@@ -1,4 +1,4 @@
-package org.flexlb.mock.engine.rtp;
+package org.flexlb.mock.host;
 
 import static org.junit.jupiter.api.Assertions.*;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -12,7 +12,7 @@ import java.util.concurrent.*;
 import org.flexlb.engine.grpc.EngineRpcService.*;
 import org.flexlb.engine.grpc.RpcServiceGrpc;
 import org.flexlb.mock.api.model.Types.None;
-import org.flexlb.mock.engine.rtp.host.*;
+
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -28,11 +28,15 @@ class EngineHostTest {
         return new EngineHostApi.Create(id, port(), port());
     }
     private void config(String id, String role) throws Exception {
-        var json = new ObjectMapper(); ObjectNode value = json.valueToTree(RtpNodeTest.configuration(role));
+        var json = new ObjectMapper(); ObjectNode value = json.valueToTree(configuration(role));
         value.put("id", id);
         ((ObjectNode)value.path("component").path("config").path("compute").path("forward")).put("expression", "1000");
         var path = directory.resolve(id); Files.createDirectory(path);
         json.writeValue(path.resolve("config.json").toFile(), value);
+    }
+    static Map<String,Object> configuration(String role) {
+        return Map.of("id",role+"-0","component_role",role,"component",Map.of("engine","rtp","config",Map.of("seq_size_per_block",16,
+            "max_seq_len",4096,"test_block_num",9,"reserve_block_ratio",0,"compute",Map.of("forward",Map.of("expression","1 + batchSize")))),"environment",Map.of());
     }
     @Test void stoppingOneObjectPreservesOtherInstancesAndDoesNotReuseAnIdentity() throws Exception {
         config("prefill-0", "prefill"); config("decode-0", "decode"); config("prefill-1", "prefill");
@@ -45,7 +49,7 @@ class EngineHostTest {
             var channel = ManagedChannelBuilder.forTarget(p.rpc()).usePlaintext().build();
             try {
                 var replies = new LinkedBlockingQueue<Object>();
-                RpcServiceGrpc.newStub(channel).generateStreamCall(LocalPrefillTest.input(1, 5000, true), new StreamObserver<>() {
+                RpcServiceGrpc.newStub(channel).generateStreamCall(GenerateInputPB.newBuilder().setRequestId(1).addAllTokenIds(List.of(1,2,3,4,5)).setGenerateConfig(GenerateConfigPB.newBuilder().setMaxNewTokens(1).setTimeoutMs(5000).setReuseCache(true)).build(), new StreamObserver<>() {
                     public void onNext(GenerateOutputsPB value) { replies.add(value); }
                     public void onError(Throwable error) { replies.add(error); }
                     public void onCompleted() { replies.add("complete"); }

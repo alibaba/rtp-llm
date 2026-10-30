@@ -76,7 +76,7 @@ def test_real_master_routes_to_isolated_rtp_processes(tmp_path, batched, replica
     master_classpath = os.pathsep.join([str(root / 'java/master/target/test-classes'), str(root / 'java/master/target/classes'),
         (root / 'java/master/target/dependencies.txt').read_text().strip()])
     client_classpath = os.pathsep.join([str(root / 'java/client/target/test-classes'), str(root / 'java/client/target/classes'),
-        (root / 'java/engine/rtp/target/rtp-classpath.txt').read_text().strip()])
+        str(root / 'java/host/target/mock-engine-service-1.0-SNAPSHOT-all.jar')])
     native = {'scheduler': {'type': 'QUEUE' if batched else 'DIRECT'},
               'dispatcher': {'type': 'BATCH' if batched else 'NON_BATCH'},
               'requestLifecycle': {'request': {'timeoutMs': 60000}},
@@ -111,7 +111,7 @@ def test_real_master_routes_to_isolated_rtp_processes(tmp_path, batched, replica
     registry = Registry.standard(); case = compile_case(case_file, registry)
     components = {'master': {'command': [str(java), '-XX:ActiveProcessorCount=2', '-cp', master_classpath, 'org.flexlb.mock.master.LateMasterNode' if history_overflow else 'org.flexlb.MasterNode'], 'startup_timeout': '60s'}}
     for role in ('prefill', 'decode'):
-        components[role] = {'command': [str(java), '-jar', str(root / 'java/engine/rtp/target/mock-rtp-1.0-SNAPSHOT-all.jar')]}
+        components[role] = {'command': [str(java), '-cp', str(root / 'java/host/target/mock-engine-service-1.0-SNAPSHOT-all.jar'), 'org.flexlb.mock.host.EngineHost']}
     launch = prepare_launch({'components': components,
         'zookeeper': {'command': [str(java), '-XX:ActiveProcessorCount=2', '-cp', master_classpath,
                                   'org.flexlb.mock.master.ZookeeperNode']}}, case, tmp_path)

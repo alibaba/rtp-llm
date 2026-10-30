@@ -14,7 +14,7 @@ _sym_db = _symbol_database.Default()
 
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x12\x63lient_input.proto\x12\x11\x66lexlb.mock.input\"\x8e\x01\n\x07Request\x12\x11\n\ttoken_ids\x18\x01 \x03(\x05\x12\x16\n\x0emax_new_tokens\x18\x02 \x01(\x05\x12\x15\n\x08priority\x18\x03 \x01(\x05H\x00\x88\x01\x01\x12\x1e\n\x11\x61rrival_offset_ms\x18\x04 \x01(\x03H\x01\x88\x01\x01\x42\x0b\n\t_priorityB\x14\n\x12_arrival_offset_ms\"w\n\x05\x42\x61tch\x12\x10\n\x08sequence\x18\x01 \x01(\x04\x12,\n\x08requests\x18\x02 \x03(\x0b\x32\x1a.flexlb.mock.input.Request\x12\x1b\n\x0etotal_requests\x18\x03 \x01(\x04H\x00\x88\x01\x01\x42\x11\n\x0f_total_requestsB+\n\x1corg.flexlb.mock.client.inputB\x0b\x43lientInputb\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x12\x63lient_input.proto\x12\x11\x66lexlb.mock.input\"\xb8\x01\n\x07Request\x12\x11\n\ttoken_ids\x18\x01 \x03(\x05\x12\x16\n\x0emax_new_tokens\x18\x02 \x01(\x05\x12\x15\n\x08priority\x18\x03 \x01(\x05H\x00\x88\x01\x01\x12(\n\x06images\x18\x05 \x03(\x0b\x32\x18.flexlb.mock.input.Image\x12\x1e\n\x11\x61rrival_offset_ms\x18\x04 \x01(\x03H\x01\x88\x01\x01\x42\x0b\n\t_priorityB\x14\n\x12_arrival_offset_ms\"w\n\x05\x42\x61tch\x12\x10\n\x08sequence\x18\x01 \x01(\x04\x12,\n\x08requests\x18\x02 \x03(\x0b\x32\x1a.flexlb.mock.input.Request\x12\x1b\n\x0etotal_requests\x18\x03 \x01(\x04H\x00\x88\x01\x01\x42\x11\n\x0f_total_requests\"S\n\x05Image\x12\x0b\n\x03url\x18\x01 \x01(\t\x12\r\n\x05width\x18\x02 \x01(\x05\x12\x0e\n\x06height\x18\x03 \x01(\x05\x12\x0e\n\x06offset\x18\x04 \x01(\x05\x12\x0e\n\x06length\x18\x05 \x01(\x05\x42+\n\x1corg.flexlb.mock.client.inputB\x0b\x43lientInputb\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
@@ -23,7 +23,9 @@ if _descriptor._USE_C_DESCRIPTORS == False:
   _globals['DESCRIPTOR']._options = None
   _globals['DESCRIPTOR']._serialized_options = b'\n\034org.flexlb.mock.client.inputB\013ClientInput'
   _globals['_REQUEST']._serialized_start=42
-  _globals['_REQUEST']._serialized_end=184
-  _globals['_BATCH']._serialized_start=186
-  _globals['_BATCH']._serialized_end=305
+  _globals['_REQUEST']._serialized_end=226
+  _globals['_BATCH']._serialized_start=228
+  _globals['_BATCH']._serialized_end=347
+  _globals['_IMAGE']._serialized_start=349
+  _globals['_IMAGE']._serialized_end=432
 # @@protoc_insertion_point(module_scope)

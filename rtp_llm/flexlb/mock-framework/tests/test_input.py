@@ -101,3 +101,14 @@ def test_python_and_java_use_one_proto_and_the_same_framing(tmp_path):
     write = subprocess.run(prefix + ['write', str(java_file)], capture_output=True, text=True, timeout=15)
     assert write.returncode == 0, write.stderr
     assert list(read_inputs(java_file)) == list(requests())
+
+
+def test_image_spans_round_trip_and_reject_overlap(tmp_path):
+    image = pb.Image(url='mock://image', width=56, height=28, offset=1, length=2)
+    request = pb.Request(token_ids=[10, 0, 0, 20], max_new_tokens=3, images=[image])
+    path = tmp_path / 'images.binpb.zst'
+    write_inputs(path, [request])
+    assert list(read_inputs(path)) == [request]
+    request.images.add().CopyFrom(image)
+    with pytest.raises(ValueError, match='span'):
+        write_inputs(tmp_path / 'overlap.binpb.zst', [request])

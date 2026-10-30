@@ -129,7 +129,7 @@ def test_killed_java_writer_leaves_readable_frames_but_no_complete_evidence(tmp_
     root = Path(__file__).resolve().parents[1]
     classpath = os.pathsep.join(str(root / path) for path in [
         'java/client/target/test-classes', 'java/client/target/mock-client-1.0-SNAPSHOT-all.jar',
-        'java/engine/rtp/target/mock-rtp-1.0-SNAPSHOT-all.jar'])
+        'java/host/target/mock-engine-service-1.0-SNAPSHOT-all.jar'])
     java = str(Path(os.environ['JAVA_HOME']) / 'bin/java') if os.environ.get('JAVA_HOME') else shutil.which('java')
     with (tmp_path / 'probe.log').open('wb') as log:
         process = subprocess.Popen([java, '-Xmx256m', '-cp', classpath,

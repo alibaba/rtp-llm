@@ -8,10 +8,19 @@ message Request {
   repeated int32 token_ids = 1;
   int32 max_new_tokens = 2;
   optional int32 priority = 3; // Absent means 50.
+  repeated Image images = 5; // Explicit expanded token spans, no runtime legacy conversion.
   optional int64 arrival_offset_ms = 4; // Relative to the source start, before replay_speed.
 }
 message Batch {
   uint64 sequence = 1;
   repeated Request requests = 2;
   optional uint64 total_requests = 3; // Final batch only, with no requests.
+}
+
+message Image {
+  string url = 1;
+  int32 width = 2;
+  int32 height = 3;
+  int32 offset = 4;
+  int32 length = 5;
 }

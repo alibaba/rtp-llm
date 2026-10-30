@@ -46,7 +46,7 @@ def setup_case(tmp_path, operation, mode='shared', monitor=False, invalid=False,
             {'id': 'exercise', 'describe': 'exercise', 'interface': operation.case_interface.name}]}]}))
     case = compile_case(source, registry)
     java = Path(os.environ['JAVA_HOME']) / 'bin/java'
-    command = [str(java), '-jar', str(ROOT / 'java/engine/rtp/target/mock-rtp-1.0-SNAPSHOT-all.jar')]
+    command = [str(java), '-cp', str(ROOT / 'java/host/target/mock-engine-service-1.0-SNAPSHOT-all.jar'), 'org.flexlb.mock.host.EngineHost']
     raw = {'engine_mode': mode, 'components': {role: {'command': command} for role in env if role != 'master'}}
     if master:
         classpath = os.pathsep.join([str(ROOT / 'java/master/target/classes'),
@@ -126,7 +126,7 @@ def test_scale_in_selects_once_and_instances_keep_separate_artifacts_and_metrics
             assert json.loads((folder / 'endpoints.json').read_text())['rpc'] == item['rpc']
             assert (folder / 'ready.json').exists() == (item['id'] in {node['id'] for node in owner.topology.active()})
         # Exercise real TCP request traffic after removal and subsequent creation.
-        classpath = (ROOT / 'java/engine/rtp/target/rtp-classpath.txt').read_text().strip()
+        classpath = os.pathsep.join([str(ROOT / 'java/engine/rtp/target/test-classes'), str(ROOT / 'java/host/target/mock-engine-service-1.0-SNAPSHOT-all.jar')])
         probe = await asyncio.to_thread(subprocess.run, [str(Path(os.environ['JAVA_HOME']) / 'bin/java'),
             '-cp', classpath, 'org.flexlb.mock.engine.rtp.NativeProbe', ctx.globals()['decode'][0],
             str(tmp_path / 'traffic.json'), ctx.globals()['prefill'][0]], capture_output=True, text=True, timeout=15)
@@ -244,7 +244,7 @@ def test_live_traffic_survives_scale_and_real_master_eventually_retires_old_addr
         directory = ctx.records.directory / 'traffic'
         directory.mkdir()
         classpath = os.pathsep.join([str(ROOT / 'java/client/target/test-classes'), str(ROOT / 'java/client/target/classes'),
-            (ROOT / 'java/engine/rtp/target/rtp-classpath.txt').read_text().strip()])
+            str(ROOT / 'java/host/target/mock-engine-service-1.0-SNAPSHOT-all.jar')])
         master = ctx.globals()['masters'][0]
         def rows():
             path = directory / 'requests.jsonl'

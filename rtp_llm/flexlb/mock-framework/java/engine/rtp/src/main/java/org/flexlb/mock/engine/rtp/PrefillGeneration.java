@@ -13,6 +13,7 @@ import org.flexlb.mock.engine.rtp.transfer.TransferRequest;
 final class PrefillGeneration implements AutoCloseable {
     private final RtpConfig config;
     private final PrefillTransfer transfer;
+    private final org.flexlb.mock.multimodal.MediaClient vision = new org.flexlb.mock.multimodal.MediaClient();
     private final RpcChannels channels = new RpcChannels();
     private final ExecutorService workers = Executors.newVirtualThreadPerTaskExecutor();
     private final ScheduledThreadPoolExecutor deadlines = new ScheduledThreadPoolExecutor(1,
@@ -143,7 +144,7 @@ final class PrefillGeneration implements AutoCloseable {
     }
 
     private final class Call {
-        final GenerateInputPB input;
+        GenerateInputPB input;
         final BufferedOutput output;
         final boolean deferred;
         final CompletableFuture<Void> admitted = new CompletableFuture<>();
@@ -167,6 +168,7 @@ final class PrefillGeneration implements AutoCloseable {
         void run() { context.run(this::exchange); }
         void exchange() {
             try {
+                input = vision.prepare(input, deadline);
                 var inbox = new Inbox();
                 var stub = RpcServiceGrpc.newStub(channels.get(target));
                 if (deadline != Long.MAX_VALUE) stub = stub.withDeadlineAfter(Math.max(1, deadline - System.nanoTime()), TimeUnit.NANOSECONDS);
@@ -260,6 +262,6 @@ final class PrefillGeneration implements AutoCloseable {
         synchronized (this) { closed = true; owned = List.copyOf(active.values()); }
         for (var call : owned) call.finish(Status.UNAVAILABLE.withDescription("Prefill node closed").asRuntimeException());
         synchronized (this) { outputs.clear(); }
-        workers.shutdownNow(); deadlines.shutdownNow(); channels.close();
+        workers.shutdownNow(); deadlines.shutdownNow(); vision.close(); channels.close();
     }
 }

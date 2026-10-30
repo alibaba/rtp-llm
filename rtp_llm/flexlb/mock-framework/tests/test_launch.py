@@ -23,7 +23,7 @@ def artifacts(tmp_path):
     framework = tmp_path / 'framework with spaces'
     for relative in ('java/master/target/classes/org/flexlb/MasterNode.class',
                      'java/master/target/classes/org/flexlb/mock/master/ZookeeperNode.class',
-                     'java/engine/rtp/target/mock-rtp-1.0-SNAPSHOT-all.jar',
+                     'java/host/target/mock-engine-service-1.0-SNAPSHOT-all.jar',
                      'java/client/target/mock-client-1.0-SNAPSHOT-all.jar', 'dependency.jar'):
         path = framework / relative
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -44,6 +44,7 @@ def test_local_recipes_round_trip_without_shell_or_cwd_assumptions(case, artifac
     assert launch['engine_mode'] == mode
     assert set(launch['components']) == set(case.environment)
     assert launch['components']['prefill'] == launch['components']['decode']
+    assert launch['components']['prefill']['command'][-1] == 'org.flexlb.mock.host.EngineHost'
     assert launch['components']['master']['command'][-1] == 'org.flexlb.MasterNode'
     assert launch['zookeeper']['command'][-1] == 'org.flexlb.mock.master.ZookeeperNode'
     assert launch['components']['client']['command'][-1].endswith('mock-client-1.0-SNAPSHOT-all.jar')
@@ -57,7 +58,7 @@ def test_local_recipes_reject_missing_or_unusable_inputs(case, artifacts, damage
     if damage in ('java', 'prometheus'):
         (java if damage == 'java' else prometheus).chmod(0o644)
     elif damage == 'engine':
-        (framework / 'java/engine/rtp/target/mock-rtp-1.0-SNAPSHOT-all.jar').unlink()
+        (framework / 'java/host/target/mock-engine-service-1.0-SNAPSHOT-all.jar').unlink()
     elif damage == 'master':
         (framework / 'java/master/target/classes/org/flexlb/MasterNode.class').unlink()
     else:
@@ -69,7 +70,7 @@ def test_local_recipes_reject_missing_or_unusable_inputs(case, artifacts, damage
 @pytest.mark.parametrize('configuration', ['unsupported-role', 'non-native-master'])
 def test_local_recipes_reject_roles_or_master_configuration_the_binaries_cannot_run(case, artifacts, configuration):
     framework, java, prometheus = artifacts
-    environment = ({'vit': case.environment['prefill']} if configuration == 'unsupported-role'
+    environment = ({'unknown': case.environment['prefill']} if configuration == 'unsupported-role'
                    else {'master': {'config': {}}})
     with pytest.raises(ExecutionError):
         local_launch(replace(case, environment=environment), java, prometheus, framework=framework)
@@ -89,3 +90,12 @@ def test_cli_generates_a_readable_launch_file_and_refuses_overwrite(case, artifa
     with pytest.raises(SystemExit) as error:
         cli.main()
     assert error.value.code == 2 and output.read_text() == content
+
+
+def test_vision_uses_the_same_mixed_host_without_a_backend_tag(case, artifacts):
+    framework, java, prometheus = artifacts
+    environment = dict(case.environment)
+    environment['vit'] = {'deployment': {'replicas': 1}, 'config': {'compute': {'forward': {'expression': '1'}}}}
+    case = replace(case, environment=environment)
+    launch = local_launch(case, java, prometheus, framework=framework)
+    assert launch['components']['vit'] == launch['components']['prefill']

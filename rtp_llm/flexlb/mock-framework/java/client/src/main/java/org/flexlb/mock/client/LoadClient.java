@@ -99,10 +99,15 @@ final class LoadClient implements AutoCloseable {
                         var item = queue.remove();
                         var input = GenerateInputPB.newBuilder().setRequestId(item.request_id()).addAllTokenIds(item.input().getTokenIdsList())
                             .setGenerateConfig(GenerateConfigPB.newBuilder().setMaxNewTokens(item.input().getMaxNewTokens())
-                                .setIgnoreEos(true).setCanUsePdSeparation(true).setReturnIncremental(true)).build();
+                                .setIgnoreEos(true).setCanUsePdSeparation(true).setReturnIncremental(true));
+                        for (var image : item.input().getImagesList()) {
+                            input.addMultimodalInputs(MultimodalInputPB.newBuilder().setMultimodalType(1).setMultimodalUrl(image.getUrl())
+                                .setMmPreprocessConfig(MMPreprocessConfigPB.newBuilder().setWidth(image.getWidth()).setHeight(image.getHeight())));
+                            input.getMultimodalTokenLayoutBuilder().addSpans(MultimodalTokenSpanPB.newBuilder().setOffset(image.getOffset()).setLength(image.getLength()));
+                        }
                         var request = FlexlbScheduleRequestPB.newBuilder().setRequestId(item.request_id())
                             .setSeqLen(item.input().getTokenIdsList().size()).setMaxNewTokens(item.input().getMaxNewTokens())
-                            .setPriority(item.input().hasPriority() ? item.input().getPriority() : 50).setGenerateInput(input.toByteString()).build();
+                            .setPriority(item.input().hasPriority() ? item.input().getPriority() : 50).setGenerateInput(input.build().toByteString()).build();
                         var call = client.send(request, Duration.ofMillis(plan.request_timeout_ms()));
                         active.put(item.request_id(), call); issued++; metrics.issued();
                         call.completion().whenComplete((result, error) -> {

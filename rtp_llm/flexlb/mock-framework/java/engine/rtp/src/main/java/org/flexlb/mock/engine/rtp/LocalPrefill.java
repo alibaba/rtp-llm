@@ -11,6 +11,7 @@ import org.flexlb.mock.cache.KvCache;
 /** Native LocalGenerate boundary. Scheduling and network delivery use separate execution contexts. */
 final class LocalPrefill implements AutoCloseable {
     record Result(GenerateOutputsPB output, Status status, long engineCode) {}
+    private final org.flexlb.mock.multimodal.MediaClient vision = new org.flexlb.mock.multimodal.MediaClient();
     private final RtpConfig config;
     private final EngineLoop engine;
 
@@ -47,12 +48,16 @@ final class LocalPrefill implements AutoCloseable {
 
     Session submit(GenerateInputPB input) { return submit(input, Long.MAX_VALUE); }
     Session submit(GenerateInputPB input, long rpcDeadline) { return submit(input, rpcDeadline, false); }
-    synchronized Session submit(GenerateInputPB input, long rpcDeadline, boolean retained) {
+    Session submit(GenerateInputPB input, long rpcDeadline, boolean retained) {
         validate(input, retained);
+        long started = System.nanoTime();
+        long deadline = Math.min(rpcDeadline, input.getGenerateConfig().getTimeoutMs() <= 0 ? Long.MAX_VALUE
+            : RtpTasks.after(started, java.util.concurrent.TimeUnit.MILLISECONDS.toNanos(input.getGenerateConfig().getTimeoutMs())));
+        input = vision.prepare(input, deadline);
         var session = new Session(input, retained);
         try {
-            session.request = engine.input(RtpTasks.input(input, Long.toString(input.getRequestId()), System.nanoTime(),
-                rpcDeadline, retained, config.blockSize()), session);
+            session.request = engine.input(RtpTasks.input(input, Long.toString(input.getRequestId()), started,
+                deadline, retained, config.blockSize()), session);
         } catch (RequestFailure failure) {
             if (failure.reason() == RequestFailure.Reason.INVALID)
                 throw RtpErrors.failure(Status.INVALID_ARGUMENT.withDescription(failure.getMessage()), 605);
@@ -86,5 +91,5 @@ final class LocalPrefill implements AutoCloseable {
     }
     Scheduler.Status snapshot(long latestFinished) { return engine.status(latestFinished); }
     String scrapeMetrics() { return engine.scrapeMetrics(); }
-    @Override public void close() { engine.close(); }
+    @Override public void close() { vision.close(); engine.close(); }
 }

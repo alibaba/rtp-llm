@@ -9,12 +9,11 @@ final class RtpRequestValidation {
 
     static void supported(GenerateInputPB input) {
         var g = input.getGenerateConfig();
-        if (input.getMultimodalInputsCount() > 0 || input.hasV41Inputs() || input.hasMultimodalTokenLayout()
-                || g.hasAdapterName() || !g.getUniqueKey().isEmpty()
+        if (g.hasAdapterName() || !g.getUniqueKey().isEmpty()
                 || g.getNumBeams() > 1 || g.getNumReturnSequences() > 1 || g.getVariableNumBeamsCount() > 0
                 || g.getReturnPromptLogits() || g.getReturnHiddenStates() || g.getReturnLogits() || g.getReturnAllHiddenStates()
                 || g.getReturnAllProbs() || g.getReturnSoftmaxProbs() || g.getReturnCumLogProbs() || g.getCalculateLoss() != 0
                 || g.getStopWordsList().getRowsCount() > 0 || g.getSpEdit() || g.getSpInputLookup())
-            throw Status.UNIMPLEMENTED.withDescription("Unsupported multimodal, adapter, sequence shape or output mode").asRuntimeException();
+            throw Status.UNIMPLEMENTED.withDescription("Unsupported adapter, sequence shape or output mode").asRuntimeException();
     }
 }

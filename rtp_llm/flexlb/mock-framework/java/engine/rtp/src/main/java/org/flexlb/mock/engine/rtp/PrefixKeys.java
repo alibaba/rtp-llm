@@ -3,7 +3,7 @@ package org.flexlb.mock.engine.rtp;
 import java.util.*;
 import org.flexlb.engine.grpc.EngineRpcService.GenerateInputPB;
 
-/** Text-only native Jenkins rolling keys, matching cpp/utils/HashUtil.h (signed arithmetic shift). */
+/** Native Jenkins rolling keys, matching cpp/utils/HashUtil.h (signed arithmetic shift). */
 final class PrefixKeys {
     private PrefixKeys() {}
     static List<Long> completeBlocks(GenerateInputPB input, int blockSize) {

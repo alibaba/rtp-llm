@@ -2,7 +2,7 @@
 
 这是独立重写的实验框架。当前版本由 Python 编译 Case、编排进程、执行步骤和门禁，Python 函数定义 Case 接口，Java 实现组件和实例协议。RTP Mock 使用生产协议，真实 Master 使用生产调度与 ZK 选举；共享组件不依赖旧 Mock 或 online_eval。
 
-当前已接通本机真实 Master、新 RTP P/D、Client 原生收发核心、标准压缩输入播放、client0 多 JVM 协调和 Prometheus。Engine 默认共享一个宿主 JVM，也支持每实例独立 JVM，实例间统一使用网络 gRPC。Master 停启、替换及 Client 主备发现已接通；旧采集格式仅支持离线转换，运行时只读新格式；ViT/vLLM 尚未接通；未实现的能力不登记为可调用 Case 接口。已有验证是小流量功能接线，不能替代开发机/CI 的规模和压力验收。
+当前已接通本机真实 Master、新 RTP P/D、通用 V、Client 原生收发核心、标准压缩输入播放、client0 多 JVM 协调和 Prometheus。Engine 默认共享一个宿主 JVM，也支持每实例独立 JVM，实例间统一使用网络 gRPC。Master 停启、替换及 Client 主备发现已接通；旧采集格式仅支持离线转换，运行时只读新格式；ViT 图像元数据链路已接通，vLLM 尚未接通；未实现的能力不登记为可调用 Case 接口。已有验证是小流量功能接线，不能替代开发机/CI 的规模和压力验收。
 
 ## Scheduler 输入、执行完成、传输完成与状态查询
 
@@ -135,7 +135,7 @@ D 只有 KV 加载成功和生成许可均满足后才进入 Decode；Prefill-on
 | P/D/V Mock Engine | 全部放在同一个 Engine JVM | 每个 Engine 一个 JVM |
 | Client | 每个 Client 独立 JVM | 每个 Client 独立 JVM |
 
-本地运行默认采用共享模式，已实现的 P/D Engine 放在一个 JVM，ViT 接入后沿用同一放置规则；独立模式用于需要进程隔离的实验。模式在运行开始前确定。共享模式新增 Engine 就在已有宿主创建对象；独立模式新增 Engine 就启动专属 JVM。不实现任意多 JVM/多实例装箱、动态迁移或共享宿主不足时自动另开 JVM。共享指代码复用，实例仍独立拥有缓存容量、请求状态和 Scheduler。
+本地运行默认采用共享模式，P/D/V 实例放在一个 JVM；独立模式用于需要进程隔离的实验。模式在运行开始前确定。共享模式新增 Engine 就在已有宿主创建对象；独立模式新增 Engine 就启动专属 JVM。不实现任意多 JVM/多实例装箱、动态迁移或共享宿主不足时自动另开 JVM。共享指代码复用，实例仍独立拥有缓存容量、请求状态和 Scheduler。
 
 实例使用服务地址区分，同 IP 下用端口区分。控制、业务 RPC 和 metrics 地址之间的对应关系留在发现信息中，不向 Case 暴露额外的 JVM 身份。实例之间统一通过 TCP 通信，共 JVM 不另走 in-process 传输。Python 内部仍须保存进程与实例归属，以处理宿主退出和清理。
 
@@ -193,7 +193,7 @@ Python 在 stop 或最终清理时收集异常，不增加实时发压监控。�
 
 `client/start` 只接受 `requests_file`，路径指向标准 Protobuf＋Zstd 文件；不接受 inline requests、JSONL、xz 或格式兼容开关。相对路径基于 Case YAML 所在目录，也接受绝对路径。当前所有 Client 位于同一机器并共享文件系统，不支持 URL 或跨机器分发。
 
-唯一输入定义为 `java/client/src/main/proto/client_input.proto`，Java 由 Maven 生成，Python 提交同一 protoc 3.25.1 生成的 client_input_pb2.py。当前 Request 仅实现文本请求：非空、非负 int32 token_ids，正 int32 max_new_tokens（本格式中的固定目标输出长度，LoadClient 发送 ignore_eos=true），可选非负 int32 priority（缺省为 50，显式 0 保留），可选非负 int64 arrival_offset_ms（相对于源起点的毫秒偏移，尚未除以倍速）。多模态、完整生成参数及真实观测尚未接通；不能把二进制格式接通等同于这些能力已实现。未知字段、非法请求及不支持的版本均拒绝。
+唯一输入定义为 `java/client/src/main/proto/client_input.proto`，Java 由 Maven 生成，Python 提交同一 protoc 3.25.1 生成的 client_input_pb2.py。Request 保存已展开的生成输入：非空、非负 int32 token_ids，正 int32 max_new_tokens（本格式中的固定目标输出长度，LoadClient 发送 ignore_eos=true），可选非负 int32 priority（缺省为 50，显式 0 保留），可选非负 int64 arrival_offset_ms（相对于源起点的毫秒偏移，尚未除以倍速）。可选 images 保存 url、width、height、offset、length；token_ids 中提前为每张图展开 length 个占位 token，按 offset 排序且不得重叠，实际长度必须与 V 输出一致。Client 和 P 用 V 返回的逐行特征 hash 替换这些占位值，普通 token 保持不变。完整生成参数及真实观测仍不是此播放格式的内容。未知字段、非法请求及不支持的版本均拒绝。
 
 文件以 `MCKINP01` 标识输入格式 v1，之后每批为 4 字节大端压缩长度加一个 Zstd 压缩的 Protobuf Batch。帧必须为 single-segment、声明解压长度并带校验和，压缩及解压单批上限均为 4 MiB；每请求 Protobuf 上限 1 MiB，每批至多 1024 个请求。写入器按约 1 MiB 或 1024 请求封批，不累积整个文件。Batch.sequence 从 1 连续递增，末批只含 total_requests；缺末批、计数不符、截断或尾随数据均报错。输入和分片使用同一份格式与读写器，输入消息与执行证据消息分开定义。
 
@@ -288,7 +288,7 @@ Java 产生指标并暴露 `/metrics`；Python 直接调用 Prometheus HTTP API�
 1. 从 LocalPrefill/DecodeAdmission 分离协议、调度域和公共执行组件，保留现有超时、取消、P/D 交接及清理行为；先让 RTP 使用公共 Engine。
 2. 把队列、容量等待、选批和完成后的重新入队一起移入 Scheduler，不能只抽 `advance()`。用第二种明确的调度行为验证边界，再按选定版本实现 vLLM 策略；当前 RTP 有界合批不等于完整 RTP/vLLM 调度。
 3. 将 Case 级接口与 Prometheus 查询迁移到 Python，保留实例协议、Java 指标产生及既有校验。迁移完成后删除旧查询服务和重复定义，不长期维护两条调用链。
-4. Engine 两种放置方式、动态上下线和发现更新已接通；Client 已接通上述第一批能力，文本文件输入和有界分片已接通，后续按剩余边界推进采集格式转换和请求执行记录。每批改动同时补齐对应调用方、配置、测试和文档，避免旧入口继续承载另一套语义。
+4. Engine 两种放置方式、动态上下线和发现更新已接通；Client 已接通上述第一批能力，生成输入文件、图片元数据和有界分片已接通，后续按剩余边界推进采集格式转换和请求执行记录。每批改动同时补齐对应调用方、配置、测试和文档，避免旧入口继续承载另一套语义。
 
 本批落实公共 Scheduler 操作、私有队列、持续 running、有界多请求 Forward、部分批次取消和 PD 确认后释放。强制 group、分块 Prefill、抢占/重算、vLLM 对齐版本及 connector 范围仍待确定。
 
@@ -304,10 +304,13 @@ Java 产生指标并暴露 `/metrics`；Python 直接调用 Prometheus HTTP API�
 | `python/mock_framework/execution/` | 运行环境装配、统一 Step 执行、角色生命周期、拓扑、采集、HTTP 传输、断言与记录；各模块边界见下表。 |
 | `python/mock_framework/interfaces/` | 已接通的 Case 函数：逐 Master 状态、Client start/stop、公共指标与原始 PromQL。 |
 | `java/interfaces/` | Java 内部端点的类型/校验及共享模型定义；不再定义或导出 Case API。 |
-| `java/runtime/` | HTTP 接口绑定、参数和回执校验、调用上下文。 |
+| `java/runtime/` | HTTP 接口绑定、参数和回执校验、调用上下文、实例生命周期句柄和进程监听地址。 |
+| `java/host/` | P/D/V 统一实例装配和可执行 JAR；单实例入口 EngineMain、本地多实例宿主 EngineHost。宿主不包含调度或集群策略。 |
 | `java/master/` | 真实 Master 的启动入口、生产状态到公共读取接口的适配、独立 ZK 启动入口。 |
 | `java/client/` | client0 协调、Player 控速、LoadClient 队列/并发/生命周期、NativeClient 原生收发与实际计时。 |
+| `java/shared/vit/` | 跨后端共用的 V Engine：图像编码、组批、embedding/hash 字节缓存和节点装配。 |
 | `java/engine/rtp/` | RTP 协议适配、P/D 调度策略、资源申请时机、P/D 交接与节点装配。 |
+| `java/shared/multimodal/` | 原生媒体输入、Mock 元数据校验与 TCP 客户端，无 V 服务、计算或缓存依赖。 |
 | `java/shared/engine/` | EngineLoop/Scheduler 执行边界及工厂契约、RequestState 进度与终态/资源使用权、QueueSnapshot 请求计数。 |
 | `java/shared/compute/` | Forward batch、公式、噪声、Decode 推进、停止模型和可取消计时。 |
 | `java/shared/cache/` | BlockPool 物理容量与引用、KvCache 块租约及前缀发布、BlockTree 叶子候选与驱逐。 |
@@ -451,7 +454,7 @@ uv run --locked mock-case run <case目录>/case.yaml \
 
 启动配方与 Case 业务配置分开。Master/Client 按 replicas 启动独立进程；Engine 的 replicas 表示逻辑实例数，编号 `<组件>-<序号>`，由 engine_mode 决定放置；Compute 是组内配置，不单独启动。`command` 是 argv，不经过 shell；cwd 相对配方解析。配方不再包含 bindings；目标选择和查询聚合由 Python 接口函数完成。
 
-真实 Master 配方需要顶层 `zookeeper`；P/D 使用 `java/engine/rtp/target/mock-rtp-1.0-SNAPSHOT-all.jar`。Master classpath 是 `java/master/target/classes` 加 `target/dependencies.txt` 的内容。示意：
+真实 Master 配方需要顶层 `zookeeper`；P/D/V 使用 `java/host/target/mock-engine-service-1.0-SNAPSHOT-all.jar`。Master classpath 是 `java/master/target/classes` 加 `target/dependencies.txt` 的内容。示意：
 
 ```yaml
 engine_mode: shared  # shared（默认）：一个 Engine JVM；isolated：每实例一个 JVM
@@ -462,14 +465,18 @@ components:
     command: [<Java21>, -cp, <Master的classpath>, org.flexlb.MasterNode]
     startup_timeout: 60s
   prefill:
-    command: [<Java21>, -jar, <RTP的JAR绝对路径>]
+    command: [<Java21>, -cp, <Engine JAR绝对路径>, org.flexlb.mock.host.EngineHost]
   decode:
-    command: [<Java21>, -jar, <RTP的JAR绝对路径>]
+    command: [<Java21>, -cp, <Engine JAR绝对路径>, org.flexlb.mock.host.EngineHost]
+  vit:
+    command: [<Java21>, -cp, <Engine JAR绝对路径>, org.flexlb.mock.host.EngineHost]
 ```
 
 配方必须覆盖 Case 实际声明的组件。组件通过 `MOCK_CONFIG_FILE` 读取本实例配置和完整 environment；`MOCK_NODE_ID`、`MOCK_COMPONENT`、`MOCK_OUTPUT_DIR` 提供身份和目录。初始化并绑定端口后原子发布 `MOCK_READY_FILE`，启动超时或提前退出都失败并回收已有进程。
 
-Engine JAR 的默认入口为 `EngineHost`。共享模式下 P/D 的 command、cwd、env 和 startup_timeout 必须一致；角色差异写入各自 config，不能用进程 env 区分同 JVM 的实例。宿主读取 `MOCK_COMPONENTS_DIR`，按实例目录读取配置并创建对象。底层 `RtpNode` 入口仍可用 classpath 直接运行，供配置校验与单节点探针使用。
+统一 Engine JAR 的默认入口为 `EngineMain`，只启动配置指定的一个 P/D/V Engine，不启动管理接口。Whale 每个 Pod 用 `java -jar <Engine JAR>` 运行一个实例，生命周期由 Whale 管理。
+
+本地 Runner 显式用 `java -cp <Engine JAR> org.flexlb.mock.host.EngineHost` 启动宿主；同一个宿主管理 P/D/V，不为 V 单设管理者。共享模式下 P/D/V 的 command、cwd、env 和 startup_timeout 必须一致；角色差异写入各自 config，不能用进程 env 区分同 JVM 的实例。宿主读取 `MOCK_COMPONENTS_DIR`，按实例目录读取配置并创建对象。Runner 的 isolated 模式仍使用每 JVM 一个对象的本地宿主，便于验证统一扩缩容协议；这不是 Whale 的启动方式。两种入口共用实例装配，RtpNode/VitNode 不再各自提供进程入口或可执行 JAR。
 
 宿主的 `host/create`、`host/stop`、`host/status` 是内部原子接口，不接收集群副本数。`create` 接收 Python 分配的实例 id、rpcPort 和 controlPort；metrics 与该实例的 control 共用 HTTP 监听端口。宿主控制端口通过 `MOCK_HOST_PORT` 指定。Python 在启动监听前选择本次实验未使用的端口，Java 绑定指定端口，Runner 再核对返回地址与分配一致。端口探测不构成预留，若被其他进程抢占，启动失败并结束实验，不偷偷换端口；不能先启动服务再检查是否复用了旧地址。Python `execution/engines.py` 管理放置和实例归属，`interfaces/engines.py` 提供两项 Case 操作：
 
@@ -546,7 +553,7 @@ Engine 独立宿主在对象关闭后登记预期退出并回收；其他运行�
 
 `org.flexlb.MasterNode` 与生产 Application、同步器和调度器在同一 JVM，不另起 Master 子进程，也不实现 Mock 调度器。Case 的 `environment.master.config` 使用原生环境变量字符串：`FLEXLB_CONFIG` 是业务 JSON，`MODEL_SERVICE_CONFIG` 是路由 JSON。
 
-Runner 先启动独占 ZK，再启动 Engine、Master 和 Client，与 YAML 书写顺序无关。已启动 Engine 的 `endpoints.json` 形成 topology/discovery；Runner 只替换 `MODEL_SERVICE_CONFIG` 的 hosts/discovery_file，保留 service_id、组和角色域名，不读取线上 VIP，不改写 `FLEXLB_CONFIG`。当前只支持一个 endpoint 组、分离角色和 gRPC；ViT 发现映射可表达，但 ViT Engine 尚未实现。
+Runner 先启动独占 ZK，再启动 Engine、Master 和 Client，与 YAML 书写顺序无关。已启动 Engine 的 `endpoints.json` 形成 topology/discovery；Runner 只替换 `MODEL_SERVICE_CONFIG` 的 hosts/discovery_file，保留 service_id、组和角色域名，不读取线上 VIP，不改写 `FLEXLB_CONFIG`。当前只支持一个 endpoint 组、分离角色和 gRPC；ViT 使用相同的发现和实例生命周期。
 
 发现使用实际 Engine gRPC 端口，生产 WorkerAddressService 再转换内部 HTTP 身份，不假定 Mock 控制端口相邻。原始组件配置、实际环境、effective-config 和 discovery 分开保存；Master 暴露生产 `/prometheus`。
 
@@ -628,6 +635,46 @@ Scheduler 与 KV 管理器按 Token 交互：`acquire(requiredTokens, keys)` 首
 不再每轮调用 markValid，也不在 Lease 中重复保存计算进度。Scheduler 在成功终态且所有 Compute/PD 使用结束后调用 `publish(keys, validTokens)`，一次声明有效范围并注册完整 prompt 块；KV 管理器校验有效范围未超过已分配容量、key 数未超过完整有效块数。`publish` 不关闭租约，`close` 只释放请求引用。投机拒绝区域、预留空间、失败/取消请求不发布，生成内容暂不额外建立前缀索引。多个请求可共享已注册的不可变 Device 块。缓存索引引用与请求物理引用独立：索引可以在请求运行中注销或迁往 Host，请求仍保留原 Device 块，最后一个引用释放才归还物理容量。acquire/publish 仅在同步事务内临时保护完整前缀。状态中的 referenced 只统计仍同时被索引和请求引用的 Device 物理块；注销或转存后仍被请求持有的块计入 held。Host-only 的私有 Device 副本与 Host 记作两层真实占用。
 
 Device/Host 水位按物理占用比例工作：达到 high 后，尽量回收到 low，未达到 low 时保留触发状态。加载、发布、增长和请求释放完成后同步检查，顺序为 Host、Device，不建后台扫描线程；运行中请求的引用可能使物理占用暂时无法下降。`enable_memory_cache` 要求显式正数 `memory_cache_blocks`。Disk/Remote 仍拒绝开启。Host 传输超时保留在 pending_config，本地瞬间完成不使用该超时。Host-only 写回暂保留可容纳的部分前缀，尚未对齐 real 的整批目标预分配与整批失败回滚；Device+Host 主路径不依赖此简化。异步传输队列、Disk/Remote 和 Hybrid/SWA/Linear 布局仍不实现。
+
+## 通用 V 与输入准备
+
+Engine 是运行实例的概念，prefill/decode/vit 是 Engine 的角色；RTP/vLLM 是 Engine 后端，不能与 P/D/V 混为一层。当前配置中的 `component.engine` 字段选择 P/D 后端；V 统一实现于 `java/shared/vit`，不需要选择后端，也不与 `java/engine/rtp` 并列为后端。以后 P/D 使用哪个后端都复用这一份 V。V 的媒体协议与 TCP 客户端仍在 `java/shared/multimodal`，Client/P 只依赖该协议模块。
+
+P/D/V 都实现 `EngineInstance` 生命周期句柄，各自拥有端口、队列、缓存和产物目录；V 拥有自己的调度器。本地同一个 `EngineHost` 平等管理三种 Engine；Whale 每 Pod 直接启动一个 Engine，无需 EngineHost。统一产物是 `java/host/target/mock-engine-service-1.0-SNAPSHOT-all.jar`，同时包含通用单实例入口和本地宿主入口，不为 V 单独打包。Master 始终独立 JVM。
+
+原生 `RemoteMultimodalEmbedding` 的一个请求可含多张图，并发请求由 V 调度器合成 batch，无额外 Batch RPC。`gpu_max_batch_size=1` 表示单请求执行并忽略收集窗口；否则按请求数、图数和收集窗口选 FIFO batch。队列和 RPC 等待者均有上限，超出返回 RESOURCE_EXHAUSTED。Client/P 只依赖 shared/multimodal，不依赖 V 服务模块。首版不拆分一个请求的图片组，超过单批图数预算明确拒绝。取消/超时仅释放当前等待者；同 key 的计算可被多个请求共享，无消费者且尚未执行的工作不再 forward，已开始的 batch 可以完成并登记缓存。
+
+`environment.vit` 不指定 engine 身份，配置示例：
+
+```yaml
+vit:
+  deployment:
+    replicas: 1
+  config:
+    patch_size: 14
+    spatial_merge_size: 2
+    hidden_size: 4096
+    gpu_max_batch_size: 8
+    gpu_max_batch_images: 200
+    gpu_batch_wait_ms: 10
+    mm_max_queue_size: 1024
+    mm_cache_gpu_max_bytes: 67108864
+    mm_cache_cpu_max_bytes: 268435456
+    mm_hash_key_cache_max_bytes: 16777216
+    compute.forward.expression: "2 + 0.00001 * totalImagePixels"
+```
+
+图像输入携带明确的 width/height（原生 mm_preprocess_config），不下载/解码实际图片。输出行数为 ceil(width/(patch_size*spatial_merge_size))*ceil(height/(patch_size*spatial_merge_size))。这是可配置的 Mock 几何模型，不宣称复现某个真实视觉模型的 resize/crop。首版只接受 IMAGE URL 身份和显式尺寸；视频、音频、tensor 输入、V4.1 prepared patches 在 V 模块边界明确拒绝，不由 Client 或 P 的核心校验器按多模态类别拒绝。数据文件的 Image.length 要事先按模型几何生成，旧数据仅离线转换，不新增运行时兼容格式。
+
+V 以 miss 的图片组成 ForwardBatch，复用公式和 SimulatedCompute。计算完成后登记缓存、通知等待者；Compute 不直接改变缓存。命中和在途合并不重复计入 forward。提供 real 名称的 py_rtp_vit_embedding_forward_rt、batch_size、cache 指标及 mock_vit_theoretical_forward_rt；元数据模拟不能代替真实模型计时校准。
+
+Embedding Device/Host 按逻辑 rows*hidden_size*BF16(2 bytes) 计费，各自 LRU；Device 淘汰转存 Host，Host 淘汰移除 embedding。Hash 独立按行数和 key 字节计费，因此 hash_hit 与 embedding_hit 不等价。在途计算使用独立 claim，失败移除，旧 claim 的迟到完成不能覆盖新 claim。消费者持有不可变结果，不依赖缓存继续驻留。缓存 key 对齐 Linux real MultimodalInput 的 URL/type/preprocess 身份，hash 内容是稳定模拟值，不宣称与实际 tensor 的 hash 相等。
+
+Client 按 Master 的 V-only route 选 V，读取元数据、准备特征 token，再带 selected_vit 请求完整 P/D 路由；Master 切换使 pin 失效时重新取一次 V 路由。P 在输入准备完成后才把规范化 token 序列交给 KV/Scheduler，并用同一输入准备 D ALLOCATE 和 PD 交接。P 的输入准备发生在调度锁外，受原请求 deadline/取消约束；这段准备暂不计入 P Scheduler 的队列快照，但计入 Client 端到端耗时。D 接收已准备输入，不重复编码。
+
+VP 同 JVM 和跨进程都走 TCP gRPC，只传 shape/dtype、split_size 和逐行 INT32 hash，不生成 embedding payload，也不伪造 RDMA lease。Mock P 校验形状、长度和展开 span 后使用；此响应不能交给真实 tensor 解码器，VP 网络带宽和 GPU 内存复制不在模拟范围内。
+
+Whale 的 P/D/V 统一使用 `java -jar java/host/target/mock-engine-service-1.0-SNAPSHOT-all.jar`，无需 Python Runner、`MOCK_HOST_PORT`、`MOCK_COMPONENTS_DIR` 或宿主管理服务。入口 `EngineMain` 从 `MOCK_CONFIG_FILE` 中的 component_role 决定启动哪个 Engine；设置 MOCK_OUTPUT_DIR、MOCK_READY_FILE，以及固定 MOCK_RPC_PORT、MOCK_CONTROL_PORT。实例配置采用与 Runner 相同的 id/component_role/component.config 结构，P/D 另外提供 component.engine。通过 MOCK_BIND_HOST=0.0.0.0 和 MOCK_ADVERTISE_HOST=PodIP 区分监听和发现地址。每个实例独立写入 effective-config、endpoints 和 ready；关闭删除 ready，旧产物目录拒绝覆盖。共享 JVM 的实例沿用同一进程地址，各自端口不同。无论是否共 JVM，VP/PD 都走 TCP、只传元数据。
 
 ## Compute、Forward、Decode 和 EOS
 
@@ -718,7 +765,7 @@ decode_retry_times、decode_retry_timeout_ms 在当前 real C++ 执行代码中�
 
 ## Client 原生收发核心
 
-`NativeClient` 接收 FlexlbScheduleRequestPB 和单请求总 timeout。每次请求固定一份主备快照，先向主节点 Schedule，传输失败时最多向备节点尝试一次；收到业务响应、deadline 超时、主动取消或进入 Engine 取流后都不重发。要求成功响应及有效 P 地址。已入队走 FetchResponse，其他走 GenerateStreamCall，并写入 Master 返回的 P/D 路由。不提供不 Fetch、不消费完整流、Engine 代报 TTFT 或 schedule-only 模式。
+`NativeClient` 接收 FlexlbScheduleRequestPB 和单请求总 timeout。每次请求固定一份主备快照，先向主节点 Schedule，传输失败时最多向备节点尝试一次；收到业务响应、deadline 超时、主动取消或进入 Engine 取流后都不重发。要求成功响应及有效 P 地址。已入队走 FetchResponse，其他走 GenerateStreamCall，并写入 Master 返回的 P/D/V 路由。不提供不 Fetch、不消费完整流、Engine 代报 TTFT 或 schedule-only 模式。
 
 每个 Client JVM 独立运行 MasterDiscovery：每秒刷新 topology.json 并 POST 真实 `/rtp_llm/master/info`，单次心跳 500ms、最多 4 个并发探测；连续两次失败判不健康。对齐 real Frontend `server/host_service.py` 的选择规则：优先健康且声明自己为主的节点，否则保留仍健康的原目标，再按 IP 选择健康候选；备用节点从未声明为主的其他健康节点中选择。发现暂时漏掉的健康节点仍继续探测，失败后停止保留，不再发现且已不健康的记录在最后探测 30s 后清理。文件损坏或非法端点属于执行错误，会终止整个 Client 播放；没有健康 Master 是请求失败，不直连 Engine，也不按列表轮流广播。
 
@@ -728,7 +775,7 @@ decode_retry_times、decode_retry_timeout_ms 在当前 real C++ 执行代码中�
 
 同一 deadline 覆盖调度和取流，并受更短原生 timeout 限制。取消/错误/超时结束当前 RPC，向该请求最后尝试的 Master 尽力发一次有界 Cancel，不随新的选举结果改变取消目标；Cancel 失败写日志，不承诺远端释放。连接复用、请求上下文独立，close 取消活动并等待有界 Cancel 后关闭所拥有连接。
 
-协议测试使用夹具，真实接线测试使用生产 Master，二者都真实消费 P/D 输出。文本请求列表/文件的 Player、LoadClient、client0 协调和 start/stop 已接通，主备发送只改变 Schedule 目标选择与传输失败重试边界。Client 逐请求执行记录已接通；旧采集格式已有离线转换；Engine 与 Master 的完整服务端证据仍未接通。
+协议测试使用夹具，真实接线测试使用生产 Master，二者都真实消费 P/D 输出。标准 Protobuf 输入的 Player、LoadClient、client0 协调和 start/stop 已接通，主备发送只改变 Schedule 目标选择与传输失败重试边界。Client 逐请求执行记录已接通；旧采集格式已有离线转换；Engine 与 Master 的完整服务端证据仍未接通。
 
 ## 指标、采集和查询
 

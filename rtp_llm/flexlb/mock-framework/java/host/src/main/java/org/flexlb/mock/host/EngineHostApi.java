@@ -1,4 +1,4 @@
-package org.flexlb.mock.engine.rtp.host;
+package org.flexlb.mock.host;
 
 import java.util.List;
 import org.flexlb.mock.api.Endpoint;
@@ -20,7 +20,7 @@ public interface EngineHostApi {
     @Endpoint(value="host/stop", kind=action) Instance stop(Stop args) throws Exception;
     @Endpoint(value="host/status", kind=read) List<Instance> status(None args);
     private static void valid(String id) {
-        if (id == null || !id.matches("(prefill|decode)-[0-9]{1,9}"))
+        if (id == null || !id.matches("(prefill|decode|vit)-[0-9]{1,9}"))
             throw new IllegalArgumentException("Invalid Engine instance id");
     }
 }

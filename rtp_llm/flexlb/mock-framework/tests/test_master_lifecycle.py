@@ -169,7 +169,7 @@ def test_real_master_replacement_with_uninterrupted_client_plan(tmp_path, batche
     components = {'master': {'command': [java, '-XX:ActiveProcessorCount=2', '-cp', classpath, 'org.flexlb.MasterNode'], 'startup_timeout': '60s'},
         'client': {'command': [java, '-XX:ActiveProcessorCount=2', '-jar', str(root / 'java/client/target/mock-client-1.0-SNAPSHOT-all.jar')]}}
     for role in ('prefill', 'decode'):
-        components[role] = {'command': [java, '-XX:ActiveProcessorCount=2', '-jar', str(root / 'java/engine/rtp/target/mock-rtp-1.0-SNAPSHOT-all.jar')]}
+        components[role] = {'command': [java, '-XX:ActiveProcessorCount=2', '-cp', str(root / 'java/host/target/mock-engine-service-1.0-SNAPSHOT-all.jar'), 'org.flexlb.mock.host.EngineHost']}
     recipe = {'components': components, 'zookeeper': {'command': [java, '-XX:ActiveProcessorCount=2', '-cp', classpath, 'org.flexlb.mock.master.ZookeeperNode']}}
     if os.environ.get('PROMETHEUS_BIN'):
         recipe['prometheus'] = {'binary': os.environ['PROMETHEUS_BIN'], 'scrape_interval': '250ms'}

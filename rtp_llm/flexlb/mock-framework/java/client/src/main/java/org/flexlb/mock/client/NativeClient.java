@@ -10,6 +10,7 @@ import org.flexlb.engine.grpc.RpcServiceGrpc;
 import org.flexlb.schedule.grpc.FlexlbScheduleProtocol.*;
 import org.flexlb.schedule.grpc.FlexlbServiceGrpc;
 import org.flexlb.mock.client.evidence.ClientEvidence.Event;
+import org.flexlb.mock.multimodal.*;
 
 /** One native Schedule -> Fetch/Generate exchange. Frontend-style primary/backup scheduling; no Engine fallback. */
 public final class NativeClient implements AutoCloseable {
@@ -18,11 +19,12 @@ public final class NativeClient implements AutoCloseable {
                          int outputTokens, Outcome outcome, String grpcCode, long errorCode, String message) {}
     private final java.util.function.Supplier<List<String>> masters;
     private final java.util.function.Consumer<Event.Builder> events;
+    private final MediaClient vision = new MediaClient();
     private final Map<String, ManagedChannel> channels = new HashMap<>();
     private final Map<Long, Call> active = new HashMap<>();
     private final ScheduledThreadPoolExecutor timers = new ScheduledThreadPoolExecutor(1,
         Thread.ofPlatform().daemon().name("mock-client-deadline").factory());
-    private final ExecutorService cleanup = Executors.newVirtualThreadPerTaskExecutor();
+    private final ExecutorService workers = Executors.newVirtualThreadPerTaskExecutor();
     private boolean closed, closing;
 
     public NativeClient(String master) {
@@ -51,9 +53,8 @@ public final class NativeClient implements AutoCloseable {
         if (request.getRequestId() <= 0 || input.getRequestId() != request.getRequestId() || input.getTokenIdsCount() == 0
                 || input.getTokenIdsCount() != request.getSeqLen() || input.getGenerateConfig().getMaxNewTokens() < 1
                 || input.getGenerateConfig().getMaxNewTokens() != request.getMaxNewTokens() || request.getVitRouteOnly()
-                || input.getMultimodalInputsCount() != 0 || input.hasV41Inputs() || input.hasMultimodalTokenLayout()
                 || input.getGenerateConfig().getNumBeams() > 1 || input.getGenerateConfig().getNumReturnSequences() > 1)
-            throw new IllegalArgumentException("Client currently requires matching single-sequence text request metadata");
+            throw new IllegalArgumentException("Client currently requires matching single-sequence request metadata");
         if (input.getGenerateConfig().getTimeoutMs() > 0) budget = Math.min(budget, TimeUnit.MILLISECONDS.toNanos(input.getGenerateConfig().getTimeoutMs()));
         Call call;
         synchronized (this) {
@@ -74,10 +75,11 @@ public final class NativeClient implements AutoCloseable {
     }
 
     public final class Call {
-        private final FlexlbScheduleRequestPB request;
-        private final GenerateInputPB input;
+        private FlexlbScheduleRequestPB request;
+        private GenerateInputPB input;
         private final List<String> routes;
         private String scheduledMaster;
+        private boolean visionPrepared, visionRerouted;
         private final Context.CancellableContext context;
         private final CompletableFuture<Result> result = new CompletableFuture<>();
         private final CompletableFuture<Long> firstToken = new CompletableFuture<>();
@@ -116,9 +118,13 @@ public final class NativeClient implements AutoCloseable {
             if (routes.isEmpty()) { finish(Status.UNAVAILABLE.withDescription("No healthy Master"), 0, Outcome.error); return; }
             try {
                 scheduledMaster = routes.get(attempt);
-                scheduleStarted = true; scheduleAttempt = attempt + 1; pendingSchedule = true;
+                scheduleAttempt++; pendingSchedule = true;
                 events.accept(event(Event.Kind.SCHEDULE_START).setAttempt(scheduleAttempt).setMaster(scheduledMaster));
-                FlexlbServiceGrpc.newStub(channel(scheduledMaster)).schedule(request, new StreamObserver<>() {
+                boolean visionRoute = MediaInput.present(input) && !visionPrepared;
+                if (!visionRoute) scheduleStarted = true;
+                var query = visionRoute ? request.toBuilder().setVitRouteOnly(true).clearSelectedVit()
+                    .clearCacheAffinityKeys().addAllCacheAffinityKeys(input.getMultimodalInputsList().stream().map(MediaInput::key).toList()).build() : request;
+                FlexlbServiceGrpc.newStub(channel(scheduledMaster)).schedule(query, new StreamObserver<>() {
                     private boolean received;
                     @Override public void onNext(FlexlbScheduleResponsePB route) {
                         synchronized (Call.this) {
@@ -127,11 +133,17 @@ public final class NativeClient implements AutoCloseable {
                             received = true;
                             scheduleResult(Status.OK.withDescription(route.getErrorMessage()), route.getCode(), route.getSuccess());
                             batchId = route.hasLifecycle() ? route.getLifecycle().getBatchId() : 0;
+                            if (!route.getSuccess() && route.getCode() == 8408 && visionPrepared && !visionRerouted) {
+                                // A new Master has its own worker generation; acquire a fresh V pin once.
+                                visionPrepared = false; visionRerouted = true; request = request.toBuilder().clearSelectedVit().build();
+                                context.run(() -> schedule(attempt)); return;
+                            }
                             if (!route.getSuccess() || route.getCode() != 200) {
                                 routeRejected = !route.hasLifecycle();
                                 finish(Status.FAILED_PRECONDITION.withDescription(route.getErrorMessage()), route.getCode(), Outcome.error); return;
                             }
-                            context.run(() -> consume(route));
+                            if (visionRoute) prepareVision(route);
+                            else context.run(() -> consume(route));
                         }
                     }
                     @Override public void onError(Throwable error) {
@@ -150,6 +162,31 @@ public final class NativeClient implements AutoCloseable {
                         synchronized (Call.this) { if (!received) finish(Status.DATA_LOSS.withDescription("Empty Schedule response"), 0, Outcome.error); }
                     }
                 });
+            } catch (RuntimeException error) { fail(error); }
+        }
+        private void prepareVision(FlexlbScheduleResponsePB route) {
+            try {
+                var targets = route.getServerStatusList().stream().filter(s -> s.getRole().equals("VIT")).toList();
+                if (targets.size() != 1 || route.getEnqueuedByMaster() || route.hasLifecycle())
+                    throw Status.DATA_LOSS.withDescription("Invalid V-only route").asRuntimeException();
+                var selected = targets.getFirst(); address(selected);
+                var source = input.toBuilder();
+                source.getGenerateConfigBuilder().clearRoleAddrs().addRoleAddrs(RoleAddrPB.newBuilder()
+                    .setRole(RoleAddrPB.RoleType.VIT).setIp(selected.getServerIp()).setGrpcPort(selected.getGrpcPort()));
+                var media = source.build();
+                workers.execute(() -> context.run(() -> {
+                    try {
+                        var prepared = vision.routingInput(media,
+                            System.nanoTime() + Math.max(0, context.getDeadline().timeRemaining(TimeUnit.NANOSECONDS)));
+                        synchronized (Call.this) {
+                            if (terminal) return;
+                            input = prepared; visionPrepared = true;
+                            request = request.toBuilder().setGenerateInput(prepared.toByteString()).setSeqLen(prepared.getTokenIdsCount())
+                                .setSelectedVit(selected).clearBlockCacheKeys().build();
+                            schedule(0);
+                        }
+                    } catch (RuntimeException error) { fail(error); }
+                }));
             } catch (RuntimeException error) { fail(error); }
         }
         private void consume(FlexlbScheduleResponsePB route) {
@@ -181,7 +218,7 @@ public final class NativeClient implements AutoCloseable {
                                     || flat.getOutputIds().getShapeCount() != 3 || flat.getOutputIds().getShape(0) != 1 || flat.getOutputIds().getShape(1) != 1
                                     || flat.getOutputIds().getShape(2) != width || width != (input.getGenerateConfig().getReturnIncremental() ? length - outputTokens : length)
                                     || length <= outputTokens || length > input.getGenerateConfig().getMaxNewTokens()) {
-                                finish(Status.DATA_LOSS.withDescription("Invalid text output stream"), 0, Outcome.error); return;
+                                finish(Status.DATA_LOSS.withDescription("Invalid generation output stream"), 0, Outcome.error); return;
                             }
                             if (flat.getFinished(0) && (length < input.getGenerateConfig().getMinNewTokens()
                                     || input.getGenerateConfig().getIgnoreEos() && length != input.getGenerateConfig().getMaxNewTokens())) {
@@ -207,6 +244,7 @@ public final class NativeClient implements AutoCloseable {
                         var role = switch (server.getRole()) {
                             case "PREFILL" -> RoleAddrPB.RoleType.PREFILL;
                             case "DECODE" -> RoleAddrPB.RoleType.DECODE;
+                            case "VIT" -> RoleAddrPB.RoleType.VIT;
                             default -> throw Status.UNIMPLEMENTED.withDescription("Unsupported native route role: " + server.getRole()).asRuntimeException();
                         };
                         address(server);
@@ -236,7 +274,7 @@ public final class NativeClient implements AutoCloseable {
             synchronized (NativeClient.this) { active.remove(request.getRequestId(), this); }
             if (outcome != Outcome.success && scheduleStarted && !routeRejected) {
                 // Cancel against this request's last attempted Master, not a newer discovery snapshot.
-                try { cleanup.submit(() -> {
+                try { workers.submit(() -> {
                     try {
                         FlexlbServiceGrpc.newBlockingStub(channel(scheduledMaster)).withDeadlineAfter(1, TimeUnit.SECONDS).cancel(
                             FlexlbCancelRequestPB.newBuilder().setRequestId(request.getRequestId()).setBatchId(batchId)
@@ -268,9 +306,9 @@ public final class NativeClient implements AutoCloseable {
         List<Call> calls;
         synchronized (this) { if (closed || closing) return; closing = true; calls = List.copyOf(active.values()); }
         for (var call : calls) call.cancel();
-        timers.shutdownNow(); cleanup.shutdown();
-        try { cleanup.awaitTermination(2, TimeUnit.SECONDS); } catch (InterruptedException error) { Thread.currentThread().interrupt(); }
-        cleanup.shutdownNow();
+        timers.shutdownNow(); vision.close(); workers.shutdown();
+        try { workers.awaitTermination(2, TimeUnit.SECONDS); } catch (InterruptedException error) { Thread.currentThread().interrupt(); }
+        workers.shutdownNow();
         List<ManagedChannel> owned;
         synchronized (this) { closed = true; owned = List.copyOf(channels.values()); }
         owned.forEach(ManagedChannel::shutdownNow);

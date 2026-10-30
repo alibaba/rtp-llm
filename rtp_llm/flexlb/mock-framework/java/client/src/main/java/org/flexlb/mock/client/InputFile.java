@@ -20,6 +20,15 @@ final class InputFile {
                 || request.hasPriority() && request.getPriority() < 0
                 || request.getSerializedSize() > MAX_REQUEST || !request.getUnknownFields().asMap().isEmpty())
             throw new IOException("Invalid or unsupported playback request");
+        int end = 0;
+        if (request.getImagesCount() > 256) throw new IOException("Too many images");
+        for (var image : request.getImagesList()) {
+            if (image.getUrl().isBlank() || image.getUrl().length() > 4096 || image.getWidth() < 1 || image.getWidth() > 32768
+                    || image.getHeight() < 1 || image.getHeight() > 32768 || image.getOffset() < end || image.getLength() < 1
+                    || (long) image.getOffset() + image.getLength() > request.getTokenIdsCount() || !image.getUnknownFields().asMap().isEmpty())
+                throw new IOException("Invalid expanded image span or geometry");
+            end = image.getOffset() + image.getLength();
+        }
     }
     static void checkInterrupted() throws InterruptedIOException {
         if (Thread.currentThread().isInterrupted()) throw new InterruptedIOException("Request preparation/playback interrupted");

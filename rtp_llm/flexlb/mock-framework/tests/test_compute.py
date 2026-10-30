@@ -25,7 +25,7 @@ def test_python_compile_to_java_formula_noise_and_timer(case_data, compile_data,
     config = tmp_path / 'component.json'
     output = tmp_path / 'result.json'
     write_json(config, {'component': compiled.environment['prefill'], 'environment': compiled.environment})
-    classpath = (ROOT / 'java/shared/compute/target/compute-classpath.txt').read_text().strip()
+    classpath = os.pathsep.join([str(ROOT / 'java/shared/compute/target/test-classes'), str(ROOT / 'java/host/target/mock-engine-service-1.0-SNAPSHOT-all.jar')])
     java = Path(os.environ['JAVA_HOME']) / 'bin/java'
     subprocess.run([str(java), '-cp', classpath, 'org.flexlb.mock.compute.ComputeProbe', str(config), str(output)],
                    capture_output=True, text=True, check=True, timeout=10)

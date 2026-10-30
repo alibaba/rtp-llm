@@ -1,4 +1,4 @@
-package org.flexlb.mock.engine.rtp.host;
+package org.flexlb.mock.host;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.net.InetSocketAddress;
@@ -6,14 +6,13 @@ import java.nio.file.*;
 import java.util.*;
 import java.util.concurrent.CountDownLatch;
 import org.flexlb.mock.api.model.Types.None;
-import org.flexlb.mock.engine.rtp.*;
-import org.flexlb.mock.runtime.ApiServer;
+import org.flexlb.mock.runtime.*;
 
 /** Owns Engine objects, never their scheduling or cluster membership policy. */
 public final class EngineHost implements EngineHostApi, AutoCloseable {
     private static final ObjectMapper JSON = new ObjectMapper();
     private final Path directory;
-    private final Map<String, RtpNode> nodes = new LinkedHashMap<>();
+    private final Map<String, EngineInstance> nodes = new LinkedHashMap<>();
     private final Set<String> used = new HashSet<>();
     private final Set<Integer> ports = new HashSet<>();
     private boolean closed;
@@ -23,20 +22,16 @@ public final class EngineHost implements EngineHostApi, AutoCloseable {
         if (closed || nodes.size() >= 1024) throw new IllegalStateException("Host closed or full");
         if (!used.add(args.id())) throw new IllegalArgumentException("Instance id has already been used");
         var output = directory.resolve(args.id());
-        var config = RtpConfig.load(output.resolve("config.json"));
-        if (!config.id().equals(args.id()) || !args.id().startsWith(config.role().name() + "-"))
+        var root = JSON.readTree(output.resolve("config.json").toFile());
+        if (!root.path("id").asText().equals(args.id()))
             throw new IllegalArgumentException("Instance identity differs from configuration");
         if (ports.contains(args.rpcPort()) || ports.contains(args.controlPort()))
             throw new IllegalArgumentException("Listener port has already been used in this host");
         ports.add(args.rpcPort()); ports.add(args.controlPort());
-        // CREATE_NEW also rejects reusing an artifact directory after the owning JVM exits.
-        try (var stream = Files.newOutputStream(output.resolve("effective-config.json"), StandardOpenOption.CREATE_NEW)) {
-            JSON.writeValue(stream, config.effective());
-        }
-        var node = RtpNode.start(config, args.rpcPort(), args.controlPort());
+        EngineInstance node = EngineInstances.start(output.resolve("config.json"), output, args.rpcPort(), args.controlPort());
         try {
-            write(output.resolve("endpoints.json"), node.endpoints());
-            write(output.resolve("ready.json"), Map.of("url", node.endpoints().get("control")));
+            EngineInstances.publish(output.resolve("endpoints.json"), node.endpoints());
+            EngineInstances.publish(output.resolve("ready.json"), Map.of("url", node.endpoints().get("control")));
             nodes.put(args.id(), node);
             return instance(node);
         } catch (Exception error) {
@@ -59,17 +54,10 @@ public final class EngineHost implements EngineHostApi, AutoCloseable {
         if (closed) throw new IllegalStateException("Host closed");
         return nodes.values().stream().map(node -> { node.checkHealthy(); return instance(node); }).toList();
     }
-    private static Instance instance(RtpNode node) {
+    private static Instance instance(EngineInstance node) {
         var e = node.endpoints();
         return new Instance((String)e.get("id"), (String)e.get("role"), (String)e.get("rpc"),
             (String)e.get("control"), (String)e.get("metrics"));
-    }
-    private static void write(Path path, Object value) throws Exception {
-        var temporary = Files.createTempFile(path.getParent(), ".publish-", ".json");
-        try {
-            JSON.writeValue(temporary.toFile(), value);
-            Files.move(temporary, path, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
-        } finally { Files.deleteIfExists(temporary); }
     }
     @Override public synchronized void close() {
         if (closed) return;

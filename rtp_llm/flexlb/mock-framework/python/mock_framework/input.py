@@ -30,6 +30,15 @@ def _validate(request):
             or request.HasField('priority') and request.priority < 0
             or request.ByteSize() > MAX_REQUEST):
         raise ValueError('Invalid or unsupported playback request')
+    end = 0
+    if len(request.images) > 256:
+        raise ValueError('Too many images')
+    for image in request.images:
+        if (not image.url.strip() or len(image.url) > 4096 or not 1 <= image.width <= 32768
+                or not 1 <= image.height <= 32768 or image.offset < end or image.length < 1
+                or image.offset + image.length > len(request.token_ids)):
+            raise ValueError('Invalid expanded image span or geometry')
+        end = image.offset + image.length
 
 
 def write_inputs(path, requests):

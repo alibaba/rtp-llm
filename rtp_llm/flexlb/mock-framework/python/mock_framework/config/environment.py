@@ -38,7 +38,7 @@ def compile_environment(raw):
     fields(raw, {'master', 'client', 'prefill', 'decode', 'vit'}, where='environment')
     result = {}
     for role, config in raw.items():
-        allowed = {'deployment', 'config'} | ({'engine'} if role in {'prefill', 'decode', 'vit'} else set())
+        allowed = {'deployment', 'config'} | ({'engine'} if role in {'prefill', 'decode'} else set())
         required = {'engine'} if 'engine' in allowed else set()
         fields(config, allowed, required, where=role)
         if 'engine' in config and config['engine'] != 'rtp':

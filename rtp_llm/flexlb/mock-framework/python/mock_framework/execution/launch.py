@@ -27,7 +27,8 @@ def prepare_launch(raw, case, base):
         env = recipe.get('env', {})
         if not isinstance(env, dict) or any(not isinstance(k, str) or not isinstance(v, str) for k, v in env.items()):
             raise ExecutionError('Launch env must contain string keys and values')
-        if any(k.startswith('MOCK_') for k in env):
+        address_env = {'MOCK_BIND_HOST', 'MOCK_ADVERTISE_HOST'} if role in {'prefill', 'decode', 'vit'} else set()
+        if any(k.startswith('MOCK_') and k not in address_env for k in env):
             raise ExecutionError('MOCK_* launch variables are assigned by the runner')
         startup = recipe.get('startup_timeout', '30s')
         duration(startup, positive=True)
@@ -68,7 +69,7 @@ def local_launch(case, java, prometheus, *, framework, engine_mode='shared'):
     framework, java = Path(framework).resolve(), Path(java).resolve()
     if not java.is_file() or not os.access(java, os.X_OK):
         raise ExecutionError('java must be an executable Java 21 binary')
-    unsupported = set(case.environment) - {'master', 'prefill', 'decode', 'client'}
+    unsupported = set(case.environment) - {'master', 'prefill', 'decode', 'vit', 'client'}
     if unsupported:
         raise ExecutionError(f'Local launch does not implement roles: {sorted(unsupported)}')
 
@@ -95,9 +96,10 @@ def local_launch(case, java, prometheus, *, framework, engine_mode='shared'):
         master_prefix = prefix + ['-cp', classpath]
         commands['master'] = master_prefix + ['org.flexlb.MasterNode']
         raw['zookeeper'] = {'command': master_prefix + ['org.flexlb.mock.master.ZookeeperNode'], 'startup_timeout': '60s'}
-    if {'prefill', 'decode'} & case.environment.keys():
-        engine = prefix + ['-jar', str(artifact('java/engine/rtp/target/mock-rtp-1.0-SNAPSHOT-all.jar'))]
-        commands.update(prefill=engine, decode=engine)
+    if {'prefill', 'decode', 'vit'} & case.environment.keys():
+        engine = prefix + ['-cp', str(artifact('java/host/target/mock-engine-service-1.0-SNAPSHOT-all.jar')),
+                           'org.flexlb.mock.host.EngineHost']
+        commands.update(prefill=engine, decode=engine, vit=engine)
     if 'client' in case.environment:
         commands['client'] = prefix + ['-jar', str(artifact('java/client/target/mock-client-1.0-SNAPSHOT-all.jar'))]
     raw['components'] = {role: {'command': list(commands[role]), 'startup_timeout': '60s'} for role in case.environment}

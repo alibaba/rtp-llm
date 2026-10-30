@@ -74,6 +74,8 @@ public final class ApiServer implements AutoCloseable {
         return this;
     }
 
+    public int port() { return server.getAddress().getPort(); }
+
     public String url() {
         String host = server.getAddress().getAddress().getHostAddress();
         return "http://" + (host.contains(":") ? "[" + host + "]" : host) + ":" + server.getAddress().getPort();

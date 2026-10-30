@@ -1,11 +1,8 @@
 package org.flexlb.mock.engine.rtp;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
 import io.grpc.Server;
 import io.grpc.netty.NettyServerBuilder;
 import java.io.IOException;
-import java.net.InetSocketAddress;
-import java.nio.file.*;
 import java.util.*;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -14,11 +11,12 @@ import org.flexlb.mock.engine.Scheduler;
 import org.flexlb.mock.runtime.ApiServer;
 
 /** One owned RTP P/D object with independent listeners and resources. Does not contain the case runner or a cluster controller. */
-public final class RtpNode implements AutoCloseable {
+public final class RtpNode implements org.flexlb.mock.runtime.EngineInstance {
     private final RtpConfig config;
     private final KvCache cache;
     private final RtpRpcService service;
     private final AtomicBoolean closed = new AtomicBoolean();
+    private final org.flexlb.mock.runtime.EngineAddress address = org.flexlb.mock.runtime.EngineAddress.local();
     private Server rpc;
     private ApiServer api;
 
@@ -46,18 +44,18 @@ public final class RtpNode implements AutoCloseable {
     public static RtpNode start(RtpConfig config, int rpcPort, int controlPort, Scheduler.Factory schedulers) throws IOException {
         var node = new RtpNode(config, schedulers);
         try {
-            var builder = NettyServerBuilder.forAddress(new InetSocketAddress("127.0.0.1", rpcPort)).addService(node.service);
+            var builder = NettyServerBuilder.forAddress(node.address.listener(rpcPort)).addService(node.service);
             var transfer = node.service.transfer();
             if (transfer != null) builder.addService(transfer);
             node.rpc = builder.build().start();
             node.service.rpcAddress(node.rpcAddress());
-            node.api = new ApiServer(new InetSocketAddress("127.0.0.1", controlPort)).metrics(node.service::scrapeMetrics);
+            node.api = new ApiServer(node.address.listener(controlPort)).metrics(node.service::scrapeMetrics);
             node.api.start();
             return node;
         } catch (IOException | RuntimeException error) { node.close(); throw error; }
     }
 
-    public String rpcAddress() { return "127.0.0.1:" + rpc.getPort(); }
+    public String rpcAddress() { return address.rpc(rpc.getPort()); }
     public void checkHealthy() {
         if (closed.get()) throw new IllegalStateException("Engine closed");
         service.scrapeMetrics();
@@ -67,12 +65,12 @@ public final class RtpNode implements AutoCloseable {
         boolean prefill = config.role() == org.flexlb.mock.api.model.Types.Role.prefill;
         var result = new LinkedHashMap<String, Object>();
         result.put("id", config.id()); result.put("role", config.role().name()); result.put("engine", "rtp");
-        result.put("rpc", rpcAddress()); result.put("control", api.url()); result.put("metrics", api.url() + "/metrics");
+        result.put("rpc", rpcAddress()); result.put("control", address.http(api.port())); result.put("metrics", address.http(api.port()) + "/metrics");
         result.put("supported_rpc", prefill ? List.of("CheckHealth", "GetWorkerStatus", "GetCacheStatus", "GenerateStreamCall", "EnqueueBatch", "EnqueueGroup", "FetchResponse", "Cancel")
             : List.of("CheckHealth", "GetWorkerStatus", "GetCacheStatus", "RemoteGenerate"));
-        result.put("local_generation", prefill ? Map.of("max_new_tokens", 1, "text_only", true) : Map.of());
-        result.put("pd_generation", prefill ? Map.of("rpc", "GenerateStreamCall", "decode_target", "role_addrs", "text_only", true) : Map.of());
-        result.put("remote_generation", prefill ? Map.of() : Map.of("stages", List.of("ALLOCATE", "LOAD", "GENERATE", "PREFILL_COMPLETE"), "text_only", true, "load", true));
+        result.put("local_generation", prefill ? Map.of("max_new_tokens", 1, "multimodal", true) : Map.of());
+        result.put("pd_generation", prefill ? Map.of("rpc", "GenerateStreamCall", "decode_target", "role_addrs", "multimodal", true) : Map.of());
+        result.put("remote_generation", prefill ? Map.of() : Map.of("stages", List.of("ALLOCATE", "LOAD", "GENERATE", "PREFILL_COMPLETE"), "multimodal", true, "load", true));
         result.put("mock_transfer", prefill ? Map.of("address", rpcAddress(), "service", "mock.rtp.PrefillTransfer", "metadata_only", true) : Map.of());
         return Map.copyOf(result);
     }
@@ -98,29 +96,4 @@ public final class RtpNode implements AutoCloseable {
         if (failure != null) throw failure;
     }
 
-    public static void main(String[] args) throws Exception {
-        if (args.length != 0) throw new IllegalArgumentException("Use runner configuration variables, not legacy CLI flags");
-        var config = RtpConfig.load(Path.of(required("MOCK_CONFIG_FILE")));
-        Path directory = Path.of(required("MOCK_OUTPUT_DIR"));
-        Files.createDirectories(directory);
-        try (var node = start(config)) {
-            var hook = new Thread(node::close, "rtp-node-shutdown");
-            Runtime.getRuntime().addShutdownHook(hook);
-            try {
-                var json = new ObjectMapper();
-                json.writerWithDefaultPrettyPrinter().writeValue(directory.resolve("effective-config.json").toFile(), config.effective());
-                json.writerWithDefaultPrettyPrinter().writeValue(directory.resolve("endpoints.json").toFile(), node.endpoints());
-                node.api.publishReady(Path.of(required("MOCK_READY_FILE")));
-                node.rpc.awaitTermination();
-            } finally {
-                try { Runtime.getRuntime().removeShutdownHook(hook); } catch (IllegalStateException ignored) { }
-            }
-        }
-    }
-
-    private static String required(String key) {
-        var value = System.getenv(key);
-        if (value == null || value.isBlank()) throw new IllegalArgumentException("Missing " + key);
-        return value;
-    }
 }
