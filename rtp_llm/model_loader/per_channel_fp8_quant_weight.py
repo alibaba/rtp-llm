@@ -2,7 +2,7 @@ import copy
 import functools
 import logging
 import re
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Sequence, Any, Dict, List, Optional, Tuple, Union
 
 import torch
 
@@ -64,8 +64,73 @@ def _exclude_pattern_for(base_name_template: str) -> Optional["re.Pattern"]:
     return re.compile("^" + r"\d+".join(re.escape(p) for p in parts) + "$")
 
 
+# Layer indices the ``re:`` ignore patterns are probed with. A template stands
+# for *every* layer, so a pattern only covers it when it matches at every one of
+# these widths. A single fixed probe cannot tell "matches any layer" from
+# "matches a layer with this many digits": ``model\.layers\.[0-9]\.`` matches
+# layer 0 but not layer 12, so it does not stand for the whole template.
+_LAYER_INDEX_PROBES = (
+    "0",
+    "1",
+    "12",
+    "123",
+    "123456789",
+)
+
+
+def _regex_ignore_covers_template(
+    pattern: str,
+    base_name_template: str,
+    concrete_names: Optional[Sequence[str]] = None,
+) -> bool:
+    r"""Return whether a ``re:`` ignore pattern covers the whole weight template.
+
+    "Covers the whole template" means the pattern matches *every* instance the
+    template expands to in this checkpoint, so callers that know those instances
+    pass them in ``concrete_names`` and the question is answered exactly. This
+    is the only way to answer it for a pattern written to a fixed number of
+    digits, such as ``model\.layers\.\d{1,2}\.``: it covers a 100-layer
+    checkpoint and does not cover a 1000-layer one, and the pattern alone does
+    not say which.
+
+    Without ``concrete_names`` the template is rendered at each of
+    ``_LAYER_INDEX_PROBES`` and every rendering has to match, which cannot tell
+    "matches every layer" from "matches a layer with this many digits". A
+    pattern that matches only some renderings is reported with a warning rather
+    than being decided quietly, because both readings are wrong somewhere:
+    reading it as "covers" de-quantizes every layer, reading it as "does not
+    cover" quantizes layers the operator asked to exclude.
+    """
+    if concrete_names is not None:
+        concrete = list(concrete_names)
+        if not concrete:
+            return False
+        return all(re.search(pattern, name) for name in concrete)
+
+    matched = [
+        probe
+        for probe in _LAYER_INDEX_PROBES
+        if re.search(pattern, base_name_template.replace("{i}", probe))
+    ]
+    if matched and len(matched) != len(_LAYER_INDEX_PROBES):
+        logging.warning(
+            "compressed-tensors ignore %r matches the weight template %r at only "
+            "%d of %d probed layer widths; whether it covers every layer depends "
+            "on the layer count of this checkpoint. Use an unbounded quantifier "
+            "such as \\d+ if every layer is meant to be excluded.",
+            pattern,
+            base_name_template,
+            len(matched),
+            len(_LAYER_INDEX_PROBES),
+        )
+        return False
+    return len(matched) == len(_LAYER_INDEX_PROBES)
+
+
 def _ckpt_base_matches_quant_exclude(
-    base_name_template: str, exclude_modules: set
+    base_name_template: str,
+    exclude_modules: set,
+    concrete_names: Optional[Sequence[str]] = None,
 ) -> bool:
     """
     Check if the checkpoint module path template matches any entry in the quantization exclude list.
@@ -75,6 +140,15 @@ def _ckpt_base_matches_quant_exclude(
                             acts as a placeholder for the layer index (e.g., 'model.layers.{i}.mlp.gate_proj').
         exclude_modules: A set of concrete module paths that are excluded from quantization
                          (e.g., {'model.layers.0.mlp.gate_proj', 'model.layers.1.mlp.gate_proj'}).
+        concrete_names: The module paths this template expands to in the checkpoint
+                        being loaded, one per layer instance. Supplying them lets a
+                        ``re:`` entry be judged against what the checkpoint actually
+                        contains instead of against a fixed probe set, which is the
+                        only way to answer the question for a pattern written to a
+                        fixed number of digits. Callers that iterate
+                        ``WeightModule.weights`` have them; omit to probe the
+                        template instead.
+
 
     Returns:
         True if the template (with '{i}' replaced by a wildcard for digits) matches any
@@ -99,8 +173,9 @@ def _ckpt_base_matches_quant_exclude(
     for exclude in exclude_modules:
         if exclude.startswith("re:"):
             try:
-                candidate = base_name_template.replace("{i}", "0")
-                if re.search(exclude[3:], candidate):
+                if _regex_ignore_covers_template(
+                    exclude[3:], base_name_template, concrete_names
+                ):
                     return True
             except re.error as error:
                 raise ValueError(
@@ -111,14 +186,25 @@ def _ckpt_base_matches_quant_exclude(
     return False
 
 
-def _ckpt_base_matches_regex_exclude(base_name_template: str, exclude_modules: set) -> bool:
-    """Return whether a regex ignore matches the whole weight template."""
-    candidate = base_name_template.replace("{i}", "0")
+def _ckpt_base_matches_regex_exclude(
+    base_name_template: str,
+    exclude_modules: set,
+    concrete_names: Optional[Sequence[str]] = None,
+) -> bool:
+    """Return whether a regex ignore matches the whole weight template.
+
+    ``concrete_names`` is the module paths this template expands to in this
+    checkpoint; when given, a ``re:`` entry matches only if it matches all of
+    them. See ``_regex_ignore_covers_template`` for why that is the question
+    being asked, and what the probe fallback does instead.
+    """
     for exclude in exclude_modules:
         if not exclude.startswith("re:"):
             continue
         try:
-            if re.search(exclude[3:], candidate):
+            if _regex_ignore_covers_template(
+                exclude[3:], base_name_template, concrete_names
+            ):
                 return True
         except re.error as error:
             raise ValueError(
@@ -327,10 +413,12 @@ class PerChannelFp8Weight(CompositeWeight, QuantWeight):
             return False
         ckpt_weights = src_weight_info.weights
         if quant_config.exclude_modules and ckpt_weights:
-            for ckpt_w in ckpt_weights:
-                base_name = ckpt_w.name.rsplit(".", 1)[0]
+            # Every instance this template expands to in this checkpoint, which
+            # is what "the ignore covers the template" has to be decided against.
+            concrete_names = [ckpt_w.name.rsplit(".", 1)[0] for ckpt_w in ckpt_weights]
+            for base_name in concrete_names:
                 if _ckpt_base_matches_quant_exclude(
-                    base_name, quant_config.exclude_modules
+                    base_name, quant_config.exclude_modules, concrete_names
                 ):
                     return False
         return True
