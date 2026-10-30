@@ -46,6 +46,7 @@ def test_writer_removes_failed_output_without_publishing_a_valid_prefix(tmp_path
 
 @pytest.mark.parametrize('input_request', [pb.Request(max_new_tokens=3), pb.Request(token_ids=[-1], max_new_tokens=3),
     pb.Request(token_ids=[1], max_new_tokens=0), pb.Request(token_ids=[1], max_new_tokens=3, priority=-1),
+    pb.Request(token_ids=[1], max_new_tokens=1, arrival_offset_ms=-1),
     pb.Request.FromString(pb.Request(token_ids=[1], max_new_tokens=3).SerializeToString() + b'\xa0\x06\x01')])
 def test_invalid_or_unknown_fields_are_rejected_by_writer_and_reader(tmp_path, input_request):
     path = tmp_path / 'bad.binpb.zst'
@@ -100,10 +101,3 @@ def test_python_and_java_use_one_proto_and_the_same_framing(tmp_path):
     write = subprocess.run(prefix + ['write', str(java_file)], capture_output=True, text=True, timeout=15)
     assert write.returncode == 0, write.stderr
     assert list(read_inputs(java_file)) == list(requests())
-
-
-def test_negative_arrival_offset_is_rejected_and_failed_file_removed(tmp_path):
-    target = tmp_path / 'bad.binpb.zst'
-    with pytest.raises(ValueError):
-        write_inputs(target, [pb.Request(token_ids=[1], max_new_tokens=1, arrival_offset_ms=-1)])
-    assert not target.exists()

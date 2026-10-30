@@ -36,6 +36,17 @@ class ComputeModelTest {
     @Test void rejectsLegacyLocationsMisspellingsAndInvalidNestedModels() throws Exception {
         for (String value : new String[]{"{}", "{\"expression\":\"1\"}", "{\"forward\":{\"expression\":\"1\",\"scale\":2}}",
                 "{\"forward\":{\"expression\":\"unknownTokens\"}}", "{\"forward\":{\"expression\":\"1\",\"noise\":{\"seed\":1.2}}}",
+                "{\"forward\":{\"expression\":\"1\",\"unexpected\":1}}",
+                "{\"forward\":{\"expression\":\"1\",\"noise\":{\"stddev_ms\":-1,\"max_deviation_ms\":1,\"seed\":42}}}",
+                "{\"forward\":{\"expression\":\"1\",\"noise\":{\"scale\":2}}}",
+                "{\"forward\":{\"expression\":\"1\",\"noise\":{\"seed\":9223372036854775808}}}",
+                "{\"forward\":{\"expression\":\"1\",\"noise\":null}}",
+                "{\"forward\":{\"expression\":\"1\"},\"decode\":{\"draft_tokens\":-1,\"acceptance_rate\":1,\"seed\":42}}",
+                "{\"forward\":{\"expression\":\"1\"},\"decode\":{\"draft_tokens\":4,\"acceptance_rate\":1.01,\"seed\":42}}",
+                "{\"forward\":{\"expression\":\"1\"},\"decode\":{\"draft_tokens\":4,\"acceptance_rate\":1,\"seed\":1.5}}",
+                "{\"forward\":{\"expression\":\"1\"},\"eos\":{\"probability\":-0.1,\"seed\":42}}",
+                "{\"forward\":{\"expression\":\"1\"},\"eos\":{\"probability\":1.1,\"seed\":42}}",
+                "{\"forward\":{\"expression\":\"1\"},\"eos\":{\"unknown\":1}}",
                 "{\"forward\":{\"expression\":\"1\"},\"eos\":{\"probability\":0.1}}", "{\"forward\":null}",
                 "{\"forward\":{\"expression\":\"1\"},\"decode\":{\"draft_tokens\":3,\"tokens_per_step\":2.6}}"})
             assertThrows(Exception.class, () -> load(value), value);

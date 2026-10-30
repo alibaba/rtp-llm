@@ -13,6 +13,7 @@ from mock_framework.config.registry import case_interface
 from mock_framework.execution import prepare_launch, run_case
 from mock_framework.execution.processes import ProcessSupervisor
 from mock_framework.execution.master import master_port
+from mock_framework.execution.launch import local_launch
 from mock_framework.execution.transport import ExecutionError, post
 
 
@@ -218,6 +219,44 @@ def test_kill_and_restore_keep_addresses_and_preserve_each_launch_artifact(tmp_p
     killed = [v for v in logs(output) if v['event'] == 'process_stopped' and v['code'] == -9]
     assert len(killed) == 2
     assert not (output / 'topology-history.json').exists()
+    assert_reaped(output)
+
+
+@pytest.mark.skipif(not os.environ.get('JAVA_HOME') or not os.environ.get('PROMETHEUS_BIN'),
+                    reason='Java artifacts, JAVA_HOME and PROMETHEUS_BIN required')
+def test_native_restart_preserves_address_and_refreshes_only_current_discovery(tmp_path):
+    from test_master import configuration
+    root = Path(__file__).resolve().parents[1]
+    config = configuration()
+    config['FLEXLB_CONFIG'] = json.dumps(json.loads(config['FLEXLB_CONFIG']) | {
+        'grpcServer': {'shutdownQuietPeriodMs': 10}})
+    engine = {'engine': 'rtp', 'config': {'seq_size_per_block': 16, 'test_block_num': 256,
+        'max_seq_len': 4096, 'compute.forward.expression': '1'}}
+    document = dict(id='restart', describe='Native restart and current discovery',
+        environment={'master': {'config': config}, 'prefill': engine, 'decode': engine},
+        phases=[dict(id='lifecycle', describe='restart', timeout='120s', steps=[
+            step('a', 'master/leadership/get', expect={'count': 1}),
+            step('killed', 'master/stop', args={'targets': {'ref': 'steps.a'}, 'mode': 'kill'}),
+            step('restored', 'master/restart', args={'targets': {'ref': 'steps.a'}}, within='60s', wait_after='2s'),
+            step('leader', 'master/leadership/get', expect={'eq': {'ref': 'steps.a'}}),
+            step('added', 'engine/scale_out', args={'role': 'prefill', 'count': 1}, expect={'count': 1})])])
+    source = tmp_path / 'case.yaml'; source.write_text(yaml.safe_dump(document))
+    registry = Registry.standard(); case = compile_case(source, registry)
+    launch = local_launch(case, Path(os.environ['JAVA_HOME']) / 'bin/java', os.environ['PROMETHEUS_BIN'], framework=root)
+    output = tmp_path / 'run'
+    result = asyncio.run(run_case(case, registry, launch, output))
+    assert result['status'] == 'PASS', result
+    values = {item['step']: item['result'] for item in logs(output) if item['event'] == 'step_finished'}
+    assert values['a'] == values['restored']
+    first = output / 'components/master-0'
+    current = first / 'restart-1'
+    original = json.loads((first / 'endpoints.json').read_text())
+    restored = json.loads((current / 'endpoints.json').read_text())
+    assert original['rpc'] == restored['rpc'] and original['http'] == restored['http']
+    assert len(json.loads((first / 'discovery.json').read_text())['p-domain']) == 1
+    assert len(json.loads((current / 'discovery.json').read_text())['p-domain']) == 2
+    process = [item for item in logs(output) if item['event'] == 'process_started' and item['node'].startswith('master-')]
+    assert len(process) == 2 and process[0]['pid'] != process[1]['pid']
     assert_reaped(output)
 
 

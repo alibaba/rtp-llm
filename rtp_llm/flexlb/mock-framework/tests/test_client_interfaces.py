@@ -158,6 +158,8 @@ def test_client_playback_through_real_master(tmp_path, replicas, large_input):
             'interface': 'client/qps', 'args': {'range': ['-10s' if large_input else '-6s', '0s']},
             'expect': {'gte': 21.6, 'lte': 26.4} if large_input else {'gte': 1.5, 'lte': 3},
             'wait_after': '10s' if large_input else '0s'})
+        data['phases'][0]['steps'].insert(2, {'id': 'success', 'describe': 'Check aggregate terminal success rate',
+            'interface': 'client/success_rate', 'args': {'range': ['-20s', '0s']}, 'expect': {'eq': 1.0}})
         path.write_text(yaml.safe_dump(data)); case = compile_case(path, registry)
     elif large_input:
         data['phases'][0]['steps'][0]['wait_after'] = '34s'
@@ -166,6 +168,10 @@ def test_client_playback_through_real_master(tmp_path, replicas, large_input):
     output = tmp_path / 'result'
     result = asyncio.run(run_case(case, registry, launch, output))
     assert result['status'] == 'PASS', result
+    if 'prometheus' in recipe:
+        gates = [json.loads(line) for line in (output / 'gates.jsonl').read_text().splitlines()]
+        success, = [gate for gate in gates if gate['interface'] == 'client/success_rate']
+        assert success['actual'] == 1.0
     summary = json.loads((output / 'components/client-0/coordinator/1/result.json').read_text())
     assert not summary['errors'] and len(summary['clients']) == replicas
     assert sum(v['issued'] for v in summary['clients'].values()) == count

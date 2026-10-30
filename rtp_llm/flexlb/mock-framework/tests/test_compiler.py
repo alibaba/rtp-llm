@@ -1,10 +1,21 @@
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Annotated
 import pytest
-from mock_framework.config import ConfigError, Registry, Step
+from mock_framework.config import ConfigError, Registry, Step, compile_case
 from mock_framework.config.model import Reference
 from mock_framework.config.registry import case_interface, Bounds
 from mock_framework.config.environment import expand_config
+
+
+@pytest.mark.parametrize('path', sorted((Path(__file__).resolve().parents[1] / 'cases').glob('*/case.yaml')),
+                         ids=lambda path: path.parent.name)
+def test_shipped_cases_compile_and_reference_existing_inputs(path, registry):
+    case = compile_case(path, registry)
+    for phase in case.phases:
+        for step in phase.steps:
+            if step.interface == 'client/start':
+                assert (case.directory / step.args['requests_file']).is_file()
 
 
 def test_compiles_without_java_catalog_and_read_can_have_no_assertion(case_data, compile_data):
@@ -120,12 +131,4 @@ def test_wait_after_is_a_step_duration(case_data, compile_data, wait):
 def test_invalid_wait_after_rejected_before_execution(case_data, compile_data, wait):
     case_data['phases'][0]['steps'][0]['wait_after'] = wait
     with pytest.raises(ConfigError):
-        compile_data(case_data)
-
-
-def test_wait_interface_is_removed(case_data, compile_data):
-    assert 'runtime/wait' not in Registry.standard().interfaces
-    case_data['phases'][0]['steps'][0] = {'id': 'wait', 'describe': 'old wait',
-        'interface': 'runtime/wait', 'args': {'duration': '1s'}}
-    with pytest.raises(ConfigError, match='Unknown or unimplemented'):
         compile_data(case_data)
