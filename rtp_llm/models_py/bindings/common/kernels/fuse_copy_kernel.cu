@@ -1,5 +1,7 @@
+#include "rtp_llm/cpp/utils/PrefillOptimization.h"
 #include <cstdint>
 #include <cstddef>
+#include <algorithm>
 
 #include "rtp_llm/models_py/bindings/common/kernels/fuse_copy_kernel.h"
 
@@ -51,7 +53,25 @@ __global__ void fusedCopyKernel(FusedD2DCopyParams params) {
 void invokeFusedCopy(const FusedD2DCopyParams& params, cudaStream_t stream) {
     if (params.num_copies <= 0)
         return;
-    dim3 grid(FUSED_COPY_BLOCKS_PER_TASK, params.num_copies);
+    if (!rtp_llm::prefillOptimizationsEnabled()) {
+        dim3 grid(FUSED_COPY_BLOCKS_PER_TASK, params.num_copies);
+        fusedCopyKernel<<<grid, FUSED_COPY_THREADS, 0, stream>>>(params);
+        return;
+    }
+    // Small metadata copies retain their launch shape. Large prefill hidden
+    // states need more than eight CTAs to use device bandwidth. The size list
+    // is already host-resident; this adds no device query or synchronization.
+    size_t max_bytes = 0;
+    for (int i = 0; i < params.num_copies; ++i) {
+        max_bytes = std::max(max_bytes, params.size[i]);
+    }
+    constexpr size_t bytes_per_block = 128 * 1024;
+    const size_t     wanted          = max_bytes / bytes_per_block + (max_bytes % bytes_per_block != 0);
+    // Bound empty work when a single large tensor is mixed with many tiny
+    // metadata tensors. Preserve the existing minimum for each copy.
+    const int cap    = std::max(FUSED_COPY_BLOCKS_PER_TASK, std::min(256, 1024 / params.num_copies));
+    const int blocks = static_cast<int>(std::max<size_t>(FUSED_COPY_BLOCKS_PER_TASK, std::min<size_t>(cap, wanted)));
+    dim3      grid(blocks, params.num_copies);
     fusedCopyKernel<<<grid, FUSED_COPY_THREADS, 0, stream>>>(params);
 }
 

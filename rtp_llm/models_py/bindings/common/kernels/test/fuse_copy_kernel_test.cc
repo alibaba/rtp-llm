@@ -534,6 +534,100 @@ TEST_F(FusedStridedCopyTest, PinnedHostToDeviceCopy) {
     cudaFree(d_dst);
 }
 
+// Exercise every tail/alignment around the enlarged-grid threshold and a
+// hidden-state-sized tensor. Guards prove the extra CTAs do not write padding.
+TEST_F(FusedCopyTest, AdaptiveGridSizesAndGuards) {
+    for (size_t n : {size_t(0),
+                     size_t(15),
+                     size_t(16),
+                     size_t(17),
+                     size_t(1024 * 1024 - 1),
+                     size_t(1024 * 1024),
+                     size_t(1024 * 1024 + 1),
+                     size_t(64 * 1024 * 1024 + 7)}) {
+        for (size_t offset : {size_t(0), size_t(1), size_t(7), size_t(16)}) {
+            SCOPED_TRACE(::testing::Message() << "bytes=" << n << " offset=" << offset);
+            std::vector<uint8_t> input(n + 64, 0x6d), expected(n + 64, 0xa5);
+            for (size_t i = 0; i < n; ++i)
+                input[offset + i] = uint8_t(i * 19 + i / 251);
+            std::memcpy(expected.data() + offset, input.data() + offset, n);
+            auto*                       src = deviceAlloc(input);
+            auto*                       dst = deviceAlloc(std::vector<uint8_t>(n + 64, 0xa5));
+            rtp_llm::FusedD2DCopyParams params;
+            params.add(src + offset, dst + offset, n);
+            rtp_llm::invokeFusedCopy(params, stream_);
+            CUDA_CHECK(cudaStreamSynchronize(stream_));
+            auto actual = deviceToHost(dst, n + 64);
+            EXPECT_EQ(0, std::memcmp(expected.data(), actual.data(), actual.size()));
+            cudaFree(src);
+            cudaFree(dst);
+        }
+    }
+}
+
+TEST_F(FusedCopyTest, LargeMixedBatchAndGraphReplay) {
+    // One large tensor plus 63 tiny tensors exercises the total-CTA cap.
+    const size_t         big = 32 * 1024 * 1024 + 3;
+    std::vector<uint8_t> source(big + 4096), initial(big + 4096, 0);
+    for (size_t i = 0; i < source.size(); ++i)
+        source[i] = uint8_t(i * 7 + i / 127);
+    auto*                       src = deviceAlloc(source);
+    auto*                       dst = deviceAlloc(initial);
+    rtp_llm::FusedD2DCopyParams params;
+    params.add(src, dst, big);
+    for (int i = 1; i < rtp_llm::MAX_FUSED_D2D_COPIES; ++i) {
+        const size_t offset = big + 64 * (i - 1);
+        params.add(src + offset, dst + offset, 64);
+    }
+    const size_t copied = big + 63 * 64;
+#if USING_CUDA
+    cudaGraph_t     graph{};
+    cudaGraphExec_t exec{};
+    CUDA_CHECK(cudaStreamBeginCapture(stream_, cudaStreamCaptureModeThreadLocal));
+    rtp_llm::invokeFusedCopy(params, stream_);
+    CUDA_CHECK(cudaStreamEndCapture(stream_, &graph));
+    CUDA_CHECK(cudaGraphInstantiate(&exec, graph, nullptr, nullptr, 0));
+#endif
+    for (int iteration = 0; iteration < 5; ++iteration) {
+        CUDA_CHECK(cudaMemsetAsync(dst, 0xa5, source.size(), stream_));
+#if USING_CUDA
+        CUDA_CHECK(cudaGraphLaunch(exec, stream_));
+#else
+        rtp_llm::invokeFusedCopy(params, stream_);
+#endif
+        CUDA_CHECK(cudaStreamSynchronize(stream_));
+        auto actual = deviceToHost(dst, source.size());
+        EXPECT_EQ(0, std::memcmp(source.data(), actual.data(), copied));
+        for (size_t i = copied; i < actual.size(); ++i)
+            ASSERT_EQ(actual[i], 0xa5);
+    }
+#if USING_CUDA
+    CUDA_CHECK(cudaGraphExecDestroy(exec));
+    CUDA_CHECK(cudaGraphDestroy(graph));
+#endif
+    cudaFree(src);
+    cudaFree(dst);
+}
+
+TEST_F(FusedCopyTest, LargePinnedInputAndIdentityCopy) {
+    std::vector<uint8_t> input(2 * 1024 * 1024 + 9);
+    for (size_t i = 0; i < input.size(); ++i)
+        input[i] = uint8_t(i * 23);
+    auto*                       host = pinnedHostAlloc(input);
+    auto*                       dst  = deviceAllocZero<uint8_t>(input.size());
+    rtp_llm::FusedD2DCopyParams params;
+    params.add(host, dst, input.size());
+    rtp_llm::invokeFusedCopy(params, stream_);
+    params.clear();
+    params.add(dst, dst, input.size());
+    rtp_llm::invokeFusedCopy(params, stream_);
+    CUDA_CHECK(cudaStreamSynchronize(stream_));
+    auto actual = deviceToHost(dst, input.size());
+    EXPECT_EQ(0, std::memcmp(input.data(), actual.data(), input.size()));
+    cudaFreeHost(host);
+    cudaFree(dst);
+}
+
 int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();

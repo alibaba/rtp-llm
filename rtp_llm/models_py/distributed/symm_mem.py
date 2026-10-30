@@ -7,6 +7,8 @@ import torch
 import torch.distributed as dist
 from torch.distributed import ProcessGroup
 
+from rtp_llm.config.prefill_optimization import PREFILL_OPTIMIZATIONS_ENABLED
+
 MiB = 1024 * 1024
 
 TORCH_SYMM_MEM_ALL_REDUCE_MAX_SIZES = {
@@ -267,6 +269,208 @@ class TorchSymmMemCommunicator:
         )
         out.copy_(buf_out.view(self.world_size, *shard.shape))
         return out
+
+    # Compatibility implementation from 70f1ecde04. Selected once at import.
+    if not PREFILL_OPTIMIZATIONS_ENABLED:
+
+        def _baseline___init__(
+            self, group: ProcessGroup, device: Union[int, str, torch.device]
+        ):
+            """
+            Args:
+                group: Torch process group used for rendezvous and naming.
+                device: Target CUDA device (index, 'cuda:X', or torch.device).
+            """
+
+            self.disabled = True
+
+            if not torch_symm_mem_available:
+                return
+
+            if isinstance(device, int):
+                device = torch.device(f"cuda:{device}")
+            elif isinstance(device, str):
+                device = torch.device(device)
+            torch.cuda.set_device(device)
+            self.dtype = torch.bfloat16
+            self.device = device
+            self.group = group
+            self.world_size = dist.get_world_size(self.group)
+            self.device_capability = torch.cuda.get_device_capability(device)[0]
+            if self.device_capability < 9:
+                logging.warning(
+                    "TorchSymmMemCommunicator: Device capability %s not supported, "
+                    "communicator is not available.",
+                    self.device_capability,
+                )
+                return
+            if (
+                self.world_size
+                not in TORCH_SYMM_MEM_ALL_REDUCE_MAX_SIZES[self.device_capability]
+            ):
+                logging.warning(
+                    "TorchSymmMemCommunicator: World size %d not supported, "
+                    "communicator is not available.",
+                    self.world_size,
+                )
+                return
+            self.max_size = TORCH_SYMM_MEM_ALL_REDUCE_MAX_SIZES[self.device_capability][
+                self.world_size
+            ]
+            self.buffer = torch_symm_mem.empty(
+                self.max_size // self.dtype.itemsize,
+                device=self.device,
+                dtype=self.dtype,
+            )
+            # Try ProcessGroup object first, fallback to group_name if needed
+            handle = torch_symm_mem.rendezvous(self.buffer, group=self.group.group_name)
+            if handle.multicast_ptr == 0:
+                logging.warning(
+                    "TorchSymmMemCommunicator: torch symmetric memory "
+                    "multicast operations are not supported."
+                )
+                self.buffer = None
+                self.disabled = True
+                return
+            if not hasattr(torch.ops.symm_mem, "multimem_all_gather_out"):
+                logging.warning(
+                    "TorchSymmMemCommunicator: torch.ops.symm_mem.multimem_all_gather_out "
+                    "is not available in this PyTorch build, disabling symm_mem communicator."
+                )
+                self.buffer = None
+                self.disabled = True
+                return
+            self.disabled = False
+
+        __init__ = _baseline___init__
+
+        def _baseline_should_torch_symm_mem_allreduce(self, inp: torch.Tensor):
+            """
+            Fast-path eligibility check for a given tensor.
+
+            Conditions:
+              - Communicator must be enabled.
+              - dtype must be bfloat16 (matches kernel + buffer dtype).
+              - Total byte size must be 4-byte aligned (hardware requirement).
+              - Payload must be smaller than the symmetric-memory max size.
+
+            Returns:
+                True if the symmetric-memory path can handle this tensor.
+            """
+            if self.disabled:
+                return False
+            if inp.dtype != self.dtype:
+                return False
+            inp_size = inp.numel() * inp.element_size()
+            # enforce 4-byte alignment
+            if inp_size % 4 != 0:
+                return False
+            return inp_size < self.max_size
+
+        should_torch_symm_mem_allreduce = _baseline_should_torch_symm_mem_allreduce
+
+        def _baseline_all_reduce(
+            self, inp: torch.Tensor, *, out: Optional[torch.Tensor] = None
+        ) -> Optional[torch.Tensor]:
+            """
+            Perform an in-place sum all-reduce via torch symmetric memory.
+
+            Args:
+                inp: Input tensor on the target CUDA device (bfloat16).
+                out: Optional output tensor; if omitted, a new tensor is allocated.
+
+            Returns:
+                The reduced tensor (same shape as inp), or None if disabled.
+
+            Implementation details:
+                - Stages 'inp' into the symmetric buffer.
+                - Selects 'multimem' or 'two_shot' kernel based on topology.
+                - Writes the result into 'out' and returns it.
+            """
+            if out is None:
+                out = torch.empty_like(inp)
+            self.buffer[: inp.numel()].copy_(inp.view(-1))
+            if self.world_size in self._WORLD_SIZES_MULTIMEM[self.device_capability]:
+                torch.ops.symm_mem.multimem_all_reduce_(
+                    self.buffer[: inp.numel()], "sum", self.group.group_name
+                )
+            else:
+                torch.ops.symm_mem.two_shot_all_reduce_(
+                    self.buffer[: inp.numel()], "sum", self.group.group_name
+                )
+            out.copy_(self.buffer[: inp.numel()].view(out.shape))
+            return out
+
+        all_reduce = _baseline_all_reduce
+
+        def _baseline_should_torch_symm_mem_allgather(
+            self, shard: torch.Tensor
+        ) -> bool:
+            """
+            Fast-path eligibility check for all_gather.
+
+            Aligns with torch.distributed._symmetric_memory constraints for
+            multimem_all_gather_out:
+              - Communicator must be enabled (implies multicast support).
+              - dtype must be bfloat16.
+              - Shard must be contiguous (op requirement).
+              - Shard byte size must be 4-byte aligned (hardware requirement).
+              - Gather is along dim 0 only; leading_dims * world_size <= 2048
+                (empirical heuristic from PyTorch fused_all_gather_matmul).
+              - Total gathered size (shard * world_size) must fit in the buffer.
+            """
+            if self.disabled or shard.dtype != self.dtype or not shard.is_contiguous():
+                return False
+            shard_bytes = shard.numel() * shard.element_size()
+            if shard_bytes % 4 != 0:
+                return False
+            leading_numel = math.prod(shard.shape[:-1]) if shard.dim() >= 2 else 1
+            if leading_numel * self.world_size > 2048:
+                return False
+            return shard_bytes * self.world_size < self.max_size
+
+        should_torch_symm_mem_allgather = _baseline_should_torch_symm_mem_allgather
+
+        def _baseline_all_gather(
+            self, shard: torch.Tensor, *, out: Optional[torch.Tensor] = None
+        ) -> Optional[torch.Tensor]:
+            """
+            Gather shards from all ranks into a single concatenated tensor.
+
+            Each rank contributes its local 'shard'; the result on every rank is
+            the concatenation [shard_rank0, shard_rank1, ..., shard_rank_{N-1}].
+
+            Args:
+                shard: Local input shard (bfloat16, any shape).
+                out:   Optional pre-allocated output tensor of shape
+                       (world_size * shard.numel(),); allocated if omitted.
+
+            Returns:
+                Gathered tensor of shape (world_size, *shard.shape), or None if
+                disabled.
+
+            Implementation details:
+                - Uses multimem_all_gather_out which requires multicast support
+                  (already validated during __init__).
+                - Output is staged through the symmetric buffer and then copied
+                  to a regular tensor.
+            """
+            shard_numel = shard.numel()
+            total_numel = shard_numel * self.world_size
+            if out is None:
+                out = torch.empty(
+                    (self.world_size, *shard.shape),
+                    dtype=self.dtype,
+                    device=self.device,
+                )
+            buf_out = self.buffer[:total_numel]
+            torch.ops.symm_mem.multimem_all_gather_out(
+                shard.view(-1), self.group.group_name, buf_out
+            )
+            out.copy_(buf_out.view(self.world_size, *shard.shape))
+            return out
+
+        all_gather = _baseline_all_gather
 
 
 # Use lazy initialization instead of module-level initialization

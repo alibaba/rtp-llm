@@ -26,6 +26,11 @@ from typing import Any, Dict, Tuple
 import torch
 import torch.distributed as dist
 
+from rtp_llm.config.prefill_optimization import (
+    PREFILL_OPTIMIZATIONS_ENABLED,
+    prefill_optimization_setting,
+)
+
 _ncclComm_t = ctypes.c_void_p
 _cudaStream_t = ctypes.c_void_p
 _buffer_t = ctypes.c_void_p
@@ -70,7 +75,9 @@ def _env_enabled(name: str) -> bool:
 # avoiding an os.environ lookup in every layer keeps the dispatcher negligible.
 _OPT_ENABLED = _env_enabled("GLM5_CP_OPT")
 _PYNCCL_VALIDATE = _env_enabled("GLM5_CP_PYNCCL_VALIDATE")
-_TORCH_SYMM_GATHER = os.environ.get("RTP_LLM_CP_TORCH_SYMM_GATHER", "1") == "1"
+_TORCH_SYMM_GATHER = (
+    prefill_optimization_setting("RTP_LLM_CP_TORCH_SYMM_GATHER", "1") == "1"
+)
 
 
 class _NCCLLib:
@@ -206,6 +213,9 @@ _COMMS: Dict[Tuple[Any, int], Tuple["_NCCLLib", Any]] = {}
 _OVERLAP_COMMS: Dict[Tuple[Any, int], Tuple["_NCCLLib", Any]] = {}
 _OVERLAP_STREAMS: Dict[Tuple[Any, int], torch.cuda.Stream] = {}
 _OVERLAP_SYMM_COMMS: Dict[Tuple[Any, int], Any] = {}
+_INDEXER_OVERLAP_COMMS: Dict[Tuple[Any, int], Tuple[Any, Any]] = {}
+_INDEXER_OVERLAP_STREAMS: Dict[Tuple[Any, int], torch.cuda.Stream] = {}
+_INDEXER_OVERLAP_SYMM_COMMS: Dict[Tuple[Any, int], Any] = {}
 _WORLD_SIZES: Dict[Any, int] = {}
 _OVERLAP_BUFFERS: Dict[Tuple[Any, ...], Any] = {}
 _INDEXER_BUFFERS: Dict[Tuple[Any, ...], Tuple[Any, Any]] = {}
@@ -267,12 +277,16 @@ def _torch_all_gather(input: torch.Tensor, group: Any) -> torch.Tensor:
     return all_gather(input, group=group)
 
 
-def _get_comm(process_group, device: torch.device, *, independent: bool = False):
+def _get_comm(process_group, device: torch.device, *, independent: bool | str = False):
     """Collectively create and cache the direct NCCL communicator at startup."""
     global _LIB
 
     key = _comm_key(process_group, device)
-    cache = _OVERLAP_COMMS if independent else _COMMS
+    cache = (
+        _INDEXER_OVERLAP_COMMS
+        if independent == "indexer"
+        else _OVERLAP_COMMS if independent else _COMMS
+    )
     cached = cache.get(key)
     if cached is not None:
         return cached
@@ -302,7 +316,7 @@ def warmup_kv_overlap(group: Any) -> torch.cuda.Stream:
     process_group = _resolve_process_group(group)
     device = torch.device("cuda", torch.cuda.current_device())
     _get_comm(process_group, device, independent=True)
-    if os.environ.get("RTP_LLM_CP_INDEXER_REGISTERED", "0") == "1":
+    if prefill_optimization_setting("RTP_LLM_CP_INDEXER_REGISTERED", "0") == "1":
         _get_comm(process_group, device)
     key = _comm_key(process_group, device)
     if key not in _OVERLAP_STREAMS:
@@ -332,7 +346,78 @@ def warmup_kv_overlap(group: Any) -> torch.cuda.Stream:
             else:
                 side._owner_stream = _OVERLAP_STREAMS[key].cuda_stream
         _OVERLAP_SYMM_COMMS[key] = side
+    if (
+        enabled()
+        and prefill_optimization_setting("RTP_LLM_CP_INDEXER_OVERLAP", "1") == "1"
+    ):
+        _warmup_indexer_overlap(process_group, device)
     return _OVERLAP_STREAMS[key]
+
+
+def _warmup_indexer_overlap(process_group, device):
+    # Called only from rank-uniform prepare, never lazily inside forward.
+    key = _comm_key(process_group, device)
+    if key in _INDEXER_OVERLAP_STREAMS:
+        return
+    _get_comm(process_group, device, independent="indexer")
+    stream = torch.cuda.Stream(device=device, priority=-1)
+    side = None
+    if _TORCH_SYMM_GATHER:
+        from rtp_llm.models_py.distributed.symm_mem import (
+            TorchSymmMemCommunicator,
+            get_symm_mem_communicator,
+        )
+
+        main = get_symm_mem_communicator()
+        if main is not None and main.group is process_group and not main.disabled:
+            side = TorchSymmMemCommunicator(process_group, device)
+            if side.disabled:
+                side = None
+            else:
+                side._owner_stream = stream.cuda_stream
+    _INDEXER_OVERLAP_STREAMS[key] = stream
+    _INDEXER_OVERLAP_SYMM_COMMS[key] = side
+
+
+def indexer_overlap_stream(group, device):
+    if not enabled() or torch.cuda.is_current_stream_capturing():
+        return None
+    return _INDEXER_OVERLAP_STREAMS.get(
+        _comm_key(_resolve_process_group(group), device)
+    )
+
+
+def _on_indexer_overlap_stream(process_group, device):
+    stream = _INDEXER_OVERLAP_STREAMS.get(_comm_key(process_group, device))
+    return (
+        stream is not None
+        and stream.cuda_stream == torch.cuda.current_stream(device).cuda_stream
+    )
+
+
+def _indexer_overlap_all_gather(input, process_group):
+    key = _comm_key(process_group, input.device)
+    side = _INDEXER_OVERLAP_SYMM_COMMS.get(key)
+    if side is not None:
+        output = _try_torch_symm_all_gather(input, process_group, communicator=side)
+        if output is not None:
+            return output
+    output = torch.empty(
+        (_world_size(process_group) * input.size(0), *input.shape[1:]),
+        dtype=input.dtype,
+        device=input.device,
+    )
+    _validate_all_gather(output, input, process_group)
+    lib, comm = _INDEXER_OVERLAP_COMMS[key]
+    lib.all_gather(
+        input.data_ptr(),
+        output.data_ptr(),
+        input.numel(),
+        input.dtype,
+        comm,
+        torch.cuda.current_stream(input.device).cuda_stream,
+    )
+    return output
 
 
 class _RegisteredKvBuffers:
@@ -386,7 +471,10 @@ def registered_kv_overlap_buffers(rows, width, dtype, device, group):
     the persistent history stream. Crossing a power-of-two capacity boundary
     synchronizes the owner and releases its old pool; steady reuse does neither.
     """
-    if os.environ.get("RTP_LLM_CP_KV_REGISTERED", "1") != "1" or rows == 0:
+    if (
+        prefill_optimization_setting("RTP_LLM_CP_KV_REGISTERED", "1") != "1"
+        or rows == 0
+    ):
         return None
     process_group = _resolve_process_group(group)
     comm_key = _comm_key(process_group, device)
@@ -420,7 +508,7 @@ def _registered_indexer_all_gather(input, group, role):
     allocation path. The direct communicator is warmed with layered prefill.
     """
     if (
-        os.environ.get("RTP_LLM_CP_INDEXER_REGISTERED", "0") != "1"
+        prefill_optimization_setting("RTP_LLM_CP_INDEXER_REGISTERED", "0") != "1"
         or role not in ("indexer_k_quant", "indexer_k_packed")
         or input.numel() == 0
         or torch.cuda.is_current_stream_capturing()
@@ -428,7 +516,8 @@ def _registered_indexer_all_gather(input, group, role):
         return None
     process_group = _resolve_process_group(group)
     comm_key = _comm_key(process_group, input.device)
-    entry = _COMMS.get(comm_key)
+    on_side = _on_indexer_overlap_stream(process_group, input.device)
+    entry = (_INDEXER_OVERLAP_COMMS if on_side else _COMMS).get(comm_key)
     if entry is None:
         return None
     lib, comm = entry
@@ -437,7 +526,12 @@ def _registered_indexer_all_gather(input, group, role):
     if input.dim() != 2 or not input.is_contiguous() or input.element_size() != 1:
         return None
     stream = torch.cuda.current_stream(input.device)
-    key = (*comm_key, role, input.size(1), input.dtype)
+    key = (
+        *comm_key,
+        role + "@overlap" if on_side else role,
+        input.size(1),
+        input.dtype,
+    )
     cached = _INDEXER_BUFFERS.get(key)
     buffers = None
     if cached is not None:
@@ -523,6 +617,9 @@ def destroy() -> None:
     """Release symmetric windows and direct communicators before PG teardown."""
     global _LIB
 
+    for stream in _INDEXER_OVERLAP_STREAMS.values():
+        stream.synchronize()
+    _INDEXER_OVERLAP_SYMM_COMMS.clear()
     for key, side in _OVERLAP_SYMM_COMMS.items():
         if side is not None:
             _OVERLAP_STREAMS[key].synchronize()
@@ -548,7 +645,11 @@ def destroy() -> None:
                 "Failed to deregister GLM5 pynccl symmetric window: %s", error
             )
 
-    for lib, comm in [*_COMMS.values(), *_OVERLAP_COMMS.values()]:
+    for lib, comm in [
+        *_COMMS.values(),
+        *_OVERLAP_COMMS.values(),
+        *_INDEXER_OVERLAP_COMMS.values(),
+    ]:
         try:
             lib.destroy_comm(comm)
         except RuntimeError as error:
@@ -567,6 +668,8 @@ def destroy() -> None:
     _COMMS.clear()
     _OVERLAP_COMMS.clear()
     _OVERLAP_STREAMS.clear()
+    _INDEXER_OVERLAP_COMMS.clear()
+    _INDEXER_OVERLAP_STREAMS.clear()
     _OVERLAP_BUFFERS.clear()
     _INDEXER_BUFFERS.clear()
     _WORLD_SIZES.clear()
@@ -895,6 +998,12 @@ def all_gather(
         )
 
     process_group = _resolve_process_group(group)
+    if (
+        role is not None
+        and role.startswith("indexer_")
+        and _on_indexer_overlap_stream(process_group, input.device)
+    ):
+        return _indexer_overlap_all_gather(input, process_group)
     gathered = _try_torch_symm_all_gather(input, process_group)
     if gathered is not None:
         return gathered
@@ -928,3 +1037,249 @@ def all_gather(
     assert gather_stream is not None
     _pynccl_symm_all_gather(output, input, gather_stream, process_group)
     return output
+
+
+# Compatibility implementation from 70f1ecde04. Selected once at import.
+if not PREFILL_OPTIMIZATIONS_ENABLED:
+
+    def _baseline__get_comm(
+        process_group, device: torch.device, *, independent: bool = False
+    ):
+        """Collectively create and cache the direct NCCL communicator at startup."""
+        global _LIB
+
+        key = _comm_key(process_group, device)
+        cache = _OVERLAP_COMMS if independent else _COMMS
+        cached = cache.get(key)
+        if cached is not None:
+            return cached
+
+        resolved_device = torch.device("cuda", key[1])
+        with torch.cuda.device(resolved_device):
+            if torch.cuda.is_current_stream_capturing():
+                raise RuntimeError(
+                    "GLM5 pynccl communicator must be initialized before CUDA graph capture"
+                )
+            if _LIB is None:
+                _LIB = _NCCLLib()
+            comm = _LIB.make_comm(process_group, resolved_device)
+        _WORLD_SIZES[process_group] = dist.get_world_size(process_group)
+        cached = (_LIB, comm)
+        cache[key] = cached
+        return cached
+
+    _get_comm = _baseline__get_comm
+
+    def _baseline_warmup_kv_overlap(group: Any) -> torch.cuda.Stream:
+        """Return a persistent stream with a communicator independent of Indexer.
+
+        FMHA wrappers are recreated for each forward. Reuse the stream as well as
+        the communicator: CUDA allocator pools are stream-specific, so rotating
+        streams strands multi-GiB history buffers and triggers cache reclamation.
+        """
+        process_group = _resolve_process_group(group)
+        device = torch.device("cuda", torch.cuda.current_device())
+        _get_comm(process_group, device, independent=True)
+        if prefill_optimization_setting("RTP_LLM_CP_INDEXER_REGISTERED", "0") == "1":
+            _get_comm(process_group, device)
+        key = _comm_key(process_group, device)
+        if key not in _OVERLAP_STREAMS:
+            _OVERLAP_STREAMS[key] = torch.cuda.Stream(device=device)
+        return _OVERLAP_STREAMS[key]
+
+    warmup_kv_overlap = _baseline_warmup_kv_overlap
+
+    def _baseline__registered_indexer_all_gather(input, group, role):
+        """Reuse both registered endpoints for eager FP8 Indexer communication.
+
+        Its consumers copy/assemble the result on the same stream before the next
+        layer overwrites it. Other streams and graph capture keep their normal
+        allocation path. The direct communicator is warmed with layered prefill.
+        """
+        if (
+            prefill_optimization_setting("RTP_LLM_CP_INDEXER_REGISTERED", "0") != "1"
+            or role not in ("indexer_k_quant", "indexer_k_packed")
+            or input.numel() == 0
+            or torch.cuda.is_current_stream_capturing()
+        ):
+            return None
+        process_group = _resolve_process_group(group)
+        comm_key = _comm_key(process_group, input.device)
+        entry = _COMMS.get(comm_key)
+        if entry is None:
+            return None
+        lib, comm = entry
+        if not lib._has_symm or not lib._has_window_deregister:
+            return None
+        if input.dim() != 2 or not input.is_contiguous() or input.element_size() != 1:
+            return None
+        stream = torch.cuda.current_stream(input.device)
+        key = (*comm_key, role, input.size(1), input.dtype)
+        cached = _INDEXER_BUFFERS.get(key)
+        buffers = None
+        if cached is not None:
+            owner, buffers = cached
+            if owner.cuda_stream != stream.cuda_stream:
+                return None
+            if buffers.rows < input.size(0):
+                owner.synchronize()
+                buffers.close()
+                del _INDEXER_BUFFERS[key]
+                buffers = None
+        if buffers is None:
+            buffers = _RegisteredKvBuffers(
+                process_group,
+                input.device,
+                input.size(0),
+                input.size(1),
+                input.dtype,
+                lib,
+                comm,
+            )
+            _INDEXER_BUFFERS[key] = (stream, buffers)
+        local = buffers.local[: input.size(0)]
+        output = buffers.gathered[: input.size(0) * _world_size(process_group)]
+        local.copy_(input)
+        lib.all_gather(
+            local.data_ptr(),
+            output.data_ptr(),
+            input.numel(),
+            input.dtype,
+            comm,
+            stream.cuda_stream,
+        )
+        return output
+
+    _registered_indexer_all_gather = _baseline__registered_indexer_all_gather
+
+    def _baseline_all_gather_kv_overlap(
+        input: torch.Tensor,
+        group: Any,
+        *,
+        output: torch.Tensor | None = None,
+        **_kwargs,
+    ) -> torch.Tensor:
+        """Enqueue history-KV communication on the caller's stream, without a CPU wait."""
+        process_group = _resolve_process_group(group)
+        lib, comm = _OVERLAP_COMMS[_comm_key(process_group, input.device)]
+        if output is None:
+            output = torch.empty(
+                (_WORLD_SIZES[process_group] * input.size(0), *input.shape[1:]),
+                dtype=input.dtype,
+                device=input.device,
+            )
+        _validate_all_gather(output, input, process_group)
+        lib.all_gather(
+            input.data_ptr(),
+            output.data_ptr(),
+            input.numel(),
+            input.dtype,
+            comm,
+            torch.cuda.current_stream(input.device).cuda_stream,
+        )
+        return output
+
+    all_gather_kv_overlap = _baseline_all_gather_kv_overlap
+
+    def _baseline_destroy() -> None:
+        """Release symmetric windows and direct communicators before PG teardown."""
+        global _LIB
+
+        for stream, buffers in _INDEXER_BUFFERS.values():
+            stream.synchronize()
+            buffers.close()
+
+        for key, buffers in _OVERLAP_BUFFERS.items():
+            _OVERLAP_STREAMS[key[:2]].synchronize()
+            buffers.close()
+
+        for window_key, window in list(_SYMM_WINDOWS.items()):
+            comm_entry = _COMMS.get(window_key[:2])
+            if comm_entry is None:
+                continue
+            lib, comm = comm_entry
+            try:
+                lib.window_deregister(comm, window)
+            except RuntimeError as error:
+                logging.warning(
+                    "Failed to deregister GLM5 pynccl symmetric window: %s", error
+                )
+
+        for lib, comm in [*_COMMS.values(), *_OVERLAP_COMMS.values()]:
+            try:
+                lib.destroy_comm(comm)
+            except RuntimeError as error:
+                logging.warning("Failed to destroy GLM5 pynccl communicator: %s", error)
+
+        # Keep registered allocations alive until their communicator has been
+        # destroyed, including on NCCL builds without an explicit deregister API.
+        _SYMM_VIEWS.clear()
+        _SYMM_BASES.clear()
+        _SYMM_WINDOWS.clear()
+        _SYMM_CAPACITY_NBYTES.clear()
+        _SYMM_ROLE_STREAMS.clear()
+        _SYMM_INIT_DONE.clear()
+        _SYMM_POOLS.clear()
+        _SYMM_POOL_FAILED.clear()
+        _COMMS.clear()
+        _OVERLAP_COMMS.clear()
+        _OVERLAP_STREAMS.clear()
+        _OVERLAP_BUFFERS.clear()
+        _INDEXER_BUFFERS.clear()
+        _WORLD_SIZES.clear()
+        _LIB = None
+
+    destroy = _baseline_destroy
+
+    def _baseline_all_gather(
+        input: torch.Tensor,
+        group: Any = None,
+        *,
+        role: str | None = None,
+    ) -> torch.Tensor:
+        """GLM5 dispatcher: symmetric window, ordinary pynccl, then C10D."""
+        registered = _registered_indexer_all_gather(input, group, role)
+        if registered is not None:
+            return registered
+        if not enabled():
+            return _torch_all_gather(input, group=group)
+        if input.dim() == 0:
+            raise ValueError(
+                "GLM5 CP AllGather expects a tensor with at least one dimension"
+            )
+
+        process_group = _resolve_process_group(group)
+        world_size = _world_size(process_group)
+        output_shape = (world_size * input.shape[0], *input.shape[1:])
+        output = _symm_output(
+            role,
+            output_shape,
+            input.dtype,
+            input.device,
+            process_group,
+        )
+        gather_stream = None
+        if output is not None:
+            gather_stream = torch.cuda.current_stream(input.device)
+            if not _symm_stream_allowed(
+                role, gather_stream, process_group, input.device
+            ):
+                # A separate stream could still be reading the persistent role
+                # buffer. Use an ordinary output instead of adding hot-path events.
+                output = None
+        if output is None:
+            output = torch.empty(
+                output_shape,
+                dtype=input.dtype,
+                device=input.device,
+            )
+            all_gather_into_tensor(output, input, group=process_group)
+            return output
+
+        if _PYNCCL_VALIDATE:
+            _validate_all_gather(output, input, process_group)
+        assert gather_stream is not None
+        _pynccl_symm_all_gather(output, input, gather_stream, process_group)
+        return output
+
+    all_gather = _baseline_all_gather

@@ -11,6 +11,7 @@ from typing import Dict, List, Optional, Union
 import torch
 import torch.distributed
 
+from rtp_llm.config.prefill_optimization import PREFILL_OPTIMIZATIONS_ENABLED
 from rtp_llm.ops import NcclCommConfig, ParallelismConfig
 
 # ParallelMode enum values matching C++ rtp_llm::ParallelMode in OpData.h
@@ -825,3 +826,274 @@ __all__ = [
     "all_gather",
     "barrier",
 ]
+
+# Compatibility implementation from 70f1ecde04. Selected once at import.
+if not PREFILL_OPTIMIZATIONS_ENABLED:
+
+    def _baseline__register_process_groups_to_cpp():
+        """Register Python comm op callbacks for C++ to call back into."""
+        try:
+            import librtp_compute_ops
+
+            if not hasattr(librtp_compute_ops, "register_comm_ops"):
+                logging.debug(
+                    "register_comm_ops not available, skip C++ comm ops registration"
+                )
+                return
+        except ImportError:
+            logging.debug(
+                "librtp_compute_ops not available, skip C++ comm ops registration"
+            )
+            return
+
+        # Build mode -> process_group mapping (int mode -> ProcessGroup)
+        mode_to_group: Dict[int, torch.distributed.ProcessGroup] = {}
+        registered_modes: set = set()
+
+        for group_key, pg in _group_map.items():
+            if group_key == Group.DP_AND_TP:
+                if _CPP_PARALLEL_MODE_DP_AND_TP not in registered_modes:
+                    mode_to_group[_CPP_PARALLEL_MODE_DP_AND_TP] = pg
+                    registered_modes.add(_CPP_PARALLEL_MODE_DP_AND_TP)
+            elif isinstance(group_key, str):
+                if group_key.startswith(Group.TP.name):
+                    if _parallelism_config is not None:
+                        dp_rank = (
+                            torch.distributed.get_rank() // _parallelism_config.tp_size
+                        )
+                        expected_key = Group.TP.name + str(dp_rank)
+                        if (
+                            group_key == expected_key
+                            and _CPP_PARALLEL_MODE_TP not in registered_modes
+                        ):
+                            mode_to_group[_CPP_PARALLEL_MODE_TP] = pg
+                            registered_modes.add(_CPP_PARALLEL_MODE_TP)
+                elif group_key.startswith(Group.DP.name):
+                    if _parallelism_config is not None:
+                        tp_rank = (
+                            torch.distributed.get_rank() % _parallelism_config.tp_size
+                        )
+                        expected_key = Group.DP.name + str(tp_rank)
+                        if (
+                            group_key == expected_key
+                            and _CPP_PARALLEL_MODE_DP not in registered_modes
+                        ):
+                            mode_to_group[_CPP_PARALLEL_MODE_DP] = pg
+                            registered_modes.add(_CPP_PARALLEL_MODE_DP)
+
+        # If world_size == tp_size, WORLD is also TP group.
+        if (
+            _parallelism_config is not None
+            and _parallelism_config.tp_size > 1
+            and _parallelism_config.world_size == _parallelism_config.tp_size
+            and _CPP_PARALLEL_MODE_TP not in registered_modes
+        ):
+            pg_world = _group_map.get(Group.DP_AND_TP)
+            if pg_world is not None:
+                mode_to_group[_CPP_PARALLEL_MODE_TP] = pg_world
+
+        # NOTE: These callbacks are NOT thin wrappers around the module-level broadcast()/
+        # all_reduce()/all_gather() because the C++ calling convention differs significantly:
+        #   - C++ uses int mode (ParallelMode enum ordinal) instead of Group enum
+        #   - execBroadcast passes multiple tensors + CPU tensors needing GPU promotion
+        #   - execAllReduce supports dest tensor + multiple ReduceOp types
+        #   - execAllGather writes into pre-allocated recv_buffers with inplace mode
+        # The module-level functions have different signatures and semantics (e.g. all_gather
+        # allocates a new tensor), so we implement the C++ contract directly here.
+
+        def _ensure_cuda(t: torch.Tensor, device_id: int):
+            """Move CPU tensor to CUDA if needed (NCCL requires CUDA tensors)."""
+            if t.is_cuda:
+                return t, False
+            return t.to(torch.device("cuda", device_id)), True
+
+        def cpp_broadcast(tensors: List[torch.Tensor], root: int, mode: int) -> None:
+            """Broadcast tensors from root rank to all ranks in the group.
+
+            Args:
+                tensors: Tensors to broadcast, each is broadcast in-place from root.
+                root: Source rank that holds the data.
+                mode: ParallelMode int (0=TP, 1=DP, 2=DP_AND_TP) selecting process group.
+            """
+            pg = mode_to_group.get(mode)
+            if pg is None or pg.size() < 2:
+                return
+            device_id = torch.cuda.current_device()
+            for t in tensors:
+                gpu_t, was_cpu = _ensure_cuda(t, device_id)
+                torch.distributed.broadcast(gpu_t, root, group=pg)
+                if was_cpu:
+                    t.copy_(gpu_t)
+
+        _REDUCE_OPS = {
+            0: torch.distributed.ReduceOp.SUM,
+            1: torch.distributed.ReduceOp.PRODUCT,
+            2: torch.distributed.ReduceOp.MAX,
+            3: torch.distributed.ReduceOp.MIN,
+            4: torch.distributed.ReduceOp.AVG,
+        }
+
+        def cpp_allreduce(
+            tensor: torch.Tensor, op: int, mode: int, dest: Optional[torch.Tensor]
+        ) -> torch.Tensor:
+            """All-reduce a tensor across ranks in the group.
+
+            Args:
+                tensor: Input tensor to reduce.
+                op: ReduceOp int (0=SUM, 1=PROD, 2=MAX, 3=MIN, 4=AVG).
+                mode: ParallelMode int (0=TP, 1=DP, 2=DP_AND_TP) selecting process group.
+                dest: If not None, result is written here instead of reducing in-place on tensor.
+            Returns:
+                The reduced tensor (dest if provided, otherwise tensor).
+            """
+            pg = mode_to_group.get(mode)
+            if pg is None or pg.size() < 2:
+                return tensor if dest is None else tensor
+            target = dest if dest is not None else tensor
+            if dest is not None:
+                target.copy_(tensor)
+            device_id = torch.cuda.current_device()
+            gpu_t, was_cpu = _ensure_cuda(target, device_id)
+            torch.distributed.all_reduce(
+                gpu_t, op=_REDUCE_OPS.get(op, torch.distributed.ReduceOp.SUM), group=pg
+            )
+            if was_cpu:
+                target.copy_(gpu_t)
+            return target
+
+        def cpp_allgather(
+            recv_buffers: List[torch.Tensor],
+            mode: int,
+            send_buffers: List[torch.Tensor],
+            inplace: bool,
+        ) -> None:
+            """All-gather tensors from all ranks into recv_buffers.
+
+            Args:
+                recv_buffers: Output tensors, each of size [world_size * per_rank_numel].
+                mode: ParallelMode int (0=TP, 1=DP, 2=DP_AND_TP) selecting process group.
+                send_buffers: Per-rank input tensors (used when inplace=False).
+                inplace: If True, each rank's send data is extracted from its slice in recv_buffers;
+                         if False, send data comes from send_buffers.
+            """
+            pg = mode_to_group.get(mode)
+            if pg is None or pg.size() < 2:
+                return
+            world_size = pg.size()
+            device_id: Optional[int] = None
+            rank = pg.rank() if inplace else 0
+            for i, recv_buf in enumerate(recv_buffers):
+                recv_on_cpu = not recv_buf.is_cuda
+                data_num = recv_buf.numel() // world_size
+                if not inplace:
+                    send_tensor = send_buffers[i]
+                    if (
+                        not recv_on_cpu
+                        and send_tensor.is_cuda
+                        and recv_buf.is_contiguous()
+                        and send_tensor.is_contiguous()
+                    ):
+                        # Fast path for C++ explicit-send allgather: keep the 2D
+                        # output shape so c10d can launch directly without local
+                        # rank-slice packing or Python-side CUDA promotion.
+                        torch.distributed.all_gather_into_tensor(
+                            recv_buf, send_tensor, group=pg
+                        )
+                        continue
+
+                if device_id is None:
+                    device_id = torch.cuda.current_device()
+                gpu_recv = (
+                    recv_buf.to(torch.device("cuda", device_id))
+                    if recv_on_cpu
+                    else recv_buf
+                )
+                gpu_recv_flat = gpu_recv.reshape(-1)
+                if inplace:
+                    send_tensor = gpu_recv_flat.narrow(
+                        0, rank * data_num, data_num
+                    ).contiguous()
+                else:
+                    send_tensor, _ = _ensure_cuda(send_tensor, device_id)
+                torch.distributed.all_gather_into_tensor(
+                    gpu_recv_flat, send_tensor, group=pg
+                )
+                if recv_on_cpu:
+                    recv_buf.copy_(gpu_recv)
+
+        librtp_compute_ops.register_comm_ops(
+            cpp_broadcast, cpp_allreduce, cpp_allgather
+        )
+        logging.info(
+            f"Registered C++ comm ops callbacks (modes: {list(mode_to_group.keys())})"
+        )
+
+        # Bootstrap the UDS-backed intra-node TP broadcaster right after new_group.
+        # Lazy C++ init can race if a peer reaches tpSyncModelInputs before rank 0
+        # binds; cross-node TP keeps the NCCL fallback.
+        if (
+            _parallelism_config is not None
+            and _parallelism_config.tp_size > 1
+            and _parallelism_config.tp_size <= _parallelism_config.local_world_size
+            and hasattr(librtp_compute_ops, "init_cpu_tp_broadcaster")
+        ):
+            # Parent PID plus NCCL init port gives peers a shared per-init UDS path.
+            # dp_rank disambiguates DP groups on the same node.
+            base_path = _cpu_tp_broadcaster_base_path
+            assert base_path is not None
+            librtp_compute_ops.init_cpu_tp_broadcaster(
+                _parallelism_config.tp_rank,
+                _parallelism_config.tp_size,
+                base_path,
+            )
+            logging.info(
+                f"Initialized CpuTpBroadcaster (tp_rank={_parallelism_config.tp_rank}, "
+                f"tp_size={_parallelism_config.tp_size}, base_path={base_path})"
+            )
+
+    _register_process_groups_to_cpp = _baseline__register_process_groups_to_cpp
+
+    def _baseline_all_gather(tensor: torch.Tensor, group: Group) -> torch.Tensor:
+        """Gather tensors from all ranks in the group.
+
+        Args:
+            tensor: Tensor to gather from this rank
+            group: Process group to use
+
+        Returns:
+            Concatenated tensor containing all gathered tensors
+            (shape: [world_size * tensor.shape[0]] + list(tensor.shape)[1:])
+        """
+        rocm_rccl = _get_rocm_rccl()
+        if rocm_rccl is not None:
+            rocm_rccl.ensure_capture_comm_ready(group == Group.TP)
+            if rocm_rccl.should_use_capture_collectives(group == Group.TP):
+                return rocm_rccl.capture_all_gather(tensor)
+
+        if group == Group.TP:
+            symm_mem_comm = _get_symm_mem().get_symm_mem_communicator()
+            if (
+                symm_mem_comm is not None
+                and symm_mem_comm.should_torch_symm_mem_allgather(tensor)
+            ):
+                gathered = symm_mem_comm.all_gather(tensor)
+                if gathered is not None:
+                    world_size = gathered.shape[0]
+                    return gathered.view(
+                        [world_size * tensor.shape[0]] + list(tensor.shape)[1:]
+                    )
+
+        process_group = _get_group(group)
+        world_size = torch.distributed.get_world_size(process_group)
+
+        tensor_list = torch.zeros(
+            [world_size * tensor.shape[0]] + list(tensor.shape)[1:],
+            device=tensor.device,
+            dtype=tensor.dtype,
+        )
+        torch.distributed.all_gather_into_tensor(
+            tensor_list, tensor, group=process_group
+        )
+        return tensor_list
+
+    all_gather = _baseline_all_gather

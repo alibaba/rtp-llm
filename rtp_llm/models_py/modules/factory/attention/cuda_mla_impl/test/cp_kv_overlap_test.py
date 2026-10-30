@@ -124,7 +124,15 @@ class CpKvOverlapTest(unittest.TestCase):
                                 wrapper = self.make_wrapper()
                                 wrapper.overlap_kv = overlap
                                 wrapper._cross_layer_prefetch = None
+                                # prepare() may replace the op inputs with an owned
+                                # host-prefix snapshot. The wrapper's original input
+                                # must not decide whether this forward has history.
                                 wrapper.attn_inputs = SimpleNamespace(
+                                    prefix_lengths=torch.tensor(
+                                        [64, 64] if not any(prefixes) else [0, 0]
+                                    )
+                                )
+                                wrapper.fmha_impl.attn_inputs = SimpleNamespace(
                                     prefix_lengths=torch.tensor(prefixes)
                                 )
                                 cache = SimpleNamespace(
@@ -380,7 +388,7 @@ class CpKvOverlapTest(unittest.TestCase):
         op._attend_gather = Mock(side_effect=lambda q, *_a: q)
         wrapper.fmha_impl = op
 
-        def indexer(*_args):
+        def indexer(*_args, **_kwargs):
             # Exercise the real MlaAttention -> prepare_kv -> CP forward order.
             # A decoder consuming immediately at publication must see new KV.
             writer.assert_not_called()
@@ -390,6 +398,7 @@ class CpKvOverlapTest(unittest.TestCase):
             return None if empty_q else torch.zeros(2, 1, dtype=torch.int32)
 
         layer = SimpleNamespace(
+            indexer=None,
             q_lora_rank=2,
             kv_lora_rank=2,
             qk_rope_head_dim=2,
@@ -406,6 +415,9 @@ class CpKvOverlapTest(unittest.TestCase):
             o_proj=lambda x: x,
             parallelism_config=SimpleNamespace(get_attn_tp_size=lambda: 1),
             _run_sparse_indexer=indexer,
+        )
+        layer._forward_impl = lambda *a, **kw: MlaAttention._forward_impl(
+            layer, *a, **kw
         )
         with patch.object(
             torch.cuda, "current_stream", return_value=Mock()

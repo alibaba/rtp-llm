@@ -9,6 +9,53 @@ from rtp_llm.models_py.distributed import pynccl_cp
 
 
 class PyncclCPUnitTest(unittest.TestCase):
+
+    def test_indexer_aux_dispatch_never_uses_main_symmetric_scratch(self):
+        inp = torch.ones((2, 8), dtype=torch.bfloat16)
+        output = object()
+        group = object()
+        with patch.object(pynccl_cp, "_OPT_ENABLED", True), patch.object(
+            pynccl_cp, "_registered_indexer_all_gather", return_value=None
+        ), patch.object(
+            pynccl_cp, "_resolve_process_group", return_value=group
+        ), patch.object(
+            pynccl_cp, "_on_indexer_overlap_stream", return_value=True
+        ), patch.object(
+            pynccl_cp, "_indexer_overlap_all_gather", return_value=output
+        ) as side, patch.object(
+            pynccl_cp, "_try_torch_symm_all_gather"
+        ) as main:
+            self.assertIs(
+                pynccl_cp.all_gather(inp, group, role="indexer_k_bf16"), output
+            )
+        side.assert_called_once_with(inp, group)
+        main.assert_not_called()
+
+    def test_capture_does_not_select_indexer_overlap(self):
+        with patch.object(pynccl_cp, "_OPT_ENABLED", True), patch.object(
+            torch.cuda, "is_current_stream_capturing", return_value=True
+        ), patch.object(pynccl_cp, "_resolve_process_group") as resolve:
+            self.assertIsNone(
+                pynccl_cp.indexer_overlap_stream(object(), torch.device("cuda", 0))
+            )
+        resolve.assert_not_called()
+
+    def test_unprepared_indexer_stream_does_not_lazily_create_collectives(self):
+        group = object()
+        with patch.object(pynccl_cp, "_OPT_ENABLED", True), patch.object(
+            torch.cuda, "is_current_stream_capturing", return_value=False
+        ), patch.object(
+            pynccl_cp, "_resolve_process_group", return_value=group
+        ), patch.dict(
+            pynccl_cp._INDEXER_OVERLAP_STREAMS, {}, clear=True
+        ), patch.object(
+            pynccl_cp, "_get_comm"
+        ) as create:
+            self.assertIsNone(
+                pynccl_cp.indexer_overlap_stream(group, torch.device("cuda", 0))
+            )
+        create.assert_not_called()
+
     def test_all_gather_into_tensor_uses_torch_fallback_when_disabled(self):
         output = object()
         input_tensor = object()
@@ -19,9 +66,7 @@ class PyncclCPUnitTest(unittest.TestCase):
             pynccl_cp,
             "_resolve_process_group",
             return_value=process_group,
-        ), patch.object(
-            pynccl_cp.dist, "all_gather_into_tensor"
-        ) as torch_all_gather:
+        ), patch.object(pynccl_cp.dist, "all_gather_into_tensor") as torch_all_gather:
             pynccl_cp.all_gather_into_tensor(
                 output,
                 input_tensor,
@@ -165,9 +210,7 @@ class PyncclCPUnitTest(unittest.TestCase):
         first_lib.destroy_comm.assert_called_once_with(first_comm)
         second_lib.destroy_comm.assert_called_once_with(second_comm)
         first_lib.window_deregister.assert_called_once_with(first_comm, first_window)
-        second_lib.window_deregister.assert_called_once_with(
-            second_comm, second_window
-        )
+        second_lib.window_deregister.assert_called_once_with(second_comm, second_window)
 
     def test_master_switch_controls_optimization_stack(self):
         with patch.object(pynccl_cp, "_OPT_ENABLED", True):
@@ -184,9 +227,7 @@ class PyncclCPUnitTest(unittest.TestCase):
 
         with patch.object(pynccl_cp, "_OPT_ENABLED", True), patch.object(
             pynccl_cp, "_resolve_process_group", return_value=process_group
-        ), patch.object(
-            pynccl_cp, "_world_size", return_value=4
-        ), patch.object(
+        ), patch.object(pynccl_cp, "_world_size", return_value=4), patch.object(
             pynccl_cp, "_symm_output", return_value=output
         ) as symm_output, patch.object(
             pynccl_cp.torch.cuda, "current_stream", return_value=stream

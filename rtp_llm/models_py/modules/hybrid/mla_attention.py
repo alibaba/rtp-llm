@@ -4,6 +4,7 @@ from typing import Any, Dict, Optional, Tuple, Union
 import torch
 from torch import nn
 
+from rtp_llm.config.prefill_optimization import PREFILL_OPTIMIZATIONS_ENABLED
 from rtp_llm.device.device_type import DeviceType, get_device_type
 from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce
 from rtp_llm.models_py.modules import RMSNorm
@@ -178,6 +179,7 @@ class MlaAttention(nn.Module):
         q_c_scale: Optional[torch.Tensor] = None,
         prev_topk_indices: Optional[torch.Tensor] = None,
         force_reuse_topk_indices: bool = False,
+        prepared_cp_k=None,
     ) -> Optional[torch.Tensor]:
         if self.reuse_topk_indices or force_reuse_topk_indices:
             if not fmha_impl.is_sparse():
@@ -204,6 +206,7 @@ class MlaAttention(nn.Module):
             x_scale=x_scale,
             q_c_fp8=q_c_fp8,
             q_c_scale=q_c_scale,
+            **({"prepared_cp_k": prepared_cp_k} if prepared_cp_k is not None else {}),
         )
 
     def forward(
@@ -216,6 +219,49 @@ class MlaAttention(nn.Module):
         prev_topk_indices: Optional[torch.Tensor] = None,
         force_reuse_topk_indices: bool = False,
         return_topk: bool = False,
+    ) -> Union[torch.Tensor, Tuple[torch.Tensor, Optional[torch.Tensor]]]:
+        prepare = getattr(self.indexer, "prefetch_cp_k", None)
+        context = (
+            prepare(
+                hidden_states,
+                kv_cache,
+                fmha_impl.attn_inputs,
+                fmha_impl.cp_params,
+                x_fp8,
+                x_scale,
+            )
+            if (
+                prepare is not None
+                and not self.reuse_topk_indices
+                and not force_reuse_topk_indices
+                and fmha_impl.is_sparse()
+            )
+            else nullcontext(None)
+        )
+        with context as prepared_cp_k:
+            return self._forward_impl(
+                hidden_states,
+                fmha_impl,
+                kv_cache,
+                x_fp8,
+                x_scale,
+                prev_topk_indices,
+                force_reuse_topk_indices,
+                return_topk,
+                prepared_cp_k=prepared_cp_k,
+            )
+
+    def _forward_impl(
+        self,
+        hidden_states: torch.Tensor,
+        fmha_impl: MlaImplBase,
+        kv_cache: Optional[LayerKVCache] = None,
+        x_fp8: Optional[torch.Tensor] = None,
+        x_scale: Optional[torch.Tensor] = None,
+        prev_topk_indices: Optional[torch.Tensor] = None,
+        force_reuse_topk_indices: bool = False,
+        return_topk: bool = False,
+        prepared_cp_k=None,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, Optional[torch.Tensor]]]:
         input_shape = hidden_states.shape[:-1]
         early_prefetch = self.q_lora_rank > 0 and self.layer_idx in getattr(
@@ -276,6 +322,7 @@ class MlaAttention(nn.Module):
                     q_c_scale,
                     prev_topk_indices,
                     force_reuse_topk_indices,
+                    prepared_cp_k=prepared_cp_k,
                 )
                 fmha_impl.prefetch_kv(self.layer_idx, topk_indices)
             defer_cross_layer_kv = (
@@ -403,6 +450,7 @@ class MlaAttention(nn.Module):
                     q_c_scale,
                     prev_topk_indices,
                     force_reuse_topk_indices,
+                    prepared_cp_k=prepared_cp_k,
                 )
             del q_c, q_c_fp8, q_c_scale
             if prepared_kv is None:
@@ -436,3 +484,228 @@ class MlaAttention(nn.Module):
         if return_topk:
             return attn_output, topk_indices
         return attn_output
+
+    # Compatibility implementation from 70f1ecde04. Selected once at import.
+    if not PREFILL_OPTIMIZATIONS_ENABLED:
+
+        def _baseline__run_sparse_indexer(
+            self,
+            hidden_states: torch.Tensor,
+            q_c: Optional[torch.Tensor],
+            q_view: Optional[torch.Tensor],
+            kv_cache: Optional[LayerKVCache],
+            fmha_impl: MlaImplBase,
+            x_fp8: Optional[torch.Tensor] = None,
+            x_scale: Optional[torch.Tensor] = None,
+            q_c_fp8: Optional[torch.Tensor] = None,
+            q_c_scale: Optional[torch.Tensor] = None,
+            prev_topk_indices: Optional[torch.Tensor] = None,
+            force_reuse_topk_indices: bool = False,
+        ) -> Optional[torch.Tensor]:
+            if self.reuse_topk_indices or force_reuse_topk_indices:
+                if not fmha_impl.is_sparse():
+                    return None
+                if prev_topk_indices is None:
+                    raise RuntimeError(
+                        f"DSA shared layer {self.layer_idx} needs previous top-k "
+                        "indices, but none were provided"
+                    )
+                return prev_topk_indices
+
+            if self.indexer is None:
+                return None
+            q_for_indexer = q_c if self.q_lora_rank > 0 else q_view
+            return self.indexer(
+                hidden_states,
+                q_for_indexer,
+                kv_cache,
+                fmha_impl.fmha_params,
+                fmha_impl.attn_inputs,
+                use_fast_path=not fmha_impl.is_sparse(),
+                cp_params=fmha_impl.cp_params,
+                x_fp8=x_fp8,
+                x_scale=x_scale,
+                q_c_fp8=q_c_fp8,
+                q_c_scale=q_c_scale,
+            )
+
+        _run_sparse_indexer = _baseline__run_sparse_indexer
+
+        def _baseline_forward(
+            self,
+            hidden_states: torch.Tensor,
+            fmha_impl: MlaImplBase,
+            kv_cache: Optional[LayerKVCache] = None,
+            x_fp8: Optional[torch.Tensor] = None,
+            x_scale: Optional[torch.Tensor] = None,
+            prev_topk_indices: Optional[torch.Tensor] = None,
+            force_reuse_topk_indices: bool = False,
+            return_topk: bool = False,
+        ) -> Union[torch.Tensor, Tuple[torch.Tensor, Optional[torch.Tensor]]]:
+            input_shape = hidden_states.shape[:-1]
+            early_prefetch = self.q_lora_rank > 0 and self.layer_idx in getattr(
+                fmha_impl, "pinned_mla_groups", {}
+            )
+            q_c = None
+            q_c_fp8 = None
+            q_c_scale = None
+            if self.q_lora_rank > 0:
+                if x_fp8 is not None and x_scale is not None:
+                    fused_qkv = self.fused_qkv_a_proj(x_fp8, input_scales=x_scale)
+                else:
+                    fused_qkv = self.fused_qkv_a_proj(hidden_states)
+                kv_offset = self.q_lora_rank
+                q, compressed_kv = torch.split(
+                    fused_qkv,
+                    [
+                        kv_offset,
+                        self.kv_lora_rank + self.qk_rope_head_dim,
+                    ],
+                    dim=-1,
+                )
+                # F1a/F1b: fused strided RMSNorm (skip .contiguous() copy). When
+                # q_b_proj is fp8 we additionally emit fp8+scale (F1b dual output)
+                # so q_b_proj can use input_scales= and skip its internal quant.
+                if self._fuse_q_a_norm_mode == "fp8_dual":
+                    q_c, q_c_fp8, q_c_scale = (
+                        fused_strided_rmsnorm_per_token_fp8_quant_with_bf16_output(
+                            q,
+                            self.q_a_layernorm.weight.data,
+                            self.q_a_layernorm.variance_epsilon,
+                            group_size=128,
+                            scale_ue8m0=self.q_b_proj.scale_ue8m0,
+                        )
+                    )
+                elif self._fuse_q_a_norm_mode == "bf16":
+                    q_c = fused_strided_rmsnorm(
+                        q,
+                        self.q_a_layernorm.weight.data,
+                        self.q_a_layernorm.variance_epsilon,
+                    )
+                else:
+                    q_c = self.q_a_layernorm(q.contiguous())
+                if early_prefetch:
+                    # Indexer consumes q_c, so Q expansion and KV normalization can
+                    # run while the selected historical KV is being fetched.
+                    topk_indices = self._run_sparse_indexer(
+                        hidden_states,
+                        q_c,
+                        None,
+                        kv_cache,
+                        fmha_impl,
+                        x_fp8,
+                        x_scale,
+                        q_c_fp8,
+                        q_c_scale,
+                        prev_topk_indices,
+                        force_reuse_topk_indices,
+                    )
+                    fmha_impl.prefetch_kv(self.layer_idx, topk_indices)
+                q = (
+                    self.q_b_proj(q_c_fp8, input_scales=q_c_scale)
+                    if q_c_fp8 is not None
+                    else self.q_b_proj(q_c)
+                )
+            else:
+                if x_fp8 is not None and x_scale is not None:
+                    fused_qkv = self.fused_qkv_proj(x_fp8, input_scales=x_scale)
+                else:
+                    fused_qkv = self.fused_qkv_proj(hidden_states)
+                kv_offset = self.num_heads * self.attn_config.size_per_head
+                q, compressed_kv = torch.split(
+                    fused_qkv,
+                    [
+                        kv_offset,
+                        self.kv_lora_rank + self.qk_rope_head_dim,
+                    ],
+                    dim=-1,
+                )
+            q_view = q.reshape(-1, self.num_heads, self.q_head_dim)
+
+            compressed_kv, k_pe = torch.split(
+                compressed_kv, [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1
+            )
+
+            # F2: fused strided RMSNorm on compressed_kv (skip .contiguous() copy)
+            if self._fuse_kv_a_norm:
+                compressed_kv = fused_strided_rmsnorm(
+                    compressed_kv,
+                    self.kv_a_layernorm.weight.data,
+                    self.kv_a_layernorm.variance_epsilon,
+                )
+            else:
+                compressed_kv = self.kv_a_layernorm(compressed_kv.contiguous())
+
+            layered = getattr(fmha_impl, "layered_prefill_cache", None)
+            independent_prefetch = getattr(layered, "prefetch_before_indexer", None)
+            if independent_prefetch is not None:
+                independent_prefetch(self.layer_idx)
+
+            cache_context = (
+                layered.attention(self.layer_idx, fmha_impl, kv_cache)
+                if layered is not None
+                else nullcontext(kv_cache)
+            )
+            with ExitStack() as stack:
+                prepared_kv = None
+                # With Q-LoRA the Indexer reads q_c, so rotating q_view early is
+                # independent. Preserve the original ordering for other backends.
+                if self.q_lora_rank > 0 and getattr(fmha_impl, "overlap_kv", False):
+                    attention_cache = stack.enter_context(cache_context)
+                    prepared_kv = stack.enter_context(
+                        fmha_impl.prepare_kv(
+                            q_view,
+                            compressed_kv,
+                            k_pe,
+                            attention_cache,
+                            layer_id=self.layer_idx,
+                        )
+                    )
+                if not early_prefetch:
+                    topk_indices = self._run_sparse_indexer(
+                        hidden_states,
+                        q_c,
+                        q_view,
+                        kv_cache,
+                        fmha_impl,
+                        x_fp8,
+                        x_scale,
+                        q_c_fp8,
+                        q_c_scale,
+                        prev_topk_indices,
+                        force_reuse_topk_indices,
+                    )
+                del q_c, q_c_fp8, q_c_scale
+                if prepared_kv is None:
+                    attention_cache = stack.enter_context(cache_context)
+                attn_output = fmha_impl.forward(
+                    q_view,
+                    compressed_kv,
+                    k_pe,
+                    attention_cache,
+                    self.layer_idx,
+                    topk_indices,
+                    **({"kv_prefetched": True} if early_prefetch else {}),
+                    **({"prepared_kv": prepared_kv} if prepared_kv is not None else {}),
+                )
+
+            # The sparse-attention launch has consumed these projections. PyTorch's
+            # stream-aware allocator delays physical reuse until the launch is safe.
+            del q_view, compressed_kv, k_pe, fused_qkv, q, prepared_kv
+
+            if attn_output is not None:
+                attn_output = attn_output.reshape(*input_shape, -1).contiguous()
+            else:
+                attn_output = torch.zeros(
+                    (*input_shape, self.num_heads * self.v_head_dim),
+                    dtype=hidden_states.dtype,
+                    device=hidden_states.device,
+                )
+            attn_output = self.o_proj(attn_output)
+            if self.parallelism_config.get_attn_tp_size() > 1:
+                attn_output = all_reduce(attn_output, group=Group.TP)
+            if return_topk:
+                return attn_output, topk_indices
+            return attn_output
+
+        forward = _baseline_forward
