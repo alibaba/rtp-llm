@@ -450,6 +450,205 @@ def _register_identity_allreduce() -> None:
     _register_no_collectives(identity_allreduce)
 
 
+def _run_tp_sync_cache_rows_pending_rank(tp_rank: int, base_path: str, ready) -> None:
+    check = unittest.TestCase()
+
+    def broadcast(tensors, root, mode):
+        check.assertEqual((root, mode), (0, 0))
+        for tensor in tensors:
+            # CPU control data must use the real UDS broadcaster. GPU payload
+            # transport is outside this scheduling probe; initialize its receive
+            # buffer without copying any device data back to the host.
+            check.assertTrue(tensor.is_cuda)
+            if tp_rank != 0:
+                tensor.zero_()
+
+    def unexpected(*_args):
+        check.fail("cache input synchronization must only broadcast")
+
+    event = None
+    register_comm_ops(broadcast, unexpected, unexpected)
+    try:
+        init_cpu_tp_broadcaster(tp_rank, 2, base_path)
+        blocks = torch.arange(12, device="cuda", dtype=torch.int32).reshape(2, 2, 3)
+        types = torch.arange(2, device="cuda", dtype=torch.int32)
+        # Warm allocation and transport before queuing the probe. Both ranks
+        # must be ready, so process/CUDA startup cannot consume the sleep window.
+        _extension.run_tp_sync_cache_rows(tp_rank, ["a", "z"], blocks, blocks, types)
+        torch.cuda.synchronize()
+        ready.wait(timeout=30)
+        if tp_rank == 0:
+            event = torch.cuda.Event()
+            torch.cuda._sleep(2_000_000_000)
+            event.record()
+            check.assertFalse(
+                event.query(),
+                "pending-work probe completed before TP sync",
+            )
+        _extension.run_tp_sync_cache_rows(tp_rank, ["a", "z"], blocks, blocks, types)
+        if event is not None:
+            check.assertFalse(
+                event.query(),
+                "canonical cache metadata waited for queued GPU work",
+            )
+    finally:
+        try:
+            if event is not None:
+                event.synchronize()
+        finally:
+            try:
+                destroy_cpu_tp_broadcaster()
+            finally:
+                clear_comm_ops()
+
+
+class TpSyncCacheRowsTest(unittest.TestCase):
+    def _round_trip(self, tags, blocks, kernel, group_types):
+        # Producers supply canonical rows. Replay only transport; production
+        # tpSyncModelInputs must preserve the tensors without any row remap.
+        self.assertEqual(tags, sorted(tags))
+        frames = {"cpu": [], "cuda": []}
+        positions = {"cpu": 0, "cuda": 0}
+        receiving = False
+
+        def broadcast(tensors, root, _mode):
+            self.assertEqual(root, 0)
+            for tensor in tensors:
+                kind = "cuda" if tensor.is_cuda else "cpu"
+                if receiving:
+                    tensor.copy_(frames[kind][positions[kind]])
+                    positions[kind] += 1
+                else:
+                    frames[kind].append(tensor.clone())
+
+        def unexpected(*_args):
+            self.fail("cache input synchronization must only broadcast")
+
+        _extension.register_comm_ops(broadcast, unexpected, unexpected)
+        try:
+            with torch.profiler.profile(
+                activities=[torch.profiler.ProfilerActivity.CPU]
+            ) as profile:
+                root_result = _extension.run_tp_sync_cache_rows(
+                    0, tags, blocks, kernel, group_types
+                )
+            self.assertNotIn(
+                "aten::index_select", [event.name for event in profile.events()]
+            )
+            self.assertEqual(root_result["blocks"].data_ptr(), blocks.data_ptr())
+            self.assertEqual(root_result["kernel"].data_ptr(), kernel.data_ptr())
+            self.assertEqual(root_result["types"].data_ptr(), group_types.data_ptr())
+            receiving = True
+            positions = {"cpu": 0, "cuda": 0}
+            result = _extension.run_tp_sync_cache_rows(
+                1, tags, blocks, kernel, group_types
+            )
+            self.assertEqual(result["tags"], tags)
+            for key, source in (
+                ("blocks", blocks),
+                ("kernel", kernel),
+                ("types", group_types),
+            ):
+                if source.numel() == 0:
+                    self.assertTrue(result[key] is None or result[key].numel() == 0)
+                    continue
+                self.assertEqual(result[key].device, source.device)
+                torch.testing.assert_close(
+                    result[key].cpu(), source.cpu(), rtol=0, atol=0
+                )
+                if source.is_pinned():
+                    self.assertTrue(result[key].is_pinned())
+            self.assertEqual(
+                positions, {key: len(value) for key, value in frames.items()}
+            )
+        finally:
+            _extension.clear_comm_ops()
+
+    def test_cuda_group_order_and_noncontiguous_tables(self):
+        for groups, noncontiguous in ((2, False), (2, True), (65, False)):
+            with self.subTest(groups=groups, noncontiguous=noncontiguous):
+                tags = [f"g{i:03d}" for i in range(groups)]
+                blocks = torch.arange(groups * 2 * 3, device="cuda", dtype=torch.int32)
+                blocks = blocks.reshape(groups, 2, 3)
+                kernel = blocks + 1000
+                if noncontiguous:
+                    blocks = blocks.transpose(1, 2)
+                    kernel = kernel.transpose(1, 2)
+                types = torch.arange(groups, device="cuda", dtype=torch.int32)
+                self._round_trip(tags, blocks, kernel, types)
+
+    def test_identity_empty_and_pinned_cpu_tables(self):
+        for device, empty in (("cuda", False), ("cuda", True), ("cpu", False)):
+            with self.subTest(device=device, empty=empty):
+                tags = ["a", "z"]
+                width = 0 if empty else 3
+                blocks = torch.arange(2 * 2 * width, device=device, dtype=torch.int32)
+                blocks = blocks.reshape(2, 2, width)
+                kernel = blocks + 1000
+                types = torch.arange(2, device=device, dtype=torch.int32)
+                if device == "cpu":
+                    blocks = blocks.transpose(1, 2)
+                    kernel = kernel.transpose(1, 2)
+                    blocks, kernel, types = (
+                        value.pin_memory() for value in (blocks, kernel, types)
+                    )
+                self._round_trip(tags, blocks, kernel, types)
+
+    def test_identity_still_validates_group_shapes(self):
+        def unexpected(*_args):
+            self.fail("invalid cache group metadata must fail before broadcasting")
+
+        _extension.register_comm_ops(unexpected, unexpected, unexpected)
+        try:
+            types = torch.arange(2, device="cuda", dtype=torch.int32)
+            for shape, tags in (
+                ((3, 2, 1), ["a", "z"]),
+                ((2, 3), ["a", "z"]),
+                ((2, 2, 1), ["a", "a"]),
+                ((2, 2, 1), ["z", "a"]),
+            ):
+                with self.subTest(shape=shape, tags=tags):
+                    blocks = torch.zeros(shape, device="cuda", dtype=torch.int32)
+                    with self.assertRaises(RuntimeError):
+                        _extension.run_tp_sync_cache_rows(
+                            0, tags, blocks, blocks, types
+                        )
+        finally:
+            _extension.clear_comm_ops()
+
+    @unittest.skipIf(torch.version.hip is not None, "CUDA pending-work probe")
+    def test_canonical_cuda_metadata_does_not_wait_for_queued_gpu_work(self):
+        # Spawn avoids inheriting CUDA state. Real CPU TP transport keeps the
+        # fallback's deliberate device synchronization outside this probe.
+        context = multiprocessing.get_context("spawn")
+        ready = context.Barrier(2)
+        with tempfile.TemporaryDirectory(prefix="tp_cache_pending_") as directory:
+            processes = [
+                context.Process(
+                    target=_run_tp_sync_cache_rows_pending_rank,
+                    args=(tp_rank, os.path.join(directory, "broadcast"), ready),
+                )
+                for tp_rank in range(2)
+            ]
+            started = []
+            try:
+                for process in processes:
+                    process.start()
+                    started.append(process)
+                for tp_rank, process in enumerate(processes):
+                    process.join(timeout=30)
+                    self.assertFalse(process.is_alive(), f"TP rank {tp_rank} timed out")
+                    self.assertEqual(process.exitcode, 0, f"TP rank {tp_rank} failed")
+            finally:
+                for process in started:
+                    if process.is_alive():
+                        process.terminate()
+                    process.join(timeout=5)
+                    if process.is_alive():
+                        process.kill()
+                        process.join(timeout=5)
+
+
 class CacheStoreForwardModel:
     """Test model that replaces attention math but keeps the real cache-store call."""
 
@@ -543,6 +742,150 @@ class CacheStoreForwardModel:
     def forward_micro_batch(self, inputs: list[PyModelInputs]) -> list[PyModelOutputs]:
         self.micro_batch_calls += 1
         return [self._forward_one(model_inputs) for model_inputs in inputs]
+
+
+class K3RequestPaddingTest(unittest.TestCase):
+    def test_request_padding_keeps_complete_rows_and_null_cache(self):
+        import math
+
+        for tp in (4, 8):
+            for batch in (1, 2, 3, 7, 8, 31, 32, 63, 64):
+                for width, prefill, update in (
+                    (1, False, False),
+                    (4, False, False),
+                    (4, False, True),
+                    (3, True, False),
+                ):
+                    for grouped in (False, True):
+                        with self.subTest(
+                            tp=tp,
+                            batch=batch,
+                            width=width,
+                            prefill=prefill,
+                            update=update,
+                            grouped=grouped,
+                        ):
+                            result = run_scenario(
+                                CacheStoreForwardModel(),
+                                f"request_padding {tp} {batch} {width} {int(prefill)} {int(grouped)} {int(update)}",
+                            )
+                            logical_tokens = batch * width + int(prefill)
+                            unit = tp // math.gcd(tp, width)
+                            physical_batch = (batch + unit - 1) // unit * unit
+                            physical_tokens = physical_batch * width
+                            if prefill:
+                                physical_tokens = (logical_tokens + tp - 1) // tp * tp
+                                physical_batch = batch + int(
+                                    physical_tokens > logical_tokens
+                                )
+                            self.assertEqual(result["logical_requests"], batch)
+                            self.assertEqual(result["logical_tokens"], logical_tokens)
+                            self.assertEqual(result["tokens"].numel(), physical_tokens)
+                            self.assertEqual(
+                                result["input_lengths"].numel(), physical_batch
+                            )
+                            self.assertEqual(
+                                result["hidden"].shape, (physical_tokens, 2)
+                            )
+                            torch.testing.assert_close(
+                                result["tokens"][:logical_tokens].cpu(),
+                                torch.arange(logical_tokens, dtype=torch.int32),
+                                rtol=0,
+                                atol=0,
+                            )
+                            torch.testing.assert_close(
+                                result["positions"][:logical_tokens].cpu(),
+                                torch.arange(logical_tokens, dtype=torch.int32),
+                                rtol=0,
+                                atol=0,
+                            )
+                            self.assertFalse(
+                                result["tokens"][logical_tokens:].count_nonzero()
+                            )
+                            self.assertFalse(
+                                result["hidden"][logical_tokens:].count_nonzero()
+                            )
+                            self.assertFalse(
+                                result["positions"][logical_tokens:].count_nonzero()
+                            )
+                            self.assertEqual(result["output_indexes"].numel(), batch)
+                            torch.testing.assert_close(
+                                result["output_indexes"].cpu(),
+                                torch.arange(batch, dtype=torch.int32) * width
+                                + width
+                                - 1
+                                + int(prefill),
+                                rtol=0,
+                                atol=0,
+                            )
+                            torch.testing.assert_close(
+                                result["hidden"][:logical_tokens].cpu(),
+                                torch.arange(
+                                    logical_tokens * 2, dtype=torch.float32
+                                ).reshape(logical_tokens, 2),
+                                rtol=0,
+                                atol=0,
+                            )
+                            self.assertTrue((result["mask"] == 1).all())
+                            lengths = torch.full(
+                                (physical_batch,), width, dtype=torch.int32
+                            )
+                            if prefill:
+                                lengths[0] += 1
+                                if physical_batch > batch:
+                                    lengths[-1] = physical_tokens - logical_tokens
+                            torch.testing.assert_close(
+                                result["input_lengths"].cpu(), lengths, rtol=0, atol=0
+                            )
+                            for key, present in (
+                                ("prefix_lengths", prefill or width > 1),
+                                ("sequence_lengths", not prefill and width == 1),
+                            ):
+                                expected = (
+                                    torch.cat(
+                                        (
+                                            torch.full(
+                                                (batch,), 65535, dtype=torch.int32
+                                            ),
+                                            torch.zeros(
+                                                physical_batch - batch,
+                                                dtype=torch.int32,
+                                            ),
+                                        )
+                                    )
+                                    if present
+                                    else torch.empty(0, dtype=torch.int32)
+                                )
+                                torch.testing.assert_close(
+                                    result[key].cpu(), expected, rtol=0, atol=0
+                                )
+                            torch.testing.assert_close(
+                                result["sequence_lengths_plus_1"].cpu(),
+                                torch.cat(
+                                    (
+                                        torch.full((batch,), 65536, dtype=torch.int32),
+                                        torch.ones(
+                                            physical_batch - batch, dtype=torch.int32
+                                        ),
+                                    )
+                                ),
+                                rtol=0,
+                                atol=0,
+                            )
+                            for key in ("physical_table", "kernel_table"):
+                                table = result[key]
+                                self.assertEqual(table.shape[-2], physical_batch)
+                                self.assertFalse(
+                                    table.narrow(
+                                        table.ndim - 2, batch, physical_batch - batch
+                                    ).count_nonzero()
+                                )
+                            if not prefill:
+                                self.assertTrue(
+                                    (result["input_lengths"] == width).all()
+                                )
+                                if batch == 32 and width == 4:
+                                    self.assertEqual(physical_batch, 32)
 
 
 class DirtyGenerationPrefillCaptureModel:
@@ -811,13 +1154,7 @@ class TpSyncModelInputsIntegrationTest(unittest.TestCase):
             self.assertEqual(result["capture_hidden_states"], capture_hidden_states)
             self.assertEqual(result["skip_run"], skip_run)
             if "group_tags" in result:
-                tags = (
-                    []
-                    if skip_run
-                    else (
-                        ["linear", "full"] if tp_rank % 2 == 0 else ["full", "linear"]
-                    )
-                )
+                tags = [] if skip_run else ["full", "linear"]
                 self.assertEqual(result["group_tags"], tags)
                 if skip_run:
                     for name in ("physical", "kernel", "group_types", "copy_mapping"):
@@ -3620,6 +3957,139 @@ class CustomOutputPostLayersTest(unittest.TestCase):
                 result = self.run_case(handler, python_norm=False)
                 self.assertIsNone(result["custom_output"])
                 self.assertIn(message, result["custom_output_error"])
+
+
+class MtpDecodeForwardModel(SuccessfulGenerationPrefillCaptureModel):
+    def __init__(self, inspect_padding=False, inspect_metadata=False):
+        super().__init__()
+        self.forward_calls = 0
+        self.inspect_padding = inspect_padding
+        self.inspect_metadata = inspect_metadata
+        self.fail_next_prepare = False
+        if inspect_padding:
+            # The C++ constructor must capture SP geometry before creating
+            # its graph runner; toggling its test peer afterward is too late.
+            self.requires_sequence_parallel_padding = True
+
+    def prepare_fmha_impl(
+        self, inputs, is_cuda_graph=False, cuda_graph_selection_mode=None
+    ):
+        super().prepare_fmha_impl(inputs, is_cuda_graph, cuda_graph_selection_mode)
+        return self if self.inspect_metadata else None
+
+    def prepare_cuda_graph(self, _inputs):
+        if self.fail_next_prepare:
+            self.fail_next_prepare = False
+            raise RuntimeError("injected Q1 prepare failure")
+
+    def forward(self, inputs, fmha_impl=None):
+        self.forward_calls += 1
+        hidden = (
+            inputs.input_ids.unsqueeze(1) * 4 + torch.arange(4, device="cuda") + 1
+        ).to(torch.bfloat16)
+        if self.inspect_padding:
+            hidden = hidden + inputs.input_ids[-1].to(hidden.dtype)
+            if inputs.input_hiddens is not None and inputs.input_hiddens.numel():
+                hidden = hidden + inputs.input_hiddens
+                # A stale nonzero dummy row changes live outputs too. The test
+                # primes that row before the first unaligned replay.
+                hidden = hidden + inputs.input_hiddens[-1].sum()
+        return PyModelOutputs(rms_norm(hidden), hidden + 100)
+
+
+@unittest.skipUnless(torch.cuda.is_available() and torch.version.cuda, "requires CUDA")
+class MtpDecodeForwardIntegrationTest(unittest.TestCase):
+    def run_case(self, scenario):
+        tagged_q1 = scenario == "multi_tag_q1_prepare"
+        sp_unaligned = tagged_q1 or scenario in (
+            "sp_unaligned",
+            "sp_unaligned_inline_prepare",
+        )
+        result = _extension.run_mtp_decode_forward(
+            MtpDecodeForwardModel(
+                inspect_padding=sp_unaligned, inspect_metadata=tagged_q1
+            ),
+            scenario,
+        )
+        # Both user forwards must replay graphs, without invoking Python again.
+        self.assertEqual(
+            result["python_calls_before"], result["python_calls_after_first"]
+        )
+        self.assertEqual(
+            result["python_calls_before"], result["python_calls_after_second"]
+        )
+        self.assertTrue(result["normal_snapshots_distinct"])
+        self.assertTrue(result["recurrent_snapshots_distinct"])
+        rows = 6 if scenario == "context" else 1 if sp_unaligned else 2
+        for prefix, first_token in (("first_", 1), ("next_", 4)):
+            tokens = torch.arange(first_token, first_token + rows, device="cuda")
+            hidden = (tokens.unsqueeze(1) * 4 + torch.arange(4, device="cuda") + 1).to(
+                torch.bfloat16
+            )
+            if sp_unaligned:
+                expected_input = torch.arange(
+                    10, 14, device="cuda", dtype=torch.bfloat16
+                ).reshape(1, 4)
+                if prefix == "next_":
+                    expected_input = expected_input + 5
+                torch.testing.assert_close(
+                    result[prefix + "input_hiddens"], expected_input, rtol=0, atol=0
+                )
+                hidden = hidden + expected_input
+            # Inspect after the second replay: first-round tensors must still
+            # contain their own normalized and recurrent values.
+            torch.testing.assert_close(
+                result[prefix + "normalized"], rms_norm(hidden), rtol=0, atol=0
+            )
+            torch.testing.assert_close(
+                result[prefix + "recurrent"], hidden + 100, rtol=0, atol=0
+            )
+        return result
+
+    def test_unaligned_sp_padding_zeroes_old_token_and_hidden_tail(self):
+        result = self.run_case("sp_unaligned")
+        self.assertIsNone(result["first_logits"])
+
+    def test_q1_inline_prepare_replays_graph_without_external_prepare(self):
+        # The fixture omits both prepareAttentionInputs and updateKVCacheKernelBlockId
+        # before the two B=1 forwards, matching the real Q1 executor entry.
+        result = self.run_case("sp_unaligned_inline_prepare")
+        self.assertIsNone(result["first_logits"])
+
+    def test_multitag_q1_metadata_is_published_and_recovers_after_prepare_failure(self):
+        result = self.run_case("multi_tag_q1_prepare")
+        self.assertFalse(result["published_after_failure"])
+        for prefix, length in (("first_", 4), ("next_", 7)):
+            metadata = result[prefix + "tag_metadata"]
+            self.assertEqual(set(metadata), {"full", "aux"})
+            for tag_inputs in metadata.values():
+                self.assertEqual(
+                    tag_inputs["sequence_lengths_plus_1"].tolist(), [length, 1]
+                )
+                self.assertEqual(tag_inputs["decode_cu_seqlens"].tolist(), [0, 1, 2])
+                self.assertEqual(tag_inputs["valid_token_mask"].tolist(), [True, False])
+        metadata = result["fallback_tag_metadata"]
+        self.assertEqual(set(metadata), {"common", "full", "aux"})
+        for tag_inputs in metadata.values():
+            self.assertEqual(
+                tag_inputs["sequence_lengths_plus_1"].tolist(), [7, 7, 7, 1]
+            )
+            self.assertEqual(tag_inputs["decode_cu_seqlens"].tolist(), [0, 1, 2, 3, 4])
+            self.assertEqual(
+                tag_inputs["valid_token_mask"].tolist(), [True, True, True, False]
+            )
+
+    def test_ordinary_all_logits_debug_and_context_keep_dense_logits(self):
+        for scenario in ("default", "all_logits", "check_nan", "context"):
+            with self.subTest(scenario=scenario):
+                result = self.run_case(scenario)
+                for prefix in ("first_", "next_"):
+                    logits = result[prefix + "logits"]
+                    self.assertEqual(tuple(logits.shape), (2, 4))
+                    expected = result[prefix + "normalized"].float()
+                    if scenario == "context":
+                        expected = expected[[2, 5]]
+                    torch.testing.assert_close(logits, expected, rtol=0, atol=0)
 
 
 if __name__ == "__main__":

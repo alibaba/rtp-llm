@@ -66,6 +66,9 @@ public:
     mutable torch::Tensor all_probs;      // shape: [batch_size, vocab_size]
 
     std::vector<at::Generator> generator;
+    // MTP rejection consumes filtered all_probs while an ORIGINAL response
+    // needs the distribution before top-k/top-p filtering.
+    bool capture_original_probs = false;
 };
 
 struct SamplerOutput {
@@ -79,6 +82,7 @@ public:
     // The draft distribution is a one-hot at token_ids and need not be
     // materialized as [batch, speculative_steps, vocab].
     bool                                  token_ids_are_point_mass = false;
+    torch::Tensor                         original_all_probs;
 };
 
 struct MergedOutput {

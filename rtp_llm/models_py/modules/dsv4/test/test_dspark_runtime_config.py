@@ -87,6 +87,7 @@ class DSparkRuntimeConfigTest(unittest.TestCase):
                 sp_config.model_type = model_type
                 sp_config.quantization = None
                 target_config.max_seq_len = 4096
+                target_config.moe_prefill_max_tokens_per_rank = 4096
                 target_config.capture_aux_hidden_layer_ids = None
                 draft_config.tokenizer_path = ""
                 draft_config.ckpt_path = ""
@@ -117,6 +118,7 @@ class DSparkRuntimeConfigTest(unittest.TestCase):
 
                 self.assertIs(result, draft_config)
                 self.assertEqual(result.max_seq_len, target_config.max_seq_len)
+                self.assertEqual(result.moe_prefill_max_tokens_per_rank, 4096)
                 if should_setup_dspark:
                     setup_dspark.assert_called_once_with(
                         sp_config, target_config, draft_config

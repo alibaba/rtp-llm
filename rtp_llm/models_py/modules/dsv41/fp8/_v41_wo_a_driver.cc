@@ -8,6 +8,9 @@ struct EpilogueArgs {
     uint32_t* sfd;
     uint32_t  stride, m, n;
     float     legacy;
+    float     clamp_value       = 0.0f;
+    uint32_t* clamped_count     = nullptr;
+    uint32_t* clamp_count_ready = nullptr;
 };
 
 struct V41Module {

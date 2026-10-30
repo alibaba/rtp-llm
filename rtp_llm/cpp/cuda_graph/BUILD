@@ -30,6 +30,12 @@ cc_library(
     visibility = ["//visibility:public"],
 )
 
+cc_library(
+    name = "mtp_draft_prefill_capacity",
+    hdrs = ["mtp_draft_prefill_capacity.h"],
+    visibility = ["//visibility:public"],
+)
+
 filegroup(
     name = "cuda_graph_srcs",
     srcs = [
@@ -45,6 +51,7 @@ filegroup(
 filegroup(
     name = "cuda_graph_hdrs",
     srcs = [
+        "mtp_draft_prefill_capacity.h",
         "cuda_graph_base.h",
         "combo_position_ids_validation.h",
         "generation_prefill_cuda_graph_replay_metadata.h",
@@ -65,6 +72,7 @@ cc_library(
         "cuda_graph_runner.h",
     ],
     deps = [
+        ":mtp_draft_prefill_capacity",
         "//rtp_llm/cpp/config:config_modules",
         "//rtp_llm/models_py/bindings:op_defs",
     ],
@@ -88,6 +96,7 @@ cc_library(
     ],
     deps = torch_deps() + [
         ":cuda_graph_base",
+        ":mtp_draft_prefill_capacity",
         ":combo_position_ids_validation",
         ":prepared_attention_inputs_guard",
         ":generation_prefill_cuda_graph_replay_metadata",

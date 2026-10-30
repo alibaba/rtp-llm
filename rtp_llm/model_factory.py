@@ -93,6 +93,7 @@ class ModelFactory:
 
         model = model_cls.from_config(
             model_config=model_config,
+            runtime_config=engine_config.runtime_config,
             parallelism_config=engine_config.parallelism_config,
             hw_kernel_config=engine_config.hw_kernel_config,
             kv_cache_config=engine_config.kv_cache_config,
@@ -151,7 +152,7 @@ class ModelFactory:
             or sp_type == SpeculativeType.DSPARK
         ):
             model_type = propose_model_config.model_type
-            if model_type == "deepseek-v3-mtp" or model_type == "mixtbstars-mtp":
+            if model_type in ("deepseek-v3-mtp", "mixtbstars-mtp"):
                 logging.warning(
                     f"create sp model type is {model_type}, so change the sp type to mtp"
                 )
@@ -200,6 +201,7 @@ class ModelFactory:
 
             gpt_model = model_cls.from_config(
                 model_config=propose_model_config,
+                runtime_config=engine_config.runtime_config,
                 parallelism_config=engine_config.parallelism_config,
                 hw_kernel_config=propose_hw_kernel_config,
                 kv_cache_config=engine_config.kv_cache_config,
@@ -419,13 +421,8 @@ class ModelFactory:
             seq_size_per_block=model_config.attn_config.tokens_per_block,
         )
         scheduler_config = engine_config.runtime_config.fifo_scheduler_config
-        # Generic MoE executors allocate their fixed-capacity communication
-        # buffers while the Python model is constructed. Preserve the finalized
-        # scheduler prefill bound on the model config so those buffers cover a
-        # full admitted context batch, not just one maximum-length request.
         model_config.moe_prefill_max_tokens_per_rank = min(
-            int(scheduler_config.max_context_batch_size)
-            * int(model_config.max_seq_len),
+            int(scheduler_config.max_context_batch_size) * int(model_config.max_seq_len),
             int(scheduler_config.max_batch_tokens_size),
         )
 
@@ -458,18 +455,19 @@ class ModelFactory:
         if not sp_config.checkpoint_path:
             return None
 
-        # Current learned-draft SP engine supports MTP, EAGLE and DSpARK.
+        # Learned draft models share the same propose-model construction path.
         if sp_config.type not in [
             SpeculativeType.MTP,
             SpeculativeType.EAGLE,
+            SpeculativeType.EAGLE3,
             SpeculativeType.DSPARK,
         ]:
             logging.error(
-                "Speculative engine only supports MTP, EAGLE and DSpARK, but got %s",
+                "Speculative engine only supports MTP, EAGLE, EAGLE3 and DSpARK, but got %s",
                 sp_config.type.name,
             )
             raise ValueError(
-                "Speculative engine only supports MTP, EAGLE and DSpARK, but got %s"
+                "Speculative engine only supports MTP, EAGLE, EAGLE3 and DSpARK, but got %s"
                 % sp_config.type.name
             )
 
@@ -508,6 +506,12 @@ class ModelFactory:
             propose_model_config, engine_config.kv_cache_config
         )
         propose_model_cls._post_build_model_config(propose_model_config)
+        # Draft models share the target scheduler bounds. Proposal width sizes
+        # their workspaces independently of the number of draft modules.
+        propose_model_config.gen_num_per_cycle = sp_config.gen_num_per_cycle
+        propose_model_config.moe_prefill_max_tokens_per_rank = (
+            model_config.moe_prefill_max_tokens_per_rank
+        )
 
         if sp_config.type == SpeculativeType.DSPARK:
             ModelFactory._setup_dspark_configs(

@@ -45,6 +45,7 @@ struct GraphParams {
     CudaGraphRole    role                               = CudaGraphRole::AUTO;
     int              max_seq_len                        = 0;
     int              num_tokens_per_bs      = 1;  // Number of tokens per batch (1 for decode, max_seq_len for prefill)
+    int              sequence_parallel_size = 1;
     size_t           max_context_batch_size = 128;
     std::size_t      hidden_size            = 0;
     c10::ScalarType  model_data_type        = c10::ScalarType::Float;
@@ -57,6 +58,8 @@ struct GraphParams {
     // topology keeps the direct AttentionInputs fast path; multiple groups
     // require an exact tag -> AttentionInputs mapping at replay time.
     std::vector<std::string> kv_cache_group_tags;
+    // Physical cache-group count for target LINEAR replay metadata.
+    int linear_replay_group_count = 0;
     // Final kernel block-table width, in kernel block IDs per row. Callers
     // compute it from model topology and actual reserve/fake bounds before
     // constructing the graph; this struct never re-derives page geometry.

@@ -2,6 +2,7 @@
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include <cstdint>
 #include <deque>
+#include <vector>
 
 namespace rtp_llm {
 
@@ -44,5 +45,6 @@ private:
     GenerationPrefillCudaGraphStatus generation_prefill_cuda_graph_status_{
         GenerationPrefillCudaGraphStatus::NOT_REQUESTED};
     std::deque<GenerateOutputs> generate_outputs_;
+    std::vector<torch::Tensor>  pending_all_probs_;
 };
 }  // namespace rtp_llm

@@ -14,10 +14,10 @@ void CudaGraphRunner::capturePrefill() {
         int seq_len = capture_range_[i];
         RTP_LLM_LOG_INFO("capture range for seq len: %d", seq_len);
         PyModelInputs inputs;
-        // for attention, it always run the max_bs, so when we run `forward`, the real batch size is not sure
-        // we will transfer a `batch size tensor(int)` for `copy kernel`.
-        // Prepare common inputs using shared function
-        prepareCaptureInputs(inputs, max_bs_, seq_len);
+        // Each draft token bucket owns its request capacity. The live request
+        // count is refreshed through the graph's device batch-size scalar.
+        const int capture_bs = mtpDraftPrefillBatchCapacity(seq_len);
+        prepareCaptureInputs(inputs, capture_bs, seq_len);
         // Generation prefill uses Bmax real slots plus one fixed sentinel slot.
         // Capture the conservative layout [0, ..., 0, Tg] so FMHA/RoPE fix
         // batch size and max_q_len at their profile capacity. All sentinel KV
@@ -64,8 +64,9 @@ void CudaGraphRunner::capturePrefill() {
             inputs.attention_inputs.cu_seqlens_device.copy_(inputs.attention_inputs.cu_seqlens, false);
             inputs.attention_inputs.cu_kv_seqlens_device.copy_(inputs.attention_inputs.cu_seqlens, false);
         } else {
-            // Draft model prefill: distribute seq_len tokens across batches (max num_tokens_per_bs_ each).
-            // All max_bs_ batches get the largest legal prefix so
+            // Draft prefill rounds this bucket to complete Q-wide request rows,
+            // including sequence-parallel alignment.
+            // All captured request slots get the largest legal prefix so
             // prefix_len + q_len never exceeds max_seq_len_.
             int active_bs  = (seq_len + num_tokens_per_bs_ - 1) / num_tokens_per_bs_;
             int prefix_len = max_seq_len_ > num_tokens_per_bs_ ? max_seq_len_ - num_tokens_per_bs_ : 0;
@@ -87,7 +88,7 @@ void CudaGraphRunner::capturePrefill() {
 
             cu_seqlens_host[0]    = 0;
             cu_kv_seqlens_host[0] = 0;
-            for (int b = 0; b < max_bs_; b++) {
+            for (int b = 0; b < capture_bs; b++) {
                 cu_seqlens_host[b + 1] = cu_seqlens_host[b].item<int>() + input_lengths[b].item<int>();
                 cu_kv_seqlens_host[b + 1] =
                     cu_kv_seqlens_host[b].item<int>() + input_lengths[b].item<int>() + prefix_lengths[b].item<int>();
@@ -102,6 +103,12 @@ void CudaGraphRunner::capturePrefill() {
         inputs.attention_inputs.context_total_kv_length = seq_len;
         inputs.attention_inputs.prefill_cuda_graph_copy_params =
             capture_mem_hold_.py_model_inputs_.attention_inputs.prefill_cuda_graph_copy_params;
+        if (isMtpDraftPrefillCudaGraph()) {
+            auto& params          = *inputs.attention_inputs.prefill_cuda_graph_copy_params;
+            params.max_batch_size = capture_bs;
+            params.max_seq_len    = num_tokens_per_bs_;
+            params.cuda_graph_prefill_batch_size.fill_(capture_bs);
+        }
         if (isGenerationPrefillCudaGraph()) {
             if (inputs.bert_embedding_inputs.combo_position_ids.defined()) {
                 inputs.bert_embedding_inputs.combo_position_ids =
@@ -111,7 +118,7 @@ void CudaGraphRunner::capturePrefill() {
                 inputs.bert_embedding_inputs.combo_tokens_type_ids =
                     inputs.bert_embedding_inputs.combo_tokens_type_ids.slice(0, 0, seq_len);
             }
-        } else if (inputs.bert_embedding_inputs.position_encoding.numel() > 0) {
+        } else if (isMtpDraftPrefillCudaGraph() || inputs.bert_embedding_inputs.position_encoding.numel() > 0) {
             inputs.bert_embedding_inputs.combo_position_ids =
                 inputs.bert_embedding_inputs.combo_position_ids.slice(0, 0, seq_len);
             inputs.bert_embedding_inputs.combo_tokens_type_ids =
@@ -119,17 +126,10 @@ void CudaGraphRunner::capturePrefill() {
         }
         // Prefill reshapes common metadata after prepareCaptureInputs synchronized the tag map.
         refreshTaggedAttentionInputs(inputs);
-        const int output_capacity           = isGenerationPrefillCudaGraph() ? seq_len : max_bs_ * num_tokens_per_bs_;
-        graph_instances_[seq_len].mem_hold_ = createCaptureMemoryHold(inputs, output_capacity);
+        // Both logits input and recurrent hidden use this bucket's token capacity.
+        graph_instances_[seq_len].mem_hold_ = createCaptureMemoryHold(inputs, seq_len);
         graph_instances_[seq_len].mem_hold_.attn_pyobj_ =
             prepareFmhaImpl(graph_instances_[seq_len].mem_hold_.py_model_inputs_, true);
-        // HC-shaped MTP draft prefill keeps its output at fixed graph capacity.
-        // Other paths produce the real flattened seq_len and must keep their
-        // metadata shapes aligned.
-        if (!usesFixedCapacityMtpDraftPrefillCudaGraph()) {
-            graph_instances_[seq_len].mem_hold_.decoder_layer_hidden_states_ =
-                graph_instances_[seq_len].mem_hold_.decoder_layer_hidden_states_.slice(0, 0, seq_len);
-        }
         capturePrefillOneSeqLen(seq_len);
         cuda_graph::finish_capture_session();
         replayAndSyncCheck(seq_len, "seq len");

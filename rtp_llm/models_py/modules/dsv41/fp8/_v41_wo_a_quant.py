@@ -25,14 +25,26 @@ _READY = {}
 _LIBRARIES = {}
 _LOCK = threading.Lock()
 _SOURCES = ("_v41_wo_a_quant.cu", "_v41_wo_a_quant.cuh", "_v41_wo_a_driver.cc")
-# The shim and two schedules depend on this private DeepGEMM ABI. A different
-# implementation falls back until its epilogue/layout has been verified.
+# The shim and two schedules depend on the audited DeepGEMM 2.8.2 ABI. A
+# different implementation falls back until its epilogue/layout is verified.
 _VENDOR_HASHES = {
-    "impls/sm100_fp8_fp4_gemm_1d1d.cuh": "88dd217719c153b805ee9a791a8c612c078c42a65205a14b7c9ee4f1d0fce110",
-    "epilogue/sm100_store_cd.cuh": "72ea5a5915552004c4b1d5cedd049442476c2cce367985527032f6dcca4a5b10",
-    "epilogue/sm100_store_cd_swap_ab.cuh": "0cc27e0ca66e3be47b1d90974ff7f66efca38c08b783ce16fc5e8f1d8db7010f",
-    "common/math.cuh": "576e9db1a1889087f77b3f74d74d011bf452f16c0e5c030bdd661e961c074ddc",
+    "impls/sm100_fp8_fp4_gemm_1d1d.cuh": "71d32a9fd72034d04f3900165f5bb88dde6e2d4565c624a4953c4c72b2c18ef1",
+    "epilogue/sm100_store_cd.cuh": "0b23dcc32c4d08b1efb641844806dd92ebffd4697c8157bdfc5ca64238fe489b",
+    "epilogue/sm100_store_cd_swap_ab.cuh": "7d71c6630ba4d9376266cbdfdbe8fb38544cb1ac7ef2437d32ce52bdb2c76f6a",
+    "common/math.cuh": "a28f4dfe0340b62dbdb3e9c1286d5e7332d81bd5936ef7cbec13e8e447a2e51a",
+    "epilogue/operators.cuh": "42c9580b1cabd18c68e1b2ffaa8029f30cb97b550d7047e39db0b2cffebc258b",
+    "common/types.cuh": "0382bf27efb6deea5dc21a4f8ae21296494e513166c2682c63e498c70cefa6b2",
+    "impls/sm100_fp8_gemm_local_policy.cuh": "470da6d88dae81b48bcafc0fc0c79dd197c35721a8ddb077fa557165ffc93f46",
 }
+
+
+def _vendor_supported(include):
+    return all(
+        (include / "deep_gemm" / name).is_file()
+        and hashlib.sha256((include / "deep_gemm" / name).read_bytes()).hexdigest()
+        == expected
+        for name, expected in _VENDOR_HASHES.items()
+    )
 
 
 def _device_supported(device):
@@ -91,13 +103,8 @@ def _dependencies():
     import deep_gemm
 
     include = Path(deep_gemm.__file__).resolve().parent / "include"
-    for name, expected in _VENDOR_HASHES.items():
-        path = include / "deep_gemm" / name
-        if (
-            not path.is_file()
-            or hashlib.sha256(path.read_bytes()).hexdigest() != expected
-        ):
-            return None
+    if not _vendor_supported(include):
+        return None
     cuda = os.environ.get("CUDA_HOME") or os.environ.get("CUDA_PATH")
     nvcc = str(Path(cuda) / "bin/nvcc") if cuda else shutil.which("nvcc")
     cxx = os.environ.get("CXX") or shutil.which("c++")

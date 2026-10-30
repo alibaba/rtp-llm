@@ -75,6 +75,13 @@ GenerateOutputs NormalGenerateStream::prepareGenerateOutput(const StreamUpdateIn
     GenerateOutputs generate_results;
     generate_results.request_id = request_id_;
 
+    // Join pending accepted windows once per output, rather than every decode round.
+    auto output_all_probs = all_probs_;
+    if (!pending_all_probs_.empty()) {
+        output_all_probs =
+            pending_all_probs_.size() == 1 ? pending_all_probs_.front() : torch::cat(pending_all_probs_, 1);
+    }
+
     // CompleteTokenIds has already applied this step, so currentBatchSize is the output row count.
     for (int i = 0; i < currentBatchSize(); i++) {
         GenerateOutput generate_output;
@@ -184,7 +191,16 @@ GenerateOutputs NormalGenerateStream::prepareGenerateOutput(const StreamUpdateIn
             if (!update_info.all_probs.defined()) {
                 throw std::runtime_error("all_probs is not while generate_config return_all_probs is true");
             }
-            generate_output.aux_info.all_probs = all_probs_.narrow(0, i, 1).clone();
+            auto output_probs = output_all_probs.narrow(0, i, 1);
+            if (output_probs.dim() == 3) {
+                // Accepted chunks may stop before the end of the verify window.
+                RTP_LLM_CHECK_WITH_INFO(output_probs.size(1) >= output_len,
+                                        "target probabilities [%ld] do not cover output tokens [%ld]",
+                                        output_probs.size(1),
+                                        output_len);
+                output_probs = output_probs.narrow(1, 0, output_len);
+            }
+            generate_output.aux_info.all_probs = output_probs.clone();
         }
         // hidden_states post process
         if (generate_output.finished && generate_input_->generate_config->return_hidden_states
@@ -261,7 +277,13 @@ void NormalGenerateStream::updateOutput(const StreamUpdateInfo& update_info) {
         cum_log_probs_ = update_info.cum_log_probs.cpu();
     }
     if (update_info.all_probs.defined()) {
-        all_probs_ = update_info.all_probs.cpu();
+        if (update_info.all_probs.dim() == 3) {
+            // Keep each accepted window until its tokens are emitted. Later MTP
+            // rounds may reuse the CPU staging buffer backing this update.
+            pending_all_probs_.push_back(update_info.all_probs.cpu().clone());
+        } else {
+            all_probs_ = update_info.all_probs.cpu();
+        }
     }
 
     // TODO: move it to better position
@@ -304,6 +326,7 @@ void NormalGenerateStream::updateOutput(const StreamUpdateInfo& update_info) {
     }
 
     last_output_pos_ = seqLength();
+    pending_all_probs_.clear();
 }
 
 GenerationPrefillCudaGraphStatus NormalGenerateStream::generationPrefillCudaGraphStatus() const {

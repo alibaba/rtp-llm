@@ -612,8 +612,14 @@ TEST(KVCMInternalTest, PreservesHeterogeneousBlockSizesAndScalesLocationSpecsLin
     FullLayerGroupPolicy policy(*topology, unusedResolver(), full_group_tags, /*other_group_tags=*/{});
     ASSERT_TRUE(policy.init());
     ASSERT_EQ(policy.groups().size(), group_count);
-    EXPECT_EQ(policy.groups().at(0).block_size_bytes, 1u);
-    EXPECT_EQ(policy.groups().at(group_count - 1).block_size_bytes, static_cast<size_t>(group_count));
+    for (int group_id = 0; group_id < group_count; ++group_id) {
+        const std::string tag = "group_" + std::to_string(group_id);
+        const auto group      = std::find_if(policy.groups().begin(), policy.groups().end(), [&tag](const auto& entry) {
+            return entry.second.tag == tag;
+        });
+        ASSERT_NE(group, policy.groups().end()) << tag;
+        EXPECT_EQ(group->second.block_size_bytes, static_cast<size_t>(group_id + 1)) << tag;
+    }
 
     GroupPolicy::LocationSpecGroups location_groups;
     ASSERT_TRUE(policy.buildLocationSpecGroups(/*tp_size=*/2, location_groups));

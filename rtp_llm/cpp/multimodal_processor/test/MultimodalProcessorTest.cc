@@ -5,6 +5,7 @@
 #include "gtest/gtest.h"
 #include "rtp_llm/cpp/multimodal_processor/MultimodalError.h"
 #include "rtp_llm/cpp/testing/TestBase.h"
+#include "rtp_llm/cpp/multimodal_processor/FeatureHashOp.h"
 #include "rtp_llm/cpp/multimodal_processor/test/FakeMultimodalProcessor.h"
 
 using namespace std;
@@ -177,6 +178,62 @@ TEST_F(MultimodalProcessorTest, V41EmbeddingReceivesOnlyRemainingRequestBudget) 
     EXPECT_EQ(result.code(), ErrorCode::GENERATE_TIMEOUT);
     EXPECT_EQ(processor.calls, 0);
 }
+
+#if USING_CUDA
+TEST_F(MultimodalProcessorTest, CudaFeaturesAndExtraInputsBecomeReadyPinnedCpuTensors) {
+    class CudaMultimodalProcessor: public FakeMultimodalProcessor {
+    public:
+        CudaMultimodalProcessor(torch::Tensor features, torch::Tensor extra):
+            FakeMultimodalProcessor(py::none(), {{1}}, false, 32),
+            features_(std::move(features)),
+            extra_(std::move(extra)) {}
+
+    private:
+        ErrorResult<MultimodalOutput>
+        MultimodalEmbedding(const std::vector<MultimodalInput>, std::string, int64_t, grpc::ServerContext*) override {
+            MultimodalOutput output;
+            output.mm_features       = {features_};
+            output.mm_extra_input    = std::vector<torch::Tensor>{extra_};
+            output.mm_feature_hashes = std::vector<torch::Tensor>{torch::arange(features_.size(0), torch::kInt32)};
+            return output;
+        }
+
+        torch::Tensor features_;
+        torch::Tensor extra_;
+    };
+
+    for (int layout : {0, 1, 2}) {
+        SCOPED_TRACE(layout);
+        auto expected_features = torch::arange(24, torch::kBFloat16).reshape({6, 4});
+        auto cuda_features     = expected_features.to(torch::kCUDA);
+        if (layout != 0) {
+            expected_features = expected_features.transpose(0, 1);
+            cuda_features     = cuda_features.transpose(0, 1);
+        }
+        if (layout == 2) {
+            expected_features = expected_features.slice(1, 0, 6, 2);
+            cuda_features     = cuda_features.slice(1, 0, 6, 2);
+        }
+        auto                    expected_extra = torch::tensor({3, 5, 7}, torch::kInt64);
+        CudaMultimodalProcessor processor(cuda_features, expected_extra.to(torch::kCUDA));
+        auto                    input = std::make_shared<GenerateInput>();
+        input->input_ids              = torch::tensor({0, 1, 2}, torch::kInt32);
+        input->multimodal_inputs      = std::vector<MultimodalInput>{MultimodalInput("image")};
+
+        ASSERT_TRUE(processor.updateMultimodalFeatures(input).ok());
+        ASSERT_TRUE(input->multimodal_features.has_value());
+        ASSERT_TRUE(input->mm_extra_input.has_value());
+        ASSERT_EQ(input->multimodal_features->size(), 1);
+        ASSERT_EQ(input->mm_extra_input->size(), 1);
+        const auto& features = input->multimodal_features->front();
+        const auto& extra    = input->mm_extra_input->front();
+        EXPECT_TRUE(features.is_pinned());
+        EXPECT_TRUE(extra.is_pinned());
+        EXPECT_TRUE(torch::equal(features, expected_features));
+        EXPECT_TRUE(torch::equal(extra, expected_extra));
+    }
+}
+#endif
 
 TEST_F(MultimodalProcessorTest, testSimple) {
     FakeMultimodalProcessor        processor = FakeMultimodalProcessor::createFakeMultimodalProcessor({{1}}, false, 10);
@@ -434,8 +491,11 @@ TEST_F(MultimodalProcessorTest, testFeatureHashCpuGpuConsistency) {
     std::vector<int32_t> gpu_hashes(gpu_embedding.size(0));
     EXPECT_TRUE(processor.getFeatureHash(cpu_hashes.data(), cpu_embedding).ok());
     EXPECT_TRUE(processor.getFeatureHash(gpu_hashes.data(), gpu_embedding).ok());
+    auto pinned_hashes = getMultimodalFeatureHash(gpu_embedding);
 
     EXPECT_EQ(cpu_hashes, gpu_hashes);
+    EXPECT_TRUE(pinned_hashes.is_pinned());
+    EXPECT_EQ(pinned_hashes.device().type(), torch::kCPU);
     EXPECT_EQ(cpu_hashes[0], cpu_hashes[1]);
     EXPECT_NE(cpu_hashes[0], cpu_hashes[2]);
 }
