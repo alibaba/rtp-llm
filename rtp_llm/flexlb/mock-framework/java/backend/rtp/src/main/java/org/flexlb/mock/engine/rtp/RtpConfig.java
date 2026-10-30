@@ -1,5 +1,7 @@
 package org.flexlb.mock.engine.rtp;
 
+import org.flexlb.mock.admission.AdmissionConfig;
+
 import com.fasterxml.jackson.core.JsonParser;
 import com.fasterxml.jackson.databind.*;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -85,6 +87,10 @@ public record RtpConfig(String id, Role role, int blockSize, int deviceBlocks, i
             nativeInt(config, "max_batch_tokens_without_cache", 0, 0, Integer.MAX_VALUE),
             cpSize, cpEnabled, tpSize, dpSize,
             config, compute);
+    }
+
+    public AdmissionConfig endpoint() {
+        return new AdmissionConfig(id, role, blockSize, tpSize, maxSeqLen, maxBatchTokens, compute);
     }
 
     public ObjectNode effective() {

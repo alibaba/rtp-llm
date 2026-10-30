@@ -1,5 +1,8 @@
 package org.flexlb.mock.engine.rtp;
 
+import org.flexlb.mock.admission.RpcErrors;
+import org.flexlb.mock.admission.TaskHistory;
+
 import java.util.*;
 import org.flexlb.mock.api.model.Types.Role;
 import org.flexlb.mock.compute.*;
@@ -10,7 +13,7 @@ import static org.flexlb.mock.engine.RequestFailure.Reason.*;
 import static org.flexlb.mock.engine.rtp.RtpScheduler.Phase.*;
 
 /** RTP queue policy. No RPC objects, executors or compute loop live here. */
-final class RtpScheduler implements Scheduler {
+public final class RtpScheduler implements Scheduler {
     enum Phase { QUEUED, CAPACITY, LOADING, TRANSFERRING, TRANSFERRED, RUNNING, OUTPUT, FORWARD, READY }
     private final TaskHistory history = new TaskHistory();
     private final Object lock;
@@ -60,7 +63,7 @@ final class RtpScheduler implements Scheduler {
     private record Batch(List<Member> members) {}
     private record Notice(Runnable action, boolean terminal) {}
 
-    static Scheduler.Factory factory(RtpConfig config) {
+    public static Scheduler.Factory factory(RtpConfig config) {
         Objects.requireNonNull(config);
         return (lock, cache) -> new RtpScheduler(lock, config, cache);
     }
@@ -114,7 +117,7 @@ final class RtpScheduler implements Scheduler {
         var entry = entry(handle);
         if (entry.state.terminating()) return;
         if (entry.state.expired()) { finish(entry, new RequestFailure(TIMEOUT, "Control arrived after deadline")); return; }
-        if (!(control instanceof RtpControl event)) throw new RequestFailure(INVALID, "Foreign RTP control");
+        if (!(control instanceof org.flexlb.mock.admission.Control event)) throw new RequestFailure(INVALID, "Foreign RTP control");
         switch (event) {
             case GENERATE -> {
                 if (prefill() || !entry.loaded || entry.generating || entry.prefillFinished)
@@ -341,7 +344,7 @@ final class RtpScheduler implements Scheduler {
     @Override public void transferCompleted(Request request, TransferResult result) {
         var entry = entry(request);
         if (!live(entry)) return;
-        if (!(result instanceof RtpTransferResult transferred)) throw new RequestFailure(INVALID, "Foreign RTP transfer result");
+        if (!(result instanceof org.flexlb.mock.admission.TransferResult transferred)) throw new RequestFailure(INVALID, "Foreign RTP transfer result");
         if (transferred.failure() != null) { finish(entry, transferred.failure()); return; }
         if (!entry.transferBegun || entry.phase != TRANSFERRING)
             throw new RequestFailure(INVALID, "Stale or duplicate transfer completion");
@@ -487,8 +490,8 @@ final class RtpScheduler implements Scheduler {
         var phase = endTimeMillis >= 0 && entry.finalPhase != null ? entry.finalPhase : reportedPhase(entry);
         long wait = Math.max(0, (entry.admittedAt == Long.MIN_VALUE ? now : entry.admittedAt) - entry.input.started());
         long execution = entry.admittedAt == Long.MIN_VALUE ? 0 : Math.max(0, now - entry.admittedAt);
-        long code = failure == null ? 0 : RtpErrors.code(failure);
-        if (failure != null && code == 0) code = RtpErrors.status(failure).getCode().value();
+        long code = failure == null ? 0 : RpcErrors.code(failure);
+        if (failure != null && code == 0) code = RpcErrors.status(failure).getCode().value();
         return new Task(entry.input.requestId(), entry.input.groupId(), entry.input.tokens(), entry.reused,
             entry.input.priority(), phase, progress.iterations(), wait / 1_000_000, execution / 1_000_000,
             endTimeMillis, code, failure == null ? "" : Objects.toString(failure.getMessage(), ""));

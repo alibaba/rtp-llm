@@ -1,5 +1,7 @@
 package org.flexlb.mock.engine.rtp;
 
+import org.flexlb.mock.admission.*;
+
 import static org.junit.jupiter.api.Assertions.*;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -48,12 +50,12 @@ class RtpSchedulerTest {
     }
     private static void loaded(Scheduler scheduler, Scheduler.Request request) {
         try (var use = scheduler.beginTransfer(request)) {
-            scheduler.transferCompleted(request, new RtpTransferResult(false, null));
+            scheduler.transferCompleted(request, new TransferResult(false, null));
         }
     }
     private static void generate(Scheduler scheduler, Scheduler.Request request) {
         loaded(scheduler, request);
-        scheduler.control(request, RtpControl.GENERATE);
+        scheduler.control(request, Control.GENERATE);
     }
 
     @Test void retainedPrefillKeepsKvThroughReadUntilTransferAcknowledgement() throws Exception {
@@ -64,10 +66,10 @@ class RtpSchedulerTest {
             complete(scheduler, scheduler.schedule(), config); drain(scheduler);
             assertEquals(new QueueSnapshot(0, 0, 0, 1), scheduler.queues());
             assertFalse(listener.terminal.isDone()); assertEquals(5, cache.snapshot(0, false).availableBlocks());
-            assertThrows(RequestFailure.class, () -> scheduler.control(request, RtpControl.TRANSFER_ACKNOWLEDGED));
+            assertThrows(RequestFailure.class, () -> scheduler.control(request, Control.TRANSFER_ACKNOWLEDGED));
             var read = scheduler.beginTransfer(request);
-            scheduler.transferCompleted(request, new RtpTransferResult(false, null));
-            scheduler.control(request, RtpControl.TRANSFER_ACKNOWLEDGED);
+            scheduler.transferCompleted(request, new TransferResult(false, null));
+            scheduler.control(request, Control.TRANSFER_ACKNOWLEDGED);
             assertEquals(5, cache.snapshot(0, false).availableBlocks()); assertFalse(listener.terminal.isDone());
             read.close(); drain(scheduler);
             assertNull(listener.terminal.get(1, TimeUnit.SECONDS)); assertEquals(8, cache.snapshot(0, false).availableBlocks());
@@ -130,12 +132,12 @@ class RtpSchedulerTest {
             var old = scheduler.input(input(1, false), listener);
             scheduler.maintain(); drain(scheduler);
             assertEquals(new QueueSnapshot(0, 0, 1, 0), scheduler.queues());
-            assertThrows(RequestFailure.class, () -> scheduler.control(old, RtpControl.GENERATE));
+            assertThrows(RequestFailure.class, () -> scheduler.control(old, Control.GENERATE));
             loaded(scheduler, old); assertNull(scheduler.schedule());
             scheduler.finish(old, new RequestFailure(RequestFailure.Reason.CANCELLED, "cancel")); drain(scheduler);
             var replacement = scheduler.input(input(1, false), new Listener());
             scheduler.maintain(); scheduler.finish(old, null);
-            scheduler.control(old, RtpControl.GENERATE);
+            scheduler.control(old, Control.GENERATE);
             assertFalse(replacement.snapshot().terminating());
             assertEquals(0, replacement.snapshot().generated()); assertNull(scheduler.schedule());
         }

@@ -1,4 +1,4 @@
-package org.flexlb.mock.engine.rtp;
+package org.flexlb.mock.admission;
 
 import io.grpc.*;
 import org.flexlb.mock.engine.RequestFailure;
@@ -6,7 +6,8 @@ import static org.flexlb.mock.engine.RequestFailure.Reason.*;
 import org.flexlb.engine.grpc.EngineRpcService.ErrorDetailsPB;
 
 /** Native C++ grpc::Status.error_details wire encoding, shared by P and D. */
-final class RtpErrors {
+public final class RpcErrors {
+    private RpcErrors() {}
     private static final Metadata.Key<byte[]> DETAILS = Metadata.Key.of("grpc-status-details-bin", Metadata.BINARY_BYTE_MARSHALLER);
     static StatusRuntimeException failure(Status status, long code) {
         if (code == 0) return status.asRuntimeException();
@@ -27,7 +28,7 @@ final class RtpErrors {
         };
         return new RequestFailure(reason, status.getDescription(), failure(status, code));
     }
-    static Status status(RequestFailure failure) {
+    public static Status status(RequestFailure failure) {
         if (failure == null) return Status.OK;
         if (failure.getCause() instanceof StatusRuntimeException nativeError) return nativeError.getStatus();
         return (switch (failure.reason()) {
@@ -40,7 +41,7 @@ final class RtpErrors {
             case INTERNAL -> Status.INTERNAL;
         }).withDescription(failure.getMessage());
     }
-    static long code(RequestFailure failure) {
+    public static long code(RequestFailure failure) {
         if (failure == null) return 0;
         if (failure.getCause() instanceof StatusRuntimeException nativeError) {
             var trailers = nativeError.getTrailers();

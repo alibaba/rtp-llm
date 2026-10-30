@@ -315,7 +315,8 @@ Java 产生指标并暴露 `/metrics`；Python 直接调用 Prometheus HTTP API�
 | `java/master/` | 真实 Master 的启动入口、生产状态到公共读取接口的适配、独立 ZK 启动入口。 |
 | `java/client/` | client0 协调、Player 控速、LoadClient 队列/并发/生命周期、NativeClient 原生收发与实际计时。 |
 | `java/shared/vit/` | 跨后端共用的 V Engine：图像编码、组批、embedding/hash 字节缓存和节点装配。 |
-| `java/backend/rtp/` | RTP 协议适配、P/D 调度策略、资源申请时机、P/D 交接与节点装配。 |
+| `java/shared/admission/` | 共享接入层：RPC、Batch/Fetch、PD 通信、输出编码与状态适配；不依赖后端实现。 |
+| `java/backend/rtp/` | RTP 配置解析、P/D 调度策略、资源申请时机和节点装配。 |
 | `java/shared/multimodal/` | 原生媒体输入、Mock 元数据校验与 TCP 客户端，无 V 服务、计算或缓存依赖。 |
 | `java/shared/engine/` | EngineLoop/Scheduler 执行边界及工厂契约、RequestState 进度与终态/资源使用权、QueueSnapshot 请求计数。 |
 | `java/shared/compute/` | Forward batch、公式、噪声、Decode 推进、停止模型和可取消计时。 |
@@ -346,7 +347,7 @@ Python 运行时按以下边界组织。`RunEnvironment` 装配实例并安排�
 
 新增 Case 操作在 `interfaces/` 用现有装饰器注册；新增角色生命周期行为进入对应服务；只有新的跨服务启动/收尾顺序才修改 `RunEnvironment`。不为接口名、角色名或 Case 名向 Runner 主循环增加分支，也不引入通用插件框架或事件总线。配置入口和业务 Case 的下一批接线以这些边界为基础，本批保持现有 YAML 参数、返回值与产物格式。
 
-共享指代码复用，不是不同实例共享资源。本批按职责重写 LocalPrefill/DecodeAdmission：它们保留原生校验、ALLOCATE/LOAD/GENERATE 协议状态和响应编码，通过公共 Scheduler.Request 句柄与 EngineLoop 交互；RtpTasks 只转换输入与状态编码，RtpErrors 负责原生错误码；上报阶段、准入等待时间和终态完成记录由 RtpScheduler 提交。RtpScheduler 无 gRPC/protobuf/执行器依赖，拥有 FIFO、持续 running、资源准入和执行结果提交。
+共享指代码复用，不是不同实例共享资源。本批按职责重写 LocalPrefill/DecodeAdmission：它们保留原生校验、ALLOCATE/LOAD/GENERATE 协议状态和响应编码，通过公共 Scheduler.Request 句柄与 EngineLoop 交互；RpcTasks 只转换输入与状态编码，RpcErrors 负责原生错误码；上报阶段、准入等待时间和终态完成记录由 RtpScheduler 提交。RtpScheduler 无 gRPC/protobuf/执行器依赖，拥有 FIFO、持续 running、资源准入和执行结果提交。
 
 RequestState 是共享的请求进度、终态和资源清理机制。调度器决定何时申请和成功发布缓存；公共机制确保终态只通知一次、发布失败也尝试释放、取消请求不能再提交进度。Forward 持有资源使用权，终止请求不会提前释放仍被使用的块；EngineLoop 对执行对象做身份校验，晚到回调不能影响下一次执行。当前模拟 Forward 使用可取消计时；单成员取消保留整批执行，全部成员终止或关闭 Engine 时才取消计时并释放使用权。
 
@@ -659,7 +660,7 @@ environment:
 
 原生字段支持 server_args 小写或 Whale 大写 env 名，同一字段同时提供两种写法报错；整数/布尔接受对应原生文本，其余原生内容保留，但不能据此宣称功能已模拟。当前要求显式 block size、max sequence length 和 test_block_num，只支持 `dp_size=1`、`dp_rank=0`；P/D 批量上限取 1–1024，默认 1。Mock 一个 Engine 表示完整计算体，不拆 CP/TP/DP rank 或模拟 rank 间通信；内部并行的影响由整 Engine 的性能公式、容量和调度配置表达。block size 是本 Engine 的逻辑分配粒度，PD 不根据 CP 数乘除。配置导入时应先统一容量口径。不加载模型层/head 或 GPU 布局，不从部署内存推导 KV 块数。
 
-RTP 请求公共支持范围集中在 `RtpRequestValidation`，本地单 token、P/D Prefill 及 Decode ALLOCATE 均使用它：adapter/unique_key、多 beam/多返回、stop words、sp_edit/sp_input_lookup、额外 logits/hidden/prob/loss 输出明确拒绝。路径只保留自身角色、长度、路由和协议阶段规则。测试通过实际 gRPC 同时验证 max_new_tokens=1/2 和 D ALLOCATE，防止参数只在一条路径被拒绝。
+RTP 请求公共支持范围集中在 `RequestValidation`，本地单 token、P/D Prefill 及 Decode ALLOCATE 均使用它：adapter/unique_key、多 beam/多返回、stop words、sp_edit/sp_input_lookup、额外 logits/hidden/prob/loss 输出明确拒绝。路径只保留自身角色、长度、路由和协议阶段规则。测试通过实际 gRPC 同时验证 max_new_tokens=1/2 和 D ALLOCATE，防止参数只在一条路径被拒绝。
 
 ### 执行和 P/D 交接
 
@@ -741,7 +742,7 @@ Embedding Device/Host 按逻辑 rows*hidden_size*BF16(2 bytes) 计费，各自 L
 
 Client 按 Master 的 V-only route 选 V，读取元数据、准备特征 token，再带 selected_vit 请求完整 P/D 路由；Master 切换使 pin 失效时重新取一次 V 路由。P 在输入准备完成后才把规范化 token 序列交给 KV/Scheduler，并用同一输入准备 D ALLOCATE 和 PD 交接。P 的输入准备发生在调度锁外，受原请求 deadline/取消约束；这段准备暂不计入 P Scheduler 的队列快照，但计入 Client 端到端耗时。D 接收已准备输入，不重复编码。
 
-本地单 token 的输入准备由 RtpRpcService 负责，P/D 单请求和 Master batch 由 PrefillGeneration 负责；LocalPrefill 的单个与批量提交只接受已准备输入，拒绝尚带媒体内容的请求，不调用 V。本地入口保留准备前的请求开始时间；各路径沿用原请求 deadline，不在准备完成后重置超时预算。
+本地单 token 的输入准备由 RpcService 负责，P/D 单请求和 Master batch 由 PrefillGeneration 负责；LocalPrefill 的单个与批量提交只接受已准备输入，拒绝尚带媒体内容的请求，不调用 V。本地入口保留准备前的请求开始时间；各路径沿用原请求 deadline，不在准备完成后重置超时预算。
 
 VP 同 JVM 和跨进程都走 TCP gRPC，只传 shape/dtype、split_size 和逐行 INT32 hash，不生成 embedding payload，也不伪造 RDMA lease。Mock P 校验形状、长度和展开 span 后使用；此响应不能交给真实 tensor 解码器，VP 网络带宽和 GPU 内存复制不在模拟范围内。
 
@@ -952,3 +953,7 @@ Master HA Case 在 environment 中声明两个独立 Master JVM，启动后通�
 原生 Master 的正常停止和最终清理使用每进程 60 秒退出预算，覆盖选举交接、gRPC 静默期和资源回收。最终清理按启动尝试的逆序逐个等待退出，期间保持其他 Master、Engine 和 ZooKeeper 存活；超时仍强杀并记录清理错误，不把退出失败当作成功。
 
 接入层只处理原生 RPC 的解析、响应关联和异步输出；Scheduler 是队列、计算进度、容量和终态的唯一来源。D 的网络不可写只阻塞输出缓冲发送，不再阻塞 Decode Forward 或 KV 释放；缓冲仍受请求生成长度和整体输出保留策略约束。PD 交接只保留 ALLOCATE→Prefill 完成→LOAD/ACK→GENERATE 或 PREFILL_COMPLETE，不实现额外来源注册表、Reader 所有权及自定义 proto。Wire 阶段仅用于拒绝乱序帧，不代替 Scheduler 的调度状态。
+
+接入组件独立为 `mock-admission`（`java/shared/admission`，包名 `org.flexlb.mock.admission`）。对外入口为 `RpcService`，只接收 `AdmissionConfig`、实例自己的 `KvCache` 和现有 `Scheduler.Factory`。`AdmissionConfig` 只含身份、角色、块大小、TP、序列/批 Token 上限和 ComputeModel，不包含排队、抢占或组批策略。RTP 后端通过 `RtpConfig.endpoint()` 提供这些值，由 `RtpNode` 装配 `RtpScheduler.factory(config)`；换 Scheduler 不需要复制接入代码。模块只有当前这一套 RPC，不增加协议选择、接入基类或插件注册机制。
+
+接入层的独立测试只依赖共享组件，用独立测试 Scheduler 验证 P/D 入队、错误返回和锁归属；真实 RTP 策略的 RPC/PD 集成测试仍在后端模块中运行。模块依赖方向为后端→接入层→共享运行组件，不存在接入层→后端依赖。
