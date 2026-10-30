@@ -141,17 +141,17 @@ def test_real_master_replacement_with_uninterrupted_client_plan(tmp_path, batche
     from mock_framework.input import write_inputs, pb
     source = tmp_path / 'traffic.binpb.zst'
     write_inputs(source, (pb.Request(token_ids=[1, 2, 3], max_new_tokens=3) for _ in range(800)))
-    steps = [step('leader', 'master/leadership/get', expect={'count': 1}),
+    steps = [step('leader', 'master/get', args={'is_leader': True}, expect={'count': 1}),
         step('traffic', 'client/start', args={'requests_file': source.name,
             'qps': 8, 'concurrency': 32, 'queue_capacity': 64, 'request_timeout': '5s', 'drain_timeout': '5s'}, wait_after='4s'),
         step('before', 'test/client_progress', expect={'gte': 1}),
         step('stop_primary', 'master/stop', args={'targets': {'ref': 'steps.leader'}}, wait_after='10s'),
-        step('survivor', 'master/leadership/get', expect={'count': 1}),
+        step('survivor', 'master/get', args={'is_leader': True}, expect={'count': 1}),
         step('after_first', 'test/client_progress', expect={'gte': {'ref': 'steps.before'}}),
         step('replacement', 'master/start', within='60s', wait_after='3s'),
         step('before_second', 'test/client_progress'),
         step('stop_survivor', 'master/stop', args={'targets': {'ref': 'steps.survivor'}}, wait_after='10s'),
-        step('new_leader', 'master/leadership/get', expect={'eq': {'ref': 'steps.replacement'}}),
+        step('new_leader', 'master/get', args={'is_leader': True}, expect={'eq': {'ref': 'steps.replacement'}}),
         step('after_second', 'test/client_progress', expect={'gte': {'ref': 'steps.before_second'}}, wait_after='3s'),
         step('steady', 'test/client_progress', expect={'gte': {'ref': 'steps.after_second'}}),
         step('engines', 'master/engine/get'), step('collected', 'client/stop')]
@@ -235,10 +235,10 @@ def test_native_restart_preserves_address_and_refreshes_only_current_discovery(t
     document = dict(id='restart', describe='Native restart and current discovery',
         environment={'master': {'config': config}, 'prefill': engine, 'decode': engine},
         phases=[dict(id='lifecycle', describe='restart', timeout='120s', steps=[
-            step('a', 'master/leadership/get', expect={'count': 1}),
+            step('a', 'master/get', args={'is_leader': True}, expect={'count': 1}),
             step('killed', 'master/stop', args={'targets': {'ref': 'steps.a'}, 'mode': 'kill'}),
             step('restored', 'master/restart', args={'targets': {'ref': 'steps.a'}}, within='60s', wait_after='2s'),
-            step('leader', 'master/leadership/get', expect={'eq': {'ref': 'steps.a'}}),
+            step('leader', 'master/get', args={'is_leader': True}, expect={'eq': {'ref': 'steps.a'}}),
             step('added', 'engine/scale_out', args={'role': 'prefill', 'count': 1}, expect={'count': 1})])])
     source = tmp_path / 'case.yaml'; source.write_text(yaml.safe_dump(document))
     registry = Registry.standard(); case = compile_case(source, registry)

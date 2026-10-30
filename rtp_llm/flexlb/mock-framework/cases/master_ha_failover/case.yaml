@@ -27,18 +27,20 @@ phases:
   steps:
   - id: get_master_a
     describe: 记录当前唯一主 Master 的实际地址列表作为 A。
-    interface: master/leadership/get
+    interface: master/get
+    args: {is_leader: true}
     expect:
       count: 1
   - id: get_master_b
     describe: 记录声明自己非主的唯一 Master 作为 B。
-    interface: master/leadership/get
+    interface: master/get
     args: {is_leader: false}
     expect:
       count: 1
   - id: check_initial_master_leader
     describe: 检查所有存活 Master 中唯一的主节点。
-    interface: master/leadership/get
+    interface: master/get
+    args: {is_leader: true}
     expect:
       eq:
         ref: steps.get_master_a
@@ -81,7 +83,8 @@ phases:
     wait_after: 30s
   - id: check_master_leader_after_kill_a
     describe: 检查所有存活 Master 中唯一的主节点。
-    interface: master/leadership/get
+    interface: master/get
+    args: {is_leader: true}
     expect:
       eq:
         ref: steps.get_master_b
@@ -107,7 +110,8 @@ phases:
     wait_after: 30s
   - id: check_master_leader_after_restart_a
     describe: 检查所有存活 Master 中唯一的主节点。
-    interface: master/leadership/get
+    interface: master/get
+    args: {is_leader: true}
     expect:
       eq:
         ref: steps.get_master_b
@@ -125,7 +129,8 @@ phases:
     wait_after: 30s
   - id: check_master_leader_after_kill_b
     describe: 检查所有存活 Master 中唯一的主节点。
-    interface: master/leadership/get
+    interface: master/get
+    args: {is_leader: true}
     expect:
       eq:
         ref: steps.get_master_a
@@ -151,7 +156,8 @@ phases:
     wait_after: 30s
   - id: check_master_leader_after_restart_b
     describe: 检查所有存活 Master 中唯一的主节点。
-    interface: master/leadership/get
+    interface: master/get
+    args: {is_leader: true}
     expect:
       eq:
         ref: steps.get_master_a

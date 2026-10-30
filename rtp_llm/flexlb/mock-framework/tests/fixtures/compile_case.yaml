@@ -17,12 +17,14 @@ phases:
     steps:
       - id: leader
         describe: Observe leadership
-        interface: master/leadership/get
+        interface: master/get
+        args: {is_leader: true}
         expect: {count: 1}
       - id: again
         describe: Query the selected Master
-        interface: master/leadership/get
+        interface: master/get
         args:
+          is_leader: true
           targets: {ref: steps.leader}
       - id: tps
         describe: Observe actual compute throughput
