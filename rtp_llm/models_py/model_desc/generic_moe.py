@@ -2,6 +2,8 @@ import os
 from typing import Any, Dict, Optional
 
 import torch
+from torch import nn
+
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py import prefill_optimization as _prefill_optimization
@@ -39,7 +41,6 @@ from rtp_llm.ops import HWKernelConfig, MoeConfig, ParallelismConfig
 from rtp_llm.ops.compute_ops import LayerKVCache, PyModelInputs, PyModelOutputs
 from rtp_llm.utils.dsa_indexing import dsa_layer_has_indexer, dsa_layer_skips_topk
 from rtp_llm.utils.model_weight import W
-from torch import nn
 
 try:
     from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp8_gemm_linear import (
@@ -150,6 +151,7 @@ class GenericMoeLayer(nn.Module):
             "mega_moe_se",
             "mega_moe_fused",
             "mega_moe_fp8_se",
+            "gc_moe_se",
         )
         self._use_mega_moe_fused_shared = (
             moe_config.moe_strategy in fused_shared_strategies
@@ -176,8 +178,22 @@ class GenericMoeLayer(nn.Module):
             "mega_moe_fp8",
             "mega_moe_fp8_se",
             "mega_moe_fused",
+            "gc_moe",
+            "gc_moe_se",
         ):
-            if moe_config.moe_strategy == "mega_moe_se":
+            if moe_config.moe_strategy == "gc_moe_se":
+                from rtp_llm.models_py.modules.glm5_gc_moe.gc_moe_se_wrapper import (
+                    GCMoeSEWrapper,
+                )
+
+                wrapper_cls = GCMoeSEWrapper
+            elif moe_config.moe_strategy == "gc_moe":
+                from rtp_llm.models_py.modules.glm5_gc_moe.gc_moe_wrapper import (
+                    GCMoeWrapper,
+                )
+
+                wrapper_cls = GCMoeWrapper
+            elif moe_config.moe_strategy == "mega_moe_se":
                 from rtp_llm.models_py.modules.glm5_mega_moe.mega_moe_se_wrapper import (
                     MegaMoeSEWrapper,
                 )
@@ -503,7 +519,7 @@ class GenericMoeDecoderLayer(nn.Module):
                 or os.environ.get("RTP_LLM_CP_KV_CROSS_LAYER", "1") == "1"
             )
             and layer_idx in config.moe_layer_index
-            and str(moe_config.moe_strategy).startswith("mega_moe")
+            and str(moe_config.moe_strategy).startswith(("mega_moe", "gc_moe"))
         )
 
         # Get quant_config from model_config

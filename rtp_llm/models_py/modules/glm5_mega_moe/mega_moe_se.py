@@ -107,8 +107,6 @@ class GLM5MegaMoESE(GLM5MegaMoE):
         w2_s: torch.Tensor,
     ) -> None:
         """Transform full-rank FP8 shared weights for unified MegaMoE."""
-        import deep_gemm
-
         cfg = self.cfg
         if w1_w.dtype != torch.float8_e4m3fn or w2_w.dtype != torch.float8_e4m3fn:
             raise TypeError(
@@ -158,7 +156,7 @@ class GLM5MegaMoESE(GLM5MegaMoE):
         (self._shared_l1_w, self._shared_l1_sf), (
             self._shared_l2_w,
             self._shared_l2_sf,
-        ) = deep_gemm.transform_weights_for_mega_moe(
+        ) = self._transform_shared_fp8_weights(
             (w1_w.contiguous(), w1_sf),
             (w2_w.contiguous(), w2_sf),
         )
@@ -171,6 +169,12 @@ class GLM5MegaMoESE(GLM5MegaMoE):
             shared_intermediate,
         )
         self._setup_buffer_and_warmup()
+
+    def _transform_shared_fp8_weights(self, l1, l2):
+        """Apply the DeepGEMM shared layout; GC overrides this hook."""
+        import deep_gemm
+
+        return deep_gemm.transform_weights_for_mega_moe(l1, l2)
 
     def maybe_warmup_fused_shared_jit_once(self) -> None:
         self._maybe_warmup_jit_once()

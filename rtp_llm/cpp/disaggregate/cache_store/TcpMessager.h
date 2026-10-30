@@ -3,6 +3,7 @@
 #include "rtp_llm/cpp/disaggregate/cache_store/Messager.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/TcpServer.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/TcpCacheStoreServiceImpl.h"
+#include "autil/ThreadPool.h"
 
 namespace rtp_llm {
 
@@ -12,7 +13,7 @@ public:
                 const std::shared_ptr<RequestBlockBufferStore>& request_block_buffer_store,
                 const kmonitor::MetricsReporterPtr&             metrics_reporter):
         Messager(memory_util, request_block_buffer_store, metrics_reporter) {}
-    virtual ~TcpMessager() = default;
+    ~TcpMessager() override;
 
 public:
     bool init(MessagerInitParams params) override;
@@ -26,6 +27,7 @@ protected:
                            uint32_t                            local_partition_id) override;
 
 private:
+    std::unique_ptr<autil::ThreadPool>        load_response_pool_;
     std::shared_ptr<TcpServer>                tcp_server_;
     std::shared_ptr<TcpCacheStoreServiceImpl> service_;
 };

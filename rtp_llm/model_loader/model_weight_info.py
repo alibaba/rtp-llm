@@ -59,7 +59,9 @@ def _apply_mega_moe_fp4_wrappers(
         ``MOE_STRATEGY=mega_moe_se`` or ``mega_moe_fused`` additionally wraps
         shared experts as FP8 per-block
         (:class:`OfflineMegaMoeFp8SharedExpertWeight`);
-        ``MOE_STRATEGY=mega_moe`` leaves shared experts on the normal FFN path.
+        ``MOE_STRATEGY=mega_moe`` or ``gc_moe`` leaves shared experts on the
+        normal FFN path. ``gc_moe_se`` loads the same FP8 shared checkpoint
+        weights as ``mega_moe_se``.
       - ``MoeAtomicWeight`` (BF16 ckpt): wrap with
         :class:`OnlineMegaMoeFp4Weight` (BF16 → FP4).
       - ``PerBlockFp8Weight`` for moe_w1/moe_w2 (FP8 ckpt under

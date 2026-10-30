@@ -1117,21 +1117,20 @@ void MtpExecutor::stageAcceptLenMetrics(const torch::Tensor& accept_len,
     accept_len_ready_event.block(collect_metrics_stream_);
     bool fused_metrics = prepared_rows.defined() && prepared_total.defined();
     if (fused_metrics) {
-        RTP_LLM_CHECK(prepared_rows.device() == accept_len.device()
-                      && prepared_total.device() == accept_len.device()
-                      && prepared_rows.scalar_type() == torch::kInt64
-                      && prepared_total.scalar_type() == torch::kInt64
+        RTP_LLM_CHECK(prepared_rows.device() == accept_len.device() && prepared_total.device() == accept_len.device()
+                      && prepared_rows.scalar_type() == torch::kInt64 && prepared_total.scalar_type() == torch::kInt64
                       && prepared_rows.numel() == accept_len.numel() && prepared_total.numel() == 1);
         // Retain tensors until the existing metrics-stream D2H event completes.
         metrics_accept_len_rows_gpu_ = prepared_rows;
-        metrics_accept_len_sum_gpu_ = prepared_total;
+        metrics_accept_len_sum_gpu_  = prepared_total;
     }
 #if USING_CUDA
-    fused_metrics = fused_metrics || (mtpFusionEnabled()
-                    && tryMtpAcceptMetrics(accept_len,
-                                           metrics_accept_len_rows_gpu_,
-                                           metrics_accept_len_sum_gpu_,
-                                           cuda_graph::graphGetCurrentStream().stream()));
+    fused_metrics = fused_metrics
+                    || (mtpFusionEnabled()
+                        && tryMtpAcceptMetrics(accept_len,
+                                               metrics_accept_len_rows_gpu_,
+                                               metrics_accept_len_sum_gpu_,
+                                               cuda_graph::graphGetCurrentStream().stream()));
 #endif
     if (!fused_metrics) {
         metrics_accept_len_rows_gpu_ = accept_len.to(torch::kInt64).flatten().contiguous();
@@ -1541,7 +1540,9 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
             const bool disable_sp_prefill_by_env   = kDisableSpPrefillCudaGraphByEnv;
             const bool force_sp_prefill_cuda_graph = kForceSpPrefillCudaGraphByEnv;
             const auto is_mega_moe_strategy        = [](const std::string& strategy) {
-                return strategy.rfind("mega_moe", 0) == 0;
+                // Both kernels perform ordered EP collectives on their own
+                // symmetric arenas; draft clones must follow the same policy.
+                return strategy.rfind("mega_moe", 0) == 0 || strategy.rfind("gc_moe", 0) == 0;
             };
             const bool draft_uses_mega_moe = is_mega_moe_strategy(params.moe_config.moe_strategy)
                                              || is_mega_moe_strategy(mtp_params->moe_config.moe_strategy);
@@ -3239,7 +3240,7 @@ void MtpExecutor::prepareStreams(const std::list<GenerateStreamPtr>& streams,
                 const auto& current_state = stream->getMtpAsyncDeviceState();
                 if (!current_state.mtp_indexer_topk_gpu.defined()
                     || current_state.mtp_indexer_topk_gpu.numel() != mtp_indexer_topk_) {
-                    auto state = current_state;
+                    auto          state       = current_state;
                     auto          options     = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
                     auto          seed        = mtpFusionEnabled() ? torch::empty({1, mtp_indexer_topk_}, options) :
                                                                      torch::full({1, mtp_indexer_topk_}, -1, options);
@@ -3593,12 +3594,12 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
         }
         auto fast_topk_sampler_output =
             fast_topk_sampler_->forward(draft_decode_model_output.logits, 1, &sample_context);
-        auto draft_probs              = fast_topk_sampler_output.all_probs;
+        auto draft_probs = fast_topk_sampler_output.all_probs;
         auto draft_probs_reshape =
             draft_probs.defined() ? draft_probs.reshape({(int)batch_size, 1, -1}) : torch::Tensor();
-        auto draft_token_ids          = fast_topk_sampler_output.token_ids_int32.defined() ?
-                                            fast_topk_sampler_output.token_ids_int32 :
-                                            fast_topk_sampler_output.token_ids;
+        auto draft_token_ids = fast_topk_sampler_output.token_ids_int32.defined() ?
+                                   fast_topk_sampler_output.token_ids_int32 :
+                                   fast_topk_sampler_output.token_ids;
 
         if (model_input.is_fake_stream && !fast_topk_sampler_output.fake_inputs_prepared) {
             c10::InferenceMode inference_mode(true);
@@ -3796,7 +3797,7 @@ void MtpExecutor::publishSyncMtpDeviceState(const StreamGroups&                 
                                          cuda_graph::graphGetCurrentStream().stream());
     }
 #endif
-    const auto    stream_hidden_len = static_cast<int64_t>(propose_step_ + 1);
+    const auto stream_hidden_len = static_cast<int64_t>(propose_step_ + 1);
     if (!fused_state && propose_step_ > 1 && draft_all_hidden_full.defined()) {
         const auto hidden_size = draft_all_hidden_full.size(1);
         auto       hidden_3d   = draft_all_hidden_full.reshape({batch_size, stream_hidden_len, hidden_size});
@@ -3814,19 +3815,19 @@ void MtpExecutor::publishSyncMtpDeviceState(const StreamGroups&                 
 
     std::shared_ptr<GenerateStream::MtpBatchDeviceState> batch_state;
     if (mtpFusionEnabled()) {
-        batch_state = std::make_shared<GenerateStream::MtpBatchDeviceState>();
-        batch_state->next_lengths = next_seq_len_owned;
-        batch_state->propose_tokens = propose_tokens_all;
+        batch_state                  = std::make_shared<GenerateStream::MtpBatchDeviceState>();
+        batch_state->next_lengths    = next_seq_len_owned;
+        batch_state->propose_tokens  = propose_tokens_all;
         batch_state->selected_tokens = selected_tokens_all;
-        batch_state->hidden_states = last_hidden_all;
+        batch_state->hidden_states   = last_hidden_all;
     }
     // Assign per-stream views
     int64_t probs_batch_off = 0;
     int64_t idx             = 0;
     for (auto& stream : all_streams) {
         GenerateStream::MtpAsyncDeviceState state;
-        state.batch = batch_state;
-        state.batch_row = idx;
+        state.batch             = batch_state;
+        state.batch_row         = idx;
         state.accept_len_gpu    = accept_len_all.narrow(0, idx, 1);
         state.accept_tokens_gpu = accept_tokens_all.narrow(0, idx, 1);
         state.propose_tokens_gpu =
@@ -3896,7 +3897,7 @@ absl::Status MtpExecutor::dispatchDecodeAsync(const StreamGroups&               
     if (accept_len_gpu_all.defined() && batch_size > 0) {
         // Build prev_seq_len per-stream: use device state when available,
         // fall back to host seqLength for new streams without device state.
-        std::vector<torch::Tensor> prev_slices;
+        std::vector<torch::Tensor>  prev_slices;
         std::vector<const int32_t*> previous_rows;
         prev_slices.reserve(batch_size);
         previous_rows.reserve(batch_size);
@@ -3907,14 +3908,13 @@ absl::Status MtpExecutor::dispatchDecodeAsync(const StreamGroups&               
                 prev_slices.push_back(gpu_val.dim() == 1 ? gpu_val : gpu_val.reshape({1}));
                 const auto& state = stream->getMtpAsyncDeviceState();
                 const auto& owner = state.batch;
-                if (owner && state.batch_row >= 0 && owner->next_lengths.defined()
-                    && owner->next_lengths.is_cuda() && owner->next_lengths.scalar_type() == torch::kInt32
-                    && owner->next_lengths.is_contiguous() && owner->next_lengths.dim() == 1
-                    && state.batch_row < owner->next_lengths.numel()
+                if (owner && state.batch_row >= 0 && owner->next_lengths.defined() && owner->next_lengths.is_cuda()
+                    && owner->next_lengths.scalar_type() == torch::kInt32 && owner->next_lengths.is_contiguous()
+                    && owner->next_lengths.dim() == 1 && state.batch_row < owner->next_lengths.numel()
                     && owner->next_lengths.device() == accept_len_gpu_all.device()) {
                     previous_rows.push_back(owner->next_lengths.data_ptr<int32_t>() + state.batch_row);
-                } else if (gpu_val.scalar_type() == torch::kInt32 && gpu_val.is_contiguous()
-                           && gpu_val.numel() == 1 && gpu_val.device() == accept_len_gpu_all.device()) {
+                } else if (gpu_val.scalar_type() == torch::kInt32 && gpu_val.is_contiguous() && gpu_val.numel() == 1
+                           && gpu_val.device() == accept_len_gpu_all.device()) {
                     previous_rows.push_back(gpu_val.data_ptr<int32_t>());
                 } else {
                     mapped_lengths = false;
@@ -3926,8 +3926,8 @@ absl::Status MtpExecutor::dispatchDecodeAsync(const StreamGroups&               
         }
         if (!mapped_lengths) {
             previous_rows.clear();
-            prev_seq_len_all = mtpFusionEnabled() && prev_slices.size() == 1 ?
-                                   prev_slices.front() : torch::cat(prev_slices, 0);
+            prev_seq_len_all =
+                mtpFusionEnabled() && prev_slices.size() == 1 ? prev_slices.front() : torch::cat(prev_slices, 0);
         }
 
         auto accept_len_i32 = accept_len_gpu_all.to(torch::kInt32);
@@ -3941,7 +3941,8 @@ absl::Status MtpExecutor::dispatchDecodeAsync(const StreamGroups&               
                                              next_seq_len_all,
                                              selected_tokens_all,
                                              last_hidden_all,
-                                             at::cuda::getCurrentCUDAStream().stream(), previous_rows);
+                                             at::cuda::getCurrentCUDAStream().stream(),
+                                             previous_rows);
         }
         if (!fused_state) {
             if (!prev_seq_len_all.defined())
@@ -3964,7 +3965,7 @@ absl::Status MtpExecutor::dispatchDecodeAsync(const StreamGroups&               
     }
 
     // 2. Batch gather hidden states (1 gather op instead of N index_selects)
-    const auto    stream_hidden_len = static_cast<int64_t>(propose_step_ + 1);
+    const auto stream_hidden_len = static_cast<int64_t>(propose_step_ + 1);
     if (!fused_state && propose_step_ > 1 && draft_all_hidden_full.defined()) {
         const auto hidden_size  = draft_all_hidden_full.size(1);
         auto       hidden_3d    = draft_all_hidden_full.reshape({batch_size, stream_hidden_len, hidden_size});
@@ -3980,19 +3981,19 @@ absl::Status MtpExecutor::dispatchDecodeAsync(const StreamGroups&               
 
     std::shared_ptr<GenerateStream::MtpBatchDeviceState> batch_state;
     if (mtpFusionEnabled()) {
-        batch_state = std::make_shared<GenerateStream::MtpBatchDeviceState>();
-        batch_state->next_lengths = next_seq_len_all;
-        batch_state->propose_tokens = propose_tokens_gpu_all;
+        batch_state                  = std::make_shared<GenerateStream::MtpBatchDeviceState>();
+        batch_state->next_lengths    = next_seq_len_all;
+        batch_state->propose_tokens  = propose_tokens_gpu_all;
         batch_state->selected_tokens = selected_tokens_all;
-        batch_state->hidden_states = last_hidden_all;
+        batch_state->hidden_states   = last_hidden_all;
     }
     // 4. Assign per-stream views (narrow is metadata-only, no kernel launch)
     int64_t probs_batch_off = 0;
     int64_t idx             = 0;
     for (auto& stream : all_streams) {
         GenerateStream::MtpAsyncDeviceState state;
-        state.batch = batch_state;
-        state.batch_row = idx;
+        state.batch                  = batch_state;
+        state.batch_row              = idx;
         state.accept_len_gpu         = accept_len_gpu_all.narrow(0, idx, 1);
         state.accept_tokens_gpu      = accept_tokens_gpu_all.narrow(0, idx, 1);
         state.propose_tokens_gpu     = propose_tokens_gpu_all.narrow(0, idx, 1);

@@ -748,6 +748,8 @@ def is_mega_moe_strategy() -> bool:
         "mega_moe",
         "mega_moe_se",
         "mega_moe_fused",
+        "gc_moe",
+        "gc_moe_se",
     }
 
 
@@ -755,7 +757,11 @@ def is_mega_moe_fused_strategy() -> bool:
     """Return True when the selected FP8xFP4 kernel consumes shared weights."""
     import os
 
-    return os.environ.get("MOE_STRATEGY") in {"mega_moe_se", "mega_moe_fused"}
+    return os.environ.get("MOE_STRATEGY") in {
+        "mega_moe_se",
+        "mega_moe_fused",
+        "gc_moe_se",
+    }
 
 
 def is_online_fp4gemm_enabled() -> bool:

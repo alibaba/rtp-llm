@@ -103,6 +103,8 @@ class BackendManager(object):
             "mega_moe_fp8",
             "mega_moe_fp8_se",
             "mega_moe_fused",
+            "gc_moe",
+            "gc_moe_se",
         ):
             need_dist = True
         if need_dist:

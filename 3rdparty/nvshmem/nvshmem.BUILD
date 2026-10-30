@@ -25,7 +25,9 @@ cc_library(
         "usr/include/nvshmemx.h",
         "usr/include/nvshmem.h",
     ],
-    strip_include_prefix = "usr/include",
+    # Headers are already installed under /usr/include. A virtual include tree
+    # rooted at / also exposes glibc headers through -I, which breaks CUDA 13
+    # parsing of bits/floatn*.h with GCC 13.
     visibility = ["//visibility:public"],
 )
 
@@ -50,7 +52,7 @@ cc_library(
         "usr/include/nvshmemx.h",
         "usr/include/nvshmem.h",
     ],
-    strip_include_prefix = "usr/include",
+    # Use the system include path for the installed NVSHMEM headers; see above.
     copts = cuda_copts(),
     visibility = ["//visibility:public"],
 )
