@@ -30,6 +30,7 @@ from rtp_llm.models.base_model import BaseModel
 from rtp_llm.openai.api_datatype import (
     ChatCompletionExtraOutputs,
     ChatCompletionRequest,
+    ChatCompletionResponseStreamChoice,
     ChatCompletionStreamResponse,
     ChatMessage,
     DebugInfo,
@@ -40,6 +41,7 @@ from rtp_llm.openai.api_datatype import (
     GPTToolDefinition,
     RoleEnum,
     ToolCall,
+    UsageInfo,
 )
 from rtp_llm.openai.openai_endpoint import OpenaiEndpoint
 from rtp_llm.openai.renderer_factory import ChatRendererFactory, RendererParams
@@ -461,6 +463,98 @@ class QwenTestTokenizer(BaseTokenizer):
         self.tokenizer = QWenTokenizer(tokenizer_path)
         self.im_start_id = self.tokenizer.im_start_id
         self.im_end_id = self.tokenizer.im_end_id
+
+
+class OpenaiResponseCollectorTest(IsolatedAsyncioTestCase):
+    @staticmethod
+    async def _collect(frames):
+        async def responses():
+            for frame in frames:
+                yield frame
+
+        return await OpenaiEndpoint._collect_complete_response(responses(), None)
+
+    async def test_final_usage_frame_preserves_single_and_multiple_choices(self):
+        usage = UsageInfo(prompt_tokens=17, completion_tokens=9, total_tokens=26)
+        for choice_count in (1, 2):
+            with self.subTest(choice_count=choice_count):
+                frames = [
+                    custom_renderer.StreamResponseObject(
+                        choices=[
+                            ChatCompletionResponseStreamChoice(
+                                index=i,
+                                delta=DeltaMessage(
+                                    role=RoleEnum.assistant, content=f"{i}:"
+                                ),
+                            )
+                            for i in range(choice_count)
+                        ],
+                        extra_outputs=ChatCompletionExtraOutputs(input_ids=[[7, 8]]),
+                    ),
+                    custom_renderer.StreamResponseObject(
+                        choices=[
+                            ChatCompletionResponseStreamChoice(
+                                index=i,
+                                delta=DeltaMessage(content="answer"),
+                                finish_reason=FinisheReason.stop,
+                            )
+                            for i in range(choice_count)
+                        ],
+                    ),
+                    custom_renderer.StreamResponseObject(
+                        choices=[],
+                        usage=usage,
+                        aux_info=AuxInfo(input_len=17, output_len=9),
+                        extra_outputs=ChatCompletionExtraOutputs(
+                            custom_output=[[-0.25]]
+                        ),
+                    ),
+                ]
+                result = await self._collect(frames)
+                self.assertEqual(result.usage, usage)
+                self.assertEqual(result.aux_info.output_len, 9)
+                self.assertEqual(result.extra_outputs.input_ids, [[7, 8]])
+                self.assertEqual(result.extra_outputs.custom_output, [[-0.25]])
+                self.assertEqual(len(result.choices), choice_count)
+                for i, choice in enumerate(result.choices):
+                    self.assertEqual(choice.index, i)
+                    self.assertEqual(choice.message.content, f"{i}:answer")
+                    self.assertEqual(choice.finish_reason, FinisheReason.stop)
+
+    async def test_changed_nonempty_choice_count_is_rejected(self):
+        frames = [
+            custom_renderer.StreamResponseObject(
+                choices=[
+                    ChatCompletionResponseStreamChoice(
+                        index=0, delta=DeltaMessage(content="a")
+                    )
+                ],
+            ),
+            custom_renderer.StreamResponseObject(
+                choices=[
+                    ChatCompletionResponseStreamChoice(
+                        index=i, delta=DeltaMessage(content="b")
+                    )
+                    for i in range(2)
+                ],
+            ),
+        ]
+        with self.assertRaisesRegex(ValueError, "different length"):
+            await self._collect(frames)
+
+    async def test_empty_frame_without_usage_is_rejected_after_content(self):
+        frames = [
+            custom_renderer.StreamResponseObject(
+                choices=[
+                    ChatCompletionResponseStreamChoice(
+                        index=0, delta=DeltaMessage(content="a")
+                    )
+                ],
+            ),
+            custom_renderer.StreamResponseObject(choices=[]),
+        ]
+        with self.assertRaisesRegex(ValueError, "different length"):
+            await self._collect(frames)
 
 
 class OpenaiResponseTest(IsolatedAsyncioTestCase):
