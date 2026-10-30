@@ -393,6 +393,15 @@ models_py_test(
     deps = _REFERENCE_DEPS,
 )
 
+py_test(
+    name = "decode_rope_block64_repro_test",
+    srcs = ["decode_rope_block64_repro_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    env = {"GPU_COUNT": "1"},
+    tags = ["H20_CU13"],
+    exec_properties = {"gpu": "H20_CU13", "gpu_count": "1"},
+)
+
 models_py_test(
     name = "rope_cache_policy_test",
     src = "qsa/rope_cache_policy_test.py",
