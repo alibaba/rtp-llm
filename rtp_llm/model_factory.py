@@ -84,7 +84,11 @@ class ModelFactory:
             engine_config.runtime_config.model_warm_up,
         )
         model_type = model_config.model_type
-        model_cls = ModelFactory.get_model_cls(model_type)
+        from rtp_llm.platforms.model_dispatch import resolve_model_class
+
+        model_cls = resolve_model_class(
+            model_type, ModelFactory.get_model_cls(model_type), model_config
+        )
 
         # Get model_name from model_config (default to model class name if not set)
         model_name = model_config.model_name or model_cls.__name__
@@ -165,7 +169,13 @@ class ModelFactory:
                 sp_type = SpeculativeType.EAGLE3
 
             # Need to create GPT model for propose model
-            model_cls = ModelFactory.get_model_cls(propose_model_config.model_type)
+            from rtp_llm.platforms.model_dispatch import resolve_model_class
+
+            model_cls = resolve_model_class(
+                propose_model_config.model_type,
+                ModelFactory.get_model_cls(propose_model_config.model_type),
+                propose_model_config,
+            )
             # propose model's max seq len must be equal to score model's max seq len
             propose_model_config.max_seq_len = model_config.max_seq_len
             propose_model_config.gen_num_per_cycle = model_config.gen_num_per_cycle
@@ -419,6 +429,14 @@ class ModelFactory:
             seq_size_per_block=model_config.attn_config.tokens_per_block,
         )
         scheduler_config = engine_config.runtime_config.fifo_scheduler_config
+        prefill_chunk_size = int(scheduler_config.prefill_chunk_size)
+        # Some smoke paths pass the pybind C++ ModelConfig, which predates the
+        # Python-only field. Preserve the value on Python configs while keeping
+        # those legacy bindings usable.
+        try:
+            model_config.prefill_chunk_size = prefill_chunk_size
+        except AttributeError:
+            pass
         # Generic MoE executors allocate their fixed-capacity communication
         # buffers while the Python model is constructed. Preserve the finalized
         # scheduler prefill bound on the model config so those buffers cover a
@@ -426,7 +444,12 @@ class ModelFactory:
         model_config.moe_prefill_max_tokens_per_rank = min(
             int(scheduler_config.max_context_batch_size)
             * int(model_config.max_seq_len),
-            int(scheduler_config.max_batch_tokens_size),
+            max(
+                int(scheduler_config.max_batch_tokens_size),
+                prefill_chunk_size
+                if prefill_chunk_size > 0
+                else int(model_config.max_seq_len),
+            ),
         )
 
         # Set model_name to engine_config.runtime_config.model_name (for backward compatibility)
@@ -508,6 +531,13 @@ class ModelFactory:
             propose_model_config, engine_config.kv_cache_config
         )
         propose_model_cls._post_build_model_config(propose_model_config)
+        propose_model_config.moe_prefill_max_tokens_per_rank = getattr(
+            model_config, "moe_prefill_max_tokens_per_rank", None
+        )
+        try:
+            propose_model_config.prefill_chunk_size = getattr(model_config, "prefill_chunk_size", 0)
+        except AttributeError:
+            pass
 
         if sp_config.type == SpeculativeType.DSPARK:
             ModelFactory._setup_dspark_configs(

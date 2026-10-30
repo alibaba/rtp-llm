@@ -529,6 +529,34 @@ std::shared_ptr<GenerateInput> NormalEngine::makeFakeInput(size_t seq_len) {
     return fake_input;
 }
 
+absl::Status NormalEngine::runPrefillWarmupBatch(const ResourceContext& resource_context,
+                                                 int64_t                per_request_tokens,
+                                                 int64_t                token_budget,
+                                                 int64_t                max_input_length) {
+    c10::InferenceMode inference_guard(true);
+    const int64_t block_size = model_config_.attn_config.tokens_per_block;
+    if (block_size <= 0 || per_request_tokens <= 0 || token_budget <= 0) {
+        return absl::InvalidArgumentError("invalid batched prefill warmup dimensions");
+    }
+    std::list<GenerateStreamPtr> streams;
+    for (int64_t row = 0; row < runtime_config.fifo_scheduler_config.max_context_batch_size && token_budget > 0;
+         ++row) {
+        const int64_t tokens = std::min(per_request_tokens, token_budget);
+        const int64_t reuse  = (max_input_length - tokens) / block_size * block_size;
+        auto input = makeFakeInput(static_cast<size_t>(reuse + tokens));
+        auto stream = std::make_shared<NormalGenerateStream>(
+            input, model_config_, runtime_config, resource_context, nullptr, 0, true);
+        stream->setIsFakeStream(true);
+        stream->setReuseLength(static_cast<int>(reuse));
+        stream->fakeInitKVBlock((stream->seqLength() + block_size - 1) / block_size);
+        stream->enableWarmupChunkWindow();
+        stream->setChunkSize(static_cast<int>(tokens));
+        streams.push_back(stream);
+        token_budget -= tokens;
+    }
+    return executor_->process(streams);
+}
+
 size_t NormalEngine::getWarmUpInputLength() const {
     const auto max_seq_len  = static_cast<size_t>(model_config_.max_seq_len);
     const auto reserve_step = reserve_step_ > 0 ? static_cast<size_t>(reserve_step_) : 0;
@@ -643,21 +671,10 @@ WarmUpResult NormalEngine::prefillWarmUp(const EngineInitParams& params) {
         max_consumed = memory_tracker->maxConsumedBytes();
         token_heavy_result.value().reset();
 
-        const int64_t block_size       = model_config_.attn_config.tokens_per_block;
-        const int64_t row_count =
-            std::min(token_budget, runtime_config.fifo_scheduler_config.max_context_batch_size);
-        const int64_t row_heavy_tokens = std::min(token_budget, token_heavy_seq_len);
-        const int64_t row_heavy_reuse  = (token_heavy_seq_len - row_heavy_tokens) / block_size * block_size;
-        auto          row_heavy_input  = makeFakeInput(static_cast<size_t>(row_heavy_reuse + row_heavy_tokens));
-        row_heavy_input->generate_config->num_return_sequences = static_cast<int>(row_count);
-
-        // Conservatively combine multiple rows with a full chunk per row and a long prefix.
-        // Run once without splitting by the scheduler's global token budget.
-        auto row_heavy_result = runPrefillWarmupShape(
-            row_heavy_input, warmup_resource_context, static_cast<int>(row_heavy_reuse), 0);
-        THROW_IF_STATUSOR_ERROR(row_heavy_result);
+        const int64_t per_request_tokens = std::min(token_budget, token_heavy_seq_len);
+        THROW_IF_STATUS_ERROR(runPrefillWarmupBatch(
+            warmup_resource_context, per_request_tokens, token_budget, token_heavy_seq_len));
         max_consumed = std::max(max_consumed, memory_tracker->maxConsumedBytes());
-        row_heavy_result.value().reset();
 
         const auto longest_system_prompt =
             std::max_element(kv_cache_config.multi_task_prompt_tokens.begin(),
