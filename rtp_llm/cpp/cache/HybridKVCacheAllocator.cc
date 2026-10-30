@@ -353,24 +353,27 @@ MallocResult HybridKVCacheAllocator::incrMalloc(const MallocInfo& malloc_info) {
             auto&       block_ids = kv_resource->mutableBlockIds(b, gid);
             const auto& original  = original_blocks[static_cast<size_t>(b)][static_cast<size_t>(gid)];
 
-            std::unordered_set<BlockIdxType> original_valid_blocks;
-            original_valid_blocks.reserve(original.size());
-            for (auto block : original) {
-                if (!isNullBlockIdx(block)) {
-                    original_valid_blocks.insert(block);
-                }
-            }
-
+            // LINEAR malloc may reclaim obsolete states before allocating its
+            // replacement tail. That cleanup is not reversible: a later group
+            // can fail after the old IDs have been freed (or reused at a new
+            // slot). Restore only references still held at their original
+            // positions, and release every newly allocated position. Comparing
+            // ID sets would resurrect freed states and miss recycled IDs.
+            BlockIndicesType restored_blocks(original.size(), NULL_BLOCK_IDX);
             BlockIndicesType blocks_to_free;
-            for (auto block : block_ids.blocks()) {
-                if (!isNullBlockIdx(block) && original_valid_blocks.find(block) == original_valid_blocks.end()) {
+            const auto&      current = block_ids.blocks();
+            for (size_t pos = 0; pos < current.size(); ++pos) {
+                const auto block = current[pos];
+                if (pos < original.size() && block == original[pos]) {
+                    restored_blocks[pos] = block;
+                } else if (!isNullBlockIdx(block)) {
                     blocks_to_free.push_back(block);
                 }
             }
             if (!blocks_to_free.empty()) {
                 freeBlocksInGroup(gid, blocks_to_free);
             }
-            block_ids.assign(original);
+            block_ids.assign(std::move(restored_blocks));
         }
     }
     RTP_LLM_LOG_WARNING("Hybrid incrMalloc failed at batch=%d group=%d", failed_batch, failed_group);
