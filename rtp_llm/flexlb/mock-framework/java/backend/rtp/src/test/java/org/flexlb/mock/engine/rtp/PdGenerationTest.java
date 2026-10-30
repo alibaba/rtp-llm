@@ -157,6 +157,7 @@ class PdGenerationTest {
     @Test void allGenerationPathsRejectTheSameUnsupportedInputsBeforeAdmission() throws Exception {
         try (var p = node("prefill", 16, 1); var d = node("decode", 16, 1)) {
             var modes = List.<java.util.function.Consumer<GenerateConfigPB.Builder>>of(
+                g -> g.setPrefillOnly(true),
                 g -> g.getStopWordsListBuilder().addRowsBuilder().addValues(1),
                 g -> g.setSpEdit(true), g -> g.setSpInputLookup(true),
                 g -> g.setReturnLogits(true), g -> g.setNumBeams(2), g -> g.setAdapterName(com.google.protobuf.StringValue.of("adapter")));
@@ -166,6 +167,10 @@ class PdGenerationTest {
                     var request = input(d, id++, 4, length, 1000, true).toBuilder();
                     mode.accept(request.getGenerateConfigBuilder());
                     try (var call = new Call(p, request.build())) { call.error(Status.Code.UNIMPLEMENTED); }
+                    var batch = enqueue(p, 2000, request.build());
+                    assertEquals(0, batch.getSuccessesCount());
+                    assertEquals(1, batch.getErrorsCount());
+                    assertEquals(Status.Code.UNIMPLEMENTED.value(), batch.getErrors(0).getErrorInfo().getErrorCode());
                     var rejected = new LinkedBlockingQueue<Throwable>();
                     var remote = RpcServiceGrpc.newStub(d.channel).withDeadlineAfter(2, TimeUnit.SECONDS).remoteGenerate(new StreamObserver<GenerateOutputsPB>() {
                         public void onNext(GenerateOutputsPB value) { fail("Unsupported input was admitted"); }
@@ -201,6 +206,45 @@ class PdGenerationTest {
     private static CancelStatusPB cancel(Harness p, long id) {
         return RpcServiceGrpc.newBlockingStub(p.channel).withDeadlineAfter(3, TimeUnit.SECONDS)
             .cancel(CancelRequestPB.newBuilder().setRequestId(id).build()).getStatus();
+    }
+
+    @Test void singleTokenBatchAndGroupCompleteWithoutDecodeForwardAndRetainFetchOutput() throws Exception {
+        try (var p = node("prefill", 16, 1); var d = node("decode", 16, 1)) {
+            long id = 2000;
+            for (boolean group : new boolean[]{false, true}) for (boolean canUsePd : new boolean[]{false, true}) {
+                var request = input(d, id++, 5, 1, 3000, true).toBuilder();
+                request.getGenerateConfigBuilder().setCanUsePdSeparation(canUsePd).setIgnoreEos(true);
+                var input = request.build();
+                var ack = group ? RpcServiceGrpc.newBlockingStub(p.channel).withDeadlineAfter(3, TimeUnit.SECONDS)
+                    .enqueueGroup(EnqueueGroupRequestPB.newBuilder().setBatchId(81)
+                        .addRequests(EnqueueGroupInputPB.newBuilder().setInput(input)).build()) : enqueue(p, 2000, input);
+                assertEquals(1, ack.getSuccessesCount()); assertEquals(0, ack.getErrorsCount());
+                await(() -> p.status().getRunningTaskInfoCount() == 0 && d.status().getRunningTaskInfoCount() == 0);
+                try (var call = new Call(p, input, true)) {
+                    call.output(1, true, 1); assertEquals("completed", call.next());
+                }
+                assertEquals(32, p.status().getAvailableKvCache()); assertEquals(32, d.status().getAvailableKvCache());
+            }
+            assertEquals(0, metric(d, "rtp_llm_model_forward_seconds_count", "role=\"decode\""));
+            assertTrue(p.status().getFinishedTaskListList().stream().noneMatch(TaskInfoPB::hasErrorInfo));
+            assertTrue(d.status().getFinishedTaskListList().stream().noneMatch(TaskInfoPB::hasErrorInfo));
+        }
+    }
+
+    @Test void mixedSingleAndMultiTokenBatchKeepsEachOutputLengthExact() throws Exception {
+        try (var p = node("prefill", 16, 1); var d = node("decode", 16, 1)) {
+            var one = input(d, 2100, 5, 1, 3000, true);
+            var many = input(d, 2101, 5, 3, 3000, true);
+            var ack = enqueue(p, 2000, one, many);
+            assertEquals(2, ack.getSuccessesCount()); assertEquals(0, ack.getErrorsCount());
+            try (var first = new Call(p, one, true); var second = new Call(p, many, true)) {
+                first.output(1, true, 1); assertEquals("completed", first.next());
+                for (int i = 1; i <= 3; i++) second.output(i, i == 3, 1);
+                assertEquals("completed", second.next());
+            }
+            await(() -> p.status().getRunningTaskInfoCount() == 0 && d.status().getRunningTaskInfoCount() == 0);
+            assertEquals(2, metric(d, "rtp_llm_forward_tokens_total", "kind=\"output\""));
+        }
     }
 
     @Test void batchCompletesBothSchedulersWithoutFetchAndRetainsOutput() throws Exception {

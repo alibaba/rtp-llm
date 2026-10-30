@@ -9,6 +9,8 @@ final class RtpRequestValidation {
 
     static void supported(GenerateInputPB input) {
         var g = input.getGenerateConfig();
+        if (g.getPrefillOnly())
+            throw Status.UNIMPLEMENTED.withDescription("Mock does not support prefill_only").asRuntimeException();
         if (g.hasAdapterName() || !g.getUniqueKey().isEmpty()
                 || g.getNumBeams() > 1 || g.getNumReturnSequences() > 1 || g.getVariableNumBeamsCount() > 0
                 || g.getReturnPromptLogits() || g.getReturnHiddenStates() || g.getReturnLogits() || g.getReturnAllHiddenStates()
