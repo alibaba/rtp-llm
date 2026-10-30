@@ -13,6 +13,8 @@ namespace rtp_llm {
 namespace block_tree_cache_detail {
 // Fault seam for a single publication-copy failure; null in production.
 inline std::atomic<void (*)()> before_transfer_publication_copy_for_test{nullptr};
+// A bounded test barrier after publication ownership is claimed; null in production.
+inline std::atomic<void (*)() noexcept> after_transfer_completion_claim_for_test{nullptr};
 }  // namespace block_tree_cache_detail
 
 class BroadcastManager;
