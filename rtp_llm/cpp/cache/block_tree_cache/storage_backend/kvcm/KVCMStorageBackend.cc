@@ -114,6 +114,10 @@ public:
         sdk_check_enabled_(autil::EnvUtil::getEnv("KVCM_SDK_CHECK", autil::EnvUtil::getEnv("RECO_SDK_CHECK", false))) {
     }
 
+    std::optional<ControlConfig> controlConfig() const {
+        return control_config_;
+    }
+
     bool init(const CacheTopology&                                                topology,
               StorageBackend::BufferResolver                                      buffer_resolver,
               const std::function<const DeviceBlockPoolPtr&(const std::string&)>& pool_resolver) {
@@ -267,6 +271,8 @@ public:
         const auto& config = client_config_map.at("");
         // Use prefix queries for the instance; payload reuse is filtered locally.
         config->set_default_query_type(default_query_type_);
+        ControlConfig control_config{config->instance_group(), config->instance_id(), config->registerInstanceRequest(),
+                                     config->enable_vipserver(), config->vipserver_domain(), config->addresses()};
         if (kv_cache_config_.kvcm_min_replica_count < 0
             || (kv_cache_config_.kvcm_read_backend_type != 0
                 && !isPayloadBackend(kv_cache_config_.kvcm_read_backend_type))) {
@@ -290,6 +296,7 @@ public:
             RTP_LLM_LOG_ERROR("create BlockTree KVCM clients failed");
             return false;
         }
+        control_config_ = std::move(control_config);
         const auto tp_rank = parallelism_config_.tp_rank;
         RTP_LLM_LOG_INFO("BlockTree KVCM storage backend initialized, tp_rank=%ld tp_size=%ld policy={%s}",
                          tp_rank,
@@ -1400,6 +1407,7 @@ private:
     std::shared_ptr<kmonitor::MetricsReporter>          metrics_reporter_;
     std::unique_ptr<kvcm::GroupPolicy>   group_policy_;
     std::shared_ptr<kvcm::ClientWrapper> client_wrapper_;
+    std::optional<ControlConfig> control_config_;
     const bool gdr_enabled_;
     std::vector<std::string>             registration_tags_;
     std::unordered_map<std::string, DeviceBlockPoolPtr> pools_by_tag_;
@@ -1457,6 +1465,10 @@ KVCMStorageBackend::KVCMStorageBackend(const CacheConfig& cache_config,
                        std::move(client_wrapper)) {}
 
 KVCMStorageBackend::~KVCMStorageBackend() = default;
+
+std::optional<KVCMStorageBackend::ControlConfig> KVCMStorageBackend::controlConfig() const {
+    return impl_->controlConfig();
+}
 
 bool KVCMStorageBackend::initImpl() {
     return impl_->init(
