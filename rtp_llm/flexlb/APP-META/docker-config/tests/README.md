@@ -44,7 +44,7 @@ successful Schedule can continue independently after FlexLB exits.
 From the FlexLB directory:
 
 ```bash
-./mvnw -B -P 'opensource,!internal' -pl flexlb-api,flexlb-mock-engine -am clean package \
+./mvnw -B -P 'opensource,!internal' -pl flexlb-api -am clean package \
   -Dtest=ConfigServiceTest,ApplicationLifecycleTest,FlexlbGrpcDrainTest,FlexlbServiceImplTest,AppStateHookServerTest,ScheduleForwardMatrixTest,FlexlbServiceCancelTest,FlexlbForwardHopGuardNettyTest,FollowerAsyncForwardingNettyTest \
   -Dsurefire.failIfNoSpecifiedTests=false
 python3 -m unittest discover -s APP-META/docker-config/tests -v
@@ -60,14 +60,22 @@ The old HTTP token-holding fixture has been removed.
 ## Packaged application + mock engine + real entry TERM
 
 ```bash
-python3 APP-META/docker-config/tests/run_mock_engine_term.py --scenario late --quiet-period-ms 7000 --output /tmp/flexlb-term-late
-python3 APP-META/docker-config/tests/run_mock_engine_term.py --scenario queued --output /tmp/flexlb-term-queued
-python3 APP-META/docker-config/tests/run_mock_engine_term.py --scenario engine --output /tmp/flexlb-term-engine
+uv run --locked --project mock-framework python APP-META/docker-config/tests/run_mock_engine_term.py --scenario late --quiet-period-ms 7000 --output /tmp/flexlb-term-late
+uv run --locked --project mock-framework python APP-META/docker-config/tests/run_mock_engine_term.py --scenario queued --output /tmp/flexlb-term-queued
+uv run --locked --project mock-framework python APP-META/docker-config/tests/run_mock_engine_term.py --scenario engine --output /tmp/flexlb-term-engine
 ```
 
-Output directories must not exist. Requires JDK 21, Python `grpcio`, `grpcio-tools`
-and `protobuf`, as does the existing `flexlb_ft` harness. Build jars first using
-the command above; do not rebuild them during a process test.
+Output directories must not exist. Set `JAVA_HOME` to JDK 21 and install `uv`.
+Build the packaged application and the current Mock artifacts first:
+
+```bash
+mock-framework/scripts/build.sh
+./mvnw -B -P 'opensource,!internal' -pl flexlb-api -am package -DskipTests
+```
+
+The test uses the locked Python dependencies from `mock-framework`. Do not rebuild
+artifacts during a process test. Producing the packaged application must follow
+the framework build, since it needs the executable Spring Boot jar.
 
 Every scenario launches `sh whale_start.sh`, the real supervisor and packaged
 Spring Boot application, then sends SIGTERM to the **entry PID**. Full production
@@ -86,9 +94,11 @@ TCP gRPC follows Schedule → EnqueueBatch → FetchResponse:
 - `engine`: send TERM after Schedule has returned; FlexLB exits while independent
   engine generation continues and finishes successfully.
 
-Each run checks request IDs, terminal output-length metadata, P/D completion
-records, successful entry exit and shutdown log timestamps. It records client
-and engine responses, process commands/PIDs, jar hashes and a result JSON.
+Each run checks sealed Client request evidence, one successful Schedule attempt
+per request, full output lengths, successful entry exit and shutdown log timestamps.
+It retains Engine configurations/logs, Master inflight state, Client evidence,
+process commands/PIDs, jar hashes and a result JSON. Decode running state is read
+from the current Engine's metrics; no legacy per-request diagnostics are required.
 Mock output metadata is checked; real model token contents are not generated.
 These are single-master tests with consistency disabled. They do not exercise
 ZK election, master handoff or production container cleanup.

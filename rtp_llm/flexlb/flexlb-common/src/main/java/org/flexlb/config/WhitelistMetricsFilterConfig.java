@@ -24,7 +24,7 @@ import java.util.stream.Collectors;
  * Metric whitelist — the single configurable {@code flexlb.} exposure
  * filter: only {@code flexlb.} prefixed metrics matching the comma-separated
  * {@code flexlb.monitor.metric-whitelist} command-line property are
- * registered/reported, so deployments (e.g. the online_eval harness) can
+ * registered/reported, so deployments (e.g. the Mock framework) can
  * trim the exposition surface down to exactly the series their collector
  * consumes.
  *
