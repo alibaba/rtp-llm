@@ -75,20 +75,23 @@ class CudaFp4GEMMLinear(LinearBase):
         self.alpha = self.weight_scale_2 * self.input_scale
         self.input_scale_inv = 1 / self.input_scale
         self.silu_quant_mask = None
-        self._decode_auto_backend = (
+        # The private CuTe runner is validated with the pinned CUDA 13 stack.
+        sm120_decode_enabled = (
             os.getenv("RTP_LLM_SM120_FUSION", "0") == "1"
             and self.backend == "cutlass"
+            and torch.version.cuda is not None
+            and torch.version.cuda.startswith("13.")
             and weight.is_cuda
             and get_sm(weight.device) == (12, 0)
-            and (self.hidden_size, self.output_size) == (8704, 5120)
         )
+        self._decode_auto_backend = sm120_decode_enabled and (
+            self.hidden_size,
+            self.output_size,
+        ) == (8704, 5120)
         self._decode_tiled_runner = None
-        if (
-            os.getenv("RTP_LLM_SM120_FUSION", "0") == "1"
-            and self.backend == "cutlass"
-            and weight.is_cuda
-            and get_sm(weight.device) == (12, 0)
-            and (self.hidden_size, self.output_size) in ((5120, 17408), (5120, 124160))
+        if sm120_decode_enabled and (self.hidden_size, self.output_size) in (
+            (5120, 17408),
+            (5120, 124160),
         ):
             try:
                 from flashinfer.gemm.gemm_base import _b12x_gemm_fp4_runner
@@ -96,22 +99,8 @@ class CudaFp4GEMMLinear(LinearBase):
                 self._decode_tiled_runner = _b12x_gemm_fp4_runner(
                     12, 0, True, torch.bfloat16, True
                 )
-            except ImportError:
-                pass
-        self._decode_cudnn_backend = False
-        if (
-            os.getenv("RTP_LLM_SM120_FUSION", "0") == "1"
-            and self.backend == "cutlass"
-            and weight.is_cuda
-            and get_sm(weight.device) == (12, 0)
-            and (self.hidden_size, self.output_size) == (5120, 17408)
-        ):
-            try:
-                import cudnn
-
-                self._decode_cudnn_backend = cudnn.backend_version() >= 91500
-            except ImportError:
-                pass
+            except (ImportError, AttributeError, TypeError) as error:
+                logger.warning("SM120 FP4 tiled runner unavailable: %s", error)
         if os.getenv("RTP_LLM_SM120_FUSION", "0") == "1" and weight.is_cuda:
             # The expert quantizer also bounds every row by the input shape.
             # All rows of a dense matrix are valid; prepare this outside capture.
@@ -121,6 +110,55 @@ class CudaFp4GEMMLinear(LinearBase):
                 device=weight.device,
                 dtype=torch.int32,
             )
+
+        self._swiglu_weights = None
+        if (
+            self._decode_tiled_runner is not None
+            and (self.hidden_size, self.output_size) == (5120, 17408)
+            and self.bias is None
+        ):
+            from rtp_llm.models_py.kernels.cuda.sm120_fp4_swiglu import prepare_weights
+
+            self._swiglu_weights = prepare_weights(self.weight, self.weight_scales)
+            logger.info(
+                "SM120 fused FFN retains %d additional weight/scale bytes on %s",
+                sum(t.numel() * t.element_size() for t in self._swiglu_weights),
+                self.weight.device,
+            )
+
+    def forward_fused_mlp(
+        self, input, down, *, residual=None, norm=None, communicator=None
+    ):
+        if (
+            self._swiglu_weights is None
+            or not isinstance(down, CudaFp4GEMMLinear)
+            or down.backend != "cutlass"
+            or (down.hidden_size, down.output_size) != (8704, 5120)
+            or input.dtype != torch.bfloat16
+            or input.ndim != 2
+            or not 0 < input.shape[0] <= 64
+            or input.shape[1] != 5120
+            or not input.is_contiguous()
+            or input.device != self.weight.device
+        ):
+            return None
+        from rtp_llm.models_py.kernels.cuda.sm120_fp4_swiglu import fused_swiglu_fp4
+
+        if norm is None:
+            quantized = fp4_quantize(input, self.input_scale_inv)
+        else:
+            quantized = residual_norm_fp4_quant(
+                input,
+                residual,
+                norm.weight,
+                self.input_scale_inv,
+                norm.variance_epsilon,
+                communicator,
+            )
+            if quantized is None:
+                return None
+        output, scales = fused_swiglu_fp4(self, *quantized, down.input_scale_inv)
+        return down._forward_quantized(output, scales, input.shape[0], input.dtype)
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         # Get input dimensions
@@ -183,8 +221,6 @@ class CudaFp4GEMMLinear(LinearBase):
         if output_dtype == torch.bfloat16:
             if self._decode_auto_backend and 0 < input_m <= 64:
                 backend = "auto"
-            elif self._decode_cudnn_backend and 5 <= input_m <= 32:
-                backend = "cudnn"
         if (
             self._decode_tiled_runner is not None
             and output_dtype == torch.bfloat16
