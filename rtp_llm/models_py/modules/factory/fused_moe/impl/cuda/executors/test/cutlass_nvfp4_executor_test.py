@@ -112,6 +112,10 @@ class CutlassNvfp4ExecutorTest(unittest.TestCase):
         )
 
     def _check_offline_loader_tp2(self, source, prefix, experts, hidden, inter):
+        from unittest import mock
+
+        from flashinfer.autotuner import AutoTuner
+
         from rtp_llm.config.quant_config import QWEN4_NVFP4_RECIPE, ModelOptFp4Config
         from rtp_llm.config.server_config_setup import set_parallelism_config
         from rtp_llm.model_loader.ffn_weight import MoeAtomicWeight, MoeConfig
@@ -261,26 +265,78 @@ class CutlassNvfp4ExecutorTest(unittest.TestCase):
                 expert_topk_ids=ids,
                 expert_topk_weights=routing,
             )
-            got = sum(
-                executor.execute(
-                    payload, "SiGLU", None, None, False, None
-                ).fused_expert_output.float()
-                for executor in executors
+            tuner = AutoTuner.get()
+            choose_one = tuner.choose_one
+            tactics = []
+
+            def record_tactic(*args, **kwargs):
+                result = choose_one(*args, **kwargs)
+                tactics.append((args[0], result[1]))
+                return result
+
+            # Observe selection without replacing it: this reference models
+            # the default, unfused-finalize CUTLASS tactic (sentinel -1).
+            with mock.patch.object(tuner, "choose_one", side_effect=record_tactic):
+                got_parts = [
+                    executor.execute(
+                        payload, "SiGLU", None, None, False, None
+                    ).fused_expert_output.float()
+                    for executor in executors
+                ]
+            self.assertEqual(
+                tactics,
+                [
+                    ("trtllm::fused_moe::gemm1", -1),
+                    ("trtllm::fused_moe::gemm2", -1),
+                ]
+                * 2,
             )
             quantized_input = quantize_activation(current, first_input_scale)
-            expected = torch.zeros_like(got)
-            for expert in selected:
-                up = quantized_input @ weights[expert, "up"].T
-                gate = quantized_input @ weights[expert, "gate"].T
-                intermediate = quantize_activation(
-                    up * torch.nn.functional.silu(gate), second_input_scale
+            expected_parts = []
+            for rank, got in enumerate(got_parts):
+                shard = slice(rank * (inter // 2), (rank + 1) * (inter // 2))
+                expert_outputs = {}
+                for expert in selected:
+                    # CUTLASS stores FC1 in the BF16 backbone dtype. Its
+                    # activation quantizer also rounds the SwiGLU product to
+                    # BF16 before computing the NVFP4 block scale and codes.
+                    up = (
+                        (quantized_input @ weights[expert, "up"][shard].T)
+                        .to(torch.bfloat16)
+                        .float()
+                    )
+                    gate = (
+                        (quantized_input @ weights[expert, "gate"][shard].T)
+                        .to(torch.bfloat16)
+                        .float()
+                    )
+                    product = (up * torch.nn.functional.silu(gate)).to(torch.bfloat16)
+                    intermediate = quantize_activation(product, second_input_scale)
+                    # The unfused finalize path reads BF16 FC2 expert outputs,
+                    # accumulates routing weights in FP32, then writes BF16.
+                    expert_outputs[expert] = (
+                        (intermediate @ weights[expert, "down"][:, shard].T)
+                        .to(torch.bfloat16)
+                        .float()
+                    )
+                expected = torch.zeros_like(got)
+                for slot in range(ids.shape[1]):
+                    slot_output = torch.zeros_like(got)
+                    for expert in selected:
+                        slot_output += (
+                            ids[:, slot : slot + 1] == expert
+                        ) * expert_outputs[expert]
+                    expected += slot_output * routing[:, slot : slot + 1]
+                expected = expected.to(torch.bfloat16).float()
+                expected_parts.append(expected)
+                with self.subTest(experts=experts, amplitude=amplitude, rank=rank):
+                    torch.testing.assert_close(got, expected, rtol=0.02, atol=1e-4)
+            # Compare the FP32 sum of already-rounded rank outputs as well as
+            # each rank, so cancellation cannot hide a shard-loading error.
+            with self.subTest(experts=experts, amplitude=amplitude, rank="sum"):
+                torch.testing.assert_close(
+                    sum(got_parts), sum(expected_parts), rtol=0.02, atol=1e-4
                 )
-                output = intermediate @ weights[expert, "down"].T
-                coefficient = ((ids == expert) * routing).sum(-1, keepdim=True)
-                expected += output * coefficient
-            # TP outputs are each rounded to BF16 before their FP32 sum; the
-            # independent reference performs the final reduction in FP32.
-            torch.testing.assert_close(got, expected, rtol=0.02, atol=1e-4)
 
     @unittest.skipUnless(
         torch.cuda.is_available()
