@@ -2145,9 +2145,10 @@ TEST_F(HybridTypeCoordinatorCacheManagerTest, LinearHistoryBecomesReusableAndEvi
     EXPECT_EQ(resource->blocks(0, "full1"), full);
     EXPECT_EQ(linear_pool->referencedBlocksNum(), 3u);
     EXPECT_EQ(full_pool->referencedBlocksNum(), 6u);
-    const auto path = allocator->blockTreeCacheOwner()->tree()->findNode({100, 101, 102});
+    const auto linear_set = groupSetIdForTag(*allocator->blockTreeCacheOwner(), "linear");
+    const auto path       = allocator->blockTreeCacheOwner()->tree()->findNode({100, 101, 102});
     ASSERT_EQ(path.size(), 3u);
-    EXPECT_EQ(path[0]->group_set_resources[0].device_blocks, (BlockIndicesType{linear[0]}));
+    EXPECT_EQ(path[0]->group_set_resources[linear_set].device_blocks, (BlockIndicesType{linear[0]}));
     auto match = allocator->blockTreeCacheOwner()->match({100, 101, 102});
     EXPECT_EQ(match.matched_device_blocks, 3u);
     block_tree_cache_test::releaseRequestRefsForTest(*allocator->blockTreeCacheOwner(), match.matched_device_resources);
@@ -2203,9 +2204,10 @@ TEST_F(HybridTypeCoordinatorCacheManagerTest, LinearHistoryPrefixHitDoesNotRemat
     // recomputed it and cannot republish an allocated-but-uninitialized state.
     EXPECT_EQ(allocator->blockTreeCacheOwner()->evictForGroup("linear", 5), 5);
     allocator->reclaimLinearHistory(incoming, 28, true);
-    const auto path = allocator->blockTreeCacheOwner()->tree()->findNode({100, 101, 102, 103, 104});
+    const auto linear_set = groupSetIdForTag(*allocator->blockTreeCacheOwner(), "linear");
+    const auto path       = allocator->blockTreeCacheOwner()->tree()->findNode({100, 101, 102, 103, 104});
     ASSERT_EQ(path.size(), 5u);
-    EXPECT_FALSE(path.back()->group_set_resources[0].hasTier(Tier::DEVICE));
+    EXPECT_FALSE(path.back()->group_set_resources[linear_set].hasTier(Tier::DEVICE));
     allocator->free(FreeInfo{incoming, tokens});
     for (const auto& group : allocator->cacheGroups()) {
         group->unreference(running->blocks(0, group->tag()));
@@ -2216,8 +2218,6 @@ TEST_F(HybridTypeCoordinatorCacheManagerTest, InsertIntoCacheInsertsOnlyFullBloc
     auto config    = makeTinyHybridConfig();
     auto allocator = std::make_shared<TestHybridTypeCoordinatorCacheManager>(config, AllocationType::DEVICE);
     ASSERT_TRUE(allocator->init());
-
-    // group_id=0 linear, group_id=1 full.
 
     auto batch_res = makeBatchResource(/*batch_size=*/1, config, CacheKeysType{100, 101, 102});
     // Disable device cache reuse.
@@ -2317,10 +2317,12 @@ TEST_F(HybridTypeCoordinatorCacheManagerTest, InsertIntoCacheStopsBeforeFullHole
         size_t resident_prefix_length = 0;
         allocator->insertIntoCache(InsertInfo{batch_res, nullptr, /*is_resident=*/false}, resident_prefix_length);
     }
-    const auto path = allocator->blockTreeCacheOwner()->tree()->findNode(CacheKeysType{100, 101, 102});
+    const auto linear_set = groupSetIdForTag(*allocator->blockTreeCacheOwner(), "linear");
+    const auto full_set   = groupSetIdForTag(*allocator->blockTreeCacheOwner(), "full1");
+    const auto path       = allocator->blockTreeCacheOwner()->tree()->findNode(CacheKeysType{100, 101, 102});
     ASSERT_EQ(path.size(), 1u);
-    EXPECT_EQ(path.front()->group_set_resources[0].device_blocks, (BlockIndicesType{blocks[0]}));
-    EXPECT_EQ(path.front()->group_set_resources[1].device_blocks, (BlockIndicesType{blocks[3]}));
+    EXPECT_EQ(path.front()->group_set_resources[linear_set].device_blocks, (BlockIndicesType{blocks[0]}));
+    EXPECT_EQ(path.front()->group_set_resources[full_set].device_blocks, (BlockIndicesType{blocks[3]}));
 
     linear_pool->decRef(linear_blocks);
     full_pool->decRef(full_blocks);
@@ -2656,12 +2658,14 @@ TEST_F(HybridTypeCoordinatorCacheManagerTest, PdDecodeLinearTailOnlyPublishesFul
     size_t resident_prefix_length          = 0;
     allocator->insertIntoCache(insert_info, resident_prefix_length);
 
-    const auto path = allocator->blockTreeCacheOwner()->tree()->findNode(CacheKeysType{200, 201});
+    const auto linear_set = groupSetIdForTag(*allocator->blockTreeCacheOwner(), "linear");
+    const auto full_set   = groupSetIdForTag(*allocator->blockTreeCacheOwner(), "full1");
+    const auto path       = allocator->blockTreeCacheOwner()->tree()->findNode(CacheKeysType{200, 201});
     ASSERT_EQ(path.size(), 2u);
-    EXPECT_TRUE(path[0]->group_set_resources[0].is_empty());
-    EXPECT_TRUE(path[1]->group_set_resources[0].is_empty());
-    EXPECT_EQ(path[0]->group_set_resources[1].device_blocks, (BlockIndicesType{full_blocks[0]}));
-    EXPECT_EQ(path[1]->group_set_resources[1].device_blocks, (BlockIndicesType{full_blocks[1]}));
+    EXPECT_TRUE(path[0]->group_set_resources[linear_set].is_empty());
+    EXPECT_TRUE(path[1]->group_set_resources[linear_set].is_empty());
+    EXPECT_EQ(path[0]->group_set_resources[full_set].device_blocks, (BlockIndicesType{full_blocks[0]}));
+    EXPECT_EQ(path[1]->group_set_resources[full_set].device_blocks, (BlockIndicesType{full_blocks[1]}));
 
     const auto ordinary_match = allocator->blockTreeCacheOwner()->match(CacheKeysType{200, 201});
     EXPECT_EQ(ordinary_match.matched_device_blocks, 0u);
@@ -3086,6 +3090,75 @@ TEST_F(HybridTypeCoordinatorCacheManagerTest, ReclaimPeakForecastDoesNotCreditSh
     full_pool->decRef(full);
 }
 
+TEST_F(HybridTypeCoordinatorCacheManagerTest, ReviewRegressionPublishedPrefillSurvivesReplayPruning) {
+    for (const int tail : {1, std::numeric_limits<int>::max()}) {
+        for (const bool prune : {false, true}) {
+            for (const bool publish_before_decode : {false, true}) {
+                SCOPED_TRACE(::testing::Message() << "tail=" << tail << " prune=" << prune
+                                                  << " prefill_published=" << publish_before_decode);
+                auto config                    = makeTinyHybridConfig();
+                config.reuse_cache_tail_blocks = tail;
+                config.linear_replay.group_ids = {static_cast<int>(config.topology().groupIdForTag("linear"))};
+                setGroupBlockCounts(config, 12, 24);
+                auto allocator =
+                    std::make_shared<TestHybridTypeCoordinatorCacheManager>(config, AllocationType::DEVICE);
+                ASSERT_TRUE(allocator->init());
+                auto                linear_pool = poolForTag(*allocator, "linear");
+                auto                full_pool   = poolForTag(*allocator, "full1");
+                const auto          linear      = allocateReferencedBlocks(linear_pool, tail == 1 ? 3 : 7);
+                const auto          full        = allocateReferencedBlocks(full_pool, 7);
+                const CacheKeysType keys{100, 101, 102, 103, 104, 105, 106, 107};
+                auto resource = makeBatchResource(1, config, CacheKeysType(keys.begin(), keys.begin() + 7));
+                if (tail == 1) {
+                    resource->mutableBlockIds(0, "linear")
+                        .assign({NULL_BLOCK_IDX,
+                                 NULL_BLOCK_IDX,
+                                 NULL_BLOCK_IDX,
+                                 NULL_BLOCK_IDX,
+                                 linear[0],
+                                 linear[1],
+                                 linear[2]});
+                } else {
+                    resource->mutableBlockIds(0, "linear").assign(linear);
+                }
+                resource->mutableBlockIds(0, "full1").assign(full);
+                // Prefill ends at 20 tokens; the two later slots are mutable replay tails.
+                resource->cacheResource(0).restrictLinearReplayPrefix("linear", 5);
+                resource->cacheResource(0).setLinearReplayActiveBegin("linear", 5);
+                size_t resident_prefix_length = 0;
+                if (publish_before_decode) {
+                    resource->setBatchCacheKeys(0, CacheKeysType(keys.begin(), keys.begin() + 5));
+                    allocator->insertIntoCache(InsertInfo{resource, nullptr, false}, resident_prefix_length);
+                    resource->setBatchCacheKeys(0, CacheKeysType(keys.begin(), keys.begin() + 7));
+                }
+                if (prune) {
+                    auto       tokens = makeCompleteTokenIds(1, 28, 4);
+                    MallocInfo info{resource, tokens};
+                    info.enable_cache_lookup = false;
+                    info.preserve_inflight   = true;
+                    ASSERT_TRUE(allocator->malloc(info).success);
+                    EXPECT_TRUE(isNullBlockIdx(resource->blocks(0, "linear")[4]));
+                }
+                EXPECT_FALSE(resource->cacheResource(0).canPublishLinearReplayBlock("linear", 5));
+                EXPECT_FALSE(resource->cacheResource(0).canPublishLinearReplayBlock("linear", 6));
+                allocator->insertIntoCache(InsertInfo{resource, nullptr, false}, resident_prefix_length);
+                allocator->free(FreeInfo{resource, nullptr});
+
+                auto       next   = makeBatchResource(1, config, keys);
+                auto       tokens = makeCompleteTokenIds(1, 29, 4);
+                MallocInfo info{next, tokens};
+                info.reuse_cache  = true;
+                const auto result = allocator->malloc(info);
+                ASSERT_TRUE(result.success);
+                // This characterizes the reported performance regression. Already
+                // published Prefill state survives, but a Decode-only publication loses it.
+                EXPECT_EQ(result.reuse_len, prune && !publish_before_decode ? 0 : 20);
+                allocator->free(FreeInfo{next, tokens});
+            }
+        }
+    }
+}
+
 TEST_F(HybridTypeCoordinatorCacheManagerTest, InflightGrowthReclaimsOnlyBeforeCommittedLinearTail) {
     auto config = makeTinyHybridConfig();
     setGroupBlockCounts(config, 13, 13);
@@ -3173,49 +3246,90 @@ TEST_F(HybridTypeCoordinatorCacheManagerTest, FailedInflightGrowthDoesNotPruneEx
     allocator->free(FreeInfo{resource, nullptr});
 }
 
-TEST_F(HybridTypeCoordinatorCacheManagerTest, OrdinaryDecodeGcKeepsCommittedStateWithReservedSuffix) {
-    for (const int reserve_step : {0, 3}) {
-        SCOPED_TRACE(reserve_step);
-        auto config = makeTinyHybridConfig();
-        setGroupBlockCounts(config, 32, 32);
-        auto allocator = std::make_shared<TestHybridTypeCoordinatorCacheManager>(config, AllocationType::DEVICE);
-        ASSERT_TRUE(allocator->init());
-        auto                   linear_pool  = poolForTag(*allocator, "linear");
-        auto                   full_pool    = poolForTag(*allocator, "full1");
-        const int              linear_slots = 4 + (reserve_step > 0 ? reserve_step - 1 : 0);
-        const int              full_slots   = (16 + reserve_step + 3) / 4;
-        const auto             linear       = allocateReferencedBlocks(linear_pool, linear_slots + 4);
-        const auto             full         = allocateReferencedBlocks(full_pool, full_slots + 4);
-        auto                   exact        = makeBatchResource(1, config, {});
-        auto                   reserved     = makeBatchResource(1, config, {});
-        const BlockIndicesType linear_prefix(linear.begin(), linear.begin() + linear_slots);
-        const BlockIndicesType full_prefix(full.begin(), full.begin() + full_slots);
-        linear_pool->incRef(linear_prefix);
-        full_pool->incRef(full_prefix);
-        exact->mutableBlockIds(0, "linear").assign(linear_prefix);
-        exact->mutableBlockIds(0, "full1").assign(full_prefix);
-        reserved->mutableBlockIds(0, "linear").assign(linear);
-        reserved->mutableBlockIds(0, "full1").assign(full);
-        auto tokens = makeCompleteTokenIds(1, 16, 4);
-        tokens->setReserveStep(reserve_step);
-        MallocInfo info{exact, tokens};
-        info.enable_cache_lookup = false;
+TEST_F(HybridTypeCoordinatorCacheManagerTest, InflightReplayGcAdvancesWithoutRefillingRetiredSlots) {
+    auto config                    = makeTinyHybridConfig();
+    config.linear_replay.group_ids = {static_cast<int>(config.topology().groupIdForTag("linear"))};
+    setGroupBlockCounts(config, 24, 24);
+    auto allocator = std::make_shared<TestHybridTypeCoordinatorCacheManager>(config, AllocationType::DEVICE);
+    ASSERT_TRUE(allocator->init());
+    auto       linear_pool = poolForTag(*allocator, "linear");
+    auto       full_pool   = poolForTag(*allocator, "full1");
+    const auto linear      = allocateReferencedBlocks(linear_pool, 8);
+    auto       resource    = makeBatchResource(1, config, {});
+    resource->mutableBlockIds(0, "linear").assign(linear);
+    resource->mutableBlockIds(0, "full1").assign(allocateReferencedBlocks(full_pool, 8));
+    resource->cacheResource(0).restrictLinearReplayPrefix("linear", 4);
+    resource->cacheResource(0).setLinearReplayActiveBegin("linear", 2);
+    auto       tokens = makeCompleteTokenIds(1, 16, 4);
+    MallocInfo info{resource, tokens};
+    info.enable_cache_lookup = false;
+    info.preserve_inflight   = true;
+    for (const int committed_length : {16, 32, 40}) {
+        SCOPED_TRACE(committed_length);
+        tokens->setSeqLength(committed_length);
+        info.incr_seq_len_override = committed_length + 24;
         ASSERT_TRUE(allocator->malloc(info).success);
-        info.batch_kv_cache_resource = reserved;
-        ASSERT_TRUE(allocator->malloc(info).success);
-        const auto& actual = reserved->blocks(0, "linear");
-        EXPECT_EQ(BlockIndicesType(actual.begin(), actual.begin() + linear_slots), exact->blocks(0, "linear"));
-        // An old larger reservation must not move cleanup past the current
-        // canonical state or discard proposal destinations on the ordinary path.
-        EXPECT_EQ(actual[3], linear[3]);
-        for (size_t position = linear_slots; position < actual.size(); ++position) {
-            EXPECT_EQ(actual[position], linear[position]);
+        const auto&  blocks       = resource->blocks(0, "linear");
+        const size_t active_begin = static_cast<size_t>(committed_length / 4 - 2);
+        EXPECT_EQ(resource->cacheResource(0).linearReplayActiveBegin("linear", blocks.size()), active_begin);
+        for (size_t position = 0; position < blocks.size(); ++position) {
+            EXPECT_EQ(isNullBlockIdx(blocks[position]), position < active_begin);
         }
-        EXPECT_EQ(reserved->blocks(0, "full1"), full);
-        allocator->free(FreeInfo{exact, nullptr});
-        allocator->free(FreeInfo{reserved, nullptr});
-        EXPECT_EQ(linear_pool->freeBlocksNum(), 31u);
-        EXPECT_EQ(full_pool->freeBlocksNum(), 31u);
+        EXPECT_EQ(linear_pool->freeBlocksNum(), 23u - (blocks.size() - active_begin));
+    }
+    allocator->free(FreeInfo{resource, nullptr});
+    EXPECT_EQ(linear_pool->freeBlocksNum(), 23u);
+    EXPECT_EQ(full_pool->freeBlocksNum(), 23u);
+}
+
+TEST_F(HybridTypeCoordinatorCacheManagerTest, OrdinaryDecodeGcKeepsCommittedStateWithReservedSuffix) {
+    for (const bool replay : {false, true}) {
+        for (const int reserve_step : {0, 3}) {
+            SCOPED_TRACE(::testing::Message() << "replay=" << replay << " reserve=" << reserve_step);
+            auto config = makeTinyHybridConfig();
+            if (replay) {
+                config.linear_replay.group_ids = {static_cast<int>(config.topology().groupIdForTag("linear"))};
+            }
+            setGroupBlockCounts(config, 32, 32);
+            auto allocator = std::make_shared<TestHybridTypeCoordinatorCacheManager>(config, AllocationType::DEVICE);
+            ASSERT_TRUE(allocator->init());
+            auto                   linear_pool  = poolForTag(*allocator, "linear");
+            auto                   full_pool    = poolForTag(*allocator, "full1");
+            const int              linear_slots = 4 + (reserve_step > 0 ? reserve_step - 1 : 0);
+            const int              full_slots   = (16 + reserve_step + 3) / 4;
+            const auto             linear       = allocateReferencedBlocks(linear_pool, linear_slots + 4);
+            const auto             full         = allocateReferencedBlocks(full_pool, full_slots + 4);
+            auto                   exact        = makeBatchResource(1, config, {});
+            auto                   reserved     = makeBatchResource(1, config, {});
+            const BlockIndicesType linear_prefix(linear.begin(), linear.begin() + linear_slots);
+            const BlockIndicesType full_prefix(full.begin(), full.begin() + full_slots);
+            linear_pool->incRef(linear_prefix);
+            full_pool->incRef(full_prefix);
+            exact->mutableBlockIds(0, "linear").assign(linear_prefix);
+            exact->mutableBlockIds(0, "full1").assign(full_prefix);
+            reserved->mutableBlockIds(0, "linear").assign(linear);
+            reserved->mutableBlockIds(0, "full1").assign(full);
+            auto tokens = makeCompleteTokenIds(1, 16, 4);
+            tokens->setReserveStep(reserve_step);
+            MallocInfo info{exact, tokens};
+            info.enable_cache_lookup = false;
+            ASSERT_TRUE(allocator->malloc(info).success);
+            info.batch_kv_cache_resource = reserved;
+            ASSERT_TRUE(allocator->malloc(info).success);
+            const auto& actual = reserved->blocks(0, "linear");
+            EXPECT_EQ(BlockIndicesType(actual.begin(), actual.begin() + linear_slots), exact->blocks(0, "linear"));
+            // An old larger reservation must not move cleanup past the current
+            // canonical state or discard proposal destinations on the ordinary path.
+            EXPECT_EQ(actual[3], linear[3]);
+            for (size_t position = linear_slots; position < actual.size(); ++position) {
+                EXPECT_EQ(actual[position], linear[position]);
+            }
+            EXPECT_EQ(reserved->blocks(0, "full1"), full);
+            allocator->free(FreeInfo{exact, nullptr});
+            allocator->free(FreeInfo{reserved, nullptr});
+            EXPECT_EQ(linear_pool->freeBlocksNum(), 31u);
+            EXPECT_EQ(full_pool->freeBlocksNum(), 31u);
+        }
     }
 }
 

@@ -16,7 +16,7 @@ spec.loader.exec_module(launch)
 
 
 class CheckpointSourceTest(unittest.TestCase):
-    def test_decode_runs_sync_and_async_with_graph(self):
+    def test_decode_runs_sync_and_async_with_replay_and_graph(self):
         with tempfile.TemporaryDirectory() as temporary:
             target, draft = Path(temporary) / "target", Path(temporary) / "draft"
             target.mkdir()
@@ -38,6 +38,7 @@ class CheckpointSourceTest(unittest.TestCase):
                     environment, command = launch.launch_config(args)
                 options = dict(zip(command[1::2], command[2::2]))
                 self.assertEqual(environment["RTP_LLM_STREAM_ASYNC"], enabled)
+                self.assertEqual(options["--enable_linear_replay"], "1")
                 self.assertEqual(options["--enable_cuda_graph"], "1")
 
     def test_nonorthogonal_prefill_keeps_pager_routing_metadata(self):
@@ -66,6 +67,7 @@ class CheckpointSourceTest(unittest.TestCase):
 
     def test_all_pd_profiles_pass_retired_environment_options_by_cli(self):
         retired = {
+            "ENABLE_LINEAR_REPLAY": "0",
             "RTP_MLA_PREFILL_EXPANDED_KV_BUDGET_GIB": "invalid",
             "PREFILL_KV_WORKSPACE_BUDGET_BYTES": "1",
             "SHARED_EXPERT_WEIGHT_SHARD": "invalid",
@@ -127,6 +129,7 @@ class CheckpointSourceTest(unittest.TestCase):
                                 options["--moe_strategy"],
                                 "mega_moe" if role == "PREFILL" else "mega_moe_se",
                             )
+                            self.assertEqual(options["--enable_linear_replay"], "1")
                             self.assertEqual(
                                 options["--shared_expert_weight_shard"],
                                 "1" if role == "PREFILL" else "0",

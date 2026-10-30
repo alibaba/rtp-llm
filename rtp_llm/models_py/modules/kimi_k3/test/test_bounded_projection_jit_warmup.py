@@ -22,6 +22,7 @@ DEPENDENCIES = dict(
     fla="fla.modules.l2norm",
     mla=PREFIX + "kimi_k3.mla_jit_warmup",
     dsa=PREFIX + "kimi_k3.dsa_jit_warmup",
+    replay="rtp_llm.models_py.triton_kernels.linear_replay",
     directed=PREFIX + "kimi_k3.bounded_projection_jit_warmup",
 )
 WEIGHT_KEYS = NS(mla_kv_b_w="kv_up", mla_kv_b_s="kv_scale")
@@ -35,12 +36,15 @@ def load_source(path):
     return module
 
 
-def load_startup_warmup():
+def load_startup_warmup(replay):
     with dependencies(
         torch=metadata_torch(),
         switch=NS(model_warm_up_enabled=lambda: True),
+        replay=NS(linear_serial_replay=None),
     ):
-        return load_source(ROOT / "kernel_jit_warmup.py")
+        startup = load_source(ROOT / "kernel_jit_warmup.py")
+    startup._warmup_replay = replay
+    return startup
 
 
 def dependencies(**items):
@@ -338,37 +342,39 @@ class BoundedProjectionWarmupTest(unittest.TestCase):
             mla=NS(warmup_kimi_k3_mla_jit=noop),
             directed=NS(warmup_kimi_k3_projection_jit=fail),
         ):
-            startup = load_startup_warmup()
+            startup = load_startup_warmup(noop)
             with self.assertRaisesRegex(RuntimeError, "directed compile failed"):
                 startup.warmup_kimi_k3_kernel_jit(object(), object())
 
     def test_plain_k3_warmup_does_not_import_dsa_dependencies(self):
-        projection, mla = mock.Mock(), mock.Mock()
+        projection, mla, replay = mock.Mock(), mock.Mock(), mock.Mock()
         with dependencies(
             mla=NS(warmup_kimi_k3_mla_jit=mla),
             directed=NS(warmup_kimi_k3_projection_jit=projection),
             dsa=None,
         ):
-            startup = load_startup_warmup()
+            startup = load_startup_warmup(replay)
             model, resource = NS(dsa_workspace=None), object()
             startup.warmup_kimi_k3_kernel_jit(model, resource)
         for stage in (projection, mla):
             stage.assert_called_once_with(model, resource)
+        replay.assert_called_once_with(model)
 
     def test_dsa_compile_failure_prevents_successful_startup(self):
-        projection, mla = mock.Mock(), mock.Mock()
+        projection, mla, replay = mock.Mock(), mock.Mock(), mock.Mock()
         dsa = mock.Mock(side_effect=RuntimeError("DSA compile failed"))
         with dependencies(
             mla=NS(warmup_kimi_k3_mla_jit=mla),
             directed=NS(warmup_kimi_k3_projection_jit=projection),
             dsa=NS(warmup_kimi_k31_dsa_jit=dsa),
         ):
-            startup = load_startup_warmup()
+            startup = load_startup_warmup(replay)
             model, resource = NS(dsa_workspace=object()), object()
             with self.assertRaisesRegex(RuntimeError, "DSA compile failed"):
                 startup.warmup_kimi_k3_kernel_jit(model, resource)
         for stage in (projection, mla, dsa):
             stage.assert_called_once_with(model, resource)
+        replay.assert_not_called()
 
 
 class Bf16MlaWorkspaceBudgetTest(unittest.TestCase):

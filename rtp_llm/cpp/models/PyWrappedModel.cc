@@ -186,6 +186,22 @@ GptModelInputs PyWrappedModel::padSequenceParallelInputs(const GptModelInputs& s
         padded.narrow(dim, original_rows, rows).fill_(value);
         return padded;
     };
+    if (const auto* target_replay = source.targetLinearReplay()) {
+        auto          replay = *target_replay;
+        const int64_t batch  = replay.slot_ids.numel();
+        RTP_LLM_CHECK_WITH_INFO(batch == requests, "LINEAR replay request count disagrees with SP input");
+        for (auto* tensor : replay.tensors()) {
+            RTP_LLM_CHECK_WITH_INFO(tensor->defined() && (tensor->dim() == 1 || tensor->dim() == 2)
+                                        && tensor->size(tensor->dim() - 1) == requests,
+                                    "LINEAR replay request rows disagree");
+            const int64_t fill = tensor == &replay.slot_ids || tensor == &replay.active_block_ids
+                                         || tensor == &replay.state_read_block_ids ?
+                                     -1 :
+                                     0;
+            *tensor            = append(*tensor, extra_requests, fill, tensor->dim() - 1);
+        }
+        out.linear_replay = std::move(replay);
+    }
     const auto append_prefill_token =
         [this, &append, prefill](const torch::Tensor& tensor, int64_t rows, int64_t value) {
             if (!prefill || !tensor.defined() || tensor.numel() == 0 || rows == 0 || !tensor.device().is_cpu()
@@ -481,6 +497,9 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
     py_attn_inputs.is_warmup                    = inputs.warmup || inputs.is_fake_stream;
     const int64_t                token_count    = inputs.combo_tokens.defined() ? inputs.combo_tokens.numel() : 0;
     const int64_t                logical_tokens = inputs.sp_logical_tokens > 0 ? inputs.sp_logical_tokens : token_count;
+    if (const auto* replay = inputs.targetLinearReplay()) {
+        py_attn_inputs.linear_replay = *replay;
+    }
 
     auto normalize_i32 = [this](const torch::Tensor& tensor) -> torch::Tensor {
         if (!tensor.defined()) {

@@ -1,4 +1,4 @@
-"""The directed MLA compilation must leave live request cache untouched."""
+"""The directed replay compilation must leave live request state untouched."""
 
 import importlib.util
 import sys
@@ -8,6 +8,188 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import torch
+
+from rtp_llm.models_py.modules.kimi_k3.kernel_jit_warmup import (
+    _inactive_replay_inputs,
+    _warmup_replay,
+)
+from rtp_llm.models_py.triton_kernels.linear_replay import linear_serial_replay
+
+
+class KimiK3JitWarmupTest(unittest.TestCase):
+
+    def test_replay_warmup_covers_active_multi_request_batches(self):
+        if not torch.cuda.is_available():
+            self.skipTest("CUDA is required")
+        import triton
+
+        from rtp_llm.models_py.model_desc.kimi_k3 import KimiK3Model
+        from rtp_llm.models_py.modules.hybrid.kda_attention import KdaAttention
+        from rtp_llm.models_py.modules.kimi_k3.attention import KimiK3KDA
+
+        torch.manual_seed(67)
+        device = torch.device("cuda:0")
+        dim, channels, capacity, slots, blocks = 128, 384, 4, 7, 11
+
+        def zeros(shape, dtype=torch.float32):
+            return torch.zeros(shape, device=device, dtype=dtype)
+
+        state = torch.ones((blocks, 1, dim, dim), device=device)
+        conv = torch.ones((blocks, 3, channels), device=device, dtype=torch.bfloat16)
+        replay = SimpleNamespace(
+            k=zeros((2 * slots, capacity, 1, dim)),
+            u=zeros((slots, capacity, 1, dim)),
+            g=zeros((2 * slots, capacity, 1, dim)),
+            conv_inputs=zeros((slots, capacity, channels), torch.bfloat16),
+        )
+        # Bind the production attention through its shared KDA constructor so
+        # warmup follows the same projection/decode attributes as the model.
+        attention = object.__new__(KimiK3KDA)
+        decoder = SimpleNamespace(
+            _get_ssm_states=lambda _: state,
+            _get_conv_states=lambda _: conv,
+            parallelism_config=SimpleNamespace(tp_size=1),
+            local_num_k_heads=1,
+            local_num_v_heads=1,
+            head_k_dim=dim,
+            head_v_dim=dim,
+            conv_weights=torch.ones((channels, 4), device=device, dtype=torch.bfloat16),
+            alog=zeros((1,)),
+            dt_bias=zeros((dim,)),
+            gate_lower_bound=-5.0,
+        )
+        KdaAttention.__init__(
+            attention,
+            input_projection=torch.nn.Linear(
+                dim, 4 * dim + dim + 1, device=device, dtype=torch.bfloat16
+            ),
+            forget_projection=torch.nn.Linear(
+                dim, dim, device=device, dtype=torch.bfloat16
+            ),
+            output_projection=torch.nn.Identity(),
+            fa_width=dim,
+            norm=torch.nn.Identity(),
+            prefill=decoder,
+            decode=decoder,
+        )
+        model = object.__new__(KimiK3Model)
+        torch.nn.Module.__init__(model)
+        model.config = SimpleNamespace(gen_num_per_cycle=capacity - 1, hidden_size=dim)
+        model.embed_tokens = torch.nn.Embedding(
+            1, dim, device=device, dtype=torch.bfloat16
+        )
+        model.layers = [SimpleNamespace(index=0, attention=attention)]
+        groups = tuple(
+            SimpleNamespace(group_id=group, kv_cache_base=state, linear_replay=replay)
+            for group in (0, 2)
+        )
+        model.kv_cache = SimpleNamespace(get_layer_cache_groups=lambda _: groups)
+        tracked = (state, conv, *vars(replay).values())
+        before = [tensor.clone() for tensor in tracked]
+        _warmup_replay(model)
+        for tensor, expected in zip(tracked, before):
+            torch.testing.assert_close(tensor, expected, rtol=0, atol=0)
+
+        compilations = []
+
+        def observe_request(*, cache_hit, **_):
+            compilations.append(cache_hit)
+
+        with torch.inference_mode(), triton.knobs.compilation.scope():
+            triton.knobs.compilation.listener = observe_request
+            for batch in (2, 3):
+                inputs = SimpleNamespace(
+                    slot_ids=torch.arange(batch, device=device, dtype=torch.int32),
+                    state_read_block_ids=torch.ones(
+                        (3, batch), device=device, dtype=torch.int32
+                    ),
+                    active_block_ids=torch.full(
+                        (3, batch), 4, device=device, dtype=torch.int32
+                    ),
+                    prev_accept_lengths=zeros((batch,), torch.int32),
+                    history_valid_lengths=zeros((batch,), torch.int32),
+                    history_log_banks=zeros((batch,), torch.int32),
+                    init_kinds=torch.ones(batch, device=device, dtype=torch.int32),
+                )
+                inputs.active_block_ids[2] = torch.arange(
+                    4, 4 + batch, device=device, dtype=torch.int32
+                )
+                for steps in (1, capacity):
+                    fused = attention.input(zeros((batch * steps, dim), torch.bfloat16))
+                    qkv, _, latent, beta = fused.split((channels, dim, dim, 1), dim=-1)
+                    q, k, v = qkv.split(dim, dim=-1)
+                    result = linear_serial_replay(
+                        q,
+                        k,
+                        v,
+                        attention._project_forget(latent),
+                        beta,
+                        attention.decode.conv_weights,
+                        attention.decode.alog,
+                        attention.decode.dt_bias,
+                        state,
+                        conv,
+                        replay,
+                        inputs,
+                        group_id=2,
+                        vector_gate=True,
+                        state_v_first=False,
+                        lower_bound=-5.0,
+                    )
+                    self.assertTrue(torch.isfinite(result).all().item())
+                    self.assertGreater(torch.count_nonzero(result).item(), 0)
+
+        self.assertNotIn(False, compilations)
+
+    def test_inactive_production_shape_replay_does_not_change_pool(self):
+        if not torch.cuda.is_available():
+            self.skipTest("CUDA is required")
+        device = torch.device("cuda:0")
+        slots, blocks, capacity, dim, width = 7, 11, 4, 128, 4
+        channels = 3 * dim
+
+        def tensor(shape, dtype=torch.float32):
+            return torch.ones(shape, device=device, dtype=dtype)
+
+        cache = SimpleNamespace(
+            k=tensor((2 * slots, capacity, 1, dim)),
+            u=tensor((slots, capacity, 1, dim)),
+            g=tensor((2 * slots, capacity, 1, dim)),
+            conv_inputs=tensor((slots, capacity, channels), torch.bfloat16),
+        )
+        state = tensor((blocks, 1, dim, dim))
+        conv = tensor((blocks, width - 1, channels), torch.bfloat16)
+        inputs = _inactive_replay_inputs(2, device)
+        tracked = (state, conv, *(getattr(cache, name) for name in vars(cache)))
+        before = tuple(value.clone() for value in tracked)
+
+        for steps in range(1, capacity + 1):
+            qkv = tensor((steps, channels), torch.bfloat16)
+            q, k, v = qkv.split((dim, dim, dim), dim=-1)
+            result = linear_serial_replay(
+                q,
+                k,
+                v,
+                tensor((steps, dim), torch.bfloat16),
+                tensor((steps, 1), torch.bfloat16),
+                tensor((channels, width), torch.bfloat16),
+                tensor((1,)),
+                tensor((dim,)),
+                state,
+                conv,
+                cache,
+                inputs,
+                group_id=2,
+                vector_gate=True,
+                state_v_first=False,
+                lower_bound=-5.0,
+            )
+            self.assertEqual(tuple(result.shape), (steps, 1, dim))
+            self.assertEqual(torch.count_nonzero(result).item(), 0)
+        torch.cuda.synchronize(device)
+        for actual, expected in zip(tracked, before):
+            torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
 
 def load_warmup():
     from rtp_llm.models_py.modules.kimi_k3 import mla_jit_warmup

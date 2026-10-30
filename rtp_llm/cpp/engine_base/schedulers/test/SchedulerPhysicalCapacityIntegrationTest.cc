@@ -96,6 +96,7 @@ protected:
         auto manager      = std::make_shared<KVCacheManager>(cache_config, false, nullptr, cache_options, parallelism);
         ASSERT_TRUE(manager->init());
         ASSERT_TRUE(manager->cacheConfig().local_kv_cache_sharded);
+        ASSERT_FALSE(manager->cacheConfig().linear_replay.enabled());
         engine_->resource_context_.cache_manager = std::move(manager);
         engine_->resource_context_.role_type     = RoleType::PDFUSION;
         engine_->resource_context_.reuse_cache   = false;
@@ -189,26 +190,34 @@ protected:
                 [real_allocator](const BatchKVCacheResourcePtr& resource, int seq_len, int reserve_step) {
                     return real_allocator->singleBatchNeedBlocks(resource, seq_len, reserve_step);
                 }));
-        ON_CALL(*allocator, estimatePeakNeedBlocks(testing::_, testing::_, testing::_, testing::_, testing::_))
+        ON_CALL(*allocator,
+                estimatePeakNeedBlocks(testing::_, testing::_, testing::_, testing::_, testing::_, testing::_))
             .WillByDefault(testing::Invoke([real_allocator](const KVCacheResource& resource,
                                                             int                    seq_len,
                                                             int                    remaining_tokens,
                                                             int                    reserve_step,
-                                                            bool                   reuse_cache) {
+                                                            bool                   reuse_cache,
+                                                            LinearCachePolicy      linear_cache_policy) {
                 return real_allocator->estimatePeakNeedBlocks(
-                    resource, seq_len, remaining_tokens, reserve_step, reuse_cache);
+                    resource, seq_len, remaining_tokens, reserve_step, reuse_cache, linear_cache_policy);
             }));
-        ON_CALL(
-            *allocator,
-            estimateInitialBatchPeakNeedBlocks(testing::_, testing::_, testing::_, testing::_, testing::_, testing::_))
-            .WillByDefault(testing::Invoke([real_allocator](int  seq_len,
-                                                            int  common_seq_len,
-                                                            int  remaining_tokens,
-                                                            int  reserve_step,
-                                                            bool reuse_cache,
-                                                            int  target_batch_size) {
-                return real_allocator->estimateInitialBatchPeakNeedBlocks(
-                    seq_len, common_seq_len, remaining_tokens, reserve_step, reuse_cache, target_batch_size);
+        ON_CALL(*allocator,
+                estimateInitialBatchPeakNeedBlocks(
+                    testing::_, testing::_, testing::_, testing::_, testing::_, testing::_, testing::_))
+            .WillByDefault(testing::Invoke([real_allocator](int               seq_len,
+                                                            int               common_seq_len,
+                                                            int               remaining_tokens,
+                                                            int               reserve_step,
+                                                            bool              reuse_cache,
+                                                            int               target_batch_size,
+                                                            LinearCachePolicy linear_cache_policy) {
+                return real_allocator->estimateInitialBatchPeakNeedBlocks(seq_len,
+                                                                          common_seq_len,
+                                                                          remaining_tokens,
+                                                                          reserve_step,
+                                                                          reuse_cache,
+                                                                          target_batch_size,
+                                                                          linear_cache_policy);
             }));
         cache_manager->coordinator_manager_ = allocator;
         return contexts;
@@ -424,6 +433,8 @@ TEST_F(SchedulerPhysicalCapacityIntegrationTest, UnspecifiedExecutionCapacityPre
     ASSERT_NO_FATAL_FAILURE(initializeScheduler(true, 2, 2, 1, 3));
     ASSERT_EQ(engine_->model_config_.max_execution_tokens, 4);
     engine_->model_config_.max_execution_tokens = 0;
+    // The legacy gate counts requests, so one request with fanout 3 fills a batch of one.
+    engine_->runtime_config.batch_decode_scheduler_config.batch_decode_scheduler_batch_size = 1;
     engine_->initScheduler();
     auto stream = enqueueStream(1, 3, 1);
     auto output = engine_->scheduler_->schedule();

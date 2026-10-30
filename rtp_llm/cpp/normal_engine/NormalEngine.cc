@@ -1167,6 +1167,8 @@ void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) 
                                                   nullptr;
     auto               config               = CacheConfigCreator::createConfig(
         model_config_, parallelism_config, kv_cache_config, sp_config, draft_model_config, isMTPEagle(), isEagle());
+    CacheConfigCreator::configureLinearReplay(
+        config, model_config_, parallelism_config, runtime_config, sp_config, isMTPEagle());
     auto block_tree_layout = planBlockTreeCacheLayout(config, kv_cache_config);
     RTP_LLM_CHECK_WITH_INFO(block_tree_layout != nullptr, "failed to plan BlockTreeCache layout");
     const auto local_block_num     = CacheConfigCreator::computeLocalBlockNum(config,

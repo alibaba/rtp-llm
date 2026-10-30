@@ -238,9 +238,21 @@ public:
         // Refresh the drain state from the current queue. This batch may drain a mixed-mode tail,
         // but later homogeneous arrivals must go through the normal batch-size gate.
         draining_mixed_modes_ = has_other_mode;
+        for (const auto& stream : selected_streams) {
+            if (!stream->streamCacheResource().reserveLinearReplaySlot()) {
+                return;
+            }
+        }
         for (auto& stream : selected_streams) {
             if (stop_requested_.load()) {
                 return;
+            }
+            if (scheduler_type_ == SchedulerType::kBatchDecode && !isPrefillOnly(stream)
+                && cache_manager_->cacheConfig().linear_replay.enabled()) {
+                // Direct Decode starts from the prompt's final token, with its
+                // already-processed prefix initialized before the first grow.
+                stream->setPerfTest(true);
+                stream->setIsContextStream(false);
             }
             stream->reportEvent(StreamEvents::CanRun);
             // 忙等stream load cache done, 和原有SyncLoadCache逻辑等效

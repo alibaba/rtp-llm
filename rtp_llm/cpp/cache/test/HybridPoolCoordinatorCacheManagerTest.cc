@@ -708,6 +708,32 @@ TEST_F(HybridPoolCoordinatorCacheManagerTest, RecomputePreservesCompactCpReadyPr
     }
 }
 
+TEST_F(HybridPoolCoordinatorCacheManagerTest, LinearReplayReservesOnlyTheCurrentStateBlock) {
+    // MTP Verify reconstructs the accepted LINEAR state in its replay log;
+    // proposal slots are needed by FULL attention, not by the LINEAR pool.
+    auto config = makeTinyMultiPoolHybridConfig(/*linear_block_num=*/4, /*full_block_num=*/8);
+    config.linear_replay.group_ids = {static_cast<int>(config.topology().groupIdForTag("linear"))};
+    auto allocator = makeAllocator(config, RoleType::DECODE);
+    ASSERT_TRUE(allocator->init());
+
+    auto resource = makeBatchResource(1, config);
+    auto tokens = makeCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/3, /*seq_size_per_block=*/4);
+    tokens->setReserveStep(4);
+    MallocInfo info{resource, tokens};
+    info.enable_cache_lookup = false;
+    info.reuse_cache = false;
+
+    // The three proposed tokens stay in the existing 4-token FULL page until
+    // they cross its boundary; only one additional FULL page is needed here.
+    EXPECT_EQ(allocator->getNeedBlocks(info), 3);
+    ASSERT_TRUE(allocator->malloc(info).success);
+    ASSERT_EQ(resource->blocksNum(0, "linear"), 1u);
+    ASSERT_EQ(resource->blocksNum(0, "full"), 2u);
+    EXPECT_EQ(validBlockCount(resource->blocks(0, "linear")), 1u);
+    EXPECT_EQ(validBlockCount(resource->blocks(0, "full")), 2u);
+    allocator->free(FreeInfo{resource, tokens});
+}
+
 TEST_F(HybridPoolCoordinatorCacheManagerTest, OrdinaryLinearGroupReservesProposalSlotsOnDecode) {
     auto config = makeTinyMultiPoolHybridConfig(/*linear_block_num=*/6, /*full_block_num=*/8);
     auto allocator = makeAllocator(config, RoleType::DECODE);

@@ -69,6 +69,20 @@ cc_test(
 )
 
 cc_test(
+    name = "linear_replay_scheduler_regression_test",
+    srcs = ["LinearReplaySchedulerRegressionTest.cc"],
+    copts = copts() + ["-fno-access-control"],
+    deps = test_deps + [
+        "//rtp_llm/cpp/cache/block_tree_cache:block_tree_cache",
+        "//rtp_llm/cpp/cache/block_tree_cache/test:block_tree_cache_test_utils",
+        "//rtp_llm/cpp/cache/test:cache_config_test_utils",
+    ],
+    env = {"TEST_USING_DEVICE": "CUDA"},
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
+)
+
+cc_test(
     name = "fifo_scheduler_test",
     srcs = [
         "FIFOSchedulerTest.cc",

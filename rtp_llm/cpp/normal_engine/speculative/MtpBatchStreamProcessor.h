@@ -47,6 +47,11 @@ public:
 
     absl::StatusOr<GptModelInputs> gatherDecodeModelInput(const StreamGroups& stream_groups,
                                                           TensorHolder&       host_holder) const;
+    absl::Status                   gatherLinearReplayInputs(const StreamGroups&                             stream_groups,
+                                                            const CacheConfig&                              cache_config,
+                                                            GptModelInputs&                                 model_input,
+                                                            TensorHolder&                                   host_holder,
+                                                            std::vector<GenerateStream::LinearReplayRound>& rounds) const;
 
     // Produce the next round's immutable page table by applying the exact
     // linear-cache permutation used by GenerateStream::specUpdate.  FULL/SWA

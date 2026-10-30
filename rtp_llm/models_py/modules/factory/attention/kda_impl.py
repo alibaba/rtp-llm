@@ -15,6 +15,7 @@ from rtp_llm.models_py.triton_kernels.causal_conv1d import (
     causal_conv1d_update,
 )
 from rtp_llm.models_py.triton_kernels.kda import fused_recurrent_kda
+from rtp_llm.models_py.triton_kernels.linear_replay import LinearReplay
 from rtp_llm.models_py.utils.typed_storage_view import LinearCacheConverter
 from rtp_llm.ops import LinearAttentionConfig, ParallelismConfig
 from rtp_llm.ops.compute_ops import LayerKVCache, PyAttentionInputs
@@ -107,6 +108,7 @@ class KdaBase(nn.Module):
         self.conv_weights = weights[W.linear_attn_conv1d_w].squeeze(1)
         self.dt_bias = weights[W.linear_attn_dt_b_kda]
         self.alog = weights[W.linear_attn_alog]
+        self._linear_replay: Optional[LinearReplay] = None
 
     def forward(
         self,
@@ -696,6 +698,21 @@ class KdaDecode(KdaBase):
             kv_cache.kv_cache_base.shape[0], -1
         )
         is_target_verify = attn_meta.is_target_verify
+
+        if is_target_verify and kv_cache.linear_replay is not None:
+            if attn_inputs.linear_replay is None:
+                raise RuntimeError("target LINEAR replay requires round metadata")
+            self._linear_replay = LinearReplay.bind(
+                self._linear_replay,
+                self,
+                kv_cache,
+                vector_gate=True,
+                state_v_first=False,
+                lower_bound=self.gate_lower_bound,
+            )
+            return self._linear_replay(
+                mixed_qkv, forget_gate, beta, attn_inputs.linear_replay
+            )
 
         mixed_qkv = self._conv1d(
             mixed_qkv,

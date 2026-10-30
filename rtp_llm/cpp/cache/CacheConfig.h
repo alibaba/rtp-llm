@@ -14,6 +14,7 @@
 #include "rtp_llm/cpp/cache/CacheGroupType.h"
 #include "rtp_llm/cpp/cache/KVCacheSpec.h"
 #include "rtp_llm/cpp/cache/CacheTopology.h"
+#include "rtp_llm/cpp/cache/LinearReplayPlan.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/models_py/bindings/core/Types.h"
@@ -73,6 +74,10 @@ public:
     // Deployment sizing only; never part of a cache Spec or group policy identity.
     std::map<std::string, uint32_t> pool_block_weights;
 
+    // Accepted-prefix replay is enabled for target LINEAR groups during MTP.
+    // Group IDs follow the merged physical topology; the draft groups are excluded.
+    LinearReplayPlan linear_replay;
+
     // mtp-model configurations
     std::vector<std::shared_ptr<CacheConfig>> mtp_sub_configs;
 
@@ -128,6 +133,17 @@ public:
 
     const std::vector<GroupBase>& groups() const {
         return topology().groups();
+    }
+
+    // Startup resolves the replay switch for all eligible target LINEAR groups.
+    // Group consumers share that decision instead of checking runtime flags.
+    bool isLinearReplayGroup(int group_id) const {
+        return linear_replay.containsGroup(group_id);
+    }
+
+    bool isLegacyLinearGroup(int group_id) const {
+        return groups()[static_cast<size_t>(group_id)].policy.group_type == CacheGroupType::LINEAR
+               && !isLinearReplayGroup(group_id);
     }
 
     CacheTopology::GroupRefs groupsForLayer(int layer_id) const {

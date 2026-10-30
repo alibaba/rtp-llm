@@ -2718,8 +2718,8 @@ TEST_F(MtpBatchStreamProcessorTest, testDSparkCommitOnlyPrefillDispatch) {
     EXPECT_FALSE(stream->getSPOutputBuffer()->propose_tokens_gpu.defined());
 }
 
-TEST_F(MtpBatchStreamProcessorTest, FullSnapshotsDoNotRequirePerProposalPages) {
-    // FULL tables contain canonical pages only. A legacy permutation
+TEST_F(MtpBatchStreamProcessorTest, ReplaySnapshotsDoNotRequirePerProposalPages) {
+    // Replay/FULL tables contain canonical pages only. A legacy permutation
     // would gather proposal slot 7 from this one-page table even if no group
     // subsequently used the permutation.
     auto table = torch::tensor({11, 21}, torch::kInt32).reshape({2, 1, 1}).to(torch::kCUDA);
@@ -3127,7 +3127,7 @@ TEST_F(MtpBatchStreamProcessorTest, testCacheSnapshotOverlayKeepsPhysicalKernelP
     EXPECT_ANY_THROW(processor.overlayMtpCacheSnapshots(StreamGroups({steady, fresh}), too_narrow, holder));
 }
 
-TEST_F(MtpBatchStreamProcessorTest, testCacheSnapshotOverlayRestoresPagesInMixedGroups) {
+TEST_F(MtpBatchStreamProcessorTest, testCacheSnapshotOverlayRestoresReplayPagesInMixedGroups) {
     ModelConfig model_config;
     model_config.max_seq_len = 2048;
     model_config.vocab_size  = 8;
@@ -3142,6 +3142,7 @@ TEST_F(MtpBatchStreamProcessorTest, testCacheSnapshotOverlayRestoresPagesInMixed
         {{0}, {1}},
         {CacheGroupType::LINEAR, CacheGroupType::FULL},
         {"linear", "full"});
+    cache_config.linear_replay.group_ids = {0};
     TestableMtpBatchStreamProcessor processor(model_config, {}, {}, cache_config, sp_config, false);
 
     auto steady = createContextStream(model_config, runtime_config, {}, {1}, 1);

@@ -1709,6 +1709,88 @@ TEST_F(GenerateStreamTest, MtpCacheReservationPreservesLegacyLinearDevicePermuta
     }
 }
 
+TEST_F(GenerateStreamTest, MtpCacheReservationExtendsLinearReplayWithoutInvalidatingItsAnchor) {
+    auto config          = test::makeSimpleLinearCacheConfig(1, 32, 4, DataType::TYPE_BF16, 1, 2);
+    config.linear_replay = LinearReplayPlan::create({0}, 1, 4, {1, 2}, {1, 2}, false, DataType::TYPE_BF16, 1);
+    auto stream          = createMtpCacheStream(config, 4, 4);
+    ASSERT_TRUE(stream->stream_cache_resource_->prepareLinearReplayResources().ok());
+    const auto round = stream->prepareLinearReplayRound();
+    ASSERT_TRUE(round.ok());
+    ASSERT_NE(round->initial_state_hold, nullptr);
+    const auto anchor  = cacheTable(stream);
+    // Synchronous admission may already own proposal slots. Cross the actual
+    // snapshot extent to exercise an asynchronous extension rather than a hit.
+    const int  next_bound = static_cast<int>((anchor.size(2) + 1) * config.seq_size_per_block);
+    auto       pending    = pendingMtpCacheSnapshot(stream, next_bound);
+    const auto epoch   = stream->getMtpAsyncDeviceState().epoch;
+
+    ASSERT_TRUE(stream->prepareMtpCacheForNextStep());
+    EXPECT_TRUE(stream->hasPendingAsyncBookkeeping());
+    const auto next = stream->getMtpAsyncDeviceState();
+    EXPECT_EQ(next.epoch, epoch);
+    EXPECT_GT(next.next_kv_cache_block_id_gpu.size(2), anchor.size(2));
+    EXPECT_TRUE(torch::equal(next.next_kv_cache_block_id_gpu.cpu(), cacheTable(stream)));
+    EXPECT_TRUE(torch::equal(next.next_kv_cache_kernel_block_id_gpu.cpu(), cacheTable(stream, true)));
+    EXPECT_EQ(stream->stream_cache_resource_->linearReplayLease(), round->lease);
+    EXPECT_EQ(cacheTable(stream)[0][0][0].item<int32_t>(), anchor[0][0][0].item<int32_t>());
+}
+
+TEST_F(GenerateStreamTest, ReplayPdTailPreparationMatchesCapacityCheck) {
+    constexpr int block_tokens = 64;
+    constexpr int host_length  = 180;
+    constexpr int next_bound   = 188;  // MTP gamma=3: host + 2 * (gamma + 1), still in the same state page.
+    for (const int reserve_step : {0, 4}) {
+        SCOPED_TRACE(reserve_step);
+        auto config          = test::makeSimpleLinearCacheConfig(1, 32, block_tokens, DataType::TYPE_BF16, 1, 2);
+        config.linear_replay = LinearReplayPlan::create({0}, 1, 4, {1, 2}, {1, 2}, false, DataType::TYPE_BF16, 1);
+        auto       stream    = createMtpCacheStream(config, host_length, reserve_step, 1, /*prepare_decode=*/false);
+        auto&      resource  = stream->streamCacheResource();
+        auto&      blocks    = stream->kvCacheMutable();
+        const auto tag       = config.groupTags().front();
+        const auto manager   = resource.resourceContext().cache_manager;
+        const auto pool      = manager->coordinator_manager_->groupBlockPools().front();
+        ASSERT_TRUE(stream->isContextStream());
+        ASSERT_EQ(blocks.blocks(0, tag).size(), 3u);
+        // PD transfers only the LINEAR group's last state page. Preserve that
+        // canonical state and remove the earlier request refs as the handoff does.
+        const auto anchor = blocks.blocks(0, tag)[2];
+        for (size_t position = 0; position < 2; ++position) {
+            const auto block = blocks.blocks(0, tag)[position];
+            if (!isNullBlockIdx(block)) {
+                pool->decRef(block);
+                blocks.mutableBlockIds(0, tag).remove({position});
+            }
+        }
+        ASSERT_TRUE(isNullBlockIdx(blocks.blocks(0, tag)[1]));
+        ASSERT_TRUE(resource.prepareLinearReplayResources().ok());
+        ASSERT_EQ(resource.linearReplayLease(), nullptr) << "context preparation must still take its early return";
+        stream->setIsContextStream(false);
+        ASSERT_TRUE(resource.incrKVBlock().ok());
+        const size_t expected_slots = 3 + (reserve_step == 0 ? 0 : reserve_step - 1);
+        EXPECT_EQ(blocks.blocks(0, tag).size(), expected_slots) << "ordinary proposal capacity must be retained";
+        EXPECT_EQ(blocks.blocks(0, tag)[2], anchor);
+        EXPECT_EQ(resource.singleBatchNeedBlocks(next_bound, reserve_step), 0);
+
+        auto pending = pendingMtpCacheSnapshot(stream, next_bound);
+        for (int iteration = 0; iteration < 3; ++iteration) {
+            SCOPED_TRACE(iteration);
+            const auto before = stream->getMtpAsyncDeviceState();
+            ASSERT_TRUE(stream->prepareMtpCacheForNextStep());
+            EXPECT_EQ(resource.singleBatchNeedBlocks(next_bound, reserve_step), 0)
+                << "a successful reserve must satisfy the following capacity check";
+            stream->generate_status_->handleRunning();
+            const auto after = stream->getMtpAsyncDeviceState();
+            EXPECT_TRUE(GenerateStream::hasMtpCacheSnapshot(after));
+            if (!GenerateStream::hasMtpCacheSnapshot(after)) {
+                break;
+            }
+            EXPECT_EQ(after.epoch, before.epoch);
+            EXPECT_EQ(after.next_kv_cache_block_id_gpu.data_ptr(), before.next_kv_cache_block_id_gpu.data_ptr());
+            EXPECT_TRUE(stream->hasPendingAsyncBookkeeping());
+        }
+    }
+}
+
 TEST_F(GenerateStreamTest, MtpCacheReservationJoinsBeforePublishingBackfilledLegacySlots) {
     auto       config   = test::makeSimpleLinearCacheConfig(1, 32, 4, DataType::TYPE_BF16, 1, 2);
     auto       stream   = createMtpCacheStream(config, 5, 4);

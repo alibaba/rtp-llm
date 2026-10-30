@@ -1019,6 +1019,9 @@ bool GenerateStream::prepareUpdateWithoutLock(const std::optional<ErrorInfo>& er
         advanceChunk();
         return false;
     }
+    if (isContextStream()) {
+        stream_cache_resource_->publishPrefillCache(seqLength());
+    }
     is_context_stream_->store(false, std::memory_order_release);
     return true;
 }
@@ -1210,16 +1213,19 @@ bool GenerateStream::prepareMtpCacheForNextStep() {
 
     RTP_LLM_PROFILE_SCOPE("stream.reserve_mtp_cache_from_upper_bound");
     const auto& config = stream_cache_resource_->resourceContext().cache_manager->cacheConfig();
+    if (config.linear_replay.enabled() && !stream_cache_resource_->linearReplayLease()) {
+        return false;
+    }
     const auto& tags     = config.groupTags();
     const auto& resource = stream_cache_resource_->kvCache();
     RTP_LLM_CHECK_WITH_INFO(state.next_kv_cache_block_id_gpu.size(0) == static_cast<int64_t>(tags.size()),
                             "MTP cache snapshot must match the allocator topology");
-    // LINEAR groups permute proposal slots. Preserve their device
+    // Only legacy LINEAR groups permute proposal slots. Preserve their device
     // prefix whether the worker has already committed its host swaps or not.
     std::vector<BlockIndicesType> previous_linear_blocks(tags.size());
     std::vector<size_t>           previous_kernel_sizes(tags.size(), 0);
     for (size_t row = 0; row < tags.size(); ++row) {
-        if (config.groups()[row].policy.group_type == CacheGroupType::LINEAR) {
+        if (config.isLegacyLinearGroup(static_cast<int>(row))) {
             previous_linear_blocks[row] = resource.blocks(0, tags[row]);
             previous_kernel_sizes[row]  = resource.kernelBlocks(0, tags[row]).size();
         }
@@ -1568,7 +1574,9 @@ void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info,
         const auto& config   = stream_cache_resource_->resourceContext().cache_manager->cacheConfig();
         const auto& topology = config.topology();
         for (const auto& group : topology.groups()) {
-            if (group.policy.group_type != CacheGroupType::LINEAR) {
+            const int group_id = static_cast<int>(topology.groupIdForTag(group.tag));
+            // Replay commits accepted state through its log, without proposal-slot swaps.
+            if (!config.isLegacyLinearGroup(group_id)) {
                 continue;
             }
             // Calculate the two swaps in this LINEAR group's block-table coordinates.
@@ -1647,6 +1655,53 @@ void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info,
             timings[i].ttft_us = complete_token_ids_->firstTokenLatencyUs();
         }
     }
+}
+
+absl::StatusOr<GenerateStream::LinearReplayRound> GenerateStream::prepareLinearReplayRound() {
+    std::lock_guard<std::mutex> stream_lock(*mutex_);
+    std::lock_guard<std::mutex> state_lock(*mtp_async_state_mutex_);
+    auto&                       replay = stream_cache_resource_->linear_replay_;
+    const auto&                 lease  = replay.lease;
+    // Cancellation after batch admission does not invalidate this round's resources.
+    // Keep its row and ownership until GPU use completes; output publication drops
+    // errored streams, and the scheduler releases them after bookkeeping drains.
+    if (!lease || stream_cache_resource_->isResourceReleased()) {
+        return absl::FailedPreconditionError("target LINEAR replay requires a live log lease");
+    }
+    LinearReplayRound round;
+    round.lease = lease;
+    if (replay.window && replay.window->lease == lease) {
+        round.previous_window = replay.window;
+    }
+    round.state_block_hold   = stream_cache_resource_->holdLinearReplayBlocks();
+    round.initial_block_ids  = replay.initial_block_ids;
+    round.initial_state_hold = replay.initial_state_hold;
+    return round;
+}
+
+void GenerateStream::publishLinearReplayWindow(std::shared_ptr<const LinearReplayWindow> window) {
+    std::lock_guard<std::mutex> stream_lock(*mutex_);
+    std::lock_guard<std::mutex> state_lock(*mtp_async_state_mutex_);
+    if (stream_cache_resource_->isResourceReleased() || isFinished() || hasErrorWithoutLock()) {
+        return;
+    }
+    auto& replay = stream_cache_resource_->linear_replay_;
+    // The executor publishes in step order, before launching async bookkeeping.
+    if (window && window->lease == replay.lease) {
+        replay.window = std::move(window);
+        replay.clearInitialState();
+    }
+}
+
+std::shared_ptr<LinearReplayBlockHold> GenerateStream::linearReplayStateBlockHold() const {
+    std::lock_guard<std::mutex> lock(*mtp_async_state_mutex_);
+    const auto&                 window = stream_cache_resource_->linear_replay_.window;
+    return window ? window->state_block_hold : nullptr;
+}
+
+void GenerateStream::clearLinearReplayWindow() {
+    std::lock_guard<std::mutex> lock(*mtp_async_state_mutex_);
+    stream_cache_resource_->linear_replay_.window.reset();
 }
 
 void GenerateStream::update(const StreamUpdateInfo& update_info,

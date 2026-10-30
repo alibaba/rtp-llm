@@ -363,6 +363,10 @@ void FIFOScheduler::admitWaitingStreams(list<GenerateStreamPtr>&       waiting_s
         if (!evaluateRunningMemory(schedule_runtime, stream)) {
             continue;
         }
+        bool newly_reserved = false;
+        if (!stream->streamCacheResource().reserveLinearReplaySlot(&newly_reserved)) {
+            continue;
+        }
 
         const bool was_counted           = accountExecutionRows(schedule_runtime, stream, false);
         const auto state                 = stream->getStatus();
@@ -376,6 +380,9 @@ void FIFOScheduler::admitWaitingStreams(list<GenerateStreamPtr>&       waiting_s
         const bool load_initiated      = !load_initiated_before && stream->hasEvent(StreamEvents::LoadInitiated);
         const bool scheduling_progress = new_state == StreamState::RUNNING || new_state == StreamState::LOADING_CACHE
                                          || (new_state == StreamState::WAITING && (kv_initialized || load_initiated));
+        if (newly_reserved && !scheduling_progress) {
+            stream->streamCacheResource().releaseUnusedLinearReplaySlot();
+        }
 
         if (was_counted || scheduling_progress) {
             accountExecutionRows(schedule_runtime, stream);
@@ -521,6 +528,10 @@ void FIFOScheduler::evaluateWaitingGroupQueue() {
         if (!evaluateRunningMemory(schedule_runtime, stream)) {
             continue;
         }
+        bool newly_reserved = false;
+        if (!stream->streamCacheResource().reserveLinearReplaySlot(&newly_reserved)) {
+            continue;
+        }
 
         const bool was_counted           = accountExecutionRows(schedule_runtime, stream, false);
         const bool load_initiated_before = stream->hasEvent(StreamEvents::LoadInitiated);
@@ -537,6 +548,9 @@ void FIFOScheduler::evaluateWaitingGroupQueue() {
         }
         if (scheduling_progress) {
             accountAdmission(schedule_runtime, stream);
+        }
+        if (newly_reserved && !scheduling_progress) {
+            stream->streamCacheResource().releaseUnusedLinearReplaySlot();
         }
         if (kv_initialized) {
             ++newly_inited_kv_streams;

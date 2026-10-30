@@ -215,6 +215,7 @@ def launch_config(args):
         "world_size": world_size,
         "local_world_size": world_size,
         "world_rank": 0,
+        "enable_linear_replay": 1,
         "shared_expert_weight_shard": int(is_prefill and moe_strategy == "mega_moe"),
         "prefill_cp_kv_cache_sharded": int(max(prefill_tp, tp_size) > 1),
         "prefill_cp_size": prefill_tp,
