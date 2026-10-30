@@ -56,6 +56,12 @@ cc_library(
 )
 
 cc_library(
+    name = "kv_cache_spec_type",
+    hdrs = ["KVCacheSpecType.h"],
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "kv_cache_specs",
     srcs = [
         "KVCacheSpecDesc.cc",
@@ -73,6 +79,7 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":block_info",
+        ":kv_cache_spec_type",
         ":tp_cache_transfer_layout",
         ":cache_group_type",
         "//rtp_llm/cpp/config:config_modules",
@@ -221,6 +228,7 @@ cc_library(
     copts = copts(),
     visibility = ["//visibility:public"],
     deps = [
+        ":kv_cache_spec_type",
         ":cache_types",
     ] + torch_deps(),
 )

@@ -1,6 +1,7 @@
 #include "autil/TimeUtility.h"
 #include "rtp_llm/cpp/model_rpc/QueryConverter.h"
 #include "rtp_llm/cpp/model_rpc/PrefillRpcServer.h"
+#include "rtp_llm/cpp/cache/CPSlotMapper.h"
 #include <exception>
 #include "autil/Scope.h"
 #include "rtp_llm/cpp/model_rpc/StagePeerGroups.h"
@@ -453,6 +454,24 @@ GenerateRequestPB PrefillRpcServer::buildAllocateRequest(PrefillGenerateContext&
         alloc_request.add_peer_addrs(address);
     }
     fillStagePeerGroups(alloc_request, prefill_context.prefill_worker_cache_store_addrs);
+    alloc_request.set_prefill_tp_size(static_cast<int32_t>(maga_init_params_.parallelism_config.get_attn_tp_size()));
+    if (maga_init_params_.parallelism_config.tp_size <= 1) {
+        return alloc_request;
+    }
+    // Advertise the resolved physical layout, which may be independent of Query CP.
+    // A raw sharding flag alone does not mean that this cache owns PageRR shards.
+    const auto cp_mapper = engine_->resourceContext().cache_manager->cpSlotMapper();
+    if (cp_mapper && cp_mapper->isSharded()) {
+        const auto shard_count = cp_mapper->cpSize();
+        const auto stage_count = std::max<int64_t>(1, maga_init_params_.parallelism_config.pp_size);
+        RTP_LLM_CHECK_WITH_INFO(alloc_request.peer_addrs_size() == shard_count * stage_count,
+                                "sharded Prefill KV requires one cache-store peer per shard in each PP stage, "
+                                "got peers=%d shards=%d stages=%ld",
+                                alloc_request.peer_addrs_size(),
+                                shard_count,
+                                stage_count);
+        alloc_request.set_prefill_cp_size(static_cast<int32_t>(shard_count));
+    }
     return alloc_request;
 }
 

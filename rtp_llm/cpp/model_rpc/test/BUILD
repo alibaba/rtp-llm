@@ -238,6 +238,7 @@ cc_test(
     ],
     copts = test_copts,
     deps = test_deps + [
+        "//rtp_llm/cpp/cache/test:cache_config_test_utils",
         "@io_opentelemetry_cpp//exporters/memory:in_memory_span_exporter",
     ],
     env = {

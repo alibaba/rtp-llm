@@ -127,6 +127,7 @@ cc_library(
         "//rtp_llm/cpp/cache:cp_slot_mapper",
         "//rtp_llm/cpp/config:rank_layout",
         "//rtp_llm/cpp/config:stage_layer_range",
+        "//rtp_llm/cpp/cache/connector/p2p:asymmetric_tp_util",
         "//rtp_llm/cpp/disaggregate/cache_store",
         "//rtp_llm/cpp/engine_base:profiler",
         "//rtp_llm/cpp/engine_base/stream:generate_types",

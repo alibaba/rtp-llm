@@ -67,6 +67,18 @@ cc_library(
 )
 
 cc_library(
+    name = "asymmetric_tp_util",
+    srcs = ["AsymmetricTpUtil.cc"],
+    hdrs = ["AsymmetricTpUtil.h"],
+    copts = copts(),
+    deps = ["//rtp_llm/cpp/utils:core_utils"],
+    visibility = [
+        "//rtp_llm/cpp/cache/connector/p2p/test:__pkg__",
+        "//rtp_llm/cpp/model_rpc:__pkg__",
+    ],
+)
+
+cc_library(
     name = "components",
     srcs = [
         "P2PBroadcastClient.cc",

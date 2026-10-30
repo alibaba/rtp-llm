@@ -384,7 +384,9 @@ TEST(CacheConfigCreatorTest, SparseIndexerUsesIndependentNaturalStridePool) {
         const auto pool_config = DeviceBlockPoolConfigHelper::createConfigForGroup(config, group);
         ASSERT_FALSE(pool_config.memory_layouts.empty());
         for (const auto& layout : pool_config.memory_layouts) {
-            EXPECT_FALSE(layout.enable_hybrid_attention);
+            const auto expected_type =
+                group.tag == "default" ? KVCacheSpecType::MultiHeadLatentAttention : KVCacheSpecType::OpaqueKV;
+            EXPECT_EQ(layout.cache_type, expected_type) << "tag=" << group.tag;
         }
     }
     ASSERT_EQ(config.groupNums(), 2);
@@ -953,7 +955,9 @@ TEST(CacheConfigCreatorTest, HybridAttentionIndependentPoolUsesHybridPoolConfig)
         const auto pool_config = DeviceBlockPoolConfigHelper::createConfigForGroup(config, group);
         ASSERT_FALSE(pool_config.memory_layouts.empty());
         for (const auto& layout : pool_config.memory_layouts) {
-            EXPECT_FALSE(layout.enable_hybrid_attention);
+            const auto expected_type =
+                group.tag == "full" ? KVCacheSpecType::MultiHeadAttention : KVCacheSpecType::LinearAttention;
+            EXPECT_EQ(layout.cache_type, expected_type) << "tag=" << group.tag;
         }
     }
     ASSERT_EQ(config.groupNums(), 2);
