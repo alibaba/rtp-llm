@@ -105,6 +105,128 @@ py_test(
 )
 
 py_test(
+    name = "kimi_k3_request_contract_test",
+    srcs = ["kimi_k3_request_contract_test.py"],
+    deps = ["//rtp_llm:testlib"],
+)
+
+py_test(
+    name = "mtp_logprobs_renderer_test",
+    srcs = ["mtp_logprobs_renderer_test.py"],
+    data = ["//rtp_llm:sdk"],
+    deps = [
+        "//rtp_llm:testlib",
+        "//rtp_llm:torch",
+    ],
+)
+
+py_test(
+    name = "kimi_k3_renderer_test",
+    srcs = ["kimi_k3_renderer_test.py"],
+    data = ["//rtp_llm:sdk"],
+    deps = ["//rtp_llm:testlib"],
+)
+
+py_test(
+    name = "kimi_k3_grammar_test",
+    srcs = ["kimi_k3_grammar_test.py"],
+    deps = ["//rtp_llm:testlib"],
+)
+
+py_test(
+    name = "kimi_k3_native_tokenizer_smoke_test",
+    srcs = ["kimi_k3_native_tokenizer_smoke_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    tags = ["manual"],
+)
+
+py_test(
+    name = "kimi_k3_http_checkpoint_smoke_test",
+    srcs = ["kimi_k3_http_checkpoint_smoke_test.py"],
+    data = ["//rtp_llm/cpp/multimodal_processor/test:kimi_k3_feature_expand_check"],
+    deps = ["//rtp_llm:testlib"],
+    tags = ["manual"],
+)
+
+py_test(
+    name = "kimi_k3_multimodal_test",
+    srcs = ["kimi_k3_multimodal_test.py"],
+    data = ["testdata/kimi_k3/preprocessor_config.json"],
+    deps = ["//rtp_llm:testlib"],
+    env = {"GPU_COUNT": "1"},
+    exec_properties = {"gpu": "L20_CU13", "gpu_count": "1"},
+    tags = ["L20_CU13"],
+)
+
+py_test(
+    name = "kimi_k3_multimodal_checkpoint_smoke_test",
+    srcs = ["kimi_k3_multimodal_checkpoint_smoke_test.py"],
+    data = ["//rtp_llm/cpp/multimodal_processor/test:kimi_k3_feature_expand_check"],
+    deps = ["//rtp_llm:testlib"],
+    tags = ["manual"],
+)
+
+py_test(
+    name = "kimi_k3_linear_replay_wiring_test",
+    srcs = ["kimi_k3_linear_replay_wiring_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    env = {"GPU_COUNT": "1"},
+    exec_properties = {"gpu": "L20_CU13", "gpu_count": "1"},
+    tags = ["L20_CU13"],
+)
+
+py_test(
+    name = "kimi_k3_jit_warmup_test",
+    srcs = ["kimi_k3_jit_warmup_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    exec_properties = {"gpu": "SM100_ARM_CU13"},
+    tags = ["SM100_ARM_CU13"],
+)
+
+py_test(
+    name = "kimi_k3_rope_cpu_test",
+    srcs = ["kimi_k3_rope_test.py"],
+    main = "kimi_k3_rope_test.py",
+    args = ["KimiK3RopeCpuTest"],
+    deps = ["//rtp_llm:testlib"],
+)
+
+py_test(
+    name = "kimi_k3_rope_test",
+    srcs = ["kimi_k3_rope_test.py"],
+    main = "kimi_k3_rope_test.py",
+    args = ["KimiK3RopeTest"],
+    deps = ["//rtp_llm:testlib"],
+    exec_properties = {"gpu": "L20_CU13", "gpu_count": "1"},
+    tags = ["L20_CU13"],
+)
+
+py_test(
+    name = "kimi_k3_rope_jit_cache_test",
+    size = "large",
+    srcs = ["kimi_k3_rope_test.py"],
+    main = "kimi_k3_rope_test.py",
+    args = ["KimiK3RopeJitCacheTest"],
+    deps = ["//rtp_llm:testlib"],
+    exec_properties = {"gpu": "SM103_CU13"},
+    tags = ["SM103_CU13", "no-cache"],
+)
+
+py_test(
+    name = "kimi_k3_rope_microbenchmark",
+    srcs = ["kimi_k3_rope_microbenchmark.py"],
+    deps = ["//rtp_llm:testlib"],
+    tags = ["manual"],
+)
+
+py_test(
+    name = "kimi_k3_batch_vit_microbenchmark",
+    srcs = ["kimi_k3_batch_vit_microbenchmark.py"],
+    deps = ["//rtp_llm:testlib"],
+    tags = ["manual"],
+)
+
+py_test(
     name = "stop_words_pipeline_test",
     srcs = [
         "stop_words_pipeline_test.py",
@@ -484,4 +606,20 @@ py_test(
     deps = ["//rtp_llm:testlib"],
     tags = ["SM100_ARM_CU13"],
     exec_properties = {"gpu": "SM100_ARM_CU13", "gpu_count": "1"},
+)
+
+py_test(
+    name = "kimi_k3_cache_config_test",
+    srcs = ["kimi_k3_cache_config_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    tags = ["L20_CU13"],
+    exec_properties = {"gpu": "L20_CU13", "gpu_count": "1"},
+)
+
+py_test(
+    name = "kimi_k3_fp8_weight_test",
+    srcs = ["kimi_k3_fp8_weight_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    tags = ["L20_CU13"],
+    exec_properties = {"gpu": "L20_CU13", "gpu_count": "1"},
 )

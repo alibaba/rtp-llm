@@ -1,4 +1,5 @@
 import importlib.metadata
+import importlib.util
 import logging
 import os
 import platform
@@ -139,6 +140,34 @@ def _distribution_version(name: str) -> str:
     return importlib.metadata.version(name)
 
 
+def _tokenspeed_mla_identity() -> str:
+    # Inspect the selected package without importing its GPU runtime. Both wheel
+    # rebuilds and edits to a source install can change the generated CuTe code.
+    spec = importlib.util.find_spec("tokenspeed_mla")
+    if spec is None or not spec.origin:
+        raise ValueError("TokenSpeed MLA is not importable")
+    package = Path(spec.origin).resolve(strict=True).parent
+    digest = sha256()
+    with suppress(importlib.metadata.PackageNotFoundError):
+        dist = importlib.metadata.distribution("tokenspeed-mla")
+        digest.update(dist.version.encode() + b"\0")
+        if record := dist.read_text("RECORD"):
+            digest.update(record.encode() + b"\0")
+    sources = sorted(
+        path
+        for path in package.rglob("*")
+        if path.is_file()
+        and path.suffix in {".py", ".so", ".cu", ".cuh", ".h", ".inc", ".cpp"}
+        and "__pycache__" not in path.relative_to(package).parts
+    )
+    if not sources:
+        raise ValueError("TokenSpeed MLA has no identifiable source files")
+    for path in sources:
+        digest.update(path.relative_to(package).as_posix().encode() + b"\0")
+        digest.update(sha256(path.read_bytes()).digest())
+    return digest.hexdigest()
+
+
 def _component_scope_parts(item: Component, scopes: dict[str, str]) -> tuple[str, ...]:
     parts = tuple(
         _distribution_version(part[1:]) if part.startswith("@") else scopes[part]
@@ -160,6 +189,11 @@ def _component_scope_parts(item: Component, scopes: dict[str, str]) -> tuple[str
         except importlib.metadata.PackageNotFoundError:
             cubin = "absent"
         parts += (f"cubin-{cubin}",)
+    if item.name == "cute_dsl" and os.environ.get("MODEL_TYPE") in (
+        "kimi_k3",
+        "kimi_k3_mtp",
+    ):
+        parts += (_tokenspeed_mla_identity(),)
     return parts
 
 
@@ -213,6 +247,14 @@ def resolve_scope(
                 keys.append("-".join((item.name, *parts)))
         except importlib.metadata.PackageNotFoundError:
             pass
+        except (OSError, ValueError) as error:
+            if os.environ.get("MODEL_TYPE") not in ("kimi_k3", "kimi_k3_mtp"):
+                raise
+            logging.warning(
+                "JIT_CACHE_FAIL_OPEN: %s K3 producer identity unavailable: %s",
+                item.name,
+                error,
+            )
     if not selected:
         logging.warning("JIT_CACHE_FAIL_OPEN: no managed components")
         return None

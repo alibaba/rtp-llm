@@ -1531,6 +1531,31 @@ def _sm100_dense_layout_info(
     return num_waves, last_wave_util
 
 
+def _sm100_bf16_k_mn_storage_signature(
+    *,
+    swap_ab: int,
+    block_m: int,
+    block_n: int,
+    block_k: int,
+    cluster_m: int,
+    cluster_n: int,
+    cd_elem_size: int,
+) -> tuple[int, ...]:
+    """DG98 KernelNoSF, BF16 A=K/B=MN; do not reuse FP8 SF storage."""
+    load_m, load_n = block_m // cluster_n, block_n // cluster_m
+    store_m = 16 if swap_ab else min(128, block_m)
+    swizzle_a = _sm100_swizzle_mode(block_k, 2)
+    swizzle_b = _sm100_swizzle_mode(load_n, 2)
+    swizzle_cd = _sm100_swizzle_mode(block_n, cd_elem_size)
+    smem_cd = (
+        store_m * block_n * cd_elem_size * 2 if swap_ab else store_m * swizzle_cd * 2
+    )
+    # DG98 allocates full/empty/overlap barriers even for KernelNoSF.
+    extra = smem_cd + 32 * 8 * 3 + 2 * 8 * 3 + 8 + 4
+    stages = min((232448 - extra) // ((load_m + load_n) * block_k * 2), 32)
+    return (load_m, load_n, store_m, block_n, swizzle_a, swizzle_b, swizzle_cd, stages)
+
+
 def _sm100_dense_layout_is_better(
     candidate: tuple[int, int, int, int, int, int],
     current: tuple[int, int, int, int, int, int],
@@ -1597,9 +1622,10 @@ def _sm100_dense_layout_signature(
     gemm_type_key = 1 if str(kind) in ("fp8_batched", "v41_fp8_batched") else 0
     # V41 pins DeepGEMM 2.8's single-accumulator TMEM layout. Retain V4's
     # older two-accumulator scan for its supported dependency versions.
-    tmem_accumulators = 1 if str(kind).startswith("v41_") else 2
+    bf16_k_mn = kind == "dg98_bf16_k_mn"
+    tmem_accumulators = 1 if str(kind).startswith("v41_") or bf16_k_mn else 2
     num_groups = max(int(num_groups), 1)
-    block_k = 128
+    block_k = 64 if bf16_k_mn else 128
     candidates: list[tuple[int, int, int, int, int, int]] = []
 
     for swap_ab in (0, 1):
@@ -1636,7 +1662,7 @@ def _sm100_dense_layout_signature(
                         continue
 
                     for block_n in block_n_candidates:
-                        if (block_n // cluster_m) % 8 != 0:
+                        if (block_n // cluster_m) % (64 if bf16_k_mn else 8) != 0:
                             continue
                         if _ceil_div(n_value, block_n) % cluster_n != 0:
                             continue
@@ -1645,16 +1671,22 @@ def _sm100_dense_layout_signature(
 
                         sf_block_m = _align(block_m, 128)
                         sf_block_n = _align(block_n, 128)
-                        tmem_sf_cols = sf_block_m // 32 + sf_block_n // 32
+                        tmem_sf_cols = (
+                            0 if bf16_k_mn else sf_block_m // 32 + sf_block_n // 32
+                        )
                         umma_n = block_m if swap_ab else block_n
                         if tmem_accumulators * umma_n + tmem_sf_cols > 512:
                             continue
 
-                        # RTP warmup tensors are K-major for A and B.  DeepGEMM
-                        # keeps only layouts whose A/B swizzles are both 128B.
+                        # DG98 BF16 skip-head uses A=K/B=MN. Existing FP8
+                        # callers retain their original K/K storage recipe.
                         if (
-                            _sm100_swizzle_mode(block_k, 1) != 128
-                            or _sm100_swizzle_mode(block_k, 1) != 128
+                            _sm100_swizzle_mode(block_k, 2 if bf16_k_mn else 1) != 128
+                            or _sm100_swizzle_mode(
+                                block_n // cluster_m if bf16_k_mn else block_k,
+                                2 if bf16_k_mn else 1,
+                            )
+                            != 128
                         ):
                             continue
                         candidates.append(
@@ -1676,7 +1708,12 @@ def _sm100_dense_layout_signature(
         ):
             best = candidate
 
-    storage = _sm100_dense_storage_signature(
+    storage_selector = (
+        _sm100_bf16_k_mn_storage_signature
+        if bf16_k_mn
+        else _sm100_dense_storage_signature
+    )
+    storage = storage_selector(
         swap_ab=best[0],
         block_m=best[1],
         block_n=best[2],
