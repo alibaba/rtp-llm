@@ -969,6 +969,28 @@ protected:
         }
     };
 };
+TEST_P(EosGpuCompletionTest, RuntimeDisableSkipsEosBeforePinsAndAllowsLaterPublication) {
+    Scenario s(std::get<0>(GetParam()), std::get<1>(GetParam()), true, false, std::get<2>(GetParam()));
+    const auto pool = s.env.pools_by_tag.at("full");
+    const auto refs = pool->refCount(s.full.front());
+    s.backend->setRemoteCacheEnabled(false);
+    ASSERT_TRUE(s.backend->captureCompletedDecode(s.resource, s.end(), true));
+    EXPECT_EQ(s.starts, 0);
+    EXPECT_EQ(s.saves, 0);
+    EXPECT_EQ(s.finishes, 0);
+    EXPECT_FALSE(s.resource.decodeCompletionSubmitted());
+    EXPECT_EQ(pool->refCount(s.full.front()), refs);
+
+    s.backend->setRemoteCacheEnabled(true);
+    ASSERT_TRUE(s.backend->captureCompletedDecode(s.resource, s.end(), true));
+    ASSERT_TRUE(waitForBackendOperationsForTest(*s.backend));
+    EXPECT_EQ(s.starts, 1);
+    EXPECT_GT(s.saves, 0);
+    EXPECT_EQ(s.finishes, 1);
+    EXPECT_EQ(s.aborts, 0);
+    EXPECT_EQ(pool->refCount(s.full.front()), refs);
+}
+
 TEST_P(EosGpuCompletionTest, NoProgressSnapshotAndNativePagesSurviveRequestRelease) {
     Scenario s(std::get<0>(GetParam()), std::get<1>(GetParam()), true, false, std::get<2>(GetParam()));
     s.block_start = true;

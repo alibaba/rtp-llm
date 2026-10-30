@@ -1144,6 +1144,126 @@ TEST(StorageBackendTest, IoExceptionsPropagateFailureAndReleasePins) {
     backend.shutdown();
 }
 
+TEST(StorageBackendTest, RuntimeDisableSkipsQueuedIoAndPreservesLocalMatchesAndPins) {
+    auto pool = std::make_shared<TestBlockPool>();
+    const auto block = pool->malloc().value();
+    pool->incRef(block);
+    auto executor = std::make_shared<HoldingExecutor>();
+    ProtectedBackend backend(true, executor);
+    ASSERT_TRUE(initBackend(backend, pool));
+    auto write = backend.prepareWrite(makeRequest(block));
+    ASSERT_TRUE(write);
+    EXPECT_TRUE(backend.write(std::move(write)));
+    bool read_success = true;
+    backend.read(makeRequest(block), nullptr, [&](ErrorInfo error) { read_success = error.ok(); });
+    auto request = makeRequest(NULL_BLOCK_IDX, 2);
+    request.local_matched_blocks_num = 1;
+    bool match_done = false;
+    backend.match(std::move(request), [&](size_t matched, auto meta, bool success) {
+        EXPECT_TRUE(success);
+        EXPECT_EQ(matched, 1u);
+        EXPECT_EQ(meta, nullptr);
+        match_done = true;
+    });
+    EXPECT_EQ(pool->refCount(block), 3u);
+    backend.setRemoteCacheEnabled(false);
+    EXPECT_FALSE(backend.prepareWrite(makeRequest(block)));
+    EXPECT_EQ(executor->runAll(), 3u);
+    EXPECT_TRUE(match_done);
+    EXPECT_FALSE(read_success);
+    EXPECT_EQ(backend.readCalls(), 0u);
+    EXPECT_EQ(backend.writeHandleCount(), 0u);
+    EXPECT_EQ(pool->refCount(block), 1u);
+    EXPECT_FALSE(pool->isFrozen(block));
+
+    backend.setRemoteCacheEnabled(true);
+    backend.read(makeRequest(block), nullptr, [&](ErrorInfo error) { read_success = error.ok(); });
+    EXPECT_TRUE(backend.write(backend.prepareWrite(makeRequest(block))));
+    EXPECT_EQ(executor->runAll(), 2u);
+    EXPECT_TRUE(read_success);
+    EXPECT_EQ(backend.readCalls(), 1u);
+    EXPECT_EQ(backend.writeHandleCount(), 1u);
+    EXPECT_EQ(pool->refCount(block), 1u);
+    backend.shutdown();
+    pool->decRef(block);
+}
+
+TEST(StorageBackendTest, DisabledLocalMatchDoesNotDependOnExecutorCapacity) {
+    auto pool = std::make_shared<TestBlockPool>();
+    const auto block = pool->malloc().value();
+    pool->incRef(block);
+    auto executor = std::make_shared<HoldingExecutor>();
+    TestBackend backend(true, executor);
+    ASSERT_TRUE(initBackend(backend, pool));
+    auto write = backend.prepareWrite(makeRequest(block));
+    ASSERT_TRUE(write);
+    executor->setReject(true);
+    backend.setRemoteCacheEnabled(false);
+    auto request = makeRequest(NULL_BLOCK_IDX, 2);
+    request.local_matched_blocks_num = 1;
+    bool done = false;
+    backend.match(std::move(request), [&](size_t matched, auto meta, bool success) {
+        EXPECT_TRUE(success);
+        EXPECT_EQ(matched, 1u);
+        EXPECT_EQ(meta, nullptr);
+        done = true;
+    });
+    EXPECT_TRUE(done);
+    bool read_done = false;
+    backend.read(makeRequest(block), nullptr, [&](ErrorInfo error) {
+        EXPECT_FALSE(error.ok());
+        read_done = true;
+    });
+    EXPECT_TRUE(read_done);
+    EXPECT_FALSE(backend.write(std::move(write)));
+    EXPECT_EQ(backend.readCalls(), 0u);
+    EXPECT_EQ(backend.writeHandleCount(), 0u);
+    EXPECT_EQ(pool->refCount(block), 1u);
+    EXPECT_EQ(executor->pendingCount(), 0u);
+    backend.shutdown();
+    pool->decRef(block);
+}
+
+TEST(StorageBackendTest, DisableDuringMatchDiscardsRemoteHitsWithoutFailingLocalMatch) {
+    auto pool = std::make_shared<TestBlockPool>();
+    TestBackend backend;
+    ASSERT_TRUE(initBackend(backend, pool));
+    backend.blockMatch();
+    auto completion = std::make_shared<std::promise<size_t>>();
+    auto result = completion->get_future();
+    auto request = makeRequest(NULL_BLOCK_IDX, 2);
+    request.local_matched_blocks_num = 1;
+    backend.match(std::move(request), [completion](size_t matched, auto meta, bool success) {
+        EXPECT_TRUE(success);
+        EXPECT_EQ(meta, nullptr);
+        completion->set_value(matched);
+    });
+    const bool entered = backend.waitUntilMatchEntered();
+    backend.setRemoteCacheEnabled(false);
+    backend.releaseMatch();
+    ASSERT_TRUE(entered);
+    ASSERT_EQ(result.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+    EXPECT_EQ(result.get(), 1u);
+    backend.shutdown();
+}
+
+TEST(StorageBackendTest, DisableDoesNotCancelAlreadyAdmittedPayload) {
+    auto pool = std::make_shared<TestBlockPool>();
+    const auto block = pool->malloc().value();
+    pool->incRef(block);
+    auto executor = std::make_shared<HoldingExecutor>();
+    QuarantineObservingBackend backend(true, executor);
+    ASSERT_TRUE(initBackend(backend, pool));
+    backend.write_action = [&] { backend.setRemoteCacheEnabled(false); };
+    EXPECT_TRUE(backend.write(backend.prepareWrite(makeRequest(block))));
+    EXPECT_EQ(executor->runAll(), 1u);
+    EXPECT_FALSE(backend.remoteCacheEnabled());
+    EXPECT_EQ(backend.quarantine_events, 0u);
+    EXPECT_EQ(pool->refCount(block), 1u);
+    backend.shutdown();
+    pool->decRef(block);
+}
+
 TEST(StorageBackendTest, AsyncWritesReturnBeforeCompletionAndReleaseOnlyTheirOwnPins) {
     for (bool complete_first : {true, false}) {
         auto pool         = std::make_shared<TestBlockPool>();

@@ -7,6 +7,7 @@
 #include <atomic>
 #include <chrono>
 #include <future>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <numeric>
@@ -45,6 +46,8 @@ struct KVCMBroadcastState {
     std::vector<RemoteOperationRequestPB> requests;
     bool                                  fail{false};
     grpc::StatusCode                      failure_code{grpc::StatusCode::INTERNAL};
+    // Installed before requests are submitted; callbacks may run on both ranks.
+    std::function<void()>                 on_request;
 };
 
 class KVCMBroadcastRpcService final: public RpcService::Service {
@@ -61,6 +64,9 @@ public:
         {
             std::lock_guard<std::mutex> lock(state_->mutex);
             state_->requests.push_back(remote_request);
+        }
+        if (state_->on_request) {
+            state_->on_request();
         }
         if (state_->fail) {
             return grpc::Status(state_->failure_code, "injected KVCM broadcast failure");

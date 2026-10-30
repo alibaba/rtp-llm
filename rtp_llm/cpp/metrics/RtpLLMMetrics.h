@@ -1370,6 +1370,21 @@ private:
     AUTIL_LOG_DECLARE();
 };
 
+class RtpLLMRemoteCacheControlMetricsCollector final {
+public:
+    bool enabled{true};
+};
+
+class RtpLLMRemoteCacheControlMetrics: public kmonitor::MetricsGroup {
+public:
+    bool init(kmonitor::MetricsGroupManager* manager) override;
+    void report(const kmonitor::MetricsTags* tags, RtpLLMRemoteCacheControlMetricsCollector* collector);
+    kmonitor::MutableMetric* enabled_metric{nullptr};
+
+private:
+    AUTIL_LOG_DECLARE();
+};
+
 class RtpLLMRemoteCacheOutcomeMetricsCollector final {
 public:
     const char* stage{"lookup"};

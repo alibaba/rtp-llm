@@ -1,6 +1,7 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/test/KVCMMockTestBase.h"
 
 #include <array>
+#include <atomic>
 #include <csignal>
 #include <cstdint>
 #include <stdexcept>
@@ -723,6 +724,176 @@ TEST(KVCMLocalTest, FailureBeforeTransferStillAbortsItsUnusedAllocation) {
         ASSERT_TRUE(backend.backend->write(std::move(task)));
         ASSERT_TRUE(waitForBackendOperationsForTest(*backend.backend));
         EXPECT_FALSE(environment.device_pool->isFrozen(environment.block_id));
+    }
+}
+
+TEST(KVCMLocalTest, RuntimeDisableAfterAllocationAbortsBeforePayloadAndCanRecover) {
+    autil::EnvGuard async("RTP_LLM_STREAM_ASYNC", "0");
+    for (const bool protected_io : {false, true}) {
+        autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", protected_io ? "1" : "0");
+        auto environment = makeBackendEnvironment("kvcm_control_after_allocation");
+        auto client = std::make_shared<MockClientWrapper>();
+        EXPECT_CALL(*client, initForPools(_, _, _, _)).WillOnce(Return(true));
+        EXPECT_CALL(*client, shutdown()).Times(1);
+        auto backend = makeCompletionProofBackend(environment, client);
+        ASSERT_TRUE(initSingleRank(*backend.backend, environment));
+        const auto refs = environment.device_pool->refCount(environment.block_id);
+        kv_cache_manager::WriteLocation allocation;
+        allocation.write_session_id = "disabled-before-save";
+        allocation.block_mask = kv_cache_manager::BlockMaskOffset{0};
+        allocation.locations = {{{"tp0_Fdefault", "pace://write_uri"}}};
+        EXPECT_CALL(*client, getWriteLocation(_, _, _, _, _, _, 0))
+            .WillOnce(Invoke([&](const auto&, const auto&, const auto&, const auto&, const auto&, auto, auto) {
+                backend.backend->setRemoteCacheEnabled(false);
+                return std::make_pair(true, allocation);
+            }));
+        EXPECT_CALL(*client, saveKvCachesForTag(_, _, _, _)).Times(0);
+        EXPECT_CALL(*client,
+                    finishWrite(_, _, "disabled-before-save",
+                                ::testing::Eq(kv_cache_manager::BlockMask{kv_cache_manager::BlockMaskOffset{0}}),
+                                ::testing::IsEmpty()))
+            .WillOnce(Return(true));
+        EXPECT_TRUE(backend.backend->write(backend.backend->prepareWrite(makeStorageRequest(environment))));
+        ASSERT_TRUE(waitForBackendOperationsForTest(*backend.backend));
+        EXPECT_EQ(environment.device_pool->refCount(environment.block_id), refs);
+        EXPECT_FALSE(environment.device_pool->isFrozen(environment.block_id));
+        EXPECT_FALSE(backend.backend->protected_quarantine_);
+        EXPECT_FALSE(backend.backend->prepareWrite(makeStorageRequest(environment)));
+
+        backend.backend->setRemoteCacheEnabled(true);
+        kv_cache_manager::WriteLocation empty;
+        // All keys already exist: the returned mask must cover the request.
+        empty.block_mask = kv_cache_manager::BlockMaskOffset{1};
+        EXPECT_CALL(*client, getWriteLocation(_, _, _, _, _, _, 0)).WillOnce(Return(std::make_pair(true, empty)));
+        EXPECT_TRUE(backend.backend->write(backend.backend->prepareWrite(makeStorageRequest(environment))));
+        ASSERT_TRUE(waitForBackendOperationsForTest(*backend.backend));
+        EXPECT_EQ(environment.device_pool->refCount(environment.block_id), refs);
+    }
+}
+
+TEST(KVCMLocalTest, RuntimeDisableAfterMatchSkipsLoadWithoutQuarantine) {
+    autil::EnvGuard async("RTP_LLM_STREAM_ASYNC", "0");
+    for (const bool protected_io : {false, true}) {
+        autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", protected_io ? "1" : "0");
+        auto environment = makeBackendEnvironment("kvcm_control_after_match");
+        auto client = std::make_shared<MockClientWrapper>();
+        EXPECT_CALL(*client, initForPools(_, _, _, _)).WillOnce(Return(true));
+        EXPECT_CALL(*client, shutdown()).Times(1);
+        auto backend = makeCompletionProofBackend(environment, client);
+        ASSERT_TRUE(initSingleRank(*backend.backend, environment));
+        kv_cache_manager::Locations locations{{{"tp0_Fdefault", "pace://read_uri"}}};
+        EXPECT_CALL(*client, match(_, _, _, _, _, _)).WillOnce(Return(std::make_pair(true, locations)));
+        auto observation = match(*backend.backend, makeStorageRequest(environment));
+        ASSERT_TRUE(observation.success);
+        ASSERT_NE(observation.match_meta, nullptr);
+        EXPECT_CALL(*client, loadKvCachesForTag(_, _, _, _)).Times(0);
+        const auto refs = environment.device_pool->refCount(environment.block_id);
+        backend.backend->setRemoteCacheEnabled(false);
+        const auto result = readResult(*backend.backend, makeStorageRequest(environment), observation.match_meta);
+        EXPECT_FALSE(result.ok());
+        EXPECT_NE(result.code(), ErrorCode::DEADLINE_EXCEEDED);
+        EXPECT_EQ(environment.device_pool->refCount(environment.block_id), refs);
+        EXPECT_FALSE(backend.backend->protected_quarantine_);
+        EXPECT_FALSE(environment.device_pool->isFrozen(environment.block_id));
+        auto local_request = makeStorageRequest(environment, {101, 102}, 1);
+        const auto local = match(*backend.backend, std::move(local_request));
+        EXPECT_TRUE(local.success);
+        EXPECT_EQ(local.matched_blocks_num, 1u);
+        EXPECT_EQ(local.match_meta, nullptr);
+    }
+}
+
+TEST(KVCMLocalTest, RuntimeDisableDuringSaveStillFinishesAdmittedWrite) {
+    autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "0");
+    auto environment = makeBackendEnvironment("kvcm_control_during_save");
+    auto client = std::make_shared<MockClientWrapper>();
+    EXPECT_CALL(*client, initForPools(_, _, _, _)).WillOnce(Return(true));
+    EXPECT_CALL(*client, shutdown()).Times(1);
+    auto backend = makeBackend(environment, singleRankConfig(), client);
+    ASSERT_TRUE(initSingleRank(*backend.backend, environment));
+    kv_cache_manager::WriteLocation allocation;
+    allocation.write_session_id = "already-submitted";
+    allocation.block_mask = kv_cache_manager::BlockMaskOffset{0};
+    allocation.locations = {{{"tp0_Fdefault", "pace://write_uri"}}};
+    EXPECT_CALL(*client, getWriteLocation(_, _, _, _, _, _, 0)).WillOnce(Return(std::make_pair(true, allocation)));
+    EXPECT_CALL(*client, saveKvCachesForTag(_, _, _, _))
+        .WillOnce(Invoke([&](const auto&, const auto& uris, const auto&, const auto&) {
+            backend.backend->setRemoteCacheEnabled(false);
+            return std::make_pair(true, uris);
+        }));
+    EXPECT_CALL(*client,
+                finishWrite(_, _, "already-submitted",
+                            ::testing::Eq(kv_cache_manager::BlockMask{kv_cache_manager::BlockMaskOffset{1}}), _))
+        .WillOnce(Return(true));
+    const auto refs = environment.device_pool->refCount(environment.block_id);
+    EXPECT_TRUE(backend.backend->write(backend.backend->prepareWrite(makeStorageRequest(environment))));
+    ASSERT_TRUE(waitForBackendOperationsForTest(*backend.backend));
+    EXPECT_EQ(environment.device_pool->refCount(environment.block_id), refs);
+    EXPECT_FALSE(backend.backend->prepareWrite(makeStorageRequest(environment)));
+}
+
+TEST(KVCMLocalTest, RuntimeDisableDuringTp2FanoutStillCompletesBothRanksAndFinishesWrite) {
+    autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "0");
+    auto environment = makeBackendEnvironment("kvcm_control_tp2");
+    auto client = std::make_shared<MockClientWrapper>();
+    EXPECT_CALL(*client, initForPools(_, _, _, _)).WillOnce(Return(true));
+    EXPECT_CALL(*client, shutdown()).Times(1);
+    std::atomic<StorageBackend*> control_backend{nullptr};
+    auto first_state = std::make_shared<KVCMBroadcastState>();
+    auto second_state = std::make_shared<KVCMBroadcastState>();
+    for (const auto& state : {first_state, second_state}) {
+        state->on_request = [&] {
+            if (auto* backend = control_backend.load()) {
+                backend->setRemoteCacheEnabled(false);
+            }
+        };
+    }
+    KVCMBroadcastRpcServer first(0, first_state);
+    KVCMBroadcastRpcServer second(1, second_state);
+    ASSERT_TRUE(first.start());
+    ASSERT_TRUE(second.start());
+    auto broadcast = std::make_shared<BroadcastManager>(std::vector<std::string>{first.address(), second.address()});
+    ASSERT_TRUE(broadcast->init());
+    auto parallel = singleRankConfig();
+    parallel.tp_size = 2;
+    auto backend = makeBackend(environment, parallel, client, broadcast);
+    ASSERT_TRUE(initSingleRank(*backend.backend, environment));
+    control_backend.store(backend.backend.get());
+    kv_cache_manager::WriteLocation allocation;
+    allocation.write_session_id = "tp2-admitted-before-disable";
+    allocation.block_mask = kv_cache_manager::BlockMaskOffset{0};
+    allocation.locations = {{{"tp0_Fdefault", "pace://rank0"}, {"tp1_Fdefault", "pace://rank1"}}};
+    EXPECT_CALL(*client, getWriteLocation(_, _, _, _, _, _, 0)).WillOnce(Return(std::make_pair(true, allocation)));
+    EXPECT_CALL(*client, saveKvCachesForTag(_, _, _, _)).Times(0);
+    EXPECT_CALL(*client,
+                finishWrite(_, _, "tp2-admitted-before-disable",
+                            ::testing::Eq(kv_cache_manager::BlockMask{kv_cache_manager::BlockMaskOffset{1}}), _))
+        .WillOnce(Return(true));
+    const auto refs = environment.device_pool->refCount(environment.block_id);
+    EXPECT_TRUE(backend.backend->write(backend.backend->prepareWrite(makeStorageRequest(environment))));
+    ASSERT_TRUE(waitForBackendOperationsForTest(*backend.backend));
+    EXPECT_FALSE(backend.backend->remoteCacheEnabled());
+    for (const auto& state : {first_state, second_state}) {
+        const auto requests = snapshotRequests(state);
+        ASSERT_EQ(requests.size(), 1u);
+        EXPECT_EQ(requests.front().op(), REMOTE_OPERATION_WRITE);
+        EXPECT_EQ(requests.front().uris_size(), 1);
+    }
+    EXPECT_EQ(environment.device_pool->refCount(environment.block_id), refs);
+    EXPECT_FALSE(backend.backend->prepareWrite(makeStorageRequest(environment)));
+    control_backend.store(nullptr);
+}
+
+TEST(KVCMLocalTest, RemoteCacheControlGaugeReportsDisabledAndEnabled) {
+    auto reporter = std::make_shared<kmonitor::MetricsReporter>("", "", kmonitor::MetricsTags{});
+    RtpLLMRemoteCacheControlMetricsCollector collector;
+    for (const bool enabled : {false, true}) {
+        collector.enabled = enabled;
+        reporter->report<RtpLLMRemoteCacheControlMetrics, RtpLLMRemoteCacheControlMetricsCollector>(nullptr,
+                                                                                                &collector);
+        auto* metrics = reporter->getMetricsGroup<RtpLLMRemoteCacheControlMetrics>();
+        ASSERT_NE(metrics, nullptr);
+        EXPECT_DOUBLE_EQ(snapshotGauge(metrics->enabled_metric), enabled ? 1 : 0);
     }
 }
 

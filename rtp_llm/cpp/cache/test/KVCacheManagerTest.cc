@@ -3,6 +3,7 @@
 #include "rtp_llm/cpp/cache/test/TestLayoutSpec.h"
 
 #include <chrono>
+#include <atomic>
 #include <condition_variable>
 #include <cstdint>
 #include <cstdlib>
@@ -351,12 +352,19 @@ static void assertDsv4RegionPatternEq(const std::shared_ptr<KVCacheManager>& man
 
 class EventPublicationReporter final: public KVCacheEventReporter {
 public:
+    bool deliver_remote_control{false};
+    std::atomic<bool> remote_enabled{true};
+
     bool post(const std::string& route, const std::string& request, std::string& response) noexcept override {
         {
             std::lock_guard<std::mutex> lock(mutex_);
             requests_.emplace_back(route, request);
         }
         response = R"({"header":{"status":{"code":"OK"}}})";
+        if (deliver_remote_control) {
+            response = std::string(R"({"header":{"status":{"code":"OK"}},"extra_info":"{\"rtp_remote_cache_enabled\":)")
+                       + (remote_enabled.load() ? "true" : "false") + R"(}"})";
+        }
         cv_.notify_all();
         return true;
     }
@@ -429,6 +437,45 @@ static KVCacheConfig makeEventPublicationRuntimeConfig() {
     config.kv_cache_event_instance_id = "event_wiring_instance";
     config.kv_cache_event_host_ip_port = "127.0.0.1:19000";
     return config;
+}
+
+class EventControlStorageBackend final: public StorageBackend {
+protected:
+    bool initImpl() override {
+        return true;
+    }
+    StorageMatchResult matchImpl(const StorageRequest& request) override {
+        return {request.local_matched_blocks_num, nullptr};
+    }
+    void readImpl(const StorageRequest&, const std::shared_ptr<StorageBackendMatchMeta>&) override {}
+    void writeImpl(const StorageRequest&) override {}
+};
+
+TEST_F(KVCacheManagerTest, EventControlUpdatesRemoteBackendThroughRegistrationAndHeartbeat) {
+    auto config = makeSimpleMhaCacheConfig(4, 128, 1, DataType::TYPE_FP16);
+    RuntimeConfig runtime;
+    runtime.model_name = "event_control_model";
+    KVCacheManager manager(config, false, nullptr, makeEventPublicationRuntimeConfig(), {}, runtime);
+    auto full = std::make_shared<FullGroupSet>(
+        std::vector<DeviceBlockPoolPtr>{block_tree_cache_test::makeStructuralDevicePool(0)}, nullptr, nullptr);
+    full->initialize(0, config.topologyPtr(), {"default"});
+    manager.block_tree_cache_ = block_tree_cache_test::makeBlockTreeCacheForTest({full});
+    auto backend = std::make_shared<EventControlStorageBackend>();
+    manager.block_tree_cache_->storage_backend_ = backend;
+    auto reporter = std::make_shared<EventPublicationReporter>();
+    reporter->deliver_remote_control = true;
+    reporter->remote_enabled.store(false);
+    manager.initCacheEventPublisher(reporter);
+    ASSERT_NE(manager.cache_event_publisher_, nullptr);
+    ASSERT_TRUE(waitForEventPublisherReady(*manager.cache_event_publisher_));
+    EXPECT_FALSE(backend->remoteCacheEnabled());
+    reporter->remote_enabled.store(true);
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    while (!backend->remoteCacheEnabled() && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    EXPECT_TRUE(backend->remoteCacheEnabled());
+    manager.stopCacheEventPublisher();
 }
 
 TEST_F(KVCacheManagerTest, EventPublisherWiresEligibleGroupsInTopologyOrder) {
