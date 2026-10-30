@@ -17,20 +17,6 @@ cc_library(
 )
 
 cc_library(
-    name = "cp_slot_mapper",
-    srcs = ["CPSlotMapper.cc"],
-    hdrs = ["CPSlotMapper.h"],
-    copts = copts(),
-    visibility = ["//visibility:public"],
-    deps = [
-        ":batch_kv_cache_resource",
-        ":cache_config",
-        ":cache_group_type",
-        "//rtp_llm/cpp/utils:core_utils",
-    ],
-)
-
-cc_library(
     name = "cache_group_type",
     hdrs = [
         "CacheGroupType.h",
@@ -95,13 +81,24 @@ alias(
 )
 
 cc_library(
+    name = "cp_slot_mapper",
+    srcs = ["CPSlotMapper.cc"],
+    hdrs = ["CPSlotMapper.h"],
+    copts = copts(),
+    visibility = ["//visibility:public"],
+    deps = [":cache_group_type"],
+)
+
+cc_library(
     name = "cache_config",
     srcs = [
         "CacheConfig.cc",
+        "CachePhysicalRegion.cc",
         "CacheTopology.cc",
     ],
     hdrs = [
         "CacheConfig.h",
+        "CachePhysicalRegion.h",
         "CacheTopology.h",
     ],
     copts = copts(),
@@ -204,7 +201,6 @@ cc_library(
     deps = [
         ":batch_kv_cache_resource",
         ":cache_types",
-        ":cp_slot_mapper",
         ":recent_cache_key_window",
         "//rtp_llm/cpp/metrics",
         "//rtp_llm/cpp/utils:core_utils",
@@ -282,7 +278,6 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":cache_types",
-        ":cp_slot_mapper",
         ":single_type_cache_manager",
         "//rtp_llm/cpp/cache/block_tree_cache:device_block_pool",
         "//rtp_llm/cpp/metrics:metrics",
@@ -301,7 +296,6 @@ cc_library(
     copts = copts(),
     visibility = ["//visibility:public"],
     deps = [
-        ":cp_slot_mapper",
         ":device_block_pool_config_helper",
         ":coordinator_cache_manager_hdr",
         ":single_type_cache_manager",
@@ -408,7 +402,6 @@ cc_library(
         "//rtp_llm/cpp/cache/events:kv_cache_event_publisher",
         ":cache_async_context",
         ":cache_core",
-        ":cp_slot_mapper",
         ":prefill_cache_hit_metrics_reporter",
         "//rtp_llm/cpp/cache/block_tree_cache",
         "//rtp_llm/cpp/model_rpc:broadcast_manager",

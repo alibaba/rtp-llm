@@ -152,7 +152,9 @@ makeDiskPool(size_t payload_bytes, size_t usable_count, std::unique_ptr<DiskBloc
 bool cudaAvailable() {
     try {
         return torch::cuda::is_available();
-    } catch (const std::exception&) { return false; }
+    } catch (const std::exception&) {
+        return false;
+    }
 }
 
 DeviceBlockPoolPtr
@@ -389,7 +391,7 @@ void prepareGroupSets(std::vector<GroupSetPtr>& group_sets) {
         size_t         seq_size_per_block = 1;
         if (const auto* swa = dynamic_cast<SWAGroupSet*>(group_set.get()); swa != nullptr) {
             type               = CacheGroupType::SWA;
-            seq_size_per_block = swa->seqSizePerBlock();
+            seq_size_per_block = swa->canonicalSizePerBlock();
         } else if (dynamic_cast<LinearGroupSet*>(group_set.get()) != nullptr) {
             type = CacheGroupType::LINEAR;
         }
@@ -474,9 +476,11 @@ std::unique_ptr<BlockTreeCache> makeBlockTreeCacheForTest(std::vector<GroupSetPt
                                                   std::move(task_pool),
                                                   std::move(cache_metrics_reporter));
     if (cache->storageBackend()) {
+        const size_t canonical_size = storage_topology->groups().front().seqSizePerBlock();
         RTP_LLM_CHECK_WITH_INFO(cache->storageBackend()->init(std::move(storage_topology),
                                                               std::move(storage_pools),
-                                                              std::move(storage_buffer_resolver)),
+                                                              std::move(storage_buffer_resolver),
+                                                              canonical_size),
                                 "StorageBackend init failed");
     }
     if (!cache->init()) {
@@ -703,7 +707,9 @@ bool BlockTreeCacheTestPeer::restoreQueueAfterRejectionForTest(BlockTreeCache& c
         return true;
     } catch (const std::exception& error) {
         ADD_FAILURE() << "queue-rejection guard failed to restore thread pool: " << error.what();
-    } catch (...) { ADD_FAILURE() << "queue-rejection guard failed to restore thread pool with unknown exception"; }
+    } catch (...) {
+        ADD_FAILURE() << "queue-rejection guard failed to restore thread pool with unknown exception";
+    }
     cache.task_pool_.reset();
     return false;
 }
@@ -800,7 +806,7 @@ void fillDeviceBlock(const DeviceBlockPoolPtr& pool, BlockIdxType block, uint8_t
 void expectDeviceBlock(const DeviceBlockPoolPtr& pool, BlockIdxType block, uint8_t pattern) {
     for (const auto& buffer : pool->convertIndexToBuffer(0, block)) {
         auto                view = torch::from_blob(buffer.addr,
-                                     {static_cast<int64_t>(buffer.size_bytes)},
+                                                    {static_cast<int64_t>(buffer.size_bytes)},
                                      torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA));
         const torch::Tensor host = view.cpu();
         const auto*         data = host.data_ptr<uint8_t>();
@@ -879,8 +885,8 @@ std::unique_ptr<FullSWAEnvironment> FullSWAEnvironment::create(const FullSWAEnvi
                                                      options.enable_disk ? environment->disk_pools[0] : nullptr);
     auto swa            = block_transfer_engine_test::makeTestGroupSet(1,
                                                             environment->topology,
-                                                            {"group2"},
-                                                            {environment->device_pools[2]},
+                                                                       {"group2"},
+                                                                       {environment->device_pools[2]},
                                                             environment->host_pools[1],
                                                             options.enable_disk ? environment->disk_pools[1] : nullptr);
     environment->groups = {full, swa};

@@ -5,7 +5,6 @@
 
 #include "kmonitor/client/MetricsReporter.h"
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
-#include "rtp_llm/cpp/cache/CPSlotMapper.h"
 #include "rtp_llm/cpp/cache/RecentCacheKeyWindow.h"
 #include "rtp_llm/cpp/cache/Types.h"
 
@@ -16,11 +15,12 @@ public:
     explicit PrefillCacheHitMetricsReporter(kmonitor::MetricsReporterPtr metrics_reporter);
     ~PrefillCacheHitMetricsReporter();
 
-    void record(const BatchKVCacheResource&          resource,
-                const std::shared_ptr<CPSlotMapper>& cp_mapper,
-                int64_t                              request_id,
-                int64_t                              token_num,
-                int                                  seq_size_per_block);
+    void record(const BatchKVCacheResource& resource,
+                int64_t                     request_id,
+                int64_t                     token_num,
+                int                         seq_size_per_block,
+                const CacheKeysType*        resolved_theory_keys,
+                int64_t                     resolved_block_tokens);
 
 private:
     struct TheoryHitStats;
@@ -30,7 +30,6 @@ private:
     std::unique_ptr<TheoryHitStats> theory_stats_;
 };
 
-CacheKeysType buildPrefillTheoryWindowKeys(const BatchKVCacheResource&          resource,
-                                           const std::shared_ptr<CPSlotMapper>& cp_mapper);
+CacheKeysType buildPrefillTheoryWindowKeys(const BatchKVCacheResource& resource);
 
 }  // namespace rtp_llm

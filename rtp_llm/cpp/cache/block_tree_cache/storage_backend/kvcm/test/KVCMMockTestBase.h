@@ -220,10 +220,10 @@ struct BackendEnvironment {
     StorageBackend::PoolsByTag pools_by_tag;
     BlockIdxType               block_id{NULL_BLOCK_IDX};
 
-    BackendEnvironment()                              = default;
-    BackendEnvironment(BackendEnvironment&&) noexcept = default;
-    BackendEnvironment& operator=(BackendEnvironment&&) = delete;
-    BackendEnvironment(const BackendEnvironment&)       = delete;
+    BackendEnvironment()                                     = default;
+    BackendEnvironment(BackendEnvironment&&) noexcept        = default;
+    BackendEnvironment& operator=(BackendEnvironment&&)      = delete;
+    BackendEnvironment(const BackendEnvironment&)            = delete;
     BackendEnvironment& operator=(const BackendEnvironment&) = delete;
     ~BackendEnvironment() {
         for (const auto& [tag, pool] : pools_by_tag) {
@@ -239,10 +239,10 @@ struct BackendHandle {
 
     BackendHandle() = default;
     explicit BackendHandle(std::unique_ptr<KVCMStorageBackend> value): backend(std::move(value)) {}
-    BackendHandle(BackendHandle&&) noexcept = default;
+    BackendHandle(BackendHandle&&) noexcept            = default;
     BackendHandle& operator=(BackendHandle&&) noexcept = default;
     BackendHandle(const BackendHandle&)                = delete;
-    BackendHandle& operator=(const BackendHandle&) = delete;
+    BackendHandle& operator=(const BackendHandle&)     = delete;
     ~BackendHandle() {
         if (backend) {
             backend->shutdown();
@@ -495,11 +495,13 @@ read(KVCMStorageBackend& backend, StorageRequest request, std::shared_ptr<Storag
 }
 
 [[maybe_unused]] bool initSingleRank(KVCMStorageBackend& backend, const BackendEnvironment& environment) {
-    return backend.init(environment.cache_config.topologyPtr(),
-                        environment.pools_by_tag,
-                        [&](int layer_id, const std::string& tag, int block_id) {
-                            return environmentBuffers(environment, layer_id, tag, block_id);
-                        });
+    return backend.init(
+        environment.cache_config.topologyPtr(),
+        environment.pools_by_tag,
+        [&](int layer_id, const std::string& tag, int block_id) {
+            return environmentBuffers(environment, layer_id, tag, block_id);
+        },
+        environment.cache_config.canonicalSizePerBlock());
 }
 
 }  // namespace

@@ -1,6 +1,8 @@
 #include "rtp_llm/cpp/cache/connector/p2p/LayerCacheBufferUtil.h"
 
 #include "rtp_llm/cpp/cache/CPSlotMapper.h"
+#include "rtp_llm/cpp/cache/CachePhysicalRegion.h"
+#include "rtp_llm/cpp/distribute/context_parallel/CpTransferProjection.h"
 #include <algorithm>
 #include <exception>
 #include <map>
@@ -28,8 +30,10 @@ std::map<size_t, size_t> stateProjection(const GroupBase& group, size_t key_coun
     const size_t             slots = key_count / span + (key_count % span != 0);
     std::map<size_t, size_t> result;
     // The group span already incorporates CP scaling. Do not compact it again.
-    for (const auto& pair : buildCacheStorePlan(group.policy, slots, 0, true, 0, 1, span, key_count)) {
-        result.emplace(static_cast<size_t>(pair.key_index), static_cast<size_t>(pair.offset_index));
+    const bool use_hybrid = true;
+    const bool compact_tail = false;
+    for (const auto page : selectProducerTransferPages(group.policy, slots, use_hybrid, compact_tail)) {
+        result.emplace(makeCacheBlockKeyRange(span, page, key_count).key_index, page);
     }
     return result;
 }

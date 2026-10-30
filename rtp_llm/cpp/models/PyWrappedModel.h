@@ -691,7 +691,9 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
             std::make_shared<CacheStoreAsyncWriter>(static_cast<int>(params.parallelism_config.local_rank),
                                                     cache_manager_,
                                                     model_id_,
-                                                    params.mtp_cache_config_index);
+                                                    params.mtp_cache_config_index,
+                                                    std::nullopt,
+                                                    params.cache_store_producer_cp_topology);
     }
 
     if (py::hasattr(py_model_, "has_mtp_hidden_buffer")) {

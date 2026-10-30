@@ -3,25 +3,29 @@
 namespace rtp_llm {
 
 SWAGroupSet::SWAGroupSet(size_t                          sliding_window_size,
-                         size_t                          seq_size_per_block,
+                         size_t                          canonical_size_per_block,
                          std::vector<DeviceBlockPoolPtr> device_pools,
                          std::shared_ptr<HostBlockPool>  host_pool,
                          BlockTreeDiskBlockPoolPtr       disk_pool):
     GroupSet(std::move(device_pools), std::move(host_pool), std::move(disk_pool)),
     sliding_window_size_(sliding_window_size),
-    seq_size_per_block_(seq_size_per_block) {}
+    canonical_size_per_block_(canonical_size_per_block) {
+    RTP_LLM_CHECK_WITH_INFO(canonical_size_per_block > 0, "canonical size per block must be positive");
+}
 
 std::unique_ptr<MatchValidator> SWAGroupSet::createMatchValidator() {
-    return std::make_unique<SWAMatchValidator>(sliding_window_size_, seq_size_per_block_);
+    return std::make_unique<SWAMatchValidator>(sliding_window_size_, canonical_size_per_block_);
 }
 
 size_t SWAGroupSet::computeReuseBlockCount(size_t matched_block_count) const {
-    return group(groupTags().front()).reuseBlockCount(matched_block_count);
+    return group(groupTags().front()).reuseBlockCount(matched_block_count, canonical_size_per_block_);
 }
 
 // SWAMatchValidator
-SWAMatchValidator::SWAMatchValidator(size_t sliding_window_size, size_t seq_size_per_block):
-    sliding_window_size_(sliding_window_size), seq_size_per_block_(seq_size_per_block) {}
+SWAMatchValidator::SWAMatchValidator(size_t sliding_window_size, size_t canonical_size_per_block):
+    sliding_window_size_(sliding_window_size), canonical_size_per_block_(canonical_size_per_block) {
+    RTP_LLM_CHECK_WITH_INFO(canonical_size_per_block > 0, "canonical size per block must be positive");
+}
 
 bool SWAMatchValidator::validate(const GroupSetResource& resource) {
     // A busy resource (DEMOTING/LOAD_PENDING) counts as a hole: it cannot serve
@@ -34,7 +38,7 @@ bool SWAMatchValidator::validate(const GroupSetResource& resource) {
         return false;
     }
 
-    accumulated_length_ += seq_size_per_block_;
+    accumulated_length_ += canonical_size_per_block_;
     return connected_to_root_ || (sliding_window_size_ > 0 && accumulated_length_ >= sliding_window_size_);
 }
 

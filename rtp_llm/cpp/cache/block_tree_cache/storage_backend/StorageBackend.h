@@ -90,11 +90,11 @@ struct StorageTaskState;
 
 class StorageWriteTask {
 public:
-    StorageWriteTask()                            = default;
-    StorageWriteTask(StorageWriteTask&&) noexcept = default;
+    StorageWriteTask()                                       = default;
+    StorageWriteTask(StorageWriteTask&&) noexcept            = default;
     StorageWriteTask& operator=(StorageWriteTask&&) noexcept = default;
 
-    StorageWriteTask(const StorageWriteTask&) = delete;
+    StorageWriteTask(const StorageWriteTask&)            = delete;
     StorageWriteTask& operator=(const StorageWriteTask&) = delete;
 
     explicit operator bool() const {
@@ -124,9 +124,12 @@ public:
 
     // Initialization is single-attempt. A failed start may permanently stop
     // an injected executor; create a fresh backend/executor to retry.
-    bool init(std::shared_ptr<const CacheTopology> topology, PoolsByTag pools_by_tag, BufferResolver buffer_resolver);
-    void match(StorageRequest request, MatchDone done);
-    void read(StorageRequest request, std::shared_ptr<StorageBackendMatchMeta> match_meta, Done done);
+    bool             init(std::shared_ptr<const CacheTopology> topology,
+                          PoolsByTag                           pools_by_tag,
+                          BufferResolver                       buffer_resolver,
+                          size_t                               canonical_size_per_block);
+    void             match(StorageRequest request, MatchDone done);
+    void             read(StorageRequest request, std::shared_ptr<StorageBackendMatchMeta> match_meta, Done done);
     StorageWriteTask prepareWrite(StorageRequest request);
     // Returns admission only, not the I/O result; never waits for completion.
     // Source pins live until execution or rejection.
@@ -172,6 +175,7 @@ private:
     std::shared_ptr<const CacheTopology> topology_;
     PoolsByTag                           pools_by_tag_;
     BufferResolver                       buffer_resolver_;
+    size_t                               canonical_size_per_block_{0};
     std::shared_ptr<StorageBackendExecutor> executor_;
     bool                                    init_attempted_{false};
     bool                                    initialized_{false};

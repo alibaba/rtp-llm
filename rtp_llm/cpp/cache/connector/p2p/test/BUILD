@@ -71,6 +71,7 @@ cc_test(
         ":mock_generate_stream",
         ":test_rpc_server",
         "//rtp_llm/cpp/cache/connector/p2p:connector",
+        "//rtp_llm/cpp/cache/connector/p2p/plan:transfer_plan",
         "//rtp_llm/cpp/cache/connector/p2p/transfer:basic_types",
         "//rtp_llm/cpp/cache/test:cache_config_test_utils",
         "//rtp_llm/cpp/engine_base/stream",

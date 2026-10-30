@@ -18,6 +18,9 @@ struct MLAKVCacheSpec: public KVCacheSpec {
         type = KVCacheSpecType::MultiHeadLatentAttention;
     }
 
+private:
+    friend class SpecBuilder;
+
     static KVCacheSpecPtr build(const KVCacheSpecDesc& desc, const SpecBuildContext& ctx) {
         RTP_LLM_CHECK_WITH_INFO(ctx.attn_config != nullptr,
                                 "KVCacheSpecDesc tag=%s cache_type=%d requires SpecBuildContext.attn_config",
@@ -51,6 +54,7 @@ struct MLAKVCacheSpec: public KVCacheSpec {
         return spec;
     }
 
+public:
     size_t block_size() const override {
         return elems_per_token * seq_size_per_block;
     }

@@ -32,6 +32,7 @@ cc_library(
         "//rtp_llm/cpp/cache:batch_kv_cache_resource",
         "//rtp_llm/cpp/cache/connector/p2p/plan:transfer_plan",
         "//rtp_llm/cpp/cache/connector/p2p/transfer:basic_types",
+        "//rtp_llm/cpp/distribute/context_parallel:cp_transfer_projection",
         "@havenask//aios/autil:thread",
     ],
     visibility = ["//visibility:public"],

@@ -157,6 +157,40 @@ TEST_F(SWAGroupSetTest, ComputeReuseBlockCountCapsAtWindowSize) {
     EXPECT_EQ(group_->computeReuseBlockCount(4), 2u);
 }
 
+TEST_F(SWAGroupSetTest, CanonicalWindowAndReuseCountAgreeWhenPhysicalSpanDiffers) {
+    const auto free_before = pool_->freeBlocksNum();
+    auto       swa    = std::make_shared<SWAGroupSet>(65, 32, std::vector<DeviceBlockPoolPtr>{pool_}, nullptr, nullptr);
+    auto       policy = defaultCacheGroupPolicy(CacheGroupType::SWA);
+    policy.enable_prefix_reuse = true;
+    policy.sliding_window_size = 65;
+    auto topology              = makeTestTopology({makeTestGroupBase(policy, {0}, 1, 0, 128, 64)});
+    swa->initialize(0, topology, topology->groupTags());
+    EXPECT_EQ(swa->computeReuseBlockCount(5), 3u);
+
+    auto             validator = swa->createMatchValidator();
+    GroupSetResource hole;
+    EXPECT_FALSE(validator->validate(hole));
+    std::vector<TreeNode> nodes(3);
+    for (size_t index = 0; index < nodes.size(); ++index) {
+        nodes[index].group_set_resources.resize(1);
+        setDeviceBlock(&nodes[index], 0);
+        EXPECT_EQ(validator->validate(nodes[index].group_set_resources[0]), index == 2);
+    }
+    auto* swa_validator = dynamic_cast<SWAMatchValidator*>(validator.get());
+    ASSERT_NE(swa_validator, nullptr);
+    EXPECT_EQ(swa_validator->accumulatedLength(), 96u);
+    for (const auto block : held_blocks_) {
+        pool_->decRef(block);
+    }
+    held_blocks_.clear();
+    EXPECT_EQ(pool_->freeBlocksNum(), free_before);
+}
+
+TEST_F(SWAGroupSetTest, RejectsZeroCanonicalSpan) {
+    EXPECT_ANY_THROW(SWAGroupSet(65, 0, std::vector<DeviceBlockPoolPtr>{pool_}, nullptr, nullptr));
+    EXPECT_ANY_THROW(SWAMatchValidator(65, 0));
+}
+
 TEST_F(SWAGroupSetTest, WindowValidatorBusyResourceResetsLikeHole) {
     for (GroupSetTransferState state : {GroupSetTransferState::DEMOTING, GroupSetTransferState::LOAD_PENDING}) {
         std::unique_ptr<MatchValidator> validator     = group_->createMatchValidator();
@@ -222,7 +256,7 @@ TEST_F(SWAGroupSetTest, IndependentEvictionDoesNotAffectFull) {
 
 TEST_F(SWAGroupSetTest, SlidingWindowConfig) {
     EXPECT_EQ(group_->slidingWindowSize(), 128);
-    EXPECT_EQ(group_->seqSizePerBlock(), 64);
+    EXPECT_EQ(group_->canonicalSizePerBlock(), 64);
 }
 
 }  // namespace

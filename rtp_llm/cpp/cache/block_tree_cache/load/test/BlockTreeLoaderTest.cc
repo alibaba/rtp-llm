@@ -84,7 +84,7 @@ TEST(BlockTreeLoaderTest, CrcDeviceReuseDoesNotPromoteUnprotectedBackendFailure)
         }
     }
     ASSERT_TRUE(backend->init(
-        environment->topology, pools, [](int, const std::string&, int) { return std::vector<BlockInfo>{}; }));
+        environment->topology, pools, [](int, const std::string&, int) { return std::vector<BlockInfo>{}; }, 1));
     environment->cache->loader_.storage_backend_ = backend;
     CacheKeysType keys                           = environment->keys;
     keys.push_back(keys.back() + 1);
@@ -500,13 +500,13 @@ TEST(BlockTreeLoaderTest, DiskTransferFailureInstallsNoLoadTargets) {
     environment->scripted_per_rank_transfer_engine->enqueue(true);
     environment->scripted_per_rank_transfer_engine->enqueue(false);
 
-    BlockTreeMatchResult result       = environment->cache->match(environment->keys);
+    BlockTreeMatchResult result = environment->cache->match(environment->keys);
     ASSERT_EQ(result.reuse_time_metrics_snapshots.size(), 2u);
     for (const auto& snapshot : result.reuse_time_metrics_snapshots) {
         EXPECT_EQ(snapshot.tier, Tier::DISK);
         EXPECT_TRUE(snapshot.reuse_block_first_hit_idletime_ms.has_value());
     }
-    auto                 load_context = std::dynamic_pointer_cast<LoadAsyncContext>(result.async_context);
+    auto load_context = std::dynamic_pointer_cast<LoadAsyncContext>(result.async_context);
     ASSERT_NE(load_context, nullptr);
     ASSERT_EQ(load_context->loadDescs().size(), 2u);
     std::vector<std::pair<DeviceBlockPoolPtr, BlockIdxType>> request_targets;

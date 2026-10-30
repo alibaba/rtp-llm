@@ -144,7 +144,7 @@ void initializeTestGroupSet(const GroupSetPtr&                     group_set,
     size_t         seq_size_per_block = 1;
     if (const auto* swa = dynamic_cast<SWAGroupSet*>(group_set.get()); swa != nullptr) {
         type               = CacheGroupType::SWA;
-        seq_size_per_block = swa->seqSizePerBlock();
+        seq_size_per_block = swa->canonicalSizePerBlock();
     } else if (dynamic_cast<LinearGroupSet*>(group_set.get()) != nullptr) {
         type = CacheGroupType::LINEAR;
     }
@@ -182,7 +182,7 @@ void initializeSingleMemberGroupSets(const std::vector<GroupSetPtr>&        grou
         size_t         seq_size_per_block = 1;
         if (const auto* swa = dynamic_cast<SWAGroupSet*>(group_set.get()); swa != nullptr) {
             type               = CacheGroupType::SWA;
-            seq_size_per_block = swa->seqSizePerBlock();
+            seq_size_per_block = swa->canonicalSizePerBlock();
         } else if (dynamic_cast<LinearGroupSet*>(group_set.get()) != nullptr) {
             type = CacheGroupType::LINEAR;
         }

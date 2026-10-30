@@ -109,8 +109,11 @@ public:
     }
 
     std::vector<std::pair<BlockInfo, size_t>> getAllBuffers() const override {
+        ++get_all_buffers_calls;
         return {};
     }
+
+    mutable int get_all_buffers_calls = 0;
 };
 
 // Mock IKVCacheSender for testing (replaces old TransferClient mock)
@@ -770,6 +773,63 @@ TEST_F(P2PConnectorWorkerTest, CancelHandleRead_HoldsStartedSourceAndReleasesQue
     EXPECT_EQ(released[started_layer].wait_for(std::chrono::seconds(2)), std::future_status::ready);
     prefill_.reset();  // Drain the skipped task before checking that it never called send.
     EXPECT_EQ(mock_sender_->getTransferCallCount(), 1);
+}
+
+TEST_F(P2PConnectorWorkerTest, PrefillWorkerUsesFixedP1P2P4KeyAndCompletionVectors) {
+    const std::vector<std::tuple<int, int, std::map<int64_t, int>>> cases = {
+        {1, 0, {{1000, 10}, {1001, 11}, {1002, 12}}},
+        {2, 1, {{1001, 10}, {1003, 11}, {1005, 12}}},
+        {4, 3, {{1003, 10}, {1007, 11}}},
+    };
+    int64_t request_id = 1100;
+    for (const auto& [cp_size, cp_rank, expected] : cases) {
+        SCOPED_TRACE("P=" + std::to_string(cp_size));
+        prefill_.reset();
+        worker_config_.layer_all_num    = 1;
+        worker_config_.kv_cache_sharded = cp_size > 1;
+        worker_config_.cp_rank          = cp_rank;
+        worker_config_.cp_size          = cp_size;
+        prefill_                        = std::make_unique<P2PConnectorWorkerPrefill>(
+            worker_config_, mock_layer_block_converter_, nullptr, mock_sender_);
+        ASSERT_TRUE(prefill_->init(10 * 1000));
+        computed_buffers_ = prefill_->getComputedBuffersStore();
+
+        auto resource = createKVCacheResource(/*layer_id=*/0, /*num_blocks=*/3);
+        resource->mutableBlockIds("group0").assign({10, 11, 12});
+        resource->cacheKeys() = {1000, 1001, 1002, 1003, 1004, 1005, 1006, 1007, 1008, 1009};
+        ASSERT_TRUE(prefill_->writeByLayer(0, resource, request_id, std::nullopt));
+        auto computed = computed_buffers_->getBuffer(request_id);
+        ASSERT_NE(computed, nullptr);
+        ASSERT_EQ(computed->expectedBufferCount(), std::optional<size_t>(1));
+        computed->waitChange(0, 3000);
+        const auto [completed, buffers] = computed->getBuffers({0});
+        ASSERT_EQ(completed, 1);
+        ASSERT_EQ(buffers.size(), 1u);
+        EXPECT_EQ(buffers.front()->blockIdMap(), expected);
+        ++request_id;
+    }
+}
+
+TEST_F(P2PConnectorWorkerTest, PrefillWorkerDoesNotExpectPaddedOrNullTail) {
+    prefill_.reset();
+    worker_config_.layer_all_num    = 1;
+    worker_config_.kv_cache_sharded = true;
+    worker_config_.cp_rank          = 3;
+    worker_config_.cp_size          = 4;
+    prefill_ =
+        std::make_unique<P2PConnectorWorkerPrefill>(worker_config_, mock_layer_block_converter_, nullptr, mock_sender_);
+    ASSERT_TRUE(prefill_->init(10 * 1000));
+    computed_buffers_ = prefill_->getComputedBuffersStore();
+
+    auto resource = createKVCacheResource(/*layer_id=*/0, /*num_blocks=*/2);
+    resource->mutableBlockIds("group0").assign({NULL_BLOCK_IDX, 11});
+    resource->cacheKeys()        = {1000, 1001, 1002, 1003, 1004};
+    constexpr int64_t request_id = 1104;
+    ASSERT_TRUE(prefill_->writeByLayer(0, resource, request_id, std::nullopt));
+    auto computed = computed_buffers_->getBuffer(request_id);
+    ASSERT_NE(computed, nullptr);
+    ASSERT_EQ(computed->expectedBufferCount(), std::optional<size_t>(0));
+    EXPECT_EQ(computed->getBuffers({0}).first, 0);
 }
 
 // ==================== sendKVCache 测试 (Prefill 端) ====================
@@ -2616,6 +2676,46 @@ protected:
 
     std::shared_ptr<const CacheTopology> topology_;
 };
+
+TEST_F(LayerCacheBufferUtilTest, ShardedInventoryKeepsLogicalKeysAndCompactLocalBlocks) {
+    auto resource = createResource(1, 3);
+    resource->mutableBlockIds("group0").assign({10, 11, 12});
+    resource->cacheKeys() = {1000, 1001, 1002, 1003, 1004, 1005, 1006, 1007, 1008, 1009};
+    auto group = topology_->groups().front();
+    group.policy.cp_mapping = CpBlockMappingMode::BLOCK_ROUND_ROBIN;
+
+    const auto p1 = LayerCacheBufferUtil::convertLayerTag(*resource, group, 0, 0, 3, 0, 1);
+    ASSERT_TRUE(p1.ok()) << p1.status().ToString();
+    ASSERT_NE(p1.value(), nullptr);
+    EXPECT_EQ(p1.value()->blockIdMap(), (std::map<int64_t, int>{{1000, 10}, {1001, 11}, {1002, 12}}));
+
+    const auto p2 = LayerCacheBufferUtil::convertLayerTag(*resource, group, 0, 0, 6, 1, 2);
+    ASSERT_TRUE(p2.ok()) << p2.status().ToString();
+    ASSERT_NE(p2.value(), nullptr);
+    EXPECT_EQ(p2.value()->blockIdMap(), (std::map<int64_t, int>{{1001, 10}, {1003, 11}, {1005, 12}}));
+
+    const auto p4 = LayerCacheBufferUtil::convertLayerTag(*resource, group, 0, 0, -1, 3, 4);
+    ASSERT_TRUE(p4.ok()) << p4.status().ToString();
+    ASSERT_NE(p4.value(), nullptr);
+    EXPECT_EQ(p4.value()->blockIdMap(), (std::map<int64_t, int>{{1003, 10}, {1007, 11}}));
+}
+
+TEST_F(LayerCacheBufferUtilTest, ShardedInventorySkipsNullSlotsAndUnownedTail) {
+    auto resource = createResource(1, 3);
+    resource->mutableBlockIds("group0").assign({NULL_BLOCK_IDX, 11, 12});
+    resource->cacheKeys() = {1000, 1001, 1002, 1003, 1004};
+    auto group = topology_->groups().front();
+    group.policy.cp_mapping = CpBlockMappingMode::BLOCK_ROUND_ROBIN;
+
+    const auto null_slot = LayerCacheBufferUtil::convertLayerTag(*resource, group, 0, 0, -1, 3, 4);
+    ASSERT_TRUE(null_slot.ok()) << null_slot.status().ToString();
+    EXPECT_EQ(null_slot.value(), nullptr);
+
+    const auto short_tail = LayerCacheBufferUtil::convertLayerTag(*resource, group, 0, 4, -1, 0, 4);
+    ASSERT_TRUE(short_tail.ok()) << short_tail.status().ToString();
+    ASSERT_NE(short_tail.value(), nullptr);
+    EXPECT_EQ(short_tail.value()->blockIdMap(), (std::map<int64_t, int>{{1004, 11}}));
+}
 
 TEST_F(LayerCacheBufferUtilTest, ConvertLayer_ReturnNull_StartIdxEqualActualCount) {
     auto resource = createResource(2, 3);

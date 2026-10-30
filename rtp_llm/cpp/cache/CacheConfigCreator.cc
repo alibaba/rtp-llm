@@ -5,10 +5,10 @@
 #include <map>
 #include <numeric>
 #include <set>
+#include <stdexcept>
 #include <utility>
 
 #include "rtp_llm/cpp/cache/KVCacheSpec.h"
-#include "rtp_llm/cpp/cache/KVCacheSpecDesc.h"
 #include "rtp_llm/cpp/cache/MemoryEvaluationHelper.h"
 #include "rtp_llm/cpp/config/RankLayout.h"
 #include "rtp_llm/cpp/config/StageLayerRange.h"
@@ -227,10 +227,7 @@ void validateDescs(const ModelConfig& model_config, uint32_t kernel_tokens_per_b
     }
 }
 
-void populateGroups(CacheConfig&                 config,
-                    const LayerKVCacheSpecDescs& descs_by_layer,
-                    const LayerKVCacheSpecs&     specs_by_layer,
-                    const ModelConfig&           model_config) {
+void buildGroupsFromDescs(CacheConfig& config, const ModelConfig& model_config, const SpecBuildContext& ctx) {
     struct BuildState {
         KVCacheSpecPtr   spec;
         std::string      fingerprint;
@@ -240,18 +237,11 @@ void populateGroups(CacheConfig&                 config,
     std::vector<std::string>          ordered_tags;
     std::vector<LayerBase>            layers(static_cast<size_t>(config.layer_num));
     for (uint32_t layer_id = 0; layer_id < config.layer_num; ++layer_id) {
-        layers[layer_id].layer_id = static_cast<int>(layer_id);
-        const auto& descs         = descs_by_layer[layer_id];
-        const auto& specs         = specs_by_layer[layer_id];
-        RTP_LLM_CHECK_WITH_INFO(descs.size() == specs.size(),
-                                "cache layer %u desc count %zu != spec count %zu",
-                                layer_id,
-                                descs.size(),
-                                specs.size());
+        layers[layer_id].layer_id   = static_cast<int>(layer_id);
+        const auto&           descs = model_config.kv_cache_spec_descs[layer_id];
         std::set<std::string> layer_tags;
-        for (size_t i = 0; i < descs.size(); ++i) {
-            const auto& desc = descs[i];
-            const auto& spec = specs[i];
+        for (const auto& desc : descs) {
+            const auto spec = SpecBuilder::build(desc, ctx);
             RTP_LLM_CHECK_WITH_INFO(spec != nullptr, "cache layer %u has null spec", layer_id);
             RTP_LLM_CHECK_WITH_INFO(layer_tags.emplace(spec->tag).second,
                                     "cache layer %u has duplicate tag=%s",
@@ -261,7 +251,7 @@ void populateGroups(CacheConfig&                 config,
             checkGroupResidencyBudget(policy, spec->tag);
             if (policy.group_type == CacheGroupType::SWA) {
                 RTP_LLM_CHECK_WITH_INFO(model_config.attn_config.sliding_window >= 0,
-                                        "SWA tag=%s has negative sliding window=%d",
+                                        "SWA tag=%s has negative sliding_window=%d",
                                         spec->tag.c_str(),
                                         model_config.attn_config.sliding_window);
                 policy.sliding_window_size = model_config.attn_config.sliding_window;
@@ -307,8 +297,6 @@ CacheConfig createConfigFromDescs(const ModelConfig&       model_config,
     validateAttentionMetadata(model_config);
     const auto ctx =
         makeSpecBuildContext(model_config, parallelism_config, seq_size, kernel_seq_size, gen_num_per_cycle);
-    const auto specs =
-        CacheConfigCreator::buildLayerSpecsFromDescs(model_config.kv_cache_spec_descs, ctx, model_config.num_layers);
 
     CacheConfig config;
     config.dtype                   = ctx.dtype;
@@ -320,7 +308,7 @@ CacheConfig createConfigFromDescs(const ModelConfig&       model_config,
     config.seq_size_per_block = seq_size;
     config.use_mla            = model_config.attn_config.use_mla;
     config.is_sparse          = model_config.attn_config.is_sparse;
-    populateGroups(config, model_config.kv_cache_spec_descs, specs, model_config);
+    buildGroupsFromDescs(config, model_config, ctx);
     for (const auto& group : config.topology().groups()) {
         const bool opaque =
             group.spec->type == KVCacheSpecType::OpaqueKV || group.spec->type == KVCacheSpecType::OpaqueState;
@@ -448,6 +436,7 @@ CacheConfig CacheConfigCreator::createWarmupConfig(const ModelConfig&       mode
     auto       config =
         createBasicConfig(stage_model_config, parallelism_config, kv_cache_config, gen_num_per_cycle, range.begin);
     config.model_has_multiple_cache_groups = modelHasMultipleCacheGroups(model_config);
+    config.finalizeStorageLayout(parallelism_config, /*warmup=*/true);
     config.finalizeBlockNums(2, RuntimeConfig{});
     auto groups = config.topology().groups();
     for (auto& group : groups) {
@@ -476,12 +465,14 @@ CacheConfig CacheConfigCreator::createConfig(const ModelConfig&                 
     auto       config =
         createBasicConfig(stage_model_config, parallelism_config, kv_cache_config, gen_num_per_cycle, range.begin);
     config.model_has_multiple_cache_groups = modelHasMultipleCacheGroups(model_config);
+    config.finalizeStorageLayout(parallelism_config);
     if (draft_model_config != nullptr) {
         const auto layout = RankLayout::fromParallelismConfig(parallelism_config);
         RTP_LLM_CHECK_WITH_INFO(layout.isLastStage(), "draft cache configuration is only valid on the last PP stage");
         auto draft_model = stageScopedModelConfig(*draft_model_config, parallelism_config, true);
         auto draft       = createBasicConfig(
             draft_model, parallelism_config, kv_cache_config, gen_num_per_cycle, /*global_layer_begin=*/0);
+        draft.finalizeStorageLayout(parallelism_config);
         int num_mtp_modules = is_mtp && !is_eagle && sp_config->type != SP_TYPE_DSPARK ? gen_num_per_cycle : 1;
         RTP_LLM_CHECK_WITH_INFO(num_mtp_modules > 0, "draft cache configuration requires at least one module");
         config.mtp_sub_configs.reserve(static_cast<size_t>(num_mtp_modules));

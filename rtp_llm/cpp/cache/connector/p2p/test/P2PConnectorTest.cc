@@ -27,9 +27,43 @@
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
 #include "rtp_llm/cpp/cache/connector/p2p/LayerBlockConverter.h"
 #include "rtp_llm/cpp/cache/connector/p2p/LayerBlockConverterImpl.h"
+#include "rtp_llm/cpp/cache/connector/p2p/plan/ShardLayout.h"
 #include "rtp_llm/cpp/cache/BlockInfo.h"
 
 namespace rtp_llm {
+
+TEST(P2PConnectorConfigTest, ShardedConfigSetsCpRankAndSize) {
+    ParallelismConfig parallelism;
+    parallelism.role_type                          = RoleType::PREFILL;
+    parallelism.tp_size                            = 4;
+    parallelism.tp_rank                            = 3;
+    parallelism.prefill_cp_config.method           = CPRotateMethod::ALL_GATHER;
+    parallelism.prefill_cp_config.kv_cache_sharded = true;
+    const RuntimeConfig    runtime;
+    const CacheStoreConfig cache_store;
+    const PDSepConfig      pd_sep;
+
+    auto make_layout = [&](const ParallelismConfig& pc) {
+        const auto config = P2PConnectorConfig::create(runtime, cache_store, pc, pd_sep, 1, 1024);
+        ShardLayout layout;
+        layout.pc = config.scheduler_config.parallelism_config;
+        return layout;
+    };
+    const auto config = make_layout(parallelism);
+    EXPECT_EQ(config.cpRank(parallelism.tp_rank), 3);
+    EXPECT_EQ(config.cpSize(), 4);
+
+    parallelism.tp_size = 1;
+    parallelism.tp_rank = 0;
+    const auto p1       = make_layout(parallelism);
+    EXPECT_EQ(p1.cpRank(parallelism.tp_rank), 0);
+    EXPECT_EQ(p1.cpSize(), 1);
+    parallelism.tp_size                            = 4;
+    parallelism.prefill_cp_config.kv_cache_sharded = false;
+    const auto unsharded = make_layout(parallelism);
+    EXPECT_EQ(unsharded.cpRank(parallelism.tp_rank), 0);
+    EXPECT_EQ(unsharded.cpSize(), 1);
+}
 
 // Mock LayerBlockConverter for testing
 class MockLayerBlockConverter: public LayerBlockConverter {
