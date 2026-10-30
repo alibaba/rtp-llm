@@ -926,8 +926,23 @@ void KVCacheManager::initCacheEventPublisher(std::shared_ptr<KVCacheEventReporte
             return shared_cache->logicalCacheSnapshot();
         };
 
+        std::weak_ptr<StorageBackend> weak_backend = block_tree_cache_->storageBackend();
+        auto remote_cache_control = [weak_backend,
+                                     instance_group = publisher_context.instance_group,
+                                     instance_id = publisher_context.instance_id](bool enabled) {
+            if (const auto backend = weak_backend.lock()) {
+                const bool previous = backend->remoteCacheEnabled();
+                backend->setRemoteCacheEnabled(enabled);
+                if (previous != enabled) {
+                    RTP_LLM_LOG_INFO("KVCM remote cache control changed: instance_group=%s instance_id=%s "
+                                     "enabled=%d->%d",
+                                     instance_group.c_str(), instance_id.c_str(), previous, enabled);
+                }
+            }
+        };
         cache_event_publisher_ = std::make_shared<KVCMPublisher>(
-            publisher_config, publisher_context, std::move(snapshot_provider), std::move(reporter));
+            publisher_config, publisher_context, std::move(snapshot_provider), std::move(reporter),
+            std::move(remote_cache_control));
         block_tree_cache_->setEventPublisher(cache_event_publisher_, reuse_group_tags);
         if (!cache_event_publisher_->start()) {
             RTP_LLM_LOG_WARNING("KV cache event publisher failed to start, type=%s; inference remains enabled",
@@ -983,6 +998,12 @@ void KVCacheManager::reportMetricsLoop() {
 
         RtpLLMCacheMetricsCollector global_metrics = collectGlobalCacheMetrics(coordinator_manager_);
         metrics_reporter_->report<RtpLLMCacheMetrics, RtpLLMCacheMetricsCollector>(&tags, &global_metrics);
+        if (parallelism_config_.tp_rank == 0 && block_tree_cache_->storageBackend()) {
+            RtpLLMRemoteCacheControlMetricsCollector control_metrics;
+            control_metrics.enabled = block_tree_cache_->storageBackend()->remoteCacheEnabled();
+            metrics_reporter_->report<RtpLLMRemoteCacheControlMetrics, RtpLLMRemoteCacheControlMetricsCollector>(
+                &tags, &control_metrics);
+        }
 
         if (cache_event_publisher_) {
             const auto status = cache_event_publisher_->status();

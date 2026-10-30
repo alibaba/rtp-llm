@@ -167,7 +167,8 @@ public:
         std::atomic<size_t> unresolved{0};
     };
 
-    Impl(const CacheConfig&                            cache_config,
+    Impl(const StorageBackend&                         backend,
+         const CacheConfig&                            cache_config,
          const KVCacheConfig&                          kv_cache_config,
          const RuntimeConfig&                          runtime_config,
          const ParallelismConfig&                      parallelism_config,
@@ -176,6 +177,7 @@ public:
          bool                                          gdr_enabled,
          std::shared_ptr<kmonitor::MetricsReporter>    metrics_reporter,
          std::shared_ptr<kvcm::ClientWrapper>          client_wrapper):
+        backend_(backend),
         cache_config_(cache_config),
         kv_cache_config_(kv_cache_config),
         runtime_config_(runtime_config),
@@ -429,6 +431,17 @@ public:
         return true;
     }
 
+    void reportRemoteCacheSkipped(const char* stage) noexcept {
+        try {
+            RtpLLMRemoteCacheOutcomeMetricsCollector collector;
+            collector.stage = stage;
+            collector.outcome = "disabled";
+            reportRemoteMetrics<RtpLLMRemoteCacheOutcomeMetrics>(collector);
+        } catch (...) {
+            RTP_LLM_LOG_WARNING("failed to report disabled remote cache operation");
+        }
+    }
+
     StorageMatchResult match(const StorageRequest& request) {
         if (decode_publication_enabled_ && (is_decode_role_ || completion_stopped_.load())) {
             return {request.local_matched_blocks_num, nullptr};
@@ -659,6 +672,17 @@ public:
                 }
             }
         }
+        // Rank 0 admits the whole fanout. Workers must finish an admitted
+        // batch even if a later heartbeat disables new remote operations.
+        if (!backend_.remoteCacheEnabled()) {
+            if (!decode_publication_enabled_) {
+                reportRemoteCacheSkipped("read");
+            }
+            collector.remote_read_qps = false;
+            collector.remote_read_fail_qps = false;
+            read_outcome = "disabled";
+            throw StorageOperationBufferSafeFailure("remote cache disabled by KVCM before read submission");
+        }
         (void)dispatchRequests(requests, request, source_may_be_touched);
         source_may_be_touched = false;
         (void)remainingTimeout(request, "after read");
@@ -762,6 +786,10 @@ public:
     }
 
     void writeTransaction(const StorageRequest& request, bool& source_may_be_touched) {
+        if (!backend_.remoteCacheEnabled()) {
+            reportRemoteCacheSkipped("write");
+            return;
+        }
         // Preserve ordinary Prefill publication. D publishes through the EOS
         // transaction only; no benchmark flag may disable P's normal cache path.
         if (decode_publication_enabled_ && is_decode_role_ && !request.decode_completion)
@@ -809,8 +837,19 @@ public:
             if (session && !retain_remote_session && !source_may_be_touched)
                 completion_resources_->releaseSession(session);
         });
+        const auto check_write_admission = [&] {
+            if (!backend_.remoteCacheEnabled()) {
+                reportRemoteCacheSkipped("write");
+                collector.remote_write_qps = false;
+                collector.remote_write_fail_qps = false;
+                // No worker can touch this allocation yet. The existing catch
+                // closes it with a zero success mask, without quarantining pins.
+                throw StorageOperationBufferSafeFailure("remote cache disabled by KVCM before write submission");
+            }
+        };
         try {
             (void)remainingTimeout(request, "after StartWrite");
+            check_write_admission();
             std::vector<FunctionRequestPB> requests(
                 static_cast<size_t>(request.decode_completion ? target_prefill_tp_ : parallelism_config_.tp_size));
             ActualUriGather                actual_uri_gather(requests.size());
@@ -878,6 +917,7 @@ public:
                 const auto                             stage_start = Clock::now();
                 block_tree_cache_detail::ScopeRollback timer(
                     [&] { collector.remote_write_broadcast_time_us = elapsedTimeUs(stage_start); });
+                check_write_admission();
                 if (request.decode_completion) {
                     return transferCompletedDecode(requests, *request.transfer_task,
                                                    transfer_attempted, source_may_be_touched);
@@ -1945,6 +1985,7 @@ private:
     StorageBackend::BufferResolver file_resolver_;
     std::shared_ptr<kvcm::DecodePublicationAccounting>   completion_accounting_;
     DecodePublicationLimits                              completion_limits_;
+    const StorageBackend&                backend_;
     CacheConfig                          cache_config_;
     KVCacheConfig                        kv_cache_config_;
     RuntimeConfig                        runtime_config_;
@@ -1988,7 +2029,8 @@ KVCMStorageBackend::KVCMStorageBackend(const CacheConfig&                       
                    std::make_shared<BlockTreeCacheMetricsReporter>(metrics_reporter),
                    parallelism_config.world_rank,
                    std::chrono::milliseconds(kv_cache_config.kvcm_task_timeout_ms)),
-    impl_(std::make_unique<Impl>(cache_config,
+    impl_(std::make_unique<Impl>(*this,
+                                 cache_config,
                                  kv_cache_config,
                                  runtime_config,
                                  parallelism_config,
@@ -2026,6 +2068,10 @@ void KVCMStorageBackend::writeImpl(const StorageRequest& request) {
 
 void KVCMStorageBackend::shutdownImpl() noexcept {
     impl_->shutdown();
+}
+
+void KVCMStorageBackend::onRemoteCacheSkipped(const char* stage) noexcept {
+    impl_->reportRemoteCacheSkipped(stage);
 }
 
 bool KVCMStorageBackend::protectUnknownCompletion() const noexcept {
@@ -2078,11 +2124,18 @@ bool KVCMStorageBackend::captureCompletedDecode(const BatchKVCacheResource& reso
     // A progress callback is intentionally a no-op: no GPU query, pin or copy.
     if (!finished)
         return true;
+    if (!remoteCacheEnabled()) {
+        onRemoteCacheSkipped("write");
+        return true;
+    }
     try {
         auto request = impl_->planCompletedDecode(resource, end);
         if (request.empty())
             return true;
         auto       task     = prepareWrite(std::move(request));
+        if (!task) {
+            return true;
+        }
         const bool admitted = write(std::move(task));
         if (admitted)
             resource.decodeCompletionSubmitted() = true;

@@ -233,7 +233,7 @@ bool StorageBackend::init(std::shared_ptr<const CacheTopology> topology,
     return true;
 }
 
-bool StorageBackend::dispatch(Operation operation, BlockTreeTaskClass task_class) {
+bool StorageBackend::dispatch(Operation operation, BlockTreeTaskClass task_class, bool run_inline) {
     const auto once = std::make_shared<std::once_flag>();
     Lifecycle  outcome;
     {
@@ -263,6 +263,12 @@ bool StorageBackend::dispatch(Operation operation, BlockTreeTaskClass task_class
     if (outcome != Lifecycle::ACCEPTING) {
         complete(Lifecycle::STOPPING);
         return false;
+    }
+    // Local-only completions must not queue behind stalled remote I/O or
+    // become allocation errors when that executor is full.
+    if (run_inline) {
+        complete(Lifecycle::ACCEPTING);
+        return true;
     }
     try {
         if (executor_->submit([complete]() mutable { complete(Lifecycle::ACCEPTING); }, task_class)) {
@@ -503,7 +509,8 @@ void StorageBackend::match(StorageRequest request, MatchDone done) {
     const auto trace_id = storage_backend_detail::nextTraceId();
     auto       total    = stageTimer("match_total", request, "match", trace_id);
     auto       queue    = stageTimer("match_queue_wait", request, "match", trace_id);
-    dispatch([this, request = std::move(request), done = std::move(done), trace_id, total, queue](
+    const bool skip_remote = !remoteCacheEnabled();
+    dispatch([this, skip_remote, request = std::move(request), done = std::move(done), trace_id, total, queue](
                  Lifecycle outcome) mutable {
         queue.finish(outcome == Lifecycle::ACCEPTING);
         StorageMatchResult result;
@@ -511,7 +518,16 @@ void StorageBackend::match(StorageRequest request, MatchDone done) {
         if (success) {
             auto io = stageValue("match_io", request, "match", trace_id);
             try {
-                result = matchImpl(request);
+                const bool admitted = !skip_remote && remoteCacheEnabled();
+                if (admitted) {
+                    result = matchImpl(request);
+                }
+                // A query may have been in flight when the control changed.
+                // Return a successful local-only match, never unfilled remote hits.
+                if (!admitted || !remoteCacheEnabled()) {
+                    onRemoteCacheSkipped("match");
+                    result = {request.local_matched_blocks_num, nullptr};
+                }
                 success = !request.transfer_task->expired();
             } catch (...) {
                 success = false;
@@ -524,7 +540,7 @@ void StorageBackend::match(StorageRequest request, MatchDone done) {
             callback.finish(true);
         }
         total.finish(success);
-    }, BlockTreeTaskClass::LOAD);
+    }, BlockTreeTaskClass::LOAD, skip_remote);
 }
 
 void StorageBackend::read(StorageRequest request, std::shared_ptr<StorageBackendMatchMeta> match_meta, Done done) {
@@ -535,8 +551,9 @@ void StorageBackend::read(StorageRequest request, std::shared_ptr<StorageBackend
     auto       total    = stageTimer("read_total", request, "read", trace_id);
     auto       state    = prepare(std::move(request), false, trace_id);
     auto       queue    = stageTimer("read_queue_wait", state->request, "read", trace_id);
-    dispatch([this, state = std::move(state), match_meta = std::move(match_meta), done = std::move(done), total, queue](
-                 Lifecycle outcome) mutable {
+    const bool skip_remote = !remoteCacheEnabled();
+    dispatch([this, skip_remote, state = std::move(state), match_meta = std::move(match_meta),
+              done = std::move(done), total, queue](Lifecycle outcome) mutable {
         queue.finish(outcome == Lifecycle::ACCEPTING);
         ErrorInfo error = outcome == Lifecycle::ACCEPTING ?
                               ErrorInfo::OkStatus() :
@@ -544,6 +561,10 @@ void StorageBackend::read(StorageRequest request, std::shared_ptr<StorageBackend
         std::optional<StorageQuarantineReason> quarantine_reason;
         if (error.ok() && state->request.transfer_task->expired()) {
             error = ErrorInfo(ErrorCode::DEADLINE_EXCEEDED, "storage read deadline exceeded before I/O");
+        }
+        if (error.ok() && (skip_remote || !remoteCacheEnabled())) {
+            onRemoteCacheSkipped("read");
+            error = ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "remote cache disabled by KVCM before read submission");
         }
         if (error.ok()) {
             auto io = stageValue("read_io", state->request, "read", state->trace_id);
@@ -597,11 +618,15 @@ void StorageBackend::read(StorageRequest request, std::shared_ptr<StorageBackend
             callback.finish(true);
         }
         total.finish(success);
-    }, BlockTreeTaskClass::LOAD);
+    }, BlockTreeTaskClass::LOAD, skip_remote);
 }
 
 StorageWriteTask StorageBackend::prepareWrite(StorageRequest request) {
     RTP_LLM_CHECK(initialized_);
+    if (!remoteCacheEnabled()) {
+        onRemoteCacheSkipped("write");
+        return {};
+    }
     if (request.empty()) {
         return {};
     }
@@ -617,13 +642,17 @@ bool StorageBackend::write(StorageWriteTask task) {
     auto state = std::move(task.state_);
     auto total = stageTimer("write_total", state->request, "write", state->trace_id);
     auto queue = stageTimer("write_queue_wait", state->request, "write", state->trace_id);
-    if (state->request.completion_admission)
+    const bool skip_remote = !remoteCacheEnabled();
+    if (state->request.completion_admission) {
         state->request.completion_admission->onQueued();
-    return dispatch([this, state, total, queue](Lifecycle outcome) {
+    }
+    const bool admitted = dispatch([this, skip_remote, state, total, queue](Lifecycle outcome) {
         queue.finish(outcome == Lifecycle::ACCEPTING);
         bool                                   success = false;
         std::optional<StorageQuarantineReason> quarantine_reason;
-        if (outcome == Lifecycle::ACCEPTING && !state->request.transfer_task->expired()) {
+        if (outcome == Lifecycle::ACCEPTING && (skip_remote || !remoteCacheEnabled())) {
+            onRemoteCacheSkipped("write");
+        } else if (outcome == Lifecycle::ACCEPTING && !state->request.transfer_task->expired()) {
             auto io = stageValue("write_io", state->request, "write", state->trace_id);
             if (state->request.completion_admission)
                 state->request.completion_admission->onRunning();
@@ -668,7 +697,8 @@ bool StorageBackend::write(StorageWriteTask task) {
         }
         settle.finish(true);
         total.finish(success);
-    }, BlockTreeTaskClass::BACKGROUND);
+    }, BlockTreeTaskClass::BACKGROUND, skip_remote);
+    return admitted && !skip_remote;
 }
 
 }  // namespace rtp_llm

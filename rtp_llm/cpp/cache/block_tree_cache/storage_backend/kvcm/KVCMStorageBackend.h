@@ -51,6 +51,7 @@ protected:
     void readImpl(const StorageRequest& request, const std::shared_ptr<StorageBackendMatchMeta>& match_meta) override;
     void writeImpl(const StorageRequest& request) override;
     void shutdownImpl() noexcept override;
+    void onRemoteCacheSkipped(const char* stage) noexcept override;
     bool protectUnknownCompletion() const noexcept override;
     std::shared_ptr<void> completionResourceOwner() const override;
     bool hasUnresolvedExternalIo() const noexcept override;

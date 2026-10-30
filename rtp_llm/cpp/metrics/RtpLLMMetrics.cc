@@ -43,6 +43,7 @@ AUTIL_LOG_SETUP(rtp_llm, RtpLLMRemoteCachePayloadMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMRemoteCacheQuarantineMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMDecodePublicationMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMRemoteCacheOutcomeMetrics);
+AUTIL_LOG_SETUP(rtp_llm, RtpLLMRemoteCacheControlMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMDecodeCacheTokenMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMRemoteRestoreLatencyMetrics);
 
@@ -1043,6 +1044,16 @@ void RtpLLMRemoteRestoreLatencyMetrics::report(const kmonitor::MetricsTags*     
     all_tags.AddTag("le_us", "+Inf");
     latency_bucket_qps_metric->Report(&all_tags, 1);
     latency_sum_us_qps_metric->Report(&mode_tags, collector->latency_us);
+}
+
+bool RtpLLMRemoteCacheControlMetrics::init(kmonitor::MetricsGroupManager* manager) {
+    REGISTER_GAUGE_MUTABLE_METRIC(enabled_metric, "rtp_llm_remote_cache_enabled");
+    return true;
+}
+
+void RtpLLMRemoteCacheControlMetrics::report(const kmonitor::MetricsTags* tags,
+                                             RtpLLMRemoteCacheControlMetricsCollector* collector) {
+    REPORT_MUTABLE_METRIC(enabled_metric, collector->enabled ? 1 : 0);
 }
 
 bool RtpLLMRemoteCacheOutcomeMetrics::init(kmonitor::MetricsGroupManager* manager) {
