@@ -215,6 +215,34 @@ class ResultCheckTest(unittest.TestCase):
         self.assertFalse(verdict["host_load_timing_verified"])
         self.assertFalse(verdict["full_original_suite_passed"])
 
+    def test_declared_prewarm_is_separate_from_formal_stage_membership(self):
+        result = self.fixture()
+        warmup = dict(result["cases"][0], name="rdma_prewarm_1_0", phase="prewarm")
+        result["cases"].append(warmup)
+        result["summary"]["case_count"] += 1
+        result["rdma_prewarm"] = {
+            "enabled": True,
+            "attempts": [{"attempt": 1, "passed": True, "case_names": [warmup["name"]]}],
+        }
+        verdict = self.checked(result)
+        self.assertCountEqual(verdict["errors"], self.checked(self.fixture())["errors"])
+        self.assertEqual(verdict["formal_case_count"], 6)
+        self.assertEqual(verdict["prewarm_case_count"], 1)
+        del result["rdma_prewarm"]
+        self.assertIn("invalid RDMA prewarm membership", self.checked(result)["errors"])
+
+    def test_formal_case_cannot_be_hidden_as_prewarm(self):
+        result = self.fixture()
+        row = result["cases"][0]
+        row["phase"] = "prewarm"
+        result["rdma_prewarm"] = {
+            "enabled": True,
+            "attempts": [{"attempt": 1, "passed": True, "case_names": [row["name"]]}],
+        }
+        errors = self.checked(result)["errors"]
+        self.assertIn("invalid RDMA prewarm membership", errors)
+        self.assertIn("stage case membership is incomplete or duplicated", errors)
+
     def test_legacy_flow_suites_are_rejected(self):
         for suite in ("orthogonal-flow", "flow"):
             result = self.fixture()

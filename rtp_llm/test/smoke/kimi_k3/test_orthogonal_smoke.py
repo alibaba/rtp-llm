@@ -96,6 +96,7 @@ class OrthogonalSmokeOfflineTest(unittest.TestCase):
                 ["--suite", "main-text-64k-capped"],
                 ["--require-mtp"],
                 ["--decode-dp-size", "1"],
+                ["--batch-size", "17"],
             ):
                 with self.subTest(option=option), patch.object(
                     sys, "argv", argv + option
@@ -225,7 +226,14 @@ class OrthogonalSmokeOfflineTest(unittest.TestCase):
         )
         self.assertEqual(calls[-1].name, "orthogonal_kv_final")
 
-    def test_decode_global_64_routes_32_per_dp_owner(self):
+    def test_prefill_admission_rejects_more_than_16_requests(self):
+        smoke = runner()
+        with self.assertRaisesRegex(SmokeFailure, "must not exceed 16"):
+            smoke.request_cases([None] * 17, concurrent=True)
+        with self.assertRaisesRegex(SmokeFailure, "must not exceed 16"):
+            smoke.request_cases_group([None] * 17)
+
+    def test_decode_global_16_routes_8_per_dp_owner(self):
         smoke = runner()
         smoke.decode_role_addrs = [{"role": "DECODE"}, {"role": "DECODE"}]
         groups = []
@@ -233,13 +241,13 @@ class OrthogonalSmokeOfflineTest(unittest.TestCase):
             (name, cases, kwargs)
         )
         smoke._orthogonal_decode_batches()
-        self.assertEqual([len(cases) for _, cases, _ in groups], [1, 4, 8, 63, 64, 64])
+        self.assertEqual([len(cases) for _, cases, _ in groups], [1, 4, 8, 15, 16, 16])
         self.assertEqual(
             [
                 sum(case.decode_owner_rank == rank for case in groups[4][1])
                 for rank in (0, 1)
             ],
-            [32, 32],
+            [8, 8],
         )
         self.assertIsNone(groups[4][2].get("admission_wave_size"))
         self.assertEqual(groups[4][2].get("admission_gap_s", 0), 0)
@@ -252,10 +260,10 @@ class OrthogonalSmokeOfflineTest(unittest.TestCase):
                 sum(case.decode_owner_rank == rank for case in groups[3][1])
                 for rank in (0, 1)
             ],
-            [32, 31],
+            [8, 7],
         )
         self.assertTrue(all(group[2]["grouped_pd"] for group in groups[1:]))
-        self.assertEqual(groups[4][0], "orthogonal_decode_04_batch_64")
+        self.assertEqual(groups[4][0], "orthogonal_decode_04_batch_16")
         self.assertTrue(groups[4][2]["grouped_pd"])
         self.assertEqual(groups[3][1][0].max_tokens, 2560)
         self.assertEqual(groups[4][1][0].max_tokens, 1280)
@@ -265,14 +273,14 @@ class OrthogonalSmokeOfflineTest(unittest.TestCase):
             self.assertEqual(case.expected_json, original.expected_json)
             self.assertEqual(len(case.expected_json["value"].split()), 56)
         name, cases, options = groups[5]
-        self.assertEqual(name, "orthogonal_decode_graph_long_output_batch_64")
-        self.assertEqual(len(cases), 64)
+        self.assertEqual(name, "orthogonal_decode_graph_long_output_batch_16")
+        self.assertEqual(len(cases), 16)
         self.assertEqual(
             [
                 sum(case.decode_owner_rank == owner for case in cases)
                 for owner in (0, 1)
             ],
-            [32, 32],
+            [8, 8],
         )
         self.assertTrue(options["concurrent"] and options["grouped_pd"])
         for case in cases:
