@@ -60,6 +60,8 @@ public final class ComputeModel {
         return new ComputeModel(JSON.treeToValue(node, ComputeSpec.class), constants);
     }
 
+    public int kvReserveTokens() { return decode.reserveTokens(); }
+
     public ComputeSpec configuration() { return configuration; }
     public JsonNode effectiveConfiguration() { return JSON.valueToTree(configuration); }
 

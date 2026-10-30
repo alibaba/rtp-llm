@@ -14,10 +14,10 @@ public final class EngineMetrics {
     public static final String FORWARD_SECONDS = "mock_engine_forward_seconds";
     public enum Outcome { success, cancelled, timeout, error }
     public record State(long waiting, long running, long loading, long ready, long totalTokens, long availableTokens,
-                        long freeTokens, long heldTokens) {
+                        long freeTokens, long heldTokens, long hostTotalTokens, long hostFreeTokens) {
         public State {
             if (waiting < 0 || running < 0 || loading < 0 || ready < 0 || totalTokens < 0 || availableTokens < 0 || freeTokens < 0
-                    || heldTokens < 0 || availableTokens > totalTokens || freeTokens > availableTokens || heldTokens > totalTokens)
+                    || heldTokens < 0 || hostTotalTokens < 0 || hostFreeTokens < 0 || hostFreeTokens > hostTotalTokens || availableTokens > totalTokens || freeTokens > availableTokens || heldTokens > totalTokens)
                 throw new IllegalArgumentException("Invalid engine state");
         }
     }
@@ -62,7 +62,10 @@ public final class EngineMetrics {
                 kv.addMetric(List.of(role, "available"), value.availableTokens());
                 kv.addMetric(List.of(role, "free"), value.freeTokens());
                 kv.addMetric(List.of(role, "held"), value.heldTokens());
-                return List.of(tasks, kv);
+                var host = new GaugeMetricFamily("mock_engine_host_kv_tokens", "Local Host KV capacity in tokens.", List.of("role", "state"));
+                host.addMetric(List.of(role, "total"), value.hostTotalTokens());
+                host.addMetric(List.of(role, "free"), value.hostFreeTokens());
+                return List.of(tasks, kv, host);
             }
         }.register(registry);
     }

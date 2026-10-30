@@ -8,7 +8,7 @@ public final class BlockPool {
     public record Snapshot(int total, int free, int available, int active) {}
     private final int capacity;
     private final int[] referenced = new int[Kind.values().length];
-    private int allocated, active;
+    private int allocated, active, cachedActive;
     private long generation;
 
     public BlockPool(int capacity) {
@@ -40,6 +40,7 @@ public final class BlockPool {
         return new Snapshot(capacity, capacity - allocated, capacity - active, active);
     }
     public synchronized int referencedBlocks(Kind kind) { return referenced[kind.ordinal()]; }
+    synchronized int cachedActiveBlocks() { return cachedActive; }
     public synchronized long generation() { return generation; }
     public synchronized void awaitChange(long observed, long waitMs) throws InterruptedException {
         if (generation == observed) wait(Math.max(1, waitMs));
@@ -47,8 +48,10 @@ public final class BlockPool {
 
     private Reference add(Block block, Kind kind) {
         if (block.refs[kind.ordinal()] == Integer.MAX_VALUE) throw new IllegalStateException("Block reference overflow");
+        boolean cached = isCachedActive(block);
         if (block.refs[kind.ordinal()]++ == 0) referenced[kind.ordinal()]++;
         if (kind != Kind.CACHE && block.activeRefs++ == 0) active++;
+        if (!cached && isCachedActive(block)) cachedActive++;
         block.totalRefs++;
         return new Reference(this, block, kind);
     }
@@ -56,11 +59,16 @@ public final class BlockPool {
         if (reference.closed) return;
         reference.closed = true;
         var block = reference.block;
+        boolean cached = isCachedActive(block);
         if (--block.refs[reference.kind.ordinal()] == 0) referenced[reference.kind.ordinal()]--;
         boolean increased = false;
         if (reference.kind != Kind.CACHE && --block.activeRefs == 0) { active--; increased = true; }
+        if (cached && !isCachedActive(block)) cachedActive--;
         if (--block.totalRefs == 0) { allocated--; increased = true; }
         if (increased) { generation++; notifyAll(); }
+    }
+    private static boolean isCachedActive(Block block) {
+        return block.activeRefs > 0 && block.refs[Kind.CACHE.ordinal()] > 0;
     }
     private void requireOwned(Reference reference) {
         if (reference == null || reference.owner != this || reference.closed)

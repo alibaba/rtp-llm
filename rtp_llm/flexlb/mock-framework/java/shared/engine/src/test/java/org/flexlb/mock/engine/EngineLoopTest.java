@@ -43,7 +43,7 @@ class EngineLoopTest {
         public RequestState.Use beginTransfer(Request request) { throw new UnsupportedOperationException(); }
     }
     private EngineLoop engine(Object lock, Policy policy, String expression) {
-        return new EngineLoop(lock, policy, new org.flexlb.mock.cache.DeviceCache(1, 0, org.flexlb.mock.cache.DeviceCache.EvictionPolicy.LRU), new ComputeModel(new ComputeSpec(new ComputeSpec.Forward(expression, null), null, null)), Role.prefill, "test");
+        return new EngineLoop(lock, policy, new org.flexlb.mock.cache.KvCache(1, 1, 0, org.flexlb.mock.cache.KvCache.EvictionPolicy.LRU), new ComputeModel(new ComputeSpec(new ComputeSpec.Forward(expression, null), null, null)), Role.prefill, "test");
     }
 
     @Test void idleLoopsCannotExhaustVirtualThreadCarriers() throws Exception {
@@ -157,12 +157,12 @@ class EngineLoopTest {
     }
 
     @Test void externalCapacityReleaseWakesAnOtherwiseIdleEngine() throws Exception {
-        try (var cache = new org.flexlb.mock.cache.DeviceCache(1, 0, org.flexlb.mock.cache.DeviceCache.EvictionPolicy.LRU)) {
+        try (var cache = new org.flexlb.mock.cache.KvCache(1, 1, 0, org.flexlb.mock.cache.KvCache.EvictionPolicy.LRU)) {
             var owner = cache.acquire(1, List.of()).lease();
             var tried = new CountDownLatch(1);
             var attempts = new java.util.concurrent.atomic.AtomicInteger();
             var policy = new Policy(false) {
-                org.flexlb.mock.cache.DeviceCache.Lease lease;
+                org.flexlb.mock.cache.KvCache.Lease lease;
                 @Override public Work schedule() {
                     if (lease != null) return null;
                     attempts.incrementAndGet();

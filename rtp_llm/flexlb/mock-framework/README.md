@@ -61,7 +61,7 @@ Python async 只表达非阻塞等待，不代表任意 step 可以脱离 Runner
 
 RTP 和 vLLM 的设计目标是复用请求事实、资源机制、EngineLoop、Forward、输出和生命周期工具；各自的 Scheduler 拥有队列模型、准入、组批、抢占恢复和结果后的状态转换。替换调度策略不应修改 Compute 或 EngineLoop。原生协议和计算模型参数仍在各自接入/配置边界适配，不宣称两个真实后端只有调度差异。
 
-当前已打通 Java 装配入口 `RtpNode.start(config, Scheduler.Factory)`，指定监听端口时使用 `start(config, rpcPort, controlPort, factory)`。工厂的 `create(lock, cache)` 为每个实例创建一个新 Scheduler，收到协议接入层与 EngineLoop 共用的调度锁，以及本实例独占的公共 DeviceCache。工厂不关闭缓存；节点在关闭或调度器创建失败时回收它。默认入口只在 RtpNode 选择 RTP 工厂，LocalPrefill/DecodeAdmission 不再创建或引用 RtpScheduler，公共执行层不识别 RTP 配置。
+当前已打通 Java 装配入口 `RtpNode.start(config, Scheduler.Factory)`，指定监听端口时使用 `start(config, rpcPort, controlPort, factory)`。工厂的 `create(lock, cache)` 为每个实例创建一个新 Scheduler，收到协议接入层与 EngineLoop 共用的调度锁，以及本实例独占的 RTP Full-KV 管理器 KvCache。工厂不关闭缓存；节点在关闭或调度器创建失败时回收它。默认入口只在 RtpNode 选择 RTP 工厂，LocalPrefill/DecodeAdmission 不再创建或引用 RtpScheduler，公共执行层不识别 RTP 配置。
 
 P 接入层保留原生报文、模型上下文及生成参数校验，单批 token 预算等调度策略由 Scheduler 判定。RTP 默认策略仍拒绝超出单批预算的 Prefill，并返回原有 INVALID_ARGUMENT/605；替换 Scheduler 不会被接入层的重复策略校验拦截。请求数量保护上限统一来自 RtpConfig，不再由接入层读取具体调度器的常量。
 
@@ -310,7 +310,7 @@ Java 产生指标并暴露 `/metrics`；Python 直接调用 Prometheus HTTP API�
 | `java/engine/rtp/` | RTP 协议适配、P/D 调度策略、资源申请时机、P/D 交接与节点装配。 |
 | `java/shared/engine/` | EngineLoop/Scheduler 执行边界及工厂契约、RequestState 进度与终态/资源使用权、QueueSnapshot 请求计数。 |
 | `java/shared/compute/` | Forward batch、公式、噪声、Decode 推进、停止模型和可取消计时。 |
-| `java/shared/cache/` | BlockPool 物理容量与引用、DeviceCache 块租约及前缀发布、BlockTree 叶子候选与驱逐。 |
+| `java/shared/cache/` | BlockPool 物理容量与引用、KvCache 块租约及前缀发布、BlockTree 叶子候选与驱逐。 |
 | `java/shared/metrics/` | Engine 指标、注册表和 Prometheus 导出；不提供查询代理。 |
 | `tests/`、各模块 `src/test/` | Python/跨语言集成与 Java 测试；探针不作为正式业务入口。 |
 | `scripts/` | 构建和检查入口。 |
@@ -603,17 +603,25 @@ P/D 都按实际 Forward 计时，token 是重复输入末 token 的模拟载荷
 
 请求总预算取 timeout_ms 和 RPC deadline 较早者，不逐阶段重置；取消、超时和关闭只释放一次，旧回调不能影响复用身份的新请求。602/603/605 使用原生 ErrorDetailsPB。P 转发采用受控拉取/有限 Inbox，遵守发送就绪；共享连接不随单请求取消关闭。Mock 保护上限是 1024 活动请求，TaskHistory 保留 1024 项。旧游标越过历史窗口时，按 real 的恢复方式继续返回完整当前状态、仍保留的完成记录和推进后的游标，不以 OUT_OF_RANGE 阻断健康同步；超前游标不倒退。每次缺口读取在组件日志中记录 `finished_history_gap`，包含 requested_version、dropped_through、latest_version、retained，不能把这段完成记录当成完整请求历史。生产 proto 没有历史完整性字段，缺口证据保存在实验组件日志；需要完整逐请求证据时不能依赖 WorkerStatus 的有限窗口。real 当前为 1000 条/5s 保留，Mock 的 1024 条是明确的模拟边界，不宣称保留策略完全相同。
 
-WorkerStatus 报真实等待/执行任务、finished/version，available_concurrency 保持生产默认 0，KV 以 token 为单位；CacheStatus 提供 block size 与版本。D 当前要求 input+max_new_tokens<max_seq_len，未实现真实截断/reserveStep。成功且 reuse/device 均开启时写回完整 prompt 块；失败不提交，生成内容不额外建索引。没有完整动态 batch、GPU 或混合 KV 布局模拟。
+WorkerStatus 报真实等待/执行任务、finished/version，available_concurrency 保持生产默认 0，KV 以 token 为单位；CacheStatus 提供 block size 与版本。D 当前要求 input+max_new_tokens<max_seq_len，未实现完整真实截断。显式投机按 RTP reserveStep 预留，成功且 reuse 与缓存层开启时写回完整 prompt 块；失败不提交，生成内容不额外建索引。没有完整动态 batch、GPU 或混合 KV 布局模拟。
 
 ## Block 容量与 RTP 缓存
 
 共享 `BlockPool` 只管理物理容量和引用。每个实例/存储层各自建池，每个所有者持有独立 Reference，close 幂等，不能释放其他所有者份额或混用池。REQUEST/CACHE/LOAD/STORE/EVICTION 分别计数；只有 CACHE 引用的块算可回收容量，free 和 available 分开，分配失败不部分扣账，释放唤醒等待者。
 
-公共 `BlockTree` 管前缀与叶子候选，`DeviceCache` 提供块租约、复用、增长、完成和取消机制；二者及其行为测试位于 `java/shared/cache`，不依赖 RTP。键的生成、可复用前缀范围、申请时机和容量不足后的动作由协议适配与具体 Scheduler 决定。按 2026-10-28 fetch 的 main `7cdc40370e5129c5f3d70a40d7cdc54633a7955`，real 统一使用 BlockTreeCache；`lru/lfu/fifo` 是树内候选排序，不是 tree 之外的模式。只驱逐未引用叶子，按需逐个回收，保留可匹配父节点；match 刷新热度，release/重叠 insert 不刷新。
+`KvCache` 和 `BlockTree` 目前固定实现 RTP Full-KV 语义，文件保留在 `java/shared/cache`，不为未知的 vLLM 行为增加策略层或适配接口。每个 Engine 各自拥有 Device/Host 池、前缀索引和请求租约，同 JVM 不共享缓存内容。树内 `lru/lfu/fifo` 只改变合法候选的排序，Device 和 Host 可以分别配置。一次 match 用同一访问序号刷新整条命中路径，release/重叠 publish 不刷新；每次成功进入新存储层都会刷新该层的 FIFO 入层顺序。
 
-容量使用原生 `test_block_num` 和 `reserve_block_ratio`，不支持旧 `capacity.device_blocks/reserve_blocks`。block 0 不可分配，可用块数=test_block_num−1；token 容量再乘 block size。reserve 是原生百分比向下取整，默认 5%，约束首次分配，允许运行中增长使用预留。先引用命中再校验净新增需求，失败回滚；增长失败保留已取得部分，由请求最终释放。
+正式 `acquire` 在同一锁内完成前缀匹配、取得使用引用、申请缺少的 Device 容量和本地读取；没有先查询再占用的 Scheduler 接口。状态/前缀快照只读，不保证后续请求仍然命中。本地 Host/Device 读取和转存瞬间完成，不建立本地 loading 队列、异步任务或带宽模型；PD 网络交接仍按原有生命周期执行。
 
-仅缓存完整块，命中排除 prompt 最后 token；遵守全局/请求 reuse 和 device 开关，D 还遵守 disable_decode_first_malloc_device_reuse。成功完成才提交新 key，取消不提交。当前只有 Full-attention device 池；host/disk/remote 尚未接通，显式开启对应 enable_*_cache 会拒绝启动。共享容量类可供各层使用，迁移与驱逐策略仍由 Engine 实现。
+对齐当前 real BlockTree：开启 Device cache 时，Host 读取成功后把已有有效前缀注册到 Device，再移除 Host 副本；关闭 Device cache 时，Host 源保留，Device 工作副本不注册。申请失败不能消费 Host。驱逐候选按所在层的直接子节点判断叶子，不要求整棵树的全局叶子；Full-KV 前缀被删除时，所有失效后缀跨层清理。Device 水位触发时向 Host 转存；Host 分配失败时保留 Device 源，不为了转存强制删除 Host 缓存，也不退化成丢弃 Device。未配置 Host 时水位回收可以直接删除 Device 索引。紧急 Device 分配允许直接回收 Device 缓存及失效后缀，不额外删除无关 Host 根。层间移动保持逻辑 key 和索引版本，真正插入/删除才改变 key 版本。Host 不计入 WorkerStatus/CacheStatus 的 Device 执行容量。
+
+容量使用原生 `test_block_num` 和 `reserve_block_ratio`。Device 可用块数=test_block_num−1；Host 使用 `memory_cache_blocks` 个块。reserve 默认 5%，约束首次分配，运行中增长可以使用预留。需求超过单实例上限为永久不足，暂时被其他请求占用为可重试；增长一次补齐差额，失败不留下半次新增分配。容量不足后的等待/结束决定仍在 Scheduler，运行中的 RTP Decode 增长失败会结束该请求，不实现主动换出。显式投机的首次 D 分配也包含 reserveStep，在 PD 交接前准备目标容量。
+
+Scheduler 与 KV 管理器按 Token 交互：`acquire(requiredTokens, keys)` 首次取得资源，`Lease.ensureCapacity(requiredTokens)` 保证本轮容量，`reusedTokens()` 返回复用 Token 数。容量的 Block 换算和向上取整封装在 KV 管理器中；已有容量足够或需求变小时不缩容、不重复申请，超过容量上限返回永久不足。容量配置、物理池和状态快照仍使用原生 Block 口径。
+
+不再每轮调用 markValid，也不在 Lease 中重复保存计算进度。Scheduler 在成功终态且所有 Compute/PD 使用结束后调用 `publish(keys, validTokens)`，一次声明有效范围并注册完整 prompt 块；KV 管理器校验有效范围未超过已分配容量、key 数未超过完整有效块数。`publish` 不关闭租约，`close` 只释放请求引用。投机拒绝区域、预留空间、失败/取消请求不发布，生成内容暂不额外建立前缀索引。多个请求可共享已注册的不可变 Device 块。缓存索引引用与请求物理引用独立：索引可以在请求运行中注销或迁往 Host，请求仍保留原 Device 块，最后一个引用释放才归还物理容量。acquire/publish 仅在同步事务内临时保护完整前缀。状态中的 referenced 只统计仍同时被索引和请求引用的 Device 物理块；注销或转存后仍被请求持有的块计入 held。Host-only 的私有 Device 副本与 Host 记作两层真实占用。
+
+Device/Host 水位按物理占用比例工作：达到 high 后，尽量回收到 low，未达到 low 时保留触发状态。加载、发布、增长和请求释放完成后同步检查，顺序为 Host、Device，不建后台扫描线程；运行中请求的引用可能使物理占用暂时无法下降。`enable_memory_cache` 要求显式正数 `memory_cache_blocks`。Disk/Remote 仍拒绝开启。Host 传输超时保留在 pending_config，本地瞬间完成不使用该超时。Host-only 写回暂保留可容纳的部分前缀，尚未对齐 real 的整批目标预分配与整批失败回滚；Device+Host 主路径不依赖此简化。异步传输队列、Disk/Remote 和 Hybrid/SWA/Linear 布局仍不实现。
 
 ## Compute、Forward、Decode 和 EOS
 
@@ -657,9 +665,9 @@ ForwardBatch 保留请求长度、实际缓存命中、已生成长度、stepTok
 
 Decode 有两种互斥模型。默认普通模式每轮一个 token；平均模式 tokens_per_step>=1 按 ceil((n+1)*v)−ceil(n*v) 产生候选数量，每轮每请求计一个 target 输入，不虚构 draft/accept 统计。显式投机模式配置 draft_tokens、acceptance_rate、seed：抽取接受前缀 A，候选产出为 A+1；固定独立接受率 α、草稿长 k 时 E[C]=1+α+…+α^k。这是可复现的统计近似，不模拟真实 MTP 的 logits、draft 张量和独立 draft KV；P 的初始化成本包含在 P 整体公式中。
 
-长度边界在接受结果后统一处理。显式投机模式按固定 k 个草稿、k+1 个验证位置及对应 KV 前瞻执行，对齐当前 RTP 的固定验证窗口；不能因为只剩 R 个输出位置就提前缩小验证量。候选产出 5 个而只剩 4 个时，只提交 4 个并返回 finished=true，验证成本仍按完整计划累计。平均进度模型每轮仍计一个 target 输入，KV 仅覆盖最终可能提交的输出前缀。EOS 只检查接受后的候选 token，按绝对输出位置生成固定概率事件；相同 seed、请求身份和概率下，改变 batch、轮宽、接受模型或调用顺序不会重抽已经走过的位置。拒绝的草稿不参与结束判断。
+长度边界在接受结果后统一处理。显式投机模式按固定 k 个草稿、k+1 个验证位置及 seq_len+k+1 的 KV 预留执行（普通 Decode reserveStep=0），对齐当前 RTP 的固定验证窗口；不能因为只剩 R 个输出位置就提前缩小验证量。候选产出 5 个而只剩 4 个时，只提交 4 个并返回 finished=true，验证成本仍按完整计划累计。平均进度模型每轮仍计一个 target 输入，KV 仅覆盖最终可能提交的输出前缀。EOS 只检查接受后的候选 token，按绝对输出位置生成固定概率事件；相同 seed、请求身份和概率下，改变 batch、轮宽、接受模型或调用顺序不会重抽已经走过的位置。拒绝的草稿不参与结束判断。
 
-StoppingModel 遵守 min_new_tokens，ignore_eos 只屏蔽 EOS，不屏蔽长度上限。完成判定的上限同时受 max_new_tokens 与 maxSequence−inputTokens 约束；RTP 接入仍保留前述较严格的序列准入规则，尚未模拟 real reserveStep。EOS 位于本轮中间时截断实际产出，但本轮已执行的验证成本和在途资源引用不撤销。固定概率只是 Mock EOS hazard，不宣称真实输出分布。标准回放发送 ignore_eos=true，所以 Case 可保留 P/D 的 EOS 参数而不再次缩短数据中的目标长度。
+StoppingModel 遵守 min_new_tokens，ignore_eos 只屏蔽 EOS，不屏蔽长度上限。完成判定的上限同时受 max_new_tokens 与 maxSequence−inputTokens 约束；RTP 接入仍保留前述较严格的序列准入规则；显式投机在首次分配和后续增长中另外预留 reserveStep。EOS 位于本轮中间时截断实际产出，但本轮已执行的验证成本和在途资源引用不撤销。固定概率只是 Mock EOS hazard，不宣称真实输出分布。标准回放发送 ignore_eos=true，所以 Case 可保留 P/D 的 EOS 参数而不再次缩短数据中的目标长度。
 
 real 依据：MtpExecutor::decodeStep 先 target verify Forward，再执行 speculative_sampler；MtpBatchStreamProcessor::prepareDecodeSpecUpdateInfo 提取接受后的 token，GenerateStream::specUpdate 经 NormalGenerateStream::updateOutput 检查 EOS/max；CompleteTokenIds::matchEosToken 截断到第一个 EOS。PrefillRpcServer::remoteLoadCacheEnd 保留 LOAD ACK、释放源 KV 和 PREFILL_COMPLETE 顺序。当前 Mock 不支持 stop words/beam search 等未实现条件，显式请求会拒绝。
 
@@ -669,7 +677,7 @@ real 依据：MtpExecutor::decodeStep 先 target verify Forward，再执行 spec
 
 CP/TP/DP 保留在执行配置及 effective-config 中，不转成来源说明。一个 Mock Engine 仍表示整体计算单元；不创建内部 rank，不模拟并行通信。当前执行域仍只支持 dp_size=1、dp_rank=0，其他值明确拒绝；保留 dp_size 并不表示已经支持内部多 DP。并行度作为公式输入，已校准的公式、容量和 block size 不再隐式换算。
 
-下表是当前 DeepSeek HA 配置的处理结果。待实现参数保留实际数值、校验类型与范围，但只进入 pending_config，不表示行为已经对齐。主动开启尚不存在的 Host/disk/remote cache 仍拒绝启动；其他待实现项允许保留并警告，相关调度、压力和超时结论不得作为已对齐结果。
+下表是当前 DeepSeek HA 配置的处理结果。待实现参数保留实际数值、校验类型与范围，但只进入 pending_config，不表示行为已经对齐。Host 容量、策略和水位已经接通；开启尚不存在的 disk/remote cache 仍拒绝启动；其他待实现项允许保留并警告，相关调度、压力和超时结论不得作为已对齐结果。
 
 | 参数 | P | D | 当前处理 |
 | --- | --- | --- | --- |
@@ -683,12 +691,12 @@ CP/TP/DP 保留在执行配置及 effective-config 中，不转成来源说明�
 | max_batch_tokens_without_cache | 50000 | 不配置 | P 待实现准入限制；D 原值 0，省略。 |
 | max_inited_kv_cache_streams | 128 | 不配置 | P 待实现初始化 KV 请求限制；D 原值 0，省略。 |
 | reuse_cache / enable_device_cache / device_eviction_policy | false / true / lru | false / true / lru | 保留现有语义，不为接 Host 而打开 reuse。 |
-| enable_memory_cache / memory_cache_blocks | true / 52295 | false / 不配置 | P Host 组件待实现，当前拒绝启动。 |
-| memory_eviction_policy | lru | 不配置 | P 待实现；删除 D 无效项。 |
-| block_tree_device_evict_low/high_watermark_ratio | 0.82 / 0.9 | 0.82 / 0.9 | 待实现主动驱逐水位。 |
-| block_tree_memory_evict_low/high_watermark_ratio | 0.9 / 0.94 | 不配置 | P 待实现；删除 D 无效项。 |
+| enable_memory_cache / memory_cache_blocks | true / 52295 | false / 不配置 | P Host 容量生效，本地瞬间周转。 |
+| memory_eviction_policy | lru | 不配置 | P Host 策略/水位生效；D 不配置。 |
+| block_tree_device_evict_low/high_watermark_ratio | 0.82 / 0.9 | 0.82 / 0.9 | Device 水位生效；释放资源时同步回收到低水位。 |
+| block_tree_memory_evict_low/high_watermark_ratio | 0.9 / 0.94 | 不配置 | P Host 策略/水位生效；D 不配置。 |
 | block_tree_business_queue_max_size / block_tree_transfer_queue_max_size | 10000 / 10000 | 10000 / 10000 | 待实现队列背压，不以无界队列冒充等价实现。 |
-| memory_cache_sync_timeout_ms | 10000 | 不配置 | P 待实现 Host 传输超时。 |
+| memory_cache_sync_timeout_ms | 10000 | 不配置 | P 本地瞬间传输不使用，保留 pending_config。 |
 | enable_disk_cache / enable_remote_cache | false / false | false / false | 明确关闭；开启拒绝。 |
 | prefill_retry_times | 0 | 不配置 | 当前不重试；非零值列为待实现。 |
 | prefill_max_wait_timeout_ms | 600000 | 不配置 | P 待实现独立等待期限。 |
@@ -724,6 +732,7 @@ EngineMetrics 使用 Prometheus simpleclient 0.16.0，每个节点独立注册�
 | --- | --- | --- |
 | mock_engine_requests_started_total | Counter | 校验并接纳后加一，入口拒绝不计。 |
 | mock_engine_requests_finished_total | Counter，outcome=success/cancelled/timeout/error | 每个已接纳请求唯一终态，节点关闭计 error，不代替 Client 成功率。 |
+| mock_engine_host_kv_tokens | Gauge | 本地 Host total/free token 容量，与 Device 分开。 |
 | mock_engine_cache_lookup_tokens_total / mock_engine_cache_hit_tokens_total | Counter | 分配时实际输入/历史命中 token，取消不撤销已发生查找。 |
 | mock_engine_forward_tokens_total | Counter，kind=input/compute/output | 完成 Forward 的 token；input/compute 汇总本批全部执行成员，output 只计有效提交。全部取消的 Forward 不补完成样本。 |
 | rtp_llm_model_forward_us | Gauge | 最近一个完成 Forward 的实际耗时，微秒；计时到执行完成通知，不包含等待调度域锁和结果提交。 |
@@ -747,7 +756,7 @@ EngineMetrics 使用 Prometheus simpleclient 0.16.0，每个节点独立注册�
 
 `client/success_rate` 的 range 是必填的 `[start, end]`（start < end <= 0），按固定查询时刻定位窗口，使用 Counter 的 increase，按完成时间统计，分母包含 success/error/timeout/cancelled。它没有最小请求数门槛；窗口无终态时分母为零，或任一 Client 的终态序列采集不完整时均报错。至少两次抓取是计数器增量的计算条件，不是请求数要求。近期完成请求可能在更早时发出；此口径不表示同一发送阶段的成功率。
 
-`cases/master_ha_failover/case.yaml` 使用已转换的 DeepSeek trace，按 YAML 中的 `replay_speed` 回放贯穿杀 A、恢复 A、杀 B、恢复 B，检查结束后提前停止。操作通过已保存的地址列表引用，恢复前不杀另一侧；恢复后检查原主不被抢占。Case 在保守等待后直接检查最近完成请求的成功率，最后收集 Client 终态，不使用进度接口、最少样本数、精确事件窗口或 HA 专用执行器。启动配方仍由 `mock-case launch <case>/case.yaml` 生成；双 Master 要求本机可绑定两个回环 IP。该 Case 保留原 DeepSeek preset 的 Host 缓存开关；Host 缓存尚未接通时启动明确失败，不以关闭缓存替代原配置。参数来自 legacy_unverified preset，配置和数据迁移不代表端到端验收通过。
+`cases/master_ha_failover/case.yaml` 使用已转换的 DeepSeek trace，按 YAML 中的 `replay_speed` 回放贯穿杀 A、恢复 A、杀 B、恢复 B，检查结束后提前停止。操作通过已保存的地址列表引用，恢复前不杀另一侧；恢复后检查原主不被抢占。Case 在保守等待后直接检查最近完成请求的成功率，最后收集 Client 终态，不使用进度接口、最少样本数、精确事件窗口或 HA 专用执行器。启动配方仍由 `mock-case launch <case>/case.yaml` 生成；双 Master 要求本机可绑定两个回环 IP。该 Case 保留原 DeepSeek preset 的 Host 开关、容量与水位，不为演示命中而打开原配置关闭的 reuse_cache。参数来自 legacy_unverified preset，配置和数据迁移不代表端到端验收通过。
 
 原始 PromQL 不自动加过滤。matrix/string/native histogram、非有限值、查询 warning 或后端失败都不作为有效门禁；普通指标恰好一个有限值。原始查询返回结构化结果，不隐式聚合或对各样本套用数值门禁。查询不重试，HTTP 和求值均受步骤剩余预算限制。
 

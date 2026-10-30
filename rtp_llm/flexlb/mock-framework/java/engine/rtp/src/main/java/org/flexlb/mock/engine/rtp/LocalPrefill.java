@@ -6,7 +6,7 @@ import java.util.concurrent.CompletionStage;
 import org.flexlb.engine.grpc.EngineRpcService.*;
 import org.flexlb.mock.api.model.Types.Role;
 import org.flexlb.mock.engine.*;
-import org.flexlb.mock.cache.DeviceCache;
+import org.flexlb.mock.cache.KvCache;
 
 /** Native LocalGenerate boundary. Scheduling and network delivery use separate execution contexts. */
 final class LocalPrefill implements AutoCloseable {
@@ -14,7 +14,7 @@ final class LocalPrefill implements AutoCloseable {
     private final RtpConfig config;
     private final EngineLoop engine;
 
-    LocalPrefill(RtpConfig config, DeviceCache cache, Scheduler.Factory schedulers) {
+    LocalPrefill(RtpConfig config, KvCache cache, Scheduler.Factory schedulers) {
         this.config = config;
         engine = new EngineLoop(this, schedulers.create(this, cache), cache, config.compute(), config.role(), config.id());
     }

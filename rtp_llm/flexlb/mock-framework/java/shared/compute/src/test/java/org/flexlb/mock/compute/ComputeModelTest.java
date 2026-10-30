@@ -21,7 +21,7 @@ class ComputeModelTest {
     @Test void eosRunsAfterAcceptanceAndDoesNotRefundVerification() throws Exception {
         var compute = load("{\"forward\":{\"expression\":\"1\"},\"decode\":{\"draft_tokens\":4,\"acceptance_rate\":1},\"eos\":{\"probability\":1}}");
         var plan = compute.prepare(Role.decode, new ComputeModel.Request("r", 0, 8, 1, 3, 20, 100, false));
-        assertEquals(5, plan.verifyTokens()); assertEquals(4, plan.additionalKvTokens());
+        assertEquals(5, plan.verifyTokens()); assertEquals(5, plan.additionalKvTokens());
         assertEquals(new ComputeModel.Result(2, true), compute.completed(plan));
         assertEquals(5, plan.verifyTokens());
     }

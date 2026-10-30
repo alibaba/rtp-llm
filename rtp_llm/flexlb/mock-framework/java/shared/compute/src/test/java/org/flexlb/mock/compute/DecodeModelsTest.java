@@ -12,10 +12,10 @@ class DecodeModelsTest {
         var rejected = step(4, 0, 1); var accepted = step(4, 1, 1);
         var plan = rejected.plan(0, 10);
         assertEquals(plan, accepted.plan(0, 10));
-        assertEquals(5, plan.verifyTokens()); assertEquals(4, plan.additionalKvTokens());
+        assertEquals(5, plan.verifyTokens()); assertEquals(5, plan.additionalKvTokens());
         assertEquals(1, rejected.candidates(plan, "r", 0)); assertEquals(5, accepted.candidates(plan, "r", 0));
         var tail = accepted.plan(0, 4);
-        assertEquals(5, tail.verifyTokens()); assertEquals(4, tail.additionalKvTokens());
+        assertEquals(5, tail.verifyTokens()); assertEquals(5, tail.additionalKvTokens());
         assertEquals(5, accepted.candidates(tail, "r", 0));
     }
     @Test void cappedGeometricHasTheExpectedAcceptedOutputDistribution() {

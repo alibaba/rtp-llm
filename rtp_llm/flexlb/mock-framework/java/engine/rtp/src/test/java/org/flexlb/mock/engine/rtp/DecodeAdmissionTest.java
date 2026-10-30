@@ -85,7 +85,7 @@ class DecodeAdmissionTest {
     }
 
     @Test void temporaryPressureWaitsPastOldRetryBudgetAndWakesOnRelease() throws Exception {
-        try (var node = node(false); var owner = node.node.cache().acquire(6, List.of()).lease(); var call = new Call(node, 0)) {
+        try (var node = node(false); var owner = node.node.cache().acquire(12, List.of()).lease(); var call = new Call(node, 0)) {
             call.request.onNext(input("p", 1, 5, 0));
             await(() -> node.status().getWaitingQueryLen() == 1);
             assertEquals(TaskPhase.TASK_PHASE_RECEIVED, node.status().getRunningTaskInfo(0).getPhase());
@@ -95,7 +95,7 @@ class DecodeAdmissionTest {
     }
 
     @Test void waitingDeadlineHasNative603AndCannotAllocateAfterExpiry() throws Exception {
-        try (var node = node(false); var owner = node.node.cache().acquire(6, List.of()).lease(); var call = new Call(node, 0)) {
+        try (var node = node(false); var owner = node.node.cache().acquire(12, List.of()).lease(); var call = new Call(node, 0)) {
             call.request.onNext(input("p", 1, 5, 50));
             assertEquals(603, engineCode(call.error(Status.Code.DEADLINE_EXCEEDED)));
             owner.close(); Thread.sleep(100);
@@ -135,7 +135,9 @@ class DecodeAdmissionTest {
             try (var node = node(disabled); var call = new Call(node, 0)) {
                 var input = input("p", 1, 5, 0);
                 var keys = PrefixKeys.completeBlocks(input.getInput(), 2);
-                node.node.cache().acquire(3, List.of()).lease().complete(keys);
+                try (var lease = node.node.cache().acquire(6, List.of()).lease()) {
+                    lease.publish(keys, 5);
+                }
                 call.request.onNext(input); call.ack();
                 assertEquals(disabled ? 0 : 4, node.status().getRunningTaskInfo(0).getPrefixLength());
                 call.close(); await(() -> node.status().getWaitingQueryLen() == 0);
@@ -174,7 +176,7 @@ class DecodeAdmissionTest {
     }
 
     @Test void cancellingCapacityWaitCannotResurrectAnAllocationOrReportForwardWork() throws Exception {
-        try (var node = node(false); var owner = node.node.cache().acquire(6, List.of()).lease(); var call = new Call(node, 0)) {
+        try (var node = node(false); var owner = node.node.cache().acquire(12, List.of()).lease(); var call = new Call(node, 0)) {
             call.request.onNext(input("p", 1, 5, 0)); await(() -> node.status().getWaitingQueryLen() == 1);
             call.close(); await(() -> node.status().getWaitingQueryLen() == 0);
             owner.close(); Thread.sleep(100);

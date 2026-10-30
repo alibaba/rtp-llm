@@ -8,12 +8,14 @@ import java.nio.file.Path;
 import java.util.*;
 import org.flexlb.mock.api.model.Types.Role;
 import org.flexlb.mock.compute.*;
-import org.flexlb.mock.cache.DeviceCache.EvictionPolicy;
+import org.flexlb.mock.cache.KvCache.EvictionPolicy;
+import org.flexlb.mock.cache.KvCache.Watermark;
 import org.flexlb.mock.api.model.DecodeSpec;
 
 /** Native RTP names/units stay native; resolved pool capacity excludes the native null block. */
 public record RtpConfig(String id, Role role, int blockSize, int deviceBlocks, int reserveBlocks, EvictionPolicy evictionPolicy,
-                        boolean reuseCache, boolean deviceCache, boolean disableDecodeFirstReuse, int maxSeqLen, int maxBatchTokens,
+                        boolean reuseCache, boolean deviceCache, int hostBlocks, EvictionPolicy hostPolicy,
+                        Watermark deviceWatermark, Watermark hostWatermark, boolean disableDecodeFirstReuse, int maxSeqLen, int maxBatchTokens,
                         int maxGenerateBatchSize, int cpSize, boolean cpEnabled, int tpSize, int dpSize, int loadTimeoutMs,
                         JsonNode business, ComputeModel compute) {
     public static final int REQUEST_LIMIT = 1024;
@@ -24,10 +26,11 @@ public record RtpConfig(String id, Role role, int blockSize, int deviceBlocks, i
     public RtpConfig {
         if (id == null || id.isBlank() || (role != Role.prefill && role != Role.decode)
                 || blockSize < 1 || deviceBlocks < 1 || reserveBlocks < 0 || reserveBlocks > deviceBlocks
-                || maxSeqLen < 1 || maxBatchTokens < 0 || maxGenerateBatchSize < 1 || cpSize < 1 || tpSize < 1 || dpSize < 1 || loadTimeoutMs < 1)
+                || hostBlocks < 0 || maxSeqLen < 1 || maxBatchTokens < 0 || maxGenerateBatchSize < 1 || cpSize < 1 || tpSize < 1 || dpSize < 1 || loadTimeoutMs < 1)
             throw new IllegalArgumentException("Invalid RTP node configuration");
         business = business.deepCopy();
-        Objects.requireNonNull(evictionPolicy); Objects.requireNonNull(compute);
+        Objects.requireNonNull(evictionPolicy); Objects.requireNonNull(hostPolicy);
+        Objects.requireNonNull(deviceWatermark); Objects.requireNonNull(hostWatermark); Objects.requireNonNull(compute);
     }
 
     @Override public JsonNode business() { return business.deepCopy(); }
@@ -49,14 +52,14 @@ public record RtpConfig(String id, Role role, int blockSize, int deviceBlocks, i
         int blocks = nativeInt(config, "test_block_num", null, 2, Integer.MAX_VALUE) - 1;
         int ratio = nativeInt(config, "reserve_block_ratio", 5, 0, 100);
         int reserve = (int) ((long) blocks * ratio / 100);
-        for (String tier : List.of("enable_memory_cache", "enable_disk_cache", "enable_remote_cache"))
+        for (String tier : List.of("enable_disk_cache", "enable_remote_cache"))
             if (nativeBool(config, tier, false)) throw new IllegalArgumentException(tier + " is not connected in the RTP Mock yet");
-        var policyValue = config.get("device_eviction_policy");
-        EvictionPolicy policy;
-        try {
-            if (policyValue != null && !policyValue.isTextual()) throw new IllegalArgumentException("Expected a string");
-            policy = EvictionPolicy.valueOf(policyValue == null ? "LRU" : policyValue.textValue().toUpperCase(Locale.ROOT));
-        } catch (IllegalArgumentException error) { throw new IllegalArgumentException("Invalid device_eviction_policy: expected lru, lfu, or fifo", error); }
+        var policy = policy(config, "device_eviction_policy");
+        var hostPolicy = policy(config, "memory_eviction_policy");
+        boolean hostEnabled = nativeBool(config, "enable_memory_cache", false);
+        int hostBlocks = config.has("memory_cache_blocks")
+            ? nativeInt(config, "memory_cache_blocks", null, 1, Integer.MAX_VALUE) : 0;
+        if (hostEnabled && hostBlocks == 0) throw new IllegalArgumentException("enable_memory_cache requires memory_cache_blocks");
         int cpSize = nativeInt(config, "cp_size", 1, 1, Integer.MAX_VALUE);
         int tpSize = nativeInt(config, "tp_size", 1, 1, Integer.MAX_VALUE);
         int dpSize = nativeInt(config, "dp_size", 1, 1, Integer.MAX_VALUE);
@@ -73,6 +76,7 @@ public record RtpConfig(String id, Role role, int blockSize, int deviceBlocks, i
         return new RtpConfig(root.path("id").textValue(), role,
             nativeInt(config, "seq_size_per_block", null, 1, Integer.MAX_VALUE), blocks, reserve, policy,
             nativeBool(config, "reuse_cache", false), nativeBool(config, "enable_device_cache", true),
+            hostEnabled ? hostBlocks : 0, hostPolicy, watermark(config, "device", 0.82, 0.90), watermark(config, "memory", 0.90, 0.94),
             nativeBool(config, "disable_decode_first_malloc_device_reuse", false),
             nativeInt(config, "max_seq_len", null, 1, Integer.MAX_VALUE),
             nativeInt(config, "max_batch_tokens_size", 0, 0, Integer.MAX_VALUE),
@@ -91,7 +95,13 @@ public record RtpConfig(String id, Role role, int blockSize, int deviceBlocks, i
             .put("disable_decode_first_malloc_device_reuse", disableDecodeFirstReuse)
             .put("load_cache_timeout_ms", loadTimeoutMs).put("max_seq_len", maxSeqLen).put("max_batch_tokens_size", maxBatchTokens)
             .put("dp_size", dpSize).put("dp_rank", 0).put("tp_size", tpSize).put("cp_size", cpSize).put("cp_enabled", cpEnabled)
-            .put("enable_memory_cache", false).put("enable_disk_cache", false).put("enable_remote_cache", false);
+            .put("enable_memory_cache", hostBlocks > 0).put("memory_cache_blocks", hostBlocks)
+            .put("memory_eviction_policy", hostPolicy.name().toLowerCase(Locale.ROOT))
+            .put("block_tree_device_evict_low_watermark_ratio", deviceWatermark.low())
+            .put("block_tree_device_evict_high_watermark_ratio", deviceWatermark.high())
+            .put("block_tree_memory_evict_low_watermark_ratio", hostWatermark.low())
+            .put("block_tree_memory_evict_high_watermark_ratio", hostWatermark.high())
+            .put("enable_disk_cache", false).put("enable_remote_cache", false);
         if (role == Role.prefill) { result.remove("load_cache_timeout_ms"); result.put("prefill_retry_times", 0); }
         result.put("max_generate_batch_size", maxGenerateBatchSize).put("local_request_limit", REQUEST_LIMIT);
         result.set("requested_config", business()); result.set("pending_config", RtpSettings.pending(business));
@@ -99,6 +109,27 @@ public record RtpConfig(String id, Role role, int blockSize, int deviceBlocks, i
         return result;
     }
 
+    private static EvictionPolicy policy(JsonNode config, String key) {
+        var value = config.get(key);
+        try {
+            if (value != null && !value.isTextual()) throw new IllegalArgumentException();
+            return EvictionPolicy.valueOf(value == null ? "LRU" : value.textValue().toUpperCase(Locale.ROOT));
+        } catch (IllegalArgumentException error) {
+            throw new IllegalArgumentException("Invalid " + key + ": expected lru, lfu, or fifo", error);
+        }
+    }
+    private static Watermark watermark(JsonNode config, String tier, double low, double high) {
+        String prefix = "block_tree_" + tier + "_evict_";
+        return new Watermark(ratio(config, prefix + "low_watermark_ratio", low), ratio(config, prefix + "high_watermark_ratio", high));
+    }
+    private static double ratio(JsonNode config, String key, double fallback) {
+        if (!config.has(key)) return fallback;
+        var value = config.get(key);
+        try {
+            if (!value.isNumber() && !value.isTextual()) throw new NumberFormatException();
+            return Double.parseDouble(value.asText());
+        } catch (NumberFormatException error) { throw new IllegalArgumentException("Invalid " + key, error); }
+    }
     private static int loadTimeout(JsonNode config) {
         int value = nativeInt(config, "load_cache_timeout_ms", 5000, Integer.MIN_VALUE, Integer.MAX_VALUE);
         return value > 0 ? value : 5000;

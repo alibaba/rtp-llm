@@ -7,7 +7,7 @@ import io.grpc.*;
 import io.grpc.stub.StreamObserver;
 import io.grpc.netty.NettyServerBuilder;
 import java.net.InetSocketAddress;
-import org.flexlb.mock.cache.DeviceCache;
+import org.flexlb.mock.cache.KvCache;
 import java.nio.file.*;
 import java.util.*;
 import java.util.concurrent.*;
@@ -42,13 +42,13 @@ class PrefillTransferTest {
         while (!condition.getAsBoolean()) { if (System.nanoTime() >= end) fail("Condition timed out"); Thread.sleep(5); }
     }
     private static final class Harness implements AutoCloseable {
-        final DeviceCache cache;
+        final KvCache cache;
         final RtpRpcService service;
         final PrefillTransfer transfer;
         final Server server;
         final ManagedChannel channel;
         Harness(RtpConfig config) throws Exception {
-            cache = new DeviceCache(config.deviceBlocks(), config.reserveBlocks(), config.evictionPolicy());
+            cache = new KvCache(config.blockSize(), config.deviceBlocks(), config.reserveBlocks(), config.evictionPolicy());
             service = new RtpRpcService(config, cache, RtpScheduler.factory(config));
             transfer = (PrefillTransfer) service.transfer();
             var builder = NettyServerBuilder.forAddress(new InetSocketAddress("127.0.0.1", 0)).addService(service);
@@ -137,7 +137,9 @@ class PrefillTransferTest {
 
     @Test void loadCannotUseAnUnrelatedCachedPrefixOrMissingRequest() throws Exception {
         try (var p = node("prefill", 2, 1); var d = node("decode", 2, 1); var replies = new Replies<GenerateOutputsPB>()) {
-            p.cache.acquire(2, List.of()).lease().complete(PrefixKeys.completeBlocks(input(1, 5, 2000), 2));
+            try (var lease = p.cache.acquire(4, List.of()).lease()) {
+                lease.publish(PrefixKeys.completeBlocks(input(1, 5, 2000), 2), 4);
+            }
             var request = allocate(p, d, input(1, 5, 2000), replies); request.onNext(load(1)); replies.error(Status.Code.NOT_FOUND);
             assertEquals(16, d.status().getAvailableKvCache());
         }
