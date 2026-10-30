@@ -51,11 +51,7 @@ class ChunkedLogprobsTest(unittest.TestCase):
         self.addCleanup(self.session.close)
 
     def free_port(self):
-        # Shared-host /tmp may contain another user's private lock directory.
-        # Keep this fixture's port reservations in its writable artifact tree.
-        ports, locks = PortManager(
-            lock_dir=self.output_dir / "port_locks"
-        ).get_consecutive_ports(200)
+        ports, locks = PortManager().get_consecutive_ports(200)
         for lock in locks:
             self.port_locks.callback(lock.__exit__, None, None, None)
         return str(ports[0] + 100)

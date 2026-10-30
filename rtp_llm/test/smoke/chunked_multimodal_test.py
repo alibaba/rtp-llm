@@ -72,9 +72,7 @@ class ChunkedMultimodalTest(unittest.TestCase):
     def start_server(self, chunk_size, stack):
         devices = get_gpu_ids()
         self.assertTrue(devices, "the smoke test needs one reserved GPU")
-        ports, locks = PortManager(
-            lock_dir=self.output_dir / "port_locks"
-        ).get_consecutive_ports(200)
+        ports, locks = PortManager().get_consecutive_ports(200)
         for lock in locks:
             self.port_locks.callback(lock.__exit__, None, None, None)
         manager = MagaServerManager(

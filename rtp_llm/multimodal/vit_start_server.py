@@ -40,6 +40,29 @@ def vit_start_server(
     local_rank = engine_config.parallelism_config.local_rank
     setup_cuda_device_and_accl_env(local_rank)
 
+    manager = None
+    try:
+        if py_env_configs.model_args.model_type == "kimi_k3":
+            try:
+                from rtp_llm.utils.jit_cache_manager import start_from_config
+
+                manager = start_from_config(py_env_configs.jit_config)
+            except Exception:
+                logging.exception("JIT_CACHE_FAIL_OPEN: K3 ViT cache setup failed; cold start")
+        _serve_vit_model(
+            server_id, py_env_configs, engine_config, local_rank,
+            grpc_port, http_port, is_proxy_mode,
+        )
+    finally:
+        if manager:
+            manager.stop()
+
+
+def _serve_vit_model(
+    server_id, py_env_configs, engine_config, local_rank,
+    grpc_port, http_port, is_proxy_mode,
+):
+
     model_config = ModelFactory.create_model_config(
         model_args=py_env_configs.model_args,
         lora_config=py_env_configs.lora_config,
