@@ -165,6 +165,7 @@ message GenerateConfigPB {
     // Explicit target-prefill assertion. true requires max_new_tokens == 0 and cannot be combined with
     // return_prompt_logits. false/omitted does not change the legacy bare-zero behavior above.
     bool prefill_only = 76;
+    bool frontend_metric_streaming = 77;
 }
 
 message MMPreprocessConfigPB {
@@ -385,6 +386,24 @@ message GenerateOutputsPB {
     RpcErrorPB error_info = 9;
     // Advertised only by the Decode ALLOCATE response.
     bool supports_prefill_completion = 10;
+    bool frontend_metric_only = 11;
+    google.protobuf.Int64Value frontend_generate_token_num = 12;
+    google.protobuf.Int64Value frontend_context_token_num = 13;
+    google.protobuf.Int64Value frontend_context_token_num_with_cache = 14;
+    google.protobuf.Int64Value frontend_context_execute_time_us = 15;
+    google.protobuf.Int64Value frontend_context_execute_time_with_cache_us = 16;
+    google.protobuf.Int64Value frontend_generate_execute_time_us = 17;
+    google.protobuf.Int64Value frontend_input_len = 18;
+    google.protobuf.Int64Value frontend_output_len = 19;
+    google.protobuf.Int64Value frontend_speculative_verify_rounds = 20;
+    google.protobuf.Int64Value frontend_speculative_accepted_token_num = 21;
+    google.protobuf.Int64Value frontend_speculative_proposed_draft_tokens = 22;
+    repeated FrontendSpTpotSamplePB frontend_sp_tpot_samples = 23;
+}
+
+message FrontendSpTpotSamplePB {
+    uint64 sequence_id = 1;
+    double tpot_us = 2;
 }
 
 // return to python client

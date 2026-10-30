@@ -520,8 +520,8 @@ fastapi==0.115.6 \
     --hash=sha256:9ec46f7addc14ea472958a96aae5b5de65f39721a46aaf5705c480d9a8b76654 \
     --hash=sha256:e9240b29e36fa8f4bb7290316988e90c381e5092e0cbe84e7818cc3713bcf305
     # via -r internal_source/deps/../../open_source/deps/requirements_base.txt
-fastsafetensors==0.1.19rc5+ali ; platform_machine == "x86_64"  \
-    --hash=sha256:aafb2bc7492a5de970b03455e68b5c9e15034e5d31d86f4524523bee7d9ada29
+fastsafetensors @ https://artlab.alibaba-inc.com/1/pypi/simple/fastsafetensors/fastsafetensors-0.3.4.dev20260908%2Bali.fuseshm.gfb2c381b.aone70048596-cp310-cp310-linux_x86_64.whl ; platform_machine == "x86_64" \
+    --hash=sha256:02f69129d1af0678201b96278d840d4ec68b19d6a7fadad413b182b735583d80
     # via -r internal_source/deps/requirements_rocm.txt
 filelock==3.20.0 \
     --hash=sha256:339b4732ffda5cd79b13f4e2711a31b0365ce445d95d243bb996273d072546a2 \

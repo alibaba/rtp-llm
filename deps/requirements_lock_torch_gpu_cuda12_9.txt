@@ -715,15 +715,15 @@ exceptiongroup==1.3.0 \
 fast-hadamard-transform==1.0.4.post1 \
     --hash=sha256:a465dc40ecf271cb1ffda8d25623f2fd17f90b892effaf63108f5841ebba966a
     # via -r internal_source/deps/requirements_torch_gpu_cuda12_9.txt
-fast-safetensors==0.7.3+torch2.1.2.cu121 \
-    --hash=sha256:dd760931feb6dd585cc0b14b1bacf39c1e31a39bb9f8e12a8c62720caf1ccc1f
+fast-safetensors @ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/fast_safetensors-0.7.4.dev0%2Btorch2.8.0.cu129.aone67401633-cp310-cp310-linux_x86_64.whl \
+    --hash=sha256:cc40ec64c394a6c0ec0fa7b69996d533b757049c6e4ef24b9a85a50aa0833949
     # via -r internal_source/deps/requirements_torch_gpu_cuda12_9.txt
 fastapi==0.115.6 \
     --hash=sha256:9ec46f7addc14ea472958a96aae5b5de65f39721a46aaf5705c480d9a8b76654 \
     --hash=sha256:e9240b29e36fa8f4bb7290316988e90c381e5092e0cbe84e7818cc3713bcf305
     # via -r internal_source/deps/../../open_source/deps/requirements_base.txt
-fastsafetensors==0.1.19rc5+ali \
-    --hash=sha256:aafb2bc7492a5de970b03455e68b5c9e15034e5d31d86f4524523bee7d9ada29
+fastsafetensors @ https://artlab.alibaba-inc.com/1/pypi/simple/fastsafetensors/fastsafetensors-0.3.4.dev20260908%2Bali.fuseshm.gfb2c381b.aone70048596-cp310-cp310-linux_x86_64.whl \
+    --hash=sha256:02f69129d1af0678201b96278d840d4ec68b19d6a7fadad413b182b735583d80
     # via -r internal_source/deps/requirements_torch_gpu_cuda12_9.txt
 filelock==3.20.0 \
     --hash=sha256:339b4732ffda5cd79b13f4e2711a31b0365ce445d95d243bb996273d072546a2 \
@@ -3269,8 +3269,8 @@ rpds-py==0.30.0 \
     # via
     #   jsonschema
     #   referencing
-rtp-kernel==0.1.0+47e3c4a4.cu129 \
-    --hash=sha256:e4b8542538288cdf056baa9a50711cf81e8d0c56eb992ae2f93fb6c5006a47a5
+rtp-kernel @ https://artlab.alibaba-inc.com/1/pypi/rtp_llm/rtp-kernel/rtp_kernel-0.1.0%2Bbdafb874.cu129-cp310-cp310-linux_x86_64.whl \
+    --hash=sha256:482760ac1c2d7e029f1582b1d3bb7aaa316cf20a4dc7a873cdd11e45907f159a
     # via -r internal_source/deps/requirements_torch_gpu_cuda12_9.txt
 safetensors==0.5.3 \
     --hash=sha256:1077f3e94182d72618357b04b5ced540ceb71c8a813d3319f1aba448e68a770d \

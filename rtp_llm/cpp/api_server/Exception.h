@@ -96,7 +96,7 @@ public:
             tag_map["error_code"] = std::to_string(error_code);
             tag_map["priority"]   = "0";
             auto tags             = kmonitor::MetricsTags(tag_map);
-            metric_reporter->report(1, "py_rtp_framework_error_qps", kmonitor::MetricType::QPS, &tags, true);
+            reportKmonMetric(metric_reporter, 1, "py_rtp_framework_error_qps", kmonitor::MetricType::QPS, &tags);
         }
         RTP_LLM_LOG_WARNING("found exception: [%s]", e.what());
         AccessLogWrapper::logExceptionAccess(body, request_id, e.what());

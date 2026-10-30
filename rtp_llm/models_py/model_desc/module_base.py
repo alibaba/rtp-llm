@@ -61,9 +61,7 @@ class GptModelBase(nn.Module):
         self._mtp_aux_capture_layer_ids = tuple(
             config.capture_aux_hidden_layer_ids or ()
         )
-        self._mtp_aux_capture_layer_id_set = frozenset(
-            self._mtp_aux_capture_layer_ids
-        )
+        self._mtp_aux_capture_layer_id_set = frozenset(self._mtp_aux_capture_layer_ids)
         self._mtp_target_hidden_states: Optional[torch.Tensor] = None
         self._mtp_target_graph_buffer: Optional[torch.Tensor] = None
         self._mtp_target_prompt_buffer: Optional[torch.Tensor] = None
@@ -141,6 +139,7 @@ class GptModelBase(nn.Module):
                     weight=self.weight,
                     attn_inputs=group_inputs,
                     fmha_config=self.fmha_config,
+                    hw_kernel_config=self.py_hw_kernel_config,
                     is_cuda_graph=is_cuda_graph,
                     cuda_graph_selection_mode=cuda_graph_selection_mode,
                 )
@@ -152,6 +151,7 @@ class GptModelBase(nn.Module):
             weight=self.weight,
             attn_inputs=attention_inputs,
             fmha_config=self.fmha_config,
+            hw_kernel_config=self.py_hw_kernel_config,
             is_cuda_graph=is_cuda_graph,
             cuda_graph_selection_mode=cuda_graph_selection_mode,
         )
@@ -243,9 +243,7 @@ class GptModelBase(nn.Module):
             : self._mtp_aux_capture_rows
         ]
 
-    def get_mtp_target_hidden_states(
-        self, num_tokens: int
-    ) -> Optional[torch.Tensor]:
+    def get_mtp_target_hidden_states(self, num_tokens: int) -> Optional[torch.Tensor]:
         hidden = self._mtp_target_hidden_states
         if hidden is None:
             return None

@@ -505,5 +505,71 @@ class PipelineDecodeTest(unittest.TestCase):
         self.assertEqual(len(output_tokens_list), 1)
 
 
+class PipelineFrontendMetricsTest(unittest.IsolatedAsyncioTestCase):
+    async def test_private_observer_and_consumer_close(self):
+        import asyncio
+        from types import SimpleNamespace
+
+        closed = asyncio.Event()
+        captured = []
+        observed = []
+        output = GenerateOutputs(
+            generate_outputs=[
+                GenerateOutput(output_ids=torch.tensor([9]), finished=False)
+            ],
+            frontend_sp_tpot_samples=[(1, 2500.0)],
+        )
+
+        class Visitor:
+            async def enqueue(self, request):
+                captured.append(request)
+
+                async def stream():
+                    try:
+                        request.frontend_metric_observer(output, 1)
+                        yield output
+                        await asyncio.Event().wait()
+                    finally:
+                        closed.set()
+
+                return stream()
+
+        pipeline = Pipeline.__new__(Pipeline)
+        pipeline.tokenizer = MockTokenizer()
+        pipeline.backend_rpc_server_visitor = Visitor()
+        pipeline.decode_incremental_tokens = lambda *args, **kwargs: (
+            ["J"],
+            [1],
+            [],
+            [],
+            [],
+        )
+        config = GenerateConfig(is_streaming=True, aux_info=False)
+        stream = pipeline.generate_stream(
+            1,
+            [7, 8],
+            [],
+            config,
+            frontend_metric_tags={"priority": "80"},
+            frontend_metric_observer=observed.append,
+            frontend_metric_unit_id=3,
+            group_size=2,
+            group_id=1,
+        )
+        response = await stream.__anext__()
+        self.assertEqual(response.generate_texts, ["J"])
+        self.assertEqual(response.generate_outputs.frontend_sp_tpot_samples, [])
+        await stream.aclose()
+        self.assertTrue(closed.is_set())
+        self.assertFalse(config.frontend_metric_streaming)
+        self.assertFalse(config.aux_info)
+        self.assertTrue(captured[0].generate_config.frontend_metric_streaming)
+        self.assertTrue(captured[0].generate_config.aux_info)
+        self.assertEqual((captured[0].group_size, captured[0].group_id), (2, 1))
+        self.assertEqual(observed[0].frontend_sp_tpot_samples, [(1, 2500.0)])
+        self.assertEqual(observed[0]._frontend_metric_attempt, 1)
+        self.assertEqual(observed[0]._frontend_metric_unit_id, 3)
+
+
 if __name__ == "__main__":
     unittest.main()

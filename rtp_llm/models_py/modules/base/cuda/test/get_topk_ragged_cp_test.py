@@ -102,9 +102,8 @@ def _tp2_indexer_worker(rank: int, nccl_port: int) -> None:
         base_port = nccl_port + 11
         with patch.object(dist, "init_process_group", _init_process_group):
             with patch(
-                "rtp_llm.models_py.distributed.collective_torch.init_symm_mem_communicator",
+                "rtp_llm.models_py.distributed.symm_mem.init_symm_mem_communicator",
                 lambda *_args, **_kwargs: None,
-                create=True,
             ):
                 init_distributed_environment(
                     parallelism,

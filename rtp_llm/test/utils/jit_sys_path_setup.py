@@ -294,6 +294,12 @@ def _flashinfer_op_is_stale(op_dir: Path) -> bool:
         return True
     if any(not Path(path).exists() for path in include_paths):
         return True
+    # Ninja files survive changes to CC/CXX. FlashInfer reuses existing rules,
+    # so a removed toolchain must invalidate them just like a missing header.
+    compilers = re.findall(r"^\s*(?:cxx|nvcc)\s*=\s*(/\S+)", rules, re.MULTILINE)
+    compilers += re.findall(r"-ccbin(?:=|\s+)(/\S+)", rules)
+    if any(not Path(compiler).is_file() for compiler in compilers):
+        return True
     src_link = op_dir / "src"
     return src_link.is_symlink() and not src_link.exists()
 
@@ -321,15 +327,20 @@ def _evict_dangling_flashinfer_ops(workspace: Path) -> None:
     """
     started = time.monotonic()
     stale_candidates = []
-    # FlashInfer layout only: cached_ops/<op_name>/build.ninja. Scan that one
-    # directory directly instead of walking the workspace tree: the workspace
-    # root must never be treated as enumerable (a HOME-sized root once dragged
-    # the whole FUSE-mounted model library into this scan).
-    cached_ops_root = workspace / "cached_ops"
-    if cached_ops_root.is_dir():
-        for op_dir in sorted(cached_ops_root.iterdir()):
-            if (op_dir / "build.ninja").is_file() and _flashinfer_op_is_stale(op_dir):
-                stale_candidates.append(op_dir)
+    # Accept a resolved workspace as well as FLASHINFER_WORKSPACE_BASE.
+    # FlashInfer 0.6.x appends .cache/flashinfer/<version>/<arch>/cached_ops
+    # to the latter. Only inspect these fixed-depth layouts, never walk HOME.
+    cached_ops_roots = [workspace / "cached_ops"]
+    cached_ops_roots.extend(
+        (workspace / ".cache" / "flashinfer").glob("*/*/cached_ops")
+    )
+    for cached_ops_root in cached_ops_roots:
+        if cached_ops_root.is_dir():
+            for op_dir in sorted(cached_ops_root.iterdir()):
+                if (op_dir / "build.ninja").is_file() and _flashinfer_op_is_stale(
+                    op_dir
+                ):
+                    stale_candidates.append(op_dir)
     logging.info(
         f"[Package Setup] FlashInfer eviction scan found "
         f"{len(stale_candidates)} stale candidate(s) under {workspace}"

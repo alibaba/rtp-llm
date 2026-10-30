@@ -262,6 +262,13 @@ class Dsv4MoeConfigTest(unittest.TestCase):
                         num_max_tokens_per_rank=capacity
                     )
                     executor._mega_y = torch.empty(capacity, 1)
+                    for name in (
+                        "_shared_l1_w",
+                        "_shared_l1_sf",
+                        "_shared_l2_w",
+                        "_shared_l2_sf",
+                    ):
+                        setattr(executor, name, torch.empty(1))
                     executor._validate_capacity(expected_cap)
                     with self.assertRaisesRegex(RuntimeError, "exceeds"):
                         executor._validate_capacity(expected_cap + 1)
@@ -377,6 +384,13 @@ class Dsv4MoeConfigTest(unittest.TestCase):
                         num_max_tokens_per_rank=expected
                     )
                     executor._mega_y = torch.empty(expected, 1)
+                    for name in (
+                        "_shared_l1_w",
+                        "_shared_l1_sf",
+                        "_shared_l2_w",
+                        "_shared_l2_sf",
+                    ):
+                        setattr(executor, name, torch.empty(1))
                     executor._validate_capacity(expected)
                     with self.assertRaisesRegex(RuntimeError, "exceeds"):
                         executor._validate_capacity(expected + 1)

@@ -3,7 +3,7 @@ auto_gptq
 autoawq
 apache-tvm-ffi<0.2,>=0.1.6
 fast-safetensors==0.7.3+torch2.1.2.cu121
-fastsafetensors==0.1.19rc5+ali
+fastsafetensors @ https://artlab.alibaba-inc.com/1/pypi/simple/fastsafetensors/fastsafetensors-0.3.4.dev20260908%2Bali.fuseshm.gfb2c381b.aone70048596-cp310-cp310-linux_x86_64.whl
 tensorrt-cu12-libs==10.3.0
 datasets==3.1.0
 flash-attn==2.7.4.post1 ; platform_machine == "x86_64"

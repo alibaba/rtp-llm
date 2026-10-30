@@ -4,8 +4,8 @@ autoawq
 apache-tvm-ffi
 opentelemetry-sdk==1.44.0
 opentelemetry-exporter-otlp-proto-http==1.15.0
-fast-safetensors==0.7.3+torch2.1.2.cu121
-fastsafetensors==0.1.19rc5+ali
+fast-safetensors @ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/fast_safetensors-0.7.4.dev0%2Btorch2.8.0.cu129.aone67401633-cp310-cp310-linux_x86_64.whl
+fastsafetensors @ https://artlab.alibaba-inc.com/1/pypi/simple/fastsafetensors/fastsafetensors-0.3.4.dev20260908%2Bali.fuseshm.gfb2c381b.aone70048596-cp310-cp310-linux_x86_64.whl
 tensorrt-cu12-libs==10.3.0
 flash-attn==2.8.3
 flash-attn-3==3.0.0b1
@@ -20,7 +20,7 @@ flash-mla==1.0.0+fcaae18.cu129
 fast-hadamard-transform==1.0.4.post1
 nvidia-cutlass-dsl==4.4.2
 nvidia-cutlass-dsl-libs-base==4.4.2
-rtp-kernel==0.1.0+47e3c4a4.cu129
+rtp-kernel @ https://artlab.alibaba-inc.com/1/pypi/rtp_llm/rtp-kernel/rtp_kernel-0.1.0%2Bbdafb874.cu129-cp310-cp310-linux_x86_64.whl
 mysql-connector-python
 tensorrt==10.3.0 ; platform_machine == "x86_64"
 tensorrt-cu12-bindings==10.3.0 ; platform_machine == "x86_64"

@@ -2,6 +2,7 @@
 
 #include "autil/Log.h"
 #include "kmonitor/client/MetricsReporter.h"
+#include "rtp_llm/cpp/metrics/ServiceStatus.h"
 #include <chrono>
 #include <cstdint>
 #include <thread>

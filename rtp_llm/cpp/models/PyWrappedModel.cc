@@ -163,8 +163,16 @@ torch::Tensor PyWrappedModel::getMtpLastHiddenStates(int64_t num_tokens) {
         return torch::Tensor();
     }
     py::gil_scoped_acquire gil;
-    if (!py::hasattr(py_model_, "get_mtp_last_hidden_states")) {
-        return torch::Tensor();
+    if (!has_py_mtp_last_hidden_getter_) {
+        if (!cp_mtp_last_hidden_states_.defined()) {
+            return torch::Tensor();
+        }
+        const auto rows = num_tokens < 0 ? cp_mtp_last_hidden_states_.size(0) : num_tokens;
+        RTP_LLM_CHECK_WITH_INFO(rows <= cp_mtp_last_hidden_states_.size(0),
+                                "requested %ld CP MTP last-hidden rows from %ld retained rows",
+                                rows,
+                                cp_mtp_last_hidden_states_.size(0));
+        return cp_mtp_last_hidden_states_.narrow(0, 0, rows);
     }
     py::object result = py_model_.attr("get_mtp_last_hidden_states")(num_tokens);
     return result.is_none() ? torch::Tensor() : result.cast<torch::Tensor>();
@@ -172,6 +180,16 @@ torch::Tensor PyWrappedModel::getMtpLastHiddenStates(int64_t num_tokens) {
 
 bool PyWrappedModel::hasMtpTargetHiddenBuffer() const {
     return has_mtp_hidden_buffer_;
+}
+
+void PyWrappedModel::loadMtpIndexerTopk(const torch::Tensor& topk) {
+    py::gil_scoped_acquire gil;
+    py_model_.attr("load_mtp_indexer_topk")(topk);
+}
+
+torch::Tensor PyWrappedModel::snapshotMtpIndexerTopk(int64_t batch_size) {
+    py::gil_scoped_acquire gil;
+    return py_model_.attr("snapshot_mtp_indexer_topk")(batch_size).cast<torch::Tensor>();
 }
 
 PyWrappedModel::~PyWrappedModel() {
@@ -272,6 +290,7 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
     }
     py_attn_inputs.prefix_lengths_device = to_device_i32(py_attn_inputs.prefix_lengths);
     py_attn_inputs.input_lengths_device  = to_device_i32(py_attn_inputs.input_lengths);
+    py_attn_inputs.mtp_indexer_seed_rows = to_device_i32(inputs.lm_output_indexes);
 
     if (inputs.combo_position_ids.defined()) {
         py_attn_inputs.combo_position_ids = tensorHoldHostAndToCuda(inputs.combo_position_ids);
@@ -284,6 +303,7 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
     py_attn_inputs.dtype            = dataTypeToTorchType(description_.data_type);
     py_attn_inputs.is_prefill       = !decode_batch_size;
     py_attn_inputs.is_target_verify = inputs.is_target_verify;
+    py_attn_inputs.is_draft_extend  = inputs.is_draft_extend;
     RTP_LLM_CHECK_WITH_INFO(
         context_batch_size + decode_batch_size == batch_size,
         "batch size check failed context_batch_size[%ld] decode_batch_size[%ld] total_batch_size[%ld]",
@@ -1005,6 +1025,7 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
     if (hidden_state_capture_publisher_) {
         hidden_state_capture_publisher_->beginForward();
     }
+    cp_mtp_last_hidden_states_ = torch::Tensor();
     DevicePerfWrapper wrapper(enable_device_perf_, "py model forward");
     holdInputsHostBuffers(inputs);
     const bool capture_hidden_states = shouldCaptureHiddenStates(inputs);
@@ -1114,6 +1135,9 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         }
         const bool can_run_graph = !capture_hidden_states && enable_cuda_graph_ && graph_runner != nullptr
                                    && graph_runner->canRun(py_model_inputs, graph_state);
+        // The eager Python instance retains this wrapper's SEED/REUSE role and
+        // shares its request-local TopK buffer with the graph clones. Batches
+        // outside the captured buckets must use that same role eagerly.
         if (!capture_hidden_states && is_generation_prefill_runner && !can_run_graph) {
             generation_prefill_cuda_graph_status =
                 graph_state.generation_prefill_status == GenerationPrefillCudaGraphStatus::NOT_REQUESTED ?
@@ -1234,10 +1258,21 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         if (device_props_.enable_prefill_cp && has_context_request) {
             if (!inputs.need_all_logits && !inputs.need_all_hidden_states) {
                 context_parallel_processor_->handleOutputsLastHidden(hidden_states, inputs, cp_params);
+                if (has_mtp_hidden_buffer_ && !has_py_mtp_last_hidden_getter_) {
+                    cp_mtp_last_hidden_states_ = hidden_states;
+                }
                 return with_generation_prefill_cuda_graph_status(
                     attach_mtp_target_hidden_states(forwardPostLayersLastHidden(hidden_states, inputs)));
             }
             size_t num_valid_tokens = context_parallel_processor_->handleOutputs(hidden_states, inputs, cp_params);
+            if (has_mtp_hidden_buffer_ && !has_py_mtp_last_hidden_getter_) {
+                // Prompt-logit requests restore all rows, but the following
+                // MTP step still needs this batch's per-request last rows.
+                buffer_holder_.hold_host(inputs.lm_output_indexes);
+                auto indexes =
+                    inputs.lm_output_indexes.to(hidden_states.options().dtype(torch::kLong), /*non_blocking=*/true);
+                cp_mtp_last_hidden_states_ = hidden_states.index_select(0, indexes);
+            }
             return with_generation_prefill_cuda_graph_status(
                 attach_mtp_target_hidden_states(callForwardPostLayers(hidden_states, inputs, true, num_valid_tokens)));
         }

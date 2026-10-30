@@ -37,6 +37,7 @@ from rtp_llm.distribute.distributed_server import (
 from rtp_llm.embedding.embedding_type import TYPE_STR, EmbeddingType
 from rtp_llm.frontend.frontend_server import FrontendServer
 from rtp_llm.frontend.shutdown_manager import FrontendShutdownManager
+from rtp_llm.metrics import kmonitor
 from rtp_llm.openai.api_datatype import (
     BatchChatCompletionRequest,
     ChatCompletionRequest,
@@ -535,6 +536,7 @@ class FrontendApp(object):
         except BaseException as e:
             raise e
         finally:
+            kmonitor.set_serving(False)
             # bounded flush; drops remaining spans past the deadline (fail-open)
             shutdown_telemetry()
 
@@ -586,6 +588,7 @@ class FrontendApp(object):
                     self.frontend_server._global_controller.max_concurrency * 2
                 )
             )
+            kmonitor.start_serving_when_ready()
 
         def draining_response():
             reason = (

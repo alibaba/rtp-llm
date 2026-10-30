@@ -27,9 +27,11 @@ enum class ModelInputsModelRole;
 class ModelInputsLogger;
 
 struct MtpMetricsCollector {
-    RtpLLMExecutorMetricsCollector          executor_collector;
-    RtpLLMTokenPSMetricsCollector           tps_collector;
-    RtpLLMSpeculativeEngineMetricsCollector sp_engine_collector;
+    std::unique_ptr<FrontendMetricsStep<GenerateStreamPtr>> frontend_prefill_step;
+    std::unique_ptr<FrontendMetricsStep<GenerateStreamPtr>> frontend_decode_step;
+    RtpLLMExecutorMetricsCollector                          executor_collector;
+    RtpLLMTokenPSMetricsCollector                           tps_collector;
+    RtpLLMSpeculativeEngineMetricsCollector                 sp_engine_collector;
 
     // Accepted decode tokens bucketed by stream priority; the bucket sums add
     // up exactly to sp_engine_collector.total_accepted_token_num.
@@ -93,10 +95,10 @@ public:
                                                              bool drop_broad_sync,
                                                              bool linear_attention,
                                                              bool cache_snapshot_ready = false);
-    static int selectMtpPreviousSeqLenUpperBound(bool pending, int previous_next_bound, int host_seq_len);
+    static int               selectMtpPreviousSeqLenUpperBound(bool pending, int previous_next_bound, int host_seq_len);
 
 protected:
-    static bool dsparkPrefillCPRoleIsValid(const PrefillCPConfig& prefill_cp_config, RoleType role_type);
+    static bool speculativePrefillCPRoleIsValid(const PrefillCPConfig& prefill_cp_config, RoleType role_type);
     static bool dsparkDraftGraphAllowed(bool is_dspark, RoleType role_type);
     struct AcceptLenMetricsSnapshot {
         int64_t total_accept_len        = 0;
@@ -281,6 +283,9 @@ private:
     // post-verify prefill roles; DSpARK supplies propose and commit construction
     // parameters to the same two slots.
     std::shared_ptr<ModelBase>                       draft_model_;
+    std::shared_ptr<ModelBase>                       seed_decode_draft_model_;
+    bool                                             mtp_indexer_share_enabled_ = false;
+    int64_t                                          mtp_indexer_topk_          = 0;
     std::shared_ptr<ModelBase>                       sp_prefill_draft_model_;
     std::unique_ptr<speculative::SpeculativeSampler> speculative_sampler_;
     std::unique_ptr<speculative::FastTopKSampler>    fast_topk_sampler_;
@@ -319,8 +324,8 @@ private:
     // stream + thread and runs D2H/specUpdate/KV release off the main thread.
     AsyncRunner spec_bookkeeping_runner_;
 
-    torch::Stream dspark_cache_store_sync_stream_;
-    torch::Tensor dspark_cache_store_status_;
+    torch::Stream             dspark_cache_store_sync_stream_;
+    torch::Tensor             dspark_cache_store_status_;
     std::function<bool(bool)> dspark_cache_store_status_reducer_for_test_;
 };
 }  // namespace rtp_llm

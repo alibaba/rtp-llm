@@ -661,15 +661,15 @@ exceptiongroup==1.3.1 \
     --hash=sha256:8b412432c6055b0b7d14c310000ae93352ed6754f70fa8f7c34141f91c4e3219 \
     --hash=sha256:a7a39a3bd276781e98394987d3a5701d0c4edffb633bb7a5144577f82c773598
     # via anyio
-fast-safetensors==0.7.3+torch2.11.cu130 \
-    --hash=sha256:46355b2e6b138248677f5306060a3eee5d05d9baf1d9c026ef069c84b2ea5a99
+fast-safetensors @ https://artlab.alibaba-inc.com/1/pypi/simple/fast-safetensors/fast_safetensors-0.7.4.dev0%2Btorch2.11.0.cu130.aone67401633-cp310-cp310-linux_aarch64.whl \
+    --hash=sha256:2b02e66535be51217b78e741e06467edb75e7e65dab9da2ade4bc3e7340df941
     # via -r internal_source/deps/requirements_cuda13_arm.txt
 fastapi==0.115.6 \
     --hash=sha256:9ec46f7addc14ea472958a96aae5b5de65f39721a46aaf5705c480d9a8b76654 \
     --hash=sha256:e9240b29e36fa8f4bb7290316988e90c381e5092e0cbe84e7818cc3713bcf305
     # via -r deps/requirements_base.txt
-fastsafetensors==0.1.20+ali \
-    --hash=sha256:c2a9945c4a11a4b8afa8eafe20d51aaf5b77ab1bfe6decd66d2c65396a213605
+fastsafetensors @ https://artlab.alibaba-inc.com/1/pypi/simple/fastsafetensors/fastsafetensors-0.3.4.dev20260908%2Bali.fuseshm.gfb2c381b.aone70048596-cp310-cp310-linux_aarch64.whl \
+    --hash=sha256:bb5cd2b7b29fa62525ce28e994d6c74837b4d3a9188f703a56e621d914f2eeb1
     # via -r internal_source/deps/requirements_cuda13_arm.txt
 filelock==3.32.0 \
     --hash=sha256:7be2ad23a14607ccc71808e68fe30848aeace7058ace17852f68e2a68e310402 \
@@ -685,14 +685,12 @@ flash-mla==1.0.0+2e5429f \
 flash-mla-legacy==1.0.0+92fd68b.rtp1 \
     --hash=sha256:9a0d330ee0875d7bbca8772f7467a561c31627583373c1d5c06c7e183810ec7a
     # via -r internal_source/deps/requirements_cuda13_arm.txt
-flashinfer-cubin==0.6.9+8c4f4dcf \
-    --hash=sha256:6e4a9132f5096b7a6d7904a90efd90a90573c365e5250237bc37f1812ab15b9f
+flashinfer-cubin==0.6.11 \
+    --hash=sha256:f472c055978fe99e36b8aad9ca031cccdfec9e1bb556800f7bc107ddb314f9e2
     # via -r internal_source/deps/requirements_cuda13_arm.txt
-flashinfer-python==0.6.9+8c4f4dcf \
-    --hash=sha256:80b268711c20b00ff3271953a4c7c7574fe2adb69994792c78e2f6fa026a66d4
-    # via
-    #   -r internal_source/deps/requirements_cuda13_arm.txt
-    #   rtp-kernel
+flashinfer-python==0.6.9 \
+    --hash=sha256:46d013119ecd039a5844c4847325b3571f99cdd8fd9e00839bf008c67b15811a
+    # via rtp-kernel
 fonttools==4.63.0 \
     --hash=sha256:032038247a96c1690f9f31e377c389383c902531b085aa4e4dabd6f57f870e69 \
     --hash=sha256:063e08bd17bd5a90127a14123de0d6a952dbc847695fd98b63c043d58057f90c \
@@ -2224,22 +2222,20 @@ nvidia-cusparselt-cu13==0.8.0 \
     --hash=sha256:400c6ed1cf6780fc6efedd64ec9f1345871767e6a1a0a552a1ea0578117ea77c \
     --hash=sha256:e80212ed7b1afc97102fbb2b5c82487aa73f6a0edfa6d26c5a152593e520bb8f
     # via torch
-nvidia-cutlass-dsl==4.5.3 \
-    --hash=sha256:c14ca121c2a4ce53ca4d5ee5d939e4181b97054b55ea7bb84aa9f99b98960060
+nvidia-cutlass-dsl==4.5.0 \
+    --hash=sha256:3b051fe02ca69422ab840e64d9865667aba288a3984a7ca4ccd038a82aef1344
     # via flashinfer-python
-nvidia-cutlass-dsl-libs-base==4.5.3 \
-    --hash=sha256:1bea2f2e5312a97a850be4bfe73ab0689861fa6f81888ad2abe47172f96afd1d \
-    --hash=sha256:224ceed6db71b632b318c19bea52f1d0efdafc321dbe4159a7508f93abe8c694 \
-    --hash=sha256:5516d76454f04f381111187b180bfa8651b4829e169b8283eeac8e794285d529 \
-    --hash=sha256:5d29ff10d723f4525da8777ba668b107a0879b895fe2a11f1d60b555ec0a1c7c \
-    --hash=sha256:83070630bd0bab18a2fd4ef3c57632e11628c0e930fbf2aa070a3509a32a1079 \
-    --hash=sha256:acf61f778e1c26326407bb5aa2e92a236e0abe9a41abf2ae71222d90593f4b1d \
-    --hash=sha256:b36ba3ae4d5d9b0b1dc55f47d1939d2d4262d8eaad188aa675e366d4c58011cc \
-    --hash=sha256:b5b5229c4ac9508b5f5554de62f35cfa162dadbd806a3dad4affb34775eb2a89 \
-    --hash=sha256:d0e524fc5fe8901479571af6d4b8fcf14277cc2c61b791b287a7762e6c9f7a90 \
-    --hash=sha256:ef820069ee6fa79832a30efd3ba99f6bf289cf48a942f78119361710f3c0e0d1 \
-    --hash=sha256:f788a83c4c6f62bca9ba01fced55b8899663cdd61eac0fea09e8aa8e1a5b4294 \
-    --hash=sha256:feab418814e6973c57ca64b021e9147002d4fb13c9c745d390d232435991d8de
+nvidia-cutlass-dsl-libs-base==4.5.0 \
+    --hash=sha256:0a60dfce3349984315306ef719ed1edf0e225527158f26019a5cf266e06cc45d \
+    --hash=sha256:2e121b20f0a48122c9b48227d00a7d681189e1de2fd4d211f9661a4e1658f066 \
+    --hash=sha256:3f7c133d31fa82ae7db697fd6943a5f9a2c97c8a40ee1056c67ef29fe00974d8 \
+    --hash=sha256:5cfdf52bea8feede5e512a094484956693cb87adaafa310991d2876653b1a88e \
+    --hash=sha256:7bb6de91b00a2b392cd834fec174a1461bf0f10a9b6d28086c8f4885aed27218 \
+    --hash=sha256:8e58b016da5bb09bd1d809d0c025433edb36b279adfbcd107e96361b214bd8bc \
+    --hash=sha256:90a4d802a03963fa36eb287fbc9b40a1374590fc7e8cc1b9673dee8872f75713 \
+    --hash=sha256:bd18322d9247f8c033a10ed4e519c4985ca6b4fb578ade382e5a264422ebd915 \
+    --hash=sha256:c78b18f2b44ca10a91bc76380ebd65bb7b86aa97a9330bae9b73eb0a1bc51d55 \
+    --hash=sha256:f8635ad1e0a670323cc729f167067fa880cb56577ec2e79afb80a35ab371912e
     # via nvidia-cutlass-dsl
 nvidia-ml-py==13.610.43 \
     --hash=sha256:65437eb73d68d0c62c931ca4d45038472faff03bd0b8729abba4b899f70d60f2 \
@@ -4407,3 +4403,11 @@ zstandard==0.25.0 \
     --hash=sha256:fd7a5004eb1980d3cefe26b2685bcb0b17989901a70a1040d1ac86f1d898c551 \
     --hash=sha256:ffef5a74088f1e09947aecf91011136665152e0b4b359c42be3373897fb39b01
     # via -r deps/requirements_base.txt
+
+av==16.1.0 \
+    --hash=sha256:6cbac833092e66b6b0ac4d81ab077970b8ca874951e9c3974d41d922aaa653ed
+    # via -r internal_source/deps/requirements_cuda13_arm.txt
+
+fast-hadamard-transform @ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/fast_hadamard_transform-1.0.4.post1-cp310-cp310-linux_aarch64.whl \
+    --hash=sha256:b778ac8445b5257ded89c4e8612cd9ac650f446cdf0408e5fdb4319be0c78706
+    # via -r internal_source/deps/requirements_cuda13_arm.txt

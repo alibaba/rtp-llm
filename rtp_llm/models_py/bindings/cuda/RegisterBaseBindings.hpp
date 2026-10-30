@@ -22,6 +22,7 @@
 #include "rtp_llm/models_py/bindings/cuda/kernels/dsv4_persistent_topk.h"
 #ifndef USE_PPU
 #include "rtp_llm/models_py/bindings/cuda/kernels/topk_v3.h"
+#include "rtp_llm/models_py/bindings/cuda/kernels/topk_v3_tie_break.h"
 #endif
 #include "rtp_llm/models_py/bindings/cuda/kernels/dsv4_top_k_per_row_prefill.h"
 #include "rtp_llm/models_py/bindings/cuda/kernels/deepselect_bf16.h"
@@ -250,6 +251,16 @@ void registerBasicCudaOps(py::module& rtp_ops_m) {
                   py::arg("workspace"),
                   py::arg("k"),
                   py::arg("max_seq_len"));
+    rtp_ops_m.def("topk_v3_tie_break",
+                  &topk_v3_tie_break,
+                  "GLM5 prefill stable ragged radix-select TopK",
+                  py::arg("scores"),
+                  py::arg("row_starts"),
+                  py::arg("row_ends"),
+                  py::arg("output"),
+                  py::arg("k"),
+                  py::arg("max_seq_len"));
+
 #endif  // !USE_PPU
 
     // Vendored from vLLM (csrc/sampler.cu::top_k_per_row_prefill).
@@ -299,6 +310,17 @@ void registerBasicCudaOps(py::module& rtp_ops_m) {
                   py::arg("seq_lens"),
                   py::arg("workspace_starts"),
                   py::arg("batch_size"));
+
+    rtp_ops_m.def("cp_gather_and_upconvert_fp8_kv_cache_v2",
+                  &rtp_llm::cp_gather_and_upconvert_fp8_kv_cache_v2,
+                  "Gather and upconvert FP8 KV cache to fused BF16 [total_tokens, 576] (vectorized v3)",
+                  py::arg("src_cache"),
+                  py::arg("dst_fused"),
+                  py::arg("block_table"),
+                  py::arg("seq_lens"),
+                  py::arg("workspace_starts"),
+                  py::arg("batch_size"),
+                  py::arg("total_tokens"));
 
     rtp_ops_m.def("concat_and_cache_mla",
                   &rtp_llm::concat_and_cache_mla,

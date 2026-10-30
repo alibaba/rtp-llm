@@ -1,6 +1,6 @@
 -r requirements_base.txt
 fast-safetensors==0.7.3+torch2.1.2.rocm ; platform_machine == "x86_64"
-fastsafetensors==0.1.19rc5+ali ; platform_machine == "x86_64"
+fastsafetensors @ https://artlab.alibaba-inc.com/1/pypi/simple/fastsafetensors/fastsafetensors-0.3.4.dev20260908%2Bali.fuseshm.gfb2c381b.aone70048596-cp310-cp310-linux_x86_64.whl ; platform_machine == "x86_64"
 torch==2.9.1+git7e1940d
 torchvision==0.24.0+rocm7.2.0.gitb919bd0c
 triton==3.8.0+amd.rocm7.2.0.git111ff227

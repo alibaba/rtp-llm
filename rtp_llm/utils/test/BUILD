@@ -286,3 +286,9 @@ py_test(
     # Exercise the same lightweight entrypoint used by the PPU model target.
     data = ["//rtp_llm/models_py:ppu_entrypoint"],
 )
+
+py_test(
+    name = "dsa_indexing_test",
+    srcs = ["dsa_indexing_test.py"],
+    data = ["//rtp_llm:utils/dsa_indexing.py"],
+)

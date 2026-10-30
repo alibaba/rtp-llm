@@ -1,13 +1,12 @@
 # CUDA 13 / aarch64 (GB200 / GB300) dep set.
 # Matches the x86 cuda13 pattern: only self-built wheels against torch 2.11+cu130.
-# Packages that link libcudart.so.12 (flash_attn, fast_hadamard,
-# nvidia_cutlass_dsl) are deferred.
+# FlashAttention wheels remain deferred.
 -r requirements_base.txt
 torch==2.11.0+cu130
 torchvision==0.26.0+cu130
 mysql-connector-python
-flashinfer-python==0.6.9+8c4f4dcf
-flashinfer-cubin==0.6.9+8c4f4dcf
+flashinfer-python==0.6.9
+flashinfer-cubin==0.6.11
 
 # Self-built wheels against torch 2.11+cu130; SHAs encoded in filename.
 deep-gemm==2.8.1+057ca59
@@ -22,8 +21,8 @@ deep-ep==2.1.0+a56d615
 rtp-kernel==0.1.0+94fd20eb.cu132
 
 # fastsafetensors / fast_safetensors rebuilt against torch 2.11+cu130
-fastsafetensors==0.1.20+ali
-fast-safetensors==0.7.3+torch2.11.cu130
+fastsafetensors @ https://artlab.alibaba-inc.com/1/pypi/simple/fastsafetensors/fastsafetensors-0.3.4.dev20260908%2Bali.fuseshm.gfb2c381b.aone70048596-cp310-cp310-linux_aarch64.whl
+fast-safetensors @ https://artlab.alibaba-inc.com/1/pypi/simple/fast-safetensors/fast_safetensors-0.7.4.dev0%2Btorch2.11.0.cu130.aone67401633-cp310-cp310-linux_aarch64.whl
 
 # TileLang 0.1.15 requires the TVM FFI 0.1.11/0.1.12 ABI.
 tilelang==0.1.15+cuda.gita35f8ddf
@@ -34,4 +33,9 @@ tile-kernels==0.1.dev0+ali.git36d9e45
 safetensors==0.7.0
 tabulate==0.9.0
 
-# flash_attn / flash_attn_3 / fast_hadamard / nvidia_cutlass_dsl are deferred.
+av==16.1.0
+
+fast-hadamard-transform @ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/fast_hadamard_transform-1.0.4.post1-cp310-cp310-linux_aarch64.whl
+
+nvidia-cutlass-dsl==4.5.0
+nvidia-cutlass-dsl-libs-base==4.5.0

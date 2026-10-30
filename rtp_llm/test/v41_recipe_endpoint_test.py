@@ -17,6 +17,7 @@ from rtp_llm.config.py_config_modules import (
     PyEnvConfigs,
     RenderConfig,
 )
+from rtp_llm.frontend.frontend_request_metrics import FrontendRequestMetrics
 from rtp_llm.frontend.frontend_server import FrontendServer
 from rtp_llm.multimodal.multimodal_mixins.deepseek_v41.deepseek_v41_processor import (
     IMAGE_PLACEHOLDER,
@@ -243,6 +244,9 @@ class EndpointAsyncPreparationTest(unittest.IsolatedAsyncioTestCase):
         renderer.tokenizer = ImageTokenizer()
         endpoint = make_endpoint(renderer)
         server = FrontendServer.__new__(FrontendServer)
+        server._metric_sources = set()
+        server._request_metrics = FrontendRequestMetrics(enabled=False)
+        self.addCleanup(server._request_metrics.close)
         server._openai_endpoint = endpoint
         server._frontend_worker = SimpleNamespace(
             is_streaming=lambda req: req.get("stream", False)
