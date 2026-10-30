@@ -255,7 +255,12 @@ def modify_bazel_wrapper_pythonpath(wrapper_path):
 
 
 def bootstrap_remote_jit_dir():
-    remote = os.environ.get("REMOTE_JIT_DIR", "").strip()
+    # Expand $VAR references the same way the server arg parser does: this
+    # wrapper runs before the test and owns the only chance to bootstrap the
+    # directory and hand child processes a normalized absolute path. A literal
+    # "$VAR/..." is not POSIX-absolute, so without expansion every $VAR-form
+    # REMOTE_JIT_DIR is refused here and silently dropped for the server.
+    remote = os.path.expandvars(os.environ.get("REMOTE_JIT_DIR", "")).strip()
     if not remote or urlparse(remote).scheme:
         return
     try:
