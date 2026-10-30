@@ -241,7 +241,11 @@ cc_library(
         "//rtp_llm/models_py/bindings/cuda/kernels:push_reduce_scatter",
         ":cuda_bindings_base",
         ":cuda_attn_bindings_base",
-    ],
+    ] + select({
+        "@//:using_cuda13_x86": ["//rtp_llm/models_py/bindings/cuda/kernels:attn_res"],
+        "@//:using_cuda13_arm": ["//rtp_llm/models_py/bindings/cuda/kernels:attn_res"],
+        "//conditions:default": [],
+    }),
     visibility = ["//visibility:public"],
     alwayslink = 1,
 )
