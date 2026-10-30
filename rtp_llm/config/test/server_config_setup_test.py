@@ -109,6 +109,40 @@ class KVCacheEventHostIdentityTest(TestCase):
 
         self.assertEqual(py_env_configs.kv_cache_config.kv_cache_event_host_ip_port, "")
 
+    def test_remote_control_derives_identity_when_hbm_events_are_disabled(self):
+        configs = self._dp_publisher_configs()
+        configs.kv_cache_config.kv_cache_event_publisher_type = "none"
+        configs.kv_cache_config.enable_remote_cache = True
+        configure_kv_cache_event_host_ip_port(configs)
+        self.assertEqual(
+            configs.kv_cache_config.kv_cache_event_host_ip_port, "10.0.0.8:20027"
+        )
+
+    def test_remote_control_preserves_explicit_identity(self):
+        configs = self._dp_publisher_configs()
+        configs.kv_cache_config.kv_cache_event_publisher_type = "none"
+        configs.kv_cache_config.enable_remote_cache = True
+        configs.kv_cache_config.kv_cache_event_host_ip_port = "replica-1:19000"
+        configure_kv_cache_event_host_ip_port(configs)
+        self.assertEqual(
+            configs.kv_cache_config.kv_cache_event_host_ip_port, "replica-1:19000"
+        )
+
+    def test_disabled_remote_and_hbm_events_do_not_derive_identity(self):
+        configs = self._dp_publisher_configs()
+        configs.kv_cache_config.kv_cache_event_publisher_type = "none"
+        configs.kv_cache_config.enable_remote_cache = False
+        configure_kv_cache_event_host_ip_port(configs)
+        self.assertEqual(configs.kv_cache_config.kv_cache_event_host_ip_port, "")
+
+    def test_remote_control_does_not_derive_identity_on_nonzero_tp_rank(self):
+        configs = self._dp_publisher_configs()
+        configs.kv_cache_config.kv_cache_event_publisher_type = "none"
+        configs.kv_cache_config.enable_remote_cache = True
+        configs.parallelism_config.tp_rank = 1
+        configure_kv_cache_event_host_ip_port(configs)
+        self.assertEqual(configs.kv_cache_config.kv_cache_event_host_ip_port, "")
+
 
 class SingleGpuBackendRankTest(TestCase):
     def _start_rank(self, tp_size: int, dp_size: int, world_rank: int):

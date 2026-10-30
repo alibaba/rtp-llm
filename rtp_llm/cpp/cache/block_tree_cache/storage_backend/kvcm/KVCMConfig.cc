@@ -1,5 +1,7 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/KVCMConfig.h"
 
+#include <utility>
+
 using namespace autil::legacy;
 
 namespace rtp_llm {
@@ -202,6 +204,36 @@ void MetaChannelConfig::Jsonize(Jsonizable::JsonWrapper& json) {
     json.Jsonize("retry_time", retry_time_, retry_time_);
     json.Jsonize("connection_timeout", connection_timeout_, connection_timeout_);
     json.Jsonize("call_timeout", call_timeout_, call_timeout_);
+}
+
+std::string KVCMConfig::registerInstanceRequest() const {
+    json::JsonMap request;
+    request["instance_group"] = instance_group_;
+    request["instance_id"] = instance_id_;
+    request["block_size"] = block_size_;
+    request["default_query_type"] = default_query_type_;
+    request["model_deployment"] = ToJson(model_deployment_);
+    json::JsonArray infos;
+    if (location_spec_info_map_) {
+        for (const auto& [name, size] : *location_spec_info_map_) {
+            json::JsonMap info;
+            info["name"] = name;
+            info["size"] = size;
+            infos.emplace_back(std::move(info));
+        }
+    }
+    request["location_spec_infos"] = std::move(infos);
+    json::JsonArray groups;
+    if (location_spec_groups_) {
+        for (const auto& [name, specs] : *location_spec_groups_) {
+            json::JsonMap group;
+            group["name"] = name;
+            group["spec_names"] = ToJson(specs);
+            groups.emplace_back(std::move(group));
+        }
+    }
+    request["location_spec_groups"] = std::move(groups);
+    return ToJsonString(request, true);
 }
 
 void KVCMConfig::Jsonize(Jsonizable::JsonWrapper& json) {
