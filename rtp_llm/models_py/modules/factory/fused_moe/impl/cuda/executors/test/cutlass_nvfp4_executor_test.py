@@ -1,3 +1,5 @@
+import json
+import os
 import unittest
 from types import SimpleNamespace
 
@@ -20,6 +22,266 @@ from rtp_llm.utils.model_weight import W
 
 
 class CutlassNvfp4ExecutorTest(unittest.TestCase):
+
+    @unittest.skipUnless(
+        torch.cuda.is_available()
+        and torch.version.hip is None
+        and torch.cuda.get_device_capability()[0] == 12,
+        "requires SM120 NVIDIA GPU",
+    )
+    def test_offline_checkpoint_loader_tp2_matches_independent_nvfp4_reference(self):
+        from rtp_llm.model_loader.tensor_source import TensorSource
+
+        class Source(TensorSource):
+            def __init__(self, values):
+                self.values = values
+
+            def load_tensor(self, name, data_type=torch.bfloat16):
+                return [self.values[name].to(data_type)]
+
+            def has_tensor(self, name):
+                return name in self.values
+
+            def get_database(self):
+                return None
+
+        experts, hidden, inter = 2, 2560, 640
+        values = {}
+        # Author an offline checkpoint directly from E2M1 codes. No online
+        # weight quantizer or loader output participates in the reference.
+        for expert in range(experts):
+            for projection in ("up", "gate", "down"):
+                rows, columns = (
+                    (hidden, inter) if projection == "down" else (inter, hidden)
+                )
+                codes = torch.zeros(rows, columns, dtype=torch.uint8)
+                row = torch.arange(rows)
+                if projection == "down":
+                    # Each output uses both TP partitions, with distinct signs.
+                    codes[row, row % (inter // 2)] = 2
+                    codes[row, row % (inter // 2) + inter // 2] = 9 if expert else 4
+                else:
+                    column = (row % 32) * 2 + int(projection == "gate")
+                    codes[row, column] = 4 if projection == "gate" else 2 + expert
+                prefix = f"layers.0.experts.{expert}.{projection}_proj."
+                values[prefix + "weight"] = codes[:, 0::2] | (codes[:, 1::2] << 4)
+                values[prefix + "weight_scale"] = (
+                    (row[:, None] % 4 + torch.arange(columns // 16)[None, :] % 2 + 1)
+                    / 4
+                ).to(torch.float8_e4m3fn)
+                values[prefix + "weight_scale_2"] = torch.tensor(
+                    (expert + 1) / (8 if projection == "down" else 4)
+                ).reshape((1,) if projection == "gate" else ())
+                values[prefix + "input_scale"] = torch.tensor(1 / 256).reshape(
+                    (1, 1) if projection == "down" else (1,)
+                )
+
+        self._check_offline_loader_tp2(
+            Source(values), "layers.{i}.experts.{expert_id}.", experts, hidden, inter
+        )
+
+    @unittest.skipUnless(
+        torch.cuda.is_available()
+        and torch.version.hip is None
+        and torch.cuda.get_device_capability()[0] == 12,
+        "requires SM120 NVIDIA GPU",
+    )
+    def test_real_offline_checkpoint_layer0_tp2(self):
+        from rtp_llm.model_loader.tensor_source import DatabaseTensorSource
+        from rtp_llm.utils.database import CkptDatabase
+
+        directory = os.getenv("QWEN4_NVFP4_CKPT_DIR")
+        if not directory:
+            self.skipTest(
+                "set QWEN4_NVFP4_CKPT_DIR to a complete offline NVFP4 checkpoint"
+            )
+        with open(os.path.join(directory, "config.json")) as stream:
+            config = json.load(stream)
+        text = config["text_config"]
+        self.assertEqual(text["num_experts"], 512)
+        self.assertEqual(text["hidden_size"], 2560)
+        self.assertEqual(text["moe_intermediate_size"], 640)
+        # Load every expert in layer 0 through the real safetensors database;
+        # independently decode only the two experts selected by the payload.
+        self._check_offline_loader_tp2(
+            DatabaseTensorSource(CkptDatabase(directory)),
+            "model.language_model.layers.{i}.mlp.experts.{expert_id}.",
+            text["num_experts"],
+            text["hidden_size"],
+            text["moe_intermediate_size"],
+        )
+
+    def _check_offline_loader_tp2(self, source, prefix, experts, hidden, inter):
+        from rtp_llm.config.quant_config import QWEN4_NVFP4_RECIPE, ModelOptFp4Config
+        from rtp_llm.config.server_config_setup import set_parallelism_config
+        from rtp_llm.model_loader.ffn_weight import MoeAtomicWeight, MoeConfig
+        from rtp_llm.models.qwen4_exp.offline_nvfp4 import Qwen4Nvfp4MoeWeight
+        from rtp_llm.ops import ParallelismConfig
+        from rtp_llm.utils.model_weight import CkptWeightInfo, stack_, stack_moe_w1
+
+        quant = ModelOptFp4Config(
+            bits=4, group_size=16, is_quanted=True, model_recipe=QWEN4_NVFP4_RECIPE
+        )
+        descriptors = []
+        for name, projections, process in (
+            (W.moe_w1, ("up", "gate"), stack_moe_w1),
+            (W.moe_w2, ("down",), stack_),
+        ):
+            descriptors.append(
+                Qwen4Nvfp4MoeWeight(
+                    MoeAtomicWeight(
+                        name,
+                        [
+                            CkptWeightInfo(prefix + p + "_proj.weight")
+                            for p in projections
+                        ],
+                        process_fun=process,
+                        config=MoeConfig(expert_num=experts),
+                    ),
+                    quant,
+                )
+            )
+
+        # Use the actual CUDA preparation methods without parsing process argv.
+        device = CudaImpl.__new__(CudaImpl)
+        device.py_env_configs = SimpleNamespace(
+            moe_config=SimpleNamespace(fp4_moe_op="cutlass")
+        )
+        executors = []
+        for rank in range(2):
+            lc = SimpleNamespace(
+                compute_dtype=torch.bfloat16,
+                tp_size=2,
+                tp_rank=rank,
+                ffn_tp_size=2,
+                ffn_tp_rank=rank,
+                ep_size=1,
+                ep_rank=0,
+                dp_size=1,
+                dp_rank=0,
+                hidden_size=hidden,
+                head_num=24,
+                head_num_kv=2,
+                size_per_head=256,
+                moe_pure_tp_mode=True,
+                moe_pure_tp_preshard=False,
+                merge_lora=False,
+                use_swizzleA=False,
+                bit=4,
+                exported_device=device,
+                get_selected_experts=lambda layer, count: range(count),
+            )
+            loaded = {}
+            for descriptor in descriptors:
+                loaded.update(descriptor.load(source, 0, "cuda", lc))
+            self.assertEqual(loaded[W.moe_w1].shape, (experts, inter, hidden // 2))
+            self.assertEqual(loaded[W.moe_w2].shape, (experts, hidden, inter // 4))
+            self.assertEqual(loaded[W.moe_w1_s2].shape, (experts,))
+            self.assertEqual(loaded[W.moe_w2_i_s].shape, (experts,))
+            pc = ParallelismConfig()
+            pc.tp_size = 2
+            pc.tp_rank = rank
+            pc.ep_size = 1
+            pc.ffn_sp_size = 1
+            pc.world_size = 2
+            pc.local_world_size = 2
+            pc.world_rank = rank
+            set_parallelism_config(pc)
+            executors.append(
+                CutlassNvfp4Executor(
+                    SimpleNamespace(
+                        ep_size=1,
+                        ep_rank=0,
+                        parallelism_config=pc,
+                        model_config=SimpleNamespace(enable_qwen4_qsa=False),
+                    ),
+                    FusedMoEQuantConfig(quant_dtype=torch.uint8, block_shape=[16, 16]),
+                    loaded,
+                )
+            )
+
+        levels = torch.tensor(
+            [0, 0.5, 1, 1.5, 2, 3, 4, 6, 0, -0.5, -1, -1.5, -2, -3, -4, -6],
+            device="cuda",
+        )
+
+        def checkpoint_tensor(projection, expert, suffix, dtype):
+            name = prefix.format(i=0, expert_id=expert) + projection + "_proj." + suffix
+            tensors = source.load_tensor(name, dtype)
+            self.assertEqual(len(tensors), 1)
+            return tensors[0].to("cuda")
+
+        def decode(projection, expert):
+            packed = checkpoint_tensor(projection, expert, "weight", torch.uint8)
+            nibbles = torch.stack((packed & 15, packed >> 4), dim=-1).flatten(-2)
+            block = checkpoint_tensor(
+                projection, expert, "weight_scale", torch.float8_e4m3fn
+            ).float()
+            outer = checkpoint_tensor(
+                projection, expert, "weight_scale_2", torch.float32
+            ).item()
+            return levels[nibbles.long()] * block.repeat_interleave(16, -1) * outer
+
+        def quantize_activation(tensor, input_scale):
+            # Independent nearest-value E2M1 reference. Prefer even ordinal on
+            # exact ties, and apply both the FP8 block and FP32 global scales.
+            block = tensor.float().reshape(*tensor.shape[:-1], -1, 16)
+            sf = (block.abs().amax(-1) / (6 * input_scale)).clamp(max=448)
+            sf = sf.to(torch.float8_e4m3fn).float() * input_scale
+            divisor = torch.where(sf == 0, torch.ones_like(sf), sf)
+            normalized = block / divisor.unsqueeze(-1)
+            candidates = levels[torch.tensor([0, 2, 4, 6, 1, 3, 5, 7], device="cuda")]
+            closest = (normalized.abs().unsqueeze(-1) - candidates).abs().argmin(-1)
+            rounded = candidates[closest] * normalized.sign()
+            return (rounded * sf.unsqueeze(-1)).reshape_as(tensor)
+
+        selected = (0, experts - 1)
+        weights = {
+            (expert, p): decode(p, expert)
+            for expert in selected
+            for p in ("up", "gate", "down")
+        }
+        first_input_scale = checkpoint_tensor(
+            "up", 0, "input_scale", torch.float32
+        ).item()
+        second_input_scale = checkpoint_tensor(
+            "down", 0, "input_scale", torch.float32
+        ).item()
+        ids = torch.tensor([selected, selected[::-1]], dtype=torch.int32, device="cuda")
+        routing = torch.tensor([[0.25, 0.75], [0.625, 0.375]], device="cuda")
+        x = torch.zeros(2, hidden, device="cuda", dtype=torch.bfloat16)
+        x[:, :64:2] = 0.5
+        x[:, 1:64:2] = 1
+        x[1] *= 0.5
+        for amplitude in (0.5, 1.0, 2.0):
+            current = x * amplitude
+            payload = ExpertForwardPayload(
+                expert_x=current,
+                expert_x_origin_dtype=torch.bfloat16,
+                expert_topk_ids=ids,
+                expert_topk_weights=routing,
+            )
+            got = sum(
+                executor.execute(
+                    payload, "SiGLU", None, None, False, None
+                ).fused_expert_output.float()
+                for executor in executors
+            )
+            quantized_input = quantize_activation(current, first_input_scale)
+            expected = torch.zeros_like(got)
+            for expert in selected:
+                up = quantized_input @ weights[expert, "up"].T
+                gate = quantized_input @ weights[expert, "gate"].T
+                intermediate = quantize_activation(
+                    up * torch.nn.functional.silu(gate), second_input_scale
+                )
+                output = intermediate @ weights[expert, "down"].T
+                coefficient = ((ids == expert) * routing).sum(-1, keepdim=True)
+                expected += output * coefficient
+            # TP outputs are each rounded to BF16 before their FP32 sum; the
+            # independent reference performs the final reduction in FP32.
+            torch.testing.assert_close(got, expected, rtol=0.02, atol=1e-4)
+
     @unittest.skipUnless(
         torch.cuda.is_available()
         and torch.version.hip is None
@@ -169,6 +431,61 @@ class CutlassNvfp4ExecutorTest(unittest.TestCase):
             torch.cuda.synchronize()
             torch.testing.assert_close(got, combined(), atol=0, rtol=0)
             torch.testing.assert_close(got, run(full).float(), atol=0.0005, rtol=0.02)
+
+    @unittest.skipUnless(
+        torch.cuda.is_available()
+        and torch.version.hip is None
+        and torch.cuda.get_device_capability()[0] == 12,
+        "requires SM120 NVIDIA GPU",
+    )
+    def test_offline_recipe_is_selected_but_generic_prequantized_weights_are_not(self):
+        from rtp_llm.config.model_config import ModelConfig
+        from rtp_llm.config.quant_config import QWEN4_NVFP4_RECIPE, ModelOptFp4Config
+        from rtp_llm.config.server_config_setup import set_parallelism_config
+        from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
+            MoEConfigAdapter,
+        )
+        from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.strategy.fp4 import (
+            CudaNvfp4CutlassStrategy,
+        )
+        from rtp_llm.ops import MoeConfig, ParallelismConfig
+
+        model = ModelConfig()
+        model.data_type = "bf16"
+        model.expert_num = 512
+        model.moe_k = 10
+        model.moe_inter_size = 640
+        model.hidden_size = 2560
+        model.n_shared_experts = 1
+        model._qwen4_full_fp8_nvfp4 = False
+        pc = ParallelismConfig()
+        pc.tp_size = 2
+        pc.ep_size = 1
+        pc.ffn_sp_size = 1
+        pc.world_size = 2
+        pc.local_world_size = 2
+        set_parallelism_config(pc)
+        moe = MoeConfig()
+        moe.moe_strategy = "nvfp4_cutlass"
+        moe.fp4_moe_op = "cutlass"
+        moe.use_all_gather = True
+        moe.use_deepep_moe = False
+        strategy = CudaNvfp4CutlassStrategy()
+        for offline_source, recipe, expected in (
+            (True, QWEN4_NVFP4_RECIPE, True),
+            (True, None, False),
+            (False, QWEN4_NVFP4_RECIPE, False),
+            (False, None, False),
+        ):
+            with self.subTest(offline_source=offline_source, recipe=recipe):
+                model._qwen4_nvfp4_source = offline_source
+                model.quant_config = ModelOptFp4Config(
+                    bits=4, group_size=16, is_quanted=True, model_recipe=recipe
+                )
+                # can_handle includes both the router and executor predicates.
+                self.assertEqual(
+                    strategy.can_handle(MoEConfigAdapter(model, pc, moe)), expected
+                )
 
     def test_tensor_parallel_selection_is_gated_and_rejects_sp_and_world_mismatch(self):
         from rtp_llm.config.model_config import ModelConfig

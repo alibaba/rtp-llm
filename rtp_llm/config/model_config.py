@@ -776,12 +776,23 @@ class ModelConfig(CppModelConfig):
             requested = init_quant_config(self.quantization)
             recipe = getattr(requested, "model_recipe", None)
             if recipe is not None and (
-                recipe != "qwen4_fp8_nvfp4"
+                recipe not in ("qwen4_fp8_nvfp4", "qwen4_nvfp4")
                 or self.model_type not in ("qwen4_exp", "qwen4_exp_mtp")
             ):
-                raise ValueError("QWEN4_FP8_NVFP4 is only valid for qwen4_exp models")
+                raise ValueError(
+                    "Qwen4 precision recipes are only valid for qwen4_exp models"
+                )
         # Load quant_config
-        quant_config = QuantizationConfig.load_from_ckpt(self.ckpt_path)
+        if getattr(self, "_qwen4_nvfp4_source", False):
+            from rtp_llm.config.qwen4_exp_config import build_qwen4_quant_config
+
+            # Qwen4 already validated every mixed-precision module. The generic
+            # ModelOpt reader assumes one group and cannot describe this source.
+            quant_config = build_qwen4_quant_config(
+                self.quantization, source_fp8=False, source_nvfp4=True
+            )
+        else:
+            quant_config = QuantizationConfig.load_from_ckpt(self.ckpt_path)
         if not quant_config:
             if self.quantization:
                 quant_config = init_quant_config(self.quantization)

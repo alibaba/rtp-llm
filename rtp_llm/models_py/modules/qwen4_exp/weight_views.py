@@ -145,7 +145,7 @@ def prepare_compute_weights(weights):
     return view
 
 
-def annotate_compute_inventory(weights):
+def annotate_compute_inventory(weights, source_format=None):
     """Freeze actual consumers and aliases after model assembly has installed them."""
     prior = getattr(weights, "compute_inventory", None)
 
@@ -175,7 +175,7 @@ def annotate_compute_inventory(weights):
         prior.layers if prior is not None else [() for _ in weights.weights]
     )
     weights.compute_inventory = ComputeWeightInventory(
-        prior.source_format if prior is not None else "BF16",
+        source_format or (prior.source_format if prior is not None else "BF16"),
         prior.source_owner if prior is not None else None,
         tuple(
             inventory(items, previous)
@@ -226,6 +226,12 @@ class Qwen4LinearFactory:
         weight_scale_2_key=None,
         input_scale_key=None,
     ):
+        from rtp_llm.config.quant_config import QWEN4_NVFP4_RECIPE
+
+        # The offline recipe quantizes routed experts only. Attention, routers
+        # and shared-expert projections retain their checkpoint BF16 precision.
+        if getattr(quant_config, "model_recipe", None) == QWEN4_NVFP4_RECIPE:
+            quant_config = None
         storage_scale = weights.get(weight_key + FP8_STORAGE_SCALE_SUFFIX)
         if storage_scale is not None:
             module = Fp8Linear(

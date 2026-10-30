@@ -571,6 +571,8 @@ class Qwen4ExpDecoderLayer(Qwen3NextDecoderLayer):
             self.self_attn.qk_fuse_norm = ZeroCenteredFusedQKRMSNorm.replacing(fused)
 
     def _attention_quant_config(self, config, weights):
+        if getattr(config, "_qwen4_nvfp4_source", False):
+            return None
         if bool(getattr(config, "_qwen4_full_fp8", False)):
             from rtp_llm.config.quant_config import Fp8BlockWiseQuantConfig
 
@@ -827,8 +829,11 @@ class Qwen4ExpModel(Qwen35Model):
         )
 
         self._cpu_target_status = prepare_cpu_target_status(config, parallelism_config)
-        inventory = annotate_compute_inventory(self.weight)
-        if getattr(config, "_qwen4_full_fp8", False):
+        offline_nvfp4 = bool(getattr(config, "_qwen4_nvfp4_source", False))
+        inventory = annotate_compute_inventory(
+            self.weight, source_format="NVFP4" if offline_nvfp4 else None
+        )
+        if getattr(config, "_qwen4_full_fp8", False) or offline_nvfp4:
             logging.info(
                 "Qwen4 weight inventory rank=%s %s",
                 parallelism_config.world_rank,

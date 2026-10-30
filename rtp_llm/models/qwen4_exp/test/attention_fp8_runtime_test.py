@@ -89,9 +89,29 @@ class QwenAttentionFp8RuntimeTest(unittest.TestCase):
         self.assertIs(cfg.quant_config, original)
         cfg._qwen4_full_fp8 = False
         self.assertIs(layer._attention_quant_config(cfg, {}), original)
+        cfg._qwen4_nvfp4_source = True
+        self.assertIsNone(layer._attention_quant_config(cfg, {}))
+        self.assertIs(cfg.quant_config, original)
+        cfg._qwen4_nvfp4_source = False
         base = Qwen3NextDecoderLayer.__new__(Qwen3NextDecoderLayer)
         cfg._qwen4_full_fp8 = True
         self.assertIs(base._attention_quant_config(cfg, {}), original)
+
+    def test_offline_nvfp4_dense_projection_keeps_unquantized_consumer(self):
+        from rtp_llm.config.quant_config import init_quant_config
+        from rtp_llm.models_py.modules.factory.linear.factory import LinearFactory
+        from rtp_llm.models_py.modules.qwen4_exp.weight_views import Qwen4LinearFactory
+
+        quant = init_quant_config("QWEN4_NVFP4")
+        weights = {"dense": object()}
+        with mock.patch.object(LinearFactory, "create_linear_from_weights") as create:
+            Qwen4LinearFactory.create_linear_from_weights(
+                weights,
+                "dense",
+                quant_config=quant,
+            )
+        self.assertIsNone(create.call_args.args[4])
+        self.assertTrue(quant.is_quanted())
 
     def test_full_recipe_quantizes_both_attention_geometries(self):
         from rtp_llm.models_py.model_desc.qwen4_exp import Qwen4ExpDecoderLayer

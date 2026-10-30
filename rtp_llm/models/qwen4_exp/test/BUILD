@@ -12,6 +12,12 @@ py_test(
 )
 
 py_test(
+    name = "moe_nvfp4_test",
+    srcs = ["moe_nvfp4_test.py"],
+    deps = ["//rtp_llm:testlib"],
+)
+
+py_test(
     name = "qwen4_exp_mtp_component_test",
     srcs = ["qwen4_exp_mtp_component_test.py"],
     deps = ["//rtp_llm:testlib"],
@@ -59,6 +65,12 @@ py_test(
 py_test(
     name = "moe_fp4_test",
     srcs = ["moe_fp4_test.py"],
+    deps = ["//rtp_llm:testlib"],
+)
+
+py_test(
+    name = "offline_nvfp4_test",
+    srcs = ["offline_nvfp4_test.py"],
     deps = ["//rtp_llm:testlib"],
 )
 

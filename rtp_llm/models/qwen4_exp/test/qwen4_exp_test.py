@@ -9,6 +9,7 @@ from rtp_llm.config.kv_cache_config import KVCacheConfig
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.config.quant_config import (
     QWEN4_FP8_NVFP4_RECIPE,
+    QWEN4_NVFP4_RECIPE,
     Fp8BlockWiseQuantConfig,
     ModelOptFp4Config,
     init_quant_config,
@@ -220,13 +221,112 @@ class Qwen4ExpTest(unittest.TestCase):
                 )
 
     def test_bf16_checkpoint_rejects_partial_quantization_recipes(self):
-        for choice in ("MODELOPT_FP4", "FP8_PER_BLOCK", "QWEN4_FP8_NVFP4"):
+        for choice in (
+            "MODELOPT_FP4",
+            "FP8_PER_BLOCK",
+            "QWEN4_FP8_NVFP4",
+            "QWEN4_NVFP4",
+        ):
             self.config.quantization = choice
             with (
                 self.subTest(choice=choice),
                 self.assertRaisesRegex(ValueError, "recipe"),
             ):
                 Qwen4Exp._post_build_model_config(self.config)
+
+    def test_offline_nvfp4_dispatch_survives_common_precision_initialization(self):
+        data = self._config()
+        data["quantization_config"] = {
+            "quant_method": "modelopt",
+            "quant_algo": "MIXED_PRECISION",
+            "quantized_layers": {
+                "model.language_model.layers.1.ple.ple_embedding.ngram_embedding": {
+                    "quant_algo": "FP8",
+                },
+            },
+            "config_groups": {
+                "routed_experts": {
+                    "weights": {"type": "float", "num_bits": 4, "group_size": 16},
+                    "input_activations": {"num_bits": 4},
+                }
+            },
+        }
+        root = Path(self._temp_dir.name)
+        (root / "config.json").write_text(json.dumps(data))
+        (root / "model.safetensors.index.json").write_text(
+            json.dumps({"weight_map": {}})
+        )
+        with (
+            mock.patch(
+                "rtp_llm.models.qwen4_exp.moe_nvfp4.validate_moe_nvfp4_checkpoint"
+            ) as offline,
+            mock.patch(
+                "rtp_llm.models.qwen4_exp.moe_fp8.validate_moe_fp8_checkpoint"
+            ) as fp8,
+        ):
+            cfg = Qwen4Exp.create_config(self._temp_dir.name)
+        offline.assert_called_once()
+        fp8.assert_not_called()
+        for choice in ("", "QWEN4_NVFP4"):
+            cfg.quantization = choice
+            cfg.init_precision_config(KVCacheConfig(), "BF16")
+            Qwen4Exp._post_build_model_config(cfg)
+            self.assertTrue(cfg._qwen4_nvfp4_source)
+            self.assertTrue(cfg._qwen4_ple_fp8)
+            self.assertFalse(cfg._qwen4_fp8_source)
+            self.assertFalse(cfg._qwen4_full_fp8)
+            self.assertFalse(cfg._qwen4_full_fp8_nvfp4)
+            self.assertTrue(cfg.quant_config.is_quanted())
+            self.assertEqual(cfg.quant_config.model_recipe, QWEN4_NVFP4_RECIPE)
+            self.assertIsNone(cfg.quant_config.source_fp8_block_size)
+            self.assertIsNone(cfg.quant_config.activation_amax)
+            self.assertEqual(cfg.data_type, DataType.TYPE_BF16)
+        for choice in ("FP8_PER_BLOCK", "MODELOPT_FP4", "QWEN4_FP8_NVFP4"):
+            cfg.quantization = choice
+            with self.assertRaisesRegex(ValueError, "offline NVFP4"):
+                Qwen4Exp._post_build_model_config(cfg)
+
+    def test_offline_nvfp4_refuses_mtp_before_loading_target_weights(self):
+        for overrides in (dict(is_mtp=True), dict(gen_num_per_cycle=1)):
+            model = self._loaded_model(
+                _qwen4_nvfp4_source=True,
+                quant_config=init_quant_config("QWEN4_NVFP4"),
+                **overrides,
+            )
+            with mock.patch.object(Qwen35Moe, "load") as parent:
+                with self.assertRaisesRegex(RuntimeError, "MTP disabled"):
+                    model.load()
+            parent.assert_not_called()
+
+    def test_offline_nvfp4_rejects_unsupported_topology_before_loading(self):
+        model = self._loaded_model(
+            _qwen4_nvfp4_source=True,
+            quant_config=init_quant_config("QWEN4_NVFP4"),
+            moe_inter_size=640,
+            eplb_config=SimpleNamespace(enable_eplb=lambda: False),
+        )
+        pc = model.parallelism_config
+        pc.tp_size = pc.world_size = 2
+        pc.dp_size = pc.ep_size = pc.ffn_sp_size = 1
+        pc.get_ffn_tp_size = lambda: pc.tp_size
+        pc.ffn_disaggregate_config = SimpleNamespace(enable_ffn_disaggregate=False)
+        from rtp_llm.config.qwen4_exp_config import validate_qwen4_runtime
+
+        validate_qwen4_runtime(model.model_config, pc)
+        for name, value in (
+            ("tp_size", 4),
+            ("ep_size", 2),
+            ("dp_size", 2),
+            ("ffn_sp_size", 2),
+        ):
+            old = getattr(pc, name)
+            setattr(pc, name, value)
+            with self.assertRaisesRegex(RuntimeError, "TP1/TP2"):
+                validate_qwen4_runtime(model.model_config, pc)
+            setattr(pc, name, old)
+        model.model_config.moe_inter_size = 16
+        with self.assertRaisesRegex(RuntimeError, "16-element blocks"):
+            validate_qwen4_runtime(model.model_config, pc)
 
     def test_official_recipe_survives_source_precision_initialization_and_cache_override(
         self,

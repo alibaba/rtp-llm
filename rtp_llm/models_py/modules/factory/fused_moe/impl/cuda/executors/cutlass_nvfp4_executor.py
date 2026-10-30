@@ -6,6 +6,7 @@ import torch
 from flashinfer import ActivationType
 from flashinfer.fused_moe import cutlass_fused_moe
 
+from rtp_llm.config.quant_config import QWEN4_NVFP4_RECIPE
 from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import (
     CombineForwardPayload,
     FusedMoeExpertExecutor,
@@ -38,7 +39,14 @@ class CutlassNvfp4Executor(FusedMoeExpertExecutor):
             config.parallelism_config.get_ffn_tp_size() == 1 or tensor_parallel
         )
         checker.check(config.moe_config.fp4_moe_op == "cutlass")
-        checker.check(not config.model_config.quant_config.is_quanted())
+        quant = config.model_config.quant_config
+        checker.check(
+            not quant.is_quanted()
+            or (
+                getattr(quant, "model_recipe", None) == QWEN4_NVFP4_RECIPE
+                and getattr(config.model_config, "_qwen4_nvfp4_source", False)
+            )
+        )
         checker.check(not config.has_redundant_experts)
         checker.check(not config.model_config.eplb_config.enable_eplb())
         checker.check(config.tp_size == config.ep_size or tensor_parallel)
@@ -60,7 +68,7 @@ class CutlassNvfp4Executor(FusedMoeExpertExecutor):
                 or not bool((scale == scale.flatten()[0]).all())
             ):
                 raise ValueError(
-                    "CUTLASS online NVFP4 requires uniform finite positive activation scales"
+                    "CUTLASS NVFP4 requires uniform finite positive activation scales"
                 )
         self.quant_scales = [
             weights[W.moe_w1_i_s].reciprocal().min(),
