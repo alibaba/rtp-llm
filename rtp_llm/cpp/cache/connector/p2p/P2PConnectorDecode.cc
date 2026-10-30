@@ -29,6 +29,12 @@ P2PConnectorDecode::P2PConnectorDecode(P2PConnectorConfig                       
 
 P2PConnectorDecode::~P2PConnectorDecode() = default;
 
+void P2PConnectorDecode::stopMetricsReporter() {
+    if (worker_) {
+        worker_->stopMetricsReporter();
+    }
+}
+
 bool P2PConnectorDecode::init() {
     if (config_.tp_rank == 0) {
         tp_broadcast_client_ = std::make_shared<P2PBroadcastClient>(

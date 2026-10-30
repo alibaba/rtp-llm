@@ -70,7 +70,8 @@ Python VIPServer 同样保留最近一次非空域名缓存，持续空结果不
 失败仅记录日志和指标，不改变调度结果。
 
 一个服务发现 frontend 会按 Endpoint `multi_engine_num` 展开为 N 个逻辑 worker，map key
-统一为 `ip:httpPort@index`（N=1 也是 `@0`）。frontend HTTP/gRPC 地址保持共享；第 i 个
+为 `ip:httpPort@index`（N=1 也是 `@0`）。ViT 每个地址登记一个 worker，登记、缓存索引和选路复核
+都用 `ip:httpPort`。frontend HTTP/gRPC 地址保持共享；第 i 个
 `GrpcWorkerStatusRunner` 连接显式配置的 `worker_status_port + i`，N=1 时同样接受该覆盖；
 未配置时使用发现归一化后的 gRPC port。N>1 必须显式配置 status base，配置加载时同时校验 count、base 和
 `base + N - 1 <= 65535`。

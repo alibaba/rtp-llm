@@ -291,6 +291,7 @@ KVCacheManager::~KVCacheManager() {
         allocation_wait_state_->stopped.store(true, std::memory_order_release);
     }
     allocation_wait_state_->cv.notify_all();
+    stopP2PConnector();
     stopMetricsReporter();
     stopCacheEventPublisher();
 }
@@ -299,6 +300,12 @@ void KVCacheManager::stopMetricsReporter() {
     stop_.store(true, std::memory_order_release);
     if (metrics_reporter_thread_.joinable()) {
         metrics_reporter_thread_.join();
+    }
+}
+
+void KVCacheManager::stopP2PConnector() {
+    if (p2p_connector_) {
+        p2p_connector_->stop();
     }
 }
 

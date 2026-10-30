@@ -1636,18 +1636,15 @@ void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info,
                         old_seq_length + offset);
         }
     }
-    updateOutput({new_tokens,
-                  num_new_tokens,
-                  torch::Tensor(),
-                  torch::Tensor(),
-                  torch::Tensor(),
-                  torch::Tensor(),
-                  torch::Tensor(),
-                  torch::Tensor(),
-                  torch::Tensor(),
-                  torch::Tensor(),
-                  update_info.update_remote_generate,
-                  update_info.force_update_info});
+    // Prefill publishes the first token's probabilities from this update to Decode.
+    updateOutput({.new_tokens             = new_tokens,
+                  .num_new_tokens         = num_new_tokens,
+                  .update_remote_generate = update_info.update_remote_generate,
+                  .force_update_info      = update_info.force_update_info,
+                  .token_logprobs         = update_info.token_logprobs,
+                  .top_logprob_token_ids  = update_info.top_logprob_token_ids,
+                  .top_logprobs           = update_info.top_logprobs,
+                  .logprobs_offset        = update_info.logprobs_offset});
     // Accepted tokens and both speculative cache swaps are now committed.
     // The scheduler will reclaim history before its next allocation.
     stream_cache_resource_->reclaimLinearHistory(nxt_cached_len);

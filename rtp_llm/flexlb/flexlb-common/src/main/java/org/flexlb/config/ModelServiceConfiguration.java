@@ -6,6 +6,7 @@ import org.apache.commons.lang3.StringUtils;
 import org.flexlb.dao.route.Endpoint;
 import org.flexlb.dao.route.KvcmConfig;
 import org.flexlb.dao.route.OptimizerConfig;
+import org.flexlb.dao.route.RoleType;
 import org.flexlb.dao.route.ServiceRoute;
 import org.flexlb.discovery.RoutingServiceDiscovery;
 import org.springframework.context.annotation.Bean;
@@ -54,6 +55,13 @@ public class ModelServiceConfiguration {
         if (CollectionUtils.isEmpty(endpoints)) {
             throw new IllegalArgumentException(
                     "MODEL_SERVICE_CONFIG must contain at least one role endpoint");
+        }
+        for (Endpoint endpoint : serviceRoute.getRoleEndpoints(RoleType.VIT)) {
+            if (endpoint.getMultiEngineNum() > 1) {
+                throw new IllegalArgumentException(
+                        "MODEL_SERVICE_CONFIG vit_endpoint supports one worker per address: "
+                                + endpoint.getAddress());
+            }
         }
         for (Endpoint endpoint : endpoints) {
             validateEngineEndpointConfiguration(endpoint);

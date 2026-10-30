@@ -453,6 +453,21 @@ class KVCacheControlArgumentsTest(TestCase):
             )
 
 
+class EnvArgumentParserTest(TestCase):
+    def test_environment_mappings_do_not_leak_between_parsers(self):
+        from rtp_llm.server.server_args.server_args import EnvArgumentParser
+
+        first_parser = EnvArgumentParser()
+        first_parser.add_argument("--value", type=int, default=1)
+        second_parser = EnvArgumentParser()
+        second_parser.add_argument(
+            "--value", env_name="OTHER_VALUE", type=int, default=2
+        )
+        with patch.dict(os.environ, {"VALUE": "3", "OTHER_VALUE": "4"}, clear=True):
+            self.assertEqual(first_parser.parse_args([]).value, 3)
+            self.assertEqual(second_parser.parse_args([]).value, 4)
+
+
 class CacheConfigArgumentsTest(TestCase):
     def test_pool_block_weights_default_env_and_cli_precedence(self):
         from_env = '{"full":8,"linear":1}'
@@ -2400,6 +2415,24 @@ class ServerArgsSetTest(TestCase):
         parser.parse_args(["--gpu_batch_wait_ms", "500", "--gpu_max_batch_size", "8"])
         self.assertEqual(cfg.vit_config.gpu_max_batch_size, 8)
         self.assertEqual(cfg.vit_config.gpu_batch_wait_ms, 500)
+
+    def test_oss_endpoint_rewrite_environment_and_cli(self):
+        from rtp_llm.config.py_config_modules import VitConfig
+        from rtp_llm.server.server_args.server_args import EnvArgumentParser
+        from rtp_llm.server.server_args.vit_group_args import init_vit_group_args
+
+        config = VitConfig()
+        parser = EnvArgumentParser()
+        parser.set_root_config(config)
+        init_vit_group_args(parser, config)
+        with patch.dict(os.environ, {"ENABLE_OSS_INTERNAL_ENDPOINT_REWRITE": "0"}):
+            parser.parse_args([])
+            self.assertFalse(config.enable_oss_internal_endpoint_rewrite)
+            self.assertFalse(
+                pickle.loads(pickle.dumps(config)).enable_oss_internal_endpoint_rewrite
+            )
+            parser.parse_args(["--enable_oss_internal_endpoint_rewrite", "1"])
+            self.assertTrue(config.enable_oss_internal_endpoint_rewrite)
 
     def test_repetition_detection_config(self):
         """Test that repetition detection args bind to PyEnvConfigs."""

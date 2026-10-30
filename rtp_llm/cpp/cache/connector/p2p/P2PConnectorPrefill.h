@@ -31,6 +31,7 @@ public:
     ~P2PConnectorPrefill();
 
     bool init();
+    void stop();
 
     std::shared_ptr<AsyncContext> registerResource(const KVCacheResourcePtr&    resource,
                                                    const std::shared_ptr<Meta>& meta);

@@ -331,6 +331,12 @@ public class WorkerStatus {
                                 current.multiEngineNum()));
     }
 
+    public String routingAddress() {
+        return getRole() == RoleType.VIT
+                ? workerIdentity.getPhysicalIpPort()
+                : workerIdentity.getLogicalIpPort();
+    }
+
     public RoleType getRole() {
         return committedStatus.get().fields().role();
     }

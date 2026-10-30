@@ -82,7 +82,6 @@ public final class RandomStrategy {
             result.setHttpPort(topology.port());
             result.setGrpcPort(CommonUtils.toGrpcPort(topology.port()));
             result.setDpRank(engine.dpRank());
-            result.setSelectedEngineIndex(topology.engineIndex(), topology.multiEngineNum());
 
             WorkerEndpoint.GenerationPin owned = pin;
             pin = null;

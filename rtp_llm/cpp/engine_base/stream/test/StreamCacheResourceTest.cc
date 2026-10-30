@@ -3426,15 +3426,17 @@ TEST_F(StreamCacheResourceTest, testP2PFirstTokenAllowsAbsentPromptScoresForEmpt
 
 TEST_F(StreamCacheResourceTest, testP2PFirstTokenOutputsRoundTripThroughStartLoad) {
     autil::EnvGuard real_outputs("PERF_TEST", "0");
-    for (const auto& [requested, hybrid, prompt_scores] : {std::tuple{false, false, false},
-                                                           std::tuple{true, false, false},
-                                                           std::tuple{false, true, false},
-                                                           std::tuple{true, true, false},
-                                                           std::tuple{true, false, true},
-                                                           std::tuple{true, true, true}}) {
+    for (const auto& [requested, hybrid, prompt_scores, speculative] : {std::tuple{false, false, false, false},
+                                                                        std::tuple{true, false, false, false},
+                                                                        std::tuple{false, true, false, false},
+                                                                        std::tuple{false, true, false, true},
+                                                                        std::tuple{true, true, false, false},
+                                                                        std::tuple{true, false, true, false},
+                                                                        std::tuple{true, true, true, false}}) {
         for (bool eos : {false, true}) {
-            SCOPED_TRACE(::testing::Message() << "requested=" << requested << ", hybrid=" << hybrid << ", eos=" << eos
-                                              << ", prompt_scores=" << prompt_scores);
+            SCOPED_TRACE(::testing::Message()
+                         << "requested=" << requested << ", hybrid=" << hybrid << ", eos=" << eos
+                         << ", prompt_scores=" << prompt_scores << ", speculative=" << speculative);
             const bool compact = hybrid && !requested;
             const std::string key = "first-token-outputs";
             ASSERT_NO_FATAL_FAILURE(prepareP2PRegistrationResource(true, key, hybrid));
@@ -3462,7 +3464,7 @@ TEST_F(StreamCacheResourceTest, testP2PFirstTokenOutputsRoundTripThroughStartLoa
                 config.calculate_loss           = requested ? 2 : 0;
                 config.return_prompt_logits     = prompt_scores;
                 config.return_logprobs          = compact;
-                config.top_logprobs             = compact ? 1 : 0;
+                config.top_logprobs             = compact && !speculative ? 1 : 0;
                 ModelConfig model;
                 model.max_seq_len                  = 32;
                 model.vocab_size                   = 16;
@@ -3497,23 +3499,39 @@ TEST_F(StreamCacheResourceTest, testP2PFirstTokenOutputsRoundTripThroughStartLoa
                 scores.target_logprobs = torch::arange(3, torch::kFloat32);
             scores.start_pos        = 1;
             scores.end_pos          = 4;
-            const auto graph_status = eos ? GenerationPrefillCudaGraphStatus::REPLAYED :
-                                            GenerationPrefillCudaGraphStatus::CAPTURE_UNAVAILABLE;
+            const auto             graph_status = speculative ? GenerationPrefillCudaGraphStatus::NOT_REQUESTED :
+                                                                (eos ? GenerationPrefillCudaGraphStatus::REPLAYED :
+                                                                       GenerationPrefillCudaGraphStatus::CAPTURE_UNAVAILABLE);
+            const auto             top_count    = prefill->generateConfig()->top_logprobs;
+            const StreamUpdateInfo first_update{
+                .new_tokens                           = torch::tensor({{7}}, torch::kInt32),
+                .num_new_tokens                       = 1,
+                .hidden_states                        = hidden,
+                .logits                               = logits,
+                .softmax_probs                        = torch::full({1, 1}, 0.75f),
+                .cum_log_probs                        = torch::full({1}, -0.5f),
+                .all_probs                            = probs,
+                .loss                                 = requested ? loss : torch::Tensor{},
+                .all_hidden_states                    = all_hidden,
+                .prompt_logits                        = prompt_scores ? std::make_optional(scores) : std::nullopt,
+                .generation_prefill_cuda_graph_status = graph_status,
+                .token_logprobs                       = compact ? torch::full({1, 1}, -0.5f) : torch::Tensor{},
+                .top_logprob_token_ids = compact ? torch::full({1, 1, top_count}, 7, torch::kInt32) : torch::Tensor{},
+                .top_logprobs          = compact ? torch::full({1, 1, top_count}, -0.5f) : torch::Tensor{},
+            };
             prefill->step();
-            prefill->update({.new_tokens        = torch::tensor({7}, torch::kInt32).reshape({1, 1}),
-                             .num_new_tokens    = 1,
-                             .hidden_states     = hidden,
-                             .logits            = logits,
-                             .softmax_probs     = torch::full({1, 1}, 0.75f),
-                             .cum_log_probs     = torch::full({1}, -0.5f),
-                             .all_probs         = probs,
-                             .loss              = requested ? loss : torch::Tensor{},
-                             .all_hidden_states = all_hidden,
-                             .prompt_logits     = prompt_scores ? std::make_optional(scores) : std::nullopt,
-                             .generation_prefill_cuda_graph_status = graph_status,
-                             .token_logprobs        = compact ? torch::full({1, 1}, -0.5f) : torch::Tensor{},
-                             .top_logprob_token_ids = compact ? torch::full({1, 1, 1}, 7, torch::kInt32) : torch::Tensor{},
-                             .top_logprobs          = compact ? torch::full({1, 1, 1}, -0.5f) : torch::Tensor{}});
+            if (speculative) {
+                auto buffer    = std::make_shared<SpeculativeExecutorStreamOutput>();
+                buffer->tokens = torch::zeros({1, 2}, torch::kInt32);
+                prefill->setSPOutputBuffer(buffer);
+                prefill->specUpdate({.new_tokens            = first_update.new_tokens,
+                                     .num_new_tokens        = first_update.num_new_tokens,
+                                     .token_logprobs        = first_update.token_logprobs,
+                                     .top_logprob_token_ids = first_update.top_logprob_token_ids,
+                                     .top_logprobs          = first_update.top_logprobs});
+            } else {
+                prefill->update(first_update);
+            }
             ASSERT_FALSE(prefill->hasError());
             PrefillResultStore::SideChannelData published;
             ASSERT_TRUE(prefill_connector.stream_store_->takePrefillPayload(key, published));
@@ -3563,8 +3581,13 @@ TEST_F(StreamCacheResourceTest, testP2PFirstTokenOutputsRoundTripThroughStartLoa
             ASSERT_EQ(output.top_logprobs.has_value(), compact);
             if (compact) {
                 EXPECT_FLOAT_EQ(output.token_logprobs->item<float>(), -0.5f);
-                EXPECT_EQ(output.top_logprob_token_ids->item<int32_t>(), 7);
-                EXPECT_FLOAT_EQ(output.top_logprobs->item<float>(), -0.5f);
+                if (speculative) {
+                    EXPECT_EQ(output.top_logprob_token_ids->numel(), 0);
+                    EXPECT_EQ(output.top_logprobs->numel(), 0);
+                } else {
+                    EXPECT_EQ(output.top_logprob_token_ids->item<int32_t>(), 7);
+                    EXPECT_FLOAT_EQ(output.top_logprobs->item<float>(), -0.5f);
+                }
             }
             EXPECT_EQ(decode->generateInput()->multimodalLengths(), published.multimodal_lengths);
             // A handoff must retain existing cache hits without counting newly transferred KV.

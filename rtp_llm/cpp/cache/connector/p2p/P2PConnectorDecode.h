@@ -24,6 +24,7 @@ public:
     ~P2PConnectorDecode();
 
     bool init();
+    void stopMetricsReporter();
 
     std::shared_ptr<AsyncContext> read(const KVCacheResourcePtr&    resource,
                                        const std::shared_ptr<Meta>& meta,

@@ -58,6 +58,10 @@ P2PWorkerPrefillRead::P2PWorkerPrefillRead(P2PConnectorWorkerConfig             
     computed_buffers_(std::make_shared<ComputedLayerCacheBufferStore>()) {}
 
 P2PWorkerPrefillRead::~P2PWorkerPrefillRead() {
+    stop();
+}
+
+void P2PWorkerPrefillRead::stop() {
     store_wait_stopping_.store(true);
     computed_buffers_->notification()->notify();
     if (store_wait_check_thread_.joinable()) {
@@ -66,6 +70,9 @@ P2PWorkerPrefillRead::~P2PWorkerPrefillRead() {
     if (async_sender_pool_) {
         async_sender_pool_->stop();
         async_sender_pool_.reset();
+    }
+    if (sender_) {
+        sender_->stop();
     }
 }
 
