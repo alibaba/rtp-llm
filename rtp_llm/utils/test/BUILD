@@ -27,6 +27,12 @@ py_test(
 )
 
 py_test(
+    name = "shared_expert_config_test",
+    srcs = ["shared_expert_config_test.py"],
+    deps = ["//rtp_llm:utils"],
+)
+
+py_test(
     name = "jit_cache_env_test",
     srcs = ["jit_cache_env_test.py"],
     deps = ["//rtp_llm:jit_cache_env"],

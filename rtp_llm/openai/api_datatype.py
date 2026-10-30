@@ -110,6 +110,8 @@ class ChatMessage(BaseModel):
     tool_calls: Optional[List[ToolCall]] = None
     partial: Optional[bool] = False
     tool_call_id: Optional[str] = None
+    # Conversation-local tool declarations carried by a system message.
+    tools: Optional[List[Dict[str, Any]]] = None
 
 
 # NOTE: according to openai api definition, `function_call` is deprecated, and replaced by `tool_calls`.
@@ -166,6 +168,11 @@ def get_tool_choice_function_name(tool_choice: Optional[ToolChoice]) -> Optional
 
 class ThinkingConfig(BaseModel):
     type: Literal["enabled", "disabled"]
+    effort: Optional[Union[StrictInt, StrictStr]] = None
+
+
+class StreamOptions(BaseModel):
+    include_usage: bool = False
 
 
 class ChatCompletionRequest(BaseModel):
@@ -176,14 +183,18 @@ class ChatCompletionRequest(BaseModel):
     tool_choice: Optional[ToolChoice] = None
     reasoning_effort: Optional[Union[StrictInt, StrictStr]] = None
     thinking: Optional[ThinkingConfig] = None
+    parallel_tool_calls: Optional[bool] = None
     temperature: Optional[float] = 0.7
     top_p: Optional[float] = 1.0
+    presence_penalty: Optional[float] = 0.0
+    frequency_penalty: Optional[float] = 0.0
     top_k: Optional[int] = None
     max_tokens: Optional[int] = None
     max_completion_tokens: Optional[int] = None
     thinking_budget: Optional[int] = None
     stop: Optional[Union[str, List[str]]] = Field(default_factory=list)
     stream: Optional[bool] = False
+    stream_options: Optional[StreamOptions] = None
     user: Optional[str] = None
     seed: Optional[int] = None
     n: Optional[int] = None
@@ -195,8 +206,6 @@ class ChatCompletionRequest(BaseModel):
     json_format: Optional[bool] = None
 
     # ---- These functions are not implemented yet.
-    # presence_penalty: Optional[float] = 0.0
-    # frequency_penalty: Optional[float] = 0.0
     # logit_bias: Optional[Dict[str, float]] = None
 
     # ---- These params are hacked for our framework, not standard.
@@ -463,6 +472,7 @@ class ChatCompletionResponseStreamChoice(BaseModel):
     delta: DeltaMessage
     finish_reason: Optional[FinisheReason] = None
     logprobs: Optional[ChoiceLogprobs] = None
+    usage: Optional[UsageInfo] = None
 
 
 class ChatCompletionStreamResponse(BaseModel):

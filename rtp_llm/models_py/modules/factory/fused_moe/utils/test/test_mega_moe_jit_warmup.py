@@ -74,6 +74,8 @@ class MegaMoeJitWarmupTest(unittest.TestCase):
             moe_strategy="mega_moe",
         )
         executor._mega_l1_w = torch.empty(1)
+        executor.activation = "swiglu"
+        executor._activation_kwargs = {}
         executor._input_packer = FusedMegaMoEInputPacker()
         executor.warmup_jit = mock.Mock(side_effect=RuntimeError("compile failed"))
         fake_deep_gemm = types.SimpleNamespace(get_num_sms=lambda: 148)
@@ -96,6 +98,7 @@ class MegaMoeJitWarmupTest(unittest.TestCase):
             self.addCleanup(_MEGA_MOE_JIT_WARMED_KEYS.clear)
             with self.assertRaisesRegex(RuntimeError, "compile failed"):
                 executor._maybe_warmup_jit_once()
+            executor.warmup_jit.assert_called_once()
             self.assertFalse(_MEGA_MOE_JIT_WARMED_KEYS)
             self.assertEqual(os.environ["TMPDIR"], "/old/tmp")
             self.assertTrue(
@@ -295,9 +298,8 @@ class MegaMoeJitWarmupTest(unittest.TestCase):
         )
         for executor_type, generator_path in cases:
             with self.subTest(executor=executor_type.__name__):
-                executor = executor_type.__new__(executor_type)
-                torch.nn.Module.__init__(executor)
-                executor.cfg = config
+                with mock.patch.object(executor_type, "setup_weights"):
+                    executor = executor_type(config, quant_config=None, weights={})
                 with mock.patch(generator_path, return_value=[1]) as generator:
                     self.assertEqual(
                         executor._resolve_jit_warmup_token_counts(128), [1]

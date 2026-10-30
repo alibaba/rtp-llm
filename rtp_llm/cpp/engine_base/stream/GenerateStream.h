@@ -53,6 +53,8 @@ struct StreamUpdateInfo {
         GenerationPrefillCudaGraphStatus::NOT_REQUESTED};
     // Appended to preserve existing aggregate initializers. CPU context rows.
     const torch::Tensor custom_output{};
+    // Absolute start of per-token MTP probabilities [batch, tokens, vocab].
+    int64_t speculative_token_begin = -1;
 };
 
 struct StreamSpecUpdateInfo {
@@ -77,6 +79,9 @@ struct StreamSpecUpdateInfo {
     // updates leave speculative_propose_step at zero and are not counted.
     int speculative_propose_step = 0;
     int accepted_draft_tokens    = 0;
+    // Per-accepted-token target distributions [stream_batch, accepted, vocab].
+    // Never populated from draft_token_probs.
+    torch::Tensor all_probs;
 };
 
 struct SpeculativeExecutorStreamOutput {
@@ -638,6 +643,14 @@ public:
     void markDeferredRelease();
     bool isDeferredReleasePending() const;
 
+    using LinearReplayWindow = rtp_llm::LinearReplayWindow;
+    using LinearReplayRound  = rtp_llm::LinearReplayRound;
+
+    absl::StatusOr<LinearReplayRound> prepareLinearReplayRound();
+    void publishLinearReplayWindow(std::shared_ptr<const LinearReplayWindow> window);
+    std::shared_ptr<LinearReplayBlockHold> linearReplayStateBlockHold() const;
+    void clearLinearReplayWindow();
+
     // Per-stream CUDA state used to prepare the next MTP decode step while host
     // bookkeeping may still be in flight. It carries accept_len/tokens,
     // next_seq_len, propose_tokens; epoch guards stale clears in tests.
@@ -646,7 +659,7 @@ public:
         torch::Tensor accept_len_gpu;
         torch::Tensor accept_tokens_gpu;
         torch::Tensor next_seq_len_gpu;
-        // Position tuple of the next round's newest committed token.  DSpARK
+        // Position tuple of the next round's newest committed token. MTP
         // carries this beside next_seq_len so MRoPE target-verify graphs can
         // be prepared without consulting worker-owned host bookkeeping.
         torch::Tensor next_position_ids_gpu;
@@ -677,9 +690,14 @@ public:
         // once bookkeeping catches up.
         // -1 = unset (first iter / cleared).
         int next_seq_len_upper_bound = -1;
+        // Immutable sources of replacement page tables, retained through H2D.
+        std::vector<torch::Tensor> cache_snapshot_host_buffers;
     };
 
     uint64_t setMtpAsyncDeviceState(MtpAsyncDeviceState state) {
+        RTP_LLM_CHECK_WITH_INFO(!state.propose_tokens_gpu.defined()
+                                    || state.propose_tokens_gpu.scalar_type() == torch::kInt32,
+                                "MTP device-state proposal token IDs must be int32");
         std::lock_guard<std::mutex> lock(*mtp_async_state_mutex_);
         state.epoch      = ++mtp_async_epoch_counter_;
         mtp_async_state_ = std::move(state);
@@ -890,9 +908,10 @@ public:
 
 protected:
     // moveToNext() runs under mutex_, while the async MTP worker needs the
-    // same mutex to commit accepted tokens/cache swaps.  Decide whether a
-    // capacity-boundary join is needed before taking mutex_.
-    bool needsAsyncBookkeepingJoinForKvReservation() const;
+    // same mutex to commit accepted tokens/cache swaps. Reserve under that
+    // mutex; return false if the caller must join outside it before proceeding.
+    bool prepareMtpCacheForNextStep();
+    int  speculativeTokenCount(const torch::Tensor& new_tokens, int num_new_tokens) const;
 
     // Consumer-visible state is read and written under mutex_. Public readers
     // acquire the lock; already-locked engine paths use these helpers.

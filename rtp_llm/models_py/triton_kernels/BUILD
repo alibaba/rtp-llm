@@ -32,8 +32,8 @@ genrule(
 )
 
 py_library(
-    name = "kimi_kda",
-    srcs = glob(["kimi_kda/*.py"]),
+    name = "kda",
+    srcs = glob(["kda/*.py"]),
     deps = [
         ":autotune_cache",
         ":common",
@@ -45,6 +45,11 @@ py_library(
 py_library(
     name = "causal_conv1d",
     srcs = glob(["causal_conv1d/*.py"]),
+    deps = [
+        "//rtp_llm:numpy",
+        "//rtp_llm:torch",
+        "//rtp_llm:triton",
+    ],
     visibility = ["//visibility:public"]
 )
 
@@ -58,6 +63,10 @@ py_library(
 py_library(
     name = "common",
     srcs = glob(["common/*.py"]),
+    deps = [
+        "//rtp_llm/models_py:utils",
+        "//rtp_llm/models_py/distributed:collective_torch",
+    ],
     visibility = ["//visibility:public"]
 )
 
@@ -78,17 +87,25 @@ py_library(
 )
 
 py_library(
+    name = "mla",
+    srcs = glob(["mla/*.py"]),
+    deps = ["//rtp_llm:torch"] + triton_deps(["triton"]),
+    visibility = ["//visibility:public"],
+)
+
+py_library(
     name = "triton_kernels",
-    srcs = ["legacy_fp8_indexer_score.py"],
+    srcs = ["legacy_fp8_indexer_score.py", "linear_replay.py"],
     deps = [
         ":attention",
         ":autotune_cache",
         ":fla",
-        ":kimi_kda",
+        ":kda",
         ":causal_conv1d",
         ":moe",
         ":common",
         ":sparse_mla",
+        ":mla",
     ] + triton_deps(["triton"]),
     visibility = ["//visibility:public"]
 )

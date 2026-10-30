@@ -19,6 +19,13 @@ public:
                  int64_t              topk,
                  bool                 renormalize,
                  double               routed_scaling_factor);
+    void forwardFusedSigmoid(torch::Tensor&       topk_values,
+                             torch::Tensor&       topk_indices,
+                             torch::Tensor const& router_logits,
+                             torch::Tensor const& correction_bias,
+                             int64_t              topk,
+                             bool                 renormalize,
+                             double               routed_scaling_factor);
 };
 
 void registerGroupTopKOp(const pybind11::module& m);

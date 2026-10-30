@@ -2,26 +2,53 @@
 
 #include <algorithm>
 #include <chrono>
+#include <limits>
 #include <mutex>
+#include <numeric>
 #include <unordered_set>
 #include <sstream>
 
 #include "rtp_llm/cpp/cache/CPSlotMapper.h"
 #include "rtp_llm/cpp/engine_base/schedulers/SchedulerUtils.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
+#include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 
 using namespace std;
 namespace rtp_llm {
 
-int64_t computeChunkGrant(int64_t budget, int64_t rows, int64_t remaining, int64_t block_size) {
-    if (budget <= 0 || rows <= 0 || remaining <= 0 || block_size <= 0) {
+namespace {
+
+int64_t combineChunkAlignment(int64_t alignment, int64_t tokens) {
+    if (alignment <= 0 || tokens <= 0) {
+        return 0;
+    }
+    const auto factor = alignment / std::gcd(alignment, tokens);
+    if (factor > std::numeric_limits<int>::max() / tokens) {
+        return 0;
+    }
+    return factor * tokens;
+}
+
+}  // namespace
+
+int64_t computeChunkGrant(int64_t budget, int64_t rows, int64_t remaining, int64_t alignment, int64_t prefix) {
+    if (budget <= 0 || rows <= 0 || remaining <= 0 || alignment <= 0 || prefix < 0) {
         return 0;
     }
 
     const int64_t max_len = budget / rows;
-    return remaining <= max_len ? remaining : (max_len / block_size) * block_size;
+    if (remaining <= max_len) {
+        return remaining;
+    }
+
+    // Align the absolute end; a loaded prefix may only be base-page aligned.
+    const int64_t first_boundary = (alignment - prefix % alignment) % alignment;
+    if (max_len < first_boundary) {
+        return 0;
+    }
+    return first_boundary + ((max_len - first_boundary) / alignment) * alignment;
 }
 
 FIFOSchedulerBase::FIFOSchedulerBase(const RuntimeConfig&                   runtime_config,
@@ -39,7 +66,27 @@ FIFOSchedulerBase::FIFOSchedulerBase(const RuntimeConfig&                   runt
         std::max<int64_t>(runtime_config.fifo_scheduler_config.max_inited_kv_cache_streams, 0)),
     prefill_chunk_size_(runtime_config.fifo_scheduler_config.prefill_chunk_size),
     need_fill_fake_stream_(parallelism_config.dp_size > 1 && parallelism_config.tp_rank == 0),
-    metrics_reporter_(metrics_reporter) {}
+    metrics_reporter_(metrics_reporter) {
+    const auto& config       = cache_manager_->cacheConfig();
+    const auto& mapper       = cache_manager_->cpSlotMapper();
+    prefill_chunk_alignment_ = combineChunkAlignment(1, config.seq_size_per_block);
+    if (mapper) {
+        prefill_chunk_alignment_ = combineChunkAlignment(prefill_chunk_alignment_, mapper->reuseBlockTokens(config));
+    }
+    for (const auto& group : config.groups()) {
+        prefill_chunk_alignment_ = combineChunkAlignment(prefill_chunk_alignment_, group.seqSizePerBlock());
+    }
+    if (prefill_chunk_size_ > 0) {
+        RTP_LLM_CHECK_WITH_INFO(prefill_chunk_alignment_ > 0 && prefill_chunk_size_ >= prefill_chunk_alignment_,
+                                "[chunked_prefill] invalid configuration: prefill_chunk_size=%ld, "
+                                "intermediate_chunk_alignment=%ld; requires 0 < alignment <= prefill_chunk_size",
+                                prefill_chunk_size_,
+                                prefill_chunk_alignment_);
+        RTP_LLM_LOG_INFO("[chunked_prefill] token_budget=%ld, intermediate_chunk_alignment=%ld",
+                         prefill_chunk_size_,
+                         prefill_chunk_alignment_);
+    }
+}
 
 bool FIFOSchedulerBase::empty() {
     lock_guard<mutex> lock(lock_);
@@ -134,13 +181,16 @@ absl::Status FIFOSchedulerBase::checkChunkedPrefillRequest(const GenerateStreamP
     const int64_t seq_length = stream->seqLength();
     const int64_t rows       = stream->currentBatchSize();
     const int64_t block_size = stream->seqSizePerBlock();
-    if (seq_length > 0 && rows > 0 && block_size > 0) {
+    if (seq_length > 0 && rows > 0 && block_size > 0 && prefill_chunk_alignment_ > 0) {
         for (const auto& group : cache_config.groups()) {
             const bool linear_reuse = reuse_cache && group.policy.enable_prefix_reuse
                                       && group.policy.group_type == CacheGroupType::LINEAR;
             std::string error_msg;
-            const bool  sparse_reuse =
-                reuse_cache && group.policy.enable_prefix_reuse && group.policy.group_type != CacheGroupType::FULL;
+            // Shared LINEAR state follows checkpoint alignment below. Other
+            // sparse groups still need their retained prefix to cover the prompt.
+            const bool sparse_reuse = reuse_cache && group.policy.enable_prefix_reuse
+                                      && group.policy.group_type != CacheGroupType::FULL
+                                      && !group.policy.shared_chunk_state;
             const int64_t prompt_blocks = (seq_length + group.seqSizePerBlock() - 1) / group.seqSizePerBlock();
             if (sparse_reuse && cache_config.reuse_cache_tail_blocks < prompt_blocks) {
                 error_msg = "[chunked_prefill] cache group [" + group.tag
@@ -158,9 +208,10 @@ absl::Status FIFOSchedulerBase::checkChunkedPrefillRequest(const GenerateStreamP
             } else if (linear_reuse && group.seqSizePerBlock() % 64 != 0) {
                 error_msg = "[chunked_prefill] LINEAR cache reuse requires 64-token aligned group blocks, got "
                             + std::to_string(group.seqSizePerBlock());
-            } else if (group.policy.group_type != CacheGroupType::FULL && !group.policy.shared_chunk_state
+            } else if (group.policy.group_type == CacheGroupType::SWA && !group.policy.shared_chunk_state
                        && block_size % group.seqSizePerBlock() != 0) {
-                // Prefix reuse still requires chunk boundaries to align to native sparse blocks.
+                // SWA retains its native page-layout restriction. LINEAR chunk
+                // ends instead align to every group's checkpoint period.
                 error_msg = "[chunked_prefill] cache group [" + group.tag
                             + "] requires base block size to be a multiple of group block size (base="
                             + std::to_string(block_size) + ", group=" + std::to_string(group.seqSizePerBlock()) + ")";
@@ -175,7 +226,7 @@ absl::Status FIFOSchedulerBase::checkChunkedPrefillRequest(const GenerateStreamP
 
     std::ostringstream error_msg;
     error_msg << "[chunked_prefill] invalid request shape: seq_length=" << seq_length << ", rows=" << rows
-              << ", block_size=" << block_size;
+              << ", block_size=" << block_size << ", alignment=" << prefill_chunk_alignment_;
     stream->reportError(ErrorCode::ERROR_GENERATE_CONFIG_FORMAT, error_msg.str());
     return absl::InvalidArgumentError(error_msg.str());
 }
@@ -275,7 +326,29 @@ std::list<GenerateStreamPtr> FIFOSchedulerBase::selectPrefillPrefix(std::list<Ge
             continue;
         }
 
-        const int64_t grant = computeChunkGrant(budget_left, rows, remaining, block_size);
+        // Page-RR reuse stripes and native state pages can span several
+        // base blocks. Every middle chunk must publish a state for its next prefix.
+        bool invalid_group_prefix = false;
+        for (const auto& group : cache_manager_->cacheConfig().groups()) {
+            const bool cyclic_group = group.policy.group_type != CacheGroupType::FULL
+                                      && !group.policy.shared_chunk_state
+                                      && !(stream->streamCacheResource().reuseCache()
+                                           && group.policy.enable_prefix_reuse);
+            if (cyclic_group && reuse % group.seqSizePerBlock() != 0) {
+                // A loaded prefix can be base-page aligned but start inside a
+                // larger native state page. Cyclic remapping cannot read that prefix.
+                it = finish_invalid_stream(it,
+                                           ErrorCode::INVALID_PARAMS,
+                                           "cyclic cache group [" + group.tag + "] requires a native-page aligned prefix");
+                invalid_group_prefix = true;
+                break;
+            }
+        }
+        if (invalid_group_prefix) {
+            continue;
+        }
+
+        const int64_t grant = computeChunkGrant(budget_left, rows, remaining, prefill_chunk_alignment_, reuse);
 
         if (grant <= 0) {
             if (!selected.empty()) {
@@ -287,6 +360,7 @@ std::list<GenerateStreamPtr> FIFOSchedulerBase::selectPrefillPrefix(std::list<Ge
                                            + std::to_string(prefill_chunk_size_) + ", rows=" + std::to_string(rows)
                                            + ", block_size=" + std::to_string(block_size)
                                            + ", remaining=" + std::to_string(remaining)
+                                           + ", alignment=" + std::to_string(prefill_chunk_alignment_)
                                            + "); increase prefill_chunk_size or reduce num_return_sequences");
             continue;
         }

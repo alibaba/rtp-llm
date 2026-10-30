@@ -21,7 +21,7 @@ public:
 private:
     void initLocalHostInfo();
     void initLocalPeerInfo();
-    void initCacheStore(const EngineInitParams& params, rtp_llm::ProposeModelEngineInitParams* propose_params);
+    void initCacheStore(const EngineInitParams& params, const std::shared_ptr<MemoryUtil>& memory_util);
 
 protected:
     std::string                 process_id_;
