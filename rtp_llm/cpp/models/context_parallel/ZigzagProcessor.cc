@@ -1,3 +1,4 @@
+#include "rtp_llm/cpp/utils/PrefillOptimization.h"
 #include "rtp_llm/cpp/models/context_parallel/ZigzagProcessor.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/models_py/bindings/core/OpData.h"
@@ -159,6 +160,21 @@ torch::Tensor ZigZagProcessor::computeLocalLastHidden(const torch::Tensor&      
         cp_params.prefill_cp_output_indices.index_select(0, inputs.lm_output_indexes.to(torch::kLong)).to(torch::kLong);
 
     const int64_t num_lm = sel.size(0);
+
+    if (!prefillOptimizationsEnabled()) {
+        // sel is non-negative kLong; floor-division and the residual recover (rank, offset).
+        torch::Tensor owner     = sel.div(chunk_len, c10::string_view("floor"));
+        torch::Tensor local_off = sel - owner.mul(chunk_len);
+        torch::Tensor mine      = (owner == static_cast<int64_t>(parallelism_config_.tp_rank));
+        torch::Tensor mine_rows = torch::nonzero(mine).squeeze(-1);  // positions in [0, num_lm) this rank owns
+
+        torch::Tensor local_buf = torch::zeros({num_lm, hidden}, hidden_states.options());
+        if (mine_rows.size(0) > 0) {
+            torch::Tensor my_local_off = local_off.index_select(0, mine_rows);
+            local_buf.index_copy_(0, mine_rows, hidden_states.index_select(0, my_local_off));
+        }
+        return local_buf;
+    }
 
     if (num_lm == 0) {
         return torch::empty({0, hidden}, hidden_states.options());

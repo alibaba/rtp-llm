@@ -185,3 +185,10 @@ py_test(
     tags = ["manual"],
     exec_properties = {"gpu": "L20_CU13", "gpu_count": "1"},
 )
+
+py_test(
+    name = "prefill_rollback_test",
+    srcs = ["prefill_rollback_test.py"],
+    deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
+    tags = ["manual"],
+)

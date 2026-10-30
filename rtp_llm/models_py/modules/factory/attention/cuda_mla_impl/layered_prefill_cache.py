@@ -15,6 +15,8 @@ from typing import Sequence
 
 import torch
 
+from rtp_llm.config.prefill_optimization import PREFILL_OPTIMIZATIONS_ENABLED
+
 
 def contiguous_runs(pairs: Sequence[tuple[int, int]]) -> list[tuple[int, int, int]]:
     """Coalesce (source page, destination page) pairs without copying gaps."""
@@ -98,7 +100,17 @@ class _PrefillStaging:
         )
         # Plan once per batch. No per-layer index D2H or allocator-generation
         # cache: every forward reloads the live pages, including reused IDs.
-        slots_cpu = self.original_slots.detach().cpu().to(torch.int64)
+        slots_host = getattr(op, "sharded_slot_mapping_host", None)
+        if (
+            getattr(op, "kv_cache_sharded", False)
+            and getattr(op, "_host_slot_mapping_source", None) is self.original_slots
+            and isinstance(slots_host, torch.Tensor)
+            and slots_host.device.type == "cpu"
+            and slots_host.shape == self.original_slots.shape
+        ):
+            slots_cpu = slots_host.to(torch.int64)
+        else:
+            slots_cpu = self.original_slots.detach().cpu().to(torch.int64)
         table_cpu = table.to(torch.int64)
         pages = torch.unique(table_cpu[table_cpu >= 0], sorted=True)
         if pages.numel() > self.capacity:
@@ -236,6 +248,130 @@ class _PrefillStaging:
         if failed:
             compute.synchronize()
         self.active = False
+
+    # Compatibility implementation from 70f1ecde04. Selected once at import.
+    if not PREFILL_OPTIMIZATIONS_ENABLED:
+
+        def _baseline_begin_forward(self, fmha) -> None:
+            if self.active:
+                raise RuntimeError("layered prefill forwards must be serialized")
+            if (
+                not fmha.attn_inputs.is_prefill
+                or torch.cuda.is_current_stream_capturing()
+            ):
+                raise ValueError("layered MLA staging requires eager prefill")
+            op = fmha.fmha_impl
+            table = getattr(fmha.attn_inputs, "kv_cache_kernel_block_id_host", None)
+            if not isinstance(table, torch.Tensor) or table.numel() == 0:
+                table = fmha.attn_inputs.kv_cache_block_id_host
+            if table.is_cuda or table.shape != op.block_table.shape:
+                raise ValueError(
+                    "prefill staging requires the matching CPU kernel block table"
+                )
+            self.original_slots = (
+                op.sharded_slot_mapping
+                if getattr(op, "kv_cache_sharded", False)
+                else fmha.rope_params.slot_mapping.clone()
+            )
+            # Plan once per batch. No per-layer index D2H or allocator-generation
+            # cache: every forward reloads the live pages, including reused IDs.
+            slots_cpu = self.original_slots.detach().cpu().to(torch.int64)
+            table_cpu = table.to(torch.int64)
+            pages = torch.unique(table_cpu[table_cpu >= 0], sorted=True)
+            if pages.numel() > self.capacity:
+                raise ValueError(
+                    f"prefill batch needs {pages.numel()} staging pages; capacity={self.capacity}; "
+                    "batch exceeds staging derived from the scheduler KV budget"
+                )
+            if pages.numel() and int(pages[-1]) >= self.backing[0].shape[0]:
+                raise ValueError("prefill block table exceeds logical cache capacity")
+            mapping = {page: slot for slot, page in enumerate(pages.tolist())}
+            dirty_pages = torch.unique(
+                slots_cpu[slots_cpu >= 0] // self.page_size, sorted=True
+            ).tolist()
+            if any(page not in mapping for page in dirty_pages):
+                raise ValueError(
+                    "KV write slots must belong to the current block table"
+                )
+            safe_table = table_cpu.clamp_min(0)
+            compact_table = torch.searchsorted(pages, safe_table).to(torch.int32)
+            compact_table[table_cpu < 0] = -1
+            self.block_table = compact_table.to(self.device)
+            compact_slots = torch.searchsorted(
+                pages, slots_cpu.clamp_min(0) // self.page_size
+            )
+            compact_slots = compact_slots * self.page_size + slots_cpu.remainder(
+                self.page_size
+            )
+            compact_slots[slots_cpu < 0] = -1
+            self.slots = compact_slots.to(
+                device=self.device, dtype=self.original_slots.dtype
+            )
+            self.fetch_runs = self._fetch_plan(mapping, slots_cpu)
+            self.write_runs = contiguous_runs(
+                [(mapping[page], page) for page in dirty_pages]
+            )
+            self.active = True
+            self.copy_stats = {
+                "h2d_bytes": 0,
+                "d2h_bytes": 0,
+                "h2d_calls": 0,
+                "d2h_calls": 0,
+            }
+            self.page_bytes = (
+                self.backing[0][0].numel() * self.backing[0].element_size()
+            )
+
+        begin_forward = _baseline_begin_forward
+
+        @contextmanager
+        def _baseline_attention(self, layer: int, fmha, kv_cache):
+            slot = self._acquire(layer)
+            if slot is None:
+                yield kv_cache
+                return
+            from rtp_llm.ops.compute_ops import LayerKVCache
+
+            compute = torch.cuda.current_stream(self.device)
+            self._wait_ready(slot, compute)
+            op = fmha.fmha_impl
+            original_table = op.block_table
+            original_store = fmha.write_cache_store_impl
+            has_inner_store = hasattr(op, "write_cache_store_impl")
+            original_inner_store = (
+                op.write_cache_store_impl if has_inner_store else None
+            )
+            sharded = getattr(op, "kv_cache_sharded", False)
+            target = LayerKVCache()
+            target.kv_cache_base = self.staging[slot]
+            op.block_table = self.block_table
+            if sharded:
+                op.sharded_slot_mapping = self.slots
+            else:
+                fmha.rope_params.slot_mapping.copy_(self.slots)
+            # Publish backing storage only after D2H, never the temporary slot.
+            fmha.write_cache_store_impl = None
+            if has_inner_store:
+                op.write_cache_store_impl = None
+            succeeded = False
+            try:
+                yield target
+                succeeded = True
+            finally:
+                op.block_table = original_table
+                if sharded:
+                    op.sharded_slot_mapping = self.original_slots
+                else:
+                    fmha.rope_params.slot_mapping.copy_(self.original_slots)
+                fmha.write_cache_store_impl = original_store
+                if has_inner_store:
+                    op.write_cache_store_impl = original_inner_store
+                if succeeded:
+                    self._writeback(
+                        layer, slot, compute, fmha, kv_cache, original_store
+                    )
+
+        attention = _baseline_attention
 
 
 def chunk_runs(runs, max_pages):

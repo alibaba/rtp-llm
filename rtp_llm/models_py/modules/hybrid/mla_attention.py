@@ -2,6 +2,9 @@ from contextlib import ExitStack, nullcontext
 from typing import Any, Dict, Optional, Tuple, Union
 
 import torch
+from torch import nn
+
+from rtp_llm.config.prefill_optimization import PREFILL_OPTIMIZATIONS_ENABLED
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.device.device_type import DeviceType, get_device_type
 from rtp_llm.models_py import prefill_optimization as _prefill_optimization
@@ -14,7 +17,6 @@ from rtp_llm.ops import AttentionConfigs, HWKernelConfig, ParallelismConfig
 from rtp_llm.ops.compute_ops import LayerKVCache
 from rtp_llm.utils.dsa_indexing import dsa_layer_has_indexer, dsa_layer_skips_topk
 from rtp_llm.utils.model_weight import W
-from torch import nn
 
 # CUDA-only fused strided RMSNorm (replaces .contiguous() + RMSNorm). When
 # q_b_proj is fp8, we additionally emit fp8+scale to skip a separate
@@ -365,6 +367,7 @@ class MlaAttention(nn.Module):
         q_c_scale: Optional[torch.Tensor] = None,
         prev_topk_indices: Optional[torch.Tensor] = None,
         force_reuse_topk_indices: bool = False,
+        prepared_cp_k=None,
     ) -> Optional[torch.Tensor]:
         if self.reuse_topk_indices or force_reuse_topk_indices:
             if not fmha_impl.is_sparse():
@@ -391,6 +394,7 @@ class MlaAttention(nn.Module):
             x_scale=x_scale,
             q_c_fp8=q_c_fp8,
             q_c_scale=q_c_scale,
+            **({"prepared_cp_k": prepared_cp_k} if prepared_cp_k is not None else {}),
         )
 
     def forward(
@@ -403,6 +407,50 @@ class MlaAttention(nn.Module):
         prev_topk_indices: Optional[torch.Tensor] = None,
         force_reuse_topk_indices: bool = False,
         return_topk: bool = False,
+    ) -> Union[torch.Tensor, Tuple[torch.Tensor, Optional[torch.Tensor]]]:
+        prepare = getattr(self.indexer, "prefetch_cp_k", None)
+        context = (
+            prepare(
+                hidden_states,
+                kv_cache,
+                fmha_impl.attn_inputs,
+                fmha_impl.cp_params,
+                x_fp8,
+                x_scale,
+            )
+            if (
+                prepare is not None
+                and PREFILL_OPTIMIZATIONS_ENABLED
+                and not self.reuse_topk_indices
+                and not force_reuse_topk_indices
+                and fmha_impl.is_sparse()
+            )
+            else nullcontext(None)
+        )
+        with context as prepared_cp_k:
+            return self._forward_impl(
+                hidden_states,
+                fmha_impl,
+                kv_cache,
+                x_fp8,
+                x_scale,
+                prev_topk_indices,
+                force_reuse_topk_indices,
+                return_topk,
+                prepared_cp_k=prepared_cp_k,
+            )
+
+    def _forward_impl(
+        self,
+        hidden_states: torch.Tensor,
+        fmha_impl: MlaImplBase,
+        kv_cache: Optional[LayerKVCache] = None,
+        x_fp8: Optional[torch.Tensor] = None,
+        x_scale: Optional[torch.Tensor] = None,
+        prev_topk_indices: Optional[torch.Tensor] = None,
+        force_reuse_topk_indices: bool = False,
+        return_topk: bool = False,
+        prepared_cp_k=None,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, Optional[torch.Tensor]]]:
         input_shape = hidden_states.shape[:-1]
         early_prefetch = self.q_lora_rank > 0 and self.layer_idx in getattr(
@@ -523,6 +571,7 @@ class MlaAttention(nn.Module):
                     q_c_scale,
                     prev_topk_indices,
                     force_reuse_topk_indices,
+                    prepared_cp_k=prepared_cp_k,
                 )
                 fmha_impl.prefetch_kv(self.layer_idx, topk_indices)
             defer_cross_layer_kv = (
@@ -652,6 +701,7 @@ class MlaAttention(nn.Module):
                     q_c_scale,
                     prev_topk_indices,
                     force_reuse_topk_indices,
+                    prepared_cp_k=prepared_cp_k,
                 )
             del q_c, q_c_fp8, q_c_scale
             if prepared_kv is None:

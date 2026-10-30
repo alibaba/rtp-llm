@@ -1,3 +1,4 @@
+#include "rtp_llm/cpp/utils/PrefillOptimization.h"
 #include "rtp_llm/cpp/models/PyWrappedModel.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
@@ -708,6 +709,10 @@ GptModelOutputs PyWrappedModel::forwardMicroBatched(const GptModelInputs& inputs
                                 py_model_outputs.size(),
                                 input_list.size());
 
+        if (!prefillOptimizationsEnabled() && !inputs.warmup && inputs.pd_separation) {
+            cache_store_async_writer_->waitAllDone();
+        }
+
         // TODO: merge hidden states in one tensor
         torch::Tensor hidden_states;
         if (!micro_batch_plan.enable) {
@@ -742,7 +747,7 @@ GptModelOutputs PyWrappedModel::forwardMicroBatched(const GptModelInputs& inputs
 
         return callForwardPostLayers(hidden_states, inputs, false);
     };
-    if (!inputs.warmup && inputs.pd_separation) {
+    if (prefillOptimizationsEnabled() && !inputs.warmup && inputs.pd_separation) {
         return cache_store_async_writer_->completeAfter(submit_forward_and_post);
     }
     return submit_forward_and_post();
@@ -984,6 +989,10 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
                 hidden_states         = py_model_outputs.hidden_states.clone();
             }
 
+            if (!prefillOptimizationsEnabled() && !inputs.warmup && inputs.pd_separation) {
+                cache_store_async_writer_->waitAllDone();
+            }
+
             RTP_LLM_LOG_DEBUG("Python object instance forward method called successfully.");
             // CP exit-gather + strip-padding must only run when there's an
             // actual CP-split prefill stream present.  A pure-decode batch
@@ -1042,7 +1051,7 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             }
             return callForwardPostLayers(hidden_states, inputs, true);
         };
-        if (!inputs.warmup && inputs.pd_separation) {
+        if (prefillOptimizationsEnabled() && !inputs.warmup && inputs.pd_separation) {
             return cache_store_async_writer_->completeAfter(submit_forward_and_post);
         }
         return submit_forward_and_post();
