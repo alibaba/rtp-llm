@@ -2,6 +2,7 @@ import json
 import logging
 import os
 from typing import (
+    TYPE_CHECKING,
     Any,
     List,
     Optional,
@@ -45,6 +46,10 @@ from rtp_llm.utils.database import CkptDatabase
 from rtp_llm.utils.model_weight import sp_0_pad8_size
 from rtp_llm.utils.time_util import timer_wrapper
 
+if TYPE_CHECKING:
+    from rtp_llm.config.response_format_compiler import GrammarFormat
+    from rtp_llm.dash_sc.inference.request_adapter import DashScRequestAdapter
+
 
 @runtime_checkable
 class _MultiModalModel(Protocol):
@@ -75,6 +80,16 @@ class BaseModel(object):
     fmha_config: FMHAConfig
     moe_config: MoeConfig
     runtime_config: Optional[RuntimeConfig] = None
+
+    @classmethod
+    def create_dash_sc_request_adapter(cls) -> "DashScRequestAdapter":
+        from rtp_llm.dash_sc.inference.request_adapter import DashScRequestAdapter
+
+        return DashScRequestAdapter()
+
+    @classmethod
+    def create_grammar_format(cls) -> Optional["GrammarFormat"]:
+        return None
 
     def __init__(
         self,
