@@ -15,6 +15,21 @@ namespace rtp_llm {
 struct GrammarPrefetchContext;
 struct PPSamplingState;
 
+/** Retain sampling products for draft input preparation and final result assembly. */
+struct PPSamplingOutput {
+    SamplerOutput                         sampler_output;
+    speculative::SpeculativeSamplerOutput verify_output;
+    std::vector<ErrorInfo>                request_errors;
+    int64_t                               sample_input_us = 0;
+};
+
+struct PPDraftOutput {
+    /** The complete next proposal, including DSpARK Q; result assembly decides which fields to send. */
+    SamplerOutput proposals;
+    /** Per-request final draft hidden for the MTP/EAGLE P-side handoff; otherwise undefined. */
+    torch::Tensor hidden_states;
+};
+
 class PPBatchStreamProcessor: public NormalBatchStreamProcessor {
 public:
     PPBatchStreamProcessor(const ModelConfig&                 model_config,
@@ -35,10 +50,10 @@ public:
                                  const std::unordered_map<RequestId, PPSamplingState>& sampling_states) const;
 
     void prepareSampling(const PPExecutionPlan&                              plan,
-                         const std::unordered_map<RequestId, torch::Tensor>& dspark_q,
+                         std::unordered_map<RequestId, torch::Tensor>&       dspark_q,
                          const torch::Tensor&                                d2t_map,
                          std::unordered_map<RequestId, PPSamplingState>&     sampling_states,
-                         PPExecutionResult&                                  result,
+                         std::vector<ErrorInfo>&                              request_errors,
                          SamplerOutput&                                      draft_sampler_output,
                          speculative::SpeculativeSamplingParams&             verify_params,
                          GrammarPrefetchContext*                             grammar_prefetch = nullptr);
@@ -51,16 +66,12 @@ public:
                                       size_t                                                propose_step  = 0,
                                       const torch::Tensor&                                  verify_tokens = {}) const;
 
-    void fillExecutionResult(const PPExecutionPlan& plan,
-                             const GptModelOutputs& model_output,
-                             const SamplerOutput&   sampler_output,
+    /** Called after draft submission; completes target/draft outputs and their CPU copies before sending. */
+    void fillExecutionResult(const PPExecutionPlan&  plan,
+                             const GptModelOutputs&  model_output,
+                             const PPSamplingOutput& sampling_output,
+                             const PPDraftOutput&    draft_output,
                              PPExecutionResult&     result) const;
-
-    void fillExecutionResult(const PPExecutionPlan&                       plan,
-                             const GptModelOutputs&                       model_output,
-                             const SamplerOutput&                         target_sampler_output,
-                             const speculative::SpeculativeSamplerOutput& sp_output,
-                             PPExecutionResult&                           result) const;
 
     void prepareDraftPrefillAfterTargetPrefill(GptModelInputs&      draft_prefill_input,
                                                const torch::Tensor& target_hidden_states,
@@ -79,11 +90,9 @@ public:
     void
     prepareDSparkCommitInput(GptModelInputs& commit_input, const torch::Tensor& target_features, bool cp_enabled) const;
 
-    mtp::DSparkRoundState buildDSparkRoundState(const GptModelInputs& target_input,
-                                                const torch::Tensor&  draft_next_position_ids,
-                                                const torch::Tensor&  new_token_ids,
-                                                const torch::Tensor&  new_token_lengths,
-                                                TensorHolder&         host_holder) const;
+    mtp::DSparkRoundState buildDSparkRoundState(const PPExecutionPlan&  plan,
+                                                const PPSamplingOutput& sampling_output,
+                                                TensorHolder&           host_holder) const;
 
     void prepareDSparkProposeModelInput(const mtp::DSparkRoundState& round_state,
                                         GptModelInputs&              draft_input,
@@ -92,6 +101,9 @@ public:
     torch::Tensor prepareDSparkDraftTemperature(const PPSamplingPlan& sampling_plan,
                                                 torch::Device         device,
                                                 TensorHolder&         host_holder) const;
+
+    /** Validate received results before metrics or stream updates consume them. */
+    void validateExecutionResult(const StreamGroups& stream_groups, const PPExecutionResult& result) const;
 
     void dispatchExecutionResult(const StreamGroups& stream_groups, const PPExecutionResult& result) const;
 
@@ -117,12 +129,15 @@ private:
                            size_t                                                propose_step,
                            const torch::Tensor&                                  verify_tokens) const;
 
+    static void collectRequestErrors(const PPSamplingPlan&                        sampling_plan,
+                                     const std::vector<std::optional<ErrorInfo>>& processor_errors,
+                                     const torch::Tensor&                         success_cpu,
+                                     std::vector<ErrorInfo>&                      request_errors);
+
     void fillOptionalOutputs(const PPExecutionPlan& plan,
                              const GptModelOutputs& model_output,
                              const SamplerOutput&   sampler_output,
                              PPExecutionResult&     result) const;
-
-    void validateExecutionResult(const StreamGroups& stream_groups, const PPExecutionResult& result) const;
 
     void dispatchPrefillOnlyExecutionResult(const StreamGroups& stream_groups, const PPExecutionResult& result) const;
 

@@ -170,6 +170,63 @@ public:
     int64_t               hidden_offset     = 0;
 };
 
+/** Keep GPU work pending until the test releases it; timeout also drains a failing test. */
+class CudaStreamGate {
+public:
+    explicit CudaStreamGate(const torch::Stream& stream): stream_(stream) {
+        const auto error = cudaLaunchHostFunc(
+            cuda_graph::toGraphStream(stream).stream(),
+            [](void* arg) {
+                auto&                        gate = *static_cast<CudaStreamGate*>(arg);
+                std::unique_lock<std::mutex> lock(gate.mutex_);
+                gate.entered_ = true;
+                gate.cv_.notify_all();
+                gate.timed_out_ = !gate.cv_.wait_for(lock, std::chrono::seconds(10), [&] { return gate.released_; });
+            },
+            this);
+        TORCH_CHECK(error == cudaSuccess, cudaGetErrorString(error));
+    }
+
+    ~CudaStreamGate() {
+        release();
+        stream_.synchronize();
+    }
+
+    bool waitUntilEntered() {
+        std::unique_lock<std::mutex> lock(mutex_);
+        return cv_.wait_for(lock, std::chrono::seconds(5), [&] { return entered_; });
+    }
+
+    void release() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        released_ = true;
+        cv_.notify_all();
+    }
+
+    bool timedOut() const {
+        return timed_out_.load();
+    }
+
+private:
+    torch::Stream           stream_;
+    std::mutex              mutex_;
+    std::condition_variable cv_;
+    bool                    entered_  = false;
+    bool                    released_ = false;
+    std::atomic<bool>       timed_out_{false};
+};
+
+/** A forward with pending GPU work and no CPU consumers, as on non-root or placeholder paths. */
+class PendingForwardModel: public ModelBase {
+public:
+    GptModelOutputs forward(const GptModelInputs&) override {
+        submit();
+        return {};
+    }
+
+    std::function<void()> submit;
+};
+
 class RecordingCPTargetModel: public RecordingDraftModel {
 public:
     RecordingCPTargetModel(bool cp_enabled, int rank): cp_enabled_(cp_enabled), rank_(rank) {}
@@ -3742,45 +3799,44 @@ TEST_F(PPExecutorTest, LastRequestErrorsPreserveHealthyExecutionAndStillSendResu
                 ASSERT_EQ(recorded_draft->inputs.size(), 3u);
                 EXPECT_EQ(result.propose_token_ids.sizes().vec(), (std::vector<int64_t>{2, 3}));
                 EXPECT_EQ(tensorToVector<int32_t>(recorded_draft->inputs[0].combo_tokens),
-                          (std::vector<int32_t>{2, phase == "update" ? 7 : 0, 4, 5, 8}));
+                          (std::vector<int32_t>{2, 7, 4, 5, 8}));
             }
         }
     }
 }
 
-TEST_F(PPExecutorTest, LastSampleReturnsDraftReadyResultsForPartialAndWholeBatchErrors) {
+TEST_F(PPExecutorTest, LastSamplingKeepsRawOutputsUntilResultAssembly) {
     for (bool verify : {false, true}) {
         for (bool all_failed : {false, true}) {
             SCOPED_TRACE(::testing::Message() << "verify=" << verify << ", all_failed=" << all_failed);
-            auto       params  = makeStageParams(2, SP_TYPE_MTP);
-            auto       propose = makeMtpProposeParams(params);
+            auto params = makeStageParams(2, SP_TYPE_MTP);
+            auto propose = makeMtpProposeParams(params);
             PPExecutor executor(params, nullptr, false, MlaOpsType::AUTO, nullptr, nullptr, propose.get());
-            auto       plan = makePlan(params, verify);
+            auto plan = makePlan(params, verify);
             for (int row = all_failed ? 0 : 1; row < 2; ++row) {
                 plan.sampling_plan.logits_processor_configs[row].grammar_type = "unsupported";
             }
-
             RecordingDraftModel target;
             target.next_tokens = verify ? std::vector<int32_t>{11, 40, 13, 14, 21, 22, 23, 24} :
                                           std::vector<int32_t>{7, 8};
-            const auto        model_output = target.forward(plan.model_input);
-            /** Model execution flags may be cleared after forward; sampling still follows the planned phase. */
-            plan.model_input.is_target_verify = false;
-            PPExecutionResult result;
-            executor.sampleTokens(plan, model_output, result);
-
-            ASSERT_EQ(result.request_errors.size(), 2u);
-            EXPECT_EQ(result.new_token_ids.sizes().vec(), (std::vector<int64_t>{2, verify ? 4 : 1}));
-            EXPECT_EQ(tensorToVector<int32_t>(result.new_token_lengths),
-                      (std::vector<int32_t>{all_failed ? 1 : (verify ? 2 : 1), 1}));
-            for (int row = all_failed ? 0 : 1; row < 2; ++row) {
-                EXPECT_EQ(result.request_errors[row].code(), ErrorCode::INVALID_PARAMS);
-                EXPECT_TRUE(torch::equal(result.new_token_ids[row], torch::zeros_like(result.new_token_ids[row])));
+            const auto model_output = target.forward(plan.model_input);
+            auto sampling = executor.sampleTokens(plan, model_output);
+            EXPECT_TRUE(sampling.sampler_output.token_ids.is_cuda());
+            EXPECT_TRUE(sampling.sampler_output.success.is_cuda());
+            if (verify) {
+                EXPECT_TRUE(sampling.verify_output.accept_tokens.is_cuda());
             }
-            if (!all_failed) {
-                EXPECT_TRUE(result.request_errors[0].ok());
-                const auto expected = verify ? intTensor({11, 40}) : intTensor({7});
-                EXPECT_TRUE(torch::equal(result.new_token_ids[0].narrow(0, 0, expected.numel()), expected));
+            PPExecutionResult result;
+            executor.batch_stream_processor_->fillExecutionResult(plan, model_output, sampling, {}, result);
+            const auto expected = verify ? sampling.verify_output.accept_tokens.cpu() :
+                                           sampling.sampler_output.token_ids.slice(1, -1).cpu();
+            EXPECT_TRUE(torch::equal(result.new_token_ids, expected));
+            ASSERT_EQ(result.request_errors.size(), 2u);
+            for (int row = 0; row < 2; ++row) {
+                EXPECT_EQ(result.request_errors[row].hasError(), all_failed || row == 1);
+                if (all_failed || row == 1) {
+                    EXPECT_EQ(result.request_errors[row].code(), ErrorCode::INVALID_PARAMS);
+                }
             }
         }
     }
@@ -3827,6 +3883,241 @@ TEST_F(PPExecutorTest, LastShutdownPlanCleansFinishedStatesWithoutExecutionOrRes
 }
 
 /** Last-stage draft execution: PD prefill, verification, failed rows and hidden-state handoff. */
+TEST_F(PPExecutorTpTest, LastCompletionWaitsForNonRootAndPlaceholderForward) {
+    for (int rank : {0, 1}) {
+        for (const std::string phase : {"ordinary", "prefill_only", "fake"}) {
+            if (rank == 0 && phase == "ordinary") {
+                continue;
+            }
+            SCOPED_TRACE(::testing::Message() << "rank=" << rank << ", phase=" << phase);
+            auto params = makeTpStageParams(2, rank, SP_TYPE_NONE);
+            PPExecutor executor(params, nullptr, false);
+            auto* wire = attachTransport(executor);
+            auto plan = phase == "fake" ? makeFakePlan(params, false) :
+                                          makePlan(params, false, phase == "prefill_only");
+            enqueuePlan(*wire, plan, rank != 0);
+
+            std::unique_ptr<CudaStreamGate> gate;
+            std::promise<CudaStreamGate*> submitted;
+            auto pending = submitted.get_future();
+            std::promise<void> returned;
+            auto finished = returned.get_future();
+            auto completion = cuda_graph::makeGraphEvent();
+            const auto producer = rank != 0 || phase == "prefill_only" ? cuda_graph::graphGetStreamFromPool(false) :
+                                                                       cuda_graph::graphGetCurrentStream();
+            completion.record(producer);
+            producer.synchronize();
+            auto model = std::make_unique<PendingForwardModel>();
+            model->submit = [&] {
+                gate = std::make_unique<CudaStreamGate>(producer);
+                completion.record(producer);
+                submitted.set_value(gate.get());
+            };
+            executor.setModel(std::move(model));
+            auto release = std::async(std::launch::async, [&] {
+                if (pending.wait_for(std::chrono::seconds(5)) != std::future_status::ready) {
+                    return false;
+                }
+                auto* active = pending.get();
+                const bool entered = active->waitUntilEntered();
+                const bool waited = finished.wait_for(std::chrono::milliseconds(200)) == std::future_status::timeout;
+                active->release();
+                return entered && waited;
+            });
+            const auto status = executor.process(ScheduleOutput{});
+            const bool complete_on_return = completion.query();
+            returned.set_value();
+            EXPECT_TRUE(release.get());
+            ASSERT_TRUE(status.ok());
+            EXPECT_TRUE(complete_on_return);
+            ASSERT_NE(gate, nullptr);
+            EXPECT_FALSE(gate->timedOut());
+            EXPECT_EQ(wire->sent_tensors.size(), rank == 0 ? 2u : 0u);
+            EXPECT_TRUE(executor.sampling_states_.empty());
+        }
+    }
+}
+
+TEST_F(PPExecutorTest, FillResultWaitsForTargetOutputsWithoutDraft) {
+    for (bool verify : {false, true}) {
+        SCOPED_TRACE(verify);
+        auto params  = makeStageParams(2, verify ? SP_TYPE_MTP : SP_TYPE_NONE, 2);
+        auto propose = verify ? makeMtpProposeParams(params) : nullptr;
+        PPExecutor executor(params, nullptr, false, MlaOpsType::AUTO, nullptr, nullptr, propose.get());
+        auto       plan            = makePlan(params, verify);
+        const auto stream          = cuda_graph::graphGetCurrentStream();
+        const auto expected_tokens = verify ? intTensor({11, 12, 14, 21, 25, 0}).reshape({2, 3}) :
+                                             intTensor({1, 7, 3, 8}).reshape({2, 2});
+        const auto tokens_gpu  = expected_tokens.cuda();
+        const auto lengths_gpu = intTensor({3, 2}).cuda();
+        PPSamplingOutput sampling;
+        sampling.request_errors.assign(2, ErrorInfo::OkStatus());
+        sampling.sampler_output.success =
+            torch::zeros({verify ? 6 : 2}, torch::TensorOptions(torch::kBool).device(torch::kCUDA));
+        auto& tokens = verify ? sampling.verify_output.accept_tokens : sampling.sampler_output.token_ids;
+        tokens       = torch::zeros_like(tokens_gpu);
+        if (verify) {
+            sampling.verify_output.accept_len = torch::zeros_like(lengths_gpu);
+            sampling.verify_output.accept_tokens_cpu =
+                torch::empty_like(expected_tokens, expected_tokens.options().pinned_memory(true));
+            sampling.verify_output.accept_len_cpu =
+                torch::empty({2}, torch::TensorOptions(torch::kInt32).pinned_memory(true));
+            sampling.verify_output.accept_tokens_cpu.copy_(tokens, true);
+            sampling.verify_output.accept_len_cpu.copy_(sampling.verify_output.accept_len, true);
+        }
+        /** Warm up producers before holding them pending; the result must read their later values. */
+        tokens.copy_(tokens_gpu);
+        sampling.sampler_output.success.fill_(true);
+        auto completion = cuda_graph::makeGraphEvent();
+        completion.record(stream);
+        stream.synchronize();
+        tokens.zero_();
+        sampling.sampler_output.success.zero_();
+        CudaStreamGate gate(stream);
+        ASSERT_TRUE(gate.waitUntilEntered());
+        tokens.copy_(tokens_gpu);
+        sampling.sampler_output.success.fill_(true);
+        if (verify) {
+            sampling.verify_output.accept_len.copy_(lengths_gpu);
+            sampling.verify_output.accept_tokens_cpu.copy_(tokens, true);
+            sampling.verify_output.accept_len_cpu.copy_(sampling.verify_output.accept_len, true);
+            sampling.verify_output.transfer_done_event->record(stream);
+        }
+        completion.record(stream);
+        std::promise<void> returned;
+        auto finished = returned.get_future();
+        auto release = std::async(std::launch::async, [&] {
+            const bool waited = finished.wait_for(std::chrono::milliseconds(200)) == std::future_status::timeout;
+            gate.release();
+            return waited;
+        });
+        PPExecutionResult result;
+        executor.batch_stream_processor_->fillExecutionResult(plan, {}, sampling, {}, result);
+        const bool complete_on_return = completion.query();
+        returned.set_value();
+        EXPECT_TRUE(release.get());
+        EXPECT_TRUE(complete_on_return);
+        EXPECT_FALSE(gate.timedOut());
+        EXPECT_TRUE(torch::equal(result.new_token_ids, verify ? expected_tokens : expected_tokens.narrow(1, 1, 1)));
+        EXPECT_EQ(tensorToVector<int32_t>(result.new_token_lengths),
+                  verify ? (std::vector<int32_t>{3, 2}) : (std::vector<int32_t>{1, 1}));
+        EXPECT_TRUE(result.request_errors[0].ok());
+        EXPECT_TRUE(result.request_errors[1].ok());
+        EXPECT_FALSE(result.propose_token_ids.defined());
+    }
+}
+
+TEST_F(PPExecutorTest, FillResultWaitsForFakeSpeculativeWorkOnAnotherStream) {
+    for (bool decode : {false, true}) {
+        SCOPED_TRACE(decode);
+        auto params  = makeStageParams(2, SP_TYPE_MTP, 2);
+        auto propose = makeMtpProposeParams(params);
+        PPExecutor executor(params, nullptr, false, MlaOpsType::AUTO, nullptr, nullptr, propose.get());
+        auto       plan     = makeFakePlan(params, decode);
+        auto       sampling = executor.sampleTokens(plan, {});
+        const auto producer = cuda_graph::graphGetStreamFromPool(false);
+        auto       completion = cuda_graph::makeGraphEvent();
+        completion.record(producer);
+        producer.synchronize();
+        CudaStreamGate gate(producer);
+        ASSERT_TRUE(gate.waitUntilEntered());
+        completion.record(producer);
+        std::promise<void> returned;
+        auto finished = returned.get_future();
+        auto release = std::async(std::launch::async, [&] {
+            const bool waited = finished.wait_for(std::chrono::milliseconds(200)) == std::future_status::timeout;
+            gate.release();
+            return waited;
+        });
+        PPExecutionResult result;
+        executor.batch_stream_processor_->fillExecutionResult(plan, {}, sampling, {}, result);
+        const bool complete_on_return = completion.query();
+        returned.set_value();
+        EXPECT_TRUE(release.get());
+        EXPECT_TRUE(complete_on_return);
+        EXPECT_FALSE(gate.timedOut());
+        const int width = decode ? 3 : 1;
+        EXPECT_TRUE(torch::equal(result.new_token_ids, torch::zeros({1, width}, torch::kInt32)));
+        EXPECT_EQ(result.new_token_lengths.item<int32_t>(), width);
+        EXPECT_TRUE(executor.sampling_states_.empty());
+        EXPECT_TRUE(result.request_errors[0].ok());
+    }
+}
+
+TEST_F(PPExecutorTest, FillResultWaitsForLateDraftOutputsAfterTargetTransfer) {
+    for (bool verify : {false, true}) {
+        SCOPED_TRACE(verify);
+        auto params = makeStageParams(2, SP_TYPE_MTP, 2);
+        params.pd_sep_config.role_type = verify ? RoleType::PDFUSION : RoleType::PREFILL;
+        auto propose = makeMtpProposeParams(params);
+        PPExecutor executor(params, nullptr, false, MlaOpsType::AUTO, nullptr, nullptr, propose.get());
+        auto plan = makePlan(params, verify);
+        const auto stream = cuda_graph::graphGetCurrentStream();
+        PPSamplingOutput sampling;
+        sampling.request_errors.assign(2, ErrorInfo::OkStatus());
+        sampling.sampler_output.success = torch::ones({verify ? 6 : 2}, torch::TensorOptions(torch::kBool).device(torch::kCUDA));
+        if (verify) {
+            sampling.verify_output.accept_tokens = intTensor({11, 12, 14, 21, 25, 0}).reshape({2, 3}).cuda();
+            sampling.verify_output.accept_len = intTensor({3, 2}).cuda();
+            sampling.verify_output.accept_tokens_cpu = sampling.verify_output.accept_tokens.to(torch::kCPU, true);
+            sampling.verify_output.accept_len_cpu = sampling.verify_output.accept_len.to(torch::kCPU, true);
+            sampling.verify_output.transfer_done_event->record(stream);
+        } else {
+            sampling.sampler_output.token_ids = intTensor({1, 7, 3, 8}).reshape({2, 2}).cuda();
+        }
+        const int width = verify ? 2 : 1;
+        PPDraftOutput draft;
+        draft.proposals.token_ids = torch::zeros({2, width}, torch::TensorOptions(torch::kInt32).device(torch::kCUDA));
+        if (!verify) {
+            draft.proposals.all_probs = torch::zeros({2, 1, 64}, torch::TensorOptions(torch::kFloat32).device(torch::kCUDA));
+            draft.hidden_states = torch::zeros({2, 4}, draft.proposals.all_probs.options());
+        }
+        /** Initialize kernels and events before blocking the stream to avoid CUDA lazy-init waits. */
+        draft.proposals.token_ids.fill_(0);
+        if (!verify) {
+            draft.proposals.all_probs.select(2, 17).fill_(0);
+            draft.hidden_states.fill_(0);
+        }
+        auto completion = cuda_graph::makeGraphEvent();
+        completion.record(stream);
+        stream.synchronize();
+        CudaStreamGate gate(stream);
+        ASSERT_TRUE(gate.waitUntilEntered());
+        draft.proposals.token_ids.fill_(17);
+        if (!verify) {
+            draft.proposals.all_probs.select(2, 17).fill_(1);
+            draft.hidden_states.fill_(3);
+        }
+        completion.record(stream);
+        std::promise<void> returned;
+        auto finished = returned.get_future();
+        auto release = std::async(std::launch::async, [&] {
+            const bool waited = finished.wait_for(std::chrono::milliseconds(200)) == std::future_status::timeout;
+            gate.release();
+            return waited;
+        });
+        PPExecutionResult result;
+        executor.batch_stream_processor_->fillExecutionResult(plan, {}, sampling, draft, result);
+        const bool complete_on_return = completion.query();
+        returned.set_value();
+        EXPECT_TRUE(release.get());
+        EXPECT_TRUE(complete_on_return);
+        EXPECT_FALSE(gate.timedOut());
+        EXPECT_TRUE(torch::equal(result.propose_token_ids, torch::full({2, width}, 17, torch::kInt32)));
+        EXPECT_EQ(tensorToVector<int32_t>(result.new_token_lengths),
+                  verify ? (std::vector<int32_t>{3, 2}) : (std::vector<int32_t>{1, 1}));
+        EXPECT_EQ(tensorToVector<int32_t>(result.new_token_ids),
+                  verify ? (std::vector<int32_t>{11, 12, 14, 21, 25, 0}) : (std::vector<int32_t>{7, 8}));
+        if (!verify) {
+            EXPECT_TRUE(result.propose_hidden_states.device().is_cpu());
+            EXPECT_TRUE(torch::equal(result.propose_hidden_states, torch::full({2, 4}, 3.0f)));
+            EXPECT_TRUE(result.propose_all_probs.device().is_cpu());
+            EXPECT_EQ(result.propose_all_probs.select(2, 17).sum().item<float>(), 2);
+            EXPECT_EQ(result.propose_all_probs.sum().item<float>(), 2);
+        }
+    }
+}
+
 TEST_F(PPExecutorTest, LastPrefillOnlyRunsNormalDraftWorkOnRealKvWithoutTargetSampling) {
     for (auto type : {SP_TYPE_NONE, SP_TYPE_MTP, SP_TYPE_EAGLE, SP_TYPE_DSPARK}) {
         for (auto role : {RoleType::PREFILL, RoleType::PDFUSION}) {
@@ -4106,13 +4397,13 @@ TEST_F(PPExecutorTest, LastDSparkPublicationWaitsBothWritersBeforeReturningResul
     }
 }
 
-TEST_F(PPExecutorTest, DSparkPublicationSkipsUpstreamNonPdAndWarmupWork) {
+TEST_F(PPExecutorTest, DSparkPublicationSkipsUpstreamFusedAndWarmupWork) {
     for (const auto& config : std::vector<std::pair<int, bool>>{{1, false}, {2, false}, {2, true}}) {
         const auto stage  = config.first;
         const auto warmup = config.second;
         SCOPED_TRACE(::testing::Message() << "stage=" << stage << ", warmup=" << warmup);
         auto params                    = makeStageParams(stage, SP_TYPE_DSPARK);
-        params.pd_sep_config.role_type = RoleType::PREFILL;
+        params.pd_sep_config.role_type = stage == 2 && !warmup ? RoleType::PDFUSION : RoleType::PREFILL;
         auto       propose             = makeMtpProposeParams(params);
         PPExecutor executor(params, nullptr, warmup, MlaOpsType::AUTO, nullptr, nullptr, propose.get());
         auto*      wire          = attachTransport(executor);
@@ -4131,9 +4422,6 @@ TEST_F(PPExecutorTest, DSparkPublicationSkipsUpstreamNonPdAndWarmupWork) {
         } else {
             auto plan = makePlan(params);
             if (stage == 2) {
-                /** A P-role engine can run a batch with no PD cache publication. */
-                plan.model_input.pd_separation = false;
-                plan.model_input.request_pd_separation.zero_();
                 auto draft              = installDSparkModels(executor, 3);
                 draft->wait_publication = [&] {
                     ++waits;
@@ -4246,18 +4534,17 @@ TEST_F(PPExecutorTest, PrefillHandoffUsesExplicitDraftOutputWithoutMtpBuffer) {
     draft->expose_mtp_hidden = false;
     executor.draft_model_    = std::move(draft);
     auto              plan   = makePlan(params);
-    PPExecutionResult result;
-    result.new_token_ids     = intTensor({7, 8}).reshape({2, 1});
-    result.new_token_lengths = torch::ones({2}, torch::kInt32);
-    const auto target_hidden = torch::full({5, 4}, -100.0f, torch::TensorOptions().device(torch::kCUDA));
-    executor.runDraftStep(
-        plan.model_input, plan.draft_next_position_ids, target_hidden, plan.sampling_plan, result);
+    PPSamplingOutput sampling;
+    sampling.sampler_output.token_ids = intTensor({7, 8}).reshape({2, 1});
+    GptModelOutputs target_output;
+    target_output.all_hidden_states = torch::full({5, 4}, -100.0f, torch::TensorOptions().device(torch::kCUDA));
+    const auto result = executor.runDraftStep(plan, target_output, sampling);
     auto expected = torch::arange(20, torch::kFloat32)
                         .reshape({5, 4})
                         .narrow(1, 0, 2)
                         .index_select(0, torch::tensor({1, 4}, torch::kLong));
-    ASSERT_EQ(result.propose_hidden_states.sizes().vec(), (std::vector<int64_t>{2, 2}));
-    EXPECT_TRUE(torch::equal(result.propose_hidden_states, expected));
+    ASSERT_EQ(result.hidden_states.sizes().vec(), (std::vector<int64_t>{2, 2}));
+    EXPECT_TRUE(torch::equal(result.hidden_states.cpu(), expected));
 }
 
 TEST_F(PPExecutorTest, LastDSparkHistoryDeltasMatchFullHistoryAcrossAcceptedPrefixesAndReordering) {
@@ -4469,6 +4756,8 @@ TEST_F(PPExecutorTest, LastDSparkConsumesOldQBeforeDraftAndDiscardsQAfterUpdateF
         EXPECT_TRUE(result.request_errors[1].ok());
         EXPECT_FALSE(result.propose_all_probs.defined());
         EXPECT_EQ(executor.dspark_q_.count(101), 0u);
+        EXPECT_EQ(executor.sampling_states_.count(101), 0u);
+        EXPECT_EQ(executor.sampling_states_.count(202), 1u);
         EXPECT_TRUE(executor.dspark_q_.at(202).is_cuda());
         EXPECT_TRUE(torch::equal(executor.dspark_q_.at(303), other_q));
 
@@ -4493,7 +4782,7 @@ TEST_F(PPExecutorTest, LastDSparkConsumesOldQBeforeDraftAndDiscardsQAfterUpdateF
     }
 }
 
-TEST_F(PPExecutorTest, LastDSparkMissingQFailsRequestsWithoutRecreatingTheirCache) {
+TEST_F(PPExecutorTest, LastDSparkMissingQRetiresFailedRequestState) {
     for (bool all_missing : {false, true}) {
         SCOPED_TRACE(all_missing);
         auto params                    = makeStageParams(2, SP_TYPE_DSPARK);
@@ -4518,7 +4807,6 @@ TEST_F(PPExecutorTest, LastDSparkMissingQFailsRequestsWithoutRecreatingTheirCach
         EXPECT_TRUE(result.request_errors[1].hasError());
         EXPECT_NE(result.request_errors[1].ToString().find("missing PP DSpARK proposal probabilities"),
                   std::string::npos);
-        EXPECT_EQ(result.new_token_ids[1].count_nonzero().item<int64_t>(), 0);
         EXPECT_EQ(executor.dspark_q_.count(101), all_missing ? 0u : 1u);
         EXPECT_EQ(executor.dspark_q_.count(202), 0u);
         EXPECT_EQ(draft->inputs.size(), 2u);
@@ -4689,18 +4977,20 @@ TEST_F(PPExecutorTest, LastDSparkProposalUsesRequestSamplingMode) {
             StreamGroups({first, second}), {}, false, history_lengths, holder);
         ASSERT_TRUE(gathered.ok()) << gathered.status().ToString();
         auto& plan               = gathered.value();
-        auto  result             = makeInitializedResult(plan.sampling_plan);
-        result.new_token_ids     = intTensor({30, 31}).reshape({2, 1});
-        result.new_token_lengths = intTensor({1, 1});
-        executor.runDraftStep(plan.model_input, {}, hidden, plan.sampling_plan, result);
+        PPSamplingOutput sampling;
+        sampling.verify_output.accept_tokens = intTensor({30, 31}).reshape({2, 1});
+        sampling.verify_output.accept_len = intTensor({1, 1});
+        GptModelOutputs target_output;
+        target_output.all_hidden_states = hidden;
+        const auto result = executor.runDraftStep(plan, target_output, sampling);
         const auto  q                    = torch::stack({executor.dspark_q_.at(101), executor.dspark_q_.at(202)});
         const float expected_temperature = do_sample && non_top1 ? .5f : 1.e-6f;
         const auto  expected_q = torch::softmax(logits / expected_temperature, -1).reshape({2, width, 64}).cpu();
         EXPECT_TRUE(q.is_cuda());
-        EXPECT_FALSE(result.propose_all_probs.defined());
+        EXPECT_TRUE(torch::equal(result.proposals.all_probs, q));
         EXPECT_TRUE(torch::allclose(q.cpu(), expected_q));
         if (!do_sample || !non_top1) {
-            EXPECT_TRUE(torch::equal(result.propose_token_ids, torch::full({2, width}, 10, torch::kInt32)));
+            EXPECT_TRUE(torch::equal(result.proposals.token_ids.cpu(), torch::full({2, width}, 10, torch::kInt32)));
         }
     }
 }
@@ -4844,9 +5134,12 @@ TEST_F(PPExecutorTest, LastVerifyFailuresKeepDraftRowsForPartialAndWholeBatchErr
                 const auto result = lastResult(*wire);
                 EXPECT_EQ(result.request_errors[0].hasError(), all_failed);
                 EXPECT_EQ(result.request_errors[1].code(), error.code());
-                EXPECT_EQ(tensorToVector<int32_t>(result.new_token_lengths),
-                          (std::vector<int32_t>{all_failed ? 1 : 2, 1}));
-                EXPECT_TRUE(torch::equal(result.new_token_ids[1], torch::zeros_like(result.new_token_ids[1])));
+                EXPECT_EQ(result.new_token_ids[1][0].item<int32_t>(), 21);
+                if (!all_failed) {
+                    EXPECT_EQ(result.new_token_lengths[0].item<int32_t>(), 2);
+                }
+                EXPECT_EQ(executor.sampling_states_.count(202), 0u);
+                EXPECT_EQ(executor.sampling_states_.count(101), all_failed ? 0u : 1u);
                 if (failed) {
                     EXPECT_TRUE(failed->committed_tokens.empty());
                 }
@@ -4972,10 +5265,11 @@ TEST_F(PPExecutorTest, LastDraftForwardUsesDraftCacheStrides) {
         plan.model_input.kv_block_stride_bytes = 17;
         plan.model_input.kv_scale_stride_bytes = 19;
         const auto        hidden = torch::zeros({5, 4}, torch::TensorOptions(torch::kFloat32).device(torch::kCUDA));
-        PPExecutionResult execution_result;
-        execution_result.new_token_ids     = intTensor({7, 8}).reshape({2, 1});
-        execution_result.new_token_lengths = intTensor({1, 1});
-        executor.runDraftStep(plan.model_input, {}, hidden, plan.sampling_plan, execution_result);
+        PPSamplingOutput sampling;
+        sampling.sampler_output.token_ids = intTensor({7, 8}).reshape({2, 1});
+        GptModelOutputs target_output;
+        target_output.all_hidden_states = hidden;
+        executor.runDraftStep(plan, target_output, sampling);
         ASSERT_EQ(recorded->inputs.size(), 1u);
         const auto& expected = cache->getMTPModuleCacheConfig(0);
         ASSERT_EQ(expected.groupNums(), multiple_groups ? 2 : 1);
@@ -5020,15 +5314,18 @@ TEST_F(PPExecutorTest, LastDraftChainUsesTargetAndPreviousDraftHidden) {
         target_input.combo_position_ids    = intTensor({3, 4, 5, 6, 7});
         executor.position_id_len_factor_   = 1;
 
-        PPSamplingPlan    sampling_plan;
-        PPExecutionResult execution_result;
-        execution_result.new_token_ids     = intTensor({2, 5}).reshape({2, 1});
-        execution_result.new_token_lengths = intTensor({1, 1});
-        executor.runDraftStep(target_input, intTensor({5, 8}), target_hidden, sampling_plan, execution_result);
-        const auto& proposed = execution_result.propose_token_ids;
+        PPExecutionPlan plan;
+        plan.model_input = target_input;
+        plan.draft_next_position_ids = intTensor({5, 8});
+        PPSamplingOutput sampling;
+        sampling.sampler_output.token_ids = intTensor({1, 2, 4, 5}).reshape({2, 2}).cuda();
+        GptModelOutputs target_output;
+        target_output.all_hidden_states = target_hidden;
+        const auto draft_output = executor.runDraftStep(plan, target_output, sampling);
+        EXPECT_TRUE(draft_output.proposals.token_ids.is_cuda());
+        const auto proposed = draft_output.proposals.token_ids.cpu();
         ASSERT_EQ(recorded->inputs.size(), 3u);
         EXPECT_EQ(recorded->hidden_requests, (std::vector<int64_t>{5, 2, 2}));
-        EXPECT_TRUE(proposed.device().is_cpu());
         EXPECT_EQ(proposed.scalar_type(), torch::kInt32);
         EXPECT_TRUE(torch::equal(proposed, intTensor({10, 12, 14, 11, 13, 15}).reshape({2, 3})));
         EXPECT_TRUE(torch::equal(recorded->inputs.front().last_hidden_states, target_hidden));
@@ -5097,12 +5394,16 @@ TEST_F(PPExecutorTpTest, LastDraftDecodeSynchronizesOnlyItsInitialInput) {
                     auto target_hidden = torch::arange(20, torch::TensorOptions(torch::kFloat32).device(torch::kCUDA))
                                              .reshape({5, 4})
                                              .narrow(1, 0, hidden_width);
-                    PPExecutionResult result;
+                    PPExecutionPlan plan;
+                    plan.model_input = input;
+                    plan.draft_next_position_ids = intTensor({5, 105, 8, 108});
+                    PPSamplingOutput sampling;
                     if (rank == 0) {
-                        result.new_token_ids     = intTensor({2, 5}).reshape({2, 1});
-                        result.new_token_lengths = intTensor({1, 1});
+                        sampling.sampler_output.token_ids = intTensor({2, 5}).reshape({2, 1});
                     }
-                    executor.runDraftStep(input, intTensor({5, 105, 8, 108}), target_hidden, {}, result);
+                    GptModelOutputs target_output;
+                    target_output.all_hidden_states = target_hidden;
+                    const auto result = executor.runDraftStep(plan, target_output, sampling);
 
                     ASSERT_EQ(recorded->inputs.size(), static_cast<size_t>(width));
                     ASSERT_EQ(forward_positions.size(), static_cast<size_t>(width));
@@ -5142,13 +5443,13 @@ TEST_F(PPExecutorTpTest, LastDraftDecodeSynchronizesOnlyItsInitialInput) {
                                 expected_tokens.push_back(static_cast<int32_t>(53 - 2 * step - row));
                             }
                         }
-                        EXPECT_TRUE(torch::equal(result.propose_token_ids,
+                        EXPECT_TRUE(torch::equal(result.proposals.token_ids.cpu(),
                                                  intTensor(std::move(expected_tokens)).reshape({2, width})));
                     } else {
                         EXPECT_EQ(forward_positions, root_forward_positions);
                         EXPECT_EQ(broadcasts.position(), broadcasts.size());
-                        EXPECT_FALSE(result.propose_token_ids.defined());
-                        EXPECT_FALSE(result.propose_all_probs.defined());
+                        EXPECT_FALSE(result.proposals.token_ids.defined());
+                        EXPECT_FALSE(result.proposals.all_probs.defined());
                     }
                     EXPECT_TRUE(executor.sampling_states_.empty());
                     EXPECT_TRUE(executor.dspark_q_.empty());
@@ -5412,7 +5713,8 @@ TEST_F(PPExecutorTpTest, LastCpPrefillPreservesGlobalInputsAndRetainsRankLocalHi
                 EXPECT_EQ(input.last_hidden_states.size(0), fake ? 2 : 4);
                 if (mtp_model) {
                     EXPECT_TRUE(mtp_model->hidden_requests.empty());
-                    EXPECT_EQ(mtp_model->last_hidden_requests, std::vector<int64_t>{fake ? 1 : 2});
+                    EXPECT_EQ(mtp_model->last_hidden_requests,
+                              rank == 0 ? std::vector<int64_t>{fake ? 1 : 2} : std::vector<int64_t>{});
                 } else {
                     EXPECT_TRUE(input.last_hidden_states.defined());
                 }

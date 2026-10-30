@@ -167,6 +167,12 @@ protected:
         return makeResult(tensorToVector<int64_t>(plan.request_ids));
     }
 
+    static PPSamplingOutput makeSamplingOutput(const PPSamplingPlan& plan) {
+        PPSamplingOutput output;
+        output.request_errors.assign(plan.request_ids.numel(), ErrorInfo::OkStatus());
+        return output;
+    }
+
     static void commitTokens(const GenerateStreamPtr& stream, const torch::Tensor& tokens) {
         stream->update({tokens, static_cast<int>(tokens.size(1))}, false);
         ASSERT_FALSE(stream->hasError());
@@ -202,6 +208,7 @@ protected:
         ASSERT_NE(LogitsProcessorFactory::grammarBackend(), nullptr);
     }
 
+    std::unordered_map<RequestId, torch::Tensor> dspark_q_;
     ModelConfig                      model_config_{};
     CacheConfig                      cache_config_;
     ResourceContext                  resources_;
@@ -413,11 +420,11 @@ TEST_F(PPBatchStreamProcessorTest, DSparkVerifyNormalizesTemperatureForTargetAnd
     auto       processor = makeProcessor(SP_TYPE_DSPARK, RoleType::DECODE, 2);
     const auto plan      = makePlan(processor, StreamGroups(streams));
     ASSERT_TRUE(plan.model_input.is_target_verify);
-    auto                                   result = makeResult(plan.sampling_plan);
+    auto                                   sampling_output = makeSamplingOutput(plan.sampling_plan);
     SamplingStates                         states;
     SamplerOutput                          draft;
     speculative::SpeculativeSamplingParams params;
-    processor.prepareSampling(plan, {}, {}, states, result, draft, params);
+    processor.prepareSampling(plan, dspark_q_, {}, states, sampling_output.request_errors, draft, params);
     const auto   inputs = processor.gatherSamplerInputs(plan.sampling_plan,
                                                       plan.output_config,
                                                       torch::zeros({static_cast<int64_t>(cases.size()) * 3, 64}),
@@ -579,8 +586,8 @@ TEST_F(PPBatchStreamProcessorTest, IncrementalHistorySurvivesBatchChangesAndBuil
     SamplingStates                         states;
     SamplerOutput                          draft;
     speculative::SpeculativeSamplingParams params;
-    auto                                   result = makeResult(plan);
-    processor.prepareSampling(execution_plan, {}, {}, states, result, draft, params);
+    auto                                   sampling_output = makeSamplingOutput(plan);
+    processor.prepareSampling(execution_plan, dspark_q_, {}, states, sampling_output.request_errors, draft, params);
     const auto generator                      = states.at(101).sampling.generator;
     auto       recorder                       = std::make_shared<RecordingLogitsProcessor>();
     states.at(101).sampling.logits_processors = {recorder};
@@ -594,8 +601,8 @@ TEST_F(PPBatchStreamProcessorTest, IncrementalHistorySurvivesBatchChangesAndBuil
     EXPECT_EQ(tensorToVector<RequestId>(plan.request_ids), (std::vector<RequestId>{101, 303}));
     EXPECT_EQ(tensorToVector<int32_t>(plan.token_ids), (std::vector<int32_t>{6, 7, 8, 9, 10}));
     EXPECT_EQ(tensorToVector<int64_t>(plan.token_offsets), (std::vector<int64_t>{0, 2, 4, 5}));
-    result = makeResult(plan);
-    processor.prepareSampling(execution_plan, {}, {}, states, result, draft, params);
+    sampling_output = makeSamplingOutput(plan);
+    processor.prepareSampling(execution_plan, dspark_q_, {}, states, sampling_output.request_errors, draft, params);
     EXPECT_EQ(states.at(101).token_history, (std::vector<std::vector<int32_t>>{{1, 2, 6, 7}, {1, 2, 8, 9}}));
     EXPECT_EQ(states.at(202).token_history, (std::vector<std::vector<int32_t>>{{3, 4, 5}}));
     EXPECT_EQ(states.at(101).sampling.generator, generator);
@@ -608,8 +615,8 @@ TEST_F(PPBatchStreamProcessorTest, IncrementalHistorySurvivesBatchChangesAndBuil
     EXPECT_EQ(tensorToVector<RequestId>(plan.request_ids), (std::vector<RequestId>{202, 101, 303}));
     EXPECT_EQ(tensorToVector<int32_t>(plan.token_ids), (std::vector<int32_t>{11}));
     EXPECT_EQ(tensorToVector<int64_t>(plan.token_offsets), (std::vector<int64_t>{0, 1, 1, 1, 1}));
-    result = makeResult(plan);
-    processor.prepareSampling(execution_plan, {}, {}, states, result, draft, params);
+    sampling_output = makeSamplingOutput(plan);
+    processor.prepareSampling(execution_plan, dspark_q_, {}, states, sampling_output.request_errors, draft, params);
 
     const auto inputs = processor.gatherSamplerInputs(plan, {}, torch::zeros({4, 64}), states);
     EXPECT_EQ(tensorToVector<int32_t>(inputs.sequence_lengths), (std::vector<int32_t>{4, 4, 4, 1}));
@@ -626,8 +633,8 @@ TEST_F(PPBatchStreamProcessorTest, IncrementalHistorySurvivesBatchChangesAndBuil
     EXPECT_TRUE(plan.token_ids.defined());
     EXPECT_EQ(plan.token_ids.numel(), 0);
     EXPECT_EQ(tensorToVector<int64_t>(plan.token_offsets), (std::vector<int64_t>{0, 0, 0, 0, 0}));
-    result = makeResult(plan);
-    processor.prepareSampling(execution_plan, {}, {}, states, result, draft, params);
+    sampling_output = makeSamplingOutput(plan);
+    processor.prepareSampling(execution_plan, dspark_q_, {}, states, sampling_output.request_errors, draft, params);
     EXPECT_EQ(states.at(202).token_history, (std::vector<std::vector<int32_t>>{{3, 4, 5, 11}}));
     EXPECT_EQ(recorder->updates, 0);
 }
@@ -640,12 +647,18 @@ TEST_F(PPBatchStreamProcessorTest, SamplingStatesPreserveExistingRequestWhenAddi
     std::unordered_map<RequestId, int32_t> history_lengths;
     auto           execution_plan = makePlan(processor, StreamGroups({existing}), history_lengths);
     auto&          plan           = execution_plan.sampling_plan;
-    auto           result         = makeResult(plan);
+    auto           sampling_output         = makeSamplingOutput(plan);
     SamplingStates states;
     SamplerOutput  draft_sampler_output;
     speculative::SpeculativeSamplingParams params;
-    processor.prepareSampling(execution_plan, {}, {}, states, result, draft_sampler_output, params);
-    ASSERT_TRUE(result.request_errors[0].ok());
+    processor.prepareSampling(execution_plan,
+                              dspark_q_,
+                              {},
+                              states,
+                              sampling_output.request_errors,
+                              draft_sampler_output,
+                              params);
+    ASSERT_TRUE(sampling_output.request_errors[0].ok());
     auto& state = states.at(101).sampling;
     ASSERT_TRUE(state.generator.defined());
     EXPECT_EQ(state.generator.current_seed(), 123);
@@ -659,11 +672,17 @@ TEST_F(PPBatchStreamProcessorTest, SamplingStatesPreserveExistingRequestWhenAddi
 
     auto added     = makeStream(202, {3}, config(0));
     execution_plan = makePlan(processor, StreamGroups({existing, added}), history_lengths);
-    result         = makeResult(plan);
-    processor.prepareSampling(execution_plan, {}, {}, states, result, draft_sampler_output, params);
+    sampling_output         = makeSamplingOutput(plan);
+    processor.prepareSampling(execution_plan,
+                              dspark_q_,
+                              {},
+                              states,
+                              sampling_output.request_errors,
+                              draft_sampler_output,
+                              params);
     ASSERT_EQ(states.size(), 2);
-    EXPECT_TRUE(result.request_errors[0].ok());
-    EXPECT_TRUE(result.request_errors[1].ok());
+    EXPECT_TRUE(sampling_output.request_errors[0].ok());
+    EXPECT_TRUE(sampling_output.request_errors[1].ok());
     EXPECT_EQ(states.at(101).sampling.generator, generator);
     EXPECT_TRUE(torch::equal(states.at(101).sampling.generator.get_state(), rng_state));
     EXPECT_EQ(states.at(101).sampling.logits_processors, processors);
@@ -681,29 +700,47 @@ TEST_F(PPBatchStreamProcessorTest, SamplingStatesReplayPdAnchorAtSequenceOffsetO
     std::unordered_map<RequestId, int32_t> history_lengths;
     auto           execution_plan = makePlan(processor, StreamGroups({existing}), history_lengths);
     auto&          plan           = execution_plan.sampling_plan;
-    auto           result         = makeResult(plan);
+    auto           sampling_output         = makeSamplingOutput(plan);
     SamplingStates states;
     SamplerOutput  draft_sampler_output;
     speculative::SpeculativeSamplingParams params;
-    processor.prepareSampling(execution_plan, {}, {}, states, result, draft_sampler_output, params);
+    processor.prepareSampling(execution_plan,
+                              dspark_q_,
+                              {},
+                              states,
+                              sampling_output.request_errors,
+                              draft_sampler_output,
+                              params);
 
     auto cfg   = config();
     cfg.regex  = "abc";
     auto added = makeStream(202, {3}, cfg);
     commitTokens(added, intTensor({0}).reshape({1, 1}));
     execution_plan = makePlan(processor, StreamGroups({existing, added}), history_lengths);
-    result         = makeResult(plan);
+    sampling_output         = makeSamplingOutput(plan);
     ASSERT_EQ(plan.logits_processor_configs[1].grammar_type, "regex");
     EXPECT_EQ(plan.logits_processor_configs[1].grammar_value, "abc");
-    processor.prepareSampling(execution_plan, {}, {}, states, result, draft_sampler_output, params);
-    ASSERT_TRUE(result.request_errors[1].ok());
+    processor.prepareSampling(execution_plan,
+                              dspark_q_,
+                              {},
+                              states,
+                              sampling_output.request_errors,
+                              draft_sampler_output,
+                              params);
+    ASSERT_TRUE(sampling_output.request_errors[1].ok());
     const auto processors = states.at(202).sampling.logits_processors;
     ASSERT_EQ(processors.size(), 1);
     EXPECT_EQ(processors[0]->committedOutputLen(), std::optional<int64_t>(1));
     execution_plan = makePlan(processor, StreamGroups({existing, added}), history_lengths);
-    result         = makeResult(plan);
-    processor.prepareSampling(execution_plan, {}, {}, states, result, draft_sampler_output, params);
-    EXPECT_TRUE(result.request_errors[1].ok());
+    sampling_output         = makeSamplingOutput(plan);
+    processor.prepareSampling(execution_plan,
+                              dspark_q_,
+                              {},
+                              states,
+                              sampling_output.request_errors,
+                              draft_sampler_output,
+                              params);
+    EXPECT_TRUE(sampling_output.request_errors[1].ok());
     EXPECT_EQ(states.at(202).sampling.logits_processors, processors);
     EXPECT_EQ(processors[0]->committedOutputLen(), std::optional<int64_t>(1));
 }
@@ -716,12 +753,18 @@ TEST_F(PPBatchStreamProcessorTest, SamplingStatesDoNotReplayThePrefillPromptAsGe
     auto                                   processor      = makeProcessor();
     auto                                   execution_plan = makePlan(processor, StreamGroups({stream}));
     const auto&                            plan           = execution_plan.sampling_plan;
-    auto                                   result         = makeResult(plan);
+    auto                                   sampling_output         = makeSamplingOutput(plan);
     SamplingStates                         states;
     SamplerOutput                          draft_sampler_output;
     speculative::SpeculativeSamplingParams params;
-    processor.prepareSampling(execution_plan, {}, {}, states, result, draft_sampler_output, params);
-    EXPECT_TRUE(result.request_errors[0].ok());
+    processor.prepareSampling(execution_plan,
+                              dspark_q_,
+                              {},
+                              states,
+                              sampling_output.request_errors,
+                              draft_sampler_output,
+                              params);
+    EXPECT_TRUE(sampling_output.request_errors[0].ok());
     EXPECT_FALSE(draft_sampler_output.token_ids.defined());
     EXPECT_FALSE(draft_sampler_output.all_probs.defined());
     EXPECT_FALSE(params.do_sample.defined());
@@ -770,14 +813,21 @@ TEST_F(PPBatchStreamProcessorTest, UnsupportedGrammarIsSkippedByAsyncPreparation
     auto           context = processor.prepareLogitsProcessorsAsync(execution_plan.sampling_plan, states);
     EXPECT_TRUE(context.handles.empty());
 
-    auto                                   result = makeResult(execution_plan.sampling_plan);
+    auto                                   sampling_output = makeSamplingOutput(execution_plan.sampling_plan);
     SamplerOutput                          draft_sampler_output;
     speculative::SpeculativeSamplingParams params;
-    processor.prepareSampling(execution_plan, {}, {}, states, result, draft_sampler_output, params, &context);
+    processor.prepareSampling(execution_plan,
+                              dspark_q_,
+                              {},
+                              states,
+                              sampling_output.request_errors,
+                              draft_sampler_output,
+                              params,
+                              &context);
 
-    ASSERT_EQ(result.request_errors.size(), 1u);
-    EXPECT_EQ(result.request_errors[0].code(), ErrorCode::INVALID_PARAMS);
-    EXPECT_NE(result.request_errors[0].ToString().find("unsupported grammar type"), std::string::npos);
+    ASSERT_EQ(sampling_output.request_errors.size(), 1u);
+    EXPECT_EQ(sampling_output.request_errors[0].code(), ErrorCode::INVALID_PARAMS);
+    EXPECT_NE(sampling_output.request_errors[0].ToString().find("unsupported grammar type"), std::string::npos);
 }
 
 TEST_F(PPBatchStreamProcessorTest, SamplingStateInitializationFailureIsRequestLocal) {
@@ -792,13 +842,19 @@ TEST_F(PPBatchStreamProcessorTest, SamplingStateInitializationFailureIsRequestLo
     const auto& plan           = execution_plan.sampling_plan;
     /** A tail with no grammar backend must return an error while retaining rows for ordinary sampling. */
     LogitsProcessorFactory::grammarBackend().reset();
-    auto                                   result = makeResult(plan);
+    auto                                   sampling_output = makeSamplingOutput(plan);
     SamplingStates                         states;
     SamplerOutput                          draft_sampler_output;
     speculative::SpeculativeSamplingParams params;
-    processor.prepareSampling(execution_plan, {}, {}, states, result, draft_sampler_output, params);
-    EXPECT_EQ(result.request_errors[0].code(), ErrorCode::INVALID_PARAMS);
-    EXPECT_TRUE(result.request_errors[1].ok());
+    processor.prepareSampling(execution_plan,
+                              dspark_q_,
+                              {},
+                              states,
+                              sampling_output.request_errors,
+                              draft_sampler_output,
+                              params);
+    EXPECT_EQ(sampling_output.request_errors[0].code(), ErrorCode::INVALID_PARAMS);
+    EXPECT_TRUE(sampling_output.request_errors[1].ok());
     ASSERT_EQ(states.size(), 2);
     EXPECT_TRUE(states.at(101).sampling.logits_processors.empty());
     EXPECT_EQ(states.at(101).sampling.generator.current_seed(), 456);
@@ -835,9 +891,15 @@ TEST_F(PPBatchStreamProcessorTest, DSparkQFollowsRequestOrderAcrossDenseAndHando
     std::unordered_map<RequestId, int32_t>       history_lengths;
     auto          plan     = makePlan(processor, StreamGroups({first, second, third}), history_lengths);
     auto&         sampling = plan.sampling_plan;
-    auto          result   = makeResult(sampling);
+    auto          sampling_output   = makeSamplingOutput(sampling);
     SamplerOutput draft_sampler_output;
-    processor.prepareSampling(plan, dspark_q, {}, states, result, draft_sampler_output, verify_params);
+    processor.prepareSampling(plan,
+                              dspark_q,
+                              {},
+                              states,
+                              sampling_output.request_errors,
+                              draft_sampler_output,
+                              verify_params);
     EXPECT_FALSE(draft_sampler_output.token_ids_are_point_mass);
     ASSERT_TRUE(draft_sampler_output.all_probs.defined());
     EXPECT_TRUE(draft_sampler_output.all_probs.is_cuda());
@@ -859,7 +921,7 @@ TEST_F(PPBatchStreamProcessorTest, DSparkQFollowsRequestOrderAcrossDenseAndHando
     ASSERT_TRUE(verify_params.generators[2].defined());
     EXPECT_EQ(verify_params.generators[2].current_seed(), 456);
     ASSERT_EQ(states.size(), 3u);
-    for (const auto& error : result.request_errors) {
+    for (const auto& error : sampling_output.request_errors) {
         EXPECT_TRUE(error.ok());
     }
 
@@ -873,10 +935,16 @@ TEST_F(PPBatchStreamProcessorTest, DSparkQFollowsRequestOrderAcrossDenseAndHando
     /** A request from another inflight batch remains cached while these requests change order. */
     setProposals(third, {0, 2, 2});
     plan                 = makePlan(processor, StreamGroups({third, first}), history_lengths);
-    result               = makeResult(sampling);
+    sampling_output               = makeSamplingOutput(sampling);
     verify_params        = speculative::SpeculativeSamplingParams{};
     draft_sampler_output = SamplerOutput{};
-    processor.prepareSampling(plan, dspark_q, {}, states, result, draft_sampler_output, verify_params);
+    processor.prepareSampling(plan,
+                              dspark_q,
+                              {},
+                              states,
+                              sampling_output.request_errors,
+                              draft_sampler_output,
+                              verify_params);
     EXPECT_TRUE(torch::equal(draft_sampler_output.all_probs, torch::stack({q[2], q[0]})));
     EXPECT_TRUE(draft_sampler_output.all_probs.is_contiguous());
     EXPECT_EQ(draft_sampler_output.all_probs.data_ptr<float>(), initial_storage);
@@ -886,7 +954,10 @@ TEST_F(PPBatchStreamProcessorTest, DSparkQFollowsRequestOrderAcrossDenseAndHando
     ASSERT_EQ(verify_params.generators.size(), 2u);
     EXPECT_EQ(verify_params.generators[0], states.at(303).sampling.generator);
     EXPECT_EQ(verify_params.generators[1], states.at(101).sampling.generator);
-    EXPECT_EQ(dspark_q.size(), 3u);
+    EXPECT_EQ(dspark_q.size(), 1u);
+    EXPECT_TRUE(torch::equal(dspark_q.at(202), q[1]));
+    dspark_q.emplace(101, q[0]);
+    dspark_q.emplace(303, q[2]);
 
     auto fourth = makeStream(404, {5});
     auto fifth  = makeStream(505, {6});
@@ -895,10 +966,16 @@ TEST_F(PPBatchStreamProcessorTest, DSparkQFollowsRequestOrderAcrossDenseAndHando
         setProposals(stream, {0, 0, 0});
     }
     plan                 = makePlan(processor, StreamGroups({fourth, third, fifth, first}), history_lengths);
-    result               = makeResult(sampling);
+    sampling_output               = makeSamplingOutput(sampling);
     verify_params        = speculative::SpeculativeSamplingParams{};
     draft_sampler_output = SamplerOutput{};
-    processor.prepareSampling(plan, dspark_q, {}, states, result, draft_sampler_output, verify_params);
+    processor.prepareSampling(plan,
+                              dspark_q,
+                              {},
+                              states,
+                              sampling_output.request_errors,
+                              draft_sampler_output,
+                              verify_params);
     EXPECT_TRUE(torch::equal(draft_sampler_output.token_ids, intTensor({0, 0, 2, 2, 0, 0, 0, 0}).reshape({4, 2})));
     EXPECT_FALSE(draft_sampler_output.token_ids_are_point_mass);
     EXPECT_TRUE(torch::equal(draft_sampler_output.all_probs[1], q[2]));
@@ -915,9 +992,11 @@ TEST_F(PPBatchStreamProcessorTest, DSparkQFollowsRequestOrderAcrossDenseAndHando
     const auto grown_storage = draft_sampler_output.all_probs.data_ptr<float>();
     EXPECT_TRUE(draft_sampler_output.all_probs.is_contiguous());
     draft_sampler_output.all_probs[1].zero_();
-    EXPECT_EQ(dspark_q.at(303).sum().item<float>(), 2);
+    EXPECT_EQ(q[2].sum().item<float>(), 2);
+    EXPECT_EQ(dspark_q.count(303), 0u);
+    EXPECT_EQ(dspark_q.count(101), 0u);
     EXPECT_TRUE(torch::equal(dspark_q.at(202), q[1]));
-    for (const auto& error : result.request_errors) {
+    for (const auto& error : sampling_output.request_errors) {
         EXPECT_TRUE(error.ok());
     }
 
@@ -928,10 +1007,16 @@ TEST_F(PPBatchStreamProcessorTest, DSparkQFollowsRequestOrderAcrossDenseAndHando
         setProposals(stream, {0, 0, 0});
     }
     plan                 = makePlan(processor, StreamGroups({sixth, seventh}), history_lengths);
-    result               = makeResult(sampling);
+    sampling_output               = makeSamplingOutput(sampling);
     verify_params        = speculative::SpeculativeSamplingParams{};
     draft_sampler_output = SamplerOutput{};
-    processor.prepareSampling(plan, dspark_q, {}, states, result, draft_sampler_output, verify_params);
+    processor.prepareSampling(plan,
+                              dspark_q,
+                              {},
+                              states,
+                              sampling_output.request_errors,
+                              draft_sampler_output,
+                              verify_params);
     EXPECT_FALSE(draft_sampler_output.token_ids_are_point_mass);
     ASSERT_TRUE(draft_sampler_output.all_probs.defined());
     EXPECT_EQ(draft_sampler_output.all_probs.sizes().vec(), (std::vector<int64_t>{2, 2, 16}));
@@ -945,8 +1030,8 @@ TEST_F(PPBatchStreamProcessorTest, DSparkQFollowsRequestOrderAcrossDenseAndHando
     ASSERT_EQ(verify_params.generators.size(), 2u);
     EXPECT_FALSE(verify_params.generators[0].defined());
     EXPECT_FALSE(verify_params.generators[1].defined());
-    EXPECT_EQ(dspark_q.size(), 3u);
-    for (const auto& error : result.request_errors) {
+    EXPECT_EQ(dspark_q.size(), 1u);
+    for (const auto& error : sampling_output.request_errors) {
         EXPECT_TRUE(error.ok());
     }
 }
@@ -965,10 +1050,10 @@ TEST_F(PPBatchStreamProcessorTest, DSparkPreparesMappedAndHandoffQBeforeSampling
         SamplingStates states;
         std::unordered_map<RequestId, int32_t> history_lengths;
         auto                                   plan   = makePlan(processor, StreamGroups({existing}), history_lengths);
-        auto                                   result = makeResult(plan.sampling_plan);
+        auto                                   sampling_output = makeSamplingOutput(plan.sampling_plan);
         SamplerOutput                          draft;
         speculative::SpeculativeSamplingParams params;
-        processor.prepareSampling(plan, {}, {}, states, result, draft, params);
+        processor.prepareSampling(plan, dspark_q_, {}, states, sampling_output.request_errors, draft, params);
         commitTokens(existing, intTensor({1}).reshape({1, 1}));
         commitTokens(handoff, intTensor({2}).reshape({1, 1}));
         setProposals(existing, reduced ? std::vector<int32_t>{1, 1, 3} : std::vector<int32_t>{1, 2, 3});
@@ -979,8 +1064,8 @@ TEST_F(PPBatchStreamProcessorTest, DSparkPreparesMappedAndHandoffQBeforeSampling
         std::unordered_map<RequestId, torch::Tensor> cache{{101, cached}};
         /** Handoff candidates are target token 0, so their Q bypasses the draft vocabulary mapping. */
         plan   = makePlan(processor, StreamGroups({existing, handoff}), history_lengths);
-        result = makeResult(plan.sampling_plan);
-        processor.prepareSampling(plan, cache, map, states, result, draft, params);
+        sampling_output = makeSamplingOutput(plan.sampling_plan);
+        processor.prepareSampling(plan, cache, map, states, sampling_output.request_errors, draft, params);
         auto expected_q = torch::zeros({2, 2, 4}, f32);
         expected_q[0].copy_(reduced ? torch::tensor({{0.f, .25f, 0.f, .75f}, {0.f, .5f, 0.f, .5f}}, f32) :
                                       torch::tensor({{.2f, .4f, .1f, .3f}, {.3f, .1f, .4f, .2f}}, f32));
@@ -992,7 +1077,8 @@ TEST_F(PPBatchStreamProcessorTest, DSparkPreparesMappedAndHandoffQBeforeSampling
         EXPECT_TRUE(draft.token_ids.is_contiguous());
         EXPECT_FALSE(draft.token_ids_are_point_mass);
         EXPECT_TRUE(torch::equal(cached, snapshot));
-        for (const auto& error : result.request_errors) {
+        EXPECT_TRUE(cache.empty());
+        for (const auto& error : sampling_output.request_errors) {
             EXPECT_TRUE(error.ok());
         }
     }
@@ -1006,31 +1092,34 @@ TEST_F(PPBatchStreamProcessorTest, DSparkMissingCachedQReportsErrorAndClearsStal
     SamplingStates                         states;
     std::unordered_map<RequestId, int32_t> history_lengths;
     auto                                   plan   = makePlan(processor, StreamGroups({first, second}), history_lengths);
-    auto                                   result = makeResult(plan.sampling_plan);
+    auto                                   sampling_output = makeSamplingOutput(plan.sampling_plan);
     SamplerOutput                          draft;
     speculative::SpeculativeSamplingParams params;
-    processor.prepareSampling(plan, {}, {}, states, result, draft, params);
+    processor.prepareSampling(plan, dspark_q_, {}, states, sampling_output.request_errors, draft, params);
     commitTokens(first, intTensor({1}).reshape({1, 1}));
     commitTokens(second, intTensor({2}).reshape({1, 1}));
     setProposals(first, {1, 3});
     setProposals(second, {2, 2});
     plan           = makePlan(processor, StreamGroups({first, second}), history_lengths);
-    result         = makeResult(plan.sampling_plan);
+    sampling_output         = makeSamplingOutput(plan.sampling_plan);
     const auto f32 = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA);
     std::unordered_map<RequestId, torch::Tensor> cache{{101, torch::tensor({{0.f, .25f, 0.f, .75f}}, f32)},
                                                        {202, torch::tensor({{0.f, 0.f, 1.f, 0.f}}, f32)}};
-    processor.prepareSampling(plan, cache, {}, states, result, draft, params);
-    EXPECT_TRUE(torch::equal(draft.all_probs, torch::stack({cache.at(101), cache.at(202)})));
+    const auto first_q = cache.at(101);
+    const auto second_q = cache.at(202);
+    processor.prepareSampling(plan, cache, {}, states, sampling_output.request_errors, draft, params);
+    EXPECT_TRUE(torch::equal(draft.all_probs, torch::stack({first_q, second_q})));
+    EXPECT_TRUE(cache.empty());
 
-    cache.erase(202);
+    cache.emplace(101, first_q);
     plan   = makePlan(processor, StreamGroups({first, second}), history_lengths);
-    result = makeResult(plan.sampling_plan);
-    processor.prepareSampling(plan, cache, {}, states, result, draft, params);
-    EXPECT_TRUE(result.request_errors[0].ok());
-    EXPECT_NE(result.request_errors[1].ToString().find("missing PP DSpARK proposal probabilities"), std::string::npos);
-    EXPECT_TRUE(torch::equal(draft.all_probs[0], cache.at(101)));
+    sampling_output = makeSamplingOutput(plan.sampling_plan);
+    processor.prepareSampling(plan, cache, {}, states, sampling_output.request_errors, draft, params);
+    EXPECT_TRUE(sampling_output.request_errors[0].ok());
+    EXPECT_NE(sampling_output.request_errors[1].ToString().find("missing PP DSpARK proposal probabilities"), std::string::npos);
+    EXPECT_TRUE(torch::equal(draft.all_probs[0], first_q));
     EXPECT_EQ(draft.all_probs[1].count_nonzero().item<int64_t>(), 0);
-    EXPECT_EQ(cache.size(), 1u);
+    EXPECT_TRUE(cache.empty());
 }
 
 /** Verify rows append candidate prefixes to committed history without advancing persistent state. */
@@ -1047,11 +1136,17 @@ TEST_F(PPBatchStreamProcessorTest, SamplerInputsRouteMultiSequenceStateAndClampP
     StreamGroups                           groups({multi, single});
     const auto                             execution_plan = makePlan(processor, groups);
     const auto&                            plan           = execution_plan.sampling_plan;
-    auto                                   result         = makeResult(plan);
+    auto                                   sampling_output         = makeSamplingOutput(plan);
     SamplingStates                         states;
     SamplerOutput                          draft_sampler_output;
     speculative::SpeculativeSamplingParams params;
-    processor.prepareSampling(execution_plan, {}, {}, states, result, draft_sampler_output, params);
+    processor.prepareSampling(execution_plan,
+                              dspark_q_,
+                              {},
+                              states,
+                              sampling_output.request_errors,
+                              draft_sampler_output,
+                              params);
     states.at(101).sampling.cum_log_probs.copy_(torch::tensor({-2.0f, -4.0f}));
     auto first_processor                      = std::make_shared<RecordingLogitsProcessor>();
     auto second_processor                     = std::make_shared<RecordingLogitsProcessor>();
@@ -1095,11 +1190,17 @@ TEST_F(PPBatchStreamProcessorTest, VerifySamplerInputsExpandEachCandidatePrefix)
     const auto                             execution_plan = makePlan(processor, StreamGroups({first, second}));
     const auto&                            candidates     = execution_plan.model_input.combo_tokens;
     const auto&                            plan           = execution_plan.sampling_plan;
-    auto                                   result         = makeResult(plan);
+    auto                                   sampling_output         = makeSamplingOutput(plan);
     SamplingStates                         states;
     SamplerOutput                          draft_sampler_output;
     speculative::SpeculativeSamplingParams params;
-    processor.prepareSampling(execution_plan, {}, {}, states, result, draft_sampler_output, params);
+    processor.prepareSampling(execution_plan,
+                              dspark_q_,
+                              {},
+                              states,
+                              sampling_output.request_errors,
+                              draft_sampler_output,
+                              params);
     EXPECT_TRUE(torch::equal(draft_sampler_output.token_ids, intTensor({2, 9, 10, 8, 11, 12}).reshape({2, 3})));
     EXPECT_TRUE(draft_sampler_output.token_ids_are_point_mass);
     EXPECT_FALSE(draft_sampler_output.all_probs.defined());
@@ -1147,11 +1248,17 @@ TEST_F(PPBatchStreamProcessorTest, SamplerInputsPreserveRequestedRawLogitsAndPro
     auto                                   processor      = makeProcessor();
     auto                                   execution_plan = makePlan(processor, StreamGroups({stream}));
     const auto&                            plan           = execution_plan.sampling_plan;
-    auto                                   result         = makeResult(plan);
+    auto                                   sampling_output         = makeSamplingOutput(plan);
     SamplingStates                         states;
     SamplerOutput                          draft_sampler_output;
     speculative::SpeculativeSamplingParams params;
-    processor.prepareSampling(execution_plan, {}, {}, states, result, draft_sampler_output, params);
+    processor.prepareSampling(execution_plan,
+                              dspark_q_,
+                              {},
+                              states,
+                              sampling_output.request_errors,
+                              draft_sampler_output,
+                              params);
     for (bool return_logits : {false, true}) {
         PPOutputConfig output;
         output.return_logits        = return_logits;
@@ -1184,11 +1291,17 @@ TEST_F(PPBatchStreamProcessorTest, OrdinarySamplerMasksPaddingAndKeepsProbabilit
         auto                                   processor        = makeProcessor();
         auto                                   execution_plan   = makePlan(processor, StreamGroups({stream}));
         const auto&                            plan             = execution_plan.sampling_plan;
-        auto                                   result           = makeResult(plan);
+        auto                                   sampling_output           = makeSamplingOutput(plan);
         SamplingStates                         states;
         SamplerOutput                          draft_sampler_output;
         speculative::SpeculativeSamplingParams params;
-        processor.prepareSampling(execution_plan, {}, {}, states, result, draft_sampler_output, params);
+        processor.prepareSampling(execution_plan,
+                                  dspark_q_,
+                                  {},
+                                  states,
+                                  sampling_output.request_errors,
+                                  draft_sampler_output,
+                                  params);
         for (bool preserve_logits : {false, true}) {
             for (auto mode : {ReturnAllProbsMode::DEFAULT, ReturnAllProbsMode::ORIGINAL}) {
                 PPOutputConfig output;
@@ -1224,11 +1337,17 @@ TEST_F(PPBatchStreamProcessorTest, VerifySamplerUsesOnlyTheConfiguredTargetVocab
         auto                                   processor      = makeProcessor(type, RoleType::PDFUSION, 2);
         auto                                   execution_plan = makePlan(processor, StreamGroups({stream}));
         const auto&                            plan           = execution_plan.sampling_plan;
-        auto                                   result         = makeResult(plan);
+        auto                                   sampling_output         = makeSamplingOutput(plan);
         SamplingStates                         states;
         SamplerOutput                          draft_sampler_output;
         speculative::SpeculativeSamplingParams params;
-        processor.prepareSampling(execution_plan, {}, {}, states, result, draft_sampler_output, params);
+        processor.prepareSampling(execution_plan,
+                                  dspark_q_,
+                                  {},
+                                  states,
+                                  sampling_output.request_errors,
+                                  draft_sampler_output,
+                                  params);
         PPOutputConfig output;
         output.return_all_probs = ReturnAllProbsMode::DEFAULT;
         auto logits             = torch::full({3, 8}, 100.0f);
@@ -1409,7 +1528,9 @@ TEST_F(PPBatchStreamProcessorTest, DSparkProposalUsesNextRoundStateInBothAnchorM
             model_config_, pd_sep_config, ProfilingDebugLoggingConfig{}, cache_config_, sp_config, true);
         TensorHolder host_holder;
 
-        GptModelInputs target_input;
+        PPExecutionPlan plan;
+        auto& target_input = plan.model_input;
+        PPSamplingOutput sampling;
         target_input.combo_tokens          = intTensor({1, 2, 3, 4, 5});
         target_input.input_lengths         = intTensor({2, 3});
         target_input.prefix_lengths        = intTensor({5, 8});
@@ -1421,11 +1542,9 @@ TEST_F(PPBatchStreamProcessorTest, DSparkProposalUsesNextRoundStateInBothAnchorM
         target_input.request_pd_separation = torch::ones({2}, torch::kBool);
         target_input.cache_keys            = torch::zeros({2, 1}, torch::kInt64);
 
-        auto round_state = processor.buildDSparkRoundState(target_input,
-                                                           intTensor({31, 31, 31, 62, 62, 62}),
-                                                           intTensor({7, 8}).reshape({2, 1}),
-                                                           intTensor({1, 1}),
-                                                           host_holder);
+        plan.draft_next_position_ids = intTensor({31, 31, 31, 62, 62, 62});
+        sampling.sampler_output.token_ids = intTensor({1, 2, 7, 3, 4, 8}).reshape({2, 3});
+        auto round_state = processor.buildDSparkRoundState(plan, sampling, host_holder);
         EXPECT_EQ(tensorToVector<int32_t>(round_state.anchors), (std::vector<int32_t>{7, 8}));
         EXPECT_TRUE(round_state.anchors.is_cuda());
         EXPECT_EQ(tensorToVector<int32_t>(round_state.committed_ends), (std::vector<int32_t>{7, 11}));
@@ -1465,12 +1584,10 @@ TEST_F(PPBatchStreamProcessorTest, DSparkProposalUsesNextRoundStateInBothAnchorM
         target_input.combo_position_ids =
             intTensor({32, 32, 32, 33, 33, 33, 34, 34, 34, 35, 35, 35, 63, 63, 63, 64, 64, 64,
                        65, 65, 65, 66, 66, 66, 90, 90, 90, 91, 91, 91, 92, 92, 92, 93, 93, 93});
-        round_state =
-            processor.buildDSparkRoundState(target_input,
-                                            {},
-                                            intTensor({15, 0, 0, 0, 21, 25, 0, 0, 31, 32, 33, 35}).reshape({3, 4}),
-                                            intTensor({1, 2, 4}),
-                                            host_holder);
+        sampling.verify_output.accept_tokens =
+            intTensor({15, 0, 0, 0, 21, 25, 0, 0, 31, 32, 33, 35}).reshape({3, 4});
+        sampling.verify_output.accept_len = intTensor({1, 2, 4});
+        round_state = processor.buildDSparkRoundState(plan, sampling, host_holder);
         EXPECT_EQ(tensorToVector<int32_t>(round_state.anchors), (std::vector<int32_t>{15, 25, 35}));
         EXPECT_EQ(tensorToVector<int32_t>(round_state.committed_ends), (std::vector<int32_t>{8, 13, 24}));
         EXPECT_EQ(tensorToVector<int32_t>(round_state.position_bases),
@@ -1490,8 +1607,9 @@ TEST_F(PPBatchStreamProcessorTest, DSparkProposalUsesNextRoundStateInBothAnchorM
         target_input.prefix_lengths     = intTensor({8});
         target_input.lm_output_indexes  = torch::arange(4, torch::kInt32);
         target_input.combo_position_ids = torch::Tensor();
-        round_state                     = processor.buildDSparkRoundState(
-            target_input, {}, intTensor({16, 0, 0, 0}).reshape({1, 4}), intTensor({1}), host_holder);
+        sampling.verify_output.accept_tokens = intTensor({16, 0, 0, 0}).reshape({1, 4});
+        sampling.verify_output.accept_len = intTensor({1});
+        round_state = processor.buildDSparkRoundState(plan, sampling, host_holder);
         draft_input = target_input;
         processor.prepareDSparkProposeModelInput(round_state, draft_input, host_holder);
         EXPECT_EQ(tensorToVector<int32_t>(draft_input.combo_tokens),
@@ -1526,13 +1644,14 @@ TEST_F(PPBatchStreamProcessorTest, FillResultCommitsLastSampleAndCopiesRequested
     output.logits            = raw_logits.to(torch::kCUDA);
     output.hidden_states     = torch::arange(12, torch::kFloat32).reshape({3, 4}).to(torch::kCUDA);
     output.all_hidden_states = torch::arange(20, torch::kFloat32).reshape({5, 4}).to(torch::kCUDA);
-    SamplerOutput sampled;
+    auto sampling = makeSamplingOutput(plan.sampling_plan);
+    auto& sampled = sampling.sampler_output;
     sampled.token_ids     = intTensor({1, 7, 2, 8, 3, 9}).reshape({3, 2}).to(torch::kCUDA);
     sampled.success       = torch::tensor({true, true, true}, torch::kBool).to(torch::kCUDA);
     sampled.cum_log_probs = torch::tensor({-1.0f, -2.0f, -3.0f}).to(torch::kCUDA);
     sampled.all_probs     = torch::full({3, 64}, 1.0f / 64, output.logits.options());
-    auto result           = makeResult(plan.sampling_plan);
-    processor.fillExecutionResult(plan, output, sampled, result);
+    PPExecutionResult result;
+    processor.fillExecutionResult(plan, output, sampling, {}, result);
     EXPECT_EQ(tensorToVector<int32_t>(result.new_token_ids), (std::vector<int32_t>{7, 8, 9}));
     EXPECT_TRUE(result.new_token_ids.device().is_cpu());
     ASSERT_EQ(result.request_outputs.size(), 2u);
@@ -1582,11 +1701,12 @@ TEST_F(PPBatchStreamProcessorTest, MixedBatchReturnsOnlyRequestedRowsAtNonzeroOf
     model_output.logits            = torch::arange(256, torch::kFloat32).reshape({4, 64}).cuda();
     model_output.hidden_states     = torch::arange(16, torch::kFloat32).reshape({4, 4}).cuda();
     model_output.all_hidden_states = torch::arange(36, torch::kFloat32).reshape({9, 4}).cuda();
-    SamplerOutput sampled;
+    auto sampling = makeSamplingOutput(plan.sampling_plan);
+    auto& sampled = sampling.sampler_output;
     sampled.token_ids = intTensor({10, 11, 12, 13}).reshape({4, 1}).cuda();
     sampled.success   = torch::ones({4}, torch::TensorOptions(torch::kBool).device(torch::kCUDA));
-    auto result       = makeResult(plan.sampling_plan);
-    processor.fillExecutionResult(plan, model_output, sampled, result);
+    PPExecutionResult result;
+    processor.fillExecutionResult(plan, model_output, sampling, {}, result);
 
     ASSERT_EQ(result.request_outputs.size(), 3u);
     const auto& output = result.request_outputs[1];
@@ -1622,17 +1742,17 @@ TEST_F(PPBatchStreamProcessorTest, VerifyResultReturnsAcceptedTokensAndErrorsWit
     auto         processor = makeProcessor(SP_TYPE_MTP, RoleType::PDFUSION, 2);
     auto         plan      = makePlan(processor, groups);
     plan.is_decode         = true;
-    SamplerOutput target_sampled;
+    auto sampling = makeSamplingOutput(plan.sampling_plan);
+    auto& target_sampled = sampling.sampler_output;
     target_sampled.success =
         torch::tensor({true, true, true, false, true, true, true, false, true}, torch::kBool).to(torch::kCUDA);
     const auto accepted_tokens = intTensor({10, 11, 12, 13, 0, 0, 16, 17, 0}).reshape({3, 3});
-    speculative::SpeculativeSamplerOutput sp_output;
+    auto& sp_output = sampling.verify_output;
     sp_output.accept_tokens_cpu = accepted_tokens;
     sp_output.accept_len_cpu    = intTensor({3, 1, 2});
-    sp_output.transfer_done_event->record(cuda_graph::graphGetCurrentStream());
     sp_output.processor_errors = {std::nullopt, ErrorInfo(ErrorCode::INVALID_PARAMS, "verify failed"), std::nullopt};
-    auto result                = makeResult(plan.sampling_plan);
-    processor.fillExecutionResult(plan, GptModelOutputs{}, target_sampled, sp_output, result);
+    PPExecutionResult result;
+    processor.fillExecutionResult(plan, GptModelOutputs{}, sampling, {}, result);
     EXPECT_EQ(tensorToVector<int32_t>(result.new_token_ids), (std::vector<int32_t>{10, 11, 12, 13, 0, 0, 16, 17, 0}));
     EXPECT_EQ(tensorToVector<int32_t>(result.new_token_lengths), (std::vector<int32_t>{3, 1, 2}));
     for (const auto& output : result.request_outputs) {
@@ -1658,16 +1778,17 @@ TEST_F(PPBatchStreamProcessorTest, FillResultPreservesEarlierErrorsAndMapsSample
     auto            healthy   = makeStream(404, {4});
     auto            processor = makeProcessor();
     auto            plan      = makePlan(processor, StreamGroups({first, multi, failed, healthy}));
-    auto            result    = makeResult(plan.sampling_plan);
+    PPExecutionResult result;
     const ErrorInfo initialization_error(ErrorCode::INVALID_PARAMS, "tail grammar backend unavailable");
     const ErrorInfo processor_error(ErrorCode::EXECUTION_EXCEPTION, "logits processor failed");
-    result.request_errors[0] = initialization_error;
-    SamplerOutput sampled;
+    auto sampling = makeSamplingOutput(plan.sampling_plan);
+    auto& sampled = sampling.sampler_output;
+    sampling.request_errors[0] = initialization_error;
     sampled.token_ids = intTensor({0, 10, 0, 0, 12}).reshape({5, 1});
     sampled.success   = torch::tensor({false, true, false, false, true}, torch::kBool);
     sampled.processor_errors.resize(5);
     sampled.processor_errors[3] = processor_error;
-    processor.fillExecutionResult(plan, GptModelOutputs{}, sampled, result);
+    processor.fillExecutionResult(plan, GptModelOutputs{}, sampling, {}, result);
     EXPECT_EQ(result.request_errors[0].ToString(), initialization_error.ToString());
     EXPECT_EQ(result.request_errors[1].code(), ErrorCode::UNKNOWN_ERROR);
     EXPECT_EQ(result.request_errors[2].ToString(), processor_error.ToString());
@@ -1695,15 +1816,32 @@ TEST_F(PPBatchStreamProcessorTest, FillResultUsesCompactProbabilityBeforeRestori
     GptModelOutputs output;
     output.logits =
         torch::tensor({0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, std::log(3.0f), 0.0f}).reshape({2, 4}).to(torch::kCUDA);
-    SamplerOutput sampled;
+    auto sampling = makeSamplingOutput(plan.sampling_plan);
+    auto& sampled = sampling.sampler_output;
     sampled.token_ids = intTensor({0, 2}).reshape({2, 1}).to(torch::kCUDA);
     sampled.success   = torch::tensor({false, true}, torch::kBool).to(torch::kCUDA);
-    auto result       = makeResult(plan.sampling_plan);
-    processor.fillExecutionResult(plan, output, sampled, result);
+    PPExecutionResult result;
+    processor.fillExecutionResult(plan, output, sampling, {}, result);
     EXPECT_EQ(result.request_errors[0].code(), ErrorCode::UNKNOWN_ERROR);
     EXPECT_TRUE(result.request_errors[1].ok());
     EXPECT_EQ(tensorToVector<int32_t>(result.new_token_ids), (std::vector<int32_t>{0, 7}));
     EXPECT_NEAR(result.request_outputs[1].softmax_probs[0][0].item<float>(), 0.5f, 1e-6);
+}
+
+TEST_F(PPBatchStreamProcessorTest, FillResultSkipsFailedSamplerSentinelsDuringVocabularyMapping) {
+    model_config_.output_vocab_ids = {2, 7, 63};
+    auto failed = makeStream(101, {1});
+    auto healthy = makeStream(202, {3});
+    auto processor = makeProcessor();
+    auto plan = makePlan(processor, StreamGroups({failed, healthy}));
+    auto sampling = makeSamplingOutput(plan.sampling_plan);
+    sampling.sampler_output.token_ids = intTensor({-1, 1}).reshape({2, 1}).cuda();
+    sampling.sampler_output.success = torch::tensor({false, true}, torch::kBool).cuda();
+    PPExecutionResult result;
+    processor.fillExecutionResult(plan, {}, sampling, {}, result);
+    EXPECT_EQ(result.request_errors[0].code(), ErrorCode::UNKNOWN_ERROR);
+    EXPECT_TRUE(result.request_errors[1].ok());
+    EXPECT_EQ(tensorToVector<int32_t>(result.new_token_ids), (std::vector<int32_t>{-1, 7}));
 }
 
 TEST_F(PPBatchStreamProcessorTest, FillResultPromptLogitsAreRequestLocalAndUseFirstSequenceOnlyInPrefill) {
@@ -1733,11 +1871,12 @@ TEST_F(PPBatchStreamProcessorTest, FillResultPromptLogitsAreRequestLocalAndUseFi
     output.all_logits[1].copy_(torch::tensor({4.0f, 3.0f, 2.0f, 1.0f}).log());
     output.all_logits[2].copy_(torch::tensor({1.0f, 3.0f, 2.0f, 4.0f}).log());
     output.all_logits[6].copy_(torch::tensor({1.0f, 2.0f, 3.0f, 4.0f}).log());
-    SamplerOutput sampled;
+    auto sampling = makeSamplingOutput(plan.sampling_plan);
+    auto& sampled = sampling.sampler_output;
     sampled.token_ids = intTensor({2, 2, 0, 0}).reshape({4, 1});
     sampled.success   = torch::ones({4}, torch::kBool);
-    auto result       = makeResult(plan.sampling_plan);
-    processor.fillExecutionResult(plan, output, sampled, result);
+    PPExecutionResult result;
+    processor.fillExecutionResult(plan, output, sampling, {}, result);
     ASSERT_EQ(result.request_outputs.size(), 3u);
     for (const auto& request : result.request_outputs) {
         EXPECT_FALSE(request.loss.defined());
@@ -1760,8 +1899,8 @@ TEST_F(PPBatchStreamProcessorTest, FillResultPromptLogitsAreRequestLocalAndUseFi
     EXPECT_FALSE(result.request_outputs[1].prompt_logits->target_logprobs.defined());
 
     plan.is_decode     = true;
-    auto decode_result = makeResult(plan.sampling_plan);
-    processor.fillExecutionResult(plan, output, sampled, decode_result);
+    PPExecutionResult decode_result;
+    processor.fillExecutionResult(plan, output, sampling, {}, decode_result);
     for (const auto& request : decode_result.request_outputs) {
         EXPECT_FALSE(request.prompt_logits.has_value());
         EXPECT_FALSE(request.loss.defined());
@@ -2116,7 +2255,7 @@ TEST_F(PPBatchStreamProcessorTest, MixedEosAtLengthBoundaryFinishesOnlyThatReque
     }
 }
 
-TEST_F(PPBatchStreamProcessorTest, SpeculativeDispatchKeepsFailedPlaceholderOutOfRequestHistory) {
+TEST_F(PPBatchStreamProcessorTest, SpeculativeDispatchKeepsFailedResultsOutOfRequestHistory) {
     initCache();
     auto failed  = makeStream(101, {1, 2});
     auto healthy = makeStream(202, {3, 4});
@@ -2127,9 +2266,9 @@ TEST_F(PPBatchStreamProcessorTest, SpeculativeDispatchKeepsFailedPlaceholderOutO
     }
     setProposals(healthy, {9, 20, 22, 23});
     auto result = makeResult(std::vector<int64_t>{101, 202});
-    /** Failed draft rows use a valid one-token placeholder so the remaining draft batch can run. */
-    result.new_token_ids     = intTensor({0, 0, 0, 0, 20, 21, -1, -1}).reshape({2, 4});
-    result.new_token_lengths = intTensor({1, 2});
+    /** Failed rows retain verifier outputs; the error prevents both token and proposal commits. */
+    result.new_token_ids     = intTensor({10, 11, 13, -1, 20, 21, -1, -1}).reshape({2, 4});
+    result.new_token_lengths = intTensor({3, 2});
     result.propose_token_ids = intTensor({10, 11, 12, 22, 23, 24}).reshape({2, 3});
     result.request_errors[0] = ErrorInfo(ErrorCode::GRAMMAR_VERIFY_EXCEPTION, "verify failed");
     auto processor           = makeProcessor(SP_TYPE_MTP);

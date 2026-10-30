@@ -147,16 +147,16 @@ private:
     absl::StatusOr<PPExecutionPlan>
     buildPlan(const StreamGroups& stream_groups, const std::vector<RequestId>& finished_request_ids, bool shutdown);
 
-    void sampleTokens(const PPExecutionPlan&  plan,
-                      const GptModelOutputs&  model_output,
-                      PPExecutionResult&      result,
-                      GrammarPrefetchContext* grammar_prefetch = nullptr);
+    PPSamplingOutput sampleTokens(const PPExecutionPlan&  plan,
+                                  const GptModelOutputs&  model_output,
+                                  GrammarPrefetchContext* grammar_prefetch = nullptr);
 
-    void finishDSparkPrefillCachePublication(const GptModelInputs& model_input, PPExecutionResult& execution_result);
+    void finishDSparkPrefillCachePublication(const GptModelInputs&    model_input,
+                                             std::vector<ErrorInfo>& request_errors);
 
     void advanceSamplingStates(const PPSamplingPlan& sampling_plan, PPExecutionResult& result);
 
-    void eraseFailedDSparkQ(const PPExecutionResult& result);
+    void eraseFailedRequestStates(const PPExecutionResult& result);
 
     void verifyDraftTokens(const PPExecutionPlan&                        plan,
                            const torch::Tensor&                          target_logits,
@@ -169,13 +169,9 @@ private:
 
     GptModelOutputs forwardDraftModel(ModelBase& draft_model, GptModelInputs& draft_input);
 
-    void runDraftStep(GptModelInputs&       target_input,
-                      const torch::Tensor&  draft_next_position_ids,
-                      const torch::Tensor&  target_hidden_states,
-                      const PPSamplingPlan& sampling_plan,
-                      PPExecutionResult&    execution_result);
-
-    void fillFailedDraftRows(PPExecutionResult& result);
+    PPDraftOutput runDraftStep(const PPExecutionPlan&  plan,
+                               const GptModelOutputs&  target_output,
+                               const PPSamplingOutput& sampling_output);
 
     void asyncSendPlan(const torch::Tensor& plan_payload, PPTickets& tickets);
 
