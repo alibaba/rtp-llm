@@ -61,8 +61,8 @@ void LoadTaskRunner::runTransfer(TaskPtr                        task,
             task->host_to_device_task,
             [this, task, &transfer_dispatcher, &metrics_reporter, transfer_begin, callback = std::move(callback)](
                 TransferResult result) mutable {
-                auto observation =
-                    CompletionStageContext::forTask(metrics_reporter, task->host_to_device_task, "load", result.ok());
+                auto observation = CompletionStageContext::forTransfer(
+                    metrics_reporter, task->host_to_device_task, "load", result.ok());
                 CompletionStageScope total(observation, "callback_total", "workflow_callback");
                 {
                     CompletionStageScope save(observation, "save_result", "workflow_callback");
@@ -128,7 +128,7 @@ void LoadTaskRunner::startDiskTransfer(TaskPtr                        task,
         task->disk_to_device_task,
         [this, task, &metrics_reporter, transfer_begin, callback = std::move(callback)](TransferResult result) mutable {
             auto observation =
-                CompletionStageContext::forTask(metrics_reporter, task->disk_to_device_task, "load", result.ok());
+                CompletionStageContext::forTransfer(metrics_reporter, task->disk_to_device_task, "load", result.ok());
             CompletionStageScope total(observation, "callback_total", "workflow_callback");
             {
                 CompletionStageScope save(observation, "save_result", "workflow_callback");
