@@ -29,6 +29,12 @@ def _install_stubs(calls):
     deepgemm_wrapper.fp8_gemm_nt = fp8_gemm_nt
     deepgemm_wrapper.has_deep_gemm = lambda: True
     deepgemm_wrapper.is_deep_gemm_e8m0_used = lambda: True
+    deepgemm_wrapper.has_fp8_gemm_nt_skip_head_mid = lambda: False
+
+    def unexpected_packed_gemm(*args, **kwargs):
+        raise AssertionError("The ordinary quantized-input contract must not use packed GEMM")
+
+    deepgemm_wrapper.fp8_gemm_nt_skip_head_mid = unexpected_packed_gemm
 
     fp8_kernel = types.ModuleType("rtp_llm.models_py.kernels.cuda.fp8_kernel")
 
@@ -137,6 +143,55 @@ class QuantizedInputContractTest(unittest.TestCase):
 
         self.assertIs(got, out)
         self.assertTrue(torch.all(out == torch.tensor(3.0, dtype=out.dtype)))
+
+
+class WrapperCollectiveInputContractTest(unittest.TestCase):
+    def _make_wrapper(self, calls):
+        from unittest.mock import patch
+
+        deepgemm = _load_module(calls)
+        flashinfer = types.ModuleType(
+            "rtp_llm.models_py.modules.factory.linear.impl.cuda.fp8_flashinfer_linear"
+        )
+        flashinfer.CudaFp8FlashinferLinear = type(
+            "UnusedFlashinferLinear", (), {"FLASHINFER_M_THRESHOLD": 32}
+        )
+        path = Path(__file__).resolve().parents[1] / "fp8_gemm_linear.py"
+        spec = importlib.util.spec_from_file_location("fp8_gemm_wrapper_contract", path)
+        mod = importlib.util.module_from_spec(spec)
+        with patch.dict(
+            sys.modules,
+            {
+                "rtp_llm.models_py.modules.factory.linear.impl.cuda.fp8_deepgemm_linear": deepgemm,
+                "rtp_llm.models_py.modules.factory.linear.impl.cuda.fp8_flashinfer_linear": flashinfer,
+            },
+        ):
+            spec.loader.exec_module(mod)
+        wrapper = mod.CudaFp8GEMMLinear.__new__(mod.CudaFp8GEMMLinear)
+        nn.Module.__init__(wrapper)
+        wrapper._deepgemm_linear = QuantizedInputContractTest._make_linear(self, deepgemm)
+        wrapper._flashinfer_linear = None
+        return wrapper
+
+    def test_collective_reuse_quantizes_once_and_preserves_output_buffer(self):
+        calls = []
+        wrapper = self._make_wrapper(calls)
+        x = torch.zeros((2, 4), dtype=torch.bfloat16)
+        values, scales = wrapper.quantize_collective_input(x)
+        out = torch.empty((2, 3), dtype=torch.bfloat16)
+
+        self.assertIs(wrapper.forward_quantized(values, scales, out=out), out)
+        self.assertEqual([call[0] for call in calls], ["quant", "fp8_gemm_nt"])
+        self.assertIs(calls[1][1][0], values)
+        self.assertIs(calls[1][1][1], scales)
+        self.assertTrue(torch.all(out == 3.0))
+
+    def test_collective_api_does_not_opt_attention_into_fused_norm(self):
+        wrapper = self._make_wrapper([])
+        # Existing V4 attention uses this optional interface as its fused-norm
+        # capability. Adding a collective API must preserve the old decision.
+        self.assertFalse(hasattr(wrapper, "quantize_input"))
+        self.assertTrue(hasattr(wrapper, "forward_quantized"))
 
 
 if __name__ == "__main__":
