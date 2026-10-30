@@ -4069,31 +4069,36 @@ TEST_F(MtpExecutorTest, testDSparkDraftMixedBatchKeepsDenseQForStochasticRow) {
         output.all_probs.select(0, 1), torch::softmax(base_logits.select(0, 1) / 0.5f, -1), 1e-5, 1e-6));
 }
 
-
 TEST_F(MtpExecutorTest, testDSparkDraftPureExplicitTopKUsesFullAndMixedUsesCap) {
-    constexpr int vocab = 8192;
+    constexpr int         vocab = 8192;
     MtpExecutorTestConfig test_config;
     test_config.vocab_size           = vocab;
     test_config.vocab_size_override  = vocab;
     test_config.gen_num_per_cycle    = 1;
     test_config.sp_type              = SP_TYPE_DSPARK;
     test_config.dspark_mask_token_id = 0;
-    auto components = createMtpExecutorComponents(test_config);
-    auto floats = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA);
-    auto ints = floats.dtype(torch::kInt32);
-    auto run = [&](auto& test_components, int test_vocab, int batch, int first_k, int other_k,
-                   bool other_do_sample = true, float top_p = 1.0f, int tied_logits = 0) {
+    auto components                  = createMtpExecutorComponents(test_config);
+    auto floats                      = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA);
+    auto ints                        = floats.dtype(torch::kInt32);
+    auto run                         = [&](auto& test_components,
+                   int   test_vocab,
+                   int   batch,
+                   int   first_k,
+                   int   other_k,
+                   bool  other_do_sample = true,
+                   float top_p           = 1.0f,
+                   int   tied_logits     = 0) {
         std::list<GenerateStreamPtr> streams;
         for (int i = 0; i < batch; ++i) {
             auto stream = createContextStream(
                 test_components.model_config, test_components.runtime_config, test_components.resource_context, {0, 1});
             stream->generateConfig()->do_sample = i == 0 || other_do_sample;
-            stream->generateConfig()->top_k = i == 0 ? first_k : other_k;
-            stream->generateConfig()->top_p = top_p;
+            stream->generateConfig()->top_k     = i == 0 ? first_k : other_k;
+            stream->generateConfig()->top_p     = top_p;
             streams.push_back(stream);
         }
-        auto logits = tied_logits ? torch::full({batch, test_vocab}, -std::numeric_limits<float>::infinity(), floats)
-                                  : torch::randn({batch, test_vocab}, floats);
+        auto logits = tied_logits ? torch::full({batch, test_vocab}, -std::numeric_limits<float>::infinity(), floats) :
+                                                            torch::randn({batch, test_vocab}, floats);
         if (tied_logits) {
             logits.slice(1, 0, tied_logits).fill_(5.0f);
         }
@@ -4104,31 +4109,41 @@ TEST_F(MtpExecutorTest, testDSparkDraftPureExplicitTopKUsesFullAndMixedUsesCap) 
     EXPECT_EQ(small_pure.all_probs.size(2), vocab);
     EXPECT_FALSE(small_pure.all_probs_indices.defined());
 
+    auto pure_no_k_p1 = run(components, vocab, 2, 0, 0);
+    EXPECT_EQ(pure_no_k_p1.all_probs.size(2), vocab);
+    EXPECT_FALSE(pure_no_k_p1.all_probs_indices.defined());
+
+    auto pure_no_k_p95 = run(components, vocab, 2, 0, 0, true, 0.95f);
+    EXPECT_EQ(pure_no_k_p95.all_probs.size(2), 4096);
+    EXPECT_TRUE(pure_no_k_p95.all_probs_indices.defined());
+
     auto small_vocab_large_batch = run(components, vocab, 56, 1024, 1024);
     EXPECT_EQ(small_vocab_large_batch.all_probs.size(2), vocab);
     EXPECT_FALSE(small_vocab_large_batch.all_probs_indices.defined());
 
     auto mixed = run(components, vocab, 2, 8192, 40);
-    EXPECT_EQ(mixed.all_probs.size(2), vocab);
-    EXPECT_FALSE(mixed.all_probs_indices.defined());
+    EXPECT_EQ(mixed.all_probs.size(2), 4096);
+    EXPECT_TRUE(mixed.all_probs_indices.defined());
 
     auto mixed_greedy = run(components, vocab, 2, 40, 40, false);
-    EXPECT_EQ(mixed_greedy.all_probs.size(2), vocab);
-    EXPECT_FALSE(mixed_greedy.all_probs_indices.defined());
+    EXPECT_EQ(mixed_greedy.all_probs.size(2), 4096);
+    EXPECT_TRUE(mixed_greedy.all_probs_indices.defined());
 
-    constexpr int large_vocab = 129280;
-    test_config.vocab_size = large_vocab;
-    test_config.vocab_size_override = large_vocab;
-    auto large_components = createMtpExecutorComponents(test_config);
-    auto bf16 = floats.dtype(torch::kBFloat16);
+    constexpr int large_vocab                    = 129280;
+    test_config.vocab_size                       = large_vocab;
+    test_config.vocab_size_override              = large_vocab;
+    auto large_components                        = createMtpExecutorComponents(test_config);
+    auto bf16                                    = floats.dtype(torch::kBFloat16);
     large_components.executor->dspark_markov_w1_ = torch::zeros({large_vocab, 1}, bf16);
     large_components.executor->dspark_markov_w2_ = torch::zeros({large_vocab, 1}, bf16);
-    auto large_mixed = run(large_components, large_vocab, 2, 8192, 40);
-    EXPECT_EQ(large_mixed.all_probs.size(2), large_vocab);
-    EXPECT_FALSE(large_mixed.all_probs_indices.defined());
+    auto large_mixed                             = run(large_components, large_vocab, 2, 8192, 40);
+    EXPECT_EQ(large_mixed.all_probs.size(2), 4096);
+    EXPECT_TRUE(large_mixed.all_probs_indices.defined());
     auto large_mixed_topp = run(large_components, large_vocab, 2, 8192, 40, true, 0.95f);
-    EXPECT_EQ(large_mixed_topp.all_probs.size(2), large_vocab);
-    EXPECT_FALSE(large_mixed_topp.all_probs_indices.defined());
+    EXPECT_EQ(large_mixed_topp.all_probs.size(2), 4096);
+    EXPECT_TRUE(large_mixed_topp.all_probs_indices.defined());
+    EXPECT_TRUE(large_mixed_topp.all_probs_indices.ge(0).all().item<bool>());
+    EXPECT_TRUE(large_mixed_topp.all_probs_indices.lt(large_vocab).all().item<bool>());
     auto bounded_mixed_topp = run(large_components, large_vocab, 2, 41, 40, true, 0.95f);
     EXPECT_EQ(bounded_mixed_topp.all_probs.size(2), 4096);
     ASSERT_TRUE(bounded_mixed_topp.all_probs_indices.defined());
@@ -4155,8 +4170,7 @@ TEST_F(MtpExecutorTest, testDSparkDraftPureExplicitTopKUsesFullAndMixedUsesCap) 
     EXPECT_EQ(tied.all_probs.size(2), large_vocab);
     EXPECT_FALSE(tied.all_probs_indices.defined());
     auto tied_q = tied.all_probs.select(1, 0);
-    EXPECT_TRUE(torch::allclose(tied_q.slice(1, 0, 5000),
-                                torch::full({8, 5000}, 1.0f / 5000.0f, floats), 1e-4, 1e-7));
+    EXPECT_TRUE(torch::allclose(tied_q.slice(1, 0, 5000), torch::full({8, 5000}, 1.0f / 5000.0f, floats), 1e-4, 1e-7));
     EXPECT_TRUE(tied_q.slice(1, 5000).eq(0).all().item<bool>());
 }
 
@@ -4320,8 +4334,8 @@ TEST_F(MtpExecutorTest, testDSparkForceTopK4096PreservesFullVocabularyQ) {
         sampler.sampleDSparkDraft(logits, anchors, temperature, {}, top_p, markov, markov, vocab, false, 4096);
     ASSERT_TRUE(output.all_probs_indices.defined());
     EXPECT_EQ(output.all_probs.size(2), 4096);
-    auto dense_q = torch::zeros_like(expected).scatter_(1, output.all_probs_indices.select(1, 0).to(torch::kLong),
-                                                         output.all_probs.select(1, 0));
+    auto dense_q = torch::zeros_like(expected).scatter_(
+        1, output.all_probs_indices.select(1, 0).to(torch::kLong), output.all_probs.select(1, 0));
     EXPECT_TRUE(torch::allclose(dense_q, expected, 1e-5, 1e-6));
     auto tokens = toVec<int32_t>(output.token_ids.cpu());
     EXPECT_TRUE(tokens[0] == 7 || tokens[0] == 111);
@@ -4355,8 +4369,9 @@ TEST_F(MtpExecutorTest, testDSparkForceTopK4096SparseDraftQ) {
             sampler.sampleDSparkDraft(logits, anchors, temperature, {}, top_p, markov, markov, vocab, false, 4096);
         ASSERT_TRUE(output.all_probs_indices.defined());
         EXPECT_EQ(output.all_probs.size(2), 4096);
-        auto q = torch::zeros({batch, vocab}, options).scatter_(
-            1, output.all_probs_indices.select(1, 0).to(torch::kLong), output.all_probs.select(1, 0));
+        auto q =
+            torch::zeros({batch, vocab}, options)
+                .scatter_(1, output.all_probs_indices.select(1, 0).to(torch::kLong), output.all_probs.select(1, 0));
         EXPECT_TRUE(q.select(1, vocab - 1).eq(1.0f).all().item<bool>());
         EXPECT_TRUE(q.slice(1, 0, vocab - 1).eq(0.0f).all().item<bool>());
         auto tokens = toVec<int32_t>(output.token_ids.cpu());

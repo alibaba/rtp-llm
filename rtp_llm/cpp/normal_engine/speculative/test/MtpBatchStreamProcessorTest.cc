@@ -551,38 +551,41 @@ TEST_F(MtpBatchStreamProcessorTest, testGatherSpecSamplerInputBuildsPositionSpec
               toVec<float>(sampler_inputs.temperature));
 }
 
-
 TEST_F(MtpBatchStreamProcessorTest, testDSparkMixedTargetUsesFixedCandidateWidth) {
-    ModelConfig model_config;
-    RuntimeConfig runtime_config;
-    SpeculativeExecutionConfig sp_config;
-    PDSepConfig pd_sep_config;
+    ModelConfig                 model_config;
+    RuntimeConfig               runtime_config;
+    SpeculativeExecutionConfig  sp_config;
+    PDSepConfig                 pd_sep_config;
     ProfilingDebugLoggingConfig debug_config;
-    CacheConfig cache_config = makeProcessorCacheConfig();
-    model_config.max_seq_len = 32;
-    model_config.vocab_size = 8192;
-    model_config.num_layers = 1;
-    sp_config.gen_num_per_cycle = 1;
-    sp_config.type = SP_TYPE_DSPARK;
+    CacheConfig                 cache_config = makeProcessorCacheConfig();
+    model_config.max_seq_len                 = 32;
+    model_config.vocab_size                  = 8192;
+    model_config.num_layers                  = 1;
+    sp_config.gen_num_per_cycle              = 1;
+    sp_config.type                           = SP_TYPE_DSPARK;
     ResourceContext resource_context;
-    auto first = createContextStream(model_config, runtime_config, resource_context, {1}, 1);
-    auto second = createContextStream(model_config, runtime_config, resource_context, {2}, 2);
+    auto            first  = createContextStream(model_config, runtime_config, resource_context, {1}, 1);
+    auto            second = createContextStream(model_config, runtime_config, resource_context, {2}, 2);
     for (const auto& stream : {first, second}) {
         stream->setScoreLen(2);
         stream->generateConfig()->do_sample = true;
-        stream->generateConfig()->top_p = 1.0f;
+        stream->generateConfig()->top_p     = 1.0f;
     }
-    first->generateConfig()->top_k = 8192;
+    first->generateConfig()->top_k  = 8192;
     second->generateConfig()->top_k = 40;
-    MtpBatchStreamProcessor processor(
-        model_config, pd_sep_config, debug_config, cache_config, sp_config, false);
-    GptModelOutputs output;
+    MtpBatchStreamProcessor processor(model_config, pd_sep_config, debug_config, cache_config, sp_config, false);
+    GptModelOutputs         output;
     output.logits = torch::randn({4, 8192}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
-    auto draft = torch::zeros({2, 1}, torch::kInt32);
-    auto mixed = processor.gatherSpecSamplerInput(StreamGroups({first, second}), output, {}, draft);
+    auto draft    = torch::zeros({2, 1}, torch::kInt32);
+    auto mixed    = processor.gatherSpecSamplerInput(StreamGroups({first, second}), output, {}, draft);
     ASSERT_TRUE(mixed.ok());
-    EXPECT_EQ(mixed->all_probs.size(1), 8192);
-    EXPECT_FALSE(mixed->all_probs_indices.defined());
+    EXPECT_EQ(mixed->all_probs.size(1), 4096);
+    EXPECT_TRUE(mixed->all_probs_indices.defined());
+
+    auto mapped = processor.gatherSpecSamplerInput(StreamGroups({first, second}), output, {}, draft, nullptr, true);
+    ASSERT_TRUE(mapped.ok());
+    EXPECT_EQ(mapped->all_probs.size(1), 8192);
+    EXPECT_FALSE(mapped->all_probs_indices.defined());
 
     second->generateConfig()->top_k = 8192;
     auto pure = processor.gatherSpecSamplerInput(StreamGroups({first, second}), output, {}, draft);
@@ -590,7 +593,23 @@ TEST_F(MtpBatchStreamProcessorTest, testDSparkMixedTargetUsesFixedCandidateWidth
     EXPECT_EQ(pure->all_probs.size(1), 8192);
     EXPECT_FALSE(pure->all_probs_indices.defined());
 
-    first->generateConfig()->top_k = 40;
+    first->generateConfig()->top_k  = 0;
+    second->generateConfig()->top_k = 0;
+    auto pure_no_k_p1 = processor.gatherSpecSamplerInput(StreamGroups({first, second}), output, {}, draft);
+    ASSERT_TRUE(pure_no_k_p1.ok());
+    EXPECT_EQ(pure_no_k_p1->all_probs.size(1), 8192);
+    EXPECT_FALSE(pure_no_k_p1->all_probs_indices.defined());
+
+    first->generateConfig()->top_p  = 0.95f;
+    second->generateConfig()->top_p = 0.95f;
+    auto pure_no_k_p95 = processor.gatherSpecSamplerInput(StreamGroups({first, second}), output, {}, draft);
+    ASSERT_TRUE(pure_no_k_p95.ok());
+    EXPECT_EQ(pure_no_k_p95->all_probs.size(1), 4096);
+    EXPECT_TRUE(pure_no_k_p95->all_probs_indices.defined());
+
+    first->generateConfig()->top_p  = 1.0f;
+    second->generateConfig()->top_p = 1.0f;
+    first->generateConfig()->top_k  = 40;
     second->generateConfig()->top_k = 40;
     auto small_vocab_pure = processor.gatherSpecSamplerInput(StreamGroups({first, second}), output, {}, draft);
     ASSERT_TRUE(small_vocab_pure.ok());
@@ -603,47 +622,45 @@ TEST_F(MtpBatchStreamProcessorTest, testDSparkMixedTargetUsesFixedCandidateWidth
     EXPECT_EQ(equivalent_p->all_probs.size(1), 8192);
     EXPECT_FALSE(equivalent_p->all_probs_indices.defined());
 
-    second->generateConfig()->top_p = 1.0f;
+    second->generateConfig()->top_p     = 1.0f;
     second->generateConfig()->do_sample = false;
     auto mixed_greedy = processor.gatherSpecSamplerInput(StreamGroups({first, second}), output, {}, draft);
     ASSERT_TRUE(mixed_greedy.ok());
-    EXPECT_EQ(mixed_greedy->all_probs.size(1), 8192);
-    EXPECT_FALSE(mixed_greedy->all_probs_indices.defined());
+    EXPECT_EQ(mixed_greedy->all_probs.size(1), 4096);
+    EXPECT_TRUE(mixed_greedy->all_probs_indices.defined());
 
     model_config.vocab_size = 129280;
-    auto large_first = createContextStream(model_config, runtime_config, resource_context, {1}, 3);
-    auto large_second = createContextStream(model_config, runtime_config, resource_context, {2}, 4);
+    auto large_first        = createContextStream(model_config, runtime_config, resource_context, {1}, 3);
+    auto large_second       = createContextStream(model_config, runtime_config, resource_context, {2}, 4);
     for (const auto& stream : {large_first, large_second}) {
         stream->setScoreLen(2);
         stream->generateConfig()->do_sample = true;
-        stream->generateConfig()->top_k = 0;
-        stream->generateConfig()->top_p = 0.95f;
+        stream->generateConfig()->top_k     = 0;
+        stream->generateConfig()->top_p     = 0.95f;
     }
-    MtpBatchStreamProcessor large_processor(
-        model_config, pd_sep_config, debug_config, cache_config, sp_config, false);
-    large_first->generateConfig()->top_k = 8192;
-    large_first->generateConfig()->top_p = 1.0f;
+    MtpBatchStreamProcessor large_processor(model_config, pd_sep_config, debug_config, cache_config, sp_config, false);
+    large_first->generateConfig()->top_k  = 8192;
+    large_first->generateConfig()->top_p  = 1.0f;
     large_second->generateConfig()->top_k = 40;
     large_second->generateConfig()->top_p = 1.0f;
     GptModelOutputs large_output;
-    large_output.logits = torch::randn(
-        {4, 129280}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
-    auto large_mixed = large_processor.gatherSpecSamplerInput(
-        StreamGroups({large_first, large_second}), large_output, {}, draft);
+    large_output.logits = torch::randn({4, 129280}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
+    auto large_mixed =
+        large_processor.gatherSpecSamplerInput(StreamGroups({large_first, large_second}), large_output, {}, draft);
     ASSERT_TRUE(large_mixed.ok());
-    EXPECT_EQ(large_mixed->all_probs.size(1), 129280);
-    EXPECT_FALSE(large_mixed->all_probs_indices.defined());
+    EXPECT_EQ(large_mixed->all_probs.size(1), 4096);
+    EXPECT_TRUE(large_mixed->all_probs_indices.defined());
 
     large_second->generateConfig()->top_p = 0.95f;
-    auto large_mixed_topp = large_processor.gatherSpecSamplerInput(
-        StreamGroups({large_first, large_second}), large_output, {}, draft);
+    auto large_mixed_topp =
+        large_processor.gatherSpecSamplerInput(StreamGroups({large_first, large_second}), large_output, {}, draft);
     ASSERT_TRUE(large_mixed_topp.ok());
-    EXPECT_EQ(large_mixed_topp->all_probs.size(1), 129280);
-    EXPECT_FALSE(large_mixed_topp->all_probs_indices.defined());
+    EXPECT_EQ(large_mixed_topp->all_probs.size(1), 4096);
+    EXPECT_TRUE(large_mixed_topp->all_probs_indices.defined());
 
     large_first->generateConfig()->top_k = 41;
-    auto bounded_mixed_topp = large_processor.gatherSpecSamplerInput(
-        StreamGroups({large_first, large_second}), large_output, {}, draft);
+    auto bounded_mixed_topp =
+        large_processor.gatherSpecSamplerInput(StreamGroups({large_first, large_second}), large_output, {}, draft);
     ASSERT_TRUE(bounded_mixed_topp.ok());
     EXPECT_EQ(bounded_mixed_topp->all_probs.size(1), 4096);
     EXPECT_TRUE(bounded_mixed_topp->all_probs_indices.defined());
@@ -652,8 +669,8 @@ TEST_F(MtpBatchStreamProcessorTest, testDSparkMixedTargetUsesFixedCandidateWidth
         stream->generateConfig()->top_k = 0;
         stream->generateConfig()->top_p = 0.95f;
     }
-    auto large_pure = large_processor.gatherSpecSamplerInput(
-        StreamGroups({large_first, large_second}), large_output, {}, draft);
+    auto large_pure =
+        large_processor.gatherSpecSamplerInput(StreamGroups({large_first, large_second}), large_output, {}, draft);
     ASSERT_TRUE(large_pure.ok());
     EXPECT_EQ(large_pure->all_probs.size(1), 4096);
     EXPECT_TRUE(large_pure->all_probs_indices.defined());
@@ -661,11 +678,9 @@ TEST_F(MtpBatchStreamProcessorTest, testDSparkMixedTargetUsesFixedCandidateWidth
     large_first->generateConfig()->top_k = 40;
     large_first->generateConfig()->top_p = 1.0f;
     GptModelOutputs one_output;
-    one_output.logits = torch::randn(
-        {2, 129280}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
-    auto one_draft = torch::zeros({1, 1}, torch::kInt32);
-    auto large_single = large_processor.gatherSpecSamplerInput(
-        StreamGroups({large_first}), one_output, {}, one_draft);
+    one_output.logits = torch::randn({2, 129280}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
+    auto one_draft    = torch::zeros({1, 1}, torch::kInt32);
+    auto large_single = large_processor.gatherSpecSamplerInput(StreamGroups({large_first}), one_output, {}, one_draft);
     ASSERT_TRUE(large_single.ok());
     EXPECT_EQ(large_single->all_probs.size(1), 129280);
     EXPECT_FALSE(large_single->all_probs_indices.defined());
@@ -675,24 +690,24 @@ TEST_F(MtpBatchStreamProcessorTest, testDSparkMixedTargetUsesFixedCandidateWidth
         auto stream = createContextStream(model_config, runtime_config, resource_context, {2}, 5 + i);
         stream->setScoreLen(2);
         stream->generateConfig()->do_sample = true;
-        stream->generateConfig()->top_k = 40;
-        stream->generateConfig()->top_p = 1.0f;
+        stream->generateConfig()->top_k     = 40;
+        stream->generateConfig()->top_p     = 1.0f;
         pure_k_streams.push_back(stream);
     }
     GptModelOutputs eight_output;
-    eight_output.logits = torch::randn(
-        {16, 129280}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
+    eight_output.logits =
+        torch::randn({16, 129280}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
     auto eight_draft = torch::zeros({8, 1}, torch::kInt32);
-    auto large_eight = large_processor.gatherSpecSamplerInput(
-        StreamGroups(pure_k_streams), eight_output, {}, eight_draft);
+    auto large_eight =
+        large_processor.gatherSpecSamplerInput(StreamGroups(pure_k_streams), eight_output, {}, eight_draft);
     ASSERT_TRUE(large_eight.ok());
     EXPECT_EQ(large_eight->all_probs.size(1), 129280);
     EXPECT_FALSE(large_eight->all_probs_indices.defined());
     for (const auto& stream : pure_k_streams) {
         stream->generateConfig()->top_p = 0.95f;
     }
-    auto large_eight_joint = large_processor.gatherSpecSamplerInput(
-        StreamGroups(pure_k_streams), eight_output, {}, eight_draft);
+    auto large_eight_joint =
+        large_processor.gatherSpecSamplerInput(StreamGroups(pure_k_streams), eight_output, {}, eight_draft);
     ASSERT_TRUE(large_eight_joint.ok());
     EXPECT_EQ(large_eight_joint->all_probs.size(1), 129280);
     EXPECT_FALSE(large_eight_joint->all_probs_indices.defined());

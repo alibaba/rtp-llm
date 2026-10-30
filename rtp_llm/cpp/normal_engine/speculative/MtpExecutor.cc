@@ -2405,7 +2405,8 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
                                                                 sampler_model_output,
                                                                 *spec_logits_result,
                                                                 draft_sampler_output.token_ids,
-                                                                is_dspark_ ? draft_tokens_ready_event : nullptr));
+                                                                is_dspark_ ? draft_tokens_ready_event : nullptr,
+                                                                d2t_map_.defined()));
             holdSamplerInputHostBuffers(buffer_holder_, sampler_input);
             sampler_output           = std::move(sampler_->forward(sampler_input));
             sampler_output.all_probs = reshapeMtpTargetAllProbs(sampler_output.all_probs,
@@ -2420,9 +2421,10 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
                     // Keep its existing dense probability contract.
                     auto dense = torch::zeros({static_cast<int64_t>(batch_size),
                                                static_cast<int64_t>(propose_step_ + 1),
-                                               sampler_input.logits.size(1)}, sampler_output.all_probs.options());
+                                               sampler_input.logits.size(1)},
+                                              sampler_output.all_probs.options());
                     dense.scatter_(2, sampler_output.all_probs_indices.to(torch::kLong), sampler_output.all_probs);
-                    sampler_output.all_probs = std::move(dense);
+                    sampler_output.all_probs         = std::move(dense);
                     sampler_output.all_probs_indices = torch::Tensor();
                 }
             }
@@ -3083,20 +3085,14 @@ SamplerOutput MtpExecutor::sampleDSparkDraft(const StreamGroups&  stream_groups,
     buffer_holder_.hold_host(temperature_cpu);
     buffer_holder_.hold_host(top_k_cpu);
     buffer_holder_.hold_host(top_p_cpu);
-    int force_topk = speculative::dsparkForceTopK();
+    int        force_topk     = speculative::dsparkForceTopK();
     const bool mixed_sampling = speculative::dsparkHasMixedSamplingParams(stream_groups.allStreams());
-    // A top-k above the candidate width keeps its requested support.
-    // Pure explicit top-k uses the full path; homogeneous no-k top-p uses
-    // compact candidates at the measured shape.
-    const bool measured_pure_shape = force_topk == 4096 && draft_vocab_size_ == 129280
-                                     && base_logits.stride(0) % 256 == 0
-                                     && dspark_markov_w2_.scalar_type() == torch::kBFloat16;
-    const bool compact_pure_path = measured_pure_shape && !has_top_k && has_top_p;
-    const bool compact_mixed_path = mixed_sampling && joint_max_top_k <= force_topk
-                                    && static_cast<int64_t>(draft_vocab_size_) > 16LL * force_topk
-                                    && (has_top_p || batch_size >= 64);
-    if (force_topk <= 0 || force_topk > 4096 || force_topk >= static_cast<int>(draft_vocab_size_)
-        || d2t_map_.defined() || (!compact_mixed_path && !compact_pure_path)) {
+    // Mixed requests use the fixed candidate cap, including explicit top-k
+    // above that cap. Pure explicit top-k keeps the full-vocabulary path.
+    const bool compact_pure_path  = !has_top_k && has_top_p;
+    const bool compact_mixed_path = mixed_sampling;
+    if (force_topk <= 0 || force_topk > 4096 || force_topk >= static_cast<int>(draft_vocab_size_) || d2t_map_.defined()
+        || (!compact_mixed_path && !compact_pure_path)) {
         force_topk = 0;
     }
     if (force_topk > 0 && compact_mixed_path) {
@@ -3112,8 +3108,8 @@ SamplerOutput MtpExecutor::sampleDSparkDraft(const StreamGroups&  stream_groups,
     }
 #endif
     auto temperature = temperature_cpu.to(base_logits.device(), /*non_blocking=*/true);
-    auto top_k = has_top_k ? top_k_cpu.to(base_logits.device(), /*non_blocking=*/true) : torch::Tensor();
-    auto top_p = has_top_p ? top_p_cpu.to(base_logits.device(), /*non_blocking=*/true) : torch::Tensor();
+    auto top_k       = has_top_k ? top_k_cpu.to(base_logits.device(), /*non_blocking=*/true) : torch::Tensor();
+    auto top_p       = has_top_p ? top_p_cpu.to(base_logits.device(), /*non_blocking=*/true) : torch::Tensor();
     return speculative_sampler_->sampleDSparkDraft(
         base_logits,
         anchors,
@@ -3125,8 +3121,9 @@ SamplerOutput MtpExecutor::sampleDSparkDraft(const StreamGroups&  stream_groups,
         draft_vocab_size_,
         batch_all_greedy,
         force_topk,
-        force_topk == 0 && exact_joint_device && draft_vocab_size_ >= 512 && draft_vocab_size_ % 256 == 0
-            ? joint_max_top_k : 0,
+        force_topk == 0 && exact_joint_device && draft_vocab_size_ >= 512 && draft_vocab_size_ % 256 == 0 ?
+            joint_max_top_k :
+            0,
         /*copy_token_ids=*/false,
         confidence_hidden_logits,
         confidence_hidden_logits.defined() ? dspark_confidence_head_ : torch::Tensor(),

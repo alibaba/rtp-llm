@@ -189,7 +189,8 @@ public:
                            const GptModelOutputs&                      model_output,
                            const SpecLogitsVerifyRunner::LaunchResult& spec_logits_result,
                            const torch::Tensor&                        draft_token_ids,
-                           const std::shared_ptr<torch::Event>&        draft_tokens_ready = nullptr) const;
+                           const std::shared_ptr<torch::Event>&        draft_tokens_ready          = nullptr,
+                           bool                                        has_draft_to_target_mapping = false) const;
 
     void prepareDecodeDraftModelInput(const StreamGroups& stream_groups,
                                       GptModelInputs&     model_input,
