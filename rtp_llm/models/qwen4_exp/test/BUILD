@@ -30,6 +30,12 @@ py_test(
 )
 
 py_test(
+    name = "moe_nvfp4_test",
+    srcs = ["moe_nvfp4_test.py"],
+    deps = ["//rtp_llm:testlib"],
+)
+
+py_test(
     name = "qwen4_exp_mtp_component_test",
     srcs = ["qwen4_exp_mtp_component_test.py"],
     env = {"GPU_COUNT": "0"},
@@ -76,6 +82,19 @@ py_test(
     srcs = ["moe_nvfp4_test.py"],
     env = {"GPU_COUNT": "0"},
     deps = [":config_fixture", "//rtp_llm:testlib"],
+)
+
+py_test(
+    name = "offline_nvfp4_test",
+    srcs = ["offline_nvfp4_test.py"],
+    deps = ["//rtp_llm:testlib"],
+)
+
+py_test(
+    name = "attention_fp8_runtime_test",
+    srcs = ["attention_fp8_runtime_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    exec_properties = {'gpu':'RTX_5000_PRO_CU13'},
 )
 
 py_test(

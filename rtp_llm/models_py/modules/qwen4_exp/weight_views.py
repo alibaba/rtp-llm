@@ -183,7 +183,7 @@ def record_projection_consumer(weights, name, module):
     )
 
 
-def annotate_compute_inventory(weights):
+def annotate_compute_inventory(weights, source_format=None):
     source_owner = getattr(weights, "_fp8_storage_owner", weights)
 
     def inventory(items, source):
@@ -203,7 +203,7 @@ def annotate_compute_inventory(weights):
         )
 
     weights.compute_inventory = ComputeWeightInventory(
-        "FP8" if source_owner is not weights else "BF16",
+        source_format or ("FP8" if source_owner is not weights else "BF16"),
         source_owner,
         tuple(inventory(items, source) for items, source in zip(weights.weights, source_owner.weights)),
         inventory(weights.global_weights, source_owner.global_weights),
@@ -224,6 +224,12 @@ class Qwen4LinearFactory:
         weight_scale_2_key=None,
         input_scale_key=None,
     ):
+        from rtp_llm.config.quant_config import QWEN4_NVFP4_RECIPE
+
+        # The offline recipe quantizes routed experts only. Attention, routers
+        # and shared-expert projections retain their checkpoint BF16 precision.
+        if getattr(quant_config, "model_recipe", None) == QWEN4_NVFP4_RECIPE:
+            quant_config = None
         storage_scale = weights.get(weight_key + FP8_STORAGE_SCALE_SUFFIX)
         if storage_scale is not None:
             module = Fp8Linear(

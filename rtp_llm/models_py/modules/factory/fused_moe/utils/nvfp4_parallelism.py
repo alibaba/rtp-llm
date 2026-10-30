@@ -1,10 +1,12 @@
-"""Topology admission for block128 FP8-source, contiguous online NVFP4 experts."""
+"""Topology admission for Qwen4 NVFP4 tensor parallelism."""
+
+from rtp_llm.config.quant_config import QWEN4_NVFP4_RECIPE
 
 
 def use_nvfp4_tensor_parallel(config) -> bool:
     pc = config.parallelism_config
     quant = getattr(config.model_config, "quant_config", None)
-    return (
+    online = (
         quant is not None
         and quant.get_method() == "modelopt_fp4"
         and not quant.is_quanted()
@@ -14,6 +16,13 @@ def use_nvfp4_tensor_parallel(config) -> bool:
         and quant.require_contiguous_experts
         and quant.activation_amax == 32.0
         and not quant.mixed_attention
+    )
+    mixed_nvfp4 = (
+        getattr(config.model_config, "_qwen4_nvfp4_mixed_source", False)
+        and getattr(quant, "model_recipe", None) == QWEN4_NVFP4_RECIPE
+    )
+    return (
+        (online or mixed_nvfp4)
         and config.tp_size == 2
         and config.ep_size == 1
         and pc.world_size == 2

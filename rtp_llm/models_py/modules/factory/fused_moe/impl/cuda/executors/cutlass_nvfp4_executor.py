@@ -4,6 +4,7 @@ import torch
 from flashinfer import ActivationType
 from flashinfer.fused_moe import cutlass_fused_moe
 
+from rtp_llm.config.quant_config import QWEN4_NVFP4_RECIPE
 from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import (
     CombineForwardPayload,
     FusedMoeExpertExecutor,
@@ -54,7 +55,16 @@ class CutlassNvfp4Executor(FusedMoeExpertExecutor):
             )
         )
         quant_config = config.model_config.quant_config
-        checker.check(quant_config is not None and not quant_config.is_quanted())
+        checker.check(
+            quant_config is not None
+            and (
+                not quant_config.is_quanted()
+                or (
+                    getattr(quant_config, "model_recipe", None) == QWEN4_NVFP4_RECIPE
+                    and getattr(config.model_config, "_qwen4_nvfp4_mixed_source", False)
+                )
+            )
+        )
         checker.check(not config.has_redundant_experts)
         checker.check(not config.model_config.eplb_config.enable_eplb())
         checker.check(config.tp_size == config.ep_size or tensor_parallel)

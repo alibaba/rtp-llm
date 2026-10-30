@@ -65,15 +65,20 @@ class Qwen4Exp(Qwen35Moe):
     @staticmethod
     def _validate_checkpoint(config: ModelConfig) -> None:
         if getattr(config, "_qwen4_nvfp4_source", False):
-            from rtp_llm.models.qwen4_exp.moe_nvfp4 import validate_nvfp4_manifest
+            from rtp_llm.models.qwen4_exp.moe_nvfp4 import (
+                validate_moe_nvfp4_checkpoint,
+                validate_nvfp4_manifest,
+            )
 
             root = Path(config.ckpt_path)
-            validate_nvfp4_manifest(
-                json.loads((root / "config.json").read_text()),
-                json.loads((root / "model.safetensors.index.json").read_text())[
-                    "weight_map"
-                ],
-            )
+            config_json = json.loads((root / "config.json").read_text())
+            weight_map = json.loads(
+                (root / "model.safetensors.index.json").read_text()
+            )["weight_map"]
+            if getattr(config, "_qwen4_nvfp4_mixed_source", False):
+                validate_moe_nvfp4_checkpoint(config_json, weight_map, root)
+            else:
+                validate_nvfp4_manifest(config_json, weight_map)
             return
         if not getattr(config, "_qwen4_fp8_source", False):
             return
@@ -106,19 +111,31 @@ class Qwen4Exp(Qwen35Moe):
         config.config_dtype = text_config.get("dtype") or text_config.get(
             "torch_dtype", ""
         )
-        config._qwen4_nvfp4_source = bool(
+        from rtp_llm.models.qwen4_exp.moe_nvfp4 import is_qwen4_nvfp4_checkpoint
+
+        config._qwen4_nvfp4_mixed_source = is_qwen4_nvfp4_checkpoint(config_json)
+        config._qwen4_nvfp4_source = config._qwen4_nvfp4_mixed_source or bool(
             source_quant
             and source_quant.get("quant_method") == "modelopt"
             and str(source_quant.get("quant_algo", "")).upper() == "NVFP4"
         )
         config._qwen4_fp8_source = bool(source_quant) and not config._qwen4_nvfp4_source
+        config._qwen4_ple_fp8 = config._qwen4_fp8_source or (
+            config._qwen4_nvfp4_mixed_source
+            and any(
+                name.endswith(".ple_embedding.ngram_embedding")
+                and spec.get("quant_algo") == "FP8"
+                for name, spec in source_quant.get("quantized_layers", {}).items()
+            )
+        )
         cls._configure_precision_recipe(config)
         return config
 
     @staticmethod
     def _configure_precision_recipe(config: ModelConfig) -> None:
         config._qwen4_full_fp8 = bool(getattr(config, "_qwen4_fp8_source", False))
-        if getattr(config, "_qwen4_nvfp4_source", False):
+        mixed_nvfp4 = getattr(config, "_qwen4_nvfp4_mixed_source", False)
+        if getattr(config, "_qwen4_nvfp4_source", False) and not mixed_nvfp4:
             from rtp_llm.config.quant_config import ModelOptFp4Config
 
             if config.quantization:
@@ -142,10 +159,13 @@ class Qwen4Exp(Qwen35Moe):
             config.expert_weight_dtype = "fp4"
             return
         config.quant_config = build_qwen4_quant_config(
-            config.quantization, config._qwen4_full_fp8
+            config.quantization,
+            config._qwen4_full_fp8,
+            source_nvfp4=mixed_nvfp4,
         )
         config._qwen4_full_fp8_nvfp4 = bool(
-            config.quant_config is not None
+            config._qwen4_full_fp8
+            and config.quant_config is not None
             and config.quant_config.get_method() == "modelopt_fp4"
         )
         config._qwen4_dense_storage = getattr(
@@ -256,7 +276,15 @@ class Qwen4Exp(Qwen35Moe):
             table_params + auxiliary_bf16_params + metadata_params
         )
         table_bytes = float(
-            table_params * (1 if getattr(config, "_qwen4_full_fp8", False) else 2)
+            table_params
+            * (
+                1
+                if (
+                    getattr(config, "_qwen4_ple_fp8", False)
+                    or getattr(config, "_qwen4_full_fp8", False)
+                )
+                else 2
+            )
         )
         replicated_bytes = float(auxiliary_bf16_params * 2 + metadata_params * 8)
         config._extra_weight_bytes = table_bytes + replicated_bytes

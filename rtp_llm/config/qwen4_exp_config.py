@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.config.quant_config import (
     QWEN4_FP8_NVFP4_RECIPE,
+    QWEN4_NVFP4_RECIPE,
     Fp8BlockWiseQuantConfig,
     ModelOptFp4Config,
     init_quant_config,
@@ -245,8 +246,34 @@ def resolve_qwen4_parallelism(config, parallelism):
     return resolved
 
 
-def build_qwen4_quant_config(quantization, source_fp8):
+def build_qwen4_quant_config(quantization, source_fp8, source_nvfp4=False):
     requested = init_quant_config(quantization) if quantization else None
+    if source_nvfp4:
+        if (
+            source_fp8
+            or requested is not None
+            and (
+                not isinstance(requested, ModelOptFp4Config)
+                or requested.model_recipe != QWEN4_NVFP4_RECIPE
+                or not requested.is_quanted()
+                or requested.bits != 4
+                or requested.group_size() != 16
+                or requested.source_fp8_block_size is not None
+                or requested.activation_amax is not None
+                or requested.online_cache_dir is not None
+                or requested.mixed_attention
+                or not requested.require_contiguous_experts
+            )
+        ):
+            raise ValueError("qwen4_exp offline NVFP4 requires the QWEN4_NVFP4 recipe")
+        return ModelOptFp4Config(
+            bits=4,
+            group_size=16,
+            is_quanted=True,
+            model_recipe=QWEN4_NVFP4_RECIPE,
+            dense_storage="source_bf16",
+            require_contiguous_experts=True,
+        )
     full_fp8 = bool(source_fp8)
     # The official checkpoint already carries routed E4M3 + block128 scales.
     # Preserve that format by default, including on SM90 where NVFP4 is absent.
@@ -307,8 +334,42 @@ def validate_qwen4_runtime(config, parallelism):
     ):
         raise RuntimeError("qwen4_exp requires complete checkpoint PLE/QSA geometry")
     full_fp8 = bool(getattr(config, "_qwen4_full_fp8_nvfp4", False))
-    native_fp8 = bool(getattr(config, "_qwen4_full_fp8", False)) and not full_fp8
     quant = getattr(config, "quant_config", None)
+    if getattr(config, "_qwen4_nvfp4_mixed_source", False):
+        if (
+            not isinstance(quant, ModelOptFp4Config)
+            or quant.model_recipe != QWEN4_NVFP4_RECIPE
+            or not quant.is_quanted()
+            or quant.bits != 4
+            or quant.group_size() != 16
+            or full_fp8
+            or getattr(config, "_qwen4_full_fp8", False)
+        ):
+            raise RuntimeError("qwen4_exp requires the offline NVFP4 precision recipe")
+        if config.is_mtp or int(getattr(config, "gen_num_per_cycle", 0)) > 0:
+            raise RuntimeError(
+                "qwen4_exp offline NVFP4 currently requires MTP disabled"
+            )
+        pc = parallelism
+        tp = int(pc.tp_size)
+        if (
+            tp not in (1, 2)
+            or pc.world_size != tp
+            or pc.ep_size != 1
+            or pc.dp_size != 1
+            or pc.get_ffn_tp_size() != tp
+            or pc.ffn_sp_size != 1
+            or pc.ffn_disaggregate_config.enable_ffn_disaggregate
+            or config.eplb_config.enable_eplb()
+        ):
+            raise RuntimeError(
+                "qwen4_exp offline NVFP4 requires TP1/TP2, EP1, DP1 without EPLB"
+            )
+        if config.moe_inter_size % (16 * tp) or config.hidden_size % 16:
+            raise RuntimeError(
+                "qwen4_exp offline NVFP4 TP shards must preserve 16-element blocks"
+            )
+    native_fp8 = bool(getattr(config, "_qwen4_full_fp8", False)) and not full_fp8
     if (full_fp8 or native_fp8) and getattr(config, "tie_word_embeddings", False):
         raise RuntimeError("qwen4_exp FP8/NVFP4 requires untied word embeddings")
     if full_fp8 and not is_qwen4_precision_recipe(quant):

@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 import torch
 
 QWEN4_FP8_NVFP4_RECIPE = "qwen4_fp8_nvfp4"
+QWEN4_NVFP4_RECIPE = "qwen4_nvfp4"
 
 
 def _validate_compressed_targets(group_name: str, group_config: Dict[str, Any]) -> None:
@@ -858,10 +859,13 @@ class ModelOptFp4Config(QuantizationConfig):
         self.dense_storage = kwargs.get("dense_storage", "fp8")
         self.mtp_dense_storage = kwargs.get("mtp_dense_storage", "inherit")
         qwen4_recipe = self.model_recipe == QWEN4_FP8_NVFP4_RECIPE
-        if self.model_recipe is not None and not qwen4_recipe:
+        offline_qwen4 = self.model_recipe == QWEN4_NVFP4_RECIPE
+        if self.model_recipe is not None and not (qwen4_recipe or offline_qwen4):
             raise ValueError(f"Unsupported modelopt_fp4 recipe: {self.model_recipe}")
         self.supported_model_types = (
-            ("qwen4_exp", "qwen4_exp_mtp") if qwen4_recipe else None
+            ("qwen4_exp", "qwen4_exp_mtp")
+            if qwen4_recipe or offline_qwen4
+            else None
         )
         self.mixed_attention = kwargs.get("mixed_attention", False)
         self.activation_amax = kwargs.get(
@@ -1138,6 +1142,14 @@ DEFAULT_QWEN4_FP8_NVFP4_QUANT_CONFIG = ModelOptFp4Config(
     model_recipe=QWEN4_FP8_NVFP4_RECIPE,
 )
 
+DEFAULT_QWEN4_NVFP4_QUANT_CONFIG = ModelOptFp4Config(
+    bits=4,
+    group_size=16,
+    is_quanted=True,
+    require_contiguous_experts=True,
+    model_recipe=QWEN4_NVFP4_RECIPE,
+)
+
 preset_quant_config = {
     "INT8": DEFAULT_WEIGHT_ONLY_INT8_PER_CHANNEL_QUANT_CONFIG,
     "FP8": DEFAULT_FP8_PER_TENSOR_QUANT_CONFIG,
@@ -1151,6 +1163,7 @@ preset_quant_config = {
     "MODELOPT_FP4_HYBRID_FP8_PER_BLOCK": (
         DEFAULT_MODELOPT_FP4_HYBRID_FP8_PER_BLOCK_QUANT_CONFIG
     ),
+    "QWEN4_NVFP4": DEFAULT_QWEN4_NVFP4_QUANT_CONFIG,
     "W4A8_INT4_PER_CHANNEL": DEFAULT_W4A8_INT4_PER_CHANNEL_QUANT_CONFIG,
     "W4A8_INT4_PER_CHANNEL_COMPRESSED": (
         DEFAULT_COMPRESSED_W4A8_INT4_PER_CHANNEL_QUANT_CONFIG

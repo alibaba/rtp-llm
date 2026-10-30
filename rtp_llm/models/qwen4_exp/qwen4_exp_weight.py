@@ -317,7 +317,10 @@ class Qwen4ExpWeight(Qwen35MoeWeight):
         self._append_indexer_weights(info.layer_weights)
         self._append_ple_weights(info.layer_weights)
         if getattr(self.model_config, "_qwen4_nvfp4_source", False):
-            from rtp_llm.models.qwen4_exp.moe_nvfp4 import Qwen4Nvfp4WeightInfo
+            if getattr(self.model_config, "_qwen4_nvfp4_mixed_source", False):
+                from rtp_llm.models.qwen4_exp.offline_nvfp4 import Qwen4Nvfp4WeightInfo
+            else:
+                from rtp_llm.models.qwen4_exp.moe_nvfp4 import Qwen4Nvfp4WeightInfo
 
             return Qwen4Nvfp4WeightInfo(info.weights, info.layer_weights)
         if self._full_fp8:
@@ -395,11 +398,15 @@ class Qwen4ExpWeight(Qwen35MoeWeight):
                             self.prefix
                             + "layers.{i}.ple.ple_embedding.ngram_embedding.weight_scale"
                         )
-                        if getattr(self.model_config, "_qwen4_fp8_source", False)
+                        if (
+                            getattr(self.model_config, "_qwen4_ple_fp8", False)
+                            or getattr(self.model_config, "_qwen4_fp8_source", False)
+                        )
                         else None
                     ),
                     preserve_fp8=bool(
-                        getattr(self.model_config, "_qwen4_full_fp8", False)
+                        getattr(self.model_config, "_qwen4_ple_fp8", False)
+                        or getattr(self.model_config, "_qwen4_full_fp8", False)
                     ),
                 )
             )

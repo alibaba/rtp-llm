@@ -937,7 +937,15 @@ class ModelConfig(CppModelConfig):
         # Load quant_config. An explicit online W8A8 request is intentionally
         # handled before the legacy checkpoint-first path: it may reuse a W8A8
         # checkpoint, but it must never silently turn into another scheme.
-        quant_config = QuantizationConfig.load_from_ckpt(self.ckpt_path)
+        if getattr(self, "_qwen4_nvfp4_mixed_source", False):
+            from rtp_llm.config.qwen4_exp_config import build_qwen4_quant_config
+
+            # Generic ModelOpt parsing cannot represent the mixed manifest.
+            quant_config = build_qwen4_quant_config(
+                self.quantization, source_fp8=False, source_nvfp4=True
+            )
+        else:
+            quant_config = QuantizationConfig.load_from_ckpt(self.ckpt_path)
         if explicit_online_w8a8:
             if quant_config is None:
                 # Qwen3.5 and Qwen3.6 share RTP-LLM's qwen35_moe model

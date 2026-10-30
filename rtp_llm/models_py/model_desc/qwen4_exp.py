@@ -836,8 +836,11 @@ class Qwen4ExpModel(Qwen35Model):
             for layer in self.layers:
                 install_target_graph_all_reduce(layer.self_attn, layer.mlp, dispatch)
 
-        if compute_weights is not weights:
-            inventory = annotate_compute_inventory(self.weight)
+        offline_nvfp4 = bool(getattr(config, "_qwen4_nvfp4_source", False))
+        if compute_weights is not weights or offline_nvfp4:
+            inventory = annotate_compute_inventory(
+                self.weight, source_format="NVFP4" if offline_nvfp4 else None
+            )
             logging.info(
                 "Qwen4 weight inventory rank=%s %s",
                 parallelism_config.world_rank,

@@ -35,7 +35,7 @@ class Nvfp4WeightViews:
                 or not bool((scale == scale.flatten()[0]).all())
             ):
                 raise ValueError(
-                    "CUTLASS online NVFP4 requires uniform finite positive activation scales"
+                    "CUTLASS NVFP4 requires uniform finite positive activation scales"
                 )
         return [
             weights[W.moe_w1_i_s].reciprocal().min(),
