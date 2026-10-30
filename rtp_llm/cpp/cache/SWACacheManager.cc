@@ -231,13 +231,15 @@ bool SWACacheManager::malloc(BlockIds&                block_ids,
                       required_positions);
 }
 
-bool SWACacheManager::mallocForDecode(BlockIds&            block_ids,
-                                      int                  seq_len,
-                                      bool                 enable_reuse_cache,
-                                      int                  reserve_step,
-                                      std::vector<size_t>* backfilled_positions) {
+bool SWACacheManager::mallocForDecode(BlockIds&                block_ids,
+                                      int                      seq_len,
+                                      bool                     enable_reuse_cache,
+                                      int                      reserve_step,
+                                      std::vector<size_t>*     backfilled_positions,
+                                      const RequiredPositions& required_positions) {
     (void)enable_reuse_cache;
-    return mallocImpl(block_ids, seq_len, reserve_step, activeTailBlockCount(), false, backfilled_positions, {});
+    return mallocImpl(block_ids, seq_len, reserve_step, activeTailBlockCount(), false, backfilled_positions,
+                      required_positions);
 }
 
 bool SWACacheManager::mallocImpl(BlockIds&                block_ids,

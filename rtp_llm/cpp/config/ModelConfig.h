@@ -14,6 +14,7 @@
 #include <vector>
 #include <string>
 #include <map>
+#include <optional>
 
 namespace rtp_llm {
 
@@ -86,6 +87,8 @@ public:
     bool use_norm_attn_out_residual = false;
 
     int64_t max_seq_len       = 0;
+    // Model workspace limit for one unchunked Prefill, across all return sequences; 0 is unbounded.
+    int64_t max_prefill_tokens = 0;
     int64_t gen_num_per_cycle = 0;  // speculative decoding: tokens per cycle
     int64_t vocab_size        = 0;
     // Output vocab pruning contract: empty means disabled; otherwise ids must be strictly
@@ -143,6 +146,10 @@ public:
     // Declarative per-model KV cache layout. C++ cache config consumes this
     // and performs runtime finalization such as block/ring sizing.
     LayerKVCacheSpecDescs kv_cache_spec_descs;
+    // Local FULL/BLOCK_ROUND_ROBIN allocation and table layout, independent of
+    // Query CP and the upstream Prefill TP size. Unset preserves legacy rules;
+    // true selects owned pages in compact order, false selects the full table.
+    std::optional<bool> local_kv_cache_sharded = std::nullopt;
     // Model policy for prefix recomputation; live P/D transfers are unaffected.
     int     cache_min_replay_tokens = 1;
     int64_t cache_key_hash_seed     = 0;

@@ -1,6 +1,7 @@
 #include "rtp_llm/cpp/distribute/CpuTpBroadcaster.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include "rtp_llm/cpp/engine_base/EngineBase.h"
+#include "rtp_llm/cpp/distribute/CpuTpBroadcaster.h"
 #include "rtp_llm/cpp/normal_engine/NormalExecutor.h"
 #include "rtp_llm/cpp/normal_engine/NormalEngine.h"
 #include "rtp_llm/cpp/normal_engine/pipeline/PPExecutor.h"
@@ -360,8 +361,11 @@ void NormalEngine::initScheduler() {
                                          metrics_reporter_));
         RTP_LLM_LOG_INFO("create pipeline parallel scheduler done");
     } else if (runtime_config.use_batch_decode_scheduler) {
-        scheduler_.reset(new BatchDecodeScheduler(
-            runtime_config, resource_context_.cache_manager, metrics_reporter_, parallelism_config.dp_rank));
+        scheduler_.reset(new BatchDecodeScheduler(runtime_config,
+                                                  resource_context_.cache_manager,
+                                                  metrics_reporter_,
+                                                  parallelism_config.dp_rank,
+                                                  model_config_.max_prefill_tokens));
         RTP_LLM_LOG_INFO("create batch decode scheduler done");
     } else if (pdfusion_scheduler_mode == PDFusionSchedulerMode::RATIO
                && pd_sep_config.role_type == RoleType::PDFUSION) {
@@ -425,11 +429,13 @@ absl::StatusOr<GenerateStreamPtr> NormalEngine::preRun(const std::shared_ptr<Gen
     const auto reserve_step = reserveStepForStream(stream->generateConfig()->isPrefillOnly());
     stream->setReserveStep(reserve_step);
     if (mode == preRunMode::decode_warm_up) {
+        stream->setIsFakeStream(true);
         stream->setIsContextStream(false);
         const size_t seq_size_per_block = model_config_.attn_config.tokens_per_block;
         const size_t reserved_blocks = warmUpReservedBlockCount(stream->seqLength(), reserve_step, seq_size_per_block);
         stream->fakeInitKVBlock(reserved_blocks);
     } else if (mode == preRunMode::prefill_warm_up && resource_context_.cache_manager) {
+        stream->setIsFakeStream(true);
         // Generation-prefill CUDA Graph capture needs a temporary real KV pool, while the
         // framework warmup stream deliberately does not allocate request KV
         // blocks. Keep the model-level KV tensor and per-request block table
@@ -497,9 +503,9 @@ NormalEngine::runPrefillWarmupShape(const std::shared_ptr<GenerateInput>& genera
     }
 
     stream->setReuseLength(reuse_length);
-    // The temporary manager owns valid physical block 0. Alias the logical prompt table to that
-    // block so the warmup shapes exercise the production paged-attention path without reserving
-    // a production-sized KV cache before capacity is sampled.
+    stream->enableWarmupChunkWindow();
+    // Attention aliases block zero; LINEAR groups borrow per-row state slots
+    // through copyChunkKernelBlocks without reserving a full prompt cache.
     stream->fakeInitKVBlock((static_cast<size_t>(stream->seqLength()) + static_cast<size_t>(block_size) - 1)
                             / block_size);
 
@@ -509,7 +515,6 @@ NormalEngine::runPrefillWarmupShape(const std::shared_ptr<GenerateInput>& genera
         return stream;
     }
 
-    stream->enableWarmupChunkWindow();
     while (true) {
         const int64_t remaining = static_cast<int64_t>(stream->seqLength()) - stream->reuseLength();
         const int64_t grant     = computeChunkGrant(token_budget, stream->currentBatchSize(), remaining, block_size);
@@ -530,20 +535,32 @@ NormalEngine::runPrefillWarmupShape(const std::shared_ptr<GenerateInput>& genera
     }
 }
 
-std::shared_ptr<KVCacheManager> NormalEngine::createWarmupCacheManager() {
+std::shared_ptr<KVCacheManager> NormalEngine::createWarmupCacheManager(int prefill_batch_size) {
     const int cache_gen_num_per_cycle =
         sp_config.type != SP_TYPE_NONE ? static_cast<int>(sp_config.gen_num_per_cycle) : 0;
     // Use the same cache geometry as real inference, including independent
     // pools and kernel page overrides. The warmup helper assigns the small
     // temporary capacity needed by fake streams.
     auto cache_config = CacheConfigCreator::createWarmupConfig(
-        model_config_, parallelism_config, kv_cache_config, cache_gen_num_per_cycle);
+        model_config_, parallelism_config, kv_cache_config, cache_gen_num_per_cycle, prefill_batch_size);
     ParallelismConfig temp_parallelism_config;
     RuntimeConfig     temp_runtime_config;
     auto              cache_manager = make_shared<KVCacheManager>(
         cache_config, true, nullptr, KVCacheConfig{}, temp_parallelism_config, temp_runtime_config);
     if (!cache_manager->init()) {
         RTP_LLM_FAIL("init warmup kv cache manager failed");
+    }
+    if (prefill_batch_size > 0) {
+        const auto layout = cache_manager->allLayerCacheBase();
+        for (const auto& group : cache_config.groups()) {
+            if (group.policy.group_type == CacheGroupType::LINEAR) {
+                for (const auto& layer : layout.group(group.tag).layers()) {
+                    if (layer.kv_addr.defined()) {
+                        layer.kv_addr.zero_();
+                    }
+                }
+            }
+        }
     }
     return cache_manager;
 }
@@ -687,7 +704,8 @@ WarmUpResult NormalEngine::prefillWarmUp(const EngineInitParams& params) {
 
     size_t max_consumed = 0;
     {
-        auto            warmup_cache_manager    = createWarmupCacheManager();
+        auto warmup_cache_manager =
+            createWarmupCacheManager(std::max<int64_t>(1, runtime_config.fifo_scheduler_config.max_context_batch_size));
         ResourceContext warmup_resource_context = resource_context_;
         warmup_resource_context.cache_manager   = warmup_cache_manager;
         // The temporary paged cache is warmup infrastructure, not runtime activation memory.
@@ -701,15 +719,15 @@ WarmUpResult NormalEngine::prefillWarmUp(const EngineInitParams& params) {
 
         const int64_t block_size = model_config_.attn_config.tokens_per_block;
         const int64_t row_count  = std::min(token_budget, runtime_config.fifo_scheduler_config.max_context_batch_size);
-        const int64_t row_heavy_tokens = std::min(token_budget, token_heavy_seq_len);
+        RTP_LLM_CHECK_WITH_INFO(row_count > 0, "chunked prefill warmup requires max_context_batch_size > 0");
+        const int64_t row_heavy_tokens = std::min(token_budget / row_count, token_heavy_seq_len);
         const int64_t row_heavy_reuse  = (token_heavy_seq_len - row_heavy_tokens) / block_size * block_size;
         auto          row_heavy_input  = makeFakeInput(static_cast<size_t>(row_heavy_reuse + row_heavy_tokens));
         row_heavy_input->generate_config->num_return_sequences = static_cast<int>(row_count);
 
-        // Conservatively combine multiple rows with a full chunk per row and a long prefix.
-        // Run once without splitting by the scheduler's global token budget.
-        auto row_heavy_result =
-            runPrefillWarmupShape(row_heavy_input, warmup_resource_context, static_cast<int>(row_heavy_reuse), 0);
+        // Warm up multiple rows with a long prefix while sharing the scheduler's token budget.
+        auto row_heavy_result = runPrefillWarmupShape(
+            row_heavy_input, warmup_resource_context, static_cast<int>(row_heavy_reuse), token_budget);
         THROW_IF_STATUSOR_ERROR(row_heavy_result);
         max_consumed = std::max(max_consumed, memory_tracker->maxConsumedBytes());
         row_heavy_result.value().reset();
@@ -845,6 +863,8 @@ void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) 
                                                   nullptr;
     auto               config               = CacheConfigCreator::createConfig(
         model_config_, parallelism_config, kv_cache_config, sp_config, draft_model_config, isMTPEagle(), isEagle());
+    CacheConfigCreator::configureLinearReplay(
+        config, model_config_, parallelism_config, runtime_config, sp_config, isMTPEagle());
     auto block_tree_layout = planBlockTreeCacheLayout(config, kv_cache_config);
     RTP_LLM_CHECK_WITH_INFO(block_tree_layout != nullptr, "failed to plan BlockTreeCache layout");
     const auto local_block_num = CacheConfigCreator::computeLocalBlockNum(
@@ -915,7 +935,7 @@ absl::Status NormalEngine::stop() {
         return absl::OkStatus();
     }
     RTP_LLM_LOG_INFO("stop normal engine");
-    running_ = false;
+    running_                    = false;
     const auto scheduler_status = scheduler_->stop();
     // Ask rank 0 to stop at a step boundary. Receivers must finish all model
     // collectives for inputs that rank 0 has already published before exiting.
@@ -927,7 +947,7 @@ absl::Status NormalEngine::stop() {
     return scheduler_status;
 }
 
-void NormalEngine::loop() {
+void NormalEngine::loop() try {
     RTP_LLM_PROFILE_FUNCTION();
     RTP_LLM_LOG_INFO("loop begin");
     c10::InferenceMode inference_guard(true);
@@ -951,6 +971,11 @@ void NormalEngine::loop() {
     // for the receivers and subsequent model teardown collectives.
     THROW_IF_STATUS_ERROR(executor_->finish());
     tp_broadcaster.finish();
+} catch (const CpuTpPeerClosed& error) {
+    if (running_) {
+        throw;
+    }
+    RTP_LLM_LOG_INFO("CPU TP peer closed during engine shutdown: %s", error.what());
 }
 
 absl::Status NormalEngine::trySaveStepError() const {

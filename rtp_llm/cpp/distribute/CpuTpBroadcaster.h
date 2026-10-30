@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <mutex>
+#include <stdexcept>
 #include <string>
 #include <stdexcept>
 #include <vector>
@@ -11,6 +12,12 @@
 namespace rtp_llm {
 
 class CpuTpBroadcastStopped: public std::runtime_error {
+public:
+    using std::runtime_error::runtime_error;
+};
+
+// Only a clean EOF between frames may be treated as an orderly engine stop.
+class CpuTpPeerClosed: public std::runtime_error {
 public:
     using std::runtime_error::runtime_error;
 };

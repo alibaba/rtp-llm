@@ -20,6 +20,7 @@
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_utils.h"
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_base.h"
+#include "rtp_llm/cpp/utils/math_utils.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 
 namespace py = pybind11;
@@ -62,6 +63,8 @@ public:
         capture_stream_(cuda_graph::graphGetStreamFromPool(true)),
         enable_cuda_graph_debug_mode_(graph_params.enable_cuda_graph_debug_mode),
         num_tokens_per_bs_(graph_params.num_tokens_per_bs),
+        linear_replay_group_count_(graph_params.linear_replay_group_count),
+        sequence_parallel_size_(graph_params.sequence_parallel_size),
         max_seq_len_(graph_params.max_seq_len),
         request_max_seq_len_(graph_params.request_max_seq_len > 0 ? graph_params.request_max_seq_len :
                                                                     graph_params.max_seq_len),
@@ -104,6 +107,9 @@ public:
         draft_prefill_uses_request_lanes_ =
             isMtpDraftPrefillCudaGraph() && py::hasattr(py_instance_, "cuda_graph_draft_prefill_uses_request_lanes")
             && py_instance_.attr("cuda_graph_draft_prefill_uses_request_lanes")().cast<bool>();
+        if (sequence_parallel_size_ > 1 && role_ != CudaGraphRole::GENERATION_PREFILL) {
+            max_bs_ = padSequenceParallelRequests(max_bs_, num_tokens_per_bs_, sequence_parallel_size_);
+        }
         if (role_ == CudaGraphRole::GENERATION_PREFILL) {
             RTP_LLM_CHECK_WITH_INFO(
                 request_max_seq_len_ > 0 && request_max_seq_len_ <= max_seq_len_,
@@ -263,6 +269,8 @@ private:
     bool                    enable_cuda_graph_debug_mode_{false};
     size_t                  max_bs_{1};
     int                     num_tokens_per_bs_{1};
+    int                     linear_replay_group_count_{0};
+    int                     sequence_parallel_size_{1};
     int                     max_num_token_{1};
     int64_t                 max_kernel_block_table_width_{0};
     int                     max_seq_len_{0};

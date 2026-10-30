@@ -6,7 +6,10 @@
 #include "rtp_llm/cpp/cache/Types.h"
 #include "rtp_llm/cpp/cache/KVCacheResource.h"
 #include "rtp_llm/cpp/cache/CacheGroupType.h"
+#include "rtp_llm/cpp/cache/BlockInfo.h"
+#include "rtp_llm/cpp/cache/connector/p2p/AsymmetricTpUtil.h"
 
+#include <map>
 #include <utility>
 
 namespace rtp_llm {
@@ -38,7 +41,8 @@ public:
                            int                         partition_id,
                            grpc::ServerContext*        server_context,
                            int32_t                     prefill_cp_size          = 1,
-                           std::vector<StagePeerGroup> remote_stage_peer_groups = {}):
+                           std::vector<StagePeerGroup> remote_stage_peer_groups = {},
+                           int32_t                     prefill_tp_size          = 1):
             request_id(request_id),
             request_key(std::move(request_key)),
             peer_addrs(std::move(peer_addrs)),
@@ -50,6 +54,7 @@ public:
             server_context(server_context),
             prefill_cp_size(prefill_cp_size),
             remote_stage_peer_groups(std::move(remote_stage_peer_groups)),
+            prefill_tp_size(prefill_tp_size),
             group_block_ids_(std::move(group_block_ids)) {
             group_block_ids_.validate();
         }
@@ -75,6 +80,7 @@ public:
         int32_t              prefill_cp_size;
         /** Own source-stage metadata for asynchronous loads; empty groups mean pp_P=1 with flat peers. */
         std::vector<StagePeerGroup> remote_stage_peer_groups;
+        int32_t                     prefill_tp_size;
 
     private:
         GroupBlockIds group_block_ids_;
@@ -124,35 +130,57 @@ private:
     static void            appendGroupBlockIds(const LoadKVCacheContext& context,
                                                const CacheTopology&      topology,
                                                BroadcastLoadRequestPB&   request);
-    static std::string makeTaggedRequestKey(int64_t request_id, size_t layer_id, const std::string& tag);
+    static std::string     makeTaggedRequestKey(int64_t request_id, size_t layer_id, const std::string& tag);
     static std::string
     makeMTPModuleCacheKey(size_t mtp_base_model_id, const std::string& token_id_str, size_t layer_id);
     static std::vector<MTPModuleLoadPlan> makeMTPModuleLoadPlan(const ProposeModelEngineInitParams* propose_params);
+    bool                                  hasLinearCacheTransfer() const;
+    ErrorInfo validateLinearCacheTransferPartitions(const std::map<std::string, AsymmetricTPContext>& partitions) const;
+    static std::map<std::string, AsymmetricTPContext> prefillPeerPartitions(const std::vector<std::string>& peer_addrs,
+                                                                            int  attention_tp,
+                                                                            int  attention_rank,
+                                                                            bool use_mla       = false,
+                                                                            bool replicated_kv = false);
+    static std::vector<BlockInfo>                     linearLoadSegments(const std::vector<size_t>& segment_bytes,
+                                                                         const BlockInfo&           block,
+                                                                         const AsymmetricTPContext& partition);
     // Projects the producer's buildCacheStorePlan onto one group's decode block
     // table: key_index indexes the global cache keys, offset_index the group-local
     // BlockIds::blocks(). Derived from group policy plus block geometry only, never
-    // from how many prefill peers answered this load. Static so it is testable.
+    // from how many prefill peers answered this load. Every required destination
+    // must exist; an incomplete block table must not erase load obligations.
     static std::vector<CacheStoreBlockPair> buildGroupLoadPlan(const CacheGroupPolicy& policy,
                                                                size_t                  local_block_num,
                                                                size_t                  cache_key_count,
                                                                size_t                  reuse_block_size,
                                                                bool                    use_hybrid,
                                                                size_t                  group_seq_size_per_block,
-                                                               size_t                  base_seq_size_per_block);
-    static size_t    cacheKeysPerPhysicalBlock(size_t group_seq_size_per_block, size_t base_seq_size_per_block);
-    static size_t    keyBlocksPerLogicalBlock(const CacheGroupPolicy& policy,
-                                              size_t                  group_seq_size_per_block,
-                                              size_t                  base_seq_size_per_block);
-    static void      markCacheKeyRange(std::vector<size_t>& cache_key_counts,
-                                       size_t               endpoint_key_index,
-                                       size_t               block_offset_index,
-                                       size_t               cache_keys_per_physical_block);
-    static size_t    completedHandoffPrefixBlocks(size_t                     already_reused_blocks,
-                                                  const std::vector<size_t>& required_cache_key_counts,
-                                                  const std::vector<size_t>& transferred_cache_key_counts,
-                                                  bool                       allow_no_local_load = false);
-    static size_t    minLoadedCacheBlockCount(const std::vector<size_t>& rank_loaded_cache_block_counts);
-    static ErrorInfo validateRemoteLoadTopology(size_t worker_size, size_t peer_size);
+                                                               size_t                  base_seq_size_per_block,
+                                                               int                     decode_cp_rank = 0,
+                                                               int                     decode_cp_size = 1);
+    static size_t cacheKeysPerPhysicalBlock(size_t group_seq_size_per_block, size_t base_seq_size_per_block);
+    static size_t keyBlocksPerLogicalBlock(const CacheGroupPolicy& policy,
+                                           size_t                  group_seq_size_per_block,
+                                           size_t                  base_seq_size_per_block);
+    static size_t
+    fullBlockSourcePeer(size_t endpoint_key_index, size_t cache_keys_per_physical_block, size_t peer_count) {
+        // FULL blocks are published by logical block owner, including a clipped final endpoint key.
+        const size_t logical_block = cache_keys_per_physical_block == 1 ?
+                                         endpoint_key_index :
+                                         endpoint_key_index / cache_keys_per_physical_block;
+        return logical_block % peer_count;
+    }
+    static void markCacheKeyRange(std::vector<size_t>& cache_key_counts,
+                                  size_t               endpoint_key_index,
+                                  size_t               cache_keys_per_physical_block);
+    // Returns a global prefix length after all scheduled loads have succeeded.
+    // Keys with no rank-local loads are skipped; at least one new local load is required.
+    static size_t              completedHandoffPrefixBlocks(size_t                     already_reused_blocks,
+                                                            const std::vector<size_t>& required_cache_key_counts,
+                                                            const std::vector<size_t>& transferred_cache_key_counts,
+                                                            bool                       allow_no_local_load = false);
+    static size_t              minLoadedCacheBlockCount(const std::vector<size_t>& rank_loaded_cache_block_counts);
+    static ErrorInfo           validateRemoteLoadTopology(size_t worker_size, size_t peer_size);
     static std::vector<size_t> completionQueueExpectedResponseCounts(size_t worker_size);
     static grpc::Status        generateRequestReadFailureStatus(bool cancelled);
     static ErrorInfo           cacheLoadClientError(int64_t request_id, ErrorCode error_code);

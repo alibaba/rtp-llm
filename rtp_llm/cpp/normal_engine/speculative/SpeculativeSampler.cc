@@ -4,6 +4,10 @@
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/cpp/utils/DebugUtils.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
+#if USING_CUDA
+#include <ATen/cuda/CUDAContext.h>
+#include "rtp_llm/models_py/bindings/cuda/kernels/mtp_greedy_sampling.h"
+#endif
 
 namespace rtp_llm {
 namespace speculative {
@@ -12,6 +16,16 @@ FastTopKSamplerOutput FastTopKSampler::forward(const torch::Tensor& logits, int 
     FastTopKSamplerOutput output;
 
     if (top_k == 1) {
+#if USING_CUDA
+        if (logits.is_cuda()) {
+            invokeMtpGreedySampling(logits,
+                                    d2t_map_,
+                                    output.token_ids,
+                                    output.all_probs,
+                                    at::cuda::getCurrentCUDAStream(logits.get_device()).stream());
+            return output;
+        }
+#endif
         output.token_ids = torch::argmax(logits, -1, true);
         output.all_probs = torch::zeros_like(logits).scatter_(-1, output.token_ids, 1.0);
     } else {
@@ -22,6 +36,7 @@ FastTopKSamplerOutput FastTopKSampler::forward(const torch::Tensor& logits, int 
 
     int batch_size = output.token_ids.size(0);
     execMappingDraft2Target({output.token_ids, d2t_map_, batch_size, 0, 1});
+    output.token_ids = output.token_ids.to(torch::kInt32);
 
     return output;
 }
@@ -99,6 +114,41 @@ SpeculativeSamplerOutput SpeculativeSampler::forward(const SpeculativeSamplingPa
     return sample_output;
 }
 
+torch::Tensor SpeculativeSampler::targetResponseProbabilities(const std::vector<ReturnAllProbsMode>& modes,
+                                                              const SamplerOutput& target_sampler_output) {
+    const bool need_response =
+        std::any_of(modes.begin(), modes.end(), [](auto mode) { return mode != ReturnAllProbsMode::NONE; });
+    if (!need_response) {
+        return {};
+    }
+    const auto& filtered_probs = target_sampler_output.all_probs;
+    RTP_LLM_CHECK_WITH_INFO(filtered_probs.defined() && filtered_probs.dim() == 3
+                                && filtered_probs.size(0) == static_cast<int64_t>(modes.size()),
+                            "MTP filtered target probabilities must be [stream, verify_row, vocab]");
+    const bool has_original =
+        std::any_of(modes.begin(), modes.end(), [](auto mode) { return mode == ReturnAllProbsMode::ORIGINAL; });
+    if (!has_original) {
+        return filtered_probs;
+    }
+
+    const auto& original_probs = target_sampler_output.original_all_probs;
+    RTP_LLM_CHECK_WITH_INFO(original_probs.defined() && original_probs.sizes() == filtered_probs.sizes(),
+                            "MTP original target probabilities must match filtered verify rows");
+    const bool has_default =
+        std::any_of(modes.begin(), modes.end(), [](auto mode) { return mode == ReturnAllProbsMode::DEFAULT; });
+    if (!has_default) {
+        return original_probs;
+    }
+
+    auto response_probs = filtered_probs.clone();
+    for (int64_t row = 0; row < static_cast<int64_t>(modes.size()); ++row) {
+        if (modes[row] == ReturnAllProbsMode::ORIGINAL) {
+            response_probs.select(0, row).copy_(original_probs.select(0, row));
+        }
+    }
+    return response_probs;
+}
+
 void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&        sample_output,
                                      const SpeculativeSamplingParams& params,
                                      SamplerOutput&                   draft_sampler_output,
@@ -108,8 +158,7 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&        sample_out
 
     const int batch_size = params.do_sample.size(0);
 
-    auto draft_token_ids  = draft_sampler_output.token_ids;
-    auto target_token_ids = target_sampler_output.token_ids;
+    auto draft_token_ids = draft_sampler_output.token_ids;
 
     auto       draft_token_probs      = draft_sampler_output.all_probs;
     auto       target_token_probs     = target_sampler_output.all_probs;

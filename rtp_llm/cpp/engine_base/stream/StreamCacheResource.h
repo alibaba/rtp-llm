@@ -11,6 +11,7 @@
 #include "rtp_llm/cpp/engine_base/stream/ResourceContext.h"
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
 #include "rtp_llm/cpp/cache/CPSlotMapper.h"
+#include "rtp_llm/cpp/cache/LinearReplayPool.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 
 namespace rtp_llm {
@@ -19,7 +20,29 @@ class AsyncContext;
 class GenerateStream;
 struct MallocResult;
 
+struct LinearReplayWindow {
+    int64_t                                verify_epoch   = 0;
+    int32_t                                produced_steps = 0;
+    torch::Tensor                          accept_len_gpu;
+    torch::Tensor                          anchor_block_ids_gpu;
+    torch::Tensor                          anchor_processed_len_gpu;
+    std::shared_ptr<LinearReplayLease>     lease;
+    std::shared_ptr<LinearReplayBlockHold> state_block_hold;
+    std::shared_ptr<torch::Event>          device_ready;
+};
+
+struct LinearReplayRound {
+    int64_t                                   verify_epoch = 0;
+    std::shared_ptr<LinearReplayLease>        lease;
+    std::shared_ptr<const LinearReplayWindow> previous_window;
+    std::shared_ptr<LinearReplayBlockHold>    state_block_hold;
+    std::vector<int32_t>                      initial_block_ids;
+    std::shared_ptr<LinearReplayBlockHold>    initial_state_hold;
+};
+
 class StreamCacheResource {
+    friend class GenerateStream;
+
 public:
     StreamCacheResource(GenerateStream*        stream,
                         const ResourceContext& resource_context,
@@ -39,7 +62,13 @@ public:
     absl::Status         waitForAllocatorLoad();
     // Empty while pending; a terminal status preserves retryable materialization failures.
     std::optional<absl::Status> pollAllocatorLoad();
-    absl::Status                incrKVBlock(int seq_len_override = -1);
+    absl::Status                           incrKVBlock(int seq_len_override = -1, bool preserve_inflight = false);
+    void                                   pruneKVCache(int completed_seq_len);
+    void                                   publishPrefillCache(int processed_length);
+    std::shared_ptr<LinearReplayLease>     linearReplayLease() const {
+        return linear_replay_.lease;
+    }
+    std::shared_ptr<LinearReplayBlockHold> holdLinearReplayBlocks();
     void                        fakeInitKVBlock(size_t reserved_blocks = 0);
     int                         tryReleaseKVBlock(size_t nums);
     void                        freeBatchBlocks(size_t batch_id, std::vector<int>& blocks);
@@ -139,6 +168,7 @@ private:
     void         recordCacheReuseMallocResult(const MallocResult& result);
     void         publishReuseLengths(int total_length, int host_length, int disk_length, int backend_length);
     absl::Status finalizeAllocatorLoad();
+    absl::Status prepareLinearReplayResources(bool prepare_tails = true);
 
     GenerateStream*                stream_;
     BatchKVCacheResourcePtr        batch_kv_cache_resource_;
@@ -150,6 +180,7 @@ private:
     int                              malloc_failed_times_   = 0;
     bool                             fake_inited_           = false;
     bool                             resource_released_     = false;
+    bool                             deferred_cache_prune_  = false;
     std::shared_ptr<AsyncContext>    allocator_load_context_;
     RtpLLMCacheReuseMetricsCollector cache_reuse_metrics_;
     int64_t                          malloc_begin_time_us_    = 0;
@@ -157,6 +188,19 @@ private:
 
     // Physical block pins held for PD separation.
     std::shared_ptr<KVCacheResource> pd_kvcache_ref_;
+    // Window access remains protected by the owning stream's async-state mutex.
+    struct LinearReplayState {
+        std::shared_ptr<LinearReplayLease>        lease;
+        std::shared_ptr<LinearReplayBlockHold>    initial_state_hold;
+        std::vector<int32_t>                      initial_block_ids;
+        std::shared_ptr<const LinearReplayWindow> window;
+        int64_t                                   epoch = 0;
+
+        void clearInitialState() {
+            initial_block_ids.clear();
+            initial_state_hold.reset();
+        }
+    } linear_replay_;
 };
 
 }  // namespace rtp_llm

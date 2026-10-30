@@ -138,11 +138,19 @@ class DraftModelLoadingTest(unittest.TestCase):
                 ):
                     result = ModelFactory.create_propose_model_config(
                         engine,
-                        SimpleNamespace(num_layers=7, max_seq_len=128),
+                        SimpleNamespace(
+                            num_layers=7,
+                            max_seq_len=128,
+                            moe_prefill_max_tokens_per_rank=256,
+                        ),
                         ModelArgs(),
                     )
 
                 self.assertIs(result, draft)
+                self.assertEqual(
+                    result.gen_num_per_cycle, engine.sp_config.gen_num_per_cycle
+                )
+                self.assertEqual(result.moe_prefill_max_tokens_per_rank, 256)
                 check_draft_role(result)
                 build_config.assert_called_once()
                 model_cls._apply_kv_cache_config.assert_called_once()

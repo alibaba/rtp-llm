@@ -30,10 +30,13 @@ public:
     BatchDecodeScheduler(const RuntimeConfig&                   runtime_config,
                          const std::shared_ptr<KVCacheManager>& cache_manager,
                          const kmonitor::MetricsReporterPtr     metrics_reporter,
-                         int                                    dp_rank = 0) {
+                         int                                    dp_rank            = 0,
+                         int64_t                                max_prefill_tokens = 0) {
         cache_manager_    = cache_manager;
         metrics_reporter_ = metrics_reporter;
         batch_size_       = runtime_config.batch_decode_scheduler_config.batch_decode_scheduler_batch_size;
+        max_batch_size_   = std::max<int64_t>(runtime_config.max_generate_batch_size, batch_size_);
+        max_prefill_tokens_ = max_prefill_tokens;
         scheduler_type_   = SchedulerType::kBatchDecode;
         dp_rank_          = dp_rank;
     }
@@ -114,6 +117,11 @@ public:
     void updateSchedulerInfo(const std::string& scheduler_info) override {
         BatchDecodeSchedulerConfigLocal config;
         autil::legacy::FromJsonString(config, scheduler_info);
+        if (config.batch_size_ == 0 || config.batch_size_ > max_batch_size_) {
+            RTP_LLM_LOG_WARNING(
+                "reject batch size %u outside initialized capacity [1, %u]", config.batch_size_, max_batch_size_);
+            return;
+        }
         batch_size_ = config.batch_size_;
         if (config.mode_ == "decode") {
             scheduler_type_ = SchedulerType::kBatchDecode;
@@ -230,6 +238,26 @@ public:
                 (*it)->moveToNext();
             }
         }
+        if (max_prefill_tokens_ <= 0) {
+            return;
+        }
+        int64_t remaining = max_prefill_tokens_;
+        for (const auto& stream : running_streams_) {
+            if (!stream->isContextStream()) {
+                continue;
+            }
+            const int64_t rows = static_cast<int64_t>(stream->contextLength()) * stream->currentBatchSize();
+            if (rows > remaining) {
+                for (const auto& rejected : running_streams_) {
+                    rejected->reportError(ErrorCode::INVALID_PARAMS,
+                                          "fixed Prefill batch exceeds initialized model capacity");
+                    rejected->moveToNext();
+                }
+                running_streams_.clear();
+                return;
+            }
+            remaining -= rows;
+        }
     }
 
     absl::StatusOr<ScheduleOutput> schedule() override {
@@ -287,6 +315,8 @@ private:
     std::list<GenerateStreamPtr> loading_cache_streams_;
     std::list<GenerateStreamPtr> running_streams_;
     uint32_t                     batch_size_;
+    uint32_t                     max_batch_size_;
+    int64_t                      max_prefill_tokens_ = 0;
     bool                         reorder_request_;
     uint32_t                     current_step_ = 0;
     bool                         draining_mixed_modes_ = false;

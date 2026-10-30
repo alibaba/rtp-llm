@@ -23,8 +23,11 @@ from unittest.mock import Mock, patch
 import numpy as np
 import torch
 
+from rtp_llm.models_py.distributed import symm_mem
 from rtp_llm.models_py.distributed.collective_torch import (
+    Group,
     destroy_distributed_environment,
+    get_process_group,
     init_distributed_environment,
 )
 from rtp_llm.ops import KvCacheDataType, NcclCommConfig
@@ -147,10 +150,10 @@ def _tp2_worker(rank: int, nccl_port: int, result_queue: mp.Queue) -> None:
                 dist.barrier()
 
         with patch.object(dist, "init_process_group", _init_pg):
-            with patch(
-                "rtp_llm.models_py.distributed.collective_torch.init_symm_mem_communicator",
-                lambda *_a, **_kw: None,
-            ):
+            # Initialize real NCCL groups while isolating symmetric-memory setup.
+            with patch.object(
+                symm_mem, "init_symm_mem_communicator", return_value=None
+            ) as init_symm_mem:
                 init_distributed_environment(
                     pc,
                     NcclCommConfig(
@@ -163,6 +166,12 @@ def _tp2_worker(rank: int, nccl_port: int, result_queue: mp.Queue) -> None:
                     backend="nccl",
                     timeout=120,
                 )
+                tp_group = get_process_group(Group.TP)
+                init_symm_mem.assert_called_once_with(
+                    tp_group, disable_custom_all_reduce=None
+                )
+                assert dist.get_world_size(tp_group) == 2
+                assert dist.get_rank(tp_group) == rank
 
         _set_seed(42)
         H, R, dh, page, topk, T = 64, 512, 64, 64, 128, 8

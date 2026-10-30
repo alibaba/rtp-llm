@@ -183,6 +183,7 @@ class Qwen35DenseMTPTest(unittest.TestCase):
                     checkpoint_path=temp_dir,
                     model_type="qwen35_dense_mtp",
                     quantization=None,
+                    gen_num_per_cycle=3,
                 ),
                 parallelism_config=SimpleNamespace(pp_size=1, pp_stage_layer_counts=[]),
                 kv_cache_config=KVCacheConfig(),
@@ -199,7 +200,9 @@ class Qwen35DenseMTPTest(unittest.TestCase):
                     with patch("rtp_llm.model_factory.build_model_config"):
                         config = ModelFactory.create_propose_model_config(
                             engine_config,
-                            SimpleNamespace(max_seq_len=4096),
+                            SimpleNamespace(
+                                max_seq_len=4096, moe_prefill_max_tokens_per_rank=256
+                            ),
                             ModelArgs(),
                         )
 

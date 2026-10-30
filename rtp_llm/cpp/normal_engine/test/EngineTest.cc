@@ -122,11 +122,7 @@ TEST_F(NormalEngineTest, testExecutorDecodesCopyRowsUsingPayloadTags) {
                 return result.status();
             }
             auto& inputs = result.value();
-            std::reverse(inputs.kv_cache_group_tags.begin(), inputs.kv_cache_group_tags.end());
-            inputs.kv_cache_block_id        = inputs.kv_cache_block_id.flip({0});
-            inputs.kv_cache_kernel_block_id = inputs.kv_cache_kernel_block_id.flip({0});
-            inputs.kv_cache_group_types     = inputs.kv_cache_group_types.flip({0});
-            inputs.kv_cache_update_mapping  = mapping_;
+            inputs.kv_cache_update_mapping = mapping_;
             return result;
         }
 
@@ -150,9 +146,9 @@ TEST_F(NormalEngineTest, testExecutorDecodesCopyRowsUsingPayloadTags) {
     config.layer_num          = 2;
     config.seq_size_per_block = 2;
     config.dtype              = DataType::TYPE_FP16;
-    config.fromGroupedSpecs({test::makeResolvedMhaSpec(config.dtype, 1, 4, 2, "first"),
-                             test::makeResolvedMhaSpec(config.dtype, 1, 4, 2, "second")},
-                            {{0}, {1}},
+    config.fromGroupedSpecs({test::makeResolvedMhaSpec(config.dtype, 1, 4, 2, "second"),
+                             test::makeResolvedMhaSpec(config.dtype, 1, 4, 2, "first")},
+                            {{1}, {0}},
                             {CacheGroupType::FULL, CacheGroupType::FULL});
     config.finalizeBlockNums(4, RuntimeConfig{});
     auto manager = std::make_shared<KVCacheManager>(config);
@@ -179,7 +175,7 @@ TEST_F(NormalEngineTest, testExecutorDecodesCopyRowsUsingPayloadTags) {
     bool           reached_model = false;
     executor.setModel(std::make_unique<MockModel>(model.vocab_size, [&](const GptModelInputs& inputs) {
         reached_model = true;
-        EXPECT_EQ(inputs.kv_cache_group_tags, (std::vector<std::string>{"second", "first"}));
+        EXPECT_EQ(inputs.kv_cache_group_tags, (std::vector<std::string>{"first", "second"}));
         throw StopBeforeSampling{};
     }));
 
@@ -188,8 +184,8 @@ TEST_F(NormalEngineTest, testExecutorDecodesCopyRowsUsingPayloadTags) {
         first_dst.fill_(33);
         second_dst.fill_(44);
         reached_model = false;
-        auto mapping  = invalid_row ? torch::tensor({0, 1, 2, 2, 1, 2}, torch::kInt32).reshape({2, 3}) :
-                                      torch::tensor({0, 1, 2}, torch::kInt32).reshape({1, 3});
+        auto mapping  = invalid_row ? torch::tensor({1, 1, 2, 2, 1, 2}, torch::kInt32).reshape({2, 3}) :
+                                      torch::tensor({1, 1, 2}, torch::kInt32).reshape({1, 3});
         executor.setBatchProcessor(std::make_unique<CopyPayloadProcessor>(model, config, mapping));
         auto query                   = std::make_shared<GenerateInput>();
         query->input_ids             = torch::tensor({1, 2, 3}, torch::kInt32);
@@ -1344,11 +1340,18 @@ TEST_F(NormalEngineTest, testChunkedPrefillWarmupStartup) {
     auto engine                     = createMockEngine(config);
 
     // Token-heavy: one row walks the 19-token prompt in budget-4 chunks. Row-heavy: four rows
-    // each execute four tokens after a block-aligned 14-token synthetic prefix. The 7-token
-    // whole-segment shape runs once during warmup and once while constructing the system prompt.
+    // share the budget, each executing one token after a block-aligned 18-token synthetic prefix.
+    // The 7-token whole-segment shape runs once during warmup and once for the system prompt.
     ASSERT_EQ(*config.forward_shapes,
               (std::vector<ForwardShape>{
-                  {4, 0, 1}, {4, 4, 1}, {4, 8, 1}, {4, 12, 1}, {3, 16, 1}, {16, 14, 4}, {7, 0, 1}, {7, 0, 1}}));
+                  {4, 0, 1},
+                  {4, 4, 1},
+                  {4, 8, 1},
+                  {4, 12, 1},
+                  {3, 16, 1},
+                  {4, 18, 4},
+                  {7, 0, 1},
+                  {7, 0, 1}}));
     const auto& cache_config = engine->resourceContext().cache_manager->cacheConfig();
     ASSERT_EQ(cache_config.groups().size(), 1u);
     ASSERT_EQ(cache_config.groups().front().block_num, 100u);
@@ -1377,7 +1380,7 @@ TEST_F(NormalEngineTest, testChunkedPrefillWarmupAlignsPrefixWithOddBudget) {
     config.forward_shapes     = std::make_shared<std::vector<ForwardShape>>();
     (void)createMockEngine(config);
 
-    // Middle chunks align to two-token blocks; the five-token row-heavy query keeps prefix 14.
+    // Middle chunks align to two-token blocks; five row-heavy rows share the budget after prefix 18.
     ASSERT_EQ(*config.forward_shapes,
               (std::vector<ForwardShape>{
                   {4, 0, 1},
@@ -1385,7 +1388,7 @@ TEST_F(NormalEngineTest, testChunkedPrefillWarmupAlignsPrefixWithOddBudget) {
                   {4, 8, 1},
                   {4, 12, 1},
                   {3, 16, 1},
-                  {25, 14, 5},
+                  {5, 18, 5},
               }));
 }
 
@@ -1422,7 +1425,7 @@ TEST_F(NormalEngineTest, testChunkedPrefillGenerationGraphWarmupUsesChunkShapes)
                   {4, 8, 1},
                   {4, 12, 1},
                   {3, 16, 1},
-                  {16, 14, 4},
+                  {4, 18, 4},
               }));
 }
 

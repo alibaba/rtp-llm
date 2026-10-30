@@ -66,6 +66,7 @@ class MegaMoeSEExecutor(MegaMoeExecutor):
     """Run routed FP4 experts and the replicated FP8 shared expert together."""
 
     includes_shared_expert = True
+    supported_activations = ("swiglu",)
 
     @property
     def _shared_recipe(self) -> tuple[int, int, int]:
@@ -103,7 +104,9 @@ class MegaMoeSEExecutor(MegaMoeExecutor):
                 "MOE_STRATEGY=mega_moe to run the routed padding fallback "
                 "with a standalone shared expert."
             )
-        device = self._transform_routed_weights(layer_weights, deep_gemm, inter)
+        device = self._transform_routed_weights(
+            layer_weights, deep_gemm.transform_weights_for_mega_moe, inter
+        )
 
         self._setup_shared_expert_weights(layer_weights, deep_gemm, D, inter)
 

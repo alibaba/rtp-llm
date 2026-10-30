@@ -149,6 +149,19 @@ py_test(
 )
 
 py_test(
+    name = "k3_device_input_metadata_repro_test",
+    srcs = [
+        "k3_device_input_metadata_repro_test.py",
+        "pywrapped_model_cache_store_integration_test.py",
+    ],
+    data = [":th_pywrapped_model_cache_store_integration_test"],
+    deps = pywrapped_model_test_deps,
+    env = {"TEST_USING_DEVICE": "CUDA"},
+    exec_properties = {"gpu": "L20_CU13", "gpu_count": "1"},
+    tags = ["manual", "L20_CU13"],
+)
+
+py_test(
     name = "pywrapped_model_cache_store_integration_test_rocm",
     main = "pywrapped_model_cache_store_integration_test.py",
     srcs = ["pywrapped_model_cache_store_integration_test.py"],

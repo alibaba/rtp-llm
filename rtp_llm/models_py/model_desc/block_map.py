@@ -1,6 +1,8 @@
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Protocol, TypeVar
 
+import torch
+
 from rtp_llm.ops.compute_ops import LayerKVCache, PyAttentionInputs, PyModelInputs
 
 AttentionInputs = PyAttentionInputs | Mapping[str, PyAttentionInputs]
@@ -32,6 +34,40 @@ def get_primary_attention_inputs(
     if isinstance(value, PyAttentionInputs):
         return value
     return next(iter(value.values()))
+
+
+def ensure_host_prefill_metadata(inputs: PyModelInputs) -> None:
+    """Materialize missing CPU planning mirrors with one packed device copy."""
+    value = get_attention_inputs_value(inputs)
+    groups = value.values() if isinstance(value, Mapping) else (value,)
+    pending, sources, offsets = [], [], {}
+    size = 0
+    for attn in groups:
+        if not attn.is_prefill or attn.is_target_verify or attn.is_mtp_draft_update:
+            continue
+        for name in (
+            "cu_seqlens",
+            "prefix_lengths",
+            "kv_cache_block_id",
+            "kv_cache_kernel_block_id",
+        ):
+            tensor = getattr(attn, name)
+            if name == "cu_seqlens" and (tensor is None or tensor.numel() == 0):
+                tensor = attn.cu_seqlens_device
+            if tensor is None or not tensor.is_cuda:
+                continue
+            key = (tensor.data_ptr(), tuple(tensor.shape), tuple(tensor.stride()))
+            if key not in offsets:
+                offsets[key] = size
+                sources.append(tensor.reshape(-1))
+                size += tensor.numel()
+            pending.append((attn, name, tensor.shape, offsets[key], tensor.numel()))
+    if pending:
+        packed = torch.cat(sources)
+        host = torch.empty_like(packed, device="cpu", pin_memory=True)
+        host.copy_(packed)
+        for attn, name, shape, offset, count in pending:
+            setattr(attn, name, host.narrow(0, offset, count).view(shape))
 
 
 def select_attention_inputs_for_tag(

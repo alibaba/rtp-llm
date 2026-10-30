@@ -62,8 +62,8 @@ struct GptModelInitParams {
     RuntimeConfig                                runtime_config;
     ConcurrencyConfig                            concurrency_config;
     SpeculativeExecutionConfig                   sp_config;
-    int64_t                                      max_seq_len  = 0;
-    int64_t                                      hidden_size  = 0;
+    int64_t                                      max_seq_len = 0;
+    int64_t                                      hidden_size = 0;
     std::shared_ptr<KVCacheManager>              cache_manager;
     // nullopt selects the main-model cache config; otherwise selects this MTP module config.
     std::optional<int> mtp_cache_config_index;
@@ -110,6 +110,8 @@ enum GptModelInputIndex : size_t {
     skipRun,
     gptModelRequestLength,  // length of request id & pd_separation
     isFakeStream,
+    linearReplayBatch,
+    linearReplayGroups,
     // last_hidden_states can have a different row count from combo_tokens for
     // DSpARK prefill seeding, so transmit its leading dimension explicitly.
     mtpHiddenStatesRows,
@@ -181,6 +183,7 @@ enum GptModelInputControlFlag : uint32_t {
     kControlDecodeEntrance      = 1u << 8,
     kControlOpaqueKvCacheStore  = 1u << 9,
     kControlShutdown            = 1u << 10,
+    kControlMtpDraftUpdate      = 1u << 11,
 };
 
 GptModelInputShapeHints getModelInputShapeHints(const GptModelInputs& inputs);

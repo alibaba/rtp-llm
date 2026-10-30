@@ -489,6 +489,10 @@ void FIFOScheduler::advanceLoadingGroup(StreamGroup& group) {
 
 void FIFOScheduler::moveGroupToNewStreams(StreamGroup& group) {
     for (auto it = group.begin(); it != group.end();) {
+        if (!checkPrefillCapacity(*it)) {
+            it = group.erase(it);
+            continue;
+        }
         accountBatchMetrics(*it);
         new_streams_.splice(new_streams_.end(), group, it++);
     }
