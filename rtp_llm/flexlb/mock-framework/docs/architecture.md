@@ -336,7 +336,7 @@ Python 运行时按以下边界组织。`RunEnvironment` 装配实例并安排�
 | `execution/components.py` | Master/Client 通用的配置文件、进程启动、ready 检查与端点登记；原生配置与端点额外校验由调用方提供。 |
 | `execution/master.py` | `MasterGroup` 的 ZK 选举环境、独立 JVM 增减、原生配置和 Master discovery 发布。 |
 | `execution/engines.py` | `EngineHosts` 的实例分配、JVM 放置、扩缩容、成员检查和宿主退出影响范围。 |
-| `execution/clients.py` | `ClientGroup` 的 Client JVM、当前播放待收尾状态、client0 控制与结果/证据完整性检查；流量分片和控速仍由 Java 负责。 |
+| `execution/client_group.py` | `ClientGroup` 的 Client JVM、当前播放待收尾状态、client0 控制与最终汇总校验；流量分片和控速仍由 Java 负责。 |
 | `execution/monitoring.py` | `Prometheus` 的采集器、目标、基线、末次采样和采集完整性记录；不执行 Case 语义查询。 |
 | `execution/launch.py` | 启动配方的结构校验与规范化，不持有运行状态。 |
 | `interfaces/` | Case 参数/返回契约及操作组合；调用对应服务或传输/查询函数。运行时服务不反向导入这一层。 |

@@ -6,8 +6,8 @@ from mock_framework.config import Registry
 from mock_framework.config.errors import ConfigError
 from mock_framework.interfaces import metrics
 from mock_framework.execution.transport import ExecutionError
-from mock_framework.execution import clients as client_runtime
-from mock_framework.execution.clients import ClientGroup
+from mock_framework.execution import client_group as client_runtime
+from mock_framework.execution.client_group import ClientGroup
 from helpers.input import read_inputs, write_inputs, pb
 
 
