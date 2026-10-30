@@ -50,8 +50,28 @@ requirement(flashinfer)
 requirement(deep)
 requirement(flashmla)
 requirement(["flash-mla-legacy"])
+requirement(["tokenspeed-mla"])
 requirement(rtp_kernel)
 requirement(flashattn)
+
+
+filegroup(
+    name = "bounded_projection_jit_test_sources",
+    srcs = [
+        "modules/kimi_k3/bounded_projection_jit_warmup.py",
+        "modules/kimi_k3/kernel_jit_warmup.py",
+        "modules/dsv41/dsv4_kernel_jit_warmup.py",
+        "modules/factory/attention/mla_prefill_plan.py",
+    ],
+    visibility = ["//rtp_llm/models_py/modules/kimi_k3/test:__pkg__"],
+)
+
+
+filegroup(
+    name = "flash_mla_prefill_api_test_sources",
+    srcs = ["modules/kimi_k3/mla.py"],
+    visibility = ["//rtp_llm/models_py/modules/kimi_k3/test:__pkg__"],
+)
 
 
 filegroup(
@@ -134,8 +154,8 @@ py_library(
         "//conditions:default": [],
     }) + select({
         # cuda12_arm (kept from main) has no branch here: its lock ships none of these.
-        "@//:using_cuda13_x86": ["flash-mla", "fast-hadamard-transform", "tilelang"],
-        "@//:using_cuda13_arm": ["flash-mla", "flash-mla-legacy", "tilelang"],
+        "@//:using_cuda13_x86": ["flash-mla", "fast-hadamard-transform", "tilelang", "tokenspeed-mla"],
+        "@//:using_cuda13_arm": ["flash-mla", "flash-mla-legacy", "tilelang", "tokenspeed-mla"],
         "@//:using_cuda12_9_x86": flashmla,
         "//conditions:default": [],
     }) + select({

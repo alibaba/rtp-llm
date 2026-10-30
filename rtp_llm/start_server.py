@@ -575,7 +575,10 @@ def _should_run_startup_real_warmup(py_env_configs: PyEnvConfigs) -> bool:
         )
         return False
 
-    return getattr(py_env_configs.model_args, "model_type", "") == "deepseek_v4"
+    return getattr(py_env_configs.model_args, "model_type", "") in (
+        "deepseek_v4",
+        "kimi_k3",
+    )
 
 
 def _setup_startup_warmup_health_gate(py_env_configs: PyEnvConfigs):
