@@ -4,6 +4,7 @@
 #include <chrono>
 #include <memory>
 #include <string_view>
+#include <vector>
 
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCacheMetricsReporter.h"
 #include "rtp_llm/cpp/utils/AsyncProfilingScope.h"
@@ -38,6 +39,24 @@ struct CacheStageContext {
                 operation == std::string_view("write") ? "REMOTE" : "DEVICE",
                 "storage_backend"};
     }
+    // A logical load may settle HOST and DISK sources together. Do not charge
+    // that completion to just the last physical transfer direction.
+    static CacheStageContext workflow(const char*                            operation,
+                                      const std::vector<TransferDescriptor>& descriptors) noexcept {
+        if (descriptors.empty())
+            return {operation, "NONE", "NONE", "unknown"};
+        auto identity      = local(descriptors.front().source_tier, descriptors.front().target_tier);
+        identity.operation = operation;
+        for (const auto& descriptor : descriptors) {
+            if (descriptor.source_tier != descriptors.front().source_tier)
+                identity.source = "MIXED";
+            if (descriptor.target_tier != descriptors.front().target_tier)
+                identity.target = "MIXED";
+        }
+        if (identity.source == std::string_view("MIXED") || identity.target == std::string_view("MIXED"))
+            identity.path = identity.target == std::string_view("DEVICE") ? "mixed_to_device" : "mixed";
+        return identity;
+    }
 };
 
 class TransferStageTimer;
@@ -58,6 +77,10 @@ private:
 // Value timers never allocate. Shared timers are best-effort: creation failure
 // yields an empty handle, and every caller continues its original business work.
 class TransferStageTimer {
+    struct ReporterRef {
+        const BlockTreeCacheMetricsReporter* reporter;
+    };
+
 public:
     TransferStageTimer(std::shared_ptr<BlockTreeCacheMetricsReporter> reporter,
                        const char*                                    stage,
@@ -68,16 +91,53 @@ public:
                        const char*                                    scope       = "worker_batch",
                        uint64_t                                       transfer_id = 0,
                        CacheStageContext                              identity    = {}) noexcept:
-        reporter_(std::move(reporter)),
+        TransferStageTimer(
+            ReporterRef{reporter.get()}, stage, request_id, begin, end, rank, scope, transfer_id, identity) {
+        reporter_owner_ = std::move(reporter);
+    }
+    // Borrowed observers are used only by workflows whose owner drains all
+    // callbacks before destroying the reporter (BlockTreeCache destruction).
+    TransferStageTimer(const BlockTreeCacheMetricsReporter& reporter,
+                       const char*                          stage,
+                       int64_t                              request_id,
+                       size_t                               begin,
+                       size_t                               end,
+                       int64_t                              rank        = -1,
+                       const char*                          scope       = "worker_batch",
+                       uint64_t                             transfer_id = 0,
+                       CacheStageContext                    identity    = {}) noexcept:
+        TransferStageTimer(ReporterRef{&reporter}, stage, request_id, begin, end, rank, scope, transfer_id, identity) {}
+
+private:
+    TransferStageTimer(ReporterRef       reporter,
+                       const char*       stage,
+                       int64_t           request_id,
+                       size_t            begin,
+                       size_t            end,
+                       int64_t           rank,
+                       const char*       scope,
+                       uint64_t          transfer_id,
+                       CacheStageContext identity) noexcept:
+        reporter_(reporter.reporter),
         stage_(stage),
         rank_(rank),
         scope_(scope),
         identity_(identity),
         enabled_((reporter_ && reporter_->stageMetricsEnabled()) || AsyncProfileSession::enabled()),
         start_us_(enabled_ ? AsyncProfileSession::steadyNowUs() : 0),
-        span_(enabled_ ? AsyncProfileSpan::fromSteady(
-                             stage, request_id, begin, end, start_us_, rank, transfer_id, identity.path) :
+        span_(enabled_ ? AsyncProfileSpan::fromSteady(stage,
+                                                      request_id,
+                                                      begin,
+                                                      end,
+                                                      start_us_,
+                                                      rank,
+                                                      transfer_id,
+                                                      identity.path,
+                                                      scope,
+                                                      identity.operation) :
                          AsyncProfileSpan{}) {}
+
+public:
     ~TransferStageTimer() {
         finish(false);
     }
@@ -97,6 +157,26 @@ public:
                 allocation_probe_(stage);
             return SharedTransferStageTimer(std::make_shared<TransferStageTimer>(
                 std::move(reporter), stage, request_id, begin, end, rank, scope, transfer_id, identity));
+        } catch (...) {
+            return {};
+        }
+    }
+    static SharedTransferStageTimer create(const BlockTreeCacheMetricsReporter& reporter,
+                                           const char*                          stage,
+                                           int64_t                              request_id,
+                                           size_t                               begin,
+                                           size_t                               end,
+                                           int64_t                              rank        = -1,
+                                           const char*                          scope       = "worker_batch",
+                                           uint64_t                             transfer_id = 0,
+                                           CacheStageContext                    identity    = {}) noexcept {
+        if (!reporter.stageMetricsEnabled() && !AsyncProfileSession::enabled())
+            return {};
+        try {
+            if (allocation_probe_)
+                allocation_probe_(stage);
+            return SharedTransferStageTimer(std::make_shared<TransferStageTimer>(
+                reporter, stage, request_id, begin, end, rank, scope, transfer_id, identity));
         } catch (...) {
             return {};
         }
@@ -123,7 +203,8 @@ private:
     // unrelated business allocations or other requests.
     inline static thread_local void (*allocation_probe_)(const char*) = nullptr;
     friend class TransferStageTimerTestPeer;
-    std::shared_ptr<BlockTreeCacheMetricsReporter> reporter_;
+    std::shared_ptr<BlockTreeCacheMetricsReporter> reporter_owner_;
+    const BlockTreeCacheMetricsReporter*           reporter_;
     const char*                                    stage_;
     int64_t                                        rank_;
     const char*                                    scope_;
