@@ -1,11 +1,11 @@
-package org.flexlb.mock.engine.rtp;
+package org.flexlb.mock.admission;
 
 import java.util.concurrent.TimeUnit;
 import org.flexlb.engine.grpc.EngineRpcService.*;
 import org.flexlb.mock.engine.Scheduler;
 
 /** Translation at the native RTP boundary; scheduling state contains no protobuf objects. */
-final class RtpTasks {
+final class RpcTasks {
     static Scheduler.Input input(GenerateInputPB input, String identity, long started, long rpcDeadline,
                                     boolean retained, int blockSize) {
         long deadline = Math.min(rpcDeadline, input.getGenerateConfig().getTimeoutMs() == 0 ? Long.MAX_VALUE

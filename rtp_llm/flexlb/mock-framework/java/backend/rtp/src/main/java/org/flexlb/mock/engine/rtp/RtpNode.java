@@ -1,5 +1,7 @@
 package org.flexlb.mock.engine.rtp;
 
+import org.flexlb.mock.admission.RpcService;
+
 import io.grpc.Server;
 import io.grpc.netty.NettyServerBuilder;
 import java.io.IOException;
@@ -14,7 +16,7 @@ import org.flexlb.mock.runtime.ApiServer;
 public final class RtpNode implements org.flexlb.mock.runtime.EngineInstance {
     private final RtpConfig config;
     private final KvCache cache;
-    private final RtpRpcService service;
+    private final RpcService service;
     private final AtomicBoolean closed = new AtomicBoolean();
     private final org.flexlb.mock.runtime.EngineAddress address = org.flexlb.mock.runtime.EngineAddress.local();
     private Server rpc;
@@ -25,7 +27,7 @@ public final class RtpNode implements org.flexlb.mock.runtime.EngineInstance {
         Objects.requireNonNull(schedulers);
         cache = new KvCache(config.blockSize(), config.deviceBlocks(), config.reserveBlocks(), config.evictionPolicy(),
             config.deviceCache(), config.hostBlocks(), config.hostPolicy(), config.deviceWatermark(), config.hostWatermark());
-        try { service = new RtpRpcService(config, cache, schedulers); }
+        try { service = new RpcService(config.endpoint(), cache, schedulers); }
         catch (RuntimeException error) { cache.close(); throw error; }
     }
 

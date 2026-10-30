@@ -1,4 +1,4 @@
-package org.flexlb.mock.engine.rtp;
+package org.flexlb.mock.admission;
 
 import com.google.protobuf.ByteString;
 import java.nio.*;

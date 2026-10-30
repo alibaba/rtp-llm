@@ -11,11 +11,11 @@ import org.flexlb.engine.grpc.RpcServiceGrpc;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
-class RtpNodeTest {
+public class RtpNodeTest {
     private static final ObjectMapper JSON = new ObjectMapper();
     @TempDir Path directory;
 
-    static Map<String, Object> configuration(String role) {
+    public static Map<String, Object> configuration(String role) {
         return Map.of("id", role + "-0", "component_role", role,
             "component", Map.of("engine", "rtp", "config", Map.of("seq_size_per_block", 16,
                 "max_seq_len", 4096, "test_block_num", 9, "reserve_block_ratio", 0, "compute", Map.of("forward", Map.of("expression", "1 + batchSize")))),

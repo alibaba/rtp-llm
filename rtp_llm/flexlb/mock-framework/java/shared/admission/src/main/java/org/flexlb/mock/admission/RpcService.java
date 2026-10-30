@@ -1,4 +1,4 @@
-package org.flexlb.mock.engine.rtp;
+package org.flexlb.mock.admission;
 
 import io.grpc.Status;
 import io.grpc.stub.StreamObserver;
@@ -11,8 +11,8 @@ import org.flexlb.mock.cache.KvCache;
 import org.flexlb.mock.engine.Scheduler;
 
 /** Native RPC adapter; P and D owners manage request state and KV independently. */
-public final class RtpRpcService extends RpcServiceGrpc.RpcServiceImplBase {
-    private final RtpConfig config;
+public final class RpcService extends RpcServiceGrpc.RpcServiceImplBase implements AutoCloseable {
+    private final AdmissionConfig config;
     private final KvCache cache;
     private final LocalPrefill requests;
     private final org.flexlb.mock.multimodal.MediaClient vision;
@@ -21,7 +21,7 @@ public final class RtpRpcService extends RpcServiceGrpc.RpcServiceImplBase {
     private final AtomicLong statusVersion = new AtomicLong();
     private volatile boolean closed;
 
-    public RtpRpcService(RtpConfig config, KvCache cache, Scheduler.Factory schedulers) {
+    public RpcService(AdmissionConfig config, KvCache cache, Scheduler.Factory schedulers) {
         this.config = config; this.cache = cache;
         requests = config.role() == org.flexlb.mock.api.model.Types.Role.prefill ? new LocalPrefill(config, cache, schedulers) : null;
         vision = requests == null ? null : new org.flexlb.mock.multimodal.MediaClient();
@@ -41,7 +41,7 @@ public final class RtpRpcService extends RpcServiceGrpc.RpcServiceImplBase {
         }
         if (failure != null) throw failure;
     }
-    String scrapeMetrics() { return requests == null ? decode.scrapeMetrics() : requests.scrapeMetrics(); }
+    public String scrapeMetrics() { return requests == null ? decode.scrapeMetrics() : requests.scrapeMetrics(); }
 
     @Override public StreamObserver<GenerateRequestPB> remoteGenerate(StreamObserver<GenerateOutputsPB> observer) {
         return decode == null ? super.remoteGenerate(observer) : decode.open(observer);
@@ -100,7 +100,7 @@ public final class RtpRpcService extends RpcServiceGrpc.RpcServiceImplBase {
         try {
             requests.validate(request, false);
             if (request.getGenerateConfig().getTimeoutMs() > 0)
-                deadline = Math.min(deadline, RtpTasks.after(started,
+                deadline = Math.min(deadline, RpcTasks.after(started,
                     java.util.concurrent.TimeUnit.MILLISECONDS.toNanos(request.getGenerateConfig().getTimeoutMs())));
             var prepared = vision.prepare(request, deadline);
             accepted = requests.submit(prepared, deadline, false, started);
@@ -110,7 +110,7 @@ public final class RtpRpcService extends RpcServiceGrpc.RpcServiceImplBase {
         if (response.isCancelled()) cancel.run();
         accepted.completion().thenAccept(result -> {
             if (response.isCancelled()) return;
-            if (!result.status().isOk()) { response.onError(RtpErrors.failure(result.status(), result.engineCode())); return; }
+            if (!result.status().isOk()) { response.onError(RpcErrors.failure(result.status(), result.engineCode())); return; }
             try { response.onNext(result.output()); response.onCompleted(); }
             catch (RuntimeException error) { accepted.cancel(); }
         });
@@ -132,8 +132,8 @@ public final class RtpRpcService extends RpcServiceGrpc.RpcServiceImplBase {
                 .setDpSize(1).setDpRank(0).setTpSize(config.tpSize()).setPrecision("FP16")
                 .setStatusVersion(version).setMaxSeqLen(config.maxSeqLen()).setMaxBatchTokensSize(config.maxBatchTokens())
                 .setTotalKvCache(tokens(snapshot.totalBlocks())).setAvailableKvCache(tokens(snapshot.availableBlocks()))
-                .addAllRunningTaskInfo(tasks.tasks().stream().map(RtpTasks::task).toList())
-                .addAllFinishedTaskList(tasks.finished().stream().map(RtpTasks::task).toList()).setLatestFinishedVersion(tasks.finishedVersion())
+                .addAllRunningTaskInfo(tasks.tasks().stream().map(RpcTasks::task).toList())
+                .addAllFinishedTaskList(tasks.finished().stream().map(RpcTasks::task).toList()).setLatestFinishedVersion(tasks.finishedVersion())
                 .setWaitingQueryLen(tasks.waiting()).setRunningQueryLen(tasks.running())
                 .build();
         });
