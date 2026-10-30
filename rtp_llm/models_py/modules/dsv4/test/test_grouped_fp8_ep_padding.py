@@ -391,12 +391,14 @@ class GroupedFP8EPPaddingTest(unittest.TestCase):
                     max_tokens_per_rank=512,
                     is_decode_role=decode,
                     enable_cuda_graph=True,
+                    is_speculative=True,
                 )
                 cfg = create.call_args.args[0]
                 self.assertIs(cfg.is_decode_role, decode)
                 self.assertEqual(cfg.max_tokens_per_rank, 512)
                 self.assertEqual(cfg.expert_dtype, "fp8")
                 self.assertTrue(cfg.enable_cuda_graph)
+                self.assertTrue(cfg.is_speculative)
 
 
 if __name__ == "__main__":

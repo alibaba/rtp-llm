@@ -555,6 +555,21 @@ class GroupedFP8Strategy(RoutedExpertsStrategy):
                     "PREFILL/PDFUSION exchanges synchronize variable token counts; "
                     "disable CUDA graphs for this role or use PD separation."
                 )
+            if (
+                cfg.ep_size > 1
+                and getattr(cfg, "is_speculative", False)
+                and not self._ll_gate(cfg)
+            ):
+                raise ValueError(
+                    "grouped_fp8 does not support speculative decoding (MTP) "
+                    "with EP>1 and NCCL CUDA graphs. Draft decode and "
+                    "draft-prefill share a strategy but require different graph "
+                    "shapes; DECODE_CAPTURE_CONFIG cannot make this combination "
+                    "safe. Enable DSV4_MOE_DEEPEP_LL=1 with an RDMA-capable "
+                    "DeepEP build and set DSV4_MOE_LL_MAX_TOKENS to at least "
+                    f"{cfg.max_tokens_per_rank} (the per-rank verify token budget), "
+                    "or set ENABLE_CUDA_GRAPH=0, or disable speculative decoding."
+                )
             required = cfg.max_tokens_per_rank * cfg.ep_size
             limit = masked_max_n()
             if (
@@ -1042,10 +1057,10 @@ class GroupedFP8Strategy(RoutedExpertsStrategy):
         graph per rank by ``lower_bound`` over *that rank's own* batch size, and
         nothing equalises per-rank batch: ``mayAddFakeStream`` only guarantees each
         dp rank has at least one stream, not the same number. So if more than one
-        batch size is captured, two ranks can replay different graphs and issue
-        those collectives with different counts. NCCL neither errors nor recovers --
-        it hangs, and the symptom is one token followed by the P/D timeout, tens of
-        seconds away from the cause.
+        batch size is captured, two ranks can replay different collective captures.
+        NCCL requires all ranks to launch graphs derived from the same collective
+        capture; equal padded operand counts alone do not make them interchangeable.
+        Violating this can hang until the P/D timeout, far from the cause.
 
         A capture set of exactly one size, equal to the largest per-rank batch the
         scheduler can produce, makes all ranks agree by construction. That is a

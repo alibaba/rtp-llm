@@ -151,6 +151,7 @@ class ChunkedFp8Fp4MoeLayer(nn.Module):
         *,
         chunking_enabled: bool = True,
         enable_cuda_graph: bool = False,
+        is_speculative: bool = False,
         model_type: str = "generic_fp8_fp4_moe",
         moe_w1_layout: str = "up_gate",
         has_shared_expert_gate: bool = False,
@@ -193,6 +194,7 @@ class ChunkedFp8Fp4MoeLayer(nn.Module):
             physical_expert_num=n_physical_experts,
             is_decode_role=is_decode_role,
             enable_cuda_graph=enable_cuda_graph,
+            is_speculative=is_speculative,
         )
         self.strategy_name = self._moe.strategy_name
 

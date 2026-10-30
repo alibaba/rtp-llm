@@ -10,7 +10,12 @@ from rtp_llm.models_py.model_desc.deepseek_v4_model import (
     Dsv4MtpHiddenBufferSpec,
     Dsv4SharedRuntimeBufferStore,
 )
-from rtp_llm.models_py.modules.dsv4.transformer import V4Args, V4Transformer
+from rtp_llm.models_py.model_desc.module_base import GptModelBase
+from rtp_llm.models_py.modules.dsv4.transformer import (
+    V4Args,
+    V4Transformer,
+    _block_kwargs,
+)
 
 
 class _RuntimeModule(torch.nn.Module):
@@ -26,6 +31,27 @@ class _RuntimeModule(torch.nn.Module):
 
 
 class MtpHiddenBufferTest(unittest.TestCase):
+    def test_initialize_threads_speculative_role_and_verify_budget_to_blocks(self):
+        model = DeepSeekV4Model.__new__(DeepSeekV4Model)
+        torch.nn.Module.__init__(model)
+        model.weight = types.SimpleNamespace(global_weights={})
+        model._materialized = False
+        model._v4_args = V4Args(n_layers=1, compress_ratios=[0], commit_only=True)
+        model._prefill_cp_size = 1
+        model._max_generate_batch_size = 4
+        model._gen_num_per_cycle = 2
+        resources = types.SimpleNamespace(
+            is_speculative=True, is_decode_role=True, max_context_batch_size=1
+        )
+        with patch.object(GptModelBase, "initialize"), patch.object(
+            model, "_initialize_commit_only", return_value=True
+        ):
+            self.assertTrue(model._initialize_impl(resources))
+        block = _block_kwargs(0, model._v4_args, {})
+        self.assertTrue(block["is_speculative"])
+        self.assertTrue(block["is_decode_role"])
+        self.assertEqual(block["max_tokens_per_rank"], 12)
+
     def test_model_constructs_with_nonempty_hidden_state_capture_layers(self) -> None:
         model_config: Any = types.SimpleNamespace(
             num_layers=2,

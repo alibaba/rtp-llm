@@ -106,6 +106,7 @@ class Block(nn.Module):
         fp8_kv_cache: bool = False,
         commit_only: bool = False,
         n_physical_experts: Optional[int] = None,
+        is_speculative: bool = False,
     ):
         super().__init__()
         self.layer_id = layer_id
@@ -174,6 +175,7 @@ class Block(nn.Module):
             max_tokens_per_rank=max_tokens_per_rank,
             is_decode_role=is_decode_role,
             enable_cuda_graph=enable_cuda_graph,
+            is_speculative=is_speculative,
             strategy=moe_strategy,
             n_physical_experts=n_physical_experts,
             chunking_enabled=chunked_moe_enabled(),

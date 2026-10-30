@@ -24,6 +24,7 @@ from rtp_llm.models_py.modules.factory.fused_moe.strategy_registry import (
 )
 from rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.chunked_layer import (
     ChunkedFp8Fp4MoeLayer,
+    resolve_moe_max_tokens_per_rank,
     synchronized_moe_chunk_plan,
 )
 from rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.layer import (
@@ -87,7 +88,7 @@ class _CountingRoutedLayer(nn.Module):
         return out
 
 
-def _worker(rank, init_method, low_latency=False):
+def _worker(rank, init_method, low_latency=False, speculative=False):
     torch.set_num_threads(1)
     torch.cuda.set_device(rank)
     device = torch.device("cuda", rank)
@@ -95,6 +96,20 @@ def _worker(rank, init_method, low_latency=False):
     # do not support all of the tiny synthetic NCCL fixture's shapes.
     dim, inter = (4096, 2048) if low_latency else (_DIM, _INTER)
     experts, topk = (256, 6) if low_latency else (_EXPERTS, 2)
+    decode = low_latency or speculative
+    budget = (
+        resolve_moe_max_tokens_per_rank(
+            8192,
+            8192,
+            1,
+            4,
+            is_decode_role=True,
+            is_speculative=True,
+            gen_num_per_cycle=2,
+        )
+        if speculative
+        else 8 if low_latency else 8192
+    )
     dist.init_process_group(
         "nccl",
         init_method=init_method,
@@ -115,9 +130,10 @@ def _worker(rank, init_method, low_latency=False):
             n_local_experts=experts,
             local_expert_start=0,
             local_expert_end=experts,
-            max_tokens_per_rank=8 if low_latency else 8192,
-            is_decode_role=low_latency,
+            max_tokens_per_rank=budget,
+            is_decode_role=decode,
             enable_cuda_graph=low_latency,
+            is_speculative=speculative,
         )
         local_experts = experts // _RANKS
         ep_cfg = dataclasses.replace(
@@ -153,8 +169,9 @@ def _worker(rank, init_method, low_latency=False):
             moe_strategy="grouped_fp8",
             expert_dtype="fp8",
             moe_w1_layout="gate_up",
-            is_decode_role=low_latency,
+            is_decode_role=decode,
             enable_cuda_graph=low_latency,
+            is_speculative=speculative,
         )
         weights = {
             W.moe_w1: torch.cat(
@@ -174,13 +191,29 @@ def _worker(rank, init_method, low_latency=False):
         registry.register(CudaGroupedFp8Strategy())
         FusedMoeFactory.set_registry(registry)
         with mock.patch.object(grouped_fp8, "_ep_group", return_value=dist.group.WORLD):
+            if speculative and not low_latency:
+                # Reject the unsupported combination during weight setup, before
+                # either draft wrapper can start a CUDA graph capture. Changing
+                # a capture bucket cannot fix the shared-wrapper constraint.
+                runtime_cfg.enable_cuda_graph = True
+                try:
+                    FusedMoeFactory().create_fused_moe(runtime_cfg, dict(weights))
+                except ValueError as error:
+                    assert "DECODE_CAPTURE_CONFIG cannot" in str(error), error
+                    assert "MAX_TOKENS to at least 12" in str(error), error
+                else:
+                    raise AssertionError("NCCL MTP graphs must fail before capture")
+                finally:
+                    runtime_cfg.enable_cuda_graph = False
+                dist.barrier()
             # Real factory -> FusedMoe -> Router -> Executor -> grouped backend.
             # In particular, empty ranks must survive FusedMoe's fast path.
             moe = FusedMoeFactory().create_fused_moe(runtime_cfg, weights)
             if low_latency:
                 assert moe.fused_experts.grouped._ll_ok
                 graphs = {}
-                for n in (1, 2, 4, 8):
+                sizes = (1, 3, 4, 6, 9, 12) if speculative else (1, 2, 4, 8)
+                for n in sizes:
                     inputs = _inputs(n, device, dim, experts, topk)
                     # Compile all specializations before entering capture.
                     expected = moe(*inputs).clone()
@@ -192,11 +225,27 @@ def _worker(rank, init_method, low_latency=False):
                     dist.barrier()
                 # Ranks deliberately replay different graph batch sizes. LL
                 # carries their token counts in its fixed-capacity protocol.
-                for counts in ((1, 2, 4, 8), (8, 4, 2, 1), (1, 1, 1, 1)):
+                cases = (
+                    ((1, 3, 6, 12), (4, 6, 9, 3), (12, 9, 4, 1), (3, 3, 3, 3))
+                    if speculative
+                    else ((1, 2, 4, 8), (8, 4, 2, 1), (1, 1, 1, 1))
+                )
+                for counts in cases:
                     graph, inputs, output, expected = graphs[counts[rank]]
                     graph.replay()
                     torch.cuda.synchronize()
                     torch.testing.assert_close(output, expected, rtol=0.03, atol=3e-4)
+                    dist.barrier()
+                return
+            if speculative:
+                # The actionable eager alternative must serve all draft/verify
+                # shapes and empty ranks under the common verify-sized budget.
+                for counts in ((0, 1, 4, 12), (12, 0, 3, 1), (4, 3, 2, 1)):
+                    inputs = _inputs(counts[rank], device, dim)
+                    expected = reference(*inputs)
+                    actual = moe(*inputs)
+                    torch.cuda.synchronize()
+                    torch.testing.assert_close(actual, expected, rtol=0.03, atol=3e-4)
                     dist.barrier()
                 return
             for counts in ((0, 1, 2, 0), (0, 0, 0, 0), (257, 1, 2, 0)):
@@ -243,13 +292,21 @@ class GroupedFP8RaggedNCCLTest(unittest.TestCase):
     def test_low_latency_replays_different_rank_local_graph_sizes(self):
         self._run(low_latency=True)
 
-    def _run(self, low_latency):
+    @unittest.skipUnless(torch.cuda.device_count() >= _RANKS, "needs four CUDA GPUs")
+    def test_mtp_nccl_graphs_fail_early_and_eager_handles_ragged_draft_shapes(self):
+        self._run(low_latency=False, speculative=True)
+
+    @unittest.skipUnless(torch.cuda.device_count() >= _RANKS, "needs four CUDA GPUs")
+    def test_mtp_low_latency_shared_strategy_captures_draft_and_verify_shapes(self):
+        self._run(low_latency=True, speculative=True)
+
+    def _run(self, low_latency, speculative=False):
         with tempfile.TemporaryDirectory() as root, mock.patch.dict(
             os.environ,
             {
                 "DSV4_EP_CHECK_SIZES": "1",
                 "DSV4_MOE_DEEPEP_LL": "1" if low_latency else "0",
-                "DSV4_MOE_LL_MAX_TOKENS": "8",
+                "DSV4_MOE_LL_MAX_TOKENS": "12" if speculative else "8",
                 "DSV4_MOE_MASKED": "0",
                 "NCCL_P2P_LEVEL": "NVL",
             },
@@ -260,7 +317,11 @@ class GroupedFP8RaggedNCCLTest(unittest.TestCase):
                 os.environ.pop("ACCL_LOW_LATENCY_OPTIMIZE", None)
             mp.spawn(
                 _worker,
-                args=("file://" + os.path.join(root, "nccl-init"), low_latency),
+                args=(
+                    "file://" + os.path.join(root, "nccl-init"),
+                    low_latency,
+                    speculative,
+                ),
                 nprocs=_RANKS,
             )
 

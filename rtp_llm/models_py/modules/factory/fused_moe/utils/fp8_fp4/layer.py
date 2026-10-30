@@ -57,6 +57,7 @@ class Fp8Fp4MoeRuntimeConfig:
         is_decode_role: bool = False,
         expert_dtype: str = "fp4",
         enable_cuda_graph: bool = False,
+        is_speculative: bool = False,
     ) -> None:
         if expert_num % max(ep_size, 1) != 0:
             raise ValueError(
@@ -64,6 +65,7 @@ class Fp8Fp4MoeRuntimeConfig:
             )
         self.is_decode_role = bool(is_decode_role)
         self.enable_cuda_graph = bool(enable_cuda_graph)
+        self.is_speculative = bool(is_speculative)
         self.expert_dtype = expert_dtype
         self.layer_id = int(layer_id)
         self.hidden_size = int(hidden_size)
@@ -159,6 +161,7 @@ class Fp8Fp4MoeLayer(nn.Module):
         physical_expert_num: Optional[int] = None,
         is_decode_role: bool = False,
         enable_cuda_graph: bool = False,
+        is_speculative: bool = False,
     ) -> None:
         super().__init__()
         if n_shared_experts < 0:
@@ -202,6 +205,7 @@ class Fp8Fp4MoeLayer(nn.Module):
             physical_expert_num=physical_expert_num,
             is_decode_role=is_decode_role,
             enable_cuda_graph=enable_cuda_graph,
+            is_speculative=is_speculative,
             expert_dtype=(
                 "fp8" if layer_weights[W.moe_w1].dtype == torch.float8_e4m3fn else "fp4"
             ),

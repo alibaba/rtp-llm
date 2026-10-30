@@ -27,6 +27,7 @@ class MoeCfg:
     max_tokens_per_rank: int
     is_decode_role: bool = False
     enable_cuda_graph: bool = False
+    is_speculative: bool = False
 
 
 class RoutedExpertsStrategy(nn.Module):

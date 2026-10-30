@@ -114,6 +114,7 @@ class V4Args:
     world_rank: int = 0
     is_decode_role: bool = False
     enable_cuda_graph: bool = False
+    is_speculative: bool = False
     # Dedicated DSpARK prefill workers only project target features into the
     # draft SWA pools; they do not construct proposal, FFN, or mHC modules.
     commit_only: bool = False
@@ -185,6 +186,7 @@ def _block_kwargs(
         max_tokens_per_rank=args.max_tokens_per_rank,
         is_decode_role=args.is_decode_role,
         enable_cuda_graph=args.enable_cuda_graph,
+        is_speculative=args.is_speculative,
         fp8_kv_cache=args.fp8_kv_cache,
         commit_only=commit_only,
     )

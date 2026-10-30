@@ -225,6 +225,52 @@ class GroupedFP8CaptureGuardTest(unittest.TestCase):
         strat._captured_ns = set()
         return strat
 
+    def test_mtp_nccl_graphs_fail_before_capture_with_actionable_alternatives(self):
+        cfg = dataclasses.replace(
+            _cfg(ep_size=4),
+            max_tokens_per_rank=12,
+            is_decode_role=True,
+            enable_cuda_graph=True,
+            is_speculative=True,
+        )
+        with mock.patch.dict(os.environ, {"DSV4_MOE_DEEPEP_LL": "0"}):
+            with self.assertRaisesRegex(ValueError, "speculative decoding.*NCCL") as cm:
+                GroupedFP8Strategy(cfg)
+        message = str(cm.exception)
+        self.assertIn("DECODE_CAPTURE_CONFIG cannot", message)
+        self.assertIn("DSV4_MOE_DEEPEP_LL=1", message)
+        self.assertIn("DSV4_MOE_LL_MAX_TOKENS to at least 12", message)
+        self.assertIn("ENABLE_CUDA_GRAPH=0", message)
+
+    def test_mtp_ll_graphs_require_capacity_for_verify_not_only_draft_decode(self):
+        cfg = dataclasses.replace(
+            _cfg(ep_size=4),
+            max_tokens_per_rank=32,
+            is_decode_role=True,
+            enable_cuda_graph=True,
+            is_speculative=True,
+        )
+        with mock.patch.dict(
+            os.environ,
+            {"DSV4_MOE_DEEPEP_LL": "1", "DSV4_MOE_LL_MAX_TOKENS": "16"},
+        ):
+            with self.assertRaisesRegex(ValueError, "MAX_TOKENS to at least 32"):
+                GroupedFP8Strategy(cfg)
+            GroupedFP8Strategy(dataclasses.replace(cfg, max_tokens_per_rank=12))
+
+    def test_mtp_eager_and_single_rank_graphs_remain_allowed(self):
+        cfg = dataclasses.replace(
+            _cfg(ep_size=4),
+            max_tokens_per_rank=12,
+            is_decode_role=True,
+            is_speculative=True,
+        )
+        with mock.patch.dict(os.environ, {"DSV4_MOE_DEEPEP_LL": "0"}):
+            GroupedFP8Strategy(cfg)
+            GroupedFP8Strategy(
+                dataclasses.replace(cfg, ep_size=1, enable_cuda_graph=True)
+            )
+
     def test_single_size_at_the_scheduler_bound_is_accepted(self):
         strat = self._strategy(ep_size=4, max_tokens_per_rank=8)
         with mock.patch(self.CAPTURING, return_value=True):
