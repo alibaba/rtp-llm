@@ -244,15 +244,23 @@ class TraceTelemetryLifecycleTest(TestCase):
         app._grpc_server = MagicMock()
         app._shutdown_manager = MagicMock()
         app._shutdown_event = MagicMock()
+        app._enqueue_loop = None
+        app._enqueue_loop_thread = None
         app._install_signal_handlers = MagicMock()
         app._start_enqueue_loop = MagicMock(return_value=MagicMock())
         app.stop = MagicMock()
+        model_config = MagicMock(model_type="qwen_2")
+        request_adapter = object()
+        model_cls = Mock()
+        model_cls.create_dash_sc_request_adapter.return_value = request_adapter
 
         with patch.object(
             bg_app, "_is_proxy_mode_enabled", return_value=False
         ), patch.object(
-            bg_app.ModelFactory, "create_model_config", return_value=MagicMock()
+            bg_app.ModelFactory, "create_model_config", return_value=model_config
         ), patch.object(
+            bg_app.ModelFactory, "get_model_cls", return_value=model_cls
+        ) as get_model_cls, patch.object(
             bg_app, "create_backend_rpc_server_visitor", return_value=MagicMock()
         ), patch.object(
             bg_app.TokenizerFactory, "create", return_value=MagicMock()
@@ -266,7 +274,7 @@ class TraceTelemetryLifecycleTest(TestCase):
             bg_app, "build_think_runtime", return_value=MagicMock()
         ), patch.object(
             bg_app, "DashScInferenceServicer", return_value=MagicMock()
-        ), patch.object(
+        ) as create_servicer, patch.object(
             bg_app.kmonitor, "init"
         ), patch.object(
             bg_app, "_init_trace_telemetry"
@@ -278,6 +286,11 @@ class TraceTelemetryLifecycleTest(TestCase):
         init_trace.assert_called_once_with()
         shutdown_trace.assert_called_once_with()
         app.stop.assert_called_once_with()
+        get_model_cls.assert_called_once_with("qwen_2")
+        model_cls.create_dash_sc_request_adapter.assert_called_once_with()
+        self.assertIs(
+            create_servicer.call_args.kwargs["request_adapter"], request_adapter
+        )
 
     def test_init_failure_is_fail_open(self) -> None:
         with patch.object(
