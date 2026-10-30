@@ -1,6 +1,7 @@
 #pragma once
 
 #include <unordered_map>
+#include <atomic>
 
 #include <condition_variable>
 #include <chrono>
@@ -153,6 +154,14 @@ public:
     // Initialization is single-attempt. A failed start may permanently stop
     // an injected executor; create a fresh backend/executor to retry.
     bool init(std::shared_ptr<const CacheTopology> topology, PoolsByTag pools_by_tag, BufferResolver buffer_resolver);
+    // Runtime admission only. Disabling must not tear down clients or interrupt
+    // a payload batch that rank 0 has already admitted.
+    void setRemoteCacheEnabled(bool enabled) noexcept {
+        remote_cache_enabled_.store(enabled);
+    }
+    bool remoteCacheEnabled() const noexcept {
+        return remote_cache_enabled_.load();
+    }
     void match(StorageRequest request, MatchDone done);
     void read(StorageRequest request, std::shared_ptr<StorageBackendMatchMeta> match_meta, Done done);
     StorageWriteTask prepareWrite(StorageRequest request);
@@ -177,6 +186,7 @@ protected:
                                         const std::shared_ptr<StorageBackendMatchMeta>& match_meta) = 0;
     virtual void               writeImpl(const StorageRequest& request)                             = 0;
     virtual void               shutdownImpl() noexcept {}
+    virtual void               onRemoteCacheSkipped(const char*) noexcept {}
     virtual void               onQuarantined(bool, StorageQuarantineReason, size_t) noexcept {}
     virtual void               onQuarantineChanged(uint64_t, size_t, size_t, const StorageQuarantineBreakdown&) noexcept {}
 
@@ -201,12 +211,13 @@ private:
                                         const char*           operation,
                                         uint64_t              trace_id) const noexcept;
     void validateRequest(const StorageRequest& request, bool allow_null_blocks) const;
-    bool                                 dispatch(Operation operation, BlockTreeTaskClass task_class);
+    bool dispatch(Operation operation, BlockTreeTaskClass task_class, bool run_inline = false);
     void                                 taskFinished();
     void quarantineTask(const std::shared_ptr<storage_backend_detail::StorageTaskState>& state,
                         bool                                                             is_write,
                         StorageQuarantineReason                                          reason);
     std::shared_ptr<const CacheTopology> topology_;
+    std::atomic<bool>                    remote_cache_enabled_{true};
     PoolsByTag                           pools_by_tag_;
     BufferResolver                       buffer_resolver_;
     std::shared_ptr<StorageBackendExecutor> executor_;

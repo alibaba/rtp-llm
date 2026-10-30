@@ -1,6 +1,7 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/test/KVCMMockTestBase.h"
 
 #include <array>
+#include <atomic>
 #include <csignal>
 #include <cstdint>
 #include <unistd.h>
