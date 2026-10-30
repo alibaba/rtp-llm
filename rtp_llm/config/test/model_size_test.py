@@ -317,5 +317,70 @@ class WeightConvertDeviceDecisionReplayTest(unittest.TestCase):
             self.assertEqual(loader._choose_weight_convert_device("cuda:0"), "cpu")
 
 
+class Fp4ExpertStorageDetectionTest(unittest.TestCase):
+    @staticmethod
+    def _expert_keys(with_scales: bool):
+        keys = {
+            "layers.3.attn.wq_a.weight",
+            "layers.3.ffn.experts.17.w1.weight",
+            "layers.3.ffn.experts.17.w2.weight",
+            "layers.3.ffn.experts.17.w3.weight",
+        }
+        if with_scales:
+            keys |= {
+                "layers.3.ffn.experts.17.w1.scale",
+                "layers.3.ffn.experts.17.w2.scale",
+                "layers.3.ffn.experts.17.w3.scale",
+            }
+        return keys
+
+    def test_scale_sibling_keys_detect_fp4(self):
+        from rtp_llm.models.deepseek_v4 import detect_fp4_expert_storage
+
+        self.assertEqual(detect_fp4_expert_storage(self._expert_keys(True)), "fp4")
+
+    def test_fp8_layout_and_dense_scales_not_detected(self):
+        from rtp_llm.models.deepseek_v4 import detect_fp4_expert_storage
+
+        # FP8/int8 stored experts carry no per-expert scale siblings.
+        self.assertIsNone(detect_fp4_expert_storage(self._expert_keys(False)))
+        # Dense FP8 block-wise scale names must not trigger either.
+        self.assertIsNone(
+            detect_fp4_expert_storage(
+                {"layers.3.attn.wq.weight_scale_inv", "layers.3.ffn.experts.17.w1.weight_inv"}
+            )
+        )
+
+    def test_process_meta_populates_undeclared_config(self):
+        from rtp_llm.models.deepseek_v4 import DeepSeekV4Weight
+
+        with TemporaryDirectory() as ckpt_path:
+            _write_quant_config(ckpt_path)
+            config = _moe_model_config(ckpt_path, V4_PRO_SHAPE)
+            config.num_hash_layers = 0
+            shim = SimpleNamespace(
+                model_config=config, _num_layers=V4_PRO_SHAPE["layers"]
+            )
+            DeepSeekV4Weight._process_meta(shim, [{}], self._expert_keys(True))
+            self.assertEqual(config.expert_weight_dtype, "fp4")
+            # The estimate now prices experts at their storage width and
+            # lands back on the disk-sized figure (see the V4-Pro replay).
+            self.assertLess(config.eval_model_weight_size(), 893e9 * 1.05)
+
+    def test_process_meta_respects_explicit_declaration(self):
+        from rtp_llm.models.deepseek_v4 import DeepSeekV4Weight
+
+        with TemporaryDirectory() as ckpt_path:
+            _write_quant_config(ckpt_path)
+            # An explicit fp8 declaration wins over the detected storage.
+            config = _moe_model_config(ckpt_path, V4_PRO_SHAPE, "fp8")
+            config.num_hash_layers = 0
+            shim = SimpleNamespace(
+                model_config=config, _num_layers=V4_PRO_SHAPE["layers"]
+            )
+            DeepSeekV4Weight._process_meta(shim, [{}], self._expert_keys(True))
+            self.assertEqual(config.expert_weight_dtype, "fp8")
+
+
 if __name__ == "__main__":
     unittest.main()
