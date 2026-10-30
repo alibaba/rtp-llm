@@ -460,6 +460,15 @@ bool StreamCacheResource::asyncLoadCache() {
     return allocator_load_context_ != nullptr;
 }
 
+bool StreamCacheResource::onAllocatorLoadDone(std::function<void()> callback) {
+    const auto context = allocator_load_context_;
+    if (!context || !callback) {
+        return false;
+    }
+    context->onDone([callback = std::move(callback)](ErrorInfo) { callback(); });
+    return true;
+}
+
 bool StreamCacheResource::loadCacheDone() {
     if (allocator_load_context_) {
         if (!allocator_load_context_->done()) {

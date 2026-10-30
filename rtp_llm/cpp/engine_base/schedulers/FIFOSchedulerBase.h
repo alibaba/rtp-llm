@@ -1,7 +1,6 @@
 #pragma once
 
 #include <atomic>
-#include <condition_variable>
 #include <list>
 #include <memory>
 #include <mutex>
@@ -14,6 +13,7 @@
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/engine_base/schedulers/EngineScheduleInfo.h"
 #include "rtp_llm/cpp/engine_base/schedulers/SchedulerBase.h"
+#include "rtp_llm/cpp/engine_base/schedulers/SchedulerSynchronizationState.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateTypes.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 
@@ -57,8 +57,10 @@ protected:
     virtual const char* schedulerName() const                                            = 0;
     virtual bool        evaluateRunningMemory(const std::list<GenerateStreamPtr>& streams,
                                               const GenerateStreamPtr&            new_stream) = 0;
+    // Called with both lock_ and scheduler_sync_state_->wake_mutex held.
     virtual bool        waitPredicate()                                                  = 0;
     virtual void        onRunningStream(const GenerateStreamPtr& stream) {}
+    virtual void        onLoadingStream(const GenerateStreamPtr& stream) {}
     virtual void        cancelExtraStreams() {}
     virtual int64_t extraOnflightStreams() const {
         return 0;
@@ -97,9 +99,9 @@ protected:
     bool                            need_fill_fake_stream_   = false;
     std::atomic<bool>               stop_                    = false;
     bool                            schedule_trigger_        = false;
-    std::mutex                      lock_;
-    std::condition_variable         cond_;
-    kmonitor::MetricsReporterPtr    metrics_reporter_ = nullptr;
+    SchedulerSynchronizationStatePtr scheduler_sync_state_ = std::make_shared<SchedulerSynchronizationState>();
+    std::mutex&                     lock_                        = scheduler_sync_state_->mutex;
+    kmonitor::MetricsReporterPtr    metrics_reporter_                 = nullptr;
     int64_t                         last_admitted_context_batch_size_ = 0;
     int64_t                         last_admitted_context_token_size_ = 0;
     int64_t                         last_waiting_oldest_age_us_       = 0;
