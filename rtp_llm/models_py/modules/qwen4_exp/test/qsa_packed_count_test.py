@@ -126,6 +126,9 @@ class QsaPackedCountTest(unittest.TestCase):
                 run(packed, True, False)
 
     def test_fp16_pv_against_independent_fp64_and_large_value_fallback(self):
+        import rtp_llm.models_py.modules.qwen4_exp.qsa.grouped_sparse_paged_fmha as grouped_backend
+        import rtp_llm.models_py.modules.qwen4_exp.qsa.sparse_paged_fmha as generic_backend
+
         torch.manual_seed(77991)
         q = torch.randn(1, 12, 4, 256, device="cuda", dtype=torch.bfloat16)
         cache = (torch.randn(18, 2, 1, 128, 256, device="cuda") * 0.2).to(
@@ -139,32 +142,48 @@ class QsaPackedCountTest(unittest.TestCase):
         packed = compact_qsa_selection(selected)
         for multiplier in (0.01, 1.0, 16.0, 1000000.0):
             sf = scale * multiplier
-            actual = sparse_paged_gqa_attn(
-                q,
-                cache,
-                table,
-                lengths,
-                packed,
-                page_size=128,
-                kv_scale=sf,
-                selected_has_count=True,
-                fp16_pv=True,
+            with patch.object(
+                generic_backend._sparse_paged_online_split_kernel,
+                "run",
+                wraps=generic_backend._sparse_paged_online_split_kernel.run,
+            ) as generic_launch, patch.object(
+                grouped_backend,
+                "grouped_sparse_paged_split",
+                wraps=grouped_backend.grouped_sparse_paged_split,
+            ) as grouped_launch:
+                actual = sparse_paged_gqa_attn(
+                    q,
+                    cache,
+                    table,
+                    lengths,
+                    packed,
+                    page_size=128,
+                    kv_scale=sf,
+                    selected_has_count=True,
+                    fp16_pv=True,
+                )
+            # This fixture is in the SM120 grouped domain; other devices use
+            # the generic path. Assert the real route before choosing its oracle.
+            expected_grouped = torch.cuda.get_device_capability(q.device) == (12, 0)
+            self.assertEqual(
+                (generic_launch.call_count, grouped_launch.call_count),
+                (0, 1) if expected_grouped else (1, 0),
             )
+            uses_grouped = grouped_launch.call_count == 1
+            if uses_grouped:
+                self.assertTrue(grouped_launch.call_args.kwargs["fp16_pv"])
             expected = torch.empty_like(q)
             for query in range(4):
                 ids = selected[0, query, :2048].long()
                 pages = table[0, ids // 128]
                 slot = ids % 128
-                k = (
-                    (cache[pages, 0, 0, slot].float() * sf[pages, 0, 0, slot, None])
-                    .bfloat16()
-                    .double()
-                )
-                v = (
-                    (cache[pages, 1, 0, slot].float() * sf[pages, 1, 0, slot, None])
-                    .bfloat16()
-                    .double()
-                )
+                k = cache[pages, 0, 0, slot].float() * sf[pages, 0, 0, slot, None]
+                v = cache[pages, 1, 0, slot].float() * sf[pages, 1, 0, slot, None]
+                # Grouped MMA materializes BF16 K/V after dequantization;
+                # the generic FP32 reduction consumes the FP32 products.
+                if uses_grouped:
+                    k, v = k.bfloat16(), v.bfloat16()
+                k, v = k.double(), v.double()
                 score = q[0, :, query].double() @ k.T / 16
                 expected[0, :, query] = (score.softmax(-1) @ v).bfloat16()
             torch.testing.assert_close(actual, expected, atol=2e-2, rtol=2e-2)
