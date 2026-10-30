@@ -9,12 +9,11 @@
 # and write each `default_config` to `configs/{GPU}/{kernel}.json`.
 #
 # Usage:
-#     # Run op benchmark once, compare the picked config vs. the existing
-#     # committed JSON without modifying files:
+#     # Run op benchmark once and compare against the committed JSON:
 #     python -m rtp_llm.models_py.triton_kernels.autotune_cache.scripts.extract \
 #         --init-default --op kda --dry-run
 #
-#     # Same but actually write:
+#     # Run the benchmark and write the selected configs:
 #     python -m rtp_llm.models_py.triton_kernels.autotune_cache.scripts.extract \
 #         --init-default --op kda
 #
