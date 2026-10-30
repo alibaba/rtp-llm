@@ -13,6 +13,7 @@
 #include <deque>
 #include <exception>
 #include <functional>
+#include <iterator>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -1152,12 +1153,42 @@ grpc::Status PrefillBatchRpcServer::acceptGroup(std::vector<BatchSlot> slots, En
         }
     }
 
-    auto enqueue_status = enqueueGroupStreams(ready_slots, response);
-    if (!enqueue_status.ok()) {
-        for (auto& ready_slot : ready_slots) {
-            rejectSlot(ready_slot, enqueue_status, response);
-        }
+    if (ready_slots.empty()) {
         return grpc::Status::OK;
+    }
+    const auto enqueue = [&](std::vector<ReadySlot>& group) {
+        const auto status = enqueueGroupStreams(group, response);
+        if (!status.ok()) {
+            for (auto& ready_slot : group) {
+                rejectSlot(ready_slot, status, response);
+            }
+            group.clear();
+        }
+    };
+
+    const auto prefill_only = [](const ReadySlot& slot) {
+        return slot.deferred->context->generate_input->generate_config->isPrefillOnly();
+    };
+    const bool first_mode  = prefill_only(ready_slots.front());
+    const auto same_mode   = [&](const ReadySlot& slot) { return prefill_only(slot) == first_mode; };
+    const auto first_other = std::find_if_not(ready_slots.begin(), ready_slots.end(), same_mode);
+    if (first_other == ready_slots.end()) {
+        enqueue(ready_slots);
+    } else {
+        // FlexLB delivers independent requests together. The engine still
+        // requires each synchronized execution group to run in one mode.
+        const auto             boundary = std::stable_partition(first_other, ready_slots.end(), same_mode);
+        std::vector<ReadySlot> other_group(std::make_move_iterator(boundary),
+                                           std::make_move_iterator(ready_slots.end()));
+        ready_slots.erase(boundary, ready_slots.end());
+        enqueue(ready_slots);
+        enqueue(other_group);
+        ready_slots.insert(ready_slots.end(),
+                           std::make_move_iterator(other_group.begin()),
+                           std::make_move_iterator(other_group.end()));
+        std::sort(ready_slots.begin(), ready_slots.end(), [](const ReadySlot& lhs, const ReadySlot& rhs) {
+            return lhs.slot < rhs.slot;
+        });
     }
 
     for (auto& ready_slot : ready_slots) {

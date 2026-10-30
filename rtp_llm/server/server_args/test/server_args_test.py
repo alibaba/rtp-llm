@@ -7,6 +7,7 @@ import pickle
 import sys
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import TestCase, main
 from unittest.mock import patch
 
@@ -1136,6 +1137,50 @@ class ServerArgsPyEnvConfigsTest(TestCase):
         self.assertEqual(
             second_configs.moe_config.moe_strategy, "external_test_strategy"
         )
+
+
+class CliOnlyArgumentsTest(TestCase):
+    def test_cli_only_ignores_environment_and_preserves_bindings(self):
+        from rtp_llm.server.server_args.server_args import EnvArgumentParser
+
+        for grouped in (False, True):
+            for args in (None, [], ["--other", "3"]):
+                with self.subTest(grouped=grouped, args=args):
+                    parser = EnvArgumentParser()
+                    config = SimpleNamespace(value=0)
+                    parser.set_root_config(config)
+                    target = parser.add_argument_group("test") if grouped else parser
+                    kwargs = {"bind_to": (config, "value")} if grouped else {}
+                    target.add_argument(
+                        "--value", type=int, default=7, cli_only=True, **kwargs
+                    )
+                    parser.add_argument("--other", type=int, default=1)
+                    with (
+                        patch.dict(
+                            os.environ, {"VALUE": "99", "OTHER": "2"}, clear=True
+                        ),
+                        patch.object(sys, "argv", ["prog"]),
+                    ):
+                        parsed = parser.parse_args(args)
+                    self.assertEqual(parsed.value, 7)
+                    self.assertEqual(parsed.other, 3 if args else 2)
+                    if grouped:
+                        self.assertEqual(config.value, 7)
+                    self.assertNotIn("value", parser.get_env_mappings())
+                    self.assertEqual(parser.parse_args(["--value", "9"]).value, 9)
+                    if grouped:
+                        self.assertEqual(config.value, 9)
+
+    def test_environment_mappings_do_not_leak_between_parsers(self):
+        from rtp_llm.server.server_args.server_args import EnvArgumentParser
+
+        environment_parser = EnvArgumentParser()
+        environment_parser.add_argument("--value", type=int, default=1)
+        cli_parser = EnvArgumentParser()
+        cli_parser.add_argument("--value", type=int, default=2, cli_only=True)
+        with patch.dict(os.environ, {"VALUE": "3"}, clear=True):
+            self.assertEqual(environment_parser.parse_args([]).value, 3)
+            self.assertEqual(cli_parser.parse_args([]).value, 2)
 
 
 class ServerArgsSetTest(TestCase):
@@ -2378,6 +2423,23 @@ class ServerArgsSetTest(TestCase):
         parser.parse_args(["--gpu_batch_wait_ms", "500", "--gpu_max_batch_size", "8"])
         self.assertEqual(cfg.vit_config.gpu_max_batch_size, 8)
         self.assertEqual(cfg.vit_config.gpu_batch_wait_ms, 500)
+
+    def test_oss_endpoint_rewrite_is_cli_only(self):
+        from rtp_llm.config.py_config_modules import VitConfig
+        from rtp_llm.server.server_args.server_args import EnvArgumentParser
+        from rtp_llm.server.server_args.vit_group_args import init_vit_group_args
+
+        config = VitConfig()
+        parser = EnvArgumentParser()
+        parser.set_root_config(config)
+        init_vit_group_args(parser, config)
+        with patch.dict(os.environ, {"ENABLE_OSS_INTERNAL_ENDPOINT_REWRITE": "0"}):
+            parser.parse_args([])
+            self.assertTrue(config.enable_oss_internal_endpoint_rewrite)
+            parser.parse_args(["--enable_oss_internal_endpoint_rewrite", "0"])
+        self.assertFalse(
+            pickle.loads(pickle.dumps(config)).enable_oss_internal_endpoint_rewrite
+        )
 
     def test_repetition_detection_config(self):
         """Test that repetition detection args bind to PyEnvConfigs."""

@@ -9,8 +9,8 @@ from unittest.mock import patch
 
 import torch
 
-from rtp_llm.dash_sc.client import build_model_infer_request
 from rtp_llm.dash_sc import codec
+from rtp_llm.dash_sc.client import build_model_infer_request
 from rtp_llm.dash_sc.codec import (
     DASH_ERROR_ABORT,
     DASH_ERROR_CAPACITY,
@@ -1844,6 +1844,56 @@ class BuildStreamResponseFromGenerateOutputsTest(TestCase):
             for i in range(len(frames[0].infer_response.outputs))
         }
         self.assertEqual(_unpack_int32_le(first_by_name["generated_ids"]), [1, 2])
+
+    def test_image_tokens_in_stream_usage(self) -> None:
+        image_output = GenerateOutput(
+            aux_info=AuxInfo(
+                input_len=3662, multimodal_lengths={MMUrlType.IMAGE: 3636}
+            ),
+        )
+        finished_output = GenerateOutput(
+            finished=True, aux_info=AuxInfo(input_len=3662)
+        )
+        for with_heartbeat in (False, True):
+            with self.subTest(with_heartbeat=with_heartbeat):
+                builder = StreamResponseBuilder(
+                    dash_sc_request_id="image",
+                    model_name="m",
+                    request_log_tag="image",
+                )
+                if with_heartbeat:
+                    heartbeat = builder.build(
+                        GenerateOutputs(generate_outputs=[GenerateOutput()])
+                    )
+                image_frame = builder.build(
+                    GenerateOutputs(generate_outputs=[image_output]),
+                    token_ids=[1],
+                )
+                final_frame = builder.build(
+                    GenerateOutputs(generate_outputs=[finished_output])
+                )
+                if with_heartbeat:
+                    self.assertNotIn(
+                        "image_tokens", heartbeat.infer_response.parameters
+                    )
+                for frame in (image_frame, final_frame):
+                    self.assertEqual(
+                        frame.infer_response.parameters["image_tokens"].int64_param,
+                        3636,
+                    )
+
+    def test_explicit_image_tokens_take_precedence_over_aux_usage(self) -> None:
+        builder = StreamResponseBuilder(
+            dash_sc_request_id="image",
+            model_name="m",
+            request_log_tag="image",
+            image_tokens=4,
+        )
+        output = GenerateOutput(
+            aux_info=AuxInfo(multimodal_lengths={MMUrlType.IMAGE: 8})
+        )
+        frame = builder.build(GenerateOutputs(generate_outputs=[output]), token_ids=[1])
+        self.assertEqual(frame.infer_response.parameters["image_tokens"].int64_param, 4)
 
     def test_stream_response_builder_removes_template_dynamic_parameter(self) -> None:
         output = GenerateOutput(

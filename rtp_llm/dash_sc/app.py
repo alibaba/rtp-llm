@@ -666,6 +666,13 @@ class DashScApp:
             # the servicer is opened below on the owner loop for a consistent
             # async lifecycle.
             if not is_proxy:
+                from rtp_llm.multimodal.multimodal_util import (
+                    configure_oss_internal_endpoint_rewrite,
+                )
+
+                configure_oss_internal_endpoint_rewrite(
+                    self.py_env_configs.vit_config.enable_oss_internal_endpoint_rewrite
+                )
                 model_config = ModelFactory.create_model_config(
                     model_args=self.py_env_configs.model_args,
                     lora_config=self.py_env_configs.lora_config,

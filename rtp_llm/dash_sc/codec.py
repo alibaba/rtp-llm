@@ -30,11 +30,14 @@ from rtp_llm.dash_sc.structural_tag import (
     structural_tag_from_response_format,
     validate_structural_tag_shape,
 )
-from rtp_llm.utils.base_model_datatypes import GenerateOutput, GenerateOutputs
+from rtp_llm.utils.base_model_datatypes import (
+    GenerateOutput,
+    GenerateOutputs,
+    MMUrlType,
+)
 
 if TYPE_CHECKING:
     from rtp_llm.config.generate_config import GenerateConfig
-    from rtp_llm.utils.base_model_datatypes import MMUrlType
 
 _INT32_MIN = -2_147_483_648
 _DEFAULT_MAX_NEW_TOKENS = 32000
@@ -1132,8 +1135,6 @@ def parse_dash_sc_grpc_request(
 def _multimodal_type_maps() -> (
     tuple[dict[str, tuple[str, MMUrlType]], dict[str, MMUrlType]]
 ):
-    from rtp_llm.utils.base_model_datatypes import MMUrlType
-
     return (
         {
             "image_url": ("image_url", MMUrlType.IMAGE),
@@ -1683,6 +1684,13 @@ class StreamResponseBuilder:
             else LLMFinishReason.STOP if finished else LLMFinishReason.STREAMING
         )
         aux_info = getattr(out_py, "aux_info", None)
+        if self._image_tokens is None and aux_info is not None:
+            self._image_tokens = aux_info.multimodal_lengths.get(MMUrlType.IMAGE)
+            if self._image_tokens is not None and self._template is not None:
+                # A heartbeat can precede the request's image usage.
+                self._template.infer_response.parameters["image_tokens"].int64_param = (
+                    self._image_tokens
+                )
         prompt_tokens = (
             int(aux_info.input_len)
             if aux_info is not None

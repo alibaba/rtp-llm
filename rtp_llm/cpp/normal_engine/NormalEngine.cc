@@ -728,15 +728,15 @@ WarmUpResult NormalEngine::prefillWarmUp(const EngineInitParams& params) {
 
         const int64_t block_size = model_config_.attn_config.tokens_per_block;
         const int64_t row_count  = std::min(token_budget, runtime_config.fifo_scheduler_config.max_context_batch_size);
-        const int64_t row_heavy_tokens = std::min(token_budget, token_heavy_seq_len);
+        RTP_LLM_CHECK_WITH_INFO(row_count > 0, "chunked prefill warmup requires max_context_batch_size > 0");
+        const int64_t row_heavy_tokens = std::min(token_budget / row_count, token_heavy_seq_len);
         const int64_t row_heavy_reuse  = (token_heavy_seq_len - row_heavy_tokens) / block_size * block_size;
         auto          row_heavy_input  = makeFakeInput(static_cast<size_t>(row_heavy_reuse + row_heavy_tokens));
         row_heavy_input->generate_config->num_return_sequences = static_cast<int>(row_count);
 
-        // Conservatively combine multiple rows with a full chunk per row and a long prefix.
-        // Run once without splitting by the scheduler's global token budget.
-        auto row_heavy_result =
-            runPrefillWarmupShape(row_heavy_input, warmup_resource_context, static_cast<int>(row_heavy_reuse), 0);
+        // Warm up multiple rows with a long prefix while sharing the scheduler's token budget.
+        auto row_heavy_result = runPrefillWarmupShape(
+            row_heavy_input, warmup_resource_context, static_cast<int>(row_heavy_reuse), token_budget);
         THROW_IF_STATUSOR_ERROR(row_heavy_result);
         max_consumed = std::max(max_consumed, memory_tracker->maxConsumedBytes());
         row_heavy_result.value().reset();
@@ -1124,13 +1124,16 @@ absl::Status NormalEngine::stop() {
         return absl::OkStatus();
     }
     RTP_LLM_LOG_INFO("stop normal engine");
-    running_                    = false;
-    const auto scheduler_status = scheduler_->stop();
+    running_ = false;
+    const auto scheduler_status = scheduler_->requestStop();
     // Ask rank 0 to stop at a step boundary. Receivers must finish all model
     // collectives for inputs that rank 0 has already published before exiting.
     CpuTpBroadcaster::instance().requestStop();
     loop_thread_->join();
     loop_thread_.reset();
+    // The loop has stopped using FIFO resources. Batch Decode releases its
+    // streams later in finalizeStop(), after the executor has drained.
+    const auto release_status = scheduler_->stop();
     scheduler_->finalizeCancelledStreams();
     // Join the async dispatch runner and release the dispatcher-owned worker pool.
     executor_.reset();
@@ -1139,10 +1142,13 @@ absl::Status NormalEngine::stop() {
         RTP_LLM_LOG_ERROR("scheduler stop finalization failed: %s", finalize_status.ToString().c_str());
     }
     resource_context_.cache_manager->stopMetricsReporter();
-    return scheduler_status.ok() ? finalize_status : scheduler_status;
+    if (!scheduler_status.ok()) {
+        return scheduler_status;
+    }
+    return release_status.ok() ? finalize_status : release_status;
 }
 
-void NormalEngine::loop() {
+void NormalEngine::loop() try {
     RTP_LLM_PROFILE_FUNCTION();
     RTP_LLM_LOG_INFO("loop begin");
     c10::InferenceMode inference_guard(true);
@@ -1166,6 +1172,11 @@ void NormalEngine::loop() {
     // for the receivers and subsequent model teardown collectives.
     THROW_IF_STATUS_ERROR(executor_->finish());
     tp_broadcaster.finish();
+} catch (const CpuTpPeerClosed& error) {
+    if (running_) {
+        throw;
+    }
+    RTP_LLM_LOG_INFO("CPU TP peer closed during engine shutdown: %s", error.what());
 }
 
 absl::Status NormalEngine::trySaveStepError() const {
@@ -1174,6 +1185,12 @@ absl::Status NormalEngine::trySaveStepError() const {
 
 bool NormalEngine::validateStreamForScheduling(const GenerateStreamPtr& stream) const {
     if (stream->hasError()) {
+        return false;
+    }
+    if (parallelism_config.pp_size <= 1 && sp_config.type != SP_TYPE_NONE && !stream->generateInput()->fake_query
+        && stream->maxBatchSize() > 1) {
+        stream->reportError(ErrorCode::INVALID_PARAMS,
+                            "speculative decoding does not support num_return_sequences > 1 or num_beams > 1");
         return false;
     }
     if (pd_sep_config.role_type != RoleType::DECODE || !stream->generateConfig()->isPrefillOnly()) {

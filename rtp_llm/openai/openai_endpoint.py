@@ -292,12 +292,25 @@ class OpenaiEndpoint(object):
             # output so the recipe parser can stop generation promptly.
             config.is_streaming = True
         request_stop_words_list.extend(config.stop_words_str)
+        # Force overrides configured defaults, while renderer/tokenizer framing
+        # remains required. Both engine and renderer consume this effective config.
+        tokenizer_stop_words_str = list(
+            getattr(self.tokenizer, "stop_words_str_list", []) or []
+        )
         config.stop_words_str = list(
-            set(self.stop_words_str_list + request_stop_words_list)
+            set(
+                self.stop_words_str_list
+                + tokenizer_stop_words_str
+                + request_stop_words_list
+            )
         )
         config.stop_words_list = self._dedup_stop_words_list(
             self.stop_words_id_list
-            + self.chat_renderer.tokenize_words(self.stop_words_str_list)
+            + renderer.get_all_extra_stop_word_ids_list()
+            + list(getattr(self.tokenizer, "stop_words_id_list", []) or [])
+            + renderer.tokenize_words(
+                self.stop_words_str_list + tokenizer_stop_words_str
+            )
             + self._tokenize_request_stop_words(request_stop_words_list)
             + config.stop_words_list
         )
@@ -651,6 +664,17 @@ class OpenaiEndpoint(object):
         prepopulate_str = ""
         if len(chat_request.messages) > 0 and chat_request.messages[-1].partial:
             prepopulate_str = str(chat_request.messages[-1].content)
+            if prepopulate_str and (
+                chat_request.json_format
+                or (
+                    chat_request.response_format is not None
+                    and chat_request.response_format.type != "text"
+                )
+            ):
+                raise FtRuntimeException(
+                    ExceptionType.INVALID_PARAMS,
+                    "partial does not support structured output without grammar prefix state",
+                )
             chat_request.messages.pop()
         from rtp_llm.openai.reasoning_effort import validate_reasoning_effort_for_model
 

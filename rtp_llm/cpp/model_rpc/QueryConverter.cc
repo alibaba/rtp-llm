@@ -320,7 +320,7 @@ std::shared_ptr<GenerateInput> QueryConverter::transQuery(const GenerateInputPB*
             }
             mm_inputs.emplace_back(
                 mm_input->multimodal_url(),
-                torch::empty(1),
+                torch::empty({0}),
                 mm_input->multimodal_type(),
                 mm_preprocess_config->width(),
                 mm_preprocess_config->height(),

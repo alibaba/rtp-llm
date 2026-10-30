@@ -92,6 +92,33 @@ class VitCacheDirectoryTest {
     }
 
     @Test
+    void selectedWorkerIsRevalidatedByAddressAndGeneration() throws Exception {
+        b = worker(b.getIp(), "one");
+        live.put(b.getIpPort(), b);
+        snapshot(a, "a1", "zero");
+        snapshot(b, "b1", "one");
+        assertEquals(a.getIp(), selector.select(context("zero"), "one").getServerIp());
+        var ctx = context("one");
+        var selected = selector.select(ctx, "one");
+        assertEquals(b.getIp(), selected.getServerIp());
+        assertEquals(b.getPort(), selected.getHttpPort());
+        var mapper = new com.fasterxml.jackson.databind.ObjectMapper();
+        ctx.getRequest()
+                .setSelectedVit(
+                        mapper.readValue(
+                                mapper.writeValueAsBytes(selected),
+                                org.flexlb.dao.loadbalance.ServerStatus.class));
+        try (var pinned = selector.selectPinned(ctx, "one")) {
+            org.junit.jupiter.api.Assertions.assertNotNull(pinned);
+            assertEquals(b.getIp(), pinned.serverStatus().getServerIp());
+            assertEquals(b.getPort(), pinned.serverStatus().getHttpPort());
+            assertEquals(b.getGenerationId(), pinned.serverStatus().getWorkerGeneration());
+        }
+        live.put(b.getIpPort(), worker(b.getIp(), "one"));
+        assertFalse(selector.validate(ctx, "one").isSuccess());
+    }
+
+    @Test
     void workerRestartInvalidatesColdKeyPlacements() {
         snapshot(a, "a1");
         snapshot(b, "b1");

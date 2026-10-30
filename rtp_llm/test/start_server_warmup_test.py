@@ -1,9 +1,10 @@
+import multiprocessing
 import unittest
 from contextlib import ExitStack
 from types import SimpleNamespace
-from unittest.mock import Mock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
-from rtp_llm import start_server
+from rtp_llm import start_backend_server, start_server
 from rtp_llm.ops import RoleType, SpeculativeType
 
 
@@ -48,6 +49,233 @@ class ServiceDrainingPropagationTest(unittest.TestCase):
 
 
 class StartupRealWarmupTest(unittest.TestCase):
+    def test_backend_ranks_report_resolved_model_length(self):
+        from unittest.mock import Mock
+
+        readers = []
+        for _ in range(2):
+            reader, writer = multiprocessing.Pipe(duplex=False)
+            self.addCleanup(reader.close)
+            readers.append(reader)
+            start_backend_server._send_pipe_status(
+                writer, "success", "ready", max_seq_len=4096
+            )
+        process = Mock(exitcode=None)
+        process.is_alive.return_value = True
+        self.assertEqual(
+            start_backend_server._wait_for_ranks_startup(
+                [process, process], readers, 2
+            ),
+            4096,
+        )
+
+    def test_warmup_uses_resolved_model_length(self):
+        config = SimpleNamespace(
+            model_args=SimpleNamespace(max_seq_len=None),
+            sp_config=SimpleNamespace(type=SpeculativeType.MTP, gen_num_per_cycle=3),
+            kv_cache_config=SimpleNamespace(
+                seq_size_per_block=128, reserve_block_ratio=5
+            ),
+            grpc_config=None,
+            server_config=SimpleNamespace(rpc_server_port=12345),
+        )
+        requests = []
+
+        async def enqueue(request):
+            requests.append(request)
+            yield SimpleNamespace(generate_outputs=[])
+
+        client = SimpleNamespace(enqueue=enqueue, close=AsyncMock())
+        cache_client = SimpleNamespace(
+            get_cache_status=AsyncMock(
+                return_value={
+                    "results": [
+                        {
+                            "address": "localhost:12345",
+                            "total_kv_cache": "8192",
+                            "block_size": "128",
+                        }
+                    ]
+                }
+            ),
+            close=AsyncMock(),
+        )
+        with patch.dict("os.environ", {"RTP_LLM_STREAM_ASYNC": "0"}), patch(
+            "rtp_llm.model_factory.ModelFactory.create_model_config",
+            side_effect=AssertionError("warmup must reuse the backend model length"),
+        ), patch(
+            "rtp_llm.cpp.model_rpc.model_rpc_client.ModelRpcClient", return_value=client
+        ), patch(
+            "rtp_llm.utils.grpc_client_wrapper.GrpcClientWrapper",
+            return_value=cache_client,
+        ), patch.object(
+            start_server,
+            "_get_startup_real_warmup_grpc_addresses",
+            return_value=["localhost:12345"],
+        ):
+            # Leave four tokens for MTP and one for the generated token.
+            power_of_two_lengths = [2**power for power in range(1, 12)]
+            for cli_length, resolved_length, expected in (
+                (None, 2053, power_of_two_lengths),
+                (8192, 2053, power_of_two_lengths),
+                (None, 6, [1]),
+            ):
+                with self.subTest(
+                    cli_length=cli_length, resolved_length=resolved_length
+                ):
+                    config.model_args.max_seq_len = cli_length
+                    requests.clear()
+                    start_server._run_startup_real_warmup_async(
+                        start_server._run_startup_real_warmup_grpc(
+                            config, resolved_length
+                        )
+                    )
+                    self.assertEqual(
+                        [request.token_ids.numel() for request in requests],
+                        expected,
+                    )
+        self.assertEqual(client.close.await_count, 3)
+        self.assertEqual(cache_client.close.await_count, 3)
+
+    def test_warmup_fits_smallest_backend_with_speculative_margin(self):
+        config = SimpleNamespace(
+            sp_config=SimpleNamespace(type=SpeculativeType.MTP, gen_num_per_cycle=3),
+            kv_cache_config=SimpleNamespace(
+                seq_size_per_block=128, reserve_block_ratio=5
+            ),
+            grpc_config=None,
+            server_config=SimpleNamespace(rpc_server_port=12345),
+        )
+        addresses = ["localhost:12345", "localhost:12346"]
+        requests = []
+
+        async def enqueue(request):
+            # The smaller backend has 20 blocks, one reserved for admission.
+            self.assertLessEqual(request.token_ids.numel() + 1 + 7, 19 * 128)
+            requests.append(request)
+            yield SimpleNamespace(generate_outputs=[])
+
+        client = SimpleNamespace(enqueue=enqueue, close=AsyncMock())
+        cache_client = SimpleNamespace(
+            get_cache_status=AsyncMock(
+                return_value={
+                    "results": [
+                        {
+                            "address": addresses[0],
+                            "total_kv_cache": "8192",
+                            "block_size": "128",
+                        },
+                        {
+                            "address": addresses[1],
+                            "total_kv_cache": "2560",
+                            "block_size": "128",
+                        },
+                    ]
+                }
+            ),
+            close=AsyncMock(),
+        )
+        with patch.dict("os.environ", {"RTP_LLM_STREAM_ASYNC": "1"}), patch(
+            "rtp_llm.cpp.model_rpc.model_rpc_client.ModelRpcClient", return_value=client
+        ), patch(
+            "rtp_llm.utils.grpc_client_wrapper.GrpcClientWrapper",
+            return_value=cache_client,
+        ), patch.object(
+            start_server,
+            "_get_startup_real_warmup_grpc_addresses",
+            return_value=addresses,
+        ):
+            start_server._run_startup_real_warmup_async(
+                start_server._run_startup_real_warmup_grpc(config, 4096)
+            )
+        expected = [2**power for power in range(1, 12)] + [2424]
+        self.assertEqual(
+            [request.token_ids.numel() for request in requests],
+            expected * len(addresses),
+        )
+        cache_client.get_cache_status.assert_awaited_once_with(
+            {"need_cache_keys": False}
+        )
+        cache_client.close.assert_awaited_once()
+        self.assertEqual(client.close.await_count, len(addresses))
+
+    def test_cp_warmup_leaves_a_local_block_for_mtp_with_no_pool_reserve(self):
+        prompt = start_server._get_startup_real_warmup_kv_prompt_limit(
+            total_tokens=20 * 8192,
+            block_size=8192,
+            local_block_size=4096,
+            reserve_block_ratio=0,
+            reserve_step=4,
+        )
+        self.assertEqual(prompt, 19 * 8192 - 1)
+
+    def test_warmup_rejects_missing_or_unusable_backend_capacity(self):
+        config = SimpleNamespace(
+            sp_config=SimpleNamespace(type=SpeculativeType.NONE, gen_num_per_cycle=0),
+            kv_cache_config=SimpleNamespace(
+                seq_size_per_block=128, reserve_block_ratio=5
+            ),
+            grpc_config=None,
+            server_config=SimpleNamespace(rpc_server_port=12345),
+        )
+        for results, error in (
+            ([], RuntimeError),
+            (
+                [
+                    {
+                        "address": "localhost:12345",
+                        "total_kv_cache": "0",
+                        "block_size": "128",
+                    }
+                ],
+                ValueError,
+            ),
+        ):
+            with self.subTest(results=results):
+                cache_client = SimpleNamespace(
+                    get_cache_status=AsyncMock(return_value={"results": results}),
+                    close=AsyncMock(),
+                )
+                with patch(
+                    "rtp_llm.utils.grpc_client_wrapper.GrpcClientWrapper",
+                    return_value=cache_client,
+                ), patch(
+                    "rtp_llm.cpp.model_rpc.model_rpc_client.ModelRpcClient"
+                ) as client, patch.object(
+                    start_server,
+                    "_get_startup_real_warmup_grpc_addresses",
+                    return_value=["localhost:12345"],
+                ):
+                    with self.assertRaises(error):
+                        start_server._run_startup_real_warmup_async(
+                            start_server._run_startup_real_warmup_grpc(config, 4096)
+                        )
+                cache_client.close.assert_awaited_once()
+                client.assert_not_called()
+
+    def test_warmup_rejects_invalid_resolved_length(self):
+        for length in (1, 0, -1):
+            with self.subTest(length=length):
+                with self.assertRaisesRegex(ValueError, "should be at least"):
+                    start_server._run_startup_real_warmup_async(
+                        start_server._run_startup_real_warmup_grpc(None, length)
+                    )
+
+    def test_warmup_rejects_model_length_with_no_room_for_prompt(self):
+        config = SimpleNamespace(
+            sp_config=SimpleNamespace(type=SpeculativeType.MTP, gen_num_per_cycle=3),
+        )
+        with patch.dict("os.environ", {"RTP_LLM_STREAM_ASYNC": "0"}), patch.object(
+            start_server, "_get_startup_real_warmup_grpc_addresses"
+        ) as resolve_addresses:
+            with self.assertRaisesRegex(
+                ValueError, r"max_seq_len=5, reserve_step=4, max_new_tokens=1"
+            ):
+                start_server._run_startup_real_warmup_async(
+                    start_server._run_startup_real_warmup_grpc(config, 5)
+                )
+        resolve_addresses.assert_not_called()
+
     def test_single_stage_dp_ranks_pass_startup_warmup_gate(self):
         for world_size in (2, 3, 4):
             for world_rank in range(world_size):
@@ -139,14 +367,6 @@ class StartupRealWarmupTest(unittest.TestCase):
                 start_server._get_startup_real_warmup_speculative_reserve_step(dflash),
                 9,
             )
-        self.assertEqual(
-            start_server._get_startup_real_warmup_request_token_len(
-                token_len=1048576,
-                max_len=1048576,
-                reserve_step=8,
-            ),
-            1048568,
-        )
 
 
 if __name__ == "__main__":

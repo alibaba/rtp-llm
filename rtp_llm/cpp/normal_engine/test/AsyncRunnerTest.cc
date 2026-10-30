@@ -1,5 +1,6 @@
 #include <atomic>
 #include <chrono>
+#include <future>
 #include <stdexcept>
 #include <thread>
 #include <ATen/record_function.h>
@@ -99,6 +100,22 @@ TEST_F(AsyncRunnerTest, CudaTensorWork) {
     EXPECT_TRUE(torch::equal(result, torch::ones({64}, torch::kFloat32)));
 }
 
+TEST_F(AsyncRunnerTest, DestructorDrainsCudaWorkAfterWorkerFailure) {
+    auto output = torch::zeros({8192}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
+    auto ready  = std::make_shared<torch::Event>(cuda_graph::makeGraphEvent());
+    ready->record(currentStream());
+    {
+        AsyncRunner runner(makeStream());
+        runner.launch([ready, output] {
+            ready->block(cuda_graph::graphGetCurrentStream());
+            output.fill_(19);
+            throw std::runtime_error("failed after CUDA submission");
+        });
+        EXPECT_THROW(runner.sync(currentStream()), std::runtime_error);
+    }
+    EXPECT_TRUE(torch::equal(output.cpu(), torch::full({8192}, 19, torch::kInt32)));
+}
+
 TEST_F(AsyncRunnerTest, DoesNotPropagateRecordFunctionCallbacksToWorker) {
     auto        stream = makeStream();
     AsyncRunner runner(stream);
@@ -160,6 +177,39 @@ TEST_F(AsyncRunnerTest, SyncWithoutLaunch) {
     runner.sync(currentStream());
 }
 
+TEST_F(AsyncRunnerTest, CompletionReleasesEverySyncConsumer) {
+    AsyncRunner        runner(makeStream());
+    std::promise<void> release_task;
+    auto               gate = release_task.get_future().share();
+    runner.launch([gate] { gate.wait(); });
+
+    std::promise<void> first_started;
+    std::promise<void> second_started;
+    auto               consume = [&](torch::Stream stream, std::promise<void>& started) {
+        cuda_graph::setDevice(static_cast<int>(stream.device_index()));
+        started.set_value();
+        runner.sync(stream);
+    };
+    auto first  = std::async(std::launch::async, consume, makeStream(), std::ref(first_started));
+    auto second = std::async(std::launch::async, consume, makeStream(), std::ref(second_started));
+    first_started.get_future().wait();
+    second_started.get_future().wait();
+    EXPECT_EQ(first.wait_for(std::chrono::milliseconds(100)), std::future_status::timeout);
+    EXPECT_EQ(second.wait_for(std::chrono::milliseconds(100)), std::future_status::timeout);
+    release_task.set_value();
+
+    const auto first_status  = first.wait_for(std::chrono::seconds(5));
+    const auto second_status = second.wait_for(std::chrono::seconds(5));
+    EXPECT_EQ(first_status, std::future_status::ready);
+    EXPECT_EQ(second_status, std::future_status::ready);
+    // Keep a failed notification regression bounded and join both consumers.
+    if (first_status != std::future_status::ready || second_status != std::future_status::ready) {
+        runner.cv_done_.notify_all();
+    }
+    first.get();
+    second.get();
+}
+
 TEST_F(AsyncRunnerTest, RethrowsWorkerExceptionFromSync) {
     auto        stream = makeStream();
     AsyncRunner runner(stream);
@@ -184,6 +234,19 @@ TEST_F(AsyncRunnerTest, RethrowsWorkerExceptionFromNextLaunch) {
     runner.launch([&counter] { counter.fetch_add(1); });
     runner.sync(currentStream());
     EXPECT_EQ(counter.load(), 1);
+}
+
+TEST_F(AsyncRunnerTest, RethrowsNonStandardWorkerException) {
+    AsyncRunner runner(makeStream());
+    runner.launch([] { throw 42; });
+    EXPECT_THROW(runner.sync(currentStream()), int);
+}
+
+TEST_F(AsyncRunnerTest, DestructorDoesNotRethrowUnobservedFailure) {
+    EXPECT_NO_THROW({
+        AsyncRunner runner(makeStream());
+        runner.launch([] { throw 19; });
+    });
 }
 
 TEST_F(AsyncRunnerTest, LaunchSyncInterleavedStress) {

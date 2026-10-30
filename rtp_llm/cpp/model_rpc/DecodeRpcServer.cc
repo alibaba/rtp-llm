@@ -407,6 +407,12 @@ void DecodeRpcServer::allocateResource(DecodeGenerateContext& decode_context) {
         maga_init_params_.pd_sep_config.decode_linear_tail_only);
     decode_context.setRequestTimeoutMs(generate_stream->getTimeoutMs());
     decode_context.setStream(generate_stream);
+    if (const auto error = generate_stream->statusInfo(); error.hasError()) {
+        generate_stream->moveToNext();
+        decode_context.error_info   = error;
+        decode_context.error_status = serializeErrorMsg(decode_context.request_key, decode_context.request_info, error);
+        return;
+    }
 
     auto cache_manager = engine_->getCacheManager();
     RTP_LLM_CHECK_WITH_INFO(cache_manager != nullptr, "decode cache manager is null");

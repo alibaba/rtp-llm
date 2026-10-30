@@ -5,6 +5,7 @@
 #include <chrono>
 #include <future>
 #include <memory>
+#include <mutex>
 #include <set>
 #include <stdexcept>
 #include <string>
@@ -14,6 +15,7 @@
 #include "opentelemetry/exporters/memory/in_memory_span_data.h"
 #include "opentelemetry/exporters/memory/in_memory_span_exporter_factory.h"
 #include "opentelemetry/sdk/trace/span_data.h"
+#include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 #include "rtp_llm/cpp/model_rpc/PrefillBatchRpcServer.h"
 #include "rtp_llm/cpp/model_rpc/QueryConverter.h"
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
@@ -153,6 +155,10 @@ public:
             status = grpc::Status(grpc::StatusCode::INTERNAL, "missing allocate request");
             return status;
         }
+        {
+            const std::lock_guard<std::mutex> lock(mutex_);
+            allocated_request_ids_.insert(request.request_id());
+        }
         span_guard.setAttribute(telemetry::kAttrRequestId, std::to_string(request.request_id()));
         GenerateOutputsPB response;
         if (!stream->Write(response)) {
@@ -162,6 +168,15 @@ public:
         while (stream->Read(&request)) {}
         return status;
     }
+
+    std::set<int64_t> allocatedRequestIds() const {
+        const std::lock_guard<std::mutex> lock(mutex_);
+        return allocated_request_ids_;
+    }
+
+private:
+    mutable std::mutex mutex_;
+    std::set<int64_t>  allocated_request_ids_;
 };
 
 class TracingDecodeRpcServer {
@@ -183,6 +198,10 @@ public:
 
     int port() const {
         return port_;
+    }
+
+    std::set<int64_t> allocatedRequestIds() const {
+        return service_.allocatedRequestIds();
     }
 
 private:
@@ -551,6 +570,120 @@ TEST(PrefillBatchRpcServerTest, PrepareRetryStartsNoAttemptForExpiredRequest) {
     EXPECT_FALSE(result.stage_status.ok());
     EXPECT_EQ(deferred->context->error_info.code(), ErrorCode::GENERATE_TIMEOUT);
     EXPECT_EQ(deferred->context->retry_times, 0);
+}
+
+TEST(PrefillBatchRpcServerTest, PrefillOnlySlotReturnsLocalOutputWithoutDecodeConnection) {
+    class RecordingWriter final: public grpc::internal::WriterInterface<GenerateOutputsPB> {
+    public:
+        bool Write(const GenerateOutputsPB& output, grpc::WriteOptions) override {
+            outputs.push_back(output);
+            return true;
+        }
+        std::vector<GenerateOutputsPB> outputs;
+    };
+
+    PrefillBatchRpcServer server;
+    server.engine_ = std::make_shared<PartialEnqueueEngine>();
+    for (const bool explicit_prefill_only : {false, true}) {
+        SCOPED_TRACE(explicit_prefill_only);
+        auto deferred = makeDeferred(server, 66 + explicit_prefill_only);
+        deferred->input->add_token_ids(1);
+        deferred->input->mutable_generate_config()->set_max_new_tokens(0);
+        deferred->input->mutable_generate_config()->set_prefill_only(explicit_prefill_only);
+        auto&      context = *deferred->context;
+        const auto result  = server.prepareSlotWithRetry(context, 0, 0);
+        ASSERT_TRUE(result.prepared) << result.stage_status.error_message();
+        EXPECT_FALSE(context.generate_input->generate_config->pd_separation);
+        EXPECT_FALSE(context.client_stream);
+
+        auto stream                      = makeGenerateStream(context.generate_input);
+        stream->generate_status_->status = StreamState::RUNNING;
+        context.setStream(stream);
+        stream->update({torch::empty({1, 0}, torch::kInt32), 0});
+        RecordingWriter writer;
+        context.rpc_context.writer = &writer;
+        const auto status          = server.finishStream(context);
+        context.markRpcHandlingCompleted();
+        ASSERT_TRUE(status.ok()) << status.error_message();
+        EXPECT_TRUE(context.finished);
+        ASSERT_EQ(writer.outputs.size(), 1);
+        const auto& output = writer.outputs.front().flatten_output();
+        EXPECT_TRUE(output.finished(0));
+        EXPECT_TRUE(output.has_output_ids());
+        EXPECT_TRUE(output.output_ids().int32_data().empty());
+    }
+}
+
+TEST(PrefillBatchRpcServerTest, MixedTransportBatchSubmitsHomogeneousExecutionGroups) {
+    class RecordingEngine final: public PartialEnqueueEngine {
+    public:
+        std::pair<std::vector<bool>, std::vector<GenerateStreamPtr>>
+        enqueueMultiple(const std::vector<std::shared_ptr<GenerateInput>>& inputs) override {
+            submissions.push_back(inputs);
+            std::vector<GenerateStreamPtr> streams;
+            for (const auto& input : inputs) {
+                auto stream = makeGenerateStream(input);
+                EXPECT_TRUE(stream->finishWithoutGenerate());
+                streams.push_back(std::move(stream));
+            }
+            return {std::vector<bool>(inputs.size(), true), std::move(streams)};
+        }
+        std::vector<std::vector<std::shared_ptr<GenerateInput>>> submissions;
+    };
+
+    TracingDecodeRpcServer decode_server;
+    ASSERT_TRUE(decode_server.start());
+    TracingDecodeRpcServer other_decode_server;
+    ASSERT_TRUE(other_decode_server.start());
+    PrefillBatchRpcServer server;
+    auto                  engine = std::make_shared<RecordingEngine>();
+    server.engine_               = engine;
+    server.meta_                 = std::make_shared<RpcServerRuntimeMeta>();
+    server.initThreadPools();
+
+    EnqueueBatchRequestPB request;
+    request.set_batch_id(77);
+    auto* slot = request.add_dp_slots();
+    for (int request_id : {71, 72, 73, 74}) {
+        auto* input = addInput(slot, request_id)->mutable_input();
+        input->add_token_ids(1);
+        auto* config = input->mutable_generate_config();
+        config->set_timeout_ms(5000);
+        config->set_max_new_tokens(request_id % 2 == 0 ? 8 : 0);
+        if (request_id % 2 == 0) {
+            auto* decode = config->add_role_addrs();
+            decode->set_role(RoleAddrPB::DECODE);
+            decode->set_ip("127.0.0.1");
+            decode->set_grpc_port(request_id == 72 ? decode_server.port() : other_decode_server.port());
+        }
+    }
+
+    EnqueueBatchResponsePB response;
+    ASSERT_TRUE(server.EnqueueBatch(nullptr, &request, &response).ok());
+    ASSERT_EQ(response.errors_size(), 0) << response.DebugString();
+    ASSERT_EQ(response.successes_size(), 4);
+    EXPECT_EQ(decode_server.allocatedRequestIds(), std::set<int64_t>{72});
+    EXPECT_EQ(other_decode_server.allocatedRequestIds(), std::set<int64_t>{74});
+    EXPECT_EQ(response.batch_id(), 77);
+    for (int i = 0; i < 4; ++i) {
+        EXPECT_EQ(response.successes(i).request_id(), 71 + i);
+    }
+    ASSERT_EQ(engine->submissions.size(), 2);
+    const auto& prefill = engine->submissions[0];
+    const auto& pd      = engine->submissions[1];
+    ASSERT_EQ(prefill.size(), 2);
+    ASSERT_EQ(pd.size(), 2);
+    EXPECT_EQ(prefill[0]->request_id, 71);
+    EXPECT_EQ(prefill[1]->request_id, 73);
+    EXPECT_EQ(pd[0]->request_id, 72);
+    EXPECT_EQ(pd[1]->request_id, 74);
+    for (const auto& group : engine->submissions) {
+        for (const auto& input : group) {
+            EXPECT_EQ(input->group_id, 77);
+            EXPECT_EQ(input->group_size, 4);
+            EXPECT_EQ(input->generate_config->pd_separation, input->request_id % 2 == 0);
+        }
+    }
 }
 
 TEST(PrefillBatchRpcServerTest, PartialSchedulerRejectionCleansRejectedPrefillResources) {

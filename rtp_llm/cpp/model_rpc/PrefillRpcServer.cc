@@ -300,7 +300,7 @@ void PrefillRpcServer::prepareGenerateInput(PrefillGenerateContext& prefill_cont
     if (!prefill_context.generate_input) {
         RTP_LLM_CHECK_WITH_INFO(engine_ != nullptr, "prefill rpc server engine is not initialized");
         auto input                                   = QueryConverter::transQuery(prefill_context.rpc_context.request);
-        input->generate_config->pd_separation        = true;
+        input->generate_config->pd_separation        = !input->generate_config->isPrefillOnly();
         input->generate_config->force_disable_sp_run = !engine_->isMTPEagle();
         prefill_context.generate_input               = std::move(input);
     }
@@ -313,6 +313,9 @@ void PrefillRpcServer::getRpcConnection(PrefillGenerateContext& prefill_context)
     prefill_context.trace_server_port = 0;
     RTP_LLM_LOG_DEBUG("request [%ld] trans query", prefill_context.request_id);
     prepareGenerateInput(prefill_context);
+    if (prefill_context.generate_input->generate_config->isPrefillOnly()) {
+        return;
+    }
 
     RTP_LLM_LOG_DEBUG("request [%ld] get rpc connection", prefill_context.request_id);
 
@@ -472,6 +475,9 @@ void PrefillRpcServer::fillStagePeerGroups(GenerateRequestPB& alloc_request, con
 
 void PrefillRpcServer::remoteAllocateResource(PrefillGenerateContext& prefill_context) {
     RTP_LLM_PROFILE_FUNCTION();
+    if (prefill_context.generate_input && prefill_context.generate_input->generate_config->isPrefillOnly()) {
+        return;
+    }
     RTP_LLM_LOG_DEBUG("request [%ld] start to remote allocate resource", prefill_context.request_id);
     if (prefill_context.isRequestCancelled()) {
         setContextError(prefill_context, ErrorInfo(ErrorCode::CANCELLED, "request is cancelled"));
@@ -563,9 +569,13 @@ void PrefillRpcServer::enqueueRequest(PrefillGenerateContext& prefill_context) {
 
 void PrefillRpcServer::remoteLoadCacheStart(PrefillGenerateContext& prefill_context) {
     RTP_LLM_PROFILE_FUNCTION();
+    const auto& stream = prefill_context.getStream();
+    if (stream->generateConfig()->isPrefillOnly()) {
+        return;
+    }
     RTP_LLM_LOG_DEBUG("request [%ld] remote load cache", prefill_context.request_id);
     auto start_time_us = currentTimeUs();
-    auto wait_result   = waitStreamBeforeRun(prefill_context.getStream());
+    auto wait_result   = waitStreamBeforeRun(stream);
     prefill_context.stat_info.remote_load_cache_wait_stream_rt_us += currentTimeUs() - start_time_us;
     if (wait_result.hasError()) {
         setContextError(prefill_context, wait_result);
@@ -619,6 +629,9 @@ void PrefillRpcServer::pollLocalOutput(PrefillGenerateContext& prefill_context) 
         prefill_context.finished = true;
         auto error_info          = stream->statusInfo();
         setContextError(prefill_context, error_info);
+    } else if (stream->generateConfig()->isPrefillOnly()) {
+        prefill_context.dequeueStreamFromRuntimeMeta();
+        prefill_context.finished = true;
     }
 }
 
@@ -1011,12 +1024,11 @@ grpc::Status PrefillRpcServer::GenerateStreamCall(grpc::ServerContext*          
     });
 
     try {
-        auto status = syncPrefix(prefill_context);
-        if (!status.ok()) {
-            return status;
-        }
-        status = finishStream(prefill_context);
-        if (!status.ok()) {
+        if (syncPrefix(prefill_context).ok()) {
+            auto status = finishStream(prefill_context);
+            if (status.ok()) {
+                RTP_LLM_LOG_DEBUG("request [%ld] all done", prefill_context.request_id);
+            }
             return status;
         }
     } catch (const std::invalid_argument& e) {
@@ -1025,20 +1037,21 @@ grpc::Status PrefillRpcServer::GenerateStreamCall(grpc::ServerContext*          
         setContextError(prefill_context,
                         error_info,
                         serializeErrorMsg(prefill_context.request_key, prefill_context.request_info, error_info));
-        return prefill_context.error_status;
     } catch (const std::exception& e) {
         auto error_msg = "request [" + prefill_context.request_key + "] catch exception [" + e.what() + "]";
         setContextError(prefill_context, ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, error_msg));
-        return prefill_context.error_status;
     } catch (...) {
         auto error_msg = "request [" + prefill_context.request_key + "] catch unknown exception";
         setContextError(prefill_context, ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, error_msg));
-        return prefill_context.error_status;
     }
 
-    RTP_LLM_LOG_DEBUG("request [%ld] all done", prefill_context.request_id);
-
-    return grpc::Status::OK;
+    // Early RPC failures have no stream teardown to publish their Engine terminal status.
+    if (!prefill_context.getStream() && prefill_context.error_info.hasError() && prefill_context.request_id > 0
+        && prefill_context.meta) {
+        prefill_context.meta->finishUnqueuedTask(
+            prefill_context.request_id, request->token_ids_size(), prefill_context.error_info);
+    }
+    return prefill_context.error_status;
 } catch (const std::invalid_argument& e) {
     const auto request_key = request ? std::to_string(request->request_id()) : "unknown";
     const auto error_info =

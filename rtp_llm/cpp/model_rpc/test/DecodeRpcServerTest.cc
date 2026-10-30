@@ -141,6 +141,9 @@ public:
         const auto params = parameters();
         stream            = std::make_shared<NormalGenerateStream>(
             input, params.model_config_, params.runtime_config, resource_context_, nullptr);
+        if (stream_error.hasError()) {
+            stream->reportError(stream_error.code(), stream_error.ToString());
+        }
         return stream;
     }
     GenerateStreamPtr enqueue(const std::shared_ptr<GenerateInput>& input) override {
@@ -163,6 +166,7 @@ public:
     std::shared_ptr<KVCacheManager>              cache;
     std::shared_ptr<AllocationErrorCacheManager> allocator;
     GenerateStreamPtr                            stream;
+    ErrorInfo                                    stream_error;
 };
 
 GroupBase makeRpcGroup(std::string tag) {
@@ -1341,11 +1345,17 @@ TEST(DecodeRpcServerTest, NonCancelledGenerateRequestReadPreservesFailure) {
 
 class PrefillCompletionRpcTest: public DeviceTestBase {};
 
-TEST_F(PrefillCompletionRpcTest, AllocationLoadTimeoutPreservesDeadlineAndReleasesResources) {
-    for (bool timeout : {false, true}) {
-        SCOPED_TRACE(timeout);
-        const auto backend_code = timeout ? ErrorCode::DEADLINE_EXCEEDED : ErrorCode::EXECUTION_EXCEPTION;
+TEST_F(PrefillCompletionRpcTest, AllocationFailurePreservesErrorAndReleasesResources) {
+    for (const auto& [backend_code, reject_stream] : {std::pair{ErrorCode::DEADLINE_EXCEEDED, false},
+                                                      std::pair{ErrorCode::EXECUTION_EXCEPTION, false},
+                                                      std::pair{ErrorCode::EXECUTION_EXCEPTION, true},
+                                                      std::pair{ErrorCode::INVALID_PARAMS, true}}) {
+        SCOPED_TRACE(::testing::Message() << static_cast<int>(backend_code) << " reject_stream=" << reject_stream);
+        const bool timeout = backend_code == ErrorCode::DEADLINE_EXCEEDED;
         auto engine = std::make_shared<AllocationErrorEngine>(ErrorInfo(backend_code, "injected backend load failure"));
+        if (reject_stream) {
+            engine->stream_error = ErrorInfo(backend_code, "injected stream admission failure");
+        }
         const auto      initial_free_blocks = engine->cache->freeBlocksNum();
         DecodeRpcServer server;
         server.engine_ = engine;
@@ -1366,18 +1376,26 @@ TEST_F(PrefillCompletionRpcTest, AllocationLoadTimeoutPreservesDeadlineAndReleas
 
         server.allocateResource(context);
 
-        EXPECT_EQ(context.error_status.error_code(),
-                  timeout ? grpc::StatusCode::DEADLINE_EXCEEDED : grpc::StatusCode::INTERNAL);
-        EXPECT_EQ(context.error_info.code(), timeout ? ErrorCode::LOAD_CACHE_TIMEOUT : ErrorCode::MALLOC_FAILED);
-        EXPECT_NE(context.error_status.error_message().find("injected backend load failure"), std::string::npos);
+        if (reject_stream) {
+            EXPECT_EQ(context.error_status.error_code(), transErrorCodeToGrpc(backend_code));
+            EXPECT_EQ(context.error_info.code(), backend_code);
+            ErrorDetailsPB details;
+            EXPECT_TRUE(details.ParseFromString(context.error_status.error_details()));
+            EXPECT_EQ(details.error_code(), static_cast<int>(backend_code));
+        } else {
+            EXPECT_EQ(context.error_status.error_code(),
+                      timeout ? grpc::StatusCode::DEADLINE_EXCEEDED : grpc::StatusCode::INTERNAL);
+            EXPECT_EQ(context.error_info.code(), timeout ? ErrorCode::LOAD_CACHE_TIMEOUT : ErrorCode::MALLOC_FAILED);
+            EXPECT_NE(context.error_status.error_message().find("injected backend load failure"), std::string::npos);
+        }
         ASSERT_NE(engine->stream, nullptr);
         EXPECT_TRUE(engine->stream->isFinished());
         EXPECT_TRUE(engine->stream->streamCacheResource().isResourceReleased());
         EXPECT_EQ(engine->stream->streamCacheResource().curBlocksNum(), 0);
-        EXPECT_GT(engine->allocator->allocated_blocks, 0u);
+        EXPECT_EQ(engine->allocator->allocated_blocks == 0u, reject_stream);
         EXPECT_EQ(engine->allocator->released_blocks, engine->allocator->allocated_blocks);
         EXPECT_EQ(engine->cache->freeBlocksNum(), initial_free_blocks);
-        EXPECT_EQ(context.retry_times, 1);
+        EXPECT_EQ(context.retry_times, reject_stream ? 0 : 1);
         EXPECT_FALSE(engine->stream->hasEvent(StreamEvents::LoadInitiated));
         context.markRpcHandlingCompleted();
     }

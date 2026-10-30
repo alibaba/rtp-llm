@@ -131,7 +131,7 @@ public class VitCacheSelector {
      */
     public synchronized ServerStatus validate(BalanceContext ctx, String group) {
         ServerStatus selected = ctx.getRequest().getSelectedVit();
-        if (selected == null) {
+        if (selected == null || selected.getServerIp() == null || selected.getHttpPort() <= 0) {
             return errorStatus(StrategyErrorType.NO_VIT_WORKER);
         }
         try (var pin =

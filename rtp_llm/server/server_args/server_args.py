@@ -136,6 +136,7 @@ class EnvArgumentGroup:
         self,
         *args,
         env_name: Optional[str] = None,
+        cli_only: bool = False,
         bind_to: Optional[
             Union[Tuple[Any, str], str, List[Union[Tuple[Any, str], str]]]
         ] = None,
@@ -147,6 +148,7 @@ class EnvArgumentGroup:
         Args:
             *args: 标准 argparse add_argument 参数
             env_name: 环境变量名称（保留用于兼容，但不再自动更新到 os.environ）
+            cli_only: 仅接受命令行参数，不注册环境变量映射
             bind_to: 配置绑定目标，可以是 (config_obj, 'attr_name')、
                 'path.to.attr' 字符串或这些目标的列表
             **kwargs: 其他 argparse add_argument 参数
@@ -166,7 +168,8 @@ class EnvArgumentGroup:
             self._parser._register_config_binding(action, bind_to)
 
         # 保留 env 映射（用于兼容和日志）
-        self._parser._register_env_mapping(action, args, env_name)
+        if not cli_only:
+            self._parser._register_env_mapping(action, args, env_name)
         return action
 
     def __getattr__(self, name):
@@ -174,10 +177,9 @@ class EnvArgumentGroup:
 
 
 class EnvArgumentParser(argparse.ArgumentParser):
-    _env_mappings: Dict[str, str] = {}
-
     def __init__(self, *args, env_prefix: str = "", **kwargs):
         self.env_prefix = env_prefix.upper()
+        self._env_mappings: Dict[str, str] = {}
         self._groups: Dict[str, EnvArgumentGroup] = {}
         self._config_bindings: List[ConfigBinding] = []  # 配置绑定列表
         self._root_config: Optional[Any] = None  # 根配置对象（PyEnvConfigs）
@@ -214,15 +216,13 @@ class EnvArgumentParser(argparse.ArgumentParser):
         return EnvArgumentGroup(group, self)
 
     def add_argument(
-        self, *args, env_name: Optional[str] = None, **kwargs
+        self, *args, env_name: Optional[str] = None, cli_only: bool = False, **kwargs
     ) -> argparse.Action:
         if args and isinstance(args[0], str) and not args[0].startswith("-"):
-            action = self._positionals.add_argument(*args, **kwargs)
+            group = self._positionals
         else:
-            action = self._optionals.add_argument(*args, **kwargs)
-
-        self._register_env_mapping(action, args, env_name)
-        return action
+            group = self._optionals
+        return group.add_argument(*args, env_name=env_name, cli_only=cli_only, **kwargs)
 
     def _register_env_mapping(
         self,
@@ -248,7 +248,7 @@ class EnvArgumentParser(argparse.ArgumentParser):
         else:
             full_env_name = effective_env_name
 
-        EnvArgumentParser._env_mappings[action.dest] = full_env_name
+        self._env_mappings[action.dest] = full_env_name
 
     def parse_args(
         self,
@@ -418,14 +418,14 @@ class EnvArgumentParser(argparse.ArgumentParser):
             if group_name in self._groups:
                 group = self._groups[group_name]._group
                 for action in group._group_actions:
-                    if action.dest in EnvArgumentParser._env_mappings:
+                    if action.dest in self._env_mappings:
                         logging.info(
-                            f"{action.dest:<20} -> {EnvArgumentParser._env_mappings[action.dest]}"
+                            f"{action.dest:<20} -> {self._env_mappings[action.dest]}"
                         )
             else:
                 logging.info(f"Group '{group_name}' not found.")
         else:
-            for dest, env_name in EnvArgumentParser._env_mappings.items():
+            for dest, env_name in self._env_mappings.items():
                 logging.info(f"{dest:<20} -> {env_name}")
 
         logging.info("-" * 50)
@@ -435,11 +435,11 @@ class EnvArgumentParser(argparse.ArgumentParser):
             group = self._groups[group_name]._group
             mappings = {}
             for action in group._group_actions:
-                if action.dest in EnvArgumentParser._env_mappings:
-                    mappings[action.dest] = EnvArgumentParser._env_mappings[action.dest]
+                if action.dest in self._env_mappings:
+                    mappings[action.dest] = self._env_mappings[action.dest]
             return mappings
         else:
-            return EnvArgumentParser._env_mappings.copy()
+            return self._env_mappings.copy()
 
 
 def init_all_group_args(

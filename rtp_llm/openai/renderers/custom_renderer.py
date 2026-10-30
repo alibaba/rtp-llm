@@ -141,6 +141,7 @@ class StreamStatus:
 
     def __init__(self, request: ChatCompletionRequest):
         self.request = request
+        self.stop_words_list: Optional[List[List[int]]] = None
         self.has_real_aux_info = True
         self._fallback_aux_info: Optional[AuxInfo] = None
 
@@ -166,12 +167,35 @@ class StreamStatus:
             self._fallback_aux_info.output_len = len(self.output_ids_list)
             self._fallback_aux_info.step_output_len = len(delta_output_ids)
             output.aux_info = self._fallback_aux_info
+        stop_kwargs = (
+            {}
+            if self.stop_words_list is None
+            else {"stop_words_list": self.stop_words_list}
+        )
         self.finish_reason = check_finish_func(
-            self.output_ids_list, self.input_token_length
+            self.output_ids_list, self.input_token_length, **stop_kwargs
         )
         self.output_ids = remove_stop_word_ids_func(
-            self.output_ids_list, delta_output_ids
+            self.output_ids_list, delta_output_ids, **stop_kwargs
         )
+        if len(self.output_ids) < len(self.output_ids_list):
+            self.finish_reason = self.finish_reason or FinisheReason.stop
+        elif (
+            self.finish_reason is None
+            and not getattr(output, "finished", False)
+            and not self.request.logprobs
+        ):
+            # Keep an incomplete stop sequence unpublished.
+            pending_length = 0
+            for stop_ids in self.stop_words_list or []:
+                for length in range(
+                    min(len(stop_ids) - 1, len(self.output_ids)), pending_length, -1
+                ):
+                    if self.output_ids[-length:] == stop_ids[:length]:
+                        pending_length = length
+                        break
+            if pending_length:
+                self.output_ids = self.output_ids[:-pending_length]
 
     def update_result(self):
         self.last_token_length = len(self.output_ids) - len(self.last_output_ids)
@@ -1233,6 +1257,8 @@ class CustomChatRenderer:
         )
         nums_output = last_num_beams if last_num_beams != 1 else nums_output
         status_list = await self._create_status_list(nums_output, request)
+        for status in status_list:
+            status.stop_words_list = generate_config.stop_words_list
         index = 0
         resolved_thinking_mode = generate_config.thinking_mode
         if resolved_thinking_mode == ThinkingMode.ADAPTIVE:
@@ -1842,10 +1868,16 @@ class CustomChatRenderer:
         return chat_response.model_dump_json(exclude_none=True)
 
     def _check_finish_reason(
-        self, token_ids: List[int], input_token_length: int, max_new_tokens: int = -1
+        self,
+        token_ids: List[int],
+        input_token_length: int,
+        max_new_tokens: int = -1,
+        stop_words_list: Optional[List[List[int]]] = None,
     ) -> Optional[FinisheReason]:
         stop_word_ids_list_all = (
             self.get_all_extra_stop_word_ids_list() + self.stop_words_id_list
+            if stop_words_list is None
+            else stop_words_list
         )
         if max_new_tokens > 0 and len(token_ids) >= max_new_tokens:
             return FinisheReason.length
@@ -1861,7 +1893,10 @@ class CustomChatRenderer:
         return None
 
     def _remove_stop_word_ids(
-        self, output_ids: List[int], delta_output_ids: List[int]
+        self,
+        output_ids: List[int],
+        delta_output_ids: List[int],
+        stop_words_list: Optional[List[List[int]]] = None,
     ) -> List[int]:
         """
         Truncate token sequence at FIRST occurrence of stop word (eos or stop_word_ids).
@@ -1893,6 +1928,8 @@ class CustomChatRenderer:
         """
         stop_word_ids_list_all = (
             self.get_all_extra_stop_word_ids_list() + self.stop_words_id_list
+            if stop_words_list is None
+            else stop_words_list
         )
 
         # Find earliest position of any stop token (EOS or stop word sequence)
