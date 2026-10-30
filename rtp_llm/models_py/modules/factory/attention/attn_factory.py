@@ -264,8 +264,11 @@ def get_fmha_impl(
         if not impl.support(attn_configs, attn_inputs):
             continue
 
-        # Check if implementation supports parallelism config
-        if not impl.support_parallelism_config(parallelism_config):
+        # Prefill CP gathers the full KV cache before regular TP decode. Decode
+        # backends do not need to implement the prefill communication method.
+        if attn_inputs.is_prefill and not impl.support_parallelism_config(
+            parallelism_config
+        ):
             continue
         kwargs = {"fmha_config": fmha_config} if impl.accepts_fmha_config else {}
         try:
