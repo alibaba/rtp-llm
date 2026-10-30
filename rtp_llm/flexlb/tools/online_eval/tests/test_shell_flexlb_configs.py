@@ -15,6 +15,28 @@ from flexlb_ft.harness import EnvManager, EnvSpec, MasterSpec, build_flexlb_conf
 
 
 class ShellFlexlbConfigTest(unittest.TestCase):
+    def test_separate_runs_get_distinct_default_deployment_names(self):
+        script = (SCRIPT_DIR / "run_online_eval.sh").read_text()
+        assignment = next(
+            line for line in script.splitlines() if line.startswith("DEPLOYMENT_NAME=")
+        )
+        command = "RUN_ID=same-run; " + assignment + '; printf "%s" "$DEPLOYMENT_NAME"'
+        names = [
+            subprocess.run(
+                ["bash", "-c", command], check=True, capture_output=True, text=True
+            ).stdout
+            for _ in range(2)
+        ]
+        self.assertNotEqual(names[0], names[1])
+        self.assertTrue(all(name.startswith("same-run-") for name in names))
+        explicit = subprocess.run(
+            ["bash", "-c", "DEPLOYMENT_NAME=shared; " + command],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual("shared", explicit.stdout)
+
     def assert_v3(self, config):
         self.assertEqual(3, config["schemaVersion"])
         prefill = config["router"]["roles"].get("prefill", {})
@@ -257,9 +279,17 @@ class ShellFlexlbConfigTest(unittest.TestCase):
             manager = EnvManager(Path(tmp), verbose=False)
             result = manager._master_env(env)
             self.assertEqual(
-                {"FLEXLB_CONFIG", "MODEL_SERVICE_CONFIG", "RTP_LLM_TRACE_CONFIG"},
+                {
+                    "FLEXLB_CONFIG",
+                    "MODEL_SERVICE_CONFIG",
+                    "RTP_LLM_TRACE_CONFIG",
+                    "BIZ_NAME",
+                    "DEPLOYMENT_NAME",
+                    "ZONE_NAME",
+                },
                 set(result),
             )
+            self.assertEqual(spec.label, result["DEPLOYMENT_NAME"])
             self.assertEqual(
                 {"enabled": False}, json.loads(result["RTP_LLM_TRACE_CONFIG"])
             )
@@ -273,10 +303,24 @@ class ShellFlexlbConfigTest(unittest.TestCase):
             )
             spec.zk_consistency = {"zkTimeoutMs": 10000}
             result = manager._master_env(env, MasterSpec(name="A", http_port=18080))
+            self.assertNotIn("FLEXLB_SYNC_CONSISTENCY_CONFIG", result)
             self.assertEqual(
-                {"needConsistency", "zookeeperConfig"},
-                set(json.loads(result["FLEXLB_SYNC_CONSISTENCY_CONFIG"])),
+                {
+                    "type": "ZOOKEEPER",
+                    "connectString": "127.0.0.1:2181",
+                    "sessionTimeoutMs": 10000,
+                    "connectionTimeoutMs": 10000,
+                },
+                json.loads(result["FLEXLB_CONFIG"])["consistency"],
             )
+            second_master = manager._master_env(
+                env, MasterSpec(name="B", http_port=18083)
+            )
+            for key in ("BIZ_NAME", "DEPLOYMENT_NAME", "ZONE_NAME"):
+                self.assertEqual(result[key], second_master[key])
+            env.zk_connect_string = ""
+            with self.assertRaisesRegex(RuntimeError, "requires a live ZK helper"):
+                manager._master_env(env, MasterSpec(name="A", http_port=18080))
 
     def test_discovery_file_replaces_static_hosts(self):
         with TemporaryDirectory() as tmp:

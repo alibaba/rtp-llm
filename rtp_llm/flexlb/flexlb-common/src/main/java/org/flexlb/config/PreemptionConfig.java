@@ -16,6 +16,8 @@ public final class PreemptionConfig {
     /** Maximum wait for the Engine terminal after the cancellation ACK phase. */
     private long timeoutMs = 1000;
 
+    private EngineCancellationConfig engineCancellation = new EngineCancellationConfig();
+
     public boolean allows(VictimStage stage) {
         return allowedVictimStages != null && allowedVictimStages.contains(stage);
     }

@@ -18,7 +18,7 @@ import java.util.Map;
 import java.util.OptionalLong;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.function.LongPredicate;
+import java.util.function.Predicate;
 
 /** Decode worker boundary: lifecycle pins, resource operations and lock-free notifications.
  * DecodeState owns the generation-local resource ledger and its single mutation lock.
@@ -50,27 +50,37 @@ public class DecodeEndpoint extends WorkerEndpoint {
     // Reservation and release. Lifecycle pins remain valid for the entire handoff.
 
     public ReservationHandle reserve(
-            GenerationPin pin, long requestId, long hardKv, long expectedKv, int priority) {
-        return reserve(pin, requestId, hardKv, expectedKv, priority, null);
+            GenerationPin pin,
+            String requestId,
+            long inputKvTokens,
+            long inputAndMaxOutputKvTokens,
+            int priority) {
+        return reserve(pin, requestId, inputKvTokens, inputAndMaxOutputKvTokens, priority, null);
     }
 
     public ReservationHandle reserve(
             GenerationPin pin,
-            long requestId,
-            long hardKv,
-            long expectedKv,
+            String requestId,
+            long inputKvTokens,
+            long inputAndMaxOutputKvTokens,
             int priority,
             AdmissionCapacity capacity) {
         requirePinnedGeneration(pin);
-        return state.reserve(requestId, hardKv, expectedKv, priority, true, capacity);
+        return state.reserve(
+                requestId, inputKvTokens, inputAndMaxOutputKvTokens, priority, true, capacity);
     }
 
     /** An engine-facing shadow for work already outside the local queue. */
     public ReservationHandle reserveUnqueued(
-            GenerationPin pin, long requestId, long hardKv, long expectedKv, int priority) {
+            GenerationPin pin,
+            String requestId,
+            long inputKvTokens,
+            long inputAndMaxOutputKvTokens,
+            int priority) {
         requirePinnedGeneration(pin);
         ReservationHandle reservation =
-                state.reserve(requestId, hardKv, expectedKv, priority, false, null);
+                state.reserve(
+                        requestId, inputKvTokens, inputAndMaxOutputKvTokens, priority, false, null);
         if (reservation == null) {
             throw new IllegalStateException("Decode request id is already owned: " + requestId);
         }
@@ -106,12 +116,12 @@ public class DecodeEndpoint extends WorkerEndpoint {
         return state.isAcceptedByEngine(reservation);
     }
 
-    public ReservationHandle reservationHandle(long requestId) {
+    public ReservationHandle reservationHandle(String requestId) {
         return isRetired() ? null : state.reservationHandle(requestId);
     }
 
     public record ReservationHandle(
-            long endpointGenerationId, long requestId, long reservationToken) {
+            long endpointGenerationId, String requestId, long reservationToken) {
 
         public ReservationHandle {
             if (endpointGenerationId <= 0L || reservationToken <= 0L) {
@@ -202,7 +212,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
     }
 
     /** Lock-free waiter hint, including retirement or lost ownership. Acquisition still rechecks capacity. */
-    public boolean shouldRetryDispatch(long requestId, AdmissionCapacity capacity) {
+    public boolean shouldRetryDispatch(String requestId, AdmissionCapacity capacity) {
         return isRetired() || state.shouldRetryDispatch(requestId, capacity);
     }
 
@@ -217,18 +227,18 @@ public class DecodeEndpoint extends WorkerEndpoint {
         }
 
         private final DecodeEndpoint endpoint;
-        private final long requestId;
+        private final String requestId;
         private final DecodeState.DispatchLease lease;
         private Resolution resolution = Resolution.ACQUIRED;
 
         private EngineDispatchPermit(
-                DecodeEndpoint endpoint, long requestId, DecodeState.DispatchLease lease) {
+                DecodeEndpoint endpoint, String requestId, DecodeState.DispatchLease lease) {
             this.endpoint = endpoint;
             this.requestId = requestId;
             this.lease = lease;
         }
 
-        public long requestId() {
+        public String requestId() {
             return requestId;
         }
 
@@ -334,9 +344,9 @@ public class DecodeEndpoint extends WorkerEndpoint {
 
     public boolean replaceQueuedRequests(
             List<ReservationHandle> victims,
-            long incomingRequestId,
-            long hardKv,
-            long expectedKv,
+            String incomingRequestId,
+            long inputKvTokens,
+            long inputAndMaxOutputKvTokens,
             int priority,
             AdmissionCapacity capacity) {
         GenerationPin pin = tryPinGeneration();
@@ -346,7 +356,12 @@ public class DecodeEndpoint extends WorkerEndpoint {
         try (pin) {
             boolean replaced =
                     state.replaceQueuedRequests(
-                            victims, incomingRequestId, hardKv, expectedKv, priority, capacity);
+                            victims,
+                            incomingRequestId,
+                            inputKvTokens,
+                            inputAndMaxOutputKvTokens,
+                            priority,
+                            capacity);
             if (replaced) {
                 publishCapacityRelease();
             }
@@ -357,9 +372,9 @@ public class DecodeEndpoint extends WorkerEndpoint {
     public PreemptionBeginResult beginPreemption(
             long attemptToken,
             List<ReservationHandle> victims,
-            long incomingRequestId,
-            long hardKv,
-            long expectedKv,
+            String incomingRequestId,
+            long inputKvTokens,
+            long inputAndMaxOutputKvTokens,
             int priority,
             AdmissionCapacity capacity) {
         if (attemptToken <= 0 || victims == null || victims.isEmpty()) {
@@ -374,8 +389,36 @@ public class DecodeEndpoint extends WorkerEndpoint {
                     attemptToken,
                     victims,
                     incomingRequestId,
-                    hardKv,
-                    expectedKv,
+                    inputKvTokens,
+                    inputAndMaxOutputKvTokens,
+                    priority,
+                    capacity);
+        }
+    }
+
+    /** Atomically reserve an instruction-bearing route without issuing Cancel RPCs. */
+    public PreemptionBeginResult beginReturnedPreemption(
+            long attemptToken,
+            List<ReservationHandle> victims,
+            String incomingRequestId,
+            long inputKvTokens,
+            long inputAndMaxOutputKvTokens,
+            int priority,
+            AdmissionCapacity capacity) {
+        if (attemptToken <= 0 || victims == null || victims.isEmpty()) {
+            throw new IllegalArgumentException("attempt token and victims are required");
+        }
+        GenerationPin pin = tryPinGeneration();
+        if (pin == null) {
+            return PreemptionBeginResult.ENDPOINT_RETIRED;
+        }
+        try (pin) {
+            return state.beginReturnedPreemption(
+                    attemptToken,
+                    victims,
+                    incomingRequestId,
+                    inputKvTokens,
+                    inputAndMaxOutputKvTokens,
                     priority,
                     capacity);
         }
@@ -414,7 +457,10 @@ public class DecodeEndpoint extends WorkerEndpoint {
     }
 
     public record PreemptionUpdate(
-            Kind kind, long requestId, ReservationHandle reservation, PreemptionCancelPhase phase) {
+            Kind kind,
+            String requestId,
+            ReservationHandle reservation,
+            PreemptionCancelPhase phase) {
         public enum Kind {
             CANCEL_SENDING,
             CANCEL_REPLY,
@@ -437,7 +483,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
             }
             if (kind != Kind.CANCEL_REPLY && kind != Kind.CANCEL_SENDING) {
                 java.util.Objects.requireNonNull(reservation, "reservation");
-                if (requestId != reservation.requestId()) {
+                if (!java.util.Objects.equals(requestId, reservation.requestId())) {
                     throw new IllegalArgumentException("Victim identity mismatch");
                 }
             } else if (reservation != null) {
@@ -446,10 +492,10 @@ public class DecodeEndpoint extends WorkerEndpoint {
         }
 
         public static PreemptionUpdate cancelSending() {
-            return new PreemptionUpdate(Kind.CANCEL_SENDING, 0, null, null);
+            return new PreemptionUpdate(Kind.CANCEL_SENDING, null, null, null);
         }
 
-        public static PreemptionUpdate cancelReply(long requestId, PreemptionCancelPhase phase) {
+        public static PreemptionUpdate cancelReply(String requestId, PreemptionCancelPhase phase) {
             return new PreemptionUpdate(Kind.CANCEL_REPLY, requestId, null, phase);
         }
 
@@ -578,7 +624,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
 
     public record LayeredAdmissionView(
             DecodeRoutingView routing,
-            Map<Long, DecodeRequestView> reserved,
+            Map<String, DecodeRequestView> reserved,
             List<DecodeRequestView> confirmed,
             int queuedCount,
             int activeDispatchPermits) {
@@ -599,7 +645,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
             return routing.engineCapacityUsed();
         }
 
-        public boolean isQueued(long requestId) {
+        public boolean isQueued(String requestId) {
             DecodeRequestView request = reserved.get(requestId);
             return request != null && request.queued();
         }
@@ -625,27 +671,27 @@ public class DecodeEndpoint extends WorkerEndpoint {
             int engineLoad,
             CapacityUsage placementUsage,
             CapacityUsage dispatchUsage,
-            long inflightHardKv,
-            long inflightExpectedKv) {
+            long inputKvReserved,
+            long inputAndMaxOutputKvReserved) {
 
         public int engineCapacityUsed() {
             return Math.toIntExact(dispatchUsage.occupiedRequests());
         }
 
         public long realKvUsed() {
-            return placementUsage.expectedKvUsed();
+            return placementUsage.kvBudgetUsedTokens();
         }
 
         public long realKvAvailable() {
-            return placementUsage.hardKvAvailable();
+            return placementUsage.availableKvAfterReservations();
         }
 
         public long engineFacingKvUsed() {
-            return dispatchUsage.expectedKvUsed();
+            return dispatchUsage.kvBudgetUsedTokens();
         }
 
         public long engineFacingKvAvailable() {
-            return dispatchUsage.hardKvAvailable();
+            return dispatchUsage.availableKvAfterReservations();
         }
 
         public long totalKv() {
@@ -664,17 +710,18 @@ public class DecodeEndpoint extends WorkerEndpoint {
     }
 
     public record DecodeRequestView(
-            long requestId,
+            String requestId,
             int priority,
             long kvTokens,
-            long expectedKvTokens,
+            long kvBudgetTokens,
             DecodeTaskPhase phase,
             boolean priorityKnown,
             long reservationToken,
             boolean queued,
             boolean claimedForPreemption) {
+
         public CapacityRelease placementRelease() {
-            return new CapacityRelease(1L, kvTokens, expectedKvTokens);
+            return new CapacityRelease(1L, kvTokens, kvBudgetTokens);
         }
     }
 
@@ -718,21 +765,21 @@ public class DecodeEndpoint extends WorkerEndpoint {
         }
 
         public CapacityDeficit evaluate(
-                CapacityUsage usage, long hardKvTokens, long expectedKvTokens) {
-            return evaluate(usage, hardKvTokens, expectedKvTokens, CapacityRelease.NONE);
+                CapacityUsage usage, long requiredKvTokens, long kvBudgetTokens) {
+            return evaluate(usage, requiredKvTokens, kvBudgetTokens, CapacityRelease.NONE);
         }
 
         /** Use the same occupancy scope for the observation and every exact victim release. */
         public CapacityDeficit evaluate(
                 CapacityUsage usage,
-                long hardKvTokens,
-                long expectedKvTokens,
+                long requiredKvTokens,
+                long kvBudgetTokens,
                 CapacityRelease release) {
             java.util.Objects.requireNonNull(usage, "usage");
             java.util.Objects.requireNonNull(release, "release");
-            if (hardKvTokens < 0L || expectedKvTokens < hardKvTokens) {
+            if (requiredKvTokens < 0L || kvBudgetTokens < requiredKvTokens) {
                 throw new IllegalArgumentException(
-                        "Decode demand must satisfy expected >= hard >= 0");
+                        "Decode demand must satisfy KV budget >= required KV >= 0");
             }
             long requests =
                     maxEngineRequests == 0L
@@ -748,13 +795,13 @@ public class DecodeEndpoint extends WorkerEndpoint {
             return new CapacityDeficit(
                     requests,
                     shortfall(
-                            usage.hardReservedKvTokens,
-                            hardKvTokens,
+                            usage.reservedKvTokens,
+                            requiredKvTokens,
                             usage.availableKvTokens,
-                            release.hardKvTokens),
+                            release.requiredKvTokens),
                     shortfall(
-                            Math.max(0L, usage.expectedKvUsed - release.expectedKvTokens),
-                            expectedKvTokens,
+                            Math.max(0L, usage.kvBudgetUsedTokens - release.kvBudgetTokens),
+                            kvBudgetTokens,
                             kvBudget(usage.totalKvTokens),
                             0L));
         }
@@ -782,28 +829,32 @@ public class DecodeEndpoint extends WorkerEndpoint {
             long occupiedRequests,
             long totalKvTokens,
             long availableKvTokens,
-            long hardReservedKvTokens,
-            long expectedKvUsed) {
+            long reservedKvTokens,
+            long kvBudgetUsedTokens) {
         public CapacityUsage {
             if (occupiedRequests < 0L
                     || totalKvTokens < 0L
                     || availableKvTokens < 0L
-                    || hardReservedKvTokens < 0L
-                    || expectedKvUsed < 0L) {
+                    || reservedKvTokens < 0L
+                    || kvBudgetUsedTokens < 0L) {
                 throw new IllegalArgumentException("Decode occupancy must be non-negative");
             }
         }
 
-        public long hardKvAvailable() {
-            return Math.max(0L, availableKvTokens - hardReservedKvTokens);
+        public long availableKvAfterReservations() {
+            return Math.max(0L, availableKvTokens - reservedKvTokens);
         }
     }
 
-    public record CapacityRelease(long requests, long hardKvTokens, long expectedKvTokens) {
+    /**
+     * Capacity released by removing a request: before confirmation, input KV
+     * and input plus max output; after confirmation, both use engine-reported KV.
+     */
+    public record CapacityRelease(long requests, long requiredKvTokens, long kvBudgetTokens) {
         public static final CapacityRelease NONE = new CapacityRelease(0L, 0L, 0L);
 
         public CapacityRelease {
-            if (requests < 0L || hardKvTokens < 0L || expectedKvTokens < hardKvTokens) {
+            if (requests < 0L || requiredKvTokens < 0L || kvBudgetTokens < requiredKvTokens) {
                 throw new IllegalArgumentException("invalid Decode capacity release");
             }
         }
@@ -811,22 +862,25 @@ public class DecodeEndpoint extends WorkerEndpoint {
         public CapacityRelease plus(CapacityRelease other) {
             return new CapacityRelease(
                     DecodeState.saturatedAddNonNegative(requests, other.requests),
-                    DecodeState.saturatedAddNonNegative(hardKvTokens, other.hardKvTokens),
-                    DecodeState.saturatedAddNonNegative(expectedKvTokens, other.expectedKvTokens));
+                    DecodeState.saturatedAddNonNegative(requiredKvTokens, other.requiredKvTokens),
+                    DecodeState.saturatedAddNonNegative(kvBudgetTokens, other.kvBudgetTokens));
         }
     }
 
-    public record CapacityDeficit(long requests, long hardKvTokens, long expectedKvTokens) {
+    /**
+     * Remaining shortages against available KV and the configured KV budget.
+     */
+    public record CapacityDeficit(long requests, long requiredKvTokens, long kvBudgetTokens) {
         public boolean fits() {
             return requests == 0L && !needsKv();
         }
 
         public boolean needsKv() {
-            return hardKvTokens > 0L || expectedKvTokens > 0L;
+            return requiredKvTokens > 0L || kvBudgetTokens > 0L;
         }
 
         public long kvTokens() {
-            return Math.max(hardKvTokens, expectedKvTokens);
+            return Math.max(requiredKvTokens, kvBudgetTokens);
         }
     }
 
@@ -845,7 +899,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
         }
     }
 
-    public int evictExpiredRequests(long ttlMs, LongPredicate retainForSchedulerCleanup) {
+    public int evictExpiredRequests(long ttlMs, Predicate<String> retainForSchedulerCleanup) {
         DecodeState.CleanupResult result =
                 state.evictExpiredRequests(ttlMs, retainForSchedulerCleanup);
         if (result.capacityReleased()) {
@@ -858,21 +912,23 @@ public class DecodeEndpoint extends WorkerEndpoint {
 
     public void reportBatchMetrics(BatchSchedulerReporter reporter) {
         DecodeState.Stats stats = state.stats();
-        reporter.reportInflightRequestCount(RoleType.DECODE.name(), getIp(), stats.inflight());
-        reporter.reportDecodeTotalLoad(getIp(), stats.totalLoad());
-        reporter.reportDecodeInflightKvReserved(getIp(), stats.expectedKv());
-        reporter.reportDecodeInflightHardKvReserved(getIp(), stats.hardKv());
-        reporter.reportInflightMaxAgeMs(RoleType.DECODE.name(), getIp(), stats.oldestAgeMs());
+        String engineIp = getStatus().getMetricIpPort();
+        reporter.reportInflightRequestCount(RoleType.DECODE.name(), engineIp, stats.inflight());
+        reporter.reportDecodeTotalLoad(engineIp, stats.totalLoad());
+        reporter.reportDecodeInputAndMaxOutputKvReserved(
+                engineIp, stats.inputAndMaxOutputKvTokens());
+        reporter.reportDecodeInputKvReserved(engineIp, stats.inputKvTokens());
+        reporter.reportInflightMaxAgeMs(RoleType.DECODE.name(), engineIp, stats.oldestAgeMs());
     }
 
     public void reportAdmissionMetrics(RequestSchedulerReporter reporter) {
-        LayeredAdmissionView view = resourceSnapshot();
-        String endpoint = ipPort();
-        reporter.reportDecodeReservedCount(endpoint, view.reserved().size());
-        reporter.reportDecodeShadowKvReserved(endpoint, view.routing().inflightHardKv());
-        reporter.reportDecodeRunningCount(endpoint, view.runningCount());
-        reporter.reportDecodeAcceptedCount(endpoint, view.acceptedCount());
-        reporter.reportDecodeEngineLoad(endpoint, view.routing().engineLoad());
+        DecodeState.AdmissionStats stats = state.admissionStats();
+        String endpoint = getStatus().getMetricIpPort();
+        reporter.reportDecodeReservedCount(endpoint, stats.reserved());
+        reporter.reportDecodeShadowKvReserved(endpoint, stats.inputKvTokens());
+        reporter.reportDecodeRunningCount(endpoint, stats.running());
+        reporter.reportDecodeAcceptedCount(endpoint, stats.accepted());
+        reporter.reportDecodeEngineLoad(endpoint, stats.engineLoad());
     }
 
     private void publishCapacityRelease() {

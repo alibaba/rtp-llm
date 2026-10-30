@@ -3,6 +3,7 @@ package org.flexlb.balance.eviction;
 import org.flexlb.balance.endpoint.DecodeEndpoint.CapacityDeficit;
 import org.flexlb.balance.endpoint.DecodeEndpoint.CapacityRelease;
 import org.flexlb.balance.endpoint.DecodeEndpoint.DecodeRequestView;
+import org.flexlb.config.EngineCancellationConfig;
 import org.flexlb.config.PreemptionConfig;
 import org.flexlb.config.VictimStage;
 import org.flexlb.enums.DecodeTaskPhase;
@@ -36,7 +37,7 @@ public final class EvictionPlanner {
     static final Comparator<DecodeRequestView> DECODE_SLOT_ORDER =
             Comparator.comparingInt(DecodeRequestView::priority)
                     .thenComparingInt(v -> v.phase().ordinal())
-                    .thenComparingLong(DecodeRequestView::requestId);
+                    .thenComparing(DecodeRequestView::requestId);
 
     /**
      * Candidate preference for KV eviction (design doc 12.4): priority asc →
@@ -49,7 +50,7 @@ public final class EvictionPlanner {
                     .thenComparing(
                             v -> PriorityCostFunction.kvBucket(v.kvTokens()),
                             Comparator.reverseOrder())
-                    .thenComparingLong(DecodeRequestView::requestId);
+                    .thenComparing(DecodeRequestView::requestId);
 
     /**
      * Plan the cheapest decode eviction that clears the incoming request's
@@ -64,8 +65,8 @@ public final class EvictionPlanner {
      * preferred.
      *
      * @param incomingPriority incoming request priority
-     * @param hardKvTokens prompt KV demand
-     * @param expectedKvTokens complete prompt and output KV demand
+     * @param inputKvTokens prompt KV demand
+     * @param inputAndMaxOutputKvTokens complete prompt and output KV demand
      * @param decodes  candidate decode endpoint snapshots
      * @param preemption immutable policy for the current admission attempt
      * @param channel  engine cancel channel for the per-endpoint support gate;
@@ -76,8 +77,8 @@ public final class EvictionPlanner {
      */
     public static DecodeEvictionProposal planDecode(
             int incomingPriority,
-            long hardKvTokens,
-            long expectedKvTokens,
+            long inputKvTokens,
+            long inputAndMaxOutputKvTokens,
             List<DecodeEndpointSnapshot> decodes,
             PreemptionConfig preemption,
             EngineCancelChannel channel,
@@ -87,8 +88,8 @@ public final class EvictionPlanner {
             DecodeEvictionProposal proposal =
                     planDecodeOne(
                             incomingPriority,
-                            hardKvTokens,
-                            expectedKvTokens,
+                            inputKvTokens,
+                            inputAndMaxOutputKvTokens,
                             ep,
                             preemption,
                             channel,
@@ -103,9 +104,9 @@ public final class EvictionPlanner {
 
     /** The same capacity decision labels both ordinary admission and eviction planning. */
     public static String decodeEvictionCase(
-            long hardKvTokens, long expectedKvTokens, DecodeEndpointSnapshot ep) {
+            long inputKvTokens, long inputAndMaxOutputKvTokens, DecodeEndpointSnapshot ep) {
         CapacityDeficit deficit =
-                ep.capacity().evaluate(ep.usage(), hardKvTokens, expectedKvTokens);
+                ep.capacity().evaluate(ep.usage(), inputKvTokens, inputAndMaxOutputKvTokens);
         if (deficit.requests() > 0L && deficit.needsKv()) {
             return DecodeEvictionProposal.CASE_SLOT_AND_KV;
         }
@@ -117,14 +118,14 @@ public final class EvictionPlanner {
 
     private static DecodeEvictionProposal planDecodeOne(
             int incomingPriority,
-            long hardKvTokens,
-            long expectedKvTokens,
+            long inputKvTokens,
+            long inputAndMaxOutputKvTokens,
             DecodeEndpointSnapshot ep,
             PreemptionConfig preemption,
             EngineCancelChannel channel,
             Map<String, String> failures) {
         CapacityDeficit deficit =
-                ep.capacity().evaluate(ep.usage(), hardKvTokens, expectedKvTokens);
+                ep.capacity().evaluate(ep.usage(), inputKvTokens, inputAndMaxOutputKvTokens);
         if (deficit.fits()) {
             failures.put(ep.endpointId(), "decode_capacity_sufficient");
             return null;
@@ -134,14 +135,15 @@ public final class EvictionPlanner {
         boolean engineCancelEnabled =
                 preemption != null
                         && preemption.allows(VictimStage.DECODE_ENGINE_OWNED)
-                        && channel != null
-                        && channel.isSupported(ep.endpoint());
+                        && (preemption.getEngineCancellation().getMode()
+                                        == EngineCancellationConfig.Mode.RETURN
+                                || channel != null && channel.isSupported(ep.endpoint()));
         DecodeEvictionProposal local =
                 localEvictionEnabled
                         ? planDecodeOneOwnership(
                                 incomingPriority,
-                                hardKvTokens,
-                                expectedKvTokens,
+                                inputKvTokens,
+                                inputAndMaxOutputKvTokens,
                                 ep,
                                 deficit,
                                 VictimOwnership.MASTER_LOCAL,
@@ -151,8 +153,8 @@ public final class EvictionPlanner {
                 engineCancelEnabled
                         ? planDecodeOneOwnership(
                                 incomingPriority,
-                                hardKvTokens,
-                                expectedKvTokens,
+                                inputKvTokens,
+                                inputAndMaxOutputKvTokens,
                                 ep,
                                 deficit,
                                 VictimOwnership.ENGINE_CANCEL,
@@ -169,8 +171,8 @@ public final class EvictionPlanner {
 
     private static DecodeEvictionProposal planDecodeOneOwnership(
             int incomingPriority,
-            long hardKvTokens,
-            long expectedKvTokens,
+            long inputKvTokens,
+            long inputAndMaxOutputKvTokens,
             DecodeEndpointSnapshot ep,
             CapacityDeficit deficit,
             VictimOwnership ownership,
@@ -178,8 +180,8 @@ public final class EvictionPlanner {
         if (deficit.requests() > 0L && deficit.needsKv()) {
             return planDecodeCombined(
                     incomingPriority,
-                    hardKvTokens,
-                    expectedKvTokens,
+                    inputKvTokens,
+                    inputAndMaxOutputKvTokens,
                     ep,
                     deficit,
                     ownership,
@@ -191,8 +193,8 @@ public final class EvictionPlanner {
                                 incomingPriority, ep, deficit.requests(), Set.of(), ownership)
                         : selectKvVictims(
                                 incomingPriority,
-                                hardKvTokens,
-                                expectedKvTokens,
+                                inputKvTokens,
+                                inputAndMaxOutputKvTokens,
                                 ep,
                                 CapacityRelease.NONE,
                                 Set.of(),
@@ -202,7 +204,7 @@ public final class EvictionPlanner {
             return null;
         }
         if (!ep.capacity()
-                .evaluate(ep.usage(), hardKvTokens, expectedKvTokens, set.release())
+                .evaluate(ep.usage(), inputKvTokens, inputAndMaxOutputKvTokens, set.release())
                 .fits()) {
             failures.put(ep.endpointId(), "insufficient_releasable_capacity");
             return null;
@@ -221,8 +223,8 @@ public final class EvictionPlanner {
     /** Preserve the cost ordering while testing every proposal against all capacity dimensions. */
     private static DecodeEvictionProposal planDecodeCombined(
             int incomingPriority,
-            long hardKvTokens,
-            long expectedKvTokens,
+            long inputKvTokens,
+            long inputAndMaxOutputKvTokens,
             DecodeEndpointSnapshot ep,
             CapacityDeficit deficit,
             VictimOwnership ownership,
@@ -234,8 +236,8 @@ public final class EvictionPlanner {
                                 && ep.capacity()
                                         .evaluate(
                                                 ep.usage(),
-                                                hardKvTokens,
-                                                expectedKvTokens,
+                                                inputKvTokens,
+                                                inputAndMaxOutputKvTokens,
                                                 slotOnly.release())
                                         .fits()
                         ? buildDecodeProposal(
@@ -249,8 +251,8 @@ public final class EvictionPlanner {
         DecodeVictimSet kvOnly =
                 selectKvVictims(
                         incomingPriority,
-                        hardKvTokens,
-                        expectedKvTokens,
+                        inputKvTokens,
+                        inputAndMaxOutputKvTokens,
                         ep,
                         CapacityRelease.NONE,
                         Set.of(),
@@ -260,8 +262,8 @@ public final class EvictionPlanner {
                                 && ep.capacity()
                                         .evaluate(
                                                 ep.usage(),
-                                                hardKvTokens,
-                                                expectedKvTokens,
+                                                inputKvTokens,
+                                                inputAndMaxOutputKvTokens,
                                                 kvOnly.release())
                                         .fits()
                         ? buildDecodeProposal(
@@ -293,7 +295,12 @@ public final class EvictionPlanner {
             return null;
         }
         CapacityDeficit remaining =
-                ep.capacity().evaluate(ep.usage(), hardKvTokens, expectedKvTokens, first.release());
+                ep.capacity()
+                        .evaluate(
+                                ep.usage(),
+                                inputKvTokens,
+                                inputAndMaxOutputKvTokens,
+                                first.release());
         DecodeVictimSet second =
                 kvPressure >= slotPressure
                         ? selectSlotVictims(
@@ -304,8 +311,8 @@ public final class EvictionPlanner {
                                 ownership)
                         : selectKvVictims(
                                 incomingPriority,
-                                hardKvTokens,
-                                expectedKvTokens,
+                                inputKvTokens,
+                                inputAndMaxOutputKvTokens,
                                 ep,
                                 first.release(),
                                 victimIds(first.victims()),
@@ -315,7 +322,9 @@ public final class EvictionPlanner {
             return null;
         }
         CapacityRelease release = first.release().plus(second.release());
-        if (!ep.capacity().evaluate(ep.usage(), hardKvTokens, expectedKvTokens, release).fits()) {
+        if (!ep.capacity()
+                .evaluate(ep.usage(), inputKvTokens, inputAndMaxOutputKvTokens, release)
+                .fits()) {
             failures.put(ep.endpointId(), "insufficient_releasable_capacity");
             return null;
         }
@@ -327,14 +336,14 @@ public final class EvictionPlanner {
                 victims,
                 first.harmProfile().plus(second.harmProfile()),
                 PriorityCostFunction.saturatedAdd(first.weightedCost(), second.weightedCost()),
-                release.hardKvTokens());
+                release.requiredKvTokens());
     }
 
     private static DecodeVictimSet selectSlotVictims(
             int incomingPriority,
             DecodeEndpointSnapshot ep,
             long deficit,
-            Set<Long> excludedVictimIds,
+            Set<String> excludedVictimIds,
             VictimOwnership ownership) {
         List<DecodeRequestView> candidates =
                 lowerPriorityCandidates(incomingPriority, ep, excludedVictimIds, false, ownership);
@@ -371,11 +380,11 @@ public final class EvictionPlanner {
     /** Both physical prompt supply and the complete-output budget must be satisfied. */
     private static DecodeVictimSet selectKvVictims(
             int incomingPriority,
-            long hardKvTokens,
-            long expectedKvTokens,
+            long inputKvTokens,
+            long inputAndMaxOutputKvTokens,
             DecodeEndpointSnapshot ep,
             CapacityRelease priorRelease,
-            Set<Long> excludedVictimIds,
+            Set<String> excludedVictimIds,
             VictimOwnership ownership) {
         List<DecodeRequestView> candidates =
                 lowerPriorityCandidates(incomingPriority, ep, excludedVictimIds, true, ownership);
@@ -387,7 +396,10 @@ public final class EvictionPlanner {
         for (DecodeRequestView candidate : candidates) {
             if (!ep.capacity()
                     .evaluate(
-                            ep.usage(), hardKvTokens, expectedKvTokens, priorRelease.plus(release))
+                            ep.usage(),
+                            inputKvTokens,
+                            inputAndMaxOutputKvTokens,
+                            priorRelease.plus(release))
                     .needsKv()) {
                 break;
             }
@@ -408,7 +420,11 @@ public final class EvictionPlanner {
                             .multiply(BigInteger.valueOf(lengthCost)));
         }
         if (ep.capacity()
-                .evaluate(ep.usage(), hardKvTokens, expectedKvTokens, priorRelease.plus(release))
+                .evaluate(
+                        ep.usage(),
+                        inputKvTokens,
+                        inputAndMaxOutputKvTokens,
+                        priorRelease.plus(release))
                 .needsKv()) {
             return DecodeVictimSet.fail("insufficient_releasable_kv");
         }
@@ -433,7 +449,7 @@ public final class EvictionPlanner {
     private static List<DecodeRequestView> lowerPriorityCandidates(
             int incomingPriority,
             DecodeEndpointSnapshot ep,
-            Set<Long> excludedVictimIds,
+            Set<String> excludedVictimIds,
             boolean releasableKvOnly,
             VictimOwnership ownership) {
         List<DecodeRequestView> candidates = new ArrayList<>();
@@ -447,7 +463,7 @@ public final class EvictionPlanner {
                     && PriorityNormalizer.hasPriority(entry.priority())
                     && entry.priority() < incomingPriority
                     && !excludedVictimIds.contains(entry.requestId())
-                    && (!releasableKvOnly || entry.placementRelease().expectedKvTokens() > 0L)) {
+                    && (!releasableKvOnly || entry.placementRelease().kvBudgetTokens() > 0L)) {
                 candidates.add(entry);
             }
         }
@@ -472,7 +488,7 @@ public final class EvictionPlanner {
             List<DecodeRequestView> candidates,
             List<DecodeRequestView> entries,
             int incomingPriority,
-            Set<Long> excludedVictimIds,
+            Set<String> excludedVictimIds,
             boolean releasableKvOnly) {
         for (DecodeRequestView entry : entries) {
             if (entry.phase().isEngineConfirmed()
@@ -480,14 +496,14 @@ public final class EvictionPlanner {
                     && PriorityNormalizer.hasPriority(entry.priority())
                     && entry.priority() < incomingPriority
                     && !excludedVictimIds.contains(entry.requestId())
-                    && (!releasableKvOnly || entry.placementRelease().expectedKvTokens() > 0L)) {
+                    && (!releasableKvOnly || entry.placementRelease().kvBudgetTokens() > 0L)) {
                 candidates.add(entry);
             }
         }
     }
 
-    private static Set<Long> victimIds(List<DecodeRequestView> victims) {
-        Set<Long> ids = new java.util.HashSet<>(victims.size());
+    private static Set<String> victimIds(List<DecodeRequestView> victims) {
+        Set<String> ids = new java.util.HashSet<>(victims.size());
         for (DecodeRequestView victim : victims) {
             ids.add(victim.requestId());
         }
@@ -501,10 +517,11 @@ public final class EvictionPlanner {
             PriorityHarmProfile harmProfile,
             long totalCost,
             long freedKvTokens) {
-        long tieBreak = Long.MAX_VALUE;
-        for (DecodeRequestView victim : victims) {
-            tieBreak = Math.min(tieBreak, victim.requestId());
-        }
+        String tieBreak =
+                victims.stream()
+                        .map(DecodeRequestView::requestId)
+                        .min(String::compareTo)
+                        .orElse("");
         PlanCost cost = new PlanCost(harmProfile, victims.size(), tieBreak);
         return new DecodeEvictionProposal(
                 ep.endpointId(), victims, evictionCase, totalCost, freedKvTokens, cost);
@@ -527,7 +544,7 @@ public final class EvictionPlanner {
         }
 
         long freedKvTokens() {
-            return release.hardKvTokens();
+            return release.requiredKvTokens();
         }
 
         boolean ok() {

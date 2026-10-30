@@ -21,12 +21,12 @@ final class RouteProjectionTestSupport {
 
     static final Comparator<GroupPlanner.Item> FIFO =
             Comparator.comparingLong(GroupPlanner.Item::enqueueSeq)
-                    .thenComparingLong(GroupPlanner.Item::requestId);
+                    .thenComparing(GroupPlanner.Item::requestId);
     static final Comparator<GroupPlanner.Item> PRIORITY =
             Comparator.comparingInt(GroupPlanner.Item::priority)
                     .reversed()
                     .thenComparingLong(GroupPlanner.Item::enqueueSeq)
-                    .thenComparingLong(GroupPlanner.Item::requestId);
+                    .thenComparing(GroupPlanner.Item::requestId);
 
     static final RouteProjection.DeliveryProjection ROUTE =
             new RouteDeliveryStrategy(mock(RequestRegistry.class), mock(DeliveryMetrics.class))
@@ -98,7 +98,13 @@ final class RouteProjectionTestSupport {
             long serviceTokens,
             long expiresAtMs) {
         return new GroupPlanner.Item(
-                requestId, priority, enqueueSequence, NOW_MS - 1L, expiresAtMs, serviceTokens, 0L);
+                Long.toString(requestId),
+                priority,
+                enqueueSequence,
+                NOW_MS - 1L,
+                expiresAtMs,
+                serviceTokens,
+                0L);
     }
 
     static RouteProjection.Probe probe(
@@ -114,7 +120,13 @@ final class RouteProjectionTestSupport {
             long sequenceLength,
             long hitCache) {
         return new RouteProjection.Probe(
-                requestId, priority, enqueuedAtMs, expiresAtMs, sequenceLength, hitCache, hitCache);
+                Long.toString(requestId),
+                priority,
+                enqueuedAtMs,
+                expiresAtMs,
+                sequenceLength,
+                hitCache,
+                hitCache);
     }
 
     static WorkSnapshot noCommittedWork() {

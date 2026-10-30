@@ -4,6 +4,7 @@ import org.flexlb.balance.planner.GroupPlanner;
 
 import java.util.Comparator;
 import java.util.List;
+import java.util.Objects;
 
 /**
  * Immutable scheduling inputs captured for a route-time what-if projection.
@@ -27,7 +28,7 @@ public record QueueSnapshot(
                 throw new IllegalArgumentException("admission block requires an ACTIVE head");
             }
             GroupPlanner.Item head = activeItems.getFirst();
-            if (head.requestId() != admissionBlock.requestId()
+            if (!Objects.equals(head.requestId(), admissionBlock.requestId())
                     || head.enqueueSeq() != admissionBlock.enqueueSeq()) {
                 throw new IllegalArgumentException(
                         "admission block must identify the exact ACTIVE head");
@@ -40,5 +41,5 @@ public record QueueSnapshot(
      * Null semantics mean the wait only limits delivery, not queue publication.
      */
     public record AdmissionBlock(
-            long requestId, long enqueueSeq, RouteProjection.AdmissionBlockSemantics semantics) {}
+            String requestId, long enqueueSeq, RouteProjection.AdmissionBlockSemantics semantics) {}
 }
