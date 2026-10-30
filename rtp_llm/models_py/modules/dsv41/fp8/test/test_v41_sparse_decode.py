@@ -101,6 +101,23 @@ class SparseDecodeTopKRoutingCPU(unittest.TestCase):
         fallback.assert_not_called()
         sparse._restore_indices_kernel.__getitem__.assert_not_called()
 
+    def test_slot_plan_reaches_restore_and_preserves_logical_output(self):
+        requests = torch.tensor([1, 0], dtype=torch.int32)
+        table = torch.empty(2, 32, dtype=torch.int32)
+        slots = topk.DecodeSlotPlan(requests, table, 128, 128)
+        with patch.object(
+            sparse.deepselect,
+            "try_select_tokens",
+            side_effect=lambda *a, **kw: kw["out"],
+        ):
+            output = sparse.select_tokens(self.logits, self.plan, slot_plan=slots)
+        call = sparse._restore_indices_kernel.__getitem__.return_value.call_args
+        self.assertIs(call.args[0], output)
+        self.assertIs(call.kwargs["slots"], slots.slots)
+        self.assertIs(call.kwargs["requests"], requests)
+        self.assertIs(call.kwargs["table"], table)
+        self.assertEqual(call.kwargs["ENTRIES"], 128)
+
     def test_fp32_input_keeps_its_precision(self):
         self.logits = self.logits.float()
         self.test_deepselect_default_switch_and_fallback()
@@ -321,6 +338,85 @@ class SparseDecodeSupportCPU(unittest.TestCase):
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
 class SparseDecodeCUDA(unittest.TestCase):
+    def test_restore_and_physical_slots_match_separate_graph_replay(self):
+        from rtp_llm.models_py.modules.dsv4.fp8.decode.paged_topk_translator import (
+            translate_local_to_global_slots,
+        )
+
+        rows, k = 6, 512
+        raw = torch.randint(
+            -1, k * 8 + 3, (rows, 512), device="cuda", dtype=torch.int32
+        )
+        blocks = torch.randint(-1, 130, (rows, k), device="cuda", dtype=torch.int32)
+        logits = torch.randn(rows, k * 8 + 256, device="cuda", dtype=torch.bfloat16)[
+            :, : k * 8
+        ]
+        logits[:, ::17] = float("nan")
+        logits[:, ::31] = float("inf")
+        lengths = torch.tensor(
+            [0, 1, 511, 512, 1023, 1024], device="cuda", dtype=torch.int32
+        )
+        ends = torch.tensor(
+            [0, 1, 257, 512, 1023, k * 8], device="cuda", dtype=torch.int32
+        )
+        requests = torch.tensor([1, 0, 1, 0, 1, 0], device="cuda", dtype=torch.int32)
+        table = torch.tensor(
+            [[1, 0, 3, 4, 5, 6, 7, 8, 99], [2, 4, 0, 5, 6, 7, 8, 9, 99]],
+            device="cuda",
+            dtype=torch.int32,
+        )[:, :8]
+        fused, separate = torch.empty_like(raw), torch.empty_like(raw)
+        slots = torch.empty_like(raw)
+
+        def forward():
+            fused.copy_(raw)
+            separate.copy_(raw)
+            for output, mapped in ((separate, False), (fused, True)):
+                sparse._restore_indices_kernel[(rows, 2)](
+                    output,
+                    logits,
+                    blocks,
+                    lengths,
+                    k,
+                    256,
+                    SCORE_STRIDE=logits.stride(0),
+                    select_lengths=ends,
+                    requests=requests if mapped else None,
+                    table=table if mapped else None,
+                    slots=slots if mapped else None,
+                    TABLE_ROWS=2,
+                    TABLE_COLS=8,
+                    TABLE_STRIDE=table.stride(0),
+                    ENTRIES=128,
+                )
+            return translate_local_to_global_slots(
+                requests,
+                table,
+                separate,
+                entries_per_block=128,
+                tokens_per_block_for_block_table=128,
+            )
+
+        stream = torch.cuda.Stream()
+        stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(stream):
+            forward()
+        torch.cuda.current_stream().wait_stream(stream)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            expected = forward()
+        for phase in range(5):
+            raw.random_(-1, k * 8 + 3)
+            blocks.random_(-1, 130)
+            table.copy_(
+                torch.randint(0, 20, table.shape, device="cuda", dtype=torch.int32)
+            )
+            requests.copy_(torch.arange(rows, device="cuda", dtype=torch.int32) % 2)
+            lengths.add_(phase)
+            graph.replay()
+            torch.testing.assert_close(fused, separate, rtol=0, atol=0)
+            torch.testing.assert_close(slots, expected, rtol=0, atol=0)
+
     def setUp(self):
         candidates = torch.empty(1, 512, device="cuda", dtype=torch.int32)
         if not sparse.is_supported(candidates):

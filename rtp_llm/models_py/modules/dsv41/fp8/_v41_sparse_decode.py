@@ -537,6 +537,13 @@ def _restore_indices_kernel(
     TOKEN_TOPK: tl.constexpr = TOKEN_TOPK,
     SCORE_STRIDE: tl.constexpr = 0,
     select_lengths=None,
+    requests=None,
+    table=None,
+    slots=None,
+    TABLE_ROWS: tl.constexpr = 0,
+    TABLE_COLS: tl.constexpr = 0,
+    TABLE_STRIDE: tl.constexpr = 0,
+    ENTRIES: tl.constexpr = 0,
 ):
     row = tl.program_id(0)
     lane = tl.program_id(1) * TILE + tl.arange(0, TILE)
@@ -552,9 +559,27 @@ def _restore_indices_kernel(
     tl.store(
         output + row * TOKEN_TOPK + lane, tl.where(keep, token, -1), lane < TOKEN_TOPK
     )
+    if slots is not None:
+        request = tl.load(requests + row).to(tl.int64)
+        page = token // ENTRIES
+        mapped = (
+            keep
+            & (token >= 0)
+            & (page >= 0)
+            & (page < TABLE_COLS)
+            & (request >= 0)
+            & (request < TABLE_ROWS)
+        )
+        base = tl.load(table + request * TABLE_STRIDE + page, mapped, other=0)
+        physical = base * ENTRIES + token % ENTRIES
+        tl.store(
+            slots + row * TOKEN_TOPK + lane,
+            tl.where(mapped & (base > 0), physical, -1),
+            lane < TOKEN_TOPK,
+        )
 
 
-def select_tokens(logits, plan, *, inplace=False):
+def select_tokens(logits, plan, *, inplace=False, slot_plan=None):
     """Select logical token IDs. ``inplace`` requires disposable scorer output.
 
     Complete engine plans skip clean/repair entirely: dummy compact ends are 0.
@@ -563,6 +588,13 @@ def select_tokens(logits, plan, *, inplace=False):
     Callers retaining raw logits keep the original copy-based path by default.
     """
     rows, k = plan.blocks.shape
+    if slot_plan is not None:
+        if (
+            slot_plan.request_ids.numel() != rows
+            or slot_plan.request_ids.device != logits.device
+        ):
+            raise ValueError("Slot mapping does not match selected query rows")
+        slot_plan.slots = None
     width = k * BLOCK_SIZE
     output = torch.empty((rows, TOKEN_TOPK), device=logits.device, dtype=torch.int32)
     enabled = os.environ.get("DSV41_DECODE_DEEPSELECT", "1") == "1"
@@ -625,7 +657,9 @@ def select_tokens(logits, plan, *, inplace=False):
             TOKEN_TOPK,
             width,
         )
-    # Both selectors share finite filtering and logical-index restoration.
+    # Preserve logical indices for sharing while optionally publishing physical slots.
+    slots = torch.empty_like(output) if slot_plan is not None else None
+    table = None if slot_plan is None else slot_plan.block_table
     _restore_indices_kernel[(rows, triton.cdiv(TOKEN_TOPK, 256))](
         output,
         scores,
@@ -635,12 +669,30 @@ def select_tokens(logits, plan, *, inplace=False):
         256,
         SCORE_STRIDE=scores.stride(0),
         select_lengths=lengths,
+        requests=None if slot_plan is None else slot_plan.request_ids,
+        table=table,
+        slots=slots,
+        TABLE_ROWS=0 if table is None else table.shape[0],
+        TABLE_COLS=0 if table is None else table.shape[1],
+        TABLE_STRIDE=0 if table is None else table.stride(0),
+        ENTRIES=0 if slot_plan is None else slot_plan.entries,
     )
+    if slot_plan is not None:
+        slot_plan.slots = slots
     return output
 
 
 def select_decode(
-    q, weights, freqs_cis, positions, pool, plan, *, rope_head_dim, prepared_query=None
+    q,
+    weights,
+    freqs_cis,
+    positions,
+    pool,
+    plan,
+    *,
+    rope_head_dim,
+    prepared_query=None,
+    slot_plan=None,
 ):
     """Run fused Q preparation, official sparse score, and logical token TopK."""
     if prepared_query is None:
@@ -665,4 +717,4 @@ def select_decode(
         k,
         BLOCK_SIZE,
     )
-    return select_tokens(logits, plan, inplace=True)
+    return select_tokens(logits, plan, inplace=True, slot_plan=slot_plan)

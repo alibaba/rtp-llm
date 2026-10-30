@@ -42,7 +42,7 @@ class DecodeSlotPlan:
 
 
 def make_slot_plan(request_ids, block_table, *, entries, logical_entries):
-    if os.environ.get("DSV41_FUSED_TOPK_SLOTS", "0") != "1":
+    if os.environ.get("DSV41_FUSED_TOPK_SLOTS", "1") != "1":
         return None
     if not (
         request_ids.is_cuda

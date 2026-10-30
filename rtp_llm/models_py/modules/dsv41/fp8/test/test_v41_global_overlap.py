@@ -286,6 +286,7 @@ class GlobalOverlapCPUTest(unittest.TestCase):
                     _decode_write_swa_fp8=lambda *args: calls.append("swa"),
                     _prepare_indexer_query_decode=prepare,
                     _select_indices_decode=select,
+                    _decode_slot_plan=Mock(return_value=None),
                     _produce_global_decode=Mock(),
                 )
                 with patch.dict(
@@ -919,6 +920,7 @@ def full_attention_case(ratio, batch, span, context):
         "_begin_forward",
         "_produce_global_decode",
         "_select_indices_decode",
+        "_decode_slot_plan",
         "_decode_global_slots",
         "_mega_position_chunks",
         "_forward_decode_body",

@@ -364,6 +364,77 @@ class V41DecodeAttentionFusionCUDA(unittest.TestCase):
                         self._slot_reference(attn, new_selected, requests),
                     )
 
+    def test_fused_slots_are_published_without_retranslation(self):
+        from rtp_llm.models_py.modules.dsv41.fp8 import _v41_decode_topk as topk
+
+        for ratio in (1, 2):
+            attn, selected, requests, table = self._slot_reuse_case(ratio)
+            attn.is_index_source = True
+            attn._decode_slot_plan = MethodType(AttentionV41FP8._decode_slot_plan, attn)
+            with patch.dict(os.environ, {"DSV41_FUSED_TOPK_SLOTS": "1"}):
+                plan = attn._decode_slot_plan(requests)
+            self.assertIsNotNone(plan)
+            width = 1024
+            logits = torch.randn(12, width, device="cuda", dtype=torch.bfloat16)
+            lengths = torch.full((12,), width, device="cuda", dtype=torch.int32)
+
+            def forward():
+                AttentionV41FP8._begin_forward(attn)
+                attn._shared_attention["topk"] = {2: selected}
+                slots = torch.empty_like(selected)
+                topk._finite_topk_slots_kernel[(12, 2)](
+                    logits,
+                    lengths,
+                    selected,
+                    requests,
+                    table,
+                    slots,
+                    width,
+                    width,
+                    512,
+                    2,
+                    3,
+                    table.stride(0),
+                    128 // ratio,
+                    128 // ratio,
+                    256,
+                )
+                first = attn._decode_global_slots(selected, requests, slots=slots)
+                self.assertIs(first, slots)
+                self.assertIs(attn._decode_global_slots(selected, requests[:]), slots)
+                return slots
+
+            with patch.object(
+                paged_topk_translator,
+                "translate_local_to_global_slots",
+                side_effect=AssertionError("fused slots must be reused"),
+            ):
+                stream = torch.cuda.Stream()
+                stream.wait_stream(torch.cuda.current_stream())
+                with torch.cuda.stream(stream):
+                    forward()
+                torch.cuda.current_stream().wait_stream(stream)
+                graph = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(graph):
+                    output = forward()
+                for phase in range(3):
+                    selected.copy_(torch.arange(512, device="cuda")[None] - phase * 9)
+                    table.copy_(
+                        torch.tensor([[1, 0, 3], [2, 4, 0]], device="cuda") + phase
+                    )
+                    graph.replay()
+                    torch.testing.assert_close(
+                        output.cpu(),
+                        self._slot_reference(attn, selected, requests),
+                        rtol=0,
+                        atol=0,
+                    )
+            attn.is_index_source = False
+            self.assertIsNone(attn._decode_slot_plan(requests))
+            attn.is_index_source = True
+            attn._cp_ctx = SimpleNamespace(cp_size=2, kv_cache_sharded=True)
+            self.assertIsNone(attn._decode_slot_plan(requests))
+
     def test_physical_slots_forward_reset_and_stream_isolation(self):
         attn, selected, requests, table = self._slot_reuse_case(1)
         first = attn._decode_global_slots(selected, requests)

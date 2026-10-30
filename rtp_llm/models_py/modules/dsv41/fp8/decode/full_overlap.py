@@ -196,24 +196,7 @@ def try_full_decode(
         )
         if not qkv.swa_written:
             attn._decode_write_swa_fp8(qkv.kv, batch, span, metadata)
-        slot_plan = None
-        if os.environ.get("DSV41_FUSED_TOPK_SLOTS", "0") == "1":
-            from rtp_llm.models_py.modules.dsv41.fp8._kv_cache_utils import (
-                require_pool_tokens_per_block,
-            )
-
-            region = attn._global_region()
-            global_pool = attn._source_pool(region)
-            raw_tpb = require_pool_tokens_per_block(attn._kv_cache, region=region)
-            cp = attn._cp_ctx
-            sharded = cp is not None and cp.cp_size > 1 and cp.kv_cache_sharded
-            if not sharded and raw_tpb % attn.compress_ratio == 0:
-                slot_plan = _v41_decode_topk.make_slot_plan(
-                    metadata.req_id_per_token[:rows],
-                    attn._block_tables_by_type[region],
-                    entries=global_pool.shape[1],
-                    logical_entries=raw_tpb // attn.compress_ratio,
-                )
+        slot_plan = attn._decode_slot_plan(metadata.req_id_per_token[:rows])
         selected = attn._select_indices_decode(
             x,
             qkv.qr,
@@ -223,13 +206,15 @@ def try_full_decode(
             overlap=work,
             **({"slot_plan": slot_plan} if slot_plan is not None else {}),
         )
-        slots = None if slot_plan is None else slot_plan.slots
-        if slots is None:
-            slots = (
-                attn._decode_global_slots(selected, metadata.req_id_per_token[:rows])
-                .to(dtype=torch.int32)
-                .contiguous()
+        slots = (
+            attn._decode_global_slots(
+                selected,
+                metadata.req_id_per_token[:rows],
+                slots=None if slot_plan is None else slot_plan.slots,
             )
+            .to(dtype=torch.int32)
+            .contiguous()
+        )
         mega_positions = attn._mega_position_chunks(metadata.position_ids, rows, rows)[
             0
         ]

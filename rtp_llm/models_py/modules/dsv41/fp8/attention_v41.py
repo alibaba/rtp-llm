@@ -3349,6 +3349,7 @@ class AttentionV41FP8(AttentionFP8):
                         plan,
                         rope_head_dim=self.rope_head_dim,
                         prepared_query=prepared,
+                        **({"slot_plan": slot_plan} if slot_plan is not None else {}),
                     )
                 shared["topk"] = {self.layer_id: output}
                 return output
@@ -3589,7 +3590,26 @@ class AttentionV41FP8(AttentionFP8):
         shared["topk"] = {self.layer_id: output}
         return output
 
-    def _decode_global_slots(self, selected, req):
+    def _decode_slot_plan(self, req):
+        from . import _v41_decode_topk
+
+        if not self.is_index_source:
+            return None
+        cp = self._cp_ctx
+        if cp is not None and cp.cp_size > 1 and cp.kv_cache_sharded:
+            return None
+        region = self._global_region()
+        raw_tpb = require_pool_tokens_per_block(self._kv_cache, region=region)
+        if raw_tpb % self.compress_ratio:
+            return None
+        return _v41_decode_topk.make_slot_plan(
+            req,
+            self._block_tables_by_type[region],
+            entries=self._source_pool(region).shape[1],
+            logical_entries=raw_tpb // self.compress_ratio,
+        )
+
+    def _decode_global_slots(self, selected, req, *, slots=None):
         """Translate compressed indices without materializing token positions."""
         region = self._global_region()
         pool = self._source_pool(region)
@@ -3641,15 +3661,21 @@ class AttentionV41FP8(AttentionFP8):
                     torch.cuda.current_stream(selected.device).cuda_stream,
                 )
                 cached = shared.get("decode_global_slots")
-                if cached is not None and cached[0] is selected and cached[1] == layout:
+                if (
+                    slots is None
+                    and cached is not None
+                    and cached[0] is selected
+                    and cached[1] == layout
+                ):
                     return cached[2]
-            slots = translate_local_to_global_slots(
-                req,
-                table,
-                selected,
-                entries_per_block=pool.shape[1],
-                tokens_per_block_for_block_table=logical_entries,
-            )
+            if slots is None:
+                slots = translate_local_to_global_slots(
+                    req,
+                    table,
+                    selected,
+                    entries_per_block=pool.shape[1],
+                    tokens_per_block_for_block_table=logical_entries,
+                )
             if reuse:
                 # Capture records one producer per mapping; every replay still
                 # refreshes its output. Retain inputs until the forward ends.
@@ -3802,6 +3828,11 @@ class AttentionV41FP8(AttentionFP8):
         finally:
             if global_work is not None:
                 global_work.finish()
+        slot_plan = (
+            self._decode_slot_plan(metadata.req_id_per_token[:T])
+            if self.compress_ratio and self.is_index_source
+            else None
+        )
         if mega is not None:
             slots = getattr(qkv, "global_slots", None)
             if self.compress_ratio and slots is None:
@@ -3816,9 +3847,14 @@ class AttentionV41FP8(AttentionFP8):
                     head_weights=qkv.head_weights,
                     index_prepared=qkv.index_prepared,
                     prepared_query=prepared_query,
+                    **({"slot_plan": slot_plan} if slot_plan is not None else {}),
                 )
                 slots = (
-                    self._decode_global_slots(selected, metadata.req_id_per_token[:T])
+                    self._decode_global_slots(
+                        selected,
+                        metadata.req_id_per_token[:T],
+                        slots=None if slot_plan is None else slot_plan.slots,
+                    )
                     .to(dtype=torch.int32)
                     .contiguous()
                 )
@@ -3847,6 +3883,7 @@ class AttentionV41FP8(AttentionFP8):
                 qkv.qr_quantized,
                 head_weights=qkv.head_weights,
                 prepared_query=prepared_query,
+                **({"slot_plan": slot_plan} if slot_plan is not None else {}),
             )
             from rtp_llm.models_py.modules.dsv41.fp8._v41_fp4_decode_attn import (
                 fp4_dual_decode_attention,
@@ -3855,7 +3892,11 @@ class AttentionV41FP8(AttentionFP8):
                 get_or_build_sched_meta,
             )
 
-            slots = self._decode_global_slots(selected, metadata.req_id_per_token[:T])
+            slots = self._decode_global_slots(
+                selected,
+                metadata.req_id_per_token[:T],
+                slots=None if slot_plan is None else slot_plan.slots,
+            )
             o = fp4_dual_decode_attention(
                 q=qkv.q,
                 swa_pool_3d=self._pool_view_3d_fp8(SWA_KV),
