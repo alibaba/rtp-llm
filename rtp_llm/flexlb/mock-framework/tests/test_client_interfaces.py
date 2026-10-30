@@ -9,7 +9,7 @@ from mock_framework.execution.transport import ExecutionError
 from mock_framework.execution import clients as client_runtime
 from mock_framework.execution.clients import ClientGroup
 from mock_framework import evidence
-from mock_framework.input import read_inputs, write_inputs, pb
+from helpers.input import read_inputs, write_inputs, pb
 
 
 def context():

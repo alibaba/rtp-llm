@@ -1,4 +1,4 @@
-"""Standard playback input: bounded Protobuf batches in checksummed Zstd frames."""
+"""Test playback fixtures: bounded Protobuf batches in checksummed Zstd frames."""
 from pathlib import Path
 import struct
 
