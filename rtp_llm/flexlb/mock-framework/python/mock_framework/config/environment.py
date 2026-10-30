@@ -6,7 +6,7 @@ from pathlib import Path
 
 from .errors import ConfigError
 from .parser import load_yaml
-from .values import fields, number, text
+from .validation import fields, number, text
 
 _RESOURCE = re.compile(r'^[1-9]\d*(?:\.\d+)?(?:KiB|MiB|GiB|TiB|[kmgtKMGT]i?|B)?$')
 _ROLES = {'master', 'client', 'prefill', 'decode', 'vit'}
@@ -37,7 +37,7 @@ def expand_config(raw):
     return result
 
 
-def compile_deployment(raw, role):
+def _compile_deployment(raw, role):
     fields(raw, {'replicas', 'resources', 'heap'}, where=f'{role}.deployment')
     deployment = copy.deepcopy(raw)
     replicas = deployment.setdefault('replicas', 1)
@@ -54,7 +54,7 @@ def compile_deployment(raw, role):
     return deployment
 
 
-def load_component_config(raw, role, directory):
+def _load_component_config(raw, role, directory):
     if isinstance(raw, str):
         value = text(raw, f'{role}.config')
         if '://' in value or directory is None:
@@ -82,7 +82,7 @@ def _reject_json_constant(value):
     raise ValueError(f'Nonfinite JSON constant: {value}')
 
 
-def validate_master_config(config):
+def _validate_master_config(config):
     if 'FLEXLB_CONFIG' not in config:
         return
     encoded = text(config['FLEXLB_CONFIG'], 'FLEXLB_CONFIG')
@@ -108,10 +108,10 @@ def compile_environment(raw, *, directory=None):
         if 'engine' in component and component['engine'] != 'rtp':
             raise ConfigError(f'{role}.engine: only RTP is implemented')
 
-        deployment = compile_deployment(component.get('deployment', {}), role)
-        native = load_component_config(component.get('config', {}), role, directory)
+        deployment = _compile_deployment(component.get('deployment', {}), role)
+        native = _load_component_config(component.get('config', {}), role, directory)
         if role == 'master':
-            validate_master_config(native)
+            _validate_master_config(native)
         result[role] = {'deployment': deployment, 'config': expand_config(native)}
         if 'engine' in component:
             result[role]['engine'] = component['engine']

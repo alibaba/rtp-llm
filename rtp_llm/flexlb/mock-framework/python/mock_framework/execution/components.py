@@ -3,7 +3,7 @@ import asyncio
 import copy
 import json
 import os
-from ..config.values import duration
+from ..config.validation import duration
 from .records import write_json
 from .transport import ExecutionError
 

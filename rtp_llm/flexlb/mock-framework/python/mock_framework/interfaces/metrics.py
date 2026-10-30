@@ -11,7 +11,7 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 from ..config.registry import case_interface
-from ..config.values import duration
+from ..config.validation import duration
 from ..execution.transport import ExecutionError
 from .master import Targets
 

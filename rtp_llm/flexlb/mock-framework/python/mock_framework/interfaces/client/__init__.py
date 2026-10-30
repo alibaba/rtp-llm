@@ -9,7 +9,7 @@ from typing import Annotated
 from ._records import RequestRecord, read_requests
 from ...execution.client_group import ClientResult
 from ...config.registry import Bounds, case_interface
-from ...config.values import duration
+from ...config.validation import duration
 from ...execution.transport import ExecutionError
 
 

@@ -145,7 +145,7 @@ def test_component_config_file_rejects_missing_empty_or_remote_paths(path, case_
 
 
 def test_nullable_reference_preserves_both_possible_types():
-    from mock_framework.config.compiler import compatible
+    from mock_framework.config.validation import compatible
     from mock_framework.config.registry import schema
     assert compatible(schema(list[str] | None), schema(list[str] | None))
     assert not compatible(schema(list[str] | None), schema(list[str]))

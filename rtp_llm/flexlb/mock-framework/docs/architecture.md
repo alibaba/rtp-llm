@@ -47,7 +47,7 @@ Case 操作放在独立的 Python 实现中，不在 Runner 主循环按接口�
 
 Case 接口由 Python 函数实现，装饰器登记稳定接口名、读写属性和必要单位，参数与返回类型来自函数签名。参数范围和跨字段校验放在参数类型中，不在装饰器另抄一份字段表。Registry 只负责登记、查找和定义检查；不要求每个函数继承一个接口基类，也不做动态插件发现。运行状态由本次 Case 的上下文持有，不能存入全局注册函数。
 
-配置编译按 Case → Phase → Step 推进，环境编译分别处理部署参数、组件配置文件和 Master 原生 JSON。普通值与 ref 共用 validation 的 schema 遍历；编译器只为 ref 叶子提供类型检查和转换，不再复制对象/列表/union 的校验规则。参数构造单独执行 dataclass 的跨字段检查。Runner 在 ref 展开后只校验并构造一次参数，再调用 Interface.call；Interface.invoke 供独立调用时从原始参数完成同样的准备。参数失败发生在调用前，结果校验失败发生在调用后，保留各自的错误阶段和写操作 outcome_unknown 语义。
+配置编译按 Case → Phase → Step 推进，环境编译分别处理部署参数、组件配置文件和 Master 原生 JSON。普通值与 ref 共用 validation 的 schema 遍历；编译器只为 ref 叶子提供类型检查和转换，不再复制对象/列表/union 的校验规则。值解析、schema 校验和类型兼容检查统一在 config/validation.py；不再保留 values.py。编译器通过 Interface.arguments 检查无引用参数，dataclass 构造与结果转换作为 registry 内部实现，不直接从编译器调用。Runner 在 ref 展开后只校验并构造一次参数，再调用 Interface.call；Interface.invoke 供独立调用时从原始参数完成同样的准备。参数失败发生在调用前，结果校验失败发生在调用后，保留各自的错误阶段和写操作 outcome_unknown 语义。
 
 Step 统一为一次接口调用，包含 id、describe、interface、args、within 和可选 expect。删除 YAML 的 call/check 外壳及两套重复 Step 类：无 expect 时执行并保存结果，有 expect 时在同一次返回后判断。读取也可以只取值供后续引用；写操作的回执可以断言，但不因断言失败重放。接口读写属性与是否断言相互独立，不把普通检查隐式变成轮询。
 
