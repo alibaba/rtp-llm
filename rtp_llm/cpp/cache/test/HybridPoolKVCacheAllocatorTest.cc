@@ -954,6 +954,94 @@ TEST_F(HybridPoolKVCacheAllocatorTest, IncrMallocRollbackFreesPartiallyAllocated
     expectPoolCountersEq(allocator, counters_before);
 }
 
+TEST_F(HybridPoolKVCacheAllocatorTest, IncrMallocFailureDoesNotResurrectReclaimedLinearStates) {
+    for (const int reserve_step : {0, 3}) {
+        SCOPED_TRACE(testing::Message() << "reserve_step=" << reserve_step);
+        auto config = makeTinyMultiPoolHybridConfig(
+            /*linear_block_num=*/8, /*full_block_num=*/4, /*seq_size_per_block=*/64);
+        config.enable_linear_attention_request_cache = true;
+        auto allocator                               = makeAllocator(config);
+        ASSERT_TRUE(allocator->init());
+        auto linear_pool = allocator->groupBlockPools()[0];
+        auto full_pool   = allocator->groupBlockPools()[1];
+
+        // Allocate the live state above a hole, so rollover takes a different
+        // physical ID instead of immediately reusing the reclaimed state.
+        auto hole = linear_pool->malloc(1);
+        ASSERT_EQ(hole.size(), 1u);
+        const auto free_before = allocator->freeBlocksNum() + hole.size();
+        auto resource          = makeBatchResource(1, config);
+        auto tokens            = makeCompleteTokenIds(1, /*seq_length=*/128, 64);
+        MallocInfo info{resource, tokens};
+        info.enable_device_cache = false;
+        info.reuse_cache         = false;
+        ASSERT_TRUE(allocator->malloc(info).success);
+        ASSERT_EQ(resource->blocksNum(0, 0), 2u);
+        const auto read_state = resource->blocks(0, 0)[1];
+        linear_pool->requestFree(hole);
+
+        // LINEAR rolls over successfully, releasing its obsolete first state;
+        // the later FULL group is exhausted. Rollback must not put a released
+        // ID back into the request, including when MTP reuses it at a new slot.
+        auto blocker = full_pool->malloc(static_cast<int>(full_pool->freeBlocksNum()));
+        ASSERT_FALSE(blocker.empty());
+        tokens->setSeqLength(129);
+        tokens->setReserveStep(reserve_step);
+        ASSERT_FALSE(allocator->malloc(info).success);
+        ASSERT_EQ(resource->blocksNum(0, 0), 2u);
+        EXPECT_TRUE(isNullBlockIdx(resource->blocks(0, 0)[0]));
+        EXPECT_EQ(resource->blocks(0, 0)[1], read_state);
+        EXPECT_EQ(linear_pool->requestRefBlocksNum(), 1u);
+
+        // Cancellation immediately after a failed allocation must release each
+        // still-owned block exactly once.
+        EXPECT_NO_THROW(allocator->free(FreeInfo{resource, tokens}));
+        full_pool->requestFree(blocker);
+        EXPECT_EQ(allocator->requestRefBlocksNum(), 0u);
+        EXPECT_EQ(allocator->freeBlocksNum(), free_before);
+    }
+}
+
+TEST_F(HybridPoolKVCacheAllocatorTest, IncrMallocRetriesAfterLinearRolloverAndLaterGroupFailure) {
+    auto config = makeTinyMultiPoolHybridConfig(
+        /*linear_block_num=*/8, /*full_block_num=*/4, /*seq_size_per_block=*/64);
+    config.enable_linear_attention_request_cache = true;
+    auto allocator                               = makeAllocator(config);
+    ASSERT_TRUE(allocator->init());
+    auto linear_pool = allocator->groupBlockPools()[0];
+    auto full_pool   = allocator->groupBlockPools()[1];
+    const auto free_before = allocator->freeBlocksNum();
+
+    auto hole = linear_pool->malloc(1);
+    ASSERT_EQ(hole.size(), 1u);
+    auto resource = makeBatchResource(1, config);
+    auto tokens   = makeCompleteTokenIds(1, /*seq_length=*/128, 64);
+    MallocInfo info{resource, tokens};
+    info.enable_device_cache = false;
+    info.reuse_cache         = false;
+    ASSERT_TRUE(allocator->malloc(info).success);
+    const auto read_state = resource->blocks(0, 0)[1];
+    linear_pool->requestFree(hole);
+    auto blocker = full_pool->malloc(static_cast<int>(full_pool->freeBlocksNum()));
+    ASSERT_FALSE(blocker.empty());
+
+    tokens->setSeqLength(129);
+    tokens->setReserveStep(3);
+    for (int attempt = 0; attempt < 3; ++attempt) {
+        ASSERT_FALSE(allocator->malloc(info).success);
+        EXPECT_TRUE(isNullBlockIdx(resource->blocks(0, 0)[0]));
+        EXPECT_EQ(resource->blocks(0, 0)[1], read_state);
+        EXPECT_EQ(linear_pool->requestRefBlocksNum(), 1u);
+    }
+
+    full_pool->requestFree(blocker);
+    ASSERT_TRUE(allocator->malloc(info).success);
+    EXPECT_EQ(resource->blocks(0, 0)[1], read_state);
+    EXPECT_NO_THROW(allocator->free(FreeInfo{resource, tokens}));
+    EXPECT_EQ(allocator->requestRefBlocksNum(), 0u);
+    EXPECT_EQ(allocator->freeBlocksNum(), free_before);
+}
+
 // ---------------------------------------------------------------------------
 // Full malloc / free cycle
 // ---------------------------------------------------------------------------
