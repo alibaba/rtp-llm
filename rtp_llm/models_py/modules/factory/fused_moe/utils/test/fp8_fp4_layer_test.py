@@ -1,4 +1,5 @@
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import torch
@@ -176,8 +177,7 @@ class Fp8Fp4MoeLayerSchedulingTest(unittest.TestCase):
 
 class Fp8Fp4ExecutorOutputDtypeTest(unittest.TestCase):
     def setUp(self):
-        self.executor = _Fp32Executor.__new__(_Fp32Executor)
-        torch.nn.Module.__init__(self.executor)
+        self.executor = _Fp32Executor(SimpleNamespace(activation_type="silu"), None, {})
         self.x = torch.ones((2, 4), dtype=torch.bfloat16)
 
     def _execute(self, payload):

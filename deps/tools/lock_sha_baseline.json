@@ -1,6 +1,6 @@
 {
  "_meta": {
-  "note": "frozen sha256 snapshot of the pre-unification internal locks; regenerate only after a reviewed re-resolution (see check_lock_sha.py)"
+  "note": "regenerated from the current locks (only after a reviewed re-resolution)"
  },
  "requirements_lock_cuda12_arm.txt": {
   "aiohappyeyeballs": [
@@ -4428,6 +4428,9 @@
    "e0f1324486bb90be6bde28bd0afbaf78a38827948d37f93f90318a01da8a3f8c",
    "e9b0f115a68f2f84c0f6d9b7e863a29517f6dfe5f7b7d07d1d9da8904754e9a2"
   ],
+  "cuda-linear-attention": [
+   "007154cc956e143d8a2ff0fac2c6a9fbbc7dffd5fbe2f7adaba89696d7fd0ab1"
+  ],
   "cuda-pathfinder": [
    "1503af579d8379c24bdd65528379bc57039b0455be9f5f9686cf8e473a1fce51"
   ],
@@ -4473,7 +4476,7 @@
    "4e7509a2ad6fd84d6f195fcac0aedc33f2a7c7b3965e777da821cb9d1cfc4787"
   ],
   "deep-gemm": [
-   "e6474ca387758f11da7aff2851215cfe5230ed6b54cce0fabf5a880b5b56827c"
+   "85ce48892fd01c28e3e6ca2fcafc1109159b8edb2b7cb10dd62704894336dd07"
   ],
   "distro": [
    "2fa77c6fd8940f116ee1d6b94a2f90b13b5ea8d019b98bc8bafdcabcdd9bdbed",
@@ -4504,8 +4507,11 @@
    "7be2ad23a14607ccc71808e68fe30848aeace7058ace17852f68e2a68e310402",
    "d396bea984af47333ef05e50eae7eff88c84256de6112aea0ec48a233c064fe3"
   ],
+  "flash-linear-attention": [
+   "20db1cc279f59abf8f18d20cc9fa575eeb152cf781cc4bff78e5a1d8a77141de"
+  ],
   "flash-mla": [
-   "4e729f23823e02ef95e5c94a1d41b9031e8e4b00682f0c44392f480fed15899e"
+   "a6ebf29632984327d96d9d1195f779cb06f78dbdb82d8b8c12adea23032c1d67"
   ],
   "flash-mla-legacy": [
    "9a0d330ee0875d7bbca8772f7467a561c31627583373c1d5c06c7e183810ec7a"
@@ -5997,19 +6003,21 @@
    "e80212ed7b1afc97102fbb2b5c82487aa73f6a0edfa6d26c5a152593e520bb8f"
   ],
   "nvidia-cutlass-dsl": [
-   "3b051fe02ca69422ab840e64d9865667aba288a3984a7ca4ccd038a82aef1344"
+   "c14ca121c2a4ce53ca4d5ee5d939e4181b97054b55ea7bb84aa9f99b98960060"
   ],
   "nvidia-cutlass-dsl-libs-base": [
-   "0a60dfce3349984315306ef719ed1edf0e225527158f26019a5cf266e06cc45d",
-   "2e121b20f0a48122c9b48227d00a7d681189e1de2fd4d211f9661a4e1658f066",
-   "3f7c133d31fa82ae7db697fd6943a5f9a2c97c8a40ee1056c67ef29fe00974d8",
-   "5cfdf52bea8feede5e512a094484956693cb87adaafa310991d2876653b1a88e",
-   "7bb6de91b00a2b392cd834fec174a1461bf0f10a9b6d28086c8f4885aed27218",
-   "8e58b016da5bb09bd1d809d0c025433edb36b279adfbcd107e96361b214bd8bc",
-   "90a4d802a03963fa36eb287fbc9b40a1374590fc7e8cc1b9673dee8872f75713",
-   "bd18322d9247f8c033a10ed4e519c4985ca6b4fb578ade382e5a264422ebd915",
-   "c78b18f2b44ca10a91bc76380ebd65bb7b86aa97a9330bae9b73eb0a1bc51d55",
-   "f8635ad1e0a670323cc729f167067fa880cb56577ec2e79afb80a35ab371912e"
+   "1bea2f2e5312a97a850be4bfe73ab0689861fa6f81888ad2abe47172f96afd1d",
+   "224ceed6db71b632b318c19bea52f1d0efdafc321dbe4159a7508f93abe8c694",
+   "5516d76454f04f381111187b180bfa8651b4829e169b8283eeac8e794285d529",
+   "5d29ff10d723f4525da8777ba668b107a0879b895fe2a11f1d60b555ec0a1c7c",
+   "83070630bd0bab18a2fd4ef3c57632e11628c0e930fbf2aa070a3509a32a1079",
+   "acf61f778e1c26326407bb5aa2e92a236e0abe9a41abf2ae71222d90593f4b1d",
+   "b36ba3ae4d5d9b0b1dc55f47d1939d2d4262d8eaad188aa675e366d4c58011cc",
+   "b5b5229c4ac9508b5f5554de62f35cfa162dadbd806a3dad4affb34775eb2a89",
+   "d0e524fc5fe8901479571af6d4b8fcf14277cc2c61b791b287a7762e6c9f7a90",
+   "ef820069ee6fa79832a30efd3ba99f6bf289cf48a942f78119361710f3c0e0d1",
+   "f788a83c4c6f62bca9ba01fced55b8899663cdd61eac0fea09e8aa8e1a5b4294",
+   "feab418814e6973c57ca64b021e9147002d4fb13c9c745d390d232435991d8de"
   ],
   "nvidia-ml-py": [
    "65437eb73d68d0c62c931ca4d45038472faff03bd0b8729abba4b899f70d60f2",
@@ -25596,6 +25604,9 @@
    "fb16a7f769c9c67469add7a1d9f6c14dd44637f6921cb6b9eb82cb5015b35c3d",
    "fce6d6b162457475b35e1a259ab643e683d1d20a84459fea898782e2f1e10a3b"
   ],
+  "cuda-linear-attention": [
+   "aad30390809c5d4b4e017a779f046e383407c0add52f700b43917e7c5ecdc4d4"
+  ],
   "cuda-pathfinder": [
    "7bd2774bc6be93aea226d579f415a63803b2b2c062207ed06c1d6dfc9cfacc3c"
   ],
@@ -25642,7 +25653,7 @@
    "76c04452cfbd8acf363ceeea1b59dc95b970fc945f86dec5b39bbb1b200dfcf0"
   ],
   "deep-gemm": [
-   "8ca0bce659a60b2a5c3459792b5eb4bcc46ed3b28b9b6bd94f278d670a7ffa7f"
+   "5fd294298c0dfeecf14b4e438a5cf5a92f0d1b6b482b585c86e337390c688525"
   ],
   "distro": [
    "2fa77c6fd8940f116ee1d6b94a2f90b13b5ea8d019b98bc8bafdcabcdd9bdbed",
@@ -25676,8 +25687,11 @@
   "flash-attn": [
    "a45ff2133f720c0042971de1f3a1c987176d19b7305e440abeb04c33a813fad0"
   ],
+  "flash-linear-attention": [
+   "20db1cc279f59abf8f18d20cc9fa575eeb152cf781cc4bff78e5a1d8a77141de"
+  ],
   "flash-mla": [
-   "ed9037a0f09ad5461c5cf04efd7770c8410831d473d83b4813512dc3fe8ac5ca"
+   "cdfbddcb2a1fc07523ace640ed2f8eb7f6e94f7ce37c9baef261f2da6a0f1106"
   ],
   "flashinfer-cubin": [
    "6e4a9132f5096b7a6d7904a90efd90a90573c365e5250237bc37f1812ab15b9f"
@@ -29637,6 +29651,9 @@
   "deep-gemm": [
    "7e42900e3e86927f874daac8466f2d8611efe9b0c2ffeea30a306fe5e445a0cd"
   ],
+  "deep-gemm-mega": [
+   "48039c6fbac4832b8990fdc1ace9ce1b5bfc3a7c4d7fa02a9b5172e01f78c392"
+  ],
   "einops": [
    "54058201ac7087911181bfec4af6091bb59380360f069276601256a76af08193",
    "609da665570e5e265e27283aab09e7f279ade90c4f01bcfca111f3d3e13f2827"
@@ -30869,6 +30886,9 @@
    "9b59d5a78e9d4c9da6c8ef053549c0a44966b8fc318c0f4886c11e3ffed6f769",
    "c9282273cc32e14658fb63f45cd4ab40607c982e4667017d258c18f2c6d7f114",
    "dcdf88f0bf542eb1a9be94c45eca2ec9b752c6edc54e0cf28d4dc23117b69e3c"
+  ],
+  "ml-dtypes": [
+   "9ad459e99793fa6e13bd5b7e6792c8f9190b4e5a1b45c63aba14a4d0a7f1d5ff"
   ],
   "mpmath": [
    "7a28eb2a9774d00c7bc92411c19a89209d5da7c4c9a9e227be8330a23a25b91f",
@@ -32966,6 +32986,9 @@
    "e54be9a2cd2f6d6ffa3517b064983fb695c9a9d8aa7d574d1ef3c3f931a99225",
    "fffdcb319b614cf14f04d02a52e26b1d1ae14a570f90e9b55461a72672f7b13d"
   ],
+  "tilelang": [
+   "a6f0a90330d7abaae9aac56c27935fcfb4a5b27bbbbe9aaa918cf2245aecdd0e"
+  ],
   "timm": [
    "2a828afac5b710a80ec66d0f85807e171e342faf5c0703b33102d8aa206f19dc",
    "9121d1cf320f7f32490d893340fd33117bda0a0270eb8282dfd52ae5fd3e1af6"
@@ -32998,6 +33021,9 @@
   ],
   "torch": [
    "34ec402766652465f13482025b8ebc35fe7a0921a5325c6b7d308fe31976d7ff"
+  ],
+  "torch-c-dlpack-ext": [
+   "e6f9da4bb9af70e27facc777458be62e10dbbbddda7672d16138db0553c5a524"
   ],
   "torchvision": [
    "7fe8f5e0c4da1c422531cb3b944f1a33d8a69374d4233da3d33e3e79c7cae270"
@@ -33243,6 +33269,9 @@
    "f53dcd26694f148f738edc052b5a69234833e739f10f4c3287bdfd8ec0f7b326",
    "f61964f235a43738bfac50da46fc4254943a7eea3051aeb0b6fc7c992c29fadc",
    "fe01645169a2112aa1d4ebc3e4c5f029c5c8f97adfc32e5d37c993b39a994d75"
+  ],
+  "z3-solver": [
+   "7e103a6f203f505b8b8b8e5c931cc407c95b61556512d4921c1ddc0b3f41b08e"
   ],
   "zipp": [
    "7ebb7a44c021b29fd8dbd7cce6812d0d7b5b454521f93cc71af6ccd155aaa70b",

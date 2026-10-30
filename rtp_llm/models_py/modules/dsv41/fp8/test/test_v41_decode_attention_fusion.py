@@ -412,13 +412,15 @@ class V41Fp4DualDecodeAttentionCUDA(unittest.TestCase):
         if torch.cuda.get_device_capability()[0] != 10:
             self.skipTest("SM100 CUDA required")
         try:
-            import flash_mla  # noqa: F401
+            from rtp_llm.models_py.utils.flash_mla_current import (  # noqa: F401
+                get_mla_metadata,
+            )
         except ImportError as error:
             self.skipTest(f"flash_mla not importable: {error}")
 
     @staticmethod
     def _metadata(case):
-        from flash_mla import get_mla_metadata
+        from rtp_llm.models_py.utils.flash_mla_current import get_mla_metadata
 
         batch, span, heads, _ = case.q.shape
         metadata, _ = get_mla_metadata(

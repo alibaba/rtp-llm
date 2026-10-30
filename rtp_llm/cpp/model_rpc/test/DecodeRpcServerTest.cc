@@ -1,17 +1,22 @@
 #include <gtest/gtest.h>
 
 #include <chrono>
+#include <array>
+#include <numeric>
 #include <optional>
 #include <stdexcept>
 #include <thread>
 #include <utility>
+#include <unistd.h>
 
 #include "rtp_llm/cpp/cache/block_tree_cache/load/LoadAsyncContext.h"
 #include "rtp_llm/cpp/model_rpc/DecodeRpcServer.h"
 #include "rtp_llm/cpp/model_rpc/QueryConverter.h"
 #include "rtp_llm/cpp/model_rpc/RpcErrorCode.h"
 #include "rtp_llm/cpp/cache/MHAKVCacheSpec.h"
+#include "rtp_llm/cpp/cache/LinearKVCacheSpec.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
+#include "rtp_llm/cpp/disaggregate/cache_store/Interface.h"
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
 #include "rtp_llm/cpp/testing/TestLogCapture.h"
 #include "rtp_llm/cpp/testing/TestBase.h"
@@ -40,7 +45,8 @@ DecodeRpcServer::LoadKVCacheContext makeLoadContext(std::string                 
             partition_id,
             /*server_context=*/nullptr,
             prefill_cp_size,
-            std::move(stage_peer_groups)};
+            std::move(stage_peer_groups),
+            static_cast<int32_t>(peer_addrs.size())};
 }
 
 class TestDecodeRpcService final: public RpcService::Service {
@@ -176,6 +182,33 @@ GroupBase makeRpcGroup(std::string tag) {
     return group;
 }
 
+class LinearTransferTestEngine final: public EngineBase {
+public:
+    explicit LinearTransferTestEngine(CacheConfig config): EngineBase(EngineInitParams()) {
+        resource_context_.cache_manager = std::make_shared<KVCacheManager>(config);
+    }
+    std::shared_ptr<GenerateStream> enqueue(const std::shared_ptr<GenerateInput>&) override {
+        return nullptr;
+    }
+    void         enqueue(std::shared_ptr<GenerateStream>&) override {}
+    absl::Status stop() override {
+        return absl::OkStatus();
+    }
+    absl::StatusOr<GenerateStreamPtr> preRun(const std::shared_ptr<GenerateInput>&, preRunMode) override {
+        return absl::UnimplementedError("not used by LINEAR transfer tests");
+    }
+    KVCacheInfo getCacheStatusInfo(int64_t, bool) override {
+        return {};
+    }
+};
+
+CacheConfig makeLinearTransferConfig(bool segmented) {
+    auto spec =
+        std::dynamic_pointer_cast<LinearKVCacheSpec>(test::makeLinearSpec("linear", 64, DataType::TYPE_FP16, 8, 2));
+    spec->tp_transfer.mode = segmented ? TpCacheTransferMode::LINEAR_QKV : TpCacheTransferMode::LEGACY;
+    return test::makeSingleGroupCacheConfig(spec, CacheGroupType::LINEAR, 1, 8);
+}
+
 // Tokens per logical (cache-key sized) block, and the CP-scaled tokens per block
 // of a compacted fixed/state group under prefill CP=2 (cp.scale_seq_size).
 constexpr size_t kBaseSeqSizePerBlock    = 64;
@@ -201,6 +234,8 @@ KeyOffsetPairs keyOffsetPairs(const std::vector<CacheStoreBlockPair>& plan) {
 }
 
 }  // namespace
+
+class LinearTransferRpcServerTest: public DeviceTestBase {};
 
 TEST(DecodeRpcServerTest, TimeoutLearnedAfterConstructionKeepsAbsoluteDeadline) {
     DecodeRpcContext             rpc_context{nullptr};
@@ -287,6 +322,8 @@ TEST(ModelRpcProtoTest, GroupedCacheFieldsPreserveLegacyNumbers) {
     EXPECT_EQ(broadcast->FindFieldByName("partition_count")->number(), 10);
     EXPECT_EQ(broadcast->FindFieldByName("partition_id")->number(), 11);
     EXPECT_EQ(broadcast->FindFieldByName("prefill_cp_size")->number(), 13);
+    EXPECT_EQ(broadcast->FindFieldByName("prefill_tp_size")->number(), 16);
+    EXPECT_EQ(GenerateRequestPB::descriptor()->FindFieldByName("prefill_tp_size")->number(), 14);
     EXPECT_EQ(broadcast->FindFieldByName("tagged_group_block_ids")->number(), 14);
     EXPECT_EQ(broadcast->FindFieldByName("stage_peer_groups")->number(), 15);
 
@@ -309,9 +346,9 @@ TEST(DecodeRpcServerTest, HeterogeneousPhysicalBlockMarksExactCoveredBaseKeys) {
     EXPECT_EQ(DecodeRpcServer::keyBlocksPerLogicalBlock(policy, 8, 4), 2u);
 
     std::vector<size_t> transferred(5, 0);
-    DecodeRpcServer::markCacheKeyRange(transferred, /*endpoint_key_index=*/1, /*block_offset_index=*/0, /*key_span=*/2);
-    DecodeRpcServer::markCacheKeyRange(transferred, /*endpoint_key_index=*/3, /*block_offset_index=*/1, /*key_span=*/2);
-    DecodeRpcServer::markCacheKeyRange(transferred, /*endpoint_key_index=*/4, /*block_offset_index=*/2, /*key_span=*/2);
+    DecodeRpcServer::markCacheKeyRange(transferred, /*endpoint_key_index=*/1, /*key_span=*/2);
+    DecodeRpcServer::markCacheKeyRange(transferred, /*endpoint_key_index=*/3, /*key_span=*/2);
+    DecodeRpcServer::markCacheKeyRange(transferred, /*endpoint_key_index=*/4, /*key_span=*/2);
 
     EXPECT_EQ(transferred, (std::vector<size_t>{1, 1, 1, 1, 1}));
 }
@@ -322,9 +359,8 @@ TEST(DecodeRpcServerTest, CompactPhysicalBlockCoversEveryBaseKey) {
     EXPECT_EQ(DecodeRpcServer::keyBlocksPerLogicalBlock(policy, kCompactSeqSizePerBlock, kBaseSeqSizePerBlock), 1u);
 
     std::vector<size_t> transferred(11, 0);
-    DecodeRpcServer::markCacheKeyRange(transferred, /*endpoint_key_index=*/9, /*block_offset_index=*/4, /*key_span=*/2);
-    DecodeRpcServer::markCacheKeyRange(
-        transferred, /*endpoint_key_index=*/10, /*block_offset_index=*/5, /*key_span=*/2);
+    DecodeRpcServer::markCacheKeyRange(transferred, /*endpoint_key_index=*/9, /*key_span=*/2);
+    DecodeRpcServer::markCacheKeyRange(transferred, /*endpoint_key_index=*/10, /*key_span=*/2);
 
     EXPECT_EQ(transferred, (std::vector<size_t>{0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1}));
 }
@@ -340,7 +376,7 @@ TEST(DecodeRpcServerTest, CompletedHandoffPrefixRequiresEveryTransferObligation)
               0u);
     EXPECT_EQ(DecodeRpcServer::completedHandoffPrefixBlocks(
                   /*already_reused_blocks=*/2, /*required=*/{0, 0, 0, 0}, /*transferred=*/{0, 0, 0, 0}),
-              0u);
+              2u);
     EXPECT_EQ(DecodeRpcServer::completedHandoffPrefixBlocks(
                   /*already_reused_blocks=*/0, /*required=*/{1}, /*transferred=*/{}),
               0u);
@@ -350,16 +386,190 @@ TEST(DecodeRpcServerTest, LaterPpStageCanCompleteKeysWithoutLocalLoads) {
     const auto completed = DecodeRpcServer::completedHandoffPrefixBlocks(0, {0, 0, 2}, {0, 0, 2}, true);
     EXPECT_EQ(completed, 3u);
     EXPECT_EQ(DecodeRpcServer::completedHandoffPrefixBlocks(0, {0, 0, 2}, {0, 0, 1}, true), 2u);
-    EXPECT_EQ(DecodeRpcServer::completedHandoffPrefixBlocks(0, {0, 0, 2}, {0, 0, 2}), 0u);
+    // Zero obligations represent keys owned by other ranks, rather than missing loads.
+    EXPECT_EQ(DecodeRpcServer::completedHandoffPrefixBlocks(0, {0, 0, 2}, {0, 0, 2}), 3u);
+    EXPECT_EQ(DecodeRpcServer::completedHandoffPrefixBlocks(0, {0, 0, 0}, {0, 0, 0}), 0u);
+    EXPECT_EQ(DecodeRpcServer::completedHandoffPrefixBlocks(0, {0, 0, 0}, {0, 0, 0}, true), 3u);
     const auto full_first = DecodeRpcServer::completedHandoffPrefixBlocks(0, {1, 1, 3}, {1, 1, 3});
     const auto tail_first = DecodeRpcServer::completedHandoffPrefixBlocks(0, {0, 0, 2}, {0, 0, 2});
     EXPECT_EQ(DecodeRpcServer::minLoadedCacheBlockCount({full_first, completed}), 3u);
-    EXPECT_EQ(DecodeRpcServer::minLoadedCacheBlockCount({tail_first, completed}), 0u);
+    EXPECT_EQ(DecodeRpcServer::minLoadedCacheBlockCount({tail_first, completed}), 3u);
 }
 
 TEST(DecodeRpcServerTest, MultiRankHandoffUsesMinimumPrefix) {
     EXPECT_EQ(DecodeRpcServer::minLoadedCacheBlockCount({6, 4, 5}), 4u);
     EXPECT_EQ(DecodeRpcServer::minLoadedCacheBlockCount({}), 0u);
+}
+
+TEST(DecodeRpcServerTest, LinearHeadPartitionsSplitSourceForLargerDecodeTp) {
+    const std::vector<std::string> peers{"127.0.0.1:1000:2000", "127.0.0.1:1001:2001"};
+    const auto partitions = DecodeRpcServer::prefillPeerPartitions(peers, /*attention_tp=*/4, /*attention_rank=*/1);
+
+    ASSERT_EQ(partitions.size(), 1u);
+    const auto& partition = partitions.at(peers[0]);
+    EXPECT_EQ(partition.local_partition_count, 1);
+    EXPECT_EQ(partition.local_partition_id, 0);
+    EXPECT_EQ(partition.remote_partition_count, 2);
+    EXPECT_EQ(partition.remote_partition_id, 1);
+}
+
+TEST_F(LinearTransferRpcServerTest, LegacyLinearRejectsAsymmetricPartitionsInMainAndMtp) {
+    struct Case {
+        int prefill_tp;
+        int decode_tp;
+    };
+    for (const auto& test_case : {Case{1, 2}, Case{2, 4}, Case{2, 1}, Case{4, 2}}) {
+        for (const bool in_mtp : {false, true}) {
+            SCOPED_TRACE(testing::Message()
+                         << test_case.prefill_tp << "->" << test_case.decode_tp << " mtp=" << in_mtp);
+            auto config = in_mtp ? test::makeSimpleMhaCacheConfig(1, 8, 64, DataType::TYPE_FP16) :
+                                   makeLinearTransferConfig(false);
+            std::unique_ptr<ProposeModelEngineInitParams> propose;
+            if (in_mtp) {
+                config.mtp_sub_configs.push_back(std::make_shared<CacheConfig>(makeLinearTransferConfig(false)));
+                auto modules = std::make_unique<std::vector<std::unique_ptr<EngineInitParams>>>();
+                modules->push_back(std::make_unique<EngineInitParams>());
+                propose = std::make_unique<ProposeModelEngineInitParams>(SP_TYPE_MTP, 1, std::move(modules));
+            }
+            DecodeRpcServer server;
+            server.engine_                   = std::make_shared<LinearTransferTestEngine>(config);
+            server.propose_maga_init_params_ = propose.get();
+            std::vector<std::string> peers;
+            for (int rank = 0; rank < test_case.prefill_tp; ++rank) {
+                peers.push_back("rank" + std::to_string(rank) + ":1:2");
+            }
+            for (int rank = 0; rank < test_case.decode_tp; ++rank) {
+                server.maga_init_params_.parallelism_config.tp_size = test_case.decode_tp;
+                server.maga_init_params_.parallelism_config.tp_rank = rank;
+                GroupBlockIds blocks;
+                for (const auto& tag : config.topology().groupTags()) {
+                    blocks.tag_to_index_.emplace(tag, blocks.rows_.size());
+                    blocks.rows_.push_back(std::make_shared<BlockIds>());
+                }
+                const auto result = server.loadCache(makeLoadContext("request", peers, {}, std::move(blocks), 1));
+                EXPECT_EQ(result.error_info.code(), ErrorCode::INVALID_PARAMS);
+                EXPECT_NE(result.error_info.ToString().find("LINEAR"), std::string::npos);
+                EXPECT_EQ(result.loaded_cache_block_count, 0u);
+            }
+        }
+    }
+}
+
+TEST_F(LinearTransferRpcServerTest, LegacyLinearKeepsSymmetricPartitionsAndSegmentedLinearKeepsAsymmetricOnes) {
+    for (const bool segmented : {false, true}) {
+        for (const int prefill_tp : {1, 2, 4}) {
+            DecodeRpcServer server;
+            server.engine_ = std::make_shared<LinearTransferTestEngine>(makeLinearTransferConfig(segmented));
+            std::vector<std::string> peers;
+            for (int rank = 0; rank < prefill_tp; ++rank) {
+                peers.push_back("rank" + std::to_string(rank) + ":1:2");
+            }
+            for (const int decode_tp : {1, 2, 4}) {
+                if (!segmented && prefill_tp != decode_tp) {
+                    continue;
+                }
+                for (int rank = 0; rank < decode_tp; ++rank) {
+                    SCOPED_TRACE(testing::Message()
+                                 << prefill_tp << "->" << decode_tp << " rank=" << rank << " segmented=" << segmented);
+                    EXPECT_TRUE(server
+                                    .validateLinearCacheTransferPartitions(
+                                        DecodeRpcServer::prefillPeerPartitions(peers, decode_tp, rank))
+                                    .ok());
+                }
+            }
+        }
+    }
+}
+
+TEST(DecodeRpcServerTest, LinearHeadPartitionsMergeSourcesForSmallerDecodeTp) {
+    const std::vector<std::string> peers{
+        "127.0.0.1:1000:2000", "127.0.0.1:1001:2001", "127.0.0.1:1002:2002", "127.0.0.1:1003:2003"};
+    const auto partitions = DecodeRpcServer::prefillPeerPartitions(peers, /*attention_tp=*/2, /*attention_rank=*/1);
+
+    ASSERT_EQ(partitions.size(), 2u);
+    EXPECT_EQ(partitions.at(peers[2]).local_partition_count, 2);
+    EXPECT_EQ(partitions.at(peers[2]).local_partition_id, 0);
+    EXPECT_EQ(partitions.at(peers[3]).local_partition_count, 2);
+    EXPECT_EQ(partitions.at(peers[3]).local_partition_id, 1);
+    EXPECT_EQ(partitions.at(peers[3]).remote_partition_count, 1);
+    EXPECT_EQ(partitions.at(peers[3]).remote_partition_id, 0);
+}
+
+TEST(DecodeRpcServerTest, LinearHeadPartitionsKeepSymmetricTpUnsplit) {
+    const std::vector<std::string> peers{"127.0.0.1:1000:2000", "127.0.0.1:1001:2001"};
+    const auto partitions = DecodeRpcServer::prefillPeerPartitions(peers, /*attention_tp=*/2, /*attention_rank=*/1);
+
+    ASSERT_EQ(partitions.size(), 1u);
+    const auto& partition = partitions.at(peers[1]);
+    EXPECT_EQ(partition.local_partition_count, 1);
+    EXPECT_EQ(partition.remote_partition_count, 1);
+    EXPECT_EQ(partition.local_partition_id, 0);
+    EXPECT_EQ(partition.remote_partition_id, 0);
+}
+
+TEST(DecodeRpcServerTest, NonLinearGroupsKeepLegacyReplicaSelection) {
+    const std::vector<std::string> peers{
+        "127.0.0.1:1000:2000", "127.0.0.1:1001:2001", "127.0.0.1:1002:2002", "127.0.0.1:1003:2003"};
+    const auto mla = DecodeRpcServer::prefillPeerPartitions(peers, 2, 1, /*use_mla=*/true);
+    ASSERT_EQ(mla.size(), 1u);
+    EXPECT_EQ(mla.at(peers[2]).local_partition_count, 1);
+    EXPECT_EQ(mla.at(peers[2]).remote_partition_count, 1);
+
+    const auto replicated =
+        DecodeRpcServer::prefillPeerPartitions(peers, 8, 5, /*use_mla=*/false, /*replicated_kv=*/true);
+    ASSERT_EQ(replicated.size(), 1u);
+    EXPECT_EQ(replicated.at(peers[1]).remote_partition_count, 8);
+    EXPECT_EQ(replicated.at(peers[1]).remote_partition_id, 5);
+}
+
+TEST(DecodeRpcServerTest, MlaPeerPartitionsRejectIncompatibleTpWithoutIndexingPeers) {
+    const std::vector<std::string> peers{
+        "127.0.0.1:1000:2000", "127.0.0.1:1001:2001", "127.0.0.1:1002:2002", "127.0.0.1:1003:2003"};
+    for (int rank = 0; rank < 6; ++rank) {
+        SCOPED_TRACE(rank);
+        ASSERT_TRUE(DecodeRpcServer::prefillPeerPartitions(peers, 6, rank, /*use_mla=*/true).empty());
+    }
+}
+
+TEST(DecodeRpcServerTest, ReplicatedLinearHeadsUseAttentionTpRatherThanPeerCount) {
+    const std::vector<std::string> peers{
+        "127.0.0.1:1000:2000", "127.0.0.1:1001:2001", "127.0.0.1:1002:2002", "127.0.0.1:1003:2003"};
+    // Four physical peers each hold all heads (Prefill attention TP=1).
+    // Decode TP=2 takes half of one replica, rather than merging two peers.
+    const auto partitions = DecodeRpcServer::prefillPeerPartitions(
+        peers, /*attention_tp=*/2, /*attention_rank=*/1, /*use_mla=*/false, /*replicated_kv=*/true);
+    ASSERT_EQ(partitions.size(), 1u);
+    const auto& partition = partitions.at(peers[1]);
+    EXPECT_EQ(partition.local_partition_count, 1);
+    EXPECT_EQ(partition.remote_partition_count, 2);
+    EXPECT_EQ(partition.remote_partition_id, 1);
+}
+
+TEST(DecodeRpcServerTest, CompletedHandoffSkipsKeysWithoutRankLocalLoads) {
+    // Both ranks have completed their own three loads in a six-block request.
+    // The result is a global prefix length, rather than a local transfer count.
+    EXPECT_EQ(DecodeRpcServer::completedHandoffPrefixBlocks(
+                  /*already_reused_blocks=*/0, /*required=*/{1, 0, 1, 0, 1, 0}, /*transferred=*/{1, 0, 1, 0, 1, 0}),
+              6u);
+    EXPECT_EQ(DecodeRpcServer::completedHandoffPrefixBlocks(
+                  /*already_reused_blocks=*/0, /*required=*/{0, 1, 0, 1, 0, 1}, /*transferred=*/{0, 1, 0, 1, 0, 1}),
+              6u);
+}
+
+TEST(DecodeRpcServerTest, IncompleteRankLocalLoadStopsTheGlobalPrefix) {
+    const auto rank0_prefix = DecodeRpcServer::completedHandoffPrefixBlocks(
+        /*already_reused_blocks=*/0, /*required=*/{1, 0, 1, 0, 1, 0}, /*transferred=*/{1, 0, 1, 0, 1, 0});
+    const auto rank1_prefix = DecodeRpcServer::completedHandoffPrefixBlocks(
+        /*already_reused_blocks=*/0, /*required=*/{0, 1, 0, 1, 0, 1}, /*transferred=*/{0, 1, 0, 0, 0, 0});
+
+    EXPECT_EQ(rank1_prefix, 3u);
+    EXPECT_EQ(DecodeRpcServer::minLoadedCacheBlockCount({rank0_prefix, rank1_prefix}), 3u);
+}
+
+TEST(DecodeRpcServerTest, CompletedHandoffDoesNotSkipAnIncompleteDenseLoad) {
+    EXPECT_EQ(DecodeRpcServer::completedHandoffPrefixBlocks(
+                  /*already_reused_blocks=*/0, /*required=*/{1, 1, 1, 1, 1, 1}, /*transferred=*/{1, 1, 1, 0, 1, 0}),
+              3u);
 }
 
 TEST(DecodeRpcServerTest, EmptyRemoteLoadTopologyFailsBeforePartitionArithmetic) {
@@ -405,13 +615,15 @@ TEST(DecodeRpcServerTest, PpLoadRequestCarriesStagePeerGroups) {
     const GroupBlockIds               block_ids_by_group;
     const std::vector<StagePeerGroup> groups = {{{0, 2}, {"prefill-0", "prefill-1"}, false},
                                                 {{2, 2}, {"prefill-2", "prefill-3"}, true}};
-    const auto                        load_context =
+    auto                              load_context =
         makeLoadContext(request_key, peer_addrs, cache_keys, block_ids_by_group, /*cp_size=*/2, /*reuse=*/0, groups);
+    load_context.prefill_tp_size = 2;
 
     const auto request = server.buildBroadcastLoadRequest(load_context);
 
     // PP routing ignores the flat peer list and ships the stage groups instead.
     EXPECT_EQ(request.prefill_cp_size(), 2);
+    EXPECT_EQ(request.prefill_tp_size(), 2);
     EXPECT_EQ(request.peer_addrs_size(), 0);
     ASSERT_EQ(request.stage_peer_groups_size(), 2);
     EXPECT_EQ(request.stage_peer_groups(0).layer_begin(), 0);
@@ -462,6 +674,7 @@ TEST(DecodeRpcServerTest, CPShardedLoadRequestReadsFromEveryPrefillPeer) {
     const auto request = server.constructRemoteLoadRequest(load_context, /*index=*/0, peer_addrs);
 
     EXPECT_EQ(request.prefill_cp_size(), 2);
+    EXPECT_EQ(request.prefill_tp_size(), 2);
     EXPECT_EQ(request.partition_count(), 1);
     EXPECT_EQ(request.partition_id(), 0);
     EXPECT_EQ(request.reuse_block_size(), 3);
@@ -491,6 +704,7 @@ TEST(DecodeRpcServerTest, CPShardedMlaLoadRequestReadsFromEveryPrefillPeer) {
     const auto request = server.constructRemoteLoadRequestForMla(load_context, /*index=*/1, peer_addrs);
 
     EXPECT_EQ(request.prefill_cp_size(), 2);
+    EXPECT_EQ(request.prefill_tp_size(), 2);
     EXPECT_EQ(request.partition_count(), 1);
     EXPECT_EQ(request.partition_id(), 0);
     EXPECT_EQ(request.reuse_block_size(), 3);
@@ -523,23 +737,24 @@ TEST(DecodeRpcServerTest, TaggedBlockRowsPreserveReceivedOrderAcrossTopologies) 
     auto topology =
         CacheTopology::create({makeRpcGroup("linear"), makeRpcGroup("full")}, {{0, {"linear"}}, {1, {"full"}}});
     BroadcastLoadRequestPB request;
-    auto*                  full = request.add_tagged_group_block_ids();
-    full->set_tag("full");
-    full->add_block_ids(10);
     auto* linear = request.add_tagged_group_block_ids();
     linear->set_tag("linear");
     linear->add_block_ids(20);
+    auto*                  full = request.add_tagged_group_block_ids();
+    full->set_tag("full");
+    full->add_block_ids(10);
 
     const auto blocks = DecodeRpcServer::decodeGroupBlockIds(request, *topology);
-    EXPECT_EQ(blocks.orderedTags(), (std::vector<std::string>{"full", "linear"}));
+    EXPECT_EQ(blocks.orderedTags(), (std::vector<std::string>{"linear", "full"}));
+    EXPECT_NE(blocks.orderedTags(), topology->groupTags());
     EXPECT_EQ(blocks.blocks("full"), (BlockIndicesType{10}));
     EXPECT_EQ(blocks.blocks("linear"), (BlockIndicesType{20}));
 
     auto reordered =
         CacheTopology::create({makeRpcGroup("full"), makeRpcGroup("linear")}, {{0, {"linear"}}, {1, {"full"}}});
-    EXPECT_NE(topology->groupTags(), reordered->groupTags());
+    EXPECT_EQ(topology->groupTags(), reordered->groupTags());
     const auto reordered_blocks = DecodeRpcServer::decodeGroupBlockIds(request, *reordered);
-    EXPECT_EQ(reordered_blocks.orderedTags(), (std::vector<std::string>{"full", "linear"}));
+    EXPECT_EQ(reordered_blocks.orderedTags(), (std::vector<std::string>{"linear", "full"}));
     EXPECT_EQ(reordered_blocks.blocks("full"), blocks.blocks("full"));
     EXPECT_EQ(DecodeRpcServer::makeTaggedRequestKey(42, 1, topology->group("full").tag),
               DecodeRpcServer::makeTaggedRequestKey(42, 1, reordered->group("full").tag));
@@ -592,9 +807,13 @@ TEST(DecodeRpcServerTest, ResourceRowsKeepTheirOwnOrderAndSharedLifetime) {
         CacheTopology::create({makeRpcGroup("linear"), makeRpcGroup("full")}, {{0, {"full", "linear"}}}));
     resource->mutableBlockIds("linear").assign({20});
     resource->mutableBlockIds("full").assign({10});
-    auto context = makeLoadContext("request", {"peer"}, {}, resource->groupBlockIds(), 1);
+    // Received row order is independent of canonical topology IDs. Keep the
+    // resource's shared holders while giving the context a noncanonical index.
+    GroupBlockIds received{{{"linear", 0}, {"full", 1}},
+                           {resource->groupBlockIds("linear"), resource->groupBlockIds("full")}};
+    auto context = makeLoadContext("request", {"peer"}, {}, received, 1);
     EXPECT_NE(&context.groupBlockIds().tag_to_index_, &resource->groupBlockIds().tag_to_index_);
-    EXPECT_EQ(context.groupBlockIds().rows_[1], resource->groupBlockIds().rows_[1]);
+    EXPECT_EQ(context.groupBlockIds().rows_[1], resource->groupBlockIds("full"));
     resource->mutableBlockIds("full").assign({11, NULL_BLOCK_IDX});
     resource.reset();
     auto sender_topology =
@@ -869,8 +1088,13 @@ public:
         return is_dspark;
     }
 
+    bool isMTPEagle() override {
+        return is_mtp;
+    }
+
     int  enqueue_count = 0;
     bool is_dspark     = false;
+    bool is_mtp        = false;
 };
 
 class HandoffRpcService: public RpcService::Service {
@@ -1606,6 +1830,55 @@ TEST(DecodeRpcServerTest, SuccessfulRequestHasNoPhaseErrorType) {
               nullptr);
 }
 
+TEST(DecodeRpcServerTest, CompactDecodeTp4LoadsGlobalPagesIntoLocalSlots) {
+    const auto                        policy   = defaultCacheGroupPolicy(CacheGroupType::FULL);
+    const std::vector<KeyOffsetPairs> expected = {
+        {{0, 0}, {4, 1}, {8, 2}, {12, 3}},
+        {{1, 0}, {5, 1}, {9, 2}},
+        {{2, 0}, {6, 1}, {10, 2}},
+        {{3, 0}, {7, 1}, {11, 2}},
+    };
+    for (int rank = 0; rank < 4; ++rank) {
+        const auto plan = DecodeRpcServer::buildGroupLoadPlan(policy,
+                                                              /*local_block_num=*/4,
+                                                              /*cache_key_count=*/13,
+                                                              /*reuse_block_size=*/0,
+                                                              /*use_hybrid=*/true,
+                                                              /*group_seq_size_per_block=*/4096,
+                                                              /*base_seq_size_per_block=*/4096,
+                                                              /*decode_cp_rank=*/rank,
+                                                              /*decode_cp_size=*/4);
+        EXPECT_EQ(keyOffsetPairs(plan), expected[rank]);
+    }
+}
+
+TEST(DecodeRpcServerTest, CompactTp8ToTp4PreservesGlobalKeysAcrossPrefillPeers) {
+    const auto policy = defaultCacheGroupPolicy(CacheGroupType::FULL);
+    const auto peer1  = buildCacheStorePlan(policy, 13, 0, true, /*cp_rank=*/1, /*cp_size=*/8);
+    const auto peer5  = buildCacheStorePlan(policy, 13, 0, true, /*cp_rank=*/5, /*cp_size=*/8);
+    // Decode rank 1 interleaves P ranks 1 and 5; copying either P table
+    // wholesale would place global page 9 in the wrong Decode slot.
+    EXPECT_EQ(keyOffsetPairs(peer1), (KeyOffsetPairs{{1, 0}, {9, 1}}));
+    EXPECT_EQ(keyOffsetPairs(peer5), (KeyOffsetPairs{{5, 0}}));
+    const auto decode = DecodeRpcServer::buildGroupLoadPlan(policy, 4, 13, 0, true, 4096, 4096, 1, 4);
+    EXPECT_EQ(keyOffsetPairs(decode), (KeyOffsetPairs{{1, 0}, {5, 1}, {9, 2}}));
+
+    const auto reused = DecodeRpcServer::buildGroupLoadPlan(policy, 4, 13, 5, false, 4096, 4096, 1, 4);
+    EXPECT_EQ(keyOffsetPairs(reused), (KeyOffsetPairs{{5, 1}, {9, 2}}));
+}
+
+TEST(DecodeRpcServerTest, CompactDecodeRejectsMissingOwnedPageCapacity) {
+    EXPECT_ANY_THROW(DecodeRpcServer::buildGroupLoadPlan(defaultCacheGroupPolicy(CacheGroupType::FULL),
+                                                         /*local_block_num=*/3,
+                                                         /*cache_key_count=*/13,
+                                                         /*reuse_block_size=*/0,
+                                                         /*use_hybrid=*/true,
+                                                         4096,
+                                                         4096,
+                                                         0,
+                                                         4));
+}
+
 TEST(DecodeRpcServerTest, HeterogeneousFullGroupUsesGlobalEndpointKeys) {
     const auto policy        = defaultCacheGroupPolicy(CacheGroupType::FULL);
     const auto producer_plan = buildCacheStorePlan(policy,
@@ -1648,6 +1921,48 @@ TEST(DecodeRpcServerTest, HeterogeneousPartialBlockUsesLastAvailableKey) {
 
     EXPECT_EQ(keyOffsetPairs(producer_plan), (KeyOffsetPairs{{1, 0}, {3, 1}, {4, 2}}));
     EXPECT_EQ(keyOffsetPairs(decode_plan), keyOffsetPairs(producer_plan));
+}
+
+TEST(DecodeRpcServerTest, FullBlockSourcePeerMatchesProducerAcrossSpansAndShards) {
+    const auto policy = defaultCacheGroupPolicy(CacheGroupType::FULL);
+    for (const size_t key_span : {1u, 2u, 3u}) {
+        for (const size_t key_count : {17u, 18u}) {
+            const size_t logical_blocks = (key_count + key_span - 1) / key_span;
+            for (const int prefill_cp : {2, 3, 4}) {
+                SCOPED_TRACE(::testing::Message()
+                             << "span=" << key_span << " keys=" << key_count << " prefill_cp=" << prefill_cp);
+                std::vector<int> published_by(key_count, -1);
+                for (int peer = 0; peer < prefill_cp; ++peer) {
+                    const auto published =
+                        buildCacheStorePlan(policy, logical_blocks, 0, true, peer, prefill_cp, key_span, key_count);
+                    for (const auto& pair : published) {
+                        ASSERT_EQ(published_by[pair.key_index], -1);
+                        published_by[pair.key_index] = peer;
+                    }
+                }
+                for (const int decode_cp : {1, 2, 4}) {
+                    const size_t local_blocks = (logical_blocks + decode_cp - 1) / decode_cp;
+                    for (int rank = 0; rank < decode_cp; ++rank) {
+                        const auto loaded =
+                            DecodeRpcServer::buildGroupLoadPlan(policy,
+                                                                local_blocks,
+                                                                key_count,
+                                                                0,
+                                                                true,
+                                                                /*group_seq_size_per_block=*/4 * key_span,
+                                                                /*base_seq_size_per_block=*/4,
+                                                                rank,
+                                                                decode_cp);
+                        for (const auto& pair : loaded) {
+                            ASSERT_GE(published_by[pair.key_index], 0);
+                            EXPECT_EQ(DecodeRpcServer::fullBlockSourcePeer(pair.key_index, key_span, prefill_cp),
+                                      static_cast<size_t>(published_by[pair.key_index]));
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 TEST(DecodeRpcServerTest, CompactStateGroupLoadsGlobalTailKeysIntoCanonicalSlots) {
@@ -1782,17 +2097,58 @@ TEST(DecodeRpcServerTest, FullGroupKeepsWholeLogicalBlocksAfterReuse) {
     EXPECT_EQ(keyOffsetPairs(plan), (KeyOffsetPairs{{2, 2}, {3, 3}}));
 }
 
-TEST(DecodeRpcServerTest, EmptyTableOrMissingCacheKeysYieldNoLoad) {
-    const auto policy = makeCompactStatePolicy(/*active_tail_blocks=*/2);
+TEST(DecodeRpcServerTest, IncompleteDestinationTableCannotEraseRequiredLoads) {
+    const auto full_policy = defaultCacheGroupPolicy(CacheGroupType::FULL);
+    EXPECT_ANY_THROW(DecodeRpcServer::buildGroupLoadPlan(full_policy,
+                                                         /*local_block_num=*/2,
+                                                         /*cache_key_count=*/3,
+                                                         /*reuse_block_size=*/0,
+                                                         /*use_hybrid=*/true,
+                                                         kBaseSeqSizePerBlock,
+                                                         kBaseSeqSizePerBlock));
+    EXPECT_ANY_THROW(DecodeRpcServer::buildGroupLoadPlan(full_policy,
+                                                         /*local_block_num=*/2,
+                                                         /*cache_key_count=*/6,
+                                                         /*reuse_block_size=*/0,
+                                                         /*use_hybrid=*/true,
+                                                         kBaseSeqSizePerBlock,
+                                                         kBaseSeqSizePerBlock,
+                                                         /*decode_cp_rank=*/0,
+                                                         /*decode_cp_size=*/2));
 
-    EXPECT_TRUE(DecodeRpcServer::buildGroupLoadPlan(policy,
+    const auto compact_policy = makeCompactStatePolicy(/*active_tail_blocks=*/2);
+    EXPECT_ANY_THROW(DecodeRpcServer::buildGroupLoadPlan(compact_policy,
+                                                         /*local_block_num=*/5,
+                                                         /*cache_key_count=*/11,
+                                                         /*reuse_block_size=*/0,
+                                                         /*use_hybrid=*/true,
+                                                         kCompactSeqSizePerBlock,
+                                                         kBaseSeqSizePerBlock));
+    EXPECT_ANY_THROW(DecodeRpcServer::buildGroupLoadPlan(compact_policy,
+                                                         /*local_block_num=*/0,
+                                                         /*cache_key_count=*/11,
+                                                         /*reuse_block_size=*/0,
+                                                         /*use_hybrid=*/true,
+                                                         kCompactSeqSizePerBlock,
+                                                         kBaseSeqSizePerBlock));
+}
+
+TEST(DecodeRpcServerTest, RankWithoutOwnedPagesHasNoRequiredLoads) {
+    EXPECT_TRUE(DecodeRpcServer::buildGroupLoadPlan(defaultCacheGroupPolicy(CacheGroupType::FULL),
                                                     /*local_block_num=*/0,
-                                                    /*cache_key_count=*/11,
+                                                    /*cache_key_count=*/1,
                                                     /*reuse_block_size=*/0,
                                                     /*use_hybrid=*/true,
-                                                    kCompactSeqSizePerBlock,
-                                                    kBaseSeqSizePerBlock)
+                                                    kBaseSeqSizePerBlock,
+                                                    kBaseSeqSizePerBlock,
+                                                    /*decode_cp_rank=*/1,
+                                                    /*decode_cp_size=*/2)
                     .empty());
+}
+
+TEST(DecodeRpcServerTest, MissingCacheKeysYieldNoLoad) {
+    const auto policy = makeCompactStatePolicy(/*active_tail_blocks=*/2);
+
     EXPECT_TRUE(DecodeRpcServer::buildGroupLoadPlan(policy,
                                                     /*local_block_num=*/6,
                                                     /*cache_key_count=*/0,
@@ -1922,6 +2278,81 @@ protected:
     std::shared_ptr<RoutingCacheStore> store_;
     DecodeRpcServer                    server_;
 };
+
+TEST_F(DecodeRpcLoadRoutingTest, TypedReplicatedGroupsLoadTargetAndDraftFromOwnerPeer) {
+    for (bool with_mtp : {false, true}) {
+        auto spec                        = test::makeResolvedOpaqueSpec(false, "default", DataType::TYPE_UINT8, 64, 4);
+        spec->tp_transfer.mode           = TpCacheTransferMode::REPLICATED;
+        auto config                      = test::makeSingleGroupCacheConfig(spec, CacheGroupType::FULL, 4, 8);
+        config.use_opaque_kv_cache_store = true;
+        if (with_mtp) {
+            auto draft = test::makeSingleGroupCacheConfig(spec->clone(), CacheGroupType::FULL, 1, 8);
+            draft.use_opaque_kv_cache_store = true;
+            config.mtp_sub_configs.push_back(config.mergeMTPModule(draft, 0, config.layer_num));
+        }
+        ASSERT_TRUE(initReceiver(false, config));
+        std::unique_ptr<ProposeModelEngineInitParams> propose;
+        if (with_mtp) {
+            auto module                      = std::make_unique<EngineInitParams>();
+            module->model_id                 = 29;
+            module->model_config_.num_layers = 1;
+            auto modules                     = std::make_unique<std::vector<std::unique_ptr<EngineInitParams>>>();
+            modules->push_back(std::move(module));
+            propose = std::make_unique<ProposeModelEngineInitParams>(SP_TYPE_MTP, 1, std::move(modules));
+            std::dynamic_pointer_cast<HandoffEngine>(server_.engine_)->is_mtp = true;
+        }
+        server_.propose_maga_init_params_ = propose.get();
+        auto request                      = makeRequest(false);
+        request.add_peer_addrs("unused-replica:3:4");
+        request.set_prefill_tp_size(2);
+        grpc::ServerContext     context;
+        BroadcastLoadResponsePB response;
+        ASSERT_TRUE(server_.RemoteLoad(&context, &request, &response).ok());
+        ASSERT_EQ(response.error_info().error_code(), ErrorCodePB::NONE_ERROR);
+        EXPECT_EQ(response.loaded_cache_block_count(), 1);
+        ASSERT_EQ(store_->calls.size(), 1u);
+        EXPECT_EQ(store_->calls[0].peer, "prefill-whole");
+        const auto& buffers = store_->calls[0].buffers;
+        ASSERT_EQ(buffers.size(), with_mtp ? 5u : 4u);
+        for (size_t index = 0; index < buffers.size(); ++index) {
+            const bool draft = index == 4;
+            const auto key   = makeCacheKey(draft ? 29 : 17, "101", draft ? 0 : index, "default");
+            const auto parts = cache_manager_->convertIndexToBuffer(index, "default", 2);
+            ASSERT_EQ(parts.size(), 1u);
+            ASSERT_EQ(buffers[index]->getBlocksCount(), 1u);
+            const auto block = buffers[index]->getBlock("kv_" + key);
+            ASSERT_NE(block, nullptr);
+            EXPECT_EQ(block->addr.get(), parts[0].addr);
+            EXPECT_EQ(block->len, parts[0].size_bytes);
+        }
+        server_.propose_maga_init_params_ = nullptr;
+    }
+}
+
+TEST_F(DecodeRpcLoadRoutingTest, SymmetricLegacyLinearLoadsOnlyItsOwningTpPeer) {
+    for (int rank = 0; rank < 2; ++rank) {
+        auto config                            = test::makeSimpleLinearCacheConfig(4, 8, 4, DataType::TYPE_BF16);
+        config.model_has_multiple_cache_groups = true;
+        ASSERT_TRUE(initReceiver(false, config));
+        auto& pc   = server_.maga_init_params_.parallelism_config;
+        pc.tp_size = pc.world_size = 2;
+        pc.tp_rank = pc.world_rank = rank;
+        auto request               = makeRequest(false);
+        request.clear_peer_addrs();
+        request.add_peer_addrs("127.0.0.1:1000:2000");
+        request.add_peer_addrs("127.0.0.2:1001:2001");
+        request.set_prefill_tp_size(2);
+        request.mutable_tagged_group_block_ids(0)->set_tag("linear");
+        grpc::ServerContext     context;
+        BroadcastLoadResponsePB response;
+        ASSERT_TRUE(server_.RemoteLoad(&context, &request, &response).ok());
+        ASSERT_EQ(response.error_info().error_code(), ErrorCodePB::NONE_ERROR);
+        ASSERT_EQ(store_->calls.size(), 1u);
+        EXPECT_EQ(store_->calls[0].peer, rank == 0 ? "127.0.0.1" : "127.0.0.2");
+        EXPECT_EQ(store_->calls[0].buffers.size(), 4u);
+        EXPECT_EQ(response.loaded_cache_block_count(), 1);
+    }
+}
 
 TEST_F(DecodeRpcLoadRoutingTest, SingletonFullStageKeepsWholeModelTransferKeys) {
     auto config                            = makeMhaCacheConfig(2, 4, 1, 4, 8, DataType::TYPE_FP16);
@@ -2080,6 +2511,445 @@ TEST_F(DecodeRpcLoadRoutingTest, SingleStageReceiverUsesPrefillStagesWithoutRela
     request.add_tagged_group_block_ids()->set_tag("other-stage");
     EXPECT_ANY_THROW(server_.RemoteLoad(&context, &request, &response));
     EXPECT_TRUE(store_->calls.empty());
+}
+
+TEST(DecodeRpcServerTest, SourceTopologyIsPreservedByEveryLoadRequestBuilder) {
+    DecodeRpcServer server;
+    server.resource_.workers = {"decode-0", "decode-1"};
+    const std::vector<std::string> peers{"prefill-0", "prefill-1", "prefill-2", "prefill-3"};
+    for (int attention_tp : {1, 4}) {
+        auto context            = makeLoadContext("request", peers, {101}, GroupBlockIds{}, /*prefill_cp_size=*/4);
+        context.prefill_tp_size = attention_tp;
+        const auto common       = server.buildBroadcastLoadRequest(context);
+        for (const auto& request : {server.constructRemoteLoadRequestForMla(context, 0, peers),
+                                    server.constructRemoteLoadRequest(context, 0, peers),
+                                    common}) {
+            EXPECT_EQ(request.prefill_cp_size(), 4);
+            EXPECT_EQ(request.prefill_tp_size(), attention_tp);
+            EXPECT_EQ(request.peer_addrs_size(), 4);
+            EXPECT_EQ(request.SerializeAsString(), common.SerializeAsString());
+        }
+    }
+}
+
+namespace {
+
+KVCacheSpecPtr makeRoutingLinearSpec(bool segmented, int tp_size = 2) {
+    LinearAttentionConfig linear;
+    linear.linear_conv_kernel_dim = 2;
+    linear.linear_key_head_dim = linear.linear_value_head_dim = 2;
+    linear.linear_num_key_heads = linear.linear_num_value_heads = 16;
+    ParallelismConfig parallelism;
+    parallelism.tp_size = tp_size;
+    KVCacheSpecDesc desc;
+    desc.tag              = "linear";
+    desc.cache_type       = KVCacheSpecType::LinearAttention;
+    desc.dtype            = DataType::TYPE_BF16;
+    desc.tp_transfer_mode = segmented ? TpCacheTransferMode::LINEAR_QKV : TpCacheTransferMode::LEGACY;
+    SpecBuildContext context;
+    context.dtype                   = desc.dtype;
+    context.seq_size_per_block      = 8;
+    context.linear_attention_config = &linear;
+    context.parallelism_config      = &parallelism;
+    return SpecBuilder::build(desc, context);
+}
+
+KVCacheSpecPtr makeRoutingMhaSpec(int tp_size, int heads, DataType dtype) {
+    AttentionConfigs attention;
+    attention.kv_head_num   = heads;
+    attention.size_per_head = 4;
+    ParallelismConfig parallelism;
+    parallelism.tp_size = tp_size;
+    KVCacheSpecDesc desc;
+    desc.tag              = "full";
+    desc.cache_type       = KVCacheSpecType::MultiHeadAttention;
+    desc.dtype            = dtype;
+    desc.tp_transfer_mode = TpCacheTransferMode::MHA_HEADS;
+    SpecBuildContext context;
+    context.dtype                   = dtype;
+    context.seq_size_per_block      = 8;
+    context.kernel_tokens_per_block = 4;
+    context.attn_config             = &attention;
+    context.parallelism_config      = &parallelism;
+    return SpecBuilder::build(desc, context);
+}
+
+}  // namespace
+
+TEST_F(DecodeRpcLoadRoutingTest, BroadcastLinearStagesUseTheirOwnTpPeers) {
+    for (bool segmented : {false, true}) {
+        for (int rank = 0; rank < 2; ++rank) {
+            auto config =
+                test::makeSingleGroupCacheConfig(makeRoutingLinearSpec(segmented), CacheGroupType::LINEAR, 1, 8);
+            config.model_has_multiple_cache_groups = true;
+            ASSERT_TRUE(initReceiver(true, config));
+            auto& pc                 = server_.maga_init_params_.parallelism_config;
+            pc.pp_size               = 2;
+            pc.pp_rank               = 1;
+            pc.tp_size               = 2;
+            pc.tp_rank               = rank;
+            pc.world_size            = 4;
+            pc.world_rank            = 2 + rank;
+            pc.pp_stage_layer_counts = {3, 1};
+            auto blocks              = std::make_shared<BlockIds>();
+            blocks->assign({2});
+            const std::vector<StagePeerGroup> groups = {{{0, 3}, {"first-0:1:2", "first-1:1:2"}, false},
+                                                        {{3, 1}, {"last-0:1:2", "last-1:1:2"}, true}};
+            auto                              load   = makeLoadContext(
+                "linear-stages", {"unused-flat:1:2"}, {101}, GroupBlockIds{{{"linear", 0}}, {blocks}}, 1, 0, groups);
+            load.prefill_tp_size = 2;
+            const auto request   = server_.buildBroadcastLoadRequest(load);
+            ASSERT_EQ(request.peer_addrs_size(), 0);
+            ASSERT_EQ(request.stage_peer_groups_size(), 2);
+            grpc::ServerContext     context;
+            BroadcastLoadResponsePB response;
+            ASSERT_TRUE(server_.RemoteLoad(&context, &request, &response).ok());
+            ASSERT_EQ(response.error_info().error_code(), ErrorCodePB::NONE_ERROR)
+                << response.error_info().error_message();
+            EXPECT_EQ(response.loaded_cache_block_count(), 1);
+            ASSERT_EQ(store_->calls.size(), 1u);
+            EXPECT_EQ(store_->calls[0].peer, "last-" + std::to_string(rank));
+            ASSERT_EQ(store_->calls[0].buffers.size(), 1u);
+            const auto  key    = makeCacheKey(17, "101", 3, "linear");
+            const auto& buffer = store_->calls[0].buffers[0];
+            if (segmented) {
+                EXPECT_NE(buffer->getBlock(makeLinearCacheSegmentKey(0, key)), nullptr);
+            } else {
+                EXPECT_NE(buffer->getBlock("kv_" + key), nullptr);
+            }
+        }
+    }
+}
+
+TEST_F(DecodeRpcLoadRoutingTest, BroadcastCpFullOnlyStageUsesItsGroupPeerCount) {
+    // A hybrid model can assign its final FULL layer to a one-layer PP stage.
+    auto config                            = makeMhaCacheConfig(1, 8, 1, 4, 8, DataType::TYPE_FP16);
+    config.model_has_multiple_cache_groups = true;
+    ASSERT_TRUE(initReceiver(true, config));
+    auto& pc   = server_.maga_init_params_.parallelism_config;
+    pc.pp_size = pc.world_size = 2;
+    pc.pp_rank = pc.world_rank  = 1;
+    pc.pp_stage_layer_counts    = {3, 1};
+    pc.prefill_cp_config.method = CPRotateMethod::PREFILL_CP;
+    auto blocks                 = std::make_shared<BlockIds>();
+    blocks->assign({2, 3});
+    const std::vector<StagePeerGroup> groups = {{{0, 3}, {"first-0:1:2", "first-1:1:2"}, false},
+                                                {{3, 1}, {"last-0:1:2", "last-1:1:2"}, true}};
+    auto                              load   = makeLoadContext(
+        "full-stage-cp", {"unused-flat:1:2"}, {101, 102}, GroupBlockIds{{{"default", 0}}, {blocks}}, 2, 0, groups);
+    const auto request = server_.buildBroadcastLoadRequest(load);
+    ASSERT_EQ(request.peer_addrs_size(), 0);
+    // Isolate a bad transport plan so a zero divisor cannot kill other tests.
+    // Re-exec the fixture instead of inheriting initialized CUDA/gRPC threads.
+    const auto previous_death_test_style    = ::testing::FLAGS_gtest_death_test_style;
+    ::testing::FLAGS_gtest_death_test_style = "threadsafe";
+    EXPECT_EXIT(
+        {
+            grpc::ServerContext     context;
+            BroadcastLoadResponsePB response;
+            const auto              status = server_.RemoteLoad(&context, &request, &response);
+            const bool complete = status.ok() && response.error_info().error_code() == ErrorCodePB::NONE_ERROR
+                                  && response.loaded_cache_block_count() == 2 && store_->calls.size() == 2;
+            _exit(complete ? 0 : 1);
+        },
+        ::testing::ExitedWithCode(0),
+        "");
+    ::testing::FLAGS_gtest_death_test_style = previous_death_test_style;
+}
+
+class SourceSizedRoutingCacheStore final: public RoutingCacheStore {
+public:
+    std::map<std::string, size_t>                                       source_bytes;
+    std::map<std::pair<std::string, std::string>, std::vector<uint8_t>> source_payloads;
+
+    void load(const std::shared_ptr<RequestBlockBuffer>& buffer,
+              CacheStoreLoadDoneCallback                 callback,
+              const std::string&                         peer,
+              uint32_t,
+              uint32_t,
+              uint32_t,
+              int partitions,
+              int partition_id) override {
+        for (const auto& [key, block] : buffer->getBlocks()) {
+            const auto source = source_bytes.find(key);
+            if (source == source_bytes.end() || partitions <= 0 || source->second % partitions
+                || block->len != source->second / partitions) {
+                ADD_FAILURE() << "source payload mismatch: peer=" << peer << " key=" << key
+                              << " source_bytes=" << (source == source_bytes.end() ? 0 : source->second)
+                              << " destination_bytes=" << block->len << " partitions=" << partitions
+                              << " partition_id=" << partition_id;
+                callback(false, CacheStoreErrorCode::InvalidParams);
+                return;
+            }
+            auto bytes = torch::from_blob(
+                block->addr.get(),
+                {block->len},
+                torch::TensorOptions().dtype(torch::kUInt8).device(block->gpu_mem ? torch::kCUDA : torch::kCPU));
+            const auto payload = source_payloads.find({peer, key});
+            if (payload == source_payloads.end()) {
+                bytes.fill_(peer == "prefill-0" ? 11 : 22);
+            } else {
+                auto source = torch::from_blob(
+                    payload->second.data(), {static_cast<int64_t>(payload->second.size())}, torch::kUInt8);
+                bytes.copy_(source.narrow(0, static_cast<int64_t>(partition_id) * block->len, block->len));
+            }
+        }
+        callback(true, CacheStoreErrorCode::None);
+    }
+};
+
+TEST_F(DecodeRpcLoadRoutingTest, TypedSymmetricLinearReadsThePublishedPayloadOfItsTpPeer) {
+    for (int rank = 0; rank < 2; ++rank) {
+        auto linear             = std::dynamic_pointer_cast<LinearKVCacheSpec>(makeRoutingLinearSpec(true));
+        auto state              = test::makeResolvedOpaqueSpec(false, "state", DataType::TYPE_UINT8, 64, 8);
+        state->tp_transfer.mode = TpCacheTransferMode::REPLICATED;
+        CacheConfig config;
+        config.dtype                     = DataType::TYPE_BF16;
+        config.layer_num                 = 2;
+        config.seq_size_per_block        = 8;
+        config.use_opaque_kv_cache_store = true;
+        config.fromGroupedSpecs(
+            {linear, state}, {{0}, {1}}, {CacheGroupType::LINEAR, CacheGroupType::FULL}, {"linear", "state"});
+        config.finalizeBlockNums(8, RuntimeConfig{});
+        ASSERT_TRUE(initReceiver(false, config));
+        server_.maga_init_params_.model_config_.num_layers = 2;
+        auto& pc                                           = server_.maga_init_params_.parallelism_config;
+        pc.tp_size = pc.world_size = 2;
+        pc.tp_rank = pc.world_rank              = rank;
+        pc.pp_stage_layer_counts                = {2};
+        auto store                              = std::make_shared<SourceSizedRoutingCacheStore>();
+        store->memory_util_                     = createMemoryUtilImpl(false);
+        const auto linear_key                   = makeCacheKey(17, "101", 0, "linear");
+        store->source_bytes["kv_" + linear_key] = linear->block_size_bytes();
+        const auto& segments                    = linear->transferSegmentBytes();
+        for (size_t index = 0; index < segments.size(); ++index) {
+            store->source_bytes[makeLinearCacheSegmentKey(index, linear_key)] = segments[index];
+        }
+        store->source_bytes["kv_" + makeCacheKey(17, "101", 1, "state")] = state->block_size_bytes();
+        server_.resource_.cache_store                                    = store;
+        auto request                                                     = makeRequest(false);
+        request.clear_peer_addrs();
+        request.add_peer_addrs("prefill-0:1:2");
+        request.add_peer_addrs("prefill-1:1:2");
+        request.set_prefill_tp_size(2);
+        request.mutable_tagged_group_block_ids(0)->set_tag("linear");
+        auto* state_ids = request.add_tagged_group_block_ids();
+        state_ids->set_tag("state");
+        state_ids->add_block_ids(2);
+        grpc::ServerContext     context;
+        BroadcastLoadResponsePB response;
+        ASSERT_TRUE(server_.RemoteLoad(&context, &request, &response).ok());
+        ASSERT_EQ(response.error_info().error_code(), ErrorCodePB::NONE_ERROR) << response.error_info().error_message();
+        EXPECT_EQ(response.loaded_cache_block_count(), 1);
+        size_t linear_sources = 0;
+        for (const auto& call : store->calls) {
+            for (const auto& buffer : call.buffers) {
+                if (buffer->getBlock("kv_" + linear_key)
+                    || buffer->getBlock(makeLinearCacheSegmentKey(0, linear_key))) {
+                    ++linear_sources;
+                    EXPECT_EQ(call.peer, "prefill-" + std::to_string(rank));
+                }
+            }
+        }
+        EXPECT_EQ(linear_sources, 1u);
+        const auto parts = cache_manager_->convertIndexToBuffer(0, "linear", 2);
+        ASSERT_EQ(parts.size(), 1u);
+        auto bytes = torch::from_blob(parts[0].addr,
+                                      {static_cast<int64_t>(parts[0].size_bytes)},
+                                      torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA));
+        EXPECT_TRUE(bytes.eq(rank == 0 ? 11 : 22).all().item<bool>());
+    }
+}
+
+TEST_F(DecodeRpcLoadRoutingTest, TypedMixedLinearAndMhaUseTheirOwningTpPeers) {
+    for (int prefill_tp : {2, 4}) {
+        for (int rank = 0; rank < 2; ++rank) {
+            SCOPED_TRACE(::testing::Message() << "P=" << prefill_tp << " D=2 rank=" << rank);
+            auto       linear = std::dynamic_pointer_cast<LinearKVCacheSpec>(makeRoutingLinearSpec(true));
+            const auto source_linear =
+                std::dynamic_pointer_cast<LinearKVCacheSpec>(makeRoutingLinearSpec(true, prefill_tp));
+            auto mha                = test::makeResolvedMhaSpec(DataType::TYPE_BF16, 1, 4, 8, "full");
+            mha->tp_transfer.mode   = TpCacheTransferMode::MHA_HEADS;
+            auto state              = test::makeResolvedOpaqueSpec(false, "state", DataType::TYPE_UINT8, 64, 8);
+            state->tp_transfer.mode = TpCacheTransferMode::REPLICATED;
+            CacheConfig config;
+            config.dtype                     = DataType::TYPE_BF16;
+            config.layer_num                 = 3;
+            config.seq_size_per_block        = 8;
+            config.use_opaque_kv_cache_store = true;
+            config.fromGroupedSpecs({linear, mha, state},
+                                    {{0}, {1}, {2}},
+                                    {CacheGroupType::LINEAR, CacheGroupType::FULL, CacheGroupType::FULL},
+                                    {"linear", "full", "state"});
+            config.finalizeBlockNums(8, RuntimeConfig{});
+            ASSERT_TRUE(initReceiver(false, config));
+            server_.maga_init_params_.model_config_.num_layers              = 3;
+            server_.maga_init_params_.model_config_.attn_config.kv_head_num = 2;
+            auto& pc   = server_.maga_init_params_.parallelism_config;
+            pc.tp_size = pc.world_size = 2;
+            pc.tp_rank = pc.world_rank              = rank;
+            pc.pp_stage_layer_counts                = {3};
+            auto store                              = std::make_shared<SourceSizedRoutingCacheStore>();
+            store->memory_util_                     = createMemoryUtilImpl(false);
+            const auto linear_key                   = makeCacheKey(17, "101", 0, "linear");
+            store->source_bytes["kv_" + linear_key] = source_linear->block_size_bytes();
+            const auto& segments                    = source_linear->transferSegmentBytes();
+            for (size_t index = 0; index < segments.size(); ++index) {
+                store->source_bytes[makeLinearCacheSegmentKey(index, linear_key)] = segments[index];
+            }
+            const auto full_key           = "kv_" + makeCacheKey(17, "101", 1, "full");
+            store->source_bytes[full_key] = mha->block_size_bytes();
+            store->source_bytes["kv_" + makeCacheKey(17, "101", 2, "state")] = state->block_size_bytes();
+            server_.resource_.cache_store                                    = store;
+            auto request                                                     = makeRequest(false);
+            request.clear_peer_addrs();
+            for (int peer = 0; peer < prefill_tp; ++peer) {
+                request.add_peer_addrs("prefill-" + std::to_string(peer) + ":1:2");
+            }
+            request.set_prefill_tp_size(prefill_tp);
+            request.mutable_tagged_group_block_ids(0)->set_tag("linear");
+            for (const auto& tag : {"full", "state"}) {
+                auto* ids = request.add_tagged_group_block_ids();
+                ids->set_tag(tag);
+                ids->add_block_ids(2);
+            }
+            grpc::ServerContext     context;
+            BroadcastLoadResponsePB response;
+            ASSERT_TRUE(server_.RemoteLoad(&context, &request, &response).ok());
+            ASSERT_EQ(response.error_info().error_code(), ErrorCodePB::NONE_ERROR)
+                << response.error_info().error_message();
+            EXPECT_EQ(response.loaded_cache_block_count(), 1);
+            size_t full_sources = 0;
+            for (const auto& call : store->calls) {
+                for (const auto& buffer : call.buffers) {
+                    if (buffer->getBlock(full_key)) {
+                        ++full_sources;
+                        // One local MHA head can be replicated on several P ranks;
+                        // select the first owner within this Decode rank's TP slice.
+                        EXPECT_EQ(call.peer, "prefill-" + std::to_string(rank * (prefill_tp / 2)));
+                    }
+                }
+            }
+            EXPECT_EQ(full_sources, 1u);
+            const auto full_parts = cache_manager_->convertIndexToBuffer(1, "full", 2);
+            ASSERT_EQ(full_parts.size(), 1u);
+            auto full_bytes = torch::from_blob(full_parts[0].addr,
+                                               {static_cast<int64_t>(full_parts[0].size_bytes)},
+                                               torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA));
+            EXPECT_TRUE(full_bytes.eq(rank == 0 ? 11 : 22).all().item<bool>());
+        }
+    }
+}
+
+TEST_F(DecodeRpcLoadRoutingTest, MixedMhaPreservesHeadSlicesReplicasPagesAndScales) {
+    const auto packed = [](const KVCacheSpec& spec, size_t first_head, bool scales) {
+        std::vector<uint8_t> bytes;
+        const size_t         pages = spec.seq_size_per_block / spec.kernel_seq_size_per_block;
+        const size_t         heads = spec.local_kv_head_num;
+        for (size_t page = 0; page < pages; ++page) {
+            for (size_t kind = 0; kind < 2; ++kind) {
+                const size_t total =
+                    scales ? (kind == 0 ? spec.k_scale_block_size_bytes() : spec.v_scale_block_size_bytes()) :
+                             (kind == 0 ? spec.k_block_size_bytes() : spec.v_block_size_bytes());
+                for (size_t head = 0; head < heads; ++head) {
+                    bytes.insert(bytes.end(),
+                                 total / pages / heads,
+                                 static_cast<uint8_t>((scales ? 128 : 0) + page * 32 + kind * 16 + first_head + head));
+                }
+            }
+        }
+        return bytes;
+    };
+    for (const auto& geometry :
+         std::vector<std::array<int, 3>>{{2, 4, 4}, {2, 4, 2}, {1, 4, 4}, {4, 2, 4}, {4, 1, 8}, {2, 8, 4}, {4, 8, 2}}) {
+        const auto [prefill_tp, decode_tp, heads] = geometry;
+        for (DataType dtype : {DataType::TYPE_BF16, DataType::TYPE_INT8}) {
+            for (int rank = 0; rank < decode_tp; ++rank) {
+                SCOPED_TRACE(::testing::Message() << "P=" << prefill_tp << " D=" << decode_tp << " H=" << heads
+                                                  << " rank=" << rank << " dtype=" << dtype);
+                auto linear = std::dynamic_pointer_cast<LinearKVCacheSpec>(makeRoutingLinearSpec(true, decode_tp));
+                const auto source_linear =
+                    std::dynamic_pointer_cast<LinearKVCacheSpec>(makeRoutingLinearSpec(true, prefill_tp));
+                auto       mha          = makeRoutingMhaSpec(decode_tp, heads, dtype);
+                const auto source_mha   = makeRoutingMhaSpec(prefill_tp, heads, dtype);
+                auto       state        = test::makeResolvedOpaqueSpec(false, "state", DataType::TYPE_UINT8, 64, 8);
+                state->tp_transfer.mode = TpCacheTransferMode::REPLICATED;
+                CacheConfig config;
+                config.dtype                     = DataType::TYPE_BF16;
+                config.layer_num                 = 3;
+                config.seq_size_per_block        = 8;
+                config.use_opaque_kv_cache_store = true;
+                config.fromGroupedSpecs({linear, mha, state},
+                                        {{0}, {1}, {2}},
+                                        {CacheGroupType::LINEAR, CacheGroupType::FULL, CacheGroupType::FULL},
+                                        {"linear", "full", "state"});
+                config.finalizeBlockNums(8, RuntimeConfig{});
+                ASSERT_TRUE(initReceiver(false, config));
+                auto& model                   = server_.maga_init_params_.model_config_;
+                model.num_layers              = 3;
+                model.attn_config.kv_head_num = heads;
+                auto& pc                      = server_.maga_init_params_.parallelism_config;
+                pc.tp_size = pc.world_size = decode_tp;
+                pc.tp_rank = pc.world_rank              = rank;
+                pc.pp_stage_layer_counts                = {3};
+                auto store                              = std::make_shared<SourceSizedRoutingCacheStore>();
+                store->memory_util_                     = createMemoryUtilImpl(false);
+                const auto linear_key                   = makeCacheKey(17, "101", 0, "linear");
+                store->source_bytes["kv_" + linear_key] = source_linear->block_size_bytes();
+                const auto& segments                    = source_linear->transferSegmentBytes();
+                for (size_t index = 0; index < segments.size(); ++index) {
+                    store->source_bytes[makeLinearCacheSegmentKey(index, linear_key)] = segments[index];
+                }
+                const auto full_key                                              = makeCacheKey(17, "101", 1, "full");
+                store->source_bytes["kv_" + full_key]                            = source_mha->block_size_bytes();
+                store->source_bytes["kv_scale_" + full_key]                      = source_mha->scale_block_size_bytes();
+                store->source_bytes["kv_" + makeCacheKey(17, "101", 2, "state")] = state->block_size_bytes();
+                const int source_groups                                          = std::gcd(heads, prefill_tp);
+                for (int peer = 0; peer < prefill_tp; ++peer) {
+                    const auto name       = "prefill-" + std::to_string(peer);
+                    const auto first_head = (peer / (prefill_tp / source_groups)) * (heads / source_groups);
+                    store->source_payloads[{name, "kv_" + full_key}] = packed(*source_mha, first_head, false);
+                    if (source_mha->scale_block_size_bytes()) {
+                        store->source_payloads[{name, "kv_scale_" + full_key}] = packed(*source_mha, first_head, true);
+                    }
+                }
+                server_.resource_.cache_store = store;
+                auto request                  = makeRequest(false);
+                request.clear_peer_addrs();
+                for (int peer = 0; peer < prefill_tp; ++peer) {
+                    request.add_peer_addrs("prefill-" + std::to_string(peer) + ":1:2");
+                }
+                request.set_prefill_tp_size(prefill_tp);
+                request.mutable_tagged_group_block_ids(0)->set_tag("linear");
+                for (const auto& tag : {"full", "state"}) {
+                    auto* ids = request.add_tagged_group_block_ids();
+                    ids->set_tag(tag);
+                    ids->add_block_ids(2);
+                }
+                grpc::ServerContext     context;
+                BroadcastLoadResponsePB response;
+                ASSERT_TRUE(server_.RemoteLoad(&context, &request, &response).ok());
+                ASSERT_EQ(response.error_info().error_code(), ErrorCodePB::NONE_ERROR)
+                    << response.error_info().error_message();
+                EXPECT_EQ(response.loaded_cache_block_count(), 1);
+                const int  destination_groups = std::gcd(heads, decode_tp);
+                const auto first_head = (rank / (decode_tp / destination_groups)) * (heads / destination_groups);
+                const auto parts      = cache_manager_->convertIndexToBuffer(1, "full", 2);
+                ASSERT_EQ(parts.size(), dtype == DataType::TYPE_INT8 ? 2u : 1u);
+                for (size_t part = 0; part < parts.size(); ++part) {
+                    auto actual = torch::from_blob(parts[part].addr,
+                                                   {static_cast<int64_t>(parts[part].size_bytes)},
+                                                   torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA))
+                                      .cpu();
+                    const auto expected = packed(*mha, first_head, part != 0);
+                    ASSERT_EQ(expected.size(), static_cast<size_t>(actual.numel()));
+                    EXPECT_EQ(
+                        std::vector<uint8_t>(actual.data_ptr<uint8_t>(), actual.data_ptr<uint8_t>() + actual.numel()),
+                        expected);
+                }
+            }
+        }
+    }
 }
 
 }  // namespace rtp_llm

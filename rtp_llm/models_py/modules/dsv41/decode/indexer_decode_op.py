@@ -38,6 +38,9 @@ import os
 
 import torch
 
+from rtp_llm.models_py.modules.dsv4.fp8._indexer_score import (
+    get_fp8_paged_mqa_logits_metadata,
+)
 from rtp_llm.models_py.modules.dsv41.indexer_topk import (
     TorchIndexerTopKBackend,
     select_indexer_topk,
@@ -257,57 +260,30 @@ class IndexerDecodeV4Op:
             k_flat,
             group_size=self.block_size,
             eps=1e-4,
-            column_major_scales=False,
-            scale_tma_aligned=False,
+            column_major_scales=(self.scale_fmt == "ue8m0"),
+            scale_tma_aligned=(self.scale_fmt == "ue8m0"),
             scale_ue8m0=(self.scale_fmt == "ue8m0"),
         )
-        # k_scale is [B*T_padded, D//group_size] either int32 (ue8m0) or fp32.
-        # Pack each token as: [data fp8 (D bytes)] || [scale fp32 per group].
-        scales_per_token = D // self.block_size  # 1 for D=128, group=128
-        head_dim_with_sf = D + scales_per_token * 4  # bytes per token
+        if self.scale_fmt == "ue8m0":
+            k_scale = _unpack_ue8m0_scale(k_scale)
+        if D != self.block_size:
+            raise ValueError("Legacy paged MQA requires one FP32 scale per K token")
 
-        # Build [num_blocks, blocksize, 1, head_dim_with_sf] uint8 cache.
+        # Each block stores all FP8 K bytes followed by all FP32 scales.
+        # The public [blocks,page,1,D+4] shape does not imply token records.
         num_blocks = B * num_blocks_per_req
-        kv_cache_u8 = torch.zeros(
-            (num_blocks, block_kv, 1, head_dim_with_sf),
+        kv_cache_u8 = torch.empty(
+            (num_blocks, block_kv, 1, D + 4),
             dtype=torch.uint8,
             device=device,
         )
-        # Reshape data: per block of block_kv tokens.
-        k_fp8_blk = (
-            k_fp8.view(B, num_blocks_per_req, block_kv, D)
-            .view(
-                num_blocks,
-                block_kv,
-                D,
-            )
-            .view(torch.uint8)
+        block_bytes = kv_cache_u8.view(num_blocks, block_kv * (D + 4))
+        block_bytes[:, : block_kv * D].copy_(
+            k_fp8.contiguous().view(num_blocks, block_kv * D).view(torch.uint8)
         )
-        kv_cache_u8[:, :, 0, :D] = k_fp8_blk
-
-        # Scale: k_scale is shape [B*T_padded, scales_per_token].
-        if self.scale_fmt == "ue8m0":
-            # int32 packed scales -> view as 4 bytes each.
-            k_scale_u8 = k_scale.view(
-                B, num_blocks_per_req, block_kv, scales_per_token
-            ).contiguous()
-            k_scale_u8 = k_scale_u8.view(num_blocks, block_kv, scales_per_token).view(
-                torch.uint8
-            )
-            # scales_per_token * 4 bytes per token.
-            kv_cache_u8[:, :, 0, D:].copy_(
-                k_scale_u8.view(num_blocks, block_kv, scales_per_token * 4),
-            )
-        else:
-            k_scale_f32 = k_scale.view(
-                B, num_blocks_per_req, block_kv, scales_per_token
-            ).contiguous()
-            k_scale_u8 = k_scale_f32.view(num_blocks, block_kv, scales_per_token).view(
-                torch.uint8
-            )
-            kv_cache_u8[:, :, 0, D:].copy_(
-                k_scale_u8.view(num_blocks, block_kv, scales_per_token * 4),
-            )
+        block_bytes[:, block_kv * D :].copy_(
+            k_scale.float().view(num_blocks, block_kv).contiguous().view(torch.uint8)
+        )
 
         # ---- block_table: one block-row per request, listing its blocks --
         block_table = torch.arange(
@@ -319,9 +295,12 @@ class IndexerDecodeV4Op:
         # ---- kv_lens (per-(B*q_len) sequence; one entry per Q token) ----
         # Indexer's "context_lens" are the valid compressed K count per req.
         kv_lens = compressed_len_per_req.to(torch.int32).contiguous()
+        if callable(getattr(deep_gemm, "get_legacy_paged_mqa_logits_metadata", None)):
+            kv_lens = kv_lens.view(B, 1).expand(B, q_len).contiguous()
 
         max_seq_len = T_padded
-        schedule_meta = deep_gemm.get_paged_mqa_logits_metadata(
+        schedule_meta = get_fp8_paged_mqa_logits_metadata(
+            deep_gemm,
             kv_lens,
             block_kv,
             deep_gemm.get_num_sms(),

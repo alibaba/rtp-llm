@@ -78,7 +78,7 @@ inline MTPModuleConfigPlan buildMTPModuleConfigPlan(const ModelConfig& model_con
     } else if (gen_num_per_cycle != weight_count) {
         model_num = std::min(weight_count, gen_num_per_cycle);
     }
-    if (sp_type == SP_TYPE_EAGLE || sp_type == SP_TYPE_EAGLE3) {
+    if (sp_type == SP_TYPE_MTP || sp_type == SP_TYPE_EAGLE || sp_type == SP_TYPE_EAGLE3) {
         model_num = 1;
     }
     RTP_LLM_CHECK_WITH_INFO(model_num > 0,
@@ -89,10 +89,8 @@ inline MTPModuleConfigPlan buildMTPModuleConfigPlan(const ModelConfig& model_con
     MTPModuleConfigPlan plan;
     plan.source_layer_indices.reserve(model_num);
     plan.module_configs.reserve(model_num);
-    // Runtime execution and cache loading currently use module 0 only. Keep a
-    // physical slot and its own weight for every configured module, but make
-    // inactive slots share module 0's cache layout so heterogeneous checkpoint
-    // metadata cannot change allocation or trigger an unused-module fail-fast.
+    // MTP and EAGLE execute module 0 repeatedly. Proposal steps size the
+    // active module's cache/workspace rather than adding checkpoint slots.
     const auto active_module_config = makeSingleLayerMTPModelConfig(model_config, /*source_layer=*/0);
     validateActiveMTPCacheLayout(active_module_config);
     for (size_t module_index = 0; module_index < model_num; ++module_index) {

@@ -36,11 +36,12 @@ fast-hadamard-transform @ https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/whls/
 # Upstream v2.8.3.post1@a8aa52b1 with CUTLASS dc481792, rebuilt for CUDA 13.2.
 flash-attn==2.8.3.post1+cu13torch2.11cxx11abitrue.r1
 
-# Wheels built against torch 2.11+cu130.
-# Preserve the GLM5 kernel versions used by the validated inference path.
-deep-gemm==2.8.0+6d6aaad.cu132
-flash-mla==1.0.0+49e2000.cu132
-
+# Self-built wheels against torch 2.11+cu130.
+# DeepGEMM preserves main interfaces alongside K3 kernels.
+https://artlab.alibaba-inc.com/1/pypi/rtp_llm/deep_gemm/deep_gemm-2.8.2+30ec3df.cu132-cp310-cp310-linux_x86_64.whl#sha256=5fd294298c0dfeecf14b4e438a5cf5a92f0d1b6b482b585c86e337390c688525
+https://artlab.alibaba-inc.com/1/pypi/rtp_llm/flash_mla/flash_mla-1.0.0%2B88c78b9.cu132-cp310-cp310-linux_x86_64.whl#sha256=cdfbddcb2a1fc07523ace640ed2f8eb7f6e94f7ce37c9baef261f2da6a0f1106
+https://artlab.alibaba-inc.com/1/pypi/rtp_llm/cuda_linear_attention/cuda_linear_attention-0.1.dev88+dcce4719.cu132-cp310-cp310-linux_x86_64.whl#sha256=aad30390809c5d4b4e017a779f046e383407c0add52f700b43917e7c5ecdc4d4
+https://artlab.alibaba-inc.com/1/pypi/rtp_llm/flash_linear_attention/flash_linear_attention-0.5.0+rtp.3a9ce1c.6-py3-none-any.whl#sha256=20db1cc279f59abf8f18d20cc9fa575eeb152cf781cc4bff78e5a1d8a77141de
 # Official DeepEP main@a56d6156 with legacy Buffer and V2 APIs.
 deep-ep==2.1.0+a56d615
 

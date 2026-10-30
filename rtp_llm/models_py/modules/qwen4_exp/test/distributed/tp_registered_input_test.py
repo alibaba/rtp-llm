@@ -1,3 +1,4 @@
+import sys
 import unittest
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -12,6 +13,13 @@ from rtp_llm.models_py.modules.qwen4_exp import tp_reduce
 
 
 class TpRegisteredInputTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        # CPU registration/finalization checks never execute DeepGEMM kernels.
+        backend = patch.dict(sys.modules, {"deep_gemm": None})
+        backend.start()
+        cls.addClassCleanup(backend.stop)
+
     def workspace(self, enabled):
         workspace = FlashInferIpcAllReduce.__new__(FlashInferIpcAllReduce)
         workspace.registered_graph_inputs = enabled

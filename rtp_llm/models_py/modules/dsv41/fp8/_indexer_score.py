@@ -42,6 +42,7 @@ import torch
 
 from rtp_llm.models_py.modules.dsv4.fp8._indexer_score import (
     deepgemm_supports_block_kv,
+    get_fp8_paged_mqa_logits_metadata,
     supports_mqa_logits,
     supports_paged_mqa_logits,
 )
@@ -60,10 +61,12 @@ try:
         _deep_gemm, "get_paged_mqa_logits_metadata"
     )
     _HAS_DEEP_GEMM_MQA = hasattr(_deep_gemm, "fp8_mqa_logits")
-    _HAS_DEEP_GEMM_FP4_MQA = hasattr(_deep_gemm, "fp8_fp4_mqa_logits")
-    _HAS_DEEP_GEMM_FP4_PAGED_MQA = hasattr(
-        _deep_gemm, "fp8_fp4_paged_mqa_logits"
-    ) and hasattr(_deep_gemm, "get_paged_mqa_logits_metadata")
+    _HAS_DEEP_GEMM_FP4_MQA = callable(
+        getattr(_deep_gemm, "fp8_fp4_mqa_logits_v2", None)
+    )
+    _HAS_DEEP_GEMM_FP4_PAGED_MQA = callable(
+        getattr(_deep_gemm, "fp8_fp4_paged_mqa_logits_v2", None)
+    ) and callable(getattr(_deep_gemm, "get_paged_mqa_logits_metadata_v2", None))
 except ImportError:
     _deep_gemm = None
     _HAS_DEEP_GEMM = False
@@ -90,7 +93,7 @@ def has_fp8_fp4_paged_mqa_logits() -> bool:
 
 # ---------------------------------------------------------------------------
 # V4.1 FP4 (MX mode) prefill indexer wrapper around
-# ``deep_gemm.fp8_fp4_mqa_logits``.
+# ``deep_gemm.fp8_fp4_mqa_logits_v2`` (compressed BF16 score contract).
 #
 # Shape contract:
 #   q_payload  [M, H, 64]  int8   (packed e2m1; logical head_dim 128)
@@ -127,7 +130,7 @@ def fp8_fp4_mqa_indexer_score(
     # BF16 logits. Selectors keep their FP32 tensor ABI, but no longer rely on
     # the removed clean_logits argument or uninitialized tail values.
     width = max_seqlen_k if max_seqlen_k > 0 else k_payload.shape[0]
-    scores = _deep_gemm.fp8_fp4_mqa_logits(
+    scores = _deep_gemm.fp8_fp4_mqa_logits_v2(
         (q_payload.contiguous(), q_sf.contiguous()),
         (k_payload.contiguous(), k_sf.contiguous()),
         weights.to(torch.bfloat16).contiguous(),
@@ -153,7 +156,7 @@ def _get_num_sms(device: torch.device) -> int:
 
 # ---------------------------------------------------------------------------
 # V4.1 FP4 (MX mode) decode paged indexer wrapper around
-# ``deep_gemm.fp8_fp4_paged_mqa_logits``.
+# ``deep_gemm.fp8_fp4_paged_mqa_logits_v2`` and its split-KV-384 metadata.
 #
 # The fused cache is the INDEX_K pool itself: the planar per-block layout
 # (payload plane then packed-UE8M0 scale plane) is exactly DeepGEMM's fused
@@ -200,10 +203,10 @@ def fp8_fp4_paged_indexer_score(
     sf = q_sf.reshape(rows, 1, heads).contiguous()
     lengths = context_lens.reshape(rows, 1).to(torch.int32).contiguous()
     tables = block_table.repeat_interleave(next_n, dim=0).contiguous()
-    schedule = _deep_gemm.get_paged_mqa_logits_metadata(
+    schedule = _deep_gemm.get_paged_mqa_logits_metadata_v2(
         lengths, block_size, _get_num_sms(q_payload.device), indices=request_ids
     )
-    scores = _deep_gemm.fp8_fp4_paged_mqa_logits(
+    scores = _deep_gemm.fp8_fp4_paged_mqa_logits_v2(
         (q, sf),
         kv_pool_uint8.unsqueeze(2),
         weights.to(torch.bfloat16).contiguous(),
@@ -308,8 +311,8 @@ def fp8_paged_indexer_score(
     kv_4d = kv_pool_uint8.view(num_blocks, block_size, 1, INDEXER_ENTRY_BYTES)
 
     num_sms = _get_num_sms(q_fp8.device)
-    schedule = _deep_gemm.get_paged_mqa_logits_metadata(
-        context_lens, block_size, num_sms
+    schedule = get_fp8_paged_mqa_logits_metadata(
+        _deep_gemm, context_lens, block_size, num_sms
     )
     return _deep_gemm.fp8_paged_mqa_logits(
         q_fp8.contiguous(),

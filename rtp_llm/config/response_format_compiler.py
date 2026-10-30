@@ -77,6 +77,7 @@ class ResponseFormatPlan:
     ) -> "ResponseFormatPlan":
         from rtp_llm.config.generate_config import ThinkingMode
 
+        config.validate()
         final_constraint = _resolve_final_constraint(config)
         thinking_mode = _resolved_thinking_mode(config)
 
@@ -134,6 +135,11 @@ class ResponseFormatPlan:
         else:
             self.engine_constraint.apply_to_config(config)
         validate_engine_ready(config)
+        uses_reasoning = _uses_reasoning_envelope(config)
+        config._reasoning_envelope_applied = uses_reasoning
+        config._reasoning_final_constraint = (
+            self.final_constraint if uses_reasoning else None
+        )
 
 
 def _resolved_thinking_mode(config: Any) -> "ThinkingMode":
@@ -266,6 +272,7 @@ def prepare_response_format(
     """Compile and install the engine constraint at request entry."""
 
     if config._reasoning_envelope_applied:
+        config.validate()
         final_constraint = config._reasoning_final_constraint
         if _uses_reasoning_envelope(config):
             validate_engine_ready(config)
@@ -275,9 +282,6 @@ def prepare_response_format(
 
     plan = ResponseFormatPlan.compile(config, reasoning_format=reasoning_format)
     plan.apply_to_config(config)
-    if _uses_reasoning_envelope(config):
-        config._reasoning_envelope_applied = True
-        config._reasoning_final_constraint = plan.final_constraint
     return plan.final_constraint
 
 

@@ -30,10 +30,22 @@ public:
     BatchDecodeScheduler(const RuntimeConfig&                   runtime_config,
                          const std::shared_ptr<KVCacheManager>& cache_manager,
                          const kmonitor::MetricsReporterPtr     metrics_reporter,
-                         int                                    dp_rank = 0) {
+                         int                                    dp_rank              = 0,
+                         int64_t                                max_execution_tokens = 0,
+                         const ParallelismConfig&               parallelism_config   = ParallelismConfig{},
+                         const ModelExecutionCapacity&          execution_capacity   = ModelExecutionCapacity{}) {
         cache_manager_    = cache_manager;
         metrics_reporter_ = metrics_reporter;
         batch_size_       = runtime_config.batch_decode_scheduler_config.batch_decode_scheduler_batch_size;
+        max_batch_size_           = std::max<int64_t>(runtime_config.max_generate_batch_size, batch_size_);
+        const auto tp             = std::max<int64_t>(parallelism_config.tp_size, 1);
+        max_prefill_capacity_     = max_execution_tokens > 0 ? max_execution_tokens / tp * tp : 0;
+        max_prefill_draft_tokens_ = execution_capacity.max_prefill_draft_tokens;
+        draft_prefill_cp_size_    = execution_capacity.draft_prefill_cp_size;
+        target_only_runs_draft_   = execution_capacity.target_only_runs_draft;
+        prefill_cp_size_          = parallelism_config.prefill_cp_config.is_enabled() ?
+                                        static_cast<size_t>(std::max<int64_t>(parallelism_config.tp_size, 1)) :
+                                        1;
         scheduler_type_   = SchedulerType::kBatchDecode;
         dp_rank_          = dp_rank;
     }
@@ -42,6 +54,12 @@ public:
     // Reject inputs longer than the KV cache can hold; mark the stream errored so the caller
     // sees the failure via collectStreamOutput / pollStreamOutput. Mirrors FIFOScheduler.
     bool checkInputLength(const GenerateStreamPtr& stream) {
+        if (static_cast<size_t>(stream->maxBatchSize()) > max_batch_size_) {
+            stream->reportError(ErrorCode::INVALID_PARAMS,
+                                "request sequences exceed initialized batch capacity "
+                                    + std::to_string(max_batch_size_));
+            return false;
+        }
         if (cache_manager_ && stream->inputLength() > cache_manager_->maxAvailableTokensNum()) {
             stream->reportError(ErrorCode::EXCEEDS_KV_CACHE_MAX_LEN,
                                 "input len " + std::to_string(stream->inputLength())
@@ -114,6 +132,11 @@ public:
     void updateSchedulerInfo(const std::string& scheduler_info) override {
         BatchDecodeSchedulerConfigLocal config;
         autil::legacy::FromJsonString(config, scheduler_info);
+        if (config.batch_size_ == 0 || config.batch_size_ > max_batch_size_) {
+            RTP_LLM_LOG_WARNING(
+                "reject batch size %u outside initialized capacity [1, %u]", config.batch_size_, max_batch_size_);
+            return;
+        }
         batch_size_ = config.batch_size_;
         if (config.mode_ == "decode") {
             scheduler_type_ = SchedulerType::kBatchDecode;
@@ -159,8 +182,12 @@ public:
     }
 
     void evaluateWaitingStreams() {
-        // Finalize errored streams before selecting a batch so they cannot count toward its size.
+        // A runtime batch reduction must not leave an oversized request waiting forever.
         for (auto it = waiting_streams_.begin(); it != waiting_streams_.end();) {
+            if (!(*it)->hasError() && static_cast<size_t>((*it)->maxBatchSize()) > batch_size_) {
+                (*it)->reportError(ErrorCode::INVALID_PARAMS,
+                                   "request sequences exceed current fixed batch size " + std::to_string(batch_size_));
+            }
             if (!(*it)->hasError()) {
                 ++it;
                 continue;
@@ -169,15 +196,13 @@ public:
             it = waiting_streams_.erase(it);
         }
 
-        // The outer gate counted entries that may just have been removed. Only an already-draining
-        // mixed-mode tail may bypass the batch-size gate after errors are reaped.
-        if (waiting_streams_.size() < batch_size_ && !draining_mixed_modes_) {
+        if (!waitingBatchReady()) {
             return;
         }
 
-        // Homogeneous queues run exactly batch_size_ streams; a mixed queue may yield a smaller
-        // mode-homogeneous batch and drain its remaining tail in subsequent rounds.
+        // Count expanded sequences, including the maximum later beam width.
         std::list<GenerateStreamPtr> selected_streams;
+        size_t                       selected_sequences = 0;
         bool                         has_execution_mode = false;
         bool                         prefill_only       = false;
         bool                         has_other_mode     = false;
@@ -191,15 +216,29 @@ public:
                 has_other_mode = true;
                 continue;
             }
-            if (selected_streams.size() < batch_size_) {
+            const auto sequences = static_cast<size_t>(stream->maxBatchSize());
+            if (sequences <= batch_size_ - selected_sequences) {
                 selected_streams.push_back(stream);
+                selected_sequences += sequences;
             }
         }
 
         // Refresh the drain state from the current queue. This batch may drain a mixed-mode tail,
         // but later homogeneous arrivals must go through the normal batch-size gate.
         draining_mixed_modes_ = has_other_mode;
+        for (const auto& stream : selected_streams) {
+            if (!stream->streamCacheResource().reserveLinearReplaySlot()) {
+                return;
+            }
+        }
         for (auto& stream : selected_streams) {
+            if (scheduler_type_ == SchedulerType::kBatchDecode && !isPrefillOnly(stream)
+                && cache_manager_->cacheConfig().linear_replay.enabled()) {
+                // Direct Decode starts from the prompt's final token, with its
+                // already-processed prefix initialized before the first grow.
+                stream->setPerfTest(true);
+                stream->setIsContextStream(false);
+            }
             stream->reportEvent(StreamEvents::CanRun);
             // 忙等stream load cache done, 和原有SyncLoadCache逻辑等效
             while (stream->getStatus() != StreamState::FINISHED && stream->moveToNext() != StreamState::RUNNING) {
@@ -207,16 +246,19 @@ public:
             }
         }
         for (const auto& stream : selected_streams) {
-            waiting_streams_.remove(stream);
-            if (stream->getStatus() == StreamState::RUNNING) {
+            const auto state = stream->getStatus();
+            if (state == StreamState::RUNNING) {
+                waiting_streams_.remove(stream);
                 running_streams_.push_back(stream);
+            } else if (state == StreamState::FINISHED) {
+                waiting_streams_.remove(stream);
             }
         }
     }
 
     void initRunningStreams() {
         // set kvcache block
-        for (auto it = running_streams_.begin(); it != running_streams_.end(); it++) {
+        for (auto it = running_streams_.begin(); it != running_streams_.end();) {
             (*it)->setPerfTest(true);
             // reset start time，to get more accurate avg token time
             (*it)->resetBeginTime(autil::TimeUtility::currentTimeInMicroSeconds());
@@ -229,14 +271,52 @@ public:
                 // for linear attn, incrKVBlock to clear unused linear block
                 (*it)->moveToNext();
             }
+            if ((*it)->getStatus() == StreamState::FINISHED) {
+                it = running_streams_.erase(it);
+            } else {
+                ++it;
+            }
+        }
+        size_t  sequences      = 0;
+        int64_t prefill_tokens = 0, draft_tokens = 0;
+        for (const auto& stream : running_streams_) {
+            const auto stream_sequences = static_cast<size_t>(stream->maxBatchSize());
+            bool       fits             = stream_sequences <= max_batch_size_ - sequences;
+            if (fits) {
+                sequences += stream_sequences;
+            }
+            if (fits && stream->isContextStream()) {
+                if (max_prefill_capacity_ > 0) {
+                    const auto tokens = prefillTokenCostWithoutCache(stream, prefill_cp_size_);
+                    fits              = tokens <= static_cast<size_t>(max_prefill_capacity_ - prefill_tokens);
+                    if (fits) {
+                        prefill_tokens += tokens;
+                    }
+                }
+                if (fits && max_prefill_draft_tokens_ > 0 && (!isPrefillOnly(stream) || target_only_runs_draft_)) {
+                    const auto tokens = prefillTokenCostWithoutCache(stream, draft_prefill_cp_size_);
+                    fits              = tokens <= static_cast<size_t>(max_prefill_draft_tokens_ - draft_tokens);
+                    if (fits) {
+                        draft_tokens += tokens;
+                    }
+                }
+            }
+            if (!fits) {
+                for (const auto& rejected : running_streams_) {
+                    rejected->reportError(ErrorCode::INVALID_PARAMS,
+                                          "fixed batch exceeds initialized model execution capacity");
+                    rejected->moveToNext();
+                }
+                running_streams_.clear();
+                return;
+            }
         }
     }
 
     absl::StatusOr<ScheduleOutput> schedule() override {
         std::unique_lock<std::mutex> lock(lock_);
         cond_.wait_for(lock, std::chrono::seconds(30), [this] {
-            return waiting_streams_.size() >= batch_size_ || running_streams_.size() > 0
-                   || !loading_cache_streams_.empty() || (draining_mixed_modes_ && !waiting_streams_.empty());
+            return waitingBatchReady() || !running_streams_.empty() || !loading_cache_streams_.empty();
         });
 
         // 统一通过状态机驱动各队列中 stream 的状态转移
@@ -248,8 +328,7 @@ public:
             draining_mixed_modes_ = false;
         }
 
-        if (running_streams_.empty()
-            && (waiting_streams_.size() >= batch_size_ || (draining_mixed_modes_ && !waiting_streams_.empty()))) {
+        if (running_streams_.empty() && waitingBatchReady()) {
             evaluateWaitingStreams();
             if (!running_streams_.empty()) {
                 initRunningStreams();
@@ -281,12 +360,30 @@ public:
     }
 
 private:
+    bool waitingBatchReady() const {
+        size_t sequences = 0;
+        for (const auto& stream : waiting_streams_) {
+            const auto count = static_cast<size_t>(stream->maxBatchSize());
+            if (stream->hasError() || count >= batch_size_ - sequences) {
+                return true;
+            }
+            sequences += count;
+        }
+        return draining_mixed_modes_ && !waiting_streams_.empty();
+    }
+
     std::mutex                   lock_;
     std::condition_variable      cond_;
     std::list<GenerateStreamPtr> waiting_streams_;
     std::list<GenerateStreamPtr> loading_cache_streams_;
     std::list<GenerateStreamPtr> running_streams_;
     uint32_t                     batch_size_;
+    uint32_t                     max_batch_size_;
+    int64_t                      max_prefill_capacity_     = 0;
+    int64_t                      max_prefill_draft_tokens_ = 0;
+    bool                         target_only_runs_draft_   = false;
+    size_t                       prefill_cp_size_          = 1;
+    size_t                       draft_prefill_cp_size_    = 1;
     bool                         reorder_request_;
     uint32_t                     current_step_ = 0;
     bool                         draining_mixed_modes_ = false;

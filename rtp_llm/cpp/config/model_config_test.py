@@ -65,5 +65,14 @@ class ModelConfigMtpHiddenSizeTest(unittest.TestCase):
                     config.getMtpInputHiddenSize()
 
 
+class ModelConfigPageRrTest(unittest.TestCase):
+    def test_page_rr_flag_round_trips_through_cpp_binding(self):
+        config = ModelConfig()
+        self.assertFalse(config.use_page_rr_kv_cache)
+        for enabled in (True, False):
+            config.use_page_rr_kv_cache = enabled
+            self.assertEqual(config.use_page_rr_kv_cache, enabled)
+
+
 if __name__ == "__main__":
     unittest.main()

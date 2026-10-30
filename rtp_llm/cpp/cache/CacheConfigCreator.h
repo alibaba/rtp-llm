@@ -44,6 +44,13 @@ public:
                                     bool                                             is_mtp             = false,
                                     bool                                             is_eagle           = false);
 
+    static void configureLinearReplay(CacheConfig&                                      config,
+                                      const ModelConfig&                                model_config,
+                                      const ParallelismConfig&                          parallelism_config,
+                                      const RuntimeConfig&                              runtime_config,
+                                      const std::optional<SpeculativeExecutionConfig>& sp_config,
+                                      bool                                              is_mtp);
+
     static uint32_t computeLocalBlockNum(const CacheConfig&                               config,
                                          const ModelConfig&                               model_config,
                                          const RuntimeConfig&                             runtime_config,

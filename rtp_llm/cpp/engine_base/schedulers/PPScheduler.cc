@@ -349,10 +349,11 @@ void PPScheduler::admitWaitingStreams(list<GenerateStreamPtr>& scheduled_streams
     }
 }
 
-bool PPScheduler::evaluateRunningMemory(const list<GenerateStreamPtr>& streams, const GenerateStreamPtr& new_stream) {
+bool PPScheduler::evaluateRunningMemory(const FIFOSchedulerBase::ScheduleRuntime& runtime,
+                                        const GenerateStreamPtr&                  new_stream) {
     ScheduleRuntime schedule_runtime;
     schedule_runtime.concurrency_stream_count = running_streams_.size() + pending_decode_streams_.size();
-    for (const auto& stream : streams) {
+    for (const auto& stream : runtime.admitted_streams) {
         updateScheduleRuntime(schedule_runtime, stream, true, false);
     }
     return fitsCurrentBatch(schedule_runtime, new_stream);

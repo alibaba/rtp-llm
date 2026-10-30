@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Any, AsyncGenerator, Callable, List, Optional,
 import torch
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
-from rtp_llm.config.generate_config import RoleAddr, RoleType
+from rtp_llm.config.generate_config import ReturnAllProbsMode, RoleAddr, RoleType
 from rtp_llm.config.model_config import ModelConfig as PyModelConfig
 from rtp_llm.cpp.model_rpc.model_rpc_client import (
     ModelRpcClient,
@@ -888,6 +888,7 @@ class BackendRPCServerVisitor:
             route_span.finish()
 
     def check_sp_supported(self, input: GenerateInput):
+        input.speculative_return_all_probs = False
         if not self.sp_config or not self.sp_config.model_type:
             return
         if input.generate_config.force_disable_sp_run:
@@ -902,18 +903,16 @@ class BackendRPCServerVisitor:
         # speculative decoding does not support num_return_sequences > 1 or num_beams > 1
         if (
             input.generate_config.num_return_sequences > 1
-            or input.generate_config.num_beams > 1
+            or input.generate_config.has_num_beams()
         ):
             raise FtRuntimeException(
                 ExceptionType.UNSUPPORTED_OPERATION,
                 "speculative decoding does not support num_return_sequences > 1 or num_beams > 1",
             )
-        # speculative decoding does not support return_all_probs
-        if input.generate_config.return_all_probs:
-            raise FtRuntimeException(
-                ExceptionType.UNSUPPORTED_OPERATION,
-                "speculative decoding does not support return_all_probs",
-            )
+
+        input.speculative_return_all_probs = (
+            input.generate_config.return_all_probs != ReturnAllProbsMode.NONE
+        )
 
     def check_prefill_cp_supported(self, input: GenerateInput) -> None:
         if not self._prefill_cp_active:

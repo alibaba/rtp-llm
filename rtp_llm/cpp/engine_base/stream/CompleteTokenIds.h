@@ -26,6 +26,12 @@ public:
     bool matchEosToken(int batch_id, int token_id);
     bool matchStopWordsList(int batch_id, const std::vector<int>& stop_words);
 
+    // Read-only suffix match. new_tokens, when provided, starts at seqLength().
+    bool matchesStopWordsAt(int                     batch_id,
+                            const std::vector<int>& stop_words,
+                            int                     end,
+                            const int*              new_tokens = nullptr) const;
+
     bool update(const torch::Tensor& new_tokens,
                 int64_t              begin_time_us,
                 int                  num_new_tokens,

@@ -43,7 +43,10 @@ class FlashMLACacheFormatTest(unittest.TestCase):
     def test_native_swa_and_dual_pool_with_page_padding_and_graph(self):
         if torch.cuda.get_device_capability()[0] != 10:
             self.skipTest("V4.1 FlashMLA requires SM100")
-        from flash_mla import flash_mla_with_kvcache, get_mla_metadata
+        from rtp_llm.models_py.utils.flash_mla_current import (
+            flash_mla_with_kvcache,
+            get_mla_metadata,
+        )
 
         torch.manual_seed(410528288)
         for padding_tokens in (0, 32):
@@ -103,7 +106,10 @@ class FlashMLACacheFormatTest(unittest.TestCase):
     def test_cp5_byte_sliced_writes_rebuild_native_cache(self):
         if torch.cuda.get_device_capability()[0] != 10:
             self.skipTest("V4.1 FlashMLA requires SM100")
-        from flash_mla import flash_mla_with_kvcache, get_mla_metadata
+        from rtp_llm.models_py.utils.flash_mla_current import (
+            flash_mla_with_kvcache,
+            get_mla_metadata,
+        )
 
         torch.manual_seed(41528)
         cp_size = 5

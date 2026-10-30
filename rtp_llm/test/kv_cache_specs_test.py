@@ -19,10 +19,47 @@ from rtp_llm.ops import (
     KVCacheSpecDesc,
     KVCacheSpecType,
     OpaqueBlockEntryCountMode,
+    TpCacheTransferMode,
 )
 
 
 class HybridKVCacheSpecTest(TestCase):
+    def test_segmented_head_transfer_is_opt_in_and_survives_pickle(self):
+        for enabled in (False, True):
+            desc = KVCacheSpecDesc()
+            self.assertEqual(desc.tp_transfer_mode, TpCacheTransferMode.LEGACY)
+            desc.cache_type = KVCacheSpecType.LINEAR
+            desc.tp_transfer_mode = (
+                TpCacheTransferMode.LINEAR_QKV
+                if enabled
+                else TpCacheTransferMode.LEGACY
+            )
+            restored = pickle.loads(pickle.dumps(desc))
+            self.assertEqual(restored.tp_transfer_mode, desc.tp_transfer_mode)
+
+    def test_legacy_descriptor_pickle_does_not_enable_new_wire_format(self):
+        desc = KVCacheSpecDesc()
+        desc.tp_transfer_mode = TpCacheTransferMode.LINEAR_QKV
+        state = desc.__getstate__()
+        self.assertEqual(len(state), 21)
+        for old_width in (20,):
+            restored = KVCacheSpecDesc.__new__(KVCacheSpecDesc)
+            restored.__setstate__(state[:old_width])
+            self.assertEqual(restored.tp_transfer_mode, TpCacheTransferMode.LEGACY)
+
+    def test_existing_linear_models_keep_whole_block_transfer(self):
+        for model in (KimiLinear, Qwen3Next):
+            config = self._build_model_config([HybridAttentionType.LINEAR])
+            model._post_build_model_config(config)
+            self.assertTrue(config.kv_cache_spec_descs)
+            self.assertTrue(
+                all(
+                    desc.tp_transfer_mode == TpCacheTransferMode.LEGACY
+                    for layer in config.kv_cache_spec_descs
+                    for desc in layer
+                )
+            )
+
     def _build_model_config(self, layer_types):
         config = ModelConfig()
         config.num_layers = len(layer_types)

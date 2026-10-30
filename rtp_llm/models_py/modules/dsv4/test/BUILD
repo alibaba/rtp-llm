@@ -187,6 +187,7 @@ test_suite(
 test_suite(
     name = "dsv4_cuda13_cross_arch",
     tests = [":" + name + "_x86" for name in _GPU_TESTS] + [
+        "//rtp_llm/models_py/kernels/cuda/test/main_superset:main_superset_cuda13_x86",
         ":test_dsv4_kernel_jit_warmup_x86",
         ":test_hc_impl_x86",
         ":test_layer_profiler_ranges_x86",

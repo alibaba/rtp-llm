@@ -69,6 +69,7 @@ cc_library(
 cc_library(
     name = "components",
     srcs = [
+        "AsymmetricTpUtil.cc",
         "P2PBroadcastClient.cc",
         "DecodeLoadHelper.cc",
         "ComputedLayerCacheBuffer.cc",
@@ -77,6 +78,7 @@ cc_library(
         "StoreWaitContext.cc",
     ],
     hdrs = [
+        "AsymmetricTpUtil.h",
         "P2PBroadcastClient.h",
         "P2PNotification.h",
         "DecodeLoadHelper.h",

@@ -30,7 +30,12 @@ class FlashMLAHeadTest(unittest.TestCase):
                 return padded, padded.sum(-1), padded.mean(-1)
 
             with patch.dict(
-                sys.modules, {"flash_mla": SimpleNamespace(flash_mla_sparse_fwd=native)}
+                sys.modules,
+                {
+                    "rtp_llm.models_py.utils.flash_mla_current": SimpleNamespace(
+                        flash_mla_sparse_fwd=native
+                    )
+                },
             ):
                 output, maximum, lse = FLASH.flash_mla_sparse_fwd(
                     q, None, None, 1.0, attn_sink=sink
@@ -46,7 +51,12 @@ class FlashMLAHeadTest(unittest.TestCase):
             return q, q.sum(-1).transpose(1, 2)
 
         with patch.dict(
-            sys.modules, {"flash_mla": SimpleNamespace(flash_mla_with_kvcache=native)}
+            sys.modules,
+            {
+                "rtp_llm.models_py.utils.flash_mla_current": SimpleNamespace(
+                    flash_mla_with_kvcache=native
+                )
+            },
         ):
             output, lse = FLASH.flash_mla_with_kvcache(q=q)
         torch.testing.assert_close(output, q)

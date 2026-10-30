@@ -97,7 +97,11 @@ class PrefillQMemoryTest(unittest.TestCase):
             stack.enter_context(
                 patch.dict(
                     sys.modules,
-                    {"flash_mla": SimpleNamespace(flash_mla_sparse_fwd=mla)},
+                    {
+                        "rtp_llm.models_py.utils.flash_mla_current": SimpleNamespace(
+                            flash_mla_sparse_fwd=mla
+                        )
+                    },
                 )
             )
             result = owner._prefill_sparse_attention(

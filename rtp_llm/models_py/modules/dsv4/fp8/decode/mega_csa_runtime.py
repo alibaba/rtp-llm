@@ -233,9 +233,9 @@ class MegaCSARuntime:
 
         import deep_gemm
 
-        # DeepGEMM 2.8.1 removed the non-varlen SM100 metadata branch; the
-        # schedule must use one token per row with each row's request id
-        # (batch-major order keeps the kernel token layout unchanged).
+        # rtp_kernel's MQA consumer uses split-KV 256. The modern DeepGEMM
+        # metadata uses 384; always select the explicit legacy builder.
+        # One token per row retains speculative request ids and batch order.
         rows = int(context_2d.shape[0]) * int(context_2d.shape[1])
         lengths = context_2d.reshape(rows, 1)
         request_ids = (
@@ -245,7 +245,7 @@ class MegaCSARuntime:
             .repeat_interleave(int(context_2d.shape[1]))
             .contiguous()
         )
-        schedule = deep_gemm.get_paged_mqa_logits_metadata(
+        schedule = deep_gemm.get_legacy_paged_mqa_logits_metadata(
             lengths, entries_per_block, deep_gemm.get_num_sms(), indices=request_ids
         )
         # Like the ordinary indexer, let the allocator/capture pool own storage.

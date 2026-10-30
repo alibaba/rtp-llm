@@ -31,6 +31,28 @@ py_test(
     ],
 )
 
+py_test(
+    name = "speculative_logprobs_wire_compat_test",
+    srcs = ["speculative_logprobs_wire_compat_test.py"],
+    deps = [
+        "//rtp_llm:config",
+        "//rtp_llm:config_ops",
+        "//rtp_llm:pydantic",
+        "//rtp_llm:protobuf",
+        "//rtp_llm:testlib",
+        "//rtp_llm:torch",
+        "//rtp_llm:utils",
+        "//rtp_llm/cpp/model_rpc:model_rpc_client",
+        "//rtp_llm/cpp/model_rpc/proto:flexlb_schedule_service_py_proto",
+        "//rtp_llm/cpp/model_rpc/proto:model_rpc_service_py_proto",
+        "//rtp_llm/server:server",
+    ],
+    data = ["//:th_transformer"],
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
+    timeout = "short",
+)
+
 py_test (
     name = "model_rpc_client_test",
     srcs = ["model_rpc_client_test.py"],
@@ -64,6 +86,17 @@ test_deps = [
     "@havenask//aios/autil:base64",
     "@havenask//aios/autil:zlib",
 ] + torch_deps() + device_impl_target() + cuda13_torch_link_deps
+
+cc_test(
+    name = "speculative_logprobs_query_converter_test",
+    srcs = ["SpeculativeLogprobsQueryConverterTest.cc"],
+    copts = test_copts,
+    deps = test_deps,
+    env = {"TEST_USING_DEVICE": "CUDA"},
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
+    timeout = "short",
+)
 
 # cc_test(
 #     name = "model_rpc_server_test",
@@ -104,6 +137,21 @@ cc_test(
     copts = test_copts,
     deps = test_deps + ["@io_opentelemetry_cpp//exporters/memory:in_memory_span_exporter"],
     env = {},
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
+)
+
+cc_test(
+    name = "remote_rpc_server_init_test",
+    srcs = ["RemoteRpcServerInitTest.cc"],
+    copts = test_copts,
+    # rtp_llm::createMemoryUtilImpl(bool), isolated from the real RDMA device pool.
+    linkopts = ["-Wl,--wrap=_ZN7rtp_llm20createMemoryUtilImplEb"],
+    deps = test_deps + ["//rtp_llm/cpp/normal_engine/test:mock_engine"],
+    env = {
+        "TEST_USING_DEVICE": "CUDA",
+        "LD_PRELOAD": "libtorch_cpu.so",
+    },
     exec_properties = {"gpu": "L20_CU13"},
     tags = ["L20_CU13"],
 )
@@ -223,6 +271,7 @@ cc_test(
     ],
     copts = test_copts,
     deps = test_deps + [
+        "//rtp_llm/cpp/cache/test:cache_config_test_utils",
         "@io_opentelemetry_cpp//exporters/memory:in_memory_span_exporter",
     ],
     env = {

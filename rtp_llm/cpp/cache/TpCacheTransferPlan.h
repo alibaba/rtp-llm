@@ -28,6 +28,18 @@ struct TpCacheTransferTopology {
     }
 };
 
+// One source peer's partition of a destination block. The mode resolves whether
+// it is read directly as segments or first staged for packed reassembly.
+struct TpCacheTransferRoute {
+    bool   selected               = true;
+    size_t local_partition_count  = 1;
+    size_t local_partition_id     = 0;
+    size_t remote_partition_count = 1;
+    size_t remote_partition_id    = 0;
+    bool   reassemble             = false;
+    bool   segmented              = false;
+};
+
 inline bool tpCachePeerOwnsPayload(TpCacheTransferMode            mode,
                                    size_t                         local_heads,
                                    const TpCacheTransferTopology& topology,
@@ -66,13 +78,40 @@ struct TpCacheTransferPlan {
                                       size_t v_bytes,
                                       size_t history_rows,
                                       size_t peers,
-                                      size_t peer) {
-        auto         slices = linearTpCacheSlices(state_bytes, q_bytes, k_bytes, v_bytes, history_rows, peers, peer);
+                                      size_t peer,
+                                      size_t source_parts   = 1,
+                                      size_t source_part_id = 0) {
+        auto slices = linearTpCacheSlices(
+            state_bytes, q_bytes, k_bytes, v_bytes, history_rows, peers, peer, source_parts, source_part_id);
         const size_t destination_bytes = state_bytes + history_rows * (q_bytes + k_bytes + v_bytes);
-        return {destination_bytes / peers, destination_bytes, peers, peer, std::move(slices)};
+        return {destination_bytes / peers * source_parts, destination_bytes, peers, peer, std::move(slices)};
     }
 
-    static TpCacheTransferPlan mha(size_t k_bytes, size_t v_bytes, size_t heads, size_t head, size_t kernel_pages = 1) {
+    static TpCacheTransferPlan mha(size_t k_bytes,
+                                   size_t v_bytes,
+                                   size_t heads,
+                                   size_t head,
+                                   size_t kernel_pages = 1,
+                                   size_t source_parts = 1,
+                                   size_t source_part  = 0) {
+        if (source_parts == 0 || source_part >= source_parts) {
+            throw std::invalid_argument("invalid MHA TP source partition");
+        }
+        if (source_parts > 1) {
+            if (heads != 1 || head != 0) {
+                throw std::invalid_argument("MHA TP source and destination partitions must be nested");
+            }
+            const auto max = std::numeric_limits<size_t>::max();
+            if (k_bytes > max / source_parts || v_bytes > max / source_parts) {
+                throw std::overflow_error("MHA TP source size overflow");
+            }
+            auto slices = mhaTpCacheSlices(
+                k_bytes * source_parts, v_bytes * source_parts, source_parts, source_part, kernel_pages);
+            for (auto& slice : slices) {
+                std::swap(slice.source_offset, slice.destination_offset);
+            }
+            return {(k_bytes + v_bytes) * source_parts, k_bytes + v_bytes, 1, 0, std::move(slices)};
+        }
         auto slices = mhaTpCacheSlices(k_bytes, v_bytes, heads, head, kernel_pages);
         return {(k_bytes + v_bytes) / heads, k_bytes + v_bytes, heads, head, std::move(slices)};
     }
@@ -106,6 +145,48 @@ struct TpCacheTransferLayout {
         return mode == TpCacheTransferMode::LINEAR_QKV || (mode == TpCacheTransferMode::MHA_HEADS && local_heads > 1);
     }
 
+    TpCacheTransferRoute route(size_t                         local_heads,
+                               const TpCacheTransferTopology& topology,
+                               size_t                         peer,
+                               bool                           typed,
+                               TpCacheTransferRoute           fallback,
+                               TpCacheTransferRoute           heads) const {
+        const bool segmented = !typed && mode == TpCacheTransferMode::LINEAR_QKV;
+        auto       result    = segmented ? heads : fallback;
+        result.segmented     = segmented;
+        result.reassemble    = false;
+        if (typed) {
+            result.selected   = tpCachePeerOwnsPayload(mode, local_heads, topology, peer);
+            result.reassemble = result.selected && needsReassembly(local_heads);
+        }
+        if (mode == TpCacheTransferMode::REPLICATED) {
+            result.local_partition_count  = 1;
+            result.local_partition_id     = 0;
+            result.remote_partition_count = 1;
+            result.remote_partition_id    = 0;
+        }
+        return result;
+    }
+
+    TpCacheTransferPlan plan(size_t k_bytes, size_t v_bytes, const TpCacheTransferRoute& route) const {
+        if (mode != TpCacheTransferMode::LINEAR_QKV) {
+            throw std::invalid_argument("partitioned cache transfer requires LINEAR_QKV layout");
+        }
+        auto result = TpCacheTransferPlan::linear(k_bytes,
+                                                  q_row_bytes,
+                                                  k_row_bytes,
+                                                  v_row_bytes,
+                                                  history_rows,
+                                                  route.local_partition_count,
+                                                  route.local_partition_id,
+                                                  route.remote_partition_count,
+                                                  route.remote_partition_id);
+        if (result.destination_bytes - k_bytes != v_bytes) {
+            throw std::invalid_argument("typed linear TP history does not match its payload");
+        }
+        return result;
+    }
+
     TpCacheTransferPlan plan(size_t                         k_bytes,
                              size_t                         v_bytes,
                              size_t                         local_heads,
@@ -119,12 +200,7 @@ struct TpCacheTransferLayout {
             if (!key_heads || !value_heads || key_heads % topology.peers || value_heads % topology.peers) {
                 throw std::invalid_argument("typed linear TP heads must divide evenly across producers");
             }
-            auto result = TpCacheTransferPlan::linear(
-                k_bytes, q_row_bytes, k_row_bytes, v_row_bytes, history_rows, topology.peers, peer);
-            if (result.destination_bytes - k_bytes != v_bytes) {
-                throw std::invalid_argument("typed linear TP history does not match its payload");
-            }
-            return result;
+            return plan(k_bytes, v_bytes, TpCacheTransferRoute{true, topology.peers, peer});
         }
         if (mode == TpCacheTransferMode::MHA_HEADS && local_heads == 2) {
             return TpCacheTransferPlan::mha(
