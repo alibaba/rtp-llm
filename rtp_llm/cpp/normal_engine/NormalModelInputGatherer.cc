@@ -7,6 +7,7 @@
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include "torch/all.h"
 #include "rtp_llm/cpp/cache/Types.h"
+#include "rtp_llm/cpp/engine_base/schedulers/SchedulerUtils.h"
 #include "rtp_llm/cpp/models/ModelTypes.h"
 #include "rtp_llm/cpp/normal_engine/NormalModelInputGatherer.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
@@ -640,15 +641,89 @@ absl::StatusOr<GptModelInputs> NormalModelInputGatherer::gather(const StreamGrou
     RTP_LLM_LOG_DEBUG("context_streams size = %d, decode_streams size = %d",
                       stream_groups.contextStreams().size(),
                       stream_groups.decodeStreams().size());
-    auto model_input = allocateModelInputBuffers(stream_groups);
+    const auto& decode_streams  = stream_groups.decodeStreams();
+    const auto& context_streams = stream_groups.contextStreams();
+
+    // Only schedulable streams define the model execution mode. In particular,
+    // an errored stream may be the first entry (or the only entry on a rank),
+    // while its input is still retained below to keep TP collectives aligned.
+    bool       has_execution_mode     = false;
+    bool       prefill_only           = false;
+    bool       mixed_execution_modes  = false;
+    const auto capture_execution_mode = [&](const auto& streams) {
+        for (const auto& stream : streams) {
+            if (stream->hasError()) {
+                continue;
+            }
+            const bool stream_prefill_only = isPrefillOnly(stream);
+            if (!has_execution_mode) {
+                has_execution_mode = true;
+                prefill_only       = stream_prefill_only;
+            } else if (prefill_only != stream_prefill_only) {
+                mixed_execution_modes = true;
+            }
+        }
+    };
+    capture_execution_mode(decode_streams);
+    capture_execution_mode(context_streams);
+    if (mixed_execution_modes) {
+        // Do not return before the executor's TP sync: non-root ranks can own an empty
+        // stream list, so a rank-local early return would fork the collective sequence.
+        // Mark every affected request instead; the gathered batch remains shape-valid
+        // and any model output is ignored by the errored streams.
+        const auto report_mixed_mode_error = [](const auto& streams) {
+            for (const auto& stream : streams) {
+                if (!stream->hasError()) {
+                    stream->reportError(ErrorCode::INVALID_PARAMS, kMixedExecutionModeBatchError);
+                }
+            }
+        };
+        report_mixed_mode_error(decode_streams);
+        report_mixed_mode_error(context_streams);
+    }
+
+    const auto cancel_capture_reservations = [&] {
+        for (const auto& stream : decode_streams) {
+            stream->cancelHiddenStateCapture();
+        }
+        for (const auto& stream : context_streams) {
+            stream->cancelHiddenStateCapture();
+        }
+    };
+    // This is the actual packed batch, after scheduler group fallback/partial admission.
+    // Do not ignore fake or errored lanes: their tokens are still packed for rank alignment.
+    const bool capture_hidden_states =
+        !config_.warm_up && (config_.role_type == RoleType::PREFILL || config_.role_type == RoleType::PDFUSION)
+        && decode_streams.empty() && !context_streams.empty() && !mixed_execution_modes
+        && std::all_of(context_streams.begin(), context_streams.end(), [](const auto& stream) {
+               return stream->isHiddenStateCaptureCandidate() && stream->hasHiddenStateCaptureReservation();
+           });
+    if (!capture_hidden_states) {
+        const auto has_reservation = [](const auto& stream) { return stream->hasHiddenStateCaptureReservation(); };
+        if (std::any_of(context_streams.begin(), context_streams.end(), has_reservation)
+            || std::any_of(decode_streams.begin(), decode_streams.end(), has_reservation)) {
+            RTP_LLM_LOG_WARNING("skip hidden-state capture: unsafe packed batch or missing reservation");
+            cancel_capture_reservations();
+        }
+    }
+
+    auto model_input                  = allocateModelInputBuffers(stream_groups);
+    model_input.skip_lm_head          = prefill_only;
+    model_input.capture_hidden_states = capture_hidden_states;
     if (record_lengths) {
         model_input.record_lengths.emplace();
         model_input.record_lengths->q_tokens.resize(stream_groups.totalModelBatchSize(), -1);
         model_input.record_lengths->kv_tokens_before.resize(stream_groups.totalModelBatchSize(), -1);
     }
     initializeKvCacheMetadata(model_input);
-    RETURN_IF_STATUS_ERROR(processDecodeStreams(model_input, stream_groups));
-    RETURN_IF_STATUS_ERROR(processContextStreams(model_input, stream_groups, host_holder));
+    auto status = processDecodeStreams(model_input, stream_groups);
+    if (status.ok()) {
+        status = processContextStreams(model_input, stream_groups, host_holder);
+    }
+    if (!status.ok()) {
+        cancel_capture_reservations();
+        return status;
+    }
     publishModelInputCoreTensorsToCuda(model_input, host_holder);
     model_input.lm_output_indexes = buildLmOutputIndexesOnCuda(model_input, stream_groups);
     return model_input;

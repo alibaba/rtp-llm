@@ -2,6 +2,7 @@
 #include <cstdint>
 #include <optional>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -90,14 +91,66 @@ public:
     bool               gen_timeline = false;
     int                profile_step = 3;
     std::string        profile_trace_name;
-    bool               ignore_eos          = false;
-    bool               reuse_cache         = true;
-    bool               enable_device_cache = true;
-    bool               enable_memory_cache = true;
-    bool               enable_remote_cache = true;
+    bool               ignore_eos            = false;
+    bool               reuse_cache           = true;
+    bool               capture_hidden_states = false;
+    bool               enable_device_cache   = true;
+    bool               enable_memory_cache   = true;
+    bool               enable_remote_cache   = true;
     std::string        trace_id;
     std::optional<int> group_timeout;
     std::string        unique_key;
+
+    bool isPrefillOnly() const {
+        return max_new_tokens == 0;
+    }
+
+    void validatePrefillOnly() {
+        if (max_new_tokens < 0) {
+            throw std::invalid_argument("max_new_tokens must be greater than or equal to 0, got "
+                                        + std::to_string(max_new_tokens));
+        }
+        if (!isPrefillOnly()) {
+            return;
+        }
+        if (min_new_tokens > 0) {
+            throw std::invalid_argument("max_new_tokens == 0 does not support min_new_tokens > 0");
+        }
+        if (num_beams > 1) {
+            throw std::invalid_argument("max_new_tokens == 0 does not support num_beams > 1");
+        }
+        if (!variable_num_beams.empty()) {
+            throw std::invalid_argument("max_new_tokens == 0 does not support non-empty variable_num_beams");
+        }
+        if (num_return_sequences > 1) {
+            throw std::invalid_argument("max_new_tokens == 0 does not support num_return_sequences > 1");
+        }
+        if (return_logits) {
+            throw std::invalid_argument("max_new_tokens == 0 does not support return_logits");
+        }
+        if (calculate_loss != 0) {
+            throw std::invalid_argument("max_new_tokens == 0 does not support calculate_loss");
+        }
+
+        if (return_softmax_probs) {
+            throw std::invalid_argument("max_new_tokens == 0 does not support return_softmax_probs");
+        }
+        if (return_all_probs) {
+            throw std::invalid_argument("max_new_tokens == 0 does not support return_all_probs");
+        }
+        if (return_cum_log_probs) {
+            throw std::invalid_argument("max_new_tokens == 0 does not support return_cum_log_probs");
+        }
+        if (return_logprobs) {
+            throw std::invalid_argument("max_new_tokens == 0 does not support return_logprobs");
+        }
+        if (return_hidden_states) {
+            throw std::invalid_argument("max_new_tokens == 0 does not support return_hidden_states");
+        }
+        if (return_all_hidden_states) {
+            throw std::invalid_argument("max_new_tokens == 0 does not support return_all_hidden_states");
+        }
+    }
 
     bool top1() {
         return top_k == 1;
@@ -157,7 +210,8 @@ public:
                      << ", begin_think_token_ids: " << vectorToString(begin_think_token_ids)
                      << ", end_think_token_ids: " << vectorToString(end_think_token_ids)
                      << ", gen_timeline: " << gen_timeline << ", profile_step: " << profile_step
-                     << ", reuse_cache: " << reuse_cache << ", enable_device_cache: " << enable_device_cache
+                     << ", reuse_cache: " << reuse_cache << ", capture_hidden_states: " << capture_hidden_states
+                     << ", enable_device_cache: " << enable_device_cache
                      << ", enable_memory_cache: " << enable_memory_cache
                      << ", enable_remote_cache: " << enable_remote_cache << ", unique_key: " << unique_key << "}";
         return debug_string.str();
@@ -245,6 +299,7 @@ public:
         JSONIZE(profile_step);
         JSONIZE(profile_trace_name);
         JSONIZE(reuse_cache);
+        JSONIZE(capture_hidden_states);
         JSONIZE(enable_device_cache);
         JSONIZE(enable_memory_cache);
         JSONIZE(enable_remote_cache);

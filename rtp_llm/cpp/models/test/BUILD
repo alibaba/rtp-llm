@@ -32,6 +32,23 @@ test_deps = [
 ] + torch_deps() + cuda13_torch_link_deps
 
 cc_test(
+    name = "hidden_state_capture_publisher_test",
+    srcs = ["HiddenStateCapturePublisherTest.cc"],
+    copts = test_copts,
+    deps = test_deps + ["@local_config_python//:python_lib"],
+    timeout = "moderate",
+)
+
+cc_test(
+    name = "model_types_test",
+    srcs = ["ModelTypesTest.cc"],
+    copts = test_copts,
+    deps = test_deps + ["//rtp_llm/cpp/distribute:cpu_tp_broadcaster"],
+    env = {"TEST_USING_DEVICE": "CUDA"},
+    timeout = "short",
+)
+
+cc_test(
     name = "model_data_test",
     srcs = [
         "ModelDataTest.cc",
@@ -43,4 +60,67 @@ cc_test(
         "TEST_USING_DEVICE": "CUDA",
     },
     exec_properties = {'gpu':'H20'},
+)
+
+cc_library(
+    name = "pywrapped_model_cache_store_integration_test_lib",
+    testonly = True,
+    srcs = ["PyWrappedModelCacheStoreIntegrationTest.cc"],
+    alwayslink = True,
+    copts = copts(),
+    deps = [
+        "//rtp_llm/cpp/config:static_config",
+        "//rtp_llm/cpp/models:context_parallel",
+        "//rtp_llm/cpp/models:models",
+        "//rtp_llm/cpp/models/models_weight:weights_define",
+        "//rtp_llm/models_py/bindings:op_defs",
+        "//rtp_llm/models_py/bindings/core:exec_ops_test_lib",
+        "//rtp_llm/models_py/bindings/core:runtime_device_hdr",
+        "//rtp_llm/models_py/bindings/cuda/ops:cuda_impl",
+    ] + torch_deps() + cuda13_torch_link_deps,
+)
+
+cc_binary(
+    name = "th_pywrapped_model_cache_store_integration_test",
+    testonly = True,
+    deps = [":pywrapped_model_cache_store_integration_test_lib"],
+    linkshared = 1,
+)
+
+py_library(
+    name = "pywrapped_model_capture_fixture",
+    testonly = True,
+    srcs = ["pywrapped_model_cache_store_integration_test.py"],
+    data = [":th_pywrapped_model_cache_store_integration_test"],
+    deps = ["//rtp_llm:torch"],
+)
+
+py_test(
+    name = "pywrapped_model_cp_capture_test",
+    srcs = ["pywrapped_model_cp_capture_test.py"],
+    deps = [
+        ":pywrapped_model_capture_fixture",
+        "//rtp_llm:torch",
+        "//rtp_llm/test/utils:test_util",
+    ],
+    timeout = "long",
+    env = {
+        "GPU_COUNT": "2",
+        "TEST_USING_DEVICE": "CUDA",
+        "WORLD_SIZE": "2",
+    },
+    tags = ["manual", "SM103_CU13"],
+    exec_properties = {"gpu": "SM103_CU13", "gpu_count": "2"},
+)
+
+py_test(
+    name = "pywrapped_model_cache_store_integration_test",
+    srcs = ["pywrapped_model_cache_store_integration_test.py"],
+    data = [
+        ":th_pywrapped_model_cache_store_integration_test",
+        "//rtp_llm/models_py:modules",
+    ],
+    deps = ["//rtp_llm:torch"],
+    env = {"TEST_USING_DEVICE": "CUDA"},
+    tags = ["manual"],
 )

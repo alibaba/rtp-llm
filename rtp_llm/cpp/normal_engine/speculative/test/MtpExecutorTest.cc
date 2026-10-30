@@ -2,11 +2,15 @@
 #include <memory>
 #include <limits>
 #include <chrono>
+#include <optional>
+#include "rtp_llm/cpp/normal_engine/HiddenStateCapturePolicy.h"
+#include "rtp_llm/cpp/engine_base/schedulers/SchedulerUtils.h"
 #include "torch/all.h"
 #include "autil/EnvUtil.h"
 #include "gtest/gtest.h"
 
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
+#include "rtp_llm/cpp/config/StaticConfig.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 #include "rtp_llm/cpp/models/logits_processor/BaseLogitsProcessor.h"
 #include "rtp_llm/cpp/models/logits_processor/SpecLogitsProcessor.h"
@@ -38,11 +42,12 @@ using namespace std;
 namespace spec = speculative;
 
 struct MtpExecutorTestConfig {
-    size_t max_seq_len         = 2048;
-    size_t vocab_size          = 4;
-    size_t num_layers          = 1;
-    size_t gen_num_per_cycle   = 4;
-    size_t vocab_size_override = 0;  // 0 means use vocab_size
+    size_t max_seq_len            = 2048;
+    size_t vocab_size             = 4;
+    size_t num_layers             = 1;
+    size_t gen_num_per_cycle      = 4;
+    size_t vocab_size_override    = 0;  // 0 means use vocab_size
+    bool   core_dump_on_exception = true;
 };
 
 template<typename T>
@@ -132,11 +137,35 @@ public:
     }
 
     GptModelOutputs forward(const GptModelInputs& inputs) override {
-        checkInputs(inputs);
+        ++forward_count_;
+        if (input_observer_) {
+            input_observer_(inputs);
+        } else {
+            checkInputs(inputs);
+        }
         if (forward_callback_) {
             forward_callback_();
         }
         return output_holder.get();
+    }
+
+    std::optional<std::string> takeDeferredHiddenStateCaptureError() override {
+        if (capture_error_observer_) {
+            capture_error_observer_();
+        }
+        auto result = deferred_capture_error_;
+        deferred_capture_error_.reset();
+        return result;
+    }
+
+    bool tryReserveHiddenStateCapture(int64_t request_id, int64_t tokens) override {
+        reserved_request_id_ = request_id;
+        reserved_tokens_     = tokens;
+        return true;
+    }
+    void cancelHiddenStateCapture(int64_t request_id) override {
+        EXPECT_EQ(request_id, reserved_request_id_);
+        ++cancel_count_;
     }
 
     void checkTensorField(const char* name, const torch::Tensor& actual, const torch::Tensor& expected) {
@@ -152,6 +181,8 @@ public:
         checkTensorField("prefix_lengths", inputs.prefix_lengths, expected_inputs.prefix_lengths);
         checkTensorField("lm_output_indexes", inputs.lm_output_indexes, expected_inputs.lm_output_indexes);
         checkTensorField("last_hidden_states", inputs.last_hidden_states, expected_inputs.last_hidden_states);
+        EXPECT_EQ(inputs.skip_lm_head, expected_inputs.skip_lm_head);
+        EXPECT_EQ(inputs.capture_hidden_states, expected_inputs.capture_hidden_states);
     }
 
     void setOutputs(const vector<GptModelOutputs>& outputs) {
@@ -165,6 +196,15 @@ public:
     void setForwardCallback(std::function<void()> callback) {
         forward_callback_ = std::move(callback);
     }
+
+public:
+    size_t                                     forward_count_       = 0;
+    int64_t                                    reserved_request_id_ = -1;
+    int64_t                                    reserved_tokens_     = 0;
+    int                                        cancel_count_        = 0;
+    std::function<void(const GptModelInputs&)> input_observer_;
+    std::function<void()>                      capture_error_observer_;
+    std::optional<std::string>                 deferred_capture_error_;
 
 private:
     TestDataHolder<GptModelInputs>  input_holder;
@@ -360,6 +400,9 @@ public:
 
         stream->setSPOutputBuffer(sp_buffer);
         stream->specUpdate(spec_update_info);
+        sp_buffer->target_token_gpu =
+            spec_update_info.new_tokens.select(1, spec_update_info.num_new_tokens - 1).to(torch::kCUDA);
+        sp_buffer->propose_tokens_gpu = torch::tensor({spec_update_info.draft_token}, torch::kInt32).to(torch::kCUDA);
         return stream;
     }
 
@@ -441,6 +484,8 @@ public:
 
         mtp_model_params->push_back(std::move(mtp_params));
 
+        params.profiling_debug_logging_config.ft_core_dump_on_exception = test_config.core_dump_on_exception;
+        StaticConfig::user_ft_core_dump_on_exception                    = test_config.core_dump_on_exception;
         auto propose_params = std::make_unique<ProposeModelEngineInitParams>(
             SP_TYPE_MTP, sp_config.gen_num_per_cycle, std::move(mtp_model_params));
 
@@ -1329,7 +1374,7 @@ TEST_F(MtpExecutorTest, testCudaSelectedMtpLogprobsAvoidDenseAcceptedRowCopy) {
 TEST_F(MtpExecutorTest, testSingleBatchPrefill) {
     autil::EnvGuard                 snapshot_env("RTP_LLM_CACHE_STATUS_SNAPSHOT", "1");
     std::shared_ptr<KVCacheManager> cache_manager;
-    MtpExecutorTestConfig test_config;
+    MtpExecutorTestConfig           test_config;
     test_config.gen_num_per_cycle = 4;
     bool target_forward_finished  = false;
     bool target_sampler_started   = false;
@@ -1544,19 +1589,19 @@ TEST_F(MtpExecutorTest, testSingleBatchDecode) {
 
     draft_input_1.combo_tokens       = torch::tensor({3}, torch::kInt32);
     draft_input_1.input_lengths      = torch::tensor({2}, torch::kInt32);
-    draft_input_1.sequence_lengths   = torch::tensor({2}, torch::kInt32);
+    draft_input_1.sequence_lengths   = torch::tensor({3}, torch::kInt32);
     draft_input_1.lm_output_indexes  = torch::tensor({0}, torch::kInt32);
     draft_input_1.last_hidden_states = stream1_hidden_states;
 
     draft_input_2.combo_tokens       = torch::tensor({2}, torch::kInt32);
     draft_input_2.input_lengths      = torch::tensor({2}, torch::kInt32);
-    draft_input_2.sequence_lengths   = torch::tensor({3}, torch::kInt32);
+    draft_input_2.sequence_lengths   = torch::tensor({4}, torch::kInt32);
     draft_input_2.lm_output_indexes  = torch::tensor({0}, torch::kInt32);
     draft_input_2.last_hidden_states = draft_output_1.all_hidden_states;
 
     draft_input_3.combo_tokens       = torch::tensor({1}, torch::kInt32);
     draft_input_3.input_lengths      = torch::tensor({2}, torch::kInt32);
-    draft_input_3.sequence_lengths   = torch::tensor({4}, torch::kInt32);
+    draft_input_3.sequence_lengths   = torch::tensor({5}, torch::kInt32);
     draft_input_3.lm_output_indexes  = torch::tensor({0}, torch::kInt32);
     draft_input_3.last_hidden_states = draft_output_2.all_hidden_states;
 
@@ -1685,7 +1730,7 @@ TEST_F(MtpExecutorTest, testDecodeSpecLogitsCapReplacesInvalidDraftWithTargetTok
     auto draft_output_1              = GptModelOutputs{};
     draft_input_1.combo_tokens       = torch::tensor({3}, torch::kInt32);
     draft_input_1.input_lengths      = torch::tensor({2}, torch::kInt32);
-    draft_input_1.sequence_lengths   = torch::tensor({2}, torch::kInt32);
+    draft_input_1.sequence_lengths   = torch::tensor({3}, torch::kInt32);
     draft_input_1.lm_output_indexes  = torch::tensor({0}, torch::kInt32);
     draft_input_1.last_hidden_states = stream_hidden_states;
     draft_output_1.logits            = torch::tensor({0.4f, 0.3f, 0.2f, 0.1f}).reshape({1, 4});
@@ -1858,9 +1903,9 @@ TEST_F(MtpExecutorTest, testErroredSpecLogitsStreamDoesNotAbortExecutor) {
     test_config.vocab_size_override = vocab_size;
     auto components                 = createMtpExecutorComponents(test_config);
 
-    auto stream_new_tokens        = torch::tensor({{2}}, torch::kInt32);
-    auto stream_hidden_states     = torch::tensor({{0.03f, 0.04f}});
-    auto stream_draft_token_probs = torch::tensor({{0.0f, 0.0f, 0.0f, 1.0f}});
+    auto                 stream_new_tokens        = torch::tensor({{2}}, torch::kInt32);
+    auto                 stream_hidden_states     = torch::tensor({{0.03f, 0.04f}});
+    auto                 stream_draft_token_probs = torch::tensor({{0.0f, 0.0f, 0.0f, 1.0f}});
     StreamSpecUpdateInfo spec_update_info{stream_new_tokens, 1, 3, stream_hidden_states, stream_draft_token_probs};
 
     GenerateStreamPtr stream = createDecodeStream(
@@ -1868,12 +1913,11 @@ TEST_F(MtpExecutorTest, testErroredSpecLogitsStreamDoesNotAbortExecutor) {
     stream->logits_processor_list_.push_back(std::make_shared<IneligibleSpecProcessor>());
     stream->reportError(ErrorCode::INVALID_PARAMS, "grammar accept_token error: parser rejected token");
 
-    auto target_input              = GptModelInputs{};
-    auto target_output             = GptModelOutputs{};
-    // GLM5's MtpBatchStreamProcessor zero-fills target tokens for streams that
-    // have already entered an error state; the executor must still avoid
-    // escalating the request-level grammar failure into a process abort.
-    target_input.combo_tokens      = torch::tensor({0, 0}, torch::kInt32);
+    auto target_input  = GptModelInputs{};
+    auto target_output = GptModelOutputs{};
+    // Device token mirrors remain valid after a request-level grammar error;
+    // the executor must not escalate that failure into a process abort.
+    target_input.combo_tokens      = torch::tensor({2, 3}, torch::kInt32);
     target_input.input_lengths     = torch::tensor({2}, torch::kInt32);
     target_input.prefix_lengths    = torch::tensor({2}, torch::kInt32);
     target_input.lm_output_indexes = torch::tensor({0, 1}, torch::kInt32);
@@ -1973,19 +2017,19 @@ TEST_F(MtpExecutorTest, testMultiBatchDecode) {
 
     draft_input_1.combo_tokens       = torch::tensor({2, 3}, torch::kInt32);
     draft_input_1.input_lengths      = torch::tensor({3, 2}, torch::kInt32);
-    draft_input_1.sequence_lengths   = torch::tensor({3, 2}, torch::kInt32);
+    draft_input_1.sequence_lengths   = torch::tensor({4, 3}, torch::kInt32);
     draft_input_1.lm_output_indexes  = torch::tensor({0, 1}, torch::kInt32);
     draft_input_1.last_hidden_states = torch::tensor({0.03f, 0.04f, 2.1f, 2.12f}).reshape({2, 2});
 
     draft_input_2.combo_tokens       = torch::tensor({1, 0}, torch::kInt32);
     draft_input_2.input_lengths      = torch::tensor({3, 2}, torch::kInt32);
-    draft_input_2.sequence_lengths   = torch::tensor({4, 3}, torch::kInt32);
+    draft_input_2.sequence_lengths   = torch::tensor({5, 4}, torch::kInt32);
     draft_input_2.lm_output_indexes  = torch::tensor({0, 1}, torch::kInt32);
     draft_input_2.last_hidden_states = draft_output_1.all_hidden_states;
 
     draft_input_3.combo_tokens       = torch::tensor({2, 2}, torch::kInt32);
     draft_input_3.input_lengths      = torch::tensor({3, 2}, torch::kInt32);
-    draft_input_3.sequence_lengths   = torch::tensor({5, 4}, torch::kInt32);
+    draft_input_3.sequence_lengths   = torch::tensor({6, 5}, torch::kInt32);
     draft_input_3.lm_output_indexes  = torch::tensor({0, 1}, torch::kInt32);
     draft_input_3.last_hidden_states = draft_output_2.all_hidden_states;
 
@@ -2196,6 +2240,535 @@ TEST_F(MtpExecutorTest, testDispatchStatePrepareBenchmark) {
         "[dispatch-bench] batched: %ld us total, %.2f us/iter", us_batched, (double)us_batched / iterations);
     RTP_LLM_LOG_INFO("[dispatch-bench] scalar:  %ld us total, %.2f us/iter", us_scalar, (double)us_scalar / iterations);
     RTP_LLM_LOG_INFO("[dispatch-bench] speedup: %.1fx", speedup);
+}
+
+TEST_F(MtpExecutorTest, NormalCaptureFailurePreservesSamplingDraftHandoffAndDispatch) {
+    for (bool fail_capture : {false, true}) {
+        SCOPED_TRACE(fail_capture);
+        auto  components                              = createMtpExecutorComponents(MtpExecutorTestConfig{});
+        auto* executor                                = components.executor.get();
+        executor->role_type_                          = RoleType::PREFILL;
+        components.resource_context.cache_manager     = executor->cache_manager_;
+        auto query                                    = std::make_shared<GenerateInput>();
+        query->request_id                             = 42;
+        query->input_ids                              = torch::tensor({0, 1, 2, 3}, torch::kInt32);
+        query->generate_config                        = std::make_shared<GenerateConfig>();
+        query->generate_config->max_new_tokens        = 2;
+        query->generate_config->is_streaming          = true;
+        query->generate_config->capture_hidden_states = true;
+        query->generate_config->reuse_cache           = false;
+        query->generate_config->ignore_eos            = true;
+        auto stream                                   = std::make_shared<NormalGenerateStream>(
+            query, components.model_config, components.runtime_config, components.resource_context, nullptr);
+        ASSERT_TRUE(stream->initKVBlock().ok());
+        stream->generate_status_->status = StreamState::RUNNING;
+        auto*           target           = components.fake_target_model.get();
+        auto*           draft            = components.fake_draft_model.get();
+        GptModelOutputs target_output;
+        target_output.logits = torch::tensor({{0.1f, 0.2f, 0.3f, 0.4f}}).to(torch::kCUDA);
+        target_output.all_hidden_states =
+            torch::arange(8, torch::TensorOptions(torch::kFloat32).device(torch::kCUDA)).reshape({4, 2});
+        GptModelOutputs draft_output;
+        draft_output.logits            = torch::tensor({{0.5f, 0.6f, 0.7f, 0.8f}}).to(torch::kCUDA);
+        draft_output.all_hidden_states = target_output.all_hidden_states + 10;
+        target->setOutputs({target_output});
+        draft->setOutputs({draft_output});
+        std::vector<std::string> trace;
+        target->input_observer_ = [&](const GptModelInputs& input) {
+            trace.push_back("target");
+            EXPECT_TRUE(input.capture_hidden_states);
+            EXPECT_FALSE(input.skip_lm_head);
+            EXPECT_EQ(toVec<int>(input.combo_tokens), (std::vector<int>{0, 1, 2, 3}));
+        };
+        draft->input_observer_ = [&](const GptModelInputs& input) {
+            trace.push_back("draft");
+            EXPECT_FALSE(input.capture_hidden_states);
+            EXPECT_FALSE(input.skip_lm_head);
+            EXPECT_TRUE(torch::equal(input.last_hidden_states, target_output.all_hidden_states));
+            EXPECT_EQ(toVec<int>(input.combo_tokens), (std::vector<int>{1, 2, 3, 1}));
+        };
+        target->capture_error_observer_ = [&] { trace.push_back("capture_error_taken"); };
+        if (fail_capture) {
+            target->deferred_capture_error_ = "training publication failed";
+        }
+        components.fake_sampler->setInputs({SamplerInputs{target_output.logits}});
+        components.fake_sampler->setOutputs({SamplerOutput{torch::tensor({{1}}, torch::kInt32)}});
+        components.fake_sampler->setForwardCallback([&] { trace.push_back("target_sample"); });
+        components.fake_fast_topk_sampler->setInputs({draft_output.logits});
+        components.fake_fast_topk_sampler->setOutputs(
+            {spec::FastTopKSamplerOutput{torch::tensor({{0.f, 0.f, 1.f, 0.f}}), torch::tensor({{2}}, torch::kInt32)}});
+        setupFakeModels(executor,
+                        std::move(components.fake_target_model),
+                        std::move(components.fake_draft_model),
+                        std::move(components.fake_fast_topk_sampler),
+                        std::move(components.fake_speculative_sampler),
+                        std::move(components.fake_sampler));
+        ASSERT_TRUE(executor->tryReserveHiddenStateCapture(42, 4));
+        EXPECT_EQ(target->reserved_request_id_, 42);
+        EXPECT_EQ(target->reserved_tokens_, 4);
+        EXPECT_EQ(draft->reserved_request_id_, -1);
+        auto                             capture_owner = std::shared_ptr<MtpExecutor>(std::move(components.executor));
+        const std::weak_ptr<MtpExecutor> weak_owner    = capture_owner;
+        stream->setHiddenStateCaptureReservation([weak_owner] {
+            if (auto owner = weak_owner.lock()) {
+                owner->cancelHiddenStateCapture(42);
+            }
+        });
+        ASSERT_TRUE(executor->process({stream}).ok());
+        EXPECT_EQ(trace, (std::vector<std::string>{"target", "target_sample", "draft", "capture_error_taken"}));
+        EXPECT_EQ(target->forward_count_, 1u);
+        EXPECT_EQ(draft->forward_count_, 1u);
+        EXPECT_FALSE(stream->hasError());
+        EXPECT_TRUE(stream->hasOutput());
+        EXPECT_EQ(stream->outputTokenLen(), 1);
+        EXPECT_EQ(stream->completeTokenIdsVec(), (std::vector<int>{0, 1, 2, 3, 1}));
+        ASSERT_NE(stream->getSPOutputBuffer(), nullptr);
+        EXPECT_EQ(toVec<int>(stream->getSPOutputBuffer()->tokens), (std::vector<int>{1, 2}));
+        stream->cancelHiddenStateCapture();
+        EXPECT_EQ(target->cancel_count_, 1);
+    }
+}
+
+TEST_F(MtpExecutorTest, testTargetOnlyPrefillBypassAndAlignmentPreserveHiddenHandoff) {
+    for (bool simulate_cp : {false, true}) {
+        for (bool ffn_alignment : {false, true}) {
+            for (int dp_size : {1, 2}) {
+                for (bool capture_failure : {false, true}) {
+                    for (bool prior_error : {false, true}) {
+                        SCOPED_TRACE(::testing::Message()
+                                     << "ffn=" << ffn_alignment << " dp=" << dp_size
+                                     << " capture_failure=" << capture_failure << " prior_error=" << prior_error);
+                        MtpExecutorTestConfig test_config;
+                        auto                  components = createMtpExecutorComponents(test_config);
+                        auto*                 executor   = components.executor.get();
+                        executor->role_type_             = RoleType::PREFILL;
+                        if (simulate_cp) {
+                            executor->parallelism_config_.prefill_cp_config.method = CPRotateMethod::ALL_GATHER;
+                        }
+                        executor->enable_ffn_disaggregate_        = ffn_alignment;
+                        executor->parallelism_config_.dp_size     = dp_size;
+                        components.resource_context.cache_manager = executor->cache_manager_;
+                        auto query                                = std::make_shared<GenerateInput>();
+                        query->input_ids                          = torch::tensor({0, 1, 2, 3}, torch::kInt32);
+                        query->generate_config                    = std::make_shared<GenerateConfig>();
+                        query->generate_config->max_new_tokens    = 0;
+                        auto stream                               = std::make_shared<NormalGenerateStream>(query,
+                                                                             components.model_config,
+                                                                             components.runtime_config,
+                                                                             components.resource_context,
+                                                                             nullptr);
+                        ASSERT_TRUE(stream->initKVBlock().ok());
+                        auto capture_cancelled = std::make_shared<int>(0);
+                        stream->setHiddenStateCaptureReservation([capture_cancelled] { ++*capture_cancelled; });
+                        stream->generate_status_->status     = StreamState::RUNNING;
+                        const bool               needs_draft = ffn_alignment || dp_size > 1;
+                        std::vector<std::string> trace;
+                        auto*                    target = components.fake_target_model.get();
+                        auto*                    draft  = components.fake_draft_model.get();
+                        auto                     hidden =
+                            torch::arange(8, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA))
+                                .reshape({4, 2});
+                        GptModelOutputs output;
+                        output.all_hidden_states = hidden;
+                        // Undefined logits deliberately make accidental target/draft sampling fail.
+                        target->setOutputs({output});
+                        draft->setOutputs({GptModelOutputs{}});
+                        target->input_observer_ = [&](const GptModelInputs& inputs) {
+                            trace.push_back("target");
+                            EXPECT_TRUE(inputs.skip_lm_head);
+                            EXPECT_TRUE(inputs.capture_hidden_states);
+                            EXPECT_EQ(toVec<int>(inputs.combo_tokens), (std::vector<int>{0, 1, 2, 3}));
+                            EXPECT_EQ(toVec<int>(inputs.input_lengths), (std::vector<int>{4}));
+                            if (simulate_cp) {
+                                // Simulate the CP target mutating the global view in place.
+                                auto& mutable_inputs = const_cast<GptModelInputs&>(inputs);
+                                mutable_inputs.combo_tokens.fill_(99);
+                                mutable_inputs.input_lengths.fill_(1);
+                            }
+                            if (prior_error) {
+                                stream->reportError(ErrorCode::CANCELLED, "original request error");
+                            }
+                        };
+                        draft->input_observer_ = [&](const GptModelInputs& inputs) {
+                            trace.push_back("draft");
+                            EXPECT_TRUE(inputs.skip_lm_head);
+                            EXPECT_FALSE(inputs.capture_hidden_states);
+                            EXPECT_EQ(toVec<int>(inputs.combo_tokens), (std::vector<int>{1, 2, 3, 0}));
+                            EXPECT_EQ(toVec<int>(inputs.input_lengths), (std::vector<int>{4}));
+                            EXPECT_TRUE(torch::equal(inputs.last_hidden_states, hidden));
+                        };
+                        if (capture_failure) {
+                            target->deferred_capture_error_ = "capture publication failed";
+                        }
+                        target->capture_error_observer_ = [&] { trace.push_back("capture_error_taken"); };
+                        setupFakeModels(executor,
+                                        std::move(components.fake_target_model),
+                                        std::move(components.fake_draft_model),
+                                        std::move(components.fake_fast_topk_sampler),
+                                        std::move(components.fake_speculative_sampler),
+                                        std::move(components.fake_sampler));
+                        ASSERT_TRUE(executor->process({stream}).ok());
+                        EXPECT_EQ(target->forward_count_, 1u);
+                        EXPECT_EQ(draft->forward_count_, needs_draft ? 1u : 0u);
+                        EXPECT_EQ(trace,
+                                  needs_draft ? (std::vector<std::string>{"target", "draft", "capture_error_taken"}) :
+                                                (std::vector<std::string>{"target", "capture_error_taken"}));
+                        EXPECT_EQ(stream->getSPOutputBuffer(), nullptr);
+                        EXPECT_FALSE(stream->getReturnAllProbs());
+                        EXPECT_EQ(stream->seqLength(), 4);
+                        EXPECT_EQ(stream->outputTokenLen(), 0);
+                        if (prior_error) {
+                            EXPECT_EQ(stream->statusInfo().code(), ErrorCode::CANCELLED);
+                            EXPECT_EQ(stream->stopReason(), "original request error");
+                            EXPECT_FALSE(stream->hasOutput());
+                            EXPECT_FALSE(stream->hasEvent(StreamEvents::GenerateDone));
+                        } else {
+                            ASSERT_TRUE(stream->hasOutput());
+                            auto result = stream->nextOutput();
+                            ASSERT_TRUE(result.ok());
+                            ASSERT_EQ(result.value().generate_outputs.size(), 1);
+                            EXPECT_TRUE(result.value().generate_outputs[0].finished);
+                            EXPECT_EQ(result.value().generate_outputs[0].output_ids.sizes(),
+                                      (torch::IntArrayRef{1, 0}));
+                            EXPECT_FALSE(stream->hasOutput());
+                            EXPECT_TRUE(stream->hasEvent(StreamEvents::GenerateDone));
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+TEST_F(MtpExecutorTest, testPrefillOnlyDecodeRoleAndMixedBatchAreRejectedBeforeModelWork) {
+    MtpExecutorTestConfig config;
+    auto                  components  = createMtpExecutorComponents(config);
+    auto                  make_stream = [&](int max_new_tokens) {
+        auto query                             = std::make_shared<GenerateInput>();
+        query->input_ids                       = torch::tensor({0, 1}, torch::kInt32);
+        query->generate_config                 = std::make_shared<GenerateConfig>();
+        query->generate_config->max_new_tokens = max_new_tokens;
+        return std::make_shared<NormalGenerateStream>(
+            query, components.model_config, components.runtime_config, components.resource_context, nullptr);
+    };
+    auto* executor                    = components.executor.get();
+    executor->role_type_              = RoleType::DECODE;
+    auto                         zero = make_stream(0);
+    std::list<GenerateStreamPtr> prefill, decode;
+    executor->prepareStreams({zero}, prefill, decode);
+    EXPECT_TRUE(prefill.empty());
+    EXPECT_TRUE(decode.empty());
+    EXPECT_EQ(zero->statusInfo().code(), ErrorCode::INVALID_PARAMS);
+    EXPECT_EQ(zero->stopReason(), kDecodeRolePrefillOnlyError);
+    EXPECT_EQ(zero->getSPOutputBuffer(), nullptr);
+    for (bool zero_first : {false, true}) {
+        executor->role_type_ = RoleType::PDFUSION;
+        zero                 = make_stream(0);
+        auto positive        = make_stream(1);
+        executor->prepareStreams(zero_first ? std::list<GenerateStreamPtr>{zero, positive} :
+                                              std::list<GenerateStreamPtr>{positive, zero},
+                                 prefill,
+                                 decode);
+        EXPECT_TRUE(prefill.empty());
+        EXPECT_TRUE(decode.empty());
+        EXPECT_EQ(zero->statusInfo().code(), ErrorCode::INVALID_PARAMS);
+        EXPECT_EQ(positive->statusInfo().code(), ErrorCode::INVALID_PARAMS);
+        EXPECT_EQ(zero->stopReason(), kMixedExecutionModeBatchError);
+        EXPECT_EQ(zero->getSPOutputBuffer(), nullptr);
+    }
+}
+
+TEST_F(MtpExecutorTest, testEmptyFfnDecodeRetainsForwardOrderWithoutSampling) {
+    for (size_t proposal_width : {size_t(1), size_t(4)}) {
+        MtpExecutorTestConfig config;
+        config.gen_num_per_cycle           = proposal_width;
+        auto  components                   = createMtpExecutorComponents(config);
+        auto* executor                     = components.executor.get();
+        executor->role_type_               = RoleType::DECODE;
+        executor->enable_ffn_disaggregate_ = true;
+        std::vector<std::string> trace;
+        components.fake_target_model->input_observer_ = [&](const GptModelInputs& inputs) {
+            trace.push_back("target");
+            EXPECT_FALSE(inputs.capture_hidden_states);
+        };
+        components.fake_draft_model->input_observer_ = [&](const GptModelInputs& inputs) {
+            trace.push_back("draft");
+            EXPECT_FALSE(inputs.capture_hidden_states);
+        };
+        components.fake_target_model->setOutputs({GptModelOutputs{}});
+        components.fake_draft_model->setOutputs(std::vector<GptModelOutputs>(proposal_width));
+        setupFakeModels(executor,
+                        std::move(components.fake_target_model),
+                        std::move(components.fake_draft_model),
+                        std::move(components.fake_fast_topk_sampler),
+                        std::move(components.fake_speculative_sampler),
+                        std::move(components.fake_sampler));
+        ASSERT_TRUE(executor->process({}).ok());
+        std::vector<std::string> expected(proposal_width - 1, "draft");
+        expected.push_back("target");
+        expected.push_back("draft");
+        EXPECT_EQ(trace, expected);
+    }
+}
+
+TEST_F(MtpExecutorTest, testMtpConstructorRejectsZeroProposalWidth) {
+    MtpExecutorTestConfig config;
+    config.gen_num_per_cycle                     = 0;
+    config.core_dump_on_exception                = false;
+    const bool core_dump_on_exception            = StaticConfig::user_ft_core_dump_on_exception;
+    StaticConfig::user_ft_core_dump_on_exception = false;
+    EXPECT_THROW(createMtpExecutorComponents(config), std::runtime_error);
+    StaticConfig::user_ft_core_dump_on_exception = core_dump_on_exception;
+}
+
+TEST_F(MtpExecutorTest, testTargetOnlyEarlyReturnRequiresSingleDpReplicaWithoutFfn) {
+    EXPECT_TRUE(MtpExecutor::canEarlyReturnTargetOnlyPrefill(1, false));
+    EXPECT_FALSE(MtpExecutor::canEarlyReturnTargetOnlyPrefill(2, false));
+    EXPECT_FALSE(MtpExecutor::canEarlyReturnTargetOnlyPrefill(1, true));
+}
+
+TEST_F(MtpExecutorTest, testHiddenStateCapturePolicy) {
+    const std::vector<int64_t> configured_layer_ids = {0, 2};
+
+    EXPECT_EQ(selectHiddenStateCaptureLayerIds(
+                  HiddenStateCaptureModelRole::TARGET, RoleType::PREFILL, false, configured_layer_ids),
+              configured_layer_ids);
+    EXPECT_EQ(selectHiddenStateCaptureLayerIds(
+                  HiddenStateCaptureModelRole::TARGET, RoleType::PDFUSION, false, configured_layer_ids),
+              configured_layer_ids);
+    EXPECT_TRUE(selectHiddenStateCaptureLayerIds(
+                    HiddenStateCaptureModelRole::TARGET, RoleType::DECODE, false, configured_layer_ids)
+                    .empty());
+    EXPECT_TRUE(selectHiddenStateCaptureLayerIds(
+                    HiddenStateCaptureModelRole::TARGET, RoleType::PREFILL, true, configured_layer_ids)
+                    .empty());
+    EXPECT_TRUE(selectHiddenStateCaptureLayerIds(
+                    HiddenStateCaptureModelRole::DRAFT, RoleType::PREFILL, false, configured_layer_ids)
+                    .empty());
+}
+
+TEST_F(MtpExecutorTest, testMixedRejectionKeepsMultiDpFakePrefillAndDecodeForwardOrder) {
+    for (auto role : {RoleType::PREFILL, RoleType::PDFUSION}) {
+        for (bool ffn : {false, true}) {
+            for (bool existing_fake_prefill : {false, true}) {
+                for (bool existing_error : {false, true}) {
+                    SCOPED_TRACE(::testing::Message()
+                                 << "role=" << static_cast<int>(role) << " ffn=" << ffn
+                                 << " existing_fake=" << existing_fake_prefill << " existing_error=" << existing_error);
+                    MtpExecutorTestConfig config;
+                    config.gen_num_per_cycle              = 1;
+                    auto  components                      = createMtpExecutorComponents(config);
+                    auto* executor                        = components.executor.get();
+                    executor->role_type_                  = role;
+                    executor->parallelism_config_.dp_size = 2;
+                    executor->enable_ffn_disaggregate_    = ffn;
+                    auto zero                             = createContextStream(
+                        components.model_config, components.runtime_config, components.resource_context, {0, 1});
+                    zero->generateConfig()->max_new_tokens = 0;
+                    auto positive                          = createContextStream(
+                        components.model_config, components.runtime_config, components.resource_context, {2, 3});
+                    if (existing_error) {
+                        positive->reportError(ErrorCode::CANCELLED, "original error");
+                    }
+                    std::list<GenerateStreamPtr> streams{zero, positive};
+                    if (existing_fake_prefill) {
+                        streams.push_back(MtpExecutor::createMinFakePrefillStream(
+                            1, components.model_config, components.runtime_config, components.resource_context));
+                    }
+                    GenerateStreamPtr fake_decode;
+                    if (role == RoleType::PDFUSION) {
+                        fake_decode = MtpExecutor::createMinFakeDecodeStream(1,
+                                                                             components.model_config,
+                                                                             components.runtime_config,
+                                                                             components.resource_context,
+                                                                             config.vocab_size);
+                        streams.push_back(fake_decode);
+                    }
+                    auto make_output = [&](int64_t rows) {
+                        GptModelOutputs output;
+                        output.all_hidden_states =
+                            torch::zeros({rows, components.model_config.hidden_size},
+                                         torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
+                        return output;
+                    };
+                    components.fake_target_model->setOutputs({make_output(1), make_output(2)});
+                    components.fake_draft_model->setOutputs({GptModelOutputs{}, GptModelOutputs{}});
+                    std::vector<std::string> trace;
+                    const auto               observe = [&](const GptModelInputs& inputs, const char* model) {
+                        EXPECT_FALSE(inputs.skip_run);
+                        EXPECT_TRUE(inputs.is_fake_stream);
+                        EXPECT_FALSE(inputs.skip_lm_head);
+                        EXPECT_FALSE(inputs.capture_hidden_states);
+                        EXPECT_EQ(inputs.input_lengths.numel(), 1);
+                        EXPECT_GT(inputs.combo_tokens.numel(), 0);
+                        trace.push_back(model);
+                    };
+                    components.fake_target_model->input_observer_ = [&](const GptModelInputs& inputs) {
+                        observe(inputs, "target");
+                    };
+                    components.fake_draft_model->input_observer_ = [&](const GptModelInputs& inputs) {
+                        observe(inputs, "draft");
+                    };
+                    // No sampler fixtures: target/rejection/final draft sampling must not publish rejected work.
+                    setupFakeModels(executor,
+                                    std::move(components.fake_target_model),
+                                    std::move(components.fake_draft_model),
+                                    std::move(components.fake_fast_topk_sampler),
+                                    std::move(components.fake_speculative_sampler),
+                                    std::move(components.fake_sampler));
+                    ASSERT_TRUE(executor->process(streams).ok());
+                    EXPECT_EQ(trace,
+                              role == RoleType::PREFILL ?
+                                  (std::vector<std::string>{"target", "draft"}) :
+                                  (std::vector<std::string>{"target", "draft", "target", "draft"}));
+                    EXPECT_EQ(zero->statusInfo().code(), ErrorCode::INVALID_PARAMS);
+                    EXPECT_EQ(zero->stopReason(), kMixedExecutionModeBatchError);
+                    EXPECT_EQ(positive->statusInfo().code(),
+                              existing_error ? ErrorCode::CANCELLED : ErrorCode::INVALID_PARAMS);
+                    EXPECT_EQ(positive->stopReason(),
+                              existing_error ? "original error" : kMixedExecutionModeBatchError);
+                    for (const auto& stream : {zero, positive}) {
+                        EXPECT_EQ(stream->outputTokenLen(), 0);
+                        EXPECT_FALSE(stream->hasOutput());
+                        EXPECT_EQ(stream->curBlocksNum(), 0u);
+                        EXPECT_EQ(stream->getSPOutputBuffer(), nullptr);
+                    }
+                    if (fake_decode) {
+                        EXPECT_FALSE(fake_decode->hasError());
+                    }
+                }
+            }
+        }
+    }
+}
+
+TEST_F(MtpExecutorTest, testRejectedDecodeRoleRequestStillRunsMultiDpDecodeAlignment) {
+    for (size_t proposal_width : {size_t(1), size_t(4)}) {
+        MtpExecutorTestConfig config;
+        config.gen_num_per_cycle              = proposal_width;
+        auto  components                      = createMtpExecutorComponents(config);
+        auto* executor                        = components.executor.get();
+        executor->role_type_                  = RoleType::DECODE;
+        executor->parallelism_config_.dp_size = 2;
+        executor->enable_ffn_disaggregate_    = false;
+        auto zero                             = createContextStream(
+            components.model_config, components.runtime_config, components.resource_context, {0, 1});
+        zero->generateConfig()->max_new_tokens = 0;
+        GptModelOutputs target_output;
+        target_output.all_hidden_states =
+            torch::zeros({static_cast<int64_t>(proposal_width + 1), components.model_config.hidden_size},
+                         torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
+        components.fake_target_model->setOutputs({target_output});
+        GptModelOutputs proposal_output;
+        proposal_output.logits = torch::zeros({1, components.model_config.vocab_size},
+                                              torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
+        proposal_output.all_hidden_states =
+            torch::zeros({1, components.model_config.hidden_size},
+                         torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
+        std::vector<GptModelOutputs> draft_outputs(proposal_width - 1, proposal_output);
+        draft_outputs.push_back(GptModelOutputs{});
+        components.fake_draft_model->setOutputs(draft_outputs);
+        spec::FastTopKSamplerOutput proposal_sample{
+            torch::zeros({1, components.model_config.vocab_size},
+                         torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA)),
+            torch::zeros({1, 1}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA))};
+        // Multi-step fake decode retains the original proposal sampling protocol.
+        components.fake_fast_topk_sampler->setInputs(
+            std::vector<torch::Tensor>(proposal_width - 1, proposal_output.logits));
+        components.fake_fast_topk_sampler->setOutputs(
+            std::vector<spec::FastTopKSamplerOutput>(proposal_width - 1, proposal_sample));
+        std::vector<std::string> trace;
+        components.fake_target_model->input_observer_ = [&](const GptModelInputs& inputs) {
+            EXPECT_TRUE(inputs.is_fake_stream);
+            EXPECT_FALSE(inputs.skip_run);
+            EXPECT_FALSE(inputs.capture_hidden_states);
+            trace.push_back("target");
+        };
+        components.fake_draft_model->input_observer_ = [&](const GptModelInputs& inputs) {
+            EXPECT_TRUE(inputs.is_fake_stream);
+            EXPECT_FALSE(inputs.skip_run);
+            trace.push_back("draft");
+        };
+        setupFakeModels(executor,
+                        std::move(components.fake_target_model),
+                        std::move(components.fake_draft_model),
+                        std::move(components.fake_fast_topk_sampler),
+                        std::move(components.fake_speculative_sampler),
+                        std::move(components.fake_sampler));
+        ASSERT_TRUE(executor->process({zero}).ok());
+        std::vector<std::string> expected(proposal_width - 1, "draft");
+        expected.push_back("target");
+        expected.push_back("draft");
+        EXPECT_EQ(trace, expected);
+        EXPECT_EQ(zero->statusInfo().code(), ErrorCode::INVALID_PARAMS);
+        EXPECT_EQ(zero->stopReason(), kDecodeRolePrefillOnlyError);
+        EXPECT_FALSE(zero->hasOutput());
+    }
+}
+
+TEST_F(MtpExecutorTest, testRejectedBatchFakeRepairIsRootOnlyAndPreservesOtherPhase) {
+    for (int dp_size : {1, 2}) {
+        for (int tp_rank : {0, 1}) {
+            MtpExecutorTestConfig config;
+            auto                  components      = createMtpExecutorComponents(config);
+            auto*                 executor        = components.executor.get();
+            executor->role_type_                  = RoleType::PDFUSION;
+            executor->parallelism_config_.dp_size = dp_size;
+            executor->tp_rank_                    = tp_rank;
+            auto zero                             = createContextStream(
+                components.model_config, components.runtime_config, components.resource_context, {0, 1});
+            zero->generateConfig()->max_new_tokens = 0;
+            auto existing_fake                     = MtpExecutor::createMinFakePrefillStream(
+                1, components.model_config, components.runtime_config, components.resource_context);
+            auto                         decode = MtpExecutor::createMinFakeDecodeStream(config.gen_num_per_cycle,
+                                                                 components.model_config,
+                                                                 components.runtime_config,
+                                                                 components.resource_context,
+                                                                 config.vocab_size);
+            std::list<GenerateStreamPtr> prefill_streams, decode_streams;
+            executor->prepareStreams({zero, existing_fake, decode}, prefill_streams, decode_streams);
+            const bool needs_fake = dp_size > 1 && tp_rank == 0;
+            ASSERT_EQ(prefill_streams.size(), needs_fake ? 1u : 0u);
+            if (needs_fake) {
+                EXPECT_EQ(prefill_streams.front(), existing_fake);
+                EXPECT_TRUE(existing_fake->isContextStream());
+                ASSERT_NE(existing_fake->getSPOutputBuffer(), nullptr);
+                EXPECT_EQ(existing_fake->getSPOutputBuffer()->propose_step, config.gen_num_per_cycle);
+            }
+            EXPECT_FALSE(existing_fake->hasError());
+            ASSERT_EQ(decode_streams.size(), 1u);
+            EXPECT_EQ(decode_streams.front(), decode);
+            EXPECT_FALSE(decode->hasError());
+            EXPECT_EQ(zero->statusInfo().code(), ErrorCode::INVALID_PARAMS);
+        }
+    }
+}
+
+TEST_F(MtpExecutorTest, testSingleDpMixedRejectionStillSkipsWithoutFfn) {
+    MtpExecutorTestConfig config;
+    auto                  components      = createMtpExecutorComponents(config);
+    auto*                 executor        = components.executor.get();
+    executor->role_type_                  = RoleType::PREFILL;
+    executor->parallelism_config_.dp_size = 1;
+    executor->enable_ffn_disaggregate_    = false;
+    auto zero =
+        createContextStream(components.model_config, components.runtime_config, components.resource_context, {0, 1});
+    zero->generateConfig()->max_new_tokens = 0;
+    auto positive =
+        createContextStream(components.model_config, components.runtime_config, components.resource_context, {2, 3});
+    auto* target = components.fake_target_model.get();
+    auto* draft  = components.fake_draft_model.get();
+    setupFakeModels(executor,
+                    std::move(components.fake_target_model),
+                    std::move(components.fake_draft_model),
+                    std::move(components.fake_fast_topk_sampler),
+                    std::move(components.fake_speculative_sampler),
+                    std::move(components.fake_sampler));
+    ASSERT_TRUE(executor->process({zero, positive}).ok());
+    EXPECT_EQ(target->forward_count_, 0u);
+    EXPECT_EQ(draft->forward_count_, 0u);
+    EXPECT_TRUE(zero->hasError());
+    EXPECT_TRUE(positive->hasError());
 }
 
 }  // namespace rtp_llm

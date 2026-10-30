@@ -48,6 +48,47 @@ class ServerArgsSetTest(TestCase):
                 parser.parse_args(cli_args)
                 self.assertEqual(admission.sandbox_process_memory_limit_mb, expected)
 
+    def test_capture_model_override_bootstrap_round_trip(self):
+        import json
+        from unittest.mock import patch
+
+        from rtp_llm.config.model_config import ModelConfig, _apply_model_override_args
+        from rtp_llm.ops import HiddenStateCaptureDtype
+        from rtp_llm.server.server_args import server_args
+
+        for dtype_name in ("bf16", "fp8_e4m3"):
+            with self.subTest(dtype=dtype_name), patch.dict(
+                os.environ,
+                {
+                    "JSON_MODEL_OVERRIDE_ARGS": json.dumps(
+                        {
+                            "hidden_state_capture_layer_ids": [1],
+                            "hidden_state_capture_dtype": "bf16",
+                        }
+                    )
+                },
+            ):
+                sys.argv = [
+                    "prog",
+                    "--json_model_override_args",
+                    json.dumps(
+                        {
+                            "hidden_state_capture_layer_ids": [2, 0],
+                            "hidden_state_capture_dtype": dtype_name,
+                        }
+                    ),
+                ]
+                configs = server_args.setup_args()
+                model_args = pickle.loads(pickle.dumps(configs.model_args))
+                model_config = ModelConfig()
+                model_config.num_layers = 4
+                _apply_model_override_args(model_config, model_args)
+                self.assertEqual(model_config.hidden_state_capture_layer_ids, [2, 0])
+                self.assertEqual(
+                    model_config.hidden_state_capture_dtype,
+                    HiddenStateCaptureDtype.__members__[dtype_name.upper()],
+                )
+
     def test_env_vars_set_to_py_env_configs(self):
         """Test that environment variables are correctly set to py_env_configs."""
         # Set environment variables

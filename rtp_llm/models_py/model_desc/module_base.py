@@ -6,6 +6,10 @@ from torch import Tensor, nn
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.device.device_type import DeviceType, get_device_type
 from rtp_llm.model_loader.model_weight_info import ModelWeights
+from rtp_llm.models_py.model_desc.hidden_state_capture import (
+    CanonicalHiddenHook,
+    CaptureContext,
+)
 from rtp_llm.models_py.modules import AttnImplFactory
 from rtp_llm.ops import DeviceResourceConfig
 from rtp_llm.ops.compute_ops import (
@@ -54,6 +58,32 @@ class GptModelBase(nn.Module):
 
         ## (batch_size -> fmha_params)
         self.params_dict: dict[int, Any] = {}
+
+        self._capture_context = CaptureContext.unsupported()
+
+    def _init_capture_context(
+        self,
+        canonical_layer: CanonicalHiddenHook,
+        canonical_final: CanonicalHiddenHook,
+    ) -> None:
+        self._capture_context = CaptureContext.configured(
+            self.config.hidden_state_capture_layer_ids,
+            canonical_layer,
+            canonical_final,
+        )
+
+    def _init_capture_passthrough(self) -> None:
+        self._capture_context = CaptureContext.passthrough()
+
+    def _disable_capture_context(self) -> None:
+        self._capture_context = CaptureContext.unsupported()
+
+    @property
+    def supports_hidden_state_capture(self) -> bool:
+        return self._capture_context.supported
+
+    def capture_context(self, requested: bool) -> CaptureContext:
+        return self._capture_context.for_forward(requested)
 
     def initialize(self, init_resource: PyModelInitResources) -> bool:
         self.kv_cache = init_resource.kv_cache

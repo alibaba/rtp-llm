@@ -154,6 +154,9 @@ py_test(
 py_test(
     name = "glm53_prefill_q_selection_test",
     srcs = ["glm53_prefill_q_selection_test.py"],
+    data = [
+        "//rtp_llm/cpp/models/context_parallel/test:th_context_parallel_py_wrapper_test",
+    ],
     deps = [
         "//rtp_llm/models_py/standalone:py_standalone_testlib",
     ],

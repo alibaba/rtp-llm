@@ -8,6 +8,13 @@ load(
 
 package(default_visibility = ["//:__subpackages__"])
 
+py_test(
+    name = "config_pickle_test",
+    srcs = ["config_pickle_test.py"],
+    data = ["//:th_transformer_config"],
+    deps = ["//rtp_llm:config_ops"],
+)
+
 cc_library(
     name = "py_utils",
     hdrs = [

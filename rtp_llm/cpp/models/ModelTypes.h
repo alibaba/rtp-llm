@@ -9,10 +9,15 @@
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/models_py/bindings/core/DeviceData.h"
 #include "rtp_llm/models_py/bindings/core/TensorHolder.h"
+#include <optional>
 #include <string>
 #include <cstdint>
 #include <utility>
 #include <memory>
+
+namespace kmonitor {
+class MetricsReporter;
+}
 
 namespace rtp_llm {
 
@@ -65,7 +70,15 @@ struct GptModelInitParams {
     // When >1, the model's pre-output residual ([T, hc_mult*hidden_size])
     // is the contract between target and draft for MTP — see
     // MtpExecutor::makeFakeSPOutputBuffer and CudaGraphRunner input_hiddens.
-    int64_t hc_mult = 1;
+    int64_t                                    hc_mult = 1;
+    std::shared_ptr<kmonitor::MetricsReporter> metrics_reporter;
+    std::vector<int64_t>                       hidden_state_capture_layer_ids;
+    HiddenStateCaptureDtype                    hidden_state_capture_dtype = HiddenStateCaptureDtype::BF16;
+    int64_t                                    hidden_state_capture_max_inflight_samples = 64;
+    int64_t                                    hidden_state_capture_max_inflight_bytes   = 1073741824;
+    int64_t                                    hidden_state_capture_max_inflight_tokens  = 131072;
+    int64_t                                    hidden_state_capture_max_pending_batches  = 8;
+    int64_t                                    hidden_state_capture_poll_interval_ms     = 1000;
 };
 
 enum GptModelInputIndex : size_t {
@@ -98,6 +111,11 @@ enum GptModelInputIndex : size_t {
     // matching GPU buffers and keep tpSync broadcast lanes consistent.
     tensorDeviceMap,
     recordExecutionId,
+    // Append root-owned capture controls without changing existing hint indices.
+    skipLmHead,
+    captureHiddenStates,
+    // Append before the length sentinel; all existing field indices stay fixed.
+    terminalStop,
     gptModelInputLength,
 };
 
@@ -134,7 +152,15 @@ public:
     virtual GptModelOutputs forward(const GptModelInputs& inputs) = 0;
     virtual void            releaseBuffers() {}
     virtual void            prepareAttentionInputs(const GptModelInputs& inputs) {}
-    virtual bool            cudaGraphEnabled() const {
+    virtual bool            tryReserveHiddenStateCapture(int64_t /*request_id*/, int64_t /*valid_tokens*/) {
+        return false;
+    }
+    // Implementations must leave already-submitted publication tasks untouched.
+    virtual void                       cancelHiddenStateCapture(int64_t /*request_id*/) {}
+    virtual std::optional<std::string> takeDeferredHiddenStateCaptureError() {
+        return std::nullopt;
+    }
+    virtual bool cudaGraphEnabled() const {
         return false;
     }
     virtual bool prefillCudaGraphMode() const {

@@ -1,5 +1,6 @@
 #pragma once
 #include "rtp_llm/cpp/engine_base/schedulers/FIFOScheduler.h"
+#include "rtp_llm/cpp/engine_base/schedulers/SchedulerUtils.h"
 
 namespace rtp_llm {
 
@@ -82,8 +83,14 @@ public:
                     break;
                 }
             }
-            // Only schedule when we have enough streams
-            if (new_streams.size() >= static_cast<size_t>(gather_batch_size_)) {
+            // Keep the original N-request gate and FIFO window. Split only after the
+            // window is full; do not pull matching requests from beyond that window.
+            if (!new_streams.empty() && new_streams.size() >= static_cast<size_t>(gather_batch_size_)) {
+                const bool prefill_only = isPrefillOnly(new_streams.front());
+                new_streams.remove_if(
+                    [prefill_only](const auto& stream) { return isPrefillOnly(stream) != prefill_only; });
+                // The other mode stays in waiting_streams_. The existing reset to 1
+                // below lets that tail drain without waiting for another full N.
                 for (auto& stream : new_streams) {
                     stream->reportEvent(StreamEvents::CanRun);
                     // busy wait for loading cache done, equivalent to to original logic.

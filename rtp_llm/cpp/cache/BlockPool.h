@@ -31,28 +31,27 @@ public:
 
     bool init();
 
-    // REBASE CONFLICT CONTEXT(2413e8e03): source branch exposed the per-pool BlockCache
-    // while the new base routes prefix reuse through SharedBlockCache at allocator scope.
-    // Keep this accessor for compatibility with the source branch's RDMA/cache-pool plumbing.
     BlockCachePtr blockCache();
 
-    MemoryType                 where() const;
+    MemoryType where() const;
     // Whole owning allocations, independent of model/layer views. CPU backing is excluded.
-    const std::vector<torch::Tensor>& gpuCacheTensors() const { return gpu_cache_tensors_; }
-    void releaseMlaHostCacheForCheckpoint();
-    void restoreMlaHostCacheAfterCheckpoint();
+    const std::vector<torch::Tensor>& gpuCacheTensors() const {
+        return gpu_cache_tensors_;
+    }
+    void                       releaseMlaHostCacheForCheckpoint();
+    void                       restoreMlaHostCacheAfterCheckpoint();
     std::vector<torch::Tensor> allLayerCacheBase() const;
     std::vector<torch::Tensor> allLayerScaleCacheBase() const;
 
     // these interfaces are all thread-safe
-    std::vector<BlockIdxType> malloc(int num_blocks, int seq_len = 0, BlockIdxType last_block = 0);
-    size_t                    totalBlocksNum() const;
-    size_t                    freeBlocksNum() const;
+    std::vector<BlockIdxType>               malloc(int num_blocks, int seq_len = 0, BlockIdxType last_block = 0);
+    size_t                                  totalBlocksNum() const;
+    size_t                                  freeBlocksNum() const;
     std::vector<KVCachePoolMetricsSnapshot> tierMetricsSnapshots() const;
-    size_t                    availableBlocksNum() const;
-    size_t                    requestRefBlocksNum() const;
-    size_t                    connectorRefBlocksNum() const;
-    size_t                    blockCacheRefBlocksNum() const;
+    size_t                                  availableBlocksNum() const;
+    size_t                                  requestRefBlocksNum() const;
+    size_t                                  connectorRefBlocksNum() const;
+    size_t                                  blockCacheRefBlocksNum() const;
     // Blocks not held by request or block cache (i.e. free + connector-in-flight).
     // Used by tiered memory eviction to avoid over-eviction.
     size_t notInUseBlocksNum() const;
@@ -69,7 +68,9 @@ public:
     void   connectorReference(BlockIdxType block_idx);
     void   connectorReference(const BlockIndicesType& block_indices);
 
-    const std::vector<torch::Tensor>& allLayerHbmCacheBase() const { return global_layer_hbm_tensors_; }
+    const std::vector<torch::Tensor>& allLayerHbmCacheBase() const {
+        return global_layer_hbm_tensors_;
+    }
     void    regUserMr(size_t model_id, std::shared_ptr<CacheStore> cache_store = nullptr);
     void    deregUserMr();
     int64_t getMrCostTimeMs() const {
@@ -98,13 +99,13 @@ private:
     void                checkLayoutValidity(int layout_id) const;
 
     // Helper functions for init()
-    void validateConfig() const;
-    void initializeCacheBuffer();
-    void initializePinnedCpuBuffer(const char* log_context);
+    void          validateConfig() const;
+    void          initializeCacheBuffer();
+    void          initializePinnedCpuBuffer(const char* log_context);
     torch::Tensor allocateGpuCacheBuffer(size_t size_bytes);
     torch::Tensor allocateCudaBuffer(size_t size_bytes);
-    void initializeLayerMappings();
-    void initializeLayoutStrategies();
+    void          initializeLayerMappings();
+    void          initializeLayoutStrategies();
 
     // Helper functions for initializeLayoutStrategies()
     void          processMemoryLayout(size_t layout_idx, const torch::Tensor& full_tensor, size_t& global_layer_begin);
@@ -136,8 +137,8 @@ private:
 private:
     BlockPoolConfig config_;
     size_t          mla_hbm_share_denominator_ = 0;
-    BlockIdxType    mla_hbm_blocks_ = 0;
-    size_t          free_hbm_blocks_ = 0;  // Protected by free_mu_.
+    BlockIdxType    mla_hbm_blocks_            = 0;
+    size_t          free_hbm_blocks_           = 0;  // Protected by free_mu_.
 
     mutable std::mutex     free_mu_;
     mutable std::mutex     ref_mu_;
@@ -154,19 +155,19 @@ private:
 
     BlockCachePtr block_cache_;
 
-    std::vector<torch::Tensor>   gpu_cache_tensors_;
-    torch::Tensor               cache_aligned_buffer_;
-    torch::Tensor               block_generations_;
-    std::vector<torch::Tensor>   layout_indexer_buffers_;
-    std::vector<torch::Tensor>   layout_hbm_buffers_;
-    std::vector<torch::Tensor>   global_layer_hbm_tensors_;
-    void*                       cache_base_ptr_               = nullptr;
-    bool                        cache_buffer_registered_host_ = false;
+    std::vector<torch::Tensor> gpu_cache_tensors_;
+    torch::Tensor              cache_aligned_buffer_;
+    torch::Tensor              block_generations_;
+    std::vector<torch::Tensor> layout_indexer_buffers_;
+    std::vector<torch::Tensor> layout_hbm_buffers_;
+    std::vector<torch::Tensor> global_layer_hbm_tensors_;
+    void*                      cache_base_ptr_               = nullptr;
+    bool                       cache_buffer_registered_host_ = false;
     // Shared with the MLA tensor deleter; its views can outlive this pool.
-    std::shared_ptr<bool>        mla_host_registered_;
+    std::shared_ptr<bool>       mla_host_registered_;
     bool                        mla_host_discarded_ = false;
-    bool                        kvcache_reg_mr_               = false;
-    int64_t                     mr_cost_time_ms_              = 0;
+    bool                        kvcache_reg_mr_     = false;
+    int64_t                     mr_cost_time_ms_    = 0;
     std::shared_ptr<CacheStore> cache_store_;
 
     std::vector<std::unique_ptr<MemoryLayoutStrategy>> layout_strategies_;

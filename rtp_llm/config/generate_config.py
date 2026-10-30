@@ -2,9 +2,18 @@ import copy
 import hashlib
 import json
 import os
-from typing import Any, Dict, List, Optional, Union
+from typing import Annotated, Any, Dict, List, Optional, Union
 
-from pydantic import BaseModel, ConfigDict, Field, field_serializer, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    TypeAdapter,
+    ValidationError,
+    field_serializer,
+    field_validator,
+    model_validator,
+)
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.ops import RoleType
@@ -192,6 +201,7 @@ class GenerateConfig(BaseModel):
 
     # 只有开启环境变量 REUSE_CACHE 时才生效
     reuse_cache: bool = True
+    capture_hidden_states: bool = False
 
     enable_device_cache: bool = True
 
@@ -201,6 +211,50 @@ class GenerateConfig(BaseModel):
     group_timeout: Optional[int] = None  # ms
 
     unique_key: str = ""
+
+    @field_validator("max_new_tokens")
+    @classmethod
+    def _validate_max_new_tokens(cls, value: int) -> int:
+        if value < 0:
+            raise ValueError(
+                f"max_new_tokens must be greater than or equal to 0, got {value}"
+            )
+        return value
+
+    def _validate_prefill_only(self) -> None:
+        # Match C++ validatePrefillOnly(), including direct mutation paths.
+        self._validate_max_new_tokens(self.max_new_tokens)
+        if not self.is_prefill_only():
+            return
+        unsupported = {
+            "min_new_tokens": (
+                any(value > 0 for value in self.min_new_tokens)
+                if isinstance(self.min_new_tokens, list)
+                else self.min_new_tokens > 0
+            ),
+            "num_beams": self.num_beams > 1,
+            "variable_num_beams": bool(self.variable_num_beams),
+            "num_return_sequences": self.num_return_sequences > 1,
+            "return_logits": self.return_logits,
+            "calculate_loss": self.calculate_loss != 0,
+            "return_softmax_probs": self.return_softmax_probs,
+            "return_all_probs": self.return_all_probs,
+            "return_cum_log_probs": self.return_cum_log_probs,
+            "return_logprobs": self.return_logprobs,
+            "return_hidden_states": self.return_hidden_states,
+            "return_all_hidden_states": self.return_all_hidden_states,
+        }
+        for field, enabled in unsupported.items():
+            if enabled:
+                raise ValueError(f"max_new_tokens == 0 does not support {field}")
+
+    @model_validator(mode="after")
+    def _validate_prefill_only_config(self):
+        self._validate_prefill_only()
+        return self
+
+    def is_prefill_only(self) -> bool:
+        return self.max_new_tokens == 0
 
     def gen_hash_value(self):
         cp = copy.copy(self)
@@ -224,18 +278,70 @@ class GenerateConfig(BaseModel):
     def is_same(self, config: "GenerateConfig") -> bool:
         return self.md5_value == config.md5_value
 
-    def update(self, new: Dict[str, Any]):
+    def _apply_update(self, new: Dict[str, Any]) -> set[str]:
+        updated_fields: set[str] = set()
+        model_fields = type(self).model_fields
         for key, value in new.items():
-            if hasattr(self, key):
-                setattr(self, key, value)
+            if key not in model_fields:
+                continue
+            try:
+                # FieldInfo retains metadata such as strict=True; the bare
+                # annotation would silently coerce values rejected at construction.
+                field = model_fields[key]
+                validated_value = TypeAdapter(
+                    Annotated[field.annotation, field]
+                ).validate_python(value)
+            except ValidationError as e:
+                raise FtRuntimeException(
+                    ExceptionType.ERROR_INPUT_FORMAT_ERROR, f"{key}: {str(e)}"
+                ) from e
+            setattr(self, key, validated_value)
+            updated_fields.add(key)
+        try:
+            self._validate_prefill_only()
+        except ValueError as e:
+            raise FtRuntimeException(
+                ExceptionType.ERROR_INPUT_FORMAT_ERROR, str(e)
+            ) from e
+        # Checkpoint defaults are not complete requests; leave full validate()
+        # (including grammar normalization) to the existing request path.
+        return updated_fields
+
+    def _validated_update(
+        self, new: Dict[str, Any]
+    ) -> tuple["GenerateConfig", set[str]]:
+        candidate = self.model_copy(deep=True)
+        updated_fields = candidate._apply_update(new)
+        return candidate, updated_fields
+
+    def _commit_update(self, candidate: "GenerateConfig") -> None:
+        # Keep the instance identity while replacing the validated state. Updating
+        # the mappings avoids depending on Pydantic's private attribute layout and
+        # preserves PrivateAttr state as part of the atomic commit.
+        self.__dict__.clear()
+        self.__dict__.update(candidate.__dict__)
+        self.__pydantic_extra__ = (
+            None
+            if candidate.__pydantic_extra__ is None
+            else candidate.__pydantic_extra__.copy()
+        )
+        self.__pydantic_fields_set__ = candidate.__pydantic_fields_set__.copy()
+        self.__pydantic_private__ = (
+            None
+            if candidate.__pydantic_private__ is None
+            else candidate.__pydantic_private__.copy()
+        )
+
+    def update(self, new: Dict[str, Any]):
+        """Validate declared fields atomically without changing instance identity."""
+        candidate, _ = self._validated_update(new)
+        self._commit_update(candidate)
 
     def update_and_pop(self, new: Dict[str, Any]):
-        to_remove: List[str] = []
-        for key, value in new.items():
-            if hasattr(self, key):
-                setattr(self, key, value)
-                to_remove.append(key)
-        return {k: v for k, v in new.items() if k not in to_remove}
+        """Validate atomically and return keys not consumed by the update."""
+        candidate, updated_fields = self._validated_update(new)
+        self._commit_update(candidate)
+        return {k: v for k, v in new.items() if k not in updated_fields}
 
     @staticmethod
     def create_generate_config(
@@ -318,6 +424,7 @@ class GenerateConfig(BaseModel):
 
     def validate(self):
         try:
+            self._validate_prefill_only()
             check_with_info(
                 is_union_positive_integer(self.top_k),
                 f"top_k {self.top_k} is wrong data type",

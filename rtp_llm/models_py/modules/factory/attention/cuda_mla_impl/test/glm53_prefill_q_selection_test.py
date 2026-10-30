@@ -2,9 +2,12 @@
 
 Only cross-rank transport/cache storage are substituted. GPU tests run the real
 RoPE, input/output BMM, FlashMLA sparse attention, and Triton scatter kernels.
+The CP2 regression uses the C++ input splitter and SparseMlaParams on each rank's
+layout, but runs ranks sequentially on one GPU, not with distributed transport.
 """
 
 import contextlib
+import os
 import unittest
 import weakref
 from types import SimpleNamespace
@@ -24,6 +27,7 @@ from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.glm53_prefill_wor
 from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.rope_emb_new import (
     NewMlaRotaryEmbeddingOp,
 )
+from rtp_llm.ops.compute_ops import rtp_llm_ops
 from rtp_llm.utils.model_weight import W
 
 
@@ -247,7 +251,9 @@ class QPreselectionCudaTest(unittest.TestCase):
             }
         ]
 
-    def _fixture(self, chunks, removed=(), noncontiguous=False, neox=True):
+    def _fixture(
+        self, chunks, removed=(), noncontiguous=False, neox=True, *, input_lengths=None
+    ):
         rows = sum(chunks)
         first, second = generate_q_indices(chunks)
         selected = [i for i in first + second if i not in removed]
@@ -255,7 +261,12 @@ class QPreselectionCudaTest(unittest.TestCase):
         req_list = [r for r, length in enumerate(chunks) for _ in range(length)]
         req_ids = torch.tensor(req_list, dtype=torch.long, device=self.device)[ids]
         # Each request has a different prefix length and distinct KV contents.
-        lengths = [19 + 7 * r + length for r, length in enumerate(chunks)]
+        lengths = [
+            19 + 7 * r + length
+            for r, length in enumerate(
+                chunks if input_lengths is None else input_lengths
+            )
+        ]
         starts = [sum(lengths[:r]) for r in range(len(chunks))]
         fused = (
             torch.randn(
@@ -318,6 +329,82 @@ class QPreselectionCudaTest(unittest.TestCase):
             cos_sin=cos_sin,
             neox=neox,
         )
+
+    def _cp2_fixture(self, input_lengths, rank):
+        from rtp_llm.cpp.models.context_parallel.test import (
+            libth_context_parallel_py_wrapper_test as cp_test,
+        )
+
+        actual_lengths = torch.tensor(input_lengths, dtype=torch.int32)
+        # Nonzero, globally unique token IDs distinguish padding and requests.
+        tokens = torch.arange(1, sum(input_lengths) + 1, dtype=torch.int32)
+        local_tokens, chunks, _, _, _ = cp_test.handle_inputs_with_hidden(
+            tokens,
+            actual_lengths,
+            torch.empty(0, dtype=torch.int32),
+            torch.empty(0, dtype=self.dtype),
+            rank,
+            2,
+        )
+        padding = chunks * 2 - actual_lengths
+        params = rtp_llm_ops.SparseMlaParams()
+        params.fill_cp_plan_params(
+            cp_test.generate_qkv_padding_mask(chunks, padding, 2),
+            cp_test.generate_qkv_restore_indices(chunks, 2),
+            *generate_q_indices(chunks.tolist()),
+            rank,
+            local_tokens.numel(),
+            actual_lengths,
+            torch.tensor(
+                [19 + 7 * r for r in range(len(input_lengths))], dtype=torch.int32
+            ),
+        )
+        removed = torch.nonzero(local_tokens == 0).flatten().tolist()
+        data = self._fixture(chunks.tolist(), removed, input_lengths=input_lengths)
+        # Check the existing numerical fixture's Q order against the production
+        # metadata, rather than assuming a rank-local arange is the selection.
+        torch.testing.assert_close(data.ids, params.cp_total_local_ids, rtol=0, atol=0)
+        data.ids = params.cp_total_local_ids.clone()
+        local_tokens = local_tokens.to(self.device)
+        torch.testing.assert_close(
+            data.ids.sort().values,
+            torch.nonzero(local_tokens != 0).flatten(),
+            rtol=0,
+            atol=0,
+        )
+        torch.testing.assert_close(
+            local_tokens[data.ids].long(),
+            params.cp_total_global_ids + 1,
+            rtol=0,
+            atol=0,
+        )
+        global_requests = torch.repeat_interleave(
+            torch.arange(len(input_lengths), device=self.device),
+            actual_lengths.to(device=self.device, dtype=torch.long),
+        )
+        torch.testing.assert_close(
+            data.req_ids, global_requests[params.cp_total_global_ids], rtol=0, atol=0
+        )
+        global_positions = torch.cat(
+            [
+                torch.arange(length, device=self.device, dtype=torch.int32) + 19 + 7 * r
+                for r, length in enumerate(input_lengths)
+            ]
+        )
+        data.positions.zero_()
+        data.positions[data.ids] = global_positions[params.cp_total_global_ids]
+        self.assertLess(int(data.positions.max()), data.cos_sin.size(0))
+        # Keep row-specific TopK and random values, and make both global token
+        # identity and request-local KV position visible in the numerical oracle.
+        data.q[..., 0] += local_tokens[:, None].to(self.dtype) / tokens.numel()
+        data.q.mul_(20)
+        for start, length in zip(data.starts, data.lengths):
+            data.fused[start : start + length, : self.LATENT] += (
+                torch.arange(length, device=self.device, dtype=self.dtype)[:, None]
+                / length
+            )
+        data.fused.mul_(4)
+        return data, removed
 
     def _impl(self, data, *, workspace, graph=False):
         op = _minimal_op(
@@ -458,6 +545,93 @@ class QPreselectionCudaTest(unittest.TestCase):
                     )
                 self.assertIsNone(optimized._glm53_prefill_workspace._storage)
 
+    def test_cp2_multi_request_delayed_scatter_matches_reference(self):
+        for lengths, rows, valid_rows in (
+            ([256, 512], 384, (384, 384)),
+            ([257, 513], 388, (382, 388)),
+        ):
+            for rank in range(2):
+                with self.subTest(lengths=lengths, rank=rank):
+                    data, removed = self._cp2_fixture(lengths, rank)
+                    self.assertEqual(data.rows, rows)
+                    self.assertEqual(data.ids.numel(), valid_rows[rank])
+                    self.assertGreaterEqual(rows, 256)
+                    self.assertFalse(
+                        torch.equal(data.ids, torch.arange(rows, device=self.device))
+                    )
+                    legacy = self._impl(data, workspace=False)
+                    with patch.dict(os.environ, {"RTP_LLM_CP_KV_INDEX_OPT": "0"}):
+                        expected = self._run(legacy, data)
+                    reference = self._reference(legacy, data)
+                    for index_opt in ("0", "1"):
+                        with self.subTest(index_opt=index_opt):
+                            impl = self._impl(data, workspace=True)
+                            # A globally padded batch can still give rank 1 a
+                            # full local permutation; only rank 0 loses Q rows.
+                            delayed = index_opt == "1" and not removed
+                            with (
+                                patch.dict(
+                                    os.environ, {"RTP_LLM_CP_KV_INDEX_OPT": index_opt}
+                                ),
+                                patch.object(
+                                    impl.fmha_impl,
+                                    "forward",
+                                    wraps=impl.fmha_impl.forward,
+                                ) as attend,
+                                patch.object(
+                                    cp, "triton_kv_scatter", wraps=cp.triton_kv_scatter
+                                ) as scatter,
+                            ):
+                                actual = self._run(impl, data)
+                            attend.assert_called_once()
+                            self.assertEqual(
+                                attend.call_args.kwargs["original_q_len"], rows
+                            )
+                            self.assertEqual(
+                                attend.call_args.kwargs["defer_output_scatter"], delayed
+                            )
+                            self.assertEqual(
+                                attend.call_args.args[0].size(0), valid_rows[rank]
+                            )
+                            scatter.assert_called_once()
+                            # Observe the actual real-kernel boundary: delayed
+                            # scatter sees V BMM's VALUE width, not LATENT width.
+                            self.assertEqual(
+                                scatter.call_args.args[0].shape,
+                                (
+                                    valid_rows[rank],
+                                    self.HEADS,
+                                    self.VALUE if delayed else self.LATENT,
+                                ),
+                            )
+                            torch.testing.assert_close(
+                                scatter.call_args.args[1], data.ids, rtol=0, atol=0
+                            )
+                            self.assertEqual(scatter.call_args.args[2], rows)
+                            torch.testing.assert_close(
+                                actual, expected, rtol=0.02, atol=0.012
+                            )
+                            torch.testing.assert_close(
+                                actual, reference, rtol=0.025, atol=0.02
+                            )
+                            self.assertTrue(torch.isfinite(actual).all().item())
+                            self.assertEqual(
+                                actual.shape, (rows, self.HEADS, self.VALUE)
+                            )
+                            if removed:
+                                self.assertEqual(
+                                    torch.count_nonzero(actual[removed]).item(), 0
+                                )
+                            self.assertIsNone(impl._glm53_prefill_workspace._storage)
+                            # The same oracle must reject a row-order error,
+                            # including transitions between requests' Q halves.
+                            wrong_order = actual.clone()
+                            wrong_order[data.ids] = actual[data.ids.roll(1)]
+                            with self.assertRaises(AssertionError):
+                                torch.testing.assert_close(
+                                    wrong_order, reference, rtol=0.025, atol=0.02
+                                )
+
     def test_preselected_projection_reaches_attention_without_second_copy(self):
         data = self._fixture([7, 9], removed=(6, 15))
         impl = self._impl(data, workspace=True)
@@ -491,7 +665,7 @@ class QPreselectionCudaTest(unittest.TestCase):
                 *args,
                 original_q_len=original_q_len,
                 scatter_out=scatter_out,
-                **kwargs
+                **kwargs,
             )
 
         def attend(q, *args):

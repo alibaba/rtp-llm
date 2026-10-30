@@ -197,8 +197,7 @@ class CudaFp8DeepGEMMLinear(LinearBase):
                           fp8 input, falls back to the legacy "scale=1.0"
                           behaviour (kept for back-compat).
         """
-        # REBASE CONFLICT CONTEXT(e2e00e570): new base added `out`; source
-        # branch added `input_scales`. Keep both keyword-compatible arguments.
+
         # Check input dtype - only accept bfloat16
         if input.dtype != torch.bfloat16 and input.dtype != torch.float8_e4m3fn:
             error_msg = f"Input tensor dtype must be bfloat16 or float8_e4m3fn, got {input.dtype}"

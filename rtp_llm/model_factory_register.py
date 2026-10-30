@@ -200,9 +200,7 @@ def _register_builtin_lazy_models() -> None:
         "deepseek_v32", "rtp_llm.models.deepseek_v2", ["DeepseekV32ForCausalLM"]
     )
     register_lazy_model("glm_5", "rtp_llm.models.deepseek_v2", ["GlmMoeDsaForCausalLM"])
-    # REBASE CONFLICT CONTEXT(e2e00e570): source branch registered GLM5 MTP via
-    # eager import side effects in `rtp_llm.models.__init__`. New base uses lazy
-    # registration, so the MTP architecture must be listed explicitly here.
+
     register_lazy_model(
         "glm_5_mtp", "rtp_llm.models.deepseek_v2", ["GlmMoeDsaMtpForCausalLM"]
     )

@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <atomic>
 #include <set>
+#include <stdexcept>
 #include <thread>
 #include <vector>
 
@@ -179,6 +180,50 @@ void buildReadySlots(PrefillBatchRpcServer&                         server,
         slot.deferred->context  = std::move(context);
         slot.deferred->input    = slot.input;
         ready_slots.push_back(PrefillBatchRpcServer::ReadySlot{&slot, slot.deferred});
+    }
+}
+
+TEST(PrefillBatchRpcServerTest, PrefillOnlyIsRejectedBeforePdConnectionOrAllocation) {
+    TestPrefillBatchRpcServer server;
+    for (const bool explicit_prefill : {false, true}) {
+        auto deferred = makeDeferred(server, 100);
+        deferred->input->add_token_ids(1);
+        deferred->input->mutable_generate_config()->set_prefill_only(explicit_prefill);
+        EXPECT_THROW(server.prepareAllocateResource(*deferred->context), std::invalid_argument);
+        EXPECT_EQ(deferred->context->generate_input, nullptr);
+        EXPECT_EQ(deferred->context->getStream(), nullptr);
+    }
+}
+
+TEST(PrefillBatchRpcServerTest, InvalidPrefillPreparationPreservesErrorCodeWithoutRetry) {
+    TestPrefillBatchRpcServer server;
+    server.meta_                                               = std::make_shared<RpcServerRuntimeMeta>();
+    server.maga_init_params_.pd_sep_config.prefill_retry_times = 3;
+    server.prepare_resource_worker_pool_ =
+        std::make_shared<autil::LockFreeThreadPool>(1, 4, nullptr, "PrefillOnlyTest");
+    ASSERT_TRUE(server.prepare_resource_worker_pool_->start());
+    std::vector<PrefillBatchRpcServer::BatchSlot> slots(3);
+    for (size_t i = 0; i < slots.size(); ++i) {
+        slots[i].input = std::make_shared<GenerateInputPB>();
+        slots[i].input->set_request_id(101 + i);
+        slots[i].input->add_token_ids(1);
+        auto* config = slots[i].input->mutable_generate_config();
+        config->set_max_new_tokens(static_cast<int>(i) - 1);
+        config->set_prefill_only(i == 2);
+    }
+    server.buildSlotContexts(slots);
+    const auto results = server.prepareGroup(slots);
+    ASSERT_EQ(results.size(), slots.size());
+    for (size_t i = 0; i < results.size(); ++i) {
+        SCOPED_TRACE(i);
+        EXPECT_FALSE(results[i].prepared);
+        EXPECT_EQ(results[i].stage_status.error_code(), grpc::StatusCode::INVALID_ARGUMENT);
+        ErrorDetailsPB details;
+        ASSERT_TRUE(details.ParseFromString(results[i].stage_status.error_details()));
+        EXPECT_EQ(details.error_code(), static_cast<int>(ErrorCode::INVALID_PARAMS));
+        EXPECT_EQ(slots[i].deferred->context->error_info.code(), ErrorCode::INVALID_PARAMS);
+        EXPECT_EQ(slots[i].deferred->context->retry_times, 1);
+        EXPECT_EQ(slots[i].deferred->context->getStream(), nullptr);
     }
 }
 
