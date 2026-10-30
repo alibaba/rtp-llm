@@ -3,11 +3,13 @@
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include <ATen/record_function.h>
 #include <thread>
+#include <memory>
 #include <utility>
 
 namespace rtp_llm {
 
-AsyncRunner::AsyncRunner(torch::Stream stream): stream_(stream), event_(stream.device_type()) {
+AsyncRunner::AsyncRunner(torch::Stream stream, bool propagate_thread_local_state):
+    propagate_thread_local_state_(propagate_thread_local_state), stream_(stream), event_(stream.device_type()) {
     thread_ = std::thread([this] {
         cuda_graph::setDevice(static_cast<int>(stream_.device_index()));
         workerLoop();
@@ -27,7 +29,9 @@ AsyncRunner::~AsyncRunner() {
 
 void AsyncRunner::launch(std::function<void()> fn) {
     RTP_LLM_PROFILE_SCOPE("async_runner.launch");
-    at::ThreadLocalState tls_state;
+    std::optional<at::ThreadLocalState> tls_state;
+    if (propagate_thread_local_state_)
+        tls_state.emplace();
     {
         std::unique_lock<std::mutex> lk(mutex_);
         cv_done_.wait(lk, [this] { return task_done_; });
@@ -71,12 +75,14 @@ void AsyncRunner::workerLoop() {
 
         std::exception_ptr exception;
         {
-            at::ThreadLocalStateGuard tls_guard(task.tls_state);
+            std::unique_ptr<at::ThreadLocalStateGuard> tls_guard;
+            if (task.tls_state)
+                tls_guard = std::make_unique<at::ThreadLocalStateGuard>(*task.tls_state);
             // Do not propagate Torch profiler callbacks into this worker: Kineto
             // callbacks are thread-affine and can crash when the main engine thread
             // starts/stops profiling while async bookkeeping still runs ATen ops.
             at::DisableRecordFunctionGuard record_function_guard;
-            cuda_graph::GraphStreamGuard stream_guard(cuda_graph::toGraphStream(stream_));
+            cuda_graph::GraphStreamGuard   stream_guard(cuda_graph::toGraphStream(stream_));
             try {
                 task.fn();
                 event_.record(stream_);

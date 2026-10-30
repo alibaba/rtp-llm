@@ -1,4 +1,5 @@
 #pragma once
+#include "rtp_llm/cpp/normal_engine/speculative/MtpTargetLogprobs.h"
 
 #include "rtp_llm/cpp/normal_engine/NormalBatchStreamProcessor.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
@@ -40,6 +41,21 @@ public:
     absl::Status dispatchDecode(const StreamGroups&                          stream_groups,
                                 const speculative::SpeculativeSamplerOutput& spec_decode_output,
                                 const MergedOutput&                          draft_prefill_output) const;
+
+    absl::Status dispatchPrefill(const StreamGroups&      stream_groups,
+                                 const MergedOutput&      prefill_output,
+                                 const MergedOutput&      propose_output,
+                                 const torch::Tensor&     draft_last_hidden_states,
+                                 const MtpTargetLogprobs& target_logprobs) const;
+
+    absl::Status dispatchDecode(const StreamGroups&                          stream_groups,
+                                const speculative::SpeculativeSamplerOutput& spec_decode_output,
+                                const MergedOutput&                          draft_prefill_output,
+                                MtpTargetLogprobs                            target_logprobs) const;
+
+    void finalizeDecodeTargetLogprobs(const StreamGroups&                          stream_groups,
+                                      const speculative::SpeculativeSamplerOutput& spec_decode_output,
+                                      MtpTargetLogprobs&                           target_logprobs) const;
 
     absl::StatusOr<GptModelInputs> gatherDecodeModelInput(const StreamGroups& stream_groups,
                                                           TensorHolder&       host_holder) const;
@@ -166,12 +182,14 @@ protected:
                                       const MergedOutput&                prefill_output,
                                       const MergedOutput&                propose_output,
                                       const torch::Tensor&               draft_last_hidden_states,
+                                      const MtpTargetLogprobs&           target_logprobs,
                                       const torch::Tensor&               new_tokens_all,
                                       std::vector<StreamSpecUpdateInfo>& spec_update_infos) const;
 
     void prepareDecodeSpecUpdateInfo(const StreamGroups&                          stream_groups,
                                      const speculative::SpeculativeSamplerOutput& spec_decode_output,
                                      const MergedOutput&                          draft_prefill_output,
+                                     MtpTargetLogprobs&                           target_logprobs,
                                      std::vector<StreamSpecUpdateInfo>&           spec_update_infos) const;
 
     torch::Tensor compactAcceptedPositionIds(const torch::Tensor&    combo_position_ids,

@@ -66,6 +66,8 @@ public:
     mutable torch::Tensor all_probs;      // shape: [batch_size, vocab_size]
 
     std::vector<at::Generator> generator;
+    torch::Tensor              raw_logprobs_logits;
+    torch::Tensor              raw_logprobs_row_indices;
 };
 
 struct SamplerOutput {
@@ -78,7 +80,9 @@ public:
     std::vector<std::optional<ErrorInfo>> processor_errors;
     // The draft distribution is a one-hot at token_ids and need not be
     // materialized as [batch, speculative_steps, vocab].
-    bool                                  token_ids_are_point_mass = false;
+    bool          token_ids_are_point_mass = false;
+    torch::Tensor raw_logprobs_logits;
+    torch::Tensor raw_logprobs_row_indices;
 };
 
 struct MergedOutput {

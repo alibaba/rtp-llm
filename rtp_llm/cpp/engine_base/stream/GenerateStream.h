@@ -50,6 +50,11 @@ struct StreamUpdateInfo {
         GenerationPrefillCudaGraphStatus::NOT_REQUESTED};
     // Appended to preserve existing aggregate initializers. CPU context rows.
     const torch::Tensor custom_output{};
+    const torch::Tensor token_logprobs{};
+    const torch::Tensor top_logprob_token_ids{};
+    const torch::Tensor top_logprobs{};
+    int32_t             old_seq_length  = -1;
+    int32_t             logprobs_offset = 0;
 };
 
 struct StreamSpecUpdateInfo {
@@ -72,8 +77,12 @@ struct StreamSpecUpdateInfo {
 
     // Rejection-sampling result for this speculative decode round. Prefill
     // updates leave speculative_propose_step at zero and are not counted.
-    int speculative_propose_step = 0;
-    int accepted_draft_tokens    = 0;
+    int           speculative_propose_step = 0;
+    int           accepted_draft_tokens    = 0;
+    torch::Tensor token_logprobs;
+    torch::Tensor top_logprob_token_ids;
+    torch::Tensor top_logprobs;
+    int32_t       logprobs_offset = 0;
 };
 
 struct SpeculativeExecutorStreamOutput {
@@ -260,7 +269,7 @@ public:
     // When useChunkWindow() is true, contextLength() returns the current chunk length.
     // initial_reuse_length_ stays frozen for cache-hit metrics.
     void setChunkSize(int chunk_size) {
-        chunk_size_ = chunk_size;
+        chunk_size_     = chunk_size;
         max_chunk_size_ = std::max(max_chunk_size_, chunk_size);
     }
     int maxChunkSize() const {
@@ -276,7 +285,7 @@ public:
     int  currentChunkLen() const;  // tokens to compute in the current chunk
     bool isLastChunk() const;      // current chunk reaches seqLength()
     bool isMiddleChunk() const;    // chunked + context + !last → no sample / no output row
-    void advanceChunk();  // reuse_length_ += currentChunkLen()
+    void advanceChunk();           // reuse_length_ += currentChunkLen()
     int  cacheStorePublishStartToken() const {
         return chunk_advanced_ ? prefixLength() : 0;
     }
@@ -390,12 +399,22 @@ public:
         return speculative_accepted_tokens_per_pos_;
     }
 
-    const ResourceContext&      resourceContext() const;
-    void                        setKVCache(const BatchKVCacheResource& kv_cache_resource);
-    void                        setLoss(const torch::Tensor& loss);
-    void                        setSoftmaxProbs(const torch::Tensor& softmax_probs,
-                                                int                  start_pos,
-                                                const torch::Tensor& src_batch_indices = torch::Tensor());
+    void setLogProbs(const torch::Tensor& token_logprobs,
+                     const torch::Tensor& top_logprob_token_ids,
+                     const torch::Tensor& top_logprobs,
+                     const torch::Tensor& src_batch_indices,
+                     int                  start_pos);
+    bool hasLogprobsContentStarted() const;
+    bool shouldComputeLogprobs() const {
+        return generate_input_->generate_config->return_logprobs && hasLogprobsContentStarted();
+    }
+    int32_t                logprobsContentOffset(const torch::Tensor& candidate_tokens, int32_t num_new_tokens) const;
+    const ResourceContext& resourceContext() const;
+    void                   setKVCache(const BatchKVCacheResource& kv_cache_resource);
+    void                   setLoss(const torch::Tensor& loss);
+    void                   setSoftmaxProbs(const torch::Tensor& softmax_probs,
+                                           int                  start_pos,
+                                           const torch::Tensor& src_batch_indices = torch::Tensor());
     const BatchKVCacheResource& kvCache() const;
     BatchKVCacheResource&       kvCacheMutable();
     BatchKVCacheResourcePtr     kvCachePtr();
@@ -887,8 +906,8 @@ protected:
     bool         consumerFinishedWithoutLock() const;
     virtual bool consumerReadyWithoutLock() const;
 
-    int                      estimateKVNeedBlocks(int remaining_tokens, int target_batch_size) const;
-    bool                     reportUpdateErrorWithoutLock(const std::optional<ErrorInfo>& error_info);
+    int  estimateKVNeedBlocks(int remaining_tokens, int target_batch_size) const;
+    bool reportUpdateErrorWithoutLock(const std::optional<ErrorInfo>& error_info);
     bool prepareUpdateWithoutLock(const std::optional<ErrorInfo>& error_info, bool force_update_info);
     std::optional<ErrorInfo> updateNormalLogitProcessorStatus(const StreamUpdateInfo& update_info);
     std::optional<ErrorInfo> updateLogitProcessorStatus(const torch::Tensor& new_tokens, int32_t num_new_tokens);
@@ -973,6 +992,12 @@ protected:
     // ownership cycle is created.
 
     torch::Tensor                            cum_log_probs_;
+    torch::Tensor                            token_logprobs_;
+    torch::Tensor                            top_logprob_token_ids_;
+    torch::Tensor                            top_logprobs_;
+    int64_t                                  logprobs_history_size_    = 0;
+    std::shared_ptr<std::atomic<bool>>       logprobs_content_started_ = std::make_shared<std::atomic<bool>>(false);
+    void                                     updateLogprobsContentStarted(int old_seq_length);
     torch::Tensor                            all_probs_;
     torch::Tensor                            softmax_probs_;
     torch::Tensor                            loss_;

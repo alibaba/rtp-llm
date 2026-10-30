@@ -181,6 +181,11 @@ public:
     std::optional<PromptLogitsOutput> prompt_logits;
     // Output of the deployment-registered post-layers CustomHandler.
     std::optional<torch::Tensor> custom_output;
+    int32_t                      logprobs_offset = 0;
+    int32_t                      logprobs_count  = 0;
+    std::optional<torch::Tensor> token_logprobs;
+    std::optional<torch::Tensor> top_logprob_token_ids;
+    std::optional<torch::Tensor> top_logprobs;
 };
 
 class GenerateOutputs {
