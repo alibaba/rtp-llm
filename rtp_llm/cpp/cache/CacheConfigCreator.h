@@ -54,12 +54,6 @@ public:
     static uint32_t synchronizeBlockNum(uint32_t local_block_num, const ParallelismConfig& parallelism_config);
     static uint32_t selectConfirmedBlockNum(const int* candidates, size_t count, bool is_ffn_service);
 
-    // Unified desc->spec conversion. Callers provide the runtime build context;
-    // descs remain read-only.
-    static LayerKVCacheSpecs buildLayerSpecsFromDescs(const LayerKVCacheSpecDescs& layer_descs,
-                                                      const SpecBuildContext&      ctx,
-                                                      int64_t                      expected_layer_num);
-
 private:
     static CacheConfig createBasicConfig(const ModelConfig&       model_config,
                                          const ParallelismConfig& parallelism_config,

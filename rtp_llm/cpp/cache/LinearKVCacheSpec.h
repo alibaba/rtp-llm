@@ -19,6 +19,9 @@ struct LinearKVCacheSpec: public KVCacheSpec {
         type = KVCacheSpecType::LinearAttention;
     }
 
+private:
+    friend class SpecBuilder;
+
     static KVCacheSpecPtr build(const KVCacheSpecDesc& desc, const SpecBuildContext& ctx) {
         RTP_LLM_CHECK_WITH_INFO(
             ctx.linear_attention_config != nullptr,
@@ -104,6 +107,7 @@ struct LinearKVCacheSpec: public KVCacheSpec {
         return spec;
     }
 
+public:
     size_t block_size() const override {
         return k_block_size() + v_block_size();
     }

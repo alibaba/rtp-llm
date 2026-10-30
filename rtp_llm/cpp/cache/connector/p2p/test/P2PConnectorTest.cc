@@ -22,6 +22,31 @@
 
 namespace rtp_llm {
 
+TEST(P2PConnectorConfigTest, ShardedConfigSetsCpRankAndSize) {
+    ParallelismConfig parallelism;
+    parallelism.tp_size                            = 4;
+    parallelism.tp_rank                            = 3;
+    parallelism.prefill_cp_config.kv_cache_sharded = true;
+    const RuntimeConfig    runtime;
+    const CacheStoreConfig cache_store;
+    const PDSepConfig      pd_sep;
+
+    const auto config = P2PConnectorConfig::create(runtime, cache_store, parallelism, pd_sep, 1);
+    EXPECT_EQ(config.worker_config.cp_rank, 3);
+    EXPECT_EQ(config.worker_config.cp_size, 4);
+
+    parallelism.tp_size = 1;
+    parallelism.tp_rank = 0;
+    const auto p1       = P2PConnectorConfig::create(runtime, cache_store, parallelism, pd_sep, 1);
+    EXPECT_EQ(p1.worker_config.cp_rank, 0);
+    EXPECT_EQ(p1.worker_config.cp_size, 1);
+    parallelism.tp_size                            = 4;
+    parallelism.prefill_cp_config.kv_cache_sharded = false;
+    const auto unsharded = P2PConnectorConfig::create(runtime, cache_store, parallelism, pd_sep, 1);
+    EXPECT_EQ(unsharded.worker_config.cp_rank, 0);
+    EXPECT_EQ(unsharded.worker_config.cp_size, 1);
+}
+
 // Mock LayerBlockConverter for testing
 class MockLayerBlockConverter: public LayerBlockConverter {
 public:

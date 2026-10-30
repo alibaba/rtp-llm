@@ -222,9 +222,13 @@ protected:
             for (size_t i = 0; i < tags.size(); ++i) {
                 EXPECT_TRUE(pools_by_tag.emplace(tags[i], pools[i]).second);
             }
-            return backend_->init(topology, std::move(pools_by_tag), [&](int layer, const std::string& tag, int block) {
-                return allocator_->convertIndexToBuffer(layer, tag, block);
-            });
+            return backend_->init(
+                topology,
+                std::move(pools_by_tag),
+                [&](int layer, const std::string& tag, int block) {
+                    return allocator_->convertIndexToBuffer(layer, tag, block);
+                },
+                config_.canonicalSizePerBlock());
         }
         cache_ = createBlockTreeCache(config_, options, allocator_, parallel, backend_);
         return cache_ != nullptr;

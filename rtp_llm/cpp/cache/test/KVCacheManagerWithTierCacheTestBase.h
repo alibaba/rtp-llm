@@ -23,7 +23,6 @@
 #include <unistd.h>
 
 #include "rtp_llm/cpp/cache/CacheConfigCreator.h"
-#include "rtp_llm/cpp/cache/CPSlotMapper.h"
 #include "rtp_llm/cpp/cache/SingleTypeCacheManager.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeCacheTestUtils.h"
@@ -364,8 +363,11 @@ inline CacheConfig makeCompactDsv4CacheConfig(uint32_t block_num, int cp_size = 
     parallelism.role_type                          = RoleType::PREFILL;
     parallelism.tp_size                            = cp_size;
     parallelism.prefill_cp_config.kv_cache_sharded = cp_size > 1;
-    auto              config = CacheConfigCreator::createWarmupConfig(makeCompactDsv4ModelConfig(), parallelism, 0);
-    config.reuse_cache_tail_blocks = std::numeric_limits<int>::max();
+    parallelism.prefill_cp_config.method           = CPRotateMethod::ALL_GATHER;
+    auto config                                    = cp_size > 1 ?
+                                                         CacheConfigCreator::createConfig(makeCompactDsv4ModelConfig(), parallelism, KVCacheConfig{}) :
+                                                         CacheConfigCreator::createWarmupConfig(makeCompactDsv4ModelConfig(), parallelism, 0);
+    config.reuse_cache_tail_blocks                 = std::numeric_limits<int>::max();
     config.finalizeBlockNums(block_num, RuntimeConfig{});
     return config;
 }
@@ -945,19 +947,25 @@ fillSeedPayload(const std::shared_ptr<KVCacheManager>& manager, const CacheConfi
     return true;
 }
 
-inline std::optional<size_t> cpCanonicalBlockPosition(const CPSlotMapper& mapper,
-                                                      const CacheConfig&  config,
-                                                      std::string_view    tag,
-                                                      size_t              path_index) {
-    if (mapper.blockRoundRobinGroup(config, tag) || mapper.compactLastRankGroup(config, tag)) {
-        return path_index;
+inline std::optional<size_t>
+expectedCpFixturePosition(const CacheConfig& config, const std::string& tag, size_t path_index) {
+    const auto& group = config.group(tag);
+    if (config.seq_size_per_block != 128 || config.cache_cp_size != 2) {
+        return std::nullopt;
     }
-    return (path_index + 1) * static_cast<size_t>(mapper.cpSize()) - 1;
+    if (group.policy.group_type == CacheGroupType::FULL
+        && group.policy.cp_mapping == CpBlockMappingMode::BLOCK_ROUND_ROBIN) {
+        return config.canonicalBlockPosition(tag, path_index);
+    }
+    if (group.policy.group_type == CacheGroupType::SWA
+        && group.policy.cp_mapping == CpBlockMappingMode::COMPACT_LAST_RANK) {
+        return config.canonicalBlockPosition(tag, path_index);
+    }
+    return std::nullopt;
 }
 
 inline bool fillCpCanonicalSeedPayload(const std::shared_ptr<KVCacheManager>& manager,
                                        const CacheConfig&                     config,
-                                       const CPSlotMapper&                    mapper,
                                        const SeededPrefix&                    seed) {
     if (manager == nullptr || seed.blocks_by_group.size() != static_cast<size_t>(config.groupNums())) {
         return false;
@@ -968,10 +976,19 @@ inline bool fillCpCanonicalSeedPayload(const std::shared_ptr<KVCacheManager>& ma
         }
 
         const auto& blocks = seed.blocks_by_group.at(tag);
+        for (const auto block : blocks) {
+            if (!isNullBlockIdx(block) && !fillGroupBlockPayload(manager, config, tag, block, 0, /*poison=*/true)) {
+                return false;
+            }
+        }
         for (size_t path_index = 0; path_index < seed.cache_keys.size(); ++path_index) {
-            const auto position = cpCanonicalBlockPosition(mapper, config, tag, path_index);
-            if (!position.has_value() || *position >= blocks.size() || isNullBlockIdx(blocks[*position])
-                || !fillGroupBlockPayload(manager, config, tag, blocks[*position], path_index, /*poison=*/false)) {
+            const auto expected = expectedCpFixturePosition(config, tag, path_index);
+            if (!expected.has_value()) {
+                return false;
+            }
+            const size_t position = *expected;
+            if (position >= blocks.size() || isNullBlockIdx(blocks[position])
+                || !fillGroupBlockPayload(manager, config, tag, blocks[position], path_index, /*poison=*/false)) {
                 return false;
             }
         }
@@ -1053,7 +1070,6 @@ inline bool requestReusesExpectedPath(const BlockTreeCache&          cache,
 
 inline bool requestReusesExpectedCpCanonicalPath(const BlockTreeCache&          cache,
                                                  const CacheConfig&             config,
-                                                 const CPSlotMapper&            mapper,
                                                  const CacheKeysType&           canonical_keys,
                                                  const BatchKVCacheResourcePtr& request_resource,
                                                  size_t                         logical_reuse_blocks) {
@@ -1075,24 +1091,23 @@ inline bool requestReusesExpectedCpCanonicalPath(const BlockTreeCache&          
         }
         const size_t reuse_begin = logical_reuse_blocks - reuse_count;
         for (size_t member_index = 0; member_index < group_set->groupTags().size(); ++member_index) {
-            const auto& tag        = group_set->groupTags()[member_index];
-            const auto  group_type = config.topology().group(tag).policy.group_type;
-            if ((group_type == CacheGroupType::FULL && !mapper.blockRoundRobinGroup(config, tag))
-                || (group_type == CacheGroupType::SWA && !mapper.compactLastRankGroup(config, tag))) {
-                return false;
-            }
+            const auto& tag            = group_set->groupTags()[member_index];
             const auto& request_blocks = request_resource->blocks(0, tag);
             for (size_t path_index = reuse_begin; path_index < logical_reuse_blocks; ++path_index) {
-                const auto  position = cpCanonicalBlockPosition(mapper, config, tag, path_index);
-                const auto* node     = found[path_index];
-                if (!position.has_value() || *position >= request_blocks.size() || node == nullptr
+                const auto expected = expectedCpFixturePosition(config, tag, path_index);
+                if (!expected.has_value()) {
+                    return false;
+                }
+                const size_t position = *expected;
+                const auto*  node     = found[path_index];
+                if (position >= request_blocks.size() || node == nullptr
                     || group_set_id >= node->group_set_resources.size()) {
                     return false;
                 }
                 const auto& tree_resource = node->group_set_resources[group_set_id];
                 if (tree_resource.transfer_state != GroupSetTransferState::IDLE || !tree_resource.hasTier(Tier::DEVICE)
                     || tree_resource.device_blocks.size() != group_set->groupTags().size()
-                    || request_blocks[*position] != tree_resource.device_blocks[member_index]) {
+                    || request_blocks[position] != tree_resource.device_blocks[member_index]) {
                     return false;
                 }
             }
@@ -1263,11 +1278,10 @@ inline std::optional<SeededPrefix> seedDevicePrefix(const std::shared_ptr<KVCach
 
 inline std::optional<SeededPrefix> seedCpCanonicalDevicePrefix(const std::shared_ptr<KVCacheManager>& manager,
                                                                const CacheConfig&                     config,
-                                                               const std::shared_ptr<CPSlotMapper>&   mapper,
+                                                               int                                    cp_size,
                                                                int                                    token_offset,
                                                                int                                    logical_blocks) {
-    if (manager == nullptr || mapper == nullptr || !mapper->isSharded() || logical_blocks <= 0
-        || logical_blocks % mapper->cpSize() != 0) {
+    if (manager == nullptr || cp_size <= 1 || logical_blocks <= 0 || logical_blocks % cp_size != 0) {
         return std::nullopt;
     }
     const int    seq_size_per_block = static_cast<int>(config.seq_size_per_block);
@@ -1275,6 +1289,7 @@ inline std::optional<SeededPrefix> seedCpCanonicalDevicePrefix(const std::shared
     SeededPrefix seed;
     seed.resource  = makeResource(config);
     seed.token_ids = makeTokenIds(token_offset, seq_len, seq_len, seq_size_per_block);
+    seed.resource->setLastBlockAligned(true);
 
     MallocInfo malloc_info{seed.resource, seed.token_ids};
     malloc_info.reuse_cache         = true;
@@ -1285,7 +1300,7 @@ inline std::optional<SeededPrefix> seedCpCanonicalDevicePrefix(const std::shared
     }
 
     seed.full_cache_keys = seed.resource->cacheKeys();
-    seed.cache_keys      = mapper->canonicalCacheKeys(seed.full_cache_keys);
+    seed.cache_keys      = config.canonicalCacheKeys(seed.full_cache_keys);
     seed.blocks_by_group.reserve(static_cast<size_t>(config.groupNums()));
     for (const auto& tag : config.groupTags()) {
         seed.blocks_by_group.emplace(tag, seed.resource->blocks(0, tag));
@@ -1297,10 +1312,14 @@ inline std::optional<SeededPrefix> seedCpCanonicalDevicePrefix(const std::shared
         manager->free(FreeInfo{seed.resource, seed.token_ids});
         return std::nullopt;
     }
+    if (!fillCpCanonicalSeedPayload(manager, config, seed)) {
+        manager->free(FreeInfo{seed.resource, seed.token_ids});
+        return std::nullopt;
+    }
     {
-        size_t resident_prefix_length = 0;
-        manager->insertIntoCache(InsertInfo{seed.resource, seed.token_ids, /*is_resident=*/false},
-                                 resident_prefix_length);
+        size_t     resident_prefix_length = 0;
+        InsertInfo insert_info{seed.resource, seed.token_ids, /*is_resident=*/false};
+        manager->insertIntoCache(insert_info, resident_prefix_length);
     }
     manager->free(FreeInfo{seed.resource, seed.token_ids});
     return seed;
@@ -1385,12 +1404,18 @@ protected:
 
     void initManager(uint32_t device_blocks, int64_t lower_cache_size_mb = 8, int cp_size = 1) {
         ASSERT_FALSE(disk_dir_.path().empty());
-        cache_config_ = makeCompactDsv4CacheConfig(device_blocks, cp_size);
+        ParallelismConfig parallelism;
+        parallelism.role_type                          = RoleType::PREFILL;
+        parallelism.tp_size                            = cp_size;
+        parallelism.prefill_cp_config.kv_cache_sharded = cp_size > 1;
+        parallelism.prefill_cp_config.method           = CPRotateMethod::ALL_GATHER;
+        cache_config_                                  = makeCompactDsv4CacheConfig(device_blocks, cp_size);
 
         manager_ = std::make_shared<KVCacheManager>(cache_config_,
                                                     /*warmup=*/false,
                                                     nullptr,
-                                                    makeTierConfig(GetParam(), disk_dir_.path(), lower_cache_size_mb));
+                                                    makeTierConfig(GetParam(), disk_dir_.path(), lower_cache_size_mb),
+                                                    parallelism);
         ASSERT_TRUE(manager_->init());
         ASSERT_NE(manager_->blockTreeCache(), nullptr);
         auto cache = manager_->blockTreeCache();
@@ -1707,9 +1732,9 @@ protected:
             ASSERT_TRUE(engine->armPause());
         }
         ScopedTransferRelease pending_release(engine);
-        const int    block_size     = static_cast<int>(cache_config_.seq_size_per_block);
+        const int             block_size      = static_cast<int>(cache_config_.seq_size_per_block);
         auto                  failed_resource = makeResource(cache_config_);
-        auto         tokens         = makeTokenIds(0, 2 * block_size, 2 * block_size, block_size);
+        auto                  tokens          = makeTokenIds(0, 2 * block_size, 2 * block_size, block_size);
         MallocInfo            failed_info{failed_resource, tokens};
         const auto            failed = manager_->malloc(failed_info);
         ASSERT_TRUE(failed.success);
@@ -1747,8 +1772,8 @@ protected:
         }
         if (waiting_child) {
             EXPECT_FALSE(waiting_child->done());
-            const size_t submits_before = engine->submittedDescriptorCount();
-            size_t                                                   expected_submits = 0;
+            const size_t submits_before   = engine->submittedDescriptorCount();
+            size_t       expected_submits = 0;
             std::vector<std::pair<DeviceBlockPoolPtr, BlockIdxType>> child_targets;
             if (corrupt_type == CacheGroupType::SWA) {
                 for (size_t i = 0; i < waiting_child->loadDescs().size(); ++i) {

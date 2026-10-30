@@ -134,6 +134,30 @@ bool CacheConfig::samePolicy(const CacheGroupPolicy& lhs, const CacheGroupPolicy
            && lhs.sliding_window_size == rhs.sliding_window_size && lhs.shared_chunk_state == rhs.shared_chunk_state;
 }
 
+void CacheConfig::finalizeStorageLayout(const ParallelismConfig& parallelism, bool warmup) {
+    RTP_LLM_CHECK_WITH_INFO(!cache_key_layout_resolved, "cache storage layout must be finalized exactly once");
+    RTP_LLM_CHECK_WITH_INFO(seq_size_per_block > 0, "cache base block tokens must be positive");
+    size_t cp_size = 1;
+    if (warmup) {
+        // Warmup managers probe capacity with full pages — never fold.
+    } else if (parallelism.prefill_cp_config.kv_cache_sharded && parallelism.prefill_cp_config.is_enabled()
+               && parallelism.role_type != RoleType::DECODE && parallelism.tp_size > 1) {
+        // Mirrors the execution layer's sharded-pool gate (DeviceData:
+        // is_enabled() && kv_cache_sharded). Decode retains every received
+        // FULL page per TP rank; its flag only describes the prefill layout.
+        cp_size = parallelism.tp_size;
+    }
+    RTP_LLM_CHECK_WITH_INFO(cp_size <= static_cast<size_t>(std::numeric_limits<int>::max()),
+                            "cache storage CP size exceeds int range");
+    RTP_LLM_CHECK_WITH_INFO(parallelism.tp_rank < cp_size || cp_size == 1, "cache storage CP rank exceeds size");
+    const size_t base_tokens = seq_size_per_block;
+    RTP_LLM_CHECK_WITH_INFO(base_tokens <= std::numeric_limits<size_t>::max() / cp_size,
+                            "cache storage CP token stride overflows size_t");
+    cache_cp_size               = cp_size;
+    request_projection_required = cache_cp_size > 1;
+    cache_key_layout_resolved   = true;
+}
+
 void CacheConfig::setTopology(std::vector<GroupBase> new_groups, std::vector<LayerBase> new_layers) {
     RTP_LLM_CHECK_WITH_INFO(!new_groups.empty(), "CacheConfig::setTopology requires at least one cache group");
     RTP_LLM_CHECK_WITH_INFO(!new_layers.empty(), "CacheConfig::setTopology requires at least one cache layer");
@@ -381,8 +405,7 @@ const GroupBase& CacheConfig::physicalGroupForLayer(int layer_id, const std::str
             sub_config != nullptr, "CacheConfig has null MTP configuration at module=%zu", module_index);
         const auto first_layer_id =
             mtpGlobalLayerId(layer_num, static_cast<int>(module_index), sub_config->layer_num, 0);
-        if (first_layer_id != std::numeric_limits<uint32_t>::max()
-            && static_cast<uint64_t>(layer_id) >= first_layer_id
+        if (first_layer_id != std::numeric_limits<uint32_t>::max() && static_cast<uint64_t>(layer_id) >= first_layer_id
             && static_cast<uint64_t>(layer_id) - first_layer_id < sub_config->layer_num) {
             return sub_config->topology().groupForLayer(layer_id - static_cast<int>(first_layer_id), tag);
         }
