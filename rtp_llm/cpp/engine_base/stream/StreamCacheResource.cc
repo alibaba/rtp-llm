@@ -376,6 +376,9 @@ absl::Status StreamCacheResource::finalizeAllocatorLoad() {
         return absl::OkStatus();
     }
     const std::string error_text = error.ToString();
+    if (error.code() == ErrorCode::DEADLINE_EXCEEDED) {
+        return absl::DeadlineExceededError(error_text.empty() ? "allocator load timed out" : error_text);
+    }
     return absl::InternalError(error_text.empty() ? "allocator load failed" : "allocator load failed: " + error_text);
 }
 
@@ -429,7 +432,7 @@ absl::Status StreamCacheResource::incrKVBlock(int seq_len_override) {
     malloc_info.verbose                      = malloc_failed_times_ >= 10 ? malloc_failed_times_ % 100 == 0 : true;
     malloc_info.reuse_cache                  = reuseCache();
     malloc_info.enable_cache_lookup          = enableCacheLookup();
-    malloc_info.enable_remove_skipped_blocks = !(stream_->chunkedPrefillEnabled() && stream_->isContextStream());
+    malloc_info.enable_remove_skipped_blocks = !stream_->isContextStream();
     malloc_info.incr_seq_len_override        = seq_len_override;
 
     auto result = resource_context_.cache_manager->malloc(malloc_info);
@@ -474,8 +477,10 @@ bool StreamCacheResource::loadCacheDone() {
             stream_->generate_status_->clearLoadInitiated();
             reportMallocRetry();
         } else if (!status.ok()) {
-            stream_->reportEventWithoutLock(
-                StreamEvents::Error, ErrorCode::MALLOC_FAILED, std::string(status.message()));
+            stream_->reportEventWithoutLock(StreamEvents::Error,
+                                            absl::IsDeadlineExceeded(status) ? ErrorCode::LOAD_CACHE_TIMEOUT :
+                                                                               ErrorCode::MALLOC_FAILED,
+                                            std::string(status.message()));
         }
     }
     return true;

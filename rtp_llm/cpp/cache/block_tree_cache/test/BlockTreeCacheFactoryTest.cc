@@ -127,7 +127,7 @@ CacheConfig makeHybridConfig(bool disable_linear_reuse = false) {
     config.dtype              = DataType::TYPE_FP16;
     config.layer_num          = 4;
     config.seq_size_per_block = 4;
-    config.linear_step        = 2;
+    config.reuse_cache_tail_blocks = 2;
 
     auto linear_spec = test::makeResolvedLinearSpec(DataType::TYPE_FP16,
                                                     /*local_num_k_heads=*/1,
@@ -178,6 +178,37 @@ CacheConfig makeIndependentWatermarkConfig() {
                                      {CacheGroupType::FULL, CacheGroupType::LINEAR},
                                      {full_policy, linear_policy});
     config.setGroupBlockLayout({"group0", "group1"}, {8, 8}, {full_stride, linear_stride}, {0, 0});
+    return config;
+}
+
+CacheConfig makeTierRatioConfig() {
+    CacheConfig config;
+    config.dtype              = DataType::TYPE_FP16;
+    config.layer_num          = 4;
+    config.seq_size_per_block = 4;
+    auto full_spec            = test::makeResolvedMhaSpec(DataType::TYPE_FP16, 1, 8, 4);
+    auto swa_spec             = test::makeResolvedMhaSpec(DataType::TYPE_FP16, 1, 16, 4);
+    auto linear_spec =
+        test::makeResolvedLinearSpec(DataType::TYPE_FP16, 1, 1, 1, 1, 2, 4, DataType::TYPE_FP16, DataType::TYPE_FP16);
+    auto full_policy                  = defaultCacheGroupPolicy(CacheGroupType::FULL);
+    auto swa_policy                   = defaultCacheGroupPolicy(CacheGroupType::SWA);
+    swa_policy.enable_prefix_reuse    = true;
+    swa_policy.sliding_window_size    = 8;
+    auto linear_policy                = defaultCacheGroupPolicy(CacheGroupType::LINEAR);
+    linear_policy.enable_prefix_reuse = false;
+    test::configureIndexedTestGroups(
+        config,
+        {full_spec, swa_spec, swa_spec->clone(), linear_spec},
+        {{0}, {1}, {2}, {3}},
+        {CacheGroupType::FULL, CacheGroupType::SWA, CacheGroupType::FULL, CacheGroupType::LINEAR},
+        {full_policy, swa_policy, full_policy, linear_policy});
+    config.setGroupBlockLayout({"group0", "group1", "group2", "group3"},
+                               {40, 10, 40, 100},
+                               {full_spec->block_size_bytes(),
+                                swa_spec->block_size_bytes(),
+                                swa_spec->block_size_bytes(),
+                                linear_spec->block_size_bytes()},
+                               {0, 0, 0, 0});
     return config;
 }
 
@@ -304,7 +335,7 @@ CacheConfig makeCompatibleLinearGroupsConfig(uint32_t second_active_tail_blocks)
     config.dtype              = DataType::TYPE_FP16;
     config.layer_num          = 2;
     config.seq_size_per_block = 4;
-    config.linear_step        = 2;
+    config.reuse_cache_tail_blocks = 2;
 
     std::shared_ptr<LinearKVCacheSpec> first         = test::makeResolvedLinearSpec(DataType::TYPE_FP16,
                                                                             /*local_num_k_heads=*/1,
@@ -647,11 +678,31 @@ private:
 
 }  // namespace
 
-TEST(BlockTreeCacheFactoryUtilityTest, UsableBlockCountReservesBlockZeroWithinBudget) {
-    EXPECT_EQ(computeHostUsableBlockCount(4 * 4096, 4096), 3u);
-    EXPECT_EQ(computeHostUsableBlockCount(4096, 4096), 0u);
-    EXPECT_EQ(computeHostUsableBlockCount(100, 4096), 0u);
-    EXPECT_EQ(computeHostUsableBlockCount(4096, 0), 0u);
+TEST(BlockTreeCacheFactoryUtilityTest, TierBlockCountsFollowDeviceRatioWithinBudget) {
+    EXPECT_EQ(computeTierBlockCounts(16 * 4096, {40, 10}, {4096, 8192}), (std::vector<size_t>{10, 2}));
+    EXPECT_EQ(computeTierBlockCounts(32 * 4096, {40, 10}, {4096, 8192}), (std::vector<size_t>{21, 5}));
+    EXPECT_EQ(computeTierBlockCounts(16 * 4096, {10, 10}, {4096, 8192}), (std::vector<size_t>{5, 5}));
+    EXPECT_EQ(computeTierBlockCounts(4 * 4096, {8}, {4096}), (std::vector<size_t>{4}));
+    EXPECT_TRUE(computeTierBlockCounts(4096, {}, {}).empty());
+}
+
+TEST(BlockTreeCacheFactoryUtilityTest, TierBlockCountsRejectUnusableCapacityAndOverflow) {
+    CoreDumpGuard guard;
+    EXPECT_ANY_THROW(computeTierBlockCounts(4096, {8}, {4096}));
+    EXPECT_ANY_THROW(computeTierBlockCounts(4 * 4096, {100, 2}, {4096, 4096}));
+    EXPECT_ANY_THROW(computeTierBlockCounts(0, {8}, {4096}));
+    EXPECT_ANY_THROW(computeTierBlockCounts(4096, {8}, {0}));
+    EXPECT_ANY_THROW(computeTierBlockCounts(4096, {0}, {4096}));
+    EXPECT_ANY_THROW(computeTierBlockCounts(4096, {8}, {}));
+    const size_t max_bytes = std::numeric_limits<size_t>::max();
+    EXPECT_ANY_THROW(computeTierBlockCounts(4096, {2}, {max_bytes}));
+    EXPECT_ANY_THROW(computeTierBlockCounts(4096, {1, 1}, {max_bytes, 1}));
+    EXPECT_ANY_THROW(computeTierBlockCounts(max_bytes, {8}, {1}));
+}
+
+TEST(BlockTreeCacheFactoryUtilityTest, TierBlockCountsUseWideIntermediateProduct) {
+    EXPECT_EQ(computeTierBlockCounts(size_t{1} << 63, {size_t{1} << 30}, {size_t{1} << 33}),
+              (std::vector<size_t>{size_t{1} << 30}));
 }
 
 TEST(BlockTreeCacheFactoryUtilityTest, ResolveDiskMountPathUsesLocalRankAndRejectsInvalidShape) {
@@ -1964,6 +2015,70 @@ TEST_F(BlockTreeCacheFactoryTest, DiskCacheAllowsDisabledLinearReuse) {
     ASSERT_NE(cache, nullptr);
     ASSERT_EQ(cache->groupSets().size(), 1u);
     EXPECT_EQ(cache->groupSets().front()->groupType(), CacheGroupType::FULL);
+}
+
+TEST_F(BlockTreeCacheFactoryTest, LocalTiersPreserveFullSwaRatioAndExcludeDisabledLinear) {
+    const auto config = makeTierRatioConfig();
+    for (bool enable_crc : {false, true}) {
+        for (const auto& [host_on, disk_on, buffered_io] : {std::array<bool, 3>{true, false, true},
+                                                            {false, true, true},
+                                                            {false, true, false},
+                                                            {true, true, true},
+                                                            {true, true, false}}) {
+            SCOPED_TRACE("crc=" + std::to_string(enable_crc) + " host=" + std::to_string(host_on)
+                         + " disk=" + std::to_string(disk_on) + " buffered=" + std::to_string(buffered_io));
+            auto                                     allocator = initAllocator<CoordinatorCacheManager>(config);
+            block_transfer_engine_test::TempDirGuard disk_dir("block_tree_cache_tier_ratio");
+            KVCacheConfig                            options;
+            options.enable_crc             = enable_crc;
+            options.enable_memory_cache    = host_on;
+            options.memory_cache_size_mb   = 1;
+            options.enable_disk_cache      = disk_on;
+            options.disk_cache_size_mb     = 2;
+            options.disk_cache_paths       = disk_dir.path;
+            options.disk_cache_buffered_io = buffered_io;
+            auto cache                     = createBlockTreeCache(config, options, allocator);
+            ASSERT_NE(cache, nullptr);
+            ASSERT_EQ(cache->groupSets().size(), 2u);
+            const auto& full = cache->groupSets()[0];
+            const auto& swa  = cache->groupSets()[1];
+            EXPECT_EQ(full->groupType(), CacheGroupType::FULL);
+            EXPECT_EQ(swa->groupType(), CacheGroupType::SWA);
+            EXPECT_EQ(full->groupTags(), tagsFor(config, {0, 2}));
+            EXPECT_EQ(swa->groupTags(), tagsFor(config, {1}));
+            EXPECT_EQ(full->payloadBytes(),
+                      config.blockSizeBytesForGroup("group0") + config.blockSizeBytesForGroup("group2"));
+            const bool   crc            = enable_crc && CrcBlockCopyBatch::available();
+            const size_t alignment      = disk_on && !buffered_io ? 4096 : 16;
+            const auto   expectedStride = [&](const GroupSetPtr& group) {
+                const size_t storage =
+                    crc ? CrcBlockCopyBatch::encodedBytes(group->payloadBytes()) : group->payloadBytes();
+                return (storage + alignment - 1) / alignment * alignment;
+            };
+            const size_t full_stride = expectedStride(full);
+            const size_t swa_stride  = expectedStride(swa);
+            const size_t ratio_bytes = 4 * full_stride + swa_stride;
+            const auto   verifyPools = [&](const auto& full_pool, const auto& swa_pool, size_t budget) {
+                ASSERT_NE(full_pool, nullptr);
+                ASSERT_NE(swa_pool, nullptr);
+                EXPECT_EQ(full_pool->strideBytes(), full_stride);
+                EXPECT_EQ(swa_pool->strideBytes(), swa_stride);
+                const size_t full_count = full_pool->totalBlocksNum() + 1;
+                const size_t swa_count  = swa_pool->totalBlocksNum() + 1;
+                EXPECT_EQ(full_count, budget * 4 / ratio_bytes);
+                EXPECT_EQ(swa_count, budget / ratio_bytes);
+                EXPECT_LE(full_count * full_stride + swa_count * swa_stride, budget);
+                EXPECT_GE(full_count, 4 * swa_count);
+                EXPECT_LT(full_count, 4 * (swa_count + 1));
+            };
+            if (host_on) {
+                ASSERT_NO_FATAL_FAILURE(verifyPools(full->hostPool(), swa->hostPool(), 1024 * 1024));
+            }
+            if (disk_on) {
+                ASSERT_NO_FATAL_FAILURE(verifyPools(full->diskPool(), swa->diskPool(), 2 * 1024 * 1024));
+            }
+        }
+    }
 }
 
 TEST_F(BlockTreeCacheFactoryTest, DiskStagingBlockCountPropagatesAndValidates) {

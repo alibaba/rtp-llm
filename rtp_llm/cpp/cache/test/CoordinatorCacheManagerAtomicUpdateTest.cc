@@ -251,11 +251,14 @@ TEST_F(CoordinatorCacheManagerAtomicUpdateTest, UpdateKVBlockDoesNotTransferExte
 
     // Being unique within this batch does not imply exclusive ownership in the
     // pool. Another request or any tree reference may still hold the tail.
-    for (int owner = 0; owner <= static_cast<int>(BlockTreeRefType::COUNT); ++owner) {
+    const std::array<BlockTreeRefType, 4> tree_ref_types = {
+        BlockTreeRefType::CACHE, BlockTreeRefType::LOAD, BlockTreeRefType::EVICTION, BlockTreeRefType::STORE};
+    for (size_t owner = 0; owner <= tree_ref_types.size(); ++owner) {
+        SCOPED_TRACE(owner);
         if (owner == 0) {
             pool->incRef(blocks[1]);
         } else {
-            pool->incTreeRef(blocks[1], static_cast<BlockTreeRefType>(owner - 1));
+            pool->incTreeRef(blocks[1], tree_ref_types[owner - 1]);
         }
 
         std::vector<TaggedBlockIdPair> mapping;
@@ -268,12 +271,38 @@ TEST_F(CoordinatorCacheManagerAtomicUpdateTest, UpdateKVBlockDoesNotTransferExte
         if (owner == 0) {
             pool->decRef(blocks[1]);
         } else {
-            pool->decTreeRef(blocks[1], static_cast<BlockTreeRefType>(owner - 1));
+            pool->decTreeRef(blocks[1], tree_ref_types[owner - 1]);
         }
     }
 
     allocator_->free(FreeInfo{resource, nullptr});
     EXPECT_EQ(pool->freeBlocksNum(), 2u);
+}
+
+TEST_F(CoordinatorCacheManagerAtomicUpdateTest, UpdateKVBlockDoesNotTransferFrozenTail) {
+    auto config = createSingleTypeTestConfig(/*layer_num=*/1, /*block_num=*/3, /*seq_size_per_block=*/4);
+    allocator_  = std::make_shared<TestAllocator>(config, AllocationType::HOST);
+    ASSERT_TRUE(allocator_->init());
+    auto pool   = allocator_->groupBlockPools().front();
+    auto blocks = allocateRequestBlocks(pool, 2);
+    ASSERT_EQ(blocks.size(), 2u);
+    auto resource = createBatchKVCacheResource(/*batch_size=*/2, config);
+    resource->setBatchBlocks(0, "default", {blocks[0]});
+    resource->setBatchBlocks(1, "default", {blocks[1]});
+    pool->freezeBlock(blocks[1]);
+
+    std::vector<TaggedBlockIdPair> mapping;
+    EXPECT_FALSE(allocator_->updateKVBlock(resource, {0, 0}, /*copy_last_block=*/true, mapping));
+    EXPECT_TRUE(mapping.empty());
+    EXPECT_EQ(resource->blocks(0, "default"), (BlockIndicesType{blocks[0]}));
+    EXPECT_EQ(resource->blocks(1, "default"), (BlockIndicesType{blocks[1]}));
+    EXPECT_EQ(pool->freeBlocksNum(), 0u);
+
+    allocator_->free(FreeInfo{resource, nullptr});
+    EXPECT_EQ(pool->freeBlocksNum(), 1u);
+    EXPECT_EQ(pool->refCount(blocks[1]), 1u);
+    EXPECT_TRUE(pool->isFrozen(blocks[1]));
+    EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::FROZEN), 1u);
 }
 
 TEST_F(CoordinatorCacheManagerAtomicUpdateTest, TransfersTailSharedOnlyByDroppedBeams) {

@@ -26,8 +26,7 @@ import static org.mockito.Mockito.when;
 @ExtendWith(MockitoExtension.class)
 class RecentCacheKeyTraceReporterTest {
 
-    @Mock
-    private CacheMetricsReporter cacheMetricsReporter;
+    @Mock private CacheMetricsReporter cacheMetricsReporter;
 
     @Test
     void should_report_request_hits_against_prior_pool() throws Exception {
@@ -55,10 +54,8 @@ class RecentCacheKeyTraceReporterTest {
         reporter.report(secondContext);
 
         InOrder inOrder = inOrder(cacheMetricsReporter);
-        inOrder.verify(cacheMetricsReporter).reportRecentCacheKeyHitMetrics(
-                60_000L, 0L, 300L);
-        inOrder.verify(cacheMetricsReporter).reportRecentCacheKeyHitMetrics(
-                60_000L, 200L, 300L);
+        inOrder.verify(cacheMetricsReporter).reportRecentCacheKeyHitMetrics(60_000L, 0L, 300L);
+        inOrder.verify(cacheMetricsReporter).reportRecentCacheKeyHitMetrics(60_000L, 200L, 300L);
     }
 
     @Test
@@ -68,8 +65,7 @@ class RecentCacheKeyTraceReporterTest {
         inject(reporter, "cacheMetricsReporter", cacheMetricsReporter);
 
         FlexlbConfig disabledConfig = new FlexlbConfig();
-        disabledConfig.getObservability().getCacheHit().getRecentKeyWindow()
-                .setWriteEnabled(false);
+        disabledConfig.getObservability().getCacheHit().getRecentKeyWindow().setWriteEnabled(false);
         BalanceContext skippedContext = contextWithConfig(disabledConfig);
         reporter.report(skippedContext);
 
@@ -77,8 +73,7 @@ class RecentCacheKeyTraceReporterTest {
         BalanceContext nextContext = context(enabledConfig, List.of(1L, 2L));
         reporter.report(nextContext);
 
-        verify(cacheMetricsReporter).reportRecentCacheKeyHitMetrics(
-                60_000L, 0L, 1024L);
+        verify(cacheMetricsReporter).reportRecentCacheKeyHitMetrics(60_000L, 0L, 1024L);
     }
 
     @Test
@@ -91,17 +86,17 @@ class RecentCacheKeyTraceReporterTest {
         metricOffConfig.getObservability().getCacheHit().setMetricsEnabled(false);
         BalanceContext firstContext = context(metricOffConfig, List.of(1L, 2L));
         reporter.report(firstContext);
-        verify(cacheMetricsReporter, never()).reportRecentCacheKeyHitMetrics(
-                org.mockito.Mockito.anyLong(),
-                org.mockito.Mockito.anyLong(),
-                org.mockito.Mockito.anyLong());
+        verify(cacheMetricsReporter, never())
+                .reportRecentCacheKeyHitMetrics(
+                        org.mockito.Mockito.anyLong(),
+                        org.mockito.Mockito.anyLong(),
+                        org.mockito.Mockito.anyLong());
 
         FlexlbConfig enabledConfig = new FlexlbConfig();
         BalanceContext secondContext = context(enabledConfig, List.of(2L, 3L));
         reporter.report(secondContext);
 
-        verify(cacheMetricsReporter).reportRecentCacheKeyHitMetrics(
-                60_000L, 256L, 1024L);
+        verify(cacheMetricsReporter).reportRecentCacheKeyHitMetrics(60_000L, 256L, 1024L);
     }
 
     @Test
@@ -114,10 +109,11 @@ class RecentCacheKeyTraceReporterTest {
         reporter.report(context(config, List.of(), 128L, 64L));
         reporter.report(context(config, List.of(1L), 128L, 64L));
 
-        verify(cacheMetricsReporter, org.mockito.Mockito.times(2)).reportRecentCacheKeyHitMetrics(
-                60_000L, 0L, 128L);
-        verify(cacheMetricsReporter, org.mockito.Mockito.times(2)).reportTheoryCacheHitMetrics(
-                org.mockito.Mockito.any(CacheHitTheoryStats.Snapshot.class));
+        verify(cacheMetricsReporter, org.mockito.Mockito.times(2))
+                .reportRecentCacheKeyHitMetrics(60_000L, 0L, 128L);
+        verify(cacheMetricsReporter, org.mockito.Mockito.times(2))
+                .reportTheoryCacheHitMetrics(
+                        org.mockito.Mockito.any(CacheHitTheoryStats.Snapshot.class));
     }
 
     @Test
@@ -132,7 +128,8 @@ class RecentCacheKeyTraceReporterTest {
 
         org.mockito.ArgumentCaptor<CacheHitTheoryStats.Snapshot> captor =
                 org.mockito.ArgumentCaptor.forClass(CacheHitTheoryStats.Snapshot.class);
-        verify(cacheMetricsReporter, org.mockito.Mockito.times(2)).reportTheoryCacheHitMetrics(captor.capture());
+        verify(cacheMetricsReporter, org.mockito.Mockito.times(2))
+                .reportTheoryCacheHitMetrics(captor.capture());
         CacheHitTheoryStats.Snapshot second = captor.getAllValues().get(1);
         assertEquals(512L, second.getRequestHitCount());
         assertEquals(1024L, second.getRequestTotalCount());
@@ -151,10 +148,8 @@ class RecentCacheKeyTraceReporterTest {
         reporter.report(context(config, List.of(17L, 21L), 2048L, 1024L));
 
         InOrder inOrder = inOrder(cacheMetricsReporter);
-        inOrder.verify(cacheMetricsReporter).reportRecentCacheKeyHitMetrics(
-                60_000L, 0L, 2048L);
-        inOrder.verify(cacheMetricsReporter).reportRecentCacheKeyHitMetrics(
-                60_000L, 1024L, 2048L);
+        inOrder.verify(cacheMetricsReporter).reportRecentCacheKeyHitMetrics(60_000L, 0L, 2048L);
+        inOrder.verify(cacheMetricsReporter).reportRecentCacheKeyHitMetrics(60_000L, 1024L, 2048L);
     }
 
     private static void inject(Object target, String fieldName, Object value) throws Exception {
@@ -165,10 +160,8 @@ class RecentCacheKeyTraceReporterTest {
 
     private static ShardedRecentCacheKeyWindow smallWindow() {
         FlexlbConfig config = new FlexlbConfig();
-        config.getObservability().getCacheHit().getRecentKeyWindow()
-                .setDurationMs(60_000L);
-        config.getObservability().getCacheHit().getRecentKeyWindow()
-                .setMaxKeyOccurrences(3_200L);
+        config.getObservability().getCacheHit().getRecentKeyWindow().setDurationMs(60_000L);
+        config.getObservability().getCacheHit().getRecentKeyWindow().setMaxKeyOccurrences(3_200L);
         ConfigService configService = mock(ConfigService.class);
         when(configService.loadBalanceConfig()).thenReturn(config);
         return new ShardedRecentCacheKeyWindow(configService);
@@ -184,7 +177,8 @@ class RecentCacheKeyTraceReporterTest {
         return context(config, cacheKeys, 1024L, 256L);
     }
 
-    private static BalanceContext context(FlexlbConfig config, List<Long> cacheKeys, long seqLen, long cacheKeyBlockSize) {
+    private static BalanceContext context(
+            FlexlbConfig config, List<Long> cacheKeys, long seqLen, long cacheKeyBlockSize) {
         BalanceContext balanceContext = mock(BalanceContext.class);
         Request request = mock(Request.class);
         when(balanceContext.getConfig()).thenReturn(config);

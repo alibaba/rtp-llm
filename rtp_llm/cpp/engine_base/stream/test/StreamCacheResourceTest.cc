@@ -424,6 +424,72 @@ TEST_F(StreamCacheResourceTest, SwapLinearBlocksUsesPolicyAndTagAfterGroupReorde
     }
 }
 
+TEST_F(StreamCacheResourceTest, PrefillIncrementAfterHostLoadPreservesLinearReuseState) {
+    for (const int tail_blocks : {2, 8}) {
+        SCOPED_TRACE(tail_blocks);
+        auto config                    = test::makeSimpleHybridMhaCacheConfig(4, 16, 2, DataType::TYPE_FP16, 2);
+        config.reuse_cache_tail_blocks = tail_blocks;
+        KVCacheConfig tiered_config;
+        tiered_config.enable_device_cache  = false;
+        tiered_config.enable_memory_cache  = true;
+        tiered_config.memory_cache_size_mb = 1;
+        prepareResourceWithCacheConfig(config, {1, 2, 3, 4, 5, 6, 7, 8, 9}, true, RoleType::PDFUSION, tiered_config);
+        auto& resource                                         = stream_->streamCacheResource();
+        resource.resource_context_.enable_device_cache         = false;
+        resource.resource_context_.enable_memory_cache         = true;
+        stream_->generate_input_->generate_config->reuse_cache = true;
+        initCacheKeys(resource.batch_kv_cache_resource_, stream_->completeTokenIdsPtr(), 2);
+        const auto&                                cache = cache_manager_->block_tree_cache_;
+        std::vector<std::vector<GroupSetResource>> slots(1, std::vector<GroupSetResource>(cache->groupSets().size()));
+        for (const auto& group : cache->groupSets()) {
+            const auto host_block = group->allocateSingleBlock(Tier::HOST, BlockTreeRefType::CACHE);
+            ASSERT_FALSE(isNullBlockIdx(host_block));
+            BlockIndicesType device_blocks;
+            for (const auto& pool : group->devicePools()) {
+                const auto allocated = pool->malloc(1);
+                ASSERT_TRUE(allocated.has_value());
+                pool->incRef(*allocated);
+                device_blocks.push_back(allocated->front());
+            }
+            ASSERT_TRUE(cache
+                            ->executeTransfer(TransferTask(
+                                {TransferDescriptor::deviceToHost(group->groupSetId(), device_blocks, host_block)},
+                                std::chrono::seconds(30)))
+                            .ok());
+            for (size_t member = 0; member < device_blocks.size(); ++member) {
+                group->devicePools()[member]->decRef(device_blocks[member]);
+            }
+            slots[0][group->groupSetId()].host_block = host_block;
+        }
+        ASSERT_EQ(cache->tree()
+                      ->insertNode({resource.batch_kv_cache_resource_->cacheKeys(0).front()}, slots, false, false)
+                      .accepted_resource_count,
+                  cache->groupSets().size());
+        for (const auto& group : cache->groupSets()) {
+            group->releaseSingleBlock(Tier::HOST, slots[0][group->groupSetId()].host_block, BlockTreeRefType::CACHE);
+        }
+
+        ASSERT_TRUE(resource.initKVBlock().ok());
+        ASSERT_NE(resource.allocator_load_context_, nullptr);
+        resource.allocator_load_context_->waitDone();
+        ASSERT_TRUE(resource.loadCacheDone());
+        ASSERT_EQ(stream_->reuseLength(), 2);
+        ASSERT_TRUE(stream_->isContextStream());
+        ASSERT_FALSE(stream_->chunkedPrefillEnabled());
+        const auto before = resource.kvCache().blocks(0, "linear");
+        ASSERT_EQ(before.size(), 5u);
+        ASSERT_GT(before[0], 0);
+        ASSERT_TRUE(resource.incrKVBlock().ok());
+        EXPECT_EQ(resource.kvCache().blocks(0, "linear"), before);
+        EXPECT_EQ(resource.kvCache().cacheResource(0).kernelBlocks("linear"), before);
+
+        stream_->setIsContextStream(false);
+        ASSERT_TRUE(resource.incrKVBlock().ok());
+        EXPECT_TRUE(isNullBlockIdx(resource.kvCache().blocks(0, "linear")[0]));
+        resource.releaseResource();
+    }
+}
+
 TEST_F(StreamCacheResourceTest, testAllocateResource) {
     for (const bool with_backend : {false, true}) {
         for (const bool ignore_request_switches : {false, true}) {
@@ -1310,6 +1376,31 @@ TEST_F(StreamCacheResourceTest, testPrefillAllocatorLoadFailureKeepsDeviceReadyR
     EXPECT_FALSE(stream_->hasError());
 }
 
+TEST_F(StreamCacheResourceTest, testPrefillLoadTimeoutDetachesFrozenSuffixAndRecomputes) {
+    prepareResource(/*reuse_cache=*/true, RoleType::PREFILL);
+    auto& resource = stream_->streamCacheResource();
+    ASSERT_TRUE(resource.initKVBlock().ok());
+    const auto original = resource.kvCache().blocks(0, "default");
+    ASSERT_EQ(original.size(), 3u);
+    const auto pool = cache_manager_->coordinator_manager_->groupBlockPools().front();
+    pool->freezeBlock(original[1]);
+    stream_->setReuseLength(2);
+    stream_->setInitialReuseLength(2);
+    stream_->setLocalReuseLength(2);
+    resource.allocator_load_context_ =
+        std::make_shared<CompletedAsyncContext>(ErrorInfo(ErrorCode::DEADLINE_EXCEEDED, "KVCM read timed out"));
+
+    EXPECT_TRUE(resource.waitForAllocatorLoad().ok());
+    EXPECT_EQ(resource.allocator_load_context_, nullptr);
+    EXPECT_FALSE(stream_->hasError());
+    EXPECT_EQ(stream_->reuseLength(), 2);
+    EXPECT_EQ(stream_->deviceReuseLength(), 2);
+    EXPECT_NE(resource.kvCache().blocks(0, "default")[1], original[1]);
+    EXPECT_TRUE(pool->isFrozen(original[1]));
+    EXPECT_TRUE(resource.cache_reuse_metrics_.report_load_metrics);
+    EXPECT_FALSE(resource.cache_reuse_metrics_.load_success);
+}
+
 TEST_F(StreamCacheResourceTest, testPrefillLoadFailureDetachesSharedSuffix) {
     for (bool cache_owned : {false, true}) {
         SCOPED_TRACE(cache_owned);
@@ -1563,6 +1654,36 @@ TEST_F(StreamCacheResourceTest, testAllocatorLoadFailureIsTerminal) {
     EXPECT_EQ(stream_->initialReuseLength(), 0);
     EXPECT_EQ(stream_->localReuseLength(), 0);
     EXPECT_EQ(stream_->deviceReuseLength(), 0);
+}
+
+TEST_F(StreamCacheResourceTest, testAllocatorLoadTimeoutPreservesDeadlineStatus) {
+    for (const auto role : {RoleType::DECODE, RoleType::PDFUSION}) {
+        SCOPED_TRACE(static_cast<int>(role));
+        prepareResource(/*reuse_cache=*/true, role);
+        auto& resource = stream_->streamCacheResource();
+        resource.allocator_load_context_ =
+            std::make_shared<CompletedAsyncContext>(ErrorInfo(ErrorCode::DEADLINE_EXCEEDED, "KVCM read timed out"));
+
+        const auto status = resource.waitForAllocatorLoad();
+        EXPECT_TRUE(absl::IsDeadlineExceeded(status));
+        EXPECT_NE(std::string(status.message()).find("KVCM read timed out"), std::string::npos);
+        EXPECT_EQ(resource.allocator_load_context_, nullptr);
+        EXPECT_TRUE(resource.cache_reuse_metrics_.report_load_metrics);
+        EXPECT_FALSE(resource.cache_reuse_metrics_.load_success);
+    }
+}
+
+TEST_F(StreamCacheResourceTest, testLoadCacheDoneTimeoutReportsLoadCacheTimeout) {
+    prepareResource(/*reuse_cache=*/true, RoleType::DECODE);
+    auto& resource = stream_->streamCacheResource();
+    resource.allocator_load_context_ =
+        std::make_shared<CompletedAsyncContext>(ErrorInfo(ErrorCode::DEADLINE_EXCEEDED, "KVCM read timed out"));
+
+    EXPECT_TRUE(resource.loadCacheDone());
+    EXPECT_TRUE(stream_->hasError());
+    EXPECT_EQ(stream_->statusInfo().code(), ErrorCode::LOAD_CACHE_TIMEOUT);
+    EXPECT_NE(stream_->statusInfo().ToString().find("KVCM read timed out"), std::string::npos);
+    EXPECT_EQ(resource.allocator_load_context_, nullptr);
 }
 
 TEST_F(StreamCacheResourceTest, testReleaseResetsAllocatorContextBeforeFreeingRequestBlocks) {

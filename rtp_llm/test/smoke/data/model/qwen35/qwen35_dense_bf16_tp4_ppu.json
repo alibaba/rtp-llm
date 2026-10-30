@@ -1,0 +1,65 @@
+{
+    "model_type": "qwen35_dense",
+    "model_path": "/mnt/nas1/hf/Qwen3.5-9B",
+    "query_result": [
+        {
+            "endpoint": "/v1/chat/completions",
+            "query": {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "$prompt:s2"
+                    }
+                ],
+                "max_tokens": 100,
+                "temperature": 0.0,
+                "top_p": 0,
+                "top_k": 1
+            },
+            "result": {
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": "Here's a thinking process that leads to the suggested questions about English listening methods:\n\n1.  **Analyze the Request:**\n    *   **Topic:** English Listening Methods/Techniques (英语听力方法).\n    *   **Task:** Generate questions (提出几个问题).\n    *   **Language:** Chinese (implied by the prompt).\n    *   **Goal:** The questions should be thought-provoking, cover different aspects (beginner to advanced, theory to",
+                            "partial": false
+                        },
+                        "finish_reason": "length"
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 18,
+                    "total_tokens": 118,
+                    "completion_tokens": 100
+                }
+            }
+        },
+        {
+            "query": {
+                "prompt_batch": [
+                    "$prompt:s1",
+                    "$prompt:s1",
+                    "$prompt:s1"
+                ],
+                "generate_config": {
+                    "max_new_tokens": 10,
+                    "top_k": 1
+                }
+            },
+            "result": {
+                "response_batch": [
+                    {
+                        "response": "\n\nThe **CAP Theorem** (also known"
+                    },
+                    {
+                        "response": "\n\nThe **CAP Theorem** (also known"
+                    },
+                    {
+                        "response": "\n\nThe **CAP Theorem** (also known"
+                    }
+                ]
+            }
+        }
+    ]
+}

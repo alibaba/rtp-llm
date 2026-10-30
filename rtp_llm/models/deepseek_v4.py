@@ -6,9 +6,7 @@ raises so the engine fails fast if you try to actually run inference. Subsequent
 milestones (M1 mHC, M2 HCA, M3 CSA, M4 heterogeneous KV cache) flesh out the
 real model body in `rtp_llm/models_py/model_desc/deepseek_v4_model.py`.
 
-Key V4 architecture differences vs V3 — see
-`/home/wangyin.yx/workspace/work_memory/plans/develop_ds_v4.md` for the full
-breakdown:
+Key V4 architecture differences vs V3:
 
   - MQA single-KV-head with head_dim=512 (no kv_lora_rank, no v_head_dim split)
   - Per-layer attention type from `compress_ratios`: 0=SWA-only, 4=CSA, 128=HCA
@@ -793,6 +791,19 @@ class DeepSeekV4(DeepSeekV2):
         config.moe_inter_size = int(moe_intermediate_size)
         # Every layer is MoE in V4 (compress_ratios doesn't include dense replacement)
         config.moe_layer_index = list(range(config.num_layers))
+
+        # V4 routed experts ship at a narrower width than the model-wide
+        # quant_algo: the checkpoint stores them as I8-packed FP4 + UE8M0
+        # group scales while ``quantization_config`` only describes the
+        # dense FP8 block-wise scheme (there is no ModelOptFp4-style config
+        # to trigger the framework FP4 paths; see
+        # _build_routed_experts_fp4).  Record the declared expert storage
+        # dtype so eval_model_weight_size prices experts at their real
+        # width -- the model-wide width overestimates V4-Pro by 1.81x
+        # (1562GB vs 893GB on disk) and misroutes the loader.
+        expert_dtype = config_json.get("expert_dtype")
+        if expert_dtype is not None:
+            config.expert_weight_dtype = str(expert_dtype).strip().lower()
 
         # ---- V4-only model-level fields ----
         config.hc_mult = int(config_json.get("hc_mult", 1))

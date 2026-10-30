@@ -5,6 +5,13 @@ import io.grpc.Status;
 import io.grpc.netty.NettyServerBuilder;
 import io.grpc.stub.StreamObserver;
 import io.netty.channel.nio.NioEventLoopGroup;
+import org.flexlb.balance.endpoint.WorkerEndpoint;
+import org.flexlb.config.FlexlbConfig;
+import org.flexlb.consistency.LBStatusConsistencyService;
+import org.flexlb.dao.BalanceContext;
+import org.flexlb.dao.loadbalance.Request;
+import org.flexlb.dao.master.WorkerStatus;
+import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.EngineGrpcClient;
 import org.flexlb.engine.grpc.EngineRpcService.CacheStatusPB;
 import org.flexlb.engine.grpc.EngineRpcService.CacheVersionPB;
@@ -13,14 +20,6 @@ import org.flexlb.engine.grpc.MultimodalRpcServiceGrpc;
 import org.flexlb.engine.grpc.RpcServiceGrpc;
 import org.flexlb.engine.grpc.monitor.GrpcReporter;
 import org.flexlb.engine.grpc.nameresolver.CustomNameResolver;
-import org.flexlb.balance.endpoint.WorkerEndpoint;
-import org.flexlb.config.ConfigService;
-import org.flexlb.config.FlexlbConfig;
-import org.flexlb.consistency.LBStatusConsistencyService;
-import org.flexlb.dao.BalanceContext;
-import org.flexlb.dao.loadbalance.Request;
-import org.flexlb.dao.master.WorkerStatus;
-import org.flexlb.dao.route.RoleType;
 import org.flexlb.sync.status.WorkerDirectory;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -40,8 +39,8 @@ import java.util.stream.IntStream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.any;
 import static org.mockito.Mockito.eq;
 import static org.mockito.Mockito.mock;
@@ -67,11 +66,16 @@ class VitCacheDirectoryTest {
         live.put(b.getIpPort(), b);
         var workers = mock(WorkerDirectory.class);
         when(workers.statusSnapshot(RoleType.VIT)).thenAnswer(call -> Map.copyOf(live));
-        when(workers.endpointAddressSnapshot(RoleType.VIT)).thenAnswer(call -> new java.util.ArrayList<>(live.keySet()));
-        when(workers.captureEndpoint(eq(RoleType.VIT), any())).thenAnswer(call -> {
-            WorkerStatus status = live.get(call.getArgument(1));
-            return status == null ? null : new WorkerEndpoint(status).tryPinGeneration();
-        });
+        when(workers.endpointAddressSnapshot(RoleType.VIT))
+                .thenAnswer(call -> new java.util.ArrayList<>(live.keySet()));
+        when(workers.captureEndpoint(eq(RoleType.VIT), any()))
+                .thenAnswer(
+                        call -> {
+                            WorkerStatus status = live.get(call.getArgument(1));
+                            return status == null
+                                    ? null
+                                    : new WorkerEndpoint(status).tryPinGeneration();
+                        });
         grpc = mock(EngineGrpcClient.class);
         consistency = mock(LBStatusConsistencyService.class);
         directory = new VitCacheDirectory(workers, grpc, consistency);
@@ -98,14 +102,24 @@ class VitCacheDirectoryTest {
     }
 
     private void snapshot(WorkerStatus worker, String epoch, String... keys) {
-        directory.replace(worker, MultimodalCacheStatusPB.newBuilder()
-                .setWorkerInstance(epoch).addAllKeys(List.of(keys)).build());
+        directory.replace(
+                worker,
+                MultimodalCacheStatusPB.newBuilder()
+                        .setWorkerInstance(epoch)
+                        .addAllKeys(List.of(keys))
+                        .build());
     }
 
-    private void tierSnapshot(WorkerStatus worker, List<String> hashes, List<String> gpu, List<String> cpu) {
-        directory.replace(worker, MultimodalCacheStatusPB.newBuilder()
-                .setWorkerInstance("instance").addAllKeys(hashes)
-                .addAllGpuEmbeddingKeys(gpu).addAllCpuEmbeddingKeys(cpu).build());
+    private void tierSnapshot(
+            WorkerStatus worker, List<String> hashes, List<String> gpu, List<String> cpu) {
+        directory.replace(
+                worker,
+                MultimodalCacheStatusPB.newBuilder()
+                        .setWorkerInstance("instance")
+                        .addAllKeys(hashes)
+                        .addAllGpuEmbeddingKeys(gpu)
+                        .addAllCpuEmbeddingKeys(cpu)
+                        .build());
     }
 
     @Test
@@ -115,7 +129,8 @@ class VitCacheDirectoryTest {
         selector.select(context("cold1", "cold2"), "one");
         selector.select(context("other"), "two");
         snapshot(a, "a2");
-        assertEquals(b.getIp(), selector.select(context("cold1", "cold2", "other"), null).getServerIp());
+        assertEquals(
+                b.getIp(), selector.select(context("cold1", "cold2", "other"), null).getServerIp());
     }
 
     @Test
@@ -152,7 +167,8 @@ class VitCacheDirectoryTest {
         WorkerStatus pendingWorker = selected.equals(a.getIp()) ? a : b;
         tierSnapshot(other, List.of(), List.of(), List.of("cold"));
         assertEquals(other.getIp(), selector.select(context("cold"), null).getServerIp());
-        assertEquals(pendingWorker.getIp(),
+        assertEquals(
+                pendingWorker.getIp(),
                 selector.select(context("cold"), pendingWorker.getGroup()).getServerIp());
         live.remove(other.getIpPort());
         assertEquals(pendingWorker.getIp(), selector.select(context("cold"), null).getServerIp());
@@ -173,13 +189,18 @@ class VitCacheDirectoryTest {
 
     @Test
     void refreshUsesGrpcPortAndPreservesTierFields() {
-        var snapshot = MultimodalCacheStatusPB.newBuilder().setWorkerInstance("a1")
-                .addKeys("hash")
-                .addGpuEmbeddingKeys("gpu").addCpuEmbeddingKeys("cpu").build();
+        var snapshot =
+                MultimodalCacheStatusPB.newBuilder()
+                        .setWorkerInstance("a1")
+                        .addKeys("hash")
+                        .addGpuEmbeddingKeys("gpu")
+                        .addCpuEmbeddingKeys("cpu")
+                        .build();
         var request = CacheVersionPB.newBuilder().setNeedCacheKeys(true).build();
         when(grpc.getMultimodalCacheStatusAsync(a.getIp(), 8001, request, 2000))
-                .thenReturn(CompletableFuture.completedFuture(
-                        CacheStatusPB.newBuilder().setMultimodalCache(snapshot).build()));
+                .thenReturn(
+                        CompletableFuture.completedFuture(
+                                CacheStatusPB.newBuilder().setMultimodalCache(snapshot).build()));
         when(grpc.getMultimodalCacheStatusAsync(b.getIp(), 8001, request, 2000))
                 .thenReturn(CompletableFuture.completedFuture(CacheStatusPB.getDefaultInstance()));
         directory.refresh();
@@ -217,7 +238,10 @@ class VitCacheDirectoryTest {
         directory.refresh();
         var prune = VitCacheDirectory.class.getDeclaredMethod("prune", Map.class, long.class);
         prune.setAccessible(true);
-        prune.invoke(directory, live, System.currentTimeMillis() + 2 * VitCacheDirectory.SYNC_INTERVAL_MS + 1);
+        prune.invoke(
+                directory,
+                live,
+                System.currentTimeMillis() + 2 * VitCacheDirectory.SYNC_INTERVAL_MS + 1);
         directory.refresh();
         verify(grpc, times(2)).getMultimodalCacheStatusAsync(any(), eq(8001), any(), eq(2000L));
     }
@@ -236,45 +260,75 @@ class VitCacheDirectoryTest {
 
     @Test
     void grpcTransportAcceptsLargeDirectoryAndReusesClientChannel() throws Exception {
-        List<String> keys = IntStream.range(0, 100_000)
-                .mapToObj(i -> String.format("%064x", i)).toList();
-        var response = CacheStatusPB.newBuilder().setMultimodalCache(
-                MultimodalCacheStatusPB.newBuilder().setWorkerInstance("large-worker")
-                        .addAllKeys(keys).addAllGpuEmbeddingKeys(keys)).build();
+        List<String> keys =
+                IntStream.range(0, 100_000).mapToObj(i -> String.format("%064x", i)).toList();
+        var response =
+                CacheStatusPB.newBuilder()
+                        .setMultimodalCache(
+                                MultimodalCacheStatusPB.newBuilder()
+                                        .setWorkerInstance("large-worker")
+                                        .addAllKeys(keys)
+                                        .addAllGpuEmbeddingKeys(keys))
+                        .build();
         assertTrue(response.getSerializedSize() > 8 * 1024 * 1024);
         var received = new AtomicReference<CacheVersionPB>();
-        Server server = NettyServerBuilder.forPort(0)
-                .addService(new MultimodalRpcServiceGrpc.MultimodalRpcServiceImplBase() {
-                    @Override
-                    public void getCacheStatus(CacheVersionPB request, StreamObserver<CacheStatusPB> observer) {
-                        received.set(request);
-                        observer.onNext(response);
-                        observer.onCompleted();
-                    }
-                })
-                .addService(new RpcServiceGrpc.RpcServiceImplBase() {
-                    @Override
-                    public void getCacheStatus(CacheVersionPB request, StreamObserver<CacheStatusPB> observer) {
-                        observer.onNext(response);
-                        observer.onCompleted();
-                    }
-                }).build().start();
+        Server server =
+                NettyServerBuilder.forPort(0)
+                        .addService(
+                                new MultimodalRpcServiceGrpc.MultimodalRpcServiceImplBase() {
+                                    @Override
+                                    public void getCacheStatus(
+                                            CacheVersionPB request,
+                                            StreamObserver<CacheStatusPB> observer) {
+                                        received.set(request);
+                                        observer.onNext(response);
+                                        observer.onCompleted();
+                                    }
+                                })
+                        .addService(
+                                new RpcServiceGrpc.RpcServiceImplBase() {
+                                    @Override
+                                    public void getCacheStatus(
+                                            CacheVersionPB request,
+                                            StreamObserver<CacheStatusPB> observer) {
+                                        observer.onNext(response);
+                                        observer.onCompleted();
+                                    }
+                                })
+                        .build()
+                        .start();
         var executor = (ThreadPoolExecutor) Executors.newFixedThreadPool(2);
         var eventLoop = new NioEventLoopGroup(1);
-        var client = new EngineGrpcClient(mock(CustomNameResolver.class), executor, eventLoop,
-                mock(GrpcReporter.class), 1000, 5000);
+        var client =
+                new EngineGrpcClient(
+                        mock(CustomNameResolver.class),
+                        executor,
+                        eventLoop,
+                        mock(GrpcReporter.class),
+                        1000,
+                        5000);
         try {
             var request = CacheVersionPB.newBuilder().setNeedCacheKeys(true).build();
             for (int i = 0; i < 2; i++) {
-                var actual = client.getMultimodalCacheStatusAsync("127.0.0.1", server.getPort(), request, 5000).join();
+                var actual =
+                        client.getMultimodalCacheStatusAsync(
+                                        "127.0.0.1", server.getPort(), request, 5000)
+                                .join();
                 assertEquals(response, actual);
                 assertTrue(received.get().getNeedCacheKeys());
             }
-            CompletionException error = assertThrows(CompletionException.class,
-                    () -> client.getCacheStatusAsync("127.0.0.1", server.getPort(), request, 5000).join());
+            CompletionException error =
+                    assertThrows(
+                            CompletionException.class,
+                            () ->
+                                    client.getCacheStatusAsync(
+                                                    "127.0.0.1", server.getPort(), request, 5000)
+                                            .join());
             assertEquals(Status.Code.RESOURCE_EXHAUSTED, Status.fromThrowable(error).getCode());
             directory.replace(a, response.getMultimodalCache());
-            assertEquals(a.getIp(), selector.select(context(keys.get(keys.size() - 1)), null).getServerIp());
+            assertEquals(
+                    a.getIp(),
+                    selector.select(context(keys.get(keys.size() - 1)), null).getServerIp());
         } finally {
             client.shutdownChannelPool();
             server.shutdownNow().awaitTermination(5, TimeUnit.SECONDS);
@@ -306,9 +360,15 @@ class VitCacheDirectoryTest {
     void concurrentColdRequestsSharePlacementButNotConfirmedOwnership() throws Exception {
         var executor = Executors.newFixedThreadPool(8);
         try {
-            List<Future<String>> selections = IntStream.range(0, 64)
-                    .mapToObj(i -> executor.submit(() -> selector.select(context("cold"), null).getServerIp()))
-                    .toList();
+            List<Future<String>> selections =
+                    IntStream.range(0, 64)
+                            .mapToObj(
+                                    i ->
+                                            executor.submit(
+                                                    () ->
+                                                            selector.select(context("cold"), null)
+                                                                    .getServerIp()))
+                            .toList();
             String selected = selections.get(0).get();
             for (Future<String> selection : selections) {
                 assertEquals(selected, selection.get());
@@ -358,6 +418,7 @@ class VitCacheDirectoryTest {
         directory.refresh();
         verify(grpc, times(4)).getMultimodalCacheStatusAsync(any(), eq(8001), any(), eq(2000L));
     }
+
     @Test
     void selectionKeepsGenerationThroughCopyAndPin() throws Exception {
         snapshot(a, "epoch-a", "image");
@@ -365,10 +426,13 @@ class VitCacheDirectoryTest {
         var selected = selector.select(ctx, "one");
         var copied = org.flexlb.dao.loadbalance.ServerStatus.copyOf(selected);
         var mapper = new com.fasterxml.jackson.databind.ObjectMapper();
-        assertFalse(mapper.writeValueAsString(new org.flexlb.dao.loadbalance.ServerStatus())
-                .contains("worker_generation"));
-        copied = mapper.readValue(mapper.writeValueAsBytes(copied),
-                org.flexlb.dao.loadbalance.ServerStatus.class);
+        assertFalse(
+                mapper.writeValueAsString(new org.flexlb.dao.loadbalance.ServerStatus())
+                        .contains("worker_generation"));
+        copied =
+                mapper.readValue(
+                        mapper.writeValueAsBytes(copied),
+                        org.flexlb.dao.loadbalance.ServerStatus.class);
         assertEquals(a.getGenerationId(), copied.getWorkerGeneration());
         ctx.getRequest().setSelectedVit(copied);
         copied.setWorkerGeneration(0);
@@ -382,5 +446,4 @@ class VitCacheDirectoryTest {
         assertFalse(selector.validate(ctx, "one").isSuccess());
         org.junit.jupiter.api.Assertions.assertNull(selector.selectPinned(ctx, "one"));
     }
-
 }

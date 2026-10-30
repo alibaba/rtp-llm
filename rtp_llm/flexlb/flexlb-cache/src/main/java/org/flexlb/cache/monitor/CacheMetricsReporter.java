@@ -62,8 +62,7 @@ public class CacheMetricsReporter {
      */
     private static final long LONG_OBJECT_BYTES = 24;
 
-    @Autowired
-    private FlexMonitor monitor;
+    @Autowired private FlexMonitor monitor;
 
     @PostConstruct
     public void init() {
@@ -124,10 +123,10 @@ public class CacheMetricsReporter {
         // Calculate cache count and bytes
         long cacheBytes = calculateEngineCacheBytes(cacheCount);
 
-        FlexMetricTags tags = FlexMetricTags.of(
-                "engineIp", engineIp,
-                "role", role
-        );
+        FlexMetricTags tags =
+                FlexMetricTags.of(
+                        "engineIp", engineIp,
+                        "role", role);
 
         monitor.report(CACHE_ENGINE_LOCAL_COUNT, tags, cacheCount);
         monitor.report(CACHE_ENGINE_LOCAL_BYTES, tags, cacheBytes);
@@ -157,9 +156,7 @@ public class CacheMetricsReporter {
      */
     public void reportCacheHitMetrics(RoleType roleType, long hitTokens, double hitRatio) {
 
-        FlexMetricTags baseTags = FlexMetricTags.of(
-                "role", roleType.name()
-        );
+        FlexMetricTags baseTags = FlexMetricTags.of("role", roleType.name());
 
         // Report hit token count and hit percentage
         monitor.report(CACHE_HIT_COUNT, baseTags, hitTokens);
@@ -170,10 +167,10 @@ public class CacheMetricsReporter {
     /**
      * Report request-level routing cache-match token metrics for the selected worker pool.
      */
-    public void reportRoutingSelectedCacheMatchMetrics(RoleType roleType,
-                                                       long hitTokens,
-                                                       long totalTokens) {
-        reportRoutingCacheMatchMetrics(CACHE_ROUTING_SELECTED_MATCH_HIT_TOKENS,
+    public void reportRoutingSelectedCacheMatchMetrics(
+            RoleType roleType, long hitTokens, long totalTokens) {
+        reportRoutingCacheMatchMetrics(
+                CACHE_ROUTING_SELECTED_MATCH_HIT_TOKENS,
                 CACHE_ROUTING_SELECTED_MATCH_TOTAL_TOKENS,
                 roleType,
                 hitTokens,
@@ -187,44 +184,39 @@ public class CacheMetricsReporter {
      * {@link #reportRoutingSelectedCacheMatchMetrics(RoleType, long, long)}
      * for the same successfully selected request.</p>
      */
-    public void reportRoutingCandidateMaxCacheMatchMetrics(RoleType roleType,
-                                                           long hitTokens) {
+    public void reportRoutingCandidateMaxCacheMatchMetrics(RoleType roleType, long hitTokens) {
         if (roleType == null) {
             return;
         }
 
-        FlexMetricTags tags = FlexMetricTags.of(
-                "role", roleType.name()
-        );
+        FlexMetricTags tags = FlexMetricTags.of("role", roleType.name());
         monitor.report(CACHE_ROUTING_CANDIDATE_MAX_HIT_TOKENS, tags, hitTokens);
     }
 
     /** Report the outcome of a cache-affinity routing decision. */
-    public void reportCacheAffinityDecision(RoleType roleType,
-                                            String engineIp,
-                                            String decision) {
+    public void reportCacheAffinityDecision(RoleType roleType, String engineIp, String decision) {
         if (roleType == null || engineIp == null || decision == null) {
             return;
         }
-        FlexMetricTags tags = FlexMetricTags.of(
-                "role", roleType.name(),
-                "engineIp", engineIp,
-                "decision", decision);
+        FlexMetricTags tags =
+                FlexMetricTags.of(
+                        "role", roleType.name(),
+                        "engineIp", engineIp,
+                        "decision", decision);
         monitor.report(CACHE_AFFINITY_DECISION, tags, 1.0);
     }
 
-    private void reportRoutingCacheMatchMetrics(String hitMetric,
-                                                String totalMetric,
-                                                RoleType roleType,
-                                                long hitTokens,
-                                                long totalTokens) {
+    private void reportRoutingCacheMatchMetrics(
+            String hitMetric,
+            String totalMetric,
+            RoleType roleType,
+            long hitTokens,
+            long totalTokens) {
         if (roleType == null || totalTokens <= 0L) {
             return;
         }
 
-        FlexMetricTags tags = FlexMetricTags.of(
-                "role", roleType.name()
-        );
+        FlexMetricTags tags = FlexMetricTags.of("role", roleType.name());
 
         monitor.report(hitMetric, tags, hitTokens);
         monitor.report(totalMetric, tags, totalTokens);
@@ -233,16 +225,13 @@ public class CacheMetricsReporter {
     /**
      * Report token hits for the current request against the recent cache-key pool.
      */
-    public void reportRecentCacheKeyHitMetrics(long timeWindowMs,
-                                               long hitTokens,
-                                               long inputTokens) {
+    public void reportRecentCacheKeyHitMetrics(
+            long timeWindowMs, long hitTokens, long inputTokens) {
         if (inputTokens <= 0L) {
             return;
         }
 
-        FlexMetricTags tags = FlexMetricTags.of(
-                "timeWindowMs", String.valueOf(timeWindowMs)
-        );
+        FlexMetricTags tags = FlexMetricTags.of("timeWindowMs", String.valueOf(timeWindowMs));
 
         monitor.report(CACHE_RECENT_KEY_HIT_COUNT, tags, hitTokens);
         monitor.report(CACHE_RECENT_KEY_TOTAL_COUNT, tags, inputTokens);
@@ -255,20 +244,21 @@ public class CacheMetricsReporter {
         if (snapshot == null) {
             return;
         }
-        reportTheoryWindow("all", 0L,
+        reportTheoryWindow(
+                "all",
+                0L,
                 snapshot.getAllHitCount(),
                 snapshot.getAllTotalCount(),
                 snapshot.getAllHitRatio());
     }
 
-    private void reportTheoryWindow(String window, long windowMs, long hitCount, long totalCount, double hitRatio) {
+    private void reportTheoryWindow(
+            String window, long windowMs, long hitCount, long totalCount, double hitRatio) {
         if (totalCount <= 0L) {
             return;
         }
-        FlexMetricTags tags = FlexMetricTags.of(
-                "window", window,
-                "windowMs", String.valueOf(windowMs)
-        );
+        FlexMetricTags tags =
+                FlexMetricTags.of("window", window, "windowMs", String.valueOf(windowMs));
         monitor.report(CACHE_THEORY_HIT_COUNT, tags, hitCount);
         monitor.report(CACHE_THEORY_TOTAL_COUNT, tags, totalCount);
         monitor.report(CACHE_THEORY_HIT_RATIO, tags, hitRatio);
@@ -313,23 +303,30 @@ public class CacheMetricsReporter {
             return 0L;
         }
 
-        // ConcurrentHashMap base structure overhead (object header 12 + fields 44 = 56 bytes aligned)
+        // ConcurrentHashMap base structure overhead (object header 12 + fields 44 = 56 bytes
+        // aligned)
         long baseStructureSize = 56L;
 
-        // KeySetView instance overhead (object header 12 + reference field 8 + padding 4 = 24 bytes)
+        // KeySetView instance overhead (object header 12 + reference field 8 + padding 4 = 24
+        // bytes)
         long keySetViewOverhead = 24L;
 
         // table array overhead (capacity calculated based on 75% load factor)
         int initialCapacity = Math.max(16, (cacheCount * 4 + 3) / 3);
-        long tableArraySize = alignTo8Bytes(16L + initialCapacity * 4L); // Reference is 4 bytes with compressed oops
+        long tableArraySize =
+                alignTo8Bytes(
+                        16L + initialCapacity * 4L); // Reference is 4 bytes with compressed oops
 
-        // Each ConcurrentHashMap.Node overhead (object header 12 + 4 fields 16 + padding 4 = 32 bytes)
+        // Each ConcurrentHashMap.Node overhead (object header 12 + 4 fields 16 + padding 4 = 32
+        // bytes)
         long nodeSize = 32L;
 
         // Boolean.TRUE not counted
 
-        return baseStructureSize + keySetViewOverhead + tableArraySize +
-                cacheCount * (nodeSize + LONG_OBJECT_BYTES);
+        return baseStructureSize
+                + keySetViewOverhead
+                + tableArraySize
+                + cacheCount * (nodeSize + LONG_OBJECT_BYTES);
     }
 
     /**
@@ -346,14 +343,17 @@ public class CacheMetricsReporter {
             return 0L;
         }
 
-        // ConcurrentHashMap base structure overhead (object header 12 + fields 44 = 56 bytes aligned)
+        // ConcurrentHashMap base structure overhead (object header 12 + fields 44 = 56 bytes
+        // aligned)
         long chmBaseSize = 56L;
 
-        // table array overhead (capacity calculated based on 75% load factor, reference is 4 bytes with compressed oops)
+        // table array overhead (capacity calculated based on 75% load factor, reference is 4 bytes
+        // with compressed oops)
         int initialCapacity = Math.max(16, (int) Math.ceil(totalBlocks / 0.75));
         long tableArraySize = alignTo8Bytes(16L + initialCapacity * 4L);
 
-        // Each ConcurrentHashMap.Node overhead (object header 12 + 4 fields 16 + padding 4 = 32 bytes)
+        // Each ConcurrentHashMap.Node overhead (object header 12 + 4 fields 16 + padding 4 = 32
+        // bytes)
         long nodeSize = 32L;
 
         // Each Set<String> overhead (ConcurrentHashMap.KeySetView)
@@ -364,11 +364,13 @@ public class CacheMetricsReporter {
         // Assume average IP:Port length is 15 characters (e.g., "192.168.1.1:8080")
         long stringSize = getStringObjectSize();
 
-        // Total bytes = base structure + array + all nodes + all keys + all value sets + all strings
-        return chmBaseSize + tableArraySize +
-                totalBlocks * (nodeSize + LONG_OBJECT_BYTES) +
-                totalBlocks * (setWrapperSize + setStructureSize) +
-                totalMappings * stringSize;
+        // Total bytes = base structure + array + all nodes + all keys + all value sets + all
+        // strings
+        return chmBaseSize
+                + tableArraySize
+                + totalBlocks * (nodeSize + LONG_OBJECT_BYTES)
+                + totalBlocks * (setWrapperSize + setStructureSize)
+                + totalMappings * stringSize;
     }
 
     /**
@@ -379,12 +381,12 @@ public class CacheMetricsReporter {
      * @param success   Whether successful
      */
     public void reportFindMatchingEnginesRT(RoleType roleType, long startTime, String success) {
-        FlexMetricTags tags = FlexMetricTags.of(
-                "role", roleType.name(),
-                "success", success
-        );
+        FlexMetricTags tags = FlexMetricTags.of("role", roleType.name(), "success", success);
 
-        monitor.report(CACHE_FIND_MATCHING_ENGINES_RT, tags, ((double) System.nanoTime() / 1000) - startTime);
+        monitor.report(
+                CACHE_FIND_MATCHING_ENGINES_RT,
+                tags,
+                ((double) System.nanoTime() / 1000) - startTime);
     }
 
     /**
@@ -395,12 +397,15 @@ public class CacheMetricsReporter {
      * @param success      Whether successful
      */
     public void reportUpdateEngineBlockCacheRT(String role, long startTime, String success) {
-        FlexMetricTags tags = FlexMetricTags.of(
-                "role", role,
-                "success", success
-        );
+        FlexMetricTags tags =
+                FlexMetricTags.of(
+                        "role", role,
+                        "success", success);
 
-        monitor.report(CACHE_UPDATE_ENGINE_BLOCK_CACHE_RT, tags, ((double) System.nanoTime() / 1000) - startTime);
+        monitor.report(
+                CACHE_UPDATE_ENGINE_BLOCK_CACHE_RT,
+                tags,
+                ((double) System.nanoTime() / 1000) - startTime);
     }
 
     /**
@@ -411,9 +416,7 @@ public class CacheMetricsReporter {
      * @param removedBlocksSize Number of removed blocks
      */
     public void reportCacheDiffMetrics(String role, int addedBlocksSize, int removedBlocksSize) {
-        FlexMetricTags tags = FlexMetricTags.of(
-                "role", role != null ? role : "unknown"
-        );
+        FlexMetricTags tags = FlexMetricTags.of("role", role != null ? role : "unknown");
 
         monitor.report(CACHE_DIFF_ADDED_BLOCKS_SIZE, tags, addedBlocksSize);
         monitor.report(CACHE_DIFF_REMOVED_BLOCKS_SIZE, tags, removedBlocksSize);

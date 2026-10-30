@@ -1042,8 +1042,10 @@ public:
     int64_t load_ref_blocks                   = 0;
     int64_t eviction_target_ref_blocks        = 0;
     int64_t store_ref_blocks                  = 0;
+    int64_t frozen_ref_blocks                 = 0;
     float   used_ratio                        = 0;
     bool    report_eviction_target_ref_blocks = false;
+    bool    report_frozen_ref_blocks          = false;
 
     std::optional<int64_t> read_bytes;
     std::optional<int64_t> write_bytes;
@@ -1071,6 +1073,7 @@ public:
     // Compatibility alias retained while dashboards migrate to the clarified name.
     kmonitor::MutableMetric* eviction_ref_blocks_compat_metric = nullptr;
     kmonitor::MutableMetric* store_ref_blocks_metric           = nullptr;
+    kmonitor::MutableMetric* frozen_ref_blocks_metric          = nullptr;
     kmonitor::MutableMetric* used_ratio_metric                 = nullptr;
 
     kmonitor::MutableMetric* read_bytes_metric                    = nullptr;
@@ -1148,7 +1151,6 @@ private:
 class RtpLLMCacheEvictionMetricsCollector final {
 public:
     std::string source_tier;
-    std::string target_tier;
     std::string group_type;
     std::string trigger_type;
     int64_t     evictable_candidate_count = 0;
@@ -1161,7 +1163,6 @@ public:
     bool        report_eviction_trigger   = false;
     bool        report_eviction_blocks    = false;
     bool        report_eviction           = false;
-    bool        report_block_idletime     = false;
 };
 
 class RtpLLMCacheEvictionMetrics: public kmonitor::MetricsGroup {
@@ -1208,10 +1209,8 @@ public:
     int64_t stream_cache_disk_reuse_length   = 0;
     int64_t stream_cache_remote_reuse_length = 0;
 
-    int64_t reuse_interval_avg_ms = 0;
-    int64_t reuse_interval_max_ms = 0;
-    int64_t hit_entry_age_avg_ms  = 0;
-    int64_t hit_entry_age_max_ms  = 0;
+    std::optional<double> reuse_block_first_hit_idletime_ms;
+    double                reuse_block_hit_idletime_ms = 0;
 
     int64_t match_cost_time_us            = 0;
     int64_t load_prepare_latency_us       = 0;
@@ -1329,6 +1328,37 @@ private:
     AUTIL_LOG_DECLARE();
 };
 
+class RtpLLMRemoteCacheQuarantineMetricsCollector final {
+public:
+    int64_t quarantined_lease_count = 0;
+    int64_t quarantined_block_count = 0;
+    double  quarantined_block_ratio = 0.0;
+};
+
+class RtpLLMRemoteCacheQuarantineEventMetricsCollector final {
+public:
+    const char* op          = "";
+    const char* reason      = "";
+    int64_t     block_count = 0;
+};
+
+class RtpLLMRemoteCacheQuarantineMetrics: public kmonitor::MetricsGroup {
+public:
+    bool init(kmonitor::MetricsGroupManager* manager) override;
+    void report(const kmonitor::MetricsTags* tags, RtpLLMRemoteCacheQuarantineMetricsCollector* collector);
+    void report(const kmonitor::MetricsTags* tags, RtpLLMRemoteCacheQuarantineEventMetricsCollector* collector);
+
+public:
+    kmonitor::MutableMetric* quarantined_lease_count_metric = nullptr;
+    kmonitor::MutableMetric* quarantined_block_count_metric = nullptr;
+    kmonitor::MutableMetric* quarantined_block_ratio_metric = nullptr;
+    kmonitor::MutableMetric* quarantine_qps_metric          = nullptr;
+    kmonitor::MutableMetric* quarantine_block_qps_metric    = nullptr;
+
+private:
+    AUTIL_LOG_DECLARE();
+};
+
 class RtpLLMCacheReuseMetrics: public kmonitor::MetricsGroup {
 public:
     bool init(kmonitor::MetricsGroupManager* manager) override;
@@ -1341,10 +1371,8 @@ public:
     kmonitor::MutableMetric* stream_cache_memory_reuse_length_metric = nullptr;
     kmonitor::MutableMetric* stream_cache_disk_reuse_length_metric   = nullptr;
     kmonitor::MutableMetric* stream_cache_remote_reuse_length_metric = nullptr;
-    kmonitor::MutableMetric* reuse_interval_avg_ms_metric            = nullptr;
-    kmonitor::MutableMetric* reuse_interval_max_ms_metric            = nullptr;
-    kmonitor::MutableMetric* hit_entry_age_avg_ms_metric             = nullptr;
-    kmonitor::MutableMetric* hit_entry_age_max_ms_metric             = nullptr;
+    kmonitor::MutableMetric* reuse_block_first_hit_idletime_ms_metric = nullptr;
+    kmonitor::MutableMetric* reuse_block_hit_idletime_ms_metric       = nullptr;
     kmonitor::MutableMetric* match_cost_time_us_metric               = nullptr;
     kmonitor::MutableMetric* load_qps_metric                         = nullptr;
     kmonitor::MutableMetric* load_fail_qps_metric                    = nullptr;

@@ -23,9 +23,9 @@ export PATH="/opt/homebrew/bin:${PATH}"
 # ---------------------------------------------------------------------------
 DEFAULT_SPEEDS=(10 20 50)
 if [[ -n "${STABILITY_SPEEDS:-}" ]]; then
-  read -r -a SPEEDS <<< "${STABILITY_SPEEDS}"
+    read -r -a SPEEDS <<<"${STABILITY_SPEEDS}"
 else
-  SPEEDS=("${DEFAULT_SPEEDS[@]}")
+    SPEEDS=("${DEFAULT_SPEEDS[@]}")
 fi
 
 N_PREFILL="${N_PREFILL:-2}"
@@ -95,64 +95,64 @@ echo ""
 # 主循环: 每个压力级别一轮
 # ---------------------------------------------------------------------------
 for speed in "${SPEEDS[@]}"; do
-  ROUND_ID="stability_${speed}x_$(date +%Y%m%d_%H%M%S)"
-  ROUND_DIR="${RUN_ROOT}/${ROUND_ID}"
-  mkdir -p "${ROUND_DIR}"
-  ROUND_DIRS+=("${ROUND_DIR}")
+    ROUND_ID="stability_${speed}x_$(date +%Y%m%d_%H%M%S)"
+    ROUND_DIR="${RUN_ROOT}/${ROUND_ID}"
+    mkdir -p "${ROUND_DIR}"
+    ROUND_DIRS+=("${ROUND_DIR}")
 
-  echo ">>> 第 ${speed}x 轮开始 (输出: ${ROUND_DIR})"
+    echo ">>> 第 ${speed}x 轮开始 (输出: ${ROUND_DIR})"
 
-  # 1. 后台启动监控采集器
-  python3 "${SCRIPT_DIR}/stability_monitor.py" \
-    --flexlb-http-addr "${FLEXLB_HTTP_ADDR}" \
-    --management-port "${FLEXLB_MANAGEMENT_PORT}" \
-    --mock-http-port "${MOCK_HTTP_PORT}" \
-    --interval "${MONITOR_INTERVAL}" \
-    --output "${ROUND_DIR}/monitor.jsonl" &
-  MONITOR_PID=$!
-  echo "    监控进程 PID=${MONITOR_PID}, 输出: ${ROUND_DIR}/monitor.jsonl"
+    # 1. 后台启动监控采集器
+    python3 "${SCRIPT_DIR}/stability_monitor.py" \
+        --flexlb-http-addr "${FLEXLB_HTTP_ADDR}" \
+        --management-port "${FLEXLB_MANAGEMENT_PORT}" \
+        --mock-http-port "${MOCK_HTTP_PORT}" \
+        --interval "${MONITOR_INTERVAL}" \
+        --output "${ROUND_DIR}/monitor.jsonl" &
+    MONITOR_PID=$!
+    echo "    监控进程 PID=${MONITOR_PID}, 输出: ${ROUND_DIR}/monitor.jsonl"
 
-  # 2. 通过 JAVA_TOOL_OPTIONS 注入 GC 日志 + HeapDump (零文件修改)
-  #    JVM 自动拾取此环境变量
-  export JAVA_TOOL_OPTIONS="-Xlog:gc*:${ROUND_DIR}/gc.log:time,uptime,level,tags:filecount=1,filesize=50m -XX:+HeapDumpOnOutOfMemoryError -XX:HeapDumpPath=${ROUND_DIR}/"
+    # 2. 通过 JAVA_TOOL_OPTIONS 注入 GC 日志 + HeapDump (零文件修改)
+    #    JVM 自动拾取此环境变量
+    export JAVA_TOOL_OPTIONS="-Xlog:gc*:${ROUND_DIR}/gc.log:time,uptime,level,tags:filecount=1,filesize=50m -XX:+HeapDumpOnOutOfMemoryError -XX:HeapDumpPath=${ROUND_DIR}/"
 
-  # 3. 调用 run_online_eval.sh (环境变量驱动，零修改)
-  echo "    启动 run_online_eval.sh (REPLAY_SPEED=${speed})..."
-  set +e
-  env \
-    REPLAY_SPEED="${speed}" \
-    RUN_ROOT="${RUN_ROOT}" \
-    RUN_ID="${ROUND_ID}" \
-    N_PREFILL="${N_PREFILL}" \
-    N_DECODE="${N_DECODE}" \
-    MAX_CONCURRENCY="${MAX_CONCURRENCY}" \
-    SLA_TTFT_MS="${SLA_TTFT_MS}" \
-    LIMIT="${LIMIT}" \
-    ZERO_OUTPUT_POLICY="${ZERO_OUTPUT_POLICY}" \
-    JAVA_TOOL_OPTIONS="${JAVA_TOOL_OPTIONS}" \
-    bash "${SCRIPT_DIR}/run_online_eval.sh" 2>&1 | tee "${ROUND_DIR}/eval.stdout"
-  EVAL_EXIT=$?
-  set -e
+    # 3. 调用 run_online_eval.sh (环境变量驱动，零修改)
+    echo "    启动 run_online_eval.sh (REPLAY_SPEED=${speed})..."
+    set +e
+    env \
+        REPLAY_SPEED="${speed}" \
+        RUN_ROOT="${RUN_ROOT}" \
+        RUN_ID="${ROUND_ID}" \
+        N_PREFILL="${N_PREFILL}" \
+        N_DECODE="${N_DECODE}" \
+        MAX_CONCURRENCY="${MAX_CONCURRENCY}" \
+        SLA_TTFT_MS="${SLA_TTFT_MS}" \
+        LIMIT="${LIMIT}" \
+        ZERO_OUTPUT_POLICY="${ZERO_OUTPUT_POLICY}" \
+        JAVA_TOOL_OPTIONS="${JAVA_TOOL_OPTIONS}" \
+        bash "${SCRIPT_DIR}/run_online_eval.sh" 2>&1 | tee "${ROUND_DIR}/eval.stdout"
+    EVAL_EXIT=$?
+    set -e
 
-  if [[ ${EVAL_EXIT} -ne 0 ]]; then
-    echo "    WARNING: run_online_eval.sh 退出码 ${EVAL_EXIT} (可能 Master 崩溃)"
-  fi
+    if [[ ${EVAL_EXIT} -ne 0 ]]; then
+        echo "    WARNING: run_online_eval.sh 退出码 ${EVAL_EXIT} (可能 Master 崩溃)"
+    fi
 
-  # 4. 停止监控采集器
-  kill "${MONITOR_PID}" 2>/dev/null || true
-  wait "${MONITOR_PID}" 2>/dev/null || true
+    # 4. 停止监控采集器
+    kill "${MONITOR_PID}" 2>/dev/null || true
+    wait "${MONITOR_PID}" 2>/dev/null || true
 
-  # 清除 JAVA_TOOL_OPTIONS 避免影响后续操作
-  unset JAVA_TOOL_OPTIONS
+    # 清除 JAVA_TOOL_OPTIONS 避免影响后续操作
+    unset JAVA_TOOL_OPTIONS
 
-  echo "<<< 第 ${speed}x 轮完成"
-  echo ""
+    echo "<<< 第 ${speed}x 轮完成"
+    echo ""
 
-  # 5. 轮间 sleep 确保端口释放
-  if [[ "${speed}" != "${SPEEDS[-1]}" ]]; then
-    echo "    等待 3s 确保端口释放..."
-    sleep 3
-  fi
+    # 5. 轮间 sleep 确保端口释放
+    if [[ "${speed}" != "${SPEEDS[-1]}" ]]; then
+        echo "    等待 3s 确保端口释放..."
+        sleep 3
+    fi
 done
 
 # ---------------------------------------------------------------------------
@@ -165,9 +165,9 @@ echo "============================================"
 REPORT_PATH="${STABILITY_DIR}/stability_report.md"
 
 python3 "${SCRIPT_DIR}/generate_stability_report.py" \
-  --run-dirs "${ROUND_DIRS[@]}" \
-  --sla-ttft-ms "${SLA_TTFT_MS}" \
-  --output "${REPORT_PATH}"
+    --run-dirs "${ROUND_DIRS[@]}" \
+    --sla-ttft-ms "${SLA_TTFT_MS}" \
+    --output "${REPORT_PATH}"
 
 echo ""
 echo "============================================"
@@ -177,11 +177,11 @@ echo "报告: ${REPORT_PATH}"
 echo ""
 echo "各轮输出:"
 for dir in "${ROUND_DIRS[@]}"; do
-  echo "  - ${dir}/"
-  echo "      summary: ${dir}/load_client/summary.json"
-  echo "      monitor: ${dir}/monitor.jsonl"
-  echo "      gc log:  ${dir}/gc.log"
-  echo "      flexlb:  ${dir}/flexlb.log"
+    echo "  - ${dir}/"
+    echo "      summary: ${dir}/load_client/summary.json"
+    echo "      monitor: ${dir}/monitor.jsonl"
+    echo "      gc log:  ${dir}/gc.log"
+    echo "      flexlb:  ${dir}/flexlb.log"
 done
 echo ""
 echo "查看报告: cat ${REPORT_PATH}"

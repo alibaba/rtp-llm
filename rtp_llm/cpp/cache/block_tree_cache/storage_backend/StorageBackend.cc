@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <mutex>
 #include <exception>
+#include <optional>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -216,11 +217,53 @@ void StorageBackend::shutdown() {
         lifecycle_ = Lifecycle::FINALIZING;
     }
     shutdownImpl();
+    uint64_t quarantine_generation;
+    {
+        std::lock_guard<std::mutex> lock(quarantine_mutex_);
+        quarantined_task_count_ = 0;
+        quarantine_generation   = ++quarantine_generation_;
+    }
+    onQuarantineChanged(quarantine_generation, /*task_count=*/0, /*block_count=*/0);
+    // FROZEN references remain until the block pools are destroyed.
     {
         std::lock_guard<std::mutex> lock(lifecycle_mutex_);
         lifecycle_ = Lifecycle::STOPPED;
     }
     lifecycle_cv_.notify_all();
+}
+
+void StorageBackend::quarantineTask(const std::shared_ptr<storage_backend_detail::StorageTaskState>& state,
+                                    bool                                                             is_write,
+                                    StorageQuarantineReason                                          reason) {
+    if (!state) {
+        return;
+    }
+    const size_t pinned_block_count = state->pins.size();
+    for (const auto& pin : state->pins) {
+        pin.pool->freezeBlock(pin.block);
+    }
+    state->finish();
+    size_t   task_count;
+    size_t   block_count;
+    uint64_t generation;
+    {
+        std::lock_guard<std::mutex> lock(quarantine_mutex_);
+        task_count  = ++quarantined_task_count_;
+        block_count = 0;
+        // init() guarantees distinct pools. Count physical frozen capacity,
+        // including blocks shared by multiple quarantined operations, only once.
+        for (const auto& [tag, pool] : pools_by_tag_) {
+            block_count += pool->referencedBlocksNum(BlockTreeRefType::FROZEN);
+        }
+        generation = ++quarantine_generation_;
+    }
+    RTP_LLM_LOG_WARNING("quarantine storage request after transfer completion became unknown: tasks=%zu blocks=%zu",
+                        task_count,
+                        block_count);
+    // Count each operation even if its state snapshot is superseded, and before
+    // onQuarantineChanged may abort due to the configured capacity limit.
+    onQuarantined(is_write, reason, pinned_block_count);
+    onQuarantineChanged(generation, task_count, block_count);
 }
 
 std::shared_ptr<storage_backend_detail::StorageTaskState> StorageBackend::prepare(StorageRequest request) {
@@ -308,15 +351,32 @@ void StorageBackend::read(StorageRequest request, std::shared_ptr<StorageBackend
     auto state = prepare(std::move(request));
     dispatch([this, state = std::move(state), match_meta = std::move(match_meta), done = std::move(done)](
                  Lifecycle outcome) mutable {
-        bool success = outcome == Lifecycle::ACCEPTING;
-        if (success) {
+        ErrorInfo                              error = outcome == Lifecycle::ACCEPTING ?
+                                                           ErrorInfo::OkStatus() :
+                                                           ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "storage backend is not accepting reads");
+        std::optional<StorageQuarantineReason> quarantine_reason;
+        if (error.ok()) {
             try {
                 readImpl(state->request, match_meta);
-            } catch (...) { success = false; }
+            } catch (const StorageOperationTimeout& exception) {
+                error             = ErrorInfo(ErrorCode::DEADLINE_EXCEEDED, exception.what());
+                quarantine_reason = exception.reason();
+            } catch (const StorageOperationCompletionUnknown& exception) {
+                error             = ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, exception.what());
+                quarantine_reason = exception.reason();
+            } catch (const std::exception& exception) {
+                error = ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, exception.what());
+            } catch (...) {
+                error = ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "unknown storage read failure");
+            }
         }
-        state->finish();
+        if (quarantine_reason) {
+            quarantineTask(state, /*is_write=*/false, *quarantine_reason);
+        } else {
+            state->finish();
+        }
         if (done) {
-            done(success);
+            done(std::move(error));
         }
     });
 }
@@ -334,12 +394,28 @@ bool StorageBackend::write(StorageWriteTask task) {
     RTP_LLM_CHECK(task.state_ != nullptr);
     auto state = std::move(task.state_);
     return dispatch([this, state](Lifecycle outcome) {
+        std::optional<StorageQuarantineReason> quarantine_reason;
         if (outcome == Lifecycle::ACCEPTING) {
             try {
                 writeImpl(state->request);
-            } catch (...) {}
+            } catch (const StorageOperationTimeout& error) {
+                quarantine_reason = error.reason();
+                RTP_LLM_LOG_WARNING("StorageBackend write timed out; quarantining request pins: %s", error.what());
+            } catch (const StorageOperationCompletionUnknown& error) {
+                quarantine_reason = error.reason();
+                RTP_LLM_LOG_WARNING("StorageBackend write completion is unknown; quarantining request pins: %s",
+                                    error.what());
+            } catch (const std::exception& error) {
+                RTP_LLM_LOG_ERROR("StorageBackend write failed: %s", error.what());
+            } catch (...) {
+                RTP_LLM_LOG_ERROR("StorageBackend write failed with an unknown exception");
+            }
         }
-        state->finish();
+        if (quarantine_reason) {
+            quarantineTask(state, /*is_write=*/true, *quarantine_reason);
+        } else {
+            state->finish();
+        }
     });
 }
 

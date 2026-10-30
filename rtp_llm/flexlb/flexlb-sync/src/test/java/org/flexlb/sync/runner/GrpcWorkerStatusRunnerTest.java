@@ -38,28 +38,39 @@ class GrpcWorkerStatusRunnerTest {
     void repeatedRpcFailuresRetireWorkerAndOnlyClearDetailedCacheIndexes(
             RoleType role, boolean needsCacheKeys) {
         ConfigService config = mock(ConfigService.class);
-        when(config.loadBalanceConfig()).thenReturn(
-                org.flexlb.balance.scheduler.SchedulingTestConfig.newConfig());
+        when(config.loadBalanceConfig())
+                .thenReturn(org.flexlb.balance.scheduler.SchedulingTestConfig.newConfig());
         EndpointRegistry registry = RunnerTestSupport.endpointRegistry(config);
-        WorkerStatus status = RunnerTestSupport.discovered(
-                role, null, "127.0.0.1", 8080, 8081, "test-site");
+        WorkerStatus status =
+                RunnerTestSupport.discovered(role, null, "127.0.0.1", 8080, 8081, "test-site");
         WorkerDirectory directory = directory(registry, status);
-        WorkerEndpoint endpoint = RunnerTestSupport.publishEndpoint(
-                registry, role, status.getIpPort(), status);
+        WorkerEndpoint endpoint =
+                RunnerTestSupport.publishEndpoint(registry, role, status.getIpPort(), status);
         CacheAwareService cache = mock(CacheAwareService.class);
         EngineGrpcService grpc = mock(EngineGrpcService.class);
-        when(grpc.getWorkerStatusAsync(
-                anyString(), anyInt(), anyLong(), anyLong(), any()))
-                .thenReturn(CompletableFuture.failedFuture(
-                        io.grpc.Status.UNAVAILABLE.asRuntimeException()));
+        when(grpc.getWorkerStatusAsync(anyString(), anyInt(), anyLong(), anyLong(), any()))
+                .thenReturn(
+                        CompletableFuture.failedFuture(
+                                io.grpc.Status.UNAVAILABLE.asRuntimeException()));
 
         for (int failure = 1; failure <= 3; failure++) {
             WorkerStatus.PollLease lease = status.tryBeginStatusPoll();
             assertNotNull(lease);
             new GrpcWorkerStatusRunner(
-                    "test-model", status.getIpPort(), "test-site", role, null,
-                    status, lease, directory, mock(EngineHealthReporter.class),
-                    grpc, 5_000L, cache, Runnable::run).run();
+                            "test-model",
+                            status.getIpPort(),
+                            "test-site",
+                            role,
+                            null,
+                            status,
+                            lease,
+                            directory,
+                            mock(EngineHealthReporter.class),
+                            grpc,
+                            5_000L,
+                            cache,
+                            Runnable::run)
+                    .run();
             if (failure < 3) {
                 assertSame(status, directory.statusSnapshot(role).get(status.getIpPort()));
                 assertSame(endpoint, registry.get(role, status.getIpPort()));
@@ -80,9 +91,9 @@ class GrpcWorkerStatusRunnerTest {
     @Test
     void newGenerationProjectionRunsOutsideWorkerStatusLock() {
         String ipPort = "127.0.0.1:8080";
-        WorkerStatus status = RunnerTestSupport.discovered(
-                RoleType.DECODE, null, "127.0.0.1",
-                8080, 8081, "test-site");
+        WorkerStatus status =
+                RunnerTestSupport.discovered(
+                        RoleType.DECODE, null, "127.0.0.1", 8080, 8081, "test-site");
         WorkerStatus.PollLease pollLease = status.tryBeginStatusPoll();
         assertNotNull(pollLease);
 
@@ -92,106 +103,119 @@ class GrpcWorkerStatusRunnerTest {
         EndpointRegistry registry = mock(EndpointRegistry.class);
         WorkerDirectory directory = directory(registry, status);
         when(registry.publishPreparedEndpoint(
-                org.mockito.Mockito.eq(ipPort),
-                org.mockito.Mockito.eq(status),
-                any(WorkerStatus.PreparedStatus.class)))
-                .thenAnswer(invocation -> {
-                    publicationHeldLock.set(
-                            status.lock.isHeldByCurrentThread());
-                    status.publishPreparedStatus(invocation.getArgument(2));
-                    return new EndpointRegistry.EndpointPublication(
-                            endpoint,
-                            () -> projectionReleasedLock.set(
-                                    !status.lock.isHeldByCurrentThread()));
-                });
+                        org.mockito.Mockito.eq(ipPort),
+                        org.mockito.Mockito.eq(status),
+                        any(WorkerStatus.PreparedStatus.class)))
+                .thenAnswer(
+                        invocation -> {
+                            publicationHeldLock.set(status.lock.isHeldByCurrentThread());
+                            status.publishPreparedStatus(invocation.getArgument(2));
+                            return new EndpointRegistry.EndpointPublication(
+                                    endpoint,
+                                    () ->
+                                            projectionReleasedLock.set(
+                                                    !status.lock.isHeldByCurrentThread()));
+                        });
 
         EngineRpcService.WorkerStatusPB response =
                 EngineRpcService.WorkerStatusPB.newBuilder()
                         .setRole(RoleType.DECODE.getCode())
-                        .setRoleType(
-                                EngineRpcService.RoleTypePB.ROLE_TYPE_DECODE)
+                        .setRoleType(EngineRpcService.RoleTypePB.ROLE_TYPE_DECODE)
                         .setStatusVersion(1L)
                         .setAlive(true)
                         .build();
         EngineGrpcService grpc = mock(EngineGrpcService.class);
-        when(grpc.getWorkerStatusAsync(
-                anyString(), anyInt(), anyLong(), anyLong(), any()))
+        when(grpc.getWorkerStatusAsync(anyString(), anyInt(), anyLong(), anyLong(), any()))
                 .thenReturn(CompletableFuture.completedFuture(response));
 
         new GrpcWorkerStatusRunner(
-                "test-model", ipPort, "test-site", RoleType.DECODE, null,
-                status, pollLease, directory,
-                mock(EngineHealthReporter.class), grpc, 5_000L,
-                mock(CacheAwareService.class), Runnable::run)
+                        "test-model",
+                        ipPort,
+                        "test-site",
+                        RoleType.DECODE,
+                        null,
+                        status,
+                        pollLease,
+                        directory,
+                        mock(EngineHealthReporter.class),
+                        grpc,
+                        5_000L,
+                        mock(CacheAwareService.class),
+                        Runnable::run)
                 .run();
 
-        assertTrue(publicationHeldLock.get(),
-                "publication must commit under the generation lock");
-        assertTrue(projectionReleasedLock.get(),
+        assertTrue(publicationHeldLock.get(), "publication must commit under the generation lock");
+        assertTrue(
+                projectionReleasedLock.get(),
                 "endpoint facts must project after releasing that lock");
     }
 
     @Test
     void sameVersionResponseProjectsExactEndpointActivity() {
         String ipPort = "127.0.0.1:8080";
-        WorkerStatus status = RunnerTestSupport.alive(
-                RoleType.DECODE, null, "127.0.0.1",
-                8080, 8081, "test-site");
+        WorkerStatus status =
+                RunnerTestSupport.alive(
+                        RoleType.DECODE, null, "127.0.0.1", 8080, 8081, "test-site");
         WorkerStatus.PollLease pollLease = status.tryBeginStatusPoll();
         assertNotNull(pollLease);
 
         WorkerEndpoint endpoint = mock(WorkerEndpoint.class);
         EndpointRegistry registry = mock(EndpointRegistry.class);
         WorkerDirectory directory = directory(registry, status);
-        when(registry.get(RoleType.DECODE, ipPort, status))
-                .thenReturn(endpoint);
+        when(registry.get(RoleType.DECODE, ipPort, status)).thenReturn(endpoint);
         java.util.concurrent.atomic.AtomicBoolean projected =
                 new java.util.concurrent.atomic.AtomicBoolean();
         Runnable activity = () -> projected.set(true);
-        when(endpoint.observeStatusHeartbeat(any(), any()))
-                .thenReturn(activity);
+        when(endpoint.observeStatusHeartbeat(any(), any())).thenReturn(activity);
 
-        EngineRpcService.TaskInfoPB task = EngineRpcService.TaskInfoPB.newBuilder()
-                .setRequestId(123L)
-                .setPhase(EngineRpcService.TaskPhase.TASK_PHASE_RUNNING)
-                .build();
+        EngineRpcService.TaskInfoPB task =
+                EngineRpcService.TaskInfoPB.newBuilder()
+                        .setRequestId(123L)
+                        .setPhase(EngineRpcService.TaskPhase.TASK_PHASE_RUNNING)
+                        .build();
         EngineRpcService.WorkerStatusPB response =
                 EngineRpcService.WorkerStatusPB.newBuilder()
                         .setRole(RoleType.DECODE.getCode())
                         .setRoleType(EngineRpcService.RoleTypePB.ROLE_TYPE_DECODE)
-                        .setStatusVersion(
-                                status.appliedStatusCursor().statusVersion())
+                        .setStatusVersion(status.appliedStatusCursor().statusVersion())
                         .setAlive(true)
                         .addRunningTaskInfo(task)
                         .build();
         EngineGrpcService grpc = mock(EngineGrpcService.class);
-        when(grpc.getWorkerStatusAsync(
-                anyString(), anyInt(), anyLong(), anyLong(), any()))
+        when(grpc.getWorkerStatusAsync(anyString(), anyInt(), anyLong(), anyLong(), any()))
                 .thenReturn(CompletableFuture.completedFuture(response));
         new GrpcWorkerStatusRunner(
-                "test-model", ipPort, "test-site", RoleType.DECODE, null,
-                status, pollLease, directory,
-                mock(EngineHealthReporter.class), grpc, 5_000L,
-                mock(CacheAwareService.class), Runnable::run)
+                        "test-model",
+                        ipPort,
+                        "test-site",
+                        RoleType.DECODE,
+                        null,
+                        status,
+                        pollLease,
+                        directory,
+                        mock(EngineHealthReporter.class),
+                        grpc,
+                        5_000L,
+                        mock(CacheAwareService.class),
+                        Runnable::run)
                 .run();
 
         ArgumentCaptor<WorkerStatus.StatusObservation> observation =
                 ArgumentCaptor.forClass(WorkerStatus.StatusObservation.class);
-        verify(endpoint).observeStatusHeartbeat(
-                org.mockito.Mockito.eq(status), observation.capture());
-        assertTrue(observation.getValue().runningTasks().values().stream()
-                .anyMatch(active -> active.requestId() == 123L));
+        verify(endpoint)
+                .observeStatusHeartbeat(org.mockito.Mockito.eq(status), observation.capture());
+        assertTrue(
+                observation.getValue().runningTasks().values().stream()
+                        .anyMatch(active -> active.requestId() == 123L));
         assertTrue(projected.get());
         WorkerStatus.PollLease nextPoll = status.tryBeginStatusPoll();
         assertNotNull(nextPoll, "the asynchronous owner must close the exact poll lease");
         nextPoll.close();
     }
 
-    private static WorkerDirectory directory(
-            EndpointRegistry registry, WorkerStatus status) {
+    private static WorkerDirectory directory(EndpointRegistry registry, WorkerStatus status) {
         WorkerDirectory directory = new WorkerDirectory(registry);
-        directory.currentOrDiscover(
-                status.getRole(), status.getIpPort(), () -> status);
+        directory.currentOrDiscover(status.getRole(), status.getIpPort(), () -> status);
         return directory;
     }
 }

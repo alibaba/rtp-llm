@@ -39,14 +39,13 @@ public final class FlexlbConfig {
 
     @JsonIgnore
     public boolean isPriorityOrdering() {
-        return isQueue()
-                && scheduler.getOrdering().getType()
-                == QueueOrderingConfig.Type.PRIORITY;
+        return isQueue() && scheduler.getOrdering().getType() == QueueOrderingConfig.Type.PRIORITY;
     }
 
     @JsonIgnore
     public boolean allowsPreemption(VictimStage stage) {
-        return isPriorityOrdering() && scheduler.getOrdering().getPreemption() != null
+        return isPriorityOrdering()
+                && scheduler.getOrdering().getPreemption() != null
                 && scheduler.getOrdering().getPreemption().allows(stage);
     }
 
@@ -58,14 +57,15 @@ public final class FlexlbConfig {
 
     @JsonIgnore
     public boolean isSingleDecision() {
-        return isQueue() && queueScheduler().getDecision().getType()
-                == DecisionPolicyConfig.Type.SINGLE;
+        return isQueue()
+                && queueScheduler().getDecision().getType() == DecisionPolicyConfig.Type.SINGLE;
     }
 
     @JsonIgnore
     public boolean isFixedWindowDecision() {
-        return isQueue() && queueScheduler().getDecision().getType()
-                == DecisionPolicyConfig.Type.FIXED_WINDOW;
+        return isQueue()
+                && queueScheduler().getDecision().getType()
+                        == DecisionPolicyConfig.Type.FIXED_WINDOW;
     }
 
     @JsonIgnore
@@ -74,8 +74,7 @@ public final class FlexlbConfig {
         if (policy.getType() == DecisionPolicyConfig.Type.FIXED_WINDOW) {
             return policy;
         }
-        throw new IllegalStateException(
-                "fixed-window decision configuration is not active");
+        throw new IllegalStateException("fixed-window decision configuration is not active");
     }
 
     @JsonIgnore
@@ -101,8 +100,8 @@ public final class FlexlbConfig {
         private int executorCoreSize = 1000;
         private int executorMaxSize = 1000;
         private int executorQueueSize = 1000;
+
         /** 静默时间：下线后每次 Schedule 到达重新计时，期满后等待已接收 RPC 完成。 */
         private long shutdownQuietPeriodMs = 5_000L;
     }
-
 }

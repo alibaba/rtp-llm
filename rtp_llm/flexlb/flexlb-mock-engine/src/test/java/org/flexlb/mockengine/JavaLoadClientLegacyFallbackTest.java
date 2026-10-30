@@ -45,21 +45,47 @@ import static org.mockito.Mockito.withSettings;
  */
 class JavaLoadClientLegacyFallbackTest {
 
-    @TempDir
-    Path tempDir;
+    @TempDir Path tempDir;
 
     /** Loopback ports with no listener: connects fail fast (RST). */
     private static final String UNREACHABLE_MASTER = "127.0.0.1:1";
+
     private static final String UNREACHABLE_ENGINE = "127.0.0.1:2";
 
     private JavaLoadClient legacyClient(boolean enableFallback) {
-        JavaLoadClient.Config config = new JavaLoadClient.Config(
-                "trace.jsonl", "127.0.0.1:7001", UNREACHABLE_MASTER,
-                0, 4, 10.0, 1, tempDir.resolve("out").toString(), 1, 0, 0,
-                2_000L, 500.0, false, false, 1, 1, 0L, 120, true,
-                "engine_service", "",
-                false, 10, 1000, 0, 0, "",
-                enableFallback, "", false);
+        JavaLoadClient.Config config =
+                new JavaLoadClient.Config(
+                        "trace.jsonl",
+                        "127.0.0.1:7001",
+                        UNREACHABLE_MASTER,
+                        0,
+                        4,
+                        10.0,
+                        1,
+                        tempDir.resolve("out").toString(),
+                        1,
+                        0,
+                        0,
+                        2_000L,
+                        500.0,
+                        false,
+                        false,
+                        1,
+                        1,
+                        0L,
+                        120,
+                        true,
+                        "engine_service",
+                        "",
+                        false,
+                        10,
+                        1000,
+                        0,
+                        0,
+                        "",
+                        enableFallback,
+                        "",
+                        false);
         return new JavaLoadClient(config);
     }
 
@@ -74,20 +100,25 @@ class JavaLoadClientLegacyFallbackTest {
         FlexlbServiceGrpc.FlexlbServiceBlockingStub[] stubs =
                 (FlexlbServiceGrpc.FlexlbServiceBlockingStub[]) stubsField.get(client);
         FlexlbServiceGrpc.FlexlbServiceBlockingStub failing =
-                mock(FlexlbServiceGrpc.FlexlbServiceBlockingStub.class,
+                mock(
+                        FlexlbServiceGrpc.FlexlbServiceBlockingStub.class,
                         withSettings().defaultAnswer(org.mockito.Answers.RETURNS_SELF));
         doThrow(new StatusRuntimeException(Status.UNAVAILABLE))
-                .when(failing).schedule(any(FlexlbScheduleProtocol.FlexlbScheduleRequestPB.class));
+                .when(failing)
+                .schedule(any(FlexlbScheduleProtocol.FlexlbScheduleRequestPB.class));
         stubs[0] = failing;
     }
 
     private static JavaLoadClient.RequestResult handle(
             JavaLoadClient client, JavaLoadClient.TraceRecord record) throws Exception {
-        Method handle = JavaLoadClient.class.getDeclaredMethod(
-                "handleRequest", JavaLoadClient.TraceRecord.class, Semaphore.class, double.class);
+        Method handle =
+                JavaLoadClient.class.getDeclaredMethod(
+                        "handleRequest",
+                        JavaLoadClient.TraceRecord.class,
+                        Semaphore.class,
+                        double.class);
         handle.setAccessible(true);
-        return (JavaLoadClient.RequestResult)
-                handle.invoke(client, record, new Semaphore(4), 0.0);
+        return (JavaLoadClient.RequestResult) handle.invoke(client, record, new Semaphore(4), 0.0);
     }
 
     private static void closeClient(JavaLoadClient client) throws Exception {
@@ -101,8 +132,8 @@ class JavaLoadClientLegacyFallbackTest {
         for (int i = 0; i < 64; i++) {
             tokens.add(i);
         }
-        return new JavaLoadClient.TraceRecord(idx, "rid-" + idx, "trace-" + idx, 0L,
-                64, 8, List.of(), tokens);
+        return new JavaLoadClient.TraceRecord(
+                idx, "rid-" + idx, "trace-" + idx, 0L, 64, 8, List.of(), tokens);
     }
 
     @Test

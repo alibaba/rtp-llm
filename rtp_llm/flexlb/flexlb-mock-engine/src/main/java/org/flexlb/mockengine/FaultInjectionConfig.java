@@ -279,33 +279,60 @@ public final class FaultInjectionConfig {
     @Override
     public String toString() {
         return "FaultInjectionConfig{"
-                + "failOnEnqueue=" + failOnEnqueue
-                + ", enqueueErrorCode=" + enqueueErrorCode
-                + ", enqueueDelayMs=" + enqueueDelayMs
-                + ", generateDelayMs=" + generateDelayMs
-                + ", generateError=" + generateError
-                + ", fetchError=" + fetchError
-                + ", noRespond=" + noRespond
-                + ", kvPressureTokens=" + kvPressureTokens
-                + ", queueDepthLimit=" + queueDepthLimit
-                + ", crashAfterNRequests=" + crashAfterNRequests
-                + ", statusSuppressFinished=" + statusSuppressFinished
-                + ", statusSuppressRunning=" + statusSuppressRunning
-                + ", statusSuppressRids=" + statusSuppressRids
-                + ", statusNoRespond=" + statusNoRespond
-                + ", statusFakeTasks=" + statusFakeTasks
-                + ", statusDuplicateFinished=" + statusDuplicateFinished
-                + ", statusCursorRegress=" + statusCursorRegress
-                + ", statusVersionRegress=" + statusVersionRegress
-                + ", statusZombieRunning=" + statusZombieRunning
-                + ", enqueueAckPartialFail=" + enqueueAckPartialFail
-                + ", enqueueAckErrorCode=" + enqueueAckErrorCode
-                + ", enqueueAckDrop=" + enqueueAckDrop
-                + ", prefillAsyncPartialFail=" + prefillAsyncPartialFail
-                + ", prefillAsyncFailCode=" + prefillAsyncFailCode
-                + ", cancelNoRespond=" + cancelNoRespond
-                + ", cancelError=" + cancelError
-                + ", cancelUnexpectedStatus=" + cancelUnexpectedStatus
+                + "failOnEnqueue="
+                + failOnEnqueue
+                + ", enqueueErrorCode="
+                + enqueueErrorCode
+                + ", enqueueDelayMs="
+                + enqueueDelayMs
+                + ", generateDelayMs="
+                + generateDelayMs
+                + ", generateError="
+                + generateError
+                + ", fetchError="
+                + fetchError
+                + ", noRespond="
+                + noRespond
+                + ", kvPressureTokens="
+                + kvPressureTokens
+                + ", queueDepthLimit="
+                + queueDepthLimit
+                + ", crashAfterNRequests="
+                + crashAfterNRequests
+                + ", statusSuppressFinished="
+                + statusSuppressFinished
+                + ", statusSuppressRunning="
+                + statusSuppressRunning
+                + ", statusSuppressRids="
+                + statusSuppressRids
+                + ", statusNoRespond="
+                + statusNoRespond
+                + ", statusFakeTasks="
+                + statusFakeTasks
+                + ", statusDuplicateFinished="
+                + statusDuplicateFinished
+                + ", statusCursorRegress="
+                + statusCursorRegress
+                + ", statusVersionRegress="
+                + statusVersionRegress
+                + ", statusZombieRunning="
+                + statusZombieRunning
+                + ", enqueueAckPartialFail="
+                + enqueueAckPartialFail
+                + ", enqueueAckErrorCode="
+                + enqueueAckErrorCode
+                + ", enqueueAckDrop="
+                + enqueueAckDrop
+                + ", prefillAsyncPartialFail="
+                + prefillAsyncPartialFail
+                + ", prefillAsyncFailCode="
+                + prefillAsyncFailCode
+                + ", cancelNoRespond="
+                + cancelNoRespond
+                + ", cancelError="
+                + cancelError
+                + ", cancelUnexpectedStatus="
+                + cancelUnexpectedStatus
                 + '}';
     }
 
@@ -320,10 +347,7 @@ public final class FaultInjectionConfig {
      * {@code finished} (finished-form: appended to finishedTaskList with an
      * optional {@code errorCode} carried in the task's error_info).
      */
-    public record StatusFakeTask(long requestId,
-                                 long batchId,
-                                 String phase,
-                                 long errorCode) {
+    public record StatusFakeTask(long requestId, long batchId, String phase, long errorCode) {
 
         /** True for the finished-form synthetic completion. */
         public boolean isFinishedForm() {
@@ -361,8 +385,7 @@ public final class FaultInjectionConfig {
         private boolean cancelError = false;
         private boolean cancelUnexpectedStatus = false;
 
-        private Builder() {
-        }
+        private Builder() {}
 
         public Builder failOnEnqueue(boolean fail) {
             this.failOnEnqueue = fail;

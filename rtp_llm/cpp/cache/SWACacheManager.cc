@@ -1,6 +1,7 @@
 #include "rtp_llm/cpp/cache/SWACacheManager.h"
 
 #include <algorithm>
+#include <numeric>
 
 #include "rtp_llm/cpp/utils/Logger.h"
 
@@ -15,22 +16,59 @@ bool isActiveTailBlock(int block_idx, int seq_slots, int active_tail_blocks) {
     return block_idx >= std::max(seq_slots - active_tail_blocks, 0);
 }
 
-bool shouldAllocateBlock(
-    int block_idx, int seq_slots, int reserve_step, int step, bool enable_reuse_cache, int active_tail_blocks) {
+bool shouldAllocateBlock(int block_idx, int seq_slots, int reserve_step, int active_tail_blocks) {
     const bool is_reserve = reserve_step > 0 && block_idx >= seq_slots;
-    const bool step_hit   = ((block_idx + 1) % step) == 0;
-    return is_reserve || isActiveTailBlock(block_idx, seq_slots, active_tail_blocks)
-           || (enable_reuse_cache && step_hit);
+    return is_reserve || isActiveTailBlock(block_idx, seq_slots, active_tail_blocks);
+}
+
+int estimatePeakFromSlotCosts(std::vector<int> block_costs,
+                              int              first_decode_slots,
+                              int              first_decode_tail_start,
+                              int              first_decode_peak_slots,
+                              int              final_slots,
+                              int              max_decode_growth,
+                              int              new_slot_cost,
+                              int              retained_tail_blocks) {
+    int physical_blocks = std::accumulate(block_costs.begin(), block_costs.end(), 0);
+    int peak_blocks     = physical_blocks;
+    for (int slot = first_decode_tail_start; slot < std::min(first_decode_slots, static_cast<int>(block_costs.size()));
+         ++slot) {
+        if (block_costs[slot] == 0) {
+            block_costs[slot] = new_slot_cost;
+            physical_blocks += new_slot_cost;
+        }
+    }
+    size_t next_to_release = 0;
+    auto   advance         = [&](int slots) {
+        while (static_cast<int>(block_costs.size()) < slots) {
+            block_costs.push_back(new_slot_cost);
+            physical_blocks += new_slot_cost;
+        }
+        peak_blocks = std::max(peak_blocks, physical_blocks);
+        const size_t tail_start =
+            block_costs.size() - std::min(static_cast<size_t>(retained_tail_blocks), block_costs.size());
+        while (next_to_release < tail_start) {
+            physical_blocks -= block_costs[next_to_release];
+            block_costs[next_to_release++] = 0;
+        }
+    };
+    peak_blocks = std::max(
+        peak_blocks,
+        physical_blocks + std::max(first_decode_peak_slots - static_cast<int>(block_costs.size()), 0) * new_slot_cost);
+    advance(first_decode_slots);
+    while (static_cast<int>(block_costs.size()) < final_slots) {
+        // A speculative decode may append several slots before any old blocks are released.
+        const int growth = std::min(max_decode_growth, final_slots - static_cast<int>(block_costs.size()));
+        peak_blocks      = std::max(peak_blocks, physical_blocks + growth * new_slot_cost);
+        advance(static_cast<int>(block_costs.size()) + 1);
+    }
+    return peak_blocks;
 }
 
 }  // namespace
 
 bool SWACacheManager::shouldCheckSWATailBlockIds() const {
     return policy().validate_tail_blocks;
-}
-
-bool SWACacheManager::effectiveReuseCacheForAllocation(bool enable_reuse_cache) const {
-    return enable_reuse_cache && policy().enable_prefix_reuse;
 }
 
 int SWACacheManager::activeTailBlockCount() const {
@@ -75,18 +113,44 @@ int SWACacheManager::needBlocksNum(int seq_len, int current_blocks, int reserve_
     return std::max((seq_len + reserve_step + block_size - 1) / block_size - current_blocks, 0);
 }
 
-// Conservative upper bound: sliding-window peak usage never exceeds full-attention usage.
 int SWACacheManager::estimatePeakNeedBlocks(int                     seq_len,
                                             const BlockIndicesType& current_block_indices,
                                             int                     remaining_tokens,
                                             int                     reserve_step,
                                             bool                    enable_reuse_cache) const {
-    (void)enable_reuse_cache;
-    int allocated_blocks = 0;
-    for (const auto block_index : current_block_indices) {
-        allocated_blocks += !isNullBlockIdx(block_index);
+    const int        active_tail_blocks  = activeTailBlockCount();
+    const int        prefill_tail_blocks = prefillTailBlocks(tail_blocks_, enable_reuse_cache);
+    std::vector<int> block_costs;
+    int              allocated_blocks = 0;
+    if (current_block_indices.empty()) {
+        const int seq_slots   = needBlocksNum(seq_len, 0);
+        const int total_slots = seq_slots;
+        block_costs.reserve(total_slots);
+        for (int slot = 0; slot < total_slots; ++slot) {
+            block_costs.push_back(isActiveTailBlock(slot, seq_slots, prefill_tail_blocks) ? 1 : 0);
+        }
+    } else {
+        block_costs.reserve(current_block_indices.size());
+        for (const auto block_index : current_block_indices) {
+            const int cost = !isNullBlockIdx(block_index);
+            block_costs.push_back(cost);
+            allocated_blocks += cost;
+        }
     }
-    return std::max(needBlocksNum(seq_len + remaining_tokens, 0, reserve_step) - allocated_blocks, 0);
+    if (remaining_tokens <= 0) {
+        return std::accumulate(block_costs.begin(), block_costs.end(), 0) - allocated_blocks;
+    }
+    const int decode_tokens = std::max(1, reserve_step);
+    const int peak_blocks =
+        estimatePeakFromSlotCosts(std::move(block_costs),
+                                  needBlocksNum(seq_len + 1, 0, reserve_step),
+                                  std::max(needBlocksNum(seq_len + 1, 0) - active_tail_blocks, 0),
+                                  needBlocksNum(seq_len + std::min(remaining_tokens, decode_tokens), 0, reserve_step),
+                                  needBlocksNum(seq_len + remaining_tokens, 0, reserve_step),
+                                  needBlocksNum(decode_tokens, 0),
+                                  1,
+                                  active_tail_blocks + reserve_step);
+    return std::max(peak_blocks - allocated_blocks, 0);
 }
 
 int SWACacheManager::estimateInitialBatchPeakNeedBlocks(int  seq_len,
@@ -95,11 +159,33 @@ int SWACacheManager::estimateInitialBatchPeakNeedBlocks(int  seq_len,
                                                         int  reserve_step,
                                                         bool enable_reuse_cache,
                                                         int  target_batch_size) const {
-    (void)enable_reuse_cache;
-    const int batch_size    = std::max(target_batch_size, 1);
-    const int common_blocks = needBlocksNum(common_seq_len, 0);
-    const int peak_blocks   = needBlocksNum(seq_len + remaining_tokens, 0, reserve_step);
-    return common_blocks + batch_size * std::max(peak_blocks - common_blocks, 0);
+    const int        prefill_tail_blocks = prefillTailBlocks(tail_blocks_, enable_reuse_cache);
+    const int        batch_size          = std::max(target_batch_size, 1);
+    const int        active_tail_blocks  = activeTailBlockCount();
+    const int        common_slots        = needBlocksNum(std::clamp(common_seq_len, 0, seq_len), 0);
+    const int        seq_slots           = needBlocksNum(seq_len, 0);
+    const int        total_slots         = seq_slots;
+    std::vector<int> block_costs;
+    block_costs.reserve(total_slots);
+    for (int slot = 0; slot < common_slots; ++slot) {
+        block_costs.push_back(isActiveTailBlock(slot, common_slots, prefill_tail_blocks) ? 1 : 0);
+    }
+    for (int slot = common_slots; slot < total_slots; ++slot) {
+        block_costs.push_back(isActiveTailBlock(slot, seq_slots, prefill_tail_blocks) ? batch_size : 0);
+    }
+    if (remaining_tokens <= 0) {
+        return std::accumulate(block_costs.begin(), block_costs.end(), 0);
+    }
+    const int decode_tokens = std::max(1, reserve_step);
+    return estimatePeakFromSlotCosts(
+        std::move(block_costs),
+        needBlocksNum(seq_len + 1, 0, reserve_step),
+        std::max(needBlocksNum(seq_len + 1, 0) - active_tail_blocks, 0),
+        needBlocksNum(seq_len + std::min(remaining_tokens, decode_tokens), 0, reserve_step),
+        needBlocksNum(seq_len + remaining_tokens, 0, reserve_step),
+        needBlocksNum(decode_tokens, 0),
+        batch_size,
+        active_tail_blocks + reserve_step);
 }
 
 NeedBlocksInfo SWACacheManager::getNeedBlocks(int                      common_seq_len,
@@ -108,53 +194,24 @@ NeedBlocksInfo SWACacheManager::getNeedBlocks(int                      common_se
                                               int                      reuse_blocks_len,
                                               bool                     reuse_enabled,
                                               const RequiredPositions& required_positions) const {
-    const int      step                    = std::max(1, linear_step_);
-    const bool     effective_reuse_enabled = effectiveReuseCacheForAllocation(reuse_enabled);
-    const int      active_tail_blocks      = activeTailBlockCount();
+    (void)reserve_step;
+    const int      tail_blocks  = prefillTailBlocks(tail_blocks_, reuse_enabled);
+    const int      reuse_slots  = reuse_enabled ? reuse_blocks_len : 0;
+    const int      common_slots = needBlocksNum(std::clamp(common_seq_len, 0, seq_len), 0);
+    const int      total_slots  = needBlocksNum(seq_len, 0);
     NeedBlocksInfo info;
-
-    const int seq_slots    = needBlocksNum(seq_len, 0);
-    const int total_slots  = needBlocksNum(seq_len, 0, reserve_step);
-    const int common_slots = std::min(needBlocksNum(common_seq_len, 0), seq_slots);
-
-    const int ordinary_start = reuse_enabled ? reuse_blocks_len : 0;
-    auto common_required = [&](int pos) {
-        return pos >= ordinary_start && pos < common_slots
-               && shouldAllocateBlock(pos, common_slots, 0, step, effective_reuse_enabled, active_tail_blocks);
-    };
-    for (int i = ordinary_start; i < common_slots; ++i) {
-        if (common_required(i)) {
+    for (int pos = 0; pos < common_slots; ++pos) {
+        if ((pos >= reuse_slots && isActiveTailBlock(pos, common_slots, tail_blocks))
+            || required_positions.count(static_cast<size_t>(pos)) != 0) {
             ++info.common_blocks;
         }
     }
-    for (int i = std::max(common_slots, ordinary_start); i < seq_slots; ++i) {
-        if (shouldAllocateBlock(i, seq_slots, /*reserve_step=*/0, step, effective_reuse_enabled, active_tail_blocks)) {
+    for (int pos = common_slots; pos < total_slots; ++pos) {
+        if ((pos >= reuse_slots && isActiveTailBlock(pos, total_slots, tail_blocks))
+            || required_positions.count(static_cast<size_t>(pos)) != 0) {
             ++info.extra_blocks;
         }
     }
-    info.extra_blocks += std::max(total_slots - std::max(seq_slots, ordinary_start), 0);
-    for (const size_t position : required_positions) {
-        if (position >= static_cast<size_t>(std::max(total_slots, 0))) {
-            continue;
-        }
-        const int  pos = static_cast<int>(position);
-        if (pos < common_slots) {
-            if (!common_required(pos)) {
-                ++info.common_blocks;
-            }
-            continue;
-        }
-        const bool ordinary_seq_position =
-            pos >= ordinary_start && pos < seq_slots
-            && shouldAllocateBlock(
-                pos, seq_slots, /*reserve_step=*/0, step, effective_reuse_enabled, active_tail_blocks);
-        const bool ordinary_reserve_position = pos >= std::max(seq_slots, ordinary_start) && pos < total_slots;
-        if (!ordinary_seq_position && !ordinary_reserve_position) {
-            ++info.extra_blocks;
-        }
-    }
-
-    info.extra_blocks = std::max(info.extra_blocks, 0);
     return info;
 }
 
@@ -164,17 +221,40 @@ bool SWACacheManager::malloc(BlockIds&                block_ids,
                              int                      reserve_step,
                              std::vector<size_t>*     backfilled_positions,
                              const RequiredPositions& required_positions) {
+    (void)reserve_step;
+    return mallocImpl(block_ids,
+                      seq_len,
+                      0,
+                      prefillTailBlocks(tail_blocks_, enable_reuse_cache),
+                      true,
+                      backfilled_positions,
+                      required_positions);
+}
+
+bool SWACacheManager::mallocForDecode(BlockIds&            block_ids,
+                                      int                  seq_len,
+                                      bool                 enable_reuse_cache,
+                                      int                  reserve_step,
+                                      std::vector<size_t>* backfilled_positions) {
+    (void)enable_reuse_cache;
+    return mallocImpl(block_ids, seq_len, reserve_step, activeTailBlockCount(), false, backfilled_positions, {});
+}
+
+bool SWACacheManager::mallocImpl(BlockIds&                block_ids,
+                                 int                      seq_len,
+                                 int                      reserve_step,
+                                 int                      tail_blocks,
+                                 bool                     is_prefill,
+                                 std::vector<size_t>*     backfilled_positions,
+                                 const RequiredPositions& required_positions) {
     if (backfilled_positions != nullptr) {
         backfilled_positions->clear();
     }
-    const int  step                    = std::max(1, linear_step_);
-    const bool effective_reuse_enabled = effectiveReuseCacheForAllocation(enable_reuse_cache);
-    const int  active_tail_blocks      = activeTailBlockCount();
-    const int  current_blocks_len      = static_cast<int>(block_ids.blocksNum());
-    const int  seq_slots               = needBlocksNum(seq_len, 0, 0);
-    const int  new_blocks_len          = needBlocksNum(seq_len, current_blocks_len, reserve_step);
+    const int current_blocks_len = static_cast<int>(block_ids.blocksNum());
+    const int seq_slots          = needBlocksNum(seq_len, 0, 0);
+    const int new_blocks_len     = needBlocksNum(seq_len, current_blocks_len, reserve_step);
 
-    if (required_positions.empty() && new_blocks_len == 0) {
+    if (is_prefill && required_positions.empty() && new_blocks_len == 0) {
         checkSWATailBlockIds(block_ids, "SWACacheManager::malloc");
         return true;
     }
@@ -183,15 +263,16 @@ bool SWACacheManager::malloc(BlockIds&                block_ids,
         return required_positions.find(static_cast<size_t>(pos)) != required_positions.end();
     };
     auto should_allocate = [&](int pos) {
-        return shouldAllocateBlock(pos, seq_slots, reserve_step, step, effective_reuse_enabled, active_tail_blocks)
-               || is_required(pos);
+        return shouldAllocateBlock(pos, seq_slots, reserve_step, tail_blocks) || is_required(pos);
     };
 
     std::vector<size_t> positions_to_backfill;
-    if (!required_positions.empty()) {
+    if (!is_prefill || !required_positions.empty()) {
         const auto& existing_blocks = block_ids.blocks();
-        for (int i = 0; i < current_blocks_len; ++i) {
-            if (is_required(i) && isNullBlockIdx(existing_blocks[static_cast<size_t>(i)])) {
+        const int   existing_scan   = std::min(current_blocks_len, needBlocksNum(seq_len, 0, reserve_step));
+        for (int i = 0; i < existing_scan; ++i) {
+            if ((is_required(i) || (!is_prefill && should_allocate(i)))
+                && isNullBlockIdx(existing_blocks[static_cast<size_t>(i)])) {
                 positions_to_backfill.push_back(static_cast<size_t>(i));
             }
         }
@@ -254,18 +335,14 @@ void SWACacheManager::removeSkippedBlocks(BlockIds& block_ids, bool enable_reuse
         checkSWATailBlockIds(block_ids, "SWACacheManager::removeSkippedBlocks");
         return;
     }
-    const int  step                    = std::max(1, linear_step_);
-    const bool effective_reuse_enabled = effectiveReuseCacheForAllocation(enable_reuse_cache);
-    const int  active_tail_blocks      = activeTailBlockCount();
-    const int  block_size              = static_cast<int>(block_indices.size());
+    (void)enable_reuse_cache;
+    const int active_tail_blocks = activeTailBlockCount();
+    const int block_size         = static_cast<int>(block_indices.size());
 
     BlockIndicesType    blocks_to_free;
     std::vector<size_t> pos_to_remove;
     for (int i = block_size - active_tail_blocks - 1 - reserve_step; i >= 0; i--) {
         if (isNullBlockIdx(block_indices[i])) {
-            continue;
-        }
-        if (effective_reuse_enabled && ((i + 1) % step) == 0) {
             continue;
         }
         blocks_to_free.push_back(block_indices[i]);

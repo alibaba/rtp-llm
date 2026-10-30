@@ -20,8 +20,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  */
 class JavaLoadClientParityTest {
 
-    @TempDir
-    Path tempDir;
+    @TempDir Path tempDir;
 
     private static JavaLoadClient.TraceRecord rec(int idx, long tsMs, int il, int ol) {
         List<Integer> tokens = new ArrayList<>();
@@ -32,17 +31,44 @@ class JavaLoadClientParityTest {
         for (long k = 0; k < il / 1024; k++) {
             keys.add(k + idx);
         }
-        return new JavaLoadClient.TraceRecord(idx, "rid-" + idx, "trace-" + idx, tsMs,
-                il, ol, keys, tokens);
+        return new JavaLoadClient.TraceRecord(
+                idx, "rid-" + idx, "trace-" + idx, tsMs, il, ol, keys, tokens);
     }
 
     private JavaLoadClient dryRunClient() {
-        JavaLoadClient.Config config = new JavaLoadClient.Config(
-                "trace.jsonl", "127.0.0.1:7001", "127.0.0.1:7003",
-                0, 16, 10.0, 1, tempDir.resolve("out").toString(), 1, 0, 0,
-                120_000L, 500.0, false, false, 1, 1, 0L, 120, true,
-                "engine_service", "",
-                false, 10, 1000, 0, 0, "", false, "", true);
+        JavaLoadClient.Config config =
+                new JavaLoadClient.Config(
+                        "trace.jsonl",
+                        "127.0.0.1:7001",
+                        "127.0.0.1:7003",
+                        0,
+                        16,
+                        10.0,
+                        1,
+                        tempDir.resolve("out").toString(),
+                        1,
+                        0,
+                        0,
+                        120_000L,
+                        500.0,
+                        false,
+                        false,
+                        1,
+                        1,
+                        0L,
+                        120,
+                        true,
+                        "engine_service",
+                        "",
+                        false,
+                        10,
+                        1000,
+                        0,
+                        0,
+                        "",
+                        false,
+                        "",
+                        true);
         return new JavaLoadClient(config);
     }
 
@@ -96,8 +122,7 @@ class JavaLoadClientParityTest {
         for (int i = 0; i < 6; i++) {
             records.add(rec(i, i * 1000L, 100, 10));
         }
-        List<JavaLoadClient.TraceRecord> out =
-                JavaLoadClient.filterAndShard(records, 0, 4, 1, 0);
+        List<JavaLoadClient.TraceRecord> out = JavaLoadClient.filterAndShard(records, 0, 4, 1, 0);
         assertEquals(4, out.size());
     }
 
@@ -157,8 +182,7 @@ class JavaLoadClientParityTest {
     @Test
     void truncateRecordsCapsInputTokensAndOutputLen() {
         List<JavaLoadClient.TraceRecord> records = List.of(rec(0, 0, 5000, 300));
-        List<JavaLoadClient.TraceRecord> out =
-                JavaLoadClient.truncateRecords(records, 1000, 100);
+        List<JavaLoadClient.TraceRecord> out = JavaLoadClient.truncateRecords(records, 1000, 100);
 
         assertEquals(1, out.size());
         JavaLoadClient.TraceRecord r = out.get(0);
@@ -176,8 +200,7 @@ class JavaLoadClientParityTest {
     @Test
     void truncateRecordsLeavesShortRequestsUntouched() {
         List<JavaLoadClient.TraceRecord> records = List.of(rec(1, 0, 500, 50));
-        List<JavaLoadClient.TraceRecord> out =
-                JavaLoadClient.truncateRecords(records, 1000, 100);
+        List<JavaLoadClient.TraceRecord> out = JavaLoadClient.truncateRecords(records, 1000, 100);
         JavaLoadClient.TraceRecord r = out.get(0);
         assertEquals(500, r.inputLen);
         assertEquals(500, r.tokenIds.size());
@@ -189,8 +212,7 @@ class JavaLoadClientParityTest {
     @Test
     void truncateRecordsNoopWhenBothCapsZero() {
         List<JavaLoadClient.TraceRecord> records = List.of(rec(2, 0, 2000, 200));
-        List<JavaLoadClient.TraceRecord> out =
-                JavaLoadClient.truncateRecords(records, 0, 0);
+        List<JavaLoadClient.TraceRecord> out = JavaLoadClient.truncateRecords(records, 0, 0);
         assertEquals(2000, out.get(0).inputLen);
         assertEquals(200, out.get(0).outputLen);
     }
@@ -223,7 +245,10 @@ class JavaLoadClientParityTest {
         // idx = int(100 * 0.50) = 50 -> element 51 (nearest-rank, Python parity)
         assertEquals(51.0, JavaLoadClient.percentileNearestRank(hundred, 50), 1e-9);
         // unsorted input is sorted internally
-        assertEquals(40.0, JavaLoadClient.percentileNearestRank(List.of(40.0, 10.0, 30.0, 20.0), 99), 1e-9);
+        assertEquals(
+                40.0,
+                JavaLoadClient.percentileNearestRank(List.of(40.0, 10.0, 30.0, 20.0), 99),
+                1e-9);
     }
 
     // ------------------------------------------------------------------
@@ -233,13 +258,15 @@ class JavaLoadClientParityTest {
     @Test
     void fallbackEndpointsFromEnginesArray() throws Exception {
         Path endpoints = tempDir.resolve("endpoints.json");
-        Files.writeString(endpoints, "{"
-                + "\"prefill_domain\": \"p\", \"decode_domain\": \"d\", \"env\": {},"
-                + "\"engines\": ["
-                + "{\"role\": \"prefill\", \"grpc_addr\": \"127.0.0.1:6001\"},"
-                + "{\"role\": \"decode\", \"grpc_addr\": \"127.0.0.1:6002\"},"
-                + "{\"role\": \"prefill\", \"grpc_addr\": \"\"}"
-                + "]}");
+        Files.writeString(
+                endpoints,
+                "{"
+                        + "\"prefill_domain\": \"p\", \"decode_domain\": \"d\", \"env\": {},"
+                        + "\"engines\": ["
+                        + "{\"role\": \"prefill\", \"grpc_addr\": \"127.0.0.1:6001\"},"
+                        + "{\"role\": \"decode\", \"grpc_addr\": \"127.0.0.1:6002\"},"
+                        + "{\"role\": \"prefill\", \"grpc_addr\": \"\"}"
+                        + "]}");
 
         JavaLoadClient client = dryRunClient();
         client.loadFallbackEndpoints(endpoints.toString());
@@ -286,16 +313,20 @@ class JavaLoadClientParityTest {
         assertTrue(body.contains("flexlb_client_inflight_count{route_path=\"master\"} 2"), body);
         assertTrue(body.contains("flexlb_client_max_concurrency{route_path=\"master\"} 16"), body);
         // 2 / 16 = 0.1250
-        assertTrue(body.contains("flexlb_client_semaphore_utilization{route_path=\"master\"} 0.1250"), body);
+        assertTrue(
+                body.contains("flexlb_client_semaphore_utilization{route_path=\"master\"} 0.1250"),
+                body);
         // per-route_path latency groups with nearest-rank p50/p99
         assertTrue(body.contains("flexlb_client_total_ms_avg{route_path=\"master\"} 20.000"), body);
         assertTrue(body.contains("flexlb_client_total_ms_p50{route_path=\"master\"} 20.000"), body);
         assertTrue(body.contains("flexlb_client_total_ms_p99{route_path=\"master\"} 20.000"), body);
         assertTrue(body.contains("flexlb_client_total_ms_max{route_path=\"master\"} 20.000"), body);
         assertTrue(body.contains("flexlb_client_total_ms_count{route_path=\"master\"} 1"), body);
-        assertTrue(body.contains("flexlb_client_ttft_ms_avg{route_path=\"fallback\"} 15.000"), body);
+        assertTrue(
+                body.contains("flexlb_client_ttft_ms_avg{route_path=\"fallback\"} 15.000"), body);
         // fallback result has schedule_ms=0 -> no schedule_ms metrics for fallback
-        assertFalse(body.contains("flexlb_client_schedule_ms_count{route_path=\"fallback\"}"), body);
+        assertFalse(
+                body.contains("flexlb_client_schedule_ms_count{route_path=\"fallback\"}"), body);
         assertTrue(body.endsWith("\n"));
     }
 

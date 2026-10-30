@@ -141,9 +141,13 @@ absl::Status FIFOSchedulerBase::checkChunkedPrefillRequest(const GenerateStreamP
             const bool linear_reuse = reuse_cache && group.policy.enable_prefix_reuse
                                       && group.policy.group_type == CacheGroupType::LINEAR;
             std::string error_msg;
-            if (cache_config.linear_step != 1) {
-                error_msg = "[chunked_prefill] requires linear_step=1, got "
-                            + std::to_string(cache_config.linear_step);
+            const bool  sparse_reuse =
+                reuse_cache && group.policy.enable_prefix_reuse && group.policy.group_type != CacheGroupType::FULL;
+            const int64_t prompt_blocks = (seq_length + group.seqSizePerBlock() - 1) / group.seqSizePerBlock();
+            if (sparse_reuse && cache_config.reuse_cache_tail_blocks < prompt_blocks) {
+                error_msg = "[chunked_prefill] cache group [" + group.tag
+                            + "] requires reuse_cache_tail_blocks >= " + std::to_string(prompt_blocks) + ", got "
+                            + std::to_string(cache_config.reuse_cache_tail_blocks);
             } else if (cp_mapper && cp_mapper->isSharded() && group.policy.group_type != CacheGroupType::FULL
                        && group.policy.cp_mapping == CpBlockMappingMode::BLOCK_ROUND_ROBIN) {
                 error_msg = "[chunked_prefill] cache group [" + group.tag

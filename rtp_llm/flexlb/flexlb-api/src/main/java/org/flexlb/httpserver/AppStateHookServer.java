@@ -30,8 +30,9 @@ public class AppStateHookServer {
 
     private volatile InetAddress localAddress;
 
-    public AppStateHookServer(ApplicationLifecycle applicationLifecycle,
-                              GracefulLifecycleReporter lifecycleReporter) {
+    public AppStateHookServer(
+            ApplicationLifecycle applicationLifecycle,
+            GracefulLifecycleReporter lifecycleReporter) {
         this.applicationLifecycle = applicationLifecycle;
         this.lifecycleReporter = lifecycleReporter;
     }
@@ -48,8 +49,7 @@ public class AppStateHookServer {
 
     @Bean
     public RouterFunction<ServerResponse> appStateHook() {
-        return route()
-                .GET("/hook/process_ok", accept(MediaType.ALL), this::handleProcessOk)
+        return route().GET("/hook/process_ok", accept(MediaType.ALL), this::handleProcessOk)
                 .GET("/hook/after_start", accept(MediaType.ALL), this::handleAppStartUp)
                 .GET("/hook/pre_stop", accept(MediaType.ALL), this::handleAppStop)
                 .build();
@@ -100,19 +100,32 @@ public class AppStateHookServer {
         }
         return Mono.fromCallable(applicationLifecycle::offline)
                 .subscribeOn(Schedulers.boundedElastic())
-                .flatMap(completed -> {
-                    if (completed) {
-                        log.info("shutDown Service offline success, active request complete.");
-                        return ServerResponse.ok().body(Mono.just("Shutdown complete. Ready for termination."), String.class);
-                    } else {
-                        log.error("shutDown Service offline error, active request still pending.");
-                        return ServerResponse.status(503).body(Mono.just("Shutdown error. Active requests still pending."), String.class);
-                    }
-                })
-                .onErrorResume(e -> {
-                    log.error("shutDown Service offline execution error.", e);
-                    return ServerResponse.status(500).body(Mono.just("Shutdown error."), String.class);
-                });
+                .flatMap(
+                        completed -> {
+                            if (completed) {
+                                log.info(
+                                        "shutDown Service offline success, active request complete.");
+                                return ServerResponse.ok()
+                                        .body(
+                                                Mono.just(
+                                                        "Shutdown complete. Ready for termination."),
+                                                String.class);
+                            } else {
+                                log.error(
+                                        "shutDown Service offline error, active request still pending.");
+                                return ServerResponse.status(503)
+                                        .body(
+                                                Mono.just(
+                                                        "Shutdown error. Active requests still pending."),
+                                                String.class);
+                            }
+                        })
+                .onErrorResume(
+                        e -> {
+                            log.error("shutDown Service offline execution error.", e);
+                            return ServerResponse.status(500)
+                                    .body(Mono.just("Shutdown error."), String.class);
+                        });
     }
 
     private boolean isNonLocalRequest(ServerRequest request) {
@@ -128,6 +141,7 @@ public class AppStateHookServer {
 
     private static Mono<ServerResponse> buildErrorResponse(String handler) {
         log.info("{} failed, remote request is not allowed.", handler);
-        return ServerResponse.status(403).body(Mono.just("remote request is not allowed."), String.class);
+        return ServerResponse.status(403)
+                .body(Mono.just("remote request is not allowed."), String.class);
     }
 }

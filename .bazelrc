@@ -37,6 +37,19 @@ build:cuda --copt="-DENABLE_BF16=1"
 build:cuda --copt="-DBUILD_CUTLASS_MIXED_GEMM=ON"
 build:cuda --copt="-DC10_CUDA_NO_CMAKE_CONFIGURE_FILE"
 build:cuda --copt="-DUSING_CUDA=1"
+# Closed-flavor C++ defines, default-on for the whole cuda family (cuda12 /
+# cuda12_9 / cuda13 / cuda13_arm / ppu / frontend all chain build:cuda). They
+# are inert in the public-only checkout: GOOGLE_CUDA guards the rdma accl
+# CUDA paths, which only build under the rdma stack; ACCL_USE_CUDA guards the
+# closed accl-barex impl, which is not in that tree; KVCM_INTERNAL guards
+# VIPServerSubscriber's closed block, and the kvcm backend never enters an
+# open-source build (verified: build-open_source_cuda compiles zero kvcm
+# targets). Closed lanes no longer pass a per-arch internal config.
+build:cuda --copt="-DGOOGLE_CUDA=1"
+# NPU feeds the rdma.BUILD npu config_setting (the accl cuda_driver dep); not a dead define.
+build:cuda --copt="-DNPU=1"
+build:cuda --copt="-DACCL_USE_CUDA=1"
+build:cuda --copt="-DKVCM_INTERNAL=1"
 build:cuda --define=using_cuda=true --define=using_cuda_nvcc=true
 build:cuda --crosstool_top=@local_config_cuda//crosstool:toolchain
 build:cuda --action_env CUDA_TOOLKIT_PATH="/usr/local/cuda/"
@@ -215,9 +228,8 @@ test --run_under=//tools:nvidia_wheel_env
 # by default, hence the explicit PATH / LD_LIBRARY_PATH overrides.
 #
 # These were previously hard-coded into smoke defs.bzl pointing at user-
-# private conda envs (/home/tanboyu.tby/..., /home/serina.wzq/...) which
-# only worked on those specific dev boxes. Centralize here so every cu13
-# test sees the same toolchain.
+# private conda envs which only worked on those specific dev boxes.
+# Centralize here so every cu13 test sees the same toolchain.
 test:cuda13_arm --test_env=DG_JIT_CPP_STANDARD=20
 test:cuda13_arm --test_env=CC=/opt/rh/gcc-toolset-12/root/usr/bin/gcc
 test:cuda13_arm --test_env=CXX=/opt/rh/gcc-toolset-12/root/usr/bin/g++
@@ -287,6 +299,10 @@ build:rocm --action_env TF_NEED_ROCM=1
 build:rocm --action_env GPU_ARCHS=gfx942
 build:rocm --copt="-DUSING_CUDA=0"
 build:rocm --copt="-DUSING_ROCM=1"
+# Closed accl-barex impl flavor, default-on; inert in the public-only
+# checkout because that impl is not in the tree. Closed rocm lanes no longer
+# pass --config=internal_rocm.
+build:rocm --copt="-DACCL_USE_ROCM=1"
 # Pin the OTel STL mode to a literal value. The default "best" mode defines
 # OPENTELEMETRY_STL_VERSION=(__cplusplus/100); the parentheses make shlex.quote
 # wrap the -D argument in single quotes inside crosstool_wrapper_driver_rocm,
@@ -351,6 +367,10 @@ build:arm --copt=-Wno-array-parameter # boringssl
 # remote_kv_cache
 build:remote_kv_cache --define=use_remote_kv_cache=true
 
+# rdma: no platform config enables this — default OFF everywhere; only the
+# internal overlay builds select the RDMA impls behind this flag.
+build:rdma --define=use_rdma=true
+
 build:debug --copt -g --copt -O0 --copt -U_FORTIFY_SOURCE --copt -DEXCLUDE_SM_100=1 --copt -DEXCLUDE_SM_120=1
 build:trace --copt="-DCUTLASS_DEBUG_TRACE_LEVEL=1"
 
@@ -382,9 +402,7 @@ test:cuda --test_env CUDA_HOME=/usr/local/cuda
 # compat for low driver < 535
 test:compat --test_env LD_LIBRARY_PATH="/opt/rocm/lib:/opt/conda310/lib/:/usr/local/cuda/compat/:/usr/local/nvidia/lib64:/usr/lib64:/usr/local/cuda/lib64:/opt/amdgpu/lib64:/usr/local/cuda/extras/CUPTI/lib64:/usr/local/cuda/lib64/stubs"
 
-# internal source overrides (only loaded when internal_source symlink exists)
-
-# PPU SDK 2.1 / CUDA 13. Source the SDK envsetup.sh before invoking Bazel.
+# PPU SDK 2.2 / CUDA 13. Source the SDK envsetup.sh before invoking Bazel.
 build:ppu --copt -DENABLE_DEEP_EP=1
 build:ppu --copt -DUSE_ACCL_EP=0
 build:ppu --config=cuda
@@ -411,13 +429,15 @@ build:ppu --python_top=//:python312_ppu
 build:ppu --repo_env=PYTHON_BIN_PATH="/opt/conda312/bin/python3"
 build:ppu --action_env PYTHON_BIN_PATH="/opt/conda312/bin/python3"
 build:ppu --host_action_env PYTHON_BIN_PATH="/opt/conda312/bin/python3"
-build:ppu --action_env LD_LIBRARY_PATH="/opt/conda312/lib/:/usr/local/PPU_SDK/lib/:/usr/local/cuda/lib64:/usr/local/PPU_SDK/sailSHMEM/lib"
+build:ppu --action_env LD_LIBRARY_PATH="/opt/conda310/lib/:/opt/conda312/lib:/usr/local/PPU_SDK/pccl/nccl_wrapper/lib:/usr/local/PPU_SDK/pccl/lib:/usr/local/PPU_SDK/lib/:/usr/local/cuda/lib64:/usr/local/PPU_SDK/sailSHMEM/lib"
 test:ppu --test_env PPU_HOME="/usr/local/PPU_SDK/"
-test:ppu --test_env PIP_INDEX_URL="https://artlab.alibaba-inc.com/1/PYPI/simple/"
 # ppu-smi must stay on PATH: triton picks its PPU backend in is_ppu_device()
 # via shutil.which("ppu-smi"); without it tests compile CUDA cubins for PPU KMD.
 test:ppu --test_env PATH="/opt/conda312/bin:/usr/local/PPU_SDK/ppu-smi/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-test:ppu --test_env LD_LIBRARY_PATH="/opt/conda312/lib/:/usr/local/PPU_SDK/lib/:/usr/local/cuda/lib64:/usr/local/PPU_SDK/sailSHMEM/lib"
+test:ppu --test_env LD_LIBRARY_PATH="/opt/conda310/lib/:/opt/conda312/lib:/usr/local/PPU_SDK/pccl/nccl_wrapper/lib:/usr/local/PPU_SDK/pccl/lib:/usr/local/PPU_SDK/lib/:/usr/local/cuda/lib64:/usr/local/PPU_SDK/sailSHMEM/lib"
+test:ppu --test_env SKIP_DISTRIBUTED_TEST=1
+# fastsafetensors pread on PPU NAS is 2-4x slower than scratch; use scratch globally
+test:ppu --test_env LOAD_METHOD=scratch
 
-try-import %workspace%/internal_source/.internal_bazelrc
 try-import %workspace%/internal_source/.cicd_bazelrc
+try-import %workspace%/internal_source/.internal_bazelrc

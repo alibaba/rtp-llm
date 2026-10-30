@@ -55,7 +55,7 @@ static CacheConfig makeTinyMultiPoolHybridConfig(uint32_t       linear_block_num
     config.dtype              = rtp_llm::DataType::TYPE_FP16;
     config.layer_num          = 4;
     config.seq_size_per_block = 4;
-    config.linear_step        = 2;
+    config.reuse_cache_tail_blocks = 2;
 
     auto linear_spec = makeResolvedLinearSpec(config.dtype,
                                               1,
@@ -92,7 +92,7 @@ static CacheConfig makeTinyFullSwaMultiPoolHybridConfig(uint32_t full_block_num 
     config.dtype              = DataType::TYPE_FP16;
     config.layer_num          = 4;
     config.seq_size_per_block = 4;
-    config.linear_step        = 2;
+    config.reuse_cache_tail_blocks = 2;
 
     auto full_spec                 = makeResolvedMhaSpec(config.dtype, 1, 1, 4, "full");
     auto swa_spec                  = makeResolvedMhaSpec(config.dtype, 1, 1, 4, "swa");
@@ -314,10 +314,13 @@ static ModelConfig makeProModelConfig() {
 }
 
 // Build a DSV4 7-pool CacheConfig with independent groups.
-static CacheConfig makeDSV4HybridPoolConfig(uint32_t block_num = 200) {
+static CacheConfig makeDSV4HybridPoolConfig(uint32_t block_num = 200, int cp_size = 1) {
     auto mc                                            = makeProModelConfig();
     mc.hybrid_attention_config.enable_hybrid_attention = true;
     ParallelismConfig pc;
+    pc.role_type                          = RoleType::PREFILL;
+    pc.tp_size                            = cp_size;
+    pc.prefill_cp_config.kv_cache_sharded = cp_size > 1;
     auto              config = CacheConfigCreator::createWarmupConfig(mc, pc, 0);
     config.finalizeBlockNums(block_num, RuntimeConfig{});
     return config;
@@ -595,6 +598,45 @@ TEST_F(HybridPoolCoordinatorCacheManagerTest, RecomputeDetachesPerPoolAndRollsBa
     }
 }
 
+TEST_F(HybridPoolCoordinatorCacheManagerTest, RecomputeReplacesFrozenLoadTargetsAfterOrdinaryRelease) {
+    const auto config    = makeTinyMultiPoolHybridConfig();
+    auto       allocator = makeAllocator(config);
+    ASSERT_TRUE(allocator->init());
+    auto             resource = makeBatchResource(1, config);
+    const auto&      pools    = allocator->groupBlockPools();
+    BlockIndicesType old_blocks;
+    for (size_t group = 0; group < pools.size(); ++group) {
+        auto block = pools[group]->malloc();
+        ASSERT_TRUE(block.has_value());
+        old_blocks.push_back(*block);
+        pools[group]->incRef(*block);
+        resource->mutableBlockIds(0, config.groupTags()[group]).assign({*block});
+        pools[group]->incTreeRef(*block, BlockTreeRefType::LOAD);
+        pools[group]->freezeBlock(*block);
+        pools[group]->decTreeRef(*block, BlockTreeRefType::LOAD);
+    }
+    ASSERT_TRUE(allocator->detachSharedBlocksForRecompute(resource, 0));
+    for (size_t group = 0; group < pools.size(); ++group) {
+        EXPECT_NE(resource->blocks(0, config.groupTags()[group])[0], old_blocks[group]);
+        EXPECT_EQ(pools[group]->refCount(old_blocks[group]), 1u);
+        EXPECT_EQ(pools[group]->referencedBlocksNum(BlockTreeRefType::LOAD), 0u);
+        EXPECT_EQ(pools[group]->referencedBlocksNum(BlockTreeRefType::FROZEN), 1u);
+    }
+    allocator->free({resource, makeCompleteTokenIds(1, 4, 4)});
+    for (const auto& pool : pools) {
+        EXPECT_EQ(pool->freeBlocksNum(), pool->totalBlocksNum() - 1);
+        EXPECT_EQ(pool->availableBlocksNum(), pool->totalBlocksNum() - 1);
+    }
+    const auto snapshots = allocator->poolMetricsSnapshots();
+    ASSERT_EQ(snapshots.size(), pools.size());
+    for (const auto& snapshot : snapshots) {
+        SCOPED_TRACE(snapshot.pool_name);
+        EXPECT_EQ(snapshot.frozen_ref_blocks, 1u);
+        EXPECT_EQ(snapshot.load_ref_blocks, 0u);
+        EXPECT_EQ(snapshot.request_ref_blocks, 0u);
+    }
+}
+
 TEST_F(HybridPoolCoordinatorCacheManagerTest, RecomputePreservesCompactCpReadyPrefix) {
     ParallelismConfig parallelism;
     parallelism.role_type                          = RoleType::PREFILL;
@@ -783,7 +825,7 @@ TEST_F(HybridPoolCoordinatorCacheManagerTest, StorageRoundTripUsesSparseFullLine
                         request_keys,
                         /*reader_seq_len=*/21,
                         nullptr,
-                        {{"full"}, {"linear", "full"}, {"full"}, {"linear", "full"}},
+                        {{"full"}, {"full"}, {"linear", "full"}, {"linear", "full"}},
                         {{"full"}, {"full"}, {"full"}, {"linear", "full"}});
 }
 
@@ -797,7 +839,7 @@ TEST_F(HybridPoolCoordinatorCacheManagerTest, StorageRoundTripUsesFullSwaWindowS
                         request_keys,
                         /*reader_seq_len=*/21,
                         nullptr,
-                        {{"full"}, {"full", "swa"}, {"full", "swa"}, {"full", "swa"}},
+                        {{"full"}, {"full"}, {"full", "swa"}, {"full", "swa"}},
                         {{"full"}, {"full"}, {"full", "swa"}, {"full", "swa"}});
 }
 
@@ -812,7 +854,7 @@ TEST_F(HybridPoolCoordinatorCacheManagerTest, StorageRoundTripMapsCpCanonicalFul
                         request_keys,
                         /*reader_seq_len=*/41,
                         cp_mapper,
-                        {{"linear", "full"}, {"linear", "full"}, {"linear", "full"}, {"linear", "full"}},
+                        {{"full"}, {"full"}, {"full"}, {"linear", "full"}},
                         {{"full"}, {"full"}, {"full"}, {"linear", "full"}});
 }
 
@@ -1226,6 +1268,7 @@ static void expectSameFinalPoolMetrics(const CachePoolMetricsSnapshot& expected,
     EXPECT_EQ(actual.load_ref_blocks, expected.load_ref_blocks) << context;
     EXPECT_EQ(actual.eviction_target_ref_blocks, expected.eviction_target_ref_blocks) << context;
     EXPECT_EQ(actual.store_ref_blocks, expected.store_ref_blocks) << context;
+    EXPECT_EQ(actual.frozen_ref_blocks, expected.frozen_ref_blocks) << context;
     EXPECT_FLOAT_EQ(actual.used_ratio, expected.used_ratio) << context;
 }
 
@@ -1285,6 +1328,7 @@ TEST_F(HybridPoolCoordinatorCacheManagerTest, AllPrefixReuseDisabledPoolMetricsF
         EXPECT_EQ(snapshot->block_cache_ref_blocks, 0u) << source.pool_name;
         EXPECT_EQ(snapshot->eviction_target_ref_blocks, 0u) << source.pool_name;
         EXPECT_EQ(snapshot->store_ref_blocks, 0u) << source.pool_name;
+        EXPECT_EQ(snapshot->frozen_ref_blocks, 0u) << source.pool_name;
         EXPECT_FLOAT_EQ(snapshot->used_ratio, 0.0f) << source.pool_name;
         init_reserve_blocks += snapshot->reserve_blocks;
     }
@@ -1327,6 +1371,7 @@ TEST_F(HybridPoolCoordinatorCacheManagerTest, AllPrefixReuseDisabledPoolMetricsF
         EXPECT_EQ(snapshot->block_cache_ref_blocks, 0u) << source.pool_name;
         EXPECT_EQ(snapshot->eviction_target_ref_blocks, 0u) << source.pool_name;
         EXPECT_EQ(snapshot->store_ref_blocks, 0u) << source.pool_name;
+        EXPECT_EQ(snapshot->frozen_ref_blocks, 0u) << source.pool_name;
         EXPECT_FLOAT_EQ(
             snapshot->used_ratio,
             static_cast<float>(100.0 * expected_request_blocks / static_cast<double>(snapshot->total_blocks)))
@@ -1367,6 +1412,7 @@ static KVCachePoolMetricsSnapshot makeMergeAllocatorInput(
     snapshot.load_ref_blocks            = 14 + seed;
     snapshot.eviction_target_ref_blocks = 15 + seed;
     snapshot.store_ref_blocks           = 16 + seed;
+    snapshot.frozen_ref_blocks          = 17 + seed;
     snapshot.used_ratio                 = static_cast<float>(100.0 * (snapshot.total_blocks - snapshot.available_blocks)
                                              / static_cast<double>(snapshot.total_blocks));
     return snapshot;
@@ -1392,6 +1438,7 @@ static BlockTreePoolMetricsSnapshot makeMergeTreeInput(Tier               tier,
     snapshot.load_ref_blocks            = 34 + seed;
     snapshot.eviction_target_ref_blocks = 35 + seed;
     snapshot.store_ref_blocks           = 36 + seed;
+    snapshot.frozen_ref_blocks          = 37 + seed;
     if (tier == Tier::DISK) {
         snapshot.read_bytes                    = (int64_t{1} << 40) + seed;
         snapshot.write_bytes                   = (int64_t{1} << 41) + seed;
@@ -1418,6 +1465,7 @@ static void expectMergedRowFromAllocator(const KVCachePoolMetricsSnapshot& sourc
     EXPECT_EQ(actual.load_ref_blocks, source.load_ref_blocks) << context;
     EXPECT_EQ(actual.eviction_target_ref_blocks, source.eviction_target_ref_blocks) << context;
     EXPECT_EQ(actual.store_ref_blocks, source.store_ref_blocks) << context;
+    EXPECT_EQ(actual.frozen_ref_blocks, source.frozen_ref_blocks) << context;
     EXPECT_FLOAT_EQ(actual.used_ratio, source.used_ratio) << context;
     EXPECT_EQ(actual.available_blocks, expected_available) << context;
     EXPECT_FALSE(actual.read_bytes.has_value()) << context;
@@ -1444,6 +1492,7 @@ static void expectMergedRowFromTree(const BlockTreePoolMetricsSnapshot& source,
     EXPECT_EQ(actual.load_ref_blocks, source.load_ref_blocks) << context;
     EXPECT_EQ(actual.eviction_target_ref_blocks, source.eviction_target_ref_blocks) << context;
     EXPECT_EQ(actual.store_ref_blocks, source.store_ref_blocks) << context;
+    EXPECT_EQ(actual.frozen_ref_blocks, source.frozen_ref_blocks) << context;
     EXPECT_EQ(actual.available_blocks, expected_available) << context;
     EXPECT_EQ(actual.read_bytes, source.read_bytes) << context;
     EXPECT_EQ(actual.write_bytes, source.write_bytes) << context;
@@ -1601,6 +1650,79 @@ TEST_F(HybridPoolCoordinatorCacheManagerTest, ReserveBlocksUseCPShardedFullGroup
 
     FreeInfo free_info{batch_res, token_ids};
     allocator->free(free_info);
+}
+
+TEST_F(HybridPoolCoordinatorCacheManagerTest, SharedReuseTailConfigControlsOnlyReusablePrefill) {
+    for (const bool group_reuse : {false, true}) {
+        for (const bool request_reuse : {false, true}) {
+            for (const int tail : {1, 3, std::numeric_limits<int>::max()}) {
+                SCOPED_TRACE(::testing::Message() << group_reuse << "/" << request_reuse << " tail=" << tail);
+                auto config                    = makeTinySwaMultiPoolHybridConfig(12, 12);
+                config.reuse_cache_tail_blocks = tail;
+                auto groups                    = config.groups();
+                for (auto& group : groups) {
+                    group.policy.enable_prefix_reuse = group_reuse;
+                    if (group.tag == "swa") {
+                        group.policy.sliding_window_size = 8;
+                    }
+                }
+                config.setTopology(std::move(groups), config.topology().layers());
+                auto allocator = makeAllocator(config);
+                ASSERT_TRUE(allocator->init());
+                auto       resource = makeBatchResource(1, config);
+                auto       tokens   = makeCompleteTokenIds(1, 24, 4);
+                MallocInfo info{resource, tokens};
+                info.enable_cache_lookup          = false;
+                info.reuse_cache                  = request_reuse;
+                info.enable_remove_skipped_blocks = false;
+                const int linear_count            = group_reuse && request_reuse ? std::min(tail, 6) : 1;
+                const int swa_count               = group_reuse && request_reuse ? std::clamp(tail, 2, 6) : 2;
+                EXPECT_EQ(allocator->estimateBatchPeakNeedBlocks(resource, 24, 24, 0, 0, request_reuse, 1),
+                          linear_count + swa_count);
+                ASSERT_TRUE(allocator->malloc(info).success);
+                EXPECT_EQ(validBlockCount(resource->blocks(0, "linear")), linear_count);
+                EXPECT_EQ(validBlockCount(resource->blocks(0, "swa")), swa_count);
+                info.enable_remove_skipped_blocks = true;
+                for (int seq_len : {25, 29, 33}) {
+                    tokens->setSeqLength(seq_len);
+                    ASSERT_TRUE(allocator->malloc(info).success);
+                    EXPECT_EQ(validBlockCount(resource->blocks(0, "linear")), 2u);
+                    EXPECT_EQ(validBlockCount(resource->blocks(0, "swa")), 2u);
+                }
+                allocator->free({resource, tokens});
+                EXPECT_EQ(allocator->freeBlocksNum(), 22u);
+            }
+        }
+    }
+}
+
+TEST_F(HybridPoolCoordinatorCacheManagerTest, LinearAndSWAPeakFitEqualSmallPoolsForLongPrompt) {
+    auto config    = makeTinySwaMultiPoolHybridConfig(/*linear_block_num=*/4, /*swa_block_num=*/4);
+    auto allocator = makeAllocator(config);
+    ASSERT_TRUE(allocator->init());
+    auto resource  = makeBatchResource(1, config);
+    auto token_ids = makeCompleteTokenIds(1, 160, 4);
+    EXPECT_EQ(allocator->estimateBatchPeakNeedBlocks(resource, 160, 160, 0, 0, false, 1), 3);
+    EXPECT_EQ(allocator->estimateBatchPeakNeedBlocks(resource, 160, 160, 32, 0, false, 1), 6);
+    EXPECT_EQ(allocator->availableBlocksNum(), 6u);
+
+    MallocInfo info{resource, token_ids};
+    info.enable_cache_lookup          = false;
+    info.reuse_cache                  = false;
+    info.enable_remove_skipped_blocks = false;
+    ASSERT_TRUE(allocator->malloc(info).success);
+    EXPECT_EQ(allocator->freeBlocksNum(), 3u);
+    EXPECT_EQ(allocator->estimateBatchPeakNeedBlocks(resource, 160, 160, 32, 0, false, 1), 3);
+
+    info.enable_remove_skipped_blocks = true;
+    for (int seq_len = 161; seq_len <= 192; ++seq_len) {
+        token_ids->setSeqLength(seq_len);
+        ASSERT_TRUE(allocator->malloc(info).success) << "seq_len=" << seq_len;
+        EXPECT_EQ(validBlockCount(resource->blocks(0, "linear")), 2u);
+        EXPECT_EQ(validBlockCount(resource->blocks(0, "swa")), 2u);
+    }
+    allocator->free({resource, token_ids});
+    EXPECT_EQ(allocator->freeBlocksNum(), 6u);
 }
 
 TEST_F(HybridPoolCoordinatorCacheManagerTest, PreparedSWALoadReserveRejectsPoolLocalShortfall) {
@@ -2123,7 +2245,7 @@ TEST_F(HybridPoolCoordinatorCacheManagerTest, DSV4FixedTagPoolsUsePinnedHostBack
 
 TEST_F(HybridPoolCoordinatorCacheManagerTest, DSV4HCAStateReuseEnabledAllocatesTailOnly) {
     auto config        = makeDSV4HybridPoolConfig(/*block_num=*/200);
-    config.linear_step = 4;
+    config.reuse_cache_tail_blocks = 4;
     auto allocator     = makeAllocator(config);
     ASSERT_TRUE(allocator->init());
 
@@ -2292,27 +2414,27 @@ TEST_F(HybridPoolCoordinatorCacheManagerTest, DSV4PinnedHcaStatePoolExcludesFixe
     EXPECT_EQ(explicitPoolReserveBytes(config), 0u);
 }
 
-TEST_F(HybridPoolCoordinatorCacheManagerTest, DSV4StateSwaPoolsWithoutExplicitBlocksScaleWithLinearStep) {
+TEST_F(HybridPoolCoordinatorCacheManagerTest, DSV4StateSwaPoolsWithoutExplicitBlocksFollowBaseline) {
     auto mc                                            = makeProModelConfig();
     mc.hybrid_attention_config.enable_hybrid_attention = true;
     ParallelismConfig pc;
     setDsv4ExplicitPoolBlocks(mc, "hca_state", 0);
     auto config        = CacheConfigCreator::createWarmupConfig(mc, pc, 0);
-    config.linear_step = 4;
+    config.reuse_cache_tail_blocks = 4;
 
     RuntimeConfig rt;
     config.finalizeBlockNums(/*global_block_num=*/128, rt);
 
     for (const auto& group : config.groups()) {
-        const uint32_t expected = group.policy.group_type == CacheGroupType::SWA ? 32u : 128u;
+        const uint32_t expected = 128u;
         EXPECT_EQ(group.block_num, expected) << "group_id=" << group.tag;
     }
     EXPECT_EQ(explicitPoolReserveBytes(config), 0u);
 }
 
-TEST_F(HybridPoolCoordinatorCacheManagerTest, FinalizeNonExplicitSwaBlocksUsesCeilDivision) {
+TEST_F(HybridPoolCoordinatorCacheManagerTest, FinalizeNonExplicitSwaBlocksFollowsBaseline) {
     auto config        = makeTinySwaMultiPoolHybridConfig();
-    config.linear_step = 4;
+    config.reuse_cache_tail_blocks = 4;
     RuntimeConfig rt;
 
     config.finalizeBlockNums(/*global_block_num=*/1, rt);
@@ -2321,13 +2443,13 @@ TEST_F(HybridPoolCoordinatorCacheManagerTest, FinalizeNonExplicitSwaBlocksUsesCe
 
     config.finalizeBlockNums(/*global_block_num=*/8, rt);
     EXPECT_EQ(config.group("linear").block_num, 8u);
-    EXPECT_EQ(config.group("swa").block_num, 2u);
+    EXPECT_EQ(config.group("swa").block_num, 8u);
 
     config.finalizeBlockNums(/*global_block_num=*/9, rt);
     EXPECT_EQ(config.group("linear").block_num, 9u);
-    EXPECT_EQ(config.group("swa").block_num, 3u);
+    EXPECT_EQ(config.group("swa").block_num, 9u);
 
-    config.linear_step = 1;
+    config.reuse_cache_tail_blocks = std::numeric_limits<int>::max();
     config.finalizeBlockNums(/*global_block_num=*/9, rt);
     EXPECT_EQ(config.group("linear").block_num, 9u);
     EXPECT_EQ(config.group("swa").block_num, 9u);
@@ -2406,7 +2528,7 @@ TEST_F(HybridPoolCoordinatorCacheManagerTest, DSV4AllLayerCacheBaseHasPerGroupTe
 }
 
 TEST_F(HybridPoolCoordinatorCacheManagerTest, DSV4CPShardedInsertThenReuseSamePrefix) {
-    auto config    = makeDSV4HybridPoolConfig(/*block_num=*/64);
+    auto config    = makeDSV4HybridPoolConfig(/*block_num=*/64, /*cp_size=*/2);
     auto allocator = makeAllocator(config);
     ASSERT_TRUE(allocator->init());
 
@@ -2425,7 +2547,7 @@ TEST_F(HybridPoolCoordinatorCacheManagerTest, DSV4CPShardedInsertThenReuseSamePr
 
     auto seed_res = makeBatchResource(/*batch_size=*/1, config);
     seed_res->setBatchCacheKeys(0, full_keys);
-    auto seed_tokens = makeCompleteTokenIds(/*batch_size=*/1, seq_len, spb);
+    auto seed_tokens = makeCompleteTokenIds(/*batch_size=*/1, 10 * spb, spb);
 
     MallocInfo seed_malloc{seed_res, seed_tokens};
     seed_malloc.reuse_cache         = true;
@@ -2464,12 +2586,12 @@ TEST_F(HybridPoolCoordinatorCacheManagerTest, DSV4CPShardedInsertThenReuseSamePr
 }
 
 TEST_F(HybridPoolCoordinatorCacheManagerTest, DSV4CPShardedEvictionCascadesFromFullToLowerPriorityGroups) {
-    auto config    = makeDSV4HybridPoolConfig(/*block_num=*/64);
+    auto config    = makeDSV4HybridPoolConfig(/*block_num=*/64, /*cp_size=*/2);
     auto allocator = makeAllocator(config);
     ASSERT_TRUE(allocator->init());
 
     const int spb     = static_cast<int>(config.seq_size_per_block);
-    const int seq_len = 10 * spb + 17;
+    const int seq_len = 10 * spb;
 
     CacheKeysType full_keys;
     for (int i = 0; i < 10; ++i) {
@@ -2551,9 +2673,8 @@ TEST_F(HybridPoolCoordinatorCacheManagerTest, DSV4CPShardedEvictionCascadesFromF
     for (size_t group_id = 0; group_id < allocator->groupBlockPools().size(); ++group_id) {
         const auto& pool = allocator->groupBlockPools()[group_id];
         if (reclaimed_group_tags.find(config.groupTags()[group_id]) != reclaimed_group_tags.end()) {
-            // FULL subtree pruning also releases unreachable descendants, so a
-            // cascaded group may reclaim more blocks than the triggering pool.
-            EXPECT_GE(pool->freeBlocksNum(), free_before[group_id] + reclaimed) << "group_id=" << group_id;
+            // Sparse groups retain fewer blocks than the full canonical path.
+            EXPECT_EQ(pool->freeBlocksNum(), config.groups()[group_id].block_num - 1) << "group_id=" << group_id;
         } else {
             // Other group types can still own resources below the dropped FULL
             // prefix. Those unreachable descendants are pruned as well.

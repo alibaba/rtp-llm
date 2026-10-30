@@ -1,13 +1,15 @@
 -r requirements_base.txt
-https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/kis/AMD/torch/torch-2.9.1%2Bgit7e1940d-cp310-cp310-linux_x86_64.whl
-https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/kis/AMD/torchvision/torchvision-0.24.0%2Brocm7.2.0.gitb919bd0c-cp310-cp310-linux_x86_64.whl
-https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/kis/AMD/triton/triton-3.8.0%2Bamd.rocm7.2.0.git111ff227-cp310-cp310-linux_x86_64.whl
-https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/kis/AMD/triton/triton_kernels-1.0.0%2Bamd.rocm7.2.0.git111ff227-py3-none-any.whl
-pyrsmi==0.2.0
-pyyaml==6.0.2
-https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/kis/AMD/aiter/amd_aiter-0.1.23.dev134%2Bg8449f416b-cp310-cp310-linux_x86_64.whl
+fast-safetensors==0.7.3+torch2.1.2.rocm ; platform_machine == "x86_64"
+fastsafetensors==0.1.19rc5+ali ; platform_machine == "x86_64"
+torch==2.9.1+git7e1940d
+torchvision==0.24.0+rocm7.2.0.gitb919bd0c
+triton==3.8.0+amd.rocm7.2.0.git111ff227
+triton-kernels==1.0.0+amd.rocm7.2.0.git111ff227
+amd-aiter==0.1.23.dev134+g8449f416b
 # FLA kernels directly import FlyDSL (including private flydsl._mlir APIs), so
 # pin it explicitly rather than relying on AITER's transitive dependency. 0.3.2
 # is required by the AITER FlyDSL GDN kernels used by RTP-LLM.
 flydsl==0.3.2
-https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/kis%2FAMD%2Famd_smi%2Fali%2Famd_smi.tar
+https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/rocm/amd_smi.tar ; platform_machine == "x86_64"
+pyrsmi==0.2.0
+pyyaml==6.0.2

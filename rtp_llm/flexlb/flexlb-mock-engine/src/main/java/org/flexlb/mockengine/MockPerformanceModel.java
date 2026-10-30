@@ -126,25 +126,25 @@ final class MockPerformanceModel {
      */
     private static final String DSV4_PREFILL_FIT_EXPRESSION =
             "max(196, -68.612174288157 + 0.993068319341 * (max(0, 287.3980926717 + 2.30134977837751 * batchSize + "
-            + "0.158123254797307 * sum(hitCacheTokens / 1024.) + 0.575522710053703 * sum(computeTokens / 1024.) + "
-            + "0.0517623430739831 * sum(computeTokens / 1024. * computeTokens / 1024.) + 0.0395308136993267 * "
-            + "sum(hitCacheTokens / 1024. * computeTokens / 1024.) + 0.0104363634681015 * sum(hitCacheTokens / 1024. * "
-            + "hitCacheTokens / 1024.) + 0.575522710053703 * max(sum(computeTokens / 1024.) - 16, 0) + 2.82077211814514 "
-            + "* max(sum(computeTokens / 1024.) - 32, 0) - 0.0254671429192862 * max(sum(computeTokens / 1024.) - 64, 0) "
-            + "+ 2.15779213792494 * max(sum(computeTokens / 1024.) - 96, 0) + 0.247806025472364 * "
-            + "max(sum(hitCacheTokens / 1024.) - 32, 0) - 0.444522654549492 * max(sum(hitCacheTokens / 1024.) - 64, 0) "
-            + "- 0.427317020061895 * max(sum(hitCacheTokens / 1024.) - 128, 0) + 0.347029077528455 * "
-            + "max(sum(hitCacheTokens / 1024.) - 256, 0) - 0.298742307762735 * max(sum(hitCacheTokens / 1024.) - 384, "
-            + "0) + 2.30134977837751 * max(batchSize - 8, 0) - 3.54884859699154 * max(batchSize - 16, 0) - "
-            + "11.3438560779984 * max(batchSize - 24, 0) + 0.879751992138183 * sum(max(computeTokens / 1024. - 2, 0)) + "
-            + "0.636364578079591 * sum(max(computeTokens / 1024. - 4, 0)) - 0.0513345988517118 * sum(max(computeTokens "
-            + "/ 1024. - 8, 0)) - 0.332584389129357 * sum(max(hitCacheTokens / 1024. - 2, 0)) + 0.305819761192588 * "
-            + "sum(max(hitCacheTokens / 1024. - 4, 0)) - 0.287610979974721 * sum(max(hitCacheTokens / 1024. - 8, 0)) + "
-            + "0.191310200712013 * sum(max(hitCacheTokens / 1024. - 12, 0)) + 0.0130251644478961 * max(batchSize - 8, "
-            + "0) * sum(hitCacheTokens / 1024.) + 0.00981382840761646 * max(batchSize - 16, 0) * sum(hitCacheTokens / "
-            + "1024.) - 0.0299132587297009 * max(batchSize - 24, 0) * sum(hitCacheTokens / 1024.) + 0.0447455122487382 "
-            + "* max(batchSize - 8, 0) * sum(computeTokens / 1024.) + 0.0104635312001851 * max(batchSize - 16, 0) * "
-            + "sum(computeTokens / 1024.) + 0.0542737877321807 * max(batchSize - 24, 0) * sum(computeTokens / 1024.))))";
+                    + "0.158123254797307 * sum(hitCacheTokens / 1024.) + 0.575522710053703 * sum(computeTokens / 1024.) + "
+                    + "0.0517623430739831 * sum(computeTokens / 1024. * computeTokens / 1024.) + 0.0395308136993267 * "
+                    + "sum(hitCacheTokens / 1024. * computeTokens / 1024.) + 0.0104363634681015 * sum(hitCacheTokens / 1024. * "
+                    + "hitCacheTokens / 1024.) + 0.575522710053703 * max(sum(computeTokens / 1024.) - 16, 0) + 2.82077211814514 "
+                    + "* max(sum(computeTokens / 1024.) - 32, 0) - 0.0254671429192862 * max(sum(computeTokens / 1024.) - 64, 0) "
+                    + "+ 2.15779213792494 * max(sum(computeTokens / 1024.) - 96, 0) + 0.247806025472364 * "
+                    + "max(sum(hitCacheTokens / 1024.) - 32, 0) - 0.444522654549492 * max(sum(hitCacheTokens / 1024.) - 64, 0) "
+                    + "- 0.427317020061895 * max(sum(hitCacheTokens / 1024.) - 128, 0) + 0.347029077528455 * "
+                    + "max(sum(hitCacheTokens / 1024.) - 256, 0) - 0.298742307762735 * max(sum(hitCacheTokens / 1024.) - 384, "
+                    + "0) + 2.30134977837751 * max(batchSize - 8, 0) - 3.54884859699154 * max(batchSize - 16, 0) - "
+                    + "11.3438560779984 * max(batchSize - 24, 0) + 0.879751992138183 * sum(max(computeTokens / 1024. - 2, 0)) + "
+                    + "0.636364578079591 * sum(max(computeTokens / 1024. - 4, 0)) - 0.0513345988517118 * sum(max(computeTokens "
+                    + "/ 1024. - 8, 0)) - 0.332584389129357 * sum(max(hitCacheTokens / 1024. - 2, 0)) + 0.305819761192588 * "
+                    + "sum(max(hitCacheTokens / 1024. - 4, 0)) - 0.287610979974721 * sum(max(hitCacheTokens / 1024. - 8, 0)) + "
+                    + "0.191310200712013 * sum(max(hitCacheTokens / 1024. - 12, 0)) + 0.0130251644478961 * max(batchSize - 8, "
+                    + "0) * sum(hitCacheTokens / 1024.) + 0.00981382840761646 * max(batchSize - 16, 0) * sum(hitCacheTokens / "
+                    + "1024.) - 0.0299132587297009 * max(batchSize - 24, 0) * sum(hitCacheTokens / 1024.) + 0.0447455122487382 "
+                    + "* max(batchSize - 8, 0) * sum(computeTokens / 1024.) + 0.0104635312001851 * max(batchSize - 16, 0) * "
+                    + "sum(computeTokens / 1024.) + 0.0542737877321807 * max(batchSize - 24, 0) * sum(computeTokens / 1024.))))";
 
     private volatile int blockSize;
     private final double sleepScale;
@@ -216,24 +216,25 @@ final class MockPerformanceModel {
     // (0 = unbounded, > 0 = cap on queued prefill batches).
     private volatile Integer overrideMaxWaitingPrefillBatches;
 
-    private MockPerformanceModel(int blockSize,
-                                 double sleepScale,
-                                 double prefillScale,
-                                 Double prefillMinMs,
-                                 Double configuredFixedPrefillMs,
-                                 int maxWaitingPrefillBatches,
-                                 int directBatchSizeMax,
-                                 int maxBatchTokens,
-                                 int maxBatchRequests,
-                                 PrefillTimeFormula prefillFormula,
-                                 List<DecodePoint> decodePoints,
-                                 double stepBaseMs,
-                                 double stepPerRunningMs,
-                                 double tokensPerStep,
-                                 int decodeReserveStep,
-                                 double decodeScale,
-                                 boolean reportQueuedAsKvAllocated,
-                                 double jitterPct) {
+    private MockPerformanceModel(
+            int blockSize,
+            double sleepScale,
+            double prefillScale,
+            Double prefillMinMs,
+            Double configuredFixedPrefillMs,
+            int maxWaitingPrefillBatches,
+            int directBatchSizeMax,
+            int maxBatchTokens,
+            int maxBatchRequests,
+            PrefillTimeFormula prefillFormula,
+            List<DecodePoint> decodePoints,
+            double stepBaseMs,
+            double stepPerRunningMs,
+            double tokensPerStep,
+            int decodeReserveStep,
+            double decodeScale,
+            boolean reportQueuedAsKvAllocated,
+            double jitterPct) {
         this.blockSize = blockSize;
         this.sleepScale = sleepScale;
         this.prefillScale = prefillScale;
@@ -254,7 +255,8 @@ final class MockPerformanceModel {
         this.jitterPct = jitterPct;
     }
 
-    static MockPerformanceModel load(String performanceFile, String masterConfigFile) throws IOException {
+    static MockPerformanceModel load(String performanceFile, String masterConfigFile)
+            throws IOException {
         JsonNode performance = MAPPER.readTree(Path.of(performanceFile).toFile());
         int blockSize = performance.path("block_size").asInt(1024);
         double sleepScale = performance.path("sleep_scale").asDouble(1.0);
@@ -267,15 +269,14 @@ final class MockPerformanceModel {
         // removed is the SILENT fallback, not this explicit channel.
         Double prefillFixedMs = prefill.has("fixed_ms") ? prefill.get("fixed_ms").asDouble() : null;
         Double prefillMinMs = prefill.has("min_ms") ? prefill.get("min_ms").asDouble() : null;
-        int maxWaitingPrefillBatches = prefill.path("max_waiting_batches")
-                .asInt(DEFAULT_MAX_WAITING_PREFILL_BATCHES);
+        int maxWaitingPrefillBatches =
+                prefill.path("max_waiting_batches").asInt(DEFAULT_MAX_WAITING_PREFILL_BATCHES);
         int directBatchSizeMax = prefill.path("direct_batch_size_max").asInt(32);
-        int maxBatchTokens = prefill.path("max_batch_tokens")
-                .asInt(DEFAULT_MAX_BATCH_TOKENS);
-        int maxBatchRequests = prefill.path("max_batch_requests")
-                .asInt(DEFAULT_MAX_BATCH_REQUESTS);
+        int maxBatchTokens = prefill.path("max_batch_tokens").asInt(DEFAULT_MAX_BATCH_TOKENS);
+        int maxBatchRequests = prefill.path("max_batch_requests").asInt(DEFAULT_MAX_BATCH_REQUESTS);
 
-        PrefillTimeFormula formula = PrefillTimeFormula.parse(loadPrefillExpression(masterConfigFile));
+        PrefillTimeFormula formula =
+                PrefillTimeFormula.parse(loadPrefillExpression(masterConfigFile));
 
         JsonNode decode = performance.path("decode");
         // per_token_ms is REMOVED (task #69, wrong-version-deleted-clean rule):
@@ -284,13 +285,19 @@ final class MockPerformanceModel {
         // production. Fail fast with a migration hint instead of silently
         // reinterpreting it.
         if (decode.has("per_token_ms")) {
-            throw new IllegalStateException("Performance JSON '" + performanceFile
-                    + "': decode.per_token_ms is removed — decode is now priced per STEP"
-                    + " (production fit step_base_ms=" + DEFAULT_DECODE_STEP_BASE_MS
-                    + " + step_per_running_ms=" + DEFAULT_DECODE_STEP_PER_RUNNING_MS
-                    + " × running, " + DEFAULT_TOKENS_PER_STEP + " tokens/step by default)."
-                    + " Remove per_token_ms to get the production-fit defaults, or declare"
-                    + " decode.step_ms_by_batch / decode.step_base_ms explicitly.");
+            throw new IllegalStateException(
+                    "Performance JSON '"
+                            + performanceFile
+                            + "': decode.per_token_ms is removed — decode is now priced per STEP"
+                            + " (production fit step_base_ms="
+                            + DEFAULT_DECODE_STEP_BASE_MS
+                            + " + step_per_running_ms="
+                            + DEFAULT_DECODE_STEP_PER_RUNNING_MS
+                            + " × running, "
+                            + DEFAULT_TOKENS_PER_STEP
+                            + " tokens/step by default)."
+                            + " Remove per_token_ms to get the production-fit defaults, or declare"
+                            + " decode.step_ms_by_batch / decode.step_base_ms explicitly.");
         }
         boolean reportQueuedAsKvAllocated =
                 decode.path("report_queued_as_kv_allocated").asBoolean(false);
@@ -304,9 +311,11 @@ final class MockPerformanceModel {
         if (!points.isEmpty() && hasLinearCoeffs) {
             // Two explicit step-latency declarations are a config conflict;
             // picking one silently would violate the least-surprise rule.
-            throw new IllegalStateException("Performance JSON '" + performanceFile
-                    + "': decode.step_ms_by_batch and decode.step_base_ms/step_per_running_ms"
-                    + " are mutually exclusive — declare exactly one step-latency source.");
+            throw new IllegalStateException(
+                    "Performance JSON '"
+                            + performanceFile
+                            + "': decode.step_ms_by_batch and decode.step_base_ms/step_per_running_ms"
+                            + " are mutually exclusive — declare exactly one step-latency source.");
         }
         points.sort(Comparator.comparingInt(DecodePoint::batchSize));
         // No decode latency declaration at all -> the linear production fit
@@ -316,26 +325,46 @@ final class MockPerformanceModel {
         // overrides the linear fit; explicit coefficients override its
         // default intercept/slope.
         double stepBaseMs = decode.path("step_base_ms").asDouble(DEFAULT_DECODE_STEP_BASE_MS);
-        double stepPerRunningMs = decode.path("step_per_running_ms")
-                .asDouble(DEFAULT_DECODE_STEP_PER_RUNNING_MS);
+        double stepPerRunningMs =
+                decode.path("step_per_running_ms").asDouble(DEFAULT_DECODE_STEP_PER_RUNNING_MS);
         double tokensPerStep = decode.path("tokens_per_step").asDouble(DEFAULT_TOKENS_PER_STEP);
         if (tokensPerStep <= 0) {
-            throw new IllegalStateException("Performance JSON '" + performanceFile
-                    + "': decode.tokens_per_step must be > 0 (got " + tokensPerStep + ")");
+            throw new IllegalStateException(
+                    "Performance JSON '"
+                            + performanceFile
+                            + "': decode.tokens_per_step must be > 0 (got "
+                            + tokensPerStep
+                            + ")");
         }
         int decodeReserveStep = decode.path("reserve_step").asInt(DEFAULT_DECODE_RESERVE_STEP);
         if (decodeReserveStep < 0) {
-            throw new IllegalStateException("Performance JSON '" + performanceFile
-                    + "': decode.reserve_step must be >= 0 (got " + decodeReserveStep + ")");
+            throw new IllegalStateException(
+                    "Performance JSON '"
+                            + performanceFile
+                            + "': decode.reserve_step must be >= 0 (got "
+                            + decodeReserveStep
+                            + ")");
         }
         double jitterPct = performance.path("jitter_pct").asDouble(0.0);
-        return new MockPerformanceModel(blockSize, sleepScale, prefillScale,
-                prefillMinMs, prefillFixedMs, maxWaitingPrefillBatches, directBatchSizeMax,
-                maxBatchTokens, maxBatchRequests, formula,
-                List.copyOf(points), stepBaseMs, stepPerRunningMs, tokensPerStep,
+        return new MockPerformanceModel(
+                blockSize,
+                sleepScale,
+                prefillScale,
+                prefillMinMs,
+                prefillFixedMs,
+                maxWaitingPrefillBatches,
+                directBatchSizeMax,
+                maxBatchTokens,
+                maxBatchRequests,
+                formula,
+                List.copyOf(points),
+                stepBaseMs,
+                stepPerRunningMs,
+                tokensPerStep,
                 decodeReserveStep,
                 decode.path("scale").asDouble(1.0),
-                reportQueuedAsKvAllocated, jitterPct);
+                reportQueuedAsKvAllocated,
+                jitterPct);
     }
 
     /**
@@ -358,23 +387,25 @@ final class MockPerformanceModel {
         JsonNode root = MAPPER.readTree(Path.of(masterConfigFile).toFile());
         JsonNode envs = root.path("zone_process_setting").path("process_info").path("envs");
         for (JsonNode item : envs) {
-            if (item.isArray() && item.size() >= 2
+            if (item.isArray()
+                    && item.size() >= 2
                     && "FLEXLB_CONFIG".equals(item.get(0).asText())) {
                 FlexlbConfig config = ConfigService.parse(item.get(1).asText());
-                var estimator = config.getRouter().getRoles().getPrefill()
-                        .getExecutionTimeEstimator();
-                if (estimator != null
-                        && estimator.getType() == EstimatorType.FORMULA) {
+                var estimator =
+                        config.getRouter().getRoles().getPrefill().getExecutionTimeEstimator();
+                if (estimator != null && estimator.getType() == EstimatorType.FORMULA) {
                     String expression = estimator.getExpression();
                     if (expression == null || expression.isBlank()) {
-                        throw new IllegalStateException("Master config " + masterConfigFile
-                                + ": router.roles.prefill.executionTimeEstimator is FORMULA"
-                                + " with a blank expression — set the expression explicitly or"
-                                + " omit the estimator to use the FlexLB formula default");
+                        throw new IllegalStateException(
+                                "Master config "
+                                        + masterConfigFile
+                                        + ": router.roles.prefill.executionTimeEstimator is FORMULA"
+                                        + " with a blank expression — set the expression explicitly or"
+                                        + " omit the estimator to use the FlexLB formula default");
                     }
                     return expression;
                 }
-                break;  // LEARNING estimator: fall through to the production-fit default
+                break; // LEARNING estimator: fall through to the production-fit default
             }
         }
         return DSV4_PREFILL_FIT_EXPRESSION;
@@ -409,8 +440,13 @@ final class MockPerformanceModel {
         int hitBlocks = cache.prefixHitBlocks(blockKeys);
         long hitTokens = (long) hitBlocks * blockSize;
         hitTokens = Math.min(hitTokens, inputLen);
-        return new RequestShape(input, inputLen, Math.max(1, outputLen), List.copyOf(blockKeys),
-                hitTokens, hitBlocks);
+        return new RequestShape(
+                input,
+                inputLen,
+                Math.max(1, outputLen),
+                List.copyOf(blockKeys),
+                hitTokens,
+                hitBlocks);
     }
 
     long prefillMs(List<RequestShape> requests) {
@@ -484,7 +520,8 @@ final class MockPerformanceModel {
      */
     int maxWaitingPrefillBatches() {
         return overrideMaxWaitingPrefillBatches != null
-                ? overrideMaxWaitingPrefillBatches : maxWaitingPrefillBatches;
+                ? overrideMaxWaitingPrefillBatches
+                : maxWaitingPrefillBatches;
     }
 
     /**
@@ -607,8 +644,9 @@ final class MockPerformanceModel {
             DecodePoint left = decodePoints.get(i);
             DecodePoint right = decodePoints.get(i + 1);
             if (activeBatchSize <= right.batchSize) {
-                double ratio = (activeBatchSize - left.batchSize)
-                        / (double) (right.batchSize - left.batchSize);
+                double ratio =
+                        (activeBatchSize - left.batchSize)
+                                / (double) (right.batchSize - left.batchSize);
                 return left.stepMs + ratio * (right.stepMs - left.stepMs);
             }
         }
@@ -628,14 +666,13 @@ final class MockPerformanceModel {
         return blockSize;
     }
 
-    record RequestShape(EngineRpcService.GenerateInputPB input,
-                        int inputLen,
-                        int outputLen,
-                        List<Long> blockKeys,
-                        long hitTokens,
-                        int hitBlocks) {
-    }
+    record RequestShape(
+            EngineRpcService.GenerateInputPB input,
+            int inputLen,
+            int outputLen,
+            List<Long> blockKeys,
+            long hitTokens,
+            int hitBlocks) {}
 
-    private record DecodePoint(int batchSize, double stepMs) {
-    }
+    private record DecodePoint(int batchSize, double stepMs) {}
 }

@@ -19,12 +19,12 @@ class KVCacheConfigPickleTest(TestCase):
             with self.subTest(enable_crc=enable_crc):
                 config.enable_crc = enable_crc
                 state = config.__getstate__()
-                self.assertEqual(len(state), 70)
-                self.assertEqual(state[:2], ("KVCacheConfig", 8))
+                self.assertEqual(len(state), 72)
+                self.assertEqual(state[:2], ("KVCacheConfig", 9))
                 self.assertEqual(
-                    state[-6:-1], tuple(KV_CACHE_EVENT_FIELD_VALUES.values())
+                    state[64:69], tuple(KV_CACHE_EVENT_FIELD_VALUES.values())
                 )
-                self.assertIs(state[-1], enable_crc)
+                self.assertIs(state[69], enable_crc)
                 # Normalizing old fields must not mutate the supplied tuple.
                 original_state = tuple(list(state))
                 direct = KVCacheConfig.__new__(KVCacheConfig)
@@ -46,7 +46,7 @@ class KVCacheConfigPickleTest(TestCase):
         for name, value in KV_CACHE_EVENT_FIELD_VALUES.items():
             setattr(source, name, value)
         state = source.__getstate__()
-        previous = (state[0], 7, *state[2:-1])
+        previous = (state[0], 7, *state[2:69])
         original_state = tuple(list(previous))
         restored = KVCacheConfig.__new__(KVCacheConfig)
         restored.__setstate__(previous)
@@ -61,7 +61,7 @@ class KVCacheConfigPickleTest(TestCase):
         source.dsv4_fixed_pool_blocks = 17
         source.block_tree_transfer_worker_count = 7
         state = source.__getstate__()
-        previous = (state[0], 6, *state[2:-6])
+        previous = (state[0], 6, *state[2:64])
         restored = KVCacheConfig.__new__(KVCacheConfig)
         restored.__setstate__(previous)
         self.assertEqual(restored.dsv4_fixed_pool_blocks, 17)
@@ -70,6 +70,35 @@ class KVCacheConfigPickleTest(TestCase):
         defaults = KVCacheConfig()
         for name in EVENT_PICKLE_FIELDS:
             self.assertEqual(getattr(restored, name), getattr(defaults, name), name)
+
+    def test_tail_and_pool_configuration_survives_worker_round_trips(self):
+        config = KVCacheConfig()
+        config.reuse_cache_tail_blocks = 13
+        config.linear_pool_blocks = 31
+        config.swa_pool_blocks = 17
+        for _ in range(2):
+            config = pickle.loads(pickle.dumps(config))
+            self.assertEqual(config.reuse_cache_tail_blocks, 13)
+            self.assertEqual(config.linear_pool_blocks, 31)
+            self.assertEqual(config.swa_pool_blocks, 17)
+        self.assertFalse(hasattr(config, "linear_step"))
+        self.assertFalse(hasattr(config, "linear_cache_tail_blocks"))
+
+    def test_version_eight_uses_new_retention_defaults(self):
+        source = KVCacheConfig()
+        source.enable_crc = False
+        source.reuse_cache_tail_blocks = 13
+        state = list(source.__getstate__()[:70])
+        state[1] = 8
+        state[10] = 4  # Historical checkpoint interval, not a tail count.
+        previous = tuple(state)
+        restored = KVCacheConfig.__new__(KVCacheConfig)
+        restored.__setstate__(previous)
+        self.assertEqual(previous, tuple(state))
+        self.assertEqual(restored.reuse_cache_tail_blocks, 2147483647)
+        self.assertEqual(restored.linear_pool_blocks, 0)
+        self.assertEqual(restored.swa_pool_blocks, 0)
+        self.assertFalse(restored.enable_crc)
 
     def test_malformed_event_states_are_rejected(self):
         state = KVCacheConfig().__getstate__()

@@ -49,7 +49,9 @@ class TwinOverloadAdmissionTest {
         commitBatch(endpoint, config, 2L, 9L);
 
         assertEquals(2, endpoint.getInflightBatchCount());
-        assertEquals(16, endpoint.observedRequestCount(),
+        assertEquals(
+                16,
+                endpoint.observedRequestCount(),
                 "maxRequests=8 bounds one decision, not the engine's total inflight work");
     }
 
@@ -64,9 +66,12 @@ class TwinOverloadAdmissionTest {
         Map<String, TaskInfo> finished = tasks(1L, 7, 11L, TaskPhase.RUNNING);
         applyStatus(endpoint, tasks(8L, 1, 11L, TaskPhase.RUNNING), finished);
         assertEquals(1, endpoint.getInflightBatchCount());
-        assertEquals(1, endpoint.observedRequestCount(),
+        assertEquals(
+                1,
+                endpoint.observedRequestCount(),
                 "completed members immediately leave ownership while the last member retains the batch");
-        assertTrue(!endpoint.batchAdmissionAvailability(1).isAvailable(),
+        assertTrue(
+                !endpoint.batchAdmissionAvailability(1).isAvailable(),
                 "seven finished members do not release the final member's batch slot");
 
         applyStatus(endpoint, Map.of(), tasks(8L, 1, 11L, TaskPhase.RUNNING));
@@ -79,7 +84,9 @@ class TwinOverloadAdmissionTest {
     }
 
     @ParameterizedTest
-    @EnumSource(value = TaskPhase.class, names = {"RECEIVED", "RUNNING"})
+    @EnumSource(
+            value = TaskPhase.class,
+            names = {"RECEIVED", "RUNNING"})
     void locallyOwnedBatchStatusMustRetainExactlyOneDeliverySlot(TaskPhase phase) {
         FlexlbConfig config = config(2);
         PrefillEndpoint endpoint = prefill(config);
@@ -87,14 +94,20 @@ class TwinOverloadAdmissionTest {
         assertEquals(8, endpoint.observedRequestCount());
 
         applyStatus(endpoint, tasks(101L, 8, 70L, phase), Map.of());
-        assertEquals(8, endpoint.observedRequestCount(),
+        assertEquals(
+                8,
+                endpoint.observedRequestCount(),
                 "the local batch and its engine observation describe the same eight requests");
         assertEquals(1, endpoint.getInflightBatchCount());
-        assertEquals(1, endpoint.getInflightBatchCount(),
+        assertEquals(
+                1,
+                endpoint.getInflightBatchCount(),
                 "a local batch must consume one slot without being counted again by worker status");
 
         applyStatus(endpoint, tasks(101L, 8, 70L, phase), Map.of());
-        assertEquals(1, endpoint.getInflightBatchCount(),
+        assertEquals(
+                1,
+                endpoint.getInflightBatchCount(),
                 "repeated status must neither release nor duplicate the local batch slot");
 
         applyStatus(endpoint, Map.of(), tasks(101L, 8, 70L, phase));
@@ -117,7 +130,9 @@ class TwinOverloadAdmissionTest {
             PrefillState.ReservationResult<PrefillState.BatchReservation> blocked =
                     endpoint.reserveBatch(staged, 71L, 1);
             try (PrefillState.BatchReservation unexpected = blocked.reservation()) {
-                assertEquals(PrefillState.CapacityStatus.CAPACITY_FULL, blocked.status(),
+                assertEquals(
+                        PrefillState.CapacityStatus.CAPACITY_FULL,
+                        blocked.status(),
                         "a locally reserved batch must occupy the only slot at final admission");
             }
         }
@@ -139,14 +154,20 @@ class TwinOverloadAdmissionTest {
         assertTrue(endpoint.captureRouteProjectionInputs().work().totalRemainingWorkMs().isEmpty());
         applyStatus(endpoint, Map.of(), tasks(101L, 8, 70L, TaskPhase.RUNNING));
         assertEquals(0, endpoint.observedRequestCount());
-        assertEquals(0L, endpoint.captureRouteProjectionInputs().work().totalRemainingWorkMs().orElseThrow());
+        assertEquals(
+                0L,
+                endpoint.captureRouteProjectionInputs()
+                        .work()
+                        .totalRemainingWorkMs()
+                        .orElseThrow());
     }
 
     @Test
     void decodeRequestCapMustBlockEvenWithAlmostEmptyKvPool() {
-        DecodeEndpoint endpoint = new DecodeEndpoint(
-                EndpointTestSupport.workerStatus(RoleType.DECODE, "127.0.0.2", 8080, 8090),
-                EndpointTestSupport.noopEventSink());
+        DecodeEndpoint endpoint =
+                new DecodeEndpoint(
+                        EndpointTestSupport.workerStatus(RoleType.DECODE, "127.0.0.2", 8080, 8090),
+                        EndpointTestSupport.noopEventSink());
         endpoints.add(endpoint);
         applyStatus(endpoint, Map.of(), Map.of());
         for (long id = 1; id <= 9; id++) {
@@ -157,28 +178,44 @@ class TwinOverloadAdmissionTest {
         }
         for (long id = 1; id <= 8; id++) {
             DecodeEndpoint.EngineDispatchPermitAcquisition acquisition =
-                    endpoint.acquireDispatchPermit(endpoint.reservationHandle(id), new DecodeEndpoint.AdmissionCapacity(8L, 90L));
-            assertEquals(DecodeEndpoint.EngineDispatchPermitAcquireStatus.ACQUIRED, acquisition.status());
-            assertEquals(DecodeEndpoint.EngineDispatchPermitTransferStatus.TRANSFERRED,
+                    endpoint.acquireDispatchPermit(
+                            endpoint.reservationHandle(id),
+                            new DecodeEndpoint.AdmissionCapacity(8L, 90L));
+            assertEquals(
+                    DecodeEndpoint.EngineDispatchPermitAcquireStatus.ACQUIRED,
+                    acquisition.status());
+            assertEquals(
+                    DecodeEndpoint.EngineDispatchPermitTransferStatus.TRANSFERRED,
                     acquisition.permit().dispatch());
         }
-        assertEquals(DecodeEndpoint.EngineDispatchPermitAcquireStatus.CAPACITY_FULL,
-                endpoint.acquireDispatchPermit(endpoint.reservationHandle(9L), new DecodeEndpoint.AdmissionCapacity(8L, 90L)).status());
+        assertEquals(
+                DecodeEndpoint.EngineDispatchPermitAcquireStatus.CAPACITY_FULL,
+                endpoint.acquireDispatchPermit(
+                                endpoint.reservationHandle(9L),
+                                new DecodeEndpoint.AdmissionCapacity(8L, 90L))
+                        .status());
 
-        applyStatus(endpoint, tasks(2L, 7, 10L, TaskPhase.RUNNING),
+        applyStatus(
+                endpoint,
+                tasks(2L, 7, 10L, TaskPhase.RUNNING),
                 tasks(1L, 1, 10L, TaskPhase.RUNNING));
         DecodeEndpoint.EngineDispatchPermitAcquisition resumed =
-                endpoint.acquireDispatchPermit(endpoint.reservationHandle(9L), new DecodeEndpoint.AdmissionCapacity(8L, 90L));
+                endpoint.acquireDispatchPermit(
+                        endpoint.reservationHandle(9L),
+                        new DecodeEndpoint.AdmissionCapacity(8L, 90L));
         assertEquals(DecodeEndpoint.EngineDispatchPermitAcquireStatus.ACQUIRED, resumed.status());
         assertTrue(resumed.permit().release());
     }
 
     private PrefillEndpoint prefill(FlexlbConfig config) {
         EndpointTestSupport.TestRequestRuntime runtime = EndpointTestSupport.requestRuntime();
-        PrefillEndpoint endpoint = new PrefillEndpoint(
-                EndpointTestSupport.workerStatus(RoleType.PREFILL, "127.0.0.1", 8080, 8090),
-                config, EndpointTestSupport.routeStrategy(runtime), runtime.events(),
-                mock(BatchSchedulerReporter.class));
+        PrefillEndpoint endpoint =
+                new PrefillEndpoint(
+                        EndpointTestSupport.workerStatus(RoleType.PREFILL, "127.0.0.1", 8080, 8090),
+                        config,
+                        EndpointTestSupport.routeStrategy(runtime),
+                        runtime.events(),
+                        mock(BatchSchedulerReporter.class));
         endpoints.add(endpoint);
         endpoint.startGeneration();
         return endpoint;
@@ -195,8 +232,8 @@ class TwinOverloadAdmissionTest {
         return config;
     }
 
-    private static void commitBatch(PrefillEndpoint endpoint, FlexlbConfig config,
-                                    long batchId, long firstRequestId) {
+    private static void commitBatch(
+            PrefillEndpoint endpoint, FlexlbConfig config, long batchId, long firstRequestId) {
         List<ScheduledRequest> items = new ArrayList<>();
         for (long id = firstRequestId; id < firstRequestId + 8; id++) {
             ScheduledRequest item = item(endpoint, config, id);
@@ -208,7 +245,7 @@ class TwinOverloadAdmissionTest {
                 endpoint.reserveBatch(items.getFirst(), batchId, limit);
         assertEquals(PrefillState.CapacityStatus.ACQUIRED, acquisition.status());
         try (PrefillState.BatchReservation reservation = acquisition.reservation();
-             PrefillState.CommittedHandoff ignored = reservation.commit(items, 300_000L)) {
+                PrefillState.CommittedHandoff ignored = reservation.commit(items, 300_000L)) {
             // Releasing the handoff closes only the generation pin, not engine work.
         }
     }
@@ -224,11 +261,20 @@ class TwinOverloadAdmissionTest {
         selected.setServerIp("127.0.0.1");
         selected.setHttpPort(8080);
         selected.setGrpcPort(8090);
-        return new ScheduledRequest(context, null, null, selected, null,
-                endpoint, null, null, System.currentTimeMillis());
+        return new ScheduledRequest(
+                context,
+                null,
+                null,
+                selected,
+                null,
+                endpoint,
+                null,
+                null,
+                System.currentTimeMillis());
     }
 
-    private static Map<String, TaskInfo> tasks(long firstId, int count, long batchId, TaskPhase phase) {
+    private static Map<String, TaskInfo> tasks(
+            long firstId, int count, long batchId, TaskPhase phase) {
         Map<String, TaskInfo> result = new LinkedHashMap<>();
         for (long id = firstId; id < firstId + count; id++) {
             TaskInfo task = new TaskInfo();
@@ -242,8 +288,10 @@ class TwinOverloadAdmissionTest {
         return result;
     }
 
-    private static void applyStatus(WorkerEndpoint endpoint,
-                                    Map<String, TaskInfo> running, Map<String, TaskInfo> finished) {
+    private static void applyStatus(
+            WorkerEndpoint endpoint,
+            Map<String, TaskInfo> running,
+            Map<String, TaskInfo> finished) {
         WorkerStatusResponse response = new WorkerStatusResponse();
         response.setRunningTaskInfo(running);
         response.setFinishedTaskInfo(finished);

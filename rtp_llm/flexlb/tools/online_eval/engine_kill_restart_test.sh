@@ -51,37 +51,37 @@ export JAVA_HOME="${JAVA_HOME:-/opt/homebrew/opt/openjdk@21}"
 export PATH="${JAVA_HOME}/bin:${PATH}"
 
 JAVA_MODULE_OPTS=(
-  --add-modules ALL-SYSTEM
-  --add-opens java.base/java.lang=ALL-UNNAMED
-  --add-opens java.base/java.lang.invoke=ALL-UNNAMED
-  --add-opens java.base/java.util=ALL-UNNAMED
-  --add-opens java.base/java.util.concurrent=ALL-UNNAMED
-  --add-opens=java.base/jdk.internal.misc=ALL-UNNAMED
-  --add-opens java.base/java.nio=ALL-UNNAMED
-  --add-opens java.base/sun.nio.ch=ALL-UNNAMED
-  --add-opens java.instrument/sun.instrument=ALL-UNNAMED
+    --add-modules ALL-SYSTEM
+    --add-opens java.base/java.lang=ALL-UNNAMED
+    --add-opens java.base/java.lang.invoke=ALL-UNNAMED
+    --add-opens java.base/java.util=ALL-UNNAMED
+    --add-opens java.base/java.util.concurrent=ALL-UNNAMED
+    --add-opens=java.base/jdk.internal.misc=ALL-UNNAMED
+    --add-opens java.base/java.nio=ALL-UNNAMED
+    --add-opens java.base/sun.nio.ch=ALL-UNNAMED
+    --add-opens java.instrument/sun.instrument=ALL-UNNAMED
 )
 
 # -- Configurable parameters -----------------------------------------------
 
-ENGINE_MODE="${ENGINE_MODE:-multi}"    # "multi" (2P+2D) or "single" (1P+1D)
-KILL_TARGET="${KILL_TARGET:-prefill}"   # "prefill" or "decode"
+ENGINE_MODE="${ENGINE_MODE:-multi}"   # "multi" (2P+2D) or "single" (1P+1D)
+KILL_TARGET="${KILL_TARGET:-prefill}" # "prefill" or "decode"
 
 if [[ "${ENGINE_MODE}" == "single" ]]; then
-  N_PREFILL_TOTAL=1
-  N_DECODE_TOTAL=1
+    N_PREFILL_TOTAL=1
+    N_DECODE_TOTAL=1
 else
-  N_PREFILL_TOTAL=2
-  N_DECODE_TOTAL=2
+    N_PREFILL_TOTAL=2
+    N_DECODE_TOTAL=2
 fi
 
 # Cluster gets total-1 engines of the killed role
 if [[ "${KILL_TARGET}" == "prefill" ]]; then
-  CLUSTER_N_PREFILL=$((N_PREFILL_TOTAL - 1))
-  CLUSTER_N_DECODE=${N_DECODE_TOTAL}
+    CLUSTER_N_PREFILL=$((N_PREFILL_TOTAL - 1))
+    CLUSTER_N_DECODE=${N_DECODE_TOTAL}
 else
-  CLUSTER_N_PREFILL=${N_PREFILL_TOTAL}
-  CLUSTER_N_DECODE=$((N_DECODE_TOTAL - 1))
+    CLUSTER_N_PREFILL=${N_PREFILL_TOTAL}
+    CLUSTER_N_DECODE=$((N_DECODE_TOTAL - 1))
 fi
 
 MOCK_BASE_GRPC_PORT="${MOCK_BASE_GRPC_PORT:-55151}"
@@ -95,11 +95,11 @@ DECODE_CACHE_BLOCKS="${DECODE_CACHE_BLOCKS:-3000}"
 
 # Victim engine name and cache blocks
 if [[ "${KILL_TARGET}" == "prefill" ]]; then
-  VICTIM_NAME="prefill-$((N_PREFILL_TOTAL - 1))"
-  VICTIM_CACHE_BLOCKS=${PREFILL_CACHE_BLOCKS}
+    VICTIM_NAME="prefill-$((N_PREFILL_TOTAL - 1))"
+    VICTIM_CACHE_BLOCKS=${PREFILL_CACHE_BLOCKS}
 else
-  VICTIM_NAME="decode-$((N_DECODE_TOTAL - 1))"
-  VICTIM_CACHE_BLOCKS=${DECODE_CACHE_BLOCKS}
+    VICTIM_NAME="decode-$((N_DECODE_TOTAL - 1))"
+    VICTIM_CACHE_BLOCKS=${DECODE_CACHE_BLOCKS}
 fi
 
 # -- Compute cluster engine addresses --------------------------------------
@@ -110,42 +110,43 @@ CLUSTER_DECODE_ADDRS=""
 # via toGrpcPort(httpPort) = httpPort + 1.
 _port=${MOCK_BASE_GRPC_PORT}
 for ((i = 0; i < CLUSTER_N_PREFILL; i++)); do
-  if [[ -z "${CLUSTER_PREFILL_ADDRS}" ]]; then
-    CLUSTER_PREFILL_ADDRS="127.0.0.1:$((_port - 1))"
-  else
-    CLUSTER_PREFILL_ADDRS="${CLUSTER_PREFILL_ADDRS},127.0.0.1:$((_port - 1))"
-  fi
-  _port=$((_port + 1))
+    if [[ -z "${CLUSTER_PREFILL_ADDRS}" ]]; then
+        CLUSTER_PREFILL_ADDRS="127.0.0.1:$((_port - 1))"
+    else
+        CLUSTER_PREFILL_ADDRS="${CLUSTER_PREFILL_ADDRS},127.0.0.1:$((_port - 1))"
+    fi
+    _port=$((_port + 1))
 done
 for ((i = 0; i < CLUSTER_N_DECODE; i++)); do
-  if [[ -z "${CLUSTER_DECODE_ADDRS}" ]]; then
-    CLUSTER_DECODE_ADDRS="127.0.0.1:$((_port - 1))"
-  else
-    CLUSTER_DECODE_ADDRS="${CLUSTER_DECODE_ADDRS},127.0.0.1:$((_port - 1))"
-  fi
-  _port=$((_port + 1))
+    if [[ -z "${CLUSTER_DECODE_ADDRS}" ]]; then
+        CLUSTER_DECODE_ADDRS="127.0.0.1:$((_port - 1))"
+    else
+        CLUSTER_DECODE_ADDRS="${CLUSTER_DECODE_ADDRS},127.0.0.1:$((_port - 1))"
+    fi
+    _port=$((_port + 1))
 done
 
 # -- Combine addresses for service discovery -------------------------------
 VICTIM_ADDR="127.0.0.1:${VICTIM_HTTP_PORT}"
 if [[ "${KILL_TARGET}" == "prefill" ]]; then
-  if [[ -z "${CLUSTER_PREFILL_ADDRS}" ]]; then
-    PREFILL_DOMAIN_ADDR="${VICTIM_ADDR}"
-  else
-    PREFILL_DOMAIN_ADDR="${CLUSTER_PREFILL_ADDRS},${VICTIM_ADDR}"
-  fi
-  DECODE_DOMAIN_ADDR="${CLUSTER_DECODE_ADDRS}"
+    if [[ -z "${CLUSTER_PREFILL_ADDRS}" ]]; then
+        PREFILL_DOMAIN_ADDR="${VICTIM_ADDR}"
+    else
+        PREFILL_DOMAIN_ADDR="${CLUSTER_PREFILL_ADDRS},${VICTIM_ADDR}"
+    fi
+    DECODE_DOMAIN_ADDR="${CLUSTER_DECODE_ADDRS}"
 else
-  PREFILL_DOMAIN_ADDR="${CLUSTER_PREFILL_ADDRS}"
-  if [[ -z "${CLUSTER_DECODE_ADDRS}" ]]; then
-    DECODE_DOMAIN_ADDR="${VICTIM_ADDR}"
-  else
-    DECODE_DOMAIN_ADDR="${CLUSTER_DECODE_ADDRS},${VICTIM_ADDR}"
-  fi
+    PREFILL_DOMAIN_ADDR="${CLUSTER_PREFILL_ADDRS}"
+    if [[ -z "${CLUSTER_DECODE_ADDRS}" ]]; then
+        DECODE_DOMAIN_ADDR="${VICTIM_ADDR}"
+    else
+        DECODE_DOMAIN_ADDR="${CLUSTER_DECODE_ADDRS},${VICTIM_ADDR}"
+    fi
 fi
 
 # -- Model service config --------------------------------------------------
-MODEL_SERVICE_CONFIG_JSON="$(python3 - "${PREFILL_DOMAIN_ADDR}" "${DECODE_DOMAIN_ADDR}" <<'PY_MODEL'
+MODEL_SERVICE_CONFIG_JSON="$(
+    python3 - "${PREFILL_DOMAIN_ADDR}" "${DECODE_DOMAIN_ADDR}" <<'PY_MODEL'
 import json
 import sys
 
@@ -194,10 +195,10 @@ RESTART_TS=""
 # -- Helpers ---------------------------------------------------------------
 
 wait_for_port() {
-  local host="$1"
-  local port="$2"
-  local timeout_s="$3"
-  python3 - "$host" "$port" "$timeout_s" <<'PY'
+    local host="$1"
+    local port="$2"
+    local timeout_s="$3"
+    python3 - "$host" "$port" "$timeout_s" <<'PY'
 import socket, sys, time
 host, port, timeout_s = sys.argv[1], int(sys.argv[2]), float(sys.argv[3])
 deadline = time.time() + timeout_s
@@ -215,114 +216,114 @@ PY
 }
 
 check_port_free() {
-  local port="$1"
-  if lsof -i :"${port}" -sTCP:LISTEN >/dev/null 2>&1; then
-    echo "ERROR: port ${port} is already in use" >&2
-    lsof -i :"${port}" -sTCP:LISTEN >&2
-    return 1
-  fi
-  return 0
+    local port="$1"
+    if lsof -i :"${port}" -sTCP:LISTEN >/dev/null 2>&1; then
+        echo "ERROR: port ${port} is already in use" >&2
+        lsof -i :"${port}" -sTCP:LISTEN >&2
+        return 1
+    fi
+    return 0
 }
 
 cleanup() {
-  echo ""
-  echo "[cleanup] stopping processes ..."
-  if [[ -n "${FLEXLB_PID}" ]]; then
-    kill "${FLEXLB_PID}" >/dev/null 2>&1 || true
-    wait "${FLEXLB_PID}" 2>/dev/null || true
-    FLEXLB_PID=""
-  fi
-  if [[ -n "${VICTIM_PID}" ]]; then
-    kill -9 "${VICTIM_PID}" >/dev/null 2>&1 || true
-    wait "${VICTIM_PID}" 2>/dev/null || true
-    VICTIM_PID=""
-  fi
-  if [[ -n "${MOCK_PID}" ]]; then
-    kill "${MOCK_PID}" >/dev/null 2>&1 || true
-    wait "${MOCK_PID}" 2>/dev/null || true
-    MOCK_PID=""
-  fi
-  if [[ -n "${LOAD_CLIENT_PID}" ]]; then
-    kill "${LOAD_CLIENT_PID}" >/dev/null 2>&1 || true
-    wait "${LOAD_CLIENT_PID}" 2>/dev/null || true
-    LOAD_CLIENT_PID=""
-  fi
-  echo "[cleanup] done."
+    echo ""
+    echo "[cleanup] stopping processes ..."
+    if [[ -n "${FLEXLB_PID}" ]]; then
+        kill "${FLEXLB_PID}" >/dev/null 2>&1 || true
+        wait "${FLEXLB_PID}" 2>/dev/null || true
+        FLEXLB_PID=""
+    fi
+    if [[ -n "${VICTIM_PID}" ]]; then
+        kill -9 "${VICTIM_PID}" >/dev/null 2>&1 || true
+        wait "${VICTIM_PID}" 2>/dev/null || true
+        VICTIM_PID=""
+    fi
+    if [[ -n "${MOCK_PID}" ]]; then
+        kill "${MOCK_PID}" >/dev/null 2>&1 || true
+        wait "${MOCK_PID}" 2>/dev/null || true
+        MOCK_PID=""
+    fi
+    if [[ -n "${LOAD_CLIENT_PID}" ]]; then
+        kill "${LOAD_CLIENT_PID}" >/dev/null 2>&1 || true
+        wait "${LOAD_CLIENT_PID}" 2>/dev/null || true
+        LOAD_CLIENT_PID=""
+    fi
+    echo "[cleanup] done."
 }
 trap cleanup EXIT
 
 start_victim_engine() {
-  local log_file="$1"
-  echo "  starting victim engine (${VICTIM_NAME}, ${KILL_TARGET}) at port ${VICTIM_GRPC_PORT} ..."
-  # Pre-flight: ensure both gRPC and HTTP ports are free
-  check_port_free "${VICTIM_GRPC_PORT}" || {
-    echo "  attempting to kill process on port ${VICTIM_GRPC_PORT} ..." >&2
-    local stale_pid
-    stale_pid=$(lsof -ti :"${VICTIM_GRPC_PORT}" -sTCP:LISTEN 2>/dev/null || true)
-    if [[ -n "${stale_pid}" ]]; then
-      kill -9 "${stale_pid}" 2>/dev/null || true
-      sleep 2
+    local log_file="$1"
+    echo "  starting victim engine (${VICTIM_NAME}, ${KILL_TARGET}) at port ${VICTIM_GRPC_PORT} ..."
+    # Pre-flight: ensure both gRPC and HTTP ports are free
+    check_port_free "${VICTIM_GRPC_PORT}" || {
+        echo "  attempting to kill process on port ${VICTIM_GRPC_PORT} ..." >&2
+        local stale_pid
+        stale_pid=$(lsof -ti :"${VICTIM_GRPC_PORT}" -sTCP:LISTEN 2>/dev/null || true)
+        if [[ -n "${stale_pid}" ]]; then
+            kill -9 "${stale_pid}" 2>/dev/null || true
+            sleep 2
+        fi
+        check_port_free "${VICTIM_GRPC_PORT}" || return 1
+    }
+    check_port_free "${VICTIM_HTTP_PORT}" || {
+        echo "  attempting to kill process on port ${VICTIM_HTTP_PORT} ..." >&2
+        local stale_pid
+        stale_pid=$(lsof -ti :"${VICTIM_HTTP_PORT}" -sTCP:LISTEN 2>/dev/null || true)
+        if [[ -n "${stale_pid}" ]]; then
+            kill -9 "${stale_pid}" 2>/dev/null || true
+            sleep 2
+        fi
+        check_port_free "${VICTIM_HTTP_PORT}" || return 1
+    }
+    PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="${SCRIPT_DIR}" python3 "${SCRIPT_DIR}/run_single_engine.py" \
+        --host 127.0.0.1 \
+        --grpc-port "${VICTIM_GRPC_PORT}" \
+        --role "${KILL_TARGET}" \
+        --name "${VICTIM_NAME}" \
+        --performance "${PERF_CONFIG_FILE}" \
+        --cache-blocks "${VICTIM_CACHE_BLOCKS}" \
+        --total-kv-tokens 6291456 \
+        --block-size 1024 \
+        >"${log_file}" 2>&1 &
+    VICTIM_PID="$!"
+    wait_for_port "127.0.0.1" "${VICTIM_GRPC_PORT}" 20
+    # Verify the victim process is still alive after port came up
+    # (guards against the case where gRPC binds first but HTTP fails, causing crash)
+    if ! kill -0 "${VICTIM_PID}" 2>/dev/null; then
+        echo "ERROR: victim engine process died during startup" >&2
+        echo "--- victim engine log ---" >&2
+        cat "${log_file}" >&2
+        return 1
     fi
-    check_port_free "${VICTIM_GRPC_PORT}" || return 1
-  }
-  check_port_free "${VICTIM_HTTP_PORT}" || {
-    echo "  attempting to kill process on port ${VICTIM_HTTP_PORT} ..." >&2
-    local stale_pid
-    stale_pid=$(lsof -ti :"${VICTIM_HTTP_PORT}" -sTCP:LISTEN 2>/dev/null || true)
-    if [[ -n "${stale_pid}" ]]; then
-      kill -9 "${stale_pid}" 2>/dev/null || true
-      sleep 2
-    fi
-    check_port_free "${VICTIM_HTTP_PORT}" || return 1
-  }
-  PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="${SCRIPT_DIR}" python3 "${SCRIPT_DIR}/run_single_engine.py" \
-    --host 127.0.0.1 \
-    --grpc-port "${VICTIM_GRPC_PORT}" \
-    --role "${KILL_TARGET}" \
-    --name "${VICTIM_NAME}" \
-    --performance "${PERF_CONFIG_FILE}" \
-    --cache-blocks "${VICTIM_CACHE_BLOCKS}" \
-    --total-kv-tokens 6291456 \
-    --block-size 1024 \
-    >"${log_file}" 2>&1 &
-  VICTIM_PID="$!"
-  wait_for_port "127.0.0.1" "${VICTIM_GRPC_PORT}" 20
-  # Verify the victim process is still alive after port came up
-  # (guards against the case where gRPC binds first but HTTP fails, causing crash)
-  if ! kill -0 "${VICTIM_PID}" 2>/dev/null; then
-    echo "ERROR: victim engine process died during startup" >&2
-    echo "--- victim engine log ---" >&2
-    cat "${log_file}" >&2
-    return 1
-  fi
-  echo "  victim engine started (pid=${VICTIM_PID})"
+    echo "  victim engine started (pid=${VICTIM_PID})"
 }
 
 start_master() {
-  local log_file="$1"
-  local default_flexlb_config='{"schemaVersion":3,"scheduler":{"type":"QUEUE","ordering":{"type":"PRIORITY"},"decision":{"type":"FIXED_WINDOW","maxRequests":32,"maxCollectionWaitMs":10,"maxPredictedExecutionMs":550}},"dispatcher":{"type":"BATCH","maxInflightPerPrefillWorker":4},"router":{"roles":{"prefill":{},"decode":{"availability":{"maxEngineRequests":132}}}},"requestLifecycle":{"request":{"timeoutMs":300000},"decision":{"lifetime":2.0}}}'
-  local flexlb_config="${FLEXLB_CONFIG:-${default_flexlb_config}}"
-  echo "  starting master ..."
-  env \
-    "MODEL_SERVICE_CONFIG=${MODEL_SERVICE_CONFIG_JSON}" \
-    "FLEXLB_CONFIG=${flexlb_config}" \
-    "HIPPO_ROLE=flexlb_engine_kill_test" \
-    java "${JAVA_MODULE_OPTS[@]}" -jar "${FLEXLB_JAR}" \
-    --server.port="${FLEXLB_HTTP_PORT}" \
-    --management.server.port="${FLEXLB_MANAGEMENT_PORT}" \
-    --logging.level.org.flexlb=DEBUG \
-    --logging.file.name="${log_file}.logback" \
-    >"${log_file}" 2>&1 &
-  FLEXLB_PID="$!"
-  wait_for_port "127.0.0.1" "${FLEXLB_HTTP_PORT}" 60
-  # Verify master process is still alive
-  if ! kill -0 "${FLEXLB_PID}" 2>/dev/null; then
-    echo "ERROR: master process died during startup" >&2
-    echo "--- master log ---" >&2
-    cat "${log_file}" >&2
-    return 1
-  fi
-  echo "  master started (pid=${FLEXLB_PID})"
+    local log_file="$1"
+    local default_flexlb_config='{"schemaVersion":3,"scheduler":{"type":"QUEUE","ordering":{"type":"PRIORITY"},"decision":{"type":"FIXED_WINDOW","maxRequests":32,"maxCollectionWaitMs":10,"maxPredictedExecutionMs":550}},"dispatcher":{"type":"BATCH","maxInflightPerPrefillWorker":4},"router":{"roles":{"prefill":{},"decode":{"availability":{"maxEngineRequests":132}}}},"requestLifecycle":{"request":{"timeoutMs":300000},"decision":{"lifetime":2.0}}}'
+    local flexlb_config="${FLEXLB_CONFIG:-${default_flexlb_config}}"
+    echo "  starting master ..."
+    env \
+        "MODEL_SERVICE_CONFIG=${MODEL_SERVICE_CONFIG_JSON}" \
+        "FLEXLB_CONFIG=${flexlb_config}" \
+        "HIPPO_ROLE=flexlb_engine_kill_test" \
+        java "${JAVA_MODULE_OPTS[@]}" -jar "${FLEXLB_JAR}" \
+        --server.port="${FLEXLB_HTTP_PORT}" \
+        --management.server.port="${FLEXLB_MANAGEMENT_PORT}" \
+        --logging.level.org.flexlb=DEBUG \
+        --logging.file.name="${log_file}.logback" \
+        >"${log_file}" 2>&1 &
+    FLEXLB_PID="$!"
+    wait_for_port "127.0.0.1" "${FLEXLB_HTTP_PORT}" 60
+    # Verify master process is still alive
+    if ! kill -0 "${FLEXLB_PID}" 2>/dev/null; then
+        echo "ERROR: master process died during startup" >&2
+        echo "--- master log ---" >&2
+        cat "${log_file}" >&2
+        return 1
+    fi
+    echo "  master started (pid=${FLEXLB_PID})"
 }
 
 # -- Prerequisites check ---------------------------------------------------
@@ -330,16 +331,16 @@ start_master() {
 echo ""
 echo "=== Prerequisites Check ==="
 if [[ ! -f "${FLEXLB_JAR}" ]]; then
-  echo "ERROR: FlexLB JAR not found: ${FLEXLB_JAR}" >&2
-  exit 1
+    echo "ERROR: FlexLB JAR not found: ${FLEXLB_JAR}" >&2
+    exit 1
 fi
 if [[ ! -f "${TRACE_FILE}" ]]; then
-  echo "ERROR: Trace file not found: ${TRACE_FILE}" >&2
-  exit 1
+    echo "ERROR: Trace file not found: ${TRACE_FILE}" >&2
+    exit 1
 fi
 java -version 2>&1 | head -1
 echo "  JAR: ${FLEXLB_JAR}"
-echo "  Trace: ${TRACE_FILE} ($(wc -l < "${TRACE_FILE}") lines)"
+echo "  Trace: ${TRACE_FILE} ($(wc -l <"${TRACE_FILE}") lines)"
 echo "  Engine Mode: ${ENGINE_MODE}"
 echo "  Kill Target: ${KILL_TARGET}"
 echo "  Cluster: ${CLUSTER_N_PREFILL}P + ${CLUSTER_N_DECODE}D"
@@ -353,35 +354,35 @@ echo ""
 echo "=== Pre-flight Port Check ==="
 _preflight_ports=("${FLEXLB_HTTP_PORT}" "${FLEXLB_MANAGEMENT_PORT}" "${MOCK_HTTP_PORT}" "${VICTIM_GRPC_PORT}" "${VICTIM_HTTP_PORT}")
 for ((i = 0; i < CLUSTER_N_PREFILL + CLUSTER_N_DECODE; i++)); do
-  _preflight_ports+=("$((MOCK_BASE_GRPC_PORT + i))")
+    _preflight_ports+=("$((MOCK_BASE_GRPC_PORT + i))")
 done
 _preflight_failed=0
 for port in "${_preflight_ports[@]}"; do
-  if lsof -i :"${port}" -sTCP:LISTEN >/dev/null 2>&1; then
-    echo "  WARNING: port ${port} is in use, killing stale process ..."
-    _stale_pid=$(lsof -ti :"${port}" -sTCP:LISTEN 2>/dev/null || true)
-    if [[ -n "${_stale_pid}" ]]; then
-      kill -9 "${_stale_pid}" 2>/dev/null || true
-    fi
-    sleep 2
     if lsof -i :"${port}" -sTCP:LISTEN >/dev/null 2>&1; then
-      echo "  ERROR: port ${port} still in use after kill attempt" >&2
-      _preflight_failed=1
-    else
-      echo "  port ${port} now free"
+        echo "  WARNING: port ${port} is in use, killing stale process ..."
+        _stale_pid=$(lsof -ti :"${port}" -sTCP:LISTEN 2>/dev/null || true)
+        if [[ -n "${_stale_pid}" ]]; then
+            kill -9 "${_stale_pid}" 2>/dev/null || true
+        fi
+        sleep 2
+        if lsof -i :"${port}" -sTCP:LISTEN >/dev/null 2>&1; then
+            echo "  ERROR: port ${port} still in use after kill attempt" >&2
+            _preflight_failed=1
+        else
+            echo "  port ${port} now free"
+        fi
     fi
-  fi
 done
 if [[ "${_preflight_failed}" -ne 0 ]]; then
-  echo "ERROR: pre-flight port check failed, aborting" >&2
-  exit 1
+    echo "ERROR: pre-flight port check failed, aborting" >&2
+    exit 1
 fi
 echo "  All ports free."
 
 # -- Write perf config -----------------------------------------------------
 
 PERF_CONFIG_FILE="${RUN_DIR}/perf.json"
-cat > "${PERF_CONFIG_FILE}" <<'JSON'
+cat >"${PERF_CONFIG_FILE}" <<'JSON'
 {
   "block_size": 1024,
   "sleep_scale": 1.0,
@@ -404,23 +405,23 @@ echo ""
 echo "=== Step 1: Start mock engine cluster (${CLUSTER_N_PREFILL}P + ${CLUSTER_N_DECODE}D) ==="
 ENDPOINT_FILE="${RUN_DIR}/endpoints.json"
 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="${SCRIPT_DIR}" python3 "${SCRIPT_DIR}/mock_engine_cluster.py" \
-  --n-prefill "${CLUSTER_N_PREFILL}" \
-  --n-decode "${CLUSTER_N_DECODE}" \
-  --base-grpc-port "${MOCK_BASE_GRPC_PORT}" \
-  --performance "${PERF_CONFIG_FILE}" \
-  --prefill-cache-blocks "${PREFILL_CACHE_BLOCKS}" \
-  --decode-cache-blocks "${DECODE_CACHE_BLOCKS}" \
-  --endpoint-file "${ENDPOINT_FILE}" \
-  --env-file "${RUN_DIR}/flexlb_env.txt" \
-  >"${RUN_DIR}/mock_engine.log" 2>&1 &
+    --n-prefill "${CLUSTER_N_PREFILL}" \
+    --n-decode "${CLUSTER_N_DECODE}" \
+    --base-grpc-port "${MOCK_BASE_GRPC_PORT}" \
+    --performance "${PERF_CONFIG_FILE}" \
+    --prefill-cache-blocks "${PREFILL_CACHE_BLOCKS}" \
+    --decode-cache-blocks "${DECODE_CACHE_BLOCKS}" \
+    --endpoint-file "${ENDPOINT_FILE}" \
+    --env-file "${RUN_DIR}/flexlb_env.txt" \
+    >"${RUN_DIR}/mock_engine.log" 2>&1 &
 MOCK_PID="$!"
 wait_for_port "127.0.0.1" "${MOCK_HTTP_PORT}" 20
 # Verify mock cluster process is still alive (guards against crash during startup)
 if ! kill -0 "${MOCK_PID}" 2>/dev/null; then
-  echo "ERROR: mock cluster process died during startup" >&2
-  echo "--- mock engine log ---" >&2
-  cat "${RUN_DIR}/mock_engine.log" >&2
-  exit 1
+    echo "ERROR: mock cluster process died during startup" >&2
+    echo "--- mock engine log ---" >&2
+    cat "${RUN_DIR}/mock_engine.log" >&2
+    exit 1
 fi
 echo "  mock cluster started (pid=${MOCK_PID}, http=${MOCK_HTTP_PORT})"
 
@@ -449,14 +450,14 @@ echo "=== Step 4: Start load client ==="
 LOAD_CLIENT_DIR="${RUN_DIR}/load_client"
 mkdir -p "${LOAD_CLIENT_DIR}"
 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="${SCRIPT_DIR}" python3 "${SCRIPT_DIR}/flexlb_load_client.py" \
-  "${TRACE_FILE}" \
-  --flexlb-http-addr "127.0.0.1:${FLEXLB_HTTP_PORT}" \
-  --replay-speed "${LOAD_CLIENT_REPLAY_SPEED}" \
-  --limit "${LOAD_CLIENT_LIMIT}" \
-  --max-concurrency "${LOAD_CLIENT_CONCURRENCY}" \
-  --timeout-ms "${LOAD_CLIENT_TIMEOUT_MS}" \
-  --output-dir "${LOAD_CLIENT_DIR}" \
-  >"${RUN_DIR}/load_client.log" 2>&1 &
+    "${TRACE_FILE}" \
+    --flexlb-http-addr "127.0.0.1:${FLEXLB_HTTP_PORT}" \
+    --replay-speed "${LOAD_CLIENT_REPLAY_SPEED}" \
+    --limit "${LOAD_CLIENT_LIMIT}" \
+    --max-concurrency "${LOAD_CLIENT_CONCURRENCY}" \
+    --timeout-ms "${LOAD_CLIENT_TIMEOUT_MS}" \
+    --output-dir "${LOAD_CLIENT_DIR}" \
+    >"${RUN_DIR}/load_client.log" 2>&1 &
 LOAD_CLIENT_PID="$!"
 echo "  load client started (pid=${LOAD_CLIENT_PID})"
 
@@ -468,9 +469,9 @@ echo ""
 echo "=== Step 5: Steady state wait (${STEADY_STATE_WAIT}s) ==="
 sleep "${STEADY_STATE_WAIT}"
 if kill -0 "${LOAD_CLIENT_PID}" 2>/dev/null; then
-  echo "  load client is running"
+    echo "  load client is running"
 else
-  echo "  WARNING: load client has already exited"
+    echo "  WARNING: load client has already exited"
 fi
 
 # ===========================================================================
@@ -481,19 +482,19 @@ echo ""
 echo "=== Step 6: Collect baseline data ==="
 echo "  - master inflight_status ..."
 curl -s -o "${RUN_DIR}/baseline_inflight.json" \
-  "http://127.0.0.1:${FLEXLB_HTTP_PORT}/rtp_llm/inflight_status" \
-  || echo "  WARNING: inflight_status request failed"
+    "http://127.0.0.1:${FLEXLB_HTTP_PORT}/rtp_llm/inflight_status" ||
+    echo "  WARNING: inflight_status request failed"
 echo "  - cluster snapshot ..."
 curl -s -o "${RUN_DIR}/baseline_cluster_snapshot.json" \
-  "http://127.0.0.1:${MOCK_HTTP_PORT}/snapshot" \
-  || echo '{"engines":[]}' > "${RUN_DIR}/baseline_cluster_snapshot.json"
+    "http://127.0.0.1:${MOCK_HTTP_PORT}/snapshot" ||
+    echo '{"engines":[]}' >"${RUN_DIR}/baseline_cluster_snapshot.json"
 echo "  - victim snapshot ..."
 curl -s -o "${RUN_DIR}/baseline_victim_snapshot.json" \
-  "http://127.0.0.1:${VICTIM_HTTP_PORT}/snapshot" \
-  || echo '{"engines":[]}' > "${RUN_DIR}/baseline_victim_snapshot.json"
+    "http://127.0.0.1:${VICTIM_HTTP_PORT}/snapshot" ||
+    echo '{"engines":[]}' >"${RUN_DIR}/baseline_victim_snapshot.json"
 echo "  - load client per_request.jsonl ..."
-cp "${LOAD_CLIENT_DIR}/per_request.jsonl" "${RUN_DIR}/pre_kill_per_request.jsonl" 2>/dev/null \
-  || echo "  NOTE: per_request.jsonl not available yet"
+cp "${LOAD_CLIENT_DIR}/per_request.jsonl" "${RUN_DIR}/pre_kill_per_request.jsonl" 2>/dev/null ||
+    echo "  NOTE: per_request.jsonl not available yet"
 
 # ===========================================================================
 # Step 7: KILL victim engine (kill -9)
@@ -516,9 +517,9 @@ echo ""
 echo "=== Step 8: Wait ${KILL_WAIT}s (kill period, observe failures) ==="
 sleep "${KILL_WAIT}"
 if kill -0 "${LOAD_CLIENT_PID}" 2>/dev/null; then
-  echo "  load client is still running"
+    echo "  load client is still running"
 else
-  echo "  load client has exited"
+    echo "  load client has exited"
 fi
 
 # ===========================================================================
@@ -529,20 +530,20 @@ echo ""
 echo "=== Step 9: Collect kill-period data ==="
 echo "  - master health check (should be alive) ..."
 MASTER_HEALTH_CODE=$(curl -s -o "${RUN_DIR}/kill_inflight.json" -w "%{http_code}" \
-  "http://127.0.0.1:${FLEXLB_HTTP_PORT}/rtp_llm/inflight_status" 2>/dev/null || echo "000")
-echo "${MASTER_HEALTH_CODE}" > "${RUN_DIR}/kill_master_health.txt"
+    "http://127.0.0.1:${FLEXLB_HTTP_PORT}/rtp_llm/inflight_status" 2>/dev/null || echo "000")
+echo "${MASTER_HEALTH_CODE}" >"${RUN_DIR}/kill_master_health.txt"
 echo "  master HTTP status: ${MASTER_HEALTH_CODE}"
 echo "  - cluster snapshot (surviving engines) ..."
 curl -s -o "${RUN_DIR}/kill_cluster_snapshot.json" \
-  "http://127.0.0.1:${MOCK_HTTP_PORT}/snapshot" \
-  || echo '{"engines":[]}' > "${RUN_DIR}/kill_cluster_snapshot.json"
+    "http://127.0.0.1:${MOCK_HTTP_PORT}/snapshot" ||
+    echo '{"engines":[]}' >"${RUN_DIR}/kill_cluster_snapshot.json"
 echo "  - victim snapshot (expected to fail) ..."
 curl -s -o "${RUN_DIR}/kill_victim_snapshot.json" \
-  "http://127.0.0.1:${VICTIM_HTTP_PORT}/snapshot" 2>/dev/null \
-  || echo '{"engines":[]}' > "${RUN_DIR}/kill_victim_snapshot.json"
+    "http://127.0.0.1:${VICTIM_HTTP_PORT}/snapshot" 2>/dev/null ||
+    echo '{"engines":[]}' >"${RUN_DIR}/kill_victim_snapshot.json"
 echo "  - load client per_request.jsonl ..."
-cp "${LOAD_CLIENT_DIR}/per_request.jsonl" "${RUN_DIR}/kill_per_request.jsonl" 2>/dev/null \
-  || echo "  NOTE: per_request.jsonl not available"
+cp "${LOAD_CLIENT_DIR}/per_request.jsonl" "${RUN_DIR}/kill_per_request.jsonl" 2>/dev/null ||
+    echo "  NOTE: per_request.jsonl not available"
 
 # ===========================================================================
 # Step 10: Restart victim engine
@@ -552,12 +553,12 @@ echo ""
 echo "=== Step 10: Restart victim engine ==="
 RESTART_TS=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 echo "  restart timestamp: ${RESTART_TS}"
-sleep 1  # brief pause to ensure port is released
+sleep 1 # brief pause to ensure port is released
 start_victim_engine "${RUN_DIR}/victim_engine_restart.log"
 
 # Master health check after victim restart
 _post_restart_health=$(curl -s -o /dev/null -w "%{http_code}" \
-  "http://127.0.0.1:${FLEXLB_HTTP_PORT}/rtp_llm/inflight_status" 2>/dev/null || echo "000")
+    "http://127.0.0.1:${FLEXLB_HTTP_PORT}/rtp_llm/inflight_status" 2>/dev/null || echo "000")
 echo "  master health after victim restart: HTTP ${_post_restart_health}"
 
 # ===========================================================================
@@ -568,18 +569,18 @@ echo ""
 echo "=== Step 11: Wait ${RECOVERY_WAIT}s (recovery period) ==="
 sleep "${RECOVERY_WAIT}"
 if kill -0 "${LOAD_CLIENT_PID}" 2>/dev/null; then
-  echo "  load client is still running"
+    echo "  load client is still running"
 else
-  echo "  load client has exited"
+    echo "  load client has exited"
 fi
 # Master health check after recovery wait
 _recovery_health=$(curl -s -o /dev/null -w "%{http_code}" \
-  "http://127.0.0.1:${FLEXLB_HTTP_PORT}/rtp_llm/inflight_status" 2>/dev/null || echo "000")
+    "http://127.0.0.1:${FLEXLB_HTTP_PORT}/rtp_llm/inflight_status" 2>/dev/null || echo "000")
 echo "  master health after recovery wait: HTTP ${_recovery_health}"
 if [[ "${_recovery_health}" != "200" ]]; then
-  echo "  WARNING: master is not responding after recovery wait!"
-  echo "  master logback log (last 30 lines):"
-  tail -30 "${RUN_DIR}/flexlb_master.log.logback" 2>/dev/null || echo "  (no logback log available)"
+    echo "  WARNING: master is not responding after recovery wait!"
+    echo "  master logback log (last 30 lines):"
+    tail -30 "${RUN_DIR}/flexlb_master.log.logback" 2>/dev/null || echo "  (no logback log available)"
 fi
 
 # ===========================================================================
@@ -589,15 +590,15 @@ fi
 echo ""
 echo "=== Step 12: Stop load client ==="
 if kill -0 "${LOAD_CLIENT_PID}" 2>/dev/null; then
-  echo "  stopping load client (pid=${LOAD_CLIENT_PID}) ..."
-  kill "${LOAD_CLIENT_PID}" 2>/dev/null || true
-  wait "${LOAD_CLIENT_PID}" 2>/dev/null || true
+    echo "  stopping load client (pid=${LOAD_CLIENT_PID}) ..."
+    kill "${LOAD_CLIENT_PID}" 2>/dev/null || true
+    wait "${LOAD_CLIENT_PID}" 2>/dev/null || true
 else
-  echo "  load client already exited"
+    echo "  load client already exited"
 fi
 LOAD_CLIENT_PID=""
-sleep 1  # Allow file flush
-sleep 5  # drain wait for in-flight to settle
+sleep 1 # Allow file flush
+sleep 5 # drain wait for in-flight to settle
 
 # ===========================================================================
 # Step 13: Recovery Verification
@@ -613,33 +614,33 @@ with open('${TRACE_FILE}') as f:
         req = json.loads(line)
         if req.get('ol', 0) <= 200:
             print(line, end='')
-" > "${RECOVERY_TRACE}" 2>/dev/null
-RECOVERY_TRACE_LINES=$(wc -l < "${RECOVERY_TRACE}" 2>/dev/null || echo 0)
+" >"${RECOVERY_TRACE}" 2>/dev/null
+RECOVERY_TRACE_LINES=$(wc -l <"${RECOVERY_TRACE}" 2>/dev/null || echo 0)
 echo "  recovery trace: ${RECOVERY_TRACE_LINES} short-output requests (ol <= 200)"
 
 RECOVERY_VERIFY_DIR="${RUN_DIR}/recovery_verify"
 mkdir -p "${RECOVERY_VERIFY_DIR}"
 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="${SCRIPT_DIR}" python3 "${SCRIPT_DIR}/flexlb_load_client.py" \
-  "${RECOVERY_TRACE}" \
-  --flexlb-http-addr "127.0.0.1:${FLEXLB_HTTP_PORT}" \
-  --replay-speed 0 \
-  --limit 100 \
-  --max-concurrency 10 \
-  --timeout-ms 10000 \
-  --output-dir "${RECOVERY_VERIFY_DIR}" \
-  >"${RUN_DIR}/recovery_verify.log" 2>&1 || true
+    "${RECOVERY_TRACE}" \
+    --flexlb-http-addr "127.0.0.1:${FLEXLB_HTTP_PORT}" \
+    --replay-speed 0 \
+    --limit 100 \
+    --max-concurrency 10 \
+    --timeout-ms 10000 \
+    --output-dir "${RECOVERY_VERIFY_DIR}" \
+    >"${RUN_DIR}/recovery_verify.log" 2>&1 || true
 echo "  recovery verification completed"
 cat "${RECOVERY_VERIFY_DIR}/summary.json" 2>/dev/null || echo "  NOTE: recovery summary not available"
 # Master health check after recovery verification
 _post_recovery_health=$(curl -s -o /dev/null -w "%{http_code}" \
-  "http://127.0.0.1:${FLEXLB_HTTP_PORT}/rtp_llm/inflight_status" 2>/dev/null || echo "000")
+    "http://127.0.0.1:${FLEXLB_HTTP_PORT}/rtp_llm/inflight_status" 2>/dev/null || echo "000")
 echo "  master health after recovery verification: HTTP ${_post_recovery_health}"
 if [[ "${_post_recovery_health}" != "200" ]]; then
-  echo "  WARNING: master is not responding after recovery verification!"
-  echo "  master logback log (last 50 lines):"
-  tail -50 "${RUN_DIR}/flexlb_master.log.logback" 2>/dev/null || echo "  (no logback log available)"
+    echo "  WARNING: master is not responding after recovery verification!"
+    echo "  master logback log (last 50 lines):"
+    tail -50 "${RUN_DIR}/flexlb_master.log.logback" 2>/dev/null || echo "  (no logback log available)"
 fi
-sleep 5  # drain wait for recovery verification in-flight to settle
+sleep 5 # drain wait for recovery verification in-flight to settle
 
 # ===========================================================================
 # Step 14: Collect post-restart data
@@ -649,21 +650,21 @@ echo ""
 echo "=== Step 14: Collect post-restart data ==="
 echo "  - master inflight_status ..."
 curl -s -o "${RUN_DIR}/post_restart_inflight.json" \
-  "http://127.0.0.1:${FLEXLB_HTTP_PORT}/rtp_llm/inflight_status" \
-  || echo "  WARNING: inflight_status request failed"
+    "http://127.0.0.1:${FLEXLB_HTTP_PORT}/rtp_llm/inflight_status" ||
+    echo "  WARNING: inflight_status request failed"
 echo "  - cluster snapshot ..."
 curl -s -o "${RUN_DIR}/post_restart_cluster_snapshot.json" \
-  "http://127.0.0.1:${MOCK_HTTP_PORT}/snapshot" \
-  || echo '{"engines":[]}' > "${RUN_DIR}/post_restart_cluster_snapshot.json"
+    "http://127.0.0.1:${MOCK_HTTP_PORT}/snapshot" ||
+    echo '{"engines":[]}' >"${RUN_DIR}/post_restart_cluster_snapshot.json"
 echo "  - victim snapshot ..."
 curl -s -o "${RUN_DIR}/post_restart_victim_snapshot.json" \
-  "http://127.0.0.1:${VICTIM_HTTP_PORT}/snapshot" \
-  || echo '{"engines":[]}' > "${RUN_DIR}/post_restart_victim_snapshot.json"
+    "http://127.0.0.1:${VICTIM_HTTP_PORT}/snapshot" ||
+    echo '{"engines":[]}' >"${RUN_DIR}/post_restart_victim_snapshot.json"
 echo "  - load client outputs ..."
-cp "${LOAD_CLIENT_DIR}/summary.json" "${RUN_DIR}/final_summary.json" 2>/dev/null \
-  || echo "  NOTE: summary.json not available"
-cp "${LOAD_CLIENT_DIR}/per_request.jsonl" "${RUN_DIR}/final_per_request.jsonl" 2>/dev/null \
-  || echo "  WARNING: per_request.jsonl not available"
+cp "${LOAD_CLIENT_DIR}/summary.json" "${RUN_DIR}/final_summary.json" 2>/dev/null ||
+    echo "  NOTE: summary.json not available"
+cp "${LOAD_CLIENT_DIR}/per_request.jsonl" "${RUN_DIR}/final_per_request.jsonl" 2>/dev/null ||
+    echo "  WARNING: per_request.jsonl not available"
 
 # ===========================================================================
 # Step 15: Generate test report
@@ -672,23 +673,23 @@ cp "${LOAD_CLIENT_DIR}/per_request.jsonl" "${RUN_DIR}/final_per_request.jsonl" 2
 echo ""
 echo "=== Step 15: Generate test report ==="
 ENGINE_MODE="${ENGINE_MODE}" \
-KILL_TARGET="${KILL_TARGET}" \
-KILL_TS="${KILL_TS}" \
-RESTART_TS="${RESTART_TS}" \
-MOCK_PID="${MOCK_PID}" \
-VICTIM_NAME="${VICTIM_NAME}" \
-VICTIM_GRPC_PORT="${VICTIM_GRPC_PORT}" \
-VICTIM_HTTP_PORT="${VICTIM_HTTP_PORT}" \
-LOAD_CLIENT_PID="${LOAD_CLIENT_PID:-exited}" \
-MASTER_HEALTH_CODE="${MASTER_HEALTH_CODE}" \
-CLUSTER_N_PREFILL="${CLUSTER_N_PREFILL}" \
-CLUSTER_N_DECODE="${CLUSTER_N_DECODE}" \
-N_PREFILL_TOTAL="${N_PREFILL_TOTAL}" \
-N_DECODE_TOTAL="${N_DECODE_TOTAL}" \
-FLEXLB_HTTP_PORT_VAL="${FLEXLB_HTTP_PORT}" \
-MOCK_HTTP_PORT_VAL="${MOCK_HTTP_PORT}" \
-MOCK_BASE_GRPC_PORT_VAL="${MOCK_BASE_GRPC_PORT}" \
-python3 - "${RUN_DIR}" <<'PYEOF'
+    KILL_TARGET="${KILL_TARGET}" \
+    KILL_TS="${KILL_TS}" \
+    RESTART_TS="${RESTART_TS}" \
+    MOCK_PID="${MOCK_PID}" \
+    VICTIM_NAME="${VICTIM_NAME}" \
+    VICTIM_GRPC_PORT="${VICTIM_GRPC_PORT}" \
+    VICTIM_HTTP_PORT="${VICTIM_HTTP_PORT}" \
+    LOAD_CLIENT_PID="${LOAD_CLIENT_PID:-exited}" \
+    MASTER_HEALTH_CODE="${MASTER_HEALTH_CODE}" \
+    CLUSTER_N_PREFILL="${CLUSTER_N_PREFILL}" \
+    CLUSTER_N_DECODE="${CLUSTER_N_DECODE}" \
+    N_PREFILL_TOTAL="${N_PREFILL_TOTAL}" \
+    N_DECODE_TOTAL="${N_DECODE_TOTAL}" \
+    FLEXLB_HTTP_PORT_VAL="${FLEXLB_HTTP_PORT}" \
+    MOCK_HTTP_PORT_VAL="${MOCK_HTTP_PORT}" \
+    MOCK_BASE_GRPC_PORT_VAL="${MOCK_BASE_GRPC_PORT}" \
+    python3 - "${RUN_DIR}" <<'PYEOF'
 import json
 import os
 import sys
