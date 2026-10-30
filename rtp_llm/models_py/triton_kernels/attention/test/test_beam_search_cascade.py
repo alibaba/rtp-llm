@@ -1,9 +1,11 @@
 import unittest
 
+import numpy as np
 import torch
 
 from rtp_llm.models_py.triton_kernels.attention.beam_search_cascade import (
     RocmBeamSearchCascadeAttention,
+    _query_partition_boundaries,
 )
 
 
@@ -70,6 +72,78 @@ def reference(q, k, v, table, lengths, row):
         .softmax(-1)
     )
     return torch.einsum("hl,hld->hd", probs, vv)
+
+
+class CascadePartitionPlannerTest(unittest.TestCase):
+    """CPU-only metadata regression tests; no GPU allocation or kernel launch."""
+
+    def boundaries(self, table, lengths, max_requests=2):
+        rows = len(lengths)
+        capacity = (rows + 127) // 128 + max_requests - 1
+        result = _query_partition_boundaries(table, lengths, 16, 128, capacity, 32)
+        self.assertLessEqual(len(result), capacity)
+        self.assertEqual(int(result[0]), 0)
+        self.assertTrue(np.all(np.diff(np.r_[result, rows]) > 0))
+        self.assertTrue(np.all(np.diff(np.r_[result, rows]) <= 128))
+        return result
+
+    def test_same_first_page_different_complete_history(self):
+        for boundary in (500, 503, 128, 500):
+            with self.subTest(boundary=boundary):
+                table = np.tile(np.arange(45, dtype=np.int32), (1000, 1))
+                table[boundary:, 8:44] += 1000
+                table[:, 44] = np.arange(1000) + 2000
+                result = self.boundaries(table, np.full(1000, 715))
+                expected = np.r_[
+                    np.arange(0, boundary, 128), np.arange(boundary, 1000, 128)
+                ]
+                np.testing.assert_array_equal(result, expected)
+
+    def test_same_history_different_lengths(self):
+        table = np.tile(np.arange(33, dtype=np.int32), (1000, 1))
+        lengths = np.r_[np.full(500, 501), np.full(500, 481)]
+        table[:500, 31] = np.arange(500) + 1000
+        table[500:, 30] = np.arange(500) + 2000
+        table[500:, 31:] = -1  # Inactive padding must not define a boundary.
+        result = self.boundaries(table, lengths)
+        self.assertIn(500, result)
+        self.assertEqual(len(result), 8)
+
+    def test_partial_history_page_is_not_a_beam_boundary(self):
+        # The incomplete page has copied history and the current token, but a
+        # distinct physical ID for every beam. Only its complete predecessors
+        # may contribute to the shared prefix.
+        for history in (496, 500, 511):
+            with self.subTest(history=history):
+                table = np.tile(np.arange(34, dtype=np.int32), (1000, 1))
+                table[:, history // 16] = np.arange(1000) + 1000
+                table[:, history // 16 + 1 :] = -1
+                result = self.boundaries(table, np.full(1000, history + 1))
+                np.testing.assert_array_equal(result, np.arange(0, 1000, 128))
+
+    def test_divergent_private_history_does_not_hide_other_long_runs(self):
+        table = np.tile(np.arange(45, dtype=np.int32), (1500, 1))
+        table[500:1000, 43] = np.arange(500) + 1000
+        table[1000:, 8:44] += 2000
+        table[:, 44] = np.arange(1500) + 4000
+        result = self.boundaries(table, np.full(1500, 715), max_requests=3)
+        self.assertIn(500, result)
+        self.assertIn(1000, result)
+        self.assertEqual(len(result), 12)
+
+    def test_first_page_boundaries_survive_divergent_private_history(self):
+        table = np.tile(np.arange(45, dtype=np.int32), (1000, 1))
+        table[500:, 0] = 1000
+        table[:, 43:] = np.arange(1000)[:, None] + 2000
+        result = self.boundaries(table, np.full(1000, 715))
+        self.assertIn(500, result)
+        self.assertEqual(len(result), 8)
+
+    def test_too_many_history_runs_use_fixed_capacity_fallback(self):
+        table = np.tile(np.arange(45, dtype=np.int32), (1024, 1))
+        table[:, 8] = np.arange(1024) // 32 + 1000
+        result = self.boundaries(table, np.full(1024, 715), max_requests=1)
+        np.testing.assert_array_equal(result, np.arange(0, 1024, 128))
 
 
 class RocmBeamCascadeTest(unittest.TestCase):
@@ -252,6 +326,9 @@ class RocmBeamCascadeTest(unittest.TestCase):
                 q, kv, table, lengths, k, v = make_case(rows=1000)
                 first_prefix = table[0, :-1].clone()
                 second_prefix = table[500, :-1].clone()
+                # Cross-request cache reuse can share the first physical page
+                # (and several more), without sharing the complete history.
+                second_prefix[:8] = first_prefix[:8]
                 table[:500, :-1] = first_prefix
                 table[500:, :-1] = second_prefix
                 op = RocmBeamSearchCascadeAttention(
@@ -284,11 +361,26 @@ class RocmBeamCascadeTest(unittest.TestCase):
                     op.prefix_qptr.data_ptr(),
                     op.row_cuts.data_ptr(),
                 )
-                for boundary in (500, 503, 128, 500):
+                for boundary, second_history, same_prefix in (
+                    (500, 500, False),
+                    (503, 500, False),
+                    (500, 480, True),
+                    (128, 500, False),
+                    (500, 500, False),
+                ):
                     table[:boundary, :-1] = first_prefix
-                    table[boundary:, :-1] = second_prefix
+                    table[boundary:, :-1] = (
+                        first_prefix if same_prefix else second_prefix
+                    )
+                    lengths[:boundary] = 500
+                    lengths[boundary:] = second_history
                     op.plan(table, lengths)
-                    self.assertEqual(op.shared_tokens, 1000 * 496)
+                    self.assertIn(boundary, op.qptr_host.tolist())
+                    self.assertEqual(
+                        op.shared_tokens,
+                        boundary * 496
+                        + (1000 - boundary) * (second_history // 16 * 16),
+                    )
                     graph.replay()
                     for row in (0, boundary - 1, boundary, 999):
                         expected = reference(q, k, v, table, lengths, row)

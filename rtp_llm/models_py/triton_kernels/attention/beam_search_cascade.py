@@ -235,6 +235,44 @@ def _private_tail_merge(
     )
 
 
+def _query_partition_boundaries(table, lengths, page, tile_rows, capacity, min_beams):
+    """Propose query tiles from physical histories; cuts still verify every page.
+
+    ``lengths`` includes the current token. Only complete history pages take
+    part in the signature: a copied partial page is normally private per beam.
+    Long equal-history runs also reveal requests whose first page was reused
+    across requests. Short runs are not added, so divergent beam histories do
+    not consume a tile for every row. First-page boundaries retain the previous
+    behavior when a request has divergent complete private-history pages.
+    """
+    rows, width = table.shape
+    first_page_changes = np.flatnonzero(table[1:, 0] != table[:-1, 0]) + 1
+    history_pages = (lengths - 1) // page
+    common_pages = np.minimum(history_pages[1:], history_pages[:-1])
+    history_changed = np.any(
+        (table[1:] != table[:-1]) & (np.arange(width)[None, :] < common_pages[:, None]),
+        axis=1,
+    )
+    changes = np.flatnonzero((lengths[1:] != lengths[:-1]) | history_changed) + 1
+    runs = np.r_[0, changes, rows]
+    long_runs = np.diff(runs) >= min_beams
+    edges = np.unique(
+        np.r_[0, first_page_changes, runs[:-1][long_runs], runs[1:][long_runs], rows]
+    )
+    boundaries = np.concatenate(
+        [
+            np.arange(first, last, tile_rows)
+            for first, last in zip(edges[:-1], edges[1:])
+        ]
+    )
+    if len(boundaries) > capacity:
+        # Fixed launch capacity is part of the graph contract. An arbitrary
+        # page table may propose too many runs; the normal cut checks make
+        # fixed tiling correct even when a tile crosses a request boundary.
+        boundaries = np.arange(0, rows, tile_rows)
+    return boundaries
+
+
 class RocmBeamSearchCascadeAttention:
     MIN_BEAMS = 32
     MIN_SHARED_TOKENS = 128
@@ -392,22 +430,14 @@ class RocmBeamSearchCascadeAttention:
         )
         if np.any(table[live_pages] < 0):
             raise ValueError("ROCm cascade page IDs must be nonnegative")
-        # Group adjacent rows by their first physical page, then split long
-        # groups into bounded query tiles. All pages below the cut are still
-        # checked: the first page only proposes boundaries, never proves sharing.
-        # For e.g. 500-beam requests, fixed 128-row tiles otherwise straddle
-        # requests and force whole histories through the private-tail kernel.
-        changes = np.flatnonzero(table[1:, 0] != table[:-1, 0]) + 1
-        starts = np.r_[0, changes]
-        ends = np.r_[changes, self.rows]
-        boundaries = np.concatenate(
-            [
-                np.arange(first, last, self.BEAMS_PER_TILE)
-                for first, last in zip(starts, ends)
-            ]
+        boundaries = _query_partition_boundaries(
+            table,
+            lengths,
+            self.page,
+            self.BEAMS_PER_TILE,
+            self.tiles,
+            self.MIN_BEAMS,
         )
-        if len(boundaries) > self.tiles:
-            boundaries = np.arange(0, self.rows, self.BEAMS_PER_TILE)
         qptr = self.qptr_host.numpy()
         qptr.fill(self.rows)
         qptr[: len(boundaries)] = boundaries
