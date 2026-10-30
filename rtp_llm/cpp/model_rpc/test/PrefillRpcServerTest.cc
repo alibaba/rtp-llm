@@ -182,6 +182,10 @@ private:
 
 class TestPrefillRpcServer: public PrefillRpcServer {
 public:
+    TestPrefillRpcServer() {
+        setEngineForTest(false);
+    }
+
     grpc::Status runWithRetry(PrefillGenerateContext&                             context,
                               const std::function<void(PrefillGenerateContext&)>& operation,
                               int                                                 max_retries       = 3,
@@ -228,8 +232,16 @@ public:
         maga_init_params_.pd_sep_config.max_rpc_timeout_ms = timeout_ms;
     }
 
+    void setPrefillRetryTimeoutForTest(int64_t timeout_ms) {
+        maga_init_params_.pd_sep_config.prefill_retry_timeout_ms = timeout_ms;
+    }
+
     void setPrefillMaxWaitTimeoutForTest(int64_t timeout_ms) {
         maga_init_params_.pd_sep_config.prefill_max_wait_timeout_ms = timeout_ms;
+    }
+    std::shared_ptr<RpcServerRuntimeMeta> initRuntimeMetaForTest() {
+        meta_ = std::make_shared<RpcServerRuntimeMeta>();
+        return meta_;
     }
 };
 
@@ -1148,6 +1160,44 @@ TEST_F(PrefillRpcServerTest, multimodalProcessMarksDeterministicErrorNonRetryabl
     EXPECT_EQ(context->error_info.code(), ErrorCode::MM_WRONG_FORMAT_ERROR);
     EXPECT_EQ(status.error_code(), grpc::StatusCode::INTERNAL);
     EXPECT_NE(status.error_message().find("multimodal test error"), std::string::npos);
+}
+
+TEST_F(PrefillRpcServerTest, GenerateStreamCallReportsTerminalMultimodalAdmissionFailure) {
+    TestDecodeRpcServer decode_server(/*fail_first_allocate=*/false);
+    ASSERT_TRUE(decode_server.start());
+
+    GenerateInputPB request;
+    request.set_request_id(42);
+    request.add_token_ids(1);
+    request.add_multimodal_inputs()->set_multimodal_url("image");
+    auto* config = request.mutable_generate_config();
+    config->set_max_new_tokens(2);
+    config->set_can_use_pd_separation(true);
+    auto* decode = config->add_role_addrs();
+    decode->set_role(RoleAddrPB::DECODE);
+    decode->set_ip("127.0.0.1");
+    decode->set_grpc_port(decode_server.listenPort());
+
+    TestPrefillRpcServer server;
+    server.setPrefillRetryTimeoutForTest(2000);
+    auto meta            = server.initRuntimeMetaForTest();
+    auto processor       = std::make_shared<TestMultimodalProcessor>(ErrorCode::CONCURRENCY_LIMIT_ERROR);
+    server.mm_processor_ = processor;
+    grpc::ServerContext context;
+    const auto          status = server.GenerateStreamCall(&context, &request, nullptr);
+
+    ASSERT_FALSE(status.ok());
+    EXPECT_EQ(processor->callCount(), 1);
+    EXPECT_EQ(decode_server.allocateCount(), 0);
+    const auto info = meta->getEngineScheduleInfo(0);
+    EXPECT_TRUE(info.running_task_info_list.empty());
+    ASSERT_EQ(info.finished_task_info_list.size(), 1);
+    const auto& finished = info.finished_task_info_list.front();
+    EXPECT_EQ(finished.request_id, request.request_id());
+    EXPECT_EQ(finished.error_code, static_cast<int64_t>(ErrorCode::CONCURRENCY_LIMIT_ERROR));
+    EXPECT_NE(finished.error_message.find("multimodal test error"), std::string::npos);
+    EXPECT_EQ(finished.iterate_count, 0);
+    EXPECT_GT(finished.end_time_ms, 0);
 }
 
 TEST_F(PrefillRpcServerTest, multimodalProcessKeepsTransientErrorRetryable) {

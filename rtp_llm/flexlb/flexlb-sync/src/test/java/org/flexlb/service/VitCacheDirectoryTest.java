@@ -66,8 +66,8 @@ class VitCacheDirectoryTest {
     void setUp() {
         a = worker("10.0.0.1", "one");
         b = worker("10.0.0.2", "two");
-        live.put(a.getIpPort(), a);
-        live.put(b.getIpPort(), b);
+        live.put(a.getLogicalIpPort(), a);
+        live.put(b.getLogicalIpPort(), b);
         var workers = mock(WorkerDirectory.class);
         when(workers.statusSnapshot(RoleType.VIT)).thenAnswer(call -> Map.copyOf(live));
         when(workers.endpointAddressSnapshot(RoleType.VIT))
@@ -89,6 +89,43 @@ class VitCacheDirectoryTest {
     @AfterEach
     void tearDown() {
         directory.stop();
+    }
+
+    @Test
+    void logicalEnginesHaveIndependentSnapshotsAndSelections() throws Exception {
+        live.clear();
+        a =
+                WorkerStatus.createDiscovered(
+                        RoleType.VIT, "one", "10.0.0.1", 8000, 8001, "", null, 0, 2);
+        b =
+                WorkerStatus.createDiscovered(
+                        RoleType.VIT, "one", "10.0.0.1", 8000, 8001, "", null, 1, 2);
+        live.put(a.getLogicalIpPort(), a);
+        live.put(b.getLogicalIpPort(), b);
+        snapshot(a, "engine-0", "zero");
+        snapshot(b, "engine-1", "one");
+        assertEquals(0, selector.select(context("zero"), "one").getEngineIndex());
+        var ctx = context("one");
+        var selected = selector.select(ctx, "one");
+        assertEquals(1, selected.getEngineIndex());
+        assertEquals(b.getLogicalIpPort(), selected.getLogicalIpPort());
+        var mapper = new com.fasterxml.jackson.databind.ObjectMapper();
+        ctx.getRequest()
+                .setSelectedVit(
+                        mapper.readValue(
+                                mapper.writeValueAsBytes(selected),
+                                org.flexlb.dao.loadbalance.ServerStatus.class));
+        try (var pinned = selector.selectPinned(ctx, "one")) {
+            org.junit.jupiter.api.Assertions.assertNotNull(pinned);
+            assertEquals(b.getLogicalIpPort(), pinned.serverStatus().getLogicalIpPort());
+            assertEquals(b.getGenerationId(), pinned.serverStatus().getWorkerGeneration());
+        }
+        live.put(
+                b.getLogicalIpPort(),
+                WorkerStatus.createDiscovered(
+                        RoleType.VIT, "one", "10.0.0.1", 8000, 8001, "", null, 1, 2));
+        assertFalse(selector.validate(ctx, "one").isSuccess());
+        assertEquals(0, selector.select(context("zero"), "one").getEngineIndex());
     }
 
     @Test
@@ -139,7 +176,7 @@ class VitCacheDirectoryTest {
         assertEquals(
                 pendingWorker.getIp(),
                 selector.select(context("cold"), pendingWorker.getGroup()).getServerIp());
-        live.remove(other.getIpPort());
+        live.remove(other.getLogicalIpPort());
         assertEquals(pendingWorker.getIp(), selector.select(context("cold"), null).getServerIp());
     }
 
@@ -315,9 +352,9 @@ class VitCacheDirectoryTest {
     void cacheAffinityNeverOverridesGroupOrHealth() {
         snapshot(a, "a1", "image");
         assertEquals(b.getIp(), selector.select(context("image"), "two").getServerIp());
-        live.remove(a.getIpPort());
+        live.remove(a.getLogicalIpPort());
         assertEquals(b.getIp(), selector.select(context("image"), null).getServerIp());
-        live.remove(b.getIpPort());
+        live.remove(b.getLogicalIpPort());
         assertFalse(selector.select(context("image"), null).isSuccess());
     }
 
@@ -350,7 +387,7 @@ class VitCacheDirectoryTest {
     void rejectsStaleSnapshotAndInvalidSelectedWorker() {
         snapshot(a, "a1", "image");
         WorkerStatus replacement = worker(a.getIp(), "one");
-        live.put(a.getIpPort(), replacement);
+        live.put(a.getLogicalIpPort(), replacement);
         snapshot(a, "old", "image");
         snapshot(b, "b1", "image");
         assertEquals(b.getIp(), selector.select(context("image"), null).getServerIp());
@@ -359,7 +396,7 @@ class VitCacheDirectoryTest {
         ctx.getRequest().setSelectedVit(selected);
         assertTrue(selector.validate(ctx, "two").isSuccess());
         assertFalse(selector.validate(ctx, "one").isSuccess());
-        live.remove(b.getIpPort());
+        live.remove(b.getLogicalIpPort());
         assertFalse(selector.validate(ctx, null).isSuccess());
     }
 
@@ -407,7 +444,7 @@ class VitCacheDirectoryTest {
             org.junit.jupiter.api.Assertions.assertNotNull(pinned);
             assertEquals(a.getGenerationId(), pinned.serverStatus().getWorkerGeneration());
         }
-        live.put(a.getIpPort(), worker(a.getIp(), "one"));
+        live.put(a.getLogicalIpPort(), worker(a.getIp(), "one"));
         assertFalse(selector.validate(ctx, "one").isSuccess());
         org.junit.jupiter.api.Assertions.assertNull(selector.selectPinned(ctx, "one"));
     }

@@ -80,6 +80,15 @@ bool FIFOSchedulerBase::refreshAndReapTerminalStreams(std::list<GenerateStreamPt
     return reaped;
 }
 
+absl::Status FIFOSchedulerBase::requestStop() {
+    {
+        lock_guard<mutex> lock(lock_);
+        stop_ = true;
+    }
+    cond_.notify_all();
+    return absl::OkStatus();
+}
+
 absl::Status FIFOSchedulerBase::stop() {
     RTP_LLM_LOG_INFO("stop %s", schedulerName());
     {
