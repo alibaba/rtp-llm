@@ -92,8 +92,8 @@ def test_partial_start_failure_is_not_retried_and_reclaims_started_jvms(tmp_path
 
 def test_partial_stop_failure_aborts_and_keeps_completed_operations(tmp_path, monkeypatch):
     original = ProcessSupervisor.stop_expected
-    async def fail_second(self, node):
-        errors = await original(self, node)
+    async def fail_second(self, node, grace=3):
+        errors = await original(self, node, grace)
         return [*errors, 'injected stop failure'] if node == 'master-1' else errors
     monkeypatch.setattr(ProcessSupervisor, 'stop_expected', fail_second)
     case, registry, launch = generic(tmp_path, [step('stop', 'master/stop'), step('never', 'master/start')])
@@ -103,6 +103,54 @@ def test_partial_stop_failure_aborts_and_keeps_completed_operations(tmp_path, mo
     assert not any(v.get('step') == 'never' for v in logs(output))
     assert len([v for v in logs(output) if v['event'] == 'process_stopped']) == 2
     assert_reaped(output)
+
+
+def test_master_cleanup_waits_for_peer_exit_and_slow_graceful_shutdown(tmp_path):
+    from mock_framework.execution.master import MasterGroup
+    from mock_framework.execution.records import Records
+    case, _, launch = generic(tmp_path, [step('masters', 'master/get')])
+    output = tmp_path / 'run'
+    peer = tmp_path / 'shutdown.py'
+    peer.write_text('''import os, pathlib, signal, sys, time
+root = pathlib.Path(os.environ['MOCK_OUTPUT_DIR'])
+name = os.environ['MOCK_NODE_ID']
+def stop(*args):
+    if name == 'master-0':
+        while not (root.parent / 'master-1' / 'exited').exists(): time.sleep(.01)
+    time.sleep(3.2)
+    (root / 'exited').touch()
+    sys.exit(0)
+signal.signal(signal.SIGTERM, stop)
+(root / 'ready').touch()
+while True: time.sleep(1)
+''')
+    async def exercise():
+        records = Records(output, case, launch)
+        supervisor = ProcessSupervisor(records)
+        group = MasterGroup(component=None, recipe=None, election={}, launcher=None,
+            supervisor=supervisor, topology=None, records=records, monitoring=None)
+        try:
+            for name in ('master-0', 'master-1'):
+                directory = output / name
+                directory.mkdir()
+                await supervisor.spawn(name, [sys.executable, str(peer)], tmp_path,
+                    {**os.environ, 'MOCK_OUTPUT_DIR': str(directory), 'MOCK_NODE_ID': name}, directory)
+                group._owned.append(name)
+                await supervisor.guard(_wait_file(directory / 'ready'), 5)
+            async with asyncio.timeout(15):
+                assert await group.close() == []
+            assert all((output / name / 'exited').exists() for name in group._owned)
+            assert not supervisor.children
+        finally:
+            await supervisor.close()
+            records.close({'status': 'PASS'})
+    asyncio.run(exercise())
+    assert_reaped(output)
+
+
+async def _wait_file(path):
+    while not path.exists():
+        await asyncio.sleep(.01)
 
 
 @dataclass(frozen=True)
@@ -229,7 +277,7 @@ def test_native_restart_preserves_address_and_refreshes_only_current_discovery(t
     root = Path(__file__).resolve().parents[1]
     config = configuration()
     config['FLEXLB_CONFIG'] = json.dumps(json.loads(config['FLEXLB_CONFIG']) | {
-        'grpcServer': {'shutdownQuietPeriodMs': 10}})
+        'grpcServer': {'shutdownQuietPeriodMs': 5000}})
     engine = {'engine': 'rtp', 'config': {'seq_size_per_block': 16, 'test_block_num': 256,
         'max_seq_len': 4096, 'compute.forward.expression': '1'}}
     document = dict(id='restart', describe='Native restart and current discovery',

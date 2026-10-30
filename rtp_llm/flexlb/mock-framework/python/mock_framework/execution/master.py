@@ -199,8 +199,10 @@ class MasterGroup:
                 await self.monitoring.final_scrape([item['name'] for item in selected])
             for item in selected:
                 child = self.supervisor.child(item['process'])
-                operation = self.supervisor.kill_expected if mode == 'kill' else self.supervisor.stop_expected
-                errors = await operation(item['process'])
+                if mode == 'kill':
+                    errors = await self.supervisor.kill_expected(item['process'])
+                else:
+                    errors = await self.supervisor.stop_expected(item['process'], grace=self._stop_grace())
                 if child.returncode is not None:
                     (item['directory'] / 'ready.json').unlink(missing_ok=True)
                     self.topology.retire(item['name'])
@@ -222,8 +224,16 @@ class MasterGroup:
                 self._instances[address] = replacement
             return addresses
 
+    def _stop_grace(self):
+        # Native shutdown includes up to 30s of leadership transfer, quiet time and resource teardown.
+        return 60 if self.election is not None else 3
+
     async def close(self):
-        return await self.supervisor.stop(self._owned, 3)
+        errors = []
+        # Keep peers and ZooKeeper alive until each Master has completed its shutdown.
+        for process in reversed(self._owned):
+            errors.extend(await self.supervisor.stop([process], self._stop_grace()))
+        return errors
 
     async def close_election(self):
         return await self.supervisor.stop(['zookeeper'], 5)

@@ -63,12 +63,12 @@ class ProcessSupervisor:
         retain(child)
         return child
 
-    async def stop_expected(self, name):
+    async def stop_expected(self, name, grace=3):
         child = self._children[name]
         if child.returncode is not None:
             raise ExecutionError(f'{name} already exited before intentional stop')
         self._expected.add(name)
-        errors = await self.stop([name], 3)
+        errors = await self.stop([name], grace)
         return errors
 
     async def kill_expected(self, name):
