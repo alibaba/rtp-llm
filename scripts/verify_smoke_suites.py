@@ -230,6 +230,7 @@ def _validate_dir(
     data_root_dir: str,
     expected_suite_counts: Mapping[str, int] | None = None,
     validate_oss_profiles: bool = False,
+    data_roots: Mapping[str, str] | None = None,
 ) -> List[str]:
     """Find all test_smoke_*.py files under suites_dir and validate them."""
     sys.path.insert(0, str(SMOKE_FRAMEWORK_DIR))
@@ -274,7 +275,9 @@ def _validate_dir(
         "maga_model_smoke_light": [],
     }
     errors.extend(
-        validation.validate_manifest(smoke_tests, composite_suites, data_root_dir)
+        validation.validate_manifest(
+            smoke_tests, composite_suites, data_root_dir, data_roots=data_roots
+        )
     )
     return errors
 
@@ -310,6 +313,10 @@ def main(argv: List[str] | None = None) -> int:
     sys.path.insert(0, str(gho / "rtp_llm" / "test" / "smoke_framework"))
 
     all_errors: List[str] = []
+    data_roots = {
+        "oss": str(gho / "rtp_llm" / "test" / "smoke"),
+        "internal": str(internal / "rtp_llm" / "test" / "smoke"),
+    }
 
     # OSS suites
     oss_suites = gho / "rtp_llm" / "test" / "smoke" / "suites"
@@ -320,6 +327,7 @@ def main(argv: List[str] | None = None) -> int:
             oss_data_root,
             EXPECTED_OSS_SUITE_COUNTS,
             validate_oss_profiles=True,
+            data_roots=data_roots,
         )
         if oss_errors:
             print(
@@ -340,6 +348,7 @@ def main(argv: List[str] | None = None) -> int:
                 internal_suites,
                 internal_data_root,
                 EXPECTED_INTERNAL_SUITE_COUNTS,
+                data_roots=data_roots,
             )
             if internal_errors:
                 print(

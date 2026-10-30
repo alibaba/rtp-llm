@@ -68,6 +68,8 @@ def validate_case(
     case_name: str,
     config: Mapping[str, Any],
     data_root_dir: str,
+    *,
+    data_roots: Mapping[str, str] | None = None,
 ) -> List[str]:
     """Return list of validation error strings for one case (empty = OK)."""
     errors: List[str] = []
@@ -105,9 +107,21 @@ def validate_case(
 
     task_info_rel = config.get("task_info", "")
     if task_info_rel:
-        full = os.path.join(data_root_dir, task_info_rel)
-        if not os.path.isfile(full):
-            errors.append(f"{prefix} task_info missing on disk: {full}")
+        root = data_root_dir
+        selected = config.get("data_root")
+        if selected is not None:
+            if not isinstance(selected, str) or selected not in {"oss", "internal"}:
+                errors.append(f"{prefix} unknown data_root: {selected!r}")
+                root = None
+            elif not data_roots or not data_roots.get(selected):
+                errors.append(f"{prefix} data_root {selected!r} is not configured")
+                root = None
+            else:
+                root = data_roots[selected]
+        if root is not None:
+            full = os.path.join(root, task_info_rel)
+            if not os.path.isfile(full):
+                errors.append(f"{prefix} task_info missing on disk: {full}")
 
     return errors
 
@@ -116,6 +130,8 @@ def validate_manifest(
     smoke_tests: Mapping[str, Mapping[str, Mapping[str, Any]]],
     composite_suites: Mapping[str, List[str]],
     data_root_dir: str,
+    *,
+    data_roots: Mapping[str, str] | None = None,
 ) -> List[str]:
     """Validate full manifest. Returns combined error list (empty = OK)."""
     errors: List[str] = []
@@ -141,6 +157,10 @@ def validate_manifest(
             )
             continue
         for case_name, config in suite.items():
-            errors.extend(validate_case(suite_name, case_name, config, data_root_dir))
+            errors.extend(
+                validate_case(
+                    suite_name, case_name, config, data_root_dir, data_roots=data_roots
+                )
+            )
 
     return errors
