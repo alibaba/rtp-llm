@@ -25,6 +25,7 @@ cc_library(
     name = "core_utils",
     hdrs = [
         "AssertUtils.h",
+        "PrefillOptimization.h",
         "Logger.h",
         "StringUtil.h",
         "StatusUtil.h",

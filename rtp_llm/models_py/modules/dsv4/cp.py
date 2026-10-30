@@ -31,6 +31,8 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Optional, Tuple, Union
 
 import torch
+
+from rtp_llm.config.prefill_optimization import PREFILL_OPTIMIZATIONS_ENABLED
 from rtp_llm.models_py import prefill_optimization as _prefill_optimization
 from rtp_llm.models_py.distributed import collective_torch
 from rtp_llm.models_py.distributed.collective_torch import Group, all_gather
@@ -1368,3 +1370,107 @@ def cp_should_gather(cp_ctx: Optional[CPContext], start_pos: int) -> bool:
     all-gather the current input before pooling.
     """
     return cp_ctx is not None and cp_ctx.cp_size > 1
+
+
+# Compatibility implementation from 70f1ecde04. Selected once at import.
+if not PREFILL_OPTIMIZATIONS_ENABLED:
+
+    def _baseline_build_kv_allgather_restore_indices(
+        per_req_total_kv_lens: torch.Tensor,
+        cp_size: int,
+        block_size: int,
+        device: torch.device,
+    ) -> torch.Tensor:
+        """Compute the per-iteration restore index tensor.
+
+        The all_gather output is laid out as ``[cp_size, sum_b L_b, D]`` (rank
+        major; rank ``r``'s contribution lives at row range
+        ``[r * sum_L, (r+1) * sum_L)``). We want to reorder this into logical
+        token order (per request, then concatenated across requests).
+
+        Owner rule: logical block ``b`` owned by rank ``b % cp_size``. Within a
+        block, all ``block_size`` tokens have the same owner. So for request r
+        with ``T_r`` total kv tokens:
+
+          logical token ``t`` (in [0, T_r)) is owned by rank
+          ``(t // block_size) % cp_size``, and lives at the rank's local
+          position ``(t // block_size) // cp_size * block_size + t %
+          block_size``.
+
+        Args:
+          per_req_total_kv_lens: ``[B]`` int64 — total KV tokens per request
+                (== prefix_len + new_len for prefill iterations after the
+                writer has written this iteration's K).
+          cp_size: number of CP ranks.
+          block_size: tokens per pool block (==
+                ``cache_config.seq_size_per_block`` for the relevant pool;
+                CSA/HCA/INDEXER pool block_size is uniform per pool).
+          device: target device.
+
+        Returns:
+          ``restore_indices`` ``[total_kv_len]`` int64 — applied as
+          ``flat_global = gathered_flat[restore_indices]``. Each row of
+          ``flat_global`` is the K for that logical token, in
+          request-concatenated logical order.
+        """
+        if cp_size <= 0:
+            raise ValueError(f"cp_size must be positive, got {cp_size}")
+        if block_size <= 0:
+            raise ValueError(f"block_size must be positive, got {block_size}")
+        if per_req_total_kv_lens.dim() != 1:
+            raise ValueError(
+                f"per_req_total_kv_lens must be 1D, got shape "
+                f"{tuple(per_req_total_kv_lens.shape)}"
+            )
+
+        # Vectorized formulation (mirrors branch
+        # ``flashmla_sparse_cp_impl.py:565-572`` plan()).
+        total_kv_lens = per_req_total_kv_lens.to(dtype=torch.int64, device=device)
+        if int(total_kv_lens.numel()) == 0:
+            return torch.empty(0, dtype=torch.int64, device=device)
+
+        local_per_req = cp_padded_local_kv_lens(total_kv_lens, cp_size, block_size)
+        cu_local_per_req = torch.zeros(
+            int(local_per_req.numel()) + 1, dtype=torch.int64, device=device
+        )
+        cu_local_per_req[1:] = torch.cumsum(local_per_req, dim=0)
+        total_local_kv = int(cu_local_per_req[-1].item())  # per-rank padded local
+
+        total_real = int(total_kv_lens.sum().item())
+        if total_real == 0:
+            return torch.empty(0, dtype=torch.int64, device=device)
+
+        # Flat ``[total_real]`` arange of "logical token position within request".
+        # Fully vectorized: positions_flat[i] = i - cu_starts[req_ids[i]] where
+        # cu_starts is the exclusive prefix-sum of per-request lengths. Replaces
+        # a per-request Python loop + B .item() syncs with two GPU ops.
+        req_ids = torch.repeat_interleave(
+            torch.arange(int(total_kv_lens.numel()), dtype=torch.int64, device=device),
+            total_kv_lens,
+        )
+        cu_starts = torch.zeros(
+            int(total_kv_lens.numel()), dtype=torch.int64, device=device
+        )
+        cu_starts[1:] = torch.cumsum(total_kv_lens[:-1], dim=0)
+        positions_flat = (
+            torch.arange(total_real, dtype=torch.int64, device=device)
+            - cu_starts[req_ids]
+        )
+        cu_offsets = cu_local_per_req[req_ids]  # per-token rank-local request base
+        global_block_idx = positions_flat // block_size
+        token_in_block = positions_flat % block_size
+        owner = global_block_idx % cp_size
+        local_block_idx = global_block_idx // cp_size
+        local_pos_in_req = local_block_idx * block_size + token_in_block
+        # rank-major flat index:
+        #   owner * total_local_kv + (cu_offset_of_request_for_this_rank + local_pos)
+        # The cu_offset is the same value for every rank because all ranks pad
+        # to identical L_r per request.
+        restore = (owner * total_local_kv + cu_offsets + local_pos_in_req).contiguous()
+        assert int(restore.numel()) == total_real, (
+            f"restore size {int(restore.numel())} != sum(per_req_total_kv_lens) "
+            f"{total_real}"
+        )
+        return restore
+
+    build_kv_allgather_restore_indices = _baseline_build_kv_allgather_restore_indices

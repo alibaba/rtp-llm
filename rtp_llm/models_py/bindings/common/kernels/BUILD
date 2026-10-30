@@ -235,6 +235,7 @@ cc_library(
     ],
     deps = any_cuda_deps + [
         ":fuse_copy_util",
+        "//rtp_llm/cpp/utils:core_utils",
     ],
     copts = any_cuda_copts(),
     include_prefix = "src",

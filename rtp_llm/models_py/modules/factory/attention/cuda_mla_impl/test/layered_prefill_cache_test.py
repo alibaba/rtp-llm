@@ -62,6 +62,32 @@ class LayeredPrefillCacheTest(unittest.TestCase):
             write_cache_store_impl=None,
         )
 
+    def test_same_forward_host_slots_and_stale_identity_fallback(self):
+        for stale in (False, True):
+            cache = self.make_cache(torch.uint8)
+            fmha = self.make_fmha(True)
+            op = fmha.fmha_impl
+            op.sharded_slot_mapping_host = op.sharded_slot_mapping.cpu()
+            op._host_slot_mapping_source = op.sharded_slot_mapping
+            if stale:
+                # Same shape but a different forward must not reuse old dirty pages.
+                op.sharded_slot_mapping = torch.tensor(
+                    [7 * 64, -1, -1, -1], device="cuda"
+                )
+            try:
+                cache.begin_forward(fmha)
+                expected = [7] if stale else [2, 3, 7]
+                self.assertEqual(
+                    sorted(
+                        page
+                        for _, start, count in cache.write_runs
+                        for page in range(start, start + count)
+                    ),
+                    expected,
+                )
+            finally:
+                cache.end_forward()
+
     def test_coalescing_preserves_gaps_and_destinations(self):
         self.assertEqual(
             contiguous_runs([(2, 0), (3, 1), (5, 2), (6, 4)]),

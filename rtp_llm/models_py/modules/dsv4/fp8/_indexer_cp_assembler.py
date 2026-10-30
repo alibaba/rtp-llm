@@ -33,6 +33,7 @@ from typing import Optional
 
 import torch
 
+from rtp_llm.config.prefill_optimization import PREFILL_OPTIMIZATIONS_ENABLED
 from rtp_llm.models_py.distributed.collective_torch import Group, all_gather
 from rtp_llm.models_py.modules.dsv4.cp import (
     CPContext,
@@ -268,3 +269,50 @@ def assemble_indexer_k(
     gathered_s = all_gather(local_k_scale, group=Group.TP)
     out_k_quant.copy_(gathered_q[plan.restore_indices])
     out_k_scale.copy_(gathered_s[plan.restore_indices])
+
+
+# Compatibility implementation from 70f1ecde04. Selected once at import.
+if not PREFILL_OPTIMIZATIONS_ENABLED:
+
+    def _baseline_build_indexer_cp_chunk_plan(
+        cp_ctx: CPContext,
+        per_req_total_kv_lens: torch.Tensor,
+        block_size: int,
+        device: torch.device,
+        owner_block_size: Optional[int] = None,
+    ) -> IndexerCPChunkPlan:
+        """Build per-chunk indexer assembler plan (CPU; no NCCL)."""
+        if cp_ctx.cp_size <= 0:
+            raise ValueError(f"cp_size must be > 0, got {cp_ctx.cp_size}")
+        if block_size <= 0:
+            raise ValueError(f"block_size must be > 0, got {block_size}")
+        owner_bs = int(owner_block_size or block_size)
+        if owner_bs <= 0:
+            raise ValueError(f"owner_block_size must be > 0, got {owner_bs}")
+        per_req = per_req_total_kv_lens.to(
+            device=device, dtype=torch.int64
+        ).contiguous()
+        local_lens = cp_padded_local_kv_lens(
+            per_req, cp_ctx.cp_size, owner_bs
+        ).contiguous()
+        actual_lens = cp_actual_owned_kv_lens(
+            per_req, cp_ctx.cp_size, owner_bs, cp_ctx.cp_rank
+        ).contiguous()
+        total_local = int(local_lens.sum().item())
+        total_actual = int(actual_lens.sum().item())
+        restore = build_kv_allgather_restore_indices(
+            per_req, cp_ctx.cp_size, owner_bs, device
+        )
+        return IndexerCPChunkPlan(
+            cp_ctx=cp_ctx,
+            per_req_total_kv_lens=per_req,
+            per_req_local_kv_lens=local_lens,
+            per_req_actual_local_kv_lens=actual_lens,
+            total_local_T=total_local,
+            total_actual_local_T=total_actual,
+            restore_indices=restore,
+            block_size=block_size,
+            owner_block_size=owner_bs,
+        )
+
+    build_indexer_cp_chunk_plan = _baseline_build_indexer_cp_chunk_plan
