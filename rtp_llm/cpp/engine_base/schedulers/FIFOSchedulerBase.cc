@@ -2,26 +2,55 @@
 
 #include <algorithm>
 #include <chrono>
+#include <limits>
 #include <mutex>
+#include <numeric>
 #include <unordered_set>
 #include <sstream>
+#include <stdexcept>
 
 #include "rtp_llm/cpp/cache/CPSlotMapper.h"
 #include "rtp_llm/cpp/engine_base/schedulers/SchedulerUtils.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
+#include "rtp_llm/cpp/models/context_parallel/ZigzagTokenLayout.h"
+#include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 
 using namespace std;
 namespace rtp_llm {
 
-int64_t computeChunkGrant(int64_t budget, int64_t rows, int64_t remaining, int64_t block_size) {
-    if (budget <= 0 || rows <= 0 || remaining <= 0 || block_size <= 0) {
+namespace {
+
+int64_t combineChunkAlignment(int64_t alignment, int64_t tokens) {
+    if (alignment <= 0 || tokens <= 0) {
+        return 0;
+    }
+    const auto factor = alignment / std::gcd(alignment, tokens);
+    if (factor > std::numeric_limits<int>::max() / tokens) {
+        return 0;
+    }
+    return factor * tokens;
+}
+
+}  // namespace
+
+int64_t computeChunkGrant(int64_t budget, int64_t rows, int64_t remaining, int64_t alignment, int64_t prefix) {
+    if (budget <= 0 || rows <= 0 || remaining <= 0 || alignment <= 0 || prefix < 0) {
         return 0;
     }
 
     const int64_t max_len = budget / rows;
-    return remaining <= max_len ? remaining : (max_len / block_size) * block_size;
+    if (remaining <= max_len) {
+        return remaining;
+    }
+
+    // Align the absolute end; a loaded prefix may only be base-page aligned.
+    const int64_t first_boundary = (alignment - prefix % alignment) % alignment;
+    if (max_len < first_boundary) {
+        return 0;
+    }
+    return first_boundary + ((max_len - first_boundary) / alignment) * alignment;
 }
 
 FIFOSchedulerBase::FIFOSchedulerBase(const RuntimeConfig&                   runtime_config,
@@ -29,17 +58,59 @@ FIFOSchedulerBase::FIFOSchedulerBase(const RuntimeConfig&                   runt
                                      const PDSepConfig&                     pd_sep_config,
                                      const ParallelismConfig&               parallelism_config,
                                      const std::shared_ptr<KVCacheManager>& cache_manager,
-                                     const kmonitor::MetricsReporterPtr     metrics_reporter):
+                                     const kmonitor::MetricsReporterPtr     metrics_reporter,
+                                     const ModelExecutionCapacity&          execution_capacity):
     pd_sep_config_(pd_sep_config),
     cache_manager_(cache_manager),
     max_seq_len_(model_config.max_seq_len),
     max_batch_tokens_size_(runtime_config.fifo_scheduler_config.max_batch_tokens_size),
     max_generate_batch_size_(runtime_config.max_generate_batch_size),
+    max_execution_tokens_(model_config.max_execution_tokens > 0 ?
+                              model_config.max_execution_tokens / std::max<int64_t>(parallelism_config.tp_size, 1)
+                                  * std::max<int64_t>(parallelism_config.tp_size, 1) :
+                              0),
+    max_prefill_draft_tokens_(execution_capacity.max_prefill_draft_tokens),
+    draft_prefill_cp_size_(execution_capacity.draft_prefill_cp_size),
+    target_only_runs_draft_(execution_capacity.target_only_runs_draft),
     max_inited_kv_cache_streams_(
         std::max<int64_t>(runtime_config.fifo_scheduler_config.max_inited_kv_cache_streams, 0)),
     prefill_chunk_size_(runtime_config.fifo_scheduler_config.prefill_chunk_size),
     need_fill_fake_stream_(parallelism_config.dp_size > 1 && parallelism_config.tp_rank == 0),
-    metrics_reporter_(metrics_reporter) {}
+    metrics_reporter_(metrics_reporter) {
+    if (parallelism_config.prefill_cp_config.is_enabled() && parallelism_config.tp_size > 1) {
+        prefill_token_alignment_ = 2 * static_cast<int64_t>(parallelism_config.tp_size);
+    }
+    const auto& config       = cache_manager_->cacheConfig();
+    const auto& mapper       = cache_manager_->cpSlotMapper();
+    prefill_chunk_alignment_ = combineChunkAlignment(1, config.seq_size_per_block);
+    if (mapper) {
+        prefill_chunk_alignment_ = combineChunkAlignment(prefill_chunk_alignment_, mapper->reuseBlockTokens(config));
+    }
+    for (const auto& group : config.groups()) {
+        prefill_chunk_alignment_ = combineChunkAlignment(prefill_chunk_alignment_, group.seqSizePerBlock());
+    }
+    if (prefill_chunk_size_ > 0) {
+        RTP_LLM_CHECK_WITH_INFO(prefill_chunk_alignment_ > 0 && prefill_chunk_size_ >= prefill_chunk_alignment_,
+                                "[chunked_prefill] invalid configuration: prefill_chunk_size=%ld, "
+                                "intermediate_chunk_alignment=%ld; requires 0 < alignment <= prefill_chunk_size",
+                                prefill_chunk_size_,
+                                prefill_chunk_alignment_);
+        const auto& cp = parallelism_config.prefill_cp_config;
+        if (pd_sep_config.role_type == RoleType::PREFILL && parallelism_config.dp_size == 1
+            && parallelism_config.tp_size > 1 && cp.is_enabled() && cp.preserve_tp_layout) {
+            prefill_chunk_cp_size_ = parallelism_config.tp_size;
+            // Staging buffers and admission share the independently padded
+            // Zigzag sequence capacity, including expanded return sequences.
+            prefill_chunk_padded_rows_ =
+                getZigzagPaddedTokenCapacity(prefill_chunk_size_,
+                                             runtime_config.fifo_scheduler_config.max_context_batch_size,
+                                             prefill_chunk_cp_size_);
+        }
+        RTP_LLM_LOG_INFO("[chunked_prefill] token_budget=%ld, intermediate_chunk_alignment=%ld",
+                         prefill_chunk_size_,
+                         prefill_chunk_alignment_);
+    }
+}
 
 bool FIFOSchedulerBase::empty() {
     lock_guard<mutex> lock(lock_);
@@ -108,6 +179,10 @@ int64_t FIFOSchedulerBase::lastScheduleTime() {
 }
 
 bool FIFOSchedulerBase::checkInputLength(const GenerateStreamPtr& stream) {
+    if (max_generate_batch_size_ > 0 && admissionBatchSize(stream) > static_cast<int64_t>(max_generate_batch_size_)) {
+        stream->reportError(ErrorCode::INVALID_PARAMS, "request batch exceeds max_generate_batch_size");
+        return false;
+    }
     const auto input_length = static_cast<size_t>(stream->inputLength());
     const auto reserve_step = stream->reserveStep();
     if (reserve_step > 0 && !(input_length <= max_seq_len_ && reserve_step <= max_seq_len_ - input_length)) {
@@ -143,13 +218,16 @@ absl::Status FIFOSchedulerBase::checkChunkedPrefillRequest(const GenerateStreamP
     const int64_t seq_length = stream->seqLength();
     const int64_t rows       = stream->currentBatchSize();
     const int64_t block_size = stream->seqSizePerBlock();
-    if (seq_length > 0 && rows > 0 && block_size > 0) {
+    if (seq_length > 0 && rows > 0 && block_size > 0 && prefill_chunk_alignment_ > 0) {
         for (const auto& group : cache_config.groups()) {
             const bool linear_reuse = reuse_cache && group.policy.enable_prefix_reuse
                                       && group.policy.group_type == CacheGroupType::LINEAR;
             std::string error_msg;
-            const bool  sparse_reuse =
-                reuse_cache && group.policy.enable_prefix_reuse && group.policy.group_type != CacheGroupType::FULL;
+            // Shared LINEAR state follows checkpoint alignment below. Other
+            // sparse groups still need their retained prefix to cover the prompt.
+            const bool sparse_reuse = reuse_cache && group.policy.enable_prefix_reuse
+                                      && group.policy.group_type != CacheGroupType::FULL
+                                      && !group.policy.shared_chunk_state;
             const int64_t prompt_blocks = (seq_length + group.seqSizePerBlock() - 1) / group.seqSizePerBlock();
             if (sparse_reuse && cache_config.reuse_cache_tail_blocks < prompt_blocks) {
                 error_msg = "[chunked_prefill] cache group [" + group.tag
@@ -167,9 +245,10 @@ absl::Status FIFOSchedulerBase::checkChunkedPrefillRequest(const GenerateStreamP
             } else if (linear_reuse && group.seqSizePerBlock() % 64 != 0) {
                 error_msg = "[chunked_prefill] LINEAR cache reuse requires 64-token aligned group blocks, got "
                             + std::to_string(group.seqSizePerBlock());
-            } else if (group.policy.group_type != CacheGroupType::FULL && !group.policy.shared_chunk_state
+            } else if (group.policy.group_type == CacheGroupType::SWA && !group.policy.shared_chunk_state
                        && block_size % group.seqSizePerBlock() != 0) {
-                // Prefix reuse still requires chunk boundaries to align to native sparse blocks.
+                // SWA retains its native page-layout restriction. LINEAR chunk
+                // ends instead align to every group's checkpoint period.
                 error_msg = "[chunked_prefill] cache group [" + group.tag
                             + "] requires base block size to be a multiple of group block size (base="
                             + std::to_string(block_size) + ", group=" + std::to_string(group.seqSizePerBlock()) + ")";
@@ -184,7 +263,7 @@ absl::Status FIFOSchedulerBase::checkChunkedPrefillRequest(const GenerateStreamP
 
     std::ostringstream error_msg;
     error_msg << "[chunked_prefill] invalid request shape: seq_length=" << seq_length << ", rows=" << rows
-              << ", block_size=" << block_size;
+              << ", block_size=" << block_size << ", alignment=" << prefill_chunk_alignment_;
     stream->reportError(ErrorCode::ERROR_GENERATE_CONFIG_FORMAT, error_msg.str());
     return absl::InvalidArgumentError(error_msg.str());
 }
@@ -249,7 +328,17 @@ std::list<GenerateStreamPtr> FIFOSchedulerBase::selectPrefillPrefix(std::list<Ge
         return active_streams;
     }
 
-    int64_t                      budget_left = prefill_chunk_size_;
+    int64_t budget_left =
+        max_execution_tokens_ > 0 ? std::min(prefill_chunk_size_, max_execution_tokens_) : prefill_chunk_size_;
+    int64_t draft_budget_left = max_prefill_draft_tokens_;
+    if (max_prefill_draft_tokens_ > 0 && !active_streams.empty()
+        && (!isPrefillOnly(active_streams.front()) || target_only_runs_draft_)) {
+        budget_left = std::min(budget_left, max_prefill_draft_tokens_);
+    }
+    int64_t                      padded_budget_left = prefill_chunk_padded_rows_;
+    if (max_execution_tokens_ > 0 && prefill_chunk_cp_size_ > 0) {
+        padded_budget_left = std::min(padded_budget_left, max_execution_tokens_);
+    }
     std::list<GenerateStreamPtr> selected;
 
     const auto finish_invalid_stream = [&active_streams](auto it, ErrorCode error_code, const std::string& reason) {
@@ -284,7 +373,39 @@ std::list<GenerateStreamPtr> FIFOSchedulerBase::selectPrefillPrefix(std::list<Ge
             continue;
         }
 
-        const int64_t grant = computeChunkGrant(budget_left, rows, remaining, block_size);
+        // Page-RR reuse stripes and native state pages can span several
+        // base blocks. Every middle chunk must publish a state for its next prefix.
+        bool invalid_group_prefix = false;
+        for (const auto& group : cache_manager_->cacheConfig().groups()) {
+            const bool cyclic_group =
+                group.policy.group_type != CacheGroupType::FULL && !group.policy.shared_chunk_state
+                && !(stream->streamCacheResource().reuseCache() && group.policy.enable_prefix_reuse);
+            if (cyclic_group && reuse % group.seqSizePerBlock() != 0) {
+                // A loaded prefix can be base-page aligned but start inside a
+                // larger native state page. Cyclic remapping cannot read that prefix.
+                it                   = finish_invalid_stream(it,
+                                           ErrorCode::INVALID_PARAMS,
+                                           "cyclic cache group [" + group.tag
+                                               + "] requires a native-page aligned prefix");
+                invalid_group_prefix = true;
+                break;
+            }
+        }
+        if (invalid_group_prefix) {
+            continue;
+        }
+
+        int64_t grant_budget = budget_left;
+        if (prefill_chunk_cp_size_ > 0) {
+            const auto stripe = 2 * prefill_chunk_cp_size_;
+            grant_budget      = std::min(grant_budget, padded_budget_left / rows / stripe * stripe * rows);
+        }
+        if (max_prefill_draft_tokens_ > 0 && draft_prefill_cp_size_ > 1
+            && (!isPrefillOnly(stream) || target_only_runs_draft_)) {
+            const int64_t stripe = 2 * draft_prefill_cp_size_;
+            grant_budget         = std::min(grant_budget, draft_budget_left / rows / stripe * stripe * rows);
+        }
+        const int64_t grant = computeChunkGrant(grant_budget, rows, remaining, prefill_chunk_alignment_, reuse);
 
         if (grant <= 0) {
             if (!selected.empty()) {
@@ -296,6 +417,7 @@ std::list<GenerateStreamPtr> FIFOSchedulerBase::selectPrefillPrefix(std::list<Ge
                                            + std::to_string(prefill_chunk_size_) + ", rows=" + std::to_string(rows)
                                            + ", block_size=" + std::to_string(block_size)
                                            + ", remaining=" + std::to_string(remaining)
+                                           + ", alignment=" + std::to_string(prefill_chunk_alignment_)
                                            + "); increase prefill_chunk_size or reduce num_return_sequences");
             continue;
         }
@@ -303,6 +425,13 @@ std::list<GenerateStreamPtr> FIFOSchedulerBase::selectPrefillPrefix(std::list<Ge
         stream->setChunkSize(static_cast<int>(grant));
         selected.push_back(stream);
         budget_left -= grant * rows;
+        if (max_prefill_draft_tokens_ > 0 && (!isPrefillOnly(stream) || target_only_runs_draft_)) {
+            draft_budget_left -= static_cast<int64_t>(paddedPrefillTokens(grant, draft_prefill_cp_size_)) * rows;
+        }
+        if (prefill_chunk_cp_size_ > 0) {
+            const auto padded_rows = makeZigzagTokenLayout(grant, prefill_chunk_cp_size_).padded_token_count;
+            padded_budget_left -= static_cast<int64_t>(padded_rows) * rows;
+        }
         ++it;
 
         if (grant < remaining) {
@@ -344,7 +473,8 @@ size_t FIFOSchedulerBase::evaluateAndUpdateStreams(list<GenerateStreamPtr>&     
 std::unordered_set<GenerateStream*> FIFOSchedulerBase::evaluateWaitingStreams(list<GenerateStreamPtr>& waiting_streams,
                                                                               bool include_running_mode) {
     RTP_LLM_PROFILE_FUNCTION();
-    list<GenerateStreamPtr>             admitted_streams;
+    auto                                runtime          = initScheduleRuntime();
+    auto&                               admitted_streams = runtime.admitted_streams;
     std::unordered_set<GenerateStream*> admitted_stream_ptrs;
     last_admitted_context_batch_size_ = 0;
     last_admitted_context_token_size_ = 0;
@@ -377,6 +507,9 @@ std::unordered_set<GenerateStream*> FIFOSchedulerBase::evaluateWaitingStreams(li
     for (auto it = waiting_streams.begin(); it != waiting_streams.end();) {
         auto& stream = *it;
 
+        if (stream->hasError()) {
+            accountExecutionRows(runtime, stream, false);
+        }
         const bool prefill_only = isPrefillOnly(stream);
         if (has_scheduling_type && scheduling_prefill_only != prefill_only) {
             ++it;
@@ -392,11 +525,12 @@ std::unordered_set<GenerateStream*> FIFOSchedulerBase::evaluateWaitingStreams(li
 
         // PD decode streams may already carry CanRun before FIFO admission.
         // Capacity checks must still run for the current scheduling round.
-        if (!stream->hasError() && evaluateRunningMemory(admitted_streams, stream)) {
+        if (!stream->hasError() && evaluateRunningMemory(runtime, stream)) {
             if (!stream->hasEvent(StreamEvents::CanRun)) {
                 stream->reportEvent(StreamEvents::CanRun);
             }
-            admitted_streams.push_back(stream);
+            accountExecutionRows(runtime, stream);
+            accountAdmission(runtime, stream);
             admitted_stream_ptrs.insert(stream.get());
             if (!has_scheduling_type) {
                 has_scheduling_type     = true;
@@ -433,6 +567,134 @@ size_t FIFOSchedulerBase::countInitedKVCacheStreams() const {
     return count_inited(waiting_streams_) + count_inited(loading_cache_streams_) + count_inited(running_streams_);
 }
 
+FIFOSchedulerBase::ScheduleRuntime
+FIFOSchedulerBase::initScheduleRuntime(const std::list<GenerateStreamPtr>& admitted) const {
+    ScheduleRuntime                runtime;
+    std::vector<GenerateStreamPtr> streams;
+    streams.insert(streams.end(), running_streams_.begin(), running_streams_.end());
+    streams.insert(streams.end(), new_streams_.begin(), new_streams_.end());
+    streams.insert(streams.end(), loading_cache_streams_.begin(), loading_cache_streams_.end());
+    for (const auto& stream : waiting_streams_) {
+        // Fixed workspaces retain admitted loads; other completed loads rejoin the FIFO tail.
+        if (pd_sep_config_.role_type != RoleType::DECODE
+            && (stream->hasEvent(StreamEvents::CanRun) || max_execution_tokens_ > 0 || max_prefill_draft_tokens_ > 0)
+            && (stream->hasEvent(StreamEvents::LoadInitiated) || stream->curBlocksNum() > 0)) {
+            streams.push_back(stream);
+        }
+    }
+    appendExtraExecutionReservations(streams);
+    for (const auto& stream : streams) {
+        accountExecutionRows(runtime, stream);
+    }
+    for (const auto& stream : admitted) {
+        if (stream->getStatus() == StreamState::RUNNING) {
+            accountExecutionRows(runtime, stream);
+            accountAdmission(runtime, stream);
+        }
+    }
+    return runtime;
+}
+
+bool FIFOSchedulerBase::accountExecutionRows(ScheduleRuntime&         runtime,
+                                             const GenerateStreamPtr& stream,
+                                             bool                     add) const {
+    if (add) {
+        if (!reservesExecution(stream) || runtime.counted_streams.count(stream.get())) {
+            return false;
+        }
+        const bool   prefill = stream->isContextStream() && !stream->chunkedPrefillEnabled();
+        const size_t cp      = prefill_token_alignment_ > 1 ? prefill_token_alignment_ / 2 : 1;
+        const auto   target  = prefill && max_execution_tokens_ > 0 ? prefillReservationTokens(stream, cp) : 0;
+        const auto   draft =
+            prefill && max_prefill_draft_tokens_ > 0 && (!isPrefillOnly(stream) || target_only_runs_draft_) ?
+                  prefillReservationTokens(stream, draft_prefill_cp_size_) :
+                  0;
+        const auto batch = admissionBatchSize(stream);
+        if (runtime.batch_size > std::numeric_limits<int64_t>::max() - batch
+            || runtime.prefill_tokens > std::numeric_limits<int64_t>::max() - target
+            || runtime.draft_tokens > std::numeric_limits<int64_t>::max() - draft) {
+            throw std::overflow_error("scheduler execution rows overflow");
+        }
+        runtime.counted_streams.emplace(stream.get(), std::make_tuple(batch, target, draft, prefill));
+        runtime.batch_size += batch;
+        runtime.prefill_tokens += target;
+        runtime.draft_tokens += draft;
+        runtime.prefill_streams += prefill;
+    } else {
+        const auto it = runtime.counted_streams.find(stream.get());
+        if (it == runtime.counted_streams.end()) {
+            return false;
+        }
+        const auto& [batch, target, draft, prefill] = it->second;
+        runtime.batch_size -= batch;
+        runtime.prefill_tokens -= target;
+        runtime.draft_tokens -= draft;
+        runtime.prefill_streams -= prefill;
+        runtime.counted_streams.erase(it);
+    }
+    return true;
+}
+
+void FIFOSchedulerBase::accountAdmission(ScheduleRuntime& runtime, const GenerateStreamPtr& stream) const {
+    ++runtime.admitted_stream_count;
+    const auto sequences = static_cast<size_t>(stream->currentBatchSize());
+    const auto length = static_cast<size_t>(std::max(stream->contextLength(), 0) + std::max(stream->prefixLength(), 0));
+    runtime.admitted_prefill_token_size_with_cache += length * sequences;
+    runtime.admitted_prefill_max_seq_len_with_cache = std::max(runtime.admitted_prefill_max_seq_len_with_cache, length);
+    runtime.admitted_prefill_sequence_count += sequences;
+    if (stream->isContextStream()) {
+        const size_t cp = prefill_token_alignment_ > 1 ? prefill_token_alignment_ / 2 : 1;
+        runtime.admitted_prefill_token_size_without_cache += prefillTokenCostWithoutCache(stream, cp);
+    }
+    runtime.admitted_streams.push_back(stream);
+}
+
+bool FIFOSchedulerBase::evaluateRunningMemory(const ScheduleRuntime& runtime, const GenerateStreamPtr& stream) {
+    const bool counted = runtime.counted_streams.count(stream.get()) != 0;
+    const auto limit = static_cast<int64_t>(max_generate_batch_size_);
+    if (runtime.batch_size > limit || (!counted && admissionBatchSize(stream) > limit - runtime.batch_size)) {
+        return false;
+    }
+    if (stream->chunkedPrefillEnabled() || !stream->isContextStream()) {
+        return true;
+    }
+    // Cache matching can make one oversized prompt fit; finalized rows are checked before RUNNING.
+    if (runtime.prefill_streams + (counted ? 0 : 1) <= 1) {
+        return true;
+    }
+    const size_t cp = prefill_token_alignment_ > 1 ? prefill_token_alignment_ / 2 : 1;
+    return (max_execution_tokens_ <= 0
+            || (counted ? 0 : prefillReservationTokens(stream, cp)) <= max_execution_tokens_ - runtime.prefill_tokens)
+           && (max_prefill_draft_tokens_ <= 0 || (isPrefillOnly(stream) && !target_only_runs_draft_)
+               || (counted ? 0 : prefillReservationTokens(stream, draft_prefill_cp_size_))
+                      <= max_prefill_draft_tokens_ - runtime.draft_tokens);
+}
+
+bool FIFOSchedulerBase::checkPrefillCapacity(const GenerateStreamPtr& stream) {
+    const char* reason = nullptr;
+    if (max_execution_tokens_ > 0 && reservesExecution(stream) && stream->isContextStream()
+        && !stream->chunkedPrefillEnabled()) {
+        const size_t cp       = prefill_token_alignment_ > 1 ? prefill_token_alignment_ / 2 : 1;
+        const auto   rows     = prefillTokenCostWithoutCache(stream, cp);
+        const auto   capacity = max_execution_tokens_;
+        if (rows > static_cast<size_t>(capacity)) {
+            reason = "Prefill rows exceed initialized model execution capacity";
+        }
+    }
+    if (reason == nullptr && max_prefill_draft_tokens_ > 0 && reservesExecution(stream) && stream->isContextStream()
+        && !stream->chunkedPrefillEnabled() && (!isPrefillOnly(stream) || target_only_runs_draft_)
+        && prefillTokenCostWithoutCache(stream, draft_prefill_cp_size_)
+               > static_cast<size_t>(max_prefill_draft_tokens_)) {
+        reason = "Prefill rows exceed initialized draft execution capacity";
+    }
+    if (reason == nullptr) {
+        return true;
+    }
+    stream->reportError(ErrorCode::INVALID_PARAMS, reason);
+    stream->moveToNext();
+    return false;
+}
+
 void FIFOSchedulerBase::addStreamToNewState(const GenerateStreamPtr& stream, StreamState new_state) {
     switch (new_state) {
         case StreamState::WAITING:
@@ -442,6 +704,9 @@ void FIFOSchedulerBase::addStreamToNewState(const GenerateStreamPtr& stream, Str
             loading_cache_streams_.push_back(stream);
             break;
         case StreamState::RUNNING:
+            if (!checkPrefillCapacity(stream)) {
+                break;
+            }
             onRunningStream(stream);
             new_streams_.push_back(stream);
             break;

@@ -329,6 +329,11 @@ void runRejectionSampling(speculative::SpeculativeSampler&              sampler,
     applySpecLogitsAcceptLenCap(verify_result, target_sampler_output.token_ids, output);
     output.accept_tokens_cpu = output.accept_tokens.to(torch::kCPU, /*non_blocking=*/true);
     output.accept_len_cpu    = output.accept_len.to(torch::kCPU, /*non_blocking=*/true);
+    auto response_probs =
+        speculative::SpeculativeSampler::targetResponseProbabilities(params.response_modes, target_sampler_output);
+    if (response_probs.defined()) {
+        output.target_probs_cpu = response_probs.to(torch::kCPU, /*non_blocking=*/true);
+    }
     output.transfer_done_event->record(cuda_graph::graphGetCurrentStream());
     if (verify_result.consumed_event) {
         verify_result.consumed_event->record(cuda_graph::graphGetCurrentStream());

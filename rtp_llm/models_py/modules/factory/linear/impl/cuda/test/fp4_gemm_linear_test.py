@@ -38,9 +38,9 @@ class CudaFp4GEMMLinearAutotuneTest(unittest.TestCase):
             with (
                 self.subTest(backend=expected_backend),
                 mock.patch.dict(os.environ),
-                mock.patch(f"{module}.fp4_quantize", new=quantize),
+                mock.patch(f"{module}.flashinfer.fp4_quantize", new=quantize),
                 mock.patch(
-                    f"{module}.mm_fp4",
+                    f"{module}.flashinfer.mm_fp4",
                     return_value=torch.ones(2, 8, dtype=torch.bfloat16),
                 ) as gemm,
             ):
@@ -85,8 +85,10 @@ class CudaFp4GEMMLinearAutotuneTest(unittest.TestCase):
 
                 module = CudaFp4GEMMLinear.__module__
                 with (
-                    mock.patch(f"{module}.fp4_quantize", side_effect=quantize),
-                    mock.patch(f"{module}.mm_fp4", side_effect=gemm),
+                    mock.patch(
+                        f"{module}.flashinfer.fp4_quantize", side_effect=quantize
+                    ),
+                    mock.patch(f"{module}.flashinfer.mm_fp4", side_effect=gemm),
                 ):
                     for _ in range(2):
                         output = linear(input_tensor)

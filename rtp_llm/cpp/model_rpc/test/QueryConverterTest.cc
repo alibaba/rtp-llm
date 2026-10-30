@@ -21,6 +21,38 @@ namespace rtp_llm {
 
 class QueryConverterTest: public DeviceTestBase {};
 
+TEST(QueryConverterProbabilityModeTest, PreservesLegacyAndSpeculativeModes) {
+    struct Case {
+        bool               legacy;
+        int                legacy_mode;
+        int                speculative_mode;
+        ReturnAllProbsMode expected;
+    };
+    constexpr Case cases[] = {
+        {false, 0, 0, ReturnAllProbsMode::NONE},
+        {true, 0, 0, ReturnAllProbsMode::DEFAULT},
+        {true, 1, 0, ReturnAllProbsMode::NONE},
+        {true, 2, 0, ReturnAllProbsMode::DEFAULT},
+        {true, 3, 0, ReturnAllProbsMode::ORIGINAL},
+        {true, 4, 0, ReturnAllProbsMode::NONE},
+        {false, 1, 2, ReturnAllProbsMode::DEFAULT},
+        {false, 1, 3, ReturnAllProbsMode::ORIGINAL},
+        {false, 1, 4, ReturnAllProbsMode::NONE},
+    };
+    for (const auto& test : cases) {
+        SCOPED_TRACE(test.speculative_mode);
+        GenerateConfigPB sender;
+        sender.set_max_new_tokens(1);
+        sender.set_return_all_probs(test.legacy);
+        sender.set_return_all_probs_mode(test.legacy_mode);
+        sender.set_speculative_return_all_probs_mode(test.speculative_mode);
+
+        GenerateConfigPB received;
+        ASSERT_TRUE(received.ParseFromString(sender.SerializeAsString()));
+        EXPECT_EQ(QueryConverter::transGenerateConfig(&received)->return_all_probs, test.expected);
+    }
+}
+
 TEST_F(QueryConverterTest, PrefillOnlyFlagWithZeroMaxNewTokensMeansPrefillOnly) {
     for (const bool enable_disk_cache : {false, true}) {
         SCOPED_TRACE(enable_disk_cache);
@@ -190,6 +222,24 @@ TEST_F(QueryConverterTest, NegativeMaxNewTokensIsRejected) {
     } catch (const std::invalid_argument& error) {
         EXPECT_NE(std::string(error.what()).find("max_new_tokens"), std::string::npos);
     }
+}
+
+TEST_F(QueryConverterTest, MultimodalInputPreservesUrlWithEmptyTensor) {
+    GenerateInputPB input;
+    input.add_token_ids(1);
+    auto* url_input = input.add_multimodal_inputs();
+    url_input->set_multimodal_url("data:image/png;base64,iVBORw0KGgo=");
+    url_input->set_multimodal_type(1);
+
+    auto converted = QueryConverter::transQuery(&input);
+    ASSERT_TRUE(converted->multimodal_inputs.has_value());
+    ASSERT_EQ(converted->multimodal_inputs->size(), 1);
+    const auto& url_result = converted->multimodal_inputs->at(0);
+    EXPECT_EQ(url_result.url, url_input->multimodal_url());
+    EXPECT_EQ(url_result.tensor.numel(), 0);
+    TensorPB forwarded_tensor;
+    QueryConverter::transTensorPB(&forwarded_tensor, url_result.tensor);
+    EXPECT_EQ(QueryConverter::transTensor(forwarded_tensor).numel(), 0);
 }
 
 TEST_F(QueryConverterTest, testTransInput) {

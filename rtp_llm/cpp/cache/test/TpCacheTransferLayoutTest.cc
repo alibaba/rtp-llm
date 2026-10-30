@@ -77,6 +77,118 @@ TEST(LinearTpCacheLayoutTest, DeclaredGeometryBuildsPlansWithoutModelOrTag) {
     EXPECT_THROW(layout.plan(32, 32, 2, TpCacheTransferTopology{1, 2, 2, 1}, 0), std::invalid_argument);
 }
 
+TEST(TpCacheTransferRouteTest, ModesSharePeerSelectionAndExecutionPlanning) {
+    const TpCacheTransferTopology topology{1, 4, 1, 1};
+    const TpCacheTransferRoute    fallback{false, 2, 1, 1, 0};
+    const TpCacheTransferRoute    heads{true, 1, 0, 4, 2};
+    for (const auto mode : {TpCacheTransferMode::LEGACY,
+                            TpCacheTransferMode::REPLICATED,
+                            TpCacheTransferMode::MHA_HEADS,
+                            TpCacheTransferMode::LINEAR_QKV}) {
+        TpCacheTransferLayout layout;
+        layout.mode       = mode;
+        const auto direct = layout.route(2, topology, 0, false, fallback, heads);
+        EXPECT_EQ(direct.selected, mode == TpCacheTransferMode::LINEAR_QKV);
+        EXPECT_EQ(direct.segmented, mode == TpCacheTransferMode::LINEAR_QKV);
+        EXPECT_FALSE(direct.reassemble);
+        EXPECT_EQ(direct.local_partition_count, direct.segmented || mode == TpCacheTransferMode::REPLICATED ? 1u : 2u);
+        EXPECT_EQ(direct.remote_partition_count, direct.segmented ? 4u : 1u);
+        EXPECT_EQ(direct.remote_partition_id, direct.segmented ? 2u : 0u);
+        for (size_t peer = 0; peer < topology.peers; ++peer) {
+            if (mode == TpCacheTransferMode::LEGACY) {
+                EXPECT_THROW(layout.route(2, topology, peer, true, fallback, heads), std::invalid_argument);
+                continue;
+            }
+            const auto typed = layout.route(2, topology, peer, true, fallback, heads);
+            const bool owner = mode == TpCacheTransferMode::LINEAR_QKV
+                               || (mode == TpCacheTransferMode::MHA_HEADS ? peer == 0 || peer == 2 : peer == 0);
+            EXPECT_EQ(typed.selected, owner);
+            EXPECT_EQ(typed.reassemble, owner && mode != TpCacheTransferMode::REPLICATED);
+            EXPECT_FALSE(typed.segmented);
+            EXPECT_EQ(typed.local_partition_count,
+                      mode == TpCacheTransferMode::REPLICATED ? 1u : fallback.local_partition_count);
+            EXPECT_EQ(typed.local_partition_id,
+                      mode == TpCacheTransferMode::REPLICATED ? 0u : fallback.local_partition_id);
+        }
+    }
+}
+
+TEST(TpCacheTransferRouteTest, ReplicatedPayloadDoesNotInheritHeadPartitioning) {
+    TpCacheTransferLayout layout;
+    layout.mode = TpCacheTransferMode::REPLICATED;
+    const TpCacheTransferTopology topology{4, 2, 1, 1};
+    const TpCacheTransferRoute    fallback{true, 2, 1, 2, 1};
+    for (bool typed : {false, true}) {
+        const auto route = layout.route(0, topology, 0, typed, fallback, fallback);
+        EXPECT_TRUE(route.selected);
+        EXPECT_FALSE(route.reassemble);
+        EXPECT_EQ(route.local_partition_count, 1u);
+        EXPECT_EQ(route.local_partition_id, 0u);
+        EXPECT_EQ(route.remote_partition_count, 1u);
+        EXPECT_EQ(route.remote_partition_id, 0u);
+    }
+}
+
+TEST(LinearTpCacheLayoutTest, PartitionedPlansPreserveStateAndHistoryAcrossAllTpRatios) {
+    constexpr size_t          state = 48 * 5 * 5 * sizeof(float);
+    constexpr size_t          q     = 16 * 5 * sizeof(uint16_t);
+    constexpr size_t          v     = 48 * 5 * sizeof(uint16_t);
+    constexpr size_t          rows  = 3;
+    const std::vector<size_t> widths{state, q, q, v, q, q, v, q, q, v};
+    std::vector<uint8_t>      global(state + rows * (2 * q + v));
+    for (size_t i = 0; i < global.size(); ++i) {
+        global[i] = static_cast<uint8_t>((i * 47 + i / 97) % 251);
+    }
+    // Serialize each rank independently from the global state/head layout.
+    const auto serialize = [&](size_t tp, size_t rank) {
+        std::vector<uint8_t> local;
+        size_t               offset = 0;
+        for (const auto width : widths) {
+            const auto begin = global.begin() + offset + rank * (width / tp);
+            local.insert(local.end(), begin, begin + width / tp);
+            offset += width;
+        }
+        return local;
+    };
+    for (const size_t prefill_tp : {1u, 2u, 4u, 8u}) {
+        for (const size_t decode_tp : {1u, 2u, 4u, 8u}) {
+            TpCacheTransferLayout layout;
+            layout.mode        = TpCacheTransferMode::LINEAR_QKV;
+            layout.q_row_bytes = layout.k_row_bytes = q / decode_tp;
+            layout.v_row_bytes                      = v / decode_tp;
+            layout.history_rows                     = rows;
+            for (size_t rank = 0; rank < decode_tp; ++rank) {
+                const auto           reference = serialize(decode_tp, rank);
+                std::vector<uint8_t> destination(reference.size(), 0xfe);
+                const size_t         parts        = std::max<size_t>(1, prefill_tp / decode_tp);
+                const size_t         source_parts = std::max<size_t>(1, decode_tp / prefill_tp);
+                for (size_t part = 0; part < parts; ++part) {
+                    const auto peer   = prefill_tp >= decode_tp ? rank * parts + part : rank / source_parts;
+                    const auto source = serialize(prefill_tp, peer);
+                    const TpCacheTransferRoute route{true, parts, part, source_parts, rank % source_parts};
+                    const auto plan = layout.plan(state / decode_tp, rows * (2 * q + v) / decode_tp, route);
+                    ASSERT_EQ(plan.source_bytes, source.size());
+                    ASSERT_EQ(plan.destination_bytes, destination.size());
+                    ASSERT_EQ(plan.slices.size(), widths.size());
+                    ASSERT_NO_THROW(plan.validateSlices());
+                    for (const auto& slice : plan.slices) {
+                        std::memcpy(destination.data() + slice.destination_offset,
+                                    source.data() + slice.source_offset,
+                                    slice.bytes);
+                    }
+                }
+                EXPECT_EQ(destination, reference) << prefill_tp << "->" << decode_tp << " rank=" << rank;
+            }
+        }
+    }
+}
+
+TEST(LinearTpCacheLayoutTest, RejectsInvalidSourcePartitions) {
+    EXPECT_THROW(linearTpCacheSlices(8, 4, 4, 4, 1, 1, 0, 0, 0), std::invalid_argument);
+    EXPECT_THROW(linearTpCacheSlices(8, 4, 4, 4, 1, 1, 0, 2, 2), std::invalid_argument);
+    EXPECT_THROW(linearTpCacheSlices(8, 4, 4, 4, 1, 1, 0, std::numeric_limits<size_t>::max(), 0), std::overflow_error);
+}
+
 TEST(LinearTpCacheLayoutTest, ReassemblesStateAndEveryQkvHistoryRow) {
     for (size_t decode_tp : {1u, 2u}) {
         for (size_t prefill_tp : {2u, 4u, 8u}) {
@@ -231,6 +343,48 @@ TEST(MhaTpCacheLayoutTest, RejectsInvalidGeometryAndOverflow) {
     EXPECT_THROW(mhaTpPeerOwnsHead(3, 2, 0), std::invalid_argument);
     EXPECT_THROW(mhaTpPeerOwnsHead(4, 2, 4), std::invalid_argument);
     EXPECT_THROW(mhaTpPeerOwnsHead(0, 2, 0), std::invalid_argument);
+}
+
+TEST(MhaTpCacheLayoutTest, ExtractsPackedSourceHeadsAcrossKernelPagesAndScales) {
+    for (size_t pages : {1u, 2u, 4u}) {
+        for (size_t source_parts : {2u, 4u}) {
+            for (size_t k_size : {4u, 128u}) {
+                const size_t         v_size = k_size * 2;
+                std::vector<uint8_t> source;
+                for (size_t page = 0; page < pages; ++page) {
+                    for (size_t kind = 0; kind < 2; ++kind) {
+                        for (size_t head = 0; head < source_parts; ++head) {
+                            source.insert(source.end(),
+                                          kind == 0 ? k_size : v_size,
+                                          static_cast<uint8_t>(1 + page * 32 + kind * 8 + head));
+                        }
+                    }
+                }
+                for (size_t head = 0; head < source_parts; ++head) {
+                    auto plan =
+                        TpCacheTransferPlan::mha(k_size * pages, v_size * pages, 1, 0, pages, source_parts, head);
+                    ASSERT_EQ(plan.source_bytes, source.size());
+                    ASSERT_NO_THROW(plan.validateSlices());
+                    ASSERT_NO_THROW(validateCompleteTransfer({plan}));
+                    std::vector<uint8_t> actual(plan.destination_bytes, 0xff);
+                    for (const auto& slice : plan.slices) {
+                        std::copy_n(
+                            source.data() + slice.source_offset, slice.bytes, actual.data() + slice.destination_offset);
+                    }
+                    std::vector<uint8_t> expected;
+                    for (size_t page = 0; page < pages; ++page) {
+                        expected.insert(expected.end(), k_size, static_cast<uint8_t>(1 + page * 32 + head));
+                        expected.insert(expected.end(), v_size, static_cast<uint8_t>(1 + page * 32 + 8 + head));
+                    }
+                    EXPECT_EQ(actual, expected);
+                }
+            }
+        }
+    }
+    EXPECT_THROW(TpCacheTransferPlan::mha(64, 64, 1, 0, 1, 0), std::invalid_argument);
+    EXPECT_THROW(TpCacheTransferPlan::mha(64, 64, 1, 0, 1, 2, 2), std::invalid_argument);
+    EXPECT_THROW(TpCacheTransferPlan::mha(64, 64, 2, 0, 1, 2, 0), std::invalid_argument);
+    EXPECT_THROW(TpCacheTransferPlan::mha(std::numeric_limits<size_t>::max(), 64, 1, 0, 1, 2), std::overflow_error);
 }
 
 TEST(LinearTpCacheLayoutTest, RejectsInvalidGeometryBeforeTransfer) {

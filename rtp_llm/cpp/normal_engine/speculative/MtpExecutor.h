@@ -1,8 +1,11 @@
 #pragma once
 
+#include <functional>
+#include <future>
 #include <list>
 #include <map>
 #include <memory>
+#include <optional>
 #include <vector>
 #include "kmonitor/client/MetricsReporter.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
@@ -46,6 +49,7 @@ public:
                          const std::shared_ptr<KVCacheManager>&         cache_manager,
                          int32_t                                        kv_cache_group_num = 1,
                          bool                                           warm_up            = false);
+    ~MtpExecutor() override;
 
     absl::Status process(const ScheduleOutput& schedule_output, int64_t schedule_time_us = 0) override;
     bool         updateEplbConfig(const EPLBConfig& config) override;
@@ -99,6 +103,12 @@ public:
                                                              bool linear_attention,
                                                              bool cache_snapshot_ready = false);
     static int               selectMtpPreviousSeqLenUpperBound(bool pending, int previous_next_bound, int host_seq_len);
+    static bool              hasLinearCacheSnapshotCapacity(const std::list<GenerateStreamPtr>& streams,
+                                                            const CacheConfig&                  cache_config,
+                                                            const std::vector<CacheGroupType>&  group_types,
+                                                            int64_t                             physical_width,
+                                                            int64_t                             kernel_width,
+                                                            int64_t                             max_accept_length);
 
 protected:
     static bool speculativePrefillCPRoleIsValid(const PrefillCPConfig& prefill_cp_config, RoleType role_type);
@@ -149,10 +159,10 @@ protected:
     // owns a single phase (prepare, forward, broadcast, dispatch) and
     // preserves the original PROFILE_SCOPE labels.
     void waitPreviousBookkeepingBeforeStreamPreparation(const std::list<GenerateStreamPtr>& streams);
-    void launchTargetVerifyPrepareAsync(const GptModelInputs& model_input, size_t batch_size);
-    // post_rejection=true forks with the final post-commit input, which is
-    // safe under speculative target hooks; the default pre-rejection fork
-    // keeps its historical useAsyncPrepare() gate.
+    using PreparedTargetToken = std::future<std::pair<torch::Tensor, std::shared_ptr<torch::Event>>>;
+    PreparedTargetToken launchTargetVerifyPrepareAsync(const GptModelInputs&        model_input,
+                                                       size_t                       batch_size,
+                                                       std::list<GenerateStreamPtr> streams = {});
     void            launchDraftPrefillPrepareAsync(const GptModelInputs& model_input, bool post_rejection = false);
     GptModelOutputs runTargetVerifyForward(GptModelInputs& model_input, const StreamGroups& stream_groups);
     void            debugCheckLinearBlockMapAtKernelRead(const GptModelInputs& model_input,
@@ -185,6 +195,8 @@ protected:
                                       const torch::Tensor&                         kv_cache_kernel_block_id,
                                       GptModelOutputs                              draft_prefill_model_output,
                                       SamplerOutput                                draft_prefill_sampler_output,
+                                      const std::optional<LinearReplayInputs>&     linear_replay,
+                                      const std::vector<GenerateStream::LinearReplayRound>& replay_rounds,
                                       std::shared_ptr<torch::Event>                rejection_event,
                                       std::shared_ptr<torch::Event>                draft_event,
                                       std::shared_ptr<RecordedBatch>               recorded_batch = nullptr);
@@ -198,7 +210,8 @@ protected:
                           const StreamGroups&         stream_groups,
                           std::vector<torch::Tensor>& draft_probs_list,
                           torch::Tensor&              draft_token_ids_t,
-                          int64_t&                    model_forward_us);
+                          int64_t&                    model_forward_us,
+                          PreparedTargetToken         prepared_target_token = {});
 
     bool useDeviceInput() const;
     bool checkDeviceInput() const;
@@ -224,6 +237,11 @@ protected:
     bool useAsyncDeviceState() const;
 
     bool useAsyncPrepare() const;
+    void recordLinearReplayLastUse(const std::vector<GenerateStream::LinearReplayRound>& rounds);
+    void publishLinearReplayWindows(const StreamGroups&                                   stream_groups,
+                                    const LinearReplayInputs&                             replay,
+                                    const std::vector<GenerateStream::LinearReplayRound>& rounds,
+                                    const torch::Tensor&                                  accept_lengths);
 
     // Opt-in gate for the post-rejection draft-prefill prepare fork. The
     // forked input is final (post-commit), so the hooks-mode restriction of
@@ -246,6 +264,8 @@ protected:
                                      const torch::Tensor&                         kv_cache_block_id,
                                      const torch::Tensor&                         kv_cache_kernel_block_id,
                                      MergedOutput                                 draft_prefill_output,
+                                     const std::optional<LinearReplayInputs>&              linear_replay,
+                                     const std::vector<GenerateStream::LinearReplayRound>& replay_rounds,
                                      std::shared_ptr<torch::Event>                rejection_event,
                                      std::shared_ptr<torch::Event>                draft_event);
 
@@ -261,9 +281,12 @@ protected:
                                                   int64_t              batch_size,
                                                   int64_t              verify_width);
 
-    void releaseAllModelBuffers();
+    void releaseAllModelBuffers(bool defer_reclaim = false);
 
 private:
+    void releaseEarlyReturnModelBuffers();
+    void waitForPendingForwardBeforeBufferRelease();
+
     static torch::Tensor snapshotMutableHostInputToCuda(const torch::Tensor& tensor, TensorHolder& holder);
 
     static bool canEarlyReturnTargetOnlyPrefill(int64_t dp_size);
@@ -316,6 +339,8 @@ private:
 
     // Keeps async copy source tensors alive across release points.
     TensorHolder buffer_holder_;
+    // The forward from an asynchronous early return may still use staging.
+    std::optional<torch::Event> pending_forward_event_;
 
     bool     warm_up_;
     RoleType role_type_;
@@ -347,6 +372,7 @@ private:
     // Declare the worker after its target so destruction joins the worker first.
     std::unique_ptr<SpecLogitsVerifyRunner> spec_logits_verify_runner_;
     AsyncRunner                             spec_logits_verify_async_runner_;
+    AsyncRunner                             spec_sampler_prepare_runner_;
 
     // Bookkeeping worker for stream-async decode dispatch. It owns a CUDA
     // stream + thread and runs D2H/specUpdate/KV release off the main thread.

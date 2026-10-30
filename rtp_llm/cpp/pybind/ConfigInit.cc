@@ -1552,6 +1552,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("warm_up", &RuntimeConfig::warm_up)
         .def_readwrite("warm_up_with_loss", &RuntimeConfig::warm_up_with_loss)
         .def_readwrite("model_warm_up", &RuntimeConfig::model_warm_up)
+        .def_readwrite("enable_linear_replay", &RuntimeConfig::enable_linear_replay)
         .def_readwrite("output_dispatcher_worker_count", &RuntimeConfig::output_dispatcher_worker_count)
         .def_readwrite("use_batch_decode_scheduler", &RuntimeConfig::use_batch_decode_scheduler)
         .def_readwrite("model_name", &RuntimeConfig::model_name)
@@ -1583,10 +1584,11 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.worker_addrs,
                                       self.specify_gpu_arch,
                                       self.model_warm_up,
-                                      self.output_dispatcher_worker_count);
+                                      self.output_dispatcher_worker_count,
+                                      self.enable_linear_replay);
             },
             [](py::tuple t) {
-                if (t.size() != 12 && t.size() != 13 && t.size() != 14)
+                if (t.size() != 12 && t.size() != 13 && t.size() != 14 && t.size() != 15)
                     throw std::runtime_error("Invalid state!");
                 RuntimeConfig c;
                 try {
@@ -1607,6 +1609,9 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     }
                     if (t.size() >= 14) {
                         c.output_dispatcher_worker_count = t[13].cast<int>();
+                    }
+                    if (t.size() >= 15) {
+                        c.enable_linear_replay = t[14].cast<bool>();
                     }
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("RuntimeConfig unpickle error: ") + e.what());
@@ -1656,7 +1661,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("linear_num_value_heads", &LinearAttentionConfig::linear_num_value_heads)
         .def_readwrite("linear_value_head_dim", &LinearAttentionConfig::linear_value_head_dim)
         .def_readwrite("ssm_state_dtype", &LinearAttentionConfig::ssm_state_dtype)
-        .def_readwrite("conv_state_dtype", &LinearAttentionConfig::conv_state_dtype);
+        .def_readwrite("conv_state_dtype", &LinearAttentionConfig::conv_state_dtype)
+        .def_readwrite("replay_vector_gate", &LinearAttentionConfig::replay_vector_gate);
 
     // Register KvCacheDataType enum
     py::enum_<KvCacheDataType>(m, "KvCacheDataType")
@@ -1769,6 +1775,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("v_head_dim", &AttentionConfigs::v_head_dim)
         .def_readwrite("softmax_extra_scale", &AttentionConfigs::softmax_extra_scale)
         .def_readwrite("kv_cache_dtype", &AttentionConfigs::kv_cache_dtype)
+        .def_readwrite("mla_fp8_compute", &AttentionConfigs::mla_fp8_compute)
         .def_readwrite("need_rope_kv_cache", &AttentionConfigs::need_rope_kv_cache)
         .def_readwrite("is_sparse", &AttentionConfigs::is_sparse)
         .def_readwrite("use_sparse_gqa_fmha", &AttentionConfigs::use_sparse_gqa_fmha)
@@ -2021,6 +2028,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def(py::init<>())
         .def_readwrite("num_layers", &ModelConfig::num_layers)
         .def_readwrite("max_seq_len", &ModelConfig::max_seq_len)
+        .def_readwrite("max_execution_tokens", &ModelConfig::max_execution_tokens)
         .def_readwrite("gen_num_per_cycle", &ModelConfig::gen_num_per_cycle)
         .def_readwrite("vocab_size", &ModelConfig::vocab_size)
         .def_readwrite("output_vocab_ids", &ModelConfig::output_vocab_ids)
@@ -2037,6 +2045,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("cache_min_replay_tokens", &ModelConfig::cache_min_replay_tokens)
         .def_readwrite("cache_key_hash_seed", &ModelConfig::cache_key_hash_seed)
         .def_readwrite("kv_cache_spec_descs", &ModelConfig::kv_cache_spec_descs)
+        .def_readwrite("use_page_rr_kv_cache", &ModelConfig::use_page_rr_kv_cache)
         // task_type is defined as property below
         .def_readwrite("ckpt_path", &ModelConfig::ckpt_path)
         .def_readwrite("tokenizer_path", &ModelConfig::tokenizer_path)
@@ -2232,6 +2241,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("comm_buffer_size", &PrefillCPConfig::comm_buffer_size)
         .def_readwrite("kv_cache_sharded", &PrefillCPConfig::kv_cache_sharded)
         .def_readwrite("prefill_cp_size", &PrefillCPConfig::prefill_cp_size)
+        .def_readwrite("preserve_tp_layout", &PrefillCPConfig::preserve_tp_layout)
         .def("to_string", &PrefillCPConfig::to_string)
         .def("is_enabled", &PrefillCPConfig::is_enabled)
         .def("is_prefill_enabled", &PrefillCPConfig::is_prefill_enabled)
@@ -2241,10 +2251,11 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.comm_buffer_size,
                                       self.kv_cache_sharded,
                                       self.prefill_cp_size,
-                                      self.all_gather_impl);
+                                      self.all_gather_impl,
+                                      self.preserve_tp_layout);
             },
             [](py::tuple t) {
-                if (t.size() != 2 && t.size() != 4 && t.size() != 5)
+                if (t.size() != 2 && t.size() != 4 && t.size() != 5 && t.size() != 6)
                     throw std::runtime_error("Invalid state!");
                 PrefillCPConfig c;
                 try {
@@ -2254,8 +2265,13 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                         c.kv_cache_sharded = t[2].cast<bool>();
                         c.prefill_cp_size  = t[3].cast<int64_t>();
                     }
-                    if (t.size() >= 5) {
+                    if (t.size() == 5 && py::isinstance<py::bool_>(t[4])) {
+                        c.preserve_tp_layout = t[4].cast<bool>();
+                    } else if (t.size() >= 5) {
                         c.all_gather_impl = t[4].cast<CPAllGatherImpl>();
+                    }
+                    if (t.size() == 6) {
+                        c.preserve_tp_layout = t[5].cast<bool>();
                     }
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("PrefillCPConfig unpickle error: ") + e.what());

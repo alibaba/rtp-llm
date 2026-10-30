@@ -7,13 +7,21 @@ import pickle
 import sys
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import TestCase, main
 from unittest.mock import patch
 
 from rtp_llm.config.collective_config import CollectiveConfig
 from rtp_llm.config.engine_config import EngineConfig
 from rtp_llm.config.test.kv_cache_event_test_values import KV_CACHE_EVENT_ENV_CASES
-from rtp_llm.ops import CPAllGatherImpl, HWKernelConfig, RoleType, TaskType
+from rtp_llm.ops import (
+    CPAllGatherImpl,
+    FMHAConfig,
+    HWKernelConfig,
+    RoleType,
+    RuntimeConfig,
+    TaskType,
+)
 from rtp_llm.server.server_args.util import str2_cp_all_gather_impl
 from rtp_llm.utils import backend_registry
 from rtp_llm.utils.backend_registry import register_backend_hook
@@ -115,6 +123,43 @@ class Glm5EnvironmentArgumentsTest(TestCase):
                 config.load_config.fastsafetensors_config_json,
             )
             self.assertEqual(os.environ["FASTSAFETENSORS_CONFIG"], "new.json")
+
+
+class Fia2aArgumentsTest(TestCase):
+    def test_retired_environment_is_ignored(self):
+        from rtp_llm.server.server_args import server_args
+
+        for env in (
+            {},
+            {
+                "DECODE_CP_MLA_FUSION_MODE": "UNFUSED",
+                "DECODE_CP_MLA_A2A_BACKEND": "NCCL",
+            },
+        ):
+            with self.subTest(env=env), patch.dict(os.environ, env, clear=True):
+                config = server_args.setup_args([]).fmha_config
+                self.assertEqual(config.__getstate__(), FMHAConfig().__getstate__())
+                self.assertFalse(hasattr(config, "decode_cp_mla_fusion_mode"))
+                self.assertFalse(hasattr(config, "decode_cp_mla_a2a_backend"))
+
+    def test_native_pickle_round_trip(self):
+        config = FMHAConfig()
+        config.enable_flashinfer_trt_fmha_v2 = False
+        config.absorb_opt_len = 2048
+        state = config.__getstate__()
+        restored = pickle.loads(pickle.dumps(config))
+        self.assertEqual(restored.__getstate__(), state)
+
+    def test_retired_cli_is_rejected(self):
+        from rtp_llm.server.server_args import server_args
+
+        for option, value in (
+            ("--decode_cp_mla_fusion_mode", "FUSED"),
+            ("--decode_cp_mla_a2a_backend", "CUSTOM"),
+        ):
+            with self.subTest(option=option), patch.dict(os.environ, {}, clear=True):
+                with patch("sys.stderr", io.StringIO()), self.assertRaises(SystemExit):
+                    server_args.setup_args([option, value])
 
 
 class AllReduceArgumentsTest(TestCase):
@@ -260,6 +305,174 @@ class DynamicDecodeArgumentsTest(TestCase):
                 ).py_hw_kernel_config.dyn_decode_gate_thresholds,
                 "",
             )
+
+
+class CliOnlyArgumentsTest(TestCase):
+    def test_cli_only_ignores_environment_and_preserves_bindings(self):
+        from rtp_llm.server.server_args.server_args import EnvArgumentParser
+
+        for grouped in (False, True):
+            for args in (None, [], ["--other", "3"]):
+                with self.subTest(grouped=grouped, args=args):
+                    parser = EnvArgumentParser()
+                    config = SimpleNamespace(value=0)
+                    parser.set_root_config(config)
+                    target = parser.add_argument_group("test") if grouped else parser
+                    kwargs = {"bind_to": (config, "value")} if grouped else {}
+                    target.add_argument(
+                        "--value", type=int, default=7, cli_only=True, **kwargs
+                    )
+                    parser.add_argument("--other", type=int, default=1)
+                    with (
+                        patch.dict(
+                            os.environ, {"VALUE": "99", "OTHER": "2"}, clear=True
+                        ),
+                        patch.object(sys, "argv", ["prog"]),
+                    ):
+                        parsed = parser.parse_args(args)
+                    self.assertEqual(parsed.value, 7)
+                    self.assertEqual(parsed.other, 3 if args else 2)
+                    if grouped:
+                        self.assertEqual(config.value, 7)
+                    self.assertNotIn("value", parser.get_env_mappings())
+                    self.assertEqual(parser.parse_args(["--value", "9"]).value, 9)
+                    if grouped:
+                        self.assertEqual(config.value, 9)
+
+    def test_environment_mappings_do_not_leak_between_parsers(self):
+        from rtp_llm.server.server_args.server_args import EnvArgumentParser
+
+        environment_parser = EnvArgumentParser()
+        environment_parser.add_argument("--value", type=int, default=1)
+        cli_parser = EnvArgumentParser()
+        cli_parser.add_argument("--value", type=int, default=2, cli_only=True)
+        with patch.dict(os.environ, {"VALUE": "3"}, clear=True):
+            self.assertEqual(environment_parser.parse_args([]).value, 3)
+            self.assertEqual(cli_parser.parse_args([]).value, 2)
+
+
+class ModelCliArgumentsTest(TestCase):
+    def test_retired_environment_is_ignored(self):
+        from rtp_llm.server.server_args import server_args
+
+        for args in (None, []):
+            with (
+                self.subTest(args=args),
+                patch.dict(
+                    os.environ,
+                    {
+                        "RTP_MLA_PREFILL_EXPANDED_KV_BUDGET_GIB": "1",
+                        "PREFILL_KV_WORKSPACE_BUDGET_BYTES": "1024",
+                        "SHARED_EXPERT_WEIGHT_SHARD": "1",
+                        "KIMI_K3_SHARED_EXPERT_WEIGHT_SHARD": "1",
+                    },
+                    clear=True,
+                ),
+                patch.object(sys, "argv", ["prog"]),
+            ):
+                configs = server_args.setup_args(args)
+            self.assertIsNone(configs.model_args.prefill_kv_workspace_budget_bytes)
+            self.assertIsNone(configs.model_args.shared_expert_weight_shard)
+
+    def test_explicit_cli_values_are_typed(self):
+        from rtp_llm.server.server_args import server_args
+
+        for enabled in (False, True):
+            with self.subTest(enabled=enabled), patch.dict(os.environ, {}, clear=True):
+                configs = server_args.setup_args(
+                    [
+                        "--prefill_kv_workspace_budget_bytes",
+                        str(1024**3),
+                        "--shared_expert_weight_shard",
+                        str(int(enabled)),
+                    ]
+                )
+            self.assertEqual(
+                configs.model_args.prefill_kv_workspace_budget_bytes, 1024**3
+            )
+            self.assertIs(configs.model_args.shared_expert_weight_shard, enabled)
+
+
+class LinearReplayArgumentsTest(TestCase):
+    def test_default_is_enabled(self):
+        from rtp_llm.server.server_args import server_args
+
+        self.assertTrue(RuntimeConfig().enable_linear_replay)
+        with patch.dict(os.environ, {}, clear=True):
+            configs = server_args.setup_args([])
+        self.assertTrue(configs.runtime_config.enable_linear_replay)
+
+    def test_retired_environment_is_ignored(self):
+        from rtp_llm.server.server_args import server_args
+
+        for value in ("1", "0", "invalid"):
+            for args in (None, []):
+                with self.subTest(value=value, args=args):
+                    with (
+                        patch.dict(
+                            os.environ,
+                            {"ENABLE_LINEAR_REPLAY": value},
+                            clear=True,
+                        ),
+                        patch.object(sys, "argv", ["prog"]),
+                    ):
+                        configs = server_args.setup_args(args)
+                    self.assertTrue(configs.runtime_config.enable_linear_replay)
+
+    def test_cli_overrides_environment(self):
+        from rtp_llm.server.server_args import server_args
+
+        for env_value, cli_value, expected in (
+            ("1", "0", False),
+            ("0", "1", True),
+        ):
+            with self.subTest(env_value=env_value, cli_value=cli_value):
+                with patch.dict(
+                    os.environ,
+                    {"ENABLE_LINEAR_REPLAY": env_value},
+                    clear=True,
+                ):
+                    configs = server_args.setup_args(
+                        ["--enable_linear_replay", cli_value]
+                    )
+                self.assertIs(configs.runtime_config.enable_linear_replay, expected)
+
+    def test_runtime_config_pickle_round_trip(self):
+        for enabled in (False, True):
+            with self.subTest(enabled=enabled):
+                config = RuntimeConfig()
+                config.enable_linear_replay = enabled
+                config.max_generate_batch_size = 17
+                config.model_warm_up = False
+                config.output_dispatcher_worker_count = 3
+
+                restored = pickle.loads(pickle.dumps(config))
+                self.assertIs(restored.enable_linear_replay, enabled)
+                self.assertEqual(restored.max_generate_batch_size, 17)
+                self.assertFalse(restored.model_warm_up)
+                self.assertEqual(restored.output_dispatcher_worker_count, 3)
+
+    def test_legacy_runtime_config_pickle_uses_default_replay(self):
+        config = RuntimeConfig()
+        config.enable_linear_replay = True
+        config.max_generate_batch_size = 17
+        config.model_name = "linear-replay-test"
+        config.model_warm_up = False
+        config.output_dispatcher_worker_count = 3
+        state = config.__getstate__()
+        self.assertEqual(len(state), 15)
+
+        for size in (12, 13, 14):
+            with self.subTest(size=size):
+                restored = RuntimeConfig.__new__(RuntimeConfig)
+                restored.__setstate__(state[:size])
+                self.assertTrue(restored.enable_linear_replay)
+                self.assertEqual(restored.max_generate_batch_size, 17)
+                self.assertEqual(restored.model_name, "linear-replay-test")
+                self.assertIs(restored.model_warm_up, size < 13)
+                self.assertEqual(
+                    restored.output_dispatcher_worker_count, 3 if size >= 14 else 0
+                )
 
 
 class CacheConfigArgumentsTest(TestCase):
@@ -1929,6 +2142,23 @@ class ServerArgsSetTest(TestCase):
         parser.parse_args(["--gpu_batch_wait_ms", "500", "--gpu_max_batch_size", "8"])
         self.assertEqual(cfg.vit_config.gpu_max_batch_size, 8)
         self.assertEqual(cfg.vit_config.gpu_batch_wait_ms, 500)
+
+    def test_oss_endpoint_rewrite_is_cli_only(self):
+        from rtp_llm.config.py_config_modules import VitConfig
+        from rtp_llm.server.server_args.server_args import EnvArgumentParser
+        from rtp_llm.server.server_args.vit_group_args import init_vit_group_args
+
+        config = VitConfig()
+        parser = EnvArgumentParser()
+        parser.set_root_config(config)
+        init_vit_group_args(parser, config)
+        with patch.dict(os.environ, {"ENABLE_OSS_INTERNAL_ENDPOINT_REWRITE": "0"}):
+            parser.parse_args([])
+            self.assertTrue(config.enable_oss_internal_endpoint_rewrite)
+            parser.parse_args(["--enable_oss_internal_endpoint_rewrite", "0"])
+        self.assertFalse(
+            pickle.loads(pickle.dumps(config)).enable_oss_internal_endpoint_rewrite
+        )
 
     def test_repetition_detection_config(self):
         """Test that repetition detection args bind to PyEnvConfigs."""

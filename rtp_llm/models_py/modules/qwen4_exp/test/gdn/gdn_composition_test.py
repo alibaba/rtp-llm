@@ -87,7 +87,9 @@ class GdnCompositionTest(unittest.TestCase):
                 meta = SimpleNamespace(
                     is_target_verify=steps > 1, is_cp_linear_attn=False
                 )
-                cache = SimpleNamespace(kv_cache_base=state, seq_size_per_block=128)
+                cache = SimpleNamespace(
+                    kv_cache_base=state, seq_size_per_block=128, linear_replay=None
+                )
 
                 def recurrence(*args):
                     g, beta = fused_gdn_gating(a_log, a, b, dt)

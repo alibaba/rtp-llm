@@ -30,11 +30,14 @@ from rtp_llm.dash_sc.structural_tag import (
     structural_tag_from_response_format,
     validate_structural_tag_shape,
 )
-from rtp_llm.utils.base_model_datatypes import GenerateOutput, GenerateOutputs
+from rtp_llm.utils.base_model_datatypes import (
+    GenerateOutput,
+    GenerateOutputs,
+    MMUrlType,
+)
 
 if TYPE_CHECKING:
     from rtp_llm.config.generate_config import GenerateConfig
-    from rtp_llm.utils.base_model_datatypes import MMUrlType
 
 _INT32_MIN = -2_147_483_648
 _DEFAULT_MAX_NEW_TOKENS = 32000
@@ -235,6 +238,18 @@ def _parse_optional_scalar_int(request, tensor_name: str) -> int | None:
     if not ids:
         return None
     return int(ids[0])
+
+
+def _parse_optional_scalar_bool(request, tensor_name: str) -> bool | None:
+    inp, raw = _find_input_raw(request, tensor_name)
+    if inp is None or not raw:
+        return None
+    if inp.datatype == "BOOL":
+        return raw[0] != 0
+    value = _parse_optional_scalar_int(request, tensor_name)
+    if value is None:
+        value = _parse_optional_scalar_float(request, tensor_name)
+    return value != 0 if value is not None else None
 
 
 def _parse_optional_scalar_float(request, tensor_name: str) -> float | None:
@@ -749,6 +764,8 @@ class SamplingParams:
     response_format: str | None = None
     json_format: bool = False
     structural_tag: str | None = None
+    logprobs: bool = False
+    top_logprobs: int = 0
 
     @property
     def n(self) -> int:
@@ -765,7 +782,7 @@ class SamplingParams:
         request_controls: DashScRequestControls | None = None,
     ):
         """Build ``GenerateConfig``; request controls supply non-sampling knobs."""
-        from rtp_llm.config.generate_config import GenerateConfig
+        from rtp_llm.config.generate_config import GenerateConfig, ReturnAllProbsMode
 
         structural_tag = self.structural_tag
         if self.response_format is not None:
@@ -814,6 +831,11 @@ class SamplingParams:
             stop_words_list=self.stop_words_list_py(),
             max_thinking_tokens=max_thinking_tokens,
             return_input_ids=return_input_ids,
+            return_all_probs=(
+                ReturnAllProbsMode.ORIGINAL
+                if self.logprobs
+                else ReturnAllProbsMode.NONE
+            ),
             is_streaming=True,
             response_format=response_format,
             structural_tag=structural_tag,
@@ -876,7 +898,7 @@ def parse_sampling_params(
     ``top_p``, ``top_k``, ``stop_words_list``, ``temperature``,
     ``min_new_tokens`` (or DashScope alias ``min_length``), ``seed``,
     ``repetition_penalty``, ``frequency_penalty``, ``presence_penalty``,
-    ``max_new_think_tokens`` / ``max_think_length``.
+    ``max_new_think_tokens`` / ``max_think_length``, ``logprobs``, ``top_logprobs``.
 
     Legacy: if there is no ``top_k`` input, ``request.parameters["top_k"].int64_param``
     is used instead.
@@ -943,6 +965,22 @@ def parse_sampling_params(
     if vf is not None:
         presence_penalty = vf
 
+    logprobs = _parse_optional_scalar_bool(request, "logprobs")
+    if logprobs is None:
+        logprobs = _parse_optional_parameter_bool(request, "logprobs")
+    if logprobs is None:
+        logprobs = _parse_optional_bool(
+            _lookup_ds_request_control(ds_attrs, "logprobs")
+        )
+
+    top_logprobs = _parse_optional_scalar_int(request, "top_logprobs")
+    if top_logprobs is None:
+        top_logprobs = _parse_optional_parameter_int(request, "top_logprobs")
+    if top_logprobs is None:
+        top_logprobs = _parse_optional_int_value(
+            _lookup_ds_request_control(ds_attrs, "top_logprobs")
+        )
+
     for tensor_name in ("max_think_length", "max_new_think_tokens"):
         v = _parse_optional_scalar_int(request, tensor_name)
         if v is not None:
@@ -975,6 +1013,8 @@ def parse_sampling_params(
         response_format=response_format,
         json_format=json_format,
         structural_tag=structural_tag,
+        logprobs=bool(logprobs),
+        top_logprobs=top_logprobs or 0,
     )
 
 
@@ -1132,8 +1172,6 @@ def parse_dash_sc_grpc_request(
 def _multimodal_type_maps() -> (
     tuple[dict[str, tuple[str, MMUrlType]], dict[str, MMUrlType]]
 ):
-    from rtp_llm.utils.base_model_datatypes import MMUrlType
-
     return (
         {
             "image_url": ("image_url", MMUrlType.IMAGE),
@@ -1322,6 +1360,56 @@ def _token_ids_list_from_generate_output(out_py: GenerateOutput) -> list[int]:
     return ids
 
 
+def _append_logprobs_parameter(
+    infer: predict_v2_pb2.ModelInferResponse,
+    out_py: GenerateOutput,
+    generated_ids: list[int],
+    top_logprobs: int,
+) -> None:
+    rows: list[dict[str, float]] = []
+    if generated_ids:
+        if out_py.all_probs is None:
+            raise RuntimeError(
+                "all_probs is missing or cannot be aligned while logprobs is requested"
+            )
+        probabilities = out_py.all_probs.detach().to(device="cpu", dtype=torch.float32)
+        while probabilities.dim() > 2 and probabilities.shape[0] == 1:
+            probabilities = probabilities.squeeze(0)
+        if probabilities.dim() == 1:
+            probabilities = probabilities.unsqueeze(0)
+        source_ids = _token_ids_list_from_generate_output(out_py)
+        # The thinking phase may stop partway through an MTP chunk. Only score
+        # the prefix actually emitted, using the corresponding target rows.
+        if (
+            probabilities.dim() != 2
+            or probabilities.shape[0] != len(source_ids)
+            or source_ids[: len(generated_ids)] != generated_ids
+        ):
+            raise RuntimeError(
+                "all_probs is missing or cannot be aligned while logprobs is requested"
+            )
+        candidate_limit = max(top_logprobs, 0)
+        for token_id, row in zip(generated_ids, probabilities):
+            if not 0 <= token_id < row.numel():
+                raise RuntimeError(
+                    "generated token is outside the probability vocabulary"
+                )
+            scores: dict[str, float] = {}
+            if candidate_limit:
+                candidates = row.topk(min(candidate_limit, int(row.count_nonzero())))
+                scores = {
+                    str(candidate_id): score
+                    for candidate_id, score in zip(
+                        candidates.indices.tolist(), candidates.values.log().tolist()
+                    )
+                }
+            scores[str(token_id)] = row[token_id].log().item()
+            rows.append(scores)
+    infer.parameters["logprobs"].string_param = json.dumps(
+        rows, allow_nan=False, separators=(",", ":")
+    )
+
+
 def _first_int(value: int | list[int] | tuple[int, ...] | None) -> int | None:
     if value is None:
         return None
@@ -1395,9 +1483,22 @@ def prepend_to_generated_ids_tensor(
         cur_len = shape[-1] if shape else 0
         if cur_len <= 0:
             return False
+        prefixed_logprobs = None
+        if "logprobs" in infer.parameters:
+            rows = json.loads(infer.parameters["logprobs"].string_param)
+            if not isinstance(rows, list) or len(rows) != cur_len:
+                raise ValueError("logprobs rows must match generated_ids before echo")
+            # Prompt echo has no generated probability. Preserve token alignment.
+            prefixed_logprobs = json.dumps(
+                [{str(token_id): None} for token_id in token_ids] + rows,
+                allow_nan=False,
+                separators=(",", ":"),
+            )
         prefix_raw = struct.pack("<%di" % len(token_ids), *token_ids)
         infer.raw_output_contents[i] = prefix_raw + bytes(infer.raw_output_contents[i])
         out.shape[:] = [1, cur_len + len(token_ids)]
+        if prefixed_logprobs is not None:
+            infer.parameters["logprobs"].string_param = prefixed_logprobs
         return True
     return False
 
@@ -1518,6 +1619,8 @@ def build_stream_response_from_generate_outputs(
     stream_finished: bool | None = None,
     token_ids: list[int] | None = None,
     log_input_output: bool = True,
+    top_logprobs: int = 0,
+    emit_logprobs: bool = True,
 ) -> predict_v2_pb2.ModelStreamInferResponse:
     """Build ``ModelStreamInferResponse`` from one ``GenerateOutputs`` chunk.
 
@@ -1557,6 +1660,8 @@ def build_stream_response_from_generate_outputs(
         out_py,
         prompt_token_fallback=len(request_input_ids or []),
     )
+    if emit_logprobs and getattr(generate_config, "return_all_probs", False):
+        _append_logprobs_parameter(infer, out_py, generated_ids, top_logprobs)
     infer.parameters["incremental_output"].int64_param = 1 if is_streaming else 0
     _append_dashllm_limit_parameters(
         infer,
@@ -1599,6 +1704,7 @@ class StreamResponseBuilder:
         "_return_input_ids",
         "_is_streaming",
         "_generate_config",
+        "_top_logprobs",
         "_eos_token_id",
         "_max_token_id",
         "_template",
@@ -1630,6 +1736,7 @@ class StreamResponseBuilder:
         log_input_output: bool = True,
         image_tokens: int | None = None,
         prompt_token_fallback: int | None = None,
+        top_logprobs: int = 0,
     ) -> None:
         self._dash_sc_request_id = dash_sc_request_id
         self._model_name = model_name
@@ -1644,6 +1751,7 @@ class StreamResponseBuilder:
         self._return_input_ids = return_input_ids
         self._is_streaming = is_streaming
         self._generate_config = generate_config
+        self._top_logprobs = top_logprobs
         self._eos_token_id = eos_token_id
         self._max_token_id = max_token_id
         self._log_input_output = log_input_output
@@ -1667,6 +1775,7 @@ class StreamResponseBuilder:
         finish_reason_override: int | None = None,
         stream_finished: bool | None = None,
         token_ids: list[int] | None = None,
+        emit_logprobs: bool = True,
     ) -> predict_v2_pb2.ModelStreamInferResponse:
         if not go.generate_outputs:
             raise ValueError("StreamResponseBuilder.build expects non-empty outputs")
@@ -1683,12 +1792,22 @@ class StreamResponseBuilder:
             else LLMFinishReason.STOP if finished else LLMFinishReason.STREAMING
         )
         aux_info = getattr(out_py, "aux_info", None)
+        if self._image_tokens is None and aux_info is not None:
+            self._image_tokens = aux_info.multimodal_lengths.get(MMUrlType.IMAGE)
+            if self._image_tokens is not None and self._template is not None:
+                # A heartbeat can precede the request's image usage.
+                self._template.infer_response.parameters["image_tokens"].int64_param = (
+                    self._image_tokens
+                )
         prompt_tokens = (
             int(aux_info.input_len)
             if aux_info is not None
             else self._prompt_token_fallback
         )
         cached_tokens = int(aux_info.reuse_len) if aux_info is not None else 0
+        include_logprobs = emit_logprobs and getattr(
+            self._generate_config, "return_all_probs", False
+        )
 
         if self._template is None:
             response = predict_v2_pb2.ModelStreamInferResponse()
@@ -1733,6 +1852,11 @@ class StreamResponseBuilder:
             self._template_prompt_tokens = prompt_tokens
             self._template_cached_tokens = cached_tokens
             self._template_think_token_num = generate_think_token_num
+            # Scores belong to this frame and must stay out of the template.
+            if include_logprobs:
+                _append_logprobs_parameter(
+                    infer, out_py, generated_ids, self._top_logprobs
+                )
             logging.debug(
                 "[DashScGrpc] [%s] generated_ids: %s",
                 self._request_log_tag,
@@ -1750,6 +1874,8 @@ class StreamResponseBuilder:
         response = predict_v2_pb2.ModelStreamInferResponse()
         response.CopyFrom(self._template)
         infer = response.infer_response
+        if include_logprobs:
+            _append_logprobs_parameter(infer, out_py, generated_ids, self._top_logprobs)
 
         generated_raw = (
             struct.pack("<%di" % len(generated_ids), *generated_ids)

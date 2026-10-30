@@ -1,4 +1,4 @@
-load("//rtp_llm/test/smoke:defs.bzl", "smoke_test")
+load("//rtp_llm/test/smoke:defs.bzl", "custom_smoke_test", "smoke_test")
 
 def sm8x_suites():
     # SM8x (L20)
@@ -8,6 +8,23 @@ def sm8x_suites():
     native.test_suite(
         name = "smoke_sm8x_basic",
         tests = [
+            # Extend the existing Qwen2.5 P/D fixture with chunk probability checks.
+            custom_smoke_test(
+                name = "chunked_logprobs_fused",
+                main = "chunked_logprobs_test.py",
+                args = ["--topology=fused"],
+                smoke_args = "--world_size 1",
+                gpu_type = ["L20_CU13"],
+                data = ["//rtp_llm:sdk", "data/model/qwen25/q_r_l20_remote_cache_pd_sep.json"],
+            ),
+            custom_smoke_test(
+                name = "chunked_logprobs_pd",
+                main = "chunked_logprobs_test.py",
+                args = ["--topology=pd"],
+                smoke_args = "--world_size 2",
+                gpu_type = ["L20_CU13"],
+                data = ["//rtp_llm:sdk", "data/model/qwen25/q_r_l20_remote_cache_pd_sep.json"],
+            ),
             smoke_test(
                 name = "softmax_probs",
                 task_info = "data/model/qwen25/q_r_softmax_probs.json",

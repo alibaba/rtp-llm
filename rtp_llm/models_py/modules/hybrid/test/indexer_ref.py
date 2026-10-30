@@ -638,7 +638,10 @@ def prepare_indexer_params(
         slot_mapping = block_numbers.long() * seq_size_per_block + block_offsets.long()
 
     seqlens_32 = seq_lens.to(torch.int32).to("cuda")
-    schedule_metadata = deep_gemm.get_paged_mqa_logits_metadata(
+    get_metadata = getattr(deep_gemm, "get_legacy_paged_mqa_logits_metadata", None)
+    if get_metadata is None:
+        get_metadata = deep_gemm.get_paged_mqa_logits_metadata
+    schedule_metadata = get_metadata(
         seqlens_32.view(-1, 1), blocksize, deep_gemm.get_num_sms()
     )
 
