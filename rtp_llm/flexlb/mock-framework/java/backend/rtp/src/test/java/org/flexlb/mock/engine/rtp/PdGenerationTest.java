@@ -247,6 +247,52 @@ class PdGenerationTest {
         }
     }
 
+    @Test void prefillKvRemainsOwnedUntilNativeLoadAckOrCancellation() throws Exception {
+        for (boolean cancelled : new boolean[]{false, true}) {
+            var load = new CountDownLatch(1);
+            var replies = new java.util.concurrent.atomic.AtomicReference<StreamObserver<GenerateOutputsPB>>();
+            var remote = io.grpc.netty.NettyServerBuilder.forPort(0).addService(new RpcServiceGrpc.RpcServiceImplBase() {
+                @Override public StreamObserver<GenerateRequestPB> remoteGenerate(StreamObserver<GenerateOutputsPB> response) {
+                    replies.set(response);
+                    return new StreamObserver<>() {
+                        public void onNext(GenerateRequestPB frame) {
+                            if (frame.getStage() == RemoteStage.ALLOCATE) response.onNext(GenerateOutputsPB.getDefaultInstance());
+                            else if (frame.getStage() == RemoteStage.LOAD) load.countDown();
+                            else if (frame.getStage() == RemoteStage.PREFILL_COMPLETE) response.onCompleted();
+                        }
+                        public void onError(Throwable error) {}
+                        public void onCompleted() {}
+                    };
+                }
+            }).build().start();
+            try (var p = node("prefill", 8, 1); var d = node("decode", 8, 1)) {
+                var input = input(d, 2200, 5, 1, 3000, true).toBuilder();
+                input.getGenerateConfigBuilder().getRoleAddrsBuilder(0).setGrpcPort(remote.getPort());
+                assertEquals(1, enqueue(p, 2000, input.build()).getSuccessesCount());
+                assertTrue(load.await(3, TimeUnit.SECONDS));
+                assertEquals(10, p.status().getAvailableKvCache());
+                if (cancelled) {
+                    assertEquals(CancelStatusPB.CANCEL_STATUS_ACCEPTED, cancel(p, 2200));
+                } else {
+                    replies.get().onNext(GenerateOutputsPB.newBuilder().setErrorInfo(RpcErrorPB.getDefaultInstance()).build());
+                    try (var call = new Call(p, input.build(), true)) {
+                        call.output(1, true, 1); assertEquals("completed", call.next());
+                    }
+                }
+                await(() -> p.status().getAvailableKvCache() == 16 && p.status().getRunningTaskInfoCount() == 0);
+            } finally { remote.shutdownNow().awaitTermination(3, TimeUnit.SECONDS); }
+        }
+    }
+
+    @Test void nativePdHandoffDoesNotRequireMatchingLocalBlockLayouts() throws Exception {
+        try (var p = node("prefill", 8, 1); var d = node("decode", 8, 1, Map.of("settings", Map.of("seq_size_per_block", 3)));
+             var call = new Call(p, input(d, 2300, 5, 3, 3000, true))) {
+            for (int i = 1; i <= 3; i++) call.output(i, i == 3, 1);
+            assertEquals("completed", call.next());
+            await(() -> p.status().getAvailableKvCache() == 16 && d.status().getAvailableKvCache() == 24);
+        }
+    }
+
     @Test void batchCompletesBothSchedulersWithoutFetchAndRetainsOutput() throws Exception {
         try (var p = node("prefill", 8, 100); var d = node("decode", 8, 1)) {
             var request = input(d, 101, 5, 4, 3000, true);
@@ -694,6 +740,45 @@ class PdGenerationTest {
             await(() -> d.status().getFinishedTaskListCount() == 1 && p.status().getAvailableKvCache() == 16 && d.status().getAvailableKvCache() == 4096);
             assertFalse(d.status().getFinishedTaskList(0).hasErrorInfo());
             assertEquals(2999, metric(d, "rtp_llm_model_forward_seconds_count", "role=\"decode\""));
+        }
+    }
+
+    @Test void downstreamFailureDuringPrefillCancelsTheComputeAndReleasesKv() throws Exception {
+        try (var p = node("prefill", 8, 1000); var d = node("decode", 8, 1);
+             var call = new Call(p, input(d, 2400, 3, 4, 3000, true))) {
+            await(() -> p.status().getRunningQueryLen() == 1);
+            d.node.close();
+            call.error(Status.Code.UNAVAILABLE);
+            await(() -> p.status().getAvailableKvCache() == 16);
+            assertEquals(0, metric(p, "rtp_llm_model_forward_seconds_count", "role=\"prefill\""));
+        }
+    }
+
+    @Test void decodeComputeAndCapacityDoNotWaitForRemoteOutputConsumption() throws Exception {
+        try (var d = node("decode", 2048, 0); var context = Context.current().withCancellation()) {
+            var replies = new LinkedBlockingQueue<Object>();
+            var stream = context.call(() -> RpcServiceGrpc.newStub(d.channel).remoteGenerate(
+                new io.grpc.stub.ClientResponseObserver<GenerateRequestPB, GenerateOutputsPB>() {
+                    public void beforeStart(io.grpc.stub.ClientCallStreamObserver<GenerateRequestPB> request) {
+                        request.disableAutoRequestWithInitial(2);
+                    }
+                    public void onNext(GenerateOutputsPB output) { replies.add(output); }
+                    public void onError(Throwable error) { replies.add(error); }
+                    public void onCompleted() { replies.add("completed"); }
+                }));
+            var request = input(d, 2500, 3, 3000, 5000, false);
+            stream.onNext(GenerateRequestPB.newBuilder().setStage(RemoteStage.ALLOCATE)
+                .setClientId("p").setRequestId(2500).setInput(request).build());
+            assertInstanceOf(GenerateOutputsPB.class, replies.poll(3, TimeUnit.SECONDS));
+            stream.onNext(GenerateRequestPB.newBuilder().setStage(RemoteStage.LOAD).setClientId("p").setRequestId(2500).build());
+            assertInstanceOf(GenerateOutputsPB.class, replies.poll(3, TimeUnit.SECONDS));
+            stream.onNext(GenerateRequestPB.newBuilder().setStage(RemoteStage.GENERATE)
+                .setClientId("p").setRequestId(2500).setFirstGenerateTokenId(3).build());
+            stream.onCompleted();
+            await(() -> d.status().getFinishedTaskListCount() == 1 && d.status().getAvailableKvCache() == 4096);
+            assertFalse(d.status().getFinishedTaskList(0).hasErrorInfo());
+            assertEquals(2999, metric(d, "rtp_llm_model_forward_seconds_count", "role=\"decode\""));
+            assertTrue(replies.isEmpty());
         }
     }
 

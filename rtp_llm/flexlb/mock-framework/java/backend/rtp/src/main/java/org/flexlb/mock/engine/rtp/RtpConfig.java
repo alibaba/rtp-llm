@@ -16,7 +16,7 @@ import org.flexlb.mock.api.model.DecodeSpec;
 public record RtpConfig(String id, Role role, int blockSize, int deviceBlocks, int reserveBlocks, EvictionPolicy evictionPolicy,
                         boolean reuseCache, boolean deviceCache, int hostBlocks, EvictionPolicy hostPolicy,
                         Watermark deviceWatermark, Watermark hostWatermark, boolean disableDecodeFirstReuse, int maxSeqLen, int maxBatchTokens,
-                        int maxGenerateBatchSize, int maxInitedKvStreams, int maxUncachedBatchTokens, int cpSize, boolean cpEnabled, int tpSize, int dpSize, int loadTimeoutMs,
+                        int maxGenerateBatchSize, int maxInitedKvStreams, int maxUncachedBatchTokens, int cpSize, boolean cpEnabled, int tpSize, int dpSize,
                         JsonNode business, ComputeModel compute) {
     public static final int REQUEST_LIMIT = 1024;
     private static final ObjectMapper JSON = new ObjectMapper()
@@ -26,7 +26,7 @@ public record RtpConfig(String id, Role role, int blockSize, int deviceBlocks, i
     public RtpConfig {
         if (id == null || id.isBlank() || (role != Role.prefill && role != Role.decode)
                 || blockSize < 1 || deviceBlocks < 1 || reserveBlocks < 0 || reserveBlocks > deviceBlocks
-                || hostBlocks < 0 || maxSeqLen < 1 || maxBatchTokens < 0 || maxGenerateBatchSize < 1 || maxInitedKvStreams < 0 || maxUncachedBatchTokens < 0 || cpSize < 1 || tpSize < 1 || dpSize < 1 || loadTimeoutMs < 1)
+                || hostBlocks < 0 || maxSeqLen < 1 || maxBatchTokens < 0 || maxGenerateBatchSize < 1 || maxInitedKvStreams < 0 || maxUncachedBatchTokens < 0 || cpSize < 1 || tpSize < 1 || dpSize < 1)
             throw new IllegalArgumentException("Invalid RTP node configuration");
         business = business.deepCopy();
         Objects.requireNonNull(evictionPolicy); Objects.requireNonNull(hostPolicy);
@@ -84,7 +84,7 @@ public record RtpConfig(String id, Role role, int blockSize, int deviceBlocks, i
             nativeInt(config, "max_inited_kv_cache_streams", 0, 0, Integer.MAX_VALUE),
             nativeInt(config, "max_batch_tokens_without_cache", 0, 0, Integer.MAX_VALUE),
             cpSize, cpEnabled, tpSize, dpSize,
-            loadTimeout(config), config, compute);
+            config, compute);
     }
 
     public ObjectNode effective() {
@@ -95,7 +95,7 @@ public record RtpConfig(String id, Role role, int blockSize, int deviceBlocks, i
             .put("device_eviction_policy", evictionPolicy.name().toLowerCase(Locale.ROOT))
             .put("reuse_cache", reuseCache).put("enable_device_cache", deviceCache)
             .put("disable_decode_first_malloc_device_reuse", disableDecodeFirstReuse)
-            .put("load_cache_timeout_ms", loadTimeoutMs).put("max_seq_len", maxSeqLen).put("max_batch_tokens_size", maxBatchTokens)
+            .put("max_seq_len", maxSeqLen).put("max_batch_tokens_size", maxBatchTokens)
             .put("dp_size", dpSize).put("dp_rank", 0).put("tp_size", tpSize).put("cp_size", cpSize).put("cp_enabled", cpEnabled)
             .put("enable_memory_cache", hostBlocks > 0).put("memory_cache_blocks", hostBlocks)
             .put("memory_eviction_policy", hostPolicy.name().toLowerCase(Locale.ROOT))
@@ -132,10 +132,6 @@ public record RtpConfig(String id, Role role, int blockSize, int deviceBlocks, i
             if (!value.isNumber() && !value.isTextual()) throw new NumberFormatException();
             return Double.parseDouble(value.asText());
         } catch (NumberFormatException error) { throw new IllegalArgumentException("Invalid " + key, error); }
-    }
-    private static int loadTimeout(JsonNode config) {
-        int value = nativeInt(config, "load_cache_timeout_ms", 5000, Integer.MIN_VALUE, Integer.MAX_VALUE);
-        return value > 0 ? value : 5000;
     }
     static int nativeInt(JsonNode config, String key, Integer fallback, int min, int max) {
         var value = config.get(key);
