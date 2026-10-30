@@ -634,12 +634,14 @@ Scenario makeMtpScenario() {
 
 Scenario makeScenario(const std::string& name) {
     if (name == "cyclic_chunk_views") {
-        auto config                          = makeCacheConfig({{"swa", 2, 24}, {"full", 2, 16}});
-        auto groups                          = config.topology().groups();
-        groups[0].policy                     = defaultCacheGroupPolicy(CacheGroupType::SWA);
-        auto full_spec                       = groups[1].spec->clone();
+        auto config      = makeCacheConfig({{"swa", 2, 24}, {"full", 2, 16}});
+        auto groups      = config.topology().groups();
+        auto& swa_group                      = groups.at(config.topology().groupIdForTag("swa"));
+        auto& full_group                     = groups.at(config.topology().groupIdForTag("full"));
+        swa_group.policy                     = defaultCacheGroupPolicy(CacheGroupType::SWA);
+        auto full_spec                      = full_group.spec->clone();
         full_spec->kernel_seq_size_per_block = 1;
-        groups[1].spec                       = std::move(full_spec);
+        full_group.spec                      = std::move(full_spec);
         config.setTopology(std::move(groups), {LayerBase{kLayerId, {"swa", "full"}}});
         auto layout = makeLayout(config);
         // Both chunk rows use cyclic execution banks, but only the final

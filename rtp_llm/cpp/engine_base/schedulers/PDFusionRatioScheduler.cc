@@ -282,14 +282,13 @@ absl::StatusOr<ScheduleOutput> PDFusionRatioScheduler::schedule() {
         decode_since_prefill_ += 1;
         prefill_since_decode_ = 0;
     }
-    if (!pending_decode_streams_.empty() || !new_streams_.empty()
-        || (made_progress && !waiting_streams_.empty())) {
+    if (!new_streams_.empty() || (made_progress && (!pending_decode_streams_.empty() || !waiting_streams_.empty()))) {
         schedule_trigger_ = true;
     }
-    if (running_streams_.empty() && !made_progress && !waiting_streams_.empty()) {
+    if (running_streams_.empty() && !made_progress && (!waiting_streams_.empty() || !pending_decode_streams_.empty())) {
         cond_.wait_for(lock, kNoProgressScheduleGap, [this] {
             return stop_ || schedule_trigger_ || !loading_cache_streams_.empty() || !running_streams_.empty()
-                   || !pending_decode_streams_.empty() || !new_streams_.empty();
+                   || !new_streams_.empty();
         });
     }
 
@@ -491,7 +490,7 @@ bool PDFusionRatioScheduler::classifyActivePrefillBatch() {
 }
 
 bool PDFusionRatioScheduler::promotePendingDecodeStreams() {
-    const bool processed = !pending_decode_streams_.empty();
+    bool processed = false;
     for (auto it = pending_decode_streams_.begin(); it != pending_decode_streams_.end();) {
         const auto& stream = *it;
         const auto state = stream->getStatus();
@@ -500,6 +499,12 @@ bool PDFusionRatioScheduler::promotePendingDecodeStreams() {
             stream->reportError(ErrorCode::EXECUTION_EXCEPTION, "invalid pending-decode stream state");
         }
 
+        if (state == StreamState::RUNNING && !stream->hasError() && !stream->hasEvent(StreamEvents::GenerateDone)
+            && !stream->streamCacheResource().reserveLinearReplaySlot()) {
+            ++it;
+            continue;
+        }
+        processed            = true;
         const auto new_state = stream->moveToNext();
         if (new_state == StreamState::RUNNING) {
             auto current = it++;

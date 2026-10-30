@@ -216,7 +216,8 @@ std::string LinearAttentionConfig::to_string() const {
         << "linear_value_head_dim: " << linear_value_head_dim << "\n"
         << "ssm_state_dtype: " << getDataTypeStr(ssm_state_dtype) << "\n"
         << "conv_state_dtype: " << getDataTypeStr(conv_state_dtype) << "\n"
-        << "supports_history_state_reclaim: " << supports_history_state_reclaim;
+        << "supports_history_state_reclaim: " << supports_history_state_reclaim << "\n"
+        << "replay_vector_gate: " << replay_vector_gate;
     return oss.str();
 }
 // HybridAttentionConfig
@@ -455,6 +456,7 @@ std::string RuntimeConfig::to_string() const {
         << "warm_up: " << warm_up << "\n"
         << "warm_up_with_loss: " << warm_up_with_loss << "\n"
         << "model_warm_up: " << model_warm_up << "\n"
+        << "enable_linear_replay: " << enable_linear_replay << "\n"
         << "output_dispatcher_worker_count: " << output_dispatcher_worker_count << "\n"
         << "use_batch_decode_scheduler: " << use_batch_decode_scheduler << "\n"
         << "batch_decode_scheduler_config: {\n"

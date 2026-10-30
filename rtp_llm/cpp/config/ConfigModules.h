@@ -532,6 +532,7 @@ struct RuntimeConfig {
     bool    warm_up                = false;
     bool    warm_up_with_loss      = false;
     bool    model_warm_up          = true;
+    bool    enable_linear_replay   = true;
 
     int output_dispatcher_worker_count = 0;
 
@@ -722,6 +723,9 @@ struct LinearAttentionConfig {
     // Execution accepts null historical checkpoint slots. Active and speculative
     // rollback state slots must still be retained by the cache manager.
     bool        supports_history_state_reclaim = false;
+    // The gate is per key channel for some LINEAR implementations and scalar
+    // per value head for others. Replay uses this model property, not a model name.
+    bool        replay_vector_gate = false;
     std::string to_string() const;
 };
 

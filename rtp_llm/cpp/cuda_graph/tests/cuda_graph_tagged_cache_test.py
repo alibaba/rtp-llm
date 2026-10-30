@@ -22,6 +22,7 @@ from rtp_llm.models_py.modules.factory.attention.attn_factory import (
 )
 from rtp_llm.ops.compute_ops import (
     BertEmbeddingInputs,
+    LinearReplayInputs,
     PyAttentionInputs,
     PyModelInputs,
     PyModelOutputs,
@@ -212,6 +213,37 @@ class HostPartitionModel(TaggedSequenceLengthModel):
         cuda_graph_selection_mode: Optional[str] = None,
     ):
         return self.impls
+
+
+class LinearReplayMetadataModel:
+    """Expose all live Verify rows and any stale graph bucket tail."""
+
+    def prepare_fmha_impl(self, inputs: PyModelInputs, is_cuda_graph: bool = False):
+        return None
+
+    def forward(self, inputs: PyModelInputs, fmha_impl=None) -> PyModelOutputs:
+        replay = inputs.attention_inputs["full"].linear_replay
+        valid = replay.slot_ids >= 0
+        signature = (
+            torch.where(valid, replay.slot_ids, 0).sum()
+            + 10 * torch.where(valid, replay.active_block_ids[1], 0).sum()
+            + 100 * torch.where(valid, replay.history_valid_lengths, 0).sum()
+            + 1000 * torch.where(valid, replay.history_log_banks, 0).sum()
+            + torch.where(valid, replay.prev_accept_lengths, 0).sum()
+        )
+        # Separate columns keep small metadata values exact in BF16.
+        rows = torch.stack(
+            (
+                signature.expand_as(replay.slot_ids),
+                replay.state_read_block_ids[0],
+                replay.state_read_block_ids[1],
+                replay.init_kinds,
+            ),
+            dim=1,
+        )
+        query_len = inputs.input_hiddens.size(0) // replay.slot_ids.numel()
+        signature = rows.repeat_interleave(query_len, dim=0)
+        return PyModelOutputs(inputs.input_hiddens + signature.to(torch.bfloat16))
 
 
 class TaggedDecodePaddingModel:
@@ -794,6 +826,87 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
             )
         self.assertFalse(cuda_graph_warmup_forward_enabled())
         self.assertFalse(torch.cuda.is_current_stream_capturing())
+
+    def test_target_linear_replay_metadata_tracks_growing_and_shrinking_batches(self):
+        runner = CudaGraphRunner()
+        runner.init_decode(
+            LinearReplayMetadataModel(),
+            HIDDEN_SIZE,
+            64,
+            KERNEL_BLOCK_TABLE_WIDTH,
+            [4],
+            GROUP_TAGS,
+            is_target_verify=True,
+            num_tokens_per_bs=2,
+            max_context_batch_size=4,
+            linear_replay_group_count=2,
+        )
+        for batch, first_block, history_length in ((4, 10, 1), (2, 20, 2), (3, 30, 3)):
+            with self.subTest(batch=batch):
+                inputs = _build_target_verify_inputs(
+                    GROUP_TAGS,
+                    {"full": 2, "aux": 1},
+                    batch_size=batch,
+                    query_len=2,
+                    prefix_len=1,
+                )
+                replay = LinearReplayInputs()
+                device = "cuda"
+                replay.slot_ids = torch.arange(
+                    1, batch + 1, dtype=torch.int32, device=device
+                )
+                replay.active_block_ids = torch.zeros(
+                    (2, batch), dtype=torch.int32, device=device
+                )
+                replay.active_block_ids[1] = torch.arange(
+                    first_block, first_block + batch, dtype=torch.int32, device=device
+                )
+                replay.prev_accept_lengths = torch.ones(
+                    batch, dtype=torch.int32, device=device
+                )
+                replay.history_valid_lengths = torch.full(
+                    (batch,), history_length, dtype=torch.int32, device=device
+                )
+                replay.history_log_banks = torch.full(
+                    (batch,), history_length % 2, dtype=torch.int32, device=device
+                )
+                replay.init_kinds = (replay.slot_ids + history_length) % 3
+                replay.state_read_block_ids = torch.stack(
+                    (first_block + replay.slot_ids, 2 * first_block + replay.slot_ids)
+                )
+                replay.anchor_processed_lengths = torch.zeros(
+                    batch, dtype=torch.int32, device=device
+                )
+                tagged_inputs = inputs.attention_inputs
+                for tag_inputs in tagged_inputs.values():
+                    tag_inputs.linear_replay = replay
+                inputs.attention_inputs = tagged_inputs
+
+                self.assertTrue(runner.canRun(inputs))
+                result = runner.forward(inputs)
+                expected_signature = (
+                    batch * (batch + 1) // 2
+                    + 10 * (batch * first_block + batch * (batch - 1) // 2)
+                    + 100 * batch * history_length
+                    + 1000 * batch * (history_length % 2)
+                    + batch
+                )
+                expected = torch.stack(
+                    (
+                        torch.full_like(replay.slot_ids, expected_signature),
+                        replay.state_read_block_ids[0],
+                        replay.state_read_block_ids[1],
+                        replay.init_kinds,
+                    ),
+                    dim=1,
+                ).repeat_interleave(2, dim=0)
+                torch.cuda.synchronize()
+                torch.testing.assert_close(
+                    result.hidden_states,
+                    expected.to(result.hidden_states.dtype),
+                    rtol=0,
+                    atol=0,
+                )
 
     def test_draft_placeholder_map_preserves_eager_graph_contract(self):
         tags = ["unused", "draft", "other"]
