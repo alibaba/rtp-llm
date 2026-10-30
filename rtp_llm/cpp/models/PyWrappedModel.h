@@ -71,6 +71,8 @@ private:
                                                           bool                  skip_final_layernorm,
                                                           size_t                num_valid_tokens = -1);
     torch::Tensor                   tensorHoldHostAndToCuda(const torch::Tensor& tensor);
+    void                            initializeRocmLmHeadSplit();
+    torch::Tensor                   lmHeadLogits(const torch::Tensor& hidden);
 
     // Methods absorbed from GptModel
     torch::Tensor   tpSyncEmbeddingOrLogits(const torch::Tensor& input);
@@ -104,6 +106,10 @@ private:
     torch::Tensor                                   residual_scale_fp32_;
     torch::Tensor                                   residual_scale_;
     TensorHolder                                    buffer_holder_;
+    // Immutable base-weight components, prepared before graph capture. Keep
+    // the original FP32 weight for unsupported shapes and other backends.
+    torch::Tensor              rocm_lm_head_split_source_;
+    std::vector<torch::Tensor> rocm_lm_head_components_;
 
     GraphBase* graph_runner_{nullptr};
     GraphBase* prefill_graph_runner_{nullptr};
@@ -155,7 +161,8 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
 
     c10::InferenceMode inference_guard(true);
 
-    weights_               = params.weights;
+    weights_ = params.weights;
+    initializeRocmLmHeadSplit();
     model_id_              = params.model_id;
     kv_cache_layer_layout_ = params.kv_cache_layer_layout;
     if (abs(description_.residual_scalar - 1.0) > 1e-6) {
@@ -221,8 +228,8 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         graph_params.max_context_batch_size       = params.concurrency_config.concurrency_limit;
         graph_params.max_decode_batch_size =
             params.hw_kernel_config.resolveDecodeCudaGraphMaxBatchSize(params.concurrency_config.concurrency_limit);
-        graph_params.prefill_capture_seq_lens     = params.hw_kernel_config.prefill_capture_seq_lens;
-        graph_params.decode_capture_batch_sizes   = params.hw_kernel_config.decode_capture_batch_sizes;
+        graph_params.prefill_capture_seq_lens   = params.hw_kernel_config.prefill_capture_seq_lens;
+        graph_params.decode_capture_batch_sizes = params.hw_kernel_config.decode_capture_batch_sizes;
         if (params.kv_cache_layer_layout.has_value()) {
             graph_params.kv_cache_group_tags = params.kv_cache_layer_layout->topology().groupTagsSnapshot();
         }

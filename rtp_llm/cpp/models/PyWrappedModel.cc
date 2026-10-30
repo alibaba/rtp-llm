@@ -15,6 +15,10 @@
 #include <cstring>
 #include <iostream>
 #include <numeric>
+#include <torch/version.h>
+#if USING_ROCM
+#include <hip/hip_runtime_api.h>
+#endif
 #include "rtp_llm/cpp/utils/DevicePerfWrapper.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 #if USING_CUDA
@@ -86,6 +90,63 @@ bool hasMicroBatchIncompatibleEmbeddingInputs(const GptModelInputs& inputs) {
 }
 
 }  // namespace
+
+void PyWrappedModel::initializeRocmLmHeadSplit() {
+#if USING_ROCM && ((TORCH_VERSION_MAJOR > 2) || (TORCH_VERSION_MAJOR == 2 && TORCH_VERSION_MINOR >= 9))
+    const char* enabled = std::getenv("RTP_ROCM_LM_HEAD_BF16X3");
+    if (enabled == nullptr || std::strcmp(enabled, "1") != 0 || !weights_.lm_head) {
+        return;
+    }
+    const auto& weight = weights_.lm_head->kernel;
+    if (!weight.is_cuda() || weight.scalar_type() != torch::kFloat32 || weight.dim() != 2 || weight.size(0) != 65537
+        || weight.size(1) != 1024 || !weight.is_contiguous()) {
+        return;
+    }
+    hipDeviceProp_t properties{};
+    if (hipGetDeviceProperties(&properties, weight.get_device()) != hipSuccess
+        || std::string(properties.gcnArchName).find("gfx942") != 0) {
+        return;
+    }
+    if (!torch::isfinite(weight).all().item<bool>()) {
+        return;
+    }
+    auto high     = weight.to(torch::kBFloat16);
+    auto residual = weight - high.to(torch::kFloat32);
+    auto low      = residual.to(torch::kBFloat16);
+    auto tail     = (residual - low.to(torch::kFloat32)).to(torch::kBFloat16);
+    auto restored = high.to(torch::kFloat32) + low.to(torch::kFloat32) + tail.to(torch::kFloat32);
+    // BF16 has a narrower finite range than FP32. Never enable this route if
+    // splitting loses a source value (including overflow/underflow).
+    if (!torch::equal(restored, weight)) {
+        RTP_LLM_LOG_WARNING("ROCm LM head BF16x3 disabled: source reconstruction failed");
+        return;
+    }
+    rocm_lm_head_split_source_ = weight;
+    rocm_lm_head_components_   = {high, low, tail};
+    RTP_LLM_LOG_INFO("ROCm LM head BF16x3 enabled: gfx942, FP32 weight [65537,1024], FP32 accumulation/output");
+#endif
+}
+
+torch::Tensor PyWrappedModel::lmHeadLogits(const torch::Tensor& hidden) {
+    const auto& weight = weights_.lm_head->kernel;
+#if USING_ROCM && ((TORCH_VERSION_MAJOR > 2) || (TORCH_VERSION_MAJOR == 2 && TORCH_VERSION_MINOR >= 9))
+    if (rocm_lm_head_components_.size() == 3 && weight.is_same(rocm_lm_head_split_source_)
+        && hidden.scalar_type() == torch::kBFloat16 && hidden.device() == weight.device() && hidden.dim() == 2
+        && hidden.size(1) == 1024 && hidden.size(0) >= 500 && hidden.size(0) <= 4000 && hidden.size(0) % 500 == 0) {
+        RTP_LLM_PROFILE_SCOPE("lm_head.bf16x3");
+        auto logits = at::mm(hidden, rocm_lm_head_components_[0].t(), torch::kFloat32);
+        logits.add_(at::mm(hidden, rocm_lm_head_components_[1].t(), torch::kFloat32));
+        logits.add_(at::mm(hidden, rocm_lm_head_components_[2].t(), torch::kFloat32));
+        return logits;
+    }
+#endif
+#if USING_CUDA
+    if (weight.dtype() == torch::kBFloat16) {
+        return torch_ext::cublas_gemm_bf16_bf16_fp32(hidden.to(torch::kBFloat16), weight);
+    }
+#endif
+    return torch::mm(hidden.to(weight.dtype()), weight.t()).to(torch::kFloat32);
+}
 
 torch::Tensor PyWrappedModel::tensorHoldHostAndToCuda(const torch::Tensor& tensor) {
     if (tensor.device().is_cuda()) {
@@ -1126,15 +1187,7 @@ GptModelOutputs PyWrappedModel::forwardPostLayers(torch::Tensor         hidden,
 
         printTorchTensorData(last_hidden, "last_hidden");
 
-        torch::Tensor logits;
-#if USING_CUDA
-        if (lm_head->kernel.dtype() == torch::kBFloat16) {
-            logits = torch_ext::cublas_gemm_bf16_bf16_fp32(last_hidden.to(torch::kBFloat16), lm_head->kernel);
-        } else
-#endif
-        {
-            logits = torch::mm(last_hidden.to(lm_head->kernel.dtype()), lm_head->kernel.t()).to(torch::kFloat32);
-        }
+        auto logits = lmHeadLogits(last_hidden);
         printTorchTensorData(logits, "logits");
         if (device_props_.tp_size > 1) {
             logits = tpSyncEmbeddingOrLogits(logits);
@@ -1174,15 +1227,7 @@ GptModelOutputs PyWrappedModel::forwardPostLayersLastHidden(torch::Tensor hidden
     }
 
     torch::Tensor last_hidden = hidden;
-    torch::Tensor logits;
-#if USING_CUDA
-    if (lm_head->kernel.dtype() == torch::kBFloat16) {
-        logits = torch_ext::cublas_gemm_bf16_bf16_fp32(last_hidden.to(torch::kBFloat16), lm_head->kernel);
-    } else
-#endif
-    {
-        logits = torch::mm(last_hidden.to(lm_head->kernel.dtype()), lm_head->kernel.t()).to(torch::kFloat32);
-    }
+    auto          logits      = lmHeadLogits(last_hidden);
     if (device_props_.tp_size > 1) {
         logits = tpSyncEmbeddingOrLogits(logits);
     }
