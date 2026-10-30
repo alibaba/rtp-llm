@@ -42,6 +42,7 @@ _GRAMMAR_RESPONSE_FORMAT_TYPES = {
     "json_schema",
     "regex",
     "ebnf",
+    "structural_tag",
 }
 DSML_PREFIX = "<｜DSML｜"
 DSML_TOOL_CALLS_MARKER = f"{DSML_PREFIX}tool_calls>"
@@ -336,9 +337,9 @@ class DeepseekV4Renderer(ReasoningToolBaseRenderer):
                 "tool_choice forced tool-call decoding conflicts with existing "
                 f"grammar constraint(s): {', '.join(conflicts)}",
             )
-        config.structural_tag = json.dumps(
-            structural_tag, ensure_ascii=False, separators=(",", ":")
-        )
+        # Plain text is the default and does not compete with a forced tool tag.
+        config.response_format = None
+        config.structural_tag = structural_tag
 
     def _build_prompt(self, request: ChatCompletionRequest) -> str:
         """

@@ -77,5 +77,32 @@ class SymmMemConfigurationTest(unittest.TestCase):
                 rendezvous.assert_not_called()
 
 
+class SymmetricWorkspaceTest(unittest.TestCase):
+    def test_local_allocation_error_is_reported_before_rendezvous(self) -> None:
+        group = SimpleNamespace(group_name="tp0")
+        error = RuntimeError("allocation failed locally")
+        with patch.dict(symm_mem._workspace_epochs, {}, clear=True), patch.object(
+            symm_mem, "_agree_across_group", return_value=False
+        ) as agree, patch.object(symm_mem.torch_symm_mem, "rendezvous") as rendezvous:
+            with self.assertRaisesRegex(RuntimeError, "test_allocation") as result:
+                with symm_mem.symmetric_workspace_phase(group, "test_allocation"):
+                    raise error
+                symm_mem.rendezvous_symmetric_workspace(group, "test", object())
+            self.assertIs(result.exception.__cause__, error)
+            agree.assert_called_once_with(group, False, "test_allocation", epoch=1)
+            rendezvous.assert_not_called()
+
+    def test_failed_peer_mapping_prevents_next_rendezvous(self) -> None:
+        group = SimpleNamespace(group_name="tp0")
+        with patch.dict(symm_mem._workspace_epochs, {}, clear=True), patch.object(
+            symm_mem, "_agree_across_group", return_value=False
+        ) as agree, patch.object(symm_mem.torch_symm_mem, "rendezvous") as rendezvous:
+            first, second = object(), object()
+            with self.assertRaisesRegex(RuntimeError, "test_rendezvous"):
+                symm_mem.rendezvous_symmetric_workspace(group, "test", first, second)
+            agree.assert_called_once_with(group, True, "test_rendezvous", epoch=1)
+            rendezvous.assert_called_once_with(first, group=group)
+
+
 if __name__ == "__main__":
     unittest.main()

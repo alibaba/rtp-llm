@@ -21,6 +21,8 @@ class GenerateStream;
 struct MallocResult;
 
 class StreamCacheResource {
+    friend class GenerateStream;
+
 public:
     StreamCacheResource(GenerateStream*        stream,
                         const ResourceContext& resource_context,
@@ -40,7 +42,7 @@ public:
     absl::Status         waitForAllocatorLoad();
     // Empty while pending; a terminal status preserves retryable materialization failures.
     std::optional<absl::Status> pollAllocatorLoad();
-    absl::Status                incrKVBlock(int seq_len_override = -1);
+    absl::Status                incrKVBlock(int seq_len_override = -1, bool preserve_inflight = false);
     // Called under the owning stream's mutex after token/cache-layout commit.
     // Record only; the scheduler drains this watermark before admission or allocation so an
     // async output worker never mutates the host block table during gather.

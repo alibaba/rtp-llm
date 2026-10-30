@@ -53,7 +53,7 @@ using block_tree_cache_test::BlockTreeCacheTestPeer;
 namespace {
 constexpr int                  kDsv4PoolNum = 7;
 const std::vector<std::string> kDsv4Tags    = {
-    "swa_kv", "csa_kv", "indexer_kv", "indexer_state", "csa_state", "hca_kv", "hca_state"};
+    "csa_kv", "csa_state", "hca_kv", "hca_state", "indexer_kv", "indexer_state", "swa_kv"};
 
 double snapshotUnfreezeBlocks(const kmonitor::MetricsReporterPtr& reporter,
                               const std::string& pool_name, Tier tier, const char* backend) {
@@ -523,7 +523,7 @@ TEST_F(KVCacheManagerTest, EventPublisherWiresEligibleGroupsInTopologyOrder) {
             runtime.model_name = "event_wiring_model";
             KVCacheManager manager(config, false, nullptr, makeEventPublicationRuntimeConfig(), parallelism, runtime);
 
-            // Keep GroupSet order fixed while topology order changes. Non-reusable groups have no tree resource.
+            // Keep GroupSet order fixed while the topology input order changes.
             std::vector<GroupSetPtr> groups{
                 std::make_shared<FullGroupSet>(
                     std::vector<DeviceBlockPoolPtr>{block_tree_cache_test::makeStructuralDevicePool(0)},
@@ -555,17 +555,15 @@ TEST_F(KVCacheManagerTest, EventPublisherWiresEligibleGroupsInTopologyOrder) {
             manager.initCacheEventPublisher();
             ASSERT_NE(manager.cache_event_publisher_, nullptr);
             EXPECT_EQ(cache->tree()->event_publisher_, manager.cache_event_publisher_);
-            const std::vector<std::string> expected_tags =
-                reversed ? std::vector<std::string>{"swa", "full"} : std::vector<std::string>{"full", "swa"};
-            const auto& publication_groups = cache->tree()->publication_groups_;
+            const std::vector<std::string> expected_tags{"full", "swa"};
+            const auto&                    publication_groups = cache->tree()->publication_groups_;
             ASSERT_EQ(publication_groups.size(), expected_tags.size());
             for (size_t i = 0; i < publication_groups.size(); ++i) {
                 const auto& location = publication_groups[i];
                 EXPECT_EQ(cache->groupSets().at(location.group_set_id)->groupTags().at(location.member_group_id),
                           expected_tags[i]);
             }
-            const size_t                                 full_index = reversed ? 1 : 0;
-            const std::map<int64_t, std::vector<size_t>> full_only{{100, {full_index}}, {200, {full_index}}};
+            const std::map<int64_t, std::vector<size_t>> full_only{{100, {0}}, {200, {0}}};
             EXPECT_EQ(cache->logicalCacheSnapshot().block_groups, full_only);
             EXPECT_EQ(manager.cache_event_publisher_->status().accepted_count, 0u);
 
@@ -578,7 +576,7 @@ TEST_F(KVCacheManagerTest, EventPublisherWiresEligibleGroupsInTopologyOrder) {
             resources[1][1].device_blocks = {46};
             cache->insert({100, 200}, resources, Tier::DEVICE);
             EXPECT_EQ(cache->logicalCacheSnapshot().block_groups,
-                      (std::map<int64_t, std::vector<size_t>>{{100, {full_index}}, {200, {0, 1}}}));
+                      (std::map<int64_t, std::vector<size_t>>{{100, {0}}, {200, {0, 1}}}));
             EXPECT_EQ(manager.cache_event_publisher_->status().accepted_count, 1u);
             EXPECT_EQ(cache->evictForGroup("swa", 1), 1);
             EXPECT_TRUE(cache->getKeySnapshot().keys.empty());
@@ -631,8 +629,7 @@ TEST_F(KVCacheManagerTest, EventPublisherFiltersHostGroupsWithoutChangingDeviceS
             manager.initCacheEventPublisher(reporter);
             ASSERT_NE(manager.cache_event_publisher_, nullptr);
             ASSERT_TRUE(waitForEventPublisherReady(*manager.cache_event_publisher_));
-            const std::vector<std::string> expected_tags = reversed ? std::vector<std::string>{"second_full", "full"} :
-                                                                      std::vector<std::string>{"full", "second_full"};
+            const std::vector<std::string> expected_tags{"full", "second_full"};
             rapidjson::Document            registration;
             registration.Parse(reporter->waitForRequest("/api/registerInstance").c_str());
             ASSERT_FALSE(registration.HasParseError());
@@ -990,7 +987,7 @@ TEST_F(KVCacheManagerTest, CandidateConfigAllocatesMergedDraftSegmentsWithinBudg
     const auto candidate =
         CacheConfigCreator::computeLocalBlockNum(candidate_config, target, {}, options, {}, std::nullopt, sp);
     EXPECT_EQ(candidate_config.group("default").block_num, 0u);
-    ASSERT_EQ(candidate_config.mtp_sub_configs.size(), 2u);
+    ASSERT_EQ(candidate_config.mtp_sub_configs.size(), 1u);
     for (const auto& sub : candidate_config.mtp_sub_configs) {
         EXPECT_EQ(sub->group("default").block_num, 0u);
     }
@@ -1001,14 +998,14 @@ TEST_F(KVCacheManagerTest, CandidateConfigAllocatesMergedDraftSegmentsWithinBudg
     ASSERT_TRUE(manager.init());
     const auto& config = manager.cacheConfig();
     EXPECT_EQ(config.group("default").block_num, candidate);
-    ASSERT_EQ(config.mtp_sub_configs.size(), 2u);
+    ASSERT_EQ(config.mtp_sub_configs.size(), 1u);
     ASSERT_EQ(manager.coordinator_manager_->groupBlockPools().size(), 1u);
     const auto& pool        = manager.coordinator_manager_->groupBlockPools()[0];
     const auto  pool_config = std::dynamic_pointer_cast<const DeviceBlockPoolConfig>(pool->config_);
     ASSERT_NE(pool_config, nullptr);
-    ASSERT_EQ(pool_config->memory_layouts.size(), 3u);
-    // FP16 K+V: 4 tokens/block * 2 bytes/element * (2 target + 2*4 draft elements/token).
-    constexpr size_t bytes_per_block = 4 * 2 * 2 * (2 + 2 * 4);
+    ASSERT_EQ(pool_config->memory_layouts.size(), 2u);
+    // FP16 K+V: one target segment (32 bytes) plus one draft segment (64 bytes).
+    constexpr size_t bytes_per_block = 4 * 2 * 2 * (2 + 4);
     constexpr size_t budget_bytes    = 1024 * 1024;
     EXPECT_EQ(config.group("default").block_num, budget_bytes / bytes_per_block);
     EXPECT_EQ(pool->getTotalSizeBytes(), static_cast<size_t>(config.group("default").block_num) * bytes_per_block);
@@ -1154,7 +1151,7 @@ TEST_F(KVCacheManagerTest, ProductionHybridConfigUsesHybridPoolWithDistinctPhysi
     ASSERT_TRUE(cache_manager->init());
     auto allocator = std::dynamic_pointer_cast<CoordinatorCacheManager>(cache_manager->coordinator_manager_);
     ASSERT_NE(allocator, nullptr);
-    EXPECT_EQ(publishedGroupTags(cache_config.topology()), std::vector<std::string>({"linear", "full"}));
+    EXPECT_EQ(publishedGroupTags(cache_config.topology()), std::vector<std::string>({"full", "linear"}));
     EXPECT_NE(cache_config.blockSizeBytesForGroup("full"), cache_config.blockSizeBytesForGroup("linear"));
 
     const auto& pools = allocator->groupBlockPools();

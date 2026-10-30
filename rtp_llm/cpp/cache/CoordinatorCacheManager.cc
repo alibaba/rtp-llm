@@ -929,6 +929,8 @@ MallocResult CoordinatorCacheManager::incrMalloc(const MallocInfo& malloc_info) 
     const auto& cp_mapper    = cp_slot_mapper_;
     const int   batch_size   = kv_resource->batchSize();
     const int   raw_seq_len  = malloc_info.incrSeqLen();
+    // Stream callers hold their mutex through malloc, including host-commit reads.
+    const int   committed_seq_len = malloc_info.complete_token_ids->seqLength();
     const int   reserve_step = malloc_info.complete_token_ids->getReserveStep();
 
     std::vector<std::vector<size_t>>              original_sizes(static_cast<size_t>(batch_size));
@@ -952,20 +954,34 @@ MallocResult CoordinatorCacheManager::incrMalloc(const MallocInfo& malloc_info) 
             auto&       block_ids        = kv_resource->mutableBlockIds(b, tag);
             const int   group_seq_len    = cpEffectiveSeqLenForGroup(cp_mapper, config_, tag, raw_seq_len);
             auto&       filled_positions = backfilled_positions[static_cast<size_t>(b)][static_cast<size_t>(group_id)];
-            const auto required_positions = chunkCachePositions(malloc_info, config_.group(tag));
             auto&       group              = kv_cache_groups_[static_cast<size_t>(group_id)];
-            // reuseEnabledForGroup keeps the group-scoped reuse gating (incl.
-            // pd_decode_linear_tail_only) on both of main's allocation paths.
-            const bool allocated =
-                malloc_info.enable_remove_skipped_blocks ?
-                     group->mallocForDecode(
-                        block_ids, group_seq_len, reuseEnabledForGroup(malloc_info, config_, tag), reserve_step, &filled_positions) :
-                     group->malloc(block_ids,
-                                  group_seq_len,
-                                  reuseEnabledForGroup(malloc_info, config_, tag),
-                                  reserve_step,
-                                  &filled_positions,
-                                  required_positions);
+            const bool  reuse              = reuseEnabledForGroup(malloc_info, config_, tag);
+            auto        required_positions = chunkCachePositions(malloc_info, config_.group(tag));
+            if (malloc_info.preserve_inflight) {
+                const size_t end = static_cast<size_t>(group->needBlocksNum(group_seq_len, 0, reserve_step));
+                // Acceptance can land anywhere below the bound, so sparse
+                // groups must also materialize the intervening new slots.
+                for (size_t position = block_ids.blocksNum(); position < end; ++position) {
+                    required_positions.insert(position);
+                }
+            }
+            // Decode reserves proposal slots even while earlier pages are in flight.
+            bool allocated;
+            if (malloc_info.enable_remove_skipped_blocks) {
+                allocated = group->mallocForDecode(block_ids,
+                                                   group_seq_len,
+                                                   reuse,
+                                                   reserve_step,
+                                                   &filled_positions,
+                                                   required_positions);
+            } else {
+                allocated = group->malloc(block_ids,
+                                          group_seq_len,
+                                          reuse,
+                                          reserve_step,
+                                          &filled_positions,
+                                          required_positions);
+            }
             if (!allocated) {
                 all_success  = false;
                 failed_batch = b;
@@ -985,12 +1001,17 @@ MallocResult CoordinatorCacheManager::incrMalloc(const MallocInfo& malloc_info) 
         for (int b = 0; b < batch_size; ++b) {
             for (int group_id = 0; group_id < config_.groupNums(); ++group_id) {
                 const auto& tag = config_.groupTags()[static_cast<size_t>(group_id)];
-                auto& block_ids = kv_resource->mutableBlockIds(b, tag);
+                auto&       blocks  = kv_resource->mutableBlockIds(b, tag);
+                auto&       manager = kv_cache_groups_[static_cast<size_t>(group_id)];
+                const int   group_seq_len =
+                    cpEffectiveSeqLenForGroup(cp_mapper, config_, tag, std::max(0, committed_seq_len));
+                const int base_slots = manager->needBlocksNum(group_seq_len, 0, reserve_step);
+                // The table can still contain an earlier reservation even on
+                // the ordinary path. Keep its suffix without moving the GC frontier.
+                const int future_slots = std::max(0, static_cast<int>(blocks.blocksNum()) - base_slots);
                 if (skipLinearForRequest(malloc_info, config_, tag)) {
-                    // Tail-only handoff state collapses to the decode tail: the
-                    // sparse layout never accumulates history slots.
-                    kv_cache_groups_[static_cast<size_t>(group_id)]->releaseRequestStateToDecodeTail(block_ids,
-                                                                                                      reserve_step);
+                    // A PD handoff owns only the decode tail and its live reservations.
+                    manager->releaseRequestStateToDecodeTail(blocks, reserve_step + future_slots);
                 } else if (config_.group(tag).policy.group_type == CacheGroupType::LINEAR
                            && malloc_info.linear_cache_policy == LinearCachePolicy::RECLAIM_COMMITTED
                            && malloc_info.enable_cache_lookup
@@ -1006,8 +1027,8 @@ MallocResult CoordinatorCacheManager::incrMalloc(const MallocInfo& malloc_info) 
                     // the request's whole lifetime.
                     continue;
                 } else {
-                    kv_cache_groups_[static_cast<size_t>(group_id)]->removeSkippedBlocks(
-                        block_ids, reuseEnabledForGroup(malloc_info, config_, tag), reserve_step);
+                    manager->removeSkippedBlocks(
+                        blocks, reuseEnabledForGroup(malloc_info, config_, tag), reserve_step + future_slots);
                 }
             }
         }

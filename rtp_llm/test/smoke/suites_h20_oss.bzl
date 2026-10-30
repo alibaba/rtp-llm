@@ -1,5 +1,5 @@
 load("//rtp_llm/test/smoke:cache_tier_args.bzl", "HOST_REUSE_AFTER_DEMOTION_ARGS")
-load("//rtp_llm/test/smoke:defs.bzl", "smoke_test")
+load("//rtp_llm/test/smoke:defs.bzl", "custom_smoke_test", "smoke_test")
 load("//rtp_llm/test/smoke:suites_remote_cache.bzl", "REMOTE_CACHE_DEVICE_STORE_ARGS")
 
 def h20_oss_suites():
@@ -286,6 +286,35 @@ def h20_oss_suites():
                 },
             ),
         ],
+    )
+
+    # Manual regression for a Qwen3.5 MTP true-prefix-reuse difference.
+    # Keep it runnable while the model/cache numerical boundary is investigated.
+    custom_smoke_test(
+        name="next_mtp_true_reuse",
+        main="qwen35_reuse_semantic_test.py",
+        smoke_args="--act_type BF16 --seq_size_per_block 128 --enable_device_cache 1 --tp_size 2 --max_seq_len 12800 --reserver_runtime_mem_mb 10000 --sp_model_type qwen35_moe_mtp --gen_num_per_cycle 4 --sp_type eagle --sp_checkpoint_path /mnt/nas1/hf/Qwen3.5-35B-A3B-FP8 --sp_act_type bf16 --reuse_cache 1",
+        data=[
+            "//rtp_llm:sdk",
+            ":smoke_framework_srcs",
+            "data/model/qwen3_next/q_r_next_fp8_tp2_mtp_reuse_cache.json",
+        ],
+        deps=["//rtp_llm:transformers"],
+        gpu_type=["H20_CU13"],
+    )
+
+    # Run the same prompt and cache assertions without speculative decoding.
+    custom_smoke_test(
+        name="next_plain_true_reuse",
+        main="qwen35_reuse_semantic_test.py",
+        smoke_args="--act_type BF16 --seq_size_per_block 128 --enable_device_cache 1 --tp_size 2 --max_seq_len 12800 --reserver_runtime_mem_mb 10000 --reuse_cache 1",
+        data=[
+            "//rtp_llm:sdk",
+            ":smoke_framework_srcs",
+            "data/model/qwen3_next/q_r_next_fp8_tp2_mtp_reuse_cache.json",
+        ],
+        deps=["//rtp_llm:transformers"],
+        gpu_type=["H20_CU13"],
     )
 
     # H20 Qwen3.5/Next
@@ -604,6 +633,7 @@ def h20_oss_suites():
     native.test_suite(
         name = "smoke_h20_vl",
         tests = [
+            ":chunked_multimodal",
             # Golden regression for common RoPE position_id == 0 semantics:
             # Qwen3-VL image position ids contain zero-valued spatial axes.
             smoke_test(

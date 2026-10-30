@@ -4,7 +4,6 @@ import logging
 import os
 import random
 import socket
-import tempfile
 import time
 from contextlib import closing
 from pathlib import Path
@@ -60,11 +59,9 @@ class PortInUseError(Exception):
 
 
 class ExpiredLockFile:
-    """lock file with expiration info"""
+    """Port reservation held by flock; timestamps are diagnostic metadata."""
 
-    def __init__(
-        self, path: Path, port: int, ttl: int = 3600
-    ):  # 1 hour ttl by default, make it long enough to guarantee the lock is valid during whole lifecycle of the test
+    def __init__(self, path: Path, port: int, ttl: int = 3600):
         self.path = path
         self.port = port
         self.ttl = ttl
@@ -79,27 +76,30 @@ class ExpiredLockFile:
             "ttl": self.ttl,
         }
 
-        self.fd = open(self.path, "w")
+        self.fd = open(self.path, "a+")
         try:
             fcntl.flock(self.fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            self.fd.seek(0)
+            self.fd.truncate()
             json.dump(metadata, self.fd)
             self.fd.flush()
             return self
         except (IOError, OSError):
             self.fd.close()
+            self.fd = None
             raise PortInUseError(f"Port {self.port} is already been locked")
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         if self.fd:
             fcntl.flock(self.fd, fcntl.LOCK_UN)
             self.fd.close()
-            try:
-                self.path.unlink()
-            except OSError:
-                pass
+            self.fd = None
+            # Never unlink: a waiter may already have opened this inode.
+            # Process exit releases flock, so stale metadata cannot block reuse.
 
 
 DEFAULT_PORT_RANGE_START = 10000
+DEFAULT_PORT_LOCK_DIR = Path("/tmp") / f"rtp_llm_test_port_locks_{os.getuid()}"
 
 
 class PortManager:
@@ -107,41 +107,13 @@ class PortManager:
         self.start_port = start_port or get_random_start_port()
         self.port_range = (self.start_port, get_linux_random_port_range()[0])
         self.ttl = ttl
-        self.lock_dir = lock_dir or Path(tempfile.gettempdir()) / "test_port_locks"
-        self.lock_dir.mkdir(parents=True, exist_ok=True)
+        # Remote actions share host networking but have different TMPDIRs.
+        self.lock_dir = lock_dir or DEFAULT_PORT_LOCK_DIR
+        self.lock_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
         logging.info(f"port_range: {self.port_range} lock: {self.lock_dir}")
-
-    def cleanup_stale_locks(self):
-        """clean up the potential stale lock files"""
-        current_time = time.time()
-        for lock_file in self.lock_dir.glob("port_*.lock"):
-            try:
-                with open(lock_file) as f:
-                    try:
-                        # try to lock the lock-file
-                        fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-                        try:
-                            metadata = json.load(f)
-                            if current_time - metadata["timestamp"] > metadata["ttl"]:
-                                lock_file.unlink()
-                        except (json.JSONDecodeError, KeyError):
-                            # remove the lock-file directly if json format error
-                            lock_file.unlink()
-                        finally:
-                            fcntl.flock(f.fileno(), fcntl.LOCK_UN)
-                    except (IOError, OSError):
-                        # that's ok, the file is being used now
-                        continue
-            except OSError:
-                # fine, skip this one
-                continue
 
     def get_consecutive_ports(self, num_ports: int = 1):
         """get real consecutive ports by checking the file locks"""
-        # always clean the stale lock files before getting the real available ports
-        # try best to reuse all the available ports
-        self.cleanup_stale_locks()
-
         range_start, range_end = self.port_range
         last_base_port = range_end - num_ports + 1
         candidate_base_ports = range(range_start, last_base_port)
@@ -195,7 +167,6 @@ class PortsContext:
     """
 
     def __init__(self, lock_dir: Path = None, num_ports: int = 1, ttl: int = 3600):
-        lock_dir = lock_dir or Path(tempfile.gettempdir()) / "test_port_locks"
         self.manager = PortManager(lock_dir, get_random_start_port(), ttl)
         self.num_ports = num_ports
         self.ports = None

@@ -58,6 +58,7 @@ public:
     rtp_llm::DataType dtype              = rtp_llm::DataType::TYPE_INVALID;
     uint32_t          layer_num          = 0;  // the number of main model layers
     uint32_t          global_layer_begin = 0;
+    // Legacy model-level transport/event metadata; never determines per-group storage layout.
     bool              use_mla            = false;
     bool              is_sparse          = false;
 

@@ -34,6 +34,7 @@ struct NormalModelInputGathererConfig {
     size_t                      kernel_blocks_per_kv_block = 1;
     size_t                      kv_cache_group_nums        = 1;
     bool                        use_opaque_kv_cache_store  = false;
+    // Canonical payload row order, independent of local cache group IDs.
     std::vector<CacheGroupType> kv_cache_group_types;
     std::vector<std::string>    kv_cache_group_tags;
     bool                        warm_up{};

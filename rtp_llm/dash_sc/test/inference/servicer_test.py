@@ -55,6 +55,7 @@ from rtp_llm.dash_sc.inference.grammar_validator import (
 )
 from rtp_llm.dash_sc.inference.servicer import (
     DashScInferenceServicer,
+    ImagePlaceholderMapping,
     _build_mm_inputs_from_request,
     _dash_error_mapping_for_ft_exception,
     _dash_error_spec_for_ft_exception,
@@ -2891,6 +2892,75 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(mm_inputs[0].url, "http://example/image.png")
         self.assertEqual(mm_inputs[0].mm_preprocess_config.min_pixels, 128)
         self.assertEqual(mm_inputs[0].mm_preprocess_config.max_pixels, 4096)
+
+    async def test_image_placeholder_mapping_reaches_backend_tensor(self) -> None:
+        source = (27, 91, 74, 30223, 11947, 114136, 91, 29)
+        target = 163605
+        mapping = ImagePlaceholderMapping(source_ids=source, target_id=target)
+        cases = (
+            (
+                "legacy",
+                [1, *source, 2, *source, 3],
+                2,
+                mapping,
+                [1, target, 2, target, 3],
+            ),
+            ("canonical", [target, *source, 3], 1, mapping, [target, *source, 3]),
+            ("text_only", [1, *source, 3], 0, mapping, [1, *source, 3]),
+            ("no_mapping", [1, *source, 3], 1, None, [1, *source, 3]),
+            ("too_few", [1, *source, 3], 2, mapping, None),
+            ("mixed", [target, *source], 2, mapping, None),
+        )
+        for name, input_ids, image_count, rule, expected in cases:
+            with self.subTest(name=name):
+                request = predict_v2_pb2.ModelInferRequest(
+                    id="srv-1", model_name="default"
+                )
+                _add_input_tensor(
+                    request,
+                    "input_ids",
+                    "INT32",
+                    [len(input_ids)],
+                    struct.pack(f"<{len(input_ids)}i", *input_ids),
+                )
+                if image_count:
+                    request.parameters["payload"].string_param = json.dumps(
+                        {
+                            "messages": [
+                                {
+                                    "role": "user",
+                                    "content": [
+                                        {"image": f"http://example/{i}.png"}
+                                        for i in range(image_count)
+                                    ],
+                                }
+                            ]
+                        }
+                    )
+                visitor = self._terminal_visitor()
+                servicer = DashScInferenceServicer(
+                    backend_visitor=visitor, image_placeholder_mapping=rule
+                )
+
+                responses = await _drain(
+                    servicer.ModelStreamInfer(_areq_iter([request]), _FakeGrpcContext())
+                )
+
+                self.assertEqual(len(responses), 1)
+                if expected is None:
+                    self.assertEqual(visitor.enqueue_called, 0)
+                    self.assertEqual(
+                        _finish_reason(responses[0]),
+                        DASH_ERROR_BAD_REQUEST.finish_reason,
+                    )
+                else:
+                    self.assertEqual(visitor.enqueue_called, 1)
+                    generate_input = visitor.last_generate_input
+                    self.assertEqual(generate_input.token_ids.tolist(), expected)
+                    self.assertEqual(
+                        [item.url for item in generate_input.mm_inputs],
+                        [f"http://example/{i}.png" for i in range(image_count)],
+                    )
 
     async def test_access_log_records_input_and_generated_ids(self) -> None:
         # Frontend struct path: the emitted access line carries the real token

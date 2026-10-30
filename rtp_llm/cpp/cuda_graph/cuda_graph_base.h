@@ -48,6 +48,7 @@ struct GraphParams {
     // Zero keeps the existing per-request bound equal to max_seq_len.
     int    request_max_seq_len    = 0;
     int    num_tokens_per_bs      = 1;  // Number of tokens per batch (1 for decode, max_seq_len for prefill)
+    int    sequence_parallel_size = 1;
     size_t max_context_batch_size = 128;
     std::size_t      hidden_size           = 0;
     c10::ScalarType  model_data_type       = c10::ScalarType::Float;

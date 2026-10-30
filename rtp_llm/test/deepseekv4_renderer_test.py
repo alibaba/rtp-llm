@@ -3,11 +3,14 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import IsolatedAsyncioTestCase, TestCase, main, skipUnless
 from unittest.mock import AsyncMock, Mock
 
-from rtp_llm.config.exceptions import FtRuntimeException
+from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.generate_config import GenerateConfig, ThinkingMode
+from rtp_llm.config.py_config_modules import GenerateEnvConfig
+from rtp_llm.config.response_format_compiler import validate_engine_ready
 from rtp_llm.openai.api_datatype import (
     ChatCompletionRequest,
     ChatCompletionResponseStreamChoice,
@@ -19,7 +22,11 @@ from rtp_llm.openai.api_datatype import (
     RoleEnum,
     ToolCall,
 )
-from rtp_llm.openai.renderers.custom_renderer import StreamResponseObject
+from rtp_llm.openai.openai_endpoint import OpenaiEndpoint
+from rtp_llm.openai.renderers.custom_renderer import (
+    RenderedInputs,
+    StreamResponseObject,
+)
 from rtp_llm.openai.renderers.deepseekv4_renderer import DeepseekV4Renderer
 from rtp_llm.openai.renderers.reasoning_tool_base_renderer import (
     ReasoningToolStreamStatus,
@@ -61,6 +68,9 @@ class FakeTokenizer:
 
     def __init__(self):
         self.encode_calls = []
+
+    def __len__(self):
+        return 0x110000
 
     def encode(self, prompt: str, **kwargs):
         self.encode_calls.append((prompt, kwargs))
@@ -180,6 +190,145 @@ class DeepseekV4ToolChoiceConstraintTest(TestCase):
     def setUp(self):
         self.renderer = DeepseekV4Renderer.__new__(DeepseekV4Renderer)
 
+    def _make_endpoint(self):
+        renderer = self.renderer
+        renderer.tokenizer = FakeTokenizer()
+        renderer.default_thinking_mode = ThinkingMode.DISABLED
+        renderer.generate_env_config = GenerateEnvConfig()
+        renderer.extra_stop_words = []
+        renderer.extra_stop_word_ids_list = []
+        renderer.render_chat = Mock(return_value=RenderedInputs([1]))
+        renderer.generate_choice = Mock()
+        endpoint = OpenaiEndpoint.__new__(OpenaiEndpoint)
+        endpoint.chat_renderer = renderer
+        endpoint.model_type = "deepseek_v4"
+        endpoint.tokenizer = renderer.tokenizer
+        endpoint.generate_env_config = renderer.generate_env_config
+        endpoint.stop_words_id_list = []
+        endpoint.stop_words_str_list = []
+        endpoint.backend_rpc_server_visitor = None
+        endpoint._get_debug_info = Mock()
+        return endpoint
+
+    def test_openai_paths_finalize_forced_tool_grammar(self):
+        endpoint = self._make_endpoint()
+        invoke = DeepSeekV4Detector().structure_info()("search")
+        for enable_thinking in (False, True):
+            for response_format in (None, {"type": "text"}):
+                with self.subTest(
+                    enable_thinking=enable_thinking, response_format=response_format
+                ):
+                    request = ChatCompletionRequest(
+                        messages=[{"role": "user", "content": "Search docs"}],
+                        tools=_rtp_two_tools(),
+                        tool_choice={
+                            "type": "function",
+                            "function": {"name": "search"},
+                        },
+                        enable_thinking=enable_thinking,
+                        response_format=response_format,
+                    )
+                    endpoint.chat_completion(1, request, SimpleNamespace(headers={}))
+                    single_config = self.renderer.generate_choice.call_args.args[3]
+                    _, batch_config = endpoint._prepare_chat_input(2, request)
+                    endpoint.chat_render(request)
+                    render_config = endpoint._get_debug_info.call_args.args[2]
+                    for config in (single_config, batch_config, render_config):
+                        validate_engine_ready(config)
+                        self.assertIs(config.in_think_mode, enable_thinking)
+                        self.assertIsNone(config.response_format)
+                        self.assertEqual(
+                            config.structural_tag["type"], "structural_tag"
+                        )
+                        tag_format = config.structural_tag["format"]
+                        if enable_thinking:
+                            self.assertEqual(tag_format["type"], "sequence")
+                            tag_format = tag_format["elements"][-1]
+                        self.assertEqual(
+                            [tag["begin"] for tag in tag_format["content"]["tags"]],
+                            [invoke.begin],
+                        )
+
+    def test_batch_rejects_conflicting_forced_tool_grammar(self):
+        endpoint = self._make_endpoint()
+        request = ChatCompletionRequest(
+            messages=[{"role": "user", "content": "Weather?"}],
+            tools=_rtp_tools(),
+            tool_choice="required",
+            response_format={"type": "json_object"},
+        )
+
+        with self.assertRaisesRegex(
+            FtRuntimeException, "forced tool-call decoding conflicts"
+        ) as caught:
+            endpoint._prepare_chat_input(1, request)
+        self.assertEqual(caught.exception.exception_type, ExceptionType.INVALID_PARAMS)
+
+    def test_forced_tool_choice_rejects_explicit_structural_tag_response_format(self):
+        endpoint = self._make_endpoint()
+        for tool_choice in (
+            "required",
+            {"type": "function", "function": {"name": "search"}},
+        ):
+            with self.subTest(tool_choice=tool_choice):
+                request = ChatCompletionRequest(
+                    messages=[{"role": "user", "content": "Search docs"}],
+                    tools=_rtp_two_tools(),
+                    tool_choice=tool_choice,
+                    response_format={
+                        "type": "structural_tag",
+                        "structural_tag": {
+                            "type": "structural_tag",
+                            "format": {"type": "const_string", "value": "answer"},
+                        },
+                    },
+                )
+                with self.assertRaisesRegex(
+                    FtRuntimeException, "forced tool-call decoding conflicts.*response_format"
+                ) as caught:
+                    endpoint._extract_generation_config(request)
+                self.assertEqual(
+                    caught.exception.exception_type, ExceptionType.INVALID_PARAMS
+                )
+
+    def test_message_tools_do_not_satisfy_deepseek_tool_choice(self):
+        for choice in (
+            "required",
+            {"type": "function", "function": {"name": "search"}},
+        ):
+            for tools in (None, _rtp_tools()):
+                with self.subTest(choice=choice, tools=tools):
+                    fields = dict(
+                        messages=[
+                            {
+                                "role": "system",
+                                "content": "",
+                                "tools": [
+                                    tool.model_dump(exclude_none=True)
+                                    for tool in _rtp_two_tools()
+                                ],
+                            },
+                            {"role": "user", "content": "Search docs"},
+                        ],
+                        tools=tools,
+                        tool_choice=choice,
+                    )
+                    request = ChatCompletionRequest(**fields)
+                    if choice == "required" and tools:
+                        OpenaiEndpoint._validate_renderer_tool_choice(
+                            request, self.renderer
+                        )
+                        self.renderer.apply_chat_completion_constraints(
+                            request, GenerateConfig()
+                        )
+                    else:
+                        with self.assertRaisesRegex(
+                            FtRuntimeException, "selected renderer"
+                        ):
+                            OpenaiEndpoint._validate_renderer_tool_choice(
+                                request, self.renderer
+                            )
+
     def test_named_tool_choice_filters_structural_tag_tools(self):
         request = ChatCompletionRequest(
             messages=[{"role": "user", "content": "Search docs"}],
@@ -190,7 +339,7 @@ class DeepseekV4ToolChoiceConstraintTest(TestCase):
 
         self.renderer.apply_chat_completion_constraints(request, config)
 
-        tag = json.loads(config.structural_tag)
+        tag = config.structural_tag
         invoke_info = DeepSeekV4Detector().structure_info()("search")
         self.assertEqual(
             [item["begin"] for item in tag["format"]["content"]["tags"]],
@@ -208,7 +357,7 @@ class DeepseekV4ToolChoiceConstraintTest(TestCase):
 
         self.renderer.apply_chat_completion_constraints(request, config)
 
-        tag = json.loads(config.structural_tag)
+        tag = config.structural_tag
         get_info = DeepSeekV4Detector().structure_info()
         self.assertEqual(
             [item["begin"] for item in tag["format"]["content"]["tags"]],
@@ -479,7 +628,7 @@ class DeepseekV4RendererTest(TestCase):
 
         rendered = self.renderer.render_chat(request)
         self.renderer.apply_chat_completion_constraints(request, config)
-        tag = json.loads(config.structural_tag)
+        tag = config.structural_tag
 
         self.assertIn("search", rendered.rendered_prompt)
         self.assertNotIn("get_weather", rendered.rendered_prompt)

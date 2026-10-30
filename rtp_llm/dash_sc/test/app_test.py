@@ -27,6 +27,36 @@ from rtp_llm.dash_sc.app import (
 from rtp_llm.dash_sc.server import DashScGrpcDrainAioInterceptor, DashScGrpcServer
 
 
+class ImagePlaceholderMappingTest(TestCase):
+    def test_mapping_is_enabled_only_for_kimi_k3_models(self) -> None:
+        source = "<|kimi_image_placeholder|>"
+        target = 163605
+        for model_type in ("kimi_k3", "kimi_k31", "kimi_k25"):
+            with self.subTest(model_type=model_type):
+                config = SimpleNamespace(
+                    model_type=model_type,
+                    mm_model_config=SimpleNamespace(
+                        is_multimodal=True, mm_sep_tokens=[[target]]
+                    ),
+                    mm_related_params=SimpleNamespace(
+                        special_tokens={"image_placeholder": source},
+                        special_token_ids={"image_token_index": target},
+                    ),
+                )
+                tokenizer = Mock()
+                tokenizer.encode.return_value = [27, 91]
+
+                mapping = bg_app._image_placeholder_mapping(config, tokenizer)
+
+                if model_type == "kimi_k25":
+                    self.assertIsNone(mapping)
+                    tokenizer.encode.assert_not_called()
+                else:
+                    self.assertEqual(mapping.source_ids, (27, 91))
+                    self.assertEqual(mapping.target_id, target)
+                    tokenizer.encode.assert_called_once_with(source)
+
+
 class V41CheckpointProcessorConfigTest(TestCase):
     @skipUnless(os.environ.get("DSV41_MODEL_PATH"), "requires V4.1 checkpoint config")
     def test_real_model_factory_config_builds_image_processor(self):

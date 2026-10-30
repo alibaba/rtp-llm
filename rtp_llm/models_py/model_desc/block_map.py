@@ -1,6 +1,8 @@
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Protocol, TypeVar
 
+import torch
+
 from rtp_llm.ops.compute_ops import LayerKVCache, PyAttentionInputs, PyModelInputs
 
 AttentionInputs = PyAttentionInputs | Mapping[str, PyAttentionInputs]

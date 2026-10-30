@@ -13,6 +13,7 @@
 #include <map>
 #include <memory>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
@@ -189,6 +190,7 @@ enum GptModelInputControlFlag : uint32_t {
     kControlShutdown            = 1u << 10,
     kControlMiddleChunkOnly     = 1u << 11,
     kControlDraftExtend         = 1u << 12,
+    kControlMtpDraftUpdate      = 1u << 13,
 };
 
 GptModelInputShapeHints getModelInputShapeHints(const GptModelInputs& inputs);
@@ -284,6 +286,15 @@ public:
     }
     virtual bool hasMtpTargetHiddenBuffer() const {
         return false;
+    }
+
+    // Some drafts consume global natural-order rows after a query-CP target.
+    virtual bool requiresGlobalMtpPrefillHidden() const {
+        return false;
+    }
+
+    virtual torch::Tensor restoreMtpPrefillHiddenStates(torch::Tensor /*hidden*/, const GptModelInputs& /*inputs*/) {
+        throw std::runtime_error("model cannot restore CP MTP prefill hidden states");
     }
 
     // Optional CP-prefill companion: expose one final pre-hc row per request

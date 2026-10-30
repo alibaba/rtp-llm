@@ -117,6 +117,7 @@ from rtp_llm.utils.base_model_datatypes import (
     FrontendMetricFrame,
     GenerateInput,
     GenerateOutputs,
+    MMUrlType,
     RequestInfo,
 )
 from rtp_llm.utils.util import AtomicCounter
@@ -150,6 +151,55 @@ _DASH_SERVER_ATTRIBUTES = {
     "rpc.system": "grpc",
     "rpc.method": _DASH_RPC_METHOD,
 }
+
+
+@dataclass(frozen=True)
+class ImagePlaceholderMapping:
+    """Map a wire-format image marker to the engine's one-token image slot."""
+
+    source_ids: tuple[int, ...]
+    target_id: int
+
+    def normalize(self, input_ids: list[int], image_count: int) -> list[int]:
+        target_count = input_ids.count(self.target_id)
+        if target_count == image_count:
+            return input_ids
+        if target_count:
+            raise FtRuntimeException(
+                ExceptionType.MM_WRONG_FORMAT_ERROR,
+                f"Expected {image_count} image placeholders, found {target_count} "
+                "engine image slots",
+            )
+
+        source_ids = list(self.source_ids)
+        source_length = len(source_ids)
+        offsets: list[int] = []
+        search_from = 0
+        while True:
+            try:
+                offset = input_ids.index(source_ids[0], search_from)
+            except ValueError:
+                break
+            end = offset + source_length
+            if input_ids[offset:end] == source_ids:
+                offsets.append(offset)
+                search_from = end
+            else:
+                search_from = offset + 1
+        if len(offsets) != image_count:
+            raise FtRuntimeException(
+                ExceptionType.MM_WRONG_FORMAT_ERROR,
+                f"Expected {image_count} image placeholders, found {len(offsets)}",
+            )
+
+        normalized: list[int] = []
+        end = 0
+        for offset in offsets:
+            normalized.extend(input_ids[end:offset])
+            normalized.append(self.target_id)
+            end = offset + source_length
+        normalized.extend(input_ids[end:])
+        return normalized
 
 
 def _build_mm_inputs_from_request(
@@ -1035,6 +1085,7 @@ async def iter_real_model_stream_infer(
     yield_access_stats: bool = False,
     mm_inputs: Optional[list] = None,
     input_ids_tensor: Optional[torch.Tensor] = None,
+    image_placeholder_mapping: ImagePlaceholderMapping | None = None,
     v41_inputs=None,
     v41_processor_config=None,
     max_seq_len: Optional[int] = None,
@@ -1085,6 +1136,21 @@ async def iter_real_model_stream_infer(
     stream: object | None = None
     phase2_stream: object | None = None
     try:
+        if image_placeholder_mapping is not None and mm_inputs:
+            if any(
+                item.mm_type not in (MMUrlType.DEFAULT, MMUrlType.IMAGE)
+                for item in mm_inputs
+            ):
+                raise FtRuntimeException(
+                    ExceptionType.MM_WRONG_FORMAT_ERROR,
+                    "Image placeholder mapping requires image inputs",
+                )
+            normalized_ids = image_placeholder_mapping.normalize(
+                input_ids_list, len(mm_inputs)
+            )
+            if normalized_ids is not input_ids_list:
+                input_ids_list = normalized_ids
+                input_ids_tensor = None
         if (
             v41_inputs is None
             and v41_processor_config is not None
@@ -1739,6 +1805,7 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
         rank_id: Optional[int] = None,
         repetition_monitor_config: Optional[RequestRepetitionMonitorConfig] = None,
         grammar_validator: Optional[GrammarValidator] = None,
+        image_placeholder_mapping: ImagePlaceholderMapping | None = None,
         v41_processor_config=None,
         max_seq_len: Optional[int] = None,
         monitor_interval_s: Optional[float] = None,
@@ -1784,6 +1851,7 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
         # Optional admission-time grammar check. ``None`` keeps the legacy behaviour
         # (invalid grammars surface as an engine-side error mid-stream).
         self._grammar_validator = grammar_validator
+        self._image_placeholder_mapping = image_placeholder_mapping
         self._v41_processor_config = v41_processor_config
         self._max_seq_len = max_seq_len
         self._request_metrics = request_metrics or FrontendRequestMetrics(
@@ -2223,6 +2291,7 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
                     phase2_request_id_factory=self._next_rtp_llm_request_id,
                     access_agg=record,
                     input_ids_tensor=parsed_input_ids.tensor,
+                    image_placeholder_mapping=self._image_placeholder_mapping,
                     v41_processor_config=self._v41_processor_config,
                     max_seq_len=self._max_seq_len,
                     yield_access_stats=True,

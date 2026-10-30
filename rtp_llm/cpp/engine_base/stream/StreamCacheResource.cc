@@ -22,6 +22,26 @@ namespace rtp_llm {
 
 namespace {
 
+bool hasLinearCheckpointHole(const BatchKVCacheResource& resource, const CacheConfig& config, int prefix, int length) {
+    for (const auto& group : config.groups()) {
+        const auto& policy = group.policy;
+        if (policy.group_type != CacheGroupType::LINEAR || !policy.enable_prefix_reuse || policy.shared_chunk_state) {
+            continue;
+        }
+        const size_t span = group.seqSizePerBlock();
+        const size_t end  = (static_cast<size_t>(length) + span - 1) / span;
+        // The prefix's last page is read by the first recompute chunk.
+        const size_t first = std::min(end, static_cast<size_t>(std::max(prefix - 1, 0)) / span);
+        for (int row = 0; row < resource.batchSize(); ++row) {
+            const auto& blocks = resource.blocks(row, group.tag);
+            if (blocks.size() < end || std::any_of(blocks.begin() + first, blocks.begin() + end, isNullBlockIdx)) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
 std::shared_ptr<const CacheTopology> warmupCacheTopology() {
     static const auto topology = []() {
         constexpr auto kWarmupCacheTag  = "__warmup__";
@@ -53,6 +73,30 @@ void StreamCacheResource::init(int batch_size) {
 }
 
 bool StreamCacheResource::copyChunkKernelBlocks(int batch, const std::string& tag, int32_t* dst) const {
+    if (stream_->isFakeStream() && stream_->warmup_chunk_window_) {
+        const auto& group = resource_context_.cache_manager->cacheConfig().group(tag);
+        if (group.policy.group_type != CacheGroupType::LINEAR) {
+            return false;
+        }
+        const auto span   = group.seqSizePerBlock();
+        const int  prefix = stream_->prefixLength();
+        const int  end    = prefix + stream_->contextLength();
+        const auto count  = batch_kv_cache_resource_->kernelBlocks(batch, tag).size();
+        RTP_LLM_CHECK_WITH_INFO(end > prefix && static_cast<size_t>(end - 1) / span < count,
+                                "warmup LINEAR state table does not cover the chunk");
+        // Two slots per request: readers of the prefix cannot race checkpoint
+        // writers. Intermediate checkpoints are unnecessary during warmup.
+        const int initial = 1 + 2 * batch + stream_->warmup_chunk_index_ % 2;
+        const int output  = 1 + 2 * batch + (stream_->warmup_chunk_index_ + 1) % 2;
+        RTP_LLM_CHECK_WITH_INFO(static_cast<size_t>(std::max(initial, output)) < group.block_num,
+                                "warmup LINEAR pool needs two state slots per request");
+        std::fill_n(dst, count, NULL_BLOCK_IDX);
+        if (prefix > 0) {
+            dst[static_cast<size_t>(prefix - 1) / span] = initial;
+        }
+        dst[static_cast<size_t>(end - 1) / span] = output;
+        return true;
+    }
     if (!stream_->useChunkWindow() || stream_->isFakeStream()) {
         return false;
     }
@@ -70,6 +114,11 @@ bool StreamCacheResource::copyChunkKernelBlocks(int batch, const std::string& ta
             static_cast<size_t>(stream_->prefixLength() + stream_->currentChunkLen() - 1) / group.seqSizePerBlock();
         ids.copySharedKernelBlocks(tail, chunk_tail, dst);
         return true;
+    }
+    // A whole-prompt prefill needs no cyclic mapping. Short multimodal requests
+    // may reach the scheduler without having reserved chunk banks at admission.
+    if (stream_->prefixLength() == 0 && !stream_->isMiddleChunk()) {
+        return false;
     }
     const bool reuse = reuseCache();
     const auto banks =
@@ -367,6 +416,8 @@ absl::Status StreamCacheResource::finalizeAllocatorLoad() {
     if (timed_out) {
         deferAllocatorLoadRelease();
     }
+
+    bool linear_checkpoint_hole = false;
     if (load_success) {
         RTP_LLM_CHECK(load_context != nullptr);
         publishAllocatorReuse(*load_context, false);
@@ -377,11 +428,16 @@ absl::Status StreamCacheResource::finalizeAllocatorLoad() {
             load_context ? static_cast<int>(load_context->deviceReadyBlocks()) * reuseBlockTokens() : 0;
         const bool reuse_local =
             load_context && (load_context->localLoadSucceeded() || ready_length > stream_->reuseLength());
-        const int reuse_length = reuse_local ? ready_length : stream_->reuseLength();
-        if (!resource_context_.cache_manager->detachSharedBlocksForRecompute(batch_kv_cache_resource_, reuse_length)) {
-            // Re-enter admission with no request refs if detaching the writable
-            // suffix cannot fit. Never compute into cache/other-request blocks.
-            resource_context_.cache_manager->free({batch_kv_cache_resource_, stream_->completeTokenIdsPtr()});
+        const int   reuse_length = reuse_local ? ready_length : stream_->reuseLength();
+        const auto& manager      = resource_context_.cache_manager;
+        linear_checkpoint_hole =
+            isContextStream() && stream_->chunkedPrefillEnabled() && reuseCache()
+            && hasLinearCheckpointHole(
+                *batch_kv_cache_resource_, manager->cacheConfig(), reuse_length, stream_->seqLength());
+        if (linear_checkpoint_hole) {
+            clearCacheReuseState();
+        } else if (!manager->detachSharedBlocksForRecompute(batch_kv_cache_resource_, reuse_length)) {
+            manager->free({batch_kv_cache_resource_, stream_->completeTokenIdsPtr()});
             clearCacheReuseState();
             malloc_status = MallocStatus::RETRYABLE_RESOURCE_EXHAUSTED;
         } else if (reuse_local) {
@@ -409,6 +465,10 @@ absl::Status StreamCacheResource::finalizeAllocatorLoad() {
     }
     if (load_success) {
         return absl::OkStatus();
+    }
+    if (linear_checkpoint_hole) {
+        return absl::FailedPreconditionError(
+            "chunked prefill LINEAR checkpoint missing after async cache load failure");
     }
     if (malloc_status == MallocStatus::RETRYABLE_RESOURCE_EXHAUSTED) {
         return absl::UnavailableError("allocator load materialization is temporarily out of KV blocks");
@@ -479,7 +539,7 @@ absl::Status StreamCacheResource::waitForAllocatorLoad() {
     return finalizeAllocatorLoad();
 }
 
-absl::Status StreamCacheResource::incrKVBlock(int seq_len_override) {
+absl::Status StreamCacheResource::incrKVBlock(int seq_len_override, bool preserve_inflight) {
     RTP_LLM_PROFILE_FUNCTION();
     // TODO(xinfei.sxf) add reserver_blocks
     if (fake_inited_) {
@@ -499,6 +559,7 @@ absl::Status StreamCacheResource::incrKVBlock(int seq_len_override) {
     malloc_info.reuse_cache                  = reuseCache();
     malloc_info.enable_cache_lookup          = enableCacheLookup();
     malloc_info.enable_remove_skipped_blocks = !stream_->isContextStream();
+    malloc_info.preserve_inflight            = preserve_inflight;
     malloc_info.incr_seq_len_override        = seq_len_override;
     malloc_info.pd_decode_linear_tail_only   = pd_decode_linear_tail_only_;
     // One predicate with the estimators: only a request that actually owns the
@@ -726,7 +787,9 @@ void StreamCacheResource::swapLinearBlocks(int32_t batch_id, size_t rhs, size_t 
         return;
     }
 
-    for (const auto& group : resource_context_.cache_manager->cacheConfig().topology().groups()) {
+    const auto& config = resource_context_.cache_manager->cacheConfig();
+    for (size_t group_id = 0; group_id < config.groups().size(); ++group_id) {
+        const auto& group = config.groups()[group_id];
         if (group.policy.group_type == CacheGroupType::LINEAR) {
             batch_kv_cache_resource_->swapBlocks(batch_id, group.tag, rhs, lhs);
         }

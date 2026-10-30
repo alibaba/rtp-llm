@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 #include <algorithm>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <string>
@@ -41,10 +42,8 @@ constexpr uint32_t             kDsv4Fp8KvEntryBytes        = 584;
 constexpr uint32_t             kDsv4IndexerStateEntryBytes = 512 * 4;
 constexpr uint32_t             kDsv4CsaStateEntryBytes     = 2048 * 4;
 constexpr uint32_t             kDsv4HcaStateEntryBytes     = 1024 * 4;
-const std::vector<std::string> kDsv4FlashFirstSeenTags     = {
-    "swa_kv", "csa_kv", "indexer_kv", "indexer_state", "csa_state", "hca_kv", "hca_state"};
-const std::vector<std::string> kDsv4ProFirstSeenTags = {
-    "hca_kv", "hca_state", "swa_kv", "csa_kv", "indexer_kv", "indexer_state", "csa_state"};
+const std::vector<std::string> kDsv4Tags                   = {
+    "csa_kv", "csa_state", "hca_kv", "hca_state", "indexer_kv", "indexer_state", "swa_kv"};
 
 bool containsReusableGroup(const BlockTreeCache& cache, std::string_view tag) {
     return std::any_of(cache.groupSets().begin(), cache.groupSets().end(), [tag](const GroupSetPtr& group_set) {
@@ -273,7 +272,7 @@ TEST(CacheConfigCreatorTest, ProLayerClassification) {
     ParallelismConfig pc;
     auto              config = CacheConfigCreator::createWarmupConfig(makeProModelConfig(), pc, 0);
     EXPECT_EQ(config.layer_num, 61u);
-    EXPECT_EQ(publishedGroupTags(config.topology()), kDsv4ProFirstSeenTags);
+    EXPECT_EQ(publishedGroupTags(config.topology()), kDsv4Tags);
     EXPECT_EQ(config.layerIdsForGroup("csa_kv").size(), 30u);
     EXPECT_EQ(config.layerIdsForGroup("hca_kv").size(), 31u);
     EXPECT_EQ(config.layerIdsForGroup("swa_kv").size(), 61u);
@@ -283,7 +282,7 @@ TEST(CacheConfigCreatorTest, FlashLayerClassification) {
     ParallelismConfig pc;
     auto              config = CacheConfigCreator::createWarmupConfig(makeFlashModelConfig(), pc, 0);
     EXPECT_EQ(config.layer_num, 43u);
-    EXPECT_EQ(publishedGroupTags(config.topology()), kDsv4FlashFirstSeenTags);
+    EXPECT_EQ(publishedGroupTags(config.topology()), kDsv4Tags);
     EXPECT_EQ(config.layerIdsForGroup("csa_kv").size(), 21u);
     EXPECT_EQ(config.layerIdsForGroup("hca_kv").size(), 20u);
     EXPECT_EQ(config.layerIdsForGroup("swa_kv").size(), 43u);
@@ -321,7 +320,7 @@ TEST(CacheConfigCreatorTest, MtpSwaOnlyLayerIsNotStripped) {
     EXPECT_EQ(config.groupForLayer(0, "swa_kv").tag, "swa_kv");
 }
 
-TEST(CacheConfigCreatorTest, Dsv4SpecOrderControlsFirstSeenGroupOrder) {
+TEST(CacheConfigCreatorTest, Dsv4SpecOrderDoesNotChangeCanonicalGroupOrder) {
     auto mc = makeFlashModelConfig();
     for (auto& layer_descs : mc.kv_cache_spec_descs) {
         std::reverse(layer_descs.begin(), layer_descs.end());
@@ -330,8 +329,7 @@ TEST(CacheConfigCreatorTest, Dsv4SpecOrderControlsFirstSeenGroupOrder) {
     ParallelismConfig pc;
     auto              config = CacheConfigCreator::createWarmupConfig(mc, pc, 0);
 
-    const std::vector<std::string> expected_tags = {
-        "swa_kv", "csa_state", "indexer_state", "indexer_kv", "csa_kv", "hca_state", "hca_kv"};
+    const auto& expected_tags = kDsv4Tags;
     EXPECT_EQ(publishedGroupTags(config.topology()), expected_tags);
 
     ASSERT_EQ(static_cast<size_t>(config.groupNums()), expected_tags.size());
@@ -448,7 +446,7 @@ TEST(CacheConfigTest, SetTopologyInstallsTagAndGroupTopology) {
         {makeTestGroup(swa_spec, CacheGroupType::SWA, {0, 1, 2}), makeTestGroup(csa_spec, CacheGroupType::FULL, {1})},
         std::move(layers));
 
-    EXPECT_EQ(publishedGroupTags(config.topology()), std::vector<std::string>({"swa", "csa"}));
+    EXPECT_EQ(publishedGroupTags(config.topology()), std::vector<std::string>({"csa", "swa"}));
     EXPECT_EQ(config.groupForLayer(1, "swa").tag, "swa");
     EXPECT_EQ(config.groupForLayer(1, "csa").tag, "csa");
     EXPECT_THROW((void)config.soleGroupForLayer(1), std::exception);
@@ -946,7 +944,7 @@ TEST(CacheConfigCreatorTest, FlashCacheConfig) {
     EXPECT_EQ(config.layerIdsForGroup("csa_kv").size(), 21u);
 }
 
-TEST(CacheConfigCreatorTest, HybridAttentionIndependentPoolUsesHybridPoolConfig) {
+TEST(CacheConfigCreatorTest, HybridAttentionIndependentPoolsKeepGroupCacheTypes) {
     ParallelismConfig pc;
     auto              config = CacheConfigCreator::createWarmupConfig(makeHybridAttentionModelConfig(), pc, 0);
 
@@ -968,7 +966,7 @@ TEST(CacheConfigCreatorTest, HybridAttentionIndependentPoolUsesHybridPoolConfig)
     EXPECT_GT(config.group("linear").spec->block_size_bytes(), 0u);
     EXPECT_NE(config.group("full").spec->block_size_bytes(), config.group("linear").spec->block_size_bytes());
     EXPECT_EQ(config.topology().groups().size(), 2u);
-    EXPECT_EQ(publishedGroupTags(config.topology()), std::vector<std::string>({"linear", "full"}));
+    EXPECT_EQ(publishedGroupTags(config.topology()), std::vector<std::string>({"full", "linear"}));
 
     EXPECT_EQ(config.totalGroupBlockSizeBytes(),
               config.blockSizeBytesForGroup("linear") + config.blockSizeBytesForGroup("full"));
@@ -995,7 +993,7 @@ TEST(CacheConfigCreatorTest, HybridAttentionIndependentPoolSplitsFullAndSwaSpecs
     EXPECT_EQ(config.group("full").policy.group_type, CacheGroupType::FULL);
     EXPECT_EQ(config.group("swa").policy.group_type, CacheGroupType::SWA);
     EXPECT_EQ(config.group("linear").policy.group_type, CacheGroupType::LINEAR);
-    EXPECT_EQ(publishedGroupTags(config.topology()), std::vector<std::string>({"full", "swa", "linear"}));
+    EXPECT_EQ(publishedGroupTags(config.topology()), std::vector<std::string>({"full", "linear", "swa"}));
     ASSERT_EQ(static_cast<size_t>(config.groupNums()), 3u);
     EXPECT_NE(config.group("full").spec.get(), config.group("swa").spec.get());
     EXPECT_EQ(config.layerIdsForGroup("full"), std::vector<int>({0}));
@@ -1174,7 +1172,7 @@ TEST(CacheConfigCreatorTest, HybridAttentionUsesIndependentPerGroupBlockCounts) 
     ASSERT_EQ(config.groupNums(), 2);
     EXPECT_EQ(config.group("linear").block_num, 2u);
     EXPECT_EQ(config.group("full").block_num, 2u);
-    EXPECT_EQ(publishedGroupTags(config.topology()), std::vector<std::string>({"linear", "full"}));
+    EXPECT_EQ(publishedGroupTags(config.topology()), std::vector<std::string>({"full", "linear"}));
     EXPECT_EQ(config.groupForLayer(0, "linear").tag, "linear");
     EXPECT_EQ(config.groupForLayer(1, "full").tag, "full");
 }
@@ -2236,35 +2234,26 @@ TEST(CacheConfigTest, DSV4MtpKeepsProposeLayerInSwaPool) {
     auto           config = rtp_llm::test::finalizeCacheConfig(created_config, config_candidate_block_num);
 
     ASSERT_EQ(config.layer_num, 43u);
-    ASSERT_EQ(config.layer_all_num(), 45u);
+    ASSERT_EQ(config.layer_all_num(), 44u);
     ASSERT_EQ(config.topology().layers().size(), static_cast<size_t>(config.layer_all_num()));
-    ASSERT_EQ(config.mtp_sub_configs.size(), 2u);
+    ASSERT_EQ(config.mtp_sub_configs.size(), 1u);
     ASSERT_NE(config.mtp_sub_configs[0], nullptr);
-    ASSERT_NE(config.mtp_sub_configs[1], nullptr);
 
     EXPECT_EQ(config.groupForLayer(43, "swa_kv").tag, "swa_kv");
     EXPECT_EQ(config.topology().layer(43).group_tags, std::vector<std::string>({"swa_kv"}));
-    EXPECT_EQ(config.topology().layer(44).group_tags, std::vector<std::string>({"swa_kv"}));
-    EXPECT_EQ(config.groupForLayer(44, "swa_kv").tag, "swa_kv");
-
-    EXPECT_EQ(config.layerIdsForGroup("swa_kv").size(), 45u);
+    EXPECT_EQ(config.layerIdsForGroup("swa_kv").size(), 44u);
 
     // Merge preserves target publication order and placeholder identities;
     // only layer IDs are draft-local. Runtime block tables carry their own tags.
     EXPECT_EQ(publishedGroupTags(config.mtp_sub_configs[0]->topology()), publishedGroupTags(config.topology()));
-    EXPECT_EQ(publishedGroupTags(config.mtp_sub_configs[1]->topology()), publishedGroupTags(config.topology()));
     EXPECT_EQ(config.mtp_sub_configs[0]->groupForLayer(0, "swa_kv").tag, "swa_kv");
-    EXPECT_EQ(config.mtp_sub_configs[1]->groupForLayer(0, "swa_kv").tag, "swa_kv");
     EXPECT_EQ(config.mtp_sub_configs[0]->layerIdsForGroup(config.mtp_sub_configs[0]->group("swa_kv").tag),
-              std::vector<int>({0}));
-    EXPECT_EQ(config.mtp_sub_configs[1]->layerIdsForGroup(config.mtp_sub_configs[1]->group("swa_kv").tag),
               std::vector<int>({0}));
     for (const auto& group : config.groups()) {
         if (group.tag == "swa_kv") {
             continue;
         }
         EXPECT_TRUE(config.mtp_sub_configs[0]->layerIdsForGroup(group.tag).empty()) << group.tag;
-        EXPECT_TRUE(config.mtp_sub_configs[1]->layerIdsForGroup(group.tag).empty()) << group.tag;
     }
     EXPECT_EQ(config.seq_size_per_block, 16384u);
 
@@ -2276,9 +2265,7 @@ TEST(CacheConfigTest, DSV4MtpKeepsProposeLayerInSwaPool) {
 
     EXPECT_EQ(config.group("swa_kv").block_num, 100u);
     EXPECT_EQ(config.mtp_sub_configs[0]->reuse_cache_tail_blocks, 4);
-    EXPECT_EQ(config.mtp_sub_configs[1]->reuse_cache_tail_blocks, 4);
     EXPECT_EQ(config.mtp_sub_configs[0]->group("swa_kv").block_num, 100u);
-    EXPECT_EQ(config.mtp_sub_configs[1]->group("swa_kv").block_num, 100u);
 
     EXPECT_EQ(test::explicitPoolReserveBytes(config), 256u * config.blockSizeBytesForGroup("hca_state"));
 }
@@ -2339,7 +2326,7 @@ TEST(CacheConfigTest, DSV4MtpJointBudgetIncludesScoreAndProposeSwaBacking) {
     EXPECT_LE(backing_bytes(block_num), budget_bytes);
     EXPECT_GT(backing_bytes(block_num + 1u), budget_bytes);
 
-    ASSERT_EQ(config.mtp_sub_configs.size(), 2u);
+    ASSERT_EQ(config.mtp_sub_configs.size(), 1u);
     for (const auto& sub_config : config.mtp_sub_configs) {
         ASSERT_NE(sub_config, nullptr);
         EXPECT_EQ(sub_config->reuse_cache_tail_blocks, 4);
@@ -2695,10 +2682,10 @@ TEST_F(DSV4AllocatorTest, ChunkMallocSharesCommonSparseBanksAndKeepsPrivateTail)
         }
         config.setTopology(std::move(groups), config.topology().layers());
         setGroupBlockNumsForTest(
-            config, config.groupTags(), {static_cast<uint32_t>(test_case.physical_blocks + 1), 10});
+            config, {"linear", "full1"}, {static_cast<uint32_t>(test_case.physical_blocks + 1), 10});
         auto allocator = std::make_shared<TestDSV4HybridTypeAllocator>(config, AllocationType::DEVICE);
         ASSERT_TRUE(allocator->init());
-        const auto sparse_group = allocator->cacheGroups().front();
+        const auto sparse_group = allocator->cacheGroups().at(config.topology().groupIdForTag("linear"));
         ASSERT_EQ(sparse_group->tag(), "linear");
         const auto pool        = sparse_group->blockPool();
         const auto free_before = pool->availableBlocksNum();
@@ -3916,7 +3903,7 @@ TEST(CacheConfigCreatorTest, PoolBlockWeightsValidateMergedTargetAndPropagateToD
     config.finalizeBlockNums(9, {});
     EXPECT_EQ(config.group("linear").block_num, 18u);
     EXPECT_EQ(config.group("full").block_num, 36u);
-    ASSERT_EQ(config.mtp_sub_configs.size(), 2u);
+    ASSERT_EQ(config.mtp_sub_configs.size(), 1u);
     for (const auto& sub : config.mtp_sub_configs) {
         EXPECT_TRUE(sub->layerIdsForGroup("linear").empty());
         EXPECT_EQ(sub->pool_block_weights, config.pool_block_weights);
@@ -3944,7 +3931,7 @@ TEST(CacheConfigCreatorTest, PoolBlockWeightsBudgetIncludesScalesDraftSegmentsAn
         config.finalizeBlockNums(baseline, {});
         ASSERT_EQ(config.group("full").block_num, 4u * baseline);
         const auto pool = DeviceBlockPoolConfigHelper::createConfigForGroup(config, config.group("full"));
-        ASSERT_EQ(pool.memory_layouts.size(), 3u);
+        ASSERT_EQ(pool.memory_layouts.size(), 2u);
         EXPECT_GT(pool.memory_layouts[0].kv_scale_stride_bytes, 0u);
         EXPECT_GT(pool.memory_layouts[1].kv_block_stride_bytes, pool.memory_layouts[0].kv_block_stride_bytes);
         const auto charged_bytes = [](const CacheConfig& candidate) {
@@ -4166,10 +4153,10 @@ TEST(CacheConfigCreatorTest, MergedBudgetUsesEachPhysicalSegmentOnce) {
             const uint32_t config_candidate_block_num =
                 CacheConfigCreator::computeLocalBlockNum(created_config, target, {}, options, {}, std::nullopt, sp);
             auto config = finalizeCacheConfig(created_config, config_candidate_block_num);
-            ASSERT_EQ(config.mtp_sub_configs.size(), 2u);
+            ASSERT_EQ(config.mtp_sub_configs.size(), 1u);
 
             const auto pool = DeviceBlockPoolConfigHelper::createConfigForGroup(config, config.group("full"));
-            ASSERT_EQ(pool.memory_layouts.size(), 3u);
+            ASSERT_EQ(pool.memory_layouts.size(), 2u);
             EXPECT_EQ(pool.memory_layouts[1].kv_block_stride_bytes, 2 * pool.memory_layouts[0].kv_block_stride_bytes);
             for (const auto& sub : config.mtp_sub_configs) {
                 EXPECT_TRUE(sub->layerIdsForGroup("state").empty());
@@ -4206,10 +4193,16 @@ TEST(CacheConfigCreatorTest, MtpModuleCountsPreserveEagleAndDsparkRules) {
     sp.type              = SP_TYPE_MTP;
     sp.gen_num_per_cycle = 3;
 
-    auto mtp = CacheConfigCreator::createConfig(target, {}, options, sp, &draft, true);
-    EXPECT_EQ(mtp.mtp_sub_configs.size(), 3u);
-    EXPECT_EQ(mtp.layer_all_num(), 7u);
+    for (int prediction_depth : {1, 2, 3, 5}) {
+        sp.gen_num_per_cycle = prediction_depth;
+        auto mtp = CacheConfigCreator::createConfig(target, {}, options, sp, &draft, true);
+        ASSERT_EQ(mtp.mtp_sub_configs.size(), 1u) << "prediction_depth=" << prediction_depth;
+        EXPECT_EQ(mtp.mtp_sub_configs[0]->layer_num, 2u);
+        EXPECT_EQ(mtp.layer_all_num(), 3u);
+    }
 
+    sp.type = SP_TYPE_EAGLE;
+    sp.gen_num_per_cycle = 3;
     auto eagle = CacheConfigCreator::createConfig(target, {}, options, sp, &draft, true, true);
     EXPECT_EQ(eagle.mtp_sub_configs.size(), 1u);
     EXPECT_EQ(eagle.layer_all_num(), 3u);

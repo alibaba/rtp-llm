@@ -9,6 +9,7 @@ py_library(
     name = "collective_torch",
     srcs = [
         "collective_torch.py",
+        "zigzag_row_exchange.py",
         "collective_utils.py",
         "canonical_p2p.py",
         "pynccl_cp.py",
@@ -23,6 +24,7 @@ py_library(
         "//rtp_llm:torch",
         "//rtp_llm:collective_config",
         "//rtp_llm/models_py/triton_kernels:peer_all_reduce",
+        "//rtp_llm/models_py/triton_kernels:mla",
     ],
     visibility = ["//visibility:public"],
 )

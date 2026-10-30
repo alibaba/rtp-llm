@@ -1,5 +1,6 @@
 #pragma once
 
+#include <vector>
 #include "absl/status/statusor.h"
 #include "c10/core/Event.h"
 #include "rtp_llm/cpp/engine_base/EngineInitParams.h"
@@ -31,6 +32,7 @@ public:
 
 struct FastTopKSamplerOutput {
     torch::Tensor all_probs;
+    // Token IDs are int32 on the logits device.
     torch::Tensor token_ids;
 };
 

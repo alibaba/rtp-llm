@@ -175,6 +175,9 @@ bool CompleteTokenIds::matchEosToken(int batch_id, int token_id) {
 bool CompleteTokenIds::matchStopWordsList(int batch_id, const std::vector<int>& stop_words) {
     int* token_ids = data(batch_id);
     for (size_t i = start_check_seq_length_; i <= seq_length_; ++i) {
+        if (stop_words.size() > i) {
+            continue;
+        }
         bool   match_one   = true;
         size_t begin_index = i - stop_words.size();
         for (auto& token : stop_words) {

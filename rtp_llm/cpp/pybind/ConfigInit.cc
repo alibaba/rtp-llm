@@ -1936,6 +1936,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("v_head_dim", &AttentionConfigs::v_head_dim)
         .def_readwrite("softmax_extra_scale", &AttentionConfigs::softmax_extra_scale)
         .def_readwrite("kv_cache_dtype", &AttentionConfigs::kv_cache_dtype)
+        .def_readwrite("mla_fp8_compute", &AttentionConfigs::mla_fp8_compute)
         .def_readwrite("need_rope_kv_cache", &AttentionConfigs::need_rope_kv_cache)
         .def_readwrite("is_sparse", &AttentionConfigs::is_sparse)
         .def_readwrite("use_sparse_gqa_fmha", &AttentionConfigs::use_sparse_gqa_fmha)
@@ -2188,6 +2189,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def(py::init<>())
         .def_readwrite("num_layers", &ModelConfig::num_layers)
         .def_readwrite("max_seq_len", &ModelConfig::max_seq_len)
+        .def_readwrite("max_execution_tokens", &ModelConfig::max_execution_tokens)
         .def_readwrite("gen_num_per_cycle", &ModelConfig::gen_num_per_cycle)
         .def_readwrite("vocab_size", &ModelConfig::vocab_size)
         .def_readwrite("output_vocab_ids", &ModelConfig::output_vocab_ids)
@@ -2406,6 +2408,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("comm_buffer_size", &PrefillCPConfig::comm_buffer_size)
         .def_readwrite("kv_cache_sharded", &PrefillCPConfig::kv_cache_sharded)
         .def_readwrite("prefill_cp_size", &PrefillCPConfig::prefill_cp_size)
+        .def_readwrite("preserve_tp_layout", &PrefillCPConfig::preserve_tp_layout)
         .def("to_string", &PrefillCPConfig::to_string)
         .def("is_enabled", &PrefillCPConfig::is_enabled)
         .def("is_prefill_enabled", &PrefillCPConfig::is_prefill_enabled)
@@ -2415,10 +2418,11 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.comm_buffer_size,
                                       self.kv_cache_sharded,
                                       self.prefill_cp_size,
-                                      self.all_gather_impl);
+                                      self.all_gather_impl,
+                                      self.preserve_tp_layout);
             },
             [](py::tuple t) {
-                if (t.size() != 2 && t.size() != 4 && t.size() != 5)
+                if (t.size() != 2 && t.size() != 4 && t.size() != 5 && t.size() != 6)
                     throw std::runtime_error("Invalid state!");
                 PrefillCPConfig c;
                 try {
@@ -2428,8 +2432,13 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                         c.kv_cache_sharded = t[2].cast<bool>();
                         c.prefill_cp_size  = t[3].cast<int64_t>();
                     }
-                    if (t.size() >= 5) {
+                    if (t.size() == 5 && py::isinstance<py::bool_>(t[4])) {
+                        c.preserve_tp_layout = t[4].cast<bool>();
+                    } else if (t.size() >= 5) {
                         c.all_gather_impl = t[4].cast<CPAllGatherImpl>();
+                    }
+                    if (t.size() == 6) {
+                        c.preserve_tp_layout = t[5].cast<bool>();
                     }
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("PrefillCPConfig unpickle error: ") + e.what());

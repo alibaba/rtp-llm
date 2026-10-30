@@ -1,25 +1,39 @@
-"""Regression coverage for request-specific stop token boundaries."""
+"""Regression coverage for stop boundaries and K3 continuation contracts."""
 
 import asyncio
 import unittest
 
 import torch
+import xgrammar as xgr
 
 from rtp_llm.config.generate_config import GenerateConfig, ThinkingMode
 from rtp_llm.config.py_config_modules import GenerateEnvConfig, VitConfig
+from rtp_llm.models.kimi_k3.kimi_k3_request_contract import RESPONSE_OPEN, THINK_OPEN
 from rtp_llm.openai.api_datatype import (
     ChatCompletionRequest,
     ChatMessage,
     FinisheReason,
 )
+from rtp_llm.openai.openai_endpoint import OpenaiEndpoint
 from rtp_llm.openai.renderers.custom_renderer import CustomChatRenderer, RendererParams
+from rtp_llm.openai.renderers.kimi_k3_renderer import KimiK3Renderer
 from rtp_llm.utils.base_model_datatypes import AuxInfo, GenerateOutput, GenerateOutputs
 
 
 class _Tokenizer:
-    def __init__(self):
-        self.vocab = [chr(index) for index in range(128)]
+    """Small vocabulary with native-style, indivisible XTML control tokens."""
+
+    def __init__(self, extra_pieces=()):
+        self.vocab = [chr(index) for index in range(128)] + [
+            "<|open|>",
+            "<|close|>",
+            "<|sep|>",
+            "think",
+            "response",
+            "message",
+        ]
         self.vocab[0] = "<eos>"
+        self.vocab.extend(extra_pieces)
         self.ids = {text: index for index, text in enumerate(self.vocab)}
         self.pieces = sorted(self.ids, key=len, reverse=True)
 
@@ -34,16 +48,19 @@ class _Tokenizer:
     def decode(self, token_ids):
         return "".join(self.vocab[int(token)] for token in token_ids)
 
+    def apply_chat_template(self, _messages, *, thinking, **_kwargs):
+        return self.encode("prompt" + (THINK_OPEN if thinking else RESPONSE_OPEN))
+
 
 class FrontendStopBoundaryReproTest(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.tokenizer = _Tokenizer()
 
-    def _renderer(self):
-        return CustomChatRenderer(
+    def _renderer(self, renderer_type):
+        return renderer_type(
             self.tokenizer,
             RendererParams(
-                model_type="test",
+                model_type="kimi_k3" if renderer_type is KimiK3Renderer else "test",
                 max_seq_len=256,
                 eos_token_id=0,
                 stop_word_ids_list=[],
@@ -54,16 +71,18 @@ class FrontendStopBoundaryReproTest(unittest.IsolatedAsyncioTestCase):
 
     async def _render(
         self,
+        renderer_type,
         chunks,
         *,
         stop_ids=(),
         stop_strings=(),
         max_new_tokens=128,
+        stream=True,
     ):
-        renderer = self._renderer()
+        renderer = self._renderer(renderer_type)
         request = ChatCompletionRequest(
             messages=[ChatMessage(role="user", content="question")],
-            stream=True,
+            stream=stream,
             enable_thinking=False,
             stop=list(stop_strings),
         )
@@ -113,6 +132,7 @@ class FrontendStopBoundaryReproTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_id_only_stop_prefix_is_buffered(self):
         responses = await self._render(
+            CustomChatRenderer,
             ["A", "S", "T", "OP"],
             stop_ids=[self.tokenizer.encode("STOP")],
         )
@@ -121,6 +141,7 @@ class FrontendStopBoundaryReproTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_id_only_stop_in_one_frame_drops_stop_and_trailing_text(self):
         responses = await self._render(
+            CustomChatRenderer,
             ["ASTOPB"],
             stop_ids=[self.tokenizer.encode("STOP")],
         )
@@ -129,6 +150,7 @@ class FrontendStopBoundaryReproTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_failed_id_stop_prefix_is_released(self):
         responses = await self._render(
+            CustomChatRenderer,
             ["A", "S", "T", "X", "<eos>"],
             stop_ids=[self.tokenizer.encode("STOP")],
         )
@@ -137,12 +159,88 @@ class FrontendStopBoundaryReproTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_length_limit_releases_incomplete_id_stop_prefix(self):
         responses = await self._render(
+            CustomChatRenderer,
             ["A", "S", "T"],
             stop_ids=[self.tokenizer.encode("STOP")],
             max_new_tokens=3,
         )
         self.assertEqual(self._content(responses), "AST")
         self._assert_finished(responses, FinisheReason.length)
+
+    async def test_k3_string_stop_drops_trailing_text(self):
+        # A context-dependent token can contain the stop string and following
+        # text without containing its standalone stop-token ID sequence.
+        self.tokenizer = _Tokenizer(extra_pieces=["STOPB"])
+        for stream in (False, True):
+            with self.subTest(stream=stream):
+                responses = await self._render(
+                    KimiK3Renderer,
+                    ["ASTOPB"],
+                    stop_strings=["STOP"],
+                    stream=stream,
+                )
+                self.assertEqual(self._content(responses), "A")
+                self._assert_finished(responses, FinisheReason.stop)
+
+    async def test_k3_length_flush_reassembles_pending_xtml_before_emitting(self):
+        chunks = ["A<|close|>", "response<|sep|>ST"]
+        responses = await self._render(
+            KimiK3Renderer,
+            chunks,
+            stop_strings=["STOP"],
+            max_new_tokens=sum(len(self.tokenizer.encode(chunk)) for chunk in chunks),
+        )
+        # The stop-prefix buffer contains the rest of the response closure.
+        # Reassemble it before flushing; text after the closure is not content.
+        self.assertEqual(self._content(responses), "A")
+        self._assert_finished(responses, FinisheReason.length)
+
+
+class K3PartialPromptReproTest(unittest.TestCase):
+    def test_partial_prompt_grammar_continues_the_already_open_channel(self):
+        tokenizer = _Tokenizer()
+        compiler = xgr.GrammarCompiler(
+            xgr.TokenizerInfo(tokenizer.vocab, stop_token_ids=[0]), max_threads=1
+        )
+        for thinking in (False, True):
+            with self.subTest(thinking=thinking):
+                renderer = KimiK3Renderer(
+                    tokenizer,
+                    RendererParams("kimi_k3", 256, 0, []),
+                    GenerateEnvConfig(),
+                    vit_config=VitConfig(),
+                )
+                endpoint = OpenaiEndpoint.__new__(OpenaiEndpoint)
+                endpoint.chat_renderer = renderer
+                endpoint.template_renderer = renderer
+                endpoint.tokenizer = tokenizer
+                endpoint.model_type = "kimi_k3"
+                request = ChatCompletionRequest(
+                    messages=[
+                        ChatMessage(role="user", content="question"),
+                        ChatMessage(
+                            role="assistant", content="prefilled ", partial=True
+                        ),
+                    ],
+                    enable_thinking=thinking,
+                )
+                rendered = endpoint.render_chat(request)
+                config = GenerateConfig(
+                    max_new_tokens=32,
+                    in_think_mode=thinking,
+                    thinking_mode=(
+                        ThinkingMode.ENABLED if thinking else ThinkingMode.DISABLED
+                    ),
+                    max_thinking_tokens=16 if thinking else 0,
+                )
+                plan = renderer.build_chat_completion_response_format_plan(
+                    request, config, rendered.input_ids
+                )
+                plan.apply_to_config(config)
+                matcher = xgr.GrammarMatcher(
+                    compiler.compile_structural_tag(config.structural_tag)
+                )
+                self.assertTrue(matcher.accept_token(tokenizer.ids["n"]))
 
 
 if __name__ == "__main__":

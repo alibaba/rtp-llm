@@ -376,7 +376,7 @@ TEST_F(KVCacheManagerCPSlotMapperTest, WeightedPoolAdmissionCountsCpBeamTailCopi
     for (const int rank : {0, 1}) {
         for (const int seq_len : {5, 8}) {
             SCOPED_TRACE(::testing::Message() << "rank=" << rank << " seq_len=" << seq_len);
-            auto config               = makeTestConfig(/*block_num=*/20, block_size);
+            auto config               = makeTestConfig(/*block_num=*/20, block_size, /*local_sharding=*/true);
             config.pool_block_weights = {{"default", 2}};
             config.finalizeBlockNums(20, RuntimeConfig{});
             ParallelismConfig par;

@@ -17,6 +17,10 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
+#include <limits>
+#include <numeric>
+#include <stdexcept>
 #include <type_traits>
 
 namespace rtp_llm {
@@ -40,6 +44,28 @@ auto constexpr ceilDiv(T numerator, U denominator) {
 
 inline size_t pad(const size_t& input, const size_t& alignment) {
     return alignment * ((input + alignment - 1) / alignment);
+}
+
+// Keep complete Q-token request rows while making their total divisible by SP.
+inline size_t padSequenceParallelRequests(size_t requests, size_t query_width, size_t sequence_parallel_size) {
+    return pad(requests, sequence_parallel_size / std::gcd(sequence_parallel_size, query_width));
+}
+
+inline int mtpDraftPrefillRequestCapacity(
+    int token_capacity, int max_requests, int query_width, int sequence_parallel_size) {
+    if (token_capacity <= 0 || max_requests <= 0 || query_width <= 0 || sequence_parallel_size <= 0) {
+        throw std::invalid_argument("MTP draft prefill capacities, query width and SP size must be positive");
+    }
+    // Every MTP draft update retains Q physical tokens per request.
+    const int64_t requests = ceilDiv(static_cast<int64_t>(token_capacity), query_width);
+    const int64_t rounded  = padSequenceParallelRequests(requests, query_width, sequence_parallel_size);
+    if (rounded > std::numeric_limits<int>::max() || rounded * query_width > std::numeric_limits<int>::max()) {
+        throw std::overflow_error("MTP draft prefill rectangular capacity exceeds int range");
+    }
+    if (rounded > max_requests) {
+        throw std::invalid_argument("MTP draft prefill bucket exceeds request capacity");
+    }
+    return static_cast<int>(rounded);
 }
 
 inline size_t pad_to_multiple_of_16(const size_t& input) {

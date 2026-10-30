@@ -20,7 +20,8 @@ public:
                            const ParallelismConfig&               parallelism_config,
                            const std::shared_ptr<KVCacheManager>& cache_manager,
                            const kmonitor::MetricsReporterPtr     metrics_reporter = nullptr,
-                           const int                              max_score_len    = 1);
+                           const int                              max_score_len    = 1,
+                           const ModelExecutionCapacity&          execution_capacity = ModelExecutionCapacity{});
 
     ~FIFOScheduler() override;
 
@@ -51,38 +52,11 @@ private:
         GROUP,
     };
 
-    // Per-round admission accounting for admitWaitingStreams(). Only streams that actually
-    // made scheduling progress contribute, so a stream whose KV malloc failed and stayed
-    // WAITING does not consume this round's token budget.
-    struct ScheduleRuntime {
-        size_t admitted_stream_count                     = 0;
-        size_t admitted_prefill_token_size_with_cache    = 0;
-        size_t admitted_prefill_max_seq_len_with_cache   = 0;
-        size_t admitted_prefill_sequence_count           = 0;
-        size_t admitted_prefill_token_size_without_cache = 0;
-        size_t newly_inited_kv_streams                   = 0;
-    };
-
     const char* schedulerName() const override {
         return "FIFOScheduler";
     }
-    bool evaluateRunningMemory(const std::list<GenerateStreamPtr>& streams,
-                               const GenerateStreamPtr&            new_stream) override;
-    // Counter-based admission check used by admitWaitingStreams(). evaluateRunningMemory()
-    // is the list-based FIFOSchedulerBase entry point and delegates here.
-    bool   evaluateRunningBatch(const ScheduleRuntime& schedule_runtime, const GenerateStreamPtr& new_stream) const;
-    // Overload for group-queue admission: the admitted streams are tracked as a list
-    // because ScheduleRuntime is not built in the group-queue path.
-    bool   evaluateRunningBatch(const std::list<GenerateStreamPtr>& streams, const GenerateStreamPtr& new_stream) const;
-    bool   fitsPrefillTokenLimits(size_t                   admitted_stream_count,
-                                  size_t                   admitted_tokens,
-                                  size_t                   admitted_tokens_without_cache,
-                                  size_t                   admitted_max_seq_len,
-                                  size_t                   admitted_sequence_count,
-                                  const GenerateStreamPtr& candidate) const;
-    size_t prefillTokenCostWithoutCache(const GenerateStreamPtr& stream) const;
-    size_t prefillSeqLenWithCache(const GenerateStreamPtr& stream) const;
-    size_t prefillTokenCostWithCache(const GenerateStreamPtr& stream) const;
+    bool   evaluateRunningMemory(const ScheduleRuntime& runtime, const GenerateStreamPtr& new_stream) override;
+    bool   fitsPrefillTokenLimits(const ScheduleRuntime& runtime, const GenerateStreamPtr& candidate) const;
     // Group-aware shadow of FIFOSchedulerBase::countInitedKVCacheStreams(): streams parked
     // in the group queues also hold inited KV blocks and must count against the limit.
     size_t countInitedKVCacheStreams() const;
@@ -113,6 +87,7 @@ private:
     void    fillExtraMetrics(RtpLLMSchedulerMetricsCollector& collector) const override;
     void    appendExtraRunningTaskList(std::vector<EngineScheduleInfo::TaskInfo>& task_list) const override;
     bool    partitionChunkContinuations();
+    void    appendExtraExecutionReservations(std::vector<GenerateStreamPtr>& streams) const override;
 
     // Explicit request groups (enqueueGroup). Each group is admitted as a whole
     // to an isolated execution boundary; a partially admitted group keeps its

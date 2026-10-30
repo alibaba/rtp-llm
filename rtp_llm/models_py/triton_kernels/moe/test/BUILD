@@ -145,6 +145,16 @@ cuda13_sm100_py_test(
     deps = ["//rtp_llm/models_py/triton_kernels:moe"],
 )
 
+cuda13_sm100_py_test(
+    name = "test_mega_moe_output_add_index_width",
+    srcs = ["test_mega_moe_output_add_index_width.py"],
+    deps = [
+        ":torch",
+        ":triton",
+        "//rtp_llm/models_py/triton_kernels:moe",
+    ],
+)
+
 models_py_test(
     name = "qwen4_topk_test",
     src = "qwen4_topk_test.py",

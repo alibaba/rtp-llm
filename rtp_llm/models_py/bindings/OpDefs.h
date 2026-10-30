@@ -312,6 +312,8 @@ struct PyAttentionInputs {
 
     std::optional<PyPrefillCudaGaphCopyParams> prefill_cuda_graph_copy_params;
     bool                                       is_s_padded = false;
+    // Warmup/fake inputs may alias reserved block zero; graph padding alone may not.
+    bool is_warmup = false;
     // Device-side mirrors of host tensors, managed by C++ for fused D2D copy in CUDA graph.
     torch::Tensor prefix_lengths_device;
     torch::Tensor sequence_lengths_plus_1_device;
@@ -319,6 +321,12 @@ struct PyAttentionInputs {
     torch::Tensor decode_cu_seqlens_device;
 
     // CUDA Graph mode flags
+    bool is_mtp_draft_update = false;
+    int64_t logical_request_count = 0;
+    int64_t physical_request_count = 0;
+    int64_t logical_token_count = 0;
+    int64_t physical_token_count = 0;
+    torch::Tensor valid_token_mask;
     bool is_cuda_graph = false;  // True when running in CUDA graph mode (capture or replay)
 
     std::optional<PyContextParallelParams> context_parallel_info;

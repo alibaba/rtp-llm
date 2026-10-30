@@ -9,6 +9,7 @@ from .chatglm4v.chatglm4v_mixin import ChatGlmV4VisionMixin
 from .deepseek_v41.deepseek_v41_mixin import DeepSeekV41Mixin
 from .deepseek_vl2.deepseek_vl2_mixin import DeepSeekVLV2Mixin
 from .kimi_k25.kimi_k25_mixin import KimiK25Mixin
+from .kimi_k3.kimi_k3_mixin import KimiK3Mixin
 from .llava.llava_mixin import LlavaMixin
 from .qwen2_5_vl.qwen2_5_vl_mixin import Qwen2_5_VLMixin
 from .qwen2_audio.qwen2_audio_mixin import Qwen2_AudioMixin

@@ -21,7 +21,8 @@ public:
                                     const ParallelismConfig&               parallelism_config,
                                     const std::shared_ptr<KVCacheManager>& cache_manager,
                                     const kmonitor::MetricsReporterPtr     metrics_reporter = nullptr,
-                                    const int                              max_score_len    = 1);
+                                    const int                              max_score_len    = 1,
+                                    const ModelExecutionCapacity& execution_capacity        = ModelExecutionCapacity{});
 
     ~PDFusionRatioScheduler() override;
 
@@ -42,14 +43,14 @@ private:
     const char* schedulerName() const override {
         return "PDFusionRatioScheduler";
     }
-    bool      evaluateRunningMemory(const std::list<GenerateStreamPtr>& streams,
-                                    const GenerateStreamPtr&            new_stream) override;
+    bool      evaluateRunningMemory(const ScheduleRuntime& runtime, const GenerateStreamPtr& new_stream) override;
     bool      waitPredicate() override;
     void      cancelExtraStreams() override;
     int64_t   extraOnflightStreams() const override;
     void      fillExtraMetrics(RtpLLMSchedulerMetricsCollector& collector) const override;
     void      appendExtraRunningTaskList(std::vector<EngineScheduleInfo::TaskInfo>& task_list) const override;
     bool      classifyActivePrefillBatch();
+    void      appendExtraExecutionReservations(std::vector<GenerateStreamPtr>& streams) const override;
     bool      promotePendingDecodeStreams();
     RoundType chooseRound();
     bool      tryAdmitKVForPrefill(const GenerateStreamPtr& new_stream);

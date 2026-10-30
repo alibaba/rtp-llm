@@ -164,6 +164,13 @@ struct LinearKVCacheSpec: public KVCacheSpec {
         return tp_transfer.mode == TpCacheTransferMode::LINEAR_QKV;
     }
 
+    DataType ssmStateDType() const {
+        return ssm_state_dtype;
+    }
+    DataType convStateDType() const {
+        return conv_state_dtype;
+    }
+
     rtp_llm::DataType memoryLayoutDType() const override {
         return memory_layout_dtype_;
     }

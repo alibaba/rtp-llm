@@ -100,6 +100,7 @@ class JitCacheTestBase(unittest.TestCase):
         for name in (*(item.env_name for item in jit.COMPONENTS), *COMPILE_FLAG_ENVS):
             os.environ.pop(name, None)
         os.environ.pop("REMOTE_JIT_DIR", None)
+        os.environ.pop("MODEL_TYPE", None)
         os.environ.pop(cache_env._AUTOMATIC_CACHE_ENVS, None)
         jit.setup_jit_cache_env.cache_clear()  # memoized: every test starts cold
         self.addCleanup(jit.setup_jit_cache_env.cache_clear)
@@ -120,7 +121,158 @@ class JitCacheTestBase(unittest.TestCase):
         return snap_store.publish_snapshot(generation)
 
 
+class CuTeScopeTest(unittest.TestCase):
+    def test_scope_is_model_independent_and_needs_no_kernel_sources(self):
+        component = next(item for item in jit.COMPONENTS if item.name == "cute_dsl")
+        versions = {"nvidia-cutlass-dsl": "4.4.2", "apache-tvm-ffi": "0.1.12"}
+        for model_type in ("kimi_k3", "kimi_k3_mtp", "qwen3_next", ""):
+            with (
+                self.subTest(model_type=model_type),
+                mock.patch.dict(os.environ, {"MODEL_TYPE": model_type}),
+                mock.patch.object(
+                    jit.importlib.metadata, "version", side_effect=versions.__getitem__
+                ),
+                mock.patch.object(
+                    Path,
+                    "read_bytes",
+                    side_effect=AssertionError(
+                        "cache scope must not read kernel sources"
+                    ),
+                ),
+            ):
+                self.assertEqual(
+                    jit._component_scope_parts(component, {"accelerator": "sm103"}),
+                    ("sm103", "4.4.2", "ffi-0.1.12"),
+                )
+
+    def test_scope_tracks_compiler_and_ffi_versions(self):
+        component = next(item for item in jit.COMPONENTS if item.name == "cute_dsl")
+        scopes = {"accelerator": "sm103"}
+        versions = {"nvidia-cutlass-dsl": "4.4.2", "apache-tvm-ffi": "0.1.12"}
+        with mock.patch.object(
+            jit.importlib.metadata, "version", side_effect=versions.__getitem__
+        ):
+            first = jit._component_scope_parts(component, scopes)
+            versions["nvidia-cutlass-dsl"] = "4.5.3"
+            self.assertNotEqual(first, jit._component_scope_parts(component, scopes))
+            versions["nvidia-cutlass-dsl"] = "4.4.2"
+            versions["apache-tvm-ffi"] = "0.1.13"
+            self.assertNotEqual(first, jit._component_scope_parts(component, scopes))
+
+    def test_cute_scope_allows_ffi_to_be_absent(self):
+        component = next(item for item in jit.COMPONENTS if item.name == "cute_dsl")
+
+        def version(name):
+            if name == "apache-tvm-ffi":
+                raise jit.importlib.metadata.PackageNotFoundError(name)
+            return "4.4.2"
+
+        with mock.patch.object(jit.importlib.metadata, "version", side_effect=version):
+            self.assertEqual(
+                jit._component_scope_parts(component, {"accelerator": "sm103"}),
+                ("sm103", "4.4.2", "ffi-absent"),
+            )
+
+
 class WrapperCacheSetupTest(JitCacheTestBase):
+
+    def test_default_cubin_headers_survive_runfiles_removal(self):
+        runfiles = self.root / "action.runfiles"
+        source = runfiles / "pip_cuda13_flashinfer_cubin/site-packages/flashinfer_cubin"
+        source.mkdir(parents=True)
+        (source / "__init__.py").write_text("# cubin provider\n")
+        payload = runfiles / "flashInferMetaInfo.h"
+        payload.write_text("#define META_INFO 1\n")
+        header = source / "cubins/fmha/include/flashInferMetaInfo.h"
+        header.parent.mkdir(parents=True)
+        header.symlink_to(payload)
+
+        def info(name):
+            return (
+                ("0.6.9", str(source)) if name == "flashinfer_cubin" else (None, None)
+            )
+
+        with mock.patch.object(
+            wrapper_cache, "get_package_info", side_effect=info
+        ), mock.patch.object(wrapper_cache.Path, "home", return_value=self.root):
+            wrapper_cache.setup_jit_cache(cache_dir=self.root / "packages")
+        staged = Path(os.environ["_JIT_CACHE_PATHS"]) / "flashinfer_cubin"
+        shutil.rmtree(runfiles)
+        self.assertEqual(
+            (staged / "cubins/fmha/include/flashInferMetaInfo.h").read_text(),
+            "#define META_INFO 1\n",
+        )
+        self.assertNotIn(".runfiles", str(staged))
+
+    def test_same_version_flashinfer_patch_replaces_cached_python_payload(self):
+        source = self.root / "pip_cuda13_flashinfer/site-packages/flashinfer"
+        source.mkdir(parents=True)
+        module = source / "kernel.py"
+        module.write_text("allocate = cute.make_fragment\n")
+        with mock.patch.object(
+            wrapper_cache, "get_package_info", return_value=("0.6.9", str(source))
+        ):
+            first = Path(wrapper_cache.copy_package_with_lock("flashinfer", self.root))
+            module.write_text("allocate = cute.make_rmem_tensor\n")
+            second = Path(wrapper_cache.copy_package_with_lock("flashinfer", self.root))
+        self.assertNotEqual(first, second)
+        self.assertIn(
+            "cute.make_fragment", (first / "flashinfer/kernel.py").read_text()
+        )
+        self.assertIn(
+            "cute.make_rmem_tensor", (second / "flashinfer/kernel.py").read_text()
+        )
+
+    def test_flashinfer_payload_key_is_independent_of_runfiles_location(self):
+        keys = []
+        for root in ("first", "second"):
+            source = self.root / root / "pip_cuda13_flashinfer/site-packages/flashinfer"
+            source.mkdir(parents=True)
+            (source / "kernel.py").write_text("same_payload = True\n")
+            keys.append(wrapper_cache._cache_key("flashinfer", "0.6.9", source))
+        self.assertEqual(keys[0], keys[1])
+
+    def test_flashinfer_workspace_separates_ffi_abis_and_retains_old_cache(self):
+        versions = {"torch": "2.11.0+cu130", "tvm_ffi": "0.1.13"}
+
+        def info(name):
+            return (
+                versions[name],
+                f"/runfiles/pip_gpu_cuda13_torch_{name}/site-packages/{name}",
+            )
+
+        with mock.patch.object(
+            wrapper_cache, "get_package_info", side_effect=info
+        ), mock.patch.object(wrapper_cache.Path, "home", return_value=self.root):
+            wrapper_cache.setup_jit_cache(packages=[])
+            old = Path(os.environ.pop("FLASHINFER_WORKSPACE_BASE"))
+            cached_op = old / ".cache/flashinfer/op.so"
+            cached_op.write_bytes(b"FFI 0.1.13 native op")
+            versions["tvm_ffi"] = "0.1.12"
+            wrapper_cache.setup_jit_cache(packages=[])
+            current = Path(os.environ["FLASHINFER_WORKSPACE_BASE"])
+        self.assertNotEqual(old, current)
+        self.assertEqual(cached_op.read_bytes(), b"FFI 0.1.13 native op")
+        self.assertFalse((current / ".cache/flashinfer/op.so").exists())
+
+    def test_flashinfer_workspace_reuses_relocated_runfiles_build(self):
+        with mock.patch.object(wrapper_cache, "get_package_info") as info:
+            info.side_effect = lambda name: (
+                "1.0",
+                f"/first/pip_cuda13_{name}/site-packages/{name}",
+            )
+            original = wrapper_cache._flashinfer_cache_scope()
+            info.side_effect = lambda name: (
+                "1.0",
+                f"/second/pip_cuda13_{name}/site-packages/{name}",
+            )
+            self.assertEqual(original, wrapper_cache._flashinfer_cache_scope())
+            info.side_effect = lambda name: (
+                "1.0",
+                f"/second/pip_arm_{name}/site-packages/{name}",
+            )
+            self.assertNotEqual(original, wrapper_cache._flashinfer_cache_scope())
+
     def test_local_fallback_does_not_use_remote_snapshot_root(self):
         os.environ["REMOTE_JIT_DIR"] = str(self.root / "remote")
         self.assertEqual(
@@ -691,6 +843,33 @@ class StoreTest(JitCacheTestBase):
 
 @requires_shared_acl
 class ScopeTest(JitCacheTestBase):
+
+    def test_flashinfer_snapshots_track_the_cubin_provider(self):
+        versions = {"flashinfer-cubin": "0.6.9"}
+        with _fake_probes(pkg=lambda name: versions.get(name, "1.0")):
+            first = jit.resolve_scope(self.root)
+            versions["flashinfer-cubin"] = "0.6.10"
+            second = jit.resolve_scope(self.root)
+        self.assertNotEqual(first.scope_id, second.scope_id)
+
+    def test_native_consumers_track_ffi_with_ffi_cache_opted_out(self):
+        os.environ["TVM_FFI_CACHE_DIR"] = str(self.root / "explicit-ffi")
+        versions = {"apache-tvm-ffi": "0.1.13"}
+
+        def version(name):
+            return versions.get(name, "1.0")
+
+        with _fake_probes(pkg=version):
+            first = jit.resolve_scope(self.root)
+            versions["apache-tvm-ffi"] = "0.1.12"
+            second = jit.resolve_scope(self.root)
+        self.assertNotEqual(first.scope_id, second.scope_id)
+        self.assertNotIn("tvm_ffi", {item.name for item in first.components})
+        self.assertLessEqual(
+            {"flashinfer", "tilelang", "cute_dsl"},
+            {item.name for item in second.components},
+        )
+
     def resolve(self, root=None, **overrides):
         with _fake_probes(**overrides):
             scope = jit.resolve_scope(root or self.root)

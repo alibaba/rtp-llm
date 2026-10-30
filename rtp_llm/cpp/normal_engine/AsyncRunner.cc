@@ -48,13 +48,17 @@ AsyncRunner::~AsyncRunner() {
 }
 
 void AsyncRunner::launch(std::function<void()> fn) {
+    launch("unnamed task", std::move(fn));
+}
+
+void AsyncRunner::launch(std::string task_name, std::function<void()> fn) {
     RTP_LLM_PROFILE_SCOPE("async_runner.launch");
     at::ThreadLocalState tls_state;
     {
         std::unique_lock<std::mutex> lk(mutex_);
         cv_done_.wait(lk, [this] { return task_done_; });
         rethrowPendingExceptionIfAny(lk);
-        pending_task_ = Task{std::move(fn), std::move(tls_state)};
+        pending_task_ = Task{std::move(fn), std::move(tls_state), std::move(task_name)};
         task_done_    = false;
     }
     cv_task_.notify_one();
@@ -111,7 +115,7 @@ void AsyncRunner::workerLoop() {
             // Log even when exit cleanup drains the task without a sync().
             // Keep the original exception for launch()/sync() to rethrow.
             if (exception) {
-                logAsyncFailure("task", exception);
+                logAsyncFailure(task.name.c_str(), exception);
             }
             pending_exception_ = exception;
             task_done_         = true;

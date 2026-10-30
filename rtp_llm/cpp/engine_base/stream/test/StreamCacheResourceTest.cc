@@ -843,16 +843,16 @@ TEST_F(StreamCacheResourceTest, LinearHistoryAsyncReservationJoinsOnlyAtPhysical
         // Missing publication must not silently allocate against an unknown
         // committed watermark. The stale-block-table guard applies with or
         // without the reclaim forecast policy.
-        EXPECT_TRUE(stream_->needsAsyncBookkeepingJoinForKvReservation());
+        EXPECT_FALSE(stream_->prepareMtpCacheForNextStep());
         GenerateStream::NormalAsyncDeviceState state;
         state.next_real_seq_len = 14;
         stream_->setNormalAsyncDeviceState(state);
         EXPECT_EQ(resource.singleBatchNeedBlocks(14, 0), 0);
-        EXPECT_FALSE(stream_->needsAsyncBookkeepingJoinForKvReservation());
+        EXPECT_TRUE(stream_->prepareMtpCacheForNextStep());
         state.next_real_seq_len = 15;
         stream_->setNormalAsyncDeviceState(state);
         EXPECT_GT(resource.singleBatchNeedBlocks(15, 0), 0);
-        EXPECT_EQ(stream_->needsAsyncBookkeepingJoinForKvReservation(), enabled);
+        EXPECT_EQ(stream_->prepareMtpCacheForNextStep(), !enabled);
         stream_->decPendingAsyncBookkeepingAndMaybeRelease();
     }
 }
@@ -870,12 +870,12 @@ TEST_F(StreamCacheResourceTest, LinearHistoryAsyncReservationKeepsBaseJoinGuardW
         commitLinearHistoryToken();
         ASSERT_TRUE(stream_->streamCacheResource().incrKVBlock().ok());
         stream_->incPendingAsyncBookkeeping();
-        EXPECT_TRUE(stream_->needsAsyncBookkeepingJoinForKvReservation());
+        EXPECT_FALSE(stream_->prepareMtpCacheForNextStep());
         GenerateStream::NormalAsyncDeviceState state;
         state.next_real_seq_len = 14;
         stream_->setNormalAsyncDeviceState(state);
         // Once published, the base policy allocates from the published length.
-        EXPECT_FALSE(stream_->needsAsyncBookkeepingJoinForKvReservation());
+        EXPECT_TRUE(stream_->prepareMtpCacheForNextStep());
         stream_->decPendingAsyncBookkeepingAndMaybeRelease();
     }
 }
@@ -1248,50 +1248,96 @@ TEST_F(StreamCacheResourceTest, testStreamCacheResourceReuseCacheMethod) {
 
 TEST_F(StreamCacheResourceTest, testPrefillOnlyDisablesPrefixAndDeviceCacheReuseForAllocation) {
     for (const bool ignore_request_switches : {false, true}) {
-        SCOPED_TRACE(ignore_request_switches);
-        prepareResource(/*reuse_cache=*/true);
-        auto& resource = stream_->streamCacheResource();
+        for (const int chunk_size : {0, 4}) {
+            SCOPED_TRACE(testing::Message() << "ignore_request_switches=" << ignore_request_switches
+                                           << ", chunk_size=" << chunk_size);
+            prepareResource(/*reuse_cache=*/true);
+            auto& resource = stream_->streamCacheResource();
+            stream_->setChunkSize(chunk_size);
 
-        stream_->generateConfig()->max_new_tokens                = 0;
-        stream_->generateConfig()->num_return_sequences          = 1;
-        stream_->generateConfig()->reuse_cache                   = true;
-        resource.resource_context_.ignore_request_cache_switches = ignore_request_switches;
-        resource.resource_context_.enable_device_cache           = true;
-        resource.resource_context_.enable_memory_cache           = true;
-        resource.resource_context_.enable_disk_cache             = true;
-        resource.resource_context_.enable_remote_cache           = true;
+            stream_->generateConfig()->max_new_tokens                = 0;
+            stream_->generateConfig()->num_return_sequences          = 1;
+            stream_->generateConfig()->reuse_cache                   = true;
+            resource.resource_context_.ignore_request_cache_switches = ignore_request_switches;
+            resource.resource_context_.enable_device_cache           = true;
+            resource.resource_context_.enable_memory_cache           = true;
+            resource.resource_context_.enable_disk_cache             = true;
+            resource.resource_context_.enable_remote_cache           = true;
 
-        const auto real_allocator = cache_manager_->coordinator_manager_;
-        auto allocator = std::make_shared<testing::NiceMock<MockCoordinatorCacheManager>>(cache_manager_->config_);
-        cache_manager_->coordinator_manager_ = allocator;
-        EXPECT_CALL(*allocator, initMallocForCommonLen(testing::_))
-            .WillOnce(testing::Invoke([real_allocator](const MallocInfo& info) {
-                EXPECT_FALSE(info.reuse_cache);
-                EXPECT_FALSE(info.enable_cache_lookup);
-                return real_allocator->initMallocForCommonLen(info);
-            }));
-        EXPECT_CALL(*allocator, incrMalloc(testing::_))
-            .Times(2)
-            .WillRepeatedly(testing::Invoke([real_allocator](const MallocInfo& info) {
-                EXPECT_FALSE(info.reuse_cache);
-                EXPECT_FALSE(info.enable_cache_lookup);
-                return real_allocator->incrMalloc(info);
-            }));
+            const auto real_allocator = cache_manager_->coordinator_manager_;
+            auto allocator = std::make_shared<testing::NiceMock<MockCoordinatorCacheManager>>(cache_manager_->config_);
+            cache_manager_->coordinator_manager_ = allocator;
+            EXPECT_CALL(*allocator, initMallocForCommonLen(testing::_))
+                .WillOnce(testing::Invoke([real_allocator](const MallocInfo& info) {
+                    EXPECT_FALSE(info.reuse_cache);
+                    EXPECT_FALSE(info.enable_cache_lookup);
+                    return real_allocator->initMallocForCommonLen(info);
+                }));
+            EXPECT_CALL(*allocator, incrMalloc(testing::_))
+                .Times(2)
+                .WillRepeatedly(testing::Invoke([real_allocator](const MallocInfo& info) {
+                    EXPECT_FALSE(info.reuse_cache);
+                    EXPECT_FALSE(info.enable_cache_lookup);
+                    return real_allocator->incrMalloc(info);
+                }));
 
-        const auto init_status = resource.initKVBlock();
-        EXPECT_TRUE(init_status.ok()) << init_status;
-        EXPECT_GT(resource.curBlocksNum(), 0);
-        EXPECT_TRUE(resource.incrKVBlock().ok());
-        EXPECT_FALSE(resource.asyncLoadCache());
-        EXPECT_TRUE(resource.waitForAllocatorLoad().ok());
-        EXPECT_EQ(resource.allocator_load_context_, nullptr);
-        EXPECT_EQ(stream_->reuseLength(), 0);
-        EXPECT_EQ(resource.insertTarget(), Tier::NONE);
-        EXPECT_TRUE(stream_->generateConfig()->reuse_cache);
-        cache_manager_->coordinator_manager_ = real_allocator;
-        stream_->releaseResource();
-        EXPECT_EQ(cache_manager_->freeBlocksNum(), 8u);
+            const auto init_status = resource.initKVBlock();
+            EXPECT_TRUE(init_status.ok()) << init_status;
+            EXPECT_GT(resource.curBlocksNum(), 0);
+            EXPECT_TRUE(resource.incrKVBlock().ok());
+            EXPECT_FALSE(resource.asyncLoadCache());
+            EXPECT_TRUE(resource.waitForAllocatorLoad().ok());
+            EXPECT_EQ(resource.allocator_load_context_, nullptr);
+            EXPECT_EQ(stream_->reuseLength(), 0);
+            EXPECT_EQ(resource.insertTarget(), Tier::NONE);
+            EXPECT_TRUE(stream_->generateConfig()->reuse_cache);
+            cache_manager_->coordinator_manager_ = real_allocator;
+            stream_->releaseResource();
+            EXPECT_EQ(cache_manager_->freeBlocksNum(), 8u);
+        }
     }
+}
+
+TEST_F(StreamCacheResourceTest, ReviewRegressionWarmupLinearUsesSeparateStateSlots) {
+    auto config = test::makeSimpleHybridMhaCacheConfig(4, 8, 2, DataType::TYPE_FP16, 2);
+    prepareResourceWithCacheConfig(config, {1, 2, 3, 4, 5, 6, 7, 8}, false, RoleType::PREFILL);
+    auto& resource = stream_->streamCacheResource();
+    stream_->setIsFakeStream(true);
+    stream_->enableWarmupChunkWindow();
+    stream_->setChunkSize(4);
+    resource.fakeInitKVBlock(4);
+    std::vector<int32_t> first(4), second(4), other_row(4);
+    ASSERT_TRUE(resource.copyChunkKernelBlocks(0, "linear", first.data()));
+    ASSERT_TRUE(resource.copyChunkKernelBlocks(1, "linear", other_row.data()));
+    EXPECT_EQ(first, (std::vector<int32_t>{-1, 2, -1, -1}));
+    EXPECT_EQ(other_row, (std::vector<int32_t>{-1, 4, -1, -1}));
+    stream_->advanceChunk();
+    ASSERT_TRUE(resource.copyChunkKernelBlocks(0, "linear", second.data()));
+    EXPECT_EQ(second, (std::vector<int32_t>{-1, 2, -1, 1}));
+    EXPECT_NE(second[1], second[3]);
+    EXPECT_FALSE(resource.copyChunkKernelBlocks(0, "full1", first.data()));
+}
+
+TEST_F(StreamCacheResourceTest, testLateChunkEnableKeepsFullPromptLinearMapping) {
+    prepareHybridResource(/*reuse_cache=*/false);
+    auto& resource = stream_->streamCacheResource();
+    ASSERT_FALSE(stream_->chunkedPrefillEnabled());
+    ASSERT_TRUE(resource.initKVBlock().ok());
+    const auto ordinary = resource.kvCache().kernelBlocks(0, "linear");
+    ASSERT_EQ(ordinary.size(), 3u);
+    EXPECT_EQ(ordinary[0], NULL_BLOCK_IDX);
+    EXPECT_EQ(ordinary[1], NULL_BLOCK_IDX);
+    ASSERT_GT(ordinary[2], 0);
+
+    // Scheduling can enable chunking after allocation for a prompt that fits in one round.
+    stream_->setChunkSize(stream_->seqLength());
+    ASSERT_TRUE(stream_->useChunkWindow());
+    ASSERT_EQ(stream_->prefixLength(), 0);
+    ASSERT_FALSE(stream_->isMiddleChunk());
+    auto table = ordinary;
+    EXPECT_FALSE(resource.copyChunkKernelBlocks(0, "linear", table.data()));
+    EXPECT_EQ(table, ordinary);
+    EXPECT_EQ(resource.kvCache().kernelBlocks(0, "linear"), ordinary);
 }
 
 TEST_F(StreamCacheResourceTest, testReuseCacheIgnoresPerRequestSwitchWhenConfigured) {
@@ -2419,6 +2465,56 @@ TEST_F(StreamCacheResourceTest, testPrefillAllocatorLoadFailureKeepsDeviceReadyR
     EXPECT_EQ(stream_->hostReuseLength(), 0);
     EXPECT_EQ(stream_->diskReuseLength(), 0);
     EXPECT_FALSE(stream_->hasError());
+}
+
+TEST_F(StreamCacheResourceTest, ChunkedPrefillLoadFailureRejectsOnlyForLinearSuffixHole) {
+    auto config                    = test::makeSimpleHybridMhaCacheConfig(4, 16, 2, DataType::TYPE_FP16);
+    config.reuse_cache_tail_blocks = 6;
+    // The ready prefix ends at slot 1. Slot 0 can be sparse, but slot 2 is the next checkpoint.
+    for (const size_t pos : {0u, 2u}) {
+        SCOPED_TRACE(pos);
+        prepareResourceWithCacheConfig(config, {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12}, true, RoleType::PREFILL);
+        auto& resource = stream_->streamCacheResource();
+        stream_->setChunkSize(2);
+        ASSERT_TRUE(resource.initKVBlock().ok());
+        auto&       batch = resource.kvCacheMutable();
+        const auto& pool =
+            cache_manager_->coordinator_manager_->groupBlockPools()[config.topology().groupIdForTag("linear")];
+        for (int row = 0; row < batch.batchSize(); ++row) {
+            auto& ids = batch.mutableBlockIds(row, "linear");
+            ASSERT_EQ(ids.blocks().size(), 6u);
+            const auto block = ids.blocks()[pos];
+            ASSERT_GT(block, 0);
+            ids.setAt(pos, NULL_BLOCK_IDX);
+            pool->decRef(block);
+        }
+        const auto original = batch.blocks(0, "linear");
+
+        auto context = makeAllocatorLoadContext(4, {Tier::DEVICE, Tier::DEVICE, Tier::HOST, Tier::HOST}, false);
+        context->setLocalMatchLengths(2, 4);
+        ASSERT_TRUE(context->commit());
+        ASSERT_TRUE(context->completeTransfers(2, false, Tier::HOST));
+        resource.allocator_load_context_ = context;
+        stream_->reportEvent(StreamEvents::CanRun);
+        stream_->reportEvent(StreamEvents::LoadInitiated);
+        stream_->generate_status_->status = StreamState::LOADING_CACHE;
+
+        ASSERT_EQ(stream_->moveToNext(), StreamState::WAITING);
+        EXPECT_TRUE(resource.reuseCache());
+        EXPECT_TRUE(stream_->hasEvent(StreamEvents::LoadInitiated));
+        if (pos == 0) {
+            ASSERT_FALSE(stream_->hasError());
+            EXPECT_EQ(stream_->reuseLength(), 4);
+            EXPECT_EQ(batch.blocks(0, "linear"), original);
+            EXPECT_EQ(stream_->moveToNext(), StreamState::RUNNING);
+            stream_->releaseResource();
+        } else {
+            ASSERT_TRUE(stream_->hasError());
+            EXPECT_EQ(stream_->statusInfo().code(), ErrorCode::MALLOC_FAILED);
+            EXPECT_EQ(stream_->moveToNext(), StreamState::FINISHED);
+            EXPECT_EQ(resource.curBlocksNum(), 0);
+        }
+    }
 }
 
 TEST_F(StreamCacheResourceTest, testPrefillLoadTimeoutDetachesFrozenSuffixAndRecomputes) {

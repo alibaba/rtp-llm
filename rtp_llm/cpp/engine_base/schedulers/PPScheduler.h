@@ -42,7 +42,7 @@ private:
         return "PPScheduler";
     }
 
-    bool evaluateRunningMemory(const std::list<GenerateStreamPtr>& streams,
+    bool evaluateRunningMemory(const FIFOSchedulerBase::ScheduleRuntime& runtime,
                                const GenerateStreamPtr&            new_stream) override;
 
     bool waitPredicate() override;

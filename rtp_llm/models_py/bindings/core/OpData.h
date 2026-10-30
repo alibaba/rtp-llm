@@ -63,7 +63,7 @@ struct GptModelInputs {
     torch::Tensor prefix_lengths;     // [context_batch_size]
     // First token of this request's FULL cache-store write; zero on its first chunk.
     torch::Tensor cache_store_publish_start_tokens;  // [context_batch_size], optional
-    torch::Tensor sequence_lengths_plus_1;           // optional CUDA mirror for target-verify linear attention
+    torch::Tensor sequence_lengths_plus_1;  // optional CUDA mirror for target-verify linear attention
 
     torch::Tensor combo_tokens_type_ids;  // [cumulated_seq_len]
     torch::Tensor combo_position_ids;     // [cumulated_seq_len]
@@ -78,7 +78,10 @@ struct GptModelInputs {
     torch::Tensor kv_cache_block_id;
     torch::Tensor kv_cache_kernel_block_id;  // [group, batch, kernel_blocks], int32
 
-    std::vector<std::string> kv_cache_group_tags;      // Local payload row -> group identity; not transmitted by TP.
+    // Payload rows follow strictly increasing tag order, independent of local
+    // cache group IDs. Producers and MTP snapshots share this order; TP sends
+    // the numeric payload directly without transmitting tags or reordering rows.
+    std::vector<std::string> kv_cache_group_tags;
     torch::Tensor            kv_cache_group_types;     // [group_num], int32, Convention: 0 -> LINEAR, 1 -> FULL.
     torch::Tensor            kv_cache_update_mapping;  // [block_copy_num, 3]: payload row, src/dst physical block IDs
     torch::Tensor            kv_cache_copy_token_lengths;  // CPU int32 [copy count]; zero means full copy.
@@ -125,6 +128,9 @@ struct GptModelInputs {
     // So, the model has different inference logic for target verify and normal inference.
     // To select correct inference mode, we need to set this flag manually.
     bool is_target_verify = false;
+    bool    is_mtp_draft_update = false;
+    int64_t sp_logical_requests = 0;
+    int64_t sp_logical_tokens   = 0;
 
     /** Upstream stage activations; excluded from TP input synchronization. */
     std::map<std::string, torch::Tensor> pp_intermediates;

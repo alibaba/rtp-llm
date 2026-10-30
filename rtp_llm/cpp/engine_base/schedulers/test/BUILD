@@ -34,6 +34,41 @@ async_cache_test_deps = test_deps + [
 ]
 
 cc_test(
+    name = "scheduler_physical_capacity_integration_test",
+    srcs = ["SchedulerPhysicalCapacityIntegrationTest.cc"],
+    copts = copts() + ["-fno-access-control"],
+    deps = test_deps + [
+        "//rtp_llm/cpp/cache",
+        "//rtp_llm/cpp/normal_engine/test:mock_engine",
+        "//rtp_llm/models_py/bindings/core:tensor_holder",
+        "//rtp_llm/cpp/cache/test/mock:mock_allocator_lib",
+    ],
+    env = {"TEST_USING_DEVICE": "CUDA"},
+    exec_properties = {"gpu": "L20_CU13", "gpu_count": "1"},
+    tags = ["L20_CU13"],
+    timeout = "short",
+)
+
+cc_test(
+    name = "batch_decode_query_cp_integration_test",
+    srcs = ["BatchDecodeQueryCpIntegrationTest.cc"],
+    copts = copts() + ["-fno-access-control"],
+    deps = test_deps + [
+        "//rtp_llm/cpp/cache",
+        "//rtp_llm/cpp/cache/test:cache_config_test_utils",
+        "//rtp_llm/cpp/models:context_parallel",
+        "//rtp_llm/cpp/models:context_parallel_layout",
+        "//rtp_llm/cpp/normal_engine/test:mock_engine",
+        "//rtp_llm/models_py/bindings:op_defs",
+        "//rtp_llm/models_py/bindings/core:tensor_holder",
+    ],
+    env = {"TEST_USING_DEVICE": "CUDA"},
+    exec_properties = {"gpu": "L20_CU13", "gpu_count": "1"},
+    tags = ["L20_CU13"],
+    timeout = "short",
+)
+
+cc_test(
     name = "fifo_scheduler_test",
     srcs = [
         "FIFOSchedulerTest.cc",
