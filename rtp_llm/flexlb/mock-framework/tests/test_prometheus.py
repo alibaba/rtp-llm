@@ -107,8 +107,12 @@ def test_real_prometheus_ingestion_semantic_queries_and_recorded_gates(tmp_path,
                     [str(java), '-cp', classpath, 'org.flexlb.mock.engine.rtp.MetricsProbe', endpoints[n]['rpc'],
                      str(length), str(count), str(tmp_path / f'probe-{n}.json')], capture_output=True, text=True, timeout=10)
                 assert completed.returncode == 0, completed.stderr
-            await asyncio.to_thread(wait_until, lambda: (samples := query('sum(mock_engine_forward_tokens_total{job="mock",kind="output"})'))
+            await asyncio.to_thread(wait_until, lambda: (samples := query('sum(rtp_llm_forward_tokens_total{job="mock",kind="output"})'))
                                     and float(samples[0]['value'][1]) == 12)
+            native = query('rtp_llm_kv_cache_left_seq{job="mock"}')
+            assert len(native) == 2 and all(float(row['value'][1]) >= 0 for row in native)
+            assert len(query('rtp_llm_wait_stream_size{job="mock"}')) == 2
+            assert query('mock_engine_requests_started_total{job="mock"}') == []
             result = await task
             assert result['status'] == ('FAIL' if mode == 'gate_fail' else 'PASS'), result
             assert result['cleanup_errors'] == []
@@ -136,7 +140,7 @@ def test_real_prometheus_ingestion_semantic_queries_and_recorded_gates(tmp_path,
     tool = binary.with_name('promtool')
     if mode == 'pass' and tool.is_file():
         dumped = subprocess.run([str(tool), 'tsdb', 'dump',
-            '--match={__name__="mock_engine_forward_tokens_total",kind="output"}', str(output / 'prometheus/data')],
+            '--match={__name__="rtp_llm_forward_tokens_total",kind="output"}', str(output / 'prometheus/data')],
             capture_output=True, text=True, timeout=15)
         assert dumped.returncode == 0, dumped.stderr
         (output / 'prometheus/offline-samples.txt').write_text(dumped.stdout)

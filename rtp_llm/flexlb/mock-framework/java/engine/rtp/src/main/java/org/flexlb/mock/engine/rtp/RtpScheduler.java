@@ -472,7 +472,7 @@ final class RtpScheduler implements Scheduler {
             var host = cache.hostSnapshot();
             long block = config.blockSize();
             return new EngineMetrics.State(counts.waiting(), counts.running(), counts.loading(), counts.ready(), kv.totalBlocks() * block,
-                kv.availableBlocks() * block, kv.freeBlocks() * block, kv.heldBlocks() * block, host.total() * block, host.free() * block);
+                kv.availableBlocks() * block, kv.freeBlocks() * block, kv.heldBlocks() * block, host.total() * block, host.free() * block, config.blockSize());
         }
     }
     @Override public String scrapeMetrics() { return metrics.scrape(); }

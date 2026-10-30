@@ -14,9 +14,19 @@ from mock_framework.config import Registry, compile_case
 from mock_framework.execution.records import Records
 from mock_framework.view.service import handler, serve
 from mock_framework.view.grafana import dashboard, provision
-from mock_framework.view.records import experiment
+from mock_framework.view.records import experiment, gate_text
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_page_initializes_filters_before_the_first_grafana_load():
+    import shutil
+    import subprocess
+    node = shutil.which('node')
+    if node is None:
+        pytest.skip('Node.js is required to execute the View page script')
+    subprocess.run([node, str(ROOT / 'tests/view_page_load.cjs'),
+                    str(ROOT / 'python/mock_framework/view/page.html')], check=True, timeout=10)
 
 
 def write(path, value):
@@ -32,9 +42,10 @@ def completed(tmp_path):
     write(source / 'configuration.json', {'case': {'id': 'basic', 'name': '保存的实验', 'describe': '仅查看',
         'phases': [{'steps': [{'id': 'qps', 'describe': 'QPS'}, {'id': 'raw', 'describe': 'PromQL'}]}]}})
     (source / 'case.yaml').write_text('id: basic\n')
+    write(source / 'interfaces.json', {'interfaces': {'client/qps': {'unit': 'requests/s'}}})
     write(source / 'code.json', [{'commit': 'saved-sha', 'diff': 'saved working tree diff'}])
     write(source / 'components/prefill-0/effective-config.json', {'device_blocks': 4095})
-    write(source / 'prometheus/collection.json', {'complete': False, 'errors': ['scrape unavailable']})
+    write(source / 'prometheus/collection.json', {'complete': False, 'errors': ['scrape unavailable'], 'recipe': {'scrape_interval': '100ms'}})
     gates = [
         {'step': 'qps', 'interface': 'client/qps', 'query_time': '2026-10-29T00:00:10Z',
          'args': {'range': ['-4s', '0s']}, 'expect': {'gte': 2}, 'actual': 1, 'status': 'FAIL'},
@@ -102,11 +113,24 @@ def test_dashboard_rebinds_nested_panels_without_mutating_the_source_or_future_v
     panel['datasource']['uid'] = 'mutated'
     assert dashboard(source)['panels'][0]['panels'][0]['datasource']['uid'] == 'mock-prometheus'
     assert source == original
-    provision(tmp_path, source, 'http://127.0.0.1:1234', 1793232000000, 1793232020000)
+    provision(tmp_path, source, 'http://127.0.0.1:1234', 1793232000000, 1793232020000, scrape_interval='100ms', filters={})
     saved = json.loads((tmp_path / 'dashboards/default.json').read_text())
     assert saved['annotations']['list'][0]['enable'] is True
+    assert saved['annotations']['list'][0]['hide'] is True
     assert saved['time']['from'].startswith('2026-10-29')
     assert saved['refresh'] == ''
+
+
+@pytest.mark.parametrize('name', ['engine_instance', 'prefill_instance', 'decode_instance', 'vit_instance', 'master_instance', 'client_instance'])
+def test_saved_address_filters_use_prometheus_interpolation_including_nested_rows(name):
+    expression = 'sum(metric{instance=~"${' + name + ':regex}",pool=~"${pool:regex}"})'
+    source = {'title': 'Saved dashboard', 'panels': [{'type': 'row', 'panels': [
+        {'type': 'timeseries', 'targets': [{'expr': expression}]}]}]}
+    adapted = dashboard(source)
+    target = adapted['panels'][0]['panels'][0]['targets'][0]
+    assert target['expr'] == expression.replace('${' + name + ':regex}', '${' + name + '}')
+    assert target['datasource']['type'] == 'prometheus'
+    assert source['panels'][0]['panels'][0]['targets'][0]['expr'] == expression
 
 
 def test_view_http_server_only_serves_fixed_read_only_resources(completed):
@@ -374,3 +398,171 @@ def test_busy_http_port_starts_no_metrics_processes(completed, tmp_path, metrics
         assert not list(output.glob('*.pid'))
         assert not (output / 'session.json').exists()
     asyncio.run(scenario())
+
+
+def test_gate_annotations_include_saved_conditions_values_and_errors(completed):
+    body = experiment(completed)
+    texts = [event['text'] for event in body['events'] if event['text'].startswith('门禁 ')]
+    assert '门禁 qps · client/qps · FAIL\n预期：≥ 2 requests/s\n实际：1 requests/s' in texts
+    assert '门禁 raw · prometheus/query · ERROR\n预期：数量 = 1\n实际：未取得结果\n错误：saved error' in texts
+
+
+def test_gate_annotation_formats_range_count_ratio_and_structured_results():
+    gate = {'step': 'qps', 'interface': 'client/qps', 'status': 'PASS', 'unit': 'requests/s',
+            'expect': {'gte': 1.5, 'lte': 2.5}, 'actual': 2}
+    assert '预期：≥ 1.5 requests/s 且 ≤ 2.5 requests/s\n实际：2 requests/s' in gate_text(gate)
+    gate.update(unit='ratio', expect={'gte': .95}, actual=.98)
+    assert '预期：≥ 95%\n实际：98%' in gate_text(gate)
+    gate.update(unit='', expect={'count': 1}, actual=[{'address': 'localhost'}])
+    assert '预期：数量 = 1\n实际：数量 1' in gate_text(gate)
+    gate.update(expect={'eq': {'success': 20}}, actual={'success': 20})
+    assert '预期：= {"success": 20}\n实际：{"success": 20}' in gate_text(gate)
+
+
+def test_annotation_html_escapes_saved_values_and_preserves_line_breaks(monkeypatch):
+    import io
+    from threading import Event
+    from mock_framework.view import grafana
+    sent = []
+    def post(request, timeout):
+        sent.append(json.loads(request.data))
+        return io.BytesIO(b'{}')
+    monkeypatch.setattr(grafana, 'urlopen', post)
+    grafana.annotations('http://localhost', 'unused', [
+        {'step': 'qps', 'time': 10, 'timeEnd': 20, 'text': '门禁 · FAIL\n实际：<img src=x onerror=alert(1)>'}], Event())
+    assert sent[0]['text'] == '门禁 · FAIL<br/>实际：&lt;img src=x onerror=alert(1)&gt;'
+    assert sent[0]['time'] == 10 and sent[0]['timeEnd'] == 20
+    assert len(sent) == 1 and 'dashboardUID' not in sent[0]
+    assert sent[0]['tags'] == ['experiment', 'step:qps']
+
+
+def test_annotations_merge_steps_and_gates_without_filtering_execution_records(completed):
+    body = experiment(completed)
+    assert len(body['events']) == 5
+    assert [event['step'] for event in body['annotations']] == ['qps', 'raw']
+    assert body['annotations'][0]['timeEnd'] == body['gates'][0]['to']
+    assert '实际：1 requests/s' in body['annotations'][0]['text']
+    with (completed / 'events.jsonl').open('a') as stream:
+        stream.write(json.dumps({'event': 'step_started', 'step': 'stop',
+                                 'recorded_at': '2026-10-29T00:00:15Z'}) + '\n')
+        stream.write(json.dumps({'event': 'step_finished', 'step': 'stop', 'status': 'PASS',
+                                 'recorded_at': '2026-10-29T00:00:16Z'}) + '\n')
+    stop = experiment(completed)['annotations'][-1]
+    assert stop == {'step': 'stop', 'time': 1793232015000, 'text': 'stop · PASS'}
+
+
+def test_annotation_defaults_can_include_steps_not_reached_by_a_failed_case(completed, tmp_path):
+    configuration = json.loads((completed / 'configuration.json').read_text())
+    configuration['case']['phases'][0]['steps'].append({'id': 'not_reached'})
+    write(completed / 'configuration.json', configuration)
+    body = experiment(completed)
+    assert 'not_reached' in body['annotation_steps']
+    assert all(event['step'] != 'not_reached' for event in body['annotations'])
+    selected = provision(tmp_path / 'grafana', {'title': 'HA', 'panels': [], 'annotation_steps': ['not_reached']},
+                         'http://localhost', body['start'], body['end'], scrape_interval='1s',
+                         filters={}, steps=body['annotation_steps'])
+    assert selected['selected'] == ['not_reached']
+
+
+@pytest.mark.parametrize('selected', [None, [], ['kill']])
+def test_annotation_selection_defaults_and_native_grafana_filter(tmp_path, selected):
+    view = {'title': 'HA', 'panels': []}
+    if selected is not None:
+        view['annotation_steps'] = selected
+    state = provision(tmp_path, view, 'http://localhost', 1000, 2000, scrape_interval='1s',
+                      filters={}, steps=['traffic', 'kill'])
+    assert state == {'steps': ['traffic', 'kill'], 'selected': ['traffic', 'kill'] if selected is None else selected}
+    saved = json.loads((tmp_path / 'dashboards/default.json').read_text())
+    assert 'annotation_steps' not in saved
+    variable = saved['templating']['list'][-1]
+    assert variable['current']['value'] == (['step:' + step for step in state['selected']] or ['__none__'])
+    assert saved['annotations']['list'][0]['tags'] == ['$annotation_steps']
+    embedded = json.loads((tmp_path / 'dashboards/embedded.json').read_text())
+    assert embedded['templating']['list'][-1]['hide'] == 2
+    assert view.get('annotation_steps') == selected
+
+
+@pytest.mark.parametrize('selected', ['kill', [3], ['missing'], ['kill', 'kill']])
+def test_invalid_annotation_selection_is_reported(tmp_path, selected):
+    with pytest.raises(ValueError, match='annotation_steps'):
+        provision(tmp_path, {'title': 'HA', 'panels': [], 'annotation_steps': selected},
+                  'http://localhost', 1000, 2000, scrape_interval='1s', filters={}, steps=['kill'])
+
+
+def test_invalid_unit_metadata_does_not_hide_a_saved_gate(completed):
+    write(completed / 'interfaces.json', {'interfaces': {'client/qps': {'unit': None}}})
+    body = experiment(completed)
+    assert len(body['gates']) == 2
+    assert body['gates'][0]['actual'] == 1
+    assert any('unit must be a string' in warning for warning in body['warnings'])
+
+
+def test_default_dashboard_variables_bind_and_freeze_full_experiment_choices(tmp_path):
+    source = json.loads((ROOT / 'views/default.json').read_text())
+    original = deepcopy(source)
+    filters = {'prefill_instance': ['127.0.0.1:1001', '127.0.0.1:1002'], 'decode_instance': ['127.0.0.1:1003'], 'vit_instance': [],
+               'master_instance': ['127.0.0.1:2001'], 'client_instance': ['127.0.0.1:3001']}
+    provision(tmp_path, source, 'http://127.0.0.1:9090', 1000, 2000, scrape_interval='250ms', filters=filters)
+    saved = json.loads((tmp_path / 'dashboards/default.json').read_text())
+    for variable in saved['templating']['list']:
+        if variable['name'] in ('prefill_group', 'decode_group', 'vit_group', 'master_group', 'client_group'):
+            assert variable['type'] == 'query' and variable['hide'] == 2
+            assert '${' + variable['name'].replace('_group', '_instance') + '}' in variable['query']
+            continue
+        assert variable['type'] == 'custom'  # Narrowing a gate window must not lose a retired Engine option.
+        assert variable['multi'] and variable['includeAll']
+        if variable['name'] in filters:
+            assert [option['value'] for option in variable['options']] == filters[variable['name']]
+    embedded = json.loads((tmp_path / 'dashboards/embedded.json').read_text())
+    assert embedded['uid'] != saved['uid']
+    assert all(variable['hide'] == 2 for variable in embedded['templating']['list'])
+    assert all(variable.get('hide', 0) == (2 if variable['name'] in ('prefill_group', 'decode_group', 'vit_group', 'master_group', 'client_group', 'vit_instance') else 0)
+               for variable in saved['templating']['list'])
+    assert source == original
+    import yaml
+    datasource = yaml.safe_load((tmp_path / 'provisioning/datasources/default.yaml').read_text())['datasources'][0]
+    assert datasource['jsonData']['timeInterval'] == '250ms'
+
+
+@pytest.mark.parametrize('include_vit', [False, True])
+def test_instance_choices_use_full_saved_series_and_separate_master_reporter_from_target(monkeypatch, include_vit):
+    import io
+    from mock_framework.view import grafana
+    urls = []
+    series = [
+        {'__name__': 'rtp_llm_requests_started_total', 'instance': '10.0.1.1:9000', 'role': 'prefill'},
+        {'__name__': 'rtp_llm_framework_requests_total', 'instance': '10.0.1.1:9000', 'role': 'prefill'},
+        {'__name__': 'rtp_llm_requests_started_total', 'instance': '10.0.1.2:9000', 'role': 'decode'},
+        {'__name__': 'flexlb_app_flexlb_batcher_queue_size', 'instance': '10.0.2.1:9000', 'role': 'PREFILL', 'engineIp': '10.0.1.1'},
+        {'__name__': 'jvm_memory_used_bytes', 'instance': '10.0.2.1:9000', 'application': 'flexlb-api'},
+        {'__name__': 'mock_client_requests_issued_total', 'instance': '10.0.3.1:9000', 'role': 'client'},
+        {'__name__': 'up', 'instance': 'unclassified:9000'}]
+    if include_vit:
+        series.append({'__name__': 'py_rtp_vit_qps', 'instance': '10.0.1.3:9000', 'role': 'vit'})
+    def fetch(url, timeout):
+        urls.append(url)
+        return io.BytesIO(json.dumps({'status': 'success', 'data': series}).encode())
+    monkeypatch.setattr(grafana, 'urlopen', fetch)
+    view = json.loads((ROOT / 'views/default.json').read_text())
+    options = grafana.instance_filters('http://localhost', 10000, 20000, view)
+    assert options == {'prefill_instance': ['10.0.1.1:9000'], 'decode_instance': ['10.0.1.2:9000'],
+                       'vit_instance': ['10.0.1.3:9000'] if include_vit else [],
+                       'master_instance': ['10.0.2.1:9000'], 'client_instance': ['10.0.3.1:9000']}
+    from urllib.parse import parse_qs, urlsplit
+    assert parse_qs(urlsplit(urls[0]).query) == {'match[]': ['{job="mock"}'], 'start': ['10.0'], 'end': ['20.0']}
+
+
+def test_partial_series_enumeration_is_not_treated_as_complete_filter_options(monkeypatch):
+    import io
+    from mock_framework.view import grafana
+    monkeypatch.setattr(grafana, 'urlopen', lambda *a, **kw: io.BytesIO(b'{"status":"success","data":[],"warnings":["partial"]}'))
+    with pytest.raises(ValueError, match='enumerate'):
+        grafana.instance_filters('http://localhost', 1000, 2000, {'templating': {'list': [{'name': 'engine_instance'}]}})
+
+
+def test_embedded_view_keeps_unmanaged_custom_variables_visible(tmp_path):
+    view = {'title': 'Custom', 'panels': [], 'templating': {'list': [
+        {'name': 'model', 'type': 'custom', 'query': 'a,b', 'hide': 0}]}}
+    provision(tmp_path, view, 'http://localhost:9090', 1000, 2000, scrape_interval='1s', filters={})
+    saved = json.loads((tmp_path / 'dashboards/embedded.json').read_text())
+    assert saved['templating']['list'][0]['hide'] == 0

@@ -32,6 +32,27 @@ def milliseconds(value):
     return round(value.timestamp() * 1000)
 
 
+def gate_text(gate):
+    def display(value):
+        if type(value) in (int, float):
+            if gate['unit'] == 'ratio':
+                return f'{value * 100:g}%'
+            return json.dumps(value) + (' ' + gate['unit'] if gate['unit'] else '')
+        return json.dumps(value, ensure_ascii=False)
+
+    operators = {'eq': '=', 'gte': '≥', 'lte': '≤', 'count': '数量 ='}
+    expected = ' 且 '.join(f"{operators.get(key, key)} {target if key == 'count' else display(target)}"
+                          for key, target in gate['expect'].items())
+    actual = '未取得结果'
+    if 'actual' in gate:
+        value = gate['actual']
+        actual = ('数量 ' + str(len(value))) if 'count' in gate['expect'] and isinstance(value, (list, dict, str)) else display(value)
+    text = f"门禁 {gate['step']} · {gate['interface']} · {gate['status']}\n预期：{expected}\n实际：{actual}"
+    if gate.get('error'):
+        text += '\n错误：' + str(gate['error'])
+    return text
+
+
 def experiment(directory):
     directory = Path(directory)
     path = directory / 'result.json'
@@ -98,7 +119,7 @@ def experiment(directory):
     if not isinstance(interfaces, dict):
         warnings.append('interfaces.json: interfaces must be an object')
         interfaces = {}
-    windows, events = {}, []
+    windows, events, annotations = {}, [], {}
     for number, event in lines('events.jsonl'):
         try:
             kind = event['event']
@@ -111,6 +132,11 @@ def experiment(directory):
                 name = event.get('step', event.get('phase'))
                 events.append({'time': milliseconds(event['recorded_at']),
                                'text': f"{name} · {kind}" + (' · ' + str(event['status']) if 'status' in event else '')})
+                if kind == 'step_started':
+                    annotations[name] = {'step': name, 'time': milliseconds(event['recorded_at']),
+                                         'text': steps.get(name, {}).get('describe', name)}
+                elif kind == 'step_finished' and name in annotations:
+                    annotations[name]['text'] += ' · ' + str(event.get('status', ''))
         except (ValueError, KeyError, TypeError, AttributeError, OverflowError) as error:
             warnings.append(f'events.jsonl:{number}: {error}')
     gates = []
@@ -124,11 +150,17 @@ def experiment(directory):
             if not isinstance(gate.get('expect'), dict) or not isinstance(gate.get('args'), dict):
                 raise ValueError('expect and args must be objects')
             definition = interfaces.get(gate['interface'], {})
+            unit = definition.get('unit', '') if isinstance(definition, dict) else ''
+            if not isinstance(unit, str):
+                warnings.append(f"interfaces.json: {gate['interface']}.unit must be a string")
+                unit = ''
             a, b = windows.get(gate['query_time'], (None, None))
             gates.append({**gate, 'title': steps.get(gate['step'], {}).get('describe', gate['step']), 'point': point,
-                          'unit': definition.get('unit', '') if isinstance(definition, dict) else '', 'from': a, 'to': b})
+                          'unit': unit, 'from': a, 'to': b})
             events.append({'time': a if a is not None else point, 'timeEnd': b,
-                           'text': f"门禁 {gate['step']} · {gate['status']}"})
+                           'text': gate_text(gates[-1])})
+            annotations[gate['step']] = {'step': gate['step'], 'time': a if a is not None else point,
+                                         'timeEnd': b, 'text': gate_text(gates[-1])}
         except (ValueError, KeyError, TypeError, AttributeError, OverflowError) as error:
             warnings.append(f'gates.jsonl:{number}: {error}')
     try:
@@ -147,4 +179,6 @@ def experiment(directory):
             'describe': case.get('describe', ''), 'result': result, 'start': start, 'end': end,
             'configuration': configuration, 'versions': versions, 'source': source, 'effective': effective,
             'gates': gates, 'events': sorted(events, key=lambda event: event['time']),
+            'annotations': sorted(annotations.values(), key=lambda event: event['time']),
+            'annotation_steps': list(dict.fromkeys([*steps, *annotations])),
             'collection': collection, 'warnings': warnings}

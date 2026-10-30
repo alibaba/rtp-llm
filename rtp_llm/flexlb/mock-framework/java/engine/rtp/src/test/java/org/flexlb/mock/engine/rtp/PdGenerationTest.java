@@ -211,7 +211,7 @@ class PdGenerationTest {
             await(() -> p.status().getRunningTaskInfoCount() == 1);
             assertEquals(81, p.status().getRunningTaskInfo(0).getBatchId());
             await(() -> d.status().getRunningTaskInfoCount() == 0 && p.status().getRunningTaskInfoCount() == 0);
-            assertTrue(metric(d, "mock_engine_forward_seconds_count", "role=\"decode\"") > 0);
+            assertTrue(metric(d, "rtp_llm_model_forward_seconds_count", "role=\"decode\"") > 0);
             assertTrue(p.status().getFinishedTaskListList().stream().anyMatch(t -> t.getRequestId() == 101));
             assertTrue(d.status().getFinishedTaskListList().stream().anyMatch(t -> t.getRequestId() == 101));
             assertEquals(16, p.status().getAvailableKvCache()); assertEquals(16, d.status().getAvailableKvCache());
@@ -385,9 +385,9 @@ class PdGenerationTest {
         try (var p = node("prefill", 8, 1); var d = node("decode", 16, 1, Map.of("decode", Map.of("draft_tokens", 3, "acceptance_rate", 1)));
                 var call = new Call(p, input(d, 1, 5, 10, 2000, true))) {
             call.output(1, false, 1); call.output(5, false, 4); call.output(9, false, 4); call.output(10, true, 1);
-            assertEquals("completed", call.next()); assertEquals(3, metric(d, "mock_engine_forward_seconds_count", "role=\"decode\""));
-            assertEquals(9, metric(d, "mock_engine_forward_tokens_total", "kind=\"output\""));
-            assertEquals(12, metric(d, "mock_engine_forward_tokens_total", "kind=\"compute\""));
+            assertEquals("completed", call.next()); assertEquals(3, metric(d, "rtp_llm_model_forward_seconds_count", "role=\"decode\""));
+            assertEquals(9, metric(d, "rtp_llm_forward_tokens_total", "kind=\"output\""));
+            assertEquals(12, metric(d, "rtp_llm_forward_tokens_total", "kind=\"compute\""));
             assertEquals(3, d.status().getFinishedTaskList(0).getIterateCount());
         }
     }
@@ -396,9 +396,9 @@ class PdGenerationTest {
         try (var p = node("prefill", 8, 1); var d = node("decode", 16, 1, Map.of("decode", Map.of("draft_tokens", 3, "acceptance_rate", 0),
                 "compute", Map.of("forward", Map.of("expression", "totalStepTokens")))); var call = new Call(p, input(d, 1, 5, 10, 2000, true))) {
             for (int n = 1; n <= 10; n++) call.output(n, n == 10, 1);
-            assertEquals("completed", call.next()); assertEquals(9, metric(d, "mock_engine_forward_seconds_count", "role=\"decode\""));
-            assertEquals(36, metric(d, "mock_engine_forward_tokens_total", "kind=\"compute\""));
-            assertTrue(metric(d, "mock_engine_forward_seconds_sum", "role=\"decode\"") >= .036);
+            assertEquals("completed", call.next()); assertEquals(9, metric(d, "rtp_llm_model_forward_seconds_count", "role=\"decode\""));
+            assertEquals(36, metric(d, "rtp_llm_forward_tokens_total", "kind=\"compute\""));
+            assertTrue(metric(d, "rtp_llm_model_forward_seconds_sum", "role=\"decode\"") >= .036);
         }
     }
 
@@ -408,7 +408,7 @@ class PdGenerationTest {
                 var call = new Call(p, input(d, 1, 5, 10, 2000, true))) {
             call.output(1, false, 1); call.output(5, false, 4); call.output(9, false, 4);
             assertEquals(602, code(call.error(Status.Code.RESOURCE_EXHAUSTED)));
-            assertEquals(2, metric(d, "mock_engine_forward_seconds_count", "role=\"decode\""));
+            assertEquals(2, metric(d, "rtp_llm_model_forward_seconds_count", "role=\"decode\""));
             await(() -> d.status().getAvailableKvCache() == 16);
         }
     }
@@ -418,7 +418,7 @@ class PdGenerationTest {
                 Map.of("decode", Map.of("draft_tokens", 2147483646, "acceptance_rate", 0)));
                 var call = new Call(p, input(d, 1, 5, 4, 2000, true))) {
             assertEquals(602, code(call.error(Status.Code.RESOURCE_EXHAUSTED)));
-            assertEquals(0, metric(d, "mock_engine_forward_seconds_count", "role=\"decode\""));
+            assertEquals(0, metric(d, "rtp_llm_model_forward_seconds_count", "role=\"decode\""));
             await(() -> d.status().getAvailableKvCache() == 16);
             assertTrue(d.status().getAlive());
         }
@@ -428,7 +428,7 @@ class PdGenerationTest {
         try (var p = node("prefill", 8, 1, Map.of("eos", Map.of("probability", 1))); var d = node("decode", 8, 1);
                 var call = new Call(p, input(d, 1, 5, 10, 2000, true))) {
             call.output(1, true, 1); assertEquals("completed", call.next());
-            assertEquals(0, metric(d, "mock_engine_forward_seconds_count", "role=\"decode\""));
+            assertEquals(0, metric(d, "rtp_llm_model_forward_seconds_count", "role=\"decode\""));
             assertFalse(d.status().getFinishedTaskList(0).hasErrorInfo()); assertEquals(16, d.status().getAvailableKvCache());
         }
     }
@@ -466,8 +466,8 @@ class PdGenerationTest {
             var input = input(d, 1, 5, 20, 2000, true).toBuilder(); input.getGenerateConfigBuilder().setMinNewTokens(3);
             try (var call = new Call(p, input.build())) {
                 call.output(1, false, 1); call.output(3, true, 2); assertEquals("completed", call.next());
-                assertEquals(5, metric(d, "mock_engine_forward_tokens_total", "kind=\"compute\""));
-                assertEquals(2, metric(d, "mock_engine_forward_tokens_total", "kind=\"output\""));
+                assertEquals(5, metric(d, "rtp_llm_forward_tokens_total", "kind=\"compute\""));
+                assertEquals(2, metric(d, "rtp_llm_forward_tokens_total", "kind=\"output\""));
             }
             await(() -> p.status().getAvailableKvCache() == 32 && d.status().getAvailableKvCache() == 32);
         }
@@ -478,9 +478,9 @@ class PdGenerationTest {
             try (var p = node("prefill", 16, 1); var d = node("decode", 16, 1, Map.of("decode", progress));
                     var call = new Call(p, input(d, 1, 5, 5, 2000, true))) {
                 call.output(1, false, 1); call.output(5, true, 4); assertEquals("completed", call.next());
-                assertEquals(4, metric(d, "mock_engine_forward_tokens_total", "kind=\"output\""));
+                assertEquals(4, metric(d, "rtp_llm_forward_tokens_total", "kind=\"output\""));
                 assertEquals(progress.containsKey("draft_tokens") ? 5 : 1,
-                    metric(d, "mock_engine_forward_tokens_total", "kind=\"compute\""));
+                    metric(d, "rtp_llm_forward_tokens_total", "kind=\"compute\""));
             }
         }
     }
@@ -494,9 +494,9 @@ class PdGenerationTest {
             call.output(7, false, 3);
             call.output(8, true, 1);
             assertEquals("completed", call.next());
-            assertEquals(3, metric(d, "mock_engine_forward_seconds_count", "role=\"decode\""));
-            assertEquals(3, metric(d, "mock_engine_forward_tokens_total", "kind=\"compute\""));
-            assertEquals(7, metric(d, "mock_engine_forward_tokens_total", "kind=\"output\""));
+            assertEquals(3, metric(d, "rtp_llm_model_forward_seconds_count", "role=\"decode\""));
+            assertEquals(3, metric(d, "rtp_llm_forward_tokens_total", "kind=\"compute\""));
+            assertEquals(7, metric(d, "rtp_llm_forward_tokens_total", "kind=\"output\""));
         }
     }
 
@@ -512,8 +512,8 @@ class PdGenerationTest {
             }
             assertEquals("completed", call.next());
             await(() -> p.status().getAvailableKvCache() == 16 && d.status().getAvailableKvCache() == 16);
-            assertEquals(1, metric(p, "mock_engine_forward_seconds_count", "role=\"prefill\""));
-            assertEquals(3, metric(d, "mock_engine_forward_seconds_count", "role=\"decode\""));
+            assertEquals(1, metric(p, "rtp_llm_model_forward_seconds_count", "role=\"prefill\""));
+            assertEquals(3, metric(d, "rtp_llm_model_forward_seconds_count", "role=\"decode\""));
             assertFalse(d.status().getFinishedTaskList(0).hasErrorInfo()); assertEquals(3, d.status().getFinishedTaskList(0).getIterateCount());
         }
     }
@@ -521,7 +521,7 @@ class PdGenerationTest {
     @Test void incrementalStreamDoesNotRepeatFirstTokenOrReturnCumulativePayloads() throws Exception {
         try (var p = node("prefill", 8, 1); var d = node("decode", 8, 1); var call = new Call(p, input(d, 1, 3, 6, 2000, true))) {
             for (int i = 1; i <= 6; i++) call.output(i, i == 6, 1);
-            assertEquals("completed", call.next()); assertEquals(5, metric(d, "mock_engine_forward_tokens_total", "kind=\"output\""));
+            assertEquals("completed", call.next()); assertEquals(5, metric(d, "rtp_llm_forward_tokens_total", "kind=\"output\""));
         }
     }
 
@@ -539,7 +539,7 @@ class PdGenerationTest {
         try (var p = node("prefill", 8, 1000); var d = node("decode", 8, 1); var call = new Call(p, input(d, 1, 5, 4, 3000, true))) {
             await(() -> p.status().getRunningQueryLen() == 1 && d.status().getWaitingQueryLen() == 1);
             call.close(); await(() -> p.status().getAvailableKvCache() == 16 && d.status().getAvailableKvCache() == 16);
-            assertEquals(0, metric(p, "mock_engine_forward_seconds_count", "role=\"prefill\""));
+            assertEquals(0, metric(p, "rtp_llm_model_forward_seconds_count", "role=\"prefill\""));
         }
     }
 
@@ -547,7 +547,7 @@ class PdGenerationTest {
         try (var p = node("prefill", 8, 1); var d = node("decode", 8, 1000); var call = new Call(p, input(d, 1, 5, 4, 3000, true))) {
             call.output(1, false, 1); await(() -> d.status().getRunningQueryLen() == 1);
             call.close(); await(() -> d.status().getAvailableKvCache() == 16);
-            assertEquals(0, metric(d, "mock_engine_forward_seconds_count", "role=\"decode\""));
+            assertEquals(0, metric(d, "rtp_llm_model_forward_seconds_count", "role=\"decode\""));
             assertEquals(16, p.status().getAvailableKvCache());
         }
     }
@@ -557,7 +557,7 @@ class PdGenerationTest {
                 var call = new Call(p, input(d, 1, 5, 4, 2500, true))) {
             await(() -> d.status().getWaitingQueryLen() == 1);
             assertEquals(0, p.status().getRunningTaskInfoCount()); assertEquals(16, p.status().getAvailableKvCache());
-            assertEquals(0, metric(p, "mock_engine_requests_started_total", "")); holder.close();
+            assertEquals(0, metric(p, "rtp_llm_requests_started_total", "")); holder.close();
             for (int n = 1; n <= 4; n++) call.output(n, n == 4, 1);
             assertEquals("completed", call.next());
         }
@@ -572,7 +572,7 @@ class PdGenerationTest {
             assertNull(call.outputs.poll(150, TimeUnit.MILLISECONDS));
             assertEquals(8, d.status().getAvailableKvCache());
             assertTrue(d.node.cache().snapshot(-1, true).keys().isEmpty());
-            assertEquals(1, metric(d, "mock_engine_forward_seconds_count", "role=\"decode\""));
+            assertEquals(1, metric(d, "rtp_llm_model_forward_seconds_count", "role=\"decode\""));
         }
     }
 
@@ -591,8 +591,8 @@ class PdGenerationTest {
             call.error(Status.Code.DEADLINE_EXCEEDED);
             await(() -> d.status().getWaitingQueryLen() == 0); holder.close();
             await(() -> d.status().getAvailableKvCache() == 8);
-            assertEquals(0, metric(d, "mock_engine_forward_seconds_count", "role=\"decode\""));
-            assertEquals(0, metric(p, "mock_engine_forward_seconds_count", "role=\"prefill\""));
+            assertEquals(0, metric(d, "rtp_llm_model_forward_seconds_count", "role=\"decode\""));
+            assertEquals(0, metric(p, "rtp_llm_model_forward_seconds_count", "role=\"prefill\""));
             assertNull(call.outputs.poll(150, TimeUnit.MILLISECONDS));
         }
     }
@@ -649,7 +649,7 @@ class PdGenerationTest {
             assertInstanceOf(GenerateOutputsPB.class, replies.poll(3, TimeUnit.SECONDS));
             await(() -> d.status().getFinishedTaskListCount() == 1 && p.status().getAvailableKvCache() == 16 && d.status().getAvailableKvCache() == 4096);
             assertFalse(d.status().getFinishedTaskList(0).hasErrorInfo());
-            assertEquals(2999, metric(d, "mock_engine_forward_seconds_count", "role=\"decode\""));
+            assertEquals(2999, metric(d, "rtp_llm_model_forward_seconds_count", "role=\"decode\""));
         }
     }
 
@@ -658,7 +658,7 @@ class PdGenerationTest {
             var input = input(d, 1, 3, 4, 1000, true); d.node.close();
             try (var call = new Call(p, input)) {
                 call.error(Status.Code.UNAVAILABLE); await(() -> p.status().getAvailableKvCache() == 16);
-                assertEquals(0, metric(p, "mock_engine_forward_seconds_count", "role=\"prefill\""));
+                assertEquals(0, metric(p, "rtp_llm_model_forward_seconds_count", "role=\"prefill\""));
             }
         }
     }

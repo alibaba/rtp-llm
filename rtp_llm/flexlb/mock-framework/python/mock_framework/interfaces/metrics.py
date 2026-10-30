@@ -151,22 +151,22 @@ async def metric(ctx, args, role, numerator, denominator=None, *, kind=None):
 
 @case_interface('engine/cache/hit_rate', effect='read', unit='ratio')
 async def hit_rate(ctx, args: MetricArgs) -> float:
-    return await metric(ctx, args, 'prefill', 'mock_engine_cache_hit_tokens_total', 'mock_engine_cache_lookup_tokens_total')
+    return await metric(ctx, args, 'prefill', 'rtp_llm_cache_hit_tokens_total', 'rtp_llm_cache_lookup_tokens_total')
 
 
 @case_interface('engine/prefill/tps', effect='read', unit='tokens/s')
 async def prefill_tps(ctx, args: MetricArgs) -> float:
-    return await metric(ctx, args, 'prefill', 'mock_engine_forward_tokens_total', 'mock_engine_forward_seconds_sum', kind='compute')
+    return await metric(ctx, args, 'prefill', 'rtp_llm_forward_tokens_total', 'rtp_llm_context_forward_seconds_total', kind='compute')
 
 
 @case_interface('engine/prefill/tps_with_cache', effect='read', unit='tokens/s')
 async def cached_tps(ctx, args: MetricArgs) -> float:
-    return await metric(ctx, args, 'prefill', 'mock_engine_forward_tokens_total', 'mock_engine_forward_seconds_sum', kind='input')
+    return await metric(ctx, args, 'prefill', 'rtp_llm_forward_tokens_total', 'rtp_llm_context_forward_with_cache_seconds_total', kind='input')
 
 
 @case_interface('engine/decode/tps', effect='read', unit='tokens/s')
 async def decode_tps(ctx, args: MetricArgs) -> float:
-    return await metric(ctx, args, 'decode', 'mock_engine_forward_tokens_total', kind='output')
+    return await metric(ctx, args, 'decode', 'rtp_llm_forward_tokens_total', kind='output')
 
 
 @case_interface('client/qps', effect='read', unit='requests/s')
@@ -180,6 +180,7 @@ async def client_success_rate(ctx, args: SuccessRateArgs) -> float:
     """Success share of terminal observations in an explicit [start, end] window; no request-count floor."""
     at, millis, _ = window(ctx, args)
     labels, targets = scope(ctx, args, 'client')
+    ctx.records.emit(event='metric_window', query_time=ctx.query_time, start=at - millis / 1000, end=at)
     name = 'mock_client_requests_finished_total'
     for outcome in ('success', 'error', 'timeout', 'cancelled'):
         await counter_history(ctx, name, labels + ',outcome=' + json.dumps(outcome), targets, at, millis)

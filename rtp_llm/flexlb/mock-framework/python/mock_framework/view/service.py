@@ -14,7 +14,7 @@ from urllib.parse import urlsplit
 from urllib.request import urlopen
 
 from ..execution.processes import ProcessSupervisor
-from .grafana import annotations, provision
+from .grafana import annotations, instance_filters, provision
 from .records import experiment, read_json
 
 
@@ -92,7 +92,6 @@ async def metrics(body, result, output, prometheus, grafana_home):
         while grafana_port == prom_port:
             grafana_port = free_port()
         prom_url, grafana_url = f'http://127.0.0.1:{prom_port}', f'http://127.0.0.1:{grafana_port}'
-        provision(output / 'grafana', view, prom_url, body['start'], body['end'])
         password = secrets.token_urlsafe(24)
         config = output / 'grafana/grafana.ini'
         config.write_text(f'''[server]
@@ -103,6 +102,8 @@ data = {output / 'grafana/data'}
 logs = {output / 'grafana/logs'}
 plugins = {output / 'grafana/plugins'}
 provisioning = {output / 'grafana/provisioning'}
+[database]
+wal = true
 [security]
 allow_embedding = true
 [auth.anonymous]
@@ -121,13 +122,22 @@ check_for_plugin_updates = false
             '--storage.tsdb.path=' + str(output / 'prometheus/data'), '--web.listen-address=' + prom_url.removeprefix('http://')],
             str(output), dict(os.environ), output / 'prometheus', zero_exit=True)
         await supervisor.guard(ready(prom_url + '/-/ready'), 60)
+        filters = await supervisor.guard(asyncio.to_thread(instance_filters, prom_url, body['start'], body['end'], view), 15)
+        interval = (body['collection'] or {}).get('recipe', {}).get('scrape_interval')
+        if not isinstance(interval, str) or not interval:
+            raise ValueError('Missing recorded Prometheus scrape_interval')
+        annotation_selection = provision(output / 'grafana', view, prom_url, body['start'], body['end'],
+                  scrape_interval=interval, filters=filters,
+                  steps=body['annotation_steps'])
         env = {key: value for key, value in os.environ.items() if not key.startswith('GF_')}
         env['GF_SECURITY_ADMIN_PASSWORD'] = password
         await supervisor.spawn('grafana', [str(grafana), 'server', '--homepath', str(grafana_home), '--config', str(config)],
             str(output), env, output / 'grafana')
         await supervisor.guard(ready(grafana_url + '/api/health'), 60)
-        await supervisor.guard(asyncio.to_thread(annotations, grafana_url, password, body['events'], cancelled), 60)
-        body['metrics'] = {'status': 'ready', 'url': grafana_url + '/d/mock-experiment/experiment', 'error': None}
+        await supervisor.guard(asyncio.to_thread(annotations, grafana_url, password, body['annotations'], cancelled), 60)
+        body['metrics'] = {'status': 'ready', 'url': grafana_url + '/d/mock-experiment-embedded/experiment',
+                           'open_url': grafana_url + '/d/mock-experiment/experiment', 'error': None,
+                           'filters': filters, 'annotations': annotation_selection}
         await supervisor.guard(asyncio.Event().wait(), None)
     except Exception as error:
         failure = f'{type(error).__name__}: {error}'

@@ -54,14 +54,14 @@ class LocalRpcTest {
                 assertEquals(4, reused.getFlattenOutput().getAuxInfo(0).getTotalReuseLen());
                 assertEquals(16, rpc.getWorkerStatus(StatusVersionPB.getDefaultInstance()).getAvailableKvCache());
                 var text = metrics(node);
-                assertEquals(2, sample(text, "mock_engine_requests_finished_total", "outcome=\"success\""));
-                assertEquals(10, sample(text, "mock_engine_cache_lookup_tokens_total", ""));
-                assertEquals(4, sample(text, "mock_engine_cache_hit_tokens_total", ""));
-                assertEquals(6, sample(text, "mock_engine_forward_tokens_total", "kind=\"compute\""));
-                assertEquals(2, sample(text, "mock_engine_forward_seconds_count", ""));
-                assertEquals(0, sample(text, "mock_engine_requests", "state=\"running\""));
+                assertEquals(2, sample(text, "rtp_llm_framework_requests_total", "outcome=\"success\""));
+                assertEquals(10, sample(text, "rtp_llm_cache_lookup_tokens_total", ""));
+                assertEquals(4, sample(text, "rtp_llm_cache_hit_tokens_total", ""));
+                assertEquals(6, sample(text, "rtp_llm_forward_tokens_total", "kind=\"compute\""));
+                assertEquals(2, sample(text, "rtp_llm_model_forward_seconds_count", ""));
+                assertEquals(0, sample(text, "rtp_llm_scheduler_requests", "state=\"running\""));
                 // The same scrape must not reset event counters.
-                assertEquals(4, sample(metrics(node), "mock_engine_cache_hit_tokens_total", ""));
+                assertEquals(4, sample(metrics(node), "rtp_llm_cache_hit_tokens_total", ""));
             } finally { channel.shutdownNow().awaitTermination(3, TimeUnit.SECONDS); }
         }
     }
@@ -77,8 +77,8 @@ class LocalRpcTest {
                 assertEquals(603, ErrorDetailsPB.parseFrom(raw).getErrorCode());
                 assertEquals(16, rpc.getWorkerStatus(StatusVersionPB.getDefaultInstance()).getAvailableKvCache());
                 var text = metrics(node);
-                assertEquals(1, sample(text, "mock_engine_requests_finished_total", "outcome=\"timeout\""));
-                assertEquals(0, sample(text, "mock_engine_forward_seconds_count", ""));
+                assertEquals(1, sample(text, "rtp_llm_framework_requests_total", "outcome=\"timeout\""));
+                assertEquals(0, sample(text, "rtp_llm_model_forward_seconds_count", ""));
             } finally { channel.shutdownNow().awaitTermination(3, TimeUnit.SECONDS); }
         }
     }
@@ -99,7 +99,7 @@ class LocalRpcTest {
                 }));
                 await(() -> read.getWorkerStatus(StatusVersionPB.getDefaultInstance()).getRunningQueryLen() == 1);
                 assertEquals(10, read.getWorkerStatus(StatusVersionPB.getDefaultInstance()).getAvailableKvCache());
-                assertEquals(10, sample(metrics(node), "mock_engine_kv_tokens", "state=\"available\""));
+                assertEquals(10, sample(metrics(node), "rtp_llm_kv_tokens", "state=\"available\""));
                 context.cancel(null); assertTrue(done.await(2, TimeUnit.SECONDS));
                 await(() -> read.getWorkerStatus(StatusVersionPB.getDefaultInstance()).getRunningQueryLen() == 0);
                 Thread.sleep(350);
@@ -107,9 +107,9 @@ class LocalRpcTest {
                 assertEquals(16, read.getWorkerStatus(StatusVersionPB.getDefaultInstance()).getAvailableKvCache());
                 assertEquals(0, read.getCacheStatus(CacheVersionPB.newBuilder().setNeedCacheKeys(true).setLatestCacheVersion(-1).build()).getCacheKeysCount());
                 var text = metrics(node);
-                assertEquals(1, sample(text, "mock_engine_requests_finished_total", "outcome=\"cancelled\""));
-                assertEquals(0, sample(text, "mock_engine_forward_seconds_count", ""));
-                assertEquals(16, sample(text, "mock_engine_kv_tokens", "state=\"available\""));
+                assertEquals(1, sample(text, "rtp_llm_framework_requests_total", "outcome=\"cancelled\""));
+                assertEquals(0, sample(text, "rtp_llm_model_forward_seconds_count", ""));
+                assertEquals(16, sample(text, "rtp_llm_kv_tokens", "state=\"available\""));
             } finally { context.cancel(null); channel.shutdownNow().awaitTermination(3, TimeUnit.SECONDS); }
         }
     }
@@ -133,9 +133,9 @@ class LocalRpcTest {
                 var bytes = error.getTrailers().get(Metadata.Key.of("grpc-status-details-bin", Metadata.BINARY_BYTE_MARSHALLER));
                 assertEquals(602, ErrorDetailsPB.parseFrom(bytes).getErrorCode());
                 var text = metrics(node);
-                assertEquals(1, sample(text, "mock_engine_requests_started_total", ""));
-                assertEquals(1, sample(text, "mock_engine_requests_finished_total", "outcome=\"error\""));
-                assertEquals(0, sample(text, "mock_engine_cache_lookup_tokens_total", ""));
+                assertEquals(1, sample(text, "rtp_llm_requests_started_total", ""));
+                assertEquals(1, sample(text, "rtp_llm_framework_requests_total", "outcome=\"error\""));
+                assertEquals(0, sample(text, "rtp_llm_cache_lookup_tokens_total", ""));
             } finally { channel.shutdownNow().awaitTermination(3, TimeUnit.SECONDS); }
         }
     }

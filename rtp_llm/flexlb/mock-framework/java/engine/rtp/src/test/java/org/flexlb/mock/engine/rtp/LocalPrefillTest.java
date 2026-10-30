@@ -137,9 +137,9 @@ class LocalPrefillTest {
             }
             assertEquals(100, engine.snapshot(0).finishedVersion());
             var text = engine.scrapeMetrics();
-            assertEquals(100, LocalRpcTest.sample(text, "mock_engine_requests_started_total", ""));
-            assertEquals(100, LocalRpcTest.sample(text, "mock_engine_requests_finished_total", "outcome=\"success\"")
-                + LocalRpcTest.sample(text, "mock_engine_requests_finished_total", "outcome=\"cancelled\""));
+            assertEquals(100, LocalRpcTest.sample(text, "rtp_llm_requests_started_total", ""));
+            assertEquals(100, LocalRpcTest.sample(text, "rtp_llm_framework_requests_total", "outcome=\"success\"")
+                + LocalRpcTest.sample(text, "rtp_llm_framework_requests_total", "outcome=\"cancelled\""));
         }
     }
 

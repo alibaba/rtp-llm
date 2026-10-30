@@ -1,12 +1,12 @@
 package org.flexlb.mock.client;
 
 import io.prometheus.client.*;
-import io.prometheus.client.exporter.common.TextFormat;
-import java.io.*;
+import org.flexlb.mock.metrics.MetricTags;
 import java.util.*;
 
 final class ClientMetrics {
     private final CollectorRegistry registry = new CollectorRegistry();
+    private final Map<String, String> tags = MetricTags.fromEnvironment(System.getenv());
     private final Counter.Child issued = Counter.build().name("mock_client_requests_issued_total").help("Native calls started; not Master acceptance.")
         .labelNames("role").register(registry).labels("client");
     private final Map<NativeClient.Outcome, Counter.Child> finished = new EnumMap<>(NativeClient.Outcome.class);
@@ -24,10 +24,5 @@ final class ClientMetrics {
         finished.get(result.outcome()).inc(); latency.observe(result.elapsedNanos() / 1e9);
         if (result.ttftNanos() != null) ttft.observe(result.ttftNanos() / 1e9);
     }
-    String scrape() {
-        var out = new StringWriter();
-        try { TextFormat.write004(out, registry.metricFamilySamples()); }
-        catch (IOException impossible) { throw new UncheckedIOException(impossible); }
-        return out.toString();
-    }
+    String scrape() { return MetricTags.scrape(registry, tags); }
 }

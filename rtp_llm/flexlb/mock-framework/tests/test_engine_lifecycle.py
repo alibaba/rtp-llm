@@ -132,7 +132,7 @@ def test_scale_in_selects_once_and_instances_keep_separate_artifacts_and_metrics
             str(tmp_path / 'traffic.json'), ctx.globals()['prefill'][0]], capture_output=True, text=True, timeout=15)
         assert probe.returncode == 0, probe.stderr
         if owner.monitoring:
-            samples = await query(replace(ctx, query_time=timestamp()), Promql('count_over_time(mock_engine_requests_started_total[1m])'))
+            samples = await query(replace(ctx, query_time=timestamp()), Promql('count_over_time(rtp_llm_requests_started_total[1m])'))
             assert {item.labels['instance'] for item in samples.samples} == {item['rpc'] for item in endpoints}
         assert len(await scale_in(ctx, ScaleIn())) == 2
         assert ctx.globals()['prefill'] == []
@@ -278,11 +278,11 @@ def test_live_traffic_survives_scale_and_real_master_eventually_retires_old_addr
                 await until(recovered, 10)
                 prom = ctx.runtime.monitoring
                 async def new_engine_received_requests():
-                    expr = 'mock_engine_requests_started_total{instance="' + created[0] + '"}'
+                    expr = 'rtp_llm_requests_started_total{instance="' + created[0] + '"}'
                     value = await asyncio.to_thread(_get, prom.url + '/api/v1/query?' + urllib.parse.urlencode({'query': expr}))
                     return any(float(r['value'][1]) > 0 for r in value['data']['result'])
                 await until(new_engine_received_requests, 10)
-                historical = await query(replace(ctx, query_time=timestamp()), Promql('count_over_time(mock_engine_requests_started_total[1m])'))
+                historical = await query(replace(ctx, query_time=timestamp()), Promql('count_over_time(rtp_llm_requests_started_total[1m])'))
                 assert set(removed + created) <= {sample.labels['instance'] for sample in historical.samples}
                 all_rows = rows()
                 transition = [r for r in all_rows if datetime.fromisoformat(began) <= datetime.fromisoformat(r['sent_at']) < datetime.fromisoformat(converged_at)]

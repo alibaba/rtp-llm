@@ -183,8 +183,8 @@ class DecodeAdmissionTest {
             assertEquals(16, node.status().getAvailableKvCache()); assertEquals(1, node.status().getFinishedTaskListCount());
             try (var text = java.net.URI.create((String) node.node.endpoints().get("metrics")).toURL().openStream()) {
                 var metrics = new String(text.readAllBytes(), java.nio.charset.StandardCharsets.UTF_8);
-                assertEquals(0, LocalRpcTest.sample(metrics, "mock_engine_forward_seconds_count", ""));
-                assertEquals(1, LocalRpcTest.sample(metrics, "mock_engine_requests_finished_total", "outcome=\"cancelled\""));
+                assertEquals(0, LocalRpcTest.sample(metrics, "rtp_llm_model_forward_seconds_count", ""));
+                assertEquals(1, LocalRpcTest.sample(metrics, "rtp_llm_framework_requests_total", "outcome=\"cancelled\""));
             }
         }
     }

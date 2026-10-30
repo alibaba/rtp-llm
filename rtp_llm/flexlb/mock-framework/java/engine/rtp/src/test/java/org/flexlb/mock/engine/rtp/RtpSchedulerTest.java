@@ -91,7 +91,8 @@ class RtpSchedulerTest {
             assertEquals(RequestFailure.Reason.CANCELLED, first.terminal.get(1, TimeUnit.SECONDS).reason());
             assertEquals(1, a.snapshot().generated()); assertEquals(2, b.snapshot().generated());
             assertEquals(new QueueSnapshot(0, 1, 0, 0), scheduler.queues());
-            assertTrue(scheduler.scrapeMetrics().contains("mock_engine_forward_seconds_count{role=\"decode\",} 1.0"));
+            assertTrue(scheduler.scrapeMetrics().lines().anyMatch(line -> line.startsWith("rtp_llm_model_forward_seconds_count{")
+                && line.contains("role=\"decode\"") && line.endsWith(" 1.0")));
             var next = scheduler.schedule();
             assertEquals(List.of("2"), next.batch().dps().getFirst().requests().stream().map(r -> r.id()).toList());
             complete(scheduler, next, config); drain(scheduler);

@@ -103,10 +103,16 @@ def test_runner_starts_isolated_packaged_rtp_nodes_and_native_client_reads_them(
                     assert response.headers.get_content_type() == 'text/plain'
                     metrics = response.read().decode('utf-8')
                 (directory / 'metrics.prom').write_text(metrics)
-                samples = [line for line in metrics.splitlines() if line.startswith('mock_engine_forward_seconds_count{')]
+                samples = [line for line in metrics.splitlines() if line.startswith('rtp_llm_model_forward_seconds_count{')]
                 assert len(samples) == 1
                 assert float(samples[0].rsplit(' ', 1)[1]) == (1 if role == 'prefill' else 10)
                 assert f'role="{role}"' in samples[0]
+                assert 'rtp_llm_wait_stream_size{' in metrics
+                assert 'rtp_llm_running_stream_size{' in metrics
+                native_blocks = [line for line in metrics.splitlines()
+                                 if line.startswith('rtp_llm_kv_cache_total_blocks{') and 'tier="DEVICE"' in line]
+                assert len(native_blocks) == 1 and float(native_blocks[0].rsplit(' ', 1)[1]) == 8
+                assert 'mock_engine_' not in metrics
                 effective = json.loads((directory / 'effective-config.json').read_text())
                 assert 'scale' not in effective['compute']['forward']['noise']
             assert (await task)['status'] == 'PASS'
