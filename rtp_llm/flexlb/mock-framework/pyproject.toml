@@ -10,7 +10,6 @@ dependencies = ["PyYAML>=6,<7", "protobuf>=4.25,<7", "zstandard>=0.23,<1"]
 
 [project.scripts]
 mock-case = "mock_framework.cli:main"
-mock-requests = "mock_framework.evidence:main"
 mock-view = "mock_framework.view.__main__:main"
 
 [dependency-groups]

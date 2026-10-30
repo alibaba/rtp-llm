@@ -74,13 +74,7 @@ Case 保存业务配置、流量和门禁；启动配方保存命令、程序路
 
 检查 Client 的 issued、finished、success/error/timeout/cancelled，以及 queued、inflight、unsent。Case 主动提前停止播放时，未发送的输入不算失败；已发送请求是否收齐终态、请求证据是否完整，要分别确认。清理错误和采集错误也应单独报告，不能解释成请求失败或忽略后宣称 PASS。
 
-查询所有失败请求：
-
-```sh
-uv run --locked mock-requests "$RUN_ROOT/result" --outcome error
-```
-
-工具流式读取并检查证据，遇到损坏或未封口记录会非零退出；已经输出的前缀不能当作完整统计。按 Client、请求 ID、播放轮次或 timeout 等筛选见 `mock-requests --help`，协议和查询约定见 [Client 逐请求记录](docs/architecture.md#client-逐请求记录与查询)。
+逐请求查询使用 Case 的 `client/requests` 接口，支持 Client、请求 ID、播放轮次、时间和结果筛选。只有显式查询时才读取并校验请求记录；`client/stop` 使用 Java 返回的最终汇总，不重复扫描文件。协议和示例见 [Client 逐请求记录](docs/architecture.md#client-逐请求记录与查询)。
 
 ## 查看报告
 

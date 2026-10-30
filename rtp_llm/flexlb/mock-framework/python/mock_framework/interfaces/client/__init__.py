@@ -6,11 +6,11 @@ import threading
 from pathlib import Path
 from typing import Annotated
 
-from ..evidence import RequestRecord, playback_directories, read_requests
-from ..execution.clients import ClientResult
-from ..config.registry import Bounds, case_interface
-from ..config.values import duration
-from ..execution.transport import ExecutionError
+from ._records import RequestRecord, read_requests
+from ...execution.clients import ClientResult
+from ...config.registry import Bounds, case_interface
+from ...config.values import duration
+from ...execution.transport import ExecutionError
 
 
 @dataclass(frozen=True)
@@ -87,6 +87,21 @@ class RequestsResult:
     outcomes: dict[str, int]
     records: list[RequestRecord]
     truncated: bool
+
+
+def playback_directories(root, topology, targets=None, playback=None):
+    clients = {node['rpc']: node for node in topology if node['role'] == 'client'}
+    chosen = list(clients) if targets is None else targets
+    if not chosen or len(set(chosen)) != len(chosen) or set(chosen) - clients.keys():
+        raise ExecutionError('Expected nonempty, unique Client addresses')
+    if playback is None:
+        rounds = root / 'components' / 'client-0' / 'coordinator'
+        available = [int(path.name) for path in rounds.iterdir() if path.is_dir() and path.name.isdecimal()] if rounds.exists() else []
+        if not available:
+            raise ExecutionError('No Client playback exists')
+        playback = max(available)
+    return [root / 'components' / clients[target]['id'] / 'playback' / str(playback) for target in chosen]
+
 
 
 @case_interface('client/requests', effect='read')
