@@ -13,6 +13,7 @@ Everything except `rdma_ep_probe.sh` runs on the serving host.
 | `moe_tp_vs_ep_bench.py` | Routed-MoE kernel time per layer on one GPU: TP-sharded experts (all experts, 1/TP intermediate) vs one EP rank (experts/EP full experts), autotuned CUTLASS fused MoE in a CUDA graph over 43 distinct layers. |
 | `nccl_decode_collectives.py` | all_reduce / reduce_scatter / all_gather / all_to_all latency at decode sizes inside CUDA graphs (`torchrun`). |
 | `rdma_ep_probe.sh` | perftest RDMA WRITE latency (64 B-64 KiB), atomic latency and bandwidth between two hosts. |
+| `run_decode_tp4_sm120_pd.sh` | 5kpro TP4 MTP2 DECODE for a PD setup (KV over eRDMA or TCP from the CEP4PP2 prefill launcher), real acceptance, CUDA graph on; two instances per 8-GPU host (`GPUS=0,1,2,3 PORT=21000`, `GPUS=4,5,6,7 PORT=22000`). |
 | `ep_step_model.py` | Combines the above into a TP4 vs EP16 step-time estimate (DP4xTP4 or DP16 attention) and the break-even dispatch+combine cost per layer. |
 
 ## Decode-only measurement

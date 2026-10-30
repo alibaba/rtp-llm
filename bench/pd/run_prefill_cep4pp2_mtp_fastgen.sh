@@ -13,6 +13,8 @@
 #   CP_SINGLE=0 MAX_CTX_BS=4  batched prefill: up to 4 requests per pass (default 1 per pass)
 #   GEN         MTP draft depth (gen_num_per_cycle), default 3; must match the decode side. GEN=2 also sets
 #               DSV4_FP4_INDEXER_ALLOW_MTP2=1 (MTP depth 2 with the FP4 indexer is opt-in)
+#   RDMA=0      KV cache store over TCP instead of eRDMA (default 1)
+#   PORT        frontend start_port (default 14000)
 #   PD_SERVING_CP_RANK=0  advertise / publish only CP rank 0 of each PP stage (default off). Only for a TP1-per-rank
 #               decode (PPU DEP8); a TP>1 decode of this branch then plans quarter-block reads of the single peer
 #               and writes them into whole opaque DSV4 blocks (StagePeerGroups.cc planStagePeerSlices), so it
@@ -31,7 +33,7 @@ export MODEL_SERVICE_CONFIG="{\"service_id\":\"hetero-pd-prefill\",\"use_local\"
 export NO_PROXY=127.0.0.1,localhost,0.0.0.0${NO_PROXY_EXTRA:+,$NO_PROXY_EXTRA} no_proxy=127.0.0.1,localhost,0.0.0.0${NO_PROXY_EXTRA:+,$NO_PROXY_EXTRA}
 export ACCL_SET_ERDMA=1
 export ACCL_USE_NICS=erdma_0
-export CACHE_STORE_RDMA_MODE=1
+export CACHE_STORE_RDMA_MODE=${RDMA:-1}
 export CACHE_STORE_RDMA_QP_COUNT_PER_CONNECTION=${RDMA_QP:-8}
 export CACHE_STORE_RDMA_WRITE_BLOCK_CONCAT=${RDMA_CONCAT:-0}
 export CP_FORCE_SINGLE_PREFILL=${CP_SINGLE:-1}
@@ -133,4 +135,4 @@ export USE_BATCH_DECODE_SCHEDULER=0
 export USE_LOCAL=1
 export WORLD_SIZE=8
 CKPT=${CKPT:-/mnt/fuse/deepseek-ai/DeepSeek-V4-Flash}
-exec setsid /opt/conda310/bin/python3 -m rtp_llm.start_server --model_type deepseek_v4 --role_type PREFILL --pp_size 2 --tp_size 4 --dp_size 1 --ep_size 4 --world_size 8 --cp_rotate_method PREFILL_CP --prefill_cp_size 4 --prefill_cp_kv_cache_sharded 0 --warm_up ${WARM_UP:-0} --model_warm_up ${WARM_UP:-0} --load_method scratch --max_seq_len ${MAX_SEQ:-34816} --enable_cuda_graph 0 --act_type BF16 --seq_size_per_block 256 --kernel_seq_size_per_block ${KBLOCK:-256} --cache_store_rdma_mode 1 --cache_store_rdma_connect_timeout_ms 800 --use_local 1 --reuse_cache 1 --enable_device_cache 1 --enable_memory_cache 0 --enable_remote_cache 0 --memory_cache_size_mb 256 --write_cache_sync 1 --use_deepep_moe 0 --use_deepep_low_latency 0 --reserver_runtime_mem_mb 12288 --concurrency_limit ${CONC_LIMIT:-32} --max_context_batch_size ${MAX_CTX_BS:-1} --fp8_kv_cache 1 --enable_fp32_lm_head 0 ${FASTGEN_ARGS---enable_fast_gen 1 --fast_gen_context_budget 4096} --use_batch_decode_scheduler 0 --checkpoint_path $CKPT --tokenizer_path $CKPT --start_port 14000 --sp_type mtp --sp_model_type deepseek_v4_mtp --sp_checkpoint_path $CKPT --gen_num_per_cycle ${GEN:-3} --load_cache_timeout_ms 120000 --kv_cache_mem_mb ${PREFILL_KV_MB:-16000} --shutdown_timeout 60 --frontend_pre_stop_drain_seconds 0 --dash_sc_grpc_pre_stop_drain_seconds 0 > $RUN/prefill.stdout 2>&1
+exec setsid /opt/conda310/bin/python3 -m rtp_llm.start_server --model_type deepseek_v4 --role_type PREFILL --pp_size 2 --tp_size 4 --dp_size 1 --ep_size 4 --world_size 8 --cp_rotate_method PREFILL_CP --prefill_cp_size 4 --prefill_cp_kv_cache_sharded 0 --warm_up ${WARM_UP:-0} --model_warm_up ${WARM_UP:-0} --load_method scratch --max_seq_len ${MAX_SEQ:-34816} --enable_cuda_graph 0 --act_type BF16 --seq_size_per_block 256 --kernel_seq_size_per_block ${KBLOCK:-256} --cache_store_rdma_mode ${RDMA:-1} --cache_store_rdma_connect_timeout_ms 800 --use_local 1 --reuse_cache 1 --enable_device_cache 1 --enable_memory_cache 0 --enable_remote_cache 0 --memory_cache_size_mb 256 --write_cache_sync 1 --use_deepep_moe 0 --use_deepep_low_latency 0 --reserver_runtime_mem_mb 12288 --concurrency_limit ${CONC_LIMIT:-32} --max_context_batch_size ${MAX_CTX_BS:-1} --fp8_kv_cache 1 --enable_fp32_lm_head 0 ${FASTGEN_ARGS---enable_fast_gen 1 --fast_gen_context_budget 4096} --use_batch_decode_scheduler 0 --checkpoint_path $CKPT --tokenizer_path $CKPT --start_port ${PORT:-14000} --sp_type mtp --sp_model_type deepseek_v4_mtp --sp_checkpoint_path $CKPT --gen_num_per_cycle ${GEN:-3} --load_cache_timeout_ms 120000 --kv_cache_mem_mb ${PREFILL_KV_MB:-16000} --shutdown_timeout 60 --frontend_pre_stop_drain_seconds 0 --dash_sc_grpc_pre_stop_drain_seconds 0 > $RUN/prefill.stdout 2>&1

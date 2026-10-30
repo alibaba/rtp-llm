@@ -51,6 +51,8 @@ In RDMA mode the decode side reads KV from P, so P NIC tx is the KV byte count.
 | `an_len_sweep.py` | output of `run_len_sweep.sh` → per-length TTFT, gap12, step, last KV byte, D's LOAD reply time on the gRPC stream (KV exposure = how much it lands after tok1), D first step. |
 | `an_prefix_cN.py` | shared-prefix rounds → per-round TTFT/tok2/gap12 and KV sent at the k-th first token. |
 | `an_prefix_gated.py` | gated or natural rounds → per-round TTFT/tok2/gap12/TPOT, KV MB per request, last KV byte vs first/last tok1. |
+| `an_gated_rounds.py <out_dir> [tag ...]` | gated rounds without a wire sampler → per tag TTFT / tok2 / gap12 / TPOT and city check, first round skipped. |
+| `an_uniform_load.py <run.jsonl> ...` | `pd_uniform_load.py` runs → send rate, first-token completion rate, TTFT p50/p90 and per-quarter p50, tok2, TPOT, output length / finish reasons, decode concurrency, tokens per chunk. |
 | `prefill_batches.py <engine.log> '<len-*.json>'` | how many requests P prefilled per forward (from the `publish pd plan kv cache` lines of a stage-1 rank). |
 | `thread_cpu.py snap/diff` | CPU seconds per thread name of all `rtp_llm` processes between two snapshots. |
 
@@ -100,3 +102,44 @@ python3 pd_uniform_load.py --prompts-file prompts_32k_x64_distinct.json --qps 0.
 
 TTFT depends on prompt content at a fixed length (repetitive synthetic text vs ShareGPT 32K differ by
 ~60-80 ms on the same server); compare runs on the same prompt set.
+
+## Capacity and end-to-end method (hetero / homogeneous PD comparison)
+
+Used for the 87.5% / 50% prefix-hit comparison of 5kpro P -> PPU D against
+homogeneous 5kpro and PPU PD (32K input, 1024 output, MTP 2+1 with real
+acceptance). Restart P before every run: a run's prompts stay in P's prefix cache.
+
+```bash
+# prompt sets: 800 distinct suffixes behind a 28K (87.5%) / 16K (50%) shared prefix
+python3 make_prefix_prompts.py --base prompts_32k_x24.json --tokenizer $CKPT --hit 28672 --count 800 --seed 30000 --tag H --out h28_x800.json
+python3 make_prefix_prompts.py --base prompts_32k_x24.json --tokenizer $CKPT --hit 16384 --count 800 --seed 30000 --tag H --out h16_x800.json
+
+# P capacity: single-request TTFT at 0.5 qps, then uniform arrivals above capacity with 16-token outputs (D never
+# limits); the capacity is the first-token completion rate from the 2nd quartile on (an_uniform_load.py ft_rate)
+python3 pd_uniform_load.py --d-addrs $D --prompts-file h28_x800.json --nonce-pos suffix --qps 0.5 --duration 16 --max-tokens 16 --warmup 1 --out c1.jsonl
+python3 pd_uniform_load.py --d-addrs $D --prompts-file h28_x800.json --nonce-pos suffix --qps 6.5 --duration 20 --max-tokens 16 --offset 10 --out sat.jsonl
+python3 an_uniform_load.py sat.jsonl
+
+# end to end: uniform arrivals at the target rate, 1024-token outputs; the sustainable QPS is the highest rate whose
+# TTFT quarters stay flat and whose TPOT p50 is within the SLA (15 ms here)
+python3 pd_uniform_load.py --endpoint $P1,$P2 --d-addrs $D --prompts-file h28_x800.json --nonce-pos suffix \
+    --qps 7.6 --duration 42 --max-tokens 1024 --warmup 1 --out e2e-q7.6.jsonl
+python3 an_uniform_load.py e2e-q7.6.jsonl
+```
+
+`$D` is the comma list of every decode DP rank's http address (PPU DEP8: 8 entries); several P instances are given as
+a comma list to `--endpoint` (request i goes to P i % n). Decode capacity at real acceptance: hold the decode until
+`cc` requests are ready (PPU: D-side `DSV4_DECODE_BARRIER_BATCH=cc`; 5kpro TP4: requests sent at once), then
+`../decode/decode_plateau_bench.py --cc <cc> --max-tokens 1024 --tokens-per-step 2 --d-addrs $D`, and read
+`measured_tpot_ms` / `measured_tok_per_s`; the decode capacity is tok/s at the 15 ms TPOT line / 1024.
+
+eRDMA vs TCP with whole-batch prefill (4 x (30K hit + 2K new) per round, P started with `CP_SINGLE=0 MAX_CTX_BS=4`,
+`RDMA=0` for TCP on both sides, `MTP_CHUNKED=0 FASTGEN_ARGS=' '` for the non-fastgen path):
+
+```bash
+python3 make_prefix_prompts.py --base prompts_32k_x24.json --tokenizer $CKPT --hit 30720 --count 400 --seed 50000 --tag T --out h30_x400.json
+python3 pd_prefix_gated_client.py --prompts h30_x400.json --rounds 6 --conc 4 --max-tokens 128 --gate 1.0 --tag rdma-fg --out-dir p2
+python3 an_gated_rounds.py p2
+```
+
+A 5kpro TP4 decode peer for these runs is `../decode/run_decode_tp4_sm120_pd.sh`.
