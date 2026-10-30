@@ -2501,6 +2501,13 @@ class AttentionV41FP8(AttentionFP8):
         buf = self._swa_prefill_concat(qkv, common, fuse_cache_write=fuse_cache_write)
         prefixes_host = self._host_prefill_prefixes(common)
         tails = [min(int(p), self.window_size - 1) for p in prefixes_host]
+        packed_lengths = getattr(
+            getattr(common, "swa_meta", None), "packed_row_lengths", None
+        )
+        if packed_lengths is not None:
+            return prefill_kv_workspace.split_swa_rows(buf, packed_lengths), [
+                int(p) - t for p, t in zip(prefixes_host, tails)
+            ]
         row_stride, width_stride = buf.stride()[1:]
         base_offset, batch_stride = buf.storage_offset(), buf.stride(0)
         if buf.is_contiguous():
@@ -2519,11 +2526,14 @@ class AttentionV41FP8(AttentionFP8):
         ], [int(p) - t for p, t in zip(prefixes_host, tails)]
 
     def _swa_prefill_concat(self, qkv, common, *, fuse_cache_write=False):
-        """Read the 528B prefix before a new chunk overwrites the SWA ring."""
+        """Pack prefix tails and fresh BF16 rows before overwriting the SWA ring."""
         meta = common.swa_meta
         B, D = common.batch_size, self.head_dim
+        row_offsets = getattr(meta, "packed_row_offsets", None)
+        row_lengths = getattr(meta, "packed_row_lengths", None)
+        shape = (sum(row_lengths), D) if row_lengths is not None else (B, meta.M, D)
         allocate = torch.empty if fuse_cache_write else torch.zeros
-        buf = allocate(B, meta.M, D, dtype=torch.bfloat16, device=qkv.kv_full.device)
+        buf = allocate(shape, dtype=torch.bfloat16, device=qkv.kv_full.device)
         if meta.prefix_len_max > 0:
             if self._swa_cp_byte_sliced():
                 swa_codec.dequantize_and_gather_k_cache_slots_cp_byte_sliced(
@@ -2536,6 +2546,7 @@ class AttentionV41FP8(AttentionFP8):
                     cp_size=common.cp_ctx.cp_size,
                     cp_rank=common.cp_ctx.cp_rank,
                     compaction=meta.cache_compaction,
+                    out_row_offsets=row_offsets,
                 )
             else:
                 swa_codec.dequantize_and_gather_k_cache_slots(
@@ -2544,6 +2555,7 @@ class AttentionV41FP8(AttentionFP8):
                     slot_mapping=meta.cache_slot_mapping,
                     gather_lens=meta.cache_gather_lens,
                     offset=0,
+                    out_row_offsets=row_offsets,
                 )
         if fuse_cache_write:
             # Prefix reads finish first; all visible fresh rows are then stored

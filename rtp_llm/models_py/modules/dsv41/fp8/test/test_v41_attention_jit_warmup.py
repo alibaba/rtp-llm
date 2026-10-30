@@ -1342,10 +1342,17 @@ class V41AttentionWarmupCPU(unittest.TestCase):
         self.assertEqual(mapping["tokens_per_block_for_block_table"], 8192)
         flat = ops.compute_swa_slot_in_flat_from_cu.call_args_list
         self.assertEqual(
-            [call.kwargs["num_tokens"] for call in flat], [2, 2, 6, 6, 34, 34]
+            [call.kwargs["num_tokens"] for call in flat], [2] * 4 + [6] * 4 + [34] * 4
         )
         self.assertTrue(all(call.kwargs["window_size"] == 63 for call in flat))
         self.assertEqual({call.args[1].dtype for call in flat}, {"int32", "int64"})
+        for original, packed in zip(flat[::2], flat[1::2]):
+            self.assertIsNone(original.kwargs["row_offsets"])
+            offsets = packed.kwargs["row_offsets"]
+            self.assertEqual(offsets.dtype, "int64")
+            self.assertEqual(
+                offsets.values, list(range(0, packed.kwargs["num_tokens"] // 2 * 3, 3))
+            )
 
     def test_ratio_one_compression_uses_none_previous_state(self):
         source = ast.parse((_FP8 / "_v41_attention_jit_warmup.py").read_text())

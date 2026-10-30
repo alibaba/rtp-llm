@@ -213,6 +213,42 @@ cuda13_sm100_py_test(
 
 
 cuda13_sm100_py_test(
+    name = "test_v41_swa_packed",
+    srcs = ["test_v41_swa_packed.py", "//rtp_llm/test/pytest:pytest_main.py"],
+    main = "//rtp_llm/test/pytest:pytest_main.py",
+    args = ["--cuda-devices", "1", "$(location :test_v41_swa_packed.py)"],
+    deps = [
+        "//rtp_llm:testlib",
+        "//rtp_llm/models_py:modules",
+        test_requirement("pytest"),
+    ],
+    tags = ["dsv41_cuda13"],
+    legacy_create_init = 0,
+)
+
+
+cuda13_sm100_py_test(
+    name = "test_v41_swa_packed_cp4_nccl",
+    srcs = [
+        "test_v41_swa_packed_cp4_nccl.py",
+        "test_v41_swa_packed.py",
+        "//rtp_llm/test/pytest:pytest_main.py",
+    ],
+    main = "//rtp_llm/test/pytest:pytest_main.py",
+    args = ["--cuda-devices", "4", "$(location :test_v41_swa_packed_cp4_nccl.py)"],
+    gpu_count = 4,
+    deps = [
+        "//rtp_llm:testlib",
+        "//rtp_llm/models_py:modules",
+        "//rtp_llm/test/utils:test_util",
+        test_requirement("pytest"),
+    ],
+    tags = ["dsv41_cuda13"],
+    legacy_create_init = 0,
+)
+
+
+cuda13_sm100_py_test(
     name = "test_v41_decode_qkv_integration",
     srcs = [
         "test_v41_decode_qkv_integration.py",

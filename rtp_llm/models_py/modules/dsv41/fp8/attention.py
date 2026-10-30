@@ -564,6 +564,10 @@ class SwaPrefillMeta(NamedTuple):
     cache_slot_mapping: Optional[torch.Tensor] = None
     slot_compaction: Optional[CPByteSlicedSlotCompaction] = None
     cache_compaction: Optional[CPByteSlicedSlotCompaction] = None
+    # V4.1 continuation stores only each request's prefix tail + fresh rows.
+    # All prefix/fresh/attention indices use these same packed origins.
+    packed_row_offsets: Optional[torch.Tensor] = None
+    packed_row_lengths: Optional[Tuple[int, ...]] = None
 
 
 class WorkspaceMeta(NamedTuple):
@@ -4196,6 +4200,8 @@ class AttentionFP8(nn.Module):
             )
         host_prefixes = getattr(cp_ctx, "prefix_lengths_host", None)
         host_lengths = getattr(cp_ctx, "input_lengths_global_host", None)
+        packed_row_lengths = None
+        packed_row_offsets = None
         if (
             hasattr(self, "swa_bounded_replay")
             and cp_on_write
@@ -4205,9 +4211,12 @@ class AttentionFP8(nn.Module):
             # CP continuation builds its index rows from absolute positions.
             # The per-request gather lengths are only used by the non-CP path.
             combined_gather_lens = None
-            combined_gather_len_max = max(
-                (n + min(p, win - 1) for p, n in zip(host_prefixes, host_lengths))
+            gather_lengths_host = tuple(
+                n + min(p, win - 1) for p, n in zip(host_prefixes, host_lengths)
             )
+            combined_gather_len_max = max(gather_lengths_host)
+            if swa_query_meta and any_cont:
+                packed_row_lengths = gather_lengths_host
         else:
             if write_combined_seq_lens is None:
                 write_combined_seq_lens = (
@@ -4221,7 +4230,21 @@ class AttentionFP8(nn.Module):
                 num_decodes=0,
                 window_size=win,
             )
-            combined_gather_len_max = int(combined_gather_lens.max().item())
+            if swa_query_meta and any_cont:
+                packed_row_lengths = tuple(combined_gather_lens.detach().tolist())
+                combined_gather_len_max = max(packed_row_lengths)
+            else:
+                combined_gather_len_max = int(combined_gather_lens.max().item())
+        if packed_row_lengths is not None:
+            row_offsets, total_rows = [], 0
+            for length in packed_row_lengths:
+                row_offsets.append(total_rows)
+                total_rows += length
+            if total_rows > torch.iinfo(torch.int32).max:
+                raise ValueError("Packed SWA rows exceed FlashMLA int32 indices")
+            packed_row_offsets = torch.tensor(
+                row_offsets, dtype=torch.int64, device=device
+            )
         M = max(combined_gather_len_max, 1)
         if any_cont:
             cache_seq_lens = prefix_lengths.to(device=device, dtype=torch.int32)[
@@ -4294,6 +4317,7 @@ class AttentionFP8(nn.Module):
                     N=0,
                     req_id_per_token=req_id_per_token,
                     prefix_lengths=prefix_lengths,
+                    row_offsets=packed_row_offsets,
                 )
                 slot_in_flat = _swa_ops.compute_swa_slot_in_flat_from_cu(
                     _flat_1d(
@@ -4303,6 +4327,7 @@ class AttentionFP8(nn.Module):
                     num_tokens=cp_ctx.seq_len_full,
                     M=M,
                     window_size=win,
+                    row_offsets=packed_row_offsets,
                 )
             else:
                 topk_indices_empty = torch.empty(
@@ -4318,6 +4343,7 @@ class AttentionFP8(nn.Module):
                     topk=0,
                     M=M,
                     N=0,
+                    row_offsets=packed_row_offsets,
                 )
                 slot_in_flat = _swa_ops.compute_swa_slot_in_flat(
                     position_ids.to(device=device),
@@ -4325,6 +4351,7 @@ class AttentionFP8(nn.Module):
                     prefix_lengths.to(device=device),
                     M=M,
                     window_size=win,
+                    row_offsets=packed_row_offsets,
                 )
             prefix_len_max = 1
         else:
@@ -4353,6 +4380,8 @@ class AttentionFP8(nn.Module):
             cache_slot_mapping=cache_slot_mapping,
             slot_compaction=slot_compaction,
             cache_compaction=cache_compaction,
+            packed_row_offsets=packed_row_offsets,
+            packed_row_lengths=packed_row_lengths,
         )
 
     def _prefill_compute_qkv(
