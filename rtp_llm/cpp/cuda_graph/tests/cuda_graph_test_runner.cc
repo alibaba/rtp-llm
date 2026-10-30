@@ -85,7 +85,6 @@ public:
         params.max_seq_len              = 64;
         params.kernel_block_table_width = 1;
         params.num_tokens_per_bs        = static_cast<int>(num_tokens_per_request);
-        params.hc_mult                  = hc_mult;
         params.max_context_batch_size   = static_cast<size_t>(max_requests);
         params.hidden_size              = static_cast<size_t>(hidden_size);
         params.input_hidden_size        = static_cast<size_t>(hidden_size * hc_mult);

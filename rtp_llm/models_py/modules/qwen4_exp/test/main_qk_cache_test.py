@@ -22,15 +22,17 @@ class MainQkCacheTest(unittest.TestCase):
         self.tester = native_tests.MainQkNormRopeTest()
         self.tester.setUp()
 
-    def case(self, heads, batch, query, prefixes):
+    def case(self, heads, batch, query, prefixes, pool_pages=None):
         cfg, norm, source, positions, params, original, plain, _ = (
             self.tester.setup_case(heads, batch * query)
         )
         columns = (max(prefixes) + query + 127) // 128
-        pages = 1 + batch * columns
-        table = torch.arange(1, pages, device="cuda", dtype=torch.int32).view(
-            batch, columns
-        )
+        pages = pool_pages or (1 + batch * columns)
+        table = torch.arange(
+            1, 1 + batch * columns, device="cuda", dtype=torch.int32
+        ).view(batch, columns)
+        if pool_pages is not None:
+            table.fill_(pool_pages - 1)
         cu = torch.arange(batch + 1, device="cuda", dtype=torch.int32) * query
         length = torch.full((batch,), query, dtype=torch.int32).pin_memory()
         prefix = torch.tensor(prefixes, dtype=torch.int32).pin_memory()
@@ -54,9 +56,15 @@ class MainQkCacheTest(unittest.TestCase):
             torch.tensor(prefixes, device="cuda", dtype=torch.int32)[:, None]
             + torch.arange(1, query + 1, device="cuda", dtype=torch.int32)
         ).contiguous()
-        raw = (torch.randn(pages, 2, 1, 128, 256, device="cuda") * 0.2).to(
-            torch.float8_e4m3fn
-        )
+        if pool_pages is None:
+            raw = (torch.randn(pages, 2, 1, 128, 256, device="cuda") * 0.2).to(
+                torch.float8_e4m3fn
+            )
+        else:
+            raw = torch.empty(
+                pages, 2, 1, 128, 256, device="cuda", dtype=torch.float8_e4m3fn
+            )
+            raw.view(torch.uint8).zero_()
         scales = torch.rand(pages, 256, device="cuda") + 0.5
         cache = SimpleNamespace(kv_cache_base=raw, kv_scale_base=scales)
         return cfg, norm, source, positions, params, original, table, lens, cache
@@ -111,6 +119,9 @@ class MainQkCacheTest(unittest.TestCase):
         torch.testing.assert_close(
             copies[0].kv_scale_base, copies[1].kv_scale_base, rtol=0, atol=0
         )
+
+    def test_physical_page_offset_beyond_signed_int32(self):
+        self.compare(self.case(3, 1, 4, [124], pool_pages=32769))
 
     def test_native_query_cache_scale_bytes_across_pages_and_heads(self):
         for heads in (3, 6, 12):

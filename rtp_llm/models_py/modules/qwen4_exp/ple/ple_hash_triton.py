@@ -5,17 +5,17 @@ import triton
 import triton.language as tl
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["BATCH", "SEQ", "TOTAL", "HISTORY_STRIDE"])
 def _hash_ngram_ids(
     HISTORY,
     VOCAB,
     OFFSETS,
     MULTIPLIERS,
     OUT,
-    BATCH: tl.constexpr,
-    SEQ: tl.constexpr,
-    TOTAL: tl.constexpr,
-    HISTORY_STRIDE: tl.constexpr,
+    BATCH,
+    SEQ,
+    TOTAL,
+    HISTORY_STRIDE,
     EOS: tl.constexpr,
     BLOCK: tl.constexpr,
 ):
@@ -60,7 +60,7 @@ def try_hashed_ngram_ids(
     *,
     ngram_size,
     heads_per_ngram,
-    eos_token_id
+    eos_token_id,
 ):
     if not (
         history.is_cuda

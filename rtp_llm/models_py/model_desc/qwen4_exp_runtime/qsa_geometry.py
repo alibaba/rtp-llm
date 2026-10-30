@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 import torch
+
 from rtp_llm.models.qwen4_exp.qwen4_exp_kv_cache import (
     INDEXER_KV_TAG,
     INDEXER_STATE_TAG,
@@ -319,7 +320,6 @@ def _draft_incremental_prefill_geometry(
             "token_budget": token_budget,
             "prefixes": prefixes,
             "cu_seqlens": expected_cu,
-            "logical_positions": logical_positions,
             "current_cos": current_cos,
             "current_sin": current_sin,
             "visible_lengths": visible_lengths,

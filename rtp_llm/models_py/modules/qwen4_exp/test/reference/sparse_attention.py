@@ -41,33 +41,22 @@ def gather_and_attend(
 
     q_per_kv = H_q // H_kv
     out = torch.zeros(B, H_q, S, D, device=dev, dtype=q.dtype)
-    clamped = selected_indices.clamp(min=0)
-    mask = selected_indices >= 0
-
-    for h_q in range(H_q):
-        h_kv = h_q // q_per_kv
-        ks = k[:, h_kv]  # [B, T, D]
-        vs = v[:, h_kv]  # [B, T, D]
-
-        k_sel = (
-            ks.unsqueeze(1)
-            .expand(-1, S, -1, -1)
-            .gather(2, clamped.unsqueeze(-1).expand(-1, -1, -1, D))
-        )
-        v_sel = (
-            vs.unsqueeze(1)
-            .expand(-1, S, -1, -1)
-            .gather(2, clamped.unsqueeze(-1).expand(-1, -1, -1, D))
-        )
-
-        qh = q[:, h_q]  # [B, S, D]
-        scores = torch.matmul(qh.unsqueeze(-2), k_sel.transpose(-2, -1))
-        scores = scores.squeeze(-2) * scale
-        scores = torch.where(mask, scores, float("-inf"))
-        attn = F.softmax(scores, dim=-1)
-        # Rows with zero valid positions (all -inf) produce nan; replace by 0.
-        attn = torch.where(mask.any(dim=-1, keepdim=True), attn, 0.0)
-        oh = torch.matmul(attn.unsqueeze(-2), v_sel).squeeze(-2)
-        out[:, h_q] = oh
-
+    for start in range(0, S, 32):
+        end = min(start + 32, S)
+        clamped = selected_indices[:, start:end].clamp(min=0).long()
+        mask = selected_indices[:, start:end] >= 0
+        for h_q in range(H_q):
+            h_kv = h_q // q_per_kv
+            ks, vs = k[:, h_kv], v[:, h_kv]
+            indices = clamped.unsqueeze(-1).expand(-1, -1, -1, D)
+            k_sel = ks.unsqueeze(1).expand(-1, end - start, -1, -1).gather(2, indices)
+            v_sel = vs.unsqueeze(1).expand(-1, end - start, -1, -1).gather(2, indices)
+            qh = q[:, h_q, start:end]
+            scores = torch.matmul(qh.unsqueeze(-2), k_sel.transpose(-2, -1))
+            scores = scores.squeeze(-2) * scale
+            scores = torch.where(mask, scores, float("-inf"))
+            attn = F.softmax(scores, dim=-1)
+            attn = torch.where(mask.any(dim=-1, keepdim=True), attn, 0.0)
+            out[:, h_q, start:end] = torch.matmul(attn.unsqueeze(-2), v_sel).squeeze(-2)
+            del k_sel, v_sel
     return out

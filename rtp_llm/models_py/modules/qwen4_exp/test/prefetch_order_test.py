@@ -41,7 +41,7 @@ class PrefetchOrderTest(unittest.TestCase):
         model.ple_layers = torch.nn.ModuleDict(
             {"0": torch.nn.Identity()} if has_ple else {}
         )
-        model.kv_cache = None
+        model.kv_cache = object()
         order = []
         hidden = torch.zeros(1, 4)
 

@@ -207,8 +207,8 @@ std::string PyWrappedModel::prepareSpeculativeTargetCommit(const torch::Tensor& 
     if (!has_speculative_target_commit_hooks_) {
         return {};
     }
+    py::gil_scoped_acquire gil;
     try {
-        py::gil_scoped_acquire gil;
         py_model_.attr("prepare_speculative_target_commit")(accept_len);
         return {};
     } catch (const py::error_already_set& e) {
@@ -227,8 +227,8 @@ std::string PyWrappedModel::finishSpeculativeTargetCommit(bool commit) {
     if (!has_speculative_target_commit_hooks_) {
         return {};
     }
+    py::gil_scoped_acquire gil;
     try {
-        py::gil_scoped_acquire gil;
         py_model_.attr("finish_speculative_target_commit")(commit);
         return {};
     } catch (const py::error_already_set& e) {
@@ -247,8 +247,8 @@ std::string PyWrappedModel::finalizeSpeculativeTargetCommit() {
     if (!has_speculative_target_commit_hooks_) {
         return {};
     }
+    py::gil_scoped_acquire gil;
     try {
-        py::gil_scoped_acquire gil;
         py_model_.attr("finalize_speculative_target_commit")();
         return {};
     } catch (const py::error_already_set& e) {
@@ -712,8 +712,8 @@ void PyWrappedModel::initializeCustomOutput() {
 torch::Tensor PyWrappedModel::runCustomOutput(const torch::Tensor& rows) {
     py::gil_scoped_acquire gil;
     auto                   output = py_model_.attr("custom_output_handler")
-                                        .attr("extend_forward")(py::arg("selected_hidden_states") = rows)
-                                        .cast<torch::Tensor>();
+                      .attr("extend_forward")(py::arg("selected_hidden_states") = rows)
+                      .cast<torch::Tensor>();
     TORCH_CHECK(output.defined() && (output.dim() == 1 || output.dim() == 2) && output.numel() > 0,
                 "custom output must be a nonempty [batch] or [batch, width] tensor");
     TORCH_CHECK(output.size(0) == rows.size(0), "custom output must return one row per selected context sequence");
@@ -1020,6 +1020,8 @@ void PyWrappedModel::prepareAttentionInputs(const GptModelInputs& inputs, bool s
     {
         RTP_LLM_PROFILE_SCOPE("py_model.prepareAttentionInputs(build)");
         attention_inputs = buildPyAttentionInputs(inputs);
+        // Fake/warmup streams alias reserved block zero and have no live cache rows.
+        attention_inputs.is_s_padded = inputs.warmup || inputs.is_fake_stream;
     }
     if (!inputs.warmup && inputs.pd_separation) {
         attention_inputs.cache_store_inputs = prepareWriteCacheParams(inputs);
@@ -1441,10 +1443,10 @@ torch::Tensor PyWrappedModel::computeLogits(const torch::Tensor& hidden) {
 
 torch::Tensor PyWrappedModel::tpSyncEmbeddingOrLogits(const torch::Tensor& input) {
     RTP_LLM_PROFILE_SCOPE("py_model.tpSyncEmbeddingOrLogits");
-    const auto tp_size = device_props_.tp_size;
-    const auto tp_rank = device_props_.tp_rank;
-    const auto rows    = input.size(0);
-    const auto cols    = input.size(1);
+    const auto tp_size     = device_props_.tp_size;
+    const auto tp_rank     = device_props_.tp_rank;
+    const auto rows        = input.size(0);
+    const auto cols        = input.size(1);
     const auto local_numel = input.numel();
     auto       all_data    = torch::empty({rows, cols * (int64_t)tp_size}, input.options());
     // Copy local data into the correct rank position
@@ -1780,10 +1782,10 @@ PyWrappedModel::splitInputsIntoMicroBatches(const GptModelInputs& inputs, const 
                     inputs.attention_mask.defined() ?
                         inputs.attention_mask.narrow(0, sliced_batch_idx, total_batch_size) :
                         torch::Tensor();
-                int32_t slice_token_num     = std::accumulate(input_lengths_ptr + sliced_batch_idx + d_micro_batch_size,
-                                                              input_lengths_ptr + sliced_batch_idx + total_batch_size,
-                                                              0)
-                                              + d_micro_batch_size;
+                int32_t slice_token_num = std::accumulate(input_lengths_ptr + sliced_batch_idx + d_micro_batch_size,
+                                                          input_lengths_ptr + sliced_batch_idx + total_batch_size,
+                                                          0)
+                                          + d_micro_batch_size;
                 int32_t slice_lm_output_num = total_batch_size;
                 micro_model_inputs.lm_output_indexes =
                     inputs.lm_output_indexes.narrow(0, sliced_lm_output_index, slice_lm_output_num);

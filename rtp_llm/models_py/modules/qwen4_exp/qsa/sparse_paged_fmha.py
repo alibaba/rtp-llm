@@ -149,10 +149,10 @@ def _sparse_paged_online_split_kernel(
     NUM_SPLITS: tl.constexpr,
     BLOCKS_PER_SPLIT: tl.constexpr,
 ):
-    batch = tl.program_id(0)
-    head = tl.program_id(1)
-    query = tl.program_id(2) // NUM_SPLITS
-    split = tl.program_id(2) % NUM_SPLITS
+    batch = tl.program_id(1).to(tl.int64)
+    head = tl.program_id(2)
+    query = tl.program_id(0).to(tl.int64) // NUM_SPLITS
+    split = tl.program_id(0) % NUM_SPLITS
     kv_head = head // (H_Q // H_KV)
     rd = tl.arange(0, D)
     q = tl.load(
@@ -185,7 +185,7 @@ def _sparse_paged_online_split_kernel(
             block_table_ptr + batch * stride_bt_b + logical * stride_bt_block,
             mask=candidate & (logical < max_blocks),
             other=0,
-        )
+        ).to(tl.int64)
         valid = (
             candidate
             & (logical < max_blocks)
@@ -245,7 +245,7 @@ def _merge_sparse_paged_splits_kernel(
     QUERIES: tl.constexpr,
     WITH_GATE: tl.constexpr,
 ):
-    row = tl.program_id(0)
+    row = tl.program_id(0).to(tl.int64)
     splits = tl.arange(0, NUM_SPLITS)
     rd = tl.arange(0, D)
     base = partial_ptr + row * NUM_SPLITS * (D + 2)
@@ -491,7 +491,7 @@ def sparse_paged_gqa_attn(
             fp16_pv=fp16_pv,
         )
     if not grouped:
-        _sparse_paged_online_split_kernel[(batch, q_heads, query_len * splits)](
+        _sparse_paged_online_split_kernel[(query_len * splits, batch, q_heads)](
             q,
             kv_cache,
             scale_pointer,

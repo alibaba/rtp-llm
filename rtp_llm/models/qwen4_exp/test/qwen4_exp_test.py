@@ -81,6 +81,22 @@ class Qwen4ExpTest(unittest.TestCase):
         Path(self._temp_dir.name, "config.json").write_text(json.dumps(self._config()))
         self.config = Qwen4Exp.create_config(self._temp_dir.name)
 
+    def test_checkpoint_dtype_and_default_cache_pages(self):
+        data = self._config()
+        data["text_config"]["dtype"] = "bfloat16"
+        Path(self._temp_dir.name, "config.json").write_text(json.dumps(data))
+        self.config = Qwen4Exp.create_config(self._temp_dir.name)
+        self.assertEqual(self.config.config_dtype, "bfloat16")
+        for default in (8, 16, 64):
+            self.config.attn_config.tokens_per_block = default
+            self.config.attn_config.kernel_tokens_per_block = default
+            Qwen4Exp._post_build_model_config(self.config)
+            self.assertEqual(self.config.attn_config.tokens_per_block, 128)
+            self.assertEqual(self.config.attn_config.kernel_tokens_per_block, 128)
+        self.config.attn_config.tokens_per_block = 192
+        with self.assertRaisesRegex(ValueError, "128-token"):
+            Qwen4Exp._post_build_model_config(self.config)
+
     def _loaded_model(self, **changes):
         model = Qwen4Exp.__new__(Qwen4Exp)
         config = dict(
@@ -159,7 +175,6 @@ class Qwen4ExpTest(unittest.TestCase):
             w for w in info.layer_weights[1] if w.name == W.qwen4_ple_ngram_shards
         )
         self.assertEqual(ple.resident_device, "cpu")
-        self.assertEqual(self.config._tp_sharded_extra_weight_bytes, 0)
         self.assertGreater(self.config._replicated_extra_weight_bytes, 0)
 
     def test_indexer_weights_only_belong_to_full_attention(self):
@@ -401,7 +416,7 @@ class Qwen4ExpTest(unittest.TestCase):
     def test_hc_mult_is_plumbed_from_hc_count(self):
         self.assertEqual(self.config.hc_mult, 4)
         self.assertEqual(
-            self.config.mtp_input_hidden_size,
+            self.config.getMtpInputHiddenSize(),
             self.config.hc_mult * self.config.hidden_size,
         )
         self.assertEqual(

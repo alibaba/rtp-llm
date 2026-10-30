@@ -18,9 +18,11 @@ from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer import (
 )
 from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_compressor import (
     _write_indexer_cache_vectorized,
-    compress_prefill,
     restore_indexer_cache,
     write_indexer_cache,
+)
+from rtp_llm.models_py.modules.qwen4_exp.test.indexer_compression_reference import (
+    compress_prefill,
 )
 
 _H = 4

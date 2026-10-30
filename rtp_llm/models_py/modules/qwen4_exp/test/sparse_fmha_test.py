@@ -20,6 +20,21 @@ _DEV = "cuda"
 
 
 class SparseFmhaTest(unittest.TestCase):
+    def test_long_prompts_use_grid_x_for_both_kernels(self):
+        for heads, width in ((1, 1), (3, 256)):
+            with self.subTest(heads=heads):
+                q = torch.zeros(
+                    (1, heads, 65536, 32), device="cuda", dtype=torch.bfloat16
+                )
+                k = torch.zeros((1, 1, 1, 32), device="cuda", dtype=q.dtype)
+                v = torch.arange(32, device="cuda", dtype=q.dtype).view(1, 1, 1, 32)
+                selected = torch.full(
+                    (1, 65536, width), -1, device="cuda", dtype=torch.int32
+                )
+                selected[..., 0] = 0
+                out = sparse_prefill_attn(q, k, v, selected)
+                torch.testing.assert_close(out, v.expand_as(out), rtol=0, atol=0)
+
     def test_automatic_grouping_matches_fp64_with_repeated_keys_and_empty_tiles(self):
         torch.manual_seed(88)
         for gqa in (6, 12):
@@ -202,10 +217,10 @@ class SparseFmhaTest(unittest.TestCase):
             None, None, :
         ].expand(1, 7, 16)
         expected = sparse_prefill_attn(q, k, v, selected)
-        with patch.object(torch.Tensor, "item", side_effect=AssertionError("GPU readback")):
-            actual = sparse_prefill_attn(
-                q, k, v, selected, validate_selected=False
-            )
+        with patch.object(
+            torch.Tensor, "item", side_effect=AssertionError("GPU readback")
+        ):
+            actual = sparse_prefill_attn(q, k, v, selected, validate_selected=False)
         torch.testing.assert_close(actual, expected, atol=0, rtol=0)
 
     def test_matches_torch_on_larger_shape(self):

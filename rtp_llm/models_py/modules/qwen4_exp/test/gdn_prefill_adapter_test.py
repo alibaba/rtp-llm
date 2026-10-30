@@ -5,6 +5,8 @@ import triton
 
 from rtp_llm.models_py.modules.qwen4_exp.gdn_prefill_adapter import (
     _store_page_checkpoints,
+)
+from rtp_llm.models_py.modules.qwen4_exp.test.gdn_prefill_reference import (
     sm120_prefill_with_checkpoints,
 )
 from rtp_llm.models_py.triton_kernels.fla.chunk import chunk_gated_delta_rule
@@ -14,6 +16,27 @@ from rtp_llm.models_py.triton_kernels.fla.utils import assert_close
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA is required")
 class GdnSm120PrefillTest(unittest.TestCase):
+    def test_overwritten_cuda13_wheel_uses_native_prefill(self):
+        from unittest.mock import patch
+
+        from rtp_llm.models_py.modules.qwen4_exp.gdn_prefill_adapter import (
+            sm120_dsl_available,
+        )
+
+        sm120_dsl_available.cache_clear()
+        self.assertTrue(
+            sm120_dsl_available(), "SM120 pool must provide the intact CUDA 13 compiler"
+        )
+        sm120_dsl_available.cache_clear()
+        try:
+            with patch(
+                "rtp_llm.models_py.utils.cutlass.cuda13_cutlass_is_intact",
+                return_value=False,
+            ):
+                self.assertFalse(sm120_dsl_available())
+        finally:
+            sm120_dsl_available.cache_clear()
+
     def test_output_final_and_all_page_states_with_ragged_prefix(self):
         # fail-loud rather than skip: this target is pinned to RTX_5000_PRO_CU13.
         self.assertEqual(
@@ -21,7 +44,7 @@ class GdnSm120PrefillTest(unittest.TestCase):
             (12, 0),
             "target pool is RTX_5000_PRO_CU13 (SM120)",
         )
-        for lengths in ((257,), (129, 257)):
+        for lengths in ((257,), (129, 257), (1, 7, 63)):
             for prefix in (False, True):
                 torch.manual_seed(7330 + sum(lengths) + int(prefix))
                 total = sum(lengths)
@@ -65,7 +88,11 @@ class GdnSm120PrefillTest(unittest.TestCase):
                 assert_close("SM120 output versus FP64", ref, actual, 0.005)
                 assert_close("legacy final versus FP64", ref_final, final, 0.005)
                 assert_close("SM120 final versus FP64", ref_final, actual_final, 0.005)
-                assert_close("SM120 pages versus FP64", ref_pages, checkpoints, 0.005)
+                self.assertEqual(checkpoints.shape, ref_pages.shape)
+                if ref_pages.numel():
+                    assert_close(
+                        "SM120 pages versus FP64", ref_pages, checkpoints, 0.005
+                    )
                 self.assertEqual(checkpoint_starts.dtype, torch.int64)
 
     def test_fused_post_conv_preparation_preserves_all_boundaries(self):
@@ -134,7 +161,7 @@ class GdnSm120PrefillTest(unittest.TestCase):
                     torch.testing.assert_close(got, ref, rtol=0, atol=0)
 
     def test_real_qwen4_three_value_heads_per_key_head(self):
-        for lengths in ((257,), (129, 257)):
+        for lengths in ((257,), (129, 257), (1, 7, 63)):
             torch.manual_seed(79301 + sum(lengths))
             total = sum(lengths)
             q = torch.randn(1, total, 8, 128, device="cuda", dtype=torch.bfloat16)
@@ -156,7 +183,9 @@ class GdnSm120PrefillTest(unittest.TestCase):
             )
             assert_close("GQA3 CP output versus FP64", ref, actual, 0.005)
             assert_close("GQA3 final versus FP64", ref_final, final, 0.005)
-            assert_close("GQA3 every page versus FP64", ref_pages, pages, 0.005)
+            self.assertEqual(pages.shape, ref_pages.shape)
+            if ref_pages.numel():
+                assert_close("GQA3 every page versus FP64", ref_pages, pages, 0.005)
 
     def test_checkpoint_store_all_pages_prefix_sentinel_and_dtype(self):
         lengths, prefixes = (257, 128, 7), (128, 256, 0)
@@ -254,7 +283,10 @@ def recurrence_reference(q, k, v, g, beta, initial, lengths):
                 pages.append(state.clone())
         states.append(state)
         offset += length
-    return torch.stack(outputs).unsqueeze(0), torch.stack(states), torch.stack(pages)
+    page_states = (
+        torch.stack(pages) if pages else states[0].new_empty((0, *states[0].shape))
+    )
+    return torch.stack(outputs).unsqueeze(0), torch.stack(states), page_states
 
 
 if __name__ == "__main__":

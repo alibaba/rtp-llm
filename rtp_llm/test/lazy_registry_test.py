@@ -80,7 +80,7 @@ class LazyRegistryTest(unittest.TestCase):
     def test_qwen4_exp_lazy_renderer_registration(self):
         self.assertTrue(ensure_renderer_registered("qwen4_exp"))
         renderer_type = _renderer_factory["qwen4_exp"]
-        self.assertEqual(renderer_type.__name__, "Qwen35Renderer")
+        self.assertEqual(renderer_type.__name__, "Qwen4Renderer")
         self.assertEqual(
             renderer_type.__module__, "rtp_llm.openai.renderers.qwen35_renderer"
         )
@@ -91,7 +91,7 @@ class LazyRegistryTest(unittest.TestCase):
             "rtp_llm.models.qwen4_exp.qwen4_exp_mtp",
         )
         self.assertTrue(ensure_renderer_registered("qwen4_exp_mtp"))
-        self.assertEqual(_renderer_factory["qwen4_exp_mtp"].__name__, "Qwen35Renderer")
+        self.assertEqual(_renderer_factory["qwen4_exp_mtp"].__name__, "Qwen4Renderer")
         self.assertTrue(ensure_model_registered("qwen4_exp_mtp"))
         self.assertEqual(_model_factory["qwen4_exp_mtp"].__name__, "Qwen4ExpMTP")
         self.assertTrue(ensure_tokenizer_registered("qwen4_exp_mtp"))

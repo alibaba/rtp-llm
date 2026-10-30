@@ -193,3 +193,12 @@ py_test(
     tags = ["manual", "open_skip", "RTX_5000_PRO_CU13"],
     exec_properties = {"gpu": "RTX_5000_PRO_CU13", "gpu_count": "8"},
 )
+
+py_test(
+    name = "flashinfer_ipc_all_reduce_integration_test",
+    srcs = ["flashinfer_ipc_all_reduce_integration_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    tags = ["RTX_5000_PRO_CU13"],
+    exec_properties = {"gpu": "RTX_5000_PRO_CU13", "gpu_count": "2"},
+    env = {"GPU_COUNT": "2", "TEST_USING_DEVICE": "CUDA"},
+)

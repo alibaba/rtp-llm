@@ -2,6 +2,7 @@
 #include "rtp_llm/cpp/utils/Logger.h"
 #include <c10/core/DeviceGuard.h>
 #include <cstring>
+#include <limits>
 #include <unordered_map>
 
 namespace rtp_llm {
@@ -12,14 +13,47 @@ RegisteredCacheStaging::RegisteredCacheStaging(size_t bytes, std::shared_ptr<Mem
         throw std::invalid_argument("typed TP staging needs a memory registration owner");
     }
     const auto registered_bytes = registeredCacheBytes(bytes);
-    tensor_ = torch::empty({static_cast<int64_t>(registered_bytes)},
+    tensor_                     = torch::empty({static_cast<int64_t>(registered_bytes)},
                            torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCPU).pinned_memory(true));
     if (memory_->isRdmaMode()) {
-        if (!memory_->regUserMr(tensor_.data_ptr(), registered_bytes, false, 64 * 1024)) {
+        if (!memory_->regUserMr(tensor_.data_ptr(), registered_bytes, false, registered_bytes)) {
             throw std::runtime_error("failed to register typed TP staging memory");
         }
         registered_ = true;
     }
+}
+
+RegisteredCacheStaging::RegisteredCacheStaging(size_t                                  bytes,
+                                               std::shared_ptr<RegisteredCacheStaging> owner,
+                                               size_t                                  offset):
+    source_bytes(bytes), owner_(std::move(owner)), tensor_(owner_->tensor().narrow(0, offset, bytes)) {}
+
+std::shared_ptr<RegisteredCacheStaging> RegisteredCacheStagingPool::allocate(size_t bytes) {
+    if (bytes == 0 || bytes > static_cast<size_t>(std::numeric_limits<int64_t>::max()) - 63) {
+        throw std::invalid_argument("invalid typed TP staging size");
+    }
+    const size_t aligned = (bytes + 63) & ~size_t(63);
+    if (!current_ || aligned > current_->source_bytes - used_) {
+        const auto minimum  = registeredCacheBytes(aligned);
+        size_t     capacity = std::max(slab_bytes_, minimum);
+        while (true) {
+            try {
+                // One slab must be one MR: a transport block cannot span MRs.
+                current_    = std::make_shared<RegisteredCacheStaging>(capacity, memory_);
+                slab_bytes_ = capacity;
+                break;
+            } catch (const std::runtime_error&) {
+                if (capacity == minimum) {
+                    throw;
+                }
+                capacity = std::max(minimum, registeredCacheBytes(capacity / 2));
+            }
+        }
+        used_ = 0;
+    }
+    auto slice = std::shared_ptr<RegisteredCacheStaging>(new RegisteredCacheStaging(bytes, current_, used_));
+    used_ += aligned;
+    return slice;
 }
 
 RegisteredCacheStaging::~RegisteredCacheStaging() {

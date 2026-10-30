@@ -240,12 +240,8 @@ class MarlinNvfp4Test(unittest.TestCase):
             payload, "silu", None, None, False, None
         ).fused_expert_output
         self.assert_reference(actual, self.reference(*args, 1))
-        self.assertTrue(
-            all(
-                v.update_requires_restart
-                for v in native.weights.consumer_views.values()
-            )
-        )
+        self.assertIs(executor.weights, native.weights)
+        self.assertIsNotNone(native.weights[W.moe_w1]._qwen4_marlin_layout)
         del executor
         # A later model can reuse the packed tensors after the first model dies.
         # It must rebuild views and workspaces without repacking their bytes.

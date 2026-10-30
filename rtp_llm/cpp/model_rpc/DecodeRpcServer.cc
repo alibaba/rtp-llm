@@ -822,10 +822,10 @@ BroadcastLoadRequestPB DecodeRpcServer::constructRemoteLoadRequest(const LoadKVC
 
 DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCacheForAllRank(DecodeGenerateContext& decode_context) {
     RTP_LLM_PROFILE_FUNCTION();
-    auto*                              generate_stream = decode_context.getStream().get();
-    auto&                              cache_keys      = generate_stream->cacheKeys(0);
-    const auto&                        cache_resource  = generate_stream->kvCachePtr()->cacheResource(0);
-    auto                               group_block_ids = cache_resource.groupBlockIds();
+    auto*       generate_stream = decode_context.getStream().get();
+    auto&       cache_keys      = generate_stream->cacheKeys(0);
+    const auto& cache_resource  = generate_stream->kvCachePtr()->cacheResource(0);
+    auto        group_block_ids = cache_resource.groupBlockIds();
 
     const auto topology_error = validateRemoteLoadTopology(resource_.workers.size(), decode_context.peer_addrs.size());
     if (!topology_error.ok()) {
@@ -1095,7 +1095,8 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCache(const LoadKVCacheCon
     if (typed_tp) {
         staging_device_guard.reset_device(torch::Device(torch::kCUDA, maga_init_params_.parallelism_config.local_rank));
     }
-    std::vector<PendingCacheCopy>                                      pending_cache_copies;
+    RegisteredCacheStagingPool    staging_pool(resource_.cache_store->getMemoryUtil());
+    std::vector<PendingCacheCopy> pending_cache_copies;
     std::unordered_map<void*, std::shared_ptr<RegisteredCacheStaging>> staging_owners;
     auto requireTypedTp = [](bool valid, const std::string& message) {
         if (!valid) {
@@ -1120,8 +1121,7 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCache(const LoadKVCacheCon
             plan.validateSlices();
             requireTypedTp(plan.destination_bytes == parts[index].size_bytes, "typed TP destination bytes changed");
             const size_t source_bytes = plan.source_bytes;
-            auto         staging =
-                std::make_shared<RegisteredCacheStaging>(source_bytes, resource_.cache_store->getMemoryUtil());
+            auto         staging      = staging_pool.allocate(source_bytes);
             staging_owners.emplace(staging->tensor().data_ptr(), staging);
             pending_cache_copies.push_back({staging, parts[index], std::move(plan)});
             parts[index].addr       = staging->tensor().data_ptr();
@@ -1488,6 +1488,9 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCache(const LoadKVCacheCon
             }
         }
 
+        if (typed_tp && layer_caches.empty()) {
+            continue;  // This peer owns no group in the typed transfer plan.
+        }
         auto ip_parts = autil::StringUtil::split(peer_addr, ":");
         if (ip_parts.size() != 3) {
             logReadFailures(load_context.request_id,
@@ -1557,9 +1560,9 @@ grpc::Status DecodeRpcServer::RemoteLoad(grpc::ServerContext*          server_co
     }
 
     std::vector<CacheKeyType> cache_keys(request->cache_keys().begin(), request->cache_keys().end());
-    const auto&               cache_config     = engine_->resourceContext().cache_manager->cacheConfig();
-    const auto&               topology         = cache_config.topology();
-    auto                      group_block_ids  = decodeGroupBlockIds(*request, topology);
+    const auto&               cache_config    = engine_->resourceContext().cache_manager->cacheConfig();
+    const auto&               topology        = cache_config.topology();
+    auto                      group_block_ids = decodeGroupBlockIds(*request, topology);
 
     std::vector<std::string> peer_addrs(request->peer_addrs().begin(), request->peer_addrs().end());
 
@@ -1737,7 +1740,7 @@ grpc::Status DecodeRpcServer::RemoteGenerate(grpc::ServerContext* server_context
             // scheduler releases its inflight entry without waiting for TTL eviction.
             auto& stream     = decode_context.getStream();
             auto  error_code = static_cast<int64_t>(stream && stream->hasError() ? stream->statusInfo().code() :
-                                                                                   ErrorCode::MALLOC_FAILED);
+                                                                                  ErrorCode::MALLOC_FAILED);
             reportEarlyFinishTask(decode_context,
                                   error_code,
                                   "decode allocate resource failed: " + decode_context.error_status.error_message());

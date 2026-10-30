@@ -40,6 +40,21 @@ def _ref(q, w, pool, bt, ctx, bs):
 
 
 class PagedScoreTest(unittest.TestCase):
+    def test_physical_block_beyond_signed_int32_element_offset(self):
+        block = 2**19
+        pool = torch.empty(((block + 1) * 32, _D), dtype=torch.bfloat16, device=_DEV)
+        pool[-32:].fill_(1)
+        q = torch.ones((1, 1, 1, _D), dtype=torch.bfloat16, device=_DEV)
+        w = torch.ones((1, 1), dtype=torch.float32, device=_DEV)
+        bt = torch.tensor([[block]], dtype=torch.int32, device=_DEV)
+        ctx = torch.tensor([[32]], dtype=torch.int32, device=_DEV)
+        result = qsa_paged_indexer_score(
+            q, w, pool, bt, ctx, block_size=32, max_ctx_len=32
+        )
+        torch.testing.assert_close(
+            result, torch.full((1, 32), float(_D), device=_DEV), rtol=0, atol=0
+        )
+
     def test_graph_replay_reads_refreshed_block_table_and_length(self):
         q = torch.ones(1, 1, 1, _D, dtype=torch.bfloat16, device=_DEV)
         w = torch.ones(1, 1, dtype=torch.float32, device=_DEV)

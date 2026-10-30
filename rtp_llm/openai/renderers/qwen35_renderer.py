@@ -1,6 +1,8 @@
 import json
 from typing import Any
 
+from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
+from rtp_llm.config.generate_config import ThinkingMode
 from rtp_llm.openai.api_datatype import ChatCompletionRequest
 from rtp_llm.openai.renderer_factory_register import register_renderer
 from rtp_llm.openai.renderers.basic_renderer import PromptWithMMInput
@@ -24,9 +26,8 @@ class Qwen35Renderer(Qwen3CoderRenderer, Qwen2VLRenderer):
     def _render_messages(
         self, request: ChatCompletionRequest, add_vision_id: bool
     ) -> PromptWithMMInput:
-        enable_thinking = (
-            False if request.disable_thinking() else request.enable_thinking
-        )
+        mode = request.get_explicit_thinking_mode()
+        enable_thinking = None if mode is None else mode != ThinkingMode.DISABLED
         return Qwen2VLRenderer._render_messages(
             self, request, add_vision_id, enable_thinking
         )
@@ -46,9 +47,24 @@ class Qwen35Renderer(Qwen3CoderRenderer, Qwen2VLRenderer):
         )
 
 
+class Qwen4Renderer(Qwen35Renderer):
+    def render_chat(self, request: ChatCompletionRequest) -> RenderedInputs:
+        # QSA side caches currently retain text positions only. Reject before
+        # image preprocessing/RPC so a request cannot stop the backend loop.
+        for message in request.messages:
+            if isinstance(message.content, list) and any(
+                part.type != "text" for part in message.content
+            ):
+                raise FtRuntimeException(
+                    ExceptionType.UNSUPPORTED_OPERATION,
+                    "Qwen3.8-Flash-Next QSA currently supports text inputs only",
+                )
+        return super().render_chat(request)
+
+
 register_renderer("qwen35_moe", Qwen35Renderer)
 register_renderer("qwen35_dense", Qwen35Renderer)
 register_renderer("qwen35_dense_mtp", Qwen35Renderer)
 register_renderer("qwen35_moe_mtp", Qwen35Renderer)
-register_renderer("qwen4_exp", Qwen35Renderer)
-register_renderer("qwen4_exp_mtp", Qwen35Renderer)
+register_renderer("qwen4_exp", Qwen4Renderer)
+register_renderer("qwen4_exp_mtp", Qwen4Renderer)

@@ -10,18 +10,18 @@ import triton
 import triton.language as tl
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["N"])
 def _vocab_raw_rows(
     Tokens,
     Weight,
     Output,
-    N: tl.constexpr,
+    N,
     V: tl.constexpr,
     D: tl.constexpr,
     TS: tl.constexpr,
     BLOCK: tl.constexpr,
 ):
-    offset = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    offset = tl.program_id(0).to(tl.int64) * BLOCK + tl.arange(0, BLOCK)
     row, col = offset // D, offset % D
     token = tl.load(Tokens + row * TS, row < N, other=-1).to(tl.int64)
     value = tl.load(
@@ -32,13 +32,13 @@ def _vocab_raw_rows(
     tl.store(Output + offset, value, offset < N * D)
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["N"])
 def _vocab_gather_dequant_hyper(
     Source,
     Scales,
     Mask,
     Output,
-    N: tl.constexpr,
+    N,
     LOCAL_D: tl.constexpr,
     TP: tl.constexpr,
     BRANCHES: tl.constexpr,
@@ -46,7 +46,7 @@ def _vocab_gather_dequant_hyper(
     MS: tl.constexpr,
     BLOCK: tl.constexpr,
 ):
-    offset = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    offset = tl.program_id(0).to(tl.int64) * BLOCK + tl.arange(0, BLOCK)
     width = TP * LOCAL_D
     row = offset // (BRANCHES * width)
     col = offset % width

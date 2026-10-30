@@ -114,9 +114,7 @@ class IndexerPrefillTritonTest(unittest.TestCase):
             "_check_host_mirrors",
             wraps=indexer_prefill_triton._check_host_mirrors,
         ) as check:
-            context.write_prefill_indexer_cache(
-                raw, indexer=indexer, rope_config=rope
-            )
+            context.write_prefill_indexer_cache(raw, indexer=indexer, rope_config=rope)
         self.assertEqual(check.call_count, 1)
         self.assertIs(check.call_args.args[1], context.main_inputs.cu_seqlens)
 
@@ -237,7 +235,9 @@ class IndexerPrefillTritonTest(unittest.TestCase):
             host_kv_table=args[7].cpu(),
             host_state_table=args[9].cpu(),
         )
-        with patch.object(torch.Tensor, "item", side_effect=AssertionError("GPU readback")):
+        with patch.object(
+            torch.Tensor, "item", side_effect=AssertionError("GPU readback")
+        ):
             result = write_zero_prefix_prefill(
                 *args, page_size=128, norm_eps=1e-6, **host
             )
@@ -342,6 +342,35 @@ class IndexerPrefillTritonTest(unittest.TestCase):
                     self.fused(args)
                 torch.testing.assert_close(args[6], before_kv, atol=0, rtol=0)
                 torch.testing.assert_close(args[8], before_state, atol=0, rtol=0)
+
+    def test_full_context_grid_and_undo(self):
+        args = self.inputs([262144, 129])
+        before_kv, before_state = args[6].clone(), args[8].clone()
+        result = self.fused(args)
+        self.assertIsNotNone(result)
+        self.assertEqual(result["num_kv_writes"], 262144 // 4 + 129 // 4)
+        # The final compressed key is checked independently of the writer.
+        raw, _, _, cos, sin, gamma, kv, table, state, state_table = args
+        pooled = raw[262140:262144].float().mean(0).bfloat16()
+        norm = (
+            pooled.float()
+            * torch.rsqrt(pooled.float().square().mean() + 1e-6)
+            * (1 + gamma.float())
+        ).bfloat16()
+        partner = torch.cat((-norm[32:64], norm[:32]))
+        expected = norm.clone()
+        expected[:64] = (norm[:64].float() * cos[0, 262140].float()).bfloat16() + (
+            partner.float() * sin[0, 262140].float()
+        ).bfloat16()
+        torch.testing.assert_close(
+            kv[table[0, -1], 31], expected, atol=0.015625, rtol=0.008
+        )
+        torch.testing.assert_close(
+            state[state_table[0, -1]], raw[262136:262144].float(), atol=0, rtol=0
+        )
+        restore_indexer_cache(result["undo"])
+        torch.testing.assert_close(kv, before_kv, atol=0, rtol=0)
+        torch.testing.assert_close(state, before_state, atol=0, rtol=0)
 
     def test_joint_qk_projection_strided_keys_and_float_norm_weight(self):
         args = list(self.inputs([257, 7]))

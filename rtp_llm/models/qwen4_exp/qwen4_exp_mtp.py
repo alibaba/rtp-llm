@@ -113,9 +113,6 @@ class Qwen4ExpMTP(Qwen4Exp):
     def get_weight_cls():
         return Qwen4ExpMTPWeight
 
-    def support_cuda_graph(self) -> bool:
-        return super().support_cuda_graph()
-
     def load(self, skip_python_model: bool = False):
         config = getattr(self, "model_config", None)
         if not bool(getattr(config, "enable_qwen4_qsa", False)):
@@ -177,9 +174,7 @@ class Qwen4ExpMTP(Qwen4Exp):
             )
         names = (W.embedding, W.lm_head)
         if getattr(target_config, "_qwen4_full_fp8_nvfp4", False) is True:
-            from rtp_llm.model_loader.fp8_weight import (
-                FP8_STORAGE_SCALE_SUFFIX,
-            )
+            from rtp_llm.model_loader.fp8_weight import FP8_STORAGE_SCALE_SUFFIX
 
             return names + tuple(name + FP8_STORAGE_SCALE_SUFFIX for name in names)
         return names
@@ -187,7 +182,6 @@ class Qwen4ExpMTP(Qwen4Exp):
     @classmethod
     def _create_config(cls, ckpt_path: str) -> ModelConfig:
         config = super()._create_config(ckpt_path)
-        config.model_type = "qwen4_exp_mtp"
         with open(os.path.join(ckpt_path, "config.json")) as reader:
             root_config = json.load(reader)
         text_config = root_config["text_config"]
@@ -224,7 +218,6 @@ class Qwen4ExpMTP(Qwen4Exp):
         config.num_layers = 1
         config.moe_layer_index = [0]
         config.is_mtp = True
-        config.mtp_input_hidden_size = config.hidden_size * config.hc_mult
         config.hybrid_attention_config.enable_hybrid_attention = True
         config.hybrid_attention_config.hybrid_attention_types = [
             HybridAttentionType.NONE
@@ -242,7 +235,6 @@ class Qwen4ExpMTP(Qwen4Exp):
         # sizing/loading code look up a non-existent qwen4_exp_mtp vision mixin.
         config.mm_model_config.is_multimodal = False
         config._extra_weight_bytes = 0.0
-        config._tp_sharded_extra_weight_bytes = 0.0
         config._replicated_extra_weight_bytes = 0.0
         config._extra_weight_param_count = 0
         config._qwen4_mtp_use_dedicated_embeddings = use_dedicated

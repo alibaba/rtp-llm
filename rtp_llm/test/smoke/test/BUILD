@@ -12,6 +12,7 @@ py_test(
 
 py_test(
     name = "entry_env_test",
+    env = {"GPU_COUNT": "0"},
     srcs = ["entry_env_test.py"],
     data = ["//rtp_llm/test/smoke:smoke_framework_srcs"],
     imports = ["../.."],

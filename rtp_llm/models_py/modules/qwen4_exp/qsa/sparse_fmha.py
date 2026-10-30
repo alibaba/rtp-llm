@@ -54,9 +54,9 @@ def _sparse_prefill_online_kernel(
     MAX_BLKS: tl.constexpr,
     BLK_K: tl.constexpr,
 ):
-    pid_b = tl.program_id(0)
-    pid_h = tl.program_id(1)
-    pid_s = tl.program_id(2)
+    pid_b = tl.program_id(1).to(tl.int64)
+    pid_h = tl.program_id(2)
+    pid_s = tl.program_id(0).to(tl.int64)
     h_kv = pid_h // q_per_kv
     rd = tl.arange(0, D)
     q = tl.load(
@@ -136,9 +136,9 @@ def _sparse_prefill_grouped_kernel(
     SM120_GQA_PV: tl.constexpr,
 ):
     """Share selected K/V across GQA heads and use tensor-core reductions."""
-    pid_b = tl.program_id(0)
-    pid_kv = tl.program_id(1)
-    pid_s = tl.program_id(2)
+    pid_b = tl.program_id(1).to(tl.int64)
+    pid_kv = tl.program_id(2)
+    pid_s = tl.program_id(0).to(tl.int64)
     rh = tl.arange(0, BLK_H)
     rd = tl.arange(0, D)
     q = tl.load(
@@ -286,7 +286,7 @@ def sparse_prefill_attn(
     stride_v_b, stride_v_h, stride_v_t = _s("v", v)
     stride_idx_b, stride_idx_s = selected.stride(0), selected.stride(1)
 
-    grid = (B, H_q, S)
+    grid = (S, B, H_q)
     grouped = (
         ((S >= 128 and K >= 256 and q_per_kv >= 3))
         and D >= 32
@@ -301,7 +301,7 @@ def sparse_prefill_attn(
         _sparse_prefill_grouped_kernel if grouped else (_sparse_prefill_online_kernel)
     )
     if grouped:
-        grid = (B, H_kv, S)
+        grid = (S, B, H_kv)
         # The FP32 PV product needs three tensor-core products. A 32-key tile
         # fits the shared-memory budget and avoids padding work for TP8's
         # three query heads per KV head.

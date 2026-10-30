@@ -29,7 +29,7 @@ from rtp_llm.openai.api_datatype import (
 from rtp_llm.openai.renderer_factory import ChatRendererFactory, RendererParams
 from rtp_llm.openai.renderer_factory_register import _renderer_factory
 from rtp_llm.openai.renderers.basic_renderer import BasicRenderer
-from rtp_llm.openai.renderers.qwen35_renderer import Qwen35Renderer
+from rtp_llm.openai.renderers.qwen35_renderer import Qwen4Renderer, Qwen35Renderer
 from rtp_llm.openai.renderers.qwen_agent_renderer import QwenAgentRenderer
 from rtp_llm.openai.renderers.qwen_agent_tool_renderer import QwenAgentToolRenderer
 from rtp_llm.openai.renderers.qwen_renderer import QwenRenderer
@@ -361,11 +361,11 @@ class TemplateTest(TestCase):
     def test_qwen35_dense_mtp_uses_qwen35_renderer(self):
         assert _renderer_factory["qwen35_dense_mtp"] is Qwen35Renderer
 
-    def test_qwen4_exp_uses_qwen35_renderer(self):
-        assert _renderer_factory["qwen4_exp"] is Qwen35Renderer
+    def test_qwen4_exp_uses_qwen4_renderer(self):
+        assert _renderer_factory["qwen4_exp"] is Qwen4Renderer
 
-    def test_qwen4_exp_mtp_uses_qwen35_renderer(self):
-        assert _renderer_factory["qwen4_exp_mtp"] is Qwen35Renderer
+    def test_qwen4_exp_mtp_uses_qwen4_renderer(self):
+        assert _renderer_factory["qwen4_exp_mtp"] is Qwen4Renderer
 
     def test_qwen35_passes_chat_template_kwargs_to_template(self):
         tokenizer = _Qwen35DefaultTemplateTokenizer()

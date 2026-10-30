@@ -18,14 +18,14 @@ from rtp_llm.models_py.modules.qwen4_exp.ple.ple_commit_triton import (
 )
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["B"])
 def _resolve_accepted_pair(
     ACCEPT,
     PREFIX,
     STATE_TABLE,
     CTX_TABLE,
     OUT,
-    B: tl.constexpr,
+    B,
     Q: tl.constexpr,
     PAGE: tl.constexpr,
     SC: tl.constexpr,
@@ -120,8 +120,7 @@ class AcceptedPairResolution:
         ctx_host = host[10 + batch : 10 + 2 * batch]
         if host[1]:
             raise RuntimeError(
-                "qwen4_exp PLE target accept_len must be in "
-                f"[1, {self.query_len}]"
+                "qwen4_exp PLE target accept_len must be in " f"[1, {self.query_len}]"
             )
         PLECacheViews._check_commit_verdict(
             tags[0], host[2:6], state_host, stage.state_pool.shape[0]

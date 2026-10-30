@@ -8,6 +8,7 @@ launch geometry is stable across CUDA Graph replays.
 import torch
 import triton
 import triton.language as tl
+
 from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_compressor import IndexerCacheUndo
 
 
@@ -44,7 +45,7 @@ def _write_decode_key(
         state_table_ptr + request * STATE_TABLE_WIDTH + state_column,
         mask=active & (position >= 0) & (state_column < STATE_TABLE_WIDTH),
         other=0,
-    )
+    ).to(tl.int64)
     state_valid = (position >= 0) & (state_id > 0) & (state_id < STATE_POOL_BLOCKS)
     raw = tl.load(raw_ptr + request * D + d, mask=active, other=0).to(tl.float32)
     tl.store(
@@ -61,7 +62,7 @@ def _write_decode_key(
             state_table_ptr + request * STATE_TABLE_WIDTH + source_columns,
             mask=(source_positions >= 0) & (source_columns < STATE_TABLE_WIDTH),
             other=0,
-        )
+        ).to(tl.int64)
         source_valid = (source_ids > 0) & (source_ids < STATE_POOL_BLOCKS)
         source_slots = source_ids * 8 + source_positions % 8
         history = tl.load(
@@ -104,7 +105,7 @@ def _write_decode_key(
             kv_table_ptr + request * KV_TABLE_WIDTH + kv_column,
             mask=(position >= 0) & (kv_column < KV_TABLE_WIDTH),
             other=0,
-        )
+        ).to(tl.int64)
         kv_valid = (kv_id > 0) & (kv_id < KV_POOL_BLOCKS)
         entry = (position // 4) % KV_ENTRIES_PER_BLOCK
         tl.store(
@@ -410,7 +411,7 @@ def write_target_window_with_undo_(
     offsets = torch.arange(query_len, dtype=torch.int32, device=prefixes.device)
     positions = prefixes[:, None] + offsets[None, :]
     state_columns = (positions // 128).clamp(0, state_table.shape[1] - 1)
-    state_ids = state_table.gather(1, state_columns).to(torch.long)
+    state_ids = state_table.gather(1, state_columns.to(torch.long)).to(torch.long)
     state_slots = (
         (state_ids * 8 + positions.remainder(8))
         .reshape(-1)
@@ -418,7 +419,11 @@ def write_target_window_with_undo_(
     )
     completion = prefixes + 3 - prefixes.remainder(4)
     kv_columns = (completion // 128).clamp(0, kv_table.shape[1] - 1)
-    kv_ids = kv_table.gather(1, kv_columns.unsqueeze(1)).reshape(-1).to(torch.long)
+    kv_ids = (
+        kv_table.gather(1, kv_columns.to(torch.long).unsqueeze(1))
+        .reshape(-1)
+        .to(torch.long)
+    )
     kv_slots = torch.where(
         completion < prefixes + query_len,
         kv_ids * 32 + (completion // 4).remainder(32),
@@ -546,7 +551,7 @@ def write_draft_window_with_undo_(
     source = torch.where(active, source, 0).reshape(-1).to(torch.long)
     positions = prefixes[:, None] + offsets[None, :]
     state_columns = (positions // 128).clamp(0, state_table.shape[1] - 1)
-    state_ids = state_table.gather(1, state_columns).to(torch.long)
+    state_ids = state_table.gather(1, state_columns.to(torch.long)).to(torch.long)
     state_slots = (
         torch.where(
             active,
@@ -559,7 +564,11 @@ def write_draft_window_with_undo_(
     completion_offset = 3 - prefixes.remainder(4)
     completion = prefixes + completion_offset
     kv_columns = (completion // 128).clamp(0, kv_table.shape[1] - 1)
-    kv_ids = kv_table.gather(1, kv_columns.unsqueeze(1)).reshape(-1).to(torch.long)
+    kv_ids = (
+        kv_table.gather(1, kv_columns.to(torch.long).unsqueeze(1))
+        .reshape(-1)
+        .to(torch.long)
+    )
     kv_slots = torch.where(
         lengths > completion_offset,
         kv_ids * 32 + (completion // 4).remainder(32),

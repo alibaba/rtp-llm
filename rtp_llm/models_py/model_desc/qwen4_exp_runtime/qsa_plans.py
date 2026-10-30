@@ -15,7 +15,6 @@ class IncrementalPrefillPlan:
     token_budget: int
     prefixes: torch.Tensor
     cu_seqlens: torch.Tensor
-    logical_positions: torch.Tensor
     current_cos: torch.Tensor
     current_sin: torch.Tensor
     visible_lengths: torch.Tensor

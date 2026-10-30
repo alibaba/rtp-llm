@@ -5,6 +5,7 @@ from unittest.mock import patch
 import torch
 
 from rtp_llm.models_py.modules.qwen4_exp.qsa.sparse_paged_fmha import (
+    _merge_sparse_paged_splits_kernel,
     _validate_sparse_paged_indices,
     sparse_paged_gqa_attn,
 )
@@ -13,6 +14,44 @@ _DEVICE = "cuda"
 
 
 class SparsePagedIndexValidationTest(unittest.TestCase):
+    def test_split_merge_reads_beyond_signed_int32_element_offset(self):
+        dim, splits = 256, 8
+        stride = splits * (dim + 2)
+        first_bad_row = (2**31 + stride - 1) // stride
+        rows = first_bad_row + 2
+        partial = torch.zeros((rows, splits, dim + 2), device="cuda")
+        values = torch.tensor([1, 2, 3], device="cuda", dtype=torch.bfloat16)
+        partial[-3:, :, :dim] = values[:, None, None]
+        partial[-3:, :, dim + 1] = 1
+        output = torch.empty((rows, dim), device="cuda", dtype=torch.bfloat16)
+        _merge_sparse_paged_splits_kernel[(rows,)](
+            partial,
+            output,
+            output,
+            D=dim,
+            NUM_SPLITS=splits,
+            HEADS=1,
+            QUERIES=rows,
+            WITH_GATE=False,
+        )
+        torch.testing.assert_close(
+            output[-3:], values[:, None].expand(3, dim), rtol=0, atol=0
+        )
+        self.assertEqual(int(torch.count_nonzero(output[:-3])), 0)
+
+    def test_long_incremental_prefill_keeps_split_grid_within_limits(self):
+        q = torch.zeros((1, 1, 8192, 32), device="cuda", dtype=torch.bfloat16)
+        cache = torch.zeros((2, 2, 1, 128, 32), device="cuda", dtype=q.dtype)
+        cache[1, 1, 0, 0] = torch.arange(32, device="cuda", dtype=q.dtype)
+        table = torch.ones((1, 1), device="cuda", dtype=torch.int32)
+        lengths = torch.ones((1, 8192), device="cuda", dtype=torch.int32)
+        selected = torch.full((1, 8192, 257), -1, device="cuda", dtype=torch.int32)
+        selected[..., 0] = 0
+        out = sparse_paged_gqa_attn(q, cache, table, lengths, selected, page_size=128)
+        torch.testing.assert_close(
+            out, cache[1, 1, 0, 0].expand_as(out), rtol=0, atol=0
+        )
+
     def test_valid_indices_use_one_scalar_read(self):
         table = torch.tensor([[1, 2]], dtype=torch.int32)
         lengths = torch.tensor([[5]], dtype=torch.int32)

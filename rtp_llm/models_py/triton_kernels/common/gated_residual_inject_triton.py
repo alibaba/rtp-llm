@@ -16,7 +16,7 @@ def _inject_kernel(
     BRANCHES: tl.constexpr,
     BLOCK: tl.constexpr,
 ):
-    offset = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    offset = tl.program_id(0).to(tl.int64) * BLOCK + tl.arange(0, BLOCK)
     valid = offset < TOTAL
     row = offset // (BRANCHES * HIDDEN)
     column = offset % (BRANCHES * HIDDEN)

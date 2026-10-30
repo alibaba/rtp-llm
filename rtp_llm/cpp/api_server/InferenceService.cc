@@ -236,6 +236,10 @@ InferenceService::fillGenerateInput(int64_t                                reque
     input->begin_time_us                 = autil::TimeUtility::currentTimeInMicroSeconds();
     input->generate_config               = generate_config;
 
+    if (!urls.empty() && model_config_.model_type == "qwen4_exp") {
+        throw HttpApiServerException(HttpApiServerException::MULTIMODAL_ERROR,
+                                     "qwen4_exp QSA currently supports text inputs only");
+    }
     if (urls.size() > 0) {
         std::vector<MultimodalInput> mm_inputs;
         for (auto url : urls) {

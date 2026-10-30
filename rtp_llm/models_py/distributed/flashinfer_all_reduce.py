@@ -66,7 +66,10 @@ class FlashInferAllReduce:
         # must retain NCCL until they provide that lifecycle contract too.
         self.allow_ipc_capture = False
 
-        if not enabled_by_config(disable_custom_all_reduce) or not single_node:
+        admitted = enabled_by_config(disable_custom_all_reduce) and single_node
+        peers = [None] * self.world_size
+        dist.all_gather_object(peers, admitted, group=self.group)
+        if not all(peers):
             logging.info(
                 "FlashInfer all-reduce fallback: explicit_disable=%s env_disable=%s single_node=%s",
                 disable_custom_all_reduce,
@@ -86,7 +89,9 @@ class FlashInferAllReduce:
             if not hasattr(flashinfer_comm, "allreduce_fusion") or not hasattr(
                 flashinfer_comm, "create_allreduce_fusion_workspace"
             ):
-                return
+                # Every rank must reach the availability consensus below,
+                # including peers with an older FlashInfer installation.
+                raise ImportError("FlashInfer communication API is unavailable")
             self._flashinfer_comm = flashinfer_comm
             self.disabled = False
             self.cpp_small_enabled = (
@@ -103,8 +108,20 @@ class FlashInferAllReduce:
                 self.device,
                 self.cpp_small_enabled,
             )
-        except ImportError:
-            logging.info("FlashInfer all-reduce unavailable; using NCCL")
+        except Exception as error:
+            self.disabled = True
+            self.cpp_small_enabled = False
+            logging.info("FlashInfer all-reduce unavailable; using NCCL: %s", error)
+
+        self._large_prefill = os.environ.get("QWEN4_TP_LARGE_PREFILL", "0") == "1"
+        policy = (not self.disabled, self.cpp_small_enabled, self._large_prefill)
+        dist.all_gather_object(peers, policy, group=self.group)
+        if any(peer != policy for peer in peers):
+            self.disabled = True
+            self.cpp_small_enabled = False
+            logging.warning(
+                "FlashInfer all-reduce eligibility differs across ranks; using NCCL"
+            )
 
     def _create_workspace(self, tensor: torch.Tensor) -> bool:
         if self.disabled or self._flashinfer_comm is None:
@@ -120,7 +137,7 @@ class FlashInferAllReduce:
             if self.cpp_small_enabled and hidden_dim == 2560:
                 from .flashinfer_ipc_all_reduce import FlashInferIpcAllReduce
 
-                large_prefill = os.environ.get("QWEN4_TP_LARGE_PREFILL", "0") == "1"
+                large_prefill = self._large_prefill
                 workspace = FlashInferIpcAllReduce(
                     self.group,
                     self.device,

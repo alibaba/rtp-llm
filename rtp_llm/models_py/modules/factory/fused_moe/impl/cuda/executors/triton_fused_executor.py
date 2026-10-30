@@ -136,7 +136,12 @@ class TritonFusedMoeExecutor(FusedMoeExpertExecutor):
         block_m1 = config1["BLOCK_SIZE_M"]
         block_m2 = config2["BLOCK_SIZE_M"]
         align = moe_align_block_size_torch
-        if self._decode_alignment and 0 < M <= 32:
+        if (
+            self._decode_alignment
+            and 0 < M <= 32
+            and topk_ids.dtype == torch.int32
+            and topk_ids.is_contiguous()
+        ):
             from rtp_llm.models_py.triton_kernels.moe.decode_alignment import (
                 moe_align_decode,
             )

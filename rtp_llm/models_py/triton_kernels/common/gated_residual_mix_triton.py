@@ -14,8 +14,8 @@ def _mix_reduce_kernel(
     BRANCHES: tl.constexpr,
     BLOCK: tl.constexpr,
 ):
-    row = tl.program_id(0)
-    columns = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
+    row = tl.program_id(0).to(tl.int64)
+    columns = tl.program_id(1).to(tl.int64) * BLOCK + tl.arange(0, BLOCK)
     mask = columns < HIDDEN
     acc = tl.full((BLOCK,), 0, tl.float32)
     for branch in tl.static_range(BRANCHES):

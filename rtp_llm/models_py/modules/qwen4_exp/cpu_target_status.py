@@ -38,6 +38,8 @@ def prepare_cpu_target_status(config, parallelism):
     )
     peers = [None, None]
     dist.all_gather_object(peers, identity, group=group)
+    if not any(peer[0] for peer in peers):
+        return None
     if peers[0] != peers[1]:
         raise RuntimeError("CPU target status requires identical local TP2 eligibility")
     if not eligible:

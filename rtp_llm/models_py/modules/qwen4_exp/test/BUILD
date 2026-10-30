@@ -81,7 +81,7 @@ py_test(
 
 py_test(
     name = "indexer_compressor_test",
-    srcs = ["indexer_compressor_test.py"],
+    srcs = ["indexer_compressor_test.py", "indexer_compression_reference.py"],
     deps = ["//rtp_llm:testlib", ":math_references"],
 )
 
@@ -391,7 +391,7 @@ py_test(
 
 py_test(
     name = "gdn_prefill_adapter_test",
-    srcs = ["gdn_prefill_adapter_test.py"],
+    srcs = ["gdn_prefill_adapter_test.py", "gdn_prefill_reference.py"],
     deps = ["//rtp_llm:testlib"],
     env = {"GPU_COUNT": "1"},
     tags = ["RTX_5000_PRO_CU13"],

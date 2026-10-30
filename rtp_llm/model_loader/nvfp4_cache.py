@@ -4,6 +4,7 @@ import hashlib
 import inspect
 import json
 import logging
+import marshal
 import math
 import os
 import tempfile
@@ -22,6 +23,17 @@ from rtp_llm.model_loader.online_modelopt_fp4_quant_weight import (
     quantize_expert_to_nvfp4,
 )
 
+
+def _algorithm_source(function):
+    function = inspect.unwrap(function)
+    try:
+        return inspect.getsource(function).encode()
+    except (OSError, TypeError):
+        # Sourceless deployments still fingerprint executable code. A changed
+        # Python build may miss the cache, but never reuses a stale algorithm.
+        return marshal.dumps(function.__code__)
+
+
 FORMAT = "rtp-nvfp4-expert-v1"
 ALGORITHM_SHA = hashlib.sha256(
     (
@@ -33,9 +45,9 @@ ALGORITHM_SHA = hashlib.sha256(
                 _E2M1_ODD_BOUNDS.tolist(),
             )
         )
-        + inspect.getsource(_cast_to_e2m1)
-        + inspect.getsource(quantize_expert_to_nvfp4)
     ).encode()
+    + _algorithm_source(_cast_to_e2m1)
+    + _algorithm_source(quantize_expert_to_nvfp4)
 ).hexdigest()
 
 
@@ -47,7 +59,13 @@ def tensor_sha(tensor):
 class Nvfp4ExpertCache:
     def __init__(self, directory):
         self.directory = Path(directory)
-        self.directory.mkdir(parents=True, exist_ok=True)
+        try:
+            self.directory.mkdir(parents=True, exist_ok=True)
+        except OSError as error:
+            logging.warning(
+                "NVFP4 cache directory unavailable; using in-memory quantization: %s",
+                error,
+            )
 
     def get_or_quantize(self, weight, *, block_size, input_scale, identity):
         if block_size != 16 or not math.isfinite(input_scale) or input_scale <= 0:
@@ -109,16 +127,30 @@ class Nvfp4ExpertCache:
                 sort_keys=True,
             ),
         )
-        fd, temporary = tempfile.mkstemp(
-            prefix=".nvfp4-", suffix=".safetensors", dir=self.directory
-        )
-        os.close(fd)
+        temporary = None
         try:
+            fd, temporary = tempfile.mkstemp(
+                prefix=".nvfp4-", suffix=".safetensors", dir=self.directory
+            )
+            os.close(fd)
             save_file(tensors, temporary, metadata=metadata)
             os.replace(temporary, path)
+        except (OSError, SafetensorError) as error:
+            logging.warning(
+                "Cannot publish NVFP4 cache %s; using in-memory quantization: %s",
+                path,
+                error,
+            )
         finally:
-            if os.path.exists(temporary):
-                os.unlink(temporary)
+            if temporary is not None:
+                try:
+                    os.unlink(temporary)
+                except FileNotFoundError:
+                    pass
+                except OSError as error:
+                    logging.warning(
+                        "Cannot remove temporary NVFP4 cache %s: %s", temporary, error
+                    )
         return packed, scale, global_scale
 
     @staticmethod

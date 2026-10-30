@@ -13,6 +13,8 @@ from unittest import TestCase, main, skipUnless
 from unittest.mock import Mock, patch
 
 import torch
+from torch import nn
+
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.models.qwen3_next.qwen3_next import Qwen3NextBase
 from rtp_llm.models.qwen4_exp.qwen4_exp_kv_cache import (
@@ -46,7 +48,6 @@ from rtp_llm.ops import (
     ParallelismConfig,
 )
 from rtp_llm.utils.model_weight import W
-from torch import nn
 
 _HC = 4
 _HIDDEN = 8
@@ -2744,6 +2745,56 @@ class Qwen4ExpPLERuntimeTest(TestCase):
         self.assertEqual(
             int(torch.count_nonzero(self.ctx_base[untouched_ctx]).item()), 0
         )
+
+    def test_padded_prefill_skips_only_wholly_inactive_cache_rows(self):
+        inputs = self._inputs_by_tag(
+            is_prefill=True,
+            input_lengths=torch.tensor([1, 1], dtype=torch.int32),
+            prefix_lengths=torch.zeros(2, dtype=torch.int32),
+            sequence_lengths=torch.empty(0, dtype=torch.int32),
+        )
+        for item in inputs.values():
+            item.is_s_padded = True
+            item.kv_cache_block_id_device = item.kv_cache_block_id.clone()
+            item.kv_cache_block_id_device[1].zero_()
+            item.kv_cache_block_id = item.kv_cache_block_id_device
+        hyper = torch.randn(2, _HC * _HIDDEN, dtype=torch.bfloat16)
+        output = self.model._apply_ple(
+            1, hyper, torch.ones(2, dtype=torch.long), inputs
+        )
+        self.assertEqual(output.shape, hyper.shape)
+        self.assertEqual(torch.count_nonzero(self.state_base[0]), 0)
+        self.assertEqual(torch.count_nonzero(self.ctx_base[0]), 0)
+        self.assertGreater(torch.count_nonzero(self.state_base[1]), 0)
+        # A live row with a missing terminal page must still fail, even when
+        # another row in the same padded batch is wholly inactive.
+        for item in inputs.values():
+            item.kv_cache_block_id_device[0, 0] = 0
+        with self.assertRaisesRegex(RuntimeError, "terminal page is unallocated"):
+            self.model._apply_ple(1, hyper, torch.ones(2, dtype=torch.long), inputs)
+
+    def test_cache_free_prefill_warmup_returns_placeholder_before_prefetch(self):
+        inputs = self._inputs_by_tag(
+            is_prefill=True,
+            input_lengths=torch.tensor([1, 1], dtype=torch.int32),
+            prefix_lengths=torch.zeros(2, dtype=torch.int32),
+            sequence_lengths=torch.empty(0, dtype=torch.int32),
+        )
+        for item in inputs.values():
+            item.is_s_padded = True
+        self.model.kv_cache = None
+        self.model.layers = nn.ModuleList()
+        hidden = torch.zeros(2, _HIDDEN, dtype=torch.bfloat16)
+        self.model.word_embedding = lambda _: hidden
+        args = SimpleNamespace(
+            input_ids=torch.ones(2, dtype=torch.long), attention_inputs=inputs
+        )
+        output = self.model._forward_with_ple_prefetch(args)
+        self.assertIs(output.hidden_states, hidden)
+        for item in inputs.values():
+            item.is_s_padded = False
+        with self.assertRaisesRegex(RuntimeError, "outside prefill warmup"):
+            self.model._forward_with_ple_prefetch(args)
 
     def test_prefill_rejects_an_unallocated_terminal_page(self):
         inputs = self._inputs_by_tag(

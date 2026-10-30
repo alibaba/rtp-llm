@@ -4,16 +4,6 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
-from rtp_llm.utils.fp8_constants import FP8_STORAGE_SCALE_SUFFIX
-
-
-def dequantize_parameter(weights, name):
-    value = weights[name]
-    scale = weights.get(name + FP8_STORAGE_SCALE_SUFFIX)
-    if scale is None:
-        return value
-    return (value.float() * scale).to(torch.bfloat16)
-
 
 def _quantize_projection_input(rows, *, role, scale=None, output=None):
     if scale is None and role in ("DECODE", "PDFUSION"):

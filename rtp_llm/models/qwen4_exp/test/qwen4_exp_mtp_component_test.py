@@ -125,7 +125,7 @@ class Qwen4ExpMTPComponentTest(unittest.TestCase):
         self.assertEqual(self.config.moe_layer_index, [0])
         self.assertTrue(self.config.is_mtp)
         self.assertEqual(
-            self.config.mtp_input_hidden_size,
+            self.config.getMtpInputHiddenSize(),
             self.config.hc_mult * self.config.hidden_size,
         )
         self.assertEqual(

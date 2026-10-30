@@ -9,35 +9,102 @@ The algorithm and API are provided by flashinfer.comm.vllm_ar (Apache-2.0).
 """
 
 import ctypes
+import logging
+
 import torch
 import torch.distributed as dist
 
 
 class FlashInferIpcAllReduce:
     def __init__(self, group, device, max_bytes=32 * 2560 * 2):
-        from flashinfer.comm import cuda_ipc, vllm_ar
-
         self.group = group
+        self.device = device
         self.rank = dist.get_rank(group)
-        self.ops = vllm_ar
-        self.ipc = cuda_ipc
         self.max_bytes = max_bytes
         self.capture_calls = 0
         self.registered_graph_inputs = True
-        self.meta = cuda_ipc.create_shared_buffer(
-            vllm_ar.meta_size() + max_bytes, group
-        )
-        cuda_ipc.cudart.cudaMemset(
-            ctypes.c_void_p(self.meta[self.rank]), 0, vllm_ar.meta_size() + max_bytes
-        )
-        self.buffer = cuda_ipc.create_shared_buffer(max_bytes, group)
-        self.rank_data = torch.empty(8 * 1024 * 1024, device=device, dtype=torch.uint8)
-        torch.cuda.synchronize(device)
-        dist.barrier(group=group)
-        self.handle = vllm_ar.init_custom_ar(
-            self.meta, self.rank_data, self.rank, False
-        )
-        vllm_ar.register_buffer(self.handle, self.buffer)
+        self.handle = 0
+        self.rank_data = None
+        self._allocated = []
+        self._opened = []
+        error = None
+        handles = None
+        try:
+            from flashinfer.comm import cuda_ipc, vllm_ar
+
+            self.ops = vllm_ar
+            self.ipc = cuda_ipc
+            self._close_ipc = cuda_ipc.cudart.lib.cudaIpcCloseMemHandle
+            self._close_ipc.argtypes = [ctypes.c_void_p]
+            self._close_ipc.restype = ctypes.c_int
+            self.rank_data = torch.empty(
+                8 * 1024 * 1024, device=device, dtype=torch.uint8
+            )
+            meta_bytes = vllm_ar.meta_size() + max_bytes
+            for size in (meta_bytes, max_bytes):
+                self._allocated.append(cuda_ipc.cudart.cudaMalloc(size))
+            cuda_ipc.cudart.cudaMemset(self._allocated[0], 0, meta_bytes)
+            handles = tuple(
+                cuda_ipc.cudart.cudaIpcGetMemHandle(p) for p in self._allocated
+            )
+            torch.cuda.synchronize(device)
+        except Exception as exc:
+            error = exc
+            self._release_local()
+        # Local imports, allocation and memset finish before the first exchange.
+        # All ranks vote even when only one rank fails; no dependency helper may
+        # interleave its hidden collectives with these fallible local operations.
+        peers = [None] * dist.get_world_size(group)
+        dist.all_gather_object(peers, (error is None, handles), group=group)
+        if not all(peer[0] for peer in peers):
+            self._release_local()
+            raise RuntimeError("IPC allocation failed on a TP rank") from error
+        try:
+            pointers = []
+            for index in range(2):
+                shared = []
+                for rank, (_, peer_handles) in enumerate(peers):
+                    if rank == self.rank:
+                        pointer = self._allocated[index]
+                    else:
+                        pointer = self.ipc.cudart.cudaIpcOpenMemHandle(
+                            peer_handles[index]
+                        )
+                        self._opened.append(pointer)
+                    shared.append(pointer.value)
+                pointers.append(shared)
+            self.meta, self.buffer = pointers
+            self.handle = self.ops.init_custom_ar(
+                self.meta, self.rank_data, self.rank, False
+            )
+            self.ops.register_buffer(self.handle, self.buffer)
+            torch.cuda.synchronize(device)
+        except Exception as exc:
+            error = exc
+        dist.all_gather_object(peers, error is None, group=group)
+        if not all(peers):
+            self._release_local()
+            raise RuntimeError("IPC registration failed on a TP rank") from error
+
+    def _release_local(self):
+        # Cleanup never contains a collective: partial construction is allowed.
+        actions = []
+        if self.handle:
+            actions.append((self.ops.dispose, self.handle))
+            self.handle = 0
+        actions.extend((self._close_mapping, p) for p in self._opened)
+        actions.extend((self.ipc.cudart.cudaFree, p) for p in self._allocated)
+        self._opened = []
+        self._allocated = []
+        for function, pointer in actions:
+            try:
+                function(pointer)
+            except Exception:
+                logging.exception("Failed to release local IPC allocation")
+        self.rank_data = None
+
+    def _close_mapping(self, pointer):
+        self.ipc.cudart.CUDART_CHECK(self._close_ipc(pointer))
 
     def is_buffer_size_sufficient(self, world_size, rows, hidden, dtype):
         return (
@@ -105,8 +172,7 @@ class FlashInferIpcAllReduce:
 
     def destroy(self):
         if self.handle:
-            self.ops.dispose(self.handle)
-            self.handle = 0
-            self.ipc.free_shared_buffer(self.meta, self.group)
-            self.ipc.free_shared_buffer(self.buffer, self.group)
-            self.rank_data = None
+            torch.cuda.synchronize(self.device)
+            dist.barrier(group=self.group)
+            self._release_local()
+            dist.barrier(group=self.group)

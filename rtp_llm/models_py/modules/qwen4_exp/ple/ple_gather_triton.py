@@ -1,7 +1,6 @@
 """Fixed-shape, graph-capturable lookup into the TP-local PLE row shards."""
 
 import ctypes
-from pathlib import Path
 
 import torch
 import triton
@@ -23,7 +22,7 @@ def _gather_shards(
     BF16: tl.constexpr,
     FP8: tl.constexpr,
 ):
-    rows = tl.program_id(0) * BR + tl.arange(0, BR)
+    rows = tl.program_id(0).to(tl.int64) * BR + tl.arange(0, BR)
     cols = tl.arange(0, BD)
     ids = tl.load(ids_ptr + rows, mask=rows < N, other=0)
     shard = ids // SHARD_ROWS
@@ -189,14 +188,9 @@ def prepare_cpu_uva_shards(
     ):
         raise ValueError("PLE CPU UVA shard geometry or indices are invalid")
     torch.cuda.init()
-    libraries = {
-        line.split()[-1]
-        for line in Path("/proc/self/maps").read_text().splitlines()
-        if "/libcudart.so" in line and line.split()[-1].startswith("/")
-    }
-    if len(libraries) != 1:
-        raise RuntimeError("PLE CPU UVA needs one loaded CUDA runtime")
-    runtime = ctypes.CDLL(libraries.pop())
+    # dlsym through Torch's extension follows its CUDA dependency tree. Other
+    # extensions may legitimately load a second runtime in the same process.
+    runtime = ctypes.CDLL(torch._C.__file__)
     get_pointer = runtime.cudaHostGetDevicePointer
     get_pointer.argtypes = [
         ctypes.POINTER(ctypes.c_void_p),

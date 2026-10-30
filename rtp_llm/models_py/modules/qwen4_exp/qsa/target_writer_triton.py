@@ -94,7 +94,7 @@ def _write_target_window(
             ST + request * STW + source_columns,
             (source_positions >= 0) & (source_columns < STW),
             other=0,
-        )
+        ).to(tl.int64)
         source_valid = (source_ids > 0) & (source_ids < SB)
         source_slots = source_ids * 8 + (source_positions & 7)
         history = tl.load(
@@ -135,7 +135,7 @@ def _write_target_window(
         column = completion >> 7
         kv_id = tl.load(
             KT + request * KTW + column, (completion >= 0) & (column < KTW), other=0
-        )
+        ).to(tl.int64)
         valid = (kv_id > 0) & (kv_id < KB)
         tl.store(KV + (kv_id * 32 + ((completion >> 2) & 31)) * 128 + d, value, valid)
     step = tl.arange(0, BQ)
@@ -145,7 +145,7 @@ def _write_target_window(
         ST + request * STW + columns,
         (step < Q) & (positions >= 0) & (columns < STW),
         other=0,
-    )
+    ).to(tl.int64)
     valid = (step < Q) & (ids > 0) & (ids < SB)
     raw = tl.load(
         RAW + (request * Q + step[:, None]) * RAW_STRIDE + d[None, :],
@@ -199,7 +199,7 @@ def try_write_target_window(
         old_state,
         kv_slots,
         old_kv,
-        **parameters
+        **parameters,
     )
     _write_target_window[(batch,)](
         raw,
@@ -213,7 +213,7 @@ def try_write_target_window(
         st,
         RAW_STRIDE=raw.stride(0),
         EPS=norm_eps,
-        **parameters
+        **parameters,
     )
     return IndexerCacheUndo(
         state_pool=state,

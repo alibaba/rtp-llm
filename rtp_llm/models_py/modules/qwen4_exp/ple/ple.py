@@ -1,3 +1,4 @@
+import inspect
 import math
 from contextlib import contextmanager
 from typing import List, Optional
@@ -170,7 +171,10 @@ class Qwen4ExpNGramEmbedding(nn.Module):
         self._cpu_graph_rows: Optional[torch.Tensor] = None
         self._cpu_graph_prefetch = None
         self._prefetcher = None
-        if self._cpu_uva_enabled:
+        if (
+            self._cpu_uva_enabled
+            and "external" in inspect.signature(torch.cuda.Event).parameters
+        ):
             from rtp_llm.models_py.modules.qwen4_exp.ple.ple_prefetch import (
                 PLEPrefetcher,
             )

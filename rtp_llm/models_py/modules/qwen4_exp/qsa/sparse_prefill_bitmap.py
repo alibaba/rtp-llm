@@ -17,7 +17,7 @@ def _membership_words(
     BK: tl.constexpr,
     WORDS: tl.constexpr,
 ):
-    row = tl.program_id(0)
+    row = tl.program_id(0).to(tl.int64)
     slots = tl.arange(0, BK)
     idx = tl.load(ids + row * K + slots, slots < K, other=-1)
     valid = (slots < K) & (idx >= 0) & (idx < T)
@@ -49,9 +49,9 @@ def _bitmap_gqa(
     QS: tl.constexpr,
     KT: tl.constexpr,
 ):
-    b = tl.program_id(0)
-    hk = tl.program_id(1)
-    group = tl.program_id(2)
+    b = tl.program_id(0).to(tl.int64)
+    hk = tl.program_id(1).to(tl.int64)
+    group = tl.program_id(2).to(tl.int64)
     # Five query positions use 15 of the tensor-core tile's 16 rows.
     r = tl.arange(0, 16)
     d = tl.arange(0, D)

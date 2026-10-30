@@ -4,6 +4,7 @@ from collections.abc import Mapping
 from typing import Any
 
 import torch
+
 from rtp_llm.models.qwen4_exp.qwen4_exp_kv_cache import PLE_NGRAM_CTX_TAG, PLE_STATE_TAG
 from rtp_llm.models_py.model_desc.block_map import (
     get_attention_inputs_value,
@@ -67,7 +68,7 @@ class PLEExecution:
             for key, ple in self.ple_layers.items()
             if getattr(getattr(ple, "ple_embedding", None), "supports_prefetch", False)
         ]
-        if not enabled:
+        if not enabled or self.kv_cache is None:
             return {}
         ctx_inputs = select_attention_inputs_for_tag(
             attention_inputs, PLE_NGRAM_CTX_TAG
@@ -503,6 +504,19 @@ class PLEExecution:
                         (state_writable[terminal_t] & ctx_writable[terminal_t])
                         .all()
                         .item()
+                    )
+                if not terminal_writable and bool(
+                    getattr(state_inputs, "is_s_padded", False)
+                ):
+                    tables = (
+                        host_block_tables
+                        if trusted_host_tables
+                        else device_block_tables
+                    )
+                    inactive = tables[0].eq(0).all(dim=1) & tables[1].eq(0).all(dim=1)
+                    valid = state_writable[terminal_t] & ctx_writable[terminal_t]
+                    terminal_writable = bool(
+                        (valid | inactive.to(valid.device)).all().item()
                     )
                 if not terminal_writable:
                     raise RuntimeError(

@@ -108,10 +108,6 @@ public:
 
     // Hyper-connection residual multiplier. Default 1 (no expansion).
     int64_t hc_mult = 1;
-    // Row width of the target hidden state consumed by an MTP draft. Zero keeps
-    // the legacy contract: hidden_size * hc_mult. Models whose draft consumes
-    // the collapsed target stream can opt in to hidden_size explicitly.
-    int64_t mtp_input_hidden_size = 0;
     // DeepSeek-V4 specific.
     int64_t hc_sinkhorn_iters = 0;
     double  hc_eps            = 1e-6;

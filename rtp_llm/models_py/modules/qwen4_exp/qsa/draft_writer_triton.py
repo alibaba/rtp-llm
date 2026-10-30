@@ -93,7 +93,7 @@ def _write_draft_window(
             ST + request * STW + source_columns,
             (source_positions >= 0) & (source_columns < STW),
             other=0,
-        )
+        ).to(tl.int64)
         source_valid = (source_ids > 0) & (source_ids < SB)
         source_slots = source_ids * 8 + (source_positions & 7)
         history = tl.load(
@@ -134,7 +134,7 @@ def _write_draft_window(
         column = completion >> 7
         kv_id = tl.load(
             KT + request * KTW + column, (completion >= 0) & (column < KTW), other=0
-        )
+        ).to(tl.int64)
         valid = (kv_id > 0) & (kv_id < KB)
         tl.store(KV + (kv_id * 32 + ((completion >> 2) & 31)) * 128 + d, value, valid)
     step = tl.arange(0, BQ)
@@ -144,7 +144,7 @@ def _write_draft_window(
         ST + request * STW + columns,
         (step < length) & (positions >= 0) & (columns < STW),
         other=0,
-    )
+    ).to(tl.int64)
     valid = (step < length) & (ids > 0) & (ids < SB)
     raw = tl.load(
         RAW + (begin + step[:, None]) * RAW_STRIDE + d[None, :],

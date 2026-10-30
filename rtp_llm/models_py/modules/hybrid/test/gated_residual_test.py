@@ -342,6 +342,22 @@ class GatedResidualTest(unittest.TestCase):
             torch.testing.assert_close(got, want, atol=8e-3, rtol=1e-2)
 
     @unittest.skipUnless(torch.cuda.is_available(), "CUDA is required")
+    def test_group_norm_addresses_beyond_signed_int32(self):
+        width, rows = 10240, 2**31 // 10240 + 2
+        x = torch.zeros((rows, width), device="cuda", dtype=torch.bfloat16)
+        x[-3:].normal_()
+        gamma = torch.zeros(width, device="cuda", dtype=torch.bfloat16)
+        tail = x[-3:].float().reshape(3, 4, 2560)
+        reference = (
+            (tail * torch.rsqrt(tail.square().mean(-1, keepdim=True) + _EPS))
+            .reshape(3, width)
+            .bfloat16()
+        )
+        result = grouped_rms_norm(x, gamma, 2560, _EPS)
+        torch.testing.assert_close(result[-3:], reference, atol=0.016, rtol=0.01)
+        self.assertEqual(torch.count_nonzero(result[0]), 0)
+
+    @unittest.skipUnless(torch.cuda.is_available(), "CUDA is required")
     def test_fused_group_norm_matches_torch_and_replays(self):
         width = 4 * 2560
         gamma = (torch.randn(width, device="cuda") * 0.1).bfloat16()

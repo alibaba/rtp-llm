@@ -136,10 +136,11 @@ class WrapperCacheSetupTest(JitCacheTestBase):
             path = Path(path)
             return fallback if path == fallback else None
 
-        with mock.patch.object(
-            cache_env, "local_jit_fallback", return_value=fallback
-        ), mock.patch.object(
-            cache_env, "ensure_writable_directory", side_effect=writable
+        with (
+            mock.patch.object(cache_env, "local_jit_fallback", return_value=fallback),
+            mock.patch.object(
+                cache_env, "ensure_writable_directory", side_effect=writable
+            ),
         ):
             cache_env.configure_writable_cache_env(
                 "TRITON_CACHE_DIR", default, "triton"
@@ -160,10 +161,11 @@ class WrapperCacheSetupTest(JitCacheTestBase):
             path = Path(path)
             return fallback if path == fallback else None
 
-        with mock.patch.object(
-            cache_env, "local_jit_fallback", return_value=fallback
-        ), mock.patch.object(
-            cache_env, "ensure_writable_directory", side_effect=writable
+        with (
+            mock.patch.object(cache_env, "local_jit_fallback", return_value=fallback),
+            mock.patch.object(
+                cache_env, "ensure_writable_directory", side_effect=writable
+            ),
         ):
             cache_env.configure_writable_cache_env(
                 "TRITON_CACHE_DIR", default, "triton"
@@ -392,9 +394,10 @@ class StoreTest(JitCacheTestBase):
         # answering read events re-entered the handler via deepjit_entry_files'
         # own opens and self-excited the observer into a 23M-event/30min loop.
         for event_type in ("opened", "closed_no_write"):
-            with self.subTest(event_type=event_type), mock.patch.object(
-                jit, "deepjit_entry_files"
-            ) as validate:
+            with (
+                self.subTest(event_type=event_type),
+                mock.patch.object(jit, "deepjit_entry_files") as validate,
+            ):
                 manager.on_any_event(
                     types.SimpleNamespace(
                         is_directory=False, event_type=event_type, src_path=str(meta)
@@ -453,8 +456,9 @@ class StoreTest(JitCacheTestBase):
     def test_snapshot_without_mtime_manifest_fails_open(self):
         snap_store = self.make_store()
         self.publish(snap_store, {"triton/op.so": b"x"})
-        with mock.patch.object(store, "MTIME_MANIFEST", ".missing"), self.assertLogs(
-            level="WARNING"
+        with (
+            mock.patch.object(store, "MTIME_MANIFEST", ".missing"),
+            self.assertLogs(level="WARNING"),
         ):
             self.assertIsNone(snap_store.prepare_restore(self.root / "staging"))
 
@@ -646,8 +650,9 @@ class StoreTest(JitCacheTestBase):
             self.assertTrue(release.wait(5))
             real_pack(archive, files)
 
-        with _fake_fuser(umount=released.append), mock.patch.object(
-            store, "pack_zstd_tar", side_effect=pack
+        with (
+            _fake_fuser(umount=released.append),
+            mock.patch.object(store, "pack_zstd_tar", side_effect=pack),
         ):
             publisher = threading.Thread(
                 target=snap_store.publish_snapshot, args=({"triton/op.so": source},)
@@ -856,10 +861,11 @@ class ScopeTest(JitCacheTestBase):
                 explicit = str(self.root / "explicit")
                 if scenario == "explicit":
                     os.environ["TRITON_CACHE_DIR"] = explicit
-                with _fake_probes(
-                    hip="6.2.41133" if scenario == "rocm" else None
-                ), mock.patch.object(
-                    cache_env.Path, "home", return_value=self.root / "home"
+                with (
+                    _fake_probes(hip="6.2.41133" if scenario == "rocm" else None),
+                    mock.patch.object(
+                        cache_env.Path, "home", return_value=self.root / "home"
+                    ),
                 ):
                     wrapper_cache.setup_jit_cache(packages=[])
                     before = {
@@ -943,8 +949,9 @@ class ScopeTest(JitCacheTestBase):
         owned.mkdir()
         os.chmod(owned, 0o700)
         os.environ.pop("TEST_JIT_LOCAL_DIR", None)
-        with _fake_probes(), mock.patch.object(
-            jit, "LOCAL_JIT_ROOT", owned / ".jit_cache"
+        with (
+            _fake_probes(),
+            mock.patch.object(jit, "LOCAL_JIT_ROOT", owned / ".jit_cache"),
         ):
             scope = jit.setup_jit_cache_env()
             self.assertIsNotNone(scope)
@@ -992,8 +999,11 @@ class ScopeTest(JitCacheTestBase):
 
     def test_missing_acl_support_fails_open(self):
         os.umask(0o022)
-        with _fake_probes(), mock.patch.object(
-            jit, "_run", side_effect=[OSError("no setfacl"), "user::rwx"]
+        with (
+            _fake_probes(),
+            mock.patch.object(
+                jit, "_run", side_effect=[OSError("no setfacl"), "user::rwx"]
+            ),
         ):
             with self.assertLogs(level="WARNING") as logs:
                 self.assertIsNone(jit.setup_jit_cache_env())
@@ -1005,8 +1015,9 @@ class ScopeTest(JitCacheTestBase):
         os.chmod(self.root, 0o777)
         os.chmod(shared, 0o777)
         jit._prepare_shared_root(shared)
-        with _fake_probes(), mock.patch.object(
-            jit.os, "chmod", side_effect=PermissionError
+        with (
+            _fake_probes(),
+            mock.patch.object(jit.os, "chmod", side_effect=PermissionError),
         ):
             with mock.patch.object(
                 jit,
@@ -1045,10 +1056,10 @@ class ScopeTest(JitCacheTestBase):
             "g++ (test) 13.0\n",
             "/usr/lib/libstdc++.so.6\n",
         ]
-        with mock.patch.object(
-            jit.subprocess, "check_output", side_effect=outputs
-        ), mock.patch.object(jit.Path, "is_file", return_value=True), mock.patch.object(
-            jit.Path, "read_bytes", return_value=b"solib"
+        with (
+            mock.patch.object(jit.subprocess, "check_output", side_effect=outputs),
+            mock.patch.object(jit.Path, "is_file", return_value=True),
+            mock.patch.object(jit.Path, "read_bytes", return_value=b"solib"),
         ):
             with self.assertLogs(level="WARNING"):
                 self.assertIsNone(jit._cpp_runtime_scope())
@@ -1067,11 +1078,13 @@ class ScopeTest(JitCacheTestBase):
             " get_device_capability=lambda s,i:((8,0),(9,0))[i]\n"
             "class V:hip=None\nclass T:cuda=C();version=V()\ntorch=T()"
         )
-        with mock.patch.object(
-            jit, "GPU_PROBE", jit.GPU_PROBE.replace("import torch", fake_torch)
-        ), mock.patch.dict(os.environ, {"PYTHONOPTIMIZE": "1"}), self.assertLogs(
-            level="WARNING"
-        ) as logs:
+        with (
+            mock.patch.object(
+                jit, "GPU_PROBE", jit.GPU_PROBE.replace("import torch", fake_torch)
+            ),
+            mock.patch.dict(os.environ, {"PYTHONOPTIMIZE": "1"}),
+            self.assertLogs(level="WARNING") as logs,
+        ):
             self.assertIsNone(jit._accelerator_scope("cuda", "12.8"))
         self.assertIn("mixed GPU architectures", "\n".join(logs.output))
 
@@ -1142,9 +1155,13 @@ class ManagerTest(JitCacheTestBase):
             blocked = threading.Event()
             manager = self.make_manager(self.make_scope())
             try:
-                with self.subTest(timeout_s=timeout_s), mock.patch.object(
-                    jit.JitCacheManager, "_prepare", lambda _: blocked.wait(10)
-                ), self.assertLogs(level="WARNING") as logs:
+                with (
+                    self.subTest(timeout_s=timeout_s),
+                    mock.patch.object(
+                        jit.JitCacheManager, "_prepare", lambda _: blocked.wait(10)
+                    ),
+                    self.assertLogs(level="WARNING") as logs,
+                ):
                     self.assertFalse(manager.bootstrap(timeout_s))
                 self.assertIn("setup timed out", "\n".join(logs.output))
             finally:
@@ -1163,9 +1180,10 @@ class ManagerTest(JitCacheTestBase):
             return late_store
 
         try:
-            with mock.patch.object(
-                store, "resolve_remote", side_effect=resolve_late
-            ), mock.patch.object(jit, "STOP_TIMEOUT_S", 0.01):
+            with (
+                mock.patch.object(store, "resolve_remote", side_effect=resolve_late),
+                mock.patch.object(jit, "STOP_TIMEOUT_S", 0.01),
+            ):
                 self.assertFalse(manager.bootstrap(timeout_s=0.1))
                 self.assertTrue(entered.wait(5))
                 manager.stop()
@@ -1211,9 +1229,12 @@ class ManagerTest(JitCacheTestBase):
         self.assertTrue(producer.bootstrap(timeout_s=30))
         self.write_artifact(scope, "triton/kernel.cubin")
         producer._dirty.set()
-        with mock.patch.object(
-            producer, "_snapshot_files", side_effect=OSError("scan blew up")
-        ), self.assertRaises(OSError):
+        with (
+            mock.patch.object(
+                producer, "_snapshot_files", side_effect=OSError("scan blew up")
+            ),
+            self.assertRaises(OSError),
+        ):
             producer.publish_pending_snapshot()
         # Neither the pending work nor the lock may be lost, or this scope can
         # never publish again for the lifetime of the process.
@@ -1289,9 +1310,12 @@ class ManagerTest(JitCacheTestBase):
 
         manager = self.make_manager(scope)
         self.publish_remote(manager, "triton/k.cubin", b"fresh")
-        with mock.patch.object(
-            store.RemoteSnapshotStore, "prepare_restore", slow_prepare
-        ), self.assertLogs(level="WARNING"):
+        with (
+            mock.patch.object(
+                store.RemoteSnapshotStore, "prepare_restore", slow_prepare
+            ),
+            self.assertLogs(level="WARNING"),
+        ):
             self.assertFalse(manager.bootstrap(timeout_s=0.05))
         self.write_artifact(scope, "triton/local.cubin", b"local")
         release.set()
@@ -1375,8 +1399,9 @@ class ManagerTest(JitCacheTestBase):
         lock = scope.root.parent / jit.LOCKS_DIR / f"{scope.scope_id}.restore.lock"
         restore_fd = store.acquire_flock(lock)
         try:
-            with mock.patch.object(store, "resolve_remote") as resolve, self.assertLogs(
-                level="WARNING"
+            with (
+                mock.patch.object(store, "resolve_remote") as resolve,
+                self.assertLogs(level="WARNING"),
             ):
                 self.assertFalse(manager.bootstrap(0.05))
             resolve.assert_not_called()
@@ -1412,12 +1437,11 @@ class ManagerTest(JitCacheTestBase):
                 release.wait(5)
 
         manager._dirty.set()
-        with mock.patch.object(
-            manager, "publish_pending_snapshot", side_effect=publish
-        ), _fake_fuser(umount=lambda _: unmounted.set()), mock.patch.object(
-            jit, "STOP_TIMEOUT_S", 0.05
-        ), self.assertLogs(
-            level="WARNING"
+        with (
+            mock.patch.object(manager, "publish_pending_snapshot", side_effect=publish),
+            _fake_fuser(umount=lambda _: unmounted.set()),
+            mock.patch.object(jit, "STOP_TIMEOUT_S", 0.05),
+            self.assertLogs(level="WARNING"),
         ):
             manager._worker = threading.Thread(target=manager._sync_loop)
             manager._worker.start()
@@ -1486,9 +1510,12 @@ class BackendTest(JitCacheTestBase):
         return stack
 
     def test_no_remote_sets_up_local_jit_env(self):
-        with mock.patch.object(
-            jit, "setup_jit_cache_env", return_value=mock.Mock()
-        ) as setup, mock.patch.object(jit, "JitCacheManager") as manager:
+        with (
+            mock.patch.object(
+                jit, "setup_jit_cache_env", return_value=mock.Mock()
+            ) as setup,
+            mock.patch.object(jit, "JitCacheManager") as manager,
+        ):
             self.assertIsNone(jit.start_from_config(self.make_configs().jit_config))
         setup.assert_called_once_with()
         manager.assert_not_called()
@@ -1496,9 +1523,10 @@ class BackendTest(JitCacheTestBase):
     def test_manage_jit_cache_false_skips_all_setup(self):
         config = self.make_configs(remote="/r").jit_config
         config.manage_jit_cache = False
-        with mock.patch.object(jit, "setup_jit_cache_env") as setup, mock.patch.object(
-            jit, "JitCacheManager"
-        ) as manager:
+        with (
+            mock.patch.object(jit, "setup_jit_cache_env") as setup,
+            mock.patch.object(jit, "JitCacheManager") as manager,
+        ):
             self.assertIsNone(jit.start_from_config(config))
         setup.assert_not_called()
         manager.assert_not_called()
@@ -1506,9 +1534,13 @@ class BackendTest(JitCacheTestBase):
     def test_cpu_path_forwards_pipe_writer_and_skips_jit(self):
         controller, configs, pipe_writer = mock.Mock(), mock.Mock(), mock.Mock()
         configs.parallelism_config.world_rank = 3
-        with self.patched_backend(cuda=False), mock.patch.object(
-            backend, "local_rank_start", return_value="served"
-        ) as rank_start, mock.patch.object(jit, "start_from_config") as jit_start:
+        with (
+            self.patched_backend(cuda=False),
+            mock.patch.object(
+                backend, "local_rank_start", return_value="served"
+            ) as rank_start,
+            mock.patch.object(jit, "start_from_config") as jit_start,
+        ):
             result = backend.start_backend_server(controller, configs, pipe_writer)
         self.assertEqual(result, "served")
         rank_start.assert_called_once_with(controller, configs, 3, pipe_writer)
@@ -1526,9 +1558,11 @@ class BackendTest(JitCacheTestBase):
             manager.bootstrap.side_effect = failure or None
             manager.bootstrap.return_value = False
             config = self.make_configs(remote="/r").jit_config
-            with self.subTest(failure=failure), mock.patch.object(
-                jit, "setup_jit_cache_env", return_value=mock.Mock()
-            ), mock.patch.object(jit, "JitCacheManager", return_value=manager):
+            with (
+                self.subTest(failure=failure),
+                mock.patch.object(jit, "setup_jit_cache_env", return_value=mock.Mock()),
+                mock.patch.object(jit, "JitCacheManager", return_value=manager),
+            ):
                 if failure:  # the only fail-open handler is the caller's, not ours
                     self.assertRaises(type(failure), jit.start_from_config, config)
                 else:
@@ -1538,12 +1572,15 @@ class BackendTest(JitCacheTestBase):
 
     def test_jit_setup_failure_still_starts_the_engine(self):
         configs = self.make_configs(remote="/r", world_size=1)
-        with self.patched_backend(), mock.patch.object(
-            jit, "start_from_config", side_effect=RuntimeError("setup blew up")
-        ), mock.patch.object(
-            backend, "local_rank_start", return_value="served"
-        ) as rank_start, self.assertLogs(
-            level="ERROR"
+        with (
+            self.patched_backend(),
+            mock.patch.object(
+                jit, "start_from_config", side_effect=RuntimeError("setup blew up")
+            ),
+            mock.patch.object(
+                backend, "local_rank_start", return_value="served"
+            ) as rank_start,
+            self.assertLogs(level="ERROR"),
         ):
             self.assertEqual(backend.start_backend_server(None, configs), "served")
         rank_start.assert_called_once()
@@ -1551,11 +1588,13 @@ class BackendTest(JitCacheTestBase):
     def test_multi_rank_start_owns_manager_cleanup(self):
         manager = mock.Mock()
         configs = self.make_configs(remote="/r", world_size=2)
-        with self.patched_backend(device_count=2), mock.patch.object(
-            jit, "start_from_config", return_value=manager
-        ), mock.patch.object(
-            backend, "multi_rank_start", return_value=["proc"]
-        ) as ranks:
+        with (
+            self.patched_backend(device_count=2),
+            mock.patch.object(jit, "start_from_config", return_value=manager),
+            mock.patch.object(
+                backend, "multi_rank_start", return_value=["proc"]
+            ) as ranks,
+        ):
             backend.start_backend_server(None, configs)
         ranks.assert_called_once()
         self.assertIs(ranks.call_args.kwargs["cleanup"], manager.stop)
@@ -1566,17 +1605,20 @@ class BackendTest(JitCacheTestBase):
         manager = mock.Mock()
         manager.stop.side_effect = lambda: events.append("stop")
         configs = self.make_configs(remote="/r", world_size=1)
-        with self.patched_backend(device_count=1), mock.patch.object(
-            jit, "start_from_config", return_value=manager
-        ), mock.patch.object(
-            backend,
-            "local_rank_start",
-            side_effect=lambda *_: events.append("rank") or "served",
-        ), mock.patch.object(
-            # A hard exit here would truncate the caller's own teardown.
-            backend.os,
-            "_exit",
-            side_effect=AssertionError("single rank must return, not hard exit"),
+        with (
+            self.patched_backend(device_count=1),
+            mock.patch.object(jit, "start_from_config", return_value=manager),
+            mock.patch.object(
+                backend,
+                "local_rank_start",
+                side_effect=lambda *_: events.append("rank") or "served",
+            ),
+            mock.patch.object(
+                # A hard exit here would truncate the caller's own teardown.
+                backend.os,
+                "_exit",
+                side_effect=AssertionError("single rank must return, not hard exit"),
+            ),
         ):
             self.assertEqual(backend.start_backend_server(None, configs), "served")
         self.assertEqual(events, ["rank", "stop"])
@@ -1601,9 +1643,12 @@ class BackendTest(JitCacheTestBase):
         configs.parallelism_config.local_rank = 0
         configs.parallelism_config.world_size = 1
         status = mock.Mock()
-        with mock.patch.dict(
-            sys.modules, {"rtp_llm.server.backend_manager": backend_module}
-        ), contextlib.ExitStack() as stack:
+        with (
+            mock.patch.dict(
+                sys.modules, {"rtp_llm.server.backend_manager": backend_module}
+            ),
+            contextlib.ExitStack() as stack,
+        ):
             for name in (
                 "copy_gemm_config",
                 "set_parallelism_config",
@@ -1633,13 +1678,11 @@ class BackendTest(JitCacheTestBase):
         def start_jit(_config):
             handlers[backend.signal.SIGTERM](backend.signal.SIGTERM, None)
 
-        with self.patched_backend(
-            device_count=2, signal_handler=handlers.__setitem__
-        ), mock.patch.object(
-            jit, "start_from_config", side_effect=start_jit
-        ), mock.patch.object(
-            backend, "multi_rank_start"
-        ) as ranks:
+        with (
+            self.patched_backend(device_count=2, signal_handler=handlers.__setitem__),
+            mock.patch.object(jit, "start_from_config", side_effect=start_jit),
+            mock.patch.object(backend, "multi_rank_start") as ranks,
+        ):
             with self.assertRaises(KeyboardInterrupt):
                 backend.start_backend_server(None, configs)
         ranks.assert_not_called()
@@ -1660,16 +1703,17 @@ class BackendTest(JitCacheTestBase):
         proc.is_alive.side_effect = [True, False, False]  # dies after terminate
         status = mock.Mock()
 
-        with mock.patch.object(
-            backend.multiprocessing, "get_context"
-        ), mock.patch.object(
-            backend, "_create_rank_processes", side_effect=self._fake_create(proc)
-        ), mock.patch.object(
-            backend,
-            "_wait_for_ranks_startup",
-            side_effect=KeyboardInterrupt("signal 15 during startup"),
-        ), mock.patch.object(
-            backend, "_send_pipe_status", status
+        with (
+            mock.patch.object(backend.multiprocessing, "get_context"),
+            mock.patch.object(
+                backend, "_create_rank_processes", side_effect=self._fake_create(proc)
+            ),
+            mock.patch.object(
+                backend,
+                "_wait_for_ranks_startup",
+                side_effect=KeyboardInterrupt("signal 15 during startup"),
+            ),
+            mock.patch.object(backend, "_send_pipe_status", status),
         ):
             # The abort must never be downgraded to a catchable Exception.
             with self.assertRaisesRegex(KeyboardInterrupt, "signal 15"):
@@ -1693,14 +1737,13 @@ class BackendTest(JitCacheTestBase):
         ctx = mock.Mock()
         ctx.Process.side_effect = [first, second]
         ctx.Pipe.return_value = (mock.Mock(), mock.Mock())
-        with mock.patch.object(
-            backend.multiprocessing, "get_context", return_value=ctx
-        ), mock.patch.object(
-            backend, "_get_local_world_size", return_value=2
-        ), mock.patch.object(
-            backend, "_get_cuda_device_list", return_value=["0", "1"]
-        ), mock.patch.object(
-            backend, "_send_pipe_status"
+        with (
+            mock.patch.object(backend.multiprocessing, "get_context", return_value=ctx),
+            mock.patch.object(backend, "_get_local_world_size", return_value=2),
+            mock.patch.object(
+                backend, "_get_cuda_device_list", return_value=["0", "1"]
+            ),
+            mock.patch.object(backend, "_send_pipe_status"),
         ):
             with self.assertRaisesRegex(Exception, "spawn failed"):
                 backend.multi_rank_start(None, configs)
@@ -1729,16 +1772,16 @@ class BackendTest(JitCacheTestBase):
         proc.is_alive.return_value = True
         cleanup = mock.Mock()
 
-        with mock.patch.object(
-            backend.multiprocessing, "get_context"
-        ), mock.patch.object(
-            backend, "_create_rank_processes", side_effect=self._fake_create(proc)
-        ), mock.patch.object(
-            backend, "_wait_for_ranks_startup", side_effect=RuntimeError("failed")
-        ), mock.patch.object(
-            backend, "_send_pipe_status"
-        ), mock.patch.object(
-            backend.os, "_exit", side_effect=SystemExit(1)
+        with (
+            mock.patch.object(backend.multiprocessing, "get_context"),
+            mock.patch.object(
+                backend, "_create_rank_processes", side_effect=self._fake_create(proc)
+            ),
+            mock.patch.object(
+                backend, "_wait_for_ranks_startup", side_effect=RuntimeError("failed")
+            ),
+            mock.patch.object(backend, "_send_pipe_status"),
+            mock.patch.object(backend.os, "_exit", side_effect=SystemExit(1)),
         ):
             with self.assertRaises(SystemExit):
                 backend.multi_rank_start(None, configs, cleanup=cleanup)
@@ -1774,21 +1817,23 @@ class TipcTest(JitCacheTestBase):
             self.assertFalse((build_dir / "lock").exists())  # cleared pre-load
             return "module"
 
-        with mock.patch.object(
-            tipc_ffi.os, "open", wraps=os.open
-        ) as open_file, mock.patch.dict(
-            os.environ,
-            {
-                "TORCH_EXTENSIONS_DIR": str(build_root),
-                "NVCC_APPEND_FLAGS": "--threads=4",
-            },
-        ), mock.patch.object(
-            tipc_ffi.torch.cuda, "get_device_capability", return_value=cap
-        ), mock.patch.object(
-            tipc_ffi, "_source_signature", return_value="fixed-signature"
-        ) as signature, mock.patch.object(
-            tipc_ffi, "load", side_effect=loaded
-        ) as load:
+        with (
+            mock.patch.object(tipc_ffi.os, "open", wraps=os.open) as open_file,
+            mock.patch.dict(
+                os.environ,
+                {
+                    "TORCH_EXTENSIONS_DIR": str(build_root),
+                    "NVCC_APPEND_FLAGS": "--threads=4",
+                },
+            ),
+            mock.patch.object(
+                tipc_ffi.torch.cuda, "get_device_capability", return_value=cap
+            ),
+            mock.patch.object(
+                tipc_ffi, "_source_signature", return_value="fixed-signature"
+            ) as signature,
+            mock.patch.object(tipc_ffi, "load", side_effect=loaded) as load,
+        ):
             self.assertEqual(tipc_ffi.__CompileHelper__().compile(), "module")
             load.assert_called_once()
             self.assertTrue(open_file.call_args.args[1] & os.O_NOFOLLOW)
@@ -1808,12 +1853,15 @@ class TipcTest(JitCacheTestBase):
     def test_compile_key_names_environment_inputs(self):
         def build_args(env):
             env = {"TORCH_EXTENSIONS_DIR": str(self.root / "build"), **env}
-            with mock.patch.dict(os.environ, env, clear=True), mock.patch.object(
-                tipc_ffi.torch.cuda, "get_device_capability", return_value=(8, 0)
-            ), mock.patch.object(
-                tipc_ffi, "_source_signature", return_value="fixed-signature"
-            ) as signature, mock.patch.object(
-                tipc_ffi, "load", return_value="module"
+            with (
+                mock.patch.dict(os.environ, env, clear=True),
+                mock.patch.object(
+                    tipc_ffi.torch.cuda, "get_device_capability", return_value=(8, 0)
+                ),
+                mock.patch.object(
+                    tipc_ffi, "_source_signature", return_value="fixed-signature"
+                ) as signature,
+                mock.patch.object(tipc_ffi, "load", return_value="module"),
             ):
                 tipc_ffi.__CompileHelper__().compile()
                 return signature.call_args.args[1]

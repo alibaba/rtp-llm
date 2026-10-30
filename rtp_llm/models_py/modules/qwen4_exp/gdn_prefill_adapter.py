@@ -4,13 +4,33 @@ The FlashInfer0.7 CP implementation is isolated under gdn_sm120. It does
 not replace installed FlashInfer or the speculative Decode state owner.
 """
 
+import functools
+import logging
+from importlib import metadata
+
 import torch
 import triton
 import triton.language as tl
 
 from rtp_llm.models_py.model_desc.qwen3_next import Qwen3NextGatedDeltaNetPrefill
 from rtp_llm.models_py.triton_kernels.fla.block import load_initial_state_from_block_map
-from rtp_llm.models_py.triton_kernels.fla.l2norm import l2norm_fwd
+
+
+@functools.lru_cache(maxsize=1)
+def sm120_dsl_available():
+    try:
+        if metadata.version("nvidia-cutlass-dsl") != "4.4.2":
+            return False
+        from rtp_llm.models_py.utils.cutlass import cuda13_cutlass_is_intact
+
+        if not cuda13_cutlass_is_intact():
+            return False
+        from .gdn_sm120.delta_rule_cp_sm120 import cp_delta_rule_dsl_sm120
+
+        return callable(cp_delta_rule_dsl_sm120)
+    except (ImportError, AttributeError, metadata.PackageNotFoundError) as error:
+        logging.warning("SM120 GDN DSL unavailable; using native prefill: %s", error)
+        return False
 
 
 @triton.jit(do_not_specialize=["TABLE_STRIDE", "CACHE_STRIDE"])
@@ -28,7 +48,11 @@ def _store_page_checkpoints(
     PAGE: tl.constexpr,
     BLOCK: tl.constexpr,
 ):
-    batch, page, tile = tl.program_id(0), tl.program_id(1), tl.program_id(2)
+    batch, page, tile = (
+        tl.program_id(0).to(tl.int64),
+        tl.program_id(1).to(tl.int64),
+        tl.program_id(2).to(tl.int64),
+    )
     length = tl.load(Cu + batch + 1) - tl.load(Cu + batch)
     prefix = tl.load(Prefix + batch)
     col = tile * BLOCK + tl.arange(0, BLOCK)
@@ -51,21 +75,6 @@ def _store_page_checkpoints(
         Cache + block * CACHE_STRIDE + col,
         tl.where(final_page, b, a),
         valid_page & (block > 0) & (col < width),
-    )
-
-
-def sm120_prefill_with_checkpoints(
-    q, k, v, g, beta, initial, cu_seqlens, lengths, page_size=128
-):
-    """Log gates in, FP32 final/page states out; lengths are existing CPU metadata."""
-
-    q = l2norm_fwd(q).squeeze(0).contiguous()
-    k = l2norm_fwd(k).squeeze(0).contiguous()
-    v = v.squeeze(0).contiguous()
-    alpha = torch.exp(g.squeeze(0).float()).contiguous()
-    beta_fp32 = beta.squeeze(0).float().contiguous()
-    return sm120_prefill_prepared(
-        q, k, v, alpha, beta_fp32, initial, cu_seqlens, lengths, page_size
     )
 
 
@@ -133,6 +142,7 @@ class Qwen4Sm120GdnPrefill(Qwen3NextGatedDeltaNetPrefill):
             and not attn_inputs.is_cuda_graph
             and host_lengths.device.type == "cpu"
             and host_prefixes.device.type == "cpu"
+            and sm120_dsl_available()
         )
         if not supported:
             return super()._fla(

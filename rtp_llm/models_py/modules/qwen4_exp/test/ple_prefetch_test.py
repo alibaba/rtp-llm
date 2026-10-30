@@ -1,5 +1,6 @@
 import gc
 import unittest
+from unittest.mock import patch
 
 import torch
 
@@ -48,7 +49,7 @@ class PLEPrefetchTest(unittest.TestCase):
             output, module._gather_torch(ids.cpu()).cuda(), atol=0, rtol=0
         )
 
-    def _module(self, dtype=torch.bfloat16):
+    def _module(self, dtype=torch.bfloat16, expected_prefetch=True):
         shards = [
             (torch.arange(5 * 160).reshape(5, 160) + i * 1000).to(dtype)
             for i in range(2)
@@ -64,11 +65,32 @@ class PLEPrefetchTest(unittest.TestCase):
             total_shards=4,
             distributed_reduce=True,
         )
-        self.assertTrue(module.supports_prefetch)
+        self.assertEqual(module.supports_prefetch, expected_prefetch)
         self.assertTrue(
             all(t.device.type == "cpu" and t.is_pinned() for t in module.shards)
         )
         return module
+
+    def test_legacy_event_api_uses_current_stream_lookup_for_graph_rows(self):
+        original_event = torch.cuda.Event
+
+        def legacy_event(enable_timing=False, blocking=False, interprocess=False):
+            return original_event(enable_timing, blocking, interprocess)
+
+        with patch.object(torch.cuda, "Event", legacy_event):
+            module = self._module(expected_prefetch=False)
+        ids = torch.tensor([5, 16, -1, 0], device="cuda", dtype=torch.int64)
+        module._graph_gather_required = True
+        module.prepare_cpu_graph_rows(ids, 1)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            actual = module._gather_local(ids).clone()
+        ids.copy_(torch.tensor([19, 9, 7, 2], dtype=torch.int64, device="cuda"))
+        module.prepare_cpu_graph_rows(ids, 1)
+        graph.replay()
+        torch.testing.assert_close(
+            actual, module._gather_torch(ids.cpu()).cuda(), rtol=0, atol=0
+        )
 
     def test_lookup_and_reused_slots_preserve_local_remote_and_invalid_rows(self):
         for dtype in (torch.bfloat16, torch.float32):

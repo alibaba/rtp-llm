@@ -35,12 +35,12 @@ def store_decode_rows(pool, blocks, values):
         pool.index_copy_(0, blocks[live], values[live].to(pool.dtype))
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["B"])
 def _commit_block_verdict_kernel(
     TABLE,
     PAGES,
     OUTPUT,
-    B: tl.constexpr,
+    B,
     COLUMNS: tl.constexpr,
     STRIDE_ROW: tl.constexpr,
     STRIDE_COL: tl.constexpr,
@@ -133,14 +133,14 @@ def _write_pair_verdict(
     return safe_block, bad_position | bad_page | bad_unallocated | bad_pool
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["B"])
 def _commit_pair_verdict_kernel(
     PREFIX,
     ACCEPT,
     STATE_TABLE,
     CTX_TABLE,
     OUTPUT,
-    B: tl.constexpr,
+    B,
     PAGE_SIZE: tl.constexpr,
     S_COLS: tl.constexpr,
     S_ROW: tl.constexpr,
@@ -240,16 +240,16 @@ def resolve_commit_pair(
     return output
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["ROWS"])
 def _read_blocks_kernel(
     TABLE,
     PAGES,
     OUTPUT,
-    ROWS: tl.constexpr,
+    ROWS,
     COLUMNS: tl.constexpr,
     STRIDE_ROW: tl.constexpr,
     STRIDE_COL: tl.constexpr,
-    POOL_ROWS: tl.constexpr,
+    POOL_ROWS,
     BLOCK: tl.constexpr,
 ):
     row = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)

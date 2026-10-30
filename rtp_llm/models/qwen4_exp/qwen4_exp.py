@@ -30,6 +30,11 @@ class Qwen4Exp(Qwen35Moe):
     residual and checkpoint-required PLE/QSA paths are always connected.
     """
 
+    @classmethod
+    def _parse_mm_config(cls, config_json: dict, config: ModelConfig):
+        super()._parse_mm_config(config_json, config)
+        config.mm_related_params.config["qsa_text_only"] = True
+
     @staticmethod
     def get_weight_cls():
         return Qwen4ExpWeight
@@ -57,6 +62,10 @@ class Qwen4Exp(Qwen35Moe):
         root = Path(ckpt_path)
         config_json = json.loads((root / "config.json").read_text())
         source_quant = config_json.get("quantization_config")
+        text_config = config_json.get("text_config", config_json)
+        config.config_dtype = text_config.get("dtype") or text_config.get(
+            "torch_dtype", ""
+        )
         config._qwen4_fp8_source = bool(source_quant)
         if source_quant:
             from rtp_llm.models.qwen4_exp.moe_fp8 import validate_moe_fp8_checkpoint
@@ -84,7 +93,6 @@ class Qwen4Exp(Qwen35Moe):
         # The released MTP head consumes the target residual before the final
         # hyper-connection mixer.  Each row therefore retains all hc branches;
         # the draft applies fc_hidden independently to every branch.
-        config.mtp_input_hidden_size = config.hidden_size * config.hc_mult
         # Linear-attention output gate activation; upstream falls back to hidden_act.
         config.linear_attn_norm_activation = config_json.get(
             "output_gate_type"
@@ -101,7 +109,6 @@ class Qwen4Exp(Qwen35Moe):
         config._qwen4_ple_embed_dim = int(config_json.get("ple_embed_dim", 0))
         config._qwen4_heads_per_ngram = int(config_json.get("heads_per_ngram", 8))
         config._extra_weight_bytes = 0.0
-        config._tp_sharded_extra_weight_bytes = 0.0
         config._replicated_extra_weight_bytes = 0.0
         config._extra_weight_param_count = 0
         cls._set_ple_weight_size_estimate(config)
@@ -174,6 +181,18 @@ class Qwen4Exp(Qwen35Moe):
 
     @classmethod
     def _post_build_model_config(cls, model_config: ModelConfig) -> None:
+        attn = model_config.attn_config
+        # Promote framework defaults before compressed pools are materialized.
+        if int(attn.tokens_per_block) in (0, 8, 16, 64):
+            if int(attn.kernel_tokens_per_block) in (0, int(attn.tokens_per_block)):
+                attn.kernel_tokens_per_block = 128
+            attn.tokens_per_block = 128
+        if int(attn.kernel_tokens_per_block) == 0:
+            attn.kernel_tokens_per_block = 128
+        if int(attn.tokens_per_block) % 128 or int(attn.kernel_tokens_per_block) != 128:
+            raise ValueError(
+                "qwen4_exp requires 128-token kernel pages and logical blocks divisible by 128"
+            )
         # Generic precision initialization reads source checkpoint metadata;
         # finalize the complete source-to-runtime recipe after that stage.
         cls._configure_precision_recipe(model_config)

@@ -22,6 +22,7 @@ namespace {
 
 constexpr int  kInitTimeoutMs  = 120 * 1000;
 constexpr char kLinkProbeToken = 0x5a;
+constexpr char kStopToken      = 0x53;
 
 constexpr uint32_t kFrameMagic   = 0x52545042;  // "RTPB"
 constexpr uint16_t kFrameVersion = 1;
@@ -35,6 +36,43 @@ struct BroadcastFrameHeader {
 };
 
 static_assert(sizeof(BroadcastFrameHeader) == 24, "CpuTpBroadcaster frame header must remain stable");
+
+void checkPeerStop(int fd) {
+    char token = 0;
+    if (::recv(fd, &token, 1, MSG_PEEK | MSG_DONTWAIT) == 1 && token == kStopToken) {
+        throw CpuTpBroadcastStopped("CpuTpBroadcaster peer requested shutdown");
+    }
+}
+
+ssize_t writeBroadcastAll(int fd, const void* buffer, size_t bytes) {
+    const auto* data = static_cast<const char*>(buffer);
+    size_t      done = 0;
+    while (done < bytes) {
+        checkPeerStop(fd);
+        const auto count = ::send(fd, data + done, bytes - done, MSG_NOSIGNAL | MSG_DONTWAIT);
+        if (count > 0) {
+            done += count;
+        } else if (count < 0 && errno == EINTR) {
+            continue;
+        } else if (count < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+            // Observe the reverse shutdown channel even while a payload is
+            // larger than the socket queue and the peer has stopped reading.
+            struct pollfd pfd {
+                fd, POLLIN | POLLOUT, 0
+            };
+            int rc;
+            do {
+                rc = ::poll(&pfd, 1, -1);
+            } while (rc < 0 && errno == EINTR);
+            if (rc < 0)
+                return -1;
+        } else {
+            checkPeerStop(fd);
+            return -1;
+        }
+    }
+    return static_cast<ssize_t>(done);
+}
 
 std::string makeUdsPath(const std::string& base, int rank) {
     return base + "_" + std::to_string(rank) + ".sock";
@@ -68,7 +106,7 @@ bool waitFdUntil(int fd, short events, std::chrono::steady_clock::time_point dea
 
         const auto remaining_ms =
             static_cast<int>(std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now).count());
-        struct pollfd pfd{};
+        struct pollfd pfd {};
         pfd.fd     = fd;
         pfd.events = events;
         int rc     = ::poll(&pfd, 1, remaining_ms);
@@ -241,8 +279,13 @@ void CpuTpBroadcaster::interruptReceive() {
     if (!initialized_.load(std::memory_order_acquire) || tp_size_ <= 1 || tp_rank_ == 0) {
         return;
     }
-    receive_interrupted_.store(true, std::memory_order_release);
+    if (receive_interrupted_.exchange(true, std::memory_order_acq_rel)) {
+        return;
+    }
     if (!peer_fds_.empty() && peer_fds_[0] >= 0) {
+        // The reverse direction is otherwise idle after bootstrap.
+        const char token = kStopToken;
+        (void)::send(peer_fds_[0], &token, 1, MSG_NOSIGNAL | MSG_DONTWAIT);
         ::shutdown(peer_fds_[0], SHUT_RD);
     }
 }
@@ -306,7 +349,7 @@ void CpuTpBroadcaster::initialize(int tp_rank, int tp_size, const std::string& b
             listen_fd_ = ::socket(AF_UNIX, SOCK_STREAM, 0);
             RTP_LLM_CHECK_WITH_INFO(listen_fd_ >= 0, "CpuTpBroadcaster socket: %s", std::strerror(errno));
 
-            struct sockaddr_un addr{};
+            struct sockaddr_un addr {};
             addr.sun_family = AF_UNIX;
             RTP_LLM_CHECK_WITH_INFO(
                 path.size() < sizeof(addr.sun_path), "CpuTpBroadcaster UDS path too long: %s", path.c_str());
@@ -374,7 +417,7 @@ void CpuTpBroadcaster::initialize(int tp_rank, int tp_size, const std::string& b
         }
     } else {
         const std::string  path = makeUdsPath(base_path, 0);
-        struct sockaddr_un addr{};
+        struct sockaddr_un addr {};
         addr.sun_family = AF_UNIX;
         RTP_LLM_CHECK_WITH_INFO(
             path.size() < sizeof(addr.sun_path), "CpuTpBroadcaster UDS path too long: %s", path.c_str());
@@ -437,8 +480,9 @@ void CpuTpBroadcaster::broadcast(void* buf, std::size_t nbytes, int root) {
     if (tp_size_ <= 1) {
         return;
     }
-    RTP_LLM_CHECK_WITH_INFO(!receive_interrupted_.load(std::memory_order_acquire),
-                            "CpuTpBroadcaster receive interrupted during engine shutdown");
+    if (receive_interrupted_.load(std::memory_order_acquire)) {
+        throw CpuTpBroadcastStopped("CpuTpBroadcaster receive interrupted during engine shutdown");
+    }
     RTP_LLM_CHECK_WITH_INFO(root == 0, "CpuTpBroadcaster supports only root=0 (star topology); got %d", root);
     RTP_LLM_CHECK_WITH_INFO(
         nbytes <= std::numeric_limits<uint64_t>::max(), "CpuTpBroadcaster payload is too large: %zu bytes", nbytes);
@@ -448,13 +492,13 @@ void CpuTpBroadcaster::broadcast(void* buf, std::size_t nbytes, int root) {
 
     if (tp_rank_ == 0) {
         for (int k = 1; k < tp_size_; ++k) {
-            ssize_t n = writeAll(peer_fds_[k], &expected_header, sizeof(expected_header));
+            ssize_t n = writeBroadcastAll(peer_fds_[k], &expected_header, sizeof(expected_header));
             RTP_LLM_CHECK_WITH_INFO(n == static_cast<ssize_t>(sizeof(expected_header)),
                                     "CpuTpBroadcaster frame-header write to rank %d failed at sequence %llu: %s",
                                     k,
                                     static_cast<unsigned long long>(next_sequence_),
                                     std::strerror(errno));
-            n = writeAll(peer_fds_[k], buf, nbytes);
+            n = writeBroadcastAll(peer_fds_[k], buf, nbytes);
             RTP_LLM_CHECK_WITH_INFO(n == static_cast<ssize_t>(nbytes),
                                     "CpuTpBroadcaster payload write to rank %d (%zu bytes) failed at sequence %llu: %s",
                                     k,
@@ -465,6 +509,9 @@ void CpuTpBroadcaster::broadcast(void* buf, std::size_t nbytes, int root) {
     } else {
         BroadcastFrameHeader received_header{};
         ssize_t              n = readAll(peer_fds_[0], &received_header, sizeof(received_header));
+        if (receive_interrupted_.load(std::memory_order_acquire)) {
+            throw CpuTpBroadcastStopped("CpuTpBroadcaster receive interrupted during engine shutdown");
+        }
         RTP_LLM_CHECK_WITH_INFO(n == static_cast<ssize_t>(sizeof(received_header)),
                                 "CpuTpBroadcaster frame-header read from rank 0 failed at sequence %llu: %s",
                                 static_cast<unsigned long long>(next_sequence_),
@@ -489,6 +536,9 @@ void CpuTpBroadcaster::broadcast(void* buf, std::size_t nbytes, int root) {
             tp_rank_,
             nbytes);
         n = readAll(peer_fds_[0], buf, nbytes);
+        if (receive_interrupted_.load(std::memory_order_acquire)) {
+            throw CpuTpBroadcastStopped("CpuTpBroadcaster receive interrupted during engine shutdown");
+        }
         RTP_LLM_CHECK_WITH_INFO(n == static_cast<ssize_t>(nbytes),
                                 "CpuTpBroadcaster payload read from rank 0 (%zu bytes) failed at sequence %llu: %s",
                                 nbytes,

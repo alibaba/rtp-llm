@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 import torch
 
-from rtp_llm.ops import AttentionConfigs, RopeStyle
+from rtp_llm.ops import AttentionConfigs, RopeCache, RopeStyle, get_rope_cache
 from rtp_llm.ops.fused_rope_kvcache_op import (
     FusedRopeKVCacheDecodeOp,
     _get_fused_rope_kvcache,
@@ -15,6 +15,21 @@ from rtp_llm.ops.fused_rope_kvcache_op import (
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA is required")
 class DecodeRopeStrideTest(unittest.TestCase):
+    def setUp(self):
+        # Native get_rope_cache_once is process-global: a preceding MRoPE
+        # test can permanently disable it. Exercise the cached branch with a
+        # real native cache independently of the test runner's module order.
+        cfg = self.config()
+        cache = RopeCache()
+        cache.used, cache.dim, cache.base = True, 64, 10000000
+        cache.data = get_rope_cache(cfg.rope_config, cfg.max_seq_len, True)
+        patcher = patch(
+            "rtp_llm.ops.fused_rope_kvcache_op.get_rope_cache_once",
+            return_value=cache,
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def config(self, factor=3, style=RopeStyle.Base):
         cfg = AttentionConfigs()
         cfg.head_num, cfg.kv_head_num, cfg.size_per_head = 12, 1, 256

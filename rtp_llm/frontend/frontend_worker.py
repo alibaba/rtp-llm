@@ -110,7 +110,7 @@ class FrontendWorker:
             seq_size_per_block=model_config.attn_config.tokens_per_block,
             tokenizer=self.tokenizer,
             sp_config=py_env_configs.sp_config,
-            mm_related_params=None,  # Frontend doesn't need mm_related_params
+            mm_related_params=getattr(model_config, "mm_related_params", None),
             grpc_config=py_env_configs.grpc_config,
             vit_separation=vit_separation,
             mm_model_config=getattr(model_config, "mm_model_config", None),
@@ -118,6 +118,7 @@ class FrontendWorker:
             master_config=py_env_configs.master_config,
             parallelism_config=engine_config.parallelism_config,
             prefill_cp_config=py_env_configs.prefill_cp_config,
+            model_config=model_config,
         )
         self.backend_rpc_server_visitor = self.pipeline.backend_rpc_server_visitor
         self.generate_env_config = py_env_configs.generate_env_config

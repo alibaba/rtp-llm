@@ -100,7 +100,7 @@ int connectWithRetry(const std::string& path) {
             return -1;
         }
 
-        struct sockaddr_un addr{};
+        struct sockaddr_un addr {};
         addr.sun_family = AF_UNIX;
         std::strncpy(addr.sun_path, path.c_str(), sizeof(addr.sun_path) - 1);
         if (::connect(fd, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr)) == 0) {
@@ -133,7 +133,7 @@ int fakeServerWrongProbe(const std::string& base) {
         return 1;
     }
 
-    struct sockaddr_un addr{};
+    struct sockaddr_un addr {};
     addr.sun_family = AF_UNIX;
     std::strncpy(addr.sun_path, path.c_str(), sizeof(addr.sun_path) - 1);
     if (::bind(listen_fd, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr)) != 0) {
@@ -287,6 +287,40 @@ void runHappyPath(int tp_size) {
     }
     expectChildrenOk(pids);
     cleanupTempBase(base, tp_size);
+}
+
+TEST(CpuTpBroadcasterTest, PeerStopInterruptsBackpressuredRootWrite) {
+    const auto         base = makeTempBase();
+    std::vector<pid_t> pids;
+    pids.push_back(spawnChild([=] {
+        auto& bcast = CpuTpBroadcaster::instance();
+        bcast.reset();
+        bcast.initialize(0, 2, base);
+        int value = 19;
+        bcast.broadcast(&value, sizeof(value), 0);
+        std::vector<char> payload(64 * 1024 * 1024);
+        try {
+            bcast.broadcast(payload.data(), payload.size(), 0);
+        } catch (const CpuTpBroadcastStopped&) {
+            bcast.reset();
+            return 0;
+        }
+        return 1;
+    }));
+    pids.push_back(spawnChild([=] {
+        auto& bcast = CpuTpBroadcaster::instance();
+        bcast.reset();
+        bcast.initialize(1, 2, base);
+        int value = 0;
+        bcast.broadcast(&value, sizeof(value), 0);
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        bcast.interruptReceive();
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        bcast.reset();
+        return value == 19 ? 0 : 1;
+    }));
+    expectChildrenOk(pids);
+    cleanupTempBase(base, 2);
 }
 
 TEST(CpuTpBroadcasterTest, InterruptReceiveAllowsBothRanksToReachTeardown) {

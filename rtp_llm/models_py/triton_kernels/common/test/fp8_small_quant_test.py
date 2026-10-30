@@ -44,6 +44,20 @@ class Fp8SmallQuantTest(unittest.TestCase):
             torch.equal(actual[1].view(torch.int32), expected[1].view(torch.int32))
         )
 
+    def test_native_per_tensor_size_beyond_signed_int32(self):
+        x = torch.ones((1, 2**31 + 8), device="cuda", dtype=torch.bfloat16)
+        quant, scale = scaled_fp8_per_tensor_quant(x)
+        self.assertEqual(quant.numel(), x.numel())
+        torch.testing.assert_close(
+            scale, torch.tensor([1 / 448], device="cuda"), rtol=0, atol=0
+        )
+        torch.testing.assert_close(
+            quant.reshape(-1)[[0, -1]].float(),
+            torch.full((2,), 448.0, device="cuda"),
+            rtol=0,
+            atol=0,
+        )
+
     def test_native_bytes_all_measured_widths_and_prime_rows(self):
         for rows in (1, 3, 4, 7, 8, 11, 12, 16, 20, 24, 25, 32):
             for width in (320, 640, 2560, 10240):
@@ -168,7 +182,15 @@ class Fp8SmallQuantTest(unittest.TestCase):
         for offset in range(0, bits.numel(), 4 * 640):
             gate_up = torch.zeros(4, 1280, device="cuda", dtype=torch.bfloat16)
             chunk = bits[offset : offset + 4 * 640]
-            gate_up[:, :640].flatten()[: chunk.numel()].copy_(chunk)
+            gates = torch.zeros(4, 640, device="cuda", dtype=torch.bfloat16)
+            gates.view(-1)[: chunk.numel()].copy_(chunk)
+            gate_up[:, :640].copy_(gates)
+            self.assertTrue(
+                torch.equal(
+                    gate_up[:, :640].reshape(-1).view(torch.int16)[: chunk.numel()],
+                    chunk.view(torch.int16),
+                )
+            )
             gate_up[:, 640:].fill_(0.75)
             activated = flashinfer.activation.silu_and_mul(gate_up)
             expected = try_small_fp8_quant(activated)

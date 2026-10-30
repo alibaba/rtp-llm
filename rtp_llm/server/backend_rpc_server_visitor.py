@@ -126,6 +126,9 @@ class BackendRPCServerVisitor:
         self.sp_config = sp_config
         self.source_role = source_role
         self.mm_model_config = mm_model_config
+        self._qsa_text_only = bool(
+            model_config and getattr(model_config, "enable_qwen4_qsa", False)
+        )
         self._mm_cache_routing = (
             vit_separation == VitSeparation.VIT_SEPARATION_REMOTE
             and getattr(pd_sep_config, "role_type", None) == RoleType.FRONTEND
@@ -843,6 +846,11 @@ class BackendRPCServerVisitor:
             )
 
     def _validate_input(self, input: GenerateInput) -> None:
+        if getattr(self, "_qsa_text_only", False) and input.mm_inputs:
+            raise FtRuntimeException(
+                ExceptionType.UNSUPPORTED_OPERATION,
+                "Qwen3.8-Flash-Next QSA currently supports text inputs only",
+            )
         if input.prompt_length <= 0:
             raise FtRuntimeException(
                 ExceptionType.LONG_PROMPT_ERROR,

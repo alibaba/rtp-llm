@@ -20,6 +20,67 @@ from rtp_llm.utils.model_weight import W
 
 
 class CutlassNvfp4ExecutorTest(unittest.TestCase):
+    def test_prefill_runner_uses_optional_tensor_for_swizzled_input_scale(self):
+        from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.sm120_nvfp4_prefill import (
+            Sm120PrefillMoE,
+        )
+
+        class Runner:
+            # FlashInfer v0.7.0 fused_moe/core.py's non-min-latency run_moe ABI.
+            def run_moe(
+                self,
+                output,
+                x,
+                ids,
+                router,
+                w1,
+                bias1,
+                w2,
+                bias2,
+                scales,
+                input_sf,
+                alpha,
+                beta,
+                limit,
+                situ_beta,
+                situ_linear_beta,
+                swizzled_input_sf,
+                tp_size,
+                tp_rank,
+                ep_size,
+                ep_rank,
+                cluster_size,
+                cluster_rank,
+                alltoall,
+                min_latency,
+                tactics,
+                pdl,
+                activation,
+                workspace,
+            ):
+                if swizzled_input_sf is not None and not isinstance(
+                    swizzled_input_sf, torch.Tensor
+                ):
+                    raise TypeError("swizzled_input_sf must be an optional tensor")
+                output.fill_(7)
+
+        adapter = Sm120PrefillMoE.__new__(Sm120PrefillMoE)
+        adapter.runner = Runner()
+        x = torch.zeros(2, 16, dtype=torch.bfloat16)
+        out = adapter(
+            x,
+            torch.zeros(2, 1, dtype=torch.int32),
+            torch.ones(2, 1),
+            torch.empty(1, 2, 1, dtype=torch.int64),
+            torch.empty(1, 16, 1, dtype=torch.int64),
+            [],
+            tp_size=1,
+            tp_rank=0,
+            ep_size=1,
+            ep_rank=0,
+        )
+        self.assertTrue(torch.equal(out, torch.full_like(x, 7)))
+
     def test_selection_rejects_unquantized_bf16_models(self):
         from rtp_llm.config.model_config import ModelConfig
         from rtp_llm.config.server_config_setup import set_parallelism_config

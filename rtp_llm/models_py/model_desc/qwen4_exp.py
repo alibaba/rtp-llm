@@ -64,9 +64,8 @@ from rtp_llm.models_py.modules.qwen4_exp.qsa import (
 from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer import Qwen4ExpQSAIndexer
 from rtp_llm.models_py.modules.qwen4_exp.weight_views import (
     Qwen4LinearFactory,
-    annotate_compute_inventory,
+    mark_projection_for_restart,
     prepare_compute_weights,
-    record_projection_consumer,
 )
 from rtp_llm.ops import (
     AttentionConfigs,
@@ -155,9 +154,8 @@ class Qwen4ExpAttention(Qwen3NextAttention):
             rope_config=self.qsa_rope_config,
         )
 
-        record_projection_consumer(
+        mark_projection_for_restart(
             weights,
-            W.qwen4_indexer_qk_proj_w,
             getattr(self.qsa_indexer, "qk_projection", None),
         )
 
@@ -624,25 +622,13 @@ class Qwen4ExpDecoderLayer(Qwen3NextDecoderLayer):
                 )
             ),
         )
-        for unit, names in (
-            (
-                self.attn_hyper_connection,
-                (
-                    W.qwen4_hc_attn_mix_down,
-                    W.qwen4_hc_attn_mix_up,
-                    W.qwen4_hc_attn_inject,
-                ),
-            ),
-            (
-                self.mlp_hyper_connection,
-                (W.qwen4_hc_mlp_mix_down, W.qwen4_hc_mlp_mix_up, W.qwen4_hc_mlp_inject),
-            ),
-        ):
-            for name, projection in zip(
-                names,
-                (unit.down_projection, unit.up_projection, unit.inject_projection),
+        for unit in (self.attn_hyper_connection, self.mlp_hyper_connection):
+            for projection in (
+                unit.down_projection,
+                unit.up_projection,
+                unit.inject_projection,
             ):
-                record_projection_consumer(weights, name, projection)
+                mark_projection_for_restart(weights, projection)
         for unit, down_name, inject_name in (
             (
                 self.attn_hyper_connection,
@@ -830,7 +816,6 @@ class Qwen4ExpModel(Qwen35Model):
         )
 
         self._cpu_target_status = prepare_cpu_target_status(config, parallelism_config)
-        annotate_compute_inventory(self.weight)
 
     def _ple_coordinator(self) -> PLETransactionCoordinator:
         coordinator = self.__dict__.get("_ple_transaction_coordinator")
@@ -1112,12 +1097,8 @@ class Qwen4ExpModel(Qwen35Model):
             )
 
             unit = self.ple_layers[str(layer_idx)]
-            record_projection_consumer(
-                layer_weights, W.qwen4_ple_key_proj_w, unit.key_projection
-            )
-            record_projection_consumer(
-                layer_weights, W.qwen4_ple_value_proj_w, unit.value_projection
-            )
+            mark_projection_for_restart(layer_weights, unit.key_projection)
+            mark_projection_for_restart(layer_weights, unit.value_projection)
 
     def _maybe_inject_speculative_fault(self, phase: str) -> None:
         """Invoke the private transaction test hook with actual phase and rank."""
@@ -1290,17 +1271,21 @@ class Qwen4ExpModel(Qwen35Model):
             ),
         )
 
-        for name, projection in (
-            (W.qwen4_hc_mixer_mix_down, self.hyper_connection_mixer.down_projection),
-            (W.qwen4_hc_mixer_mix_up, self.hyper_connection_mixer.up_projection),
+        for projection in (
+            self.hyper_connection_mixer.down_projection,
+            self.hyper_connection_mixer.up_projection,
         ):
-            record_projection_consumer(weights.global_weights, name, projection)
+            mark_projection_for_restart(weights.global_weights, projection)
 
     def _ple_input_ids(self, inputs: PyModelInputs) -> torch.Tensor:
         tokens = getattr(getattr(self, "config", None), "special_tokens", None)
         return ple_input_ids(inputs, getattr(tokens, "eos_token_id", None))
 
     def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
+        if torch.version.hip is not None and callable(
+            getattr(fmha_impl, "bind_graph_inputs", None)
+        ):
+            fmha_impl.bind_graph_inputs(inputs)
         if self.__dict__.get("_closed", False):
             raise RuntimeError("Qwen4 model is closed")
         from rtp_llm.models_py.distributed.flashinfer_all_reduce import (
@@ -1363,6 +1348,27 @@ class Qwen4ExpModel(Qwen35Model):
             getattr(getattr(layer, "self_attn", None), "qsa_indexer", None) is not None
             for layer in self.layers
         )
+        if has_side_caches and self.kv_cache is None:
+            groups = (
+                attention_inputs.values()
+                if isinstance(attention_inputs, Mapping)
+                else (attention_inputs,)
+            )
+            if not all(a.is_prefill and a.is_s_padded for a in groups):
+                raise RuntimeError(
+                    "qwen4_exp side caches are required outside prefill warmup"
+                )
+            hidden = self.word_embedding(inputs)
+            target_hidden = (
+                self._initial_hyper_states(hidden)
+                if getattr(self, "_capture_mtp_target_hidden", False)
+                else None
+            )
+            return (
+                PyModelOutputs(hidden, target_hidden)
+                if target_hidden is not None
+                else PyModelOutputs(hidden)
+            )
         side_cache_writers = (
             prepare_side_cache_store_writers(
                 attention_inputs, self.kv_cache, layer_count=len(self.layers)

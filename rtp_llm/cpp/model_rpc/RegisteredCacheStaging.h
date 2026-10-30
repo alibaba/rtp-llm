@@ -22,9 +22,26 @@ public:
     const size_t source_bytes;
 
 private:
-    torch::Tensor               tensor_;
-    std::shared_ptr<MemoryUtil> memory_;
-    bool                        registered_ = false;
+    friend class RegisteredCacheStagingPool;
+    RegisteredCacheStaging(size_t bytes, std::shared_ptr<RegisteredCacheStaging> owner, size_t offset);
+    std::shared_ptr<RegisteredCacheStaging> owner_;
+    torch::Tensor                           tensor_;
+    std::shared_ptr<MemoryUtil>             memory_;
+    bool                                    registered_ = false;
+};
+
+// Request-local slabs amortize registration over many cache fragments. A slice
+// owns its slab through completion/cancellation, independently of this allocator.
+class RegisteredCacheStagingPool {
+public:
+    explicit RegisteredCacheStagingPool(std::shared_ptr<MemoryUtil> memory): memory_(std::move(memory)) {}
+    std::shared_ptr<RegisteredCacheStaging> allocate(size_t bytes);
+
+private:
+    std::shared_ptr<MemoryUtil>             memory_;
+    std::shared_ptr<RegisteredCacheStaging> current_;
+    size_t                                  used_       = 0;
+    size_t                                  slab_bytes_ = 16 * 1024 * 1024;
 };
 
 struct PendingCacheCopy {

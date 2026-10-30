@@ -76,7 +76,9 @@ def _main_qk_norm_rope_cache(
     # while its remainder is negative. Inactive warmup rows must not write
     # that negative token offset into the dummy page or its scales.
     page_in_table = (length > 0) & (page >= 0) & (page < TW)
-    physical = tl.load(TABLE + (row // QUERY) * TW + page, page_in_table, other=0)
+    physical = tl.load(TABLE + (row // QUERY) * TW + page, page_in_table, other=0).to(
+        tl.int64
+    )
     valid_page = page_in_table & (physical >= 0) & (physical < PAGES)
     frequency = lane
     axis = tl.where(

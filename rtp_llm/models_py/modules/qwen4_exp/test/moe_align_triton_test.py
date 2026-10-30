@@ -16,6 +16,21 @@ from rtp_llm.models_py.triton_kernels.moe.fused_moe_kernel import (
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA is required")
 class MoeAlignTritonTest(unittest.TestCase):
+    def test_missing_or_uninspectable_histogram_keeps_torch_fallback(self):
+        from unittest.mock import patch
+
+        import triton.language as tl
+
+        from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.decode_capabilities import (
+            masked_histogram_available,
+        )
+
+        self.assertTrue(masked_histogram_available())
+        with patch.object(tl, "histogram", None):
+            self.assertFalse(masked_histogram_available())
+        with patch("inspect.signature", side_effect=ValueError):
+            self.assertFalse(masked_histogram_available())
+
     def test_sm120_tuned_gemms_match_with_live_graph_routing(self):
         if torch.cuda.get_device_capability() != (12, 0):
             self.skipTest("SM120 tiles require SM120")

@@ -243,15 +243,15 @@ void applySpecLogitsAcceptLenCap(const SpecLogitsVerifyRunner::LaunchResult& ver
     }
     const int64_t token_stride  = target_token_ids.size(1);
     auto          target_tokens = target_token_ids.reshape({batch_size, propose_step + 1, token_stride})
-                                      .select(2, token_stride - 1)
-                                      .to(output.accept_tokens.options());
+                             .select(2, token_stride - 1)
+                             .to(output.accept_tokens.options());
     auto cap_index   = cap_src.to(torch::TensorOptions().device(output.accept_tokens.device()).dtype(torch::kLong));
     auto replacement = target_tokens.gather(1, cap_index.unsqueeze(1));
 
-    auto cols         = torch::arange(propose_step + 1,
-                                      torch::TensorOptions().device(output.accept_tokens.device()).dtype(torch::kLong))
-                            .unsqueeze(0)
-                            .expand({batch_size, propose_step + 1});
+    auto cols = torch::arange(propose_step + 1,
+                              torch::TensorOptions().device(output.accept_tokens.device()).dtype(torch::kLong))
+                    .unsqueeze(0)
+                    .expand({batch_size, propose_step + 1});
     auto replace_mask = (cap_gpu < propose_step).unsqueeze(1) & (output.accept_len > cap_gpu).unsqueeze(1)
                         & (cols == cap_index.unsqueeze(1));
     output.accept_tokens =
@@ -679,8 +679,8 @@ GenerateStreamPtr MtpExecutor::createMinFakeDecodeStream(int                    
         makeFakeStream(max_new_tokens, 1 + max_new_tokens, model_config, runtime_config, resource_context);
 
     // Non-dspark: the fake SP buffer's hidden_states stands in for the target
-    // hidden state consumed by the draft. The explicit ABI defaults to the
-    // legacy hc_mult * hidden_size width. DSpARK gets only the single
+    // hidden state consumed by the draft, with hc_mult * hidden_size width.
+    // DSpARK gets only the single
     // target-token slot; the hidden/vocab arguments are unused on that branch.
     auto sp_buffer = makeFakeSPOutputBuffer(model_config.data_type,
                                             static_cast<size_t>(model_config.getMtpInputHiddenSize()),
@@ -750,9 +750,9 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
     spec_logits_verify_async_runner_(cuda_graph::graphGetStreamFromPool(true)),
     spec_bookkeeping_runner_(cuda_graph::graphGetStreamFromPool(true)),
     dspark_cache_store_sync_stream_(cuda_graph::graphGetStreamFromPool(true)) {
-    data_type_                  = params.model_config_.data_type;
-    mtp_input_hidden_size_      = static_cast<size_t>(params.model_config_.getMtpInputHiddenSize());
-    propose_step_               = propose_params->gen_num_per_circle;
+    data_type_             = params.model_config_.data_type;
+    mtp_input_hidden_size_ = static_cast<size_t>(params.model_config_.getMtpInputHiddenSize());
+    propose_step_          = propose_params->gen_num_per_circle;
     RTP_LLM_CHECK_WITH_INFO(
         propose_step_ > 0, "speculative proposal width/gen_num_per_cycle must be positive, got %zu", propose_step_);
     vocab_size_                 = params.model_config_.vocab_size;
@@ -869,11 +869,10 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
          cache_manager,
          std::nullopt,
          params.model_config_.hc_mult});
-    model_init_params.mtp_input_hidden_size          = params.model_config_.getMtpInputHiddenSize();
-    model_init_params.metrics_reporter = metrics_reporter_;
+    model_init_params.metrics_reporter               = metrics_reporter_;
     model_init_params.hidden_state_capture_layer_ids = selectHiddenStateCaptureLayerIds(
         HiddenStateCaptureModelRole::TARGET, role_type_, warm_up_, params.model_config_.hidden_state_capture_layer_ids);
-    model_init_params.hidden_state_capture_dtype     = params.model_config_.hidden_state_capture_dtype;
+    model_init_params.hidden_state_capture_dtype = params.model_config_.hidden_state_capture_dtype;
 #if USING_CUDA || USING_ROCM
     const size_t max_reserved_step = params.sp_config.speculativeReserveStep();
     if (params.hw_kernel_config.enable_cuda_graph && model_init_params.kv_cache_layer_layout.has_value()) {
@@ -908,8 +907,8 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
     // Reject the EPLB + speculative-target-hooks combination at startup
     // instead of the first decode step: discovering it after weight loading
     // wastes the whole bring-up.
-    const auto target_execution_status = validateSpeculativeTargetExecutionPolicy(
-        speculativeTargetTransactionsEnabled(), expert_balancer_ != nullptr);
+    const auto target_execution_status =
+        validateSpeculativeTargetExecutionPolicy(speculativeTargetTransactionsEnabled(), expert_balancer_ != nullptr);
     if (!target_execution_status.ok()) {
         RTP_LLM_FAIL("%s", target_execution_status.ToString().c_str());
     }
@@ -956,14 +955,13 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
                                 cache_manager,
                                 std::make_optional(0),
                                 mtp_params->model_config_.hc_mult});
-        model_params.mtp_input_hidden_size = mtp_params->model_config_.getMtpInputHiddenSize();
         model_params.metrics_reporter = metrics_reporter_;
         model_params.hidden_state_capture_layer_ids =
             selectHiddenStateCaptureLayerIds(HiddenStateCaptureModelRole::DRAFT,
                                              role_type_,
                                              warm_up_,
                                              mtp_params->model_config_.hidden_state_capture_layer_ids);
-        model_params.hidden_state_capture_dtype     = mtp_params->model_config_.hidden_state_capture_dtype;
+        model_params.hidden_state_capture_dtype = mtp_params->model_config_.hidden_state_capture_dtype;
 #if USING_CUDA || USING_ROCM
         if (params.hw_kernel_config.enable_cuda_graph && model_params.kv_cache_layer_layout.has_value()) {
             const auto& topology = model_params.kv_cache_layer_layout->topology();
@@ -1583,6 +1581,7 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
             return absl::OkStatus();
         }
         releaseAllModelBuffers();
+        beginProfiledWork();
         return runDecodeAlignmentOnly(model_input);
     }
 
@@ -1866,7 +1865,7 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         if (spec_logits_processor_present && !spec_logits_result->has_active_processor) {
             return absl::InternalError(
                 "MTP async spec logits processor is present but no verify artifact was produced; "
-                "disable MTP/async or implement spec verify for this processor");
+                         "disable MTP/async or implement spec verify for this processor");
         }
 
         if (isTpRank0()) {
@@ -2075,14 +2074,18 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
 }
 
 void MtpExecutor::waitPreviousBookkeepingBeforeStreamPreparation(const std::list<GenerateStreamPtr>& streams) {
-    bool cache_snapshot_ready = true;
+    const auto snapshots =
+        std::count_if(streams.begin(), streams.end(), [](const auto& stream) { return stream->hasMtpCacheSnapshot(); });
+    const bool mixed_snapshots      = snapshots > 0 && static_cast<size_t>(snapshots) != streams.size();
+    bool       cache_snapshot_ready = true;
     for (const auto& stream : streams) {
         if (stream->hasPendingAsyncBookkeeping() && (!useDeviceInput() || !stream->hasMtpCacheSnapshot())) {
             cache_snapshot_ready = false;
             break;
         }
     }
-    if (!mustWaitBeforeStreamPreparation(
+    if (!mixed_snapshots
+        && !mustWaitBeforeStreamPreparation(
             useStreamAsync(), useDropBroadSync(), is_linear_attention_model_, cache_snapshot_ready)) {
         return;
     }
@@ -2095,6 +2098,14 @@ void MtpExecutor::waitPreviousBookkeepingBeforeStreamPreparation(const std::list
     // DROP_BROAD_SYNC keeps its device-state overlap unchanged.
     RTP_LLM_PROFILE_SCOPE_DYNAMIC("executor.mtp.wait_prev_bookkeeping(stream_count=%zu)", streams.size());
     spec_bookkeeping_runner_.sync(cuda_graph::graphGetCurrentStream());
+    if (mixed_snapshots) {
+        // A fresh stream can force the whole batch onto host-input fallback.
+        // Snapshot rows deliberately contain token/length/position sentinels;
+        // regather all fields from committed host state after the worker joins.
+        for (const auto& stream : streams) {
+            stream->clearMtpCacheSnapshot();
+        }
+    }
 }
 
 bool MtpExecutor::mustWaitBeforeStreamPreparation(bool stream_async,
@@ -2157,14 +2168,14 @@ void MtpExecutor::launchTargetVerifyPrepareAsync(const GptModelInputs& model_inp
             RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(prepare_target_verify_input_fallback)");
             model_input_copy.input_lengths =
                 torch::full({static_cast<int64_t>(batch_size)}, static_cast<int64_t>(propose_step_ + 1), cuda_i32);
-            model_input_copy.lm_output_indexes = torch::arange(0,
+            model_input_copy.lm_output_indexes       = torch::arange(0,
                                                                static_cast<int64_t>(batch_size * (propose_step_ + 1)),
                                                                static_cast<int64_t>(propose_step_ + 1),
                                                                cuda_i32);
-            const auto& target_prefix_lengths  = target_prefix_lengths_for_prepare.defined() ?
-                                                     target_prefix_lengths_for_prepare :
-                                                     model_input.prefix_lengths;
-            model_input_copy.prefix_lengths    = toCudaInt32WithHostHold(target_prefix_lengths, buffer_holder_);
+            const auto& target_prefix_lengths        = target_prefix_lengths_for_prepare.defined() ?
+                                                           target_prefix_lengths_for_prepare :
+                                                           model_input.prefix_lengths;
+            model_input_copy.prefix_lengths          = toCudaInt32WithHostHold(target_prefix_lengths, buffer_holder_);
             model_input_copy.sequence_lengths_plus_1 = model_input_copy.prefix_lengths + 1;
         }
     }

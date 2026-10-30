@@ -48,7 +48,7 @@ def _qsa_paged_score_kernel(
     BN: tl.constexpr,
 ):
     rd = tl.arange(0, D)
-    row = tl.program_id(0)
+    row = tl.program_id(0).to(tl.int64)
     blk = tl.program_id(1)
     batch_idx = row // next_n
 
@@ -72,7 +72,7 @@ def _qsa_paged_score_kernel(
     has_block = (
         in_context & in_block_table & (physical_bt > 0) & (physical_bt < pool_blocks)
     )
-    slot = physical_bt * block_size + ei
+    slot = physical_bt.to(tl.int64) * block_size + ei
 
     acc = tl.zeros((BN,), dtype=tl.float32)
     for h in tl.static_range(H):

@@ -20,7 +20,7 @@ def _vocab_rows(
     HAS_MASK: tl.constexpr,
     BLOCK: tl.constexpr,
 ):
-    offsets = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    offsets = tl.program_id(0).to(tl.int64) * BLOCK + tl.arange(0, BLOCK)
     row = offsets // D
     col = offsets % D
     token = tl.load(Tokens + row * TOKEN_STRIDE, row < N, other=-1).to(tl.int64)
@@ -75,7 +75,7 @@ def _gather_hyper_rows(
     BRANCHES: tl.constexpr,
     BLOCK: tl.constexpr,
 ):
-    offset = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    offset = tl.program_id(0).to(tl.int64) * BLOCK + tl.arange(0, BLOCK)
     width = TP * LOCAL_D
     row = offset // (BRANCHES * width)
     column = offset % width

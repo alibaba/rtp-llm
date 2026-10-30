@@ -70,14 +70,19 @@ TEST(MtpExecutorPolicyTest, DSparkPrefillRoleDisablesDraftGraphCapture) {
     EXPECT_TRUE(MtpExecutor::dsparkDraftGraphAllowed(/*is_dspark=*/false, RoleType::DECODE));
 }
 
-TEST(MtpExecutorPolicyTest, MtpInputHiddenSizeDefaultsToHyperConnectionWidth) {
+TEST(MtpExecutorPolicyTest, MtpInputHiddenSizeDerivesCheckedHyperConnectionWidth) {
     ModelConfig config;
     config.hidden_size = 8;
     config.hc_mult     = 4;
     EXPECT_EQ(config.getMtpInputHiddenSize(), 32);
 
-    config.mtp_input_hidden_size = 8;
-    EXPECT_EQ(config.getMtpInputHiddenSize(), 8);
+    config.hidden_size = 0;
+    EXPECT_THROW(config.getMtpInputHiddenSize(), std::runtime_error);
+    config.hidden_size = 8;
+    config.hc_mult     = 0;
+    EXPECT_THROW(config.getMtpInputHiddenSize(), std::runtime_error);
+    config.hc_mult = std::numeric_limits<int64_t>::max();
+    EXPECT_THROW(config.getMtpInputHiddenSize(), std::runtime_error);
 }
 
 TEST(MtpExecutorPolicyTest, CpRestoreSnapshotOwnsMutableHostInput) {
@@ -1370,6 +1375,59 @@ TEST_P(MtpCacheStrideTest, ForwardAndPrepareUseSingleGroupStrideOnly) {
 }
 
 INSTANTIATE_TEST_SUITE_P(CacheTopology, MtpCacheStrideTest, ::testing::Values(0, 1, 2));
+
+TEST_F(MtpExecutorTest, testMixedCacheSnapshotsRegatherCommittedTokensLengthsAndPositions) {
+    MtpExecutorTestConfig config;
+    config.gen_num_per_cycle = 3;
+    auto components          = createMtpExecutorComponents(config);
+    auto initial =
+        StreamSpecUpdateInfo{torch::tensor({{3}}, torch::kInt32), 1, 2, torch::ones({1, 2}), torch::ones({1, 4})};
+    auto steady = createDecodeStream(
+        components.model_config, components.runtime_config, components.resource_context, {0, 1, 2}, initial);
+    auto fresh = createDecodeStream(
+        components.model_config, components.runtime_config, components.resource_context, {1, 2}, initial);
+    const auto&                         cache = components.executor->cache_manager_->cacheConfig();
+    GenerateStream::MtpAsyncDeviceState state;
+    state.next_kv_cache_block_id_gpu =
+        torch::ones({cache.groupNums(), 1, 2}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
+    state.next_kv_cache_kernel_block_id_gpu = state.next_kv_cache_block_id_gpu.clone();
+    steady->setMtpAsyncDeviceState(std::move(state));
+
+    auto model_config                    = components.model_config;
+    model_config.has_positional_encoding = true;
+    SpeculativeExecutionConfig speculative;
+    speculative.gen_num_per_cycle = 3;
+    MtpBatchStreamProcessor processor(
+        model_config, PDSepConfig{}, ProfilingDebugLoggingConfig{}, cache, speculative, false);
+    TensorHolder holder;
+    auto         before = processor.gatherModelInput(StreamGroups({steady, fresh}), holder);
+    ASSERT_TRUE(before.ok());
+    EXPECT_EQ(before->sequence_lengths[0].item<int32_t>(), 0);
+
+    steady->incPendingAsyncBookkeeping();
+    components.executor->spec_bookkeeping_runner_.launch([steady]() {
+        struct PendingGuard {
+            GenerateStreamPtr stream;
+            ~PendingGuard() {
+                stream->decPendingAsyncBookkeepingAndMaybeRelease();
+            }
+        } guard{steady};
+        steady->specUpdate({torch::tensor({{1, 3}}, torch::kInt32), 2, 1, torch::ones({1, 2}), torch::ones({1, 4})});
+    });
+    components.executor->waitPreviousBookkeepingBeforeStreamPreparation({steady, fresh});
+    ASSERT_FALSE(steady->hasPendingAsyncBookkeeping());
+    ASSERT_FALSE(steady->hasMtpCacheSnapshot());
+    ASSERT_FALSE(fresh->hasMtpCacheSnapshot());
+
+    auto gathered = processor.gatherDecodeModelInput(StreamGroups({steady, fresh}), holder);
+    ASSERT_TRUE(gathered.ok());
+    EXPECT_EQ((std::vector<int>{3, 3}), toVec<int>(gathered->combo_tokens));
+    EXPECT_EQ((std::vector<int>{5, 2}), toVec<int>(gathered->sequence_lengths));
+    EXPECT_EQ((std::vector<int>{5, 2}), toVec<int>(gathered->combo_position_ids));
+    processor.prepareDecodeDraftModelInput(StreamGroups({steady, fresh}), *gathered, holder);
+    EXPECT_EQ((std::vector<int>{1, 2}), toVec<int>(gathered->combo_tokens));
+    EXPECT_EQ((std::vector<int>{5, 2}), toVec<int>(gathered->prefix_lengths));
+}
 
 TEST_F(MtpExecutorTest, testMtpConstructorRejectsZeroProposalWidth) {
     MtpExecutorTestConfig test_config;
@@ -3338,7 +3396,7 @@ TEST_F(MtpExecutorTest, testDSparkFakeDecodeStartsWithoutProposalState) {
     EXPECT_EQ((std::vector<int32_t>{1, 1, 0}), stream->speculativeAcceptedTokensPerPos());
 }
 
-TEST_F(MtpExecutorTest, testFakeDecodeUsesExplicitMtpInputHiddenSize) {
+TEST_F(MtpExecutorTest, testFakeDecodeUsesHyperConnectionInputHiddenSize) {
     constexpr int32_t gamma      = 3;
     constexpr int32_t vocab_size = 16;
 
@@ -3349,7 +3407,6 @@ TEST_F(MtpExecutorTest, testFakeDecodeUsesExplicitMtpInputHiddenSize) {
     model_config.vocab_size            = vocab_size;
     model_config.hidden_size           = 8;
     model_config.hc_mult               = 4;
-    model_config.mtp_input_hidden_size = 8;
     model_config.data_type             = TYPE_FP16;
 
     auto stream = MtpExecutor::createMinFakeDecodeStream(
@@ -3357,7 +3414,7 @@ TEST_F(MtpExecutorTest, testFakeDecodeUsesExplicitMtpInputHiddenSize) {
     auto sp_buffer = stream->getSPOutputBuffer();
     ASSERT_NE(sp_buffer, nullptr);
     ASSERT_TRUE(sp_buffer->hidden_states.defined());
-    EXPECT_EQ((std::vector<int64_t>{1, 8}), sp_buffer->hidden_states.sizes().vec());
+    EXPECT_EQ((std::vector<int64_t>{1, 32}), sp_buffer->hidden_states.sizes().vec());
 }
 
 TEST_F(MtpExecutorTest, HostTargetStatusDoesNotAllocateDeviceStatusAndPropagatesFailure) {

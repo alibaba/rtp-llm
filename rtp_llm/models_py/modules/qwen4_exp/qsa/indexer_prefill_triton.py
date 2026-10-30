@@ -15,7 +15,7 @@ COMPRESS_RATIO = tl.constexpr(PREFILL_COMPRESS_RATIO)
 from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_compressor import IndexerCacheUndo
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["PAGES"])
 def _state_snapshot(
     cu,
     table,
@@ -23,16 +23,18 @@ def _state_snapshot(
     slots,
     original,
     WIDTH: tl.constexpr,
-    PAGES: tl.constexpr,
+    PAGES,
     PAGE: tl.constexpr,
 ):
-    request, page = tl.program_id(0), tl.program_id(1)
+    request, page = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64)
     length = tl.load(cu + request + 1) - tl.load(cu + request)
     r, d = tl.arange(0, STATE_RING_ROWS), tl.arange(0, INDEXER_HEAD_DIM)
     end = tl.minimum((page + 1) * PAGE, length)
     position = end - 1 - (end - 1 - r + 8) % 8
     valid = position >= page * PAGE
-    block = tl.load(table + request * WIDTH + page, mask=page * PAGE < length, other=0)
+    block = tl.load(
+        table + request * WIDTH + page, mask=page * PAGE < length, other=0
+    ).to(tl.int64)
     slot = block * 8 + r
     row = (request * PAGES + page) * 8 + r
     value = tl.load(
@@ -42,7 +44,7 @@ def _state_snapshot(
     tl.store(original + row[:, None] * 128 + d[None, :], value)
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["GROUPS"])
 def _kv_snapshot(
     cu,
     table,
@@ -50,13 +52,15 @@ def _kv_snapshot(
     slots,
     original,
     WIDTH: tl.constexpr,
-    GROUPS: tl.constexpr,
+    GROUPS,
     PAGE: tl.constexpr,
 ):
-    request, group = tl.program_id(0), tl.program_id(1)
+    group, request = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64)
     length = tl.load(cu + request + 1) - tl.load(cu + request)
     valid = group < length // 4
-    block = tl.load(table + request * WIDTH + group * 4 // PAGE, mask=valid, other=0)
+    block = tl.load(
+        table + request * WIDTH + group * 4 // PAGE, mask=valid, other=0
+    ).to(tl.int64)
     slot = block * (PAGE // 4) + group % (PAGE // 4)
     d = tl.arange(0, INDEXER_HEAD_DIM)
     value = tl.load(pool + slot * 128 + d, mask=valid, other=0)
@@ -65,16 +69,16 @@ def _kv_snapshot(
     tl.store(original + row * 128 + d, value)
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["PAGES"])
 def _state_write(
     raw,
     cu,
     slots,
     pool,
-    PAGES: tl.constexpr,
+    PAGES,
     PAGE: tl.constexpr,
 ):
-    request, page = tl.program_id(0), tl.program_id(1)
+    request, page = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64)
     start = tl.load(cu + request)
     length = tl.load(cu + request + 1) - start
     r, d = tl.arange(0, STATE_RING_ROWS), tl.arange(0, INDEXER_HEAD_DIM)
@@ -90,7 +94,7 @@ def _state_write(
     tl.store(pool + slot[:, None] * 128 + d[None, :], value, mask=(slot >= 0)[:, None])
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["GROUPS", "MAX_LENGTH"])
 def _kv_write(
     raw,
     cu,
@@ -100,12 +104,12 @@ def _kv_write(
     slots,
     pool,
     dense_keys,
-    GROUPS: tl.constexpr,
-    MAX_LENGTH: tl.constexpr,
+    GROUPS,
+    MAX_LENGTH,
     EPS: tl.constexpr,
     EMIT_DENSE: tl.constexpr,
 ):
-    request, group = tl.program_id(0), tl.program_id(1)
+    group, request = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64)
     slot = tl.load(slots + request * GROUPS + group)
     if slot >= 0:
         start = tl.load(cu + request)
@@ -168,8 +172,8 @@ def _metadata(
     KV_WIDTH: tl.constexpr,
     PAGE: tl.constexpr,
 ):
-    request = tl.program_id(0)
-    position = tl.program_id(1) * 128 + tl.arange(0, INDEXER_HEAD_DIM)
+    request = tl.program_id(0).to(tl.int64)
+    position = tl.program_id(1).to(tl.int64) * 128 + tl.arange(0, INDEXER_HEAD_DIM)
     start, end = tl.load(cu + request), tl.load(cu + request + 1)
     live = position < end - start
     state_block = tl.load(
@@ -190,7 +194,7 @@ def _metadata(
 
 @triton.jit
 def _restore_slots(pool, slots, original):
-    row = tl.program_id(0)
+    row = tl.program_id(0).to(tl.int64)
     slot = tl.load(slots + row)
     d = tl.arange(0, INDEXER_HEAD_DIM)
     value = tl.load(original + row * 128 + d)
@@ -400,7 +404,7 @@ def write_zero_prefix_prefill(
         num_warps=4,
     )
     if groups:
-        _kv_snapshot[(batch, groups)](
+        _kv_snapshot[(groups, batch)](
             cu_seqlens,
             kv_table,
             kv_pool,
@@ -426,7 +430,7 @@ def write_zero_prefix_prefill(
             num_warps=4,
         )
         if groups:
-            _kv_write[(batch, groups)](
+            _kv_write[(groups, batch)](
                 raw_keys,
                 cu_seqlens,
                 rope_cos,

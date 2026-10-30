@@ -67,7 +67,7 @@ class Sm120PrefillMoE:
             None,
             None,
             None,
-            True,
+            None,  # swizzled_input_sf in the pinned FlashInfer v0.7.0 ABI
             tp_size,
             tp_rank,
             ep_size,

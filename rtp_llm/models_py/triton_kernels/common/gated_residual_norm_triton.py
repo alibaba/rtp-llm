@@ -19,7 +19,7 @@ def _grouped_rms_norm_kernel(
     BLOCK: tl.constexpr,
     COLLECT_AMAX: tl.constexpr = False,
 ):
-    row = tl.program_id(0)
+    row = tl.program_id(0).to(tl.int64)
     group = tl.program_id(1)
     offsets = tl.arange(0, BLOCK)
     columns = group * GROUP_SIZE + offsets

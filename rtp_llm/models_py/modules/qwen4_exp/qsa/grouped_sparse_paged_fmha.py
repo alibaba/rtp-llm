@@ -197,7 +197,7 @@ def _grouped_sparse_paged_split_kernel(
             table + batch * BTW + logical,
             mask=(token >= 0) & (token < length) & (logical < BTW),
             other=0,
-        )
+        ).to(tl.int64)
         valid = (
             (offset < count)
             & (token >= 0)

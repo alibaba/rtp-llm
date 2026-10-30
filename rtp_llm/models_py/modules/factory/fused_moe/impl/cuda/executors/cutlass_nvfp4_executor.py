@@ -37,7 +37,13 @@ class CutlassNvfp4Executor(FusedMoeExpertExecutor):
         checker.check(
             config.parallelism_config.get_ffn_tp_size() == 1 or tensor_parallel
         )
-        checker.check(config.moe_config.fp4_moe_op == "cutlass")
+        checker.check(
+            config.moe_config.fp4_moe_op == "cutlass"
+            or (
+                config.moe_config.fp4_moe_op == "auto"
+                and config.moe_config.moe_strategy == "nvfp4_cutlass"
+            )
+        )
         quant_config = config.model_config.quant_config
         checker.check(quant_config is not None and not quant_config.is_quanted())
         checker.check(not config.has_redundant_experts)
@@ -129,6 +135,11 @@ class CutlassNvfp4Executor(FusedMoeExpertExecutor):
             and expert_x.is_contiguous()
             and expert_x.shape[0] >= 128
             and expert_x.shape[1] == 2560
+            and self.w1.ndim == self.w2.ndim == 3
+            and self.w1.shape[0] == self.w2.shape[0]
+            and self.w1.shape[2] * 16 == expert_x.shape[1]
+            and self.w2.shape[1] == expert_x.shape[1]
+            and self.w1.shape[1] == 32 * self.w2.shape[2]
             and not torch.cuda.is_current_stream_capturing()
         ):
             output = self.sm120_prefill(

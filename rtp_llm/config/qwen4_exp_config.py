@@ -166,6 +166,10 @@ def build_qwen4_quant_config(quantization, source_fp8):
 
 
 def validate_qwen4_runtime(config, parallelism):
+    import torch
+
+    if torch.version.hip is not None:
+        raise RuntimeError("qwen4_exp requires NVIDIA CUDA for PLE/QSA")
     if (
         config is None
         or not config.enable_qwen4_qsa
@@ -174,6 +178,8 @@ def validate_qwen4_runtime(config, parallelism):
         raise RuntimeError("qwen4_exp requires complete checkpoint PLE/QSA geometry")
     full_fp8 = bool(getattr(config, "_qwen4_full_fp8_nvfp4", False))
     quant = getattr(config, "quant_config", None)
+    if full_fp8 and getattr(config, "tie_word_embeddings", False):
+        raise RuntimeError("qwen4_exp FP8/NVFP4 requires untied word embeddings")
     if full_fp8 and (
         not isinstance(quant, ModelOptFp4Config)
         or quant.model_recipe != QWEN4_FP8_NVFP4_RECIPE

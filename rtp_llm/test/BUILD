@@ -491,3 +491,11 @@ py_test(
     tags = ["SM100_ARM_CU13"],
     exec_properties = {"gpu": "SM100_ARM_CU13", "gpu_count": "1"},
 )
+
+py_test(
+    name = "qwen4_request_admission_test",
+    srcs = ["qwen4_request_admission_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    tags = ["L20_CU13"],
+    exec_properties = {"gpu": "L20_CU13"},
+)

@@ -781,7 +781,7 @@ TEST_F(MtpBatchStreamProcessorTest, testExpandTargetVerifyPositionIdsPreservesMr
     model_config.num_layers                            = 1;
     model_config.mm_model_config.mm_position_ids_style = MROPE;
     model_config.attn_config.rope_config.index_factor  = 3;
-    sp_config.gen_num_per_cycle                        = 1;
+    sp_config.gen_num_per_cycle                        = 3;
 
     ResourceContext resource_context;
     auto            stream = createContextStream(model_config, runtime_config, resource_context, {1, 2, 3, 4}, 1);
@@ -792,15 +792,17 @@ TEST_F(MtpBatchStreamProcessorTest, testExpandTargetVerifyPositionIdsPreservesMr
     MtpBatchStreamProcessor processor(
         model_config, pd_sep_config, profiling_debug_logging_config, cache_config, sp_config, false);
     GptModelInputs model_input;
-    model_input.combo_position_ids = torch::zeros({3}, torch::kInt32);
-    auto authoritative_prefix      = torch::tensor({20}, torch::kInt32).to(torch::kCUDA);
+    model_input.combo_position_ids = torch::zeros({6}, torch::kInt32);
+    auto authoritative_prefix      = torch::tensor({20, 40}, torch::kInt32).to(torch::kCUDA);
 
-    processor.expandTargetVerifyPositionIds(StreamGroups({stream}), model_input, authoritative_prefix);
+    processor.expandTargetVerifyPositionIds(StreamGroups({stream, stream}), model_input, authoritative_prefix);
 
     EXPECT_TRUE(model_input.combo_position_ids.is_cuda());
     EXPECT_EQ(model_input.combo_position_ids.scalar_type(), torch::kInt32);
     EXPECT_TRUE(model_input.combo_position_ids.is_contiguous());
-    EXPECT_EQ((vector<int>{29, 29, 29, 30, 30, 30}), toVec<int>(model_input.combo_position_ids));
+    EXPECT_EQ(
+        (vector<int>{29, 29, 29, 30, 30, 30, 31, 31, 31, 32, 32, 32, 49, 49, 49, 50, 50, 50, 51, 51, 51, 52, 52, 52}),
+        toVec<int>(model_input.combo_position_ids));
 }
 
 TEST_F(MtpBatchStreamProcessorTest, testprepareDecodeDraftModelInput) {

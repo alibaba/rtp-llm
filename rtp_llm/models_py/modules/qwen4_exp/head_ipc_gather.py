@@ -11,6 +11,11 @@ import threading
 import torch
 import torch.distributed as dist
 
+# Cleanup can run on just one rank during initialization failure or destruction.
+# Keep raw IPC allocations/mappings alive until process exit: a local close
+# cannot prove that every peer has stopped using them.
+_PROCESS_LIFETIME_IPC = []
+
 
 class Qwen4HeadIpcGather:
     def __init__(self, group, device):
@@ -56,6 +61,8 @@ class Qwen4HeadIpcGather:
             return None
         stream = torch.cuda.current_stream(self.device)
         with self._lock:
+            if self.closed:
+                return None
             if self._last_stream is not None and self._last_stream != stream:
                 stream.wait_stream(self._last_stream)
             output = self.ops.head_ipc_gather(
@@ -65,17 +72,12 @@ class Qwen4HeadIpcGather:
         return output
 
     def close(self):
-        if self.closed:
-            return
-        with torch.cuda.device(self.device):
-            torch.cuda.synchronize(self.device)
-            if dist.is_initialized():
-                dist.barrier(group=self.group)
-            # Close imported mappings as well as each locally owned allocation.
-            self.ops.head_ipc_close(self.buffers, self.rank)
-            self.ops.head_ipc_close(self.signals, self.rank)
-        self.buffers = self.signals = []
-        self.closed = True
+        with self._lock:
+            if self.closed:
+                return
+            self.closed = True
+            _PROCESS_LIFETIME_IPC.append((self.buffers, self.signals))
+            self.buffers = self.signals = []
 
 
 def prepare_head_ipc_gather(config, parallelism, head):
