@@ -1,4 +1,4 @@
-package org.flexlb.mock.engine.rtp;
+package org.flexlb.mock.admission;
 
 import io.grpc.Status;
 import io.grpc.stub.ServerCallStreamObserver;

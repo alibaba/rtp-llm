@@ -1,4 +1,4 @@
-package org.flexlb.mock.engine.rtp;
+package org.flexlb.mock.admission;
 
 import io.grpc.*;
 import io.grpc.stub.*;
@@ -11,7 +11,7 @@ import org.flexlb.mock.engine.RequestState;
 
 /** P owns one end-to-end native request; the local Forward owner retains KV only through LOAD. */
 final class PrefillGeneration implements AutoCloseable {
-    private final RtpConfig config;
+    private final AdmissionConfig config;
     private final LocalPrefill requests;
     private final org.flexlb.mock.multimodal.MediaClient vision = new org.flexlb.mock.multimodal.MediaClient();
     private final RpcChannels channels = new RpcChannels();
@@ -26,7 +26,7 @@ final class PrefillGeneration implements AutoCloseable {
     private long nextOutputSweep;
     private boolean closed;
 
-    PrefillGeneration(RtpConfig config, LocalPrefill requests) {
+    PrefillGeneration(AdmissionConfig config, LocalPrefill requests) {
         this.config = config; this.requests = requests; deadlines.setRemoveOnCancelPolicy(true);
     }
 
@@ -46,7 +46,7 @@ final class PrefillGeneration implements AutoCloseable {
             throw Status.UNIMPLEMENTED.withDescription("Non-separated multi-token generation is not supported").asRuntimeException();
         var targets = input.getGenerateConfig().getRoleAddrsList().stream().filter(a -> a.getRole() == RoleAddrPB.RoleType.DECODE).toList();
         if (targets.size() != 1 || targets.getFirst().getIp().isBlank() || targets.getFirst().getGrpcPort() <= 0 || targets.getFirst().getGrpcPort() > 65535)
-            throw RtpErrors.failure(Status.INVALID_ARGUMENT.withDescription("Exactly one valid Decode role address is required"), 605);
+            throw RpcErrors.failure(Status.INVALID_ARGUMENT.withDescription("Exactly one valid Decode role address is required"), 605);
         var target = targets.getFirst(); String host = target.getIp().contains(":") ? "[" + target.getIp() + "]" : target.getIp();
         Call call;
         synchronized (this) {
@@ -78,7 +78,7 @@ final class PrefillGeneration implements AutoCloseable {
             if (call.terminal) return call;
             try {
                 if (call.deadline != Long.MAX_VALUE) call.timeout = deadlines.schedule(() -> call.finish(
-                    RtpErrors.failure(Status.DEADLINE_EXCEEDED.withDescription("P/D request budget expired"), 603)),
+                    RpcErrors.failure(Status.DEADLINE_EXCEEDED.withDescription("P/D request budget expired"), 603)),
                     Math.max(0, call.deadline - System.nanoTime()), TimeUnit.NANOSECONDS);
                 call.worker = workers.submit(call::run);
             } catch (RejectedExecutionException closing) { call.finish(Status.UNAVAILABLE.withDescription("Prefill node closing").asRuntimeException()); }
@@ -170,7 +170,7 @@ final class PrefillGeneration implements AutoCloseable {
         }
     }
     private static StatusRuntimeException preempted() {
-        return RtpErrors.failure(Status.RESOURCE_EXHAUSTED.withDescription("Preempted by a higher-priority request"), 8429);
+        return RpcErrors.failure(Status.RESOURCE_EXHAUSTED.withDescription("Preempted by a higher-priority request"), 8429);
     }
 
     private final class Call {
@@ -230,7 +230,7 @@ final class PrefillGeneration implements AutoCloseable {
                 if (inbox.failure != null) throw Status.fromThrowable(inbox.failure)
                     .asRuntimeException(Status.trailersFromThrowable(inbox.failure));
                 var first = source.completion().toCompletableFuture().get();
-                if (!first.status().isOk()) throw RtpErrors.failure(first.status(), first.engineCode());
+                if (!first.status().isOk()) throw RpcErrors.failure(first.status(), first.engineCode());
                 synchronized (this) {
                     if (terminal) return;
                     transferUse = requests.beginTransfer(source);
@@ -245,7 +245,7 @@ final class PrefillGeneration implements AutoCloseable {
                     throw Status.DATA_LOSS.withDescription("Invalid LOAD acknowledgement").asRuntimeException();
                 synchronized (this) {
                     if (terminal) return;
-                    requests.transferCompleted(source, new RtpTransferResult(prefillFinished, null));
+                    requests.transferCompleted(source, new TransferResult(prefillFinished, null));
                     requests.transferred(source);
                     transferUse.close(); transferUse = null;
                 }
@@ -300,7 +300,7 @@ final class PrefillGeneration implements AutoCloseable {
     }
     private static long rpcDeadline() {
         var deadline = Context.current().getDeadline();
-        return deadline == null ? Long.MAX_VALUE : RtpTasks.after(System.nanoTime(), deadline.timeRemaining(TimeUnit.NANOSECONDS));
+        return deadline == null ? Long.MAX_VALUE : RpcTasks.after(System.nanoTime(), deadline.timeRemaining(TimeUnit.NANOSECONDS));
     }
     private static final class Inbox implements ClientResponseObserver<GenerateRequestPB, GenerateOutputsPB> {
         final BlockingQueue<Object> values = new LinkedBlockingQueue<>(2);

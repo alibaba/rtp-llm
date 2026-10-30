@@ -1,4 +1,4 @@
-package org.flexlb.mock.engine.rtp;
+package org.flexlb.mock.admission;
 
 import io.grpc.Status;
 import java.util.*;
@@ -12,10 +12,10 @@ import org.flexlb.mock.cache.KvCache;
 /** Prepared-input submission boundary; callers own media preparation and network delivery. */
 final class LocalPrefill implements AutoCloseable {
     record Result(GenerateOutputsPB output, Status status, long engineCode) {}
-    private final RtpConfig config;
+    private final AdmissionConfig config;
     private final EngineLoop engine;
 
-    LocalPrefill(RtpConfig config, KvCache cache, Scheduler.Factory schedulers) {
+    LocalPrefill(AdmissionConfig config, KvCache cache, Scheduler.Factory schedulers) {
         this.config = config;
         engine = new EngineLoop(this, schedulers.create(this, cache), cache, config.compute(), config.role(), config.id());
     }
@@ -32,7 +32,7 @@ final class LocalPrefill implements AutoCloseable {
         void cancel() { finish(Status.CANCELLED.withDescription("Client cancelled local generation"), 0); }
         void preempt() { finish(Status.RESOURCE_EXHAUSTED.withDescription("Preempted by a higher-priority request"), 8429); }
         void expire() { finish(Status.DEADLINE_EXCEEDED.withDescription("RPC deadline expired"), 603); }
-        private void finish(Status status, long code) { engine.finish(request, RtpErrors.scheduling(status, code)); }
+        private void finish(Status status, long code) { engine.finish(request, RpcErrors.scheduling(status, code)); }
         private Result success(Scheduler.Request request, boolean finished) {
             return new Result(LocalResponse.token(input, input.getTokenIds(input.getTokenIdsCount() - 1), 1, 1, request.reused(), System.nanoTime() - request.input().started(), finished, false), Status.OK, 0);
         }
@@ -40,7 +40,7 @@ final class LocalPrefill implements AutoCloseable {
             if (retained) result.complete(success(request, output.finished()));
         }
         @Override public void terminal(Scheduler.Request request, RequestFailure failure) {
-            var ended = failure == null ? success(request, true) : new Result(null, RtpErrors.status(failure), RtpErrors.code(failure));
+            var ended = failure == null ? success(request, true) : new Result(null, RpcErrors.status(failure), RpcErrors.code(failure));
             result.complete(ended);
             termination.complete(ended);
         }
@@ -54,10 +54,10 @@ final class LocalPrefill implements AutoCloseable {
     Session submit(GenerateInputPB input, long rpcDeadline, boolean retained, long started) {
         validatePrepared(input, retained);
         long deadline = Math.min(rpcDeadline, input.getGenerateConfig().getTimeoutMs() <= 0 ? Long.MAX_VALUE
-            : RtpTasks.after(started, java.util.concurrent.TimeUnit.MILLISECONDS.toNanos(input.getGenerateConfig().getTimeoutMs())));
+            : RpcTasks.after(started, java.util.concurrent.TimeUnit.MILLISECONDS.toNanos(input.getGenerateConfig().getTimeoutMs())));
         var session = new Session(input, retained);
         try {
-            session.request = engine.input(RtpTasks.input(input, Long.toString(input.getRequestId()), started,
+            session.request = engine.input(RpcTasks.input(input, Long.toString(input.getRequestId()), started,
                 deadline, retained, config.blockSize()), session);
         } catch (RequestFailure failure) {
             throw rpcFailure(failure);
@@ -78,7 +78,7 @@ final class LocalPrefill implements AutoCloseable {
             try {
                 validatePrepared(item.input(), true);
                 var session = new Session(item.input(), true);
-                var input = RtpTasks.input(item.input(), Long.toString(item.input().getRequestId()),
+                var input = RpcTasks.input(item.input(), Long.toString(item.input().getRequestId()),
                     System.nanoTime(), item.deadline(), true, config.blockSize());
                 sessions.add(session); positions.add(i); items.add(new Scheduler.InputItem(input, session));
             } catch (RuntimeException failure) { results.set(i, new Admission(null, failure)); }
@@ -95,7 +95,7 @@ final class LocalPrefill implements AutoCloseable {
 
     private static io.grpc.StatusRuntimeException rpcFailure(RequestFailure failure) {
         return failure.reason() == RequestFailure.Reason.INVALID
-            ? RtpErrors.failure(Status.INVALID_ARGUMENT.withDescription(failure.getMessage()), 605) : RtpErrors.failure(failure);
+            ? RpcErrors.failure(Status.INVALID_ARGUMENT.withDescription(failure.getMessage()), 605) : RpcErrors.failure(failure);
     }
 
     private void validatePrepared(GenerateInputPB input, boolean retained) {
@@ -108,24 +108,24 @@ final class LocalPrefill implements AutoCloseable {
         if (config.role() != Role.prefill || (retained ? input.getGenerateConfig().getMaxNewTokens() < 1 : input.getGenerateConfig().getMaxNewTokens() != 1))
             throw Status.UNIMPLEMENTED.withDescription("Local generation supports one token; transfer prepares only the Prefill token").asRuntimeException();
         var generation = input.getGenerateConfig();
-        RtpRequestValidation.supported(input);
+        RequestValidation.supported(input);
         if (input.getTokenIdsCount() < 1
                 || generation.getTimeoutMs() < 0 || generation.getMinNewTokens() < 0 || generation.getMinNewTokens() > generation.getMaxNewTokens()
                 || generation.getNumBeams() < 0 || generation.getNumReturnSequences() < 0)
-            throw RtpErrors.failure(Status.INVALID_ARGUMENT.withDescription("Invalid input length or local generation settings"), 605);
+            throw RpcErrors.failure(Status.INVALID_ARGUMENT.withDescription("Invalid input length or local generation settings"), 605);
     }
 
     RequestState.Use beginTransfer(Session session) {
         try { return engine.beginTransfer(session.request); }
-        catch (RequestFailure failure) { throw RtpErrors.failure(failure); }
+        catch (RequestFailure failure) { throw RpcErrors.failure(failure); }
     }
-    void transferCompleted(Session session, RtpTransferResult result) {
+    void transferCompleted(Session session, TransferResult result) {
         try { engine.transferCompleted(session.request, result); }
-        catch (RequestFailure failure) { throw RtpErrors.failure(failure); }
+        catch (RequestFailure failure) { throw RpcErrors.failure(failure); }
     }
     void transferred(Session session) {
-        try { engine.control(session.request, RtpControl.TRANSFER_ACKNOWLEDGED); }
-        catch (RequestFailure failure) { throw RtpErrors.failure(failure); }
+        try { engine.control(session.request, Control.TRANSFER_ACKNOWLEDGED); }
+        catch (RequestFailure failure) { throw RpcErrors.failure(failure); }
     }
     Scheduler.Status snapshot(long latestFinished) { return engine.status(latestFinished); }
     String scrapeMetrics() { return engine.scrapeMetrics(); }

@@ -1,4 +1,4 @@
-package org.flexlb.mock.engine.rtp;
+package org.flexlb.mock.admission;
 
 import io.grpc.*;
 import io.grpc.stub.*;
@@ -9,14 +9,14 @@ import org.flexlb.mock.cache.KvCache;
 
 /** Native ALLOCATE/LOAD/GENERATE protocol. Queue membership and progress stay behind Scheduler. */
 final class DecodeAdmission implements AutoCloseable {
-    private final RtpConfig config;
+    private final AdmissionConfig config;
     private final EngineLoop engine;
     private final ExecutorService transport = Executors.newVirtualThreadPerTaskExecutor();
     private final KvTransfer transfer = new KvTransfer();
     private enum Stage { ALLOCATING, ALLOCATED, LOADING, LOADED, GENERATING, FINISHING }
     private boolean closed;
 
-    DecodeAdmission(RtpConfig config, KvCache cache, Scheduler.Factory schedulers) {
+    DecodeAdmission(AdmissionConfig config, KvCache cache, Scheduler.Factory schedulers) {
         this.config = config;
         engine = new EngineLoop(this, schedulers.create(this, cache), cache, config.compute(), config.role(), config.id());
     }
@@ -41,7 +41,7 @@ final class DecodeAdmission implements AutoCloseable {
         Call(ServerCallStreamObserver<GenerateOutputsPB> response, Context context) {
             this.response = response;
             rpcDeadline = context.getDeadline() == null ? Long.MAX_VALUE
-                : RtpTasks.after(started, context.getDeadline().timeRemaining(TimeUnit.NANOSECONDS));
+                : RpcTasks.after(started, context.getDeadline().timeRemaining(TimeUnit.NANOSECONDS));
             delivery = new BufferedOutput(transport, TimeUnit.MINUTES.toMillis(10));
             delivery.attach(response, () -> {
                 boolean expired = context.getDeadline() != null && context.getDeadline().isExpired();
@@ -65,7 +65,7 @@ final class DecodeAdmission implements AutoCloseable {
             send(this, output.build());
         }
         @Override public void terminal(Scheduler.Request request, RequestFailure failure) {
-            ended(this, RtpErrors.status(failure), RtpErrors.code(failure));
+            ended(this, RpcErrors.status(failure), RpcErrors.code(failure));
         }
     }
 
@@ -77,7 +77,7 @@ final class DecodeAdmission implements AutoCloseable {
                 validate(frame);
                 call.input = frame.getInput();
                 call.client = frame.getClientId();
-                call.request = engine.input(RtpTasks.input(call.input, call.client + "/" + call.input.getRequestId(),
+                call.request = engine.input(RpcTasks.input(call.input, call.client + "/" + call.input.getRequestId(),
                     call.started, call.rpcDeadline, false, config.blockSize()), call);
                 return;
             }
@@ -91,7 +91,7 @@ final class DecodeAdmission implements AutoCloseable {
                         || call.input.getGenerateConfig().getIgnoreEos() && call.input.getGenerateConfig().getMaxNewTokens() != 1)
                     throw Status.FAILED_PRECONDITION.withDescription("Invalid Prefill-only completion").asRuntimeException();
                 call.stage = Stage.FINISHING;
-                engine.control(call.request, RtpControl.PREFILL_COMPLETE);
+                engine.control(call.request, Control.PREFILL_COMPLETE);
             } else if (frame.getStage() == RemoteStage.GENERATE && call.stage == Stage.LOADED) {
                 if (frame.getProposeTokenIdsCount() > 0 || frame.getPositionIdsCount() > 0 || frame.hasProposeProbs() || frame.hasProposeHidden())
                     throw Status.UNIMPLEMENTED.withDescription("Speculative/position handoff is not supported").asRuntimeException();
@@ -99,13 +99,13 @@ final class DecodeAdmission implements AutoCloseable {
                     throw Status.FAILED_PRECONDITION.withDescription("Single-token request is already complete at Prefill").asRuntimeException();
                 call.stage = Stage.GENERATING;
                 call.token = frame.getFirstGenerateTokenId();
-                engine.control(call.request, RtpControl.GENERATE);
+                engine.control(call.request, Control.GENERATE);
             } else {
                 throw Status.FAILED_PRECONDITION.withDescription("Expected ALLOCATE, LOAD, then GENERATE or PREFILL_COMPLETE").asRuntimeException();
             }
         } catch (RequestFailure failure) {
-            stop(call, failure.reason() == RequestFailure.Reason.INVALID ? Status.INVALID_ARGUMENT.withDescription(failure.getMessage()) : RtpErrors.status(failure),
-                failure.reason() == RequestFailure.Reason.INVALID ? 605 : RtpErrors.code(failure));
+            stop(call, failure.reason() == RequestFailure.Reason.INVALID ? Status.INVALID_ARGUMENT.withDescription(failure.getMessage()) : RpcErrors.status(failure),
+                failure.reason() == RequestFailure.Reason.INVALID ? 605 : RpcErrors.code(failure));
         }
         catch (StatusRuntimeException error) { stop(call, error.getStatus(), error.getStatus().getCode() == Status.Code.INVALID_ARGUMENT ? 605 : 0); }
         catch (RuntimeException error) { stop(call, Status.INTERNAL.withDescription("Decode frame failed: " + error.getMessage()), 0); }
@@ -113,15 +113,15 @@ final class DecodeAdmission implements AutoCloseable {
     private void validate(GenerateRequestPB request) {
         if (request.getStage() != RemoteStage.ALLOCATE || !request.hasInput() || request.getClientId().isBlank()
                 || request.getInput().getRequestId() != request.getRequestId())
-            throw RtpErrors.failure(Status.INVALID_ARGUMENT.withDescription("Invalid ALLOCATE frame or identity"), 605);
+            throw RpcErrors.failure(Status.INVALID_ARGUMENT.withDescription("Invalid ALLOCATE frame or identity"), 605);
         var input = request.getInput(); var generation = input.getGenerateConfig();
-        RtpRequestValidation.supported(input);
+        RequestValidation.supported(input);
         if (org.flexlb.mock.multimodal.MediaInput.present(input))
             throw Status.FAILED_PRECONDITION.withDescription("Decode ALLOCATE requires the prepared P input").asRuntimeException();
         if (input.getTokenIdsCount() < 1
                 || generation.getTimeoutMs() < 0 || generation.getMaxNewTokens() < 1 || generation.getMinNewTokens() < 0
                 || generation.getMinNewTokens() > generation.getMaxNewTokens() || generation.getNumBeams() < 0 || generation.getNumReturnSequences() < 0)
-            throw RtpErrors.failure(Status.INVALID_ARGUMENT.withDescription("Invalid decode allocation settings"), 605);
+            throw RpcErrors.failure(Status.INVALID_ARGUMENT.withDescription("Invalid decode allocation settings"), 605);
     }
 
     private void acknowledge(Call call) {
@@ -148,12 +148,12 @@ final class DecodeAdmission implements AutoCloseable {
             outcome.state() == KvTransfer.State.CANCELLED ? RequestFailure.Reason.CANCELLED : RequestFailure.Reason.INTERNAL,
             "KV transfer " + outcome.state(), outcome.error());
         try {
-            engine.transferCompleted(call.request, new RtpTransferResult(false, failure));
+            engine.transferCompleted(call.request, new TransferResult(false, failure));
             if (failure != null) return;
             call.stage = Stage.LOADED;
             send(call, GenerateOutputsPB.newBuilder().setRequestId(call.input.getRequestId())
                 .setErrorInfo(RpcErrorPB.newBuilder().setErrorCodeValue(0)).build());
-        } catch (RequestFailure error) { stop(call, RtpErrors.status(error), RtpErrors.code(error)); }
+        } catch (RequestFailure error) { stop(call, RpcErrors.status(error), RpcErrors.code(error)); }
         catch (RuntimeException error) { stop(call, Status.CANCELLED.withDescription("LOAD acknowledgement failed"), 8100); }
     }
 
@@ -178,13 +178,13 @@ final class DecodeAdmission implements AutoCloseable {
     private synchronized void stop(Call call, Status status, long code) {
         if (call.terminal) return;
         if (call.request == null) ended(call, status, code);
-        else engine.finish(call.request, RtpErrors.scheduling(status, code));
+        else engine.finish(call.request, RpcErrors.scheduling(status, code));
     }
     private synchronized void ended(Call call, Status status, long code) {
         if (call.terminal) return;
         call.terminal = true;
         if (call.transfer != null) call.transfer.cancel();
-        call.delivery.finish(status.isOk() ? null : RtpErrors.failure(status, code));
+        call.delivery.finish(status.isOk() ? null : RpcErrors.failure(status, code));
     }
 
     Scheduler.Status snapshot(long latestFinished) { return engine.status(latestFinished); }

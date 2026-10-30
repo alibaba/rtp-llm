@@ -1,11 +1,11 @@
-package org.flexlb.mock.engine.rtp;
+package org.flexlb.mock.admission;
 
 import io.grpc.Status;
 import org.flexlb.engine.grpc.EngineRpcService.GenerateInputPB;
 
 /** Common support boundary for local Prefill, P/D Prefill and Decode admission. */
-final class RtpRequestValidation {
-    private RtpRequestValidation() {}
+final class RequestValidation {
+    private RequestValidation() {}
 
     static void supported(GenerateInputPB input) {
         var g = input.getGenerateConfig();
