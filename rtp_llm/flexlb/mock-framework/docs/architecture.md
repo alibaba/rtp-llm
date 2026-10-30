@@ -199,7 +199,7 @@ Python 在 stop 或最终清理时收集异常，不增加实时发压监控。�
 
 `client/start` 只接受 `requests_file`，路径指向标准 Protobuf＋Zstd 文件；不接受 inline requests、JSONL、xz 或格式兼容开关。相对路径基于 Case YAML 所在目录，也接受绝对路径。当前所有 Client 位于同一机器并共享文件系统，不支持 URL 或跨机器分发。
 
-唯一输入定义为 `java/client/src/main/proto/client_input.proto`，Java 由 Maven 生成，Python 提交同一 protoc 3.25.1 生成的 client_input_pb2.py。Request 保存已展开的生成输入：非空、非负 int32 token_ids，正 int32 max_new_tokens（本格式中的固定目标输出长度，LoadClient 发送 ignore_eos=true），可选非负 int32 priority（缺省为 50，显式 0 保留），可选非负 int64 arrival_offset_ms（相对于源起点的毫秒偏移，尚未除以倍速）。可选 images 保存 url、width、height、offset、length；token_ids 中提前为每张图展开 length 个占位 token，按 offset 排序且不得重叠，实际长度必须与 V 输出一致。Client 和 P 用 V 返回的逐行特征 hash 替换这些占位值，普通 token 保持不变。完整生成参数及真实观测仍不是此播放格式的内容。未知字段、非法请求及不支持的版本均拒绝。
+唯一输入定义为 `java/client/src/main/proto/client_input.proto`，Java 由 Maven 生成，Python 测试辅助目录 tests/helpers 提交同一 protoc 3.25.1 生成的 client_input_pb2.py；输入读写器 input.py 也仅供框架测试与镜像终验生成、检查测试数据，不发布到 mock_framework 运行包。Request 保存已展开的生成输入：非空、非负 int32 token_ids，正 int32 max_new_tokens（本格式中的固定目标输出长度，LoadClient 发送 ignore_eos=true），可选非负 int32 priority（缺省为 50，显式 0 保留），可选非负 int64 arrival_offset_ms（相对于源起点的毫秒偏移，尚未除以倍速）。可选 images 保存 url、width、height、offset、length；token_ids 中提前为每张图展开 length 个占位 token，按 offset 排序且不得重叠，实际长度必须与 V 输出一致。Client 和 P 用 V 返回的逐行特征 hash 替换这些占位值，普通 token 保持不变。完整生成参数及真实观测仍不是此播放格式的内容。未知字段、非法请求及不支持的版本均拒绝。
 
 文件以 `MCKINP01` 标识输入格式 v1，之后每批为 4 字节大端压缩长度加一个 Zstd 压缩的 Protobuf Batch。帧必须为 single-segment、声明解压长度并带校验和，压缩及解压单批上限均为 4 MiB；每请求 Protobuf 上限 1 MiB，每批至多 1024 个请求。写入器按约 1 MiB 或 1024 请求封批，不累积整个文件。Batch.sequence 从 1 连续递增，末批只含 total_requests；缺末批、计数不符、截断或尾随数据均报错。输入和分片使用同一份格式与读写器，输入消息与执行证据消息分开定义。
 
@@ -226,17 +226,17 @@ masters 可省略，Client 默认持续发现本实验的全部 Master；显式�
   interface: client/stop
 ```
 
-离线准备时直接构造共享 Protobuf Request 并写压缩文件：
+测试代码通过 tests/helpers/input.py 构造 Protobuf Request 并写压缩文件（下面的导入用于 pytest 或已将 tests 加入 sys.path 的镜像终验脚本）：
 
 ```python
-from mock_framework.input import pb, write_inputs
+from helpers.input import pb, write_inputs
 write_inputs("traffic.binpb.zst", (
     pb.Request(token_ids=[1, 2, i + 3], max_new_tokens=3)
     for i in range(20)
 ))
 ```
 
-写入器拒绝覆盖已有文件，生成失败删除本次不完整文件。基本 Case 直接携带标准二进制输入。控制接口仍传小型 HTTP 元数据，不在 JSON 控制报文中传请求数据。
+测试写入器拒绝覆盖已有文件，生成失败删除本次不完整文件。正常运行 Case 只传入标准二进制文件路径，由 Java InputFile/RequestFiles 校验、读取和分片，不导入 Python 输入辅助代码。基本 Case 直接携带标准二进制输入。控制接口仍传小型 HTTP 元数据，不在 JSON 控制报文中传请求数据。
 
 `RequestFilesTest` 在独立 48 MiB 堆的 JVM 中分片并完整播放解压后超过 64 MiB 的输入，覆盖非法输入、截断、校验和、内容变化和准备取消。跨语言测试验证 Python 写→Java 读、Java 写→Python 读；真实 Master 接线测试在 1/2 个 Client JVM 中播放并校验分片总量、全局请求 ID 和发压窗口内的合计 QPS。这些是有界读取和功能接线验证，不测量最大可达 QPS。
 

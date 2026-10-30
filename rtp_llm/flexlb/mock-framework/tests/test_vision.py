@@ -9,7 +9,7 @@ import yaml
 
 from mock_framework.config import Registry, compile_case
 from mock_framework.execution import prepare_launch, run_case
-from mock_framework.input import pb, write_inputs
+from helpers.input import pb, write_inputs
 from test_master import configuration
 
 

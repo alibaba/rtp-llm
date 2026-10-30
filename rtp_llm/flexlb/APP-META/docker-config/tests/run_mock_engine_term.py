@@ -21,7 +21,8 @@ CONFIG = Path(__file__).resolve().parents[1]
 FLEXLB = CONFIG.parents[1]
 FRAMEWORK = FLEXLB / "mock-framework"
 sys.path.insert(0, str(FRAMEWORK / "python"))
-from mock_framework.input import pb, write_inputs
+sys.path.insert(0, str(FRAMEWORK / "tests"))
+from helpers.input import pb, write_inputs
 from mock_framework.evidence import read_requests
 from mock_framework.execution.master import master_environment
 

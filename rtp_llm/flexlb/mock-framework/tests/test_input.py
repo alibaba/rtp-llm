@@ -6,7 +6,7 @@ import subprocess
 import pytest
 import zstandard
 
-from mock_framework.input import MAGIC, MAX_FRAME, MAX_BATCH_REQUESTS, read_inputs, write_inputs, pb
+from helpers.input import MAGIC, MAX_FRAME, MAX_BATCH_REQUESTS, read_inputs, write_inputs, pb
 
 ROOT = Path(__file__).resolve().parents[1]
 
