@@ -153,6 +153,7 @@ cc_library(
         "transfer/DeviceDiskTransferExecutor.h",
         "transfer/TransferTypes.h",
         "transfer/TransferStageTimer.h",
+        "transfer/CompletionStage.h",
         "block_pool/DiskBlockIO.h",
         "block_pool/DiskBlockPool.h",
         "block_pool/DiskMountGuard.h",

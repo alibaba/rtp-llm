@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/evict/BlockTreeEvictor.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/CompletionStage.h"
 
 #include <algorithm>
 #include <chrono>
@@ -419,6 +420,8 @@ void BlockTreeEvictor::runEvictionTask(std::shared_ptr<const EvictionTransferTas
 
 void BlockTreeEvictor::completeEvictionTask(std::shared_ptr<const EvictionTransferTask> task, ErrorInfo error) noexcept {
     if (error.code() == ErrorCode::TRANSFER_COMPLETION_UNKNOWN) {
+        auto observation = CompletionStageContext::forTask(*metrics_reporter_, task->transfer_task, "evict", false);
+        CompletionStageScope freeze(observation, "freeze_blocks", "workflow_callback");
         // Ordinary source/target references are still held here. Freeze every
         // saved endpoint before rollback can return any of them to a pool.
         for (const TransferDescriptor& desc : task->descriptors()) {
@@ -446,56 +449,75 @@ void BlockTreeEvictor::completeEvictionTask(std::shared_ptr<const EvictionTransf
 
 void BlockTreeEvictor::scheduleEvictionSettlement(std::shared_ptr<const EvictionTransferTask> task,
                                                   bool                                        success) noexcept {
-    auto settle = [this, task = std::move(task), success]() noexcept {
-        bool                 any_not_detached = false;
-        EvictionTransferTask settled_task(task->transfer_task.subtask({}));
-        {
-            std::lock_guard<std::mutex> lock(*mutex_);
-            std::vector<bool>           detached;
-            detached.reserve(task->descriptors().size());
-            for (const TransferDescriptor& desc : task->descriptors()) {
-                heaps_[desc.group_set_id].pending_timings.erase(desc.node);
-                const bool is_detached = desc.node->group_set_resources[desc.group_set_id].transfer_detached;
-                detached.push_back(is_detached);
-                any_not_detached = any_not_detached || !is_detached;
+    auto observation = CompletionStageContext::forTask(*metrics_reporter_, task->transfer_task, "evict", success);
+    auto total       = observation.start("completion_total", "business_completion");
+    auto queue       = observation.start("completion_queue_wait", "business_completion");
+    const int64_t queue_begin = currentTimeUs();
+    auto          settle =
+        [this, task = std::move(task), success, observation, queue, total, queue_begin](bool queued) noexcept {
+            queue.finish(success);
+            block_tree_cache_detail::ScopeRollback finish([&] { total.finish(success); });
+            CompletionStageScope                   execute(observation, "completion_execute", "business_completion");
+            if (queued) {
+                metrics_reporter_->reportQueueWaitMetric(
+                    true, "business", "evict", Tier::NONE, Tier::NONE, currentTimeUs() - queue_begin);
             }
+            bool                 any_not_detached = false;
+            EvictionTransferTask settled_task(task->transfer_task.subtask({}));
+            {
+                std::unique_lock<std::mutex> lock(*mutex_, std::defer_lock);
+                {
+                    CompletionStageScope wait(observation, "completion_lock_wait", "business_completion");
+                    lock.lock();
+                }
+                CompletionStageScope tree(observation, "completion_settle", "business_completion");
+                std::vector<bool>    detached;
+                detached.reserve(task->descriptors().size());
+                for (const TransferDescriptor& desc : task->descriptors()) {
+                    heaps_[desc.group_set_id].pending_timings.erase(desc.node);
+                    const bool is_detached = desc.node->group_set_resources[desc.group_set_id].transfer_detached;
+                    detached.push_back(is_detached);
+                    any_not_detached = any_not_detached || !is_detached;
+                }
 
-            if (success) {
-                completeEvict(task->descriptors());
-                settleEviction(task->descriptors());
-            } else {
-                rollbackTransferLocked(task->descriptors());
-            }
-            updatePendingRelease(task->descriptors(), false);
-            const auto& descriptor = task->descriptors().front();
+                if (success) {
+                    {
+                        CompletionStageScope update(observation, "completion_tree_update", "business_completion");
+                        completeEvict(task->descriptors());
+                    }
+                    {
+                        CompletionStageScope cleanup(observation, "completion_cleanup", "business_completion");
+                        settleEviction(task->descriptors());
+                    }
+                } else {
+                    CompletionStageScope rollback(observation, "completion_rollback", "business_completion");
+                    rollbackTransferLocked(task->descriptors());
+                }
+                updatePendingRelease(task->descriptors(), false);
+                const auto& descriptor = task->descriptors().front();
 
-            for (size_t desc_index = 0; desc_index < task->descriptors().size(); ++desc_index) {
-                const TransferDescriptor& desc = task->descriptors()[desc_index];
-                if (success && !detached[desc_index]) {
-                    settled_task.mutableDescriptorsForPreparation().push_back(desc);
-                    settled_task.timings.push_back(task->timings[desc_index]);
+                for (size_t desc_index = 0; desc_index < task->descriptors().size(); ++desc_index) {
+                    const TransferDescriptor& desc = task->descriptors()[desc_index];
+                    if (success && !detached[desc_index]) {
+                        settled_task.mutableDescriptorsForPreparation().push_back(desc);
+                        settled_task.timings.push_back(task->timings[desc_index]);
+                    }
+                }
+                {
+                    CompletionStageScope watermark(observation, "completion_watermark", "business_completion");
+                    settled_(success && any_not_detached);
+                    finishWatermarkRoundLocked(descriptor.group_set_id, descriptor.source_tier);
                 }
             }
-            settled_(success && any_not_detached);
-            finishWatermarkRoundLocked(descriptor.group_set_id, descriptor.source_tier);
-        }
-        if (!settled_task.descriptors().empty()) {
-            metrics_reporter_->reportEvictionFinished(settled_task, tree_->groupSets());
-        }
-    };
+            if (!settled_task.descriptors().empty()) {
+                CompletionStageScope metrics(observation, "completion_metrics", "business_completion");
+                metrics_reporter_->reportEvictionFinished(settled_task, tree_->groupSets());
+            }
+        };
 
-    const int64_t queue_begin = currentTimeUs();
-    bool          submitted   = false;
+    bool submitted = false;
     try {
-        submitted = task_pool_->submitCompletion([this, settle, queue_begin]() mutable {
-            metrics_reporter_->reportQueueWaitMetric(true,
-                                                     "business",
-                                                     cacheTransferOperationName(CacheTransferOperation::EVICT),
-                                                     Tier::NONE,
-                                                     Tier::NONE,
-                                                     currentTimeUs() - queue_begin);
-            settle();
-        });
+        submitted = task_pool_->submitCompletion([settle] { settle(true); });
     } catch (const std::exception& error) {
         RTP_LLM_LOG_ERROR("failed to enqueue eviction settlement: %s", error.what());
     } catch (...) {
@@ -503,7 +525,7 @@ void BlockTreeEvictor::scheduleEvictionSettlement(std::shared_ptr<const Eviction
     }
     if (!submitted) {
         RTP_LLM_LOG_WARNING("eviction completion queue is closed; settling inline");
-        settle();
+        settle(false);
     }
 }
 

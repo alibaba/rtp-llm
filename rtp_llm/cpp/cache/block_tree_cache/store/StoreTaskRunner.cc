@@ -5,6 +5,7 @@
 #include "rtp_llm/cpp/cache/AsyncContext.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCacheMetricsReporter.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferDispatcher.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/CompletionStage.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferStageState.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 
@@ -48,9 +49,17 @@ void StoreTaskRunner::runTransfer(TaskPtr                        task,
         const int64_t transfer_begin =
             metrics_reporter.reportTransferStarted(CacheTransferOperation::STORE, Tier::DEVICE, task->target_tier);
 
-        auto stage_state = std::make_shared<TransferStageState>(
-            [this, task, &metrics_reporter, transfer_begin, callback](TransferResult result) mutable {
-                try {
+        auto stage_state = std::make_shared<TransferStageState>([this,
+                                                                 task,
+                                                                 &metrics_reporter,
+                                                                 transfer_begin,
+                                                                 callback](TransferResult result) mutable {
+            auto observation =
+                CompletionStageContext::forTask(metrics_reporter, task->transfer_task, "store", result.ok());
+            CompletionStageScope total(observation, "callback_total", "workflow_callback");
+            try {
+                {
+                    CompletionStageScope metrics(observation, "metrics_report", "workflow_callback");
                     static const std::vector<TransferDescriptor> empty_descriptors;
                     metrics_reporter.reportTransferFinished(CacheTransferOperation::STORE,
                                                             Tier::DEVICE,
@@ -61,22 +70,26 @@ void StoreTaskRunner::runTransfer(TaskPtr                        task,
                                                             result.ok() ? task->descriptors() : empty_descriptors,
                                                             group_sets_);
                     metrics_reporter.maybeReportCopyError(Tier::DEVICE, task->target_tier, result);
-                    task->phase = Task::Phase::FINISHED;
-                    callback(std::move(result.status));
-                } catch (const std::exception& exception) {
-                    task->phase = Task::Phase::FINISHED;
-                    callback(ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, exception.what()));
-                } catch (...) {
-                    task->phase = Task::Phase::FINISHED;
-                    callback(ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "unknown store completion exception"));
                 }
-            });
+                task->phase = Task::Phase::FINISHED;
+                callback(std::move(result.status));
+            } catch (const std::exception& exception) {
+                total.setSuccess(false);
+                task->phase = Task::Phase::FINISHED;
+                callback(ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, exception.what()));
+            } catch (...) {
+                total.setSuccess(false);
+                task->phase = Task::Phase::FINISHED;
+                callback(ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "unknown store completion exception"));
+            }
+        });
 
         const auto submit_batch = [&](const std::vector<TransferDescriptor>& descriptors) {
             stage_state->addBatch();
             transfer_dispatcher.runTransfer(
                 task->transfer_task.subtask(descriptors),
-                [stage_state](TransferResult result) { stage_state->completeBatch(std::move(result)); });
+                [stage_state](TransferResult result) { stage_state->completeBatch(std::move(result)); },
+                "store");
         };
         if (task->target_tier == Tier::DISK) {
             for (const auto& descriptor : task->descriptors()) {
