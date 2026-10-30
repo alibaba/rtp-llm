@@ -33,7 +33,7 @@ public:
     GenerationPrefillCudaGraphStatus generationPrefillCudaGraphStatus() const override;
 
 private:
-    GenerateOutputs prepareGenerateOutput(const StreamUpdateInfo& update_info);
+    GenerateOutputs prepareGenerateOutput(const StreamUpdateInfo& update_info, size_t output_end);
     void            enqueueGenerateOutput(GenerateOutputs&& generate_results);
     bool            consumerReadyWithoutLock() const override;
 

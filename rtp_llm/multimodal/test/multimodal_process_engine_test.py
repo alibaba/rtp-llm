@@ -411,6 +411,9 @@ class MMProcessEngineTest(TestCase):
         vit_config = VitConfig()
         vit_config.use_local_preprocess = True  # fast preprocess; isolate embedding
         vit_config.mm_cache_item_num = 0  # no cache hit to short-circuit the forward
+        vit_config.mm_cache_gpu_max_bytes = 0
+        vit_config.mm_cache_cpu_max_bytes = 0
+        vit_config.mm_hash_key_cache_max_bytes = 0
         engine = MMProcessEngine(
             model.mm_part,
             model.model_config,
@@ -433,6 +436,9 @@ class MMProcessEngineTest(TestCase):
         model = FakeModel(FakeMultiModalEmbeddingInterfaceBadCount())
         vit_config = VitConfig()
         vit_config.use_local_preprocess = True  # local preprocess, serial scheduler
+        vit_config.mm_cache_gpu_max_bytes = 0
+        vit_config.mm_cache_cpu_max_bytes = 0
+        vit_config.mm_hash_key_cache_max_bytes = 0
         engine = MMProcessEngine(
             model.mm_part,
             model.model_config,

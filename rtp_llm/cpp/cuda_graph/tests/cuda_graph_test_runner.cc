@@ -110,6 +110,27 @@ public:
         runner_ = CudaGraphRunner::initializeCapture(std::make_unique<CudaGraphRunner>(params, std::move(py_instance)));
     }
 
+    void init_mtp_draft_prefill(
+        py::object py_instance, int max_requests, int query_width, int sequence_parallel_size, int hc_mult) {
+        reset_runner();
+        GraphParams params;
+        params.enable_cuda_graph                = true;
+        params.is_prefill_cuda_graph_mode       = true;
+        params.role                             = CudaGraphRole::MTP_DRAFT_PREFILL;
+        params.max_seq_len                      = 64;
+        params.num_tokens_per_bs                = query_width;
+        params.sequence_parallel_size           = sequence_parallel_size;
+        params.hc_mult                          = hc_mult;
+        params.max_context_batch_size           = max_requests;
+        params.hidden_size                      = 4;
+        params.input_hidden_size                = 4 * hc_mult;
+        params.model_data_type                  = c10::ScalarType::BFloat16;
+        params.kv_cache_group_tags              = {"full", "aux"};
+        params.position_id_len_factor           = 1;
+        params.kernel_block_table_width         = 8;
+        runner_ = CudaGraphRunner::initializeCapture(std::make_unique<CudaGraphRunner>(params, std::move(py_instance)));
+    }
+
     void init_decode(py::object               py_instance,
                      int64_t                  hidden_size,
                      int64_t                  max_seq_len,
@@ -118,7 +139,8 @@ public:
                      std::vector<std::string> group_tags,
                      bool                     is_target_verify,
                      int64_t                  num_tokens_per_bs,
-                     int64_t                  position_id_len_factor) {
+                     int64_t                  position_id_len_factor,
+                     int64_t                  linear_replay_group_count) {
         reset_runner();
         GraphParams params;
         params.enable_cuda_graph            = true;
@@ -135,6 +157,7 @@ public:
         params.kv_cache_group_tags        = std::move(group_tags);
         params.is_target_verify           = is_target_verify;
         params.position_id_len_factor     = static_cast<int>(position_id_len_factor);
+        params.linear_replay_group_count  = static_cast<int>(linear_replay_group_count);
         params.kernel_block_table_width   = kernel_block_table_width;
 
         runner_ = CudaGraphRunner::initializeCapture(std::make_unique<CudaGraphRunner>(params, std::move(py_instance)));
@@ -250,6 +273,7 @@ PYBIND11_MODULE(libtest_cuda_graph_runner, m) {
              py::arg("group_tags")            = std::vector<std::string>{},
              py::arg("position_encoding")     = py::none(),
              py::arg("token_type_embedding")  = py::none())
+        .def("init_mtp_draft_prefill", &CudaGraphTestRunner::init_mtp_draft_prefill)
         .def("init_decode",
              &CudaGraphTestRunner::init_decode,
              py::arg("py_instance"),
@@ -260,7 +284,8 @@ PYBIND11_MODULE(libtest_cuda_graph_runner, m) {
              py::arg("group_tags")            = std::vector<std::string>{},
              py::arg("is_target_verify")      = false,
              py::arg("num_tokens_per_bs")     = 1,
-             py::arg("position_id_len_factor") = 0)
+             py::arg("position_id_len_factor") = 0,
+             py::arg("linear_replay_group_count") = 0)
         .def("init_generation_prefill",
              &CudaGraphTestRunner::init_generation_prefill,
              py::arg("py_instance"),

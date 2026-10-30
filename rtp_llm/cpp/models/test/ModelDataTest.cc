@@ -268,10 +268,9 @@ void checkGroupedTpRound(GptModelInputs&                 inputs,
                          int                             rank,
                          const std::vector<std::string>& root_tags,
                          bool                            empty_tables) {
+    // Metadata producers canonicalize their layout before TP synchronization.
     auto local_tags = root_tags;
-    if (rank != 0 && local_tags.size() > 1) {
-        std::rotate(local_tags.begin(), local_tags.begin() + 1, local_tags.end());
-    }
+    std::sort(local_tags.begin(), local_tags.end());
     const auto group_count    = static_cast<int64_t>(root_tags.size());
     const auto physical_slots = empty_tables ? 0 : 2;
     const auto kernel_slots   = empty_tables ? 0 : 3;
@@ -311,28 +310,18 @@ void checkGroupedTpRound(GptModelInputs&                 inputs,
     tpSyncModelInputs(inputs, config);
 
     EXPECT_EQ(inputs.kv_cache_group_tags, local_tags);
-    std::vector<int64_t> local_to_root;
-    for (const auto& tag : local_tags) {
-        local_to_root.push_back(std::find(root_tags.begin(), root_tags.end(), tag) - root_tags.begin());
-    }
-    const auto order = torch::tensor(local_to_root, torch::kInt64);
     if (empty_tables && rank != 0) {
         EXPECT_TRUE(!inputs.kv_cache_block_id.defined() || inputs.kv_cache_block_id.numel() == 0);
         EXPECT_TRUE(!inputs.kv_cache_kernel_block_id.defined() || inputs.kv_cache_kernel_block_id.numel() == 0);
     } else {
-        expectIntTensor(inputs.kv_cache_block_id, physical.index_select(0, order));
-        expectIntTensor(inputs.kv_cache_kernel_block_id, kernel.index_select(0, order));
+        expectIntTensor(inputs.kv_cache_block_id, physical);
+        expectIntTensor(inputs.kv_cache_kernel_block_id, kernel);
     }
-    expectIntTensor(inputs.kv_cache_group_types, types.index_select(0, order));
-    auto expected_copies = copies.clone();
-    for (int64_t row = 0; row < expected_copies.size(0); ++row) {
-        auto& group_row = expected_copies.data_ptr<int>()[row * 3];
-        group_row       = std::find(local_tags.begin(), local_tags.end(), root_tags[group_row]) - local_tags.begin();
-    }
+    expectIntTensor(inputs.kv_cache_group_types, types);
     if (empty_tables && rank != 0) {
         EXPECT_TRUE(!inputs.kv_cache_update_mapping.defined() || inputs.kv_cache_update_mapping.numel() == 0);
     } else {
-        expectIntTensor(inputs.kv_cache_update_mapping, expected_copies.to(inputs.kv_cache_update_mapping.device()));
+        expectIntTensor(inputs.kv_cache_update_mapping, copies.to(inputs.kv_cache_update_mapping.device()));
     }
     expectIntTensor(inputs.combo_tokens, torch::tensor({7, 8}, torch::kInt32));
     expectIntTensor(inputs.cache_store_publish_start_tokens, torch::tensor({0, 8}, torch::kInt32));
@@ -410,6 +399,8 @@ TEST(ModelInputTpSyncChild, DISABLED_RunRank) {
     EXPECT_THROW(tpSyncModelInputs(invalid, config), RTPException);
     invalid.kv_cache_group_tags = {"group", ""};
     EXPECT_THROW(tpSyncModelInputs(invalid, config), RTPException);
+    invalid.kv_cache_group_tags = {"second", "first"};
+    EXPECT_THROW(tpSyncModelInputs(invalid, config), RTPException);
     invalid.kv_cache_group_tags = {"group"};
     EXPECT_THROW(tpSyncModelInputs(invalid, config), RTPException);
     invalid.kv_cache_group_tags.clear();
@@ -422,7 +413,7 @@ TEST(ModelInputTpSyncChild, DISABLED_RunRank) {
     ::alarm(0);
 }
 
-TEST(ModelInputTpSyncTest, PreservesIdentityAcrossRankOrderings) {
+TEST(ModelInputTpSyncTest, PreservesCanonicalPayloadWithoutRowCopies) {
     const auto        tmpdir  = std::getenv("TMPDIR");
     std::string       pattern = std::string(tmpdir ? tmpdir : "/tmp") + "/model_tp.XXXXXX";
     std::vector<char> temp_path(pattern.begin(), pattern.end());

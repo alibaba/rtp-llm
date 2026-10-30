@@ -1155,7 +1155,7 @@
                     },
                     {
                         "role": "user",
-                        "content": "查询下北京的天气，json格式返回"
+                        "content": "请将以下固定天气记录作为唯一数据来源，以 JSON 格式返回。日期和天气不代表实时信息，不需要查询或推测。最终回答必须保留记录的全部键名、层级和字符串值，不改写值，不增加字段或说明，仅输出 JSON 对象：\n{\"city\": \"北京\", \"weather\": \"晴\", \"temperature\": \"15°C\", \"humidity\": \"30%\", \"wind\": \"北风3级\"}"
                     }
                 ],
                 "max_tokens": 160,
@@ -1233,10 +1233,10 @@
                     },
                     {
                         "role": "user",
-                        "content": "查询下北京的天气，查询结果以json格式返回"
+                        "content": "请将以下固定天气记录作为唯一数据来源，以 JSON 格式返回。日期和天气不代表实时信息，不需要查询或推测。最终回答必须保留记录的全部键名、层级、数组顺序和字符串值，不改写值，不增加字段或说明，仅输出 JSON 对象：\n{\"location\": \"北京\", \"weather\": {\"date\": \"2025-04-07\", \"current\": {\"temperature\": \"18°C\", \"condition\": \"多云\", \"humidity\": \"45%\", \"wind\": \"南风 3级\"}, \"forecast\": [{\"date\": \"2025-04-07\", \"high\": \"22°C\", \"low\": \"10°C\", \"condition\": \"多云转晴\"}, {\"date\": \"2025-04-08\", \"high\": \"24°C\", \"low\": \"12°C\", \"condition\": \"晴\"}, {\"date\": \"2025-04-09\", \"high\": \"20°C\", \"low\": \"11°C\", \"condition\": \"阴转小雨\"}]}}"
                     }
                 ],
-                "max_tokens": 160,
+                "max_tokens": 512,
                 "temperature": 0.0,
                 "top_p": 1.0,
                 "top_k": 1,
@@ -1262,7 +1262,7 @@
                         "index": 0,
                         "message": {
                             "role": "assistant",
-                            "content": "{\"city\": \"北京\", \"weather\": \"晴\", \"temperature\": \"15°C\", \"humidity\": \"30%\", \"wind\": \"北风3级\", \"update_time\": \"2025-04-07 10:00\"}",
+                            "content": "{\n  \"location\": \"北京\",\n  \"weather\": {\n    \"date\": \"2025-04-07\",\n    \"current\": {\n      \"temperature\": \"18°C\",\n      \"condition\": \"多云\",\n      \"humidity\": \"45%\",\n      \"wind\": \"南风 3级\"\n    },\n    \"forecast\": [\n      {\n        \"date\": \"2025-04-07\",\n        \"high\": \"22°C\",\n        \"low\": \"10°C\",\n        \"condition\": \"多云转晴\"\n      },\n      {\n        \"date\": \"2025-04-08\",\n        \"high\": \"24°C\",\n        \"low\": \"12°C\",\n        \"condition\": \"晴\"\n      },\n      {\n        \"date\": \"2025-04-09\",\n        \"high\": \"20°C\",\n        \"low\": \"11°C\",\n        \"condition\": \"阴转小雨\"\n      }\n    ]\n  }\n}",
                             "name": null,
                             "reasoning_content": null,
                             "function_call": null,
@@ -1276,8 +1276,8 @@
                 ],
                 "usage": {
                     "prompt_tokens": 21,
-                    "total_tokens": 75,
-                    "completion_tokens": 54
+                    "total_tokens": 228,
+                    "completion_tokens": 207
                 }
             },
             "compare_config": {
@@ -1286,20 +1286,40 @@
                 "json_content": true,
                 "json_object": true,
                 "expected_json": {
-                    "city": "北京",
-                    "weather": "晴",
-                    "temperature": "15°C",
-                    "humidity": "30%",
-                    "wind": "北风3级",
-                    "update_time": "2025-04-07 10:00"
+                    "location": "北京",
+                    "weather": {
+                        "date": "2025-04-07",
+                        "current": {
+                            "temperature": "18°C",
+                            "condition": "多云",
+                            "humidity": "45%",
+                            "wind": "南风 3级"
+                        },
+                        "forecast": [
+                            {
+                                "date": "2025-04-07",
+                                "high": "22°C",
+                                "low": "10°C",
+                                "condition": "多云转晴"
+                            },
+                            {
+                                "date": "2025-04-08",
+                                "high": "24°C",
+                                "low": "12°C",
+                                "condition": "晴"
+                            },
+                            {
+                                "date": "2025-04-09",
+                                "high": "20°C",
+                                "low": "11°C",
+                                "condition": "阴转小雨"
+                            }
+                        ]
+                    }
                 },
                 "required_json_keys": [
-                    "city",
-                    "humidity",
-                    "temperature",
-                    "update_time",
-                    "weather",
-                    "wind"
+                    "location",
+                    "weather"
                 ]
             }
         },
@@ -1313,7 +1333,7 @@
                     },
                     {
                         "role": "user",
-                        "content": "查询下北京的天气，查询结果以json格式返回"
+                        "content": "请将以下固定天气记录作为唯一数据来源，以 JSON 格式返回。日期和天气不代表实时信息，不需要查询或推测。最终回答必须保留记录的全部键名、层级和字符串值；所有键都在最外层，不改写值，不增加字段或说明，仅输出 JSON 对象：\n{\"location\": \"北京\", \"temperature\": \"22°C\", \"condition\": \"晴\", \"humidity\": \"45%\", \"wind\": \"北风 3级\", \"update_time\": \"2025-04-07 14:00\"}"
                     }
                 ],
                 "max_tokens": 160,
@@ -1344,7 +1364,7 @@
                         "index": 0,
                         "delta": {
                             "role": "assistant",
-                            "content": "{\n  \"location\": \"北京\",\n  \"weather\": {\n    \"temperature\": \"22°C\",\n    \"condition\": \"晴\",\n    \"humidity\": \"45%\",\n    \"wind\": \"北风 3级\"\n  },\n  \"note\": \"此为模拟数据，实际天气请查询官方气象服务\"\n}",
+                            "content": "{\n  \"location\": \"北京\",\n  \"temperature\": \"22°C\",\n  \"condition\": \"晴\",\n  \"humidity\": \"45%\",\n  \"wind\": \"北风 3级\",\n  \"update_time\": \"2025-04-07 14:00\"\n}",
                             "reasoning_content": "我们被要求查询北京的天气，并以JSON格式",
                             "function_call": null,
                             "tool_calls": null
@@ -1355,8 +1375,8 @@
                 ],
                 "usage": {
                     "prompt_tokens": 21,
-                    "total_tokens": 105,
-                    "completion_tokens": 84
+                    "total_tokens": 98,
+                    "completion_tokens": 77
                 }
             },
             "compare_config": {
@@ -1366,18 +1386,19 @@
                 "json_object": true,
                 "expected_json": {
                     "location": "北京",
-                    "weather": {
-                        "temperature": "22°C",
-                        "condition": "晴",
-                        "humidity": "45%",
-                        "wind": "北风 3级"
-                    },
-                    "note": "此为模拟数据，实际天气请查询官方气象服务"
+                    "temperature": "22°C",
+                    "condition": "晴",
+                    "humidity": "45%",
+                    "wind": "北风 3级",
+                    "update_time": "2025-04-07 14:00"
                 },
                 "required_json_keys": [
                     "location",
-                    "weather",
-                    "note"
+                    "temperature",
+                    "condition",
+                    "humidity",
+                    "wind",
+                    "update_time"
                 ]
             }
         },
@@ -1391,7 +1412,7 @@
                     },
                     {
                         "role": "user",
-                        "content": "查询下北京的天气，json格式返回"
+                        "content": "请将以下固定天气记录作为唯一数据来源，以 JSON 格式返回。日期和天气不代表实时信息，不需要查询或推测。最终回答必须保留记录的全部键名、层级和字符串值，不改写建议或天气描述，不增加字段或说明，仅输出 JSON 对象：\n{\"advice\": \"北京今天（2025年4月8日）天气晴朗，气温在10°C到24°C之间，风力较小，适合户外活动。\", \"city\": \"北京\", \"date\": \"2025-04-08\", \"weather\": \"晴\"}"
                     }
                 ],
                 "max_tokens": 160,
@@ -1452,7 +1473,7 @@
                         "index": 0,
                         "message": {
                             "role": "assistant",
-                            "content": "{\"advice\":\"天气较冷，建议穿着厚外套、毛衣等保暖衣物。\",\"city\":\"北京\",\"date\":\"2025-04-17\",\"weather\":\"多云转晴，伴有轻度霾，气温10℃~22℃，南风2-3级\"}",
+                            "content": "{\"advice\": \"北京今天（2025年4月8日）天气晴朗，气温在10°C到24°C之间，风力较小，适合户外活动。\", \"city\": \"北京\", \"date\": \"2025-04-08\", \"weather\": \"晴\"}",
                             "name": null,
                             "reasoning_content": null,
                             "function_call": null,
@@ -1466,8 +1487,8 @@
                 ],
                 "usage": {
                     "prompt_tokens": 18,
-                    "total_tokens": 75,
-                    "completion_tokens": 57
+                    "total_tokens": 81,
+                    "completion_tokens": 63
                 }
             },
             "compare_config": {
@@ -1482,10 +1503,10 @@
                     "weather"
                 ],
                 "expected_json": {
-                    "advice": "天气较冷，建议穿着厚外套、毛衣等保暖衣物。",
+                    "advice": "北京今天（2025年4月8日）天气晴朗，气温在10°C到24°C之间，风力较小，适合户外活动。",
                     "city": "北京",
-                    "date": "2025-04-17",
-                    "weather": "多云转晴，伴有轻度霾，气温10℃~22℃，南风2-3级"
+                    "date": "2025-04-08",
+                    "weather": "晴"
                 }
             }
         },
@@ -1499,7 +1520,7 @@
                     },
                     {
                         "role": "user",
-                        "content": "查询下北京的天气，查询结果以json格式返回"
+                        "content": "请将以下固定天气记录作为唯一数据来源，以 JSON 格式返回。日期和天气不代表实时信息，不需要查询或推测。最终回答必须保留记录的全部键名、层级和字符串值，不改写建议或天气描述，不增加字段或说明，仅输出 JSON 对象：\n{\"advice\": \"北京今天天气晴朗，气温适中，适合外出活动。\", \"city\": \"北京\", \"date\": \"2025-04-05\", \"weather\": \"晴转多云，微风，气温12°C~24°C，空气质量良（AQI 85）\"}"
                     }
                 ],
                 "max_tokens": 160,
@@ -1560,7 +1581,7 @@
                         "index": 0,
                         "message": {
                             "role": "assistant",
-                            "content": "{\"advice\":\"天气寒冷，建议穿着羽绒服、毛衣、保暖裤等厚实衣物，并佩戴帽子、围巾和手套。\",\"city\":\"北京\",\"date\":\"2025-01-17\",\"weather\":\"晴转多云，伴有轻度雾霾，气温-4℃至5℃，北风2-3级，相对湿度30%-50%，空气质量指数为185（中度污染）。\"}",
+                            "content": "{\n  \"advice\": \"北京今天天气晴朗，气温适中，适合外出活动。\",\n  \"city\": \"北京\",\n  \"date\": \"2025-04-05\",\n  \"weather\": \"晴转多云，微风，气温12°C~24°C，空气质量良（AQI 85）\"\n}",
                             "name": null,
                             "reasoning_content": null,
                             "function_call": null,
@@ -1574,8 +1595,8 @@
                 ],
                 "usage": {
                     "prompt_tokens": 21,
-                    "total_tokens": 107,
-                    "completion_tokens": 86
+                    "total_tokens": 92,
+                    "completion_tokens": 71
                 }
             },
             "compare_config": {
@@ -1590,10 +1611,10 @@
                     "weather"
                 ],
                 "expected_json": {
-                    "advice": "天气寒冷，建议穿着羽绒服、毛衣、保暖裤等厚实衣物，并佩戴帽子、围巾和手套。",
+                    "advice": "北京今天天气晴朗，气温适中，适合外出活动。",
                     "city": "北京",
-                    "date": "2025-01-17",
-                    "weather": "晴转多云，伴有轻度雾霾，气温-4℃至5℃，北风2-3级，相对湿度30%-50%，空气质量指数为185（中度污染）。"
+                    "date": "2025-04-05",
+                    "weather": "晴转多云，微风，气温12°C~24°C，空气质量良（AQI 85）"
                 }
             }
         },

@@ -11,7 +11,7 @@ from unittest import TestCase, main
 from unittest.mock import patch
 
 from rtp_llm.config.test.kv_cache_event_test_values import KV_CACHE_EVENT_ENV_CASES
-from rtp_llm.ops import HWKernelConfig, RoleType, TaskType
+from rtp_llm.ops import HWKernelConfig, RoleType, RuntimeConfig, TaskType
 from rtp_llm.utils import backend_registry
 from rtp_llm.utils.backend_registry import register_backend_hook
 
@@ -36,6 +36,85 @@ class CustomAllReduceArgumentsTest(TestCase):
             configs = server_args.setup_args([])
 
         self.assertIs(configs.ft_disable_custom_ar_override, True)
+
+
+class LinearReplayArgumentsTest(TestCase):
+    def test_default_is_disabled(self):
+        from rtp_llm.server.server_args import server_args
+
+        self.assertFalse(RuntimeConfig().enable_linear_replay)
+        with patch.dict(os.environ, {}, clear=True):
+            configs = server_args.setup_args([])
+        self.assertFalse(configs.runtime_config.enable_linear_replay)
+
+    def test_environment_values(self):
+        from rtp_llm.server.server_args import server_args
+
+        for value, expected in (("1", True), ("0", False)):
+            for args in (None, []):
+                with self.subTest(value=value, args=args):
+                    with patch.dict(
+                        os.environ,
+                        {"ENABLE_LINEAR_REPLAY": value},
+                        clear=True,
+                    ), patch.object(sys, "argv", ["prog"]):
+                        configs = server_args.setup_args(args)
+                    self.assertIs(configs.runtime_config.enable_linear_replay, expected)
+
+    def test_cli_overrides_environment(self):
+        from rtp_llm.server.server_args import server_args
+
+        for env_value, cli_value, expected in (
+            ("1", "0", False),
+            ("0", "1", True),
+        ):
+            with self.subTest(env_value=env_value, cli_value=cli_value):
+                with patch.dict(
+                    os.environ,
+                    {"ENABLE_LINEAR_REPLAY": env_value},
+                    clear=True,
+                ):
+                    configs = server_args.setup_args(
+                        ["--enable_linear_replay", cli_value]
+                    )
+                self.assertIs(configs.runtime_config.enable_linear_replay, expected)
+
+    def test_runtime_config_pickle_round_trip(self):
+        for enabled in (False, True):
+            with self.subTest(enabled=enabled):
+                config = RuntimeConfig()
+                config.enable_linear_replay = enabled
+                config.max_generate_batch_size = 17
+                config.model_warm_up = False
+                config.output_dispatcher_worker_count = 3
+
+                restored = pickle.loads(pickle.dumps(config))
+                self.assertIs(restored.enable_linear_replay, enabled)
+                self.assertEqual(restored.max_generate_batch_size, 17)
+                self.assertFalse(restored.model_warm_up)
+                self.assertEqual(restored.output_dispatcher_worker_count, 3)
+
+    def test_legacy_runtime_config_pickle_disables_replay(self):
+        config = RuntimeConfig()
+        config.enable_linear_replay = True
+        config.max_generate_batch_size = 17
+        config.model_name = "linear-replay-test"
+        config.model_warm_up = False
+        config.output_dispatcher_worker_count = 3
+        state = config.__getstate__()
+        self.assertEqual(len(state), 15)
+
+        for size in (12, 13, 14):
+            with self.subTest(size=size):
+                restored = RuntimeConfig.__new__(RuntimeConfig)
+                restored.__setstate__(state[:size])
+                self.assertFalse(restored.enable_linear_replay)
+                self.assertEqual(restored.max_generate_batch_size, 17)
+                self.assertEqual(restored.model_name, "linear-replay-test")
+                self.assertIs(restored.model_warm_up, size < 13)
+                self.assertEqual(
+                    restored.output_dispatcher_worker_count, 3 if size >= 14 else 0
+                )
 
 
 class CacheConfigArgumentsTest(TestCase):

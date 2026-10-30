@@ -316,20 +316,19 @@ std::shared_ptr<GenerateInput> QueryConverter::transQuery(const GenerateInputPB*
             for (const auto& crop_position : mm_preprocess_config->crop_positions()) {
                 crop_positions.push_back(crop_position);
             }
-            mm_inputs.emplace_back(
-                mm_input->multimodal_url(),
-                torch::empty(1),
-                mm_input->multimodal_type(),
-                mm_preprocess_config->width(),
-                mm_preprocess_config->height(),
-                mm_preprocess_config->min_pixels(),
-                mm_preprocess_config->max_pixels(),
-                mm_preprocess_config->fps(),
-                mm_preprocess_config->min_frames(),
-                mm_preprocess_config->max_frames(),
-                crop_positions,
-                mm_preprocess_config->mm_timeout_ms(),
-                mm_preprocess_config->max_long_side_pixel() > 0 ? mm_preprocess_config->max_long_side_pixel() : -1);
+            mm_inputs.emplace_back(mm_input->multimodal_url(),
+                                   torch::empty({0}),
+                                   mm_input->multimodal_type(),
+                                   mm_preprocess_config->width(),
+                                   mm_preprocess_config->height(),
+                                   mm_preprocess_config->min_pixels(),
+                                   mm_preprocess_config->max_pixels(),
+                                   mm_preprocess_config->fps(),
+                                   mm_preprocess_config->min_frames(),
+                                   mm_preprocess_config->max_frames(),
+                                   crop_positions,
+                                   mm_preprocess_config->mm_timeout_ms(),
+                                   mm_preprocess_config->max_long_side_pixel() > 0 ? mm_preprocess_config->max_long_side_pixel() : -1);
         }
         generate_input->multimodal_inputs = std::move(mm_inputs);
     }

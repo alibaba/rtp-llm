@@ -1,9 +1,11 @@
 import copy
 import gc
+import math
 import os
 import unittest
 import weakref
 from typing import Optional
+from unittest import mock
 
 import torch
 
@@ -16,6 +18,7 @@ from rtp_llm.models_py.modules.factory.attention.attn_factory import (
 )
 from rtp_llm.ops.compute_ops import (
     BertEmbeddingInputs,
+    LinearReplayInputs,
     PyAttentionInputs,
     PyModelInputs,
     PyModelOutputs,
@@ -69,6 +72,24 @@ class TaggedSequenceLengthModel:
             )
         ).to(inputs.input_hiddens.dtype)
         return PyModelOutputs(inputs.input_hiddens + signature)
+
+
+class LinearReplayMetadataModel:
+    """Expose all live Verify rows and any stale graph bucket tail."""
+
+    def prepare_fmha_impl(self, inputs: PyModelInputs, is_cuda_graph: bool = False):
+        return None
+
+    def forward(self, inputs: PyModelInputs, fmha_impl=None) -> PyModelOutputs:
+        replay = inputs.attention_inputs["full"].linear_replay
+        valid = replay.slot_ids >= 0
+        signature = (
+            torch.where(valid, replay.slot_ids, 0).sum()
+            + 10 * torch.where(valid, replay.active_block_ids[1], 0).sum()
+            + 100 * torch.where(valid, replay.verify_epochs, 0).sum()
+            + torch.where(valid, replay.prev_accept_lengths, 0).sum()
+        )
+        return PyModelOutputs(inputs.input_hiddens + signature.to(torch.bfloat16))
 
 
 class TaggedDecodePaddingModel:
@@ -504,7 +525,371 @@ def _build_target_verify_inputs(
     )
 
 
+class MtpRequestMetadataModel:
+    requires_sequence_parallel_padding = False
+
+    def __init__(self, query_width):
+        self.query_width = query_width
+        self.capture_shapes = set()
+
+    def prepare_fmha_impl(self, inputs, is_cuda_graph=False):
+        return None
+
+    def forward(self, inputs, fmha_impl=None):
+        attention = inputs.attention_inputs["full"]
+        params = attention.prefill_cuda_graph_copy_params
+        if params is None:
+            # The eager dtype probe runs before graph copy parameters exist.
+            return PyModelOutputs(inputs.input_hiddens.to(torch.bfloat16))
+        requests = attention.input_lengths.numel()
+        tokens = inputs.input_ids.numel()
+        assert tokens == requests * self.query_width
+        assert attention.physical_request_count == requests
+        assert attention.physical_token_count == tokens
+        assert inputs.input_hiddens.size(0) == tokens
+        assert inputs.combo_position_ids.numel() == tokens
+        assert params.max_batch_size == requests
+        assert params.max_seq_len == self.query_width
+        for tagged in inputs.attention_inputs.values():
+            assert tagged.kv_cache_kernel_block_id_device.size(0) == requests
+            assert tagged.cu_seqlens_device.numel() == requests + 1
+        self.capture_shapes.add((requests, tokens))
+
+        rows = torch.arange(tokens, dtype=torch.int32, device="cuda")
+        request_ids = rows // self.query_width
+        full = attention.kv_cache_kernel_block_id_device[request_ids, 0]
+        aux = inputs.attention_inputs["aux"].kv_cache_kernel_block_id_device[
+            request_ids, 0
+        ]
+        signature = (
+            full
+            + 16 * aux
+            + attention.input_lengths_device.sum()
+            + params.cuda_graph_prefill_batch_size[0]
+        )
+        valid = rows < attention.cu_seqlens_device[-1]
+        if attention.valid_token_mask is not None:
+            valid = valid & attention.valid_token_mask
+        hidden = (inputs.input_hiddens.float() + signature[:, None].float()) * valid[
+            :, None
+        ]
+        return PyModelOutputs(hidden.to(torch.bfloat16))
+
+
+class RectangularMtpDraftModel:
+    requires_sequence_parallel_padding = True
+
+    def __init__(self, query_width):
+        self.query_width = query_width
+        self.capture_shapes = set()
+        self.prepared_shapes = set()
+
+    def prepare_fmha_impl(self, inputs, is_cuda_graph=False):
+        attention = inputs.attention_inputs["full"]
+        requests = attention.input_lengths.numel()
+        tokens = inputs.input_ids.numel()
+        # Production MLA constructs metadata before actual CUDA capture, while
+        # attention.is_cuda_graph is still false. The C++ profile must already
+        # have the producer's fixed Q layout at that point.
+        assert is_cuda_graph
+        assert tokens == requests * self.query_width
+        self.prepared_shapes.add((requests, tokens, attention.is_cuda_graph))
+        return None
+
+    def forward(self, inputs, fmha_impl=None):
+        attention = inputs.attention_inputs["full"]
+        requests = attention.input_lengths.numel()
+        tokens = inputs.input_ids.numel()
+        assert tokens == requests * self.query_width
+        assert inputs.input_hiddens.size(0) == tokens
+        assert inputs.combo_position_ids.numel() == tokens
+        assert attention.physical_token_count == tokens
+        self.capture_shapes.add((requests, tokens))
+        hidden = inputs.input_hiddens.reshape(tokens, -1, HIDDEN_SIZE).sum(dim=1)
+        if attention.valid_token_mask is not None:
+            hidden = hidden * attention.valid_token_mask[:, None]
+        return PyModelOutputs(hidden)
+
+
 class TestCudaGraphTaggedCache(unittest.TestCase):
+    @mock.patch.dict(
+        os.environ,
+        {"RTP_LLM_STREAM_ASYNC": "0", "RTP_LLM_MTP_ASYNC_DEVICE_STATE": "0"},
+    )
+    def test_mtp_buckets_keep_q_wide_requests_in_every_scheduling_mode(self):
+        max_requests, query = 16, 3
+        for sp, stream_async in ((1, "0"), (4, "0"), (4, "1")):
+            # Fixed Q does not depend on scheduling or a Python model marker.
+            with self.subTest(sp=sp, stream_async=stream_async), mock.patch.dict(
+                os.environ, {"RTP_LLM_STREAM_ASYNC": stream_async}
+            ):
+                model = MtpRequestMetadataModel(query)
+                runner = CudaGraphRunner()
+                runner.init_mtp_draft_prefill(model, max_requests, query, sp, 1)
+                expected_captures = (
+                    {(1, 3), (2, 6), (3, 9), (6, 18)}
+                    if sp == 1
+                    else {(4, 12), (8, 24), (12, 36), (16, 48)}
+                )
+                self.assertTrue(expected_captures <= model.capture_shapes)
+                # Grow and shrink requests, including SP-padded virtual rows.
+                for logical_requests in (2, 4, 2, 3, 7):
+                    logical_tokens = logical_requests * query
+                    alignment = sp // math.gcd(sp, query)
+                    physical_requests = (
+                        (logical_requests + alignment - 1) // alignment * alignment
+                    )
+                    physical_lengths = [query] * physical_requests
+                    inputs = _build_prefill_inputs(
+                        GROUP_TAGS, {"full": 2, "aux": 1}, physical_lengths
+                    )
+                    tokens = sum(physical_lengths)
+                    requests = len(physical_lengths)
+                    inputs.combo_position_ids = torch.arange(
+                        tokens, dtype=torch.int32, device="cuda"
+                    )
+                    inputs.input_hiddens = (
+                        torch.arange(
+                            tokens * HIDDEN_SIZE, device="cuda", dtype=torch.float32
+                        )
+                        .reshape(tokens, HIDDEN_SIZE)
+                        .to(torch.bfloat16)
+                    )
+                    tagged = inputs.attention_inputs
+                    for tag, attention in tagged.items():
+                        attention.is_mtp_draft_update = True
+                        attention.logical_request_count = logical_requests
+                        attention.physical_request_count = requests
+                        attention.logical_token_count = logical_tokens
+                        attention.physical_token_count = tokens
+                        attention.valid_token_mask = (
+                            torch.arange(tokens, device="cuda") < logical_tokens
+                        )
+                        table = attention.kv_cache_kernel_block_id
+                        table[:, 0] = torch.arange(requests) + (
+                            2 if tag == "full" else 1
+                        )
+                        attention.kv_cache_kernel_block_id_device = table.cuda()
+                    inputs.attention_inputs = tagged
+                    self.assertTrue(runner.canRun(inputs))
+                    bucket = min(
+                        captured_tokens
+                        for _, captured_tokens in model.capture_shapes
+                        if captured_tokens >= tokens
+                    )
+                    self.assertEqual(runner.getCurrentRealGraphSize(), bucket)
+                    self.assertTrue(runner.prepare(inputs))
+                    output = runner.forward(inputs).hidden_states
+                    request_ids = torch.repeat_interleave(
+                        torch.arange(requests, device="cuda"),
+                        torch.tensor(physical_lengths, device="cuda"),
+                    )
+                    signature = (
+                        (request_ids + 2) + 16 * (request_ids + 1) + tokens + requests
+                    )
+                    expected = inputs.input_hiddens.float() + signature[:, None].float()
+                    expected[logical_tokens:] = 0
+                    torch.testing.assert_close(
+                        output, expected.to(torch.bfloat16), rtol=0, atol=0
+                    )
+                oversized = _build_prefill_inputs(
+                    GROUP_TAGS, {"full": 2, "aux": 1}, [query] * (max_requests + 1)
+                )
+                self.assertFalse(runner.canRun(oversized))
+
+    def test_mtp_buckets_match_fixed_q_with_and_without_device_state(self):
+        cases = (
+            (
+                16,
+                3,
+                1,
+                1,
+                {},
+                {(1, 3), (2, 6), (4, 12), (8, 24), (16, 48)},
+                ((1, 1, 3), (8, 8, 24), (2, 2, 6)),
+            ),
+            (
+                16,
+                3,
+                4,
+                1,
+                {},
+                {(4, 12), (8, 24), (12, 36), (16, 48)},
+                ((7, 8, 24), (1, 4, 12), (11, 12, 36)),
+            ),
+            (
+                160,
+                4,
+                16,
+                2,
+                {},
+                {(12, 48), (16, 64), (28, 112), (32, 128), (64, 256)},
+                ((14, 16, 64), (28, 28, 112), (12, 12, 48)),
+            ),
+            (
+                160,
+                3,
+                16,
+                2,
+                {},
+                {(16, 48), (32, 96), (48, 144)},
+                ((14, 16, 48), (28, 32, 96), (11, 16, 48)),
+            ),
+            (
+                64,
+                4,
+                4,
+                1,
+                {"RTP_LLM_STREAM_ASYNC": "1"},
+                {(32, 128), (63, 252), (64, 256)},
+                ((63, 63, 252), (32, 32, 128), (64, 64, 256), (1, 1, 4)),
+            ),
+            (
+                160,
+                4,
+                16,
+                1,
+                {"RTP_LLM_MTP_ASYNC_DEVICE_STATE": "1"},
+                {(32, 128), (156, 624), (160, 640)},
+                ((155, 156, 624), (32, 32, 128), (156, 156, 624), (1, 4, 16)),
+            ),
+            (
+                64,
+                4,
+                1,
+                1,
+                {"RTP_LLM_STREAM_ASYNC": "1"},
+                {(32, 128), (63, 252), (64, 256)},
+                ((63, 63, 252), (32, 32, 128), (1, 1, 4)),
+            ),
+        )
+        for max_requests, query, sp, hc_mult, env, captures, requests in cases:
+            with self.subTest(
+                max_requests=max_requests, query=query, sp=sp, hc_mult=hc_mult, env=env
+            ), mock.patch.dict(
+                os.environ,
+                {
+                    "RTP_LLM_STREAM_ASYNC": "0",
+                    "RTP_LLM_MTP_ASYNC_DEVICE_STATE": "0",
+                    **env,
+                },
+            ):
+                model = RectangularMtpDraftModel(query)
+                runner = CudaGraphRunner()
+                runner.init_mtp_draft_prefill(model, max_requests, query, sp, hc_mult)
+                self.assertTrue(captures <= model.capture_shapes)
+                self.assertTrue(
+                    {(batch, tokens, False) for batch, tokens in captures}
+                    <= model.prepared_shapes
+                )
+                for logical, physical, bucket in requests:
+                    inputs = _build_target_verify_inputs(
+                        GROUP_TAGS,
+                        {"full": 2, "aux": 1},
+                        batch_size=physical,
+                        query_len=query,
+                        prefix_len=1,
+                    )
+                    tokens = physical * query
+                    inputs.input_hiddens = (
+                        torch.arange(
+                            tokens * HIDDEN_SIZE * hc_mult,
+                            dtype=torch.float32,
+                            device="cuda",
+                        )
+                        .reshape(tokens, HIDDEN_SIZE * hc_mult)
+                        .to(torch.bfloat16)
+                    )
+                    inputs.combo_position_ids = torch.arange(
+                        tokens, dtype=torch.int32, device="cuda"
+                    )
+                    tagged_attention = inputs.attention_inputs
+                    for attention in tagged_attention.values():
+                        attention.is_target_verify = False
+                        attention.is_mtp_draft_update = True
+                        attention.logical_request_count = logical
+                        attention.physical_request_count = physical
+                        attention.logical_token_count = logical * query
+                        attention.physical_token_count = tokens
+                        attention.valid_token_mask = (
+                            torch.arange(tokens, device="cuda") < logical * query
+                        )
+                        if logical < 13:
+                            storage = torch.zeros(
+                                tokens * 2, dtype=torch.bool, device="cuda"
+                            )
+                            storage[::2].copy_(attention.valid_token_mask)
+                            attention.valid_token_mask = storage[::2]
+                    inputs.attention_inputs = tagged_attention
+                    self.assertTrue(runner.canRun(inputs))
+                    self.assertEqual(runner.getCurrentRealGraphSize(), bucket)
+                    self.assertTrue(runner.prepare(inputs))
+                    output = runner.forward(inputs).hidden_states
+                    expected = (
+                        inputs.input_hiddens.reshape(tokens, -1, HIDDEN_SIZE).sum(dim=1)
+                        * inputs.attention_inputs["full"].valid_token_mask[:, None]
+                    )
+                    torch.testing.assert_close(output, expected, rtol=0, atol=0)
+
+    def test_target_linear_replay_metadata_tracks_growing_and_shrinking_batches(self):
+        runner = CudaGraphRunner()
+        runner.init_decode(
+            LinearReplayMetadataModel(),
+            HIDDEN_SIZE,
+            64,
+            KERNEL_BLOCK_TABLE_WIDTH,
+            [4],
+            GROUP_TAGS,
+            True,
+            2,
+            0,
+            2,
+        )
+        for batch, first_block, epoch in ((4, 10, 1), (2, 20, 2), (3, 30, 3)):
+            with self.subTest(batch=batch):
+                inputs = _build_target_verify_inputs(
+                    GROUP_TAGS,
+                    {"full": 2, "aux": 1},
+                    batch_size=batch,
+                    query_len=2,
+                    prefix_len=1,
+                )
+                replay = LinearReplayInputs()
+                device = "cuda"
+                replay.slot_ids = torch.arange(1, batch + 1, dtype=torch.int32, device=device)
+                replay.slot_generations = torch.ones(batch, dtype=torch.int64, device=device)
+                replay.active_block_ids = torch.zeros((2, batch), dtype=torch.int32, device=device)
+                replay.active_block_ids[1] = torch.arange(
+                    first_block, first_block + batch, dtype=torch.int32, device=device
+                )
+                replay.prev_accept_lengths = torch.ones(batch, dtype=torch.int32, device=device)
+                replay.history_valid_lengths = torch.zeros(batch, dtype=torch.int32, device=device)
+                replay.history_epochs = torch.zeros(batch, dtype=torch.int64, device=device)
+                replay.verify_epochs = torch.full((batch,), epoch, dtype=torch.int64, device=device)
+                replay.init_kinds = torch.zeros(batch, dtype=torch.int32, device=device)
+                replay.state_read_block_ids = torch.zeros((2, batch), dtype=torch.int32, device=device)
+                replay.anchor_processed_lengths = torch.zeros(batch, dtype=torch.int32, device=device)
+                tagged_inputs = inputs.attention_inputs
+                for tag_inputs in tagged_inputs.values():
+                    tag_inputs.linear_replay = replay
+                inputs.attention_inputs = tagged_inputs
+
+                self.assertTrue(runner.canRun(inputs))
+                result = runner.forward(inputs)
+                expected = (
+                    batch * (batch + 1) // 2
+                    + 10 * (batch * first_block + batch * (batch - 1) // 2)
+                    + 100 * batch * epoch
+                    + batch
+                )
+                torch.cuda.synchronize()
+                torch.testing.assert_close(
+                    result.hidden_states,
+                    torch.full_like(result.hidden_states, expected),
+                    rtol=0,
+                    atol=0,
+                )
+
     def test_draft_placeholder_map_preserves_eager_graph_contract(self):
         tags = ["unused", "draft", "other"]
         model = DraftBlockTableModel()
@@ -1502,7 +1887,10 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
         # The shared staging row is wider than the model-local capture row.
         # Upstream replay semantics permit that and copy only the intersection.
         inputs = _build_decode_inputs(
-            GROUP_TAGS, {"full": 5, "aux": 3}, batch_size=3, block_count=KERNEL_BLOCK_TABLE_WIDTH + 2
+            GROUP_TAGS,
+            {"full": 5, "aux": 3},
+            batch_size=3,
+            block_count=KERNEL_BLOCK_TABLE_WIDTH + 2,
         )
         self.assertTrue(runner.canRun(inputs))
         self.assertTrue(runner.canPrepare(inputs))
@@ -1530,7 +1918,12 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
                 with self.subTest(tags=tags, reserve=reserve, fake_count=fake_count):
                     spans = {"full": 8, "aux": 32}
                     real_width, fake_width = CudaGraphRunner.topologyWidths(
-                        [spans[tag] for tag in tags], [8, 8], [1, 1], 64, reserve, fake_count
+                        [spans[tag] for tag in tags],
+                        [8, 8],
+                        [1, 1],
+                        64,
+                        reserve,
+                        fake_count,
                     )
                     self.assertEqual(max(real_width, fake_width), width)
                     runner = CudaGraphRunner()
