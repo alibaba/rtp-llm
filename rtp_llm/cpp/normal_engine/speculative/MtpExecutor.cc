@@ -42,6 +42,19 @@
 
 namespace rtp_llm {
 
+namespace {
+// Phase-trace switch for the DiffusionGemma bs>4 decode hang diagnosis (E1).
+// Off by default: one INFO line per decode-step phase only when
+// RTP_LLM_DGM_STEP_TRACE=1, so MTP serving log volume is unchanged otherwise.
+bool dgmStepTraceEnabled() {
+    static const bool enabled = [] {
+        const char* env = std::getenv("RTP_LLM_DGM_STEP_TRACE");
+        return env != nullptr && env[0] == '1';
+    }();
+    return enabled;
+}
+}  // namespace
+
 bool MtpExecutor::dsparkPrefillCPRoleIsValid(const PrefillCPConfig& prefill_cp_config, RoleType role_type) {
     return !prefill_cp_config.is_enabled() || role_type == RoleType::PREFILL;
 }
@@ -720,6 +733,7 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
     vocab_size_                 = params.model_config_.vocab_size;
     draft_vocab_size_           = propose_params->getEngineInitParams().model_config_.vocab_size;
     is_dspark_                  = propose_params->sp_type == SP_TYPE_DSPARK;
+    is_diffusion_canvas_        = is_dspark_ && params.sp_config.sp_diffusion_canvas;
     dspark_prefill_commit_only_ = is_dspark_ && role_type_ == RoleType::PREFILL;
 
     RTP_LLM_LOG_INFO("[speculative decoding] vocab_size_ = %d, draft_vocab_size_ = %d", vocab_size_, draft_vocab_size_);
@@ -1000,7 +1014,7 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
     } else if (dspark_prefill_commit_only_) {
         RTP_LLM_LOG_INFO("[speculative decoding] DSpARK PREFILL commit-only worker: skipping proposal/Markov weights");
     }
-    speculative_sampler_.reset(new speculative::SpeculativeSampler(d2t_map_, propose_step_));
+    speculative_sampler_.reset(new speculative::SpeculativeSampler(d2t_map_, propose_step_, is_diffusion_canvas_));
     if (!is_dspark_) {
         fast_topk_sampler_.reset(new speculative::FastTopKSampler(d2t_map_));
     }
@@ -1460,6 +1474,12 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
 absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams,
                                      MtpMetricsCollector&                metrics_collector) {
     RTP_LLM_PROFILE_SCOPE_DYNAMIC("executor.mtp.decode_step(decode_stream_size=%zu)", streams.size());
+    if (dgmStepTraceEnabled()) {
+        RTP_LLM_LOG_INFO("[dgm-step-trace] decode_step enter: streams=%zu dspark=%d propose_step=%zu",
+                         streams.size(),
+                         int(is_dspark_),
+                         propose_step_);
+    }
 
     RtpLLMExecutorMetricsCollector& executor_collector = metrics_collector.executor_collector;
 
@@ -1566,7 +1586,13 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         // synchronized proposal position bases to target-verify width locally.
         releaseAllModelBuffers();
         launchTargetVerifyPrepareAsync(proposal_input, batch_size);
+        if (dgmStepTraceEnabled()) {
+            RTP_LLM_LOG_INFO("[dgm-step-trace] propose_forward enter: bs=%zu", batch_size);
+        }
         runDSparkProposal(proposal_input, stream_groups, dspark_round_state, draft_sampler_output, model_forward_us);
+        if (dgmStepTraceEnabled()) {
+            RTP_LLM_LOG_INFO("[dgm-step-trace] propose_forward exit: bs=%zu", batch_size);
+        }
 
         {
             RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(prepare_dspark_target_and_tp_sync)");
@@ -1604,10 +1630,16 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
 
         releaseAllModelBuffers();
         launchTargetVerifyPrepareAsync(model_input, batch_size);
+        if (dgmStepTraceEnabled()) {
+            RTP_LLM_LOG_INFO("[dgm-step-trace] propose_forward enter: bs=%zu", batch_size);
+        }
         if (propose_step_ > 1) {
             RTP_LLM_LOG_DEBUG("[MTP decode] draftModelDecode start");
             draftModelDecode(model_input, stream_groups, draft_probs_list, draft_token_ids_t, model_forward_us);
             RTP_LLM_LOG_DEBUG("[MTP decode] draftModelDecode end");
+        }
+        if (dgmStepTraceEnabled()) {
+            RTP_LLM_LOG_INFO("[dgm-step-trace] propose_forward exit: bs=%zu", batch_size);
         }
     }
 
@@ -1672,9 +1704,15 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
 
     {
         int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
-        model_output          = runTargetVerifyForward(model_input, stream_groups);
+        if (dgmStepTraceEnabled()) {
+            RTP_LLM_LOG_INFO("[dgm-step-trace] verify_forward enter: bs=%zu", batch_size);
+        }
+        model_output = runTargetVerifyForward(model_input, stream_groups);
         maybeOverrideLastHiddenWithMtpBuffer(model_output, *model_, model_input.combo_tokens.numel());
         model_forward_us += autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
+        if (dgmStepTraceEnabled()) {
+            RTP_LLM_LOG_INFO("[dgm-step-trace] verify_forward exit: bs=%zu", batch_size);
+        }
     }
 
     // trick: update draft sampler output after spec decode to avoid kernel launch overhead
@@ -1815,12 +1853,18 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
 
     {
         int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
+        if (dgmStepTraceEnabled()) {
+            RTP_LLM_LOG_INFO("[dgm-step-trace] commit enter: bs=%zu", batch_size);
+        }
         // DSpARK tail = commit only: dense verify rows into the draft
         // feature KV (incremental-prefill shape; output unused). The next
         // round's proposal is produced at the next round head, from this
         // freshly committed ring.
         draft_prefill_model_output = runDraftPrefillForward(model_input);
         model_forward_us += autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
+        if (dgmStepTraceEnabled()) {
+            RTP_LLM_LOG_INFO("[dgm-step-trace] commit exit: bs=%zu", batch_size);
+        }
     }
 
     if (!isTpRank0() || warm_up_ || streams.size() == 0 || model_input.is_fake_stream) {
@@ -1855,6 +1899,9 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
             stream_groups, accept_len_ready_event, speculative_sampler_output, metrics_collector, model_forward_us);
     }
 
+    if (dgmStepTraceEnabled()) {
+        RTP_LLM_LOG_INFO("[dgm-step-trace] dispatch enter: streams=%d", stream_groups.size());
+    }
     auto dispatch_result = dispatchDecodeOutput(stream_groups,
                                                 streams,
                                                 speculative_sampler_output,
@@ -1865,6 +1912,11 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
                                                 std::move(draft_prefill_sampler_output),
                                                 std::move(rejection_event),
                                                 std::move(draft_event));
+    if (dgmStepTraceEnabled()) {
+        RTP_LLM_LOG_INFO("[dgm-step-trace] dispatch exit: ok=%d streams=%d",
+                         int(dispatch_result.ok()),
+                         stream_groups.size());
+    }
     if (dispatch_result.ok() && engram_anchor_windows.defined()) {
         auto next_history = MtpBatchStreamProcessor::advanceEngramTokenWindows(
             engram_anchor_windows, speculative_sampler_output.accept_tokens, speculative_sampler_output.accept_len);
@@ -1872,6 +1924,9 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         for (const auto& stream : stream_groups.allStreams()) {
             stream->setEngramTokenWindowGpu(next_history.narrow(0, row++, 1));
         }
+    }
+    if (dgmStepTraceEnabled()) {
+        RTP_LLM_LOG_INFO("[dgm-step-trace] decode_step exit");
     }
     return dispatch_result;
 }
@@ -2301,6 +2356,21 @@ void MtpExecutor::runDSparkProposal(GptModelInputs&                             
     auto    propose_output = runDSparkProposeForward(proposal_input);
     model_forward_us += autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
 
+    if (is_diffusion_canvas_) {
+        // The python proposer already ran its entropy-bounded sampler and
+        // returned the final canvas tokens; skip Markov sampling entirely.
+        RTP_LLM_CHECK_WITH_INFO(propose_output.diffusion_tokens.defined()
+                                    && propose_output.diffusion_tokens.dim() == 2
+                                    && propose_output.diffusion_tokens.size(1)
+                                           == static_cast<int64_t>(propose_step_),
+                                "diffusion-canvas proposer must return [B, gamma=%zu] diffusion_tokens",
+                                propose_step_);
+        SamplerOutput output;
+        output.token_ids                = propose_output.diffusion_tokens.to(torch::kInt32).contiguous();
+        output.token_ids_are_point_mass = false;
+        draft_sampler_output            = std::move(output);
+        return;
+    }
     if (isTpRank0()) {
         draft_sampler_output = sampleDSparkDraft(stream_groups, propose_output.logits, round_state.anchors);
     }

@@ -50,6 +50,8 @@ private:
 class SpeculativeSampler {
 public:
     SpeculativeSampler(torch::Tensor d2t_map, size_t propose_step): d2t_map_(d2t_map), propose_step_(propose_step) {}
+    SpeculativeSampler(torch::Tensor d2t_map, size_t propose_step, bool diffusion_canvas):
+        d2t_map_(d2t_map), propose_step_(propose_step), diffusion_canvas_(diffusion_canvas) {}
 
     virtual SpeculativeSamplerOutput forward(const std::list<GenerateStreamPtr>& streams,
                                              SamplerOutput&                      draft_sampler_output,
@@ -76,6 +78,9 @@ private:
 protected:
     torch::Tensor        d2t_map_;
     size_t               propose_step_;
+    // Diffusion-canvas mode: the draft tokens are the final canvas selection;
+    // every proposal is accepted and no target bonus token is appended.
+    bool                 diffusion_canvas_ = false;
     mutable TensorHolder buffer_holder_;
 
     // Reusable buffer for draft_probs vocab-padding when draft/target vocab sizes differ.

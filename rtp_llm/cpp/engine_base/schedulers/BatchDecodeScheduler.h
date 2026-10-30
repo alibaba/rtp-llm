@@ -7,6 +7,7 @@
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/cache/Types.h"
 #include <atomic>
+#include <chrono>
 #include <mutex>
 #include <condition_variable>
 #include <list>
@@ -27,6 +28,12 @@ public:
         kBatchDecode  = 0,
         kBatchPrefill = 1
     };
+    // evaluateWaitingStreams() 的同步 cache-load 忙等上限：合法的同步加载在秒级
+    // 内完成，RETRYABLE KV 申请不会自行转错误态，只能靠这里的 bail-out 走
+    // MALLOC_FAILED 错误流，避免 schedule() 持 lock_ 无限自旋。
+    static constexpr std::chrono::seconds kLoadCacheBusyWaitTimeout{5};
+    // 忙等超过该时长先告警一次，给 hang 判读留下调度器侧证据。
+    static constexpr std::chrono::seconds kLoadCacheBusyWaitSlowLog{1};
     BatchDecodeScheduler(const RuntimeConfig&                   runtime_config,
                          const std::shared_ptr<KVCacheManager>& cache_manager,
                          const kmonitor::MetricsReporterPtr     metrics_reporter,
@@ -192,8 +199,35 @@ public:
         draining_mixed_modes_ = has_other_mode;
         for (auto& stream : selected_streams) {
             stream->reportEvent(StreamEvents::CanRun);
-            // 忙等stream load cache done, 和原有SyncLoadCache逻辑等效
+            // 忙等stream load cache done, 和原有SyncLoadCache逻辑等效。
+            // RETRYABLE 的 KV 申请会让 stream 停留在 WAITING（无错误状态转移），
+            // 无 bail-out 时这里会持 lock_ 无限自旋并卡死整个 engine loop
+            // （enqueue/stop 全被锁住）；超过 5s 转 MALLOC_FAILED 错误流。
+            const auto wait_begin = std::chrono::steady_clock::now();
+            bool      warned_slow = false;
             while (stream->getStatus() != StreamState::FINISHED && stream->moveToNext() != StreamState::RUNNING) {
+                const auto waited = std::chrono::steady_clock::now() - wait_begin;
+                if (waited >= kLoadCacheBusyWaitTimeout) {
+                    RTP_LLM_LOG_ERROR(
+                        "BatchDecodeScheduler busy-wait for stream [%ld] timed out after %llds (status=%d); "
+                        "marking MALLOC_FAILED so the engine loop can keep scheduling",
+                        stream->streamId(),
+                        static_cast<long long>(kLoadCacheBusyWaitTimeout.count()),
+                        static_cast<int>(stream->getStatus()));
+                    stream->reportError(ErrorCode::MALLOC_FAILED,
+                                        "BatchDecodeScheduler cache-load busy-wait timed out after "
+                                            + std::to_string(kLoadCacheBusyWaitTimeout.count())
+                                            + "s (retryable KV malloc did not resolve)");
+                    (void)stream->moveToNext();  // Error 事件优先: -> FINISHED 并释放资源
+                    break;
+                }
+                if (!warned_slow && waited >= kLoadCacheBusyWaitSlowLog) {
+                    warned_slow = true;
+                    RTP_LLM_LOG_WARNING("BatchDecodeScheduler busy-wait for stream [%ld] exceeded %llds (status=%d)",
+                                        stream->streamId(),
+                                        static_cast<long long>(kLoadCacheBusyWaitSlowLog.count()),
+                                        static_cast<int>(stream->getStatus()));
+                }
                 std::this_thread::sleep_for(std::chrono::milliseconds(1));
             }
         }

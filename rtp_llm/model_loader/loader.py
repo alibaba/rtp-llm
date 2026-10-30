@@ -398,6 +398,17 @@ class ModelLoader:
             logging.info(
                 f"fastsafetensors per-expert split enabled for {len(stacked_key_config)} stacked keys"
             )
+        else:
+            # fastsafetensors streams whole shard files; without a shard filter
+            # a layer-count cut (hack_layer_num) still reads the full
+            # checkpoint and discards unmatched tensors at the map lookup.
+            # Skip shard files that hold none of the declared tensors so the
+            # file-level IO scales with the declared weight set. Stacked
+            # per-expert checkpoints keep every shard (their split keys map
+            # to per-expert tensors outside tensor_to_weight_map).
+            self._load_config.database.filter_by_tensor_names(
+                set(tensor_to_weight_map.keys())
+            )
 
         inline_fp8 = self._is_online_ptpc()
         if inline_fp8:

@@ -8,6 +8,7 @@ from .base_multimodal_mixin import (
 from .chatglm4v.chatglm4v_mixin import ChatGlmV4VisionMixin
 from .deepseek_v41.deepseek_v41_mixin import DeepSeekV41Mixin
 from .deepseek_vl2.deepseek_vl2_mixin import DeepSeekVLV2Mixin
+from .diffusion_gemma_mixin import DiffusionGemmaMixin
 from .kimi_k25.kimi_k25_mixin import KimiK25Mixin
 from .llava.llava_mixin import LlavaMixin
 from .qwen2_5_vl.qwen2_5_vl_mixin import Qwen2_5_VLMixin

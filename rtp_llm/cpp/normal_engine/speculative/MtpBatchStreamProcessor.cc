@@ -18,6 +18,18 @@
 
 namespace rtp_llm {
 namespace {
+
+// Phase-trace switch for the DiffusionGemma bs>4 decode hang diagnosis (E1).
+// Mirrors MtpExecutor.cc: one INFO line per decode-step phase when
+// RTP_LLM_DGM_STEP_TRACE=1, disabled otherwise.
+bool dgmStepTraceEnabled() {
+    static const bool enabled = [] {
+        const char* env = std::getenv("RTP_LLM_DGM_STEP_TRACE");
+        return env != nullptr && env[0] == '1';
+    }();
+    return enabled;
+}
+
 torch::Tensor
 shiftedMtpTokenField(const torch::Tensor& field, const torch::Tensor& input_lengths_cpu, int32_t append_value) {
     if (!field.defined() || field.numel() == 0) {
@@ -728,6 +740,9 @@ absl::Status MtpBatchStreamProcessor::dispatchDecode(const StreamGroups&        
                                                      const speculative::SpeculativeSamplerOutput& spec_decode_output,
                                                      const MergedOutput& draft_prefill_output) const {
     RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
+    if (dgmStepTraceEnabled()) {
+        RTP_LLM_LOG_INFO("[dgm-step-trace] dispatch_decode enter: streams=%d", stream_groups.size());
+    }
 
     std::vector<StreamSpecUpdateInfo> spec_update_infos;
 
@@ -738,6 +753,11 @@ absl::Status MtpBatchStreamProcessor::dispatchDecode(const StreamGroups&        
 
     stream_groups.updateStreams(spec_update_infos);
 
+    if (dgmStepTraceEnabled()) {
+        RTP_LLM_LOG_INFO("[dgm-step-trace] dispatch_decode exit: streams=%d update_infos=%zu",
+                         stream_groups.size(),
+                         spec_update_infos.size());
+    }
     RTP_LLM_LOG_DEBUG("dispatch decode done");
     return absl::OkStatus();
 }
