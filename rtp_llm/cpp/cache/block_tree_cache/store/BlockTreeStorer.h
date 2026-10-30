@@ -18,6 +18,7 @@ namespace rtp_llm {
 
 class BlockTransferDispatcher;
 class BlockTreeTaskPool;
+struct CompletionStageContext;
 
 class BlockTreeStorer {
 public:
@@ -60,8 +61,8 @@ private:
                                          std::optional<int64_t>                            request_id);
     void           runStoreTask(const StoreTaskPtr& task);
     void           scheduleStoreSettlement(const StoreTaskPtr& task, ErrorInfo error);
-    bool           settleTask(const StoreTask& task, bool copy_success);
-    size_t         settleLocked(const StoreTask& task, bool publish);
+    bool           settleTask(const StoreTask& task, const CompletionStageContext& observation);
+    size_t         settleLocked(const StoreTask& task, bool publish, CompletionStageContext observation);
 
     BlockTree*                      tree_;
     BlockTreeEvictor&               evictor_;
