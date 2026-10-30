@@ -10,7 +10,7 @@ Two operators:
 
 import logging
 from dataclasses import dataclass
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 import torch
 
@@ -58,7 +58,7 @@ from rtp_llm.ops import (
 from rtp_llm.ops.compute_ops import KVCache, PyAttentionInputs, rtp_llm_ops
 from rtp_llm.utils.model_weight import W
 
-from .rope_emb_new import NewMlaRotaryEmbeddingOp
+from .rope_emb_new import NewMlaRotaryEmbeddingOp, NoopMlaRotaryEmbeddingOp
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -125,6 +125,7 @@ class SparseMlaOp(object):
 
     # Sub-classes that consume KV in paged layout override this to True.
     expects_paged_kv: bool = False
+    projects_values: bool = False
 
     def plan(
         self,
@@ -452,6 +453,8 @@ class SparseMlaImpl(MlaImplBase):
         is_cuda_graph: bool = False,
         parallelism_config: Optional[ParallelismConfig] = None,
         fmha_impl: Optional[type] = None,
+        apply_rope: bool = True,
+        fmha_impl_kwargs: Optional[Dict[str, Any]] = None,
     ) -> None:
         super().__init__(
             attn_configs=attn_configs,
@@ -490,6 +493,7 @@ class SparseMlaImpl(MlaImplBase):
             op_kwargs["deterministic_decode"] = bool(
                 getattr(fmha_config, "deterministic_gemm", False)
             )
+        op_kwargs.update(fmha_impl_kwargs or {})
         self.fmha_impl: SparseMlaOp = op_cls(
             attn_configs.head_num,
             attn_configs.kv_lora_rank,
@@ -501,15 +505,20 @@ class SparseMlaImpl(MlaImplBase):
             **op_kwargs,
         )
 
-        self.rope_impl = NewMlaRotaryEmbeddingOp(
-            cos_sin_cache=cos_sin_cache,
-            is_neox_style=self.attn_configs.rope_config.is_neox_style,
+        self.rope_impl = (
+            NewMlaRotaryEmbeddingOp(
+                cos_sin_cache=cos_sin_cache,
+                is_neox_style=self.attn_configs.rope_config.is_neox_style,
+            )
+            if apply_rope
+            else NoopMlaRotaryEmbeddingOp()
         )
         self.kv_cache_write_op = MlaKVCacheWriteOp(
             kv_cache_dtype=attn_configs.kv_cache_dtype,
         )
 
-        self._fuse_qk_rope_cat_cache_mla = fuse_kernels_enabled()
+        self._apply_rope = apply_rope
+        self._fuse_qk_rope_cat_cache_mla = apply_rope and fuse_kernels_enabled()
         self._kv_cache_type = (
             "fp8_ds_mla"
             if attn_configs.kv_cache_dtype == KvCacheDataType.FP8
@@ -528,7 +537,9 @@ class SparseMlaImpl(MlaImplBase):
 
     def configure_fusion(self, hw_kernel_config) -> None:
         """Use the same resolved fusion policy as the model's MLA/Indexer layers."""
-        self._fuse_qk_rope_cat_cache_mla = fuse_kernels_enabled(hw_kernel_config)
+        self._fuse_qk_rope_cat_cache_mla = self._apply_rope and fuse_kernels_enabled(
+            hw_kernel_config
+        )
 
     def create_params(self, attn_inputs: PyAttentionInputs) -> None:
         """Allocate fmha_params and run the first prepare(). Override hook."""
@@ -803,13 +814,7 @@ class SparseMlaImpl(MlaImplBase):
             )
         else:
             self.rope_impl.forward(q_pe, k_pe, self.rope_params)
-            self.kv_cache_write_op.forward(
-                compressed_kv,
-                k_pe,
-                kv_cache,
-                self.rope_params,
-            )
-
+            self._write_kv_cache(compressed_kv, k_pe, kv_cache)
         common.apply_write_cache_store(
             self.write_cache_store_impl, self.attn_inputs, kv_cache
         )
@@ -823,5 +828,14 @@ class SparseMlaImpl(MlaImplBase):
             q_transformed, kv_input, topk_indices, layer_id=layer_id
         )
 
-        # 4. Project attention output via W_vc → final output
-        return self._apply_output_bmm(attn_output, layer_id)
+        # Apply output BMM to get final output
+        output = (
+            attn_output
+            if self.fmha_impl.projects_values
+            else self._apply_output_bmm(attn_output, layer_id)
+        )
+
+        return output
+
+    def _write_kv_cache(self, compressed_kv, k_pe, kv_cache):
+        self.kv_cache_write_op.forward(compressed_kv, k_pe, kv_cache, self.rope_params)

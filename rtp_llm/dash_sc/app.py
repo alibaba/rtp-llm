@@ -28,6 +28,7 @@ from rtp_llm.config.response_format import normalize_think_tag
 from rtp_llm.dash_sc.inference.grammar_validator import GrammarValidator
 from rtp_llm.dash_sc.inference.servicer import (
     DashScInferenceServicer,
+    ImagePlaceholderMapping,
     build_think_runtime,
 )
 from rtp_llm.dash_sc.proxy.servicer import DashScProxyServicer
@@ -143,6 +144,28 @@ def _abort_bind_barrier(bind_barrier) -> None:
         bind_barrier.abort()
     except Exception as e:
         logging.warning("[DashScApp] failed to abort gRPC bind barrier: %s", e)
+
+
+def _image_placeholder_mapping(
+    model_config: ModelConfig, tokenizer: BaseTokenizer
+) -> ImagePlaceholderMapping | None:
+    if model_config.model_type not in ("kimi_k3", "kimi_k31"):
+        return None
+    mm_config = model_config.mm_model_config
+    if not mm_config.is_multimodal:
+        return None
+    mm_params = model_config.mm_related_params
+    source = mm_params.special_tokens.get("image_placeholder")
+    target = mm_params.special_token_ids.get("image_token_index")
+    if not source or target is None or mm_config.mm_sep_tokens != [[target]]:
+        return None
+
+    source_ids = tuple(tokenizer.encode(source))
+    if source_ids == (target,):
+        return None
+    if not source_ids or target in source_ids:
+        raise ValueError("Invalid tokenizer IDs for the upstream image placeholder")
+    return ImagePlaceholderMapping(source_ids=source_ids, target_id=target)
 
 
 def _v41_image_processor_config(model_config):
@@ -761,6 +784,9 @@ class DashScApp:
                     rank_id=self.server_config.rank_id,
                     repetition_monitor_config=repetition_monitor_config,
                     grammar_validator=grammar_validator,
+                    image_placeholder_mapping=_image_placeholder_mapping(
+                        model_config, base_tok
+                    ),
                     v41_processor_config=v41_processor_config,
                     max_seq_len=model_config.max_seq_len,
                     monitor_interval_s=max(

@@ -38,11 +38,45 @@ __device__ __forceinline__ unsigned v41_quant4(nv_bfloat162 a, nv_bfloat162 b, n
 
 }  // namespace deep_gemm::math
 
-// Override only these two epilogue operations in this translation unit.
-// The vendor mainloop, BF16 rounding, reductions and TMA stores stay intact.
-#define get_ue8m0_sf_exp V41QuantPolicy(epilogue_operator.alpha).template scale_exp
-#define scale_bf16x2_into_fp8x4 v41_quant4
-#include <deep_gemm/epilogue/sm100_store_cd.cuh>
-#include <deep_gemm/epilogue/sm100_store_cd_swap_ab.cuh>
-#undef scale_bf16x2_into_fp8x4
-#undef get_ue8m0_sf_exp
+#include <deep_gemm/epilogue/operators.cuh>
+
+namespace deep_gemm::epilogue::operators {
+
+// Keep the V4.1 standalone quantizer's BF16 rounding and scale policy while
+// using DeepGEMM's operator ABI; the GEMM mainloop and store schedules are intact.
+struct V41QuantizeToFP8: CastToFP8WithClamp {
+    using CastToFP8WithClamp::CastToFP8WithClamp;
+
+    template<bool kSwapAB, uint32_t kNumValues>
+    CUTLASS_DEVICE void prepare_fp8(const uint32_t (&values)[kNumValues],
+                                    nv_bfloat162 (&rounded)[kNumValues / 2],
+                                    uint2& sf_exp,
+                                    const uint32_t&,
+                                    const uint32_t&) {
+#pragma unroll
+        for (uint32_t i = 0; i < kNumValues / 2; ++i)
+            rounded[i] = math::cast_into_bf16x2(values[i * 2], values[i * 2 + 1]);
+        nv_bfloat162 amax;
+        if constexpr (kSwapAB) {
+            amax = math::warp_reduce_max<4, true>(__hmax2(__hmax2(__habs2(rounded[0]), __habs2(rounded[1])),
+                                                          __hmax2(__habs2(rounded[2]), __habs2(rounded[3]))));
+        } else {
+            amax = __bfloat162bfloat162(math::get_packed_bf16_amax(rounded));
+        }
+        const math::V41QuantPolicy policy(args.alpha);
+        sf_exp.x = policy.scale_exp<cutlass::float_e4m3_t>(amax.x);
+        sf_exp.y = kSwapAB ? policy.scale_exp<cutlass::float_e4m3_t>(amax.y) : sf_exp.x;
+    }
+
+    template<uint32_t kNumPairs>
+    CUTLASS_DEVICE void
+    cast_fp8(const nv_bfloat162 (&rounded)[kNumPairs], uint32_t (&packed)[kNumPairs / 2], const uint2& sf_exp) const {
+        const auto inv =
+            nv_bfloat162(math::get_ue8m0_sf_inv<nv_bfloat16>(sf_exp.x), math::get_ue8m0_sf_inv<nv_bfloat16>(sf_exp.y));
+#pragma unroll
+        for (uint32_t i = 0; i < kNumPairs / 2; ++i)
+            packed[i] = math::v41_quant4(rounded[i * 2], rounded[i * 2 + 1], inv, inv);
+    }
+};
+
+}  // namespace deep_gemm::epilogue::operators

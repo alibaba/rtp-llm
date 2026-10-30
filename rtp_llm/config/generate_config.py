@@ -37,7 +37,10 @@ from rtp_llm.utils.util import check_with_info
 
 if TYPE_CHECKING:
     from rtp_llm.config.grammar_constraint import GrammarConstraint
-    from rtp_llm.config.response_format_compiler import ReasoningFormat
+    from rtp_llm.config.response_format_compiler import (
+        ReasoningFormat,
+        ResponseFormatPlan,
+    )
 
 
 class RequestFormat:
@@ -714,32 +717,34 @@ class GenerateConfig(BaseModel):
     def finalize_response_format(
         self,
         reasoning_format: Optional["ReasoningFormat"] = None,
+        *,
+        plan: Optional["ResponseFormatPlan"] = None,
     ) -> Optional["GrammarConstraint"]:
         """Validate and install the one grammar constraint used by the engine.
 
-        Repeated finalization reuses an installed reasoning envelope. RPC
-        serialization only verifies the result without mutating the config.
+        A model may supply its own plan. Repeated finalization without a plan
+        reuses an installed reasoning envelope.
         """
 
         from rtp_llm.config.response_format_compiler import prepare_response_format
 
         self.validate()
-        return prepare_response_format(self, reasoning_format=reasoning_format)
+        if plan is None:
+            return prepare_response_format(self, reasoning_format=reasoning_format)
 
-    def add_thinking_params(
-        self,
-        tokenizer,
-        generate_env_config,
-        enable_thinking: Optional[bool] = None,
-        reasoning_format: Optional["ReasoningFormat"] = None,
-    ) -> Optional["GrammarConstraint"]:
-        """Apply thinking fields and finalize structured-output grammar.
+        plan.apply_to_config(self)
+        self._reasoning_envelope_applied = (
+            self.in_think_mode or self.thinking_mode == ThinkingMode.ADAPTIVE
+        )
+        self._reasoning_final_constraint = (
+            plan.final_constraint if self._reasoning_envelope_applied else None
+        )
+        return plan.final_constraint
 
-        This is the common grammar boundary for raw, OpenAI, and DashSC
-        requests. Grammar-related fields must be complete before this call;
-        later request enrichment may only update grammar-independent fields.
-        """
-
+    def prepare_thinking_params(
+        self, generate_env_config, enable_thinking: Optional[bool]
+    ) -> None:
+        """Resolve shared thinking mode and budget before constructing a plan."""
         env_budget = getattr(generate_env_config, "max_thinking_tokens", None)
         if (
             env_budget is not None
@@ -755,6 +760,41 @@ class GenerateConfig(BaseModel):
         if requested_mode == ThinkingMode.ADAPTIVE:
             self.thinking_mode = ThinkingMode.ADAPTIVE
             self.in_think_mode = False
+            return
+
+        if enable_thinking is None:
+            if requested_mode == ThinkingMode.ENABLED:
+                enable_thinking = True
+            elif requested_mode == ThinkingMode.DISABLED:
+                enable_thinking = False
+            else:
+                enable_thinking = (
+                    thinking_mode_from_value(generate_env_config.think_mode)
+                    == ThinkingMode.ENABLED
+                )
+        self.in_think_mode = bool(enable_thinking)
+        self.thinking_mode = (
+            ThinkingMode.ENABLED if self.in_think_mode else ThinkingMode.DISABLED
+        )
+
+    def add_thinking_params(
+        self,
+        tokenizer,
+        generate_env_config,
+        enable_thinking: Optional[bool] = None,
+        reasoning_format: Optional["ReasoningFormat"] = None,
+    ) -> Optional["GrammarConstraint"]:
+        """Apply thinking fields and finalize structured-output grammar.
+
+        Grammar-related fields must be complete before this call.
+        """
+        from rtp_llm.config.response_format_compiler import ReasoningFormat
+
+        self.prepare_thinking_params(generate_env_config, enable_thinking)
+        if generate_env_config is None:
+            return self.finalize_response_format(reasoning_format=reasoning_format)
+
+        if self.thinking_mode == ThinkingMode.ADAPTIVE:
             if tokenizer and not self.begin_think_token_ids:
                 think_start_tag = normalize_think_tag(
                     generate_env_config.think_start_tag
@@ -775,8 +815,6 @@ class GenerateConfig(BaseModel):
                         think_end_tag, add_special_tokens=False
                     )
 
-            from rtp_llm.config.response_format_compiler import ReasoningFormat
-
             if reasoning_format is None:
                 base_format = ReasoningFormat.from_generate_env_config(
                     generate_env_config
@@ -789,35 +827,17 @@ class GenerateConfig(BaseModel):
                 )
             return self.finalize_response_format(reasoning_format=reasoning_format)
 
-        if enable_thinking is None:
-            if requested_mode == ThinkingMode.ENABLED:
-                enable_thinking = True
-            elif requested_mode == ThinkingMode.DISABLED:
-                enable_thinking = False
-            else:
-                enable_thinking = (
-                    thinking_mode_from_value(generate_env_config.think_mode)
-                    == ThinkingMode.ENABLED
-                )
-
         # Preserve the pre-adaptive fixed-mode behavior. In particular, fixed
         # ENABLED does not require the model to emit a begin tag.
         end_think_token_id = generate_env_config.think_end_token_id
         self.end_think_token_ids = (
             [end_think_token_id] if end_think_token_id != -1 else []
         )
-        if enable_thinking and tokenizer is not None and end_think_token_id == -1:
+        if self.in_think_mode and tokenizer is not None and end_think_token_id == -1:
             think_end_tag = normalize_think_tag(generate_env_config.think_end_tag)
             self.end_think_token_ids = tokenizer.encode(
                 think_end_tag, add_special_tokens=False
             )
-        self.in_think_mode = bool(enable_thinking)
-        self.thinking_mode = (
-            ThinkingMode.ENABLED if self.in_think_mode else ThinkingMode.DISABLED
-        )
-
-        from rtp_llm.config.response_format_compiler import ReasoningFormat
-
         if self.in_think_mode and reasoning_format is None:
             reasoning_format = ReasoningFormat.from_generate_env_config(
                 generate_env_config

@@ -6,6 +6,8 @@
 #include <atomic>
 #include <chrono>
 
+#include "rtp_llm/cpp/cache/CacheConfigCreator.h"
+#include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/model_rpc/PrefillRpcServer.h"
 #include "rtp_llm/cpp/model_rpc/RemoteRpcServiceImpl.h"
 #include "rtp_llm/cpp/model_rpc/PDRequestUtils.h"
@@ -13,6 +15,33 @@
 #include "rtp_llm/cpp/model_rpc/RpcErrorCode.h"
 
 namespace rtp_llm {
+
+namespace {
+
+class PeerInfoEngine: public EngineBase {
+public:
+    PeerInfoEngine(const CacheConfig& cache_config, const ParallelismConfig& parallelism):
+        EngineBase(EngineInitParams{}) {
+        resource_context_.cache_manager =
+            std::make_shared<KVCacheManager>(cache_config, false, nullptr, KVCacheConfig{}, parallelism);
+    }
+
+    GenerateStreamPtr enqueue(const std::shared_ptr<GenerateInput>&) override {
+        return {};
+    }
+    void         enqueue(GenerateStreamPtr&) override {}
+    absl::Status stop() override {
+        return absl::OkStatus();
+    }
+    absl::StatusOr<GenerateStreamPtr> preRun(const std::shared_ptr<GenerateInput>&, preRunMode) override {
+        return absl::UnimplementedError("unused in peer layout test");
+    }
+    KVCacheInfo getCacheStatusInfo(int64_t, bool) override {
+        return {};
+    }
+};
+
+}  // namespace
 
 TEST(PrefillRpcServerTest, NullGenerateRequestReturnsInvalidParamsBeforeEngineAccess) {
     PrefillRpcServer server;
@@ -61,6 +90,52 @@ TEST(PrefillRpcServerTest, GetPeerInfoRejectsInvalidTpSize) {
     const auto            status = server.GetPeerInfo(&context, &request, &response);
     ASSERT_FALSE(status.ok());
     EXPECT_NE(status.error_message().find("invalid tp_size=0"), std::string::npos);
+}
+
+TEST(PrefillRpcServerTest, GetPeerInfoReportsPhysicalCacheSharding) {
+    struct Case {
+        int            tp_size;
+        CPRotateMethod method;
+        bool           page_rr;
+        int            cp_size;
+    };
+    const Case cases[] = {
+        {4, CPRotateMethod::DISABLED, true, 4},
+        {4, CPRotateMethod::DISABLED, false, 1},
+        {4, CPRotateMethod::ALL_GATHER, false, 4},
+        {1, CPRotateMethod::DISABLED, true, 1},
+    };
+    ModelConfig model;
+    model.num_layers                          = 1;
+    model.data_type                           = DataType::TYPE_BF16;
+    model.attn_config.use_mla                 = true;
+    model.attn_config.kv_lora_rank            = 16;
+    model.attn_config.rope_head_dim           = 8;
+    model.attn_config.tokens_per_block        = 4096;
+    model.attn_config.kernel_tokens_per_block = 128;
+    KVCacheSpecDesc spec;
+    spec.tag                  = "full";
+    spec.cache_type           = KVCacheSpecType::MultiHeadLatentAttention;
+    model.kv_cache_spec_descs = {{spec}};
+
+    for (const auto& c : cases) {
+        PrefillRpcServer server;
+        auto&            pc                   = server.maga_init_params_.parallelism_config;
+        pc.role_type                          = RoleType::PREFILL;
+        pc.tp_size                            = c.tp_size;
+        pc.prefill_cp_config.method           = c.method;
+        pc.prefill_cp_config.kv_cache_sharded = true;
+        model.use_page_rr_kv_cache            = c.page_rr;
+        const auto cache_config               = CacheConfigCreator::createWarmupConfig(model, pc);
+        server.engine_                        = std::make_shared<PeerInfoEngine>(cache_config, pc);
+
+        grpc::ServerContext   context;
+        GetPeerInfoRequestPB  request;
+        GetPeerInfoResponsePB response;
+        ASSERT_TRUE(server.GetPeerInfo(&context, &request, &response).ok());
+        EXPECT_EQ(response.tp_size(), c.tp_size);
+        EXPECT_EQ(response.cp_size(), c.cp_size);
+    }
 }
 
 TEST(PrefillRpcServerTest, OnflightScopeTracksStepAndCleansOnReturn) {

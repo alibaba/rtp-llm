@@ -457,6 +457,11 @@ class EndpointStreamTest(unittest.IsolatedAsyncioTestCase):
                         "answer ",
                     )
                     self.assertIn("STOP", received[-1].generate_config.stop_words_str)
+                    for stop_variant in ("STOP", " STOP"):
+                        self.assertIn(
+                            endpoint.tokenizer.encode(stop_variant),
+                            received[-1].generate_config.stop_words_list,
+                        )
                     self.assertIsNone(received[-1].v41_inputs)
 
     async def test_nonstream_entrypoint_stops_before_consuming_later_backend_chunks(

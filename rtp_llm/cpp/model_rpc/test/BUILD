@@ -225,6 +225,7 @@ cc_test(
     copts = test_copts,
     deps = test_deps + [
         "//rtp_llm/cpp/cache:cache",
+        "//rtp_llm/cpp/cache:cache_core",
         "//rtp_llm/cpp/engine_base/schedulers",
         "//rtp_llm/cpp/engine_base/stream:stream",
         "@havenask//aios/autil:net",

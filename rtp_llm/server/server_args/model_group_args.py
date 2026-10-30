@@ -62,6 +62,22 @@ def init_model_group_args(parser, model_args):
         help="A dictionary in JSON string format used to override default model configurations.",
     )
     model_group.add_argument(
+        "--prefill_kv_workspace_budget_bytes",
+        env_name="PREFILL_KV_WORKSPACE_BUDGET_BYTES",
+        bind_to=(model_args, "prefill_kv_workspace_budget_bytes"),
+        type=int,
+        default=None,
+        help="Prefill 展开 KV 工作区预算（字节），默认使用模型配置",
+    )
+    model_group.add_argument(
+        "--shared_expert_weight_shard",
+        env_name="SHARED_EXPERT_WEIGHT_SHARD",
+        bind_to=(model_args, "shared_expert_weight_shard"),
+        type=str2bool,
+        default=None,
+        help="Prefill shared expert 权重分片驻留，默认关闭",
+    )
+    model_group.add_argument(
         "--max_seq_len",
         env_name="MAX_SEQ_LEN",
         bind_to=(model_args, "max_seq_len"),

@@ -42,6 +42,7 @@ import torch
 
 from rtp_llm.models_py.modules.dsv4.fp8._indexer_score import (
     deepgemm_supports_block_kv,
+    get_fp8_paged_mqa_logits_metadata,
     supports_mqa_logits,
     supports_paged_mqa_logits,
 )
@@ -308,8 +309,8 @@ def fp8_paged_indexer_score(
     kv_4d = kv_pool_uint8.view(num_blocks, block_size, 1, INDEXER_ENTRY_BYTES)
 
     num_sms = _get_num_sms(q_fp8.device)
-    schedule = _deep_gemm.get_paged_mqa_logits_metadata(
-        context_lens, block_size, num_sms
+    schedule = get_fp8_paged_mqa_logits_metadata(
+        _deep_gemm, context_lens, block_size, num_sms
     )
     return _deep_gemm.fp8_paged_mqa_logits(
         q_fp8.contiguous(),

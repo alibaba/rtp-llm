@@ -41,6 +41,7 @@ from rtp_llm.ops import (
     KVCacheSpecType,
     MoeConfig,
     ParallelismConfig,
+    RuntimeConfig,
 )
 from rtp_llm.resident_weights import ResidentWeights, checkpoint_digest, vmm
 from rtp_llm.resident_weights.store import StoreSettings
@@ -85,6 +86,7 @@ class BaseModel(object):
     kv_cache_config: KVCacheConfig
     fmha_config: FMHAConfig
     moe_config: MoeConfig
+    runtime_config: Optional[RuntimeConfig] = None
 
     def __init__(
         self,
@@ -483,6 +485,13 @@ class BaseModel(object):
         """
         return ()
 
+    @staticmethod
+    def speculative_parallelism_config(
+        parallelism: ParallelismConfig,
+    ) -> ParallelismConfig:
+        """Resolve the draft model's parallelism from the target configuration."""
+        return parallelism
+
     @classmethod
     def from_config(
         cls,
@@ -503,6 +512,7 @@ class BaseModel(object):
         resident_weights_config: Optional[ResidentWeightsConfig] = None,
         weight_alias_owner: Optional["BaseModel"] = None,
         weight_alias_names: Sequence[str] = (),
+        runtime_config: Optional[RuntimeConfig] = None,
     ) -> "BaseModel":
         """Create model from independent configuration objects.
 
@@ -533,6 +543,7 @@ class BaseModel(object):
             moe_pure_tp_preshard=moe_pure_tp_preshard,
             resident_weights_config=resident_weights_config,
         )
+        model.runtime_config = runtime_config
         if weight_alias_names and weight_alias_owner is None:
             raise ValueError(
                 "weight_alias_names require an explicit weight_alias_owner"

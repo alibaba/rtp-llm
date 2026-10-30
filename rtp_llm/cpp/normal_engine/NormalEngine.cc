@@ -1,6 +1,7 @@
 #include "rtp_llm/cpp/distribute/CpuTpBroadcaster.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include "rtp_llm/cpp/engine_base/EngineBase.h"
+#include "rtp_llm/cpp/distribute/CpuTpBroadcaster.h"
 #include "rtp_llm/cpp/normal_engine/NormalExecutor.h"
 #include "rtp_llm/cpp/normal_engine/NormalEngine.h"
 #include "rtp_llm/cpp/normal_engine/pipeline/PPExecutor.h"
@@ -20,6 +21,7 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCacheFactory.h"
 #include "rtp_llm/cpp/engine_base/system_prompt/SystemPromptConstructor.h"
 #include "rtp_llm/cpp/models/GenerationPrefillCudaGraphEligibility.h"
+#include "rtp_llm/cpp/models/logits_processor/LogitsProcessorFactory.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/DevicePin.h"
@@ -120,18 +122,16 @@ private:
     std::shared_ptr<KVCacheManager> previous_cache_manager_;
 };
 
-std::shared_ptr<KVCacheManager> createGenerationPrefillCudaGraphWarmUpCacheManager(const EngineInitParams& params) {
+std::shared_ptr<KVCacheManager> createPrefillWarmUpCacheManager(const EngineInitParams& params) {
     auto cache_config = CacheConfigCreator::createWarmupConfig(
         params.model_config_, params.parallelism_config, params.kv_cache_config, /*gen_num_per_cycle=*/0);
 
-    RTP_LLM_CHECK_WITH_INFO(cache_config.seq_size_per_block > 0,
-                            "generation prefill CUDA graph warmup requires a positive KV block size");
+    RTP_LLM_CHECK_WITH_INFO(cache_config.seq_size_per_block > 0, "prefill warmup requires a positive KV block size");
 
-    // This temporary pool only supplies the KV tensor bound into the captured
-    // model. The warmup config publishes complete per-group capacities before
-    // KVCacheManager allocates the reserved block 0, as in decode warmup.
+    // This temporary pool supplies KV backing for the warmup model. The warmup config publishes complete per-group
+    // capacities before KVCacheManager allocates the reserved block 0, as in decode warmup.
     auto cache_manager = std::make_shared<KVCacheManager>(cache_config, /*warmup=*/true);
-    RTP_LLM_CHECK_WITH_INFO(cache_manager->init(), "init generation prefill CUDA graph warmup KV cache manager failed");
+    RTP_LLM_CHECK_WITH_INFO(cache_manager->init(), "init prefill warmup KV cache manager failed");
     return cache_manager;
 }
 
@@ -174,6 +174,10 @@ private:
 }  // anonymous namespace
 
 int NormalEngine::calculateReserveStep(const EngineInitParams& params) {
+    if (params.sp_config.type != SP_TYPE_NONE
+        && params.sp_config.gen_num_per_cycle == std::numeric_limits<int64_t>::max()) {
+        throw std::invalid_argument("speculative query width exceeds int64 capacity");
+    }
     const auto main_reserve = params.sp_config.speculativeReserveStep();
     if (params.sp_config.type == SP_TYPE_NONE || params.parallelism_config.pp_size <= 1) {
         return static_cast<int>(main_reserve);
@@ -444,11 +448,13 @@ absl::StatusOr<GenerateStreamPtr> NormalEngine::preRun(const std::shared_ptr<Gen
     const auto reserve_step = reserveStepForStream(stream->generateConfig()->isPrefillOnly());
     stream->setReserveStep(reserve_step);
     if (mode == preRunMode::decode_warm_up) {
+        stream->setIsFakeStream(true);
         stream->setIsContextStream(false);
         const size_t seq_size_per_block = model_config_.attn_config.tokens_per_block;
         const size_t reserved_blocks = warmUpReservedBlockCount(stream->seqLength(), reserve_step, seq_size_per_block);
         stream->fakeInitKVBlock(reserved_blocks);
     } else if (mode == preRunMode::prefill_warm_up && resource_context_.cache_manager) {
+        stream->setIsFakeStream(true);
         // Generation-prefill CUDA Graph capture needs a temporary real KV pool, while the
         // framework warmup stream deliberately does not allocate request KV
         // blocks. Keep the model-level KV tensor and per-request block table
@@ -520,9 +526,9 @@ NormalEngine::runPrefillWarmupShape(const std::shared_ptr<GenerateInput>& genera
     }
 
     stream->setReuseLength(reuse_length);
-    // The temporary manager owns valid physical block 0. Alias the logical prompt table to that
-    // block so the warmup shapes exercise the production paged-attention path without reserving
-    // a production-sized KV cache before capacity is sampled.
+    stream->enableWarmupChunkWindow();
+    // Attention aliases block zero; LINEAR groups borrow per-row state slots
+    // through copyChunkKernelBlocks without reserving a full prompt cache.
     stream->fakeInitKVBlock((static_cast<size_t>(stream->seqLength()) + static_cast<size_t>(block_size) - 1)
                             / block_size);
 
@@ -532,7 +538,6 @@ NormalEngine::runPrefillWarmupShape(const std::shared_ptr<GenerateInput>& genera
         return stream;
     }
 
-    stream->enableWarmupChunkWindow();
     while (true) {
         const int64_t remaining = static_cast<int64_t>(stream->seqLength()) - stream->reuseLength();
         const int64_t grant     = computeChunkGrant(token_budget, stream->currentBatchSize(), remaining, block_size);
@@ -553,7 +558,7 @@ NormalEngine::runPrefillWarmupShape(const std::shared_ptr<GenerateInput>& genera
     }
 }
 
-std::shared_ptr<KVCacheManager> NormalEngine::createWarmupCacheManager() {
+std::shared_ptr<KVCacheManager> NormalEngine::createWarmupCacheManager(int prefill_batch_size) {
     const int cache_gen_num_per_cycle =
         sp_config.type != SP_TYPE_NONE ? static_cast<int>(sp_config.gen_num_per_cycle) : 0;
     // Use the same cache geometry as real inference, including independent
@@ -561,12 +566,35 @@ std::shared_ptr<KVCacheManager> NormalEngine::createWarmupCacheManager() {
     // temporary capacity needed by fake streams.
     auto cache_config = CacheConfigCreator::createWarmupConfig(
         model_config_, parallelism_config, kv_cache_config, cache_gen_num_per_cycle);
+    if (prefill_batch_size > 0) {
+        auto groups = cache_config.topology().groups();
+        for (auto& group : groups) {
+            if (group.policy.group_type == CacheGroupType::LINEAR) {
+                RTP_LLM_CHECK_WITH_INFO(prefill_batch_size <= (std::numeric_limits<int>::max() - 1) / 2,
+                                        "warmup LINEAR state count overflows");
+                group.block_num = 1 + 2 * prefill_batch_size;
+            }
+        }
+        cache_config.setTopology(std::move(groups), cache_config.topology().layers());
+    }
     ParallelismConfig temp_parallelism_config;
     RuntimeConfig     temp_runtime_config;
     auto              cache_manager = make_shared<KVCacheManager>(
         cache_config, true, nullptr, KVCacheConfig{}, temp_parallelism_config, temp_runtime_config);
     if (!cache_manager->init()) {
         RTP_LLM_FAIL("init warmup kv cache manager failed");
+    }
+    if (prefill_batch_size > 0) {
+        const auto layout = cache_manager->allLayerCacheBase();
+        for (const auto& group : cache_config.groups()) {
+            if (group.policy.group_type == CacheGroupType::LINEAR) {
+                for (const auto& layer : layout.group(group.tag).layers()) {
+                    if (layer.kv_addr.defined()) {
+                        layer.kv_addr.zero_();
+                    }
+                }
+            }
+        }
     }
     return cache_manager;
 }
@@ -643,7 +671,7 @@ WarmUpResult NormalEngine::prefillWarmUp(const EngineInitParams& params) {
                                                    /*primary_graph_is_prefill=*/false,
                                                    params.parallelism_config.role_type,
                                                    params.sp_config.type);
-        if (!generation_prefill_cuda_graph_requested) {
+        if (!generation_prefill_cuda_graph_requested && !model_config_.use_page_rr_kv_cache) {
             if (parallelism_config.pp_size > 1) {
                 executor_.reset(new PPExecutor(params, nullptr, true));
             } else {
@@ -658,19 +686,20 @@ WarmUpResult NormalEngine::prefillWarmUp(const EngineInitParams& params) {
             return WarmUpResult({device_status.device_memory_status.available_bytes, max_consumed});
         }
 
-        // A normal prefill warmup historically has no CacheManager. Generation
-        // prefill CUDA Graph, however, needs a real KV layout and reserved dummy
-        // block 0 during construction. Capture against a minimal temporary pool so
-        // graph-owned tensors and graph-pool reservations are included in the
-        // runtime budget before the production KV pool consumes the remaining
-        // memory. Speculative/MTP models stay on their independent warmup path.
-        auto warmup_cache_manager = createGenerationPrefillCudaGraphWarmUpCacheManager(params);
+        // Page-RR attention and generation-prefill graphs need KV backing during
+        // warmup. Use a minimal temporary pool so activation and graph storage is
+        // measured before the production KV pool consumes the remaining memory.
+        auto warmup_cache_manager = createPrefillWarmUpCacheManager(params);
 
         const auto baseline_status    = getGpuExecStatus().device_memory_status;
         const auto baseline_allocated = cuda_graph::graphAllocatedBytes();
         const auto baseline_reserved  = cuda_graph::graphReservedBytes();
 
-        executor_.reset(new NormalExecutor(params, warmup_cache_manager, true, false, 0));
+        if (parallelism_config.pp_size > 1) {
+            executor_.reset(new PPExecutor(params, warmup_cache_manager, true));
+        } else {
+            executor_.reset(new NormalExecutor(params, warmup_cache_manager, true, false, 0));
+        }
         {
             // NormalGenerateStream snapshots ResourceContext at construction. Bind
             // the same temporary manager used by NormalExecutor so fakeInitKVBlock
@@ -710,7 +739,8 @@ WarmUpResult NormalEngine::prefillWarmUp(const EngineInitParams& params) {
 
     size_t max_consumed = 0;
     {
-        auto            warmup_cache_manager    = createWarmupCacheManager();
+        auto warmup_cache_manager =
+            createWarmupCacheManager(std::max<int64_t>(1, runtime_config.fifo_scheduler_config.max_context_batch_size));
         ResourceContext warmup_resource_context = resource_context_;
         warmup_resource_context.cache_manager   = warmup_cache_manager;
         // The temporary paged cache is warmup infrastructure, not runtime activation memory.
@@ -1201,7 +1231,17 @@ bool NormalEngine::validateStreamForScheduling(const GenerateStreamPtr& stream) 
                             "speculative decoding does not support num_return_sequences > 1 or num_beams > 1");
         return false;
     }
-    if (pd_sep_config.role_type != RoleType::DECODE || !stream->generateConfig()->isPrefillOnly()) {
+    const bool is_prefill_only = stream->generateConfig()->isPrefillOnly();
+    if (parallelism_config.dp_size > 1 && parallelism_config.pp_size <= 1 && sp_config.type != SP_TYPE_NONE
+        && !is_prefill_only) {
+        // Reject before mayAddFakeStream so a later MTP filter cannot leave one DP replica out of a forward step.
+        if (auto error = LogitsProcessorFactory::validateMtpCompatibility(stream->getAllLogitsProcessorPtr());
+            error.has_value()) {
+            stream->reportError(error->code(), error->ToString());
+            return false;
+        }
+    }
+    if (pd_sep_config.role_type != RoleType::DECODE || !is_prefill_only) {
         return true;
     }
     stream->reportError(ErrorCode::INVALID_PARAMS, kDecodeRolePrefillOnlyError);
@@ -1275,7 +1315,7 @@ void NormalEngine::enqueue(std::shared_ptr<GenerateStream>& stream) {
 }
 
 std::shared_ptr<GenerateStream> NormalEngine::enqueue(const std::shared_ptr<GenerateInput>& input) {
-    auto stream = makeStream(input);
+    auto stream = createStream(input);
     enqueue(stream);
     return stream;
 }

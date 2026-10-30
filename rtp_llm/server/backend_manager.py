@@ -107,6 +107,9 @@ class BackendManager(object):
             engine_config=engine_config,
             model_config=model_config,
         )
+        # Resolve the model's default before initializing its MoE communication.
+        if engine_config.moe_config.moe_strategy == "auto":
+            engine_config.moe_config.moe_strategy = model_config.default_moe_strategy
         self._distributed_server.validate_pp_partition_consistency(
             engine_config.parallelism_config
         )

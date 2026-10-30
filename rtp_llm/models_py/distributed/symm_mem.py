@@ -2,8 +2,9 @@
 import logging
 import math
 import os
+from contextlib import contextmanager
 from datetime import timedelta
-from typing import Optional, Union
+from typing import Iterator, Optional, Union
 
 import torch
 import torch.distributed as dist
@@ -47,6 +48,7 @@ _AGREE_TIMEOUT_S = 120
 # read the previous round's keys. Every rank runs the same init sequence, so the
 # counter advances in lockstep and the keys stay aligned across ranks.
 _agree_epoch = 0
+_workspace_epochs: dict[tuple[str, str], int] = {}
 
 # torch's symm_mem IpcChannel binds an AF_UNIX socket at
 # "<TMPDIR|TEMP|TEMPDIR, else /tmp>/symm_mem-<id>" and passes the full path
@@ -94,7 +96,9 @@ def _symm_mem_short_socket_dir() -> Optional[str]:
     return short_dir
 
 
-def _agree_across_group(group: ProcessGroup, local_ok: bool, tag: str) -> bool:
+def _agree_across_group(
+    group: ProcessGroup, local_ok: bool, tag: str, *, epoch: Optional[int] = None
+) -> bool:
     """AND-reduce `local_ok` across every rank of `group`.
 
     Symmetric-memory setup is collective: torch_symm_mem.rendezvous() only
@@ -108,9 +112,10 @@ def _agree_across_group(group: ProcessGroup, local_ok: bool, tag: str) -> bool:
     device collective to decide whether the device is usable just reintroduces
     the same failure inside the recovery path.
     """
-    global _agree_epoch
-    _agree_epoch += 1
-    epoch = _agree_epoch
+    if epoch is None:
+        global _agree_epoch
+        _agree_epoch += 1
+        epoch = _agree_epoch
 
     store = dist.distributed_c10d._get_default_store()
     group_size = dist.get_world_size(group)
@@ -134,6 +139,45 @@ def _agree_across_group(group: ProcessGroup, local_ok: bool, tag: str) -> bool:
         )
         return False
     return True
+
+
+@contextmanager
+def symmetric_workspace_phase(
+    group: Optional[ProcessGroup], tag: str
+) -> Iterator[None]:
+    """Require group-wide success before the next workspace setup step."""
+    if group is None:
+        yield
+        return
+
+    error = None
+    try:
+        yield
+    except Exception as exc:
+        error = exc
+
+    # Lazy setup in one TP group must not advance any other group's vote epoch.
+    key = (group.group_name, tag)
+    epoch = _workspace_epochs.get(key, 0) + 1
+    _workspace_epochs[key] = epoch
+    if not _agree_across_group(group, error is None, tag, epoch=epoch):
+        raise RuntimeError(
+            f"{tag}: symmetric workspace setup failed on a rank"
+        ) from error
+
+
+def rendezvous_symmetric_workspace(
+    group: ProcessGroup, tag: str, *tensors: torch.Tensor
+):
+    """Check each returned mapping before any rank enters the next rendezvous."""
+    handles = []
+    for tensor in tensors:
+        with symmetric_workspace_phase(group, f"{tag}_rendezvous"):
+            handle = torch_symm_mem.rendezvous(tensor, group=group)
+            if handle is None:
+                raise RuntimeError("Torch returned no symmetric memory handle")
+            handles.append(handle)
+    return handles
 
 
 class TorchSymmMemCommunicator:

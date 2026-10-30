@@ -13,7 +13,14 @@ from unittest.mock import patch
 from rtp_llm.config.collective_config import CollectiveConfig
 from rtp_llm.config.engine_config import EngineConfig
 from rtp_llm.config.test.kv_cache_event_test_values import KV_CACHE_EVENT_ENV_CASES
-from rtp_llm.ops import CPAllGatherImpl, HWKernelConfig, RoleType, RuntimeConfig, TaskType
+from rtp_llm.ops import (
+    CPAllGatherImpl,
+    FMHAConfig,
+    HWKernelConfig,
+    RoleType,
+    RuntimeConfig,
+    TaskType,
+)
 from rtp_llm.server.server_args.util import str2_cp_all_gather_impl
 from rtp_llm.utils import backend_registry
 from rtp_llm.utils.backend_registry import register_backend_hook
@@ -115,6 +122,43 @@ class Glm5EnvironmentArgumentsTest(TestCase):
                 config.load_config.fastsafetensors_config_json,
             )
             self.assertEqual(os.environ["FASTSAFETENSORS_CONFIG"], "new.json")
+
+
+class Fia2aArgumentsTest(TestCase):
+    def test_retired_environment_is_ignored(self):
+        from rtp_llm.server.server_args import server_args
+
+        for env in (
+            {},
+            {
+                "DECODE_CP_MLA_FUSION_MODE": "UNFUSED",
+                "DECODE_CP_MLA_A2A_BACKEND": "NCCL",
+            },
+        ):
+            with self.subTest(env=env), patch.dict(os.environ, env, clear=True):
+                config = server_args.setup_args([]).fmha_config
+                self.assertEqual(config.__getstate__(), FMHAConfig().__getstate__())
+                self.assertFalse(hasattr(config, "decode_cp_mla_fusion_mode"))
+                self.assertFalse(hasattr(config, "decode_cp_mla_a2a_backend"))
+
+    def test_native_pickle_round_trip(self):
+        config = FMHAConfig()
+        config.enable_flashinfer_trt_fmha_v2 = False
+        config.absorb_opt_len = 2048
+        state = config.__getstate__()
+        restored = pickle.loads(pickle.dumps(config))
+        self.assertEqual(restored.__getstate__(), state)
+
+    def test_retired_cli_is_rejected(self):
+        from rtp_llm.server.server_args import server_args
+
+        for option, value in (
+            ("--decode_cp_mla_fusion_mode", "FUSED"),
+            ("--decode_cp_mla_a2a_backend", "CUSTOM"),
+        ):
+            with self.subTest(option=option), patch.dict(os.environ, {}, clear=True):
+                with patch("sys.stderr", io.StringIO()), self.assertRaises(SystemExit):
+                    server_args.setup_args([option, value])
 
 
 class AllReduceArgumentsTest(TestCase):
@@ -466,6 +510,78 @@ class EnvArgumentParserTest(TestCase):
         with patch.dict(os.environ, {"VALUE": "3", "OTHER_VALUE": "4"}, clear=True):
             self.assertEqual(first_parser.parse_args([]).value, 3)
             self.assertEqual(second_parser.parse_args([]).value, 4)
+
+
+class KimiK3ModelArgumentsTest(TestCase):
+    def test_retired_environment_is_ignored(self):
+        from rtp_llm.server.server_args import server_args
+
+        for args in (None, []):
+            with (
+                self.subTest(args=args),
+                patch.dict(
+                    os.environ,
+                    {
+                        "RTP_MLA_PREFILL_EXPANDED_KV_BUDGET_GIB": "1",
+                        "KIMI_K3_SHARED_EXPERT_WEIGHT_SHARD": "1",
+                    },
+                    clear=True,
+                ),
+                patch.object(sys, "argv", ["prog"]),
+            ):
+                configs = server_args.setup_args(args)
+            self.assertIsNone(configs.model_args.prefill_kv_workspace_budget_bytes)
+            self.assertIsNone(configs.model_args.shared_expert_weight_shard)
+
+    def test_environment_configures_model_arguments(self):
+        from rtp_llm.server.server_args import server_args
+
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "PREFILL_KV_WORKSPACE_BUDGET_BYTES": "1024",
+                    "SHARED_EXPERT_WEIGHT_SHARD": "1",
+                },
+                clear=True,
+            ),
+            patch.object(sys, "argv", ["prog"]),
+        ):
+            for args in (None, []):
+                with self.subTest(args=args):
+                    configs = server_args.setup_args(args)
+                    self.assertEqual(
+                        configs.model_args.prefill_kv_workspace_budget_bytes, 1024
+                    )
+                    self.assertIs(configs.model_args.shared_expert_weight_shard, True)
+
+    def test_cli_overrides_environment(self):
+        from rtp_llm.server.server_args import server_args
+
+        for enabled in (False, True):
+            with (
+                self.subTest(enabled=enabled),
+                patch.dict(
+                    os.environ,
+                    {
+                        "PREFILL_KV_WORKSPACE_BUDGET_BYTES": "1024",
+                        "SHARED_EXPERT_WEIGHT_SHARD": str(int(not enabled)),
+                    },
+                    clear=True,
+                ),
+            ):
+                configs = server_args.setup_args(
+                    [
+                        "--prefill_kv_workspace_budget_bytes",
+                        str(1024**3),
+                        "--shared_expert_weight_shard",
+                        str(int(enabled)),
+                    ]
+                )
+                self.assertEqual(
+                    configs.model_args.prefill_kv_workspace_budget_bytes, 1024**3
+                )
+                self.assertIs(configs.model_args.shared_expert_weight_shard, enabled)
 
 
 class LinearReplayArgumentsTest(TestCase):

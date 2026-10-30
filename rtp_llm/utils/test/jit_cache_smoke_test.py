@@ -271,7 +271,25 @@ class JitCacheSmokeTest(unittest.TestCase):
         for path in self._log_candidates():
             with contextlib.suppress(OSError):
                 with path.open(errors="replace") as stream:
-                    tail = deque(stream, maxlen=200)
+                    tail, startup = deque(maxlen=200), deque(maxlen=80)
+                    context = 0
+                    for line in stream:
+                        tail.append(line)
+                        if any(
+                            marker in line
+                            for marker in (
+                                "JIT_CACHE_",
+                                "JIT scope ",
+                                "JIT shared root ",
+                            )
+                        ):
+                            context = 12
+                        if context:
+                            startup.append(line)
+                            context -= 1
+                logging.error("=== %s (JIT startup) ===", path)
+                for line in startup:
+                    logging.error("%s", line[:2000])
                 logging.error("=== %s (tail) ===", path)
                 for line in tail:
                     logging.error("%s", line[:2000])
@@ -410,6 +428,13 @@ class JitCacheSmokeTest(unittest.TestCase):
             remote = str(Path(workdir) / "main" / "jit_cache")
         if not remote:  # 环境缺失，非回归
             raise unittest.SkipTest("REMOTE_JIT_DIR unset; CI injects it")
+        # CI's client-side mkdir does not provision a remote TestRunner's disk.
+        remote_root = Path(remote)
+        self.assertTrue(
+            remote_root.is_absolute(),
+            "JIT smoke needs a mounted absolute remote directory",
+        )
+        remote_root.mkdir(parents=True, exist_ok=True)
         try:
             jit._prepare_shared_root(self.local_root)
         except OSError as error:
@@ -435,6 +460,9 @@ class JitCacheSmokeTest(unittest.TestCase):
                 remote_state = self._wait_for_snapshot(
                     remote_scope, previous, probe_name, probe_payload
                 )
+            except Exception:
+                self._dump_server_logs()
+                raise
             finally:
                 self._stop_server()
             self.assertTrue(remote_state, "producer published an empty snapshot")

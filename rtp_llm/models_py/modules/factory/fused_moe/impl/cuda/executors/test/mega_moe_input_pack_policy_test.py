@@ -148,6 +148,7 @@ class InputPackPolicyTest(unittest.TestCase):
     def test_fp8_constructor_preserves_strided_e8m0_checkpoint_scales(self):
         config = SimpleNamespace(
             layer_id=0,
+            activation_type="swiglu",
             moe_strategy="mega_moe_fp8",
             dim=256,
             moe_inter_dim=256,
@@ -230,7 +231,7 @@ class InputPackPolicyTest(unittest.TestCase):
                 weights = torch.rand(tokens, 8, device="cuda")
                 ids = torch.randint(0, 256, (tokens, 8), device="cuda")
                 ordinary, prepared = self.buffer(tokens), self.buffer(tokens)
-                executor_packer().pack(x, weights, ids, ordinary, tokens)
+                executor_packer().pack(x, weights, ids.int(), ordinary, tokens)
                 executor_packer(prepared=True).pack(
                     x, weights, ids.int(), prepared, tokens
                 )
@@ -268,8 +269,10 @@ class InputPackPolicyTest(unittest.TestCase):
                     )
                     self.assertIs(launch.call_args.args[2], indices)
                     self.assertEqual(buf.topk_idx.dtype, torch.int64)
-        with self.assertRaisesRegex(ValueError, "indices must be torch.int64"):
-            executor_packer().pack(x, weights, ids.int(), self.buffer(tokens), tokens)
+        with self.assertRaisesRegex(ValueError, "indices must be"):
+            executor_packer().pack(
+                x, weights, ids.to(torch.int16), self.buffer(tokens), tokens
+            )
 
     def test_non_finite_policy_is_preserved(self):
         x = torch.ones(1, 256, dtype=torch.bfloat16, device="cuda")
@@ -295,7 +298,8 @@ class InputPackPolicyTest(unittest.TestCase):
         )
         torch.testing.assert_close(
             prepared.x.float()[0, :3],
-            torch.tensor([448.0, 448.0, -448.0], device="cuda"),
+            torch.tensor([float("nan"), 448.0, -448.0], device="cuda"),
+            equal_nan=True,
         )
 
     def test_shared_scale_padding_after_batch_shrink_and_graph_replay(self):

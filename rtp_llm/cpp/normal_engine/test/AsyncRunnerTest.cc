@@ -106,7 +106,7 @@ TEST_F(AsyncRunnerTest, DestructorDrainsCudaWorkAfterWorkerFailure) {
     ready->record(currentStream());
     {
         AsyncRunner runner(makeStream());
-        runner.launch([ready, output] {
+        runner.launch("failed CUDA task", [ready, output] {
             ready->block(cuda_graph::graphGetCurrentStream());
             output.fill_(19);
             throw std::runtime_error("failed after CUDA submission");
@@ -214,7 +214,7 @@ TEST_F(AsyncRunnerTest, RethrowsWorkerExceptionFromSync) {
     auto        stream = makeStream();
     AsyncRunner runner(stream);
 
-    runner.launch([] { throw std::runtime_error("async failure"); });
+    runner.launch("sync failure", [] { throw std::runtime_error("async failure"); });
     EXPECT_THROW(runner.sync(currentStream()), std::runtime_error);
 
     std::atomic<int> counter{0};
@@ -227,7 +227,7 @@ TEST_F(AsyncRunnerTest, RethrowsWorkerExceptionFromNextLaunch) {
     auto        stream = makeStream();
     AsyncRunner runner(stream);
 
-    runner.launch([] { throw std::runtime_error("async failure"); });
+    runner.launch("previous task failure", [] { throw std::runtime_error("async failure"); });
     EXPECT_THROW(runner.launch([] {}), std::runtime_error);
 
     std::atomic<int> counter{0};
@@ -238,14 +238,14 @@ TEST_F(AsyncRunnerTest, RethrowsWorkerExceptionFromNextLaunch) {
 
 TEST_F(AsyncRunnerTest, RethrowsNonStandardWorkerException) {
     AsyncRunner runner(makeStream());
-    runner.launch([] { throw 42; });
+    runner.launch("non-standard failure", [] { throw 42; });
     EXPECT_THROW(runner.sync(currentStream()), int);
 }
 
 TEST_F(AsyncRunnerTest, DestructorDoesNotRethrowUnobservedFailure) {
     EXPECT_NO_THROW({
         AsyncRunner runner(makeStream());
-        runner.launch([] { throw 19; });
+        runner.launch("unobserved failure", [] { throw 19; });
     });
 }
 

@@ -98,6 +98,51 @@ class PagedMqaContextLensCompatibilityTest(TestCase):
         self.assertEqual(fake_deep_gemm.metadata_calls, [2])
         self.assertEqual(fake_deep_gemm.logits_calls, [2])
 
+    def test_restored_legacy_kernel_uses_its_own_metadata(self):
+        fake_deep_gemm = self._fake_deep_gemm(expected_dim=2)
+        legacy_metadata = mock.Mock(wraps=fake_deep_gemm.get_paged_mqa_logits_metadata)
+        fake_deep_gemm.get_legacy_paged_mqa_logits_metadata = legacy_metadata
+        fake_deep_gemm.get_paged_mqa_logits_metadata = mock.Mock(
+            side_effect=AssertionError("MX metadata cannot schedule legacy MQA")
+        )
+        with mock.patch.object(
+            indexer_op_module, "deep_gemm", fake_deep_gemm
+        ), mock.patch.object(torch.cuda, "get_device_capability", return_value=(10, 3)):
+            logits = self._run_compat()
+
+        self.assertEqual(logits.tolist(), [2, 4096])
+        legacy_metadata.assert_called_once()
+        fake_deep_gemm.get_paged_mqa_logits_metadata.assert_not_called()
+
+    def test_restored_legacy_kernels_keep_fallback_on_unsupported_gpus(self):
+        for major in (8, 12):
+            with self.subTest(major=major):
+                backend = self._fake_deep_gemm(expected_dim=2)
+                backend.fp8_mqa_logits = mock.Mock()
+                backend.fp8_paged_mqa_logits = mock.Mock()
+                backend.get_legacy_paged_mqa_logits_metadata = mock.Mock()
+                with mock.patch.object(
+                    indexer_op_module, "deep_gemm", backend
+                ), mock.patch.object(
+                    torch.cuda, "get_device_capability", return_value=(major, 0)
+                ), mock.patch.object(
+                    indexer_op_module, "legacy_fp8_mqa_logits", return_value="dense"
+                ) as dense, mock.patch.object(
+                    indexer_op_module,
+                    "legacy_fp8_paged_mqa_logits",
+                    return_value="paged",
+                ) as paged:
+                    self.assertEqual(
+                        indexer_op_module._fp8_mqa_logits_compat(torch.empty(0)),
+                        "dense",
+                    )
+                    self.assertEqual(self._run_compat(), "paged")
+                dense.assert_called_once()
+                paged.assert_called_once()
+                backend.fp8_mqa_logits.assert_not_called()
+                backend.fp8_paged_mqa_logits.assert_not_called()
+                backend.get_legacy_paged_mqa_logits_metadata.assert_not_called()
+
     def test_old_deep_gemm_falls_back_to_1d_and_caches_layout(self):
         fake_deep_gemm = self._fake_deep_gemm(expected_dim=1)
         with mock.patch.object(indexer_op_module, "deep_gemm", fake_deep_gemm):
@@ -429,7 +474,10 @@ class IndexerTest(TestCase):
         fmha_params = rtp_llm_ops.prepare_sparse_mla_params(
             attn_inputs, config.attn_config.tokens_per_block
         )
-        fmha_params.schedule_metadata = deep_gemm.get_paged_mqa_logits_metadata(
+        get_metadata = getattr(deep_gemm, "get_legacy_paged_mqa_logits_metadata", None)
+        if get_metadata is None:
+            get_metadata = deep_gemm.get_paged_mqa_logits_metadata
+        fmha_params.schedule_metadata = get_metadata(
             fmha_params.kvlen_d.view(-1, 1),
             config.attn_config.tokens_per_block,
             deep_gemm.get_num_sms(),

@@ -64,6 +64,7 @@ from rtp_llm.models_py.triton_kernels.fla.fused_recurrent import (
 )
 from rtp_llm.models_py.triton_kernels.fla.gdn_gating import fused_gdn_gating
 from rtp_llm.models_py.triton_kernels.linear_replay import LinearReplay
+from rtp_llm.models_py.utils.debug import cudagraph_debug_kernel
 from rtp_llm.models_py.utils.typed_storage_view import LinearCacheConverter
 from rtp_llm.ops import (
     AttentionConfigs,

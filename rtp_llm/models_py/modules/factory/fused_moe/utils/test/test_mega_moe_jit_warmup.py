@@ -74,6 +74,8 @@ class MegaMoeJitWarmupTest(unittest.TestCase):
             moe_strategy="mega_moe",
         )
         executor._mega_l1_w = torch.empty(1)
+        executor.activation = "swiglu"
+        executor._activation_kwargs = {}
         executor._input_packer = FusedMegaMoEInputPacker()
         executor._mega_l1_w = torch.empty(1)
         executor._mega_group = object()
@@ -99,6 +101,7 @@ class MegaMoeJitWarmupTest(unittest.TestCase):
             self.addCleanup(_MEGA_MOE_JIT_WARMED_KEYS.clear)
             with self.assertRaisesRegex(RuntimeError, "compile failed"):
                 executor._maybe_warmup_jit_once()
+            executor.warmup_jit.assert_called_once()
             self.assertFalse(_MEGA_MOE_JIT_WARMED_KEYS)
             self.assertEqual(os.environ["TMPDIR"], "/old/tmp")
             self.assertTrue(
@@ -138,18 +141,26 @@ class MegaMoeJitWarmupTest(unittest.TestCase):
         ) as barrier, mock.patch(
             "torch.cuda.synchronize"
         ):
-            executor.warmup_jit([1, 4])
+            for activation, dtype in (("silu", torch.int64), ("situ", torch.int32)):
+                with self.subTest(activation=activation):
+                    executor.cfg.activation_type = activation
+                    executor.warmup_jit([1, 4])
+                    self.assertEqual(
+                        [call.args[2].dtype for call in forward.call_args_list[-2:]],
+                        [dtype, dtype],
+                    )
 
-        self.assertEqual(forward.call_count, 2)
-        self.assertEqual(forward_gate_pack.call_count, 4)
+        self.assertEqual(forward.call_count, 4)
+        self.assertEqual(forward_gate_pack.call_count, 8)
         payloads = [call.args[1] for call in forward_gate_pack.call_args_list]
         nonhash = [payload for payload in payloads if payload.bias is not None]
         hashed = [payload for payload in payloads if payload.tid2eid is not None]
-        self.assertEqual(len(nonhash), 2)
-        self.assertEqual(len(hashed), 2)
+        self.assertEqual(len(nonhash), 4)
+        self.assertEqual(len(hashed), 4)
         self.assertTrue(all(payload.route_scale == 2.5 for payload in payloads))
         self.assertTrue(all(payload.input_ids is not None for payload in hashed))
-        self.assertEqual(barrier.call_count, 3)
+        self.assertTrue(all(payload.tid2eid.dtype == torch.int64 for payload in hashed))
+        self.assertEqual(barrier.call_count, 6)
 
     def test_unchunked_generated_counts_use_bucket_representative(self):
         tokens = generate_mega_moe_jit_token_counts(
@@ -298,9 +309,8 @@ class MegaMoeJitWarmupTest(unittest.TestCase):
         )
         for executor_type, generator_path in cases:
             with self.subTest(executor=executor_type.__name__):
-                executor = executor_type.__new__(executor_type)
-                torch.nn.Module.__init__(executor)
-                executor.cfg = config
+                with mock.patch.object(executor_type, "setup_weights"):
+                    executor = executor_type(config, quant_config=None, weights={})
                 with mock.patch(generator_path, return_value=[1]) as generator:
                     self.assertEqual(
                         executor._resolve_jit_warmup_token_counts(128), [1]

@@ -97,8 +97,9 @@ void SpecLogitsVerifyRunner::ensureBuffersFit(const VerifyShape& shape) {
     auto cpu_i32    = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCPU);
     auto pinned_i32 = cpu_i32.pinned_memory(true);
 
-    if (!has2DCapacity(draft_tokens_cpu_, B, P)) {
-        draft_tokens_cpu_ = torch::empty({B, P}, pinned_i32);
+    const int64_t draft_capacity = B * (P + 1);
+    if (!has1DCapacity(draft_tokens_cpu_, draft_capacity)) {
+        draft_tokens_cpu_ = torch::empty({draft_capacity}, pinned_i32);
     }
     if (!has2DCapacity(processor_bitmask_cpu_, P + 1, W)) {
         processor_bitmask_cpu_ = torch::empty({P + 1, W}, cpu_i32);
@@ -128,12 +129,9 @@ void SpecLogitsVerifyRunner::ensureBuffersFit(const VerifyShape& shape) {
 #endif
 }
 
-void SpecLogitsVerifyRunner::materializeDraftTokensToCpu(const LaunchTask& task) {
+torch::Tensor SpecLogitsVerifyRunner::materializeDraftTokensToCpu(const LaunchTask& task) {
     const int64_t B = static_cast<int64_t>(task.total_streams);
     const int64_t P = static_cast<int64_t>(task.propose_step);
-    if (B == 0 || P == 0) {
-        return;
-    }
 
     const auto& draft_tokens = task.draft_tokens;
     RTP_LLM_CHECK_WITH_INFO(draft_tokens.defined(), "MTP spec logits verify requires draft tokens");
@@ -152,10 +150,12 @@ void SpecLogitsVerifyRunner::materializeDraftTokensToCpu(const LaunchTask& task)
         task.draft_tokens_ready_event->block(cuda_graph::graphGetCurrentStream());
     }
 #endif
-    auto draft     = draft_tokens.reshape({B, draft_cols}).narrow(1, draft_offset, P);
-    auto dst       = draft_tokens_cpu_.narrow(0, 0, B).narrow(1, 0, P);
+    // Copy complete rows so dropping the leading anchor does not require a GPU packing kernel.
+    auto draft     = draft_tokens.reshape({B, draft_cols});
+    auto dst       = draft_tokens_cpu_.narrow(0, 0, draft.numel()).view({B, draft_cols});
     auto draft_i32 = draft.scalar_type() == torch::kInt32 ? draft.contiguous() : draft.to(torch::kInt32).contiguous();
     dst.copy_(draft_i32);
+    return dst.narrow(1, draft_offset, P);
 }
 
 void SpecLogitsVerifyRunner::initializeCompactRows(const ActiveStreamLayout& layout, const VerifyShape& shape) {
@@ -175,18 +175,23 @@ void SpecLogitsVerifyRunner::initializeCompactRows(const ActiveStreamLayout& lay
     }
 }
 
-SpecLogitsVerifyRunner::MergeProcessorMasksResult SpecLogitsVerifyRunner::mergeProcessorMasks(
-    const LaunchTask& task, const ActiveStreamLayout& layout, const VerifyShape& shape) {
+SpecLogitsVerifyRunner::MergeProcessorMasksResult
+SpecLogitsVerifyRunner::mergeProcessorMasks(const LaunchTask&         task,
+                                            const ActiveStreamLayout& layout,
+                                            const VerifyShape&        shape,
+                                            const torch::Tensor&      draft_tokens) {
     auto proc_mask = processor_bitmask_cpu_.narrow(0, 0, shape.propose_step + 1)
                          .narrow(1, 0, static_cast<int64_t>(shape.bitmask_words));
-    auto*                                 merged_base = merged_bitmask_cpu_.data_ptr<int32_t>();
-    auto*                                 cap_ptr     = spec_cap_cpu_.data_ptr<int32_t>();
+    const auto*                           draft_base   = draft_tokens.data_ptr<int32_t>();
+    const auto                            draft_stride = draft_tokens.stride(0);
+    auto*                                 merged_base  = merged_bitmask_cpu_.data_ptr<int32_t>();
+    auto*                                 cap_ptr      = spec_cap_cpu_.data_ptr<int32_t>();
     std::vector<std::optional<ErrorInfo>> processor_errors(shape.batch_size);
 
     for (const auto& item : task.active) {
         fillAllAllowBitmask(proc_mask);
         SpecLogitsProcessorRequest request;
-        request.draft_tokens       = draft_tokens_cpu_.data_ptr<int32_t>() + item.stream_idx * shape.propose_step;
+        request.draft_tokens       = draft_base + item.stream_idx * draft_stride;
         request.propose_step       = shape.propose_step;
         request.bitmask_cpu_out    = proc_mask.data_ptr<int32_t>();
         request.bitmask_size_int32 = shape.bitmask_words;
@@ -282,9 +287,9 @@ SpecLogitsVerifyRunner::LaunchResult SpecLogitsVerifyRunner::run(const LaunchTas
 
         ensureBuffersFit(shape);
         std::fill_n(spec_cap_cpu_.data_ptr<int32_t>(), B, P);
-        materializeDraftTokensToCpu(task);
+        auto draft_tokens = materializeDraftTokensToCpu(task);
         initializeCompactRows(layout, shape);
-        auto merge_result       = mergeProcessorMasks(task, layout, shape);
+        auto merge_result       = mergeProcessorMasks(task, layout, shape, draft_tokens);
         auto result             = makeResult(shape);
         result.processor_errors = std::move(merge_result.processor_errors);
         return result;

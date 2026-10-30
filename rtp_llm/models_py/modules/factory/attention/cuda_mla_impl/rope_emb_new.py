@@ -7,6 +7,13 @@ from rtp_llm.ops import KvCacheDataType, compute_ops
 from rtp_llm.ops.compute_ops import KVCache, rtp_llm_ops
 
 
+class NoopMlaRotaryEmbeddingOp:
+    """Keep the physical suffix without applying a positional transform."""
+
+    def forward(self, query, key, fmha_params, precomputed_pos_ids=None):
+        return None
+
+
 class NewMlaRotaryEmbeddingOp(object):
     """Original rotary positional embedding."""
 

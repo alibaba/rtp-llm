@@ -2162,16 +2162,7 @@ TEST_F(GenerateStreamTest, testDynamicBeamOutputUsesUpdatedCurrentBatchSize) {
     ASSERT_EQ(stream->currentBatchSize(), 2);
     ASSERT_EQ(stream->nextBatchSize(), 3);
 
-    auto outputs = stream->prepareGenerateOutput({beam_tokens,
-                                                  1,
-                                                  torch::Tensor(),
-                                                  torch::Tensor(),
-                                                  torch::Tensor(),
-                                                  torch::Tensor(),
-                                                  torch::Tensor(),
-                                                  torch::Tensor(),
-                                                  torch::Tensor(),
-                                                  torch::Tensor()});
+    auto outputs = stream->prepareGenerateOutput({.new_tokens = beam_tokens, .num_new_tokens = 1});
     ASSERT_EQ(outputs.generate_outputs.size(), 2);
     EXPECT_EQ(outputs.generate_outputs[0].output_ids[0][0].item<int32_t>(), 4);
     EXPECT_EQ(outputs.generate_outputs[1].output_ids[0][0].item<int32_t>(), 7);
@@ -2600,6 +2591,34 @@ TEST_F(GenerateStreamTest, testChunkedPrefillSpecUpdateMiddleChunkDiscards) {
     expectChunkWindow(stream, /*prefix=*/8, /*length=*/2, /*is_last=*/true);
 }
 
+TEST_F(GenerateStreamTest, testMultimodalContextPrefillWindows) {
+    GenerateStreamBuilder builder;
+    for (const auto role : {RoleType::PREFILL, RoleType::PDFUSION}) {
+        for (const int input_length : {7, 8, 9}) {
+            SCOPED_TRACE(static_cast<int>(role));
+            SCOPED_TRACE(input_length);
+            auto stream = builder.createChunkedContextStream(
+                makeInputIds(input_length), role, /*chunk_size=*/8, [](GenerateInput& input, GenerateConfig&) {
+                    input.multimodal_features = std::vector<torch::Tensor>{torch::zeros({2, 4})};
+                });
+            EXPECT_TRUE(stream->chunkedPrefillEnabled());
+            ASSERT_FALSE(stream->hasError());
+            markRunning(stream);
+            if (input_length > 8) {
+                expectChunkWindow(stream, /*prefix=*/0, /*length=*/8, /*is_last=*/false);
+                updateOneToken(stream, 101);
+                EXPECT_EQ(stream->seqLength(), input_length);
+                expectChunkWindow(stream, /*prefix=*/8, /*length=*/1, /*is_last=*/true);
+            } else {
+                expectChunkWindow(stream, /*prefix=*/0, /*length=*/input_length, /*is_last=*/true);
+            }
+            updateOneToken(stream, 101);
+            EXPECT_FALSE(stream->isContextStream());
+            EXPECT_EQ(stream->seqLength(), input_length + 1);
+        }
+    }
+}
+
 TEST_F(GenerateStreamTest, testChunkedPrefillActivationGates) {
     GenerateStreamBuilder builder;
     const auto            input_ids = makeInputIds(9);
@@ -2674,10 +2693,6 @@ TEST_F(GenerateStreamTest, testChunkedPrefillActivationGates) {
         {"return_all_probs",
          [](GenerateInput&, GenerateConfig& config) { config.return_all_probs = ReturnAllProbsMode::DEFAULT; }},
         {"custom_output", [](GenerateInput& input, GenerateConfig&) { input.custom_output_token_position = 3; }},
-        {"multimodal",
-         [](GenerateInput& input, GenerateConfig&) {
-             input.multimodal_features = std::vector<torch::Tensor>{torch::Tensor()};
-         }},
     };
     for (const auto& test_case : rejection_cases) {
         SCOPED_TRACE(test_case.name);
@@ -2918,6 +2933,37 @@ TEST_F(GenerateStreamTest, importedPrefillMetricsAddToLocalCountersBeforeFirstOu
     EXPECT_EQ(stream->frontendContextTokenNumWithCache(), 22);
     EXPECT_EQ(stream->frontendContextExecuteTimeUs(), 26);
     EXPECT_EQ(stream->frontendContextExecuteTimeWithCacheUs(), 30);
+}
+
+TEST_F(GenerateStreamTest, testShortGroupsKeepChunkedPrefillValidation) {
+    GenerateStreamBuilder builder;
+    const auto            configure_group = [](GenerateInput& input, GenerateConfig&) {
+        input.group_id   = 1;
+        input.group_size = 2;
+    };
+    for (const auto role : {RoleType::PREFILL, RoleType::PDFUSION}) {
+        for (const auto length : {7, 8, 9}) {
+            SCOPED_TRACE(testing::Message() << "role=" << static_cast<int>(role) << ", length=" << length);
+            auto stream = builder.createChunkedContextStream(makeInputIds(length), role, 8, configure_group);
+            if (length <= 8) {
+                EXPECT_FALSE(stream->hasError());
+                EXPECT_TRUE(stream->chunkedPrefillEnabled());
+                EXPECT_EQ(stream->maxChunkSize(), 8);
+                EXPECT_EQ(stream->groupId(), 1);
+            } else {
+                EXPECT_TRUE(stream->hasError());
+                EXPECT_EQ(stream->stopReason(), "chunked prefill incompatible: force_batch");
+            }
+        }
+        auto incompatible = builder.createChunkedContextStream(
+            makeInputIds(8), role, 8, [](GenerateInput& input, GenerateConfig& config) {
+                input.group_id       = 1;
+                input.group_size     = 2;
+                config.return_logits = true;
+            });
+        EXPECT_TRUE(incompatible->hasError());
+        EXPECT_EQ(incompatible->stopReason(), "chunked prefill incompatible: return_logits");
+    }
 }
 
 }  // namespace rtp_llm

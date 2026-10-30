@@ -33,7 +33,15 @@ from rtp_llm.models_py.triton_kernels.legacy_fp8_indexer_score import (
 
 def _fp8_mqa_logits_compat(*args, **kwargs):
     if deep_gemm is not None and hasattr(deep_gemm, "fp8_mqa_logits"):
-        return deep_gemm.fp8_mqa_logits(*args, **kwargs)
+        restored_legacy = callable(
+            getattr(deep_gemm, "get_legacy_paged_mqa_logits_metadata", None)
+        )
+        query = args[0] if args else kwargs["q"]
+        if not restored_legacy or torch.cuda.get_device_capability(query.device)[0] in (
+            9,
+            10,
+        ):
+            return deep_gemm.fp8_mqa_logits(*args, **kwargs)
     return legacy_fp8_mqa_logits(*args, **kwargs)
 
 
@@ -47,15 +55,18 @@ def _get_paged_mqa_logits_metadata_compat(
     flat = context_lens.reshape(-1).contiguous()
     cached_dim = _paged_mqa_context_lens_dim
     lengths = flat if cached_dim == 1 else flat.view(-1, 1)
+    get_metadata = getattr(deep_gemm, "get_legacy_paged_mqa_logits_metadata", None)
+    if not callable(get_metadata):
+        get_metadata = deep_gemm.get_paged_mqa_logits_metadata
     # Metadata acceptance alone does not establish the logits ABI. Only the
     # complete logits call below may publish _paged_mqa_context_lens_dim.
     try:
-        return deep_gemm.get_paged_mqa_logits_metadata(lengths, block_kv, num_sms)
+        return get_metadata(lengths, block_kv, num_sms)
     except (AssertionError, RuntimeError) as error:
         if cached_dim is not None:
             raise
         try:
-            return deep_gemm.get_paged_mqa_logits_metadata(flat, block_kv, num_sms)
+            return get_metadata(flat, block_kv, num_sms)
         except (AssertionError, RuntimeError) as fallback_error:
             raise error from fallback_error
 
@@ -86,6 +97,19 @@ def _fp8_paged_mqa_logits_compat(
 
     global _paged_mqa_context_lens_dim
 
+    get_metadata = getattr(deep_gemm, "get_legacy_paged_mqa_logits_metadata", None)
+    if callable(get_metadata):
+        major = torch.cuda.get_device_capability(q.device)[0]
+        if not (
+            (major == 10 and block_kv in (32, 64, 128))
+            or (major == 9 and block_kv == 64)
+        ):
+            return legacy_fp8_paged_mqa_logits(
+                q, kv_cache, weights, context_lens, block_table, max_context_len
+            )
+    else:
+        get_metadata = deep_gemm.get_paged_mqa_logits_metadata
+
     # Keep this call's probing decision stable if another call populates the cache.
     cached_dim = _paged_mqa_context_lens_dim
     flat_context_lens = context_lens.reshape(-1).contiguous()
@@ -100,7 +124,7 @@ def _fp8_paged_mqa_logits_compat(
         try:
             metadata = schedule_metadata
             if metadata is None:
-                metadata = deep_gemm.get_paged_mqa_logits_metadata(
+                metadata = get_metadata(
                     adapted_context_lens,
                     block_kv,
                     deep_gemm.get_num_sms(),
