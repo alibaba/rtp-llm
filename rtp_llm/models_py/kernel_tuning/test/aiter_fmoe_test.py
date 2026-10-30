@@ -11,9 +11,12 @@ from urllib.parse import unquote
 
 from rtp_llm.models_py.kernel_tuning.aiter import fmoe
 
+# Requirements pin AITER either as a PyPI-style version spec or as a direct
+# wheel URL; both spellings must resolve to the supported AITER version.
 _AITER_WHEEL_VERSION_PATTERN = re.compile(
     r"/aiter/amd_aiter-([^/\s]+)-cp\d+-cp\d+-linux_x86_64\.whl"
 )
+_AITER_PIN_VERSION_PATTERN = re.compile(r"^amd-aiter==([^\s\\]+)", re.MULTILINE)
 
 
 def _runfile(path: str) -> Path:
@@ -165,7 +168,8 @@ class AiterFmoeTuningTest(unittest.TestCase):
                 requirements = _runfile(requirements_path).read_text()
                 versions = {
                     unquote(match.group(1))
-                    for match in _AITER_WHEEL_VERSION_PATTERN.finditer(requirements)
+                    for pattern in (_AITER_WHEEL_VERSION_PATTERN, _AITER_PIN_VERSION_PATTERN)
+                    for match in pattern.finditer(requirements)
                 }
                 self.assertEqual(versions, {fmoe.AITER_FMOE_SUPPORTED_VERSION})
 
