@@ -1,0 +1,276 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Mock Lab · 实验回看</title>
+<style>
+:root{--bg:#f5f6fa;--card:#fff;--ink:#202530;--muted:#6d7584;--line:#e9edf3;--blue:#2865dc;--green:#198363;--red:#bd3845;--soft:#edf3ff;--amber:#996419;--radius:10px;--space:16px;--font:14px}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:var(--font)/1.6 -apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif}
+header{height:56px;background:var(--card);border-bottom:1px solid var(--line);padding:0 28px;display:flex;justify-content:space-between;align-items:center}
+.brand{font-size:16px;font-weight:700}.brand span{color:var(--blue)}main{max-width:1600px;margin:auto;padding:24px 28px}.eyebrow{color:var(--muted);font-size:12px;letter-spacing:2px}h1{font-size:24px;margin:4px 0}p{margin:4px 0}.muted,small{color:var(--muted)}.summary{display:flex;gap:24px;flex-wrap:wrap;font-size:12px;margin:16px 0}.notice{background:var(--soft);padding:12px 16px;border-radius:var(--radius);margin:16px 0;color:var(--muted);font-size:12px}.error{color:var(--red)}.pass{color:var(--green)}
+.records{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);overflow:hidden;margin-bottom:24px}details+details{border-top:1px solid var(--line)}.records details details{margin-left:20px}summary{cursor:pointer;padding:10px 16px}pre{font:12px/1.7 ui-monospace,SFMono-Regular,monospace;white-space:pre-wrap;overflow-wrap:anywhere;padding:16px;margin:0;max-height:480px;overflow:auto}
+.section-label{font-size:12px;color:var(--muted);margin-bottom:8px}.gates{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;margin-bottom:16px}.gate{display:flex;flex-direction:column;align-items:flex-start;justify-content:flex-start;font:inherit;text-align:left;padding:16px 20px;background:var(--card);border:1px solid var(--line);border-radius:var(--radius);cursor:pointer;color:var(--ink);min-width:0}.gate:hover,.gate[aria-pressed="true"]{border-color:var(--blue)}.gate strong{display:block;font-size:28px;margin:8px 0}.gate small{display:block;overflow-wrap:anywhere}.gate:focus-visible,button:focus-visible,a:focus-visible{outline:2px solid var(--blue);outline-offset:3px}.gate.failed{border-left:3px solid var(--red)}
+#artifact-warnings{white-space:pre-line;overflow-wrap:anywhere}#gate-detail{background:var(--soft);border-radius:var(--radius);margin-bottom:16px}#gate-detail pre{max-height:320px}.hidden{display:none!important}.panel{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);overflow:hidden}.toolbar{display:flex;justify-content:space-between;align-items:center;gap:16px;padding:16px;border-bottom:1px solid var(--line)}.toolbar strong{font-size:16px}.tools{display:flex;gap:8px;align-items:center}button.action,a.action{font:inherit;font-size:12px;border:1px solid var(--line);border-radius:6px;padding:6px 10px;color:var(--blue);background:var(--card);cursor:pointer;text-decoration:none}.filters{display:flex;flex-wrap:wrap;gap:12px;padding:12px 16px;border-bottom:1px solid var(--line)}.filters label{font-size:12px;color:var(--muted)}.filters select{display:block;max-width:240px;padding:6px;margin-top:4px;border:1px solid var(--line);border-radius:6px;background:var(--card);color:var(--ink)}iframe{display:block;width:100%;height:1100px;border:0}.caption,footer{font-size:12px;color:var(--muted);padding:12px 16px;border-top:1px solid var(--line)}footer{border:0;padding:16px 0}.events{padding:8px 16px 16px;display:flex;flex-wrap:wrap;gap:8px}.events button{font:inherit;font-size:12px;text-align:left;border:1px solid var(--line);border-radius:6px;padding:6px 10px;background:var(--card);color:var(--muted);cursor:pointer}.events time{display:block;color:var(--ink)}
+#filters{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px;padding:16px;background:#fafbfe}
+#filters>label{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;min-width:0;padding:12px;border:1px solid var(--line);border-radius:8px;background:var(--card);font-size:12px;font-weight:600;color:var(--ink)}
+#filters select{grid-column:1/-1;width:100%;max-width:none;min-width:0;height:128px;margin:0;padding:4px;border-color:var(--line);border-radius:6px;font:12px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;scrollbar-width:thin}
+#filters option{padding:4px 8px;border-radius:4px}
+#filters option:checked{background:var(--soft);color:var(--blue)}
+#filters select:focus-visible{outline:2px solid var(--blue);outline-offset:2px}
+#filters .action{min-height:30px;padding:4px 8px;font-size:12px;font-weight:500;white-space:nowrap}
+#filters small{grid-column:1/-1;font-size:11px;font-weight:400;line-height:1.5}
+button.action:hover,a.action:hover{background:var(--soft);border-color:#cddcfa}
+#annotation-filter>summary{padding:12px 16px;font-size:12px;font-weight:600;color:var(--muted)}
+.annotation-controls{display:flex;flex-wrap:wrap;align-items:center;gap:8px;padding:0 16px 16px}
+.annotation-choices{display:flex;flex-wrap:wrap;gap:6px;flex-basis:100%;padding-top:4px}
+.annotation-choices label{display:inline-flex;align-items:center;gap:6px;max-width:100%;padding:4px 8px;border:1px solid var(--line);border-radius:6px;background:#fafbfe;color:var(--muted);font:12px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;overflow-wrap:anywhere;cursor:pointer}
+.annotation-choices label:has(input:checked){background:var(--soft);border-color:#d6e3fc;color:#315da1}
+.annotation-choices input{flex-shrink:0;width:14px;height:14px;margin:0;accent-color:var(--blue)}
+@media(max-width:760px){#filters>label{padding:10px;gap:6px}#filters .action{padding:4px 6px;font-size:11px}}
+@media(max-width:620px){#filters{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media(max-width:480px){#filters{grid-template-columns:1fr}}
+@media(max-width:900px){main{padding:16px}header{padding:0 16px}.gates{grid-template-columns:repeat(2,minmax(0,1fr))}.toolbar{align-items:flex-start;flex-direction:column}h1{font-size:22px}}
+@media(max-width:480px){.gates{grid-template-columns:1fr}.summary{gap:8px 16px}.tools{flex-wrap:wrap}}
+</style>
+</head>
+<body>
+<header><div class="brand"><span>◈</span> Mock Lab</div><span id="status" role="status">正在读取实验结果</span></header>
+<main>
+<div class="eyebrow">EXPERIMENT RESULT</div><h1 id="name">实验回看</h1><p id="describe" class="muted"></p>
+<div class="summary"><span id="times"></span><span id="duration"></span><span id="gate-count"></span></div>
+<div id="notice" class="notice">只读已完成实验：门禁使用保存的判定，Grafana 在线查询本次实验的 Prometheus 数据。</div>
+<div id="artifact-warnings" class="notice error hidden" role="status"></div>
+<section class="records" aria-label="实验配置与执行记录">
+<details><summary>查看配置与代码</summary>
+<details><summary>原始 Case</summary><pre id="source"></pre></details>
+<details><summary>查看完整配置与启动配方</summary><pre id="configuration"></pre></details>
+<details><summary>查看组件生效配置</summary><pre id="effective"></pre></details>
+<details><summary>查看代码版本与工作区差异</summary><pre id="versions"></pre></details>
+</details>
+<details><summary>查看 Phase / Step 执行时间线</summary><div id="events" class="events"></div></details>
+</section>
+<div class="section-label">门禁结果 · 点击定位检查区间；单点检查显示查询点附近的指标；图表筛选不改变保存的门禁判定</div>
+<section id="gates" class="gates" aria-label="保存的门禁判定"></section>
+<section id="gate-detail" class="hidden" aria-label="门禁详情"><pre></pre></section>
+<section class="panel" aria-label="Grafana 实验指标">
+<div class="toolbar"><div><strong>实验指标</strong><div id="focus" class="muted"></div></div><div class="tools"><button class="action" id="reset">完整实验区间</button><a class="action" id="open-grafana" target="_blank" rel="noopener">在 Grafana 打开</a></div></div>
+<div id="filters" class="filters hidden" aria-label="图表实例筛选"></div>
+<details id="annotation-filter" class="hidden"><summary id="annotation-summary">事件线</summary><div class="annotation-controls"><button class="action" id="annotations-all">全部显示</button><button class="action" id="annotations-none">全部隐藏</button><div id="annotation-choices" class="annotation-choices" aria-label="事件线 Step 选择"></div></div></details>
+<div id="metrics-notice" class="notice" role="status">指标服务启动中；配置和门禁可先查看。</div>
+<iframe class="hidden" id="grafana" title="Grafana 实验指标与事件线"></iframe>
+<div class="caption">每个 Step 一个标注，门禁注释包含预期值和实际值；已记录的指标窗口显示为阴影区间。事件线可按 Step 筛选，完整 Phase / Step 记录保留在执行时间线。缺失指标不补零；页面不会发压或重新判定门禁。</div>
+</section>
+<footer>单个实验 · 默认 Grafana view · 曲线不固化进 HTML · Ctrl+C 结束查看服务</footer>
+</main>
+<script>
+let experiment;
+let selection;
+const filters = new Map();
+const annotationSteps = new Set();
+const $ = id => document.getElementById(id);
+const format = time => new Date(time).toLocaleString('zh-CN', {hour12:false});
+const pretty = value => value === null || value === undefined ? '未采集' : JSON.stringify(value, null, 2);
+function focus(from, to, title) {
+  selection = {from, to, title};
+  $('focus').textContent = title + ' · ' + format(from) + ' — ' + format(to);
+  if (experiment.metrics.status !== 'ready') return;
+  const url = new URL(experiment.metrics.url);
+  url.search = new URLSearchParams({orgId:'1', theme:'light', kiosk:'1', from:String(from), to:String(to), refresh:''});
+  filters.forEach((values, name) => values.forEach(value => url.searchParams.append('var-' + name, value)));
+  if (annotationSteps.size) annotationSteps.forEach(step => url.searchParams.append('var-annotation_steps', 'step:' + step));
+  else url.searchParams.set('var-annotation_steps', '__none__');
+  $('grafana').src = url.href;
+  url.searchParams.delete('kiosk');
+  const standalone = new URL(experiment.metrics.open_url ?? experiment.metrics.url);
+  standalone.search = url.search;
+  $('open-grafana').href = standalone.href;
+  $('focus').textContent = title + ' · ' + format(from) + ' — ' + format(to);
+}
+function clearGateSelection() {
+  $('gate-detail').classList.add('hidden');
+  document.querySelectorAll('.gate').forEach(card => card.setAttribute('aria-pressed', 'false'));
+}
+function reset() {
+  clearGateSelection();
+  focus(experiment.start, experiment.end, '完整实验');
+}
+function value(gate) {
+  if (!Object.hasOwn(gate, 'actual')) return '未取得结果';
+  if (Object.hasOwn(gate.expect, 'count') && Array.isArray(gate.actual)) return gate.actual.length + ' 个';
+  if (typeof gate.actual === 'number') {
+    if (gate.unit === 'ratio') return (gate.actual * 100).toFixed(1) + '%';
+    return Number(gate.actual.toPrecision(5)).toString() + (gate.unit ? ' ' + gate.unit : '');
+  }
+  if (Number.isInteger(gate.actual?.matched)) return gate.actual.matched + ' 条';
+  return typeof gate.actual === 'boolean' ? String(gate.actual) : '结构化结果';
+}
+function expectation(gate) {
+  const target = gate.expect.eq;
+  if (target && Number.isInteger(target.matched) && target.outcomes) {
+    const names = {success:'成功', error:'错误', timeout:'超时', cancelled:'取消'};
+    return target.matched + ' 条；' + Object.entries(target.outcomes).map(([key, value]) => (names[key] ?? key) + ' ' + value).join('，');
+  }
+  const operators = {eq:'=', gte:'≥', lte:'≤', count:'数量 ='};
+  return Object.entries(gate.expect).map(([key, target]) => (operators[key] ?? key) + ' ' +
+    (gate.unit === 'ratio' && typeof target === 'number' ? (target * 100).toFixed(1) + '%' : JSON.stringify(target))).join('，') +
+    (gate.unit && gate.unit !== 'ratio' ? ' ' + gate.unit : '');
+}
+function addGate(gate) {
+  const card = document.createElement('button');
+  card.className = 'gate' + (gate.status === 'PASS' ? '' : ' failed');
+  card.setAttribute('aria-pressed', 'false');
+  const title = document.createElement('span'); title.textContent = gate.title;
+  const actual = document.createElement('strong'); actual.textContent = value(gate);
+  const expected = document.createElement('small'); expected.textContent = '预期 ' + expectation(gate);
+  const status = document.createElement('small'); status.className = gate.status === 'PASS' ? 'pass' : 'error';
+  status.textContent = gate.status === 'PASS' ? '✓ 通过' : gate.status + (gate.error ? ' · ' + gate.error : ' · 未通过');
+  card.append(title, actual, expected, status);
+  card.onclick = () => {
+    document.querySelectorAll('.gate').forEach(item => item.setAttribute('aria-pressed', String(item === card)));
+    const range = gate.from !== null && gate.to !== null;
+    focus(range ? gate.from : gate.point - 2000, range ? gate.to : gate.point + 2000, gate.title);
+    $('gate-detail').classList.remove('hidden');
+    $('gate-detail').querySelector('pre').textContent =
+      gate.interface + '\n' + (range ? '检查区间：' + format(gate.from) + ' — ' + format(gate.to) : '查询点：' + format(gate.point) + '；图表展示前后 2 秒上下文') +
+      '\n参数：' + pretty(gate.args) + '\n实际值：' + pretty(gate.actual) + '\n预期值：' + pretty(gate.expect) + '\n保存的判定：' + gate.status;
+  };
+  $('gates').append(card);
+}
+function showFilters(options) {
+  const labels = {engine_instance:'Engine 地址', prefill_instance:'Prefill 地址', decode_instance:'Decode 地址', vit_instance:'ViT 地址', master_instance:'Master 地址', client_instance:'Client 地址'};
+  for (const [name, addresses] of Object.entries(options)) {
+    if (filters.has(name) || !addresses.length) continue;
+    filters.set(name, ['$__all']);
+    const label = document.createElement('label'), select = document.createElement('select');
+    label.textContent = labels[name] ?? name;
+    select.id = name;
+    select.multiple = name in labels;
+    if (select.multiple) { select.size = 5; select.setAttribute('aria-label', labels[name] + '（支持多选）'); }
+    const all = document.createElement('option'); all.value = '$__all'; all.textContent = select.multiple ? 'All · 聚合全部' : '全部'; all.selected = true; select.append(all);
+    addresses.forEach(address => {
+      const option = document.createElement('option'); option.value = address; option.textContent = address; select.append(option);
+    });
+    const choose = values => {
+      filters.set(name, values);
+      Array.from(select.options).forEach(option => { option.selected = values.includes(option.value); });
+      focus(selection.from, selection.to, selection.title);
+    };
+    select.onchange = () => {
+      let values = Array.from(select.selectedOptions, option => option.value);
+      if (values.includes('$__all') && values.length > 1) {
+        values = filters.get(name).includes('$__all') ? values.filter(value => value !== '$__all') : ['$__all'];
+      }
+      choose(values.length ? values : ['$__all']);
+    };
+    label.append(select);
+    if (select.multiple) {
+      const allButton = document.createElement('button'), separateButton = document.createElement('button');
+      allButton.className = separateButton.className = 'action';
+      allButton.textContent = '聚合全部'; separateButton.textContent = '逐实例全选';
+      allButton.onclick = () => choose(['$__all']);
+      separateButton.onclick = () => choose(addresses.length ? [...addresses] : ['$__all']);
+      const help = document.createElement('small'); help.textContent = '按住 Ctrl / ⌘ 多选地址';
+      label.append(allButton, separateButton, help);
+    }
+    $('filters').append(label);
+  }
+  $('filters').classList.toggle('hidden', !filters.size);
+}
+function showAnnotations(state) {
+  if (!state || $('annotation-choices').childElementCount) return;
+  const update = (reload = true) => {
+    $('annotation-summary').textContent = '事件线 · 已选 ' + annotationSteps.size + ' / ' + state.steps.length + ' 个 Step';
+    if (reload) focus(selection.from, selection.to, selection.title);
+  };
+  for (const step of state.steps) {
+    const label = document.createElement('label'), checkbox = document.createElement('input');
+    checkbox.type = 'checkbox'; checkbox.value = step; checkbox.checked = state.selected.includes(step);
+    if (checkbox.checked) annotationSteps.add(step);
+    checkbox.onchange = () => {
+      if (checkbox.checked) annotationSteps.add(step); else annotationSteps.delete(step);
+      update();
+    };
+    label.append(checkbox, document.createTextNode(step)); $('annotation-choices').append(label);
+  }
+  const choose = all => {
+    annotationSteps.clear();
+    $('annotation-choices').querySelectorAll('input').forEach(checkbox => {
+      checkbox.checked = all; if (all) annotationSteps.add(checkbox.value);
+    });
+    update();
+  };
+  $('annotations-all').onclick = () => choose(true);
+  $('annotations-none').onclick = () => choose(false);
+  $('annotation-filter').classList.remove('hidden');
+  update(false);
+}
+function showMetrics(state) {
+  const changed = experiment.metrics.url !== state.url || experiment.metrics.status !== state.status;
+  experiment.metrics = state;
+  const ready = state.status === 'ready';
+  $('grafana').classList.toggle('hidden', !ready);
+  $('open-grafana').classList.toggle('hidden', !ready);
+  $('metrics-notice').classList.toggle('hidden', ready);
+  $('metrics-notice').textContent = state.status === 'starting' ? '指标服务启动中；配置和门禁可先查看。' :
+    '指标不可用：' + state.error + '。实验判定保持原样；修复后可重新启动查看命令。';
+  if (ready) { showFilters(state.filters ?? {}); showAnnotations(state.annotations); }
+  if (ready && (changed || !$('grafana').hasAttribute('src'))) focus(selection.from, selection.to, selection.title);
+}
+async function refreshMetrics() {
+  try {
+    const response = await fetch('/api/metrics');
+    if (!response.ok) throw new Error('HTTP ' + response.status);
+    const state = await response.json();
+    showMetrics(state);
+    if (state.status !== 'unavailable') setTimeout(refreshMetrics, 2000);
+  } catch (error) {
+    showMetrics({status:'unavailable', url:null, error:'查看服务连接断开 · ' + error.message});
+  }
+}
+async function load() {
+  try {
+    const response = await fetch('/api/experiment');
+    if (!response.ok) throw new Error('实验记录读取失败：' + response.status);
+    experiment = await response.json();
+    $('name').textContent = experiment.name; $('describe').textContent = experiment.describe;
+    $('status').textContent = '已完成 · ' + experiment.result.status;
+    $('status').className = experiment.result.status === 'PASS' ? 'pass' : 'error';
+    $('times').textContent = '实验时间 ' + format(experiment.start) + ' — ' + format(experiment.end);
+    $('duration').textContent = '耗时 ' + ((experiment.end - experiment.start) / 1000).toFixed(1) + ' 秒';
+    $('gate-count').textContent = '已读取门禁 ' + experiment.gates.filter(gate => gate.status === 'PASS').length + ' / ' + experiment.gates.length + (experiment.gates.length ? ' 通过' : ' · 无可用记录');
+    $('source').textContent = experiment.source ?? '未采集'; $('configuration').textContent = pretty({configuration:experiment.configuration, collection:experiment.collection});
+    $('effective').textContent = Object.keys(experiment.effective).length ? pretty(experiment.effective) : '未采集'; $('versions').textContent = pretty(experiment.versions);
+    if (experiment.result.status !== 'PASS' || !experiment.collection?.complete) {
+      $('notice').classList.add('error');
+      $('notice').textContent = '实验结果：' + experiment.result.status + (experiment.result.error ? ' · ' + experiment.result.error : '') +
+        '；清理错误：' + ((experiment.result.cleanup_errors ?? []).join('；') || '无') +
+        '；采集：' + (experiment.collection === null ? '未采集' : experiment.collection.complete ? '完整' : '不完整');
+    }
+    if (experiment.warnings.length) {
+      $('artifact-warnings').classList.remove('hidden');
+      $('artifact-warnings').textContent = '产物不完整，未重新判定实验：\n' + experiment.warnings.join('；\n');
+    }
+    experiment.events.forEach(event => {
+      const button = document.createElement('button'), time = document.createElement('time');
+      time.textContent = format(event.time); button.append(time, document.createTextNode(event.text));
+      button.onclick = () => {
+        clearGateSelection();
+        focus(event.timeEnd !== null && event.timeEnd !== undefined ? event.time : event.time - 2000, event.timeEnd ?? event.time + 2000, event.text);
+      };
+      $('events').append(button);
+    });
+    experiment.gates.forEach(addGate);
+    if (!experiment.gates.length) $('gates').textContent = '没有可展示的门禁记录；缺失或损坏情况见产物提示。';
+    selection = {from:experiment.start, to:experiment.end, title:'完整实验'};
+    $('focus').textContent = '完整实验 · ' + format(experiment.start) + ' — ' + format(experiment.end);
+    $('reset').onclick = reset;
+    showMetrics(experiment.metrics);
+    if (experiment.metrics.status !== 'unavailable') setTimeout(refreshMetrics, 2000);
+  } catch (error) {
+    $('status').textContent = '读取失败'; $('status').className = 'error'; $('notice').textContent = error.message;
+  }
+}
+load();
+</script>
+</body>
+</html>

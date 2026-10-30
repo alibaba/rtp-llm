@@ -37,6 +37,8 @@ final class RtpScheduler implements Scheduler {
         KvCache.Lease lease;
         int reused;
         boolean prefillFinished;
+        final long begun = System.nanoTime();
+        long queuedAt = begun, waitNanos, firstToken, transferStarted;
         long admittedAt = Long.MIN_VALUE, attemptedGeneration = Long.MIN_VALUE;
         Phase phase = QUEUED;
         ReportedPhase finalPhase;
@@ -119,7 +121,7 @@ final class RtpScheduler implements Scheduler {
                     throw new RequestFailure(INVALID, "Generation requires loaded KV and a new generation permit");
                 entry.generating = true;
                 entry.state.transferred(1);
-                entry.phase = QUEUED; waiting.addLast(entry);
+                entry.phase = QUEUED; entry.queuedAt = System.nanoTime(); waiting.addLast(entry);
             }
             case PREFILL_COMPLETE -> {
                 if (prefill() || !entry.loaded || entry.generating || !entry.prefillFinished)
@@ -191,7 +193,20 @@ final class RtpScheduler implements Scheduler {
             items.add(new ForwardBatch.Request(entry.input.identity(), entry.input.tokens(), entry.reused,
                 prefill() ? 1 : entry.input.maxNewTokens(), progress.generated(), tokens, entry.input.priority(), List.of()));
             members.add(new Member(entry, entry.state.forward(), entry.nextStep));
+            if (entry.queuedAt != 0) { entry.waitNanos += System.nanoTime() - entry.queuedAt; entry.queuedAt = 0; }
             entry.phase = FORWARD;
+        }
+        metrics.observe("rtp_llm_context_batch_size", prefill() ? items.size() : 0);
+        metrics.observe("rtp_llm_generate_batch_size", prefill() ? 0 : items.size());
+        long executeTokens = items.stream().mapToLong(i -> prefill() ? i.computeTokens() : i.stepTokens()).sum();
+        long maxSequence = items.stream().mapToLong(i -> (long) i.inputTokens() + i.generatedTokens()).max().orElse(0);
+        metrics.observe("rtp_llm_execute_token_size", executeTokens);
+        metrics.observe("rtp_llm_max_seq_len", maxSequence);
+        if (prefill()) {
+            metrics.observe("rtp_llm_context_batch_size_when_has_context", items.size());
+            metrics.observe("rtp_llm_generate_batch_size_when_has_context", 0);
+            metrics.observe("rtp_llm_execute_token_size_when_has_context", executeTokens);
+            metrics.observe("rtp_llm_max_seq_len_when_has_context", maxSequence);
         }
         var batch = new ForwardBatch(config.id() + "/" + ++batchSequence, List.of(new ForwardBatch.Partition(0, items)));
         executing = new Work(new Batch(List.copyOf(members)), batch);
@@ -272,6 +287,7 @@ final class RtpScheduler implements Scheduler {
                 var result = config.compute().completed(member.step());
                 int committed = result.committedTokens();
                 entry.state.commit(committed, outcome.elapsedNanos());
+                if (committed > 0 && entry.firstToken == 0) entry.firstToken = System.nanoTime();
                 entry.nextStep = null;
                 output += committed;
                 if (prefill()) { running.remove(entry); entry.phase = READY; entry.prefillFinished = result.finished(); }
@@ -318,7 +334,7 @@ final class RtpScheduler implements Scheduler {
         var entry = entry(request);
         if (!live(entry) || entry.readStarted || (prefill() ? entry.phase != READY : entry.phase != LOADING))
             throw new RequestFailure(INVALID, "Request is not ready for a new KV transfer");
-        entry.readStarted = true;
+        entry.readStarted = true; entry.transferStarted = System.nanoTime();
         entry.phase = TRANSFERRING;
         return entry.state.pin();
     }
@@ -333,6 +349,7 @@ final class RtpScheduler implements Scheduler {
             if (entry.lease == null || entry.loaded || entry.generating)
                 throw new RequestFailure(INVALID, "Unexpected KV load completion");
             entry.loaded = true;
+            metrics.observe("rtp_llm_stream_loading_cache_latency_us", (System.nanoTime() - entry.transferStarted) / 1000.0);
             entry.prefillFinished = transferred.prefillFinished();
         }
         entry.phase = TRANSFERRED;
@@ -350,7 +367,20 @@ final class RtpScheduler implements Scheduler {
         entry.state.finish(failure);
     }
     private void terminal(Entry entry, RequestFailure failure) {
-        history.add(task(entry, System.nanoTime(), System.currentTimeMillis(), failure));
+        long now = System.nanoTime();
+        history.add(task(entry, now, System.currentTimeMillis(), failure));
+        // Real emits stream timings for success, cancellation and timeout, not arbitrary internal errors.
+        if (failure == null || failure.reason() == CANCELLED || failure.reason() == TIMEOUT) {
+            var progress = entry.state.snapshot();
+            metrics.observe("rtp_llm_latency_us", (now - entry.begun) / 1000.0);
+            metrics.observe("rtp_llm_wait_latency_us", (entry.waitNanos + (entry.queuedAt == 0 ? 0 : now - entry.queuedAt)) / 1000.0);
+            if (entry.firstToken != 0) metrics.observe("rtp_llm_first_token_latency_us", (entry.firstToken - entry.begun) / 1000.0);
+            metrics.observe("rtp_llm_input_token_length", entry.input.tokens());
+            metrics.observe("rtp_llm_output_token_length", progress.generated());
+            metrics.observe("rtp_llm_iterate_count", progress.iterations());
+            metrics.observe("rtp_llm_reuse_length", entry.reused);
+            metrics.observe("rtp_llm_query_batch_size", 1); // Native query batch is beams, not the scheduler batch.
+        }
         active.remove(entry.input.identity(), entry);
         metrics.finished(failure == null ? EngineMetrics.Outcome.success : switch (failure.reason()) {
             case CANCELLED -> EngineMetrics.Outcome.cancelled;
@@ -417,7 +447,10 @@ final class RtpScheduler implements Scheduler {
         var admission = cache.acquire(capacityTokens, reuse ? entry.input.keys().subList(0, matched) : List.of());
         entry.attemptedGeneration = admission.generation();
         if (admission.lease() == null) return admission.failure();
-        if (entry.admittedAt == Long.MIN_VALUE) entry.admittedAt = System.nanoTime();
+        if (entry.admittedAt == Long.MIN_VALUE) {
+            entry.admittedAt = System.nanoTime();
+            if (!prefill() && entry.queuedAt != 0) { entry.waitNanos += entry.admittedAt - entry.queuedAt; entry.queuedAt = 0; }
+        }
         entry.lease = admission.lease();
         entry.reused = Math.toIntExact(admission.lease().reusedTokens());
         entry.state.attach(entry.lease, () -> entry.lease.publish(
@@ -472,7 +505,7 @@ final class RtpScheduler implements Scheduler {
             var host = cache.hostSnapshot();
             long block = config.blockSize();
             return new EngineMetrics.State(counts.waiting(), counts.running(), counts.loading(), counts.ready(), kv.totalBlocks() * block,
-                kv.availableBlocks() * block, kv.freeBlocks() * block, kv.heldBlocks() * block, host.total() * block, host.free() * block);
+                kv.availableBlocks() * block, kv.freeBlocks() * block, kv.heldBlocks() * block, host.total() * block, host.free() * block, config.blockSize());
         }
     }
     @Override public String scrapeMetrics() { return metrics.scrape(); }

@@ -94,7 +94,8 @@ def local_launch(case, java, prometheus, *, framework, engine_mode='shared'):
             raise ExecutionError('Master classpath has missing or nonabsolute entries; run scripts/build.sh first')
         classpath = os.pathsep.join([str(framework / 'java/master/target/classes'), dependencies])
         master_prefix = prefix + ['-cp', classpath]
-        commands['master'] = master_prefix + ['org.flexlb.MasterNode']
+        # shortcut: expose all native metrics locally until collection cost is measured at scale.
+        commands['master'] = prefix + ['-Dflexlb.monitor.metric-whitelist=flexlb_', '-cp', classpath, 'org.flexlb.MasterNode']
         raw['zookeeper'] = {'command': master_prefix + ['org.flexlb.mock.master.ZookeeperNode'], 'startup_timeout': '60s'}
     if {'prefill', 'decode', 'vit'} & case.environment.keys():
         engine = prefix + ['-cp', str(artifact('java/host/target/mock-engine-service-1.0-SNAPSHOT-all.jar')),

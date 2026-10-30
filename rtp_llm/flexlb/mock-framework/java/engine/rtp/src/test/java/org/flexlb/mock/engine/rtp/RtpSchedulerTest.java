@@ -89,13 +89,21 @@ class RtpSchedulerTest {
             assertFalse(first.terminal.isDone()); assertFalse(scheduler.cancelled(batch));
             complete(scheduler, batch, config); drain(scheduler);
             assertEquals(RequestFailure.Reason.CANCELLED, first.terminal.get(1, TimeUnit.SECONDS).reason());
+            String observations = scheduler.scrapeMetrics();
+            assertTrue(observations.lines().anyMatch(line -> line.startsWith("rtp_llm_generate_batch_size{") && line.endsWith(" 2.0")), observations);
+            assertTrue(observations.lines().anyMatch(line -> line.startsWith("rtp_llm_execute_token_size{") && line.endsWith(" 2.0")), observations);
             assertEquals(1, a.snapshot().generated()); assertEquals(2, b.snapshot().generated());
             assertEquals(new QueueSnapshot(0, 1, 0, 0), scheduler.queues());
-            assertTrue(scheduler.scrapeMetrics().contains("mock_engine_forward_seconds_count{role=\"decode\",} 1.0"));
+            assertTrue(scheduler.scrapeMetrics().lines().anyMatch(line -> line.startsWith("rtp_llm_model_forward_seconds_count{")
+                && line.contains("role=\"decode\"") && line.endsWith(" 1.0")));
             var next = scheduler.schedule();
             assertEquals(List.of("2"), next.batch().dps().getFirst().requests().stream().map(r -> r.id()).toList());
             complete(scheduler, next, config); drain(scheduler);
             assertNull(second.terminal.get(1, TimeUnit.SECONDS)); assertEquals(12, cache.snapshot(0, false).availableBlocks());
+            String terminalMetrics = scheduler.scrapeMetrics();
+            for (String name : List.of("rtp_llm_latency_us", "rtp_llm_wait_latency_us", "rtp_llm_first_token_latency_us",
+                    "rtp_llm_input_token_length", "rtp_llm_output_token_length", "rtp_llm_iterate_count", "rtp_llm_query_batch_size"))
+                assertTrue(terminalMetrics.contains(name + "{"), terminalMetrics);
         }
     }
 

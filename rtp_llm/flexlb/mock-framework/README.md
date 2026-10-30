@@ -390,7 +390,43 @@ uv run --locked mock-case run cases/basic/case.yaml \
 
 配方文件和结果目录都要使用新路径。`launch` 不启动组件、不下载工具；它检查本地构建产物及 Master classpath，并复用 `prepare_launch` 的配置校验，输出当前 `run --launch` 接受的 YAML。配方中的路径为本机绝对路径，不提交到仓库；需要调整 JVM 参数时编辑生成的配方。默认设置 `-XX:ActiveProcessorCount=2`，只限制本地 JVM 看到的处理器数，不代表 CPU 配额保证。
 
+本机 Mock 配方临时为 Master 添加 `-Dflexlb.monitor.metric-whitelist=flexlb_`，导出全部 FlexLB 业务指标；JVM 等非 FlexLB 指标沿用现有导出。该设置不修改生产 Master 的默认值。全量采集在规模压测下的序列数、采样耗时及资源开销尚需验证，暂不据此取消生产限制。
+
 `shared` 把 P/D 放进一个 Engine JVM；改为 `--engine-mode isolated` 可生成每实例独立 JVM 的配方，Case 不变。Master 与 ZK 始终独立 JVM。Client 按当前拓扑自行发现主 Master。输出包括 result.json、gates.jsonl、组件日志、Client 请求证据及 Prometheus 数据；异常会中断并执行统一清理。
+
+## 实验结束后查看基础 view
+
+默认大盘的分区、聚合、地址筛选、标签来源和未实现观测见 [views/README.md](views/README.md)。
+
+基础 Case 在末尾用 `view: ../../views/default.json` 引用通用的原生 Grafana 大盘 JSON，独立于 environment。执行时把这份 view 保存为结果目录下的 view.json，避免以后修改源文件改变已完成实验的展示。配置仍由配置加载器负责，view 不参与发压、调度或门禁判定。
+
+```sh
+uv run --locked mock-view /tmp/basic-result \
+  --output /tmp/basic-view \
+  --prometheus "$PROMETHEUS_BIN" \
+  --grafana-home "$GRAFANA_HOME"
+```
+
+`GRAFANA_HOME` 是包含 bin/grafana、conf 和 public 的 Grafana 安装目录；输出目录必须是新的、位于实验目录之外的目录。命令先在回环地址提供回看页面并打印 URL，再启动独立的 Prometheus 与 Grafana。页面显示指标服务的启动状态，启动失败仍可查看配置和门禁。Ctrl+C 或 SIGTERM 统一回收页面服务和所拥有的子进程；页面关闭不等于停止服务。端口冲突直接报错，不连接其他查看会话或已有服务。
+
+查看服务复制已完成实验的 TSDB，原始结果与数据不被重新打开写入；它不启动任何 Engine/Master/Client、不重新执行检查。多个查看会话使用不同输出目录和端口，可以独立查看同一份实验。
+
+一个页面展示原始 Case、完整配置/启动配方、组件生效配置、代码版本/工作区差异、Phase/Step 时间线、保存的门禁，以及 Grafana 在线曲线。默认大盘所有 row 折叠，Prefill/Decode 分区并显式过滤各自 role；唯一线上参考是 RTP-LLM 大盘（包括其中的 FlexLB 分区）。当前已上报的 Mock 观测与 real 待埋点面板分开说明，ViT 和共享 JVM 的宿主资源缺口不伪造数据。Client 的 TTFT/请求耗时不能冒充 Engine 延迟。完整来源与覆盖见 views/coverage.md。每实例曲线保留 instance/role 等原有标签，支持 Grafana 自己的缩放与曲线选择。
+
+点击门禁卡片定位其保存的指标窗口；执行侧 metric_window 事件记录真正使用的起止时间，展示层不根据当前实现重新计算。原始 PromQL 与非指标检查只标记查询点，图表显示附近上下文，不解析表达式推导窗口。每个 Step 只导入一个图表标注：普通操作标在开始时刻；有门禁时使用查询点或已记录的查询窗口，并在注释中展示接口、判定、预期条件、实际值（含单位）和错误。Phase 和 Step 的完整开始/结束记录仍保留在执行时间线。
+
+事件线默认全部显示。在 Case 引用的 View JSON 顶层可加 `"annotation_steps": ["traffic", "kill_a", "kill_b"]` 指定默认选中的 Step，空数组表示默认全部隐藏；省略表示全选。它只属于展示配置，不扩展 Step，也不改变门禁卡片或执行记录。查看时校验重复和未知 ID；错误只影响指标展示，不改变实验结果。页面“事件线”可以逐项勾选、全部显示或全部隐藏，独立 Grafana 页面也有对应的 Step 多选变量。筛选只改变查询标签，所有标注仍然保留，不重启指标进程、不重跑实验。曲线在线查询保留的 TSDB，不固化进 HTML。
+
+实验判定、产物完整性和查看服务状态分别展示：
+
+- result.json 是核心记录，必须含有效的 status、带时区的 started_at/finished_at；缺失或损坏时命令报告文件和字段，拒绝猜测实验结果。只查看已完成实验。
+- 配置、代码版本、接口元数据、采集记录和事件/门禁日志属于附加记录。缺失或损坏时显示具体文件；JSONL 中损坏的行标出行号，保留其他有效行。页面说明记录不完整，不把缺失门禁当作通过。没有配置也能按保存的 step 名展示门禁。
+- TSDB、view.json 或依赖程序不可用，或指标进程启动失败/运行中退出时，指标区域说明原因，配置、门禁和时间线仍可读。已启动的指标进程统一回收，不自动重试。完整异常和进程 stdout/stderr 留在查看目录；修复后重新运行查看命令，使用新输出目录。
+- ERROR/FAIL/CANCELLED、清理错误、采集不完整以及缺失指标均如实显示，缺失数据不补零。即使查看服务故障，也不改写实验的 PASS/FAIL/ERROR/CANCELLED。
+
+实现分为 CLI（view/__main__.py）、服务生命周期与固定只读 HTTP 路由（view/service.py）、产物读取（view/records.py）、Grafana 配置与事件导入（view/grafana.py）、页面（view/page.html）。进程生命周期直接复用现有 ProcessSupervisor，不复制进程管理实现；Runner 只保存实验事实和 view 快照，不依赖展示层。
+
+查看只读取指定的一次实验，不增加实验索引、实例历史台账或运行中控制。页面只轮询查看服务自身的指标服务状态，不轮询 Case 接口或重新判定门禁。自定义 view 继续使用原生 Grafana JSON；复用线上大盘时，需要把查询和标签改为本地实际存在的指标，不自动兼容线上 VIP 或 KMonitor。
 
 ## Case 配置和编译
 
@@ -787,28 +823,40 @@ decode_retry_times、decode_retry_timeout_ms 在当前 real C++ 执行代码中�
 
 ## 指标、采集和查询
 
-EngineMetrics 使用 Prometheus simpleclient 0.16.0，每个节点独立注册表，`GET /metrics` 标准文本导出。事件发生时更新累计量，抓取时读取瞬时量，没有常驻采样线程。业务标签只保留 role；Prometheus 为每个采集目标设置 instance=实际 RPC 服务地址，额外维度仅下表枚举，不放 request ID、cache key 或异常文本。
+EngineMetrics 使用 Prometheus simpleclient 0.16.0，每个节点独立注册表，`GET /metrics` 标准文本导出。事件发生时更新累计量，抓取时读取瞬时量，没有常驻采样线程。业务标签只保留 role；Prometheus 为每个采集目标设置 instance=实际 RPC 服务地址，KV 分池使用 pool_name=device/host、tier=DEVICE/HOST，额外维度仅下表枚举，不放 request ID、cache key 或异常文本。
 
 | 指标 | 类型 | 含义 |
 | --- | --- | --- |
-| mock_engine_requests_started_total | Counter | 校验并接纳后加一，入口拒绝不计。 |
-| mock_engine_requests_finished_total | Counter，outcome=success/cancelled/timeout/error | 每个已接纳请求唯一终态，节点关闭计 error，不代替 Client 成功率。 |
-| mock_engine_host_kv_tokens | Gauge | 本地 Host total/free token 容量，与 Device 分开。 |
-| mock_engine_cache_lookup_tokens_total / mock_engine_cache_hit_tokens_total | Counter | 分配时实际输入/历史命中 token，取消不撤销已发生查找。 |
-| mock_engine_forward_tokens_total | Counter，kind=input/compute/output | 完成 Forward 的 token；input/compute 汇总本批全部执行成员，output 只计有效提交。全部取消的 Forward 不补完成样本。 |
+| rtp_llm_requests_started_total | Counter | 校验并接纳后加一，入口拒绝不计。 |
+| rtp_llm_framework_requests_total | Counter，outcome=success/cancelled/timeout/error | 每个已接纳请求唯一终态，节点关闭计 error，不代替 Client 成功率。 |
+| rtp_llm_host_kv_tokens | Gauge | 本地 Host total/free token 容量，与 Device 分开。 |
+| rtp_llm_cache_lookup_tokens_total / rtp_llm_cache_hit_tokens_total | Counter | 分配时实际输入/历史命中 token，取消不撤销已发生查找。 |
+| rtp_llm_forward_tokens_total | Counter，kind=input/compute/output | 完成 Forward 的 token；input/compute 汇总本批全部执行成员，output 只计有效提交。全部取消的 Forward 不补完成样本。 |
 | rtp_llm_model_forward_us | Gauge | 最近一个完成 Forward 的实际耗时，微秒；计时到执行完成通知，不包含等待调度域锁和结果提交。 |
 | mock_model_forward_planned_us | Gauge | 同一个完成 Forward 的计划耗时，微秒，包含公式和可选噪声。 |
-| mock_engine_forward_seconds | Histogram | 完成 Forward 实际耗时秒，含 bucket/sum/count，排除排队，不是 TTFT。 |
-| mock_engine_requests | Gauge，state=waiting/running/loading/ready | 调度器报告的四类互斥请求数。 |
-| mock_engine_kv_tokens | Gauge，state=total/available/free/held | token 容量，available 含可驱逐缓存，不等于 free。 |
+| rtp_llm_model_forward_seconds | Histogram | 完成 Forward 实际耗时秒，含 bucket/sum/count，排除排队，不是 TTFT。 |
+| rtp_llm_scheduler_requests | Gauge，state=waiting/running/loading/ready | 调度器报告的四类互斥请求数。 |
+| rtp_llm_kv_tokens | Gauge，state=total/available/free/held | token 容量，available 含可驱逐缓存，不等于 free。 |
+
+RTP 原生观测直接导出：`rtp_llm_wait_stream_size`、`rtp_llm_running_stream_size`、`rtp_llm_kv_cache_left_seq`（Tokens）、`rtp_llm_kv_cache_{total,free,available,used}_blocks`（Blocks）和 `rtp_llm_kv_cache_used_ratio`（0–100，不可用比例）。Host 暂只上报 total/free/used Blocks，不用 free 冒充 available。loading/ready 仍是调度器阶段辅助观测，不冒充 real 的加载缓存队列。
+
+Prefill 的 context TPS 用计算 Tokens／执行时间，含缓存 TPS 用输入 Tokens／执行时间；墙钟 TPS 用对应 Tokens／实际窗口。Decode generate TPS 统计提交的输出 Tokens，total TPS 统计模型计算 Tokens，二者在投机采样时不同。`rtp_llm_framework_qps` 统计终态，不是接纳；error 包含 timeout，cancel 单列。上述速率 Gauge 的窗口是两次采集间的单调时钟间隔，无后台采样线程；空闲窗口报告零。real 默认按后台周期报告，窗口边界可能不同，不能要求逐点相等。
+
+没有 real 同名指标的真实观测，以 RTP Prometheus 辅助 Counter/Histogram 保留供 Python 门禁和统计使用，不拿它们的累计值直接冒充线上 QPS/TPS Gauge。理论 Forward、ViT 运行图片数和 hash 缓存预算保留 `mock_` 前缀。此次更名不保留旧 `mock_engine_*` 别名；旧实验保持原始 view.json 和 TSDB，不承诺新查询可以直接读取旧指标名。
+
+P/D 已补 `rtp_llm_{context,generate}_batch_size`、执行 Token 数、最长序列、逐请求等待/首 Token/总延迟、输入/输出长度与迭代数；Decode 传输等待接入 `rtp_llm_stream_loading_cache_latency_us`。Query batch 的 native 语义是 beam 数，不能用调度批大小代替。
+
+ViT 使用相同的物理元数据与 Prometheus instance 发现；QPS、Embedding 队列/等待/Forward/合批、请求图片数/输出长度，以及缓存命中/未命中/在途合并/淘汰和逻辑驻留量均按 real 名称导出。毫秒指标不转换成微秒名，未实现的下载、预处理子进程和 CUDA Graph 不补零。详见 [指标覆盖与边界](views/README.md)。
+
+新增事件 Gauge 为采集窗口均值，无事件的窗口不发耗时样本；其 `_sum` / `_count` 辅助累计量不清零。QPS 使用真实窗口秒数换算，空闲归零；窗口与 KMonitor 固定周期不保证逐点相同。原有 Forward 最近值与 Histogram 口径保持不变。
 
 累计量预建 0，抓取不清零；分母为 0 不补比率。以下查询在 Python `interfaces/metrics.py` 实现，直接调用本次托管 Prometheus：
 
 | 接口 | 口径 |
 | --- | --- |
 | engine/cache/hit_rate | P 历史命中 token 增量／输入 token 增量，token 加权；可选 targets。 |
-| engine/prefill/tps | P 实际计算 token 增量／完成 Forward 耗时增量。 |
-| engine/prefill/tps_with_cache | P 输入 token 增量／完成 Forward 耗时增量，输入含命中。 |
+| engine/prefill/tps | P 实际计算 token 增量／含实际计算的 Forward 耗时增量。 |
+| engine/prefill/tps_with_cache | P 输入 token 增量／有输入的 Forward 耗时增量，输入含命中。 |
 | engine/decode/tps | D 完成 Forward 输出 token 增量／墙钟时间。 |
 | client/success_rate | 必填 range 区间内成功终态计数增量／全部终态计数增量，先对各 Client 算增量再聚合；可选 targets。 |
 | prometheus/query | 固定 query_time 的一次 scalar 或 float instant vector，保留标签、数值和 sample_time。 |

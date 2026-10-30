@@ -36,8 +36,8 @@ environment:
       seq_size_per_block: 512
       reuse_cache: false
       enable_device_cache: true
-      # 保留原 preset；host cache 尚未接通，当前启动会明确拒绝，不能按此配置宣称已跑通。
-      enable_memory_cache: true
+      # host cache 尚未接通，当前 Case 只启用 device cache。
+      enable_memory_cache: false
       enable_disk_cache: false
       reserve_block_ratio: 1
       enable_remote_cache: false

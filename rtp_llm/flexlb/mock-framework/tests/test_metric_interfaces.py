@@ -54,6 +54,7 @@ def context():
         {'role': 'prefill', 'rpc': '127.0.0.1:1001'},
         {'role': 'prefill', 'rpc': '127.0.0.1:1002'}]
     return SimpleNamespace(query_time='2026-10-28T00:00:00Z', nodes=nodes,
+        records=SimpleNamespace(emit=lambda **event: None),
         runtime=SimpleNamespace(topology=SimpleNamespace(active=lambda role=None: [node for node in nodes if role is None or node['role'] == role])))
 
 
@@ -68,8 +69,8 @@ def test_hit_rate_aggregates_counters_before_division_and_uses_one_query_time(mo
     assert asyncio.run(metrics.hit_rate(context(), metrics.MetricArgs(range=['-90s', '-30s']))) == .76
     assert len(calls) == 3 and len({at for _, at in calls}) == 1
     assert calls[0][1] == metrics.epoch(context().query_time) - 30
-    assert 'sum(increase(mock_engine_cache_hit_tokens_total' in calls[2][0]
-    assert ' / sum(increase(mock_engine_cache_lookup_tokens_total' in calls[2][0]
+    assert 'sum(increase(rtp_llm_cache_hit_tokens_total' in calls[2][0]
+    assert ' / sum(increase(rtp_llm_cache_lookup_tokens_total' in calls[2][0]
     assert '[60000ms]' in calls[2][0]
     assert 'node=' not in calls[2][0] and 'engine=' not in calls[2][0]
 
@@ -109,6 +110,8 @@ def test_metric_scope_uses_current_instances_and_rejects_removed_addresses():
 def test_success_rate_aggregates_all_terminals_without_a_request_count_floor(monkeypatch):
     calls = []
     ctx = context()
+    events = []
+    ctx.records.emit = lambda **event: events.append(event)
     for node in ctx.nodes:
         node['role'] = 'client'
     async def instant(ctx, expression, at):
@@ -126,6 +129,8 @@ def test_success_rate_aggregates_all_terminals_without_a_request_count_floor(mon
     numerator, denominator = expression.split(' / ')
     assert 'outcome="success"' in numerator and 'outcome=' not in denominator
     assert 'sum(increase(' in expression and '[20000ms]' in expression
+    assert events == [{'event': 'metric_window', 'query_time': ctx.query_time,
+                       'start': calls[-1][1] - 20, 'end': calls[-1][1]}]
 
 
 @pytest.mark.parametrize('value', [float('nan'), float('inf'), -0.1, 1.1])
@@ -181,3 +186,17 @@ def test_success_rate_window_keeps_selected_clients_and_fixed_end(monkeypatch):
     assert all(at == metrics.epoch(ctx.query_time) - 20 for _, at in calls)
     assert all('1002' in expression and '1001' not in expression for expression, _ in calls)
     assert '[20000ms]' in calls[-1][0] and 'irate' not in calls[-1][0]
+
+
+@pytest.mark.parametrize('method,denominator', [
+    (metrics.prefill_tps, 'rtp_llm_context_forward_seconds_total'),
+    (metrics.cached_tps, 'rtp_llm_context_forward_with_cache_seconds_total'),
+])
+def test_prefill_throughput_uses_the_matching_nonempty_forward_duration(monkeypatch, method, denominator):
+    calls = []
+    async def metric(ctx, args, role, numerator, duration, **labels):
+        calls.append((role, numerator, duration, labels))
+        return 42
+    monkeypatch.setattr(metrics, 'metric', metric)
+    assert asyncio.run(method(context(), metrics.MetricArgs())) == 42
+    assert calls[0][1:3] == ('rtp_llm_forward_tokens_total', denominator)

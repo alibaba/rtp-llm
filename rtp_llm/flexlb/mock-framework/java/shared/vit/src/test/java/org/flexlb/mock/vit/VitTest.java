@@ -27,6 +27,10 @@ class VitTest {
         return MultimodalInputsPB.newBuilder().setRequestId(1).addMultimodalInputs(MultimodalInputPB.newBuilder()
             .setMultimodalType(1).setMultimodalUrl(key).setMmPreprocessConfig(MMPreprocessConfigPB.newBuilder().setWidth(56).setHeight(28))).build();
     }
+    static double sample(String text, String name) {
+        return text.lines().filter(line -> line.startsWith(name + "{") && line.contains("role=\"vit\""))
+            .mapToDouble(line -> Double.parseDouble(line.substring(line.lastIndexOf(' ') + 1))).findFirst().orElseThrow();
+    }
     static ManagedChannel channel(VitNode node) {
         return ManagedChannelBuilder.forTarget((String)node.endpoints().get("rpc")).usePlaintext().build();
     }
@@ -48,8 +52,13 @@ class VitTest {
                     .addKeys(MediaInput.key(input("image-0").getMultimodalInputs(0))).build());
                 assertTrue(metadata.getEntries(0).getHashHit());assertTrue(metadata.getEntries(0).getEmbeddingHit());
                 String metrics=java.net.http.HttpClient.newHttpClient().send(java.net.http.HttpRequest.newBuilder(java.net.URI.create((String)node.endpoints().get("metrics"))).GET().build(),java.net.http.HttpResponse.BodyHandlers.ofString()).body();
-                assertTrue(metrics.contains("py_rtp_vit_embedding_forward_rt_count 1"),metrics);
-                assertTrue(metrics.contains("mock_vit_theoretical_forward_rt_sum 6.0"),metrics);
+                assertEquals(1, sample(metrics, "py_rtp_vit_embedding_forward_rt_count"));
+                assertEquals(6, sample(metrics, "mock_vit_theoretical_forward_rt_sum"));
+                for (String metric : List.of("py_rtp_vit_qps", "py_rtp_vit_success_qps", "py_rtp_vit_image_count",
+                        "py_rtp_vit_embedding_length", "py_rtp_vit_embedding_queue_wait_rt", "py_rtp_vit_embedding_queue_size",
+                        "py_rtp_vit_embedding_cache_tokens", "py_rtp_vit_embedding_batch_size"))
+                    assertTrue(Double.isFinite(sample(metrics, metric)), metrics);
+                assertFalse(metrics.contains("mock_engine_requests"));
             } finally { channel.shutdownNow().awaitTermination(2,TimeUnit.SECONDS); }
         }
     }
@@ -62,7 +71,7 @@ class VitTest {
             assertEquals("cpu",cache.tier("b"));assertEquals("gpu",cache.tier("c"));
             assertFalse(cache.acquire(images.get(1)).producer());
             assertEquals("gpu",cache.tier("b"));assertEquals("cpu",cache.tier("c"));
-            assertTrue(cache.metrics().contains("cache_bytes{tier=\"gpu\"} 16"));
+            assertTrue(cache.snapshot().get("py_rtp_vit_embedding_cache_bytes") == 32.0);
         }
     }
     @Test void failedProducerReleasesTheClaimAndOldCompletionCannotPublishANewGeneration() throws Exception {
@@ -115,7 +124,7 @@ class VitTest {
         try(var cache=new VitCache(config);var scheduler=new VitScheduler(config,cache)) {
             var first=cache.acquire(new MediaInput.Image("a",28,28,1));scheduler.submit(List.of(first));
             long end=System.nanoTime()+TimeUnit.SECONDS.toNanos(2);
-            while(scheduler.metrics().contains("state=\"running\"} 0")) { assertTrue(System.nanoTime()<end);Thread.sleep(2); }
+            while(scheduler.snapshot().get("mock_vit_running_image_count") == 0) { assertTrue(System.nanoTime()<end);Thread.sleep(2); }
             var second=cache.acquire(new MediaInput.Image("b",28,28,1));scheduler.submit(List.of(second));
             var overflow=cache.acquire(new MediaInput.Image("c",28,28,1));
             var rejected=assertThrows(StatusRuntimeException.class,()->scheduler.submit(List.of(overflow)));
@@ -136,7 +145,8 @@ class VitTest {
                 var hit=rpc.getMultimodalHashes(request).getEntries(0);
                 assertTrue(hit.getHashHit());assertFalse(hit.getEmbeddingHit());
                 String metrics=java.net.http.HttpClient.newHttpClient().send(java.net.http.HttpRequest.newBuilder(java.net.URI.create((String)node.endpoints().get("metrics"))).GET().build(),java.net.http.HttpResponse.BodyHandlers.ofString()).body();
-                assertTrue(metrics.contains("py_rtp_vit_embedding_forward_rt_count 1"),metrics);
+                assertEquals(1, sample(metrics, "py_rtp_vit_embedding_forward_rt_count"));
+                assertEquals(0, sample(metrics, "py_rtp_vit_embedding_cache_eviction_qps"));
                 rpc.remoteMultimodalEmbedding(input("x"));
                 assertEquals(Status.Code.INVALID_ARGUMENT,assertThrows(StatusRuntimeException.class,()->rpc.getMultimodalHashes(request.toBuilder().clearKeys().addKeys("wrong").build())).getStatus().getCode());
             } finally { channel.shutdownNow().awaitTermination(2,TimeUnit.SECONDS); }
@@ -148,11 +158,11 @@ class VitTest {
             var scheduler=new VitScheduler(config("120",16,16,1024,0),cache)) {
             var first=cache.acquire(new MediaInput.Image("a",28,28,1));scheduler.submit(List.of(first));
             long end=System.nanoTime()+TimeUnit.SECONDS.toNanos(2);
-            while(scheduler.metrics().contains("state=\"running\"} 0")) { assertTrue(System.nanoTime()<end);Thread.sleep(2); }
+            while(scheduler.snapshot().get("mock_vit_running_image_count") == 0) { assertTrue(System.nanoTime()<end);Thread.sleep(2); }
             var abandoned=cache.acquire(new MediaInput.Image("b",28,28,1));scheduler.submit(List.of(abandoned));VitCache.release(abandoned);
             first.result().get(2,TimeUnit.SECONDS);
             assertThrows(ExecutionException.class,()->abandoned.result().get(2,TimeUnit.SECONDS));
-            assertTrue(scheduler.metrics().contains("py_rtp_vit_embedding_forward_rt_count 1"));
+            assertEquals(0, scheduler.snapshot().get("mock_vit_running_image_count"));
         }
     }
 
