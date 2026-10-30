@@ -16,6 +16,8 @@ struct RejectionSamplingGraphs;
 
 // Shared DSpARK Target/Draft setting. Zero disables fixed-width truncation.
 int dsparkForceTopK();
+// Compare effective sampling controls, not temperature, which is always per row.
+bool dsparkHasMixedSamplingParams(const std::list<GenerateStreamPtr>& streams);
 
 struct SpeculativeSamplerOutput {
 public:

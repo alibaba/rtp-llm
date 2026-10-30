@@ -303,7 +303,10 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
                  greedy_sampling_buffer_ptr,
                  inputs.skip_logits_probs_restore,
                  inputs.all_probs_point_mass,
-                 inputs.force_topk});
+                 inputs.force_topk,
+                 all_probs.has_value() && inputs.all_probs_indices.defined() ?
+                     std::optional<torch::Tensor>(inputs.all_probs_indices.narrow(0, from_batch_idx_in, batch_size_in)) :
+                     std::nullopt});
             all_probs_point_mass = all_probs_point_mass && greedy_output.all_probs_point_mass;
             if (greedy_output.success.defined()) {
                 success.copy_(greedy_output.success);
@@ -386,6 +389,7 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
     // all_probs is a one-hot at token_ids and was never materialized, so
     // rejection sampling must synthesize q from token_ids instead of reading it.
     output.token_ids_are_point_mass = all_probs_point_mass;
+    output.all_probs_indices        = inputs.all_probs_indices;
     output.raw_logprobs_logits      = inputs.raw_logprobs_logits;
     output.raw_logprobs_row_indices = inputs.raw_logprobs_row_indices;
     return output;

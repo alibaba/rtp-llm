@@ -44,5 +44,22 @@ cudaError_t invokeRejectionSampling(DType*       draft_probs,
                                     // A row verifies only its prefix L and uses target row L for
                                     // the bonus. Values are clamped to [0, num_speculative_tokens]
                                     // on device. nullptr preserves the full-width behavior.
-                                    const int32_t* valid_draft_lengths = nullptr);
+                                    const int32_t* valid_draft_lengths = nullptr,
+                                    const IdType* target_candidate_ids = nullptr,
+                                    const DType* accept_target_probs = nullptr,
+                                    const DType* accept_draft_probs = nullptr);
+
+cudaError_t invokeRemapDraftTopk(const int32_t* draft_candidate_ids,
+                                const float* draft_probs,
+                                const int32_t* draft_token_ids,
+                                const int32_t* target_candidate_ids,
+                                const float* target_probs,
+                                float* aligned_draft_probs,
+                                float* accept_target_probs,
+                                float* accept_draft_probs,
+                                int batch_size,
+                                int num_speculative_tokens,
+                                int compact_width,
+                                int draft_prob_width,
+                                cudaStream_t stream);
 }  // namespace rtp_llm

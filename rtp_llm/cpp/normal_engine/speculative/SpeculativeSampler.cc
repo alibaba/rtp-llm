@@ -41,6 +41,28 @@ int dsparkForceTopK() {
     return static_cast<int>(topk);
 }
 
+bool dsparkHasMixedSamplingParams(const std::list<GenerateStreamPtr>& streams) {
+    if (streams.empty()) {
+        return false;
+    }
+    const auto normalized_p = [](float p) {
+        return std::abs(p) < 1e-7f || std::abs(p - 1.0f) < 1e-7f ? 1.0f : p;
+    };
+    const auto effective_controls = [&](const auto& config) {
+        if (!config->stochastic()) {
+            return std::pair<int, float>{1, 1.0f};
+        }
+        return std::pair<int, float>{std::max(config->top_k, 0), normalized_p(config->top_p)};
+    };
+    const auto first = effective_controls(streams.front()->generateConfig());
+    for (const auto& stream : streams) {
+        if (effective_controls(stream->generateConfig()) != first) {
+            return true;
+        }
+    }
+    return false;
+}
+
 #if USING_CUDA
 struct DSparkSamplingGraphs {
     struct Entry {
@@ -264,6 +286,9 @@ bool SpeculativeSampler::replayRejectionGraph(SpeculativeSamplerOutput& output,
         bool           draft_point_mass = true, target_point_mass = true, finalize = true;
         const int32_t* valid_lengths =
             valid_draft_lengths.defined() ? valid_draft_lengths.data_ptr<int32_t>() : nullptr;
+        const int32_t* target_candidate_ids = nullptr;
+        const float* accept_target_probs = nullptr;
+        const float* accept_draft_probs = nullptr;
         void* args[]        = {&draft_probs,
                                &draft_ids,
                                &samples,
@@ -280,7 +305,10 @@ bool SpeculativeSampler::replayRejectionGraph(SpeculativeSamplerOutput& output,
                                &target_point_mass,
                                &force,
                                &finalize,
-                               &valid_lengths};
+                               &valid_lengths,
+                               &target_candidate_ids,
+                               &accept_target_probs,
+                               &accept_draft_probs};
         auto  params        = entry->kernel_params;
         params.gridDim.x    = rows;
         params.kernelParams = args;
@@ -645,14 +673,11 @@ SamplerOutput SpeculativeSampler::sampleDSparkDraftEager(const torch::Tensor& ba
     // Float partial indices are exact only below 2^24.
     const bool point_mass_path = batch_all_greedy && draft_vocab_size < (1u << 24);
 #if USING_CUDA
-    // A compact prefilter of `force_topk` rows is exact whenever the joint
-    // top-k/top-p support cannot reach past it. MtpExecutor::sampleDSparkDraft
-    // only passes force_topk > 0 when every row has a bounded explicit
-    // top_k <= force_topk and a filtered top_p, so the retained support is a
-    // subset of the compact rows and both truncations resolve identically on
-    // either width.
+    // The executor selects the fixed-width policy for this batch. Candidate
+    // IDs preserve the original vocabulary coordinates for rejection.
     const int64_t compact_width =
-        !point_mass_path && force_topk > 0 && force_topk < static_cast<int64_t>(draft_vocab_size) ? force_topk : 0;
+        !point_mass_path && force_topk > 0
+            && force_topk <= 4096 && force_topk < static_cast<int64_t>(draft_vocab_size) ? force_topk : 0;
     const bool sample_from_strided_q = !point_mass_path && compact_width == 0 && !top_k.defined() && !top_p.defined();
 #else
     const int64_t compact_width         = 0;
@@ -678,11 +703,13 @@ SamplerOutput SpeculativeSampler::sampleDSparkDraftEager(const torch::Tensor& ba
     auto all_probabilities =
         point_mass_path ?
             torch::Tensor() :
-            torch::empty({batch_size, static_cast<int64_t>(propose_step_), static_cast<int64_t>(draft_vocab_size)},
+            torch::empty({batch_size, static_cast<int64_t>(propose_step_),
+                          compact_width > 0 && !d2t_map_.defined() ? compact_width : static_cast<int64_t>(draft_vocab_size)},
                          torch::TensorOptions().dtype(torch::kFloat32).device(base_logits.device()));
-    if (compact_width > 0) {
-        all_probabilities.zero_();
-    }
+    auto all_probability_indices = compact_width > 0 && !d2t_map_.defined() ?
+        torch::empty({batch_size, static_cast<int64_t>(propose_step_), compact_width},
+                     torch::TensorOptions().dtype(torch::kInt32).device(base_logits.device())) :
+        torch::Tensor();
     // Filtered paths need contiguous per-step scratch. Reuse it across steps
     // because each step fully rewrites it before sampling on the same stream.
     const auto sampling_width = compact_width > 0 ? compact_width : static_cast<int64_t>(draft_vocab_size);
@@ -800,7 +827,12 @@ SamplerOutput SpeculativeSampler::sampleDSparkDraftEager(const torch::Tensor& ba
             }
             sampled_draft_tokens = execSampleFromProbs(draft_q).to(torch::kInt32);
             if (compact_width > 0) {
-                all_probabilities.select(1, step).scatter_(1, compact_indices, draft_q);
+                if (d2t_map_.defined()) {
+                    all_probabilities.select(1, step).zero_().scatter_(1, compact_indices.to(torch::kLong), draft_q);
+                } else {
+                    all_probabilities.select(1, step).copy_(draft_q);
+                    all_probability_indices.select(1, step).copy_(compact_indices);
+                }
                 sampled_draft_tokens = compact_indices.gather(1, sampled_draft_tokens.to(torch::kLong).unsqueeze(1))
                                            .squeeze(1)
                                            .to(torch::kInt32);
@@ -820,7 +852,8 @@ SamplerOutput SpeculativeSampler::sampleDSparkDraftEager(const torch::Tensor& ba
     SamplerOutput output;
     output.token_ids = fused_greedy_output ? token_matrix : torch::stack(token_columns, 1).contiguous();
     if (!point_mass_path) {
-        output.all_probs = std::move(all_probabilities);
+        output.all_probs         = std::move(all_probabilities);
+        output.all_probs_indices = std::move(all_probability_indices);
     }
     output.token_ids_are_point_mass = point_mass_path;
     return output;
@@ -863,8 +896,19 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
 
     auto draft_token_ids = draft_sampler_output.token_ids;
 
-    auto       draft_token_probs      = draft_sampler_output.all_probs;
-    auto       target_token_probs     = target_sampler_output.all_probs;
+    auto       draft_token_probs       = draft_sampler_output.all_probs;
+    auto       target_token_probs      = target_sampler_output.all_probs;
+    auto       draft_candidate_ids     = draft_sampler_output.all_probs_indices;
+    auto       target_candidate_ids    = target_sampler_output.all_probs_indices;
+    if (draft_candidate_ids.defined() && !target_candidate_ids.defined()) {
+        // A compact draft can pair with a dense target only through the
+        // original full-vocabulary rejection interface.
+        auto dense = torch::zeros({draft_token_probs.size(0), draft_token_probs.size(1),
+                                   target_token_probs.size(2)}, draft_token_probs.options());
+        dense.scatter_(2, draft_candidate_ids.to(torch::kLong), draft_token_probs);
+        draft_token_probs = std::move(dense);
+        draft_candidate_ids = torch::Tensor();
+    }
     const bool draft_probs_point_mass = draft_sampler_output.token_ids_are_point_mass;
     // Greedy top_k==1 verification may skip materializing the target one-hot
     // matrix; the rejection kernel then synthesizes q from target_token_ids
@@ -997,7 +1041,8 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
     RTP_LLM_CHECK_WITH_INFO(draft_probs_point_mass
                                 || (draft_token_probs_d_t.defined() && draft_token_probs_d_t.dim() == 3),
                             "draft probabilities must be [B, steps, vocab] unless token ids define a point mass");
-    if (!draft_probs_point_mass && draft_token_probs_d_t.size(2) != target_token_probs_d_t.size(2)) {
+    if (!draft_probs_point_mass && !target_candidate_ids.defined()
+        && draft_token_probs_d_t.size(2) != target_token_probs_d_t.size(2)) {
         const int64_t target_vocab_size = target_token_probs_d_t.size(2);
         const int64_t num_spec          = draft_token_probs_d_t.size(1);
 
@@ -1042,6 +1087,8 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
             force_mask_d,
             finalize_in_kernel,
             valid_draft_lengths,
+            draft_candidate_ids,
+            target_candidate_ids,
         });
     }
 

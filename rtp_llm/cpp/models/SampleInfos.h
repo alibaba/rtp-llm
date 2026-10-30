@@ -80,7 +80,8 @@ public:
     bool all_probs_point_mass = false;
 
     mutable torch::Tensor cum_log_probs;  // shape: [batch_size]
-    mutable torch::Tensor all_probs;      // shape: [batch_size, vocab_size]
+    mutable torch::Tensor all_probs;      // shape: [batch_size, vocab_size], or compact [batch_size, K]
+    torch::Tensor all_probs_indices;      // optional CUDA int32 [batch_size, K] original vocabulary IDs
 
     // Raw LM-head rows needed by return_logprobs requests. The gatherer snapshots
     // only those rows before logits processors/sampling can mutate logits, and
@@ -104,6 +105,7 @@ public:
     // The draft distribution is a one-hot at token_ids and need not be
     // materialized as [batch, speculative_steps, vocab].
     bool          token_ids_are_point_mass = false;
+    torch::Tensor all_probs_indices;  // original vocabulary IDs when all_probs is compact
     torch::Tensor raw_logprobs_logits;
     torch::Tensor raw_logprobs_row_indices;
     // DSpARK per-position acceptance-rate prediction from the draft model

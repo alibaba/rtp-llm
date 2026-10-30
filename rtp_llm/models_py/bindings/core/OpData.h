@@ -333,6 +333,7 @@ struct GreedyParams {
     // the legacy fully-materialized all_probs contract for every caller.
     bool all_probs_point_mass = false;
     int  force_topk           = 0;
+    std::optional<torch::Tensor> output_all_probs_indices;
 };
 
 struct GreedyOutput {
@@ -437,6 +438,11 @@ struct RejectionSamplingParams {
     // L as bonus (including L=0). Undefined preserves the full-width path.
     // CUDA only: other backends must reject a defined tensor explicitly.
     torch::Tensor valid_draft_lengths_d;
+    // Optional DSpARK compact probabilities. Target indices are original
+    // vocabulary IDs [B, steps+1, K]; draft indices are [B, steps, K].
+    // When draft indices are absent, draft_probs_d is dense [B, steps, V].
+    torch::Tensor draft_probs_indices_d;
+    torch::Tensor target_probs_indices_d;
 };
 
 // One DSpARK draft step's fused distribution build:

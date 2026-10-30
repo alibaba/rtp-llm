@@ -292,7 +292,10 @@ __global__ void rejection_sampling_kernel(DType*         draft_probs,
                                           bool           target_probs_point_mass,
                                           const bool*    force_mask,
                                           bool           finalize_outputs,
-                                          const int32_t* valid_draft_lengths) {
+                                          const int32_t* valid_draft_lengths,
+                                          const IdType* target_candidate_ids,
+                                          const DType* accept_target_probs,
+                                          const DType* accept_draft_probs) {
     const uint32_t bx = blockIdx.x, tx = threadIdx.x;
     const uint32_t row_idx = bx;
 
@@ -326,10 +329,14 @@ __global__ void rejection_sampling_kernel(DType*         draft_probs,
             // token, so q(draft_id) is exactly 1.0f when the draft proposed
             // that token and 0.0f otherwise — bit-identical to reading the
             // materialized one-hot matrix, which the greedy sampler skipped.
-            float q = target_probs_point_mass ?
+            float q = target_candidate_ids ?
+                          accept_target_probs[row_idx * num_speculative_tokens + i] :
+                      target_probs_point_mass ?
                           (draft_id == target_id ? 1.0f : 0.0f) :
                           target_probs[(row_idx * (num_speculative_tokens + 1) + i) * target_vocab_size + draft_id];
-            float p = draft_probs_point_mass ?
+            float p = target_candidate_ids ?
+                          accept_draft_probs[row_idx * num_speculative_tokens + i] :
+                      draft_probs_point_mass ?
                           1.0f :
                           draft_probs[(row_idx * num_speculative_tokens + i) * target_vocab_size + draft_id];
             DType u = uniform_samples[row_idx * (num_speculative_tokens + 1) + i];
@@ -487,7 +494,11 @@ __global__ void rejection_sampling_kernel(DType*         draft_probs,
     __syncthreads();
     if (tx == 0) {
         // set the first rejected token
-        output_token_ids[row_idx * (num_speculative_tokens + 1) + pos] = temp_storage.sampled_id;
+        const int sampled_id = temp_storage.sampled_id;
+        output_token_ids[row_idx * (num_speculative_tokens + 1) + pos] =
+            target_candidate_ids ?
+                target_candidate_ids[(row_idx * (num_speculative_tokens + 1) + pos) * target_vocab_size + sampled_id] :
+                sampled_id;
         // pad remaining tokens with -1
         for (int p = pos + 1; p < num_speculative_tokens + 1; ++p) {
             output_token_ids[row_idx * (num_speculative_tokens + 1) + p] = -1;
@@ -508,6 +519,114 @@ __global__ void rejection_sampling_kernel(DType*         draft_probs,
     }
 }
 
+// Align draft probabilities to target candidates without a full-vocabulary
+// scatter. Each block owns one draft/verify row and builds a shared hash table
+// for the draft candidate IDs. Missing IDs have probability zero.
+__global__ void remap_draft_topk_kernel(const int32_t* draft_candidate_ids,
+                                        const float* draft_probs,
+                                        const int32_t* draft_token_ids,
+                                        const int32_t* target_candidate_ids,
+                                        const float* target_probs,
+                                        float* aligned_draft_probs,
+                                        float* accept_target_probs,
+                                        float* accept_draft_probs,
+                                        int num_speculative_tokens,
+                                        int compact_width,
+                                        int draft_prob_width,
+                                        int table_size) {
+    const int row = blockIdx.x;
+    const int target_row = row + row / num_speculative_tokens;
+    const int sampled_id = draft_token_ids[row];
+    const int32_t* target_ids = target_candidate_ids + target_row * compact_width;
+    const float* target_q = target_probs + target_row * compact_width;
+    float* aligned_p = aligned_draft_probs + row * compact_width;
+    extern __shared__ int table[];
+    if (threadIdx.x == 0) {
+        accept_target_probs[row] = 0.0f;
+        accept_draft_probs[row] = draft_candidate_ids || sampled_id < 0 || sampled_id >= draft_prob_width ?
+            0.0f : draft_probs[row * draft_prob_width + sampled_id];
+    }
+    if (draft_candidate_ids) {
+        const int32_t* draft_ids = draft_candidate_ids + row * compact_width;
+        const float* draft_p = draft_probs + row * compact_width;
+        for (int i = threadIdx.x; i < table_size; i += blockDim.x) {
+            table[i] = -1;
+        }
+        __syncthreads();
+        for (int i = threadIdx.x; i < compact_width; i += blockDim.x) {
+            const int id = draft_ids[i];
+            if (id == sampled_id) {
+                accept_draft_probs[row] = draft_p[i];
+            }
+            unsigned slot = static_cast<unsigned>(id) * 2654435761u & (table_size - 1);
+            while (true) {
+                const int old = atomicCAS(&table[slot], -1, i);
+                if (old == -1 || draft_ids[old] == id) {
+                    break;
+                }
+                slot = (slot + 1) & (table_size - 1);
+            }
+        }
+    }
+    __syncthreads();
+    for (int i = threadIdx.x; i < compact_width; i += blockDim.x) {
+        const int id = target_ids[i];
+        float value = 0.0f;
+        if (draft_candidate_ids) {
+            const int32_t* draft_ids = draft_candidate_ids + row * compact_width;
+            unsigned slot = static_cast<unsigned>(id) * 2654435761u & (table_size - 1);
+            while (true) {
+                const int j = table[slot];
+                if (j == -1) {
+                    break;
+                }
+                if (draft_ids[j] == id) {
+                    value = draft_probs[row * compact_width + j];
+                    break;
+                }
+                slot = (slot + 1) & (table_size - 1);
+            }
+        } else if (id >= 0 && id < draft_prob_width) {
+            value = draft_probs[row * draft_prob_width + id];
+        }
+        aligned_p[i] = value;
+        if (id == sampled_id) {
+            accept_target_probs[row] = target_q[i];
+        }
+    }
+}
+
+cudaError_t invokeRemapDraftTopk(const int32_t* draft_candidate_ids,
+                                const float* draft_probs,
+                                const int32_t* draft_token_ids,
+                                const int32_t* target_candidate_ids,
+                                const float* target_probs,
+                                float* aligned_draft_probs,
+                                float* accept_target_probs,
+                                float* accept_draft_probs,
+                                int batch_size,
+                                int num_speculative_tokens,
+                                int compact_width,
+                                int draft_prob_width,
+                                cudaStream_t stream) {
+    if (batch_size == 0 || num_speculative_tokens == 0) {
+        return cudaSuccess;
+    }
+    int table_size = 1;
+    while (table_size < 2 * compact_width) {
+        table_size *= 2;
+    }
+    if (table_size > 8192) {
+        return cudaErrorInvalidValue;
+    }
+    remap_draft_topk_kernel<<<batch_size * num_speculative_tokens, 256,
+                               draft_candidate_ids ? table_size * sizeof(int) : 0, stream>>>(
+        draft_candidate_ids, draft_probs, draft_token_ids, target_candidate_ids,
+        target_probs, aligned_draft_probs, accept_target_probs, accept_draft_probs,
+        num_speculative_tokens, compact_width, draft_prob_width, table_size);
+    return cudaGetLastError();
+}
+
 template<typename DType, typename IdType>
 cudaError_t invokeRejectionSampling(DType*         draft_probs,
                                     IdType*        draft_token_ids,
@@ -526,7 +645,10 @@ cudaError_t invokeRejectionSampling(DType*         draft_probs,
                                     bool           target_probs_point_mass,
                                     const bool*    force_mask,
                                     bool           finalize_outputs,
-                                    const int32_t* valid_draft_lengths) {
+                                    const int32_t* valid_draft_lengths,
+                                    const IdType* target_candidate_ids,
+                                    const DType* accept_target_probs,
+                                    const DType* accept_draft_probs) {
     if (batch_size == 0) {
         return cudaSuccess;
     }
@@ -554,7 +676,10 @@ cudaError_t invokeRejectionSampling(DType*         draft_probs,
                     &target_probs_point_mass,
                     &force_mask,
                     &finalize_outputs,
-                    &valid_draft_lengths};
+                    &valid_draft_lengths,
+                    &target_candidate_ids,
+                    &accept_target_probs,
+                    &accept_draft_probs};
 
     DISPATCH_ALIGNED_VEC_SIZE(vec_size, VEC_SIZE, {
         auto kernel = rejection_sampling_kernel<BLOCK_THREADS, SCAN_ALGO, REDUCE_ALGO, VEC_SIZE, false, DType, IdType>;
@@ -583,7 +708,10 @@ cudaError_t invokeRejectionSampling(DType*         draft_probs,
                                                  bool           target_probs_point_mass,                               \
                                                  const bool*    force_mask,                                            \
                                                  bool           finalize_outputs,                                      \
-                                                 const int32_t* valid_draft_lengths);
+                                                 const int32_t* valid_draft_lengths,                                           \
+                                                 const IdType* target_candidate_ids,                                            \
+                                                 const DType* accept_target_probs,                                               \
+                                                 const DType* accept_draft_probs);
 
 INSTANTIATE_REJECTION_SAMPLING(float, int);
 }  // namespace rtp_llm

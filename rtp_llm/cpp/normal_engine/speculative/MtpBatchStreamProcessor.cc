@@ -1568,10 +1568,50 @@ MtpBatchStreamProcessor::gatherSpecSamplerInput(const StreamGroups&             
             target_point_mass = std::all_of(top_k_ptr, top_k_ptr + total_batch_size, [](int32_t k) { return k == 1; });
         }
 #endif
+        bool compact_target = false;
+#if USING_CUDA
+        const int force_topk = is_dspark_ ? speculative::dsparkForceTopK() : 0;
+        if (!target_point_mass && renorm_mode && !sampler_inputs.cum_log_probs.defined()
+            && force_topk > 0 && force_topk <= 4096 && force_topk < static_cast<int>(vocab_size_)) {
+            const auto* ks = sampler_inputs.top_k.data_ptr<int32_t>();
+            const auto* ps = sampler_inputs.top_p.data_ptr<float>();
+            const bool any_top_p = std::any_of(ps, ps + total_batch_size, [](float p) {
+                return std::abs(p) >= 1e-7f && std::abs(p - 1.0f) >= 1e-7f;
+            });
+            const bool no_explicit_top_k = std::all_of(ks, ks + total_batch_size, [](int32_t k) {
+                return k <= 0;
+            });
+            const bool explicit_top_k_exceeds_cap = std::any_of(ks, ks + total_batch_size, [force_topk](int32_t k) {
+                return k > force_topk;
+            });
+            const bool mixed_sampling = speculative::dsparkHasMixedSamplingParams(all_streams);
+            // The private sampler logits view is assigned below. It is
+            // contiguous here only when the source has no padded tail.
+            const bool measured_pure_shape = force_topk == 4096 && vocab_size_ == 129280
+                                             && model_output.logits.size(1) == static_cast<int64_t>(vocab_size_)
+                                             && model_output.logits.is_contiguous();
+            // A top-k above the candidate width keeps its requested support.
+            // Pure explicit top-k also uses the full path to preserve ties.
+            // Selecting half a small vocabulary costs more than the full
+            // sampler. Keep the mixed cap for vocabularies above 16 candidate
+            // widths; target and draft use the same crossover.
+            const bool profitable_mixed_shape = static_cast<int64_t>(vocab_size_) > 16LL * force_topk
+                                                && (any_top_p || total_batch_size >= 64);
+            compact_target = !explicit_top_k_exceeds_cap
+                             && ((mixed_sampling && profitable_mixed_shape)
+                                 || (measured_pure_shape && no_explicit_top_k && any_top_p));
+        }
+#endif
         if (target_point_mass) {
             sampler_inputs.all_probs            = torch::empty({(int64_t)total_batch_size, (int64_t)vocab_size_},
                                                     torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
             sampler_inputs.all_probs_point_mass = true;
+        } else if (compact_target) {
+            const auto width = static_cast<int64_t>(speculative::dsparkForceTopK());
+            sampler_inputs.all_probs = torch::empty({(int64_t)total_batch_size, width},
+                                                    torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
+            sampler_inputs.all_probs_indices = torch::empty({(int64_t)total_batch_size, width},
+                                                    torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
         } else {
             sampler_inputs.all_probs = torch::zeros({(int64_t)total_batch_size, (int64_t)vocab_size_},
                                                     torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
