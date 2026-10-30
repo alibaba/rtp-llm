@@ -511,8 +511,12 @@ void BlockTreeLoader::runLoadTask(const LoadTaskRunner::TaskPtr& task) {
         task->phase = LoadTaskRunner::Task::Phase::FINISHED;
         if (error.code() == ErrorCode::TRANSFER_COMPLETION_UNKNOWN) {
             const auto& transfer    = task->completionTransfer();
-            auto        observation = CompletionStageContext::forTask(metrics_reporter_, transfer, "load", false);
-            observation.identity    = CacheStageContext::workflow("load", task->load_descs);
+            auto                 observation = CompletionStageContext::forWorkflow(metrics_reporter_,
+                                                                   task->load_descs,
+                                                                   "load",
+                                                                   transfer.requestId().value_or(-1),
+                                                                   transfer.traceId(),
+                                                                   false);
             CompletionStageScope freeze(observation, "freeze_blocks", "workflow_callback");
             // Ordinary LOAD references still protect both ends until settlement.
             // Preserve those physical slots before publishing the failure.
@@ -553,19 +557,18 @@ void BlockTreeLoader::scheduleContextSettlement(const LoadTaskRunner::TaskPtr&  
     if (task) {
         transfer_id = task->completionTransfer().traceId();
     }
-    CompletionStageContext observation{&metrics_reporter_,
-                                       CacheStageContext::workflow("load", descriptors),
-                                       context->requestId().value_or(-1),
-                                       transfer_id,
-                                       descriptors.size(),
-                                       context->localTransfersSucceeded()};
-    auto                   total       = observation.start("completion_total", "business_completion");
-    auto                   queue       = observation.start("completion_queue_wait", "business_completion");
+    auto                   observation = CompletionStageContext::forWorkflow(metrics_reporter_,
+                                                           descriptors,
+                                                           "load",
+                                                           context->requestId().value_or(-1),
+                                                           transfer_id,
+                                                           context->localTransfersSucceeded());
+    auto                   timers      = CompletionStageTimers::create(observation);
     const int64_t          queue_begin = currentTimeUs();
-    auto                   settle      = [this, task, context, observation, queue, total, queue_begin](bool queued) {
-        queue.finish(observation.success);
+    auto                   settle      = [this, task, context, observation, timers, queue_begin](bool queued) {
+        timers.finishQueue(observation.success);
         bool                                   success = false;
-        block_tree_cache_detail::ScopeRollback finish([&] { total.finish(success); });
+        block_tree_cache_detail::ScopeRollback finish([&] { timers.finish(success); });
         CompletionStageScope                   execute(observation, "completion_execute", "business_completion");
         if (queued) {
             metrics_reporter_.reportQueueWaitMetric(
@@ -581,7 +584,7 @@ void BlockTreeLoader::scheduleContextSettlement(const LoadTaskRunner::TaskPtr&  
                     lock.lock();
                 }
                 CompletionStageScope tree(observation, "completion_settle", "business_completion");
-                settlement_success = settleLoadLocked(*task, settlement_success, joined_contexts);
+                settlement_success = settleLoadLocked(*task, settlement_success, joined_contexts, observation);
                 tree.setSuccess(settlement_success);
             }
             CompletionStageScope notify(observation, "completion_join_notify", "business_completion");
@@ -630,10 +633,8 @@ bool BlockTreeLoader::validateLoadTaskLocked(const LoadTaskRunner::Task& task) c
 
 bool BlockTreeLoader::settleLoadLocked(LoadTaskRunner::Task&                           task,
                                        bool                                            aggregate_success,
-                                       std::vector<std::shared_ptr<LoadAsyncContext>>& joined_contexts) {
-    const auto& transfer    = task.completionTransfer();
-    auto        observation = CompletionStageContext::forTask(metrics_reporter_, transfer, "load", aggregate_success);
-    observation.identity    = CacheStageContext::workflow("load", task.load_descs);
+                                       std::vector<std::shared_ptr<LoadAsyncContext>>& joined_contexts,
+                                       CompletionStageContext                          observation) {
     std::vector<BlockTreeEvictor::InvalidationSource> corrupted;
     const auto collect_corrupted = [this, &corrupted](const TransferTask& transfer, const TransferResult& result) {
         for (size_t index = 0; index < result.block_errors.size(); ++index) {

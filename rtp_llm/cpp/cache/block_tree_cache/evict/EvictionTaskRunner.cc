@@ -45,7 +45,8 @@ void EvictionTaskRunner::runTransfer(std::shared_ptr<const EvictionTransferTask>
         task->transfer_task,
         [this, task, &metrics_reporter, transfer_begin, on_done = std::move(on_done)](TransferResult result) mutable {
             const bool success = result.ok();
-            auto observation = CompletionStageContext::forTask(metrics_reporter, task->transfer_task, "evict", success);
+            auto       observation =
+                CompletionStageContext::forTransfer(metrics_reporter, task->transfer_task, "evict", success);
             CompletionStageScope total(observation, "callback_total", "workflow_callback");
             {
                 CompletionStageScope metrics(observation, "metrics_report", "workflow_callback");

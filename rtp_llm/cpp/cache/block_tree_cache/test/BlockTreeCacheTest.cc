@@ -1154,6 +1154,7 @@ TEST(BlockTreeCacheMetricsTest, BorrowedCompletionTimersSupportTimelineWithoutKm
     auto                          observation = CompletionStageContext::forTask(reporter, task, "evict");
     EXPECT_FALSE(observation.start("completion_total", "business_completion"));
     auto session = AsyncProfileSession::start();
+    observation  = CompletionStageContext::forTask(reporter, task, "evict");
     auto total   = observation.start("completion_total", "business_completion");
     ASSERT_TRUE(total);
     std::thread worker([observation, total] {
@@ -1168,6 +1169,55 @@ TEST(BlockTreeCacheMetricsTest, BorrowedCompletionTimersSupportTimelineWithoutKm
         EXPECT_NE(event.name.find("host_to_disk"), std::string::npos);
         EXPECT_NE(event.name.find("scope=business_completion,operation=evict"), std::string::npos);
         EXPECT_NE(event.name.find("request_id=123"), std::string::npos);
+    }
+}
+
+TEST(BlockTreeCacheMetricsTest, DisabledCompletionContextDoesNotStartPartialCapture) {
+    BlockTreeCacheMetricsReporter reporter(nullptr);
+    TransferTask task({TransferDescriptor::hostToDevice(0, 1, {2}), TransferDescriptor::diskToDevice(0, 3, {4})},
+                      std::chrono::seconds(1),
+                      123);
+    auto         disabled = CompletionStageContext::forTask(reporter, task, "load");
+    EXPECT_FALSE(disabled.enabled);
+    auto session = AsyncProfileSession::start();
+    EXPECT_FALSE(CompletionStageTimers::create(disabled));
+    { CompletionStageScope ignored(disabled, "completion_execute", "business_completion"); }
+    EXPECT_TRUE(session->finish().empty());
+}
+
+TEST(BlockTreeCacheMetricsTest, PairedCompletionTimersFinishOnceAcrossThreads) {
+    auto                          raw = std::make_shared<kmonitor::MetricsReporter>("", "", kmonitor::MetricsTags{});
+    BlockTreeCacheMetricsReporter reporter(raw, true, std::chrono::hours(1));
+    TransferTask                  task({TransferDescriptor::hostToDisk(0, 1, 2)}, std::chrono::seconds(1), 123);
+    auto                          session     = AsyncProfileSession::start();
+    auto                          observation = CompletionStageContext::forTransfer(reporter, task, "evict");
+    auto                          timers      = CompletionStageTimers::create(observation);
+    ASSERT_TRUE(timers);
+    std::thread worker([timers, observation] {
+        timers.finishQueue(true);
+        timers.finishQueue(false);
+        { CompletionStageScope execute(observation, "completion_execute", "business_completion"); }
+        timers.finish(true);
+        timers.finish(false);
+    });
+    worker.join();
+    const auto events = session->finish();
+    ASSERT_EQ(events.size(), 3u);
+    for (const auto& event : events) {
+        EXPECT_NE(event.name.find("host_to_disk"), std::string::npos);
+        EXPECT_EQ(event.name.find("incomplete=1"), std::string::npos);
+    }
+    reporter.flushStageMetrics();
+    auto*                 metrics = raw->getMetricsGroup<RtpLLMCacheTransferMetrics>();
+    kmonitor::MetricsTags tags("operation", "evict");
+    tags.AddTag("source_tier", "HOST");
+    tags.AddTag("target_tier", "DISK");
+    tags.AddTag("scope", "business_completion");
+    tags.AddTag("success", "true");
+    for (const char* stage : {"completion_total", "completion_queue_wait", "completion_execute"}) {
+        tags.AddTag("stage", stage);
+        EXPECT_DOUBLE_EQ(snapshotQps(metrics->transfer_stage_qps_metric, tags), 1);
+        tags.DelTag("stage");
     }
 }
 
@@ -4192,7 +4242,8 @@ TEST_F(BlockTreeCacheTest, EventPublicationTracksInsertDuplicateAndRealEviction)
     resources[0][0].device_blocks = {42};
     resources[1][0].device_blocks = {43};
     cache_->insert({100, 200}, resources, Tier::DEVICE);
-    EXPECT_EQ(cache_->logicalCacheSnapshot().block_groups, (std::map<int64_t, std::vector<size_t>>{{100, {0}}, {200, {0}}}));
+    EXPECT_EQ(cache_->logicalCacheSnapshot().block_groups,
+              (std::map<int64_t, std::vector<size_t>>{{100, {0}}, {200, {0}}}));
     const auto version = cache_->logicalCacheSnapshot().version;
     cache_->insert({100, 200}, resources, Tier::DEVICE);
     EXPECT_EQ(cache_->logicalCacheSnapshot().version, version);

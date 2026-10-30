@@ -22,6 +22,7 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/FullGroupSet.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeCacheTestUtils.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/test/PerRankBlockTransferEngineTestUtils.h"
+#include "rtp_llm/cpp/utils/AsyncProfilingScope.h"
 
 namespace rtp_llm::block_tree_cache_test {
 class LoadShutdownTestPeer {
@@ -2847,8 +2848,24 @@ TEST_F(BlockTreeCacheIntegrationTest, MixedHostDiskFailureInstallsNoTargets) {
     }
     environment->scripted_per_rank_transfer_engine->enqueue(false);
 
+    const size_t descriptor_count = context->loadDescs().size();
+    ASSERT_NE(host_load_descs.size(), descriptor_count - host_load_descs.size());
+    auto completion_profile = AsyncProfileSession::start();
     ASSERT_TRUE(context->commit());
     context->waitDone();
+    BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*environment->cache);
+    const auto completion_events         = completion_profile->finish();
+    size_t     logical_completion_stages = 0;
+    for (const auto& event : completion_events) {
+        if (event.name.find("scope=business_completion,operation=load") == std::string::npos)
+            continue;
+        ++logical_completion_stages;
+        EXPECT_NE(event.name.find("mixed_to_device"), std::string::npos);
+        EXPECT_NE(event.name.find("batch=0:" + std::to_string(descriptor_count) + ","), std::string::npos)
+            << event.name;
+        EXPECT_EQ(event.name.find("incomplete=1"), std::string::npos);
+    }
+    EXPECT_GE(logical_completion_stages, 10u);
     ASSERT_TRUE(context->done());
     EXPECT_FALSE(context->success());
     EXPECT_EQ(environment->scripted_per_rank_transfer_engine->submittedBatchCount(),
