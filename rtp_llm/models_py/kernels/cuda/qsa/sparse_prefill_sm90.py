@@ -3,8 +3,8 @@
 # https://github.com/sgl-project/sglang/blob/5007cbd6a57515bf5e008ff2fd2bdb834356b53c/python/sglang/srt/layers/attention/qsa/sparse_attn.py
 """Bounded SM90 BF16 sparse prefill using the SGLang attention algorithm.
 
-The online exp2 softmax, BF16 probability product and launch configuration
-follow the pinned upstream implementation. QK scaling stays in FP32 after the
+The online exp2 softmax and BF16 probability product follow the pinned upstream
+implementation. QK scaling stays in FP32 after the
 BF16 dot product, preserving RTP's scaling precision rather than rounding
 pre-scaled Q back to BF16. RTP adaptations are
 independent BHSD strides, stable selection compaction with a device count, range
@@ -152,6 +152,18 @@ def supports_sm90_sparse_prefill(q, k, v, selected, *, blk_k=64):
     return torch.cuda.get_device_capability(q.device)[0] == 9
 
 
+def _prefill_launch_config(batch, length, device_name):
+    if "H20" in device_name:
+        return (32, 4) if batch * length <= 1024 else (16, 1)
+    if batch == 1 and 5120 <= length <= 20480:
+        return 64, 2
+    if batch * length <= 128:
+        return 64, 4
+    if batch * length <= 512:
+        return 32, 4
+    return 16, 1
+
+
 def try_sm90_sparse_prefill(q, k, v, selected, *, blk_k=64):
     """Return the adopted result, or None for the existing generic fallback."""
     if not supports_sm90_sparse_prefill(q, k, v, selected, blk_k=blk_k):
@@ -169,15 +181,9 @@ def try_sm90_sparse_prefill(q, k, v, selected, *, blk_k=64):
         BLOCK=4096,
         num_warps=8,
     )
-    # Preserve upstream launch choices. Long target shapes share one config.
-    if "H20" in torch.cuda.get_device_name(q.device):
-        block_n, warps = (32, 4) if batch * length <= 1024 else (16, 1)
-    elif batch * length <= 128:
-        block_n, warps = 64, 4
-    elif batch * length <= 512:
-        block_n, warps = 32, 4
-    else:
-        block_n, warps = 16, 1
+    block_n, warps = _prefill_launch_config(
+        batch, length, torch.cuda.get_device_name(q.device)
+    )
     # Return the public BHSD shape backed by NHD storage, avoiding a copy in
     # the packed-token consumer when it transposes the result back to NHD.
     out = torch.empty((batch, length, 12, 256), device=q.device, dtype=q.dtype).permute(
