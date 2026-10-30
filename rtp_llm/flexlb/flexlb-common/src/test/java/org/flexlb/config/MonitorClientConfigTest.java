@@ -10,6 +10,8 @@ import org.flexlb.metric.FlexMonitor;
 import org.flexlb.metric.MicrometerFlexMonitor;
 import org.flexlb.metric.NoOpFlexMonitor;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.boot.actuate.autoconfigure.metrics.CompositeMeterRegistryAutoConfiguration;
 import org.springframework.boot.actuate.autoconfigure.metrics.MetricsAutoConfiguration;
 import org.springframework.boot.actuate.autoconfigure.metrics.export.prometheus.PrometheusMetricsExportAutoConfiguration;
@@ -113,12 +115,13 @@ class MonitorClientConfigTest {
                         });
     }
 
-    @Test
-    void disabledMonitoringOverridesMicrometerSelection() {
+    @ParameterizedTest
+    @ValueSource(strings = {"noop", "micrometer", "kmonitor", "kmonitor-prometheus"})
+    void disabledMonitoringOverridesProviderSelection(String provider) {
         contextRunner
                 .withUserConfiguration(RegistryConfiguration.class)
                 .withPropertyValues(
-                        "flexlb.monitor.provider=micrometer", "flexlb.monitor.enabled=false")
+                        "flexlb.monitor.provider=" + provider, "flexlb.monitor.enabled=false")
                 .run(
                         context -> {
                             assertThat(context).hasNotFailed();

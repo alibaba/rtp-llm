@@ -1112,20 +1112,23 @@ absl::Status NormalEngine::stop() {
         return absl::OkStatus();
     }
     RTP_LLM_LOG_INFO("stop normal engine");
-    running_                    = false;
-    const auto scheduler_status = scheduler_->stop();
+    running_ = false;
+    const auto scheduler_status = scheduler_->requestStop();
     // Ask rank 0 to stop at a step boundary. Receivers must finish all model
     // collectives for inputs that rank 0 has already published before exiting.
     CpuTpBroadcaster::instance().requestStop();
     loop_thread_->join();
+    // The loop has finished its last model step and async dispatch. Only now
+    // can cancellation release page tables and LINEAR replay leases.
+    const auto release_status = scheduler_->stop();
     scheduler_->finalizeCancelledStreams();
     // Join the async dispatch runner and release the dispatcher-owned worker pool.
     executor_.reset();
     resource_context_.cache_manager->stopMetricsReporter();
-    return scheduler_status;
+    return scheduler_status.ok() ? release_status : scheduler_status;
 }
 
-void NormalEngine::loop() {
+void NormalEngine::loop() try {
     RTP_LLM_PROFILE_FUNCTION();
     RTP_LLM_LOG_INFO("loop begin");
     c10::InferenceMode inference_guard(true);
@@ -1149,6 +1152,11 @@ void NormalEngine::loop() {
     // for the receivers and subsequent model teardown collectives.
     THROW_IF_STATUS_ERROR(executor_->finish());
     tp_broadcaster.finish();
+} catch (const CpuTpPeerClosed& error) {
+    if (running_) {
+        throw;
+    }
+    RTP_LLM_LOG_INFO("CPU TP peer closed during engine shutdown: %s", error.what());
 }
 
 absl::Status NormalEngine::trySaveStepError() const {
