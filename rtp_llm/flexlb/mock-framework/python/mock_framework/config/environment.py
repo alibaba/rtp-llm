@@ -1,8 +1,10 @@
 import copy
 import json
 import re
+from pathlib import Path
 
 from .errors import ConfigError
+from .parser import load_yaml
 from .values import fields, number, text
 
 
@@ -34,7 +36,7 @@ def expand_config(raw):
     return result
 
 
-def compile_environment(raw):
+def compile_environment(raw, *, directory=None):
     fields(raw, {'master', 'client', 'prefill', 'decode', 'vit'}, where='environment')
     result = {}
     for role, config in raw.items():
@@ -56,8 +58,17 @@ def compile_environment(raw):
             if value is not None and (not isinstance(value, str) or not _RESOURCE.fullmatch(value)):
                 raise ConfigError(f'{role}.{key}: invalid resource size')
         native = config.get('config', {})
+        if isinstance(native, str):
+            value = text(native, f'{role}.config')
+            if '://' in value or directory is None:
+                raise ConfigError(f'{role}.config: expected a local file relative to the Case directory')
+            source = (Path(directory) / value).resolve()
+            try:
+                native = load_yaml(source)
+            except ConfigError as error:
+                raise ConfigError(f'{role}.config ({source}): {error}') from error
         if not isinstance(native, dict):
-            raise ConfigError(f'{role}.config: expected mapping')
+            raise ConfigError(f'{role}.config: expected mapping or local file path')
         if role == 'master' and 'FLEXLB_CONFIG' in native:
             text(native['FLEXLB_CONFIG'], 'FLEXLB_CONFIG')
             def pairs(values):

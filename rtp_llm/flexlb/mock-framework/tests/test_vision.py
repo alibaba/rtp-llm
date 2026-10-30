@@ -38,6 +38,11 @@ def test_vision_playback_through_real_master(tmp_path, mode):
                 'requests_file': 'requests.binpb.zst', 'qps': 4, 'concurrency': 4, 'queue_capacity': 8,
                 'request_timeout': '5s', 'drain_timeout': '5s'}, 'wait_after': '6s'},
             {'id': 'stop', 'describe': 'Collect playback result', 'interface': 'client/stop'}]}]}
+    (tmp_path / 'configs').mkdir()
+    for role in ('master', 'prefill', 'decode', 'vit'):
+        component = data['environment'][role]
+        (tmp_path / 'configs' / f'{role}.yaml').write_text(yaml.safe_dump(component['config']))
+        data['environment'][role] = {**component, 'config': f'configs/{role}.yaml'}
     requests = [pb.Request(token_ids=[10, 0, 0, 20], max_new_tokens=3,
         images=[pb.Image(url='mock://image-' + str(i % 2), width=56, height=28, offset=1, length=2)]) for i in range(8)]
     write_inputs(tmp_path / 'requests.binpb.zst', requests)

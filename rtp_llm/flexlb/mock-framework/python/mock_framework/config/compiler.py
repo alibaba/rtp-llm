@@ -123,7 +123,7 @@ def compile_case(path: str | Path, registry: Registry | None = None, *, shared_r
     case_id = identity(raw['id'])
     describe = text(raw['describe'], 'describe')
     name = text(raw['name'], 'name') if 'name' in raw else None
-    environment = compile_environment(raw['environment'])
+    environment = compile_environment(raw['environment'], directory=path.parent)
     def asset(value):
         value = text(value, 'path')
         if '://' in value:

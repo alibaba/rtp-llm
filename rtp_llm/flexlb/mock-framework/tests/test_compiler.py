@@ -104,6 +104,46 @@ def test_native_payload_and_duplicate_keys(case_data, compile_data):
         compile_data(case_data)
 
 
+@pytest.mark.parametrize('role', ['master', 'prefill', 'decode', 'vit'])
+def test_component_config_file_matches_inline_config_and_resolves_from_case_directory(
+        role, case_data, compile_data, tmp_path, monkeypatch):
+    import yaml
+    if role not in case_data['environment']:
+        case_data['environment'][role] = {'config': {'compute.forward.expression': '1'}}
+        if role == 'decode':
+            case_data['environment'][role]['engine'] = 'rtp'
+    expected = compile_data(case_data).environment
+    folder = tmp_path / 'configs'
+    folder.mkdir()
+    (folder / f'{role}.yaml').write_text(yaml.safe_dump(case_data['environment'][role]['config']))
+    case_data['environment'][role]['config'] = f'configs/{role}.yaml'
+    elsewhere = tmp_path / 'elsewhere'
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+    assert compile_data(case_data).environment == expected
+
+
+@pytest.mark.parametrize('content, message', [
+    ('[]', 'mapping'),
+    ('a: 1\na: 2\n', 'Duplicate key'),
+    ('cache: 1\ncache.enabled: true\n', 'collision'),
+    ('FLEXLB_CONFIG: \'{"a":1,"a":2}\'\n', 'Duplicate native JSON'),
+    ("FLEXLB_CONFIG: 'invalid'\n", 'Invalid FLEXLB_CONFIG'),
+])
+def test_component_config_files_use_existing_strict_validation(content, message, case_data, compile_data, tmp_path):
+    (tmp_path / 'master.yaml').write_text(content)
+    case_data['environment']['master']['config'] = 'master.yaml'
+    with pytest.raises(ConfigError, match=message):
+        compile_data(case_data)
+
+
+@pytest.mark.parametrize('path', ['missing.yaml', '', 'https://example.com/config.yaml'])
+def test_component_config_file_rejects_missing_empty_or_remote_paths(path, case_data, compile_data):
+    case_data['environment']['prefill']['config'] = path
+    with pytest.raises(ConfigError):
+        compile_data(case_data)
+
+
 def test_nullable_reference_preserves_both_possible_types():
     from mock_framework.config.compiler import compatible
     from mock_framework.config.registry import schema

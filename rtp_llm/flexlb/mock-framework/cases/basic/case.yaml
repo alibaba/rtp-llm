@@ -3,27 +3,13 @@ name: RTP 基本收发
 describe: 真实 Master 和 RTP P/D 完成有限请求播放，检查发送速率及全部请求成功。
 environment:
   master:
-    config:
-      FLEXLB_CONFIG: >-
-        {"scheduler":{"type":"DIRECT"},"dispatcher":{"type":"NON_BATCH","maxInflightPerPrefillWorker":4},"requestLifecycle":{"request":{"timeoutMs":5000}},"grpcServer":{"executorCoreSize":2,"executorMaxSize":4,"executorQueueSize":64,"shutdownQuietPeriodMs":10}}
-      MODEL_SERVICE_CONFIG: >-
-        {"service_id":"aigc.text-generation.generation.mock","role_endpoints":[{"group":"group","prefill_endpoint":{"address":"p-domain","protocol":"grpc"},"decode_endpoint":{"address":"d-domain","protocol":"grpc"}}]}
+    config: configs/master.yaml
   prefill:
     engine: rtp
-    config:
-      seq_size_per_block: 16
-      test_block_num: 4096
-      reserve_block_ratio: 0
-      max_seq_len: 4096
-      compute.forward.expression: 1 + batchSize
+    config: configs/prefill.yaml
   decode:
     engine: rtp
-    config:
-      seq_size_per_block: 16
-      test_block_num: 4096
-      reserve_block_ratio: 0
-      max_seq_len: 4096
-      compute.forward.expression: 1 + batchSize
+    config: configs/decode.yaml
   client:
     config: {}
 phases:

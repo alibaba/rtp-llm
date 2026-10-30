@@ -591,6 +591,30 @@ Engine 独立宿主在对象关闭后登记预期退出并回收；其他运行�
 
 运行目录不覆盖已有目录，保存原始 Case、编译配置、启动配方、接口清单、代码版本和工作区差异、组件配置和日志、phase/step 时间线、门禁查询时刻/真实值/阈值/结果及实际 PromQL。Client 逐请求记录和离线读取已接入，Engine 全链路记录尚未实现。测试 TransportProbe 只验证进程与传输，不替代业务实现。
 
+## 组件配置文件
+
+随仓 Case 将 Master 和 Engine 自身的配置放到 Case 目录下的 `configs/`，在 `environment.<role>.config` 填写文件路径：
+
+```yaml
+environment:
+  master:
+    config: configs/master.yaml
+  prefill:
+    engine: rtp
+    config: configs/prefill.yaml
+    deployment:
+      replicas: 48
+  decode:
+    engine: rtp
+    config: configs/decode.yaml
+    deployment:
+      replicas: 192
+```
+
+路径相对 `case.yaml` 解析，不依赖启动时的工作目录；只读取本地 YAML/JSON mapping，不加载远程配置。文件内容就是原 `config` mapping：Master 文件保存原生环境变量字符串（`FLEXLB_CONFIG`、`MODEL_SERVICE_CONFIG`），Engine 文件保存容量、调度和 Compute 参数。`engine` 后端选择、部署数量、资源/堆设置，以及 phase、step、流量与判定参数仍放在 Case YAML。Client 的发压参数也留在 Case。
+
+编译时读取文件并沿用内联配置的重复键、点路径冲突和 Master JSON 校验，结果展开到原有组件配置和运行产物，Runner/Java 不需要重新读取源文件。不增加文件继承或覆盖合并；小配置与测试夹具仍可直接使用内联 mapping。
+
 ## 真实 Master 适配
 
 `org.flexlb.MasterNode` 与生产 Application、同步器和调度器在同一 JVM，不另起 Master 子进程，也不实现 Mock 调度器。Case 的 `environment.master.config` 使用原生环境变量字符串：`FLEXLB_CONFIG` 是业务 JSON，`MODEL_SERVICE_CONFIG` 是路由 JSON。
