@@ -404,7 +404,9 @@ def setup_jit_cache(cache_dir=None, packages=None):
         "triton",
     )
 
-    package_dir = cache_env.ensure_writable_directory(base / "python_packages")
+    override = os.environ.get("RTP_JIT_PYTHON_CACHE_DIR", "").strip()
+    package_base = Path(override) if override and not cache_dir else base / "python_packages"
+    package_dir = cache_env.ensure_writable_directory(package_base)
     if package_dir is None:
         package_dir = cache_env.ensure_writable_directory(
             cache_env.local_jit_fallback("python_packages")
