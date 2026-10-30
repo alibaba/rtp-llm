@@ -195,6 +195,9 @@ public:
         model_deployment_(model_deployment) {}
 
     void        Jsonize(autil::legacy::Jsonizable::JsonWrapper& json) override;
+    std::string registerInstanceRequest() const;
+    const std::string& instance_group() const { return instance_group_; }
+    const std::string& instance_id() const { return instance_id_; }
     inline bool enable_vipserver() const {
         return enable_vipserver_;
     }
