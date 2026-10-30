@@ -6,7 +6,6 @@
 #include <unordered_set>
 #include <sstream>
 
-#include "rtp_llm/cpp/cache/CPSlotMapper.h"
 #include "rtp_llm/cpp/engine_base/schedulers/SchedulerUtils.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include "rtp_llm/cpp/utils/Logger.h"
@@ -130,16 +129,15 @@ absl::Status FIFOSchedulerBase::checkChunkedPrefillRequest(const GenerateStreamP
         return absl::OkStatus();
     }
 
-    const auto& cache_config = cache_manager_->cacheConfig();
-    const auto  cp_mapper    = cache_manager_->cpSlotMapper();
-    const bool  reuse_cache  = stream->streamCacheResource().reuseCache();
-    const int64_t seq_length = stream->seqLength();
-    const int64_t rows       = stream->currentBatchSize();
-    const int64_t block_size = stream->seqSizePerBlock();
+    const auto&   cache_config = cache_manager_->cacheConfig();
+    const bool    reuse_cache  = stream->streamCacheResource().reuseCache();
+    const int64_t seq_length   = stream->seqLength();
+    const int64_t rows         = stream->currentBatchSize();
+    const int64_t block_size   = stream->seqSizePerBlock();
     if (seq_length > 0 && rows > 0 && block_size > 0) {
         for (const auto& group : cache_config.groups()) {
-            const bool linear_reuse = reuse_cache && group.policy.enable_prefix_reuse
-                                      && group.policy.group_type == CacheGroupType::LINEAR;
+            const bool linear_reuse =
+                reuse_cache && group.policy.enable_prefix_reuse && group.policy.group_type == CacheGroupType::LINEAR;
             std::string error_msg;
             const bool  sparse_reuse =
                 reuse_cache && group.policy.enable_prefix_reuse && group.policy.group_type != CacheGroupType::FULL;
@@ -148,7 +146,7 @@ absl::Status FIFOSchedulerBase::checkChunkedPrefillRequest(const GenerateStreamP
                 error_msg = "[chunked_prefill] cache group [" + group.tag
                             + "] requires reuse_cache_tail_blocks >= " + std::to_string(prompt_blocks) + ", got "
                             + std::to_string(cache_config.reuse_cache_tail_blocks);
-            } else if (cp_mapper && cp_mapper->isSharded() && group.policy.group_type != CacheGroupType::FULL
+            } else if (cache_config.request_projection_required && group.policy.group_type != CacheGroupType::FULL
                        && group.policy.cp_mapping == CpBlockMappingMode::BLOCK_ROUND_ROBIN) {
                 error_msg = "[chunked_prefill] cache group [" + group.tag
                             + "] does not support BLOCK_ROUND_ROBIN with CP cache sharding";
@@ -246,8 +244,8 @@ std::list<GenerateStreamPtr> FIFOSchedulerBase::selectPrefillPrefix(std::list<Ge
     std::list<GenerateStreamPtr> selected;
 
     const auto finish_invalid_stream = [&active_streams](auto it, ErrorCode error_code, const std::string& reason) {
-        const auto error_msg = "[chunked_prefill] scheduler rejects stream[" + std::to_string((*it)->streamId())
-                               + "]: " + reason;
+        const auto error_msg =
+            "[chunked_prefill] scheduler rejects stream[" + std::to_string((*it)->streamId()) + "]: " + reason;
         (*it)->reportError(error_code, error_msg);
         (*it)->moveToNext();
         return active_streams.erase(it);
@@ -271,8 +269,8 @@ std::list<GenerateStreamPtr> FIFOSchedulerBase::selectPrefillPrefix(std::list<Ge
         if (remaining <= 0 || block_size <= 0 || reuse < 0 || reuse % block_size != 0) {
             it = finish_invalid_stream(it,
                                        ErrorCode::EXECUTION_EXCEPTION,
-                                       "invalid chunk window (rows=" + std::to_string(rows)
-                                           + ", reuse=" + std::to_string(reuse) + ", remaining=" + std::to_string(remaining)
+                                       "invalid chunk window (rows=" + std::to_string(rows) + ", reuse="
+                                           + std::to_string(reuse) + ", remaining=" + std::to_string(remaining)
                                            + ", block_size=" + std::to_string(block_size) + ")");
             continue;
         }
@@ -462,7 +460,7 @@ int64_t FIFOSchedulerBase::onflightStreams() {
 }
 
 void FIFOSchedulerBase::appendTaskInfos(std::vector<EngineScheduleInfo::TaskInfo>& task_list,
-                                       const std::list<GenerateStreamPtr>&         streams) const {
+                                        const std::list<GenerateStreamPtr>&        streams) const {
     for (const auto& stream : streams) {
         EngineScheduleInfo::TaskInfo task_info{};
         task_info.request_id    = stream->streamId();

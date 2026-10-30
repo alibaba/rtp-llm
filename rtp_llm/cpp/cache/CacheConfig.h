@@ -46,6 +46,15 @@ public:
     bool use_typed_cache_regions                  = false;
     bool use_opaque_kv_cache_store                = false;
     bool disable_decode_first_malloc_device_reuse = false;
+    // Finalized by cache config creation. Physical block geometry remains in
+    // each group's spec; warmup may intentionally use CP1 key topology.
+    bool cache_key_layout_resolved = false;
+    // Request projection is resolved independently of the producer's communication topology.
+    bool request_projection_required = false;
+    // Effective CP size for this local cache's keys and allocation: 1 during
+    // warmup or without local CP sharding; otherwise the local TP size.
+    // Independent of group physical block geometry and upstream producer/transport CP.
+    size_t cache_cp_size = 1;
 
     rtp_llm::DataType dtype     = rtp_llm::DataType::TYPE_INVALID;
     uint32_t          layer_num = 0;  // the number of main model layers
@@ -101,6 +110,102 @@ public:
 
     const GroupBase& group(const std::string& tag) const {
         return topology().group(tag);
+    }
+
+    // Original-sequence tokens per canonical key block: base block tokens times
+    // the effective cache CP size, independent of each group's physical block size.
+    size_t canonicalSizePerBlock() const {
+        RTP_LLM_CHECK_WITH_INFO(seq_size_per_block > 0 && cache_cp_size > 0
+                                    && seq_size_per_block <= std::numeric_limits<size_t>::max() / cache_cp_size,
+                                "cache key token stride must be positive and fit size_t");
+        return seq_size_per_block * cache_cp_size;
+    }
+
+    // Global token-coordinate span of one physical pool block, not its entry
+    // count, byte size, or the number of tokens stored on this rank.
+    size_t globalSizePerBlock(const std::string& tag) const {
+        const auto&  cache_group   = group(tag);
+        const size_t physical_span = cache_group.seqSizePerBlock();
+        const size_t scale = cache_group.policy.cp_mapping == CpBlockMappingMode::BLOCK_ROUND_ROBIN ? cache_cp_size : 1;
+        RTP_LLM_CHECK_WITH_INFO(physical_span > 0 && scale > 0
+                                    && physical_span <= std::numeric_limits<size_t>::max() / scale,
+                                "cache group tag=%s global token span must be positive and fit size_t",
+                                tag.c_str());
+        return physical_span * scale;
+    }
+
+    size_t groupKeyScale(const std::string& tag) const {
+        const size_t group_tokens = group(tag).seqSizePerBlock();
+        RTP_LLM_CHECK_WITH_INFO(seq_size_per_block > 0 && group_tokens >= seq_size_per_block
+                                    && group_tokens % seq_size_per_block == 0,
+                                "cache group tag=%s has invalid key-token scale",
+                                tag.c_str());
+        return group_tokens / seq_size_per_block;
+    }
+
+    size_t logicalBlockCountForGroup(const std::string& tag, size_t key_count) const {
+        const size_t scale = groupKeyScale(tag);
+        return key_count / scale + (key_count % scale != 0);
+    }
+
+    bool isStateEntryTag(const std::string& tag) const {
+        const auto& g = group(tag);
+        return g.spec->type == KVCacheSpecType::OpaqueState && g.policy.cp_slice == CpBlockSliceMode::PAYLOAD_BYTES;
+    }
+
+    std::vector<int64_t> canonicalCacheKeys(const std::vector<int64_t>& full_keys) const {
+        const size_t scale = cache_cp_size;
+        if (scale == 1) {
+            return full_keys;
+        }
+        std::vector<int64_t> keys;
+        for (size_t i = scale - 1; i < full_keys.size(); i += scale) {
+            keys.push_back(full_keys[i]);
+        }
+        return keys;
+    }
+
+    size_t canonicalBlockPosition(const std::string& tag, size_t key_index) const {
+        const size_t canonical = canonicalSizePerBlock();
+        RTP_LLM_CHECK_WITH_INFO(key_index < std::numeric_limits<size_t>::max() / canonical,
+                                "cache canonical endpoint overflows size_t");
+        const auto&  cache_group = group(tag);
+        const size_t stride      = cache_group.seqSizePerBlock();
+        RTP_LLM_CHECK_WITH_INFO(stride > 0, "tag=%s has zero cache block stride", tag.c_str());
+        const size_t global_slot = ((key_index + 1) * canonical - 1) / stride;
+        return cache_cp_size > 1 && cache_group.policy.cp_mapping == CpBlockMappingMode::BLOCK_ROUND_ROBIN ?
+                   global_slot / cache_cp_size :
+                   global_slot;
+    }
+
+    bool supportsCanonicalReuse() const {
+        const size_t canonical = canonicalSizePerBlock();
+        for (const auto& cache_group : topology().groups()) {
+            if (cache_group.policy.group_type == CacheGroupType::FULL
+                && globalSizePerBlock(cache_group.tag) != canonical) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    int localAllocTokens(const std::string& tag, int global_tokens) const {
+        if (cache_cp_size == 1 || group(tag).policy.cp_mapping != CpBlockMappingMode::BLOCK_ROUND_ROBIN) {
+            return global_tokens;
+        }
+        if (global_tokens <= 0) {
+            return 0;
+        }
+        RTP_LLM_CHECK_WITH_INFO(seq_size_per_block > 0
+                                    && seq_size_per_block <= static_cast<size_t>(std::numeric_limits<int>::max()),
+                                "cache base token span must fit a positive int");
+        const int64_t base  = static_cast<int64_t>(seq_size_per_block);
+        const int64_t pages = (static_cast<int64_t>(global_tokens) + base - 1) / base;
+        const size_t  scale = cache_cp_size;
+        const size_t  slots = static_cast<size_t>(pages) / scale + (static_cast<size_t>(pages) % scale != 0);
+        RTP_LLM_CHECK_WITH_INFO(slots <= static_cast<size_t>(std::numeric_limits<int>::max() / base),
+                                "cache local allocation length exceeds int range");
+        return static_cast<int>(slots * base);
     }
 
     const std::vector<GroupBase>& groups() const {
@@ -182,13 +287,16 @@ public:
 
     static bool samePolicy(const CacheGroupPolicy& lhs, const CacheGroupPolicy& rhs);
 
-    void        setTopology(std::vector<GroupBase> new_groups, std::vector<LayerBase> new_layers);
-    void        fromGroupedSpecs(const std::vector<KVCacheSpecPtr>&   specs,
-                                 const std::vector<std::vector<int>>& layers_by_group,
-                                 const std::vector<CacheGroupType>&   types,
-                                 const std::vector<std::string>&      tags     = {},
-                                 const std::vector<CacheGroupPolicy>& policies = {});
-    void        finalizeBlockNums(uint32_t global_block_num, const RuntimeConfig& runtime_config);
+    void setTopology(std::vector<GroupBase> new_groups, std::vector<LayerBase> new_layers);
+    void fromGroupedSpecs(const std::vector<KVCacheSpecPtr>&   specs,
+                          const std::vector<std::vector<int>>& layers_by_group,
+                          const std::vector<CacheGroupType>&   types,
+                          const std::vector<std::string>&      tags     = {},
+                          const std::vector<CacheGroupPolicy>& policies = {});
+    void finalizeBlockNums(uint32_t global_block_num, const RuntimeConfig& runtime_config);
+    // Bind immutable cache-key and local allocation facts once after topology
+    // construction. Warmup keeps CP1 keys while physical specs use the actual CP.
+    void        finalizeStorageLayout(const ParallelismConfig& parallelism, bool warmup = false);
     std::string debugString(size_t indent = 0) const;
 };
 

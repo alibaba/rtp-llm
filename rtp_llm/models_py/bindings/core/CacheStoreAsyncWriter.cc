@@ -10,7 +10,6 @@
 
 #include "autil/EnvUtil.h"
 #include "autil/LockFreeThreadPool.h"
-#include "rtp_llm/cpp/cache/CPSlotMapper.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/DevicePin.h"
@@ -43,7 +42,8 @@ CacheStoreAsyncWriter::CacheStoreAsyncWriter(int                                
                                              std::shared_ptr<KVCacheManager>          cache_manager,
                                              size_t                                   cache_model_id,
                                              std::optional<int>                       mtp_cache_config_index,
-                                             std::optional<std::chrono::milliseconds> store_completion_timeout):
+                                             std::optional<std::chrono::milliseconds> store_completion_timeout,
+                                             std::optional<std::pair<int, int>>       producer_cp_topology):
     device_id_(device_id),
     store_completion_timeout_(resolveStoreCompletionTimeout(store_completion_timeout)),
     cache_manager_(std::move(cache_manager)),
@@ -55,13 +55,20 @@ CacheStoreAsyncWriter::CacheStoreAsyncWriter(int                                
         }
         cache_config_ = std::shared_ptr<const CacheConfig>(cache_manager_, selected_config);
 
-        // Cache-store key/offset projection follows physical KV ownership, not
-        // forward-only CP execution. An unsharded allocator deliberately leaves
-        // this mapper null so every rank publishes the complete namespace.
-        if (const auto cp_slot_mapper = cache_manager_->cpSlotMapper()) {
-            cp_rank_ = cp_slot_mapper->cpRank();
-            cp_size_ = cp_slot_mapper->cpSize();
+        // Production passes the producer's physical KV ownership facts. The
+        // main config marks whether direct callers must provide them; draft
+        // cache configs borrow the same producer topology.
+        RTP_LLM_CHECK_WITH_INFO(producer_cp_topology.has_value()
+                                    || !cache_manager_->cacheConfig().request_projection_required,
+                                "CacheStoreAsyncWriter requires explicit producer CP topology");
+        if (producer_cp_topology) {
+            cp_rank_ = producer_cp_topology->first;
+            cp_size_ = producer_cp_topology->second;
         }
+        RTP_LLM_CHECK_WITH_INFO(cp_size_ > 0 && cp_rank_ >= 0 && cp_rank_ < cp_size_,
+                                "CacheStoreAsyncWriter invalid producer CP rank=%d size=%d",
+                                cp_rank_,
+                                cp_size_);
     }
 
     constexpr size_t kThreadCount = 3;

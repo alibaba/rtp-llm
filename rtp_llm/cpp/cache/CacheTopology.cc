@@ -39,12 +39,8 @@ size_t GroupBase::kvScaleStrideBytes() const {
     return spec->scale_block_size_bytes();
 }
 
-size_t GroupBase::cacheKeyTokenStride() const {
-    RTP_LLM_CHECK_WITH_INFO(spec != nullptr, "CacheTopology tag=%s has null spec", tag.c_str());
-    return spec->cacheKeyTokenStride();
-}
-
-size_t GroupBase::reuseBlockCount(size_t matched_block_count) const {
+size_t GroupBase::reuseBlockCount(size_t matched_block_count, size_t canonical_size_per_block) const {
+    RTP_LLM_CHECK_WITH_INFO(canonical_size_per_block > 0, "canonical size per block must be positive");
     switch (policy.group_type) {
         case CacheGroupType::FULL:
             return matched_block_count;
@@ -56,7 +52,7 @@ size_t GroupBase::reuseBlockCount(size_t matched_block_count) const {
             }
             const size_t window = static_cast<size_t>(policy.sliding_window_size);
             return std::min(matched_block_count,
-                            window / cacheKeyTokenStride() + (window % cacheKeyTokenStride() != 0));
+                            window / canonical_size_per_block + (window % canonical_size_per_block != 0));
     }
     return 0;
 }
@@ -88,10 +84,10 @@ GroupBase::chunkCacheBlockCount(int prompt_tokens, int chunk_tokens, bool reuse_
 }
 
 size_t CacheTopology::blockSizeBytesForGroup(std::string_view group_tag) const {
-    const auto& cache_group            = group(group_tag);
-    const auto  kv_block_stride_bytes  = cache_group.kvBlockStrideBytes();
-    const auto  kv_scale_stride_bytes  = cache_group.kvScaleStrideBytes();
-    const auto  layer_count            = layerIdsForGroup(group_tag).size();
+    const auto& cache_group           = group(group_tag);
+    const auto  kv_block_stride_bytes = cache_group.kvBlockStrideBytes();
+    const auto  kv_scale_stride_bytes = cache_group.kvScaleStrideBytes();
+    const auto  layer_count           = layerIdsForGroup(group_tag).size();
     RTP_LLM_CHECK_WITH_INFO(kv_scale_stride_bytes <= std::numeric_limits<size_t>::max() - kv_block_stride_bytes,
                             "CacheTopology tag=%s stride overflow",
                             cache_group.tag.c_str());
@@ -140,8 +136,6 @@ void CacheTopology::validateAndBuildIndex() {
                                 group.tag.c_str(),
                                 group.seqSizePerBlock(),
                                 group.kernelSeqSizePerBlock());
-        RTP_LLM_CHECK_WITH_INFO(
-            group.cacheKeyTokenStride() > 0, "CacheTopology tag=%s has zero cache-key token stride", group.tag.c_str());
     }
 
     for (size_t layer_index = 0; layer_index < layers_.size(); ++layer_index) {
