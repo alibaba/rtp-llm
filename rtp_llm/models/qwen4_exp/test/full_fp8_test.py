@@ -4,10 +4,7 @@ from types import SimpleNamespace
 import torch
 import torch.nn.functional as F
 
-from rtp_llm.model_loader.fp8_weight import (
-    FP8_STORAGE_SCALE_SUFFIX,
-    Fp8StorageWeight,
-)
+from rtp_llm.model_loader.fp8_weight import FP8_STORAGE_SCALE_SUFFIX, Fp8StorageWeight
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.model_loader.tensor_source import TensorSource
 from rtp_llm.model_loader.weight_module import AtomicWeight
@@ -77,13 +74,10 @@ class FullFp8StorageTest(unittest.TestCase):
             atol=0.5,
         )
 
-    def test_custom_residual_consumers_record_actual_compute_copies(self):
+    def test_custom_residual_consumers_keep_compute_copies_and_restart_markers(self):
         from torch import nn
 
         from rtp_llm.models_py.model_desc.qwen4_exp import Qwen4ExpDecoderLayer
-        from rtp_llm.models_py.modules.qwen4_exp.weight_views import (
-            annotate_compute_inventory,
-        )
 
         weights = ModelWeights(1, "cpu", torch.bfloat16)
         projections = (
@@ -106,8 +100,7 @@ class FullFp8StorageTest(unittest.TestCase):
         layer._build_residual_modules(
             SimpleNamespace(hc_mult=4, layernorm_eps=1e-6), prepared.weights[0]
         )
-        inventory = annotate_compute_inventory(prepared)
-        entries = {entry.name: entry for entry in inventory.layers[0]}
+        self.assertIs(prepared._fp8_storage_owner, weights)
         for unit, names in (
             (layer.attn_hyper_connection, [x[0] for x in projections[:3]]),
             (layer.mlp_hyper_connection, [x[0] for x in projections[3:]]),
@@ -116,18 +109,18 @@ class FullFp8StorageTest(unittest.TestCase):
                 names,
                 (unit.down_projection, unit.up_projection, unit.inject_projection),
             ):
-                entry = entries[name]
-                self.assertEqual(
-                    entry.storage.data_ptr(), weights.weights[0][name].data_ptr()
+                self.assertIs(prepared.weights[0][name], weights.weights[0][name])
+                self.assertEqual(module.compute_weight.dtype, torch.bfloat16)
+                self.assertTrue(module.compute_weight._rtp_requires_restart_for_update)
+                torch.testing.assert_close(
+                    module.compute_weight,
+                    (
+                        weights.weights[0][name].float()
+                        * weights.weights[0][name + FP8_STORAGE_SCALE_SUFFIX]
+                    ).to(torch.bfloat16),
                 )
-                self.assertEqual(
-                    entry.compute.data_ptr(), module.compute_weight.data_ptr()
-                )
-                self.assertEqual(entry.compute.dtype, torch.bfloat16)
-                self.assertTrue(entry.update_requires_restart)
-                self.assertTrue(entry.compute._rtp_requires_restart_for_update)
 
-    def test_compute_view_preserves_fp8_inventory_and_matrices(self):
+    def test_compute_view_preserves_fp8_owners_and_matrices(self):
         weights = ModelWeights(1, "cpu", torch.bfloat16)
         matrix, ms = quantized(torch.randn(32, 32))
         norm, ns = quantized(torch.randn(32))

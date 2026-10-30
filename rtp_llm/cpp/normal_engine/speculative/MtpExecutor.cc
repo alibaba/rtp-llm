@@ -679,8 +679,8 @@ GenerateStreamPtr MtpExecutor::createMinFakeDecodeStream(int                    
         makeFakeStream(max_new_tokens, 1 + max_new_tokens, model_config, runtime_config, resource_context);
 
     // Non-dspark: the fake SP buffer's hidden_states stands in for the target
-    // hidden state consumed by the draft. The explicit ABI defaults to the
-    // legacy hc_mult * hidden_size width. DSpARK gets only the single
+    // hidden state consumed by the draft, with hc_mult * hidden_size width.
+    // DSpARK gets only the single
     // target-token slot; the hidden/vocab arguments are unused on that branch.
     auto sp_buffer = makeFakeSPOutputBuffer(model_config.data_type,
                                             static_cast<size_t>(model_config.getMtpInputHiddenSize()),
@@ -869,7 +869,6 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
          cache_manager,
          std::nullopt,
          params.model_config_.hc_mult});
-    model_init_params.mtp_input_hidden_size          = params.model_config_.getMtpInputHiddenSize();
     model_init_params.metrics_reporter = metrics_reporter_;
     model_init_params.hidden_state_capture_layer_ids = selectHiddenStateCaptureLayerIds(
         HiddenStateCaptureModelRole::TARGET, role_type_, warm_up_, params.model_config_.hidden_state_capture_layer_ids);
@@ -956,7 +955,6 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
                                 cache_manager,
                                 std::make_optional(0),
                                 mtp_params->model_config_.hc_mult});
-        model_params.mtp_input_hidden_size = mtp_params->model_config_.getMtpInputHiddenSize();
         model_params.metrics_reporter = metrics_reporter_;
         model_params.hidden_state_capture_layer_ids =
             selectHiddenStateCaptureLayerIds(HiddenStateCaptureModelRole::DRAFT,

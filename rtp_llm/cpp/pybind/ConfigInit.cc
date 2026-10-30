@@ -2141,7 +2141,6 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("moe_normalize_expert_scale", &ModelConfig::moe_normalize_expert_scale)
         .def_readwrite("scoring_func", &ModelConfig::scoring_func)
         .def_readwrite("hc_mult", &ModelConfig::hc_mult)
-        .def_readwrite("mtp_input_hidden_size", &ModelConfig::mtp_input_hidden_size)
         .def_readwrite("hc_sinkhorn_iters", &ModelConfig::hc_sinkhorn_iters)
         .def_readwrite("hc_eps", &ModelConfig::hc_eps)
         .def_readwrite("swiglu_limit", &ModelConfig::swiglu_limit)

@@ -70,14 +70,19 @@ TEST(MtpExecutorPolicyTest, DSparkPrefillRoleDisablesDraftGraphCapture) {
     EXPECT_TRUE(MtpExecutor::dsparkDraftGraphAllowed(/*is_dspark=*/false, RoleType::DECODE));
 }
 
-TEST(MtpExecutorPolicyTest, MtpInputHiddenSizeDefaultsToHyperConnectionWidth) {
+TEST(MtpExecutorPolicyTest, MtpInputHiddenSizeDerivesCheckedHyperConnectionWidth) {
     ModelConfig config;
     config.hidden_size = 8;
     config.hc_mult     = 4;
     EXPECT_EQ(config.getMtpInputHiddenSize(), 32);
 
-    config.mtp_input_hidden_size = 8;
-    EXPECT_EQ(config.getMtpInputHiddenSize(), 8);
+    config.hidden_size = 0;
+    EXPECT_THROW(config.getMtpInputHiddenSize(), std::runtime_error);
+    config.hidden_size = 8;
+    config.hc_mult     = 0;
+    EXPECT_THROW(config.getMtpInputHiddenSize(), std::runtime_error);
+    config.hc_mult = std::numeric_limits<int64_t>::max();
+    EXPECT_THROW(config.getMtpInputHiddenSize(), std::runtime_error);
 }
 
 TEST(MtpExecutorPolicyTest, CpRestoreSnapshotOwnsMutableHostInput) {
@@ -3330,7 +3335,7 @@ TEST_F(MtpExecutorTest, testDSparkFakeDecodeStartsWithoutProposalState) {
     EXPECT_EQ((std::vector<int32_t>{1, 1, 0}), stream->speculativeAcceptedTokensPerPos());
 }
 
-TEST_F(MtpExecutorTest, testFakeDecodeUsesExplicitMtpInputHiddenSize) {
+TEST_F(MtpExecutorTest, testFakeDecodeUsesHyperConnectionInputHiddenSize) {
     constexpr int32_t gamma      = 3;
     constexpr int32_t vocab_size = 16;
 
@@ -3341,7 +3346,6 @@ TEST_F(MtpExecutorTest, testFakeDecodeUsesExplicitMtpInputHiddenSize) {
     model_config.vocab_size            = vocab_size;
     model_config.hidden_size           = 8;
     model_config.hc_mult               = 4;
-    model_config.mtp_input_hidden_size = 8;
     model_config.data_type             = TYPE_FP16;
 
     auto stream = MtpExecutor::createMinFakeDecodeStream(
@@ -3349,7 +3353,7 @@ TEST_F(MtpExecutorTest, testFakeDecodeUsesExplicitMtpInputHiddenSize) {
     auto sp_buffer = stream->getSPOutputBuffer();
     ASSERT_NE(sp_buffer, nullptr);
     ASSERT_TRUE(sp_buffer->hidden_states.defined());
-    EXPECT_EQ((std::vector<int64_t>{1, 8}), sp_buffer->hidden_states.sizes().vec());
+    EXPECT_EQ((std::vector<int64_t>{1, 32}), sp_buffer->hidden_states.sizes().vec());
 }
 
 TEST_F(MtpExecutorTest, HostTargetStatusDoesNotAllocateDeviceStatusAndPropagatesFailure) {

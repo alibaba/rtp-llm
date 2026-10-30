@@ -427,7 +427,6 @@ TEST_P(OutputDispatchTest, testExecutorPassesFinalGraphWidthOnlyWithLayout) {
         captured_has_layout = init_params.kv_cache_layer_layout.has_value();
         captured_layer_ids  = init_params.hidden_state_capture_layer_ids;
         EXPECT_EQ(init_params.hidden_state_capture_dtype, params.model_config_.hidden_state_capture_dtype);
-        EXPECT_EQ(init_params.mtp_input_hidden_size, params.model_config_.getMtpInputHiddenSize());
         return std::make_unique<CapturedParamsModel>();
     };
     FactoryResetGuard factory_reset_guard;
@@ -455,15 +454,6 @@ TEST_P(OutputDispatchTest, testExecutorPassesFinalGraphWidthOnlyWithLayout) {
         EXPECT_FALSE(captured_has_layout);
         EXPECT_EQ(captured_layer_ids, (std::vector<int64_t>{0}));
     }
-
-    params.model_config_.mtp_input_hidden_size = 8;
-    { NormalExecutor executor(params, nullptr, false, false, 0, MlaOpsType::AUTO); }
-    params.model_config_.mtp_input_hidden_size = -1;
-    EXPECT_THROW((NormalExecutor(params, nullptr, false, false, 0, MlaOpsType::AUTO)), std::runtime_error);
-    params.model_config_.mtp_input_hidden_size = 0;
-    params.model_config_.hidden_size           = 0;
-    EXPECT_THROW((NormalExecutor(params, nullptr, false, false, 0, MlaOpsType::AUTO)), std::runtime_error);
-    params.model_config_.hidden_size = model.hidden_size;
 
     for (const auto role : {RoleType::PREFILL, RoleType::PDFUSION, RoleType::DECODE}) {
         for (const bool warm_up : {false, true}) {

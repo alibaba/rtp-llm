@@ -407,14 +407,6 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
                                  dspark_model_role_ == DSparkModelRole::COMMIT  ? "forward_commit" :
                                                                                   "forward";
     py_forward_method_         = py_model_.attr(forward_method);
-    if (enable_cuda_graph_ && is_prefill_cuda_graph_mode
-        && py::hasattr(py_instance, "supports_cuda_graph_draft_prefill")
-        && !py_instance.attr("supports_cuda_graph_draft_prefill")().cast<bool>()) {
-        // Decode and target verification may still use their graph runners.
-        // This role needs its own graph-safe incremental-prefill cache path.
-        RTP_LLM_LOG_WARNING("CUDA graph disabled for draft prefill: model requires eager incremental prefill");
-        enable_cuda_graph_ = false;
-    }
     if (enable_cuda_graph_ && !params.kv_cache_layer_layout.has_value()) {
         // No published topology means there is no trustworthy model geometry
         // for any graph role (including prefill warmup). Keep the eager path.
@@ -436,20 +428,14 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         graph_params.is_prefill_cuda_graph_mode   = is_prefill_cuda_graph_mode;
         graph_params.max_seq_len                  = params.max_seq_len;
         graph_params.hidden_size                  = params.hidden_size;
-        graph_params.hc_mult                      = params.hc_mult;
-        // Keep CUDA Graph capture on the same MTP input-hidden ABI as eager
-        // execution. Zero remains a compatibility fallback for direct/test
-        // GptModelInitParams construction sites.
-        RTP_LLM_CHECK_WITH_INFO(params.hidden_size > 0 && params.hc_mult > 0 && params.mtp_input_hidden_size >= 0,
-                                "invalid MTP input width inputs: hidden_size=%ld hc_mult=%ld explicit_width=%ld",
+        // Match eager MTP's hyper-connection input width.
+        RTP_LLM_CHECK_WITH_INFO(params.hidden_size > 0 && params.hc_mult > 0,
+                                "invalid MTP input width: hidden_size=%ld hc_mult=%ld",
                                 params.hidden_size,
-                                params.hc_mult,
-                                params.mtp_input_hidden_size);
-        const size_t configured_mtp_input_hidden_size =
-            params.mtp_input_hidden_size == 0 ?
-                static_cast<size_t>(params.hidden_size) * static_cast<size_t>(params.hc_mult) :
-                static_cast<size_t>(params.mtp_input_hidden_size);
-        graph_params.input_hidden_size      = configured_mtp_input_hidden_size;
+                                params.hc_mult);
+        RTP_LLM_CHECK_WITH_INFO(params.hidden_size <= std::numeric_limits<int64_t>::max() / params.hc_mult,
+                                "MTP input hidden width overflows int64_t");
+        graph_params.input_hidden_size      = static_cast<size_t>(params.hidden_size * params.hc_mult);
         graph_params.input_embedding_scalar = description_.input_embedding_scalar;
         if (weights_.position_encoding) {
             graph_params.position_encoding = weights_.position_encoding->kernel.cuda();

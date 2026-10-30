@@ -159,7 +159,6 @@ class Qwen4ExpTest(unittest.TestCase):
             w for w in info.layer_weights[1] if w.name == W.qwen4_ple_ngram_shards
         )
         self.assertEqual(ple.resident_device, "cpu")
-        self.assertEqual(self.config._tp_sharded_extra_weight_bytes, 0)
         self.assertGreater(self.config._replicated_extra_weight_bytes, 0)
 
     def test_indexer_weights_only_belong_to_full_attention(self):
@@ -401,7 +400,7 @@ class Qwen4ExpTest(unittest.TestCase):
     def test_hc_mult_is_plumbed_from_hc_count(self):
         self.assertEqual(self.config.hc_mult, 4)
         self.assertEqual(
-            self.config.mtp_input_hidden_size,
+            self.config.getMtpInputHiddenSize(),
             self.config.hc_mult * self.config.hidden_size,
         )
         self.assertEqual(

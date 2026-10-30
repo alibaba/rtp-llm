@@ -109,7 +109,6 @@ class ModelConfig(CppModelConfig):
     # defaults keep the generic estimator statically visible and zero-cost for
     # every existing model.
     _extra_weight_bytes: float = 0.0
-    _tp_sharded_extra_weight_bytes: float = 0.0
     _replicated_extra_weight_bytes: float = 0.0
     _extra_weight_param_count: int = 0
 
@@ -206,7 +205,6 @@ class ModelConfig(CppModelConfig):
         "moe_normalize_expert_scale",
         "scoring_func",
         "hc_mult",
-        "mtp_input_hidden_size",
         "hc_sinkhorn_iters",
         "hc_eps",
         "swiglu_limit",
@@ -350,21 +348,16 @@ class ModelConfig(CppModelConfig):
         """Estimate the resident device weight bytes for one loader rank.
 
         Generic weights retain the existing ``max(EP, TP)`` approximation.
-        Model-specific TP-only tables must be divided by attention TP instead:
-        using EP for them underestimates memory whenever ``EP > TP``. Replicated
-        model-specific tensors are charged in full on every rank.
+        Replicated model-specific tensors are charged in full on every rank.
         """
         if tp_size <= 0 or ep_size <= 0:
             raise ValueError(
                 f"tp_size and ep_size must be positive, got {tp_size}, {ep_size}"
             )
         checkpoint_extra = self._extra_weight_bytes
-        tp_extra = self._tp_sharded_extra_weight_bytes
         replicated_extra = self._replicated_extra_weight_bytes
         generic_size = self.eval_model_weight_size() - checkpoint_extra
-        return (
-            generic_size / max(ep_size, tp_size) + tp_extra / tp_size + replicated_extra
-        )
+        return generic_size / max(ep_size, tp_size) + replicated_extra
 
     def eval_model_size(self) -> float:
         model_size = self.eval_model_weight_size()

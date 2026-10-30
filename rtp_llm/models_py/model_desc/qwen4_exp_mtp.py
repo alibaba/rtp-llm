@@ -24,7 +24,6 @@ from rtp_llm.models_py.modules.hybrid.gated_residual import grouped_rms_norm
 from rtp_llm.models_py.modules.qwen4_exp.weight_views import (
     Qwen4LinearFactory as LinearFactory,
 )
-from rtp_llm.models_py.modules.qwen4_exp.weight_views import annotate_compute_inventory
 from rtp_llm.ops import HybridAttentionType, ParallelismConfig
 from rtp_llm.ops.compute_ops import PyModelInputs
 from rtp_llm.utils.model_weight import W
@@ -179,9 +178,6 @@ class Qwen4ExpMTPInputProjection(nn.Module):
 class Qwen4ExpMTPModel(Qwen4ExpModel):
     """One-layer draft model with target-hidden input fusion and QSA."""
 
-    def supports_cuda_graph_draft_prefill(self) -> bool:
-        return True
-
     def cuda_graph_draft_prefill_uses_request_lanes(self) -> bool:
         # QSA reserves speculative token lanes independently of the HC width.
         return True
@@ -305,7 +301,6 @@ class Qwen4ExpMTPModel(Qwen4ExpModel):
             norm_eps=model_config.layernorm_eps,
         )
         self._draft_head_graph = DraftHeadGraph(enabled=hasattr(self, "_fp8_lm_head"))
-        annotate_compute_inventory(self.weight)
 
     def forward(self, inputs: PyModelInputs, fmha_impl=None):
         self._draft_head_graph.clear_activation()

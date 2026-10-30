@@ -50,7 +50,6 @@ struct GraphParams {
     c10::ScalarType  model_data_type        = c10::ScalarType::Float;
     std::vector<int> prefill_capture_seq_lens;
     std::vector<int> decode_capture_batch_sizes;
-    int64_t          hc_mult                                    = 1;
     int              generation_prefill_cuda_graph_max_requests = 0;
     int              generation_prefill_cuda_graph_pad_token_id = 0;
     // Golden cache-group identity for CUDA graph capture/replay. A one-group

@@ -150,11 +150,6 @@ class Qwen4ExpMTPInputProjectionTest(unittest.TestCase):
                     shifted, torch.tensor([129, 130, 130], dtype=torch.int32)
                 )
 
-    def test_draft_prefill_graph_is_a_model_capability(self):
-        self.assertTrue(
-            Qwen4ExpMTPModel.supports_cuda_graph_draft_prefill(SimpleNamespace())
-        )
-
     def test_draft_graph_does_not_prepare_unused_gdn_metadata(self):
         model = SimpleNamespace(
             layers=[SimpleNamespace(layer_type=HybridAttentionType.NONE)]

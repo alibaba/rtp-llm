@@ -84,7 +84,6 @@ class Qwen4Exp(Qwen35Moe):
         # The released MTP head consumes the target residual before the final
         # hyper-connection mixer.  Each row therefore retains all hc branches;
         # the draft applies fc_hidden independently to every branch.
-        config.mtp_input_hidden_size = config.hidden_size * config.hc_mult
         # Linear-attention output gate activation; upstream falls back to hidden_act.
         config.linear_attn_norm_activation = config_json.get(
             "output_gate_type"
@@ -101,7 +100,6 @@ class Qwen4Exp(Qwen35Moe):
         config._qwen4_ple_embed_dim = int(config_json.get("ple_embed_dim", 0))
         config._qwen4_heads_per_ngram = int(config_json.get("heads_per_ngram", 8))
         config._extra_weight_bytes = 0.0
-        config._tp_sharded_extra_weight_bytes = 0.0
         config._replicated_extra_weight_bytes = 0.0
         config._extra_weight_param_count = 0
         cls._set_ple_weight_size_estimate(config)

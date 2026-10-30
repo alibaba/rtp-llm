@@ -5,6 +5,8 @@ import triton
 
 from rtp_llm.models_py.modules.qwen4_exp.gdn_prefill_adapter import (
     _store_page_checkpoints,
+)
+from rtp_llm.models_py.modules.qwen4_exp.test.gdn_prefill_reference import (
     sm120_prefill_with_checkpoints,
 )
 from rtp_llm.models_py.triton_kernels.fla.chunk import chunk_gated_delta_rule

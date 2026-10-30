@@ -63,9 +63,7 @@ struct GptModelInitParams {
     std::shared_ptr<KVCacheManager>              cache_manager;
     // nullopt selects the main-model cache config; otherwise selects this MTP module config.
     std::optional<int> mtp_cache_config_index;
-    // Hyper-connection residual multiplier. Kept separately because model
-    // internals can still be hc_mult * hidden_size wide even when the MTP draft
-    // consumes a collapsed target hidden state.
+    // Hyper-connection residual multiplier for the MTP input hidden width.
     int64_t                                    hc_mult = 1;
     std::shared_ptr<kmonitor::MetricsReporter> metrics_reporter;
     // Final CUDA-graph kernel block-table width. Executors compute it from
@@ -74,10 +72,6 @@ struct GptModelInitParams {
 
     std::vector<int64_t>    hidden_state_capture_layer_ids;
     HiddenStateCaptureDtype hidden_state_capture_dtype = HiddenStateCaptureDtype::BF16;
-
-    // Explicit MTP input_hiddens row width. Zero preserves the legacy fallback
-    // to hidden_size * hc_mult for direct/test construction sites.
-    int64_t mtp_input_hidden_size = 0;
 
     // Warmup wrappers borrow the Python model later used by the real executor.
     bool owns_py_model = true;

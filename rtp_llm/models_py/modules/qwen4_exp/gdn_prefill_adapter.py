@@ -10,7 +10,6 @@ import triton.language as tl
 
 from rtp_llm.models_py.model_desc.qwen3_next import Qwen3NextGatedDeltaNetPrefill
 from rtp_llm.models_py.triton_kernels.fla.block import load_initial_state_from_block_map
-from rtp_llm.models_py.triton_kernels.fla.l2norm import l2norm_fwd
 
 
 @triton.jit(do_not_specialize=["TABLE_STRIDE", "CACHE_STRIDE"])
@@ -51,21 +50,6 @@ def _store_page_checkpoints(
         Cache + block * CACHE_STRIDE + col,
         tl.where(final_page, b, a),
         valid_page & (block > 0) & (col < width),
-    )
-
-
-def sm120_prefill_with_checkpoints(
-    q, k, v, g, beta, initial, cu_seqlens, lengths, page_size=128
-):
-    """Log gates in, FP32 final/page states out; lengths are existing CPU metadata."""
-
-    q = l2norm_fwd(q).squeeze(0).contiguous()
-    k = l2norm_fwd(k).squeeze(0).contiguous()
-    v = v.squeeze(0).contiguous()
-    alpha = torch.exp(g.squeeze(0).float()).contiguous()
-    beta_fp32 = beta.squeeze(0).float().contiguous()
-    return sm120_prefill_prepared(
-        q, k, v, alpha, beta_fp32, initial, cu_seqlens, lengths, page_size
     )
 
 

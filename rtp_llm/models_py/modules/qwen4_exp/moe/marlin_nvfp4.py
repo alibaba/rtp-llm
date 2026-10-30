@@ -534,7 +534,6 @@ class Qwen4DecodeMarlinExecutor(FusedMoeExpertExecutor):
             moe.g1, moe.g2 = prior[5:]
             moe.workspaces = {}
             self.moe = moe
-            self._record_packed_consumers()
             return
         sf1 = _linear_scales(native.quant_scales[1], experts, both_n, k // 16)
         sf2 = _linear_scales(native.quant_scales[4], experts, k, n // 16)
@@ -564,25 +563,6 @@ class Qwen4DecodeMarlinExecutor(FusedMoeExpertExecutor):
         # here would create a cycle through its packed views and their owner.
         owner._qwen4_marlin_layout = (*identity, moe.g1, moe.g2)
         self.moe = moe
-        self._record_packed_consumers()
-
-    def _record_packed_consumers(self):
-        from rtp_llm.models_py.modules.qwen4_exp.weight_views import WeightView
-        from rtp_llm.utils.model_weight import W
-
-        views = getattr(self.weights, "consumer_views", None)
-        if views is None:
-            return
-        for name, compute in (
-            (W.moe_w1, self.moe.w1),
-            (W.moe_w2, self.moe.w2),
-            (W.moe_s1, self.moe.s1),
-            (W.moe_s2, self.moe.s2),
-            (W.moe_w1_s2, self.moe.g1),
-            (W.moe_w2_s2, self.moe.g2),
-        ):
-            owner = self.weights[name]
-            views[name] = WeightView(name, owner, None, compute, True, owner)
 
     def execute(
         self,
