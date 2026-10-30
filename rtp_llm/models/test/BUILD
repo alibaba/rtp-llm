@@ -5,6 +5,22 @@ _DSV4_CUDA13_ONLY = select({
 })
 
 py_test(
+    name = "kimi_k3_cache_config_test",
+    srcs = ["kimi_k3_cache_config_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
+)
+
+py_test(
+    name = "kimi_k3_moe_capacity_test",
+    srcs = ["kimi_k3_moe_capacity_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
+)
+
+py_test(
     name = "dsv4_kv_cache_test",
     srcs = ["dsv4_kv_cache_test.py"],
     deps = ["//rtp_llm:testlib"],

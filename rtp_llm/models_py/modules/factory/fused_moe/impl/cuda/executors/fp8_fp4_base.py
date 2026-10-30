@@ -64,10 +64,16 @@ def normalize_moe_w13_gate_up(
     )
 
 
+def _normalize_activation(activation: str) -> str:
+    activation = activation.lower()
+    return "swiglu" if activation in ("silu", "siglu") else activation
+
+
 class Fp8Fp4ExecutorBase(FusedMoeExpertExecutor, torch.nn.Module):
     """Adapt an FP8/FP4 backend to the common fused-MoE executor API."""
 
     includes_shared_expert = False
+    supported_activations = ("swiglu",)
 
     def __init__(
         self,
@@ -78,6 +84,12 @@ class Fp8Fp4ExecutorBase(FusedMoeExpertExecutor, torch.nn.Module):
         torch.nn.Module.__init__(self)
         super().__init__(config, quant_config, weights)
         self.cfg = config
+        self.activation = _normalize_activation(config.activation_type)
+        if self.activation not in self.supported_activations:
+            raise ValueError(
+                f"{type(self).__name__} supports activations "
+                f"{self.supported_activations}, got {config.activation_type!r}"
+            )
         self.setup_weights(weights)
 
     @classmethod
@@ -128,9 +140,10 @@ class Fp8Fp4ExecutorBase(FusedMoeExpertExecutor, torch.nn.Module):
         apply_router_weight_on_input: bool,
         extra_expert_args: Optional[dict[str, Any]],
     ) -> CombineForwardPayload:
-        if activation.lower() not in ("silu", "siglu", "swiglu"):
+        if _normalize_activation(activation) != self.activation:
             raise ValueError(
-                f"FP8/FP4 MoE requires SiLU activation, got {activation!r}"
+                f"{type(self).__name__} was initialized with activation "
+                f"{self.activation!r}, got {activation!r}"
             )
         if expert_map is not None:
             raise ValueError("FP8/FP4 MoE does not support expert_map")

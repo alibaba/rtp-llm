@@ -9,7 +9,7 @@
 
 
 class KDACacheGenerator:
-    """Run kimi_kda kernels to populate a Triton autotune cache for one head_dim.
+    """Run kda kernels to populate a Triton autotune cache for one head_dim.
 
     Forward-only, prefill-only. Exercises chunk_kda + fused_kda_gate using the
     exact production/CI call path (use_gate_in_kernel=True, safe_gate=False,
@@ -52,7 +52,7 @@ class KDACacheGenerator:
         g = torch.randn(1, T_total, H, D, dtype=torch.float32)
         A_log = torch.randn(H, dtype=torch.float)
         dt_bias = torch.randn(H * D, dtype=torch.float)
-        beta = torch.randn(1, T_total, H, dtype=dtype).sigmoid()
+        beta = torch.randn(1, T_total, H, dtype=dtype).float().sigmoid()
         # Initial states: one per sequence — shape [N, H, D, D].
         h0 = torch.randn(N, H, D, D, dtype=torch.float32)
         cu_seqlens = torch.tensor(
@@ -72,7 +72,7 @@ class KDACacheGenerator:
         return q, k, v, g, beta, h0, A_log, dt_bias, cu_seqlens
 
     def generate_kda(self) -> None:
-        from rtp_llm.models_py.triton_kernels.kimi_kda import chunk_kda, fused_kda_gate
+        from rtp_llm.models_py.triton_kernels.kda import chunk_kda, fused_kda_gate
 
         q, k, v, g, beta, h0, A_log, dt_bias, cu_seqlens = self.tensors
 

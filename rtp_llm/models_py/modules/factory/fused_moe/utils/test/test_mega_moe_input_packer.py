@@ -193,6 +193,68 @@ class TestMegaMoEInputPacker(unittest.TestCase):
             0,
         )
 
+    def test_shared_padding_routes_refresh_on_graph_replay(self):
+        from rtp_llm.models_py.triton_kernels.moe.mega_moe_input_pack import (
+            fused_pack_mega_moe_inputs_optimized,
+        )
+
+        tokens, dim, topk = 33, 256, 16
+        x = torch.randn(tokens, dim, device="cuda", dtype=torch.bfloat16)
+        shared = torch.randn(tokens, 2 * dim, device="cuda", dtype=torch.bfloat16)
+        shared_out = torch.empty_like(shared)
+        weights = torch.rand(tokens, topk, device="cuda") + 0.25
+        weights[0, 0] = 0
+        indices = torch.arange(tokens * topk, device="cuda").reshape(tokens, topk) % 256
+        valid_mask = torch.ones(tokens, device="cuda", dtype=torch.bool)
+        buf = _make_buf(tokens, dim, topk, "cuda")
+
+        def pack():
+            fused_pack_mega_moe_inputs_optimized(
+                x,
+                weights,
+                indices,
+                buf.x,
+                buf.x_sf,
+                buf.topk_idx,
+                buf.topk_weights,
+                shared_input=shared,
+                shared_out=shared_out,
+                valid_mask=valid_mask,
+            )
+
+        warmup_stream = torch.cuda.Stream()
+        warmup_stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(warmup_stream):
+            pack()
+        torch.cuda.current_stream().wait_stream(warmup_stream)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            pack()
+
+        # Reuse captured addresses while changing which rows are padding.
+        for valid_tokens in (19, 0, tokens, 7):
+            with self.subTest(valid_tokens=valid_tokens):
+                valid_mask.copy_(torch.arange(tokens, device="cuda") < valid_tokens)
+                graph.replay()
+                torch.testing.assert_close(
+                    buf.topk_idx,
+                    torch.where(valid_mask[:, None], indices, -1),
+                    rtol=0,
+                    atol=0,
+                )
+                torch.testing.assert_close(
+                    buf.topk_weights,
+                    torch.where(valid_mask[:, None], weights, 0),
+                    rtol=0,
+                    atol=0,
+                )
+                torch.testing.assert_close(
+                    shared_out,
+                    torch.where(valid_mask[:, None], shared, 0),
+                    rtol=0,
+                    atol=0,
+                )
+
     def test_nonfinite_activations_are_zeroed(self):
         tokens, dim, topk = 3, 256, 8
         x = torch.randn(tokens, dim, device="cuda", dtype=torch.bfloat16)
