@@ -17,6 +17,7 @@ from rtp_llm.models.qwen4_exp.qwen4_exp_kv_cache import (
 from rtp_llm.models_py.model_desc.block_map import (
     get_attention_inputs_value,
     get_layer_tags,
+    get_primary_attention_inputs,
     select_attention_inputs_for_tag,
 )
 from rtp_llm.models_py.model_desc.qwen3_next import (
@@ -805,18 +806,11 @@ class Qwen4ExpModel(Qwen35Model):
                 role=getattr(parallelism_config, "role_type", "PDFUSION")
             )
         self.ple_layers = nn.ModuleDict()
-        self.requires_cuda_graph_model_input_preparation = bool(
-            getattr(self.config, "enable_qwen4_ple", False)
-        )
         self._ple_target_transaction: Optional[_PLETargetTransaction] = None
         self._ple_graph_target_transactions: Dict[int, _PLETargetTransaction] = {}
         self._capture_mtp_target_hidden = bool(getattr(self.config, "is_mtp", False))
         if getattr(self.config, "enable_qwen4_ple", False):
             self._build_ple_layers()
-            self.requires_cuda_graph_model_input_preparation = any(
-                not ple.ple_embedding.inline_cpu_uva_graph
-                for ple in self.ple_layers.values()
-            )
         from .qwen4_exp_runtime.target_head_graph import TargetHeadGraph
 
         self._target_head_graph = TargetHeadGraph(
@@ -1131,10 +1125,15 @@ class Qwen4ExpModel(Qwen35Model):
         if hook is not None:
             hook(phase, int(self.parallelism_config.get_attn_tp_rank()))
 
-    def clear_speculative_target_graph_capture(self) -> None:
-        return self._ple_coordinator().clear_speculative_target_graph_capture()
+    def on_cuda_graph_warmup(self, inputs: PyModelInputs) -> None:
+        """Release eager-only state after each graph warmup forward."""
+        if get_primary_attention_inputs(inputs).is_target_verify:
+            self._ple_coordinator().clear_speculative_target_graph_capture()
 
-    def save_speculative_target_graph_capture(self, graph_key: int) -> None:
+    def on_cuda_graph_capture(self, graph_key: int, inputs: PyModelInputs) -> None:
+        """Retain model-owned tensors for this captured graph instance."""
+        if not get_primary_attention_inputs(inputs).is_target_verify:
+            return
         from rtp_llm.models_py.distributed.flashinfer_all_reduce import (
             get_flashinfer_allreduce,
         )
@@ -1144,7 +1143,10 @@ class Qwen4ExpModel(Qwen35Model):
             communicator.finish_graph_capture()
         return self._ple_coordinator().save_speculative_target_graph_capture(graph_key)
 
-    def activate_speculative_target_graph_replay(self, graph_key: int) -> None:
+    def on_cuda_graph_replay(self, graph_key: int, inputs: PyModelInputs) -> None:
+        """Activate the model state belonging to the graph that just replayed."""
+        if not get_primary_attention_inputs(inputs).is_target_verify:
+            return
         self._ple_coordinator().activate_speculative_target_graph_replay(graph_key)
         head_graph = self.__dict__.get("_target_head_graph")
         if head_graph is not None:
@@ -1172,11 +1174,6 @@ class Qwen4ExpModel(Qwen35Model):
         if not self.ple_layers:
             return {}
         return self._ple_execution()._start_eager_ple_prefetch(inputs, attention_inputs)
-
-    def prepare_cuda_graph_model_inputs(self, inputs: PyModelInputs) -> None:
-        if not self.ple_layers:
-            return
-        return self._ple_execution().prepare_cuda_graph_model_inputs(inputs)
 
     def _apply_ple(
         self,

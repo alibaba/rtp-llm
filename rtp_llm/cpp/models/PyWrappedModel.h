@@ -384,9 +384,9 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
                                     "Python target status reducer capability requires its reduce hook");
         }
         if (has_speculative_target_commit_hooks_ && enable_cuda_graph_) {
-            RTP_LLM_CHECK_WITH_INFO(py::hasattr(py_model_, "clear_speculative_target_graph_capture")
-                                        && py::hasattr(py_model_, "save_speculative_target_graph_capture")
-                                        && py::hasattr(py_model_, "activate_speculative_target_graph_replay"),
+            RTP_LLM_CHECK_WITH_INFO(py::hasattr(py_model_, "on_cuda_graph_warmup")
+                                        && py::hasattr(py_model_, "on_cuda_graph_capture")
+                                        && py::hasattr(py_model_, "on_cuda_graph_replay"),
                                     "speculative target CUDA Graph requires capture, save and replay transaction "
                                     "hooks to preserve side-state across graph instances");
         }
@@ -471,6 +471,11 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         if (params.kv_cache_layer_layout.has_value()) {
             RTP_LLM_CHECK_WITH_INFO(cache_manager_ != nullptr, "cache-backed CUDA graph requires a cache manager");
             graph_params.kv_cache_group_tags = params.kv_cache_layer_layout->topology().groupTags();
+            for (const auto& group : params.kv_cache_layer_layout->topology().groups()) {
+                if (group.spec->type == KVCacheSpecType::OpaqueState) {
+                    graph_params.physical_block_table_tags.push_back(group.tag);
+                }
+            }
         }
         // Most models transport explicit positions only for MRoPE. A model
         // that consumes those positions with Base RoPE (Qwen4 MTP's indexer)

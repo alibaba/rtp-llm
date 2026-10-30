@@ -10,6 +10,7 @@ from rtp_llm.cpp.cuda_graph.tests.libtest_cuda_graph_runner import (
     CudaGraphRunner,
     DirtyCudaGraphCaptureError,
 )
+from rtp_llm.models_py.model_desc.block_map import get_primary_attention_inputs
 from rtp_llm.models_py.modules.factory.attention.attn_factory import (
     CudaGraphSelectionMode,
 )
@@ -71,6 +72,67 @@ class TaggedPhysicalBlockTableModel(TaggedBlockTableModel):
         aux_id = attention_inputs["aux"].kv_cache_block_id_device[0, 0]
         signature = (full_id + 16 * aux_id).to(inputs.input_hiddens.dtype)
         return PyModelOutputs(inputs.input_hiddens + signature)
+
+
+class SelectivePhysicalBlockTableModel(TaggedBlockTableModel):
+    def __init__(self, tags, physical_tag):
+        self.tags = tags
+        self.physical_tag = physical_tag
+
+    def forward(self, inputs, fmha_impl=None):
+        groups = inputs.attention_inputs
+        signature = inputs.input_hiddens.new_zeros(())
+        for tag in self.tags:
+            attention = groups[tag] if isinstance(groups, dict) else groups
+            table = attention.kv_cache_block_id_device
+            if tag == self.physical_tag:
+                if table is None:
+                    raise RuntimeError("missing declared physical table")
+                signature = signature + table.sum().to(signature.dtype)
+            elif table is not None:
+                raise RuntimeError("unrequested physical table was allocated")
+        return PyModelOutputs(inputs.input_hiddens + signature)
+
+
+class GraphLifecycleModel(TaggedBlockTableModel):
+    requires_cuda_graph_model_input_preparation = True
+
+    def __init__(self):
+        self.events = []
+        self.pending_stage = False
+        self.captured = set()
+
+    def prepare_cuda_graph_model_inputs(self, inputs):
+        raise RuntimeError("obsolete input preparation hook was called")
+
+    def forward(self, inputs, fmha_impl=None):
+        if self.pending_stage:
+            raise RuntimeError("warmup state leaked into another forward")
+        self.pending_stage = True
+        output = super().forward(inputs, fmha_impl).hidden_states
+        return PyModelOutputs(output + inputs.input_ids.to(output.dtype)[:, None])
+
+    def on_cuda_graph_warmup(self, inputs):
+        if not self.pending_stage:
+            raise RuntimeError("warmup callback ran before forward")
+        self.pending_stage = False
+        self.events.append(
+            ("warmup", get_primary_attention_inputs(inputs).input_lengths.numel())
+        )
+
+    def on_cuda_graph_capture(self, key, inputs):
+        if not self.pending_stage:
+            raise RuntimeError("capture callback has no captured stage")
+        if key != get_primary_attention_inputs(inputs).input_lengths.numel():
+            raise RuntimeError("capture callback selected a different bucket")
+        self.pending_stage = False
+        self.captured.add(key)
+        self.events.append(("capture", key))
+
+    def on_cuda_graph_replay(self, key, inputs):
+        if key not in self.captured or self.pending_stage:
+            raise RuntimeError("replay callback has no matching captured stage")
+        self.events.append(("replay", key))
 
 
 class TaggedSequenceLengthModel:
@@ -711,6 +773,7 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
                     GROUP_TAGS,
                     target_verify,
                     2 if target_verify else 1,
+                    physical_block_table_tags=GROUP_TAGS,
                 )
                 for full, aux in ((3, 7), (5, 2)):
                     inputs = (
@@ -741,6 +804,7 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
             GROUP_TAGS,
             True,
             2,
+            physical_block_table_tags=GROUP_TAGS,
         )
         inputs = _build_target_verify_inputs(
             GROUP_TAGS,
@@ -758,6 +822,84 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
         torch.testing.assert_close(
             output.hidden_states, torch.full_like(output.hidden_states, 100)
         )
+
+    def test_physical_tables_are_scoped_and_cleared_after_shrink(self):
+        for tags, physical_tag in (
+            (GROUP_TAGS, "full"),
+            (GROUP_TAGS, "aux"),
+            (["aux"], "aux"),
+            (GROUP_TAGS, None),
+        ):
+            with self.subTest(tags=tags, physical_tag=physical_tag):
+                runner = CudaGraphRunner()
+                runner.init_decode(
+                    SelectivePhysicalBlockTableModel(tags, physical_tag),
+                    HIDDEN_SIZE,
+                    TOKENS_PER_BLOCK,
+                    KERNEL_BLOCK_TABLE_WIDTH,
+                    [4],
+                    tags,
+                    physical_block_table_tags=[physical_tag] if physical_tag else [],
+                )
+                for batch, width in ((3, 2), (1, 1), (2, 1)):
+                    inputs = _build_decode_inputs(
+                        tags,
+                        dict.fromkeys(tags, 1),
+                        batch_size=batch,
+                        block_count=width,
+                    )
+                    for attention in inputs.attention_inputs.values():
+                        attention.kv_cache_block_id_device = torch.full(
+                            (batch, width), 7, dtype=torch.int32, device="cuda"
+                        )
+                    if len(tags) == 1:
+                        inputs.attention_inputs = get_primary_attention_inputs(inputs)
+                    self.assertTrue(runner.prepare(inputs))
+                    runner.updateBlockTables(inputs)
+                    output = runner.forward(inputs).hidden_states.clone()
+                    expected = batch * width * 7 if physical_tag else 0
+                    torch.testing.assert_close(
+                        output, torch.full_like(output, expected)
+                    )
+
+    def test_native_runner_calls_model_lifecycle_for_each_bucket(self):
+        model = GraphLifecycleModel()
+        runner = CudaGraphRunner()
+        runner.init_decode(
+            model,
+            HIDDEN_SIZE,
+            TOKENS_PER_BLOCK,
+            KERNEL_BLOCK_TABLE_WIDTH,
+            [1, 4],
+            GROUP_TAGS,
+            True,
+            2,
+        )
+        self.assertEqual(
+            model.events,
+            [
+                ("warmup", 128),
+                ("warmup", 4),
+                ("warmup", 4),
+                ("capture", 4),
+                ("warmup", 1),
+                ("warmup", 1),
+                ("capture", 1),
+            ],
+        )
+        for batch, token in ((3, 5), (1, 9), (2, 3), (1, 7)):
+            inputs = _build_target_verify_inputs(
+                GROUP_TAGS,
+                {"full": 2, "aux": 1},
+                batch_size=batch,
+                query_len=2,
+                prefix_len=1,
+            )
+            self.assertTrue(runner.prepare(inputs))
+            inputs.input_ids.fill_(token)
+            output = runner.forward(inputs).hidden_states.clone()
+            torch.testing.assert_close(output, torch.full_like(output, 18 + token))
+            self.assertEqual(model.events[-1], ("replay", 1 if batch == 1 else 4))
 
     def test_prepare_sync_policy_is_role_scoped(self) -> None:
         # Run in a fresh process for each async environment: the production

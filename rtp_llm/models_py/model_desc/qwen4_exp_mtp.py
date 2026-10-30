@@ -8,7 +8,10 @@ from torch import nn
 
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_loader.model_weight_info import ModelWeights
-from rtp_llm.models_py.model_desc.block_map import get_attention_inputs_value
+from rtp_llm.models_py.model_desc.block_map import (
+    get_attention_inputs_value,
+    get_primary_attention_inputs,
+)
 from rtp_llm.models_py.model_desc.qwen3_next import Qwen3NextMetadata
 from rtp_llm.models_py.model_desc.qwen4_exp import Qwen4ExpModel
 from rtp_llm.models_py.model_desc.qwen4_exp_runtime.draft_head_graph import (
@@ -317,8 +320,10 @@ class Qwen4ExpMTPModel(Qwen4ExpModel):
             self._draft_head_graph.stage(self._fp8_lm_head, outputs.hidden_states)
         return outputs
 
-    def activate_draft_lm_head_graph(self, graph_batch: int) -> None:
-        self._draft_head_graph.activate(graph_batch)
+    def on_cuda_graph_replay(self, graph_key: int, inputs: PyModelInputs) -> None:
+        super().on_cuda_graph_replay(graph_key, inputs)
+        if not get_primary_attention_inputs(inputs).is_prefill:
+            self._draft_head_graph.activate(graph_key)
 
     def _compute_local_logits(self, hidden: torch.Tensor) -> torch.Tensor:
         logits = self._draft_head_graph.take(hidden)

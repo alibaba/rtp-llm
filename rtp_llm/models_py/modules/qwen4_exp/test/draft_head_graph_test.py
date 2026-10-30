@@ -1,4 +1,5 @@
 import unittest
+from types import SimpleNamespace
 
 import torch
 
@@ -110,7 +111,14 @@ class DraftHeadGraphTest(unittest.TestCase):
         torch.nn.Module.__init__(model)
         model._draft_head_graph = cache
         model._fp8_lm_head = head
-        cache.activate(4)
+        model.on_cuda_graph_replay(
+            4,
+            SimpleNamespace(
+                attention_inputs={
+                    "draft": SimpleNamespace(is_target_verify=False, is_prefill=False)
+                }
+            ),
+        )
         actual = model._compute_local_logits(live)
         self.assertEqual(actual.dtype, torch.bfloat16)
         torch.testing.assert_close(actual, expected, rtol=0, atol=0)

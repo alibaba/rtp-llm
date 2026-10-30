@@ -1273,21 +1273,21 @@ class Qwen4ExpPLERuntimeTest(TestCase):
 
         # Capture warmup must not leave an active transaction behind.
         self.model._apply_ple(1, hyper.flatten(0, 1), ids.flatten(), inputs)
-        self.model.clear_speculative_target_graph_capture()
+        self.model.on_cuda_graph_warmup(SimpleNamespace(attention_inputs=inputs))
         self.assertIsNone(self.model._ple_target_transaction)
 
         self.model._apply_ple(1, hyper.flatten(0, 1), ids.flatten(), inputs)
-        self.model.save_speculative_target_graph_capture(2)
+        self.model.on_cuda_graph_capture(2, SimpleNamespace(attention_inputs=inputs))
         captured = self.model._ple_graph_target_transactions[2]
         self.assertIsNone(self.model._ple_target_transaction)
         with self.assertRaisesRegex(RuntimeError, "missing for replay batch"):
-            self.model.activate_speculative_target_graph_replay(1)
+            self.model.on_cuda_graph_replay(1, SimpleNamespace(attention_inputs=inputs))
 
         state_before = self.state_base.clone()
         context_before = self.ctx_base.clone()
-        self.model.activate_speculative_target_graph_replay(2)
+        self.model.on_cuda_graph_replay(2, SimpleNamespace(attention_inputs=inputs))
         with self.assertRaisesRegex(RuntimeError, "still active"):
-            self.model.activate_speculative_target_graph_replay(2)
+            self.model.on_cuda_graph_replay(2, SimpleNamespace(attention_inputs=inputs))
         self.model.prepare_speculative_target_commit(
             torch.tensor([1, 5], dtype=torch.int32)
         )
@@ -1300,7 +1300,7 @@ class Qwen4ExpPLERuntimeTest(TestCase):
 
         # A second replay selects the same graph-owned stage after the first
         # invocation has released its transient undo buffers.
-        self.model.activate_speculative_target_graph_replay(2)
+        self.model.on_cuda_graph_replay(2, SimpleNamespace(attention_inputs=inputs))
         self.model.prepare_speculative_target_commit(
             torch.tensor([2, 3], dtype=torch.int32)
         )
@@ -1316,14 +1316,15 @@ class Qwen4ExpPLERuntimeTest(TestCase):
         self._seed_target_history(prefixes)
         ids = torch.tensor([[4, 5, 6], [3, 4, 5]], dtype=torch.long)
         hyper = torch.randn(6, _HC * _HIDDEN, dtype=torch.bfloat16)
-        self.model._apply_ple(1, hyper, ids.flatten(), self._target_inputs(prefixes, 3))
-        self.model.save_speculative_target_graph_capture(2)
+        inputs = self._target_inputs(prefixes, 3)
+        self.model._apply_ple(1, hyper, ids.flatten(), inputs)
+        self.model.on_cuda_graph_capture(2, SimpleNamespace(attention_inputs=inputs))
         captured = self.model._ple_graph_target_transactions[2]
         before_state, before_ctx = self.state_base.clone(), self.ctx_base.clone()
         # Capacity two is reused by live batches one, two, then one. Padding
         # must never reach destination validation, candidate selection or undo.
         for accepted in ([3], [1, 2], [2]):
-            self.model.activate_speculative_target_graph_replay(2)
+            self.model.on_cuda_graph_replay(2, SimpleNamespace(attention_inputs=inputs))
             self.model.prepare_speculative_target_commit(
                 torch.tensor(accepted, dtype=torch.int32)
             )
@@ -1421,11 +1422,11 @@ class Qwen4ExpPLERuntimeTest(TestCase):
         for value in inputs.values():
             value.is_cuda_graph = value.is_s_padded = True
         self.model._apply_ple(1, hyper, ids.flatten(), inputs)
-        self.model.clear_speculative_target_graph_capture()
+        self.model.on_cuda_graph_warmup(SimpleNamespace(attention_inputs=inputs))
         graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(graph):
             actual = self.model._apply_ple(1, hyper, ids.flatten(), inputs)
-        self.model.save_speculative_target_graph_capture(2)
+        self.model.on_cuda_graph_capture(2, SimpleNamespace(attention_inputs=inputs))
         for live_batch in (1, 2, 1):
             self.state_base.copy_(before_state)
             self.ctx_base.copy_(before_ctx)
@@ -1437,7 +1438,7 @@ class Qwen4ExpPLERuntimeTest(TestCase):
                 value.prefix_lengths_device.copy_(torch.tensor(prefixes, device="cuda"))
                 value.prefix_lengths_device[live_batch:].zero_()
             graph.replay()
-            self.model.activate_speculative_target_graph_replay(2)
+            self.model.on_cuda_graph_replay(2, SimpleNamespace(attention_inputs=inputs))
             self.model.prepare_speculative_target_commit(
                 torch.full((live_batch,), 3, dtype=torch.int32, device="cuda")
             )
@@ -1523,10 +1524,20 @@ class Qwen4ExpPLERuntimeTest(TestCase):
             expected_layers=frozenset({1}),
             stages={1: stage},
         )
-        self.model.save_speculative_target_graph_capture(2)
+        self.model.on_cuda_graph_capture(
+            2,
+            SimpleNamespace(
+                attention_inputs={PLE_STATE_TAG: SimpleNamespace(is_target_verify=True)}
+            ),
+        )
 
         graph.replay()
-        self.model.activate_speculative_target_graph_replay(2)
+        self.model.on_cuda_graph_replay(
+            2,
+            SimpleNamespace(
+                attention_inputs={PLE_STATE_TAG: SimpleNamespace(is_target_verify=True)}
+            ),
+        )
         self.model.prepare_speculative_target_commit(
             torch.tensor([1, 1], device=device, dtype=torch.int32)
         )
@@ -1538,7 +1549,12 @@ class Qwen4ExpPLERuntimeTest(TestCase):
         state_seed.add_(50)
         ids_seed.add_(50)
         graph.replay()
-        self.model.activate_speculative_target_graph_replay(2)
+        self.model.on_cuda_graph_replay(
+            2,
+            SimpleNamespace(
+                attention_inputs={PLE_STATE_TAG: SimpleNamespace(is_target_verify=True)}
+            ),
+        )
         self.model.prepare_speculative_target_commit(
             torch.tensor([3, 2], device=device, dtype=torch.int32)
         )
@@ -1562,6 +1578,7 @@ class Qwen4ExpPLERuntimeTest(TestCase):
             embedding.multipliers.to(device),
             ngram_size=embedding.ngram_size,
             eos_token_id=embedding.eos_token_id,
+            inline_cpu_uva_graph=cpu_tables,
         )
         if cpu_tables:
             self.assertTrue(gpu_embedding._cpu_uva_enabled)
@@ -1767,11 +1784,11 @@ class Qwen4ExpPLERuntimeTest(TestCase):
 
         self.model._apply_ple(1, hyper, ids.flatten(), inputs)
         self.assertIsNotNone(gpu_embedding._triton_shard_ptrs)
-        self.model.clear_speculative_target_graph_capture()
+        self.model.on_cuda_graph_warmup(SimpleNamespace(attention_inputs=inputs))
         graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(graph):
             got = self.model._apply_ple(1, hyper, ids.flatten(), inputs)
-        self.model.save_speculative_target_graph_capture(2)
+        self.model.on_cuda_graph_capture(2, SimpleNamespace(attention_inputs=inputs))
         graph.replay()
 
         baseline, _ = self.ple.decode_chunk(
@@ -1791,44 +1808,12 @@ class Qwen4ExpPLERuntimeTest(TestCase):
         )
         torch.testing.assert_close(got.view(2, 3, -1), hyper.view(2, 3, -1) + baseline)
 
-    def test_cpu_graph_preparation_masks_nontext_tokens_without_state_writes(self):
-        if not torch.cuda.is_available():
-            self.skipTest("CUDA is required for CPU lookup staging")
-        device = torch.device("cuda")
-        embedding = self._move_ple_to_cuda(device, cpu_tables=True)
-        self.model.requires_cuda_graph_model_input_preparation = True
-        prefixes = (self._PAGE - 1, self._PAGE)
-        _, context = self._seed_target_history(prefixes)
-        ids = torch.tensor([4, 5, 6, 3, 4, 5], device=device)
-        text_mask = torch.tensor([True, False, True, False, True, True], device=device)
-        inputs = self._target_inputs(prefixes, 3)
-        for value in inputs.values():
-            value.is_cuda_graph = True
-        state_before, context_before = self.state_base.clone(), self.ctx_base.clone()
-        self.model.prepare_cuda_graph_model_inputs(
-            SimpleNamespace(
-                input_ids=ids,
-                attention_inputs=inputs,
-                embedding_inputs=SimpleNamespace(text_tokens_mask=text_mask),
-            )
-        )
-        masked_ids = torch.where(text_mask, ids, embedding.eos_token_id).view(2, 3)
-        hashed = embedding.hashed_ids(
-            torch.cat((context.to(device), masked_ids), dim=1), 3
-        )
-        expected = embedding._gather_torch(hashed.cpu()).to(device)
-        torch.testing.assert_close(embedding._cpu_graph_rows, expected, rtol=0, atol=0)
-        torch.testing.assert_close(self.state_base, state_before, rtol=0, atol=0)
-        torch.testing.assert_close(self.ctx_base, context_before, rtol=0, atol=0)
-        self.assertTrue(all(shard.device.type == "cpu" for shard in embedding.shards))
-
     def test_target_cpu_ple_forward_captures_and_replays_captured_batch(self):
         if not torch.cuda.is_available():
             self.skipTest("CUDA is required for Graph replay")
         device = torch.device("cuda")
         gpu_embedding = self._move_ple_to_cuda(device, cpu_tables=True)
 
-        self.model.requires_cuda_graph_model_input_preparation = True
         prefixes = (self._PAGE - 1, self._PAGE)
         initial_state, initial_context = self._seed_target_history(prefixes)
         initial_state = initial_state.to(device)
@@ -1842,24 +1827,15 @@ class Qwen4ExpPLERuntimeTest(TestCase):
             value.is_cuda_graph = True
             value.is_s_padded = True
 
-        self.model.prepare_cuda_graph_model_inputs(
-            SimpleNamespace(input_ids=ids.flatten(), attention_inputs=inputs)
-        )
         self.model._apply_ple(1, hyper, ids.flatten(), inputs)
         self.assertTrue(
             all(shard.device.type == "cpu" for shard in gpu_embedding.shards)
         )
-        self.model.clear_speculative_target_graph_capture()
+        self.model.on_cuda_graph_warmup(SimpleNamespace(attention_inputs=inputs))
         graph = torch.cuda.CUDAGraph()
-        self.model.prepare_cuda_graph_model_inputs(
-            SimpleNamespace(input_ids=ids.flatten(), attention_inputs=inputs)
-        )
         with torch.cuda.graph(graph):
             got = self.model._apply_ple(1, hyper, ids.flatten(), inputs)
-        self.model.save_speculative_target_graph_capture(2)
-        self.model.prepare_cuda_graph_model_inputs(
-            SimpleNamespace(input_ids=ids.flatten(), attention_inputs=inputs)
-        )
+        self.model.on_cuda_graph_capture(2, SimpleNamespace(attention_inputs=inputs))
         graph.replay()
 
         self.ple.ple_embedding._graph_gather_required = False
@@ -1872,9 +1848,6 @@ class Qwen4ExpPLERuntimeTest(TestCase):
 
         ids.add_(1)
         hyper.add_(0.125)
-        self.model.prepare_cuda_graph_model_inputs(
-            SimpleNamespace(input_ids=ids.flatten(), attention_inputs=inputs)
-        )
         graph.replay()
         self.ple.ple_embedding._graph_gather_required = False
         baseline, _ = self.ple.decode_chunk(
@@ -1887,6 +1860,7 @@ class Qwen4ExpPLERuntimeTest(TestCase):
         self.assertTrue(
             all(shard.device.type == "cpu" for shard in self.ple.ple_embedding.shards)
         )
+        self.assertEqual(self.ple.ple_embedding._cpu_graph_buffers, {})
 
     def test_decode_ple_forward_captures_and_replays_captured_batch(self):
         if not torch.cuda.is_available():
@@ -1969,7 +1943,6 @@ class Qwen4ExpPLERuntimeTest(TestCase):
             self.skipTest("CUDA is required for Graph replay")
         device = torch.device("cuda")
         self._move_ple_to_cuda(device, cpu_tables=True)
-        self.model.requires_cuda_graph_model_input_preparation = True
         state_pool = PLECacheViews._fixed_state_pool(
             self.model.kv_cache.get_layer_cache(1, PLE_STATE_TAG),
             torch.bfloat16,
@@ -2014,23 +1987,14 @@ class Qwen4ExpPLERuntimeTest(TestCase):
             for row, expected in zip(context_rows, ids):
                 torch.testing.assert_close(self.ctx_base[row], expected.view(1))
 
-        self.model.prepare_cuda_graph_model_inputs(
-            SimpleNamespace(input_ids=ids.flatten(), attention_inputs=inputs)
-        )
         self.model._apply_ple(1, hyper, ids, inputs)
         self.state_base.copy_(initial_state_pool)
         self.ctx_base.copy_(initial_context_pool)
         graph = torch.cuda.CUDAGraph()
-        self.model.prepare_cuda_graph_model_inputs(
-            SimpleNamespace(input_ids=ids.flatten(), attention_inputs=inputs)
-        )
         with torch.cuda.graph(graph):
             got = self.model._apply_ple(1, hyper, ids, inputs)
         self.state_base.copy_(initial_state_pool)
         self.ctx_base.copy_(initial_context_pool)
-        self.model.prepare_cuda_graph_model_inputs(
-            SimpleNamespace(input_ids=ids.flatten(), attention_inputs=inputs)
-        )
         graph.replay()
         check_replay()
 
@@ -2038,9 +2002,6 @@ class Qwen4ExpPLERuntimeTest(TestCase):
         self.ctx_base.copy_(initial_context_pool)
         ids.add_(1)
         hyper.add_(0.125)
-        self.model.prepare_cuda_graph_model_inputs(
-            SimpleNamespace(input_ids=ids.flatten(), attention_inputs=inputs)
-        )
         graph.replay()
         check_replay()
 
@@ -2051,15 +2012,13 @@ class Qwen4ExpPLERuntimeTest(TestCase):
         self.ctx_blocks[0, 1] = 9
         initial_state = state_pool[[1, 4]].clone()
         initial_context = self.ctx_base[[3, 2]].clone()
-        self.model.prepare_cuda_graph_model_inputs(
-            SimpleNamespace(input_ids=ids.flatten(), attention_inputs=inputs)
-        )
         graph.replay()
         check_replay(state_rows=(7, 4), context_rows=(9, 2))
 
         self.assertTrue(
             all(shard.device.type == "cpu" for shard in self.ple.ple_embedding.shards)
         )
+        self.assertEqual(self.ple.ple_embedding._cpu_graph_buffers, {})
 
     def test_target_verify_commit_finalize_and_next_decode_match_baseline(self):
         prefixes = (self._PAGE - 1, self._PAGE)

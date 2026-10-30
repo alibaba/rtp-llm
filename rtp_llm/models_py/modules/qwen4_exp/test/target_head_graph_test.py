@@ -64,9 +64,24 @@ class TargetHeadGraphTest(unittest.TestCase):
         hidden = torch.ones(4, 32, device="cuda", dtype=torch.bfloat16)
         cache = TargetHeadGraph(True)
         cache.stage(lambda x: x * 2, hidden, 1)
-        model = SimpleNamespace(_target_head_graph=cache, _fp8_lm_head=lambda x: x * 3)
+        activated = []
+        coordinator = SimpleNamespace(
+            activate_speculative_target_graph_replay=activated.append
+        )
+        model = SimpleNamespace(
+            _target_head_graph=cache,
+            _fp8_lm_head=lambda x: x * 3,
+            _ple_coordinator=lambda: coordinator,
+        )
         method = lambda rows: Qwen4ExpModel._compute_local_logits(model, rows)
-        cache.activate(1)
+        Qwen4ExpModel.on_cuda_graph_replay(
+            model,
+            1,
+            SimpleNamespace(
+                attention_inputs={"target": SimpleNamespace(is_target_verify=True)}
+            ),
+        )
+        self.assertEqual(activated, [1])
         actual = method(hidden)
         self.assertEqual(actual.dtype, torch.bfloat16)
         self.assertTrue(torch.equal(actual, hidden * 2))
