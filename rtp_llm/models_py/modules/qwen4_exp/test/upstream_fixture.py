@@ -7,8 +7,6 @@ import re
 import unittest
 from pathlib import Path
 
-from rtp_llm.test.utils.hf_checkpoint import resolve_hf_checkpoint
-
 # Vendored byte-identical copy of transformers' modeling_qwen4_exp.py plus its
 # content-addressed manifest, so qualification needs no external fixture path.
 # QWEN4_EXP_UPSTREAM_SRC / QWEN4_EXP_UPSTREAM_MANIFEST still override both.
@@ -34,18 +32,6 @@ def upstream_source_path() -> str:
             "Qwen4 parity qualification is uncovered: fixed source/manifest missing"
         )
     checkpoint = os.environ.get("QWEN4_EXP_CKPT_DIR", "")
-    if required and checkpoint.startswith("hf://"):
-        # These are the real tensors consumed by the qualification below;
-        # the rest of the 360-GB BF16 checkpoint is not needed for parity.
-        checkpoint = resolve_hf_checkpoint(
-            checkpoint,
-            (
-                "model.language_model.layers.0.attn_hyper_connection.*",
-                "*.self_attn.q_norm.weight",
-                "*.self_attn.k_norm.weight",
-            ),
-        )
-        os.environ["QWEN4_EXP_CKPT_DIR"] = checkpoint
     if required and (not checkpoint or not Path(checkpoint).is_dir()):
         raise RuntimeError("Qwen4 real-weight parity checkpoint fixture is missing")
     if manifest_path:

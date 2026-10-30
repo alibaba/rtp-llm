@@ -78,21 +78,6 @@ class UpstreamFixtureTest(unittest.TestCase):
             with self.assertRaises(unittest.SkipTest):
                 uncovered_fixture("missing optional shard")
 
-    def test_required_hf_fixture_is_local_before_parity_imports(self):
-        resolver = (
-            "rtp_llm.models_py.modules.qwen4_exp.test.upstream_fixture."
-            "resolve_hf_checkpoint"
-        )
-        uri = "hf://owner/model@" + "a" * 40
-        with tempfile.TemporaryDirectory() as directory, patch.dict(
-            os.environ,
-            {"QWEN4_EXP_REQUIRE_PARITY": "1", "QWEN4_EXP_CKPT_DIR": uri},
-            clear=True,
-        ), patch(resolver, return_value=directory) as download:
-            self.assertTrue(Path(upstream_source_path()).is_file())
-            self.assertEqual(os.environ["QWEN4_EXP_CKPT_DIR"], directory)
-            self.assertEqual(download.call_args.args[0], uri)
-
 
 if __name__ == "__main__":
     unittest.main()
