@@ -111,6 +111,18 @@ KVCMReportFeedback parseKVCMReportFeedback(const std::string& response) {
             }
         }
     }
+    // extra_info is opaque to KVCM. A malformed control field must not turn
+    // an otherwise valid event ACK into a registration/snapshot failure.
+    const char* extra_key = document.HasMember("extra_info") ? "extra_info" :
+                            (document.HasMember("extraInfo") ? "extraInfo" : nullptr);
+    if (extra_key && document[extra_key].IsString()) {
+        rapidjson::Document extra;
+        extra.Parse(document[extra_key].GetString(), document[extra_key].GetStringLength());
+        if (!extra.HasParseError() && extra.IsObject() && extra.HasMember("rtp_remote_cache_enabled")
+            && extra["rtp_remote_cache_enabled"].IsBool()) {
+            feedback.remote_cache_enabled = extra["rtp_remote_cache_enabled"].GetBool();
+        }
+    }
     return feedback;
 }
 
@@ -597,11 +609,13 @@ public:
     Impl(KVCacheEventPublisherConfig           config,
          KVCacheEventPublisherContext          context,
          KVCacheSnapshotProvider               snapshot_provider,
-         std::shared_ptr<KVCacheEventReporter> reporter):
+         std::shared_ptr<KVCacheEventReporter> reporter,
+         RemoteCacheControl                   remote_cache_control):
         config_(std::move(config)),
         context_(std::move(context)),
         snapshot_provider_(std::move(snapshot_provider)),
         reporter_(std::move(reporter)),
+        remote_cache_control_(std::move(remote_cache_control)),
         queue_(config_.queue_capacity) {
         if (reporter_) {
             snapshot_reporter_ = reporter_;
@@ -789,12 +803,23 @@ private:
         snapshot_cv_.notify_all();
     }
 
+    void applyRemoteCacheControl(const detail::KVCMReportFeedback& feedback) noexcept {
+        if (feedback.remote_cache_enabled.has_value() && remote_cache_control_) {
+            try {
+                remote_cache_control_(*feedback.remote_cache_enabled);
+            } catch (...) {
+                RTP_LLM_LOG_WARNING("KVCMPublisher remote cache control callback failed");
+            }
+        }
+    }
+
     bool observeReportResponse(const detail::KVCMReportFeedback& feedback, bool success, uint64_t generation,
-                               bool normal_ack = false) {
+                               bool normal_ack = false, bool apply_remote_control = false) {
         const bool acknowledged = success && feedback.valid && feedback.ok;
         {
             std::lock_guard<std::mutex> lock(snapshot_mu_);
-            if (generation != registration_generation_.load(std::memory_order_acquire)) {
+            if (stopping_.load(std::memory_order_relaxed)
+                || generation != registration_generation_.load(std::memory_order_acquire)) {
                 return false;
             }
             // An unknown transport outcome does not prove that registration was lost.
@@ -803,6 +828,9 @@ private:
                 registered_.store(false, std::memory_order_release);
             } else if (acknowledged && normal_ack) {
                 refreshNormalAckDeadline();
+            }
+            if (acknowledged && apply_remote_control) {
+                applyRemoteCacheControl(feedback);
             }
         }
         if (feedback.registration_required) {
@@ -825,10 +853,15 @@ private:
         if (!reporter_->post("/api/registerInstance", buildRegisterInstanceRequest(context_, trace_id), response)) {
             return false;
         }
+        const auto registration_feedback = detail::parseKVCMReportFeedback(response);
+        if (!registration_feedback.valid || !registration_feedback.ok) {
+            return false;
+        }
         trace_id = nextTraceId("node-register");
         const bool success = reporter_->post(
             "/api/reportEvent", buildControlReport(context_, trace_id, ControlEventType::NODE_REGISTER), response);
-        if (!observeReportResponse(detail::parseKVCMReportFeedback(response), success,
+        const auto node_feedback = detail::parseKVCMReportFeedback(response);
+        if (!observeReportResponse(node_feedback, success,
                                    registration_generation_.load(std::memory_order_acquire))) {
             return false;
         }
@@ -838,7 +871,14 @@ private:
         }
         {
             std::lock_guard<std::mutex> lock(snapshot_mu_);
+            if (stopping_.load(std::memory_order_relaxed)) {
+                return false;
+            }
             registration_generation_.fetch_add(1, std::memory_order_release);
+            // NODE_REGISTER is newer than RegisterInstance. Prefer its value
+            // when present, and publish before the heartbeat worker can run.
+            applyRemoteCacheControl(node_feedback.remote_cache_enabled.has_value() ? node_feedback :
+                                                                                     registration_feedback);
             snapshot_report_.reset();
             snapshot_requested_ = true;
             registered_.store(true, std::memory_order_release);
@@ -979,7 +1019,7 @@ private:
         const bool success = reporter_->post(
             "/api/reportEvent", buildControlReport(context_, trace_id, ControlEventType::HEARTBEAT), response);
         const auto feedback = detail::parseKVCMReportFeedback(response);
-        if (!observeReportResponse(feedback, success, generation, /*normal_ack=*/true)) {
+        if (!observeReportResponse(feedback, success, generation, /*normal_ack=*/true, /*apply_remote_control=*/true)) {
             return false;
         }
         // Deliver a repeated heartbeat advisory once per consecutive streak,
@@ -1136,6 +1176,7 @@ private:
     KVCacheEventPublisherContext          context_;
     KVCacheSnapshotProvider               snapshot_provider_;
     std::shared_ptr<KVCacheEventReporter> reporter_;
+    RemoteCacheControl                   remote_cache_control_;
     std::shared_ptr<KVCacheEventReporter> snapshot_reporter_;
     detail::KVCacheEventQueue             queue_;
     std::thread                           worker_;
@@ -1170,9 +1211,11 @@ private:
 KVCMPublisher::KVCMPublisher(KVCacheEventPublisherConfig           config,
                              KVCacheEventPublisherContext          context,
                              KVCacheSnapshotProvider               snapshot_provider,
-                             std::shared_ptr<KVCacheEventReporter> reporter):
+                             std::shared_ptr<KVCacheEventReporter> reporter,
+                             RemoteCacheControl                   remote_cache_control):
     impl_(std::make_unique<Impl>(
-        std::move(config), std::move(context), std::move(snapshot_provider), std::move(reporter))) {}
+        std::move(config), std::move(context), std::move(snapshot_provider), std::move(reporter),
+        std::move(remote_cache_control))) {}
 
 KVCMPublisher::~KVCMPublisher() = default;
 
