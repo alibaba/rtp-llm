@@ -1,4 +1,11 @@
 py_test(
+    name = "model_factory_native_mtp_test",
+    srcs = ["model_factory_native_mtp_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    env = {"GPU_COUNT": "0"},
+)
+
+py_test(
     name = "kv_cache_specs_test",
     srcs = [
         "kv_cache_specs_test.py",
