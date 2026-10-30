@@ -82,6 +82,7 @@ def main():
     for kv in a.set:
         k, v = kv.split("=", 1)
         c[k] = v
+    os.makedirs(os.path.dirname(os.path.abspath(a.out)), exist_ok=True)
     json.dump(c, open(a.out, "w"), indent=2)
     print(
         json.dumps(
