@@ -126,32 +126,32 @@ environment:
     deployment:
       replicas: 2
 phases:
-- id: ready
+- id: startup
   describe: 先取得 A 的实际地址，再新增 B；两个 Master 始终为独立 JVM。
   timeout: 120s
   steps:
-  - id: a
+  - id: get_master_a
     describe: 记录首个 Master 的实际地址列表作为 A。
     interface: master/leadership/get
     expect:
       count: 1
-  - id: b
+  - id: start_master_b
     describe: 新增第二个 Master 并保存其地址列表作为 B。
     interface: master/start
     expect:
       count: 1
     wait_after: 10s
-  - id: initial_leader
+  - id: check_initial_master_leader
     describe: 检查所有存活 Master 中唯一的主节点。
     interface: master/leadership/get
     expect:
       eq:
-        ref: steps.a
-- id: rolling
+        ref: steps.get_master_a
+- id: failover
   describe: 持续流量中先杀 A、恢复 A，再杀 B、恢复 B；不重启 Client。
   timeout: 600s
   steps:
-  - id: traffic
+  - id: start_client
     describe: 按 0.1 倍速回放完整 DeepSeek trace，先等待 30 秒建立基线。
     interface: client/start
     args:
@@ -163,7 +163,7 @@ phases:
       replay_speed: 0.1
     wait_after: 30s
     within: 300s
-  - id: baseline
+  - id: check_baseline_client_success_rate
     describe: 最近 20 秒完成请求的成功率至少 95%；不设请求数门槛，零终态或采集缺失报错。
     interface: client/success_rate
     args:
@@ -172,25 +172,25 @@ phases:
       - 0s
     expect:
       gte: 0.95
-  - id: kill_a
+  - id: kill_master_a
     describe: 强制杀掉指定 Master，保守等待 30 秒供另一节点接管。
     interface: master/stop
     args:
       targets:
-        ref: steps.a
+        ref: steps.get_master_a
       mode: kill
     expect:
       eq:
-        ref: steps.a
+        ref: steps.get_master_a
     within: 45s
     wait_after: 30s
-  - id: b_leader
+  - id: check_master_leader_after_kill_a
     describe: 检查所有存活 Master 中唯一的主节点。
     interface: master/leadership/get
     expect:
       eq:
-        ref: steps.b
-  - id: b_success
+        ref: steps.start_master_b
+  - id: check_client_success_rate_after_kill_a
     describe: 最近 20 秒完成请求的成功率至少 95%；不设请求数门槛，零终态或采集缺失报错。
     interface: client/success_rate
     args:
@@ -199,42 +199,42 @@ phases:
       - 0s
     expect:
       gte: 0.95
-  - id: restore_a
+  - id: restart_master_a
     describe: 在原服务地址恢复指定 Master，使用新进程和独立产物，等待 30 秒。
     interface: master/restart
     args:
       targets:
-        ref: steps.a
+        ref: steps.get_master_a
     expect:
       eq:
-        ref: steps.a
+        ref: steps.get_master_a
     within: 120s
     wait_after: 30s
-  - id: a_rejoined_without_preemption
+  - id: check_master_leader_after_restart_a
     describe: 检查所有存活 Master 中唯一的主节点。
     interface: master/leadership/get
     expect:
       eq:
-        ref: steps.b
-  - id: kill_b
+        ref: steps.start_master_b
+  - id: kill_master_b
     describe: 强制杀掉指定 Master，保守等待 30 秒供另一节点接管。
     interface: master/stop
     args:
       targets:
-        ref: steps.b
+        ref: steps.start_master_b
       mode: kill
     expect:
       eq:
-        ref: steps.b
+        ref: steps.start_master_b
     within: 45s
     wait_after: 30s
-  - id: a_leader
+  - id: check_master_leader_after_kill_b
     describe: 检查所有存活 Master 中唯一的主节点。
     interface: master/leadership/get
     expect:
       eq:
-        ref: steps.a
-  - id: a_success
+        ref: steps.get_master_a
+  - id: check_client_success_rate_after_kill_b
     describe: 最近 20 秒完成请求的成功率至少 95%；不设请求数门槛，零终态或采集缺失报错。
     interface: client/success_rate
     args:
@@ -243,24 +243,24 @@ phases:
       - 0s
     expect:
       gte: 0.95
-  - id: restore_b
+  - id: restart_master_b
     describe: 在原服务地址恢复指定 Master，使用新进程和独立产物，等待 30 秒。
     interface: master/restart
     args:
       targets:
-        ref: steps.b
+        ref: steps.start_master_b
     expect:
       eq:
-        ref: steps.b
+        ref: steps.start_master_b
     within: 120s
     wait_after: 30s
-  - id: b_rejoined_without_preemption
+  - id: check_master_leader_after_restart_b
     describe: 检查所有存活 Master 中唯一的主节点。
     interface: master/leadership/get
     expect:
       eq:
-        ref: steps.a
-  - id: both_success
+        ref: steps.get_master_a
+  - id: check_client_success_rate_after_restart_b
     describe: 最近 20 秒完成请求的成功率至少 95%；不设请求数门槛，零终态或采集缺失报错。
     interface: client/success_rate
     args:
@@ -269,7 +269,7 @@ phases:
       - 0s
     expect:
       gte: 0.95
-  - id: collected
+  - id: stop_client
     describe: 提前停止 trace 回放并收齐所有 Client 已发请求的终态。
     interface: client/stop
     within: 180s

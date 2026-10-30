@@ -27,11 +27,11 @@ environment:
   client:
     config: {}
 phases:
-  - id: ready
+  - id: startup
     describe: 检查选举结果并等待 Engine 发现传播。
     timeout: 10s
     steps:
-      - id: leader
+      - id: check_master_leader
         describe: 只有一个主 Master。
         interface: master/leadership/get
         expect: {count: 1}
@@ -40,7 +40,7 @@ phases:
     describe: 20 条请求按总 QPS=2 播放，收尾后检查完整结果。
     timeout: 35s
     steps:
-      - id: start
+      - id: start_client
         describe: Client 自行发现主 Master，开始单轮播放。
         interface: client/start
         args:
@@ -51,16 +51,16 @@ phases:
           request_timeout: 3s
           drain_timeout: 5s
         wait_after: 6s
-      - id: qps
+      - id: check_client_qps
         describe: 在持续播放中检查已发请求速率，容许采样误差。
         interface: client/qps
         args: {range: [-4s, 0s]}
         expect: {gte: 1.5, lte: 2.5}
         wait_after: 6s
-      - id: stop
+      - id: stop_client
         describe: 收集 Client 结果并验证请求证据完整。
         interface: client/stop
-      - id: requests
+      - id: check_client_requests
         describe: 所有 20 条请求成功，没有错误、超时或取消。
         interface: client/requests
         args: {limit: 0}
