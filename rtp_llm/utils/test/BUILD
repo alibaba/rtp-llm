@@ -102,6 +102,25 @@ py_test(
     deps = ["//rtp_llm:utils"],
 )
 
+py_test(
+    name = "tensor_capture_paged_test",
+    size = "small",
+    srcs = ["tensor_capture_paged_test.py"],
+    deps = [
+        "//rtp_llm:torch",
+        "//rtp_llm:utils",
+    ],
+)
+
+py_test(
+    name = "tensor_capture_test",
+    srcs = ["tensor_capture_test.py"],
+    deps = [
+        "//rtp_llm:torch",
+        "//rtp_llm:utils",
+    ],
+)
+
 
 py_test(
     name = "util_test",
@@ -165,8 +184,6 @@ py_test(
     ],
     exec_properties = {'gpu':'H20'}
 )
-
-load("//bazel:arch_select.bzl", "requirement")
 
 requirement([
     "grpcio",
@@ -355,4 +372,57 @@ py_test(
     name = "process_manager_fatal_test",
     srcs = ["process_manager_fatal_test.py"],
     deps = ["//rtp_llm:utils"],
+)
+
+py_test(
+    name = "tensor_capture_replay_test",
+    size = "small",
+    srcs = ["tensor_capture_replay_test.py"],
+    args = ["TensorCaptureReplayTest"],
+    deps = [
+        "//rtp_llm:torch",
+        "//rtp_llm:utils",
+    ],
+)
+
+py_test(
+    name = "tensor_capture_replay_cuda_test",
+    size = "small",
+    srcs = ["tensor_capture_replay_test.py"],
+    main = "tensor_capture_replay_test.py",
+    args = ["TensorCaptureReplayCudaTest"],
+    data = [
+        "//rtp_llm/libs:libs",
+        "//rtp_llm/libs:librtp_compute_ops_so",
+        "//rtp_llm/libs:libth_transformer_config_so",
+    ],
+    deps = [
+        "//rtp_llm:ops",
+        "//rtp_llm:torch",
+        "//rtp_llm:utils",
+    ],
+    env = {"RTP_LLM_TEST_CAPTURE_REPLAY_CUDA": "1"},
+    tags = ["manual", "L20_CU13"],
+    exec_properties = {"gpu": "L20_CU13", "gpu_count": "1"},
+)
+
+py_test(
+    name = "tensor_capture_mqa_replay_cuda_test",
+    size = "small",
+    srcs = ["tensor_capture_replay_test.py"],
+    main = "tensor_capture_replay_test.py",
+    args = ["TensorCaptureMqaReplayCudaTest"],
+    data = [
+        "//rtp_llm/libs:libs",
+        "//rtp_llm/libs:librtp_compute_ops_so",
+        "//rtp_llm/libs:libth_transformer_config_so",
+    ],
+    deps = [
+        "//rtp_llm:ops",
+        "//rtp_llm:torch",
+        "//rtp_llm:utils",
+        "//rtp_llm/models_py:deep_gemm",
+    ],
+    env = {"RTP_LLM_TEST_CAPTURE_REPLAY_CUDA": "1"},
+    tags = ["manual"],
 )

@@ -257,6 +257,8 @@ TEST_F(NormalBatchStreamProcessorTest, testSimpleAssemble) {
         EXPECT_EQ(sequence_lengths, toVec<int>(model_input.sequence_lengths));
         EXPECT_EQ(prefix_lengths, toVec<int>(model_input.prefix_lengths));
         ASSERT_TRUE(model_input.record_lengths.has_value());
+        EXPECT_EQ(model_input.record_execution_id, 0);
+        EXPECT_TRUE(model_input.tensor_capture_context_json.empty());
         EXPECT_EQ(model_input.record_lengths->q_tokens, (std::vector<int32_t>{1, 1, 3, 3}));
         EXPECT_EQ(model_input.record_lengths->kv_tokens_before, (std::vector<int32_t>{1, 2, 0, 1}));
         EXPECT_EQ(kv_cache_block_id, toVec<int>(model_input.kv_cache_block_id));
@@ -274,6 +276,7 @@ TEST_F(NormalBatchStreamProcessorTest, testSimpleAssemble) {
         auto& model_input = merge_input_status.value();
         EXPECT_FALSE(model_input.attention_mask.defined());
         EXPECT_FALSE(model_input.record_lengths.has_value());
+        EXPECT_TRUE(model_input.tensor_capture_context_json.empty());
     }
 }
 
@@ -308,6 +311,13 @@ TEST_F(NormalBatchStreamProcessorTest, testDeviceLengthsAllowMissingCpuMirror) {
     auto       processor    = makeLogprobsProcessor(model_config);
     auto       stream       = makeLogprobsStream(model_config, false, 0, 8, true);
     stream->setIsContextStream(false);
+    auto known_stream = makeLogprobsStream(model_config, false, 0, 8, true);
+    known_stream->setIsContextStream(false);
+    known_stream->setNormalAsyncDeviceState(GenerateStream::NormalAsyncDeviceState{
+        .last_sample_token_gpu = torch::tensor({43}, torch::kInt32).to(torch::kCUDA),
+        .next_seq_len_gpu      = torch::tensor({5}, torch::kInt32).to(torch::kCUDA),
+        .next_real_seq_len     = 5,
+    });
     for (int mirror : {-1, 0}) {
         stream->setNormalAsyncDeviceState(GenerateStream::NormalAsyncDeviceState{
             .last_sample_token_gpu = torch::tensor({42}, torch::kInt32).to(torch::kCUDA),
@@ -315,15 +325,16 @@ TEST_F(NormalBatchStreamProcessorTest, testDeviceLengthsAllowMissingCpuMirror) {
             .next_real_seq_len     = mirror,
         });
         for (bool record : {false, true}) {
-            StreamGroups groups({stream});
+            StreamGroups groups({known_stream, stream});
             TensorHolder holder;
             auto         result = processor->gatherModelInput(groups, holder, record);
             ASSERT_TRUE(result.ok()) << result.status();
-            EXPECT_EQ(toVec<int32_t>(result->sequence_lengths), (std::vector<int32_t>{3}));
+            EXPECT_EQ(toVec<int32_t>(result->sequence_lengths), (std::vector<int32_t>{4, 3}));
             ASSERT_EQ(result->record_lengths.has_value(), record);
             if (record) {
-                EXPECT_EQ(result->record_lengths->q_tokens, (std::vector<int32_t>{1}));
-                EXPECT_EQ(result->record_lengths->kv_tokens_before, (std::vector<int32_t>{-1}));
+                // Unknown rows remain in place; never silently capture only the known request.
+                EXPECT_EQ(result->record_lengths->q_tokens, (std::vector<int32_t>{1, 1}));
+                EXPECT_EQ(result->record_lengths->kv_tokens_before, (std::vector<int32_t>{4, -1}));
             }
         }
     }

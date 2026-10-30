@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cstdlib>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include "rtp_llm/cpp/utils/StatusUtil.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
@@ -191,7 +192,17 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
     profile_step_start_(std::move(profile_step_start)),
     profile_step_finish_(std::move(profile_step_finish)),
     dispatch_runner_(cuda_graph::graphGetStreamFromPool(true)) {
-    enable_detail_log_  = params.profiling_debug_logging_config.enable_detail_log;
+    enable_detail_log_ = params.profiling_debug_logging_config.enable_detail_log;
+    tensor_capture_enabled_ =
+        PyWrappedModel::tensorCaptureConfigEnabled(params.profiling_debug_logging_config.tensor_capture_config);
+    tensor_capture_prefill_enabled_ = tensor_capture_enabled_
+                                      && PyWrappedModel::tensorCaptureConfigEnabled(
+                                          params.profiling_debug_logging_config.tensor_capture_config, "prefill");
+    tensor_capture_decode_enabled_ = tensor_capture_enabled_
+                                     && PyWrappedModel::tensorCaptureConfigEnabled(
+                                         params.profiling_debug_logging_config.tensor_capture_config, "decode");
+    const bool capture_records_decode =
+        tensor_capture_decode_enabled_ && (role_type_ == RoleType::DECODE || role_type_ == RoleType::PDFUSION);
     tp_rank_            = params.parallelism_config.tp_rank;
     parallelism_config_ = params.parallelism_config;
     auto& recorder      = ExecutionRecorder::instance();
@@ -209,13 +220,25 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
                                 {"cache_groups", cache_manager_->cacheConfig().groupNums()},
                                 {"model_config", params.model_config_.to_string()},
                                 {"cache_config", cache_manager_->cacheConfig().debugString()},
-                                {"record_decode", recordDecodeEnabled()},
-                                {"decode_filter_policy", std::string("skip_entire_batch_containing_decode")},
+                                {"record_decode", recordDecodeEnabled() || capture_records_decode},
+                                {"record_decode_env", recordDecodeEnabled()},
+                                {"record_decode_capture", capture_records_decode},
+                                {"decode_filter_policy",
+                                 std::string(recordDecodeEnabled() ?
+                                                 "record_all_batches" :
+                                                 (capture_records_decode ? "record_pure_decode_for_capture_skip_mixed" :
+                                                                           "skip_entire_batch_containing_decode"))},
+                                {"tensor_capture_budget_scope", std::string("per_recorder_instance")},
                                 {"model_fingerprint", ExecutionRecorder::JsonValue()},
                                 {"scope", std::string("normal_executor")}});
         if (!configured) {
             RTP_LLM_LOG_WARNING("batch recorder initialization failed; configuration was not published");
         }
+    }
+    if (tensor_capture_enabled_ && !warm_up_ && !is_propose_ && !recorder.enabled()) {
+        throw std::runtime_error(
+            "tensor capture requires a ready ExecutionRecorder; set RTP_LLM_RECORD_DIR and RTP_LLM_RECORD_SESSION "
+            "and check recorder initialization errors");
     }
     RTP_LLM_LOG_INFO("enable_detail_log_ = %d, tp_rank_ = %d", enable_detail_log_, tp_rank_);
 
@@ -369,9 +392,16 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
     const bool record_owner       = execution_recorder.enabled() && !warm_up_ && !is_propose_ && tp_rank_ == 0;
     // Filter before CPU snapshot allocation/JSON work. Never emit a partial
     // mixed batch that could be mistaken for a replayable model input.
-    const int64_t record_id = record_owner && (recordDecodeEnabled() || stream_groups.totalDecodeBatchSize() == 0) ?
-                                  execution_recorder.nextId() :
-                                  0;
+    const bool pure_prefill    = stream_groups.totalDecodeBatchSize() == 0 && stream_groups.totalContextBatchSize() > 0;
+    const bool pure_decode     = stream_groups.totalDecodeBatchSize() > 0 && stream_groups.totalContextBatchSize() == 0;
+    const bool capture_prefill = tensor_capture_prefill_enabled_ && pure_prefill
+                                 && (role_type_ == RoleType::PREFILL || role_type_ == RoleType::PDFUSION);
+    const bool capture_decode = tensor_capture_decode_enabled_ && pure_decode
+                                && (role_type_ == RoleType::DECODE || role_type_ == RoleType::PDFUSION);
+    const int64_t record_id =
+        record_owner && (recordDecodeEnabled() || stream_groups.totalDecodeBatchSize() == 0 || capture_decode) ?
+            execution_recorder.nextId() :
+            0;
     {
         RTP_LLM_PROFILE_SCOPE("executor.gather_model_input");
         int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
@@ -411,6 +441,13 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
     if (tp_rank_ == 0 && model_input.record_execution_id) {
         try {
             recorded_batch = recordBatchInputs(model_input, stream_groups);
+            if ((capture_prefill || capture_decode) && recorded_batch && !warm_up_ && !is_propose_
+                && !model_input.warmup && !model_input.is_fake_stream && !model_input.is_target_verify
+                && !model_input.is_draft_extend) {
+                // Preserve global request lengths before PyWrappedModel performs the CP split.
+                model_input.tensor_capture_context_json =
+                    recorded_batch->tensorCaptureContextJson(roleTypeToString(role_type_));
+            }
         } catch (const std::exception& e) {
             execution_recorder.reportSnapshotError(e.what());
         }

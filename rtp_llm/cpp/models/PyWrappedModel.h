@@ -71,6 +71,9 @@ public:
                    MtpIndexerRole            mtp_indexer_role           = MtpIndexerRole::NORMAL);
     ~PyWrappedModel();
 
+    // Delegate all configuration validation to the Python recorder's single loader.
+    static bool tensorCaptureConfigEnabled(const std::string& config_path, const std::string& phase = {});
+
     GptModelOutputs forward(const GptModelInputs& inputs) override;
     GptModelOutputs forwardMicroBatched(const GptModelInputs& inputs);
     void            releaseBuffers() override;
@@ -125,6 +128,17 @@ private:
     std::pair<std::vector<GptModelInputs>, std::vector<TokenSliceInfo>>
          splitInputsIntoMicroBatches(const GptModelInputs& inputs, const MicroBatchPlan& micro_batch_plan);
     void holdInputsHostBuffers(const GptModelInputs& inputs);
+    friend class RecordingEngineTest;
+    static const char* tensorCaptureSkipReason(const GptModelInputs&               inputs,
+                                               const torch_ext::PyAttentionInputs& attention_inputs,
+                                               const ExecProperties&               device_props,
+                                               RoleType                            server_role,
+                                               bool                                graph_warmup,
+                                               bool                                graph_capture);
+    // Caller holds the GIL, including on constructor failure.
+    static void closeTensorCaptureRecorder(py::object& recorder) noexcept;
+    void        noteTensorCaptureSkip(const char* reason);
+    void prepareTensorCaptureContext(const GptModelInputs& inputs, torch_ext::PyAttentionInputs& attention_inputs);
 
     // Member variables (formerly inherited from GptModel)
     const rtp_llm::ExecProperties            device_props_;
@@ -140,6 +154,9 @@ private:
     GraphBase*     graph_runner_{nullptr};
     py::object     py_model_;
     py::object     held_attn_pyobj_;
+    py::object     tensor_capture_recorder_;
+    bool           tensor_capture_error_reported_{false};
+    RoleType       tensor_capture_server_role_{RoleType::PDFUSION};
     bool           enable_cuda_graph_{false};
     bool           is_prefill_cuda_graph_mode_{false};
     bool           use_spec_decoding_{false};
@@ -182,6 +199,7 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
     weights_          = params.weights;
     model_id_         = params.model_id;
     mtp_indexer_role_ = int(device_props_.enable_layer_micro_batch) ? MtpIndexerRole::NORMAL : mtp_indexer_role;
+    tensor_capture_server_role_ = params.parallelism_config.role_type;
     if (mtp_indexer_role != MtpIndexerRole::NORMAL && int(device_props_.enable_layer_micro_batch)) {
         RTP_LLM_LOG_WARNING("MTP indexer share is disabled when layer micro-batching is enabled");
     }
@@ -206,222 +224,246 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
 
     py::gil_scoped_acquire          gil;
     torch_ext::PyModelInitResources init_resources;
-
-    if (params.kv_cache_layer_layout.has_value()) {
-        torch_ext::KVCache kv_cache;
-        // Source these from the top-level GptModelInitParams (filled from
-        // cache_manager->cacheConfig() in NormalExecutor/MtpExecutor) rather
-        // than the model-static attention_conf — for DSV4 the cache manager
-        // promotes seq_size_per_block to a 256-token physical block while
-        // attention_conf still reflects the 64-token --seq_size_per_block
-        // CLI flag, causing the fused compressor to index state block_table
-        // with the wrong stride and trap on unallocated ring slots.
-        RTP_LLM_CHECK_WITH_INFO(params.tokens_per_block > 0 && params.kernel_tokens_per_block > 0
-                                    && params.tokens_per_block % params.kernel_tokens_per_block == 0,
-                                "GptModelInitParams must carry valid tokens_per_block / kernel_tokens_per_block "
-                                "from CacheConfig before constructing PyWrappedModel KVCache; got tokens_per_block=%zu "
-                                "kernel_tokens_per_block=%zu",
-                                params.tokens_per_block,
-                                params.kernel_tokens_per_block);
-        kv_cache.seq_size_per_block        = params.tokens_per_block;
-        kv_cache.kernel_seq_size_per_block = params.kernel_tokens_per_block;
-        const auto& layout                 = params.kv_cache_layer_layout.value();
-        kv_cache.dsa_mla_resident_tokens = layout.dsa_mla_resident_tokens;
-        kv_cache.dsa_mla_hbm_blocks = layout.dsa_mla_hbm_blocks;
-        kv_cache.dsa_prefill_staging_tokens = layout.dsa_prefill_staging_tokens;
-        kv_cache.dsa_prefill_hbm_layers     = layout.dsa_prefill_hbm_layers;
-        kv_cache.dsa_prefill_staging_layers = layout.dsa_prefill_staging_layers;
-        kv_cache.mla_hbm_cache_by_layer = layout.mla_hbm_cache_by_layer;
-        kv_cache.block_generations = layout.block_generations;
-        kv_cache.kv_cache_base_by_layer.reserve(layout.layers_to_kv_buffer_ptrs.size());
-        kv_cache.num_kv_heads  = params.description.attention_conf.kv_head_num;
-        kv_cache.head_dim      = params.description.attention_conf.size_per_head;
-        kv_cache.use_mla       = params.description.attention_conf.use_mla;
-        kv_cache.kv_lora_rank  = params.description.attention_conf.kv_lora_rank;
-        kv_cache.rope_head_dim = params.description.attention_conf.rope_head_dim;
-        for (const auto& t : layout.layers_to_kv_buffer_ptrs) {
-            kv_cache.kv_cache_base_by_layer.push_back(t);
-        }
-        kv_cache.kv_scale_base_by_layer.reserve(layout.layers_to_scale_buffer_ptrs.size());
-        for (const auto& t : layout.layers_to_scale_buffer_ptrs) {
-            kv_cache.kv_scale_base_by_layer.push_back(t);
+    try {
+        if (!params.profile_debug_logging_config.tensor_capture_config.empty()) {
+            tensor_capture_recorder_ =
+                py::module_::import("rtp_llm.utils.tensor_capture")
+                    .attr("TensorCaptureRecorder")(params.profile_debug_logging_config.tensor_capture_config,
+                                                   py::arg("tp_rank")    = params.parallelism_config.tp_rank,
+                                                   py::arg("world_rank") = params.parallelism_config.world_rank);
         }
 
-        kv_cache.layer_group_types  = layout.layer_group_types;
-        kv_cache.group_region_names = layout.group_region_names;
-        kv_cache.group_seq_size_per_block.clear();
-        kv_cache.group_seq_size_per_block.reserve(layout.group_seq_size_per_block.size());
-        for (auto value : layout.group_seq_size_per_block) {
-            kv_cache.group_seq_size_per_block.push_back(static_cast<int>(value));
-        }
-        kv_cache.layer_region_to_group_id      = layout.layer_region_to_group_id;
-        kv_cache.kv_cache_base_by_layer_region = layout.layers_to_kv_buffer_ptrs_by_attn;
-        kv_cache.kv_scale_base_by_layer_region = layout.layers_to_scale_buffer_ptrs_by_attn;
+        if (params.kv_cache_layer_layout.has_value()) {
+            torch_ext::KVCache kv_cache;
+            // Source these from the top-level GptModelInitParams (filled from
+            // cache_manager->cacheConfig() in NormalExecutor/MtpExecutor) rather
+            // than the model-static attention_conf — for DSV4 the cache manager
+            // promotes seq_size_per_block to a 256-token physical block while
+            // attention_conf still reflects the 64-token --seq_size_per_block
+            // CLI flag, causing the fused compressor to index state block_table
+            // with the wrong stride and trap on unallocated ring slots.
+            RTP_LLM_CHECK_WITH_INFO(
+                params.tokens_per_block > 0 && params.kernel_tokens_per_block > 0
+                    && params.tokens_per_block % params.kernel_tokens_per_block == 0,
+                "GptModelInitParams must carry valid tokens_per_block / kernel_tokens_per_block "
+                "from CacheConfig before constructing PyWrappedModel KVCache; got tokens_per_block=%zu "
+                "kernel_tokens_per_block=%zu",
+                params.tokens_per_block,
+                params.kernel_tokens_per_block);
+            kv_cache.seq_size_per_block        = params.tokens_per_block;
+            kv_cache.kernel_seq_size_per_block = params.kernel_tokens_per_block;
+            const auto& layout                 = params.kv_cache_layer_layout.value();
+            kv_cache.dsa_mla_resident_tokens    = layout.dsa_mla_resident_tokens;
+            kv_cache.dsa_mla_hbm_blocks         = layout.dsa_mla_hbm_blocks;
+            kv_cache.dsa_prefill_staging_tokens = layout.dsa_prefill_staging_tokens;
+            kv_cache.dsa_prefill_hbm_layers     = layout.dsa_prefill_hbm_layers;
+            kv_cache.dsa_prefill_staging_layers = layout.dsa_prefill_staging_layers;
+            kv_cache.mla_hbm_cache_by_layer     = layout.mla_hbm_cache_by_layer;
+            kv_cache.block_generations         = layout.block_generations;
+            kv_cache.kv_cache_base_by_layer.reserve(layout.layers_to_kv_buffer_ptrs.size());
+            kv_cache.num_kv_heads  = params.description.attention_conf.kv_head_num;
+            kv_cache.head_dim      = params.description.attention_conf.size_per_head;
+            kv_cache.use_mla       = params.description.attention_conf.use_mla;
+            kv_cache.kv_lora_rank  = params.description.attention_conf.kv_lora_rank;
+            kv_cache.rope_head_dim = params.description.attention_conf.rope_head_dim;
+            for (const auto& t : layout.layers_to_kv_buffer_ptrs) {
+                kv_cache.kv_cache_base_by_layer.push_back(t);
+            }
+            kv_cache.kv_scale_base_by_layer.reserve(layout.layers_to_scale_buffer_ptrs.size());
+            for (const auto& t : layout.layers_to_scale_buffer_ptrs) {
+                kv_cache.kv_scale_base_by_layer.push_back(t);
+            }
 
-        // Flatten by_attn into a 1D vector for pybind11 compatibility
-        // Layout: [layer_0_type_0, ..., layer_0_type_7, layer_1_type_0, ...]
-        {
-            const size_t attn_count = static_cast<size_t>(rtp_llm::KVCacheRegionName::REGION_COUNT);
-            const size_t num_layers = layout.layers_to_kv_buffer_ptrs_by_attn.size();
-            kv_cache.kv_cache_base_by_layer_region_flat.resize(num_layers * attn_count);
-            for (size_t l = 0; l < num_layers; ++l) {
-                for (size_t a = 0; a < attn_count && a < layout.layers_to_kv_buffer_ptrs_by_attn[l].size(); ++a) {
-                    auto& t = layout.layers_to_kv_buffer_ptrs_by_attn[l][a];
-                    kv_cache.kv_cache_base_by_layer_region_flat[l * attn_count + a] =
-                        t.defined() ? t : torch::empty({0});
+            kv_cache.layer_group_types  = layout.layer_group_types;
+            kv_cache.group_region_names = layout.group_region_names;
+            kv_cache.group_seq_size_per_block.clear();
+            kv_cache.group_seq_size_per_block.reserve(layout.group_seq_size_per_block.size());
+            for (auto value : layout.group_seq_size_per_block) {
+                kv_cache.group_seq_size_per_block.push_back(static_cast<int>(value));
+            }
+            kv_cache.layer_region_to_group_id      = layout.layer_region_to_group_id;
+            kv_cache.kv_cache_base_by_layer_region = layout.layers_to_kv_buffer_ptrs_by_attn;
+            kv_cache.kv_scale_base_by_layer_region = layout.layers_to_scale_buffer_ptrs_by_attn;
+
+            // Flatten by_attn into a 1D vector for pybind11 compatibility
+            // Layout: [layer_0_type_0, ..., layer_0_type_7, layer_1_type_0, ...]
+            {
+                const size_t attn_count = static_cast<size_t>(rtp_llm::KVCacheRegionName::REGION_COUNT);
+                const size_t num_layers = layout.layers_to_kv_buffer_ptrs_by_attn.size();
+                kv_cache.kv_cache_base_by_layer_region_flat.resize(num_layers * attn_count);
+                for (size_t l = 0; l < num_layers; ++l) {
+                    for (size_t a = 0; a < attn_count && a < layout.layers_to_kv_buffer_ptrs_by_attn[l].size(); ++a) {
+                        auto& t = layout.layers_to_kv_buffer_ptrs_by_attn[l][a];
+                        kv_cache.kv_cache_base_by_layer_region_flat[l * attn_count + a] =
+                            t.defined() ? t : torch::empty({0});
+                    }
                 }
             }
+
+            init_resources.kv_cache = kv_cache;
+        }
+        init_resources.is_speculative         = (params.sp_config.type != SP_TYPE_NONE);
+        init_resources.is_decode_role         = (params.parallelism_config.role_type == RoleType::DECODE);
+        init_resources.max_context_batch_size = params.runtime_config.fifo_scheduler_config.max_context_batch_size;
+
+        py::object py_init_result;
+        // Always initialize py_model_ so it can be used as fallback when CUDA graph cannot run
+        py_model_                 = py_instance;
+        auto py_initialize_method = py_model_.attr("initialize");
+        try {
+            py_init_result = py_initialize_method(init_resources);
+        } catch (const py::error_already_set& e) {
+            RTP_LLM_LOG_ERROR("Python model initialize failed:\n%s", e.what());
+            throw;
+        }
+        const auto py_model_class_name = py::str(py_instance.attr("__class__").attr("__name__")).cast<std::string>();
+        if (enable_cuda_graph_ && py_model_class_name == "DeepSeekV4Model"
+            && !params.kv_cache_layer_layout.has_value()) {
+            RTP_LLM_LOG_WARNING(
+                "Disable CUDA graph for DeepSeekV4 warmup without kv_cache_layer_layout; real executor can capture after "
+                "CacheManager is initialized.");
+            enable_cuda_graph_ = false;
+        }
+        if (enable_cuda_graph_) {
+#if USING_CUDA || USING_ROCM
+            // CUDA graph capture stamps tokens_per_block / kernel_tokens_per_block
+            // into GraphParams below; a 0 here propagates into every captured
+            // graph and is impossible to recover from. Mirror the check
+            // performed in the kv_cache branch so any warmup path that reaches
+            // this branch with invalid values fails fast.
+            RTP_LLM_CHECK_WITH_INFO(params.tokens_per_block > 0 && params.kernel_tokens_per_block > 0,
+                                    "GraphParams requires valid tokens_per_block / kernel_tokens_per_block "
+                                    "from CacheConfig; got tokens_per_block=%zu kernel_tokens_per_block=%zu",
+                                    params.tokens_per_block,
+                                    params.kernel_tokens_per_block);
+            c10::ScalarType dtype = dataTypeToTorchType(description_.data_type);
+
+            // Create GraphParams from individual config fields
+            GraphParams graph_params;
+            graph_params.enable_cuda_graph            = params.hw_kernel_config.enable_cuda_graph;
+            graph_params.enable_cuda_graph_debug_mode = params.hw_kernel_config.enable_cuda_graph_debug_mode;
+            graph_params.is_prefill_cuda_graph_mode   = is_prefill_cuda_graph_mode;
+            graph_params.max_seq_len                  = params.max_seq_len;
+            graph_params.tokens_per_block             = params.tokens_per_block;
+            graph_params.kernel_tokens_per_block      = params.kernel_tokens_per_block;
+            graph_params.hidden_size                  = params.hidden_size;
+            graph_params.hc_mult                      = params.hc_mult;
+            graph_params.model_data_type              = dtype;
+            graph_params.max_context_batch_size       = params.concurrency_config.concurrency_limit;
+            graph_params.prefill_capture_seq_lens     = params.hw_kernel_config.prefill_capture_seq_lens;
+            graph_params.decode_capture_batch_sizes   = params.hw_kernel_config.decode_capture_batch_sizes;
+            graph_params.kv_cache_group_num           = params.kv_cache_group_num;
+
+            if (kv_cache_layer_to_group.size() > 0) {
+                graph_params.kv_cache_layer_to_group = kv_cache_layer_to_group;
+            } else {
+                graph_params.kv_cache_layer_to_group = params.kv_cache_layer_to_group;
+            }
+
+            // clang-format off
+            // Decision table for num_tokens_per_bs:
+            // +---------------------------+--------------------------+----------------+----------+-------------------------+
+            // | Model Type                | is_prefill_cuda_graph    | sp_config.type | model_id | num_tokens_per_bs       |
+            // +---------------------------+--------------------------+----------------+----------+-------------------------+
+            // | Embedding Model (prefill) | true                     | SP_TYPE_NONE   | -        | max_seq_len             |
+            // | Draft Model (prefill)     | true                     | != SP_TYPE_NONE| 1        | gen_num_per_cycle + 1   |
+            // | Normal Model (decode)     | false                    | SP_TYPE_NONE   | -        | 1 (default)             |
+            // | Target Model (verify)     | false                    | != SP_TYPE_NONE| 0        | gen_num_per_cycle + 1   |
+            // | Draft Model (decode)      | false                    | != SP_TYPE_NONE| 1        | 1 (default)             |
+            // +---------------------------+--------------------------+----------------+----------+-------------------------+
+            // clang-format on
+
+            if (is_prefill_cuda_graph_mode && params.sp_config.type == SP_TYPE_NONE) {
+                // for embedding model
+                graph_params.num_tokens_per_bs = params.max_seq_len;
+            } else if (params.sp_config.type != SP_TYPE_NONE && params.sp_config.gen_num_per_cycle > 0
+                       && (!params.model_id || is_prefill_cuda_graph_mode)) {
+                // for target model verify and draft model prefill
+                // Only use multi-token capture when SP is actually enabled;
+                // gen_num_per_cycle may be >1 from config even when SP is disabled.
+                graph_params.num_tokens_per_bs = params.sp_config.gen_num_per_cycle + 1;
+            } else {
+                graph_params.num_tokens_per_bs = 1;
+            }
+            // Target-model decode path with SP enabled (num_tokens_per_bs>1,
+            // not prefill-graph, model_id==0) must set is_target_verify so the
+            // Python dispatch routes through forward_decode.  NormalExecutor's
+            // decodeWarmUp path defaults use_spec_decoding=false but still sees
+            // sp_config enabled, so infer the flag from config instead of
+            // relying solely on the constructor arg.
+            const bool is_target_verify_decode = params.sp_config.type != SP_TYPE_NONE
+                                                 && params.sp_config.gen_num_per_cycle > 0 && !params.model_id
+                                                 && !is_prefill_cuda_graph_mode;
+            graph_params.is_target_verify = use_spec_decoding || is_target_verify_decode;
+            graph_params.is_draft_extend  = params.sp_config.type != SP_TYPE_NONE
+                                           && params.sp_config.gen_num_per_cycle > 0 && params.model_id
+                                           && is_prefill_cuda_graph_mode;
+            if (params.sp_config.type != SP_TYPE_NONE) {
+                graph_params.sp_steps = params.sp_config.gen_num_per_cycle;
+            }
+
+            graph_runner_ = new CudaGraphRunner(graph_params, py_instance);
+            RTP_LLM_CHECK_WITH_INFO(graph_runner_ != nullptr, "graph_runner_ can't be nullptr in PyWrapper");
+            {
+                void* nccl_comm = cuda_graph::getGraphCaptureTpNcclComm();
+                cuda_graph::register_graph_capture_nccl_comm(nccl_comm,
+                                                             static_cast<int>(params.parallelism_config.tp_size),
+                                                             static_cast<int>(params.parallelism_config.tp_rank));
+            }
+#else
+            RTP_LLM_CHECK_WITH_INFO(false, "CUDA/HIP Graph is only supported on CUDA/ROCm platform");
+#endif
+            if (weights_.position_encoding) {
+                graph_runner_->setPositionEncoding(weights_.position_encoding->kernel.to(getTorchCudaDevice()));
+            }
+            if (weights_.token_type_embedding) {
+                graph_runner_->setTokenTypeEmbedding(weights_.token_type_embedding->kernel.to(getTorchCudaDevice()));
+            }
+            graph_runner_->setInputEmbeddingScalar(description_.input_embedding_scalar);
+            RTP_LLM_CHECK_WITH_INFO(graph_runner_ != nullptr, "graph_runner_ can't be null");
+            auto py_initialize_method = py_instance.attr("initialize");
+            try {
+                syncCudaGraphCaptureRanks(params.parallelism_config, "before_initCapture");
+                py_init_result = py_initialize_method(init_resources);
+                if (mtp_indexer_role_ != MtpIndexerRole::NORMAL && py::hasattr(py_model_, "set_mtp_indexer_role")) {
+                    py_model_.attr("set_mtp_indexer_role")(static_cast<int>(mtp_indexer_role_));
+                }
+                graph_runner_->initCapture();
+            } catch (const py::error_already_set& e) {
+                RTP_LLM_LOG_ERROR("Python model initialize failed (cuda_graph branch):\n%s", e.what());
+                throw;
+            } catch (...) {
+                throw;
+            }
         }
 
-        init_resources.kv_cache = kv_cache;
-    }
-    init_resources.is_speculative         = (params.sp_config.type != SP_TYPE_NONE);
-    init_resources.is_decode_role         = (params.parallelism_config.role_type == RoleType::DECODE);
-    init_resources.max_context_batch_size = params.runtime_config.fifo_scheduler_config.max_context_batch_size;
+        auto py_init_success = py_init_result.cast<bool>();
+        if (!py_init_success) {
+            throw std::runtime_error("PyWrappedModel constructor: Python model initialization failed.");
+        }
 
-    py::object py_init_result;
-    // Always initialize py_model_ so it can be used as fallback when CUDA graph cannot run
-    py_model_                 = py_instance;
-    auto py_initialize_method = py_model_.attr("initialize");
-    try {
-        py_init_result = py_initialize_method(init_resources);
-    } catch (const py::error_already_set& e) {
-        RTP_LLM_LOG_ERROR("Python model initialize failed:\n%s", e.what());
+        cache_store_async_writer_ = std::make_unique<CacheStoreAsyncWriter>(params.parallelism_config.local_rank);
+
+        if (device_props_.enable_prefill_cp) {
+            context_parallel_processor_ =
+                ContextParallelProcessorFactory::create(ProcessorType::ZIG_ZAG, params.parallelism_config);
+            RTP_LLM_LOG_INFO("Context parallel processor initialized with ZIG_ZAG strategy.");
+        }
+
+        RTP_LLM_LOG_INFO("PyWrappedModel initialized done.");
+    } catch (...) {
+        // This catch runs before the local gil guard is destroyed. A failed
+        // constructor never reaches ~PyWrappedModel(), so release Python members here.
+        closeTensorCaptureRecorder(tensor_capture_recorder_);
+        held_attn_pyobj_                         = py::object();
+        py_model_                                = py::object();
+        attention_inputs_.headwise_config        = py::object();
+        attention_inputs_.tensor_capture_context = py::object();
+        py_instance                              = py::object();
+        delete graph_runner_;
+        graph_runner_ = nullptr;
         throw;
     }
-    const auto py_model_class_name = py::str(py_instance.attr("__class__").attr("__name__")).cast<std::string>();
-    if (enable_cuda_graph_ && py_model_class_name == "DeepSeekV4Model" && !params.kv_cache_layer_layout.has_value()) {
-        RTP_LLM_LOG_WARNING(
-            "Disable CUDA graph for DeepSeekV4 warmup without kv_cache_layer_layout; real executor can capture after "
-            "CacheManager is initialized.");
-        enable_cuda_graph_ = false;
-    }
-    if (enable_cuda_graph_) {
-#if USING_CUDA || USING_ROCM
-        // CUDA graph capture stamps tokens_per_block / kernel_tokens_per_block
-        // into GraphParams below; a 0 here propagates into every captured
-        // graph and is impossible to recover from. Mirror the check
-        // performed in the kv_cache branch so any warmup path that reaches
-        // this branch with invalid values fails fast.
-        RTP_LLM_CHECK_WITH_INFO(params.tokens_per_block > 0 && params.kernel_tokens_per_block > 0,
-                                "GraphParams requires valid tokens_per_block / kernel_tokens_per_block "
-                                "from CacheConfig; got tokens_per_block=%zu kernel_tokens_per_block=%zu",
-                                params.tokens_per_block,
-                                params.kernel_tokens_per_block);
-        c10::ScalarType dtype = dataTypeToTorchType(description_.data_type);
-
-        // Create GraphParams from individual config fields
-        GraphParams graph_params;
-        graph_params.enable_cuda_graph            = params.hw_kernel_config.enable_cuda_graph;
-        graph_params.enable_cuda_graph_debug_mode = params.hw_kernel_config.enable_cuda_graph_debug_mode;
-        graph_params.is_prefill_cuda_graph_mode   = is_prefill_cuda_graph_mode;
-        graph_params.max_seq_len                  = params.max_seq_len;
-        graph_params.tokens_per_block             = params.tokens_per_block;
-        graph_params.kernel_tokens_per_block      = params.kernel_tokens_per_block;
-        graph_params.hidden_size                  = params.hidden_size;
-        graph_params.hc_mult                      = params.hc_mult;
-        graph_params.model_data_type              = dtype;
-        graph_params.max_context_batch_size       = params.concurrency_config.concurrency_limit;
-        graph_params.prefill_capture_seq_lens     = params.hw_kernel_config.prefill_capture_seq_lens;
-        graph_params.decode_capture_batch_sizes   = params.hw_kernel_config.decode_capture_batch_sizes;
-        graph_params.kv_cache_group_num           = params.kv_cache_group_num;
-
-        if (kv_cache_layer_to_group.size() > 0) {
-            graph_params.kv_cache_layer_to_group = kv_cache_layer_to_group;
-        } else {
-            graph_params.kv_cache_layer_to_group = params.kv_cache_layer_to_group;
-        }
-
-        // clang-format off
-        // Decision table for num_tokens_per_bs:
-        // +---------------------------+--------------------------+----------------+----------+-------------------------+
-        // | Model Type                | is_prefill_cuda_graph    | sp_config.type | model_id | num_tokens_per_bs       |
-        // +---------------------------+--------------------------+----------------+----------+-------------------------+
-        // | Embedding Model (prefill) | true                     | SP_TYPE_NONE   | -        | max_seq_len             |
-        // | Draft Model (prefill)     | true                     | != SP_TYPE_NONE| 1        | gen_num_per_cycle + 1   |
-        // | Normal Model (decode)     | false                    | SP_TYPE_NONE   | -        | 1 (default)             |
-        // | Target Model (verify)     | false                    | != SP_TYPE_NONE| 0        | gen_num_per_cycle + 1   |
-        // | Draft Model (decode)      | false                    | != SP_TYPE_NONE| 1        | 1 (default)             |
-        // +---------------------------+--------------------------+----------------+----------+-------------------------+
-        // clang-format on
-
-        if (is_prefill_cuda_graph_mode && params.sp_config.type == SP_TYPE_NONE) {
-            // for embedding model
-            graph_params.num_tokens_per_bs = params.max_seq_len;
-        } else if (params.sp_config.type != SP_TYPE_NONE && params.sp_config.gen_num_per_cycle > 0
-                   && (!params.model_id || is_prefill_cuda_graph_mode)) {
-            // for target model verify and draft model prefill
-            // Only use multi-token capture when SP is actually enabled;
-            // gen_num_per_cycle may be >1 from config even when SP is disabled.
-            graph_params.num_tokens_per_bs = params.sp_config.gen_num_per_cycle + 1;
-        } else {
-            graph_params.num_tokens_per_bs = 1;
-        }
-        // Target-model decode path with SP enabled (num_tokens_per_bs>1,
-        // not prefill-graph, model_id==0) must set is_target_verify so the
-        // Python dispatch routes through forward_decode.  NormalExecutor's
-        // decodeWarmUp path defaults use_spec_decoding=false but still sees
-        // sp_config enabled, so infer the flag from config instead of
-        // relying solely on the constructor arg.
-        const bool is_target_verify_decode = params.sp_config.type != SP_TYPE_NONE
-                                             && params.sp_config.gen_num_per_cycle > 0 && !params.model_id
-                                             && !is_prefill_cuda_graph_mode;
-        graph_params.is_target_verify = use_spec_decoding || is_target_verify_decode;
-        graph_params.is_draft_extend  = params.sp_config.type != SP_TYPE_NONE && params.sp_config.gen_num_per_cycle > 0
-                                       && params.model_id && is_prefill_cuda_graph_mode;
-        if (params.sp_config.type != SP_TYPE_NONE) {
-            graph_params.sp_steps = params.sp_config.gen_num_per_cycle;
-        }
-
-        graph_runner_ = new CudaGraphRunner(graph_params, py_instance);
-        RTP_LLM_CHECK_WITH_INFO(graph_runner_ != nullptr, "graph_runner_ can't be nullptr in PyWrapper");
-        {
-            void* nccl_comm = cuda_graph::getGraphCaptureTpNcclComm();
-            cuda_graph::register_graph_capture_nccl_comm(nccl_comm,
-                                                         static_cast<int>(params.parallelism_config.tp_size),
-                                                         static_cast<int>(params.parallelism_config.tp_rank));
-        }
-#else
-        RTP_LLM_CHECK_WITH_INFO(false, "CUDA/HIP Graph is only supported on CUDA/ROCm platform");
-#endif
-        if (weights_.position_encoding) {
-            graph_runner_->setPositionEncoding(weights_.position_encoding->kernel.to(getTorchCudaDevice()));
-        }
-        if (weights_.token_type_embedding) {
-            graph_runner_->setTokenTypeEmbedding(weights_.token_type_embedding->kernel.to(getTorchCudaDevice()));
-        }
-        graph_runner_->setInputEmbeddingScalar(description_.input_embedding_scalar);
-        RTP_LLM_CHECK_WITH_INFO(graph_runner_ != nullptr, "graph_runner_ can't be null");
-        auto py_initialize_method = py_instance.attr("initialize");
-        try {
-            syncCudaGraphCaptureRanks(params.parallelism_config, "before_initCapture");
-            py_init_result = py_initialize_method(init_resources);
-            if (mtp_indexer_role_ != MtpIndexerRole::NORMAL && py::hasattr(py_model_, "set_mtp_indexer_role")) {
-                py_model_.attr("set_mtp_indexer_role")(static_cast<int>(mtp_indexer_role_));
-            }
-            graph_runner_->initCapture();
-        } catch (const py::error_already_set& e) {
-            RTP_LLM_LOG_ERROR("Python model initialize failed (cuda_graph branch):\n%s", e.what());
-            throw;
-        } catch (...) {
-            throw;
-        }
-    }
-
-    auto py_init_success = py_init_result.cast<bool>();
-    if (!py_init_success) {
-        throw std::runtime_error("PyWrappedModel constructor: Python model initialization failed.");
-    }
-
-    cache_store_async_writer_ = std::make_unique<CacheStoreAsyncWriter>(params.parallelism_config.local_rank);
-
-    if (device_props_.enable_prefill_cp) {
-        context_parallel_processor_ =
-            ContextParallelProcessorFactory::create(ProcessorType::ZIG_ZAG, params.parallelism_config);
-        RTP_LLM_LOG_INFO("Context parallel processor initialized with ZIG_ZAG strategy.");
-    }
-
-    RTP_LLM_LOG_INFO("PyWrappedModel initialized done.");
 }
 
 }  // namespace rtp_llm

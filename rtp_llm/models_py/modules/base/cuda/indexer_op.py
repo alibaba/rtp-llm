@@ -1,5 +1,6 @@
 """CUDA-specific indexer operations for DeepSeek-V3.2 DSA mechanism."""
 
+import logging
 import os
 from types import SimpleNamespace
 from typing import Any, Dict, Optional, Tuple
@@ -18,6 +19,8 @@ from rtp_llm.models_py.modules.base.cuda.paged_mqa import (
 from rtp_llm.models_py.modules.dsv4.chunk_env import dsv4_chunk_tokens_from_env
 from rtp_llm.ops.compute_ops import KVCache, rtp_llm_ops
 from torch import nn
+from rtp_llm.utils.tensor_capture_indexer import for_context as indexer_capture_context
+from rtp_llm.utils.tensor_capture_indexer import paged_schedule_version
 
 # Try to import CUDA dependencies, but don't fail if running on CPU
 try:
@@ -34,6 +37,24 @@ except Exception as e:
 
 
 _persistent_topk_workspace: Dict[torch.device, torch.Tensor] = {}
+_logger = logging.getLogger(__name__)
+
+
+def _note_tensor_capture_skip(context: Any, reason: str, layer: Optional[int]) -> None:
+    if context is not None:
+        try:
+            context.note_skip(reason, layer=layer)
+        except Exception:
+            _logger.warning(
+                "Indexer tensor capture skip reporting failed", exc_info=True
+            )
+
+
+def _cancel_topk_capture(token: Any, reason: str) -> None:
+    try:
+        token.cancel(reason=reason)
+    except Exception:
+        _logger.warning("Indexer tensor capture cancellation failed", exc_info=True)
 
 
 def _get_topk_workspace(device: torch.device) -> torch.Tensor:
@@ -218,6 +239,7 @@ class IndexerOp(nn.Module):
         block_size: int = 128,
         scale_fmt: str = "ue8m0",
         is_neox_style: bool = True,
+        layer_idx: Optional[int] = None,
     ):
         """
         Initialize IndexerOp.
@@ -231,6 +253,7 @@ class IndexerOp(nn.Module):
             blocksize: Page size (default: 64)
             block_size: Quantization block size (default: 128)
             scale_fmt: FP8 quantization format (default: "ue8m0")
+            layer_idx: Logical layer for tensor capture; None disables capture.
         """
         super().__init__()
         self.index_n_heads = index_n_heads
@@ -242,6 +265,7 @@ class IndexerOp(nn.Module):
         self.block_size = block_size
         self.scale_fmt = scale_fmt
         self.is_neox_style = is_neox_style
+        self.layer_idx = layer_idx
 
         glm5_topk_backend = (
             os.environ.get("GLM5_INDEXER_TOPK_BACKEND", "dsv4_persistent")
@@ -253,6 +277,9 @@ class IndexerOp(nn.Module):
                 "GLM5_INDEXER_TOPK_BACKEND must be 'dsv4_persistent' or "
                 f"'topk_v3', got {glm5_topk_backend!r}"
             )
+        self._paged_topk_backend = (
+            "topk_v3" if glm5_topk_backend == "topk_v3" else "dsv4_persistent_topk"
+        )
         self._paged_topk_op = (
             rtp_llm_ops.topk_v3
             if glm5_topk_backend == "topk_v3"
@@ -272,6 +299,154 @@ class IndexerOp(nn.Module):
             )
         self._prefill_topk_backend = prefill_topk_backend
 
+    def _capture_skip_reason(
+        self, tensor: torch.Tensor, total_query_rows: Optional[int]
+    ) -> Optional[str]:
+        from rtp_llm.ops.compute_ops import (
+            cuda_graph_capture_forward_enabled,
+            cuda_graph_warmup_forward_enabled,
+        )
+
+        if self.layer_idx is None:
+            return "missing_layer"
+        if total_query_rows is None:
+            return "missing_row_mapping"
+        if cuda_graph_warmup_forward_enabled():
+            return "warmup"
+        if cuda_graph_capture_forward_enabled() or (
+            tensor.is_cuda and torch.cuda.is_current_stream_capturing()
+        ):
+            return "graph"
+        return None
+
+    def _begin_mqa_capture(
+        self,
+        context: Any,
+        q_fp8: torch.Tensor,
+        kv_fp8: Tuple[torch.Tensor, torch.Tensor],
+        weights: torch.Tensor,
+        row_starts: torch.Tensor,
+        row_ends: torch.Tensor,
+        query_row_start: Optional[int],
+        total_query_rows: int,
+        *,
+        query_global_ids: Optional[torch.Tensor] = None,
+        local_query_row_start: Optional[int] = None,
+        local_query_rows: Optional[int] = None,
+        cp_rank: int = 0,
+        cp_size: int = 1,
+        kv_cache_sharded: bool = False,
+    ) -> Any:
+        try:
+            indexed = (
+                query_row_start is None
+                or query_global_ids is not None
+                or local_query_row_start is not None
+                or local_query_rows is not None
+                or cp_rank != 0
+                or cp_size != 1
+                or kv_cache_sharded
+            )
+            if indexed and query_global_ids is None:
+                _note_tensor_capture_skip(
+                    context, "missing_row_mapping", self.layer_idx
+                )
+                return None
+            reason = self._capture_skip_reason(q_fp8, total_query_rows)
+            if reason is not None:
+                _note_tensor_capture_skip(context, reason, self.layer_idx)
+                return None
+            mapping = {}
+            if indexed:
+                mapping = dict(
+                    query_global_ids=query_global_ids,
+                    local_query_row_start=local_query_row_start,
+                    local_query_rows=local_query_rows,
+                    cp_rank=cp_rank,
+                    cp_size=cp_size,
+                    kv_cache_sharded=kv_cache_sharded,
+                )
+            return context.begin_mqa(
+                layer=self.layer_idx,
+                q_fp8=q_fp8,
+                k_fp8=kv_fp8[0],
+                k_scale=kv_fp8[1],
+                weights=weights,
+                row_starts=row_starts,
+                row_ends=row_ends,
+                k=self.index_topk,
+                query_row_start=query_row_start,
+                total_query_rows=total_query_rows,
+                **mapping,
+            )
+        except Exception:
+            _note_tensor_capture_skip(context, "capture_error", self.layer_idx)
+            return None
+
+    def _begin_topk_capture(
+        self,
+        context: Any,
+        logits: torch.Tensor,
+        row_starts: torch.Tensor,
+        row_ends: torch.Tensor,
+        parameters: Dict[str, Any],
+        query_row_start: Optional[int],
+        total_query_rows: Optional[int],
+        *,
+        query_global_ids: Optional[torch.Tensor] = None,
+        local_query_row_start: Optional[int] = None,
+        local_query_rows: Optional[int] = None,
+        cp_rank: int = 0,
+        cp_size: int = 1,
+        kv_cache_sharded: bool = False,
+    ) -> Any:
+        try:
+            indexed = (
+                query_row_start is None
+                or query_global_ids is not None
+                or local_query_row_start is not None
+                or local_query_rows is not None
+                or cp_rank != 0
+                or cp_size != 1
+                or kv_cache_sharded
+            )
+            if indexed and query_global_ids is None:
+                _note_tensor_capture_skip(
+                    context, "missing_row_mapping", self.layer_idx
+                )
+                return None
+            # Reject warmup/capture forwards even if a caller leaked a context.
+            reason = self._capture_skip_reason(logits, total_query_rows)
+            if reason is not None:
+                _note_tensor_capture_skip(context, reason, self.layer_idx)
+                return None
+            mapping = {}
+            if indexed:
+                mapping = dict(
+                    query_global_ids=query_global_ids,
+                    local_query_row_start=local_query_row_start,
+                    local_query_rows=local_query_rows,
+                    cp_rank=cp_rank,
+                    cp_size=cp_size,
+                    kv_cache_sharded=kv_cache_sharded,
+                )
+            return context.begin_topk(
+                layer=self.layer_idx,
+                logits=logits,
+                row_starts=row_starts,
+                row_ends=row_ends,
+                k=self.index_topk,
+                backend=self._prefill_topk_backend,
+                parameters=parameters,
+                query_row_start=query_row_start,
+                total_query_rows=total_query_rows,
+                **mapping,
+            )
+        except Exception:
+            _logger.warning("Indexer tensor capture begin failed", exc_info=True)
+            _note_tensor_capture_skip(context, "capture_error", self.layer_idx)
+            return None
+
     def _run_prefill_topk(
         self,
         logits: torch.Tensor,
@@ -279,28 +454,124 @@ class IndexerOp(nn.Module):
         row_ends: torch.Tensor,
         output: torch.Tensor,
         max_seq_len: int,
+        *,
+        context: Any = None,
+        query_row_start: Optional[int] = 0,
+        total_query_rows: Optional[int] = None,
+        capture_token: Any = None,
+        query_global_ids: Optional[torch.Tensor] = None,
+        local_query_row_start: Optional[int] = None,
+        local_query_rows: Optional[int] = None,
+        cp_rank: int = 0,
+        cp_size: int = 1,
+        kv_cache_sharded: bool = False,
     ) -> None:
-        if self._prefill_topk_backend == "topk_v3_tie_break":
-            rtp_llm_ops.topk_v3_tie_break(
-                logits,
-                row_starts,
-                row_ends,
-                output,
-                self.index_topk,
-                min(max(int(max_seq_len), 1), logits.shape[1]),
-            )
-            return
-        rtp_llm_ops.dsv4_top_k_per_row_prefill(
-            logits,
-            row_starts,
-            row_ends,
-            output,
-            logits.shape[0],
-            logits.stride(0),
-            logits.stride(1),
-            self.index_topk,
-            _fp8_prefill_topk_force_radix_sort(),
-        )
+        token = capture_token
+        cancel_reason = "capture_error"
+        # An MQA token already owns snapshots and budget before TopK arguments
+        # are resolved. Keep that entire lifetime inside the cleanup boundary.
+        try:
+            context = indexer_capture_context(context)
+            use_v3 = self._prefill_topk_backend == "topk_v3_tie_break"
+            if use_v3:
+                max_seq_len = min(max(int(max_seq_len), 1), logits.shape[1])
+            else:
+                num_rows = logits.shape[0]
+                stride0, stride1 = logits.stride(0), logits.stride(1)
+                force_radix_sort = _fp8_prefill_topk_force_radix_sort()
+
+            topk_context = context
+            if token is None and context is not None:
+                try:
+                    # Group rejection must never publish an unrelated TopK-only sample.
+                    if getattr(context, "mqa_enabled", False):
+                        topk_context = None
+                except Exception:
+                    _note_tensor_capture_skip(context, "capture_error", self.layer_idx)
+                    topk_context = None
+            if token is not None or topk_context is not None:
+                parameters = (
+                    {
+                        "max_seq_len": max_seq_len,
+                        "stride0": logits.stride(0),
+                        "stride1": logits.stride(1),
+                    }
+                    if use_v3
+                    else {
+                        "num_rows": num_rows,
+                        "stride0": stride0,
+                        "stride1": stride1,
+                        "force_radix_sort": force_radix_sort,
+                    }
+                )
+                if token is not None:
+                    try:
+                        prepared = token.prepare_topk(
+                            logits,
+                            backend=self._prefill_topk_backend,
+                            parameters=parameters,
+                        )
+                    except Exception:
+                        _note_tensor_capture_skip(
+                            context, "capture_error", self.layer_idx
+                        )
+                        prepared = False
+                    if not prepared:
+                        rejected_token, token = token, None
+                        _cancel_topk_capture(rejected_token, "capture_error")
+                else:
+                    try:
+                        token = self._begin_topk_capture(
+                            topk_context,
+                            logits,
+                            row_starts,
+                            row_ends,
+                            parameters,
+                            query_row_start,
+                            total_query_rows,
+                            query_global_ids=query_global_ids,
+                            local_query_row_start=local_query_row_start,
+                            local_query_rows=local_query_rows,
+                            cp_rank=cp_rank,
+                            cp_size=cp_size,
+                            kv_cache_sharded=kv_cache_sharded,
+                        )
+                    except Exception:
+                        _note_tensor_capture_skip(
+                            context, "capture_error", self.layer_idx
+                        )
+            cancel_reason = "kernel_error"
+            if use_v3:
+                rtp_llm_ops.topk_v3_tie_break(
+                    logits, row_starts, row_ends, output, self.index_topk, max_seq_len
+                )
+            else:
+                rtp_llm_ops.dsv4_top_k_per_row_prefill(
+                    logits,
+                    row_starts,
+                    row_ends,
+                    output,
+                    num_rows,
+                    stride0,
+                    stride1,
+                    self.index_topk,
+                    force_radix_sort,
+                )
+            cancel_reason = "capture_error"
+            if token is not None:
+                try:
+                    token.finish(output)
+                except Exception:
+                    _logger.warning(
+                        "Indexer tensor capture finish failed", exc_info=True
+                    )
+                    rejected_token, token = token, None
+                    _cancel_topk_capture(rejected_token, "capture_error")
+                    _note_tensor_capture_skip(context, "capture_error", self.layer_idx)
+        except BaseException:
+            if token is not None:
+                _cancel_topk_capture(token, cancel_reason)
+            raise
 
     def _head_dim_with_sf(self) -> int:
         return self.index_head_dim + self.index_head_dim // self.block_size * 4
@@ -687,6 +958,136 @@ class IndexerOp(nn.Module):
         q_scale = q_scale.view(-1, self.index_n_heads, 1)
         return q_fp8, q_scale
 
+    def _begin_paged_mqa_capture(
+        self,
+        context: Any,
+        *,
+        q_fp8: torch.Tensor,
+        kv_cache_fp8: torch.Tensor,
+        weights: torch.Tensor,
+        context_lens: torch.Tensor,
+        block_table: torch.Tensor,
+        schedule_metadata: torch.Tensor,
+        lengths: torch.Tensor,
+        max_seq_len: int,
+        total_query_rows: int,
+        num_sms: Optional[int] = None,
+    ) -> Any:
+        try:
+            # Reject excluded layers before inspecting package/device metadata.
+            if not context.selected(self.layer_idx):
+                return None
+            try:
+                version = paged_schedule_version(deep_gemm)
+            except Exception:
+                _note_tensor_capture_skip(
+                    context, "unknown_paged_schedule_abi", self.layer_idx
+                )
+                return None
+            schedule_environment = dict(
+                deep_gemm_version=version,
+                device_capability=list(torch.cuda.get_device_capability(q_fp8.device)),
+                num_sms=deep_gemm.get_num_sms() if num_sms is None else num_sms,
+            )
+            return context.begin_paged_mqa(
+                layer=self.layer_idx,
+                q_fp8=q_fp8,
+                kv_cache_fp8=kv_cache_fp8,
+                weights=weights,
+                context_lens=context_lens,
+                block_table=block_table,
+                schedule_metadata=schedule_metadata,
+                lengths=lengths,
+                k=self.index_topk,
+                block_size=self.blocksize,
+                max_seq_len=max_seq_len,
+                total_query_rows=total_query_rows,
+                schedule_environment=schedule_environment,
+            )
+        except Exception:
+            _note_tensor_capture_skip(context, "capture_error", self.layer_idx)
+            return None
+
+    def _run_paged_topk(
+        self,
+        logits: torch.Tensor,
+        lengths: torch.Tensor,
+        output: torch.Tensor,
+        workspace: torch.Tensor,
+        max_seq_len: int,
+        *,
+        context: Any = None,
+        total_query_rows: Optional[int] = None,
+        capture_token: Any = None,
+    ) -> None:
+        token = capture_token
+        cancel_reason = "capture_error"
+        try:
+            if context is not None or token is not None:
+                try:
+                    context = indexer_capture_context(context)
+                    # Joint selection survives a rejected begin; never fall back.
+                    topk_only = (
+                        token is None
+                        and context is not None
+                        and not context.mqa_enabled
+                    )
+                    if token is not None or topk_only:
+                        parameters = dict(
+                            k=self.index_topk,
+                            max_seq_len=max_seq_len,
+                            index_space="sequence_relative",
+                            workspace_bytes=workspace.numel()
+                            * workspace.element_size(),
+                            stride0=logits.stride(0),
+                            stride1=logits.stride(1),
+                        )
+                        if token is not None:
+                            if not token.prepare_topk(
+                                logits,
+                                backend=self._paged_topk_backend,
+                                parameters=parameters,
+                            ):
+                                rejected_token, token = token, None
+                                _cancel_topk_capture(rejected_token, "capture_error")
+                        else:
+                            reason = self._capture_skip_reason(logits, total_query_rows)
+                            if reason is not None:
+                                _note_tensor_capture_skip(
+                                    context, reason, self.layer_idx
+                                )
+                            else:
+                                token = context.begin_paged_topk(
+                                    layer=self.layer_idx,
+                                    logits=logits,
+                                    lengths=lengths,
+                                    k=self.index_topk,
+                                    backend=self._paged_topk_backend,
+                                    parameters=parameters,
+                                    total_query_rows=total_query_rows,
+                                )
+                except Exception:
+                    if token is not None:
+                        rejected_token, token = token, None
+                        _cancel_topk_capture(rejected_token, "capture_error")
+                    _note_tensor_capture_skip(context, "capture_error", self.layer_idx)
+            cancel_reason = "kernel_error"
+            self._paged_topk_op(
+                logits, lengths, output, workspace, self.index_topk, max_seq_len
+            )
+            cancel_reason = "capture_error"
+            if token is not None:
+                try:
+                    token.finish(output)
+                except Exception:
+                    rejected_token, token = token, None
+                    _cancel_topk_capture(rejected_token, "capture_error")
+                    _note_tensor_capture_skip(context, "capture_error", self.layer_idx)
+        except BaseException:
+            if token is not None:
+                _cancel_topk_capture(token, cancel_reason)
+            raise
+
     def _get_topk_paged(
         self,
         q_fp8: torch.Tensor,
@@ -761,38 +1162,119 @@ class IndexerOp(nn.Module):
                 has_schedule_metadata = schedule_metadata.numel() > 0
             except RuntimeError:
                 has_schedule_metadata = False
+        num_sms = None
         if not has_schedule_metadata:
+            num_sms = deep_gemm.get_num_sms()
             schedule_metadata = deep_gemm.get_paged_mqa_logits_metadata(
                 kvlen_2d,
                 self.blocksize,
-                deep_gemm.get_num_sms(),
+                num_sms,
             )
 
-        logits = deep_gemm.fp8_paged_mqa_logits(
-            paged_q,
-            kv_cache_fp8.view(dtype=torch.uint8),
-            weights,
-            kvlen_2d,
-            block_table,
-            schedule_metadata,
-            max_seq_len,
-            clean_logits=False,
-        )
+        context = getattr(attention_inputs, "tensor_capture_context", None)
+        total_query_rows = None
+        mqa_enabled = False
+        if context is not None:
+            try:
+                context = indexer_capture_context(context)
+                reason = None
+                if is_multi_token_decode:
+                    reason = "paged"
+                elif (
+                    getattr(attention_inputs, "is_cuda_graph", False)
+                    or getattr(attention_inputs, "prefill_cuda_graph_copy_params", None)
+                    is not None
+                ):
+                    reason = "graph"
+                elif (
+                    getattr(attention_inputs, "context_parallel_info", None) is not None
+                ):
+                    reason = "cp"
+                elif getattr(attention_inputs, "is_prefill", None) is not False:
+                    reason = "phase"
+                else:
+                    identity = context.identity
+                    requests = identity.get("requests")
+                    if identity.get("model_role") != "target":
+                        reason = "phase"
+                    elif not requests:
+                        reason = "missing_row_mapping"
+                    elif any(request.get("phase") != "decode" for request in requests):
+                        reason = "phase"
+                    elif (
+                        any(
+                            type(request.get("q_len")) is not int
+                            or request["q_len"] != 1
+                            or request.get("is_fake", False)
+                            for request in requests
+                        )
+                        or q_fp8.shape[0] != len(requests)
+                        or block_table.shape[0] != len(requests)
+                        or kvlen_2d.shape != (len(requests), 1)
+                        or lengths.shape != (len(requests),)
+                        or weights.shape[0] != len(requests)
+                    ):
+                        reason = "missing_row_mapping"
+                    else:
+                        total_query_rows = len(requests)
+                        reason = self._capture_skip_reason(paged_q, total_query_rows)
+                if reason is not None:
+                    _note_tensor_capture_skip(context, reason, self.layer_idx)
+                    context = None
+                else:
+                    mqa_enabled = context.mqa_enabled
+            except Exception:
+                _note_tensor_capture_skip(context, "capture_error", self.layer_idx)
+                context = None
 
-        assert (
-            fmha_params.expanded_seq_lens.device == logits.device
-        ), "expanded_seq_lens must be on the same device as logits"
+        token = None
+        if context is not None and mqa_enabled:
+            token = self._begin_paged_mqa_capture(
+                context,
+                q_fp8=paged_q,
+                kv_cache_fp8=kv_cache_fp8,
+                weights=weights,
+                context_lens=kvlen_2d,
+                block_table=block_table,
+                schedule_metadata=schedule_metadata,
+                lengths=lengths,
+                max_seq_len=max_seq_len,
+                total_query_rows=total_query_rows,
+                num_sms=num_sms,
+            )
+        try:
+            logits = deep_gemm.fp8_paged_mqa_logits(
+                paged_q,
+                kv_cache_fp8,
+                weights,
+                kvlen_2d,
+                block_table,
+                schedule_metadata,
+                max_seq_len,
+                clean_logits=False,
+            )
 
-        topk_result = logits.new_empty(
-            (logits.shape[0], self.index_topk), dtype=torch.int32
-        )
-        self._paged_topk_op(
+            assert (
+                fmha_params.expanded_seq_lens.device == logits.device
+            ), "expanded_seq_lens must be on the same device as logits"
+
+            topk_result = logits.new_empty(
+                (logits.shape[0], self.index_topk), dtype=torch.int32
+            )
+            workspace = _get_topk_workspace(logits.device)
+        except BaseException:
+            if token is not None:
+                _cancel_topk_capture(token, "kernel_error")
+            raise
+        self._run_paged_topk(
             logits,
             lengths,
             topk_result,
-            _get_topk_workspace(logits.device),
-            self.index_topk,
+            workspace,
             max_seq_len,
+            context=context,
+            total_query_rows=total_query_rows,
+            capture_token=token,
         )
 
         return topk_result
@@ -826,6 +1308,39 @@ class IndexerOp(nn.Module):
             "multi-token decode must use paged DSA topk; ragged fp8_mqa_logits is "
             "not CUDA-graph safe"
         )
+
+        context = indexer_capture_context(
+            getattr(attention_inputs, "tensor_capture_context", None)
+        )
+        mqa_enabled = False
+        if context is not None:
+            # Owner, pure-prefill and microbatch eligibility come from the frozen
+            # execution context. Never reconstruct that identity from GPU metadata.
+            try:
+                reason = None
+                if (
+                    getattr(attention_inputs, "is_cuda_graph", False)
+                    or getattr(attention_inputs, "prefill_cuda_graph_copy_params", None)
+                    is not None
+                ):
+                    reason = "graph"
+                elif (
+                    getattr(attention_inputs, "context_parallel_info", None) is not None
+                ):
+                    reason = "cp"
+                elif not getattr(attention_inputs, "is_prefill", False):
+                    reason = "decode"
+                if reason is not None:
+                    _note_tensor_capture_skip(context, reason, self.layer_idx)
+                    context = None
+                else:
+                    mqa_enabled = getattr(context, "mqa_enabled", False)
+            except Exception:
+                _logger.warning(
+                    "Indexer tensor capture eligibility failed", exc_info=True
+                )
+                _note_tensor_capture_skip(context, "capture_error", self.layer_idx)
+                context = None
 
         # Gather quantized key from cache for prefill.
         # total_kv_tokens = sum(input_lengths + prefix_lengths) across all
@@ -867,6 +1382,7 @@ class IndexerOp(nn.Module):
             (num_rows, self.index_topk), dtype=torch.int32, device=q_fp8.device
         )
         if num_rows == 0:
+            _note_tensor_capture_skip(context, "empty", self.layer_idx)
             return topk_result
         chunk_rows_env = _fp8_mqa_logits_chunk_rows()
         chunk_rows = num_rows if chunk_rows_env <= 0 else min(chunk_rows_env, num_rows)
@@ -876,23 +1392,48 @@ class IndexerOp(nn.Module):
         row_start = 0
         while row_start < num_rows:
             row_end = min(row_start + chunk_rows, num_rows)
-            logits = deep_gemm.fp8_mqa_logits(
-                q_fp8[row_start:row_end],
-                kv_fp8,
-                weights[row_start:row_end],
-                fmha_params.ks[row_start:row_end],
-                fmha_params.ke[row_start:row_end],
-                clean_logits=False,
-            )
-            topk_part = logits.new_empty(
-                (logits.shape[0], self.index_topk), dtype=torch.int32
-            )
+            q_part = q_fp8[row_start:row_end]
+            weights_part = weights[row_start:row_end]
+            row_starts = fmha_params.ks[row_start:row_end]
+            row_ends = fmha_params.ke[row_start:row_end]
+            token = None
+            if mqa_enabled:
+                token = self._begin_mqa_capture(
+                    context,
+                    q_part,
+                    kv_fp8,
+                    weights_part,
+                    row_starts,
+                    row_ends,
+                    row_start,
+                    num_rows,
+                )
+            try:
+                logits = deep_gemm.fp8_mqa_logits(
+                    q_part,
+                    kv_fp8,
+                    weights_part,
+                    row_starts,
+                    row_ends,
+                    clean_logits=False,
+                )
+                topk_part = logits.new_empty(
+                    (logits.shape[0], self.index_topk), dtype=torch.int32
+                )
+            except BaseException:
+                if token is not None:
+                    _cancel_topk_capture(token, "kernel_error")
+                raise
             self._run_prefill_topk(
                 logits,
-                fmha_params.ks[row_start:row_end],
-                fmha_params.ke[row_start:row_end],
+                row_starts,
+                row_ends,
                 topk_part,
                 prefill_max_kv_len,
+                context=context,
+                query_row_start=row_start,
+                total_query_rows=num_rows,
+                capture_token=token,
             )
             _write_prefill_topk(
                 topk_part,
@@ -927,11 +1468,11 @@ class IndexerOp(nn.Module):
         indexer_copy_dst_idx: Optional[torch.Tensor] = None,
         indexer_src_for_padded: Optional[torch.Tensor] = None,
         total_local_ids_is_identity: bool = False,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        total_global_ids: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
         """
-        Compute TopK indices for ragged attention (prefill phase) with context parallel
-        chunking. Splits q by CP chunk indices, runs fp8_mqa_logits + topk per chunk,
-        and returns (topk0, topk1) for the two CP chunks so the caller can use them directly.
+        Compute TopK indices for this CP rank's selected query rows in prefill.
+        Runs fp8_mqa_logits + topk in score chunks and returns one local tensor.
 
         Full KV for logits: deep_gemm.fp8_mqa_logits requires full kv_fp8 for mathematical
         correctness. Each row i uses K[ks[i]:ke[i]] (ragged); we only chunk the q dimension,
@@ -950,6 +1491,8 @@ class IndexerOp(nn.Module):
             precomputed_ke: ``fmha_params.ke[total_global_ids]``, precomputed in plan().
             precomputed_lengths: ``fmha_params.expanded_seq_lens[total_global_ids]``, precomputed in plan().
             precomputed_topk_off: ``fmha_params.topk_indices_offset[total_global_ids]``, precomputed in plan().
+            total_global_ids: Existing global query IDs aligned with total_local_ids,
+                used only for capture; never reconstructed from local row positions.
 
         Returns:
             TopK indices for this CP rank, shape [len(total_local_ids), index_topk].
@@ -961,6 +1504,11 @@ class IndexerOp(nn.Module):
         has_local_ids = total_local_ids is not None and int(total_local_ids.numel()) > 0
         sharded_cp_kv = kv_cache_sharded and int(cp_size) > 1
         if not has_local_ids and not sharded_cp_kv:
+            _note_tensor_capture_skip(
+                getattr(attention_inputs, "tensor_capture_context", None),
+                "empty",
+                self.layer_idx,
+            )
             return torch.empty((0, self.index_topk), dtype=torch.int32, device=device)
 
         total_kv_tokens = num_kv_tokens
@@ -1051,11 +1599,53 @@ class IndexerOp(nn.Module):
                 cu_kv_seqlens_global,
             )
         if not has_local_ids:
+            _note_tensor_capture_skip(
+                getattr(attention_inputs, "tensor_capture_context", None),
+                "empty",
+                self.layer_idx,
+            )
             return torch.empty((0, self.index_topk), dtype=torch.int32, device=device)
         kv_fp8_full = (k_fp8, k_scale.view(torch.float32).squeeze(-1))
         prefill_max_kv_len = int(
             getattr(fmha_params, "prefill_max_kv_len", total_kv_tokens)
         )
+
+        # Capture eligibility must not bypass the sharded-K collective above,
+        # including on ranks with no local queries.
+        context = getattr(attention_inputs, "tensor_capture_context", None)
+        mqa_enabled = False
+        total_query_rows = None
+        if context is not None:
+            try:
+                context = indexer_capture_context(context)
+                reason = None
+                if (
+                    getattr(attention_inputs, "is_cuda_graph", False)
+                    or getattr(attention_inputs, "prefill_cuda_graph_copy_params", None)
+                    is not None
+                ):
+                    reason = "graph"
+                elif getattr(attention_inputs, "is_target_verify", False) or getattr(
+                    attention_inputs, "is_draft_extend", False
+                ):
+                    reason = "paged"
+                elif not getattr(attention_inputs, "is_prefill", False):
+                    reason = "decode"
+                elif total_global_ids is None or total_global_ids.shape != (
+                    q0.shape[0],
+                ):
+                    reason = "missing_row_mapping"
+                if reason is not None:
+                    _note_tensor_capture_skip(context, reason, self.layer_idx)
+                    context = None
+                else:
+                    total_query_rows = sum(
+                        request["q_len"] for request in context.identity["requests"]
+                    )
+                    mqa_enabled = context.mqa_enabled
+            except Exception:
+                _note_tensor_capture_skip(context, "capture_error", self.layer_idx)
+                context = None
 
         def run_part_logits_topk(
             q_part: torch.Tensor,
@@ -1073,25 +1663,66 @@ class IndexerOp(nn.Module):
             chunk_rows_env = _fp8_mqa_logits_chunk_rows()
             chunk_rows = nr if chunk_rows_env <= 0 else min(chunk_rows_env, nr)
             row_start = 0
+            capture_kwargs = {}
             while row_start < nr:
                 row_end = min(row_start + chunk_rows, nr)
-                logits_p = deep_gemm.fp8_mqa_logits(
-                    q_part[row_start:row_end],
-                    kv_fp8_full,
-                    weights_part[row_start:row_end],
-                    ks[row_start:row_end],
-                    ke[row_start:row_end],
-                    clean_logits=False,
-                )
-                topk_part = logits_p.new_empty(
-                    (logits_p.shape[0], self.index_topk), dtype=torch.int32
-                )
+                q_chunk = q_part[row_start:row_end]
+                weights_chunk = weights_part[row_start:row_end]
+                row_starts = ks[row_start:row_end]
+                row_ends = ke[row_start:row_end]
+                token = None
+                if context is not None:
+                    try:
+                        capture_kwargs = dict(
+                            query_row_start=None,
+                            total_query_rows=total_query_rows,
+                            query_global_ids=total_global_ids[row_start:row_end],
+                            local_query_row_start=row_start,
+                            local_query_rows=nr,
+                            cp_rank=cp_rank,
+                            cp_size=cp_size,
+                            kv_cache_sharded=kv_cache_sharded,
+                        )
+                    except Exception:
+                        _note_tensor_capture_skip(
+                            context, "capture_error", self.layer_idx
+                        )
+                        capture_kwargs = {}
+                    else:
+                        if mqa_enabled:
+                            token = self._begin_mqa_capture(
+                                context,
+                                q_chunk,
+                                kv_fp8_full,
+                                weights_chunk,
+                                row_starts,
+                                row_ends,
+                                **capture_kwargs,
+                            )
+                        capture_kwargs.update(context=context, capture_token=token)
+                try:
+                    logits_p = deep_gemm.fp8_mqa_logits(
+                        q_chunk,
+                        kv_fp8_full,
+                        weights_chunk,
+                        row_starts,
+                        row_ends,
+                        clean_logits=False,
+                    )
+                    topk_part = logits_p.new_empty(
+                        (logits_p.shape[0], self.index_topk), dtype=torch.int32
+                    )
+                except BaseException:
+                    if token is not None:
+                        _cancel_topk_capture(token, "kernel_error")
+                    raise
                 self._run_prefill_topk(
                     logits_p,
-                    ks[row_start:row_end],
-                    ke[row_start:row_end],
+                    row_starts,
+                    row_ends,
                     topk_part,
                     prefill_max_kv_len,
+                    **capture_kwargs,
                 )
                 _write_prefill_topk(
                     topk_part,

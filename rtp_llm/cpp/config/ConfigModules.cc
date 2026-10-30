@@ -161,6 +161,7 @@ std::string ProfilingDebugLoggingConfig::to_string() const {
         << "ft_alog_conf_path: " << ft_alog_conf_path << "\n"
         << "gen_timeline_sync: " << gen_timeline_sync << "\n"
         << "torch_cuda_profiler_dir: " << torch_cuda_profiler_dir << "\n"
+        << "tensor_capture_config: " << tensor_capture_config << "\n"
         << "log_file_backup_count: " << log_file_backup_count << "\n"
         << "debug_load_server: " << debug_load_server << "\n"
         << "hack_layer_num: " << hack_layer_num << "\n"

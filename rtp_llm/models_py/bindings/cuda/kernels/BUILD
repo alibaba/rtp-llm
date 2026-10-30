@@ -9,8 +9,9 @@ sm100_cuda_copts = copts() + cuda_default_copts_without_arch() + [
     '--cuda-include-ptx=sm_103a', '--cuda-gpu-arch=sm_103a',
 ]
 
-# The GLM5 TopK uses CTA clusters and requires SM90+.  CUDA Runtime reports
-# this host as SM103, so emit an exact SM103 cubin alongside production SM100.
+# The GLM5 TopK uses CTA clusters and requires SM90+. Keep production
+# SM100/103 cubins and add native SM120 code for CUDA13 x86 workstations;
+# their driver may not support PTX emitted by a newer CUDA13 toolkit.
 glm5_indexer_topk_cuda_copts = copts() + cuda_default_copts_without_arch() + [
     '-O3',
     # TopK is defined by exact FP32 ordering. The global CUDA defaults enable
@@ -19,7 +20,10 @@ glm5_indexer_topk_cuda_copts = copts() + cuda_default_copts_without_arch() + [
     '--cuda-include-ptx=sm_100', '--cuda-gpu-arch=sm_100',
     '--cuda-include-ptx=sm_100a', '--cuda-gpu-arch=sm_100a',
     '--cuda-include-ptx=sm_103', '--cuda-gpu-arch=sm_103',
-]
+] + select({
+    "//:using_cuda13_x86": ['--cuda-gpu-arch=sm_120'],
+    "//conditions:default": [],
+})
 
 cuda_deps = [
     "//rtp_llm/models_py/bindings/cuda:cuda_host_utils",

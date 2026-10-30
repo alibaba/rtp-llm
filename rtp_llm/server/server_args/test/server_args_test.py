@@ -2,6 +2,8 @@ import importlib
 import os
 import pickle
 import sys
+import tempfile
+from pathlib import Path
 from types import SimpleNamespace
 from unittest import TestCase, main
 
@@ -20,6 +22,99 @@ class ServerArgsSetTest(TestCase):
         os.environ.clear()
         os.environ.update(self._environ_backup)
         sys.argv = self._argv_backup
+
+    def test_tensor_capture_config_arguments(self):
+        from rtp_llm.server.server_args.profile_debug_logging_group_args import (
+            init_profile_debug_logging_group_args,
+        )
+        from rtp_llm.server.server_args.server_args import EnvArgumentParser
+
+        env_name = "RTP_LLM_TENSOR_CAPTURE_CONFIG"
+        flag = "--tensor_capture_config"
+        for env_value, cli_args, expected in (
+            (None, [], ""),
+            ("env-capture.json", [], "env-capture.json"),
+            (None, [flag, "cli-capture.json"], "cli-capture.json"),
+            ("env-capture.json", [flag, "cli-capture.json"], "cli-capture.json"),
+            ("env-capture.json", [flag, ""], ""),
+        ):
+            with self.subTest(env_value=env_value, cli_args=cli_args):
+                os.environ.pop(env_name, None)
+                if env_value is not None:
+                    os.environ[env_name] = env_value
+                config = SimpleNamespace()
+                parser = EnvArgumentParser()
+                parser.set_root_config(SimpleNamespace())
+                init_profile_debug_logging_group_args(parser, config)
+                parser.parse_args(cli_args)
+                self.assertEqual(config.tensor_capture_config, expected)
+                self.assertEqual(os.environ.get(env_name), env_value)
+
+    def test_tensor_capture_config_binding_and_pickle(self):
+        from rtp_llm.ops import ProfilingDebugLoggingConfig
+        from rtp_llm.server.server_args.profile_debug_logging_group_args import (
+            init_profile_debug_logging_group_args,
+        )
+        from rtp_llm.server.server_args.server_args import EnvArgumentParser
+
+        config = ProfilingDebugLoggingConfig()
+        self.assertEqual(config.tensor_capture_config, "")
+        for path in ("", "capture.json"):
+            with self.subTest(path=path):
+                parser = EnvArgumentParser()
+                parser.set_root_config(SimpleNamespace())
+                init_profile_debug_logging_group_args(parser, config)
+                parser.parse_args(["--tensor_capture_config", path])
+                self.assertEqual(config.tensor_capture_config, path)
+                restored = pickle.loads(pickle.dumps(config))
+                self.assertEqual(restored.tensor_capture_config, path)
+                self.assertEqual(restored.check_nan, config.check_nan)
+                self.assertIn(f"tensor_capture_config: {path}\n", restored.to_string())
+
+    def test_tensor_capture_config_legacy_pickle_state(self):
+        from rtp_llm.ops import ProfilingDebugLoggingConfig
+
+        config = ProfilingDebugLoggingConfig()
+        config.trace_memory = True
+        config.check_nan = True
+        config.torch_cuda_profiler_dir = "profile"
+        config.tensor_capture_config = "capture.json"
+        current = config.__getstate__()
+        self.assertEqual(len(current), 13)
+        for state, expected in ((current[:12], ""), (current, "capture.json")):
+            with self.subTest(size=len(state)):
+                restored = ProfilingDebugLoggingConfig.__new__(ProfilingDebugLoggingConfig)
+                restored.__setstate__(state)
+                self.assertEqual(restored.tensor_capture_config, expected)
+                self.assertTrue(restored.trace_memory)
+                self.assertTrue(restored.check_nan)
+                self.assertEqual(restored.torch_cuda_profiler_dir, "profile")
+                self.assertEqual(pickle.loads(pickle.dumps(restored)).tensor_capture_config, expected)
+        for state in (current[:11], current + ("extra",)):
+            with self.subTest(invalid_size=len(state)):
+                restored = ProfilingDebugLoggingConfig.__new__(ProfilingDebugLoggingConfig)
+                with self.assertRaises(RuntimeError):
+                    restored.__setstate__(state)
+
+    def test_disabled_tensor_capture_config_needs_no_record_environment(self):
+        from rtp_llm.utils.tensor_capture import TensorCaptureRecorder, config_enabled
+
+        self.assertNotIn("RTP_LLM_RECORD_DIR", os.environ)
+        self.assertNotIn("RTP_LLM_RECORD_SESSION", os.environ)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "capture.json"
+            path.write_text('{"enabled": false}')
+            self.assertFalse(config_enabled(str(path)))
+            for rank in (0, 1):
+                recorder = TensorCaptureRecorder(str(path), tp_rank=rank, world_rank=rank)
+                self.assertIsNone(recorder.for_execution("{}"))
+                self.assertTrue(recorder.close(timeout=0.1))
+            self.assertEqual(list(Path(directory).iterdir()), [path])
+            path.write_text('{"enabled": "false"}')
+            with self.assertRaises(ValueError):
+                config_enabled(str(path))
+            with self.assertRaises(ValueError):
+                TensorCaptureRecorder(str(path))
 
     def test_grammar_sandbox_memory_default_and_overrides(self):
         from rtp_llm.config.py_config_modules import GrammarAdmissionConfig
