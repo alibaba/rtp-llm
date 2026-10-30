@@ -457,6 +457,7 @@ build:ppu --action_env CUDA_HOME="/usr/local/PPU_SDK/CUDA_SDK/"
 build:ppu --action_env CUDA_PATH="/usr/local/PPU_SDK/CUDA_SDK/"
 build:ppu --action_env PPU_SDK="/usr/local/PPU_SDK/"
 build:ppu --python_top=//:python312_ppu
+build:ppu --incompatible_use_python_toolchains=false
 build:ppu --repo_env=PYTHON_BIN_PATH="/opt/conda312/bin/python3"
 build:ppu --action_env PYTHON_BIN_PATH="/opt/conda312/bin/python3"
 build:ppu --host_action_env PYTHON_BIN_PATH="/opt/conda312/bin/python3"
