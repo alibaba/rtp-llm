@@ -60,6 +60,31 @@ cc_test(
     tags = ["L20_CU13"],
 )
 
+# Real GPU dependency gate against the public MM preprocessing entry point.
+# The host watchdog releases the gate without calling any CUDA API, bounding a
+# pre-fix failure even when a synchronous copy is holding a driver lock.
+cc_test(
+    name = "multimodal_cuda_stream_test",
+    srcs = ["MultimodalCudaStreamTest.cc"],
+    copts = copts(),
+    deps = torch_deps() + cuda13_torch_link_deps + [
+        "//rtp_llm/cpp/config:config_modules",
+        "//rtp_llm/cpp/multimodal_processor",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ] + select({
+        "@//:using_cuda": [
+            "@local_config_cuda//cuda:cuda_headers",
+            "@local_config_cuda//cuda:cuda_driver",
+            "@local_config_cuda//cuda:cudart",
+        ],
+        "//conditions:default": [],
+    }),
+    timeout = "short",
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
+)
+
 # Ingress ownership / processor-kind decision table. Depends on the lean mm_processor_config
 # target rather than the fat one, so it links no torch and needs no GPU node.
 cc_test(

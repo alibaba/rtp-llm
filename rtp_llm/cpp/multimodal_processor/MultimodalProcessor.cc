@@ -2,9 +2,18 @@
 #include <algorithm>
 #include <cstring>
 #include <limits>
+#include <map>
+#include <mutex>
+#include <optional>
 #include <string>
 #include <vector>
 #include <torch/python.h>
+#if USING_CUDA
+#include <ATen/cuda/CUDAEvent.h>
+#include <c10/cuda/CUDAException.h>
+#include <c10/cuda/CUDAGuard.h>
+#include <c10/cuda/CUDAFunctions.h>
+#endif
 #include "absl/status/statusor.h"
 #include "rtp_llm/cpp/multimodal_processor/FeatureHashOp.h"
 #include "rtp_llm/cpp/multimodal_processor/MultimodalError.h"
@@ -15,6 +24,48 @@ namespace rtp_llm {
 
 namespace {
 
+#if USING_CUDA
+c10::cuda::CUDAStream multimodalCudaStream(c10::DeviceIndex device) {
+    static std::mutex                                        mutex;
+    static std::map<c10::DeviceIndex, c10::cuda::CUDAStream> streams;
+    std::lock_guard<std::mutex>                              lock(mutex);
+    if (const auto found = streams.find(device); found != streams.end()) {
+        return found->second;
+    }
+    const c10::cuda::CUDAGuard device_guard(device);
+    cudaStream_t               raw = nullptr;
+    C10_CUDA_CHECK(cudaStreamCreateWithFlags(&raw, cudaStreamNonBlocking));
+    try {
+        const auto stream = c10::cuda::getStreamFromExternal(raw, device);
+        streams.emplace(device, stream);
+        // Keep one stream per device for the CUDA context's lifetime, like
+        // PyTorch's own pool. GPU allocations retain their allocation stream
+        // in the caching allocator even after this request releases them.
+        // Never borrow a pool entry that engine/collective workers may use.
+        return stream;
+    } catch (...) {
+        (void)cudaStreamDestroy(raw);
+        throw;
+    }
+}
+
+class ScopedMultimodalCudaStream {
+public:
+    ScopedMultimodalCudaStream() {
+        if (c10::cuda::device_count() == 0) {
+            return;
+        }
+        guard_.emplace(multimodalCudaStream(c10::cuda::current_device()));
+    }
+
+    ScopedMultimodalCudaStream(const ScopedMultimodalCudaStream&)            = delete;
+    ScopedMultimodalCudaStream& operator=(const ScopedMultimodalCudaStream&) = delete;
+
+private:
+    std::optional<c10::cuda::CUDAStreamGuard> guard_;
+};
+#endif
+
 ErrorInfo pinMultimodalTensors(std::vector<torch::Tensor>& tensors, const char* tensor_name) {
 #if USING_CUDA
     try {
@@ -23,10 +74,32 @@ ErrorInfo pinMultimodalTensors(std::vector<torch::Tensor>& tensors, const char* 
                 continue;
             }
             if (tensor.is_cuda()) {
-                auto options =
+                c10::cuda::CUDAStreamGuard copy_guard(multimodalCudaStream(tensor.get_device()));
+                auto                       options =
                     torch::TensorOptions().dtype(tensor.scalar_type()).device(torch::kCPU).pinned_memory(true);
-                // Downstream TP serialization can read the host tensor immediately.
-                tensor = tensor.to(options, /*non_blocking=*/false);
+                // Allocate the pinned destination explicitly. Tensor::to()
+                // overrides TensorOptions::pinned_memory with a pin_out value
+                // derived from non_blocking; to(pinned_cpu_options, false)
+                // therefore allocates pageable output in current PyTorch.
+                // Pageable D2H can wait inside the driver while holding its
+                // context lock, preventing another thread from submitting the
+                // GPU work needed to satisfy that wait.
+                auto host = tensor.is_non_overlapping_and_dense() ?
+                                torch::empty_strided(tensor.sizes(), tensor.strides(), options) :
+                                torch::empty(tensor.sizes(), options);
+                // The embedding adapter publishes its producer dependency to
+                // this consumer stream; receiving-side materialization and
+                // this copy stay in the same isolated stream's program order.
+                // Do not add a model-default-stream event here: that stream
+                // may be waiting for another TP rank to enqueue its work.
+                host.copy_(tensor, /*non_blocking=*/true);
+                at::cuda::CUDAEvent copied;
+                copied.record(c10::cuda::getCurrentCUDAStream(tensor.get_device()));
+                // TP serialization reads CPU data immediately after return.
+                // Wait only for the copy's completion, not the device/default
+                // stream or any unrelated model work.
+                copied.synchronize();
+                tensor = std::move(host);
             } else {
                 tensor = tensor.pin_memory();
             }
@@ -185,6 +258,13 @@ ErrorInfo MultimodalProcessor::updateMultimodalFeatures(std::shared_ptr<rtp_llm:
     if (!input->multimodal_inputs || input->multimodal_inputs->empty()) {
         return ErrorInfo::OkStatus();
     }
+#if USING_CUDA
+    // Isolate the complete receiving chain, not just its final D2H. RDMA
+    // providers and feature hashing can enqueue CUDA work before pinning, and
+    // a producer event recorded on an already blocked default stream cannot
+    // make a late stream switch safe.
+    ScopedMultimodalCudaStream mm_stream;
+#endif
     CHECK_AND_RETURN_REF(
         mm_embedding_res,
         MultimodalEmbedding(input->multimodal_inputs.value(), ip_port, input->request_id, server_context));
