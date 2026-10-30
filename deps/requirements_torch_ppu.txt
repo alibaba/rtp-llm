@@ -11,6 +11,4 @@ fast-hadamard-transform @ https://pkg.flytiger-eco.com/artifactory/pypi_generic/
 mkl==2021.1.1
 # Flash checkpoints contain F8_E8M0 scale tensors.
 safetensors==0.8.0
-# Bazel 6 runfiles drop paths containing spaces, while jaraco.text (setuptools
-# >= 60.7) reads "Lorem ipsum.txt" at import. 70.3.0 does not, so keep it pinned.
 setuptools==70.3.0
