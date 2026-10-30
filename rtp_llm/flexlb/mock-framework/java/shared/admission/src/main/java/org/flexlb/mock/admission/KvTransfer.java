@@ -1,10 +1,12 @@
-package org.flexlb.mock.engine;
+package org.flexlb.mock.admission;
+
+import org.flexlb.mock.engine.RequestState;
 
 import java.util.*;
 import java.util.concurrent.*;
 
 /** Asynchronous zero-time KV transfer model. Resource use lasts until execution quiesces. */
-public final class KvTransfer implements AutoCloseable {
+final class KvTransfer implements AutoCloseable {
     public enum State { COMPLETED, CANCELLED, FAILED }
     public record Outcome(State state, RuntimeException error) {}
     private final Object lock = new Object();

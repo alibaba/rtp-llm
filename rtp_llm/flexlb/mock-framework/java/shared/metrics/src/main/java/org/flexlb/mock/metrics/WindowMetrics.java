@@ -16,7 +16,7 @@ public final class WindowMetrics extends Collector {
     private final Map<String, Reading> values = new TreeMap<>();
 
     public WindowMetrics(String role) { this(role, System::nanoTime); }
-    WindowMetrics(String role, LongSupplier clock) {
+    public WindowMetrics(String role, LongSupplier clock) {
         this.role = Objects.requireNonNull(role); this.clock = clock; started = clock.getAsLong();
     }
     public synchronized void observe(String name, double value) {

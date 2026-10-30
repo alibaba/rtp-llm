@@ -1,12 +1,12 @@
-package org.flexlb.mock.metrics;
+package org.flexlb.mock.engine.rtp;
 
 import static org.junit.jupiter.api.Assertions.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.Test;
 
-class EngineMetricsTest {
-    private static final EngineMetrics.State IDLE = new EngineMetrics.State(0, 0, 0, 0, 100, 100, 100, 0, 0, 0, 1);
+class RtpMetricsTest {
+    private static final RtpMetrics.State IDLE = new RtpMetrics.State(0, 0, 0, 0, 100, 100, 100, 0, 0, 0, 1);
 
     static double sample(String text, String name, String label) {
         return text.lines().filter(line -> line.startsWith(name + "{") && line.contains(label))
@@ -15,9 +15,9 @@ class EngineMetricsTest {
 
     @Test void exposesZeroCountersAndCurrentStateWithoutResetOnScrape() {
         var state = new AtomicReference<>(IDLE);
-        var metrics = new EngineMetrics("prefill", state::get);
+        var metrics = new RtpMetrics("prefill", state::get);
         assertEquals(0, sample(metrics.scrape(), "rtp_llm_requests_started_total", ""));
-        state.set(new EngineMetrics.State(2, 1, 3, 4, 100, 70, 50, 30, 200, 120, 5));
+        state.set(new RtpMetrics.State(2, 1, 3, 4, 100, 70, 50, 30, 200, 120, 5));
         var before = metrics.scrape();
         assertEquals(2, sample(before, "rtp_llm_scheduler_requests", "state=\"waiting\""));
         assertEquals(70, sample(before, "rtp_llm_kv_tokens", "state=\"available\""));
@@ -31,12 +31,12 @@ class EngineMetricsTest {
     }
 
     @Test void keepsTokenWeightsDurationAndOutcomesSeparate() {
-        var metrics = new EngineMetrics("prefill", () -> IDLE);
+        var metrics = new RtpMetrics("prefill", () -> IDLE);
         metrics.started(); metrics.started();
         metrics.cacheLookup(100, 60); metrics.cacheLookup(10, 0);
         metrics.forwardCompleted(20_000_000, 1000, 100, 40, 1);
         metrics.forwardCompleted(10_000_000, 1000, 10, 10, 1);
-        metrics.finished(EngineMetrics.Outcome.success); metrics.finished(EngineMetrics.Outcome.timeout);
+        metrics.finished(RtpMetrics.Outcome.success); metrics.finished(RtpMetrics.Outcome.timeout);
         var text = metrics.scrape();
         assertEquals(110, sample(text, "rtp_llm_cache_lookup_tokens_total", ""));
         assertEquals(60, sample(text, "rtp_llm_cache_hit_tokens_total", ""));
@@ -53,7 +53,7 @@ class EngineMetricsTest {
     }
 
     @Test void nativeQueueAndKvMetricsKeepRealUnitsAndDoNotInventHostAvailability() {
-        var metrics = new EngineMetrics("prefill", () -> new EngineMetrics.State(2, 1, 3, 4, 100, 70, 50, 30, 200, 120, 5));
+        var metrics = new RtpMetrics("prefill", () -> new RtpMetrics.State(2, 1, 3, 4, 100, 70, 50, 30, 200, 120, 5));
         var text = metrics.scrape();
         assertEquals(2, sample(text, "rtp_llm_wait_stream_size", ""));
         assertEquals(1, sample(text, "rtp_llm_running_stream_size", ""));
@@ -67,16 +67,16 @@ class EngineMetricsTest {
         assertFalse(text.lines().anyMatch(line -> line.startsWith("rtp_llm_kv_cache_available_blocks{") && line.contains("HOST")));
         assertFalse(text.contains("rtp_llm_loading_cache_stream_size"));
         assertFalse(text.contains("mock_engine_"));
-        assertThrows(IllegalArgumentException.class, () -> new EngineMetrics.State(0, 0, 0, 0, 100, 71, 50, 0, 0, 0, 5));
+        assertThrows(IllegalArgumentException.class, () -> new RtpMetrics.State(0, 0, 0, 0, 100, 71, 50, 0, 0, 0, 5));
     }
 
     @Test void nativeThroughputSeparatesActiveTimeWallTimeAndTerminalQpsAndClearsIdleWindows() {
         var clock = new java.util.concurrent.atomic.AtomicLong();
-        var metrics = new EngineMetrics("prefill", () -> IDLE, clock::get);
+        var metrics = new RtpMetrics("prefill", () -> IDLE, clock::get);
         metrics.started(); metrics.started(); metrics.started();
         metrics.forwardCompleted(20_000_000, 1000, 100, 40, 1);
         metrics.forwardCompleted(10_000_000, 1000, 10, 10, 1);
-        metrics.finished(EngineMetrics.Outcome.success); metrics.finished(EngineMetrics.Outcome.timeout);
+        metrics.finished(RtpMetrics.Outcome.success); metrics.finished(RtpMetrics.Outcome.timeout);
         clock.set(1_000_000_000);
         var text = metrics.scrape();
         assertEquals(50 / .03, sample(text, "rtp_llm_context_tps", ""), 1e-9);
@@ -101,7 +101,7 @@ class EngineMetricsTest {
 
     @Test void decodeOutputCountsCommittedTokensInsteadOfVerificationTokens() {
         var clock = new java.util.concurrent.atomic.AtomicLong();
-        var metrics = new EngineMetrics("decode", () -> IDLE, clock::get);
+        var metrics = new RtpMetrics("decode", () -> IDLE, clock::get);
         metrics.forwardCompleted(5_000_000, 1000, 6, 6, 3);
         clock.set(2_000_000_000);
         var text = metrics.scrape();
@@ -111,31 +111,31 @@ class EngineMetricsTest {
     }
 
     @Test void independentRegistriesDoNotLeakEvenWithIdenticalIdentity() {
-        var a = new EngineMetrics("prefill", () -> IDLE);
-        var b = new EngineMetrics("prefill", () -> IDLE);
+        var a = new RtpMetrics("prefill", () -> IDLE);
+        var b = new RtpMetrics("prefill", () -> IDLE);
         a.started();
         assertEquals(1, sample(a.scrape(), "rtp_llm_requests_started_total", ""));
         assertEquals(0, sample(b.scrape(), "rtp_llm_requests_started_total", ""));
     }
 
     @Test void validatesObservationsBeforeChangingAnyCounter() {
-        var metrics = new EngineMetrics("prefill", () -> IDLE);
+        var metrics = new RtpMetrics("prefill", () -> IDLE);
         assertThrows(IllegalArgumentException.class, () -> metrics.cacheLookup(1, 2));
         assertThrows(IllegalArgumentException.class, () -> metrics.forwardCompleted(-1, 1000, 1, 1, 1));
         assertThrows(IllegalArgumentException.class, () -> metrics.forwardCompleted(1, 1000, 1, 2, 1));
-        assertThrows(IllegalArgumentException.class, () -> new EngineMetrics.State(0, 0, 0, 0, 10, 11, 0, 0, 0, 0, 1));
+        assertThrows(IllegalArgumentException.class, () -> new RtpMetrics.State(0, 0, 0, 0, 10, 11, 0, 0, 0, 0, 1));
         assertEquals(0, sample(metrics.scrape(), "rtp_llm_cache_lookup_tokens_total", ""));
         assertEquals(0, sample(metrics.scrape(), "rtp_llm_model_forward_seconds_count", ""));
     }
 
     @Test void concurrentWritersAndScrapesPreserveFinalTotals() throws Exception {
-        var metrics = new EngineMetrics("prefill", () -> IDLE);
+        var metrics = new RtpMetrics("prefill", () -> IDLE);
         try (var threads = Executors.newVirtualThreadPerTaskExecutor()) {
             var writes = new java.util.ArrayList<Future<?>>();
             for (int thread = 0; thread < 8; thread++) writes.add(threads.submit(() -> {
                 for (int i = 0; i < 500; i++) {
                     metrics.started(); metrics.cacheLookup(5, 2); metrics.forwardCompleted(1000, 1000, 5, 3, 1);
-                    metrics.finished(EngineMetrics.Outcome.success);
+                    metrics.finished(RtpMetrics.Outcome.success);
                     if (i % 50 == 0) assertFalse(metrics.scrape().isEmpty());
                 }
             }));

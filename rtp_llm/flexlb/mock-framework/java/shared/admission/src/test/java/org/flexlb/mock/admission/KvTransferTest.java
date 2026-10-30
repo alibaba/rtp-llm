@@ -1,4 +1,6 @@
-package org.flexlb.mock.engine;
+package org.flexlb.mock.admission;
+
+import org.flexlb.mock.engine.RequestState;
 
 import static org.junit.jupiter.api.Assertions.*;
 import java.util.concurrent.*;

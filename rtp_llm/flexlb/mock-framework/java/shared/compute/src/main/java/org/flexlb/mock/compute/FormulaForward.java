@@ -6,7 +6,7 @@ import java.util.function.ToDoubleFunction;
 import org.flexlb.balance.prediction.ArithmeticFormula;
 
 /** Uses the real Master's formula engine; no copied parser or historical calibration fallback. */
-public final class FormulaForward implements ForwardModel {
+public final class FormulaForward {
     private static final Map<String, ToDoubleFunction<ForwardBatch.Request>> REQUEST_VARIABLES = variables();
     private static final Map<String, Integer> INDICES;
     private static final Set<String> BATCH_VARIABLES;
@@ -49,7 +49,7 @@ public final class FormulaForward implements ForwardModel {
 
     public static Set<String> variableNames() { return INDICES.keySet(); }
 
-    @Override public Duration estimate(ForwardBatch batch) {
+    public Duration estimate(ForwardBatch batch) {
         if (batch.dps().size() != 1)
             throw new IllegalArgumentException("FormulaForward currently supports one DP; multiple DPs need an explicit model");
         var dp = batch.dps().getFirst();

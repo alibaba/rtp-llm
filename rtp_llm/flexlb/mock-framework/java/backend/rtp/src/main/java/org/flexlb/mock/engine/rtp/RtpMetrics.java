@@ -1,12 +1,15 @@
-package org.flexlb.mock.metrics;
+package org.flexlb.mock.engine.rtp;
+
+import org.flexlb.mock.metrics.MetricTags;
+import org.flexlb.mock.metrics.WindowMetrics;
 
 import io.prometheus.client.*;
 import java.util.*;
 import java.util.function.Supplier;
 import java.util.function.LongSupplier;
 
-/** Common engine observations. The engine decides when work/cache events actually occurred. */
-public final class EngineMetrics {
+/** RTP metric names and statistics; the scheduler supplies events and state snapshots. */
+final class RtpMetrics {
     public static final String CACHE_LOOKUPS = "rtp_llm_cache_lookup_tokens_total";
     public static final String CACHE_HITS = "rtp_llm_cache_hit_tokens_total";
     public static final String FORWARD_TOKENS = "rtp_llm_forward_tokens_total";
@@ -39,9 +42,9 @@ public final class EngineMetrics {
     private long windowStarted, windowInput, windowComputed, windowOutput, windowComputeNanos, windowInputNanos;
     private double lastFinished, lastErrors, lastCancelled;
 
-    public EngineMetrics(String role, Supplier<State> state) { this(role, state, System::nanoTime); }
+    public RtpMetrics(String role, Supplier<State> state) { this(role, state, System::nanoTime); }
 
-    EngineMetrics(String role, Supplier<State> state, LongSupplier clock) {
+    RtpMetrics(String role, Supplier<State> state, LongSupplier clock) {
         if (role == null || role.isBlank()) throw new IllegalArgumentException("Metric role must not be blank");
         Objects.requireNonNull(state);
         this.clock = Objects.requireNonNull(clock);

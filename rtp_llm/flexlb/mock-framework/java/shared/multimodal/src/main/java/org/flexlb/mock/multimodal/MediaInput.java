@@ -4,7 +4,6 @@ import com.google.protobuf.ByteString;
 import io.grpc.Status;
 import java.nio.*;
 import java.nio.charset.StandardCharsets;
-import java.security.*;
 import java.util.*;
 import org.flexlb.engine.grpc.EngineRpcService.*;
 
@@ -41,21 +40,6 @@ public final class MediaInput {
             hash^=tail;hash*=m;
         }
         hash^=hash>>>47;hash*=m;return hash^(hash>>>47);
-    }
-    public record Image(String key, int width, int height, int rows) {
-        public long bytes(int hidden, int dtypeBytes) { return Math.multiplyExact(Math.multiplyExact((long) rows, hidden), dtypeBytes); }
-    }
-    public static ByteString hashes(String key, int rows) {
-        byte[] digest;
-        try { digest = MessageDigest.getInstance("SHA-256").digest(key.getBytes(StandardCharsets.UTF_8)); }
-        catch (NoSuchAlgorithmException error) { throw new AssertionError(error); }
-        long hash = ByteBuffer.wrap(digest).getLong();
-        var output = ByteBuffer.allocate(Math.multiplyExact(rows, 4)).order(ByteOrder.LITTLE_ENDIAN);
-        for (int i = 0; i < rows; i++) {
-            hash ^= 0x9e3779b97f4a7c15L + i + (hash << 12) + (hash >> 32);
-            output.putInt((int) (hash ^ (hash >>> 32)));
-        }
-        return ByteString.copyFrom(output.array());
     }
     /** Inputs already contain expanded token spans, as on the native wire. */
     public static GenerateInputPB apply(GenerateInputPB input, MultimodalOutputPB output) {

@@ -59,8 +59,6 @@ class FormulaForwardTest {
             new ForwardBatch.Partition(1, List.of(request("b", 2, 0)))));
         assertEquals(2, input.dps().size());
         assertThrows(IllegalArgumentException.class, () -> new FormulaForward("totalInputTokens").estimate(input));
-        ForwardModel custom = batch -> Duration.ofMillis(batch.dps().size());
-        assertEquals(Duration.ofMillis(2), custom.estimate(input));
     }
 
     @Test void validatesAndFreezesInputWithoutChangingEngineState() {
