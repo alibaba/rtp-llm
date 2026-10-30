@@ -21,6 +21,9 @@ from rtp_llm.models_py.modules.dsv41.moe.mega_sm90_input_packer import (
     per_token_cast_to_fp8_fp32_scale,
 )
 from rtp_llm.models_py.modules.dsv41.moe.strategies import SM90MegaMoEStrategy
+from rtp_llm.models_py.modules.dsv41.moe.strategies.mega_sm90 import (
+    _SM90_WEIGHT_LAYOUT,
+)
 
 
 class Sm90MegaMoEGateTest(unittest.TestCase):
@@ -96,6 +99,9 @@ class Sm90MegaMoEStrategyTest(unittest.TestCase):
         # SymmBufferSM90 has no shared-expert fusion, so the MoE layer must
         # keep running its standalone shared expert.
         self.assertFalse(SM90MegaMoEStrategy.routed_includes_shared)
+
+    def test_uses_l20z_optimized_weight_layout(self):
+        self.assertEqual(_SM90_WEIGHT_LAYOUT, "tiled")
 
     def test_cannot_handle_without_the_opt_in(self):
         cfg = mock.Mock(

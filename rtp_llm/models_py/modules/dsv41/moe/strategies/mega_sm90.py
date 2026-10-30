@@ -34,6 +34,11 @@ from .base import MoeCfg, RoutedExpertsStrategy, register_strategy
 # with 16 packed E2M1 values per scale group.
 _SM90_ROUTED_RECIPE = (1, 1, 32)
 _SM90_ACTIVATION = "swiglu"
+# L20Z/SM90 decode benchmarking for the V4.1 EP8 geometry shows that the
+# register-A tiled transform is consistently faster than the row/shared-memory
+# transform for the small token counts served here.  Split-K is intentionally
+# left disabled in the kernel call because it regresses this workload.
+_SM90_WEIGHT_LAYOUT = "tiled"
 
 
 @register_strategy
@@ -98,7 +103,7 @@ class SM90MegaMoEStrategy(RoutedExpertsStrategy):
         torch.cuda.empty_cache()
 
         self._mega_l1, self._mega_l2 = deep_gemm.transform_weights_for_mega_moe_sm90(
-            (w13, s13), (w2, s2), layout="row"
+            (w13, s13), (w2, s2), layout=_SM90_WEIGHT_LAYOUT
         )
         del w13, s13, w2, s2
         torch.cuda.empty_cache()
