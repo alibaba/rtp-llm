@@ -86,6 +86,10 @@ public:
     bool use_norm_attn_out_residual = false;
 
     int64_t max_seq_len       = 0;
+    // Model workspace limit for one unchunked Prefill, across all return sequences; 0 is unbounded.
+    int64_t max_prefill_tokens = 0;
+    // Global physical input rows of the initialized TP workspace, including Decode/verify; 0 is unspecified.
+    int64_t max_execution_tokens = 0;
     int64_t gen_num_per_cycle = 0;  // speculative decoding: tokens per cycle
     int64_t vocab_size        = 0;
     // Output vocab pruning contract: empty means disabled; otherwise ids must be strictly
@@ -143,6 +147,8 @@ public:
     // Declarative per-model KV cache layout. C++ cache config consumes this
     // and performs runtime finalization such as block/ring sizing.
     LayerKVCacheSpecDescs kv_cache_spec_descs;
+    // Physical FULL-page layout policy, resolved once before cache allocation.
+    LocalKVCacheLayoutPolicy local_kv_cache_layout = LocalKVCacheLayoutPolicy::FOLLOW_QUERY_CP;
     // Model policy for prefix recomputation; live P/D transfers are unaffected.
     int     cache_min_replay_tokens = 1;
     int64_t cache_key_hash_seed     = 0;

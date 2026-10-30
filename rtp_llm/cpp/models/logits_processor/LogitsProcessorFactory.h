@@ -28,11 +28,12 @@ struct GrammarPrefetchContext {
 
 class LogitsProcessorFactory {
 public:
-    static void init(const ModelConfig&             model_config,
-                     const GrammarConfig&           grammar_config,
-                     const std::string&             tree_decode_config,
-                     kmonitor::MetricsReporterPtr   metrics_reporter = nullptr);
+    static void init(const ModelConfig&           model_config,
+                     const GrammarConfig&         grammar_config,
+                     const std::string&           tree_decode_config,
+                     kmonitor::MetricsReporterPtr metrics_reporter = nullptr);
 
+    // Call after streams stop, before shutting down the metrics factory.
     static void shutdown();
 
     static ErrorResult<std::vector<BaseLogitsProcessorPtr>>
@@ -40,7 +41,7 @@ public:
                            int32_t                        init_batch_size,
                            int32_t                        max_batch_size,
                            int64_t                        eos_token_id,
-                           GrammarPrefetchContext*        grammar_prefetch        = nullptr,
+                           GrammarPrefetchContext*        grammar_prefetch         = nullptr,
                            bool                           create_grammar_processor = true,
                            bool                           output_vocab_enabled     = false);
 

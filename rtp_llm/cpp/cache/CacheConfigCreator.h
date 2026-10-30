@@ -34,7 +34,8 @@ public:
     static CacheConfig createWarmupConfig(const ModelConfig&       model_config,
                                           const ParallelismConfig& parallelism_config,
                                           const KVCacheConfig&     kv_cache_config,
-                                          int                      gen_num_per_cycle = 0);
+                                          int                      gen_num_per_cycle  = 0,
+                                          int                      prefill_batch_size = 0);
     // Builds main and draft layouts. Capacity is computed and finalized separately.
     static CacheConfig createConfig(const ModelConfig&                               model_config,
                                     const ParallelismConfig&                         parallelism_config,
@@ -43,6 +44,13 @@ public:
                                     const ModelConfig*                               draft_model_config = nullptr,
                                     bool                                             is_mtp             = false,
                                     bool                                             is_eagle           = false);
+
+    static void configureLinearReplay(CacheConfig&                                      config,
+                                      const ModelConfig&                                model_config,
+                                      const ParallelismConfig&                          parallelism_config,
+                                      const RuntimeConfig&                              runtime_config,
+                                      const std::optional<SpeculativeExecutionConfig>& sp_config,
+                                      bool                                              is_mtp);
 
     static uint32_t computeLocalBlockNum(const CacheConfig&                               config,
                                          const ModelConfig&                               model_config,

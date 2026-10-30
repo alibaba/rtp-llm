@@ -151,6 +151,7 @@ try:
         KVCacheSpecDesc,
         KVCacheSpecType,
         LinearAttentionConfig,
+        LocalKVCacheLayoutPolicy,
         MiscellaneousConfig,
         ModelConfig,
         MoeConfig,

@@ -24,6 +24,55 @@ using ::testing::Return;
 using ::testing::ReturnRef;
 using ::testing::SetArgReferee;
 
+// Exercise the newer SDK's optional methods even when CI selects the older
+// public SDK. Their return/argument types must come from the client interface.
+class ExtendedMetadataSdk {
+public:
+    virtual ~ExtendedMetadataSdk() = default;
+    virtual std::pair<kv_cache_manager::ClientErrorCode, kv_cache_manager::WriteLocation>
+    StartWrite(const std::string&,
+               const std::vector<int64_t>&,
+               const std::vector<int64_t>&,
+               const std::vector<std::string>&,
+               int64_t,
+               int32_t = 0) = 0;
+    virtual std::pair<kv_cache_manager::ClientErrorCode, kv_cache_manager::Locations>
+    GetCacheLocationsByBackend(const std::string&,
+                               const std::vector<int64_t>&,
+                               const std::vector<int64_t>&,
+                               const kv_cache_manager::BlockMask&,
+                               const std::vector<std::string>&,
+                               int32_t,
+                               int32_t) = 0;
+    virtual std::pair<kv_cache_manager::ClientErrorCode, std::vector<std::string>>
+    GetHostCacheState(const std::string&,
+                      kv_cache_manager::QueryType,
+                      const std::vector<int64_t>&,
+                      const std::vector<std::string>&,
+                      int32_t,
+                      const std::vector<int32_t>&) = 0;
+};
+
+TEST(MetadataClientMockTest, AdaptsOptionalSdkMethodsAndDefaultReplicaCount) {
+    using Mock = kv_cache_manager::MockMetaClientWrite<kv_cache_manager::MockMetaClientQueries<ExtendedMetadataSdk>,
+                                                       decltype(&ExtendedMetadataSdk::StartWrite)>;
+    Mock                 mock;
+    ExtendedMetadataSdk& client = mock;
+    EXPECT_CALL(mock,
+                StartWriteRequest(
+                    "trace", std::vector<int64_t>{1}, std::vector<int64_t>{2}, std::vector<std::string>{"linear"}, 30))
+        .WillOnce(Return(std::make_pair(kv_cache_manager::ClientErrorCode::ER_OK, kv_cache_manager::WriteLocation{})));
+    EXPECT_EQ(client.StartWrite("trace", {1}, {2}, {"linear"}, 30).first, kv_cache_manager::ClientErrorCode::ER_OK);
+    EXPECT_CALL(mock, GetCacheLocationsByBackend(_, _, _, _, _, _, _))
+        .WillOnce(Return(std::make_pair(kv_cache_manager::ClientErrorCode::ER_OK, kv_cache_manager::Locations{})));
+    EXPECT_EQ(client.GetCacheLocationsByBackend("trace", {1}, {2}, size_t(0), {"linear"}, 1, 0).first,
+              kv_cache_manager::ClientErrorCode::ER_OK);
+    EXPECT_CALL(mock, GetHostCacheState(_, _, _, _, _, _))
+        .WillOnce(Return(std::make_pair(kv_cache_manager::ClientErrorCode::ER_OK, std::vector<std::string>{"host"})));
+    EXPECT_EQ(client.GetHostCacheState("trace", kv_cache_manager::QueryType::QT_BATCH_GET, {1}, {}, 1, {1}).second,
+              std::vector<std::string>{"host"});
+}
+
 struct InitObservation {
     const kv_cache_manager::RegistSpan* registration_descriptor = nullptr;
     void*                               registration_base       = nullptr;
@@ -606,7 +655,7 @@ TEST_P(MetadataClientLifetimeTest, VipRefreshRetainsInFlightClient) {
             return std::make_pair(kv_cache_manager::ClientErrorCode::ER_OK, kv_cache_manager::Locations{});
         }));
     } else if (GetParam() == "start_write") {
-        EXPECT_CALL(*old_client, StartWrite(_, _, _, _, _)).WillOnce(Invoke([hold](const auto&...) {
+        EXPECT_CALL(*old_client, StartWriteRequest(_, _, _, _, _)).WillOnce(Invoke([hold](const auto&...) {
             hold();
             return std::make_pair(kv_cache_manager::ClientErrorCode::ER_OK, kv_cache_manager::WriteLocation{});
         }));

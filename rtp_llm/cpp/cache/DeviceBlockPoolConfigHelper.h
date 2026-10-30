@@ -111,11 +111,11 @@ private:
         cfg.dtype                   = spec->memoryLayoutDType();
         cfg.local_head_num_kv       = local_kv_head_num;
         cfg.enable_hybrid_attention = enable_hybrid_attention;
-        // Sparse GQA still owns ordinary MHA K/V and FP32 per-token/head scales.
-        // Byte-packed scales belong to MLA/indexer regions, not the model-wide sparse flag.
-        cfg.is_mla = spec->type != KVCacheSpecType::MultiHeadAttention
+        const bool is_linear_state  = spec->type == KVCacheSpecType::LinearAttention;
+        // Sparse GQA owns ordinary K/V scales; LINEAR state has no token axis.
+        cfg.is_mla = !is_linear_state && spec->type != KVCacheSpecType::MultiHeadAttention
                      && (cache_config.use_mla || cache_config.is_sparse);
-        cfg.use_mla                    = cache_config.use_mla;
+        cfg.use_mla                    = !is_linear_state && cache_config.use_mla;
         cfg.seq_size_per_block         = seq_size_per_block;
         cfg.kernel_blocks_per_kv_block = kernel_blocks_per_kv_block;
 

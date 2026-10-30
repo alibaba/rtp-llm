@@ -140,13 +140,15 @@ PDFusionRatioScheduler::PDFusionRatioScheduler(const RuntimeConfig&             
                                                const ParallelismConfig&               parallelism_config,
                                                const std::shared_ptr<KVCacheManager>& cache_manager,
                                                const kmonitor::MetricsReporterPtr     metrics_reporter,
-                                               const int                              max_score_len):
+                                               const int                              max_score_len,
+                                               const ModelExecutionCapacity&          execution_capacity):
     FIFOSchedulerBase(runtime_config,
                       model_config,
                       pd_sep_config,
                       parallelism_config,
                       cache_manager,
-                      metrics_reporter),
+                      metrics_reporter,
+                      execution_capacity),
     decode_prefill_step_(parseDecodePrefillRatio(runtime_config.fifo_scheduler_config.decode_prefill_ratio)),
     decode_since_prefill_(0),
     prefill_since_decode_(0) {
@@ -255,14 +257,13 @@ absl::StatusOr<ScheduleOutput> PDFusionRatioScheduler::schedule() {
         decode_since_prefill_ += 1;
         prefill_since_decode_ = 0;
     }
-    if (!pending_decode_streams_.empty() || !new_streams_.empty()
-        || (made_progress && !waiting_streams_.empty())) {
+    if (!new_streams_.empty() || (made_progress && (!pending_decode_streams_.empty() || !waiting_streams_.empty()))) {
         schedule_trigger_ = true;
     }
-    if (running_streams_.empty() && !made_progress && !waiting_streams_.empty()) {
+    if (running_streams_.empty() && !made_progress && (!waiting_streams_.empty() || !pending_decode_streams_.empty())) {
         cond_.wait_for(lock, kNoProgressScheduleGap, [this] {
             return stop_ || schedule_trigger_ || !loading_cache_streams_.empty() || !running_streams_.empty()
-                   || !pending_decode_streams_.empty() || !new_streams_.empty();
+                   || !new_streams_.empty();
         });
     }
 
@@ -369,6 +370,10 @@ bool PDFusionRatioScheduler::tryAdmitKVForPrefill(const GenerateStreamPtr& new_s
         new_stream, static_cast<int64_t>(initial_capacity), static_cast<int64_t>(available));
 }
 
+void PDFusionRatioScheduler::appendExtraExecutionReservations(std::vector<GenerateStreamPtr>& streams) const {
+    streams.insert(streams.end(), pending_decode_streams_.begin(), pending_decode_streams_.end());
+}
+
 bool PDFusionRatioScheduler::classifyActivePrefillBatch() {
     const bool classified = !new_streams_.empty();
     for (auto it = new_streams_.begin(); it != new_streams_.end();) {
@@ -399,7 +404,7 @@ bool PDFusionRatioScheduler::classifyActivePrefillBatch() {
 }
 
 bool PDFusionRatioScheduler::promotePendingDecodeStreams() {
-    const bool processed = !pending_decode_streams_.empty();
+    bool processed = false;
     for (auto it = pending_decode_streams_.begin(); it != pending_decode_streams_.end();) {
         const auto& stream = *it;
         const auto state = stream->getStatus();
@@ -408,6 +413,12 @@ bool PDFusionRatioScheduler::promotePendingDecodeStreams() {
             stream->reportError(ErrorCode::EXECUTION_EXCEPTION, "invalid pending-decode stream state");
         }
 
+        if (state == StreamState::RUNNING && !stream->hasError() && !stream->hasEvent(StreamEvents::GenerateDone)
+            && !stream->streamCacheResource().reserveLinearReplaySlot()) {
+            ++it;
+            continue;
+        }
+        processed            = true;
         const auto new_state = stream->moveToNext();
         if (new_state == StreamState::RUNNING) {
             auto current = it++;

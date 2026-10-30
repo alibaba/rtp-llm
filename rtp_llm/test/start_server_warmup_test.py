@@ -7,6 +7,62 @@ from rtp_llm.ops import RoleType, SpeculativeType
 
 
 class StartupRealWarmupTest(unittest.TestCase):
+    def test_warmup_uses_resolved_model_length(self):
+        config = SimpleNamespace(
+            model_args=SimpleNamespace(max_seq_len=None),
+            **{
+                name: object()
+                for name in (
+                    "lora_config",
+                    "kv_cache_config",
+                    "profiling_debug_logging_config",
+                    "generate_env_config",
+                    "embedding_config",
+                    "quantization_config",
+                    "render_config",
+                    "eplb_config",
+                    "vit_config",
+                )
+            },
+        )
+        with patch(
+            "rtp_llm.model_factory.ModelFactory.create_model_config",
+            return_value=SimpleNamespace(max_seq_len=4096),
+        ) as create_config:
+            for cli_length in (None, 8192):
+                with self.subTest(cli_length=cli_length):
+                    config.model_args.max_seq_len = cli_length
+                    self.assertEqual(
+                        start_server._get_startup_real_warmup_max_len(config), 4096
+                    )
+                    self.assertEqual(create_config.call_args.kwargs, vars(config))
+
+    def test_warmup_rejects_invalid_resolved_length(self):
+        config = SimpleNamespace(
+            **{
+                name: None
+                for name in (
+                    "model_args",
+                    "lora_config",
+                    "kv_cache_config",
+                    "profiling_debug_logging_config",
+                    "generate_env_config",
+                    "embedding_config",
+                    "quantization_config",
+                    "render_config",
+                    "eplb_config",
+                    "vit_config",
+                )
+            }
+        )
+        for length in (0, -1):
+            with self.subTest(length=length), patch(
+                "rtp_llm.model_factory.ModelFactory.create_model_config",
+                return_value=SimpleNamespace(max_seq_len=length),
+            ):
+                with self.assertRaisesRegex(ValueError, "should be positive"):
+                    start_server._get_startup_real_warmup_max_len(config)
+
     def test_single_stage_dp_ranks_pass_startup_warmup_gate(self):
         for world_size in (2, 3, 4):
             for world_rank in range(world_size):
@@ -95,8 +151,56 @@ class StartupRealWarmupTest(unittest.TestCase):
                 max_len=1048576,
                 reserve_step=8,
             ),
-            1048568,
+            1048567,
         )
+        self.assertEqual(
+            start_server._get_startup_real_warmup_request_token_len(
+                token_len=1048576,
+                max_len=1048576,
+                reserve_step=4,
+            ),
+            1048571,
+        )
+
+    def test_k3_prefill_entry_only_and_both_switches_required(self):
+        config = SimpleNamespace(
+            runtime_config=SimpleNamespace(warm_up=True, model_warm_up=True),
+            role_config=SimpleNamespace(role_type=RoleType.PREFILL),
+            parallelism_config=SimpleNamespace(
+                world_rank=0, world_size=8, pp_size=1, dp_size=2, tp_size=4
+            ),
+            model_args=SimpleNamespace(model_type="kimi_k3"),
+        )
+        self.assertTrue(start_server._should_run_startup_real_warmup(config))
+        config.parallelism_config.world_rank = 1
+        self.assertFalse(start_server._should_run_startup_real_warmup(config))
+        config.parallelism_config.world_rank = 0
+        config.role_config.role_type = RoleType.DECODE
+        self.assertFalse(start_server._should_run_startup_real_warmup(config))
+        config.role_config.role_type = RoleType.PREFILL
+        config.runtime_config.model_warm_up = False
+        self.assertFalse(start_server._should_run_startup_real_warmup(config))
+
+    def test_real_warmup_only_enables_dsv4_and_k3_targets(self):
+        config = SimpleNamespace(
+            runtime_config=SimpleNamespace(warm_up=True, model_warm_up=True),
+            role_config=SimpleNamespace(role_type=RoleType.PREFILL),
+            parallelism_config=SimpleNamespace(world_rank=0, world_size=1, tp_size=1),
+            model_args=SimpleNamespace(model_type="deepseek_v4"),
+        )
+        for model_type, expected in (
+            ("deepseek_v4", True),
+            ("kimi_k3", True),
+            ("deepseek_v4_mtp", False),
+            ("kimi_k3_mtp", False),
+            ("custom_model", False),
+            ("", False),
+        ):
+            with self.subTest(model_type=model_type):
+                config.model_args.model_type = model_type
+                self.assertEqual(
+                    start_server._should_run_startup_real_warmup(config), expected
+                )
 
 
 if __name__ == "__main__":

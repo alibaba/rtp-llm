@@ -20,7 +20,8 @@ public:
                            const ParallelismConfig&               parallelism_config,
                            const std::shared_ptr<KVCacheManager>& cache_manager,
                            const kmonitor::MetricsReporterPtr     metrics_reporter = nullptr,
-                           const int                              max_score_len    = 1);
+                           const int                              max_score_len    = 1,
+                           const ModelExecutionCapacity&          execution_capacity = ModelExecutionCapacity{});
 
     ~FIFOScheduler() override;
 
@@ -78,8 +79,8 @@ private:
                                   size_t                   admitted_tokens,
                                   size_t                   admitted_max_seq_len,
                                   size_t                   admitted_sequence_count,
+                                  size_t                   admitted_physical_tokens,
                                   const GenerateStreamPtr& candidate) const;
-    size_t prefillTokenCostWithoutCache(const GenerateStreamPtr& stream) const;
     size_t prefillSeqLenWithCache(const GenerateStreamPtr& stream) const;
     size_t prefillTokenCostWithCache(const GenerateStreamPtr& stream) const;
     // Group-aware shadow of FIFOSchedulerBase::countInitedKVCacheStreams(): streams parked
@@ -111,6 +112,7 @@ private:
     void    fillExtraMetrics(RtpLLMSchedulerMetricsCollector& collector) const override;
     void    appendExtraRunningTaskList(std::vector<EngineScheduleInfo::TaskInfo>& task_list) const override;
     bool    partitionChunkContinuations();
+    void    appendExtraExecutionReservations(std::vector<GenerateStreamPtr>& streams) const override;
 
     // Explicit request groups (enqueueGroup). Each group is admitted as a whole
     // to an isolated execution boundary; a partially admitted group keeps its

@@ -82,7 +82,6 @@ from rtp_llm.dash_sc.codec import (
     build_dash_error_response,
     parse_dash_sc_grpc_request,
     parse_ds_header_attributes,
-    parse_multimodal_parts_from_request,
     parse_v41_image_request,
     prepend_to_generated_ids_tensor,
 )
@@ -97,6 +96,11 @@ from rtp_llm.dash_sc.inference.grammar_validator import (
     GrammarCheckUnavailable,
     GrammarCompilationError,
     GrammarValidator,
+)
+from rtp_llm.dash_sc.inference.request_adapter import (
+    DashScRequestAdapter,
+    DashScRequestContext,
+    _build_mm_inputs_from_request,
 )
 from rtp_llm.dash_sc.proto import predict_v2_pb2, predict_v2_pb2_grpc
 from rtp_llm.dash_sc.repetition_monitor import RequestRepetitionMonitorConfig
@@ -148,33 +152,6 @@ _DASH_SERVER_ATTRIBUTES = {
     "rpc.system": "grpc",
     "rpc.method": _DASH_RPC_METHOD,
 }
-
-
-def _build_mm_inputs_from_request(
-    request: predict_v2_pb2.ModelInferRequest,
-) -> list:
-    """Convert DashSc message parts to the engine's generic multimodal inputs."""
-    parts = parse_multimodal_parts_from_request(request)
-    if not parts:
-        return []
-
-    from rtp_llm.ops import MMPreprocessConfig, MultimodalInput
-
-    return [
-        MultimodalInput(
-            part.url,
-            part.mm_type,
-            torch.empty(0),
-            MMPreprocessConfig(
-                min_pixels=part.min_pixels,
-                max_pixels=part.max_pixels,
-                fps=part.fps,
-                min_frames=part.min_frames,
-                max_frames=part.max_frames,
-            ),
-        )
-        for part in parts
-    ]
 
 
 def _request_parameter_string(request, name: str) -> str:
@@ -996,6 +973,7 @@ async def iter_real_model_stream_infer(
     v41_inputs=None,
     v41_processor_config=None,
     max_seq_len: Optional[int] = None,
+    request_adapter: DashScRequestAdapter | None = None,
 ) -> AsyncIterator[predict_v2_pb2.ModelStreamInferResponse]:
     """Run enqueue on ``backend_visitor`` and yield one proto per chunk as the backend streams.
 
@@ -1090,6 +1068,22 @@ async def iter_real_model_stream_infer(
             runtime,
             default_thinking_mode,
         )
+        adapter = request_adapter or DashScRequestAdapter()
+        context = DashScRequestContext(
+            request=request,
+            input_ids=input_ids_list,
+            sampling=sampling,
+            controls=request_controls,
+            generate_config=generate_config,
+            tokenizer=_hf_tokenizer(tokenizer),
+            mm_inputs=mm_inputs,
+        )
+        prepared = adapter.prepare(context)
+        if prepared.input_ids is not input_ids_list:
+            input_ids_tensor = None
+        input_ids_list = prepared.input_ids
+        mm_inputs = prepared.mm_inputs
+        prompt_token_offset = prepared.prompt_token_offset
         configured_thinking_mode = generate_config.thinking_mode
         matched_think_bos_ids = matched_echo_ids or _matched_echo_prefix_ids(
             input_ids_list, begin_think_tokens
@@ -1126,19 +1120,19 @@ async def iter_real_model_stream_infer(
                 # any future engine-side mutation request-local; inner lists are
                 # shared (snapshot is read-only by contract).
                 generate_config.stop_words_list = list(extra_stop_word_ids)
-        if generate_env_config is None:
-            final_constraint = generate_config.finalize_response_format()
-        else:
-            final_constraint = generate_config.add_thinking_params(
-                _hf_tokenizer(tokenizer),
-                generate_env_config,
-                enable_thinking=(
-                    None
-                    if configured_thinking_mode == ThinkingMode.ADAPTIVE
-                    else generate_config.in_think_mode
-                ),
-                reasoning_format=reasoning_format,
-            )
+        generate_config.prepare_thinking_params(
+            generate_env_config,
+            enable_thinking=(
+                None
+                if configured_thinking_mode == ThinkingMode.ADAPTIVE
+                else generate_config.in_think_mode
+            ),
+        )
+        plan = adapter.build_response_format_plan(
+            context, prepared, generate_env_config, reasoning_format
+        )
+        plan.apply_to_config(generate_config)
+        final_constraint = plan.final_constraint
         if runtime.eos_tokens and not generate_config.end_think_token_ids:
             generate_config.end_think_token_ids = list(runtime.eos_tokens)
         # All these are pre-resolved at servicer init via ``build_think_runtime``;
@@ -1191,6 +1185,8 @@ async def iter_real_model_stream_infer(
             max_token_id=max_id,
             prompt_token_fallback=prompt_length,
             image_tokens=image_tokens,
+            prompt_token_offset=prompt_token_offset,
+            top_logprobs=sampling.top_logprobs,
         )
         chunk_idx = 0
         phase2_needed = False
@@ -1327,6 +1323,7 @@ async def iter_real_model_stream_infer(
                         ),
                         stream_finished=not will_do_phase2,
                         token_ids=list(runtime.eos_tokens),
+                        emit_logprobs=False,
                     )
                     eos_finished = not will_do_phase2
                     eos_finish_reason = (
@@ -1517,6 +1514,7 @@ async def iter_real_model_stream_infer(
                 eos_token_id=eos_id,
                 max_token_id=max_id,
                 image_tokens=image_tokens,
+                top_logprobs=sampling.top_logprobs,
             )
             phase2_cumulative_sent_ids: list[int] = []
 
@@ -1674,6 +1672,7 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
         grammar_validator: Optional[GrammarValidator] = None,
         v41_processor_config=None,
         max_seq_len: Optional[int] = None,
+        request_adapter: DashScRequestAdapter | None = None,
     ):
         if backend_visitor is None:
             raise ValueError("backend_visitor is required for DashScInferenceServicer")
@@ -1716,6 +1715,7 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
         self._grammar_validator = grammar_validator
         self._v41_processor_config = v41_processor_config
         self._max_seq_len = max_seq_len
+        self._request_adapter = request_adapter or DashScRequestAdapter()
 
     async def _validate_request_grammar(
         self, sampling: SamplingParams, request_id: str
@@ -2081,6 +2081,7 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
                     max_seq_len=self._max_seq_len,
                     yield_access_stats=True,
                     mm_inputs=mm_inputs,
+                    request_adapter=self._request_adapter,
                 )
                 try:
                     async for resp, stats in response_iter:

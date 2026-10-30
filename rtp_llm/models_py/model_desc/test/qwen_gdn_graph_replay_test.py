@@ -1,4 +1,4 @@
-"""ROCm Qwen replay contracts, independent of NVIDIA-only model imports."""
+"""Qwen graph replay and shared LINEAR replay dispatch contracts."""
 
 import importlib.util
 import sys
@@ -20,6 +20,76 @@ from rtp_llm.models_py.model_desc.qwen3_next import (
     _QwenGdnGraphDelegate,
     _QwenGraphAttentionImpls,
 )
+from rtp_llm.models_py.modules.factory.attention.kda_impl import KdaDecode
+from rtp_llm.models_py.triton_kernels.linear_replay import LinearReplay
+
+
+class LinearReplayDispatchTest(unittest.TestCase):
+    def test_dispatch_uses_the_bound_group_and_requires_round_metadata(self):
+        for decode_type in (Qwen3NextGatedDeltaNetDecode, KdaDecode):
+            for target_verify, selected, has_metadata in (
+                (True, True, True),
+                (True, True, False),
+                (True, False, True),
+                (True, False, False),
+                (False, True, True),
+                (False, True, False),
+            ):
+                with self.subTest(
+                    decode=decode_type.__name__,
+                    verify=target_verify,
+                    selected=selected,
+                    metadata=has_metadata,
+                ):
+                    decode = object.__new__(decode_type)
+                    torch.nn.Module.__init__(decode)
+                    decode._linear_replay = None
+                    decode.gate_lower_bound = -5.0
+                    decode._is_target_verify = lambda *args: target_verify
+                    tokens = torch.zeros(1, 3)
+                    legacy_output, replay_output = object(), object()
+                    decode._conv1d = Mock(return_value=tokens)
+                    decode._fla = Mock(return_value=legacy_output)
+                    bound = Mock(return_value=replay_output)
+                    cache = SimpleNamespace(
+                        kv_cache_base=torch.zeros(1, 1),
+                        seq_size_per_block=1,
+                        linear_replay=object() if selected else None,
+                    )
+                    inputs = SimpleNamespace(
+                        linear_replay=object() if has_metadata else None
+                    )
+                    metadata = SimpleNamespace(is_target_verify=target_verify)
+                    with patch.object(LinearReplay, "bind", return_value=bound) as bind:
+                        if target_verify and selected and not has_metadata:
+                            with self.assertRaisesRegex(RuntimeError, "round metadata"):
+                                decode.forward(
+                                    tokens, tokens, tokens, inputs, cache, metadata
+                                )
+                        else:
+                            output = decode.forward(
+                                tokens, tokens, tokens, inputs, cache, metadata
+                            )
+                            self.assertIs(
+                                output,
+                                (
+                                    replay_output
+                                    if target_verify and selected
+                                    else legacy_output
+                                ),
+                            )
+                        if target_verify and selected:
+                            decode._conv1d.assert_not_called()
+                            decode._fla.assert_not_called()
+                            if has_metadata:
+                                bind.assert_called_once()
+                                bound.assert_called_once()
+                            else:
+                                bind.assert_not_called()
+                        else:
+                            bind.assert_not_called()
+                            decode._conv1d.assert_called_once()
+                            decode._fla.assert_called_once()
 
 
 class QwenGdnGraphReplayTest(unittest.TestCase):

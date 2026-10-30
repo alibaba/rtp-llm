@@ -177,8 +177,42 @@ def _rtp_expected_prompt(
 
 
 class DeepseekV4ToolChoiceConstraintTest(TestCase):
+
     def setUp(self):
         self.renderer = DeepseekV4Renderer.__new__(DeepseekV4Renderer)
+
+    def test_message_tools_do_not_satisfy_deepseek_tool_choice(self):
+        for choice in (
+            "required",
+            {"type": "function", "function": {"name": "search"}},
+        ):
+            for tools in (None, _rtp_tools()):
+                with self.subTest(choice=choice, tools=tools):
+                    fields = dict(
+                        messages=[
+                            {
+                                "role": "system",
+                                "content": "",
+                                "tools": [
+                                    tool.model_dump(exclude_none=True)
+                                    for tool in _rtp_two_tools()
+                                ],
+                            },
+                            {"role": "user", "content": "Search docs"},
+                        ],
+                        tools=tools,
+                        tool_choice=choice,
+                    )
+                    if choice == "required" and tools:
+                        request = ChatCompletionRequest(**fields)
+                        self.renderer.apply_chat_completion_constraints(
+                            request, GenerateConfig()
+                        )
+                    else:
+                        with self.assertRaisesRegex(
+                            ValueError, "requires non-empty tools|is not in tools"
+                        ):
+                            ChatCompletionRequest(**fields)
 
     def test_named_tool_choice_filters_structural_tag_tools(self):
         request = ChatCompletionRequest(

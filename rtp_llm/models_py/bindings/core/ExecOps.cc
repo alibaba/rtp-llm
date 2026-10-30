@@ -6,6 +6,7 @@
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/CacheGroupType.h"
+#include "rtp_llm/cpp/cache/LinearKVCacheSpec.h"
 #include "rtp_llm/cpp/utils/KVCacheUtils.h"
 #include "rtp_llm/cpp/utils/ErrorCode.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
@@ -19,6 +20,7 @@
 #include <cstdlib>
 #include <cstdio>
 #include <memory>
+#include <limits>
 #include <mutex>
 #include <atomic>
 #include <stdexcept>
@@ -71,7 +73,6 @@ namespace rtp_llm {
 namespace {
 static std::atomic<bool> g_runtime_initialized{false};
 static std::once_flag    g_init_flag;
-
 
 static int64_t g_device_id = 0;
 }  // anonymous namespace
@@ -276,7 +277,7 @@ void runtimeWriteCacheStore(const torch_ext::PyCacheStoreInputs& cache_store_inp
     const auto   host_kv_cache_offset  = param.host_kv_cache_offset.accessor<int32_t, 2>();
     const auto   input_lengths_host    = param.input_lengths_host.accessor<int32_t, 1>();
     const auto   prefix_lengths_host   = param.prefix_lengths_host.accessor<int32_t, 1>();
-    const auto   publish_start_tokens = param.publish_start_tokens.accessor<int32_t, 1>();
+    const auto   publish_start_tokens  = param.publish_start_tokens.accessor<int32_t, 1>();
     const auto   request_ids           = param.request_id.accessor<int64_t, 1>();
     const auto   request_pd_separation = param.request_pd_separation.accessor<bool, 1>();
     const auto   cache_keys            = param.cache_keys.accessor<int64_t, 2>();
@@ -331,16 +332,19 @@ void runtimeWriteCacheStore(const torch_ext::PyCacheStoreInputs& cache_store_inp
                 (request_cache_key_count + key_blocks_per_group_block - 1) / key_blocks_per_group_block;
         const size_t key_blocks_per_logical_block = compact_cp_mapping ? 1 : key_blocks_per_group_block;
 
-        const int64_t request_id       = request_ids[context_index];
-        const int publish_start_token = publish_start_tokens[context_index];
+        const int64_t request_id          = request_ids[context_index];
+        const int     publish_start_token = publish_start_tokens[context_index];
         RTP_LLM_CHECK_WITH_INFO(publish_start_token >= 0 && publish_start_token <= prefix_length,
                                 "cache-store tag=%s invalid publish_start_token=%d for prefix_length=%d",
-                                layer_kv.tag.c_str(), publish_start_token, prefix_length);
+                                layer_kv.tag.c_str(),
+                                publish_start_token,
+                                prefix_length);
         const size_t publish_start_block =
             group.policy.group_type == CacheGroupType::FULL && group.policy.active_tail_blocks == 0 ?
-                static_cast<size_t>(publish_start_token) / seq_size_per_block : 0;
-        auto event          = pre_created_event ? pre_created_event : runtimeCreateEvent();
-        auto request_blocks = std::make_shared<RequestBlockBuffer>(std::to_string(request_id), event);
+                static_cast<size_t>(publish_start_token) / seq_size_per_block :
+                0;
+        auto                 event          = pre_created_event ? pre_created_event : runtimeCreateEvent();
+        auto                 request_blocks = std::make_shared<RequestBlockBuffer>(std::to_string(request_id), event);
         std::vector<int64_t> publication_lease_keys;
         std::vector<int32_t> publication_lease_blocks;
         RTP_LLM_LOG_DEBUG("write cache store, request id is %ld, blocks num is %zu",
@@ -414,6 +418,36 @@ void runtimeWriteCacheStore(const torch_ext::PyCacheStoreInputs& cache_store_inp
                               kv_addr,
                               kv_block_stride_bytes,
                               kv_block_transfer_bytes);
+            const auto* linear_spec = dynamic_cast<const LinearKVCacheSpec*>(group.spec.get());
+            if (linear_spec != nullptr && linear_spec->usesHeadShardedTransfer()) {
+                RTP_LLM_CHECK_WITH_INFO(!has_kv_scale,
+                                        "head-sharded LINEAR cache-store does not support a scale buffer");
+                size_t      segment_offset = 0;
+                const auto& segment_bytes  = linear_spec->transferSegmentBytes();
+                RTP_LLM_CHECK_WITH_INFO(!segment_bytes.empty(),
+                                        "head-sharded LINEAR cache-store needs transfer segments");
+                for (size_t segment_id = 0; segment_id < segment_bytes.size(); ++segment_id) {
+                    const size_t size = segment_bytes[segment_id];
+                    RTP_LLM_CHECK_WITH_INFO(size > 0 && segment_offset + size <= kv_block_transfer_bytes
+                                                && size <= std::numeric_limits<uint32_t>::max(),
+                                            "invalid LINEAR transfer segment %zu offset=%zu size=%zu block=%zu",
+                                            segment_id,
+                                            segment_offset,
+                                            size,
+                                            kv_block_transfer_bytes);
+                    auto* addr = static_cast<uint8_t*>(kv_addr) + segment_offset;
+                    request_blocks->addBlock(makeLinearCacheSegmentKey(segment_id, cache_key),
+                                             std::shared_ptr<void>(kv_cache_owner, addr),
+                                             static_cast<uint32_t>(size),
+                                             kv_gpu_mem,
+                                             true);
+                    segment_offset += size;
+                }
+                RTP_LLM_CHECK_WITH_INFO(segment_offset == kv_block_transfer_bytes,
+                                        "LINEAR transfer segments must cover physical block");
+            }
+            // Typed TP consumes a packed block; segmented TP/CP consumes aliases
+            // of the same storage. Publishing both does not copy the payload.
             if (use_opaque_key_prefix) {
                 request_blocks->addBlock(
                     "kv_" + cache_key, kv_block_addr, static_cast<uint32_t>(kv_block_transfer_bytes), kv_gpu_mem, true);
@@ -646,11 +680,11 @@ namespace {
 std::mutex g_comm_mutex;
 
 // Avoid destroying static Python objects after interpreter finalization.
-py::function* g_broadcast_fn            = nullptr;
-py::function* g_allreduce_fn            = nullptr;
-py::function* g_allgather_fn            = nullptr;
-py::function* g_isend_fn                = nullptr;
-py::function* g_irecv_fn                = nullptr;
+py::function* g_broadcast_fn = nullptr;
+py::function* g_allreduce_fn = nullptr;
+py::function* g_allgather_fn = nullptr;
+py::function* g_isend_fn     = nullptr;
+py::function* g_irecv_fn     = nullptr;
 
 void clearCommOpsUnlocked() {
     py::function broadcast_fn;
@@ -856,7 +890,7 @@ void initRuntime(size_t device_id) {
         ROCM_CHECK(hipSetDevice(device_id));
 #endif
 
-        g_device_id           = device_id;
+        g_device_id = device_id;
 
         g_runtime_initialized.store(true, std::memory_order_release);
         RTP_LLM_LOG_INFO("Runtime init done (communication via c10d ProcessGroup)");
@@ -888,12 +922,7 @@ void registerExecCtxOps(pybind11::module& m) {
     m.def("get_device_id", &getDeviceId);
     m.def("preprocess_weight_scale", &preprocessWeightScale, py::arg("weight"), py::arg("scale"));
 
-    m.def(
-        "init_exec_ctx",
-        [](size_t device_id) {
-            initRuntime(device_id);
-        },
-        py::arg("device_id"));
+    m.def("init_exec_ctx", [](size_t device_id) { initRuntime(device_id); }, py::arg("device_id"));
 
     m.def(
         "register_comm_ops",

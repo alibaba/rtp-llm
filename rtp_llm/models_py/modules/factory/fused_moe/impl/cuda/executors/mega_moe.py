@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import logging
 import os
-from functools import lru_cache
+from functools import lru_cache, partial
 from typing import Any, Dict
 
 import torch
@@ -23,6 +23,10 @@ from rtp_llm.models_py.kernels.cuda.quant_layouts import (
     prepare_fp4_weight_scale_for_deepgemm,
 )
 from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import ExpertGatePayload
+from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.activation import (
+    mega_moe_functions,
+    situ_kwargs,
+)
 from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.buffer import (
     _get_or_create_mega_buf,
     _get_or_create_mega_output,
@@ -55,17 +59,28 @@ _MMA_TYPE = "fp8xfp4"
 
 @lru_cache(maxsize=None)
 def _native_mega_intermediate_supported(
-    group_size: int, num_experts: int, num_topk: int, hidden: int, intermediate: int
+    group_size: int,
+    num_experts: int,
+    num_topk: int,
+    hidden: int,
+    intermediate: int,
+    activation: str,
 ) -> bool:
     return (
         estimate_mega_moe_symm_buffer_bytes(
-            group_size, num_experts, 384, num_topk, hidden, intermediate
+            group_size,
+            num_experts,
+            384,
+            num_topk,
+            hidden,
+            intermediate,
+            activation=activation,
         )
         is not None
     )
 
 
-def _mega_intermediate_size(cfg) -> int:
+def _mega_intermediate_size(cfg, activation: str = "swiglu") -> int:
     """Intermediate width the Mega kernel and its resident weights use.
 
     DeepGEMM bounds the symmetric buffer by a 384-token staging capacity. When
@@ -82,6 +97,7 @@ def _mega_intermediate_size(cfg) -> int:
             cfg.n_activated_experts,
             cfg.dim,
             intermediate,
+            activation,
         )
     ):
         return intermediate
@@ -150,6 +166,8 @@ def _get_validated_world_ep_group(cfg, dist):
 
 
 class MegaMoeExecutor(Fp8Fp4ExecutorBase):
+    supported_activations = ("swiglu", "situ")
+
     execute_empty_inputs = True
 
     @property
@@ -169,13 +187,22 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
 
     def setup_weights(self, layer_weights: Dict) -> None:
         """Keep the MegaMoE-resident weights and register the symm-mem buffer."""
-        import deep_gemm
         import torch.distributed as dist
 
         cfg = self.cfg
+        self._mega_kernel, transform_weights, _ = mega_moe_functions(self.activation)
+        self._activation_kwargs = {}
+        if self.activation == "situ":
+            self._activation_kwargs = situ_kwargs(
+                self._mega_kernel,
+                cfg.activation_beta,
+                cfg.activation_linear_beta,
+            )
         D = cfg.dim
-        inter = _mega_intermediate_size(cfg)
-        device = self._transform_routed_weights(layer_weights, deep_gemm, inter)
+        inter = _mega_intermediate_size(cfg, self.activation)
+        if self.activation == "situ":
+            transform_weights = partial(transform_weights, activation=self.activation)
+        device = self._transform_routed_weights(layer_weights, transform_weights, inter)
 
         # (4) Allocate the symmetric-memory buffer.  Uses
         # ``torch.distributed.group.WORLD`` because our DP+EP layout has
@@ -196,7 +223,7 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
             hidden=D,
             intermediate_hidden=inter,
             use_fp8_dispatch=True,
-            activation="swiglu",
+            activation=self.activation,
         )
         # Single-layer staging output. All MoE layers execute sequentially, so one
         # process-local buffer is enough and avoids O(layers) persistent memory.
@@ -210,7 +237,7 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
         self._maybe_warmup_jit_once()
 
     def _transform_routed_weights(
-        self, layer_weights: Dict, deep_gemm, inter: int
+        self, layer_weights: Dict, transform_weights, inter: int
     ) -> torch.device:
         """Stack EP-local routed-expert SFs into the int32 UTCCP-transposed
         layout ``fp8_fp4_mega_moe`` expects.
@@ -290,7 +317,7 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
 
         # Mega MoE transform: L1 gate/up interleave (gran=8 along N) +
         # both SFs UTCCP-transposed. Drop inputs immediately after.
-        (l1_w, l1_sf), (l2_w, l2_sf) = deep_gemm.transform_weights_for_mega_moe(
+        (l1_w, l1_sf), (l2_w, l2_sf) = transform_weights(
             (w13, s13_int),
             (w2, s2_int),
         )
@@ -334,7 +361,7 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
             num_experts=cfg.n_routed_experts,
             num_experts_per_rank=cfg.n_local_experts,
             num_topk=cfg.n_activated_experts,
-            intermediate_hidden=_mega_intermediate_size(cfg),
+            intermediate_hidden=_mega_intermediate_size(cfg, self.activation),
             num_sms=num_sms,
             max_tokens_per_rank=max_tokens_per_rank,
             include_cap=cfg.warmup_include_capacity,
@@ -368,6 +395,8 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
             cfg.moe_inter_dim,
             max_tokens_per_rank,
             cfg.swiglu_limit,
+            self.activation,
+            tuple(self._activation_kwargs.items()),
             cfg.route_scale,
             num_sms,
             tuple(token_counts),
@@ -491,23 +520,22 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
             )
 
     def _launch(self, y: torch.Tensor, tokens: int, device: torch.device) -> None:
-        import deep_gemm
-
         sync_cuda_graph_warmup_ranks(
             f"moe.mega_moe.layer{self.cfg.layer_id}.before_deepgemm",
             device,
         )
-        deep_gemm.fp8_fp4_mega_moe(
+        self._mega_kernel(
             y,
             (self._mega_l1_w, self._mega_l1_sf),
             (self._mega_l2_w, self._mega_l2_sf),
             self._mega_buf,
             recipe=(1, 1, FP4_BLOCK),
-            activation="swiglu",
+            activation=self.activation,
             activation_clamp=(
                 self.cfg.swiglu_limit if self.cfg.swiglu_limit > 0 else None
             ),
             fast_math=True,
+            **self._activation_kwargs,
         )
 
     def forward(

@@ -6,6 +6,7 @@
 #include "rtp_llm/cpp/model_utils/AttentionConfig.h"
 #include "rtp_llm/cpp/models/eplb/stats/ExpertStats.h"
 #include "rtp_llm/models_py/bindings/ParamsBase.h"
+#include "rtp_llm/models_py/bindings/LinearReplay.h"
 #include "rtp_llm/models_py/bindings/core/TensorHolder.h"
 #include <cstddef>
 #include <map>
@@ -45,8 +46,8 @@ struct GptModelInputs {
     };
     std::optional<RecordedLengths> record_lengths;
     int64_t                        record_execution_id = 0;
-    torch::Tensor engram_token_windows;
-    torch::Tensor mm_features_spans;
+    torch::Tensor                  engram_token_windows;
+    torch::Tensor                  mm_features_spans;
     // input_lengths holds original input length for requests,
     // shape [decoder_batch_size + context_batch_size], int32
     // sequence_lengths holds current sequence length for incremental decoding requests,
@@ -59,11 +60,12 @@ struct GptModelInputs {
     torch::Tensor custom_output_indexes;
     // Kept for ModelInputsLogger/legacy micro-batch consumers; the async
     // scheduling redesign no longer populates it (stays undefined).
-    torch::Tensor lm_output_lengths;        // [total_batch_size]
-    torch::Tensor prefix_lengths;           // [context_batch_size]
+    torch::Tensor lm_output_lengths;  // [total_batch_size]
+    torch::Tensor prefix_lengths;     // [context_batch_size]
     // First token of this request's FULL cache-store write; zero on its first chunk.
     torch::Tensor cache_store_publish_start_tokens;  // [context_batch_size], optional
-    torch::Tensor sequence_lengths_plus_1;  // optional CUDA mirror for target-verify linear attention
+    torch::Tensor sequence_lengths_plus_1;           // optional CUDA mirror for target-verify linear attention
+    std::optional<LinearReplayInputs> linear_replay;
 
     torch::Tensor combo_tokens_type_ids;  // [cumulated_seq_len]
     torch::Tensor combo_position_ids;     // [cumulated_seq_len]
@@ -78,7 +80,10 @@ struct GptModelInputs {
     torch::Tensor kv_cache_block_id;
     torch::Tensor kv_cache_kernel_block_id;  // [group, batch, kernel_blocks], int32
 
-    std::vector<std::string> kv_cache_group_tags;      // Local payload row -> group identity; not transmitted by TP.
+    // Payload rows follow strictly increasing tag order, independent of local
+    // cache group IDs. Producers and MTP snapshots share this order; TP sends
+    // the numeric payload directly without transmitting tags or reordering rows.
+    std::vector<std::string> kv_cache_group_tags;
     torch::Tensor            kv_cache_group_types;     // [group_num], int32, Convention: 0 -> LINEAR, 1 -> FULL.
     torch::Tensor            kv_cache_update_mapping;  // [block_copy_num, 3]: payload row, src/dst physical block IDs
     torch::Tensor            kv_cache_copy_token_lengths;  // CPU int32 [copy count]; zero means full copy.
@@ -122,7 +127,10 @@ struct GptModelInputs {
     // to extra kv_cache blocks when normal inference only write last token mamba state.
     // So, the model has different inference logic for target verify and normal inference.
     // To select correct inference mode, we need to set this flag manually.
-    bool is_target_verify = false;
+    bool    is_target_verify    = false;
+    bool    is_mtp_draft_update = false;
+    int64_t sp_logical_requests = 0;
+    int64_t sp_logical_tokens   = 0;
 
     /** Upstream stage activations; excluded from TP input synchronization. */
     std::map<std::string, torch::Tensor> pp_intermediates;
@@ -134,6 +142,11 @@ struct GptModelInputs {
     std::optional<std::vector<bool>>          request_is_multimodal;
 
 public:
+    // Metadata stays with the round; only target verification consumes it.
+    const LinearReplayInputs* targetLinearReplay() const {
+        return is_target_verify && linear_replay ? &*linear_replay : nullptr;
+    }
+
     std::string debugString(bool force = false) const;
 };
 
@@ -325,6 +338,9 @@ struct GreedyParams {
 
     std::vector<at::Generator> generator;
     GreedySamplingBuffers*     sampling_buffers = nullptr;
+    // Keep the normalized, unfiltered logits available for MTP responses.
+    // In particular, the top-k=1 fast path must run softmax when this is set.
+    bool capture_original_probs = false;
 };
 
 struct GreedyOutput {

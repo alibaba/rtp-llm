@@ -454,7 +454,7 @@ TEST_F(GenerateStreamStateTest, testNormalAsyncHostCommitPrecedesPageBoundaryRes
     ASSERT_EQ(stream->curBlocksNum(), 1u);
     stream->setIsContextStream(false);
     stream->incPendingAsyncBookkeeping();
-    EXPECT_TRUE(stream->needsAsyncBookkeepingJoinForKvReservation());
+    EXPECT_FALSE(stream->prepareMtpCacheForNextStep());
 
     std::promise<void> scheduling_started;
     auto               scheduling_ready = scheduling_started.get_future();
@@ -486,7 +486,7 @@ TEST_F(GenerateStreamStateTest, testNormalAsyncPublishedLengthReservesBeforeHost
     state.next_real_seq_len = 3;
     stream->setNormalAsyncDeviceState(std::move(state));
     stream->incPendingAsyncBookkeeping();
-    EXPECT_FALSE(stream->needsAsyncBookkeepingJoinForKvReservation());
+    EXPECT_TRUE(stream->prepareMtpCacheForNextStep());
     EXPECT_EQ(stream->moveToNext(), StreamState::RUNNING);
     EXPECT_EQ(stream->seqLength(), 2u);
     EXPECT_EQ(stream->curBlocksNum(), 2u);

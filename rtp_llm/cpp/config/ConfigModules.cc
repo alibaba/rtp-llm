@@ -8,6 +8,7 @@
 #include <string>
 #include <cctype>
 #include <regex>
+#include <stdexcept>
 
 namespace rtp_llm {
 
@@ -47,7 +48,8 @@ std::string PrefillCPConfig::to_string() const {
     }
     oss << "\n comm_buffer_size: " << comm_buffer_size << "\n"
         << " kv_cache_sharded: " << kv_cache_sharded << "\n"
-        << " prefill_cp_size: " << prefill_cp_size << "\n";
+        << " prefill_cp_size: " << prefill_cp_size << "\n"
+        << " preserve_tp_layout: " << preserve_tp_layout << "\n";
     return oss.str();
 }
 
@@ -80,6 +82,23 @@ std::string ParallelismConfig::to_string() const {
         << "prefill_cp_config: {\n"
         << prefill_cp_config.to_string() << "}\n";
     return oss.str();
+}
+
+bool resolveLocalKVCacheSharding(LocalKVCacheLayoutPolicy policy, const ParallelismConfig& parallelism_config) {
+    if (parallelism_config.tp_size <= 1) {
+        return false;
+    }
+    switch (policy) {
+        case LocalKVCacheLayoutPolicy::FOLLOW_QUERY_CP:
+            return parallelism_config.prefill_cp_config.kv_cache_sharded
+                   && parallelism_config.prefill_cp_config.is_enabled()
+                   && parallelism_config.role_type != RoleType::DECODE;
+        case LocalKVCacheLayoutPolicy::FULL_TABLE:
+            return false;
+        case LocalKVCacheLayoutPolicy::PAGE_RR:
+            return true;
+    }
+    throw std::invalid_argument("unknown local KV cache layout policy");
 }
 
 // ConcurrencyConfig
@@ -202,7 +221,8 @@ std::string LinearAttentionConfig::to_string() const {
         << "linear_num_value_heads: " << linear_num_value_heads << "\n"
         << "linear_value_head_dim: " << linear_value_head_dim << "\n"
         << "ssm_state_dtype: " << getDataTypeStr(ssm_state_dtype) << "\n"
-        << "conv_state_dtype: " << getDataTypeStr(conv_state_dtype);
+        << "conv_state_dtype: " << getDataTypeStr(conv_state_dtype) << "\n"
+        << "replay_vector_gate: " << replay_vector_gate;
     return oss.str();
 }
 // HybridAttentionConfig
@@ -425,6 +445,7 @@ std::string RuntimeConfig::to_string() const {
         << "warm_up: " << warm_up << "\n"
         << "warm_up_with_loss: " << warm_up_with_loss << "\n"
         << "model_warm_up: " << model_warm_up << "\n"
+        << "enable_linear_replay: " << enable_linear_replay << "\n"
         << "output_dispatcher_worker_count: " << output_dispatcher_worker_count << "\n"
         << "use_batch_decode_scheduler: " << use_batch_decode_scheduler << "\n"
         << "batch_decode_scheduler_config: {\n"

@@ -100,5 +100,5 @@ class FusedMegaMoEInputPacker(MegaMoEInputPacker):
         )
 
 
-def get_mega_moe_input_packer() -> MegaMoEInputPacker:
+def get_mega_moe_input_packer() -> FusedMegaMoEInputPacker:
     return FusedMegaMoEInputPacker()

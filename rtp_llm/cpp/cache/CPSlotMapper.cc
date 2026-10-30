@@ -95,6 +95,8 @@ int CPSlotMapper::reuseBlockTokens(const CacheConfig& config) const {
                                           group.seqSizePerBlock());
             }
         }
+        // LINEAR and SWA groups share the canonical virtual block stride.
+        return checked_tokens(static_cast<size_t>(virtual_block_size_));
     }
     return checked_tokens(config.seq_size_per_block);
 }

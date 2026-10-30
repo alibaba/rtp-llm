@@ -241,6 +241,9 @@ TEST_F(PPBatchStreamProcessorTest, ExecutionPlanKeepsRequestAndSequenceOffsets) 
     std::unordered_map<RequestId, int32_t> history_lengths;
     auto gathered = processor.gatherExecutionPlan(groups, {}, false, history_lengths, holder);
     ASSERT_TRUE(gathered.ok());
+    ASSERT_FALSE(gathered->model_input.skip_run);
+    ASSERT_FALSE(gathered->model_input.is_fake_stream);
+    ASSERT_FALSE(gathered->model_input.skip_lm_head);
     EXPECT_TRUE(gathered->is_decode);
     EXPECT_FALSE(gathered->model_input.is_target_verify);
     EXPECT_EQ(tensorToVector<int32_t>(gathered->model_input.combo_tokens), (std::vector<int32_t>{10, 63, 3, 4, 5, 6}));
@@ -1535,6 +1538,9 @@ TEST_F(PPBatchStreamProcessorTest, VerifyModelInputUsesCurrentAnchorAndPreserves
             std::unordered_map<RequestId, int32_t> history_lengths;
             auto verified = processor.gatherExecutionPlan(groups, {}, false, history_lengths, holder);
             ASSERT_TRUE(verified.ok());
+            ASSERT_FALSE(verified->model_input.skip_run);
+            ASSERT_FALSE(verified->model_input.is_fake_stream);
+            ASSERT_FALSE(verified->model_input.skip_lm_head);
             const auto& input = verified->model_input;
             EXPECT_FALSE(verified->draft_next_position_ids.defined());
             EXPECT_EQ(tensorToVector<int32_t>(verified->sampling_plan.token_ids),

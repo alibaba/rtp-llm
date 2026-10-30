@@ -329,6 +329,11 @@ void runRejectionSampling(speculative::SpeculativeSampler&              sampler,
     applySpecLogitsAcceptLenCap(verify_result, target_sampler_output.token_ids, output);
     output.accept_tokens_cpu = output.accept_tokens.to(torch::kCPU, /*non_blocking=*/true);
     output.accept_len_cpu    = output.accept_len.to(torch::kCPU, /*non_blocking=*/true);
+    auto response_probs =
+        speculative::SpeculativeSampler::targetResponseProbabilities(params.response_modes, target_sampler_output);
+    if (response_probs.defined()) {
+        output.target_probs_cpu = response_probs.to(torch::kCPU, /*non_blocking=*/true);
+    }
     output.transfer_done_event->record(cuda_graph::graphGetCurrentStream());
     if (verify_result.consumed_event) {
         verify_result.consumed_event->record(cuda_graph::graphGetCurrentStream());
@@ -463,8 +468,7 @@ void prepareDraftPrefillAfterVerify(GptModelInputs&                             
             memcpy(combo_tokens_ptr + token_offset,
                    accept_tokens_ptr + i * (propose_step + 1),
                    accept_lens[i] * sizeof(int32_t));
-            hidden_states_list.push_back(
-                target_hidden_states.narrow(0, i * (propose_step + 1), accept_lens[i]));
+            hidden_states_list.push_back(target_hidden_states.narrow(0, i * (propose_step + 1), accept_lens[i]));
             input_lengths_ptr[i] = accept_lens[i];
             token_offset += accept_lens[i];
             output_indexes_ptr[i] = static_cast<int32_t>(token_offset - 1);

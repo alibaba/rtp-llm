@@ -122,7 +122,7 @@ bool NormalGenerateStream::canDeferTerminalOutput(const StreamUpdateInfo& update
                    && cumLogProbs().dim() >= 1));
 }
 
-AuxInfo NormalGenerateStream::prepareAuxInfo(size_t output_len) const {
+AuxInfo NormalGenerateStream::prepareAuxInfo(size_t output_end) const {
     AuxInfo aux;
     aux.iter_count = iter_count_;
     if (!generate_input_->generate_config->aux_info) {
@@ -133,8 +133,8 @@ AuxInfo NormalGenerateStream::prepareAuxInfo(size_t output_len) const {
     aux.wait_time_us                        = wait_time_us_;
     aux.input_len                           = generate_input_->promptLength();
     aux.prefix_len                          = generate_input_->prefix_length;
-    aux.output_len                          = seqLength() - generate_input_->inputLength();
-    aux.step_output_len                     = output_len;
+    aux.output_len                          = output_end - generate_input_->inputLength();
+    aux.step_output_len                     = output_end - last_output_pos_;
     aux.reuse_len                           = initialReuseLength();
     aux.pd_sep                              = queryPdSep();
     aux.local_reuse_len                     = local_reuse_length_;
@@ -162,7 +162,7 @@ GenerateOutputs NormalGenerateStream::snapshotTerminalOutput(const StreamUpdateI
                                .narrow(1, last_output_pos_, output_len)
                                .clone()
                                .unsqueeze(1);
-    snapshot->aux_info = prepareAuxInfo(output_len);
+    snapshot->aux_info = prepareAuxInfo(seqLength());
     if (generate_input_->generate_config->aux_info && update_info.cum_log_probs.defined()) {
         // Dispatcher has completed D2H before entering update(). Clone only
         // this request's final scores to detach from reusable sampler input.
@@ -192,13 +192,21 @@ GenerateOutputs NormalGenerateStream::materializeTerminalOutput(GenerateOutputs 
     return output;
 }
 
-GenerateOutputs NormalGenerateStream::prepareGenerateOutput(const StreamUpdateInfo& update_info) {
-    size_t          output_len = seqLength() - last_output_pos_;
+GenerateOutputs NormalGenerateStream::prepareGenerateOutput(const StreamUpdateInfo& update_info, size_t output_end) {
+    size_t          output_len = output_end - last_output_pos_;
     GenerateOutputs generate_results;
     const auto&     cum_log_probs_ = sampling_state_.cum_log_probs;
     const auto&     all_probs_     = sampling_state_.all_probs;
     const auto&     softmax_probs_ = sampling_state_.softmax_probs;
     generate_results.request_id    = request_id_;
+
+    auto output_all_probs = all_probs_;
+    if (output_all_probs.defined() && output_all_probs.dim() == 3 && update_info.speculative_token_begin >= 0) {
+        const int64_t row = static_cast<int64_t>(output_end) - update_info.speculative_token_begin - 1;
+        RTP_LLM_CHECK_WITH_INFO(row >= 0 && row < output_all_probs.size(1),
+                               "MTP probabilities do not cover output position");
+        output_all_probs = output_all_probs.select(1, row);
+    }
 
     // CompleteTokenIds has already applied this step, so currentBatchSize is the output row count.
     for (int i = 0; i < currentBatchSize(); i++) {
@@ -269,8 +277,8 @@ GenerateOutputs NormalGenerateStream::prepareGenerateOutput(const StreamUpdateIn
             generate_output.prompt_logits = update_info.prompt_logits;
         }
 
-        generate_output.finished = isSubGenerateDoneWithoutLock(i);
-        generate_output.aux_info = prepareAuxInfo(output_len);
+        generate_output.finished = output_end == static_cast<size_t>(seqLength()) && isSubGenerateDoneWithoutLock(i);
+        generate_output.aux_info = prepareAuxInfo(output_end);
         if (generate_input_->generate_config->aux_info) {
             if (calculateSoftmaxProbs() && softmax_probs_.defined()) {
                 generate_output.aux_info.softmax_probs =
@@ -286,7 +294,7 @@ GenerateOutputs NormalGenerateStream::prepareGenerateOutput(const StreamUpdateIn
             if (!update_info.all_probs.defined()) {
                 throw std::runtime_error("all_probs is not while generate_config return_all_probs is true");
             }
-            generate_output.aux_info.all_probs = all_probs_.narrow(0, i, 1).clone();
+            generate_output.aux_info.all_probs = output_all_probs.narrow(0, i, 1).clone();
         }
         // hidden_states post process
         if (generate_output.finished && generate_input_->generate_config->return_hidden_states
@@ -407,15 +415,21 @@ void NormalGenerateStream::updateOutput(const StreamUpdateInfo& update_info) {
         // GenerateDone and the result become visible together when update()
         // unlocks the stream mutex. Queue draining precedes FINISHED.
         enqueueGenerateOutput(std::move(result));
-    } else {
-        enqueueGenerateOutput(prepareGenerateOutput(update_info));
-    }
-
-    if (hasErrorWithoutLock()) {
+        if (!hasErrorWithoutLock()) {
+            last_output_pos_ = seqLength();
+        }
         return;
     }
 
-    last_output_pos_ = seqLength();
+    const bool split_output = isStreaming() && update_info.speculative_token_begin >= 0;
+    do {
+        const size_t output_end = split_output ? last_output_pos_ + 1 : seqLength();
+        enqueueGenerateOutput(prepareGenerateOutput(update_info, output_end));
+        if (hasErrorWithoutLock()) {
+            return;
+        }
+        last_output_pos_ = output_end;
+    } while (last_output_pos_ < static_cast<size_t>(seqLength()));
 }
 
 GenerationPrefillCudaGraphStatus NormalGenerateStream::generationPrefillCudaGraphStatus() const {

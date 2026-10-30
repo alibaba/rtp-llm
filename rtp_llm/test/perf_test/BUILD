@@ -8,6 +8,34 @@ exports_files([
     "test_entry.py",
 ])
 
+py_test(
+    name = "linear_replay_microbenchmark_h20",
+    srcs = ["linear_replay_microbenchmark.py"],
+    main = "linear_replay_microbenchmark.py",
+    timeout = "long",
+    deps = [
+        "//rtp_llm/models_py/triton_kernels:triton_kernels",
+        "//rtp_llm:torch",
+        "//rtp_llm:triton",
+    ],
+    exec_properties = {"gpu": "H20_CU13", "gpu_count": "1"},
+    tags = ["manual", "H20_CU13"],
+)
+
+py_test(
+    name = "linear_replay_microbenchmark_sm103",
+    srcs = ["linear_replay_microbenchmark.py"],
+    main = "linear_replay_microbenchmark.py",
+    timeout = "long",
+    deps = [
+        "//rtp_llm/models_py/triton_kernels:triton_kernels",
+        "//rtp_llm:torch",
+        "//rtp_llm:triton",
+    ],
+    exec_properties = {"gpu": "SM103_CU13", "gpu_count": "1"},
+    tags = ["manual", "SM103_CU13"],
+)
+
 py_library(
     name = "perf_test_lib",
     srcs = [

@@ -68,6 +68,10 @@ load("@rtp_deps//:git.bzl", "git_deps")
 
 git_deps()
 
+load("//3rdparty/deep_gemm_mqa:repositories.bzl", "deep_gemm_mqa_deps")
+
+deep_gemm_mqa_deps()
+
 load("//3rdparty/xgrammar:repositories.bzl", "xgrammar_deps")
 
 xgrammar_deps()

@@ -3,10 +3,21 @@ load("@local_config_cuda//cuda:build_defs.bzl", "cuda_default_copts_without_arch
 load("@arch_config//:arch_select.bzl", "torch_deps")
 package(default_visibility = ["//rtp_llm:__subpackages__"])
 
-sm100_cuda_copts = copts() + cuda_default_copts_without_arch() + [
-    '--cuda-include-ptx=sm_100', '--cuda-gpu-arch=sm_100',
-    '--cuda-include-ptx=sm_100a', '--cuda-gpu-arch=sm_100a',
-]
+sm100_cuda_copts = copts() + cuda_default_copts_without_arch() + select({
+    # Emit family-specific code for both SM100 and SM103 FP4 conversion.
+    "@//:using_cuda13_x86": ["--cuda-gpu-arch=sm_100f"],
+    "@//:using_cuda13_arm": ["--cuda-gpu-arch=sm_100f"],
+    "//conditions:default": [
+        '--cuda-include-ptx=sm_100', '--cuda-gpu-arch=sm_100',
+        '--cuda-include-ptx=sm_100a', '--cuda-gpu-arch=sm_100a',
+    ],
+})
+
+sm103_cuda_copts = select({
+    "@//:using_cuda13_x86": ["--cuda-gpu-arch=sm_103", "--cuda-include-ptx=sm_103"],
+    "@//:using_cuda13_arm": ["--cuda-gpu-arch=sm_103", "--cuda-include-ptx=sm_103"],
+    "//conditions:default": [],
+})
 
 # The DeepSeek V4 TopK uses CTA clusters and requires SM90+. CUDA Runtime reports
 # this host as SM103, so emit an exact SM103 cubin alongside production SM100.
@@ -28,6 +39,30 @@ cuda_deps = [
 ]
 
 cc_library(
+    name = "custom_all_gather",
+    srcs = ["custom_all_gather.cu"],
+    hdrs = ["custom_all_gather.h", "collective_poll.cuh"],
+    deps = [
+        "@local_config_cuda//cuda:cuda_headers",
+        "@local_config_cuda//cuda:cudart",
+    ] + torch_deps(),
+    copts = cuda_copts() + sm103_cuda_copts,
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "push_reduce_scatter",
+    srcs = ["push_reduce_scatter.cu"],
+    hdrs = ["push_reduce_scatter.h", "collective_poll.cuh"],
+    deps = [
+        "@local_config_cuda//cuda:cuda_headers",
+        "@local_config_cuda//cuda:cudart",
+    ] + torch_deps(),
+    copts = cuda_copts() + sm103_cuda_copts,
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "cuda_utils_common",
     hdrs = [
         "vec_dtypes.cuh",
@@ -36,6 +71,18 @@ cc_library(
     deps = [
         "//rtp_llm/models_py/bindings/cuda:cuda_host_utils",
         "//rtp_llm/cpp/utils:core_utils",
+    ] + torch_deps(),
+    copts = cuda_copts(),
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "mtp_greedy_sampling",
+    srcs = ["mtp_greedy_sampling.cu"],
+    hdrs = ["mtp_greedy_sampling.h"],
+    deps = [
+        "@local_config_cuda//cuda:cuda_headers",
+        "@local_config_cuda//cuda:cudart",
     ] + torch_deps(),
     copts = cuda_copts(),
     visibility = ["//visibility:public"],
@@ -87,18 +134,25 @@ cc_library(
 )
 
 cc_library(
+    name = "nvfp4_quant",
+    hdrs = ["nvfp4_quant.cuh"],
+    deps = [
+        "@cutlass4.0//:cutlass",
+        "@local_config_cuda//cuda:cuda_headers",
+    ],
+)
+
+cc_library(
     name = "scaled_fp4_quant",
     srcs = ["scaled_fp4_quant.cu"],
-    hdrs = [
-        "scaled_fp4_quant.h",
-        "nvfp4_quant.cuh",
-    ],
+    hdrs = ["scaled_fp4_quant.h"],
     deps = [
         "@cutlass4.0//:cutlass",
         "@local_config_cuda//cuda:cuda_headers",
         "@local_config_cuda//cuda:cudart",
         "//rtp_llm/models_py/bindings/cuda:cuda_host_utils",
         ":cuda_utils_common",
+        ":nvfp4_quant",
     ] + torch_deps(),
     copts = sm100_cuda_copts + [
         "-DCUTLASS_ARCH_MMA_SM100_SUPPORTED",
@@ -196,6 +250,7 @@ cc_library(
     srcs = ["topk_v3.cu"],
     hdrs = [
         "topk_v3.h",
+        "dsa_range_topk.cuh",
         "topk_v3.cuh",
         "topk_v3_compat.cuh",
     ],
@@ -207,6 +262,19 @@ cc_library(
     copts = dsv4_indexer_topk_cuda_copts,
     visibility = ["//visibility:public"],
 )
+
+cc_library(
+    name = "mega_topk",
+    srcs = ["mega_topk.cu"],
+    hdrs = ["mega_topk.h"],
+    deps = [
+        "@local_config_cuda//cuda:cuda_headers",
+        "@local_config_cuda//cuda:cudart",
+    ] + torch_deps(),
+    copts = dsv4_indexer_topk_cuda_copts,
+    visibility = ["//visibility:public"],
+)
+
 
 cc_library(
     name = "cuda_graph_prepare",
@@ -273,9 +341,13 @@ cc_library(
 
 cc_library(
     name = "mla_quant_kernel",
-    srcs = ["mla_quant_kernel.cu"],
+    srcs = [
+        "mla_quant_kernel.cu",
+        "mla_decode_epilogue.cu",
+    ],
     hdrs = ["mla_quant_kernel.h"],
     deps = [
+        "//rtp_llm/models_py/bindings/cuda:launch_utils",
         "//rtp_llm/models_py/bindings/cuda:cuda_utils_cu",
         "//rtp_llm/cpp/utils:core_utils",
         "//rtp_llm/models_py/bindings/cuda:cuda_host_utils",
@@ -393,4 +465,23 @@ cc_library(
         "//conditions:default": [],
     }),
     visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "attn_res",
+    srcs = ["attn_res.cu"],
+    hdrs = ["attn_res.h"],
+    deps = torch_deps() + [
+        ":nvfp4_quant",
+        "@local_config_cuda//cuda:cuda_headers",
+        "@local_config_cuda//cuda:cudart",
+    ],
+    copts = copts() + cuda_default_copts_without_arch() + [
+        "-O3",
+        # Match the pinned vLLM AttnRes translation unit's math and arch flags.
+        # These affect reciprocal/RMSNorm rounding; do not apply globally.
+        "-nvcc_options=use_fast_math",
+        "-nvcc_options=extended-lambda",
+        "--cuda-gpu-arch=sm_100f",
+    ],
 )

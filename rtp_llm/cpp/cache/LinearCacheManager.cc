@@ -181,12 +181,14 @@ bool LinearCacheManager::malloc(BlockIds&                block_ids,
     return mallocImpl(block_ids, seq_len, 0, true, enable_reuse_cache, backfilled_positions, required_positions);
 }
 
-bool LinearCacheManager::mallocForDecode(BlockIds&            block_ids,
-                                         int                  seq_len,
-                                         bool                 enable_reuse_cache,
-                                         int                  reserve_step,
-                                         std::vector<size_t>* backfilled_positions) {
-    return mallocImpl(block_ids, seq_len, reserve_step, false, enable_reuse_cache, backfilled_positions, {});
+bool LinearCacheManager::mallocForDecode(BlockIds&                block_ids,
+                                         int                      seq_len,
+                                         bool                     enable_reuse_cache,
+                                         int                      reserve_step,
+                                         std::vector<size_t>*     backfilled_positions,
+                                         const RequiredPositions& required_positions) {
+    return mallocImpl(block_ids, seq_len, reserve_step, false, enable_reuse_cache, backfilled_positions,
+                      required_positions);
 }
 
 bool LinearCacheManager::mallocImpl(BlockIds&                block_ids,

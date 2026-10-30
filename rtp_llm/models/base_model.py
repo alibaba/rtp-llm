@@ -2,6 +2,7 @@ import json
 import logging
 import os
 from typing import (
+    TYPE_CHECKING,
     Any,
     List,
     Optional,
@@ -37,10 +38,14 @@ from rtp_llm.ops import (
     KVCacheSpecType,
     MoeConfig,
     ParallelismConfig,
+    RuntimeConfig,
 )
 from rtp_llm.utils.database import CkptDatabase
 from rtp_llm.utils.model_weight import sp_0_pad8_size
 from rtp_llm.utils.time_util import timer_wrapper
+
+if TYPE_CHECKING:
+    from rtp_llm.dash_sc.inference.request_adapter import DashScRequestAdapter
 
 
 @runtime_checkable
@@ -71,6 +76,13 @@ class BaseModel(object):
     kv_cache_config: KVCacheConfig
     fmha_config: FMHAConfig
     moe_config: MoeConfig
+    runtime_config: Optional[RuntimeConfig] = None
+
+    @classmethod
+    def create_dash_sc_request_adapter(cls) -> "DashScRequestAdapter":
+        from rtp_llm.dash_sc.inference.request_adapter import DashScRequestAdapter
+
+        return DashScRequestAdapter()
 
     def __init__(
         self,
@@ -318,6 +330,7 @@ class BaseModel(object):
         moe_pure_tp_preshard: bool = False,
         weight_alias_owner: Optional["BaseModel"] = None,
         weight_alias_names: Sequence[str] = (),
+        runtime_config: Optional[RuntimeConfig] = None,
     ) -> "BaseModel":
         """Create model from independent configuration objects.
 
@@ -347,6 +360,7 @@ class BaseModel(object):
             loader_recycle_handles=loader_recycle_handles,
             moe_pure_tp_preshard=moe_pure_tp_preshard,
         )
+        model.runtime_config = runtime_config
         if weight_alias_names and weight_alias_owner is None:
             raise ValueError(
                 "weight_alias_names require an explicit weight_alias_owner"

@@ -30,12 +30,27 @@ public:
     BatchDecodeScheduler(const RuntimeConfig&                   runtime_config,
                          const std::shared_ptr<KVCacheManager>& cache_manager,
                          const kmonitor::MetricsReporterPtr     metrics_reporter,
-                         int                                    dp_rank = 0) {
-        cache_manager_    = cache_manager;
-        metrics_reporter_ = metrics_reporter;
-        batch_size_       = runtime_config.batch_decode_scheduler_config.batch_decode_scheduler_batch_size;
-        scheduler_type_   = SchedulerType::kBatchDecode;
-        dp_rank_          = dp_rank;
+                         int                                    dp_rank            = 0,
+                         int64_t                                max_prefill_tokens = 0,
+                         const ParallelismConfig&               parallelism_config = ParallelismConfig{},
+                         const ModelExecutionCapacity&          execution_capacity = ModelExecutionCapacity{},
+                         RoleType                               role               = RoleType::PDFUSION) {
+        cache_manager_      = cache_manager;
+        metrics_reporter_   = metrics_reporter;
+        batch_size_         = runtime_config.batch_decode_scheduler_config.batch_decode_scheduler_batch_size;
+        max_batch_size_     = std::max<int64_t>(runtime_config.max_generate_batch_size, batch_size_);
+        max_prefill_tokens_ = max_prefill_tokens;
+        max_execution_tokens_     = execution_capacity.max_execution_tokens;
+        max_decode_sequences_     = execution_capacity.max_decode_sequences;
+        max_prefill_draft_tokens_ = execution_capacity.max_prefill_draft_tokens;
+        target_only_runs_draft_   = execution_capacity.target_only_runs_draft;
+        execution_tp_size_        = std::max<int64_t>(parallelism_config.tp_size, 1);
+        role_                     = role;
+        prefill_cp_size_    = parallelism_config.prefill_cp_config.is_enabled() ?
+                                  static_cast<size_t>(std::max<int64_t>(parallelism_config.tp_size, 1)) :
+                                  1;
+        scheduler_type_     = SchedulerType::kBatchDecode;
+        dp_rank_            = dp_rank;
     }
     virtual ~BatchDecodeScheduler() = default;
 
@@ -114,6 +129,11 @@ public:
     void updateSchedulerInfo(const std::string& scheduler_info) override {
         BatchDecodeSchedulerConfigLocal config;
         autil::legacy::FromJsonString(config, scheduler_info);
+        if (config.batch_size_ == 0 || config.batch_size_ > max_batch_size_) {
+            RTP_LLM_LOG_WARNING(
+                "reject batch size %u outside initialized capacity [1, %u]", config.batch_size_, max_batch_size_);
+            return;
+        }
         batch_size_ = config.batch_size_;
         if (config.mode_ == "decode") {
             scheduler_type_ = SchedulerType::kBatchDecode;
@@ -199,7 +219,19 @@ public:
         // Refresh the drain state from the current queue. This batch may drain a mixed-mode tail,
         // but later homogeneous arrivals must go through the normal batch-size gate.
         draining_mixed_modes_ = has_other_mode;
+        for (const auto& stream : selected_streams) {
+            if (!stream->streamCacheResource().reserveLinearReplaySlot()) {
+                return;
+            }
+        }
         for (auto& stream : selected_streams) {
+            if (scheduler_type_ == SchedulerType::kBatchDecode && !isPrefillOnly(stream)
+                && cache_manager_->cacheConfig().linear_replay.enabled()) {
+                // Direct Decode starts from the prompt's final token, with its
+                // already-processed prefix initialized before the first grow.
+                stream->setPerfTest(true);
+                stream->setIsContextStream(false);
+            }
             stream->reportEvent(StreamEvents::CanRun);
             // 忙等stream load cache done, 和原有SyncLoadCache逻辑等效
             while (stream->getStatus() != StreamState::FINISHED && stream->moveToNext() != StreamState::RUNNING) {
@@ -207,16 +239,19 @@ public:
             }
         }
         for (const auto& stream : selected_streams) {
-            waiting_streams_.remove(stream);
-            if (stream->getStatus() == StreamState::RUNNING) {
+            const auto state = stream->getStatus();
+            if (state == StreamState::RUNNING) {
+                waiting_streams_.remove(stream);
                 running_streams_.push_back(stream);
+            } else if (state == StreamState::FINISHED) {
+                waiting_streams_.remove(stream);
             }
         }
     }
 
     void initRunningStreams() {
         // set kvcache block
-        for (auto it = running_streams_.begin(); it != running_streams_.end(); it++) {
+        for (auto it = running_streams_.begin(); it != running_streams_.end();) {
             (*it)->setPerfTest(true);
             // reset start time，to get more accurate avg token time
             (*it)->resetBeginTime(autil::TimeUtility::currentTimeInMicroSeconds());
@@ -228,6 +263,53 @@ public:
                 (*it)->setIsContextStream(false);
                 // for linear attn, incrKVBlock to clear unused linear block
                 (*it)->moveToNext();
+            }
+            if ((*it)->getStatus() == StreamState::FINISHED) {
+                it = running_streams_.erase(it);
+            } else {
+                ++it;
+            }
+        }
+        if (max_prefill_tokens_ <= 0 && max_execution_tokens_ <= 0 && max_decode_sequences_ <= 0
+            && max_prefill_draft_tokens_ <= 0) {
+            return;
+        }
+        int64_t prefill_capacity = max_prefill_tokens_;
+        if (max_execution_tokens_ > 0) {
+            const auto capacity = max_execution_tokens_ / execution_tp_size_ * execution_tp_size_;
+            prefill_capacity    = prefill_capacity > 0 ? std::min(prefill_capacity, capacity) : capacity;
+        }
+        int64_t remaining = prefill_capacity;
+        int64_t decode_remaining = max_decode_sequences_;
+        int64_t draft_remaining  = max_prefill_draft_tokens_;
+        for (const auto& stream : running_streams_) {
+            const auto    sequences       = stream->isContextStream() ? 0 : decodeSequenceReservation(stream, role_);
+            const bool    decode_overflow = max_decode_sequences_ > 0 && sequences > decode_remaining;
+            const int64_t rows = stream->isContextStream() ?
+                                     static_cast<int64_t>(prefillTokenCostWithoutCache(stream, prefill_cp_size_)) :
+                                                0;
+            const int64_t natural_rows =
+                stream->isContextStream() && (!isPrefillOnly(stream) || target_only_runs_draft_) ?
+                    static_cast<int64_t>(prefillTokenCostWithoutCache(stream, 1)) :
+                    0;
+            const bool draft_overflow = max_prefill_draft_tokens_ > 0 && natural_rows > draft_remaining;
+            if (decode_overflow || draft_overflow || (prefill_capacity > 0 && rows > remaining)) {
+                for (const auto& rejected : running_streams_) {
+                    rejected->reportError(ErrorCode::INVALID_PARAMS,
+                                          "fixed batch exceeds initialized model execution capacity");
+                    rejected->moveToNext();
+                }
+                running_streams_.clear();
+                return;
+            }
+            if (prefill_capacity > 0) {
+                remaining -= rows;
+            }
+            if (max_prefill_draft_tokens_ > 0) {
+                draft_remaining -= natural_rows;
+            }
+            if (max_decode_sequences_ > 0) {
+                decode_remaining -= sequences;
             }
         }
     }
@@ -287,6 +369,15 @@ private:
     std::list<GenerateStreamPtr> loading_cache_streams_;
     std::list<GenerateStreamPtr> running_streams_;
     uint32_t                     batch_size_;
+    uint32_t                     max_batch_size_;
+    int64_t                      max_prefill_tokens_ = 0;
+    int64_t                      max_execution_tokens_     = 0;
+    int64_t                      max_decode_sequences_     = 0;
+    int64_t                      max_prefill_draft_tokens_ = 0;
+    bool                         target_only_runs_draft_   = false;
+    int64_t                      execution_tp_size_        = 1;
+    RoleType                     role_                     = RoleType::PDFUSION;
+    size_t                       prefill_cp_size_    = 1;
     bool                         reorder_request_;
     uint32_t                     current_step_ = 0;
     bool                         draining_mixed_modes_ = false;

@@ -46,6 +46,7 @@ cc_library(
         "//rtp_llm/cpp/config:config_modules",
         "//rtp_llm/cpp/config:rank_layout",
         "//rtp_llm/cpp/config:stage_layer_range",
+        "//rtp_llm/cpp/observability:execution_recorder",
         "//rtp_llm/cpp/config:role_types",
         "//rtp_llm/cpp/cuda_graph:cuda_graph_hdrs_lib",
         "//rtp_llm/cpp/engine_base:executor",
@@ -53,7 +54,6 @@ cc_library(
         "//rtp_llm/cpp/model_utils:model_utils",
         "//rtp_llm/cpp/models:models",
         "//rtp_llm/cpp/models:logits_processor",
-        "//rtp_llm/cpp/observability:execution_recorder",
         "//rtp_llm/cpp/engine_base:engine_base",
         "//rtp_llm/cpp/utils:device_pin",
         "//rtp_llm/cpp/engine_base/stream:generate_config",
@@ -83,6 +83,7 @@ cc_library(
         "//:using_cuda": [
             "//rtp_llm/models_py/bindings/cuda/ops:standalone_ops",
             "//rtp_llm/models_py/bindings/cuda/kernels:mtp_target_verify_prepare",
+            "//rtp_llm/models_py/bindings/cuda/kernels:mtp_greedy_sampling",
             "//rtp_llm/cpp/cuda_graph:cuda_graph_impl",
         ],
         "@//:using_rocm": [

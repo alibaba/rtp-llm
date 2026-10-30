@@ -1,6 +1,12 @@
 import unittest
 
-from rtp_llm.ops import AttentionConfigs, ModelConfig, RopeConfig, RopeStyle
+from rtp_llm.ops import (
+    AttentionConfigs,
+    LocalKVCacheLayoutPolicy,
+    ModelConfig,
+    RopeConfig,
+    RopeStyle,
+)
 
 
 class ModelConfigAttentionTest(unittest.TestCase):
@@ -63,6 +69,21 @@ class ModelConfigMtpHiddenSizeTest(unittest.TestCase):
                 config.hc_mult = multiplier
                 with self.assertRaisesRegex(RuntimeError, error):
                     config.getMtpInputHiddenSize()
+
+
+class ModelConfigLocalKvLayoutTest(unittest.TestCase):
+    def test_layout_policy_round_trips_through_cpp_binding(self):
+        config = ModelConfig()
+        self.assertEqual(
+            config.local_kv_cache_layout, LocalKVCacheLayoutPolicy.FOLLOW_QUERY_CP
+        )
+        for policy in (
+            LocalKVCacheLayoutPolicy.FOLLOW_QUERY_CP,
+            LocalKVCacheLayoutPolicy.FULL_TABLE,
+            LocalKVCacheLayoutPolicy.PAGE_RR,
+        ):
+            config.local_kv_cache_layout = policy
+            self.assertEqual(config.local_kv_cache_layout, policy)
 
 
 if __name__ == "__main__":

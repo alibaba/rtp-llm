@@ -138,10 +138,13 @@ std::shared_ptr<GenerateConfig> QueryConverter::transGenerateConfig(const Genera
     generate_config->force_disable_sp_run     = config_proto->force_disable_sp_run();
     generate_config->force_sp_accept          = config_proto->force_sp_accept();
     generate_config->return_cum_log_probs     = config_proto->return_cum_log_probs();
-    if (config_proto->return_all_probs_mode() != 0) {
-        // new client: explicit mode (offset 1). Clamp out-of-range values to NONE
-        // so a malformed client can't synthesize an undefined ReturnAllProbsMode.
-        int mode = config_proto->return_all_probs_mode() - 1;
+    const int wire_probs_mode                 = config_proto->speculative_return_all_probs_mode() != 0 ?
+                                                    config_proto->speculative_return_all_probs_mode() :
+                                                    config_proto->return_all_probs_mode();
+    if (wire_probs_mode != 0) {
+        // Explicit mode (offset 1). Clamp invalid values to NONE so malformed
+        // clients cannot synthesize an undefined ReturnAllProbsMode.
+        int mode = wire_probs_mode - 1;
         if (mode < static_cast<int>(ReturnAllProbsMode::NONE)
             || mode > static_cast<int>(ReturnAllProbsMode::ORIGINAL)) {
             mode = static_cast<int>(ReturnAllProbsMode::NONE);
@@ -317,20 +320,19 @@ std::shared_ptr<GenerateInput> QueryConverter::transQuery(const GenerateInputPB*
             for (const auto& crop_position : mm_preprocess_config->crop_positions()) {
                 crop_positions.push_back(crop_position);
             }
-            mm_inputs.emplace_back(
-                mm_input->multimodal_url(),
-                torch::empty(1),
-                mm_input->multimodal_type(),
-                mm_preprocess_config->width(),
-                mm_preprocess_config->height(),
-                mm_preprocess_config->min_pixels(),
-                mm_preprocess_config->max_pixels(),
-                mm_preprocess_config->fps(),
-                mm_preprocess_config->min_frames(),
-                mm_preprocess_config->max_frames(),
-                crop_positions,
-                mm_preprocess_config->mm_timeout_ms(),
-                mm_preprocess_config->max_long_side_pixel() > 0 ? mm_preprocess_config->max_long_side_pixel() : -1);
+            mm_inputs.emplace_back(mm_input->multimodal_url(),
+                                   torch::empty({0}),
+                                   mm_input->multimodal_type(),
+                                   mm_preprocess_config->width(),
+                                   mm_preprocess_config->height(),
+                                   mm_preprocess_config->min_pixels(),
+                                   mm_preprocess_config->max_pixels(),
+                                   mm_preprocess_config->fps(),
+                                   mm_preprocess_config->min_frames(),
+                                   mm_preprocess_config->max_frames(),
+                                   crop_positions,
+                                   mm_preprocess_config->mm_timeout_ms(),
+                                   mm_preprocess_config->max_long_side_pixel() > 0 ? mm_preprocess_config->max_long_side_pixel() : -1);
         }
         generate_input->multimodal_inputs = std::move(mm_inputs);
     }

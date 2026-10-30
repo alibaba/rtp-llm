@@ -1,8 +1,13 @@
 #include <ATen/cuda/CUDAContext.h>
+#include <c10/cuda/CUDAException.h>
 #include <c10/cuda/CUDAGuard.h>
+#include <cub/block/block_reduce.cuh>
+#include <cooperative_groups.h>
 #include <cuda_runtime.h>
 #include <cuda_runtime_api.h>
 #include <torch/all.h>
+
+#include <limits>
 
 #ifdef ENABLE_FP4
 #include "rtp_llm/models_py/bindings/cuda/kernels/nvfp4_quant.cuh"
@@ -19,79 +24,193 @@ inline int getSMVersion() {
     return major * 10 + minor;
 }
 
-// Quantizes the provided PackedVec into the uint32_t output
-template<class Type, bool UE8M0_SF = false>
-__device__ uint32_t cvt_warp_fp16_to_fp4(PackedVec<Type>& vec, float SFScaleVal, uint8_t* SFout) {
+#if defined(USING_CUDA13) && USING_CUDA13
+namespace {
+
+constexpr int kNvfp4QuantThreads    = 128;
+constexpr int kNvfp4ThreadsPerScale = CVT_FP4_SF_VEC_SIZE / CVT_FP4_ELTS_PER_THREAD;
+
+struct Nvfp4Max {
+    __device__ float operator()(float lhs, float rhs) const {
+        return fmaxf(lhs, rhs);
+    }
+};
+
+using Nvfp4InputVec = PackedVec<__nv_bfloat16>;
+
+__device__ __forceinline__ Nvfp4InputVec load_nvfp4_input_vec(const __nv_bfloat16* src) {
+    struct alignas(16) AlignedInputVec {
+        Nvfp4InputVec value;
+    };
+    static_assert(sizeof(Nvfp4InputVec) == 16);
+    if (reinterpret_cast<uintptr_t>(src) % alignof(AlignedInputVec) == 0) {
+        return reinterpret_cast<const AlignedInputVec*>(src)->value;
+    }
+    if (reinterpret_cast<uintptr_t>(src) % alignof(Nvfp4InputVec) == 0) {
+        return *reinterpret_cast<const Nvfp4InputVec*>(src);
+    }
+    Nvfp4InputVec values;
+#pragma unroll
+    for (int i = 0; i < CVT_FP4_ELTS_PER_THREAD / 2; ++i) {
+        values.elts[i] = __halves2bfloat162(src[2 * i], src[2 * i + 1]);
+    }
+    return values;
+}
+
+template<int FixedWidth = 0>
+__global__ void nvfp4_quantize_strided_kernel(const __nv_bfloat16* input,
+                                              int64_t              row_stride,
+                                              int                  rows,
+                                              int                  padded_rows,
+                                              int                  runtime_width,
+                                              float*               amax_partials,
+                                              int64_t              num_partials,
+                                              bool                 compute_amax,
+                                              uint32_t*            output,
+                                              uint8_t*             output_scale,
+                                              float*               global_scale) {
 #if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
-    // Get absolute maximum values among the local 8 values.
-    auto localMax = __habs2(vec.elts[0]);
-
-// Local maximum value.
+    using BlockReduce = cub::BlockReduce<float, kNvfp4QuantThreads>;
+    __shared__ BlockReduce::TempStorage reduce_storage;
+    __shared__ float                    inverse_scale;
+    const int                           width           = FixedWidth ? FixedWidth : runtime_width;
+    const int                           vectors_per_row = width / CVT_FP4_ELTS_PER_THREAD;
+    const int64_t                       start           = int64_t(blockIdx.x) * blockDim.x + threadIdx.x;
+    const int                           step            = gridDim.x * blockDim.x;
+    if (compute_amax) {
+        uint32_t      local_bits    = 0;
+        const int64_t valid_vectors = int64_t(rows) * vectors_per_row;
+        for (int64_t index = start; index < valid_vectors; index += step) {
+            const auto* src =
+                input + index / vectors_per_row * row_stride + index % vectors_per_row * CVT_FP4_ELTS_PER_THREAD;
+            const auto values = load_nvfp4_input_vec(src);
 #pragma unroll
-    for (int i = 1; i < CVT_FP4_ELTS_PER_THREAD / 2; i++) {
-        localMax = __hmax2(localMax, __habs2(vec.elts[i]));
-    }
-
-    // Get the absolute maximum among all 16 values (two threads).
-    localMax = __hmax2(__shfl_xor_sync(uint32_t(-1), localMax, 1), localMax);
-    // Get the final absolute maximum values.
-    float vecMax = float(__hmax(localMax.x, localMax.y));
-
-    // Get the SF (max value of the vector / max value of e2m1).
-    // maximum value of e2m1 = 6.0.
-    // TODO: use half as compute data type.
-    float SFValue = SFScaleVal * (vecMax * reciprocal_approximate_ftz(6.0f));
-    // 8 bits representation of the SF.
-    uint8_t fp8SFVal;
-    // Write the SF to global memory (STG.8).
-    if constexpr (UE8M0_SF) {
-        // Extract the 8 exponent bits from float32.
-        // float 32bits = 1 sign bit + 8 exponent bits + 23 mantissa bits.
-        uint32_t tmp = reinterpret_cast<uint32_t&>(SFValue) >> 23;
-        fp8SFVal     = tmp & 0xff;
-        // Convert back to fp32.
-        reinterpret_cast<uint32_t&>(SFValue) = tmp << 23;
-    } else {
-        // Here SFValue is always positive, so E4M3 is the same as UE4M3.
-        __nv_fp8_e4m3 tmp                          = __nv_fp8_e4m3(SFValue);
-        reinterpret_cast<__nv_fp8_e4m3&>(fp8SFVal) = tmp;
-        // Convert back to fp32.
-        SFValue = float(tmp);
-    }
-    // Get the output scale.
-    // Recipe: final_scale = reciprocal(fp32(fp8(SFValue * SFScaleVal))) *
-    //                       reciprocal(SFScaleVal))
-    float outputScale =
-        SFValue != 0 ? reciprocal_approximate_ftz(SFValue * reciprocal_approximate_ftz(SFScaleVal)) : 0.0f;
-
-    if (SFout) {
-        // Write the SF to global memory (STG.8).
-        *SFout = fp8SFVal;
-    }
-
-    // Convert the input to float.
-    float2 fp2Vals[CVT_FP4_ELTS_PER_THREAD / 2];
-
-#pragma unroll
-    for (int i = 0; i < CVT_FP4_ELTS_PER_THREAD / 2; i++) {
-        if constexpr (std::is_same_v<Type, half>) {
-            fp2Vals[i] = __half22float2(vec.elts[i]);
-        } else {
-            fp2Vals[i] = __bfloat1622float2(vec.elts[i]);
+            for (int i = 0; i < CVT_FP4_ELTS_PER_THREAD / 2; ++i) {
+                local_bits = __vmaxu2(local_bits, reinterpret_cast<const uint32_t&>(values.elts[i]) & 0x7fff7fff);
+            }
         }
-        fp2Vals[i].x *= outputScale;
-        fp2Vals[i].y *= outputScale;
+        const float local_max = __uint_as_float(max(local_bits & 0xffffu, local_bits >> 16) << 16);
+        const float partial   = BlockReduce(reduce_storage).Reduce(local_max, Nvfp4Max{});
+        if (threadIdx.x == 0) {
+            amax_partials[blockIdx.x] = partial;
+        }
+        cooperative_groups::this_grid().sync();
+        num_partials = gridDim.x;
     }
+    float local_max = 0.0f;
+    for (int64_t i = threadIdx.x; i < num_partials; i += blockDim.x) {
+        local_max = fmaxf(local_max, amax_partials[i]);
+    }
+    const float amax = BlockReduce(reduce_storage).Reduce(local_max, Nvfp4Max{});
+    if (threadIdx.x == 0) {
+        // Match the online per-tensor scale and FlashInfer's input convention.
+        const float scale = fmaxf(amax, 1.0e-8f) * (1.0f / (6.0f * 448.0f));
+        inverse_scale     = __frcp_rn(scale);
+        if (blockIdx.x == 0) {
+            *global_scale = scale;
+        }
+    }
+    __syncthreads();
 
-    // Convert to e2m1 values.
-    uint32_t e2m1Vec = fp32_vec_to_e2m1(fp2Vals);
-
-    // Write the e2m1 values to global memory.
-    return e2m1Vec;
-#else
-    return 0;
+    // K is a multiple of 64, so neither row tails nor the grid stride
+    // split the pairs of lanes that share a group16 scale.
+    const int64_t padded_vectors = int64_t(padded_rows) * vectors_per_row;
+    for (int64_t index = start; index < padded_vectors; index += step) {
+        const int row        = index / vectors_per_row;
+        const int vector_col = index % vectors_per_row;
+        auto*     sf =
+            cvt_quant_to_fp4_get_sf_out_offset<uint8_t, kNvfp4ThreadsPerScale>(row, vector_col, width, output_scale);
+        const bool    valid_row = row < rows;
+        Nvfp4InputVec values{};
+        if (valid_row) {
+            const auto* src = input + int64_t(row) * row_stride + vector_col * CVT_FP4_ELTS_PER_THREAD;
+            values          = load_nvfp4_input_vec(src);
+        }
+        const auto packed = cvt_warp_fp16_to_fp4<__nv_bfloat16, false, true>(values, inverse_scale, sf);
+        if (valid_row) {
+            output[index] = packed;
+        }
+    }
 #endif
 }
+
+}  // namespace
+
+void nvfp4_quantize_strided_from_amax(const torch::Tensor& input,
+                                      const torch::Tensor& amax_partials,
+                                      torch::Tensor&       output,
+                                      torch::Tensor&       output_scale,
+                                      torch::Tensor&       global_scale,
+                                      bool                 compute_amax) {
+    TORCH_CHECK(input.is_cuda() && input.scalar_type() == at::kBFloat16 && input.dim() == 2 && input.size(1) > 0
+                    && input.size(1) % 64 == 0 && input.size(1) <= std::numeric_limits<int>::max() && input.size(0) > 0
+                    && input.stride(1) == 1 && (input.size(0) == 1 || input.stride(0) >= input.size(1)),
+                "Expected CUDA BF16 rows with unit inner stride and K aligned to 64");
+    const int64_t rows        = input.size(0);
+    const int     width       = static_cast<int>(input.size(1));
+    const int64_t padded_rows = (rows + 127) / 128 * 128;
+    TORCH_CHECK(padded_rows <= std::numeric_limits<int>::max(), "Too many rows for NVFP4 quantization");
+    const auto check_buffer = [&](const torch::Tensor& tensor, at::ScalarType dtype) {
+        TORCH_CHECK(tensor.device() == input.device() && tensor.is_contiguous() && tensor.scalar_type() == dtype,
+                    "NVFP4 quantization buffers must be contiguous and on the input device");
+    };
+    check_buffer(amax_partials, at::kFloat);
+    check_buffer(output, at::kByte);
+    check_buffer(output_scale, at::kByte);
+    check_buffer(global_scale, at::kFloat);
+    TORCH_CHECK(amax_partials.dim() == 1 && amax_partials.numel() > 0, "Expected nonempty amax partials");
+    TORCH_CHECK(output.dim() == 2 && output.size(0) == rows && output.size(1) == width / 2
+                    && reinterpret_cast<uintptr_t>(output.data_ptr()) % alignof(uint32_t) == 0,
+                "Expected aligned packed FP4 output [M,K/2]");
+    TORCH_CHECK(output_scale.dim() == 2 && output_scale.size(0) == padded_rows
+                    && output_scale.size(1) == width / CVT_FP4_SF_VEC_SIZE,
+                "Expected swizzled E4M3 scales [round_up(M,128),K/16]");
+    TORCH_CHECK(global_scale.dim() == 1 && global_scale.numel() == 1, "Expected one FP32 global scale");
+
+    const c10::cuda::CUDAGuard guard(input.device());
+    const auto*                props = at::cuda::getDeviceProperties(input.get_device());
+    TORCH_CHECK(props->major == 10 && (props->minor == 0 || props->minor == 3),
+                "Strided NVFP4 quantization requires SM100 or SM103");
+    // Keep F_b's narrow width specialized and avoid runtime division in the
+    // wide projections used by K3.1. Other aligned widths share the generic path.
+    const auto    kernel         = width == 128  ? nvfp4_quantize_strided_kernel<128> :
+                                   width == 1536 ? nvfp4_quantize_strided_kernel<1536> :
+                                   width == 7168 ? nvfp4_quantize_strided_kernel<7168> :
+                                                   nvfp4_quantize_strided_kernel<>;
+    const int64_t padded_vectors = padded_rows * (width / CVT_FP4_ELTS_PER_THREAD);
+    int blocks = static_cast<int>(std::min<int64_t>((padded_vectors + kNvfp4QuantThreads - 1) / kNvfp4QuantThreads,
+                                                    props->multiProcessorCount * 4));
+    cudaLaunchConfig_t  config{};
+    cudaLaunchAttribute attr{};
+    if (compute_amax) {
+        int active_blocks;
+        C10_CUDA_CHECK(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&active_blocks, kernel, kNvfp4QuantThreads, 0));
+        blocks = std::min(blocks, active_blocks * props->multiProcessorCount);
+        TORCH_CHECK(props->cooperativeLaunch && blocks > 0 && amax_partials.numel() >= blocks,
+                    "Strided NVFP4 needs a cooperative grid and one partial per block");
+        attr.id              = cudaLaunchAttributeCooperative;
+        attr.val.cooperative = 1;
+        config.attrs         = &attr;
+        config.numAttrs      = 1;
+    }
+    config.gridDim  = blocks;
+    config.blockDim = kNvfp4QuantThreads;
+    config.stream   = at::cuda::getCurrentCUDAStream(input.get_device());
+    C10_CUDA_CHECK(cudaLaunchKernelEx(&config,
+                                      kernel,
+                                      reinterpret_cast<const __nv_bfloat16*>(input.data_ptr()),
+                                      input.stride(0),
+                                      static_cast<int>(rows),
+                                      static_cast<int>(padded_rows),
+                                      width,
+                                      amax_partials.data_ptr<float>(),
+                                      amax_partials.numel(),
+                                      compute_amax,
+                                      reinterpret_cast<uint32_t*>(output.data_ptr()),
+                                      output_scale.data_ptr<uint8_t>(),
+                                      global_scale.data_ptr<float>()));
+}
+#endif
 
 __device__ __forceinline__ float silu(const float& val) {
     return val / (1.0f + __expf(-val));

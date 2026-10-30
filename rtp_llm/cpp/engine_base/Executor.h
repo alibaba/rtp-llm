@@ -57,6 +57,15 @@ protected:
     bool sampleDecodeStep();
 
 public:
+    static const torch::Tensor& eplbMoeKernel(const Weights& weights, int layer) {
+        if (layer < 0 || static_cast<size_t>(layer) >= weights.layers.size()
+            || !weights.layers[layer].ffn_weights.moe_gate_weight
+            || !weights.layers[layer].ffn_weights.moe_gate_weight->kernel.defined()) {
+            throw std::invalid_argument("EPLB requires native MoE expert weights; disable eplb_mode for this model");
+        }
+        return weights.layers[layer].ffn_weights.moe_gate_weight->kernel;
+    }
+
     static GptModelDescription genModelDescription(const ModelConfig&       model_config,
                                                    const ParallelismConfig& parallelism_config,
                                                    const EPLBConfig&        eplb_config,

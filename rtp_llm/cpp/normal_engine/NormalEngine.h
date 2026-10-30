@@ -61,7 +61,7 @@ private:
                                                             const ResourceContext& resource_context,
                                                             int                    reuse_length,
                                                             int64_t                token_budget);
-    std::shared_ptr<KVCacheManager> createWarmupCacheManager();
+    std::shared_ptr<KVCacheManager>   createWarmupCacheManager(int prefill_batch_size = 0);
     void                            initLoadBalance();
     absl::Status                    trySaveStepError() const;
     void                            loop();

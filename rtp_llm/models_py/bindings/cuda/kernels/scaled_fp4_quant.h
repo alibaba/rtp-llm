@@ -6,6 +6,15 @@
 
 namespace rtp_llm {
 
+#if defined(USING_CUDA13) && USING_CUDA13
+void nvfp4_quantize_strided_from_amax(const torch::Tensor& input,
+                                      const torch::Tensor& amax_partials,
+                                      torch::Tensor&       output,
+                                      torch::Tensor&       output_scale,
+                                      torch::Tensor&       global_scale,
+                                      bool                 compute_amax = false);
+#endif
+
 // Forward declarations for FP4 quantization functions
 void scaled_fp4_experts_quant_sm100a(torch::Tensor&       output,
                                      torch::Tensor&       output_scale,

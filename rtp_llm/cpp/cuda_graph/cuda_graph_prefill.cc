@@ -66,8 +66,9 @@ void CudaGraphRunner::capturePrefill() {
             inputs.attention_inputs.cu_seqlens_device.copy_(inputs.attention_inputs.cu_seqlens, false);
             inputs.attention_inputs.cu_kv_seqlens_device.copy_(inputs.attention_inputs.cu_seqlens, false);
         } else {
-            // Draft model prefill: distribute seq_len tokens across batches (max num_tokens_per_bs_ each).
-            // All max_bs_ batches get the largest legal prefix so
+            // Draft prefill rounds this bucket to complete Q-wide request rows,
+            // including sequence-parallel alignment.
+            // All captured request slots get the largest legal prefix so
             // prefix_len + q_len never exceeds max_seq_len_.
             int active_bs  = (seq_len + num_tokens_per_bs_ - 1) / num_tokens_per_bs_;
             int prefix_len = max_seq_len_ > num_tokens_per_bs_ ? max_seq_len_ - num_tokens_per_bs_ : 0;
@@ -104,6 +105,12 @@ void CudaGraphRunner::capturePrefill() {
         inputs.attention_inputs.context_total_kv_length = seq_len;
         inputs.attention_inputs.prefill_cuda_graph_copy_params =
             capture_mem_hold_.py_model_inputs_.attention_inputs.prefill_cuda_graph_copy_params;
+        if (isMtpDraftPrefillCudaGraph()) {
+            auto& params          = *inputs.attention_inputs.prefill_cuda_graph_copy_params;
+            params.max_batch_size = capture_batch_size;
+            params.max_seq_len    = num_tokens_per_bs_;
+            params.cuda_graph_prefill_batch_size.fill_(capture_batch_size);
+        }
         if (isGenerationPrefillCudaGraph()) {
             if (inputs.bert_embedding_inputs.combo_position_ids.defined()) {
                 inputs.bert_embedding_inputs.combo_position_ids =
@@ -113,7 +120,7 @@ void CudaGraphRunner::capturePrefill() {
                 inputs.bert_embedding_inputs.combo_tokens_type_ids =
                     inputs.bert_embedding_inputs.combo_tokens_type_ids.slice(0, 0, seq_len);
             }
-        } else if (inputs.bert_embedding_inputs.position_encoding.numel() > 0) {
+        } else if (isMtpDraftPrefillCudaGraph() || inputs.bert_embedding_inputs.position_encoding.numel() > 0) {
             inputs.bert_embedding_inputs.combo_position_ids =
                 inputs.bert_embedding_inputs.combo_position_ids.slice(0, 0, seq_len);
             inputs.bert_embedding_inputs.combo_tokens_type_ids =

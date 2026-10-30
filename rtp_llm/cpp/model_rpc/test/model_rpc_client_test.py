@@ -5,6 +5,7 @@ import json
 import struct
 import sys
 from enum import Enum
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 # Mock the ops module to avoid CUDA dependency in this unit test
@@ -79,6 +80,7 @@ from rtp_llm.utils.base_model_datatypes import (
     BatchedTerminalOutputs,
     GenerateInput,
     GenerateOutputs,
+    MMUrlType,
     RequestInfo,
 )
 from rtp_llm.utils.grpc_util import trans_tensor
@@ -413,6 +415,41 @@ class ModelRpcClientTest(TestCase):
         async for res in client.enqueue(input):
             responses.extend(res.generate_outputs)
         return responses
+
+    def test_multimodal_rpc_preserves_url_without_tensor(self):
+        def mm_input(url, tensor):
+            return SimpleNamespace(
+                url=url,
+                mm_type=MMUrlType.IMAGE,
+                tensor=tensor,
+                mm_preprocess_config=SimpleNamespace(
+                    width=-1,
+                    height=-1,
+                    min_pixels=-1,
+                    max_pixels=-1,
+                    fps=-1,
+                    min_frames=-1,
+                    max_frames=-1,
+                    crop_positions=[],
+                    mm_timeout_ms=-1,
+                ),
+            )
+
+        input_pb = trans_input(
+            GenerateInput(
+                request_id=123,
+                token_ids=torch.tensor([1, 2, 3]),
+                mm_inputs=[
+                    mm_input("data:image/png;base64,iVBORw0KGgo=", torch.empty(0)),
+                ],
+                generate_config=GenerateConfig(),
+            )
+        )
+
+        (url_pb,) = input_pb.multimodal_inputs
+        self.assertEqual(url_pb.multimodal_url, "data:image/png;base64,iVBORw0KGgo=")
+        self.assertEqual(url_pb.multimodal_type, MMUrlType.IMAGE)
+        self.assertFalse(url_pb.HasField("multimodal_tensor"))
 
     def test_trans_input_serializes_typed_request_info(self):
         input_py = GenerateInput(

@@ -91,6 +91,8 @@ class GenerateInput:
     group_id: int = -1  # Batch group ID for force batch grouping, -1 means not set
     v41_inputs: Any = None
     enqueued_by_master: bool = False
+    # Preserve the SP probability request across routing retries and batch copies.
+    speculative_return_all_probs: bool = field(default=False, repr=False, kw_only=True)
     headers: Dict[str, str] = field(default_factory=dict, repr=False)
     request_info: RequestInfo = field(default_factory=RequestInfo, repr=False)
     # Internal receipt from ViT metadata, bound to the selected worker and media.

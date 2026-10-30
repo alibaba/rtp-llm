@@ -14,12 +14,13 @@
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/engine_base/schedulers/EngineScheduleInfo.h"
 #include "rtp_llm/cpp/engine_base/schedulers/SchedulerBase.h"
+#include "rtp_llm/cpp/engine_base/schedulers/SchedulerUtils.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateTypes.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 
 namespace rtp_llm {
 
-int64_t computeChunkGrant(int64_t budget, int64_t rows, int64_t remaining, int64_t block_size);
+int64_t computeChunkGrant(int64_t budget, int64_t rows, int64_t remaining, int64_t alignment, int64_t prefix = 0);
 
 class FIFOSchedulerBase: public SchedulerBase {
 public:
@@ -28,7 +29,8 @@ public:
                                const PDSepConfig&                     pd_sep_config,
                                const ParallelismConfig&               parallelism_config,
                                const std::shared_ptr<KVCacheManager>& cache_manager,
-                               const kmonitor::MetricsReporterPtr     metrics_reporter = nullptr);
+                               const kmonitor::MetricsReporterPtr     metrics_reporter = nullptr,
+                               const ModelExecutionCapacity&          execution_capacity = ModelExecutionCapacity{});
 
     ~FIFOSchedulerBase() override = default;
 
@@ -38,6 +40,7 @@ public:
     // with real group-queue semantics.
     std::pair<std::vector<bool>, std::vector<GenerateStreamPtr>>
                  enqueueGroup(const std::vector<GenerateStreamPtr>& streams) override;
+    absl::Status requestStop() override;
     absl::Status stop() override;
     bool         empty() override;
     int64_t      lastScheduleTime() override;
@@ -53,31 +56,35 @@ public:
     int64_t runningStreamsSize();
 
 protected:
-    virtual const char* schedulerName() const                                            = 0;
+    virtual const char* schedulerName() const                                      = 0;
     virtual bool        evaluateRunningMemory(const std::list<GenerateStreamPtr>& streams,
                                               const GenerateStreamPtr&            new_stream) = 0;
-    virtual bool        waitPredicate()                                                  = 0;
+    virtual bool        waitPredicate()                                            = 0;
     virtual void        onRunningStream(const GenerateStreamPtr& stream) {}
     virtual void        cancelExtraStreams() {}
-    virtual int64_t extraOnflightStreams() const {
+    virtual int64_t     extraOnflightStreams() const {
         return 0;
     }
     virtual void fillExtraMetrics(RtpLLMSchedulerMetricsCollector& collector) const {}
     virtual void appendExtraRunningTaskList(std::vector<EngineScheduleInfo::TaskInfo>& task_list) const {}
 
-    bool   checkInputLength(const GenerateStreamPtr& stream);
-    absl::Status checkChunkedPrefillRequest(const GenerateStreamPtr& stream);
-    std::list<GenerateStreamPtr> selectPrefillPrefix(std::list<GenerateStreamPtr>& active_streams);
-    void   cancelStreams(std::list<GenerateStreamPtr>& streams);
-    bool   refreshAndReapTerminalStreams(std::list<GenerateStreamPtr>& streams);
+    bool                                checkInputLength(const GenerateStreamPtr& stream);
+    bool                                checkPrefillCapacity(const GenerateStreamPtr& stream);
+    absl::Status                        checkChunkedPrefillRequest(const GenerateStreamPtr& stream);
+    std::list<GenerateStreamPtr>        selectPrefillPrefix(std::list<GenerateStreamPtr>& active_streams);
+    void                                cancelStreams(std::list<GenerateStreamPtr>& streams);
+    bool                                refreshAndReapTerminalStreams(std::list<GenerateStreamPtr>& streams);
     size_t                              evaluateAndUpdateStreams(std::list<GenerateStreamPtr>&              streams,
                                                                  const std::unordered_set<GenerateStream*>* admitted_streams = nullptr);
     std::unordered_set<GenerateStream*> evaluateWaitingStreams(std::list<GenerateStreamPtr>& waiting_streams,
                                                                bool include_running_mode = true);
-    virtual void   addStreamToNewState(const GenerateStreamPtr& stream, StreamState new_state);
-    size_t countInitedKVCacheStreams() const;
-    void   appendTaskInfos(std::vector<EngineScheduleInfo::TaskInfo>& task_list,
-                           const std::list<GenerateStreamPtr>&         streams) const;
+    virtual void                        addStreamToNewState(const GenerateStreamPtr& stream, StreamState new_state);
+    size_t                              countInitedKVCacheStreams() const;
+    bool canAdmitExecution(const GenerateStreamPtr& candidate, const std::list<GenerateStreamPtr>& admitted = {}) const;
+    virtual void                   appendExtraExecutionReservations(std::vector<GenerateStreamPtr>&) const {}
+    std::vector<GenerateStreamPtr> executionReservations() const;
+    void                                appendTaskInfos(std::vector<EngineScheduleInfo::TaskInfo>& task_list,
+                                                        const std::list<GenerateStreamPtr>&        streams) const;
 
 protected:
     PDSepConfig                     pd_sep_config_;
@@ -86,18 +93,28 @@ protected:
     std::list<GenerateStreamPtr>    running_streams_;
     std::list<GenerateStreamPtr>    new_streams_;
     std::shared_ptr<KVCacheManager> cache_manager_;
-    std::atomic<int64_t>            last_schedule_time_      = autil::TimeUtility::currentTimeInMilliSeconds();
-    size_t                          max_seq_len_             = 0;
-    size_t                          max_batch_tokens_size_   = 0;
-    size_t                          max_generate_batch_size_ = 1;
+    std::atomic<int64_t>            last_schedule_time_          = autil::TimeUtility::currentTimeInMilliSeconds();
+    size_t                          max_seq_len_                 = 0;
+    size_t                          max_batch_tokens_size_       = 0;
+    size_t                          max_generate_batch_size_     = 1;
+    int64_t                         max_prefill_tokens_          = 0;
+    int64_t                         max_execution_tokens_        = 0;
+    int64_t                         max_decode_sequences_        = 0;
+    int64_t                         max_prefill_draft_tokens_    = 0;
+    bool                            target_only_runs_draft_      = false;
+    int64_t                         execution_tp_size_           = 1;
     size_t                          max_inited_kv_cache_streams_ = 0;
-    int64_t                         prefill_chunk_size_      = 0;
-    bool                            need_fill_fake_stream_   = false;
-    std::atomic<bool>               stop_                    = false;
-    bool                            schedule_trigger_        = false;
+    int64_t                         prefill_chunk_size_          = 0;
+    int64_t                         prefill_token_alignment_     = 1;
+    int64_t                         prefill_chunk_alignment_     = 0;
+    int64_t                         prefill_chunk_cp_size_       = 0;
+    int64_t                         prefill_chunk_padded_rows_   = 0;
+    bool                            need_fill_fake_stream_       = false;
+    std::atomic<bool>               stop_                        = false;
+    bool                            schedule_trigger_            = false;
     std::mutex                      lock_;
     std::condition_variable         cond_;
-    kmonitor::MetricsReporterPtr    metrics_reporter_ = nullptr;
+    kmonitor::MetricsReporterPtr    metrics_reporter_                 = nullptr;
     int64_t                         last_admitted_context_batch_size_ = 0;
     int64_t                         last_admitted_context_token_size_ = 0;
     int64_t                         last_waiting_oldest_age_us_       = 0;

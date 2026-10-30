@@ -27,7 +27,7 @@ using TestHybridTypeCoordinatorCacheManager = BlockTreeCacheTestAllocator<Coordi
 
 namespace {
 
-// Two-group hybrid: group_id=0 linear (won't be exercised here), group_id=1 full (the CP-shard target).
+// Two-group hybrid with rank-local FULL pages and unsharded LINEAR state.
 CacheConfig makeCPHybridConfig() {
     CacheConfig config;
     config.dtype              = rtp_llm::DataType::TYPE_FP16;
@@ -95,9 +95,11 @@ TEST_F(HybridCoordinatorCacheManagerCPShardTest, PrefillNeedBlocksUsesEachGroups
     auto allocator = std::make_shared<TestHybridTypeCoordinatorCacheManager>(config, AllocationType::DEVICE);
     ASSERT_TRUE(allocator->init());
     allocator->setCPSlotMapper(std::make_shared<CPSlotMapper>(0, 2, 4));
-    auto       resource    = makeBatchRes(1, config, {});
-    auto       linear_pool = allocator->groupBlockPools()[0];
-    auto       full_pool   = allocator->groupBlockPools()[1];
+    auto        resource    = makeBatchRes(1, config, {});
+    const auto& pools       = allocator->groupBlockPools();
+    const auto& topology    = config.topology();
+    const auto& linear_pool = pools[topology.groupIdForTag("linear")];
+    const auto& full_pool   = pools[topology.groupIdForTag("full")];
     const auto linear      = linear_pool->malloc(1).value();
     const auto full        = full_pool->malloc(2).value();
     linear_pool->incRef(linear);
@@ -115,8 +117,10 @@ TEST_F(HybridCoordinatorCacheManagerCPShardTest, RecomputeDetachesSuffixUsingGro
     auto       allocator = std::make_shared<TestHybridTypeCoordinatorCacheManager>(config, AllocationType::DEVICE);
     ASSERT_TRUE(allocator->init());
     allocator->setCPSlotMapper(std::make_shared<CPSlotMapper>(0, 2, 4));
-    const auto linear_pool   = allocator->groupBlockPools()[0];
-    const auto pool          = allocator->groupBlockPools()[1];
+    const auto& pools        = allocator->groupBlockPools();
+    const auto& topology     = config.topology();
+    const auto& linear_pool  = pools[topology.groupIdForTag("linear")];
+    const auto& pool         = pools[topology.groupIdForTag("full")];
     auto       resource      = makeBatchRes(1, config, {100, 101, 102, 103});
     auto       linear_blocks = linear_pool->malloc(2);
     ASSERT_TRUE(linear_blocks.has_value());
@@ -325,6 +329,43 @@ TEST_F(HybridCoordinatorCacheManagerCPShardTest, ShardedAllocCpSize4) {
     auto result = allocator->malloc(info);
     ASSERT_TRUE(result.success);
     EXPECT_EQ(batch_res->blocksNum(0, "full"), 2);  // ceil(8/4)=2
+}
+
+TEST_F(HybridCoordinatorCacheManagerCPShardTest, InflightReservationKeepsPageRoundRobinProjection) {
+    for (const int cp_size : {2, 16}) {
+        auto config    = makeCPHybridConfig();
+        auto allocator = std::make_shared<TestHybridTypeCoordinatorCacheManager>(config, AllocationType::DEVICE);
+        ASSERT_TRUE(allocator->init());
+        allocator->setCPSlotMapper(std::make_shared<CPSlotMapper>(0, cp_size, 4));
+        auto       resource       = makeBatchRes(1, config, {});
+        const int  initial_length = cp_size * 4;
+        auto       tokens         = makeTokens(1, initial_length, 4);
+        MallocInfo info{resource, tokens};
+        info.enable_cache_lookup = false;
+        info.reuse_cache         = false;
+        ASSERT_TRUE(allocator->malloc(info).success);
+        const auto physical = resource->blocks(0, "full");
+        const auto kernel   = resource->kernelBlocks(0, "full");
+        ASSERT_EQ(physical.size(), 1u);
+        ASSERT_EQ(kernel.size(), 2u);
+
+        info.incr_seq_len_override = initial_length + 1;
+        info.preserve_inflight     = true;
+        ASSERT_TRUE(allocator->malloc(info).success);
+        const auto& grown_physical = resource->blocks(0, "full");
+        const auto& grown_kernel   = resource->kernelBlocks(0, "full");
+        ASSERT_EQ(grown_physical.size(), 2u);
+        ASSERT_EQ(grown_kernel.size(), 4u);
+        EXPECT_EQ(grown_physical[0], physical[0]);
+        EXPECT_EQ(grown_kernel[0], kernel[0]);
+        EXPECT_EQ(grown_kernel[1], kernel[1]);
+        EXPECT_EQ(grown_kernel[2], grown_physical[1] * 2);
+        EXPECT_EQ(grown_kernel[3], grown_physical[1] * 2 + 1);
+        const auto reserved = grown_physical;
+        allocator->pruneKVCache(resource, initial_length, 0, false);
+        EXPECT_EQ(resource->blocks(0, "full"), reserved);
+        allocator->free(FreeInfo{resource, nullptr});
+    }
 }
 
 }  // namespace test

@@ -536,8 +536,8 @@ concat_and_cache_ds_mla_kernel(const scalar_t* __restrict__ kv_c,  // [num_token
                                const int    kv_lora_rank,                 //
                                const int    pe_dim,                       //
                                const int    block_size,                   //
-                               const float* scale                         //
-) {
+                               const float* scale,                        //
+                               const bool   use_ue8m0) {
     const int64_t token_idx = blockIdx.x;
     const int64_t slot_idx  = slot_mapping[token_idx];
     // NOTE: slot_idx can be -1 if the token is padded
@@ -599,6 +599,9 @@ concat_and_cache_ds_mla_kernel(const scalar_t* __restrict__ kv_c,  // [num_token
     // Compute the scale for the tile
     float tile_scale = max_abs / 448.f;
     tile_scale       = fmaxf(tile_scale, FLT_MIN);
+    if (use_ue8m0) {
+        tile_scale = exp2f(ceilf(log2f(tile_scale)));
+    }
 
     // The first lane of each half-warp writes the scale to kv_cache
     if ((lane_idx == 0) || (lane_idx == 16)) {
@@ -768,7 +771,8 @@ concat_and_cache_ds_model1_kernel(const scalar_t* __restrict__ kv_c,  // [num_to
                                      kv_lora_rank,                                                                     \
                                      pe_dim,                                                                           \
                                      block_size,                                                                       \
-                                     reinterpret_cast<const float*>(scale.data_ptr()));
+                                     reinterpret_cast<const float*>(scale.data_ptr()),                                 \
+                                     use_ue8m0);
 
 #define CALL_CONCAT_AND_CACHE_DS_MODEL1(KV_T, CACHE_T, KV_DTYPE)                                                       \
     concat_and_cache_ds_model1_kernel<KV_T, CACHE_T, KV_DTYPE>                                                         \
@@ -849,7 +853,9 @@ void concat_and_cache_mla(torch::Tensor&     kv_c,          // [num_tokens, kv_l
                           torch::Tensor&     kv_cache,      // [num_blocks, block_size, (kv_lora_rank + pe_dim)]
                           torch::Tensor&     slot_mapping,  // [num_tokens] or [num_actual_tokens]
                           const std::string& kv_cache_dtype,
-                          torch::Tensor&     scale) {
+                          torch::Tensor&     scale,
+                          bool               use_ue8m0) {
+    TORCH_CHECK(!use_ue8m0 || kv_cache_dtype == "fp8_ds_mla", "power-of-two MLA cache scales require fp8_ds_mla");
     // NOTE: In vLLM V1, key.size(0) can be different from slot_mapping.size(0) because of padding
     // for CUDA graphs. We use slot_mapping.size(0) as the number of tokens for compatibility.
     int num_tokens   = slot_mapping.size(0);

@@ -174,8 +174,11 @@ class ModelConfig(CppModelConfig):
     # Known C++ ModelConfig members (from ModelConfig.h)
     # These may not be explicitly exposed via pybind11 but exist in C++
     _cpp_members = {
+        "local_kv_cache_layout",
         "num_layers",
         "max_seq_len",
+        "max_prefill_tokens",
+        "max_execution_tokens",
         "vocab_size",
         "hidden_size",
         "hidden_state_capture_layer_ids",
