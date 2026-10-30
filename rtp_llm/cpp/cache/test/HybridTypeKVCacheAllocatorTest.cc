@@ -647,6 +647,48 @@ TEST_F(HybridTypeKVCacheAllocatorTest, IncrMallocRollbackFreesPartiallyAllocated
     block_pool->requestFree(keep);
 }
 
+TEST_F(HybridTypeKVCacheAllocatorTest, FailedRolloverDoesNotRestoreReleasedOrRecycledLinearIds) {
+    for (const int reserve_step : {0, 3}) {
+        SCOPED_TRACE(testing::Message() << "reserve_step=" << reserve_step);
+        auto config                                  = makeTinyHybridConfig();
+        config.block_num                             = 8;
+        config.enable_linear_attention_request_cache = true;
+        auto allocator = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
+        allocator->setSharedBlockCache(std::make_shared<SharedBlockCache>());
+        ASSERT_TRUE(allocator->init());
+        auto pool              = allocator->getBlockPool();
+        const auto free_before = pool->freeBlocksNum();
+        auto hole              = pool->malloc(1);
+        ASSERT_EQ(hole.size(), 1u);
+
+        auto resource = makeBatchResource(
+            1, 2, static_cast<int>(config.layer_all_num), config.layer_to_group_id, CacheKeysType{100, 101, 102});
+        auto tokens   = makeCompleteTokenIds(1, /*seq_length=*/8, /*seq_size_per_block=*/4);
+        MallocInfo info{resource, tokens};
+        info.enable_device_cache = false;
+        info.reuse_cache         = false;
+        ASSERT_TRUE(allocator->malloc(info).success);
+        const auto read_state = resource->blocks(0, 0)[1];
+        pool->requestFree(hole);
+        auto blocker = pool->malloc(static_cast<int>(pool->freeBlocksNum()));
+        ASSERT_FALSE(blocker.empty());
+
+        // Without MTP, LINEAR recycles its old ID into the new tail, then FULL
+        // fails. With MTP, LINEAR itself fails after freeing the old state.
+        // Both paths must keep that old position null on rollback.
+        tokens->setSeqLength(9);
+        tokens->setReserveStep(reserve_step);
+        ASSERT_FALSE(allocator->malloc(info).success);
+        ASSERT_EQ(resource->blocksNum(0, 0), 2u);
+        EXPECT_TRUE(isNullBlockIdx(resource->blocks(0, 0)[0]));
+        EXPECT_EQ(resource->blocks(0, 0)[1], read_state);
+        EXPECT_NO_THROW(allocator->free(FreeInfo{resource, tokens}));
+        pool->requestFree(blocker);
+        EXPECT_EQ(pool->requestRefBlocksNum(), 0u);
+        EXPECT_EQ(pool->freeBlocksNum(), free_before);
+    }
+}
+
 }  // namespace test
 }  // namespace rtp_llm
 
