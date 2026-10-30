@@ -17,7 +17,9 @@ cc_library(
         "usr/lib64/nvshmem_bootstrap_uid.so",
     ],
     hdrs = _NVSHMEM_HEADERS,
-    strip_include_prefix = "usr/include",
+    # Headers are already installed under /usr/include. A virtual include tree
+    # rooted at / also exposes glibc headers through -I, which breaks CUDA 13
+    # parsing of bits/floatn*.h with GCC 13.
     visibility = ["//visibility:public"],
 )
 
@@ -25,7 +27,7 @@ cc_library(
     name = "nvshmem_device",
     srcs = ["usr/lib64/libnvshmem_device.a"],
     hdrs = _NVSHMEM_HEADERS,
-    strip_include_prefix = "usr/include",
+    # Use the system include path for the installed NVSHMEM headers; see above.
     copts = cuda_copts(),
     visibility = ["//visibility:public"],
 )

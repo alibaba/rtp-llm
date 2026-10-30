@@ -242,6 +242,7 @@ class GenericMoeLayer(nn.Module):
             "mega_moe_se",
             "mega_moe_fused",
             "mega_moe_fp8_se",
+            "gc_moe_se",
         )
         self._use_mega_moe_fused_shared = (
             moe_config.moe_strategy in fused_shared_strategies
@@ -268,8 +269,22 @@ class GenericMoeLayer(nn.Module):
             "mega_moe_fp8",
             "mega_moe_fp8_se",
             "mega_moe_fused",
+            "gc_moe",
+            "gc_moe_se",
         ):
-            if moe_config.moe_strategy == "mega_moe_se":
+            if moe_config.moe_strategy == "gc_moe_se":
+                from rtp_llm.models_py.modules.glm5_gc_moe.gc_moe_se_wrapper import (
+                    GCMoeSEWrapper,
+                )
+
+                wrapper_cls = GCMoeSEWrapper
+            elif moe_config.moe_strategy == "gc_moe":
+                from rtp_llm.models_py.modules.glm5_gc_moe.gc_moe_wrapper import (
+                    GCMoeWrapper,
+                )
+
+                wrapper_cls = GCMoeWrapper
+            elif moe_config.moe_strategy == "mega_moe_se":
                 from rtp_llm.models_py.modules.glm5_mega_moe.mega_moe_se_wrapper import (
                     MegaMoeSEWrapper,
                 )
@@ -357,7 +372,7 @@ class GenericMoeLayer(nn.Module):
             and config.model_type in ("glm_5", "glm_5_mtp")
             and parallelism_config.get_attn_tp_size() == 1
             and self.ffn_tp_size == 1
-            and moe_config.moe_strategy in ("mega_moe", "mega_moe_fp8")
+            and moe_config.moe_strategy in ("mega_moe", "mega_moe_fp8", "gc_moe")
             and self.shared_expert is not None
             and self.shared_expert_gate is None
             and not self._use_mega_moe_fused_shared
@@ -660,7 +675,7 @@ class GenericMoeDecoderLayer(nn.Module):
                 or os.environ.get("RTP_LLM_CP_KV_CROSS_LAYER", "1") == "1"
             )
             and layer_idx in config.moe_layer_index
-            and str(moe_config.moe_strategy).startswith("mega_moe")
+            and str(moe_config.moe_strategy).startswith(("mega_moe", "gc_moe"))
         )
 
         # Get quant_config from model_config

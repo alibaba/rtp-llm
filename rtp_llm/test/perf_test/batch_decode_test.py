@@ -225,6 +225,27 @@ def _effective_grid_max_seq_len(
     return max(needed_seq_len, args.max_seq_len)
 
 
+def _create_grid_query_dict(input_len_list: List[int]) -> Dict[int, str]:
+    """Create grid queries with an opt-in allowance for server-side prompt tokens."""
+    try:
+        token_offset = int(os.environ.get("PERF_QUERY_TOKEN_OFFSET", "0"))
+    except ValueError as e:
+        raise ValueError("PERF_QUERY_TOKEN_OFFSET must be an integer") from e
+    if token_offset < 0:
+        raise ValueError("PERF_QUERY_TOKEN_OFFSET must be non-negative")
+    if any(input_len <= token_offset for input_len in input_len_list):
+        raise ValueError(
+            "PERF_QUERY_TOKEN_OFFSET must be smaller than every requested input length"
+        )
+
+    content_lengths = [input_len - token_offset for input_len in input_len_list]
+    content_queries = create_query(input_len_list=content_lengths)
+    return {
+        input_len: content_queries[input_len - token_offset]
+        for input_len in input_len_list
+    }
+
+
 def _parse_grid_cases(grid_cases: str) -> Optional[List[Tuple[int, int]]]:
     if not grid_cases.strip():
         return None
@@ -355,7 +376,7 @@ def main() -> str:
             max_concurrency=max(batch_size_list),
         )
 
-        input_query_dict = create_query(input_len_list=input_len_list)
+        input_query_dict = _create_grid_query_dict(input_len_list)
         reuse_cache_query_dict = None
         if args.prefill_reuse_cache_hit_rate > 0.0 and args.partial in (0, 2):
             tokenizer_path = (

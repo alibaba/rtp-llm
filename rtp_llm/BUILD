@@ -41,6 +41,10 @@ deep = [
     "deep_ep"
 ]
 
+gc_moe = [
+    "gc_moe",
+]
+
 rtp_kernel = [
     "rtp-kernel"
 ]
@@ -145,7 +149,7 @@ requirement([
     "pybind11_stubgen",
     "xgrammar",
     "epsilon",
-] + deep + flashinfer_with_cache + flashmla + rtp_kernel + flashattn)
+] + deep + gc_moe + flashinfer_with_cache + flashmla + rtp_kernel + flashattn)
 
 
 py_library(
@@ -259,8 +263,8 @@ py_library(
         "//rtp_llm/models_py:models",
     ] + arch_dep + select({
         # cuda13 lock omits deep_ep pending rebuild → only deep_gemm here.
-        "@//:using_cuda13_x86": ["deep_gemm"],
-        "@//:using_cuda13_arm": ["deep_gemm"],
+        "@//:using_cuda13_x86": ["deep_gemm", "gc_moe"],
+        "@//:using_cuda13_arm": ["deep_gemm", "gc_moe"],
         "@//:using_cuda": deep,
         "//conditions:default": []
     }) + select({
