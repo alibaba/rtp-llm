@@ -799,6 +799,51 @@ TEST_F(CudaSamplerTest, testUnrestrictedTopPReturnsOriginalDistributionForReject
     assertTokenIn(toHostInt(output_token_ids_t), 1, {0, 1, 2});
 }
 
+TEST_F(CudaSamplerTest, testPureTopPSamplesFromReturnedDistribution) {
+    constexpr int64_t batch = 2, vocab = 8192;
+    auto              dev    = torch::TensorOptions().device(torch::kCUDA);
+    auto              logits = torch::randn({batch, vocab}, dev.dtype(torch::kFloat32));
+    logits.select(0, 0).fill_(-std::numeric_limits<float>::infinity());
+    logits.index_put_({0, 17}, 4.0f);
+
+    for (int force_topk : {0, 4096}) {
+        auto tokens = torch::zeros({batch, 2}, dev.dtype(torch::kInt32));
+        auto q      = torch::empty({batch, force_topk > 0 ? force_topk : vocab}, dev.dtype(torch::kFloat32));
+        auto candidate_ids =
+            force_topk > 0 ? torch::empty({batch, force_topk}, dev.dtype(torch::kInt32)) : torch::Tensor();
+        GreedyParams params({logits.clone(),
+                             pinnedIntTensor({-1, -1}),
+                             pinnedIntTensor({1, 1}),
+                             tokens,
+                             1,
+                             pinnedIntTensor({0, 0}),
+                             pinnedFloatTensor({0.5f, 0.95f}),
+                             pinnedFloatTensor({1.0f, 1.0f})});
+        params.output_all_probs = q;
+        if (candidate_ids.defined()) {
+            params.output_all_probs_indices = candidate_ids;
+        }
+        params.skip_logits_probs_restore = true;
+        params.force_topk                = force_topk;
+        auto generator                   = torch::make_generator<at::CUDAGeneratorImpl>();
+        generator.set_current_seed(20261030);
+        params.generator = {generator, generator};
+
+        execSampleGreedy(params);
+        check_cuda_error();
+        EXPECT_TRUE(q.sum(-1).sub(1.0f).abs().lt(1e-4).all().item<bool>());
+        if (candidate_ids.defined()) {
+            EXPECT_TRUE(candidate_ids.ge(0).logical_and(candidate_ids.lt(vocab)).all().item<bool>());
+            auto full_q = torch::zeros({batch, vocab}, q.options());
+            full_q.scatter_(1, candidate_ids.to(torch::kLong), q);
+            EXPECT_TRUE(full_q.gather(1, tokens.select(1, 1).to(torch::kLong).unsqueeze(1)).gt(0).all().item<bool>());
+        } else {
+            EXPECT_TRUE(q.gather(1, tokens.select(1, 1).to(torch::kLong).unsqueeze(1)).gt(0).all().item<bool>());
+        }
+        EXPECT_EQ(tokens.index({0, 1}).item<int32_t>(), 17);
+    }
+}
+
 TEST_F(CudaSamplerTest, testAirTopPRenormHandlesFlatRowsInMixedBatch) {
     // Regression: the DSpARK packed target-verify path scatters
     // [packed_rows, vocab] logits into a zero-filled dense buffer, so the

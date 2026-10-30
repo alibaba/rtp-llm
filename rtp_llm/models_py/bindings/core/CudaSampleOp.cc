@@ -453,8 +453,7 @@ static GreedyOutput flashinferSampleGreedy(const GreedyParams& params, const tor
         const bool compact_output = params.output_all_probs_indices.has_value();
         if (compact_output) {
             RTP_LLM_CHECK_WITH_INFO(params.output_all_probs->size(1) == params.force_topk
-                                        && params.output_all_probs_indices->sizes()
-                                               == params.output_all_probs->sizes(),
+                                        && params.output_all_probs_indices->sizes() == params.output_all_probs->sizes(),
                                     "compact sampling probabilities and candidate IDs must be [rows, force_topk]");
             return params.force_topk < params.logits.size(1) ? params.force_topk : 0;
         }
@@ -511,11 +510,11 @@ static GreedyOutput flashinferSampleGreedy(const GreedyParams& params, const tor
                             "output probability width must be in (0, padded vocab size]");
     const bool need_full_sampling_probs = output_all_probs_t.defined() && output_width < params.logits.size(1)
                                           && !params.output_all_probs_indices.has_value();
-    auto       sampling_probs_t         = force_topk > 0 ?
-                                              (params.output_all_probs_indices.has_value() ? output_all_probs_t :
-                                                                                             torch::empty_like(probs_t)) :
-                                          need_full_sampling_probs ? torch::zeros_like(params.logits) :
-                                                                     output_all_probs_t;
+    auto sampling_probs_t =
+        force_topk > 0 ?
+            (params.output_all_probs_indices.has_value() ? output_all_probs_t : torch::empty_like(probs_t)) :
+        need_full_sampling_probs ? torch::zeros_like(params.logits) :
+                                   output_all_probs_t;
 
     // top_k/top_p are CPU tensors with int32/float32 dtype
     auto top_k_ptr = top_k_t.data_ptr<int32_t>();
@@ -578,8 +577,16 @@ static GreedyOutput flashinferSampleGreedy(const GreedyParams& params, const tor
     } else if (all_top_k_no_limit) {
         const bool all_top_p_unrestricted =
             std::all_of(top_p_ptr, top_p_ptr + batch_size, [](float p) { return p == 1.0f; });
-        if (all_top_p_unrestricted) {
-            sampling_from_probs(probs_t,
+        // The compact target path returns q with candidate IDs for rejection.
+        // Sample from that q instead of searching the nucleus twice.
+        const bool sample_from_renorm = force_topk > 0 && params.skip_logits_probs_restore
+                                        && params.output_all_probs_indices.has_value() && need_renorm_probs
+                                        && !all_top_p_unrestricted;
+        if (sample_from_renorm) {
+            top_p_renorm_probs(probs_t, sampling_probs_t, top_p_t, 1.0, (int64_t)cur_stream);
+        }
+        if (all_top_p_unrestricted || sample_from_renorm) {
+            sampling_from_probs(sample_from_renorm ? sampling_probs_t : probs_t,
                                 samples_t.squeeze(0),
                                 success_t,
                                 std::nullopt,
@@ -603,7 +610,7 @@ static GreedyOutput flashinferSampleGreedy(const GreedyParams& params, const tor
                                       0,
                                       (int64_t)cur_stream);
         }
-        if (need_renorm_probs) {
+        if (need_renorm_probs && !sample_from_renorm) {
             if (all_top_p_unrestricted) {
                 sampling_probs_t.copy_(probs_t, true);
             } else {
@@ -615,9 +622,9 @@ static GreedyOutput flashinferSampleGreedy(const GreedyParams& params, const tor
         // kernel takes a top_k array, so normalize mixed batches after the
         // pure top-p route has been selected.
         std::transform(top_k_ptr, top_k_ptr + batch_size, top_k_ptr, [force_topk](int32_t k) {
-            return force_topk > 0 ? (k <= 0 ? static_cast<int32_t>(force_topk)
-                                            : std::min(k, static_cast<int32_t>(force_topk)))
-                                  : (k <= 0 ? 1 << 30 : k);
+            return force_topk > 0 ?
+                       (k <= 0 ? static_cast<int32_t>(force_topk) : std::min(k, static_cast<int32_t>(force_topk))) :
+                       (k <= 0 ? 1 << 30 : k);
         });
         const auto* device_properties = at::cuda::getDeviceProperties(probs_t.get_device());
         const bool  exact_joint_small_k =
@@ -826,13 +833,13 @@ void rejectionSampling(const RejectionSamplingParams& params) {
     // Compact DSpARK distributions are aligned to the target candidate IDs
     // before rejection; the residual then scans K candidates instead of V.
     torch::Tensor aligned_draft_probs, accept_target_probs, accept_draft_probs;
-    const bool compact = params.target_probs_indices_d.defined();
-    float* draft_probs = params.draft_probs_point_mass ? nullptr : params.draft_probs_d.data_ptr<float>();
+    const bool    compact     = params.target_probs_indices_d.defined();
+    float*        draft_probs = params.draft_probs_point_mass ? nullptr : params.draft_probs_d.data_ptr<float>();
     if (compact) {
         aligned_draft_probs = torch::empty_like(params.target_probs_d.narrow(1, 0, config.num_speculative_tokens));
-        auto accept_shape = std::vector<int64_t>{config.batch_size, config.num_speculative_tokens};
+        auto accept_shape   = std::vector<int64_t>{config.batch_size, config.num_speculative_tokens};
         accept_target_probs = torch::empty(accept_shape, params.target_probs_d.options());
-        accept_draft_probs = torch::empty(accept_shape, params.target_probs_d.options());
+        accept_draft_probs  = torch::empty(accept_shape, params.target_probs_d.options());
         check_cuda_value(invokeRemapDraftTopk(
             params.draft_probs_indices_d.defined() ? params.draft_probs_indices_d.data_ptr<int32_t>() : nullptr,
             draft_probs,
