@@ -4,7 +4,8 @@ import queue
 import threading
 import unittest
 from collections import Counter
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FutureTimeoutError
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -386,6 +387,120 @@ class BatchPipelineTest(unittest.TestCase):
         scheduler = self.scheduler(model)
         with self.assertRaisesRegex(MMSchedulerExecutionError, "upload failure"):
             scheduler.submit_and_wait([Item(0)])
+        item = Item(1)
+        scheduler.submit_and_wait([item])
+        self.assertEqual(item.embedding_result, 101)
+        self.assertEqual(model.forwarded, [[101]])
+
+    def test_poll_timeout_racing_with_success_does_not_stop_scheduler(self):
+        real_result = Future.result
+
+        def result(future, timeout=None):
+            if (
+                threading.current_thread().name == "mm-scheduler"
+                and timeout is not None
+            ):
+                # Force the old result(timeout) race: the producer succeeds just
+                # before the consumer handles its wait timeout. The fixed path
+                # waits for completion separately and reads result() untimed.
+                real_result(future, timeout=5)
+                raise FutureTimeoutError()
+            return real_result(future, timeout)
+
+        with patch.object(Future, "result", result):
+            model = Backend()
+            scheduler = self.scheduler(model)
+            for value in (0, 1):
+                item = Item(value)
+                scheduler.submit_and_wait([item])
+                self.assertEqual(item.embedding_result, value + 100)
+            self.assertFalse(scheduler._stopped.is_set())
+            self.assertTrue(scheduler._executor.is_alive())
+            self.assertTrue(scheduler.close())
+
+    def test_collection_failure_fails_dequeued_requests_and_continues(self):
+        model = Backend()
+        scheduler = MMScheduler(
+            model, max_batch_size=2, batch_wait_ms=100, prefetch_batches=1, device="cpu"
+        )
+        self.addCleanup(scheduler.close)
+        first_dequeued = threading.Event()
+        release = threading.Event()
+        self.addCleanup(release.set)
+        real_report = scheduler._report_queue_depth
+        dequeued = 0
+
+        def report():
+            nonlocal dequeued
+            if threading.current_thread().name.startswith("mm-upload"):
+                dequeued += 1
+                if dequeued == 1:
+                    first_dequeued.set()
+                    if not release.wait(5):
+                        raise RuntimeError("test release missing")
+                elif dequeued == 2:
+                    raise FutureTimeoutError("collection failure")
+            real_report()
+
+        with patch.object(scheduler, "_report_queue_depth", report):
+            first = scheduler.submit([Item(0)])
+            self.assertTrue(first_dequeued.wait(5))
+            second = scheduler.submit([Item(1)])
+            release.set()
+            for request in (first, second):
+                with self.assertRaisesRegex(
+                    MMSchedulerExecutionError, "collection failure"
+                ) as caught:
+                    scheduler.wait(request)
+                self.assertEqual(
+                    caught.exception.source_type, FutureTimeoutError.__name__
+                )
+            item = Item(2)
+            scheduler.submit_and_wait([item])
+            self.assertEqual(item.embedding_result, 102)
+        self.assertEqual(model.forwarded, [[102]])
+        self.assertTrue(scheduler._executor.is_alive())
+
+    def test_consumer_failure_only_fails_current_batch(self):
+        for error in (
+            ValueError("consumer failure"),
+            FutureTimeoutError("task timeout"),
+        ):
+            with self.subTest(error=type(error).__name__):
+                model = Backend(block=True)
+                scheduler = self.scheduler(model)
+                first = scheduler.submit([Item(0)])
+                self.assertTrue(model.entered.wait(5))
+                failed = scheduler.submit([Item(1)])
+                self.assertTrue(model.prepared_events[1].wait(5))
+                execute = scheduler._execute_batch
+
+                def fail_once(batch, prepared):
+                    scheduler._execute_batch = execute
+                    raise error
+
+                # Fail the next consumer batch outside the forward's own guard.
+                scheduler._execute_batch = fail_once
+                model.release.set()
+                scheduler.wait(first)
+                with self.assertRaisesRegex(MMSchedulerExecutionError, str(error)):
+                    scheduler.wait(failed)
+                last = Item(2)
+                scheduler.submit_and_wait([last])
+                self.assertEqual(last.embedding_result, 102)
+                self.assertTrue(scheduler.close())
+                self.assertEqual(model.closed, [0, 1, 2])
+
+    def test_prepare_timeout_is_request_failure_not_poll_timeout(self):
+        model = Backend()
+        scheduler = self.scheduler(model)
+        with patch.object(
+            model,
+            "prepare_embedding_batch",
+            side_effect=FutureTimeoutError("upload timeout"),
+        ):
+            with self.assertRaisesRegex(MMSchedulerExecutionError, "upload timeout"):
+                scheduler.submit_and_wait([Item(0)])
         item = Item(1)
         scheduler.submit_and_wait([item])
         self.assertEqual(item.embedding_result, 101)
