@@ -9,6 +9,27 @@
 
 namespace rtp_llm {
 
+RdmaMessager::~RdmaMessager() {
+    // The RPC server keeps a raw Service pointer. Join its workers, and drain
+    // outbound callbacks, before releasing the service and its RDMA owners.
+    tcp_server_.reset();
+    tcp_client_.reset();
+    service_.reset();
+    timer_manager_.reset();
+    stopMetricsReporter();
+    rdma_server_.reset();
+    rdma_client_.reset();
+}
+
+void RdmaMessager::stopMetricsReporter() {
+    if (rdma_server_) {
+        rdma_server_->stopMetricsReporter();
+    }
+    if (rdma_client_) {
+        rdma_client_->stopMetricsReporter();
+    }
+}
+
 bool RdmaMessager::init(MessagerInitParams params) {
     init_params_ = params;
 
