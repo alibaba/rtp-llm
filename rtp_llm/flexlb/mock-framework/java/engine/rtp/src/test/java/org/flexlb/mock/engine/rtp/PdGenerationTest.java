@@ -671,12 +671,12 @@ class PdGenerationTest {
                 input(d, 701, 5, 3, 3000, true), input(d, 702, 7, 3, 3000, true)));
             await(() -> d.status().getRunningTaskInfoCount() == 2 && d.status().getAvailableKvCache() < 8);
             assertFalse(accepted.isDone());
-            assertEquals(0, metric(p, "mock_engine_requests_started_total", ""));
+            assertEquals(0, metric(p, "rtp_llm_requests_started_total", ""));
             holder.close();
             var ack = accepted.get(3, TimeUnit.SECONDS);
             assertEquals(2, ack.getSuccessesCount()); assertEquals(0, ack.getErrorsCount());
             await(() -> p.status().getFinishedTaskListCount() == 2 && d.status().getFinishedTaskListCount() == 2);
-            assertEquals(1, metric(p, "mock_engine_forward_seconds_count", "role=\"prefill\""));
+            assertEquals(1, metric(p, "rtp_llm_model_forward_seconds_count", "role=\"prefill\""));
             assertEquals(32, p.status().getAvailableKvCache()); assertEquals(16, d.status().getAvailableKvCache());
         }
     }
@@ -688,7 +688,7 @@ class PdGenerationTest {
             assertEquals(1, ack.getSuccessesCount()); assertEquals(711, ack.getSuccesses(0).getRequestId());
             assertEquals(1, ack.getErrorsCount()); assertEquals(602, ack.getErrors(0).getErrorInfo().getErrorCode());
             await(() -> p.status().getFinishedTaskListCount() == 1 && d.status().getFinishedTaskListCount() == 2);
-            assertEquals(1, metric(p, "mock_engine_forward_seconds_count", "role=\"prefill\""));
+            assertEquals(1, metric(p, "rtp_llm_model_forward_seconds_count", "role=\"prefill\""));
             assertEquals(32, p.status().getAvailableKvCache()); assertEquals(16, d.status().getAvailableKvCache());
         }
     }
@@ -709,7 +709,7 @@ class PdGenerationTest {
             assertEquals(pending, ack.getErrors(0).getRequestId());
             assertEquals(8429, ack.getErrors(0).getErrorInfo().getErrorCode());
             await(() -> p.status().getFinishedTaskListCount() == 1 && d.status().getFinishedTaskListCount() == 2);
-            assertEquals(1, metric(p, "mock_engine_forward_seconds_count", "role=\"prefill\""));
+            assertEquals(1, metric(p, "rtp_llm_model_forward_seconds_count", "role=\"prefill\""));
             assertEquals(8, d.status().getAvailableKvCache());
             holder.close(); assertEquals(16, d.status().getAvailableKvCache());
         }

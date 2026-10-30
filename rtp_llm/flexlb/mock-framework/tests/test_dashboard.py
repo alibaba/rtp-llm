@@ -88,7 +88,11 @@ def test_vit_and_shared_process_resources_are_not_faked():
     rows = dashboard()['panels']
     vit = next(r for r in rows if r['title'] == 'ViT')
     assert len(vit['panels']) >= 20
-    assert all('待埋点' in p['title'] for p in vit['panels'])
+    items = {p['id']: p for p in vit['panels']}
+    assert '待埋点' not in items[300449]['title']
+    assert '待埋点' not in items[310354]['title']
+    assert '待埋点' in items[310356]['title']  # No simulated CUDA Graph.
+    assert '待埋点' in items[310350]['title']  # No image download.
     assert all('role="vit"' in t['expr'] for p in vit['panels'] for t in p['targets'])
     host = next(r for r in rows if r['title'].startswith('Engine 宿主'))
     assert all(not p['targets'] for p in host['panels'])

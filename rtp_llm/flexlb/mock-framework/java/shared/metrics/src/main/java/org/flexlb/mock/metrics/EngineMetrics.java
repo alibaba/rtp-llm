@@ -26,6 +26,7 @@ public final class EngineMetrics {
     private static final String[] LABELS = {"role"};
     private final CollectorRegistry registry = new CollectorRegistry();
     private final Map<String, String> tags;
+    private final WindowMetrics events;
     private final Counter.Child started, cacheInputs, cacheHits, contextSeconds, contextWithCacheSeconds;
     private final Map<Outcome, Counter.Child> finished = new EnumMap<>(Outcome.class);
     private final Map<String, Counter.Child> tokens = new HashMap<>();
@@ -46,6 +47,8 @@ public final class EngineMetrics {
         this.clock = Objects.requireNonNull(clock);
         prefill = role.equals("prefill");
         windowStarted = clock.getAsLong();
+        events = new WindowMetrics(role, clock);
+        events.register(registry);
         var physical = new HashMap<>(MetricTags.fromEnvironment(System.getenv()));
         physical.put("dp_rank", "0"); // The current Engine supports exactly one DP worker.
         tags = Map.copyOf(physical);
@@ -153,11 +156,13 @@ public final class EngineMetrics {
     private Counter counter(String name, String help) {
         return Counter.build().name(name).help(help).labelNames(LABELS).register(registry);
     }
+    public void observe(String name, double value) { events.observe(name, value); }
     public void started() { started.inc(); }
     public void finished(Outcome outcome) { finished.get(Objects.requireNonNull(outcome)).inc(); }
     public void cacheLookup(long input, long reused) {
         if (input < 0 || reused < 0 || reused > input) throw new IllegalArgumentException("Invalid cache observation");
         cacheInputs.inc(input); cacheHits.inc(reused);
+        events.observe("rtp_llm_kv_cache_reuse_length", reused);
     }
     public void forwardCompleted(long elapsedNanos, long plannedNanos, long input, long computed, long output) {
         if (elapsedNanos < 0 || plannedNanos < 0 || input < 0 || computed < 0 || computed > input || output < 0)

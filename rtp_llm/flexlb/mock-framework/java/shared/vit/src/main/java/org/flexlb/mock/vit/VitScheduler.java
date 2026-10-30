@@ -13,22 +13,26 @@ final class VitScheduler implements AutoCloseable {
     private record Job(List<VitCache.Claim> claims, long enqueued) {}
     private final VitConfig config;
     private final VitCache cache;
+    private final VitMetrics metrics;
     private final ArrayDeque<Job> waiting = new ArrayDeque<>();
     private final SimulatedCompute compute = new SimulatedCompute();
     private final Thread worker;
     private boolean closed;
     private RuntimeException failure;
     private int running;
-    private long forwards, batchItems, sequence;
-    private double forwardMs, theoreticalMs;
-    VitScheduler(VitConfig config, VitCache cache) {
-        this.config=config; this.cache=cache; worker=Thread.ofVirtual().name("vision-"+config.id()).start(this::run);
+    private long sequence;
+    VitScheduler(VitConfig config, VitCache cache) { this(config, cache, new VitMetrics()); }
+    VitScheduler(VitConfig config, VitCache cache, VitMetrics metrics) {
+        this.config=config; this.cache=cache; this.metrics=metrics; worker=Thread.ofVirtual().name("vision-"+config.id()).start(this::run);
     }
     synchronized void submit(List<VitCache.Claim> claims) {
         if (closed || failure != null) throw Status.UNAVAILABLE.withDescription("V scheduler stopped").asRuntimeException();
         if (claims.isEmpty()) return;
         if (config.batchSize() > 1 && claims.size() > config.batchImages()) throw MediaInput.invalid("Image count exceeds V forward budget");
-        if (waiting.size() >= config.queueSize()) throw Status.RESOURCE_EXHAUSTED.withDescription("V waiting queue full").asRuntimeException();
+        if (waiting.size() >= config.queueSize()) {
+            metrics.events.increment("py_rtp_vit_embedding_overload_qps");
+            throw Status.RESOURCE_EXHAUSTED.withDescription("V waiting queue full").asRuntimeException();
+        }
         waiting.add(new Job(List.copyOf(claims),System.nanoTime())); notifyAll();
     }
     private List<Job> next() throws InterruptedException {
@@ -62,6 +66,9 @@ final class VitScheduler implements AutoCloseable {
                 }
                 batch=selected;
                 if(batch.isEmpty()) { synchronized(this) { running=0; }continue; }
+                long started = System.nanoTime();
+                for (var job : batch) metrics.events.observe("py_rtp_vit_embedding_queue_wait_rt", (started - job.enqueued) / 1e6);
+                metrics.events.observe("py_rtp_vit_embedding_batch_size", batch.size());
                 var requests=new ArrayList<ForwardBatch.Request>();
                 for (var job:batch) {
                     var images=job.claims.stream().map(c -> new ForwardBatch.Image(c.image().key(),c.image().width(),c.image().height(),3)).toList();
@@ -71,7 +78,9 @@ final class VitScheduler implements AutoCloseable {
                 var work=new ForwardBatch(Long.toString(++sequence),List.of(new ForwardBatch.Partition(0,requests)));
                 var sample=config.compute().plan(Role.vit,config.id(),work);
                 var result=compute.submit(sample).completion().toCompletableFuture().get();
-                synchronized(this) { forwards++;batchItems+=requests.size();forwardMs+=result.elapsedNanos()/1e6;theoreticalMs+=sample.base().toNanos()/1e6;running=0; }
+                metrics.events.observe("py_rtp_vit_embedding_forward_rt", result.elapsedNanos()/1e6);
+                metrics.events.observe("mock_vit_theoretical_forward_rt", sample.planned().toNanos()/1e6);
+                synchronized(this) { running=0; }
                 Throwable error=result.state()==SimulatedCompute.State.COMPLETED?null:Status.UNAVAILABLE.withDescription("V forward cancelled").asRuntimeException();
                 for(var job:batch) for(var claim:job.claims) cache.complete(claim,error);
             }
@@ -85,11 +94,10 @@ final class VitScheduler implements AutoCloseable {
         for(var job:rest) for(var claim:job.claims) cache.complete(claim,error);
     }
     synchronized void checkHealthy() { if(failure!=null) throw failure; if(closed) throw new IllegalStateException("V scheduler closed"); }
-    synchronized String metrics() {
-        checkHealthy();return "mock_engine_requests{role=\"vit\",state=\"waiting\"} "+waiting.size()+"\nmock_engine_requests{role=\"vit\",state=\"running\"} "+running
-            +"\npy_rtp_vit_embedding_forward_rt_sum "+forwardMs+"\npy_rtp_vit_embedding_forward_rt_count "+forwards
-            +"\nmock_vit_theoretical_forward_rt_sum "+theoreticalMs+"\nmock_vit_theoretical_forward_rt_count "+forwards
-            +"\npy_rtp_vit_embedding_batch_size_sum "+batchItems+"\npy_rtp_vit_embedding_batch_size_count "+forwards+"\n";
+    synchronized Map<String, Double> snapshot() {
+        checkHealthy();
+        return Map.of("py_rtp_vit_embedding_queue_size", (double) waiting.size(),
+            "mock_vit_running_image_count", (double) running);
     }
     @Override public void close() {
         List<Job> rest;

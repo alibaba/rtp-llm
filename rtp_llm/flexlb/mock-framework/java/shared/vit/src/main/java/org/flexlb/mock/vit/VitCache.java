@@ -10,23 +10,24 @@ import java.util.concurrent.atomic.AtomicInteger;
 final class VitCache implements AutoCloseable {
     record Claim(MediaInput.Image image, CompletableFuture<MediaInput.Image> result, AtomicInteger users, boolean producer) {}
     private final VitConfig config;
+    private final VitMetrics metrics;
     private record Pending(CompletableFuture<MediaInput.Image> result, AtomicInteger users) {}
     private final Map<String, Pending> pending = new HashMap<>();
     private final LinkedHashMap<String, MediaInput.Image> device = new LinkedHashMap<>(16,.75f,true), host = new LinkedHashMap<>(16,.75f,true), hashes = new LinkedHashMap<>(16,.75f,true);
     private long deviceBytes, hostBytes, hashBytes;
-    long hits, misses, joined, evictions;
     private boolean closed;
-    VitCache(VitConfig config) { this.config = config; }
+    VitCache(VitConfig config) { this(config, new VitMetrics()); }
+    VitCache(VitConfig config, VitMetrics metrics) { this.config = config; this.metrics = metrics; }
     synchronized Claim acquire(MediaInput.Image image) {
         if (closed) throw new IllegalStateException("V cache closed");
         var result = device.get(image.key());
         if (result == null && (result = host.remove(image.key())) != null) {
             hostBytes -= bytes(result); retain(result);
         }
-        if (result != null) { hits++; return new Claim(image, CompletableFuture.completedFuture(result),new AtomicInteger(1),false); }
+        if (result != null) { metrics.events.increment("py_rtp_vit_embedding_cache_hit_qps"); return new Claim(image, CompletableFuture.completedFuture(result),new AtomicInteger(1),false); }
         var waiting = pending.get(image.key());
-        if (waiting != null) { joined++; waiting.users.incrementAndGet();return new Claim(image,waiting.result,waiting.users,false); }
-        misses++; waiting = new Pending(new CompletableFuture<>(),new AtomicInteger(1));pending.put(image.key(),waiting);
+        if (waiting != null) { metrics.events.increment("py_rtp_vit_embedding_cache_inflight_qps"); waiting.users.incrementAndGet();return new Claim(image,waiting.result,waiting.users,false); }
+        metrics.events.increment("py_rtp_vit_embedding_cache_miss_qps"); waiting = new Pending(new CompletableFuture<>(),new AtomicInteger(1));pending.put(image.key(),waiting);
         return new Claim(image,waiting.result,waiting.users,true);
     }
     void complete(Claim claim, Throwable error) {
@@ -61,8 +62,8 @@ final class VitCache implements AutoCloseable {
     }
     private void storeHost(MediaInput.Image image) {
         long bytes = bytes(image);
-        if (bytes > config.hostBytes() || config.hostBytes() == 0) { evictions++; return; }
-        while (hostBytes > config.hostBytes() - bytes) { var old = host.pollFirstEntry(); hostBytes -= bytes(old.getValue()); evictions++; }
+        if (bytes > config.hostBytes() || config.hostBytes() == 0) return;
+        while (hostBytes > config.hostBytes() - bytes) { var old = host.pollFirstEntry(); hostBytes -= bytes(old.getValue()); metrics.events.increment("py_rtp_vit_embedding_cache_eviction_qps"); }
         host.put(image.key(),image); hostBytes += bytes;
     }
     static void release(Claim claim) { if(claim.users.decrementAndGet()<0) throw new IllegalStateException("V claim released twice"); }
@@ -73,11 +74,11 @@ final class VitCache implements AutoCloseable {
     synchronized Set<String> keys() { return Set.copyOf(hashes.keySet()); }
     synchronized Set<String> deviceKeys() { return Set.copyOf(device.keySet()); }
     synchronized Set<String> hostKeys() { return Set.copyOf(host.keySet()); }
-    synchronized String metrics() {
-        return "py_rtp_vit_embedding_cache_hit_qps_total " + hits + "\npy_rtp_vit_embedding_cache_miss_qps_total " + misses
-            + "\npy_rtp_vit_embedding_cache_inflight_qps_total " + joined + "\npy_rtp_vit_embedding_cache_eviction_qps_total " + evictions
-            + "\npy_rtp_vit_embedding_cache_bytes{tier=\"gpu\"} " + deviceBytes + "\npy_rtp_vit_embedding_cache_bytes{tier=\"cpu\"} " + hostBytes
-            + "\nmock_vit_hash_cache_bytes " + hashBytes + "\n";
+    synchronized Map<String, Double> snapshot() {
+        long tokens = (deviceBytes + hostBytes) / (2L * config.hidden());
+        return Map.of("py_rtp_vit_embedding_cache_tokens", (double) tokens,
+            "py_rtp_vit_embedding_cache_bytes", (double) (deviceBytes + hostBytes),
+            "mock_vit_hash_cache_bytes", (double) hashBytes);
     }
     @Override public void close() {
         List<CompletableFuture<MediaInput.Image>> waiting;

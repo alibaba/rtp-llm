@@ -1447,7 +1447,7 @@
         {
           "id": 100215,
           "type": "timeseries",
-          "title": "请求队列排队延迟 · 待埋点",
+          "title": "请求队列排队延迟",
           "gridPos": {
             "x": 12,
             "y": 83,
@@ -1510,7 +1510,7 @@
               ]
             }
           },
-          "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。 参考 RTP-LLM 大盘 v514 / panel 215。",
+          "description": "参考 RTP-LLM 大盘 v514 / panel 215。\n已按 real 名称接入；事件 Gauge 为每次采集窗口的观测均值，QPS 为窗口事件数/实际秒数。无事件的耗时窗口不补零。",
           "links": [
             {
               "title": "RTP-LLM 原面板",
@@ -1522,7 +1522,7 @@
         {
           "id": 100234,
           "type": "timeseries",
-          "title": "first token latency · 待埋点",
+          "title": "first token latency",
           "gridPos": {
             "x": 0,
             "y": 92,
@@ -1585,7 +1585,7 @@
               ]
             }
           },
-          "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。 参考 RTP-LLM 大盘 v514 / panel 234。",
+          "description": "参考 RTP-LLM 大盘 v514 / panel 234。\n已按 real 名称接入；事件 Gauge 为每次采集窗口的观测均值，QPS 为窗口事件数/实际秒数。无事件的耗时窗口不补零。",
           "links": [
             {
               "title": "RTP-LLM 原面板",
@@ -1747,7 +1747,7 @@
         {
           "id": 100130,
           "type": "timeseries",
-          "title": "total latency · 待埋点",
+          "title": "total latency",
           "gridPos": {
             "x": 12,
             "y": 101,
@@ -1810,7 +1810,7 @@
               ]
             }
           },
-          "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。 参考 RTP-LLM 大盘 v514 / panel 130。",
+          "description": "参考 RTP-LLM 大盘 v514 / panel 130。\n已按 real 名称接入；事件 Gauge 为每次采集窗口的观测均值，QPS 为窗口事件数/实际秒数。无事件的耗时窗口不补零。",
           "links": [
             {
               "title": "RTP-LLM 原面板",
@@ -2347,7 +2347,7 @@
         {
           "id": 110588,
           "type": "timeseries",
-          "title": "stream loading cache latency · 待埋点",
+          "title": "stream loading cache latency",
           "gridPos": {
             "x": 12,
             "y": 137,
@@ -2410,7 +2410,7 @@
               ]
             }
           },
-          "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。 参考 RTP-LLM 大盘 v514 / panel 10588。",
+          "description": "参考 RTP-LLM 大盘 v514 / panel 10588。\n已按 real 名称接入；事件 Gauge 为每次采集窗口的观测均值，QPS 为窗口事件数/实际秒数。无事件的耗时窗口不补零。",
           "links": [
             {
               "title": "RTP-LLM 原面板",
@@ -2956,7 +2956,7 @@
         {
           "id": 100220,
           "type": "timeseries",
-          "title": "context_batch_size_when_has_context · 待埋点",
+          "title": "context_batch_size_when_has_context",
           "gridPos": {
             "x": 12,
             "y": 173,
@@ -3019,7 +3019,7 @@
               ]
             }
           },
-          "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。context_batch_size_when_has_context 参考 RTP-LLM 大盘 v514 / panel 220。",
+          "description": "context_batch_size_when_has_context 参考 RTP-LLM 大盘 v514 / panel 220。\n已按 real 名称接入；事件 Gauge 为每次采集窗口的观测均值，QPS 为窗口事件数/实际秒数。无事件的耗时窗口不补零。",
           "links": [
             {
               "title": "RTP-LLM 原面板",
@@ -3031,7 +3031,7 @@
         {
           "id": 100150,
           "type": "timeseries",
-          "title": "query batch size · 待埋点",
+          "title": "query batch size",
           "gridPos": {
             "x": 0,
             "y": 182,
@@ -3094,7 +3094,7 @@
               ]
             }
           },
-          "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。 参考 RTP-LLM 大盘 v514 / panel 150。",
+          "description": "参考 RTP-LLM 大盘 v514 / panel 150。\n已按 real 名称接入；事件 Gauge 为每次采集窗口的观测均值，QPS 为窗口事件数/实际秒数。无事件的耗时窗口不补零。",
           "links": [
             {
               "title": "RTP-LLM 原面板",
@@ -3181,7 +3181,7 @@
         {
           "id": 100122,
           "type": "timeseries",
-          "title": "context batch size · 待埋点",
+          "title": "context batch size",
           "gridPos": {
             "x": 0,
             "y": 191,
@@ -3244,7 +3244,7 @@
               ]
             }
           },
-          "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。 参考 RTP-LLM 大盘 v514 / panel 122。",
+          "description": "参考 RTP-LLM 大盘 v514 / panel 122。\n已按 real 名称接入；事件 Gauge 为每次采集窗口的观测均值，QPS 为窗口事件数/实际秒数。无事件的耗时窗口不补零。",
           "links": [
             {
               "title": "RTP-LLM 原面板",
@@ -3331,7 +3331,7 @@
         {
           "id": 100124,
           "type": "timeseries",
-          "title": "batch max seq len · 待埋点",
+          "title": "batch max seq len",
           "gridPos": {
             "x": 0,
             "y": 200,
@@ -3394,7 +3394,7 @@
               ]
             }
           },
-          "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。 参考 RTP-LLM 大盘 v514 / panel 124。",
+          "description": "参考 RTP-LLM 大盘 v514 / panel 124。\n已按 real 名称接入；事件 Gauge 为每次采集窗口的观测均值，QPS 为窗口事件数/实际秒数。无事件的耗时窗口不补零。",
           "links": [
             {
               "title": "RTP-LLM 原面板",
@@ -3406,7 +3406,7 @@
         {
           "id": 100226,
           "type": "timeseries",
-          "title": "batch max seq len when has context · 待埋点",
+          "title": "batch max seq len when has context",
           "gridPos": {
             "x": 12,
             "y": 200,
@@ -3469,7 +3469,7 @@
               ]
             }
           },
-          "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。 参考 RTP-LLM 大盘 v514 / panel 226。",
+          "description": "参考 RTP-LLM 大盘 v514 / panel 226。\n已按 real 名称接入；事件 Gauge 为每次采集窗口的观测均值，QPS 为窗口事件数/实际秒数。无事件的耗时窗口不补零。",
           "links": [
             {
               "title": "RTP-LLM 原面板",
@@ -3481,7 +3481,7 @@
         {
           "id": 100125,
           "type": "timeseries",
-          "title": "input token length · 待埋点",
+          "title": "input token length",
           "gridPos": {
             "x": 0,
             "y": 209,
@@ -3544,7 +3544,7 @@
               ]
             }
           },
-          "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。 参考 RTP-LLM 大盘 v514 / panel 125。",
+          "description": "参考 RTP-LLM 大盘 v514 / panel 125。\n已按 real 名称接入；事件 Gauge 为每次采集窗口的观测均值，QPS 为窗口事件数/实际秒数。无事件的耗时窗口不补零。",
           "links": [
             {
               "title": "RTP-LLM 原面板",
@@ -3556,7 +3556,7 @@
         {
           "id": 110099,
           "type": "timeseries",
-          "title": "context batch size / max agg · 待埋点",
+          "title": "context batch size / max agg",
           "gridPos": {
             "x": 12,
             "y": 209,
@@ -3619,7 +3619,7 @@
               ]
             }
           },
-          "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。 参考 RTP-LLM 大盘 v514 / panel 10099。",
+          "description": "参考 RTP-LLM 大盘 v514 / panel 10099。\n已按 real 名称接入；事件 Gauge 为每次采集窗口的观测均值，QPS 为窗口事件数/实际秒数。无事件的耗时窗口不补零。",
           "links": [
             {
               "title": "RTP-LLM 原面板",
@@ -3856,7 +3856,7 @@
         {
           "id": 100227,
           "type": "timeseries",
-          "title": "execute token size when has context · 待埋点",
+          "title": "execute token size when has context",
           "gridPos": {
             "x": 12,
             "y": 227,
@@ -3919,7 +3919,7 @@
               ]
             }
           },
-          "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。 参考 RTP-LLM 大盘 v514 / panel 227。",
+          "description": "参考 RTP-LLM 大盘 v514 / panel 227。\n已按 real 名称接入；事件 Gauge 为每次采集窗口的观测均值，QPS 为窗口事件数/实际秒数。无事件的耗时窗口不补零。",
           "links": [
             {
               "title": "RTP-LLM 原面板",
@@ -3931,7 +3931,7 @@
         {
           "id": 100146,
           "type": "timeseries",
-          "title": "execute token size · 待埋点",
+          "title": "execute token size",
           "gridPos": {
             "x": 0,
             "y": 236,
@@ -3994,7 +3994,7 @@
               ]
             }
           },
-          "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。 参考 RTP-LLM 大盘 v514 / panel 146。",
+          "description": "参考 RTP-LLM 大盘 v514 / panel 146。\n已按 real 名称接入；事件 Gauge 为每次采集窗口的观测均值，QPS 为窗口事件数/实际秒数。无事件的耗时窗口不补零。",
           "links": [
             {
               "title": "RTP-LLM 原面板",
@@ -6230,7 +6230,7 @@
         {
           "id": 100147,
           "type": "timeseries",
-          "title": "实际的总reuse len · 待埋点",
+          "title": "实际的总reuse len",
           "gridPos": {
             "x": 0,
             "y": 382,
@@ -6293,7 +6293,7 @@
               ]
             }
           },
-          "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。 参考 RTP-LLM 大盘 v514 / panel 147。",
+          "description": "参考 RTP-LLM 大盘 v514 / panel 147。\n已按 real 名称接入；事件 Gauge 为每次采集窗口的观测均值，QPS 为窗口事件数/实际秒数。无事件的耗时窗口不补零。",
           "links": [
             {
               "title": "RTP-LLM 原面板",
@@ -11527,7 +11527,7 @@
         {
           "id": 200215,
           "type": "timeseries",
-          "title": "请求队列排队延迟 · 待埋点",
+          "title": "请求队列排队延迟",
           "gridPos": {
             "x": 12,
             "y": 701,
@@ -11590,7 +11590,7 @@
               ]
             }
           },
-          "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。 参考 RTP-LLM 大盘 v514 / panel 215。",
+          "description": "参考 RTP-LLM 大盘 v514 / panel 215。\n已按 real 名称接入；事件 Gauge 为每次采集窗口的观测均值，QPS 为窗口事件数/实际秒数。无事件的耗时窗口不补零。",
           "links": [
             {
               "title": "RTP-LLM 原面板",
@@ -11602,7 +11602,7 @@
         {
           "id": 200234,
           "type": "timeseries",
-          "title": "first token latency · 待埋点",
+          "title": "first token latency",
           "gridPos": {
             "x": 0,
             "y": 710,
@@ -11665,7 +11665,7 @@
               ]
             }
           },
-          "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。 参考 RTP-LLM 大盘 v514 / panel 234。",
+          "description": "参考 RTP-LLM 大盘 v514 / panel 234。\n已按 real 名称接入；事件 Gauge 为每次采集窗口的观测均值，QPS 为窗口事件数/实际秒数。无事件的耗时窗口不补零。",
           "links": [
             {
               "title": "RTP-LLM 原面板",
@@ -11827,7 +11827,7 @@
         {
           "id": 200130,
           "type": "timeseries",
-          "title": "total latency · 待埋点",
+          "title": "total latency",
           "gridPos": {
             "x": 12,
             "y": 719,
@@ -11890,7 +11890,7 @@
               ]
             }
           },
-          "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。 参考 RTP-LLM 大盘 v514 / panel 130。",
+          "description": "参考 RTP-LLM 大盘 v514 / panel 130。\n已按 real 名称接入；事件 Gauge 为每次采集窗口的观测均值，QPS 为窗口事件数/实际秒数。无事件的耗时窗口不补零。",
           "links": [
             {
               "title": "RTP-LLM 原面板",
@@ -12427,7 +12427,7 @@
         {
           "id": 210588,
           "type": "timeseries",
-          "title": "stream loading cache latency · 待埋点",
+          "title": "stream loading cache latency",
           "gridPos": {
             "x": 12,
             "y": 755,
@@ -12490,7 +12490,7 @@
               ]
             }
           },
-          "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。 参考 RTP-LLM 大盘 v514 / panel 10588。",
+          "description": "参考 RTP-LLM 大盘 v514 / panel 10588。\n已按 real 名称接入；事件 Gauge 为每次采集窗口的观测均值，QPS 为窗口事件数/实际秒数。无事件的耗时窗口不补零。",
           "links": [
             {
               "title": "RTP-LLM 原面板",
@@ -13111,7 +13111,7 @@
         {
           "id": 200221,
           "type": "timeseries",
-          "title": "generate_batch_size_when_has_context · 待埋点",
+          "title": "generate_batch_size_when_has_context",
           "gridPos": {
             "x": 0,
             "y": 800,
@@ -13174,7 +13174,7 @@
               ]
             }
           },
-          "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。generate_batch_size_when_has_context 参考 RTP-LLM 大盘 v514 / panel 221。",
+          "description": "generate_batch_size_when_has_context 参考 RTP-LLM 大盘 v514 / panel 221。\n已按 real 名称接入；事件 Gauge 为每次采集窗口的观测均值，QPS 为窗口事件数/实际秒数。无事件的耗时窗口不补零。",
           "links": [
             {
               "title": "RTP-LLM 原面板",
@@ -13186,7 +13186,7 @@
         {
           "id": 200149,
           "type": "timeseries",
-          "title": "iterate count · 待埋点",
+          "title": "iterate count",
           "gridPos": {
             "x": 12,
             "y": 800,
@@ -13249,7 +13249,7 @@
               ]
             }
           },
-          "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。 参考 RTP-LLM 大盘 v514 / panel 149。",
+          "description": "参考 RTP-LLM 大盘 v514 / panel 149。\n已按 real 名称接入；事件 Gauge 为每次采集窗口的观测均值，QPS 为窗口事件数/实际秒数。无事件的耗时窗口不补零。",
           "links": [
             {
               "title": "RTP-LLM 原面板",
@@ -13261,7 +13261,7 @@
         {
           "id": 200150,
           "type": "timeseries",
-          "title": "query batch size · 待埋点",
+          "title": "query batch size",
           "gridPos": {
             "x": 0,
             "y": 809,
@@ -13324,7 +13324,7 @@
               ]
             }
           },
-          "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。 参考 RTP-LLM 大盘 v514 / panel 150。",
+          "description": "参考 RTP-LLM 大盘 v514 / panel 150。\n已按 real 名称接入；事件 Gauge 为每次采集窗口的观测均值，QPS 为窗口事件数/实际秒数。无事件的耗时窗口不补零。",
           "links": [
             {
               "title": "RTP-LLM 原面板",
@@ -13486,7 +13486,7 @@
         {
           "id": 200124,
           "type": "timeseries",
-          "title": "batch max seq len · 待埋点",
+          "title": "batch max seq len",
           "gridPos": {
             "x": 12,
             "y": 818,
@@ -13549,7 +13549,7 @@
               ]
             }
           },
-          "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。 参考 RTP-LLM 大盘 v514 / panel 124。",
+          "description": "参考 RTP-LLM 大盘 v514 / panel 124。\n已按 real 名称接入；事件 Gauge 为每次采集窗口的观测均值，QPS 为窗口事件数/实际秒数。无事件的耗时窗口不补零。",
           "links": [
             {
               "title": "RTP-LLM 原面板",
@@ -13561,7 +13561,7 @@
         {
           "id": 200226,
           "type": "timeseries",
-          "title": "batch max seq len when has context · 待埋点",
+          "title": "batch max seq len when has context",
           "gridPos": {
             "x": 0,
             "y": 827,
@@ -13624,7 +13624,7 @@
               ]
             }
           },
-          "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。 参考 RTP-LLM 大盘 v514 / panel 226。",
+          "description": "参考 RTP-LLM 大盘 v514 / panel 226。\n已按 real 名称接入；事件 Gauge 为每次采集窗口的观测均值，QPS 为窗口事件数/实际秒数。无事件的耗时窗口不补零。",
           "links": [
             {
               "title": "RTP-LLM 原面板",
@@ -13636,7 +13636,7 @@
         {
           "id": 200125,
           "type": "timeseries",
-          "title": "input token length · 待埋点",
+          "title": "input token length",
           "gridPos": {
             "x": 12,
             "y": 827,
@@ -13699,7 +13699,7 @@
               ]
             }
           },
-          "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。 参考 RTP-LLM 大盘 v514 / panel 125。",
+          "description": "参考 RTP-LLM 大盘 v514 / panel 125。\n已按 real 名称接入；事件 Gauge 为每次采集窗口的观测均值，QPS 为窗口事件数/实际秒数。无事件的耗时窗口不补零。",
           "links": [
             {
               "title": "RTP-LLM 原面板",
@@ -13711,7 +13711,7 @@
         {
           "id": 200123,
           "type": "timeseries",
-          "title": "generate batch size · 待埋点",
+          "title": "generate batch size",
           "gridPos": {
             "x": 0,
             "y": 836,
@@ -13774,7 +13774,7 @@
               ]
             }
           },
-          "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。 参考 RTP-LLM 大盘 v514 / panel 123。",
+          "description": "参考 RTP-LLM 大盘 v514 / panel 123。\n已按 real 名称接入；事件 Gauge 为每次采集窗口的观测均值，QPS 为窗口事件数/实际秒数。无事件的耗时窗口不补零。",
           "links": [
             {
               "title": "RTP-LLM 原面板",
@@ -13861,7 +13861,7 @@
         {
           "id": 200145,
           "type": "timeseries",
-          "title": "output token length (AVG 平均值) · 待埋点",
+          "title": "output token length (AVG 平均值)",
           "gridPos": {
             "x": 0,
             "y": 845,
@@ -13924,7 +13924,7 @@
               ]
             }
           },
-          "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。 参考 RTP-LLM 大盘 v514 / panel 145。",
+          "description": "参考 RTP-LLM 大盘 v514 / panel 145。\n已按 real 名称接入；事件 Gauge 为每次采集窗口的观测均值，QPS 为窗口事件数/实际秒数。无事件的耗时窗口不补零。",
           "links": [
             {
               "title": "RTP-LLM 原面板",
@@ -13936,7 +13936,7 @@
         {
           "id": 200439,
           "type": "timeseries",
-          "title": "output token length (Max 最大值) · 待埋点",
+          "title": "output token length (Max 最大值)",
           "gridPos": {
             "x": 12,
             "y": 845,
@@ -13999,7 +13999,7 @@
               ]
             }
           },
-          "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。 参考 RTP-LLM 大盘 v514 / panel 439。",
+          "description": "参考 RTP-LLM 大盘 v514 / panel 439。\n已按 real 名称接入；事件 Gauge 为每次采集窗口的观测均值，QPS 为窗口事件数/实际秒数。无事件的耗时窗口不补零。",
           "links": [
             {
               "title": "RTP-LLM 原面板",
@@ -14011,7 +14011,7 @@
         {
           "id": 200227,
           "type": "timeseries",
-          "title": "execute token size when has context · 待埋点",
+          "title": "execute token size when has context",
           "gridPos": {
             "x": 0,
             "y": 854,
@@ -14074,7 +14074,7 @@
               ]
             }
           },
-          "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。 参考 RTP-LLM 大盘 v514 / panel 227。",
+          "description": "参考 RTP-LLM 大盘 v514 / panel 227。\n已按 real 名称接入；事件 Gauge 为每次采集窗口的观测均值，QPS 为窗口事件数/实际秒数。无事件的耗时窗口不补零。",
           "links": [
             {
               "title": "RTP-LLM 原面板",
@@ -14086,7 +14086,7 @@
         {
           "id": 200146,
           "type": "timeseries",
-          "title": "execute token size · 待埋点",
+          "title": "execute token size",
           "gridPos": {
             "x": 12,
             "y": 854,
@@ -14149,7 +14149,7 @@
               ]
             }
           },
-          "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。 参考 RTP-LLM 大盘 v514 / panel 146。",
+          "description": "参考 RTP-LLM 大盘 v514 / panel 146。\n已按 real 名称接入；事件 Gauge 为每次采集窗口的观测均值，QPS 为窗口事件数/实际秒数。无事件的耗时窗口不补零。",
           "links": [
             {
               "title": "RTP-LLM 原面板",
@@ -14161,7 +14161,7 @@
         {
           "id": 200219,
           "type": "timeseries",
-          "title": "output token length(timeout) · 待埋点",
+          "title": "output token length(timeout)",
           "gridPos": {
             "x": 0,
             "y": 863,
@@ -14224,7 +14224,7 @@
               ]
             }
           },
-          "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。 参考 RTP-LLM 大盘 v514 / panel 219。",
+          "description": "参考 RTP-LLM 大盘 v514 / panel 219。\n已按 real 名称接入；事件 Gauge 为每次采集窗口的观测均值，QPS 为窗口事件数/实际秒数。无事件的耗时窗口不补零。",
           "links": [
             {
               "title": "RTP-LLM 原面板",
@@ -20946,7 +20946,7 @@
         {
           "id": 300449,
           "type": "timeseries",
-          "title": "vit qps · 待埋点",
+          "title": "vit qps",
           "gridPos": {
             "x": 0,
             "y": 1293,
@@ -21009,7 +21009,7 @@
               ]
             }
           },
-          "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。 参考 RTP-LLM 大盘 v514 / panel 449。",
+          "description": "参考 RTP-LLM 大盘 v514 / panel 449。\n已按 real 名称接入；事件 Gauge 为每次采集窗口的观测均值，QPS 为窗口事件数/实际秒数。无事件的耗时窗口不补零。",
           "links": [
             {
               "title": "RTP-LLM 原面板",
@@ -21021,7 +21021,7 @@
         {
           "id": 300458,
           "type": "timeseries",
-          "title": "vit success qps · 待埋点",
+          "title": "vit success qps",
           "gridPos": {
             "x": 12,
             "y": 1293,
@@ -21084,7 +21084,7 @@
               ]
             }
           },
-          "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。 参考 RTP-LLM 大盘 v514 / panel 458。",
+          "description": "参考 RTP-LLM 大盘 v514 / panel 458。\n已按 real 名称接入；事件 Gauge 为每次采集窗口的观测均值，QPS 为窗口事件数/实际秒数。无事件的耗时窗口不补零。",
           "links": [
             {
               "title": "RTP-LLM 原面板",
@@ -21096,7 +21096,7 @@
         {
           "id": 300457,
           "type": "timeseries",
-          "title": "vit error qps · 待埋点",
+          "title": "vit error qps",
           "gridPos": {
             "x": 0,
             "y": 1302,
@@ -21159,7 +21159,7 @@
               ]
             }
           },
-          "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。 参考 RTP-LLM 大盘 v514 / panel 457。",
+          "description": "参考 RTP-LLM 大盘 v514 / panel 457。\n已按 real 名称接入；事件 Gauge 为每次采集窗口的观测均值，QPS 为窗口事件数/实际秒数。无事件的耗时窗口不补零。",
           "links": [
             {
               "title": "RTP-LLM 原面板",
@@ -21480,7 +21480,7 @@
         {
           "id": 310366,
           "type": "timeseries",
-          "title": "vit images total num · 待埋点",
+          "title": "vit images total num",
           "gridPos": {
             "x": 12,
             "y": 1320,
@@ -21543,7 +21543,7 @@
               ]
             }
           },
-          "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。 参考 RTP-LLM 大盘 v514 / panel 10366。",
+          "description": "参考 RTP-LLM 大盘 v514 / panel 10366。\n已按 real 名称接入；事件 Gauge 为每次采集窗口的观测均值，QPS 为窗口事件数/实际秒数。无事件的耗时窗口不补零。",
           "links": [
             {
               "title": "RTP-LLM 原面板",
@@ -21555,7 +21555,7 @@
         {
           "id": 300456,
           "type": "timeseries",
-          "title": "vit embedding rt · 待埋点",
+          "title": "vit embedding rt",
           "gridPos": {
             "x": 0,
             "y": 1329,
@@ -21618,7 +21618,7 @@
               ]
             }
           },
-          "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。 参考 RTP-LLM 大盘 v514 / panel 456。",
+          "description": "参考 RTP-LLM 大盘 v514 / panel 456。\n已按 real 名称接入；事件 Gauge 为每次采集窗口的观测均值，QPS 为窗口事件数/实际秒数。无事件的耗时窗口不补零。",
           "links": [
             {
               "title": "RTP-LLM 原面板",
@@ -21705,7 +21705,7 @@
         {
           "id": 310353,
           "type": "timeseries",
-          "title": "vit embedding length · 待埋点",
+          "title": "vit embedding length",
           "gridPos": {
             "x": 0,
             "y": 1338,
@@ -21768,7 +21768,7 @@
               ]
             }
           },
-          "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。 参考 RTP-LLM 大盘 v514 / panel 10353。",
+          "description": "参考 RTP-LLM 大盘 v514 / panel 10353。\n已按 real 名称接入；事件 Gauge 为每次采集窗口的观测均值，QPS 为窗口事件数/实际秒数。无事件的耗时窗口不补零。",
           "links": [
             {
               "title": "RTP-LLM 原面板",
@@ -21780,7 +21780,7 @@
         {
           "id": 310354,
           "type": "timeseries",
-          "title": "vit embedding waiting queue size · 待埋点",
+          "title": "vit embedding waiting queue size",
           "gridPos": {
             "x": 12,
             "y": 1338,
@@ -21843,7 +21843,7 @@
               ]
             }
           },
-          "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。 参考 RTP-LLM 大盘 v514 / panel 10354。",
+          "description": "参考 RTP-LLM 大盘 v514 / panel 10354。\n已按 real 名称接入；事件 Gauge 为每次采集窗口的观测均值，QPS 为窗口事件数/实际秒数。无事件的耗时窗口不补零。",
           "links": [
             {
               "title": "RTP-LLM 原面板",
@@ -21855,7 +21855,7 @@
         {
           "id": 310355,
           "type": "timeseries",
-          "title": "vit embedding waiting time · 待埋点",
+          "title": "vit embedding waiting time",
           "gridPos": {
             "x": 0,
             "y": 1347,
@@ -21918,7 +21918,7 @@
               ]
             }
           },
-          "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。 参考 RTP-LLM 大盘 v514 / panel 10355。",
+          "description": "参考 RTP-LLM 大盘 v514 / panel 10355。\n已按 real 名称接入；事件 Gauge 为每次采集窗口的观测均值，QPS 为窗口事件数/实际秒数。无事件的耗时窗口不补零。",
           "links": [
             {
               "title": "RTP-LLM 原面板",
@@ -22230,7 +22230,7 @@
         {
           "id": 310360,
           "type": "timeseries",
-          "title": "vit embedding cache hit qps · 待埋点",
+          "title": "vit embedding cache hit qps",
           "gridPos": {
             "x": 12,
             "y": 1365,
@@ -22293,7 +22293,7 @@
               ]
             }
           },
-          "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。 参考 RTP-LLM 大盘 v514 / panel 10360。",
+          "description": "参考 RTP-LLM 大盘 v514 / panel 10360。\n已按 real 名称接入；事件 Gauge 为每次采集窗口的观测均值，QPS 为窗口事件数/实际秒数。无事件的耗时窗口不补零。",
           "links": [
             {
               "title": "RTP-LLM 原面板",
@@ -22305,7 +22305,7 @@
         {
           "id": 310361,
           "type": "timeseries",
-          "title": "vit embedding cache miss qps · 待埋点",
+          "title": "vit embedding cache miss qps",
           "gridPos": {
             "x": 0,
             "y": 1374,
@@ -22368,7 +22368,7 @@
               ]
             }
           },
-          "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。 参考 RTP-LLM 大盘 v514 / panel 10361。",
+          "description": "参考 RTP-LLM 大盘 v514 / panel 10361。\n已按 real 名称接入；事件 Gauge 为每次采集窗口的观测均值，QPS 为窗口事件数/实际秒数。无事件的耗时窗口不补零。",
           "links": [
             {
               "title": "RTP-LLM 原面板",
@@ -22380,7 +22380,7 @@
         {
           "id": 310362,
           "type": "timeseries",
-          "title": "vit embedding cache inflight qps · 待埋点",
+          "title": "vit embedding cache inflight qps",
           "gridPos": {
             "x": 12,
             "y": 1374,
@@ -22443,7 +22443,7 @@
               ]
             }
           },
-          "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。 参考 RTP-LLM 大盘 v514 / panel 10362。",
+          "description": "参考 RTP-LLM 大盘 v514 / panel 10362。\n已按 real 名称接入；事件 Gauge 为每次采集窗口的观测均值，QPS 为窗口事件数/实际秒数。无事件的耗时窗口不补零。",
           "links": [
             {
               "title": "RTP-LLM 原面板",
@@ -22455,7 +22455,7 @@
         {
           "id": 310367,
           "type": "timeseries",
-          "title": "vit embedding cache tokens · 待埋点",
+          "title": "vit embedding cache tokens",
           "gridPos": {
             "x": 0,
             "y": 1383,
@@ -22518,7 +22518,7 @@
               ]
             }
           },
-          "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。 参考 RTP-LLM 大盘 v514 / panel 10367。",
+          "description": "参考 RTP-LLM 大盘 v514 / panel 10367。\n已按 real 名称接入；事件 Gauge 为每次采集窗口的观测均值，QPS 为窗口事件数/实际秒数。无事件的耗时窗口不补零。",
           "links": [
             {
               "title": "RTP-LLM 原面板",
@@ -22976,6 +22976,355 @@
               "targetBlank": true
             }
           ]
+        },
+        {
+          "id": 390001,
+          "type": "timeseries",
+          "title": "ViT forward · 实际 / 计划",
+          "gridPos": {
+            "x": 0,
+            "y": 1353,
+            "w": 8,
+            "h": 6
+          },
+          "datasource": {
+            "type": "prometheus",
+            "uid": "mock-prometheus"
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "expr": "avg by(${vit_group})(py_rtp_vit_embedding_forward_rt{instance=~\"${vit_instance}\",role=\"vit\"})",
+              "legendFormat": "实际 · {{${vit_group}}}",
+              "datasource": {
+                "type": "prometheus",
+                "uid": "mock-prometheus"
+              }
+            },
+            {
+              "refId": "B",
+              "expr": "avg by(${vit_group})(mock_vit_theoretical_forward_rt{instance=~\"${vit_instance}\",role=\"vit\"})",
+              "legendFormat": "计划 · {{${vit_group}}}",
+              "datasource": {
+                "type": "prometheus",
+                "uid": "mock-prometheus"
+              }
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "ms",
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "drawStyle": "line",
+                "lineInterpolation": "linear",
+                "lineWidth": 2,
+                "fillOpacity": 0,
+                "showPoints": "auto",
+                "spanNulls": false
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "tooltip": {
+              "mode": "multi",
+              "sort": "none"
+            },
+            "legend": {
+              "displayMode": "table",
+              "placement": "bottom",
+              "calcs": [
+                "mean",
+                "max",
+                "lastNotNull"
+              ]
+            }
+          },
+          "description": "来自 real 的 ViT scheduler/cache 观测边界；计划耗时仅为 Mock 模拟配置。缓存字节是逻辑预算，不是 JVM 实际内存或 GPU 显存。"
+        },
+        {
+          "id": 390002,
+          "type": "timeseries",
+          "title": "ViT forward · 合并请求数",
+          "gridPos": {
+            "x": 8,
+            "y": 1353,
+            "w": 8,
+            "h": 6
+          },
+          "datasource": {
+            "type": "prometheus",
+            "uid": "mock-prometheus"
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "expr": "avg by(${vit_group})(py_rtp_vit_embedding_batch_size{instance=~\"${vit_instance}\",role=\"vit\"})",
+              "legendFormat": "请求数 · {{${vit_group}}}",
+              "datasource": {
+                "type": "prometheus",
+                "uid": "mock-prometheus"
+              }
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "drawStyle": "line",
+                "lineInterpolation": "linear",
+                "lineWidth": 2,
+                "fillOpacity": 0,
+                "showPoints": "auto",
+                "spanNulls": false
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "tooltip": {
+              "mode": "multi",
+              "sort": "none"
+            },
+            "legend": {
+              "displayMode": "table",
+              "placement": "bottom",
+              "calcs": [
+                "mean",
+                "max",
+                "lastNotNull"
+              ]
+            }
+          },
+          "description": "来自 real 的 ViT scheduler/cache 观测边界；计划耗时仅为 Mock 模拟配置。缓存字节是逻辑预算，不是 JVM 实际内存或 GPU 显存。"
+        },
+        {
+          "id": 390003,
+          "type": "timeseries",
+          "title": "ViT 缓存 · 逻辑驻留字节",
+          "gridPos": {
+            "x": 16,
+            "y": 1353,
+            "w": 8,
+            "h": 6
+          },
+          "datasource": {
+            "type": "prometheus",
+            "uid": "mock-prometheus"
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "expr": "avg by(${vit_group})(py_rtp_vit_embedding_cache_bytes{instance=~\"${vit_instance}\",role=\"vit\"})",
+              "legendFormat": "驻留 · {{${vit_group}}}",
+              "datasource": {
+                "type": "prometheus",
+                "uid": "mock-prometheus"
+              }
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "bytes",
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "drawStyle": "line",
+                "lineInterpolation": "linear",
+                "lineWidth": 2,
+                "fillOpacity": 0,
+                "showPoints": "auto",
+                "spanNulls": false
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "tooltip": {
+              "mode": "multi",
+              "sort": "none"
+            },
+            "legend": {
+              "displayMode": "table",
+              "placement": "bottom",
+              "calcs": [
+                "mean",
+                "max",
+                "lastNotNull"
+              ]
+            }
+          },
+          "description": "来自 real 的 ViT scheduler/cache 观测边界；计划耗时仅为 Mock 模拟配置。缓存字节是逻辑预算，不是 JVM 实际内存或 GPU 显存。"
+        },
+        {
+          "id": 390004,
+          "type": "timeseries",
+          "title": "ViT 缓存淘汰 QPS",
+          "gridPos": {
+            "x": 0,
+            "y": 1359,
+            "w": 8,
+            "h": 6
+          },
+          "datasource": {
+            "type": "prometheus",
+            "uid": "mock-prometheus"
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "expr": "avg by(${vit_group})(py_rtp_vit_embedding_cache_eviction_qps{instance=~\"${vit_instance}\",role=\"vit\"})",
+              "legendFormat": "淘汰 · {{${vit_group}}}",
+              "datasource": {
+                "type": "prometheus",
+                "uid": "mock-prometheus"
+              }
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "reqps",
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "drawStyle": "line",
+                "lineInterpolation": "linear",
+                "lineWidth": 2,
+                "fillOpacity": 0,
+                "showPoints": "auto",
+                "spanNulls": false
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "tooltip": {
+              "mode": "multi",
+              "sort": "none"
+            },
+            "legend": {
+              "displayMode": "table",
+              "placement": "bottom",
+              "calcs": [
+                "mean",
+                "max",
+                "lastNotNull"
+              ]
+            }
+          },
+          "description": "来自 real 的 ViT scheduler/cache 观测边界；计划耗时仅为 Mock 模拟配置。缓存字节是逻辑预算，不是 JVM 实际内存或 GPU 显存。"
+        },
+        {
+          "id": 390005,
+          "type": "timeseries",
+          "title": "ViT Embedding 排队拒绝 QPS",
+          "gridPos": {
+            "x": 8,
+            "y": 1359,
+            "w": 8,
+            "h": 6
+          },
+          "datasource": {
+            "type": "prometheus",
+            "uid": "mock-prometheus"
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "expr": "avg by(${vit_group})(py_rtp_vit_embedding_overload_qps{instance=~\"${vit_instance}\",role=\"vit\"})",
+              "legendFormat": "拒绝 · {{${vit_group}}}",
+              "datasource": {
+                "type": "prometheus",
+                "uid": "mock-prometheus"
+              }
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "reqps",
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "drawStyle": "line",
+                "lineInterpolation": "linear",
+                "lineWidth": 2,
+                "fillOpacity": 0,
+                "showPoints": "auto",
+                "spanNulls": false
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "tooltip": {
+              "mode": "multi",
+              "sort": "none"
+            },
+            "legend": {
+              "displayMode": "table",
+              "placement": "bottom",
+              "calcs": [
+                "mean",
+                "max",
+                "lastNotNull"
+              ]
+            }
+          },
+          "description": "来自 real 的 ViT scheduler/cache 观测边界；计划耗时仅为 Mock 模拟配置。缓存字节是逻辑预算，不是 JVM 实际内存或 GPU 显存。"
         }
       ],
       "gridPos": {

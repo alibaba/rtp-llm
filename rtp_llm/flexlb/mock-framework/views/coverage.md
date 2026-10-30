@@ -17,11 +17,11 @@
 | prefill | 231 | model forward rt | 已上报 | rtp_llm_model_forward_us |
 | prefill | 10081 | wall tps report interval | 已上报 | rtp_llm_wall_tps_report_interval_us |
 | prefill | 159 | gather model input rt | 待埋点 | rtp_llm_gather_model_input_us |
-| prefill | 215 | 请求队列排队延迟 | 待埋点 | rtp_llm_wait_latency_us |
-| prefill | 234 | first token latency | 待埋点 | rtp_llm_first_token_latency_us |
+| prefill | 215 | 请求队列排队延迟 | 已上报 | rtp_llm_wait_latency_us |
+| prefill | 234 | first token latency | 已上报 | rtp_llm_first_token_latency_us |
 | prefill | 121 | framework qps | 已上报 | rtp_llm_framework_qps |
 | prefill | 162 | framework cancel qps | 待埋点 | rtp_llm_rpc_cancel_qps |
-| prefill | 130 | total latency | 待埋点 | rtp_llm_latency_us |
+| prefill | 130 | total latency | 已上报 | rtp_llm_latency_us |
 | prefill | 131 | pause latency | 待埋点 | rtp_llm_pause_latency_us |
 | prefill | 233 | dispatch output rt | 待埋点 | rtp_llm_dispatch_output_us_metric |
 | prefill | 230 | tp sync input rt | 待埋点 | rtp_llm_tp_sync_input_us |
@@ -29,7 +29,7 @@
 | prefill | 161 | framework error qps | 已上报 | rtp_llm_framework_error_qps |
 | prefill | 217 | 请求超时时间 | 待埋点 | rtp_llm_timeout_lantency_us |
 | prefill | 10587 | stream canrun to running latency | 待埋点 | rtp_llm_stream_canrun_to_running_us |
-| prefill | 10588 | stream loading cache latency | 待埋点 | rtp_llm_stream_loading_cache_latency_us |
+| prefill | 10588 | stream loading cache latency | 已上报 | rtp_llm_stream_loading_cache_latency_us |
 | prefill | 10098 | model inputs dump latency | 待埋点 | rtp_llm_model_inputs_log_us |
 | prefill | 232 | sample rt | 待埋点 | rtp_llm_sample_input_us |
 | prefill | 10586 | py framework error qps | 待埋点 | py_rtp_master_queue_reject_qps |
@@ -37,20 +37,20 @@
 | prefill | 10629 | stream update rt | 待埋点 | rtp_llm_stream_update_latency_us |
 | prefill | 10630 | xgrammar timeout qps | 待埋点 | rtp_llm_grammar_update_timeout_qps |
 | prefill | 128 | running stream size | 已上报 | rtp_llm_running_stream_size |
-| prefill | 220 | context_batch_size_when_has_context | 待埋点 | rtp_llm_context_batch_size_when_has_context |
-| prefill | 150 | query batch size | 待埋点 | rtp_llm_query_batch_size |
+| prefill | 220 | context_batch_size_when_has_context | 已上报 | rtp_llm_context_batch_size_when_has_context |
+| prefill | 150 | query batch size | 已上报 | rtp_llm_query_batch_size |
 | prefill | 327 | remote running stream size | 待埋点 | rtp_llm_remote_running_stream_size |
-| prefill | 122 | context batch size | 待埋点 | rtp_llm_context_batch_size |
+| prefill | 122 | context batch size | 已上报 | rtp_llm_context_batch_size |
 | prefill | 127 | waiting stream size | 已上报 | rtp_llm_wait_stream_size |
-| prefill | 124 | batch max seq len | 待埋点 | rtp_llm_max_seq_len |
-| prefill | 226 | batch max seq len when has context | 待埋点 | rtp_llm_max_seq_len_when_has_context |
-| prefill | 125 | input token length | 待埋点 | rtp_llm_input_token_length |
-| prefill | 10099 | context batch size / max agg | 待埋点 | rtp_llm_context_batch_size |
+| prefill | 124 | batch max seq len | 已上报 | rtp_llm_max_seq_len |
+| prefill | 226 | batch max seq len when has context | 已上报 | rtp_llm_max_seq_len_when_has_context |
+| prefill | 125 | input token length | 已上报 | rtp_llm_input_token_length |
+| prefill | 10099 | context batch size / max agg | 已上报 | rtp_llm_context_batch_size |
 | prefill | 10163 | waiting stream size max/agg | 已上报 | rtp_llm_wait_stream_size |
 | prefill | 228 | batch with prefill times | 待埋点 | rtp_llm_batch_with_prefill_times |
 | prefill | 229 | batch with prefill lens | 待埋点 | rtp_llm_batch_with_prefill_len |
-| prefill | 227 | execute token size when has context | 待埋点 | rtp_llm_execute_token_size_when_has_context |
-| prefill | 146 | execute token size | 待埋点 | rtp_llm_execute_token_size |
+| prefill | 227 | execute token size when has context | 已上报 | rtp_llm_execute_token_size_when_has_context |
+| prefill | 146 | execute token size | 已上报 | rtp_llm_execute_token_size |
 | prefill | 170 | get rpc connection rt | 待埋点 | rtp_llm_rpc_get_rpc_connection_rt_us |
 | prefill | 169 | multimodal process rt | 待埋点 | rtp_llm_rpc_multimodal_process_rt_us |
 | prefill | 223 | remote allocate resource rt | 待埋点 | rtp_llm_rpc_remote_allocate_resource_rt_us |
@@ -66,7 +66,7 @@
 | prefill | 197 | poll remote output rt | 待埋点 | rtp_llm_rpc_poll_remote_output_rt_us |
 | prefill | 10035 | Prefill 理论命中/总输入数量 | 待埋点 | rtp_llm_prefill_worker_recent_cache_key_hit_count,rtp_llm_prefill_worker_recent_cache_key_total_count |
 | prefill | 143 | kv cache item num | 待埋点 | rtp_llm_kv_cache_item_num |
-| prefill | 147 | 实际的总reuse len | 待埋点 | rtp_llm_kv_cache_reuse_length |
+| prefill | 147 | 实际的总reuse len | 已上报 | rtp_llm_kv_cache_reuse_length |
 | prefill | 10636 | new device reuse length | 待埋点 | rtp_llm_stream_cache_device_reuse_length |
 | prefill | 491 | new memory reuse length | 待埋点 | rtp_llm_stream_cache_memory_reuse_length |
 | prefill | 10590 | new disk reuse length | 待埋点 | rtp_llm_stream_cache_disk_reuse_length |
@@ -131,11 +131,11 @@
 | decode | 231 | model forward rt | 已上报 | rtp_llm_model_forward_us |
 | decode | 10081 | wall tps report interval | 已上报 | rtp_llm_wall_tps_report_interval_us |
 | decode | 159 | gather model input rt | 待埋点 | rtp_llm_gather_model_input_us |
-| decode | 215 | 请求队列排队延迟 | 待埋点 | rtp_llm_wait_latency_us |
-| decode | 234 | first token latency | 待埋点 | rtp_llm_first_token_latency_us |
+| decode | 215 | 请求队列排队延迟 | 已上报 | rtp_llm_wait_latency_us |
+| decode | 234 | first token latency | 已上报 | rtp_llm_first_token_latency_us |
 | decode | 121 | framework qps | 已上报 | rtp_llm_framework_qps |
 | decode | 162 | framework cancel qps | 待埋点 | rtp_llm_rpc_cancel_qps |
-| decode | 130 | total latency | 待埋点 | rtp_llm_latency_us |
+| decode | 130 | total latency | 已上报 | rtp_llm_latency_us |
 | decode | 131 | pause latency | 待埋点 | rtp_llm_pause_latency_us |
 | decode | 233 | dispatch output rt | 待埋点 | rtp_llm_dispatch_output_us_metric |
 | decode | 230 | tp sync input rt | 待埋点 | rtp_llm_tp_sync_input_us |
@@ -143,7 +143,7 @@
 | decode | 161 | framework error qps | 已上报 | rtp_llm_framework_error_qps |
 | decode | 217 | 请求超时时间 | 待埋点 | rtp_llm_timeout_lantency_us |
 | decode | 10587 | stream canrun to running latency | 待埋点 | rtp_llm_stream_canrun_to_running_us |
-| decode | 10588 | stream loading cache latency | 待埋点 | rtp_llm_stream_loading_cache_latency_us |
+| decode | 10588 | stream loading cache latency | 已上报 | rtp_llm_stream_loading_cache_latency_us |
 | decode | 10098 | model inputs dump latency | 待埋点 | rtp_llm_model_inputs_log_us |
 | decode | 232 | sample rt | 待埋点 | rtp_llm_sample_input_us |
 | decode | 10112 | TPOT(估计值) | 待埋点 | rtp_llm_sp_estimate_tpot_us |
@@ -152,21 +152,21 @@
 | decode | 10629 | stream update rt | 待埋点 | rtp_llm_stream_update_latency_us |
 | decode | 10630 | xgrammar timeout qps | 待埋点 | rtp_llm_grammar_update_timeout_qps |
 | decode | 128 | running stream size | 已上报 | rtp_llm_running_stream_size |
-| decode | 221 | generate_batch_size_when_has_context | 待埋点 | rtp_llm_generate_batch_size_when_has_context |
-| decode | 149 | iterate count | 待埋点 | rtp_llm_iterate_count |
-| decode | 150 | query batch size | 待埋点 | rtp_llm_query_batch_size |
+| decode | 221 | generate_batch_size_when_has_context | 已上报 | rtp_llm_generate_batch_size_when_has_context |
+| decode | 149 | iterate count | 已上报 | rtp_llm_iterate_count |
+| decode | 150 | query batch size | 已上报 | rtp_llm_query_batch_size |
 | decode | 327 | remote running stream size | 待埋点 | rtp_llm_remote_running_stream_size |
 | decode | 127 | waiting stream size | 已上报 | rtp_llm_wait_stream_size |
-| decode | 124 | batch max seq len | 待埋点 | rtp_llm_max_seq_len |
-| decode | 226 | batch max seq len when has context | 待埋点 | rtp_llm_max_seq_len_when_has_context |
-| decode | 125 | input token length | 待埋点 | rtp_llm_input_token_length |
-| decode | 123 | generate batch size | 待埋点 | rtp_llm_generate_batch_size |
+| decode | 124 | batch max seq len | 已上报 | rtp_llm_max_seq_len |
+| decode | 226 | batch max seq len when has context | 已上报 | rtp_llm_max_seq_len_when_has_context |
+| decode | 125 | input token length | 已上报 | rtp_llm_input_token_length |
+| decode | 123 | generate batch size | 已上报 | rtp_llm_generate_batch_size |
 | decode | 10163 | waiting stream size max/agg | 已上报 | rtp_llm_wait_stream_size |
-| decode | 145 | output token length (AVG 平均值) | 待埋点 | rtp_llm_output_token_length |
-| decode | 439 | output token length (Max 最大值) | 待埋点 | rtp_llm_output_token_length |
-| decode | 227 | execute token size when has context | 待埋点 | rtp_llm_execute_token_size_when_has_context |
-| decode | 146 | execute token size | 待埋点 | rtp_llm_execute_token_size |
-| decode | 219 | output token length(timeout) | 待埋点 | rtp_llm_output_token_length |
+| decode | 145 | output token length (AVG 平均值) | 已上报 | rtp_llm_output_token_length |
+| decode | 439 | output token length (Max 最大值) | 已上报 | rtp_llm_output_token_length |
+| decode | 227 | execute token size when has context | 已上报 | rtp_llm_execute_token_size_when_has_context |
+| decode | 146 | execute token size | 已上报 | rtp_llm_execute_token_size |
+| decode | 219 | output token length(timeout) | 已上报 | rtp_llm_output_token_length |
 | decode | 192 | prepare generate context rt | 待埋点 | rtp_llm_rpc_prepare_generate_context_rt_us |
 | decode | 196 | allocate resource rt | 待埋点 | rtp_llm_rpc_allocate_resource_rt_us |
 | decode | 194 | load cache from prefill rt | 待埋点 | rtp_llm_rpc_load_cache_from_prefill_rt_us |
@@ -239,27 +239,27 @@
 | decode | 178 | sp_step_latency | 待埋点 | rtp_llm_sp_step_latency_us |
 | decode | 176 | sp_total_accepted_token_num | 待埋点 | rtp_llm_sp_total_accepted_token_num |
 | decode | 182 | sp_total_propose_token_num | 待埋点 | rtp_llm_sp_total_propose_token_num |
-| vit | 449 | vit qps | 待埋点 | py_rtp_vit_qps |
-| vit | 458 | vit success qps | 待埋点 | py_rtp_vit_success_qps |
-| vit | 457 | vit error qps | 待埋点 | py_rtp_vit_error_qps |
+| vit | 449 | vit qps | 已上报 | py_rtp_vit_qps |
+| vit | 458 | vit success qps | 已上报 | py_rtp_vit_success_qps |
+| vit | 457 | vit error qps | 已上报 | py_rtp_vit_error_qps |
 | vit | 452 | vit preprocess rt | 待埋点 | py_rtp_vit_download_rt,py_rtp_vit_preprocess_other_rt |
 | vit | 10350 | vit download rt | 待埋点 | py_rtp_vit_download_rt |
 | vit | 10351 | vit preprocess rt(except download) | 待埋点 | py_rtp_vit_preprocess_other_rt |
 | vit | 10365 | vit preprocess waiting queue size | 待埋点 | py_rtp_vit_preprocess_queue_size |
-| vit | 10366 | vit images total num | 待埋点 | py_rtp_vit_image_count |
-| vit | 456 | vit embedding rt | 待埋点 | py_rtp_vit_embedding_rt |
+| vit | 10366 | vit images total num | 已上报 | py_rtp_vit_image_count |
+| vit | 456 | vit embedding rt | 已上报 | py_rtp_vit_embedding_rt |
 | vit | 10352 | vit embedding batch rt | 待埋点 | py_rtp_vit_embedding_batch_rt |
-| vit | 10353 | vit embedding length | 待埋点 | py_rtp_vit_embedding_length |
-| vit | 10354 | vit embedding waiting queue size | 待埋点 | py_rtp_vit_embedding_queue_size |
-| vit | 10355 | vit embedding waiting time | 待埋点 | py_rtp_vit_embedding_queue_wait_rt |
+| vit | 10353 | vit embedding length | 已上报 | py_rtp_vit_embedding_length |
+| vit | 10354 | vit embedding waiting queue size | 已上报 | py_rtp_vit_embedding_queue_size |
+| vit | 10355 | vit embedding waiting time | 已上报 | py_rtp_vit_embedding_queue_wait_rt |
 | vit | 10356 | vit cuda graph hit qps | 待埋点 | py_rtp_vit_cuda_graph_hit_qps |
 | vit | 10357 | vit cuda graph miss qps | 待埋点 | py_rtp_vit_cuda_graph_miss_qps |
 | vit | 10358 | vit cuda graph capture qps | 待埋点 | py_rtp_vit_cuda_graph_capture_qps |
 | vit | 10359 | vit cuda graph fallback qps | 待埋点 | py_rtp_vit_cuda_graph_fallback_qps |
-| vit | 10360 | vit embedding cache hit qps | 待埋点 | py_rtp_vit_embedding_cache_hit_qps |
-| vit | 10361 | vit embedding cache miss qps | 待埋点 | py_rtp_vit_embedding_cache_miss_qps |
-| vit | 10362 | vit embedding cache inflight qps | 待埋点 | py_rtp_vit_embedding_cache_inflight_qps |
-| vit | 10367 | vit embedding cache tokens | 待埋点 | py_rtp_vit_embedding_cache_tokens |
+| vit | 10360 | vit embedding cache hit qps | 已上报 | py_rtp_vit_embedding_cache_hit_qps |
+| vit | 10361 | vit embedding cache miss qps | 已上报 | py_rtp_vit_embedding_cache_miss_qps |
+| vit | 10362 | vit embedding cache inflight qps | 已上报 | py_rtp_vit_embedding_cache_inflight_qps |
+| vit | 10367 | vit embedding cache tokens | 已上报 | py_rtp_vit_embedding_cache_tokens |
 | vit | 10624 | vit greennet success qps | 待埋点 | py_rtp_greennet_success_qps |
 | vit | 10625 | vit greennet error qps | 待埋点 | py_rtp_greennet_error_qps |
 | vit | 10626 | vit greennet rt | 待埋点 | py_rtp_greennet_rt |
