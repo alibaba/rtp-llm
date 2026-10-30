@@ -42,11 +42,14 @@ struct MLAKVCacheSpec: public KVCacheSpec {
                                 static_cast<int>(desc.cache_type));
 
         const bool   is_fp8   = spec->dtype_ == DataType::TYPE_FP8_E4M3 || spec->dtype_ == DataType::TYPE_FP8_E8M0;
+        RTP_LLM_CHECK_WITH_INFO(!attn.mla_fp8_compute || spec->dtype_ == DataType::TYPE_FP8_E4M3,
+                                "ordinary MLA E4M3 layout requires FP8 E4M3 storage");
         const size_t no_pe    = static_cast<size_t>(attn.kv_lora_rank);
         const size_t rope     = static_cast<size_t>(attn.rope_head_dim);
         spec->nope_per_token  = no_pe;
         spec->rope_per_token  = rope;
-        spec->elems_per_token = is_fp8 ? no_pe + no_pe / 128 * 4 + rope * 2 : no_pe + rope;
+        spec->elems_per_token = attn.mla_fp8_compute ? no_pe + rope
+                              : is_fp8 ? no_pe + no_pe / 128 * 4 + rope * 2 : no_pe + rope;
 
         return spec;
     }

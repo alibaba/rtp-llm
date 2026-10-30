@@ -1,6 +1,15 @@
 load("//rtp_llm/test/utils:cuda13_sm100_test.bzl", "cuda13_sm100_py_test")
 load("//rtp_llm/models_py/modules/dsv4/test:defs.bzl", "dsv4_sm100_py_test")
 
+py_test(
+    name = "mega_moe_situ_test",
+    srcs = ["mega_moe_situ_test.py"],
+    deps = [
+        "//rtp_llm:testlib",
+        "//rtp_llm/models_py:modules",
+    ],
+)
+
 py_library(
     name = "fused_moe_executor_test_util",
     srcs = ["fused_moe_executor_test_util.py"],
