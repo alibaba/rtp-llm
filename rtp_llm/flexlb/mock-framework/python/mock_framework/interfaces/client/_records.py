@@ -1,7 +1,6 @@
 """Streaming reader for Client-owned facts; an unsealed stream is never complete evidence."""
-import argparse
 from collections import Counter
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 import json
 from pathlib import Path
 import struct
@@ -10,7 +9,7 @@ from google.protobuf.message import DecodeError
 import zstandard
 
 from . import client_evidence_pb2 as pb
-from .execution.transport import ExecutionError
+from ...execution.transport import ExecutionError
 
 MAX_FRAME = 2 * 1024 * 1024
 OUTCOMES = {'success', 'error', 'timeout', 'cancelled'}
@@ -159,54 +158,3 @@ def read_requests(directory: Path, cancelled=None):
                 raise ValueError('Evidence does not reconcile Client result')
     except (OSError, ValueError, KeyError, TypeError, DecodeError, zstandard.ZstdError) as error:
         raise ExecutionError(f'Invalid Client evidence at {path}: {error}') from error
-
-
-def playback_directories(root, topology, targets=None, playback=None):
-    clients = {node['rpc']: node for node in topology if node['role'] == 'client'}
-    chosen = list(clients) if targets is None else targets
-    if not chosen or len(set(chosen)) != len(chosen) or set(chosen) - clients.keys():
-        raise ExecutionError('Expected nonempty, unique Client addresses')
-    if playback is None:
-        rounds = root / 'components' / 'client-0' / 'coordinator'
-        available = [int(path.name) for path in rounds.iterdir() if path.is_dir() and path.name.isdecimal()] if rounds.exists() else []
-        if not available:
-            raise ExecutionError('No Client playback exists')
-        playback = max(available)
-    return [root / 'components' / clients[target]['id'] / 'playback' / str(playback) for target in chosen]
-
-
-def verify_playback(root, topology, results, cancelled=None):
-    for directory in playback_directories(root, topology):
-        if not (directory / 'result.json').is_file():
-            raise ExecutionError(f'Missing Client result at {directory}')
-        outcome = Counter()
-        count = 0
-        for record in read_requests(directory, cancelled):
-            count += 1
-            outcome[record.outcome] += 1
-        node = next(node for node in topology if node['id'] == directory.parent.parent.name)
-        expected = results[node['control']]
-        if count != expected['issued'] or expected['outcomes'] != {key: outcome[key] for key in OUTCOMES}:
-            raise ExecutionError('Client control result and evidence disagree')
-
-
-def main():
-    parser = argparse.ArgumentParser(description='Stream Client request records as JSON; nonzero exit means incomplete/invalid evidence')
-    parser.add_argument('output', type=Path, help='Case output directory')
-    parser.add_argument('--playback', type=int)
-    parser.add_argument('--target', action='append', dest='targets', help='Client rpc address; defaults to all')
-    parser.add_argument('--request-id', type=int, action='append')
-    parser.add_argument('--outcome', choices=sorted(OUTCOMES))
-    args = parser.parse_args()
-    try:
-        topology = [json.loads(path.read_text()) for path in sorted(args.output.glob('components/client-*/endpoints.json'))]
-        for directory in playback_directories(args.output, topology, args.targets, args.playback):
-            for record in read_requests(directory):
-                if (args.request_id is None or record.request_id in args.request_id) and (args.outcome is None or record.outcome == args.outcome):
-                    print(json.dumps(asdict(record), ensure_ascii=False))
-    except (ExecutionError, OSError, ValueError) as error:
-        parser.exit(2, f'{error}\nPreviously emitted records are only a recovered prefix, not complete evidence.\n')
-
-
-if __name__ == '__main__':
-    main()

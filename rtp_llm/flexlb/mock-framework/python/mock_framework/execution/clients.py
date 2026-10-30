@@ -2,7 +2,6 @@
 import asyncio
 from dataclasses import dataclass
 import json
-import threading
 from typing import Annotated
 from ..config.registry import Bounds, schema
 from ..config.validation import validate
@@ -71,7 +70,6 @@ class ClientGroup:
         return True
 
     async def collect(self, query_time, timeout):
-        from ..evidence import verify_playback
         result = await self.control('client/stop', {}, query_time, timeout)
         self.records.emit(event='client_result', result=result)
         if not isinstance(result, dict) or set(result) != {'clients', 'errors'}:
@@ -86,11 +84,6 @@ class ClientGroup:
                 or value['issued'] != value['finished'] or sum(value['outcomes'].values()) != value['finished']
                 or set(value['outcomes']) != {'success', 'error', 'timeout', 'cancelled'} for value in result['clients'].values()):
             raise ExecutionError(f'Client playback failed or results incomplete: {result}')
-        cancelled = threading.Event()
-        try:
-            await asyncio.to_thread(verify_playback, self.records.directory, self.topology.active(), result['clients'], cancelled)
-        finally:
-            cancelled.set()
         self.pending = False
         by_address = {node['control']: node['rpc'] for node in clients}
         return {by_address[url]: value for url, value in result['clients'].items()}

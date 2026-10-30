@@ -23,7 +23,7 @@ FRAMEWORK = FLEXLB / "mock-framework"
 sys.path.insert(0, str(FRAMEWORK / "python"))
 sys.path.insert(0, str(FRAMEWORK / "tests"))
 from helpers.input import pb, write_inputs
-from mock_framework.evidence import read_requests
+from mock_framework.interfaces.client._records import read_requests
 from mock_framework.execution.master import master_environment
 
 

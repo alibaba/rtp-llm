@@ -7,9 +7,10 @@ from types import SimpleNamespace
 import pytest
 import zstandard
 
-from mock_framework import client_evidence_pb2 as pb
+from mock_framework.interfaces.client import client_evidence_pb2 as pb
 from mock_framework.config import Registry
-from mock_framework.evidence import read_requests, playback_directories, main
+from mock_framework.interfaces.client import playback_directories
+from mock_framework.interfaces.client._records import read_requests
 from mock_framework.execution.transport import ExecutionError
 from mock_framework.execution import clients as client_runtime
 
@@ -100,25 +101,16 @@ def test_query_defaults_to_all_clients_and_limits_details_not_counts(evidence, t
     with pytest.raises(ExecutionError): asyncio.run(query.invoke(ctx, {'limit': 0, 'request_ids': [1]}))
 
 
-def test_collect_rejects_missing_evidence_even_when_rpc_summary_passes(monkeypatch, tmp_path):
+def test_stop_uses_rpc_summary_while_request_query_requires_files(monkeypatch, tmp_path):
     from test_client_interfaces import context, state
     ctx = context(); ctx.records.directory = tmp_path; ctx.runtime.clients.pending = True
     async def post(*args): return {'clients': {'http://c:1': state(), 'http://c:2': state()}, 'errors': []}
     monkeypatch.setattr(client_runtime, 'post', post)
+    result = asyncio.run(Registry.standard().get('client/stop').invoke(ctx, {}))
+    assert set(result) == {'c:1', 'c:2'} and not ctx.runtime.clients.pending
+    assert list(tmp_path.iterdir()) == []
     with pytest.raises(ExecutionError, match='No Client playback'):
-        asyncio.run(Registry.standard().get('client/stop').invoke(ctx, {}))
-    assert ctx.runtime.clients.pending
-
-
-def test_cli_partial_output_is_nonzero_and_explicit(evidence, tmp_path, monkeypatch, capsys):
-    directory, batch = evidence()
-    batch.ClearField('seal'); (directory / 'requests.binpb.zst').write_bytes(frame(batch))
-    (tmp_path / 'components/client-0/endpoints.json').write_text(json.dumps(dict(id='client-0', role='client', rpc='c:0')))
-    monkeypatch.setattr('sys.argv', ['mock-requests', str(tmp_path)])
-    with pytest.raises(SystemExit) as error: main()
-    assert error.value.code == 2
-    captured = capsys.readouterr()
-    assert '9007199254740993' in captured.out and 'recovered prefix' in captured.err
+        asyncio.run(Registry.standard().get('client/requests').invoke(ctx, {}))
 
 
 def test_killed_java_writer_leaves_readable_frames_but_no_complete_evidence(tmp_path):

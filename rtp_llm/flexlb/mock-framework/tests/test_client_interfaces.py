@@ -8,7 +8,6 @@ from mock_framework.interfaces import metrics
 from mock_framework.execution.transport import ExecutionError
 from mock_framework.execution import clients as client_runtime
 from mock_framework.execution.clients import ClientGroup
-from mock_framework import evidence
 from helpers.input import read_inputs, write_inputs, pb
 
 
@@ -68,20 +67,18 @@ def test_stop_collects_all_original_clients_without_task_id(monkeypatch, tmp_pat
         return {'clients': {'http://c:1': state(), 'http://c:2': state()}, 'errors': []}
     monkeypatch.setattr(client_runtime, 'post', post)
     ctx = context(); ctx.runtime.clients.pending = True; ctx.records.directory = tmp_path
-    verified = []
-    monkeypatch.setattr(evidence, 'verify_playback', lambda *args: verified.append(args))
     result = asyncio.run(Registry.standard().get('client/stop').invoke(ctx, {}))
     assert set(result) == {'c:1', 'c:2'} and not ctx.runtime.clients.pending
     assert calls[0]['args'] == {} and ctx.events[0]['event'] == 'client_result'
-    assert len(verified) == 1 and verified[0][0] == tmp_path
 
 
-@pytest.mark.parametrize('bad', ['missing', 'overflow', 'unfinished'])
+@pytest.mark.parametrize('bad', ['missing', 'overflow', 'unfinished', 'writer'])
 def test_stop_does_not_hide_missing_workers_or_execution_errors(monkeypatch, bad):
     value = {'clients': {'http://c:1': state(), 'http://c:2': state()}, 'errors': []}
     if bad == 'missing': del value['clients']['http://c:2']
     if bad == 'overflow': value['errors'] = ['queue full']
     if bad == 'unfinished': value['clients']['http://c:2']['done'] = False
+    if bad == 'writer': value['clients']['http://c:2']['errors'] = ['Client evidence write failed']
     async def post(*a): return value
     monkeypatch.setattr(client_runtime, 'post', post)
     with pytest.raises(ExecutionError):
@@ -192,7 +189,8 @@ def test_client_playback_through_real_master(tmp_path, replicas, large_input):
                 assert index not in seen
                 seen.add(index)
     if large_input: assert seen == set(range(count))
-    from mock_framework.evidence import playback_directories, read_requests
+    from mock_framework.interfaces.client import playback_directories
+    from mock_framework.interfaces.client._records import read_requests
     assert not (output / 'topology-history.json').exists()
     topology = [json.loads(path.read_text()) for path in sorted(output.glob('components/client-*/endpoints.json'))]
     records = [record for directory in playback_directories(output, topology) for record in read_requests(directory)]
