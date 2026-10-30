@@ -1636,18 +1636,15 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
     }
 
     private static Path findOnlineLogsDirectory() throws IOException {
-        Path current = Path.of("").toAbsolutePath();
-        for (int depth = 0; depth < 6 && current != null; depth++) {
-            Path candidate = current.resolve("tools/online_eval/data/online_logs");
-            if (Files.isRegularFile(candidate.resolve("sample_access.json"))
-                    && Files.isRegularFile(candidate.resolve("trace_30min.jsonl"))) {
-                return candidate;
-            }
-            current = current.getParent();
+        var resource = MasterBatchEndToEndPerformanceTest.class.getResource("/online-logs/sample_access.json");
+        if (resource == null) {
+            throw new IOException("Missing online-logs test fixtures");
         }
-        throw new IOException(
-                "Cannot locate tools/online_eval/data/online_logs from "
-                        + Path.of("").toAbsolutePath());
+        try {
+            return Path.of(resource.toURI()).getParent();
+        } catch (java.net.URISyntaxException error) {
+            throw new IOException("Invalid online-logs fixture URI", error);
+        }
     }
 
     private static int[] readTokenCorpus(JsonNode inputIds) throws IOException {
