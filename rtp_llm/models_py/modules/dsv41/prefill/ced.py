@@ -31,7 +31,7 @@ from rtp_llm.models_py.distributed.collective_torch import Group
 from rtp_llm.models_py.modules.dsv41._profiler import record_function_range
 from rtp_llm.models_py.modules.dsv41.attn_type import DECODER_SWA_KV, SWA_KV
 from rtp_llm.models_py.modules.dsv41.cp import CPContext, cp_swa_replay_starts
-from rtp_llm.models_py.modules.dsv41.kv_cache_utils import host_block_tables
+from rtp_llm.models_py.modules.dsv41.kv_cache_utils import as_attention_inputs_by_tag
 
 _TAIL_TOKENS = 3072
 _MIN_TOKENS = 32768
@@ -786,20 +786,24 @@ class CEDPlan:
         regions = tuple(getattr(kv_cache, "group_tags", ()))
         region = DECODER_SWA_KV if bounded_replay else SWA_KV
         groups = [i for i, r in enumerate(regions) if str(r) == str(region)]
-        host = host_block_tables(kv_cache, attn_inputs)
+        by_tag = as_attention_inputs_by_tag(attn_inputs, kv_cache)
+        host = getattr(by_tag.get(str(region)), "kv_cache_block_id", None)
         spans = tuple(
             kv_cache.get_seq_size_per_block(tag) for tag in kv_cache.group_tags
         )
         if (
             len(groups) != 1
+            or any(
+                getattr(by_tag.get(str(tag)), "kv_cache_block_id", None) is None
+                for tag in regions
+            )
             or not isinstance(host, torch.Tensor)
-            # Only exact CED reads the table values (``host[group_id, 0].tolist()``)
+            # Only exact CED reads the selected table values (``host[0].tolist()``)
             # and therefore needs a host-resident tensor. Bounded replay uses the
             # shape only, so a CUDA table (RTP_LLM_DEVICE_INPUT=1) is fine.
             or (not bounded_replay and host.device.type != "cpu")
-            or host.ndim != 3
-            or host.shape[1] != len(lengths)
-            or host.shape[0] != len(regions)
+            or host.ndim != 2
+            or host.shape[0] != len(lengths)
             or len(spans) != len(regions)
             or spans[groups[0]] <= 0
         ):
@@ -833,7 +837,7 @@ class CEDPlan:
             selected = checkpoint_positions(
                 cp_ctx.prefix_length,
                 cp_ctx.seq_len_full,
-                host[group_id, 0].tolist(),
+                host[0].tolist(),
                 spans[group_id],
                 ring_entries,
             )

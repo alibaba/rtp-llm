@@ -46,6 +46,40 @@ class AttentionV41Test(unittest.TestCase):
                 self.assertEqual(select(x, ctx, output_width), expected)
         self.assertFalse(select(x[:, ::2], ctx, 1024))
 
+    def test_prefill_qkv_cp_gather_receives_token_major_rows(self):
+        attn = AttentionV41FP8.__new__(AttentionV41FP8)
+        torch.nn.Module.__init__(attn)
+        attn.layer_id, attn.kv_norm, attn.eps = 2, None, 1e-6
+        qr = torch.arange(12).view(1, 3, 4)
+        kv = torch.arange(24).view(1, 3, 1, 8)
+        x = torch.empty((3, 5120))
+        common = SimpleNamespace(
+            rd=None, freqs_cis=None, cp_on=True, cp_ctx=SimpleNamespace()
+        )
+
+        with (
+            patch.object(attn, "_try_fused_qr_kv", return_value=(qr, kv)),
+            patch(
+                "rtp_llm.models_py.modules.dsv41.fp8.attention.swa_kv_norm_rope",
+                side_effect=lambda value, *args, **kwargs: value,
+            ),
+            patch(
+                "rtp_llm.models_py.modules.dsv41.fp8.attention.cp_all_gather_full_varlen",
+                side_effect=lambda rows, *args, **kwargs: torch.cat(
+                    (rows, rows + 100), dim=0
+                ),
+            ) as gather,
+        ):
+            result = attn._prefill_compute_qkv(x, common)
+            torch.testing.assert_close(result.qr, qr[0])
+            torch.testing.assert_close(result.kv_full, torch.cat((kv[0], kv[0] + 100)))
+            self.assertEqual(gather.call_args.args[0].shape, (3, 1, 8))
+            self.assertEqual(gather.call_args.kwargs["replay_only"], False)
+            common.cp_on = False
+            result = attn._prefill_compute_qkv(x, common)
+            torch.testing.assert_close(result.kv_full, kv[0])
+            self.assertEqual(gather.call_count, 1)
+
     def test_raw_pool_identity_keeps_reinterpret_and_strided_layout(self):
         attn = AttentionV41FP8.__new__(AttentionV41FP8)
         torch.nn.Module.__init__(attn)
@@ -394,6 +428,50 @@ class AttentionV41Test(unittest.TestCase):
                             self.assertEqual(result.dtype, torch.long)
                             torch.testing.assert_close(result, reference)
 
+    def test_prefill_chunk_meta_device_plan_skips_host_shape_scan(self):
+        class DeviceOnlyGlobals:
+            def __len__(self):
+                return 2
+
+            def __iter__(self):
+                raise AssertionError("device metadata must bypass global row shapes")
+
+        attn = self._chunk_meta_fixture(2, 128)
+        expected = tuple(torch.empty((3, 1), dtype=torch.long) for _ in range(3))
+        common = SimpleNamespace(
+            cp_on=False,
+            cp_ctx=None,
+            input_lengths=torch.tensor([3, 5], dtype=torch.int32),
+            prefix_lengths=torch.tensor([0, 8], dtype=torch.int32),
+        )
+        with patch(
+            "rtp_llm.models_py.modules.dsv41.fp8._v41_prefill_metadata.try_chunk_metadata",
+            return_value=expected,
+        ):
+            actual = attn._prefill_chunk_meta(
+                DeviceOnlyGlobals(),
+                [torch.empty(3, 4), torch.empty(5, 4)],
+                [0, 0],
+                torch.tensor([0, 1, 1]),
+                torch.device("cpu"),
+                common=common,
+            )
+        self.assertIs(actual, expected)
+
+    def test_prefill_chunk_meta_empty_pool_bound_rows(self):
+        attn = self._chunk_meta_fixture(2, 128)
+        empty = torch.empty(0, dtype=torch.long)
+        common = SimpleNamespace(
+            cp_on=False,
+            cp_ctx=None,
+            input_lengths=empty,
+            prefix_lengths=empty,
+        )
+        actual = attn._prefill_chunk_meta(
+            [], [], [], empty, torch.device("cpu"), common=common
+        )
+        self.assertTrue(all(value.shape == (0, 1) for value in actual))
+
     def test_prefill_chunk_meta_pool_free_keeps_new_boundary_shapes(self):
         lengths = [1, 3, 2]
         prefixes = [7, 8, 13]
@@ -566,9 +644,10 @@ class AttentionV41Test(unittest.TestCase):
         symm = SimpleNamespace(
             get_symm_mem_communicator=lambda: SymmetricCommunicator()
         )
-        with patch.object(
-            collectives, "_get_rocm_rccl", return_value=None
-        ), patch.object(collectives, "_get_symm_mem", return_value=symm):
+        with (
+            patch.object(collectives, "_get_rocm_rccl", return_value=None),
+            patch.object(collectives, "_get_symm_mem", return_value=symm),
+        ):
             actual = AttentionV41FP8._gather_shards(source, value)
             projected = torch.tensor([[3.0, 5.0]])
             AttentionV41FP8._prefill_output_all_reduce(
@@ -878,13 +957,16 @@ class AttentionV41Test(unittest.TestCase):
             source = (
                 projected if full_projected else (x_full[:1] if streamed else x_full)
             )
-            with patch(
-                "rtp_llm.models_py.modules.dsv41.fp8.compressor._linear_bf16_bf16_fp32",
-                side_effect=lambda x, w: torch.nn.functional.linear(
-                    x.float(), w.float()
+            with (
+                patch(
+                    "rtp_llm.models_py.modules.dsv41.fp8.compressor._linear_bf16_bf16_fp32",
+                    side_effect=lambda x, w: torch.nn.functional.linear(
+                        x.float(), w.float()
+                    ),
                 ),
-            ), patch.object(
-                attention_v41_module, "_PRODUCE_GLOBAL_TILE_ROWS", tile_rows
+                patch.object(
+                    attention_v41_module, "_PRODUCE_GLOBAL_TILE_ROWS", tile_rows
+                ),
             ):
                 attn._produce_global(
                     source,
@@ -1021,7 +1103,7 @@ class PrefillCandidatesIntegrationTest(unittest.TestCase):
             out,
             flags,
             build_bitmap=True,
-            mask_tail=False
+            mask_tail=False,
         ):
             self.assertEqual(
                 out.untyped_storage().data_ptr(),
@@ -1045,13 +1127,15 @@ class PrefillCandidatesIntegrationTest(unittest.TestCase):
             return True
 
         helpers = attention_v41_module.prefill_candidates
-        with patch.object(
-            helpers, "select_candidates", side_effect=select
-        ), patch.object(
-            helpers, "build_flags", side_effect=AssertionError("Bitmap must be reused")
-        ), patch.object(
-            helpers, "mask_candidates", side_effect=mask
-        ) as mask_call:
+        with (
+            patch.object(helpers, "select_candidates", side_effect=select),
+            patch.object(
+                helpers,
+                "build_flags",
+                side_effect=AssertionError("Bitmap must be reused"),
+            ),
+            patch.object(helpers, "mask_candidates", side_effect=mask) as mask_call,
+        ):
             attention_v41_module._apply_prefill_candidates(
                 shared, logits, visible, rows, 2, 2, True
             )
@@ -1091,7 +1175,7 @@ class PrefillCandidatesIntegrationTest(unittest.TestCase):
             out,
             flags,
             build_bitmap=True,
-            mask_tail=False
+            mask_tail=False,
         ):
             self.assertNotEqual(
                 out.untyped_storage().data_ptr(),
@@ -1142,11 +1226,10 @@ class PrefillCandidatesIntegrationTest(unittest.TestCase):
         built = torch.tensor([[5], [6]], dtype=torch.int32)
         consumer = torch.arange(8, dtype=torch.float32).view(2, 4)
         reference = mask_candidate_logits(consumer.clone(), candidates[rows], 2)
-        with patch.object(
-            helpers, "build_flags", return_value=built
-        ) as build, patch.object(
-            helpers, "mask_candidates", return_value=False
-        ) as fused_mask:
+        with (
+            patch.object(helpers, "build_flags", return_value=built) as build,
+            patch.object(helpers, "mask_candidates", return_value=False) as fused_mask,
+        ):
             attention_v41_module._apply_prefill_candidates(
                 shared, consumer, visible, rows, 2, 3, False
             )
@@ -1225,35 +1308,42 @@ class PrefillCandidatesIntegrationTest(unittest.TestCase):
                         block_size,
                         topk,
                         publish,
-                        **kwargs
+                        **kwargs,
                     ):
                         self.assertTrue(publish)
                         selections.append(rows)
 
-                    with patch.object(
-                        attention_v41_module,
-                        "rope_only",
-                        side_effect=lambda q, *args: q,
-                    ), patch.object(
-                        attention_v41_module.prefill_indexer,
-                        "quantize_indexer_q",
-                        side_effect=lambda q: (q, torch.zeros(5, 1)),
-                    ), patch.object(
-                        attention_v41_module.prefill_indexer,
-                        "logits_chunk_rows",
-                        return_value=2,
-                    ), patch.object(
-                        attention_v41_module.prefill_indexer,
-                        "score_indexer_chunk",
-                        side_effect=score,
-                    ), patch.object(
-                        attention_v41_module.prefill_topk,
-                        "try_select_tokens",
-                        side_effect=select,
-                    ), patch.object(
-                        attention_v41_module,
-                        "_apply_prefill_candidates",
-                        side_effect=candidates,
+                    with (
+                        patch.object(
+                            attention_v41_module,
+                            "rope_only",
+                            side_effect=lambda q, *args: q,
+                        ),
+                        patch.object(
+                            attention_v41_module.prefill_indexer,
+                            "quantize_indexer_q",
+                            side_effect=lambda q: (q, torch.zeros(5, 1)),
+                        ),
+                        patch.object(
+                            attention_v41_module.prefill_indexer,
+                            "logits_chunk_rows",
+                            return_value=2,
+                        ),
+                        patch.object(
+                            attention_v41_module.prefill_indexer,
+                            "score_indexer_chunk",
+                            side_effect=score,
+                        ),
+                        patch.object(
+                            attention_v41_module.prefill_topk,
+                            "try_select_tokens",
+                            side_effect=select,
+                        ),
+                        patch.object(
+                            attention_v41_module,
+                            "_apply_prefill_candidates",
+                            side_effect=candidates,
+                        ),
                     ):
                         actual = AttentionV41FP8._select_indices(
                             attn, x, qr, positions, req_ids

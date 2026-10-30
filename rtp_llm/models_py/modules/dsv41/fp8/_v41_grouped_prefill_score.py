@@ -228,9 +228,10 @@ def _group_layout(keys, rows):
     device = keys[0].quant.device
     for key, count in zip(keys, rows):
         width = len(key)
+        if width == 0:
+            continue
         if (
-            width <= 0
-            or width * len(keys) >= 2**31
+            width * len(keys) >= 2**31
             or key.quant.shape != (width, 64)
             or key.scale.shape != (width,)
             or key.quant.dtype != torch.int8
@@ -246,6 +247,10 @@ def _group_layout(keys, rows):
     groups = []
     first, row_start = 0, 0
     while first < len(keys):
+        if len(keys[first]) == 0:
+            row_start += rows[first]
+            first += 1
+            continue
         stop = first + 1
         width, group_rows = len(keys[first]), rows[first]
         useful_scores = group_rows * width
@@ -273,9 +278,14 @@ def _group_layout(keys, rows):
             first = stop
             continue
         while stop < len(keys):
-            next_width = max(width, len(keys[stop]))
-            next_rows = group_rows + rows[stop]
-            next_useful = useful_scores + rows[stop] * len(keys[stop])
+            next_nonempty = stop
+            while next_nonempty < len(keys) and len(keys[next_nonempty]) == 0:
+                next_nonempty += 1
+            if next_nonempty == len(keys):
+                break
+            next_width = max(width, len(keys[next_nonempty]))
+            next_rows = group_rows + sum(rows[stop : next_nonempty + 1])
+            next_useful = useful_scores + rows[next_nonempty] * len(keys[next_nonempty])
             if (
                 next_rows > _MAX_GROUP_ROWS
                 or next_rows * next_width > _MAX_LOGITS_INFLATION * next_useful
@@ -285,7 +295,7 @@ def _group_layout(keys, rows):
                 break
             # Admission needs only adjacency metadata. Constructing a new
             # growing slab at every request creates two discarded ATen views.
-            previous, following = keys[stop - 1], keys[stop]
+            previous, following = keys[stop - 1], keys[next_nonempty]
             padded = (len(previous) + 255) // 256 * 256
             if not all(
                 left.untyped_storage().data_ptr() == right.untyped_storage().data_ptr()
@@ -297,16 +307,16 @@ def _group_layout(keys, rows):
                 )
             ):
                 break
-            group_rows += rows[stop]
+            group_rows = next_rows
             width = next_width
             useful_scores = next_useful
-            stop += 1
+            stop = next_nonempty + 1
         if stop > first + 1:
             payload = _slab_view(
-                tuple(key.quant for key in keys[first:stop]), padded=True
+                tuple(key.quant for key in keys[first:stop] if len(key)), padded=True
             )
             scale = _slab_view(
-                tuple(key.scale for key in keys[first:stop]), padded=True
+                tuple(key.scale for key in keys[first:stop] if len(key)), padded=True
             )
             if payload is None or scale is None:
                 return None
@@ -322,8 +332,8 @@ def _group_layout(keys, rows):
         )
         row_start += group_rows
         first = stop
-    if len(groups) == len(keys) and all(
-        group.stop - group.first == 1 for group in groups
+    if all(group.stop - group.first == 1 for group in groups) and (
+        len(groups) == len(keys) or any(len(key) == 0 for key in keys)
     ):
         return None
     return tuple(groups)
@@ -351,7 +361,7 @@ class _GroupedScores:
 
     def split_rows(self, tensor):
         """Make views for this call only; never cache layer activations."""
-        return (tensor,) if len(self.layout) == 1 else tensor.split(self.group_rows)
+        return (tensor[group.rows] for group in self.layout)
 
     def _bounds(self):
         from ._v41_prefill_metadata import try_score_bounds

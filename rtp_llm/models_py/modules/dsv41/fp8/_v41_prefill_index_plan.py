@@ -18,7 +18,6 @@ except ModuleNotFoundError as error:
     triton = None
 
 
-_MAX_ROWS = 131072
 _MAX_WIDTH = 2048
 _INT32_MAX = 2**31 - 1
 
@@ -115,7 +114,6 @@ def is_supported(selected, positions, offset, global_count, swa_start, window_si
         and selected.is_cuda
         and selected.dtype in (torch.int32, torch.int64)
         and selected.ndim == 2
-        and 0 <= selected.shape[0] <= _MAX_ROWS
         and 1 <= selected.shape[1] <= _MAX_WIDTH - window_size
         and selected.stride(1) == 1
         and selected.stride(0) >= selected.shape[1]

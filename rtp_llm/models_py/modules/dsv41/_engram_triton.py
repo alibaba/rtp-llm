@@ -15,17 +15,19 @@ def _hash_windows_kernel(
     primes,
     offsets,
     output,
+    token_mask,
     num_tokens,
     window_stride,
     dead_stride,
     pad_id,
+    image_token,
     VOCAB: tl.constexpr,
-    LAYERS: tl.constexpr,
     NGRAM: tl.constexpr,
     HEADS: tl.constexpr,
     BLOCK_T: tl.constexpr,
     BLOCK_H: tl.constexpr,
     HAS_DEAD_MASK: tl.constexpr,
+    HAS_IMAGE_TOKEN: tl.constexpr,
 ):
     token = tl.program_id(0) * BLOCK_T + tl.arange(0, BLOCK_T)
     layer = tl.program_id(1)
@@ -35,11 +37,20 @@ def _hash_windows_kernel(
     rolling = tl.full((BLOCK_T,), 0, tl.int64)
     for shift in tl.static_range(NGRAM):
         raw = tl.load(windows + token * window_stride + shift, valid, other=-1)
+        if HAS_IMAGE_TOKEN and shift == 0:
+            if layer == 0:
+                tl.store(
+                    token_mask + token,
+                    (raw >= 0) & (raw != image_token),
+                    valid,
+                )
         token_valid = valid & (raw >= 0) & (raw < VOCAB)
         mapped = tl.load(token_map + raw, token_valid, other=pad_id).to(tl.int64)
         dead = tl.full((BLOCK_T,), False, tl.int1)
         if HAS_DEAD_MASK:
             dead = tl.load(dead_mask + token * dead_stride + shift, valid, other=False)
+        if HAS_IMAGE_TOKEN:
+            dead |= raw == image_token
         blocked |= ~token_valid | dead
         value = tl.where(blocked, pad_id, mapped)
         multiplier = tl.load(multipliers + layer * NGRAM + shift)
@@ -50,19 +61,29 @@ def _hash_windows_kernel(
             prime = tl.load(primes + param, head < HEADS, other=1)
             offset = tl.load(offsets + param, head < HEADS, other=0)
             hashed = rolling[:, None] % prime[None, :] + offset[None, :]
-            out = (token.to(tl.int64) * LAYERS + layer)[:, None]
+            out = (layer * num_tokens + token.to(tl.int64))[:, None]
             out = out * ((NGRAM - 1) * HEADS) + column[None, :]
             tl.store(output + out, hashed, valid[:, None] & (head < HEADS))
 
 
-def hash_token_windows(windows, dead_mask, buffers, layout, pad_id):
+def hash_token_windows(
+    windows, dead_mask, buffers, layout, pad_id, *, image_token=None
+):
+    # Layer-major storage gives each Engram layer a contiguous [T, heads] view.
+    # The public [T, layers, heads] shape is preserved by a metadata-only view.
     output = torch.empty(
-        (windows.shape[0], len(layout.layer_ids), layout.n_hash_cols),
+        (len(layout.layer_ids), windows.shape[0], layout.n_hash_cols),
         dtype=torch.int64,
         device=windows.device,
     )
+    token_mask = (
+        torch.empty(windows.shape[0], dtype=torch.bool, device=windows.device)
+        if image_token is not None
+        else None
+    )
+    hashes = output.permute(1, 0, 2)
     if windows.shape[0] == 0:
-        return output
+        return (hashes, token_mask) if token_mask is not None else hashes
     token_map, multipliers, primes, offsets = buffers
     _hash_windows_kernel[(triton.cdiv(windows.shape[0], 32), len(layout.layer_ids))](
         windows,
@@ -72,20 +93,22 @@ def hash_token_windows(windows, dead_mask, buffers, layout, pad_id):
         primes,
         offsets,
         output,
+        token_mask if token_mask is not None else output,
         windows.shape[0],
         windows.stride(0),
         dead_mask.stride(0) if dead_mask is not None else 0,
         pad_id,
+        image_token if image_token is not None else -1,
         VOCAB=token_map.numel(),
-        LAYERS=len(layout.layer_ids),
         NGRAM=layout.max_ngram_size,
         HEADS=layout.n_heads,
         BLOCK_T=32,
         BLOCK_H=triton.next_power_of_2(layout.n_heads),
         HAS_DEAD_MASK=dead_mask is not None,
+        HAS_IMAGE_TOKEN=image_token is not None,
         num_warps=4,
     )
-    return output
+    return (hashes, token_mask) if token_mask is not None else hashes
 
 
 @triton.jit

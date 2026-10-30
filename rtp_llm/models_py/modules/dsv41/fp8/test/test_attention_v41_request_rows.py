@@ -288,7 +288,7 @@ class PrefillRequestRowsCPU(unittest.TestCase):
                     None,
                 )
 
-    def test_builder_attaches_slices_and_restores_compression_ratio(self):
+    def test_builder_attaches_slices_without_changing_compression_ratio(self):
         common = PrefillMeta(
             seqlen=8,
             seqlen_full=32,
@@ -316,7 +316,8 @@ class PrefillRequestRowsCPU(unittest.TestCase):
         owner._rope_beta_slow = 1
 
         def base(*args, **kwargs):
-            self.assertEqual(owner.compress_ratio, 0)
+            self.assertEqual(owner.compress_ratio, 2)
+            self.assertTrue(kwargs["swa_query_meta"])
             self.assertIs(kwargs["reuse_common_meta"], common)
             return common
 

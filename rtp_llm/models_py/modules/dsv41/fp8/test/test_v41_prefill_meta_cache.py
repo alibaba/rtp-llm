@@ -697,7 +697,21 @@ class V41CommonMetaIntegrationTest(unittest.TestCase):
                             model, x, 0, cache, tables, workspace=workspace, **inputs
                         )
                     self.assertEqual(len(calls), 2 if bound else 1)
-                    self.assertEqual(topk.call_count, 1)
+                    flat_window_needed = not (bound and any(prefixes))
+                    self.assertEqual(topk.call_count, int(flat_window_needed))
+                    if flat_window_needed:
+                        self.assertEqual(
+                            layers[0]._prefill_meta_shared.topk_idxs.ndim, 2
+                        )
+                        self.assertEqual(
+                            layers[0]._prefill_meta_shared.topk_idxs.dtype,
+                            torch.int32,
+                        )
+                    else:
+                        self.assertIsNone(layers[0]._prefill_meta_shared.topk_idxs)
+                        self.assertIsNone(
+                            layers[0]._prefill_meta_shared.swa_meta.topk_length_kv_full
+                        )
                     for a, want in zip(layers, expected):
                         got = a._prefill_meta_shared
                         for field in want._fields:
@@ -835,7 +849,9 @@ class V41SwaWriteReuseDispatchTest(unittest.TestCase):
                         0,
                         cache,
                         tables,
-                        host_block_ids=host,
+                        host_swa_tables={
+                            region: host[ids.index(region)] for region in ids
+                        },
                         workspace=None,
                         **_inputs(),
                     )
@@ -850,7 +866,9 @@ class V41SwaWriteReuseDispatchTest(unittest.TestCase):
                         cache,
                         tables,
                         first_layer=21,
-                        host_block_ids=host,
+                        host_swa_tables={
+                            region: host[ids.index(region)] for region in ids
+                        },
                         workspace=None,
                         **_inputs(),
                     )
@@ -1113,9 +1131,8 @@ class V41CedMetadataPrologueTest(unittest.TestCase):
         )
 
     @staticmethod
-    def _state(plan, *, allow_ced=True):
+    def _state(*, allow_ced=True):
         events = Mock()
-        events.create.return_value = plan
         return dict(
             torch=torch,
             allow_ced=allow_ced,
@@ -1124,7 +1141,9 @@ class V41CedMetadataPrologueTest(unittest.TestCase):
             _rt_on=False,
             _fwd_dbg=SimpleNamespace(enabled=lambda: False),
             CEDPlan=SimpleNamespace(create=events.create),
-            v4=SimpleNamespace(fp8_kv_cache=True, swa_bounded_replay=True),
+            v4=SimpleNamespace(
+                fp8_kv_cache=True, swa_bounded_replay=True, layers=[None] * 40
+            ),
             cp_ctx=SimpleNamespace(
                 first_position_host=0,
                 prefix_lengths=torch.tensor([0]),
@@ -1139,6 +1158,7 @@ class V41CedMetadataPrologueTest(unittest.TestCase):
             cu_seqlens=None,
             h=torch.zeros(8, 1),
             ws=object(),
+            host_block_table_for_tag=lambda *args: None,
             host_block_tables=lambda *args: None,
             build_and_propagate_prefill_meta_fp8=events.build,
             clear_prefill_meta_shared_fp8=events.clear,
@@ -1146,48 +1166,30 @@ class V41CedMetadataPrologueTest(unittest.TestCase):
             events=events,
         )
 
-    def test_plan_precedes_build_and_only_an_active_plan_limits_buckets(self):
+    def test_initial_build_limits_decoder_bucket_only_when_ced_requested(self):
         code = self._prologue()
-        for allow_ced, plan in ((False, object()), (True, None), (True, object())):
-            with self.subTest(allow_ced=allow_ced, plan=plan):
-                state = self._state(plan, allow_ced=allow_ced)
+        for allow_ced, stop_layer in ((False, None), (True, 21)):
+            with self.subTest(allow_ced=allow_ced):
+                state = self._state(allow_ced=allow_ced)
                 exec(code, state)
                 events = state["events"]
+                events.create.assert_not_called()
+                events.build.assert_called_once()
                 self.assertEqual(
-                    [call[0] for call in events.mock_calls],
-                    ["create", "build"] if allow_ced else ["build"],
-                )
-                self.assertEqual(
-                    events.build.call_args.kwargs["stop_layer"],
-                    21 if allow_ced and plan is not None else None,
+                    events.build.call_args.kwargs["stop_layer"], stop_layer
                 )
 
-    def test_plan_creation_failure_cleans_metadata_and_shared_state(self):
+    def test_initial_build_failure_propagates_before_late_ced_plan(self):
         code = self._prologue()
-        for fp8_cache in (False, True):
-            with self.subTest(fp8_cache=fp8_cache):
-                state = self._state(None)
-                state["v4"].fp8_kv_cache = fp8_cache
-                events = state["events"]
-                error = RuntimeError("plan failed")
-                events.create.side_effect = error
-                with self.assertRaisesRegex(RuntimeError, "plan failed") as raised:
-                    exec(code, state)
-                self.assertIs(raised.exception, error)
-                events.build.assert_not_called()
-                if fp8_cache:
-                    events.clear.assert_called_once_with(state["v4"])
-                else:
-                    events.clear.assert_not_called()
-                events.release.assert_called_once_with(state["shared_prefill"])
-                self.assertEqual(
-                    [call[0] for call in events.mock_calls],
-                    (
-                        ["create", "clear", "release"]
-                        if fp8_cache
-                        else ["create", "release"]
-                    ),
-                )
+        state = self._state()
+        events = state["events"]
+        error = RuntimeError("initial metadata failed")
+        events.build.side_effect = error
+        with self.assertRaisesRegex(RuntimeError, "initial metadata failed") as raised:
+            exec(code, state)
+        self.assertIs(raised.exception, error)
+        events.create.assert_not_called()
+        events.build.assert_called_once()
 
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
@@ -1273,7 +1275,23 @@ class V41SwaHostPlanCudaTest(unittest.TestCase):
             self.assertIs(reused.slot_mapping, new.slot_mapping)
             self.assertIs(reused.slot_compaction, new.slot_compaction)
             # Exact / pure-SWA still consumes all prefix and combined metadata.
-            full = owner._build_swa_prefill_meta_varlen(**kwargs, host_swa_table=host)
+            with patch(
+                "rtp_llm.models_py.modules.dsv41.fp8._swa_ops_triton.compute_prefill_gather_lens",
+                side_effect=AssertionError("CP must not build unused gather lengths"),
+            ):
+                full = owner._build_swa_prefill_meta_varlen(
+                    **kwargs, host_swa_table=host
+                )
+            self.assertIsNone(full.combined_gather_lens)
+            if kwargs["any_cont"]:
+                expected = torch.tensor(
+                    [min(p, 127) for p in owner._cp_ctx.prefix_lengths_host],
+                    device="cuda",
+                    dtype=torch.int32,
+                )
+                torch.testing.assert_close(
+                    full.cache_gather_lens, expected, rtol=0, atol=0
+                )
             for field in old._fields:
                 a, b = getattr(full, field), getattr(old, field)
                 if isinstance(a, torch.Tensor):

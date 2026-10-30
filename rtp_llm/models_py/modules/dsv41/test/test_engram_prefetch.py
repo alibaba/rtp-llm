@@ -1043,6 +1043,7 @@ class EngramCPUPrefetchTest(unittest.TestCase):
         output.shape = (4, 192)
         output.copy_.side_effect = lambda *a, **kw: order.append("copy")
         slot.copied = Mock()
+        slot.hosts, slot.stage_events = (slot.host,), (slot.copied,)
         slot.copied.synchronize.side_effect = lambda: order.append("host_wait")
         slot.copied.record.side_effect = lambda stream: order.append("copied")
         slot.stream, slot.allocated = Mock(), Mock()
@@ -1145,8 +1146,9 @@ class EngramCPUPrefetchTest(unittest.TestCase):
                         host.copy_(ids.expand(-1, 2))
 
                     slot.copied, slot.stream = Mock(), Mock()
+                    slot.hosts, slot.stage_events = (slot.host,), (slot.copied,)
                     slot.copied.synchronize.side_effect = finish_copy
-                    slot._copy = lambda destination, host: pending.append(
+                    slot._copy = lambda destination, host, event: pending.append(
                         (destination, host, host.clone())
                     )
                     lookup = Mock(side_effect=native)

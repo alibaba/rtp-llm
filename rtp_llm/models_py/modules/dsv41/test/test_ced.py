@@ -143,6 +143,7 @@ def _swa_owner(bounded):
         _can_fuse_swa_fresh=mock.Mock(return_value=False),
         _prefill_write_swa_fp8_paged=mock.Mock(),
         _prefill_sparse_attention=mock.Mock(),
+        _prefill_output_buffer=mock.Mock(return_value=None),
     )
     for name in names:
         setattr(owner, name, types.MethodType(namespace[name], owner))
@@ -341,8 +342,13 @@ def _batch_compact_oracle(full, lengths, rank):
     return torch.cat(outputs)
 
 
-_CED.host_block_tables = lambda cache, attn: getattr(
-    attn, "kv_cache_block_id_host", None
+_CED.as_attention_inputs_by_tag = lambda attn, cache: (
+    {
+        tag: types.SimpleNamespace(kv_cache_block_id=attn.kv_cache_block_id_host[i])
+        for i, tag in enumerate(cache.group_tags)
+    }
+    if hasattr(attn, "kv_cache_block_id_host")
+    else {}
 )
 
 
@@ -529,6 +535,25 @@ class CedCreationTest(_SingleThreadTest):
                     )
                     self.assertTrue(torch.equal(ctx.gather_restore_positions, selected))
                     cache.get_layer_cache.assert_called_once_with(21, _CED.SWA_KV)
+
+    def test_exact_checkpoint_uses_selected_pool_without_group_padding(self):
+        model, ctx, attn, cache = self.fixture(prefix=16387)
+        selected = attn.kv_cache_block_id_host[1]
+        inputs_by_tag = {
+            cache.group_tags[0]: types.SimpleNamespace(
+                kv_cache_block_id=torch.full((1, selected.shape[1] + 17), 99)
+            ),
+            cache.group_tags[1]: types.SimpleNamespace(kv_cache_block_id=selected),
+        }
+        with mock.patch.object(
+            _CED, "as_attention_inputs_by_tag", return_value=inputs_by_tag
+        ):
+            plan = _CED.CEDPlan.create(model, ctx, attn, cache)
+        self.assertIsNotNone(plan)
+        expected = _CED.checkpoint_positions(
+            ctx.prefix_length, ctx.seq_len_full, selected[0].tolist(), 512, 136
+        )
+        self.assertTrue(torch.equal(plan.context.gather_restore_positions, expected))
 
     def test_native_tma_aligned_stride_preserves_136_ring_entries(self):
         for dtype in (torch.uint8, torch.bfloat16, torch.int32):
@@ -1883,7 +1908,7 @@ class CedCandidatePublicationTest(_SingleThreadTest):
 
             state = dict(
                 logging=logging,
-                host_block_tables=lambda *args: None,
+                host_swa_tables={},
                 layer_calls=[layer(i) for i in range(40)],
                 use_prefill_fast_path=False,
                 routing_metadata=None,
@@ -1892,6 +1917,7 @@ class CedCandidatePublicationTest(_SingleThreadTest):
                 expert_token_counts=None,
                 expert_load_for_layer=expert_load_for_layer,
                 ced_in_l20=False,
+                ced_requested=False,
                 ced_tail=None if absent else plan,
                 prefill_write_by_region=None,
                 attn_inputs=None,
@@ -2481,9 +2507,11 @@ class CedRouterProjectionTest(_SingleThreadTest):
                 _mega_l1_sf=None,
                 _mega_l2_w=None,
                 _mega_l2_sf=None,
-                cfg=types.SimpleNamespace(layer_id=20, swiglu_limit=0),
+                cfg=types.SimpleNamespace(layer_id=20, swiglu_limit=0, ep_rank=0),
+                fake_balance_expert=None,
                 _maybe_pre_kernel_barrier=lambda *a: None,
                 _validate_capacity=lambda *a: None,
+                finalize_routing=lambda *a: None,
                 _block_m=lambda *a: 128,
                 _launch=mock.Mock(),
             )
@@ -2666,7 +2694,7 @@ class CedEncoderSplitTest(_SingleThreadTest):
                 cp_on=False,
                 cp_ctx=None,
                 any_cont=bool(prefix),
-                topk_idxs=torch.tensor([[[0, -1], [1, 0]]]),
+                topk_idxs=torch.tensor([[0, -1], [1, 0]], dtype=torch.int32),
                 swa_meta=types.SimpleNamespace(
                     combined_indices=torch.tensor([[127, 126], [128, 127]]),
                     combined_lens=torch.tensor([2, 2]),
@@ -2674,7 +2702,8 @@ class CedEncoderSplitTest(_SingleThreadTest):
                 ),
             )
             qkv = types.SimpleNamespace(
-                kv_full=torch.arange(4).reshape(2, 2).bfloat16()
+                kv_full=torch.arange(4).reshape(2, 2).bfloat16(),
+                qr=torch.empty(2, 2),
             )
             source = qkv.kv_full.clone()
             concat = torch.empty(prefix + 2, 2)
@@ -2710,9 +2739,7 @@ class CedEncoderSplitTest(_SingleThreadTest):
             expected_kv = concat if prefix else qkv.kv_full
             self.assertEqual(launch["kv"].data_ptr(), expected_kv.data_ptr())
             expected_indices = (
-                common.swa_meta.combined_indices
-                if prefix
-                else common.topk_idxs.squeeze(0)
+                common.swa_meta.combined_indices if prefix else common.topk_idxs
             )
             self.assertTrue(torch.equal(launch["indices"].squeeze(1), expected_indices))
             self.assertTrue(torch.equal(qkv.kv_full, source))
@@ -2771,7 +2798,7 @@ class CedEncoderSplitTest(_SingleThreadTest):
         rebuild = mock.Mock()
         state = dict(
             logging=logging,
-            host_block_tables=lambda *args: None,
+            host_swa_tables={},
             layer_calls=[layer(i) for i in range(40)],
             use_prefill_fast_path=False,
             routing_metadata=None,
@@ -2780,6 +2807,7 @@ class CedEncoderSplitTest(_SingleThreadTest):
             expert_token_counts=expert_token_counts,
             expert_load_for_layer=expert_load_for_layer,
             ced_in_l20=True,
+            ced_requested=False,
             ced_tail=plan,
             prefill_write_by_region=None,
             attn_inputs=None,

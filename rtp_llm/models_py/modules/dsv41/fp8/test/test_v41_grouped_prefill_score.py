@@ -766,6 +766,46 @@ class GroupedScoreLayoutTest(unittest.TestCase):
             [(0, 5, slice(0, 60), 3077)],
         )
 
+    def test_zero_key_request_keeps_adjacent_nonempty_scores_grouped(self):
+        keys = key_views([0, 1024, 1024, 1024], (4,))
+        layout = grouped._group_layout(keys, (1, 4, 4, 4))
+        self.assertEqual(
+            [(g.first, g.stop, g.rows) for g in layout],
+            [(1, 4, slice(1, 13))],
+        )
+        plan = grouped._GroupedScores(
+            None, None, None, None, 2, {}, (1, 4, 4, 4), layout, None, None
+        )
+        self.assertEqual(
+            [part.tolist() for part in plan.split_rows(torch.arange(13))],
+            [list(range(1, 13))],
+        )
+
+        keys = key_views([1024, 1024, 0, 1024, 1024], (5,))
+        layout = grouped._group_layout(keys, (4, 4, 1, 4, 4))
+        self.assertEqual(
+            [(g.first, g.stop, g.rows) for g in layout],
+            [(0, 5, slice(0, 17))],
+        )
+        self.assertEqual(layout[0].payload.shape, (4096, 64))
+        self.assertEqual(layout[0].scale.shape, (4096,))
+        bridge = grouped._group_layout(key_views([1024, 0, 1024], (3,)), (4, 1, 4))
+        self.assertEqual(
+            [(g.first, g.stop, g.rows) for g in bridge],
+            [(0, 3, slice(0, 9))],
+        )
+        plan = grouped._GroupedScores(
+            None, None, None, None, 2, {}, (4, 1, 4), bridge, None, None
+        )
+        self.assertEqual(
+            [part.tolist() for part in plan.split_rows(torch.arange(9))],
+            [list(range(9))],
+        )
+        gap = key_views([1024, 0, 1024], (3,))
+        gap[2].scale = gap[2].scale.clone()
+        self.assertIsNone(grouped._group_layout(gap, (4, 1, 4)))
+        self.assertIsNone(grouped._group_layout(key_views([0, 0], (2,)), (1, 1)))
+
     def test_fresh_rows_respect_4096_cap(self):
         keys = key_views([8192] * 4, (4,))
         self.assertIsNone(grouped._group_layout(keys, (4096,) * 4))
@@ -879,6 +919,33 @@ class GroupedScoreLayoutTest(unittest.TestCase):
     "GPU tests require explicit assigned GPU",
 )
 class GroupedScoreCudaTest(unittest.TestCase):
+    def test_zero_key_gap_preserves_absolute_rows_and_empty_bounds(self):
+        keys = key_views([1024, 0, 1024], (3,), device="cuda")
+        layout = grouped._group_layout(keys, (4, 1, 4))
+        self.assertEqual(
+            [(g.first, g.stop, g.rows) for g in layout],
+            [(0, 3, slice(0, 9))],
+        )
+        plan = grouped._GroupedScores(
+            torch.empty(1, device="cuda"),
+            None,
+            None,
+            torch.tensor([2, 4, 6, 8, 0, 2, 4, 6, 8], device="cuda"),
+            2,
+            {},
+            (4, 1, 4),
+            layout,
+            torch.tensor([0] * 4 + [1] + [2] * 4, device="cuda"),
+            torch.tensor([1024, 0, 1024], device="cuda"),
+        )
+        bounds = plan._bounds()
+        self._assert_bounds_reference(plan, bounds)
+        self.assertEqual(bounds[0][-1].cpu().tolist(), [1, 2, 3, 4, 0, 1, 2, 3, 4])
+        self.assertEqual(
+            bounds[0][1].cpu().tolist(),
+            [0, 0, 0, 0, 1024, 1024, 1024, 1024, 1024],
+        )
+
     def _bounds_plan(
         self,
         lengths,

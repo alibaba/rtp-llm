@@ -84,25 +84,24 @@ def release_v41_prefill_shared(shared: Dict, layer_id: Optional[int] = None) -> 
             shared.pop(key, None)
         return
 
-    remaining = [attn for index, attn in shared["layers"].items() if index > layer_id]
-    for key, source_attr, dependent_keys in (
-        (
-            "global",
-            "kv_source_layer_id",
-            ("prefill_chunk_meta", "prefill_kv_workspace"),
-        ),
-        ("topk", "index_source_layer_id", ("prefill_index_plan",)),
+    unused_global = set(shared.get("global", ()))
+    unused_topk = set(shared.get("topk", ()))
+    has_future_index_source = False
+    for index, attn in shared["layers"].items():
+        if index <= layer_id:
+            continue
+        unused_global.discard(getattr(attn, "kv_source_layer_id", None))
+        unused_topk.discard(getattr(attn, "index_source_layer_id", None))
+        has_future_index_source |= bool(getattr(attn, "is_index_source", False))
+        if not unused_global and not unused_topk and has_future_index_source:
+            break
+    for key, unused_sources, dependent_keys in (
+        ("global", unused_global, ("prefill_chunk_meta", "prefill_kv_workspace")),
+        ("topk", unused_topk, ("prefill_index_plan",)),
     ):
         values = shared.get(key, {})
-        if values:
-            unused_sources = set(values)
-            for attn in remaining:
-                unused_sources.discard(getattr(attn, source_attr, None))
-                if not unused_sources:
-                    break
-            for source in tuple(values):
-                if source in unused_sources:
-                    del values[source]
+        for source in unused_sources:
+            del values[source]
         if not values:
             for dependent in dependent_keys:
                 removed = shared.pop(dependent, None)
@@ -111,7 +110,7 @@ def release_v41_prefill_shared(shared: Dict, layer_id: Optional[int] = None) -> 
                     # into the next source group's MQA workspace allocation.
                     _clear_v41_attention_metadata(shared)
 
-    if not any(getattr(attn, "is_index_source", False) for attn in remaining):
+    if not has_future_index_source:
         for key in (
             "candidates",
             "candidate_mask",
@@ -141,7 +140,7 @@ def build_and_propagate_prefill_meta_fp8(
     workspace: "PrefillWorkspace",
     first_layer: int = 0,
     reuse_write_by_region: Optional[Dict] = None,
-    host_block_ids: Optional[torch.Tensor] = None,
+    host_swa_tables: Optional[Dict[str, torch.Tensor]] = None,
     stop_layer: Optional[int] = None,
 ) -> Dict:
     """Build the layer-invariant prefill meta once per ``compress_ratio``
@@ -195,6 +194,7 @@ def build_and_propagate_prefill_meta_fp8(
     reusable_query: Dict[tuple, "PrefillMeta"] = {}
     reusable_freqs_by_rope_kind: Dict[bool, "PrefillMeta"] = {}
     write_by_region: Dict = {}
+    bind_legacy_freqs = getattr(getattr(v4, "args", None), "v41_config", None) is None
     # V4.1 buckets (ratios 0/2/1) build through ``AttentionV41FP8``'s SWA
     # planner override, which caches the built meta per (rope kind, input
     # identity) in the shared per-forward state. Drop that cache HERE, at the
@@ -206,11 +206,6 @@ def build_and_propagate_prefill_meta_fp8(
     if isinstance(first_shared, dict):
         first_shared.pop("prefill_meta_common", None)
     try:
-        regions = (
-            tuple(str(region) for region in getattr(kv_cache, "group_tags", ()))
-            if ordered_ratios
-            else ()
-        )
         with record_function_range("dsv4.fp8.prefill_meta.build_all_ratios"):
             for key in ordered_ratios:
                 r, swa_region = key
@@ -252,17 +247,14 @@ def build_and_propagate_prefill_meta_fp8(
                         if reuse_write is not None
                         else {}
                     )
+                    host_swa_table = (host_swa_tables or {}).get(swa_region)
                     if (
                         hasattr(attn, "swa_bounded_replay")
-                        and isinstance(host_block_ids, torch.Tensor)
-                        and host_block_ids.device.type == "cpu"
-                        and host_block_ids.ndim == 3
-                        and host_block_ids.shape[0] == len(regions)
-                        and swa_region in regions
+                        and isinstance(host_swa_table, torch.Tensor)
+                        and host_swa_table.device.type == "cpu"
+                        and host_swa_table.ndim == 2
                     ):
-                        write_kwargs["host_swa_table"] = host_block_ids[
-                            regions.index(swa_region)
-                        ]
+                        write_kwargs["host_swa_table"] = host_swa_table
                     with record_function_range(f"dsv4.fp8.prefill_meta.ratio_{r}"):
                         meta_by_ratio[key] = attn._build_shared_prefill_meta(
                             x_first_layer,
@@ -308,7 +300,8 @@ def build_and_propagate_prefill_meta_fp8(
                 # Each layer owns its own compressor / indexer; freqs_cis must
                 # be bound per-layer (not just on the rep). Cheap idempotent
                 # is-None set.
-                attn._ensure_freqs_cis_bound()
+                if bind_legacy_freqs:
+                    attn._ensure_freqs_cis_bound()
                 attn._set_prefill_meta_shared(meta_by_ratio.get(key))
         return write_by_region
     except BaseException:

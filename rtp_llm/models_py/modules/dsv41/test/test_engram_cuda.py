@@ -83,6 +83,53 @@ class EngramCudaTest(unittest.TestCase):
         )
         torch.testing.assert_close(output.cpu(), expected_rows, rtol=0, atol=0)
 
+    def test_fused_hash_mask_is_layer_contiguous_and_graph_safe(self):
+        from rtp_llm.models_py.modules.dsv41 import _engram_triton
+
+        buffers = self.hash.prepare_device(torch.device("cuda:0"))
+
+        def fused(windows):
+            return _engram_triton.hash_token_windows(
+                windows, None, buffers, self.layout, self.hash.pad_id, image_token=9
+            )
+
+        for rows in (0, 1, 33, 257):
+            windows = torch.randint(
+                -1, 32, (rows * 2, 4), dtype=torch.int32, device="cuda:0"
+            )[::2]
+            if rows:
+                windows[0, 1] = 9
+                windows[-1, 0] = 9
+            hashes, mask = fused(windows)
+            expected = self.hash(windows.cpu(), (windows == 9).cpu())
+            torch.testing.assert_close(hashes.cpu(), expected)
+            torch.testing.assert_close(
+                mask.cpu(), ((windows[:, 0] >= 0) & (windows[:, 0] != 9)).cpu()
+            )
+            for layer in range(len(self.layout.layer_ids)):
+                self.assertTrue(hashes[:, layer].is_contiguous())
+
+        windows = torch.tensor(
+            [[7, 9, 5, 4], [9, 8, -1, -1]], dtype=torch.int32, device="cuda:0"
+        )
+        stream = torch.cuda.Stream()
+        stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(stream):
+            fused(windows)
+        stream.synchronize()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph, stream=stream):
+            hashes, mask = fused(windows)
+        windows.copy_(torch.tensor([[1, 0, -1, -1], [17, 9, 15, 14]], device="cuda:0"))
+        graph.replay()
+        torch.cuda.synchronize()
+        torch.testing.assert_close(
+            hashes.cpu(), self.hash(windows.cpu(), (windows == 9).cpu())
+        )
+        torch.testing.assert_close(
+            mask.cpu(), ((windows[:, 0] >= 0) & (windows[:, 0] != 9)).cpu()
+        )
+
     def test_gated_engram_residual_native_matches_reference(self):
         # Production shape (hc=4, dim=5120): the fused Triton kernel (inference
         # mode) must match the torch reference (grad mode keeps the reference

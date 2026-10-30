@@ -229,7 +229,9 @@ extern "C" int engram_cpu_hash(const void*    windows,
                         }
                         const uint64_t result =
                             static_cast<uint64_t>(remainder) + static_cast<uint64_t>(offsets[column]);
-                        std::memcpy(output + token * layers * columns + column, &result, sizeof(result));
+                        std::memcpy(output + (layer * tokens + token) * columns + (shift - 1) * heads + head,
+                                    &result,
+                                    sizeof(result));
                     }
                 }
             }

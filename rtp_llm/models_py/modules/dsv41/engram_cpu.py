@@ -245,8 +245,9 @@ def hash_token_windows_cpu(
         and offsets.shape == (layers, depth * heads)
     ):
         raise ValueError("Unsupported Engram CPU hash geometry")
+    # Layer-major storage keeps each lookup worker's token rows contiguous.
     output = torch.empty(
-        (tokens, layers, depth * heads), dtype=torch.int64, device="cpu"
+        (layers, tokens, depth * heads), dtype=torch.int64, device="cpu"
     )
     status = _LIBRARY.engram_cpu_hash(
         windows.data_ptr(),
@@ -269,4 +270,4 @@ def hash_token_windows_cpu(
     )
     if status:
         raise ValueError(f"Invalid Engram CPU hash constants or geometry: {status}")
-    return output
+    return output.permute(1, 0, 2)

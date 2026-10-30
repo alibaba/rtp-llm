@@ -362,6 +362,7 @@ class EngramCpuDeadlineTest(unittest.TestCase):
         slot.stream = Mock()
         slot.embedding = SimpleNamespace(weight=object(), scales=object())
         slot.host = torch.empty((4, 32), dtype=torch.bfloat16)
+        slot.hosts, slot.stage_events = (slot.host,), (slot.copied,)
         slot.hash_index, slot.num_threads = 0, 16
         slot.packed = False
         slot._copy = Mock()
@@ -408,8 +409,9 @@ class EngramCpuDeadlineTest(unittest.TestCase):
         slot.stream = Mock()
         slot.embedding = SimpleNamespace(weight=object(), scales=object())
         slot.host = torch.empty((4, 32), dtype=torch.bfloat16)
+        slot.hosts, slot.stage_events = (slot.host,), (slot.copied,)
         slot.hash_index, slot.num_threads, slot.packed = 0, 16, False
-        slot._copy = Mock(side_effect=lambda output, host: output.copy_(host))
+        slot._copy = Mock(side_effect=lambda output, host, event: output.copy_(host))
         self.slot = slot
         work, ids = self.work(ids=TensorMetadata(10))
         hashes = Future()
@@ -466,6 +468,7 @@ class EngramCpuDeadlineTest(unittest.TestCase):
                 slot.stream = Mock()
                 slot.embedding = SimpleNamespace(weight=object(), scales=object())
                 slot.host = torch.empty((4, 32), dtype=torch.bfloat16)
+                slot.hosts, slot.stage_events = (slot.host,), (slot.copied,)
                 slot.hash_index, slot.num_threads, slot.packed = 0, 16, False
                 slot.collect_timing = False
                 slot._copy = Mock()
@@ -499,6 +502,48 @@ class EngramCpuDeadlineTest(unittest.TestCase):
                 self.assertIsNone(work.future)
                 self.assertIsNone(work.ids)
 
+    def test_staging_next_chunk_does_not_wait_for_previous_copy(self):
+        slot = object.__new__(engram._EngramCPULookupSlot)
+        slot.__dict__.update(self.slot.__dict__)
+        slot.stream = Mock()
+        slot.embedding = SimpleNamespace(weight=object(), scales=object())
+        slot.host = torch.empty((4, 32), dtype=torch.bfloat16)
+        slot.hosts = (slot.host, torch.empty_like(slot.host))
+        pending = [False, False]
+        events = []
+        for index in range(2):
+            event = Mock()
+            event.synchronize.side_effect = lambda index=index: pending.__setitem__(
+                index, False
+            )
+            events.append(event)
+        slot.stage_events = tuple(events)
+        slot.hash_index, slot.num_threads, slot.packed = 0, 16, False
+
+        def copy(output, host, event):
+            index = events.index(event)
+            self.assertFalse(pending[index])
+            pending[index] = True
+            output.copy_(host)
+
+        slot._copy = copy
+        hashes = Future()
+        hashes.set_result(torch.arange(10).view(10, 1, 1))
+        output = torch.empty((10, 32), dtype=torch.bfloat16)
+
+        def native(weight, scales, chunk_ids, host, **kwargs):
+            if chunk_ids[0, 0] == 4:
+                self.assertTrue(pending[0])
+            host.copy_(chunk_ids.expand(-1, 32))
+
+        package = "rtp_llm.models_py.modules.dsv41.engram_cpu"
+        with patch.dict(
+            sys.modules, {package: SimpleNamespace(lookup_host_rows_cpu=native)}
+        ):
+            self.assertIs(slot.run(hashes, output), output)
+        torch.testing.assert_close(output[:, 0], torch.arange(10).to(output.dtype))
+        self.assertEqual([event.synchronize.call_count for event in events], [2, 1])
+
     def test_h2d_commit_race_is_atomic_against_deadline_abandonment(self):
         copying, release, queried = (
             threading.Event(),
@@ -510,6 +555,7 @@ class EngramCpuDeadlineTest(unittest.TestCase):
         slot.stream = Mock()
         slot.embedding = SimpleNamespace(weight=object(), scales=object())
         slot.host = torch.empty((4, 32), dtype=torch.bfloat16)
+        slot.hosts, slot.stage_events = (slot.host,), (slot.copied,)
         slot.hash_index, slot.num_threads, slot.packed = 0, 16, False
         self.slot = slot
         work, ids = self.work()

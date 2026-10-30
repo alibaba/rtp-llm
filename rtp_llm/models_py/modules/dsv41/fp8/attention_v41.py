@@ -33,7 +33,10 @@ from rtp_llm.models_py.modules.dsv41.bounded_replay import (
 from rtp_llm.models_py.modules.dsv41.chunk_env import (
     FLASH_MLA_SPARSE_Q_CHUNK as _FLASH_MLA_SPARSE_Q_CHUNK,
 )
-from rtp_llm.models_py.modules.dsv41.cp import _cp_restore_gathered_full_2d
+from rtp_llm.models_py.modules.dsv41.cp import (
+    _cp_restore_gathered_full_2d,
+    build_cp_full_prefill_positions,
+)
 from rtp_llm.models_py.modules.dsv41.fp8 import _v41_deepselect as prefill_deepselect
 from rtp_llm.models_py.modules.dsv41.fp8 import (
     _v41_indexer_q_triton as indexer_q_fusion,
@@ -1150,30 +1153,25 @@ class AttentionV41FP8(AttentionFP8):
         # Every V4.1 layer needs the full SWA prefix metadata, including global
         # layers. Build through the mature SWA planner with this layer's RoPE.
         ratio = self.compress_ratio
-        self.compress_ratio = 0
         # Only compressed bounded consumers bypass prefix concat. Pure SWA
         # still reads combined_indices even if bounded replay was requested.
         kwargs["swa_write_only"] = (
             bool(getattr(self, "swa_bounded_replay", False)) and ratio != 0
         )
+        kwargs["swa_query_meta"] = True
         reuse_common = kwargs.get("reuse_common_meta")
-        try:
-            cache = self._shared_attention.setdefault("prefill_meta_common", {})
-            key = self._v41_prefill_meta_cache_key(ratio, args, kwargs)
-            if reuse_common is None and key in cache:
-                return cache[key]
-            common = super()._build_shared_prefill_meta(*args, **kwargs)
-            if reuse_common is not None:
-                # Parent rechecks this layer's RoPE table but strips SWA Group-2
-                # for V4. V4.1 consumes the full same-region broadcast metadata.
-                common = common._replace(swa_meta=reuse_common.swa_meta)
-            common = common._replace(
-                request_row_slices=_prefill_request_row_slices(common)
-            )
-            cache[key] = common
-            return common
-        finally:
-            self.compress_ratio = ratio
+        cache = self._shared_attention.setdefault("prefill_meta_common", {})
+        key = self._v41_prefill_meta_cache_key(ratio, args, kwargs)
+        if reuse_common is None and key in cache:
+            return cache[key]
+        common = super()._build_shared_prefill_meta(*args, **kwargs)
+        if reuse_common is not None:
+            # Parent rechecks this layer's RoPE table but strips SWA Group-2
+            # for V4. V4.1 consumes the full same-region broadcast metadata.
+            common = common._replace(swa_meta=reuse_common.swa_meta)
+        common = common._replace(request_row_slices=_prefill_request_row_slices(common))
+        cache[key] = common
+        return common
 
     def _project_prefill_q(self, qr, freqs_cis, workspace):
         rows = qr.shape[0]
@@ -1473,7 +1471,7 @@ class AttentionV41FP8(AttentionFP8):
                 len(positions), 2 * self.head_dim, device=positions.device
             )
         pool = self._source_pool(CSA_STATE)
-        state = pool[slots.clamp_min(0)].clone()
+        state = pool[slots.clamp_min(0)]
         state.masked_fill_((slots < 0).unsqueeze(-1), 0)
         return self._gather_shards(state)
 
@@ -1542,11 +1540,7 @@ class AttentionV41FP8(AttentionFP8):
             else _PRODUCE_GLOBAL_TILE_ROWS
         )
         ends = [s + l for s, l in zip(prefixes_host, lengths_host)]
-        pair_ranges = []
-        base = 0
-        for start, length in zip(prefixes_host, lengths_host):
-            pair_ranges.append((base + (1 - start % 2), base + length))
-            base += length
+        pair_ranges = None
         producer_meta = None
         state_pool = None
         if (
@@ -1742,6 +1736,12 @@ class AttentionV41FP8(AttentionFP8):
             elif ratio == 2:
                 # Host lengths retain compact completed-pair rows without
                 # nonzero or doubling the index projection's GEMM row count.
+                if pair_ranges is None:
+                    pair_ranges = []
+                    base = 0
+                    for start, length in zip(prefixes_host, lengths_host):
+                        pair_ranges.append((base + (1 - start % 2), base + length))
+                        base += length
                 pair_cache = self._shared_attention.setdefault(
                     "prefill_meta_common", {}
                 ).setdefault("global_pairs", {})
@@ -2091,9 +2091,6 @@ class AttentionV41FP8(AttentionFP8):
         if not self.is_index_source:
             return shared["topk"][self.index_source_layer_id]
         globals_by_req = shared["global"][self.kv_source_layer_id]
-        out = torch.empty(
-            (x.shape[0], self.index_topk), dtype=torch.int32, device=x.device
-        )
         config = getattr(self, "v41_config", {})
         candidate_source = int(config.get("candidate_source_layer_id", -1))
         candidate_blocks = int(config.get("candidate_topk_blocks", 0))
@@ -2155,15 +2152,16 @@ class AttentionV41FP8(AttentionFP8):
         if max((len(k) for _, k in globals_by_req), default=0) <= self.index_topk:
             if candidates_out is not None:
                 candidates_out.fill_(-1)
-            ids = torch.arange(self.index_topk, device=x.device)
-            out.copy_(
-                torch.where(
-                    ids[None] < ((positions + 1) // self.compress_ratio)[:, None],
-                    ids[None],
-                    -1,
-                )
+            ids = torch.arange(self.index_topk, device=x.device, dtype=torch.int32)
+            out = torch.where(
+                ids[None] < ((positions + 1) // self.compress_ratio)[:, None],
+                ids[None],
+                -1,
             )
         else:
+            out = torch.empty(
+                (x.shape[0], self.index_topk), dtype=torch.int32, device=x.device
+            )
             q = self._lin(self.index_wq, qr).view(
                 -1, self.index_n_heads, self.index_head_dim
             )
@@ -2248,6 +2246,8 @@ class AttentionV41FP8(AttentionFP8):
                 if row_count == 0:
                     continue
                 key_count = len(keys)
+                if key_count == 0:
+                    continue
                 candidates = shared.get("candidates")
                 probe = slice(rows.start, rows.start + 1) if contiguous else rows[:1]
                 sparse_request = (
@@ -2576,6 +2576,33 @@ class AttentionV41FP8(AttentionFP8):
             # shorten SWA without moving global KV or changing its aliases.
             if workspace.try_layout(swa) is not None:
                 physical_offsets = workspace.device_offsets
+        pool_bound = (
+            min(len(globals_by_req), len(swa)) != 1
+            and self._source_pool(self._global_region()) is not None
+        )
+        if pool_bound:
+            from rtp_llm.models_py.modules.dsv41.cp import cp_swa_replay_starts
+
+            from ._v41_prefill_metadata import try_chunk_metadata
+
+            compact_replay = cp_swa_replay_starts(common.cp_ctx) is not None
+            meta = try_chunk_metadata(
+                common.prefix_lengths,
+                (
+                    common.cp_ctx.input_lengths_global
+                    if common.cp_on
+                    else common.input_lengths
+                ),
+                req_ids,
+                self.compress_ratio,
+                self.window_size,
+                self.swa_bounded_replay,
+                compact_replay=compact_replay,
+                physical_offsets=physical_offsets,
+            )
+            if meta is not None:
+                shared["prefill_chunk_meta"] = meta
+                return meta
         offsets, global_sizes = [], []
         offset = 0
         swa_sizes = (
@@ -2595,7 +2622,7 @@ class AttentionV41FP8(AttentionFP8):
             # directly and skip the device tensors (and their H2D copy) entirely.
             meta = (offsets[0], global_sizes[0], swa_starts[0])
         else:
-            if self._source_pool(self._global_region()) is None:
+            if not pool_bound:
                 # Pool-free warmup materializes only this chunk's closed
                 # groups, so its shapes need not include prefix history.
                 def device_values(values):
@@ -2610,28 +2637,6 @@ class AttentionV41FP8(AttentionFP8):
                 sizes = device_values(global_sizes)
                 starts_d = device_values(swa_starts)
             else:
-                from rtp_llm.models_py.modules.dsv41.cp import cp_swa_replay_starts
-
-                from ._v41_prefill_metadata import try_chunk_metadata
-
-                compact_replay = cp_swa_replay_starts(common.cp_ctx) is not None
-                meta = try_chunk_metadata(
-                    common.prefix_lengths,
-                    (
-                        common.cp_ctx.input_lengths_global
-                        if common.cp_on
-                        else common.input_lengths
-                    ),
-                    req_ids,
-                    self.compress_ratio,
-                    self.window_size,
-                    self.swa_bounded_replay,
-                    compact_replay=compact_replay,
-                    physical_offsets=physical_offsets,
-                )
-                if meta is not None:
-                    shared["prefill_chunk_meta"] = meta
-                    return meta
                 lengths = (
                     common.cp_ctx.input_lengths_global
                     if common.cp_on
@@ -2678,10 +2683,32 @@ class AttentionV41FP8(AttentionFP8):
             self._shared_attention.pop("prefill_chunk_meta", None)
             self._shared_attention.pop("prefill_index_plan", None)
         common = self._prefill_common_setup(x, positions)
+        if self.compress_ratio == 0:
+            qkv = self._prefill_compute_qkv(
+                x, common, shared_input_quant=shared_input_quant
+            )
+            # Read old SWA tails before the new rows wrap over their pool slots.
+            swa_only_workspace = (
+                self._swa_prefill_concat(qkv, common)
+                if common.any_cont and self._kv_cache is not None
+                else None
+            )
+            self._prefill_write_swa_fp8_paged(common, qkv.kv_full)
+            return common, qkv, None, None, swa_only_workspace
+        if not self.is_kv_source:
+            qkv = self._prefill_compute_qkv(
+                x, common, shared_input_quant=shared_input_quant
+            )
+            fuse_swa_fresh = self._can_fuse_swa_fresh(qkv, common)
+            swa, swa_starts = self._swa_prefill_workspace(
+                qkv, common, fuse_cache_write=fuse_swa_fresh
+            )
+            if not fuse_swa_fresh:
+                self._prefill_write_swa_fp8_paged(common, qkv.kv_full)
+            return common, qkv, swa, swa_starts, None
         previous_state = None
         if (
             x.is_cuda
-            and self.is_kv_source
             and self.compress_ratio == 2
             and common.cp_on
             and common.cp_ctx.cp_size > 1
@@ -2728,18 +2755,15 @@ class AttentionV41FP8(AttentionFP8):
                 allow_owner_tiles=True,
                 output_width=self.head_dim * (2 if self.compress_ratio == 2 else 1),
             )
-            if self.is_kv_source and common.cp_on and not small_cp
+            if common.cp_on and not small_cp
             else None
         )
-        if self.is_kv_source and common.cp_on and x_groups is None:
+        if common.cp_on and x_groups is None:
             if small_cp:
                 # One bounded all-gather avoids per-half launches on short requests.
                 first_tile = (None, 0, common.cp_ctx.padded_seq_len)
                 weights = ()
-                projected_small_cp = self.compress_ratio in (
-                    1,
-                    2,
-                ) and _project_before_small_cp_gather(
+                projected_small_cp = _project_before_small_cp_gather(
                     x, common.cp_ctx, self.compress_ratio * self.head_dim
                 )
                 if projected_small_cp:
@@ -2781,22 +2805,11 @@ class AttentionV41FP8(AttentionFP8):
                 )
         # Read old SWA tails before writes wrap over them in long prefill chunks.
         fuse_swa_fresh = self._can_fuse_swa_fresh(qkv, common)
-        swa, swa_starts = (
-            self._swa_prefill_workspace(qkv, common, fuse_cache_write=fuse_swa_fresh)
-            if self.compress_ratio
-            else (None, None)
-        )
-        swa_only_workspace = (
-            self._swa_prefill_concat(qkv, common)
-            if not self.compress_ratio
-            and common.any_cont
-            and self._kv_cache is not None
-            else None
+        swa, swa_starts = self._swa_prefill_workspace(
+            qkv, common, fuse_cache_write=fuse_swa_fresh
         )
         if not fuse_swa_fresh:
             self._prefill_write_swa_fp8_paged(common, qkv.kv_full)
-        if not self.compress_ratio or not self.is_kv_source:
-            return common, qkv, swa, swa_starts, swa_only_workspace
         starts = common.prefix_lengths
         lengths = (
             common.cp_ctx.input_lengths_global if common.cp_on else common.input_lengths
@@ -2808,98 +2821,89 @@ class AttentionV41FP8(AttentionFP8):
             and common.batch_size >= 2
         ):
             starts, lengths = starts.long(), lengths.long()
-        if self.is_kv_source:
-            rows = common.cp_ctx.seq_len_full if common.cp_on else x.shape[0]
-            x_full, projected_tiles, raw_tiles = x, None, None
-            batched_groups = False
-            if small_cp:
-                x_full = _cp_restore_gathered_full_2d(
-                    _wait_prefill_x_gather(x_gather), common.cp_ctx
-                )
-            elif x_groups is not None:
-                if os.environ.get("RTP_V41_BATCHED_PRODUCER", "0") == "1" and all(
-                    _prefill_x_group_fits(x, common.cp_ctx, l1 - l0, r1 - r0)
-                    for l0, l1, r0, r1 in x_groups
-                ):
-                    from . import _v41_batched_producer
-
-                    batched_groups = _v41_batched_producer.can_batch_groups(
-                        self, x, common.cp_ctx
-                    )
-                owner = self._owner()
-                weights = (
-                    (owner.global_wkv, owner.global_wgate)
-                    if self.compress_ratio == 2
-                    else (owner.global_wkv,)
-                )
-                projected_tiles = _prefill_projected_x_groups(
-                    x, common.cp_ctx, x_groups, weights, whole_groups=batched_groups
-                )
-            elif common.cp_on:
-                projected_tiles = _prefill_x_tiles(
-                    x, common.cp_ctx, x_plan, x_gather, x_buffers, weights
-                )
-            x_gather = None
-            if common.cp_on and x_groups is None:
-                del x_buffers
-            row_metadata = None
-            if (
-                common.cp_on
-                and common.batch_size > 1
-                and x.is_cuda
-                and starts.is_contiguous()
-                and lengths.is_contiguous()
+        rows = common.cp_ctx.seq_len_full if common.cp_on else x.shape[0]
+        x_full, projected_tiles, raw_tiles = x, None, None
+        batched_groups = False
+        if small_cp:
+            x_full = _cp_restore_gathered_full_2d(
+                _wait_prefill_x_gather(x_gather), common.cp_ctx
+            )
+        elif x_groups is not None:
+            if os.environ.get("RTP_V41_BATCHED_PRODUCER", "0") == "1" and all(
+                _prefill_x_group_fits(x, common.cp_ctx, l1 - l0, r1 - r0)
+                for l0, l1, r0, r1 in x_groups
             ):
-                from rtp_llm.models_py.modules.dsv41._cp_metadata_triton import (
-                    try_build_cp_full_prefill_positions,
-                )
+                from . import _v41_batched_producer
 
-                row_metadata = try_build_cp_full_prefill_positions(
-                    lengths, starts, total_tokens=rows
+                batched_groups = _v41_batched_producer.can_batch_groups(
+                    self, x, common.cp_ctx
                 )
-            if row_metadata is not None:
-                pos_full, ids_full = row_metadata
-                del row_metadata
-            else:
-                ids_full = torch.repeat_interleave(
-                    torch.arange(common.batch_size, device=x.device),
-                    lengths,
-                    output_size=rows,
+            owner = self._owner()
+            weights = (
+                (owner.global_wkv, owner.global_wgate)
+                if self.compress_ratio == 2
+                else (owner.global_wkv,)
+            )
+            projected_tiles = _prefill_projected_x_groups(
+                x, common.cp_ctx, x_groups, weights, whole_groups=batched_groups
+            )
+        elif common.cp_on:
+            projected_tiles = _prefill_x_tiles(
+                x, common.cp_ctx, x_plan, x_gather, x_buffers, weights
+            )
+        x_gather = None
+        if common.cp_on and x_groups is None:
+            del x_buffers
+        row_metadata = None
+        if (
+            common.cp_on
+            and common.batch_size > 1
+            and x.is_cuda
+            and starts.is_contiguous()
+            and lengths.is_contiguous()
+        ):
+            row_metadata = build_cp_full_prefill_positions(common.cp_ctx, x.device)[:2]
+        if row_metadata is not None:
+            pos_full, ids_full = row_metadata
+            del row_metadata
+        else:
+            ids_full = torch.repeat_interleave(
+                torch.arange(common.batch_size, device=x.device),
+                lengths,
+                output_size=rows,
+            )
+            cu = torch.cat(
+                (
+                    torch.zeros(1, device=x.device, dtype=torch.long),
+                    lengths.cumsum(0),
                 )
-                cu = torch.cat(
-                    (
-                        torch.zeros(1, device=x.device, dtype=torch.long),
-                        lengths.cumsum(0),
-                    )
-                )
-                pos_full = (
-                    torch.arange(rows, device=x.device)
-                    - cu[ids_full]
-                    + starts[ids_full]
-                )
-            try:
-                self._produce_global(
-                    x_full,
-                    pos_full,
-                    ids_full,
-                    starts,
-                    lengths,
-                    prefill=True,
-                    projected_tiles=projected_tiles,
-                    projected_full=projected_small_cp,
-                    raw_tiles=raw_tiles,
-                    grouped_projection=x_groups is not None,
-                    batched_groups=batched_groups,
-                    swa=swa,
-                    previous_state=previous_state,
-                )
-            finally:
-                if raw_tiles is not None:
-                    raw_tiles.close()
-                if projected_tiles is not None:
-                    projected_tiles.close()
-            del x_full
-        return common, qkv, swa, swa_starts, swa_only_workspace
+            )
+            pos_full = (
+                torch.arange(rows, device=x.device) - cu[ids_full] + starts[ids_full]
+            )
+        try:
+            self._produce_global(
+                x_full,
+                pos_full,
+                ids_full,
+                starts,
+                lengths,
+                prefill=True,
+                projected_tiles=projected_tiles,
+                projected_full=projected_small_cp,
+                raw_tiles=raw_tiles,
+                grouped_projection=x_groups is not None,
+                batched_groups=batched_groups,
+                swa=swa,
+                previous_state=previous_state,
+            )
+        finally:
+            if raw_tiles is not None:
+                raw_tiles.close()
+            if projected_tiles is not None:
+                projected_tiles.close()
+        del x_full
+        return common, qkv, swa, swa_starts, None
 
     def _prefill_query(self, x, common, qkv, swa, swa_starts, swa_only_workspace=None):
         """Consume query rows without regenerating or writing source KV."""
@@ -2916,14 +2920,11 @@ class AttentionV41FP8(AttentionFP8):
                     profile_name="dsv41.prefill.swa_concat.flash_mla",
                     out=self._prefill_output_buffer(x, qkv.qr.shape[0]),
                 )
-            topk = common.topk_idxs
-            if topk.dim() == 3:
-                topk = topk.squeeze(0)
             out = self._prefill_sparse_attention(
                 qkv,
                 common,
                 kv=qkv.kv_full.unsqueeze(1),
-                indices=topk.to(torch.int32),
+                indices=common.topk_idxs,
                 topk_length=common.swa_meta.topk_length_kv_full,
                 profile_name="dsv41.prefill.swa.flash_mla_kv_full",
                 out=self._prefill_output_buffer(x, qkv.qr.shape[0]),

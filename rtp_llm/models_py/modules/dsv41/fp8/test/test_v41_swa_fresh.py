@@ -111,6 +111,64 @@ def write(keys, raw, slots, compaction, dest, out, rank=0):
 
 
 class SwaWorkspaceViewTest(unittest.TestCase):
+    def test_shared_global_consumer_prepares_only_its_swa(self):
+        Attention = load_attention()
+        for layer_id in range(3, 8):
+            owner = Attention()
+            owner.layer_id = layer_id
+            owner.swa_bounded_replay = False
+            owner.compress_ratio = 2
+            owner.is_kv_source = False
+            common = object()
+            qkv = SimpleNamespace(kv_full=object())
+            swa, starts = object(), object()
+            calls = []
+            owner._begin_forward = lambda: calls.append("begin")
+            owner._prefill_common_setup = lambda *args: common
+            owner._prefill_compute_qkv = lambda *args, **kw: qkv
+            owner._can_fuse_swa_fresh = lambda *args: False
+            owner._swa_prefill_workspace = lambda *args, **kw: (
+                calls.append("read") or swa,
+                starts,
+            )
+            owner._prefill_write_swa_fp8_paged = lambda *args: calls.append("write")
+            result = owner._prefill_produce(torch.empty(0), None)
+            self.assertEqual(calls, ["begin", "read", "write"])
+            self.assertEqual(result, (common, qkv, swa, starts, None))
+
+    def test_swa_only_produce_reads_continuation_before_write(self):
+        Attention = load_attention()
+        for layer_id in (0, 1):
+            for any_cont in (False, True):
+                with self.subTest(layer_id=layer_id, any_cont=any_cont):
+                    owner = Attention()
+                    owner.layer_id = layer_id
+                    owner.swa_bounded_replay = False
+                    owner.compress_ratio = 0
+                    owner._kv_cache = object()
+                    common = SimpleNamespace(any_cont=any_cont)
+                    qkv = SimpleNamespace(kv_full=object())
+                    workspace = object()
+                    calls = []
+                    owner._begin_forward = lambda: calls.append("begin")
+                    owner._prefill_common_setup = lambda *args: common
+                    owner._prefill_compute_qkv = lambda *args, **kw: qkv
+                    owner._swa_prefill_concat = lambda *args: (
+                        calls.append("read") or workspace
+                    )
+                    owner._prefill_write_swa_fp8_paged = lambda *args: calls.append(
+                        "write"
+                    )
+                    result = owner._prefill_produce(torch.empty(0), None)
+                    self.assertEqual(
+                        calls,
+                        ["begin", "read", "write"] if any_cont else ["begin", "write"],
+                    )
+                    self.assertEqual(
+                        result,
+                        (common, qkv, None, None, workspace if any_cont else None),
+                    )
+
     def test_ragged_views_preserve_offsets_strides_and_aliasing(self):
         owner = load_attention()()
         owner.swa_bounded_replay = False
