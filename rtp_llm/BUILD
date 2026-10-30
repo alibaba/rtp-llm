@@ -909,6 +909,12 @@ rename_wheel(
     name = "rtp_llm",
     package_name = "rtp_llm-%s" % RELEASE_VERSION,
     src = ":rtp_llm_whl",
+    # Building the usual ROCm wheel target also builds the pinned ATOM wheel.
+    # CUDA and other platforms retain the original single-wheel output.
+    extra_files = select({
+        "@//:using_rocm": ["@atom_source//:atom_whl"],
+        "//conditions:default": [],
+    }),
 )
 
 rename_wheel(

@@ -240,7 +240,7 @@ def whl_deps():
             # Keep the ROCm AITER/FlyDSL pins synchronized with
             # deps/requirements{,_lock}_rocm.txt.
             "amd-aiter==0.1.23.dev134+g8449f416b",
-            "flydsl==0.3.2",
+            "flydsl==0.3.4.1",
             "triton==3.8.0+amd.rocm7.2.0.git111ff227",
             "triton-kernels==1.0.0+amd.rocm7.2.0.git111ff227",
             "fast-safetensors==0.7.3+torch2.1.2.rocm",
