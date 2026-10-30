@@ -58,6 +58,10 @@ private:
                                                             const ResourceContext& resource_context,
                                                             int                    reuse_length,
                                                             int64_t                token_budget);
+    absl::Status runPrefillWarmupBatch(const ResourceContext& resource_context,
+                                     int64_t per_request_tokens,
+                                     int64_t token_budget,
+                                     int64_t max_input_length);
     std::shared_ptr<KVCacheManager> createWarmupCacheManager();
     void                            initLoadBalance();
     absl::Status                    trySaveStepError() const;

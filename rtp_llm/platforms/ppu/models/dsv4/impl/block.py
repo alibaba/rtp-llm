@@ -1,0 +1,765 @@
+"""PPU overrides; unchanged behavior is inherited from the shared DSV4 implementation."""
+
+from __future__ import annotations
+from rtp_llm.models_py.modules.dsv4.block import (
+    _PrefillFastHCImpls,
+    _MOE_WEIGHT_NAMES,
+)
+import logging
+import os
+from typing import Callable, Dict, Optional, Tuple
+import torch
+import torch.nn as nn
+from rtp_llm.models_py.modules import RMSNorm
+from rtp_llm.models_py.modules.dsv4 import _profiler
+from rtp_llm.platforms.ppu.models.dsv4.impl.chunk_env import chunked_moe_enabled
+from rtp_llm.platforms.ppu.models.dsv4.impl.fp8.attention import (
+    AttentionFP8,
+    CommitOnlyAttentionFP8,
+)
+from rtp_llm.platforms.ppu.models.dsv4.impl.hc.factory import build_hc_unit
+from rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.chunked_layer import (
+    ChunkedFp8Fp4MoeLayer,
+)
+from rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.weight_adapter import (
+    adapt_split_moe_weights,
+)
+from rtp_llm.platforms.ppu.models.dsv4.impl.platform_provider import (
+    DefaultDsv4PlatformProvider,
+    Dsv4AttentionLayout,
+    Dsv4PlatformProvider,
+    Dsv4ProviderCapability,
+    resolve_dsv4_attention_layout,
+)
+from rtp_llm.platforms.ppu.models.dsv4.impl.tp_norm import tp_rms_norm
+from rtp_llm.utils.model_weight import W
+from rtp_llm.models_py.modules.dsv4.block import Block as _BaseBlock
+
+def build_baseline_moe(*, tp_size=1, tp_rank=0, platform_provider=None, **kwargs):
+    # PPU builders receive the untouched checkpoint dictionary and therefore
+    # retain their loader-owned TP layout. Only this selected baseline packs
+    # weights into the generic fused-MoE convention.
+    options = getattr(platform_provider, "execution_options", os.environ)
+    adapt_split_moe_weights(
+        kwargs["layer_weights"],
+        kwargs["moe_inter_dim"],
+        kwargs["n_shared_experts"],
+        _MOE_WEIGHT_NAMES,
+    )
+    return ChunkedFp8Fp4MoeLayer(
+        chunking_enabled=chunked_moe_enabled(options),
+        model_type="deepseek_v4",
+        moe_w1_layout="gate_up",
+        **kwargs,
+    )
+
+def _prefill_fast_norm(
+    norm: nn.Module,
+    x: torch.Tensor,
+    *,
+    tp_size: int = 1,
+    tp_rank: int = 0,
+    global_dim: int | None = None,
+) -> torch.Tensor:
+    # Regular CUDA TP retains full-width hidden states. Preserve its in-place
+    # norm path; hidden-dimension shards need the TP adapter, including the
+    # layout where the affine weight is sharded to the same local width.
+    if tp_size > 1 and (
+        (global_dim is not None and x.shape[-1] != global_dim)
+        or norm.weight.numel() != x.shape[-1]
+    ):
+        return tp_rms_norm(
+            norm,
+            x,
+            tp_size=tp_size,
+            tp_rank=tp_rank,
+            global_dim=global_dim,
+        )
+    if (
+        isinstance(norm, RMSNorm)
+        and norm.__class__.__module__ == "rtp_llm.models_py.modules.base.cuda.norm"
+    ):
+        return norm(x, output=x)
+    return norm(x)
+
+def _prefill_fast_hc_pre_norm(
+    hc: nn.Module,
+    pre_impl: Callable,
+    norm: nn.Module,
+    x: torch.Tensor,
+    *,
+    tp_size: int,
+    tp_rank: int,
+):
+    fused = getattr(hc, "prefill_fast_pre_norm", None)
+    if fused is not None:
+        result = fused(x, norm, tp_size=tp_size, tp_rank=tp_rank)
+        if result is not None:
+            return result, True
+    x_pre, post, comb = pre_impl(x)
+    return (x_pre, post, comb), False
+
+class Block(_BaseBlock):
+    def _hc_pre_norm(self, hc, x, norm, *, tp_size, tp_rank, dbg_tag=None):
+        x_pre, post, comb = hc.pre(x, dbg_tag=dbg_tag)
+        shape = x_pre.shape
+        return norm(x_pre.reshape(-1, shape[-1])).view(shape), post, comb
+
+    tp_size: int = 1
+
+    tp_rank: int = 0
+
+    dim: int | None = None
+
+    def __init__(
+        self,
+        layer_id: int,
+        dim: int,
+        n_heads: int,
+        q_lora_rank: int,
+        head_dim: int,
+        rope_head_dim: int,
+        o_lora_rank: int,
+        o_groups: int,
+        window_size: int,
+        compress_ratio: int,
+        compress_rope_theta: float,
+        rope_theta: float,
+        rope_factor: float,
+        beta_fast: int,
+        beta_slow: int,
+        original_seq_len: int,
+        max_batch_size: int,
+        max_seq_len: int,
+        index_n_heads: int,
+        index_head_dim: int,
+        index_topk: int,
+        moe_inter_dim: int,
+        n_routed_experts: int,
+        n_activated_experts: int,
+        n_shared_experts: int,
+        score_func: str,
+        route_scale: float,
+        swiglu_limit: float,
+        n_hash_layers: int,
+        vocab_size: int,
+        hc_mult: int,
+        hc_sinkhorn_iters: int,
+        hc_eps: float,
+        norm_eps: float = 1e-6,
+        layer_weights: Optional[Dict[str, torch.Tensor]] = None,
+        tp_size: int = 1,
+        tp_rank: int = 0,
+        ep_size: int = 1,
+        ep_rank: int = 0,
+        world_size: Optional[int] = None,
+        world_rank: Optional[int] = None,
+        max_tokens_per_rank: int = 8192,
+        is_decode_role: bool = False,
+        moe_strategy: str = "auto",
+        fp8_kv_cache: bool = False,
+        platform_provider: Optional[Dsv4PlatformProvider] = None,
+        commit_only: bool = False,
+        n_physical_experts: Optional[int] = None,
+    ):
+        super(_BaseBlock, self).__init__()
+        self.layer_id = layer_id
+        self.tp_size = int(tp_size)
+        self.tp_rank = int(tp_rank)
+        self.dim = int(dim)
+        self.fp8_kv_cache = fp8_kv_cache
+        self._platform_provider = platform_provider
+        self._attention_layout = resolve_dsv4_attention_layout(
+            platform_provider
+            if platform_provider is not None
+            else DefaultDsv4PlatformProvider()
+        )
+
+        attn_cls = CommitOnlyAttentionFP8 if commit_only else AttentionFP8
+        attn_kwargs = dict(
+            layer_id=layer_id,
+            dim=dim,
+            n_heads=n_heads,
+            q_lora_rank=q_lora_rank,
+            head_dim=head_dim,
+            rope_head_dim=rope_head_dim,
+            o_lora_rank=o_lora_rank,
+            o_groups=o_groups,
+            window_size=window_size,
+            compress_ratio=compress_ratio,
+            compress_rope_theta=compress_rope_theta,
+            rope_theta=rope_theta,
+            rope_factor=rope_factor,
+            beta_fast=beta_fast,
+            beta_slow=beta_slow,
+            original_seq_len=original_seq_len,
+            max_batch_size=max_batch_size,
+            max_seq_len=max_seq_len,
+            index_n_heads=index_n_heads,
+            index_head_dim=index_head_dim,
+            index_topk=index_topk,
+            norm_eps=norm_eps,
+            layer_weights=layer_weights,
+            tp_size=tp_size,
+            tp_rank=tp_rank,
+        )
+        self.attn = (
+            platform_provider.build_attention(attn_cls, **attn_kwargs)
+            if platform_provider is not None
+            and Dsv4ProviderCapability.ATTENTION in platform_provider.capabilities
+            else attn_cls(**attn_kwargs)
+        )
+        self._cp_sync_after_attn_done = False
+        if commit_only:
+            self.ffn = None
+            self.attn_norm = None
+            self.ffn_norm = None
+            self.attn_hc = None
+            self.ffn_hc = None
+            self._prefill_fast_hc_impls_cached = None
+            return
+
+        if layer_weights is None:
+            raise ValueError("Block requires per-layer weights")
+        moe_kwargs = dict(
+            layer_id=layer_id,
+            dim=dim,
+            moe_inter_dim=moe_inter_dim,
+            n_routed_experts=n_routed_experts,
+            n_activated_experts=n_activated_experts,
+            n_shared_experts=n_shared_experts,
+            score_func=score_func,
+            route_scale=route_scale,
+            swiglu_limit=swiglu_limit,
+            n_hash_layers=n_hash_layers,
+            vocab_size=vocab_size,
+            layer_weights=layer_weights,
+            tp_size=tp_size,
+            ep_size=ep_size,
+            ep_rank=ep_rank,
+            world_size=world_size,
+            world_rank=world_rank,
+            max_tokens_per_rank=max_tokens_per_rank,
+            is_decode_role=is_decode_role,
+            strategy=moe_strategy,
+            n_physical_experts=n_physical_experts,
+            observer_factory=self._moe_observer,
+            record_function_scope=_profiler.moe_record_function_scope,
+        )
+        self.ffn = (
+            platform_provider.build_moe(
+                build_baseline_moe, tp_rank=tp_rank, **moe_kwargs
+            )
+            if platform_provider is not None
+            and Dsv4ProviderCapability.MOE in platform_provider.capabilities
+            else build_baseline_moe(
+                platform_provider=platform_provider, tp_rank=tp_rank, **moe_kwargs
+            )
+        )
+
+        # Framework loader already casts norms to bf16 (compute_dtype) and
+        # hc_* tensors to fp32 (descriptor data_type); pass refs straight
+        # into ``RMSNorm`` at construction time.  Norms here see 2D inputs
+        # ``[T, dim]`` from the hc_pre output, so framework ``RMSNorm``
+        # (which expects 2D) drops in directly.
+        self.attn_norm = RMSNorm(layer_weights[W.v4_attn_norm], norm_eps)
+        self.ffn_norm = RMSNorm(layer_weights[W.v4_ffn_norm], norm_eps)
+
+        self.attn_hc = build_hc_unit(
+            layer_weights[W.v4_hc_attn_fn],
+            layer_weights[W.v4_hc_attn_base],
+            layer_weights[W.v4_hc_attn_scale],
+            dim=dim,
+            hc_mult=hc_mult,
+            hc_sinkhorn_iters=hc_sinkhorn_iters,
+            norm_eps=norm_eps,
+            hc_eps=hc_eps,
+            layer_id=layer_id,
+            name="attn",
+            tp_size=tp_size,
+            tp_rank=tp_rank,
+            platform_provider=self._platform_provider,
+        )
+        self.ffn_hc = build_hc_unit(
+            layer_weights[W.v4_hc_ffn_fn],
+            layer_weights[W.v4_hc_ffn_base],
+            layer_weights[W.v4_hc_ffn_scale],
+            dim=dim,
+            hc_mult=hc_mult,
+            hc_sinkhorn_iters=hc_sinkhorn_iters,
+            norm_eps=norm_eps,
+            hc_eps=hc_eps,
+            layer_id=layer_id,
+            name="ffn",
+            tp_size=tp_size,
+            tp_rank=tp_rank,
+            platform_provider=self._platform_provider,
+        )
+        self._prefill_fast_hc_impls_cached = self._resolve_prefill_fast_hc_impls()
+        self._mega_csa_adapter = None
+        self._mega_hca_adapter = None
+
+    def enable_mega_csa(self, runtime, layer_weights: Dict[str, torch.Tensor]) -> None:
+        """Attach the TP1 CSA adapter only to compress-ratio-4 layers."""
+        from rtp_llm.models_py.modules.dsv4.fp8.decode.mega_csa_weights import (
+            COMPRESS_RATIO,
+        )
+
+        if int(self.attn.compress_ratio) != COMPRESS_RATIO:
+            return
+        from rtp_llm.platforms.ppu.models.dsv4.impl.fp8.decode.mega_csa_adapter import MegaCSAAdapter
+
+        # Packed Mega weights add GPU memory; keep the original weights for
+        # prefill and decode shapes that use the ordinary attention path.
+        self._mega_csa_adapter = MegaCSAAdapter(self, layer_weights, runtime)
+
+    def enable_mega_hca(self, runtime, layer_weights: Dict[str, torch.Tensor]) -> None:
+        """Attach the TP1 HCA adapter only to compress-ratio-128 layers."""
+        from rtp_llm.models_py.modules.dsv4.fp8.decode.mega_hca_weights import (
+            HCA_COMPRESS_RATIO,
+        )
+
+        if int(self.attn.compress_ratio) != HCA_COMPRESS_RATIO:
+            return
+        from rtp_llm.platforms.ppu.models.dsv4.impl.fp8.decode.mega_hca_adapter import MegaHCAAdapter
+
+        self._mega_hca_adapter = MegaHCAAdapter(self, layer_weights, runtime)
+
+    def prefill_fast_callable(self):
+        if getattr(self.attn, "prefill_fast_protocol", None) != "dsv4.fp8-attention.v1":
+            return None
+        # ``prefill.forward_layers`` caches this private callable only after the
+        # layer has passed the production FP8 support matrix. Keep the public
+        # ``forward_prefill_fast`` wrapper defensive for tests/manual calls.
+        return self._forward_prefill_fast_fp8
+
+    def prefill_fast_attn_pre(self, x: torch.Tensor):
+        attn_hc_pre, _, _, _ = self._prefill_fast_hc_impls()
+        residual = x
+        (x_pre, post, comb), norm_fused = _prefill_fast_hc_pre_norm(
+            self.attn_hc,
+            attn_hc_pre,
+            self.attn_norm,
+            x,
+            tp_size=self.tp_size,
+            tp_rank=self.tp_rank,
+        )
+        if not norm_fused:
+            x_pre = _prefill_fast_norm(
+                self.attn_norm,
+                x_pre,
+                tp_size=self.tp_size,
+                tp_rank=self.tp_rank,
+                global_dim=self.dim,
+            )
+        return residual, x_pre, post, comb
+
+    def prefill_fast_ffn_pre(self, x: torch.Tensor):
+        _, ffn_hc_pre, _, _ = self._prefill_fast_hc_impls()
+        residual = x
+        (x_pre, post, comb), norm_fused = _prefill_fast_hc_pre_norm(
+            self.ffn_hc,
+            ffn_hc_pre,
+            self.ffn_norm,
+            x,
+            tp_size=self.tp_size,
+            tp_rank=self.tp_rank,
+        )
+        if not norm_fused:
+            x_pre = _prefill_fast_norm(
+                self.ffn_norm,
+                x_pre,
+                tp_size=self.tp_size,
+                tp_rank=self.tp_rank,
+                global_dim=self.dim,
+            )
+        return residual, x_pre, post, comb
+
+    def forward_decode(
+        self,
+        x: torch.Tensor,  # [B, 1, hc, dim]
+        attn_metadata: "DSv4DecodeAttnMetadata",  # type: ignore[name-defined]
+        input_ids: torch.Tensor,  # [B, 1]
+        kv_cache=None,
+        attn_fn=None,
+    ) -> torch.Tensor:
+        """Decode-only block forward — mirrors prefill ``forward`` but
+        delegates attention to ``Attention.forward_decode``. Prefill
+        ``forward`` is byte-identical for PD-disagg cleanliness.
+
+        ``attn_fn`` overrides the attention call (normed input -> attention
+        output) while keeping this block's hyper-connection choreography as
+        the single authority; the DSpARK draft substitutes its non-causal
+        fixed-block attention this way instead of copying the block body.
+        """
+        from rtp_llm.models_py.modules.dsv4 import _record_tensor as _rt
+
+        _dbg_layer = _rt.should_record_layer(self.layer_id)
+        mega_adapter = self._mega_csa_adapter or self._mega_hca_adapter
+        use_mega_attention = (
+            attn_fn is None
+            and mega_adapter is not None
+            and mega_adapter.supports_decode_shape(x, attn_metadata)
+        )
+        if use_mega_attention:
+            # Fused HC/norm intermediates are not exposed by Mega. The shared
+            # residual record below remains available; DSV4_MEGA=0 restores
+            # the ordinary attention intermediate records for debugging.
+            x = mega_adapter.forward_attention_sublayer(
+                self, x, attn_metadata, kv_cache=kv_cache
+            )
+        else:
+            # Attention path
+            residual = x
+            prepared = None
+            fused_attn_pre = getattr(self.attn, "forward_decode_with_hc_pre", None)
+            if not _dbg_layer and attn_fn is None and callable(fused_attn_pre):
+                prepared = fused_attn_pre(
+                    x, attn_metadata, self.attn_hc, self.attn_norm, kv_cache=kv_cache
+                )
+            if prepared is not None:
+                attn_out, post, comb = prepared
+            else:
+                x_pre, post, comb = self._hc_pre_norm(
+                    self.attn_hc,
+                    x,
+                    self.attn_norm,
+                    tp_size=self.tp_size,
+                    tp_rank=self.tp_rank,
+                    dbg_tag=f"L{self.layer_id:02d}_decode_attn_hc_pre" if _dbg_layer else None,
+                )
+                if _dbg_layer:
+                    _rt.record_if_level(2, f"L{self.layer_id:02d}_decode_attn_in", x_pre)
+                if attn_fn is not None:
+                    attn_out = attn_fn(x_pre)
+                else:
+                    attn_out = self.attn.forward_decode(
+                        x_pre,
+                        attn_metadata,
+                        kv_cache=kv_cache,
+                    )
+            if _dbg_layer:
+                _rt.record_if_level(2, f"L{self.layer_id:02d}_decode_attn_out", attn_out)
+            x = self.attn_hc.post(attn_out, residual, post, comb)
+        if _dbg_layer:
+            _rt.record_if_level(2, f"L{self.layer_id:02d}_decode_attn_residual", x)
+
+        # FFN path — MoE has no per-step state, reuse existing forward
+        residual = x
+        fused_ffn_pre = getattr(self.ffn, "forward_with_hc_pre", None)
+        if not _dbg_layer and callable(fused_ffn_pre):
+            fused = fused_ffn_pre(
+                x, input_ids, self.ffn_hc, self.ffn_norm,
+                active_token_mask=getattr(attn_metadata, "active_token_mask", None),
+            )
+            if fused is not None:
+                return fused
+        x_pre, post, comb = self._hc_pre_norm(
+                    self.ffn_hc,
+            x,
+            self.ffn_norm,
+            tp_size=self.tp_size,
+            tp_rank=self.tp_rank,
+            dbg_tag=f"L{self.layer_id:02d}_decode_ffn_hc_pre" if _dbg_layer else None,
+        )
+        if _dbg_layer:
+            _rt.record_if_level(2, f"L{self.layer_id:02d}_decode_ffn_in", x_pre)
+        active_token_mask = getattr(attn_metadata, "active_token_mask", None)
+        ffn_kwargs = (
+            {"active_token_mask": active_token_mask}
+            if active_token_mask is not None else {}
+        )
+        fused_ffn_hc = getattr(self.ffn, "forward_with_hc", None)
+        if not _dbg_layer and callable(fused_ffn_hc):
+            fused = fused_ffn_hc(
+                x_pre, input_ids, self.ffn_hc, residual, post, comb, **ffn_kwargs
+            )
+            if fused is not None:
+                return fused
+        ffn_out = self.ffn(x_pre, input_ids, is_decode_forward=True, **ffn_kwargs)
+        if _dbg_layer:
+            _rt.record_if_level(2, f"L{self.layer_id:02d}_decode_ffn_out", ffn_out)
+        x = self.ffn_hc.post(ffn_out, residual, post, comb)
+        return x
+
+    def _forward_prefill_fast_fp8(
+        self,
+        x: torch.Tensor,
+        input_ids: Optional[torch.Tensor],
+        positions: torch.Tensor,
+        cu_seqlens: torch.Tensor,
+        kv_cache=None,
+        block_tables_by_type=None,
+    ) -> torch.Tensor:
+        """Validated FP8 prefill fast body.
+
+        This private method is cached by ``prefill.forward_layers`` after the
+        layer is proven to be ``Block + AttentionFP8``. Keep it semantically
+        paired with ``forward``: production runs may switch between the normal
+        and fast paths via env/debug gates.
+        """
+        if input_ids is None:
+            raise RuntimeError("DSV4 prefill fast path requires input_ids")
+
+        (
+            attn_hc_pre,
+            ffn_hc_pre,
+            attn_hc_post,
+            ffn_hc_post,
+        ) = self._prefill_fast_hc_impls()
+
+        residual = x
+        (x_pre, post, comb), norm_fused = _prefill_fast_hc_pre_norm(
+            self.attn_hc,
+            attn_hc_pre,
+            self.attn_norm,
+            x,
+            tp_size=self.tp_size,
+            tp_rank=self.tp_rank,
+        )
+        if norm_fused:
+            attn_out = self.attn(
+                x_pre,
+                positions,
+                kv_cache=kv_cache,
+                block_tables_by_type=block_tables_by_type,
+            )
+        elif (
+            self.tp_size == 1 or self.attn_norm.weight.numel() == x_pre.shape[-1]
+        ) and self.attn.can_fuse_prefill_attn_norm_input_quant(
+            x_pre, self.attn_norm.weight.data
+        ):
+            x_pre, shared_input_quant = self.attn.prefill_fused_attn_norm_input_quant(
+                x_pre,
+                self.attn_norm.weight.data,
+                self.attn_norm.variance_epsilon,
+            )
+            attn_out = self.attn.forward_with_shared_input_quant(
+                x_pre,
+                positions,
+                shared_input_quant,
+                kv_cache=kv_cache,
+                block_tables_by_type=block_tables_by_type,
+            )
+        else:
+            x_pre = _prefill_fast_norm(
+                self.attn_norm,
+                x_pre,
+                tp_size=self.tp_size,
+                tp_rank=self.tp_rank,
+                global_dim=self.dim,
+            )
+            attn_out = self.attn(
+                x_pre,
+                positions,
+                kv_cache=kv_cache,
+                block_tables_by_type=block_tables_by_type,
+            )
+        x = attn_hc_post(attn_out, residual, post, comb)
+        self._sync_after_first_cp_prefill_attention()
+
+        residual = x
+        (x_pre, post, comb), norm_fused = _prefill_fast_hc_pre_norm(
+            self.ffn_hc,
+            ffn_hc_pre,
+            self.ffn_norm,
+            x,
+            tp_size=self.tp_size,
+            tp_rank=self.tp_rank,
+        )
+        if not norm_fused:
+            x_pre = _prefill_fast_norm(
+                self.ffn_norm,
+                x_pre,
+                tp_size=self.tp_size,
+                tp_rank=self.tp_rank,
+                global_dim=self.dim,
+            )
+        ffn_out = self.ffn(x_pre, input_ids)
+        return ffn_hc_post(ffn_out, residual, post, comb)
+
+    def forward(
+        self,
+        x: torch.Tensor,  # [T, hc, dim]
+        input_ids: Optional[torch.Tensor],  # [T]
+        positions: torch.Tensor,  # [T] int64
+        cu_seqlens: torch.Tensor,  # [B+1] int64
+        kv_cache=None,
+        block_tables_by_type=None,
+    ) -> torch.Tensor:
+        """Flat per-block forward — accepts ``[T, hc, dim]`` hidden and 1D
+        ``input_ids`` / ``positions`` / ``cu_seqlens``, matching the vLLM
+        DSV4 layer layout.  HC pre/post are flat-native;
+        ``self.ffn`` (MoE) reshapes to 2D internally so any shape flows.
+
+        Attention is called with a padded ``[B, max_S, dim]`` tensor and
+        per-row ``start_pos [B]`` / ``sequence_lengths [B]`` derived from
+        ``cu_seqlens`` + ``positions``.  For B==1 the scatter/gather
+        collapses to an identity copy and Attention's internal scalar
+        path kicks in (start_pos tensor with ``numel()==1`` falls through
+        to ``int(start_pos)``), so the single-request case is bit-equal
+        to the pre-batched behavior.
+        """
+        from rtp_llm.models_py.modules.dsv4 import _record_tensor as _rt
+
+        # Master switch: when MOEDBG=0 the AND short-circuits so neither the
+        # layer_id compare nor any record_if_level call site below runs.
+        # By default keep the narrow trace from _record_tensor; use
+        # MOEDBG_LAYER/MOEDBG_ALL_LAYERS for wider bisection.
+        _dbg_layer = _rt.should_record_layer(self.layer_id)
+        dbg_pos = getattr(_rt, "_DBG_GLOBAL_POS", -1)
+        dbg_pos_mask = None
+        dbg_pos_name = None
+        dbg_positions = positions
+        cp_ctx = getattr(self.attn, "_cp_ctx", None)
+        if cp_ctx is not None and getattr(cp_ctx, "global_positions", None) is not None:
+            cp_positions = cp_ctx.global_positions
+            if cp_positions.numel() == positions.numel():
+                dbg_positions = cp_positions
+        if _dbg_layer and dbg_pos >= 0:
+            dbg_pos_mask = dbg_positions.to(torch.long) == int(dbg_pos)
+            dbg_pos_name = f"pos{dbg_pos}"
+        # Attention path
+        residual = x
+        x_pre, post, comb = self._hc_pre_norm(
+            self.attn_hc,
+            x,
+            self.attn_norm,
+            tp_size=self.tp_size,
+            tp_rank=self.tp_rank,
+            dbg_tag=f"L{self.layer_id:02d}_attn_hc_pre" if _dbg_layer else None,
+        )  # [T, dim], [T, hc, 1], [T, hc, hc]
+        if _dbg_layer:
+            _rt.record_if_level(2, f"L{self.layer_id:02d}_attn_in", x_pre)
+            if dbg_pos_mask is not None:
+                _rt.record_if_level(
+                    2,
+                    f"L{self.layer_id:02d}_attn_in_{dbg_pos_name}",
+                    x_pre[dbg_pos_mask].contiguous(),
+                )
+
+        # AttentionFP8 is flat-native: takes [T, dim] + per-token positions,
+        # no padding / per-request scalars. The runtime kv-cache dtype flag can
+        # be false while this branch still constructs AttentionFP8, so dispatch
+        # on the module type instead of only the cache config.
+        if self._attention_layout == Dsv4AttentionLayout.FLAT:
+            attn_out = self.attn(
+                x_pre,  # [T, dim]
+                positions,  # [T] int64 absolute positions
+                kv_cache=kv_cache,
+                block_tables_by_type=block_tables_by_type,
+            )  # [T, dim]
+        else:
+            # Present flat [T, dim] as [B, S, dim] for Attention.  The common
+            # prefill layouts (single request, or dense equal-length batch) are
+            # already request-major, so a view is enough.  Ragged batches keep
+            # the padded scatter/gather fallback.
+            cu_long = cu_seqlens.to(torch.long)
+            batch_size = int(cu_long.numel() - 1)
+            seqlens = cu_long[1:] - cu_long[:-1]  # [B]
+            T = int(x_pre.size(0))
+            D = int(x_pre.size(-1))
+            device = x_pre.device
+            max_S = (
+                int(seqlens.max().item())
+                if batch_size > 0 and seqlens.device.type == "cpu"
+                else T
+            )
+            # Per-row start_pos = absolute position of each request's first
+            # token, pulled directly off the flat positions tensor.
+            start_pos_per_req = positions[cu_long[:-1]].to(torch.long)  # [B]
+
+            equal_len_dense = (
+                T == batch_size * max_S
+                and seqlens.device.type == "cpu"
+                and bool((seqlens == max_S).all().item())
+            )
+            dense_layout = batch_size == 1 or (batch_size > 1 and equal_len_dense)
+            if dense_layout:
+                x_padded = x_pre.view(batch_size, max_S, D)
+                b_idx = None
+                s_idx = None
+            else:
+                t_idx = torch.arange(T, device=device, dtype=torch.long)
+                # right=True so tokens at cu_seqlens[b] land in request b
+                # (cu_long[1:] are exclusive ends).
+                b_idx = torch.searchsorted(cu_long[1:].contiguous(), t_idx, right=True)
+                s_idx = t_idx - cu_long[:-1][b_idx]
+                x_padded = torch.zeros(
+                    batch_size, max_S, D, dtype=x_pre.dtype, device=device
+                )
+                x_padded[b_idx, s_idx] = x_pre
+
+            attn_out_padded = self.attn(
+                x_padded,  # [B, max_S, dim]
+                start_pos_per_req,
+                sequence_lengths=seqlens,
+                kv_cache=kv_cache,
+                block_tables_by_type=block_tables_by_type,
+            )  # [B, max_S, dim]
+            if dense_layout:
+                attn_out = attn_out_padded.reshape(T, D)
+            else:
+                attn_out = attn_out_padded[b_idx, s_idx]  # [T, dim]
+        if _dbg_layer:
+            _rt.record_if_level(2, f"L{self.layer_id:02d}_attn_out", attn_out)
+            if dbg_pos_mask is not None:
+                _rt.record_if_level(
+                    2,
+                    f"L{self.layer_id:02d}_attn_out_{dbg_pos_name}",
+                    attn_out[dbg_pos_mask].contiguous(),
+                )
+        x = self.attn_hc.post(attn_out, residual, post, comb)  # [T, hc, dim]
+        self._sync_after_first_cp_prefill_attention()
+        if _dbg_layer:
+            _rt.record_if_level(2, f"L{self.layer_id:02d}_attn_residual", x)
+            if dbg_pos_mask is not None:
+                _rt.record_if_level(
+                    2,
+                    f"L{self.layer_id:02d}_attn_residual_{dbg_pos_name}",
+                    x[dbg_pos_mask].contiguous(),
+                )
+
+        # FFN path
+        residual = x
+        x_pre, post, comb = self._hc_pre_norm(
+            self.ffn_hc,
+            x,
+            self.ffn_norm,
+            tp_size=self.tp_size,
+            tp_rank=self.tp_rank,
+            dbg_tag=f"L{self.layer_id:02d}_ffn_hc_pre" if _dbg_layer else None,
+        )  # [T, dim], ...
+        if _dbg_layer:
+            _rt.record_if_level(2, f"L{self.layer_id:02d}_ffn_in", x_pre)
+            if dbg_pos_mask is not None:
+                _rt.record_if_level(
+                    2,
+                    f"L{self.layer_id:02d}_ffn_in_{dbg_pos_name}",
+                    x_pre[dbg_pos_mask].contiguous(),
+                )
+        ffn_in_ids = (
+            input_ids
+            if input_ids is not None
+            else torch.zeros(x.size(0), dtype=torch.long, device=x.device)
+        )
+        if _dbg_layer and dbg_pos_mask is not None:
+            ffn_out = self.ffn(x_pre, ffn_in_ids, positions=dbg_positions)
+        else:
+            ffn_out = self.ffn(x_pre, ffn_in_ids)  # [T, dim]
+        if _dbg_layer:
+            _rt.record_if_level(2, f"L{self.layer_id:02d}_ffn_out", ffn_out)
+            if dbg_pos_mask is not None:
+                _rt.record_if_level(
+                    2,
+                    f"L{self.layer_id:02d}_ffn_out_{dbg_pos_name}",
+                    ffn_out[dbg_pos_mask].contiguous(),
+                )
+        x = self.ffn_hc.post(ffn_out, residual, post, comb)  # [T, hc, dim]
+        if _dbg_layer and dbg_pos_mask is not None:
+            _rt.record_if_level(
+                2,
+                f"L{self.layer_id:02d}_ffn_residual_{dbg_pos_name}",
+                x[dbg_pos_mask].contiguous(),
+            )
+        return x  # [T, hc, dim]
