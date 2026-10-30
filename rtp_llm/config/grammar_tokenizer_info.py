@@ -1,4 +1,23 @@
+import importlib.util
+import os
 from typing import Any, List, Sequence
+
+
+def _make_xgrammar_bindings_findable() -> None:
+    # xgrammar loads libxgrammar_bindings.so through tvm_ffi, which locates the
+    # file via the wheel RECORD and then LD_LIBRARY_PATH. Bazel pip runfiles
+    # omit RECORD, so prepend the package directory, where the .so lives.
+    spec = importlib.util.find_spec("xgrammar")
+    if spec is None or not spec.submodule_search_locations:
+        return
+    lib_dir = list(spec.submodule_search_locations)[0]
+    if not os.path.exists(os.path.join(lib_dir, "libxgrammar_bindings.so")):
+        return
+    paths = os.environ.get("LD_LIBRARY_PATH", "")
+    if lib_dir not in paths.split(os.pathsep):
+        os.environ["LD_LIBRARY_PATH"] = (
+            lib_dir + os.pathsep + paths if paths else lib_dir
+        )
 
 
 def build_grammar_tokenizer_info_json(
@@ -8,6 +27,7 @@ def build_grammar_tokenizer_info_json(
     stop_token_ids: Sequence[int],
 ) -> str:
     """Serialize tokenizer metadata through xgrammar's public Python API."""
+    _make_xgrammar_bindings_findable()
     import xgrammar as xgr
 
     normalized_stop_ids = [int(token_id) for token_id in stop_token_ids]

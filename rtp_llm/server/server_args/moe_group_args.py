@@ -178,6 +178,8 @@ def init_moe_group_args(parser, moe_config, eplb_config, deep_ep_config):
             "mega_moe_fp8",
             "mega_moe_fp8_se",
             "mega_moe_fused",
+            "gc_moe",
+            "gc_moe_se",
         ],
         default="auto",
         help="指定moe strategy, 默认为auto",

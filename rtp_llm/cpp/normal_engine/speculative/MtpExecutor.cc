@@ -1685,7 +1685,9 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
             const bool disable_sp_prefill_by_env   = kDisableSpPrefillCudaGraphByEnv;
             const bool force_sp_prefill_cuda_graph = kForceSpPrefillCudaGraphByEnv;
             const auto is_mega_moe_strategy        = [](const std::string& strategy) {
-                return strategy.rfind("mega_moe", 0) == 0;
+                // Both kernels perform ordered EP collectives on their own
+                // symmetric arenas; draft clones must follow the same policy.
+                return strategy.rfind("mega_moe", 0) == 0 || strategy.rfind("gc_moe", 0) == 0;
             };
             const bool draft_uses_mega_moe = is_mega_moe_strategy(params.moe_config.moe_strategy)
                                              || is_mega_moe_strategy(mtp_params->moe_config.moe_strategy);

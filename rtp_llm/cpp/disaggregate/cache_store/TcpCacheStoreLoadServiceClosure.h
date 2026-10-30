@@ -7,6 +7,7 @@
 #include "rtp_llm/cpp/disaggregate/cache_store/CommonDefine.h"
 #include "aios/network/arpc/arpc/CommonMacros.h"
 #include "aios/network/arpc/arpc/ANetRPCController.h"
+#include "autil/ThreadPool.h"
 
 namespace rtp_llm {
 
@@ -19,7 +20,8 @@ public:
                                     CacheLoadResponse*                                           response,
                                     CacheStoreLoadDoneCallback                                   callback,
                                     const std::shared_ptr<CacheStoreClientLoadMetricsCollector>& collector,
-                                    int                                                          device_id = -1):
+                                    int                                                          device_id = -1,
+                                    autil::ThreadPool* response_pool                                       = nullptr):
         memory_util_(memory_util),
         request_block_buffer_(request_block_buffer),
         controller_(controller),
@@ -27,7 +29,8 @@ public:
         response_(response),
         callback_(callback),
         collector_(collector),
-        device_id_(device_id) {}
+        device_id_(device_id),
+        response_pool_(response_pool) {}
 
     ~TcpCacheStoreLoadServiceClosure();
 
@@ -35,7 +38,9 @@ public:
     void Run() override;
 
 private:
-    void end(bool success, CacheStoreErrorCode ec);
+    void                processResponse();
+    CacheStoreErrorCode copyResponse();
+    void                end(bool success, CacheStoreErrorCode ec);
 
 private:
     std::shared_ptr<MemoryUtil>                           memory_util_;
@@ -46,6 +51,7 @@ private:
     CacheStoreLoadDoneCallback                            callback_{nullptr};
     std::shared_ptr<CacheStoreClientLoadMetricsCollector> collector_;
     int                                                   device_id_{-1};
+    autil::ThreadPool*                                    response_pool_{nullptr};
 };
 
 }  // namespace rtp_llm

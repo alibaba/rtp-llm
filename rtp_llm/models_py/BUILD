@@ -23,11 +23,13 @@ py_library(
 # flashinfer-python is only available for CUDA12
 flashinfer = ["flashinfer-python"]
 deep = ["deep_gemm", "deep_ep"]
+gc_moe = ["gc_moe"]
 flashmla = ["fast-hadamard-transform", "flash-mla", "tilelang"]
 rtp_kernel = ["rtp-kernel"]
 flashattn = ["flash_attn","flash-attn-3"]
 requirement(flashinfer)
 requirement(deep)
+requirement(gc_moe)
 requirement(flashmla)
 requirement(rtp_kernel)
 requirement(flashattn)
@@ -67,8 +69,8 @@ py_library(
         "//rtp_llm/models_py/distributed:user_buffers",
     ] + select({
         # cuda13 lock omits flashinfer-python and deep_ep → only deep_gemm.
-        "@//:using_cuda13_x86": ["deep_gemm"],
-        "@//:using_cuda13_arm": ["deep_gemm"],
+        "@//:using_cuda13_x86": ["deep_gemm", "gc_moe"],
+        "@//:using_cuda13_arm": ["deep_gemm", "gc_moe"],
         "@//:using_cuda12": flashinfer + deep,
         "@//:using_ppu": deep,
         "@//:using_rocm": [
@@ -152,6 +154,23 @@ py_test(
 )
 
 py_test(
+    name = "gc_moe_contract_test",
+    srcs = ["modules/glm5_gc_moe/test_gc_moe_contract.py"],
+    main = "modules/glm5_gc_moe/test_gc_moe_contract.py",
+    deps = [
+        "//rtp_llm/models_py/standalone:py_standalone_testlib",
+    ],
+    env = {"GPU_COUNT": "1"},
+    tags = ["SM103_CU13"],
+    exec_properties = {"gpu": "SM103_CU13", "gpu_count": "1"},
+    target_compatible_with = select({
+        "@//:using_cuda13_x86": [],
+        "@//:using_cuda13_arm": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+)
+
+py_test(
     name = "hy4_attention_sink_test",
     srcs = ["modules/factory/attention/cuda_mla_impl/test_hy4_sink.py"],
     main = "modules/factory/attention/cuda_mla_impl/test_hy4_sink.py",
@@ -231,7 +250,7 @@ py_library(
 
 py_library(
     name = "models",
-    srcs = glob([
+    srcs = ["prefill_optimization.py", "mtp_optimization.py"] + glob([
         "model_desc/*.py",
         "model_desc/**/*.py",
     ]),
