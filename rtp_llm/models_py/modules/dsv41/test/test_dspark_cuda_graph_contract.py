@@ -1,7 +1,7 @@
 import unittest
 from contextlib import nullcontext
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import torch
 
@@ -840,6 +840,69 @@ class DSparkCudaGraphContractTest(unittest.TestCase):
         self.assertEqual(rows.data_ptr(), kv.data_ptr())
         self.assertIs(written_pool, pool)
         self.assertIs(written_slots, slots)
+
+    def test_proposal_fused_cache_write_and_fallback_precede_attention(self) -> None:
+        model = _dspark_harness()
+        x = torch.randn(2, 5, 8, dtype=torch.bfloat16)
+        positions = torch.arange(10).view(2, 5)
+        slots = torch.arange(10, dtype=torch.int32)
+        indices = torch.zeros(2, 5, 128, dtype=torch.int32)
+        pool = torch.zeros(2, 136, 528, dtype=torch.uint8)
+        for written in (False, True):
+            with self.subTest(swa_written=written):
+                order = []
+                mega = SimpleNamespace(
+                    supports_input=lambda _x: True,
+                    supports_decode=lambda *_args: True,
+                    decode=Mock(
+                        side_effect=lambda *_a, **_kw: order.append("attention") or x
+                    ),
+                    project_output=lambda output, _weight: output,
+                )
+                attn = SimpleNamespace(
+                    _mega_attention=mega,
+                    head_dim=512,
+                    wo_b=object(),
+                    _prefill_output_all_reduce=lambda _x: None,
+                )
+                model._swa_cache_bound = lambda *_args: nullcontext((attn, 136, pool))
+                model._proposal_metadata = lambda *_args: (slots, indices, None)
+                qkv = SimpleNamespace(q=x, kv=x, swa_written=written)
+                with (
+                    patch.object(
+                        dspark_model_module,
+                        "decode_compute_qkv",
+                        side_effect=lambda *_a, **_kw: order.append("project") or qkv,
+                    ) as project,
+                    patch.object(
+                        dspark_model_module,
+                        "_write_dspark_swa",
+                        side_effect=lambda **_kw: order.append("write"),
+                    ) as writer,
+                ):
+                    actual = model._forward_dspark_attention(
+                        0,
+                        x,
+                        positions,
+                        torch.zeros(2),
+                        torch.arange(2),
+                        None,
+                        136,
+                        None,
+                        {},
+                    )
+                self.assertIs(project.call_args.kwargs["swa_pool"], pool)
+                self.assertIs(project.call_args.kwargs["swa_slots"], slots)
+                self.assertEqual(writer.call_count, int(not written))
+                self.assertEqual(
+                    order,
+                    (
+                        ["project", "attention"]
+                        if written
+                        else ["project", "write", "attention"]
+                    ),
+                )
+                torch.testing.assert_close(actual, x)
 
     def test_v41_commit_only_block_keeps_minimal_weights_and_cache_geometry(
         self,

@@ -910,16 +910,19 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
                 attn,
                 x,
                 query_positions.reshape(-1),
+                swa_pool=pool,
+                swa_slots=query_slots,
                 **({"mega_attention": mega} if mega is not None else {}),
             )
-            _write_dspark_swa(
-                kv=qkv.kv,
-                slot_mapping=query_slots,
-                swa_pool_3d=pool,
-                bsz=batch_size,
-                q_len=gamma,
-                head_dim=int(attn.head_dim),
-            )
+            if not qkv.swa_written:
+                _write_dspark_swa(
+                    kv=qkv.kv,
+                    slot_mapping=query_slots,
+                    swa_pool_3d=pool,
+                    bsz=batch_size,
+                    q_len=gamma,
+                    head_dim=int(attn.head_dim),
+                )
 
             if mega is not None:
                 # DSpark lengths are per request; Mega flattens query tokens.

@@ -105,8 +105,7 @@ def decode_compute_qkv(
     )
     from rtp_llm.models_py.modules.dsv41.fp8._v41_front_gemm import is_reindex, project
 
-    # Restrict our fusions to Reindex, including when FULL overlap is disabled
-    # or falls back. FULL keeps its original projection and PDL consumer.
+    # REINDEX also projects index-head weights; FULL uses the native QKV path.
     reindex = is_reindex(attn)
     front = (
         project(attn, x, quantized_input=shared_input_quant, pdl=qb_pdl)
@@ -116,11 +115,10 @@ def decode_compute_qkv(
     head_weights = None if front is None else front[3]
     # Select the producer before launching it: QB/KV and READY consume raw KV,
     # whereas the upstream native producer already normalizes/rotates KV and
-    # writes SWA. A PDL consumer also needs the existing norm producer trigger.
+    # writes SWA.
     merged = getattr(mega_attention, "merged_qb", None)
     needs_raw_kv = (
         reindex
-        or qb_pdl
         or ready_plan is not None
         or (merged is not None and os.environ.get("DSV41_FUSED_QB_KV", "0") == "1")
     )
@@ -131,6 +129,10 @@ def decode_compute_qkv(
             attn, x, freqs_cis, swa_pool, swa_slots, shared_input_quant
         )
     )
+    if native_qkv is not None:
+        # The native producer completes Q quantization and SWA writes together;
+        # it does not publish the split norm producer's early PDL trigger.
+        qb_pdl = False
     quantized_qkv = front[:3] if front is not None else native_qkv
     if quantized_qkv is None:
         quantized_qkv = try_project_quantized_qkv(

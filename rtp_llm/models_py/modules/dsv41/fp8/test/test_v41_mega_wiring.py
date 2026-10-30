@@ -23,6 +23,7 @@ def _owner():
     owner.softmax_scale = 0.5
     owner.attn_sink = torch.zeros(2)
     owner.is_index_source = False
+    owner.is_kv_source = False
     owner._qb_weight_owner = None
     owner._mega_attention = None
     owner._prefill_output_all_reduce = Mock()
@@ -518,7 +519,9 @@ class DSparkMegaWiringTest(unittest.TestCase):
                 indices = torch.arange(width).repeat(rows, 1).int()
                 lengths = torch.tensor([15, 0], dtype=torch.int32)
                 positions = torch.arange(rows).view(batch, gamma) + 10
-                qkv = SimpleNamespace(q=object(), kv=object(), freqs_cis=object())
+                qkv = SimpleNamespace(
+                    q=object(), kv=object(), freqs_cis=object(), swa_written=False
+                )
                 output = torch.arange(rows * dim).reshape(rows, dim).bfloat16()
                 state.decode = Mock(return_value=object())
                 state.project_output = Mock(return_value=output)
@@ -562,6 +565,8 @@ class DSparkMegaWiringTest(unittest.TestCase):
                     project.call_args.kwargs.get("mega_attention"),
                     state if rejection is None else None,
                 )
+                self.assertIs(project.call_args.kwargs["swa_pool"], pool)
+                self.assertIs(project.call_args.kwargs["swa_slots"], slots)
                 self.assertIs(write.call_args.kwargs["kv"], qkv.kv)
                 self.assertIs(write.call_args.kwargs["slot_mapping"], slots)
                 self.assertIs(write.call_args.kwargs["swa_pool_3d"], pool)
@@ -622,7 +627,7 @@ class DSparkMegaWiringTest(unittest.TestCase):
         with patch.object(
             dspark,
             "decode_compute_qkv",
-            return_value=SimpleNamespace(q=object(), kv=object()),
+            return_value=SimpleNamespace(q=object(), kv=object(), swa_written=False),
         ), patch.object(dspark, "_write_dspark_swa"), self.assertRaisesRegex(
             RuntimeError, "mega launch failed"
         ):

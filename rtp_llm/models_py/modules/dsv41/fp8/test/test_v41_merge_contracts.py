@@ -106,6 +106,7 @@ class MergeContractsCPU(unittest.TestCase):
             "native_fallback",
             "reindex",
             "pdl",
+            "pdl_fallback",
             "ready",
             "ready_fused",
             "qb_kv",
@@ -143,7 +144,7 @@ class MergeContractsCPU(unittest.TestCase):
                         "try_project_qkv_to_cache",
                         return_value=(
                             None
-                            if route == "native_fallback"
+                            if route in ("native_fallback", "pdl_fallback")
                             else (qr, cached_kv, quantized)
                         ),
                     )
@@ -198,20 +199,21 @@ class MergeContractsCPU(unittest.TestCase):
                     positions,
                     freqs_cis=freqs,
                     mega_attention=mega,
-                    qb_pdl=route == "pdl",
+                    qb_pdl=route in ("pdl", "pdl_fallback"),
                     ready_plan=object() if route in ("ready", "ready_fused") else None,
                     swa_pool=object(),
                     swa_slots=object(),
                 )
                 self.assertTrue(result.swa_written)
                 self.assertIs(result.kv, cached_kv)
-                if route == "native":
+                if route in ("native", "pdl"):
                     native.assert_called_once()
                     original.assert_not_called()
                     fused_front.assert_not_called()
                     rope.assert_not_called()
+                    merged.forward_quantized.assert_called_once_with(*quantized)
                 else:
-                    if route == "native_fallback":
+                    if route in ("native_fallback", "pdl_fallback"):
                         native.assert_called_once()
                     else:
                         native.assert_not_called()
@@ -237,7 +239,7 @@ class MergeContractsCPU(unittest.TestCase):
                 if route == "qb_kv":
                     fused_qb.assert_called_once()
                     self.assertIs(fused_qb.call_args.args[3], raw_kv)
-                if route == "pdl":
+                if route == "pdl_fallback":
                     self.assertTrue(original.call_args.kwargs["pdl"])
                     self.assertTrue(
                         merged.forward_quantized.call_args.kwargs["wait_pdl"]

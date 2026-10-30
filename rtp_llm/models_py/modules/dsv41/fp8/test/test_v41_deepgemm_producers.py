@@ -98,8 +98,16 @@ class DeepGEMMProducerTest(unittest.TestCase):
     @torch.inference_mode()
     def test_decode_calls_native_qkv_and_preserves_original_outputs(self):
         attn = self.attn
-        for batch, span in ((1, 1), (11, 6), (32, 6), (64, 6), (512, 1)):
-            with self.subTest(batch=batch, span=span):
+        for batch, span, qb_pdl in (
+            (1, 1, False),
+            (11, 6, False),
+            (32, 6, False),
+            (64, 6, False),
+            (512, 1, False),
+            (64, 6, True),
+            (64, 5, False),
+        ):
+            with self.subTest(batch=batch, span=span, qb_pdl=qb_pdl):
                 rows = batch * span
                 x = torch.randn(batch, span, 5120, device="cuda").bfloat16()
                 positions = torch.arange(rows, device="cuda", dtype=torch.int32) * 7
@@ -141,6 +149,7 @@ class DeepGEMMProducerTest(unittest.TestCase):
                         freqs,
                         swa_pool=cache,
                         swa_slots=slots,
+                        qb_pdl=qb_pdl,
                     )
                 self.assertEqual(native.call_count, 1, "production native QKV dispatch")
                 self.assertTrue(actual.swa_written)
