@@ -117,6 +117,21 @@ class ModelOptFp4ProducerTest(unittest.TestCase):
             self.assertIsNone(quant.silu_fp4_quant(x, scale, self.mask))
         self.assertIsNone(quant.silu_fp4_quant(x, scale, None))
 
+    def test_changed_grouped_layout_retains_original_producer(self):
+        x = torch.randn(5, 17408, device="cuda", dtype=torch.bfloat16)
+        before = x.clone()
+        scale = torch.ones(1, device="cuda")
+        q = torch.empty(5, 4352, 1, device="cuda", dtype=torch.uint8)
+        sf = torch.empty(32, 4, 1, 4, 136, 1, device="cuda")
+        for changed in [(q.permute(2, 0, 1), sf), (q, sf.transpose(0, 1))]:
+            with patch.object(
+                quant,
+                "silu_and_mul_scaled_nvfp4_experts_quantize",
+                return_value=changed,
+            ):
+                self.assertIsNone(quant.silu_fp4_quant(x, scale, self.mask))
+        self.assertTrue(torch.equal(x, before))
+
     def test_large_dense_input_retains_original_producer(self):
         width = 17408
         rows = (2**31 + width - 1) // width
@@ -158,16 +173,12 @@ class ModelOptFp4ProducerTest(unittest.TestCase):
                 torch.tensor([0.01713], device="cuda"),
                 weight_scale_2=1 / wscale,
             )
-        if not layer._decode_cudnn_backend:
-            self.skipTest("requires cuDNN 9.15 or newer")
         runner = layer._decode_tiled_runner
         self.assertIsNotNone(runner)
         for m in (1, 3, 5, 10, 17, 20, 32, 40, 64, 65, 71):
             x = torch.randn(m, k, device="cuda", dtype=torch.bfloat16)
-            layer._decode_cudnn_backend = False
             layer._decode_tiled_runner = None
             reference = layer(x)
-            layer._decode_cudnn_backend = True
             layer._decode_tiled_runner = runner
             with patch.object(runner, "forward", wraps=runner.forward) as tiled:
                 actual = layer(x)
@@ -230,12 +241,213 @@ class ModelOptFp4ProducerTest(unittest.TestCase):
             layer.alpha.mul_(0.7)
         graph.replay()
         layer._decode_tiled_runner = None
-        layer._decode_cudnn_backend = False
         expected = layer(x)
         self.assertTrue(
             torch.equal(actual.view(torch.int16), expected.view(torch.int16))
         )
         graph.reset()
+
+    def _fused_mlp_layers(self, enabled=True):
+        scale = torch.tensor([32.0], device="cuda")
+        layers = []
+        with patch.dict(os.environ, {"RTP_LLM_SM120_FUSION": str(int(enabled))}):
+            for n, k in [(17408, 5120), (5120, 8704)]:
+                w, sf = fp4_quantize(
+                    torch.randn(n, k, device="cuda", dtype=torch.bfloat16) * 0.1,
+                    scale,
+                )
+                layers.append(
+                    CudaFp4GEMMLinear(w, sf, 1 / scale, weight_scale_2=1 / scale)
+                )
+        return layers
+
+    def test_optional_runner_failure_and_cuda12_fallback(self):
+        up, down = self._fused_mlp_layers(enabled=False)
+        x = torch.randn(17, 5120, device="cuda", dtype=torch.bfloat16)
+        expected = up(x)
+        runner_path = "flashinfer.gemm.gemm_base._b12x_gemm_fp4_runner"
+
+        def new_layer(original):
+            return CudaFp4GEMMLinear(
+                original.weight,
+                original.weight_scales,
+                original.input_scale,
+                weight_scale_2=original.weight_scale_2,
+            )
+
+        with patch.dict(os.environ, {"RTP_LLM_SM120_FUSION": "1"}):
+            for error in (ImportError, AttributeError, TypeError):
+                with self.subTest(error=error), patch(runner_path, side_effect=error):
+                    layer = new_layer(up)
+                    self.assertIsNone(layer._decode_tiled_runner)
+                    self.assertIsNone(layer._swiglu_weights)
+                    torch.testing.assert_close(layer(x), expected, rtol=0, atol=0)
+            with patch.object(torch.version, "cuda", "12.9"), patch(
+                runner_path
+            ) as runner:
+                layer = new_layer(up)
+                down_layer = new_layer(down)
+                runner.assert_not_called()
+                self.assertIsNone(layer._decode_tiled_runner)
+                self.assertIsNone(layer._swiglu_weights)
+                self.assertFalse(down_layer._decode_auto_backend)
+                torch.testing.assert_close(layer(x), expected, rtol=0, atol=0)
+
+    def test_deferred_reduction_requires_ffn_tensor_parallelism(self):
+        from rtp_llm.models_py.model_desc import qwen3_next as qwen
+
+        config = SimpleNamespace(
+            hybrid_attention_config=SimpleNamespace(
+                hybrid_attention_types=[qwen.HybridAttentionType.LINEAR]
+            ),
+            linear_attention_config=None,
+            layernorm_eps=1e-6,
+            quant_config=None,
+            moe_style=0,
+            activation_type="swiglu",
+            enable_w4a16_sm120_dense_ffn=False,
+        )
+        mlp = torch.nn.Module()
+        mlp.is_gated = True
+        mlp.up_proj = SimpleNamespace(
+            hidden_size=5120,
+            output_size=17408,
+            forward_with_residual_norm=lambda *args: None,
+        )
+        weights = {
+            name: torch.ones(5120, device="cuda", dtype=torch.bfloat16)
+            for name in (qwen.W.pre_ln_gamma, qwen.W.post_ln_gamma)
+        }
+        with (
+            patch.dict(os.environ, {"RTP_LLM_SM120_FUSION": "1"}),
+            patch.object(qwen, "DenseMLP", return_value=mlp),
+            patch.object(
+                qwen, "Qwen3NextGatedDeltaNet", return_value=torch.nn.Module()
+            ),
+        ):
+            for attn_tp, ffn_tp in [(2, 1), (2, 2), (1, 2), (2, 4)]:
+                parallelism = SimpleNamespace(
+                    get_attn_tp_size=lambda: attn_tp,
+                    get_ffn_tp_size=lambda: ffn_tp,
+                )
+                layer = qwen.Qwen3NextDecoderLayer(
+                    config, parallelism, weights, 0, None
+                )
+                self.assertEqual(layer._fused_ar_norm, (attn_tp, ffn_tp) == (2, 2))
+
+    def test_fused_gemm_swiglu_matches_original_mlp(self):
+        up, down = self._fused_mlp_layers()
+        for m in (1, 5, 17, 31, 32, 33, 40, 64):
+            with self.subTest(m=m):
+                x = torch.randn(m, 5120, device="cuda", dtype=torch.bfloat16)
+                expected = down.forward_with_silu(up(x))
+                actual = up.forward_fused_mlp(x, down)
+                self.assertTrue(
+                    torch.equal(expected.view(torch.int16), actual.view(torch.int16))
+                )
+
+    @torch.inference_mode()
+    def test_fused_gemm_graph_reads_current_operands(self):
+        up, down = self._fused_mlp_layers()
+        x = torch.randn(5, 5120, device="cuda", dtype=torch.bfloat16)
+        up.forward_fused_mlp(x, down)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            actual = up.forward_fused_mlp(x, down)
+        x.normal_()
+        up.alpha.mul_(0.9)
+        down.input_scale_inv.fill_(17.2)
+        # The same bytewise change commutes with the gate/up row permutation.
+        up.weight.bitwise_xor_(1)
+        up._swiglu_weights[0].bitwise_xor_(1)
+        up.weight_scales.view(torch.uint8).bitwise_xor_(1)
+        up._swiglu_weights[1].view(torch.uint8).bitwise_xor_(1)
+        graph.replay()
+        expected = down.forward_with_silu(up(x))
+        self.assertTrue(
+            torch.equal(expected.view(torch.int16), actual.view(torch.int16))
+        )
+        graph.reset()
+
+    def test_fused_gemm_unsupported_and_disabled_preserve_input(self):
+        up, down = self._fused_mlp_layers()
+        for shape, dtype in [((65, 5120), torch.bfloat16), ((5, 5120), torch.float16)]:
+            x = torch.randn(*shape, device="cuda", dtype=dtype)
+            before = x.clone()
+            self.assertIsNone(up.forward_fused_mlp(x, down))
+            self.assertTrue(torch.equal(x, before))
+        up, down = self._fused_mlp_layers(enabled=False)
+        x = torch.randn(5, 5120, device="cuda", dtype=torch.bfloat16)
+        self.assertIsNone(up.forward_fused_mlp(x, down))
+
+    def test_dense_mlp_fused_reduces_exactly_once(self):
+        from rtp_llm.models_py.modules.hybrid.dense_mlp import DenseMLP
+
+        up, down = self._fused_mlp_layers()
+        mlp = DenseMLP.__new__(DenseMLP)
+        torch.nn.Module.__init__(mlp)
+        mlp.w4a16 = None
+        mlp.is_gated = True
+        mlp.up_proj, mlp.down_proj = up, down
+        mlp.parallelism_config = SimpleNamespace(get_ffn_tp_size=lambda: 2)
+        x = torch.randn(5, 5120, device="cuda", dtype=torch.bfloat16)
+        expected = down.forward_with_silu(up(x))
+        with patch(
+            "rtp_llm.models_py.modules.hybrid.dense_mlp.all_reduce",
+            side_effect=lambda y, **kw: y + 1,
+        ) as reduce:
+            actual = mlp.forward(x)
+            self.assertEqual(reduce.call_count, 1)
+            self.assertTrue(torch.equal(actual, expected + 1))
+            actual = mlp.forward(x, skip_allreduce=True)
+            self.assertEqual(reduce.call_count, 1)
+            self.assertTrue(torch.equal(actual, expected))
+
+    @torch.inference_mode()
+    def test_fused_packed_outputs_preserve_guards(self):
+        from rtp_llm.models_py.kernels.cuda.sm120_fp4_swiglu import _compile
+
+        up, down = self._fused_mlp_layers()
+        w, ws = up._swiglu_weights
+        for m in (1, 5, 32, 33, 40, 64):
+            x = torch.randn(m, 5120, device="cuda", dtype=torch.bfloat16)
+            q, sf = fp4_quantize(x, up.input_scale_inv)
+            output_storage = torch.full(
+                (m * 4352 + 128,), 0xA5, device="cuda", dtype=torch.uint8
+            )
+            scale_storage = torch.full(
+                (128 * 544 + 128,), 0xA5, device="cuda", dtype=torch.uint8
+            )
+            output = output_storage[64:-64].reshape(m, 4352)
+            scales = scale_storage[64:-64]
+            compiled = _compile(q.device, m <= 32)
+
+            def call():
+                compiled(
+                    q,
+                    w,
+                    output,
+                    scales,
+                    down.input_scale_inv,
+                    1,
+                    136,
+                    80,
+                    sf.data_ptr(),
+                    ws.data_ptr(),
+                    up.alpha,
+                )
+
+            call()
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph):
+                call()
+            for _ in range(3):
+                graph.replay()
+            self.assertTrue(bool((output_storage[:64] == 0xA5).all()))
+            self.assertTrue(bool((output_storage[-64:] == 0xA5).all()))
+            self.assertTrue(bool((scale_storage[:64] == 0xA5).all()))
+            self.assertTrue(bool((scale_storage[-64:] == 0xA5).all()))
+            graph.reset()
 
 
 if __name__ == "__main__":
