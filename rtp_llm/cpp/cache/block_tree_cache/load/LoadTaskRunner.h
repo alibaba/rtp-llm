@@ -39,6 +39,14 @@ public:
             target_installed(load_descs.size(), false),
             context(std::move(load_context)) {}
 
+        // A HOST failure can finish a mixed workflow before DISK was submitted.
+        // Link settlement to the completed phase, rather than an unstarted DISK ID.
+        const TransferTask& completionTransfer() const {
+            return !disk_result.block_errors.empty() || host_to_device_task.descriptors().empty() ?
+                       disk_to_device_task :
+                       host_to_device_task;
+        }
+
         std::vector<TransferDescriptor> load_descs;
         TransferTask                    host_to_device_task;
         TransferTask                    disk_to_device_task;

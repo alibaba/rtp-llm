@@ -42,6 +42,8 @@ public:
         int64_t     rank{-1};
         uint64_t    transfer_id{0};
         int64_t     start_us{0};
+        const char* scope{nullptr};
+        const char* operation{nullptr};
     };
     struct Entry {
         Record               record;
@@ -150,9 +152,14 @@ private:
     static std::string formatName(const Record& r) {
         if (r.literal_name)
             return r.literal_name;
-        return std::string("cache.transfer.") + r.path + "." + r.stage + "(request_id=" + std::to_string(r.request_id)
-               + ",batch=" + std::to_string(r.begin) + ":" + std::to_string(r.end) + ",rank=" + std::to_string(r.rank)
-               + ",transfer_id=" + std::to_string(r.transfer_id) + ")";
+        auto name = std::string("cache.transfer.") + r.path + "." + r.stage + "(request_id="
+                    + std::to_string(r.request_id) + ",batch=" + std::to_string(r.begin) + ":" + std::to_string(r.end)
+                    + ",rank=" + std::to_string(r.rank) + ",transfer_id=" + std::to_string(r.transfer_id);
+        if (r.scope)
+            name += std::string(",scope=") + r.scope;
+        if (r.operation)
+            name += std::string(",operation=") + r.operation;
+        return name + ")";
     }
     static std::shared_ptr<AsyncProfileSession>& active() {
         static std::shared_ptr<AsyncProfileSession> s;
@@ -202,9 +209,11 @@ public:
                                        int64_t     start,
                                        int64_t     rank,
                                        uint64_t    id,
-                                       const char* path) noexcept {
+                                       const char* path,
+                                       const char* scope     = nullptr,
+                                       const char* operation = nullptr) noexcept {
         AsyncProfileSpan span;
-        span.record_          = {stage, path, nullptr, request_id, begin, end, rank, id, 0};
+        span.record_          = {stage, path, nullptr, request_id, begin, end, rank, id, 0, scope, operation};
         span.steady_start_us_ = start;
         span.captured_        = false;
         span.capture();

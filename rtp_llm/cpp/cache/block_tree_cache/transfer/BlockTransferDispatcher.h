@@ -28,7 +28,10 @@ public:
     std::shared_ptr<TransferAsyncContext> executePerRank(TransferTask task) const;
 
     // Callback-driven path used by Load/Store/Evict: stable grouping and bounded batches.
-    void runTransfer(TransferTask task, TransferDoneCallback callback) const;
+    // completion_operation is an optional borrowed literal for new completion
+    // observations only. Existing physical transfer stage identities are unchanged.
+    void
+    runTransfer(TransferTask task, TransferDoneCallback callback, const char* completion_operation = nullptr) const;
 
     void                cancelPendingStagingTransfers() const;
     BlockTreeQueueSizes queueSizes() const;
@@ -38,7 +41,8 @@ public:
     void drainTransfers() const;
 
 private:
-    std::shared_ptr<TransferAsyncContext> executeMultiRank(TransferTask task) const;
+    std::shared_ptr<TransferAsyncContext> executeMultiRank(TransferTask task,
+                                                           const char*  completion_operation = nullptr) const;
 
     std::shared_ptr<PerRankBlockTransferEngine>   per_rank_engine_;
     std::shared_ptr<MultiRankBlockTransferEngine> multi_rank_engine_;
