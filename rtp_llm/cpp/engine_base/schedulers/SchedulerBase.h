@@ -60,7 +60,9 @@ public:
     virtual std::vector<EngineScheduleInfo::TaskInfo> runningTaskList() {
         return {};
     }
-    virtual void updateSchedulerInfo(const std::string& scheduler_info) {}
+    virtual absl::Status updateSchedulerInfo(const std::string& scheduler_info) {
+        return absl::OkStatus();
+    }
 };
 
 }  // namespace rtp_llm

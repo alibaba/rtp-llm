@@ -61,7 +61,7 @@ using block_tree_cache_test::BlockTreeCacheTestPeer;
 namespace {
 constexpr int                  kDsv4PoolNum = 7;
 const std::vector<std::string> kDsv4Tags    = {
-    "swa_kv", "csa_kv", "indexer_kv", "indexer_state", "csa_state", "hca_kv", "hca_state"};
+    "csa_kv", "csa_state", "hca_kv", "hca_state", "indexer_kv", "indexer_state", "swa_kv"};
 
 double snapshotUnfreezeBlocks(const kmonitor::MetricsReporterPtr& reporter,
                               const std::string&                  pool_name,
@@ -122,6 +122,84 @@ protected:
 
 private:
 };
+
+static CacheConfig makeLinearReplayLifetimeConfig(int block_num) {
+    auto config                      = makeSimpleLinearCacheConfig(1, block_num, 4, DataType::TYPE_BF16, 1, 2);
+    config.linear_replay = LinearReplayPlan::create({0}, 1, 2, {1, 2}, {1, 2}, false, DataType::TYPE_BF16, 1);
+    return config;
+}
+
+TEST_F(KVCacheManagerTest, LinearReplayOwnLifetimeHoldsDoNotRequireCopyOnWrite) {
+    auto           config = makeLinearReplayLifetimeConfig(2);
+    KVCacheManager manager(config);
+    ASSERT_TRUE(manager.init());
+    auto pool  = manager.coordinator_manager_->groupBlockPools().front();
+    auto block = pool->malloc();
+    ASSERT_TRUE(block.has_value());
+    pool->incRef(*block);
+    ASSERT_EQ(pool->freeBlocksNum(), 0u);
+    auto resource = std::make_shared<BatchKVCacheResource>();
+    resource->resetBatchSize(1);
+    resource->initGroups(config.topologyPtr());
+    resource->setBatchBlocks(0, "linear", {*block});
+    auto hold = manager.holdLinearReplayBlocks(resource);
+    ASSERT_EQ(pool->refCount(*block), 2u);
+
+    // With no spare blocks, treating the hold as another request fails COW.
+    EXPECT_FALSE(manager.makeLinearReplayTailsPrivate(resource));
+    // Copies of one shared_ptr are one pool reference, not separate owners.
+    EXPECT_TRUE(manager.makeLinearReplayTailsPrivate(resource, -1, {hold, hold}));
+    EXPECT_EQ(resource->blocks(0, "linear"), (BlockIndicesType{*block}));
+    EXPECT_EQ(pool->freeBlocksNum(), 0u);
+    for (int round = 0; round < 8; ++round) {
+        auto next_hold = manager.holdLinearReplayBlocks(resource);
+        EXPECT_TRUE(manager.makeLinearReplayTailsPrivate(resource, -1, {hold, next_hold}));
+        hold = std::move(next_hold);
+        EXPECT_EQ(pool->refCount(*block), 2u);
+    }
+
+    // Another request's reference still requires COW and cannot be ignored.
+    pool->incRef(*block);
+    EXPECT_FALSE(manager.makeLinearReplayTailsPrivate(resource, -1, {hold}));
+    pool->decRef(*block);
+    EXPECT_TRUE(manager.makeLinearReplayTailsPrivate(resource, -1, {hold}));
+    hold.reset();
+    pool->decRef(*block);
+}
+
+TEST_F(KVCacheManagerTest, LinearReplayRetainsOnlyItsAnchorAcrossPageCrossing) {
+    auto           config = makeLinearReplayLifetimeConfig(3);
+    KVCacheManager manager(config);
+    ASSERT_TRUE(manager.init());
+    auto pool   = manager.coordinator_manager_->groupBlockPools().front();
+    auto blocks = pool->malloc(2);
+    ASSERT_TRUE(blocks.has_value());
+    pool->incRef(*blocks);
+    ASSERT_EQ(pool->freeBlocksNum(), 0u);
+    auto resource = std::make_shared<BatchKVCacheResource>();
+    resource->resetBatchSize(1);
+    resource->initGroups(config.topologyPtr());
+    resource->setBatchBlocks(0, "linear", *blocks);
+    auto anchor = manager.holdLinearReplayBlocks(resource, 4);
+    EXPECT_EQ(pool->refCount((*blocks)[0]), 1u);
+    EXPECT_EQ(pool->refCount((*blocks)[1]), 2u);
+
+    // Advance from token 4 to token 8 at full capacity. The older tail is no
+    // longer a replay source and can become the new destination; the anchor
+    // remains retained while the next verify rebuilds from it.
+    BlockIndicesType replacements;
+    int              required_free_blocks = 0;
+    ASSERT_TRUE(pool->tryReplaceRequestReferences({{(*blocks)[0], 1, 0}}, 1, replacements, required_free_blocks));
+    ASSERT_EQ(replacements.size(), 1u);
+    EXPECT_EQ(replacements[0], (*blocks)[0]);
+    resource->setBatchBlocks(0, "linear", {0, (*blocks)[1], replacements[0]});
+    auto next_anchor = manager.holdLinearReplayBlocks(resource, 8);
+    EXPECT_TRUE(manager.makeLinearReplayTailsPrivate(resource, 8, {anchor, next_anchor}));
+    EXPECT_EQ(pool->freeBlocksNum(), 0u);
+    anchor.reset();
+    next_anchor.reset();
+    pool->decRef(*blocks);
+}
 
 static void assertBlockBytesEq(const std::shared_ptr<rtp_llm::KVCacheManager>& cache_manager,
                                int                                             layer_id,
@@ -533,7 +611,7 @@ TEST_F(KVCacheManagerTest, EventPublisherWiresEligibleGroupsInTopologyOrder) {
             runtime.model_name = "event_wiring_model";
             KVCacheManager manager(config, false, nullptr, makeEventPublicationRuntimeConfig(), parallelism, runtime);
 
-            // Keep GroupSet order fixed while topology order changes. Non-reusable groups have no tree resource.
+            // Keep GroupSet order fixed while the topology input order changes.
             std::vector<GroupSetPtr> groups{
                 std::make_shared<FullGroupSet>(
                     std::vector<DeviceBlockPoolPtr>{block_tree_cache_test::makeStructuralDevicePool(0)},
@@ -565,17 +643,15 @@ TEST_F(KVCacheManagerTest, EventPublisherWiresEligibleGroupsInTopologyOrder) {
             manager.initCacheEventPublisher();
             ASSERT_NE(manager.cache_event_publisher_, nullptr);
             EXPECT_EQ(cache->tree()->event_publisher_, manager.cache_event_publisher_);
-            const std::vector<std::string> expected_tags =
-                reversed ? std::vector<std::string>{"swa", "full"} : std::vector<std::string>{"full", "swa"};
-            const auto& publication_groups = cache->tree()->publication_groups_;
+            const std::vector<std::string> expected_tags{"full", "swa"};
+            const auto&                    publication_groups = cache->tree()->publication_groups_;
             ASSERT_EQ(publication_groups.size(), expected_tags.size());
             for (size_t i = 0; i < publication_groups.size(); ++i) {
                 const auto& location = publication_groups[i];
                 EXPECT_EQ(cache->groupSets().at(location.group_set_id)->groupTags().at(location.member_group_id),
                           expected_tags[i]);
             }
-            const size_t                                 full_index = reversed ? 1 : 0;
-            const std::map<int64_t, std::vector<size_t>> full_only{{100, {full_index}}, {200, {full_index}}};
+            const std::map<int64_t, std::vector<size_t>> full_only{{100, {0}}, {200, {0}}};
             EXPECT_EQ(cache->logicalCacheSnapshot().block_groups, full_only);
             EXPECT_EQ(manager.cache_event_publisher_->status().accepted_count, 0u);
 
@@ -588,7 +664,7 @@ TEST_F(KVCacheManagerTest, EventPublisherWiresEligibleGroupsInTopologyOrder) {
             resources[1][1].device_blocks = {46};
             cache->insert({100, 200}, resources, Tier::DEVICE);
             EXPECT_EQ(cache->logicalCacheSnapshot().block_groups,
-                      (std::map<int64_t, std::vector<size_t>>{{100, {full_index}}, {200, {0, 1}}}));
+                      (std::map<int64_t, std::vector<size_t>>{{100, {0}}, {200, {0, 1}}}));
             EXPECT_EQ(manager.cache_event_publisher_->status().accepted_count, 1u);
             EXPECT_EQ(cache->evictForGroup("swa", 1), 1);
             EXPECT_TRUE(cache->getKeySnapshot().keys.empty());
@@ -641,8 +717,7 @@ TEST_F(KVCacheManagerTest, EventPublisherFiltersHostGroupsWithoutChangingDeviceS
             manager.initCacheEventPublisher(reporter);
             ASSERT_NE(manager.cache_event_publisher_, nullptr);
             ASSERT_TRUE(waitForEventPublisherReady(*manager.cache_event_publisher_));
-            const std::vector<std::string> expected_tags = reversed ? std::vector<std::string>{"second_full", "full"} :
-                                                                      std::vector<std::string>{"full", "second_full"};
+            const std::vector<std::string> expected_tags{"full", "second_full"};
             rapidjson::Document            registration;
             registration.Parse(reporter->waitForRequest("/api/registerInstance").c_str());
             ASSERT_FALSE(registration.HasParseError());
@@ -1164,7 +1239,7 @@ TEST_F(KVCacheManagerTest, ProductionHybridConfigUsesHybridPoolWithDistinctPhysi
     ASSERT_TRUE(cache_manager->init());
     auto allocator = std::dynamic_pointer_cast<CoordinatorCacheManager>(cache_manager->coordinator_manager_);
     ASSERT_NE(allocator, nullptr);
-    EXPECT_EQ(publishedGroupTags(cache_config.topology()), std::vector<std::string>({"linear", "full"}));
+    EXPECT_EQ(publishedGroupTags(cache_config.topology()), std::vector<std::string>({"full", "linear"}));
     EXPECT_NE(cache_config.blockSizeBytesForGroup("full"), cache_config.blockSizeBytesForGroup("linear"));
 
     const auto& pools = allocator->groupBlockPools();

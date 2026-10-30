@@ -13,6 +13,8 @@
 #include <functional>
 #include <thread>
 #include <list>
+#include <exception>
+#include <limits>
 
 namespace rtp_llm {
 
@@ -21,7 +23,7 @@ struct BatchDecodeSchedulerConfigLocal: public autil::legacy::Jsonizable {
         json.Jsonize("batch_size", batch_size_);
         json.Jsonize("mode", mode_, "decode");
     }
-    uint32_t    batch_size_;
+    int64_t     batch_size_ = 0;
     std::string mode_;
 };
 // Test-only scheduler that preserves explicitly requested batches.
@@ -131,16 +133,37 @@ public:
         return {std::move(enqueue_successes), streams};
     }
 
-    void updateSchedulerInfo(const std::string& scheduler_info) override {
+    absl::Status updateSchedulerInfo(const std::string& scheduler_info) override {
         BatchDecodeSchedulerConfigLocal config;
-        autil::legacy::FromJsonString(config, scheduler_info);
-        batch_size_ = config.batch_size_;
-        if (config.mode_ == "decode") {
-            scheduler_type_ = SchedulerType::kBatchDecode;
-        } else if (config.mode_ == "prefill") {
-            scheduler_type_ = SchedulerType::kBatchPrefill;
+        try {
+            autil::legacy::FromJsonString(config, scheduler_info);
+        } catch (const std::exception& e) {
+            return absl::InvalidArgumentError(e.what());
         }
-        RTP_LLM_LOG_INFO("BatchDecodeScheduler update batch size to %d, mode to %d", batch_size_, int(scheduler_type_));
+        if (config.batch_size_ <= 0 || config.batch_size_ > std::numeric_limits<uint32_t>::max()) {
+            return absl::InvalidArgumentError("BatchDecodeScheduler requires a positive batch_size fitting uint32");
+        }
+        if (config.mode_ != "decode" && config.mode_ != "prefill") {
+            return absl::InvalidArgumentError("BatchDecodeScheduler mode must be decode or prefill");
+        }
+        if (cache_manager_) {
+            const auto& replay = cache_manager_->cacheConfig().linear_replay;
+            if (replay.enabled() && config.batch_size_ > replay.slotCount()) {
+                return absl::InvalidArgumentError(
+                    "BatchDecodeScheduler batch_size " + std::to_string(config.batch_size_)
+                    + " exceeds LINEAR replay slot capacity " + std::to_string(replay.slotCount()));
+            }
+        }
+        const auto batch_size = static_cast<uint32_t>(config.batch_size_);
+        const auto mode       = config.mode_ == "decode" ? SchedulerType::kBatchDecode : SchedulerType::kBatchPrefill;
+        {
+            std::lock_guard<std::mutex> lock(lock_);
+            batch_size_     = batch_size;
+            scheduler_type_ = mode;
+        }
+        cond_.notify_all();
+        RTP_LLM_LOG_INFO("BatchDecodeScheduler update batch size to %u, mode to %d", batch_size, int(mode));
+        return absl::OkStatus();
     }
 
     // 根据状态机转移后的目标状态，将 stream 路由到对应的队列
@@ -181,7 +204,7 @@ public:
     void evaluateWaitingStreams() {
         // Finalize errored streams before selecting a batch so they cannot count toward its size.
         for (auto it = waiting_streams_.begin(); it != waiting_streams_.end();) {
-            if (!(*it)->hasError()) {
+            if (!(*it)->isFinished() && !(*it)->hasError()) {
                 ++it;
                 continue;
             }
@@ -216,12 +239,31 @@ public:
             }
         }
 
-        // Refresh the drain state from the current queue. This batch may drain a mixed-mode tail,
-        // but later homogeneous arrivals must go through the normal batch-size gate.
+        if (auto blocked = tryReserveBatchReplaySlots(selected_streams)) {
+            if (stop_requested_.load()) {
+                return;
+            }
+            if (blocked->isFinished() || blocked->hasError()) {
+                blocked->moveToNext();
+                waiting_streams_.remove(blocked);
+            } else {
+                // The wait predicate still sees a full batch. Back off before the next scheduling pass.
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+            return;
+        }
+        // Refresh the drain state after selecting a batch. Later homogeneous arrivals go through the batch-size gate.
         draining_mixed_modes_ = has_other_mode;
         for (auto& stream : selected_streams) {
             if (stop_requested_.load()) {
                 return;
+            }
+            if (scheduler_type_ == SchedulerType::kBatchDecode && !prefill_only
+                && cache_manager_->cacheConfig().linear_replay.enabled()) {
+                // Direct Decode starts from the prompt's final token, with its
+                // already-processed prefix initialized before the first grow.
+                stream->setPerfTest(true);
+                stream->setIsContextStream(false);
             }
             stream->reportEvent(StreamEvents::CanRun);
             // This synchronous benchmark scheduler cannot execute the selected streams to
@@ -360,6 +402,24 @@ public:
     }
 
 private:
+    GenerateStreamPtr tryReserveBatchReplaySlots(const std::list<GenerateStreamPtr>& streams) {
+        std::vector<StreamCacheResource*> reservations;
+        for (const auto& stream : streams) {
+            auto& resource       = stream->streamCacheResource();
+            bool  newly_reserved = false;
+            if (!resource.reserveLinearReplaySlot(&newly_reserved)) {
+                for (auto* reserved : reservations) {
+                    reserved->releaseUnusedLinearReplaySlot();
+                }
+                return stream;
+            }
+            if (newly_reserved) {
+                reservations.push_back(&resource);
+            }
+        }
+        return nullptr;
+    }
+
     std::atomic<bool>            stop_requested_{false};
     std::mutex                   lock_;
     std::condition_variable      cond_;
