@@ -232,7 +232,9 @@ def _test_all_gather_collective(
             ), f"Rank {rank} all_gather {group_type}: Expected {expected.cpu()}, got {result.cpu()}"
 
             output = torch.empty_like(expected)
-            result_into = all_gather_into(output, tensor, group=group_type)
+            result_into = all_gather_into(
+                tensor=tensor, output=output, group=group_type
+            )
             torch.cuda.synchronize()
             torch.distributed.barrier(group=process_group)
             assert torch.allclose(result_into, expected), (

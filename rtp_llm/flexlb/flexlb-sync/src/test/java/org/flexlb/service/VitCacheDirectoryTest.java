@@ -92,6 +92,19 @@ class VitCacheDirectoryTest {
     }
 
     @Test
+    void routesBeforeMediaHashesAreAvailable() {
+        var ctx = context();
+        var selected = selector.select(ctx, "one");
+        assertTrue(selected.isSuccess());
+        assertEquals(a.getLogicalIpPort(), selected.getLogicalIpPort());
+        ctx.getRequest().setSelectedVit(selected);
+        try (var pinned = selector.selectPinned(ctx, "one")) {
+            org.junit.jupiter.api.Assertions.assertNotNull(pinned);
+            assertEquals(a.getGenerationId(), pinned.serverStatus().getWorkerGeneration());
+        }
+    }
+
+    @Test
     void logicalEnginesHaveIndependentSnapshotsAndSelections() throws Exception {
         live.clear();
         a =

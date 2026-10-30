@@ -9,8 +9,8 @@ from unittest.mock import patch
 
 import torch
 
-from rtp_llm.dash_sc.client import build_model_infer_request
 from rtp_llm.dash_sc import codec
+from rtp_llm.dash_sc.client import build_model_infer_request
 from rtp_llm.dash_sc.codec import (
     DASH_ERROR_ABORT,
     DASH_ERROR_CAPACITY,

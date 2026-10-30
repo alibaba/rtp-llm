@@ -353,6 +353,7 @@ def finalize_scheduler_config(
     role_type: RoleType,
     use_batch_decode_scheduler: bool = False,
     seq_size_per_block: int = 0,
+    is_causal: bool = True,
 ) -> None:
     """Finalize fifo_scheduler_config with computed values.
 
@@ -362,6 +363,7 @@ def finalize_scheduler_config(
         role_type: Engine role; chunked prefill only applies to PREFILL and PDFUSION.
         use_batch_decode_scheduler: Whether BatchDecodeScheduler is enabled, which is incompatible with chunked prefill.
         seq_size_per_block: KV block size used to align the chunk budget; 0 skips normalization.
+        is_causal: Non-causal models require unchunked Prefill.
     """
 
     # Set max_batch_tokens_size if not set from py_runtime_config
@@ -385,6 +387,12 @@ def finalize_scheduler_config(
         )
         fifo_scheduler_config.prefill_chunk_size = 0
         return
+
+    if not is_causal:
+        raise ValueError(
+            "prefill_chunk_size > 0 requires is_causal=True; "
+            "non-causal attention needs the complete prompt. Set prefill_chunk_size=0."
+        )
 
     if use_batch_decode_scheduler:
         raise ValueError(

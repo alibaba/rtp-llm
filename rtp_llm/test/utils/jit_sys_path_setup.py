@@ -15,8 +15,10 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from contextlib import suppress
+from hashlib import sha256
 from pathlib import Path
 
 from filelock import FileLock, Timeout
@@ -96,9 +98,41 @@ def _cache_key(package_name, version, source_path):
     # on 3.10). Key on it so each interpreter stages its own copy.
     py_tag = "cp%d%d" % sys.version_info[:2]
     variant = _build_variant(source_path)
-    if variant is None:
-        return "%s_python-%s-%s" % (package_name, version, py_tag)
-    return "%s_python-%s-%s__%s" % (package_name, version, py_tag, variant)
+    key = "%s_python-%s-%s" % (package_name, version, py_tag)
+    if variant is not None:
+        key += "__" + variant
+    if package_name in ("flashinfer", "flashinfer_cubin"):
+        # Bazel wheel patches keep upstream metadata unchanged. Include Python
+        # payloads so a same-version cached copy cannot hide a dependency fix.
+        source = Path(source_path)
+        digest = sha256()
+        for path in sorted(source.rglob("*.py")):
+            digest.update(str(path.relative_to(source)).encode())
+            digest.update(path.read_bytes())
+        key += "__src_" + digest.hexdigest()[:16]
+    return key
+
+
+def _package_sources(package_name, source_path):
+    """Keep a wheel's sibling packages beside the resolved package copy."""
+    source = Path(source_path)
+    sources = [source]
+    for dist in importlib.metadata.distributions(path=[str(source.parent)]):
+        names = (dist.read_text("top_level.txt") or "").split()
+        if package_name not in names:
+            continue
+        for name in names:
+            sibling = source.parent / name
+            if name.isidentifier() and sibling != source and sibling.exists():
+                sources.append(sibling)
+        break
+    names = [package_name] + [sibling.name for sibling in sources[1:]]
+    for name in names:
+        for suffix in (".libs", "_libs"):
+            libraries = source.parent / f"{name}{suffix}"
+            if libraries.is_dir():
+                sources.append(libraries)
+    return list(dict.fromkeys(sources))
 
 
 def copy_package_with_lock(package_name, cache_dir):
@@ -122,13 +156,15 @@ def copy_package_with_lock(package_name, cache_dir):
     target_base = Path(cache_dir) / cache_key
     target_site_packages = target_base / "site-packages"
     target_package_path = target_site_packages / Path(source_path).name
+    sources = _package_sources(package_name, source_path)
+    targets = [target_site_packages / source.name for source in sources]
 
     # Lock file for this specific package and version
     lock_file = Path(cache_dir) / f".{cache_key}.lock"
     completion_marker = target_base / ".copy_complete"
 
     # Check if already copied and complete
-    if completion_marker.exists() and target_package_path.exists():
+    if completion_marker.exists() and all(target.exists() for target in targets):
         logging.info(
             f"[Package Copy] {package_name} v{version} already cached at {target_base}"
         )
@@ -137,7 +173,7 @@ def copy_package_with_lock(package_name, cache_dir):
     # Use file lock to prevent concurrent copies
     with FileLock(str(lock_file), timeout=300):
         # Double check after acquiring lock
-        if completion_marker.exists() and target_package_path.exists():
+        if completion_marker.exists() and all(target.exists() for target in targets):
             logging.info(
                 f"[Package Copy] {package_name} v{version} already cached (confirmed after lock)"
             )
@@ -150,32 +186,32 @@ def copy_package_with_lock(package_name, cache_dir):
         # Create target directories
         target_site_packages.mkdir(parents=True, exist_ok=True)
 
-        # Remove incomplete copy if exists
-        if target_package_path.exists():
-            shutil.rmtree(target_package_path)
-
         # Copy the package
         try:
-            if Path(source_path).is_dir():
-                shutil.copytree(source_path, target_package_path, symlinks=True)
-            else:
-                shutil.copy2(source_path, target_package_path)
-
-            # Also copy .libs directory if it exists (for torch, flashinfer, etc.)
-            source_parent = Path(source_path).parent
-            libs_dirs = [f"{package_name}.libs", f"{package_name}_libs"]
-            for libs_dir_name in libs_dirs:
-                libs_source = source_parent / libs_dir_name
-                if libs_source.exists() and libs_source.is_dir():
-                    libs_target = target_site_packages / libs_dir_name
-                    if not libs_target.exists():
-                        logging.info(
-                            f"[Package Copy] Copying {libs_dir_name} directory..."
+            for source, target in zip(sources, targets):
+                if target.exists():
+                    if completion_marker.exists():
+                        continue
+                    if target.is_dir():
+                        shutil.rmtree(target)
+                    else:
+                        target.unlink()
+                # Backfill newly bundled sibling packages without replacing a
+                # completed main package that other tests may already be using.
+                with tempfile.TemporaryDirectory(dir=target_site_packages) as temporary:
+                    staged = Path(temporary) / source.name
+                    if source.is_dir():
+                        shutil.copytree(
+                            source,
+                            staged,
+                            symlinks=package_name != "flashinfer_cubin",
                         )
-                        shutil.copytree(libs_source, libs_target, symlinks=True)
+                    else:
+                        shutil.copy2(source, staged)
+                    staged.rename(target)
 
             # Verify copy
-            if not target_package_path.exists():
+            if not all(target.exists() for target in targets):
                 raise RuntimeError(f"Copy verification failed for {package_name}")
 
             # Create completion marker
@@ -189,8 +225,13 @@ def copy_package_with_lock(package_name, cache_dir):
         except Exception as e:
             logging.info(f"[Package Copy] Failed to copy {package_name}: {e}")
             # Clean up incomplete copy
-            if target_package_path.exists():
-                shutil.rmtree(target_package_path, ignore_errors=True)
+            if not completion_marker.exists():
+                for target in targets:
+                    if target.is_dir():
+                        shutil.rmtree(target, ignore_errors=True)
+                    else:
+                        with suppress(OSError):
+                            target.unlink()
             return None
 
 
@@ -365,6 +406,17 @@ def _evict_dangling_flashinfer_ops(workspace: Path) -> None:
     )
 
 
+def _flashinfer_cache_scope():
+    # FlashInfer keys its ops by its own version and GPU, but their shared
+    # libraries also link the selected Torch/TVM FFI runtime. A runfiles path
+    # may change per action; the wheel build variant remains stable.
+    identities = []
+    for package in ("torch", "tvm_ffi"):
+        version, source = get_package_info(package)
+        identities.append(_cache_key(package, version or "absent", source or ""))
+    return sha256("\0".join(identities).encode()).hexdigest()[:16]
+
+
 def setup_jit_cache(cache_dir=None, packages=None):
     logging.info("[Package Setup] setup_jit_cache starting")
     # 缓存基根前置唯一确定：传入 cache_dir 直接用，未传回落 HOME。路径解析
@@ -373,12 +425,14 @@ def setup_jit_cache(cache_dir=None, packages=None):
     base = Path(cache_dir) if cache_dir else Path.home()
     base.mkdir(parents=True, exist_ok=True)
 
+    flashinfer_scope = _flashinfer_cache_scope()
     # workspace 必须是真实 FlashInfer 缓存目录，驱逐只扫其 cached_ops 子目录，
     # 不会爬基根本体。
     cache_env.configure_writable_cache_env(
         "FLASHINFER_WORKSPACE_BASE",
-        base / "flashinfer",
-        "flashinfer",
+        base / "flashinfer" / flashinfer_scope,
+        f"flashinfer-{flashinfer_scope}",
+        cache_subpath=(".cache", "flashinfer"),
     )
     _evict_dangling_flashinfer_ops(Path(os.environ["FLASHINFER_WORKSPACE_BASE"]))
     # server 侧 jit_cache_manager 会把 flashinfer op 重定向到受管 v2 scope 工

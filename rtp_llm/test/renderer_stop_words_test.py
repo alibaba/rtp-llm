@@ -472,11 +472,7 @@ class TestStopWordTruncation(_RendererTestBase):
         self.assertEqual(status.finish_reason, FinisheReason.stop)
 
     async def test_single_token_stop_word_in_mtp_chunk(self):
-        """MTP: single-token stop word appears mid-chunk with trailing tokens.
-        _check_finish_reason only checks the suffix of output_ids_list, so it
-        misses a stop word that isn't at the end. _remove_stop_word_ids truncates
-        the content correctly, but finish_reason is not set by the renderer
-        (the engine is expected to set it)."""
+        """An MTP chunk stops at a stop token even with trailing tokens."""
         tokenizer = self._make_tokenizer({100: "A", 101: "B", 999: "X", 102: "C"})
         renderer = self._make_renderer(tokenizer, stop_word_ids_list=[[999]])
         status = await self._make_status(renderer)
@@ -492,16 +488,11 @@ class TestStopWordTruncation(_RendererTestBase):
         )
         # Content is correctly truncated — "X" and "C" are not emitted
         self.assertEqual(delta.output_str, "AB")
-        # NOTE: finish_reason is None because _check_finish_reason only checks
-        # the suffix of output_ids_list ([102] ≠ [999]). In production the engine
-        # sets finish_reason; the renderer relies on that.
-        self.assertIsNone(status.finish_reason)
+        self.assertEqual(status.output_ids, [100, 101])
+        self.assertEqual(status.finish_reason, FinisheReason.stop)
 
     async def test_eos_in_mtp_chunk_with_trailing_tokens(self):
-        """MTP: EOS token appears mid-chunk with trailing tokens.
-        _check_finish_reason only checks the last token — does NOT catch mid-chunk EOS.
-        _remove_stop_word_ids truncates content at EOS position. Engine sets finish_reason.
-        """
+        """An MTP chunk stops at EOS even with trailing tokens."""
         eos = 2
         tokenizer = self._make_tokenizer({100: "Hello", eos: "", 103: "extra"})
         renderer = self._make_renderer(
@@ -520,10 +511,8 @@ class TestStopWordTruncation(_RendererTestBase):
         )
         # Content correctly truncated — tokens after EOS are not emitted
         self.assertEqual(delta.output_str, "Hello")
-        # finish_reason is None for the same reason as the stop-word case:
-        # _check_finish_reason checks token_ids[-1] == eos_token_id, but the
-        # last token is 103, not EOS. Engine handles this.
-        self.assertIsNone(status.finish_reason)
+        self.assertEqual(status.output_ids, [100])
+        self.assertEqual(status.finish_reason, FinisheReason.stop)
 
     async def test_string_level_stop_word_without_token_truncation(self):
         """String-level stop word that doesn't correspond to a token boundary.

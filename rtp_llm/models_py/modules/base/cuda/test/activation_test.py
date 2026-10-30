@@ -2,9 +2,8 @@ import itertools
 from unittest import SkipTest, TestCase, main
 
 import torch
-from torch import dtype as _dtype
-
 from rtp_llm.models_py.modules import FusedSiluAndMul
+from torch import dtype as _dtype
 
 
 class ActivationTest(TestCase):
@@ -65,6 +64,56 @@ class ActivationTest(TestCase):
                 num_tokens=params[0], hidden_size=params[1], dtype=params[2]
             ):
                 self._run_silu_and_mul_test(*params)
+
+    def test_situ_row_counts_reuse_jit(self):
+        from rtp_llm.models_py.triton_kernels.moe.activation import (
+            _situ_and_mul_kernel,
+            situ_and_mul,
+        )
+        from triton import knobs
+
+        for width in (6144, 33792):
+            for split, inplace, up_beta in ((True, False, 1.5), (False, True, None)):
+                _situ_and_mul_kernel.device_caches.clear()
+                attempts, previous = [], knobs.runtime.jit_cache_hook
+
+                def listen(**event):
+                    if event["fn"].jit_function is _situ_and_mul_kernel:
+                        attempts.append(event["key"])
+                    if previous is not None:
+                        return previous(**event)
+                    return None
+
+                knobs.runtime.jit_cache_hook = listen
+                try:
+                    for rows in (1, 17):
+                        if split:
+                            gate, up = torch.randn(
+                                rows,
+                                2 * width,
+                                device=self.device,
+                                dtype=torch.bfloat16,
+                            ).split(width, dim=-1)
+                        else:
+                            gate = torch.randn(
+                                rows, width, device=self.device, dtype=torch.bfloat16
+                            )
+                            up = torch.randn_like(gate)
+                        g, u = gate.float(), up.float()
+                        if up_beta is not None:
+                            u = up_beta * torch.tanh(u / up_beta)
+                        expected = (
+                            1.7 * torch.tanh(g / 1.7) * torch.sigmoid(g) * u
+                        ).to(gate.dtype)
+                        output = situ_and_mul(gate, up, 1.7, up_beta, inplace=inplace)
+                        if inplace:
+                            self.assertEqual(output.data_ptr(), gate.data_ptr())
+                        torch.testing.assert_close(
+                            output, expected, rtol=0.016, atol=0.016
+                        )
+                finally:
+                    knobs.runtime.jit_cache_hook = previous
+                self.assertEqual(len(attempts), 1, attempts)
 
 
 if __name__ == "__main__":

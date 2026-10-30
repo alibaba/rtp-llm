@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 import torch
 
 QWEN4_FP8_NVFP4_RECIPE = "qwen4_fp8_nvfp4"
+KIMI_K31_NVFP4_RECIPE = "kimi_k31_nvfp4"
 
 
 def _validate_compressed_targets(group_name: str, group_config: Dict[str, Any]) -> None:
@@ -858,11 +859,15 @@ class ModelOptFp4Config(QuantizationConfig):
         self.dense_storage = kwargs.get("dense_storage", "fp8")
         self.mtp_dense_storage = kwargs.get("mtp_dense_storage", "inherit")
         qwen4_recipe = self.model_recipe == QWEN4_FP8_NVFP4_RECIPE
-        if self.model_recipe is not None and not qwen4_recipe:
+        k31_recipe = self.model_recipe == KIMI_K31_NVFP4_RECIPE
+        if self.model_recipe is not None and not (qwen4_recipe or k31_recipe):
             raise ValueError(f"Unsupported modelopt_fp4 recipe: {self.model_recipe}")
-        self.supported_model_types = (
-            ("qwen4_exp", "qwen4_exp_mtp") if qwen4_recipe else None
-        )
+        if k31_recipe:
+            self.supported_model_types = ("kimi_k31",)
+        elif qwen4_recipe:
+            self.supported_model_types = ("qwen4_exp", "qwen4_exp_mtp")
+        else:
+            self.supported_model_types = None
         self.mixed_attention = kwargs.get("mixed_attention", False)
         self.activation_amax = kwargs.get(
             "activation_amax", 32.0 if qwen4_recipe else None
@@ -889,6 +894,15 @@ class ModelOptFp4Config(QuantizationConfig):
         else:
             self.hybrid_attn_quant_method = None
         self.exclude_modules = set(kwargs.get("exclude_modules", []))
+        self.activation_scheme = kwargs.get(
+            "activation_scheme", "dynamic" if k31_recipe else "static"
+        )
+        if self.activation_scheme not in ("static", "dynamic"):
+            raise ValueError("ModelOpt FP4 activation_scheme must be static or dynamic")
+        if k31_recipe and self.activation_scheme != "dynamic":
+            raise ValueError(
+                "Kimi K3.1 NVFP4 projections require dynamic activation scales"
+            )
 
     @classmethod
     def get_method(cls) -> str:
@@ -1102,6 +1116,12 @@ DEFAULT_MODELOPT_FP4_HYBRID_FP8_PER_BLOCK_QUANT_CONFIG = ModelOptFp4Config(
     is_quanted=False,
     hybrid_attn_quant_method="FP8_PER_BLOCK",
 )
+DEFAULT_KIMI_K31_NVFP4_QUANT_CONFIG = ModelOptFp4Config(
+    bits=4,
+    group_size=16,
+    is_quanted=False,
+    model_recipe=KIMI_K31_NVFP4_RECIPE,
+)
 
 DEFAULT_W4A8_INT4_PER_CHANNEL_QUANT_CONFIG = W4a8Int4PerChannelQuantConfig(
     bits=4, group_size=128, is_quanted=False
@@ -1132,6 +1152,7 @@ preset_quant_config = {
     "FP8_PER_CHANNEL_QUARK": DEFAULT_FP8_PER_CHANNEL_QUARK_QUANT_CONFIG,
     "QUARKMXFP4": DEFAULT_QUARK_MXFP4_QUANT_CONFIG,
     "MODELOPT_FP4": DEFAULT_MODELOPT_FP4_QUANT_CONFIG,
+    "KIMI_K31_NVFP4": DEFAULT_KIMI_K31_NVFP4_QUANT_CONFIG,
     "QWEN4_FP8_NVFP4": DEFAULT_QWEN4_FP8_NVFP4_QUANT_CONFIG,
     "MODELOPT_FP4_HYBRID_FP8_PER_BLOCK": (
         DEFAULT_MODELOPT_FP4_HYBRID_FP8_PER_BLOCK_QUANT_CONFIG

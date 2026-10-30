@@ -3,6 +3,7 @@
 #include <limits>
 #include "rtp_llm/cpp/cache/CPSlotMapper.h"
 #include "rtp_llm/cpp/cache/CacheConfig.h"
+#include "rtp_llm/cpp/cache/LinearKVCacheSpec.h"
 #include "rtp_llm/cpp/cache/MHAKVCacheSpec.h"
 
 namespace rtp_llm {
@@ -47,6 +48,26 @@ TEST_F(CPSlotMapperTest, RejectsOverflowingReuseGeometry) {
     EXPECT_THROW(mapper.reuseBlockTokens(config), std::invalid_argument);
     config.seq_size_per_block = std::numeric_limits<int>::max();
     EXPECT_EQ(mapper.reuseBlockTokens(config), std::numeric_limits<int>::max());
+}
+
+TEST_F(CPSlotMapperTest, ReuseWithoutFullGroupUsesCanonicalStride) {
+    for (const auto type : {CacheGroupType::LINEAR, CacheGroupType::SWA}) {
+        CacheConfig config;
+        config.seq_size_per_block = 256;
+        config.layer_num          = 1;
+        GroupBase group;
+        group.tag    = type == CacheGroupType::LINEAR ? "linear" : "swa";
+        group.policy = defaultCacheGroupPolicy(type);
+        if (type == CacheGroupType::LINEAR) {
+            group.spec = std::make_shared<LinearKVCacheSpec>(group.tag, 256, 256);
+        } else {
+            group.spec = std::make_shared<MHAKVCacheSpec>(group.tag, 256, 256);
+        }
+        config.setTopology({group}, {{0, {group.tag}}});
+
+        EXPECT_EQ(CPSlotMapper(0, 8, 256).reuseBlockTokens(config), 2048);
+        EXPECT_EQ(CPSlotMapper(0, 1, 256).reuseBlockTokens(config), 256);
+    }
 }
 
 TEST_F(CPSlotMapperTest, LocalBlockCount) {

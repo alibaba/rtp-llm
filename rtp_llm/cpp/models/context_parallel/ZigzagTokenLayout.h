@@ -14,4 +14,7 @@ struct ZigzagTokenLayout {
 // of 2 * cp_size so each rank receives two equally sized chunks.
 ZigzagTokenLayout makeZigzagTokenLayout(size_t token_count, size_t cp_size);
 
+// Upper bound for a batch described by its logical token and sequence budgets.
+size_t getZigzagPaddedTokenCapacity(size_t token_budget, size_t sequence_budget, size_t cp_size);
+
 }  // namespace rtp_llm

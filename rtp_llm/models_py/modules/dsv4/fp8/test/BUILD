@@ -55,6 +55,8 @@ _GPU_TESTS = [
 # Mock only non-target transport/kernel boundaries; these verify scheduling,
 # lifetime, and metadata contracts without loading a full DSv4 checkpoint.
 _CONTRACT_TESTS = [
+    "test_legacy_mqa_decode_cache",
+    "test_legacy_mqa_metadata",
     "test_cp_pool_reader_owned_lens",
     "test_attention_cp_prefill_paths",
     "test_attention_csa_overlap",

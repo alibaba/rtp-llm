@@ -25,12 +25,15 @@ class Embedding(nn.Module):
         config: ModelConfig,
         parallelism_config: ParallelismConfig,
         weight: torch.Tensor,
+        *,
+        replicated: bool = False,
     ):
         super().__init__()
         self.weight = weight
         self.config = config
         self.parallelism_config = parallelism_config
-        self.tp_size = parallelism_config.get_attn_tp_size()
+        # Query-CP ranks embed different tokens with complete hidden vectors.
+        self.tp_size = 1 if replicated else parallelism_config.get_attn_tp_size()
 
     def forward(
         self,
@@ -38,6 +41,8 @@ class Embedding(nn.Module):
         position_ids: Optional[torch.Tensor] = None,
         token_types: Optional[torch.Tensor] = None,
         text_tokens_mask: Optional[torch.Tensor] = None,
+        *,
+        tp_gather=None,
     ) -> torch.Tensor:
         tokens = input.size(0)
         hidden_size = self.weight.size(-1)
@@ -49,7 +54,11 @@ class Embedding(nn.Module):
         )
         if self.tp_size > 1:
             m, n = output.shape
-            output = all_gather(output, group=Group.TP)
+            output = (
+                tp_gather(output)
+                if tp_gather is not None
+                else all_gather(output, group=Group.TP)
+            )
             output = (
                 output.reshape(self.tp_size, m, n)
                 .transpose(0, 1)
