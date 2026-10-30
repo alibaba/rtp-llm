@@ -23,7 +23,12 @@ from rtp_llm.config.exceptions import (
     ExceptionType,
     FtRuntimeException,
 )
-from rtp_llm.config.generate_config import GenerateConfig, RoleAddr, ThinkingMode
+from rtp_llm.config.generate_config import (
+    GenerateConfig,
+    ReturnAllProbsMode,
+    RoleAddr,
+    ThinkingMode,
+)
 from rtp_llm.dash_sc import grpc_metrics
 from rtp_llm.dash_sc.access_log import DASH_SC_GRPC_ACCESS_LOGGER_NAME
 from rtp_llm.dash_sc.access_record import (
@@ -55,6 +60,7 @@ from rtp_llm.dash_sc.inference.grammar_validator import (
 )
 from rtp_llm.dash_sc.inference.servicer import (
     DashScInferenceServicer,
+    ImagePlaceholderMapping,
     _build_mm_inputs_from_request,
     _dash_error_mapping_for_ft_exception,
     _dash_error_spec_for_ft_exception,
@@ -1622,6 +1628,8 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
                     output_ids=torch.tensor([10, 11, 1, 99], dtype=torch.int32),
                     finished=False,
                     aux_info=AuxInfo(input_len=4, reuse_len=0),
+                    logprobs_offset=4,
+                    logprobs_count=0,
                 )
             ]
         )
@@ -1631,6 +1639,13 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
                     output_ids=torch.tensor([20, 21, 22], dtype=torch.int32),
                     finished=True,
                     aux_info=AuxInfo(input_len=4, reuse_len=0),
+                    token_logprobs=torch.zeros(3),
+                    top_logprob_token_ids=torch.tensor(
+                        [[20], [21], [22]], dtype=torch.int32
+                    ),
+                    top_logprobs=torch.zeros(3, 1),
+                    logprobs_offset=0,
+                    logprobs_count=3,
                 )
             ]
         )
@@ -1667,6 +1682,8 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
                 [7, 8, 128821],
                 SamplingParams(
                     response_format=json.dumps({"type": "json_object"}),
+                    logprobs=True,
+                    top_logprobs=1,
                 ),
                 DashScRequestControls(enable_thinking=True),
                 visitor,
@@ -1686,6 +1703,9 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(visitor.generate_inputs[0].mm_inputs, mm_inputs)
         self.assertEqual(visitor.generate_inputs[1].mm_inputs, mm_inputs)
         self.assertTrue(visitor.generate_inputs[0].generate_config.in_think_mode)
+        for generate_input in visitor.generate_inputs:
+            self.assertTrue(generate_input.generate_config.return_logprobs)
+            self.assertEqual(generate_input.generate_config.top_logprobs, 1)
         self.assertEqual(
             visitor.generate_inputs[0].generate_config.begin_think_token_ids,
             [128821, 198],
@@ -1697,6 +1717,15 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(_gen_ids(chunks[0]), [128821, 10, 11])
         self.assertEqual(_gen_ids(chunks[1]), [128822, 271])
         self.assertEqual(_gen_ids(chunks[2]), [20, 21, 22])
+        self.assertEqual(
+            json.loads(chunks[0].infer_response.parameters["logprobs"].string_param),
+            [{"128821": None}, {"10": None}, {"11": None}],
+        )
+        self.assertNotIn("logprobs", chunks[1].infer_response.parameters)
+        self.assertEqual(
+            json.loads(chunks[2].infer_response.parameters["logprobs"].string_param),
+            [{"20": 0.0}, {"21": 0.0}, {"22": 0.0}],
+        )
         self.assertEqual(chunks[2].infer_response.id, "trace-real-2")
         # phase-2 trace_id mirrors phase-1 (no -2 suffix) so dashscope log search
         # finds both halves under a single trace.
@@ -1707,6 +1736,8 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(phase2_input_ids, [7, 8, 128821, 271, 128822, 271])
         phase1_config = visitor.generate_inputs[0].generate_config
         phase2_config = visitor.generate_inputs[1].generate_config
+        self.assertEqual(phase1_config.return_all_probs, ReturnAllProbsMode.NONE)
+        self.assertEqual(phase2_config.return_all_probs, ReturnAllProbsMode.NONE)
         self.assertIsNone(phase1_config.response_format)
         self.assertIsNotNone(phase1_config.structural_tag)
         self.assertIsNone(phase2_config.response_format)
@@ -2900,6 +2931,75 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(mm_inputs[0].url, "http://example/image.png")
         self.assertEqual(mm_inputs[0].mm_preprocess_config.min_pixels, 128)
         self.assertEqual(mm_inputs[0].mm_preprocess_config.max_pixels, 4096)
+
+    async def test_image_placeholder_mapping_reaches_backend_tensor(self) -> None:
+        source = (27, 91, 74, 30223, 11947, 114136, 91, 29)
+        target = 163605
+        mapping = ImagePlaceholderMapping(source_ids=source, target_id=target)
+        cases = (
+            (
+                "legacy",
+                [1, *source, 2, *source, 3],
+                2,
+                mapping,
+                [1, target, 2, target, 3],
+            ),
+            ("canonical", [target, *source, 3], 1, mapping, [target, *source, 3]),
+            ("text_only", [1, *source, 3], 0, mapping, [1, *source, 3]),
+            ("no_mapping", [1, *source, 3], 1, None, [1, *source, 3]),
+            ("too_few", [1, *source, 3], 2, mapping, None),
+            ("mixed", [target, *source], 2, mapping, None),
+        )
+        for name, input_ids, image_count, rule, expected in cases:
+            with self.subTest(name=name):
+                request = predict_v2_pb2.ModelInferRequest(
+                    id="srv-1", model_name="default"
+                )
+                _add_input_tensor(
+                    request,
+                    "input_ids",
+                    "INT32",
+                    [len(input_ids)],
+                    struct.pack(f"<{len(input_ids)}i", *input_ids),
+                )
+                if image_count:
+                    request.parameters["payload"].string_param = json.dumps(
+                        {
+                            "messages": [
+                                {
+                                    "role": "user",
+                                    "content": [
+                                        {"image": f"http://example/{i}.png"}
+                                        for i in range(image_count)
+                                    ],
+                                }
+                            ]
+                        }
+                    )
+                visitor = self._terminal_visitor()
+                servicer = DashScInferenceServicer(
+                    backend_visitor=visitor, image_placeholder_mapping=rule
+                )
+
+                responses = await _drain(
+                    servicer.ModelStreamInfer(_areq_iter([request]), _FakeGrpcContext())
+                )
+
+                self.assertEqual(len(responses), 1)
+                if expected is None:
+                    self.assertEqual(visitor.enqueue_called, 0)
+                    self.assertEqual(
+                        _finish_reason(responses[0]),
+                        DASH_ERROR_BAD_REQUEST.finish_reason,
+                    )
+                else:
+                    self.assertEqual(visitor.enqueue_called, 1)
+                    generate_input = visitor.last_generate_input
+                    self.assertEqual(generate_input.token_ids.tolist(), expected)
+                    self.assertEqual(
+                        [item.url for item in generate_input.mm_inputs],
+                        [f"http://example/{i}.png" for i in range(image_count)],
+                    )
 
     async def test_access_log_records_input_and_generated_ids(self) -> None:
         # Frontend struct path: the emitted access line carries the real token

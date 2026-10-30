@@ -459,6 +459,7 @@ class Glm5FmhaDispatchTest(unittest.TestCase):
         executor = MegaMoeExecutor.__new__(MegaMoeExecutor)
         nn.Module.__init__(executor)
         executor.cfg = SimpleNamespace(mega_moe_policy=MegaMoeExecutionPolicy())
+        executor.activation = "swiglu"
         executor._is_decode_role = not cp_prefill
         executor._mega_buf = SimpleNamespace(num_max_tokens_per_rank=8)
         executor.forward = Mock(return_value=torch.full((3, 4), 2.0))

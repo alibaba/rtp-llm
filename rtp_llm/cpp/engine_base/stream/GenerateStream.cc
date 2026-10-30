@@ -7,6 +7,10 @@
 #include <limits>
 #include <memory>
 #include <ATen/Generator.h>
+#if USING_CUDA
+#include <ATen/cuda/CUDAEvent.h>
+#include <c10/cuda/CUDACachingAllocator.h>
+#endif
 #if defined(USING_CUDA) || defined(USING_ROCM)
 #include <ATen/cuda/CUDAGeneratorImpl.h>
 #endif
@@ -26,6 +30,16 @@
 using namespace std;
 
 namespace rtp_llm {
+#if USING_CUDA
+struct SpeculativeExecutorStreamOutput::P2PProposalUpload {
+    explicit P2PProposalUpload(c10::cuda::CUDAStream stream): stream(stream) {}
+    c10::cuda::CUDAStream stream;
+    at::cuda::CUDAEvent   ready;
+    torch::Tensor         device_probs;
+    torch::Tensor         device_hidden;
+};
+#endif
+
 namespace {
 constexpr int64_t kInitialLogprobsHistoryCapacity = 64;
 }  // namespace
@@ -148,17 +162,16 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
     if (!input->fake_query && chunk_size > 0
         && (resource_context.role_type == RoleType::PREFILL || resource_context.role_type == RoleType::PDFUSION)) {
         const auto& config = *generateConfig();
-        const char* reason = isGroup()                                       ? "force_batch" :
-                             hasNumBeams()                                   ? "num_beams" :
-                             returnLogits()                                  ? "return_logits" :
-                             returnPromptLogits()                            ? "return_prompt_logits" :
-                             calculateLoss()                                 ? "calculate_loss" :
-                             config.return_hidden_states                     ? "return_hidden_states" :
-                             config.return_all_hidden_states                 ? "return_all_hidden_states" :
+        const char* reason = (isGroup() && seqLength() > chunk_size)  ? "force_batch" :
+                             hasNumBeams()                            ? "num_beams" :
+                             returnLogits()                           ? "return_logits" :
+                             returnPromptLogits()                     ? "return_prompt_logits" :
+                             calculateLoss()                          ? "calculate_loss" :
+                             config.return_hidden_states              ? "return_hidden_states" :
+                             config.return_all_hidden_states          ? "return_all_hidden_states" :
                              getReturnAllProbs() != ReturnAllProbsMode::NONE ? "return_all_probs" :
-                             input->custom_output_token_position >= 0        ? "custom_output" :
-                             multimodalFeaturesLength() != 0                 ? "multimodal" :
-                                                                               nullptr;
+                             input->custom_output_token_position >= 0 ? "custom_output" :
+                                                                        nullptr;
         if (reason != nullptr) {
             reportEvent(
                 StreamEvents::Error, ErrorCode::INVALID_PARAMS, "chunked prefill incompatible: " + std::string(reason));
@@ -637,6 +650,9 @@ bool GenerateStream::hasPendingChunk() const {
 void GenerateStream::advanceChunk() {
     reuse_length_ += currentChunkLen();
     chunk_advanced_ = true;
+    if (warmup_chunk_window_) {
+        ++warmup_chunk_index_;
+    }
 }
 
 int GenerateStream::nextChunkBoundaryToken() const {
@@ -806,10 +822,20 @@ vector<int> GenerateStream::textTokensMask() const {
     if (!generate_input_->text_tokens_mask) {
         return {};
     }
-    auto& mask  = generate_input_->text_tokens_mask.value();
-    auto* data  = mask.data_ptr<int>();
-    int   start = reuseLength() > 0 ? reuseLength() : 0;
-    return vector<int>(data + start, data + mask.numel());
+    const auto&   mask  = generate_input_->text_tokens_mask.value();
+    const auto*   data  = mask.data_ptr<int>();
+    const int64_t start = std::max(reuseLength(), 0);
+    const int64_t end   = isContextStream() ? start + contextLength() : std::max(start, mask.numel());
+    RTP_LLM_CHECK_WITH_INFO(end >= start, "invalid text mask window [%ld, %ld)", start, end);
+    // Recompute may include generated text beyond the original prompt mask.
+    // Those rows are text; never read past the stored prompt mask.
+    vector<int> result;
+    result.reserve(end - start);
+    if (start < mask.numel()) {
+        result.insert(result.end(), data + start, data + std::min(end, mask.numel()));
+    }
+    result.resize(end - start, 1);
+    return result;
 }
 
 torch::Tensor GenerateStream::generateContextPositionIds() {
@@ -1460,6 +1486,58 @@ const ResourceContext& GenerateStream::resourceContext() const {
     return stream_cache_resource_->resourceContext();
 }
 
+void GenerateStream::setP2PProposalBuffer(SpeculativeExecutorStreamOutputPtr output,
+                                          torch::Tensor                      probs,
+                                          torch::Tensor                      hidden) {
+#if USING_CUDA
+    if (probs.numel() > 0 || hidden.numel() > 0) {
+        RTP_LLM_PROFILE_SCOPE("engine.p2p.upload_speculative_proposal");
+        auto upload =
+            std::make_shared<SpeculativeExecutorStreamOutput::P2PProposalUpload>(c10::cuda::getCurrentCUDAStream());
+        // PyTorch's nonblocking copy records the pinned source with its host allocator.
+        const auto upload_tensor = [](const torch::Tensor& tensor) {
+            return (tensor.numel() > 0 ? tensor.pin_memory() : tensor).to(torch::kCUDA, /*non_blocking=*/true);
+        };
+        output->all_probs     = upload_tensor(probs);
+        output->hidden_states = upload_tensor(hidden);
+        upload->device_probs  = output->all_probs;
+        upload->device_hidden = output->hidden_states;
+        upload->ready.record(upload->stream);
+        output->p2p_proposal_upload_ = std::move(upload);
+        output->p2p_proposal_pending_.store(true, std::memory_order_release);
+        setSPOutputBuffer(std::move(output));
+        return;
+    }
+#endif
+    output->all_probs     = probs.to(torch::kCUDA);
+    output->hidden_states = hidden.to(torch::kCUDA);
+    output->tensors_holder.emplace_back(std::move(probs));
+    output->tensors_holder.emplace_back(std::move(hidden));
+    setSPOutputBuffer(std::move(output));
+}
+
+SpeculativeExecutorStreamOutputPtr GenerateStream::getSPOutputBuffer() {
+    auto output = sp_output_buffer_;
+#if USING_CUDA
+    if (output && output->p2p_proposal_pending_.load(std::memory_order_acquire)) {
+        const auto upload = std::atomic_load(&output->p2p_proposal_upload_);
+        if (upload) {
+            const auto stream = c10::cuda::getCurrentCUDAStream(upload->stream.device_index());
+            if (stream != upload->stream) {
+                // Preserve device ordering and allocator lifetime on a different consumer stream.
+                upload->ready.block(stream);
+                for (const auto* tensor : {&upload->device_probs, &upload->device_hidden}) {
+                    if (tensor->numel() > 0) {
+                        c10::cuda::CUDACachingAllocator::recordStream(tensor->storage().data_ptr(), stream);
+                    }
+                }
+            }
+        }
+    }
+#endif
+    return output;
+}
+
 size_t GenerateStream::curBlocksNum() const {
     return stream_cache_resource_->curBlocksNum();
 }
@@ -1650,6 +1728,11 @@ void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info,
 
     sp_output_buffer_->hidden_states = update_info.draft_hidden_states;
     sp_output_buffer_->all_probs     = update_info.draft_token_probs;
+    if (sp_output_buffer_->p2p_proposal_pending_.load(std::memory_order_relaxed)) {
+        sp_output_buffer_->p2p_proposal_pending_.store(false, std::memory_order_release);
+        std::atomic_store(&sp_output_buffer_->p2p_proposal_upload_,
+                          std::shared_ptr<SpeculativeExecutorStreamOutput::P2PProposalUpload>{});
+    }
     // Apply the explicit tri-state proposal update. PD partial updates use
     // nullopt to preserve the handoff proposal; GPU/CPU proposal producers use
     // a defined/undefined Tensor respectively to replace or clear the mirror.

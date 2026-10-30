@@ -70,10 +70,11 @@ _PPU_LOCK_SKIPPED = [
 def requirement(names):
     for name in names:
         if name == "flash-mla-legacy":
+            # Compatibility label: current CUDA13 FlashMLA includes legacy ops.
             native.py_library(
                 name = name,
                 deps = select({
-                    "@rtp_llm//:using_cuda13_arm": [requirement_cuda13_arm(name)],
+                    "@rtp_llm//:using_cuda13_arm": [requirement_cuda13_arm("flash-mla")],
                     "//conditions:default": [],
                 }),
                 visibility = ["//visibility:public"],
@@ -162,9 +163,9 @@ def whl_deps():
             # source upstream is download.pytorch.org/whl/cu130).
             "torch==2.11.0+cu130",
             "torchvision==0.26.0+cu130",
-            # GLM5 kernels shared by the CUDA13 inference paths.
-            "deep-gemm==2.8.0+122e18b.cu132",
-            "flash-mla==1.0.0+9241ae3",
+            # DeepGEMM with K3 Mega MoE and shared-expert kernels.
+            "deep-gemm==2.8.2+a5165ad.cu132",
+            "flash-mla==1.0.0+db0745d.cu132",
             "deep-ep==2.1.0+a56d615",
             "fast-hadamard-transform@https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/whls/fast_hadamard/fast_hadamard_transform-1.1.0-cp310-cp310-linux_x86_64.whl",
             "flash_attn==2.8.3.post1+cu13torch2.11cxx11abitrue.r1",
@@ -178,14 +179,14 @@ def whl_deps():
             "fastsafetensors==0.3.4.dev20260908+ali.fuseshm.gfb2c381b.aone70048596",
             "tilelang==0.1.15",
             "apache-tvm-ffi==0.1.12",
+            "cuda-linear-attention==0.1.dev88+dcce4719.cu132",
+            "flash-linear-attention==0.5.0+rtp.3a9ce1c.6",
         ] + _CUDA13_FLASHINFER_WHEEL_DEPS,
         "@rtp_llm//:using_cuda13_arm": [
             "torch==2.11.0+cu130",
             "torchvision==0.26.0+cu130",
-            # DeepGEMM opt_glm5 + SM12x, CI-built against torch 2.11+cu130.
-            "deep_gemm==2.8.1+057ca59",
-            "flash-mla==1.0.0+2e5429f",
-            "flash-mla-legacy==1.0.0+92fd68b.rtp1",
+            "deep-gemm==2.8.2+a5165ad.cu132",
+            "flash-mla==1.0.0+db0745d.cu132",
             "deep-ep==2.1.0+a56d615",
             "rtp-kernel==0.1.0+94fd20eb.cu132",
             "fast-safetensors==0.7.4.dev0+torch2.11.0.cu130.aone67401633",
@@ -194,6 +195,8 @@ def whl_deps():
             "apache-tvm-ffi==0.1.12",
             # FlashAttention wheels remain deferred on CUDA13 ARM.
             "fast-hadamard-transform@https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/fast_hadamard_transform-1.0.4.post1-cp310-cp310-linux_aarch64.whl",
+            "cuda-linear-attention==0.1.dev88+dcce4719.cu132",
+            "flash-linear-attention==0.5.0+rtp.3a9ce1c.6",
         ] + _CUDA13_FLASHINFER_WHEEL_DEPS,
         "@rtp_llm//:using_cuda12_9_x86": [
             # torch 2.8.0+cu129: the upstream wheel (http.bzl torch_2.8_py310_cuda
@@ -285,8 +288,12 @@ def ml_pin_reqs():
             "transformers==5.2.0",
             "sentence-transformers==5.2.0",
             "pyarrow==14.0.0",
-            "xgrammar==0.2.5",
         ],
+    }) + select({
+        "@rtp_llm//:using_cuda13_x86": ["xgrammar==0.2.8"],
+        "@rtp_llm//:using_cuda13_arm": ["xgrammar==0.2.8"],
+        "@rtp_llm//:using_ppu": [],
+        "//conditions:default": ["xgrammar==0.2.5"],
     })
 
 def platform_deps():

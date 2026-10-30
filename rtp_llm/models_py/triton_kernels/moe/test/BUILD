@@ -11,6 +11,23 @@ requirement([
 ])
 
 py_test(
+    name = "test_k31_decode_topk",
+    srcs = ["test_k31_decode_topk.py"],
+    deps = [
+        "//rtp_llm:models",
+        "//rtp_llm/models_py:modules",
+        "//rtp_llm/models_py/standalone:py_standalone_testlib",
+    ],
+    env = {"GPU_COUNT": "1"},
+    tags = ["SM103_CU13"],
+    exec_properties = {"gpu": "SM103_CU13", "gpu_count": "1"},
+    target_compatible_with = select({
+        "//:using_cuda13_x86": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+)
+
+py_test(
     name = "test_remap_local_ids",
     srcs = ["test_remap_local_ids.py"],
     deps = [
@@ -143,6 +160,16 @@ cuda13_sm100_py_test(
     name = "test_mega_moe_input_packer_perf",
     srcs = ["test_mega_moe_input_packer_perf.py"],
     deps = ["//rtp_llm/models_py/triton_kernels:moe"],
+)
+
+cuda13_sm100_py_test(
+    name = "test_mega_moe_output_add_index_width",
+    srcs = ["test_mega_moe_output_add_index_width.py"],
+    deps = [
+        ":torch",
+        ":triton",
+        "//rtp_llm/models_py/triton_kernels:moe",
+    ],
 )
 
 models_py_test(

@@ -1,4 +1,5 @@
 import runpy
+import sys
 import unittest
 from contextlib import ExitStack
 from unittest.mock import MagicMock, patch
@@ -37,6 +38,13 @@ def _histogram(input, num_bins, mask=None):
 
 
 class MarlinAdmissionTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        # CPU admission checks use the real router, not its optional GPU backend.
+        backend = patch.dict(sys.modules, {"deep_gemm": None})
+        backend.start()
+        cls.addClassCleanup(backend.stop)
+
     def test_incompatible_factory_paths_never_construct_or_load_marlin(self):
         registry = StrategyRegistry()
         strategy = CudaNvfp4MarlinStrategy()

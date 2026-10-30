@@ -1,3 +1,44 @@
+_K31_VERIFY_DEPS = [
+    "//rtp_llm:flashinfer-python",
+    "//rtp_llm:models",
+    "//rtp_llm/models_py/distributed:collective_torch",
+    "//rtp_llm/models_py/standalone:py_standalone_testlib",
+]
+
+_K31_VERIFY_EXEC_PROPERTIES = {
+    "gpu": "SM103_CU13",
+    "gpu_count": "4",
+}
+
+_K31_VERIFY_PLATFORMS = select({
+    "@//:using_cuda13_x86": [],
+    "//conditions:default": ["@platforms//:incompatible"],
+})
+
+py_test(
+    name = "k31_verify_all_gather_test",
+    srcs = ["k31_verify_all_gather_benchmark.py"],
+    args = ["--check-only"],
+    main = "k31_verify_all_gather_benchmark.py",
+    deps = _K31_VERIFY_DEPS,
+    env = {"GPU_COUNT": "4"},
+    tags = ["SM103_CU13", "multi_device"],
+    exec_properties = _K31_VERIFY_EXEC_PROPERTIES,
+    target_compatible_with = _K31_VERIFY_PLATFORMS,
+    timeout = "long",
+)
+
+py_test(
+    name = "k31_verify_all_gather_benchmark",
+    srcs = ["k31_verify_all_gather_benchmark.py"],
+    deps = _K31_VERIFY_DEPS,
+    env = {"GPU_COUNT": "4"},
+    tags = ["SM103_CU13", "manual", "multi_device"],
+    exec_properties = _K31_VERIFY_EXEC_PROPERTIES,
+    target_compatible_with = _K31_VERIFY_PLATFORMS,
+    timeout = "long",
+)
+
 py_test(
     name = "deepep_group_test",
     srcs = ["deepep_group_test.py"],

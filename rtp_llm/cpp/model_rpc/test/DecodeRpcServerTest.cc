@@ -727,6 +727,7 @@ TEST(DecodeRpcServerTest, UnimplementedBatchFallbackKeepsIndependentCancelLive) 
         config->set_num_beams(1);
         config->set_num_return_sequences(1);
         config->set_can_use_pd_separation(true);
+        config->set_return_logprobs(id == 302);
         auto* address = config->add_role_addrs();
         address->set_role(RoleAddrPB::PREFILL);
         address->set_ip("127.0.0.1");
@@ -749,6 +750,7 @@ TEST(DecodeRpcServerTest, UnimplementedBatchFallbackKeepsIndependentCancelLive) 
     EXPECT_FALSE(handle->terminal.load());
     EXPECT_TRUE(decode->meta_->getEngineScheduleInfo(-1).finished_task_info_list.empty());
     EXPECT_EQ(streams[0]->generateInput()->group_id, -1);
+    EXPECT_TRUE(streams[1]->generateInput()->generate_config->return_logprobs);
 
     grpc::ClientContext cancel_context;
     cancel_context.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(3));

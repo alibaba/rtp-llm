@@ -16,6 +16,7 @@
 #include "rtp_llm/cpp/model_rpc/PrefillRpcServer.h"
 #include "rtp_llm/cpp/model_rpc/QueryConverter.h"
 #include "rtp_llm/cpp/model_rpc/PDRequestUtils.h"
+#include "rtp_llm/cpp/model_rpc/RpcErrorCode.h"
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
 #include "rtp_llm/cpp/testing/TestBase.h"
 #include "rtp_llm/cpp/testing/TestLogCapture.h"
@@ -182,6 +183,20 @@ public:
     bool throw_on_enqueue = false;
     bool mismatch_results = false;
     std::vector<std::shared_ptr<GenerateInput>> admitted_inputs;
+};
+
+class FailingMultimodalProcessor: public MultimodalProcessor {
+public:
+    FailingMultimodalProcessor(): MultimodalProcessor(py::object{}, MMModelConfig{true, {{1}}, false}, 32) {}
+
+    int calls = 0;
+
+private:
+    ErrorResult<MultimodalOutput>
+    MultimodalEmbedding(const std::vector<MultimodalInput>, std::string, int64_t, grpc::ServerContext*) override {
+        ++calls;
+        return {ErrorCode::MM_PROCESS_ERROR, "injected multimodal processing failure"};
+    }
 };
 
 class LifecycleService: public RpcService::Service {
@@ -394,6 +409,56 @@ TEST_F(RpcHandlerLifecycleTest, PrefillEarlyFailurePreservesPriorityPreemption) 
 }
 TEST_F(RpcHandlerLifecycleTest, PrefillExceptionUnwindsAndDiagnosesOnce) {
     runSynchronousHandler(Handler::PREFILL, OutputAction::THROW);
+}
+
+TEST_F(RpcHandlerLifecycleTest, PrefillPublishesOneTerminalAfterMultimodalRetriesFail) {
+    auto             engine    = std::make_shared<SteppedEngine>(OutputAction::WAIT);
+    auto             meta      = std::make_shared<RpcServerRuntimeMeta>();
+    auto             processor = std::make_shared<FailingMultimodalProcessor>();
+    PrefillRpcServer server;
+    server.engine_             = engine;
+    server.meta_               = meta;
+    server.mm_processor_       = processor;
+    server.cancel_registry_    = std::make_unique<PDCancelRegistry>(meta);
+    auto& config               = server.maga_init_params_.pd_sep_config;
+    config.role_type           = RoleType::PREFILL;
+    config.prefill_retry_times = 1;
+
+    P2PConnectorConfig connector_config;
+    connector_config.role_type         = RoleType::PREFILL;
+    auto connector                     = std::make_shared<P2PConnector>(connector_config, nullptr, nullptr);
+    connector->prefill_                = std::make_unique<P2PConnectorPrefill>(connector_config, nullptr, nullptr);
+    connector->prefill_->stream_store_ = std::make_shared<P2PConnectorResourceStore>(nullptr);
+    engine->getCacheManager()->p2p_connector_ = connector;
+
+    auto request = lifecycleRequest();
+    request.mutable_generate_config()->set_unique_key("prefill-mm-failure");
+    request.add_multimodal_inputs()->set_multimodal_url("test-image");
+    grpc::ServerContext context;
+    const auto          status = server.GenerateStreamCall(nullptr, &request, nullptr);
+    EXPECT_EQ(errorInfoFromGrpcStatus(status).code(), ErrorCode::MM_PROCESS_ERROR);
+    EXPECT_EQ(processor->calls, 2);
+    EXPECT_EQ(engine->stream, nullptr);
+
+    StatusVersionPB since;
+    WorkerStatusPB  worker_status;
+    ASSERT_TRUE(server.GetWorkerStatus(&context, &since, &worker_status).ok());
+    EXPECT_EQ(worker_status.running_task_info_size(), 0);
+    ASSERT_EQ(worker_status.finished_task_list_size(), 1);
+    const auto& task = worker_status.finished_task_list(0);
+    EXPECT_EQ(task.request_id(), kRequestId);
+    EXPECT_EQ(task.batch_id(), kBatchId);
+    EXPECT_EQ(task.input_length(), request.token_ids_size());
+    EXPECT_EQ(task.error_info().error_code(), static_cast<int64_t>(ErrorCode::MM_PROCESS_ERROR));
+
+    const auto duplicate_status = server.GenerateStreamCall(nullptr, &request, nullptr);
+    EXPECT_EQ(errorInfoFromGrpcStatus(duplicate_status).code(), ErrorCode::INVALID_PARAMS);
+    EXPECT_EQ(processor->calls, 2);
+    since.set_latest_finished_version(worker_status.latest_finished_version());
+    grpc::ServerContext updated_context;
+    WorkerStatusPB      updated_status;
+    ASSERT_TRUE(server.GetWorkerStatus(&updated_context, &since, &updated_status).ok());
+    EXPECT_EQ(updated_status.finished_task_list_size(), 0);
 }
 
 TEST_F(RpcHandlerLifecycleTest, ProductionBatchCombinesValidationAndEngineAdmissionResults) {

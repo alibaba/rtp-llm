@@ -17,6 +17,7 @@ from rtp_llm.config.py_config_modules import (
 )
 from rtp_llm.ops import (
     ArpcConfig,
+    CPRotateMethod,
     CacheStoreConfig,
     ConcurrencyConfig,
     DashScGrpcConfig,
@@ -373,6 +374,24 @@ def _validate_p2p_transfer_port(member, p2p_transfer_port: int) -> None:
                 f"p2p_transfer_port={p2p_transfer_port} for member {member} "
                 f"conflicts with {port_name}"
             )
+
+
+def apply_tp_sharded_prefill_cp(
+    parallelism: ParallelismConfig, *, required: bool
+) -> None:
+    if (
+        not required
+        or parallelism.role_type != RoleType.PREFILL
+        or parallelism.tp_size <= 1
+    ):
+        return
+
+    cp = parallelism.prefill_cp_config
+    if not cp.kv_cache_sharded:
+        raise ValueError("Query CP with TP requires --prefill_cp_kv_cache_sharded=1")
+    cp.method = CPRotateMethod.ALL_GATHER
+    cp.prefill_cp_size = parallelism.tp_size
+    cp.preserve_tp_layout = True
 
 
 def setup_pd_sep_config(

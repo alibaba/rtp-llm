@@ -98,8 +98,13 @@ public:
     torch::Tensor              getMtpTargetHiddenStates(int64_t num_tokens) override;
     torch::Tensor              getMtpLastHiddenStates(int64_t num_tokens) override;
     bool                       hasMtpTargetHiddenBuffer() const override;
+    bool                    requiresGlobalMtpPrefillHidden() const override;
+    torch::Tensor           restoreMtpPrefillHiddenStates(torch::Tensor hidden, const GptModelInputs& inputs) override;
     void                       prepareAttentionInputs(const GptModelInputs& inputs) override;
-    void                       prepareAttentionInputs(const GptModelInputs& inputs, bool skip_forward_event_sync);
+    void                    prepareAttentionInputs(const GptModelInputs& inputs,
+                                                   bool                  skip_forward_event_sync,
+                                                   const GptModelInputs* publication_inputs = nullptr,
+                                                   bool                  resolve_moe_phase = true);
     void                       updateKVCacheKernelBlockId(const GptModelInputs& inputs) override;
     std::string                waitCacheStorePublication() override;
     HiddenStateCaptureStats    hiddenStateCaptureStats() const;
@@ -118,6 +123,18 @@ private:
     std::optional<PyCacheStoreInputs> prepareWriteCacheParams(const GptModelInputs& inputs);
 
 private:
+    bool                                              sequence_parallel_padding_enabled_  = false;
+    bool                                              requires_global_mtp_prefill_hidden_ = false;
+    std::optional<torch_ext::PyContextParallelParams> mtp_prefill_cp_params_;
+    bool                                              usesSequenceParallelPadding(const GptModelInputs& inputs) const {
+        // CP owns Prefill's per-request padding. Decode/verify still need SP
+        // alignment even when the same model also serves Query-CP Prefill.
+        const bool cp_prefill = device_props_.enable_prefill_cp && inputs.sequence_lengths.numel() == 0
+                                && !inputs.is_target_verify && !inputs.is_mtp_draft_update;
+        return sequence_parallel_padding_enabled_ && !cp_prefill;
+    }
+    GptModelInputs                                    padSequenceParallelInputs(const GptModelInputs& inputs);
+
     // Helper functions to reduce code duplication
     torch_ext::PyAttentionInputs  buildPyAttentionInputs(const GptModelInputs& inputs);
     torch_ext::PyEmbeddingInputs  buildPyEmbeddingInputs(const GptModelInputs& inputs);
@@ -125,6 +142,7 @@ private:
     torch_ext::BertEmbeddingInputs
                                     buildBertEmbeddingInputs(const GptModelInputs& inputs,
                                                              const torch::Tensor&  prepared_position_ids = torch::Tensor());
+    PyModelInputs                   buildPyModelInputs(const GptModelInputs& inputs);
     torch_ext::AttentionInputsByTag setupKVCacheForAttentionInputs(torch_ext::PyAttentionInputs& py_attn_inputs,
                                                                    const GptModelInputs&         inputs);
     GptModelOutputs                 callForwardPostLayers(torch::Tensor         hidden_states,
@@ -193,6 +211,7 @@ private:
         GenerationPrefillCudaGraphStatus::NOT_REQUESTED};
     bool use_spec_decoding_{false};
     bool has_mtp_hidden_buffer_{false};
+    bool spec_decode_uses_device_kv_lengths_{false};
     bool has_speculative_target_commit_hooks_{false};
     bool has_speculative_target_status_reducer_{false};
     bool supports_micro_batch_{false};
@@ -381,6 +400,11 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
     py::object py_init_result;
     // Always initialize py_model_ so it can be used as fallback when CUDA graph cannot run
     py_model_ = py_instance;
+#if USING_CUDA
+    spec_decode_uses_device_kv_lengths_ =
+        init_resources.is_decode_role
+        && py::getattr(py_model_, "spec_decode_uses_device_kv_lengths", py::bool_(false)).cast<bool>();
+#endif
     // MtpExecutor passes use_spec_decoding only to its target wrapper. The
     // normal and draft wrappers may share the same Python class, but must not
     // activate target transactions.
@@ -427,6 +451,10 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         RTP_LLM_CHECK(py::hasattr(py_model_, "set_mtp_indexer_role"));
         py_model_.attr("set_mtp_indexer_role")(static_cast<int>(mtp_indexer_role_));
     }
+    sequence_parallel_padding_enabled_ = py::hasattr(py_instance, "requires_sequence_parallel_padding")
+                                         && py_instance.attr("requires_sequence_parallel_padding").cast<bool>();
+    requires_global_mtp_prefill_hidden_ = py::hasattr(py_instance, "requires_global_mtp_prefill_hidden")
+                                          && py_instance.attr("requires_global_mtp_prefill_hidden").cast<bool>();
     auto py_initialize_method = py_model_.attr("initialize");
     try {
         py_init_result = py_initialize_method(init_resources);
@@ -564,6 +592,9 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         RTP_LLM_CHECK_WITH_INFO(graph_params.kernel_block_table_width > 0,
                                 "CUDA graph requires Executor to provide a positive kernel block table width");
 
+        graph_params.mtp_draft_prefill_uses_request_lanes = params.mtp_draft_prefill_uses_request_lanes;
+        graph_params.sequence_parallel_size =
+            sequence_parallel_padding_enabled_ ? params.parallelism_config.tp_size : 1;
         auto graph_runner =
             std::make_unique<CudaGraphRunner>(graph_params, py_instance, forward_method, params.metrics_reporter);
         {

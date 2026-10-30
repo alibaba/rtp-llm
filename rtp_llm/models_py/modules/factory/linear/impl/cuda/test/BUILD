@@ -3,6 +3,46 @@ py_test_deps = [
 ]
 
 py_test(
+    name = "nvfp4_dispatch_test",
+    srcs = ["nvfp4_dispatch_test.py"],
+    deps = ["//rtp_llm:testlib", "//rtp_llm/models_py:modules"],
+    env = {"GPU_COUNT": "1", "OMP_NUM_THREADS": "1"},
+    tags = ["SM103_CU13"],
+    exec_properties = {"gpu": "SM103_CU13", "gpu_count": "1"},
+    timeout = "eternal",
+)
+
+py_test(
+    name = "nvfp4_dispatch_collective_test",
+    srcs = ["nvfp4_dispatch_test.py"],
+    main = "nvfp4_dispatch_test.py",
+    args = ["--distributed"],
+    deps = ["//rtp_llm:testlib", "//rtp_llm/models_py:modules"],
+    env = {"GPU_COUNT": "2", "OMP_NUM_THREADS": "1"},
+    tags = ["SM103_CU13", "multi_device"],
+    exec_properties = {"gpu": "SM103_CU13", "gpu_count": "2"},
+    timeout = "eternal",
+)
+
+py_test(
+    name = "collective_projection_gemm_rs_test",
+    srcs = ["collective_projection_gemm_rs_test.py"],
+    data = ["//rtp_llm/models_py:collective_projection_gemm_rs_test_sources"],
+    deps = ["//rtp_llm:torch"],
+    env = {"GPU_COUNT": "0"},
+    timeout = "short",
+)
+
+py_test(
+    name = "bf16_collective_projection_test",
+    srcs = ["bf16_collective_projection_test.py"],
+    deps = ["//rtp_llm:testlib", "//rtp_llm/models_py:modules"],
+    env = {"GPU_COUNT": "2"},
+    tags = ["SM103_CU13", "multi_device"],
+    exec_properties = {"gpu": "SM103_CU13", "gpu_count": "2"},
+)
+
+py_test(
     name = "fp8_deepgemm_linear_out_test",
     srcs = ["fp8_deepgemm_linear_out_test.py"],
     deps = [
@@ -17,7 +57,11 @@ py_test(
 
 py_test(
     name = "fp8_linear_test",
-    srcs = ["fp8_linear_test.py"],
+    srcs = [
+        "fp8_linear_test.py",
+        "fp8_linear_test_launcher.py",
+    ],
+    main = "fp8_linear_test_launcher.py",
     deps = py_test_deps,
     tags = ["H20_CU13"],
     exec_properties = {"gpu": "H20_CU13"},
@@ -58,4 +102,12 @@ py_test(
     deps = py_test_deps,
     tags = ["SM100_ARM_CU13"],
     exec_properties = {"gpu": "SM100_ARM_CU13"},
+)
+
+py_test(
+    name = "dynamic_nvfp4_linear_test",
+    srcs = ["dynamic_nvfp4_linear_test.py"],
+    deps = ["//rtp_llm:testlib", "//rtp_llm/models_py:modules"],
+    tags = ["SM103_CU13"],
+    exec_properties = {"gpu": "SM103_CU13", "gpu_count": "1"},
 )

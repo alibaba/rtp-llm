@@ -1,5 +1,5 @@
 import logging
-from typing import Callable, Dict, List, Optional, Union
+from typing import Callable, Dict, List, Optional, Sequence, Union
 
 from rtp_llm.config.cuda_graph import (
     CudaGraphSelectionMode,
@@ -100,7 +100,11 @@ def get_mla_impl(
     max_seq_len: int = 0,
     parallelism_config: Optional[ParallelismConfig] = None,
     cuda_graph_selection_mode: Optional[Union[str, CudaGraphSelectionMode]] = None,
+    *,
+    implementations: Optional[Sequence[type[MlaImplBase]]] = None,
+    prefill_kv_workspace_budget_bytes: Optional[int] = None,
 ) -> MlaImplBase:
+    """Select registered or model-scoped MLA implementations using one contract."""
 
     selection_mode = _normalize_cuda_graph_selection_mode(
         is_cuda_graph, cuda_graph_selection_mode
@@ -119,11 +123,13 @@ def get_mla_impl(
     # Dense MLA keeps the prefill impl for these prefill-shaped inputs.
     use_decode_mla = (is_target_verify or is_draft_extend) and attn_configs.is_sparse
 
-    mla_impls = (
-        PREFILL_MLA_IMPS
-        if (attn_inputs.is_prefill and not use_decode_mla)
-        else DECODE_MLA_IMPS
-    )
+    mla_impls = implementations
+    if mla_impls is None:
+        mla_impls = (
+            PREFILL_MLA_IMPS
+            if (attn_inputs.is_prefill and not use_decode_mla)
+            else DECODE_MLA_IMPS
+        )
     allow_cuda_graph_prefill_absorb = False
     if is_cuda_graph and attn_inputs.is_prefill and not use_decode_mla:
         try:
@@ -157,7 +163,8 @@ def get_mla_impl(
             # particular, do the device-to-host max() read only once.
             cos_sin_cache = weight.get_global_weight_or_none(W.rope_cos_sin_cache)
             use_fast_path = bool(
-                attn_inputs.is_prefill
+                implementations is None
+                and attn_inputs.is_prefill
                 and not use_decode_mla
                 and not (
                     parallelism_config
@@ -193,6 +200,11 @@ def get_mla_impl(
             max_seq_len=max_seq_len,
             is_cuda_graph=is_cuda_graph,
             parallelism_config=parallelism_config,
+            **(
+                {"prefill_kv_workspace_budget_bytes": prefill_kv_workspace_budget_bytes}
+                if prefill_kv_workspace_budget_bytes is not None
+                else {}
+            ),
         )
         if selection_mode == CudaGraphSelectionMode.GENERATION_PREFILL_GRAPH:
             if not _matches_cuda_graph_selection_mode(instance, selection_mode):

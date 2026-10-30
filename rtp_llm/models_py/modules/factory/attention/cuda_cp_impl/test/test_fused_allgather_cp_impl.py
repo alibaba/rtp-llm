@@ -46,9 +46,9 @@ class TestPCPFusedPagedAttnOp(CPAttnTestBase):
         all_local_v: List[torch.Tensor],
         cp_rank: int,
     ):
-        def mock_all_gather_into(output, input_, group):
+        def mock_all_gather_into(tensor, output, group):
             self.assertEqual(group.name, "TP")
-            tokens_local, _, kv_head_num, head_dim = input_.shape
+            tokens_local, _, kv_head_num, head_dim = tensor.shape
             packed = [
                 torch.stack(
                     (
@@ -59,7 +59,7 @@ class TestPCPFusedPagedAttnOp(CPAttnTestBase):
                 )
                 for local_k, local_v in zip(all_local_k, all_local_v)
             ]
-            self.assertTrue(torch.equal(input_, packed[cp_rank]))
+            self.assertTrue(torch.equal(tensor, packed[cp_rank]))
             payload = torch.cat(packed, dim=0)
             output.copy_(payload.view_as(output))
             return output

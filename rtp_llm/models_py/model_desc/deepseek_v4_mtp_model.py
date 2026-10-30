@@ -107,9 +107,6 @@ class DeepSeekV4MtpModel(DeepSeekV4Model):
     def _should_capture_cuda_graph(self, attn, is_target_verify: bool) -> bool:
         return True
 
-    def cuda_graph_draft_prefill_uses_request_lanes(self) -> bool:
-        return True
-
     # ------------------------------------------------------------------
     # Weight loading hook (called by parent's _initialize_impl right
     # before ``del self.weight``).

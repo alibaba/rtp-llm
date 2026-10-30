@@ -84,13 +84,15 @@ private:
         std::vector<std::optional<ErrorInfo>> processor_errors;
     };
 
-    ActiveStreamLayout buildActiveStreamLayout(const LaunchTask& task) const;
-    void               ensureBuffersFit(const VerifyShape& shape);
-    void               materializeDraftTokensToCpu(const LaunchTask& task);
-    void               initializeCompactRows(const ActiveStreamLayout& layout, const VerifyShape& shape);
-    MergeProcessorMasksResult
-    mergeProcessorMasks(const LaunchTask& task, const ActiveStreamLayout& layout, const VerifyShape& shape);
-    LaunchResult makeResult(const VerifyShape& shape);
+    ActiveStreamLayout        buildActiveStreamLayout(const LaunchTask& task) const;
+    void                      ensureBuffersFit(const VerifyShape& shape);
+    torch::Tensor             materializeDraftTokensToCpu(const LaunchTask& task);
+    void                      initializeCompactRows(const ActiveStreamLayout& layout, const VerifyShape& shape);
+    MergeProcessorMasksResult mergeProcessorMasks(const LaunchTask&         task,
+                                                  const ActiveStreamLayout& layout,
+                                                  const VerifyShape&        shape,
+                                                  const torch::Tensor&      draft_tokens);
+    LaunchResult              makeResult(const VerifyShape& shape);
 
     torch::Tensor draft_tokens_cpu_;
     torch::Tensor processor_bitmask_cpu_;

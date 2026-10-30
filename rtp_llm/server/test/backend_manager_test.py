@@ -4,6 +4,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, Mock, patch
 
 from rtp_llm.config.collective_config import CollectiveConfig
+from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.config.server_config_setup import set_parallelism_config
 from rtp_llm.ops import NcclCommConfig
@@ -197,16 +198,31 @@ class BackendManagerStopTest(unittest.TestCase):
 
 
 class BackendManagerDeepEPTest(unittest.TestCase):
-    def test_mega_moe_skips_deepep_but_other_strategies_initialize_it(self):
-        for strategy in (
-            "mega_moe",
-            "mega_moe_se",
-            "mega_moe_fp8",
-            "mega_moe_fp8_se",
-            "mega_moe_fused",
-            "auto",
-        ):
-            with self.subTest(strategy=strategy):
+    def test_deepep_initialization_uses_effective_moe_strategy(self):
+        from rtp_llm.models.kimi_k3.kimi_k3 import KimiK3ModelConfig
+        from rtp_llm.models.kimi_k3.kimi_k31 import KimiK31ModelConfig
+
+        cases = [
+            (ModelConfig, strategy, strategy)
+            for strategy in (
+                "mega_moe",
+                "mega_moe_se",
+                "mega_moe_fp8",
+                "mega_moe_fp8_se",
+                "mega_moe_fused",
+                "auto",
+            )
+        ]
+        cases += [
+            (model_config_cls, strategy, expected)
+            for model_config_cls in (KimiK3ModelConfig, KimiK31ModelConfig)
+            for strategy, expected in (
+                ("auto", "mega_moe"),
+                ("mega_moe_se", "mega_moe_se"),
+            )
+        ]
+        for model_config_cls, strategy, expected in cases:
+            with self.subTest(model=model_config_cls.__name__, strategy=strategy):
                 manager = BackendManager.__new__(BackendManager)
                 manager.py_env_configs = Mock()
                 manager._distributed_server = Mock()
@@ -218,7 +234,9 @@ class BackendManagerDeepEPTest(unittest.TestCase):
                 config.moe_config.use_mori_ep = False
                 config.moe_config.moe_strategy = strategy
                 factory = Mock()
-                factory.create_model_config.return_value.expert_num = 8
+                model_config = model_config_cls()
+                model_config.expert_num = 896
+                factory.create_model_config.return_value = model_config
                 init_deepep = Mock()
                 with (
                     patch.multiple(
@@ -240,10 +258,9 @@ class BackendManagerDeepEPTest(unittest.TestCase):
                     ),
                 ):
                     manager.start()
-                if strategy == "auto":
-                    init_deepep.assert_called_once_with(
-                        config, factory.create_model_config.return_value
-                    )
+                self.assertEqual(config.moe_config.moe_strategy, expected)
+                if expected == "auto":
+                    init_deepep.assert_called_once_with(config, model_config)
                 else:
                     init_deepep.assert_not_called()
                 factory.from_model_configs.assert_called_once()

@@ -192,6 +192,15 @@ public:
         commitDequeueSnapshot(request_id, stream, stream_snapshot);
     }
 
+    void finishUnqueuedTask(const TaskIdentity& identity, int64_t input_length, const ErrorInfo& error) {
+        std::unique_lock<std::shared_mutex> lock(read_write_lock_);
+        if (running_streams_.count(identity.request_id) || priority_preemption_overlays_.count(identity.request_id)) {
+            return;
+        }
+        appendFinishedTaskUnderLock(
+            makeTaskInfo(identity, 0, input_length, 0), static_cast<int64_t>(error.code()), error.ToString());
+    }
+
     void finishTask(int64_t            request_id,
                     int64_t            input_length  = 0,
                     int64_t            prefix_length = 0,
@@ -218,6 +227,13 @@ public:
             }
             running_streams_.erase(ptr);
         }
+        appendFinishedTaskUnderLock(std::move(task_info), error_code, error_message);
+    }
+
+protected:
+    void appendFinishedTaskUnderLock(EngineScheduleInfo::TaskInfo task_info,
+                                     int64_t                      error_code,
+                                     const std::string&           error_message) {
         if (finished_streams_.size() >= finished_capacity_) {
             finished_streams_.pop_front();
         }
@@ -225,10 +241,9 @@ public:
         task_info.error_code    = error_code;
         task_info.error_message = error_message;
         int64_t version         = version_.fetch_add(1, std::memory_order_relaxed);
-        finished_streams_.push_back(std::make_pair(version, task_info));
+        finished_streams_.push_back(std::make_pair(version, std::move(task_info)));
     }
 
-protected:
     struct StreamRuntimeSnapshot {
         int64_t   end_time_ms     = -1;
         int64_t   begin_time_us   = 0;

@@ -5,6 +5,8 @@ import os
 from typing import Any, Dict, Optional
 
 import torch
+
+from rtp_llm.config.model_args import ModelArgs
 from rtp_llm.config.py_config_modules import VitConfig
 from rtp_llm.config.quant_config import (
     CompressedW4A8Int4PerChannelQuantConfig,
@@ -155,6 +157,9 @@ def _resolve_explicit_w8a8_method(quantization: Optional[str]) -> Optional[str]:
 
 
 class ModelConfig(CppModelConfig):
+    default_moe_strategy: str = "auto"
+    requires_tp_sharded_prefill_cp: bool = False
+
     # Model-specific weight estimators add to these fields when needed. Class
     # defaults keep the generic estimator statically visible and zero-cost for
     # every existing model.
@@ -218,6 +223,7 @@ class ModelConfig(CppModelConfig):
         "use_page_rr_kv_cache",
         "num_layers",
         "max_seq_len",
+        "mtp_draft_prefill_uses_request_lanes",
         "vocab_size",
         "hidden_size",
         "hidden_state_capture_layer_ids",
@@ -847,6 +853,10 @@ class ModelConfig(CppModelConfig):
         self.vit_separation: VitSeparation = VitSeparation.VIT_SEPARATION_LOCAL
         self.quant_config = None
 
+    def apply_model_args(self, model_args: ModelArgs) -> None:
+        if model_args.json_model_override_args:
+            self.apply_override_args(model_args.json_model_override_args)
+
     def apply_override_args(self, json_model_override_args: str) -> None:
         """Apply model override arguments to ModelConfig.
 
@@ -1234,11 +1244,6 @@ def apply_layer_num_override(model_config: ModelConfig, num_layers: int) -> None
     model_config.num_layers = num_layers
 
 
-def _apply_model_override_args(model_config: ModelConfig, model_args: Any) -> None:
-    if model_args.json_model_override_args:
-        model_config.apply_override_args(model_args.json_model_override_args)
-
-
 def build_model_config(
     model_config: ModelConfig,  # ModelConfig instance to build
     model_args: Any,  # ModelArgs from py_env_configs
@@ -1334,6 +1339,4 @@ def build_model_config(
     model_config.output_vocab_padded_size = 0
     model_config.enable_output_vocab_pruning = model_args.enable_output_vocab_pruning
 
-    # JSON model overrides are applied first; the dedicated operational switch
-    # is the final override when it was explicitly supplied by CLI or env.
-    _apply_model_override_args(model_config, model_args)
+    model_config.apply_model_args(model_args)

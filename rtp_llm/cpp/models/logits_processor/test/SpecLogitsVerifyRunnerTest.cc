@@ -296,18 +296,29 @@ TEST(SpecLogitsVerifyRunnerTest, LeadingVerifyAnchorIsNotPassedAsProposal) {
     constexpr int    kStep  = 3;
     constexpr size_t kVocab = 35;
 
-    auto processor = std::make_shared<StubSpecVerifyProcessor>(/*masked_token=*/-1);
+    auto first  = std::make_shared<StubSpecVerifyProcessor>(/*masked_token=*/-1);
+    auto second = std::make_shared<StubSpecVerifyProcessor>(/*masked_token=*/-1);
 
-    auto task         = makeTask(/*total_streams=*/1, kStep, kVocab);
-    task.draft_tokens = torch::tensor({99, 11, 12, 13}, torch::kInt32).reshape({1, kStep + 1});
-    task.active.push_back({processor, /*stream_idx=*/0});
+    auto task = makeTask(/*total_streams=*/2, kStep, kVocab);
+    task.active.push_back({second, /*stream_idx=*/1});
+    task.active.push_back({first, /*stream_idx=*/0});
+
+    const auto anchored = torch::tensor({99, 11, 12, 13, 98, 21, 22, 23}, torch::kInt32).reshape({2, kStep + 1});
+    std::vector<torch::Tensor> inputs = {anchored, anchored.narrow(1, 1, kStep), anchored.to(torch::kInt64)};
+#if USING_CUDA
+    inputs.push_back(anchored.cuda());
+#endif
 
     SpecLogitsVerifyRunner runner;
-    auto                   result = runner.run(task);
-    syncResult(result);
+    for (const auto& input : inputs) {
+        task.draft_tokens = input;
+        auto result       = runner.run(task);
+        syncResult(result);
 
-    EXPECT_TRUE(result.has_active_processor);
-    EXPECT_EQ((std::vector<int32_t>{11, 12, 13}), processor->observedTokens());
+        ASSERT_TRUE(result.has_active_processor);
+        EXPECT_EQ((std::vector<int32_t>{11, 12, 13}), first->observedTokens());
+        EXPECT_EQ((std::vector<int32_t>{21, 22, 23}), second->observedTokens());
+    }
 }
 
 }  // namespace rtp_llm

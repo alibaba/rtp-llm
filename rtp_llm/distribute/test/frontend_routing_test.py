@@ -93,7 +93,6 @@ class FrontendRoutingTest(unittest.TestCase):
                 )
                 store.assert_not_called()
 
-
     def test_warmup_without_local_serving_rank_keeps_resolution_error(self):
         from rtp_llm.start_server import (
             StartupRealWarmupAddressResolutionError,
@@ -126,6 +125,7 @@ class FrontendRoutingTest(unittest.TestCase):
             model_type="unused",
             max_seq_len=1024,
             attn_config=SimpleNamespace(tokens_per_block=16),
+            requires_tp_sharded_prefill_cp=False,
         )
         expected = ["127.0.0.1:8001", "127.0.0.1:8021"]
         with (
@@ -166,6 +166,72 @@ class FrontendRoutingTest(unittest.TestCase):
             self.assertEqual(visitor.call_args.kwargs["addresses"], expected)
             self.assertEqual(_get_startup_real_warmup_grpc_addresses(config), expected)
             store.assert_not_called()
+
+    def test_serving_clients_use_effective_prefill_cp_config(self):
+        from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
+        from rtp_llm.config.generate_config import GenerateConfig
+        from rtp_llm.config.model_config import ModelConfig
+        from rtp_llm.frontend.frontend_worker import FrontendWorker
+        from rtp_llm.models.kimi_k3.kimi_k31 import KimiK31ModelConfig
+        from rtp_llm.ops import CPRotateMethod, RoleType
+        from rtp_llm.server.backend_rpc_server_visitor import (
+            create_backend_rpc_server_visitor,
+        )
+
+        def create_frontend_visitor(config, model_config):
+            return FrontendWorker(
+                config, model_config, special_tokens=None
+            ).backend_rpc_server_visitor
+
+        for create_visitor in (
+            create_frontend_visitor,
+            create_backend_rpc_server_visitor,
+        ):
+            for model_cls, method in (
+                (KimiK31ModelConfig, CPRotateMethod.DISABLED),
+                (ModelConfig, CPRotateMethod.PREFILL_CP),
+            ):
+                with self.subTest(client=create_visitor.__name__, method=method):
+                    config = self.config(pp=1, world_rank=0)
+                    config.role_config.role_type = RoleType.PREFILL
+                    config.prefill_cp_config.method = method
+                    config.prefill_cp_config.kv_cache_sharded = True
+                    set_parallelism_config(
+                        config.parallelism_config,
+                        0,
+                        py_prefill_cp_config=config.prefill_cp_config,
+                    )
+                    model_config = model_cls()
+                    model_config.max_seq_len = 1024
+                    model_config.attn_config.tokens_per_block = 16
+
+                    with (
+                        patch(
+                            "rtp_llm.frontend.frontend_worker.TokenizerFactory.create"
+                        ),
+                        patch(
+                            "rtp_llm.distribute.distributed_server.socket.gethostbyname",
+                            return_value="127.0.0.1",
+                        ),
+                        patch(
+                            "rtp_llm.server.backend_rpc_server_visitor.ModelRpcClient"
+                        ),
+                    ):
+                        visitor = create_visitor(config, model_config)
+                    for option, value in (
+                        ("calculate_loss", 1),
+                        ("return_all_hidden_states", True),
+                    ):
+                        request = SimpleNamespace(
+                            generate_config=GenerateConfig(**{option: value})
+                        )
+                        with self.assertRaisesRegex(
+                            FtRuntimeException, option
+                        ) as error:
+                            visitor.check_prefill_cp_supported(request)
+                        self.assertEqual(
+                            error.exception.exception_type, ExceptionType.INVALID_PARAMS
+                        )
 
 
 if __name__ == "__main__":

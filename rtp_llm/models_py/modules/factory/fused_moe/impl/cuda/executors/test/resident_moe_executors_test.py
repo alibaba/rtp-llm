@@ -407,8 +407,8 @@ def _mega_cfg() -> SimpleNamespace:
     """The configuration fields MegaMoE's two weight transforms read.
 
     Everything EP-related belongs to the second half of ``setup_weights``, which allocates the
-    symmetric buffer and needs more than one GPU; the transforms below take ``deep_gemm`` as an
-    argument and touch no distributed state at all.
+    symmetric buffer and needs more than one GPU. The transforms below touch
+    no distributed state.
     """
     return SimpleNamespace(
         dim=_MEGA_DIM,
@@ -486,7 +486,9 @@ def _run_mega_transforms(executor, layer_weights, deep_gemm, inter: int) -> list
     adapt_split_moe_weights(
         layer_weights, _MEGA_INTER, executor.cfg.n_shared_experts, _CHECKPOINT_NAMES
     )
-    executor._transform_routed_weights(layer_weights, deep_gemm, inter)
+    executor._transform_routed_weights(
+        layer_weights, deep_gemm.transform_weights_for_mega_moe, inter
+    )
     executor._setup_shared_expert_weights(layer_weights, deep_gemm, _MEGA_DIM, inter)
     return [
         executor._mega_l1_w,

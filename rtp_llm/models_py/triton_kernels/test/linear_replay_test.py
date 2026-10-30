@@ -14,7 +14,7 @@ from rtp_llm.models_py.triton_kernels.fla.fused_recurrent import (
     fused_recurrent_gated_delta_rule,
 )
 from rtp_llm.models_py.triton_kernels.fla.gdn_gating import fused_gdn_gating
-from rtp_llm.models_py.triton_kernels.kimi_kda import fused_recurrent_kda
+from rtp_llm.models_py.triton_kernels.kda import fused_recurrent_kda
 from rtp_llm.models_py.triton_kernels.linear_replay import (
     LinearReplay,
     linear_serial_replay,
@@ -123,7 +123,7 @@ class LinearReplayInputContractTest(unittest.TestCase):
 
 class LinearReplayTest(unittest.TestCase):
     def setUp(self):
-        if not torch.version.cuda or not torch.cuda.is_available():
+        if not torch.cuda.is_available():
             self.skipTest("CUDA is required")
         torch.manual_seed(1234)
 
@@ -651,7 +651,7 @@ class LinearReplayTest(unittest.TestCase):
 
     def _check_kda_verify_matches_production(self, state_dtype):
         # The synthetic reference above must also agree with the operators
-        # Kimi Linear calls, including its physical recurrent-state layout.
+        # K3 actually calls, including their physical recurrent-state layout.
         (
             batch,
             heads,
@@ -715,13 +715,16 @@ class LinearReplayTest(unittest.TestCase):
             k=k_ref.reshape(batch, 4, heads, 128).contiguous(),
             v=v_ref.reshape(batch, 4, value_heads, 128).contiguous(),
             g=gate,
-            beta=beta.float().sigmoid(),
+            beta=beta,
             initial_state=reference_state,
             A_log=alog,
             dt_bias=bias,
+            lower_bound=-5.0,
             inplace_final_state=True,
             use_qk_l2norm_in_kernel=True,
             use_gate_in_kernel=True,
+            use_beta_sigmoid_in_kernel=True,
+            state_v_first=False,
             block_map=block_map,
             sequence_lengths=sequence_lengths,
             seq_size_per_block=1,
@@ -748,6 +751,7 @@ class LinearReplayTest(unittest.TestCase):
             group_id=1,
             vector_gate=True,
             state_v_first=False,
+            lower_bound=-5.0,
         )
         torch.testing.assert_close(
             conv[destination],

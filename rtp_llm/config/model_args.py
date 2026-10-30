@@ -26,6 +26,8 @@ class ModelArgs:
         "act_type",
         "max_seq_len",
         "json_model_override_args",
+        "prefill_kv_workspace_budget_bytes",
+        "shared_expert_weight_shard",
         "phy2log_path",
         "enable_fp32_lm_head",
         "enable_output_vocab_pruning",
@@ -50,6 +52,10 @@ class ModelArgs:
 
         # Model override args
         self.json_model_override_args: str = "{}"
+
+        # Prefill model options
+        self.prefill_kv_workspace_budget_bytes: Optional[int] = None
+        self.shared_expert_weight_shard: bool = False
 
         # EPLB config
         self.phy2log_path: str = ""

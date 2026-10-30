@@ -1395,13 +1395,17 @@ def create_backend_rpc_server_visitor(
 
     Used by both `FrontendWorker` (historically inline) and `DashScApp` (independent
     process) so they open equivalent channels to the backend without dragging in the
-    tokenizer/pipeline machinery. `model_config` only needs `max_seq_len` and
-    `attn_config.tokens_per_block`; produce it via `ModelFactory.create_model_config`.
+    tokenizer/pipeline machinery. Produce `model_config` via
+    `ModelFactory.create_model_config`.
     """
-    from rtp_llm.config.engine_config import EngineConfig
+    from rtp_llm.config.engine_config import EngineConfig, apply_tp_sharded_prefill_cp
     from rtp_llm.distribute.distributed_server import get_dp_rpc_addresses
 
     engine_config = EngineConfig.create(py_env_configs, nccl_comm_config=None)
+    apply_tp_sharded_prefill_cp(
+        engine_config.parallelism_config,
+        required=model_config.requires_tp_sharded_prefill_cp,
+    )
     addresses = get_dp_rpc_addresses(py_env_configs)
     vit_separation = None
     if py_env_configs.vit_config:
@@ -1418,7 +1422,6 @@ def create_backend_rpc_server_visitor(
         server_config=py_env_configs.server_config,
         master_config=py_env_configs.master_config,
         parallelism_config=engine_config.parallelism_config,
-        prefill_cp_config=py_env_configs.prefill_cp_config,
         source_role=source_role,
         mm_model_config=getattr(model_config, "mm_model_config", None),
         model_config=model_config,

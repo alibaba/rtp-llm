@@ -2,6 +2,7 @@
 #include "autil/Scope.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
 #include "rtp_llm/cpp/utils/DebugUtils.h"
+#include "rtp_llm/cpp/cache/CPSlotMapper.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/engine_base/Host.h"
 #include "rtp_llm/cpp/multimodal_processor/MultimodalError.h"
@@ -462,9 +463,20 @@ grpc::Status PrefillRpcServer::GenerateStreamCall(grpc::ServerContext*          
         generate_context.synthesizeTracePhases(telemetry::PhaseRole::Prefill, exception_unwinding);
     });
     const int                          uncaught_exceptions = std::uncaught_exceptions();
-    autil::ScopeGuard                  rpc_completion_guard([&generate_context, uncaught_exceptions] {
+    autil::ScopeGuard rpc_completion_guard([&generate_context, &cancel_handle, request, uncaught_exceptions] {
         if (std::uncaught_exceptions() == uncaught_exceptions) {
             generate_context.markRpcHandlingCompleted();
+        }
+        // An admitted request that never created a stream has no dequeue to report its terminal status.
+        if (cancel_handle && generate_context.request_id > 0 && !generate_context.getStream()
+            && generate_context.error_info.hasError()) {
+            try {
+                generate_context.meta->finishUnqueuedTask(
+                    cancel_handle->identity, request->token_ids_size(), generate_context.error_info);
+            } catch (const std::exception& error) {
+                RTP_LLM_LOG_WARNING(
+                    "failed to report unqueued Prefill request [%ld]: %s", generate_context.request_id, error.what());
+            }
         }
     });
     try {
@@ -521,6 +533,7 @@ grpc::Status PrefillRpcServer::GenerateStreamCall(grpc::ServerContext*          
             });
         mm_cost_us = currentTimeUs() - phase_start;
         if (!preprocess_status.ok()) {
+            generate_context.error_info = preprocess_status;
             generate_context.error_status =
                 serializeErrorMsg(generate_context.request_key, generate_context.request_info, preprocess_status);
         }
@@ -1032,11 +1045,15 @@ PrefillRpcServer::Cancel(grpc::ServerContext*, const CancelRequestPB* request, C
             ErrorInfo(ErrorCode::INVALID_PARAMS, "GetPeerInfo invalid tp_size=" + std::to_string(pc.tp_size)));
     }
     response->set_tp_size(static_cast<int32_t>(pc.tp_size));
-    const auto& cp = pc.prefill_cp_config;
-    response->set_cp_size(static_cast<int32_t>(cp.is_enabled() && cp.kv_cache_sharded ? pc.tp_size : 1));
-    // Advertise actual cache geometry for single-stage peers as well as pipelines.
-    if (engine_ && engine_->getCacheManager()) {
-        response->set_pipeline_layout(engine_->getCacheManager()->p2pPipelineLayout());
+    const auto cache_manager = engine_ ? engine_->getCacheManager() : nullptr;
+    if (cache_manager) {
+        // PageRR can shard the physical cache with Query CP disabled.
+        const auto mapper = cache_manager->cpSlotMapper();
+        response->set_cp_size(mapper ? mapper->cpSize() : 1);
+        response->set_pipeline_layout(cache_manager->p2pPipelineLayout());
+    } else {
+        const auto& cp = pc.prefill_cp_config;
+        response->set_cp_size(static_cast<int32_t>(cp.is_enabled() && cp.kv_cache_sharded ? pc.tp_size : 1));
     }
     RTP_LLM_LOG_INFO("GetPeerInfo: tp_size=%ld, cp_size=%d", pc.tp_size, response->cp_size());
     return grpc::Status::OK;

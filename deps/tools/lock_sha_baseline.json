@@ -1,14 +1,17 @@
 {
  "_meta": {
-  "note": "frozen sha256 snapshot of the pre-unification internal locks; regenerate only after a reviewed re-resolution (see check_lock_sha.py)",
+  "note": "regenerated from the current locks (only after a reviewed re-resolution)",
   "re_resolutions": {
    "requirements_lock_torch_gpu_cuda13.txt": {
     "deep-gemm": {
      "from": [
       "8ca0bce659a60b2a5c3459792b5eb4bcc46ed3b28b9b6bd94f278d670a7ffa7f"
      ],
-     "reason": "2.8.0+6d6aaad.cu132 removed from the wheel index; re-pinned to 2.8.0+122e18b.cu132",
+     "reason": "2.8.0+6d6aaad.cu132 removed from the wheel index; re-pinned to 2.8.0+122e18b.cu132. K3 re-pinned to 2.8.2+a5165ad.cu132.",
      "to": [
+      "4cfa7d2a31acfe426ec48ba13fd93f8fa6944bbaf1efe95cea091c8dfec34c92"
+     ],
+     "via": [
       "5d5afc1d58bb24f7c8a460f74e8dff39a99d7a6ebae35152cdcfd5f393ead080"
      ]
     },
@@ -16,9 +19,13 @@
      "from": [
       "ed9037a0f09ad5461c5cf04efd7770c8410831d473d83b4813512dc3fe8ac5ca"
      ],
-     "reason": "1.0.0+49e2000.cu132 removed from the wheel index; re-pinned to 1.0.0+9241ae3",
+     "reason": "1.0.0+49e2000.cu132 removed from the wheel index; re-pinned to 1.0.0+9241ae3. K3 re-pinned to 1.0.0+017cc29.cu132. Rebuilt from merged dev as 1.0.0+db0745d.cu132.",
      "to": [
-      "67bba01c854fe3b06397c297d49724e16029984a37124d05047a78ff48e7c44f"
+      "f71a7d28f5508e0e0a43cbd540327fddbbc659a32c94b11f50492dd8aac36260"
+     ],
+     "via": [
+      "67bba01c854fe3b06397c297d49724e16029984a37124d05047a78ff48e7c44f",
+      "9a6b14a82b2ab5f2fb1133ab6873b82c24fa60820d5f81897b3e28c98f577434"
      ]
     }
    }
@@ -4450,6 +4457,9 @@
    "e0f1324486bb90be6bde28bd0afbaf78a38827948d37f93f90318a01da8a3f8c",
    "e9b0f115a68f2f84c0f6d9b7e863a29517f6dfe5f7b7d07d1d9da8904754e9a2"
   ],
+  "cuda-linear-attention": [
+   "007154cc956e143d8a2ff0fac2c6a9fbbc7dffd5fbe2f7adaba89696d7fd0ab1"
+  ],
   "cuda-pathfinder": [
    "1503af579d8379c24bdd65528379bc57039b0455be9f5f9686cf8e473a1fce51"
   ],
@@ -4498,7 +4508,7 @@
    "4e7509a2ad6fd84d6f195fcac0aedc33f2a7c7b3965e777da821cb9d1cfc4787"
   ],
   "deep-gemm": [
-   "e6474ca387758f11da7aff2851215cfe5230ed6b54cce0fabf5a880b5b56827c"
+   "3031fe7aa79ffacfdb0fd4ffba88b1c7d24bde1738d8f04cb67a3e4c533f6dc3"
   ],
   "distro": [
    "2fa77c6fd8940f116ee1d6b94a2f90b13b5ea8d019b98bc8bafdcabcdd9bdbed",
@@ -4529,11 +4539,11 @@
    "7be2ad23a14607ccc71808e68fe30848aeace7058ace17852f68e2a68e310402",
    "d396bea984af47333ef05e50eae7eff88c84256de6112aea0ec48a233c064fe3"
   ],
-  "flash-mla": [
-   "4e729f23823e02ef95e5c94a1d41b9031e8e4b00682f0c44392f480fed15899e"
+  "flash-linear-attention": [
+   "20db1cc279f59abf8f18d20cc9fa575eeb152cf781cc4bff78e5a1d8a77141de"
   ],
-  "flash-mla-legacy": [
-   "9a0d330ee0875d7bbca8772f7467a561c31627583373c1d5c06c7e183810ec7a"
+  "flash-mla": [
+   "ee0c702f4bb9293c694dac8e257f45d24f707bc187de8497b6787cc08ce496ac"
   ],
   "flashinfer-cubin": [
    "2fa84c29f933f6086512d3426b19456ea4e4cf3ed7120003b0e7f3d9a93c73c2"
@@ -25756,6 +25766,9 @@
    "e833404527908776bc46991484f825dede7df7e9bca544334a292e845c794eb8",
    "f43ebc01ed8143d2fc7a2ae5bec1c64f96b35d72f55f728198ded869605bcbfd"
   ],
+  "cuda-linear-attention": [
+   "aad30390809c5d4b4e017a779f046e383407c0add52f700b43917e7c5ecdc4d4"
+  ],
   "cuda-pathfinder": [
    "e29e59829c297a7a5233bd9cc71094fc5bddbd076951482670178f9eade39b1f"
   ],
@@ -25816,7 +25829,7 @@
    "76c04452cfbd8acf363ceeea1b59dc95b970fc945f86dec5b39bbb1b200dfcf0"
   ],
   "deep-gemm": [
-   "5d5afc1d58bb24f7c8a460f74e8dff39a99d7a6ebae35152cdcfd5f393ead080"
+   "4cfa7d2a31acfe426ec48ba13fd93f8fa6944bbaf1efe95cea091c8dfec34c92"
   ],
   "distro": [
    "2fa77c6fd8940f116ee1d6b94a2f90b13b5ea8d019b98bc8bafdcabcdd9bdbed",
@@ -25850,8 +25863,11 @@
   "flash-attn": [
    "a45ff2133f720c0042971de1f3a1c987176d19b7305e440abeb04c33a813fad0"
   ],
+  "flash-linear-attention": [
+   "20db1cc279f59abf8f18d20cc9fa575eeb152cf781cc4bff78e5a1d8a77141de"
+  ],
   "flash-mla": [
-   "67bba01c854fe3b06397c297d49724e16029984a37124d05047a78ff48e7c44f"
+   "f71a7d28f5508e0e0a43cbd540327fddbbc659a32c94b11f50492dd8aac36260"
   ],
   "flashinfer-cubin": [
    "2fa84c29f933f6086512d3426b19456ea4e4cf3ed7120003b0e7f3d9a93c73c2"

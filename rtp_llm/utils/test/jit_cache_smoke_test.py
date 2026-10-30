@@ -410,6 +410,13 @@ class JitCacheSmokeTest(unittest.TestCase):
             remote = str(Path(workdir) / "main" / "jit_cache")
         if not remote:  # 环境缺失，非回归
             raise unittest.SkipTest("REMOTE_JIT_DIR unset; CI injects it")
+        # CI's client-side mkdir does not provision a remote TestRunner's disk.
+        remote_root = Path(remote)
+        self.assertTrue(
+            remote_root.is_absolute(),
+            "JIT smoke needs a mounted absolute remote directory",
+        )
+        remote_root.mkdir(parents=True, exist_ok=True)
         try:
             jit._prepare_shared_root(self.local_root)
         except OSError as error:

@@ -121,6 +121,81 @@ class JitCacheTestBase(unittest.TestCase):
 
 
 class WrapperCacheSetupTest(JitCacheTestBase):
+    def test_same_version_flashinfer_patch_replaces_cached_python_payload(self):
+        source = self.root / "pip_cuda13_flashinfer/site-packages/flashinfer"
+        source.mkdir(parents=True)
+        module = source / "kernel.py"
+        module.write_text("allocate = cute.make_fragment\n")
+        with mock.patch.object(
+            wrapper_cache,
+            "get_package_info",
+            return_value=("0.6.9", str(source), None),
+        ):
+            first = Path(wrapper_cache.copy_package_with_lock("flashinfer", self.root))
+            module.write_text("allocate = cute.make_rmem_tensor\n")
+            second = Path(wrapper_cache.copy_package_with_lock("flashinfer", self.root))
+        self.assertNotEqual(first, second)
+        self.assertIn(
+            "cute.make_fragment", (first / "flashinfer/kernel.py").read_text()
+        )
+        self.assertIn(
+            "cute.make_rmem_tensor", (second / "flashinfer/kernel.py").read_text()
+        )
+
+    def test_flashinfer_payload_key_is_independent_of_runfiles_location(self):
+        keys = []
+        for root in ("first", "second"):
+            source = self.root / root / "pip_cuda13_flashinfer/site-packages/flashinfer"
+            source.mkdir(parents=True)
+            (source / "kernel.py").write_text("same_payload = True\n")
+            keys.append(wrapper_cache._cache_key("flashinfer", "0.6.9", source, None))
+        self.assertEqual(keys[0], keys[1])
+
+    def test_flashinfer_workspace_separates_ffi_abis_and_retains_old_cache(self):
+        versions = {"torch": "2.11.0+cu130", "tvm_ffi": "0.1.13"}
+
+        def info(name):
+            return (
+                versions[name],
+                f"/runfiles/pip_gpu_cuda13_torch_{name}/site-packages/{name}",
+                None,
+            )
+
+        with mock.patch.object(
+            wrapper_cache, "get_package_info", side_effect=info
+        ), mock.patch.object(wrapper_cache.Path, "home", return_value=self.root):
+            wrapper_cache.setup_jit_cache(packages=[])
+            old = Path(os.environ.pop("FLASHINFER_WORKSPACE_BASE"))
+            cached_op = old / ".cache/flashinfer/op.so"
+            cached_op.write_bytes(b"FFI 0.1.13 native op")
+            versions["tvm_ffi"] = "0.1.12"
+            wrapper_cache.setup_jit_cache(packages=[])
+            current = Path(os.environ["FLASHINFER_WORKSPACE_BASE"])
+        self.assertNotEqual(old, current)
+        self.assertEqual(cached_op.read_bytes(), b"FFI 0.1.13 native op")
+        self.assertFalse((current / ".cache/flashinfer/op.so").exists())
+
+    def test_flashinfer_workspace_reuses_relocated_runfiles_build(self):
+        with mock.patch.object(wrapper_cache, "get_package_info") as info:
+            info.side_effect = lambda name: (
+                "1.0",
+                f"/first/pip_cuda13_{name}/site-packages/{name}",
+                None,
+            )
+            original = wrapper_cache._flashinfer_cache_scope()
+            info.side_effect = lambda name: (
+                "1.0",
+                f"/second/pip_cuda13_{name}/site-packages/{name}",
+                None,
+            )
+            self.assertEqual(original, wrapper_cache._flashinfer_cache_scope())
+            info.side_effect = lambda name: (
+                "1.0",
+                f"/second/pip_arm_{name}/site-packages/{name}",
+                None,
+            )
+            self.assertNotEqual(original, wrapper_cache._flashinfer_cache_scope())
+
     def test_local_fallback_does_not_use_remote_snapshot_root(self):
         os.environ["REMOTE_JIT_DIR"] = str(self.root / "remote")
         self.assertEqual(
