@@ -184,8 +184,11 @@ public:
     virtual absl::Status incrKVBlock();
     virtual void         releaseResource();
     int                  nextNeedBlockNums(int reserve_step) const;
-    int                  estimateInitialNeedBlocks() const;
-    int                  estimatePeakNeedBlocks(int remaining_tokens) const;
+    int                  estimateInitialNeedBlocks(const std::string& pool_tag = {}) const;
+    int                  estimatePeakNeedBlocks(int remaining_tokens, const std::string& pool_tag = {}) const;
+    // Scheduler boundary: commit pending output work, then expose reclaimed
+    // history through the allocator's real available-block count for admission.
+    void                 drainLinearHistoryForAdmission();
     void                 setNeedReleaseResource(bool need_release_resource);
     bool                 hasCacheKeys() const;
     const CacheKeysType& cacheKeys(int32_t batch_id = 0) const;
@@ -774,6 +777,9 @@ public:
         // scheduler can drive incrKVBlock without racing the async worker.
         // -1 = unset (first iter / cleared).
         int next_real_seq_len = -1;
+        // Read the mapping before launching dispatch, never while the worker
+        // clears it. Only fixed, non-beam streams with no remapping may overlap.
+        bool kv_cache_update_pending = false;
     };
 
     uint64_t setNormalAsyncDeviceState(NormalAsyncDeviceState state) {
@@ -887,7 +893,7 @@ protected:
     bool         consumerFinishedWithoutLock() const;
     virtual bool consumerReadyWithoutLock() const;
 
-    int                      estimateKVNeedBlocks(int remaining_tokens, int target_batch_size) const;
+    int estimateKVNeedBlocks(int remaining_tokens, int target_batch_size, const std::string& pool_tag = {}) const;
     bool                     reportUpdateErrorWithoutLock(const std::optional<ErrorInfo>& error_info);
     bool prepareUpdateWithoutLock(const std::optional<ErrorInfo>& error_info, bool force_update_info);
     std::optional<ErrorInfo> updateNormalLogitProcessorStatus(const StreamUpdateInfo& update_info);

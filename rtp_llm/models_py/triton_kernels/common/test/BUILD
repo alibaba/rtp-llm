@@ -55,3 +55,46 @@ py_test(
     },
     tags = ["L20_CU13"],
 )
+
+py_test(
+    name = "aiter_verify_attention_test",
+    srcs = ["test_aiter_verify_attention.py"],
+    main = "test_aiter_verify_attention.py",
+    deps = [
+        "//rtp_llm/models_py/standalone:py_standalone_testlib",
+    ],
+    env = {"GPU_COUNT": "1"},
+    tags = ["rocm"],
+    exec_properties = {"gpu": "MI308X-ROCM7", "gpu_count": "1"},
+)
+
+py_test(
+    name = "dflash_attention_cuda_test",
+    srcs = ["dflash_attention_test.py"],
+    main = "dflash_attention_test.py",
+    deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
+    env = {"GPU_COUNT": "1"},
+    # Route to the L20_CU13 pool like the sibling CUDA kernel tests in this
+    # package; a bare "H20" tag matches no worker pool, so bazel keeps the
+    # action in [Sched] forever and the ut-sm8x job times out.
+    tags = ["L20_CU13"],
+    exec_properties = {"gpu": "L20_CU13", "gpu_count": "1"},
+)
+
+py_test(
+    name = "dflash_attention_rocm_test",
+    srcs = ["dflash_attention_test.py"],
+    main = "dflash_attention_test.py",
+    deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
+    env = {"GPU_COUNT": "1"},
+    tags = ["rocm"],
+    exec_properties = {"gpu": "MI308X-ROCM7", "gpu_count": "1"},
+)
+
+py_test(
+    name = "dflash_attention_contract_test",
+    srcs = ["dflash_attention_test.py"],
+    main = "dflash_attention_test.py",
+    args = ["DFlashAttentionContractTest"],
+    deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
+)

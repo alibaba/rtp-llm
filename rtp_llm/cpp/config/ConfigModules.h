@@ -192,9 +192,16 @@ struct KVCacheConfig {
     double block_tree_memory_evict_high_watermark_ratio = kDefaultMemoryHighWatermarkRatio;
     double block_tree_disk_evict_low_watermark_ratio    = kDefaultDiskLowWatermarkRatio;
     double block_tree_disk_evict_high_watermark_ratio   = kDefaultDiskHighWatermarkRatio;
+    // Reusable tail retention (main #1574) plus per-pool explicit block
+    // budgets; replace the old linear_step field.
     int      reuse_cache_tail_blocks                      = std::numeric_limits<int>::max();
     uint32_t linear_pool_blocks                           = 0;
     uint32_t swa_pool_blocks                              = 0;
+    // Opt-in request policy; only models declaring history-state reclaim support may enable it.
+    bool enable_linear_cache_reclaim = false;
+    // Optional JSON map from cache-group tags to positive pool block-count weights.
+    // Empty preserves the existing pool sizing policy.
+    std::string kv_cache_pool_block_weights = "";
     // Fields merged from PyKvCacheConfig
     int fp8_kv_cache = 0;
     // "auto" preserves a model-declared recurrent-state dtype. Models
@@ -359,8 +366,13 @@ enum SpeculativeType {
     SP_TYPE_EAGLE3        = 3,  // EAGLE-3
     SP_TYPE_EAGLE         = 4,  // EAGLE
     SP_TYPE_DETERMINISTIC = 5,  // Deterministic (Prompt-Lookup)
-    SP_TYPE_DSPARK        = 6   // DSpARK block-diffusion draft
+    SP_TYPE_DSPARK        = 6,  // DSpARK block-diffusion draft
+    SP_TYPE_DFLASH        = 7   // DFlash parallel block draft
 };
+
+inline bool isBlockDraftType(SpeculativeType type) {
+    return type == SP_TYPE_DSPARK || type == SP_TYPE_DFLASH;
+}
 
 struct SpeculativeExecutionConfig {
     std::string     model_type                    = "";
@@ -467,6 +479,11 @@ struct FIFOSchedulerConfig {
     //   invalid input falls back to "1".
     std::string decode_prefill_ratio           = "1";
     bool        cp_force_single_prefill        = true;
+    // Unconditional single-stream prefill rounds: at most one stream per
+    // prefill forward regardless of the context-parallel setup. Used by the
+    // deterministic batched serving mode to pin the prefill batch-total M to
+    // each request's own length.
+    bool        force_single_prefill           = false;
     int64_t     max_inited_kv_cache_streams    = 0;
     int64_t     max_batch_tokens_without_cache = 0;
     // Global real-context token budget per chunked-prefill forward; <=0 disables, >0 enables.
@@ -541,6 +558,8 @@ struct PDSepConfig {
     int64_t  max_rpc_timeout_ms              = 2 * 3600 * 1000;  // 2h default
     int64_t  worker_port_offset              = 0;
     bool     decode_entrance                 = false;
+    // Only PD handoff streams may omit historical linear states; ordinary prefill still needs them.
+    bool decode_linear_tail_only = false;
     // ========== Prefill Thread Pool Configuration ==========
     // prepare-resource pool size. 0 = concurrency_limit * 2; effective minimum is 128.
     int64_t prefill_prepare_resource_pool_size = 0;
@@ -709,6 +728,9 @@ struct LinearAttentionConfig {
     int         linear_value_head_dim  = 0;
     DataType    ssm_state_dtype        = DataType::TYPE_BF16;
     DataType    conv_state_dtype       = DataType::TYPE_BF16;
+    // Execution accepts null historical checkpoint slots. Active and speculative
+    // rollback state slots must still be retained by the cache manager.
+    bool        supports_history_state_reclaim = false;
     std::string to_string() const;
 };
 

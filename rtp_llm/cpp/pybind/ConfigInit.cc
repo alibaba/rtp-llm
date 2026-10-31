@@ -509,6 +509,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("reuse_cache_tail_blocks", &KVCacheConfig::reuse_cache_tail_blocks)
         .def_readwrite("linear_pool_blocks", &KVCacheConfig::linear_pool_blocks)
         .def_readwrite("swa_pool_blocks", &KVCacheConfig::swa_pool_blocks)
+        .def_readwrite("enable_linear_cache_reclaim", &KVCacheConfig::enable_linear_cache_reclaim)
+        .def_readwrite("kv_cache_pool_block_weights", &KVCacheConfig::kv_cache_pool_block_weights)
         .def_readwrite("fp8_kv_cache", &KVCacheConfig::fp8_kv_cache)
         .def_readwrite("ssm_state_dtype", &KVCacheConfig::ssm_state_dtype)
         .def_readwrite("kv_cache_mem_mb", &KVCacheConfig::kv_cache_mem_mb)
@@ -577,7 +579,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def(py::pickle(
             [](const KVCacheConfig& self) {
                 return py::make_tuple(std::string("KVCacheConfig"),
-                                      9,
+                                      11,
                                       self.reuse_cache,
                                       self.multi_task_prompt,
                                       self.multi_task_prompt_str,
@@ -646,10 +648,41 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.kv_cache_event_instance_id,
                                       self.kv_cache_event_host_ip_port,
                                       self.enable_crc,
+                                      self.enable_linear_cache_reclaim,
+                                      self.kv_cache_pool_block_weights,
                                       self.linear_pool_blocks,
                                       self.swa_pool_blocks);
             },
             [](py::tuple t) {
+                // Pickle version ladder after merging main #1574:
+                // v8 = enable_crc (index 69, shared with main);
+                // v9 = main's linear_pool_blocks+swa_pool_blocks (size 72)
+                //      or ours enable_linear_cache_reclaim (size 71);
+                // v10 = ours + kv_cache_pool_block_weights (size 72);
+                // v11 = merged state with main's pool budgets appended (size 74).
+                // Each step strips its tail fields and steps the version down,
+                // so both families' older states keep decoding unchanged.
+                const py::tuple merged_pool_state = t;
+                const bool has_merged_pool_fields =
+                    t.size() == 74 && py::isinstance<py::int_>(t[1]) && t[1].cast<int>() == 11;
+                if (has_merged_pool_fields) {
+                    t    = t[py::slice(0, 72, 1)].cast<py::tuple>();
+                    t[1] = py::int_(10);
+                }
+                const py::tuple pool_weights_state = t;
+                const bool      has_pool_weights_field =
+                    t.size() == 72 && py::isinstance<py::int_>(t[1]) && t[1].cast<int>() == 10;
+                if (has_pool_weights_field) {
+                    t    = t[py::slice(0, 71, 1)].cast<py::tuple>();
+                    t[1] = py::int_(9);
+                }
+                const py::tuple reclaim_state = t;
+                const bool      has_reclaim_field =
+                    t.size() == 71 && py::isinstance<py::int_>(t[1]) && t[1].cast<int>() == 9;
+                if (has_reclaim_field) {
+                    t    = t[py::slice(0, 70, 1)].cast<py::tuple>();
+                    t[1] = py::int_(8);
+                }
                 const py::tuple tail_state = t;
                 const bool has_tail_fields = t.size() == 72 && py::isinstance<py::int_>(t[1]) && t[1].cast<int>() == 9;
                 if (has_tail_fields) {
@@ -782,6 +815,27 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                 }
                 if (has_crc_field) {
                     c.enable_crc = crc_state[69].cast<bool>();
+                }
+                if (has_reclaim_field) {
+                    c.enable_linear_cache_reclaim = reclaim_state[70].cast<bool>();
+                }
+                if (has_pool_weights_field) {
+                    c.kv_cache_pool_block_weights = pool_weights_state[71].cast<std::string>();
+                }
+                if (has_merged_pool_fields) {
+                    // Merged v11 state: our reclaim fields at 70/71, main's
+                    // per-pool budgets at 72/73; reuse_cache_tail_blocks keeps
+                    // its shared mid-tuple slot (index 10).
+                    c.reuse_cache_tail_blocks     = merged_pool_state[10].cast<int>();
+                    c.enable_linear_cache_reclaim = merged_pool_state[70].cast<bool>();
+                    c.kv_cache_pool_block_weights = merged_pool_state[71].cast<std::string>();
+                    c.linear_pool_blocks          = merged_pool_state[72].cast<uint32_t>();
+                    c.swa_pool_blocks             = merged_pool_state[73].cast<uint32_t>();
+                    if (c.reuse_cache_tail_blocks <= 0 || c.linear_pool_blocks == 1 || c.swa_pool_blocks == 1
+                        || c.linear_pool_blocks > static_cast<uint32_t>(std::numeric_limits<int>::max())
+                        || c.swa_pool_blocks > static_cast<uint32_t>(std::numeric_limits<int>::max())) {
+                        throw std::runtime_error("invalid KVCacheConfig tail or pool blocks");
+                    }
                 }
                 return c;
             }));
@@ -1070,7 +1124,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .value("EAGLE3", SP_TYPE_EAGLE3)
         .value("EAGLE", SP_TYPE_EAGLE)
         .value("DETERMINISTIC", SP_TYPE_DETERMINISTIC)
-        .value("DSPARK", SP_TYPE_DSPARK);
+        .value("DSPARK", SP_TYPE_DSPARK)
+        .value("DFLASH", SP_TYPE_DFLASH);
 
     // Register SpeculativeExecutionConfig
     py::class_<SpeculativeExecutionConfig>(m, "SpeculativeExecutionConfig")
@@ -1478,6 +1533,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("pdfusion_scheduler_mode", &FIFOSchedulerConfig::pdfusion_scheduler_mode)
         .def_readwrite("decode_prefill_ratio", &FIFOSchedulerConfig::decode_prefill_ratio)
         .def_readwrite("cp_force_single_prefill", &FIFOSchedulerConfig::cp_force_single_prefill)
+        .def_readwrite("force_single_prefill", &FIFOSchedulerConfig::force_single_prefill)
         .def_readwrite("max_inited_kv_cache_streams", &FIFOSchedulerConfig::max_inited_kv_cache_streams)
         .def_readwrite("max_batch_tokens_without_cache", &FIFOSchedulerConfig::max_batch_tokens_without_cache)
         .def_readwrite("prefill_chunk_size", &FIFOSchedulerConfig::prefill_chunk_size)
@@ -1491,10 +1547,16 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.cp_force_single_prefill,
                                       self.max_inited_kv_cache_streams,
                                       self.max_batch_tokens_without_cache,
-                                      self.prefill_chunk_size);
+                                      self.prefill_chunk_size,
+                                      self.force_single_prefill);
             },
             [](py::tuple t) {
-                if (t.size() != 2 && t.size() != 4 && t.size() != 6 && t.size() != 7 && t.size() != 8)
+                // Tuple ladder after merging main's chunked prefill (#1460):
+                // size 8 = main's prefill_chunk_size (index 7); size 9 appends
+                // force_single_prefill (index 8). Older mainline states keep
+                // decoding unchanged.
+                if (t.size() != 2 && t.size() != 4 && t.size() != 6 && t.size() != 7 && t.size() != 8
+                    && t.size() != 9)
                     throw std::runtime_error("Invalid state!");
                 FIFOSchedulerConfig c;
                 try {
@@ -1513,6 +1575,9 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     }
                     if (t.size() >= 8) {
                         c.prefill_chunk_size = t[7].cast<int64_t>();
+                    }
+                    if (t.size() >= 9) {
+                        c.force_single_prefill = t[8].cast<bool>();
                     }
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("FIFOSchedulerConfig unpickle error: ") + e.what());
@@ -1708,14 +1773,15 @@ PYBIND11_MODULE(libth_transformer_config, m) {
 
     // LinearAttentionConfig
     pybind11::class_<LinearAttentionConfig>(m, "LinearAttentionConfig")
-        .def(pybind11::init<int, int, int, int, int, DataType, DataType>(),
-             pybind11::arg("linear_conv_kernel_dim") = 0,
-             pybind11::arg("linear_key_head_dim")    = 0,
-             pybind11::arg("linear_num_key_heads")   = 0,
-             pybind11::arg("linear_num_value_heads") = 0,
-             pybind11::arg("linear_value_head_dim")  = 0,
-             pybind11::arg("ssm_state_dtype")        = DataType::TYPE_BF16,
-             pybind11::arg("conv_state_dtype")       = DataType::TYPE_BF16)
+        .def(pybind11::init<int, int, int, int, int, DataType, DataType, bool>(),
+             pybind11::arg("linear_conv_kernel_dim")         = 0,
+             pybind11::arg("linear_key_head_dim")            = 0,
+             pybind11::arg("linear_num_key_heads")           = 0,
+             pybind11::arg("linear_num_value_heads")         = 0,
+             pybind11::arg("linear_value_head_dim")          = 0,
+             pybind11::arg("ssm_state_dtype")                = DataType::TYPE_BF16,
+             pybind11::arg("conv_state_dtype")               = DataType::TYPE_BF16,
+             pybind11::arg("supports_history_state_reclaim") = false)
         .def("to_string", &LinearAttentionConfig::to_string)
         .def_readwrite("linear_conv_kernel_dim", &LinearAttentionConfig::linear_conv_kernel_dim)
         .def_readwrite("linear_key_head_dim", &LinearAttentionConfig::linear_key_head_dim)
@@ -1723,7 +1789,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("linear_num_value_heads", &LinearAttentionConfig::linear_num_value_heads)
         .def_readwrite("linear_value_head_dim", &LinearAttentionConfig::linear_value_head_dim)
         .def_readwrite("ssm_state_dtype", &LinearAttentionConfig::ssm_state_dtype)
-        .def_readwrite("conv_state_dtype", &LinearAttentionConfig::conv_state_dtype);
+        .def_readwrite("conv_state_dtype", &LinearAttentionConfig::conv_state_dtype)
+        .def_readwrite("supports_history_state_reclaim", &LinearAttentionConfig::supports_history_state_reclaim);
 
     // Register KvCacheDataType enum
     py::enum_<KvCacheDataType>(m, "KvCacheDataType")
@@ -2235,6 +2302,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("max_rpc_timeout_ms", &PDSepConfig::max_rpc_timeout_ms)
         .def_readwrite("worker_port_offset", &PDSepConfig::worker_port_offset)
         .def_readwrite("decode_entrance", &PDSepConfig::decode_entrance)
+        .def_readwrite("decode_linear_tail_only", &PDSepConfig::decode_linear_tail_only)
         .def_readwrite("prefill_prepare_resource_pool_size", &PDSepConfig::prefill_prepare_resource_pool_size)
         .def_readwrite("prefill_stop_stream_wait_timeout_ms", &PDSepConfig::prefill_stop_stream_wait_timeout_ms)
         .def("to_string", &PDSepConfig::to_string)
@@ -2261,11 +2329,12 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.worker_port_offset,
                                       self.decode_entrance,
                                       self.prefill_stop_stream_wait_timeout_ms,
-                                      self.prefill_prepare_resource_pool_size);
+                                      self.prefill_prepare_resource_pool_size,
+                                      self.decode_linear_tail_only);
             },
             [](py::tuple t) {
-                if (t.size() != 22)
-                    throw std::runtime_error("Invalid PDSepConfig state: expected 22 fields, got "
+                if (t.size() != 22 && t.size() != 23)
+                    throw std::runtime_error("Invalid PDSepConfig state: expected 22 or 23 fields, got "
                                              + std::to_string(t.size()));
                 PDSepConfig c;
                 try {
@@ -2291,6 +2360,9 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     c.decode_entrance                     = t[19].cast<bool>();
                     c.prefill_stop_stream_wait_timeout_ms = t[20].cast<int64_t>();
                     c.prefill_prepare_resource_pool_size  = t[21].cast<int64_t>();
+                    if (t.size() == 23) {
+                        c.decode_linear_tail_only = t[22].cast<bool>();
+                    }
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("PDSepConfig unpickle error: ") + e.what());
                 }

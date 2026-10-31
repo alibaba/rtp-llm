@@ -6,6 +6,8 @@
 #include <numeric>
 #include <set>
 #include <utility>
+#include <cstring>
+#include <rapidjson/document.h>
 
 #include "rtp_llm/cpp/cache/KVCacheSpec.h"
 #include "rtp_llm/cpp/cache/KVCacheSpecDesc.h"
@@ -37,6 +39,8 @@ bool blockNumFitsBudget(uint32_t block_num, size_t total_budget_bytes, const KVC
         remaining -= static_cast<size_t>(block_num) * budget.paged_block_bytes;
     }
 
+    // Main #1574 keeps SWA pool blocks at the same baseline count (tail
+    // retention is a runtime concern), so no SWA downsampling here.
     return budget.swa_block_bytes == 0 || static_cast<size_t>(block_num) <= remaining / budget.swa_block_bytes;
 }
 
@@ -51,6 +55,7 @@ void addBudgetBytes(size_t& total, size_t bytes, size_t count = 1) {
 
 KVCacheBlockBudget blockBudgetForConfig(const CacheConfig& config) {
     KVCacheBlockBudget budget;
+    budget.max_baseline_block_num = config.maxBaselineBlockNum();
     for (size_t gid = 0; gid < config.topology().groups().size(); ++gid) {
         const auto& group          = config.topology().groups()[gid];
         size_t      group_bytes    = 0;
@@ -89,14 +94,55 @@ KVCacheBlockBudget blockBudgetForConfig(const CacheConfig& config) {
         switch (policy.group_type) {
             case CacheGroupType::FULL:
             case CacheGroupType::LINEAR:
-                addBudgetBytes(budget.paged_block_bytes, group_bytes);
+                addBudgetBytes(budget.paged_block_bytes, group_bytes, config.blockWeight(group.tag));
                 break;
             case CacheGroupType::SWA:
-                addBudgetBytes(budget.swa_block_bytes, group_bytes);
+                addBudgetBytes(budget.swa_block_bytes, group_bytes, config.blockWeight(group.tag));
                 break;
         }
     }
     return budget;
+}
+
+void resolvePoolBlockWeights(CacheConfig& config, const std::string& json) {
+    if (json.empty()) {
+        return;
+    }
+    rapidjson::Document document;
+    document.Parse<rapidjson::kParseValidateEncodingFlag>(json.data(), json.size());
+    RTP_LLM_CHECK_WITH_INFO(json.find('\0') == std::string::npos && !document.HasParseError() && document.IsObject(),
+                            "KV_CACHE_POOL_BLOCK_WEIGHTS must be a JSON object of pool tags to positive integers");
+    std::map<std::string, uint32_t> weights;
+    for (auto it = document.MemberBegin(); it != document.MemberEnd(); ++it) {
+        const std::string tag(it->name.GetString(), it->name.GetStringLength());
+        RTP_LLM_CHECK_WITH_INFO(it->value.IsUint64() && it->value.GetUint64() > 0
+                                    && it->value.GetUint64() <= std::numeric_limits<int32_t>::max(),
+                                "KV_CACHE_POOL_BLOCK_WEIGHTS pool '%s' must have a positive int32 integer weight",
+                                tag.c_str());
+        RTP_LLM_CHECK_WITH_INFO(weights.emplace(tag, static_cast<uint32_t>(it->value.GetUint64())).second,
+                                "KV_CACHE_POOL_BLOCK_WEIGHTS has duplicate pool '%s'",
+                                tag.c_str());
+        const auto group = std::find_if(config.groups().begin(),
+                                        config.groups().end(),
+                                        [&](const GroupBase& candidate) { return candidate.tag == tag; });
+        RTP_LLM_CHECK_WITH_INFO(group != config.groups().end(),
+                                "KV_CACHE_POOL_BLOCK_WEIGHTS has unknown pool '%s' in merged target/draft topology",
+                                tag.c_str());
+        RTP_LLM_CHECK_WITH_INFO(group->policy.memory_placement == CacheMemoryPlacement::DEVICE,
+                                "KV_CACHE_POOL_BLOCK_WEIGHTS pool '%s' must be DEVICE resident",
+                                tag.c_str());
+        RTP_LLM_CHECK_WITH_INFO(group->policy.explicit_block_num == 0,
+                                "KV_CACHE_POOL_BLOCK_WEIGHTS pool '%s' conflicts with explicit_block_num=%u",
+                                tag.c_str(),
+                                group->policy.explicit_block_num);
+    }
+    config.pool_block_weights = std::move(weights);
+    // Children have the merged logical topology, including empty target-only
+    // groups. Their physical views must publish the same pool capacities.
+    for (auto& sub : config.mtp_sub_configs) {
+        RTP_LLM_CHECK_WITH_INFO(sub != nullptr, "MTP cache configuration is null while resolving pool weights");
+        sub->pool_block_weights = config.pool_block_weights;
+    }
 }
 
 std::pair<uint32_t, uint32_t> resolveSeqSizes(const ModelConfig& model_config, const KVCacheConfig& kv_cache_config) {
@@ -323,7 +369,7 @@ uint32_t maxKVCacheBlockNumForBudget(size_t total_budget_bytes, const KVCacheBlo
     }
 
     uint32_t low  = 0;
-    uint32_t high = std::numeric_limits<uint32_t>::max();
+    uint32_t high = budget.max_baseline_block_num;
     while (low < high) {
         const uint32_t mid = low + static_cast<uint32_t>((static_cast<uint64_t>(high) - low + 1) / 2);
         if (blockNumFitsBudget(mid, total_budget_bytes, budget)) {
@@ -360,24 +406,56 @@ CacheConfig CacheConfigCreator::createBasicConfig(const ModelConfig&       model
                                                   const KVCacheConfig&     kv_cache_config,
                                                   int                      gen_num_per_cycle) {
     auto config        = createConfigFromDescs(model_config, parallelism_config, kv_cache_config, gen_num_per_cycle);
+    // Main #1574: reusable tail retention plus optional per-pool explicit
+    // block budgets for LINEAR/SWA pools.
     RTP_LLM_CHECK_WITH_INFO(kv_cache_config.reuse_cache_tail_blocks > 0, "reuse_cache_tail_blocks must be positive");
     config.reuse_cache_tail_blocks = kv_cache_config.reuse_cache_tail_blocks;
-    auto groups                    = config.topology().groups();
-    for (auto& group : groups) {
-        const uint32_t override_blocks =
-            group.policy.group_type == CacheGroupType::LINEAR ? kv_cache_config.linear_pool_blocks :
-            group.policy.group_type == CacheGroupType::SWA    ? kv_cache_config.swa_pool_blocks :
-                                                                0;
-        RTP_LLM_CHECK_WITH_INFO(override_blocks != 1
-                                    && override_blocks <= static_cast<uint32_t>(std::numeric_limits<int>::max()),
-                                "pool blocks for tag=%s must be 0 or in [2, INT_MAX]",
-                                group.tag.c_str());
-        if (override_blocks > 0 && group.policy.explicit_block_num == 0) {
-            group.policy.explicit_block_num     = override_blocks;
-            group.policy.charge_to_paged_budget = group.policy.memory_placement == CacheMemoryPlacement::DEVICE;
+    {
+        auto groups = config.topology().groups();
+        for (auto& group : groups) {
+            const uint32_t override_blocks =
+                group.policy.group_type == CacheGroupType::LINEAR ? kv_cache_config.linear_pool_blocks :
+                group.policy.group_type == CacheGroupType::SWA    ? kv_cache_config.swa_pool_blocks :
+                                                                    0;
+            RTP_LLM_CHECK_WITH_INFO(override_blocks != 1
+                                        && override_blocks <= static_cast<uint32_t>(std::numeric_limits<int>::max()),
+                                    "pool blocks for tag=%s must be 0 or in [2, INT_MAX]",
+                                    group.tag.c_str());
+            if (override_blocks > 0 && group.policy.explicit_block_num == 0) {
+                group.policy.explicit_block_num     = override_blocks;
+                group.policy.charge_to_paged_budget = group.policy.memory_placement == CacheMemoryPlacement::DEVICE;
+            }
+        }
+        config.setTopology(std::move(groups), config.topology().layers());
+    }
+    if (!kv_cache_config.enable_linear_cache_reclaim) {
+        return config;
+    }
+    const auto& groups     = config.topology().groups();
+    const bool  has_linear = std::any_of(groups.begin(), groups.end(), [](const GroupBase& group) {
+        return group.policy.group_type == CacheGroupType::LINEAR;
+    });
+    // Target and draft models share KVCacheConfig. A FULL-only draft has no
+    // recurrent state to reclaim and must not inherit the target capability.
+    if (!has_linear) {
+        return config;
+    }
+    RTP_LLM_CHECK_WITH_INFO(model_config.linear_attention_config.supports_history_state_reclaim,
+                            "enable_linear_cache_reclaim requires model supports_history_state_reclaim");
+    for (const auto& group : groups) {
+        if (group.policy.group_type == CacheGroupType::LINEAR) {
+            RTP_LLM_CHECK_WITH_INFO(
+                group.cacheKeyTokenStride() == config.seq_size_per_block,
+                "enable_linear_cache_reclaim requires LINEAR cache-key span to match the base span: "
+                "tag=%s group_span=%zu base_span=%zu",
+                group.tag.c_str(),
+                group.cacheKeyTokenStride(),
+                config.seq_size_per_block);
         }
     }
-    config.setTopology(std::move(groups), config.topology().layers());
+    RTP_LLM_CHECK_WITH_INFO(!parallelism_config.prefill_cp_config.kv_cache_sharded,
+                            "enable_linear_cache_reclaim does not support CP-sharded KV cache");
+    config.enable_linear_cache_reclaim = true;
     return config;
 }
 
@@ -421,14 +499,16 @@ CacheConfig CacheConfigCreator::createConfig(const ModelConfig&                 
     auto      config = createBasicConfig(model_config, parallelism_config, kv_cache_config, gen_num_per_cycle);
     if (draft_model_config != nullptr) {
         auto draft = createBasicConfig(*draft_model_config, parallelism_config, kv_cache_config, gen_num_per_cycle);
-        int  num_mtp_modules = is_mtp && !is_eagle && sp_config->type != SP_TYPE_DSPARK ? gen_num_per_cycle : 1;
+        // DSpARK/DFlash are single multi-layer block-draft models; gamma is
+        // the proposal width, not a count of independent one-layer modules.
+        int  num_mtp_modules = is_mtp && !is_eagle && !isBlockDraftType(sp_config->type) ? gen_num_per_cycle : 1;
         RTP_LLM_CHECK_WITH_INFO(num_mtp_modules > 0, "draft cache configuration requires at least one module");
         config.mtp_sub_configs.reserve(static_cast<size_t>(num_mtp_modules));
         for (int module = 0; module < num_mtp_modules; ++module) {
             config.mtp_sub_configs.push_back(config.mergeMTPModule(draft, module, config.layer_num));
         }
     }
-
+    resolvePoolBlockWeights(config, kv_cache_config.kv_cache_pool_block_weights);
     return config;
 }
 
@@ -441,7 +521,8 @@ uint32_t CacheConfigCreator::computeLocalBlockNum(const CacheConfig&            
                                                   const std::optional<SpeculativeExecutionConfig>& sp_config) {
     uint32_t block_num = 0;
     if (kv_cache_config.test_block_num > 0) {
-        RTP_LLM_LOG_INFO("KVCacheConfig explicitly specified kv cache block num %d", kv_cache_config.test_block_num);
+        RTP_LLM_LOG_INFO("KVCacheConfig explicitly specified baseline kv cache block num %d",
+                         kv_cache_config.test_block_num);
         block_num = static_cast<uint32_t>(kv_cache_config.test_block_num);
     } else {
         const auto kv_cache_mem_size = MemoryEvaluationHelper::getKVCacheMemorySize(
@@ -460,13 +541,16 @@ uint32_t CacheConfigCreator::computeLocalBlockNum(const CacheConfig&            
         block_num = maxKVCacheBlockNumForBudget(kv_cache_mem_size, block_budget);
     }
     RTP_LLM_CHECK_WITH_INFO(block_num > 0, "kv cache needs at least one baseline block, got %u", block_num);
+    RTP_LLM_CHECK_WITH_INFO(block_num <= config.maxBaselineBlockNum(),
+                            "cache baseline=%u exceeds weighted pool int32 block ID bounds",
+                            block_num);
     const auto kv_cache_seq_len = static_cast<uint64_t>(block_num) * config.seq_size_per_block;
-    RTP_LLM_LOG_INFO("cache layout created: candidate_blocks=%u, candidate_tokens=%lu, draft_modules=%zu",
+    RTP_LLM_LOG_INFO("cache layout created: baseline_blocks=%u, baseline_token_span=%lu, draft_modules=%zu",
                      block_num,
                      kv_cache_seq_len,
                      config.mtp_sub_configs.size());
     if (kv_cache_seq_len < static_cast<uint64_t>(model_config.max_seq_len)) {
-        RTP_LLM_LOG_WARNING("candidate cache capacity %lu tokens is below max_seq_len %ld tokens",
+        RTP_LLM_LOG_WARNING("cache baseline token span %lu is below max_seq_len %ld (before per-pool block weights)",
                             kv_cache_seq_len,
                             model_config.max_seq_len);
     }
@@ -493,6 +577,115 @@ uint32_t CacheConfigCreator::synchronizeBlockNum(uint32_t                 candid
             block_num_ptr, world_size, parallelism_config.ffn_disaggregate_config.is_ffn_service());
     }
     return candidate_block_num;
+}
+
+CacheConfigCreator::SizingSignature
+CacheConfigCreator::sizingSignature(const CacheConfig& config, uint32_t baseline, bool is_ffn_service) {
+    // Stable byte encoding and two independently seeded 64-bit FNV streams.
+    // Do not use std::hash or raw structs (padding and enum sizes are not a
+    // portable collective contract). This is an agreement checksum, not an ID
+    // used for prefix reuse or PD cache-store interoperability.
+    uint64_t   first  = 14695981039346656037ull;
+    uint64_t   second = 7809847782465536322ull;
+    const auto byte   = [&](uint8_t value) {
+        first  = (first ^ value) * 1099511628211ull;
+        second = (second ^ value) * 1099511628211ull;
+    };
+    const auto number = [&](uint64_t value) {
+        for (int i = 0; i < 8; ++i) {
+            byte(static_cast<uint8_t>(value & 0xff));
+            value >>= 8;
+        }
+    };
+    number(1);  // Signature format version.
+    // Main #1574's tail-retention knob replaces the old linear_step sizing
+    // input in the cross-rank sizing signature.
+    number(static_cast<uint64_t>(config.reuse_cache_tail_blocks));
+    number(config.groups().size());
+    for (const auto& group : config.groups()) {
+        number(group.tag.size());
+        for (unsigned char character : group.tag) {
+            byte(character);
+        }
+        const auto& policy = group.policy;
+        number(static_cast<uint64_t>(policy.group_type));
+        number(policy.explicit_block_num);
+        number(policy.charge_to_paged_budget);
+        number(static_cast<uint64_t>(policy.memory_placement));
+        number(policy.enable_prefix_reuse);
+        number(policy.reservable);
+        number(policy.active_tail_blocks);
+        number(policy.validate_tail_blocks);
+        number(static_cast<uint64_t>(policy.cp_mapping));
+        number(static_cast<uint64_t>(policy.cp_slice));
+        number(policy.sliding_window_size);
+        number(config.blockWeight(group.tag));
+        if (baseline > 0) {
+            number(config.blockNumForGroup(group, baseline));
+        }
+    }
+    SizingSignature result{};
+    // FFN disaggregation shares DP_AND_TP/WORLD with attention ranks, but its
+    // existing baseline is one. Compare capacities only within each role.
+    result[0] = is_ffn_service ? 1 : 0;
+    // Encode into fixed-width int32 tensor words without signed narrowing.
+    const std::array<uint32_t, 4> words{static_cast<uint32_t>(first),
+                                        static_cast<uint32_t>(first >> 32),
+                                        static_cast<uint32_t>(second),
+                                        static_cast<uint32_t>(second >> 32)};
+    std::memcpy(result.data() + 1, words.data(), sizeof(words));
+    return result;
+}
+
+void CacheConfigCreator::validateSizingSignatures(const int32_t* signatures, size_t rank_count) {
+    RTP_LLM_CHECK_WITH_INFO(signatures != nullptr && rank_count > 0,
+                            "cross-rank cache sizing signatures must not be empty");
+    constexpr size_t              width = std::tuple_size<SizingSignature>::value;
+    std::array<const int32_t*, 2> first_by_role{};
+    for (size_t rank = 0; rank < rank_count; ++rank) {
+        const auto*   signature = signatures + rank * width;
+        const int32_t role      = signature[0];
+        RTP_LLM_CHECK_WITH_INFO(
+            role == 0 || role == 1, "invalid cache sizing cohort=%d from TP/DP rank %zu", role, rank);
+        const auto* first = first_by_role[role];
+        if (first == nullptr) {
+            first_by_role[role] = signature;
+            continue;
+        }
+        RTP_LLM_CHECK_WITH_INFO(std::equal(first + 1, first + width, signature + 1),
+                                "cache pool sizing mismatch within %s cohort at TP/DP rank %zu; "
+                                "pool topology, policies, weights and final capacities must agree",
+                                role == 1 ? "FFN" : "attention",
+                                rank);
+    }
+}
+
+uint32_t CacheConfigCreator::synchronizeBlockNum(uint32_t                 candidate_block_num,
+                                                 const ParallelismConfig& parallelism_config,
+                                                 const CacheConfig&       config) {
+    const size_t world_size = parallelism_config.tp_size * parallelism_config.dp_size;
+    if (world_size <= 1) {
+        return candidate_block_num;
+    }
+    const size_t     local_rank = parallelism_config.tp_size * parallelism_config.dp_rank + parallelism_config.tp_rank;
+    constexpr size_t width      = std::tuple_size<SizingSignature>::value;
+    const auto       agree      = [&](uint32_t baseline) {
+        const auto signature =
+            sizingSignature(config, baseline, parallelism_config.ffn_disaggregate_config.is_ffn_service());
+        // Shape never depends on local pool count or the JSON configuration.
+        // Even inconsistent topologies therefore reach the same collective.
+        auto  tensor = torch::empty({static_cast<int64_t>(world_size * width)}, torch::kInt32).pin_memory();
+        auto* data   = tensor.data_ptr<int32_t>();
+        std::copy(signature.begin(), signature.end(), data + local_rank * width);
+        execAllGather({{tensor}, ParallelMode::DP_AND_TP});
+        execSyncCommunication(false);
+        cudaSyncAndCheck();
+        validateSizingSignatures(data, world_size);
+    };
+    agree(0);
+    const auto confirmed = synchronizeBlockNum(candidate_block_num, parallelism_config);
+    agree(confirmed);
+    return confirmed;
 }
 
 uint32_t CacheConfigCreator::selectConfirmedBlockNum(const int* candidates, size_t count, bool is_ffn_service) {

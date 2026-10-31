@@ -7,7 +7,7 @@ from typing import Optional
 
 import torch
 
-from rtp_llm.config.py_config_modules import PyEnvConfigs
+from rtp_llm.config.py_config_modules import PyEnvConfigs, resolve_max_generate_batch_size
 from rtp_llm.model_factory_register import ModelDict
 from rtp_llm.ops import (
     FfnDisAggregateConfig,
@@ -667,7 +667,14 @@ def setup_and_configure_server(py_env_configs: PyEnvConfigs):
     """
     setup_default_args(py_env_configs)
     fetch_model_files_to_local(py_env_configs)
-    ll_num_max_token = py_env_configs.concurrency_config.concurrency_limit
+    # DeepEP's wrapper init derives ll_num_max_token from
+    # runtime_config.max_generate_batch_size while the low-latency router
+    # derives it from moe_config.ll_num_max_token configured here, and
+    # DeepepWrapperConfig.equal compares both chains; resolving the cap with
+    # the same shared helper as EngineConfig.create keeps them identical when
+    # --max_generate_batch_size overrides concurrency_limit (this function
+    # also re-validates positivity, since it runs before EngineConfig.create).
+    ll_num_max_token = resolve_max_generate_batch_size(py_env_configs)
     sp_type = py_env_configs.sp_config.type  # Get SpeculativeType enum value
     if py_env_configs.sp_config.type != SpeculativeType.NONE:
         ll_num_max_token *= py_env_configs.sp_config.gen_num_per_cycle + 1

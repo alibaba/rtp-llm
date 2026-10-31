@@ -12,7 +12,8 @@ int FullCacheManager::estimatePeakNeedBlocks(int                     seq_len,
                                              const BlockIndicesType& current_block_indices,
                                              int                     remaining_tokens,
                                              int                     reserve_step,
-                                             bool                    enable_reuse_cache) const {
+                                             bool                    enable_reuse_cache,
+                                             bool /*reclaim_history*/) const {
     (void)enable_reuse_cache;
     const int current_blocks = static_cast<int>(current_block_indices.size());
     return std::max(
@@ -24,7 +25,8 @@ int FullCacheManager::estimateInitialBatchPeakNeedBlocks(int  seq_len,
                                                          int  remaining_tokens,
                                                          int  reserve_step,
                                                          bool enable_reuse_cache,
-                                                         int  target_batch_size) const {
+                                                         int  target_batch_size,
+                                                         bool /*reclaim_history*/) const {
     (void)enable_reuse_cache;
     const int batch_size    = std::max(target_batch_size, 1);
     const int common_blocks = (common_seq_len + seqSizePerBlock() - 1) / seqSizePerBlock();
@@ -37,7 +39,8 @@ NeedBlocksInfo FullCacheManager::getNeedBlocks(int                      common_s
                                                int                      reserve_step,
                                                int                      reuse_blocks_len,
                                                bool                     reuse_enabled,
-                                               const RequiredPositions& required_positions) const {
+                                               const RequiredPositions& required_positions,
+                                               size_t /*reclaimed_prefix_blocks*/) const {
     NeedBlocksInfo info;
     const int      common_slots        = needBlocksNum(common_seq_len, /*current_blocks=*/0);
     const int      total_slots         = needBlocksNum(seq_len, /*current_blocks=*/0, reserve_step);
