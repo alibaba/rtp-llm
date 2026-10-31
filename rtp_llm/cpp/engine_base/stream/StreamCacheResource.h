@@ -171,6 +171,7 @@ private:
     void         publishReuseLengths(int total_length, int host_length, int disk_length, int backend_length);
     absl::Status finalizeAllocatorLoad();
     absl::Status prepareLinearReplayResources(bool prepare_tails = true);
+    bool         deferAllocatorLoadRelease();
     void         publishAllocatorReuse(const LoadAsyncContext& context, bool local_only);
 
     GenerateStream*                stream_;

@@ -323,6 +323,35 @@ TEST_F(BroadcastManagerTest, Broadcast_OnDoneCompletesWithoutWaitDone) {
     EXPECT_TRUE(result->success());
 }
 
+TEST_F(BroadcastManagerTest, CachePartialSubmissionFailureSettlesSubmittedRankWithoutFatal) {
+    auto server = std::make_unique<TestRpcServer>(std::make_unique<TestRpcService>());
+    ASSERT_TRUE(server->start());
+    BroadcastManager manager(std::vector<std::string>(
+        3, "127.0.0.1:" + std::to_string(server->listenPort())));
+    ASSERT_TRUE(manager.init());
+    std::vector<FunctionRequestPB> requests(manager.workerNum());
+    size_t submitted = 0;
+    auto rpc_call = [&](const std::shared_ptr<RpcService::Stub>& stub,
+                        const std::shared_ptr<grpc::ClientContext>& context,
+                        const FunctionRequestPB& request,
+                        grpc::CompletionQueue* queue) {
+        if (++submitted == 2) {
+            throw std::runtime_error("injected partial dispatch failure");
+        }
+        return stub->AsyncExecuteFunction(context.get(), request, queue);
+    };
+    auto result = manager.broadcast<FunctionRequestPB, FunctionResponsePB>(
+        requests, 1000, rpc_call, 42, "REMOTE2D", /*fatal_on_error=*/false);
+    ASSERT_NE(result, nullptr);
+    ASSERT_TRUE(result->waitDone(2000, /*fatal_on_error=*/false));
+    EXPECT_EQ(submitted, 2u);
+    EXPECT_TRUE(result->rpcSucceeded(0));
+    EXPECT_FALSE(result->rpcSucceeded(1));
+    EXPECT_FALSE(result->rpcSucceeded(2));
+    EXPECT_FALSE(result->success());
+    EXPECT_NE(result->failureSummary().find("request_id=42"), std::string::npos);
+}
+
 TEST_F(BroadcastManagerTest, Broadcast_ReturnNotNull_AllRequestsTimeout) {
     std::vector<std::unique_ptr<TestRpcServer>> servers;
     std::vector<std::string>                    server_addrs;
