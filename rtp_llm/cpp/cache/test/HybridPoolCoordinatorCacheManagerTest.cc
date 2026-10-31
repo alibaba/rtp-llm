@@ -122,7 +122,7 @@ public:
     bool start() override {
         return true;
     }
-    bool submit(Task task) override {
+    bool submit(Task task, BlockTreeTaskClass = BlockTreeTaskClass::BACKGROUND) override {
         task();
         return true;
     }
@@ -134,7 +134,7 @@ public:
     bool start() override {
         return true;
     }
-    bool submit(Task task) override {
+    bool submit(Task task, BlockTreeTaskClass = BlockTreeTaskClass::BACKGROUND) override {
         std::lock_guard<std::mutex> lock(mutex_);
         tasks_.push_back(std::move(task));
         return true;

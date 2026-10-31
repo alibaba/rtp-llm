@@ -9,6 +9,7 @@
 #include <mutex>
 #include <atomic>
 #include <condition_variable>
+#include <chrono>
 #include <optional>
 #include <functional>
 #include <thread>
@@ -90,6 +91,8 @@ public:
                              const std::string&                 write_session_id,
                              const kv_cache_manager::BlockMask& block_mask,
                              const kv_cache_manager::Locations& locations);
+    virtual bool abortWrite(const std::string& unique_id, const std::string& trace_id,
+                            const std::string& write_session_id);
 
     // The tag selects a registered transfer client; vector slots stay private.
     // PACE uses the first client, which owns all GPU registrations. Span-bound backends must use their own pool's tag.
@@ -102,7 +105,8 @@ public:
                                  const kv_cache_manager::UriStrVec&                          uris,
                                  kv_cache_manager::BlockBuffers&                             buffers,
                                  const std::shared_ptr<kv_cache_manager::TransferTraceInfo>& trace_info = nullptr,
-                                 TransferCompletion*                                         completion = nullptr);
+                                 TransferCompletion*                                         completion = nullptr,
+                                 std::optional<std::chrono::steady_clock::time_point>         deadline = std::nullopt);
     virtual std::pair<bool, kv_cache_manager::UriStrVec>
     saveKvCachesForTag(const std::string&                                          tag,
                        const kv_cache_manager::UriStrVec&                          uris,
@@ -113,7 +117,8 @@ public:
                                  const kv_cache_manager::UriStrVec&                          uris,
                                  const kv_cache_manager::BlockBuffers&                       buffers,
                                  const std::shared_ptr<kv_cache_manager::TransferTraceInfo>& trace_info = nullptr,
-                                 TransferCompletion*                                         completion = nullptr);
+                                 TransferCompletion*                                         completion = nullptr,
+                                 std::optional<std::chrono::steady_clock::time_point>         deadline = std::nullopt);
 
 private:
     bool initImpl(const ConfigMap&                     config_map,

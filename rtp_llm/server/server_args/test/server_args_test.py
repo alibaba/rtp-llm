@@ -319,6 +319,21 @@ class CacheConfigArgumentsTest(TestCase):
             parser.parse_args(None if use_sys_argv else args)
         return config
 
+    def test_remote_task_budget_is_independent_of_host_and_sdk(self):
+        cases = (
+            ([], {}, 20000),
+            ([], {"KVCM_TASK_TIMEOUT_MS": "23000"}, 23000),
+            (["--kvcm_task_timeout_ms", "24000"], {"KVCM_TASK_TIMEOUT_MS": "23000"}, 24000),
+        )
+        for args, env, expected in cases:
+            with self.subTest(args=args, env=env):
+                config = self.parse_cache_config(args, env)
+                self.assertEqual(config.kvcm_task_timeout_ms, expected)
+                self.assertEqual(config.memory_cache_sync_timeout_ms, 10000)
+                self.assertEqual(config.disk_cache_sync_timeout_ms, 30000)
+                self.assertEqual(config.kvcm_get_timeout_ms, 12000)
+                self.assertEqual(config.kvcm_put_timeout_ms, 12000)
+
     def test_pool_capacity_options_survive_startup_serialization(self):
         config = self.parse_cache_config(
             ["--dsv41_decoder_swa_pool_blocks", "512"],

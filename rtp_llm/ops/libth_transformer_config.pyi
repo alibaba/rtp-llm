@@ -797,6 +797,7 @@ class KVCacheConfig:
     kvcm_server_address: str
     kvcm_storage_queue_size: int
     kvcm_storage_thread_num: int
+    kvcm_task_timeout_ms: int
     kvcm_vipserver_domain: str
     # Legacy aliases of the canonical KVCM members.
     reco_asyncwrapper_queue_size: int

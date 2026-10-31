@@ -908,6 +908,8 @@ message RemoteOperationRequestPB {
     repeated string group_tags = 6;
     // Metadata operations are served by TP rank 0 for this backend's instance.
     RemoteMetadataRequestPB metadata = 7;
+    // Remaining task budget for READ/WRITE; metadata operations keep their own policy.
+    int64 timeout_ms = 8;
 }
 
 message RemoteMetadataRequestPB {
@@ -956,7 +958,7 @@ enum RemoteTransferStatusPB {
     REMOTE_TRANSFER_STATUS_SUCCESS = 1;
     REMOTE_TRANSFER_STATUS_FAILED = 2;
     REMOTE_TRANSFER_STATUS_TIMEOUT = 3;
-    // Feature-on SDK failure/exception without proof that caller buffers are safe.
+    // SDK failure/exception without proof that caller buffers are safe.
     REMOTE_TRANSFER_STATUS_COMPLETION_UNKNOWN = 4;
     // Explicit local-before-I/O rejection or SDK BUFFER_SAFE result. Unlike the
     // legacy FAILED value, this status carries a buffer-lifetime guarantee.
@@ -966,15 +968,14 @@ enum RemoteTransferStatusPB {
 message RemoteOperationResponsePB {
     RemoteBlockMaskPB succeed_block = 1;  // for read/write, TODO
     repeated string actual_uris = 2; // only for write
-    // Application-level transfer result. UNSPECIFIED is accepted as legacy
-    // success only with Decode publication off. On requires explicit proof.
+    // Application-level result; UNSPECIFIED supplies no completion proof.
     RemoteTransferStatusPB transfer_status = 3;
     repeated RemoteHostCacheMatchPB hosts = 4;
     repeated RemoteBackendKeyLocationsPB backend_locations = 5;
-    // Explicit caller-buffer proof for the opt-in Decode publication path.
+    // Caller-buffer proof for every READ/WRITE, independent of Decode publication.
     // True means this worker submitted no payload I/O, or that all of its
-    // submitted payload I/O completed. It does not prove a metadata commit
-    // or remote target drain. Absent/false remains unknown to an enabled peer.
+    // submitted payload I/O stopped accessing caller buffers. It does not prove
+    // a metadata commit or remote target drain. Absent/false remains unknown.
     bool payload_buffer_safe = 6;
 }
 

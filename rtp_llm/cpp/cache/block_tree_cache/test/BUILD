@@ -93,7 +93,10 @@ cc_library(
     name = "bounded_thread_test_utils",
     testonly = True,
     hdrs = ["BoundedThreadTestUtils.h"],
-    visibility = ["//rtp_llm/cpp/cache/block_tree_cache:__subpackages__"],
+    visibility = [
+        "//rtp_llm/cpp/cache/block_tree_cache:__subpackages__",
+        "//rtp_llm/cpp/engine_base/stream/test:__pkg__",
+    ],
 )
 
 cc_library(

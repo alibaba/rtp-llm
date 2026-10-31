@@ -453,6 +453,14 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         help="instance_group名称",
     )
     kv_cache_group.add_argument(
+        "--kvcm_task_timeout_ms",
+        env_name="KVCM_TASK_TIMEOUT_MS",
+        bind_to=(kv_cache_config, "kvcm_task_timeout_ms"),
+        type=int,
+        default=20000,
+        help="Remote读写整体任务超时预算（毫秒，包含排队）",
+    )
+    kv_cache_group.add_argument(
         "--kvcm_read_backend_type",
         env_name="KVCM_READ_BACKEND_TYPE",
         bind_to=(kv_cache_config, "kvcm_read_backend_type"),
@@ -578,7 +586,7 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         bind_to=(kv_cache_config, "kvcm_get_broadcast_timeout"),
         type=int,
         default=15000,
-        help="GET广播超时时间（毫秒）",
+        help="兼容旧参数；BTC remote GET广播使用整体任务剩余预算",
     )
     kv_cache_group.add_argument(
         "--kvcm_put_broadcast_timeout",
@@ -586,7 +594,7 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         bind_to=(kv_cache_config, "kvcm_put_broadcast_timeout"),
         type=int,
         default=15000,
-        help="PUT广播超时时间（毫秒）",
+        help="兼容旧参数；BTC remote PUT广播使用整体任务剩余预算",
     )
     kv_cache_group.add_argument(
         "--kvcm_client_config",

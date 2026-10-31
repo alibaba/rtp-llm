@@ -147,6 +147,7 @@ private:
     void         recordCacheReuseMallocResult(const MallocResult& result);
     void         publishReuseLengths(int total_length, int host_length, int disk_length, int backend_length);
     absl::Status finalizeAllocatorLoad();
+    bool         deferAllocatorLoadRelease();
     void         publishAllocatorReuse(const LoadAsyncContext& context, bool local_only);
     void         reportRemoteRestoreLatency(const char* mode, int64_t latency_us);
     void         adoptDecodeReuse(DecodeReuseSourcesPtr sources, int64_t adopted_end);

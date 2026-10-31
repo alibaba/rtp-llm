@@ -544,6 +544,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("kvcm_vipserver_domain", &KVCacheConfig::kvcm_vipserver_domain)
         .def_readwrite("kvcm_server_address", &KVCacheConfig::kvcm_server_address)
         .def_readwrite("kvcm_instance_group", &KVCacheConfig::kvcm_instance_group)
+        .def_readwrite("kvcm_task_timeout_ms", &KVCacheConfig::kvcm_task_timeout_ms)
         .def_readwrite("kvcm_read_backend_type", &KVCacheConfig::kvcm_read_backend_type)
         .def_readwrite("kvcm_min_replica_count", &KVCacheConfig::kvcm_min_replica_count)
         .def_readwrite("kvcm_meta_channel_retry_time", &KVCacheConfig::kvcm_meta_channel_retry_time)
@@ -596,7 +597,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def(py::pickle(
             [](const KVCacheConfig& self) {
                 return py::make_tuple(std::string("KVCacheConfig"),
-                                      13,
+                                      14,
                                       self.reuse_cache,
                                       self.multi_task_prompt,
                                       self.multi_task_prompt_str,
@@ -677,11 +678,14 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.block_tree_full_memory_evict_low_watermark_ratio,
                                       self.block_tree_full_memory_evict_high_watermark_ratio,
                                       self.block_tree_full_disk_evict_low_watermark_ratio,
-                                      self.block_tree_full_disk_evict_high_watermark_ratio);
+                                      self.block_tree_full_disk_evict_high_watermark_ratio,
+                                      self.kvcm_task_timeout_ms);
             },
             [](py::tuple t) {
-                if (t.size() != 83 || !py::isinstance<py::str>(t[0]) || !py::isinstance<py::int_>(t[1])
-                    || t[0].cast<std::string>() != "KVCacheConfig" || t[1].cast<int>() != 13) {
+                if (t.size() < 2 || !py::isinstance<py::str>(t[0]) || !py::isinstance<py::int_>(t[1])
+                    || t[0].cast<std::string>() != "KVCacheConfig"
+                    || !((t.size() == 83 && t[1].cast<int>() == 13)
+                         || (t.size() == 84 && t[1].cast<int>() == 14))) {
                     throw std::runtime_error("invalid KVCacheConfig state");
                 }
 
@@ -767,6 +771,9 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                 c.block_tree_full_memory_evict_high_watermark_ratio = t[80].cast<double>();
                 c.block_tree_full_disk_evict_low_watermark_ratio    = t[81].cast<double>();
                 c.block_tree_full_disk_evict_high_watermark_ratio   = t[82].cast<double>();
+                if (t.size() == 84) {
+                    c.kvcm_task_timeout_ms = t[83].cast<int>();
+                }
                 if (c.reuse_cache_tail_blocks <= 0 || c.linear_pool_blocks == 1 || c.swa_pool_blocks == 1
                     || c.linear_pool_blocks > static_cast<uint32_t>(std::numeric_limits<int>::max())
                     || c.swa_pool_blocks > static_cast<uint32_t>(std::numeric_limits<int>::max())) {

@@ -47,7 +47,8 @@ BlockTreeLoader::BlockTreeLoader(BlockTree*                      tree,
             std::lock_guard<std::mutex> lock(mutex_);
             abortLoadLocked(
                 context.loadDescs(), context.joinedLoads(), 0, context.contextId(), /*release_transferred_refs=*/false);
-        })),
+        },
+        [task_pool](std::function<void()> cleanup) { return task_pool->submitCompletion(std::move(cleanup)); })),
     track_decode_origins_(remoteCacheDecodePublicationEnabled()) {}
 
 DecodeReuseSourcesPtr BlockTreeLoader::snapshotDecodeSources(const std::vector<TreeNode*>& path, size_t prefix) const {

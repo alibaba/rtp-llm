@@ -589,13 +589,15 @@ TEST(KVCMLocalTest, EnabledReadQuarantinesUnprovenSdkErrorsButNotExplicitSafeRes
             auto observation = match(*backend.backend, request);
             ASSERT_TRUE(observation.success);
             ASSERT_NE(observation.match_meta, nullptr);
+            const auto ref_count_before = environment.device_pool->refCount(environment.block_id);
             client->load_status = ec;
             const auto error    = readResult(*backend.backend, request, std::move(observation.match_meta));
             EXPECT_FALSE(error.ok());
             ASSERT_TRUE(waitForBackendOperationsForTest(*backend.backend));
-            const bool unknown = enabled && !safe;
-            EXPECT_EQ(static_cast<bool>(backend.backend->protected_quarantine_), unknown);
-            EXPECT_FALSE(environment.device_pool->isFrozen(environment.block_id));
+            const bool unknown = !safe;
+            EXPECT_EQ(static_cast<bool>(backend.backend->protected_quarantine_), enabled && unknown);
+            EXPECT_EQ(environment.device_pool->isFrozen(environment.block_id), !enabled && unknown);
+            EXPECT_EQ(environment.device_pool->refCount(environment.block_id), ref_count_before + (unknown ? 1u : 0u));
             std::lock_guard<std::mutex> lock(backend.backend->quarantine_mutex_);
             EXPECT_EQ(
                 backend.backend->quarantined_breakdown_[0][static_cast<size_t>(StorageQuarantineReason::INVALID_RESPONSE)]
@@ -623,19 +625,21 @@ TEST(KVCMLocalTest, CallerBufferSafetyDoesNotProveRemoteAllocationQuiescence) {
             allocation.locations        = {{{"tp0_Fdefault", "pace://write_uri"}}};
             EXPECT_CALL(*client, getWriteLocation(_, _, _, _, _, _, 0))
                 .WillOnce(Return(std::make_pair(true, allocation)));
-            const bool unknown = enabled && !safe;
+            const bool unknown = !safe;
             if (enabled) {
                 EXPECT_CALL(*client, finishWrite(_, _, _, _, _)).Times(0);
             } else {
                 EXPECT_CALL(*client, finishWrite(_, _, "pending-session", _, _)).WillOnce(Return(true));
             }
+            const auto ref_count_before = environment.device_pool->refCount(environment.block_id);
             client->save_status = ec;
             auto task           = backend.backend->prepareWrite(makeStorageRequest(environment));
             ASSERT_TRUE(static_cast<bool>(task));
             ASSERT_TRUE(backend.backend->write(std::move(task)));
             ASSERT_TRUE(waitForBackendOperationsForTest(*backend.backend));
-            EXPECT_EQ(static_cast<bool>(backend.backend->protected_quarantine_), unknown);
-            EXPECT_FALSE(environment.device_pool->isFrozen(environment.block_id));
+            EXPECT_EQ(static_cast<bool>(backend.backend->protected_quarantine_), enabled && unknown);
+            EXPECT_EQ(environment.device_pool->isFrozen(environment.block_id), !enabled && unknown);
+            EXPECT_EQ(environment.device_pool->refCount(environment.block_id), ref_count_before + (unknown ? 1u : 0u));
         }
     }
 }
@@ -1005,9 +1009,9 @@ TEST(KVCMLocalTest, PayloadReadFailurePropagatesToCompletion) {
     EXPECT_CALL(*client_wrapper, loadKvCachesForTag("default", kv_cache_manager::UriStrVec{"read_uri"}, _, _))
         .WillOnce(Return(false));
     EXPECT_FALSE(read(*backend.backend, makeStorageRequest(environment), std::move(observation.match_meta)));
-    EXPECT_EQ(environment.device_pool->refCount(environment.block_id), ref_count_before);
-    EXPECT_FALSE(environment.device_pool->isFrozen(environment.block_id));
-    EXPECT_EQ(environment.device_pool->treeRefCount(environment.block_id), 0u);
+    EXPECT_EQ(environment.device_pool->refCount(environment.block_id), ref_count_before + 1);
+    EXPECT_TRUE(environment.device_pool->isFrozen(environment.block_id));
+    EXPECT_EQ(environment.device_pool->treeRefCount(environment.block_id), 1u);
 }
 
 TEST(KVCMLocalTest, PayloadReadTimeoutFreezesOnlyDestinationBlock) {

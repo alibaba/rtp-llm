@@ -1063,6 +1063,45 @@ TEST(ClientWrapperTest, ServiceInstanceFailureReRegistersAndRoutesTheNextRequest
     EXPECT_EQ(*destruction_count, 1);
 }
 
+TEST(ClientWrapperTest, AbortRetriesOnlyTransientFailuresAndRequiresAnOkReply) {
+    using Code = kv_cache_manager::ClientErrorCode;
+    const std::vector<std::vector<Code>> scenarios{
+        {Code::ER_INVALID_GRPCSTATUS, Code::ER_OK},
+        {Code::ER_INVALID_STUB, Code::ER_OK},
+        {Code::ER_INVALID_GRPCSTATUS, Code::ER_INVALID_GRPCSTATUS, Code::ER_INVALID_GRPCSTATUS},
+        {Code::ER_SERVICE_INTERNAL_ERROR}};
+    for (const auto& codes : scenarios) {
+        std::array<char, 64> pool{};
+        kv_cache_manager::RegistSpan span{pool.data(), pool.size()};
+        InitObservation observation;
+        kv_cache_manager::MockMetaClient* meta = nullptr;
+        auto wrapper = initializeClient(false, "abort_endpoint", span, observation, std::make_shared<int>(0),
+                                        &meta, std::make_shared<std::atomic<int>>(0));
+        ASSERT_NE(wrapper, nullptr);
+        ASSERT_NE(meta, nullptr);
+        {
+            ::testing::InSequence ordered;
+            for (const auto code : codes) {
+                EXPECT_CALL(*meta, FinishWrite("abort_trace", "abort_session", _, _))
+                    .WillOnce(Invoke([code](const auto&, const auto&, const kv_cache_manager::BlockMask& mask,
+                                           const kv_cache_manager::Locations& locations) {
+                        const auto* offset = std::get_if<kv_cache_manager::BlockMaskOffset>(&mask);
+                        EXPECT_NE(offset, nullptr);
+                        if (offset) {
+                            EXPECT_EQ(*offset, 0u);
+                        }
+                        EXPECT_TRUE(locations.empty());
+                        return code;
+                    }));
+            }
+        }
+        EXPECT_EQ(wrapper->abortWrite("", "abort_trace", "abort_session"), codes.back() == Code::ER_OK);
+        EXPECT_FALSE(wrapper->abortWrite("", "abort_trace", ""));
+        wrapper->shutdown();
+        EXPECT_FALSE(wrapper->abortWrite("", "abort_trace", "abort_session"));
+    }
+}
+
 TEST(ClientWrapperTest, DisabledPublicationPreservesSdkCallAndTraceIdentity) {
     autil::EnvGuard disabled("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "0");
     using namespace kv_cache_manager;
@@ -1190,6 +1229,55 @@ TEST(ClientWrapperTest, BoundedSdkChunksPreserveUrisAndDestinationBytes) {
     EXPECT_EQ(unknown_calls, 0u);
     client->shutdown();
 }
+TEST(ClientWrapperTest, BoundedSdkDoesNotStartAnotherChunkAfterDeadline) {
+    autil::EnvGuard enabled("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "1");
+    using namespace kv_cache_manager;
+    for (const bool is_read : {true, false}) {
+        unsigned char byte = 7;
+        RegistSpan span{&byte, 1};
+        InitObservation observation;
+        MockTransferClient* mock = nullptr;
+        auto client = initializeClient(false, "bounded_deadline", span, observation, std::make_shared<int>(0),
+                                        nullptr, nullptr, &mock);
+        ASSERT_NE(client, nullptr);
+        ASSERT_NE(mock, nullptr);
+        UriStrVec uris(120, "uri");
+        BlockBuffers buffers(120);
+        for (auto& block : buffers)
+            for (int i = 0; i < 19; ++i)
+                block.iovs.push_back({MemoryType::CPU, &byte, 1, false});
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+        auto finish_after_deadline = [&](const BlockBuffers& batch) {
+            EXPECT_LT(batch.size(), buffers.size());
+            std::this_thread::sleep_until(deadline + std::chrono::milliseconds(10));
+        };
+        auto completion = ClientWrapper::TransferCompletion::NOT_STARTED;
+        if (is_read) {
+            EXPECT_CALL(*mock, SaveKvCaches(_, _, _)).Times(0);
+            EXPECT_CALL(*mock, LoadKvCaches(_, _, _))
+                .WillOnce(Invoke([&](const auto&, auto& batch, const auto&) {
+                    finish_after_deadline(batch);
+                    return ClientErrorCode::ER_OK;
+                }));
+            EXPECT_EQ(client->loadKvCachesForTagWithStatus("default", uris, buffers, nullptr, &completion, deadline),
+                      ClientErrorCode::ER_SDK_TIMEOUT);
+        } else {
+            EXPECT_CALL(*mock, LoadKvCaches(_, _, _)).Times(0);
+            EXPECT_CALL(*mock, SaveKvCaches(_, _, _))
+                .WillOnce(Invoke([&](const auto&, const auto& batch, const auto&) {
+                    finish_after_deadline(batch);
+                    return std::make_pair(ClientErrorCode::ER_OK, UriStrVec{});
+                }));
+            const auto result =
+                client->saveKvCachesForTagWithStatus("default", uris, buffers, nullptr, &completion, deadline);
+            EXPECT_EQ(result.first, ClientErrorCode::ER_SDK_TIMEOUT);
+            EXPECT_TRUE(result.second.empty());
+        }
+        EXPECT_EQ(completion, ClientWrapper::TransferCompletion::BUFFER_SAFE);
+        client->shutdown();
+    }
+}
+
 TEST(ClientWrapperTest, BoundedSdkStopsOnFailureAndRejectsUnsafeGeometry) {
     autil::EnvGuard enabled("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "1");
     using namespace kv_cache_manager;

@@ -34,7 +34,7 @@ using ::testing::Invoke;
 using ::testing::Return;
 
 // Test-only observation of backend-owned I/O completion; not a write mode or
-// a BlockTree task-pool workflow barrier. The fixtures submit no concurrent I/O.
+// a BlockTree task-pool workflow barrier.
 [[maybe_unused]] bool waitForBackendOperationsForTest(StorageBackend& backend) {
     std::unique_lock<std::mutex> lock(backend.lifecycle_mutex_);
     return backend.lifecycle_cv_.wait_for(lock, std::chrono::seconds(5), [&] { return backend.in_flight_ == 0; });
@@ -67,6 +67,7 @@ public:
         }
         auto* remote_response = response->mutable_remote_response();
         remote_response->set_transfer_status(REMOTE_TRANSFER_STATUS_SUCCESS);
+        remote_response->set_payload_buffer_safe(true);
         if (remote_request.op() == REMOTE_OPERATION_WRITE) {
             for (int index = 0; index < remote_request.uris_size(); ++index) {
                 remote_response->add_actual_uris("actual_rank_" + std::to_string(rank_) + "_" + std::to_string(index));
@@ -118,7 +119,14 @@ snapshotRequests(const std::shared_ptr<KVCMBroadcastState>& state) {
 
 class MockClientWrapper final: public kvcm::ClientWrapper {
 public:
-    MockClientWrapper(): ClientWrapper(std::make_unique<kvcm::MockClientFactory>()) {}
+    MockClientWrapper(): ClientWrapper(std::make_unique<kvcm::MockClientFactory>()) {
+        ON_CALL(*this, abortWrite(_, _, _)).WillByDefault(Invoke(
+            [this](const std::string& id, const std::string& trace, const std::string& session) {
+                return finishWrite(id, trace, session, kv_cache_manager::BlockMaskOffset{0}, {});
+            }));
+    }
+
+    MOCK_METHOD(bool, abortWrite, (const std::string&, const std::string&, const std::string&), (override));
 
     std::optional<kv_cache_manager::ClientErrorCode> load_status;
     std::optional<kv_cache_manager::ClientErrorCode> save_status;
@@ -187,12 +195,17 @@ public:
                                  const kv_cache_manager::UriStrVec&                          uris,
                                  kv_cache_manager::BlockBuffers&                             buffers,
                                  const std::shared_ptr<kv_cache_manager::TransferTraceInfo>& trace_info,
-                                 TransferCompletion* completion = nullptr) override {
+                                 TransferCompletion* completion = nullptr,
+                                 std::optional<std::chrono::steady_clock::time_point> = std::nullopt) override {
+        if (completion)
+            *completion = TransferCompletion::NOT_STARTED;
         if (load_status.has_value()) {
             if (completion)
                 *completion = sdkResultCompletion(*load_status);
             return *load_status;
         }
+        if (completion)
+            *completion = TransferCompletion::UNKNOWN;
         const auto ec = loadKvCachesForTag(tag, uris, buffers, trace_info) ?
                             kv_cache_manager::ClientErrorCode::ER_OK :
                             kv_cache_manager::ClientErrorCode::ER_SDKREAD_ERROR;
@@ -205,12 +218,17 @@ public:
                                  const kv_cache_manager::UriStrVec&                          uris,
                                  const kv_cache_manager::BlockBuffers&                       buffers,
                                  const std::shared_ptr<kv_cache_manager::TransferTraceInfo>& trace_info,
-                                 TransferCompletion* completion = nullptr) override {
+                                 TransferCompletion* completion = nullptr,
+                                 std::optional<std::chrono::steady_clock::time_point> = std::nullopt) override {
+        if (completion)
+            *completion = TransferCompletion::NOT_STARTED;
         if (save_status.has_value()) {
             if (completion)
                 *completion = sdkResultCompletion(*save_status);
             return {*save_status, {}};
         }
+        if (completion)
+            *completion = TransferCompletion::UNKNOWN;
         auto [success, result] = saveKvCachesForTag(tag, uris, buffers, trace_info);
         const auto ec =
             success ? kv_cache_manager::ClientErrorCode::ER_OK : kv_cache_manager::ClientErrorCode::ER_SDKWRITE_ERROR;
@@ -425,8 +443,8 @@ makeMultiGroupBackendEnvironment(const std::string& pool_name, size_t full_group
                                            const std::shared_ptr<MockClientWrapper>&  client_wrapper,
                                            std::shared_ptr<BroadcastManager>          broadcast_manager = nullptr,
                                            std::shared_ptr<kmonitor::MetricsReporter> metrics_reporter  = nullptr,
-                                           bool                                       gdr_enabled       = false) {
-    KVCacheConfig kv_cache_config;
+                                           bool                                       gdr_enabled       = false,
+                                           KVCacheConfig                              kv_cache_config   = {}) {
     kv_cache_config.kvcm_server_address = "unused-test-address";
     RuntimeConfig runtime_config;
     runtime_config.model_name = "kvcm_test_model";

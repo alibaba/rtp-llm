@@ -125,12 +125,6 @@ bool configureDecodePublication(const CacheTopology&                            
             completion_limits_.bytes, completion_limits_.jobs, std::move(snapshots), std::move(events));
         file_resolver_ = resolver;
     }
-    buffer_safe_failure_ = std::make_exception_ptr(StorageOperationBufferSafeFailure(
-        "KVCM operation failed before submission or after completed payload"));
-    completion_unknown_failure_ = std::make_exception_ptr(StorageOperationCompletionUnknown(
-        "KVCM payload completion unknown", StorageQuarantineReason::INVALID_RESPONSE));
-    completion_timeout_failure_ = std::make_exception_ptr(StorageOperationTimeout(
-        "KVCM payload transfer timed out", StorageQuarantineReason::SDK_TIMEOUT));
     return true;
 }
 
@@ -327,6 +321,7 @@ StorageRequest planCompletedDecode(const BatchKVCacheResource& resource, size_t 
 // with the same masks and FinishWrite rules. Only the source projection differs:
 // D owns all P peers' FULL pages and the unsliced native STATE/SWA page locally.
 std::vector<FunctionResponsePB> transferCompletedDecode(const std::vector<FunctionRequestPB>& requests,
+                                                       const TransferTask& task,
                                                        bool& transfer_attempted,
                                                        bool& source_may_be_touched) {
     setCudaDevice();
@@ -391,7 +386,7 @@ std::vector<FunctionResponsePB> transferCompletedDecode(const std::vector<Functi
             });
             const auto result = executeTagTransfers(
                 REMOTE_OPERATION_WRITE, batch.tags, batch.blocks, batch.uris, batch.buffers, response,
-                &source_may_be_touched, &transfer_attempted);
+                source_may_be_touched, &transfer_attempted, task);
             if (result == TransferResult::TIMEOUT) {
                 std::rethrow_exception(timeout);
             }
