@@ -22,6 +22,7 @@ import os
 import sys
 import unittest
 
+import numpy as np
 import torch
 import torch_npu  # noqa: F401 — registers NPU dispatch before any NPU ops
 
@@ -881,6 +882,264 @@ class TestAscendSampler(unittest.TestCase):
                 if not tok:
                     all_ok = False
         print(f"\n=== cross-run top_k+top_p joint: all_ok={all_ok} ===")
+
+
+def _one_hot_probs(ids_per_step, vocab):
+    """Build [bs, S, vocab] one-hot prob rows from ids [bs, S]."""
+    ids = np.asarray(ids_per_step)
+    bs, S = ids.shape
+    probs = np.zeros((bs, S, vocab), dtype=np.float32)
+    for b in range(bs):
+        for s in range(S):
+            probs[b, s, ids[b, s]] = 1.0
+    return probs
+
+
+def _rejection_reference(draft_ids, draft_probs, uniform, target_probs, target_tokens, do_sample, point_mass):
+    """NumPy reference for the Ascend rejectionSampling op (CUDA kernel semantics).
+
+    draft_ids [bs, K]; draft_probs [bs, K, V] or None (point_mass);
+    uniform [bs, K+1]; target_probs [bs, K+1, V]; target_tokens [bs, K+1];
+    do_sample [bs] bool.  Returns (out_ids [bs, K+1], accepted [bs]).
+    """
+    bs, K = np.asarray(draft_ids).shape
+    draft_ids = np.asarray(draft_ids)
+    uniform = np.asarray(uniform)
+    target_probs = np.asarray(target_probs)
+    target_tokens = np.asarray(target_tokens)
+    do_sample = np.asarray(do_sample)
+    V = target_probs.shape[2]
+    if point_mass:
+        draft_probs = np.zeros((bs, K, V), dtype=np.float32)
+        for b in range(bs):
+            for k in range(K):
+                draft_probs[b, k, draft_ids[b, k]] = 1.0
+    out = np.full((bs, K + 1), -1, dtype=np.int64)
+    acc = np.zeros(bs, dtype=np.int64)
+    for b in range(bs):
+        pos = K
+        for k in range(K):
+            d = int(draft_ids[b, k])
+            q = target_probs[b, k, d]
+            p = draft_probs[b, k, d]
+            u = uniform[b, k]
+            ok = (u * p) < q if do_sample[b] else (d == target_tokens[b, k])
+            if not ok:
+                pos = k
+                break
+        if pos == K:
+            out[b, :K] = draft_ids[b]
+            out[b, K] = target_tokens[b, K]        # bonus token
+        else:
+            out[b, :pos] = draft_ids[b, :pos]
+            if do_sample[b]:
+                residual = np.maximum(target_probs[b, pos] - draft_probs[b, pos], 0.0)
+                cdf = np.cumsum(residual)
+                total = cdf[-1]
+                u_next = uniform[b, min(pos + 1, K)]
+                recovered = int(np.sum(cdf < u_next * total))
+                out[b, pos] = min(recovered, V - 1)
+            else:
+                out[b, pos] = target_tokens[b, pos]
+        acc[b] = pos + 1
+    return out, acc
+
+
+class TestAscendRejectionSampling(unittest.TestCase):
+    """MTP rejection sampling / draft2target mapping on Ascend NPU.
+
+    Mirrors the CUDA/ROCm rejection_sampling_kernel contract:
+      accept d_i iff (do_sample && u*p < q) || (!do_sample && d_i == t_i)
+      out = accepted draft prefix, token at first reject, -1 tail;
+      all-accepted rows append the bonus target token at step K.
+    All cases use V=4; target token ids may exceed V (ids and probs are
+    independent inputs), draft ids must stay < V (gathered from probs).
+    """
+
+    VOCAB = 4
+
+    def _run(self, draft_ids, draft_probs, uniform, target_probs, target_tokens,
+             do_sample, point_mass=False, stride=1):
+        bs, K = np.asarray(draft_ids).shape
+        # target_token_ids layout: [bs*(K+1), stride], token in the LAST column.
+        tti = np.zeros((bs * (K + 1), stride), dtype=np.int32)
+        for b in range(bs):
+            for s in range(K + 1):
+                tti[b * (K + 1) + s, stride - 1] = target_tokens[b][s]
+
+        def npu(x, dtype):
+            return torch.tensor(np.asarray(x), dtype=dtype, device=NPU_DEVICE)
+
+        draft_probs_t = (npu(draft_probs, torch.float32)
+                         if draft_probs is not None else torch.Tensor())
+        out_t = torch.full((bs, K + 1), -7, dtype=torch.int32, device=NPU_DEVICE)
+        acc_t = torch.full((bs,), -7, dtype=torch.int32, device=NPU_DEVICE)
+        sampler_test_module.exec_rejection_sampling(
+            draft_probs_t,
+            npu(draft_ids, torch.int32),
+            npu(uniform, torch.float32),
+            npu(target_probs, torch.float32),
+            npu(tti, torch.int32),
+            out_t,
+            acc_t,
+            npu(do_sample, torch.bool),
+            point_mass,
+        )
+        torch.npu.synchronize()
+        return out_t.cpu().numpy(), acc_t.cpu().numpy()
+
+    def _check(self, **kw):
+        point_mass = kw.pop("point_mass", False)
+        stride = kw.pop("stride", 1)
+        ref_out, ref_acc = _rejection_reference(point_mass=point_mass, **kw)
+        out, acc = self._run(point_mass=point_mass, stride=stride, **kw)
+        np.testing.assert_array_equal(out, ref_out)
+        np.testing.assert_array_equal(acc, ref_acc)
+        return out, acc
+
+    def test_greedy_prefix_then_reject(self):
+        # row0: draft [1,2] vs target [1,3,0] -> accept 1, reject at pos1
+        # row1: draft [1,2] vs target [1,2,7] -> all accepted, bonus 7 (>V is fine)
+        target_tokens = [[1, 3, 0], [1, 2, 7]]
+        # probs for the bonus step are irrelevant (bonus id comes from
+        # target_token_ids); keep one-hot ids inside V=4.
+        target_probs = _one_hot_probs([[1, 3, 0], [1, 2, 3]], self.VOCAB)
+        out, acc = self._check(
+            draft_ids=[[1, 2], [1, 2]],
+            draft_probs=_one_hot_probs([[1, 2], [1, 2]], self.VOCAB),
+            uniform=[[0.0] * 3] * 2,
+            target_probs=target_probs,
+            target_tokens=target_tokens,
+            do_sample=[False, False],
+        )
+        np.testing.assert_array_equal(out, [[1, 3, -1], [1, 2, 7]])
+        np.testing.assert_array_equal(acc, [2, 3])
+
+    def test_greedy_immediate_reject(self):
+        # draft[0]=3 != target[0]=0 -> pos=0, out = [target[0], -1, -1]
+        out, acc = self._check(
+            draft_ids=[[3, 0]],
+            draft_probs=_one_hot_probs([[3, 0]], self.VOCAB),
+            uniform=[[0.0] * 3],
+            target_probs=_one_hot_probs([[0, 1, 2]], self.VOCAB),
+            target_tokens=[[0, 1, 2]],
+            do_sample=[False],
+        )
+        np.testing.assert_array_equal(out, [[0, -1, -1]])
+        np.testing.assert_array_equal(acc, [1])
+
+    def test_stochastic_accept_then_reject(self):
+        # step0: p=q=1 at token1, u=0.5 -> 0.5<1 accept
+        # step1: p=1 at token2 but q(2)=0, u=0.5 -> reject; recover from
+        # relu(onehot(3) - onehot(2)) = [0,0,0,1], cdf=[0,0,0,1], u'=0.5 -> idx 3
+        target_probs = np.zeros((1, 3, self.VOCAB), dtype=np.float32)
+        target_probs[0, 0, 1] = 1.0          # q(draft0)=1
+        target_probs[0, 1, 3] = 1.0          # q(draft1)=0, mass on 3
+        target_probs[0, 2, 0] = 1.0
+        out, acc = self._check(
+            draft_ids=[[1, 2]],
+            draft_probs=_one_hot_probs([[1, 2]], self.VOCAB),
+            uniform=[[0.5, 0.5, 0.5]],
+            target_probs=target_probs,
+            target_tokens=[[9, 9, 9]],
+            do_sample=[True],
+        )
+        np.testing.assert_array_equal(out, [[1, 3, -1]])
+        np.testing.assert_array_equal(acc, [2])
+
+    def test_stochastic_all_accepted_bonus(self):
+        # u*p < q holds on every step (u=0, q=0.25) -> pos=K, bonus=3
+        out, acc = self._check(
+            draft_ids=[[2, 1]],
+            draft_probs=_one_hot_probs([[2, 1]], self.VOCAB),
+            uniform=[[0.0, 0.0, 0.0]],
+            target_probs=np.full((1, 3, self.VOCAB), 0.25, dtype=np.float32),
+            target_tokens=[[7, 7, 3]],
+            do_sample=[True],
+        )
+        np.testing.assert_array_equal(out, [[2, 1, 3]])
+        np.testing.assert_array_equal(acc, [3])
+
+    def test_point_mass_matches_explicit_one_hot(self):
+        # draft_probs_point_mass synthesizes one-hot rows: must equal the
+        # explicit one-hot draft_probs result.
+        draft_ids = [[1, 2], [0, 3]]
+        uniform = [[0.5, 0.5, 0.5], [0.9, 0.1, 0.5]]
+        target_probs = np.zeros((2, 3, self.VOCAB), dtype=np.float32)
+        target_probs[0, 0, 1] = 1.0
+        target_probs[0, 1, 3] = 1.0
+        target_probs[1] = 0.25
+        common = dict(
+            draft_ids=draft_ids,
+            uniform=uniform,
+            target_probs=target_probs,
+            target_tokens=[[9, 9, 9], [9, 9, 9]],
+            do_sample=[True, True],
+        )
+        out, acc = self._check(draft_probs=None, point_mass=True, **common)
+        out2, acc2 = self._check(
+            draft_probs=_one_hot_probs(draft_ids, self.VOCAB), **common)
+        np.testing.assert_array_equal(out, out2)
+        np.testing.assert_array_equal(acc, acc2)
+
+    def test_mixed_batch_greedy_and_stochastic(self):
+        # row0 greedy: reject at 1 -> [1, 3, -1]
+        # row1 stochastic: u*p(1)<q(1) on both steps -> all accepted, bonus 7
+        target_tokens = [[1, 3, 0], [1, 2, 7]]
+        target_probs = np.zeros((2, 3, self.VOCAB), dtype=np.float32)
+        target_probs[0, 0, 1] = 1.0
+        target_probs[0, 1, 3] = 1.0
+        target_probs[0, 2, 0] = 1.0
+        target_probs[1, 0, 1] = 1.0
+        target_probs[1, 1, 2] = 1.0
+        target_probs[1, 2, 3] = 1.0
+        out, acc = self._check(
+            draft_ids=[[1, 2], [1, 2]],
+            draft_probs=_one_hot_probs([[1, 2], [1, 2]], self.VOCAB),
+            uniform=[[0.5, 0.5, 0.5], [0.5, 0.5, 0.5]],
+            target_probs=target_probs,
+            target_tokens=target_tokens,
+            do_sample=[False, True],
+        )
+        np.testing.assert_array_equal(out, [[1, 3, -1], [1, 2, 7]])
+        np.testing.assert_array_equal(acc, [2, 3])
+
+    def test_stride3_target_token_layout(self):
+        # target_token_ids uses stride 3: token must be read from the LAST
+        # column of each stride slot, not the first.
+        target_tokens = [[1, 3, 0]]
+        out, acc = self._check(
+            draft_ids=[[1, 2]],
+            draft_probs=_one_hot_probs([[1, 2]], self.VOCAB),
+            uniform=[[0.0] * 3],
+            target_probs=_one_hot_probs(target_tokens, self.VOCAB),
+            target_tokens=target_tokens,
+            do_sample=[False],
+            stride=3,
+        )
+        np.testing.assert_array_equal(out, [[1, 3, -1]])
+        np.testing.assert_array_equal(acc, [2])
+
+    def test_mapping_draft2_target(self):
+        # tokens [bs, 5]; map window columns [1, 3); d2t_map[i] = i + 10
+        tokens = np.array([[0, 1, 2, 3, 4],
+                           [5, 100, 3, 200, 6]], dtype=np.int64)
+        d2t_map = torch.arange(10, dtype=torch.int64, device=NPU_DEVICE) + 10
+        tokens_t = torch.tensor(tokens, device=NPU_DEVICE)
+        sampler_test_module.exec_mapping_draft2_target(tokens_t, d2t_map, 2, 1, 3)
+        torch.npu.synchronize()
+        got = tokens_t.cpu().numpy()
+        # column 1/2 mapped (+10); 100 out of range -> passthrough; others untouched
+        np.testing.assert_array_equal(got, [[0, 11, 12, 3, 4],
+                                            [5, 100, 13, 200, 6]])
+
+    def test_mapping_empty_map_is_noop(self):
+        tokens = np.array([[1, 2, 3]], dtype=np.int64)
+        tokens_t = torch.tensor(tokens, device=NPU_DEVICE)
+        empty = torch.empty(0, dtype=torch.int64, device=NPU_DEVICE)
+        sampler_test_module.exec_mapping_draft2_target(tokens_t, empty, 1, 0, 3)
+        torch.npu.synchronize()
+        np.testing.assert_array_equal(tokens_t.cpu().numpy(), tokens)
 
 
 if __name__ == "__main__":

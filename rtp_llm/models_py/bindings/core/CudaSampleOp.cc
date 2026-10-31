@@ -819,12 +819,106 @@ torch::Tensor sampleFromProbs(const torch::Tensor&) {
     return {};
 }
 
-void rejectionSampling(const RejectionSamplingParams&) {
-    RTP_LLM_CHECK_WITH_INFO(false, "rejection sampling currently requires CUDA");
+void rejectionSampling(const RejectionSamplingParams& params) {
+    // Plain torch ops mirroring the CUDA/ROCm rejection_sampling_kernel:
+    //   accept draft d_i iff (do_sample && u * p < q) || (!do_sample && d_i == t_i)
+    //   pos = first rejected position (K when all accepted)
+    //   all accepted: bonus token = target token at step K
+    //   do_sample reject: token at pos sampled from relu(target - draft)
+    //   greedy reject: token at pos = target token
+    //   output_accepted_token_num = pos + 1, tail slots after pos filled with -1
+    auto draft_ids  = params.draft_token_ids_d.to(torch::kLong);   // [bs, K]
+    auto uniform    = params.uniform_samples_d.to(torch::kFloat);  // [bs, K+1]
+    auto target     = params.target_probs_d.to(torch::kFloat);     // [bs, K+1, V]
+    auto target_ids = params.target_token_ids_d.to(torch::kLong);  // [bs, (K+1)*stride]
+    auto do_sample  = params.do_sample_d;                           // [bs]
+
+    const int64_t bs = draft_ids.size(0);
+    const int64_t K  = draft_ids.size(1);
+    if (bs == 0 || K == 0) {
+        return;
+    }
+    const int64_t V = target.size(2);
+
+    // Point-mass proposals carry no draft_probs; synthesize the one-hot rows.
+    torch::Tensor draft_probs;
+    if (params.draft_probs_point_mass) {
+        auto vocab_arange = torch::arange(V, draft_ids.options());
+        draft_probs       = (vocab_arange.view({1, 1, V}) == draft_ids.unsqueeze(-1)).to(torch::kFloat);
+    } else {
+        draft_probs = params.draft_probs_d.to(torch::kFloat);      // [bs, K, V]
+    }
+
+    // Per-step target token: last column of each stride slot.
+    auto t_tok = target_ids.view({bs, K + 1, -1}).select(2, -1);    // [bs, K+1]
+
+    auto idx    = draft_ids.unsqueeze(-1);                            // [bs, K, 1]
+    auto q      = target.slice(1, 0, K).gather(-1, idx).squeeze(-1);  // [bs, K] P_target(d_i)
+    auto p      = draft_probs.gather(-1, idx).squeeze(-1);            // [bs, K] P_draft(d_i)
+    auto u      = uniform.slice(1, 0, K);                             // [bs, K]
+    auto accept = torch::where(do_sample.unsqueeze(1), (u * p) < q, draft_ids.eq(t_tok.slice(1, 0, K)));
+
+    // pos = first rejected position (K when all accepted): the accepted
+    // prefix is the set of positions whose rejection count is still 0.
+    auto reject_cnt  = accept.logical_not().to(torch::kInt32).cumsum(1);  // [bs, K]
+    auto prefix_mask = reject_cnt.eq(0);                                  // [bs, K]
+    auto pos         = prefix_mask.to(torch::kLong).sum(1);               // [bs]
+
+    // ---- token at the first rejected position (stochastic rows) ----
+    // residual r[v] = max(target[b,pos,v] - draft[b,pos,v], 0);
+    // sampled index = #{v : cumsum(r)[v] < u' * sum(r)}  (inverse CDF)
+    auto pos_safe     = pos.clamp_max(K - 1);
+    auto gather_idx   = pos_safe.view({bs, 1, 1}).expand({bs, 1, V});
+    auto q_row        = target.gather(1, gather_idx).squeeze(1);    // [bs, V]
+    auto p_row        = draft_probs.gather(1, gather_idx).squeeze(1);  // [bs, V]
+    auto residual     = (q_row - p_row).clamp_min(0.0);             // [bs, V]
+    auto cdf          = residual.cumsum(-1);                        // [bs, V]
+    auto residual_sum = cdf.select(-1, V - 1);                      // [bs]
+    auto u_next       = uniform.gather(1, (pos + 1).clamp_max(K).unsqueeze(1)).squeeze(1);  // [bs]
+    auto recovered    = (cdf < (u_next * residual_sum).unsqueeze(1)).to(torch::kLong).sum(-1);  // [bs]
+    recovered         = recovered.clamp_max(V - 1);
+    recovered         = torch::where(pos.lt(K), recovered, torch::full_like(recovered, -1));
+
+    // ---- assemble output [bs, K+1] ----
+    auto t_at_pos = t_tok.gather(1, pos.clamp_max(K).unsqueeze(1)).squeeze(1);  // [bs]
+    auto tok_pos  = torch::where(do_sample, recovered, t_at_pos);
+    tok_pos       = torch::where(pos.eq(K), t_at_pos, tok_pos);     // all-accepted: bonus token
+
+    auto id_opts   = torch::TensorOptions().dtype(torch::kLong).device(draft_ids.device());
+    auto cols      = torch::arange(K + 1, id_opts).unsqueeze(0);    // [1, K+1]
+    auto fill_pre  = cols.lt(pos.unsqueeze(1));                     // [bs, K+1] i < pos
+    auto at_pos    = cols.eq(pos.unsqueeze(1));                     // [bs, K+1] i == pos
+    auto draft_ext = torch::cat({draft_ids, torch::full({bs, 1}, -1, id_opts)}, 1);  // [bs, K+1]
+    auto neg_one   = torch::full_like(draft_ext, -1);               // [bs, K+1]
+    auto out_ids   = torch::where(fill_pre,
+                                  draft_ext,
+                                  torch::where(at_pos,
+                                               tok_pos.unsqueeze(1).expand({bs, K + 1}),
+                                               neg_one));           // [bs, K+1]
+
+    params.output_token_ids_d.copy_(out_ids.to(params.output_token_ids_d.dtype()));
+    params.output_accepted_token_num_d.copy_((pos + 1).to(params.output_accepted_token_num_d.dtype()));
 }
 
-void mappingDraft2Target(const MappingDraft2TargetParams&) {
-    RTP_LLM_CHECK_WITH_INFO(false, "mappingDraft2Target currently requires CUDA");
+void mappingDraft2Target(const MappingDraft2TargetParams& params) {
+    // Mirror the CUDA kernel: map the [token_offset, token_stride) column
+    // window of each row through d2t_map; ids outside [0, map_size) pass
+    // through unchanged. Empty map is a no-op.
+    if (!params.d2t_map.defined() || params.d2t_map.numel() == 0) {
+        return;
+    }
+    RTP_LLM_CHECK_WITH_INFO(params.tokens.dtype() == torch::kInt32 || params.tokens.dtype() == torch::kInt64,
+                            "mappingDraft2Target: unsupported token dtype");
+    const int64_t map_size = params.d2t_map.numel();
+    auto window   = params.tokens.narrow(1, params.token_offset, params.token_stride - params.token_offset);
+    auto ids      = window.to(torch::kLong);
+    auto in_range = (ids >= 0) & (ids < map_size);
+    // NPU index_select only accepts 1-D indices: flatten, gather, restore shape.
+    auto ids_flat    = ids.reshape(-1).clamp(0, map_size - 1);
+    auto mapped_flat = params.d2t_map.index_select(0, ids_flat);
+    auto mapped      = mapped_flat.reshape(ids.sizes());
+    mapped           = torch::where(in_range, mapped, ids);
+    window.copy_(mapped.to(params.tokens.dtype()));
 }
 
 
