@@ -118,7 +118,6 @@ from rtp_llm.models_py.modules.dsv41.kv_cache_utils import (
     create_tagged_cache_store_writer,
     device_attention_metadata,
     host_block_table_for_tag,
-    host_block_tables,
 )
 from rtp_llm.models_py.modules.dsv41.prefill.ced import CEDPlan, permits_ced
 from rtp_llm.models_py.modules.dsv41.prefill_workspace import (
@@ -651,18 +650,6 @@ def forward_layers(
     layer_forward_range = _profiler.make_layer_forward_range()
     original_cp_ctx = cp_ctx
     try:
-        if shared_prefill is not None and _env_flag("RTP_V41_BATCHED_PRODUCER"):
-            host_tables = host_block_tables(kv_cache, attn_inputs)
-            if (
-                kv_cache is not None
-                and isinstance(host_tables, torch.Tensor)
-                and host_tables.device.type == "cpu"
-                and host_tables.ndim == 3
-            ):
-                shared_prefill["prefill_producer_host_tables"] = (
-                    tuple(kv_cache.group_tags),
-                    host_tables,
-                )
         ced_in_l20 = False
         with record_range_ctx():
             # Two callable chains intentionally coexist:

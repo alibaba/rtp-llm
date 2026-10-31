@@ -1,12 +1,16 @@
 """Logical ownership, bounded scratch, and byte-exact owned-row transport."""
 
 import random
+import tempfile
 import unittest
 from contextlib import nullcontext
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
 import torch
+import torch.distributed as dist
+import torch.multiprocessing as mp
 import triton
 
 from rtp_llm.models_py.modules.dsv4.fp8._cp_slot_mapping import cp_kv_slot_mapping
@@ -30,8 +34,28 @@ class OwnedPoolHostTest(unittest.TestCase):
                 None,
                 layout,
                 None,
-                oversized=True,
             )
+
+    def test_try_gather_uses_segmented_plan_after_common_plan_rejects(self):
+        layout = (1, 256, 128, 128, 0, torch.int32, torch.int32, 128, 128, 4)
+        plan, result = object(), object()
+        with (
+            patch.object(owned, "plan_groups", return_value=None) as common,
+            patch.object(
+                owned, "plan_segmented_groups", return_value=plan
+            ) as segmented,
+            patch.object(owned, "_validate_local"),
+            patch.object(owned, "_gather_planned", return_value=result) as gather,
+        ):
+            self.assertIs(
+                owned.try_gather(
+                    None, None, (600_001,), None, None, None, layout, object()
+                ),
+                result,
+            )
+        common.assert_called_once_with((600_001,), cp_size=4, owner_rows=256)
+        segmented.assert_called_once_with((600_001,), cp_size=4, owner_rows=256)
+        self.assertIs(gather.call_args.args[8], plan)
 
     def test_segmented_plan_covers_mixed_requests_with_bounded_scratch(self):
         for cp in (1, 2, 4):
@@ -39,8 +63,9 @@ class OwnedPoolHostTest(unittest.TestCase):
                 unit = 256 // ratio
                 counts = (0, 17, 600_001, 0, 257, 1_200_003, 1)
                 for tier in (256, 512, 1024):
-                    with self.subTest(cp=cp, ratio=ratio, tier=tier), patch.object(
-                        owned, "_MAX_SCRATCH_MB", tier
+                    with (
+                        self.subTest(cp=cp, ratio=ratio, tier=tier),
+                        patch.object(owned, "_MAX_SCRATCH_MB", tier),
                     ):
                         plan = owned.plan_segmented_groups(
                             counts, cp_size=cp, owner_rows=unit
@@ -73,42 +98,53 @@ class OwnedPoolHostTest(unittest.TestCase):
                                 cursor = end
                             self.assertEqual(cursor, count)
 
-    def test_adaptive_scratch_uses_smallest_tier_for_fewest_groups(self):
-        with patch.object(owned, "_MAX_SCRATCH_MB", 1024):
-            for cp, ratio, batch, count, groups, max_mb in (
-                (4, 1, 16, 32768, 1, 256),
-                (4, 1, 32, 32768, 1, 512),
-                (4, 1, 64, 32768, 1, 1024),
-                (4, 2, 64, 16384, 1, 512),
-                (2, 1, 32, 32768, 1, 1024),
-                (1, 1, 64, 32768, 1, 1024),
-            ):
-                with self.subTest(cp=cp, ratio=ratio, batch=batch):
-                    plan = owned.adaptive_plan_groups(
-                        (count,) * batch, cp_size=cp, owner_rows=256 // ratio
-                    )
-                    self.assertEqual(len(plan.groups), groups)
-                    self.assertLessEqual(plan.temporary_bytes, max_mb * 1024**2)
-                    if max_mb > 256:
-                        previous = owned.plan_groups(
-                            (count,) * batch,
-                            cp_size=cp,
-                            owner_rows=256 // ratio,
-                            limit=max_mb // 2 * 1024**2,
-                        )
-                        self.assertGreater(len(previous.groups), groups)
-            self.assertIsNone(
-                owned.adaptive_plan_groups((1_048_576,), cp_size=4, owner_rows=256)
+    def test_segmented_plan_preserves_global_request_ids_across_128(self):
+        counts = (1,) * 128 + (600_001,) + (0,) * 895
+        with patch.object(owned, "_MAX_SCRATCH_MB", 256):
+            plan = owned.plan_segmented_groups(counts, cp_size=4, owner_rows=256)
+        self.assertIsNotNone(plan)
+        self.assertLessEqual(plan.temporary_bytes, 256 * 1024**2)
+        self.assertEqual(plan.groups[0].first, 0)
+        self.assertEqual(plan.groups[0].stop, 128)
+        self.assertTrue(
+            all(
+                group.first == 128 and group.stop == 129
+                for group in plan.groups
+                if group.base >= 0
             )
-            with patch.object(owned, "_MAX_SCRATCH_MB", 256):
-                self.assertEqual(
-                    len(
-                        owned.adaptive_plan_groups(
-                            (32768,) * 64, cp_size=4, owner_rows=256
-                        ).groups
-                    ),
-                    4,
-                )
+        )
+        self.assertEqual(plan.groups[-1].stop, 1024)
+        self.assertTrue(all(group.stop - group.first <= 128 for group in plan.groups))
+
+    def test_fixed_scratch_budget_covers_production_and_segmented_edges(self):
+        for tier, batch, count, groups in (
+            (256, 16, 32768, 1),
+            (256, 32, 32768, 2),
+            (256, 64, 32768, 4),
+            (512, 32, 32768, 1),
+            (512, 64, 32768, 2),
+            (1024, 64, 32768, 1),
+            (1024, 1024, 2, 8),
+        ):
+            with (
+                self.subTest(tier=tier, batch=batch, count=count),
+                patch.object(owned, "_MAX_SCRATCH_MB", tier),
+            ):
+                plan = owned.plan_groups((count,) * batch, cp_size=4, owner_rows=256)
+                self.assertIsNotNone(plan)
+                self.assertEqual(len(plan.groups), groups)
+                self.assertLessEqual(plan.temporary_bytes, tier * 1024**2)
+        with patch.object(owned, "_MAX_SCRATCH_MB", 256):
+            self.assertIsNone(
+                owned.plan_groups((1_048_576,), cp_size=4, owner_rows=256)
+            )
+            self.assertIsNotNone(
+                owned.plan_segmented_groups((1_048_576,), cp_size=4, owner_rows=256)
+            )
+        with patch.object(owned, "_MAX_SCRATCH_MB", 1024):
+            self.assertIsNotNone(
+                owned.plan_groups((1_048_576,), cp_size=4, owner_rows=256)
+            )
 
     def test_unsupported_plan_does_not_allocate_consumer_output(self):
         from rtp_llm.models_py.modules.dsv41.fp8 import _v41_prefill_kv_workspace
@@ -118,7 +154,7 @@ class OwnedPoolHostTest(unittest.TestCase):
             "prepare_global_workspace",
             side_effect=AssertionError("fallback allocated an unused full KV output"),
         ):
-            for cp, ends in ((8, (129,)), (4, (1_000_000,))):
+            for cp, ends in ((8, (129,)), (4, (1,) * 1025)):
                 layout = (1, 256, 128, 128, 0, torch.int32, torch.int32, 128, 128, cp)
                 self.assertIsNone(
                     owned.try_gather(
@@ -166,18 +202,21 @@ class OwnedPoolHostTest(unittest.TestCase):
     def test_global_scratch_bound_and_tail_only_padding(self):
         rng = random.Random(1903)
         for cp in (1, 2, 4):
-            for batch in (1, 2, 31, 32, 64, 128):
+            for batch in (1, 2, 31, 32, 64, 128, 129, 257, 1024):
                 for counts in (
                     (32768,) * batch,
                     tuple(rng.randrange(32769) for _ in range(batch)),
                     (0,) * batch,
                 ):
-                    plan = owned.plan_groups(counts, cp_size=cp, owner_rows=128)
+                    plan = owned.plan_groups(
+                        counts, cp_size=cp, owner_rows=128, limit=256 * 1024**2
+                    )
                     self.assertIsNotNone(plan)
-                    self.assertLessEqual(plan.temporary_bytes, owned._LIMIT)
+                    self.assertLessEqual(plan.temporary_bytes, 256 * 1024**2)
                     cursor = 0
                     for group in plan.groups:
                         self.assertEqual(group.first, cursor)
+                        self.assertLessEqual(group.stop - group.first, 128)
                         ns = counts[group.first : group.stop]
                         self.assertEqual(
                             group.rows, sum(triton.cdiv(n, 256) * 256 for n in ns)
@@ -218,10 +257,13 @@ class OwnedPoolHostTest(unittest.TestCase):
             (64, 2, (35, 29)),
         ):
             plan = owned.plan_groups(
-                (32768 // ratio,) * batch, cp_size=4, owner_rows=256 // ratio
+                (32768 // ratio,) * batch,
+                cp_size=4,
+                owner_rows=256 // ratio,
+                limit=256 * 1024**2,
             )
             self.assertEqual(tuple(g.stop - g.first for g in plan.groups), groups)
-            self.assertLessEqual(plan.temporary_bytes, owned._LIMIT)
+            self.assertLessEqual(plan.temporary_bytes, 256 * 1024**2)
 
     def test_padded_tiles_remain_in_one_request_for_ragged_and_empty_rows(self):
         rng = random.Random(137)
@@ -245,7 +287,7 @@ class OwnedPoolHostTest(unittest.TestCase):
     def test_common_unsupported_and_oversized_geometry(self):
         for counts, cp, unit in (
             ((), 4, 128),
-            ((1,) * 129, 4, 128),
+            ((1,) * 1025, 4, 128),
             ((-1,), 4, 128),
             ((1,), 3, 128),
             ((1,), 4, 0),
@@ -261,9 +303,9 @@ class OwnedPoolHostTest(unittest.TestCase):
         self.assertIs(plan, owned.plan_groups(tuple(counts), cp_size=4, owner_rows=128))
         counts[1] = 514
         cases = (
-            (tuple(counts), 4, 128, owned._LIMIT),
-            ((127, 513), 2, 128, owned._LIMIT),
-            ((127, 513), 4, 64, owned._LIMIT),
+            (tuple(counts), 4, 128, 256 * 1024**2),
+            ((127, 513), 2, 128, 256 * 1024**2),
+            ((127, 513), 4, 64, 256 * 1024**2),
             ((127, 513), 4, 128, 400000),
         )
         for values, cp, unit, limit in cases:
@@ -278,11 +320,11 @@ class OwnedPoolHostTest(unittest.TestCase):
         self.addCleanup(owned._plan_groups_cached.cache_clear)
         owned.plan_groups((1,), cp_size=4, owner_rows=128)
         before = owned._plan_groups_cached.cache_info()
-        for counts in ((True,), (1.0,), ([],), (-1,), (), (1,) * 129):
+        for counts in ((True,), (1.0,), ([],), (-1,), (), (1,) * 1025):
             self.assertIsNone(owned.plan_groups(counts, cp_size=4, owner_rows=128))
         self.assertEqual(owned._plan_groups_cached.cache_info(), before)
         # Preserve existing unusual scalar behavior without retaining it.
-        for cp, limit in ((True, owned._LIMIT), (1, float(owned._LIMIT))):
+        for cp, limit in ((True, 256 * 1024**2), (1, float(256 * 1024**2))):
             self.assertEqual(
                 owned.plan_groups((1,), cp_size=cp, owner_rows=128, limit=limit),
                 owned._plan_groups_cached.__wrapped__((1,), cp, 128, limit),
@@ -519,7 +561,7 @@ class OwnedPoolCudaTest(unittest.TestCase):
                 counts,
                 cp_size=cp_size,
                 owner_rows=owner_rows,
-                limit=limit or owned._LIMIT,
+                limit=limit or owned._MAX_SCRATCH_MB * 1024**2,
             )
 
         plan = (
@@ -571,10 +613,14 @@ class OwnedPoolCudaTest(unittest.TestCase):
                 if segmented
                 else patch.object(owned, "plan_groups", plan_fn)
             )
-            with planner_patch, patch.object(owned, "_collect", collect), patch.object(
-                triton.runtime.jit.JITFunction,
-                "_do_compile",
-                side_effect=AssertionError("hot-path JIT"),
+            with (
+                planner_patch,
+                patch.object(owned, "_collect", collect),
+                patch.object(
+                    triton.runtime.jit.JITFunction,
+                    "_do_compile",
+                    side_effect=AssertionError("hot-path JIT"),
+                ),
             ):
                 actual = pools.try_gather_prefill_pools(
                     attn, main, index, host, ends, workspace=workspace
@@ -606,6 +652,11 @@ class OwnedPoolCudaTest(unittest.TestCase):
                                 segmented=True,
                             )
 
+    def test_fixed_budget_long_mixed_request_preserves_output_bits(self):
+        counts = (0, 17, 600_001, 257, 0)
+        self.assertIsNone(pools._request_groups(counts))
+        self.check(counts, 4, 1, direct=True, segmented=True)
+
     def test_segmented_other_cp_sizes_preserve_output_bits(self):
         with patch.object(owned, "_MAX_SCRATCH_MB", 256):
             for cp, count in ((1, 900_001), (2, 600_001)):
@@ -627,6 +678,12 @@ class OwnedPoolCudaTest(unittest.TestCase):
         for counts in ((257,), (0, 0), tuple(129 + i for i in range(32)), (1,) * 128):
             with self.subTest(batch=len(counts)):
                 self.check(counts, 4, 2, limit=400000)
+
+    def test_large_batches_use_owned_groups_across_metadata_boundary(self):
+        for batch in (129, 1024):
+            for ratio in (1, 2):
+                with self.subTest(batch=batch, ratio=ratio):
+                    self.check((1,) * batch, 4, ratio)
 
     def test_table_dtypes_and_non_direct_output(self):
         for dtype in (torch.int32, torch.int64):
@@ -840,10 +897,13 @@ class OwnedPoolCudaTest(unittest.TestCase):
                 stream.wait_stream(torch.cuda.current_stream())
                 # Fixed host geometry must re-read pool bytes and metadata on replay.
                 graph = torch.cuda.CUDAGraph()
-                with torch.cuda.stream(stream), patch.object(
-                    triton.runtime.jit.JITFunction,
-                    "_do_compile",
-                    side_effect=AssertionError("hot-path JIT"),
+                with (
+                    torch.cuda.stream(stream),
+                    patch.object(
+                        triton.runtime.jit.JITFunction,
+                        "_do_compile",
+                        side_effect=AssertionError("hot-path JIT"),
+                    ),
                 ):
                     with torch.cuda.graph(graph, stream=stream):
                         actual = pools.try_gather_prefill_pools(
@@ -881,6 +941,61 @@ class OwnedPoolCudaTest(unittest.TestCase):
         ):
             with self.assertRaisesRegex(RuntimeError, "transport witness"):
                 pools.try_gather_prefill_pools(*ranks[0], host, ends)
+
+
+def _owned_nccl_worker(rank, rendezvous):
+    torch.cuda.set_device(rank)
+    dist.init_process_group(
+        "nccl", init_method="file://" + rendezvous, rank=rank, world_size=4
+    )
+    try:
+        from rtp_llm.models_py.distributed import collective_torch
+
+        probe = OwnedPoolCudaTest()
+        for counts, ratio, budget in (
+            ((2,) * 1024, 2, 256),
+            ((0, 17, 6001, 257, 0), 1, 1),
+        ):
+            torch.manual_seed(20261101)
+            with patch.object(owned, "_MAX_SCRATCH_MB", budget):
+                common = owned.plan_groups(counts, cp_size=4, owner_rows=256 // ratio)
+                if budget == 1:
+                    probe.assertIsNone(common)
+                    probe.assertIsNotNone(
+                        owned.plan_segmented_groups(
+                            counts, cp_size=4, owner_rows=256 // ratio
+                        )
+                    )
+                else:
+                    probe.assertIsNotNone(common)
+                ranks, host, ends = probe.fixture(counts, 4, ratio)
+                expected = probe.expected_outputs(ranks, counts)
+                attn, main, index = ranks[rank]
+                with patch.object(
+                    collective_torch, "_get_group", return_value=dist.group.WORLD
+                ):
+                    actual = pools.try_gather_prefill_pools(
+                        attn, main, index, host, ends
+                    )
+                for (global_kv, keys), reference in zip(actual, expected):
+                    for value, target in zip(
+                        (global_kv, keys.quant, keys.scale), reference
+                    ):
+                        probe.assert_bits(value, target)
+            dist.barrier()
+    finally:
+        dist.destroy_process_group()
+
+
+@unittest.skipUnless(torch.cuda.device_count() >= 4, "four GPUs required")
+class OwnedPoolNcclTest(unittest.TestCase):
+    def test_common_and_segmented_cp4_transport(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            mp.spawn(
+                _owned_nccl_worker,
+                args=(str(Path(tmp) / "rendezvous"),),
+                nprocs=4,
+            )
 
 
 if __name__ == "__main__":

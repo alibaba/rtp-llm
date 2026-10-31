@@ -23,28 +23,16 @@ from rtp_llm.models_py.modules.dsv41.fp8.attention_v41 import (
 
 
 class AttentionV41Test(unittest.TestCase):
-    def test_small_cp_projection_uses_actual_transfer_width_and_geometry(self):
-        select = attention_v41_module._project_before_small_cp_gather
-        for cp, local_rows, output_width, expected in (
-            (4, 1024, 1024, False),
-            (4, 2048, 1024, False),
-            (4, 4096, 512, False),
-            (4, 4096, 1024, False),
-            (4, 8192, 1024, True),
-            (2, 4096, 1024, False),
-            (2, 16384, 1024, True),
-            (1, 8192, 1024, False),
-            (4, 8192, 5120, False),
-        ):
-            with self.subTest(cp=cp, rows=local_rows, width=output_width):
-                x = torch.empty((local_rows, 5120), dtype=torch.bfloat16, device="meta")
-                ctx = SimpleNamespace(
-                    cp_size=cp,
-                    chunk_length=local_rows,
-                    padded_seq_len=cp * local_rows,
-                )
-                self.assertEqual(select(x, ctx, output_width), expected)
-        self.assertFalse(select(x[:, ::2], ctx, 1024))
+    def test_projected_cp_chunk_budget_is_shape_independent(self):
+        ctx = SimpleNamespace(cp_size=4)
+        for width in (512, 1024):
+            rows = attention_v41_module._prefill_x_chunk_rows(ctx, width)
+            self.assertGreater(rows, 0)
+            self.assertLessEqual(rows, attention_v41_module._PRODUCE_GLOBAL_TILE_ROWS)
+            self.assertLessEqual(
+                (ctx.cp_size + 1) * rows * width * 4,
+                attention_v41_module._CP_PROJECTED_TRANSPORT_MAX_BYTES,
+            )
 
     def test_prefill_qkv_cp_gather_receives_token_major_rows(self):
         attn = AttentionV41FP8.__new__(AttentionV41FP8)
@@ -559,36 +547,6 @@ class AttentionV41Test(unittest.TestCase):
         self.assertEqual(next_meta, (0, 1, 0))
         self.assertIsNot(next_meta, actual)
 
-    def test_small_cp_x_gather_ceiling_covers_mid_size_batches(self):
-        # The single-shot raw-x all-gather must cover the shared-prefix batch
-        # band (8x8192 = 65536 global rows and every smaller multi-request
-        # forward) while leaving large-context single requests on the tiled
-        # owner-projected path.
-        for padded, expected in [
-            (8192, True),
-            (16384, True),
-            (32768, True),
-            (40960, True),
-            (49152, True),
-            (57344, True),
-            (65536, True),
-            (65537, False),
-            (131072, False),
-        ]:
-            with self.subTest(padded=padded):
-                ctx = SimpleNamespace(padded_seq_len=padded)
-                self.assertEqual(
-                    attention_v41_module._use_small_cp_x_gather(ctx), expected
-                )
-        with patch.object(attention_v41_module, "_SMALL_CP_X_GATHER_MAX_ROWS", 32768):
-            ctx = SimpleNamespace(padded_seq_len=49152)
-            self.assertFalse(attention_v41_module._use_small_cp_x_gather(ctx))
-            self.assertTrue(
-                attention_v41_module._use_small_cp_x_gather(
-                    SimpleNamespace(padded_seq_len=32768)
-                )
-            )
-
     def test_cp_hidden_tiles_restore_padded_multiple_requests(self):
         for cp_size in (2, 4):
             lengths = (5, 19, 1, 32)
@@ -612,15 +570,17 @@ class AttentionV41Test(unittest.TestCase):
                 input_lengths_global_host=lengths,
             )
             for tile_rows in (1, 3, 7, 32768):
-                with patch.object(
-                    attention_v41_module, "_PRODUCE_GLOBAL_TILE_ROWS", tile_rows
-                ):
-                    plan = list(attention_v41_module._prefill_x_tile_plan(context))
+                plan = list(
+                    attention_v41_module._prefill_x_tile_plan(context, tile_rows)
+                )
                 actual = torch.cat(
-                    [local[rank][start : start + count] for rank, start, count in plan]
+                    [
+                        local[owner][source : source + rows]
+                        for owner, source, rows in plan
+                    ]
                 )
                 torch.testing.assert_close(actual, torch.cat(expected))
-                self.assertTrue(all(0 < count <= tile_rows for _, _, count in plan))
+                self.assertTrue(all(0 < rows <= tile_rows for _, _, rows in plan))
 
     def test_cp_gather_updates_input_with_symm_memory_wrapper(self):
         from rtp_llm.models_py.distributed import collective_torch as collectives
@@ -954,9 +914,7 @@ class AttentionV41Test(unittest.TestCase):
             state_writes = []
             attn = self._kv_source_fixture(state_writes)
             projected = torch.cat((x_full.float(), x_full.float() * 0.125), -1)
-            source = (
-                projected if full_projected else (x_full[:1] if streamed else x_full)
-            )
+            source = x_full[:1] if streamed or full_projected else x_full
             with (
                 patch(
                     "rtp_llm.models_py.modules.dsv41.fp8.compressor._linear_bf16_bf16_fp32",
@@ -975,14 +933,13 @@ class AttentionV41Test(unittest.TestCase):
                     starts,
                     lengths,
                     prefill=True,
-                    projected_full=full_projected,
                     projected_tiles=(
                         (
                             (start, projected[start : start + tile_rows])
                             for start in range(0, rows, tile_rows)
                         )
                         if streamed
-                        else None
+                        else iter(((0, projected),)) if full_projected else None
                     ),
                 )
             return attn._shared_attention["global"][2], state_writes

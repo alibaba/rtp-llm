@@ -120,6 +120,8 @@ class V41AttentionWarmupCPU(unittest.TestCase):
         producer = SimpleNamespace(
             SlotLayout=lambda *args: args,
             prepare_raw=Mock(return_value=SimpleNamespace(key_counts=object())),
+            prepare_fused_tile=Mock(return_value=object()),
+            _RAW_TILE_ROWS=32768,
         )
         package = "rtp_llm.models_py.modules.dsv41.fp8"
         with patch.dict(
@@ -151,6 +153,25 @@ class V41AttentionWarmupCPU(unittest.TestCase):
                         layouts, cp_size, cp_size - 1, "cpu"
                     )
                     self.assertEqual(producer.prepare_raw.call_count, 12)
+                    self.assertEqual(producer.prepare_fused_tile.call_count, 8)
+                    self.assertEqual(
+                        [
+                            call.args[0].numel()
+                            for call in producer.prepare_fused_tile.call_args_list
+                        ],
+                        [1, 129, 257, 513] * 2,
+                    )
+                    self.assertTrue(
+                        all(
+                            call.args[4][1] == 2
+                            and all(
+                                x[0].shape == (call.args[0].numel(), 2)
+                                for x in call.args[3]
+                            )
+                            for call in producer.prepare_fused_tile.call_args_list
+                        )
+                    )
+                    producer.prepare_fused_tile.reset_mock()
                     for call in producer.prepare_raw.call_args_list:
                         self.assertEqual(call.args[0].cp_size, cp_size)
                         descriptors = call.kwargs["slot_layouts"]
@@ -192,7 +213,6 @@ class V41AttentionWarmupCPU(unittest.TestCase):
                 _v41_prefill_global=producer,
                 _v41_prefill_metadata=meta,
                 _v41_swa_triton=SimpleNamespace(),
-                _v41_batched_producer=SimpleNamespace(is_supported=lambda value: False),
             ),
             package
             + "._v41_prefill_pools": SimpleNamespace(_group_row_metadata=Mock()),

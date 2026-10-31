@@ -44,7 +44,6 @@ def load_attention():
         prefill_kv_workspace=workspace,
         SWA_KV="swa",
         record_function_range=lambda *a: nullcontext(),
-        _use_small_cp_x_gather=lambda cp: False,
     )
     exec(
         compile(

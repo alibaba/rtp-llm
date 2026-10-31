@@ -20,6 +20,28 @@ class FullProjectionTest(unittest.TestCase):
         if torch.cuda.get_device_capability()[0] != 10:
             self.skipTest("SM10x required")
 
+    @torch.inference_mode()
+    def test_packed_packet_preserves_gemm_bits_and_padding(self):
+        from rtp_llm.ops.compute_ops import rtp_llm_ops
+
+        torch.manual_seed(20261031)
+        x = torch.randn((127, 5120), device="cuda", dtype=torch.bfloat16)
+        weights = [
+            torch.randn((512, 5120), device="cuda", dtype=torch.bfloat16)
+            for _ in range(2)
+        ]
+        actual = torch.full((128, 1024), -12345.0, device="cuda")
+        rtp_llm_ops.cublas_gemm_bf16_bf16_fp32_packed(x, weights, actual)
+        for column, weight in enumerate(weights):
+            expected = _linear_bf16_bf16_fp32(x, weight)
+            torch.testing.assert_close(
+                actual[:127, column * 512 : (column + 1) * 512],
+                expected,
+                rtol=0,
+                atol=0,
+            )
+        self.assertTrue((actual[127:] == -12345.0).all())
+
     def make_case(self, ratio, batch=4, span=6):
         case = _case("cuda", ratio, batch, span)
         attn = case.owner

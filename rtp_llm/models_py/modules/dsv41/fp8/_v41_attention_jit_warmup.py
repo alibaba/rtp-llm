@@ -535,12 +535,6 @@ def _warm_pool(attn, layout, cp_size, cp_rank, max_batch_size, device):
         _warm_swa_byte_slices(layout, cp_size, cp_rank, device)
         return
     if layout.region == INDEXER_KV:
-        from . import _v41_grouped_gemm
-
-        if _v41_grouped_gemm._enabled():
-            _require_launch(
-                _v41_grouped_gemm.warmup(attn.index_wk), "grouped index GEMM"
-            )
         pool = _private_pool(layout, 68, device)
         projected = torch.zeros((rows, 128), dtype=torch.bfloat16, device=device)
         for offset, slot_offset in ((0, 0), (0, 1), (1, 0), (1, 1)):
@@ -649,49 +643,6 @@ def _warm_pool(attn, layout, cp_size, cp_rank, max_batch_size, device):
                             "main compression",
                             enabled=producer._enabled(values),
                         )
-        from . import _v41_batched_producer as batched
-
-        if batched.is_supported(kv):
-            _require_launch(
-                batched.warmup_projected_groups(device), "batched projection transport"
-            )
-            count = rows // layout.ratio
-            plan = batched.GroupPlan(
-                0,
-                rows,
-                0,
-                count,
-                layout.ratio,
-                ((0, rows, 0, count, layout.ratio - 1),),
-            )
-            prepared = batched.prepare(plan, device)
-            for stride in (512, 1024):
-                group = torch.zeros((rows, stride), dtype=torch.float32, device=device)
-                for offset, slot_offset in ((0, 0), (0, 1), (1, 0), (1, 1)):
-                    pos = _indexer_warmup_vector(rows, torch.int64, device, 1, offset)
-                    req = _indexer_warmup_vector(
-                        rows, torch.int64, device, 1, offset, fill=0
-                    )
-                    mapped = _private_slots(
-                        count + slot_offset, layout.entries, device
-                    )[slot_offset:]
-                    _require_launch(
-                        batched.compress_main(
-                            group[:, :512],
-                            group[:, -512:] if layout.ratio == 2 else None,
-                            attn.global_norm,
-                            attn.eps,
-                            pos,
-                            req,
-                            starts,
-                            previous,
-                            prepared,
-                            attn.freqs_cis,
-                            pool,
-                            mapped,
-                        ),
-                        "batched main compression",
-                    )
 
 
 def _warm_raw_producer_metadata(ratio, cp_size, device):
@@ -726,7 +677,7 @@ def _warm_raw_producer_metadata(ratio, cp_size, device):
             torch.tensor(host, dtype=torch.int64, device=device) for host in values
         ]
         _require_launch(
-            prepare_raw(cp, *vectors, ratio, slots, (1, 2, 3), tile_rows=65536),
+            prepare_raw(cp, *vectors, ratio, slots, (1, 2, 3)),
             "raw producer metadata",
         )
 
@@ -796,13 +747,43 @@ def _warm_fused_producer_metadata(layouts, cp_size, cp_rank, device):
                         ratio,
                         unexpected_fallback,
                         (1, 2, 3),
-                        tile_rows=65536,
                         slot_layouts=descriptors,
                     ),
                     "fused producer metadata",
                 )
                 if result.key_counts is None:
                     raise RuntimeError("fused producer warmup did not publish counts")
+        # The streamed source path uses a separate kernel specialized by the
+        # power-of-two request count. Scheduler updates can raise B after
+        # initialization, so compile every production B<=1024 bucket.
+        scratch = torch.empty(
+            (8, producer._RAW_TILE_ROWS), dtype=torch.int64, device=device
+        )
+        for batch in (1, 129, 257, 513):
+            starts = torch.zeros(batch, dtype=torch.int64, device=device)
+            lengths = torch.full((batch,), 2, dtype=torch.int64, device=device)
+            tile_layouts = tuple(
+                producer.SlotLayout(
+                    torch.ones((batch, 2), dtype=table_dtype, device=device),
+                    layout.entries,
+                    layout.tokens_per_block,
+                    layouts[0].owner_tokens_per_block,
+                    cp_size,
+                    cp_rank,
+                )
+                for layout in layouts
+            )
+            _require_launch(
+                producer.prepare_fused_tile(
+                    starts,
+                    lengths,
+                    ratio,
+                    tile_layouts,
+                    (0, 2, 0, 1 if ratio == 2 else 2),
+                    scratch,
+                ),
+                "streamed producer metadata",
+            )
 
 
 def _indexer_warmup_layouts():
@@ -1627,7 +1608,7 @@ def warmup_v41_attention_jit(
                     if (
                         kv_cache_sharded
                         and cp_size > 1
-                        and max_batch_size >= 2
+                        and max_batch_size >= 1
                         and len(producer_layouts)
                         == (3 if main_layout.ratio == 2 else 2)
                     ):

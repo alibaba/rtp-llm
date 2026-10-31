@@ -29,7 +29,6 @@ _TESTS = [
     "test_attention_v41_request_rows",
     "test_attention_v41_sparse_selection",
     "test_v41_attention_jit_warmup",
-    "test_v41_batched_producer",
     "test_v41_candidate_deepselect",
     "test_v41_decode_attention_fusion",
     "test_v41_decode_device_metadata",
@@ -44,7 +43,6 @@ _TESTS = [
     "test_v41_global_overlap",
     "test_v41_merge_contracts",
     "test_v41_host_swa_metadata",
-    "test_v41_grouped_gemm",
     "test_v41_grouped_prefill_score",
     "test_v41_indexer_q_fusion",
     "test_v41_mega_attention",
@@ -189,27 +187,6 @@ cuda13_sm100_py_test(
     legacy_create_init = 0,
 )
 
-
-cuda13_sm100_py_test(
-    name = "test_attention_v41_cp_single_nccl",
-    srcs = [
-        "test_attention_v41_cp_single_nccl.py",
-        "test_attention_v41_cp_mixed_nccl.py",
-        "test_attention_v41_cp_raw_groups.py",
-        "//rtp_llm/test/pytest:pytest_main.py",
-    ],
-    main = "//rtp_llm/test/pytest:pytest_main.py",
-    args = ["--cuda-devices", "4", "$(location :test_attention_v41_cp_single_nccl.py)"],
-    gpu_count = 4,
-    deps = [
-        "//rtp_llm:testlib",
-        "//rtp_llm/models_py:modules",
-        "//rtp_llm/test/utils:test_util",
-        test_requirement("pytest"),
-    ],
-    tags = ["dsv41_cuda13"],
-    legacy_create_init = 0,
-)
 
 
 cuda13_sm100_py_test(

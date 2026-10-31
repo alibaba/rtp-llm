@@ -3,8 +3,8 @@
 All collective sizes come from common host lengths. Scratch is allocated once
 and reused in stream order, including when an outer caller uses a side stream.
 Only the request outputs survive the next group; no packet aliases escape.
-The 256 MiB eligibility plan and configurable scratch cap cover send/receive,
-slots and inverse row metadata.
+The configured fixed scratch cap covers send/receive, slots and inverse
+row metadata.
 All BF16 keys and index outputs are separately reported required model outputs;
 their lifetime is independent of transport grouping and they never alias scratch.
 """
@@ -26,8 +26,9 @@ from rtp_llm.models_py.modules.dsv41.fp8 import _v41_fp4_triton as codec
 _BYTES = 356
 _INDEX_BYTES = 68
 _INVERSE_BYTES = 16
-_LIMIT = 256 * 1024**2
-_MAX_SCRATCH_MB = int(os.environ.get("DSV41_OWNED_POOL_MAX_SCRATCH_MB", "1024"))
+_MAX_REQUESTS = 1024
+_REQUESTS_PER_GROUP = 128
+_MAX_SCRATCH_MB = int(os.environ.get("DSV41_OWNED_POOL_MAX_SCRATCH_MB", "256"))
 if _MAX_SCRATCH_MB not in (256, 512, 1024):
     raise ValueError("DSV41_OWNED_POOL_MAX_SCRATCH_MB must be 256, 512 or 1024")
 _TILE = tl.constexpr(codec.FP4_ROWS_PER_CTA)
@@ -73,18 +74,20 @@ def owned_count(count, cp_size, owner_rows, rank):
     return cycles * owner_rows + min(owner_rows, max(0, tail - rank * owner_rows))
 
 
-def plan_groups(counts, *, cp_size, owner_rows, limit=_LIMIT):
+def plan_groups(counts, *, cp_size, owner_rows, limit=None):
     """Bound persistent transport scratch independently of final outputs.
 
     The local/output caps are independent, so taking their maxima across groups
     also obeys the bound. Padding is only at the end of each rank's packet;
     each request's 256-row scorer padding exists only in the final outputs.
     """
+    if limit is None:
+        limit = _MAX_SCRATCH_MB * 1024**2
     if (
         cp_size not in (1, 2, 4)
         or type(owner_rows) is not int
         or owner_rows <= 0
-        or not 1 <= len(counts) <= 128
+        or not 1 <= len(counts) <= _MAX_REQUESTS
         or any(type(count) is not int or count < 0 for count in counts)
     ):
         return None
@@ -97,48 +100,26 @@ def plan_groups(counts, *, cp_size, owner_rows, limit=_LIMIT):
     return build(tuple(counts), cp_size, owner_rows, limit)
 
 
-def adaptive_plan_groups(counts, *, cp_size, owner_rows):
-    """Use the least scratch tier that reaches the fewest transport groups.
-
-    The 256 MiB plan is also the eligibility gate: a larger tier must not
-    switch a long request from the bounded fallback into owned-pool transport.
-    """
-    best = plan_groups(counts, cp_size=cp_size, owner_rows=owner_rows)
-    if best is None or len(best.groups) == 1 or _MAX_SCRATCH_MB == 256:
-        return best
-    for mb in (512, 1024):
-        if mb > _MAX_SCRATCH_MB:
-            break
-        candidate = plan_groups(
-            counts, cp_size=cp_size, owner_rows=owner_rows, limit=mb * 1024**2
-        )
-        if candidate is not None and len(candidate.groups) < len(best.groups):
-            best = candidate
-            if len(best.groups) == 1:
-                break
-    return best
-
-
 def plan_segmented_groups(counts, *, cp_size, owner_rows):
-    """Plan rank-identical bounded segments only for otherwise rejected batches."""
+    """Plan rank-identical bounded segments when one group exceeds the cap."""
     if (
         cp_size not in (1, 2, 4)
         or type(owner_rows) is not int
         or owner_rows <= 0
-        or not 1 <= len(counts) <= 128
+        or not 1 <= len(counts) <= _MAX_REQUESTS
         or any(type(count) is not int or count < 0 for count in counts)
     ):
         return None
     scratch_per_local = _BYTES * (cp_size + 1 if cp_size > 1 else 1) + 16
     alignment = lcm(cp_size * owner_rows, 256)
-    tiers = tuple(mb * 1024**2 for mb in (256, 512, 1024) if mb <= _MAX_SCRATCH_MB)
+    limit = _MAX_SCRATCH_MB * 1024**2
     groups = []
     short_first = 0
 
     def flush_short(stop):
         nonlocal short_first
         if short_first < stop:
-            plan = adaptive_plan_groups(
+            plan = plan_groups(
                 counts[short_first:stop], cp_size=cp_size, owner_rows=owner_rows
             )
             if plan is None:
@@ -160,15 +141,10 @@ def plan_segmented_groups(counts, *, cp_size, owner_rows):
             continue
         if not flush_short(request):
             return None
-        choices = []
-        for limit in tiers:
-            local_cap = limit // (scratch_per_local + _INVERSE_BYTES * cp_size)
-            chunk = local_cap * cp_size // alignment * alignment
-            if chunk:
-                choices.append(((count + chunk - 1) // chunk, limit, chunk))
-        if not choices:
+        local_cap = limit // (scratch_per_local + _INVERSE_BYTES * cp_size)
+        chunk = local_cap * cp_size // alignment * alignment
+        if not chunk:
             return None
-        _, limit, chunk = min(choices)
         for base in range(0, count, chunk):
             segment_count = min(chunk, count - base)
             plan = plan_groups(
@@ -193,7 +169,7 @@ def plan_segmented_groups(counts, *, cp_size, owner_rows):
     local = max(group.local_rows for group in groups)
     rows = max(group.rows for group in groups)
     scratch = scratch_per_local * local + _INVERSE_BYTES * rows
-    if scratch > tiers[-1]:
+    if scratch > limit:
         return None
     return SegmentedPlan(tuple(groups), local, rows, scratch)
 
@@ -215,7 +191,8 @@ def _plan_groups_cached(counts, cp_size, owner_rows, limit):
         if max(contribution) > local_cap or padded > output_cap:
             return None
         if (
-            rows + padded > output_cap
+            request - first == _REQUESTS_PER_GROUP
+            or rows + padded > output_cap
             or max(a + b for a, b in zip(owned, contribution)) > local_cap
         ):
             groups.append(OwnedGroup(first, request, rows, max(owned)))
@@ -629,7 +606,7 @@ def _validate_local(main, index, ends, mt, it, batch, layout):
             raise ValueError("Owned pool cache has incompatible native storage")
 
 
-def _gather_segmented(
+def _gather_planned(
     main,
     index,
     ends,
@@ -680,7 +657,7 @@ def _gather_segmented(
     long_outputs = {}
     for group in plan.groups:
         first, stop, rows, local = group.first, group.stop, group.rows, group.local_rows
-        segmented = group.base >= 0
+        segmented = getattr(group, "base", -1) >= 0
         if segmented and first not in long_outputs:
             padded = triton.cdiv(counts[first], 256) * 256
             global_keys = (
@@ -724,8 +701,8 @@ def _gather_segmented(
                         stop,
                         layout,
                         workspace is not None,
-                        segment_base=max(group.base, 0),
-                        segment_count=group.count,
+                        segment_base=max(getattr(group, "base", -1), 0),
+                        segment_count=getattr(group, "count", 0),
                         segmented=segmented,
                     )
                 )
@@ -805,142 +782,31 @@ def try_gather(
     layout,
     kernels,
     *,
-    oversized=False,
     workspace=None,
     swa=None,
     output_stream=None,
 ):
-    from . import _v41_joint_pool as joint
-    from ._v41_prefill_indexer import PrefillIndexerKeys
-
     ratio, owner, _, _, rank, _, _, _, _, cp = layout
     counts = tuple(end // ratio for end in ends)
-    plan = (
-        plan_segmented_groups(counts, cp_size=cp, owner_rows=owner // ratio)
-        if oversized
-        else adaptive_plan_groups(counts, cp_size=cp, owner_rows=owner // ratio)
-    )
+    plan = plan_groups(counts, cp_size=cp, owner_rows=owner // ratio)
+    if plan is None:
+        plan = plan_segmented_groups(counts, cp_size=cp, owner_rows=owner // ratio)
     if plan is None:
         return None
     if kernels is None:
         raise RuntimeError("Owned pool kernels were not prepared by startup warmup")
     _validate_local(main, index, seq_ends, mt, it, len(ends), layout)
-    if oversized:
-        return _gather_segmented(
-            main,
-            index,
-            ends,
-            seq_ends,
-            mt,
-            it,
-            layout,
-            kernels,
-            plan,
-            workspace=workspace,
-            swa=swa,
-            output_stream=output_stream,
-        )
-    pack_words = codec._words_aligned(
-        main.data_ptr(), main.stride(0), index.data_ptr(), index.stride(0)
+    return _gather_planned(
+        main,
+        index,
+        ends,
+        seq_ends,
+        mt,
+        it,
+        layout,
+        kernels,
+        plan,
+        workspace=workspace,
+        swa=swa,
+        output_stream=output_stream,
     )
-    pack_tile = codec.FP4_ROWS_PER_CTA if pack_words else 1
-    if workspace is None and swa is not None:
-        from ._v41_prefill_kv_workspace import prepare_global_workspace
-
-        workspace = prepare_global_workspace(swa, counts, output_stream=output_stream)
-    if workspace is not None:
-        joint._validate_workspace(workspace, counts, seq_ends.device)
-        global_views = joint._split_rows(
-            workspace.output,
-            joint._row_partitions(
-                counts, workspace.global_starts, workspace.output.shape[0]
-            ),
-        )
-    device = seq_ends.device
-    send_buffer = torch.empty(
-        plan.max_local_rows * _BYTES, dtype=torch.uint8, device=device
-    )
-    receive_buffer = (
-        torch.empty(cp * plan.max_local_rows * _BYTES, dtype=torch.uint8, device=device)
-        if cp > 1
-        else send_buffer
-    )
-    slots = torch.empty(2 * plan.max_local_rows, dtype=torch.int64, device=device)
-    inverse = torch.empty(2 * plan.max_output_rows, dtype=torch.int64, device=device)
-    result = []
-    for group in plan.groups:
-        first, stop, rows, local = group.first, group.stop, group.rows, group.local_rows
-        send = send_buffer[: local * _BYTES]
-        receive = receive_buffer[: cp * local * _BYTES]
-        if local:
-            q, s, raw = joint._views(send, local)
-            with record_function_range("dsv41.prefill.pool.owned.pack"):
-                kernels[4 if workspace is not None else 0][
-                    (triton.cdiv(max(local, rows), 128), 1, 1)
-                ](
-                    *_metadata_args(
-                        seq_ends,
-                        mt,
-                        it,
-                        slots,
-                        inverse,
-                        seq_ends if workspace is None else workspace.device_offsets,
-                        local,
-                        rows,
-                        first,
-                        stop,
-                        layout,
-                        workspace is not None,
-                    )
-                )
-                kernels[5 if pack_words else 1][(triton.cdiv(local, pack_tile), 1, 1)](
-                    slots,
-                    main,
-                    index,
-                    q,
-                    s,
-                    raw,
-                    local,
-                    main.stride(0),
-                    index.stride(0),
-                    main.shape[1],
-                    index.shape[1],
-                )
-            with record_function_range("dsv41.prefill.pool.owned.all_gather"):
-                _collect(receive, send, cp, rank)
-        out = (
-            torch.empty((rows, 512), dtype=torch.bfloat16, device=device)
-            if workspace is None
-            else workspace.output
-        )
-        oq = torch.empty((rows, 64), dtype=torch.int8, device=device)
-        os = torch.empty(rows, dtype=torch.int32, device=device)
-        if rows:
-            with record_function_range("dsv41.prefill.pool.owned.restore"):
-                kernels[3 if workspace is not None else 2][(rows, 1, 1)](
-                    receive,
-                    inverse,
-                    out,
-                    oq,
-                    os,
-                    rows,
-                    local,
-                    workspace is not None,
-                )
-        starts, cursor = [], 0
-        for count in counts[first:stop]:
-            starts.append(cursor)
-            cursor += triton.cdiv(count, 256) * 256
-        partitions = joint._row_partitions(counts[first:stop], starts, rows)
-        gs = (
-            joint._split_rows(out, partitions)
-            if workspace is None
-            else global_views[first:stop]
-        )
-        result.extend(
-            (g, PrefillIndexerKeys(q, s))
-            for g, q, s in zip(
-                gs, joint._split_rows(oq, partitions), joint._split_rows(os, partitions)
-            )
-        )
-    return result if workspace is None else workspace.publish(result)

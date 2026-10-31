@@ -118,7 +118,6 @@ def _swa_owner(bounded):
         "__package__": "rtp_llm.models_py.modules.dsv41.fp8",
         "torch": torch,
         "F": F,
-        "_use_small_cp_x_gather": lambda ctx: False,
         "prefill_index_plan": _INDEX_PLAN,
         "prefill_kv_workspace": _KV_WORKSPACE,
     }

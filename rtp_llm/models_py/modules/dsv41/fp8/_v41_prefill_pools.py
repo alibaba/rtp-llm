@@ -17,7 +17,8 @@ _MAX_TEMP_BYTES = 256 * 1024 * 1024
 _BYTES_PER_ROW = 288 + 64 + 4 + 64 + 4 + 3 * 8
 _MAX_ROWS = _MAX_TEMP_BYTES // _BYTES_PER_ROW
 _KEY_ALIGNMENT = 256
-_MAX_REQUESTS = 128
+_MAX_REQUESTS = 1024
+_REQUESTS_PER_GROUP = 128
 
 
 def _trim_rows(tensor, count):
@@ -81,7 +82,7 @@ def _request_groups(counts):
     groups = []
     first, rows = 0, 0
     for index, count in enumerate(padded):
-        if rows + count > _MAX_ROWS:
+        if rows + count > _MAX_ROWS or index - first == _REQUESTS_PER_GROUP:
             groups.append((first, index, rows))
             first, rows = index, 0
         rows += count
