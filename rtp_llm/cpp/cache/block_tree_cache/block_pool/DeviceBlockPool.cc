@@ -1,6 +1,7 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/block_pool/DeviceBlockPool.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cassert>
 #include <limits>
 #include <unordered_map>
@@ -46,6 +47,30 @@ const char* memoryTypeName(MemoryType memory_type) {
 DeviceBlockPool::DeviceBlockPool(std::shared_ptr<const DeviceBlockPoolConfig> config):
     IBlockPool(normalizeConfig(config)) {
     refcounts_.assign(this->config().physical_block_count, 0);
+    if (isOffload() && this->config().offload->hbm_blocks < this->config().offload->total_blocks) {
+        const char*       value       = std::getenv("RTP_LLM_SPARSE_KV_OFFLOAD_HBM_SHARE_DENOMINATOR");
+        const std::string denominator = value ? value : "3";
+        RTP_LLM_CHECK_WITH_INFO(
+            !denominator.empty()
+                && std::all_of(denominator.begin(), denominator.end(), [](unsigned char c) { return std::isdigit(c); }),
+            "RTP_LLM_SPARSE_KV_OFFLOAD_HBM_SHARE_DENOMINATOR must be 0 or an integer >= 2");
+        offload_hbm_share_denominator_ = std::stoull(denominator);
+        RTP_LLM_CHECK_WITH_INFO(offload_hbm_share_denominator_ != 1,
+                                "RTP_LLM_SPARSE_KV_OFFLOAD_HBM_SHARE_DENOMINATOR must be 0 or >= 2");
+        if (offload_hbm_share_denominator_ > 0) {
+            splitFreeBlocksNoLock(this->config().offload->hbm_blocks);
+        }
+    }
+}
+
+std::optional<BlockIdList> DeviceBlockPool::mallocForRequest(size_t n, size_t request_blocks, BlockIdxType last_block) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    bool                        prefer_host = false;
+    if (offload_hbm_share_denominator_ > 0 && request_blocks > 0) {
+        prefer_host = last_block > 0 ? static_cast<uint32_t>(last_block) >= config().offload->hbm_blocks :
+                                       request_blocks > freeLowerRangeBlocksNoLock() / offload_hbm_share_denominator_;
+    }
+    return mallocNoLock(n, prefer_host);
 }
 
 void DeviceBlockPool::incRef(BlockIdxType block) {
@@ -504,9 +529,19 @@ void DeviceBlockPool::initializeOffloadStorage() {
 #else
     const auto& cfg    = config();
     const auto& tiered = *cfg.offload;
-    RTP_LLM_CHECK_WITH_INFO(cfg.memory_layouts.size() == 1 && !cfg.use_pinned_cpu_backing,
-                            "offload requires one native layout with DEVICE placement");
+    RTP_LLM_CHECK_WITH_INFO(!cfg.memory_layouts.empty() && !cfg.use_pinned_cpu_backing,
+                            "offload requires native layouts with DEVICE placement");
     const auto&  layout    = cfg.memory_layouts.front();
+    size_t       total_layers = 0;
+    for (const auto& module_layout : cfg.memory_layouts) {
+        RTP_LLM_CHECK_WITH_INFO(module_layout.kv_block_stride_bytes == layout.kv_block_stride_bytes
+                                    && module_layout.kv_scale_stride_bytes == layout.kv_scale_stride_bytes
+                                    && module_layout.kernel_blocks_per_kv_block == layout.kernel_blocks_per_kv_block
+                                    && module_layout.seq_size_per_block == layout.seq_size_per_block
+                                    && module_layout.dtype == layout.dtype,
+                                "offload main and draft layouts must have matching native page geometry");
+        total_layers += module_layout.layer_num;
+    }
     const size_t pages     = layout.kernel_blocks_per_kv_block;
     const size_t page_rows = cfg.offload_layout.rows_per_page;
     RTP_LLM_CHECK_WITH_INFO(page_rows > 0 && pages > 0 && pages <= INT32_MAX / page_rows,
@@ -518,7 +553,7 @@ void DeviceBlockPool::initializeOffloadStorage() {
                                 && static_cast<uint64_t>(tiered.total_blocks) * rows <= INT32_MAX
                                 && static_cast<uint64_t>(tiered.hbm_blocks) * rows + resident <= INT32_MAX,
                             "invalid offload block counts or row capacity");
-    RTP_LLM_CHECK_WITH_INFO(cfg.offload_owner_layers.size() == layout.layer_num, "offload owner layer count mismatch");
+    RTP_LLM_CHECK_WITH_INFO(cfg.offload_owner_layers.size() == total_layers, "offload owner layer count mismatch");
     const auto checked_product = [](size_t a, size_t b) {
         RTP_LLM_CHECK_WITH_INFO(a == 0 || b <= static_cast<size_t>(INT64_MAX) / a, "offload allocation overflow");
         return a * b;
@@ -530,8 +565,8 @@ void DeviceBlockPool::initializeOffloadStorage() {
     const size_t host_pages     = static_cast<size_t>(tiered.total_blocks - tiered.hbm_blocks) * pages;
     const size_t bytes_per_page = (layout.kv_block_stride_bytes + layout.kv_scale_stride_bytes) / pages;
     cfg.offload_layout.validate(layout.kv_block_stride_bytes / pages, layout.kv_scale_stride_bytes / pages);
-    const size_t gpu_bytes  = checked_product(checked_product(gpu_pages, bytes_per_page), layout.layer_num);
-    const size_t host_bytes = checked_product(checked_product(host_pages, bytes_per_page), layout.layer_num);
+    const size_t gpu_bytes  = checked_product(checked_product(gpu_pages, bytes_per_page), total_layers);
+    const size_t host_bytes = checked_product(checked_product(host_pages, bytes_per_page), total_layers);
     if (cfg.use_device_malloc_backing) {
         initializeDeviceMallocBuffer(gpu_bytes);
     } else {
@@ -571,7 +606,7 @@ void DeviceBlockPool::initializeOffloadStorage() {
         strides.insert(strides.begin(), static_cast<int64_t>(page_bytes / element));
         return typed.as_strided(shape, strides, typed.storage_offset() + view.offset_bytes / element);
     };
-    for (uint32_t layer = 0; layer < layout.layer_num; ++layer) {
+    for (size_t layer = 0; layer < total_layers; ++layer) {
         auto storage               = std::make_shared<OffloadStorage>();
         storage->tag               = cfg.pool_name;
         storage->owner_layer       = cfg.offload_owner_layers[layer];

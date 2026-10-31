@@ -152,14 +152,21 @@ def build_paged_pool_specs(
         # compressor/indexer can gather their fp32 state on each decode
         # step.  Include CSA_STATE / HCA_STATE / INDEXER_STATE alongside
         # the KV pools.
+        has_offload = any(
+            getattr(layer.attn, "offload_plan", None) is not None for layer in v4.layers
+        )
         for tag in _DSV4_DECODE_POOL_TAGS:
             for layer in v4.layers:
                 attn = layer.attn
                 if attn.layer_id not in layer_tags:
-                    layer_tags[attn.layer_id] = {
-                        cache.tag
-                        for cache in kv_cache.get_layer_cache_groups(attn.layer_id)
-                    }
+                    layer_tags[attn.layer_id] = (
+                        attn.framework_cache_tags
+                        if has_offload
+                        else {
+                            cache.tag
+                            for cache in kv_cache.get_layer_cache_groups(attn.layer_id)
+                        }
+                    )
                 if tag not in layer_tags[attn.layer_id]:
                     continue
                 if id(attn) not in saved_kv:

@@ -125,10 +125,18 @@ protected:
     }
 
     // Helpers for derived-pool transactions; the caller holds mutex_.
-    std::optional<BlockIdList> mallocNoLock(size_t n);
+    std::optional<BlockIdList> mallocNoLock(size_t n, bool prefer_upper_range = false);
+    // Optional split for pools with two storage tiers. Configure before initialization;
+    // each range keeps its own free queue so routing never scans the whole pool.
+    void                       splitFreeBlocksNoLock(BlockIdxType boundary);
+    size_t                     freeLowerRangeBlocksNoLock() const;
     size_t                     availableFreeBlocksNoLock() const;
     void                       reserveReleasedBlocksNoLock(size_t additional) {
-        released_blocks_.reserve(released_blocks_.size() + additional);
+        const size_t count = free_range_boundary_ > 0 ? 2 : 1;
+        for (size_t i = 0; i < count; ++i) {
+            auto& range = free_ranges_[i];
+            range.released.reserve(range.released.size() + additional);
+        }
     }
     std::function<void()> capacityChangeCallbackNoLock() const {
         return capacity_change_callback_;
@@ -159,8 +167,17 @@ private:
     void          incTreeRefNoLock(BlockIdxType block, size_t ref_type_index);
 
     size_t       totalBlocksNumNoLock() const;
-    void         refillAscendingFreeBlocksNoLock();
-    BlockIdxType popFreeBlockNoLock();
+    struct FreeRange {
+        BlockIdList blocks;
+        BlockIdList released;
+        size_t      head{0};
+
+        size_t size() const {
+            return blocks.size() - head + released.size();
+        }
+    };
+    void         refillAscendingFreeBlocksNoLock(FreeRange& range);
+    BlockIdxType popFreeBlockNoLock(FreeRange& range);
     void         pushFreeBlockNoLock(BlockIdxType block);
 
 private:
@@ -171,9 +188,8 @@ private:
     std::vector<uint32_t>                                     tree_refcounts_;
     std::array<std::vector<uint32_t>, kBlockTreeRefTypeCount> tree_refcounts_by_type_;
     std::array<size_t, kBlockTreeRefTypeCount>                tree_referenced_block_counts_{};
-    std::vector<BlockIdxType>                                 free_blocks_;
-    std::vector<BlockIdxType>                                 released_blocks_;
-    size_t                                                    free_head_{0};
+    std::array<FreeRange, 2>                                  free_ranges_;
+    BlockIdxType                                              free_range_boundary_{0};
     size_t                                                    active_blocks_num_{0};
     size_t                                                    available_blocks_num_{0};
 };

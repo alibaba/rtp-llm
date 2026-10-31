@@ -364,7 +364,9 @@ class SparseMlaImpl(MlaImplBase):
         self.kv_lora_rank = attn_configs.kv_lora_rank
         self.rope_head_dim = attn_configs.rope_head_dim
         self.nope_head_dim = attn_configs.nope_head_dim
-        self.is_prefill = attn_inputs.is_prefill
+        self.is_prefill = attn_inputs.is_prefill and not (
+            attn_inputs.is_target_verify or attn_inputs.is_draft_extend
+        )
         self.parallelism_config = parallelism_config
         self.fmha_params = None
         self.rope_params = None

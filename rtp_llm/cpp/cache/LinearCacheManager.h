@@ -35,7 +35,8 @@ public:
                 bool                     enable_reuse_cache   = false,
                 int                      reserve_step         = 0,
                 std::vector<size_t>*     backfilled_positions = nullptr,
-                const RequiredPositions& required_positions   = {}) override;
+                const RequiredPositions& required_positions   = {},
+                int                      initial_seq_len      = 0) override;
 
     bool mallocForDecode(BlockIds&            block_ids,
                          int                  seq_len,

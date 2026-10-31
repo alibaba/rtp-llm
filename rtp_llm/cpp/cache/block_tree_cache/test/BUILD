@@ -155,7 +155,9 @@ cc_test(
     data = [],
     copts = test_copts,
     deps = [
+        "//rtp_llm/cpp/cache:device_block_pool_config_helper",
         "//rtp_llm/cpp/cache/test:block_pool_test_helper",
+        "//rtp_llm/cpp/cache/test:cache_config_test_utils",
     ],
     env = {},
     exec_properties = {"gpu": "H20_CU13"},

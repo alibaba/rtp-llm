@@ -680,6 +680,7 @@ class DeepSeekV4Model(GptModelBase):
         # Called by the engine after construction and before forward.
         super().initialize(init_resource)
         if self._materialized:
+            self._initialize_sparse_offload()
             return True
 
         device = (
@@ -764,6 +765,8 @@ class DeepSeekV4Model(GptModelBase):
         # shared cos_sin_cache before runtime memory allocation starts.
         for layer in self.v4.layers:
             layer.attn.init_rope_cache(device=device_str)
+
+        self._initialize_sparse_offload()
 
         # Subclass hook: lift any model-level weights (e.g. MTP fusion
         # norms / projections) off the ModelWeights wrapper before we
@@ -1132,6 +1135,44 @@ class DeepSeekV4Model(GptModelBase):
         self._materialized = True
 
         return True
+
+    def _initialize_sparse_offload(self) -> None:
+        from rtp_llm.models_py.modules.offload.plan import build_offload_plans
+
+        if self.kv_cache is None:
+            return
+        descs = self.config.kv_cache_spec_descs
+        enabled = [
+            (i, d.tag)
+            for i, ds in enumerate(descs)
+            for d in ds
+            if d.offload is not None and d.offload.enabled
+        ]
+        # Multiple speculative wrappers initialize the same model. Keep
+        # runtimes and staging addresses used by already captured graphs.
+        signature = tuple(
+            (
+                i,
+                tag,
+                self.kv_cache.get_offload_storage(i, tag).generations.data_ptr(),
+                self.kv_cache.get_offload_storage(i, tag).resident_planes[0].data_ptr(),
+            )
+            for i, tag in enabled
+        )
+        if getattr(self, "_offload_signature", None) == signature:
+            return
+        plans = build_offload_plans(self.kv_cache, descs) if enabled else {}
+        for layer, layer_descs in zip(self.v4.layers, descs):
+            layer.attn.framework_cache_tags = {desc.tag for desc in layer_descs}
+        for (i, tag), plan in plans.items():
+            if tag != "csa_kv" or not self.fp8_kv_cache:
+                raise ValueError(f"V4 has no sparse offload adapter for {tag}")
+            self.v4.layers[i].attn.configure_sparse_offload(
+                plan,
+                self._max_generate_batch_size * max(1, self._gen_num_per_cycle + 1),
+            )
+        self.offload_plans = plans
+        self._offload_signature = signature
 
     def _should_capture_cuda_graph(self, attn: Any, is_target_verify: bool) -> bool:
         """Default: capture decode + verify, skip plain prefill.  MTP

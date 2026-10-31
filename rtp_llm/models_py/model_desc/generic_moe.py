@@ -398,6 +398,8 @@ class GenericMoeDecoderLayer(nn.Module):
 class GenericMoeModel(GptModelBase):
     """Generic MoE model supporting Qwen3-MoE, internal model, and other MoE architectures."""
 
+    final_norm_weight_name = W.final_ln_gamma
+
     def __init__(
         self,
         model_config: ModelConfig,
@@ -460,7 +462,8 @@ class GenericMoeModel(GptModelBase):
             for layer in layers
         }
         self.norm = RMSResNorm(
-            weights.get_global_weight(W.final_ln_gamma), eps=model_config.layernorm_eps
+            weights.get_global_weight(self.final_norm_weight_name),
+            eps=model_config.layernorm_eps,
         )
         self._init_capture_context(
             self._capture_canonical_layer,
@@ -503,7 +506,9 @@ class GenericMoeModel(GptModelBase):
                     f"GenericMoeModel has no offload attention adapter for {tag}"
                 )
             self.layers[layer].self_attn.configure_offload(
-                plan, self.max_generate_batch_size
+                plan,
+                self.max_generate_batch_size
+                * max(1, int(self.config.gen_num_per_cycle) + 1),
             )
         return super().initialize(init_resource)
 
@@ -548,7 +553,7 @@ class GenericMoeModel(GptModelBase):
                 raise ValueError("sparse KV offload requires SparseMlaImpl decode")
         return result
 
-    def embedding(self, inputs: PyModelInputs) -> torch.Tensor:
+    def embedding(self, inputs: PyModelInputs, fmha_impl: Any = None) -> torch.Tensor:
         """Build token embeddings and inject features for an MM request.
 
         The model-level flag controls whether the injector is constructed;
@@ -589,11 +594,11 @@ class GenericMoeModel(GptModelBase):
             raise
 
     def _forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
-        hidden_states = self.embedding(inputs)
         if fmha_impl is None:
             fmha_impl = self.prepare_fmha_impl(
                 inputs
             )  # pyright: ignore[reportUnreachable]
+        hidden_states = self.embedding(inputs, fmha_impl)
         capture = self.capture_context(inputs.capture_hidden_states)
         residual = torch.zeros_like(hidden_states)
         is_sparse_mla = self._uses_sparse_mla()

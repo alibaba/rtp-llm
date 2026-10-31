@@ -633,7 +633,10 @@ class CompressorFP8(PoolBackedModule):
                 "DSV4 FP8 compressor requires fused Triton metadata preparation"
             )
         pool_rows = 0
-        if self._kv_pool_view is not None:
+        plan = getattr(self, "offload_plan", None)
+        if plan is not None:
+            pool_rows = plan.storage.total_blocks * plan.storage.rows_per_block
+        elif self._kv_pool_view is not None:
             pool_rows = int(self._kv_pool_view.numel() // self._kv_pool_view.shape[-1])
         cp_ctx = self._cp_ctx if self._kv_cache_sharded else None
         cp_size = int(cp_ctx.cp_size) if cp_ctx is not None else 1
@@ -816,7 +819,12 @@ class CompressorFP8(PoolBackedModule):
         slot = block_id * kv_eb + in_block
         valid = boundary & in_capacity & (block_id >= 0)
         if self._kv_pool_view is not None:
-            pool_rows = int(self._kv_pool_view.numel() // self._kv_pool_view.shape[-1])
+            plan = getattr(self, "offload_plan", None)
+            pool_rows = (
+                plan.storage.total_blocks * plan.storage.rows_per_block
+                if plan is not None
+                else int(self._kv_pool_view.numel() // self._kv_pool_view.shape[-1])
+            )
             valid = valid & (slot < pool_rows)
         return torch.where(valid, slot, torch.full_like(slot, -1))
 
@@ -905,6 +913,18 @@ class CompressorFP8(PoolBackedModule):
                 )
 
         with record_function_range("dsv4.fp8.compressor.launch.compress_kv_write"):
+            plan = getattr(self, "offload_plan", None)
+            kv_pool = self._kv_pool_view
+            kv_slots = meta.kv_slots
+            if plan is not None:
+                if N > self.offload_staging.shape[1]:
+                    raise ValueError("V4 offload compressor staging capacity exceeded")
+                kv_pool = self.offload_staging
+                kv_slots = torch.where(
+                    meta.kv_slots >= 0,
+                    torch.arange(N, device=kv_slots.device, dtype=kv_slots.dtype),
+                    -1,
+                )
             run_fused_compress_kv_write(
                 state_cache_for_read,
                 meta.token_to_req,
@@ -914,8 +934,8 @@ class CompressorFP8(PoolBackedModule):
                 self.norm.weight,
                 self.norm_eps,
                 cos_sin_cache,
-                self._kv_pool_view,
-                meta.kv_slots,
+                kv_pool,
+                kv_slots,
                 kv_flat,
                 score_flat,
                 self.ape,
@@ -929,6 +949,23 @@ class CompressorFP8(PoolBackedModule):
                 cu_seq_per_req=meta.cu_seq_per_req if use_varlen_raw else None,
                 state_tokens_per_block=self._state_tokens_per_block,
             )
+            if plan is not None:
+                self.write_offloaded_kv(meta.kv_slots)
+
+    def write_offloaded_kv(self, backing_ids: torch.Tensor) -> None:
+        from rtp_llm.models_py.modules.offload.runtime import KVWrite
+
+        staging = self.offload_staging
+        n = backing_ids.numel()
+        if n > staging.shape[1]:
+            raise ValueError("V4 offload compressor staging capacity exceeded")
+        payload = staging.as_strided((n, 576), (576, 1))
+        scales = staging.as_strided((n, 8), (8, 1), staging.shape[1] * 576)
+        plan = self.offload_plan
+        plan.runtime.write(
+            plan.storage_index,
+            KVWrite(backing_ids.to(torch.int32).contiguous(), (payload, scales)),
+        )
 
     # ----------------------------------------------------------------------
     # Overlap orchestration: split-phase prefill (start / finish).

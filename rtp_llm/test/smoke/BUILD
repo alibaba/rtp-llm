@@ -12,6 +12,16 @@ filegroup(
     ),
 )
 
+custom_smoke_test(
+    name = "glm5_mtp_offload_model_test",
+    main = "glm5_mtp_offload_test.py",
+    args = ["Glm5MtpOffloadTest.test_native_pd"],
+    smoke_args = "--world_size 2",
+    gpu_type = ["SM103_CU13"],
+    tags = ["model_contract", "pd_contract"],
+    data = ["//rtp_llm:sdk", "offload_test_hooks/sitecustomize.py"],
+)
+
 py_test(
     name = "disk_path_preparation_test",
     srcs = glob(

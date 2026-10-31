@@ -159,9 +159,10 @@ MallocResult CoordinatorCacheManager::initMalloc(const MallocInfo& malloc_info) 
         std::dynamic_pointer_cast<LoadAsyncContext>(init_result.async_context);
     if (!load_context || !load_context->needBackendMatch()) {
         std::shared_ptr<AsyncContext> pending_async_context = std::move(init_result.async_context);
-        auto                          prefill_info          = malloc_info;
-        prefill_info.enable_remove_skipped_blocks           = false;
-        MallocResult incr_result                            = incrMalloc(prefill_info);
+        auto prefill_info                         = malloc_info;
+        prefill_info.enable_remove_skipped_blocks = false;
+        prefill_info.initial_seq_len              = malloc_info.complete_token_ids->seqLength();
+        MallocResult incr_result                  = incrMalloc(prefill_info);
         if (!incr_result.success) {
             if (load_context != nullptr) {
                 load_context->abortPending();
@@ -710,7 +711,8 @@ bool CoordinatorCacheManager::materializeInitialBlocks(const MallocInfo& malloc_
                 malloc_info.reuse_cache,
                 0,
                 &backfilled_positions,
-                prepared.required_positions[static_cast<size_t>(group_id)])) {
+                prepared.required_positions[static_cast<size_t>(group_id)],
+                cpEffectiveSeqLenForGroup(cp_mapper, config_, tag, seq_len))) {
             return false;
         }
         const auto& blocks = block_ids.blocks();
@@ -763,6 +765,7 @@ bool CoordinatorCacheManager::finishDeferredMalloc(const MallocInfo& malloc_info
     if (success) {
         auto prefill_info                         = malloc_info;
         prefill_info.enable_remove_skipped_blocks = false;
+        prefill_info.initial_seq_len              = malloc_info.complete_token_ids->seqLength();
         const auto incr_result                    = incrMalloc(prefill_info);
         success                = incr_result.success;
         if (!success) {
@@ -810,6 +813,10 @@ MallocResult CoordinatorCacheManager::incrMalloc(const MallocInfo& malloc_info) 
             auto&       filled_positions = backfilled_positions[static_cast<size_t>(b)][static_cast<size_t>(group_id)];
             const auto  required_positions = chunkCachePositions(malloc_info, config_.group(tag));
             auto&       group              = kv_cache_groups_[static_cast<size_t>(group_id)];
+            const int   initial_seq_len =
+                malloc_info.initial_seq_len > 0 ?
+                    cpEffectiveSeqLenForGroup(cp_mapper, config_, tag, malloc_info.initial_seq_len) :
+                    0;
             const bool  allocated =
                 malloc_info.enable_remove_skipped_blocks ?
                      group->mallocForDecode(
@@ -819,7 +826,8 @@ MallocResult CoordinatorCacheManager::incrMalloc(const MallocInfo& malloc_info) 
                                   malloc_info.reuse_cache,
                                   reserve_step,
                                   &filled_positions,
-                                  required_positions);
+                                  required_positions,
+                                  initial_seq_len);
             if (!allocated) {
                 all_success  = false;
                 failed_batch = b;
