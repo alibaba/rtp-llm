@@ -5,6 +5,7 @@ import hashlib
 import io
 import json
 import os
+import select
 import socket
 import subprocess
 import tempfile
@@ -648,6 +649,41 @@ class NativePdSmokeTest(unittest.TestCase):
                         [("group", 123456, worker.signal.SIGKILL), ("wait", 10)],
                     )
 
+    @unittest.skipUnless(worker.sys.platform == "linux", "requires Linux process groups")
+    def test_cleanup_reaps_real_process_without_stopping_foreign_group(self):
+        program = (
+            "import signal,sys,time; "
+            "signal.signal(signal.SIGTERM, "
+            "signal.SIG_IGN if sys.argv[1] == 'ignore' else lambda *_: sys.exit(0)); "
+            "print('ready', flush=True); time.sleep(300)"
+        )
+        for mode in ("graceful", "ignore"):
+            with self.subTest(mode=mode):
+                processes = []
+                try:
+                    for role_mode in (mode, "ignore"):
+                        process = subprocess.Popen(
+                            [worker.sys.executable, "-c", program, role_mode],
+                            stdout=subprocess.PIPE,
+                            start_new_session=True,
+                        )
+                        processes.append(process)
+                        self.assertTrue(select.select([process.stdout], [], [], 5)[0])
+                        self.assertEqual(process.stdout.readline(), b"ready\n")
+                    owned, foreign = processes
+                    worker.stop_process(owned, timeout=0.5)
+                    self.assertEqual(
+                        owned.returncode,
+                        0 if mode == "graceful" else -worker.signal.SIGKILL,
+                    )
+                    self.assertIsNone(foreign.poll())
+                finally:
+                    for process in processes:
+                        with contextlib.suppress(ProcessLookupError):
+                            os.killpg(process.pid, worker.signal.SIGKILL)
+                        process.wait(timeout=5)
+                        process.stdout.close()
+
     def test_cleanup_attempts_both_processes_and_preserves_each_failure(self):
         for failures in (
             {"request"},
@@ -663,7 +699,7 @@ class NativePdSmokeTest(unittest.TestCase):
                 events = []
                 role.locks.callback(lambda: events.append("unlock"))
 
-                def stop(process):
+                def stop(process, timeout):
                     events.append(process.name)
                     if process.name in failures:
                         raise TimeoutError(f"{process.name} did not exit")
@@ -711,6 +747,9 @@ class NativePdSmokeTest(unittest.TestCase):
             self.assertEqual(
                 [call.args[0] for call in stop.call_args_list],
                 [role.request, role.service],
+            )
+            self.assertEqual(
+                [call.kwargs["timeout"] for call in stop.call_args_list], [60, 180]
             )
             verify.assert_called_once()
             self.assertEqual(events, ["unlock"])
