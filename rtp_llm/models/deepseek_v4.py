@@ -101,6 +101,23 @@ def _dsv4_pool_blocks(config_value: int | None, env_name: str) -> int:
     return value if value > 0 else 0
 
 
+def detect_fp4_expert_storage(weight_keys) -> "str | None":
+    """Detect I8-packed-FP4 routed-expert storage from checkpoint tensor keys.
+
+    V4 routed experts ship as I8-packed FP4 (e2m1) values plus a UE8M0
+    group-32 scale tensor per projection; ``_build_routed_experts_fp4``
+    consumes both.  The per-expert ``.w1/.w2/.w3.scale`` sibling keys are the
+    unambiguous signature of that layout: FP8/int8-stored experts carry no
+    per-expert scale tensors under this naming, so a miss leaves the estimate
+    untouched.  Used by ``DeepSeekV4Weight._process_meta`` when config.json
+    does not declare ``expert_dtype``.
+    """
+    for key in weight_keys:
+        if key.endswith((".w1.scale", ".w2.scale", ".w3.scale")) and ".ffn.experts." in key:
+            return "fp4"
+    return None
+
+
 def _require_n_shared_experts(config_json: dict) -> int:
     """Return the explicitly declared shared-expert count.
 
@@ -153,6 +170,18 @@ class DeepSeekV4Weight(DeepSeekV2Weight):
         # and no e_score_correction_bias (uses noaux_tc gate.bias on layers ≥ num_hash_layers).
         self.q_use_lora = False
         self.has_e_score_correction_bias = False
+        # Native FP4 routed-expert detection: some V4 checkpoints do not
+        # declare ``expert_dtype`` in config.json even though they store
+        # routed experts as I8-packed FP4 + UE8M0 group scales (see
+        # _build_routed_experts_fp4).  Detect the storage from the checkpoint
+        # keys so eval_model_weight_size() prices the experts at their real
+        # width; without this the model-wide FP8 width inflates the estimate
+        # ~1.8x and misroutes the loader to the scratch/CPU path (v4_pro:
+        # 42-minute weight load instead of a fastsafetensors GPU direct load).
+        if not (getattr(self.model_config, "expert_weight_dtype", None) or "").strip():
+            detected = detect_fp4_expert_storage(weight_keys)
+            if detected is not None:
+                self.model_config.expert_weight_dtype = detected
         # Per-layer attention type schedule + hash-router count, both attached to
         # ``self`` so ``_get_hf_layer_weight_info`` can branch per layer.
         self._compress_ratios = list(
