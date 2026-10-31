@@ -110,9 +110,15 @@ class CausalAttention(nn.Module):
                 qkv, kv_cache, self.layer_idx, key_center=self.fp8_key_center
             )
         attn_output = attn_output.reshape(*input_shape, -1).contiguous()
+        output = None
         if gate is not None:
-            attn_output = attn_output * torch.sigmoid(gate)
-        output = self.o_proj(attn_output)
+            fused_projection = getattr(self.o_proj, "forward_with_gate", None)
+            if fused_projection is not None:
+                output = fused_projection(attn_output, gate)
+            if output is None:
+                attn_output = attn_output * torch.sigmoid(gate)
+        if output is None:
+            output = self.o_proj(attn_output)
         if not skip_allreduce and self.tp_size > 1:
             output = all_reduce(output, group=Group.TP)
         return output

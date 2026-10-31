@@ -82,5 +82,5 @@ def decode_output_proj(
     if attn.tp_size > 1:
         from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce
 
-        all_reduce(out, Group.TP)
+        all_reduce(out, Group.TP, inplace=True)
     return out

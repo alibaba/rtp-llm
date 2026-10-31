@@ -115,6 +115,33 @@ py_test(
 )
 
 py_test(
+    name = "modelopt_fp8_producer_test",
+    srcs = ["modelopt_fp8_producer_test.py"],
+    deps = py_test_deps,
+    env = {"GPU_COUNT": "1"},
+    tags = ["RTX_5000_PRO", "RTX_5000_PRO_CU13"],
+    exec_properties = {"gpu": "RTX_5000_PRO_CU13", "gpu_count": "1"},
+)
+
+py_test(
+    name = "modelopt_fp4_producer_test",
+    srcs = ["modelopt_fp4_producer_test.py"],
+    deps = py_test_deps,
+    env = {"GPU_COUNT": "1"},
+    tags = ["RTX_5000_PRO", "RTX_5000_PRO_CU13"],
+    exec_properties = {"gpu": "RTX_5000_PRO_CU13", "gpu_count": "1"},
+)
+
+py_test(
+    name = "sm120_ipc_allreduce_test",
+    srcs = ["sm120_ipc_allreduce_test.py"],
+    deps = py_test_deps,
+    env = {"GPU_COUNT": "2"},
+    tags = ["RTX_5000_PRO", "RTX_5000_PRO_CU13"],
+    exec_properties = {"gpu": "RTX_5000_PRO_CU13", "gpu_count": "2"},
+)
+
+py_test(
     name = "test_xqa_batch_decode",
     srcs = ["test_xqa_batch_decode.py"],
     deps = py_test_deps + select({
@@ -124,4 +151,13 @@ py_test(
     }),
     tags = ["open_skip", "H20"],
     exec_properties = {'gpu':'H20'},
+)
+
+py_test(
+    name = "sm120_fp8_skinny_test",
+    srcs = ["sm120_fp8_skinny_test.py"],
+    deps = py_test_deps,
+    env = {"GPU_COUNT": "1", "RTP_LLM_SM120_FUSION": "1"},
+    tags = ["RTX_5000_PRO", "RTX_5000_PRO_CU13"],
+    exec_properties = {"gpu": "RTX_5000_PRO_CU13", "gpu_count": "1"},
 )

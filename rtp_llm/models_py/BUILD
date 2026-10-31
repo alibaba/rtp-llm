@@ -144,7 +144,9 @@ py_library(
     srcs = glob([
         "kernels/*.py",
         "kernels/**/*.py",
-    ])
+    ]),
+    data = ["kernels/cuda/sm120_ipc_allreduce.cu", "kernels/cuda/modelopt_norm_fp4_quant.cu", "kernels/cuda/sm120_fp8_skinny.cu"],
+    visibility = ["//rtp_llm/models_py/distributed:__pkg__"],
 )
 
 py_library(

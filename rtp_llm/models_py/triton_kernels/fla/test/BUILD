@@ -52,6 +52,15 @@ py_test(
 )
 
 py_test(
+    name = "gdn_recurrent_gating_test",
+    srcs = ["gdn_recurrent_gating_test.py"],
+    deps = ["//rtp_llm/models_py/triton_kernels:fla"] + [":triton", ":torch", ":numpy", ":einops", ":packaging"],
+    env = {"GPU_COUNT": "1"},
+    tags = ["RTX_5000_PRO", "RTX_5000_PRO_CU13"],
+    exec_properties = {"gpu": "RTX_5000_PRO_CU13", "gpu_count": "1"},
+)
+
+py_test(
     name = "test_gdn_block_prefill_rocm",
     srcs = ["test_gdn_block_prefill.py"],
     main = "test_gdn_block_prefill.py",
