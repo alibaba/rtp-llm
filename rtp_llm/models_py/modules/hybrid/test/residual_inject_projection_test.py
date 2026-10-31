@@ -4,6 +4,9 @@ from unittest.mock import patch
 import torch
 
 from rtp_llm.models_py.modules.hybrid.test import residual_fixtures as fixture
+from rtp_llm.models_py.triton_kernels.common.gated_residual_down_triton import (
+    separate_down_inject_epilogue,
+)
 from rtp_llm.models_py.triton_kernels.fla.utils import assert_close
 
 
@@ -71,6 +74,23 @@ class InjectProjectionContractTest(unittest.TestCase):
             graph.replay()
             torch.testing.assert_close(actual[2], native_gate, rtol=0, atol=0)
             assert_close("HC live Graph inject gate", reference, actual[2], 0.005)
+
+    def test_separate_epilogue_preserves_bf16_div_silu_sigmoid_and_double(self):
+        for rows in (1, 4, 16, 32, 128, 4096, 12288):
+            torch.manual_seed(7328 + rows)
+            d = torch.randn(rows, 320, device="cuda", dtype=torch.bfloat16) * 8
+            i = torch.randn(rows, 4, device="cuda", dtype=torch.bfloat16) * 8
+            for injection in (None, i):
+                actual, gate = separate_down_inject_epilogue(d, injection)
+                torch.testing.assert_close(
+                    actual, torch.nn.functional.silu(d / 4), rtol=0, atol=0
+                )
+                if injection is None:
+                    self.assertIsNone(gate)
+                else:
+                    torch.testing.assert_close(
+                        gate, 2 * torch.sigmoid(i / 4), rtol=0, atol=0
+                    )
 
 
 if __name__ == "__main__":

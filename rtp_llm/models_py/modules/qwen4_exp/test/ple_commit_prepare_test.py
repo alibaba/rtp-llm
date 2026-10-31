@@ -225,6 +225,60 @@ class PLECommitPrepareTest(unittest.TestCase):
             self.assertTrue(torch.equal(stage.ctx_pool, before[1]))
             owner.finish_speculative_target_commit(False)
 
+    def test_rollback_retry_refreshes_distinct_boundary_and_final_pages(self):
+        owner, stage, _, _, _ = self.transaction_fixture(batch=3)
+        stage.state_pool = stage.state_pool.repeat(2, 1, 1)
+        stage.ctx_pool = stage.ctx_pool.repeat(2, 1)
+        table = torch.arange(1, 10, device="cuda", dtype=torch.int32).reshape(3, 3)
+        stage.state_inputs.kv_cache_block_id_device = table
+        stage.ctx_inputs.kv_cache_block_id_device = table.flip(0).contiguous()
+        before_state, before_context = stage.state_pool.clone(), stage.ctx_pool.clone()
+        for attempt, lengths in enumerate(((1, 2, 4), (4, 1, 2), (2, 4, 1))):
+            with self.subTest(accepted=lengths):
+                owner.active_transaction = _PLETargetTransaction(
+                    3, 4, stage.prefixes, frozenset({1}), {1: stage}
+                )
+                accepted = torch.tensor(lengths, device="cuda", dtype=torch.int32)
+                owner.prepare_speculative_target_commit(accepted)
+                self.assertTrue(torch.equal(stage.state_pool, before_state))
+                self.assertTrue(torch.equal(stage.ctx_pool, before_context))
+                owner.finish_speculative_target_commit(True)
+                expected_state, expected_context = (
+                    before_state.clone(),
+                    before_context.clone(),
+                )
+                # Prefix 127 crosses the 128-token boundary after one token.
+                # Check each page against independent history concatenation.
+                for row, count in enumerate(lengths):
+                    final_page = (127 + count - 1) // stage.page_size
+                    for page, tokens in {0: 1, final_page: count}.items():
+                        state_block = int(table[row, page].item())
+                        context_block = int(
+                            stage.ctx_inputs.kv_cache_block_id_device[row, page].item()
+                        )
+                        expected_state[state_block] = torch.cat(
+                            (
+                                stage.initial_state[row],
+                                stage.candidate_state_inputs[row, :tokens],
+                            )
+                        )[-stage.initial_state.shape[1] :]
+                        expected_context[context_block] = torch.cat(
+                            (
+                                stage.initial_context[row],
+                                stage.candidate_ids[row, :tokens],
+                            )
+                        )[-stage.initial_context.shape[1] :]
+                self.assertTrue(torch.equal(stage.state_pool, expected_state))
+                self.assertTrue(torch.equal(stage.ctx_pool, expected_context))
+                if attempt < 2:
+                    owner.finish_speculative_target_commit(False)
+                    owner.finish_speculative_target_commit(False)
+                    self.assertTrue(torch.equal(stage.state_pool, before_state))
+                    self.assertTrue(torch.equal(stage.ctx_pool, before_context))
+                else:
+                    owner.finalize_speculative_target_commit()
+                self.assertIsNone(owner.active_transaction)
+
 
 if __name__ == "__main__":
     unittest.main()

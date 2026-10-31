@@ -142,6 +142,7 @@ test_suite(
         ":smoke_sm100_moe",
         ":smoke_sm120_dense",
         ":smoke_sm120_moe",
+        ":smoke_sm120_qwen4_exp",
         ":smoke_ppu_pd",
         ":smoke_ppu_qwen35_basic",
         ":smoke_ppu_qwen35_func",
@@ -218,4 +219,12 @@ custom_smoke_test(
     gpu_type = ["SM100_ARM_CU13"],
     tags = ["dsv41_cuda13", "model_contract", "dspark_contract"],
     data = ["//rtp_llm:sdk", "deepseek_v41_contract_test.py"],
+)
+
+py_test(
+    name = "qwen4_exp_sm120_contract_unit_test",
+    main = "qwen4_exp_sm120_contract_unit_test.py",
+    srcs = ["qwen4_exp_sm120_contract_test.py", "qwen4_exp_sm120_contract_unit_test.py"],
+    env = {"GPU_COUNT": "0"},
+    tags = ["RTX_5000_PRO_CU13"],
 )

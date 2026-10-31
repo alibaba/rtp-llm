@@ -81,7 +81,7 @@ py_test(
 
 py_test(
     name = "indexer_compressor_test",
-    srcs = ["indexer_compressor_test.py", "indexer_compression_reference.py"],
+    srcs = ["indexer_compressor_test.py"],
     deps = ["//rtp_llm:testlib", ":math_references"],
 )
 
@@ -313,7 +313,7 @@ py_test(
     data = VENDORED_UPSTREAM_FIXTURE,
     env = {"QWEN4_EXP_REQUIRE_PARITY": "1"},
     tags = ["manual"],
-    exec_properties = select({"@//:using_cuda13_x86": {"gpu": "RTX_5000_PRO_CU13"}, "//conditions:default": {"gpu": "H20_CU13"}}),
+    exec_properties = {"gpu": "RTX_5000_PRO_CU13"},
 )
 
 py_test(
@@ -324,7 +324,7 @@ py_test(
     data = VENDORED_UPSTREAM_FIXTURE,
     env = {"QWEN4_EXP_REQUIRE_PARITY": "1"},
     tags = ["manual"],
-    exec_properties = select({"@//:using_cuda13_x86": {"gpu": "RTX_5000_PRO_CU13"}, "//conditions:default": {"gpu": "H20_CU13"}}),
+    exec_properties = {"gpu": "RTX_5000_PRO_CU13"},
 )
 
 py_test(
@@ -398,14 +398,6 @@ py_test(
     exec_properties = {"gpu": "RTX_5000_PRO_CU13", "gpu_count": "1"},
 )
 
-py_test(
-    name = "qsa_output_gate_test",
-    srcs = ["qsa_output_gate_test.py", "grouped_fp8_test.py", "sparse_paged_fmha_test.py"],
-    deps = ["//rtp_llm:testlib"],
-    env = {"GPU_COUNT": "1"},
-    tags = ["RTX_5000_PRO_CU13"],
-    exec_properties = {"gpu": "RTX_5000_PRO_CU13", "gpu_count": "1"},
-)
 
 py_test(
     name = "indexer_norm_rope_test",

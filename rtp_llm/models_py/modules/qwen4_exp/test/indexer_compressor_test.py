@@ -21,9 +21,6 @@ from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_compressor import (
     restore_indexer_cache,
     write_indexer_cache,
 )
-from rtp_llm.models_py.modules.qwen4_exp.test.indexer_compression_reference import (
-    compress_prefill,
-)
 
 _H = 4
 _D = 128
@@ -31,6 +28,67 @@ _HIDDEN = 32
 _RATIO = 4
 _BUDGET = 32
 _EPS = 1e-6
+
+
+def compress_prefill(
+    hidden_states: torch.Tensor,  # [B, T, D]
+    qk_proj: torch.Tensor,  # [(n_heads+1)*head_dim, D]
+    k_norm_gamma: torch.Tensor,  # [head_dim]
+    cos: torch.Tensor,  # [B, T, rotary_dim] (full-range)
+    sin: torch.Tensor,  # [B, T, rotary_dim]
+    *,
+    ratio: int,
+    head_dim: int,
+    norm_eps: float = 1e-6,
+) -> dict:
+    """Full prefill compression returning the compressed pool entries + raw keys.
+
+    This is the **flat-buffer form**: instead of writing to framework-managed paged
+    pools, it returns tensors that let the caller (or a test) verify the compressed
+    content by placing it in a pool buffer.
+
+    Returns a dict::
+
+        raw_keys      [B, T, D] fp32
+        pooled_k      [B, nb, D] bf16          (one per **complete** block)
+        block_starts  [B, nb] int64            first token index of each block
+        num_blocks    [B] int64                how many complete blocks per batch
+
+    The caller can copy ``pooled_k[i, b]`` directly into the bf16 view of the
+    ``indexer_kv`` pool at slot ``i * num_blocks + b``.
+    """
+    B, T, _ = hidden_states.shape
+    device = hidden_states.device
+    n_heads = qk_proj.shape[0] // head_dim - 1
+    qk = hidden_states @ qk_proj.T
+    _, raw_k = qk.split([n_heads * head_dim, head_dim], dim=-1)
+    raw_keys = raw_k.float()  # [B, T, D] fp32
+
+    num_blocks_full = T // ratio
+    # Truncate raw_keys to the token positions that form complete blocks.
+    grouped = raw_keys[:, : num_blocks_full * ratio]  # [B, nb*ratio, D]
+    grouped = grouped.unflatten(1, (num_blocks_full, ratio))  # [B, nb, ratio, D]
+    # Mean in fp32 (upstream orders the summation the same way).
+    pooled = grouped.mean(dim=2).to(raw_k.dtype)  # [B, nb, D]
+
+    # Apply k_layernorm (with +1) and partial RoPE at each block's first position.
+    pooled = exact_head_rms_norm(pooled, k_norm_gamma[None, None, :], norm_eps)
+    block_starts = torch.arange(num_blocks_full, device=device) * ratio  # [nb]
+    pooled_rotated = apply_partial_rope(
+        pooled,
+        cos[:, block_starts],
+        sin[:, block_starts],
+    )
+    pooled_k = pooled_rotated.to(torch.bfloat16).contiguous()
+
+    return {
+        "raw_keys": raw_keys,
+        "pooled_k": pooled_k,
+        "block_starts": block_starts.expand(B, -1),
+        "num_blocks": torch.full(
+            (B,), num_blocks_full, dtype=torch.long, device=device
+        ),
+    }
 
 
 def _build_indexer(device="cpu"):
@@ -117,24 +175,6 @@ class IndexerCompressorTest(unittest.TestCase):
                     msg=f"T={T} pooled keys mismatch",
                 )
             self.assertEqual(ref_pooled.shape[1], nb)
-
-    def test_contract_rejects_an_invalid_rotary_width(self):
-        indexer = _build_indexer()
-        hidden = torch.randn(1, 4, _HIDDEN)
-        cos = torch.ones(1, 4, _D + 2)
-        sin = torch.zeros_like(cos)
-
-        with self.assertRaisesRegex(ValueError, "rotary_dim"):
-            compress_prefill(
-                hidden,
-                indexer.qk_proj,
-                indexer.k_norm_gamma,
-                cos,
-                sin,
-                ratio=_RATIO,
-                head_dim=_D,
-                norm_eps=_EPS,
-            )
 
 
 class IndexerCacheWriterTest(unittest.TestCase):

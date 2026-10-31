@@ -1,0 +1,198 @@
+{
+  "model_type": "qwen4_exp",
+  "model_path": "${QWEN4_EXP_CHECKPOINT}",
+  "query_result": [
+    {
+      "endpoint": "/v1/chat/completions",
+      "query": {
+        "model": "qwen4_exp",
+        "messages": [
+          {
+            "role": "user",
+            "content": "Compute 17 + 3. Reply with only the integer."
+          }
+        ],
+        "enable_thinking": false,
+        "temperature": 0,
+        "max_tokens": 64
+      },
+      "result": {
+        "choices": [
+          {
+            "index": 0,
+            "message": {
+              "role": "assistant",
+              "content": "20",
+              "partial": false
+            },
+            "finish_reason": "stop"
+          }
+        ],
+        "usage": {}
+      },
+      "compare_config": {
+        "skip_usage": true
+      }
+    },
+    {
+      "endpoint": "/v1/chat/completions",
+      "query": {
+        "model": "qwen4_exp",
+        "messages": [
+          {
+            "role": "user",
+            "content": "Compute 30 - 10. Reply with only the integer."
+          }
+        ],
+        "enable_thinking": false,
+        "temperature": 0,
+        "max_tokens": 64
+      },
+      "result": {
+        "choices": [
+          {
+            "index": 0,
+            "message": {
+              "role": "assistant",
+              "content": "20",
+              "partial": false
+            },
+            "finish_reason": "stop"
+          }
+        ],
+        "usage": {}
+      },
+      "compare_config": {
+        "skip_usage": true
+      }
+    },
+    {
+      "endpoint": "/v1/chat/completions",
+      "query": {
+        "model": "qwen4_exp",
+        "messages": [
+          {
+            "role": "user",
+            "content": "Compute (4 + 6) times 2. Reply with only the integer."
+          }
+        ],
+        "enable_thinking": false,
+        "temperature": 0,
+        "max_tokens": 64
+      },
+      "result": {
+        "choices": [
+          {
+            "index": 0,
+            "message": {
+              "role": "assistant",
+              "content": "20",
+              "partial": false
+            },
+            "finish_reason": "stop"
+          }
+        ],
+        "usage": {}
+      },
+      "compare_config": {
+        "skip_usage": true
+      }
+    },
+    {
+      "endpoint": "/v1/chat/completions",
+      "query": {
+        "model": "qwen4_exp",
+        "messages": [
+          {
+            "role": "user",
+            "content": "Copy exactly this string, without quotes: PRO5000-00-QWEN"
+          }
+        ],
+        "enable_thinking": false,
+        "temperature": 0,
+        "max_tokens": 64
+      },
+      "result": {
+        "choices": [
+          {
+            "index": 0,
+            "message": {
+              "role": "assistant",
+              "content": "PRO5000-00-QWEN",
+              "partial": false
+            },
+            "finish_reason": "stop"
+          }
+        ],
+        "usage": {}
+      },
+      "compare_config": {
+        "skip_usage": true
+      }
+    },
+    {
+      "endpoint": "/v1/chat/completions",
+      "query": {
+        "model": "qwen4_exp",
+        "messages": [
+          {
+            "role": "user",
+            "content": "How many seconds are in 2 minutes? Reply with only the integer."
+          }
+        ],
+        "enable_thinking": false,
+        "temperature": 0,
+        "max_tokens": 64
+      },
+      "result": {
+        "choices": [
+          {
+            "index": 0,
+            "message": {
+              "role": "assistant",
+              "content": "120",
+              "partial": false
+            },
+            "finish_reason": "stop"
+          }
+        ],
+        "usage": {}
+      },
+      "compare_config": {
+        "skip_usage": true
+      }
+    },
+    {
+      "endpoint": "/v1/chat/completions",
+      "query": {
+        "model": "qwen4_exp",
+        "messages": [
+          {
+            "role": "user",
+            "content": "计算 2 加 3。只回答阿拉伯数字。"
+          }
+        ],
+        "enable_thinking": false,
+        "temperature": 0,
+        "max_tokens": 64
+      },
+      "result": {
+        "choices": [
+          {
+            "index": 0,
+            "message": {
+              "role": "assistant",
+              "content": "5",
+              "partial": false
+            },
+            "finish_reason": "stop"
+          }
+        ],
+        "usage": {}
+      },
+      "compare_config": {
+        "skip_usage": true
+      }
+    }
+  ]
+}

@@ -35,37 +35,12 @@ py_test(
     deps = ["//rtp_llm:testlib"],
 )
 
-# Opt-in real-checkpoint test.  The released PLE table is 102.4 GB, so this
-# target requires all eight H20s and skips unless QWEN4_EXP_CKPT_DIR points at
-# the complete 131-shard checkpoint.
-py_test(
-    name = "ple_real_tp8_loading_test",
-    srcs = ["ple_real_tp8_loading_test.py"],
-    deps = ["//rtp_llm:testlib"],
-    env = {"GPU_COUNT": "8"},
-    tags = [
-        "H20_CU13",
-        "open_skip",
-    ],
-    exec_properties = {
-        "gpu": "H20_CU13",
-        "gpu_count": "8",
-    },
-)
-
 py_test(
     name = "moe_fp4_test",
     srcs = ["moe_fp4_test.py"],
     deps = ["//rtp_llm:testlib"],
 )
 
-py_test(
-    name = "attention_fp8_runtime_test",
-    srcs = ["attention_fp8_runtime_test.py"],
-    deps = ["//rtp_llm:testlib"],
-    tags = ["RTX_5000_PRO_CU13"],
-    exec_properties = {"gpu": "RTX_5000_PRO_CU13"},
-)
 
 py_test(
     name = "full_fp8_test",

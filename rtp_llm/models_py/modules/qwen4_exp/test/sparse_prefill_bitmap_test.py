@@ -104,8 +104,6 @@ class SparsePrefillBitmapTest(unittest.TestCase):
             sparse_prefill_attn(q, k, v, selected)
         self.assertTrue(torch.equal(k, snapshot))
 
-
-class SparsePrefillWordsTest(SparsePrefillBitmapTest):
     def test_word_boundaries_and_repeated_bits(self):
         q, k, v, selected = self.inputs()
         selected.fill_(-1)

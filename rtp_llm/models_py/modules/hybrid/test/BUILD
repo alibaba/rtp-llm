@@ -220,14 +220,6 @@ py_test(
     exec_properties = {"gpu": "RTX_5000_PRO_CU13", "gpu_count": "1"},
 )
 
-py_test(
-    name = "residual_separate_epilogue_test",
-    srcs = ["residual_separate_epilogue_test.py"],
-    deps = ["//rtp_llm:testlib"],
-    env = {"GPU_COUNT": "1"},
-    tags = ["RTX_5000_PRO_CU13"],
-    exec_properties = {"gpu": "RTX_5000_PRO_CU13", "gpu_count": "1"},
-)
 
 py_test(
     name = "residual_pending_test",
