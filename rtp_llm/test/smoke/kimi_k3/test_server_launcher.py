@@ -40,13 +40,13 @@ class CheckpointSourceTest(unittest.TestCase):
                     ):
                         env, argv = launch.launch_config(args)
                     options = dict(zip(argv[1::2], argv[2::2]))
-                    self.assertEqual(options["--shutdown_timeout"], "45")
+                    self.assertEqual(options["--shutdown_timeout"], "120")
                     for name in (
                         "frontend_pre_stop_drain_seconds",
                         "dash_sc_grpc_pre_stop_drain_seconds",
                         "backend_post_frontend_drain_seconds",
                     ):
-                        self.assertEqual(options["--" + name], "0")
+                        self.assertNotIn("--" + name, options)
                     self.assertEqual(
                         options["--moe_strategy"],
                         "mega_moe" if role == "PREFILL" else "mega_moe_se",
