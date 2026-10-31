@@ -214,8 +214,8 @@ void applySpecLogitsAcceptLenCap(const SpecLogitsVerifyRunner::LaunchResult& ver
     if (!cap_src.defined()) {
         return;
     }
-    RTP_LLM_CHECK_WITH_INFO(output.accept_len.defined() && output.accept_len.is_cuda(),
-                            "spec logits cap requires CUDA accept_len");
+    RTP_LLM_CHECK_WITH_INFO(output.accept_len.defined() && (output.accept_len.is_cuda() || output.accept_len.is_privateuseone()),
+                            "spec logits cap requires device-resident accept_len");
 
     if (verify_result.ready_event) {
         cuda_graph::graphBlockEvent(*verify_result.ready_event, cuda_graph::graphGetCurrentStream());
@@ -225,12 +225,13 @@ void applySpecLogitsAcceptLenCap(const SpecLogitsVerifyRunner::LaunchResult& ver
     auto cap_plus_one = cap_gpu + 1;
     output.accept_len = torch::minimum(output.accept_len, cap_plus_one);
 
-    RTP_LLM_CHECK_WITH_INFO(output.accept_tokens.defined() && output.accept_tokens.is_cuda(),
-                            "spec logits cap requires CUDA accept_tokens");
+    RTP_LLM_CHECK_WITH_INFO(output.accept_tokens.defined()
+                                && (output.accept_tokens.is_cuda() || output.accept_tokens.is_privateuseone()),
+                            "spec logits cap requires device-resident accept_tokens");
     RTP_LLM_CHECK_WITH_INFO(target_sampler_output.token_ids.defined(),
                             "spec logits cap requires target sampler token_ids");
     auto target_token_ids = target_sampler_output.token_ids;
-    if (!target_token_ids.is_cuda()) {
+    if (!target_token_ids.is_cuda() && !target_token_ids.is_privateuseone()) {
         target_token_ids = target_token_ids.to(output.accept_tokens.device(), /*non_blocking=*/true);
     }
     const int64_t token_stride  = target_token_ids.size(1);
@@ -517,7 +518,7 @@ void MtpExecutor::stageAcceptLenMetrics(const torch::Tensor& accept_len,
     metrics_accept_len_propose_token_num_ = static_cast<int64_t>(stream_count * propose_step_);
     metrics_accept_len_row_priorities_    = std::move(row_priorities);
 
-    if (!accept_len.is_cuda()) {
+    if (!accept_len.is_cuda() && !accept_len.is_privateuseone()) {
         metrics_accept_len_sum_gpu_  = torch::Tensor();
         metrics_accept_len_sum_cpu_  = accept_len.to(torch::kInt64).sum().reshape({1}).pin_memory();
         metrics_accept_len_rows_gpu_ = torch::Tensor();
@@ -651,7 +652,7 @@ GenerateStreamPtr MtpExecutor::createMinFakeDecodeStream(int                    
     auto seq_len = fake_stream->seqLength();
 
     // set device state
-    auto int32_gpu          = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+    auto int32_gpu          = torch::TensorOptions().dtype(torch::kInt32).device(getTorchCudaDevice());
     auto accept_len_gpu     = torch::ones({1}, int32_gpu);
     auto accept_tokens_gpu  = torch::zeros({1, max_new_tokens + 1}, int32_gpu);
     auto next_seq_len_gpu   = torch::ones({1}, int32_gpu) + 1;
@@ -674,11 +675,11 @@ GenerateStreamPtr MtpExecutor::createMinFakeDecodeStream(int                    
 
 namespace speculative {
 
-// Ascend MTP/EAGLE/DSpark is not fully migrated (rejection sampling and
-// device-state paths are CUDA-only); refuse construction until then.
-bool mtpExecutorPlatformUnsupported() {
+// On Ascend only MTP is ported; EAGLE/EAGLE3/DSpark still rely on
+// CUDA-only paths (markov weights, device-state kernels).
+bool mtpExecutorPlatformUnsupported(SpeculativeType sp_type) {
 #if USING_ASCEND
-    return true;
+    return sp_type != SP_TYPE_MTP;
 #else
     return false;
 #endif
@@ -739,11 +740,10 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
     dspark_cache_store_sync_stream_(cuda_graph::graphGetStreamFromPool(true)) {
 #endif
     // Fail-fast before any model/cache state is touched; see mtpExecutorPlatformUnsupported().
-    if (speculative::mtpExecutorPlatformUnsupported()) {
-        RTP_LLM_FAIL("speculative decoding (sp_type=%s) is not yet supported on Ascend NPU: "
-                     "MTP/EAGLE/DSpark executors still rely on CUDA-only rejection sampling and "
-                     "device-state kernels. Disable speculative decoding (remove the spec/draft "
-                     "model config) on Ascend until the migration completes.",
+    if (speculative::mtpExecutorPlatformUnsupported(propose_params ? propose_params->sp_type : SP_TYPE_NONE)) {
+        RTP_LLM_FAIL("speculative decoding (sp_type=%s) is not supported on Ascend NPU: "
+                     "only MTP is ported, EAGLE/EAGLE3/DSpark rely on CUDA-only paths. "
+                     "Use sp_type=MTP on Ascend.",
                      SpeculativeExecutionConfig::to_string(propose_params ? propose_params->sp_type
                                                                          : SP_TYPE_NONE)
                          .c_str());
@@ -1773,10 +1773,10 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(rejection_sampling)");
 
         if (model_input.is_fake_stream) {
-            speculative_sampler_output.accept_len = torch::full(
-                {1}, (int64_t)(propose_step_ + 1), torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
-            speculative_sampler_output.accept_tokens = torch::zeros(
-                {1, (int64_t)(propose_step_ + 1)}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
+            const auto npu_or_cuda_i32 = torch::TensorOptions().dtype(torch::kInt32).device(getTorchCudaDevice());
+            speculative_sampler_output.accept_len =
+                torch::full({1}, (int64_t)(propose_step_ + 1), npu_or_cuda_i32);
+            speculative_sampler_output.accept_tokens = torch::zeros({1, (int64_t)(propose_step_ + 1)}, npu_or_cuda_i32);
         } else {
             // gatherSpecSamplerInput reads host stream state updated by the previous
             // bookkeeping worker. DROP_BROAD_SYNC therefore needs this narrow sync
@@ -1829,9 +1829,9 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
             batch_stream_processor_->updateDecodePostDSparkCommitInput(
                 model_input, model_output.all_hidden_states, batch_size);
         } else {
-            model_input.is_target_verify   = false;
-            const auto cuda_i32            = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
-            model_input.lm_output_indexes  = torch::empty({(int64_t)batch_size}, cuda_i32);
+            model_input.is_target_verify = false;
+            const auto cuda_i32          = torch::TensorOptions().dtype(torch::kInt32).device(getTorchCudaDevice());
+            model_input.lm_output_indexes = torch::empty({(int64_t)batch_size}, cuda_i32);
             model_input.last_hidden_states = model_output.all_hidden_states;
         }
     }
@@ -1958,7 +1958,7 @@ void MtpExecutor::launchTargetVerifyPrepareAsync(const GptModelInputs& model_inp
     }
     {
         RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(prepare_target_verify_input)");
-        const auto cuda_i32 = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+        const auto cuda_i32 = torch::TensorOptions().dtype(torch::kInt32).device(getTorchCudaDevice());
         // Async prepare only needs the token count for metadata/cudagraph sizing.
         // The actual target-verify token ids are produced by the draft decode
         // path below.
@@ -2011,7 +2011,7 @@ void MtpExecutor::launchTargetVerifyPrepareAsync(const GptModelInputs& model_inp
     }
     model_input_copy.last_hidden_states = torch::Tensor();
     model_input_copy.sequence_lengths =
-        torch::empty({0}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
+        torch::empty({0}, torch::TensorOptions().dtype(torch::kInt32).device(getTorchCudaDevice()));
     model_input_copy.is_target_verify = true;
     ensureModelInputsOnCuda(model_input_copy, "decode.target_prepare");
 
@@ -2568,11 +2568,7 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
 
     // update TP > 0 batch_size
     size_t     batch_size       = model_input.combo_tokens.size(0);
-#if USING_ASCEND
-    const auto cuda_i32         = torch::TensorOptions().dtype(torch::kInt32).device(torch::kPrivateUse1);
-#else
-    const auto cuda_i32         = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
-#endif
+    const auto cuda_i32         = torch::TensorOptions().dtype(torch::kInt32).device(getTorchCudaDevice());
     auto       to_cuda_i32_flat = [this, batch_size](const torch::Tensor& tensor) -> torch::Tensor {
         auto tensor_d = toCudaInt32WithHostHold(tensor, buffer_holder_);
         tensor_d      = tensor_d.reshape({static_cast<int64_t>(batch_size)});
@@ -2631,7 +2627,7 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
         }
         if (!all_device_state && all_streams.empty()) {
             pre_target_token_t =
-                torch::empty({(int64_t)batch_size}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
+                torch::empty({(int64_t)batch_size}, torch::TensorOptions().dtype(torch::kInt32).device(getTorchCudaDevice()));
         }
     }
 

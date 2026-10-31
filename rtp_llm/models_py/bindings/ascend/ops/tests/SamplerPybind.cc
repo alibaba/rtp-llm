@@ -94,4 +94,57 @@ PYBIND11_MODULE(sampler_test_module, m) {
         py::arg("return_original_all_probs") = false,
         "Execute greedy/random sampling on Ascend NPU.\n\n"
         "Returns dict with keys: token_ids, success, cum_log_probs, output_all_probs.");
+
+    m.def(
+        "exec_rejection_sampling",
+        [](std::optional<torch::Tensor> draft_probs,
+           torch::Tensor draft_token_ids,
+           torch::Tensor uniform_samples,
+           torch::Tensor target_probs,
+           torch::Tensor target_token_ids,
+           torch::Tensor output_token_ids,
+           torch::Tensor output_accepted_token_num,
+           torch::Tensor do_sample,
+           bool draft_probs_point_mass) {
+            RejectionSamplingParams params;
+            params.draft_probs_d                = draft_probs.value_or(torch::Tensor());
+            params.draft_token_ids_d            = draft_token_ids;
+            params.uniform_samples_d            = uniform_samples;
+            params.target_probs_d               = target_probs;
+            params.target_token_ids_d           = target_token_ids;
+            params.output_token_ids_d           = output_token_ids;
+            params.output_accepted_token_num_d  = output_accepted_token_num;
+            params.do_sample_d                  = do_sample;
+            params.draft_probs_point_mass       = draft_probs_point_mass;
+            execRejectionSampling(params);
+        },
+        py::arg("draft_probs")               = py::none(),
+        py::arg("draft_token_ids"),
+        py::arg("uniform_samples"),
+        py::arg("target_probs"),
+        py::arg("target_token_ids"),
+        py::arg("output_token_ids"),
+        py::arg("output_accepted_token_num"),
+        py::arg("do_sample"),
+        py::arg("draft_probs_point_mass")    = false,
+        "Execute MTP rejection sampling on Ascend NPU (in-place outputs).");
+
+    m.def(
+        "exec_mapping_draft2_target",
+        [](torch::Tensor tokens,
+           torch::Tensor d2t_map,
+           int64_t batch_size,
+           int64_t token_offset,
+           int64_t token_stride) {
+            MappingDraft2TargetParams params{
+                tokens, d2t_map, static_cast<int>(batch_size), static_cast<int>(token_offset),
+                static_cast<int>(token_stride)};
+            execMappingDraft2Target(params);
+        },
+        py::arg("tokens"),
+        py::arg("d2t_map"),
+        py::arg("batch_size"),
+        py::arg("token_offset"),
+        py::arg("token_stride"),
+        "Map draft-vocab token ids to target vocab (in-place on the [offset, stride) column window).");
 }
