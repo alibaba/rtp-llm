@@ -3,6 +3,7 @@
 #include <unordered_map>
 
 #include <condition_variable>
+#include <chrono>
 #include <array>
 #include <cstdint>
 #include <functional>
@@ -19,6 +20,7 @@
 #include "rtp_llm/cpp/cache/KVCacheResource.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/block_pool/DeviceBlockPool.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/StorageBackendExecutor.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferTypes.h"
 #include "rtp_llm/cpp/utils/ErrorCode.h"
 
 namespace rtp_llm {
@@ -74,6 +76,12 @@ public:
     using StorageOperationCompletionUnknown::StorageOperationCompletionUnknown;
 };
 
+// A shared workflow budget expired before any payload I/O was submitted.
+class StorageDeadlineExceeded: public std::runtime_error {
+public:
+    using std::runtime_error::runtime_error;
+};
+
 struct StorageMatchResult {
     size_t                                   matched_blocks_num{0};
     std::shared_ptr<StorageBackendMatchMeta> match_meta;
@@ -87,6 +95,7 @@ struct StorageRequest {
     // boundary are already available from Device/Host/Disk.
     size_t                 local_matched_blocks_num{0};
     std::optional<int64_t> request_id;
+    std::optional<TransferTask> transfer_task;
 
     bool empty() const {
         for (const auto& key_handles : handles) {
@@ -135,7 +144,8 @@ public:
     // one backend; init rejects binding the same instance a second time.
     explicit StorageBackend(std::shared_ptr<StorageBackendExecutor>        executor         = nullptr,
                             std::shared_ptr<BlockTreeCacheMetricsReporter> metrics_reporter = nullptr,
-                            int64_t                                        world_rank       = -1);
+                            int64_t                                        world_rank       = -1,
+                            std::chrono::milliseconds                      timeout = std::chrono::seconds(10));
     virtual ~StorageBackend();
     // Atomic replacement allows attaching the cache reporter before or after init.
     void setStageMetricsReporter(std::shared_ptr<BlockTreeCacheMetricsReporter> reporter);
@@ -191,7 +201,7 @@ private:
                                         const char*           operation,
                                         uint64_t              trace_id) const noexcept;
     void validateRequest(const StorageRequest& request, bool allow_null_blocks) const;
-    bool                                 dispatch(Operation operation);
+    bool                                 dispatch(Operation operation, BlockTreeTaskClass task_class);
     void                                 taskFinished();
     void quarantineTask(const std::shared_ptr<storage_backend_detail::StorageTaskState>& state,
                         bool                                                             is_write,
@@ -203,6 +213,7 @@ private:
     std::shared_ptr<BlockTreeCacheMetricsReporter> stage_metrics_reporter_;
     std::atomic<bool>                              stage_metrics_enabled_{false};
     const int64_t                                  world_rank_;
+    const std::chrono::milliseconds                 timeout_;
     bool                                    init_attempted_{false};
     bool                                    initialized_{false};
 

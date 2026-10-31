@@ -111,7 +111,7 @@ void StreamCacheResource::releaseResource() {
                           std::hash<std::thread::id>{}(std::this_thread::get_id()));
         abort();
     }
-    if (allocator_load_context_) {
+    if (allocator_load_context_ && !deferAllocatorLoadRelease()) {
         if (!resource_context_.cache_manager->abortPendingLoad(allocator_load_context_)) {
             RTP_LLM_LOG_DEBUG("allocator load was already committed or completed before release");
         }
@@ -338,10 +338,14 @@ absl::Status StreamCacheResource::finalizeAllocatorLoad() {
     const auto error         = allocator_load_context_->errorInfo();
     const auto load_context  = std::dynamic_pointer_cast<LoadAsyncContext>(allocator_load_context_);
     auto       malloc_status = load_context == nullptr ? MallocStatus::NONE : load_context->mallocStatus();
+    const bool timed_out = load_context && load_context->deadlineExceeded();
+    if (timed_out) {
+        deferAllocatorLoadRelease();
+    }
     if (load_success) {
         RTP_LLM_CHECK(load_context != nullptr);
         publishAllocatorReuse(*load_context, false);
-    } else if (resource_context_.role_type == RoleType::PREFILL && malloc_status == MallocStatus::NONE) {
+    } else if (!timed_out && resource_context_.role_type == RoleType::PREFILL && malloc_status == MallocStatus::NONE) {
         const bool backend_timeout = load_context && load_context->backendTimedOut();
         skip_remote_cache_         = skip_remote_cache_ || backend_timeout;
         const bool reuse_local     = load_context && load_context->localLoadSucceeded();
@@ -374,6 +378,9 @@ absl::Status StreamCacheResource::finalizeAllocatorLoad() {
     }
     allocator_load_context_.reset();
 
+    if (timed_out) {
+        return absl::DeadlineExceededError("match-to-ready deadline exceeded");
+    }
     if (load_success) {
         return absl::OkStatus();
     }
@@ -394,6 +401,20 @@ absl::Status StreamCacheResource::finalizeAllocatorLoad() {
         return absl::DeadlineExceededError(error_text.empty() ? "allocator load timed out" : error_text);
     }
     return absl::InternalError(error_text.empty() ? "allocator load failed" : "allocator load failed: " + error_text);
+}
+
+bool StreamCacheResource::deferAllocatorLoadRelease() {
+    auto context = std::dynamic_pointer_cast<LoadAsyncContext>(allocator_load_context_);
+    if (!context || !context->needBackendMatch()) {
+        return false;
+    }
+    auto replacement = std::make_shared<BatchKVCacheResource>();
+    replacement->resetBatchSize(batch_kv_cache_resource_->batchSize());
+    replacement->initGroups(resource_context_.cache_manager->cacheConfig().topologyPtr());
+    context->deferRelease(batch_kv_cache_resource_);
+    batch_kv_cache_resource_ = std::move(replacement);
+    allocator_load_context_.reset();
+    return true;
 }
 
 void StreamCacheResource::reportCacheReuseMetrics() {

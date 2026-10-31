@@ -525,6 +525,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("kvcm_vipserver_domain", &KVCacheConfig::kvcm_vipserver_domain)
         .def_readwrite("kvcm_server_address", &KVCacheConfig::kvcm_server_address)
         .def_readwrite("kvcm_instance_group", &KVCacheConfig::kvcm_instance_group)
+        .def_readwrite("kvcm_task_timeout_ms", &KVCacheConfig::kvcm_task_timeout_ms)
         .def_readwrite("kvcm_read_backend_type", &KVCacheConfig::kvcm_read_backend_type)
         .def_readwrite("kvcm_min_replica_count", &KVCacheConfig::kvcm_min_replica_count)
         .def_readwrite("kvcm_meta_channel_retry_time", &KVCacheConfig::kvcm_meta_channel_retry_time)
@@ -577,7 +578,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def(py::pickle(
             [](const KVCacheConfig& self) {
                 return py::make_tuple(std::string("KVCacheConfig"),
-                                      11,
+                                      12,
                                       self.reuse_cache,
                                       self.multi_task_prompt,
                                       self.multi_task_prompt_str,
@@ -655,9 +656,19 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.block_tree_full_disk_evict_low_watermark_ratio,
                                       self.block_tree_full_disk_evict_high_watermark_ratio,
                                       self.memory_cache_swa_block_ratio,
-                                      self.dsv41_decoder_swa_pool_blocks);
+                                      self.dsv41_decoder_swa_pool_blocks,
+                                      self.kvcm_task_timeout_ms,
+                                      self.kvcm_read_backend_type,
+                                      self.kvcm_min_replica_count,
+                                      self.kv_cache_event_snapshot_interval_ms);
             },
             [](py::tuple t) {
+                const py::tuple backend_state = t;
+                const bool has_backend_fields = t.size() == 84 && py::isinstance<py::int_>(t[1]) && t[1].cast<int>() == 12;
+                if (has_backend_fields) {
+                    t = t[py::slice(0, 80, 1)].cast<py::tuple>();
+                    t[1] = py::int_(11);
+                }
                 const py::tuple host_pool_state = t;
                 const bool has_host_pool_fields = t.size() == 80 && py::isinstance<py::int_>(t[1]) && t[1].cast<int>() == 11;
                 if (has_host_pool_fields) {
@@ -812,6 +823,12 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                 }
                 if (has_crc_field) {
                     c.enable_crc = crc_state[69].cast<bool>();
+                }
+                if (has_backend_fields) {
+                    c.kvcm_task_timeout_ms = backend_state[80].cast<int>();
+                    c.kvcm_read_backend_type = backend_state[81].cast<int32_t>();
+                    c.kvcm_min_replica_count = backend_state[82].cast<int32_t>();
+                    c.kv_cache_event_snapshot_interval_ms = backend_state[83].cast<int>();
                 }
                 return c;
             }));

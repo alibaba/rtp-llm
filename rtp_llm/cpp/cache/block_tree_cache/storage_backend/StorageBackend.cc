@@ -87,11 +87,13 @@ StorageWriteTask::StorageWriteTask(std::shared_ptr<storage_backend_detail::Stora
 
 StorageBackend::StorageBackend(std::shared_ptr<StorageBackendExecutor>        executor,
                                std::shared_ptr<BlockTreeCacheMetricsReporter> reporter,
-                               int64_t                                        world_rank):
+                               int64_t                                        world_rank,
+                               std::chrono::milliseconds                      timeout):
     executor_(std::move(executor)),
     stage_metrics_reporter_(std::move(reporter)),
     stage_metrics_enabled_(stage_metrics_reporter_ && stage_metrics_reporter_->stageMetricsEnabled()),
-    world_rank_(world_rank) {}
+    world_rank_(world_rank),
+    timeout_(timeout) {}
 
 void StorageBackend::setStageMetricsReporter(std::shared_ptr<BlockTreeCacheMetricsReporter> reporter) {
     const bool enabled = reporter && reporter->stageMetricsEnabled();
@@ -197,7 +199,7 @@ bool StorageBackend::init(std::shared_ptr<const CacheTopology> topology,
     return true;
 }
 
-bool StorageBackend::dispatch(Operation operation) {
+bool StorageBackend::dispatch(Operation operation, BlockTreeTaskClass task_class) {
     const auto once = std::make_shared<std::once_flag>();
     Lifecycle  outcome;
     {
@@ -229,7 +231,7 @@ bool StorageBackend::dispatch(Operation operation) {
         return false;
     }
     try {
-        if (executor_->submit([complete]() mutable { complete(Lifecycle::ACCEPTING); })) {
+        if (executor_->submit([complete]() mutable { complete(Lifecycle::ACCEPTING); }, task_class)) {
             return true;
         }
     } catch (...) {}
@@ -397,6 +399,9 @@ bool StorageBackend::isHandleRequired(size_t key_index, size_t matched_key_count
 void StorageBackend::match(StorageRequest request, MatchDone done) {
     RTP_LLM_CHECK(initialized_);
     validateRequest(request, /*allow_null_blocks=*/true);
+    if (!request.transfer_task) {
+        request.transfer_task.emplace(std::vector<TransferDescriptor>{}, timeout_, request.request_id);
+    }
     const auto trace_id = storage_backend_detail::nextTraceId();
     auto       total    = stageTimer("match_total", request, "match", trace_id);
     auto       queue    = stageTimer("match_queue_wait", request, "match", trace_id);
@@ -404,11 +409,12 @@ void StorageBackend::match(StorageRequest request, MatchDone done) {
                  Lifecycle outcome) mutable {
         queue.finish(outcome == Lifecycle::ACCEPTING);
         StorageMatchResult result;
-        bool               success = outcome == Lifecycle::ACCEPTING;
+        bool               success = outcome == Lifecycle::ACCEPTING && !request.transfer_task->expired();
         if (success) {
             auto io = stageValue("match_io", request, "match", trace_id);
             try {
                 result = matchImpl(request);
+                success = !request.transfer_task->expired();
             } catch (...) {
                 success = false;
             }
@@ -420,10 +426,13 @@ void StorageBackend::match(StorageRequest request, MatchDone done) {
             callback.finish(true);
         }
         total.finish(success);
-    });
+    }, BlockTreeTaskClass::LOAD);
 }
 
 void StorageBackend::read(StorageRequest request, std::shared_ptr<StorageBackendMatchMeta> match_meta, Done done) {
+    if (!request.transfer_task) {
+        request.transfer_task.emplace(std::vector<TransferDescriptor>{}, timeout_, request.request_id);
+    }
     const auto trace_id = storage_backend_detail::nextTraceId();
     auto       total    = stageTimer("read_total", request, "read", trace_id);
     auto       state    = prepare(std::move(request), false, trace_id);
@@ -435,10 +444,18 @@ void StorageBackend::read(StorageRequest request, std::shared_ptr<StorageBackend
                               ErrorInfo::OkStatus() :
                               ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "storage backend is not accepting reads");
         std::optional<StorageQuarantineReason> quarantine_reason;
+        if (error.ok() && state->request.transfer_task->expired()) {
+            error = ErrorInfo(ErrorCode::DEADLINE_EXCEEDED, "storage read deadline exceeded before I/O");
+        }
         if (error.ok()) {
             auto io = stageValue("read_io", state->request, "read", state->trace_id);
             try {
                 readImpl(state->request, match_meta);
+                if (state->request.transfer_task->expired()) {
+                    error = ErrorInfo(ErrorCode::DEADLINE_EXCEEDED, "storage read deadline exceeded");
+                }
+            } catch (const StorageDeadlineExceeded& exception) {
+                error = ErrorInfo(ErrorCode::DEADLINE_EXCEEDED, exception.what());
             } catch (const StorageOperationTimeout& exception) {
                 error             = ErrorInfo(ErrorCode::DEADLINE_EXCEEDED, exception.what());
                 quarantine_reason = exception.reason();
@@ -466,13 +483,16 @@ void StorageBackend::read(StorageRequest request, std::shared_ptr<StorageBackend
             callback.finish(true);
         }
         total.finish(success);
-    });
+    }, BlockTreeTaskClass::LOAD);
 }
 
 StorageWriteTask StorageBackend::prepareWrite(StorageRequest request) {
     RTP_LLM_CHECK(initialized_);
     if (request.empty()) {
         return {};
+    }
+    if (!request.transfer_task) {
+        request.transfer_task.emplace(std::vector<TransferDescriptor>{}, timeout_, request.request_id);
     }
     return StorageWriteTask(prepare(std::move(request), true));
 }
@@ -487,11 +507,11 @@ bool StorageBackend::write(StorageWriteTask task) {
         queue.finish(outcome == Lifecycle::ACCEPTING);
         bool                                   success = false;
         std::optional<StorageQuarantineReason> quarantine_reason;
-        if (outcome == Lifecycle::ACCEPTING) {
+        if (outcome == Lifecycle::ACCEPTING && !state->request.transfer_task->expired()) {
             auto io = stageValue("write_io", state->request, "write", state->trace_id);
             try {
                 writeImpl(state->request);
-                success = true;
+                success = !state->request.transfer_task->expired();
             } catch (const StorageOperationTimeout& error) {
                 quarantine_reason = error.reason();
                 RTP_LLM_LOG_WARNING("StorageBackend write timed out; quarantining request pins: %s", error.what());
@@ -514,7 +534,7 @@ bool StorageBackend::write(StorageWriteTask task) {
         }
         settle.finish(true);
         total.finish(success);
-    });
+    }, BlockTreeTaskClass::BACKGROUND);
 }
 
 }  // namespace rtp_llm
