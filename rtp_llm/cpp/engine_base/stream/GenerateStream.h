@@ -192,12 +192,15 @@ public:
 
     std::shared_ptr<GenerateInput>   generateInput() const;
     std::shared_ptr<GenerateConfig>& generateConfig() const;
-    std::vector<int>                 textTokensMask() const;
-    bool                             isStreaming() const;
-    int64_t                          streamId() const;
-    std::string                      streamLogTag() const;
-    std::string                      adapterName() const;
-    rtp_llm::SpecialTokens           specialTokens() const;
+    bool                             isCodebook() const {
+        return is_codebook_;
+    }
+    std::vector<int>       textTokensMask() const;
+    bool                   isStreaming() const;
+    int64_t                streamId() const;
+    std::string            streamLogTag() const;
+    std::string            adapterName() const;
+    rtp_llm::SpecialTokens specialTokens() const;
 
     int batchSize(int output_len) const;
     int currentBatchSize() const;
@@ -908,6 +911,7 @@ protected:
     int                                   max_seq_len_;
     int64_t                               vocab_size_;
     size_t                                output_vocab_size_;
+    bool                                  is_codebook_;
     std::shared_ptr<CompleteTokenIds>     complete_token_ids_;
     int64_t                               begin_time_us_;
     int64_t                               wait_time_us_                = 0;

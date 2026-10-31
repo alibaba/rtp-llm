@@ -25,6 +25,7 @@
 #include "common.h"
 #include "decodingCommon.h"
 #include "topkLastDim.h" // Air TopK
+#include "beamSearchLimits.h"
 
 #include <cstdlib>
 
@@ -58,7 +59,7 @@ inline int beamTopkForcePath()
     }();
     return force_path;
 }
-static size_t constexpr kMaxBeamWidth = 1024;           // Max beam width supported in TRT-LLM now
+static size_t constexpr kMaxBeamWidth = kMaxSupportedBeamWidth;
 static size_t constexpr kMaxBeamWidthForV1 = 8;         // Max beam width for V1 workflow (V2 for larger)
 static size_t constexpr kMaxBeamWidthArrayLength = 8;   // Max length of beam width array of a request
 static size_t constexpr kThreadForSmallBeamWidth = 256; // Max count of thread for stage 1 in V1 workflow
@@ -89,6 +90,9 @@ struct BeamHypotheses
     size_t nMaxSeqLen{0};                   //
     size_t nVocabSize{0};                   // Vocab Size Padded
     size_t nVPart{0};                       // Count of vocab_size_padded divided
+    size_t nStage1TopK{0};                  // V2 top-k per input beam
+    size_t nStage2TopK{0};                  // V2 top-k per batch
+    size_t nStage2InputLen{0};              // V2 stage-2 input length per batch
     size_t nByteMaxSharedMemoryPerBlock{0}; // Device information
     size_t nByteSharedMemoryStage1{0};      // Dynamic shared memory size of stage 1
     size_t nByteSharedMemoryStage3{0};      // Static shared memory size of stage 3
@@ -181,11 +185,12 @@ template <typename T>
 void launchAddCumLogProbs(
     T* pStage1LogProbs, float const* cumLogProbs, FinishedState const* finished,
     int const* endIds, float const* diversityRates,
-    runtime::SizeType32 const* batchSlots, size_t nBS, size_t nBMIn, size_t nBMOut,
+    runtime::SizeType32 const* batchSlots, size_t nBS, size_t nBMIn, size_t nStage1TopK,
+    size_t nStage2InputLen,
     int nThread, cudaStream_t stream);
 
 __global__ void gatherId(int const* __restrict pStage1Id, int* __restrict pStage2Id, size_t const nBS,
-    size_t const nBMIn, size_t const nBMOut, size_t const nV);
+    size_t const nBMIn, size_t const nStage1TopK, size_t const nStage2TopK, size_t const nV);
 
 void invokePopulateTokenIds(int* tokenIdsOut, int const* tokenIdsIn, int const* sequenceLengthsOut, int const* parentIdsPtr, int const* outputIdsPtr, 
     size_t const batchSize, size_t const maxSeqLen, size_t const beamWidthOut, size_t const beamWidthIn, 

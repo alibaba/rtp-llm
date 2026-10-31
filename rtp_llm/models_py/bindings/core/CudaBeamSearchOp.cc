@@ -1,3 +1,5 @@
+#include <algorithm>
+
 #include "rtp_llm/models_py/bindings/core/OpData.h"
 #include "rtp_llm/models_py/bindings/core/CommonDefines.h"
 #include "rtp_llm/models_py/bindings/core/torch_utils/TypeConvert.h"
@@ -33,15 +35,35 @@ BeamSearchOutput sampleBeamSearch(BeamSearchParams params) {
     const int beam_width_out = params.num_beams_out != 0 ? params.num_beams_out : beam_width_in;
     const int vocab_size     = params.logits.size(2);
     const int max_seq_len    = params.token_ids.size(2);
-    // TODO(zhangjianning.zjn): check the shape of params
-    RTP_LLM_CHECK_WITH_INFO((vocab_size > 2 * beam_width_in),
-                            "cuda beam search op need vocab_size[%d] > beam_width_in[%d] * 2",
-                            vocab_size,
-                            beam_width_in);
-    RTP_LLM_CHECK_WITH_INFO((vocab_size > 2 * beam_width_out),
-                            "cuda beam search op need vocab_size[%d] > beam_width_out[%d] * 2",
-                            vocab_size,
+    RTP_LLM_CHECK_WITH_INFO(tensorrt_llm::kernels::isSupportedBeamWidth(beam_width_in)
+                                && tensorrt_llm::kernels::isSupportedBeamWidth(beam_width_out),
+                            "beam widths must be between 1 and %d, got input=%d output=%d",
+                            tensorrt_llm::kernels::kMaxSupportedBeamWidth,
+                            beam_width_in,
                             beam_width_out);
+    // TODO(zhangjianning.zjn): check the shape of params
+    const bool use_v2 = params.force_v2 || beam_width_in != beam_width_out
+                        || beam_width_in > static_cast<int>(tensorrt_llm::kernels::kMaxBeamWidthForV1);
+    if (use_v2) {
+        const size_t stage1_topk = std::min(static_cast<size_t>(vocab_size), static_cast<size_t>(beam_width_out));
+        RTP_LLM_CHECK_WITH_INFO(
+            (static_cast<size_t>(beam_width_in) * stage1_topk >= static_cast<size_t>(beam_width_out)),
+            "cuda beam search op needs enough candidates: vocab_size[%d], beam_width_in[%d], "
+            "beam_width_out[%d], stage1_topk[%zu]",
+            vocab_size,
+            beam_width_in,
+            beam_width_out,
+            stage1_topk);
+    } else {
+        RTP_LLM_CHECK_WITH_INFO((vocab_size > 2 * beam_width_in),
+                                "cuda beam search op need vocab_size[%d] > beam_width_in[%d] * 2",
+                                vocab_size,
+                                beam_width_in);
+        RTP_LLM_CHECK_WITH_INFO((vocab_size > 2 * beam_width_out),
+                                "cuda beam search op need vocab_size[%d] > beam_width_out[%d] * 2",
+                                vocab_size,
+                                beam_width_out);
+    }
 
 #define DISPATCH_TYPE(T, T_EXPR, ...)                                                                                  \
     do {                                                                                                               \
@@ -81,7 +103,8 @@ BeamSearchOutput sampleBeamSearch(BeamSearchParams params) {
     auto                           logits_dtype = torchDTypeToDataType(params.logits.dtype());
     tensorrt_llm::BeamSearchConfig config;
     DISPATCH_TYPE(T, logits_dtype, [&]() {
-        config = tensorrt_llm::configureBeamSearch<T>(batch_size, beam_width_in, beam_width_out, vocab_size);
+        config = tensorrt_llm::configureBeamSearch<T>(
+            batch_size, beam_width_in, beam_width_out, vocab_size, params.force_v2);
     });
 
     // set beam search kernel workspace
@@ -103,14 +126,17 @@ BeamSearchOutput sampleBeamSearch(BeamSearchParams params) {
     // set BeamHypotheses
     tensorrt_llm::kernels::BeamHypotheses BH;
     // basic scalar
-    BH.bVBWS         = config.mVBWS;
-    BH.nMaxBatchSize = batch_size;
-    BH.nBatchSize    = batch_size;
-    BH.nBeamWidthIn  = beam_width_in;
-    BH.nBeamWidthOut = beam_width_out;
-    BH.nMaxSeqLen    = max_seq_len;
-    BH.nVocabSize    = vocab_size;
-    BH.nVPart        = config.mVPart;
+    BH.bVBWS           = config.mVBWS;
+    BH.nMaxBatchSize   = batch_size;
+    BH.nBatchSize      = batch_size;
+    BH.nBeamWidthIn    = beam_width_in;
+    BH.nBeamWidthOut   = beam_width_out;
+    BH.nMaxSeqLen      = max_seq_len;
+    BH.nVocabSize      = vocab_size;
+    BH.nVPart          = config.mVPart;
+    BH.nStage1TopK     = config.mStage1TopK;
+    BH.nStage2TopK     = config.mStage2TopK;
+    BH.nStage2InputLen = config.mStage2InputLen;
     // buffer size
     BH.nByteMaxSharedMemoryPerBlock = config.mByteMaxSharedMemoryPerBlock;
     BH.nByteSharedMemoryStage1      = config.mByteSharedMemoryStage1;

@@ -3,6 +3,8 @@
 #include "rtp_llm/models_py/bindings/core/ops/BeamSearchOp.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include <torch/torch.h>
+#include <limits>
+#include "3rdparty/trt_beam_search/beamSearchLimits.h"
 
 using namespace rtp_llm;
 
@@ -70,14 +72,57 @@ public:
         return TestBeamSearchInput({logits, token_ids, input_lengths, sequence_lengths, cum_log_probs, beam_width_out});
     };
 
-    TestBeamSearchOutput opRun(TestBeamSearchInput& input) {
+    void runMaskedEqualSmallBeamV2Tests() {
+        for (const int valid_tokens : {1, 2}) {
+            for (const int vocab_size : {3, 7, 65536}) {
+                SCOPED_TRACE(vocab_size);
+                TestBeamSearchInput input;
+                input.logits = torch::full({1, 2, vocab_size}, -std::numeric_limits<float>::infinity(), float_options);
+                input.logits[0][0][0] = 3.0f;
+                if (valid_tokens > 1)
+                    input.logits[0][0][1] = 1.0f;
+                input.logits[0][1][0] = 2.0f;
+                if (valid_tokens > 1)
+                    input.logits[0][1][1] = 0.0f;
+                input.token_ids        = torch::tensor({10, 0, 11, 0}, int_options).reshape({1, 2, 2});
+                input.input_lengths    = torch::ones({1, 2}, int_options);
+                input.sequence_lengths = torch::ones({1, 2}, int_options);
+                input.cum_log_probs    = torch::tensor({0.0f, -10.0f}, float_options).reshape({1, 2});
+                input.beam_width_out   = 2;
+                auto ref               = torchRef(input);
+                auto result            = opRun(input, true);
+                ASSERT_TRUE(torch::equal(result.token_ids, ref.token_ids));
+                ASSERT_TRUE(torch::equal(result.beam_indices, ref.beam_indices));
+                assertTensorClose(result.cum_log_probs, ref.cum_log_probs);
+            }
+        }
+    }
+
+    void runUnsupportedBeamWidthTests() {
+        const int unsupported = tensorrt_llm::kernels::kMaxSupportedBeamWidth + 1;
+        for (const bool oversized_input : {false, true}) {
+            const int beam_in  = oversized_input ? unsupported : 1;
+            const int beam_out = oversized_input ? 1 : unsupported;
+            // Tiny vocabulary keeps the rejection test independent of large workspaces.
+            auto input = prepareInput(1, beam_in, beam_out, oversized_input ? 3 : unsupported, 4);
+            try {
+                opRun(input, true);
+                FAIL() << "unsupported beam width was accepted";
+            } catch (const std::exception& error) {
+                EXPECT_NE(std::string(error.what()).find("beam widths must be between"), std::string::npos);
+            }
+        }
+    }
+
+    TestBeamSearchOutput opRun(TestBeamSearchInput& input, bool force_v2 = false) {
         auto logits     = input.logits.to(torch::kCUDA);
         auto cuda_input = BeamSearchParams({logits,
                                             input.token_ids.to(torch::kCUDA),
                                             input.input_lengths.to(torch::kCUDA),
                                             input.sequence_lengths.to(torch::kCUDA),
                                             input.cum_log_probs.to(torch::kCUDA),
-                                            static_cast<size_t>(input.beam_width_out)});
+                                            static_cast<size_t>(input.beam_width_out),
+                                            force_v2});
 
         auto result = execSampleBeamSearch(std::move(cuda_input));
 
@@ -164,5 +209,15 @@ public:
                 }
             }
         }
+    }
+
+    void runPrunedVocabV2Tests() {
+        const int batch_size  = 1;
+        const int beam_width  = 1500;
+        const int vocab_size  = 2048;
+        const int max_seq_len = 16;
+
+        variableBeamWidthTest(batch_size, 1, beam_width, vocab_size, max_seq_len);
+        simpleTest(batch_size, beam_width, vocab_size, max_seq_len);
     }
 };

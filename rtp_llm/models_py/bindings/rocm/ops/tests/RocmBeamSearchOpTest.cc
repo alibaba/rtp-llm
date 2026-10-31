@@ -5,10 +5,22 @@ using namespace rtp_llm;
 
 class RocmBeamSearchOpTest: public BeamSearchOpTest {};
 
+TEST_F(RocmBeamSearchOpTest, rejectsUnsupportedBeamWidths) {
+    runUnsupportedBeamWidthTests();
+}
+
 TEST_F(RocmBeamSearchOpTest, simpleTest) {
     runSimpleTests();
 }
 
 TEST_F(RocmBeamSearchOpTest, variableBeamWidthTest) {
     runVariableBeamWidthTests();
+}
+
+TEST_F(RocmBeamSearchOpTest, prunedVocabV2Test) {
+    runPrunedVocabV2Tests();
+}
+
+TEST_F(RocmBeamSearchOpTest, forcedV2HandlesMaskedEqualSmallBeams) {
+    runMaskedEqualSmallBeamV2Tests();
 }

@@ -72,6 +72,7 @@ struct CustomConfig {
     RoleType                                role_type           = RoleType::PDFUSION;
     std::map<std::string, std::vector<int>> multi_task_prompt_tokens;
     std::vector<int64_t>                    output_vocab_ids;  // non-empty enables output-vocab pruning
+    std::vector<std::vector<int64_t>>       output_vocab_groups;
     bool                                       prefill_cp_enabled             = false;
     bool                                       speculative_enabled            = false;
     bool                                       warm_up_with_loss              = false;
@@ -121,8 +122,8 @@ rtp_llm::EngineInitParams createEngineInitParams(const CustomConfig&     config,
     model_config.attn_config.kernel_tokens_per_block = config.tokens_per_block;
     kv_cache_config.seq_size_per_block               = model_config.attn_config.tokens_per_block;
     kv_cache_config.kernel_seq_size_per_block        = model_config.attn_config.kernel_tokens_per_block;
-    runtime_config.reserve_runtime_mem_mb     = 1024;
-    const size_t hidden_units                 = 128;
+    runtime_config.reserve_runtime_mem_mb            = 1024;
+    const size_t hidden_units                        = 128;
 
     auto opts = torch::TensorOptions().dtype(torch::kHalf).device(torch::kCUDA);
 
@@ -168,7 +169,11 @@ rtp_llm::EngineInitParams createEngineInitParams(const CustomConfig&     config,
     rtp_llm::MMModelConfig mm_model_config;
     model_config.mm_model_config = mm_model_config;
     rtp_llm::ParallelismConfig parallelism_config;
-    model_config.output_vocab_ids = config.output_vocab_ids;
+    model_config.output_vocab_ids    = config.output_vocab_ids;
+    model_config.output_vocab_groups = config.output_vocab_groups;
+    if (!config.output_vocab_groups.empty()) {
+        model_config.special_tokens.eos_token_id = 0;
+    }
     if (!config.output_vocab_ids.empty()) {
         model_config.output_vocab_padded_size = static_cast<int64_t>(config.output_vocab_ids.size());
     }
@@ -225,7 +230,8 @@ std::shared_ptr<NormalEngine> createMockEngine(const CustomConfig& config) {
     rtp_llm::KVCacheConfig kv_cache_config;
     EngineInitParams rtp_llm_params = createEngineInitParams(config, model_config, runtime_config, kv_cache_config);
     // Set test model factory before engine construction so the model is available during startLoop()
-    size_t vocab                       = model_config.vocab_size;
+    size_t vocab =
+        model_config.output_vocab_ids.empty() ? model_config.vocab_size : model_config.output_vocab_ids.size();
     NormalExecutor::test_model_factory = [vocab, forward_shapes = config.forward_shapes](const GptModelInitParams&) {
         return std::make_unique<MockModel>(vocab, forward_shapes);
     };
