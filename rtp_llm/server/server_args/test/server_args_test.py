@@ -43,7 +43,6 @@ class PDLinearTailArgumentsTest(TestCase):
             self.assertFalse(overridden.decode_linear_tail_only)
 
 
->>>>>>> 472cabde2 (feat: unify linear cache policies for fusion and PD decode)
 class CacheConfigArgumentsTest(TestCase):
     def test_pool_block_weights_default_env_and_cli_precedence(self):
         from_env = '{"full":8,"linear":1}'
