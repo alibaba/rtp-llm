@@ -21,7 +21,6 @@ from rtp_llm.dash_sc.app import (
     _create_proxy_servicer_on_loop,
     _derive_echo_prefix_ids,
     _is_proxy_mode_enabled,
-    _pre_stop_drain_seconds,
     _wait_for_bind_barrier,
 )
 from rtp_llm.dash_sc.server import DashScGrpcDrainAioInterceptor, DashScGrpcServer
@@ -323,27 +322,42 @@ class ProxyModeEnvTest(TestCase):
             self.assertTrue(_is_proxy_mode_enabled())
 
 
+class _DrainServerConfig:
+    dash_sc_grpc_pre_stop_drain_seconds = 10.0
+    pre_stop_drain_headroom_seconds = -1.0
+
+
 class PreStopDrainSecondsTest(TestCase):
     def test_default_pre_stop_drain(self) -> None:
+        app = bg_app.DashScApp.__new__(bg_app.DashScApp)
+        app.server_config = bg_app.PyEnvConfigs().server_config
         with patch.dict(os.environ, {}, clear=True):
-            self.assertEqual(_pre_stop_drain_seconds(), 120.0)
+            self.assertEqual(app._effective_pre_stop_drain_seconds(), 120.0)
 
-    def test_env_pre_stop_drain(self) -> None:
+    def test_configured_zero_overrides_inherited_env(self) -> None:
+        app = bg_app.DashScApp.__new__(bg_app.DashScApp)
+        app.server_config = bg_app.PyEnvConfigs().server_config
+        app.server_config.dash_sc_grpc_pre_stop_drain_seconds = 0
         with patch.dict(
-            os.environ, {"DASH_SC_GRPC_PRE_STOP_DRAIN_SECONDS": "2.5"}, clear=True
+            os.environ, {"DASH_SC_GRPC_PRE_STOP_DRAIN_SECONDS": "120"}, clear=True
         ):
-            self.assertEqual(_pre_stop_drain_seconds(), 2.5)
+            self.assertEqual(app._effective_pre_stop_drain_seconds(), 0)
 
-    def test_bad_pre_stop_drain_uses_default(self) -> None:
+    def test_configured_headroom_overrides_inherited_env(self) -> None:
+        app = bg_app.DashScApp.__new__(bg_app.DashScApp)
+        app.server_config = bg_app.PyEnvConfigs().server_config
+        app.server_config.shutdown_timeout = 45
+        app.server_config.dash_sc_grpc_pre_stop_drain_seconds = 120
+        app.server_config.pre_stop_drain_headroom_seconds = 5
         with patch.dict(
-            os.environ, {"DASH_SC_GRPC_PRE_STOP_DRAIN_SECONDS": "bad"}, clear=True
+            os.environ, {"RTP_LLM_PRE_STOP_DRAIN_HEADROOM_SECONDS": "30"}, clear=True
         ):
-            self.assertEqual(_pre_stop_drain_seconds(), 120.0)
+            self.assertEqual(app._effective_pre_stop_drain_seconds(), 40)
 
     def test_effective_pre_stop_drain_clamps_to_shutdown_timeout(self) -> None:
         app = bg_app.DashScApp.__new__(bg_app.DashScApp)
 
-        class _ServerConfig:
+        class _ServerConfig(_DrainServerConfig):
             shutdown_timeout = 10
 
         app.server_config = _ServerConfig()
@@ -355,8 +369,9 @@ class PreStopDrainSecondsTest(TestCase):
     def test_effective_pre_stop_drain_reserves_shutdown_headroom(self) -> None:
         app = bg_app.DashScApp.__new__(bg_app.DashScApp)
 
-        class _ServerConfig:
+        class _ServerConfig(_DrainServerConfig):
             shutdown_timeout = 600
+            dash_sc_grpc_pre_stop_drain_seconds = 600.0
 
         app.server_config = _ServerConfig()
         with patch.dict(
@@ -367,7 +382,7 @@ class PreStopDrainSecondsTest(TestCase):
     def test_grpc_stop_grace_uses_remaining_pre_stop_budget(self) -> None:
         app = bg_app.DashScApp.__new__(bg_app.DashScApp)
 
-        class _ServerConfig:
+        class _ServerConfig(_DrainServerConfig):
             shutdown_timeout = 10
 
         app.server_config = _ServerConfig()
@@ -380,7 +395,7 @@ class PreStopDrainSecondsTest(TestCase):
     def test_grpc_stop_grace_counts_prior_drain_signal_time(self) -> None:
         app = bg_app.DashScApp.__new__(bg_app.DashScApp)
 
-        class _ServerConfig:
+        class _ServerConfig(_DrainServerConfig):
             shutdown_timeout = 10
 
         app.server_config = _ServerConfig()
@@ -399,7 +414,7 @@ class PreStopDrainSecondsTest(TestCase):
         self.assertTrue(app._shutdown_manager.try_begin_request())
         app._shutdown_manager.start_unavailable("unit test")
 
-        class _ServerConfig:
+        class _ServerConfig(_DrainServerConfig):
             shutdown_timeout = 30
 
         app.server_config = _ServerConfig()
@@ -423,7 +438,7 @@ class PreStopDrainSecondsTest(TestCase):
         app._shutdown_manager = DashScShutdownManager()
         app._shutdown_manager.start_unavailable("unit test")
 
-        class _ServerConfig:
+        class _ServerConfig(_DrainServerConfig):
             shutdown_timeout = 30
 
         app.server_config = _ServerConfig()
@@ -452,7 +467,7 @@ class PreStopDrainSecondsTest(TestCase):
         app._shutdown_manager = DashScShutdownManager()
         app._shutdown_manager.start_draining("signal 2")
 
-        class _ServerConfig:
+        class _ServerConfig(_DrainServerConfig):
             shutdown_timeout = 30
 
         app.server_config = _ServerConfig()
@@ -475,8 +490,9 @@ class PreStopDrainSecondsTest(TestCase):
         self.assertTrue(app._shutdown_manager.try_begin_request())
         handlers = {}
 
-        class _ServerConfig:
+        class _ServerConfig(_DrainServerConfig):
             shutdown_timeout = 30
+            dash_sc_grpc_pre_stop_drain_seconds = 0.1
 
         app.server_config = _ServerConfig()
 
@@ -520,7 +536,7 @@ class PreStopDrainSecondsTest(TestCase):
         app._shutdown_event = Mock()
         handlers = {}
 
-        class _ServerConfig:
+        class _ServerConfig(_DrainServerConfig):
             shutdown_timeout = 30
 
         app.server_config = _ServerConfig()
@@ -555,7 +571,7 @@ class PreStopDrainSecondsTest(TestCase):
         app._shutdown_event = Mock()
         handlers = {}
 
-        class _ServerConfig:
+        class _ServerConfig(_DrainServerConfig):
             shutdown_timeout = 30
 
         app.server_config = _ServerConfig()
@@ -590,7 +606,7 @@ class PreStopDrainSecondsTest(TestCase):
         app._grpc_server = Mock()
         app._stop_enqueue_loop = Mock()
 
-        class _ServerConfig:
+        class _ServerConfig(_DrainServerConfig):
             shutdown_timeout = 30
 
         app.server_config = _ServerConfig()
@@ -611,7 +627,7 @@ class PreStopDrainSecondsTest(TestCase):
         app._grpc_server = Mock()
         app._stop_enqueue_loop = Mock()
 
-        class _ServerConfig:
+        class _ServerConfig(_DrainServerConfig):
             shutdown_timeout = 30
 
         app.server_config = _ServerConfig()

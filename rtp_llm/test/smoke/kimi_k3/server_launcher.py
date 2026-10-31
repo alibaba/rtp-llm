@@ -255,7 +255,7 @@ def launch_config(args):
         "model_warm_up": int(model_warm_up),
         "reserver_runtime_mem_mb": reserve_runtime_mem_mb,
         # This isolated pair has no load balancer whose routes need to expire.
-        # Keep parent-managed shutdown within the worker's 60-second stop budget.
+        # The worker allows the supervisor's complete staged shutdown budget.
         "shutdown_timeout": 45,
         "frontend_pre_stop_drain_seconds": 0,
         "dash_sc_grpc_pre_stop_drain_seconds": 0,
