@@ -54,7 +54,8 @@ PerRankBlockTransferEngine::PerRankBlockTransferEngine(std::vector<GroupSetPtr> 
                                                                          std::move(device_host_options),
                                                                          metrics_reporter,
                                                                          std::move(crc_service),
-                                                                         load_transfer_task_pool_.get());
+                                                                         load_transfer_task_pool_.get(),
+                                                                         group_sets_);
     host_disk_executor_   = std::make_unique<HostDiskTransferExecutor>(
         *transfer_task_pool_, max_descriptors_per_batch, metrics_reporter, load_transfer_task_pool_.get());
     if (enable_disk_cache && !group_sets_.empty()) {

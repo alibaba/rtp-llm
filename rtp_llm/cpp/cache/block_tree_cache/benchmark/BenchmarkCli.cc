@@ -7,6 +7,7 @@ namespace rtp_llm::benchmark {
 namespace {
 void printUsage(const char* program) {
     std::cout << "Usage: " << program << " <tree|transfer> [options...]\n\n";
+    std::cout << "       " << program << " capabilities [--cuda-device=N]\n\n";
     BenchmarkOptions::printHelp();
     std::cout << "\nSubcommand help: " << program << " tree --help | transfer --help\n";
 }
@@ -22,8 +23,9 @@ void validateTransferOptions(const TransferOptions& options) {
         throw std::runtime_error("--disk-io-mode must be direct or buffered");
     if (options.disk_access_pattern != "sequential" && options.disk_access_pattern != "random")
         throw std::runtime_error("--disk-access-pattern must be sequential or random");
-    if (options.copy_strategy != "auto" && options.copy_strategy != "batch" && options.copy_strategy != "staged-sm") {
-        throw std::runtime_error("--copy-strategy must be auto, batch or staged-sm");
+    if (options.copy_strategy != "auto" && options.copy_strategy != "batch" && options.copy_strategy != "cuda-3d-batch"
+        && options.copy_strategy != "staged-sm") {
+        throw std::runtime_error("--copy-strategy must be auto, batch, cuda-3d-batch or staged-sm");
     }
 }
 
@@ -41,7 +43,7 @@ int runBenchmarkCli(int argc, char** argv, const std::function<bool(const Benchm
             printUsage(argv[0]);
             return 0;
         }
-        if (command.subcommand != "tree" && command.subcommand != "transfer") {
+        if (command.subcommand != "tree" && command.subcommand != "transfer" && command.subcommand != "capabilities") {
             throw std::runtime_error("Unknown subcommand: " + command.subcommand);
         }
         for (int index = 2; index < argc; ++index) {
@@ -50,7 +52,7 @@ int runBenchmarkCli(int argc, char** argv, const std::function<bool(const Benchm
                 BenchmarkOptions::printHelp();
                 if (command.subcommand == "tree") {
                     TreeOptions::printHelp();
-                } else {
+                } else if (command.subcommand == "transfer") {
                     TransferOptions::printHelp();
                 }
                 return 0;
@@ -59,12 +61,15 @@ int runBenchmarkCli(int argc, char** argv, const std::function<bool(const Benchm
         command.common = BenchmarkOptions::parse(argc, argv);
         if (command.subcommand == "tree") {
             command.tree = TreeOptions::parse(argc, argv);
-        } else {
+        } else if (command.subcommand == "transfer") {
             command.transfer = TransferOptions::parse(argc, argv);
             validateTransferOptions(command.transfer);
         }
         if (argc > 2) {
             throw std::runtime_error("Unknown argument: " + std::string(argv[2]));
+        }
+        if (command.subcommand == "capabilities") {
+            return run(command) ? 0 : 1;
         }
         if (command.common.model_profile_path.empty()) {
             throw std::runtime_error("--model-profile is required");
