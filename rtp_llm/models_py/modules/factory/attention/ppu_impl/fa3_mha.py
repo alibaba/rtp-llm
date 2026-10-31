@@ -33,6 +33,8 @@ import os
 import sys
 from typing import Any, Optional
 
+from rtp_llm.config.cuda_graph import CudaGraphSelectionMode
+
 # ---------------------------------------------------------------------------
 # FA3 availability check (cached)
 # ---------------------------------------------------------------------------
@@ -745,7 +747,10 @@ class FA3DecodeImpl:
         else:
             from rtp_llm.models_py.modules.factory.attention import common
 
-            new_rope_params = self.rope_impl.prepare(attn_inputs)
+            new_rope_params = self.rope_impl.prepare(
+                attn_inputs, forbid_reallocation=True
+            )
+            self.rope_params.sequence_lengths = new_rope_params.sequence_lengths
             common.copy_kv_cache_offset(
                 self.rope_params.kv_cache_offset, new_rope_params.kv_cache_offset
             )
@@ -780,6 +785,13 @@ class FA3DecodeImpl:
 
 class FA3PrefillPagedImpl:
     """FMHAImplBase-compatible FA3 paged prefill implementation for PPU."""
+
+    # copy_params also exists in generation-prefill capture. Filter that role
+    # before support/construction so its dedicated backend handles the bucket.
+    cuda_graph_selection_modes = {
+        CudaGraphSelectionMode.EAGER,
+        CudaGraphSelectionMode.DECODE_GRAPH,
+    }
 
     # The shared factory probes this capability before calling the constructor.
     accepts_fmha_config = False

@@ -175,10 +175,12 @@ class DecodeCaptureBatchSizesTest(TestCase):
         result = _parse_decode_capture_config("1, 2, 4, 8, 16, 32")
         self.assertEqual(result, [1, 2, 4, 8, 16, 32])
 
-    def test_comma_separated_list_filters_invalid(self):
-        """Test that invalid values (non-positive) are filtered out"""
-        result = _parse_decode_capture_config("1,0,-5,2,4")
-        self.assertEqual(result, [1, 2, 4])
+    def test_nonpositive_buckets_are_rejected(self):
+        for value in ("1,0,2", "1,-5,2"):
+            with self.subTest(value=value), self.assertRaises(
+                argparse.ArgumentTypeError
+            ):
+                _parse_decode_capture_config(value)
 
     def test_empty_config_returns_empty_list(self):
         """Test that empty config returns empty list"""
@@ -190,10 +192,15 @@ class DecodeCaptureBatchSizesTest(TestCase):
         result = _parse_decode_capture_config("   ")
         self.assertEqual(result, [])
 
-    def test_empty_comma_list_returns_empty_list(self):
-        """Test that empty comma-separated list returns empty list (no error)"""
-        result = _parse_decode_capture_config(",,,")
-        self.assertEqual(result, [])
+    def test_empty_bucket_is_rejected(self):
+        for value in (",,,", "1,", "1,,2"):
+            with self.subTest(value=value), self.assertRaises(
+                argparse.ArgumentTypeError
+            ):
+                _parse_decode_capture_config(value)
+
+    def test_buckets_are_sorted_and_unique(self):
+        self.assertEqual(_parse_decode_capture_config("8,2,8,1"), [1, 2, 8])
 
 
 if __name__ == "__main__":

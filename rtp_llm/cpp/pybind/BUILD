@@ -15,7 +15,10 @@ py_test(
         "//:rtp_compute_ops",
         "//:th_transformer_config",
     ],
-    deps = ["//rtp_llm:ops"],
+    deps = [
+        "//rtp_llm:device",
+        "//rtp_llm:ops",
+    ],
 )
 
 cc_library(

@@ -4,6 +4,7 @@
 #include <atomic>
 #include <exception>
 #include <memory>
+#include <limits>
 #include <optional>
 #include <stdexcept>
 #include <unordered_map>
@@ -60,6 +61,8 @@ public:
         enable_cuda_graph_debug_mode_(graph_params.enable_cuda_graph_debug_mode),
         num_tokens_per_bs_(graph_params.num_tokens_per_bs),
         max_seq_len_(graph_params.max_seq_len),
+        request_max_seq_len_(graph_params.request_max_seq_len > 0 ? graph_params.request_max_seq_len :
+                                                                    graph_params.max_seq_len),
         hidden_size_(graph_params.hidden_size),
         input_hidden_size_(graph_params.input_hidden_size),
         hc_mult_(static_cast<int>(graph_params.hc_mult)),
@@ -98,6 +101,9 @@ public:
                                       || role_ == CudaGraphRole::GENERATION_PREFILL;
         is_target_verify_ = role_ == CudaGraphRole::TARGET_VERIFY;
         if (role_ == CudaGraphRole::GENERATION_PREFILL) {
+            RTP_LLM_CHECK_WITH_INFO(
+                request_max_seq_len_ > 0 && request_max_seq_len_ <= max_seq_len_,
+                "generation prefill request limit must be positive and fit captured scratch capacity");
             RTP_LLM_CHECK_WITH_INFO(generation_prefill_cuda_graph_max_requests_ > 0
                                         && generation_prefill_cuda_graph_max_requests_
                                                <= HWKernelConfig::kGenerationPrefillCudaGraphMaxRequests,
@@ -114,6 +120,11 @@ public:
         for (auto& counter : generation_prefill_cuda_graph_fallback_log_counts_) {
             counter.store(0, std::memory_order_relaxed);
         }
+        const auto max_index = static_cast<size_t>(std::numeric_limits<int>::max());
+        RTP_LLM_CHECK_WITH_INFO(max_bs_ > 0 && max_bs_ <= max_index && num_tokens_per_bs_ > 0
+                                    && max_seq_len_ <= max_index && max_bs_ <= max_index / num_tokens_per_bs_
+                                    && (isGenerationPrefillCudaGraph() || max_bs_ <= max_index / max_seq_len_),
+                                "CUDA graph capacities exceed int32 token/padding indexing limits");
         py_attn_pyobj_method_ = py_instance_.attr("prepare_fmha_impl");
         py_forward_method_    = py_instance_.attr(forward_method_name);
         options_cuda_int32_   = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA).requires_grad(false);
@@ -246,6 +257,7 @@ private:
     int                     max_num_token_{1};
     int64_t                 max_kernel_block_table_width_{0};
     int                     max_seq_len_{0};
+    int                     request_max_seq_len_{0};
     int                     hidden_size_{0};
     size_t                  input_hidden_size_{0};
     int                     hc_mult_{1};

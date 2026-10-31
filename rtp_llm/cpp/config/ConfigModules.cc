@@ -227,6 +227,7 @@ std::string HWKernelConfig::to_string() const {
         << "num_native_cuda_graph: " << num_native_cuda_graph << "\n"
         << "prefill_capture_seq_lens size: " << prefill_capture_seq_lens.size() << "\n"
         << "decode_capture_batch_sizes size: " << decode_capture_batch_sizes.size() << "\n"
+        << "enable_decode_cascade_attention: " << enable_decode_cascade_attention << "\n"
         << "disable_dpc_random: " << disable_dpc_random << "\n"
         << "rocm_disable_custom_ag: " << rocm_disable_custom_ag;
     return oss.str();
