@@ -3,9 +3,11 @@
 #include <cerrno>
 #include <cstring>
 #include <memory>
+#include <unordered_map>
 #include <vector>
 #include <set>
 #include <optional>
+#include <stdexcept>
 #include <torch/torch.h>
 #include <dirent.h>
 #include <unistd.h>
@@ -14,8 +16,9 @@
 #include "rtp_llm/cpp/cache/CoordinatorCacheManager.h"
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/CacheConfigCreator.h"
-#include "rtp_llm/cpp/cache/CPSlotMapper.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
+#include "rtp_llm/cpp/cache/KVCacheHashUtil.h"
+#include "rtp_llm/cpp/cache/PrefixCacheRegistration.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeTaskPool.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/load/LoadAsyncContext.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/StorageBackend.h"
@@ -83,6 +86,37 @@ protected:
     }
     void readImpl(const StorageRequest&, const std::shared_ptr<StorageBackendMatchMeta>&) override {}
     void writeImpl(const StorageRequest&) override {}
+};
+
+class ScriptedSingleTypeStorageBackend: public StorageBackend {
+public:
+    ScriptedSingleTypeStorageBackend(): StorageBackend(std::make_shared<InlineSingleTypeStorageBackendExecutor>()) {}
+    ~ScriptedSingleTypeStorageBackend() override {
+        shutdown();
+    }
+    size_t matched_keys{0};
+    bool   fail_read{false};
+    size_t read_calls{0};
+    size_t match_calls{0};
+    size_t write_calls{0};
+
+protected:
+    bool initImpl() override {
+        return true;
+    }
+    StorageMatchResult matchImpl(const StorageRequest&) override {
+        ++match_calls;
+        return {matched_keys, nullptr};
+    }
+    void readImpl(const StorageRequest&, const std::shared_ptr<StorageBackendMatchMeta>&) override {
+        ++read_calls;
+        if (fail_read) {
+            throw std::runtime_error("injected remote read failure");
+        }
+    }
+    void writeImpl(const StorageRequest&) override {
+        ++write_calls;
+    }
 };
 
 class ScopedSingleTypeDiskDirectory {
@@ -165,6 +199,13 @@ CacheConfig createSingleTypeTestConfig(int layer_num = 4, int block_num = 10, in
                                     rtp_llm::DataType::TYPE_FP16,
                                     /*local_head_num_kv=*/8,
                                     /*size_per_head=*/128);
+}
+
+void resolveSingleTypeCpLayout(CacheConfig& config, const ParallelismConfig& parallelism) {
+    auto policy       = config.topology().groups().front().policy;
+    policy.cp_mapping = CpBlockMappingMode::BLOCK_ROUND_ROBIN;
+    setTestGroupPolicies(config, {policy});
+    config.finalizeStorageLayout(parallelism);
 }
 
 static rtp_llm::ModelConfig makeTestModelConfig(uint32_t num_layers) {
@@ -332,7 +373,7 @@ protected:
 
     static std::vector<uint8_t> readDeviceBytes(const void* src_device, size_t bytes) {
         auto        device_tensor = torch::from_blob(const_cast<void*>(src_device),
-                                              {static_cast<int64_t>(bytes)},
+                                                     {static_cast<int64_t>(bytes)},
                                               torch::TensorOptions(torch::kUInt8).device(torch::kCUDA));
         auto        host_tensor   = device_tensor.cpu();
         const auto* data          = host_tensor.data_ptr<uint8_t>();
@@ -341,6 +382,1070 @@ protected:
 
     std::shared_ptr<TestSingleTypeCoordinatorCacheManager> allocator_;
 };
+
+TEST_F(SingleTypeCoordinatorCacheManagerTest, UnsupportedFullGeometrySkipsReuseWithoutLosingContinuation) {
+    for (const size_t physical : {4u, 8u}) {
+        SCOPED_TRACE(physical);
+        auto config               = makeSimpleMhaCacheConfig(1, 24, physical, DataType::TYPE_FP16, 1, 1);
+        config.seq_size_per_block = 4;
+        auto policy               = config.group("default").policy;
+        policy.cp_mapping         = physical == 4 ? CpBlockMappingMode::NONE : CpBlockMappingMode::BLOCK_ROUND_ROBIN;
+        setTestGroupPolicies(config, {policy});
+        ParallelismConfig parallelism;
+        parallelism.tp_size                            = 2;
+        parallelism.prefill_cp_config.kv_cache_sharded = true;
+        parallelism.prefill_cp_config.method           = CPRotateMethod::ALL_GATHER;
+        config.finalizeStorageLayout(parallelism);
+        ASSERT_FALSE(config.supportsCanonicalReuse());
+        allocator_ = std::make_shared<TestSingleTypeCoordinatorCacheManager>(config);
+        KVCacheConfig options;
+        options.enable_remote_cache = true;
+        auto backend                = std::make_shared<ScriptedSingleTypeStorageBackend>();
+        backend->matched_keys       = 1;
+        allocator_->setBlockTreeCacheConfigForTest(options);
+        allocator_->setStorageBackendForTest(backend);
+        ASSERT_TRUE(allocator_->init());
+        const auto   pool        = allocator_->groupBlockPools().front();
+        const size_t free_before = pool->freeBlocksNum();
+        auto         runtime     = createBatchKVCacheResource(1, config);
+        auto         tokens      = createCompleteTokenIds(1, 9, 4);
+        initCacheKeys(runtime, tokens, 4);
+        MallocInfo info{runtime, tokens};
+        info.enable_cache_lookup = true;
+        info.reuse_cache         = true;
+        info.request_layout      = snapshotGlobalCacheRequest(*runtime, *tokens);
+        const auto allocated     = allocator_->malloc(info);
+        ASSERT_TRUE(allocated.success);
+        EXPECT_EQ(allocated.reuse_len, 0);
+        EXPECT_EQ(allocated.async_context, nullptr);
+        ASSERT_FALSE(runtime->blocks(0, "default").empty());
+        const auto                 source = runtime->blocks(0, "default").front();
+        const std::vector<uint8_t> expected{2, 4, 6, 8, 10, 12, 14, 16};
+        auto                       source_buffer = allocator_->convertIndexToBuffer(0, "default", source);
+        ASSERT_FALSE(source_buffer.empty());
+        writeDeviceBytes(source_buffer.front().addr, expected);
+        pool->incTreeRef(source, BlockTreeRefType::CACHE);
+        PrefixCacheRegistration registration;
+        registration.original_input_tokens = 9;
+        registration.token_ids             = {1, 2, 3, 4, 5, 6, 7, 8, 9};
+        registration.base_keys             = runtime->cacheKeys(0);
+        PrefixCacheRegistrationPoint point;
+        point.endpoint.pos = 8;
+        point.group_bindings.resize(1);
+        registration.points.push_back(std::move(point));
+        ASSERT_EQ(allocator_->prepareRequiredContinuation(registration, *runtime, 2), MallocStatus::NONE);
+        ASSERT_TRUE(registration.required_continuation_ready);
+        ASSERT_EQ(registration.source_pins.size(), 1u);
+        ASSERT_EQ(registration.copy_mappings.size(), 1u);
+        allocator_->blockBatchCopyByGroup(registration.copy_mappings, true);
+        runtimeSyncAndCheck();
+        const auto destination = runtime->blocks(0, "default").front();
+        EXPECT_NE(destination, source);
+        auto destination_buffer = allocator_->convertIndexToBuffer(0, "default", destination);
+        EXPECT_EQ(readDeviceBytes(destination_buffer.front().addr, expected.size()), expected);
+        allocator_->prepareRegisteredSave(registration, *runtime, 2);
+        EXPECT_FALSE(registration.prepared);
+        EXPECT_TRUE(registration.cached_source_pins.empty());
+        EXPECT_TRUE(registration.runtime_source_pins.empty());
+        EXPECT_EQ(registration.points.front().group_bindings.front().ownership, PrefixCacheSaveOwnership::NONE);
+        EXPECT_EQ(registration.source_pins.size(), 1u);
+        for (const bool registered : {false, true}) {
+            for (const Tier tier : {Tier::DEVICE, Tier::HOST, Tier::DISK}) {
+                InsertInfo insert{runtime, tokens, false, tier};
+                insert.prefix_cache_registration = registered ? &registration : nullptr;
+                size_t resident                  = 99;
+                allocator_->insertIntoCache(insert, resident);
+                EXPECT_EQ(resident, 0u);
+            }
+        }
+        EXPECT_TRUE(allocator_->blockTreeCacheOwner()->getKeySnapshot().keys.empty());
+        EXPECT_EQ(backend->match_calls, 0u);
+        EXPECT_EQ(backend->read_calls, 0u);
+        EXPECT_EQ(backend->write_calls, 0u);
+        allocator_->releaseRegisteredSave(registration);
+        allocator_->releaseRegisteredSave(registration);
+        EXPECT_TRUE(registration.source_pins.empty());
+        EXPECT_EQ(pool->refCount(source), 1u);
+        allocator_->free(FreeInfo{runtime, tokens});
+        pool->decTreeRef(source, BlockTreeRefType::CACHE);
+        EXPECT_EQ(pool->freeBlocksNum(), free_before);
+        backend->shutdown();
+        EXPECT_EQ(backend->match_calls + backend->read_calls + backend->write_calls, 0u);
+        allocator_.reset();
+    }
+}
+
+TEST_F(SingleTypeCoordinatorCacheManagerTest, LegacyLinearFinalStateDoesNotAdvertiseEarlierCanonicalEndpoint) {
+    for (const size_t endpoint : {12u, 16u}) {
+        SCOPED_TRACE(endpoint);
+        auto config               = makeSimpleLinearCacheConfig(1, 24, 16, DataType::TYPE_FP16);
+        config.seq_size_per_block = 4;
+        ParallelismConfig parallelism;
+        parallelism.tp_size                            = 2;
+        parallelism.prefill_cp_config.kv_cache_sharded = true;
+        parallelism.prefill_cp_config.method           = CPRotateMethod::ALL_GATHER;
+        config.finalizeStorageLayout(parallelism);
+        ASSERT_EQ(config.canonicalSizePerBlock(), 8u);
+        allocator_ = std::make_shared<TestSingleTypeCoordinatorCacheManager>(config);
+        ASSERT_TRUE(allocator_->init());
+        const auto   pool          = allocator_->groupBlockPools().front();
+        const size_t free_before   = pool->freeBlocksNum();
+        auto         make_resource = [&](const CompleteTokenIdsPtr& tokens) {
+            auto resource = std::make_shared<BatchKVCacheResource>();
+            resource->resetBatchSize(1);
+            resource->initGroups(config.topologyPtr());
+            initCacheKeys(resource, tokens, 4);
+            return resource;
+        };
+        auto       tokens = createCompleteTokenIds(1, endpoint, 4);
+        auto       source = make_resource(tokens);
+        MallocInfo cold{source, tokens};
+        cold.enable_cache_lookup = false;
+        cold.request_layout      = snapshotGlobalCacheRequest(*source, *tokens);
+        ASSERT_TRUE(allocator_->malloc(cold).success);
+        ASSERT_EQ(source->blocksNum(0, "linear"), 1u);
+        const auto           source_block = source->blocks(0, "linear").front();
+        std::vector<uint8_t> final_state;
+        for (size_t offset = 0; offset < 8; ++offset) {
+            final_state.push_back(static_cast<uint8_t>(endpoint - offset));
+        }
+        writeDeviceBytes(allocator_->convertIndexToBuffer(0, "linear", source_block).front().addr, final_state);
+        size_t resident = 0;
+        allocator_->insertIntoCache(InsertInfo{source, tokens, false}, resident);
+        allocator_->free(FreeInfo{source, tokens});
+        auto       short_tokens = createCompleteTokenIds(1, 9, 4);
+        auto       shorter      = make_resource(short_tokens);
+        MallocInfo lookup{shorter, short_tokens};
+        lookup.request_layout = snapshotGlobalCacheRequest(*shorter, *short_tokens);
+        const auto short_hit  = allocator_->malloc(lookup);
+        ASSERT_TRUE(short_hit.success);
+        EXPECT_EQ(short_hit.reuse_len, 0);
+        if (short_hit.reuse_len > 0) {
+            const auto block = shorter->blocks(0, "linear").front();
+            const auto bytes = readDeviceBytes(allocator_->convertIndexToBuffer(0, "linear", block).front().addr, 8);
+            RTP_LLM_LOG_INFO("legacy LINEAR requested=9 reused=%d source=%d restored=%d first_byte=%u",
+                             short_hit.reuse_len,
+                             source_block,
+                             block,
+                             static_cast<unsigned>(bytes.front()));
+            EXPECT_EQ(bytes, (std::vector<uint8_t>{8, 7, 6, 5, 4, 3, 2, 1}));
+        }
+        allocator_->free(FreeInfo{shorter, short_tokens});
+        auto       final_tokens = createCompleteTokenIds(1, 17, 4);
+        auto       restored     = make_resource(final_tokens);
+        MallocInfo final_lookup{restored, final_tokens};
+        final_lookup.request_layout = snapshotGlobalCacheRequest(*restored, *final_tokens);
+        const auto final_hit        = allocator_->malloc(final_lookup);
+        ASSERT_TRUE(final_hit.success);
+        EXPECT_EQ(final_hit.reuse_len, endpoint == 16 ? 16 : 0);
+        if (endpoint == 16) {
+            const auto restored_block = restored->blocks(0, "linear").front();
+            EXPECT_EQ(readDeviceBytes(allocator_->convertIndexToBuffer(0, "linear", restored_block).front().addr, 8),
+                      final_state);
+        }
+        allocator_->free(FreeInfo{restored, final_tokens});
+        allocator_->blockTreeCacheOwner()->evictForGroup("linear", pool->totalBlocksNum());
+        EXPECT_EQ(pool->freeBlocksNum(), free_before);
+    }
+}
+
+TEST_F(SingleTypeCoordinatorCacheManagerTest, RegisteredInsideBlockStateSurvivesContinuationAndLaterLegacyPublication) {
+    auto config               = makeSimpleLinearCacheConfig(1, 24, 16, DataType::TYPE_FP16);
+    config.seq_size_per_block = 4;
+    ParallelismConfig parallelism;
+    parallelism.tp_size                            = 2;
+    parallelism.prefill_cp_config.kv_cache_sharded = true;
+    parallelism.prefill_cp_config.method           = CPRotateMethod::ALL_GATHER;
+    config.finalizeStorageLayout(parallelism);
+    allocator_ = std::make_shared<TestSingleTypeCoordinatorCacheManager>(config);
+    ASSERT_TRUE(allocator_->init());
+    const auto   pool          = allocator_->groupBlockPools().front();
+    const size_t free_before   = pool->freeBlocksNum();
+    auto         make_resource = [&](const CompleteTokenIdsPtr& tokens) {
+        auto resource = std::make_shared<BatchKVCacheResource>();
+        resource->resetBatchSize(1);
+        resource->initGroups(config.topologyPtr());
+        initCacheKeys(resource, tokens, 4);
+        return resource;
+    };
+    const std::vector<uint8_t> state8{8, 7, 6, 5, 4, 3, 2, 1};
+    const std::vector<uint8_t> state16{16, 15, 14, 13, 12, 11, 10, 9};
+    auto                       tokens = createCompleteTokenIds(1, 8, 4);
+    auto                       source = make_resource(tokens);
+    MallocInfo                 cold{source, tokens};
+    cold.enable_cache_lookup = false;
+    cold.request_layout      = snapshotGlobalCacheRequest(*source, *tokens);
+    ASSERT_TRUE(allocator_->malloc(cold).success);
+    writeDeviceBytes(allocator_->convertIndexToBuffer(0, "linear", source->blocks(0, "linear").front()).front().addr,
+                     state8);
+    PrefixCacheRegistration saved;
+    saved.original_input_tokens       = 8;
+    saved.token_ids                   = tokens->completeTokenIdsVec(0);
+    saved.base_keys                   = source->cacheKeys(0);
+    saved.required_continuation_ready = true;
+    PrefixCacheRegistrationPoint point;
+    point.endpoint.pos = 8;
+    point.group_bindings.resize(1);
+    saved.points.push_back(std::move(point));
+    allocator_->prepareRegisteredSave(saved, *source, 0);
+    ASSERT_TRUE(saved.prepared);
+    ASSERT_TRUE(saved.copy_mappings.empty());
+    const auto& binding = saved.points.front().group_bindings.front();
+    ASSERT_EQ(binding.ownership, PrefixCacheSaveOwnership::OPTIONAL_REQUEST);
+    ASSERT_EQ(binding.state, PrefixCacheSaveState::REGISTERED);
+    ASSERT_TRUE(binding.resource.hasCompleteDeviceValue());
+    const auto snapshot_block = binding.resource.device_blocks.front();
+    ASSERT_NE(snapshot_block, source->blocks(0, "linear").front());
+    // A cold forward writes the optional snapshot directly; there is no resumed history to copy.
+    writeDeviceBytes(allocator_->convertIndexToBuffer(0, "linear", snapshot_block).front().addr, state8);
+    saved.points.front().group_bindings.front().state = PrefixCacheSaveState::CONTENT_COMPLETE;
+    saved.content_completed                           = true;
+    InsertInfo registered{source, tokens, false};
+    registered.prefix_cache_registration = &saved;
+    size_t resident                      = 0;
+    allocator_->insertIntoCache(registered, resident);
+    allocator_->releaseRegisteredSave(saved);
+    allocator_->free(FreeInfo{source, tokens});
+
+    auto       later_tokens = createCompleteTokenIds(1, 17, 4);
+    auto       later        = make_resource(later_tokens);
+    MallocInfo lookup{later, later_tokens};
+    lookup.request_layout = snapshotGlobalCacheRequest(*later, *later_tokens);
+    const auto resumed    = allocator_->malloc(lookup);
+    ASSERT_TRUE(resumed.success);
+    ASSERT_EQ(resumed.reuse_len, 8);
+    const auto              old_block = later->blocks(0, "linear").front();
+    PrefixCacheRegistration continuation;
+    ASSERT_EQ(allocator_->prepareRequiredContinuation(continuation, *later, 8), MallocStatus::NONE);
+    ASSERT_EQ(continuation.source_pins.size(), 1u);
+    ASSERT_EQ(continuation.copy_mappings.size(), 1u);
+    allocator_->blockBatchCopyByGroup(continuation.copy_mappings, true);
+    runtimeSyncAndCheck();
+    const auto new_block = later->blocks(0, "linear").front();
+    ASSERT_NE(new_block, old_block);
+    EXPECT_EQ(readDeviceBytes(allocator_->convertIndexToBuffer(0, "linear", new_block).front().addr, 8), state8);
+    writeDeviceBytes(allocator_->convertIndexToBuffer(0, "linear", new_block).front().addr, state16);
+    EXPECT_EQ(readDeviceBytes(allocator_->convertIndexToBuffer(0, "linear", old_block).front().addr, 8), state8);
+    allocator_->insertIntoCache(InsertInfo{later, later_tokens, false}, resident);
+    allocator_->releaseRegisteredSave(continuation);
+    allocator_->releaseRegisteredSave(continuation);
+    EXPECT_TRUE(continuation.source_pins.empty());
+    allocator_->free(FreeInfo{later, later_tokens});
+    for (const int endpoint : {8, 16}) {
+        auto       query_tokens = createCompleteTokenIds(1, endpoint + 1, 4);
+        auto       query        = make_resource(query_tokens);
+        MallocInfo request{query, query_tokens};
+        request.request_layout = snapshotGlobalCacheRequest(*query, *query_tokens);
+        const auto hit         = allocator_->malloc(request);
+        ASSERT_TRUE(hit.success);
+        EXPECT_EQ(hit.reuse_len, endpoint);
+        const auto block = query->blocks(0, "linear").front();
+        EXPECT_EQ(readDeviceBytes(allocator_->convertIndexToBuffer(0, "linear", block).front().addr, 8),
+                  endpoint == 8 ? state8 : state16);
+        allocator_->free(FreeInfo{query, query_tokens});
+    }
+    allocator_->blockTreeCacheOwner()->evictForGroup("linear", pool->totalBlocksNum());
+    EXPECT_EQ(pool->freeBlocksNum(), free_before);
+}
+
+TEST_F(SingleTypeCoordinatorCacheManagerTest, LegacyDenseSwaPublishesOnlySafePhysicalBoundary) {
+    CacheConfig config;
+    config.dtype               = DataType::TYPE_FP16;
+    config.layer_num           = 1;
+    config.seq_size_per_block  = 4;
+    auto policy                = defaultCacheGroupPolicy(CacheGroupType::SWA);
+    policy.enable_prefix_reuse = true;
+    policy.sliding_window_size = 4;
+    config.fromGroupedSpecs(
+        {makeMhaSpec("swa", 16, DataType::TYPE_FP16, 1, 1)}, {{0}}, {CacheGroupType::SWA}, {"swa"}, {policy});
+    config.finalizeBlockNums(16, RuntimeConfig{});
+    ParallelismConfig parallelism;
+    parallelism.tp_size                            = 2;
+    parallelism.prefill_cp_config.kv_cache_sharded = true;
+    parallelism.prefill_cp_config.method           = CPRotateMethod::ALL_GATHER;
+    config.finalizeStorageLayout(parallelism);
+    allocator_ = std::make_shared<TestSingleTypeCoordinatorCacheManager>(config);
+    ASSERT_TRUE(allocator_->init());
+    const auto   pool          = allocator_->groupBlockPools().front();
+    const size_t free_before   = pool->freeBlocksNum();
+    auto         make_resource = [&](const CompleteTokenIdsPtr& tokens) {
+        auto resource = std::make_shared<BatchKVCacheResource>();
+        resource->resetBatchSize(1);
+        resource->initGroups(config.topologyPtr());
+        initCacheKeys(resource, tokens, 4);
+        return resource;
+    };
+    auto       tokens = createCompleteTokenIds(1, 16, 4);
+    auto       source = make_resource(tokens);
+    MallocInfo cold{source, tokens};
+    cold.enable_cache_lookup = false;
+    cold.request_layout      = snapshotGlobalCacheRequest(*source, *tokens);
+    ASSERT_TRUE(allocator_->malloc(cold).success);
+    const std::vector<uint8_t> rows{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16};
+    writeDeviceBytes(allocator_->convertIndexToBuffer(0, "swa", source->blocks(0, "swa").front()).front().addr, rows);
+    size_t resident = 0;
+    allocator_->insertIntoCache(InsertInfo{source, tokens, false}, resident);
+    allocator_->free(FreeInfo{source, tokens});
+    for (const int endpoint : {8, 16}) {
+        auto       query_tokens = createCompleteTokenIds(1, endpoint + 1, 4);
+        auto       query        = make_resource(query_tokens);
+        MallocInfo lookup{query, query_tokens};
+        lookup.request_layout = snapshotGlobalCacheRequest(*query, *query_tokens);
+        const auto hit        = allocator_->malloc(lookup);
+        ASSERT_TRUE(hit.success);
+        EXPECT_EQ(hit.reuse_len, endpoint == 16 ? 16 : 0);
+        if (endpoint == 16) {
+            const auto block = query->blocks(0, "swa").front();
+            EXPECT_EQ(readDeviceBytes(allocator_->convertIndexToBuffer(0, "swa", block).front().addr, rows.size()),
+                      rows);
+        }
+        allocator_->free(FreeInfo{query, query_tokens});
+    }
+    allocator_->blockTreeCacheOwner()->evictForGroup("swa", pool->totalBlocksNum());
+    EXPECT_EQ(pool->freeBlocksNum(), free_before);
+}
+
+TEST_F(SingleTypeCoordinatorCacheManagerTest, NoFullCanonicalStateRoundTrip) {
+    for (const size_t physical : {4u, 8u}) {
+        for (const int mode : {0, 1, 2, 3}) {
+            const bool observe    = (mode & 1) != 0;
+            const bool registered = (mode & 2) != 0;
+            SCOPED_TRACE(::testing::Message() << "P=" << physical << " mode=" << mode);
+            auto config               = makeSimpleLinearCacheConfig(1, 16, physical, DataType::TYPE_FP16);
+            config.seq_size_per_block = 4;
+            ParallelismConfig parallelism;
+            parallelism.tp_size                            = 2;
+            parallelism.prefill_cp_config.kv_cache_sharded = true;
+            parallelism.prefill_cp_config.method           = CPRotateMethod::ALL_GATHER;
+            config.finalizeStorageLayout(parallelism);
+            allocator_ = std::make_shared<TestSingleTypeCoordinatorCacheManager>(config);
+            KVCacheConfig options;
+            options.enable_prefix_cache_observability = observe;
+            allocator_->setBlockTreeCacheConfigForTest(options);
+            ASSERT_TRUE(allocator_->init());
+            const auto   pool        = allocator_->groupBlockPools().front();
+            const size_t free_before = pool->freeBlocksNum();
+            auto         runtime     = std::make_shared<BatchKVCacheResource>();
+            runtime->resetBatchSize(1);
+            runtime->initGroups(config.topologyPtr());
+            auto tokens = createCompleteTokenIds(1, 9, 4);
+            initCacheKeys(runtime, tokens, 4);
+            auto blocks = pool->malloc(2);
+            ASSERT_TRUE(blocks.has_value());
+            pool->incRef(*blocks);
+            runtime->setBatchBlocks(0, "linear", *blocks);
+            runtime->setLastBlockAligned(false);
+            const size_t               slot = config.endpointBlockPosition("linear", 8);
+            const std::vector<uint8_t> expected{8, 7, 6, 5, 4, 3, 2, 1};
+            for (size_t index = 0; index < blocks->size(); ++index) {
+                auto buffer = allocator_->convertIndexToBuffer(0, "linear", (*blocks)[index]);
+                ASSERT_FALSE(buffer.empty());
+                writeDeviceBytes(buffer.front().addr, index == slot ? expected : std::vector<uint8_t>(8, 99));
+            }
+            PrefixCacheRegistration registration;
+            if (registered) {
+                registration.original_input_tokens       = 9;
+                registration.token_ids                   = {1, 2, 3, 4, 5, 6, 7, 8, 9};
+                registration.base_keys                   = runtime->cacheKeys(0);
+                registration.required_continuation_ready = true;
+                PrefixCacheRegistrationPoint point;
+                point.endpoint.pos = 8;
+                point.group_bindings.resize(1);
+                registration.points.push_back(std::move(point));
+                allocator_->prepareRegisteredSave(registration, *runtime, 0);
+                ASSERT_TRUE(registration.prepared);
+                allocator_->blockBatchCopyByGroup(registration.copy_mappings, true);
+                runtimeSyncAndCheck();
+                registration.points.front().group_bindings.front().state = PrefixCacheSaveState::CONTENT_COMPLETE;
+                registration.content_completed                           = true;
+            }
+            InsertInfo info{runtime, tokens, false, Tier::DEVICE};
+            info.prefix_cache_registration = registered ? &registration : nullptr;
+            size_t resident                = 0;
+            allocator_->insertIntoCache(info, resident);
+            const CacheKeysType keys{runtime->cacheKeys(0)[1]};
+            const auto&         cache = allocator_->blockTreeCacheOwner();
+            const auto          path  = cache->tree()->findNode(keys);
+            EXPECT_EQ(path.size(), 1u);
+            if (path.size() == 1) {
+                EXPECT_EQ(path.front()->token_end, 8u);
+                EXPECT_EQ(path.front()->token_ids, (std::vector<int>{1, 2, 3, 4, 5, 6, 7, 8}));
+            }
+            auto match = cache->match(keys);
+            EXPECT_EQ(match.matched_device_endpoint, 8u);
+            EXPECT_EQ(match.matched_device_resources.size(), 1u);
+            if (match.matched_device_resources.size() == 1) {
+                const auto restored = match.matched_device_resources.front().node_blocks.back().second.front();
+                auto       buffer   = allocator_->convertIndexToBuffer(0, "linear", restored);
+                EXPECT_EQ(readDeviceBytes(buffer.front().addr, expected.size()), expected);
+            }
+            for (const auto& resource : match.matched_device_resources) {
+                cache->groupSets()[resource.group_set_id]->unreferenceBlocks(resource);
+            }
+            allocator_->releaseRegisteredSave(registration);
+            pool->decRef(*blocks);
+            runtime->clearBlocks();
+            cache->evictForGroup("linear", pool->totalBlocksNum());
+            EXPECT_EQ(pool->freeBlocksNum(), free_before);
+            allocator_.reset();
+        }
+    }
+}
+
+TEST_F(SingleTypeCoordinatorCacheManagerTest, RemoteSwaCoverageClipsBeforeReadAndKeepsExactLocalFallback) {
+    for (const int window : {4, 8}) {
+        SCOPED_TRACE(window);
+        CacheConfig config;
+        config.dtype               = DataType::TYPE_FP16;
+        config.layer_num           = 1;
+        config.seq_size_per_block  = 4;
+        auto spec                  = makeMhaSpec("swa", 4, DataType::TYPE_FP16, 1, 1);
+        auto policy                = defaultCacheGroupPolicy(CacheGroupType::SWA);
+        policy.enable_prefix_reuse = true;
+        policy.cp_mapping          = CpBlockMappingMode::NONE;
+        policy.sliding_window_size = window;
+        config.fromGroupedSpecs({spec}, {{0}}, {CacheGroupType::SWA}, {"swa"}, {policy});
+        config.finalizeBlockNums(24, RuntimeConfig{});
+        ParallelismConfig parallelism;
+        parallelism.tp_size                            = 2;
+        parallelism.prefill_cp_config.kv_cache_sharded = true;
+        parallelism.prefill_cp_config.method           = CPRotateMethod::ALL_GATHER;
+        config.finalizeStorageLayout(parallelism);
+        allocator_ = std::make_shared<TestSingleTypeCoordinatorCacheManager>(config);
+        KVCacheConfig options;
+        options.enable_remote_cache               = true;
+        options.enable_prefill_partial_tail_reuse = true;
+        auto backend                              = std::make_shared<ScriptedSingleTypeStorageBackend>();
+        backend->matched_keys                     = 1;
+        allocator_->setBlockTreeCacheConfigForTest(options);
+        allocator_->setStorageBackendForTest(backend);
+        ASSERT_TRUE(allocator_->init());
+        const auto& cache       = allocator_->blockTreeCacheOwner();
+        const auto  pool        = allocator_->groupBlockPools().front();
+        const auto  free_before = pool->freeBlocksNum();
+        auto        tokens      = createCompleteTokenIds(1, 9, 4);
+        auto        runtime     = std::make_shared<BatchKVCacheResource>();
+        runtime->resetBatchSize(1);
+        runtime->initGroups(config.topologyPtr());
+        initCacheKeys(runtime, tokens, 4);
+        auto saved = pool->malloc();
+        ASSERT_TRUE(saved.has_value());
+        pool->incRef(*saved);
+        const std::vector<uint8_t> expected{3, 1, 4, 1, 5, 9, 2, 6};
+        auto                       buffer = allocator_->convertIndexToBuffer(0, "swa", *saved);
+        writeDeviceBytes(buffer.front().addr, expected);
+        std::vector<std::vector<GroupSetResource>> resources(1, std::vector<GroupSetResource>(1));
+        resources[0][0].device_blocks = {*saved};
+        const std::vector<size_t>           ends{3};
+        const std::vector<std::vector<int>> segments{{1, 2, 3}};
+        const CacheKeysType                 short_keys{cacheKeyAtTokenEnd(*tokens, 0, 4, 3)};
+        cache->insert(short_keys, resources, Tier::DEVICE, false, &segments, nullptr, &ends);
+        ASSERT_EQ(cache->tree()->findNode(short_keys).size(), 1u);
+        pool->decRef(*saved);
+        MallocInfo info{runtime, tokens};
+        auto       layout = std::make_shared<MallocInfo::RequestLayout>(*snapshotGlobalCacheRequest(*runtime, *tokens));
+        layout->token_ids = {1, 2, 3, 4, 5, 6, 7, 8, 9};
+        layout->original_input_tokens = 9;
+        layout->partial_tail_reuse    = true;
+        info.request_layout           = std::move(layout);
+        info.enable_cache_lookup      = true;
+        info.reuse_cache              = true;
+        auto result                   = allocator_->malloc(info);
+        ASSERT_TRUE(result.success);
+        auto context = std::dynamic_pointer_cast<LoadAsyncContext>(result.async_context);
+        ASSERT_NE(context, nullptr);
+        context->waitDone();
+        ASSERT_TRUE(context->success());
+        EXPECT_EQ(backend->match_calls, 1u);
+        EXPECT_EQ(backend->read_calls, window == 8 ? 0u : 1u);
+        EXPECT_EQ(context->localFallbackSelected(), window == 8);
+        EXPECT_EQ(context->matchedTokenEndpoint(8), window == 8 ? 3u : 8u);
+        if (window == 8) {
+            EXPECT_EQ(runtime->blocks(0, "swa").front(), *saved);
+            EXPECT_EQ(readDeviceBytes(buffer.front().addr, expected.size()), expected);
+        }
+        allocator_->free(FreeInfo{runtime, tokens});
+        context.reset();
+        result.async_context.reset();
+        backend->shutdown();
+        cache->evictForGroup("swa", pool->totalBlocksNum());
+        EXPECT_EQ(pool->freeBlocksNum(), free_before);
+        allocator_.reset();
+    }
+}
+
+TEST_F(SingleTypeCoordinatorCacheManagerTest, LowerTierRejectsMissingCanonicalSwaHistory) {
+    for (const Tier tier : {Tier::HOST, Tier::DISK}) {
+        SCOPED_TRACE(static_cast<int>(tier));
+        ScopedSingleTypeDiskDirectory directory;
+        CacheConfig                   config;
+        config.dtype               = DataType::TYPE_FP16;
+        config.layer_num           = 1;
+        config.seq_size_per_block  = 4;
+        auto spec                  = makeMhaSpec("swa", 4, DataType::TYPE_FP16, 1, 1);
+        auto policy                = defaultCacheGroupPolicy(CacheGroupType::SWA);
+        policy.enable_prefix_reuse = true;
+        policy.cp_mapping          = CpBlockMappingMode::NONE;
+        policy.sliding_window_size = 8;
+        config.fromGroupedSpecs({spec}, {{0}}, {CacheGroupType::SWA}, {"swa"}, {policy});
+        config.finalizeBlockNums(16, RuntimeConfig{});
+        ParallelismConfig parallelism;
+        parallelism.tp_size                            = 2;
+        parallelism.prefill_cp_config.kv_cache_sharded = true;
+        parallelism.prefill_cp_config.method           = CPRotateMethod::ALL_GATHER;
+        config.finalizeStorageLayout(parallelism);
+        allocator_ = std::make_shared<TestSingleTypeCoordinatorCacheManager>(config);
+        allocator_->setBlockTreeCacheConfigForTest(makeSingleTypeTieredConfig(tier, directory.path()));
+        ASSERT_TRUE(allocator_->init());
+        BlockTreeCacheConfig cache_options;
+        cache_options.enable_host_cache = true;
+        cache_options.enable_disk_cache = tier == Tier::DISK;
+        auto cache                      = block_tree_cache_test::makeBlockTreeCacheForTest(
+            allocator_->blockTreeCacheOwner()->groupSets(), cache_options, nullptr, nullptr, nullptr, 8);
+        ASSERT_NE(cache, nullptr);
+        const auto group = cache->groupSets().front();
+        const auto block = group->allocateSingleBlock(tier, BlockTreeRefType::CACHE);
+        ASSERT_NE(block, NULL_BLOCK_IDX);
+        std::vector<std::vector<GroupSetResource>> resources(1, std::vector<GroupSetResource>(1));
+        if (tier == Tier::HOST) {
+            resources[0][0].host_block = block;
+        } else {
+            resources[0][0].disk_block = block;
+        }
+        const std::vector<size_t>           endpoints{8};
+        const std::vector<std::vector<int>> segments{{1, 2, 3, 4, 5, 6, 7, 8}};
+        const auto inserted = cache->tree()->insertNode({77}, resources, false, false, &segments, &endpoints);
+        ASSERT_EQ(inserted.inserted_nodes.size(), 1u);
+        group->releaseSingleBlock(tier, block, BlockTreeRefType::CACHE);
+        auto match = cache->match({77});
+        EXPECT_EQ(match.matched_device_endpoint, 0u);
+        EXPECT_EQ(match.async_context, nullptr);
+        if (match.async_context) {
+            std::dynamic_pointer_cast<LoadAsyncContext>(match.async_context)->abortPending();
+            match.async_context.reset();
+        }
+        if (tier == Tier::HOST) {
+            EXPECT_EQ(group->hostPool()->referencedBlocksNum(BlockTreeRefType::LOAD), 0u);
+        } else {
+            EXPECT_EQ(group->diskPool()->referencedBlocksNum(BlockTreeRefType::LOAD), 0u);
+        }
+        allocator_.reset();
+    }
+}
+
+// Dense saves borrow runtime slots; exact recurrent states keep separate endpoints.
+TEST_F(SingleTypeCoordinatorCacheManagerTest, DenseRegisteredEndpointsAliasOneRuntimeBlockWithoutSnapshot) {
+    auto config = createSingleTypeTestConfig(1, 12, 4);
+    allocator_  = std::make_shared<TestSingleTypeCoordinatorCacheManager>(config);
+    ASSERT_TRUE(allocator_->init());
+    auto       runtime = createBatchKVCacheResource(1, config);
+    const auto pool    = allocator_->groupBlockPools().front();
+    auto       blocks  = pool->malloc(2);
+    ASSERT_TRUE(blocks.has_value());
+    pool->incRef(*blocks);
+    runtime->setBatchBlocks(0, "default", *blocks);
+    PrefixCacheRegistration registration;
+    registration.original_input_tokens       = 7;
+    registration.token_ids                   = {1, 2, 3, 4, 5, 6, 7};
+    registration.base_keys                   = {11, 22};
+    registration.required_continuation_ready = true;
+    for (const size_t endpoint : {5u, 7u}) {
+        PrefixCacheRegistrationPoint point;
+        point.endpoint.pos = endpoint;
+        point.group_bindings.resize(1);
+        registration.points.push_back(std::move(point));
+    }
+    const auto free_before = pool->freeBlocksNum();
+    allocator_->prepareRegisteredSave(registration, *runtime, 0);
+    ASSERT_TRUE(registration.prepared);
+    EXPECT_EQ(pool->freeBlocksNum(), free_before);
+    EXPECT_TRUE(registration.copy_mappings.empty());
+    for (const auto& point : registration.points) {
+        const auto& binding = point.group_bindings.front();
+        EXPECT_EQ(binding.ownership, PrefixCacheSaveOwnership::REQUIRED_RUNTIME);
+        EXPECT_EQ(binding.state, PrefixCacheSaveState::REGISTERED);
+        EXPECT_EQ(binding.resource.device_blocks, BlockIndicesType{blocks->back()});
+    }
+    ASSERT_EQ(registration.runtime_source_pins.size(), 1u);
+    EXPECT_EQ(registration.runtime_source_pins.front().block, blocks->back());
+    EXPECT_EQ(pool->refCount(blocks->back()), 2u);  // Runtime plus registration pin.
+    allocator_->releaseRegisteredSave(registration);
+    allocator_->releaseRegisteredSave(registration);
+    EXPECT_EQ(pool->refCount(blocks->back()), 1u);
+    EXPECT_EQ(pool->freeBlocksNum(), free_before);
+    pool->decRef(*blocks);
+    runtime->clearBlocks();
+    EXPECT_EQ(pool->freeBlocksNum(), free_before + 2);
+}
+
+TEST_F(SingleTypeCoordinatorCacheManagerTest, FullRuntimeAliasSurvivesBeamDropAndRuntimePriorityReallocation) {
+    auto config = createSingleTypeTestConfig(1, 12, 4);
+    allocator_  = std::make_shared<TestSingleTypeCoordinatorCacheManager>(config);
+    ASSERT_TRUE(allocator_->init());
+
+    auto runtime = createBatchKVCacheResource(1, config);
+    auto pool    = allocator_->groupBlockPools().front();
+    auto blocks  = pool->malloc(2);
+    ASSERT_TRUE(blocks.has_value());
+    pool->incRef(*blocks);
+    runtime->setBatchBlocks(0, "default", *blocks);
+    auto tokens = createCompleteTokenIds(1, 7, 4);
+    initCacheKeys(runtime, tokens, 4);
+
+    const BlockIdxType         original = blocks->back();
+    const std::vector<uint8_t> expected{1, 3, 5, 7, 9, 11, 13, 15};
+    const auto                 original_buffer = allocator_->convertIndexToBuffer(0, "default", original);
+    ASSERT_FALSE(original_buffer.empty());
+    writeDeviceBytes(original_buffer.front().addr, expected);
+
+    PrefixCacheRegistration registration;
+    registration.original_input_tokens       = 7;
+    registration.token_ids                   = {1, 2, 3, 4, 5, 6, 7};
+    registration.base_keys                   = runtime->cacheKeys(0);
+    registration.required_continuation_ready = true;
+    PrefixCacheRegistrationPoint point;
+    point.endpoint.pos = 7;
+    point.group_bindings.resize(1);
+    registration.points.push_back(std::move(point));
+
+    allocator_->prepareRegisteredSave(registration, *runtime, 0);
+    ASSERT_TRUE(registration.prepared);
+    ASSERT_EQ(registration.runtime_source_pins.size(), 1u);
+    EXPECT_EQ(registration.runtime_source_pins.front().block, original);
+    EXPECT_EQ(pool->refCount(original), 2u);
+
+    std::vector<TaggedBlockIdPair> block_update_mapping;
+    ASSERT_TRUE(allocator_->updateKVBlock(runtime, {0, 0}, /*copy_last_block=*/true, block_update_mapping));
+    ASSERT_EQ(block_update_mapping.size(), 1u);
+    ASSERT_EQ(block_update_mapping.front().src, original);
+    const BlockIdxType replacement = runtime->blocks(0, "default").back();
+    ASSERT_NE(replacement, original);
+    ASSERT_TRUE(allocator_->updateKVBlock(runtime, {0}, /*copy_last_block=*/false, block_update_mapping));
+
+    // The old branch is gone. A registration pin must keep the aliased FULL
+    // payload alive when an incremental allocation yields optional saves.
+    EXPECT_FALSE(allocator_->relinquishOptionalRegisteredSave(registration));
+    ASSERT_EQ(registration.runtime_source_pins.size(), 1u);
+    EXPECT_EQ(registration.runtime_source_pins.front().block, original);
+    EXPECT_EQ(pool->refCount(original), 1u);
+    EXPECT_EQ(registration.points.front().group_bindings.front().ownership, PrefixCacheSaveOwnership::REQUIRED_RUNTIME);
+    // Another request can take a free block, but cannot overwrite the alias.
+    EXPECT_TRUE(pool->isAllocated(original));
+    auto reallocated = pool->malloc();
+    ASSERT_TRUE(reallocated.has_value());
+    ASSERT_NE(*reallocated, original);
+    pool->incRef(*reallocated);
+    const auto reallocated_buffer = allocator_->convertIndexToBuffer(0, "default", *reallocated);
+    ASSERT_FALSE(reallocated_buffer.empty());
+    writeDeviceBytes(reallocated_buffer.front().addr, {2, 4, 6, 8, 10, 12, 14, 16});
+
+    for (auto& save_point : registration.points) {
+        for (auto& binding : save_point.group_bindings) {
+            binding.state = PrefixCacheSaveState::CONTENT_COMPLETE;
+        }
+    }
+    registration.content_completed = true;
+    InsertInfo info{runtime, tokens, false, Tier::DEVICE};
+    info.prefix_cache_registration = &registration;
+    size_t resident                = 0;
+    allocator_->insertIntoCache(info, resident);
+    allocator_->releaseRegisteredSave(registration);
+
+    const std::vector<int>  query{1, 2, 3, 4, 5, 6, 7, 8};
+    PartialTailMatchRequest partial;
+    partial.tokens            = &query;
+    partial.reuse_unit_tokens = 4;
+    partial.valid_endpoint    = [](size_t endpoint) { return endpoint < 8; };
+    partial.endpoint_key      = [&](size_t endpoint) {
+        return cacheKeyAtTokenEnd(*tokens, 0, 4, static_cast<int>(endpoint));
+    };
+    auto matched = allocator_->blockTreeCacheOwner()->match(runtime->cacheKeys(0), {}, nullptr, &partial);
+    ASSERT_EQ(matched.matched_device_endpoint, 7u);
+    ASSERT_EQ(matched.matched_device_resources.size(), 1u);
+    ASSERT_EQ(matched.matched_device_resources.front().node_blocks.back().second, BlockIndicesType{original});
+    for (const auto& resource : matched.matched_device_resources) {
+        allocator_->blockTreeCacheOwner()->groupSets()[resource.group_set_id]->unreferenceBlocks(resource);
+    }
+    EXPECT_EQ(readDeviceBytes(original_buffer.front().addr, expected.size()), expected);
+
+    pool->decRef(*reallocated);
+}
+
+TEST_F(SingleTypeCoordinatorCacheManagerTest, HybridRegisteredTailOnlyLinearNeedsOptionalSnapshot) {
+    auto config = makeSimpleHybridMhaCacheConfig(4, 16, 4, DataType::TYPE_FP16);
+    allocator_  = std::make_shared<TestSingleTypeCoordinatorCacheManager>(config);
+    ASSERT_TRUE(allocator_->init());
+    BatchKVCacheResource runtime;
+    runtime.resetBatchSize(1);
+    runtime.initGroups(config.topologyPtr());
+    const auto&             group_sets = allocator_->blockTreeCache()->groupSets();
+    PrefixCacheRegistration registration;
+    registration.original_input_tokens       = 7;
+    registration.token_ids                   = {1, 2, 3, 4, 5, 6, 7};
+    registration.base_keys                   = {11, 22};
+    registration.required_continuation_ready = true;
+    PrefixCacheRegistrationPoint point;
+    point.endpoint.pos = 7;
+    std::vector<size_t> free_before;
+    for (size_t id = 0; id < group_sets.size(); ++id) {
+        const auto& group  = group_sets[id];
+        const auto  pool   = group->devicePools().front();
+        auto        blocks = pool->malloc(2);
+        ASSERT_TRUE(blocks.has_value());
+        pool->incRef(*blocks);
+        runtime.setBatchBlocks(0, group->groupTags().front(), *blocks);
+        free_before.push_back(pool->freeBlocksNum());
+        PrefixCacheGroupSaveBinding binding;
+        binding.group_set_id = id;
+        point.group_bindings.push_back(std::move(binding));
+    }
+    registration.points.push_back(std::move(point));
+    allocator_->prepareRegisteredSave(registration, runtime, 0);
+    for (size_t id = 0; id < group_sets.size(); ++id) {
+        const auto& group   = group_sets[id];
+        const auto  pool    = group->devicePools().front();
+        const auto& binding = registration.points.front().group_bindings[id];
+        const auto  running = runtime.blocks(0, group->groupTags().front()).back();
+        if (group->groupType() == CacheGroupType::FULL) {
+            EXPECT_EQ(binding.ownership, PrefixCacheSaveOwnership::REQUIRED_RUNTIME);
+            EXPECT_EQ(binding.resource.device_blocks, BlockIndicesType{running});
+            EXPECT_EQ(pool->freeBlocksNum(), free_before[id]);
+        } else {
+            ASSERT_EQ(group->groupType(), CacheGroupType::LINEAR);
+            EXPECT_EQ(binding.ownership, PrefixCacheSaveOwnership::OPTIONAL_REQUEST);
+            ASSERT_EQ(binding.resource.device_blocks.size(), 1u);
+            EXPECT_NE(binding.resource.device_blocks.front(), running);
+            EXPECT_EQ(pool->freeBlocksNum() + 1, free_before[id]);
+        }
+    }
+    EXPECT_TRUE(allocator_->relinquishOptionalRegisteredSave(registration));
+    EXPECT_FALSE(allocator_->relinquishOptionalRegisteredSave(registration));
+    for (size_t id = 0; id < group_sets.size(); ++id) {
+        const auto& group   = group_sets[id];
+        const auto  pool    = group->devicePools().front();
+        const auto& binding = registration.points.front().group_bindings[id];
+        if (group->groupType() == CacheGroupType::FULL) {
+            const auto running = runtime.blocks(0, group->groupTags().front()).back();
+            EXPECT_EQ(binding.ownership, PrefixCacheSaveOwnership::REQUIRED_RUNTIME);
+            EXPECT_EQ(pool->refCount(running), 2u);
+        } else {
+            EXPECT_EQ(binding.state, PrefixCacheSaveState::UNFULFILLED);
+            EXPECT_EQ(binding.ownership, PrefixCacheSaveOwnership::NONE);
+            EXPECT_EQ(pool->freeBlocksNum(), free_before[id]);
+        }
+    }
+    allocator_->releaseRegisteredSave(registration);
+    for (size_t id = 0; id < group_sets.size(); ++id) {
+        const auto& group = group_sets[id];
+        const auto  pool  = group->devicePools().front();
+        EXPECT_EQ(pool->freeBlocksNum(), free_before[id]);
+        pool->decRef(runtime.blocks(0, group->groupTags().front()));
+    }
+    runtime.clearBlocks();
+}
+
+TEST_F(SingleTypeCoordinatorCacheManagerTest, RejectedInternalForkReleasesOptionalStateAndRuntimeAliasPins) {
+    auto config = makeSimpleHybridMhaCacheConfig(4, 16, 4, DataType::TYPE_FP16);
+    allocator_  = std::make_shared<TestSingleTypeCoordinatorCacheManager>(config);
+    ASSERT_TRUE(allocator_->init());
+    BatchKVCacheResource runtime;
+    runtime.resetBatchSize(1);
+    runtime.initGroups(config.topologyPtr());
+    const auto              cache  = allocator_->blockTreeCacheOwner();
+    const auto&             groups = cache->groupSets();
+    PrefixCacheRegistration registration;
+    registration.original_input_tokens       = 8;
+    registration.token_ids                   = {1, 2, 3, 4, 5, 6, 7, 8};
+    registration.base_keys                   = {11, 22};
+    registration.required_continuation_ready = true;
+    PrefixCacheRegistrationPoint fork;
+    fork.endpoint.pos  = 7;
+    fork.endpoint.key  = 22;
+    fork.internal_only = true;
+    for (size_t id = 0; id < groups.size(); ++id) {
+        const auto& group  = groups[id];
+        const auto  pool   = group->devicePools().front();
+        auto        blocks = pool->malloc(2);
+        ASSERT_TRUE(blocks.has_value());
+        pool->incRef(*blocks);
+        runtime.setBatchBlocks(0, group->groupTags().front(), *blocks);
+        PrefixCacheGroupSaveBinding binding;
+        binding.group_set_id = id;
+        fork.group_bindings.push_back(std::move(binding));
+    }
+    registration.points.push_back(std::move(fork));
+    allocator_->prepareRegisteredSave(registration, runtime, 0);
+    ASSERT_TRUE(registration.prepared);
+
+    std::vector<std::vector<GroupSetResource>> resources(2, std::vector<GroupSetResource>(groups.size()));
+    std::vector<BlockIdxType>                  optional_ids(groups.size(), NULL_BLOCK_IDX);
+    std::vector<size_t>                        free_before_release(groups.size());
+    for (size_t id = 0; id < groups.size(); ++id) {
+        const auto& binding = registration.points.front().group_bindings[id];
+        if (groups[id]->groupType() == CacheGroupType::LINEAR) {
+            ASSERT_EQ(binding.ownership, PrefixCacheSaveOwnership::OPTIONAL_REQUEST);
+            ASSERT_EQ(binding.resource.device_blocks.size(), 1u);
+            optional_ids[id] = binding.resource.device_blocks.front();
+        } else {
+            ASSERT_EQ(binding.ownership, PrefixCacheSaveOwnership::REQUIRED_RUNTIME);
+        }
+        resources.back()[id]    = binding.resource;
+        free_before_release[id] = groups[id]->devicePools().front()->freeBlocksNum();
+    }
+    const std::vector<std::vector<int>> segments{{1, 2, 3, 4}, {5, 6, 7}};
+    const std::vector<size_t>           ends{4, 7};
+    bool                                ready = true;
+    cache->insert({11, 22}, resources, Tier::DEVICE, false, &segments, nullptr, &ends, std::nullopt, true, &ready);
+    EXPECT_FALSE(ready);
+    EXPECT_TRUE(cache->tree()->findNode({11, 22}).empty());
+    for (size_t id = 0; id < groups.size(); ++id) {
+        if (!isNullBlockIdx(optional_ids[id])) {
+            EXPECT_EQ(groups[id]->devicePools().front()->refCount(optional_ids[id]), 1u);
+        }
+    }
+
+    allocator_->releaseRegisteredSave(registration);
+    allocator_->releaseRegisteredSave(registration);
+    for (size_t id = 0; id < groups.size(); ++id) {
+        const auto pool = groups[id]->devicePools().front();
+        if (!isNullBlockIdx(optional_ids[id])) {
+            EXPECT_FALSE(pool->isAllocated(optional_ids[id]));
+            EXPECT_EQ(pool->freeBlocksNum(), free_before_release[id] + 1);
+        } else {
+            EXPECT_EQ(pool->refCount(runtime.blocks(0, groups[id]->groupTags().front()).back()), 1u);
+        }
+        pool->decRef(runtime.blocks(0, groups[id]->groupTags().front()));
+    }
+    runtime.clearBlocks();
+}
+
+TEST_F(SingleTypeCoordinatorCacheManagerTest, DenseSwaPinsPreserveUnregisteredWindowSlotsAndRealHoles) {
+    for (const bool missing_window_slot : {false, true}) {
+        SCOPED_TRACE(missing_window_slot);
+        CacheConfig config;
+        config.dtype                   = DataType::TYPE_FP16;
+        config.layer_num               = 3;
+        config.seq_size_per_block      = 2;
+        auto full                      = makeMhaSpec("full", 2, DataType::TYPE_FP16, 1, 1);
+        auto swa                       = makeMhaSpec("swa", 2, DataType::TYPE_FP16, 1, 1);
+        auto linear                    = makeLinearSpec("linear", 2, DataType::TYPE_FP16, 1, 1);
+        auto swa_policy                = defaultCacheGroupPolicy(CacheGroupType::SWA);
+        swa_policy.enable_prefix_reuse = true;
+        swa_policy.sliding_window_size = 4;
+        config.fromGroupedSpecs({full, swa, linear},
+                                {{0}, {1}, {2}},
+                                {CacheGroupType::FULL, CacheGroupType::SWA, CacheGroupType::LINEAR},
+                                {"full", "swa", "linear"},
+                                {defaultCacheGroupPolicy(CacheGroupType::FULL),
+                                 swa_policy,
+                                 defaultCacheGroupPolicy(CacheGroupType::LINEAR)});
+        config.finalizeBlockNums(32, RuntimeConfig{});
+        allocator_ = std::make_shared<TestSingleTypeCoordinatorCacheManager>(config);
+        KVCacheConfig options;
+        options.enable_prefill_partial_tail_reuse = true;
+        allocator_->setBlockTreeCacheConfigForTest(options);
+        ASSERT_TRUE(allocator_->init());
+        auto runtime = std::make_shared<BatchKVCacheResource>();
+        runtime->resetBatchSize(1);
+        runtime->initGroups(config.topologyPtr());
+        const auto& cache  = allocator_->blockTreeCache();
+        const auto& groups = cache->groupSets();
+        size_t      swa_id = 0;
+        for (const auto& group : groups) {
+            auto pool   = group->devicePools().front();
+            auto blocks = pool->malloc(4);
+            ASSERT_TRUE(blocks.has_value());
+            pool->incRef(*blocks);
+            if (group->groupType() == CacheGroupType::SWA) {
+                swa_id = group->groupSetId();
+                if (missing_window_slot) {
+                    pool->decRef((*blocks)[2]);
+                    (*blocks)[2] = NULL_BLOCK_IDX;
+                }
+            }
+            runtime->setBatchBlocks(0, group->groupTags().front(), *blocks);
+        }
+        auto tokens = createCompleteTokenIds(1, 7, 2);
+        initCacheKeys(runtime, tokens, 2);
+        PrefixCacheRegistration registration;
+        registration.original_input_tokens       = 7;
+        registration.token_ids                   = {1, 2, 3, 4, 5, 6, 7};
+        registration.base_keys                   = runtime->cacheKeys(0);
+        registration.required_continuation_ready = true;
+        for (const size_t endpoint : {4u, 7u}) {
+            PrefixCacheRegistrationPoint point;
+            point.endpoint.pos = endpoint;
+            for (const auto& group : groups) {
+                PrefixCacheGroupSaveBinding binding;
+                binding.group_set_id = group->groupSetId();
+                point.group_bindings.push_back(std::move(binding));
+            }
+            registration.points.push_back(std::move(point));
+        }
+        auto         swa_pool    = groups[swa_id]->devicePools().front();
+        const size_t free_before = swa_pool->freeBlocksNum();
+        const auto   middle      = runtime->blocks(0, "swa")[2];
+        allocator_->prepareRegisteredSave(registration, *runtime, 0);
+        EXPECT_EQ(swa_pool->freeBlocksNum(), free_before);
+        EXPECT_EQ(registration.points.back().group_bindings[swa_id].ownership,
+                  PrefixCacheSaveOwnership::PINNED_RUNTIME);
+        const size_t runtime_pin_count = registration.runtime_source_pins.size();
+        const size_t swa_runtime_pins  = std::count_if(registration.runtime_source_pins.begin(),
+                                                      registration.runtime_source_pins.end(),
+                                                      [](const auto& pin) { return pin.tag == "swa"; });
+        EXPECT_EQ(swa_runtime_pins, missing_window_slot ? 3u : 4u);
+        allocator_->releaseRegisteredSourcePins(registration);
+        EXPECT_EQ(registration.runtime_source_pins.size(), runtime_pin_count);
+        InsertInfo info{runtime, tokens, false, Tier::DEVICE};
+        info.prefix_cache_registration = &registration;
+        size_t resident                = 0;
+        allocator_->insertIntoCache(info, resident);
+        EXPECT_EQ(cache->tree()->size(), 0u);  // Allocated pages are not completed KV.
+        for (auto& point : registration.points) {
+            for (auto& binding : point.group_bindings) {
+                binding.state = PrefixCacheSaveState::CONTENT_COMPLETE;
+            }
+        }
+        registration.content_completed = true;
+        if (!missing_window_slot) {
+            // Simulate the active SWA window dropping this logical page before
+            // publication. The registration pin, not a new snapshot, retains it.
+            runtime->mutableBlockIds(0, "swa").setAt(2, NULL_BLOCK_IDX);
+            swa_pool->decRef(middle);
+            EXPECT_EQ(swa_pool->refCount(middle), 1u);
+        }
+        allocator_->insertIntoCache(info, resident);
+        ASSERT_EQ(cache->tree()->size(), 4u);
+        allocator_->releaseRegisteredSave(registration);
+        EXPECT_TRUE(registration.runtime_source_pins.empty());
+        EXPECT_TRUE(registration.runtime_path_resources.empty());
+        if (!missing_window_slot) {
+            EXPECT_TRUE(swa_pool->isAllocated(middle));
+            EXPECT_EQ(swa_pool->refCount(middle), 1u);  // Now tree-owned.
+        }
+        auto query_tokens   = createCompleteTokenIds(1, 9, 2);
+        auto query_resource = std::make_shared<BatchKVCacheResource>();
+        query_resource->resetBatchSize(1);
+        query_resource->initGroups(config.topologyPtr());
+        initCacheKeys(query_resource, query_tokens, 2);
+        MallocInfo query_info{query_resource, query_tokens};
+        auto       layout =
+            std::make_shared<MallocInfo::RequestLayout>(*snapshotGlobalCacheRequest(*query_resource, *query_tokens));
+        layout->token_ids.assign(query_tokens->data(0), query_tokens->data(0) + 9);
+        layout->partial_tail_reuse     = true;
+        layout->original_input_tokens  = 9;
+        query_info.request_layout      = std::move(layout);
+        query_info.enable_cache_lookup = true;
+        auto matched                   = allocator_->malloc(query_info);
+        ASSERT_TRUE(matched.success) << "missing_window_slot=" << missing_window_slot;
+        EXPECT_EQ(matched.reuse_len, missing_window_slot ? 4u : 7u);
+        allocator_->free(FreeInfo{query_resource, query_tokens});
+        allocator_->free(FreeInfo{runtime, tokens});
+        allocator_.reset();
+    }
+}
+
+TEST_F(SingleTypeCoordinatorCacheManagerTest, DenseSwaRuntimePinsYieldWithoutFreeingLivePages) {
+    auto config                = createSingleTypeTestConfig(1, 12, 2);
+    auto policy                = defaultCacheGroupPolicy(CacheGroupType::SWA);
+    policy.enable_prefix_reuse = true;
+    policy.sliding_window_size = 4;
+    setTestGroupPolicies(config, {policy});
+    allocator_ = std::make_shared<TestSingleTypeCoordinatorCacheManager>(config);
+    ASSERT_TRUE(allocator_->init());
+    auto runtime = createBatchKVCacheResource(1, config);
+    auto pool    = allocator_->groupBlockPools().front();
+    auto blocks  = pool->malloc(2);
+    ASSERT_TRUE(blocks.has_value());
+    pool->incRef(*blocks);
+    runtime->setBatchBlocks(0, "default", *blocks);
+    PrefixCacheRegistration registration;
+    registration.original_input_tokens       = 3;
+    registration.token_ids                   = {1, 2, 3};
+    registration.base_keys                   = {11, 22};
+    registration.required_continuation_ready = true;
+    for (const size_t endpoint : {1u, 2u, 3u}) {
+        PrefixCacheRegistrationPoint point;
+        point.endpoint.pos = endpoint;
+        point.group_bindings.resize(1);
+        registration.points.push_back(std::move(point));
+    }
+    const size_t free_before = pool->freeBlocksNum();
+    allocator_->prepareRegisteredSave(registration, *runtime, 0);
+    EXPECT_EQ(pool->freeBlocksNum(), free_before);
+    ASSERT_EQ(registration.runtime_source_pins.size(), 2u);
+    for (const auto block : *blocks) {
+        EXPECT_EQ(pool->refCount(block), 2u);  // One runtime owner, one registration pin.
+    }
+    allocator_->releaseRegisteredSourcePins(registration);
+    ASSERT_EQ(registration.runtime_source_pins.size(), 2u);
+    EXPECT_TRUE(allocator_->relinquishOptionalRegisteredSave(registration));
+    EXPECT_FALSE(allocator_->relinquishOptionalRegisteredSave(registration));
+    EXPECT_TRUE(registration.runtime_source_pins.empty());
+    EXPECT_TRUE(registration.runtime_path_resources.empty());
+    for (const auto& point : registration.points) {
+        const auto& binding = point.group_bindings.front();
+        EXPECT_EQ(binding.state, PrefixCacheSaveState::UNFULFILLED);
+        EXPECT_EQ(binding.unfulfilled_reason, "runtime_priority");
+        EXPECT_EQ(binding.ownership, PrefixCacheSaveOwnership::NONE);
+        EXPECT_TRUE(binding.resource.is_empty());
+    }
+    allocator_->releaseRegisteredSave(registration);
+    allocator_->releaseRegisteredSave(registration);
+    EXPECT_EQ(pool->freeBlocksNum(), free_before);
+    for (const auto block : *blocks) {
+        EXPECT_EQ(pool->refCount(block), 1u);
+    }
+    pool->decRef(*blocks);
+    runtime->clearBlocks();
+    EXPECT_EQ(pool->freeBlocksNum(), free_before + 2);
+}
+
+TEST_F(SingleTypeCoordinatorCacheManagerTest, CpPhysicalBoundaryStillProtectsSharedLogicalTail) {
+    for (const size_t resume : {4u, 8u}) {
+        SCOPED_TRACE(resume);
+        auto              config = createSingleTypeTestConfig(1, 12, 4);
+        ParallelismConfig parallelism;
+        parallelism.tp_size                            = 2;
+        parallelism.prefill_cp_config.kv_cache_sharded = true;
+        parallelism.prefill_cp_config.method           = CPRotateMethod::ALL_GATHER;
+        resolveSingleTypeCpLayout(config, parallelism);
+        ASSERT_EQ(config.cache_cp_size, 2);
+        allocator_ = std::make_shared<TestSingleTypeCoordinatorCacheManager>(config);
+        ASSERT_TRUE(allocator_->init());
+        auto runtime = createBatchKVCacheResource(1, config);
+        auto pool    = allocator_->groupBlockPools().front();
+        auto source  = pool->malloc();
+        ASSERT_TRUE(source.has_value());
+        pool->incRef(*source);
+        pool->incTreeRef(*source, BlockTreeRefType::CACHE);
+        runtime->setBatchBlocks(0, "default", {*source});
+        PrefixCacheRegistration registration;
+        const size_t            free_before = pool->freeBlocksNum();
+        ASSERT_EQ(allocator_->prepareRequiredContinuation(registration, *runtime, resume), MallocStatus::NONE);
+        const auto running = runtime->blocks(0, "default").front();
+        if (resume == 4) {
+            // Rank 0's physical page is complete, but rank 1 will overwrite
+            // [4,8) in the same shared logical slot unless every rank changes ID.
+            EXPECT_NE(running, *source);
+            ASSERT_EQ(registration.copy_mappings.size(), 1u);
+            EXPECT_EQ(registration.copy_mappings.front().src, *source);
+            EXPECT_EQ(registration.copy_mappings.front().dst, running);
+            EXPECT_EQ(pool->freeBlocksNum() + 1, free_before);
+        } else {
+            EXPECT_EQ(running, *source);
+            EXPECT_TRUE(registration.copy_mappings.empty());
+            EXPECT_EQ(pool->freeBlocksNum(), free_before);
+        }
+        allocator_->releaseRegisteredSave(registration);
+        EXPECT_TRUE(pool->isAllocated(*source));
+        pool->decRef(running);
+        runtime->clearBlocks();
+        EXPECT_EQ(pool->refCount(*source), 1u);
+        pool->decTreeRef(*source, BlockTreeRefType::CACHE);
+        EXPECT_FALSE(pool->isAllocated(*source));
+    }
+}
 
 // Test init
 TEST_F(SingleTypeCoordinatorCacheManagerTest, ConstructorAndInit) {
@@ -890,10 +1995,14 @@ TEST_F(SingleTypeCoordinatorCacheManagerTest, InsertIntoCacheStopsAtFirstNullBlo
 }
 
 TEST_F(SingleTypeCoordinatorCacheManagerTest, CPInsertAndAllocatorMatchShareLastRankCanonicalKeys) {
-    const auto config = createSingleTypeTestConfig(/*layer_num=*/2, /*block_num=*/12, /*seq_size_per_block=*/4);
-    allocator_        = std::make_shared<TestSingleTypeCoordinatorCacheManager>(config);
+    auto              config = createSingleTypeTestConfig(/*layer_num=*/2, /*block_num=*/12, /*seq_size_per_block=*/4);
+    ParallelismConfig parallelism;
+    parallelism.tp_size                            = 2;
+    parallelism.prefill_cp_config.kv_cache_sharded = true;
+    parallelism.prefill_cp_config.method           = CPRotateMethod::ALL_GATHER;
+    resolveSingleTypeCpLayout(config, parallelism);
+    allocator_ = std::make_shared<TestSingleTypeCoordinatorCacheManager>(config);
     ASSERT_TRUE(allocator_->init());
-    allocator_->setCPSlotMapper(std::make_shared<CPSlotMapper>(/*cp_rank=*/0, /*cp_size=*/2, /*block_size=*/4));
 
     ASSERT_EQ(allocator_->groupBlockPools().size(), 1u);
     auto block_pool = allocator_->groupBlockPools().front();
@@ -905,9 +2014,11 @@ TEST_F(SingleTypeCoordinatorCacheManagerTest, CPInsertAndAllocatorMatchShareLast
     auto seed = createBatchKVCacheResource(/*batch_size=*/1, config);
     seed->setBatchBlocks(0, "default", seed_blocks);
     seed->setBatchCacheKeys(0, CacheKeysType{100, 101, 102, 103});
+    seed->setLastBlockAligned(true);
     {
-        size_t resident_prefix_length = 0;
-        allocator_->insertIntoCache(InsertInfo{seed, nullptr, /*is_resident=*/false}, resident_prefix_length);
+        size_t     resident_prefix_length = 0;
+        InsertInfo insert_info{seed, nullptr, /*is_resident=*/false};
+        allocator_->insertIntoCache(insert_info, resident_prefix_length);
     }
 
     auto noncanonical_match = allocator_->blockTreeCacheOwner()->match(CacheKeysType{100, 102});
@@ -1233,6 +2344,116 @@ TEST_F(SingleTypeCoordinatorCacheManagerTest, DeferredBackendMatchRetriesZeroRes
     allocator_->free(FreeInfo{resource, token_ids});
 }
 
+TEST_F(SingleTypeCoordinatorCacheManagerTest, PartialTailRemoteCompetitionTransfersAndReleasesLocalPins) {
+    const auto config = createSingleTypeTestConfig(/*layer_num=*/2, /*block_num=*/24, /*seq_size_per_block=*/4);
+    allocator_        = std::make_shared<TestSingleTypeCoordinatorCacheManager>(config);
+    KVCacheConfig options;
+    options.enable_remote_cache               = true;
+    options.enable_prefill_partial_tail_reuse = true;
+    auto backend                              = std::make_shared<ScriptedSingleTypeStorageBackend>();
+    allocator_->setBlockTreeCacheConfigForTest(options);
+    allocator_->setStorageBackendForTest(backend);
+    ASSERT_TRUE(allocator_->init());
+    const auto& cache = allocator_->blockTreeCacheOwner();
+    ASSERT_NE(cache, nullptr);
+    const auto pool = allocator_->groupBlockPools().front();
+    ASSERT_NE(pool, nullptr);
+
+    auto tokens   = createCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/13, /*seq_size_per_block=*/4);
+    auto resource = createBatchKVCacheResource(/*batch_size=*/1, config);
+    initCacheKeys(resource, tokens, 4);
+    const CacheKeysType short_keys{cacheKeyAtTokenEnd(*tokens, 0, 4, 4),
+                                   cacheKeyAtTokenEnd(*tokens, 0, 4, 8),
+                                   cacheKeyAtTokenEnd(*tokens, 0, 4, 10)};
+    auto                saved = pool->malloc(3);
+    ASSERT_TRUE(saved.has_value());
+    pool->incRef(*saved);
+    std::vector<std::vector<GroupSetResource>> slots(3, std::vector<GroupSetResource>(1));
+    for (size_t i = 0; i < slots.size(); ++i) {
+        slots[i][0].device_blocks = {(*saved)[i]};
+    }
+    const std::vector<size_t>           ends{4, 8, 10};
+    const std::vector<std::vector<int>> segments{{1, 2, 3, 4}, {5, 6, 7, 8}, {9, 10}};
+    ASSERT_EQ(cache->tree()->insertNode(short_keys, slots, false, false, &segments, &ends).inserted_nodes.size(), 3u);
+    pool->decRef(*saved);
+    ASSERT_EQ(pool->refCount((*saved)[2]), 1u);
+
+    const auto make_info = [&] {
+        auto request_resource = createBatchKVCacheResource(/*batch_size=*/1, config);
+        initCacheKeys(request_resource, tokens, 4);
+        MallocInfo info{request_resource, tokens};
+        auto       layout =
+            std::make_shared<MallocInfo::RequestLayout>(*snapshotGlobalCacheRequest(*request_resource, *tokens));
+        layout->token_ids.assign(tokens->data(0), tokens->data(0) + 13);
+        layout->partial_tail_reuse    = true;
+        layout->original_input_tokens = 13;
+        info.request_layout           = std::move(layout);
+        return info;
+    };
+
+    backend->matched_keys = 0;
+    auto miss_info        = make_info();
+    auto miss             = allocator_->malloc(miss_info);
+    ASSERT_TRUE(miss.success);
+    auto miss_context = std::dynamic_pointer_cast<LoadAsyncContext>(miss.async_context);
+    ASSERT_NE(miss_context, nullptr);
+    miss_context->waitDone();
+    ASSERT_TRUE(miss_context->success());
+    EXPECT_TRUE(miss_context->localFallbackSelected());
+    EXPECT_EQ(miss_context->matchedTokenEndpoint(4), 10u);
+    EXPECT_EQ(miss_info.batch_kv_cache_resource->blocks(0, "default").at(2), (*saved)[2]);
+    EXPECT_EQ(pool->refCount((*saved)[2]), 2u);
+    EXPECT_EQ(backend->read_calls, 0u);
+    allocator_->free(FreeInfo{miss_info.batch_kv_cache_resource, tokens});
+    EXPECT_EQ(pool->refCount((*saved)[2]), 1u);
+
+    // The remote miss must restore the interior G, even though its dense
+    // source resource is stored on a later endpoint node (10).
+    tokens->data(0)[9] = 99;
+    auto interior_info = make_info();
+    auto interior      = allocator_->malloc(interior_info);
+    ASSERT_TRUE(interior.success);
+    auto interior_context = std::dynamic_pointer_cast<LoadAsyncContext>(interior.async_context);
+    ASSERT_NE(interior_context, nullptr);
+    interior_context->waitDone();
+    ASSERT_TRUE(interior_context->success());
+    EXPECT_TRUE(interior_context->localFallbackSelected());
+    EXPECT_EQ(interior_context->matchedTokenEndpoint(4), 9u);
+    EXPECT_EQ(interior_info.batch_kv_cache_resource->blocks(0, "default").at(2), (*saved)[2]);
+    EXPECT_EQ(pool->refCount((*saved)[2]), 2u);
+    EXPECT_EQ(backend->read_calls, 0u);
+    allocator_->free(FreeInfo{interior_info.batch_kv_cache_resource, tokens});
+    EXPECT_EQ(pool->refCount((*saved)[2]), 1u);
+    tokens->data(0)[9] = 10;
+
+    backend->matched_keys = 3;
+    auto hit_info         = make_info();
+    auto hit              = allocator_->malloc(hit_info);
+    ASSERT_TRUE(hit.success);
+    auto hit_context = std::dynamic_pointer_cast<LoadAsyncContext>(hit.async_context);
+    ASSERT_NE(hit_context, nullptr);
+    hit_context->waitDone();
+    ASSERT_TRUE(hit_context->success());
+    EXPECT_FALSE(hit_context->localFallbackSelected());
+    EXPECT_EQ(hit_context->matchedTokenEndpoint(4), 12u);
+    EXPECT_EQ(pool->refCount((*saved)[2]), 1u);
+    EXPECT_EQ(backend->read_calls, 1u);
+    allocator_->free(FreeInfo{hit_info.batch_kv_cache_resource, tokens});
+
+    backend->fail_read = true;
+    auto failure_info  = make_info();
+    auto failure       = allocator_->malloc(failure_info);
+    ASSERT_TRUE(failure.success);
+    auto failure_context = std::dynamic_pointer_cast<LoadAsyncContext>(failure.async_context);
+    ASSERT_NE(failure_context, nullptr);
+    failure_context->waitDone();
+    EXPECT_FALSE(failure_context->success());
+    EXPECT_FALSE(failure_context->localFallbackSelected());
+    EXPECT_EQ(pool->refCount((*saved)[2]), 1u);
+    EXPECT_EQ(backend->read_calls, 2u);
+    allocator_->free(FreeInfo{failure_info.batch_kv_cache_resource, tokens});
+}
+
 TEST_F(SingleTypeCoordinatorCacheManagerTest, PrefixReuseDisabledSkipsMatchAndInsert) {
     auto config = createSingleTypeTestConfig(/*layer_num=*/4, /*block_num=*/12, /*seq_size_per_block=*/4);
     std::vector<CacheGroupPolicy> policies;
@@ -1345,7 +2566,7 @@ TEST_F(SingleTypeCoordinatorCacheManagerTest, SingleLayerMtpConfigSlicesDescript
     config.kv_cache_spec_descs[1][0].tag                   = "layer1";
     config.hybrid_attention_config.enable_hybrid_attention = true;
     config.hybrid_attention_config.hybrid_attention_types  = {HybridAttentionType::LINEAR,
-                                                             HybridAttentionType::SLIDING_WINDOW};
+                                                              HybridAttentionType::SLIDING_WINDOW};
 
     const auto single_layer = makeSingleLayerMTPModelConfig(config, /*source_layer=*/1);
 
@@ -1987,16 +3208,20 @@ TEST_F(SingleTypeCoordinatorCacheManagerTest, MaxSeqLen) {
 }
 
 TEST_F(SingleTypeCoordinatorCacheManagerTest, CapacityAndNeedBlocksUseCPVirtualBlockSize) {
-    auto config = createSingleTypeTestConfig(/*layer_num=*/4, /*block_num=*/10, /*seq_size_per_block=*/8);
-    allocator_  = std::make_shared<TestSingleTypeCoordinatorCacheManager>(config);
+    auto              config = createSingleTypeTestConfig(/*layer_num=*/4, /*block_num=*/10, /*seq_size_per_block=*/8);
+    ParallelismConfig parallelism;
+    parallelism.tp_size                            = 2;
+    parallelism.prefill_cp_config.kv_cache_sharded = true;
+    parallelism.prefill_cp_config.method           = CPRotateMethod::ALL_GATHER;
+    resolveSingleTypeCpLayout(config, parallelism);
+    allocator_ = std::make_shared<TestSingleTypeCoordinatorCacheManager>(config);
     ASSERT_TRUE(allocator_->init());
-
-    allocator_->setCPSlotMapper(std::make_shared<CPSlotMapper>(/*cp_rank=*/0, /*cp_size=*/2, /*block_size=*/8));
 
     EXPECT_EQ(allocator_->maxAvailableTokensNum(), (10u - 1u) * 16u);
     EXPECT_EQ(allocator_->availableTokensNum(), (10u - 1u) * 16u);
 
     auto batch_resource = createBatchKVCacheResource(/*batch_size=*/1, config);
+    EXPECT_EQ(config.localAllocTokens("default", 65), 40);
     EXPECT_EQ(allocator_->singleBatchNeedBlocks(batch_resource, /*seq_len=*/65, /*reserve_step=*/0), 5);
 }
 

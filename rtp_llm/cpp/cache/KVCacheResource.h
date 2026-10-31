@@ -82,9 +82,9 @@ private:
     // Size is always block_indices.size() * kernel_blocks_per_kv_block_.
     mutable BlockIndicesType kernel_block_indices_;
     size_t                   kernel_blocks_per_kv_block_ = 1;
-    mutable size_t           cyclic_prompt_tail_ = 0;
+    mutable size_t           cyclic_prompt_tail_         = 0;
     // Zero means the kernel row contains the ordinary mapping.
-    mutable size_t           cyclic_bank_count_  = 0;
+    mutable size_t cyclic_bank_count_ = 0;
 };
 
 // Build the complete identity/row pair before publishing it through a const owner view.
@@ -137,7 +137,7 @@ public:
     int                      maxBlocksNum() const;
     size_t                   firstNonEmptyBlocksNum() const;
 
-    LayerBlockIds            layerBlocks() const;
+    LayerBlockIds layerBlocks() const;
 
     CacheKeysType&       cacheKeys();
     const CacheKeysType& cacheKeys() const;
@@ -152,21 +152,6 @@ public:
     void                         setBlockDependencies(BlockDependenciesType&& dependencies);
     void                         rebuildLinearBlockDependencies();
     void                         ensureLinearBlockDependencies();
-
-    // Return rank-local cache keys: every cp_size-th key starting from cp_rank.
-    // localCacheKeys(r, s)[i] == cacheKeys()[i * s + r]
-    // Note: when cacheKeys().size() % cp_size != 0 (e.g. 1 real block, cp_size=2),
-    // localCacheKeys may return fewer entries than blocks().size().  This is
-    // intentional — padding blocks carry no real data and must NOT participate in
-    // device cache insert, PD transfer, or connector operations.  Downstream code
-    // (e.g. insertIntoCache) already uses min(keys, blocks) to handle this.
-    CacheKeysType localCacheKeys(int cp_rank, int cp_size) const {
-        CacheKeysType local;
-        for (int i = cp_rank; i < static_cast<int>(cache_keys.size()); i += cp_size) {
-            local.push_back(cache_keys[i]);
-        }
-        return local;
-    }
 
     size_t reuseBlockNum() const;
 
@@ -196,10 +181,10 @@ private:
     // Beam forks share immutable layer membership; default resources keep owning views.
     std::shared_ptr<const CacheTopology>  topology_;
     std::vector<std::vector<std::string>> layer_group_tags_;
-    GroupBlockIds         group_block_ids;
-    CacheKeysType         cache_keys;
-    BlockDependenciesType block_dependencies;
-    bool                  cache_keys_are_cp_canonical_{false};
+    GroupBlockIds                         group_block_ids;
+    CacheKeysType                         cache_keys;
+    BlockDependenciesType                 block_dependencies;
+    bool                                  cache_keys_are_cp_canonical_{false};
 
     size_t device_reuse_block_num_{0};
     size_t memory_reuse_block_num_{0};

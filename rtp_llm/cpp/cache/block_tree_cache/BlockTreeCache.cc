@@ -1,6 +1,10 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCache.h"
 
 #include <algorithm>
+#include <map>
+#include <set>
+#include <unordered_map>
+
 #include <utility>
 
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeTaskPool.h"
@@ -71,6 +75,12 @@ bool BlockTreeCache::init() {
     if (!task_pool_->start()) {
         RTP_LLM_LOG_ERROR("failed to start task pool, size=%d", config_.task_pool_size);
         return false;
+    }
+    if (config_.enable_prefix_cache_observability) {
+        RTP_LLM_LOG_INFO("event=prefix_cache_observation payload={\"kind\":\"startup\","
+                         "\"schema_version\":1,\"enabled\":true,\"instance\":\"%s\","
+                         "\"output\":\"info\",\"role\":\"PREFILL\",\"allocator_owner\":true}",
+                         config_.prefix_observability_instance.c_str());
     }
     RTP_LLM_LOG_INFO("initialized with %zu group sets, %zu reusable topology groups, "
                      "pool_threads=%d, storage_backend=%s, "
@@ -143,11 +153,13 @@ TransferResult BlockTreeCache::executeTransfer(TransferTask task) {
 }
 
 BlockTreeMatchResult BlockTreeCache::match(const CacheKeysType&               cache_keys,
-                                           const std::function<bool(size_t)>& valid_prefix) {
+                                           const std::function<bool(size_t)>& valid_prefix,
+                                           const std::vector<int>*            request_tokens,
+                                           const PartialTailMatchRequest*     partial_tail) {
     BlockTreeMatchResult result;
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        result = loader_.matchLocked(cache_keys, valid_prefix);
+        result = loader_.matchLocked(cache_keys, valid_prefix, request_tokens, partial_tail);
     }
     metrics_reporter_->reportCacheReuseTimeMetrics(result.reuse_time_metrics_snapshots);
     return result;
@@ -155,24 +167,213 @@ BlockTreeMatchResult BlockTreeCache::match(const CacheKeysType&               ca
 
 void BlockTreeCache::insert(const CacheKeysType&                              cache_keys,
                             const std::vector<std::vector<GroupSetResource>>& resources,
-                            Tier                                              target_tier) {
-    (void)insert(cache_keys, resources, target_tier, false);
+                            Tier                                              target_tier,
+                            PrefixCachePlanState*                             prefix_plan_state) {
+    (void)insert(cache_keys, resources, target_tier, false, nullptr, prefix_plan_state);
 }
 
 size_t BlockTreeCache::insert(const CacheKeysType&                              cache_keys,
                               const std::vector<std::vector<GroupSetResource>>& resources,
                               Tier                                              target_tier,
-                              bool                                              is_resident) {
+                              bool                                              is_resident,
+                              const std::vector<std::vector<int>>*              token_segments,
+                              PrefixCachePlanState*                             prefix_plan_state,
+                              const std::vector<size_t>*                         token_ends,
+                              std::optional<int64_t> observation_request_id,
+                              bool internal_fork,
+                              bool* ready_after_insert) {
     size_t           resident_prefix_length = 0;
     StorageWriteTask storage_write;
+    if (ready_after_insert != nullptr) {
+        *ready_after_insert = false;
+    }
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        storage_write = storer_.storeLocked(cache_keys, resources, target_tier, is_resident, resident_prefix_length);
+        if (internal_fork) {
+            const std::optional<size_t> fork_endpoint =
+                token_ends != nullptr && !token_ends->empty() ?
+                    std::optional<size_t>(token_ends->back()) : std::nullopt;
+            // Recheck the proposed branch under the same mutation lock as the
+            // existing storer. A short endpoint cannot become visible with
+            // only a subset of the required group histories.
+            if (target_tier != Tier::DEVICE || token_ends == nullptr || token_segments == nullptr
+                || cache_keys.empty() || cache_keys.size() != resources.size()
+                || cache_keys.size() != token_ends->size() || cache_keys.size() != token_segments->size()) {
+                storer_.observePublicationSkipped(observation_request_id, target_tier, "invalid_internal_fork_path",
+                                                  fork_endpoint);
+                return 0;
+            }
+            const auto existing = tree_->findNode(cache_keys);
+            const size_t ancestor_count = cache_keys.size() - 1;
+            if (existing.size() < ancestor_count || (ancestor_count > 0 && tree_->isShortLeaf(existing[ancestor_count - 1]))) {
+                storer_.observePublicationSkipped(observation_request_id, target_tier, "missing_internal_fork_ancestor",
+                                                  fork_endpoint);
+                return 0;
+            }
+            for (size_t index = 0; index < ancestor_count; ++index) {
+                if (existing[index]->token_end != (*token_ends)[index]
+                    || existing[index]->token_ids != (*token_segments)[index]) {
+                    storer_.observePublicationSkipped(observation_request_id, target_tier, "stale_internal_fork_ancestor",
+                                                      fork_endpoint);
+                    return 0;
+                }
+            }
+            TreeNode projected_root;
+            projected_root.token_end = 0;
+            TreeNode projected;
+            projected.parent = ancestor_count > 0 ? existing[ancestor_count - 1] : &projected_root;
+            projected.token_end = token_ends->back();
+            projected.group_set_resources.resize(tree_->groupSets().size());
+            const TreeNode* present = existing.size() == cache_keys.size() ? existing.back() : nullptr;
+            if (present != nullptr && (present->token_end != projected.token_end
+                                       || present->token_ids != token_segments->back())) {
+                storer_.observePublicationSkipped(observation_request_id, target_tier, "internal_fork_identity_conflict",
+                                                  fork_endpoint);
+                return 0;
+            }
+            if (resources.back().size() != tree_->groupSets().size()) {
+                storer_.observePublicationSkipped(observation_request_id, target_tier, "invalid_internal_fork_groups",
+                                                  fork_endpoint);
+                return 0;
+            }
+            for (size_t group_id = 0; group_id < tree_->groupSets().size(); ++group_id) {
+                const auto& incoming = resources.back()[group_id];
+                const auto& retained = present != nullptr ? present->group_set_resources[group_id] : incoming;
+                projected.group_set_resources[group_id] =
+                    present != nullptr && !retained.is_empty() ? retained : incoming;
+            }
+            std::vector<TreeNode*> projected_path(existing.begin(), existing.begin() + ancestor_count);
+            projected_path.push_back(&projected);
+            for (const auto& group : tree_->groupSets()) {
+                if (!group->hasDeviceCoverage(projected_path, projected.token_end)) {
+                    storer_.observePublicationSkipped(observation_request_id, target_tier,
+                                                      "internal_fork_not_jointly_ready", fork_endpoint);
+                    return 0;
+                }
+            }
+        }
+        storage_write =
+            storer_.storeLocked(cache_keys,
+                                resources,
+                               target_tier,
+                               is_resident,
+                               resident_prefix_length,
+                               token_segments,
+                               prefix_plan_state,
+                               token_ends,
+                                observation_request_id,
+                                internal_fork,
+                                ready_after_insert);
     }
     if (storage_write) {
         storage_backend_->write(std::move(storage_write));
     }
     return resident_prefix_length;
+}
+
+CachedPrefixResources BlockTreeCache::pinRegisteredGroups(const std::vector<int>& tokens,
+                                                           const CacheKeysType& base_keys,
+                                                           size_t base_tokens,
+                                                           const std::vector<size_t>& endpoints,
+                                                           const std::vector<PrefixCachePlanPoint>* exact_points,
+                                                           const std::function<bool(size_t, const std::vector<int>&,
+                                                                                    CacheKeyType)>& source_identity) {
+    CachedPrefixResources result;
+    result.groups.resize(endpoints.size(), std::vector<CachedPrefixResources::Group>(tree_->groupSets().size()));
+    if (endpoints.empty() || base_tokens == 0
+        || base_keys.size() < (tokens.size() + base_tokens - 1) / base_tokens) {
+        return result;
+    }
+    std::unordered_map<size_t, CacheKeyType> point_keys;
+    if (exact_points != nullptr) {
+        point_keys.reserve(exact_points->size());
+        for (const auto& point : *exact_points) {
+            point_keys.emplace(point.pos, point.key);
+        }
+    }
+    std::lock_guard<std::mutex> lock(mutex_);
+    const auto endpoint_key = [&](size_t pos) {
+        if (const auto point = point_keys.find(pos); point != point_keys.end()) {
+            return point->second;
+        }
+        return base_keys[(pos - 1) / base_tokens];
+    };
+    std::vector<BlockTreeContentRange> ranges;
+    if (source_identity) {
+        ranges = tree_->contentMatchRanges(tokens, endpoint_key, source_identity);
+    } else {
+        for (auto* node : tree_->contentMatchCandidates(tokens, endpoint_key)) {
+            ranges.push_back({node, node->token_end});
+        }
+        std::sort(ranges.begin(), ranges.end(), [](const auto& lhs, const auto& rhs) {
+            return lhs.matched_end > rhs.matched_end;
+        });
+    }
+    std::map<std::pair<size_t, const TreeNode*>, size_t> path_indices;
+    std::set<std::pair<std::string, BlockIdxType>> unique_pins;
+    std::vector<std::pair<DeviceBlockPoolPtr, BlockIndicesType>> acquisitions;
+    size_t acquired = 0;
+    try {
+        // Finish descriptor allocation before acquiring references. Incomplete
+        // groups contribute no partial pins; complete groups may be retained.
+        for (size_t row = 0; row < endpoints.size(); ++row) {
+            const size_t endpoint = endpoints[row];
+            for (size_t id = 0; id < tree_->groupSets().size(); ++id) {
+                auto& output = result.groups[row][id];
+                const auto& group = tree_->groupSets()[id];
+                const auto sources = tree_->coveredDeviceGroupPath(ranges, endpoint, id);
+                if (!sources) {
+                    continue;
+                }
+                output.ready = true;
+                for (auto* source : *sources) {
+                    const auto& value = source->group_set_resources[id];
+                    const auto key = std::make_pair(id, static_cast<const TreeNode*>(source));
+                    auto existing = path_indices.find(key);
+                    if (existing == path_indices.end()) {
+                        const size_t entry = result.path_resources.size();
+                        GroupSetResource device_only;
+                        device_only.device_blocks = value.device_blocks;
+                        result.path_resources.push_back({id, source->token_end, std::move(device_only)});
+                        existing = path_indices.emplace(key, entry).first;
+                    }
+                    output.path_indices.push_back(existing->second);
+                    for (size_t member = 0; member < group->groupTags().size(); ++member) {
+                        const auto& tag = group->groupTags()[member];
+                        const auto block = value.device_blocks[member];
+                        if (unique_pins.emplace(tag, block).second) {
+                            result.pins.push_back({tag, block});
+                            acquisitions.push_back({group->devicePools()[member], BlockIndicesType{block}});
+                        }
+                    }
+                }
+                // A later immutable dense source can alias the same physical
+                // prefix at F. Exact-state groups only resolve a node at F.
+                if (!sources->empty() && (!group->requiresExactStateEndpoint()
+                                          || sources->back()->token_end == endpoint)) {
+                    output.endpoint_resource = result.path_resources[output.path_indices.back()].resource;
+                }
+            }
+        }
+        for (; acquired < acquisitions.size(); ++acquired) {
+            acquisitions[acquired].first->incRef(acquisitions[acquired].second);
+        }
+    } catch (...) {
+        while (acquired > 0) {
+            --acquired;
+            acquisitions[acquired].first->decRef(acquisitions[acquired].second);
+        }
+        throw;
+    }
+    return result;
+}
+
+void BlockTreeCache::observePublicationSkipped(std::optional<int64_t> request_id,
+                                                Tier tier,
+                                                const char* reason,
+                                                std::optional<size_t> internal_fork_pos) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    storer_.observePublicationSkipped(request_id, tier, reason, internal_fork_pos);
 }
 
 int BlockTreeCache::evictForGroup(std::string_view group_tag, size_t num_blocks) {
@@ -234,6 +435,11 @@ CacheStats BlockTreeCache::getStats() const {
 std::vector<BlockTreePoolMetricsSnapshot> BlockTreeCache::poolMetricsSnapshots() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return metrics_reporter_->collectPoolMetricsSnapshots(tree_->groupSets());
+}
+
+BlockTreeObservabilitySnapshot BlockTreeCache::observabilitySnapshot() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return tree_->observabilitySnapshot();
 }
 
 void BlockTreeCache::reportMetrics() const {

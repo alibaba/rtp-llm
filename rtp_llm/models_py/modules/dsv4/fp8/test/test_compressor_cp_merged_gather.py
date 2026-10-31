@@ -111,14 +111,27 @@ class CompressorFP8CPMergedGatherTest(unittest.TestCase):
         self.assertTrue(
             torch.equal(
                 selection.block_ids,
-                torch.tensor([0, 21, 0, 42], dtype=torch.long),
+                torch.tensor([0, 0, 0, 21, 0, 0, 0, 42], dtype=torch.long),
             )
         )
         zero_row = torch.zeros(4, dtype=torch.int32)
         self.assertTrue(torch.equal(selection.read_block_table[0], zero_row))
         self.assertTrue(torch.equal(selection.read_block_table[2], zero_row))
-        self.assertEqual(int(selection.read_block_table[1, 0]), 2)
-        self.assertEqual(int(selection.read_block_table[3, 1]), 4)
+        self.assertEqual(int(selection.read_block_table[1, 0]), 4)
+        self.assertEqual(int(selection.read_block_table[3, 1]), 8)
+
+    def test_cp2_short_prefix_selects_both_state_history_blocks(self) -> None:
+        selection = _select_cp_state_read_tail_blocks(
+            torch.empty((8, 64, 4), dtype=torch.float32),
+            torch.tensor([[0, 11, 12, 0]], dtype=torch.int32),
+            seq_start_per_req=torch.tensor([1025], dtype=torch.int64),
+            token_count=8,
+            state_tokens_per_block=512,
+        )
+        self.assertIsNotNone(selection)
+        self.assertEqual(selection.block_ids.tolist(), [11, 12])
+        self.assertEqual(selection.read_block_table[0, 1].item(), 1)
+        self.assertEqual(selection.read_block_table[0, 2].item(), 2)
 
     def test_cp_prefill_gathers_fused_projection_once_and_launches_flat(self) -> None:
         torch.manual_seed(0)

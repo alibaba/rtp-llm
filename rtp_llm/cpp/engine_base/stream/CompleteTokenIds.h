@@ -53,6 +53,7 @@ public:
 
     std::vector<int32_t> imageCacheIdentity(int begin, int count) const;
     bool                 isValidReuseLength(int reuse_length, int min_fresh_tokens = 0) const;
+    int                  maxValidReuseLength(int upper, int min_fresh_tokens = 0) const;
 
     int32_t* data(int batch_id);
 

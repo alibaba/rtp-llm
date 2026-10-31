@@ -76,6 +76,11 @@ struct GptModelInitParams {
 
     std::vector<int64_t>    hidden_state_capture_layer_ids;
     HiddenStateCaptureDtype hidden_state_capture_dtype = HiddenStateCaptureDtype::BF16;
+
+    // Physical producer cache rank and size. NormalExecutor sets this for main
+    // and draft models from their bound manager; warmup uses {0, 1}. Direct
+    // construction must supply it for a sharded producer cache.
+    std::optional<std::pair<int, int>> cache_store_producer_cp_topology;
 };
 
 enum GptModelInputIndex : size_t {
@@ -134,6 +139,7 @@ enum GptModelInputIndex : size_t {
     mmFeaturesSpans,
     engramTokenWindowRows,
     engramTokenWindowWidth,
+    cacheSavePointCount,
     gptModelInputLength,
 };
 
@@ -162,6 +168,8 @@ enum GptModelInputDeviceBit : uint32_t {
     kDeviceBitMmFeaturesLocs      = 1u << 14,
     kDeviceBitEngramWindows       = 1u << 15,
     kDeviceBitMmFeaturesSpans     = 1u << 16,
+    kDeviceBitCacheSavePositions  = 1u << 17,
+    kDeviceBitCacheSaveBlockIds   = 1u << 18,
 };
 
 enum GptModelInputControlFlag : uint32_t {
@@ -203,6 +211,11 @@ class ModelBase {
 public:
     virtual ~ModelBase()                                                     = default;
     virtual GptModelOutputs            forward(const GptModelInputs& inputs) = 0;
+    // Explicit sparse save destinations require a model writer. Legacy models
+    // fail closed until their precise-state writer opts in.
+    virtual bool supportsSparseCacheSave() const {
+        return false;
+    }
     virtual void                       releaseBuffers() {}
     virtual void                       prepareAttentionInputs(const GptModelInputs& inputs) {}
     virtual std::optional<std::string> takeDeferredHiddenStateCaptureError() {

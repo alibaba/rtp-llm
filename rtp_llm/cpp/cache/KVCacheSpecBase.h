@@ -96,9 +96,6 @@ struct KVCacheSpec {
     uint32_t    seq_size_per_block;         // tokens/physical block of this group
     uint32_t    kernel_seq_size_per_block;  // tokens/kernel page of this group
     uint32_t    local_kv_head_num;          // layout heads on this rank
-    // Cache-key coverage may differ from physical allocation under CP. A zero
-    // value means one key covers one physical group block.
-    size_t cache_key_token_stride = 0;
 
     KVCacheSpecType type = KVCacheSpecType::MultiHeadAttention;
 
@@ -157,19 +154,15 @@ struct KVCacheSpec {
 
     virtual KVCacheSpecPtr clone() const = 0;
 
-    size_t cacheKeyTokenStride() const {
-        return cache_key_token_stride == 0 ? seq_size_per_block : cache_key_token_stride;
-    }
-
     std::string fingerprint() const {
         std::ostringstream os;
         os << "tag=" << tag << ";type=" << static_cast<int>(type) << ";dtype=" << static_cast<int>(memoryLayoutDType())
            << ";seq_size_per_block=" << seq_size_per_block << ";kernel_seq_size_per_block=" << kernel_seq_size_per_block
-           << ";local_kv_head_num=" << local_kv_head_num << ";cache_key_token_stride=" << cacheKeyTokenStride()
-           << ";block_elems=" << block_size() << ";k_block_elems=" << k_block_size()
-           << ";v_block_elems=" << v_block_size() << ";block_bytes=" << block_size_bytes()
-           << ";k_block_bytes=" << k_block_size_bytes() << ";v_block_bytes=" << v_block_size_bytes()
-           << ";block_payload_bytes=" << block_payload_bytes() << ";k_block_payload_bytes=" << k_block_payload_bytes()
+           << ";local_kv_head_num=" << local_kv_head_num << ";block_elems=" << block_size()
+           << ";k_block_elems=" << k_block_size() << ";v_block_elems=" << v_block_size()
+           << ";block_bytes=" << block_size_bytes() << ";k_block_bytes=" << k_block_size_bytes()
+           << ";v_block_bytes=" << v_block_size_bytes() << ";block_payload_bytes=" << block_payload_bytes()
+           << ";k_block_payload_bytes=" << k_block_payload_bytes()
            << ";v_block_payload_bytes=" << v_block_payload_bytes() << ";scale_block_bytes=" << scale_block_size_bytes()
            << ";k_scale_block_bytes=" << k_scale_block_size_bytes()
            << ";v_scale_block_bytes=" << v_scale_block_size_bytes();
@@ -191,7 +184,6 @@ protected:
         os << indent1 << "seq_size_per_block=" << seq_size_per_block << "\n";
         os << indent1 << "kernel_seq_size_per_block=" << kernel_seq_size_per_block << "\n";
         os << indent1 << "local_kv_head_num=" << local_kv_head_num << "\n";
-        os << indent1 << "cache_key_token_stride=" << cacheKeyTokenStride() << "\n";
         os << indent1 << "block_size=" << block_size() << "\n";
         os << indent1 << "k_block_size=" << k_block_size() << "\n";
         os << indent1 << "v_block_size=" << v_block_size() << "\n";

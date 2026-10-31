@@ -178,6 +178,19 @@ TEST_F(ModelDataTest, testShapeHintsCarryExactPackedBroadcastPlacement) {
     EXPECT_THROW((void)getModelInputShapeHints(inputs), RTPException);
 }
 
+TEST_F(ModelDataTest, testSparseSaveContextRowsMatchPrefillRowsBeforeBroadcast) {
+    GptModelInputs inputs;
+    inputs.kv_cache_group_tags   = {"full"};
+    inputs.prefix_lengths        = torch::zeros({2}, torch::kInt32);
+    inputs.cache_save_positions  = torch::zeros({1, 1}, torch::kInt64);
+    inputs.cache_save_block_ids  = torch::zeros({1, 1, 1}, torch::kInt32);
+    EXPECT_THROW((void)getModelInputShapeHints(inputs), RTPException);
+
+    inputs.cache_save_positions = torch::zeros({2, 1}, torch::kInt64);
+    inputs.cache_save_block_ids = torch::zeros({1, 2, 1}, torch::kInt32);
+    EXPECT_EQ(getModelInputShapeHints(inputs)[GptModelInputIndex::cacheSavePointCount], 1);
+}
+
 TEST_F(ModelDataTest, testTpSyncBlockTableShapesPreserve2DAnd3D) {
     GptModelInputs inputs;
     inputs.input_lengths            = torch::zeros({2}, torch::kInt32);

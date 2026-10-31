@@ -4,6 +4,7 @@
 #include <cassert>
 #include <condition_variable>
 #include <functional>
+#include <limits>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -12,6 +13,7 @@
 #include "rtp_llm/cpp/cache/Types.h"
 #include "rtp_llm/cpp/cache/BufferTypes.h"
 #include "rtp_llm/cpp/cache/CacheConfig.h"
+#include "rtp_llm/cpp/cache/CachePhysicalRegion.h"
 #include "rtp_llm/cpp/cache/AsyncContext.h"
 #include "rtp_llm/cpp/cache/CoordinatorCacheManager.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCache.h"
@@ -21,11 +23,11 @@
 
 namespace rtp_llm {
 
-class CPSlotMapper;
 class CacheStore;
 class BroadcastManager;
 class PrefillCacheHitMetricsReporter;
 class KVCacheAllocationWaitState;
+struct PrefixCacheRegistration;
 
 class KVCacheManager {
 public:
@@ -61,7 +63,17 @@ public:
     bool         abortPendingLoad(const std::shared_ptr<AsyncContext>& context);
     bool         detachSharedBlocksForRecompute(const BatchKVCacheResourcePtr& resource, int device_ready_reuse_length);
     // Outputs the resident key-prefix count; ordinary inserts report zero.
-    void insertIntoCache(const InsertInfo& insert_info, size_t& resident_prefix_length);
+    void         insertIntoCache(const InsertInfo& insert_info, size_t& resident_prefix_length);
+    void         prepareRegisteredSave(PrefixCacheRegistration& registration,
+                                       BatchKVCacheResource&    runtime,
+                                       size_t                   resume_endpoint,
+                                       const CompleteTokenIds*  original_ids = nullptr);
+    MallocStatus prepareRequiredContinuation(PrefixCacheRegistration& registration,
+                                             BatchKVCacheResource&    runtime,
+                                             size_t                   resume_endpoint);
+    void         releaseRegisteredSave(PrefixCacheRegistration& registration);
+    void         releaseRegisteredSourcePins(PrefixCacheRegistration& registration);
+    bool relinquishOptionalRegisteredSave(PrefixCacheRegistration& registration, bool internal_only_only = false);
 
     // Decode-side P/D admission allocates destination blocks before cache handoff.  When pools are
     // temporarily full, waiters use this generation instead of polling malloc in a tight loop.
@@ -72,6 +84,13 @@ public:
 
     int
     singleBatchNeedBlocks(const BatchKVCacheResourcePtr& batch_kv_cache_resource, int seq_len, int reserve_step) const;
+    int canonicalSizePerBlock() const {
+        const size_t tokens = config_.canonicalSizePerBlock();
+        RTP_LLM_CHECK_WITH_INFO(tokens > 0 && tokens <= static_cast<size_t>(std::numeric_limits<int>::max()),
+                                "cache reuse unit token span exceeds int range");
+        return static_cast<int>(tokens);
+    }
+    size_t canonicalKeyCount(const BatchKVCacheResource& resource, int batch) const;
 
     int estimatePeakNeedBlocks(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
                                int                            seq_len,
@@ -87,7 +106,9 @@ public:
     void blockBatchCopy(const torch::Tensor& copy_mapping);
     void blockBatchCopy(const BlockIdPair* copy_mapping_begin, const BlockIdPair* copy_mapping_end);
     void blockBatchCopyByGroup(const std::vector<TaggedBlockIdPair>& copy_mapping);
-    void blockBatchCopyForForward(const torch::Tensor& copy_mapping, const std::vector<std::string>& group_tags);
+    void blockBatchCopyForForward(const torch::Tensor&            copy_mapping,
+                                  const std::vector<std::string>& group_tags,
+                                  bool                            require_complete_payload = false);
 
     bool updateKVBlock(const BatchKVCacheResourcePtr&  batch_kv_cache_resource,
                        const std::vector<int>&         block_src_batch,
@@ -104,6 +125,18 @@ public:
     std::vector<BlockInfo> convertIndexToBuffer(
         int layer_id, const std::string& group_tag, int block_id, int partition_count, int partition_id) const;
 
+    // Resolve an already selected logical page to this decoder's physical
+    // destination. Missing blocks retain a region with null buffer.addr.
+    std::vector<CacheBlockRegion> queryDecodeCacheBlockRegions(int                     global_layer_id,
+                                                               const std::string&      tag,
+                                                               size_t                  key_count,
+                                                               size_t                  logical_page,
+                                                               int                     producer_cp_size,
+                                                               int                     decode_peer_count,
+                                                               int                     peer_index,
+                                                               bool                    opaque_wire,
+                                                               const BlockIndicesType& destination_blocks) const;
+
     GroupedCacheLayerLayout allLayerCacheBase() const;
 
     // for main model; grouped layout preserves layers that own multiple cache groups
@@ -119,6 +152,9 @@ public:
     size_t      totalBlocksNum() const;
     size_t      maxAvailableTokensNum() const;
     KVCacheInfo getKVCacheInfo(int64_t latest_version, bool need_cache_keys) const;
+    bool        needsPrefillHitSnapshot() const {
+        return prefill_cache_hit_metrics_reporter_ != nullptr;
+    }
 
     // 系统资源管理
     void regUserMr(size_t model_id, std::shared_ptr<CacheStore> cache_store = nullptr);
@@ -141,17 +177,10 @@ public:
     std::shared_ptr<KVCacheResource>
     incrKVCacheRef(const KVCacheResource& resource, const CacheKeysType& cache_keys, bool is_connector = true);
 
-    // CP page-level RR sharding context. Returns nullptr when sharding is not active
-    // (single-rank or kv_cache_sharded=false).  Used by connector / cache_store to
-    // remap cacheKeys -> last-rank-key namespace.
-    std::shared_ptr<CPSlotMapper> cpSlotMapper() const {
-        return cp_slot_mapper_;
-    }
-
 private:
-    std::function<void()> allocationChangeCallback() const;
-    void                  reportMetricsLoop();
-    void reportPrefillCacheHitMetrics(const MallocInfo& malloc_info, bool is_first_malloc);
+    std::function<void()>             allocationChangeCallback() const;
+    void                              reportMetricsLoop();
+    void                              reportPrefillCacheHitMetrics(const MallocInfo& malloc_info, bool is_first_malloc);
     std::shared_ptr<BroadcastManager> createMultiRankBlockTransferManager() const;
 
     // 成员变量
@@ -171,7 +200,6 @@ private:
     void                               initCacheEventPublisher();
     void                               stopCacheEventPublisher();
 
-    std::shared_ptr<CPSlotMapper>                   cp_slot_mapper_;
     std::unique_ptr<PrefillCacheHitMetricsReporter> prefill_cache_hit_metrics_reporter_;
 
     std::atomic<bool> stop_{false};

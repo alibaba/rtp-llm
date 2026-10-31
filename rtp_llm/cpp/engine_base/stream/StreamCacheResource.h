@@ -10,7 +10,7 @@
 #include "absl/status/statusor.h"
 #include "rtp_llm/cpp/engine_base/stream/ResourceContext.h"
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
-#include "rtp_llm/cpp/cache/CPSlotMapper.h"
+#include "rtp_llm/cpp/cache/PrefixCacheRegistration.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 
 namespace rtp_llm {
@@ -91,10 +91,9 @@ public:
         return resource_context_.cache_manager->cacheConfig().seq_size_per_block;
     }
 
-    // KVCacheResource reuse counters follow the topology's canonical cache-key namespace.
+    // KVCacheResource reuse counters follow the cache's canonical key namespace.
     int reuseBlockTokens() const {
-        const auto& mapper = resource_context_.cache_manager->cpSlotMapper();
-        return mapper ? mapper->reuseBlockTokens(resource_context_.cache_manager->cacheConfig()) : seqSizePerBlock();
+        return resource_context_.cache_manager->canonicalSizePerBlock();
     }
 
     void setNeedReleaseResource(bool need_release_resource) {
@@ -112,7 +111,16 @@ public:
         return stream_;
     }
 
-    bool reuseCache() const;
+    bool                                          reuseCache() const;
+    bool                                          partialTailReuseEnabled() const;
+    const std::optional<PrefixCacheRegistration>& prefixCacheRegistration() const {
+        return prefix_cache_registration_;
+    }
+    void                                  prepareRegisteredSave();
+    absl::Status                          prepareRequiredContinuation();
+    const std::vector<TaggedBlockIdPair>& registeredSaveCopyMapping() const;
+    // Called only by the owner after the T05 copy/writer completion gate.
+    void completeRegisteredSave(size_t completed_endpoint);
     bool enableMemoryCache() const;
     bool enableDeviceCache() const;
     bool enableDiskCache() const;
@@ -137,23 +145,34 @@ public:
 private:
     void         clearCacheReuseState();
     void         recordCacheReuseMallocResult(const MallocResult& result);
+    bool         prefixObservationEnabled() const;
     void         publishReuseLengths(int total_length, int host_length, int disk_length, int backend_length);
     absl::Status finalizeAllocatorLoad();
+    std::string  prefixObservationSummaryPayload(const char* status) const;
+    const char*  prefixObservationStatus() const;
+    void         emitPrefixObservationSummary(const char* status);
+    void         emitPrefixPlanClosed(const char* reason);
 
     GenerateStream*                stream_;
     BatchKVCacheResourcePtr        batch_kv_cache_resource_;
     ResourceContext                resource_context_;
     std::vector<TaggedBlockIdPair> block_update_mapping_;
 
-    bool                             need_release_resource_ = true;
-    bool                             last_block_aligned_    = false;
-    int                              malloc_failed_times_   = 0;
-    bool                             fake_inited_           = false;
-    bool                             resource_released_     = false;
-    std::shared_ptr<AsyncContext>    allocator_load_context_;
-    RtpLLMCacheReuseMetricsCollector cache_reuse_metrics_;
-    int64_t                          malloc_begin_time_us_    = 0;
-    int64_t                          load_wait_begin_time_us_ = 0;
+    bool                                       need_release_resource_ = true;
+    bool                                       last_block_aligned_    = false;
+    int                                        malloc_failed_times_   = 0;
+    bool                                       fake_inited_           = false;
+    bool                                       resource_released_     = false;
+    std::shared_ptr<AsyncContext>              allocator_load_context_;
+    RtpLLMCacheReuseMetricsCollector           cache_reuse_metrics_;
+    std::optional<PrefixCacheMatchObservation> prefix_match_observation_;
+    std::optional<PrefixCacheRegistration>     prefix_cache_registration_;
+    PrefixCacheRemoteObservation               remote_observation_;
+    bool                                       prefix_summary_emitted_{false};
+    PrefixCachePlanState                       prefix_plan_state_{PrefixCachePlanState::NOT_FORMED};
+    bool                                       prefix_plan_event_emitted_{false};
+    int64_t                                    malloc_begin_time_us_    = 0;
+    int64_t                                    load_wait_begin_time_us_ = 0;
 
     // Physical block pins held for PD separation.
     std::shared_ptr<KVCacheResource> pd_kvcache_ref_;

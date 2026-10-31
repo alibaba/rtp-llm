@@ -92,6 +92,11 @@ class BenchmarkSmokeTest(unittest.TestCase):
 
             tree = results["smoke_tree_online_mini"]
             self.assertGreater(tree.get("metrics", {}).get("loads_committed", 0), 0)
+            print("benchmark_tree_result=" + json.dumps(tree, sort_keys=True))
+            print(
+                "benchmark_process_output_bytes="
+                f"{len(proc.stdout.encode('utf-8')) + len(proc.stderr.encode('utf-8'))}"
+            )
 
             transfer = results["smoke_transfer_d2h_mini"]
             self.assertGreater(

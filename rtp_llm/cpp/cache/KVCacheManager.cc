@@ -1,4 +1,6 @@
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
+
+#include "autil/EnvUtil.h"
 #include "rtp_llm/cpp/cache/events/KVCMPublisher.h"
 
 #include <algorithm>
@@ -10,7 +12,6 @@
 #include <sstream>
 
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
-#include "rtp_llm/cpp/cache/CPSlotMapper.h"
 #include "rtp_llm/cpp/cache/CacheGroupType.h"
 #include "rtp_llm/cpp/cache/CacheTier.h"
 #include "rtp_llm/cpp/cache/CoordinatorCacheManager.h"
@@ -230,20 +231,20 @@ KVCacheManager::KVCacheManager(const CacheConfig&                 config,
     }
 
     const auto& cp_cfg = parallelism_config_.prefill_cp_config;
-    // Decode retains every received FULL page on each TP rank. Its sharding
-    // flag describes the upstream prefill layout for transport/state sizing,
-    // not local allocation: applying the CP mapper here would underallocate by the CP factor.
-    if (cp_cfg.kv_cache_sharded && cp_cfg.is_enabled() && parallelism_config_.role_type != RoleType::DECODE
-        && parallelism_config_.tp_size > 1) {
-        cp_slot_mapper_ = std::make_shared<CPSlotMapper>(static_cast<int>(parallelism_config_.tp_rank),
-                                                         static_cast<int>(parallelism_config_.tp_size),
-                                                         static_cast<int>(config_.seq_size_per_block));
-        RTP_LLM_LOG_INFO("CP sharded KV cache enabled: cp_rank=%d, cp_size=%d, block_size=%zu, "
-                         "virtual_block_size=%d",
+    if (cp_cfg.kv_cache_sharded && parallelism_config_.tp_size > 1) {
+        RTP_LLM_CHECK_WITH_INFO(config_.cache_key_layout_resolved,
+                                "sharded KV cache manager requires finalized storage layout");
+        if (!warmup_) {
+            // Live managers must mirror finalizeStorageLayout: decode with
+            // sharded && tp>1 legitimately stays unfolded (false).
+            RTP_LLM_CHECK_WITH_INFO(config_.request_projection_required
+                                        == (cp_cfg.is_enabled() && parallelism_config_.role_type != RoleType::DECODE),
+                                    "sharded storage layout CP folding must match the CP method and role guard");
+        }
+        RTP_LLM_LOG_INFO("CP sharded KV cache layout resolved: cp_rank=%d, cp_size=%d, block_size=%zu",
                          (int)parallelism_config_.tp_rank,
-                         (int)parallelism_config_.tp_size,
-                         config_.seq_size_per_block,
-                         cp_slot_mapper_->virtualBlockSize());
+                         (int)config_.cache_cp_size,
+                         config_.seq_size_per_block);
     }
 
     if (pd_sep_config_.role_type == RoleType::PREFILL) {
@@ -302,7 +303,6 @@ bool KVCacheManager::init() {
         coordinator_manager_->setUseDeviceMallocBlockPool(true);
     }
 
-    coordinator_manager_->setCPSlotMapper(cp_slot_mapper_);
     RTP_LLM_CHECK_WITH_INFO(coordinator_manager_->init(), "CoordinatorCacheManager init failed");
     // Observe real pool capacity, including asynchronous eviction and lease release.
     const auto capacity_changed = allocationChangeCallback();
@@ -336,8 +336,23 @@ bool KVCacheManager::init() {
 #endif
     }
 
+    KVCacheConfig tree_kv_cache_config = kv_cache_config_;
+    tree_kv_cache_config.enable_prefill_partial_tail_reuse =
+        kv_cache_config_.enable_prefill_partial_tail_reuse && pd_sep_config_.role_type == RoleType::PREFILL;
+    tree_kv_cache_config.enable_prefill_common_prefix_recovery =
+        kv_cache_config_.enable_prefill_common_prefix_recovery && pd_sep_config_.role_type == RoleType::PREFILL;
+    tree_kv_cache_config.enable_prefix_cache_observability =
+        autil::EnvUtil::getEnv("RTP_LLM_PREFIX_CACHE_OBSERVABILITY", false)
+        && pd_sep_config_.role_type == RoleType::PREFILL && parallelism_config_.tp_rank == 0;
+    if (autil::EnvUtil::getEnv("RTP_LLM_PREFIX_CACHE_OBSERVABILITY", false)
+        && !tree_kv_cache_config.enable_prefix_cache_observability) {
+        RTP_LLM_LOG_INFO("RTP_LLM_PREFIX_CACHE_OBSERVABILITY requested but disabled: role=%s allocator_owner=%s",
+                         roleTypeToString(pd_sep_config_.role_type).c_str(),
+                         isAllocatorOwner() ? "true" : "false");
+    }
+
     block_tree_cache_ = createBlockTreeCache(config_,
-                                             kv_cache_config_,
+                                             tree_kv_cache_config,
                                              coordinator_manager_,
                                              parallelism_config_,
                                              std::move(storage_backend),
@@ -442,11 +457,22 @@ void KVCacheManager::reportPrefillCacheHitMetrics(const MallocInfo& malloc_info,
         || !malloc_info.complete_token_ids) {
         return;
     }
-    prefill_cache_hit_metrics_reporter_->record(*malloc_info.batch_kv_cache_resource,
-                                                cp_slot_mapper_,
+    const auto&   resource = *malloc_info.batch_kv_cache_resource;
+    CacheKeysType theory_keys;
+    for (int batch_id = 0; batch_id < resource.batchSize(); ++batch_id) {
+        CacheKeysType full_keys = resource.cacheKeys(batch_id);
+        if (!resource.lastBlockAligned() && !full_keys.empty()) {
+            full_keys.pop_back();
+        }
+        auto canonical = config_.canonicalCacheKeys(full_keys);
+        theory_keys.insert(theory_keys.end(), canonical.begin(), canonical.end());
+    }
+    prefill_cache_hit_metrics_reporter_->record(resource,
                                                 malloc_info.request_id,
                                                 malloc_info.complete_token_ids->seqLength(),
-                                                config_.seq_size_per_block);
+                                                config_.seq_size_per_block,
+                                                &theory_keys,
+                                                static_cast<int64_t>(config_.canonicalSizePerBlock()));
 }
 
 void KVCacheManager::free(const FreeInfo& free_info) {
@@ -505,9 +531,41 @@ std::function<void()> KVCacheManager::allocationChangeCallback() const {
 void KVCacheManager::insertIntoCache(const InsertInfo& insert_info, size_t& resident_prefix_length) {
     RTP_LLM_PROFILE_FUNCTION();
     const int64_t begin_time_us = metrics_reporter_ == nullptr ? 0 : currentTimeUs();
-    dropLastPartialBlock(insert_info.batch_kv_cache_resource);
+    if (insert_info.prefix_cache_registration == nullptr || insert_info.target_tier != Tier::DEVICE) {
+        dropLastPartialBlock(insert_info.batch_kv_cache_resource);
+    }
     coordinator_manager_->insertIntoCache(insert_info, resident_prefix_length);
     reportCacheOperation(metrics_reporter_, RtpLLMCacheOperationMetricsCollector::OpType::INSERT, begin_time_us);
+}
+
+void KVCacheManager::prepareRegisteredSave(PrefixCacheRegistration& registration,
+                                           BatchKVCacheResource&    runtime,
+                                           size_t                   resume_endpoint,
+                                           const CompleteTokenIds*  original_ids) {
+    RTP_LLM_CHECK(coordinator_manager_ != nullptr);
+    coordinator_manager_->prepareRegisteredSave(registration, runtime, resume_endpoint, original_ids);
+}
+
+MallocStatus KVCacheManager::prepareRequiredContinuation(PrefixCacheRegistration& registration,
+                                                         BatchKVCacheResource&    runtime,
+                                                         size_t                   resume_endpoint) {
+    RTP_LLM_CHECK(coordinator_manager_ != nullptr);
+    return coordinator_manager_->prepareRequiredContinuation(registration, runtime, resume_endpoint);
+}
+
+void KVCacheManager::releaseRegisteredSave(PrefixCacheRegistration& registration) {
+    RTP_LLM_CHECK(coordinator_manager_ != nullptr);
+    coordinator_manager_->releaseRegisteredSave(registration);
+}
+
+void KVCacheManager::releaseRegisteredSourcePins(PrefixCacheRegistration& registration) {
+    RTP_LLM_CHECK(coordinator_manager_ != nullptr);
+    coordinator_manager_->releaseRegisteredSourcePins(registration);
+}
+
+bool KVCacheManager::relinquishOptionalRegisteredSave(PrefixCacheRegistration& registration, bool internal_only_only) {
+    RTP_LLM_CHECK(coordinator_manager_ != nullptr);
+    return coordinator_manager_->relinquishOptionalRegisteredSave(registration, internal_only_only);
 }
 
 int KVCacheManager::singleBatchNeedBlocks(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
@@ -516,6 +574,15 @@ int KVCacheManager::singleBatchNeedBlocks(const BatchKVCacheResourcePtr& batch_k
     RTP_LLM_CHECK_WITH_INFO(coordinator_manager_ != nullptr,
                             "singleBatchNeedBlocks called before KVCacheManager initialized");
     return coordinator_manager_->singleBatchNeedBlocks(batch_kv_cache_resource, seq_len, reserve_step);
+}
+
+size_t KVCacheManager::canonicalKeyCount(const BatchKVCacheResource& resource, int batch) const {
+    RTP_LLM_CHECK_WITH_INFO(batch >= 0 && batch < resource.batchSize(), "cache canonical key batch is out of range");
+    const auto&  full_keys = resource.cacheKeys(batch);
+    const size_t aligned_count =
+        config_.cache_key_layout_resolved && !resource.lastBlockAligned() && !full_keys.empty() ? full_keys.size() - 1 :
+                                                                                                  full_keys.size();
+    return aligned_count / config_.cache_cp_size;
 }
 
 int KVCacheManager::estimatePeakNeedBlocks(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
@@ -557,8 +624,9 @@ void KVCacheManager::blockBatchCopyByGroup(const std::vector<TaggedBlockIdPair>&
 }
 
 void KVCacheManager::blockBatchCopyForForward(const torch::Tensor&            copy_mapping,
-                                              const std::vector<std::string>& group_tags) {
-    coordinator_manager_->blockBatchCopyForForward(copy_mapping, group_tags);
+                                              const std::vector<std::string>& group_tags,
+                                              bool                            require_complete_payload) {
+    coordinator_manager_->blockBatchCopyForForward(copy_mapping, group_tags, require_complete_payload);
 }
 
 bool KVCacheManager::updateKVBlock(const BatchKVCacheResourcePtr&  batch_kv_cache_resource,
@@ -598,6 +666,56 @@ KVCacheManager::convertIndexToBuffer(int layer_id, const std::string& group_tag,
 std::vector<BlockInfo> KVCacheManager::convertIndexToBuffer(
     int layer_id, const std::string& group_tag, int block_id, int partition_count, int partition_id) const {
     return coordinator_manager_->convertIndexToBuffer(layer_id, group_tag, block_id, partition_count, partition_id);
+}
+
+std::vector<CacheBlockRegion>
+KVCacheManager::queryDecodeCacheBlockRegions(int                     global_layer_id,
+                                             const std::string&      tag,
+                                             size_t                  key_count,
+                                             size_t                  logical_page,
+                                             int                     producer_cp_size,
+                                             int                     decode_peer_count,
+                                             int                     peer_index,
+                                             bool                    opaque_wire,
+                                             const BlockIndicesType& destination_blocks) const {
+    RTP_LLM_CHECK_WITH_INFO(producer_cp_size > 0 && decode_peer_count > 0 && peer_index >= 0
+                                && peer_index < decode_peer_count,
+                            "decode cache region has invalid producer or peer topology");
+    const auto&  logical_group  = config_.topology().groupForLayer(global_layer_id, tag);
+    const auto&  physical_group = config_.physicalGroupForLayer(global_layer_id, tag);
+    const size_t scale          = config_.groupKeyScale(tag);
+    RTP_LLM_CHECK_WITH_INFO(logical_page < config_.logicalBlockCountForGroup(tag, key_count),
+                            "decode cache logical page is out of range");
+    const size_t local_slot = logical_page;
+    RTP_LLM_CHECK_WITH_INFO(local_slot < destination_blocks.size(),
+                            "decode cache local slot is outside destination block table");
+    const auto         key_range            = makeCacheBlockKeyRange(scale, logical_page, key_count);
+    const bool         full_destination_row = producer_cp_size > 1 && decode_peer_count == producer_cp_size;
+    const bool         whole_kv             = full_destination_row || opaque_wire;
+    const BlockIdxType block_id             = destination_blocks[local_slot];
+    if (isNullBlockIdx(block_id)) {
+        return {{key_range.key_index, key_range.key_range_begin, key_range.key_range_end, local_slot, 0, {}}};
+    }
+    std::vector<BlockInfo> parts =
+        whole_kv ? convertIndexToBuffer(global_layer_id, tag, block_id) :
+                   convertIndexToBuffer(global_layer_id, tag, block_id, decode_peer_count, peer_index);
+    if (logical_group.policy.group_type != CacheGroupType::FULL && full_destination_row
+        && logical_group.policy.cp_slice != CpBlockSliceMode::NONE) {
+        RTP_LLM_CHECK_WITH_INFO(parts.size() == 1, "decode cache slice requires one physical part");
+        parts[0] = sliceDecodeCacheBlock(
+            physical_group, logical_group.policy.cp_slice, parts[0], producer_cp_size, peer_index);
+    }
+    std::vector<CacheBlockRegion> regions;
+    regions.reserve(parts.size());
+    for (size_t part_index = 0; part_index < parts.size(); ++part_index) {
+        regions.push_back({key_range.key_index,
+                           key_range.key_range_begin,
+                           key_range.key_range_end,
+                           local_slot,
+                           part_index,
+                           parts[part_index]});
+    }
+    return regions;
 }
 
 GroupedCacheLayerLayout KVCacheManager::allLayerCacheBase() const {
@@ -678,9 +796,7 @@ KVCacheInfo KVCacheManager::getKVCacheInfo(int64_t latest_version, bool need_cac
         info.cached_keys              = std::move(snapshot.keys);
     }
 
-    const size_t block_size_tokens = cp_slot_mapper_ && cp_slot_mapper_->isSharded() ?
-                                         cp_slot_mapper_->virtualBlockSize() :
-                                         config_.seq_size_per_block;
+    const size_t block_size_tokens = config_.canonicalSizePerBlock();
 
     const auto capacity     = coordinator_manager_->tokenCapacity(block_size_tokens);
     info.block_size         = block_size_tokens;
@@ -806,7 +922,7 @@ void KVCacheManager::initCacheEventPublisher() {
                                 static_cast<long long>(parallelism_config_.tp_rank));
             return;
         }
-        if (cp_slot_mapper_ && cp_slot_mapper_->isSharded()) {
+        if (config_.request_projection_required) {
             RTP_LLM_LOG_WARNING("KV cache event publisher disabled for CP-sharded KV cache");
             return;
         }

@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/normal_engine/speculative/MtpExecutor.h"
+#include "rtp_llm/cpp/normal_engine/PrefillCacheWorkGuard.h"
 #include "rtp_llm/cpp/normal_engine/NormalExecutor.h"
 #include "rtp_llm/cpp/normal_engine/HiddenStateCapturePolicy.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
@@ -712,9 +713,12 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
     spec_logits_verify_async_runner_(cuda_graph::graphGetStreamFromPool(true)),
     spec_bookkeeping_runner_(cuda_graph::graphGetStreamFromPool(true)),
     dspark_cache_store_sync_stream_(cuda_graph::graphGetStreamFromPool(true)) {
-    data_type_                  = params.model_config_.data_type;
-    hidden_size_                = params.model_config_.hidden_size * params.model_config_.hc_mult;
-    propose_step_               = propose_params->gen_num_per_circle;
+    data_type_          = params.model_config_.data_type;
+    partial_tail_reuse_ = (params.kv_cache_config.enable_prefill_partial_tail_reuse
+                           || params.kv_cache_config.enable_prefill_common_prefix_recovery)
+                          && role_type_ == RoleType::PREFILL && !warm_up_;
+    hidden_size_       = params.model_config_.hidden_size * params.model_config_.hc_mult;
+    propose_step_      = propose_params->gen_num_per_circle;
     RTP_LLM_CHECK_WITH_INFO(
         propose_step_ > 0, "speculative proposal width/gen_num_per_cycle must be positive, got %zu", propose_step_);
     vocab_size_                 = params.model_config_.vocab_size;
@@ -809,6 +813,15 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
         draft_cache_layer_layout  = cache_manager->getMTPModuleGroupedCacheLayerLayout(0);
     }
 
+    // Target and draft writers share the same physical producer cache. Warmup
+    // uses a temporary unsharded cache even when the live cache is CP-sharded.
+    const bool producer_sharded =
+        !warm_up_ && cache_manager && cache_manager->cacheConfig().request_projection_required;
+    const auto producer_cp_topology = producer_sharded ?
+                                          std::make_pair(static_cast<int>(params.parallelism_config.tp_rank),
+                                                         static_cast<int>(params.parallelism_config.tp_size)) :
+                                          std::make_pair(0, 1);
+
     GptModelInitParams model_init_params(
         {params.gpt_weights,
          genModelDescription(params.model_config_, params.parallelism_config, params.eplb_config, params.moe_config),
@@ -827,10 +840,11 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
          cache_manager,
          std::nullopt,
          params.model_config_.hc_mult});
-    model_init_params.metrics_reporter = metrics_reporter_;
-    model_init_params.hidden_state_capture_layer_ids = selectHiddenStateCaptureLayerIds(
+    model_init_params.metrics_reporter                 = metrics_reporter_;
+    model_init_params.cache_store_producer_cp_topology = producer_cp_topology;
+    model_init_params.hidden_state_capture_layer_ids   = selectHiddenStateCaptureLayerIds(
         HiddenStateCaptureModelRole::TARGET, role_type_, warm_up_, params.model_config_.hidden_state_capture_layer_ids);
-    model_init_params.hidden_state_capture_dtype     = params.model_config_.hidden_state_capture_dtype;
+    model_init_params.hidden_state_capture_dtype = params.model_config_.hidden_state_capture_dtype;
 #if USING_CUDA || USING_ROCM
     const size_t max_reserved_step = params.sp_config.speculativeReserveStep();
     if (params.hw_kernel_config.enable_cuda_graph && model_init_params.kv_cache_layer_layout.has_value()) {
@@ -904,13 +918,14 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
                                 cache_manager,
                                 std::make_optional(0),
                                 mtp_params->model_config_.hc_mult});
-        model_params.metrics_reporter = metrics_reporter_;
+        model_params.metrics_reporter                 = metrics_reporter_;
+        model_params.cache_store_producer_cp_topology = producer_cp_topology;
         model_params.hidden_state_capture_layer_ids =
             selectHiddenStateCaptureLayerIds(HiddenStateCaptureModelRole::DRAFT,
                                              role_type_,
                                              warm_up_,
                                              mtp_params->model_config_.hidden_state_capture_layer_ids);
-        model_params.hidden_state_capture_dtype     = mtp_params->model_config_.hidden_state_capture_dtype;
+        model_params.hidden_state_capture_dtype = mtp_params->model_config_.hidden_state_capture_dtype;
 #if USING_CUDA || USING_ROCM
         if (params.hw_kernel_config.enable_cuda_graph && model_params.kv_cache_layer_layout.has_value()) {
             const auto& topology = model_params.kv_cache_layer_layout->topology();
@@ -1102,6 +1117,9 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
     RtpLLMExecutorMetricsCollector& executor_collector = metrics_collector.executor_collector;
 
     StreamGroups    stream_groups(streams);
+    PrefillCacheWorkGuard cache_work_guard(stream_groups,
+                                           partial_tail_reuse_ && cache_manager_
+                                               && cache_manager_->isAllocatorOwner());
     GptModelInputs  model_input;
     GptModelOutputs model_output;
     SamplerOutput   sampler_output;
@@ -1117,6 +1135,13 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
     speculative::FastTopKSamplerOutput fast_topk_sampler_output;
     int64_t                            model_forward_us = 0;
     bool                               target_only      = false;
+
+    if (cache_manager_ && cache_manager_->isAllocatorOwner()) {
+        for (const auto& stream : stream_groups.contextStreams()) {
+            stream->streamCacheResource().prepareRegisteredSave();
+        }
+        stream_groups = StreamGroups(streams);
+    }
 
     {
         RTP_LLM_PROFILE_SCOPE("executor.mtp.prefill_step(gather_model_input)");
@@ -1139,6 +1164,22 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
     }
 
     metrics_collector.not_skip = true;
+    const bool cache_completion_batch = partial_tail_reuse_ && model_input.prefix_lengths.defined()
+                                        && model_input.prefix_lengths.numel() > 0 && !model_input.is_fake_stream;
+    const bool has_sparse_save = model_input.cache_save_positions.defined()
+                                 && model_input.cache_save_positions.numel() > 0;
+    RTP_LLM_CHECK_WITH_INFO(!has_sparse_save || (model_ && model_->supportsSparseCacheSave()),
+                            "explicit sparse cache save requires a target model writer");
+    auto complete_registered_save = [&]() {
+        if (!cache_completion_batch || !cache_manager_ || !cache_manager_->isAllocatorOwner()) {
+            return;
+        }
+        for (const auto& [stream, executed_end] : cache_work_guard.completionEndpoints()) {
+            if (!stream->hasError()) {
+                stream->streamCacheResource().completeRegisteredSave(executed_end);
+            }
+        }
+    };
 
     // Any return or exception after DSpark PD work becomes possible must drain
     // local publication state. The normal path performs the TP-wide check below
@@ -1182,6 +1223,21 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
     // release model input before forward
     releaseAllModelBuffers();
 
+    // The owner already selected src/dst IDs. Every CP rank copies its own
+    // physical payload, including a rank whose local source block is full.
+    // Consume this batch's mapping before preserving the global target input;
+    // the draft sync must never replay A→C/A→D.
+    if (cache_completion_batch && model_input.kv_cache_update_mapping.defined()
+        && model_input.kv_cache_update_mapping.numel() > 0) {
+        RTP_LLM_CHECK_WITH_INFO(static_cast<bool>(cache_manager_), "sparse cache copy requires a cache manager");
+        cache_work_guard.markGpuWorkSubmitted();
+        cache_manager_->blockBatchCopyForForward(model_input.kv_cache_update_mapping,
+                                                 model_input.kv_cache_group_tags,
+                                                 /*require_complete_payload=*/true);
+        confirmTpCacheWorkCompletion(parallelism_config_.tp_size, tp_rank_);
+        model_input.kv_cache_update_mapping = torch::Tensor();
+    }
+
     // CP mutates the target input to a rank-local layout. Preserve the full
     // input so rank-local optional fields do not survive into the draft pass.
     GptModelInputs global_model_input{};
@@ -1198,6 +1254,9 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
         RTP_LLM_PROFILE_SCOPE("executor.mtp.prefill_step(target_model_forward)");
         maybePrintModelInput(model_input, "prefill target model");
         int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
+        if (cache_completion_batch) {
+            cache_work_guard.markGpuWorkSubmitted();
+        }
         model_output          = std::move(forwardModel(model_.get(), model_input, ModelInputsModelRole::TARGET));
         maybeOverrideLastHiddenWithMtpBuffer(model_output, *model_, cp_enabled ? -1 : model_input.combo_tokens.numel());
         model_forward_us += autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
@@ -1216,7 +1275,12 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
         if (metrics_reporter_) {
             collectPrefillMetrics(stream_groups, metrics_collector, schedule_time_us, model_forward_us);
         }
-        cudaSyncAndCheck();
+        if (cache_completion_batch) {
+            confirmTpCacheWorkCompletion(parallelism_config_.tp_size, tp_rank_);
+            cache_work_guard.markComplete();
+        } else {
+            cudaSyncAndCheck();
+        }
         releaseAllModelBuffers();
         if (auto deferred_capture_error = model_->takeDeferredHiddenStateCaptureError();
             deferred_capture_error.has_value()) {
@@ -1227,6 +1291,7 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
             }
             return absl::OkStatus();
         }
+        complete_registered_save();
         if (isTpRank0()) {
             return batch_stream_processor_->dispatchPrefillOnly(stream_groups);
         }
@@ -1303,9 +1368,13 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
             // are not persisted in stream or PD state.
             RTP_LLM_CHECK_WITH_INFO(sp_prefill_draft_model_ != nullptr,
                                     "DSpARK prefill requires a draft prefill model");
+            RTP_LLM_CHECK_WITH_INFO(!has_sparse_save || sp_prefill_draft_model_->supportsSparseCacheSave(),
+                                    "explicit sparse cache save requires a DSpARK draft writer");
             (void)forwardModel(sp_prefill_draft_model_.get(), model_input, ModelInputsModelRole::DRAFT_PREFILL);
             draft_model_output = GptModelOutputs();
         } else {
+            RTP_LLM_CHECK_WITH_INFO(!has_sparse_save || draft_model_->supportsSparseCacheSave(),
+                                    "explicit sparse cache save requires an MTP draft writer");
             draft_model_output = std::move(forwardModel(draft_model_.get(), model_input, ModelInputsModelRole::DRAFT));
         }
         model_forward_us += autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
@@ -1313,6 +1382,10 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
 
     const bool dspark_cache_store_ok = finishDSparkPrefillCachePublication(model_input, streams);
     cache_store_drain_guard.disarm();
+    if (cache_completion_batch) {
+        confirmTpCacheWorkCompletion(parallelism_config_.tp_size, tp_rank_);
+        cache_work_guard.markComplete();
+    }
     if (!dspark_cache_store_ok || alignment_only) {
         cudaSyncAndCheck();
         releaseAllModelBuffers();
@@ -1336,6 +1409,8 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
         }
         return absl::OkStatus();
     }
+
+    complete_registered_save();
 
     if (target_only) {
         if (metrics_reporter_) {

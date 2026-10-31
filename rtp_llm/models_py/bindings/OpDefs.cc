@@ -164,6 +164,8 @@ void registerPyOpDefs(pybind11::module& m) {
         .def_readwrite("kv_cache_kernel_block_id_device", &PyAttentionInputs::kv_cache_kernel_block_id_device)
         .def_readwrite("kv_cache_block_id", &PyAttentionInputs::kv_cache_block_id)
         .def_readwrite("kv_cache_block_id_device", &PyAttentionInputs::kv_cache_block_id_device)
+        .def_readwrite("cache_save_positions", &PyAttentionInputs::cache_save_positions)
+        .def_readwrite("cache_save_block_ids", &PyAttentionInputs::cache_save_block_ids)
         .def_readwrite("dtype", &PyAttentionInputs::dtype)
         .def_readwrite("cu_seqlens_device", &PyAttentionInputs::cu_seqlens_device)
         .def_readwrite("cu_seqlens", &PyAttentionInputs::cu_seqlens)
@@ -184,6 +186,14 @@ void registerPyOpDefs(pybind11::module& m) {
         .def("__repr__", [](const PyAttentionInputs& self) { return "PyAttentionInputs"; })
         .def_readwrite("prefill_cuda_graph_copy_params", &PyAttentionInputs::prefill_cuda_graph_copy_params)
         .def_readwrite("headwise_config", &PyAttentionInputs::headwise_config)
+        .def("clone_without_cache_store",
+             [](const PyAttentionInputs& self) {
+                 auto result = PyAttentionInputs(self);
+                 result.cache_store_inputs.reset();
+                 result.cache_store_writer.reset();
+                 return result;
+             },
+             "Shallow-copy attention inputs without external cache-store publication handles.")
         .def("__copy__", [](const PyAttentionInputs& self) { return PyAttentionInputs(self); });
 
     pybind11::class_<BertEmbeddingInputs>(m, "BertEmbeddingInputs")

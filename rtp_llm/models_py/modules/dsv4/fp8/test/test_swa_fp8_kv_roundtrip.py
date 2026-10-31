@@ -52,6 +52,10 @@ from rtp_llm.models_py.modules.dsv4.fp8._swa_kv_insert_triton import (
     quantize_and_insert_k_cache,
     quantize_and_insert_k_cache_cp_byte_sliced,
 )
+from rtp_llm.models_py.modules.dsv4.fp8.sparse_save import (
+    SparseSaveTargets,
+    iter_sparse_save_slots,
+)
 
 HEAD_DIM = 512
 NOPE_DIM = 448
@@ -523,6 +527,94 @@ class SwaFp8KvRoundtripTest(unittest.TestCase):
                 self._assert_nope_within_ue8m0_bound(compressed_kv, recovered)
                 self._assert_rope_exact(compressed_kv, recovered)
 
+    def test_short_prefix_capture_and_independent_sparse_save(self):
+        """G1300 old tail survives C ring overwrite and appears in D1320."""
+        entries = 128
+        cache = self._alloc_cache(4, entries)
+        old_k = torch.randn(20, HEAD_DIM, dtype=torch.bfloat16, device=self.device)
+        suffix_k = torch.randn(236, HEAD_DIM, dtype=torch.bfloat16, device=self.device)
+        old_slots = torch.arange(128, 148, dtype=torch.int64, device=self.device)
+        quantize_and_insert_k_cache(old_k, cache, old_slots)
+        cache[2].copy_(cache[1])
+        cache[3].copy_(cache[1])
+        old_bytes = cache[1].clone()
+
+        # This read must precede the runtime C write. Its 20 rows are read
+        # later by SWA attention even though C's same ring rows are reused.
+        read_old = torch.empty(
+            1, 20, HEAD_DIM, dtype=torch.bfloat16, device=self.device
+        )
+        gather_lens = torch.tensor([20], dtype=torch.int32, device=self.device)
+        dequantize_and_gather_k_cache_slots(
+            out=read_old,
+            k_cache=cache,
+            slot_mapping=old_slots.view(1, 20),
+            gather_lens=gather_lens,
+            offset=0,
+        )
+
+        positions = torch.arange(1300, 1536, dtype=torch.int64, device=self.device)
+        runtime_slots = torch.where(
+            positions >= 1408,
+            2 * entries + positions % entries,
+            -1,
+        )
+        quantize_and_insert_k_cache(suffix_k, cache, runtime_slots)
+        targets = SparseSaveTargets(
+            torch.tensor([[1320]], dtype=torch.int64),
+            torch.tensor([[3]], dtype=torch.int32),
+        )
+        save_slots = list(
+            iter_sparse_save_slots(
+                targets,
+                positions,
+                torch.zeros_like(positions),
+                entries_per_block=entries,
+                tokens_per_block=256,
+                runtime_block_table=torch.tensor(
+                    [[0, 0, 0, 0, 0, 2]], dtype=torch.int32, device=self.device
+                ),
+            )
+        )[0][1]
+        quantize_and_insert_k_cache(suffix_k, cache, save_slots)
+        torch.cuda.synchronize()
+
+        self.assertTrue(torch.equal(cache[1], old_bytes), "source A changed")
+        d_slots = (3 * entries + torch.arange(40, device=self.device)).view(1, 40)
+        recovered = torch.empty(
+            1, 40, HEAD_DIM, dtype=torch.bfloat16, device=self.device
+        )
+        dequantize_and_gather_k_cache_slots(
+            out=recovered,
+            k_cache=cache,
+            slot_mapping=d_slots,
+            gather_lens=torch.tensor([40], dtype=torch.int32, device=self.device),
+            offset=0,
+        )
+        expected = torch.cat((old_k, suffix_k[:20]))
+        self._assert_nope_within_ue8m0_bound(expected, recovered[0])
+        self._assert_rope_exact(expected, recovered[0])
+        a_prefix = torch.empty_like(read_old)
+        dequantize_and_gather_k_cache_slots(
+            out=a_prefix,
+            k_cache=cache,
+            slot_mapping=old_slots.view(1, 20),
+            gather_lens=gather_lens,
+            offset=0,
+        )
+        self.assertTrue(torch.equal(read_old, a_prefix))
+        overwritten_c = torch.empty_like(read_old)
+        dequantize_and_gather_k_cache_slots(
+            out=overwritten_c,
+            k_cache=cache,
+            slot_mapping=(2 * entries + torch.arange(20, device=self.device)).view(
+                1, 20
+            ),
+            gather_lens=gather_lens,
+            offset=0,
+        )
+        self.assertFalse(torch.equal(read_old, overwritten_c))
+
     def test_random_roundtrip_block_256(self):
         """Sweep token counts at block_size=256 (RTP-LLM eb=256)."""
         for num_tokens in [1, 32, 256, 257, 600]:
@@ -924,11 +1016,9 @@ class SwaFp8KvRoundtripTest(unittest.TestCase):
                 linear = torch.arange(batch * width, device=self.device).view(
                     batch, width
                 )
-                read_slots = (
-                    block_ids[linear.remainder(block_ids.numel())]
-                    * entries_per_block
-                    + (linear * 17 + 3).remainder(entries_per_block)
-                )
+                read_slots = block_ids[
+                    linear.remainder(block_ids.numel())
+                ] * entries_per_block + (linear * 17 + 3).remainder(entries_per_block)
                 gather_lens = torch.tensor(lens, dtype=torch.int32, device=self.device)
                 for batch_idx, gather_len in enumerate(lens):
                     if gather_len:

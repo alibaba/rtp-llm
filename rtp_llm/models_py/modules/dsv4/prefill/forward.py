@@ -112,7 +112,9 @@ from rtp_llm.models_py.modules.dsv4.fp8.prefill_meta import (
     build_and_propagate_prefill_meta_fp8,
     clear_prefill_meta_shared_fp8,
 )
+from rtp_llm.models_py.modules.dsv4.fp8.sparse_save import SparseSaveTargets
 from rtp_llm.models_py.modules.dsv4.kv_cache_utils import (
+    as_attention_inputs_by_tag,
     build_block_tables_batched,
     primary_attention_inputs,
 )
@@ -441,6 +443,25 @@ def forward_layers(
     )
     write_cache_store_impl = None
     write_cache_store_impl_by_tag = None
+    sparse_save_by_tag: Dict[str, SparseSaveTargets] = {}
+    if v4.fp8_kv_cache and cache_store_source is not None:
+        for tag, group_inputs in as_attention_inputs_by_tag(
+            cache_store_source, kv_cache
+        ).items():
+            points = getattr(group_inputs, "cache_save_positions", None)
+            block_ids = getattr(group_inputs, "cache_save_block_ids", None)
+            if points is not None and block_ids is not None and points.numel() > 0:
+                sparse_save_by_tag[tag] = SparseSaveTargets(points, block_ids)
+    protect_short_prefix = False
+    if v4.fp8_kv_cache and kv_cache is not None and attn_inputs is not None:
+        prefix_host = getattr(attn_inputs, "prefix_lengths", None)
+        if prefix_host is not None and prefix_host.device.type == "cpu":
+            from rtp_llm.models_py.modules.dsv4.kv_cache_utils import SWA_KV
+
+            block_tokens = int(kv_cache.get_seq_size_per_block(SWA_KV))
+            protect_short_prefix = any(
+                0 < int(p) % block_tokens for p in prefix_host.reshape(-1).tolist()
+            )
     if kv_cache is not None and cache_store_source is not None:
         if isinstance(cache_store_source, Mapping):
             write_cache_store_impl_by_tag = {
@@ -633,6 +654,10 @@ def forward_layers(
                 else v4.layers
             )
             for layer_idx, layer_call in enumerate(layer_calls):
+                if protect_short_prefix:
+                    v4.layers[layer_idx].attn._protect_short_prefix = True
+                if sparse_save_by_tag:
+                    v4.layers[layer_idx].attn._sparse_save_targets = sparse_save_by_tag
                 with layer_forward_range(layer_idx):
                     h = layer_call(
                         h,  # [T, hc, dim]
@@ -700,6 +725,12 @@ def forward_layers(
                             )
                         _rt.record(f"layer{layer_idx:02d}_last", layer_last)
     finally:
+        if protect_short_prefix:
+            for layer in v4.layers:
+                layer.attn._protect_short_prefix = False
+        if sparse_save_by_tag:
+            for layer in v4.layers:
+                layer.attn._sparse_save_targets = None
         # Always drop the per-layer ``common.workspace`` references, even if a
         # layer raises mid-prefill (e.g. a CUDA OOM under memory pressure —
         # the exact case this per-forward workspace exists to relieve). The

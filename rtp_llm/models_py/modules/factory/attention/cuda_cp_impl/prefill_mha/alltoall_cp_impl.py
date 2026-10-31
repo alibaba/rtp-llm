@@ -14,6 +14,7 @@ from rtp_llm.models_py.distributed.user_buffers import get_user_buffers_communic
 from rtp_llm.models_py.modules.factory.attention.cuda_cp_impl.prefill_mha.cp_utils import (
     generate_half_kv_indices,
     generate_half_q_indices,
+    plan_cp_attention,
     plan_prefix_paged_attention,
 )
 from rtp_llm.models_py.modules.factory.attention.cuda_impl.py_flashinfer_mha import (
@@ -67,7 +68,8 @@ class PCPAll2AllAttnOp:
         self.prefill_cp_rank = parallelism_config.tp_rank
         self.prefill_cp_size = parallelism_config.tp_size
 
-        self.seq_size_per_block = attn_configs.tokens_per_block
+        self.seq_size_per_block = attn_configs.kernel_tokens_per_block
+        self.cache_geometry = None
 
         self.communication_stream = torch.cuda.Stream(device=self.device)
         self.comm_events = [torch.cuda.Event() for _ in range(self.prefill_cp_size)]
@@ -136,7 +138,9 @@ class PCPAll2AllAttnOp:
         ]
         for config in configs:
             wrapper_name = config.pop("wrapper_name")
-            self.prefill_wrappers[wrapper_name].plan(**config, **common_params)
+            plan_cp_attention(
+                self.prefill_wrappers[wrapper_name], **config, **common_params
+            )
 
         half_q_indices = generate_half_q_indices(prefill_cp_chunk_lengths)
         half_kv_indices = generate_half_kv_indices(prefill_cp_chunk_lengths)
@@ -147,7 +151,11 @@ class PCPAll2AllAttnOp:
             self.attn_inputs.prefix_lengths,
             self.attn_inputs.sequence_lengths,
             self.cp_info.prefill_actual_input_lengths_cpu,
-            self.attn_inputs.kv_cache_kernel_block_id,
+            (
+                self.cache_geometry.block_ids
+                if self.cache_geometry is not None
+                else self.attn_inputs.kv_cache_kernel_block_id
+            ),
             self.attn_configs.kernel_tokens_per_block,
         )
 

@@ -475,6 +475,7 @@ message BroadcastLoadRequestPB {
     reserved "group_block_ids";
     int32 prefill_cp_size = 13;
     repeated TaggedBlockIdsPB tagged_group_block_ids = 14;
+    uint64 input_token_count = 15;
 
 }
 

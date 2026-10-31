@@ -112,6 +112,60 @@ py_test(
 )
 
 py_test(
+    name = "linear_sparse_save_gdn_test",
+    srcs = [
+        "linear_sparse_save_gdn_test.py",
+        "_linear_sparse_save_common.py",
+    ],
+    main = "linear_sparse_save_gdn_test.py",
+    deps = py_test_deps + [
+        "//rtp_llm/models_py:models",
+    ],
+    env = {"GPU_COUNT": "1"},
+    exec_properties = {
+        "gpu": "L20_CU13",
+        "gpu_count": "1",
+    },
+    tags = ["L20_CU13"],
+)
+
+py_test(
+    name = "linear_sparse_save_kda_test",
+    srcs = [
+        "linear_sparse_save_kda_test.py",
+        "_linear_sparse_save_common.py",
+    ],
+    main = "linear_sparse_save_kda_test.py",
+    deps = py_test_deps + [
+        "//rtp_llm/models_py:models",
+    ],
+    env = {"GPU_COUNT": "1"},
+    exec_properties = {
+        "gpu": "L20_CU13",
+        "gpu_count": "1",
+    },
+    tags = ["L20_CU13"],
+)
+
+py_test(
+    name = "linear_sparse_save_cp_test",
+    srcs = [
+        "linear_sparse_save_cp_test.py",
+        "_linear_sparse_save_common.py",
+    ],
+    main = "linear_sparse_save_cp_test.py",
+    deps = py_test_deps + [
+        "//rtp_llm/models_py:models",
+    ],
+    env = {"GPU_COUNT": "2"},
+    exec_properties = {
+        "gpu": "L20_CU13",
+        "gpu_count": "2",
+    },
+    tags = ["L20_CU13"],
+)
+
+py_test(
     name = "qwen3_next_qkvz_ba_fusion_test",
     srcs = ["qwen3_next_qkvz_ba_fusion_test.py"],
     deps = [

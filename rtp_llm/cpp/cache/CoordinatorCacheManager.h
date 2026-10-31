@@ -7,6 +7,7 @@
 #include <memory>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <vector>
 
 #include "kmonitor/client/MetricsReporter.h"
@@ -22,8 +23,10 @@
 
 namespace rtp_llm {
 
-class CPSlotMapper;
 class LoadAsyncContext;
+struct PartialTailMatchRequest;
+struct PinnedLocalFallback;
+struct PrefixCacheRegistration;
 class BlockTreeCache;
 using BlockTreeCachePtr = std::shared_ptr<BlockTreeCache>;
 class SingleTypeCacheManager;
@@ -67,9 +70,22 @@ public:
 
     virtual ~CoordinatorCacheManager();
 
-    bool                           init();
-    virtual void                   free(const FreeInfo& free_info);
-    virtual void                   insertIntoCache(const InsertInfo& insert_info, size_t& resident_prefix_length);
+    bool         init();
+    virtual void free(const FreeInfo& free_info);
+    virtual void insertIntoCache(const InsertInfo& insert_info, size_t& resident_prefix_length);
+    // Optional save destinations are request-owned until the writer has completed
+    // and the request either publishes or abandons them.
+    void         prepareRegisteredSave(PrefixCacheRegistration& registration,
+                                       BatchKVCacheResource&    runtime,
+                                       size_t                   resume_endpoint,
+                                       const CompleteTokenIds*  original_ids = nullptr);
+    MallocStatus prepareRequiredContinuation(PrefixCacheRegistration& registration,
+                                             BatchKVCacheResource&    runtime,
+                                             size_t                   resume_endpoint);
+    void         releaseRegisteredSave(PrefixCacheRegistration& registration);
+    // Called only after the owner has synchronized every registered copy and writer.
+    void releaseRegisteredSourcePins(PrefixCacheRegistration& registration);
+    bool relinquishOptionalRegisteredSave(PrefixCacheRegistration& registration, bool internal_only_only = false);
     virtual BlockAddrInfo          convertIndexToAddr(int layer_id, int block_id) const;
     virtual std::vector<BlockInfo> convertIndexToBuffer(int layer_id, int block_id) const;
     virtual std::vector<BlockInfo>
@@ -104,7 +120,8 @@ public:
     virtual void blockBatchCopy(const std::vector<BlockIdPair>& copy_mapping);
     virtual void blockBatchCopy(const BlockIdPair* copy_mapping_begin, const BlockIdPair* copy_mapping_end);
     virtual void blockBatchCopy(const torch::Tensor& copy_mapping);
-    virtual void blockBatchCopyByGroup(const std::vector<TaggedBlockIdPair>& copy_mapping);
+    virtual void blockBatchCopyByGroup(const std::vector<TaggedBlockIdPair>& copy_mapping,
+                                       bool                                  require_complete_payload = false);
 
     // Payload rows index group_tags, never the coordinator's private group order.
     // The GPU path enqueues asynchronously on the current CUDA stream, outside
@@ -112,7 +129,8 @@ public:
     // NormalExecutor calls this before PyWrappedModel::forward; eager execution
     // and ATen graph replay use that stream. Capture runs during model initialization.
     virtual void blockBatchCopyForForward(const torch::Tensor&            copy_mapping,
-                                          const std::vector<std::string>& group_tags);
+                                          const std::vector<std::string>& group_tags,
+                                          bool                            require_complete_payload = false);
 
     virtual const std::vector<DeviceBlockPoolPtr>& groupBlockPools() const {
         return group_block_pools_;
@@ -130,14 +148,6 @@ public:
 
     void setUseDeviceMallocBlockPool(bool use_device_malloc_block_pool) {
         use_device_malloc_block_pool_ = use_device_malloc_block_pool;
-    }
-
-    void setCPSlotMapper(std::shared_ptr<CPSlotMapper> cp_slot_mapper) {
-        cp_slot_mapper_ = std::move(cp_slot_mapper);
-    }
-
-    std::shared_ptr<CPSlotMapper> cpSlotMapper() const {
-        return cp_slot_mapper_;
     }
 
     void setReserveBlocksNum(size_t reserve_block_num) {
@@ -207,10 +217,7 @@ protected:
                                                      int  reserve_step,
                                                      bool enable_reuse_cache,
                                                      int  target_batch_size) const;
-    virtual void  checkCPShardedMallocResult(const MallocInfo&) const;
     virtual void  decrKVCacheRef(const KVCacheResource& kvcache_resource);
-    size_t        logicalSeqSizePerBlockForCapacity(const std::string& tag) const;
-    int           deviceCacheMetricTokensPerBlock() const;
     static size_t maxReusableMatchKeys(int seq_len, int reuse_unit_tokens) {
         if (seq_len <= 1 || reuse_unit_tokens <= 0) {
             return 0;
@@ -222,7 +229,6 @@ protected:
     const CacheConfig                  config_;
     AllocationType                     allocation_type_;
     BlockTreeCachePtr                  block_tree_cache_;
-    std::shared_ptr<CPSlotMapper>      cp_slot_mapper_;
     const kmonitor::MetricsReporterPtr metrics_reporter_             = nullptr;
     bool                               use_device_malloc_block_pool_ = false;
 
@@ -237,19 +243,25 @@ protected:
     std::mutex malloc_mutex_;
 
     struct PreparedKVCache {
-        size_t                         matched_device_blocks = 0;
-        size_t                         total_logical_blocks  = 0;
-        std::vector<RequiredPositions> required_positions;
-        std::vector<BlockIndicesType>  referenced_blocks;
-        std::vector<size_t>            original_sizes;
-        MallocStatus                   materialize_status = MallocStatus::NONE;
+        std::optional<PrefixCachePlanPoint>        farthest_fork;
+        std::optional<PrefixCacheMatchObservation> match_observation;
+        size_t                                     matched_device_blocks   = 0;
+        size_t                                     matched_device_endpoint = 0;
+        bool                                       precise_local           = false;
+        std::shared_ptr<PinnedLocalFallback>       local_fallback;
+        size_t                                     total_logical_blocks = 0;
+        std::vector<RequiredPositions>             required_positions;
+        std::vector<BlockIndicesType>              referenced_blocks;
+        std::vector<size_t>                        original_sizes;
+        MallocStatus                               materialize_status = MallocStatus::NONE;
     };
 
-    std::shared_ptr<LoadAsyncContext> prepareKVCache(const CacheKeysType&                 cache_keys,
-                                                     BatchKVCacheResource&                kv_resource,
-                                                     const std::shared_ptr<CPSlotMapper>& cp_mapper,
-                                                     PreparedKVCache&                     prepared,
-                                                     const std::function<bool(size_t)>&   valid_prefix = {});
+    std::shared_ptr<LoadAsyncContext> prepareKVCache(const CacheKeysType&               cache_keys,
+                                                     BatchKVCacheResource&              kv_resource,
+                                                     PreparedKVCache&                   prepared,
+                                                     const std::function<bool(size_t)>& valid_prefix   = {},
+                                                     const std::vector<int>*            request_tokens = nullptr,
+                                                     const PartialTailMatchRequest*     partial_tail   = nullptr);
     bool                              materializeInitialBlocks(const MallocInfo& malloc_info,
                                                                PreparedKVCache&  prepared,
                                                                LoadAsyncContext* context,
@@ -258,6 +270,7 @@ protected:
                                                            PreparedKVCache&  prepared,
                                                            LoadAsyncContext& context,
                                                            size_t            matched_blocks);
+    void                              selectLocalFallback(BatchKVCacheResource& kv_resource, PreparedKVCache& prepared);
 
     virtual MallocStatus evaluatePreparedInitCapacity(const MallocInfo&      malloc_info,
                                                       size_t                 reserve_blocks,
@@ -270,11 +283,8 @@ protected:
                                           int               failed_group,
                                           bool              incremental,
                                           int               failed_need_blocks) const;
-    size_t               loadTargetPosition(size_t                               path_index,
-                                            const std::string&                   tag,
-                                            const std::shared_ptr<CPSlotMapper>& mapper,
-                                            int                                  cp_scale) const;
-    bool                 cpCompactSwaGroup(const std::string& tag, const std::shared_ptr<CPSlotMapper>& mapper) const;
+    size_t               loadTargetPosition(size_t path_index, const std::string& tag) const;
+    size_t               loadTargetEndpoint(size_t token_end, const std::string& tag) const;
     void                 rollbackBlockIdsToSize(int group_id, BlockIds& block_ids, size_t original_size);
     void                 rollbackInitMalloc(BatchKVCacheResource&                kv_resource,
                                             const std::vector<BlockIndicesType>& referenced_blocks,
@@ -301,6 +311,17 @@ protected:
 
 private:
     size_t groupIdForTag(std::string_view tag) const;
+
+    // insertIntoCache splits into the registration-driven publication (the
+    // canonical spine plus at most one internal-only fork branch) and the
+    // legacy per-batch publication used when no registration record exists.
+    void publishRegisteredSpineAndFork(const InsertInfo&              insert_info,
+                                       BatchKVCacheResource&          kv_cache_resource,
+                                       const PrefixCacheRegistration& registration,
+                                       size_t&                        resident_prefix_length);
+    void publishLegacyBatches(const InsertInfo&     insert_info,
+                              BatchKVCacheResource& kv_cache_resource,
+                              size_t&               resident_prefix_length);
 };
 
 using CoordinatorCacheManagerPtr = std::shared_ptr<CoordinatorCacheManager>;

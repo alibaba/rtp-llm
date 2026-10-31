@@ -101,6 +101,58 @@ cc_test(
     tags = ["L20_CU13"],
 )
 
+cc_library(
+    name = "tail_reuse_cp_completion_integration_test_lib",
+    srcs = ["TailReuseCpCompletionIntegrationTest.cc"],
+    alwayslink = True,
+    copts = test_copts,
+    deps = [
+        "//rtp_llm/cpp/cache",
+        "//rtp_llm/cpp/cache/block_tree_cache:block_tree_cache",
+        "//rtp_llm/cpp/engine_base/stream:stream",
+        "//rtp_llm/cpp/models",
+        "//rtp_llm/cpp/normal_engine",
+        "//rtp_llm/models_py/bindings/core:exec_ops_test_lib",
+    ] + torch_deps() + device_runtime_deps + cuda13_torch_link_deps,
+)
+
+cc_binary(
+    name = "th_tail_reuse_cp_completion_integration_test",
+    deps = [":tail_reuse_cp_completion_integration_test_lib"],
+    linkshared = 1,
+)
+
+py_test(
+    name = "tail_reuse_cp_completion_integration_test",
+    srcs = ["tail_reuse_cp_completion_integration_test.py"],
+    data = [":th_tail_reuse_cp_completion_integration_test"],
+    deps = [
+        "//rtp_llm:config",
+        "//rtp_llm:testlib",
+        "//rtp_llm:torch",
+    ],
+    env = {"GPU_COUNT": "2", "TEST_USING_DEVICE": "CUDA"},
+    exec_properties = {"gpu": "L20_CU13", "gpu_count": "2"},
+    tags = ["L20_CU13"],
+    timeout = "moderate",
+)
+
+py_test(
+    name = "tail_reuse_tp_subgroups_integration_test",
+    srcs = ["tail_reuse_cp_completion_integration_test.py"],
+    main = "tail_reuse_cp_completion_integration_test.py",
+    data = [":th_tail_reuse_cp_completion_integration_test"],
+    deps = [
+        "//rtp_llm:config",
+        "//rtp_llm:testlib",
+        "//rtp_llm:torch",
+    ],
+    env = {"GPU_COUNT": "4", "TEST_USING_DEVICE": "CUDA", "TAIL_REUSE_TP_GROUP_COUNT": "2"},
+    exec_properties = {"gpu": "L20_CU13", "gpu_count": "4"},
+    tags = ["L20_CU13"],
+    timeout = "moderate",
+)
+
 cc_test(
     name = "async_runner_test",
     srcs = [

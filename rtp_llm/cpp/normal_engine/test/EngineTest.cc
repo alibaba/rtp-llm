@@ -1,16 +1,29 @@
 #include "c10/util/intrusive_ptr.h"
 #include "torch/all.h"
 #include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <cstdlib>
+#include <filesystem>
+#include <fstream>
 #include <limits>
+#include <future>
+#include <iostream>
+#include <iterator>
+#include <thread>
 
+#include "absl/status/status.h"
 #define private public
 #include "rtp_llm/cpp/normal_engine/NormalEngine.h"
 #undef private
 
 #include "rtp_llm/models_py/bindings/core/Types.h"
 #include "rtp_llm/cpp/cache/CacheConfigCreator.h"
+#include "rtp_llm/cpp/cache/KVCacheHashUtil.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCache.h"
+#include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 #include "rtp_llm/cpp/testing/TestBase.h"
+#include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/models/models_weight/W.h"
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
 #include "rtp_llm/cpp/engine_base/schedulers/FIFOScheduler.h"
@@ -21,7 +34,11 @@
 #include "gtest/gtest.h"
 #include <limits>
 #include <memory>
+#include <optional>
 #include <pybind11/embed.h>
+#include <stdexcept>
+#include <utility>
+#include <vector>
 
 namespace py = pybind11;
 
@@ -32,6 +49,91 @@ namespace rtp_llm {
 
 class NormalEngineTest: public DeviceTestBase {
 public:
+    void checkInternalForkHistoryCopy(bool        invalid_row,
+                                      const char* remote_address   = nullptr,
+                                      const char* failed_block_dir = nullptr,
+                                      bool        fail_after_copy  = false);
+};
+
+class FailingSaveModel: public ModelBase {
+public:
+    FailingSaveModel(GenerateStreamPtr    stream,
+                     bool                 concurrent_cancel,
+                     std::vector<int64_t> expected_save_positions = {},
+                     bool                 throw_from_forward      = false):
+        stream_(std::move(stream)),
+        concurrent_cancel_(concurrent_cancel),
+        expected_save_positions_(std::move(expected_save_positions)),
+        throw_from_forward_(throw_from_forward) {}
+
+    bool supportsSparseCacheSave() const override {
+        return true;
+    }
+
+    GptModelOutputs forward(const GptModelInputs& inputs) override {
+        if (!expected_save_positions_.empty()) {
+            EXPECT_TRUE(inputs.cache_save_positions.defined() && inputs.cache_save_positions.numel() > 0);
+            EXPECT_TRUE(inputs.cache_save_block_ids.defined() && inputs.cache_save_block_ids.numel() > 0);
+            if (!inputs.cache_save_positions.defined()) {
+                return {};
+            }
+            const auto                 positions = inputs.cache_save_positions.to(torch::kCPU).contiguous();
+            const auto*                data      = positions.data_ptr<int64_t>();
+            const std::vector<int64_t> observed(data, data + positions.numel());
+            for (int64_t expected : expected_save_positions_) {
+                EXPECT_NE(std::find(observed.begin(), observed.end(), expected), observed.end());
+            }
+        }
+        // Submit real device work so the post-writer completion boundary
+        // and the cancellation guard both cover an in-flight CUDA stream.
+        writer_work_ = torch::ones({1024}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
+        writer_work_submitted_ = true;
+        if (concurrent_cancel_) {
+            stream_->reportError(ErrorCode::EXECUTION_EXCEPTION, "injected cancellation");
+            release_future_ = std::async(std::launch::async, [this]() {
+                stream_->releaseResource();
+                released_.store(true, std::memory_order_release);
+            });
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            EXPECT_FALSE(released_.load(std::memory_order_acquire));
+        }
+        if (throw_from_forward_) {
+            throw std::runtime_error("injected selected writer failure");
+        }
+        return {};
+    }
+
+    std::optional<std::string> takeDeferredHiddenStateCaptureError() override {
+        if (throw_from_forward_) {
+            return std::nullopt;
+        }
+        return "injected deferred capture failure";
+    }
+
+    bool waitForConcurrentRelease() {
+        if (!concurrent_cancel_) {
+            return true;
+        }
+        if (release_future_.wait_for(std::chrono::seconds(3)) != std::future_status::ready) {
+            return false;
+        }
+        release_future_.get();
+        return released_.load(std::memory_order_acquire);
+    }
+
+    bool writerWorkSubmitted() const {
+        return writer_work_submitted_;
+    }
+
+private:
+    GenerateStreamPtr    stream_;
+    bool                 concurrent_cancel_;
+    std::vector<int64_t> expected_save_positions_;
+    bool                 throw_from_forward_;
+    torch::Tensor        writer_work_;
+    bool                 writer_work_submitted_{false};
+    std::future<void>    release_future_;
+    std::atomic<bool>    released_{false};
 };
 
 TEST_F(NormalEngineTest, testExecutorDecodesCopyRowsUsingPayloadTags) {
@@ -141,6 +243,996 @@ TEST_F(NormalEngineTest, testExecutorDecodesCopyRowsUsingPayloadTags) {
         EXPECT_TRUE(first_dst.cpu().eq(33).all().item<bool>());
         EXPECT_TRUE(second_dst.cpu().eq(invalid_row ? 44 : 22).all().item<bool>());
     }
+}
+
+TEST_F(NormalEngineTest, testSparseSaveRequiresWriterBeforeForward) {
+    class SparseSaveProcessor: public NormalBatchStreamProcessor {
+    public:
+        SparseSaveProcessor(const ModelConfig& model, const CacheConfig& cache):
+            NormalBatchStreamProcessor(model, PDSepConfig{}, ProfilingDebugLoggingConfig{}, cache, false) {}
+
+        absl::StatusOr<GptModelInputs> gatherModelInput(const StreamGroups& groups,
+                                                        TensorHolder&       holder) const override {
+            auto result = NormalBatchStreamProcessor::gatherModelInput(groups, holder);
+            if (result.ok()) {
+                result->cache_save_positions = torch::tensor({5}, torch::kInt64).reshape({1, 1});
+                result->cache_save_block_ids = torch::tensor({2}, torch::kInt32).reshape({1, 1, 1});
+            }
+            return result;
+        }
+    };
+
+    ModelConfig model;
+    model.num_layers                          = 1;
+    model.max_seq_len                         = 16;
+    model.vocab_size                          = 16;
+    model.input_vocab_size                    = 16;
+    model.hidden_size                         = 4;
+    model.attn_config.head_num                = 1;
+    model.attn_config.kv_head_num             = 1;
+    model.attn_config.size_per_head           = 4;
+    model.attn_config.tokens_per_block        = 2;
+    model.attn_config.kernel_tokens_per_block = 2;
+    CacheConfig cache;
+    cache.layer_num          = 1;
+    cache.seq_size_per_block = 2;
+    cache.dtype              = DataType::TYPE_FP16;
+    cache.fromGroupedSpecs({test::makeResolvedMhaSpec(cache.dtype, 1, 4, 2, "full")}, {{0}}, {CacheGroupType::FULL});
+    cache.finalizeBlockNums(4, RuntimeConfig{});
+    auto manager = std::make_shared<KVCacheManager>(cache);
+    ASSERT_TRUE(manager->init());
+
+    EngineInitParams params;
+    params.model_config_ = model;
+    params.py_model      = py::none();
+    NormalExecutor executor(params, manager);
+    bool           reached_model = false;
+    executor.setModel(
+        std::make_unique<MockModel>(model.vocab_size, [&](const GptModelInputs&) { reached_model = true; }));
+    executor.setBatchProcessor(std::make_unique<SparseSaveProcessor>(model, cache));
+    auto query             = std::make_shared<GenerateInput>();
+    query->input_ids       = torch::tensor({1, 2, 3, 4, 5}, torch::kInt32);
+    query->generate_config = std::make_shared<GenerateConfig>();
+    auto stream = std::make_shared<NormalGenerateStream>(query, model, RuntimeConfig{}, ResourceContext{}, nullptr);
+    BatchKVCacheResource resource;
+    resource.resetBatchSize(1);
+    resource.initGroups(cache.topologyPtr());
+    resource.mutableBlockIds(0, "full").assign({1, 2, 3});
+    stream->setKVCache(resource);
+    EXPECT_ANY_THROW((void)executor.process({stream}));
+    EXPECT_FALSE(reached_model);
+}
+
+TEST_F(NormalEngineTest, testFeaturePrefillWithoutWriterCannotPublishRegistration) {
+    class SparseSaveProcessor: public NormalBatchStreamProcessor {
+    public:
+        SparseSaveProcessor(const ModelConfig& model, const CacheConfig& cache):
+            NormalBatchStreamProcessor(model, PDSepConfig{}, ProfilingDebugLoggingConfig{}, cache, false) {}
+
+        absl::StatusOr<GptModelInputs> gatherModelInput(const StreamGroups& groups,
+                                                        TensorHolder&       holder) const override {
+            auto result = NormalBatchStreamProcessor::gatherModelInput(groups, holder);
+            if (result.ok()) {
+                result->cache_save_positions = torch::tensor({5}, torch::kInt64).reshape({1, 1});
+                result->cache_save_block_ids = torch::tensor({2}, torch::kInt32).reshape({1, 1, 1});
+            }
+            return result;
+        }
+    };
+
+    ModelConfig model;
+    model.num_layers                          = 1;
+    model.max_seq_len                         = 16;
+    model.vocab_size                          = 16;
+    model.input_vocab_size                    = 16;
+    model.hidden_size                         = 4;
+    model.attn_config.head_num                = 1;
+    model.attn_config.kv_head_num             = 1;
+    model.attn_config.size_per_head           = 4;
+    model.attn_config.tokens_per_block        = 2;
+    model.attn_config.kernel_tokens_per_block = 2;
+    CacheConfig cache;
+    cache.layer_num          = 1;
+    cache.seq_size_per_block = 2;
+    cache.dtype              = DataType::TYPE_FP16;
+    cache.fromGroupedSpecs({test::makeResolvedMhaSpec(cache.dtype, 1, 4, 2, "full")}, {{0}}, {CacheGroupType::FULL});
+    cache.finalizeBlockNums(8, RuntimeConfig{});
+
+    KVCacheConfig kv_config;
+    kv_config.reuse_cache                       = true;
+    kv_config.enable_prefill_partial_tail_reuse = true;
+    PDSepConfig pd_config;
+    pd_config.role_type = RoleType::PREFILL;
+    auto manager        = std::make_shared<KVCacheManager>(cache,
+                                                    false,
+                                                    nullptr,
+                                                    kv_config,
+                                                    ParallelismConfig{},
+                                                    RuntimeConfig{},
+                                                    SpeculativeExecutionConfig{},
+                                                    pd_config);
+    ASSERT_TRUE(manager->init());
+
+    EngineInitParams params;
+    params.model_config_   = model;
+    params.py_model        = py::none();
+    params.kv_cache_config = kv_config;
+    params.pd_sep_config   = pd_config;
+    NormalExecutor executor(params, manager);
+    bool           reached_model = false;
+    executor.setModel(
+        std::make_unique<MockModel>(model.vocab_size, [&](const GptModelInputs&) { reached_model = true; }));
+    executor.setBatchProcessor(std::make_unique<SparseSaveProcessor>(model, cache));
+
+    auto query             = std::make_shared<GenerateInput>();
+    query->input_ids       = torch::tensor({1, 2, 3, 4, 5}, torch::kInt32);
+    query->generate_config = std::make_shared<GenerateConfig>();
+    ResourceContext context;
+    context.cache_manager                     = manager;
+    context.reuse_cache                       = true;
+    context.role_type                         = RoleType::PREFILL;
+    context.ignore_request_cache_switches     = true;
+    context.enable_prefill_partial_tail_reuse = true;
+    auto  stream   = std::make_shared<NormalGenerateStream>(query, model, RuntimeConfig{}, context, nullptr);
+    auto& resource = stream->streamCacheResource();
+    resource.init(1);
+    ASSERT_TRUE(resource.initKVBlock().ok());
+    ASSERT_TRUE(resource.prefixCacheRegistration().has_value());
+    EXPECT_ANY_THROW((void)executor.process({stream}));
+    EXPECT_FALSE(reached_model);
+    for (const auto& point : resource.prefixCacheRegistration()->points) {
+        for (const auto& binding : point.group_bindings) {
+            EXPECT_NE(binding.state, PrefixCacheSaveState::CONTENT_COMPLETE);
+        }
+    }
+    stream->releaseResource();
+}
+
+TEST_F(NormalEngineTest, testTailReuseCaptureErrorAndConcurrentCancelNeverPublish) {
+    for (bool concurrent_cancel : {false, true}) {
+        ModelConfig model;
+        model.num_layers                          = 1;
+        model.max_seq_len                         = 16;
+        model.vocab_size                          = 16;
+        model.input_vocab_size                    = 16;
+        model.hidden_size                         = 4;
+        model.attn_config.head_num                = 1;
+        model.attn_config.kv_head_num             = 1;
+        model.attn_config.size_per_head           = 4;
+        model.attn_config.tokens_per_block        = 2;
+        model.attn_config.kernel_tokens_per_block = 2;
+        CacheConfig cache;
+        cache.layer_num          = 1;
+        cache.seq_size_per_block = 2;
+        cache.dtype              = DataType::TYPE_FP16;
+        cache.fromGroupedSpecs(
+            {test::makeResolvedMhaSpec(cache.dtype, 1, 4, 2, "full")}, {{0}}, {CacheGroupType::FULL});
+        cache.finalizeBlockNums(16, RuntimeConfig{});
+        KVCacheConfig kv_config;
+        kv_config.reuse_cache                       = true;
+        kv_config.enable_device_cache               = true;
+        kv_config.enable_prefill_partial_tail_reuse = true;
+        PDSepConfig pd_config;
+        pd_config.role_type = RoleType::PREFILL;
+        auto manager        = std::make_shared<KVCacheManager>(cache,
+                                                        false,
+                                                        nullptr,
+                                                        kv_config,
+                                                        ParallelismConfig{},
+                                                        RuntimeConfig{},
+                                                        SpeculativeExecutionConfig{},
+                                                        pd_config);
+        ASSERT_TRUE(manager->init());
+
+        ResourceContext context;
+        context.cache_manager                     = manager;
+        context.reuse_cache                       = true;
+        context.role_type                         = RoleType::PREFILL;
+        context.ignore_request_cache_switches     = true;
+        context.enable_prefill_partial_tail_reuse = true;
+        auto query                                = std::make_shared<GenerateInput>();
+        query->input_ids                          = torch::tensor({1, 2, 3, 4, 5}, torch::kInt32);
+        query->generate_config                    = std::make_shared<GenerateConfig>();
+        auto stream = std::make_shared<NormalGenerateStream>(query, model, RuntimeConfig{}, context, nullptr);
+        stream->generate_status_->status = StreamState::RUNNING;
+        auto& resource                   = stream->streamCacheResource();
+        resource.init(1);
+        ASSERT_TRUE(resource.initKVBlock().ok());
+        ASSERT_TRUE(resource.prepareRequiredContinuation().ok());
+        ASSERT_TRUE(resource.prefixCacheRegistration().has_value());
+        CacheKeysType path;
+        for (const auto& point : resource.prefixCacheRegistration()->points) {
+            path.push_back(point.endpoint.key);
+        }
+
+        EngineInitParams params;
+        params.model_config_   = model;
+        params.py_model        = py::none();
+        params.kv_cache_config = kv_config;
+        params.pd_sep_config   = pd_config;
+        NormalExecutor executor(params, manager);
+        auto           failing_model     = std::make_unique<FailingSaveModel>(stream, concurrent_cancel);
+        auto*          failing_model_ptr = failing_model.get();
+        executor.setModel(std::move(failing_model));
+        const auto status = executor.process({stream});
+        EXPECT_TRUE(status.ok()) << status.ToString();
+        EXPECT_TRUE(failing_model_ptr->waitForConcurrentRelease());
+        EXPECT_TRUE(stream->hasError());
+        EXPECT_FALSE(resource.prefixCacheRegistration()->content_completed);
+        const auto found = manager->blockTreeCache()->tree()->findNode(path);
+        EXPECT_TRUE(found.size() < path.size() || found.back()->token_end != 5);
+        if (!concurrent_cancel) {
+            stream->releaseResource();
+        }
+        EXPECT_TRUE(resource.prefixCacheRegistration()->source_pins.empty());
+    }
+}
+
+TEST_F(NormalEngineTest, testInternalForkWriterOrCaptureErrorAndConcurrentCancelNeverPublish) {
+    const std::vector<std::pair<bool, bool>> failure_cases{{false, false}, {false, true}, {true, false}, {true, true}};
+    for (const auto& [writer_failure, concurrent_cancel] : failure_cases) {
+        SCOPED_TRACE(::testing::Message()
+                     << "writer_failure=" << writer_failure << " concurrent_cancel=" << concurrent_cancel);
+        ModelConfig model;
+        model.num_layers                          = 1;
+        model.max_seq_len                         = 16;
+        model.vocab_size                          = 16;
+        model.input_vocab_size                    = 16;
+        model.hidden_size                         = 4;
+        model.attn_config.head_num                = 1;
+        model.attn_config.kv_head_num             = 1;
+        model.attn_config.size_per_head           = 4;
+        model.attn_config.tokens_per_block        = 2;
+        model.attn_config.kernel_tokens_per_block = 2;
+        auto          cache                       = test::makeSimpleLinearCacheConfig(1, 16, 2, DataType::TYPE_FP16);
+        KVCacheConfig kv_config;
+        kv_config.reuse_cache                           = true;
+        kv_config.enable_device_cache                   = true;
+        kv_config.enable_prefill_partial_tail_reuse     = true;
+        kv_config.enable_prefill_common_prefix_recovery = true;
+        PDSepConfig pd_config;
+        pd_config.role_type = RoleType::PREFILL;
+        auto manager        = std::make_shared<KVCacheManager>(cache,
+                                                        false,
+                                                        nullptr,
+                                                        kv_config,
+                                                        ParallelismConfig{},
+                                                        RuntimeConfig{},
+                                                        SpeculativeExecutionConfig{},
+                                                        pd_config);
+        ASSERT_TRUE(manager->init());
+
+        ResourceContext context;
+        context.cache_manager                         = manager;
+        context.reuse_cache                           = true;
+        context.role_type                             = RoleType::PREFILL;
+        context.ignore_request_cache_switches         = true;
+        context.enable_prefill_partial_tail_reuse     = true;
+        context.enable_prefill_common_prefix_recovery = true;
+        auto query                                    = std::make_shared<GenerateInput>();
+        query->input_ids                              = torch::tensor({1, 2, 3, 9, 5}, torch::kInt32);
+        query->generate_config                        = std::make_shared<GenerateConfig>();
+        auto stream = std::make_shared<NormalGenerateStream>(query, model, RuntimeConfig{}, context, nullptr);
+        stream->generate_status_->status = StreamState::RUNNING;
+        auto& resource                   = stream->streamCacheResource();
+        resource.init(1);
+        auto tokens = stream->completeTokenIdsPtr();
+
+        // The source shares three tokens with B, then diverges inside the
+        // second physical block. Matching must discover F3 from the tree.
+        const auto prefix_key = cacheKeyAtTokenEnd(*tokens, 0, 2, 2, 0);
+        const auto source_key = cacheKeyForSourceSegment(*tokens, {3, 4}, 2, 2, prefix_key);
+        auto       tree       = manager->blockTreeCache()->tree();
+        std::vector<std::vector<GroupSetResource>> empty(2, std::vector<GroupSetResource>(1));
+        const std::vector<std::vector<int>>        source_segments{{1, 2}, {3, 4}};
+        const std::vector<size_t>                  source_ends{2, 4};
+        ASSERT_EQ(tree->insertNode({prefix_key, source_key}, empty, false, false, &source_segments, &source_ends)
+                      .inserted_nodes.size(),
+                  2u);
+
+        auto         pool        = manager->blockTreeCache()->groupSets().front()->devicePools().front();
+        const size_t free_before = pool->freeBlocksNum();
+        ASSERT_TRUE(resource.initKVBlock().ok());
+        ASSERT_EQ(stream->initialReuseLength(), 0);
+        ASSERT_TRUE(resource.prepareRequiredContinuation().ok());
+        resource.prepareRegisteredSave();
+        ASSERT_TRUE(resource.prefixCacheRegistration().has_value());
+        const auto& registration = *resource.prefixCacheRegistration();
+        ASSERT_TRUE(registration.prepared);
+        ASSERT_EQ(registration.points.size(), 4u);
+        ASSERT_TRUE(registration.farthest_fork.has_value());
+        EXPECT_EQ(registration.farthest_fork->pos, 3u);
+        EXPECT_EQ(registration.points[2].endpoint.pos, 5u);
+        EXPECT_FALSE(registration.points[2].internal_only);
+        EXPECT_EQ(registration.points[3].endpoint.pos, 3u);
+        EXPECT_TRUE(registration.points[3].internal_only);
+        const auto& tail = registration.points[2].group_bindings.front();
+        const auto& fork = registration.points[3].group_bindings.front();
+        ASSERT_EQ(tail.state, PrefixCacheSaveState::REGISTERED);
+        ASSERT_EQ(fork.state, PrefixCacheSaveState::REGISTERED);
+        ASSERT_TRUE(tail.resource.hasCompleteDeviceValue());
+        ASSERT_TRUE(fork.resource.hasCompleteDeviceValue());
+        const auto tail_block = tail.resource.device_blocks.front();
+        const auto fork_block = fork.resource.device_blocks.front();
+        EXPECT_NE(tail_block, fork_block);
+
+        EngineInitParams params;
+        params.model_config_   = model;
+        params.py_model        = py::none();
+        params.kv_cache_config = kv_config;
+        params.pd_sep_config   = pd_config;
+        NormalExecutor executor(params, manager);
+        auto           failing_model =
+            std::make_unique<FailingSaveModel>(stream, concurrent_cancel, std::vector<int64_t>{3, 5}, writer_failure);
+        auto* failing_model_ptr = failing_model.get();
+        executor.setModel(std::move(failing_model));
+        if (writer_failure) {
+            EXPECT_THROW((void)executor.process({stream}), std::runtime_error);
+        } else {
+            const auto status = executor.process({stream});
+            EXPECT_TRUE(status.ok()) << status.ToString();
+        }
+        EXPECT_TRUE(failing_model_ptr->writerWorkSubmitted());
+        EXPECT_TRUE(failing_model_ptr->waitForConcurrentRelease());
+        if (!writer_failure || concurrent_cancel) {
+            EXPECT_TRUE(stream->hasError());
+        }
+        EXPECT_FALSE(registration.content_completed);
+        EXPECT_EQ(fork.state, PrefixCacheSaveState::REGISTERED);
+        EXPECT_EQ(tail.state, PrefixCacheSaveState::REGISTERED);
+        EXPECT_LT(tree->findNode({prefix_key, registration.points[3].endpoint.key}).size(), 2u);
+        EXPECT_LT(tree->findNode({prefix_key, registration.points[1].endpoint.key, registration.points[2].endpoint.key})
+                      .size(),
+                  3u);
+        if (!concurrent_cancel) {
+            stream->releaseResource();
+        }
+        EXPECT_TRUE(registration.source_pins.empty());
+        EXPECT_FALSE(pool->isAllocated(tail_block));
+        EXPECT_FALSE(pool->isAllocated(fork_block));
+        EXPECT_EQ(pool->freeBlocksNum(), free_before);
+        EXPECT_EQ(tree->findNode({prefix_key, source_key}).size(), 2u);
+
+        auto retry_query             = std::make_shared<GenerateInput>();
+        retry_query->input_ids       = torch::tensor({1, 2, 3, 9, 5}, torch::kInt32);
+        retry_query->generate_config = std::make_shared<GenerateConfig>();
+        auto  retry = std::make_shared<NormalGenerateStream>(retry_query, model, RuntimeConfig{}, context, nullptr);
+        auto& retry_resource = retry->streamCacheResource();
+        retry_resource.init(1);
+        ASSERT_TRUE(retry_resource.initKVBlock().ok());
+        ASSERT_TRUE(retry_resource.prepareRequiredContinuation().ok());
+        retry_resource.prepareRegisteredSave();
+        ASSERT_TRUE(retry_resource.prefixCacheRegistration().has_value());
+        const auto& retry_points = retry_resource.prefixCacheRegistration()->points;
+        ASSERT_EQ(retry_points.size(), 4u);
+        EXPECT_TRUE(retry_points[3].internal_only);
+        EXPECT_EQ(retry_points[3].endpoint.pos, 3u);
+        EXPECT_TRUE(retry_points[2].group_bindings.front().resource.hasCompleteDeviceValue());
+        EXPECT_TRUE(retry_points[3].group_bindings.front().resource.hasCompleteDeviceValue());
+        retry->releaseResource();
+        EXPECT_EQ(pool->freeBlocksNum(), free_before);
+    }
+}
+
+void NormalEngineTest::checkInternalForkHistoryCopy(bool        invalid_row,
+                                                    const char* remote_address,
+                                                    const char* failed_block_dir,
+                                                    bool        fail_after_copy) {
+    class ForkCopyRowProcessor: public NormalBatchStreamProcessor {
+    public:
+        ForkCopyRowProcessor(const ModelConfig& model,
+                             const CacheConfig& config,
+                             BlockIdxType       src,
+                             BlockIdxType       dst,
+                             bool&              observed,
+                             bool               invalid_row):
+            NormalBatchStreamProcessor(model, PDSepConfig{}, ProfilingDebugLoggingConfig{}, config, false),
+            src_(src),
+            dst_(dst),
+            observed_(observed),
+            invalid_row_(invalid_row) {}
+
+        absl::StatusOr<GptModelInputs> gatherModelInput(const StreamGroups& groups,
+                                                        TensorHolder&       holder) const override {
+            auto result = NormalBatchStreamProcessor::gatherModelInput(groups, holder);
+            if (!result.ok()) {
+                return result.status();
+            }
+            auto& inputs = result.value();
+            if (!inputs.kv_cache_update_mapping.defined()) {
+                return absl::InternalError("F3 history copy mapping was not gathered");
+            }
+            auto* rows = inputs.kv_cache_update_mapping.data_ptr<int32_t>();
+            for (int64_t i = 0; i < inputs.kv_cache_update_mapping.size(0); ++i) {
+                const auto group_row = rows[3 * i];
+                if (group_row >= 0 && static_cast<size_t>(group_row) < inputs.kv_cache_group_tags.size()
+                    && inputs.kv_cache_group_tags[group_row] == "linear" && rows[3 * i + 1] == src_
+                    && rows[3 * i + 2] == dst_) {
+                    observed_ = true;
+                    // Fault only the genuine F3 history-copy row. The existing
+                    // copy validator rejects the complete mapping before any copy.
+                    if (invalid_row_) {
+                        rows[3 * i] = static_cast<int32_t>(inputs.kv_cache_group_tags.size());
+                    }
+                    return result;
+                }
+            }
+            return absl::InternalError("F3 history copy row missing from gathered mapping");
+        }
+
+    private:
+        BlockIdxType src_;
+        BlockIdxType dst_;
+        bool&        observed_;
+        bool         invalid_row_;
+    };
+
+    ModelConfig model;
+    model.num_layers                          = 2;
+    model.max_seq_len                         = 16;
+    model.vocab_size                          = 16;
+    model.input_vocab_size                    = 16;
+    model.hidden_size                         = 4;
+    model.attn_config.head_num                = 1;
+    model.attn_config.kv_head_num             = 1;
+    model.attn_config.size_per_head           = 4;
+    model.attn_config.tokens_per_block        = 2;
+    model.attn_config.kernel_tokens_per_block = 2;
+
+    CacheConfig cache;
+    cache.layer_num          = 2;
+    cache.seq_size_per_block = 2;
+    cache.dtype              = DataType::TYPE_FP16;
+    auto full_spec           = test::makeResolvedMhaSpec(cache.dtype, 1, 4, 2, "full");
+    auto linear_spec = test::makeResolvedLinearSpec(cache.dtype, 1, 1, 1, 1, 2, 4, cache.dtype, cache.dtype, "linear");
+    cache.fromGroupedSpecs(
+        {full_spec, linear_spec}, {{0}, {1}}, {CacheGroupType::FULL, CacheGroupType::LINEAR}, {"full", "linear"});
+    cache.finalizeBlockNums(16, RuntimeConfig{});
+    KVCacheConfig kv_config;
+    kv_config.reuse_cache                           = true;
+    kv_config.enable_device_cache                   = true;
+    kv_config.enable_prefill_partial_tail_reuse     = true;
+    kv_config.enable_prefill_common_prefix_recovery = true;
+    RuntimeConfig runtime_config;
+    if (remote_address) {
+        runtime_config.model_name       = "common-prefix-real-remote-history-fixture";
+        kv_config.enable_remote_cache   = true;
+        kv_config.enable_memory_cache   = false;
+        kv_config.enable_disk_cache     = false;
+        kv_config.kvcm_server_address   = remote_address;
+        kv_config.kvcm_enable_vipserver = false;
+        // Isolate remote keys from other runs without changing production identity logic.
+        kv_config.kvcm_instance_group   = "default";
+        kv_config.kvcm_instance_id_salt = std::to_string(std::chrono::system_clock::now().time_since_epoch().count());
+    }
+    PDSepConfig pd_config;
+    pd_config.role_type = RoleType::PREFILL;
+    auto manager        = std::make_shared<KVCacheManager>(
+        cache, false, nullptr, kv_config, ParallelismConfig{}, runtime_config, SpeculativeExecutionConfig{}, pd_config);
+    ASSERT_TRUE(manager->init());
+
+    ResourceContext context;
+    context.cache_manager                         = manager;
+    context.reuse_cache                           = true;
+    context.role_type                             = RoleType::PREFILL;
+    context.ignore_request_cache_switches         = true;
+    context.enable_prefill_partial_tail_reuse     = true;
+    context.enable_prefill_common_prefix_recovery = true;
+    context.enable_remote_cache                   = remote_address != nullptr;
+    auto query                                    = std::make_shared<GenerateInput>();
+    query->input_ids                              = torch::tensor({1, 2, 3, 9, 5}, torch::kInt32);
+    query->generate_config                        = std::make_shared<GenerateConfig>();
+    auto stream = std::make_shared<NormalGenerateStream>(query, model, RuntimeConfig{}, context, nullptr);
+    stream->generate_status_->status = StreamState::RUNNING;
+    auto& resource                   = stream->streamCacheResource();
+    resource.init(1);
+    auto        tokens     = stream->completeTokenIdsPtr();
+    const auto  prefix_key = cacheKeyAtTokenEnd(*tokens, 0, 2, 2, 0);
+    const auto  source_key = cacheKeyForSourceSegment(*tokens, {3, 4}, 2, 2, prefix_key);
+    auto        tree       = manager->blockTreeCache()->tree();
+    const auto& groups     = manager->blockTreeCache()->groupSets();
+    ASSERT_EQ(groups.size(), 2u);
+    const auto full_group = std::find_if(
+        groups.begin(), groups.end(), [](const auto& group) { return group->groupTags().front() == "full"; });
+    const auto linear_group = std::find_if(
+        groups.begin(), groups.end(), [](const auto& group) { return group->groupTags().front() == "linear"; });
+    ASSERT_NE(full_group, groups.end());
+    ASSERT_NE(linear_group, groups.end());
+    const size_t linear_group_id = static_cast<size_t>(std::distance(groups.begin(), linear_group));
+    auto         linear_pool     = (*linear_group)->devicePools().front();
+
+    std::vector<std::vector<GroupSetResource>> source_resources(remote_address ? 3 : 2,
+                                                                std::vector<GroupSetResource>(groups.size()));
+    std::vector<std::pair<torch::Tensor, int>> source_payloads;
+    for (size_t node = 0; node < source_resources.size(); ++node) {
+        for (size_t group = 0; group < groups.size(); ++group) {
+            // A's FULL-only suffix keeps the preceding FULL nodes nonleaf during
+            // LINEAR eviction. This is ordinary partial-group content, not F state.
+            if (node == 2 && groups[group]->groupTags().front() != "full") {
+                continue;
+            }
+            auto       pool   = groups[group]->devicePools().front();
+            const auto blocks = pool->malloc(1);
+            ASSERT_TRUE(blocks.has_value());
+            pool->incRef(*blocks);
+            source_resources[node][group].device_blocks = *blocks;
+            const auto& tag                             = groups[group]->groupTags().front();
+            const int   layer                           = tag == "full" ? 0 : 1;
+            auto        payload = torch::from_blob(manager->convertIndexToAddr(layer, tag, blocks->front()).kv_addr,
+                                                   {static_cast<int64_t>(cache.group(tag).kvBlockStrideBytes())},
+                                            torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA));
+            const int   pattern = 37 + static_cast<int>(node * groups.size() + group);
+            payload.fill_(pattern);
+            if (!remote_address || tag == "full") {
+                source_payloads.emplace_back(std::move(payload), pattern);
+            }
+        }
+    }
+    auto                          source_linear = source_resources[0][linear_group_id].device_blocks.front();
+    std::vector<std::vector<int>> source_segments{{1, 2}, {3, 4}};
+    std::vector<size_t>           source_ends{2, 4};
+    CacheKeysType                 source_keys{prefix_key, source_key};
+    if (remote_address) {
+        source_segments.push_back({5, 6});
+        source_ends.push_back(6);
+        source_keys.push_back(cacheKeyForSourceSegment(*tokens, {5, 6}, 4, 2, source_key));
+    }
+    if (remote_address) {
+        // Publishing can start backend export on another thread. Complete source
+        // initialization before exposing these buffers to the ordinary storer.
+        runtimeSyncAndCheck();
+        // The public cache insertion path also registers eviction candidates.
+        // A raw tree insertion alone cannot be reclaimed by evictForGroup.
+        manager->blockTreeCache()->insert(
+            source_keys, source_resources, Tier::DEVICE, false, &source_segments, nullptr, &source_ends);
+        ASSERT_EQ(tree->findNode(source_keys).size(), 3u);
+    } else {
+        ASSERT_EQ(
+            tree->insertNode({prefix_key, source_key}, source_resources, false, false, &source_segments, &source_ends)
+                .inserted_nodes.size(),
+            2u);
+    }
+    for (size_t node = 0; node < source_resources.size(); ++node) {
+        for (size_t group = 0; group < groups.size(); ++group) {
+            groups[group]->devicePools().front()->decRef(source_resources[node][group].device_blocks);
+        }
+    }
+    auto blockBytes = [&](BlockIdxType block) {
+        return torch::from_blob(manager->convertIndexToAddr(1, "linear", block).kv_addr,
+                                {static_cast<int64_t>(cache.group("linear").kvBlockStrideBytes())},
+                                torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA));
+    };
+    runtimeSyncAndCheck();
+    const auto expected_remote_linear = blockBytes(source_linear).cpu().clone();
+    if (remote_address) {
+        auto backend = manager->blockTreeCache()->storageBackend();
+        ASSERT_NE(backend, nullptr);
+        StorageRequest request;
+        request.keys = std::make_shared<CacheKeysType>(CacheKeysType{prefix_key});
+        request.handles.resize(1);
+        for (size_t group = 0; group < groups.size(); ++group) {
+            request.handles[0].push_back(
+                {groups[group]->groupTags().front(), source_resources[0][group].device_blocks.front()});
+        }
+        // Normal cache insertion already exports both canonical A nodes. Avoid
+        // duplicate writes; poll G2's committed metadata from that real export.
+        // Later Stream reads must also prove the actual transferred bytes.
+        const auto deadline  = std::chrono::steady_clock::now() + std::chrono::seconds(60);
+        bool       committed = false;
+        while (!committed && std::chrono::steady_clock::now() < deadline) {
+            auto completion = std::make_shared<std::promise<bool>>();
+            auto future     = completion->get_future();
+            backend->match(request,
+                           [completion](size_t count,
+                                        std::shared_ptr<StorageBackendMatchMeta>,
+                                        bool                         success,
+                                        PrefixCacheRemoteQueryStatus status) {
+                               completion->set_value(success && count == 1
+                                                     && status == PrefixCacheRemoteQueryStatus::HIT);
+                           });
+            ASSERT_EQ(future.wait_until(deadline), std::future_status::ready);
+            committed = future.get();
+            if (!committed) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            }
+        }
+        ASSERT_TRUE(committed);
+        // Write-task pins can outlive metadata commit and are released one by
+        // one. Both LINEAR buffers must be quiescent before poisoning either.
+        for (const auto& node_resources : source_resources) {
+            if (node_resources[linear_group_id].device_blocks.empty()) {
+                continue;
+            }
+            const auto block = node_resources[linear_group_id].device_blocks.front();
+            while (linear_pool->refCount(block) > 1 && std::chrono::steady_clock::now() < deadline) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            }
+            ASSERT_EQ(linear_pool->refCount(block), 1u);
+        }
+        // A recycled allocation must not pass from stale original bytes when the
+        // remote transfer is missing. Poison only uploaded LINEAR sources; FULL
+        // stays immutable and expected_remote_linear owns detached CPU storage.
+        for (size_t node = 0; node < source_resources.size(); ++node) {
+            if (source_resources[node][linear_group_id].device_blocks.empty()) {
+                continue;
+            }
+            const auto block = source_resources[node][linear_group_id].device_blocks.front();
+            blockBytes(block).fill_(201 + static_cast<int>(node));
+        }
+        runtimeSyncAndCheck();
+        ASSERT_EQ(manager->blockTreeCache()->evictForGroup("linear", 2), 2);
+        auto retained = tree->findNode(source_keys);
+        ASSERT_EQ(retained.size(), 3u);
+        for (const auto* node : retained) {
+            ASSERT_TRUE(node->group_set_resources[static_cast<size_t>(std::distance(groups.begin(), full_group))]
+                            .hasCompleteDeviceValue());
+            ASSERT_FALSE(node->group_set_resources[linear_group_id].hasTier(Tier::DEVICE));
+            ASSERT_FALSE(node->group_set_resources[linear_group_id].hasTier(Tier::HOST));
+            ASSERT_FALSE(node->group_set_resources[linear_group_id].hasTier(Tier::DISK));
+        }
+        // Never dereference old LINEAR addresses after eviction: the expected bytes
+        // above own CPU storage, and only retained FULL tensors remain in source_payloads.
+    }
+    const size_t linear_free_before = linear_pool->freeBlocksNum();
+    const auto   source_refs_before = remote_address ? 0u : linear_pool->refCount(source_linear);
+    if (failed_block_dir) {
+        // The server for this opt-in run owns one fresh storage root. Match the
+        // exact uploaded G2 LINEAR bytes before taking only that file offline;
+        // metadata remains committed so the real SDK read must fail downstream.
+        namespace fs = std::filesystem;
+        const fs::path block_root(failed_block_dir);
+        ASSERT_TRUE(block_root.is_absolute());
+        ASSERT_EQ(block_root.filename(), "block");
+        ASSERT_TRUE(fs::is_directory(block_root));
+        ASSERT_FALSE(fs::is_symlink(block_root));
+        std::vector<fs::path> instances;
+        const std::string     instance_prefix = kv_config.kvcm_instance_id_salt + "_";
+        for (const auto& entry : fs::directory_iterator(block_root)) {
+            ASSERT_TRUE(entry.is_directory());
+            ASSERT_FALSE(entry.is_symlink());
+            if (entry.path().filename().string().rfind(instance_prefix, 0) == 0) {
+                instances.push_back(entry.path());
+            }
+        }
+        ASSERT_EQ(instances.size(), 1u);
+        const fs::path linear_dir = instances.front() / "tp0_Llinear";
+        ASSERT_TRUE(fs::is_directory(linear_dir));
+        ASSERT_FALSE(fs::is_symlink(linear_dir));
+        std::vector<fs::path> matching_files;
+        size_t                regular_files = 0;
+        const auto*           expected      = expected_remote_linear.data_ptr<uint8_t>();
+        for (const auto& entry : fs::directory_iterator(linear_dir)) {
+            ASSERT_TRUE(entry.is_regular_file());
+            ASSERT_FALSE(entry.is_symlink());
+            ++regular_files;
+            std::ifstream input(entry.path(), std::ios::binary);
+            ASSERT_TRUE(input.is_open());
+            const std::vector<uint8_t> bytes{std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()};
+            ASSERT_FALSE(input.bad());
+            if (bytes.size() == static_cast<size_t>(expected_remote_linear.numel())
+                && std::equal(bytes.begin(), bytes.end(), expected)) {
+                matching_files.push_back(entry.path());
+            }
+        }
+        ASSERT_EQ(regular_files, 2u);
+        ASSERT_EQ(matching_files.size(), 1u);
+        const fs::path missing_path = matching_files.front();
+        const fs::path held_path    = missing_path.string() + ".unavailable";
+        ASSERT_FALSE(fs::exists(held_path));
+        std::error_code rename_error;
+        fs::rename(missing_path, held_path, rename_error);
+        ASSERT_FALSE(rename_error) << rename_error.message();
+        ASSERT_FALSE(fs::exists(missing_path));
+        ASSERT_TRUE(fs::is_regular_file(held_path));
+        std::cerr << "real KVCM read fault: held G2 LINEAR object " << held_path << std::endl;
+
+        // The object is gone, but the real metadata service must still offer
+        // the committed G2 key. Otherwise this would only test a remote miss.
+        auto backend = manager->blockTreeCache()->storageBackend();
+        ASSERT_NE(backend, nullptr);
+        StorageRequest request;
+        request.keys = std::make_shared<CacheKeysType>(CacheKeysType{prefix_key});
+        request.handles.resize(1);
+        for (const auto& group : groups) {
+            request.handles[0].push_back({group->groupTags().front(), NULL_BLOCK_IDX});
+        }
+        auto completion = std::make_shared<std::promise<bool>>();
+        auto future     = completion->get_future();
+        backend->match(request,
+                       [completion](size_t count,
+                                    std::shared_ptr<StorageBackendMatchMeta>,
+                                    bool                         success,
+                                    PrefixCacheRemoteQueryStatus status) {
+                           completion->set_value(success && count == 1 && status == PrefixCacheRemoteQueryStatus::HIT);
+                       });
+        ASSERT_EQ(future.wait_for(std::chrono::seconds(60)), std::future_status::ready);
+        ASSERT_TRUE(future.get());
+    }
+    ASSERT_TRUE(resource.initKVBlock().ok());
+    if (failed_block_dir) {
+        ASSERT_TRUE(resource.asyncLoadCache());
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(60);
+        while (!resource.loadCacheDone() && std::chrono::steady_clock::now() < deadline) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        ASSERT_TRUE(resource.loadCacheDone());
+        EXPECT_FALSE(resource.asyncLoadCache());
+        EXPECT_EQ(stream->remoteReuseLength(), 0);
+        EXPECT_EQ(stream->initialReuseLength(), 0);
+        EXPECT_FALSE(stream->hasError());
+        EXPECT_EQ(stream->kvCache().cacheResource(0).storageBackendReuseBlockNum(), 0u);
+        ASSERT_TRUE(resource.prepareRequiredContinuation().ok());
+        resource.prepareRegisteredSave();
+        std::vector<std::pair<size_t, BlockIdxType>> optional_blocks;
+        std::vector<CacheKeyType>                    fork_keys;
+        bool                                         saw_internal_fork       = false;
+        bool                                         saw_fork_linear_binding = false;
+        EXPECT_TRUE(resource.prefixCacheRegistration().has_value());
+        if (resource.prefixCacheRegistration()) {
+            const auto& registration = *resource.prefixCacheRegistration();
+            EXPECT_TRUE(registration.prepared);
+            EXPECT_TRUE(registration.farthest_fork.has_value());
+            if (registration.farthest_fork) {
+                EXPECT_EQ(registration.farthest_fork->pos, 3u);
+            }
+            for (const auto& point : registration.points) {
+                if (point.internal_only) {
+                    EXPECT_EQ(point.endpoint.pos, 3u);
+                    saw_internal_fork = true;
+                    fork_keys.push_back(point.endpoint.key);
+                    EXPECT_LT(tree->findNode({prefix_key, point.endpoint.key}).size(), 2u);
+                }
+                for (const auto& binding : point.group_bindings) {
+                    // FULL can be an existing cached reference or a zero-state
+                    // demand at F. Only LINEAR's missing exact state must stay
+                    // unready after the failed remote byte read.
+                    if (point.internal_only && binding.group_set_id == linear_group_id) {
+                        saw_fork_linear_binding = true;
+                        EXPECT_EQ(binding.state, PrefixCacheSaveState::REGISTERED);
+                        EXPECT_EQ(binding.ownership, PrefixCacheSaveOwnership::OPTIONAL_REQUEST);
+                        EXPECT_TRUE(binding.resource.hasCompleteDeviceValue());
+                    }
+                    if (binding.ownership == PrefixCacheSaveOwnership::OPTIONAL_REQUEST
+                        && binding.resource.hasCompleteDeviceValue()) {
+                        for (const auto block : binding.resource.device_blocks) {
+                            optional_blocks.emplace_back(binding.group_set_id, block);
+                        }
+                    }
+                }
+            }
+        }
+        EXPECT_TRUE(saw_internal_fork);
+        EXPECT_TRUE(saw_fork_linear_binding);
+        EXPECT_FALSE(optional_blocks.empty());
+        for (const auto& [payload, pattern] : source_payloads) {
+            EXPECT_TRUE(payload.cpu().eq(pattern).all().item<bool>());
+        }
+        stream->releaseResource();
+        if (resource.prefixCacheRegistration()) {
+            EXPECT_TRUE(resource.prefixCacheRegistration()->source_pins.empty());
+        }
+        for (const auto& [group_id, block] : optional_blocks) {
+            EXPECT_FALSE(groups.at(group_id)->devicePools().front()->isAllocated(block));
+        }
+        for (const auto fork_key : fork_keys) {
+            EXPECT_LT(tree->findNode({prefix_key, fork_key}).size(), 2u);
+        }
+        EXPECT_EQ(linear_pool->freeBlocksNum(), linear_free_before);
+        ASSERT_EQ(tree->findNode(source_keys).size(), 3u);
+        for (const auto& [payload, pattern] : source_payloads) {
+            EXPECT_TRUE(payload.cpu().eq(pattern).all().item<bool>());
+        }
+        return;
+    }
+    if (remote_address) {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(60);
+        while (!resource.loadCacheDone() && std::chrono::steady_clock::now() < deadline) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        ASSERT_TRUE(resource.loadCacheDone());
+        ASSERT_EQ(stream->remoteReuseLength(), 2);
+        ASSERT_EQ(stream->kvCache().cacheResource(0).storageBackendReuseBlockNum(), 1u);
+        const auto& restored = stream->kvCache().cacheResource(0).blockIds("linear").blocks();
+        ASSERT_FALSE(restored.empty());
+        source_linear = restored.front();
+        runtimeSyncAndCheck();
+        const auto restored_linear_bytes = blockBytes(source_linear).cpu();
+        ASSERT_TRUE(torch::equal(restored_linear_bytes, expected_remote_linear));
+        EXPECT_FALSE(restored_linear_bytes.eq(201).any().item<bool>());
+        EXPECT_FALSE(restored_linear_bytes.eq(202).any().item<bool>());
+        for (const auto& [payload, pattern] : source_payloads) {
+            EXPECT_TRUE(payload.cpu().eq(pattern).all().item<bool>());
+        }
+        const auto& restored_full = stream->kvCache().cacheResource(0).blockIds("full").blocks();
+        ASSERT_FALSE(restored_full.empty());
+        auto      full_payload = torch::from_blob(manager->convertIndexToAddr(0, "full", restored_full.front()).kv_addr,
+                                                  {static_cast<int64_t>(cache.group("full").kvBlockStrideBytes())},
+                                             torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA));
+        const int full_pattern = 37 + static_cast<int>(std::distance(groups.begin(), full_group));
+        EXPECT_TRUE(full_payload.cpu().eq(full_pattern).all().item<bool>());
+    }
+    ASSERT_EQ(stream->initialReuseLength(), 2);
+    ASSERT_TRUE(resource.prepareRequiredContinuation().ok());
+    resource.prepareRegisteredSave();
+    ASSERT_TRUE(resource.prefixCacheRegistration().has_value());
+    const auto& registration = *resource.prefixCacheRegistration();
+    ASSERT_TRUE(registration.prepared);
+    ASSERT_TRUE(registration.farthest_fork.has_value());
+    ASSERT_EQ(registration.farthest_fork->pos, 3u);
+    const auto fork_point = std::find_if(registration.points.begin(), registration.points.end(), [](const auto& point) {
+        return point.internal_only && point.endpoint.pos == 3;
+    });
+    ASSERT_NE(fork_point, registration.points.end());
+    const auto tail_point = std::find_if(registration.points.begin(), registration.points.end(), [](const auto& point) {
+        return point.endpoint.pos == 5 && !point.internal_only;
+    });
+    ASSERT_NE(tail_point, registration.points.end());
+    const auto& fork_binding = fork_point->group_bindings[linear_group_id];
+    const auto& tail_binding = tail_point->group_bindings[linear_group_id];
+    ASSERT_EQ(fork_binding.state, PrefixCacheSaveState::REGISTERED);
+    ASSERT_EQ(tail_binding.state, PrefixCacheSaveState::REGISTERED);
+    ASSERT_EQ(fork_binding.ownership, PrefixCacheSaveOwnership::OPTIONAL_REQUEST);
+    ASSERT_TRUE(fork_binding.resource.hasCompleteDeviceValue());
+    const auto fork_destination = fork_binding.resource.device_blocks.front();
+    ASSERT_TRUE(tail_binding.resource.hasCompleteDeviceValue());
+    ASSERT_NE(fork_destination, tail_binding.resource.device_blocks.front());
+    const auto history_copy =
+        std::find_if(registration.copy_mappings.begin(), registration.copy_mappings.end(), [&](const auto& mapping) {
+            return mapping.tag == "linear" && mapping.src == source_linear && mapping.dst == fork_destination;
+        });
+    ASSERT_NE(history_copy, registration.copy_mappings.end());
+
+    ASSERT_NE(fork_destination, source_linear);
+    auto destination_payload = blockBytes(fork_destination);
+    destination_payload.fill_(211);
+    runtimeSyncAndCheck();
+    auto source_before = blockBytes(source_linear).cpu().clone();
+    ASSERT_FALSE(source_before.eq(211).any().item<bool>());
+    bool observed_fork_copy = false;
+    if (invalid_row) {
+        EngineInitParams params;
+        params.model_config_   = model;
+        params.py_model        = py::none();
+        params.kv_cache_config = kv_config;
+        params.pd_sep_config   = pd_config;
+        NormalExecutor executor(params, manager);
+        auto  failing_model     = std::make_unique<FailingSaveModel>(stream, false, std::vector<int64_t>{3, 5}, true);
+        auto* failing_model_ptr = failing_model.get();
+        executor.setModel(std::move(failing_model));
+        executor.setBatchProcessor(std::make_unique<ForkCopyRowProcessor>(
+            model, cache, source_linear, fork_destination, observed_fork_copy, true));
+        EXPECT_ANY_THROW((void)executor.process({stream}));
+        EXPECT_FALSE(failing_model_ptr->writerWorkSubmitted());
+        runtimeSyncAndCheck();
+        EXPECT_TRUE(destination_payload.cpu().eq(211).all().item<bool>());
+    } else if (fail_after_copy) {
+        // The executor performs the real registered F3 history transfer before
+        // entering the model. A bounded forward fault must leave the copied
+        // history unpublished and release both optional destinations.
+        EngineInitParams params;
+        params.model_config_   = model;
+        params.py_model        = py::none();
+        params.kv_cache_config = kv_config;
+        params.pd_sep_config   = pd_config;
+        NormalExecutor executor(params, manager);
+        auto  failing_model     = std::make_unique<FailingSaveModel>(stream, false, std::vector<int64_t>{3, 5}, true);
+        auto* failing_model_ptr = failing_model.get();
+        executor.setModel(std::move(failing_model));
+        executor.setBatchProcessor(std::make_unique<ForkCopyRowProcessor>(
+            model, cache, source_linear, fork_destination, observed_fork_copy, false));
+        EXPECT_THROW((void)executor.process({stream}), std::runtime_error);
+        EXPECT_TRUE(failing_model_ptr->writerWorkSubmitted());
+        runtimeSyncAndCheck();
+        EXPECT_TRUE(torch::equal(destination_payload.cpu(), source_before));
+    } else {
+        // Exercise the unmodified gathered mapping and real device-copy path.
+        // History alone is not completed F3 state: do not run a fake writer
+        // or mark/publish this registration as a successful model prefill.
+        ForkCopyRowProcessor processor(model, cache, source_linear, fork_destination, observed_fork_copy, false);
+        StreamGroups         stream_groups({stream});
+        TensorHolder         holder;
+        auto                 inputs = processor.gatherModelInput(stream_groups, holder);
+        ASSERT_TRUE(inputs.ok());
+        ASSERT_TRUE(observed_fork_copy);
+        ASSERT_NO_THROW(
+            manager->blockBatchCopyForForward(inputs->kv_cache_update_mapping, inputs->kv_cache_group_tags, true));
+        runtimeSyncAndCheck();
+        EXPECT_TRUE(torch::equal(destination_payload.cpu(), source_before));
+    }
+    EXPECT_TRUE(observed_fork_copy);
+    EXPECT_TRUE(torch::equal(blockBytes(source_linear).cpu(), source_before));
+    EXPECT_EQ(fork_binding.state, PrefixCacheSaveState::REGISTERED);
+    EXPECT_EQ(tail_binding.state, PrefixCacheSaveState::REGISTERED);
+    EXPECT_LT(tree->findNode({prefix_key, fork_point->endpoint.key}).size(), 2u);
+    EXPECT_LT(tree->findNode(registration.base_keys).size(), registration.base_keys.size());
+    for (const auto& [payload, pattern] : source_payloads) {
+        EXPECT_TRUE(payload.cpu().eq(pattern).all().item<bool>());
+    }
+    stream->releaseResource();
+    EXPECT_TRUE(registration.source_pins.empty());
+    EXPECT_FALSE(linear_pool->isAllocated(fork_destination));
+    if (!remote_address) {
+        EXPECT_EQ(linear_pool->refCount(source_linear), source_refs_before);
+    }
+    for (const auto& [payload, pattern] : source_payloads) {
+        EXPECT_TRUE(payload.cpu().eq(pattern).all().item<bool>());
+    }
+    EXPECT_EQ(linear_pool->freeBlocksNum(), linear_free_before);
+
+    if (remote_address) {
+        // Backend reads target request allocations, unlike HOST/DISK load-desc
+        // adoption. No completed prefill was stored, so original source nodes still
+        // have no LINEAR device resources and all request allocations are free.
+        const auto retained = tree->findNode(source_keys);
+        ASSERT_EQ(retained.size(), 3u);
+        for (const auto* node : retained) {
+            EXPECT_FALSE(node->group_set_resources[linear_group_id].hasTier(Tier::DEVICE));
+        }
+        return;
+    }
+
+    auto retry_query             = std::make_shared<GenerateInput>();
+    retry_query->input_ids       = torch::tensor({1, 2, 3, 9, 5}, torch::kInt32);
+    retry_query->generate_config = std::make_shared<GenerateConfig>();
+    auto  retry = std::make_shared<NormalGenerateStream>(retry_query, model, RuntimeConfig{}, context, nullptr);
+    auto& retry_resource = retry->streamCacheResource();
+    retry_resource.init(1);
+    ASSERT_TRUE(retry_resource.initKVBlock().ok());
+    ASSERT_EQ(retry->initialReuseLength(), 2);
+    ASSERT_TRUE(retry_resource.prepareRequiredContinuation().ok());
+    retry_resource.prepareRegisteredSave();
+    ASSERT_TRUE(retry_resource.prefixCacheRegistration().has_value());
+    const auto& retry_points = retry_resource.prefixCacheRegistration()->points;
+    EXPECT_TRUE(std::any_of(retry_points.begin(), retry_points.end(), [&](const auto& point) {
+        return point.internal_only && point.endpoint.pos == 3 && point.group_bindings.size() > linear_group_id
+               && point.group_bindings[linear_group_id].resource.hasCompleteDeviceValue();
+    }));
+    retry->releaseResource();
+    EXPECT_EQ(linear_pool->freeBlocksNum(), linear_free_before);
+    EXPECT_EQ(linear_pool->refCount(source_linear), source_refs_before);
+}
+
+TEST_F(NormalEngineTest, testInternalForkHistoryCopyRowValidationFailureDoesNotPublishOrDamageSource) {
+    checkInternalForkHistoryCopy(true);
+}
+
+TEST_F(NormalEngineTest, testInternalForkHistoryCopyCopiesSourceWithoutPrematurePublication) {
+    checkInternalForkHistoryCopy(false);
+}
+
+TEST_F(NormalEngineTest, testInternalForkRealHistoryCopyThenForwardFailureDoesNotPublish) {
+    checkInternalForkHistoryCopy(false, nullptr, nullptr, true);
+}
+
+TEST_F(NormalEngineTest, testRealRemoteHistoryRestoresStreamAndPreparesInternalFork) {
+    const char* address = std::getenv("COMMON_PREFIX_REAL_KVCM_ADDRESS");
+    if (address == nullptr || *address == '\0') {
+        GTEST_SKIP() << "manual integration requires COMMON_PREFIX_REAL_KVCM_ADDRESS";
+    }
+    // Preserve initialization diagnostics even if a fatal assertion returns from
+    // the helper or an exception unwinds this test. This does not change retry
+    // timing or the success criteria.
+    struct FlushRemoteTestLogs {
+        ~FlushRemoteTestLogs() {
+            alog::Logger::flushAll();
+        }
+    } flush_remote_test_logs;
+    checkInternalForkHistoryCopy(false, address);
+}
+
+TEST_F(NormalEngineTest, testRealRemoteReadFailureDoesNotPublishInternalFork) {
+    const char* address   = std::getenv("COMMON_PREFIX_REAL_KVCM_ADDRESS");
+    const char* block_dir = std::getenv("COMMON_PREFIX_REAL_KVCM_BLOCK_DIR");
+    if (address == nullptr || *address == '\0' || block_dir == nullptr || *block_dir == '\0') {
+        GTEST_SKIP() << "manual integration requires COMMON_PREFIX_REAL_KVCM_ADDRESS and "
+                        "COMMON_PREFIX_REAL_KVCM_BLOCK_DIR";
+    }
+    struct FlushRemoteTestLogs {
+        ~FlushRemoteTestLogs() {
+            alog::Logger::flushAll();
+        }
+    } flush_remote_test_logs;
+    checkInternalForkHistoryCopy(false, address, block_dir);
 }
 
 TEST_F(NormalEngineTest, testDecodeWarmupReserveTokensAreConvertedToBlocksAfterAddition) {
@@ -257,7 +1349,7 @@ TEST_F(NormalEngineTest, testDecodeWarmupUsesWarmupCacheTopology) {
     ModelConfig   model_config;
     RuntimeConfig runtime_config;
     KVCacheConfig kv_cache_config;
-    auto params                    = createEngineInitParams(config, model_config, runtime_config, kv_cache_config);
+    auto          params           = createEngineInitParams(config, model_config, runtime_config, kv_cache_config);
     params.pd_sep_config.role_type = RoleType::DECODE;
 
     bool saw_decode_warmup             = false;
@@ -283,18 +1375,21 @@ TEST_F(NormalEngineTest, testDecodeWarmupUsesWarmupCacheTopology) {
     auto engine = std::make_shared<NormalEngine>(params, nullptr);
 
     EXPECT_TRUE(saw_decode_warmup);
+    ASSERT_NE(engine->resourceContext().cache_manager, nullptr);
+    EXPECT_EQ(engine->resourceContext().cache_manager->canonicalSizePerBlock(),
+              engine->resourceContext().cache_manager->cacheConfig().seq_size_per_block);
 }
 
 TEST_F(NormalEngineTest, testCacheManagerInitFailureDoesNotPublishPartialState) {
     ModelConfig model;
-    model.num_layers                   = 1;
-    model.attn_config.head_num         = 1;
-    model.attn_config.kv_head_num      = 1;
-    model.attn_config.size_per_head    = 1;
+    model.num_layers                          = 1;
+    model.attn_config.head_num                = 1;
+    model.attn_config.kv_head_num             = 1;
+    model.attn_config.size_per_head           = 1;
     model.attn_config.tokens_per_block        = 1;
     model.attn_config.kernel_tokens_per_block = 1;
-    model.kv_cache_spec_descs          = {{{"default", KVCacheSpecType::MultiHeadAttention}}};
-    const auto config                  = CacheConfigCreator::createWarmupConfig(model, {});
+    model.kv_cache_spec_descs                 = {{{"default", KVCacheSpecType::MultiHeadAttention}}};
+    const auto config                         = CacheConfigCreator::createWarmupConfig(model, {});
 
     auto            previous  = std::make_shared<KVCacheManager>(config, /*warmup=*/true);
     auto            candidate = std::make_shared<KVCacheManager>(config, /*warmup=*/true);
@@ -308,6 +1403,88 @@ TEST_F(NormalEngineTest, testCacheManagerInitFailureDoesNotPublishPartialState) 
     EXPECT_EQ(resource_context.cache_manager, previous);
     EXPECT_EQ(resource_context.role_type, RoleType::PREFILL);
     EXPECT_EQ(group_num, 17);
+}
+
+TEST_F(NormalEngineTest, testCacheStoreProducerFactsFollowBoundWarmupCache) {
+    ModelConfig model;
+    model.num_layers                   = 1;
+    model.max_seq_len                  = 16;
+    model.vocab_size                   = 16;
+    model.hidden_size                  = 4;
+    model.attn_config.head_num         = 1;
+    model.attn_config.kv_head_num      = 1;
+    model.attn_config.size_per_head    = 4;
+    model.attn_config.tokens_per_block = 2;
+    model.kv_cache_spec_descs          = {{{"default", KVCacheSpecType::MultiHeadAttention}}};
+
+    ParallelismConfig parallelism;
+    parallelism.tp_rank                            = 1;
+    parallelism.tp_size                            = 2;
+    parallelism.prefill_cp_config.kv_cache_sharded = true;
+    parallelism.prefill_cp_config.method           = CPRotateMethod::ALL_GATHER;
+    auto       cache_config = CacheConfigCreator::createConfig(model, parallelism, KVCacheConfig{});
+    const auto draft_config = cache_config;
+    cache_config.mtp_sub_configs.push_back(cache_config.mergeMTPModule(draft_config, 0, cache_config.layer_num));
+    cache_config.finalizeBlockNums(/*global_block_num=*/8, RuntimeConfig{});
+    auto       warmup_config       = CacheConfigCreator::createWarmupConfig(model, parallelism);
+    const auto warmup_draft_config = warmup_config;
+    warmup_config.mtp_sub_configs.push_back(
+        warmup_config.mergeMTPModule(warmup_draft_config, 0, warmup_config.layer_num));
+    warmup_config.finalizeBlockNums(/*global_block_num=*/2, RuntimeConfig{});
+    auto live_manager =
+        std::make_shared<KVCacheManager>(cache_config, /*warmup=*/false, nullptr, KVCacheConfig{}, parallelism);
+    auto fake_manager = std::make_shared<KVCacheManager>(warmup_config, /*warmup=*/true);
+    ASSERT_TRUE(live_manager->init());
+    ASSERT_TRUE(fake_manager->init());
+    ASSERT_TRUE(live_manager->cacheConfig().request_projection_required);
+    EXPECT_EQ(live_manager->cacheConfig().cache_cp_size, 2);
+    ASSERT_FALSE(fake_manager->cacheConfig().request_projection_required);
+    EXPECT_EQ(fake_manager->cacheConfig().cache_cp_size, 1);
+    EXPECT_EQ(live_manager->canonicalSizePerBlock(), 4);
+    EXPECT_EQ(fake_manager->canonicalSizePerBlock(), 2);
+    for (const auto& manager : {live_manager, fake_manager}) {
+        const auto& draft = manager->getMTPModuleCacheConfig(0);
+        EXPECT_EQ(draft.globalSizePerBlock(draft.groupTags().front()), manager->canonicalSizePerBlock());
+    }
+
+    EngineInitParams params;
+    params.model_config_           = model;
+    params.parallelism_config      = parallelism;
+    params.pd_sep_config.role_type = RoleType::PREFILL;
+    params.py_model                = py::none();
+    std::vector<std::optional<std::pair<int, int>>> observed;
+    NormalExecutor::test_model_factory = [&](const GptModelInitParams& init) {
+        observed.push_back(init.cache_store_producer_cp_topology);
+        EXPECT_EQ(init.parallelism_config.tp_rank, 1u);
+        EXPECT_EQ(init.parallelism_config.tp_size, 2u);
+        return std::make_unique<MockModel>(model.vocab_size);
+    };
+    struct FactoryResetGuard {
+        ~FactoryResetGuard() {
+            NormalExecutor::test_model_factory = nullptr;
+        }
+    } factory_reset_guard;
+
+    NormalExecutor live(params, live_manager, /*warm_up=*/false);
+    NormalExecutor warmup(params, fake_manager, /*warm_up=*/true);
+    ASSERT_EQ(observed.size(), 2u);
+    ASSERT_TRUE(observed[0].has_value());
+    ASSERT_TRUE(observed[1].has_value());
+    EXPECT_EQ(*observed[0], (std::pair<int, int>{1, 2}));
+    EXPECT_EQ(*observed[1], (std::pair<int, int>{0, 1}));
+
+    for (const auto speculative_type : {SP_TYPE_MTP, SP_TYPE_DSPARK}) {
+        params.sp_config.type = speculative_type;
+        NormalExecutor draft(params, live_manager, /*warm_up=*/false, /*is_propose=*/true, /*index=*/0);
+        NormalExecutor draft_warmup(params, fake_manager, /*warm_up=*/true, /*is_propose=*/true, /*index=*/0);
+    }
+    ASSERT_EQ(observed.size(), 6u);
+    for (size_t i = 2; i < observed.size(); i += 2) {
+        ASSERT_TRUE(observed[i].has_value());
+        ASSERT_TRUE(observed[i + 1].has_value());
+        EXPECT_EQ(*observed[i], (std::pair<int, int>{1, 2}));
+        EXPECT_EQ(*observed[i + 1], (std::pair<int, int>{0, 1}));
+    }
 }
 
 TEST_F(NormalEngineTest, testRejectGenerationPrefillWithSpeculativeBeforeRunnerCreation) {
@@ -412,7 +1589,7 @@ TEST_F(NormalEngineTest, testPrefillWarmUpUsesCachelessSingleInput) {
     ModelConfig   model_config;
     RuntimeConfig runtime_config;
     KVCacheConfig kv_cache_config;
-    auto params            = createEngineInitParams(config, model_config, runtime_config, kv_cache_config);
+    auto          params = createEngineInitParams(config, model_config, runtime_config, kv_cache_config);
 
     const KVCacheSpecDesc default_desc{"default", KVCacheSpecType::MultiHeadAttention};
     KVCacheSpecDesc       indexer_desc{"indexer_kv", KVCacheSpecType::OpaqueKV};
@@ -876,14 +2053,7 @@ TEST_F(NormalEngineTest, testChunkedPrefillWarmupStartup) {
     // whole-segment shape runs once during warmup and once while constructing the system prompt.
     ASSERT_EQ(*config.forward_shapes,
               (std::vector<ForwardShape>{
-                  {4, 0, 1},
-                  {4, 4, 1},
-                  {4, 8, 1},
-                  {4, 12, 1},
-                  {3, 16, 1},
-                  {16, 14, 4},
-                  {7, 0, 1},
-                  {7, 0, 1}}));
+                  {4, 0, 1}, {4, 4, 1}, {4, 8, 1}, {4, 12, 1}, {3, 16, 1}, {16, 14, 4}, {7, 0, 1}, {7, 0, 1}}));
     const auto& cache_config = engine->resourceContext().cache_manager->cacheConfig();
     ASSERT_EQ(cache_config.groups().size(), 1u);
     ASSERT_EQ(cache_config.groups().front().block_num, 100u);
@@ -933,12 +2103,12 @@ TEST_F(NormalEngineTest, testChunkedPrefillGenerationGraphWarmupUsesChunkShapes)
     ModelConfig   model_config;
     RuntimeConfig runtime_config;
     KVCacheConfig kv_cache_config;
-    auto params = createEngineInitParams(config, model_config, runtime_config, kv_cache_config);
-    params.parallelism_config.role_type                             = RoleType::PDFUSION;
-    params.hw_kernel_config.enable_cuda_graph                       = true;
+    auto          params                = createEngineInitParams(config, model_config, runtime_config, kv_cache_config);
+    params.parallelism_config.role_type = RoleType::PDFUSION;
+    params.hw_kernel_config.enable_cuda_graph                        = true;
     params.hw_kernel_config.generation_prefill_capture_token_buckets = {4, 8};
 
-    auto forward_shapes = std::make_shared<std::vector<ForwardShape>>();
+    auto forward_shapes                = std::make_shared<std::vector<ForwardShape>>();
     NormalExecutor::test_model_factory = [vocab = model_config.vocab_size, forward_shapes](const GptModelInitParams&) {
         return std::make_unique<MockModel>(vocab, forward_shapes);
     };
@@ -963,10 +2133,10 @@ TEST_F(NormalEngineTest, testChunkedPrefillGenerationGraphWarmupUsesChunkShapes)
 
 TEST_F(NormalEngineTest, testChunkedPrefillLossWarmupUsesWholeSegment) {
     CustomConfig config;
-    config.warm_up             = true;
-    config.warm_up_with_loss   = true;
-    config.prefill_chunk_size  = 4;
-    config.forward_shapes      = std::make_shared<std::vector<ForwardShape>>();
+    config.warm_up            = true;
+    config.warm_up_with_loss  = true;
+    config.prefill_chunk_size = 4;
+    config.forward_shapes     = std::make_shared<std::vector<ForwardShape>>();
     (void)createMockEngine(config);
 
     ASSERT_EQ(*config.forward_shapes, (std::vector<ForwardShape>{{19 * 128, 0, 128}}));

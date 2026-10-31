@@ -67,6 +67,8 @@ struct GptModelInputs {
     std::vector<std::string> kv_cache_group_tags;      // Local payload row -> group identity; not transmitted by TP.
     torch::Tensor            kv_cache_group_types;     // [group_num], int32, Convention: 0 -> LINEAR, 1 -> FULL.
     torch::Tensor            kv_cache_update_mapping;  // [block_copy_num, 3]: payload row, src/dst physical block IDs
+    torch::Tensor            cache_save_positions;     // int64 [context, sparse points], absolute token ends; -1 padding
+    torch::Tensor            cache_save_block_ids;     // int32 [payload tag, context, sparse points]; -1 means no write
 
     std::optional<std::vector<torch::Tensor>> multimodal_features;  // all features in gathered stream stored here
     torch::Tensor text_tokens_mask;  // text part in multimodal input tokens [cumulated_seq_len]

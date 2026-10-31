@@ -59,6 +59,9 @@ CacheGroupPolicy SpecBuilder::groupPolicy(const KVCacheSpecDesc& desc) {
         if (desc.reuse->enable_prefix_reuse.has_value()) {
             policy.enable_prefix_reuse = *desc.reuse->enable_prefix_reuse;
         }
+        if (desc.reuse->local_only_state.has_value()) {
+            policy.local_only_state = *desc.reuse->local_only_state;
+        }
     }
     if (desc.capacity.has_value()) {
         if (desc.capacity->reservable.has_value()) {

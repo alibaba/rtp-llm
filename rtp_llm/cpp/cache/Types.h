@@ -1,8 +1,11 @@
 #pragma once
 
+#include <array>
 #include <cstddef>
 #include <memory>
+#include <optional>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 #include <cstdint>
@@ -16,6 +19,7 @@
 namespace rtp_llm {
 
 class AsyncContext;
+struct PrefixCacheRegistration;
 
 class CompleteTokenIds;
 using CompleteTokenIdsPtr = std::shared_ptr<CompleteTokenIds>;
@@ -58,6 +62,85 @@ struct GroupBlockIdPair {
 static_assert(sizeof(GroupBlockIdPair) == 3 * sizeof(int32_t),
               "GroupBlockIdPair must match the three-column int32 tensor layout");
 
+enum class PrefixCacheMediumStatus : uint8_t {
+    NOT_CHECKED = 0,
+    DISABLED,
+    CHECKED,
+};
+
+struct PrefixCacheGroupObservation {
+    size_t                                 group_set_id{0};
+    std::vector<std::string>              member_tags;
+    std::array<std::optional<size_t>, 3>  max_pos;
+    std::array<std::optional<CacheKeyType>, 3> max_key;
+};
+
+struct PrefixCachePlanPoint {
+    size_t       index{0};
+    CacheKeyType key{0};
+    size_t       pos{0};
+};
+
+enum class PrefixCacheSaveState : uint8_t {
+    REGISTERED = 0,
+    CONTENT_COMPLETE,
+    UNFULFILLED,
+    CACHED_REF,  // Existing immutable checkpoint protected by this registration.
+};
+
+enum class PrefixCacheSaveOwnership : uint8_t {
+    NONE = 0,
+    REQUIRED_RUNTIME,  // The existing BatchKVCacheResource owns this block's request reference.
+    OPTIONAL_REQUEST,  // This registration owns a separate request reference until T04 releases it.
+    CACHED_REQUEST,    // cached_path_indices refer to shared registration-owned cached source pins.
+    PINNED_RUNTIME,    // Dense SWA runtime value protected by shared registration-owned pins; no snapshot.
+};
+
+enum class PrefixCachePlanState : uint8_t {
+    NOT_FORMED = 0,
+    FORMED,
+    TERMINAL_UNFORMED,
+};
+
+inline const char* prefixCachePlanStateName(PrefixCachePlanState state) {
+    switch (state) {
+        case PrefixCachePlanState::FORMED:
+            return "formed";
+        case PrefixCachePlanState::TERMINAL_UNFORMED:
+            return "terminal_unformed";
+        case PrefixCachePlanState::NOT_FORMED:
+            break;
+    }
+    return "not_formed";
+}
+
+enum class PrefixCacheRemoteQueryStatus : uint8_t {
+    UNSET = 0,
+    NOT_QUERIED,
+    HIT,
+    MISS,
+    ERROR,
+};
+
+struct PrefixCacheRemoteObservation {
+    PrefixCacheRemoteQueryStatus query_status{PrefixCacheRemoteQueryStatus::NOT_QUERIED};
+    std::optional<size_t>        candidate_pos;
+    std::optional<bool>          effective;
+};
+
+struct PrefixCacheMatchObservation {
+    int64_t                                input_tokens{0};
+    std::optional<size_t>                  content_pos;
+    std::optional<CacheKeyType>            content_key;
+    size_t                                 content_node_offset{0};
+    bool                                   content_partial{false};
+    std::optional<size_t>                  local_valid_pos;
+    std::optional<CacheKeyType>            local_valid_key;
+    std::array<PrefixCacheMediumStatus, 3> medium_status;
+    std::vector<PrefixCacheGroupObservation> groups;
+    int64_t                                match_time_us{0};
+};
+
 struct MallocInfo {
     BatchKVCacheResourcePtr batch_kv_cache_resource;
     CompleteTokenIdsPtr     complete_token_ids;
@@ -69,9 +152,30 @@ struct MallocInfo {
     // Prefill init keeps reused prefix slots intact because model-path kernels
     // still read them by prefix_length.
     bool enable_remove_skipped_blocks = true;
+    // Present only for an enabled, local, noncanonical short-leaf resume.
+    // Incremental SWA allocation must keep the real prefix history at G;
+    // request_incr_seq_len is the destination N and cannot recover G.
+    std::optional<size_t> precise_resume_endpoint;
     // Override for incrMalloc's seqLength read; -1 = fall back to complete_token_ids->seqLength().
     // Lets the state machine feed the publish-time value instead of racing with the async worker.
     int incr_seq_len_override = -1;
+    // Immutable request snapshot for partial-tail resume matching. Populated by
+    // the stream layer only when the feature is enabled; the token identity must
+    // stay stable across malloc retries while the resource's own cache keys are
+    // recomputed by the manager. Empty match_keys fall back to the manager's
+    // freshly computed keys.
+    struct RequestLayout {
+        CacheKeysType match_keys;  // full global cumulative hashes
+        // Owned full-input token snapshot, populated when complete prefix
+        // observability is enabled OR partial tail reuse needs it. Empty means
+        // content matching is unformed.
+        std::vector<int> token_ids;
+        // Functional local short-leaf lookup uses this immutable first-prefill
+        // view even when prefix observability is disabled.
+        bool   partial_tail_reuse = false;
+        size_t original_input_tokens = 0;
+    };
+    std::shared_ptr<const RequestLayout> request_layout;
 
     // Initial chunk admission reserves fixed sparse banks for this maximum grant.
     int max_chunk_tokens = 0;
@@ -111,6 +215,10 @@ struct MallocResult {
         status(success ? MallocStatus::NONE : MallocStatus::INTERNAL_ERROR),
         async_context(std::move(async_context)) {}
 
+    // Authenticated local content divergence discovered during the initial
+    // matching attempt. It is independent of the eventual usable G.
+    std::optional<PrefixCachePlanPoint> farthest_fork;
+
     bool         success            = false;
     int          reuse_len          = 0;
     int64_t      match_cost_time_us = 0;
@@ -125,6 +233,10 @@ struct MallocResult {
     int64_t load_prepare_latency_us = 0;
     int64_t device_input_length     = 0;
     bool    load_attempted          = false;
+
+    // Diagnostic-only value snapshot; absence means the match observation is
+    // not formed rather than a zero endpoint.
+    std::optional<PrefixCacheMatchObservation> match_observation;
 };
 
 struct FreeInfo {
@@ -139,6 +251,11 @@ struct InsertInfo {
     CompleteTokenIdsPtr     complete_token_ids;
     bool                    is_resident;
     Tier                    target_tier{Tier::DEVICE};
+    // Optional request-owned plan-state sink. The cache writes only the state;
+    // plan points remain owned by the store task.
+    PrefixCachePlanState*   prefix_plan_state{nullptr};
+    const PrefixCacheRegistration* prefix_cache_registration{nullptr};
+    std::optional<int64_t> observation_request_id{std::nullopt};
 };
 
 }  // namespace rtp_llm
