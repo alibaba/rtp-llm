@@ -131,6 +131,11 @@ inline __device__ __nv_bfloat162 hadd2(__nv_bfloat162 a, __nv_bfloat162 b) {
 }
 #endif  // ENABLE_BF16
 
+#if defined(USE_PPU) && USE_PPU
+// PPU requires this overload to be visible at template definition time.
+inline __device__ float2 operator+(float2 a, float2 b);
+#endif
+
 template<typename T>
 inline __device__ T add(T a, T b) {
     return a + b;
