@@ -1,6 +1,7 @@
 #include "rtp_llm/cpp/cache/test/KVCacheManagerWithTierCacheTestBase.h"
 #include "rtp_llm/cpp/engine_base/schedulers/FIFOScheduler.h"
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
+#include "rtp_llm/cpp/cache/KVCacheHashUtil.h"
 
 namespace rtp_llm::test {
 using namespace tier_cache_test_detail;
@@ -14,13 +15,6 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4CpCanonicalFullAndSwaRoundTripThroug
     ASSERT_NE(manager_, nullptr);
     auto cache = manager_->blockTreeCache();
 
-    auto cp_mapper = std::make_shared<CPSlotMapper>(
-        /*cp_rank=*/0, /*cp_size=*/2, static_cast<int>(cache_config_.seq_size_per_block));
-    manager_->cp_slot_mapper_ = cp_mapper;
-    manager_->coordinator_manager_->setCPSlotMapper(cp_mapper);
-    ASSERT_EQ(manager_->cpSlotMapper(), cp_mapper);
-    ASSERT_TRUE(cp_mapper->isSharded());
-
     auto pausable_engine =
         std::make_shared<PausableRecordingTransferEngine>(cache->groupSets(), cache->isDiskCacheEnabled());
     BlockTreeCacheTestPeer::setPerRankBlockTransferEngineForTest(*cache, pausable_engine);
@@ -28,14 +22,16 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4CpCanonicalFullAndSwaRoundTripThroug
 
     const auto initial_device = snapshotDevicePools(manager_);
     const auto initial_lower  = snapshotLowerPools(*cache, GetParam());
-    auto       maybe_seed =
-        seedCpCanonicalDevicePrefix(manager_, cache_config_, cp_mapper, /*token_offset=*/0, /*logical_blocks=*/2);
+    auto       maybe_seed     = seedCpCanonicalDevicePrefix(manager_,
+                                                  cache_config_,
+                                                  /*cp_size=*/2,
+                                                  /*token_offset=*/0,
+                                                  /*logical_blocks=*/2);
     ASSERT_TRUE(maybe_seed.has_value());
     auto seed = std::move(*maybe_seed);
 
     ASSERT_EQ(seed.full_cache_keys.size(), 2u);
     ASSERT_EQ(seed.cache_keys.size(), 1u);
-    EXPECT_EQ(seed.cache_keys, cp_mapper->canonicalCacheKeys(seed.full_cache_keys));
     EXPECT_EQ(seed.cache_keys.front(), seed.full_cache_keys.back());
     EXPECT_TRUE(seed.resource->lastBlockAligned());
     const auto key_snapshot = cache->getKeySnapshot();
@@ -51,23 +47,22 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4CpCanonicalFullAndSwaRoundTripThroug
             const auto type = cache_config_.topology().group(tag).policy.group_type;
             if (type == CacheGroupType::FULL) {
                 saw_full = true;
-                EXPECT_TRUE(cp_mapper->blockRoundRobinGroup(cache_config_, tag));
-                EXPECT_FALSE(cp_mapper->compactLastRankGroup(cache_config_, tag));
+                EXPECT_EQ(cache_config_.topology().group(tag).policy.cp_mapping, CpBlockMappingMode::BLOCK_ROUND_ROBIN);
             } else {
                 ASSERT_EQ(type, CacheGroupType::SWA);
                 saw_swa = true;
-                EXPECT_FALSE(cp_mapper->blockRoundRobinGroup(cache_config_, tag));
-                EXPECT_TRUE(cp_mapper->compactLastRankGroup(cache_config_, tag));
+                EXPECT_EQ(cache_config_.topology().group(tag).policy.cp_mapping, CpBlockMappingMode::COMPACT_LAST_RANK);
             }
-            const auto position = cpCanonicalBlockPosition(*cp_mapper, cache_config_, tag, 0);
-            ASSERT_TRUE(position.has_value());
-            ASSERT_LT(*position, seed.blocks_by_group.at(tag).size());
-            EXPECT_FALSE(isNullBlockIdx(seed.blocks_by_group.at(tag)[*position]));
+            const auto expected_position = expectedCpFixturePosition(cache_config_, tag, 0);
+            ASSERT_TRUE(expected_position.has_value());
+            const auto position = *expected_position;
+            EXPECT_EQ(cache_config_.canonicalBlockPosition(tag, 0), position);
+            ASSERT_LT(position, seed.blocks_by_group.at(tag).size());
+            EXPECT_FALSE(isNullBlockIdx(seed.blocks_by_group.at(tag)[position]));
         }
     }
     EXPECT_TRUE(saw_full);
     EXPECT_TRUE(saw_swa);
-    ASSERT_TRUE(fillCpCanonicalSeedPayload(manager_, cache_config_, *cp_mapper, seed));
     ASSERT_NO_FATAL_FAILURE(expectPathIdleAtDevice(*cache, seed.cache_keys));
     ASSERT_TRUE(pathDevicePayloadMatches(manager_, *cache, seed.cache_keys));
 
@@ -111,7 +106,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4CpCanonicalFullAndSwaRoundTripThroug
         const GroupSetPtr& group_set = cache->groupSets()[descriptor.group_set_id];
         BlockIndicesType   expected_blocks;
         for (const auto& tag : group_set->groupTags()) {
-            const std::optional<size_t> position = cpCanonicalBlockPosition(*cp_mapper, cache_config_, tag, 0);
+            const auto position = expectedCpFixturePosition(cache_config_, tag, 0);
             ASSERT_TRUE(position.has_value());
             expected_blocks.push_back(seed.blocks_by_group.at(tag)[*position]);
         }
@@ -175,9 +170,13 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4CpCanonicalFullAndSwaRoundTripThroug
         makeTokenIds(/*offset=*/0, 2 * seq_size_per_block + 1, 2 * seq_size_per_block + 1, seq_size_per_block);
     MallocInfo load_info{load_resource, load_token_ids};
     load_info.enable_remove_skipped_blocks = false;
-    load_info.reuse_cache         = true;
-    load_info.enable_cache_lookup = true;
-    const auto load_result        = manager_->malloc(load_info);
+    load_info.reuse_cache                  = true;
+    load_info.enable_cache_lookup          = true;
+    initCacheKeys(load_resource, load_token_ids, seq_size_per_block);
+    EXPECT_EQ(cache_config_.canonicalCacheKeys(load_resource->cacheKeys(0)), seed.cache_keys);
+    EXPECT_EQ(cache_config_.localAllocTokens("swa_kv", load_info.incrSeqLen()), load_token_ids->seqLength());
+    EXPECT_EQ(cache_config_.localAllocTokens("csa_state", load_info.incrSeqLen()), 2 * seq_size_per_block + 1);
+    const auto load_result = manager_->malloc(load_info);
     ASSERT_TRUE(load_result.success);
     EXPECT_EQ(load_result.reuse_len, 0);
 
@@ -203,16 +202,17 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4CpCanonicalFullAndSwaRoundTripThroug
         EXPECT_EQ(group_set->diskPool()->treeRefCount(resource.disk_block), 2u);
         ASSERT_EQ(group_set->groupTags().size(), group_set->devicePools().size());
         for (size_t member_index = 0; member_index < group_set->groupTags().size(); ++member_index) {
-            const auto&                 tag      = group_set->groupTags()[member_index];
-            const std::optional<size_t> position = cpCanonicalBlockPosition(*cp_mapper, cache_config_, tag, 0);
-            ASSERT_TRUE(position.has_value());
-            const BlockIndicesType& blocks = load_resource->blocks(0, tag);
-            ASSERT_LT(*position, blocks.size());
-            ASSERT_FALSE(isNullBlockIdx(blocks[*position]));
-            load_targets[group_set_id].push_back(blocks[*position]);
-            EXPECT_EQ(group_set->devicePools()[member_index]->refCount(blocks[*position]), 2u);
+            const auto& tag               = group_set->groupTags()[member_index];
+            const auto  expected_position = expectedCpFixturePosition(cache_config_, tag, 0);
+            ASSERT_TRUE(expected_position.has_value());
+            const auto              position = *expected_position;
+            const BlockIndicesType& blocks   = load_resource->blocks(0, tag);
+            ASSERT_LT(position, blocks.size());
+            ASSERT_FALSE(isNullBlockIdx(blocks[position]));
+            load_targets[group_set_id].push_back(blocks[position]);
+            EXPECT_EQ(group_set->devicePools()[member_index]->refCount(blocks[position]), 2u);
             ASSERT_TRUE(fillGroupBlockPayload(
-                manager_, cache_config_, tag, blocks[*position], /*path_index=*/0, /*poison=*/true));
+                manager_, cache_config_, tag, blocks[position], /*path_index=*/0, /*poison=*/true));
         }
     }
 
@@ -255,7 +255,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4CpCanonicalFullAndSwaRoundTripThroug
     }
     ASSERT_TRUE(pathDevicePayloadMatches(manager_, *cache, seed.cache_keys));
     ASSERT_TRUE(requestReusesExpectedCpCanonicalPath(
-        *cache, cache_config_, *cp_mapper, seed.cache_keys, load_resource, /*logical_reuse_blocks=*/1));
+        *cache, cache_config_, seed.cache_keys, load_resource, /*logical_reuse_blocks=*/1));
 
     manager_->free(FreeInfo{load_resource, load_token_ids});
     const size_t submits_before_second_hit = pausable_engine->submittedDescriptorCount();
@@ -264,9 +264,10 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4CpCanonicalFullAndSwaRoundTripThroug
         makeTokenIds(/*offset=*/0, 2 * seq_size_per_block + 1, 2 * seq_size_per_block + 1, seq_size_per_block);
     MallocInfo hit_info{hit_resource, hit_token_ids};
     hit_info.enable_remove_skipped_blocks = false;
-    hit_info.reuse_cache         = true;
-    hit_info.enable_cache_lookup = true;
-    const auto hit_result        = manager_->malloc(hit_info);
+    hit_info.reuse_cache                  = true;
+    hit_info.enable_cache_lookup          = true;
+    initCacheKeys(hit_resource, hit_token_ids, seq_size_per_block);
+    const auto hit_result = manager_->malloc(hit_info);
     ASSERT_TRUE(hit_result.success);
     EXPECT_EQ(hit_result.reuse_len, 2 * seq_size_per_block);
 
@@ -274,7 +275,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4CpCanonicalFullAndSwaRoundTripThroug
     EXPECT_EQ(pausable_engine->submittedDescriptorCount(), submits_before_second_hit);
     ASSERT_TRUE(pathDevicePayloadMatches(manager_, *cache, seed.cache_keys));
     ASSERT_TRUE(requestReusesExpectedCpCanonicalPath(
-        *cache, cache_config_, *cp_mapper, seed.cache_keys, hit_resource, /*logical_reuse_blocks=*/1));
+        *cache, cache_config_, seed.cache_keys, hit_resource, /*logical_reuse_blocks=*/1));
 
     manager_->free(FreeInfo{hit_resource, hit_token_ids});
     ASSERT_NO_FATAL_FAILURE(reclaimAndExpectInitialPools(manager_, initial_device, initial_lower, GetParam()));
@@ -287,7 +288,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4MixedDeviceHostDiskSegmentsLoadBack)
     for (const bool fail_load : {false, true}) {
         SCOPED_TRACE(fail_load ? "mixed protected/legacy failure" : "mixed successful load-back");
         ASSERT_NO_FATAL_FAILURE(initManager(/*device_blocks=*/16));
-        auto cache  = manager_->blockTreeCache();
+        auto cache = manager_->blockTreeCache();
         auto engine =
             std::make_shared<PausableRecordingTransferEngine>(cache->groupSets(), cache->isDiskCacheEnabled());
         BlockTreeCacheTestPeer::setPerRankBlockTransferEngineForTest(*cache, engine);
@@ -536,7 +537,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4MixedDeviceHostDiskSegmentsLoadBack)
             const auto after_failure = snapshotPathResources(*cache, seed.cache_keys);
             ASSERT_TRUE(after_failure.has_value());
             for (size_t group_set_id = 0; group_set_id < cache->groupSets().size(); ++group_set_id) {
-                const auto&  group_set   = cache->groupSets()[group_set_id];
+                const auto& group_set = cache->groupSets()[group_set_id];
                 // Injected transport failure does not identify a corrupt record.
                 for (size_t path = 0; path < 3; ++path) {
                     const auto& source = (*after_failure)[path][group_set_id];
@@ -621,8 +622,8 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4MixedDeviceHostDiskSegmentsLoadBack)
                         const BlockIndicesType& blocks = load_resource->blocks(0, tag);
                         ASSERT_GE(blocks.size(), 3u);
                         ASSERT_FALSE(isNullBlockIdx(blocks[path]));
-                        ASSERT_TRUE(fillGroupBlockPayload(
-                            manager_, cache_config_, tag, blocks[path], path, /*poison=*/true));
+                        ASSERT_TRUE(
+                            fillGroupBlockPayload(manager_, cache_config_, tag, blocks[path], path, /*poison=*/true));
                     }
                 }
             }

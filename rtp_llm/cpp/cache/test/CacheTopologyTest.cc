@@ -40,7 +40,7 @@ GroupBase makeLayoutGroup(const std::string& tag, int head_dim) {
     context.seq_size_per_block      = 8;
     context.kernel_tokens_per_block = 2;
     auto group                      = makeGroup(tag);
-    group.spec                      = MHAKVCacheSpec::build(desc, context);
+    group.spec                      = SpecBuilder::build(desc, context);
     return group;
 }
 
@@ -73,6 +73,53 @@ TEST(CacheTopologyTest, MaximumKernelExpansionDoesNotDependOnGroupOrder) {
     EXPECT_EQ(topology->maxKernelBlocksPerKvBlock(), 4u);
     auto reversed = CacheTopology::create({full, swa}, {{0, {"swa"}}, {1, {"full"}}});
     EXPECT_EQ(reversed->maxKernelBlocksPerKvBlock(), 4u);
+}
+
+TEST(CacheTopologyTest, CanonicalFinalizationPreservesPhysicalFingerprintAndTopology) {
+    CacheConfig original;
+    original.layer_num          = 1;
+    original.seq_size_per_block = 4;
+    original.setTopology({makeLayoutGroup("full", 8)}, {{0, {"full"}}});
+    const auto topology    = original.topologyPtr();
+    const auto spec        = original.group("full").spec;
+    const auto fingerprint = spec->fingerprint();
+    for (const auto& [cp_size, warmup] : std::vector<std::pair<int, bool>>{{1, false}, {2, false}, {4, true}}) {
+        auto              config = original;
+        ParallelismConfig parallelism;
+        parallelism.tp_size                            = cp_size;
+        parallelism.prefill_cp_config.kv_cache_sharded = true;
+        parallelism.prefill_cp_config.method           = CPRotateMethod::ALL_GATHER;
+        config.finalizeStorageLayout(parallelism, warmup);
+        EXPECT_EQ(config.canonicalSizePerBlock(), warmup ? 4u : 4u * cp_size);
+        EXPECT_EQ(config.topologyPtr(), topology);
+        EXPECT_EQ(config.group("full").spec, spec);
+        EXPECT_EQ(config.group("full").spec->fingerprint(), fingerprint);
+        EXPECT_EQ(config.group("full").seqSizePerBlock(), 8u);
+        EXPECT_EQ(config.group("full").kernelSeqSizePerBlock(), 2u);
+        EXPECT_EQ(config.group("full").kvBlockStrideBytes(), spec->block_size_bytes());
+        EXPECT_EQ(config.group("full").kvScaleStrideBytes(), spec->scale_block_size_bytes());
+    }
+    auto different_p                = spec->clone();
+    different_p->seq_size_per_block = 16;
+    EXPECT_NE(different_p->fingerprint(), fingerprint);
+    auto different_k                       = spec->clone();
+    different_k->kernel_seq_size_per_block = 4;
+    EXPECT_EQ(different_k->block_size_bytes(), spec->block_size_bytes());
+    EXPECT_NE(different_k->fingerprint(), fingerprint);
+    const auto different_bytes = makeLayoutGroup("full", 16).spec;
+    EXPECT_NE(different_bytes->block_size_bytes(), spec->block_size_bytes());
+    EXPECT_NE(different_bytes->fingerprint(), fingerprint);
+}
+
+TEST(CacheTopologyTest, ReuseCountsRequirePositiveCanonicalSpanForEveryGroup) {
+    for (const auto type : {CacheGroupType::FULL, CacheGroupType::LINEAR, CacheGroupType::SWA}) {
+        auto group = makeGroup("group", type);
+        EXPECT_ANY_THROW(group.reuseBlockCount(0, 0));
+        EXPECT_EQ(group.reuseBlockCount(0, 3), 0u);
+    }
+    auto swa                       = makeGroup("swa", CacheGroupType::SWA);
+    swa.policy.sliding_window_size = 0;
+    EXPECT_EQ(swa.reuseBlockCount(7, 3), 7u);
 }
 
 TEST(CacheTopologyTest, SupportsDistinctOneToOneGroupsAndOneToManyLayers) {

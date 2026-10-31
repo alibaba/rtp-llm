@@ -794,11 +794,11 @@ TEST_F(HybridTypeCoordinatorCacheManagerTest, CreateSpConfigPreservesQwenPacking
     ASSERT_EQ(allocator->groupBlockPools().size(), 2u);
     const auto full_pool_config =
         DeviceBlockPoolConfigHelper::createConfigForGroup(config, config.topology().group("full"));
-    const auto& full_layouts = full_pool_config.memory_layouts;
-    ASSERT_EQ(full_layouts.size(), 3u);
-    EXPECT_EQ(full_layouts[0].layer_num, 2u);
-    EXPECT_EQ(full_layouts[1].layer_num, 1u);
-    EXPECT_EQ(full_layouts[2].layer_num, 1u);
+    const auto& request_layouts = full_pool_config.memory_layouts;
+    ASSERT_EQ(request_layouts.size(), 3u);
+    EXPECT_EQ(request_layouts[0].layer_num, 2u);
+    EXPECT_EQ(request_layouts[1].layer_num, 1u);
+    EXPECT_EQ(request_layouts[2].layer_num, 1u);
     const auto linear_pool_config =
         DeviceBlockPoolConfigHelper::createConfigForGroup(config, config.topology().group("linear"));
     const auto& linear_layouts = linear_pool_config.memory_layouts;
@@ -1269,9 +1269,9 @@ TEST_F(HybridTypeCoordinatorCacheManagerTest, TieredJoinedLoadMapsTargetsAcrossF
 TEST_F(HybridTypeCoordinatorCacheManagerTest, DeviceLoadSourceMatchRefBecomesRequestRef) {
     for (bool fail_load : {false, true}) {
         SCOPED_TRACE(fail_load);
-        auto config      = makeTinyHybridConfig();
+        auto config = makeTinyHybridConfig();
         setGroupBlockCounts(config, 32, 32);
-        auto allocator   = std::make_shared<TestHybridTypeCoordinatorCacheManager>(config, AllocationType::DEVICE);
+        auto allocator = std::make_shared<TestHybridTypeCoordinatorCacheManager>(config, AllocationType::DEVICE);
 
         KVCacheConfig tiered_config;
         tiered_config.enable_memory_cache  = true;
@@ -2033,43 +2033,54 @@ TEST_F(HybridTypeCoordinatorCacheManagerTest, ConnectorRefPreservesDummyTailAcro
 }
 
 TEST_F(HybridTypeCoordinatorCacheManagerTest, InsertIntoCacheInsertsOnlyFullBlocks) {
-    auto config    = makeTinyHybridConfig();
-    auto allocator = std::make_shared<TestHybridTypeCoordinatorCacheManager>(config, AllocationType::DEVICE);
-    ASSERT_TRUE(allocator->init());
+    for (const int seq_length : {10, 12}) {
+        SCOPED_TRACE(seq_length);
+        auto config    = makeTinyHybridConfig();
+        auto allocator = std::make_shared<TestHybridTypeCoordinatorCacheManager>(config, AllocationType::DEVICE);
+        ASSERT_TRUE(allocator->init());
 
-    // group_id=0 linear, group_id=1 full.
+        const CacheKeysType keys{100, 101, 102};
+        auto                batch_res = makeBatchResource(/*batch_size=*/1, config, keys);
+        auto                token_ids = makeCompleteTokenIds(/*batch_size=*/1, seq_length, /*seq_size_per_block=*/4);
+        MallocInfo          malloc_info{batch_res, token_ids};
+        malloc_info.enable_cache_lookup = false;
+        malloc_info.reuse_cache         = false;
+        ASSERT_TRUE(allocator->malloc(malloc_info).success);
+        ASSERT_EQ(batch_res->blocksNum(0, "full1"), 3);
+        ASSERT_EQ(batch_res->blocksNum(0, "linear"), 3);
 
-    auto batch_res = makeBatchResource(/*batch_size=*/1, config, CacheKeysType{100, 101, 102});
-    // Disable device cache reuse.
-
-    // BlockTree insertion records the available reusable group coordinates.
-    auto token_ids = makeCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/10, /*seq_size_per_block=*/4);
-
-    MallocInfo malloc_info{batch_res, token_ids};
-    malloc_info.enable_cache_lookup = false;
-    malloc_info.reuse_cache         = false;
-    auto malloc_result              = allocator->malloc(malloc_info);
-    ASSERT_TRUE(malloc_result.success);
-    ASSERT_EQ(batch_res->blocksNum(0, "full1"), 3);
-    ASSERT_EQ(batch_res->blocksNum(0, "linear"), 3);
-
-    InsertInfo insert_info{batch_res, token_ids, /*is_resident=*/false};
-    {
         size_t resident_prefix_length = 0;
-        allocator->insertIntoCache(insert_info, resident_prefix_length);
-    }
+        allocator->insertIntoCache(InsertInfo{batch_res, token_ids, /*is_resident=*/false}, resident_prefix_length);
 
-    auto match = allocator->blockTreeCacheOwner()->match(CacheKeysType{100, 101, 102});
-    EXPECT_EQ(match.matched_device_blocks, 3u);
-    EXPECT_EQ(allocator->blockTreeCacheOwner()->matchedBlocksForGroup("full1", match.matched_device_resources).size(),
-              3u);
-    EXPECT_EQ(allocator->blockTreeCacheOwner()->matchedBlocksForGroup("linear", match.matched_device_resources).size(),
-              1u);
-    block_tree_cache_test::releaseRequestRefsForTest(*allocator->blockTreeCacheOwner(), match.matched_device_resources);
+        const auto   cache           = allocator->blockTreeCacheOwner();
+        const auto   path            = cache->tree()->findNode(keys);
+        const size_t complete_blocks = seq_length / 4;
+        ASSERT_EQ(path.size(), complete_blocks);
+        for (size_t i = 0; i < path.size(); ++i) {
+            EXPECT_EQ(path[i]->cache_key, keys[i]);
+            EXPECT_EQ(path[i]->group_set_resources[1].device_blocks,
+                      (BlockIndicesType{batch_res->blocks(0, "full1")[i]}));
+            if (seq_length == 12 && i == 2) {
+                EXPECT_EQ(path[i]->group_set_resources[0].device_blocks,
+                          (BlockIndicesType{batch_res->blocks(0, "linear")[i]}));
+            } else {
+                EXPECT_TRUE(path[i]->group_set_resources[0].is_empty());
+            }
+        }
+
+        auto         match           = allocator->blockTreeCacheOwner()->match(keys);
+        const size_t reusable_blocks = seq_length == 12 ? 3 : 0;
+        EXPECT_EQ(match.matched_device_blocks, reusable_blocks);
+        EXPECT_EQ(cache->matchedBlocksForGroup("full1", match.matched_device_resources).size(), reusable_blocks);
+        EXPECT_EQ(cache->matchedBlocksForGroup("linear", match.matched_device_resources).size(),
+                  seq_length == 12 ? 1u : 0u);
+        block_tree_cache_test::releaseRequestRefsForTest(*allocator->blockTreeCacheOwner(),
+                                                         match.matched_device_resources);
+    }
 }
 
 TEST_F(HybridTypeCoordinatorCacheManagerTest, InsertIntoCachePreservesLinearHoleAndPublishesLaterState) {
-    auto config    = makeTinyHybridConfig();
+    auto config                    = makeTinyHybridConfig();
     config.reuse_cache_tail_blocks = 10000;
     auto allocator = std::make_shared<TestHybridTypeCoordinatorCacheManager>(config, AllocationType::DEVICE);
     ASSERT_TRUE(allocator->init());
@@ -2355,7 +2366,7 @@ TEST_F(HybridTypeCoordinatorCacheManagerTest, PrefillReuseTailAllocatesExactCapa
 // The allocator is invoked on an already-populated resource, so malloc() dispatches directly
 // to incrMalloc(). Cleanup retains the decode read state and current state independently of n.
 TEST_F(HybridTypeCoordinatorCacheManagerTest, DecodeIncrMallocAppliesSparseCleanupOnLinearGroups) {
-    auto config = makeTinyHybridConfig();
+    auto config                    = makeTinyHybridConfig();
     config.reuse_cache_tail_blocks = 10000;
     setGroupBlockCounts(config, 7, 7);  // Six usable blocks per independent pool.
     auto allocator = std::make_shared<TestHybridTypeCoordinatorCacheManager>(config, AllocationType::DEVICE);

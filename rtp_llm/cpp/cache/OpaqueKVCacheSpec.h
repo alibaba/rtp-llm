@@ -139,21 +139,22 @@ protected:
                                 "KVCacheSpecDesc tag=%s cache_type=%d requires SpecBuildContext.parallelism_config",
                                 desc.tag.c_str(),
                                 static_cast<int>(desc.cache_type));
-        const auto& parallelism_config = *ctx.parallelism_config;
-        if (!parallelism_config.prefill_cp_config.kv_cache_sharded) {
+        const auto& p = *ctx.parallelism_config;
+        if (!p.prefill_cp_config.kv_cache_sharded) {
             return 1;
         }
-        if (parallelism_config.role_type == RoleType::PREFILL && parallelism_config.tp_size > 1) {
-            return static_cast<uint32_t>(parallelism_config.tp_size);
-        }
-        if (parallelism_config.role_type == RoleType::DECODE
-            && parallelism_config.prefill_cp_config.is_prefill_enabled()) {
+        int64_t cp = 1;
+        if (p.role_type == RoleType::PREFILL && p.tp_size > 1) {
+            cp = p.tp_size;
+        } else if (p.role_type == RoleType::DECODE && p.prefill_cp_config.is_prefill_enabled()) {
+            cp = p.prefill_cp_config.prefill_cp_size;
             RTP_LLM_CHECK_WITH_INFO(
-                parallelism_config.prefill_cp_config.prefill_cp_size > 1,
-                "fixed/SWA CP sharding decode requires explicit prefill_cp_size when PREFILL_CP and kv_cache_sharded are enabled");
-            return static_cast<uint32_t>(parallelism_config.prefill_cp_config.prefill_cp_size);
+                cp > 1, "fixed region decode CP layout requires explicit prefill_cp_size for tag=%s", desc.tag.c_str());
         }
-        return 1;
+        RTP_LLM_CHECK_WITH_INFO(cp <= static_cast<int64_t>(std::numeric_limits<uint32_t>::max()),
+                                "fixed region CP size exceeds uint32 range for tag=%s",
+                                desc.tag.c_str());
+        return static_cast<uint32_t>(cp);
     }
 
     static bool isPrefillCpSliced(const KVCacheSpecDesc& desc, const SpecBuildContext& ctx) {
@@ -169,12 +170,15 @@ protected:
     }
 
     static uint32_t seqSizePerBlock(const KVCacheSpecDesc& desc, const SpecBuildContext& ctx) {
-        const uint32_t ctx_seq_size = ctx.seq_size_per_block == 0 ? 1 : ctx.seq_size_per_block;
-        const uint32_t cp_size      = fixedRegionCpSize(desc, ctx);
+        const uint32_t ctx_seq = ctx.seq_size_per_block == 0 ? 1 : ctx.seq_size_per_block;
+        const uint32_t cp_size = fixedRegionCpSize(desc, ctx);
         if (cpScaleSeqSize(desc) && cp_size > 1) {
-            return ctx_seq_size * cp_size;
+            RTP_LLM_CHECK_WITH_INFO(ctx_seq <= std::numeric_limits<uint32_t>::max() / cp_size,
+                                    "CP scaled seq_size_per_block overflows uint32 for tag=%s",
+                                    desc.tag.c_str());
+            return ctx_seq * cp_size;
         }
-        return ctx_seq_size;
+        return ctx_seq;
     }
 
     static uint32_t alignUpToMultiple(uint32_t value, uint32_t multiple) {
@@ -185,9 +189,17 @@ protected:
     static uint32_t stateRingEntries(const KVCacheSpecDesc& desc, const SpecBuildContext& ctx) {
         RTP_LLM_CHECK_WITH_INFO(
             desc.compression_ratio > 0, "state ring desc tag=%s requires positive compression_ratio", desc.tag.c_str());
-        const uint32_t window = (1 + desc.state_ring_overlap) * desc.compression_ratio;
-        const uint32_t raw    = window + (desc.state_ring_include_gen_num_per_cycle ? ctx.gen_num_per_cycle : 0);
-        return (raw + 1) & ~1U;
+        const uint64_t cycles = uint64_t{1} + desc.state_ring_overlap;
+        const uint64_t extra  = desc.state_ring_include_gen_num_per_cycle ? ctx.gen_num_per_cycle : 0;
+        const auto     max    = std::numeric_limits<uint64_t>::max();
+        RTP_LLM_CHECK_WITH_INFO(cycles <= (max - extra - 1) / desc.compression_ratio,
+                                "state ring entry count overflows uint64 for tag=%s",
+                                desc.tag.c_str());
+        const uint64_t raw = (cycles * desc.compression_ratio + extra + 1) & ~uint64_t{1};
+        RTP_LLM_CHECK_WITH_INFO(raw <= std::numeric_limits<uint32_t>::max(),
+                                "state ring entry count exceeds uint32 for tag=%s",
+                                desc.tag.c_str());
+        return static_cast<uint32_t>(raw);
     }
 
     static uint32_t entryCount(const KVCacheSpecDesc& desc, const SpecBuildContext& ctx) {
@@ -225,6 +237,7 @@ protected:
                 entries /= cp_size;
             }
         }
+
         return entries;
     }
 
@@ -289,6 +302,9 @@ struct CompressedKVCacheSpec: public OpaqueKVCacheSpec {
         type = KVCacheSpecType::OpaqueKV;
     }
 
+private:
+    friend class SpecBuilder;
+
     static KVCacheSpecPtr build(const KVCacheSpecDesc& desc, const SpecBuildContext& ctx) {
         RTP_LLM_CHECK_WITH_INFO(desc.entry_elems > 0,
                                 "COMPRESSED_KV KVCacheSpecDesc tag=%s requires positive entry_elems",
@@ -318,6 +334,7 @@ struct CompressedKVCacheSpec: public OpaqueKVCacheSpec {
         return spec;
     }
 
+public:
     KVCacheSpecPtr clone() const override {
         return std::make_shared<CompressedKVCacheSpec>(*this);
     }
@@ -339,6 +356,9 @@ struct FixedStateCacheSpec: public OpaqueKVCacheSpec {
         OpaqueKVCacheSpec(std::move(tag), seq_size_per_block, kernel_seq_size_per_block, local_kv_head_num) {
         type = KVCacheSpecType::OpaqueState;
     }
+
+private:
+    friend class SpecBuilder;
 
     static KVCacheSpecPtr build(const KVCacheSpecDesc& desc, const SpecBuildContext& ctx) {
         RTP_LLM_CHECK_WITH_INFO(
@@ -362,6 +382,7 @@ struct FixedStateCacheSpec: public OpaqueKVCacheSpec {
         return spec;
     }
 
+public:
     KVCacheSpecPtr clone() const override {
         return std::make_shared<FixedStateCacheSpec>(*this);
     }

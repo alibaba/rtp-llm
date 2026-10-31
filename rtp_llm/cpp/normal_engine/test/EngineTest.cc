@@ -21,7 +21,10 @@
 #include "gtest/gtest.h"
 #include <limits>
 #include <memory>
+#include <optional>
 #include <pybind11/embed.h>
+#include <utility>
+#include <vector>
 
 namespace py = pybind11;
 
@@ -257,7 +260,7 @@ TEST_F(NormalEngineTest, testDecodeWarmupUsesWarmupCacheTopology) {
     ModelConfig   model_config;
     RuntimeConfig runtime_config;
     KVCacheConfig kv_cache_config;
-    auto params                    = createEngineInitParams(config, model_config, runtime_config, kv_cache_config);
+    auto          params           = createEngineInitParams(config, model_config, runtime_config, kv_cache_config);
     params.pd_sep_config.role_type = RoleType::DECODE;
 
     bool saw_decode_warmup             = false;
@@ -283,18 +286,21 @@ TEST_F(NormalEngineTest, testDecodeWarmupUsesWarmupCacheTopology) {
     auto engine = std::make_shared<NormalEngine>(params, nullptr);
 
     EXPECT_TRUE(saw_decode_warmup);
+    ASSERT_NE(engine->resourceContext().cache_manager, nullptr);
+    EXPECT_EQ(engine->resourceContext().cache_manager->canonicalSizePerBlock(),
+              engine->resourceContext().cache_manager->cacheConfig().seq_size_per_block);
 }
 
 TEST_F(NormalEngineTest, testCacheManagerInitFailureDoesNotPublishPartialState) {
     ModelConfig model;
-    model.num_layers                   = 1;
-    model.attn_config.head_num         = 1;
-    model.attn_config.kv_head_num      = 1;
-    model.attn_config.size_per_head    = 1;
+    model.num_layers                          = 1;
+    model.attn_config.head_num                = 1;
+    model.attn_config.kv_head_num             = 1;
+    model.attn_config.size_per_head           = 1;
     model.attn_config.tokens_per_block        = 1;
     model.attn_config.kernel_tokens_per_block = 1;
-    model.kv_cache_spec_descs          = {{{"default", KVCacheSpecType::MultiHeadAttention}}};
-    const auto config                  = CacheConfigCreator::createWarmupConfig(model, {});
+    model.kv_cache_spec_descs                 = {{{"default", KVCacheSpecType::MultiHeadAttention}}};
+    const auto config                         = CacheConfigCreator::createWarmupConfig(model, {});
 
     auto            previous  = std::make_shared<KVCacheManager>(config, /*warmup=*/true);
     auto            candidate = std::make_shared<KVCacheManager>(config, /*warmup=*/true);
@@ -308,6 +314,88 @@ TEST_F(NormalEngineTest, testCacheManagerInitFailureDoesNotPublishPartialState) 
     EXPECT_EQ(resource_context.cache_manager, previous);
     EXPECT_EQ(resource_context.role_type, RoleType::PREFILL);
     EXPECT_EQ(group_num, 17);
+}
+
+TEST_F(NormalEngineTest, testCacheStoreProducerFactsFollowBoundWarmupCache) {
+    ModelConfig model;
+    model.num_layers                   = 1;
+    model.max_seq_len                  = 16;
+    model.vocab_size                   = 16;
+    model.hidden_size                  = 4;
+    model.attn_config.head_num         = 1;
+    model.attn_config.kv_head_num      = 1;
+    model.attn_config.size_per_head    = 4;
+    model.attn_config.tokens_per_block = 2;
+    model.kv_cache_spec_descs          = {{{"default", KVCacheSpecType::MultiHeadAttention}}};
+
+    ParallelismConfig parallelism;
+    parallelism.tp_rank                            = 1;
+    parallelism.tp_size                            = 2;
+    parallelism.prefill_cp_config.kv_cache_sharded = true;
+    parallelism.prefill_cp_config.method           = CPRotateMethod::ALL_GATHER;
+    auto       cache_config = CacheConfigCreator::createConfig(model, parallelism, KVCacheConfig{});
+    const auto draft_config = cache_config;
+    cache_config.mtp_sub_configs.push_back(cache_config.mergeMTPModule(draft_config, 0, cache_config.layer_num));
+    cache_config.finalizeBlockNums(/*global_block_num=*/8, RuntimeConfig{});
+    auto       warmup_config       = CacheConfigCreator::createWarmupConfig(model, parallelism);
+    const auto warmup_draft_config = warmup_config;
+    warmup_config.mtp_sub_configs.push_back(
+        warmup_config.mergeMTPModule(warmup_draft_config, 0, warmup_config.layer_num));
+    warmup_config.finalizeBlockNums(/*global_block_num=*/2, RuntimeConfig{});
+    auto live_manager =
+        std::make_shared<KVCacheManager>(cache_config, /*warmup=*/false, nullptr, KVCacheConfig{}, parallelism);
+    auto fake_manager = std::make_shared<KVCacheManager>(warmup_config, /*warmup=*/true);
+    ASSERT_TRUE(live_manager->init());
+    ASSERT_TRUE(fake_manager->init());
+    ASSERT_TRUE(live_manager->cacheConfig().request_projection_required);
+    EXPECT_EQ(live_manager->cacheConfig().cache_cp_size, 2);
+    ASSERT_FALSE(fake_manager->cacheConfig().request_projection_required);
+    EXPECT_EQ(fake_manager->cacheConfig().cache_cp_size, 1);
+    EXPECT_EQ(live_manager->canonicalSizePerBlock(), 4);
+    EXPECT_EQ(fake_manager->canonicalSizePerBlock(), 2);
+    for (const auto& manager : {live_manager, fake_manager}) {
+        const auto& draft = manager->getMTPModuleCacheConfig(0);
+        EXPECT_EQ(draft.globalSizePerBlock(draft.groupTags().front()), manager->canonicalSizePerBlock());
+    }
+
+    EngineInitParams params;
+    params.model_config_           = model;
+    params.parallelism_config      = parallelism;
+    params.pd_sep_config.role_type = RoleType::PREFILL;
+    params.py_model                = py::none();
+    std::vector<std::optional<std::pair<int, int>>> observed;
+    NormalExecutor::test_model_factory = [&](const GptModelInitParams& init) {
+        observed.push_back(init.cache_store_producer_cp_topology);
+        EXPECT_EQ(init.parallelism_config.tp_rank, 1u);
+        EXPECT_EQ(init.parallelism_config.tp_size, 2u);
+        return std::make_unique<MockModel>(model.vocab_size);
+    };
+    struct FactoryResetGuard {
+        ~FactoryResetGuard() {
+            NormalExecutor::test_model_factory = nullptr;
+        }
+    } factory_reset_guard;
+
+    NormalExecutor live(params, live_manager, /*warm_up=*/false);
+    NormalExecutor warmup(params, fake_manager, /*warm_up=*/true);
+    ASSERT_EQ(observed.size(), 2u);
+    ASSERT_TRUE(observed[0].has_value());
+    ASSERT_TRUE(observed[1].has_value());
+    EXPECT_EQ(*observed[0], (std::pair<int, int>{1, 2}));
+    EXPECT_EQ(*observed[1], (std::pair<int, int>{0, 1}));
+
+    for (const auto speculative_type : {SP_TYPE_MTP, SP_TYPE_DSPARK}) {
+        params.sp_config.type = speculative_type;
+        NormalExecutor draft(params, live_manager, /*warm_up=*/false, /*is_propose=*/true, /*index=*/0);
+        NormalExecutor draft_warmup(params, fake_manager, /*warm_up=*/true, /*is_propose=*/true, /*index=*/0);
+    }
+    ASSERT_EQ(observed.size(), 6u);
+    for (size_t i = 2; i < observed.size(); i += 2) {
+        ASSERT_TRUE(observed[i].has_value());
+        ASSERT_TRUE(observed[i + 1].has_value());
+        EXPECT_EQ(*observed[i], (std::pair<int, int>{1, 2}));
+        EXPECT_EQ(*observed[i + 1], (std::pair<int, int>{0, 1}));
+    }
 }
 
 TEST_F(NormalEngineTest, testRejectGenerationPrefillWithSpeculativeBeforeRunnerCreation) {
@@ -412,7 +500,7 @@ TEST_F(NormalEngineTest, testPrefillWarmUpUsesCachelessSingleInput) {
     ModelConfig   model_config;
     RuntimeConfig runtime_config;
     KVCacheConfig kv_cache_config;
-    auto params            = createEngineInitParams(config, model_config, runtime_config, kv_cache_config);
+    auto          params = createEngineInitParams(config, model_config, runtime_config, kv_cache_config);
 
     const KVCacheSpecDesc default_desc{"default", KVCacheSpecType::MultiHeadAttention};
     KVCacheSpecDesc       indexer_desc{"indexer_kv", KVCacheSpecType::OpaqueKV};
@@ -876,14 +964,7 @@ TEST_F(NormalEngineTest, testChunkedPrefillWarmupStartup) {
     // whole-segment shape runs once during warmup and once while constructing the system prompt.
     ASSERT_EQ(*config.forward_shapes,
               (std::vector<ForwardShape>{
-                  {4, 0, 1},
-                  {4, 4, 1},
-                  {4, 8, 1},
-                  {4, 12, 1},
-                  {3, 16, 1},
-                  {16, 14, 4},
-                  {7, 0, 1},
-                  {7, 0, 1}}));
+                  {4, 0, 1}, {4, 4, 1}, {4, 8, 1}, {4, 12, 1}, {3, 16, 1}, {16, 14, 4}, {7, 0, 1}, {7, 0, 1}}));
     const auto& cache_config = engine->resourceContext().cache_manager->cacheConfig();
     ASSERT_EQ(cache_config.groups().size(), 1u);
     ASSERT_EQ(cache_config.groups().front().block_num, 100u);
@@ -933,12 +1014,12 @@ TEST_F(NormalEngineTest, testChunkedPrefillGenerationGraphWarmupUsesChunkShapes)
     ModelConfig   model_config;
     RuntimeConfig runtime_config;
     KVCacheConfig kv_cache_config;
-    auto params = createEngineInitParams(config, model_config, runtime_config, kv_cache_config);
-    params.parallelism_config.role_type                             = RoleType::PDFUSION;
-    params.hw_kernel_config.enable_cuda_graph                       = true;
+    auto          params                = createEngineInitParams(config, model_config, runtime_config, kv_cache_config);
+    params.parallelism_config.role_type = RoleType::PDFUSION;
+    params.hw_kernel_config.enable_cuda_graph                        = true;
     params.hw_kernel_config.generation_prefill_capture_token_buckets = {4, 8};
 
-    auto forward_shapes = std::make_shared<std::vector<ForwardShape>>();
+    auto forward_shapes                = std::make_shared<std::vector<ForwardShape>>();
     NormalExecutor::test_model_factory = [vocab = model_config.vocab_size, forward_shapes](const GptModelInitParams&) {
         return std::make_unique<MockModel>(vocab, forward_shapes);
     };
@@ -963,10 +1044,10 @@ TEST_F(NormalEngineTest, testChunkedPrefillGenerationGraphWarmupUsesChunkShapes)
 
 TEST_F(NormalEngineTest, testChunkedPrefillLossWarmupUsesWholeSegment) {
     CustomConfig config;
-    config.warm_up             = true;
-    config.warm_up_with_loss   = true;
-    config.prefill_chunk_size  = 4;
-    config.forward_shapes      = std::make_shared<std::vector<ForwardShape>>();
+    config.warm_up            = true;
+    config.warm_up_with_loss  = true;
+    config.prefill_chunk_size = 4;
+    config.forward_shapes     = std::make_shared<std::vector<ForwardShape>>();
     (void)createMockEngine(config);
 
     ASSERT_EQ(*config.forward_shapes, (std::vector<ForwardShape>{{19 * 128, 0, 128}}));
