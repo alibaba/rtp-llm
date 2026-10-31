@@ -27,7 +27,8 @@ public:
                 bool                     enable_reuse_cache   = false,
                 int                      reserve_step         = 0,
                 std::vector<size_t>*     backfilled_positions = nullptr,
-                const RequiredPositions& required_positions   = {}) override;
+                const RequiredPositions& required_positions   = {},
+                int                      initial_seq_len      = 0) override;
 
     void removeSkippedBlocks(BlockIds& block_ids, bool enable_reuse_cache = false, int reserve_step = 0) override;
     int  needBlocksNum(int seq_len, int current_blocks, int reserve_step = 0) const override;

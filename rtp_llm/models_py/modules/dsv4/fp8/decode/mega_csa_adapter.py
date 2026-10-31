@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, Dict, Optional
 
 import torch
@@ -150,7 +150,14 @@ class MegaCSAAdapter:
         attn = block.attn
         main_state = attn._pool_view(CSA_STATE)
         indexer_state = attn._pool_view(INDEXER_STATE)
-        main_cache = attn._pool_raw_u8(CSA_KV)
+        offload = getattr(attn, "offload_plan", None)
+        if offload is not None:
+            staging = attn.compressor.offload_staging
+            main_cache = staging.as_strided(
+                (1, staging.stride(0)), (staging.stride(0), 1)
+            )
+        else:
+            main_cache = attn._pool_raw_u8(CSA_KV)
         indexer_cache = attn._pool_raw_u8(INDEXER_KV)
         swa_cache = attn._pool_raw_u8(SWA_KV)
         pools = {
@@ -185,7 +192,11 @@ class MegaCSAAdapter:
         indexer_state_block_table = require_block_table(INDEXER_STATE, "INDEXER_STATE")
         indexer_block_table = require_block_table(INDEXER_KV, "INDEXER_KV")
 
-        main_entries = attn._pool_entries_per_block(CSA_KV)
+        main_entries = (
+            int(staging.shape[1])
+            if offload is not None
+            else attn._pool_entries_per_block(CSA_KV)
+        )
         indexer_entries = attn._pool_entries_per_block(INDEXER_KV)
         swa_entries = attn._pool_entries_per_block(SWA_KV)
         main_state_entries = attn._pool_entries_per_block(CSA_STATE)
@@ -215,6 +226,19 @@ class MegaCSAAdapter:
             raise ValueError("DSV4 mega pool geometry contains an empty region")
 
         slots = self.runtime.slot_mappings(metadata, token_count)
+        if offload is not None:
+            if token_count > main_entries:
+                raise ValueError("V4 offload compressor staging capacity exceeded")
+            slots = replace(
+                slots,
+                main_destinations=torch.where(
+                    slots.main_destinations >= 0,
+                    torch.arange(
+                        token_count, device=main_cache.device, dtype=torch.int64
+                    ),
+                    -1,
+                ),
+            )
         return MegaCSAPoolContext(
             main_state=main_state,
             indexer_state=indexer_state,
@@ -510,6 +534,11 @@ class MegaCSAAdapter:
         )
         # The fused MQA tail normalizes and rotates q_raw in place.
         q_ready = q_raw.view(batch_size, q_len, g.main_heads, HEAD_DIM)
+
+        if getattr(attn, "offload_plan", None) is not None:
+            attn.compressor.write_offloaded_kv(
+                metadata.pool_write_slot_mappings[CSA_KV][:token_count]
+            )
 
         rtp_llm_ops.dsv4_persistent_topk(
             logits,

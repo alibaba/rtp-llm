@@ -85,8 +85,6 @@ public:
         config.total_size_bytes = current_offset;
         const auto tiered       = cache_config.tiered_cache_configs.find(group.tag);
         if (tiered != cache_config.tiered_cache_configs.end()) {
-            RTP_LLM_CHECK_WITH_INFO(cache_config.mtp_sub_configs.empty(),
-                                    "offload does not support draft cache layouts");
             config.offload              = tiered->second;
             config.offload_layout       = spec->entryLayout();
             config.offload_owner_layers = group_layer_ids;

@@ -60,6 +60,25 @@ int MtpExecutor::selectMtpPreviousSeqLenUpperBound(bool pending, int previous_ne
 
 GptModelOutputs MtpExecutor::forwardModel(ModelBase* model, const GptModelInputs& inputs, ModelInputsModelRole role) {
     RTP_LLM_CHECK_WITH_INFO(model != nullptr, "model is null before forward");
+    if (cache_manager_ && cache_manager_->hasSparseKvOffload()) {
+        // Allocation, P/D loads and speculative cache swaps may invalidate
+        // resident rows. Publish their generations before either model reads
+        // them, including the draft extend following rejection sampling.
+        auto offload_inputs = inputs;
+        if (isTpRank0()) {
+            offload_inputs.kv_cache_generation_updates = cache_manager_->takeOffloadVersionUpdates();
+        }
+        tpSyncModelInputs(offload_inputs, parallelism_config_);
+        if (offload_inputs.kv_cache_generation_updates.defined()) {
+            buffer_holder_.hold_host(offload_inputs.kv_cache_generation_updates);
+            cache_manager_->publishOffloadVersions(offload_inputs.kv_cache_generation_updates,
+                                                   offload_inputs.kv_cache_group_tags);
+        }
+        if (model_inputs_logger_) {
+            model_inputs_logger_->log(offload_inputs, role, model->model_id_);
+        }
+        return model->forward(offload_inputs);
+    }
     if (model_inputs_logger_) {
         model_inputs_logger_->log(inputs, role, model->model_id_);
     }
@@ -2064,7 +2083,7 @@ absl::Status MtpExecutor::runDecodeAlignmentOnly(GptModelInputs& model_input) {
         ensureModelInputsOnCuda(model_input, "decode.alignment_propose");
         if (is_dspark_) {
             maybePrintModelInput(model_input, "decode dspark propose model");
-            draft_model_->forward(model_input);
+            forwardModel(draft_model_.get(), model_input, ModelInputsModelRole::DRAFT);
         } else {
             forwardModel(draft_model_.get(), model_input, ModelInputsModelRole::DRAFT);
         }
@@ -2314,7 +2333,8 @@ GptModelOutputs MtpExecutor::runDraftPrefillForward(GptModelInputs& model_input)
     // Use sp_prefill_draft_model_ if CUDA graph is enabled, otherwise use draft_model_.
     auto* draft_prefill_model = sp_prefill_draft_model_ ? sp_prefill_draft_model_.get() : draft_model_.get();
     RTP_LLM_CHECK_WITH_INFO(draft_prefill_model != nullptr, "commit model is null before forward");
-    auto draft_prefill_model_output = draft_prefill_model->forward(model_input);
+    auto draft_prefill_model_output =
+        forwardModel(draft_prefill_model, model_input, ModelInputsModelRole::DRAFT_PREFILL);
     // Ordinary MTP chains this output into the next autoregressive draft step.
     maybeOverrideLastHiddenWithMtpBuffer(draft_prefill_model_output, *draft_prefill_model);
     return draft_prefill_model_output;

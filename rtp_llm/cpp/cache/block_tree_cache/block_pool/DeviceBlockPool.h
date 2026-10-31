@@ -48,6 +48,10 @@ public:
     // the global-layer -> (layout, local layer) mapping. Invariants enforced via RTP_LLM_CHECK.
     bool init();
 
+    // Prefer host for a request larger than its share of currently free HBM.
+    // Growth follows last_block's tier; either tier may supply overflow blocks.
+    std::optional<BlockIdList> mallocForRequest(size_t n, size_t request_blocks, BlockIdxType last_block = 0);
+
     void incRef(BlockIdxType block);
     void incRef(const BlockIdList& blocks);
     void decRef(BlockIdxType block);
@@ -113,6 +117,8 @@ protected:
     bool hasExternalRefNoLock(BlockIdxType block) const override;
 
 private:
+    size_t offload_hbm_share_denominator_{0};
+
     bool                         hasRequestRefNoLock(BlockIdxType block) const;
     const DeviceBlockPoolConfig& config() const;
     // global_layer_id -> {layout_index, local_layer_id}

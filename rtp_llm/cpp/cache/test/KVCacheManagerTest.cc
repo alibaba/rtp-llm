@@ -3085,6 +3085,56 @@ TEST_F(KVCacheManagerTest, OffloadCapacityChargesSharedRuntimeOnceButKeepsBothSt
     EXPECT_EQ(CacheConfigCreator::createConfig(model, {}, options).offload_runtime_counts.at("default"), 2u);
 }
 
+TEST_F(KVCacheManagerTest, OffloadMtpBudgetsDraftAndProjectsItsStorageToLocalLayer) {
+    ModelConfig model;
+    model.num_layers                   = 2;
+    model.data_type                    = TYPE_BF16;
+    model.attn_config.use_mla          = true;
+    model.attn_config.kv_lora_rank     = 16;
+    model.attn_config.rope_head_dim    = 8;
+    model.attn_config.tokens_per_block = 4;
+    KVCacheSpecDesc desc;
+    desc.tag                   = "default";
+    desc.cache_type            = MultiHeadLatentAttention;
+    desc.offload               = CacheOffloadPolicy{true, 16};
+    desc.offload_runtime_group = 0;
+    model.kv_cache_spec_descs  = {{desc}, {desc}};
+    auto draft                 = model;
+    draft.num_layers           = 1;
+    draft.kv_cache_spec_descs  = {{desc}};
+    KVCacheConfig options;
+    options.enable_sparse_kv_offload          = true;
+    options.sparse_kv_offload_host_mb         = 1;
+    options.sparse_kv_offload_test_hbm_blocks = 2;
+    options.test_block_num                    = 6;
+    SpeculativeExecutionConfig speculative;
+    speculative.type              = SP_TYPE_EAGLE;
+    speculative.gen_num_per_cycle = 3;
+    auto config = CacheConfigCreator::createConfig(model, {}, options, speculative, &draft, true, true);
+    ASSERT_EQ(config.mtp_sub_configs.size(), 1u);
+    EXPECT_EQ(config.offload_runtime_counts.at("default"), 2u);
+    EXPECT_EQ(config.blockSizeBytesForGroup("default"), 576u);
+    const auto capacity = CacheConfigCreator::configureOffloadCapacity(config, options, 1 << 20, 8);
+    EXPECT_EQ(capacity.fixed_bytes, 4832u);
+    EXPECT_EQ(capacity.metadata_bytes, 432u);
+    EXPECT_EQ(capacity.gpu_bytes, 6416u);
+    const auto blocks = CacheConfigCreator::synchronizeOffloadConfig(config, {});
+    config.finalizeBlockNums(blocks, {});
+    EXPECT_EQ(config.mtp_sub_configs.front()->tiered_cache_configs.at("default").total_blocks, blocks);
+    KVCacheManager manager(config);
+    ASSERT_TRUE(manager.init());
+    const auto all            = manager.allLayerCacheBase();
+    const auto local          = manager.getMTPModuleGroupedCacheLayerLayout(0);
+    const auto global_storage = all.group("default").at(2).offload;
+    const auto local_storage  = local.group("default").at(0).offload;
+    ASSERT_TRUE(global_storage);
+    ASSERT_TRUE(local_storage);
+    EXPECT_EQ(global_storage->owner_layer, 2);
+    EXPECT_EQ(local_storage->owner_layer, 0);
+    EXPECT_EQ(local_storage->resident_planes[0].data_ptr(), global_storage->resident_planes[0].data_ptr());
+    EXPECT_EQ(local_storage->generations.data_ptr(), global_storage->generations.data_ptr());
+}
+
 TEST_F(KVCacheManagerTest, OffloadVersionSnapshotsAreIndependentAndCoalesceOverwrites) {
     KVCacheManager manager(makeSparseOffloadTestConfig());
     ASSERT_TRUE(manager.init());

@@ -4,7 +4,10 @@
 #include <thread>
 #include <atomic>
 #include <algorithm>
+#include "autil/EnvUtil.h"
+#include "rtp_llm/cpp/cache/DeviceBlockPoolConfigHelper.h"
 #include "rtp_llm/cpp/cache/FullCacheManager.h"
+#include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 #include "rtp_llm/cpp/cache/test/BlockPoolTestHelper.h"
 
 namespace rtp_llm {
@@ -18,6 +21,60 @@ protected:
 
     void TearDown() override {}
 };
+
+TEST_F(DeviceFullCacheManagerTest, OffloadRoutesStagedLongRequestBeforeAllocatingShortRequest) {
+    autil::EnvGuard guard("RTP_LLM_SPARSE_KV_OFFLOAD_HBM_SHARE_DENOMINATOR", "3");
+    auto            cache = makeSimpleMhaCacheConfig(1, 30, 4, TYPE_FP16, 1, 64);
+    const auto&     tag   = cache.topology().groups().front().tag;
+    cache.tiered_cache_configs.emplace(tag, TieredCacheConfig{30, 10, 16});
+    auto pool = std::make_shared<DeviceBlockPool>(std::make_shared<DeviceBlockPoolConfig>(
+        DeviceBlockPoolConfigHelper::createConfigForGroup(cache, cache.group(tag))));
+    ASSERT_TRUE(pool->init());
+    DeviceFullCacheManager group(cache.group(tag), pool, 0);
+    ASSERT_TRUE(group.init(cache.layerIdsForGroup(tag)));
+
+    BlockIds long_request;
+    // Allocate only the common prefix first, but route from the full 48-token request.
+    ASSERT_TRUE(group.malloc(long_request, 4, false, 0, nullptr, {}, 48));
+    EXPECT_EQ(long_request.blocks(), (BlockIndicesType{10}));
+    ASSERT_TRUE(group.malloc(long_request, 48, false, 0, nullptr, {}, 48));
+    EXPECT_TRUE(
+        std::all_of(long_request.blocks().begin(), long_request.blocks().end(), [](int block) { return block >= 10; }));
+    BlockIds short_request;
+    ASSERT_TRUE(group.malloc(short_request, 8));
+    EXPECT_EQ(short_request.blocks(), (BlockIndicesType{1, 2}));
+    ASSERT_TRUE(group.malloc(long_request, 52));
+    EXPECT_GE(long_request.blocks().back(), 10);
+    group.unreference(long_request.blocks());
+    group.unreference(short_request.blocks());
+    EXPECT_EQ(pool->freeBlocksNum(), 29u);
+}
+
+TEST_F(DeviceFullCacheManagerTest, OffloadInitialRoutingPreservesReusedPrefixAndBackfillsPlaceholders) {
+    autil::EnvGuard guard("RTP_LLM_SPARSE_KV_OFFLOAD_HBM_SHARE_DENOMINATOR", "3");
+    auto            cache = makeSimpleMhaCacheConfig(1, 20, 4, TYPE_FP16, 1, 64);
+    const auto&     tag   = cache.topology().groups().front().tag;
+    cache.tiered_cache_configs.emplace(tag, TieredCacheConfig{20, 10, 16});
+    auto pool = std::make_shared<DeviceBlockPool>(std::make_shared<DeviceBlockPoolConfig>(
+        DeviceBlockPoolConfigHelper::createConfigForGroup(cache, cache.group(tag))));
+    ASSERT_TRUE(pool->init());
+    DeviceFullCacheManager group(cache.group(tag), pool, 0);
+    ASSERT_TRUE(group.init(cache.layerIdsForGroup(tag)));
+
+    auto prefix = pool->mallocForRequest(1, 1);
+    ASSERT_TRUE(prefix.has_value());
+    ASSERT_EQ(prefix->front(), 1);
+    pool->incRef(*prefix);
+    BlockIds request;
+    request.assign({prefix->front(), NULL_BLOCK_IDX});
+    std::vector<size_t> filled;
+    ASSERT_TRUE(group.malloc(request, 16, true, 0, &filled, {}, 16));
+    EXPECT_EQ(request.blocks(), (BlockIndicesType{1, 10, 11, 12}));
+    EXPECT_EQ(filled, (std::vector<size_t>{1}));
+    EXPECT_EQ(pool->refCount(1), 1u);
+    group.unreference(request.blocks());
+    EXPECT_EQ(pool->freeBlocksNum(), 19u);
+}
 
 // ==================== Basic functionality tests ====================
 

@@ -426,6 +426,9 @@ CacheConfig::mergeMTPModule(const CacheConfig& propose_config, int module_index,
 
     sub_cfg->setTopology(std::move(sub_groups), std::move(sub_layers));
     setTopology(std::move(target_groups), std::move(target_layers));
+    for (const auto& [tag, count] : propose_config.offload_runtime_counts) {
+        offload_runtime_counts[tag] += count;
+    }
     return sub_cfg;
 }
 

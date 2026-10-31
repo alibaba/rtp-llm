@@ -1,11 +1,13 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/block_pool/DeviceBlockPool.h"
 
+#include <algorithm>
 #include <memory>
 #include <optional>
 #include <type_traits>
 #include <vector>
 
 #include "gtest/gtest.h"
+#include "autil/EnvUtil.h"
 
 // Build the device pool config from the lightweight cache-config test helpers
 // (cache_config_test_utils + DeviceBlockPoolConfigHelper) rather than BlockPoolTestHelper,
@@ -71,7 +73,7 @@ std::shared_ptr<DeviceBlockPoolConfig> makeMixedScaleConfig() {
     return config;
 }
 
-std::shared_ptr<DeviceBlockPoolConfig> makeOffloadConfig(bool padded = false, uint32_t total = 6) {
+std::shared_ptr<DeviceBlockPoolConfig> makeOffloadConfig(bool padded = false, uint32_t total = 6, uint32_t hbm = 2) {
     KVCacheSpecPtr spec;
     if (padded) {
         KVCacheSpecDesc desc;
@@ -92,7 +94,7 @@ std::shared_ptr<DeviceBlockPoolConfig> makeOffloadConfig(bool padded = false, ui
     }
     auto cache    = test::makeSingleGroupCacheConfig(spec, CacheGroupType::FULL, 2, total);
     cache.use_mla = true;
-    cache.tiered_cache_configs.emplace(spec->tag, TieredCacheConfig{total, 2, padded ? 17u : 129u});
+    cache.tiered_cache_configs.emplace(spec->tag, TieredCacheConfig{total, hbm, padded ? 17u : 129u});
     return std::make_shared<DeviceBlockPoolConfig>(
         DeviceBlockPoolConfigHelper::createConfigForGroup(cache, cache.group(spec->tag)));
 }
@@ -124,6 +126,145 @@ TEST(DeviceBlockPoolTest, InitKeepsBlockZeroInvalid) {
     auto block = pool.malloc();
     ASSERT_TRUE(block.has_value());
     EXPECT_NE(*block, 0);
+}
+
+TEST(DeviceBlockPoolTest, OffloadLengthAwareAdmissionAndGrowth) {
+    autil::EnvGuard guard("RTP_LLM_SPARSE_KV_OFFLOAD_HBM_SHARE_DENOMINATOR", "3");
+    DeviceBlockPool pool(makeOffloadConfig(false, 30, 10));
+    ASSERT_TRUE(pool.init());
+    for (int round = 0; round < 3; ++round) {
+        // A long request arriving first leaves all nine usable HBM blocks free.
+        auto long_request = pool.mallocForRequest(12, 12);
+        ASSERT_TRUE(long_request.has_value());
+        EXPECT_TRUE(std::all_of(long_request->begin(), long_request->end(), [](int b) { return b >= 10; }));
+        pool.incRef(*long_request);
+        auto short_request = pool.mallocForRequest(2, 2);
+        ASSERT_TRUE(short_request.has_value());
+        EXPECT_TRUE(std::all_of(short_request->begin(), short_request->end(), [](int b) { return b < 10; }));
+        pool.incRef(*short_request);
+
+        auto host_growth = pool.mallocForRequest(1, 13, long_request->back());
+        ASSERT_TRUE(host_growth.has_value());
+        EXPECT_GE(host_growth->front(), 10);
+        pool.incRef(*host_growth);
+        auto hbm_growth = pool.mallocForRequest(1, 3, short_request->back());
+        ASSERT_TRUE(hbm_growth.has_value());
+        EXPECT_LT(hbm_growth->front(), 10);
+        pool.incRef(*hbm_growth);
+
+        pool.decRef(*long_request);
+        pool.decRef(*short_request);
+        pool.decRef(*host_growth);
+        pool.decRef(*hbm_growth);
+        EXPECT_EQ(pool.freeBlocksNum(), 29u);
+        EXPECT_EQ(pool.activeBlocksNum(), 0u);
+    }
+}
+
+TEST(DeviceBlockPoolTest, OffloadAdmissionUsesFreeHbmAndInclusiveBoundary) {
+    autil::EnvGuard guard("RTP_LLM_SPARSE_KV_OFFLOAD_HBM_SHARE_DENOMINATOR", "3");
+    DeviceBlockPool pool(makeOffloadConfig(false, 20, 10));
+    ASSERT_TRUE(pool.init());
+    auto first = pool.mallocForRequest(3, 3);  // Exactly nine / three fits HBM.
+    ASSERT_TRUE(first.has_value());
+    EXPECT_EQ(*first, (BlockIdList{1, 2, 3}));
+    pool.incRef(*first);
+    auto next = pool.mallocForRequest(3, 3);  // Now only six HBM blocks are free.
+    ASSERT_TRUE(next.has_value());
+    EXPECT_EQ(*next, (BlockIdList{10, 11, 12}));
+    pool.incRef(*next);
+
+    // CACHE and in-flight LOAD holds must not inflate free HBM on request release.
+    pool.incTreeRef(*first, BlockTreeRefType::CACHE);
+    pool.incTreeRef(*first, BlockTreeRefType::LOAD);
+    pool.decRef(*first);
+    pool.decTreeRef(*first, BlockTreeRefType::CACHE);
+    auto held = pool.mallocForRequest(3, 3);
+    ASSERT_TRUE(held.has_value());
+    EXPECT_GE(held->front(), 10);
+    pool.incRef(*held);
+    pool.decTreeRef(*first, BlockTreeRefType::LOAD);
+    auto restored = pool.mallocForRequest(3, 3);
+    ASSERT_TRUE(restored.has_value());
+    EXPECT_TRUE(std::all_of(restored->begin(), restored->end(), [](int b) { return b < 10; }));
+    pool.incRef(*restored);
+    pool.decRef(*next);
+    pool.decRef(*held);
+    pool.decRef(*restored);
+    EXPECT_EQ(pool.freeBlocksNum(), 19u);
+}
+
+TEST(DeviceBlockPoolTest, OffloadMixedLengthRoutingProtectsShortRequestsAcrossArrivalOrders) {
+    // Scale 48 short + 16 long requests to one/twelve blocks per request.
+    for (const char* denominator : {"0", "3"}) {
+        autil::EnvGuard guard("RTP_LLM_SPARSE_KV_OFFLOAD_HBM_SHARE_DENOMINATOR", denominator);
+        DeviceBlockPool pool(makeOffloadConfig(false, 241, 49));
+        ASSERT_TRUE(pool.init());
+        for (int round = 0; round < 3; ++round) {
+            std::vector<BlockIdList> requests;
+            int                      host_queries = 0;
+            for (int i = 0; i < 64; ++i) {
+                const bool   is_long = round == 1 ? i >= 48 : i < 16;
+                const size_t count   = is_long ? 12 : 1;
+                auto         blocks  = pool.mallocForRequest(count, count);
+                ASSERT_TRUE(blocks.has_value());
+                host_queries += std::any_of(blocks->begin(), blocks->end(), [](int block) { return block >= 49; });
+                pool.incRef(*blocks);
+                requests.push_back(std::move(*blocks));
+            }
+            EXPECT_EQ(host_queries, std::string(denominator) == "0" ? (round == 1 ? 16 : 60) : (round == 1 ? 18 : 38));
+            EXPECT_EQ(pool.freeBlocksNum(), 0u);
+            for (const auto& blocks : requests) {
+                pool.decRef(blocks);
+            }
+            EXPECT_EQ(pool.freeBlocksNum(), 240u);
+        }
+    }
+}
+
+TEST(DeviceBlockPoolTest, OffloadAdmissionFallsBackAtomicallyAndReusesFreedHbm) {
+    autil::EnvGuard guard("RTP_LLM_SPARSE_KV_OFFLOAD_HBM_SHARE_DENOMINATOR", "3");
+    DeviceBlockPool pool(makeOffloadConfig(false, 20, 10));
+    ASSERT_TRUE(pool.init());
+    auto large = pool.mallocForRequest(12, 12);
+    ASSERT_TRUE(large.has_value());
+    EXPECT_EQ(*large, (BlockIdList{10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 1, 2}));
+    pool.incRef(*large);
+    (void)pool.takeOffloadVersionUpdates();
+    EXPECT_FALSE(pool.mallocForRequest(8, 20).has_value());
+    EXPECT_EQ(pool.freeBlocksNum(), 7u);
+    EXPECT_TRUE(pool.takeOffloadVersionUpdates().empty());
+
+    auto rest = pool.mallocForRequest(7, 7, 2);
+    ASSERT_TRUE(rest.has_value());
+    EXPECT_EQ(*rest, (BlockIdList{3, 4, 5, 6, 7, 8, 9}));
+    pool.incRef(*rest);
+    pool.decRef(1);
+    auto recycled = pool.mallocForRequest(1, 8, 9);
+    ASSERT_TRUE(recycled.has_value());
+    EXPECT_EQ(*recycled, (BlockIdList{1}));
+    pool.incRef(*recycled);
+    EXPECT_EQ(pool.takeOffloadVersionUpdates().size(), 8u);
+    pool.decRef(*recycled);
+    pool.decRef(*rest);
+    large->erase(std::find(large->begin(), large->end(), 1));
+    pool.decRef(*large);
+    EXPECT_EQ(pool.freeBlocksNum(), 19u);
+}
+
+TEST(DeviceBlockPoolTest, OffloadLengthAwareRoutingCanBeDisabledAndValidatesSetting) {
+    {
+        autil::EnvGuard guard("RTP_LLM_SPARSE_KV_OFFLOAD_HBM_SHARE_DENOMINATOR", "0");
+        DeviceBlockPool pool(makeOffloadConfig(false, 20, 10));
+        ASSERT_TRUE(pool.init());
+        EXPECT_EQ(pool.mallocForRequest(4, 4).value(), (BlockIdList{1, 2, 3, 4}));
+    }
+    for (const char* value : {"", "1", "-1", "abc", "3x", "18446744073709551616"}) {
+        autil::EnvGuard guard("RTP_LLM_SPARSE_KV_OFFLOAD_HBM_SHARE_DENOMINATOR", value);
+        EXPECT_ANY_THROW(DeviceBlockPool{makeOffloadConfig(false, 20, 10)});
+        // A configuration for a regular HBM-only pool does not consult this knob.
+        EXPECT_NO_THROW(DeviceBlockPool{makeConfig()});
+    }
 }
 
 TEST(DeviceBlockPoolTest, OffloadNativePlanesAndSegmentBoundaries) {

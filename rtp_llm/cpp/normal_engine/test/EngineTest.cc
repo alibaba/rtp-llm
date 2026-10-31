@@ -1200,6 +1200,28 @@ TEST(SparseKvOffloadConfigTest, AcceptsTpDecodeAndRejectsUnsupportedCombinations
     EXPECT_ANY_THROW(NormalEngine::validateSparseKvOffloadConfig(params, true, true, false));
     EXPECT_ANY_THROW(NormalEngine::validateSparseKvOffloadConfig(params, false, false, false));
     EXPECT_ANY_THROW(NormalEngine::validateSparseKvOffloadConfig(params, false, true, true));
+    auto glm_mtp                        = params;
+    glm_mtp.model_config_.model_type    = "glm_5";
+    glm_mtp.sp_config.model_type        = "glm_5_mtp";
+    glm_mtp.sp_config.type              = SP_TYPE_EAGLE;
+    glm_mtp.sp_config.gen_num_per_cycle = 3;
+    EXPECT_NO_THROW(NormalEngine::validateSparseKvOffloadConfig(glm_mtp, true, true, false));
+    EXPECT_ANY_THROW(NormalEngine::validateSparseKvOffloadConfig(glm_mtp, false, true, false));
+    glm_mtp.sp_config.model_type = "deepseek-v3-mtp";
+    EXPECT_ANY_THROW(NormalEngine::validateSparseKvOffloadConfig(glm_mtp, true, true, false));
+    auto v4_dspark = params;
+    v4_dspark.model_config_.model_type = "deepseek_v4";
+    v4_dspark.sp_config.model_type = "deepseek_v4_dspark";
+    v4_dspark.sp_config.type = SP_TYPE_DSPARK;
+    v4_dspark.sp_config.gen_num_per_cycle = 3;
+    EXPECT_NO_THROW(NormalEngine::validateSparseKvOffloadConfig(v4_dspark, true, true, false));
+    v4_dspark.parallelism_config.tp_size = 1;
+    v4_dspark.parallelism_config.prefill_cp_config.method = CPRotateMethod::PREFILL_CP;
+    v4_dspark.parallelism_config.prefill_cp_config.prefill_cp_size = 2;
+    EXPECT_NO_THROW(NormalEngine::validateSparseKvOffloadConfig(v4_dspark, true, true, false));
+    EXPECT_ANY_THROW(NormalEngine::validateSparseKvOffloadConfig(v4_dspark, false, true, false));
+    v4_dspark.sp_config.gen_num_per_cycle = 0;
+    EXPECT_ANY_THROW(NormalEngine::validateSparseKvOffloadConfig(v4_dspark, true, true, false));
     const std::vector<std::function<void(EngineInitParams&)>> unsupported = {
         [](auto& p) { p.pd_sep_config.role_type = RoleType::PDFUSION; },
         [](auto& p) { p.parallelism_config.role_type = RoleType::PREFILL; },

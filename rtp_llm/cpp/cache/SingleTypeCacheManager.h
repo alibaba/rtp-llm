@@ -49,12 +49,15 @@ public:
         initializeLayerMapping(layer_ids);
         return init();
     }
+    // initial_seq_len supplies the complete request during staged admission or
+    // prefix reuse. Zero denotes ordinary growth of an already admitted request.
     virtual bool malloc(BlockIds&                block_ids,
                         int                      seq_len,
                         bool                     enable_reuse_cache   = false,
                         int                      reserve_step         = 0,
                         std::vector<size_t>*     backfilled_positions = nullptr,
-                        const RequiredPositions& required_positions   = {})                                        = 0;
+                        const RequiredPositions& required_positions   = {},
+                        int                      initial_seq_len      = 0)                                                                 = 0;
     virtual void removeSkippedBlocks(BlockIds& block_ids, bool enable_reuse_cache = false, int reserve_step = 0) = 0;
     virtual int  needBlocksNum(int seq_len, int current_blocks, int reserve_step = 0) const                      = 0;
     // Estimate peak additional blocks needed when generating remaining_tokens more tokens.

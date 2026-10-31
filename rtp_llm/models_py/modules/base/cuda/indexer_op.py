@@ -487,12 +487,29 @@ class IndexerOp(nn.Module):
             attention_inputs.kv_cache_kernel_block_id_device.shape[1] * self.blocksize
         )
 
+        multi_token_decode = bool(
+            attention_inputs.is_target_verify or attention_inputs.is_draft_extend
+        )
+        block_table = attention_inputs.kv_cache_kernel_block_id_device
+        context_lens = fmha_params.kvlen_d
+        lengths = fmha_params.expanded_seq_lens
+        cu_seqlens = attention_inputs.decode_cu_seqlens_device
+        if multi_token_decode:
+            # Treat each query as a one-token request with its causal prefix.
+            # This also covers variable accepted lengths across requests.
+            block_table = block_table.index_select(0, fmha_params.batch_indice_d.long())
+            context_lens = fmha_params.positions_d + 1
+            lengths = context_lens
+            cu_seqlens = torch.arange(
+                q_fp8.shape[0] + 1, dtype=torch.int32, device=q_fp8.device
+            )
+
         logits = _fp8_paged_mqa_logits_compat(
             q_fp8.unsqueeze(1),
             kv_cache_fp8.view(dtype=torch.uint8),
             weights,
-            fmha_params.kvlen_d,
-            attention_inputs.kv_cache_kernel_block_id_device,
+            context_lens,
+            block_table,
             self.blocksize,
             max_seq_len,
         )
@@ -501,13 +518,13 @@ class IndexerOp(nn.Module):
             fmha_params.expanded_seq_lens.device == logits.device
         ), "expanded_seq_lens must be on the same device as logits"
         assert (
-            attention_inputs.decode_cu_seqlens_device.device == logits.device
+            cu_seqlens.device == logits.device
         ), "cu_seqlens must be on the same device as logits"
 
         topk_result = fast_topk_transform_fused(
             score=logits,
-            lengths=fmha_params.expanded_seq_lens,  # expanded_seq_lens
-            cu_seqlens_q=attention_inputs.decode_cu_seqlens_device,  # bs + 1
+            lengths=lengths,
+            cu_seqlens_q=cu_seqlens,
             topk=self.index_topk,
             row_starts=None,
         )

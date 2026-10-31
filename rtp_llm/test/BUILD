@@ -1,4 +1,13 @@
 py_test(
+    name = "glm5_mtp_test",
+    srcs = ["glm5_mtp_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    data = ["//rtp_llm:sdk"],
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
+)
+
+py_test(
     name = "kv_cache_specs_test",
     srcs = [
         "kv_cache_specs_test.py",

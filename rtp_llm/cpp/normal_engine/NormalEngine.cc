@@ -131,12 +131,23 @@ void NormalEngine::validateSparseKvOffloadConfig(const EngineInitParams& params,
     RTP_LLM_CHECK_WITH_INFO(params.pd_sep_config.role_type == RoleType::DECODE
                                 && parallel.role_type == RoleType::DECODE,
                             "sparse KV offload requires P/D decode role");
-    RTP_LLM_CHECK_WITH_INFO(cp.prefill_cp_size <= 1 && !(cp.is_enabled() && parallel.tp_size > 1)
+    // A TP1 V4 decoder can receive pages from CP prefill workers without
+    // executing context parallel attention itself.
+    const bool v4_cp_import = params.model_config_.model_type == "deepseek_v4" && parallel.tp_size == 1
+                              && cp.method == CPRotateMethod::PREFILL_CP;
+    RTP_LLM_CHECK_WITH_INFO((cp.prefill_cp_size <= 1 || v4_cp_import) && !(cp.is_enabled() && parallel.tp_size > 1)
                                 && !(cp.is_prefill_enabled() && cp.prefill_cp_size == 0 && parallel.tp_size > 1),
                             "sparse KV offload does not support CP > 1");
     RTP_LLM_CHECK_WITH_INFO(parallel.pp_size == 1, "sparse KV offload does not support PP > 1");
-    RTP_LLM_CHECK_WITH_INFO(params.sp_config.type == SP_TYPE_NONE && !has_propose_model,
-                            "sparse KV offload does not support MTP or speculative execution");
+    const bool glm_mtp = params.model_config_.model_type == "glm_5" && params.sp_config.model_type == "glm_5_mtp"
+                         && params.sp_config.type == SP_TYPE_EAGLE && has_propose_model
+                         && params.sp_config.gen_num_per_cycle > 0;
+    const bool v4_dspark = params.model_config_.model_type == "deepseek_v4"
+                           && params.sp_config.model_type == "deepseek_v4_dspark"
+                           && params.sp_config.type == SP_TYPE_DSPARK && has_propose_model
+                           && params.sp_config.gen_num_per_cycle > 0;
+    RTP_LLM_CHECK_WITH_INFO((params.sp_config.type == SP_TYPE_NONE && !has_propose_model) || glm_mtp || v4_dspark,
+                            "sparse KV offload supports speculative execution only with GLM MTP or V4 DSpark");
     RTP_LLM_CHECK_WITH_INFO(params.device_resource_config.enable_layer_micro_batch == 0,
                             "sparse KV offload does not support layer micro-batch");
     RTP_LLM_CHECK_WITH_INFO(!cache.enable_memory_cache && !cache.enable_disk_cache && !cache.enable_remote_cache,

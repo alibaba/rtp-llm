@@ -159,6 +159,9 @@ class ModelFactory:
                 )
                 engine_config.sp_config.type = SpeculativeType.MTP
                 sp_type = SpeculativeType.MTP
+            elif model_type == "glm_5_mtp":
+                engine_config.sp_config.type = SpeculativeType.EAGLE
+                sp_type = SpeculativeType.EAGLE
             elif model_type == "qwen_3_moe-mtp":
                 logging.warning(
                     f"create sp model type is {model_type}, so change the sp type to eagle3"
@@ -277,7 +280,11 @@ class ModelFactory:
         """
         # Set gen_num_per_cycle on model_config so it flows to AttentionConfigs
         # for RoPE cache sizing in speculative decoding
-        model_config.gen_num_per_cycle = engine_config.sp_config.gen_num_per_cycle
+        model_config.gen_num_per_cycle = (
+            engine_config.sp_config.gen_num_per_cycle
+            if engine_config.sp_config.type != SpeculativeType.NONE
+            else 0
+        )
 
         model = ModelFactory._create_model(
             model_config=model_config,
@@ -495,12 +502,19 @@ class ModelFactory:
             f"ckpt_path: {propose_model_config.ckpt_path}, quantization: {propose_model_config.quantization}"
         )
 
+        # A target-layer smoke override must not replace GLM's single NextN
+        # layer count or its checkpoint offset.
+        draft_debug_config = engine_config.profiling_debug_logging_config
+        if sp_config.model_type == "glm_5_mtp":
+            draft_debug_config = copy.deepcopy(draft_debug_config)
+            draft_debug_config.hack_layer_num = 0
+
         # Build propose model config (no finalize_scheduler_config for propose model)
         build_model_config(
             model_config=propose_model_config,
             model_args=propose_model_args,
             kv_cache_config=engine_config.kv_cache_config,
-            profiling_debug_logging_config=engine_config.profiling_debug_logging_config,
+            profiling_debug_logging_config=draft_debug_config,
             embedding_config=None,  # Propose model doesn't need embedding_config
         )
         propose_model_cls._apply_kv_cache_config(

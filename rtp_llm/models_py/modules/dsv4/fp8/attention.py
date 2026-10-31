@@ -1228,6 +1228,23 @@ class AttentionFP8(nn.Module):
             return None
         return raw_u8[:, :useful_bytes].view(vec_dtype).view(-1, vec_dim)
 
+    def configure_sparse_offload(self, plan, max_write_rows: int) -> None:
+        if self.compress_ratio != 4 or self.compressor is None:
+            raise ValueError("V4 sparse offload requires a CSA layer")
+        self.offload_plan = plan
+        self.compressor.offload_plan = plan
+        # One native striped page keeps both row-copy planes contiguous and
+        # lets the fused CSA writer use its existing cache geometry contract.
+        stride = ((max_write_rows * 584 + 575) // 576) * 576
+        raw = torch.zeros(
+            (1, stride),
+            dtype=torch.uint8,
+            device=plan.storage.resident_planes[0].device,
+        )
+        self.compressor.offload_staging = raw.as_strided(
+            (1, max_write_rows, 584), (stride, 584, 1)
+        )
+
     def _pool_view_3d_fp8(self, attn_type: str) -> Optional[torch.Tensor]:
         """Return ``[num_blocks, eb, ENTRY_BYTES]`` uint8 view of an FP8 KV
         pool, respecting C++-side TMA padding (per-block stride may exceed
@@ -1237,6 +1254,13 @@ class AttentionFP8(nn.Module):
         """
         if self._kv_cache is None:
             return None
+        plan = getattr(self, "offload_plan", None)
+        if attn_type == "csa_kv" and plan is not None:
+            payload = plan.storage.resident_planes[0]
+            return payload.as_strided(
+                (payload.shape[0], plan.storage.rows_per_page, 584),
+                (payload.stride(0), 584, 1),
+            )
         spec = self._pool_spec.get(attn_type)
         if spec is None:
             return None
@@ -1337,6 +1361,9 @@ class AttentionFP8(nn.Module):
         this layer + cache tag.  Returns 0 if pool unavailable."""
         if self._kv_cache is None:
             return 0
+        plan = getattr(self, "offload_plan", None)
+        if attn_type == "csa_kv" and plan is not None:
+            return plan.storage.rows_per_page
         spec = self._pool_spec.get(attn_type)
         if spec is None:
             return 0
@@ -2433,6 +2460,12 @@ class AttentionFP8(nn.Module):
                 entries_per_block=self._pool_entries_per_block(cmp_attn_type),
                 tokens_per_block_for_block_table=cmp_tokens_per_block,
             )
+
+        plan = getattr(self, "offload_plan", None)
+        if cmp_attn_type == "csa_kv" and plan is not None:
+            plan.runtime.begin(cmp_global.contiguous())
+            read = plan.runtime.acquire(plan.storage_index)
+            cmp_global = read.indices
 
         # Iter3.2: swa_global / cmp_global are int32 from the translator,
         # so only ``.view + .contiguous`` is needed for FlashMLA's

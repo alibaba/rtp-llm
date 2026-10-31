@@ -20,12 +20,13 @@ public:
                     CacheGroupPolicy             policy      = defaultCacheGroupPolicy(CacheGroupType::SWA)):
         SingleTypeCacheManager(layer_ids, kvcache_spec, block_pool, group_id, policy), linear_step_(linear_step) {}
 
-    bool malloc(BlockIds&                block_ids,
-                int                      seq_len,
-                bool                     enable_reuse_cache   = false,
-                int                      reserve_step         = 0,
-                std::vector<size_t>*     backfilled_positions = nullptr,
-                const RequiredPositions& required_positions   = {}) override;
+    bool           malloc(BlockIds&                block_ids,
+                          int                      seq_len,
+                          bool                     enable_reuse_cache   = false,
+                          int                      reserve_step         = 0,
+                          std::vector<size_t>*     backfilled_positions = nullptr,
+                          const RequiredPositions& required_positions   = {},
+                          int                      initial_seq_len      = 0) override;
     void removeSkippedBlocks(BlockIds& block_ids, bool enable_reuse_cache = false, int reserve_step = 0) override;
     int  needBlocksNum(int seq_len, int current_blocks, int reserve_step = 0) const override;
     int  estimatePeakNeedBlocks(int                     seq_len,

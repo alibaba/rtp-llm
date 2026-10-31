@@ -465,6 +465,7 @@ cc_test(
         ":cache_config_test_utils",
         "//rtp_llm/cpp/cache:batch_kv_cache_resource",
         "//rtp_llm/cpp/cache:coordinator_cache_manager",
+        "//rtp_llm/cpp/engine_base/stream:complete_token_ids",
         "@com_google_googletest//:gtest_main",
     ] + torch_deps() + select({
         "@//:using_rocm": [

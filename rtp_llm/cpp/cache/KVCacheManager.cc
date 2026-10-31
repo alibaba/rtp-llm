@@ -165,6 +165,11 @@ GroupedCacheLayerLayout projectLayout(const GroupedCacheLayerLayout&       sourc
             const auto global = global_layer_ids[local];
             if (source_group.hasLayer(global)) {
                 layers[local] = source_group.at(global);
+                if (layers[local].offload && local != global) {
+                    auto storage          = std::make_shared<OffloadStorage>(*layers[local].offload);
+                    storage->owner_layer  = static_cast<int>(local);
+                    layers[local].offload = std::move(storage);
+                }
             }
         }
         groups.emplace(target_group.tag, CacheLayerLayout(std::move(layers)));

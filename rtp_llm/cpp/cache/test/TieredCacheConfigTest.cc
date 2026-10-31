@@ -175,9 +175,13 @@ TEST(TieredCacheConfigTest, MlaAndCsaExposeNativeEntriesWithoutPaddingAsPayload)
     const auto csa_layout             = csa->entryLayout();
     EXPECT_NO_THROW(csa_layout.validate(csa->block_size_bytes() / 2, 0));
     EXPECT_EQ(csa_layout.rows_per_page, 32u);
-    EXPECT_EQ(csa_layout.planes[0].shape, (std::vector<int64_t>{32, 584}));
+    ASSERT_EQ(csa_layout.planes.size(), 2u);
+    EXPECT_EQ(csa_layout.planes[0].shape, (std::vector<int64_t>{32, 576}));
     EXPECT_EQ(csa->block_size_bytes() / 2, 19008u);
-    EXPECT_EQ(csa_layout.planes[0].strides, (std::vector<int64_t>{584, 1}));
+    EXPECT_EQ(csa_layout.planes[0].strides, (std::vector<int64_t>{576, 1}));
+    EXPECT_EQ(csa_layout.planes[1].shape, (std::vector<int64_t>{32, 8}));
+    EXPECT_EQ(csa_layout.planes[1].strides, (std::vector<int64_t>{8, 1}));
+    EXPECT_EQ(csa_layout.planes[1].offset_bytes, 32u * 576);
 }
 
 TEST(TieredCacheConfigTest, EntryLayoutsRejectMissingViewsAndOutOfBoundsPlanes) {

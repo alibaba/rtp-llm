@@ -14,11 +14,12 @@ IBlockPool::IBlockPool(std::shared_ptr<const BlockPoolConfigBase> config): confi
     for (std::vector<uint32_t>& typed_refcounts : tree_refcounts_by_type_) {
         typed_refcounts.assign(config_->physical_block_count, 0);
     }
-    free_blocks_.reserve(config_->physical_block_count - 1);
+    auto& free_blocks = free_ranges_[0].blocks;
+    free_blocks.reserve(config_->physical_block_count - 1);
     for (BlockIdxType block = 1; block < static_cast<BlockIdxType>(config_->physical_block_count); ++block) {
-        free_blocks_.push_back(block);
+        free_blocks.push_back(block);
     }
-    available_blocks_num_ = free_blocks_.size();
+    available_blocks_num_ = free_blocks.size();
 }
 
 void IBlockPool::setCapacityChangeCallback(std::function<void()> callback) {
@@ -58,7 +59,7 @@ std::optional<BlockIdList> IBlockPool::malloc(size_t n) {
     return mallocNoLock(n);
 }
 
-std::optional<BlockIdList> IBlockPool::mallocNoLock(size_t n) {
+std::optional<BlockIdList> IBlockPool::mallocNoLock(size_t n, bool prefer_upper_range) {
     checkInitializedNoLock();
     if (n == 0) {
         return BlockIdList{};
@@ -66,14 +67,23 @@ std::optional<BlockIdList> IBlockPool::mallocNoLock(size_t n) {
     if (availableFreeBlocksNoLock() < n) {
         return std::nullopt;
     }
-    if (free_blocks_.size() - free_head_ < n) {
-        refillAscendingFreeBlocksNoLock();
-    }
-
     BlockIdList result;
     result.reserve(n);
-    for (size_t i = 0; i < n; ++i) {
-        result.push_back(popFreeBlockNoLock());
+    const size_t          preferred = prefer_upper_range ? 1 : 0;
+    std::array<size_t, 2> counts{};
+    counts[preferred]     = std::min(n, free_ranges_[preferred].size());
+    counts[1 - preferred] = n - counts[preferred];
+    // Prepare both queues before removing anything: a refill may allocate.
+    for (const size_t index : {preferred, 1 - preferred}) {
+        auto& range = free_ranges_[index];
+        if (range.blocks.size() - range.head < counts[index]) {
+            refillAscendingFreeBlocksNoLock(range);
+        }
+    }
+    for (const size_t index : {preferred, 1 - preferred}) {
+        for (size_t i = 0; i < counts[index]; ++i) {
+            result.push_back(popFreeBlockNoLock(free_ranges_[index]));
+        }
     }
 
     for (const auto block : result) {
@@ -249,32 +259,46 @@ size_t IBlockPool::totalBlocksNumNoLock() const {
 }
 
 size_t IBlockPool::availableFreeBlocksNoLock() const {
-    RTP_LLM_CHECK(free_head_ <= free_blocks_.size());
-    const size_t available_blocks = free_blocks_.size() - free_head_ + released_blocks_.size();
+    const size_t available_blocks = free_ranges_[0].size() + free_ranges_[1].size();
     RTP_LLM_CHECK(available_blocks <= totalBlocksNumNoLock());
     return available_blocks;
 }
 
-void IBlockPool::refillAscendingFreeBlocksNoLock() {
-    BlockIdList merged(free_blocks_.begin() + free_head_, free_blocks_.end());
-    merged.insert(merged.end(), released_blocks_.begin(), released_blocks_.end());
-    std::sort(merged.begin(), merged.end());
-    merged.erase(std::unique(merged.begin(), merged.end()), merged.end());
-    free_blocks_ = std::move(merged);
-    free_head_   = 0;
-    released_blocks_.clear();
+void IBlockPool::splitFreeBlocksNoLock(BlockIdxType boundary) {
+    RTP_LLM_CHECK(!initialized_ && free_range_boundary_ == 0);
+    RTP_LLM_CHECK(boundary > 0 && static_cast<size_t>(boundary) <= config_->physical_block_count);
+    auto&      lower = free_ranges_[0].blocks;
+    const auto split = std::lower_bound(lower.begin(), lower.end(), boundary);
+    free_ranges_[1].blocks.assign(split, lower.end());
+    lower.erase(split, lower.end());
+    free_range_boundary_ = boundary;
 }
 
-BlockIdxType IBlockPool::popFreeBlockNoLock() {
+size_t IBlockPool::freeLowerRangeBlocksNoLock() const {
+    return free_ranges_[0].size();
+}
+
+void IBlockPool::refillAscendingFreeBlocksNoLock(FreeRange& range) {
+    BlockIdList merged(range.blocks.begin() + range.head, range.blocks.end());
+    merged.insert(merged.end(), range.released.begin(), range.released.end());
+    std::sort(merged.begin(), merged.end());
+    merged.erase(std::unique(merged.begin(), merged.end()), merged.end());
+    range.blocks = std::move(merged);
+    range.head   = 0;
+    range.released.clear();
+}
+
+BlockIdxType IBlockPool::popFreeBlockNoLock(FreeRange& range) {
     RTP_LLM_CHECK_WITH_INFO(
-        free_head_ < free_blocks_.size(), "no free block available in pool [%s]", config_->pool_name.c_str());
-    const BlockIdxType block = free_blocks_[free_head_];
-    ++free_head_;
+        range.head < range.blocks.size(), "no free block available in pool [%s]", config_->pool_name.c_str());
+    const BlockIdxType block = range.blocks[range.head];
+    ++range.head;
     return block;
 }
 
 void IBlockPool::pushFreeBlockNoLock(BlockIdxType block) {
-    released_blocks_.push_back(block);
+    const size_t range = free_range_boundary_ > 0 && block >= free_range_boundary_ ? 1 : 0;
+    free_ranges_[range].released.push_back(block);
 }
 
 uint32_t IBlockPool::treeRefCountNoLock(BlockIdxType block) const {

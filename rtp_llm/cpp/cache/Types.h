@@ -72,6 +72,9 @@ struct MallocInfo {
     // Override for incrMalloc's seqLength read; -1 = fall back to complete_token_ids->seqLength().
     // Lets the state machine feed the publish-time value instead of racing with the async worker.
     int incr_seq_len_override = -1;
+    // Complete request length for initial tier placement, including reused prefixes.
+    // Zero means incremental growth should follow the last allocated tier.
+    int initial_seq_len = 0;
 
     int incrSeqLen() const;
 };

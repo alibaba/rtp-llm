@@ -471,8 +471,7 @@ TieredCacheCapacity CacheConfigCreator::configureOffloadCapacity(CacheConfig&   
                                                                  const KVCacheConfig& kv_cache_config,
                                                                  size_t               gpu_bytes,
                                                                  size_t               max_write_rows) {
-    RTP_LLM_CHECK_WITH_INFO(kv_cache_config.enable_sparse_kv_offload && config.mtp_sub_configs.empty(),
-                            "tiered cache capacity requires sparse offload without a draft model");
+    RTP_LLM_CHECK_WITH_INFO(kv_cache_config.enable_sparse_kv_offload, "tiered cache capacity requires sparse offload");
     RTP_LLM_CHECK_WITH_INFO(kv_cache_config.sparse_kv_offload_host_mb >= 0
                                 && kv_cache_config.sparse_kv_offload_test_hbm_blocks >= 0,
                             "sparse KV offload capacities must be non-negative");
@@ -592,7 +591,12 @@ uint32_t CacheConfigCreator::computeLocalOffloadConfig(CacheConfig&             
         runtime_config, kv_cache_config, model_config, parallelism_config, warm_up_result, std::nullopt);
     RTP_LLM_CHECK_WITH_INFO(runtime_config.max_generate_batch_size > 0,
                             "offload requires a positive decode batch size");
-    return configureOffloadCapacity(config, kv_cache_config, bytes, runtime_config.max_generate_batch_size)
+    const size_t query_tokens = std::max<int64_t>(1, model_config.gen_num_per_cycle + 1);
+    RTP_LLM_CHECK_WITH_INFO(query_tokens <= std::numeric_limits<size_t>::max()
+                                                / static_cast<size_t>(runtime_config.max_generate_batch_size),
+                            "sparse KV offload write capacity overflow");
+    return configureOffloadCapacity(
+               config, kv_cache_config, bytes, runtime_config.max_generate_batch_size * query_tokens)
         .config.total_blocks;
 }
 
@@ -607,6 +611,9 @@ uint32_t CacheConfigCreator::synchronizeOffloadConfig(CacheConfig&             c
     for (auto& [tag, capacity] : config.tiered_cache_configs) {
         capacity.hbm_blocks   = hbm;
         capacity.total_blocks = hbm + host;
+    }
+    for (auto& sub : config.mtp_sub_configs) {
+        sub->tiered_cache_configs = config.tiered_cache_configs;
     }
     return hbm + host;
 }
