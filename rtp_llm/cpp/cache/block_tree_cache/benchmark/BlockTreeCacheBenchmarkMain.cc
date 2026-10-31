@@ -5,6 +5,7 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/benchmark/BenchmarkCli.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/benchmark/TreeBenchmarkRunner.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/benchmark/TransferBenchmarkRunner.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/DeviceHostCopyStrategy.h"
 
 namespace rtp_llm::benchmark {
 namespace {
@@ -30,7 +31,16 @@ int main(int argc, char** argv) {
     using namespace rtp_llm::benchmark;
     return runBenchmarkCli(argc, argv, [](const BenchmarkCommand& command) {
         const auto& common = command.common;
-        const auto  prop   = selectCudaDevice(common.cuda_device);
+        if (command.subcommand == "capabilities") {
+            std::cout << "{\"cuda_3d_batch\":"
+                      << (rtp_llm::Cuda3DBatchDeviceHostCopyStrategy::isSupported() ? "true" : "false") << "}\n";
+            return true;
+        }
+        if (command.subcommand == "transfer" && command.transfer.copy_strategy == "cuda-3d-batch"
+            && !rtp_llm::Cuda3DBatchDeviceHostCopyStrategy::isSupported()) {
+            throw std::runtime_error("cuda-3d-batch requires a non-PPU CUDA 13 build/runtime and driver >= 13");
+        }
+        const auto prop = selectCudaDevice(common.cuda_device);
         std::cout << "Using GPU: " << prop.name << " (device " << common.cuda_device << ")\n";
         if (command.subcommand == "tree") {
             return TreeBenchmarkRunner(command.profile,

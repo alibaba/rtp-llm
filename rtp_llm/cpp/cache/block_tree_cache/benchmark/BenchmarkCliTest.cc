@@ -60,6 +60,17 @@ TEST(BenchmarkCliTest, ReportsErrorsBeforeRunningGpuCode) {
     }
 }
 
+TEST(BenchmarkCliTest, DispatchesCapabilitiesWithoutLoadingAProfile) {
+    const auto result = invoke({"capabilities", "--cuda-device=2"});
+    EXPECT_EQ(result.code, 0);
+    EXPECT_TRUE(result.ran);
+    EXPECT_TRUE(result.error.empty());
+    EXPECT_EQ(result.output.find("Loaded profile:"), std::string::npos);
+    const auto invalid = invoke({"capabilities", "--unknown=1"});
+    EXPECT_EQ(invalid.code, 1);
+    EXPECT_FALSE(invalid.ran);
+}
+
 TEST(BenchmarkCliTest, DispatchesMixedCommonAndTreeOptions) {
     const char* runfiles  = std::getenv("TEST_SRCDIR");
     const char* workspace = std::getenv("TEST_WORKSPACE");

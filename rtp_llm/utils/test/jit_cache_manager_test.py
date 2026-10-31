@@ -1250,6 +1250,44 @@ class ManagerTest(JitCacheTestBase):
         staging = scope.root.parent / jit.STAGING_DIR / scope.scope_id
         self.assertFalse(list(staging.glob("*")))
 
+    def test_deepjit_read_events_do_not_revalidate_metadata(self):
+        component = replace(
+            next(x for x in jit.COMPONENTS if x.name == "deep_gemm"),
+            local_dir=self.root / "deep_gemm",
+        )
+        manager = self.make_manager(jit.Scope("test", self.root, (component,)))
+        entry = component.local_dir / "cache" / "hash"
+        entry.mkdir(parents=True)
+        for name, data in {
+            "kernel.cu": "source",
+            "kernel.cubin": "binary",
+            "meta.json": "{}",
+            ".committed": "",
+        }.items():
+            (entry / name).write_text(data)
+        with mock.patch.object(
+            jit, "deepjit_entry_files", wraps=jit.deepjit_entry_files
+        ) as validate:
+            for event_type in ("opened", "closed_no_write"):
+                manager.on_any_event(
+                    types.SimpleNamespace(
+                        is_directory=False,
+                        event_type=event_type,
+                        src_path=str(entry / "meta.json"),
+                    )
+                )
+            validate.assert_not_called()
+            self.assertFalse(manager._dirty.is_set())
+            manager.on_any_event(
+                types.SimpleNamespace(
+                    is_directory=False,
+                    event_type="closed",
+                    src_path=str(entry / ".committed"),
+                )
+            )
+            validate.assert_called_once_with(entry)
+            self.assertTrue(manager._dirty.is_set())
+
     def test_event_handler_marks_dirty_only_for_trigger_files(self):
         triton = replace(
             next(x for x in jit.COMPONENTS if x.name == "triton"),
