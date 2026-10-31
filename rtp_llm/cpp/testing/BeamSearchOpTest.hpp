@@ -165,4 +165,65 @@ public:
             }
         }
     }
+
+    void runPrunedVocabV2Tests() {
+        const int batch_size  = 1;
+        const int beam_width  = 1500;
+        const int vocab_size  = 2048;
+        const int max_seq_len = 16;
+
+        variableBeamWidthTest(batch_size, 1, beam_width, vocab_size, max_seq_len);
+        simpleTest(batch_size, beam_width, vocab_size, max_seq_len);
+        // Exercise the production wrapper, including the fixed-width tiny-vocab
+        // V2 route. A flat CPU top-k is independent of its stage decomposition.
+        for (int batches : {1, 2}) {
+            prunedVocabMappingTest(batches, 2, 128, 67);
+            prunedVocabMappingTest(batches, 4, 4, 7);
+        }
+        for (int unsupported : {4097, 5000}) {
+            auto wide_output = prepareInput(1, 1, unsupported, 8192, 6);
+            EXPECT_ANY_THROW(opRun(wide_output));
+            auto wide_input = prepareInput(1, unsupported, 4, 2, 6);
+            EXPECT_ANY_THROW(opRun(wide_input));
+        }
+        auto insufficient = prepareInput(1, 2, 135, 67, 6);
+        EXPECT_ANY_THROW(opRun(insufficient));
+    }
+
+    void prunedVocabMappingTest(int batches, int beams_in, int beams_out, int vocab) {
+        constexpr int       max_seq_len = 6;
+        TestBeamSearchInput input{
+            torch::arange(vocab, float_options).mul(0.125f).repeat({batches, beams_in, 1}),
+            torch::arange(batches * beams_in * max_seq_len, int_options)
+                .remainder(vocab)
+                .reshape({batches, beams_in, max_seq_len}),
+            torch::ones({batches, beams_in}, int_options),
+            torch::full({batches, beams_in}, 3, int_options),
+            torch::arange(beams_in, float_options).roll({1}, {0}).mul(-0.03125f).repeat({batches, 1}),
+            beams_out};
+        for (int parent = 0; parent < beams_in; ++parent) {
+            input.input_lengths.select(1, parent).fill_(1 + parent % 2);
+            input.sequence_lengths.select(1, parent).fill_(3 + parent % 2);
+        }
+        auto scores                     = input.logits.log_softmax(-1) + input.cum_log_probs.unsqueeze(-1);
+        auto [expected_scores, indices] = scores.flatten(1).topk(beams_out, -1);
+        auto parents                    = torch::div(indices, vocab, "floor").to(torch::kInt32);
+        auto tokens                     = indices.remainder(vocab).to(torch::kInt32);
+        auto expected_input_lengths     = input.input_lengths.gather(1, parents.to(torch::kLong));
+        auto expected_lengths           = input.sequence_lengths.gather(1, parents.to(torch::kLong)) + 1;
+        auto expected_ids =
+            input.token_ids.gather(1, parents.to(torch::kLong).unsqueeze(-1).expand({batches, beams_out, max_seq_len}));
+        for (int batch = 0; batch < batches; ++batch) {
+            for (int beam = 0; beam < beams_out; ++beam) {
+                expected_ids.index_put_({batch, beam, expected_lengths[batch][beam].item<int>() - 1},
+                                        tokens[batch][beam]);
+            }
+        }
+        auto actual = opRun(input);
+        ASSERT_TRUE(torch::equal(actual.token_ids, expected_ids));
+        ASSERT_TRUE(torch::equal(actual.beam_indices, parents));
+        ASSERT_TRUE(torch::equal(actual.sequence_lengths, expected_lengths));
+        ASSERT_TRUE(torch::equal(actual.input_lengths, expected_input_lengths));
+        assertTensorClose(actual.cum_log_probs, expected_scores);
+    }
 };
