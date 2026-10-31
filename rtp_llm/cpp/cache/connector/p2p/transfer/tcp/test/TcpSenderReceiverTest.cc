@@ -60,6 +60,54 @@ static KeyBlockInfoMap makeBlocks(int64_t cache_key, void* addr, size_t size) {
     return m;
 }
 
+static std::shared_ptr<::tcp_transfer::TcpLayerBlockTransferRequest>
+makeOwnedTransferRequest(const std::string& key) {
+    auto request = std::make_shared<::tcp_transfer::TcpLayerBlockTransferRequest>();
+    request->set_unique_key(key);
+    auto* blocks = request->add_blocks();
+    blocks->set_key(1);
+    auto* block = blocks->add_blocks();
+    block->set_len(4096);
+    block->set_content(std::string(4096, 'R'));
+    return request;
+}
+
+static void expectCompletionReleasesResources(
+    TcpKVCacheSender& sender,
+    uint32_t port,
+    std::shared_ptr<::tcp_transfer::TcpLayerBlockTransferRequest> request,
+    TransferErrorCode expected,
+    int64_t timeout_ms) {
+    std::weak_ptr<::tcp_transfer::TcpLayerBlockTransferRequest> weak_request = request;
+    auto owner = std::make_shared<int>(7);
+    std::weak_ptr<int> weak_owner = owner;
+    auto completion = std::make_shared<std::promise<TransferErrorCode>>();
+    auto done = completion->get_future();
+    auto callbacks = std::make_shared<std::atomic<int>>(0);
+    sender.loadToRemote(
+        "127.0.0.1", port, request,
+        [completion, owner, callbacks](TransferErrorCode code, const std::string&) {
+            EXPECT_EQ(*owner, 7);
+            ++*callbacks;
+            completion->set_value(code);
+        },
+        currentTimeMs() + timeout_ms);
+    // A positive wire timeout proves this reached RPC submission, not an early rejection.
+    EXPECT_GT(request->timeout_ms(), 0);
+    request.reset();
+    owner.reset();
+    ASSERT_EQ(done.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+    EXPECT_EQ(done.get(), expected);
+    // Completion wakes the caller before Run() returns and destroys its captures.
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while ((!weak_request.expired() || !weak_owner.expired()) && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    EXPECT_TRUE(weak_request.expired()) << "completed RPC retained its protobuf KV payload";
+    EXPECT_TRUE(weak_owner.expired()) << "completed RPC retained its callback captures";
+    EXPECT_EQ(callbacks->load(), 1);
+}
+
 // ---------------------------------------------------------------------------
 // Fixture: Sender only (no Receiver)
 // ---------------------------------------------------------------------------
@@ -137,6 +185,30 @@ protected:
 };
 
 bool TcpSenderReceiverTest::device_initialized_ = false;
+
+TEST_F(TcpSenderReceiverTest, SuccessCompletionReleasesRequestAndCallbackCaptures) {
+    auto destination = allocDevice(4096);
+    RecvRequest receive;
+    receive.unique_key = "release-after-success";
+    receive.block_info = makeBlocks(1, destination.data_ptr(), 4096);
+    receive.deadline_ms = currentTimeMs() + 5000;
+    auto task = receiver_->recv(receive);
+    ASSERT_NE(task, nullptr);
+    expectCompletionReleasesResources(
+        *sender_, test_port_, makeOwnedTransferRequest(receive.unique_key), TransferErrorCode::OK, 5000);
+    EXPECT_TRUE(task->success());
+    EXPECT_TRUE(verifyDevice(destination.data_ptr(), std::string(4096, 'R')));
+}
+
+TEST_F(TcpSenderReceiverTest, ReceiverErrorCompletionReleasesRequestAndCallbackCaptures) {
+    expectCompletionReleasesResources(
+        *sender_, test_port_, makeOwnedTransferRequest("release-after-receiver-timeout"), TransferErrorCode::TIMEOUT, 250);
+}
+
+TEST_F(TcpSenderOnlyTest, RpcErrorCompletionReleasesRequestAndCallbackCaptures) {
+    expectCompletionReleasesResources(
+        *sender_, unused_port_, makeOwnedTransferRequest("release-after-rpc-timeout"), TransferErrorCode::TIMEOUT, 250);
+}
 
 TEST_F(TcpSenderOnlyTest, StagedGatherFollowsSourceDeviceOnReusedThread) {
     if (torch::cuda::device_count() < 2) {

@@ -6,6 +6,7 @@
 #include "aios/network/arpc/arpc/ANetRPCController.h"
 #include <algorithm>
 #include <limits>
+#include <memory>
 
 namespace rtp_llm {
 namespace transfer {
@@ -56,6 +57,7 @@ public:
     }
 
     void Run() override {
+        std::unique_ptr<TcpTransferClosure> self_guard(this);
         TransferErrorCode error_code = TransferErrorCode::OK;
         std::string       error_msg;
 
