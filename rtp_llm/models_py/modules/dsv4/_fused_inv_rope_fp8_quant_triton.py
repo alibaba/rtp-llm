@@ -27,8 +27,6 @@ eager inv-RoPE + per-group quant, and ≤2-ULP end-to-end vs wo_a GEMM).
 
 from __future__ import annotations
 
-import os
-
 import torch
 import triton
 import triton.language as tl
@@ -329,9 +327,8 @@ def fused_inv_rope_fp8_quant(
         quant_group_size: FP8 quant block size along K (fixed at 128 for V4).
         eps: Numerical epsilon used inside absmax-scale computation.
         heads_per_cta: Optimized Triton path head grouping.  Valid values are
-           1, 2, 4, and 8; ``None`` reads ``DSV4_INV_ROPE_HEADS_PER_CTA``.
-           ``DSV4_INV_ROPE_NUM_WARPS`` is an experimental tuning override for
-           the optimized Triton launch; default is 2.
+           1, 2, 4, and 8; ``None`` picks the hardware default (8 on
+           Blackwell, 2 elsewhere, falling back to 1 when not divisible).
 
     Returns:
         (o_fp8, o_scale) where:
@@ -401,11 +398,7 @@ def fused_inv_rope_fp8_quant(
     )
     tma_M = scale_work.stride(2)
 
-    selected_impl = (
-        impl
-        if impl is not None
-        else os.environ.get("DSV4_INV_ROPE_FP8_QUANT_IMPL", "optimized")
-    ).lower()
+    selected_impl = (impl if impl is not None else "optimized").lower()
     if selected_impl == "legacy":
         # complex64 .real / .imag are stride-2 views; .contiguous() is a real
         # layout copy. Keep this path only as a correctness/perf baseline.
@@ -439,26 +432,18 @@ def fused_inv_rope_fp8_quant(
             num_stages=1,
         )
     elif selected_impl == "optimized":
-        env_heads_per_cta = os.environ.get("DSV4_INV_ROPE_HEADS_PER_CTA")
         if heads_per_cta is not None:
             selected_heads_per_cta = heads_per_cta
-        elif env_heads_per_cta is not None:
-            selected_heads_per_cta = int(env_heads_per_cta)
         else:
             selected_heads_per_cta = 8 if _is_blackwell_device(o.device) else 2
         if selected_heads_per_cta not in (1, 2, 4, 8):
             raise ValueError(
-                f"invalid DSV4_INV_ROPE_HEADS_PER_CTA={selected_heads_per_cta}; "
+                f"invalid heads_per_cta={selected_heads_per_cta}; "
                 "expected 1, 2, 4, or 8"
             )
         if heads_per_group % selected_heads_per_cta != 0:
             selected_heads_per_cta = 1
-        selected_num_warps = int(os.environ.get("DSV4_INV_ROPE_NUM_WARPS", "2"))
-        if selected_num_warps not in (1, 2, 4, 8):
-            raise ValueError(
-                f"invalid DSV4_INV_ROPE_NUM_WARPS={selected_num_warps}; "
-                "expected 1, 2, 4, or 8"
-            )
+        selected_num_warps = 2
         freqs_ri = torch.view_as_real(freqs_cis_per_b)
         grid = (tma_M, n_groups, heads_per_group // selected_heads_per_cta)
         _fused_inv_rope_fp8_quant_group_heads[grid](
@@ -488,7 +473,7 @@ def fused_inv_rope_fp8_quant(
         )
     else:
         raise ValueError(
-            f"invalid DSV4_INV_ROPE_FP8_QUANT_IMPL={selected_impl!r}; "
+            f"invalid impl={selected_impl!r}; "
             "expected legacy|optimized"
         )
     # Transpose (0, 1) so the consumer sees [M, G, …]:

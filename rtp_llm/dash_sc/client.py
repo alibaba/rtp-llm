@@ -478,7 +478,7 @@ def build_dash_sc_grpc_client_argparser() -> argparse.ArgumentParser:
         "--dash_sc_grpc_config_json",
         type=str,
         default="",
-        help="Optional DashScGrpcConfig JSON (client_config / server_config / max_server_workers).",
+        help="Optional DashScGrpcConfig JSON (client_config / server_config).",
     )
     return parser
 

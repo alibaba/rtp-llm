@@ -22,27 +22,3 @@ def init_rpc_discovery_group_args(parser):
         default=None,
         help="指定远程 RPC 服务器的 IP 地址和可选端口 (格式: `ip:port` 或 `ip`)。主要用于 prefill server 的本地测试和调试。",
     )
-
-    rpc_discovery_group.add_argument(
-        "--decode_cm2_config",
-        env_name="RTP_LLM_DECODE_CM2_CONFIG",
-        type=str,
-        default=None,
-        help="为 decode cluster 提供服务发现 (如 CM2) 的 JSON 配置字符串。用于在集群环境中定位 decode 服务。",
-    )
-
-    rpc_discovery_group.add_argument(
-        "--remote_vit_server_ip",
-        env_name="REMOTE_VIT_SERVER_IP",
-        type=str,
-        default=None,
-        help="指定远程 ViT (Visual Transformer) 服务器的 IP 地址和可选端口。主要用于多模态模型的本地测试和调试。",
-    )
-
-    rpc_discovery_group.add_argument(
-        "--multimodal_part_cm2_config",
-        env_name="RTP_LLM_MULTIMODAL_PART_CM2_CONFIG",
-        type=str,
-        default=None,
-        help="为多模态 (ViT) 服务部分提供服务发现 (如 CM2) 的 JSON 配置字符串。用于在集群环境中定位多模态处理服务。",
-    )

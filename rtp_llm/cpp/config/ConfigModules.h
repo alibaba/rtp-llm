@@ -81,7 +81,6 @@ struct ParallelismConfig {
     int64_t dp_rank          = 0;
     int64_t ffn_tp_size      = 1;
     int64_t ffn_tp_rank      = 0;
-    bool    enable_sp        = false;
     bool    use_ub_comm      = false;
 
     // Mirror of py_env_configs.role_config.role_type, plumbed in
@@ -142,12 +141,10 @@ enum class FMHAType {
 };
 
 struct FMHAConfig {
-    bool enable_fmha                         = true;
     bool enable_flashinfer_trtllm_gen        = true;
     bool enable_flashinfer_trt_fmha_v2       = true;
     bool enable_paged_flashinfer_trt_fmha_v2 = true;
     bool enable_open_source_fmha             = true;
-    bool enable_paged_open_source_fmha       = true;
     bool disable_flashinfer_native           = false;
     bool disable_flashinfer_hybrid_prefill   = true;
     bool enable_xqa                          = true;
@@ -174,7 +171,6 @@ struct KVCacheConfig {
     std::string                             multi_task_prompt_str = "";
     std::map<std::string, std::vector<int>> multi_task_prompt_tokens;
     int64_t                                 reserve_block_ratio                             = 5;
-    int                                     max_block_size_per_item                         = 16;
     int64_t                                 memory_cache_size_mb                            = 0;
     int64_t                                 memory_cache_sync_timeout_ms                    = 10000;
     std::string                             disk_cache_paths                                = "";
@@ -206,7 +202,6 @@ struct KVCacheConfig {
     int         seq_size_per_block        = 0;
     int         kernel_seq_size_per_block = 0;
     int         test_block_num            = 0;
-    int         use_block_cache           = -1;  // -1 means not set, use Optional<int> equivalent
     bool        enable_device_cache       = true;
     bool        enable_memory_cache       = false;
     bool        enable_disk_cache         = false;
@@ -297,11 +292,6 @@ struct HWKernelConfig {
     // stay at or below 1023.
     static constexpr int kGenerationPrefillCudaGraphMaxRequests = 1023;
 
-    int         deep_gemm_num_sm             = -1;
-    bool        arm_gemm_use_kai             = false;
-    bool        enable_multi_block_mode      = true;
-    bool        ft_disable_custom_ar         = true;
-    std::string rocm_hipblaslt_config        = "gemm_config.csv";
     bool        use_swizzleA                 = false;
     bool        enable_cuda_graph            = false;
     bool        enable_cuda_graph_debug_mode = false;
@@ -309,26 +299,13 @@ struct HWKernelConfig {
     // switch is on and this capture bucket list is explicitly configured.
     int              generation_prefill_cuda_graph_max_requests = 1;
     std::vector<int> generation_prefill_capture_token_buckets;
-    bool             enable_native_cuda_graph = false;
-    int              num_native_cuda_graph    = 200;
     // Prefill CUDA Graph capture configuration
     // Can be set via: prefill_capture_file_path, prefill_capture_seq_lens, or prefill_capture_max_seq_len + step
     std::vector<int> prefill_capture_seq_lens;
     // Decode CUDA Graph capture configuration
     // Comma-separated list of batch sizes, e.g., "1,2,4,8,16,32"
     std::vector<int> decode_capture_batch_sizes;
-    bool             disable_dpc_random     = false;
-    bool             rocm_disable_custom_ag = true;
     std::string      to_string() const;
-};
-
-struct DeviceResourceConfig {
-    int         overlap_math_sm_count    = 0;
-    int         overlap_comm_type        = 0;
-    int         m_split                  = 0;
-    bool        enable_comm_overlap      = true;
-    int         enable_layer_micro_batch = 0;
-    std::string to_string() const;
 };
 
 struct MoeConfig {
@@ -365,12 +342,8 @@ enum SpeculativeType {
 struct SpeculativeExecutionConfig {
     std::string     model_type                    = "";
     SpeculativeType type                          = SP_TYPE_NONE;
-    int64_t         sp_min_token_match            = 2;
-    int64_t         sp_max_token_match            = 2;
     std::string     tree_decode_config            = "";
     int64_t         gen_num_per_cycle             = 1;
-    bool            force_stream_sample           = false;
-    bool            force_score_context_attention = true;
     std::string     quantization                  = "";
     std::string     checkpoint_path               = "";
     // DSpARK noise/mask token used to build each fixed-width draft block.
@@ -411,8 +384,6 @@ struct VitConfig {
 
 struct CacheStoreConfig {
     bool    cache_store_rdma_mode         = false;
-    int     wrr_available_ratio           = 80;
-    int     rank_factor                   = 0;
     int     thread_count                  = 32;
     int     rdma_connect_timeout_ms       = 250;
     int     rdma_qp_count_per_connection  = 2;
@@ -531,11 +502,8 @@ struct PDSepConfig {
     int64_t  prefill_retry_times             = 0;
     int64_t  prefill_retry_timeout_ms        = 20;
     int64_t  prefill_max_wait_timeout_ms     = 600 * 1000;
-    int64_t  decode_retry_times              = 100;
-    int64_t  decode_retry_timeout_ms         = 100;
     int64_t  decode_retry_interval_ms        = 1;
     int64_t  decode_polling_kv_cache_step_ms = 30;
-    int64_t  decode_polling_call_prefill_ms  = 30;
     int64_t  rdma_connect_retry_times        = 0;
     int64_t  load_cache_timeout_ms           = 5000;
     int64_t  max_rpc_timeout_ms              = 2 * 3600 * 1000;  // 2h default
@@ -694,7 +662,6 @@ struct GrpcConfig: GrpcMapsConfig {
 
 /// DashSc gRPC (predict_v2.proto) Python client/server channel options.
 struct DashScGrpcConfig: GrpcMapsConfig {
-    int max_server_workers = 4;
     DashScGrpcConfig(){};
     DashScGrpcConfig(const std::string& json_str);
     std::string to_string() const;

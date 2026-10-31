@@ -31,12 +31,10 @@ from rtp_llm.model_loader.model_weight_info import ModelDeployWeightInfo, ModelW
 from rtp_llm.models.downstream_modules.custom_module import CustomModule
 from rtp_llm.models.downstream_modules.utils import create_custom_module
 from rtp_llm.ops import (
-    DeviceResourceConfig,
     FMHAConfig,
     HWKernelConfig,
     KVCacheSpecDesc,
     KVCacheSpecType,
-    MlaOpsType,
     MoeConfig,
     ParallelismConfig,
 )
@@ -86,7 +84,6 @@ class BaseModel(object):
         load_method: LoadMethod,
         vit_config: Optional[VitConfig],
         merge_lora: bool,
-        device_resource_config: Optional[DeviceResourceConfig],
         force_cpu_load_weights: bool = False,
         loader_recycle_handles: bool = False,
         moe_pure_tp_preshard: bool = False,
@@ -101,7 +98,6 @@ class BaseModel(object):
             moe_config: MoE configuration
             max_generate_batch_size: Maximum batch size for generation
             merge_lora: Whether to merge LoRA weights
-            device_resource_config: Optional DeviceResourceConfig for device resource configuration
         """
         self.model_config = model_config
         self.parallelism_config = parallelism_config
@@ -114,7 +110,6 @@ class BaseModel(object):
         self.vit_config = vit_config
 
         self.merge_lora = merge_lora
-        self.device_resource_config = device_resource_config
         self.force_cpu_load_weights = force_cpu_load_weights
         self.loader_recycle_handles = loader_recycle_handles
         self.moe_pure_tp_preshard = moe_pure_tp_preshard
@@ -272,10 +267,7 @@ class BaseModel(object):
             return
 
         desc = KVCacheSpecDesc()
-        if (
-            model_config.attn_config.use_mla
-            and model_config.mla_ops_type != MlaOpsType.MHA
-        ):
+        if model_config.attn_config.use_mla:
             desc.cache_type = KVCacheSpecType.MLA
         else:
             desc.cache_type = KVCacheSpecType.MHA
@@ -311,7 +303,6 @@ class BaseModel(object):
         max_generate_batch_size: int,
         vit_config: Optional[VitConfig],
         merge_lora: bool,
-        device_resource_config: DeviceResourceConfig,
         force_cpu_load_weights: bool = False,
         skip_python_model: bool = False,
         loader_recycle_handles: bool = False,
@@ -330,7 +321,6 @@ class BaseModel(object):
             moe_config: MoE configuration
             max_generate_batch_size: Maximum batch size for generation
             merge_lora: Whether to merge LoRA weights
-            device_resource_config: DeviceResourceConfig for device resource configuration
         """
         # All metadata is in model_config
         model = cls(
@@ -344,7 +334,6 @@ class BaseModel(object):
             max_generate_batch_size=max_generate_batch_size,
             vit_config=vit_config,
             merge_lora=merge_lora,
-            device_resource_config=device_resource_config,
             force_cpu_load_weights=force_cpu_load_weights,
             loader_recycle_handles=loader_recycle_handles,
             moe_pure_tp_preshard=moe_pure_tp_preshard,

@@ -1,7 +1,6 @@
 import functools
 import json
 import logging
-import os
 from functools import lru_cache
 from typing import Any, Dict, List, Optional, Tuple, Union
 
@@ -133,7 +132,6 @@ def sgl_per_token_group_quant_fp8(
         scale_ue8m0=scale_ue8m0,
     )
     if x.shape[0] > 0:
-        quant_kernel = os.environ.get("DSV4_FP8_QUANT_KERNEL", "auto").strip().lower()
 
         def can_use_v2() -> bool:
             if group_size not in (16, 32, 64, 128):
@@ -151,29 +149,7 @@ def sgl_per_token_group_quant_fp8(
             # consistently once the quantized matrix has at least ~4M elements.
             return x.numel() >= 4 * 1024 * 1024
 
-        if quant_kernel == "legacy":
-            per_token_group_quant_fp8(
-                x, x_q, x_s, group_size, eps, fp8_min, fp8_max, scale_ue8m0
-            )
-        elif quant_kernel == "v2":
-            per_token_group_quant_fp8_v2(
-                x,
-                x_q,
-                x_s,
-                group_size,
-                eps,
-                fp8_min,
-                fp8_max,
-                scale_ue8m0,
-                fuse_silu_and_mul,
-                masked_m,
-            )
-        elif quant_kernel != "auto":
-            raise ValueError(
-                "DSV4_FP8_QUANT_KERNEL must be one of auto, legacy, v2; "
-                f"got {quant_kernel!r}"
-            )
-        elif should_auto_use_v2():
+        if should_auto_use_v2():
             per_token_group_quant_fp8_v2(
                 x,
                 x_q,

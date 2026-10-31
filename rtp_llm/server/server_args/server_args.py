@@ -37,9 +37,6 @@ from rtp_llm.server.server_args.lora_group_args import init_lora_group_args
 from rtp_llm.server.server_args.master_group_args import init_master_group_args
 from rtp_llm.server.server_args.misc_group_args import init_misc_group_args
 from rtp_llm.server.server_args.model_group_args import init_model_group_args
-from rtp_llm.server.server_args.model_specific_group_args import (
-    init_model_specific_group_args,
-)
 from rtp_llm.server.server_args.moe_group_args import init_moe_group_args
 from rtp_llm.server.server_args.parallel_group_args import init_parallel_group_args
 from rtp_llm.server.server_args.pd_separation_group_args import (
@@ -456,9 +453,7 @@ def init_all_group_args(
     )
     init_cache_store_group_args(parser, py_env_configs.cache_store_config)
     init_concurrent_group_args(parser, py_env_configs.concurrency_config)
-    init_device_resource_group_args(
-        parser, py_env_configs.device_resource_config, py_env_configs.runtime_config
-    )
+    init_device_resource_group_args(parser, py_env_configs.runtime_config)
     init_embedding_group_args(parser, py_env_configs.embedding_config)
     init_engine_group_args(parser, py_env_configs.runtime_config)
     init_fifo_scheduler_group_args(
@@ -479,7 +474,6 @@ def init_all_group_args(
     init_master_group_args(parser, py_env_configs.master_config)
     init_misc_group_args(parser, py_env_configs.misc_config)
     init_model_group_args(parser, py_env_configs.model_args)
-    init_model_specific_group_args(parser, py_env_configs.model_specific_config)
     init_moe_group_args(
         parser,
         py_env_configs.moe_config,

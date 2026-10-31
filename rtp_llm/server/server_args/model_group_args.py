@@ -23,14 +23,6 @@ def init_model_group_args(parser, model_args):
         help="计算使用的数据类型",
     )
     model_group.add_argument(
-        "--mla_ops_type",
-        env_name="MLA_OPS_TYPE",
-        bind_to=(model_args, "mla_ops_type"),
-        type=str,
-        default=None,
-        help="Multi Latent Attention的操作类型（将自动转换为枚举）",
-    )
-    model_group.add_argument(
         "--task_type",
         env_name="TASK_TYPE",
         bind_to=(model_args, "task_type"),

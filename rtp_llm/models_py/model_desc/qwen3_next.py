@@ -1488,7 +1488,6 @@ class Qwen3NextModel(GptModelBase):
         max_generate_batch_size: int,
         fmha_config=None,
         py_hw_kernel_config=None,
-        device_resource_config=None,
     ):
         super().__init__(
             model_config,
@@ -1497,7 +1496,6 @@ class Qwen3NextModel(GptModelBase):
             max_generate_batch_size=max_generate_batch_size,
             fmha_config=fmha_config,
             py_hw_kernel_config=py_hw_kernel_config,
-            device_resource_config=device_resource_config,
         )
         self.embed_tokens = Embedding(
             model_config, parallelism_config, weights.get_global_weight(W.embedding)
@@ -1817,7 +1815,6 @@ class Qwen35Model(Qwen3NextModel):
         max_generate_batch_size: int,
         fmha_config=None,
         py_hw_kernel_config=None,
-        device_resource_config=None,
     ):
         super().__init__(
             model_config,
@@ -1827,7 +1824,6 @@ class Qwen35Model(Qwen3NextModel):
             max_generate_batch_size,
             fmha_config,
             py_hw_kernel_config,
-            device_resource_config,
         )
         self.multimodal_embedding_injector = MultimodalEmbeddingInjector()
 

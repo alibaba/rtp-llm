@@ -98,9 +98,7 @@ class RdmaSenderOnlyTest: public ::testing::Test {
 public:
     static void SetUpTestSuite() {
         initRuntime(/*device_id=*/0,
-                    /*trace_memory=*/false,
-                    /*enable_comm_overlap=*/false,
-                    MlaOpsType::AUTO);
+                    /*trace_memory=*/false);
     }
 
 protected:
@@ -131,9 +129,7 @@ class RdmaSenderReceiverTest: public ::testing::Test {
 public:
     static void SetUpTestSuite() {
         initRuntime(/*device_id=*/0,
-                    /*trace_memory=*/false,
-                    /*enable_comm_overlap=*/false,
-                    MlaOpsType::AUTO);
+                    /*trace_memory=*/false);
     }
 
 protected:

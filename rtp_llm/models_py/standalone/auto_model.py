@@ -84,8 +84,6 @@ class AutoModel:
         init_exec_ctx(
             device_id=pc.world_rank % pc.local_world_size,
             trace_memory=engine_config.profiling_debug_logging_config.trace_memory,
-            enable_comm_overlap=engine_config.device_resource_config.enable_comm_overlap,
-            mla_ops_type=int(model_config.mla_ops_type),
         )
         self.device = "cuda"
 

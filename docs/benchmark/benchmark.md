@@ -219,11 +219,11 @@ benchmarks:
       input_len_list: ["[2048,4096,8192]", "[65536]"]
 ```
 
-**recursive_search_config**: Defines configuration that will be tested using Cartesian product combinations. Each configuration can have multiple values, and all possible combinations will be tested. For example, with `enable_comm_overlap: [false, true]` and `enable_layer_micro_batch: [0, 2]`, four combinations will be tested: `(false, 0)`, `(false, 2)`, `(true, 0)`, `(true, 2)`.
+**recursive_search_config**: Defines configuration that will be tested using Cartesian product combinations. Each configuration can have multiple values, and all possible combinations will be tested. For example, with `concurrency_limit: [4, 8]` and `gen_num_per_cycle: [2, 3]`, four combinations will be tested: `(4, 2)`, `(4, 3)`, `(8, 2)`, `(8, 3)`.
 ```yaml
     recursive_search_config:
-      enable_comm_overlap: [false, true]
-      enable_layer_micro_batch: [0, 2]
+      concurrency_limit: [4, 8]
+      gen_num_per_cycle: [2, 3]
 ```
 
 ### Run step

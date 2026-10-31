@@ -72,24 +72,6 @@ def init_pd_separation_group_args(parser, pd_separation_config):
     )
 
     pd_separation_group.add_argument(
-        "--decode_retry_times",
-        env_name="DECODE_RETRY_TIMES",
-        bind_to=(pd_separation_config, "decode_retry_times"),
-        type=int,
-        default=100,
-        help="Decode部分流程重试次数，0 表示禁用重试",
-    )
-
-    pd_separation_group.add_argument(
-        "--decode_retry_timeout_ms",
-        env_name="DECODE_RETRY_TIMEOUT_MS",
-        bind_to=(pd_separation_config, "decode_retry_timeout_ms"),
-        type=int,
-        default=100,
-        help="Decode流程重试的总超时时间（毫秒）",
-    )
-
-    pd_separation_group.add_argument(
         "--decode_retry_interval_ms",
         env_name="DECODE_RETRY_INTERVAL_MS",
         bind_to=(pd_separation_config, "decode_retry_interval_ms"),

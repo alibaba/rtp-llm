@@ -110,8 +110,7 @@ import sysconfig
 from ctypes import cdll
 
 cdll.LoadLibrary(
-    sysconfig.get_config_var("LIBDIR")
-    + "/libpython%d.%d.so" % sys.version_info[:2]
+    sysconfig.get_config_var("LIBDIR") + "/libpython%d.%d.so" % sys.version_info[:2]
 )
 
 try:
@@ -136,7 +135,6 @@ try:
         CPRotateMethod,
         DashScGrpcConfig,
         DataType,
-        DeviceResourceConfig,
         EPLBConfig,
         EplbMode,
         FfnDisAggregateConfig,
@@ -155,7 +153,6 @@ try:
         KVCacheSpecType,
         LinearAttentionConfig,
         MiscellaneousConfig,
-        MlaOpsType,
         ModelConfig,
         ModelSpecificConfig,
         MoeConfig,

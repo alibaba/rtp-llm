@@ -16,7 +16,6 @@ from rtp_llm.ops import (
     FMHAConfig,
     MoeConfig,
     RuntimeConfig,
-    DeviceResourceConfig,
 )
 
 
@@ -176,7 +175,6 @@ class Gemma(Llama):
         fmha_config: FMHAConfig,
         moe_config: MoeConfig,
         runtime_config: RuntimeConfig,
-        device_resource_config: DeviceResourceConfig,
         vit_config: Optional[Any] = None,
         merge_lora: bool = False,
     ):
@@ -194,7 +192,6 @@ class Gemma(Llama):
             fmha_config=fmha_config,
             moe_config=moe_config,
             runtime_config=runtime_config,
-            device_resource_config=device_resource_config,
             vit_config=vit_config,
             merge_lora=merge_lora,
         )

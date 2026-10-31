@@ -47,14 +47,6 @@ def init_server_group_args(parser, server_config, distribute_config):
         help="前端服务器序号",
     )
     server_group.add_argument(
-        "--vit_server_id",
-        env_name="VIT_SERVER_ID",
-        bind_to=(server_config, "vit_server_id"),
-        type=int,
-        default=0,
-        help="VIT服务器序号",
-    )
-    server_group.add_argument(
         "--worker_info_port_num",
         env_name="WORKER_INFO_PORT_NUM",
         bind_to=[

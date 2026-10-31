@@ -8,7 +8,6 @@ and only fuses the final add+cast when possible.
 
 from __future__ import annotations
 
-import os
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 
@@ -16,7 +15,6 @@ import torch
 import torch.nn as nn
 
 from rtp_llm.models_py.modules.factory.fused_moe.utils.config import (
-    shared_expert_mode,
     strict_fused_moe_enabled,
 )
 from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.warmup_sync import (
@@ -564,16 +562,11 @@ class OverlapSharedExpertExecutor(SharedExpertExecutor):
     def _can_overlap(self, x: torch.Tensor) -> bool:
         if not (x.is_cuda and torch.cuda.is_available()):
             return False
-        threshold = int(
-            os.environ.get("MOE_SHARED_EXPERT_STREAM_TOKEN_THRESHOLD", "4096")
-        )
-        if x.shape[0] > threshold:
+        if x.shape[0] > 4096:
             return False
         if torch.cuda.is_current_stream_capturing():
             return False
         if cuda_graph_warmup_forward_enabled():
-            return False
-        if os.environ.get("MOEDBG", "0") != "0":
             return False
         return True
 
@@ -647,20 +640,13 @@ def get_shared_expert_executor(
 ) -> SharedExpertExecutor:
     if native_mxfp8:
         return MXFP8SharedExpertExecutor()
-    mode = shared_expert_mode()
     fast_path = FusedSharedExpertExecutor(
         max_tokens_per_rank=max_tokens_per_rank,
         dim=dim,
         inter_dim=inter_dim,
         swiglu_limit=swiglu_limit,
     )
-    if mode == "sequential":
-        return SequentialSharedExpertExecutor(fast_path)
-    if mode in ("auto", "overlap"):
-        return OverlapSharedExpertExecutor(fast_path)
-    raise ValueError(
-        f"invalid MOE_SHARED_EXPERT_MODE={mode!r}; expected auto|sequential|overlap"
-    )
+    return SequentialSharedExpertExecutor(fast_path)
 
 
 def combine_routed_and_shared(
@@ -679,16 +665,6 @@ def combine_routed_and_shared(
             raise ValueError(
                 "combined MoE output must use the requested dtype and routed device"
             )
-
-    if os.environ.get("MOE_SHARED_EXPERT_BF16_ADD", "0") == "1":
-        if strict_fused_moe_enabled():
-            raise RuntimeError(
-                "MOE_STRICT_FUSED=1 forbids MOE_SHARED_EXPERT_BF16_ADD=1"
-            )
-        if out is None:
-            return (routed.to(out_dtype) + shared.to(out_dtype)).to(out_dtype)
-        torch.add(routed.to(out_dtype), shared.to(out_dtype), out=out)
-        return out
 
     try:
         from rtp_llm.models_py.triton_kernels.moe.shared_expert import (

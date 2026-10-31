@@ -457,12 +457,8 @@ class CacheStoreForwardModel:
 
     def __init__(self, hidden_size: int = 1) -> None:
         self.hidden_size = hidden_size
-        # Match the production disaggregate model contract: the micro-batch
-        # result already includes final normalization.
-        self.micro_batch_final_norm = True
         self.kv_cache = None
         self.forward_calls = 0
-        self.micro_batch_calls = 0
         self.seen_input_lengths: list[list[int]] = []
         self.seen_kernel_tables: dict[str, list[list[int]]] = {}
         self.seen_cache_tables: list[dict[str, dict[str, list[list[int]]]]] = []
@@ -539,11 +535,6 @@ class CacheStoreForwardModel:
     def forward(self, inputs: PyModelInputs, fmha_impl=None) -> PyModelOutputs:
         self.forward_calls += 1
         return self._forward_one(inputs)
-
-    def forward_micro_batch(self, inputs: list[PyModelInputs]) -> list[PyModelOutputs]:
-        self.micro_batch_calls += 1
-        return [self._forward_one(model_inputs) for model_inputs in inputs]
-
 
 class DirtyGenerationPrefillCaptureModel:
     """Fail on the graph-capture body after all eager generation-prefill warmups."""
@@ -658,13 +649,6 @@ class UnsupportedBackendGenerationPrefillCaptureModel(
         return None
 
 
-class MissingMicroBatchForwardModel(CacheStoreForwardModel):
-    def __getattribute__(self, name):
-        if name == "forward_micro_batch":
-            raise AttributeError(name)
-        return super().__getattribute__(name)
-
-
 class PositionAwareCaptureModel(CacheStoreForwardModel):
     def _forward_one(self, inputs: PyModelInputs) -> PyModelOutputs:
         output = super()._forward_one(inputs)
@@ -709,12 +693,6 @@ class MalformedCaptureLayoutModel(CacheStoreForwardModel):
         if inputs.capture_hidden_states:
             return PyModelOutputs(output.hidden_states[:, :2])
         return output
-
-
-class MalformedCaptureOutputCountModel(CacheStoreForwardModel):
-    def forward_micro_batch(self, inputs: list[PyModelInputs]) -> list[PyModelOutputs]:
-        outputs = super().forward_micro_batch(inputs)
-        return outputs[:-1]
 
 
 class MalformedCaptureRankModel(CacheStoreForwardModel):
@@ -1372,46 +1350,6 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
                 )
                 self.assertEqual(model.seen_kernel_tables["draft"], [[1, 2]])
 
-    def test_micro_batch_uses_regular_forward_when_entry_point_is_absent(
-        self,
-    ) -> None:
-        model = MissingMicroBatchForwardModel()
-        result = run_scenario(model, "micro_batch")
-
-        self.assertEqual(model.micro_batch_calls, 0)
-        self.assertEqual(model.forward_calls, 1)
-        self.assertEqual(len(result["records"]), 3)
-
-    def test_micro_batch_slices_request_metadata_with_block_rows(self) -> None:
-        model = CacheStoreForwardModel()
-        result = run_scenario(model, "micro_batch")
-
-        self.assertEqual(model.forward_calls, 0)
-        self.assertEqual(model.micro_batch_calls, 1)
-        self.assertEqual(model.seen_input_lengths, [[2, 4], [2]])
-        self.assertEqual(len(result["records"]), 3)
-
-        expected = {
-            201: ([2101], [16]),
-            202: ([2201, 2202], [32, 48]),
-            203: ([2301], [64]),
-        }
-        base = result["base_addresses"]["default"]
-        for request_id, (token_keys, offsets) in expected.items():
-            record = _record_for_request(result, request_id)
-            self.assertEqual(len(record["blocks"]), len(token_keys))
-            self.assertEqual(
-                sorted(block["address"] - base for block in record["blocks"]),
-                offsets,
-            )
-            for token_key in token_keys:
-                self.assertTrue(
-                    any(
-                        f"_token_id_str_{token_key}_" in block["key"]
-                        for block in record["blocks"]
-                    )
-                )
-
     @_skip_rocm_context_parallel
     def test_context_parallel_publishes_original_lengths_to_every_tag(self) -> None:
         rank_key_sets = []
@@ -1464,106 +1402,6 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
             rank_key_sets.append(set(blocks))
 
         self.assertEqual(rank_key_sets[0], rank_key_sets[1])
-
-    def test_micro_batch_preserves_reordered_group_rows(self) -> None:
-        model = CacheStoreForwardModel()
-        result = run_scenario(model, "micro_batch_multi_tag")
-        self.assertEqual(model.seen_input_lengths, [[2, 4], [2]])
-        self.assertEqual(len(model.seen_cache_tables), 2)
-        expected_tables = [
-            {
-                "full": [[1, -1, -1, -1], [2, 3, -1, -1]],
-                "linear": [[2, 3, -1, -1], [4, 5, 6, 7]],
-            },
-            {"full": [[4, -1, -1, -1]], "linear": [[1, 2, -1, -1]]},
-        ]
-        for actual, expected in zip(model.seen_cache_tables, expected_tables):
-            self.assertEqual(set(actual), set(expected))
-            for tag, table in expected.items():
-                self.assertEqual(actual[tag]["physical"], table)
-                self.assertEqual(actual[tag]["kernel"], table)
-
-        blocks = _blocks_by_key(result)
-        for tag, offsets in (
-            ("full", [16, 32, 48, 64]),
-            ("linear", [24, 48, 48, 72, 96, 120, 144, 168]),
-        ):
-            self.assertEqual(
-                sorted(
-                    block["address"] - result["base_addresses"][tag]
-                    for key, block in blocks.items()
-                    if f"_tag_{tag}" in key
-                ),
-                offsets,
-            )
-
-    def test_micro_batch_split_preserves_cache_storage_contract(self) -> None:
-        multi_group_tables = [
-            [[1, -1, -1, -1], [2, 3, -1, -1], [4, -1, -1, -1]],
-            [[2, 3, -1, -1], [4, 5, 6, 7], [1, 2, -1, -1]],
-        ]
-        single_group_tables = [[[1, -1], [2, 3], [4, -1]]]
-        for scenario, on_cuda, two_dimensional, tags, tables in (
-            (
-                "micro_batch_split_pinned",
-                False,
-                False,
-                ["full", "linear"],
-                multi_group_tables,
-            ),
-            (
-                "micro_batch_split_cuda",
-                True,
-                False,
-                ["full", "linear"],
-                multi_group_tables,
-            ),
-            (
-                "micro_batch_split_single_group",
-                False,
-                False,
-                ["default"],
-                single_group_tables,
-            ),
-            ("micro_batch_split_2d", False, True, ["default"], single_group_tables),
-        ):
-            with self.subTest(scenario=scenario):
-                result = run_scenario(CacheStoreForwardModel(), scenario)
-                self.assertEqual(result["source_tags"], tags)
-                self.assertEqual(len(result["batches"]), 2)
-                physical = torch.tensor(tables, dtype=torch.int32)
-                kernel = torch.where(physical >= 0, physical + 100, physical)
-                if two_dimensional:
-                    physical = physical.squeeze(0)
-                    kernel = kernel.squeeze(0)
-                batch_axis = 0 if two_dimensional else 1
-                for field, expected in (("physical", physical), ("kernel", kernel)):
-                    source = result[f"source_{field}"]
-                    self.assertEqual(source.dtype, torch.int32)
-                    self.assertEqual(source.is_cuda, on_cuda)
-                    self.assertEqual(source.is_pinned(), not on_cuda)
-                    torch.testing.assert_close(source.cpu(), expected)
-                    for batch, start, count in zip(result["batches"], (0, 2), (2, 1)):
-                        self.assertEqual(batch["tags"], tags)
-                        tensor = batch[field]
-                        self.assertEqual(tensor.dtype, torch.int32)
-                        self.assertEqual(tensor.device, source.device)
-                        self.assertEqual(tensor.is_pinned(), not on_cuda)
-                        self.assertTrue(tensor.is_contiguous())
-                        torch.testing.assert_close(
-                            tensor.cpu(), expected.narrow(batch_axis, start, count)
-                        )
-                self.assertEqual(
-                    [batch["input_lengths"].tolist() for batch in result["batches"]],
-                    [[2, 4], [2]],
-                )
-
-    def test_fake_micro_batch_has_no_cache_identity(self) -> None:
-        result = run_scenario(CacheStoreForwardModel(), "fake_micro_batch")
-        self.assertEqual(result["real_tags"], ["full", "linear"])
-        self.assertEqual(result["fake_tags"], [])
-        self.assertFalse(result["fake_physical_defined"])
-        self.assertFalse(result["fake_kernel_defined"])
 
     def test_mtp_writer_uses_selected_sub_config_for_real_write(self) -> None:
         model = CacheStoreForwardModel()
@@ -1665,7 +1503,6 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
         self.addCleanup(clear_comm_ops)
         scenarios = [
             "capture_bf16",
-            "capture_micro_batch",
             "capture_non_owner",
             "capture_explicit_off",
         ]
@@ -1798,17 +1635,12 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
                             baseline["capture_metrics"][key],
                         )
                 names = {e.name for e in events}
-                if scenario == "capture_micro_batch":
-                    self.assertIn("py_model.forwardMicroBatched(python_forward)", names)
-                    self.assertIn("py_model.capture_microbatch_layout", names)
-                    self.assertIn("py_model.forwardMicroBatched(merge)", names)
-                else:
-                    layout = next(
-                        e for e in events if e.name == "py_model.capture_layout_status"
-                    )
-                    self.assertLessEqual(
-                        layout.time_range.end, publish[0].time_range.start
-                    )
+                layout = next(
+                    e for e in events if e.name == "py_model.capture_layout_status"
+                )
+                self.assertLessEqual(
+                    layout.time_range.end, publish[0].time_range.start
+                )
                 if scenario == "capture_cp":
                     restore = next(
                         e for e in events if e.name == "py_model.capture_cp_restore"
@@ -2203,7 +2035,6 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
                 )
             self.assertEqual(_FakeEagleMooncakeStore.instances, [])
             self.assertEqual(model.forward_calls, 0)
-            self.assertEqual(model.micro_batch_calls, 0)
             self.assertEqual(model.capture_flags, [])
             quantizer.assert_not_called()
 
@@ -2277,131 +2108,6 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
                 [[30.0], [30.0], [30.0]],
             ],
         )
-
-    def test_capture_micro_batch_merges_packed_width_before_publish(self) -> None:
-        model = CacheStoreForwardModel()
-        result = run_scenario(model, "capture_micro_batch")
-
-        self.assertEqual(model.forward_calls, 0)
-        self.assertEqual(model.micro_batch_calls, 1)
-        self.assertEqual(result["hidden_width"], 1)
-        self.assertCaptureQps(
-            result["capture_metrics"],
-            batch=1,
-            publish_success=1,
-            failure=0,
-            bf16_publish=1,
-        )
-        self.assertEqual(
-            [
-                put["input_ids"].tolist()
-                for put in _FakeEagleMooncakeStore.instances[0].puts
-            ],
-            [[1, 2], [3, 4, 5]],
-        )
-
-    def test_capture_disabled_micro_batch_ignores_canonical_fake_lane(self) -> None:
-        model = CacheStoreForwardModel()
-
-        result = run_scenario(model, "capture_disabled_micro_batch_fake_lane")
-
-        self.assertEqual(model.forward_calls, 0)
-        self.assertEqual(model.micro_batch_calls, 1)
-        self.assertEqual(model.capture_flags, [True, True])
-        self.assertEqual(model.seen_input_lengths, [[2], [2]])
-        self.assertEqual(result["hidden_width"], 1)
-        self.assertCaptureQps(
-            result["capture_metrics"],
-            batch=1,
-            publish_success=1,
-            failure=0,
-            bf16_publish=1,
-        )
-        puts = _FakeEagleMooncakeStore.instances[0].puts
-        self.assertEqual(len(puts), 1)
-        self.assertEqual(puts[0]["input_ids"].tolist(), [1, 2])
-
-    def test_disabled_micro_batch_zero_tokens_does_not_narrow_fake_lane(self) -> None:
-        model = CacheStoreForwardModel()
-
-        result = run_scenario(model, "disabled_micro_batch_zero_tokens")
-
-        self.assertEqual(model.forward_calls, 0)
-        self.assertEqual(model.micro_batch_calls, 1)
-        self.assertEqual(model.capture_flags, [False, False])
-        self.assertEqual(model.seen_input_lengths, [[0], [0]])
-        self.assertEqual(_FakeEagleMooncakeStore.instances, [])
-        self.assertEqual(tuple(result["forward_hidden_states"][0].shape), (0, 1))
-
-    def test_micro_batch_final_hidden_numeric_parity_capture_on_off(self) -> None:
-        os.environ["MOONCAKE_HIDDEN_DIM"] = "2"
-        capture_off_model = FinalNormParityModel(hidden_size=2)
-        capture_on_model = FinalNormParityModel(hidden_size=2)
-
-        capture_off_result = run_scenario(
-            capture_off_model, "micro_batch_final_norm_parity_capture_off"
-        )
-        capture_on_result = run_scenario(
-            capture_on_model, "micro_batch_final_norm_parity_capture_on"
-        )
-
-        self.assertTrue(capture_off_model.capture_flags)
-        self.assertTrue(capture_on_model.capture_flags)
-        self.assertTrue(all(flag is False for flag in capture_off_model.capture_flags))
-        self.assertTrue(all(flag is True for flag in capture_on_model.capture_flags))
-        capture_off_hidden = capture_off_result["forward_hidden_states"][0]
-        capture_on_hidden = capture_on_result["forward_hidden_states"][0]
-        self.assertEqual(tuple(capture_off_hidden.shape), (5, 2))
-        self.assertEqual(tuple(capture_on_hidden.shape), (5, 2))
-        torch.testing.assert_close(
-            capture_on_hidden,
-            capture_off_hidden,
-            rtol=0,
-            atol=0,
-        )
-
-    def test_capture_micro_batch_output_count_failure_is_deferred_without_collective(
-        self,
-    ) -> None:
-        _register_identity_allreduce()
-        self.addCleanup(clear_comm_ops)
-        with self.assertRaisesRegex(
-            Exception,
-            "capture output count 1 must match micro-batch input count 2",
-        ):
-            run_scenario(
-                MalformedCaptureOutputCountModel(),
-                "capture_micro_batch_tp",
-            )
-
-        self.assertEqual(_FakeEagleMooncakeStore.instances[0].puts, [])
-
-    def test_capture_micro_batch_layout_failure_is_deferred_without_collective(
-        self,
-    ) -> None:
-        _register_identity_allreduce()
-        self.addCleanup(clear_comm_ops)
-        with self.assertRaisesRegex(
-            Exception,
-            "capture micro-batch output 0 width 2 must match expected packed width 3",
-        ):
-            run_scenario(MalformedCaptureLayoutModel(), "capture_micro_batch_tp")
-
-        self.assertEqual(_FakeEagleMooncakeStore.instances[0].puts, [])
-
-    def test_capture_context_parallel_and_micro_batch_is_explicitly_unsupported(
-        self,
-    ) -> None:
-        model = CacheStoreForwardModel()
-        with self.assertRaisesRegex(
-            Exception,
-            "hidden-state capture does not support context parallel combined with layer micro-batching",
-        ):
-            run_scenario(model, "capture_cp_micro_batch")
-
-        self.assertEqual(model.forward_calls, 0)
-        self.assertEqual(model.micro_batch_calls, 0)
-        self.assertEqual(_FakeEagleMooncakeStore.instances, [])
 
     @unittest.skipUnless(
         os.environ.get("TEST_USING_DEVICE") == "ROCM",
@@ -3243,7 +2949,6 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
 
         self.assertEqual(model.capture_flags, [])
         self.assertEqual(model.forward_calls, 0)
-        self.assertEqual(model.micro_batch_calls, 0)
         self.assertEqual(len(_FakeEagleMooncakeStore.instances), 1)
         store = _FakeEagleMooncakeStore.instances[0]
         self.assertEqual(store.put_attempts, 0)
@@ -3546,15 +3251,10 @@ def rms_norm(hidden):
 
 
 class ForwardModel(SuccessfulGenerationPrefillCaptureModel):
-    micro_batch_final_norm = True
-
     def hidden(self, inputs):
         return (
             inputs.input_ids.unsqueeze(1) * 4 + torch.arange(4, device="cuda") + 1
         ).to(torch.bfloat16)
-
-    def forward_micro_batch(self, inputs):
-        return [PyModelOutputs(rms_norm(self.hidden(part))) for part in inputs]
 
     def forward(self, inputs, fmha_impl=None):
         return PyModelOutputs(rms_norm(self.hidden(inputs)))

@@ -23,7 +23,6 @@ from typing import Any, Dict, Optional, Tuple
 
 import torch
 
-from rtp_llm.models_py.modules.dsv4 import _forward_tensor_debug as _fwd_dbg
 from rtp_llm.models_py.modules.dsv4 import _record_tensor as _rt
 from rtp_llm.models_py.modules.dsv41 import _profiler
 from rtp_llm.models_py.modules.dsv41.attn_type import (
@@ -467,15 +466,6 @@ def forward_decode(
         prepare_hidden_fn=prepare_hidden_fn,
     )  # [B, q_len, dim]
     hidden = h.reshape(B * q_len, v4_args.dim)  # packed [T_total, dim]
-    if _fwd_dbg.enabled():
-        _fwd_dbg.print_decode(
-            hidden=hidden,
-            input_ids_2d=input_ids.view(B, q_len),
-            attn_inputs=attn,
-            meta=meta,
-            head_weight=getattr(v4, "head_weight", None),
-            step=int(getattr(v4, "_dbg_step", 0)),
-        )
     if _rt_on:
         _rt.record("decode_hidden", hidden)
         lm_logits = torch.mm(

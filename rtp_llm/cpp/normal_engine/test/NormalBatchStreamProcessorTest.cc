@@ -432,7 +432,7 @@ TEST_P(OutputDispatchTest, testExecutorPassesFinalGraphWidthOnlyWithLayout) {
     FactoryResetGuard factory_reset_guard;
 
     {
-        NormalExecutor executor(params, manager, false, false, 0, MlaOpsType::AUTO, nullptr, nullptr);
+        NormalExecutor executor(params, manager, false, false, 0, nullptr, nullptr);
         EXPECT_EQ(captured_width, 9);
         EXPECT_TRUE(captured_has_layout);
         EXPECT_EQ(captured_layer_ids, (std::vector<int64_t>{0}));
@@ -442,14 +442,14 @@ TEST_P(OutputDispatchTest, testExecutorPassesFinalGraphWidthOnlyWithLayout) {
     // would inflate this NormalExecutor capture to 17 blocks.
     params.sp_config.gen_num_per_cycle = 16;
     {
-        NormalExecutor executor(params, manager, false, false, 0, MlaOpsType::AUTO);
+        NormalExecutor executor(params, manager, false, false, 0);
         EXPECT_EQ(captured_width, 11);
         EXPECT_TRUE(captured_has_layout);
         EXPECT_EQ(captured_layer_ids, (std::vector<int64_t>{0}));
     }
 
     {
-        NormalExecutor executor(params, nullptr, false, false, 0, MlaOpsType::AUTO, nullptr, nullptr);
+        NormalExecutor executor(params, nullptr, false, false, 0, nullptr, nullptr);
         EXPECT_EQ(captured_width, 0);
         EXPECT_FALSE(captured_has_layout);
         EXPECT_EQ(captured_layer_ids, (std::vector<int64_t>{0}));

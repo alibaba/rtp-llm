@@ -44,7 +44,6 @@ struct EngineInitParams {
                      const KVCacheConfig&               kv_cache_config,
                      const ProfilingDebugLoggingConfig& profiling_debug_logging_config,
                      const HWKernelConfig&              hw_kernel_config,
-                     const DeviceResourceConfig&        device_resource_config,
                      const MoeConfig&                   moe_config,
                      const ModelSpecificConfig&         model_specific_config,
                      const SpeculativeExecutionConfig&  sp_config,
@@ -70,7 +69,6 @@ struct EngineInitParams {
         kv_cache_config(kv_cache_config),
         profiling_debug_logging_config(profiling_debug_logging_config),
         hw_kernel_config(hw_kernel_config),
-        device_resource_config(device_resource_config),
         moe_config(moe_config),
         model_specific_config(model_specific_config),
         sp_config(sp_config),
@@ -112,7 +110,6 @@ struct EngineInitParams {
     KVCacheConfig                kv_cache_config;
     ProfilingDebugLoggingConfig  profiling_debug_logging_config;
     HWKernelConfig               hw_kernel_config;
-    DeviceResourceConfig         device_resource_config;
     MoeConfig                    moe_config;
     ModelSpecificConfig          model_specific_config;
     SpeculativeExecutionConfig   sp_config;

@@ -1,8 +1,6 @@
 import itertools
-import os
 from typing import Tuple
 from unittest import SkipTest, TestCase, main
-from unittest.mock import patch
 
 import torch
 import triton
@@ -11,9 +9,12 @@ from torch import dtype as _dtype
 from torch.profiler import ProfilerActivity, profile, record_function
 
 from rtp_llm.models_py.utils.arch import is_hip
-from rtp_llm.models_py.kernels.cuda.fp8_kernel import sgl_per_token_group_quant_fp8
+from rtp_llm.models_py.kernels.cuda.fp8_kernel import (
+    create_per_token_group_quant_fp8_output_scale,
+)
 from rtp_llm.ops.compute_ops import (
     per_token_group_quant_fp8,
+    per_token_group_quant_fp8_v2,
     per_token_group_quant_int8,
 )
 
@@ -404,15 +405,31 @@ class PerTokenGroupQuantTest(TestCase):
         x.zero_()
         torch.cuda.synchronize()
 
-        with patch.dict(os.environ, {"DSV4_FP8_QUANT_KERNEL": "v2"}):
-            x_q, x_s = sgl_per_token_group_quant_fp8(
-                x,
-                group_size=group_size,
-                eps=1e-10,
-                column_major_scales=True,
-                scale_tma_aligned=True,
-                scale_ue8m0=True,
-            )
+        # Drive the v2 kernel directly rather than through the auto heuristic
+        # so this large-offset regression cannot silently drift to the legacy
+        # kernel if the heuristic changes.
+        x_q = torch.empty(x.shape, device=x.device, dtype=fp8_type_)
+        x_s = create_per_token_group_quant_fp8_output_scale(
+            x.shape,
+            x.device,
+            group_size=group_size,
+            column_major_scales=True,
+            scale_tma_aligned=True,
+            scale_ue8m0=True,
+        )
+        fp8_info = torch.finfo(fp8_type_)
+        per_token_group_quant_fp8_v2(
+            x,
+            x_q,
+            x_s,
+            group_size,
+            1e-10,
+            fp8_info.min,
+            fp8_info.max,
+            True,
+            False,
+            None,
+        )
         torch.cuda.synchronize()
 
         self.assertEqual(x_q.shape, x.shape)

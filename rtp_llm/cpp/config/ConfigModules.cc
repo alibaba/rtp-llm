@@ -68,7 +68,6 @@ std::string ParallelismConfig::to_string() const {
         << "dp_rank: " << dp_rank << "\n"
         << "ffn_tp_size: " << ffn_tp_size << "\n"
         << "ffn_tp_rank: " << ffn_tp_rank << "\n"
-        << "enable_sp: " << enable_sp << "\n"
         << "role_type: " << roleTypeToString(role_type) << "\n"
         << "ffn_disaggregate_config: {\n"
         << ffn_disaggregate_config.to_string() << "\n}\n"
@@ -88,12 +87,10 @@ std::string ConcurrencyConfig::to_string() const {
 // FMHAConfig
 std::string FMHAConfig::to_string() const {
     std::ostringstream oss;
-    oss << "enable_fmha: " << enable_fmha << "\n"
-        << "enable_flashinfer_trtllm_gen: " << enable_flashinfer_trtllm_gen << "\n"
+    oss << "enable_flashinfer_trtllm_gen: " << enable_flashinfer_trtllm_gen << "\n"
         << "enable_flashinfer_trt_fmha_v2: " << enable_flashinfer_trt_fmha_v2 << "\n"
         << "enable_paged_flashinfer_trt_fmha_v2: " << enable_paged_flashinfer_trt_fmha_v2 << "\n"
         << "enable_open_source_fmha: " << enable_open_source_fmha << "\n"
-        << "enable_paged_open_source_fmha: " << enable_paged_open_source_fmha << "\n"
         << "disable_flashinfer_native: " << disable_flashinfer_native << "\n"
         << "disable_flashinfer_hybrid_prefill: " << disable_flashinfer_hybrid_prefill << "\n"
         << "enable_xqa: " << enable_xqa << "\n"
@@ -120,7 +117,6 @@ std::string KVCacheConfig::to_string() const {
         << "multi_task_prompt_str: " << multi_task_prompt_str << "\n"
         << "multi_task_prompt_tokens: " << (multi_task_prompt_tokens.empty() ? "empty" : "non-empty") << "\n"
         << "reserve_block_ratio: " << reserve_block_ratio << "\n"
-        << "max_block_size_per_item: " << max_block_size_per_item << "\n"
         << "memory_cache_size_mb: " << memory_cache_size_mb << "\n"
         << "memory_cache_sync_timeout_ms: " << memory_cache_sync_timeout_ms << "\n"
         << "disk_cache_paths: " << disk_cache_paths << "\n"
@@ -148,7 +144,7 @@ std::string KVCacheConfig::to_string() const {
         << "seq_size_per_block: " << seq_size_per_block << "\n"
         << "kernel_seq_size_per_block: " << kernel_seq_size_per_block << "\n"
         << "test_block_num: " << test_block_num << "\n"
-        << "use_block_cache: " << use_block_cache << "\n"
+
         << "enable_device_cache: " << enable_device_cache << "\n"
         << "enable_memory_cache: " << enable_memory_cache << "\n"
         << "enable_disk_cache: " << enable_disk_cache << "\n"
@@ -213,33 +209,13 @@ std::string HybridAttentionConfig::to_string() const {
 // HWKernelConfig
 std::string HWKernelConfig::to_string() const {
     std::ostringstream oss;
-    oss << "deep_gemm_num_sm: " << deep_gemm_num_sm << "\n"
-        << "arm_gemm_use_kai: " << arm_gemm_use_kai << "\n"
-        << "enable_multi_block_mode: " << enable_multi_block_mode << "\n"
-        << "ft_disable_custom_ar: " << ft_disable_custom_ar << "\n"
-        << "rocm_hipblaslt_config: " << rocm_hipblaslt_config << "\n"
-        << "use_swizzleA: " << use_swizzleA << "\n"
+    oss << "use_swizzleA: " << use_swizzleA << "\n"
         << "enable_cuda_graph: " << enable_cuda_graph << "\n"
         << "enable_cuda_graph_debug_mode: " << enable_cuda_graph_debug_mode << "\n"
         << "generation_prefill_cuda_graph_max_requests: " << generation_prefill_cuda_graph_max_requests << "\n"
         << "generation_prefill_capture_token_buckets size: " << generation_prefill_capture_token_buckets.size() << "\n"
-        << "enable_native_cuda_graph: " << enable_native_cuda_graph << "\n"
-        << "num_native_cuda_graph: " << num_native_cuda_graph << "\n"
         << "prefill_capture_seq_lens size: " << prefill_capture_seq_lens.size() << "\n"
-        << "decode_capture_batch_sizes size: " << decode_capture_batch_sizes.size() << "\n"
-        << "disable_dpc_random: " << disable_dpc_random << "\n"
-        << "rocm_disable_custom_ag: " << rocm_disable_custom_ag;
-    return oss.str();
-}
-
-// DeviceResourceConfig
-std::string DeviceResourceConfig::to_string() const {
-    std::ostringstream oss;
-    oss << "overlap_math_sm_count: " << overlap_math_sm_count << "\n"
-        << "overlap_comm_type: " << overlap_comm_type << "\n"
-        << "m_split: " << m_split << "\n"
-        << "enable_comm_overlap: " << enable_comm_overlap << "\n"
-        << "enable_layer_micro_batch: " << enable_layer_micro_batch;
+        << "decode_capture_batch_sizes size: " << decode_capture_batch_sizes.size();
     return oss.str();
 }
 
@@ -330,12 +306,8 @@ std::string SpeculativeExecutionConfig::to_string() const {
     std::ostringstream oss;
     oss << "model_type: " << model_type << "\n"
         << "type: " << SpeculativeExecutionConfig::to_string(type) << "\n"
-        << "sp_min_token_match: " << sp_min_token_match << "\n"
-        << "sp_max_token_match: " << sp_max_token_match << "\n"
         << "tree_decode_config: " << tree_decode_config << "\n"
         << "gen_num_per_cycle: " << gen_num_per_cycle << "\n"
-        << "force_stream_sample: " << force_stream_sample << "\n"
-        << "force_score_context_attention: " << force_score_context_attention << "\n"
         << "quantization: " << quantization << "\n"
         << "checkpoint_path: " << checkpoint_path << "\n"
         << "sp_dspark_mask_token_id: " << sp_dspark_mask_token_id << ", "
@@ -369,8 +341,6 @@ std::string VitConfig::to_string() const {
 std::string CacheStoreConfig::to_string() const {
     std::ostringstream oss;
     oss << "cache_store_rdma_mode: " << cache_store_rdma_mode << "\n"
-        << "wrr_available_ratio: " << wrr_available_ratio << "\n"
-        << "rank_factor: " << rank_factor << "\n"
         << "thread_count: " << thread_count << "\n"
         << "rdma_connect_timeout_ms: " << rdma_connect_timeout_ms << "\n"
         << "rdma_qp_count_per_connection: " << rdma_qp_count_per_connection << "\n"
@@ -578,7 +548,6 @@ DashScGrpcConfig::DashScGrpcConfig(const std::string& json_str) {
 std::string DashScGrpcConfig::to_string() const {
     std::ostringstream oss;
     append_grpc_maps_to_stream(oss, *this);
-    oss << "max_server_workers: " << max_server_workers << "\n";
     return oss.str();
 }
 
@@ -588,10 +557,7 @@ void DashScGrpcConfig::from_json(const std::string& json_str) {
     }
     client_config.clear();
     server_config.clear();
-    max_server_workers = 4;
     parse_grpc_client_server_maps_json(json_str, client_config, server_config);
-    int mw             = parse_optional_root_int_json(json_str, "max_server_workers", 4);
-    max_server_workers = mw > 0 ? mw : 4;
 }
 
 // FfnDisAggregateConfig
@@ -619,11 +585,8 @@ std::string PDSepConfig::to_string() const {
         << "prefill_retry_times: " << prefill_retry_times << "\n"
         << "prefill_retry_timeout_ms: " << prefill_retry_timeout_ms << "\n"
         << "prefill_max_wait_timeout_ms: " << prefill_max_wait_timeout_ms << "\n"
-        << "decode_retry_times: " << decode_retry_times << "\n"
-        << "decode_retry_timeout_ms: " << decode_retry_timeout_ms << "\n"
         << "decode_retry_interval_ms: " << decode_retry_interval_ms << "\n"
         << "decode_polling_kv_cache_step_ms: " << decode_polling_kv_cache_step_ms << "\n"
-        << "decode_polling_call_prefill_ms: " << decode_polling_call_prefill_ms << "\n"
         << "rdma_connect_retry_times: " << rdma_connect_retry_times << "\n"
         << "load_cache_timeout_ms: " << load_cache_timeout_ms << "\n"
         << "max_rpc_timeout_ms: " << max_rpc_timeout_ms << "\n"

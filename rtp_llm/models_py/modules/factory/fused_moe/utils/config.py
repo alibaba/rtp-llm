@@ -7,10 +7,6 @@ def strict_fused_moe_enabled() -> bool:
     return os.environ.get("MOE_STRICT_FUSED", "1") != "0"
 
 
-def shared_expert_mode() -> str:
-    return os.environ.get("MOE_SHARED_EXPERT_MODE", "sequential").strip().lower()
-
-
 def mega_shared_expert_block32_enabled() -> bool:
     """Decode-only opt-in for a group-32 shared expert fused into MegaMoE.
 

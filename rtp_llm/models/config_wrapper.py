@@ -18,7 +18,6 @@ from rtp_llm.ops import (
     KVCacheConfig,
     ProfilingDebugLoggingConfig,
     HWKernelConfig,
-    DeviceResourceConfig,
     MoeConfig,
     ModelSpecificConfig,
     SpeculativeExecutionConfig,
@@ -46,7 +45,6 @@ class ConfigWrapper:
         kv_cache_config: KV cache configuration (KVCacheConfig)
         profiling_debug_logging_config: Profiling and debug logging configuration (ProfilingDebugLoggingConfig)
         hw_kernel_config: Hardware kernel configuration (HWKernelConfig)
-        device_resource_config: Device resource configuration (DeviceResourceConfig)
         moe_config: MoE configuration (MoeConfig)
         model_specific_config: Model-specific configuration (ModelSpecificConfig)
         sp_config: Speculative execution configuration (SpeculativeExecutionConfig)
@@ -81,7 +79,6 @@ class ConfigWrapper:
         self.kv_cache_config = engine_config.kv_cache_config
         self.profiling_debug_logging_config = engine_config.profiling_debug_logging_config
         self.hw_kernel_config = engine_config.hw_kernel_config
-        self.device_resource_config = engine_config.device_resource_config
         self.moe_config = engine_config.moe_config
         self.model_specific_config = engine_config.model_specific_config
         self.sp_config = engine_config.sp_config
