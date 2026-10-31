@@ -26,6 +26,8 @@ logger = logging.getLogger(__name__)
 class CudaFp8DeepGEMMLinear(LinearBase):
     """CUDA FP8 DeepGEMM quantized Linear"""
 
+    supports_fused_silu_quant = True
+
     # 全局共享的 scale cache，key = (device, K, max_len)
     _global_scale_cache: dict = {}
 
@@ -267,7 +269,9 @@ class CudaFp8DeepGEMMLinear(LinearBase):
     ) -> torch.Tensor:
         """Run DeepGEMM with a caller-provided FP8 input and matching scales."""
         if input_fp8.dtype != torch.float8_e4m3fn:
-            error_msg = f"Quantized input dtype must be float8_e4m3fn, got {input_fp8.dtype}"
+            error_msg = (
+                f"Quantized input dtype must be float8_e4m3fn, got {input_fp8.dtype}"
+            )
             logger.error(error_msg)
             raise ValueError(error_msg)
         M, _ = self._validate_input(input_fp8)
@@ -291,3 +295,33 @@ class CudaFp8DeepGEMMLinear(LinearBase):
 
         # Prepare output tensor
         return self.forward_quantized(input_fp8, input_scales, out=out)
+
+    def forward_silu_and_mul_quantized(
+        self, gate_up: torch.Tensor
+    ) -> Optional[torch.Tensor]:
+        """Consume dense SwiGLU input without materializing its BF16 output.
+
+        The fused quantizer preserves the separate activation's single BF16
+        rounding after FP32 SiLU and multiplication. Other quantization
+        formats retain the existing activation + Linear path.
+        """
+        if (
+            not self.scale_ue8m0
+            or gate_up.dtype != torch.bfloat16
+            or gate_up.dim() != 2
+            or gate_up.shape[-1] != 2 * self.K
+            or self.K % 512 != 0
+            or not gate_up.is_contiguous()
+        ):
+            return None
+        input_fp8, input_scales = sgl_per_token_group_quant_fp8(
+            gate_up,
+            group_size=128,
+            eps=1e-4,
+            column_major_scales=True,
+            scale_tma_aligned=True,
+            scale_ue8m0=True,
+            fuse_silu_and_mul=True,
+            preserve_silu_mul_rounding=True,
+        )
+        return self.forward_quantized(input_fp8, input_scales)
