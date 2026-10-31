@@ -1372,6 +1372,23 @@ void LocalRpcServer::reportCacheStatusTime(int64_t request_begin_time_us) {
         RTP_LLM_LOG_WARNING("execute function failed, cache manager is null");
         return grpc::Status(grpc::StatusCode::INTERNAL, "cache manager is null");
     }
+    FunctionRequestPB bounded_request;
+    if (request->has_remote_request()
+        && (request->remote_request().op() == REMOTE_OPERATION_READ
+            || request->remote_request().op() == REMOTE_OPERATION_WRITE)) {
+        if (request->remote_request().timeout_ms() <= 0) {
+            return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "remote task budget must be positive");
+        }
+        const auto remaining_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            context->deadline() - std::chrono::system_clock::now()).count();
+        if (remaining_ms <= 0) {
+            return grpc::Status(grpc::StatusCode::DEADLINE_EXCEEDED, "remote task expired before execution");
+        }
+        bounded_request.CopyFrom(*request);
+        bounded_request.mutable_remote_request()->set_timeout_ms(
+            std::min<int64_t>(request->remote_request().timeout_ms(), remaining_ms));
+        request = &bounded_request;
+    }
     if (!cache_manager->executeFunction(*request, *response)) {
         RTP_LLM_LOG_WARNING("execute function failed, request: [%s]", request->DebugString().c_str());
         const std::string error_msg = "execute function failed, request: [" + request->DebugString() + "]";

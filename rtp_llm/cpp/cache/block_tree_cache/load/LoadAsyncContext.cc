@@ -5,6 +5,7 @@
 #include <unordered_map>
 #include <utility>
 
+#include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/ScopeRollback.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
@@ -27,11 +28,16 @@ LoadAsyncContext::LoadAsyncContext(std::vector<TransferDescriptor>              
     storage_backend_(std::move(storage_backend)),
     request_id_(storage_request.request_id),
     storage_request_(std::move(storage_request)),
+    backend_task_({}, storage_backend_ ? storage_backend_->timeout_ : std::chrono::milliseconds(0), request_id_),
     need_backend_match_(storage_backend_ && !storage_request_.empty()),
     backend_pending_(need_backend_match_),
+    backend_deadline_state_(need_backend_match_ ? State::PENDING : State::SUCCEEDED),
     remaining_transfer_count_(std::count_if(load_descs_.begin(), load_descs_.end(), [](const auto& desc) {
         return desc.source_tier == Tier::HOST || desc.source_tier == Tier::DISK;
     })) {
+    if (need_backend_match_) {
+        storage_request_.transfer_task = backend_task_.subtask({});
+    }
     remaining_join_count_.store(static_cast<size_t>(std::count(joined_load_.begin(), joined_load_.end(), true)),
                                 std::memory_order_relaxed);
     rebuildMatchedBlocksByTier();
@@ -96,6 +102,9 @@ void LoadAsyncContext::setSettlementReadyCallback(SettlementReadyCallback callba
 
 void LoadAsyncContext::startBackendMatch() {
     RTP_LLM_CHECK(need_backend_match_ && match_callback_ && !backend_started_);
+    if (done()) {
+        return;
+    }
     backend_started_                     = true;
     std::weak_ptr<LoadAsyncContext> weak = weak_from_this();
     storage_backend_->match(
@@ -136,7 +145,8 @@ void LoadAsyncContext::onBackendMatch(size_t                                   m
     block_tree_cache_detail::ScopeRollback active_callback_guard(
         [coordinator = coordinator_] { coordinator->retireActiveCallback(); });
     std::lock_guard<std::mutex> backend_match_lock(backend_match_mutex_);
-    if (state_.load() != State::PENDING) {
+    if (done()) {
+        failBeforeCommit();
         return;
     }
     if (!success) {
@@ -181,6 +191,10 @@ void LoadAsyncContext::onBackendMatch(size_t                                   m
         onBackendRead(ErrorInfo::OkStatus());
         return;
     }
+    if (backend_task_.expired()) {
+        onBackendRead(ErrorInfo(ErrorCode::DEADLINE_EXCEEDED, "match-to-ready deadline exceeded"));
+        return;
+    }
     std::weak_ptr<LoadAsyncContext> weak = weak_from_this();
     storage_backend_->read(std::move(storage_request_), std::move(match_meta), [weak](ErrorInfo error) {
         if (auto context = weak.lock()) {
@@ -196,6 +210,12 @@ void LoadAsyncContext::onBackendRead(ErrorInfo error) {
         std::lock_guard<std::mutex> lock(mutex_);
         if (state_.load() != State::PENDING || !backend_pending_) {
             return;
+        }
+        (void)done();
+        State expected = State::PENDING;
+        backend_deadline_state_.compare_exchange_strong(expected, State::SUCCEEDED);
+        if (deadlineExceeded()) {
+            error = ErrorInfo(ErrorCode::DEADLINE_EXCEEDED, "match-to-ready deadline exceeded");
         }
         if (error.ok()) {
             matched_blocks_ = backend_matched_blocks_;
@@ -220,6 +240,9 @@ void LoadAsyncContext::failCommit() {
 }
 
 bool LoadAsyncContext::commit() {
+    if (done() && deadlineExceeded()) {
+        return false;
+    }
     bool expected = false;
     if (!commit_started_.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
         return false;
@@ -249,6 +272,8 @@ void LoadAsyncContext::markAborted() {
         if (state != State::PENDING) {
             return;
         }
+        State expected = State::PENDING;
+        backend_deadline_state_.compare_exchange_strong(expected, State::SUCCEEDED);
         remaining_transfer_count_ = 0;
         backend_pending_          = false;
         if (error_info_.ok()) {
@@ -363,6 +388,8 @@ bool LoadAsyncContext::onTaskFail() {
         if (state != State::PENDING) {
             return false;
         }
+        State expected = State::PENDING;
+        backend_deadline_state_.compare_exchange_strong(expected, State::SUCCEEDED);
         remaining_transfer_count_ = 0;
         backend_pending_          = false;
         if (error_info_.ok()) {
@@ -403,7 +430,13 @@ void LoadAsyncContext::dispatchCompletion(bool notify, SettlementReadyCallback s
 
 void LoadAsyncContext::waitDone() {
     std::unique_lock<std::mutex> lock(mutex_);
-    cv_.wait(lock, [this] { return done(); });
+    while (!done()) {
+        if (backend_pending_) {
+            cv_.wait_until(lock, backend_task_.deadline(), [this] { return done(); });
+        } else {
+            cv_.wait(lock, [this] { return done(); });
+        }
+    }
 }
 
 void LoadAsyncContext::onDone(DoneCallback callback) {
@@ -427,6 +460,9 @@ void LoadAsyncContext::onDone(DoneCallback callback) {
 }
 
 ErrorInfo LoadAsyncContext::completionErrorLocked() const {
+    if (deadlineExceeded()) {
+        return ErrorInfo(ErrorCode::DEADLINE_EXCEEDED, "match-to-ready deadline exceeded");
+    }
     if (state_.load() == State::FAILED && error_info_.ok()) {
         return ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "load async context failed");
     }
@@ -449,24 +485,60 @@ void LoadAsyncContext::notifyCompletion() {
 
 bool LoadAsyncContext::done() const {
     const State state = state_.load();
-    return state == State::SUCCEEDED || state == State::FAILED;
+    if (state == State::PENDING && backend_deadline_state_.load() == State::PENDING
+        && backend_task_.expired()) {
+        State expected = State::PENDING;
+        backend_deadline_state_.compare_exchange_strong(expected, State::FAILED);
+    }
+    return deadlineExceeded() || state_.load() != State::PENDING;
 }
 
 bool LoadAsyncContext::success() const {
-    return state_.load() == State::SUCCEEDED;
+    return state_.load() == State::SUCCEEDED && !deadlineExceeded();
 }
 
 ErrorInfo LoadAsyncContext::errorInfo() const {
+    (void)done();
     std::lock_guard<std::mutex> lock(mutex_);
     return completionErrorLocked();
+}
+
+void LoadAsyncContext::deferRelease(std::shared_ptr<BatchKVCacheResource> resource) {
+    if (!coordinator_->defer_cleanup_
+        || !coordinator_->defer_cleanup_([self = shared_from_this(), resource = std::move(resource)] {
+               std::lock_guard<std::mutex> lock(self->backend_match_mutex_);
+               if (self->coordinator_->abort(*self)) {
+                   self->markAborted();
+               } else if (self->deadlineExceeded()) {
+                   // I/O pins remain with StorageBackend until the payload has settled.
+                   self->onBackendRead(
+                       ErrorInfo(ErrorCode::DEADLINE_EXCEEDED, "match-to-ready deadline exceeded"));
+               }
+               for (int batch = 0; batch < resource->batchSize(); ++batch) {
+                   for (const auto& tag : self->storage_backend_->topology().groupTags()) {
+                       for (const auto block : resource->blocks(batch, tag)) {
+                           if (!isNullBlockIdx(block)) {
+                               self->storage_backend_->devicePool(tag)->decRef(block, DeviceBlockRefType::REQUEST);
+                           }
+                       }
+                   }
+               }
+               resource->clearBlocks();
+           })) {
+        // Admission has closed. Keep request ownership rather than reuse an I/O target.
+        RTP_LLM_LOG_WARNING("load cleanup queue closed; retaining abandoned request block references");
+    }
 }
 
 MallocStatus LoadAsyncContext::mallocStatus() const {
     return malloc_status_.load(std::memory_order_acquire);
 }
 
-LoadContextCoordinator::LoadContextCoordinator(CommitCallback commit_callback, AbortCallback abort_callback):
-    commit_callback_(std::move(commit_callback)), abort_callback_(std::move(abort_callback)) {}
+LoadContextCoordinator::LoadContextCoordinator(CommitCallback commit_callback, AbortCallback abort_callback,
+                                               std::function<bool(std::function<void()>)> defer_cleanup):
+    commit_callback_(std::move(commit_callback)),
+    abort_callback_(std::move(abort_callback)),
+    defer_cleanup_(std::move(defer_cleanup)) {}
 
 std::shared_ptr<LoadAsyncContext> LoadContextCoordinator::create(std::vector<TransferDescriptor> load_descs,
                                                                  std::vector<bool>               joined_load,
