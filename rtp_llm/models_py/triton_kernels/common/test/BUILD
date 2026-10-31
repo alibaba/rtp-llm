@@ -74,8 +74,11 @@ py_test(
     main = "dflash_attention_test.py",
     deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
     env = {"GPU_COUNT": "1"},
-    tags = ["H20"],
-    exec_properties = {"gpu": "H20", "gpu_count": "1"},
+    # Route to the L20_CU13 pool like the sibling CUDA kernel tests in this
+    # package; a bare "H20" tag matches no worker pool, so bazel keeps the
+    # action in [Sched] forever and the ut-sm8x job times out.
+    tags = ["L20_CU13"],
+    exec_properties = {"gpu": "L20_CU13", "gpu_count": "1"},
 )
 
 py_test(
