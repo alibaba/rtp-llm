@@ -245,7 +245,9 @@ TEST(KVCMSafetyTest, BroadcastWaitClassifiesDeadlineAndRpcFailureBeforeFreezing)
         ASSERT_TRUE(matched.success);
 
         try {
-            backend->readImpl(makeStorageRequest(environment), matched.match_meta);
+            auto request = makeStorageRequest(environment);
+            request.transfer_task.emplace(std::vector<TransferDescriptor>{}, std::chrono::seconds(1));
+            backend->readImpl(request, matched.match_meta);
             FAIL() << "expected broadcast failure";
         } catch (const StorageOperationTimeout& exception) {
             EXPECT_TRUE(timeout);

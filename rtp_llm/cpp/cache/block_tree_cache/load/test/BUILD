@@ -40,10 +40,11 @@ cc_test(
 
 cc_test(
     name = "load_async_context_test",
+    testonly = True,
     exec_properties = {"gpu": "L20_CU13"},
     srcs = ["LoadAsyncContextTest.cc"],
     copts = test_copts,
-    deps = test_deps,
+    deps = test_deps + ["//rtp_llm/cpp/cache/block_tree_cache/test:bounded_thread_test_utils"],
     tags = ["L20_CU13"],
 )
 

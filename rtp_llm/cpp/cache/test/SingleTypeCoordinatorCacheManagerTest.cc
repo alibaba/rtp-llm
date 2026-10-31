@@ -60,7 +60,7 @@ public:
     bool start() override {
         return true;
     }
-    bool submit(Task task) override {
+    bool submit(Task task, BlockTreeTaskClass = BlockTreeTaskClass::BACKGROUND) override {
         task();
         return true;
     }
