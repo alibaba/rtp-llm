@@ -1377,8 +1377,7 @@ class Qwen3NextGatedDeltaNet(nn.Module):
         valid_mask = attn_meta.cp_local_valid_mask
         local_attn_out[valid_mask] = full_attn_out[attn_meta.cp_local_extract_indices]
 
-        # Per-head gated RMSNorm (weight [head_dim]): match main's Triton
-        # semantics, which normalizes each value head independently.
+        # Per-head gated RMSNorm (weight is [head_dim], not [hidden]).
         local_attn_out = self.norm(
             local_attn_out.reshape(-1, self.head_v_dim),
             z.reshape(-1, self.head_v_dim),
@@ -1420,8 +1419,7 @@ class Qwen3NextGatedDeltaNet(nn.Module):
             attn_output = self.decode_gdn(
                 mixed_qkv, b, a, attention_inputs, kv_cache, attn_meta
             )
-        # Per-head gated RMSNorm (weight [head_dim]): match main's Triton
-        # semantics, which normalizes each value head independently.
+        # Per-head gated RMSNorm (weight is [head_dim], not [hidden]).
         attn_output = self.norm(
             attn_output.reshape(-1, self.head_v_dim),
             z.reshape(-1, self.head_v_dim),
@@ -1864,9 +1862,7 @@ class Qwen35Model(Qwen3NextModel):
         input_ids: torch.Tensor = inputs.input_ids
 
         if _IS_ASCEND:
-            # Ascend text-only serving: the Ascend Embedding is a pure lookup
-            # (no position/token-type args and no multimodal injector input),
-            # and _parse_mm_config keeps the model non-multimodal there.
+            # Pure token lookup; Ascend serves text-only (see _parse_mm_config).
             return self.embed_tokens(input_ids)
 
         position_ids = inputs.combo_position_ids

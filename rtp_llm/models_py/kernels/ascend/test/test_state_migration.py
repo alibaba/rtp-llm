@@ -1,7 +1,7 @@
 """Unit tests for state_migration.
 
-CPU 环境走 index_copy_ 回退路径（NPU triton kernel 需要 NPU 环境与 triton，
-不在本测试覆盖范围内）。
+Runs the ``index_copy_`` fallback on CPU; the NPU triton kernel path needs
+an NPU device plus triton and is out of scope here.
 """
 
 import ast

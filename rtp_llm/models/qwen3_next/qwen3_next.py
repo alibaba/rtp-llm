@@ -243,8 +243,7 @@ class Qwen35Moe(Qwen3NextBase):
                 "Qwen3Next requires rope_parameters.mrope_interleaved to be true"
             )
         if is_ascend():
-            # Ascend RoPE cache only supports Base/Yarn and attn impls build
-            # 1-D positions; keep Base as main does (TODO@xieshui reopens mrope).
+            # Ascend RoPE cache supports Base/Yarn only; keep Base as main does.
             logging.warning(
                 "Qwen3.5 on Ascend: rope style downgraded Mrope->Base for "
                 "text-only serving (1-D positions)."
@@ -273,8 +272,7 @@ class Qwen35Moe(Qwen3NextBase):
 
     @classmethod
     def _parse_mm_config(cls, config_json: dict, config: ModelConfig):
-        # Ascend serves text-only: keeping the multimodal flag would build the
-        # vision tower on a CUDA device string and assert in MMProcessorConfig.
+        # Ascend is text-only: the mm flag would build ViT on a CUDA device string.
         if is_ascend():
             logging.warning(
                 "Qwen3.5 multimodal checkpoint on Ascend: serving text-only "

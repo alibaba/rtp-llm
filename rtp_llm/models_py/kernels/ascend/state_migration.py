@@ -1,24 +1,24 @@
-"""Paged state 的按行条件迁移（precopy 优化）。
+"""Row-wise conditional paged-state migration (precopy optimization).
 
-朴素实现是无条件全量 ``index_copy_``（正确性优先）：每步每层拷贝 batch 个整页
-（recurrent ssm_state 32x128x128 fp32 = 2MB/页），而绝大多数行是自拷贝 no-op
-——只有恰跨 ``seq_size_per_block`` 边界的序列才真正需要迁移。带宽与 ACL Graph
-捕获期驻留（30 层 x batch x 2MB 的 index_select 中间分配）都被浪费。
+The naive path is an unconditional full ``index_copy_``: every step copies
+batch x whole pages per layer (recurrent ssm_state is 2MB/page at
+32x128x128 fp32) while most rows are self-copy no-ops -- only sequences
+crossing a ``seq_size_per_block`` boundary need the move, so bandwidth and
+ACL-graph capture residency are wasted.
 
-本模块用 triton kernel 在 kernel 内部跳过 ``src == dst`` 的行（vllm-ascend
-``precopy.py`` 同思路）：只有真正跨界的行才读写整页。
+This module runs a triton kernel that skips ``src == dst`` rows in-kernel
+(same idea as vllm-ascend ``precopy.py``). Graph-capture safe: the grid
+depends only on batch and the constexpr TILES; rows are filtered by an
+in-kernel equality check -- no nonzero / boolean-mask indexing, which would
+bake capture-time shapes into the graph.
 
-图捕获安全：grid 只依赖 batch（bucket 内静态）与 constexpr 的 TILES；kernel
-内部对 device 索引做条件跳过——无 nonzero / 布尔掩码索引（那是动态 shape，
-捕获会失败或把捕获时刻的 shape 烤死，replay 时需要迁移的行集合已变）。
+Caller contract (``_cross_page_copy_device`` / ``_seed_first_write_pages_device``):
+no-migration rows are pre-set to ``src == dst`` via
+``torch.where(needs, read, write)``, so one equality covers self-copy,
+sentinels (-1 / reserved page 0) and out-of-range no-ops.
 
-调用方约定（_cross_page_copy_device / _seed_first_write_pages_device）：
-"无需迁移"的行已被 ``torch.where(needs, read, write)`` 做成 ``src == dst``，
-因此 kernel 只需一个相等判断即可覆盖自拷贝 / 哨兵（-1 或保留页 0）/ 越界
-三种 no-op 情形。
-
-回退路径（CPU tensor / 无 triton / 环境变量 ``RTP_LLM_GDN_PRECOPY=0``）：
-等价的无条件 ``index_copy_`` 实现（哨兵行 clamp 到保留页 0 后自拷贝）。
+Fallback (CPU tensors / no triton / ``RTP_LLM_GDN_PRECOPY=0``): equivalent
+unconditional ``index_copy_`` with sentinel rows clamped to page 0.
 """
 
 from __future__ import annotations
@@ -108,15 +108,15 @@ def migrate_state_rows(
     src_pages: torch.Tensor,
     dst_pages: torch.Tensor,
 ) -> None:
-    """把 ``state`` 的 ``src_pages[i]`` 页整行拷到 ``dst_pages[i]`` 页（原地）。
+    """Copy whole page rows ``src_pages[i] -> dst_pages[i]`` in place.
 
-    * ``src_pages[i] == dst_pages[i]``（或 src 为负哨兵）的行是 no-op——覆盖
-      自拷贝 / 哨兵 / 未分配三种"无需迁移"情形（调用方约定）；
-    * ``state`` 形如 ``(pages, ...)``，要求 **dim0 之后内层连续**（生产视图均
-      满足：conv 的 FLA 视图与 ssm 的 fp32 视图），dim0 stride 任意（hybrid
-      pool 上的 padded 视图 OK）；
-    * ``src_pages`` / ``dst_pages`` 形如 ``(batch,)``，int32/int64 tensor
-      （图捕获安全：grid 只依赖 batch 与静态 tile 数，索引内容 kernel 内读取）。
+    Rows with ``src_pages[i] == dst_pages[i]`` (or a negative src sentinel)
+    are no-ops, covering self-copy / sentinel / unallocated (caller
+    contract). ``state`` is ``(pages, ...)`` and must be contiguous after
+    dim0 (the conv FLA view and the fp32 ssm view both qualify; padded
+    hybrid-pool dim0 strides are fine). ``src_pages`` / ``dst_pages`` are
+    ``(batch,)`` int32/int64; graph-capture safe since the grid depends
+    only on batch and the static tile count.
     """
     rows = src_pages.shape[0]
     if rows == 0 or state.shape[0] == 0:

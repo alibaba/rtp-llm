@@ -1,7 +1,10 @@
-"""Ascend BF16 fallback MoE strategy using naive PyTorch implementation.
+"""Ascend BF16 fallback MoE strategy.
 
-This is a pure PyTorch fallback for Ascend (no Triton dependency).
-For production use, replace with a properly optimized executor.
+Candidate for non-quantized MoE configs that AscendCannStrategy rejects
+(e.g. fp16 act_type or non-auto MOE_STRATEGY): routes through the shared
+BatchedDataRouter + BatchedTritonExperts execution chain (triton-ascend).
+Not numerically validated on NPU yet; when triton is unimportable the
+strategy skips itself and selection fails with an explicit error.
 """
 
 from typing import Any, Dict
@@ -18,7 +21,7 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs.strategy_base import MoeSt
 
 
 class AscendBf16FallbackStrategy(MoeStrategy):
-    """Ascend BF16 fallback MoE strategy using pure PyTorch."""
+    """Fallback candidate for non-quantized configs the CANN strategy rejects."""
 
     def get_attributes(self) -> StrategyAttributes:
         from rtp_llm.models_py.modules.factory.fused_moe.impl.common.executor.batched_triton_executor import (

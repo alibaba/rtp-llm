@@ -157,6 +157,46 @@ class BlockTest(unittest.TestCase):
                     torch.full_like(cache_storage[:, 6:], -1.0),
                 )
 
+    def test_store_writes_first_block_aligned_chunk(self):
+        # seq_size_per_block == chunk_size: chunk 0's end IS a block boundary
+        # and must be persisted -- 1-block prefix reuse reads this segment
+        # back as the initial state (P1 regression, finding 28354).
+        h = torch.arange(3 * 1 * 2 * 3, dtype=torch.float32).reshape(3, 1, 2, 3)
+        final_states = (
+            torch.arange(1 * 1 * 2 * 3, dtype=torch.float32).reshape(1, 1, 2, 3) + 100
+        )
+        prefix_lengths = torch.tensor([0], dtype=torch.int32)
+        cu_seqlens = torch.tensor([0, 9], dtype=torch.int32)
+        block_map = torch.tensor([[7, 8, 9]], dtype=torch.int32)
+        cache_storage = torch.full((10, 7), -1.0, dtype=torch.bfloat16)
+        ssm_states = cache_storage[:, :6].view(10, 1, 3, 2)
+
+        self.block.store_ssm_state_to_block_map(
+            h,
+            final_states,
+            prefix_lengths,
+            cu_seqlens,
+            block_map,
+            ssm_states,
+            seq_size_per_block=4,
+            chunk_size=4,
+        )
+
+        torch.testing.assert_close(
+            ssm_states[7], h[1].transpose(-1, -2).bfloat16()
+        )
+        torch.testing.assert_close(
+            ssm_states[8], h[2].transpose(-1, -2).bfloat16()
+        )
+        torch.testing.assert_close(
+            ssm_states[9], final_states[0].transpose(-1, -2).bfloat16()
+        )
+        for untouched_block in (0, 1, 2, 3, 4, 5, 6):
+            torch.testing.assert_close(
+                ssm_states[untouched_block],
+                torch.full_like(ssm_states[untouched_block], -1.0),
+            )
+
     def test_store_skips_non_positive_physical_block(self):
         ssm_states = torch.full((1, 1, 1, 1), -1.0, dtype=torch.float32)
 

@@ -130,7 +130,10 @@ def _store_ssm_state_to_block_map_npu(
     is_last_chunk = (local_chunks + 1) * chunk_size >= chunk_input_lengths
     is_middle_block_end = (
         (~is_last_chunk)
-        & (local_chunks > 0)
+        # local chunk 0's aligned end must be stored too: with
+        # seq_size_per_block <= chunk_size it is a real block boundary, and
+        # 1-block prefix reuse reads this segment back (h[global + 1] is the
+        # state at that boundary).
         & (((local_chunks + 1) * chunk_size) % seq_size_per_block == 0)
     )
 
