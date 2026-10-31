@@ -14,6 +14,7 @@
 #include <gtest/gtest.h>
 
 #include "rtp_llm/cpp/cache/MHAKVCacheSpec.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/ScopeRollback.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/test/BoundedThreadTestUtils.h"
 
 namespace rtp_llm {
@@ -46,13 +47,13 @@ TEST(StorageBackendExecutorTest, HonorsConfiguredWorkerAndQueueCapacity) {
         cv.notify_all();
     };
 
-    const bool first_submitted = executor->submit(blocking_task);
+    const bool first_submitted = executor->submit(blocking_task, BlockTreeTaskClass::LOAD);
     bool       first_started   = false;
     {
         std::unique_lock<std::mutex> lock(mutex);
         first_started = cv.wait_for(lock, std::chrono::seconds(5), [&] { return started >= 1; });
     }
-    const bool second_submitted = first_started && executor->submit(blocking_task);
+    const bool second_submitted = first_started && executor->submit(blocking_task, BlockTreeTaskClass::LOAD);
     bool       both_started     = false;
     if (second_submitted) {
         std::unique_lock<std::mutex> lock(mutex);
@@ -61,8 +62,8 @@ TEST(StorageBackendExecutorTest, HonorsConfiguredWorkerAndQueueCapacity) {
     const bool queued_submitted  = both_started && executor->submit([&] {
         completed.fetch_add(1);
         cv.notify_all();
-    });
-    const bool overflow_rejected = both_started && !executor->submit([] {});
+    }, BlockTreeTaskClass::LOAD);
+    const bool overflow_rejected = both_started && !executor->submit([] {}, BlockTreeTaskClass::LOAD);
     {
         std::lock_guard<std::mutex> lock(mutex);
         release = true;
@@ -96,12 +97,12 @@ TEST(StorageBackendExecutorTest, ShutdownDrainsQueuedTasksAndWaitsForConcurrentS
         entered->set_value();
         released.wait();
         completed->fetch_add(1);
-    }));
+    }, BlockTreeTaskClass::LOAD));
     const auto started_status = started.wait_for(std::chrono::seconds(5));
     EXPECT_EQ(started_status, std::future_status::ready);
-    EXPECT_TRUE(executor->submit([completed] { completed->fetch_add(1); }));
-    EXPECT_TRUE(executor->submit([] { throw std::runtime_error("task failure"); }));
-    EXPECT_TRUE(executor->submit([completed] { completed->fetch_add(1); }));
+    EXPECT_TRUE(executor->submit([completed] { completed->fetch_add(1); }, BlockTreeTaskClass::LOAD));
+    EXPECT_TRUE(executor->submit([] { throw std::runtime_error("task failure"); }, BlockTreeTaskClass::LOAD));
+    EXPECT_TRUE(executor->submit([completed] { completed->fetch_add(1); }, BlockTreeTaskClass::LOAD));
 
     BoundedThread<void> first([executor] { executor->shutdown(); });
     EXPECT_EQ(first.waitFor(std::chrono::milliseconds(50)), std::future_status::timeout);
@@ -115,6 +116,56 @@ TEST(StorageBackendExecutorTest, ShutdownDrainsQueuedTasksAndWaitsForConcurrentS
     second.get();
     EXPECT_EQ(completed->load(), 3u);
     EXPECT_FALSE(executor->submit([] {}));
+}
+
+TEST(StorageBackendExecutorTest, BlockedBackgroundTaskLeavesAWorkerForLoad) {
+    auto executor = makeStorageBackendExecutor(/*thread_count=*/2, /*queue_size=*/8);
+    ASSERT_TRUE(executor->start());
+    std::promise<void> release;
+    auto released = release.get_future().share();
+    std::promise<void> background_entered;
+    auto started = background_entered.get_future();
+    std::promise<void> load_entered;
+    auto load_started = load_entered.get_future();
+    block_tree_cache_detail::ScopeRollback cleanup([&] {
+        release.set_value();
+        executor->shutdown();
+    });
+    ASSERT_TRUE(executor->submit([&] {
+        background_entered.set_value();
+        released.wait();
+    }));
+    ASSERT_EQ(started.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+    EXPECT_FALSE(executor->submit([] {}));
+    EXPECT_TRUE(executor->submit([&] { load_entered.set_value(); }, BlockTreeTaskClass::LOAD));
+    EXPECT_EQ(load_started.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+}
+
+TEST(StorageBackendExecutorTest, BackgroundExceptionRetiresAdmission) {
+    auto executor = makeStorageBackendExecutor(/*thread_count=*/1, /*queue_size=*/8);
+    ASSERT_TRUE(executor->start());
+    std::promise<void> release;
+    auto released = release.get_future().share();
+    std::promise<void> entered;
+    auto started = entered.get_future();
+    std::promise<bool> admitted;
+    auto admission = admitted.get_future();
+    block_tree_cache_detail::ScopeRollback unblock([&] { release.set_value(); });
+    block_tree_cache_detail::ScopeRollback cleanup([&] {
+        unblock.run();
+        executor->shutdown();
+    });
+    ASSERT_TRUE(executor->submit([&] {
+        entered.set_value();
+        released.wait();
+        throw std::runtime_error("background failure");
+    }));
+    ASSERT_EQ(started.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+    EXPECT_FALSE(executor->submit([] {}));
+    EXPECT_TRUE(executor->submit([&] { admitted.set_value(executor->submit([] {})); }, BlockTreeTaskClass::LOAD));
+    unblock.run();
+    ASSERT_EQ(admission.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+    EXPECT_TRUE(admission.get());
 }
 
 class TestBlockPool: public DeviceBlockPool {
@@ -165,7 +216,7 @@ public:
         return started_;
     }
 
-    bool submit(Task task) override {
+    bool submit(Task task, BlockTreeTaskClass = BlockTreeTaskClass::BACKGROUND) override {
         {
             std::lock_guard<std::mutex> lock(mutex_);
             if (throw_on_submit_) {
@@ -317,6 +368,11 @@ public:
     size_t readCalls() const {
         std::lock_guard<std::mutex> lock(mutex_);
         return read_calls_;
+    }
+
+    bool matchEntered() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return match_entered_;
     }
 
     size_t writeHandleCount() const {

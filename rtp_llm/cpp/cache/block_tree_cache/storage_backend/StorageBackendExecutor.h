@@ -4,6 +4,8 @@
 #include <atomic>
 #include <functional>
 #include <memory>
+
+#include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeTaskPool.h"
 namespace rtp_llm {
 
 // submit returns true iff the task was accepted for exactly-once execution.
@@ -13,7 +15,7 @@ public:
     using Task                        = std::function<void()>;
     virtual ~StorageBackendExecutor() = default;
     virtual bool start()              = 0;
-    virtual bool submit(Task task)    = 0;
+    virtual bool submit(Task task, BlockTreeTaskClass task_class = BlockTreeTaskClass::BACKGROUND) = 0;
     virtual void shutdown() noexcept  = 0;
 
 private:

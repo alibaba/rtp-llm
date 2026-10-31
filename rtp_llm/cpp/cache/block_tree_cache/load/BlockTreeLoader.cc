@@ -45,7 +45,8 @@ BlockTreeLoader::BlockTreeLoader(BlockTree*                      tree,
             std::lock_guard<std::mutex> lock(mutex_);
             abortLoadLocked(
                 context.loadDescs(), context.joinedLoads(), 0, context.contextId(), /*release_transferred_refs=*/false);
-        })) {}
+        },
+        [task_pool](std::function<void()> cleanup) { return task_pool->submitCompletion(std::move(cleanup)); })) {}
 
 BlockTreeMatchResult BlockTreeLoader::matchLocked(const CacheKeysType&               cache_keys,
                                                   const std::function<bool(size_t)>& valid_prefix,

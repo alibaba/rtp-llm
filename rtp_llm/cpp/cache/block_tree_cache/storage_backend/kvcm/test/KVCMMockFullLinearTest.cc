@@ -390,7 +390,7 @@ TEST(KVCMMockFullLinearTest, ReuseDisabledGroupsAreExcludedFromRemoteProtocolAnd
     write_location.block_mask = kv_cache_manager::BlockMaskOffset{0};
     write_location.locations = {{{"tp0_Ffull0", "full_101"}}, locations[1], locations[2]};
     const std::vector<std::string> write_groups{"Ffull0", "Ffull0Lwindow0", "Ffull0Lwindow0"};
-    EXPECT_CALL(*client, getWriteLocation(_, _, std::vector<int64_t>({101, 102, 103}), _, write_groups, 600, 0))
+    EXPECT_CALL(*client, getWriteLocation(_, _, std::vector<int64_t>({101, 102, 103}), _, write_groups, 40, 0))
         .WillOnce(Return(std::make_pair(true, write_location)));
     const std::vector<std::vector<std::string>> groups_by_key{
         {"full0"}, {"full0", "window0"}, {"full0", "window0"}};
@@ -527,7 +527,7 @@ TEST(KVCMMockFullLinearTest, FullLinearWriteRoutesEachGroupToItsOwnLayerBuffers)
         kv_cache_manager::LocationSpecUnit{"tp0_Llinear", "linear_uri"},
     }};
     EXPECT_CALL(*client_wrapper, getWriteLocation(_, _, std::vector<int64_t>{101}, _,
-                                                 std::vector<std::string>{"Ffull1Llinear"}, 600, 0))
+                                                 std::vector<std::string>{"Ffull1Llinear"}, 40, 0))
         .WillOnce(Return(std::make_pair(true, write_location)));
     for (const auto& tag : std::vector<std::string>{"full1", "linear"}) {
         const auto                        bases = tag == "full1" ? expected_full_bases : expected_linear_bases;
@@ -594,7 +594,7 @@ TEST(KVCMMockFullLinearTest, TwoFullTwoLinearWritePreservesMaskOrderAndActualUri
     };
     EXPECT_CALL(*client_wrapper,
                 getWriteLocation(
-                    _, _, std::vector<int64_t>({101, 102, 103}), std::vector<int64_t>{}, expected_write_groups, 600, 0))
+                    _, _, std::vector<int64_t>({101, 102, 103}), std::vector<int64_t>{}, expected_write_groups, 40, 0))
         .WillOnce(Return(std::make_pair(true, write_location)));
 
     const auto expected_uris = flattenUris(write_location.locations);
@@ -652,7 +652,7 @@ TEST(KVCMMockFullLinearTest, AllMissingLinearGroupsWriteOnlyFullPayloads) {
         makeFullLinearLocation(1, 2, 103, false),
     };
     EXPECT_CALL(*client_wrapper,
-                getWriteLocation(_, _, _, _, std::vector<std::string>({"Ffull0", "Ffull0", "Ffull0"}), 600, 0))
+                getWriteLocation(_, _, _, _, std::vector<std::string>({"Ffull0", "Ffull0", "Ffull0"}), 40, 0))
         .WillOnce(Return(std::make_pair(true, write_location)));
     const auto bases = expectedBases(environment, block_ids, groups_by_key);
     expectTaggedTransfers(*client_wrapper, write_location.locations, bases, true);

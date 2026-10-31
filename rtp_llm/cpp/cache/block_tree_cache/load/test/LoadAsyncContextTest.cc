@@ -7,12 +7,14 @@
 #include <memory>
 #include <mutex>
 #include <stdexcept>
+#include <thread>
 #include <utility>
 
 #include <gtest/gtest.h>
 
 #include "rtp_llm/cpp/cache/MHAKVCacheSpec.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/ScopeRollback.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/test/BoundedThreadTestUtils.h"
 
 namespace rtp_llm {
 namespace {
@@ -51,7 +53,7 @@ public:
     bool start() override {
         return true;
     }
-    bool submit(Task task) override {
+    bool submit(Task task, BlockTreeTaskClass = BlockTreeTaskClass::BACKGROUND) override {
         std::lock_guard<std::mutex> lock(mutex_);
         tasks_.push_back(std::move(task));
         return true;
@@ -91,7 +93,8 @@ private:
 
 class ManualBackend: public StorageBackend {
 public:
-    ManualBackend(): ManualBackend(std::make_shared<ManualExecutor>()) {}
+    explicit ManualBackend(std::chrono::milliseconds timeout = std::chrono::seconds(10)):
+        ManualBackend(std::make_shared<ManualExecutor>(), timeout) {}
 
     ~ManualBackend() override {
         shutdown();
@@ -134,6 +137,12 @@ public:
     const std::shared_ptr<TestMatchMeta>& readMatchMeta() const {
         return read_match_meta_;
     }
+    TransferTask::Clock::time_point matchDeadline() const {
+        return match_deadline_;
+    }
+    TransferTask::Clock::time_point readDeadline() const {
+        return read_deadline_;
+    }
 
 protected:
     bool initImpl() override {
@@ -146,18 +155,20 @@ protected:
         }
         match_keys_         = *request.keys;
         match_local_blocks_ = request.local_matched_blocks_num;
+        match_deadline_     = request.transfer_task->deadline();
         return pending_match_;
     }
     void readImpl(const StorageRequest& request, const std::shared_ptr<StorageBackendMatchMeta>& match_meta) override {
         if (timeout_read_) {
             timeout_read_ = false;
-            throw StorageOperationTimeout("injected read timeout", StorageQuarantineReason::RPC_TIMEOUT);
+            throw StorageOperationTimeout("read timed out", StorageQuarantineReason::RPC_TIMEOUT);
         }
         if (fail_read_) {
             fail_read_ = false;
             throw std::runtime_error("read failed");
         }
         read_match_meta_ = std::dynamic_pointer_cast<TestMatchMeta>(match_meta);
+        read_deadline_   = request.transfer_task->deadline();
         read_keys_       = *request.keys;
         for (const auto& key_handles : request.handles) {
             read_handle_counts_.push_back(key_handles.size());
@@ -171,8 +182,8 @@ protected:
     void writeImpl(const StorageRequest&) override {}
 
 private:
-    explicit ManualBackend(std::shared_ptr<ManualExecutor> executor):
-        StorageBackend(executor), executor_(std::move(executor)) {}
+    ManualBackend(std::shared_ptr<ManualExecutor> executor, std::chrono::milliseconds timeout):
+        StorageBackend(executor, nullptr, -1, timeout), executor_(std::move(executor)) {}
 
     std::shared_ptr<ManualExecutor>       executor_;
     StorageMatchResult                    pending_match_;
@@ -182,6 +193,8 @@ private:
     std::vector<size_t>                   read_handle_counts_;
     std::vector<std::vector<std::string>> read_group_tags_;
     std::shared_ptr<TestMatchMeta>        read_match_meta_;
+    TransferTask::Clock::time_point       match_deadline_;
+    TransferTask::Clock::time_point       read_deadline_;
     bool                                  fail_match_{false};
     bool                                  fail_read_{false};
     bool                                  timeout_read_{false};
@@ -840,6 +853,136 @@ TEST(LoadAsyncContextTest, LocalAndStorageReadsMustBothComplete) {
     EXPECT_TRUE(context->done());
     EXPECT_TRUE(context->success());
     EXPECT_EQ(context->matchedBlocks(), 1u);
+    EXPECT_EQ(pool->refCount(block), 1u);
+    pool->decRef(block);
+    coordinator->shutdown();
+}
+
+TEST(LoadAsyncContextTest, QueuedMatchExpirationSkipsAllocationAndNotifiesOnce) {
+    size_t commits = 0;
+    size_t aborts = 0;
+    auto coordinator = makeCoordinator(commits, aborts);
+    auto backend = std::make_shared<ManualBackend>(std::chrono::milliseconds(100));
+    auto pool = std::make_shared<TestBlockPool>();
+    initBackend(*backend, pool);
+    auto context = coordinator->create({}, {}, 0, backend, makeRequest(1));
+    ASSERT_TRUE(coordinator->registerContext(context));
+    size_t allocations = 0;
+    context->setMatchCallback([&](LoadAsyncContext&, size_t) {
+        ++allocations;
+        return true;
+    });
+    size_t notifications = 0;
+    context->onDone([&](ErrorInfo error) {
+        ++notifications;
+        EXPECT_EQ(error.code(), ErrorCode::DEADLINE_EXCEEDED);
+    });
+    context->startBackendMatch();
+    ASSERT_TRUE(backend->readPending());
+    std::this_thread::sleep_for(std::chrono::milliseconds(110));
+    EXPECT_TRUE(context->done());
+    backend->completeMatch(1);
+    EXPECT_FALSE(context->success());
+    EXPECT_EQ(context->errorInfo().code(), ErrorCode::DEADLINE_EXCEEDED);
+    EXPECT_EQ(allocations, 0u);
+    EXPECT_EQ(aborts, 1u);
+    EXPECT_EQ(notifications, 1u);
+    coordinator->shutdown();
+}
+
+TEST(LoadAsyncContextTest, WaitDoneExitsAtDeadlineBeforeQueuedReadRetires) {
+    size_t commits = 0;
+    size_t aborts = 0;
+    auto coordinator = makeCoordinator(commits, aborts);
+    auto backend = std::make_shared<ManualBackend>(std::chrono::milliseconds(100));
+    auto pool = std::make_shared<TestBlockPool>();
+    const auto block = pool->malloc().value();
+    pool->incRef(block);
+    initBackend(*backend, pool);
+    auto context = coordinator->create({}, {}, 0, backend, makeRequest(1));
+    ASSERT_TRUE(coordinator->registerContext(context));
+    context->setMatchCallback([&](LoadAsyncContext& current, size_t) {
+        current.setBackendTargetBlock(0, 0, block);
+        return current.commit();
+    });
+    size_t notifications = 0;
+    context->onDone([&](ErrorInfo error) {
+        ++notifications;
+        EXPECT_EQ(error.code(), ErrorCode::DEADLINE_EXCEEDED);
+        EXPECT_FALSE(context->success());
+        EXPECT_TRUE(context->deadlineExceeded());
+    });
+    context->startBackendMatch();
+    backend->completeMatch(1);
+    ASSERT_TRUE(backend->readPending());
+    block_tree_cache_test::BoundedThread<void> waiter([context] { context->waitDone(); });
+    ASSERT_EQ(waiter.waitFor(std::chrono::seconds(5)), std::future_status::ready);
+    waiter.get();
+    EXPECT_TRUE(context->done());
+    EXPECT_FALSE(context->success());
+    EXPECT_TRUE(context->deadlineExceeded());
+    EXPECT_TRUE(backend->readPending());
+    EXPECT_EQ(pool->refCount(block), 2u);
+    size_t timeout_observations = 0;
+    context->onDone([&](ErrorInfo error) {
+        ++timeout_observations;
+        EXPECT_EQ(error.code(), ErrorCode::DEADLINE_EXCEEDED);
+    });
+    EXPECT_EQ(timeout_observations, 1u);
+    backend->completeRead();
+    EXPECT_TRUE(backend->readKeys().empty());
+    EXPECT_FALSE(context->success());
+    EXPECT_EQ(context->errorInfo().code(), ErrorCode::DEADLINE_EXCEEDED);
+    EXPECT_EQ(notifications, 1u);
+    EXPECT_EQ(timeout_observations, 1u);
+    EXPECT_EQ(pool->refCount(block), 1u);
+    EXPECT_FALSE(pool->isFrozen(block));
+    pool->decRef(block);
+    coordinator->shutdown();
+}
+
+TEST(LoadAsyncContextTest, TimelyRemoteReadDoesNotExpireIndependentHostDiskAndJoin) {
+    size_t commits = 0;
+    size_t aborts = 0;
+    auto coordinator = makeCoordinator(commits, aborts);
+    auto backend = std::make_shared<ManualBackend>(std::chrono::milliseconds(100));
+    auto pool = std::make_shared<TestBlockPool>();
+    const auto block = pool->malloc().value();
+    pool->incRef(block);
+    initBackend(*backend, pool);
+    TransferDescriptor host;
+    host.source_tier = Tier::HOST;
+    TransferDescriptor disk;
+    disk.source_tier = Tier::DISK;
+    auto context = coordinator->create({host, disk}, {false, true}, 0, backend, makeRequest(1));
+    ASSERT_TRUE(coordinator->registerContext(context));
+    context->startJoinWait(1);
+    context->setMatchCallback([&](LoadAsyncContext& current, size_t) {
+        current.setBackendTargetBlock(0, 0, block);
+        return current.commit();
+    });
+    size_t notifications = 0;
+    context->onDone([&](ErrorInfo error) {
+        ++notifications;
+        EXPECT_TRUE(error.ok());
+        EXPECT_TRUE(context->success());
+    });
+    context->startBackendMatch();
+    backend->completeMatch(1);
+    backend->completeRead();
+    EXPECT_EQ(backend->matchDeadline(), backend->readDeadline());
+    ASSERT_FALSE(context->done());
+    std::this_thread::sleep_until(backend->readDeadline() + std::chrono::milliseconds(1));
+    EXPECT_FALSE(context->done());
+    EXPECT_TRUE(context->completeTransfers(1, true));
+    bool joined = false;
+    int64_t latency = 0;
+    EXPECT_TRUE(context->completeJoinedOne(true, joined, latency));
+    EXPECT_TRUE(joined);
+    EXPECT_TRUE(context->success());
+    EXPECT_TRUE(context->errorInfo().ok());
+    EXPECT_EQ(notifications, 1u);
+    EXPECT_TRUE(context->done());
     EXPECT_EQ(pool->refCount(block), 1u);
     pool->decRef(block);
     coordinator->shutdown();

@@ -19,6 +19,7 @@ struct PoolTransferState {
     std::vector<size_t>                              reads;
     size_t                                           destroyed{0};
     int                                              fail_pool{-1};
+    int                                              timeout_pool{-1};
     kv_cache_manager::ClientErrorCode                fail_code{kv_cache_manager::ClientErrorCode::ER_INVALID_PARAMS};
     std::function<void()>                            fail_action;
     kv_cache_manager::Locations                      locations;
@@ -384,7 +385,7 @@ TEST_P(KVCMIndependentPoolFailureTest, SdkFailureProtectsWholeTaskOnlyOnTimeout)
         proposal.write_session_id = "sdk_failure";
         proposal.block_mask       = kv_cache_manager::BlockMaskOffset{0};
         proposal.locations        = locations;
-        EXPECT_CALL(*meta_, StartWrite(_, _, _, _, _))
+        EXPECT_CALL(*meta_, StartWrite(_, _, _, _, _, 0))
             .WillOnce(Return(std::make_pair(kv_cache_manager::ClientErrorCode::ER_OK, proposal)));
         EXPECT_CALL(*meta_,
                     FinishWrite(_,

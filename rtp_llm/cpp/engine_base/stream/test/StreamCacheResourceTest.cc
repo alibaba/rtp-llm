@@ -19,6 +19,8 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/ScopeRollback.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/StorageBackend.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/load/LoadAsyncContext.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeCacheTestUtils.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/test/BoundedThreadTestUtils.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateTypes.h"
 #include "rtp_llm/cpp/engine_base/stream/StreamCacheResource.h"
@@ -116,6 +118,9 @@ makeAllocatorLoadContext(size_t matched_blocks, const std::vector<Tier>& source_
 
 class StreamReadStorageBackend: public StorageBackend {
 public:
+    explicit StreamReadStorageBackend(std::chrono::milliseconds timeout = std::chrono::seconds(10)):
+        StorageBackend(nullptr, nullptr, -1, timeout) {}
+
     ~StreamReadStorageBackend() override {
         shutdown();
     }
@@ -301,7 +306,9 @@ protected:
     std::shared_ptr<StreamReadStorageBackend> prepareStorageBackendResource(bool     block_matches,
                                                                             bool     seed_host     = false,
                                                                             RoleType role_type     = RoleType::PDFUSION,
-                                                                            bool     seed_resident = false) {
+                                                                            bool     seed_resident = false,
+                                                                            std::chrono::milliseconds timeout =
+                                                                                std::chrono::seconds(10)) {
         KVCacheConfig kv_cache_config;
         kv_cache_config.enable_remote_cache   = true;
         kv_cache_config.enable_memory_cache   = seed_host;
@@ -313,7 +320,7 @@ protected:
         prepareResourceWithCacheConfig(
             init_config(), {1, 2, 3, 4, 5, 6}, /*reuse_cache=*/true, role_type, manager_kv_cache_config);
 
-        auto backend = std::make_shared<StreamReadStorageBackend>();
+        auto backend = std::make_shared<StreamReadStorageBackend>(timeout);
         if (block_matches) {
             backend->blockMatches();
         }
@@ -1264,6 +1271,42 @@ TEST_F(StreamCacheResourceTest, StorageMatchDefersReusePublicationUntilReadCompl
     EXPECT_EQ(resource.kvCache().cacheResource(0).memoryReuseBlockNum(), 0u);
     EXPECT_EQ(resource.kvCache().cacheResource(0).diskReuseBlockNum(), 0u);
     EXPECT_EQ(resource.kvCache().cacheResource(0).storageBackendReuseBlockNum(), 2u);
+}
+
+TEST_F(StreamCacheResourceTest, OverallDeadlineReturnsBeforeReadAndLateCompletionCannotPublishReuse) {
+    auto backend = prepareStorageBackendResource(false, false, RoleType::PREFILL, false, std::chrono::seconds(1));
+    auto& resource = stream_->streamCacheResource();
+    backend->blockReads();
+    block_tree_cache_detail::ScopeRollback release_read([&] { backend->releaseReads(); });
+    ASSERT_TRUE(resource.initKVBlock().ok());
+    ASSERT_TRUE(backend->waitForReadsFor(1));
+    auto context = std::dynamic_pointer_cast<LoadAsyncContext>(resource.allocator_load_context_);
+    ASSERT_NE(context, nullptr);
+    const auto original_resource = resource.batch_kv_cache_resource_;
+    const auto original_blocks = original_resource->blocks(0, "default");
+    ASSERT_FALSE(original_blocks.empty());
+    auto pool = cache_manager_->coordinator_manager_->groupBlockPools().front();
+    block_tree_cache_test::BoundedThread<absl::Status> waiter([stream = stream_] {
+        return stream->streamCacheResource().waitForAllocatorLoad();
+    });
+    ASSERT_EQ(waiter.waitFor(std::chrono::seconds(5)), std::future_status::ready);
+    EXPECT_EQ(waiter.get().code(), absl::StatusCode::kDeadlineExceeded);
+    EXPECT_NE(resource.batch_kv_cache_resource_, original_resource);
+    EXPECT_EQ(resource.kvCache().curBlocksNum(), 0);
+    EXPECT_FALSE(resource.allocator_load_context_);
+    EXPECT_GE(pool->refCount(original_blocks.front()), 1u);
+    EXPECT_EQ(stream_->reuseLength(), 0);
+    EXPECT_FALSE(resource.cache_reuse_metrics_.load_success);
+    EXPECT_TRUE(resource.cache_reuse_metrics_.report_match_to_ready_latency);
+
+    release_read.run();
+    backend->shutdown();
+    block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache_manager_->block_tree_cache_);
+    EXPECT_FALSE(context->success());
+    EXPECT_EQ(context->errorInfo().code(), ErrorCode::DEADLINE_EXCEEDED);
+    EXPECT_EQ(stream_->reuseLength(), 0);
+    EXPECT_EQ(resource.kvCache().curBlocksNum(), 0);
+    EXPECT_FALSE(pool->isAllocated(original_blocks.front()));
 }
 
 TEST_F(StreamCacheResourceTest, RemoteTimeoutKeepsHostPrefixAndReplacesFrozenSuffix) {
