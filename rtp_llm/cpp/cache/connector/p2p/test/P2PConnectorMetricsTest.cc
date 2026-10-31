@@ -247,31 +247,29 @@ TEST_F(P2PWritebackMetricsTest, IdleStatusReportsZerosWithoutRequestLabels) {
     EXPECT_TRUE(samples_.at("rtp_llm_p2p_writeback_retained_kv_bytes").front().reason.empty());
 }
 
-TEST_F(P2PWritebackMetricsTest, CacheReuseReportsPhysicalAndDiscountedLengthsIncludingZero) {
+TEST_F(P2PWritebackMetricsTest, CacheReuseReportsOnlyWritebackBenefitIncludingZero) {
     RtpLLMCacheReuseMetricsCollector metrics;
     metrics.report_reuse_lengths = true;
-    metrics.side                 = "prefill";
-    metrics.actual_reuse_len     = 12;
-    metrics.reuse_len            = 8;
+    metrics.writeback_reuse_len = 4;
     reporter_->report<RtpLLMCacheReuseMetrics>(nullptr, &metrics);
-    metrics.actual_reuse_len = 0;
-    metrics.reuse_len        = 0;
+    metrics.writeback_reuse_len = 0;
     reporter_->report<RtpLLMCacheReuseMetrics>(nullptr, &metrics);
     snapshot();
-    expectGauge("rtp_llm_actual_reuse_len", {12, 0});
-    expectGauge("rtp_llm_reuse_len", {8, 0});
-    EXPECT_EQ(samples_.at("rtp_llm_actual_reuse_len").front().side, "prefill");
+    expectGauge("rtp_llm_writeback_reuse_len", {4, 0});
+    EXPECT_EQ(samples_.at("rtp_llm_writeback_reuse_len").front().side, "prefill");
+    EXPECT_EQ(samples_.count("rtp_llm_actual_reuse_len"), 0);
+    EXPECT_EQ(samples_.count("rtp_llm_reuse_len"), 0);
     EXPECT_EQ(samples_.count("rtp_llm_writeback_first_use_len"), 0);
 }
 
 TEST_F(P2PWritebackMetricsTest, ReuseSubphaseReportsDoNotEmitRequestLengths) {
     RtpLLMCacheReuseMetricsCollector metrics;
-    metrics.actual_reuse_len      = 12;
-    metrics.reuse_len             = 8;
+    metrics.writeback_reuse_len    = 4;
     metrics.report_load_join      = true;
     metrics.join_dependency_count = 1;
     reporter_->report<RtpLLMCacheReuseMetrics>(nullptr, &metrics);
     snapshot();
+    EXPECT_EQ(samples_.count("rtp_llm_writeback_reuse_len"), 0);
     EXPECT_EQ(samples_.count("rtp_llm_actual_reuse_len"), 0);
     EXPECT_EQ(samples_.count("rtp_llm_reuse_len"), 0);
 }

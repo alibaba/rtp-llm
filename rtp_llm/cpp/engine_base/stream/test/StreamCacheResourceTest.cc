@@ -1115,27 +1115,32 @@ TEST_F(StreamCacheResourceTest, CacheReuseMetricsReportWithoutCacheManager) {
     const auto& metrics = resource.cache_reuse_metrics_;
     EXPECT_TRUE(metrics.report_reuse_metrics);
     EXPECT_EQ(metrics.kv_cache_reuse_length, 20);
-    EXPECT_EQ(metrics.actual_reuse_len, 20);
-    EXPECT_EQ(metrics.reuse_len, 20);
+    EXPECT_EQ(metrics.writeback_reuse_len, -1);
     EXPECT_EQ(metrics.stream_cache_device_reuse_length, 2);
     EXPECT_EQ(metrics.stream_cache_memory_reuse_length, 4);
     EXPECT_EQ(metrics.stream_cache_disk_reuse_length, 6);
     EXPECT_EQ(metrics.stream_cache_remote_reuse_length, 8);
 }
 
-TEST_F(StreamCacheResourceTest, CacheReuseMetricsSeparateActualAndDiscountedPrefillReuse) {
+TEST_F(StreamCacheResourceTest, CacheReuseMetricsReportWritebackBenefitBeforePrefillAccounting) {
     prepareResourceWithInputTokens(std::vector<int>(32, 1), true, RoleType::PREFILL);
     auto& resource = stream_->streamCacheResource();
     stream_->setMetricsReporter(std::make_shared<kmonitor::MetricsReporter>("", "", kmonitor::MetricsTags()));
     stream_->setInitialReuseLength(20);
     stream_->setWritebackFirstUseLength(8);
     resource.reportCacheReuseMetrics();
-    EXPECT_EQ(resource.cache_reuse_metrics_.actual_reuse_len, 20);
-    EXPECT_EQ(resource.cache_reuse_metrics_.reuse_len, 12);
-    EXPECT_STREQ(resource.cache_reuse_metrics_.side, "prefill");
+    EXPECT_EQ(resource.cache_reuse_metrics_.kv_cache_reuse_length, 20);
+    EXPECT_EQ(resource.cache_reuse_metrics_.writeback_reuse_len, 8);
+    stream_->setWritebackFirstUseLength(0);
+    resource.reportCacheReuseMetrics();
+    EXPECT_EQ(resource.cache_reuse_metrics_.writeback_reuse_len, 0);
+    stream_->setWritebackFirstUseLength(40);
+    resource.reportCacheReuseMetrics();
+    EXPECT_EQ(resource.cache_reuse_metrics_.writeback_reuse_len, 20);
+
 }
 
-TEST_F(StreamCacheResourceTest, CacheReuseMetricsDecodeUsesPrefillAccountingRatherThanDecodeCacheHits) {
+TEST_F(StreamCacheResourceTest, CacheReuseMetricsDecodeDoesNotDuplicateWritebackBenefit) {
     prepareResourceWithInputTokens(std::vector<int>(32, 1), true, RoleType::DECODE);
     auto& resource = stream_->streamCacheResource();
     stream_->setMetricsReporter(std::make_shared<kmonitor::MetricsReporter>("", "", kmonitor::MetricsTags()));
@@ -1143,19 +1148,16 @@ TEST_F(StreamCacheResourceTest, CacheReuseMetricsDecodeUsesPrefillAccountingRath
     stream_->setWritebackFirstUseLength(16);
     stream_->setPrefillReuseLength(20, 20, 0, 0, 0, false, 8);
     resource.reportCacheReuseMetrics();
-    EXPECT_EQ(resource.cache_reuse_metrics_.actual_reuse_len, 20);
-    EXPECT_EQ(resource.cache_reuse_metrics_.reuse_len, 12);
+    EXPECT_EQ(resource.cache_reuse_metrics_.writeback_reuse_len, -1);
     EXPECT_EQ(resource.cache_reuse_metrics_.kv_cache_reuse_length, 28);
-    EXPECT_STREQ(resource.cache_reuse_metrics_.side, "decode");
 }
 
 TEST_F(StreamCacheResourceTest, CacheReuseMetricsReportZeroLengthsWhenCacheReuseIsDisabled) {
-    prepareResource(false);
+    prepareResourceWithInputTokens(std::vector<int>(32, 1), false, RoleType::PREFILL);
     auto& resource = stream_->streamCacheResource();
     stream_->setMetricsReporter(std::make_shared<kmonitor::MetricsReporter>("", "", kmonitor::MetricsTags()));
     resource.reportCacheReuseMetrics();
-    EXPECT_EQ(resource.cache_reuse_metrics_.actual_reuse_len, 0);
-    EXPECT_EQ(resource.cache_reuse_metrics_.reuse_len, 0);
+    EXPECT_EQ(resource.cache_reuse_metrics_.writeback_reuse_len, 0);
     EXPECT_FALSE(resource.cache_reuse_metrics_.report_reuse_metrics);
 }
 

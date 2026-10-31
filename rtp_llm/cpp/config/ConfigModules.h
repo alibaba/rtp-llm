@@ -417,8 +417,9 @@ struct VitConfig {
 
 struct CacheStoreConfig {
     bool    p2p_writeback_enable           = false;
+    bool    p2p_writeback_require_device_prefix = true;
     int64_t p2p_writeback_timeout_ms       = 5000;
-    double  p2p_writeback_kv_reserve_ratio = 0.1;
+    double  p2p_writeback_max_kv_ratio = 0.3;
 
     bool    cache_store_rdma_mode               = false;
     int     wrr_available_ratio                 = 80;

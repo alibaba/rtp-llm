@@ -196,8 +196,9 @@ class CacheStoreConfig:
     p2p_prefill_sender_thread_count: int
     p2p_prefill_sender_queue_size: int
     p2p_writeback_enable: bool
+    p2p_writeback_require_device_prefix: bool
     p2p_writeback_timeout_ms: int
-    p2p_writeback_kv_reserve_ratio: float
+    p2p_writeback_max_kv_ratio: float
 
     def __getstate__(self) -> tuple:
         ...

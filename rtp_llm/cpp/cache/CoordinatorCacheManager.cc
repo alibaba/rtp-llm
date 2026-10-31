@@ -194,7 +194,9 @@ void CoordinatorCacheManager::releaseMatchedBlockReferences(const BlockTreeMatch
 
 ErrorInfo CoordinatorCacheManager::mallocAndBindLoadTargets(KVCacheResource&  resource,
                                                             bool              enable_reuse_cache,
-                                                            LoadAsyncContext* load_context) const {
+                                                            LoadAsyncContext* load_context,
+                                                            std::optional<double> max_kv_ratio,
+                                                            const std::map<DeviceBlockPool*, size_t>& available) const {
     const auto groups = cacheGroups();
     const int cp_size = cp_slot_mapper_ ? cp_slot_mapper_->cpSize() : 1;
     std::unordered_map<std::string, RequiredPositions> required_positions;
@@ -213,6 +215,35 @@ ErrorInfo CoordinatorCacheManager::mallocAndBindLoadTargets(KVCacheResource&  re
         for (const auto& desc : load_context->loadDescs()) {
             for (const auto& tag : block_tree_cache_->groupSets()[desc.group_set_id]->groupTags()) {
                 required_positions[tag].insert(loadTargetPosition(desc.path_index, tag, cp_slot_mapper_, cp_size));
+            }
+        }
+    }
+    if (max_kv_ratio) {
+        // Slot vectors already cover the final extent: FULL fills every hole,
+        // while sparse groups fill only the required tail and local-load positions.
+        std::map<DeviceBlockPool*, std::unordered_set<BlockIdxType>> matched;
+        std::map<DeviceBlockPool*, size_t> missing;
+        for (const auto& group : groups) {
+            if (!group->prefixReuseEnabled()) {
+                continue;
+            }
+            const auto pool = group->blockPool().get();
+            auto& held = matched[pool];
+            const auto& blocks = resource.blocks(group->tag());
+            for (size_t i = 0; i < blocks.size(); ++i) {
+                if (!isNullBlockIdx(blocks[i])) {
+                    held.insert(blocks[i]);
+                } else if (group->policy().group_type == CacheGroupType::FULL
+                           || required_positions[group->tag()].count(i)) {
+                    ++missing[pool];
+                }
+            }
+        }
+        for (const auto& [pool, held] : matched) {
+            const size_t demand = held.size() + missing[pool];
+            const size_t capacity = available.at(pool);
+            if (demand > 0 && (capacity == 0 || static_cast<double>(demand) / capacity >= *max_kv_ratio)) {
+                return ErrorInfo(ErrorCode::MALLOC_FAILED, "writeback exceeds available KV budget");
             }
         }
     }
@@ -257,10 +288,15 @@ ErrorInfo CoordinatorCacheManager::admitWriteBackDecodeCache(const CacheKeysType
                                                              size_t                             required_prefix_blocks,
                                                              KVCacheResourcePtr&                resource,
                                                              size_t&                            start_block,
-                                                             std::shared_ptr<LoadAsyncContext>& load_context) {
+                                                             std::shared_ptr<LoadAsyncContext>& load_context,
+                                                             bool require_device_prefix,
+                                                             std::optional<double> max_kv_ratio) {
     resource.reset();
     load_context.reset();
     start_block = 0;
+    if (max_kv_ratio && !(*max_kv_ratio >= 0.0 && *max_kv_ratio <= 1.0)) {
+        return ErrorInfo(ErrorCode::INVALID_PARAMS, "invalid writeback KV budget ratio");
+    }
     if (!block_tree_cache_ || !block_tree_cache_->isDeviceCacheEnabled() || allocation_type_ != AllocationType::DEVICE) {
         return ErrorInfo(ErrorCode::INVALID_PARAMS, "external insert requires reusable DEVICE groups");
     }
@@ -293,6 +329,16 @@ ErrorInfo CoordinatorCacheManager::admitWriteBackDecodeCache(const CacheKeysType
     }
     const auto groups = cacheGroups();
 
+    std::map<DeviceBlockPool*, size_t> available;
+    if (max_kv_ratio) {
+        for (const auto& group : groups) {
+            const auto pool = group->blockPool().get();
+            if (!available.count(pool)) {
+                available.emplace(pool, pool->availableBlocksNum());
+            }
+        }
+    }
+
     KVCacheResourcePtr owner(new KVCacheResource, [groups](KVCacheResource* resource) {
         for (const auto& group : groups) {
             group->unreference(resource->blocks(group->tag()));
@@ -306,12 +352,17 @@ ErrorInfo CoordinatorCacheManager::admitWriteBackDecodeCache(const CacheKeysType
     const auto tree_keys = cp_size > 1 ? cp_slot_mapper_->canonicalCacheKeys(cache_keys) : cache_keys;
 
     // step 1. match the existing blocks in the cache, admission control and hold the resource with the matched blocks
-    const auto error = block_tree_cache_->matchForExternalInsert(tree_keys, required_prefix_blocks / cp_size, match_result);
+    const auto error = block_tree_cache_->matchForExternalInsert(
+        tree_keys, required_prefix_blocks / cp_size, match_result, require_device_prefix);
     if (error.hasError()) {
         return error;
     }
     auto         local_load     = match_result.async_context;
     const size_t matched_blocks = local_load ? local_load->localMatchedBlocks() : match_result.matched_device_blocks;
+    if (matched_blocks < required_prefix_blocks / cp_size) {
+        releaseMatchedBlockReferences(match_result);
+        return ErrorInfo(ErrorCode::CACHE_STORE_STORE_FAILED, "prefix_evicted_or_demoted");
+    }
 
     // match() already owns these request references; transfer them into the resource without incrementing again.
     for (const auto& group : groups) {
@@ -327,8 +378,12 @@ ErrorInfo CoordinatorCacheManager::admitWriteBackDecodeCache(const CacheKeysType
         return populate_error;
     }
 
-    // step 3. malloc the remaining blocks and bind them to the resource and load context
-    const auto malloc_error = mallocAndBindLoadTargets(*owner, false, local_load.get());
+    // A fully DEVICE-cached handshake needs neither transfer nor a new KV budget.
+    if (matched_blocks == tree_keys.size() && !local_load) {
+        max_kv_ratio.reset();
+    }
+    // Check the complete physical demand before allocation can evict cached blocks.
+    const auto malloc_error = mallocAndBindLoadTargets(*owner, false, local_load.get(), max_kv_ratio, available);
     if (malloc_error.hasError()) {
         return malloc_error;
     }

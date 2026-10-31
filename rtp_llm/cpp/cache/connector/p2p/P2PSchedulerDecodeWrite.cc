@@ -38,7 +38,7 @@ bool P2PSchedulerDecodeWrite::init() {
     if (async_write_pool_ || !client_ || !config_.topology || config_.p2p_writeback_timeout_ms <= 0
         || config_.load_cache_timeout_ms <= 0 || config_.p2p_lease_query_timeout_ms <= 0
         || config_.p2p_cancel_broadcast_timeout_ms <= 0
-        || !validWritebackKvReserveRatio(config_.p2p_writeback_kv_reserve_ratio)
+        || !validWritebackMaxKvRatio(config_.p2p_writeback_max_kv_ratio)
         || config_.parallelism_config.tp_size <= 0
         || config_.worker_grpc_addrs.size() != static_cast<size_t>(config_.parallelism_config.tp_size)) {
         return false;

@@ -128,7 +128,8 @@ public:
                                std::optional<int64_t>             request_id             = {});
     ErrorInfo            matchForExternalInsert(const CacheKeysType&  cache_keys,
                                                 size_t                required_prefix_blocks,
-                                                BlockTreeMatchResult& match_result);
+                                                BlockTreeMatchResult& match_result,
+                                                bool require_device_prefix = true);
     ErrorInfo            insertExternalBlocks(const CacheKeysType&                              cache_keys,
                                               size_t                                            start_block,
                                               const std::vector<std::vector<GroupSetResource>>& resources,
@@ -194,7 +195,9 @@ public:
     }
 
 private:
-    ErrorInfo validateDevicePrefixLocked(const CacheKeysType& cache_keys, size_t required_prefix_blocks) const;
+    ErrorInfo validateWritebackPrefixLocked(const CacheKeysType& cache_keys,
+                                            size_t required_prefix_blocks,
+                                            bool require_device_prefix = true) const;
     void      checkWatermark();
     // Caller holds mutex_.
     void onWorkflowSettledLocked(bool check_watermark);

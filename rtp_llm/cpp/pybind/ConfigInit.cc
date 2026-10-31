@@ -1126,8 +1126,9 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("p2p_prefill_sender_thread_count", &CacheStoreConfig::p2p_prefill_sender_thread_count)
         .def_readwrite("p2p_prefill_sender_queue_size", &CacheStoreConfig::p2p_prefill_sender_queue_size)
         .def_readwrite("p2p_writeback_enable", &CacheStoreConfig::p2p_writeback_enable)
+        .def_readwrite("p2p_writeback_require_device_prefix", &CacheStoreConfig::p2p_writeback_require_device_prefix)
         .def_readwrite("p2p_writeback_timeout_ms", &CacheStoreConfig::p2p_writeback_timeout_ms)
-        .def_readwrite("p2p_writeback_kv_reserve_ratio", &CacheStoreConfig::p2p_writeback_kv_reserve_ratio)
+        .def_readwrite("p2p_writeback_max_kv_ratio", &CacheStoreConfig::p2p_writeback_max_kv_ratio)
         .def("to_string", &CacheStoreConfig::to_string)
         .def(py::pickle(
             [](const CacheStoreConfig& self) {
@@ -1158,10 +1159,11 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.p2p_kv_leak_exit_threshold_percent,
                                       self.p2p_writeback_enable,
                                       self.p2p_writeback_timeout_ms,
-                                      self.p2p_writeback_kv_reserve_ratio);
+                                      self.p2p_writeback_max_kv_ratio,
+                                      self.p2p_writeback_require_device_prefix);
             },
             [](py::tuple t) {
-                if (t.size() != 28) {
+                if (t.size() != 28 && t.size() != 29) {
                     throw std::runtime_error("Invalid CacheStoreConfig state");
                 }
                 CacheStoreConfig c;
@@ -1192,7 +1194,10 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                 c.p2p_kv_leak_exit_threshold_percent = t[24].cast<int>();
                 c.p2p_writeback_enable = t[25].cast<bool>();
                 c.p2p_writeback_timeout_ms = t[26].cast<int64_t>();
-                c.p2p_writeback_kv_reserve_ratio = t[27].cast<double>();
+                if (t.size() == 29) {
+                    c.p2p_writeback_max_kv_ratio = t[27].cast<double>();
+                    c.p2p_writeback_require_device_prefix = t[28].cast<bool>();
+                }
                 return c;
             }));
 

@@ -156,13 +156,13 @@ protected:
     makeManager(RoleType                          role,
                 const std::shared_ptr<Allocator>& allocator,
                 bool                              enabled          = true,
-                double                            kv_reserve_ratio = CacheStoreConfig{}.p2p_writeback_kv_reserve_ratio,
+                double                            max_kv_ratio = CacheStoreConfig{}.p2p_writeback_max_kv_ratio,
                 const KVCacheConfig&              kv_cache_config  = {}) {
         PDSepConfig pd;
         pd.role_type = role;
         CacheStoreConfig store;
         store.p2p_writeback_enable           = enabled;
-        store.p2p_writeback_kv_reserve_ratio = kv_reserve_ratio;
+        store.p2p_writeback_max_kv_ratio = max_kv_ratio;
         auto manager =
             std::make_shared<KVCacheManager>(role == RoleType::PREFILL ? prefill_config_ : config_,
                                              false,
@@ -218,7 +218,8 @@ protected:
             target_->setCPSlotMapper(std::make_shared<CPSlotMapper>(0, prefillCpSize(), config_.seq_size_per_block));
         }
         decode_                          = makeManager(RoleType::DECODE, source_);
-        prefill_                         = makeManager(RoleType::PREFILL, target_);
+        // Keep tiny receiver pools focused on transfer/lifecycle; scheduler tests exercise the capacity threshold.
+        prefill_                         = makeManager(RoleType::PREFILL, target_, true, 1.0);
         decode_service_.local.engine_    = std::make_shared<WritebackEngine>(decode_);
         decode_service_.decode.engine_   = decode_service_.local.engine_;
         prefill_service_.local.engine_   = std::make_shared<WritebackEngine>(prefill_);
@@ -240,7 +241,7 @@ protected:
             ASSERT_TRUE(allocator->init());
             allocator->setCPSlotMapper(
                 std::make_shared<CPSlotMapper>(rank, prefillCpSize(), config_.seq_size_per_block));
-            auto manager           = makeManager(RoleType::PREFILL, allocator);
+            auto manager           = makeManager(RoleType::PREFILL, allocator, true, 1.0);
             auto service           = std::make_unique<WritebackService>();
             service->local.engine_ = std::make_shared<WritebackEngine>(manager);
             int rpc_port           = 0;
@@ -332,6 +333,7 @@ protected:
             scheduler.cache_key_tokens_per_block                           = config_.seq_size_per_block;
             scheduler.cache_key_hash_seed = config_.cache_key_hash_seed;
             scheduler.role_type                                    = role;
+            scheduler.p2p_writeback_max_kv_ratio = role == RoleType::PREFILL ? 1.0 : 0.3;
             scheduler.parallelism_config                           = parallelismFor(role);
             scheduler.worker_grpc_addrs =
                 role == RoleType::PREFILL ? prefill_grpc_addrs : decode_grpc_addrs;
@@ -933,7 +935,7 @@ TEST_P(DecodeWritebackCachePolicyIntegrationTest, LocalCachePolicyDoesNotGateWri
     kv_cache_config.reuse_cache         = reuse_cache;
     kv_cache_config.enable_device_cache = enable_device_cache;
     auto manager                        = makeManager(
-        RoleType::DECODE, source_, true, CacheStoreConfig{}.p2p_writeback_kv_reserve_ratio, kv_cache_config);
+        RoleType::DECODE, source_, true, CacheStoreConfig{}.p2p_writeback_max_kv_ratio, kv_cache_config);
     manager->p2p_connector_ = decode_->p2p_connector_;
     decode_                 = std::move(manager);
     ASSERT_TRUE(decode_->writebackEnabled());
@@ -1152,8 +1154,8 @@ TEST_F(DecodeWritebackIntegrationTest, NonDecodeRolePreservesLocalReleaseWithout
     EXPECT_EQ(sourceRefs(1), 1u);
 }
 
-TEST_F(DecodeWritebackIntegrationTest, KvReserveSkipsWritebackAndPreservesLocalRelease) {
-    auto reserved            = makeManager(RoleType::DECODE, source_, true, /*kv_reserve_ratio=*/1.0);
+TEST_F(DecodeWritebackIntegrationTest, KvBudgetSkipsWritebackAndPreservesLocalRelease) {
+    auto reserved            = makeManager(RoleType::DECODE, source_, true, /*max_kv_ratio=*/0.0);
     reserved->p2p_connector_ = decode_->p2p_connector_;
     decode_                  = std::move(reserved);
     prepare();
@@ -1163,8 +1165,8 @@ TEST_F(DecodeWritebackIntegrationTest, KvReserveSkipsWritebackAndPreservesLocalR
     EXPECT_EQ(sourceRefs(1), 1u);
 }
 
-TEST_F(DecodeWritebackIntegrationTest, KvReserveDoesNotCreditPromptHeldByAnotherRequest) {
-    auto reserved            = makeManager(RoleType::DECODE, source_, true, /*kv_reserve_ratio=*/0.7);
+TEST_F(DecodeWritebackIntegrationTest, KvBudgetDoesNotCreditPromptHeldByAnotherRequest) {
+    auto reserved            = makeManager(RoleType::DECODE, source_, true, /*max_kv_ratio=*/0.18);
     reserved->p2p_connector_ = decode_->p2p_connector_;
     decode_                  = std::move(reserved);
     tokens_.resize(29);
@@ -1192,8 +1194,8 @@ TEST_F(DecodeWritebackIntegrationTest, KvReserveDoesNotCreditPromptHeldByAnother
     EXPECT_EQ(sourceRefs(5), 1u);
 }
 
-TEST_F(DecodeWritebackIntegrationTest, KvReserveCreditsReleasedLongPromptBeforeWriteback) {
-    auto reserved            = makeManager(RoleType::DECODE, source_, true, /*kv_reserve_ratio=*/0.7);
+TEST_F(DecodeWritebackIntegrationTest, KvBudgetCreditsReleasedLongPromptBeforeWriteback) {
+    auto reserved            = makeManager(RoleType::DECODE, source_, true, /*max_kv_ratio=*/0.18);
     reserved->p2p_connector_ = decode_->p2p_connector_;
     decode_                  = std::move(reserved);
     tokens_.resize(29);
@@ -1221,8 +1223,8 @@ TEST_F(DecodeWritebackIntegrationTest, KvReserveCreditsReleasedLongPromptBeforeW
     EXPECT_EQ(target_->devicePrefixBlocksForTest(keys_), 7u);
 }
 
-TEST_F(DecodeWritebackIndependentPoolsIntegrationTest, KvReserveChecksEachPoolBeforeHoldingSuffix) {
-    auto reserved            = makeManager(RoleType::DECODE, source_, true, /*kv_reserve_ratio=*/0.875);
+TEST_F(DecodeWritebackIndependentPoolsIntegrationTest, KvBudgetChecksEachPoolBeforeHoldingSuffix) {
+    auto reserved            = makeManager(RoleType::DECODE, source_, true, /*max_kv_ratio=*/0.25);
     reserved->p2p_connector_ = decode_->p2p_connector_;
     decode_                  = std::move(reserved);
     prepare();

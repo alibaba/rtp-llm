@@ -89,7 +89,7 @@ bool P2PSchedulerPrefillWrite::init() {
     if (initialized_ || !coordinator_manager_ || !client_ || !config_.topology
         || config_.p2p_cancel_broadcast_timeout_ms <= 0 || config_.p2p_writeback_timeout_ms <= 0
         || config_.load_cache_timeout_ms <= 0 || config_.p2p_lease_query_timeout_ms <= 0
-        || !validWritebackKvReserveRatio(config_.p2p_writeback_kv_reserve_ratio)
+        || !validWritebackMaxKvRatio(config_.p2p_writeback_max_kv_ratio)
         || !retained_kv_.init(config_.topology, config_.p2p_kv_leak_exit_threshold_percent, true, metrics_reporter_)
         || config_.worker_addrs.size() != static_cast<size_t>(config_.parallelism_config.tp_size)
         || config_.worker_grpc_addrs.size() != config_.worker_addrs.size()) {
@@ -600,7 +600,9 @@ void P2PSchedulerPrefillWrite::handleWrite(const P2PConnectorStartWriteBackReque
             return state->errorInfo();
         const auto admission_start_us = currentTimeUs();
         const auto error =
-            coordinator_manager_->admitWriteBackDecodeCache(keys, prompt_blocks, resource, start, load_context);
+            coordinator_manager_->admitWriteBackDecodeCache(
+                keys, prompt_blocks, resource, start, load_context,
+                config_.p2p_writeback_require_device_prefix, config_.p2p_writeback_max_kv_ratio);
         if (resource) {
             hold_start_us = currentTimeUs();
             std::lock_guard<std::mutex> lock(state->mutex);
@@ -618,11 +620,6 @@ void P2PSchedulerPrefillWrite::handleWrite(const P2PConnectorStartWriteBackReque
         if (count == 0 && !load_context) {
             metrics.committed_token_count = 0;
             return ErrorInfo::OkStatus();
-        }
-        // Checked after admission so each pool already reflects this writeback's real per-group, per-rank demand.
-        if (!writebackKeepsKvReserve(coordinator_manager_->cacheGroups(), config_.p2p_writeback_kv_reserve_ratio)) {
-            state->fail(ErrorInfo(ErrorCode::MALLOC_FAILED, "writeback would leave too few available KV blocks"));
-            return state->errorInfo();
         }
         P2PBroadcastClient::RankRoutes routes(transfer_addrs_.size());
         P2PBroadcastClient::RankRoutes send_routes;

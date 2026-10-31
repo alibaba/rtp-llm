@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <functional>
 #include <limits>
+#include <map>
 #include <memory>
 #include <optional>
 #include <string>
@@ -109,7 +110,9 @@ public:
                                            size_t                             required_prefix_blocks,
                                            KVCacheResourcePtr&                resource,
                                            size_t&                            start_block,
-                                           std::shared_ptr<LoadAsyncContext>& load_context);
+                                           std::shared_ptr<LoadAsyncContext>& load_context,
+                                           bool require_device_prefix = true,
+                                           std::optional<double> max_kv_ratio = std::nullopt);
     ErrorInfo    commitWriteBackDecodeCache(const KVCacheResource& resource, size_t start_block, int64_t deadline_ms);
     virtual void blockCopy(int src_block_index, int dest_block_index);
     virtual void blockBatchCopy(const std::vector<BlockIdPair>& copy_mapping);
@@ -177,7 +180,9 @@ protected:
     void      releaseMatchedBlockReferences(const BlockTreeMatchResult& match_result) const;
     ErrorInfo mallocAndBindLoadTargets(KVCacheResource&  resource,
                                        bool              enable_reuse_cache,
-                                       LoadAsyncContext* load_context) const;
+                                       LoadAsyncContext* load_context,
+                                       std::optional<double> max_kv_ratio,
+                                       const std::map<DeviceBlockPool*, size_t>& available) const;
     // Which capacity snapshots evaluateInitCapacity() is allowed to consult.
     // TOTAL_ONLY answers "can this request ever fit"; TOTAL_AND_AVAILABLE also
     // answers "can it fit right now".

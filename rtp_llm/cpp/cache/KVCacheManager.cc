@@ -1339,9 +1339,9 @@ std::shared_ptr<AsyncContext> KVCacheManager::asyncWriteBack(const BatchKVCacheR
             RTP_LLM_LOG_WARNING("writeback source selection failed: %s", selected_error.ToString().c_str());
             return skip("invalid_source_routes");
         }
-        if (!writebackKeepsKvReserveAfterRelease(
-                groups, source, selected, cache_store_config_.p2p_writeback_kv_reserve_ratio)) {
-            return skip("kv_reserve");
+        if (!writebackFitsKvBudgetAfterRelease(
+                groups, source, selected, cache_store_config_.p2p_writeback_max_kv_ratio)) {
+            return skip("kv_budget");
         }
         // Preserve logical positions, including sparse holes, while holding only physical blocks.
         KVCacheResourcePtr hold(new KVCacheResource, [groups](KVCacheResource* resource) {

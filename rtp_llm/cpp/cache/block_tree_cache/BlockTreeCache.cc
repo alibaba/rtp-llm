@@ -158,10 +158,11 @@ BlockTreeMatchResult BlockTreeCache::match(const CacheKeysType&               ca
 
 ErrorInfo BlockTreeCache::matchForExternalInsert(const CacheKeysType&  cache_keys,
                                                  size_t                required_prefix_blocks,
-                                                 BlockTreeMatchResult& match_result) {
+                                                 BlockTreeMatchResult& match_result,
+                                                 bool require_device_prefix) {
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        const auto                  error = validateDevicePrefixLocked(cache_keys, required_prefix_blocks);
+        const auto error = validateWritebackPrefixLocked(cache_keys, required_prefix_blocks, require_device_prefix);
         if (error.hasError()) {
             return error;
         }
@@ -172,8 +173,9 @@ ErrorInfo BlockTreeCache::matchForExternalInsert(const CacheKeysType&  cache_key
     return ErrorInfo::OkStatus();
 }
 
-ErrorInfo BlockTreeCache::validateDevicePrefixLocked(const CacheKeysType& cache_keys,
-                                                     size_t               required_prefix_blocks) const {
+ErrorInfo BlockTreeCache::validateWritebackPrefixLocked(const CacheKeysType& cache_keys,
+                                                        size_t required_prefix_blocks,
+                                                        bool require_device_prefix) const {
     // Check that the request targets a valid DEVICE cache range.
     if (!config_.enable_device_cache || cache_keys.empty() || required_prefix_blocks > cache_keys.size()
         || tree_->groupSets().empty()) {
@@ -193,8 +195,11 @@ ErrorInfo BlockTreeCache::validateDevicePrefixLocked(const CacheKeysType& cache_
             std::min(tree_->groupSets()[gid]->computeReuseBlockCount(required_prefix_blocks), required_prefix_blocks);
         for (size_t i = required_prefix_blocks - reuse_blocks; i < required_prefix_blocks; ++i) {
             const auto& resource = path[i]->group_set_resources[gid];
-            if (!resource.isValidSteadyState() || resource.transfer_detached || !resource.hasCompleteDeviceValue()
-                || resource.device_blocks.size() != tree_->groupSets()[gid]->devicePools().size()) {
+            const bool device_ready = resource.hasCompleteDeviceValue()
+                && resource.device_blocks.size() == tree_->groupSets()[gid]->devicePools().size();
+            const bool loadable = !require_device_prefix
+                && (resource.hasTier(Tier::HOST) || resource.hasTier(Tier::DISK));
+            if (!resource.isValidSteadyState() || resource.transfer_detached || (!device_ready && !loadable)) {
                 return ErrorInfo(ErrorCode::CACHE_STORE_STORE_FAILED, "prefix_evicted_or_demoted");
             }
         }
@@ -217,14 +222,14 @@ ErrorInfo BlockTreeCache::insertExternalBlocks(const CacheKeysType&             
         }
 
         // Confirm that matched and locally loaded blocks are still published on DEVICE.
-        const auto prefix_error = validateDevicePrefixLocked(cache_keys, start_block);
+        const auto prefix_error = validateWritebackPrefixLocked(cache_keys, start_block);
         if (prefix_error.hasError()) {
             return prefix_error;
         }
 
         size_t resident_prefix_length = 0;
         storage_write = storer_.storeLocked(cache_keys, resources, Tier::DEVICE, false, resident_prefix_length, true);
-        if (validateDevicePrefixLocked(cache_keys, cache_keys.size()).hasError()) {
+        if (validateWritebackPrefixLocked(cache_keys, cache_keys.size()).hasError()) {
             publication_error = ErrorInfo(ErrorCode::CACHE_STORE_STORE_FAILED,
                                            "writeback publication incomplete: final reuse endpoint unavailable");
         }

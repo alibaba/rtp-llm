@@ -24,6 +24,17 @@ def init_cache_store_group_args(parser, cache_store_config):
         help="Enable decode KV cache writeback to prefill.",
     )
     cache_store_group.add_argument(
+        "--p2p_writeback_require_device_prefix",
+        env_name="P2P_WRITEBACK_REQUIRE_DEVICE_PREFIX",
+        bind_to=(cache_store_config, "p2p_writeback_require_device_prefix"),
+        type=str2bool,
+        default=True,
+        help=(
+            "Require the prompt cache on DEVICE before prefill accepts writeback; "
+            "false allows loading a local HOST/DISK prefix."
+        ),
+    )
+    cache_store_group.add_argument(
         "--p2p_writeback_timeout_ms",
         env_name="P2P_WRITEBACK_TIMEOUT_MS",
         bind_to=(cache_store_config, "p2p_writeback_timeout_ms"),
@@ -32,13 +43,13 @@ def init_cache_store_group_args(parser, cache_store_config):
         help="Timeout for a decode KV cache writeback request in milliseconds.",
     )
     cache_store_group.add_argument(
-        "--p2p_writeback_kv_reserve_ratio",
-        env_name="P2P_WRITEBACK_KV_RESERVE_RATIO",
-        bind_to=(cache_store_config, "p2p_writeback_kv_reserve_ratio"),
+        "--p2p_writeback_max_kv_ratio",
+        env_name="P2P_WRITEBACK_MAX_KV_RATIO",
+        bind_to=(cache_store_config, "p2p_writeback_max_kv_ratio"),
         type=float,
-        default=0.1,
-        help="Fraction of KV cache blocks that decode KV cache writeback leaves available for serving; "
-        "writeback is skipped on decode and rejected on prefill when it would go below it.",
+        default=0.3,
+        help="Accept writeback only when its held blocks are below this fraction of each pool's "
+        "free plus reclaimable cache blocks, crediting this request's releasable blocks.",
     )
     cache_store_group.add_argument(
         "--cache_store_rdma_mode",

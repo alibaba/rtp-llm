@@ -9,12 +9,10 @@
 
 namespace rtp_llm {
 
-bool writebackKeepsKvReserve(const std::vector<SingleTypeCacheManagerPtr>& groups, double reserve_ratio);
-
-bool writebackKeepsKvReserveAfterRelease(const std::vector<SingleTypeCacheManagerPtr>& groups,
+bool writebackFitsKvBudgetAfterRelease(const std::vector<SingleTypeCacheManagerPtr>& groups,
                                          const KVCacheResource&              source,
                                          const KVCacheResource&              retained,
-                                         double                              reserve_ratio);
+                                         double                              max_ratio);
 
 class WritebackRetainedKv {
 public:

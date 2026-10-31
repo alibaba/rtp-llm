@@ -114,6 +114,7 @@ cc_test(
 
 cc_test(
     name = "p2p_connector_worker_test",
+    linkstatic = True,
     srcs = [
         "P2PConnectorWorkerTest.cc",
         "P2PConnectorWriteWorkerTest.cc",
@@ -125,6 +126,8 @@ cc_test(
         "//rtp_llm/cpp/cache/connector/p2p/transfer/tcp:tcp_backend",
         "//rtp_llm/cpp/model_rpc:model_rpc_server",
         "//rtp_llm/cpp/cache/test:cache_config_test_utils",
+        "@havenask//aios/autil:base64",
+        "@havenask//aios/autil:zlib",
         "//rtp_llm/cpp/testing:device_test_utils",
         "@com_google_googletest//:gtest",
     ] + device_impl_target(),

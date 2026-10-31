@@ -656,16 +656,10 @@ void StreamCacheResource::reportCacheReuseMetrics() {
     if (stream_->metrics_reporter_ == nullptr) {
         return;
     }
-    const bool decode         = resource_context_.role_type == RoleType::DECODE;
-    cache_reuse_metrics_.side = decode                                           ? "decode" :
-                                resource_context_.role_type == RoleType::PREFILL ? "prefill" :
-                                                                                   "normal";
-    cache_reuse_metrics_.actual_reuse_len =
-        std::max<int64_t>(0, decode ? stream_->prefillTotalReuseLen() : stream_->initialReuseLength());
-    const int64_t first_use_len =
-        decode ? stream_->prefillWritebackFirstUseLength() : stream_->writebackFirstUseLength();
-    cache_reuse_metrics_.reuse_len = cache_reuse_metrics_.actual_reuse_len
-                                     - std::clamp<int64_t>(first_use_len, 0, cache_reuse_metrics_.actual_reuse_len);
+    cache_reuse_metrics_.writeback_reuse_len =
+        resource_context_.role_type == RoleType::PREFILL ?
+            std::clamp<int64_t>(stream_->writebackFirstUseLength(), 0, std::max(0, stream_->initialReuseLength())) :
+            -1;
     cache_reuse_metrics_.kv_cache_reuse_length            = stream_->initialReuseLength();
     cache_reuse_metrics_.stream_cache_device_reuse_length = stream_->deviceReuseLength();
     cache_reuse_metrics_.stream_cache_memory_reuse_length = stream_->hostReuseLength();
@@ -674,7 +668,7 @@ void StreamCacheResource::reportCacheReuseMetrics() {
     cache_reuse_metrics_.report_reuse_metrics             = reuseCache();
     kmonitor::MetricsTags tags;
     auto                  metrics = cache_reuse_metrics_;
-    metrics.report_reuse_lengths  = true;
+    metrics.report_reuse_lengths = true;
     stream_->metrics_reporter_->report<RtpLLMCacheReuseMetrics, RtpLLMCacheReuseMetricsCollector>(&tags, &metrics);
 }
 

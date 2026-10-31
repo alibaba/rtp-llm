@@ -2776,6 +2776,7 @@ TEST_P(WritebackMissingGroupAllocatorTest, RejectsAdmissionWithoutTakingReferenc
     std::shared_ptr<LoadAsyncContext> load;
     size_t                            start = 0;
     EXPECT_TRUE(allocator_->admitWriteBackDecodeCache(keys_, 4, resource, start, load).hasError());
+    EXPECT_TRUE(allocator_->admitWriteBackDecodeCache(keys_, 4, resource, start, load, false).hasError());
     EXPECT_EQ(resource, nullptr);
     EXPECT_EQ(load, nullptr);
     EXPECT_EQ(pool->freeBlocksNum(), free);
@@ -2804,7 +2805,8 @@ TEST_F(WritebackMultiGroupAllocatorTest, SparseLocalLoadTargetsOutsideTransferTa
     KVCacheResourcePtr                resource;
     std::shared_ptr<LoadAsyncContext> load;
     size_t                            start = 0;
-    const auto                        error = allocator_->admitWriteBackDecodeCache(keys_, 4, resource, start, load);
+    EXPECT_TRUE(allocator_->admitWriteBackDecodeCache(keys_, 8, resource, start, load).hasError());
+    const auto error = allocator_->admitWriteBackDecodeCache(keys_, 8, resource, start, load, false);
     ASSERT_TRUE(error.ok()) << error.ToString();
     ASSERT_NE(load, nullptr);
     EXPECT_EQ(start, 8u);
@@ -2838,6 +2840,7 @@ TEST_F(WritebackMultiGroupAllocatorTest, BusySwaWindowRejectsAdmissionWithoutTak
     std::shared_ptr<LoadAsyncContext> load;
     size_t                            start = 0;
     EXPECT_TRUE(allocator_->admitWriteBackDecodeCache(keys_, 4, resource, start, load).hasError());
+    EXPECT_TRUE(allocator_->admitWriteBackDecodeCache(keys_, 4, resource, start, load, false).hasError());
     EXPECT_EQ(resource, nullptr);
     EXPECT_EQ(pool->freeBlocksNum(), free);
     value.transfer_state = GroupSetTransferState::IDLE;
