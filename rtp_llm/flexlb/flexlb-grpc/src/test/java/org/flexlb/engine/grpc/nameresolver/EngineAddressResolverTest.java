@@ -141,11 +141,9 @@ class EngineAddressResolverTest {
         roleEndpoint.setPdFusionEndpoint(endpoint);
 
         ServiceRoute route = new ServiceRoute();
-        route.setServiceId("test-service");
         route.setRoleEndpoints(List.of(roleEndpoint));
 
-        ModelMetaConfig modelMetaConfig = new ModelMetaConfig();
-        modelMetaConfig.putServiceRoute(route.getServiceId(), route);
+        ModelMetaConfig modelMetaConfig = new ModelMetaConfig(route);
 
         ServiceDiscovery serviceDiscovery = mock(ServiceDiscovery.class);
         when(serviceDiscovery.getHosts(endpoint))
@@ -190,7 +188,7 @@ class EngineAddressResolverTest {
         ServiceRoute route = mock(ServiceRoute.class);
         when(route.getAllEndpoints()).thenReturn(List.of(first, second));
         ModelMetaConfig config = mock(ModelMetaConfig.class);
-        when(config.getServiceRoutes()).thenReturn(List.of(route));
+        when(config.getServiceRoute()).thenReturn(route);
         ServiceDiscovery discovery = mock(ServiceDiscovery.class);
         WorkerHost a = workerHost("10.0.0.1", 8080);
         WorkerHost b = workerHost("10.0.0.2", 8080);
@@ -239,7 +237,7 @@ class EngineAddressResolverTest {
         ServiceRoute route = mock(ServiceRoute.class);
         when(route.getAllEndpoints()).thenReturn(List.of(first, sameAddressInAnotherGroup, differentControlPort));
         ModelMetaConfig config = mock(ModelMetaConfig.class);
-        when(config.getServiceRoutes()).thenReturn(List.of(route));
+        when(config.getServiceRoute()).thenReturn(route);
         ServiceDiscovery discovery = mock(ServiceDiscovery.class);
         when(discovery.getHosts(first)).thenReturn(List.of(workerHost("10.0.0.1", 8080)));
         when(discovery.getHosts(differentControlPort)).thenReturn(List.of(workerHost("10.0.0.2", 8080)));
@@ -260,7 +258,7 @@ class EngineAddressResolverTest {
         ServiceRoute route = mock(ServiceRoute.class);
         when(route.getAllEndpoints()).thenReturn(List.of(endpoints));
         ModelMetaConfig config = mock(ModelMetaConfig.class);
-        when(config.getServiceRoutes()).thenReturn(List.of(route));
+        when(config.getServiceRoute()).thenReturn(route);
         return config;
     }
 

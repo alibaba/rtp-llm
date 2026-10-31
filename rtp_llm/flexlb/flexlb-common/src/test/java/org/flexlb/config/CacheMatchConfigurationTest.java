@@ -24,28 +24,25 @@ class CacheMatchConfigurationTest {
     @Test
     void defaultsToKvcmAndRequiresTopology() {
         FlexlbConfig config = ConfigTestFixtures.parse("{}");
-        CacheMatchConfiguration configuration =
-                new CacheMatchConfiguration(modelMetaConfig(route("service-1", true)), config);
+        CacheMatchConfiguration configuration = new CacheMatchConfiguration(new ModelMetaConfig(route(true)), config);
         assertEquals(CacheMatchMode.KVCM, configuration.getConfiguredMode());
         assertTrue(configuration.isKvcmEnabled());
         assertTrue(configuration.isLocalStandbyEnabled());
         assertFalse(configuration.isLocalSyncEnabled());
         assertThrows(IllegalStateException.class,
-                () -> new CacheMatchConfiguration(modelMetaConfig(route("service-1", false)), config));
+                () -> new CacheMatchConfiguration(new ModelMetaConfig(route(false)), config));
     }
 
     @Test
     void usesExplicitLocalSync() {
         FlexlbConfig config = new FlexlbConfig();
         config.setCacheMatching(new LocalSyncCacheMatchingConfig());
-        CacheMatchConfiguration configuration =
-                new CacheMatchConfiguration(modelMetaConfig(route("service-1", false)), config);
+        CacheMatchConfiguration configuration = new CacheMatchConfiguration(new ModelMetaConfig(route(false)), config);
 
         assertFalse(configuration.isKvcmEnabled());
         assertTrue(configuration.isLocalSyncEnabled());
         assertFalse(configuration.isLocalStandbyEnabled());
         assertFalse(configuration.isAutoSwitchEnabled());
-        assertNull(configuration.getKvcmServiceRoute());
         assertNull(configuration.getKvcmConfig());
         assertNull(configuration.getKvcmRuntimeConfig());
         assertNull(configuration.getLocalStandbyConfig());
@@ -54,16 +51,15 @@ class CacheMatchConfigurationTest {
 
     @Test
     void usesTopologyFromModelConfigAndPolicyFromFlexlbConfig() {
-        ServiceRoute route = route("service-1", true);
+        ServiceRoute route = route(true);
         FlexlbConfig flexlbConfig = kvcmConfig(false);
 
-        CacheMatchConfiguration configuration = new CacheMatchConfiguration(
-                modelMetaConfig(route), flexlbConfig);
+        CacheMatchConfiguration configuration = new CacheMatchConfiguration(new ModelMetaConfig(route), flexlbConfig);
 
         assertTrue(configuration.isKvcmEnabled());
         assertFalse(configuration.isLocalSyncEnabled());
         assertTrue(configuration.isLocalStandbyEnabled());
-        assertSame(route, configuration.getKvcmServiceRoute());
+        assertSame(route, configuration.getServiceRoute());
         assertSame(route.getKvcm(), configuration.getKvcmConfig());
         assertSame(flexlbConfig.getKvcmAndStandbyConfig(), configuration.getKvcmRuntimeConfig());
         assertSame(flexlbConfig.getKvcmAndStandbyConfig().getLocalStandby(), configuration.getLocalStandbyConfig());
@@ -73,9 +69,8 @@ class CacheMatchConfigurationTest {
 
     @Test
     void readsAutoSwitchFromFlexlbConfig() {
-        CacheMatchConfiguration configuration = new CacheMatchConfiguration(
-                modelMetaConfig(route("service-1", true)),
-                kvcmConfig(true));
+        CacheMatchConfiguration configuration =
+                new CacheMatchConfiguration(new ModelMetaConfig(route(true)), kvcmConfig(true));
 
         assertTrue(configuration.isLocalStandbyEnabled());
         assertTrue(configuration.isAutoSwitchEnabled());
@@ -84,9 +79,7 @@ class CacheMatchConfigurationTest {
     @Test
     void rejectsKvcmModeWithoutKvcmTopology() {
         IllegalStateException error = assertThrows(IllegalStateException.class,
-                () -> new CacheMatchConfiguration(
-                        modelMetaConfig(route("service-1", false)),
-                        kvcmConfig(true)));
+                () -> new CacheMatchConfiguration(new ModelMetaConfig(route(false)), kvcmConfig(true)));
 
         assertTrue(error.getMessage().contains(
                 "cacheMatching.type=KVCM requires MODEL_SERVICE_CONFIG kvcm topology"));
@@ -97,22 +90,8 @@ class CacheMatchConfigurationTest {
         FlexlbConfig config = new FlexlbConfig();
         config.setCacheMatching(new LocalStandbyCacheMatchingConfig());
         IllegalStateException error = assertThrows(IllegalStateException.class,
-                () -> new CacheMatchConfiguration(modelMetaConfig(route("service-1", false)), config));
+                () -> new CacheMatchConfiguration(new ModelMetaConfig(route(false)), config));
         assertTrue(error.getMessage().contains("cacheMatching.type=LOCAL_STANDBY"));
-    }
-
-    @Test
-    void selectsOneOfMultipleKvcmTopologies() {
-        ModelMetaConfig modelMetaConfig = modelMetaConfig(
-                route("service-1", true),
-                route("service-2", true));
-
-        CacheMatchConfiguration configuration = new CacheMatchConfiguration(
-                modelMetaConfig, kvcmConfig(true));
-        String selectedServiceId = configuration.getKvcmServiceRoute().getServiceId();
-
-        assertTrue("service-1".equals(selectedServiceId)
-                || "service-2".equals(selectedServiceId));
     }
 
     @Test
@@ -124,8 +103,8 @@ class CacheMatchConfigurationTest {
         ArgumentCaptor<Consumer<FlexlbConfig>> listener =
                 ArgumentCaptor.forClass(Consumer.class);
 
-        CacheMatchConfiguration configuration = new CacheMatchConfiguration(
-                modelMetaConfig(route("service-1", true)), configService);
+        CacheMatchConfiguration configuration =
+                new CacheMatchConfiguration(new ModelMetaConfig(route(true)), configService);
         assertSame(initial.getKvcmAndStandbyConfig(), configuration.getKvcmRuntimeConfig());
         verify(configService).addUpdateListener(listener.capture());
 
@@ -155,8 +134,8 @@ class CacheMatchConfigurationTest {
         ArgumentCaptor<Consumer<FlexlbConfig>> listener =
                 ArgumentCaptor.forClass(Consumer.class);
 
-        CacheMatchConfiguration configuration = new CacheMatchConfiguration(
-                modelMetaConfig(route("service-1", true)), configService);
+        CacheMatchConfiguration configuration =
+                new CacheMatchConfiguration(new ModelMetaConfig(route(true)), configService);
         verify(configService).addUpdateListener(listener.capture());
 
         FlexlbConfig localSync = new FlexlbConfig();
@@ -175,17 +154,8 @@ class CacheMatchConfigurationTest {
         return config;
     }
 
-    private ModelMetaConfig modelMetaConfig(ServiceRoute... routes) {
-        ModelMetaConfig modelMetaConfig = new ModelMetaConfig();
-        for (ServiceRoute route : routes) {
-            modelMetaConfig.putServiceRoute(route.getServiceId(), route);
-        }
-        return modelMetaConfig;
-    }
-
-    private ServiceRoute route(String serviceId, boolean hasKvcmTopology) {
+    private ServiceRoute route(boolean hasKvcmTopology) {
         ServiceRoute route = new ServiceRoute();
-        route.setServiceId(serviceId);
         if (hasKvcmTopology) {
             route.setKvcm(new KvcmConfig());
         }

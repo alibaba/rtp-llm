@@ -1429,7 +1429,6 @@ class EnvManager:
         elif spec.discovery == "domain":
             menv["MODEL_SERVICE_CONFIG"] = json.dumps(
                 {
-                    "service_id": "aigc.text-generation.generation.engine_service",
                     "role_endpoints": [
                         {
                             "group": "mock",

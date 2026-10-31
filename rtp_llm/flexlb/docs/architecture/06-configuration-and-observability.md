@@ -309,9 +309,12 @@ Nacos 监听更新通过 `ConfigService` 校验并发布到 `CacheMatchConfigura
 
 ## MODEL_SERVICE_CONFIG
 
-独立反序列化为 `ServiceRoute`：
+每个 FlexLB 进程只服务一个模型，独立反序列化为唯一的 `ServiceRoute`。
+`ModelMetaConfig` 保存该路由及所需角色，按 role 读取各 group 的 endpoint；
+无需配置模型标识，旧配置中的 `service_id` 会被忽略。
+配置包含：
 
-- `service_id` 和 `role_endpoints`；
+- `role_endpoints`；
 - endpoint 的 `address`、`protocol`、`path`、`worker_status_port`、`discovery`；
 - discovery 定位字段：类型 `static-env`、`vipserver`、`dashscope`，以及可选
   `base_url` / `hosts`；
@@ -471,11 +474,11 @@ Decode 端点预留资源失败的尝试 QPS，在进入 Prefill 子队列前、
 `app.flexlb.queue.subqueue.oldest.wait.ms{role,engineIp}` 查看最老等待年龄，空队列报 0。
 队列深度与容量计数来自不同并发点，采样时允许短暂不一致；只有持续偏差才值得排查漏账。
 
-`app.engine.health.check.engine.worker.number.service.discovery.result{model,role}` 统计所有已配置 endpoint
+`app.engine.health.check.engine.worker.number.service.discovery.result{role}` 统计所有已配置 endpoint
 成功返回的原始 Host 数量；空返回上报 0，即使健康检查继续沿用缓存。某 endpoint 查询失败时
 不以缓存或 0 伪装完整的发现结果，本轮跳过总数上报，失败由 discovery error/timeout 指标记录。
 `app.engine.health.check.engine.{prefill,decode,encoder}.worker.number` 则统计 WorkerDirectory
-中已展开的逻辑 Worker 数，使用公共 BIZ_NAME 与 Master 标签定位部署，不含 model 标签。
+中已展开的逻辑 Worker 数。两者均使用公共 BIZ_NAME 与 Master 标签定位部署，不含 model 标签。
 两种数量含义不同，不能互相替代。
 
 Block Size 保留 `app.cache.block.size{role}`：同一角色的 Worker 共享相同配置，

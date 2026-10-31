@@ -14,7 +14,6 @@ import org.flexlb.dao.optimizer.OptimizerTraceQueryRequest;
 import org.flexlb.dao.optimizer.OptimizerTraceQueryResponse;
 import org.flexlb.dao.route.Endpoint;
 import org.flexlb.dao.route.OptimizerConfig;
-import org.flexlb.dao.route.ServiceRoute;
 import org.flexlb.discovery.ServiceDiscovery;
 import org.flexlb.engine.grpc.client.KvcmWorkerMetadataResolver;
 import org.flexlb.enums.FlexMetricType;
@@ -58,7 +57,7 @@ public class OptimizerClient {
 
         OptimizerRuntimeConfig runtimeConfig =
                 configService.loadBalanceConfig().getOptimizer();
-        OptimizerConfig optimizerConfig = resolveOptimizerConfig(modelMetaConfig);
+        OptimizerConfig optimizerConfig = modelMetaConfig.getServiceRoute().getOptimizer();
         this.enabled = runtimeConfig.isEnabled();
         if (!enabled) {
             this.addressResolver = null;
@@ -209,15 +208,6 @@ public class OptimizerClient {
                 addressResolver.shutdown();
             }
         }
-    }
-
-    private static OptimizerConfig resolveOptimizerConfig(ModelMetaConfig modelMetaConfig) {
-        for (ServiceRoute route : modelMetaConfig.getServiceRoutes()) {
-            if (route != null && route.getOptimizer() != null) {
-                return route.getOptimizer();
-            }
-        }
-        return null;
     }
 
     private static String stripTrailingSlash(String path) {

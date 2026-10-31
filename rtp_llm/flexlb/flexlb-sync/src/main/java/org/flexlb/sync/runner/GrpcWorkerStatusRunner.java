@@ -26,7 +26,6 @@ public class GrpcWorkerStatusRunner implements Runnable {
     private static final Runnable NO_STATUS_NOTIFIER = () -> { };
 
     private final String ipPort;
-    private final String modelName;
     private final String site;
     private final RoleType roleType;
     private final WorkerStatus workerStatus;
@@ -43,8 +42,7 @@ public class GrpcWorkerStatusRunner implements Runnable {
     private final CacheAwareService cacheAwareService;
     private final Executor callbackExecutor;
 
-    public GrpcWorkerStatusRunner(String modelName,
-                                  String ipPort,
+    public GrpcWorkerStatusRunner(String ipPort,
                                   int workerStatusPort,
                                   String site,
                                   RoleType roleType,
@@ -60,7 +58,6 @@ public class GrpcWorkerStatusRunner implements Runnable {
         this.ipPort = ipPort;
         this.ip = workerStatus.getIp();
         this.workerStatusPort = workerStatusPort;
-        this.modelName = modelName;
         this.workerStatus = workerStatus;
         this.pollLease = pollLease;
         workerStatus.requireStatusPollLease(pollLease);
@@ -74,8 +71,10 @@ public class GrpcWorkerStatusRunner implements Runnable {
         this.callbackExecutor = callbackExecutor;
     }
 
-    public GrpcWorkerStatusRunner(String modelName, String ipPort, String site,
-                                  RoleType roleType, String ignoredGroup,
+    public GrpcWorkerStatusRunner(String ipPort,
+                                  String site,
+                                  RoleType roleType,
+                                  String ignoredGroup,
                                   WorkerStatus workerStatus,
                                   WorkerStatus.PollLease pollLease,
                                   WorkerDirectory workerDirectory,
@@ -84,10 +83,9 @@ public class GrpcWorkerStatusRunner implements Runnable {
                                   long syncRequestTimeoutMs,
                                   CacheAwareService cacheAwareService,
                                   Executor callbackExecutor) {
-        this(modelName, ipPort, defaultWorkerStatusPort(workerStatus), site, roleType,
-                ignoredGroup, workerStatus, pollLease, workerDirectory,
-                engineHealthReporter, engineGrpcService, syncRequestTimeoutMs,
-                cacheAwareService, callbackExecutor);
+        this(ipPort, defaultWorkerStatusPort(workerStatus), site, roleType, ignoredGroup, workerStatus, pollLease,
+                workerDirectory, engineHealthReporter, engineGrpcService, syncRequestTimeoutMs, cacheAwareService,
+                callbackExecutor);
     }
 
     private static int defaultWorkerStatusPort(WorkerStatus workerStatus) {
@@ -480,12 +478,6 @@ public class GrpcWorkerStatusRunner implements Runnable {
     }
 
     private void log(String msg) {
-        logger.debug("[gRPC][{}][{}][{}][{}][{}μs]: {}",
-                id,
-                site,
-                ipPort,
-                modelName,
-                System.nanoTime() / 1000 - createTimeUs,
-                msg);
+        logger.debug("[gRPC][{}][{}][{}][{}μs]: {}", id, site, ipPort, System.nanoTime() / 1000 - createTimeUs, msg);
     }
 }

@@ -141,12 +141,9 @@ class ConfigServiceTest {
 
     @Test
     void keepsModelServiceConfigIndependentFromDynamicFlexlbSources() throws Exception {
-        ConfigService service = new EnvironmentVariables(Map.of(
-                "MODEL_SERVICE_CONFIG",
-                "{\"service_id\":\"environment-service\",\"role_endpoints\":[]}",
-                "FLEXLB_CONFIG",
-                "{\"schemaVersion\":3,\"observability\":{\"logging\":{\"level\":\"error\"}}}"))
-                .execute(() -> {
+        ConfigService service = new EnvironmentVariables(Map.of("MODEL_SERVICE_CONFIG",
+                "{\"discovery_file\":\"environment-workers.json\",\"role_endpoints\":[]}", "FLEXLB_CONFIG",
+                "{\"schemaVersion\":3,\"observability\":{\"logging\":{\"level\":\"error\"}}}")).execute(() -> {
                     EnvironmentConfigSource environmentSource =
                             new EnvironmentConfigSource();
                     environmentSource.initialize();
@@ -158,8 +155,7 @@ class ConfigServiceTest {
                 });
         configService = service;
 
-        assertThat(service.modelServiceConfig().getServiceId())
-                .isEqualTo("environment-service");
+        assertThat(service.modelServiceConfig().getDiscoveryFile()).isEqualTo("environment-workers.json");
         assertThat(service.loadBalanceConfig().getObservability()
                 .getLogging().getLevel()).isEqualTo(LogLevel.WARN);
     }

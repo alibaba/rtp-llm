@@ -129,13 +129,10 @@ class KvcmWorkerMetadataResolverTest {
         kvcm.setNamespace(namespace);
 
         ServiceRoute route = new ServiceRoute();
-        route.setServiceId("test-service");
         route.setKvcm(kvcm);
         route.setRoleEndpoints(List.of(group));
 
-        ModelMetaConfig modelMetaConfig = new ModelMetaConfig();
-        modelMetaConfig.putServiceRoute(route.getServiceId(), route);
-        return modelMetaConfig;
+        return new ModelMetaConfig(route);
     }
 
     private CacheMatchConfiguration configuration(String namespace) {

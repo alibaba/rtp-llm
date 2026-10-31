@@ -31,8 +31,6 @@ public class EngineSyncRunner implements Runnable {
 
     private static final Logger logger = LoggerFactory.getLogger("syncLogger");
 
-    private final String modelName;
-
     private final WorkerDirectory workerDirectory;
 
     private final WorkerAddressService workerAddressService;
@@ -61,8 +59,7 @@ public class EngineSyncRunner implements Runnable {
 
     private final long statusStaleAfterUs;
 
-    public EngineSyncRunner(String modelName,
-                            WorkerDirectory workerDirectory,
+    public EngineSyncRunner(WorkerDirectory workerDirectory,
                             WorkerAddressService workerAddressService,
                             ExecutorService statusCheckExecutor,
                             EngineHealthReporter engineHealthReporter,
@@ -75,15 +72,12 @@ public class EngineSyncRunner implements Runnable {
                             Long syncEngineStatusInterval,
                             boolean cacheFullSnapshotDebugMode,
                             long statusStaleAfterUs) {
-        this(modelName, workerDirectory, workerAddressService,
-                statusCheckExecutor, engineHealthReporter, engineGrpcService,
-                roleType, cacheAwareService, cacheIntervalService,
-                syncRequestTimeoutMs, syncCount, syncEngineStatusInterval,
-                false, cacheFullSnapshotDebugMode, statusStaleAfterUs);
+        this(workerDirectory, workerAddressService, statusCheckExecutor, engineHealthReporter, engineGrpcService,
+                roleType, cacheAwareService, cacheIntervalService, syncRequestTimeoutMs, syncCount,
+                syncEngineStatusInterval, false, cacheFullSnapshotDebugMode, statusStaleAfterUs);
     }
 
-    public EngineSyncRunner(String modelName,
-                            WorkerDirectory workerDirectory,
+    public EngineSyncRunner(WorkerDirectory workerDirectory,
                             WorkerAddressService workerAddressService,
                             ExecutorService statusCheckExecutor,
                             EngineHealthReporter engineHealthReporter,
@@ -98,7 +92,6 @@ public class EngineSyncRunner implements Runnable {
                             boolean cacheFullSnapshotDebugMode,
                             long statusStaleAfterUs) {
 
-        this.modelName = modelName;
         this.workerAddressService = workerAddressService;
         this.workerDirectory = workerDirectory;
         this.statusCheckExecutor = statusCheckExecutor;
@@ -121,22 +114,22 @@ public class EngineSyncRunner implements Runnable {
 
     @Override
     public void run() {
-        logger.debug("EngineSyncRunner start for model: {}, role: {}", modelName, roleType.toString());
+        logger.debug("EngineSyncRunner start for role: {}", roleType);
         try {
             long startTimeInUs = System.nanoTime() / 1000;
-            List<WorkerHost> latestEngineWorkerList =
-                    workerAddressService.getEngineWorkerList(
-                            modelName, roleType);
-            logger.debug("workerAddressService getEngineWorkerList, model: {}, role: {}, size: {}", modelName, roleType, latestEngineWorkerList.size());
+            List<WorkerHost> latestEngineWorkerList = workerAddressService.getEngineWorkerList(roleType);
+            logger.debug("workerAddressService getEngineWorkerList, role: {}, size: {}", roleType,
+                    latestEngineWorkerList.size());
             if (CollectionUtils.isEmpty(latestEngineWorkerList)) {
-                logger.debug("get engine worker list is empty, cost={}μs, model={}", System.nanoTime() / 1000 - startTimeInUs, modelName);
+                logger.debug("get engine worker list is empty, cost={}μs, role={}",
+                        System.nanoTime() / 1000 - startTimeInUs, roleType);
             }
             Map<String, WorkerStatus> cachedWorkerStatuses =
                     workerDirectory.statusSnapshot(roleType);
             // Log if latest worker count differs from cached worker count
             if (cachedWorkerStatuses.size() != latestEngineWorkerList.size()) {
-                logger.info("[update] engine ip changes, model={}, role={}, before={}, after={}",
-                        modelName, roleType, cachedWorkerStatuses.size(), latestEngineWorkerList.size());
+                logger.info("[update] engine ip changes, role={}, before={}, after={}", roleType,
+                        cachedWorkerStatuses.size(), latestEngineWorkerList.size());
             }
 
             // Remove if not in latest engine list
@@ -188,13 +181,10 @@ public class EngineSyncRunner implements Runnable {
                     boolean handedOff = false;
                     try {
                         logger.debug("Submitting GrpcWorkerStatusRunner for worker: {}, site: {}", workerIpPort, site);
-                        GrpcWorkerStatusRunner grpcWorkerStatusRunner
-                                = new GrpcWorkerStatusRunner(modelName, workerIpPort,
-                                host.getWorkerStatusPort(), site, roleType, host.getGroup(),
-                                workerStatus, statusPollLease, workerDirectory,
-                                engineHealthReporter, engineGrpcService,
-                                syncRequestTimeoutMs,
-                                cacheAwareService, statusCheckExecutor);
+                        GrpcWorkerStatusRunner grpcWorkerStatusRunner = new GrpcWorkerStatusRunner(workerIpPort,
+                                host.getWorkerStatusPort(), site, roleType, host.getGroup(), workerStatus,
+                                statusPollLease, workerDirectory, engineHealthReporter, engineGrpcService,
+                                syncRequestTimeoutMs, cacheAwareService, statusCheckExecutor);
                         statusCheckExecutor.submit(grpcWorkerStatusRunner);
                         handedOff = true;
                     } catch (RejectedExecutionException e) {
@@ -214,13 +204,10 @@ public class EngineSyncRunner implements Runnable {
                     boolean handedOff = false;
                     try {
                         logger.debug("Submitting GrpcCacheStatusCheckRunner for worker: {}, site: {}", workerIpPort, site);
-                        GrpcCacheStatusCheckRunner grpcCacheStatusCheckRunner
-                                = new GrpcCacheStatusCheckRunner(modelName, workerIpPort,
-                                host.getWorkerStatusPort(), site, roleType,
-                                workerStatus, cachePollLease, workerDirectory,
-                                engineHealthReporter, engineGrpcService,
-                                cacheAwareService, cacheIntervalService,
-                                syncRequestTimeoutMs, syncCount, syncEngineStatusInterval,
+                        GrpcCacheStatusCheckRunner grpcCacheStatusCheckRunner = new GrpcCacheStatusCheckRunner(
+                                workerIpPort, host.getWorkerStatusPort(), site, roleType, workerStatus, cachePollLease,
+                                workerDirectory, engineHealthReporter, engineGrpcService, cacheAwareService,
+                                cacheIntervalService, syncRequestTimeoutMs, syncCount, syncEngineStatusInterval,
                                 cacheFullSnapshotDebugMode, statusCheckExecutor);
                         statusCheckExecutor.submit(grpcCacheStatusCheckRunner);
                         handedOff = true;
@@ -233,14 +220,14 @@ public class EngineSyncRunner implements Runnable {
                     }
                 }
             }
-            logger.debug("Finished submitting status check tasks for model: {}, role: {}, worker count: {}", modelName,
-                    roleType, latestEngineWorkerList.size());
+            logger.debug("Finished submitting status check tasks for role: {}, worker count: {}", roleType,
+                    latestEngineWorkerList.size());
 
         } catch (Exception e) {
-            logger.error("sync engine workers status exception, modelName:{}, error:{}", modelName, e.getMessage(), e);
+            logger.error("sync engine workers status exception, role:{}, error:{}", roleType, e.getMessage(), e);
             engineHealthReporter.reportStatusCheckerFail(BalanceStatusEnum.UNKNOWN_ERROR, null);
         } finally {
-            logger.debug("Entering finally block for model: {}", modelName);
+            logger.debug("Collecting worker status metrics for role: {}", roleType);
             Map<String, WorkerStatus> currentStatuses =
                     workerDirectory.statusSnapshot(roleType);
             logger.debug("Worker status map size: {}", currentStatuses.size());
@@ -308,23 +295,22 @@ public class EngineSyncRunner implements Runnable {
                             this.roleType.toString(),
                             runningLoadVariance);
                 }
-                logger.debug("EngineSyncRunner finished for model: {}, role: {}", modelName, roleType);
+                logger.debug("EngineSyncRunner finished for role: {}", roleType);
             } else {
-                logger.debug("Less than 2 workers, skipping variance calculation for model: {}", modelName);
+                logger.debug("Less than 2 workers, skipping variance calculation for role: {}", roleType);
             }
         }
     }
 
-    private WorkerStatus getOrCreateWorkerStatus(
-            String workerIpPort,
-            String site,
-            String group,
-            String deploymentName,
-            String ip,
-            int port,
-            int grpcPort,
-            int engineIndex,
-            int multiEngineNum) {
+    private WorkerStatus getOrCreateWorkerStatus(String workerIpPort,
+                                                 String site,
+                                                 String group,
+                                                 String deploymentName,
+                                                 String ip,
+                                                 int port,
+                                                 int grpcPort,
+                                                 int engineIndex,
+                                                 int multiEngineNum) {
         while (true) {
             WorkerStatus workerStatus = workerDirectory.currentOrDiscover(
                     roleType, workerIpPort,
@@ -375,13 +361,8 @@ public class EngineSyncRunner implements Runnable {
             workerDirectory.completeRetirement(
                     generationRole, workerIpPort, workerStatus,
                     endpointToRetire, cacheAwareService, logger);
-            logger.info(
-                    "[replace] retiring worker topology generation, model={}, role={}, ipPort={}, generation={}, newGroup={}",
-                    modelName,
-                    roleType,
-                    workerIpPort,
-                    workerStatus.getGenerationId(),
-                    group);
+            logger.info("[replace] retiring worker topology generation, role={}, ipPort={}, generation={}, newGroup={}",
+                    roleType, workerIpPort, workerStatus.getGenerationId(), group);
             // A later discovery pass can publish the replacement only after
             // real endpoint retirement removes this RETIRING holder.
             return workerStatus;
@@ -413,9 +394,7 @@ public class EngineSyncRunner implements Runnable {
         return discovered;
     }
 
-    private void retireMissingGenerationIfExpired(
-            String workerIpPort,
-            WorkerStatus workerStatus) {
+    private void retireMissingGenerationIfExpired(String workerIpPort, WorkerStatus workerStatus) {
         EndpointRegistry.DetachedGeneration endpointToRetire = null;
         RoleType generationRole = null;
         boolean retirementStarted = false;
@@ -447,11 +426,7 @@ public class EngineSyncRunner implements Runnable {
             workerDirectory.completeRetirement(
                     generationRole, workerIpPort, workerStatus,
                     endpointToRetire, cacheAwareService, logger);
-            logger.info(
-                    "[remove] retiring missing worker, model={}, role={}, ipPort={}, generation={}",
-                    modelName,
-                    roleType,
-                    workerIpPort,
+            logger.info("[remove] retiring missing worker, role={}, ipPort={}, generation={}", roleType, workerIpPort,
                     workerStatus.getGenerationId());
         }
     }

@@ -16,9 +16,6 @@ import java.util.Set;
 @Data
 public class ServiceRoute {
 
-    @JsonProperty("service_id")
-    private String serviceId;
-
     private List<GroupRoleEndPoint> roleEndpoints = new ArrayList<>();
 
     @JsonProperty("kvcm")

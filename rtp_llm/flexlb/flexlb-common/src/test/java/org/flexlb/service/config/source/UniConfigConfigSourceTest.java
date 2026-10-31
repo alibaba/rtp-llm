@@ -149,11 +149,10 @@ class UniConfigConfigSourceTest {
             throws Exception {
         com.alibaba.nacos.api.config.ConfigService nacosClient =
                 mock(com.alibaba.nacos.api.config.ConfigService.class);
-        spectrumEnvironment()
-                .set("FLEXLB_UNICONF_ENABLE", " TrUe ")
+        spectrumEnvironment().set("FLEXLB_UNICONF_ENABLE", " TrUe ")
                 .set(NACOS_SERVER_ADDR, "unreachable-nacos:8848")
                 .set("FLEXLB_CONFIG", environmentConfig)
-                .set("MODEL_SERVICE_CONFIG", "{\"service_id\":\"test-model\",\"role_endpoints\":[]}")
+                .set("MODEL_SERVICE_CONFIG", "{\"discovery_file\":\"workers.json\",\"role_endpoints\":[]}")
                 .execute(() -> {
                     DeploymentIdentity identity = new DeploymentIdentity();
                     EnvironmentConfigSource environmentSource = new EnvironmentConfigSource();
@@ -169,7 +168,7 @@ class UniConfigConfigSourceTest {
         assertThat(configService.loadBalanceConfig().getFallbackBatchTokenCapacity())
                 .isEqualTo(1048585L);
         assertThat(configService.loadBalanceConfig().isEnableFallback()).isFalse();
-        assertThat(configService.modelServiceConfig().getServiceId()).isEqualTo("test-model");
+        assertThat(configService.modelServiceConfig().getDiscoveryFile()).isEqualTo("workers.json");
         verifyNoInteractions(nacosClient);
     }
 

@@ -15,6 +15,7 @@ import org.flexlb.config.ConfigService;
 import org.flexlb.config.ModelMetaConfig;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
+import org.flexlb.dao.route.ServiceRoute;
 import org.flexlb.enums.TaskPhase;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -52,7 +53,8 @@ class CacheHitFeedbackTrackerLifecycleTest {
     private final ListAppender<ILoggingEvent> pv = new ListAppender<>();
     private final WorkerStatus worker = workerStatus("127.0.0.1", 8080, RoleType.PREFILL);
     private CacheHitFeedbackTracker tracker = new CacheHitFeedbackTracker(
-            new LocalStandbyComparisonService(localSync(new ModelMetaConfig()), null), new ConfigService("""
+            new LocalStandbyComparisonService(localSync(new ModelMetaConfig(new ServiceRoute())), null),
+            new ConfigService("""
                     {"schemaVersion":3,"requestLifecycle":{"request":{"timeoutMs":100000}}}
                     """));
 
@@ -171,7 +173,8 @@ class CacheHitFeedbackTrackerLifecycleTest {
         try (var tickers = mockStatic(Ticker.class)) {
             tickers.when(Ticker::systemTicker).thenReturn((Ticker) timeNs::get);
             return new CacheHitFeedbackTracker(
-                    new LocalStandbyComparisonService(localSync(new ModelMetaConfig()), null), new ConfigService(
+                    new LocalStandbyComparisonService(localSync(new ModelMetaConfig(new ServiceRoute())), null),
+                    new ConfigService(
                             """
                                     {"schemaVersion":3,"requestLifecycle":{"request":{"timeoutMs":100000,"statusUpdateTimeoutMs":7}},
                                     "observability":{"cacheHit":{"feedbackTimeoutMs":1000}}}

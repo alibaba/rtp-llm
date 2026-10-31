@@ -37,7 +37,6 @@ public class ReuseSpringContextIntegrationTest {
         environmentVariables.set("MODEL_SERVICE_CONFIG",
                 """
                         {
-                            "service_id": "aigc.text-generation.generation.engine_service",\s
                             "role_endpoints": [
                                 {
                                     "group": "nm     125_L20X_2TP",\s

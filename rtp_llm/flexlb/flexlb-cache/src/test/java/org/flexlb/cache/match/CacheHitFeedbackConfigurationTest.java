@@ -10,6 +10,7 @@ import org.flexlb.config.ConfigService;
 import org.flexlb.config.ModelMetaConfig;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
+import org.flexlb.dao.route.ServiceRoute;
 import org.flexlb.enums.TaskPhase;
 import org.flexlb.service.config.ConfigSource;
 import org.junit.jupiter.api.Test;
@@ -48,7 +49,8 @@ class CacheHitFeedbackConfigurationTest {
             tickers.when(Ticker::systemTicker).thenReturn((Ticker) timeNs::get);
             ArgumentCaptor<Consumer<String>> updates = ArgumentCaptor.captor();
             verify(nacos).setUpdateListener(updates.capture());
-            var comparison = new LocalStandbyComparisonService(localSync(new ModelMetaConfig()), null);
+            var comparison =
+                    new LocalStandbyComparisonService(localSync(new ModelMetaConfig(new ServiceRoute())), null);
             context.getBeanFactory().registerSingleton("configService", config);
             context.getBeanFactory().registerSingleton("comparisonService", comparison);
             context.getBeanFactory().registerSingleton("metricsReporter", mock(CacheMetricsReporter.class));

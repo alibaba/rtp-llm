@@ -1,20 +1,13 @@
 package org.flexlb.config;
 
 import org.apache.commons.lang3.tuple.Pair;
-import org.flexlb.constant.CommonConstants;
 import org.flexlb.dao.route.Endpoint;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.dao.route.ServiceRoute;
-import org.flexlb.service.config.parser.ModelServiceConfigParser;
-import org.flexlb.util.IdUtils;
 
-import java.util.Collection;
-import java.util.Collections;
 import java.util.EnumSet;
 import java.util.List;
-import java.util.Map;
 import java.util.Set;
-import java.util.concurrent.ConcurrentHashMap;
 
 public class ModelMetaConfig {
 
@@ -25,56 +18,19 @@ public class ModelMetaConfig {
             RoleType.VIT,
             RoleType.ENCODER);
 
-    private final ConcurrentHashMap<String, ServiceRoute> modelServiceRoute =
-            new ConcurrentHashMap<>();
+    private final ServiceRoute serviceRoute;
+    private final List<RoleType> requiredRoles;
 
-    private volatile ServiceRoute primaryRoute;
-    private volatile String modelName = "";
-    private volatile List<RoleType> requiredRoles = List.of();
-
-    public ModelMetaConfig() {
-    }
-
-    public ModelMetaConfig(String document) {
-        ServiceRoute route = ModelServiceConfigParser.parse(document);
-        putServiceRoute(route.getServiceId(), route);
-    }
-
-    public void putServiceRoute(String serviceId, ServiceRoute serviceRoute) {
-        if (serviceId == null || serviceId.isBlank()) {
-            throw new IllegalArgumentException("serviceId must not be blank");
-        }
-        if (serviceRoute == null) {
-            throw new IllegalArgumentException("serviceRoute must not be null");
-        }
-        modelServiceRoute.put(serviceId, serviceRoute);
-        if (primaryRoute == null || serviceId.equals(primaryRoute.getServiceId())) {
-            setPrimaryRoute(serviceRoute);
-        }
-    }
-
-    public ServiceRoute getServiceRoute(String serviceId) {
-        return modelServiceRoute.get(serviceId);
-    }
-
-    public ServiceRoute getServiceRoute() {
-        return primaryRoute;
-    }
-
-    public Collection<ServiceRoute> getServiceRoutes() {
-        return List.copyOf(modelServiceRoute.values());
-    }
-
-    private void setPrimaryRoute(ServiceRoute serviceRoute) {
-        this.primaryRoute = serviceRoute;
-        this.modelName = modelNameFromServiceId(serviceRoute.getServiceId());
+    public ModelMetaConfig(ServiceRoute serviceRoute) {
+        this.serviceRoute = serviceRoute;
         this.requiredRoles = resolveRequiredRoles(serviceRoute);
     }
 
+    public ServiceRoute getServiceRoute() {
+        return serviceRoute;
+    }
+
     private static List<RoleType> resolveRequiredRoles(ServiceRoute serviceRoute) {
-        if (serviceRoute == null) {
-            return List.of();
-        }
         List<RoleType> parsedRoles = serviceRoute.getAllRoleTypes();
         Set<RoleType> configured = parsedRoles.isEmpty()
                 ? EnumSet.noneOf(RoleType.class)
@@ -84,48 +40,20 @@ public class ModelMetaConfig {
                 .toList();
     }
 
-    private static String modelNameFromServiceId(String serviceId) {
-        if (serviceId == null) {
-            return "";
-        }
-        String servicePrefix = CommonConstants.FUNCTION + ".";
-        if (serviceId.startsWith(servicePrefix)
-                && serviceId.length() > servicePrefix.length()) {
-            return IdUtils.getModelNameByServiceId(serviceId);
-        }
-        return serviceId;
-    }
-
-    /** Immutable request topology; live endpoint occupancy never changes it. */
+    /**
+     * Immutable request topology; live endpoint occupancy never changes it.
+     */
     public List<RoleType> requiredRoles() {
         return requiredRoles;
     }
 
-    public String modelName() {
-        return modelName;
-    }
-
-    /** Return a fresh structural list for the single configured service. */
-    public List<Pair<String, Endpoint>> endpointsWithGroup(
-            String requestedModelName,
-            RoleType role) {
-        if (requestedModelName == null || role == null) {
-            return Collections.emptyList();
+    /**
+     * Return a fresh structural list for the configured role across groups.
+     */
+    public List<Pair<String, Endpoint>> endpointsWithGroup(RoleType role) {
+        if (role == null || !serviceRoute.getAllRoleTypes().contains(role)) {
+            return List.of();
         }
-        for (Map.Entry<String, ServiceRoute> entry : modelServiceRoute.entrySet()) {
-            ServiceRoute route = entry.getValue();
-            if (route == null) {
-                continue;
-            }
-            String routeServiceId = route.getServiceId();
-            String routeModelName = modelNameFromServiceId(routeServiceId);
-            if ((requestedModelName.equals(routeModelName)
-                    || requestedModelName.equals(routeServiceId)
-                    || requestedModelName.equals(entry.getKey()))
-                    && route.getAllRoleTypes().contains(role)) {
-                return route.getAllEndpointsWithGroup(role);
-            }
-        }
-        return Collections.emptyList();
+        return serviceRoute.getAllEndpointsWithGroup(role);
     }
 }

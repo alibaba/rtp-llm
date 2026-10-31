@@ -131,6 +131,9 @@
       "oldName": "app.engine.health.check.engine.worker.number.service.discovery.result",
       "newName": "app.engine.health.check.engine.worker.number.service.discovery.result",
       "type": "GAUGE",
+      "removeLabels": [
+        "model"
+      ],
       "note": "服务发现成功返回的原始 Host 数，空返回为 0，不是缓存回退或展开后的逻辑 Worker 数。"
     }
   ],
@@ -156,9 +159,9 @@
   "newPanels": [
     {
       "title": "服务发现原始 Host 数",
-      "description": "各 model、role 的全部 endpoint 成功返回的原始数量，成功空返回为 0；失败轮次不更新总数。",
-      "expr": "max by (model,role) (last_over_time({__name__=\"whale-lb.app.engine.health.check.engine.worker.number.service.discovery.result\",BIZ_NAME=\"${biz_name}\",HIPPO_ROLE=~\"${master_role:raw}\",host=~\"^(${master_host:regex})$\"}[1m]))",
-      "legend": "{{model}} · {{role}}"
+      "description": "当前部署各 role 的全部 endpoint 成功返回的原始数量，成功空返回为 0；失败轮次不更新总数。",
+      "expr": "max by (role) (last_over_time({__name__=\"whale-lb.app.engine.health.check.engine.worker.number.service.discovery.result\",BIZ_NAME=\"${biz_name}\",HIPPO_ROLE=~\"${master_role:raw}\",host=~\"^(${master_host:regex})$\"}[1m]))",
+      "legend": "{{role}}"
     },
     {
       "title": "请求生命周期异常（最近 5 分钟）",

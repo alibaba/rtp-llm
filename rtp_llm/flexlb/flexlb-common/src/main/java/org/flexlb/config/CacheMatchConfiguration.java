@@ -7,18 +7,15 @@ import org.flexlb.dao.route.ServiceRoute;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
-import java.util.List;
-
 /**
- * Centralized cache-matching configuration derived from the parsed model service routes.
+ * Centralized cache-matching configuration derived from the model service route.
  */
 @Getter
 @Slf4j
 @Component
 public class CacheMatchConfiguration {
 
-    private final List<ServiceRoute> serviceRoutes;
-    private final ServiceRoute kvcmServiceRoute;
+    private final ServiceRoute serviceRoute;
     private final KvcmConfig kvcmConfig;
     private final LocalStandbyConfig localStandbyConfig;
     private volatile KvcmCacheMatchingConfig kvcmRuntimeConfig;
@@ -38,9 +35,8 @@ public class CacheMatchConfiguration {
     }
 
     public CacheMatchConfiguration(ModelMetaConfig modelMetaConfig, FlexlbConfig flexlbConfig) {
-        this.serviceRoutes = List.copyOf(modelMetaConfig.getServiceRoutes());
-        this.kvcmServiceRoute = resolveKvcmServiceRoute(serviceRoutes);
-        this.kvcmConfig = kvcmServiceRoute == null ? null : kvcmServiceRoute.getKvcm();
+        this.serviceRoute = modelMetaConfig.getServiceRoute();
+        this.kvcmConfig = serviceRoute.getKvcm();
         this.kvcmEnabled = flexlbConfig.isKvcmAndStandbyEnabled();
         if (kvcmEnabled && kvcmConfig == null) {
             throw new IllegalStateException(
@@ -86,37 +82,22 @@ public class CacheMatchConfiguration {
         return kvcmEnabled ? kvcmRuntimeConfig.getType() : CacheMatchMode.LOCAL_SYNC;
     }
 
-    private ServiceRoute resolveKvcmServiceRoute(List<ServiceRoute> routes) {
-        for (ServiceRoute route : routes) {
-            if (route != null && route.getKvcm() != null) {
-                return route;
-            }
-        }
-        return null;
-    }
-
     private void logInitialization() {
         log.info(
                 "Cache match configuration initialized: configuredMode={}, kvcmEnabled={}, "
                         + "localSyncEnabled={}, localStandbyEnabled={}, autoSwitchEnabled={}",
                 getConfiguredMode(), kvcmEnabled, localSyncEnabled, localStandbyEnabled, autoSwitchEnabled);
         if (kvcmEnabled) {
-            log.info("KVCM cache matching configuration: serviceId={}, address={}, namespace={}, "
+            log.info(
+                    "KVCM cache matching configuration: address={}, namespace={}, "
                             + "requestTimeoutMs={}, leaderRefreshIntervalMs={}, "
                             + "heartbeatFailureThreshold={}, queryFailureThreshold={}, maxQueryRetryCount={}, "
                             + "recoverySuccessThreshold={}, topKHostCount={}, backendTypes={}, medium={}",
-                    kvcmServiceRoute.getServiceId(),
-                    kvcmConfig.getAddress(),
-                    kvcmConfig.getNamespace(),
-                    kvcmRuntimeConfig.getRequestTimeoutMs(),
-                    kvcmRuntimeConfig.getLeaderRefreshIntervalMs(),
-                    kvcmRuntimeConfig.getHeartbeatFailureThreshold(),
-                    kvcmRuntimeConfig.getQueryFailureThreshold(),
-                    kvcmRuntimeConfig.getMaxQueryRetryCount(),
-                    kvcmRuntimeConfig.getRecoverySuccessThreshold(),
-                    kvcmRuntimeConfig.getTopKHostCount(),
-                    kvcmRuntimeConfig.getBackendTypes(),
-                    kvcmRuntimeConfig.getMedium());
+                    kvcmConfig.getAddress(), kvcmConfig.getNamespace(), kvcmRuntimeConfig.getRequestTimeoutMs(),
+                    kvcmRuntimeConfig.getLeaderRefreshIntervalMs(), kvcmRuntimeConfig.getHeartbeatFailureThreshold(),
+                    kvcmRuntimeConfig.getQueryFailureThreshold(), kvcmRuntimeConfig.getMaxQueryRetryCount(),
+                    kvcmRuntimeConfig.getRecoverySuccessThreshold(), kvcmRuntimeConfig.getTopKHostCount(),
+                    kvcmRuntimeConfig.getBackendTypes(), kvcmRuntimeConfig.getMedium());
         }
         if (localStandbyEnabled) {
             log.info("Local standby cache configuration: autoSwitch={}, "

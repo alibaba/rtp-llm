@@ -183,10 +183,7 @@ class LocalStandbyCacheMatchProviderTest {
 
     private ModelMetaConfig modelMetaConfig() {
         ServiceRoute route = new ServiceRoute();
-        route.setServiceId("test-service");
         route.setKvcm(new KvcmConfig());
-        ModelMetaConfig config = new ModelMetaConfig();
-        config.putServiceRoute(route.getServiceId(), route);
-        return config;
+        return new ModelMetaConfig(route);
     }
 }

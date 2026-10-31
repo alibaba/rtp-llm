@@ -1,7 +1,5 @@
 package org.flexlb.util;
 
-import org.flexlb.constant.CommonConstants;
-
 import java.util.concurrent.ThreadLocalRandom;
 
 public class IdUtils {
@@ -19,10 +17,6 @@ public class IdUtils {
 
         // Manual formatting to avoid String.format overhead
         return formatUuid(mostSigBits, leastSigBits);
-    }
-
-    public static String getModelNameByServiceId(String physicalServiceId) {
-        return physicalServiceId.substring(CommonConstants.FUNCTION.length() + 1);
     }
 
     private static String formatUuid(long mostSigBits, long leastSigBits) {

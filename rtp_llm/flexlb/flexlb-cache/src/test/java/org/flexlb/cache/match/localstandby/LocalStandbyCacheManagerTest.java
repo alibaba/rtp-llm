@@ -244,22 +244,17 @@ class LocalStandbyCacheManagerTest {
                 LocalStandbyConfig.DEFAULT_CAPACITY_MULTIPLIER);
     }
 
-    private CacheMatchConfiguration configuration(
-            long expirationMs,
-            long maximumEntries,
-            double capacityMultiplier) {
+    private CacheMatchConfiguration configuration(long expirationMs, long maximumEntries, double capacityMultiplier) {
         KvcmConfig kvcmTopology = new KvcmConfig();
 
         ServiceRoute route = new ServiceRoute();
-        route.setServiceId("test-service");
         route.setKvcm(kvcmTopology);
         GroupRoleEndPoint roleEndpoint = new GroupRoleEndPoint();
         roleEndpoint.setGroup("default");
         roleEndpoint.setPrefillEndpoint(new Endpoint());
         route.setRoleEndpoints(List.of(roleEndpoint));
 
-        ModelMetaConfig config = new ModelMetaConfig();
-        config.putServiceRoute(route.getServiceId(), route);
+        ModelMetaConfig config = new ModelMetaConfig(route);
         return kvcm(config, runtime -> {
             LocalStandbyConfig standby = runtime.getLocalStandby();
             standby.setTtlMs(expirationMs);

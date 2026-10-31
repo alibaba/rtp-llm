@@ -38,7 +38,7 @@ public class LocalStandbyCacheManager {
     private final boolean enabled;
     private final WorkerStatusProvider workerStatusProvider;
     private final CacheMetricsReporter cacheMetricsReporter;
-    private final Collection<ServiceRoute> serviceRoutes;
+    private final ServiceRoute serviceRoute;
     private final long configuredMaximumEntries;
     private final double capacityMultiplier;
     private final LocalStandbyCacheIndex cacheIndex;
@@ -51,7 +51,7 @@ public class LocalStandbyCacheManager {
         this.enabled = configuration.isLocalStandbyEnabled();
         this.workerStatusProvider = workerStatusProvider;
         this.cacheMetricsReporter = cacheMetricsReporter;
-        this.serviceRoutes = configuration.getServiceRoutes();
+        this.serviceRoute = configuration.getServiceRoute();
         this.configuredMaximumEntries = enabled
                 ? config.getMaximumEntries()
                 : LocalStandbyConfig.DEFAULT_MAXIMUM_ENTRIES;
@@ -235,15 +235,13 @@ public class LocalStandbyCacheManager {
 
     private long estimateHbmBlockCapacity() {
         long totalCapacity = 0;
-        for (ServiceRoute serviceRoute : serviceRoutes) {
-            for (RoleType roleType : serviceRoute.getAllRoleTypes()) {
-                totalCapacity += addRoleCapacity(serviceRoute, roleType);
-            }
+        for (RoleType roleType : serviceRoute.getAllRoleTypes()) {
+            totalCapacity += addRoleCapacity(roleType);
         }
         return totalCapacity;
     }
 
-    private long addRoleCapacity(ServiceRoute serviceRoute, RoleType roleType) {
+    private long addRoleCapacity(RoleType roleType) {
         long roleCapacity = 0;
         for (var endpointWithGroup : serviceRoute.getAllEndpointsWithGroup(roleType)) {
             if (endpointWithGroup.getRight() == null) {

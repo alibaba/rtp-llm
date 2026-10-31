@@ -186,7 +186,6 @@ class ShellFlexlbConfigTest(unittest.TestCase):
         with TemporaryDirectory() as tmp:
             endpoint_file = Path(tmp) / "endpoints.json"
             model = {
-                "service_id": "aigc.text-generation.generation.engine_service",
                 "hosts": {"mock.prefill.hosts.address": ["127.0.0.1:8000"]},
                 "role_endpoints": [],
             }

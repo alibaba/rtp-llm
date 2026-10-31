@@ -30,17 +30,11 @@ public class ModelServiceConfiguration {
 
         validateServiceRoute(serviceRoute, serviceDiscovery);
 
-        ModelMetaConfig modelMetaConfig = new ModelMetaConfig();
-        modelMetaConfig.putServiceRoute(serviceRoute.getServiceId(), serviceRoute);
-        log.info("Loaded model service route: serviceId={}, endpoints={}",
-                serviceRoute.getServiceId(), serviceRoute.getAllEndpoints().size());
-        return modelMetaConfig;
+        log.info("Loaded model service route: endpoints={}", serviceRoute.getAllEndpoints().size());
+        return new ModelMetaConfig(serviceRoute);
     }
 
     private void validateServiceRoute(ServiceRoute serviceRoute, RoutingServiceDiscovery serviceDiscovery) {
-        if (StringUtils.isBlank(serviceRoute.getServiceId())) {
-            throw new IllegalArgumentException("MODEL_SERVICE_CONFIG service_id must not be blank");
-        }
         if (CollectionUtils.isEmpty(serviceRoute.getRoleEndpoints())) {
             throw new IllegalArgumentException("MODEL_SERVICE_CONFIG role_endpoints must not be empty");
         }

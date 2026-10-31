@@ -11,6 +11,7 @@ import org.flexlb.config.ModelMetaConfig;
 import org.flexlb.config.SchedulerConfig;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
+import org.flexlb.dao.route.ServiceRoute;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.junit.jupiter.api.Test;
@@ -178,7 +179,8 @@ class RequestOrchestratorsTest {
         RequestRegistry requests = mock(RequestRegistry.class);
         BatchSchedulerReporter reporter = mock(BatchSchedulerReporter.class);
         SchedulerRuntime runtime = new SchedulerRuntime(requests, mock(EndpointRegistry.class), reporter,
-                mock(RequestSchedulerReporter.class), configs, new QueueCapacity(), new ModelMetaConfig());
+                mock(RequestSchedulerReporter.class), configs, new QueueCapacity(),
+                new ModelMetaConfig(new ServiceRoute()));
 
         runtime.report();
         verify(reporter).reportGlobalQueueLimit(1000);
@@ -198,9 +200,8 @@ class RequestOrchestratorsTest {
                 mock(RequestSchedulerReporter.class);
         when(lifecycle.isShuttingDown()).thenReturn(true);
 
-        new SchedulerRuntime(
-                lifecycle, registry, reporter, admissionReporter,
-                mock(ConfigService.class), new QueueCapacity(), new ModelMetaConfig()).report();
+        new SchedulerRuntime(lifecycle, registry, reporter, admissionReporter, mock(ConfigService.class),
+                new QueueCapacity(), new ModelMetaConfig(new ServiceRoute())).report();
 
         verify(lifecycle, never()).trackedRequestStats();
         verify(registry, never()).snapshotPrefillEndpoints();
@@ -229,9 +230,8 @@ class RequestOrchestratorsTest {
         doThrow(new RuntimeException("metrics unavailable"))
                 .when(failingPrefill).reportBatchMetrics(reporter);
 
-        new SchedulerRuntime(
-                lifecycle, registry, reporter, admissionReporter,
-                mock(ConfigService.class), new QueueCapacity(), new ModelMetaConfig()).report();
+        new SchedulerRuntime(lifecycle, registry, reporter, admissionReporter, mock(ConfigService.class),
+                new QueueCapacity(), new ModelMetaConfig(new ServiceRoute())).report();
 
         verify(lifecycle).trackedRequestStats();
         verify(reporter).reportSchedulerInflightMaxAgeMs(300L);
@@ -256,7 +256,7 @@ class RequestOrchestratorsTest {
         when(lifecycle.globalQueueStats()).thenReturn(new RequestRegistry.GlobalQueueStats(12, 256, 75L));
 
         new SchedulerRuntime(lifecycle, registry, reporter, mock(RequestSchedulerReporter.class),
-                mock(ConfigService.class), new QueueCapacity(), new ModelMetaConfig()).report();
+                mock(ConfigService.class), new QueueCapacity(), new ModelMetaConfig(new ServiceRoute())).report();
 
         verify(reporter).reportGlobalQueue(12, 256);
         verify(reporter).reportGlobalQueueOldestWaitMs(75L);
@@ -327,18 +327,14 @@ class RequestOrchestratorsTest {
         when(lifecycle.globalQueueStats()).thenReturn(null);
 
         new SchedulerRuntime(lifecycle, registry, reporter, mock(RequestSchedulerReporter.class),
-                mock(ConfigService.class), new QueueCapacity(), new ModelMetaConfig()).report();
+                mock(ConfigService.class), new QueueCapacity(), new ModelMetaConfig(new ServiceRoute())).report();
 
         verify(reporter, never()).reportGlobalQueue(anyInt(), anyInt());
     }
 
     private static SchedulerRuntime runtime(RequestRegistry requests, EndpointRegistry endpoints) {
-        return new SchedulerRuntime(
-                requests,
-                endpoints,
-                mock(BatchSchedulerReporter.class),
-                mock(RequestSchedulerReporter.class),
-                mock(ConfigService.class),
-                new QueueCapacity(), new ModelMetaConfig());
+        return new SchedulerRuntime(requests, endpoints, mock(BatchSchedulerReporter.class),
+                mock(RequestSchedulerReporter.class), mock(ConfigService.class), new QueueCapacity(),
+                new ModelMetaConfig(new ServiceRoute()));
     }
 }

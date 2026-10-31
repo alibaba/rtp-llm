@@ -53,11 +53,9 @@ class GrpcCacheStatusCheckRunnerTest {
                 anyString(), anyInt(), eq(status), anyLong(), anyLong(), eq(RoleType.DECODE)))
                 .thenReturn(CompletableFuture.completedFuture(response));
 
-        new GrpcCacheStatusCheckRunner(
-                "test-model", status.getLogicalIpPort(), "test-site", RoleType.DECODE,
-                status, status.tryBeginCachePoll(), directory(status),
-                engineHealthReporter, engineGrpcService, localKvCacheAwareManager, cacheIntervalService,
-                20, new LongAdder(), 50L, true, Runnable::run).run();
+        new GrpcCacheStatusCheckRunner(status.getLogicalIpPort(), "test-site", RoleType.DECODE, status,
+                status.tryBeginCachePoll(), directory(status), engineHealthReporter, engineGrpcService,
+                localKvCacheAwareManager, cacheIntervalService, 20, new LongAdder(), 50L, true, Runnable::run).run();
 
         assertEquals(1000, status.getCacheStatus().getAvailableKvCache());
         assertEquals(2000, status.getCacheStatus().getTotalKvCache());
@@ -67,7 +65,6 @@ class GrpcCacheStatusCheckRunnerTest {
     @Test
     void testGrpcCacheStatusCheckRunner() {
         // Arrange
-        String modelName = "test-model";
         String site = "test-site";
 
         WorkerStatus workerStatus = workerStatus();
@@ -88,13 +85,9 @@ class GrpcCacheStatusCheckRunnerTest {
                         .build());
 
         // Act
-        GrpcCacheStatusCheckRunner runner = new GrpcCacheStatusCheckRunner(
-                modelName, ipPort, site, RoleType.PREFILL, workerStatus,
-                workerStatus.tryBeginCachePoll(),
-                directory,
-                engineHealthReporter, engineGrpcService,
-                localKvCacheAwareManager, cacheIntervalService,
-                20, new LongAdder(), 50L, true, Runnable::run);
+        GrpcCacheStatusCheckRunner runner = new GrpcCacheStatusCheckRunner(ipPort, site, RoleType.PREFILL, workerStatus,
+                workerStatus.tryBeginCachePoll(), directory, engineHealthReporter, engineGrpcService,
+                localKvCacheAwareManager, cacheIntervalService, 20, new LongAdder(), 50L, true, Runnable::run);
         runner.run();
 
         // Give some time for async execution
@@ -176,12 +169,9 @@ class GrpcCacheStatusCheckRunnerTest {
                 anyString(), anyInt(), any(WorkerStatus.class), anyLong(),
                 anyLong(), eq(RoleType.PREFILL))).thenReturn(response);
 
-        GrpcCacheStatusCheckRunner runner = new GrpcCacheStatusCheckRunner(
-                "test-model", ipPort, "test-site", RoleType.PREFILL,
-                oldStatus, oldStatus.tryBeginCachePoll(), directory,
-                engineHealthReporter, engineGrpcService,
-                localKvCacheAwareManager, cacheIntervalService,
-                20, new LongAdder(), 50L, true, Runnable::run);
+        GrpcCacheStatusCheckRunner runner = new GrpcCacheStatusCheckRunner(ipPort, "test-site", RoleType.PREFILL,
+                oldStatus, oldStatus.tryBeginCachePoll(), directory, engineHealthReporter, engineGrpcService,
+                localKvCacheAwareManager, cacheIntervalService, 20, new LongAdder(), 50L, true, Runnable::run);
         runner.run();
 
         response.complete(EngineRpcService.CacheStatusPB.newBuilder()
@@ -195,17 +185,10 @@ class GrpcCacheStatusCheckRunnerTest {
                 .updateFromWorkerStatus(oldStatus);
     }
 
-    private void runCachePoll(
-            String ipPort,
-            WorkerStatus workerStatus,
-            WorkerDirectory directory,
-            boolean debug) {
-        new GrpcCacheStatusCheckRunner(
-                "test-model", ipPort, "test-site", RoleType.PREFILL,
-                workerStatus, workerStatus.tryBeginCachePoll(), directory,
-                engineHealthReporter, engineGrpcService,
-                localKvCacheAwareManager, cacheIntervalService,
-                20, new LongAdder(), 50L, debug, Runnable::run).run();
+    private void runCachePoll(String ipPort, WorkerStatus workerStatus, WorkerDirectory directory, boolean debug) {
+        new GrpcCacheStatusCheckRunner(ipPort, "test-site", RoleType.PREFILL, workerStatus,
+                workerStatus.tryBeginCachePoll(), directory, engineHealthReporter, engineGrpcService,
+                localKvCacheAwareManager, cacheIntervalService, 20, new LongAdder(), 50L, debug, Runnable::run).run();
     }
 
     private static WorkerStatus workerStatus() {

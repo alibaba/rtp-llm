@@ -163,7 +163,6 @@ not a second FlexLB behavior configuration:
 
 ```bash
 export MODEL_SERVICE_CONFIG='{
-    "service_id": "aigc.text-generation.generation.engine_service",
     "load_balance": true,
     "role_endpoints": [
         {

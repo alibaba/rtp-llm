@@ -278,8 +278,7 @@ reservation remains tracked until authoritative terminal/retirement evidence or 
     "protocol": "http",
     "type": "SpecifiedIpPortList",
     "address": "[\"localhost:8080\"]"
-  },
-  "service_id": "model.service"
+  }
 }
 ```
 

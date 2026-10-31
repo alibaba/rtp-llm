@@ -267,7 +267,6 @@ def merge_endpoints(args: argparse.Namespace, partials: List[dict]) -> Dict[str,
         f"{e['ip']}:{e['http_port']}" for e in all_engines if e["role"] == "decode"
     ]
     model_service_config = {
-        "service_id": "aigc.text-generation.generation.engine_service",
         "load_balance": True,
         "hosts": {args.prefill_domain: prefill_addrs, args.decode_domain: decode_addrs},
         "role_endpoints": [

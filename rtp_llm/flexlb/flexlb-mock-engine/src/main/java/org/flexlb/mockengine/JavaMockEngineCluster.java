@@ -457,7 +457,6 @@ public final class JavaMockEngineCluster {
         roleEndpoint.put("prefill_endpoint", prefillEndpoint);
         roleEndpoint.put("decode_endpoint", decodeEndpoint);
         Map<String, Object> serviceConfig = new LinkedHashMap<>();
-        serviceConfig.put("service_id", "aigc.text-generation.generation.engine_service");
         serviceConfig.put("load_balance", true);
         serviceConfig.put("role_endpoints", List.of(roleEndpoint));
 

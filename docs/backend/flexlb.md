@@ -102,8 +102,7 @@ export MODEL_SERVICE_CONFIG='{
         "protocol": "http",
         "type": "SpecifiedIpPortList",
         "address": "[\"localhost:8080\"]"
-    },
-    "service_id": "aigc.text-generation.generation.engine_service"
+    }
 }'
 ```
 

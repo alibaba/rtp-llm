@@ -83,7 +83,6 @@ class FileDiscoveryDynamicScaleEndToEndTest extends FlexLBMockTestBase {
     private static final ObjectMapper MAPPER = new ObjectMapper();
     private static final String PREFILL_DOMAIN = "mock.prefill.hosts.address";
     private static final String DECODE_DOMAIN = "mock.decode.hosts.address";
-    private static final String MODEL_NAME = "mock-model";
     /** Master SYNC_STATUS_INTERVAL default — the production re-pull cadence. */
     private static final long SYNC_INTERVAL_MS = 20L;
     private static final long CONVERGENCE_CAP_MS = 10_000L;
@@ -140,10 +139,9 @@ class FileDiscoveryDynamicScaleEndToEndTest extends FlexLBMockTestBase {
         decodeEndpoint.setAddress(DECODE_DOMAIN);
         decodeEndpoint.setProtocol("http");
         ModelMetaConfig modelMetaConfig = mock(ModelMetaConfig.class);
-        when(modelMetaConfig.endpointsWithGroup(MODEL_NAME, RoleType.PREFILL))
+        when(modelMetaConfig.endpointsWithGroup(RoleType.PREFILL))
                 .thenReturn(List.of(Pair.of("mock", prefillEndpoint)));
-        when(modelMetaConfig.endpointsWithGroup(MODEL_NAME, RoleType.DECODE))
-                .thenReturn(List.of(Pair.of("mock", decodeEndpoint)));
+        when(modelMetaConfig.endpointsWithGroup(RoleType.DECODE)).thenReturn(List.of(Pair.of("mock", decodeEndpoint)));
 
         // Real master discovery wiring (metrics reporter mocked — not on the decision path).
         healthReporter = mock(EngineHealthReporter.class);
@@ -166,7 +164,6 @@ class FileDiscoveryDynamicScaleEndToEndTest extends FlexLBMockTestBase {
         });
 
         EngineSyncRunner prefillSyncRunner = new EngineSyncRunner(
-                MODEL_NAME,
                 // Share the fixture's directory so discovery retires and
                 // republishes the exact generations used by routing.
                 engineWorkerStatus,
@@ -183,9 +180,8 @@ class FileDiscoveryDynamicScaleEndToEndTest extends FlexLBMockTestBase {
                 false,
                 STATUS_STALE_AFTER_US);
 
-        EngineSyncRunner decodeSyncRunner = new EngineSyncRunner(
-                MODEL_NAME, engineWorkerStatus, workerAddressService, statusCheckExecutor,
-                healthReporter, engineGrpcService, RoleType.DECODE, cacheAwareService,
+        EngineSyncRunner decodeSyncRunner = new EngineSyncRunner(engineWorkerStatus, workerAddressService,
+                statusCheckExecutor, healthReporter, engineGrpcService, RoleType.DECODE, cacheAwareService,
                 cacheIntervalService, 5_000L, new LongAdder(), 1L, false, STATUS_STALE_AFTER_US);
 
         syncScheduler = Executors.newSingleThreadScheduledExecutor(r -> {

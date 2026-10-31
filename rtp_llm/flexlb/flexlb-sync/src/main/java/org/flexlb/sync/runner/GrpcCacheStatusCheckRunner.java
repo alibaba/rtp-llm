@@ -26,7 +26,6 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
     private static final Logger logger = LoggerFactory.getLogger("syncLogger");
 
     private final String ipPort;
-    private final String modelName;
     private final String site;
     private final RoleType roleType;
     private final WorkerStatus workerStatus;
@@ -47,7 +46,9 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
     private final Long syncEngineStatusInterval;
     private final Executor callbackExecutor;
 
-    public GrpcCacheStatusCheckRunner(String modelName, String ipPort, String site, RoleType roleType,
+    public GrpcCacheStatusCheckRunner(String ipPort,
+                                      String site,
+                                      RoleType roleType,
                                       WorkerStatus workerStatus,
                                       WorkerStatus.PollLease pollLease,
                                       WorkerDirectory workerDirectory,
@@ -61,15 +62,12 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
                                       boolean fullSnapshotDebugMode,
                                       Executor callbackExecutor) {
 
-        this(modelName, ipPort, workerStatus.getGrpcPort(), site, roleType,
-                workerStatus, pollLease, workerDirectory, engineHealthReporter,
-                engineGrpcService, cacheAwareService, cacheIntervalService,
-                requestTimeoutMs, syncCount, syncEngineStatusInterval,
-                fullSnapshotDebugMode, callbackExecutor);
+        this(ipPort, workerStatus.getGrpcPort(), site, roleType, workerStatus, pollLease, workerDirectory,
+                engineHealthReporter, engineGrpcService, cacheAwareService, cacheIntervalService, requestTimeoutMs,
+                syncCount, syncEngineStatusInterval, fullSnapshotDebugMode, callbackExecutor);
     }
 
-    public GrpcCacheStatusCheckRunner(String modelName,
-                                      String ipPort,
+    public GrpcCacheStatusCheckRunner(String ipPort,
                                       int workerStatusPort,
                                       String site,
                                       RoleType roleType,
@@ -90,7 +88,6 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
         this.ip = workerStatus.getIp();
         this.roleType = roleType;
         this.grpcPort = workerStatusPort;
-        this.modelName = modelName;
         this.workerStatus = workerStatus;
         this.workerDirectory = workerDirectory;
         this.pollLease = pollLease;
@@ -311,24 +308,13 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
     }
 
     private void log(String msg) {
-        logger.debug("[gRPC-Cache][{}][{}][{}][{}][{}μs]: {}",
-                id,
-                site,
-                ipPort,
-                modelName,
-                (System.nanoTime() / 1000) - startTime,
+        logger.debug("[gRPC-Cache][{}][{}][{}][{}μs]: {}", id, site, ipPort, (System.nanoTime() / 1000) - startTime,
                 msg);
     }
 
     private void log(String msg, Throwable e) {
-        logger.debug("[gRPC-Cache][{}][{}][{}][{}][{}μs]: {}",
-                id,
-                site,
-                ipPort,
-                modelName,
-                (System.nanoTime() / 1000) - startTime,
-                msg,
-                e);
+        logger.debug("[gRPC-Cache][{}][{}][{}][{}μs]: {}", id, site, ipPort, (System.nanoTime() / 1000) - startTime,
+                msg, e);
     }
 
     private void handleException(Throwable ex) {

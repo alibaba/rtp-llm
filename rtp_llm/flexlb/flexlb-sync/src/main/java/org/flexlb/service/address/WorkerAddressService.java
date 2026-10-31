@@ -85,15 +85,12 @@ public class WorkerAddressService {
         }
     }
 
-    public List<WorkerHost> getEngineWorkerList(String modelName, RoleType modelEndpointType) {
+    public List<WorkerHost> getEngineWorkerList(RoleType roleType) {
         List<WorkerHost> workerHosts = new ArrayList<>();
-        List<Pair<String, Endpoint>> endpoints =
-                modelMetaConfig.endpointsWithGroup(
-                        modelName, modelEndpointType);
+        List<Pair<String, Endpoint>> endpoints = modelMetaConfig.endpointsWithGroup(roleType);
         if (endpoints.isEmpty()) {
-            logger.info("modelName={} role={} service route not found",
-                    modelName, modelEndpointType);
-            engineHealthReporter.reportRawServiceDiscoveryHostCount(modelName, modelEndpointType, 0);
+            logger.info("role={} service route not found", roleType);
+            engineHealthReporter.reportRawServiceDiscoveryHostCount(roleType, 0);
             return workerHosts;
         }
         int discoveredHostCount = 0;
@@ -101,11 +98,11 @@ public class WorkerAddressService {
         for (Pair<String, Endpoint> endpointTuple : endpoints) {
             Endpoint endpoint = endpointTuple.getRight();
             if (endpoint == null) {
-                logger.info("modelName={} endpoint is null, endpointType={}", modelName, modelEndpointType);
+                logger.info("endpoint is null, role={}", roleType);
                 allEndpointsSucceeded = false;
                 continue;
             }
-            ServiceHosts result = getServiceHosts(modelName, endpoint);
+            ServiceHosts result = getServiceHosts(endpoint);
             workerHosts.addAll(result.discoveredOrCachedHostsForStatusCheck());
             if (result.discoveredHostCount() == null) {
                 allEndpointsSucceeded = false;
@@ -114,7 +111,7 @@ public class WorkerAddressService {
             }
         }
         if (allEndpointsSucceeded) {
-            engineHealthReporter.reportRawServiceDiscoveryHostCount(modelName, modelEndpointType, discoveredHostCount);
+            engineHealthReporter.reportRawServiceDiscoveryHostCount(roleType, discoveredHostCount);
         }
         return workerHosts;
     }
@@ -123,19 +120,19 @@ public class WorkerAddressService {
      * Failed and empty discovery results retain the endpoint's last non-empty snapshot.
      * Cached workers continue through the regular worker health checks.
      */
-    private ServiceHosts getServiceHosts(String modelName, Endpoint endpoint) {
+    private ServiceHosts getServiceHosts(Endpoint endpoint) {
         String address = endpoint.getAddress();
         Future<List<WorkerHost>> future;
         try {
             future = serviceDiscoveryExecutor.submit(() -> serviceDiscovery.getHosts(endpoint));
         } catch (RejectedExecutionException e) {
-            logger.error("query service discovery rejected, model={}, address={}, msg:{}", modelName, address, e.getMessage());
+            logger.error("query service discovery rejected, address={}, msg:{}", address, e.getMessage());
             engineHealthReporter.reportStatusCheckerFail(BalanceStatusEnum.SERVICE_DISCOVERY_ERROR, null);
             return new ServiceHosts(lastNonEmptyHostsByEndpoint.getOrDefault(endpoint, List.of()), null);
         }
         try {
             List<WorkerHost> hosts = future.get(500, TimeUnit.MILLISECONDS);
-            reportWorkerAvailability(modelName, endpoint, hosts);
+            reportWorkerAvailability(endpoint, hosts);
             if (!hosts.isEmpty()) {
                 // Update the cache only after a successful wait;
                 lastNonEmptyHostsByEndpoint.put(endpoint, hosts);
@@ -144,15 +141,15 @@ public class WorkerAddressService {
             return new ServiceHosts(lastNonEmptyHostsByEndpoint.getOrDefault(endpoint, List.of()), 0);
         } catch (TimeoutException e) {
             future.cancel(true);
-            logger.error("query service discovery timeout, model={}, address={}", modelName, address);
+            logger.error("query service discovery timeout, address={}", address);
             engineHealthReporter.reportStatusCheckerFail(BalanceStatusEnum.SERVICE_DISCOVERY_TIMEOUT, null);
         } catch (InterruptedException e) {
             future.cancel(true);
             Thread.currentThread().interrupt();
-            logger.warn("query service discovery interrupted, model={}, address={}", modelName, address);
+            logger.warn("query service discovery interrupted, address={}", address);
             engineHealthReporter.reportStatusCheckerFail(BalanceStatusEnum.SERVICE_DISCOVERY_ERROR, null);
         } catch (ExecutionException e) {
-            logger.error("query service discovery error, model={}, address={}", modelName, address, e.getCause());
+            logger.error("query service discovery error, address={}", address, e.getCause());
             engineHealthReporter.reportStatusCheckerFail(BalanceStatusEnum.SERVICE_DISCOVERY_ERROR, null);
         }
         return new ServiceHosts(lastNonEmptyHostsByEndpoint.getOrDefault(endpoint, List.of()), null);
@@ -161,21 +158,22 @@ public class WorkerAddressService {
     private record ServiceHosts(List<WorkerHost> discoveredOrCachedHostsForStatusCheck, Integer discoveredHostCount) {
     }
 
-    private void reportWorkerAvailability(String modelName, Endpoint endpoint, List<WorkerHost> hosts) {
+    private void reportWorkerAvailability(Endpoint endpoint, List<WorkerHost> hosts) {
         WorkerAvailabilityLogState state = workerAvailabilityByEndpoint.computeIfAbsent(
                 endpoint, ignored -> new WorkerAvailabilityLogState());
         if (hosts.isEmpty()) {
             if (state.shouldWarnForEmptyWorkers()) {
-                logger.warn("No workers discovered, model={}, address={}, group={}; "
+                logger.warn(
+                        "No workers discovered, address={}, group={}; "
                                 + "retaining last non-empty worker list (warning limited to once per minute)",
-                        modelName, endpoint.getAddress(), endpoint.getGroup());
+                        endpoint.getAddress(), endpoint.getGroup());
             }
             return;
         }
 
         if (state.markAvailable()) {
-            logger.info("Worker discovery recovered, model={}, address={}, group={}, worker_count={}",
-                    modelName, endpoint.getAddress(), endpoint.getGroup(), hosts.size());
+            logger.info("Worker discovery recovered, address={}, group={}, worker_count={}", endpoint.getAddress(),
+                    endpoint.getGroup(), hosts.size());
         }
     }
 

@@ -19,6 +19,7 @@ import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerStatusProvider;
 import org.flexlb.dao.route.RoleType;
+import org.flexlb.dao.route.ServiceRoute;
 import org.flexlb.schedule.grpc.FlexlbScheduleProtocol;
 import org.flexlb.service.RouteService;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
@@ -50,7 +51,7 @@ class FlexlbScheduleLocalStandbyTest {
         CacheMatchConfiguration configuration = mock(CacheMatchConfiguration.class);
         when(configuration.isLocalStandbyEnabled()).thenReturn(true);
         when(configuration.getLocalStandbyConfig()).thenReturn(new LocalStandbyConfig());
-        when(configuration.getServiceRoutes()).thenReturn(List.of());
+        when(configuration.getServiceRoute()).thenReturn(new ServiceRoute());
         WorkerStatus worker = mock(WorkerStatus.class);
         when(worker.getLogicalIpPort()).thenReturn("127.0.0.1:8080@1");
         WorkerStatusProvider workers = mock(WorkerStatusProvider.class);

@@ -186,11 +186,9 @@ class CacheMatchHotSwitchTest {
             ArgumentCaptor<Consumer<String>> updateCaptor = ArgumentCaptor.forClass(Consumer.class);
             verify(source).setUpdateListener(updateCaptor.capture());
             update = updateCaptor.getValue();
-            ModelMetaConfig model = new ModelMetaConfig();
             ServiceRoute route = new ServiceRoute();
-            route.setServiceId("service");
             route.setKvcm(new KvcmConfig());
-            model.putServiceRoute("service", route);
+            ModelMetaConfig model = new ModelMetaConfig(route);
             configuration = new CacheMatchConfiguration(model, configService);
             when(client.healthSnapshot()).thenReturn(health(true));
             CacheMetricsReporter reporter = mock(CacheMetricsReporter.class);

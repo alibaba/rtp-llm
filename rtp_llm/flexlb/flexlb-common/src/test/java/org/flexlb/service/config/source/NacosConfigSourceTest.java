@@ -48,15 +48,11 @@ class NacosConfigSourceTest {
                 mock(com.alibaba.nacos.api.config.ConfigService.class);
         when(client.getConfig("flexlb-test", DEFAULT_NACOS_GROUP, 3000L))
                 .thenReturn("{\"schemaVersion\":3,\"fallbackBatchTokenCapacity\":1048585}");
-        new EnvironmentVariables(
-                "FLEXLB_UNICONF_ENABLE", "false",
-                "UNICONF_ENABLE", "true",
-                NACOS_SERVER_ADDR, "127.0.0.1:8848",
-                NACOS_DATA_ID, "flexlb-test",
-                WHALE_BIZ_NAME, "dash_pd", WHALE_DEPLOYMENT_NAME, "flexlb-test", WHALE_ZONE_NAME, "master",
-                "FLEXLB_CONFIG", "{\"schemaVersion\":1,\"enableFallback\":true}",
-                "MODEL_SERVICE_CONFIG", "{\"service_id\":\"test-model\",\"role_endpoints\":[]}")
-                .remove(NACOS_GROUP)
+        new EnvironmentVariables("FLEXLB_UNICONF_ENABLE", "false", "UNICONF_ENABLE", "true", NACOS_SERVER_ADDR,
+                "127.0.0.1:8848", NACOS_DATA_ID, "flexlb-test", WHALE_BIZ_NAME, "dash_pd", WHALE_DEPLOYMENT_NAME,
+                "flexlb-test", WHALE_ZONE_NAME, "master", "FLEXLB_CONFIG",
+                "{\"schemaVersion\":1,\"enableFallback\":true}", "MODEL_SERVICE_CONFIG",
+                "{\"discovery_file\":\"workers.json\",\"role_endpoints\":[]}").remove(NACOS_GROUP)
                 .remove(SPECTRUM_WORKSPACE_ID)
                 .remove(SPECTRUM_APPLICATION_NAME)
                 .remove(SPECTRUM_DEPLOYMENT_NAME)
@@ -74,7 +70,7 @@ class NacosConfigSourceTest {
                         assertThat(configService.loadBalanceConfig().getFallbackBatchTokenCapacity())
                                 .isEqualTo(1048585L);
                         assertThat(configService.loadBalanceConfig().isEnableFallback()).isFalse();
-                        assertThat(configService.modelServiceConfig().getServiceId()).isEqualTo("test-model");
+                        assertThat(configService.modelServiceConfig().getDiscoveryFile()).isEqualTo("workers.json");
                     } finally {
                         configService.close();
                     }
@@ -274,10 +270,8 @@ class NacosConfigSourceTest {
                 new StandardConfigDocumentParser(), new V0ConfigDocumentParser()));
         try {
             ServiceRoute route = new ServiceRoute();
-            route.setServiceId("test-service");
             route.setKvcm(new KvcmConfig());
-            ModelMetaConfig modelMetaConfig = new ModelMetaConfig();
-            modelMetaConfig.putServiceRoute(route.getServiceId(), route);
+            ModelMetaConfig modelMetaConfig = new ModelMetaConfig(route);
             CacheMatchConfiguration configuration = new CacheMatchConfiguration(modelMetaConfig, configService);
             KvcmCacheMatchingConfig initial = configuration.getKvcmRuntimeConfig();
             assertThat(initial.getTopKHostCount()).isEqualTo(3);

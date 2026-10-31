@@ -28,6 +28,7 @@ import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
+import org.flexlb.dao.route.ServiceRoute;
 import org.flexlb.enums.TaskPhase;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.EngineHealthReporter;
@@ -119,7 +120,7 @@ class PdfusionSchedulingTest {
         RequestScheduler scheduler = new RequestScheduler(service, router, endpoints, reporter,
                 mock(EvictionManager.class), lifecycle, availability, queueCapacity);
         SchedulerRuntime runtime = new SchedulerRuntime(lifecycle, endpoints, reporter, requestReporter, scheduler,
-                service, queueCapacity, new ModelMetaConfig());
+                service, queueCapacity, new ModelMetaConfig(new ServiceRoute()));
         try {
             long requestId = 920001L;
             var context = RequestLifecycleTestSupport.context(config, requestId);

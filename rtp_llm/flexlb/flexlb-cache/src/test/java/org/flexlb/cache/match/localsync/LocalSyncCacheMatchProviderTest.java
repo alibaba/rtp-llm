@@ -172,13 +172,10 @@ class LocalSyncCacheMatchProviderTest {
 
     private ModelMetaConfig modelMetaConfig(boolean kvcmEnabled) {
         ServiceRoute serviceRoute = new ServiceRoute();
-        serviceRoute.setServiceId("test-service");
         if (kvcmEnabled) {
             serviceRoute.setKvcm(new KvcmConfig());
         }
 
-        ModelMetaConfig modelMetaConfig = new ModelMetaConfig();
-        modelMetaConfig.putServiceRoute(serviceRoute.getServiceId(), serviceRoute);
-        return modelMetaConfig;
+        return new ModelMetaConfig(serviceRoute);
     }
 }

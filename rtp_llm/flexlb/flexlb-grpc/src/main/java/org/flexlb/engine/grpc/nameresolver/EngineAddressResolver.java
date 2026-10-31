@@ -92,8 +92,8 @@ public class EngineAddressResolver {
 
     private List<Endpoint> initServiceEndpoints(ModelMetaConfig modelMetaConfig) {
         Map<AddressSource, Endpoint> uniqueSources = new LinkedHashMap<>();
-        modelMetaConfig.getServiceRoutes().stream()
-                .flatMap(serviceRoute -> serviceRoute.getAllEndpoints().stream())
+        modelMetaConfig.getServiceRoute()
+                .getAllEndpoints()
                 .forEach(endpoint -> uniqueSources.putIfAbsent(AddressSource.from(endpoint), endpoint));
         List<Endpoint> endpoints = List.copyOf(uniqueSources.values());
         if (CollectionUtils.isEmpty(endpoints)) {

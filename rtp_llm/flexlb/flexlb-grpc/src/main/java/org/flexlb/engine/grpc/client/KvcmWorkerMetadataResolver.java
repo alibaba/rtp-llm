@@ -37,10 +37,9 @@ public class KvcmWorkerMetadataResolver {
     private final ConcurrentMap<RoleType, QueryType> queryTypeByRoleForCrossGroupRouting =
             new ConcurrentHashMap<>();
 
-    public KvcmWorkerMetadataResolver(
-            CacheMatchConfiguration configuration,
-            WorkerStatusProvider workerStatusProvider) {
-        this.serviceRoute = configuration.getKvcmServiceRoute();
+    public KvcmWorkerMetadataResolver(CacheMatchConfiguration configuration,
+                                      WorkerStatusProvider workerStatusProvider) {
+        this.serviceRoute = configuration.getServiceRoute();
         KvcmConfig config = configuration.getKvcmConfig();
         this.configuredNamespace = configuration.isKvcmEnabled()
                 ? StringUtils.trimToNull(config.getNamespace())
@@ -71,7 +70,7 @@ public class KvcmWorkerMetadataResolver {
     }
 
     public void refreshNamespacesAndQueryTypes() {
-        if (serviceRoute == null) {
+        if (serviceRoute.getKvcm() == null) {
             return;
         }
 

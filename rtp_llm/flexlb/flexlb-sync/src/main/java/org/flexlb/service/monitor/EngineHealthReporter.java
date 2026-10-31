@@ -303,9 +303,8 @@ public class EngineHealthReporter {
         }
     }
 
-    public void reportRawServiceDiscoveryHostCount(String model, RoleType role, int count) {
-        monitor.report(ENGINE_SERVICE_DISCOVERY_RAW_HOST_COUNT,
-                FlexMetricTags.of("model", model, "role", role.name()), count);
+    public void reportRawServiceDiscoveryHostCount(RoleType role, int count) {
+        monitor.report(ENGINE_SERVICE_DISCOVERY_RAW_HOST_COUNT, FlexMetricTags.of("role", role.name()), count);
     }
 
     public void reportStatusCheckRemoteInfo(WorkerStatus worker, long startTime) {

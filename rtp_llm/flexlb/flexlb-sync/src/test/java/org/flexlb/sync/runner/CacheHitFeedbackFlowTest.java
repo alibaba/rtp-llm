@@ -412,8 +412,8 @@ class CacheHitFeedbackFlowTest {
                 .thenReturn(CompletableFuture.completedFuture(response(task, finished, version)));
         var lease = status.tryBeginStatusPoll();
         assertNotNull(lease);
-        new GrpcWorkerStatusRunner("model", status.getLogicalIpPort(), "test", RoleType.PREFILL, "group",
-                status, lease, directory, reporter, grpc, 5000, cache, Runnable::run).run();
+        new GrpcWorkerStatusRunner(status.getLogicalIpPort(), "test", RoleType.PREFILL, "group", status, lease,
+                directory, reporter, grpc, 5000, cache, Runnable::run).run();
     }
 
     private List<JsonNode> events(String event) throws Exception {

@@ -19,6 +19,7 @@ import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
+import org.flexlb.dao.route.ServiceRoute;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -60,8 +61,8 @@ class RequestConfirmationTimeoutTest {
         var queueCapacity = new QueueCapacity();
         var endpoints = new EndpointRegistry(service, eventHandler, reporter, EndpointTestSupport.parkedDelivery(),
                 new NonBatchTtftEstimator(), new PlacementAvailability(), queueCapacity, new PrefillQueueRegistry());
-        var runtime = new SchedulerRuntime(requests, endpoints, reporter, requestReporter,
-                service, queueCapacity, new ModelMetaConfig());
+        var runtime = new SchedulerRuntime(requests, endpoints, reporter, requestReporter, service, queueCapacity,
+                new ModelMetaConfig(new ServiceRoute()));
         DecodeEndpoint decode = null;
         try {
             WorkerStatus prefillWorker = worker(RoleType.PREFILL, "127.0.0.1");

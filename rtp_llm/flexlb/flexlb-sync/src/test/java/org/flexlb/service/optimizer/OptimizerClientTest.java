@@ -12,6 +12,7 @@ import org.flexlb.dao.optimizer.OptimizerTraceQueryResponse;
 import org.flexlb.dao.route.DiscoveryConfig;
 import org.flexlb.dao.route.Endpoint;
 import org.flexlb.dao.route.RoleType;
+import org.flexlb.dao.route.ServiceRoute;
 import org.flexlb.discovery.ServiceDiscovery;
 import org.flexlb.discovery.ServiceDiscoveryType;
 import org.flexlb.engine.grpc.client.KvcmWorkerMetadataResolver;
@@ -195,13 +196,8 @@ class OptimizerClientTest {
     void skipsTraceQueryWhenOptimizerIsDisabled() {
         ConfigService configService = mock(ConfigService.class);
         when(configService.loadBalanceConfig()).thenReturn(new FlexlbConfig());
-        OptimizerClient disabledClient = new OptimizerClient(
-                httpService,
-                mock(ServiceDiscovery.class),
-                new ModelMetaConfig(),
-                configService,
-                workerMetadataResolver,
-                monitor);
+        OptimizerClient disabledClient = new OptimizerClient(httpService, mock(ServiceDiscovery.class),
+                new ModelMetaConfig(new ServiceRoute()), configService, workerMetadataResolver, monitor);
         disabledClient.shutdown();
 
         disabledClient.traceQuery(traceRequest(List.of(1L)), selectedWorker());

@@ -256,11 +256,8 @@ class LocalStandbyComparisonServiceTest {
         KvcmConfig kvcm = new KvcmConfig();
 
         ServiceRoute route = new ServiceRoute();
-        route.setServiceId("test-service");
         route.setKvcm(kvcm);
 
-        ModelMetaConfig config = new ModelMetaConfig();
-        config.putServiceRoute(route.getServiceId(), route);
-        return config;
+        return new ModelMetaConfig(route);
     }
 }

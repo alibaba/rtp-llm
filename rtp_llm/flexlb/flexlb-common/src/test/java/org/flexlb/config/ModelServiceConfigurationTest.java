@@ -43,8 +43,7 @@ class ModelServiceConfigurationTest {
                 .run(context -> {
                     assertThat(context).hasNotFailed();
                     ModelMetaConfig config = context.getBean(ModelMetaConfig.class);
-                    var endpoint = config.getServiceRoute("test-service")
-                            .getAllEndpoints().getFirst();
+                    var endpoint = config.getServiceRoute().getAllEndpoints().getFirst();
                     assertThat(endpoint.getDiscovery().getType())
                             .isEqualTo(ServiceDiscoveryType.STATIC_ENV);
                     assertThat(endpoint.getDiscovery().getHosts())
@@ -61,10 +60,8 @@ class ModelServiceConfigurationTest {
                 "\"worker_status_port\":18002,\"multi_engine_num\":2,"))
                 .run(context -> {
                     assertThat(context).hasNotFailed();
-                    var endpoint = context.getBean(ModelMetaConfig.class)
-                            .getServiceRoute("test-service")
-                            .getAllEndpoints()
-                            .getFirst();
+                    var endpoint =
+                            context.getBean(ModelMetaConfig.class).getServiceRoute().getAllEndpoints().getFirst();
                     assertThat(endpoint.getMultiEngineNum()).isEqualTo(2);
                 });
     }
@@ -119,7 +116,7 @@ class ModelServiceConfigurationTest {
     @Test
     void rejectsEndpointWithoutDiscovery() {
         String config = """
-                {"service_id":"test-service","role_endpoints":[{"group":"default",
+                {"role_endpoints":[{"group":"default",
                 "pd_fusion_endpoint":{"address":"service-a","protocol":"http","path":"/"}}]}
                 """;
 
@@ -135,7 +132,7 @@ class ModelServiceConfigurationTest {
     @Test
     void rejectsDiscoveryTypeWithoutProvider() {
         String config = """
-                {"service_id":"test-service","role_endpoints":[{"group":"default",
+                {"role_endpoints":[{"group":"default",
                 "pd_fusion_endpoint":{"address":"v-test","protocol":"http","path":"/",
                 "discovery":{"type":"dashscope","base_url":"http://127.0.0.1:8880"}}}]}
                 """;
@@ -153,7 +150,7 @@ class ModelServiceConfigurationTest {
     @Test
     void loadsKvcmTopology() {
         String config = """
-                {"service_id":"test-service","kvcm":{"address":"kvcm-service",
+                {"kvcm":{"address":"kvcm-service",
                 "port":7381,
                 "discovery":{"type":"static-env","hosts":["127.0.0.1:8080"]}},
                 "role_endpoints":[{"group":"default",
@@ -164,8 +161,7 @@ class ModelServiceConfigurationTest {
         withModelConfig(config)
                 .run(context -> {
                     assertThat(context).hasNotFailed();
-                    var route = context.getBean(ModelMetaConfig.class)
-                            .getServiceRoute("test-service");
+                    var route = context.getBean(ModelMetaConfig.class).getServiceRoute();
                     assertThat(route.getKvcm()).isNotNull();
                     assertThat(route.getKvcm().getPort()).isEqualTo(7381);
                     assertThat(route.getAllEndpoints()).hasSize(1);
@@ -177,9 +173,7 @@ class ModelServiceConfigurationTest {
         withModelConfig(modelConfig(validOptimizerConfig()))
                 .run(context -> {
                     assertThat(context).hasNotFailed();
-                    OptimizerConfig optimizer = context.getBean(ModelMetaConfig.class)
-                            .getServiceRoute("test-service")
-                            .getOptimizer();
+                    OptimizerConfig optimizer = context.getBean(ModelMetaConfig.class).getServiceRoute().getOptimizer();
                     assertThat(optimizer.getAddress()).isEqualTo("optimizer-service");
                     assertThat(optimizer.getPort()).isEqualTo(9090);
                     assertThat(optimizer.getPath()).isEqualTo("/custom/optimizer");
@@ -196,9 +190,7 @@ class ModelServiceConfigurationTest {
                         ",\"port\":9090,\"path\":\"/custom/optimizer\"", "")))
                 .run(context -> {
                     assertThat(context).hasNotFailed();
-                    OptimizerConfig optimizer = context.getBean(ModelMetaConfig.class)
-                            .getServiceRoute("test-service")
-                            .getOptimizer();
+                    OptimizerConfig optimizer = context.getBean(ModelMetaConfig.class).getServiceRoute().getOptimizer();
                     assertThat(optimizer.getPath()).isEqualTo(OptimizerConfig.DEFAULT_PATH);
                     assertThat(optimizer.getPort()).isEqualTo(OptimizerConfig.DEFAULT_PORT);
                 });
@@ -220,7 +212,7 @@ class ModelServiceConfigurationTest {
 
     private String staticModelConfig() {
         return """
-                {"service_id":"test-service","role_endpoints":[{"group":"default",
+                {"role_endpoints":[{"group":"default",
                 "pd_fusion_endpoint":{"address":"service-a","protocol":"http","path":"/",
                 "worker_status_port":18002,
                 "discovery":{"type":"static-env","hosts":["127.0.0.1:8080"]}}}]}
@@ -253,7 +245,7 @@ class ModelServiceConfigurationTest {
 
     private String modelConfig(String optimizerConfig) {
         return """
-                {"service_id":"test-service","optimizer":%s,
+                {"optimizer":%s,
                 "role_endpoints":[{"group":"default",
                 "pd_fusion_endpoint":{"address":"service-a","protocol":"http","path":"/",
                 "discovery":{"type":"static-env","hosts":["127.0.0.1:8080"]}}}]}

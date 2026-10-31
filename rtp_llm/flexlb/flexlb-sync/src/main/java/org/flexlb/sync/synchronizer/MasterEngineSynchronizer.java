@@ -34,7 +34,6 @@ public final class MasterEngineSynchronizer {
 
     private static final Logger logger = LoggerFactory.getLogger("syncLogger");
 
-    private final String modelName;
     private final List<RoleType> requiredRoles;
     private final WorkerAddressService workerAddressService;
     private final WorkerDirectory workerDirectory;
@@ -67,7 +66,6 @@ public final class MasterEngineSynchronizer {
         this.engineGrpcService = engineGrpcService;
         this.cacheAwareService = cacheAwareService;
         this.cacheIntervalService = cacheIntervalService;
-        this.modelName = modelMetaConfig.modelName();
         this.requiredRoles = modelMetaConfig.requiredRoles();
 
         this.syncEngineStatusInterval = flexlbConfig.getWorkerRegistry().getHealth()
@@ -116,11 +114,10 @@ public final class MasterEngineSynchronizer {
 
     public void syncEngineStatus() {
         syncCount.increment();
-        logger.debug("sync engine status start, times:{}, modelName:{}",
-                syncCount.longValue(), modelName);
+        logger.debug("sync engine status start, times:{}", syncCount.longValue());
         try {
             for (RoleType roleType : requiredRoles) {
-                engineSyncExecutor.submit(new EngineSyncRunner(modelName, workerDirectory, workerAddressService,
+                engineSyncExecutor.submit(new EngineSyncRunner(workerDirectory, workerAddressService,
                         statusCheckExecutor, engineHealthReporter, engineGrpcService, roleType, cacheAwareService,
                         cacheIntervalService, syncRequestTimeoutMs, syncCount, syncEngineStatusInterval,
                         flexlbConfig.isKvcmAndStandbyEnabled(),

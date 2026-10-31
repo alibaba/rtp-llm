@@ -100,8 +100,8 @@ class WorkerAddressServiceTest {
         assertEquals(hosts, refresh());
         verify(engineHealthReporter).reportStatusCheckerFail(
                 BalanceStatusEnum.SERVICE_DISCOVERY_ERROR, null);
-        verify(engineHealthReporter).reportRawServiceDiscoveryHostCount("model", RoleType.PREFILL, 1);
-        verify(engineHealthReporter, never()).reportRawServiceDiscoveryHostCount("model", RoleType.PREFILL, 0);
+        verify(engineHealthReporter).reportRawServiceDiscoveryHostCount(RoleType.PREFILL, 1);
+        verify(engineHealthReporter, never()).reportRawServiceDiscoveryHostCount(RoleType.PREFILL, 0);
     }
 
     @Test
@@ -114,8 +114,8 @@ class WorkerAddressServiceTest {
         assertEquals(hosts, refresh());
         assertEquals(hosts, refresh());
 
-        verify(engineHealthReporter).reportRawServiceDiscoveryHostCount("model", RoleType.PREFILL, 1);
-        verify(engineHealthReporter).reportRawServiceDiscoveryHostCount("model", RoleType.PREFILL, 0);
+        verify(engineHealthReporter).reportRawServiceDiscoveryHostCount(RoleType.PREFILL, 1);
+        verify(engineHealthReporter).reportRawServiceDiscoveryHostCount(RoleType.PREFILL, 0);
     }
 
     @Test
@@ -223,8 +223,8 @@ class WorkerAddressServiceTest {
 
         assertEquals(List.of(a, b), refresh());
         assertEquals(List.of(a, c), refresh());
-        verify(engineHealthReporter).reportRawServiceDiscoveryHostCount("model", RoleType.PREFILL, 2);
-        verify(engineHealthReporter).reportRawServiceDiscoveryHostCount("model", RoleType.PREFILL, 1);
+        verify(engineHealthReporter).reportRawServiceDiscoveryHostCount(RoleType.PREFILL, 2);
+        verify(engineHealthReporter).reportRawServiceDiscoveryHostCount(RoleType.PREFILL, 1);
     }
 
     @Test
@@ -267,7 +267,7 @@ class WorkerAddressServiceTest {
             assertTrue(refresh().isEmpty());
             assertEquals(List.of("group-a", "group-b"), events.list.stream()
                     .filter(event -> event.getLevel() == Level.WARN)
-                    .map(event -> event.getArgumentArray()[2])
+                    .map(event -> event.getArgumentArray()[1])
                     .toList());
 
             assertEquals(List.of(b), refresh());
@@ -276,13 +276,13 @@ class WorkerAddressServiceTest {
                     "recovering another endpoint must not reset an empty endpoint's warning deadline");
             assertEquals(List.of("group-b"), events.list.stream()
                     .filter(event -> event.getFormattedMessage().startsWith("Worker discovery recovered"))
-                    .map(event -> event.getArgumentArray()[2])
+                    .map(event -> event.getArgumentArray()[1])
                     .toList());
 
             assertEquals(List.of(a, b), refresh());
             assertEquals(List.of("group-b", "group-a"), events.list.stream()
                     .filter(event -> event.getFormattedMessage().startsWith("Worker discovery recovered"))
-                    .map(event -> event.getArgumentArray()[2])
+                    .map(event -> event.getArgumentArray()[1])
                     .toList());
         } finally {
             logger.detachAppender(events);
@@ -314,12 +314,12 @@ class WorkerAddressServiceTest {
     }
 
     private void configure(Endpoint... endpoints) {
-        when(modelMetaConfig.endpointsWithGroup("model", RoleType.PREFILL))
+        when(modelMetaConfig.endpointsWithGroup(RoleType.PREFILL))
                 .thenReturn(Arrays.stream(endpoints).map(endpoint -> Pair.of(endpoint.getGroup(), endpoint)).toList());
     }
 
     private List<WorkerHost> refresh() {
-        return workerAddressService.getEngineWorkerList("model", RoleType.PREFILL);
+        return workerAddressService.getEngineWorkerList(RoleType.PREFILL);
     }
 
     private static Endpoint endpoint(String address) {

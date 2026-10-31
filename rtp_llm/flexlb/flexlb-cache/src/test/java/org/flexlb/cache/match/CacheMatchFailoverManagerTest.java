@@ -148,11 +148,9 @@ class CacheMatchFailoverManagerTest {
         KvcmConfig kvcmTopology = new KvcmConfig();
 
         ServiceRoute route = new ServiceRoute();
-        route.setServiceId("test-service");
         route.setKvcm(kvcmTopology);
 
-        ModelMetaConfig config = new ModelMetaConfig();
-        config.putServiceRoute(route.getServiceId(), route);
+        ModelMetaConfig config = new ModelMetaConfig(route);
         return kvcm(config,
                 runtime -> runtime.getLocalStandby().setAutoSwitch(autoSwitch));
     }

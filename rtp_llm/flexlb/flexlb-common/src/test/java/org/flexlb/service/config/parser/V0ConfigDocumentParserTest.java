@@ -147,7 +147,7 @@ class V0ConfigDocumentParserTest {
         assertThat(behavior.getConsistency()).isInstanceOf(ZookeeperConsistencyConfig.class);
         assertThat(((ZookeeperConsistencyConfig) behavior.getConsistency()).getConnectString())
                 .isEqualTo("zk.example:2181");
-        assertThat(modelService.getServiceId()).isEqualTo("engine-service");
+        assertThat(modelService.getAllEndpoints().getFirst().getAddress()).isEqualTo("engine.example");
         assertThat(modelService.getKvcm()).isNotNull();
         assertThat(modelService.getOptimizer()).isNotNull();
         service.close();

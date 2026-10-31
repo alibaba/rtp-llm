@@ -1959,7 +1959,6 @@ class MockEngineCluster:
         prefill = [s.ip_port for s in self.states if s.role == "prefill"]
         decode = [s.ip_port for s in self.states if s.role == "decode"]
         model_service_config = {
-            "service_id": "aigc.text-generation.generation.engine_service",
             "load_balance": True,
             "hosts": {prefill_domain: prefill, decode_domain: decode},
             "role_endpoints": [

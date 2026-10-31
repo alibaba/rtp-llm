@@ -1,10 +1,10 @@
 package org.flexlb.dao.route;
 
-import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.flexlb.config.ModelMetaConfig;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.discovery.ServiceDiscoveryType;
+import org.flexlb.service.config.parser.ModelServiceConfigParser;
 import org.flexlb.util.JsonUtils;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
@@ -14,7 +14,6 @@ import java.util.List;
 class ServiceRouteTest {
     private static final String ROUTE_JSON = """
             {
-              "service_id": "aigc.text-generation.generation.engine_service",
               "prefill_endpoint": {
                 "address": "com.aicheng.whale.pre.deepseek_dp_tp_test",
                 "protocol": "http",
@@ -60,10 +59,12 @@ class ServiceRouteTest {
     }
 
     @Test
-    void testConfigLoaderList() {
-        List<ServiceRoute> serviceRoutes = JsonUtils.toObject("[" + ROUTE_JSON + "]", new TypeReference<>() {
-        });
-        assertStandardRoute(serviceRoutes.getFirst());
+    void ignoresLegacyServiceIdWithoutSerializingIt() {
+        ServiceRoute route =
+                ModelServiceConfigParser.parse(ROUTE_JSON.replaceFirst("\\{", "{\"service_id\":\"legacy-service\","));
+
+        assertStandardRoute(route);
+        Assertions.assertFalse(JsonUtils.strictValueToTree(route).has("service_id"));
     }
 
     private static void assertStandardRoute(ServiceRoute serviceRoute) {
@@ -85,10 +86,34 @@ class ServiceRouteTest {
     }
 
     @Test
+    void resolvesRoleEndpointsAcrossGroupsWithoutAModelIdentifier() {
+        ServiceRoute route = ModelServiceConfigParser.parse("""
+                {"role_endpoints":[
+                  {"group":"g1","prefill_endpoint":{"address":"p1"},"decode_endpoint":{"address":"d1"}},
+                  {"group":"g2","prefill_endpoint":{"address":"p2"}}
+                ]}
+                """);
+        ModelMetaConfig config = new ModelMetaConfig(route);
+
+        var prefill = config.endpointsWithGroup(RoleType.PREFILL);
+        Assertions.assertEquals(List.of("g1", "g2"), prefill.stream().map(pair -> pair.getLeft()).toList());
+        Assertions.assertEquals(List.of("p1", "p2"),
+                prefill.stream().map(pair -> pair.getRight().getAddress()).toList());
+        Assertions.assertEquals(List.of(RoleType.DECODE, RoleType.PREFILL), config.requiredRoles());
+        Assertions.assertTrue(config.endpointsWithGroup(RoleType.ENCODER).isEmpty());
+        Assertions.assertTrue(config.endpointsWithGroup(null).isEmpty());
+        var decode = config.endpointsWithGroup(RoleType.DECODE);
+        Assertions.assertEquals("d1", decode.getFirst().getRight().getAddress());
+        Assertions.assertNull(decode.getLast().getRight());
+
+        prefill.clear();
+        Assertions.assertEquals(2, config.endpointsWithGroup(RoleType.PREFILL).size());
+    }
+
+    @Test
     void should_load_pd_fusion_and_vit_endpoints() throws Exception {
         String json = """
                 {
-                  "service_id": "test.service",
                   "role_endpoints": [{
                     "group": "g1",
                     "pd_fusion_endpoint": {"address": "pd", "protocol": "http", "path": "/"},
@@ -109,7 +134,6 @@ class ServiceRouteTest {
     void should_load_encoder_endpoint_as_independent_role() throws Exception {
         String json = """
                 {
-                  "service_id": "test.service",
                   "role_endpoints": [{
                     "group": "g1",
                     "encoder_endpoint": {"address": "encoder", "protocol": "http", "path": "/"},
@@ -119,8 +143,7 @@ class ServiceRouteTest {
                 """;
 
         ServiceRoute route = objectMapper.readValue(json, ServiceRoute.class);
-        ModelMetaConfig config = new ModelMetaConfig();
-        config.putServiceRoute(route.getServiceId(), route);
+        ModelMetaConfig config = new ModelMetaConfig(route);
 
         Assertions.assertEquals(List.of(RoleType.VIT, RoleType.ENCODER), config.requiredRoles());
         Assertions.assertEquals("encoder", route.getRoleEndpoints(RoleType.ENCODER).getFirst().getAddress());
@@ -151,7 +174,6 @@ class ServiceRouteTest {
     void loadsKvcmConfigurationWithCodeDefaults() throws Exception {
         String json = """
                 {
-                  "service_id": "test-service",
                   "kvcm": {
                     "address": "v-kvcm",
                     "namespace": "vllm-test-0",
