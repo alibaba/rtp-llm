@@ -8,7 +8,10 @@ import torch
 
 from rtp_llm.config.py_config_modules import VitConfig
 from rtp_llm.config.quant_config import (
+    CompressedW4A8Int4PerChannelQuantConfig,
     Fp8BlockWiseQuantConfig,
+    ModelOptFp4Config,
+    MXFp4QuarkQuantConfig,
     QuantizationConfig,
     W4a8Int4PerChannelQuantConfig,
     init_quant_config,
@@ -20,6 +23,45 @@ from rtp_llm.ops import TaskType, VitSeparation
 from rtp_llm.utils.base_model_datatypes import VitParameters
 from rtp_llm.utils.util import get_config_from_path, to_torch_dtype
 from rtp_llm.utils.weight_type import WEIGHT_TYPE
+
+
+def apply_quant_scope_to_pricing(model_config: "ModelConfig", quant_config) -> None:
+    """Declare the dense/expert pricing scope of an expert-only quantization.
+
+    Called from init_precision_config right after quant_algo is set.  The
+    model-wide quant_algo feeds eval_model_weight_size() its default width,
+    which is only correct when the checkpoint stores *every* layer weight at
+    that width.  The classes handled here are expert-only or online-quant
+    schemes whose dense slice (attention, dense FFN, shared experts, norms)
+    stays BF16 on disk; without the declaration the estimate under-counts
+    load-time residency and can route the loader into the
+    fastsafetensors/GPU path with too little headroom (the mirror image of
+    the V4-Pro overestimate misroute).
+
+    Declarations already present on the model config (e.g. an explicit
+    expert_weight_dtype from the model's config parsing) always win.
+    """
+    if isinstance(quant_config, CompressedW4A8Int4PerChannelQuantConfig):
+        # Kimi-K2.5: routed experts int4-g32; the ignore list keeps
+        # attention/shared-expert/lm_head weights BF16.
+        model_config.dense_weight_dtype = "bf16"
+    elif isinstance(quant_config, MXFp4QuarkQuantConfig):
+        # quark MXFP4 checkpoints quantize the routed experts (and MoE
+        # linears) while the dense slice ships BF16.
+        model_config.dense_weight_dtype = "bf16"
+    elif isinstance(quant_config, ModelOptFp4Config):
+        if not quant_config.is_quanted():
+            # Online NVFP4 (--quantization MODELOPT_FP4 on a BF16 MoE
+            # checkpoint): experts are quantized to FP4 in flight (resident
+            # ~0.53 B/param) while the dense slice stays BF16.
+            model_config.dense_weight_dtype = "bf16"
+            if not (model_config.expert_weight_dtype or "").strip():
+                model_config.expert_weight_dtype = "fp4"
+        elif quant_config.mixed_attention:
+            # Mixed-attention NVFP4 checkpoints: full-attention layers and
+            # the ignore-list modules are BF16; only linear/SWA layers and
+            # the routed experts carry FP4.
+            model_config.dense_weight_dtype = "bf16"
 
 
 def kv_cache_dtype_to_torch_dtype(
@@ -99,6 +141,7 @@ class ModelConfig(CppModelConfig):
         "src_quantization_bit",
         "config_dtype",
         "expert_weight_dtype",
+        "dense_weight_dtype",
         "template_type",
         "model_name",
         "quant_config",
@@ -283,11 +326,34 @@ class ModelConfig(CppModelConfig):
                     "(narrow experts) or 'fp8'/'int8' (model-wide width)"
                 )
 
+        # The complementary scope: expert-only quantization keeps the dense
+        # slice (attention, dense FFN, shared experts, norms) at its original
+        # width while ``quant_algo`` describes the narrow routed experts.
+        # Kimi-K2.5 int4-g32 experts, quark MXFP4 and mixed-attention NVFP4
+        # checkpoints all leave their dense weights in BF16 on disk; without
+        # this declaration the dense slice is priced at the model-wide 4-bit
+        # width and the estimate under-counts load-time residency (~1.46
+        # bytes/param on the dense slice), which can push the loader into
+        # the fastsafetensors/GPU path with too little headroom.
+        dense_param_bytes = layer_param_bytes
+        dense_weight_dtype = (self.dense_weight_dtype or "").strip().lower()
+        if dense_weight_dtype:
+            if dense_weight_dtype in ("bf16", "fp16"):
+                dense_param_bytes = 2.0
+            elif dense_weight_dtype in ("fp8", "int8"):
+                dense_param_bytes = 1.0
+            else:
+                raise ValueError(
+                    f"dense_weight_dtype {self.dense_weight_dtype!r} is not a "
+                    "supported dense-slice storage dtype; expected 'bf16'/'fp16' "
+                    "(unquantized dense) or 'fp8'/'int8' (8-bit dense)"
+                )
+
         layer_param_count = self.layer_weight_param_count()
         moe_param_count = self.moe_weight_param_count()
         model_size = (
             self.word_emb_param_count(vocab_size) * 2
-            + max(layer_param_count - moe_param_count, 0) * layer_param_bytes
+            + max(layer_param_count - moe_param_count, 0) * dense_param_bytes
             + moe_param_count * expert_param_bytes
             + self.word_emb_param_count(vocab_size) * 2
         )  # maybe some model donot have lm_head
@@ -633,6 +699,12 @@ class ModelConfig(CppModelConfig):
         # ``quantization_config``).  None keeps experts at the model-wide
         # quant width; see eval_model_weight_size for the pricing effect.
         self.expert_weight_dtype: Optional[str] = None
+        # Storage dtype of the dense slice (attention/dense FFN/shared
+        # experts/norms) when the quantization scope is expert-only and the
+        # dense weights stay unquantized (e.g. Kimi-K2.5 int4 experts, quark
+        # MXFP4, mixed-attention NVFP4).  None keeps the dense slice at the
+        # model-wide quant width; see eval_model_weight_size.
+        self.dense_weight_dtype: Optional[str] = None
 
         # Model metadata fields (merged from function parameters)
         self.template_type: Optional[Any] = None  # TemplateType enum
@@ -751,6 +823,7 @@ class ModelConfig(CppModelConfig):
                 quant_config.bits,
                 quant_config.group_size(),
             )
+            apply_quant_scope_to_pricing(self, quant_config)
 
         # Initialize data_type: first try act_type, then config_dtype, finally default to FP16
         data_type: Optional[WEIGHT_TYPE] = None

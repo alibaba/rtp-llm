@@ -262,6 +262,165 @@ class ExpertWeightDtypeSizeTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 config.eval_model_weight_size()
 
+    def test_expert_only_quant_prices_dense_slice_at_bf16(self):
+        # Kimi-K2.5 / quark MXFP4 / mixed-attention NVFP4 shape: the
+        # model-wide 4-bit algo prices routed experts correctly (0.54) but
+        # the dense slice stays BF16 (2.0 B/param) on disk.  Without the
+        # dense_weight_dtype declaration the dense slice is under-counted
+        # by 1.46 B/param and the loader gates can pick the GPU path with
+        # too little headroom.
+        with TemporaryDirectory() as ckpt_path:
+            _write_quant_config(ckpt_path)
+            config = _moe_model_config(ckpt_path, V4_FLASH_SHAPE)
+            config.quant_algo.setQuantAlgo("w4a8_int4_per_channel", 4, 32)
+            self.assertEqual(config.quant_algo.getWeightBits(), 4)
+            moe_params = config.moe_weight_param_count()
+            dense_params = _legacy_layer_param_count(V4_FLASH_SHAPE) - moe_params
+            embedding = 2 * (V4_FLASH_SHAPE["vocab"] * V4_FLASH_SHAPE["hidden"])
+
+            underpriced = config.eval_model_weight_size()
+            self.assertAlmostEqual(
+                underpriced,
+                embedding + dense_params * 0.54 + moe_params * 0.54 + embedding,
+                delta=2.0,
+            )
+
+            config.dense_weight_dtype = "bf16"
+            self.assertAlmostEqual(
+                config.eval_model_weight_size(),
+                embedding + dense_params * 2.0 + moe_params * 0.54 + embedding,
+                delta=2.0,
+            )
+
+    def test_dense_weight_dtype_fp8_pricing(self):
+        # A checkpoint with FP8 dense weights and 4-bit experts prices the
+        # dense slice at 1.0 B/param (e.g. the qwen4 FP8-dense + NVFP4-MoE
+        # recipe).
+        with TemporaryDirectory() as ckpt_path:
+            _write_quant_config(ckpt_path)
+            config = _moe_model_config(ckpt_path, V4_FLASH_SHAPE)
+            config.quant_algo.setQuantAlgo("w4a8_int4_per_channel", 4, 32)
+            config.dense_weight_dtype = "fp8"
+            config.expert_weight_dtype = "fp4"
+            moe_params = config.moe_weight_param_count()
+            dense_params = _legacy_layer_param_count(V4_FLASH_SHAPE) - moe_params
+            embedding = 2 * (V4_FLASH_SHAPE["vocab"] * V4_FLASH_SHAPE["hidden"])
+            self.assertAlmostEqual(
+                config.eval_model_weight_size(),
+                embedding + dense_params * 1.0 + moe_params * 0.54 + embedding,
+                delta=2.0,
+            )
+
+    def test_unknown_dense_dtype_fails_fast(self):
+        with TemporaryDirectory() as ckpt_path:
+            _write_quant_config(ckpt_path)
+            config = _moe_model_config(ckpt_path, V4_FLASH_SHAPE)
+            config.dense_weight_dtype = "int2"
+            with self.assertRaises(ValueError):
+                config.eval_model_weight_size()
+
+    def test_quant_scope_setters_declare_dense_bf16(self):
+        # init_precision_config routes the expert-only quant classes to the
+        # dense-bf16 pricing scope; online NVFP4 additionally narrows the
+        # expert pricing.
+        from rtp_llm.config.model_config import apply_quant_scope_to_pricing
+        from rtp_llm.config.quant_config import (
+            CompressedW4A8Int4PerChannelQuantConfig,
+            ModelOptFp4Config,
+            MXFp4QuarkQuantConfig,
+        )
+
+        with TemporaryDirectory() as ckpt_path:
+            _write_quant_config(ckpt_path)
+            base = lambda: _moe_model_config(ckpt_path, V4_FLASH_SHAPE)
+
+            config = base()
+            apply_quant_scope_to_pricing(
+                config,
+                CompressedW4A8Int4PerChannelQuantConfig(
+                    bits=4, group_size=32, is_quanted=True, ignore_patterns=[]
+                ),
+            )
+            self.assertEqual(config.dense_weight_dtype, "bf16")
+
+            config = base()
+            apply_quant_scope_to_pricing(
+                config, MXFp4QuarkQuantConfig(bits=4, group_size=32, is_quanted=True)
+            )
+            self.assertEqual(config.dense_weight_dtype, "bf16")
+
+            config = base()
+            apply_quant_scope_to_pricing(
+                config,
+                ModelOptFp4Config(bits=4, group_size=16, is_quanted=True,
+                                  mixed_attention=True),
+            )
+            self.assertEqual(config.dense_weight_dtype, "bf16")
+            self.assertEqual((config.expert_weight_dtype or "").strip(), "")
+
+            config = base()
+            apply_quant_scope_to_pricing(
+                config,
+                ModelOptFp4Config(bits=4, group_size=16, is_quanted=False),
+            )
+            self.assertEqual(config.dense_weight_dtype, "bf16")
+            self.assertEqual(config.expert_weight_dtype, "fp4")
+
+            # An explicit expert declaration survives the online branch.
+            config = base()
+            config.expert_weight_dtype = "fp8"
+            apply_quant_scope_to_pricing(
+                config,
+                ModelOptFp4Config(bits=4, group_size=16, is_quanted=False),
+            )
+            self.assertEqual(config.expert_weight_dtype, "fp8")
+
+    def test_glm_fp4_expert_dtype_from_quantization_config(self):
+        # GLM-5 FP4-expert checkpoints declare the narrow routed-expert
+        # storage inside quantization_config.expert_dtype (not the V4-style
+        # top-level expert_dtype); DeepSeekV2._from_hf must surface it.
+        from rtp_llm.models.deepseek_v2 import DeepSeekV2
+
+        glm_config = {
+            "intermediate_size": 1024,
+            "num_attention_heads": 4,
+            "num_key_value_heads": 1,
+            "num_hidden_layers": 2,
+            "vocab_size": 1024,
+            "hidden_size": 512,
+            "qk_nope_head_dim": 64,
+            "qk_rope_head_dim": 16,
+            "v_head_dim": 64,
+            "rms_norm_eps": 1e-6,
+            "routed_scaling_factor": 1.0,
+            "num_experts_per_tok": 4,
+            "n_routed_experts": 16,
+            "moe_intermediate_size": 256,
+            "n_shared_experts": 1,
+            "first_k_dense_replace": 0,
+            "quantization_config": {
+                "quant_method": "fp8",
+                "expert_dtype": "fp4",
+            },
+        }
+        with TemporaryDirectory() as ckpt_path:
+            with open(f"{ckpt_path}/config.json", "w") as writer:
+                json.dump(glm_config, writer)
+            config = ModelConfig()
+            DeepSeekV2._from_hf(config, ckpt_path)
+            self.assertEqual(config.expert_weight_dtype, "fp4")
+            # The narrow declaration drops the estimate toward the disk
+            # figure only after init_precision_config resolves the
+            # model-wide width; here it is enough that the scope is set.
+            with open(f"{ckpt_path}/config.json") as reader:
+                cfg = json.load(reader)
+            cfg["quantization_config"].pop("expert_dtype")
+            with open(f"{ckpt_path}/config.json", "w") as writer:
+                json.dump(cfg, writer)
+            config2 = ModelConfig()
+            DeepSeekV2._from_hf(config2, ckpt_path)
+            self.assertEqual((config2.expert_weight_dtype or "").strip(), "")
+
 
 class WeightConvertDeviceDecisionReplayTest(unittest.TestCase):
     """Replay the v4_pro smoke failure with the measured CI numbers.
@@ -315,6 +474,71 @@ class WeightConvertDeviceDecisionReplayTest(unittest.TestCase):
             # convert device -- the exact fault this fix removes.
             config.expert_weight_dtype = None
             self.assertEqual(loader._choose_weight_convert_device("cuda:0"), "cpu")
+
+
+class Fp4ExpertStorageDetectionTest(unittest.TestCase):
+    @staticmethod
+    def _expert_keys(with_scales: bool):
+        keys = {
+            "layers.3.attn.wq_a.weight",
+            "layers.3.ffn.experts.17.w1.weight",
+            "layers.3.ffn.experts.17.w2.weight",
+            "layers.3.ffn.experts.17.w3.weight",
+        }
+        if with_scales:
+            keys |= {
+                "layers.3.ffn.experts.17.w1.scale",
+                "layers.3.ffn.experts.17.w2.scale",
+                "layers.3.ffn.experts.17.w3.scale",
+            }
+        return keys
+
+    def test_scale_sibling_keys_detect_fp4(self):
+        from rtp_llm.models.deepseek_v4 import detect_fp4_expert_storage
+
+        self.assertEqual(detect_fp4_expert_storage(self._expert_keys(True)), "fp4")
+
+    def test_fp8_layout_and_dense_scales_not_detected(self):
+        from rtp_llm.models.deepseek_v4 import detect_fp4_expert_storage
+
+        # FP8/int8 stored experts carry no per-expert scale siblings.
+        self.assertIsNone(detect_fp4_expert_storage(self._expert_keys(False)))
+        # Dense FP8 block-wise scale names must not trigger either.
+        self.assertIsNone(
+            detect_fp4_expert_storage(
+                {"layers.3.attn.wq.weight_scale_inv", "layers.3.ffn.experts.17.w1.weight_inv"}
+            )
+        )
+
+    def test_process_meta_populates_undeclared_config(self):
+        from rtp_llm.models.deepseek_v4 import DeepSeekV4Weight
+
+        with TemporaryDirectory() as ckpt_path:
+            _write_quant_config(ckpt_path)
+            config = _moe_model_config(ckpt_path, V4_PRO_SHAPE)
+            config.num_hash_layers = 0
+            shim = SimpleNamespace(
+                model_config=config, _num_layers=V4_PRO_SHAPE["layers"]
+            )
+            DeepSeekV4Weight._process_meta(shim, [{}], self._expert_keys(True))
+            self.assertEqual(config.expert_weight_dtype, "fp4")
+            # The estimate now prices experts at their storage width and
+            # lands back on the disk-sized figure (see the V4-Pro replay).
+            self.assertLess(config.eval_model_weight_size(), 893e9 * 1.05)
+
+    def test_process_meta_respects_explicit_declaration(self):
+        from rtp_llm.models.deepseek_v4 import DeepSeekV4Weight
+
+        with TemporaryDirectory() as ckpt_path:
+            _write_quant_config(ckpt_path)
+            # An explicit fp8 declaration wins over the detected storage.
+            config = _moe_model_config(ckpt_path, V4_PRO_SHAPE, "fp8")
+            config.num_hash_layers = 0
+            shim = SimpleNamespace(
+                model_config=config, _num_layers=V4_PRO_SHAPE["layers"]
+            )
+            DeepSeekV4Weight._process_meta(shim, [{}], self._expert_keys(True))
+            self.assertEqual(config.expert_weight_dtype, "fp8")
 
 
 if __name__ == "__main__":
