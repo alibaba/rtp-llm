@@ -143,3 +143,11 @@ python3 an_gated_rounds.py p2
 ```
 
 A 5kpro TP4 decode peer for these runs is `../decode/run_decode_tp4_sm120_pd.sh`.
+
+Batched prefill and the request count: with dense indexer logits (`COMPRESSED_LOGITS=0`) a batch is
+`requests x 8191` columns wide for 32K contexts, and past 32768 columns (5 or more requests) the deterministic TopK
+canonicalize falls back from its Triton kernel to a torch gather + argsort, about 30 ms per CSA layer at 8 requests.
+Measured on CEP4PP2 with 8192 new tokens per batch, per-stage forward GPU time: 1/2/4/8 requests 252/257/270/591 ms
+dense, 252/258/266/282 ms with the default per-request windows (TTFT for 8 x (31K hit + 1K new) 1410 -> 747 ms).
+`rtp_llm/models_py/modules/dsv4/fp8/test/test_fp4_prefill_compressed_logits.py` checks that both layouts select the
+same TopK.

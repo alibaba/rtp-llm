@@ -11,6 +11,7 @@
 #   RUN         run/log dir (default ./run)
 #   MTP_CHUNKED=0 FASTGEN_ARGS=' '  non-fastgen MTP prefill (same binary) for comparison
 #   CP_SINGLE=0 MAX_CTX_BS=4  batched prefill: up to 4 requests per pass (default 1 per pass)
+#   COMPRESSED_LOGITS=0  dense batch-wide indexer logits (default 1: per-request windows, see the export below)
 #   GEN         MTP draft depth (gen_num_per_cycle), default 3; must match the decode side. GEN=2 also sets
 #               DSV4_FP4_INDEXER_ALLOW_MTP2=1 (MTP depth 2 with the FP4 indexer is opt-in)
 #   RDMA=0      KV cache store over TCP instead of eRDMA (default 1)
@@ -61,6 +62,9 @@ export DSV4_INDEXER_FP8_DEEPGEMM_PAGED=0
 export DSV4_INDEXER_TILE=16,256,8,3
 export DSV4_INDEXER_TOPK_B7_RECONSTRUCT=0
 export DSV4_INDEXER_TOPK_CANONICALIZE=1
+# Batched prefill: score each request's own compressed-K window so canonicalize stays on its Triton path
+# (dense logits are B x 8191 wide for 32K contexts and leave it past 4 requests).
+export DSV4_FP4_PREFILL_COMPRESSED_LOGITS=${COMPRESSED_LOGITS:-1}
 export DSV4_M1_HOST_META=0
 export DSV4_MHC_PRE_GEMM_BACKEND=tilelang_single
 export DSV4_MOE_ACTIVE_SCALE_FUSION=1

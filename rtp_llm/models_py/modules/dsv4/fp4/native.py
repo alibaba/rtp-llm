@@ -27,7 +27,13 @@ def provider():
     return deep_gemm
 
 
-def prefill_score(q, weights, packed_k, k_scales, starts, ends, *, clean_logits=False):
+def prefill_score(
+    q, weights, packed_k, k_scales, starts, ends, *, clean_logits=False, max_seqlen_k=0
+):
+    """Dense ``[rows, K rows]`` logits, or with ``max_seqlen_k > 0`` compressed
+    ``[rows, max_seqlen_k]`` logits where column ``j`` of row ``r`` holds key
+    ``starts[r] + j`` (DeepGEMM writes only each row's window).
+    """
     payload, scales = q
     if payload.dtype != torch.uint8 or scales.dtype != torch.uint8:
         raise ValueError("Native FP4 Q requires uint8 payload and UE8M0 scales")
@@ -47,9 +53,12 @@ def prefill_score(q, weights, packed_k, k_scales, starts, ends, *, clean_logits=
         starts.contiguous(),
         ends.contiguous(),
         clean_logits=clean_logits,
+        max_seqlen_k=int(max_seqlen_k),
     )
     if not isinstance(result, torch.Tensor):
         result = torch.from_dlpack(result)
+    if max_seqlen_k > 0:
+        return result[: payload.shape[0], : int(max_seqlen_k)]
     return result[: payload.shape[0], : packed_k.shape[0]]
 
 

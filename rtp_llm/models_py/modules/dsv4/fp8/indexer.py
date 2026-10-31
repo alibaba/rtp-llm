@@ -231,6 +231,29 @@ def _fp8_prefill_topk_canonicalize() -> bool:
     )
 
 
+def _prefill_compressed_logits_enabled() -> bool:
+    """``DSV4_FP4_PREFILL_COMPRESSED_LOGITS=1``: native FP4 prefill scoring writes
+    each row's own K window.
+
+    The dense layout is ``[rows, total compressed K of the whole batch]``; its
+    width grows with the request count, and above 32768 columns the
+    deterministic TopK canonicalize leaves its Triton path for a full-width
+    torch gather + argsort (about 30 ms per CSA layer for 8 x 32K contexts on
+    SM120). With ``max_seqlen_k`` DeepGEMM stores column ``c - ks[r]`` for key
+    ``c`` of row ``r``, so the width is the longest single-request window and
+    TopK runs on ``[0, ke - ks)``. TopK indices are relative to the window
+    start in both layouts, so the selected keys and their order are unchanged.
+    """
+    return os.environ.get(
+        "DSV4_FP4_PREFILL_COMPRESSED_LOGITS", "0"
+    ).strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
 def _compressed_k_scalars_host(
     cp_ctx,
     prefix_lengths: torch.Tensor,
@@ -483,6 +506,10 @@ class _IndexerFP8PrefillMeta(NamedTuple):
     # with the rest of prefill metadata.
     indexer_cp_plan: Optional[Any]
     indexer_cp_local_cu: Optional[torch.Tensor]
+    # Longest single-request compressed-K window (max_b T_b), from the host
+    # length mirrors; 0 when unknown or on the B==1 path. Compressed logits are
+    # used when it is below the batch total ``T``.
+    max_req_k: int = 0
 
 
 class IndexerFP8(PoolBackedModule):
@@ -536,6 +563,7 @@ class IndexerFP8(PoolBackedModule):
 
         self._fp4_indexer = fp4_indexer_enabled()
         self._fp4_native_paged = False
+        self._fp4_native_prefill = False
         self._cache_payload_dim = 64 if self._fp4_indexer else INDEXER_HEAD_DIM
         self._cache_payload_dtype = (
             torch.uint8 if self._fp4_indexer else torch.float8_e4m3fn
@@ -580,6 +608,7 @@ class IndexerFP8(PoolBackedModule):
                 self._score_prefill = triton_prefill_score
             else:
                 self._score_prefill = prefill_score
+                self._fp4_native_prefill = True
             self._gather_cache = gather_cache
 
         from rtp_llm.models_py.modules.dsv4.fp8.attention import _v4_fp8_linear
@@ -1061,6 +1090,15 @@ class IndexerFP8(PoolBackedModule):
                 host_scalars = _compressed_k_scalars_host(
                     cp_ctx, prefix_lengths, eff_input_lengths, ratio
                 )
+                max_req_k = 0
+                if host_scalars is not None:
+                    max_req_k = max(
+                        (int(p) + int(l)) // int(ratio)
+                        for p, l in zip(
+                            cp_ctx.prefix_lengths_full_host,
+                            cp_ctx.input_lengths_full_host,
+                        )
+                    )
                 seq_total_per_req = prefix_lengths.to(
                     device=device, dtype=torch.int64
                 ) + eff_input_lengths.to(
@@ -1148,6 +1186,7 @@ class IndexerFP8(PoolBackedModule):
             )
             is_fresh_prefill = sp_int == 0
         else:
+            max_req_k = 0
             # Legacy B == 1 scalar path — unchanged, bit-equal to pre-Phase-3a.
             with record_function_range("dsv4.fp8.indexer.prepare.legacy"):
                 end_pos = sp_int + seqlen
@@ -1312,6 +1351,7 @@ class IndexerFP8(PoolBackedModule):
             compressor_meta=compressor_meta,
             indexer_cp_plan=indexer_cp_plan,
             indexer_cp_local_cu=indexer_cp_local_cu,
+            max_req_k=max_req_k,
         )
 
     # --------------------------------------------------------------
@@ -1559,11 +1599,20 @@ class IndexerFP8(PoolBackedModule):
         if not chunked_score:
             score_chunk_rows = M
         out_buf = torch.empty((M, K), dtype=torch.int32, device=state.q_fp8.device)
+        compressed = (
+            self._fp4_native_prefill
+            and 0 < attention_inputs.max_req_k < attention_inputs.T
+            and _prefill_compressed_logits_enabled()
+        )
+        if compressed:
+            win_end = (attention_inputs.ke - attention_inputs.ks).contiguous()
+            win_start = torch.zeros_like(win_end)
 
         # Vendored CUDA per-row TopK over [ks[r], ke[r]). Causal mask is
         # implicit via ke = (q_pos+1)//ratio clamped to T; padding past
         # per-row valid count is ``-1`` from the kernel. For long prefill,
         # score in row chunks because DeepGEMM returns dense [rows, T].
+        # Compressed logits hold each row's own window, so TopK runs on [0, ke - ks).
         for row_start in range(0, M, score_chunk_rows):
             row_end = min(M, row_start + score_chunk_rows)
             with record_function_range("dsv4.fp8.indexer.prefill.score"):
@@ -1579,13 +1628,20 @@ class IndexerFP8(PoolBackedModule):
                     attention_inputs.ks[row_start:row_end],
                     attention_inputs.ke[row_start:row_end],
                     clean_logits=False,
-                )  # [chunk_rows, T] fp32
+                    **(
+                        {"max_seqlen_k": attention_inputs.max_req_k}
+                        if compressed
+                        else {}
+                    ),
+                )  # [chunk_rows, T] fp32; [chunk_rows, max_req_k] when compressed
 
             with record_function_range("dsv4.fp8.indexer.prefill.topk"):
                 _run_prefill_topk(
                     logits,
-                    attention_inputs.ks[row_start:row_end],
-                    attention_inputs.ke[row_start:row_end],
+                    (win_start if compressed else attention_inputs.ks)[
+                        row_start:row_end
+                    ],
+                    (win_end if compressed else attention_inputs.ke)[row_start:row_end],
                     out_buf[row_start:row_end],
                     K,
                     self.compress_ratio,
@@ -1776,6 +1832,14 @@ class IndexerFP8(PoolBackedModule):
             if not chunked_score:
                 score_chunk_rows = M
             out_buf = torch.empty((M, K), dtype=torch.int32, device=x.device)
+            compressed = (
+                self._fp4_native_prefill
+                and 0 < attention_inputs.max_req_k < attention_inputs.T
+                and _prefill_compressed_logits_enabled()
+            )
+            if compressed:
+                win_end = (attention_inputs.ke - attention_inputs.ks).contiguous()
+                win_start = torch.zeros_like(win_end)
 
             for row_start in range(0, M, score_chunk_rows):
                 row_end = min(M, row_start + score_chunk_rows)
@@ -1792,13 +1856,22 @@ class IndexerFP8(PoolBackedModule):
                         attention_inputs.ks[row_start:row_end],
                         attention_inputs.ke[row_start:row_end],
                         clean_logits=False,
+                        **(
+                            {"max_seqlen_k": attention_inputs.max_req_k}
+                            if compressed
+                            else {}
+                        ),
                     )
 
                 with record_function_range("dsv4.fp8.indexer.prefill.topk"):
                     _run_prefill_topk(
                         logits,
-                        attention_inputs.ks[row_start:row_end],
-                        attention_inputs.ke[row_start:row_end],
+                        (win_start if compressed else attention_inputs.ks)[
+                            row_start:row_end
+                        ],
+                        (win_end if compressed else attention_inputs.ke)[
+                            row_start:row_end
+                        ],
                         out_buf[row_start:row_end],
                         K,
                         self.compress_ratio,
