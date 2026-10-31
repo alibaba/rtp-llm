@@ -297,7 +297,6 @@ def set_parallelism_config(
 
     ffn_tp_size = parallelism_config.tp_size // parallelism_config.ffn_sp_size
     parallelism_config.ffn_tp_size = ffn_tp_size
-    parallelism_config.enable_sp = parallelism_config.ffn_sp_size > 1
     if world_rank is not None:
         parallelism_config.world_rank = world_rank
     parallelism_config.local_rank = (
@@ -404,14 +403,6 @@ def setup_default_args(py_env_configs):
     if not py_env_configs.model_args.model_type:
         raise ValueError(
             f"model_type is not set and could not be inferred from checkpoint path: {py_env_configs.model_args.ckpt_path}. Please provide --model_type or MODEL_TYPE environment variable."
-        )
-
-    # add rocm env config, if using default value, change it to optimize version
-    # 这些特殊处理仍然需要设置环境变量（因为可能被 C++ 代码读取）
-    if os.path.exists("/dev/kfd") and os.getenv("FT_DISABLE_CUSTOM_AR") is None:
-        py_env_configs.py_hw_kernel_config.ft_disable_custom_ar = False
-        logging.info(
-            "[MI308X] enable FT_DISABLE_CUSTOM_AR by default, as amd has own implementation."
         )
 
     if (

@@ -18,7 +18,6 @@ from rtp_llm.models_py.model_desc.hidden_state_capture import (
 )
 from rtp_llm.models_py.modules import AttnImplFactory
 from rtp_llm.models_py.modules.factory.attention.attn_factory import AttentionImpl
-from rtp_llm.ops import DeviceResourceConfig
 from rtp_llm.ops.compute_ops import (
     KVCache,
     PyModelInitResources,
@@ -37,9 +36,6 @@ class GptModelBase(nn.Module):
         max_generate_batch_size: int,
         fmha_config=None,  # Optional FMHAConfig
         py_hw_kernel_config=None,  # Optional HWKernelConfig
-        device_resource_config: Optional[
-            DeviceResourceConfig
-        ] = None,  # Optional DeviceResourceConfig
     ) -> None:
         super().__init__()
         self.config = config
@@ -53,12 +49,11 @@ class GptModelBase(nn.Module):
             and getattr(py_hw_kernel_config, "enable_decode_cascade_attention", False)
             else 0
         )
-        self.micro_batch_size: int = (
-            1
-            if device_resource_config
-            and device_resource_config.enable_layer_micro_batch == 0
-            else 2
-        )
+        # AF-disagg FFN-service receive side expects the C++ two-lane
+        # micro-batch contract (planMicroBatches always emits 2 lanes); the
+        # derived attribute previously collapsed to 1 and desynced the
+        # [dp_num, lanes + 1] receive buffer.
+        self.micro_batch_size: int = 2
         self.layer_num: int = config.num_layers
         self.vocab_size: int = config.vocab_size
 

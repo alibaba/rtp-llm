@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 from rtp_llm.models_py.modules.dsv4.fp8.attention import (
-    _use_read_from_pool,
     _use_cp_cache_hit_raw_q_merge,
     _force_cp_cache_hit_raw_q_merge,
     _force_all_cp_raw_q_merge,

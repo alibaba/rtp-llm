@@ -18,7 +18,6 @@ from rtp_llm.ops import (
     CacheStoreConfig,
     ConcurrencyConfig,
     DashScGrpcConfig,
-    DeviceResourceConfig,
     FfnDisAggregateConfig,
     FMHAConfig,
     GrammarConfig,
@@ -61,7 +60,6 @@ class EngineConfig:
     kv_cache_config: KVCacheConfig
     profiling_debug_logging_config: ProfilingDebugLoggingConfig
     hw_kernel_config: HWKernelConfig
-    device_resource_config: DeviceResourceConfig
     moe_config: MoeConfig
     model_specific_config: ModelSpecificConfig
     sp_config: SpeculativeExecutionConfig
@@ -109,9 +107,6 @@ class EngineConfig:
 
         lines.append("\n[HWKernelConfig]")
         lines.append(self.hw_kernel_config.to_string())
-
-        lines.append("\n[DeviceResourceConfig]")
-        lines.append(self.device_resource_config.to_string())
 
         lines.append("\n[MoeConfig]")
         lines.append(self.moe_config.to_string())
@@ -181,7 +176,6 @@ class EngineConfig:
         kv_cache_config = py_env_configs.kv_cache_config
         profiling_debug_logging_config = py_env_configs.profiling_debug_logging_config
         hw_kernel_config = py_env_configs.py_hw_kernel_config
-        device_resource_config = py_env_configs.device_resource_config
         model_specific_config = py_env_configs.model_specific_config
         misc_config = py_env_configs.misc_config.misc_config
         moe_config = py_env_configs.moe_config
@@ -231,7 +225,6 @@ class EngineConfig:
             kv_cache_config=kv_cache_config,
             profiling_debug_logging_config=profiling_debug_logging_config,
             hw_kernel_config=hw_kernel_config,
-            device_resource_config=device_resource_config,
             moe_config=moe_config,
             model_specific_config=model_specific_config,
             sp_config=sp_config,

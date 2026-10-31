@@ -59,7 +59,6 @@ protected:
         PDSepConfig pd_sep_config;
         pd_sep_config.role_type                      = RoleType::PREFILL;
         pd_sep_config.cache_store_listen_port        = 0;
-        pd_sep_config.decode_polling_call_prefill_ms = 30;
 
         config_ = P2PConnectorConfig::create(
             runtime_config, cache_store_config, parallelism_config, pd_sep_config, /*layer_all_num=*/2);

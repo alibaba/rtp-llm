@@ -247,11 +247,8 @@ def fused_rmsnorm_rope(
     BLOCK_D = triton.next_power_of_2(D)
     assert BLOCK_D <= 4096
 
-    env_group_heads = os.environ.get("DSV4_RMSNORM_ROPE_GROUP_HEADS")
     if group_heads is not None:
         selected_group_heads = group_heads
-    elif env_group_heads is not None:
-        selected_group_heads = int(env_group_heads)
     else:
         selected_group_heads = 1
         if _is_blackwell_device(x.device):
@@ -264,7 +261,7 @@ def fused_rmsnorm_rope(
             selected_group_heads = 8 if N_freq >= group_heads8_min_freq else 4
     if selected_group_heads not in (1, 2, 4, 8):
         raise ValueError(
-            f"invalid DSV4_RMSNORM_ROPE_GROUP_HEADS={selected_group_heads}; "
+            f"invalid group_heads={selected_group_heads}; "
             "expected 1, 2, 4, or 8"
         )
     can_group_heads = (

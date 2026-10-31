@@ -45,6 +45,7 @@ from rtp_llm.utils.warmup import model_warm_up_enabled
 from rtp_llm.ops.compute_ops import PyModelInitResources, PyModelInputs, PyModelOutputs
 from rtp_llm.models_py.model_desc.deepseek_v4_model import DeepSeekV4Model as _BaseDeepSeekV4Model
 
+
 def _env_flag_enabled(name: str, default: bool = True) -> bool:
     raw = os.environ.get(name)
     if raw is None:
@@ -63,7 +64,6 @@ class DeepSeekV4Model(_BaseDeepSeekV4Model):
         max_generate_batch_size: int,
         fmha_config=None,
         py_hw_kernel_config=None,
-        device_resource_config=None,
         platform_provider=None,
     ):
         if platform_provider is None:
@@ -77,7 +77,6 @@ class DeepSeekV4Model(_BaseDeepSeekV4Model):
             max_generate_batch_size=max_generate_batch_size,
             fmha_config=fmha_config,
             py_hw_kernel_config=py_hw_kernel_config,
-            device_resource_config=device_resource_config,
         )
 
         # Build V4Transformer with matching args.
@@ -208,18 +207,6 @@ class DeepSeekV4Model(_BaseDeepSeekV4Model):
         self._materialized = False
         self._ckpt_path: str = model_config.ckpt_path
 
-        # Optional on-demand timeline capture. Set DSV4_PROFILE_TRACE=/path/trace.json
-        # and touch /tmp/dsv4_profile_trigger to capture the NEXT forward only.
-        self._profile_path = os.environ.get("DSV4_PROFILE_TRACE")
-        self._profile_trigger = "/tmp/dsv4_profile_trigger"
-        self._profile_done = False
-        if self._profile_path:
-            logging.info(
-                "[DeepSeekV4Model] timeline trigger: `touch %s` — "
-                "next forward captures to %s",
-                self._profile_trigger,
-                self._profile_path,
-            )
         self._init_capture_context(
             self._capture_canonical_layer,
             self._capture_canonical_final,

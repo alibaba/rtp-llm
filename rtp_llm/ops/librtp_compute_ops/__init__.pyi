@@ -25,7 +25,6 @@ __all__: list[str] = [
     "PyPrefillCudaGaphCopyParams",
     "TypeMeta",
     "get_device_id",
-    "preprocess_gemm_weight_by_key",
     "preprocess_weight_scale",
     "get_scalar_type",
     "get_typemeta",
@@ -468,7 +467,6 @@ class TypeMeta:
     def __init__(self) -> None: ...
 
 def get_device_id() -> int: ...
-def preprocess_gemm_weight_by_key(key: str, weight: torch.Tensor, user_arm_gemm_use_kai: bool) -> torch.Tensor: ...
 def preprocess_weight_scale(weight: torch.Tensor, scale: torch.Tensor) -> torch.Tensor: ...
 def get_scalar_type(arg0: TypeMeta) -> torch.dtype:
     """
@@ -483,8 +481,6 @@ def get_typemeta(arg0: torch.Tensor) -> TypeMeta:
 def init_exec_ctx(
     device_id: int,
     trace_memory: bool,
-    enable_comm_overlap: bool,
-    mla_ops_type: int,
 ) -> None: ...
 
 def register_comm_ops(broadcast_fn: typing.Callable, allreduce_fn: typing.Callable, allgather_fn: typing.Callable) -> None:

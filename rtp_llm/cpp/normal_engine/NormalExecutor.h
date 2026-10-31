@@ -28,7 +28,6 @@ public:
                             bool                                   warm_up             = false,
                             bool                                   is_propose          = false,
                             int                                    propose_model_index = 0,
-                            MlaOpsType                             mla_ops_type        = MlaOpsType::AUTO,
                             std::function<void()>                  profile_step_start  = nullptr,
                             std::function<void()>                  profile_step_finish = nullptr);
     ~NormalExecutor();

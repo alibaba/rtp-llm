@@ -17,7 +17,6 @@ from rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.shared_expert imp
     SequentialSharedExpertExecutor,
     W13SharedExpert,
     combine_routed_and_shared,
-    get_shared_expert_executor,
 )
 from rtp_llm.models_py.triton_kernels.moe.shared_expert import (
     quant_bf16_fp8_packed_ue8m0,
@@ -292,19 +291,6 @@ class TestSharedExpertExecutor(unittest.TestCase):
             self.assertEqual(resized.hidden_fp8.size(1), 256)
             self.assertEqual(grown_workspace.hidden_fp8.size(1), 128)
 
-    def test_overlap_threshold_short_circuits_capture_query(self):
-        executor = OverlapSharedExpertExecutor()
-        x = mock.Mock()
-        x.is_cuda = True
-        x.shape = (10 * 1024, 128)
-
-        with _env("MOE_SHARED_EXPERT_STREAM_TOKEN_THRESHOLD", "4096"), mock.patch(
-            "torch.cuda.is_available", return_value=True
-        ), mock.patch("torch.cuda.is_current_stream_capturing") as capture_query:
-            self.assertFalse(executor._can_overlap(x))
-
-        capture_query.assert_not_called()
-
     def test_combine_preserves_fp32_accumulate_semantics(self):
         routed = torch.tensor([[1.0, 2.0], [3.0, 4.0]], dtype=torch.float32)
         shared = torch.tensor([[0.5, -0.25], [0.125, -0.5]], dtype=torch.float32)
@@ -313,44 +299,11 @@ class TestSharedExpertExecutor(unittest.TestCase):
         ref = (routed.float() + shared.float()).to(torch.bfloat16)
         self.assertTrue(torch.equal(got, ref))
 
-    def test_bf16_add_experimental_switch(self):
-        routed = torch.randn(4, 8, dtype=torch.float32)
-        shared = torch.randn(4, 8, dtype=torch.float32)
-        with _env("MOE_STRICT_FUSED", "0"), _env("MOE_SHARED_EXPERT_BF16_ADD", "1"):
-            got = combine_routed_and_shared(routed, shared, torch.bfloat16)
-        ref = (routed.to(torch.bfloat16) + shared.to(torch.bfloat16)).to(torch.bfloat16)
-        self.assertTrue(torch.equal(got, ref))
-
-    def test_strict_rejects_bf16_add_switch(self):
-        routed = torch.randn(4, 8, dtype=torch.float32)
-        shared = torch.randn(4, 8, dtype=torch.float32)
-        with _env("MOE_SHARED_EXPERT_BF16_ADD", "1"):
-            with self.assertRaisesRegex(RuntimeError, "forbids"):
-                combine_routed_and_shared(routed, shared, torch.bfloat16)
-
     def test_strict_rejects_generic_shared_path(self):
         x = torch.randn(3, 4, dtype=torch.bfloat16)
         executor = SequentialSharedExpertExecutor()
         with self.assertRaisesRegex(RuntimeError, "generic Expert.forward"):
             executor.start(_Shared(), x)
-
-    def test_executor_dispatch(self):
-        os.environ.pop("MOE_SHARED_EXPERT_MODE", None)
-        self.assertIsInstance(
-            get_shared_expert_executor(), SequentialSharedExpertExecutor
-        )
-        with _env("MOE_SHARED_EXPERT_MODE", "sequential"):
-            self.assertIsInstance(
-                get_shared_expert_executor(), SequentialSharedExpertExecutor
-            )
-        with _env("MOE_SHARED_EXPERT_MODE", "overlap"):
-            self.assertIsInstance(
-                get_shared_expert_executor(), OverlapSharedExpertExecutor
-            )
-        with _env("MOE_SHARED_EXPERT_MODE", "auto"):
-            self.assertIsInstance(
-                get_shared_expert_executor(), OverlapSharedExpertExecutor
-            )
 
     def test_sequential_executor(self):
         x = torch.randn(3, 4, dtype=torch.bfloat16)
@@ -454,22 +407,6 @@ class TestSharedExpertExecutor(unittest.TestCase):
 
         ref = shared(x).float()
         self.assertTrue(torch.equal(out.cpu(), ref.cpu()))
-
-    @unittest.skipIf(not torch.cuda.is_available(), "CUDA required")
-    def test_overlap_threshold_falls_back_to_sequential(self):
-        x = torch.randn(33, 128, device="cuda", dtype=torch.bfloat16)
-        shared = _Shared().cuda()
-        executor = OverlapSharedExpertExecutor()
-
-        with _env("MOE_STRICT_FUSED", "0"), _env(
-            "MOE_SHARED_EXPERT_STREAM_TOKEN_THRESHOLD", "1"
-        ):
-            executor.start(shared, x)
-            self.assertIsNone(executor._active_stream)
-            got = executor.finish()
-
-        ref = shared(x).float()
-        self.assertTrue(torch.equal(got.cpu(), ref.cpu()))
 
     @unittest.skipIf(not torch.cuda.is_available(), "CUDA required")
     def test_merged_w13_matches_split_reference(self):

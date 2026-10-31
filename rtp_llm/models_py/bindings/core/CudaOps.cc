@@ -221,8 +221,7 @@ void runtimeCopy(const CopyParams& params) {
     params.check();
     auto         stream_raw  = at::cuda::getCurrentCUDAStream().stream();
     auto         comm_stream = getOverlapStream().stream();
-    bool         use_overlap = getEnableCommOverlap();
-    cudaStream_t stream      = (params.overlapped && use_overlap) ? comm_stream : stream_raw;
+    cudaStream_t stream      = params.overlapped ? comm_stream : stream_raw;
 
     const auto& src = params.src;
     const auto& dst = params.dst;
@@ -457,8 +456,7 @@ void runtimeBatchCopy(const BatchCopyParams& params) {
     auto stream_raw = at::hip::getCurrentHIPStream(at::hip::current_device()).stream();
 #endif  // USING_CUDA
     auto         comm_stream = getOverlapStream().stream();
-    bool         use_overlap = getEnableCommOverlap();
-    cudaStream_t stream      = (params.overlapped && use_overlap) ? comm_stream : stream_raw;
+    cudaStream_t stream      = params.overlapped ? comm_stream : stream_raw;
 
     BatchCopyParams fallback_copies;
     bool            need_fallback = false;

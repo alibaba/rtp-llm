@@ -165,64 +165,12 @@ def init_hw_kernel_group_args(parser, hw_kernel_config):
         ),
     )
 
-    hw_kernel_group.add_argument(
-        "--enable_native_cuda_graph",
-        env_name="ENABLE_NATIVE_CUDA_GRAPH",
-        bind_to=(hw_kernel_config, "enable_native_cuda_graph"),
-        type=str2bool,
-        default=False,
-        help="系统是否允许在C++后端使用Cuda Graph",
-    )
-
-    hw_kernel_group.add_argument(
-        "--num_native_cuda_graph",
-        env_name="NUM_NATIVE_CUDA_GRAPH",
-        bind_to=(hw_kernel_config, "num_native_cuda_graph"),
-        type=int,
-        default=200,
-        help="C++后端缓存Cuda Graph数量",
-    )
-
-    hw_kernel_group.add_argument(
-        "--deep_gemm_num_sm",
-        env_name="DEEP_GEMM_NUM_SM",
-        bind_to=(hw_kernel_config, "deep_gemm_num_sm"),
-        type=int,
-        default=None,
-        help="指定 DeepGEMM 使用的 SM (Streaming Multiprocessor) 数量。如果设置，此值将覆盖自动检测的数量。",
-    )
-
-    hw_kernel_group.add_argument(
-        "--arm_gemm_use_kai",
-        env_name="ARM_GEMM_USE_KAI",
-        bind_to=(hw_kernel_config, "arm_gemm_use_kai"),
-        type=str2bool,
-        default=False,
-        help="设置为 `True` 时，为 ARM GEMM 操作启用 KleidiAI 支持。这可能影响权重处理和计算性能。",
-    )
-
-    hw_kernel_group.add_argument(
-        "--enable_multi_block_mode",
-        env_name="ENABLE_MULTI_BLOCK_MODE",
-        bind_to=(hw_kernel_config, "enable_multi_block_mode"),
-        type=str2bool,
-        default=True,
-        help="控制是否为 Multi-Head Attention (MMHA) 启用 multi-block 模式。设置为 'ON' 启用，'OFF' 禁用。",
-    )
-
-    hw_kernel_group.add_argument(
-        "--rocm_hipblaslt_config",
-        env_name="ROCM_HIPBLASLT_CONFIG",
-        bind_to=(hw_kernel_config, "rocm_hipblaslt_config"),
-        type=str,
-        default="gemm_config.csv",
-        help="指定 hipBLASLt GEMM 配置文件的路径。此文件用于优化 ROCm平台上的 GEMM 操作。",
-    )
-
+    # FT_DISABLE_CUSTOM_AR feeds the Python-side custom-AllReduce override
+    # (py_env_configs.ft_disable_custom_ar_override); the legacy C++
+    # HWKernelConfig mirror field has been removed.
     hw_kernel_group.add_argument(
         "--ft_disable_custom_ar",
         env_name="FT_DISABLE_CUSTOM_AR",
-        bind_to=(hw_kernel_config, "ft_disable_custom_ar"),
         type=str2bool,
         default=None,
         help="设置为 `True` 时，禁用自定义的 AllReduce (AR) 实现，可能回退到标准库（如 NCCL）的 AllReduce。",
@@ -273,24 +221,6 @@ def init_hw_kernel_group_args(parser, hw_kernel_config):
             "Buckets must not exceed CONCURRENCY_LIMIT and do not resize decode capacity. "
             "If unset, buckets are generated up to CONCURRENCY_LIMIT."
         ),
-    )
-
-    hw_kernel_group.add_argument(
-        "--disable_dpc_random",
-        env_name="DISABLE_DPC_RANDOM",
-        bind_to=(hw_kernel_config, "disable_dpc_random"),
-        type=str2bool,
-        default=None,
-        help="控制是否禁用 DPC 的随机性",
-    )
-
-    hw_kernel_group.add_argument(
-        "--rocm_disable_custom_ag",
-        env_name="ROCM_DISABLE_CUSTOM_AG",
-        bind_to=(hw_kernel_config, "rocm_disable_custom_ag"),
-        type=str2bool,
-        default=None,
-        help="设置为 `True` 时，禁用ROCm平台自定义的 AllGather (AG) 实现，可能回退到标准库（如 RCCL）的 AllGather。",
     )
 
 

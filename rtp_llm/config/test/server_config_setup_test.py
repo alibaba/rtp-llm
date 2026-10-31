@@ -697,7 +697,6 @@ class GenerateConfigTest(TestCase):
                 py_env_configs.profiling_debug_logging_config
             ),
             hw_kernel_config=py_env_configs.py_hw_kernel_config,
-            device_resource_config=py_env_configs.device_resource_config,
             moe_config=py_env_configs.moe_config,
             model_specific_config=py_env_configs.model_specific_config,
             sp_config=py_env_configs.sp_config,

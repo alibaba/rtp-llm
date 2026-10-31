@@ -510,7 +510,6 @@ class SeparatedCaseRunner(CaseRunner):
             for role in [PREFILL_ROLE_NAME] if has_pd else [LLM_ROLE_NAME]:
                 envs[role]["VIT_SEPARATION"] = "2"
                 if len(self.vit_roles) == 1:
-                    envs[role]["REMOTE_VIT_SERVER_IP"] = "localhost"
                     if not has_pd:
                         envs[role]["REMOTE_SERVER_PORT"] = str(ports[self.vit_roles[0]])
             if frontend_envs is not None:

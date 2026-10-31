@@ -1,6 +1,4 @@
-import os
 import unittest
-from contextlib import contextmanager
 
 import torch
 
@@ -9,22 +7,8 @@ from rtp_llm.models_py.modules.dsv4.indexer_topk import (
     FastIndexerTopKBackend,
     PersistentIndexerTopKBackend,
     TorchIndexerTopKBackend,
-    get_indexer_topk_backend,
     select_indexer_topk,
 )
-
-
-@contextmanager
-def _env(key: str, value: str):
-    old = os.environ.get(key)
-    os.environ[key] = value
-    try:
-        yield
-    finally:
-        if old is None:
-            os.environ.pop(key, None)
-        else:
-            os.environ[key] = old
 
 
 def _assert_topk_sets(testcase, got, ref):
@@ -97,9 +81,7 @@ class TestIndexerTopKBackend(unittest.TestCase):
 
     def test_auto_backend_empty_3d_score_uses_safe_torch_path(self):
         score = torch.empty(1, 2, 0, dtype=torch.float32)
-        with _env("DSV4_INDEXER_TOPK_BACKEND", ""):
-            os.environ.pop("DSV4_INDEXER_TOPK_BACKEND", None)
-            out = select_indexer_topk(score, 512)
+        out = select_indexer_topk(score, 512)
         self.assertEqual(out.shape, (1, 2, 512))
         self.assertTrue(torch.equal(out, torch.full_like(out, -1)))
 
@@ -123,25 +105,12 @@ class TestIndexerTopKBackend(unittest.TestCase):
             torch.equal(out[1], torch.tensor([0, 1, -1, -1], dtype=torch.int32))
         )
 
-    def test_dispatch_env(self):
-        with _env("DSV4_INDEXER_TOPK_BACKEND", ""):
-            os.environ.pop("DSV4_INDEXER_TOPK_BACKEND", None)
-            self.assertIsInstance(get_indexer_topk_backend(), AutoIndexerTopKBackend)
-        with _env("DSV4_INDEXER_TOPK_BACKEND", "torch"):
-            self.assertIsInstance(get_indexer_topk_backend(), TorchIndexerTopKBackend)
-        with _env("DSV4_INDEXER_TOPK_BACKEND", "fast"):
-            self.assertIsInstance(get_indexer_topk_backend(), FastIndexerTopKBackend)
-        with _env("DSV4_INDEXER_TOPK_BACKEND", "persistent"):
-            self.assertIsInstance(get_indexer_topk_backend(), PersistentIndexerTopKBackend)
-
     @unittest.skipIf(not torch.cuda.is_available(), "CUDA required")
     def test_auto_backend_topk_512_matches_torch_sets(self):
         torch.manual_seed(1)
         score = torch.randn(3, 2048, device="cuda", dtype=torch.float32)
         lengths = torch.tensor([2048, 777, 13], device="cuda", dtype=torch.int32)
-        with _env("DSV4_INDEXER_TOPK_BACKEND", ""):
-            os.environ.pop("DSV4_INDEXER_TOPK_BACKEND", None)
-            auto = get_indexer_topk_backend().select(score, 512, lengths=lengths)
+        auto = AutoIndexerTopKBackend().select(score, 512, lengths=lengths)
         ref = TorchIndexerTopKBackend().select(score, 512, lengths=lengths)
         _assert_topk_sets(self, auto.cpu(), ref.cpu())
 
@@ -169,29 +138,6 @@ class TestIndexerTopKBackend(unittest.TestCase):
             got = PersistentIndexerTopKBackend().select(score, 512, lengths=lengths)
             _assert_topk_sets(self, got.cpu(), first.cpu())
             _assert_valid_indices_compact(self, got, lengths)
-
-    @unittest.skipIf(not torch.cuda.is_available(), "CUDA required")
-    def test_persistent_backend_canonicalized_order_is_repeatable(self):
-        torch.manual_seed(5)
-        score = torch.randn(5, 16384, device="cuda", dtype=torch.float32)
-        lengths = torch.tensor(
-            [16384, 9000, 4096, 511, 17], device="cuda", dtype=torch.int32
-        )
-        with _env("DSV4_INDEXER_TOPK_CANONICALIZE", "1"):
-            first = PersistentIndexerTopKBackend().select(score, 512, lengths=lengths)
-            for _ in range(5):
-                got = PersistentIndexerTopKBackend().select(score, 512, lengths=lengths)
-                self.assertTrue(torch.equal(got.cpu(), first.cpu()))
-                _assert_topk_sets(self, got.cpu(), first.cpu())
-                _assert_valid_indices_compact(self, got, lengths)
-                for row in got.cpu():
-                    valid_count = int((row >= 0).sum().item())
-                    self.assertTrue(
-                        torch.equal(
-                            row[:valid_count],
-                            torch.sort(row[:valid_count]).values,
-                        )
-                    )
 
     @unittest.skipIf(not torch.cuda.is_available(), "CUDA required")
     def test_persistent_backend_topk_1024_matches_torch_sets(self):

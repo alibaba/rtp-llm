@@ -93,13 +93,10 @@ def try_project_quantized_qkv(attn, x):
         return None
     if attn.q_lora_rank % 32 or attn.q_lora_rank < 128:
         return None
-    quant_kernel = os.environ.get("DSV4_FP8_QUANT_KERNEL", "auto").strip().lower()
     elements = (x.numel() // x.shape[-1]) * attn.q_lora_rank
     # The v2 producer has different zero/tiny-scale semantics. Let the native
-    # consumer select it (and validate unknown settings) on the original path.
-    if quant_kernel not in ("auto", "legacy") or (
-        quant_kernel == "auto" and elements >= 4 * 1024 * 1024
-    ):
+    # consumer select it on the original path.
+    if elements >= 4 * 1024 * 1024:
         return None
     projected = linear(x)
     qr, quantized = query_norm_quant(

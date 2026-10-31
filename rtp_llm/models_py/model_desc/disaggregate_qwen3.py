@@ -78,14 +78,12 @@ class DisaggregateModelBase(GptModelBase):
         parallelism_config: ParallelismConfig,
         weights: ModelWeights,
         max_generate_batch_size: int,
-        device_resource_config=None,
     ):
         super().__init__(
             config,
             parallelism_config,
             weights,
             max_generate_batch_size=max_generate_batch_size,
-            device_resource_config=device_resource_config,
         )
         ffn_disaggregate_config = parallelism_config.ffn_disaggregate_config
         check_with_info(
@@ -253,14 +251,12 @@ class Qwen3GemmModel(DisaggregateModelBase):
         parallelism_config: ParallelismConfig,
         weights: ModelWeights,
         max_generate_batch_size: int,
-        device_resource_config=None,
     ):
         super().__init__(
             config,
             parallelism_config,
             weights,
             max_generate_batch_size=max_generate_batch_size,
-            device_resource_config=device_resource_config,
         )
         ffn_disaggregate_config = parallelism_config.ffn_disaggregate_config
         # Get quant_config from model_config
@@ -454,14 +450,12 @@ class Qwen3AttnModel(DisaggregateModelBase):
         parallelism_config: ParallelismConfig,
         weights: ModelWeights,
         max_generate_batch_size: int,
-        device_resource_config=None,
     ):
         super().__init__(
             config,
             parallelism_config,
             weights,
             max_generate_batch_size=max_generate_batch_size,
-            device_resource_config=device_resource_config,
         )
         ffn_disaggregate_config = parallelism_config.ffn_disaggregate_config
         self.attention_layers = nn.ModuleList(
@@ -585,7 +579,6 @@ class Qwen3DisaggregateModel(GptModelBase):
         max_generate_batch_size: int,
         fmha_config=None,
         py_hw_kernel_config=None,
-        device_resource_config=None,
     ):
         super().__init__(
             config,
@@ -594,7 +587,6 @@ class Qwen3DisaggregateModel(GptModelBase):
             max_generate_batch_size=max_generate_batch_size,
             fmha_config=fmha_config,
             py_hw_kernel_config=py_hw_kernel_config,
-            device_resource_config=device_resource_config,
         )
         ffn_disaggregate_config = parallelism_config.ffn_disaggregate_config
         # forward_micro_batch returns final-normalized hidden states. The C++
@@ -607,16 +599,14 @@ class Qwen3DisaggregateModel(GptModelBase):
                 parallelism_config,
                 weights,
                 max_generate_batch_size=max_generate_batch_size,
-                device_resource_config=device_resource_config,
-            )
+                )
         else:
             self.model = Qwen3AttnModel(
                 config,
                 parallelism_config,
                 weights,
                 max_generate_batch_size=max_generate_batch_size,
-                device_resource_config=device_resource_config,
-            )
+                )
         self._init_capture_passthrough()
 
         self.norm = RMSNorm(

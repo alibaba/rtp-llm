@@ -16,25 +16,6 @@ def init_cache_store_group_args(parser, cache_store_config):
     )
 
     cache_store_group.add_argument(
-        "--wrr_available_ratio",
-        env_name="WRR_AVAILABLE_RATIO",
-        bind_to=(cache_store_config, "wrr_available_ratio"),
-        type=int,
-        default=80,
-        help="为 WRR (Weighted Round Robin) 负载均衡器设置的可用性阈值百分比 (0-100)，数值越低越容易启用动态权重分配，但可能降低全局负载均衡准确性。",
-    )
-
-    cache_store_group.add_argument(
-        "--rank_factor",
-        env_name="RANK_FACTOR",
-        bind_to=(cache_store_config, "rank_factor"),
-        type=int,
-        default=0,
-        choices=[0, 1],
-        help="指定 WRR 负载均衡器使用的排序因子。`0` 表示基于 KV_CACHE 使用情况排序，`1` 表示基于正在处理的请求数 (ONFLIGHT_REQUESTS) 排序。",
-    )
-
-    cache_store_group.add_argument(
         "--cache_store_thread_count",
         env_name="CACHE_STORE_THREAD_COUNT",
         bind_to=(cache_store_config, "thread_count"),

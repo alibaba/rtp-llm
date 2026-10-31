@@ -84,7 +84,6 @@ def init_router(
         kv_cache_config=py_env.kv_cache_config,
         profiling_debug_logging_config=py_env.profiling_debug_logging_config,
         hw_kernel_config=py_env.py_hw_kernel_config,
-        device_resource_config=py_env.device_resource_config,
         moe_config=py_env.moe_config,
         model_specific_config=py_env.model_specific_config,
         sp_config=py_env.sp_config,

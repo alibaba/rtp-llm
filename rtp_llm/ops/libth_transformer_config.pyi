@@ -4,8 +4,8 @@ import typing
 
 import torch
 
-__all__: list[str] = ['ALLTOALL', 'ALL_GATHER', 'ALL_GATHER_WITH_OVERLAP', 'ActivationType', 'ArpcConfig', 'AttentionConfigs', 'BatchDecodeSchedulerConfig', 'CPRotateMethod', 'CacheStoreConfig', 'ConcurrencyConfig', 'DISABLED', 'DataType', 'DeviceResourceConfig', 'EPLBConfig', 'EplbMode', 'FIFOSchedulerConfig', 'FMHAConfig', 'FMHAType', 'FfnDisAggregateConfig', 'GrammarConfig', 'GrpcConfig', 'HWKernelConfig', 'HiddenStateCaptureDtype', 'HybridAttentionConfig', 'HybridAttentionType', 'KVCacheConfig', 'KvCacheDataType', 'LayerNormType', 'LinearAttentionConfig', 'MMModelConfig',
-                      'MiscellaneousConfig', 'MlaOpsType', 'ModelConfig', 'ModelSpecificConfig', 'MoeConfig', 'NcclCommConfig', 'NormType', 'PDSepConfig', 'PREFILL_CP', 'ParallelismConfig', 'PrefillCPConfig', 'ProfilingDebugLoggingConfig', 'QuantAlgo', 'QuantMethod', 'RoleSpecialTokens', 'RoleType', 'RopeCache', 'RopeConfig', 'RopeStyle', 'RuntimeConfig', 'SpecialTokens', 'SpeculativeExecutionConfig', 'SpeculativeType', 'TaskType', 'UNKNOWN', 'VitConfig', 'VitSeparation', 'check_rope_cache', 'get_block_cache_keys', 'get_rope_cache', 'get_rope_cache_once']
+__all__: list[str] = ['ALLTOALL', 'ALL_GATHER', 'ALL_GATHER_WITH_OVERLAP', 'ActivationType', 'ArpcConfig', 'AttentionConfigs', 'BatchDecodeSchedulerConfig', 'CPRotateMethod', 'CacheStoreConfig', 'ConcurrencyConfig', 'DISABLED', 'DataType', 'EPLBConfig', 'EplbMode', 'FIFOSchedulerConfig', 'FMHAConfig', 'FMHAType', 'FfnDisAggregateConfig', 'GrammarConfig', 'GrpcConfig', 'HWKernelConfig', 'HiddenStateCaptureDtype', 'HybridAttentionConfig', 'HybridAttentionType', 'KVCacheConfig', 'KvCacheDataType', 'LayerNormType', 'LinearAttentionConfig', 'MMModelConfig',
+                      'MiscellaneousConfig', 'ModelConfig', 'ModelSpecificConfig', 'MoeConfig', 'NcclCommConfig', 'NormType', 'PDSepConfig', 'PREFILL_CP', 'ParallelismConfig', 'PrefillCPConfig', 'ProfilingDebugLoggingConfig', 'QuantAlgo', 'QuantMethod', 'RoleSpecialTokens', 'RoleType', 'RopeCache', 'RopeConfig', 'RopeStyle', 'RuntimeConfig', 'SpecialTokens', 'SpeculativeExecutionConfig', 'SpeculativeType', 'TaskType', 'UNKNOWN', 'VitConfig', 'VitSeparation', 'check_rope_cache', 'get_block_cache_keys', 'get_rope_cache', 'get_rope_cache_once']
 
 
 class ActivationType:
@@ -172,8 +172,6 @@ class CPRotateMethod:
         ...
 class CacheStoreConfig:
     cache_store_rdma_mode: bool
-    wrr_available_ratio: int
-    rank_factor: int
     thread_count: int
     rdma_connect_timeout_ms: int
     rdma_qp_count_per_connection: int
@@ -308,20 +306,7 @@ class DataType:
     @property
     def value(self) -> int:
         ...
-class DeviceResourceConfig:
-    enable_comm_overlap: bool
-    enable_layer_micro_batch: int
-    m_split: int
-    overlap_comm_type: int
-    overlap_math_sm_count: int
-    def __getstate__(self) -> tuple:
-        ...
-    def __init__(self) -> None:
-        ...
-    def __setstate__(self, arg0: tuple) -> None:
-        ...
-    def to_string(self) -> str:
-        ...
+
 class EPLBConfig:
     balance_method: str
     eplb_balance_layer_per_step: int
@@ -442,10 +427,8 @@ class FMHAConfig:
     disable_flashinfer_native: bool
     enable_flashinfer_trtllm_gen: bool
     enable_flashinfer_trt_fmha_v2: bool
-    enable_fmha: bool
     enable_open_source_fmha: bool
     enable_paged_flashinfer_trt_fmha_v2: bool
-    enable_paged_open_source_fmha: bool
     enable_xqa: bool
     use_aiter_pa: bool
     use_asm_pa: bool
@@ -614,25 +597,16 @@ class HWKernelConfig:
     generation_prefill_cuda_graph_max_capture_buckets: typing.ClassVar[int]
     generation_prefill_cuda_graph_max_capture_tokens: typing.ClassVar[int]
     generation_prefill_cuda_graph_max_requests_limit: typing.ClassVar[int]
-    arm_gemm_use_kai: bool
     decode_capture_batch_sizes: list[int]
     enable_decode_cascade_attention: bool
-    deep_gemm_num_sm: int
     deterministic_attn: bool
     deterministic_gemm: bool
-    disable_dpc_random: bool
     enable_cuda_graph: bool
     enable_cuda_graph_debug_mode: bool
-    enable_multi_block_mode: bool
-    enable_native_cuda_graph: bool
     enable_stable_scatter_add: bool
-    ft_disable_custom_ar: bool
-    num_native_cuda_graph: int
     prefill_capture_seq_lens: list[int]
     generation_prefill_capture_token_buckets: list[int]
     generation_prefill_cuda_graph_max_requests: int
-    rocm_disable_custom_ag: bool
-    rocm_hipblaslt_config: str
     use_swizzleA: bool
     def __getstate__(self) -> tuple:
         ...
@@ -757,7 +731,6 @@ class KVCacheConfig:
     reuse_cache_tail_blocks: int
     linear_pool_blocks: int
     swa_pool_blocks: int
-    max_block_size_per_item: int
     memory_cache_size_mb: int
     memory_cache_sync_timeout_ms: int
     disk_cache_paths: str
@@ -821,7 +794,6 @@ class KVCacheConfig:
     kv_cache_event_host_ip_port: str
     ssm_state_dtype: str
     test_block_num: int
-    use_block_cache: int
     def __getstate__(self) -> tuple:
         ...
     def __init__(self) -> None:
@@ -959,49 +931,6 @@ class MiscellaneousConfig:
     def __setstate__(self, arg0: tuple) -> None:
         ...
     def to_string(self) -> str:
-        ...
-class MlaOpsType:
-    """
-    Members:
-    
-      AUTO
-    
-      MHA
-    
-      FLASH_INFER
-    
-      FLASH_MLA
-    """
-    AUTO: typing.ClassVar[MlaOpsType]  # value = <MlaOpsType.AUTO: 0>
-    FLASH_INFER: typing.ClassVar[MlaOpsType]  # value = <MlaOpsType.FLASH_INFER: 2>
-    FLASH_MLA: typing.ClassVar[MlaOpsType]  # value = <MlaOpsType.FLASH_MLA: 3>
-    MHA: typing.ClassVar[MlaOpsType]  # value = <MlaOpsType.MHA: 1>
-    __members__: typing.ClassVar[dict[str, MlaOpsType]]  # value = {'AUTO': <MlaOpsType.AUTO: 0>, 'MHA': <MlaOpsType.MHA: 1>, 'FLASH_INFER': <MlaOpsType.FLASH_INFER: 2>, 'FLASH_MLA': <MlaOpsType.FLASH_MLA: 3>}
-    def __eq__(self, other: typing.Any) -> bool:
-        ...
-    def __getstate__(self) -> int:
-        ...
-    def __hash__(self) -> int:
-        ...
-    def __index__(self) -> int:
-        ...
-    def __init__(self, value: int) -> None:
-        ...
-    def __int__(self) -> int:
-        ...
-    def __ne__(self, other: typing.Any) -> bool:
-        ...
-    def __repr__(self) -> str:
-        ...
-    def __setstate__(self, state: int) -> None:
-        ...
-    def __str__(self) -> str:
-        ...
-    @property
-    def name(self) -> str:
-        ...
-    @property
-    def value(self) -> int:
         ...
 class KVCacheSpecType:
     MHA: typing.ClassVar[KVCacheSpecType]
@@ -1190,12 +1119,6 @@ class ModelConfig:
     def layernorm_type(self, arg1: str) -> None:
         ...
     @property
-    def mla_ops_type(self) -> MlaOpsType:
-        ...
-    @mla_ops_type.setter
-    def mla_ops_type(self, arg1: str) -> None:
-        ...
-    @property
     def norm_type(self) -> NormType:
         ...
     @norm_type.setter
@@ -1208,7 +1131,6 @@ class ModelConfig:
     def task_type(self, arg1: typing.Any) -> None:
         ...
 class ModelSpecificConfig:
-    max_lora_model_size: int
     def __getstate__(self) -> tuple:
         ...
     def __init__(self) -> None:
@@ -1317,11 +1239,8 @@ class PDSepConfig:
     cache_store_rdma_listen_port: int
     cache_store_rdma_mode: bool
     decode_entrance: bool
-    decode_polling_call_prefill_ms: int
     decode_polling_kv_cache_step_ms: int
     decode_retry_interval_ms: int
-    decode_retry_timeout_ms: int
-    decode_retry_times: int
     load_cache_timeout_ms: int
     max_rpc_timeout_ms: int
     prefill_max_wait_timeout_ms: int
@@ -1344,7 +1263,6 @@ class PDSepConfig:
 class ParallelismConfig:
     dp_rank: int
     dp_size: int
-    enable_sp: bool
     ep_rank: int
     ep_size: int
     ffn_disaggregate_config: FfnDisAggregateConfig
@@ -1355,6 +1273,7 @@ class ParallelismConfig:
     local_world_size: int
     pp_size: int
     prefill_cp_config: ...
+    use_ub_comm: bool
     role_type: RoleType
     tp_rank: int
     tp_size: int
@@ -1377,8 +1296,8 @@ class ParallelismConfig:
     def to_string(self) -> str:
         ...
 class PrefillCPConfig:
-    comm_buffer_size: int
     kv_cache_sharded: bool
+    comm_buffer_size: int
     method: CPRotateMethod
     prefill_cp_size: int
     def __getstate__(self) -> tuple:
@@ -1719,13 +1638,9 @@ class SpecialTokens:
         ...
 class SpeculativeExecutionConfig:
     checkpoint_path: str
-    force_score_context_attention: bool
-    force_stream_sample: bool
     gen_num_per_cycle: int
     model_type: str
     quantization: str
-    sp_max_token_match: int
-    sp_min_token_match: int
     tree_decode_config: str
     def __getstate__(self) -> tuple:
         ...

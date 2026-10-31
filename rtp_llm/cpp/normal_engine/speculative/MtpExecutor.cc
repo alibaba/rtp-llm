@@ -693,7 +693,6 @@ GenerateStreamPtr MtpExecutor::createMinFakeDecodeStream(int                    
 MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
                          std::unique_ptr<ProposeModelEngineInitParams>& propose_params,
                          const std::shared_ptr<KVCacheManager>&         cache_manager,
-                         MlaOpsType                                     mla_ops_type,
                          int32_t                                        kv_cache_group_num,
                          bool                                           warm_up):
     Executor(),
@@ -731,8 +730,6 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
                                 static_cast<int>(role_type_));
         // DSpARK commit handles both replicated and byte-sharded prefill-CP
         // cache layouts after gathering the rank-local target features.
-        RTP_LLM_CHECK_WITH_INFO(params.device_resource_config.enable_layer_micro_batch == 0,
-                                "dspark fixed-gamma v1 does not support layer micro-batching");
         RTP_LLM_CHECK_WITH_INFO(params.sp_config.sp_dspark_mask_token_id >= 0,
                                 "dspark requires sp_dspark_mask_token_id, got %ld",
                                 params.sp_config.sp_dspark_mask_token_id);
@@ -820,8 +817,6 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
          params.runtime_config,
          params.concurrency_config,
          params.sp_config,
-         params.device_resource_config,
-         mla_ops_type,
          params.model_config_.max_seq_len,
          params.model_config_.hidden_size,
          cache_manager,
@@ -897,8 +892,6 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
                                 params.runtime_config,
                                 params.concurrency_config,
                                 params.sp_config,
-                                params.device_resource_config,
-                                mla_ops_type,
                                 mtp_params->model_config_.max_seq_len,
                                 mtp_params->model_config_.hidden_size,
                                 cache_manager,

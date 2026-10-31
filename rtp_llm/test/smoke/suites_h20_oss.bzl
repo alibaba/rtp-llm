@@ -650,16 +650,6 @@ def h20_oss_suites():
                     "prefill": "--use_local 1 --load_cache_timeout_ms 120000 --role_type PREFILL --tp_size 2 --act_type BF16 --seq_size_per_block 2048 --max_seq_len 8192 --enable_cuda_graph 0 --warm_up 0 --concurrency_limit 8 --reserver_runtime_mem_mb 8192",
                     "decode": "--use_local 1 --load_cache_timeout_ms 120000 --role_type DECODE  --tp_size 2 --act_type BF16 --seq_size_per_block 2048 --max_seq_len 8192 --enable_cuda_graph 1 --warm_up 0 --concurrency_limit 8 --reserver_runtime_mem_mb 8192 --use_deepep_moe 1 --use_deepep_low_latency 1",
                 },
-                envs = {
-                    # Pin the FP8 per-token-group quant to the legacy kernel: the
-                    # auto heuristic switches long prefills to the v2 kernel whose
-                    # reciprocal-multiply rounding differs by ulps, and this
-                    # prompt sits on a razor-thin argmax tie (~token 60) that then
-                    # varies per pod (JIT autotune state), breaking golden-exact
-                    # comparison. Production keeps the auto default.
-                    "prefill": ["DSV4_FP8_QUANT_KERNEL=legacy"],
-                    "decode": ["DSV4_FP8_QUANT_KERNEL=legacy"],
-                },
                 gpu_type = ["H20_CU13"],
                 data = native.glob(["data/model/qwen_vl/*.jpeg"]),
             ),

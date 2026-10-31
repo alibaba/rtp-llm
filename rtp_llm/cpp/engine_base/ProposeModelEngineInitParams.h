@@ -36,7 +36,6 @@ struct ProposeModelEngineInitParams {
             base_params.kv_cache_config,
             base_params.profiling_debug_logging_config,
             base_params.hw_kernel_config,
-            base_params.device_resource_config,
             base_params.moe_config,
             base_params.model_specific_config,
             base_params.sp_config,

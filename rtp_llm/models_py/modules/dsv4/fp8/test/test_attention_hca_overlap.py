@@ -30,7 +30,6 @@ without spinning up a real DSV4 layer (no DeepGEMM / no real KV pool):
 
 from __future__ import annotations
 
-import os
 import unittest
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -44,7 +43,6 @@ from rtp_llm.models_py.modules.dsv4.fp8.attention import (
     PrefillQKV,
     SwaPrefillMeta,
     WorkspaceMeta,
-    _prefill_cp_overlap_enabled,
 )
 from rtp_llm.models_py.modules.dsv4.prefill_workspace import PrefillWorkspace
 
@@ -140,75 +138,53 @@ class HCAOverlapGateTest(unittest.TestCase):
     def setUp(self) -> None:
         self.device = torch.device("cpu")
 
-    def _with_env(self, value: str):
-        return patch.dict(os.environ, {"DSV4_PREFILL_CP_OVERLAP": value})
-
-    def test_env_off_is_false(self) -> None:
-        layer = _make_attention_stub(compress_ratio=128)
-        common = _make_common(cp_on=True, device=self.device)
-        with self._with_env("0"):
-            self.assertFalse(_prefill_cp_overlap_enabled())
-            self.assertFalse(layer._should_overlap_cp_for_prefill(common))
-
-    def test_env_on_cp_off_is_false(self) -> None:
+    def test_cp_off_is_false(self) -> None:
         layer = _make_attention_stub(compress_ratio=128)
         common = _make_common(cp_on=False, device=self.device)
-        with self._with_env("1"):
-            self.assertFalse(layer._should_overlap_cp_for_prefill(common))
+        self.assertFalse(layer._should_overlap_cp_for_prefill(common))
 
-    def test_env_on_cp_size_1_is_false(self) -> None:
+    def test_cp_size_1_is_false(self) -> None:
         layer = _make_attention_stub(compress_ratio=128)
         common = _make_common(cp_on=True, cp_size=1, device=self.device)
-        with self._with_env("1"):
-            self.assertFalse(layer._should_overlap_cp_for_prefill(common))
+        self.assertFalse(layer._should_overlap_cp_for_prefill(common))
 
-    def test_env_on_swa_only_ratio_zero_is_false(self) -> None:
+    def test_swa_only_ratio_zero_is_false(self) -> None:
         layer = _make_attention_stub(compress_ratio=0, has_compressor=False)
         common = _make_common(cp_on=True, device=self.device)
-        with self._with_env("1"):
-            self.assertFalse(layer._should_overlap_cp_for_prefill(common))
+        self.assertFalse(layer._should_overlap_cp_for_prefill(common))
 
-    def test_env_on_cp_active_cpu_device_is_false(self) -> None:
+    def test_cp_active_cpu_device_is_false(self) -> None:
         layer = _make_attention_stub(compress_ratio=128)
         common = _make_common(cp_on=True, device=self.device)
-        with self._with_env("1"):
-            self.assertFalse(layer._should_overlap_cp_for_prefill(common))
+        self.assertFalse(layer._should_overlap_cp_for_prefill(common))
 
-    def test_env_on_cp_active_cuda_hca_is_true(self) -> None:
+    def test_cp_active_cuda_hca_is_true(self) -> None:
         layer = _make_attention_stub(compress_ratio=128)
         common = _make_common(cp_on=True, device=torch.device("cuda"))
-        with self._with_env("1"):
-            self.assertTrue(layer._should_overlap_cp_for_prefill(common))
+        self.assertTrue(layer._should_overlap_cp_for_prefill(common))
 
-    def test_env_on_cp_active_cuda_unsupported_ratio_is_false(self) -> None:
+    def test_cp_active_cuda_unsupported_ratio_is_false(self) -> None:
         layer = _make_attention_stub(compress_ratio=128)
         common = _make_common(cp_on=True, device=torch.device("cuda"))
         layer.compress_ratio = 16
-        with self._with_env("1"):
-            self.assertFalse(layer._should_overlap_cp_for_prefill(common))
+        self.assertFalse(layer._should_overlap_cp_for_prefill(common))
 
-    def test_env_on_cp_active_cuda_csa_is_true(self) -> None:
+    def test_cp_active_cuda_csa_is_true(self) -> None:
         layer = _make_attention_stub(compress_ratio=4)
         common = _make_common(cp_on=True, device=torch.device("cuda"))
-        with self._with_env("1"):
-            self.assertTrue(layer._should_overlap_cp_for_prefill(common))
+        self.assertTrue(layer._should_overlap_cp_for_prefill(common))
 
-    def test_workspace_read_async_requires_overlap_env_and_page_rr(self) -> None:
+    def test_workspace_read_async_requires_page_rr(self) -> None:
         layer = _make_attention_stub(compress_ratio=128)
         common = _make_common(cp_on=True, device=torch.device("cuda"))
         common.cp_ctx.kv_cache_sharded = True
         layer._cp_ctx = common.cp_ctx
 
-        with self._with_env("0"):
-            self.assertFalse(layer._should_async_workspace_reads_for_prefill(common))
-
         common.cp_ctx.kv_cache_sharded = False
-        with self._with_env("1"):
-            self.assertFalse(layer._should_async_workspace_reads_for_prefill(common))
+        self.assertFalse(layer._should_async_workspace_reads_for_prefill(common))
 
         common.cp_ctx.kv_cache_sharded = True
-        with self._with_env("1"):
-            self.assertTrue(layer._should_async_workspace_reads_for_prefill(common))
+        self.assertTrue(layer._should_async_workspace_reads_for_prefill(common))
 
 
 @unittest.skipUnless(torch.cuda.is_available(), "stream allocation requires CUDA")

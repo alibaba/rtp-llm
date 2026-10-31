@@ -1,6 +1,5 @@
 """Native group-32/128 quantization and V4.1 block-32 dense GEMM contracts."""
 
-import os
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -48,44 +47,42 @@ class MXFP8DenseTest(unittest.TestCase):
 
     def test_native_group_quant_payload_and_all_scale_groups(self):
         torch.manual_seed(104)
-        for kernel in ("legacy", "v2"):
-            for group in (32, 128):
-                for rows in (3, 127):
-                    with self.subTest(kernel=kernel, group=group, rows=rows):
-                        x = torch.randn(rows, 640, device="cuda", dtype=torch.bfloat16)
-                        with patch.dict(os.environ, {"DSV4_FP8_QUANT_KERNEL": kernel}):
-                            q, scales = sgl_per_token_group_quant_fp8(
-                                x,
-                                group_size=group,
-                                eps=torch.finfo(torch.float32).tiny,
-                                column_major_scales=True,
-                                scale_tma_aligned=True,
-                                scale_ue8m0=True,
+        for group in (32, 128):
+            # rows=6554 keeps numel >= 4Mi elements so the auto heuristic
+            # routes the v2 kernel and the closed-form scale check covers
+            # both quant kernels (legacy stays covered by the small rows).
+            for rows in (3, 127, 6554):
+                with self.subTest(group=group, rows=rows):
+                    x = torch.randn(rows, 640, device="cuda", dtype=torch.bfloat16)
+                    q, scales = sgl_per_token_group_quant_fp8(
+                        x,
+                        group_size=group,
+                        eps=torch.finfo(torch.float32).tiny,
+                        column_major_scales=True,
+                        scale_tma_aligned=True,
+                        scale_ue8m0=True,
+                    )
+                    self.assertEqual(scales.shape, (rows, (640 // group + 3) // 4))
+                    expected_scale = torch.pow(
+                        2.0,
+                        torch.ceil(
+                            torch.log2(
+                                x.float().reshape(rows, -1, group).abs().amax(-1) / 448
                             )
-                        self.assertEqual(scales.shape, (rows, (640 // group + 3) // 4))
-                        expected_scale = torch.pow(
-                            2.0,
-                            torch.ceil(
-                                torch.log2(
-                                    x.float().reshape(rows, -1, group).abs().amax(-1)
-                                    / 448
-                                )
-                            ),
-                        )
-                        packed = scales.contiguous().view(torch.uint8)[
-                            :, : 640 // group
-                        ]
-                        actual_scale = torch.pow(2.0, packed.float() - 127)
-                        torch.testing.assert_close(
-                            actual_scale, expected_scale, rtol=0, atol=0
-                        )
-                        expected_q = (
-                            x.float().reshape(rows, -1, group)
-                            / expected_scale.unsqueeze(-1)
-                        ).to(torch.float8_e4m3fn)
-                        torch.testing.assert_close(
-                            q.float(), expected_q.reshape_as(x).float(), rtol=0, atol=0
-                        )
+                        ),
+                    )
+                    packed = scales.contiguous().view(torch.uint8)[:, : 640 // group]
+                    actual_scale = torch.pow(2.0, packed.float() - 127)
+                    torch.testing.assert_close(
+                        actual_scale, expected_scale, rtol=0, atol=0
+                    )
+                    expected_q = (
+                        x.float().reshape(rows, -1, group)
+                        / expected_scale.unsqueeze(-1)
+                    ).to(torch.float8_e4m3fn)
+                    torch.testing.assert_close(
+                        q.float(), expected_q.reshape_as(x).float(), rtol=0, atol=0
+                    )
 
     def test_checkpoint_block32_dense_matches_quantized_reference(self):
         torch.manual_seed(105)

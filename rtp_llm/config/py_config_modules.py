@@ -15,7 +15,6 @@ from rtp_llm.ops import (
     CacheStoreConfig,
     ConcurrencyConfig,
     DashScGrpcConfig,
-    DeviceResourceConfig,
     EPLBConfig,
     FfnDisAggregateConfig,
     FMHAConfig,
@@ -717,7 +716,6 @@ class PyEnvConfigs:
         self.quantization_config: QuantizationConfig = QuantizationConfig()
         self.eplb_config: EPLBConfig = EPLBConfig()
         self.kv_cache_config: KVCacheConfig = KVCacheConfig()
-        self.device_resource_config: DeviceResourceConfig = DeviceResourceConfig()
         self.runtime_config: RuntimeConfig = RuntimeConfig()
         # EngineConfig has been merged into RuntimeConfig and ModelConfig
         # warm_up, warm_up_with_loss, and model_warm_up are in RuntimeConfig
@@ -772,9 +770,6 @@ class PyEnvConfigs:
             "[quantization_config]\n" + self.quantization_config.to_string() + "\n\n"
             "[eplb_config]\n" + self.eplb_config.to_string() + "\n\n"
             "[kv_cache_config]\n" + self.kv_cache_config.to_string() + "\n\n"
-            "[device_resource_config]\n"
-            + self.device_resource_config.to_string()
-            + "\n\n"
             "[sparse_config]\n" + self.sparse_config.to_string() + "\n\n"
             "[embedding_config]\n" + self.embedding_config.to_string() + "\n\n"
             "[role_config]\n" + self.role_config.to_string() + "\n\n"

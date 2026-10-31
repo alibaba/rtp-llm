@@ -47,7 +47,6 @@ EngineInitParams createMockEngineInitParams() {
     kv_cache_config.reuse_cache    = false;
     ProfilingDebugLoggingConfig profiling_debug_logging_config;
     HWKernelConfig              hw_kernel_config;
-    DeviceResourceConfig        device_resource_config;
     MoeConfig                   moe_config;
     ModelSpecificConfig         model_specific_config;
     SpeculativeExecutionConfig  sp_config;
@@ -104,7 +103,6 @@ EngineInitParams createMockEngineInitParams() {
         kv_cache_config,
         profiling_debug_logging_config,
         hw_kernel_config,
-        device_resource_config,
         moe_config,
         model_specific_config,
         sp_config,

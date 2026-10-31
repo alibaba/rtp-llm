@@ -212,8 +212,7 @@ class QWenBase(BaseModel):
                 max_generate_batch_size=self.max_generate_batch_size,
                 fmha_config=fmha_config,
                 py_hw_kernel_config=py_hw_kernel_config,
-                device_resource_config=self.device_resource_config,
-            )
+                )
         else:
             self.py_model = Qwen3Model(
                 model_config,
@@ -223,8 +222,7 @@ class QWenBase(BaseModel):
                 quant_config=quant_config,
                 fmha_config=fmha_config,
                 py_hw_kernel_config=py_hw_kernel_config,
-                device_resource_config=self.device_resource_config,
-            )
+                )
 
     def support_cuda_graph(self) -> bool:
         return True

@@ -180,7 +180,6 @@ rtp_llm::EngineInitParams createEngineInitParams(const CustomConfig&     config,
     rtp_llm::FMHAConfig                  fmha_config;
     rtp_llm::ProfilingDebugLoggingConfig profiling_debug_logging_config;
     rtp_llm::HWKernelConfig              hw_kernel_config;
-    rtp_llm::DeviceResourceConfig        device_resource_config;
     rtp_llm::MoeConfig                   moe_config;
     rtp_llm::ModelSpecificConfig         model_specific_config;
     rtp_llm::SpeculativeExecutionConfig  sp_config;
@@ -205,7 +204,6 @@ rtp_llm::EngineInitParams createEngineInitParams(const CustomConfig&     config,
                                              kv_cache_config,
                                              profiling_debug_logging_config,
                                              hw_kernel_config,
-                                             device_resource_config,
                                              moe_config,
                                              model_specific_config,
                                              sp_config,
