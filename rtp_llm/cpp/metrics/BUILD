@@ -33,3 +33,15 @@ cc_test(
         "@com_google_googletest//:gtest_main",
     ],
 )
+
+cc_test(
+    name = "kmonitor_shutdown_hook_test",
+    srcs = [
+        "KmonitorShutdownHookTest.cc",
+    ],
+    deps = [
+        ":metrics",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ],
+)

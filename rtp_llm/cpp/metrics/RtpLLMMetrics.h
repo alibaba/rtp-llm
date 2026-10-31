@@ -6,6 +6,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <functional>
 #include <map>
 #include <optional>
 #include <string>
@@ -1563,6 +1564,16 @@ private:
 };
 
 bool initKmonitorFactory();
+// 异步上报者在自身构造期间、线程启动前注册停止回调；回调必须可重复调用、不得抛异常，
+// 需等待工作线程及在途上报结束，且回调和被等待的线程都不得调用这些生命周期接口。
+// owner 析构时须先停止并等待上报结束，再注销回调。
+// 每个 owner 只能注册一次，重复注册返回 false 并保留原回调；更换回调须先注销。
+// 注册、注销、初始化和关闭串行化；关闭后拒绝注册，直到下一次 initKmonitorFactory() 成功。
+// 不持有 owner 的所有权；注册不初始化 factory，也不创建任何上报者。
+bool registerKmonitorShutdownHook(void* owner, std::function<void()> hook);
+void unregisterKmonitorShutdownHook(void* owner);
+// 先执行所有停止回调并等待完成，再释放 factory 资源；可重复调用，每次仍执行尚未注销的回调。
+// 回调抛出的异常会被记录，不会中断其余回调和 factory 关闭。
 void stopKmonitorFactory();
 
 void setHippoTags(kmonitor::MetricsConfig& config);

@@ -11,6 +11,7 @@ from rtp_llm.server.server_args.batch_decode_scheduler_group_args import (
 )
 from rtp_llm.server.server_args.cache_store_group_args import (
     init_cache_store_group_args,
+    validate_rdma_device_health_config,
 )
 from rtp_llm.server.server_args.concurrent_group_args import init_concurrent_group_args
 from rtp_llm.server.server_args.device_resource_group_args import (
@@ -542,6 +543,7 @@ def setup_args(args: Optional[Sequence[str]] = None) -> PyEnvConfigs:
     parsed_args = parser.parse_args(args)
     py_env_configs.ft_disable_custom_ar_override = parsed_args.ft_disable_custom_ar
     py_env_configs.server_config.validate_allocator_dump_config()
+    validate_rdma_device_health_config(py_env_configs.cache_store_config)
 
     # Normalize the two switches before model construction and process spawn.
     from rtp_llm.utils.warmup import configure_warmup

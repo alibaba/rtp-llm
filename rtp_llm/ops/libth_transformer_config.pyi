@@ -171,6 +171,12 @@ class CPRotateMethod:
     def value(self) -> int:
         ...
 class CacheStoreConfig:
+    rdma_device_health_device_fault_confirm_ms_range: typing.ClassVar[tuple[int, int]]
+    rdma_device_health_fault_window_ms_range: typing.ClassVar[tuple[int, int]]
+    rdma_device_health_flap_warn_threshold_range: typing.ClassVar[tuple[int, int]]
+    rdma_device_health_min_confirm_probe_intervals: typing.ClassVar[int]
+    rdma_device_health_probe_interval_ms_range: typing.ClassVar[tuple[int, int]]
+    rdma_device_health_unavailable_threshold_ms_range: typing.ClassVar[tuple[int, int]]
     cache_store_rdma_mode: bool
     wrr_available_ratio: int
     rank_factor: int
@@ -191,6 +197,13 @@ class CacheStoreConfig:
     p2p_cancel_broadcast_timeout_ms: int
     cache_store_tcp_anet_rpc_thread_num: int
     cache_store_tcp_anet_rpc_queue_num: int
+    rdma_device_health_enabled: bool
+    rdma_device_health_fault_handler: str
+    rdma_device_health_probe_interval_ms: int
+    rdma_device_health_device_fault_confirm_ms: int
+    rdma_device_health_fault_window_ms: int
+    rdma_device_health_unavailable_threshold_ms: int
+    rdma_device_health_flap_warn_threshold: int
 
     def __getstate__(self) -> tuple:
         ...

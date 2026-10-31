@@ -31,6 +31,12 @@ cc_library(
 )
 
 cc_library(
+    name = "rdma_device_health_config",
+    hdrs = ["RdmaDeviceHealthConfig.h"],
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "config_modules",
     hdrs = ["ConfigModules.h"],
     srcs = ["ConfigModules.cc"],
@@ -40,6 +46,7 @@ cc_library(
         ":eplb_config",
         ":mm_transport_mode",
         ":rdma_config",
+        ":rdma_device_health_config",
         "//rtp_llm/cpp/utils:core_utils",
         "//rtp_llm/models_py/bindings/core:types",
     ],

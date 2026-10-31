@@ -1,6 +1,7 @@
 #pragma once
 
 #include <stdint.h>
+#include "rtp_llm/cpp/config/RdmaDeviceHealthConfig.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/MemoryUtil.h"
 #include "kmonitor/client/MetricsReporter.h"
 
@@ -19,6 +20,8 @@ struct MessagerInitParams {
 
     int rdma_connect_timeout_ms{250};
     int rdma_qp_count_per_connection{2};
+
+    RdmaDeviceHealthConfig rdma_device_health;
 };
 
 class CacheStoreInitParams {
@@ -46,6 +49,8 @@ public:
 
     kmonitor::MetricsReporterPtr metrics_reporter;
     int                          device_id{-1};
+
+    RdmaDeviceHealthConfig rdma_device_health;
 
     // for test
     std::shared_ptr<MemoryUtil> memory_util;
