@@ -190,6 +190,11 @@ custom_smoke_test(
         "deepseek_v41_pd_contract_test.py",
         "deepseek_v41_dspark_contract_test.py",
     ],
+    # The NAS-backed target+draft checkpoint load on the ARM pool can exceed
+    # the default 1800s hang watchdog, which would kill the process before the
+    # framework's own 3600s server-start budget elapses. Give the load the
+    # full designed window.
+    env = {"RTP_TEST_WATCHDOG_SECONDS": "4500"},
 )
 
 custom_smoke_test(

@@ -124,7 +124,7 @@ def _require_single_gpu_type(macro_name, name, gpu_type):
         fail("%s %s: gpu_type must contain exactly one hardware tag, got %s" % (macro_name, name, gpu_type))
     return gpu_type[0]
 
-def custom_smoke_test(name, main, smoke_args="", args=[], gpu_type=[], tags=[], data=[], deps=[]):
+def custom_smoke_test(name, main, smoke_args="", args=[], gpu_type=[], tags=[], data=[], deps=[], env={}):
     """Defines a smoke_case py_test with its own unittest main.
 
     Bypasses the entry.py framework while inheriting the framework deps, tags,
@@ -132,6 +132,13 @@ def custom_smoke_test(name, main, smoke_args="", args=[], gpu_type=[], tags=[], 
     single source for GPU reservation, server arguments and WORLD_SIZE."""
     gpu = _require_single_gpu_type("custom_smoke_test", name, gpu_type)
     gpu_count = get_world_size_from_smoke_args(smoke_args)
+    test_env = {
+        "GPU_COUNT": str(gpu_count),
+        "SMOKE_ARGS": smoke_args,
+        "WORLD_SIZE": str(gpu_count),
+        "PYTHONNOUSERSITE": "1",
+    }
+    test_env.update(env)
     native.py_test(
         name = name,
         main = main,
@@ -140,12 +147,7 @@ def custom_smoke_test(name, main, smoke_args="", args=[], gpu_type=[], tags=[], 
         timeout = "eternal",
         deps = SMOKE_FRAMEWORK_DEPS + deps,
         data = data,
-        env = {
-            "GPU_COUNT": str(gpu_count),
-            "SMOKE_ARGS": smoke_args,
-            "WORLD_SIZE": str(gpu_count),
-            "PYTHONNOUSERSITE": "1",
-        },
+        env = test_env,
         # Local runs inherit the shared root from the shell; CI overrides it with
         # --test_env. Declared here only: these are the remote-cache smoke cases.
         env_inherit = ["REMOTE_JIT_DIR"],
