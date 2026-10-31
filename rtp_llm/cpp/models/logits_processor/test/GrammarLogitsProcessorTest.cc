@@ -1,6 +1,8 @@
 // Unit tests for GrammarLogitsProcessor over a 128-char ASCII vocab.
 
 #include "rtp_llm/cpp/models/logits_processor/GrammarLogitsProcessor.h"
+#include "rtp_llm/cpp/models/logits_processor/LogitsProcessorFactory.h"
+#include "rtp_llm/cpp/config/ModelConfig.h"
 #include "rtp_llm/cpp/engine_base/grammar/RtpGrammarMatcher.h"
 #include "rtp_llm/cpp/engine_base/grammar/XGrammarBackend.h"
 #include "rtp_llm/cpp/models/logits_processor/BitmaskUtils.h"
@@ -81,6 +83,22 @@ ProcessorBundle makeProcessor(const std::shared_ptr<XGrammarBackend>& backend, c
 bool rowAllows(const std::vector<int32_t>& bm, size_t words, int row, int token) {
     const int32_t word = bm[static_cast<size_t>(row) * words + token / 32];
     return (static_cast<uint32_t>(word) & (1u << (token % 32))) != 0u;
+}
+
+TEST(GrammarFactoryLifecycleTest, ShutdownReleasesMetricsReporterAndAllowsReinitialization) {
+    ModelConfig model_config;
+    auto config = grammarConfig();
+    config.tokenizer_info_json = makeAsciiTokenizerInfo().SerializeJSON();
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        kmonitor::MetricsTags tags;
+        auto reporter = std::make_shared<kmonitor::MetricsReporter>("", "grammar_shutdown_test", tags);
+        std::weak_ptr<kmonitor::MetricsReporter> lifetime = reporter;
+        LogitsProcessorFactory::init(model_config, config, "", std::move(reporter));
+        ASSERT_FALSE(lifetime.expired());
+        LogitsProcessorFactory::shutdown();
+        EXPECT_TRUE(lifetime.expired());
+        LogitsProcessorFactory::shutdown();
+    }
 }
 
 SamplerInputs makeSamplerInputs(torch::Tensor logits) {
