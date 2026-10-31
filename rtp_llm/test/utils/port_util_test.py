@@ -2,6 +2,7 @@ import shutil
 import threading
 import unittest
 from contextlib import contextmanager
+from unittest.mock import patch
 
 from port_util import *
 
@@ -105,6 +106,28 @@ class TestPortManager(unittest.TestCase):
         finally:
             for lock in locks2:
                 lock.__exit__(None, None, None)
+
+    def test_default_locks_are_shared_across_action_tmpdirs(self):
+        managers = []
+        with patch("port_util.DEFAULT_PORT_LOCK_DIR", self.test_dir, create=True):
+            for action in ("action_a", "action_b"):
+                with patch(
+                    "port_util.tempfile.gettempdir",
+                    return_value=str(self.test_dir / action),
+                ):
+                    managers.append(PortManager(start_port=12000))
+                    context = PortsContext(num_ports=2)
+                    self.assertEqual(context.manager.lock_dir, self.test_dir)
+
+        allocations = []
+        try:
+            for manager in managers:
+                allocations.append(manager.get_consecutive_ports(2))
+            self.assertTrue(set(allocations[0][0]).isdisjoint(allocations[1][0]))
+        finally:
+            for _, locks in allocations:
+                for lock in locks:
+                    lock.__exit__(None, None, None)
 
     def test_concurrent_access(self):
         def get_ports():
