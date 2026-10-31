@@ -347,11 +347,19 @@ def _evict_dangling_flashinfer_ops(workspace: Path) -> None:
     # directory directly instead of walking the workspace tree: the workspace
     # root must never be treated as enumerable (a HOME-sized root once dragged
     # the whole FUSE-mounted model library into this scan).
-    cached_ops_root = workspace / "cached_ops"
-    if cached_ops_root.is_dir():
-        for op_dir in sorted(cached_ops_root.iterdir()):
-            if (op_dir / "build.ninja").is_file() and _flashinfer_op_is_stale(op_dir):
-                stale_candidates.append(op_dir)
+    # flashinfer >= 0.6.9 nests the ops dir as
+    # <workspace>/.cache/flashinfer/<version>/<arch>/cached_ops (jit/env.py),
+    # so scan both layouts: missing the nested one is how poisoned
+    # runfiles-anchored ops survived eviction in CI run 85083250.
+    cached_ops_roots = [workspace / "cached_ops"]
+    cached_ops_roots += sorted(
+        (workspace / ".cache" / "flashinfer").glob("*/*/cached_ops")
+    )
+    for cached_ops_root in cached_ops_roots:
+        if cached_ops_root.is_dir():
+            for op_dir in sorted(cached_ops_root.iterdir()):
+                if (op_dir / "build.ninja").is_file() and _flashinfer_op_is_stale(op_dir):
+                    stale_candidates.append(op_dir)
     logging.info(
         f"[Package Setup] FlashInfer eviction scan found "
         f"{len(stale_candidates)} stale candidate(s) under {workspace}"
@@ -431,7 +439,10 @@ def setup_jit_cache(cache_dir=None, packages=None):
     )
 
     if packages is None:
-        packages = ["flashinfer", "torch", "deep_gemm", "tvm_ffi"]
+        # flashinfer_cubin carries the flashInferMetaInfo.h / csrc headers that
+        # fmha_gen ops embed as -I paths: without a stable package copy those
+        # anchors point into per-action runfiles and poison the shared cache.
+        packages = ["flashinfer", "flashinfer_cubin", "torch", "deep_gemm", "tvm_ffi"]
 
     # Copy packages to cache with file locking
     copied_paths = []
