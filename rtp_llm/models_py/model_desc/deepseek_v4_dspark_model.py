@@ -122,6 +122,7 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
             or str(role_type).upper().rsplit(".", 1)[-1] == "PREFILL"
         )
         self._v4_args.commit_only = self._commit_only_prefill
+        self._v4_args.model_type = "deepseek_v4_dspark"
         if self._commit_only_prefill:
             logging.info(
                 "[DeepSeekV4DSparkModel] PREFILL role: enabling commit-only model"

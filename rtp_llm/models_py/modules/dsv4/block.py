@@ -6,7 +6,7 @@ twice — once for Attention and once for MoE FFN.
 
 import logging
 import os
-from typing import Callable, Dict, Optional, Tuple
+from typing import Any, Callable, Dict, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -99,9 +99,13 @@ class Block(nn.Module):
         ep_rank: int = 0,
         world_size: Optional[int] = None,
         world_rank: Optional[int] = None,
+        parallelism_config: Optional[Any] = None,
+        moe_config: Optional[Any] = None,
+        enable_cuda_graph: bool = False,
         max_tokens_per_rank: int = 8192,
         is_decode_role: bool = False,
         moe_strategy: str = "auto",
+        model_type: str = "deepseek_v4",
         fp8_kv_cache: bool = False,
         commit_only: bool = False,
         n_physical_experts: Optional[int] = None,
@@ -170,12 +174,15 @@ class Block(nn.Module):
             ep_rank=ep_rank,
             world_size=world_size,
             world_rank=world_rank,
+            parallelism_config=parallelism_config,
+            moe_config=moe_config,
+            enable_cuda_graph=enable_cuda_graph,
             max_tokens_per_rank=max_tokens_per_rank,
             is_decode_role=is_decode_role,
             strategy=moe_strategy,
             n_physical_experts=n_physical_experts,
             chunking_enabled=chunked_moe_enabled(),
-            model_type="deepseek_v4",
+            model_type=model_type,
             moe_w1_layout="gate_up",
             observer_factory=self._moe_observer,
             record_function_scope=_profiler.moe_record_function_scope,

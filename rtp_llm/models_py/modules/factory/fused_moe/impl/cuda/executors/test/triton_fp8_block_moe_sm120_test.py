@@ -49,6 +49,42 @@ class Sm120TestEnvironment(unittest.TestCase):
         )
 
 
+class TritonFp8TopPRoutingTest(unittest.TestCase):
+    def test_graph_capture_uses_contiguous_path_for_pruned_routes(self) -> None:
+        executor = DeepGemmHybridExecutor.__new__(DeepGemmHybridExecutor)
+        executor.is_sm120 = True
+        executor.enable_cuda_graph = True
+        executor.norm_top_p_enabled = True
+        executor.ep_size = 1
+        executor.sm120_triton_max_tokens = 32
+        executor.masked_max_token_num = 0
+        payload = ExpertForwardPayload(
+            expert_x=torch.empty(1, 512, dtype=torch.float8_e4m3fn),
+            expert_topk_ids=torch.tensor([[-1, 2]]),
+        )
+        fallback_result = object()
+        with patch(
+            "rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors."
+            "deepgemm_hybrid_executor._is_cuda_graph_warmup_or_capture",
+            return_value=True,
+        ), patch.object(
+            executor, "execute_triton_fp8"
+        ) as triton, patch.object(
+            executor, "execute_contiguous", return_value=fallback_result
+        ) as deepgemm:
+            result = executor.execute(
+                payload,
+                activation="SiGLU",
+                expert_map=None,
+                a2_scale=None,
+                apply_router_weight_on_input=False,
+                extra_expert_args=None,
+            )
+        self.assertIs(result, fallback_result)
+        triton.assert_not_called()
+        deepgemm.assert_called_once()
+
+
 class TritonFp8BlockMoeSm120Test(unittest.TestCase):
     NUM_EXPERTS = 8
     TOP_K = 2
@@ -477,6 +513,58 @@ class TritonFp8BlockMoeSm120Test(unittest.TestCase):
         self.assertIs(result, fast_result)
         triton.assert_called_once()
         deepgemm.assert_not_called()
+
+    def test_top_p_routes_bypass_triton_during_cuda_graph(self) -> None:
+        config = self._make_config()
+        config.norm_top_p_enabled = True
+        weights = {
+            W.moe_w1: self.executor.w13_weight,
+            W.moe_s1: self.executor.w13_weight_scale_inv,
+            W.moe_w2: self.executor.w2_weight,
+            W.moe_s2: self.executor.w2_weight_scale_inv,
+        }
+        with patch(
+            "rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors."
+            "deepgemm_hybrid_executor._get_sm120_triton_max_tokens",
+            side_effect=AssertionError("Top-p must not initialize the Triton path"),
+        ):
+            executor = DeepGemmHybridExecutor(
+                config=config,
+                quant_config=self.executor.quant_config,
+                weights=weights,
+            )
+        self.assertTrue(executor.norm_top_p_enabled)
+        self.assertEqual(executor.sm120_triton_max_tokens, 0)
+
+        payload = ExpertForwardPayload(
+            expert_x=torch.empty(
+                1, self.HIDDEN_SIZE, device="cuda", dtype=torch.float8_e4m3fn
+            ),
+            expert_topk_ids=torch.tensor([[-1, 2]], device="cuda"),
+        )
+        fallback_result = object()
+        with patch(
+            "rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors."
+            "deepgemm_hybrid_executor._is_cuda_graph_warmup_or_capture",
+            return_value=True,
+        ), patch.object(
+            executor, "sm120_triton_max_tokens", 32
+        ), patch.object(
+            executor, "execute_triton_fp8"
+        ) as triton, patch.object(
+            executor, "execute_contiguous", return_value=fallback_result
+        ) as deepgemm:
+            result = executor.execute(
+                payload,
+                activation="SiGLU",
+                expert_map=None,
+                a2_scale=None,
+                apply_router_weight_on_input=False,
+                extra_expert_args=None,
+            )
+        self.assertIs(result, fallback_result)
+        triton.assert_not_called()
+        deepgemm.assert_called_once()
 
     def test_unsupported_contracts_fall_back_to_deepgemm(self) -> None:
         payload = ExpertForwardPayload(

@@ -228,8 +228,15 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
 
         self.masked_max_token_num = config.masked_max_token_num
         self.enable_cuda_graph = config.enable_cuda_graph
+        # Triton's route aligner requires every expert ID to be valid; Top-p uses -1.
+        self.norm_top_p_enabled = bool(getattr(config, "norm_top_p_enabled", False))
         self.is_sm120 = get_sm()[0] == 12
-        if self.is_sm120 and self.enable_cuda_graph and self.ep_size == 1:
+        if (
+            self.is_sm120
+            and self.enable_cuda_graph
+            and self.ep_size == 1
+            and not self.norm_top_p_enabled
+        ):
             self.sm120_triton_max_tokens = _get_sm120_triton_max_tokens()
         else:
             # Do not let an SM120-only rollback knob affect H20/SM100 or an
@@ -250,7 +257,12 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
         assert self.w2_weight.size(1) == self.K
         assert self.w2_weight.size(2) == self.N // 2
 
-        if self.is_sm120 and self.enable_cuda_graph and self.ep_size == 1:
+        if (
+            self.is_sm120
+            and self.enable_cuda_graph
+            and self.ep_size == 1
+            and not self.norm_top_p_enabled
+        ):
             gate_shape = (self.E, self.N, self.K, self.top_k)
             down_shape = (self.E, self.K, self.N // 2, self.top_k)
             config_source = (
@@ -293,6 +305,7 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
         if (
             self.is_sm120
             and self.enable_cuda_graph
+            and not self.norm_top_p_enabled
             and self.ep_size == 1
             and _is_cuda_graph_warmup_or_capture()
             and token_num >= _SM120_TRITON_MIN_TOKENS
