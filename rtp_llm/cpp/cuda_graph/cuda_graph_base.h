@@ -57,6 +57,12 @@ struct GraphParams {
     // topology keeps the direct AttentionInputs fast path; multiple groups
     // require an exact tag -> AttentionInputs mapping at replay time.
     std::vector<std::string> kv_cache_group_tags;
+    // ---- Ascend ACL Graph fields (used by AscendGraphRunner only) ----
+    int                  tokens_per_block             = 0;  // physical kv block size
+    int                  kernel_tokens_per_block      = 0;
+    int                  sp_steps                     = 0;
+    int32_t              kv_cache_group_num           = 0;
+    std::vector<int32_t> kv_cache_layer_to_group;           // layer index -> group id
     // Final kernel block-table width, in kernel block IDs per row. Callers
     // compute it from model topology and actual reserve/fake bounds before
     // constructing the graph; this struct never re-derives page geometry.

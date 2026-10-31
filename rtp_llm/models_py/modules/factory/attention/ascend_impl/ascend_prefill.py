@@ -3,13 +3,14 @@ import torch_npu
 
 from rtp_llm.models_py.modules.factory.attention.ascend_impl.ascend_attn_params import (
     AscendAttnParams,
+    _blocks_per_phys_from_config,
     compute_ascend_attn_params,
 )
+
 from rtp_llm.models_py.modules.factory.attention.ascend_impl.ascend_kv_cache_write_op import AscendKVCacheWriteOp
 from rtp_llm.models_py.modules.factory.attention.ascend_impl.ascend_rope_emb import AscendRotaryEmbeddingOp
 from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import FMHAImplBase
 from rtp_llm.models_py.modules.factory.attention import common
-from rtp_llm.ops import RopeStyle
 
 
 class AscendPrefillImpl(FMHAImplBase):
@@ -26,13 +27,10 @@ class AscendPrefillImpl(FMHAImplBase):
 
         self.fmha_impl = AscendPrefillAttnOp(attn_configs, attn_inputs)
         self.rope_impl = self._create_rope_impl(attn_configs)
-        # FIA read / scatter write / slot mapping all run at kernel-block
-        # granularity (PyAttentionInputs.kv_cache is never assigned).
-        self.kernel_page_size = attn_configs.kernel_tokens_per_block or 128
         self.kv_cache_write_op = AscendKVCacheWriteOp(
             num_kv_heads=attn_configs.kv_head_num,
             head_size=attn_configs.size_per_head,
-            token_per_block=self.kernel_page_size,
+            token_per_block=attn_inputs.kv_cache.seq_size_per_block if attn_inputs.kv_cache else 128,
         )
 
         self.params = AscendAttnParams() # Only used by rope and KV cache write
@@ -44,6 +42,7 @@ class AscendPrefillImpl(FMHAImplBase):
         self.write_cache_store_impl = common.create_write_cache_store_impl(attn_inputs)
 
     def _create_rope_impl(self, attn_configs):
+        from rtp_llm.ops import RopeStyle
         if attn_configs.rope_config.style == RopeStyle.No:
             return None
         return AscendRotaryEmbeddingOp(attn_configs)
@@ -63,10 +62,20 @@ class AscendPrefillImpl(FMHAImplBase):
         value = v.reshape(v.shape[0], num_kv_heads, head_dim).contiguous()
         return query, key, value
 
-    def _update_rope_kv_write_params(self, device):
-        positions, slot_mapping = compute_ascend_attn_params(self.attn_inputs, page_size=self.kernel_page_size)
+    def _update_rope_kv_write_params(self, device, kv_cache, layer_idx: int = 0):
+        # The kernel block granularity comes from the per-layer cache view; the
+        # physical block size it maps onto drives slot_mapping and the writes.
+        blocks_per_phys = _blocks_per_phys_from_config(self.attn_configs, self.attn_inputs)
+        kernel_page = kv_cache.seq_size_per_block if kv_cache is not None else 0
+        self.params.blocks_per_phys = blocks_per_phys
+        positions, slot_mapping, mrope_positions = compute_ascend_attn_params(
+            self.attn_inputs, layer_idx, kernel_page * blocks_per_phys
+        )
         self.params.positions_d = positions.to(device, non_blocking=True)
         self.params.slot_mapping = slot_mapping.to(device, non_blocking=True)
+        self.params.mrope_positions_d = (
+            mrope_positions.to(device, non_blocking=True) if mrope_positions is not None else None
+        )
 
     def prepare(self, attn_inputs):
         self.fmha_impl.prepare(attn_inputs)
@@ -75,7 +84,7 @@ class AscendPrefillImpl(FMHAImplBase):
 
     def forward(self, qkv, kv_cache, layer_idx=0):
         if self.need_rope_kv_cache:
-            self._update_rope_kv_write_params(qkv.device)
+            self._update_rope_kv_write_params(qkv.device, kv_cache, layer_idx)
 
             if self.rope_impl is not None:
                 query, key, value = self.rope_impl.forward(qkv)
@@ -94,11 +103,10 @@ class AscendPrefillImpl(FMHAImplBase):
 
     @staticmethod
     def support(attn_configs, attn_inputs):
-        # MRoPE rejected: only 1-D positions are built here (same guard as the
-        # CUDA impl); multi-axis support lands with multimodal models.
+        from rtp_llm.ops import RopeStyle
+        # MRoPE variants are applied by AscendRotaryEmbeddingOp.
         return attn_inputs.is_prefill and \
                not attn_configs.use_mla and \
-               attn_configs.rope_config.style != RopeStyle.Mrope and \
                torch.npu.is_available()
 
 
@@ -116,22 +124,24 @@ class AscendPrefillAttnOp:
         return cls._causal_mask
 
     def __init__(self, attn_configs, attn_inputs):
+        self.attn_configs = attn_configs
         self.num_heads = attn_configs.head_num
         self.num_kv_heads = attn_configs.kv_head_num
         self.head_dim = attn_configs.size_per_head
         self.scale = attn_configs.q_scaling * (self.head_dim ** -0.5)
-        # Kernel-block page size (FIA table and kv_cache_base are sized by
-        # kernel_seq_size_per_block, not the physical seq size).
-        self.page_size = attn_configs.kernel_tokens_per_block or 128
+        self.page_size = attn_inputs.kv_cache.seq_size_per_block if \
+                         attn_inputs.kv_cache else 128
         self.block_table = None
         self.actual_seq_q = None
         self.actual_seq_kv = None
+        self.blocks_per_phys = _blocks_per_phys_from_config(attn_configs, attn_inputs)
 
     def set_params(self, params):
         self.params = params
 
     def prepare(self, attn_inputs):
         self.block_table = attn_inputs.kv_cache_kernel_block_id
+        self.blocks_per_phys = _blocks_per_phys_from_config(self.attn_configs, attn_inputs)
         if self.block_table is not None:
             self.block_table = self.block_table.clamp(min=0)
             if self.block_table.ndim != 2:
@@ -142,13 +152,16 @@ class AscendPrefillAttnOp:
         self.actual_seq_q = torch.cumsum(seq_lens_q, dim=0)
         self.actual_seq_kv = seq_lens_kv
 
+    def _split_kv(self, kv_cache):
+        # Zero-copy K/V half views (base[:, 0/1]), matching the write op and
+        # decode read addressing.
+        base = kv_cache.kv_cache_base
+        k_cache = base[:, 0].reshape(base.shape[0], base.shape[2], -1)
+        v_cache = base[:, 1].reshape(base.shape[0], base.shape[2], -1)
+        return k_cache, v_cache, base.shape[2]
+
     def forward(self, q, kv_cache):
-        # kv_cache_base is BSND [blocks, seq, heads, dim] from C++ reshape.
-        # FIA v2 page attention supports 3D cache (blocknum, blocksize, H).
-        k_cache = kv_cache.kv_cache_base[:, 0].reshape(
-            kv_cache.kv_cache_base.shape[0], self.page_size, -1)
-        v_cache = kv_cache.kv_cache_base[:, 1].reshape(
-            kv_cache.kv_cache_base.shape[0], self.page_size, -1)
+        k_cache, v_cache, page_size = self._split_kv(kv_cache)
         block_table = self.block_table
         if block_table is not None and block_table.device.type != q.device.type:
             block_table = block_table.to(q.device)
@@ -164,7 +177,7 @@ class AscendPrefillAttnOp:
             atten_mask=atten_mask,
             block_table=block_table,
             input_layout="TND",
-            block_size=self.page_size,
+            block_size=page_size,
             actual_seq_qlen=actual_seq_q,
             actual_seq_kvlen=actual_seq_kv,
             num_key_value_heads=self.num_kv_heads,
