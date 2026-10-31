@@ -254,12 +254,29 @@ def modify_bazel_wrapper_pythonpath(wrapper_path):
         return False
 
 
+REMOTE_JIT_AUTO = "auto"
+
+
 def bootstrap_remote_jit_dir():
     # Expand $VAR references the same way the server arg parser does: this
     # wrapper runs before the test and owns the only chance to bootstrap the
     # directory and hand child processes a normalized absolute path. A literal
     # "$VAR/..." is not POSIX-absolute, so without expansion every $VAR-form
     # REMOTE_JIT_DIR is refused here and silently dropped for the server.
+    # REMOTE_JIT_DIR=auto is the CI-safe form: a plain word survives every
+    # quoting/expansion layer of the CI command assembly (a $VAR reference
+    # gets expanded on the runner, where the variable is empty, and reached
+    # bazel as "/main/jit_cache" in run 85063732), and resolves here from
+    # HIPPO_APP_WORKDIR, which nativelink injects into every remote action.
+    if os.environ.get("REMOTE_JIT_DIR", "").strip() == REMOTE_JIT_AUTO:
+        workdir = os.environ.get("HIPPO_APP_WORKDIR", "").strip()
+        if not workdir:
+            os.environ.pop("REMOTE_JIT_DIR", None)  # child servers inherit the env
+            logging.warning(
+                "[JIT] REMOTE_JIT_DIR=auto refused (HIPPO_APP_WORKDIR unset); cold start later"
+            )
+            return
+        os.environ["REMOTE_JIT_DIR"] = str(Path(workdir) / "main" / "jit_cache")
     remote = os.path.expandvars(os.environ.get("REMOTE_JIT_DIR", "")).strip()
     if not remote or urlparse(remote).scheme:
         return
@@ -379,6 +396,16 @@ def setup_jit_cache(cache_dir=None, packages=None):
         "flashinfer",
     )
     _evict_dangling_flashinfer_ops(Path(os.environ["FLASHINFER_WORKSPACE_BASE"]))
+    # The managed v2 scope workspaces (the server-side jit_cache_manager
+    # redirects flashinfer ops there) are invisible to the default-root scan
+    # above: stale ops whose build.ninja embeds per-action runfiles include
+    # paths survive there and break the next cold-start consumer that touches
+    # the same op (run 85063732: fused_moe_trtllm_sm100 shipped includes from
+    # a destroyed runfiles tree). Scan every scope's flashinfer workspace too.
+    for scope_workspace in sorted(
+        Path("/tmp/rtp-llm/.jit_cache/v2").glob("*/flashinfer")
+    ):
+        _evict_dangling_flashinfer_ops(scope_workspace)
     cache_env.configure_writable_cache_env(
         "TRITON_CACHE_DIR", Path.home() / ".triton" / "cache", "triton"
     )
