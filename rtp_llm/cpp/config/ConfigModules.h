@@ -258,6 +258,7 @@ struct KVCacheConfig {
     std::string kvcm_vipserver_domain                = "";
     std::string kvcm_server_address                  = "";
     std::string kvcm_instance_group                  = "default";
+    int         kvcm_task_timeout_ms                 = 20000;
     int32_t     kvcm_read_backend_type               = 0;  // 0 uses MatchLocation
     int32_t     kvcm_min_replica_count               = 0;  // server interprets 0 as 1
     uint32_t    kvcm_meta_channel_retry_time         = 3;
@@ -273,6 +274,7 @@ struct KVCacheConfig {
     std::string kvcm_instance_id_salt                = "";
     size_t      kvcm_asyncwrapper_thread_num         = 16;
     size_t      kvcm_asyncwrapper_queue_size         = 1000;
+    // Retained for parsing compatibility; BTC remote broadcasts inherit the task deadline.
     int         kvcm_get_broadcast_timeout           = 15000;
     int         kvcm_put_broadcast_timeout           = 15000;
     std::string kvcm_client_config                   = "";

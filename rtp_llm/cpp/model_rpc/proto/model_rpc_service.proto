@@ -942,6 +942,8 @@ message RemoteOperationRequestPB {
     repeated string group_tags = 6;
     // Metadata operations are served by TP rank 0 for this backend's instance.
     RemoteMetadataRequestPB metadata = 7;
+    // Remaining task budget for READ/WRITE; metadata operations keep their own policy.
+    int64 timeout_ms = 8;
 }
 
 message RemoteMetadataRequestPB {
