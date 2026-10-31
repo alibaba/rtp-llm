@@ -103,8 +103,8 @@ class AccMetrics(Enum):
         "py_rtp_vit_remote_embedding_cache_stage_error_qps"
     )
     # Accumulated bytes are exported as B/s, not as an average object size.
-    VIT_REMOTE_EMB_TRANSFER_BYTES_PER_SECOND_METRIC = (
-        "py_rtp_vit_remote_embedding_cache_transfer_bytes_per_second"
+    VIT_REMOTE_EMB_SDK_OBJECT_BYTES_PER_SECOND_METRIC = (
+        "py_rtp_vit_remote_embedding_cache_sdk_object_bytes_per_second"
     )
     VIT_REMOTE_EMB_PAYLOAD_BYTES_PER_SECOND_METRIC = (
         "py_rtp_vit_remote_embedding_cache_payload_bytes_per_second"
@@ -156,13 +156,14 @@ class GaugeMetrics(Enum):
     VIT_REMOTE_EMB_WRITE_RT_METRIC = "py_rtp_vit_remote_embedding_cache_write_rt"
 
     VIT_REMOTE_EMB_STAGE_RT_METRIC = "py_rtp_vit_remote_embedding_cache_stage_rt_ms"
-    # SDK-completed payload bytes and bytes / SDK wall time. SDK calls include
-    # their metadata work; these are not NIC bytes or physical network bandwidth.
-    VIT_REMOTE_EMB_TRANSFER_BYTES_METRIC = (
-        "py_rtp_vit_remote_embedding_cache_transfer_bytes"
+    # Logical object bytes for completed SDK calls and bytes / SDK wall time.
+    # An existing-key save may succeed without IO; reads may use local replicas.
+    # These are API volume, not transferred/network bytes. PACE reports actual IO.
+    VIT_REMOTE_EMB_SDK_OBJECT_BYTES_METRIC = (
+        "py_rtp_vit_remote_embedding_cache_sdk_object_bytes"
     )
-    VIT_REMOTE_EMB_TRANSFER_SPEED_METRIC = (
-        "py_rtp_vit_remote_embedding_cache_transfer_mib_per_second"
+    VIT_REMOTE_EMB_SDK_EFFECTIVE_SPEED_METRIC = (
+        "py_rtp_vit_remote_embedding_cache_sdk_effective_mib_per_second"
     )
     # Only caller-accepted reads / completed writes. A late SDK read after a
     # caller timeout contributes to transfer metrics, never to payload metrics.

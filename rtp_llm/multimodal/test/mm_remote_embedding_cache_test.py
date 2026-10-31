@@ -252,7 +252,7 @@ class RemoteCacheTest(unittest.TestCase):
                 self.assertEqual(
                     self.metric_values(
                         report,
-                        AccMetrics.VIT_REMOTE_EMB_TRANSFER_BYTES_PER_SECOND_METRIC,
+                        AccMetrics.VIT_REMOTE_EMB_SDK_OBJECT_BYTES_PER_SECOND_METRIC,
                     ),
                     [(nbytes, tags)],
                 )
@@ -265,7 +265,7 @@ class RemoteCacheTest(unittest.TestCase):
                 )
                 self.assertEqual(remote.stats()["inflight_tasks"], 0)
 
-    def test_transfer_and_accepted_bytes_distinguish_corruption_and_miss(self):
+    def test_sdk_and_accepted_bytes_distinguish_corruption_and_miss(self):
         data = pack_object(plan_object((torch.ones(3, 4), None)))
         remote = self.remote(Store({"key": data}))
         with patch(
@@ -278,7 +278,7 @@ class RemoteCacheTest(unittest.TestCase):
         tags = {"operation": "read"}
         self.assertEqual(
             self.metric_values(
-                report, AccMetrics.VIT_REMOTE_EMB_TRANSFER_BYTES_PER_SECOND_METRIC
+                report, AccMetrics.VIT_REMOTE_EMB_SDK_OBJECT_BYTES_PER_SECOND_METRIC
             ),
             [(data.numel(), tags), (data.numel(), tags)],
         )
@@ -304,7 +304,7 @@ class RemoteCacheTest(unittest.TestCase):
             data.numel(), 3 * 4 * 4
         )  # Serialized header/alignment count too.
 
-    def test_late_success_counts_transfer_but_not_accepted_payload(self):
+    def test_late_success_counts_sdk_bytes_but_not_accepted_payload(self):
         data = pack_object(plan_object((torch.ones(3, 4), None)))
         store = Store({"key": data})
         store.read_gate.clear()
@@ -317,7 +317,7 @@ class RemoteCacheTest(unittest.TestCase):
                 self.assertTrue(store.read_started.is_set())
                 self.assertFalse(
                     self.metric_values(
-                        report, GaugeMetrics.VIT_REMOTE_EMB_TRANSFER_BYTES_METRIC
+                        report, GaugeMetrics.VIT_REMOTE_EMB_SDK_OBJECT_BYTES_METRIC
                     )
                 )
             finally:
@@ -336,7 +336,7 @@ class RemoteCacheTest(unittest.TestCase):
         )
         self.assertEqual(
             self.metric_values(
-                report, AccMetrics.VIT_REMOTE_EMB_TRANSFER_BYTES_PER_SECOND_METRIC
+                report, AccMetrics.VIT_REMOTE_EMB_SDK_OBJECT_BYTES_PER_SECOND_METRIC
             ),
             [(data.numel(), tags)],
         )
@@ -356,12 +356,12 @@ class RemoteCacheTest(unittest.TestCase):
             self.assertIsNone(remote.load("key"))
         self.assertFalse(
             self.metric_values(
-                report, GaugeMetrics.VIT_REMOTE_EMB_TRANSFER_BYTES_METRIC
+                report, GaugeMetrics.VIT_REMOTE_EMB_SDK_OBJECT_BYTES_METRIC
             )
         )
         self.assertEqual(
             self.metric_values(
-                report, AccMetrics.VIT_REMOTE_EMB_TRANSFER_BYTES_PER_SECOND_METRIC
+                report, AccMetrics.VIT_REMOTE_EMB_SDK_OBJECT_BYTES_PER_SECOND_METRIC
             ),
             [(0, {"operation": "read"})],
         )
@@ -372,7 +372,7 @@ class RemoteCacheTest(unittest.TestCase):
             [t for v, t in errors if v], [{"operation": "read", "stage": "transfer"}]
         )
 
-    def test_transfer_metric_units_use_sdk_wall_time_and_mib(self):
+    def test_sdk_metric_units_use_wall_time_and_mib(self):
         remote = self.remote(Store())
         with patch(
             "rtp_llm.multimodal.mm_remote_embedding_cache.kmonitor.report"
@@ -385,7 +385,7 @@ class RemoteCacheTest(unittest.TestCase):
                     pass
         self.assertEqual(
             self.metric_values(
-                report, GaugeMetrics.VIT_REMOTE_EMB_TRANSFER_SPEED_METRIC
+                report, GaugeMetrics.VIT_REMOTE_EMB_SDK_EFFECTIVE_SPEED_METRIC
             ),
             [(8, {"operation": "write"})],
         )

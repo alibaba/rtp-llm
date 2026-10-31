@@ -339,8 +339,9 @@ class MMRemoteEmbeddingCache:
     def _observe_stage(self, operation, stage, nbytes=0):
         """Observe completed SDK work independently of a caller's deadline.
 
-        Stage values are fixed at call sites. Transfer size counts only fully
-        successful SDK calls, including late reads; partial failures are unknown.
+        Stage values are fixed at call sites. Object bytes count fully successful
+        SDK calls, including late reads and deduplicated saves. This is logical
+        API volume, not actual IO bytes; partial failures are unknown.
         """
         started = time.perf_counter()
         outcome = "success"
@@ -371,19 +372,19 @@ class MMRemoteEmbeddingCache:
                 tags = {"operation": operation}
                 completed_bytes = nbytes if outcome == "success" else 0
                 self._report_metric(
-                    AccMetrics.VIT_REMOTE_EMB_TRANSFER_BYTES_PER_SECOND_METRIC,
+                    AccMetrics.VIT_REMOTE_EMB_SDK_OBJECT_BYTES_PER_SECOND_METRIC,
                     completed_bytes,
                     tags,
                 )
                 if completed_bytes:
                     self._report_metric(
-                        GaugeMetrics.VIT_REMOTE_EMB_TRANSFER_BYTES_METRIC,
+                        GaugeMetrics.VIT_REMOTE_EMB_SDK_OBJECT_BYTES_METRIC,
                         completed_bytes,
                         tags,
                     )
                     if elapsed_ms > 0:
                         self._report_metric(
-                            GaugeMetrics.VIT_REMOTE_EMB_TRANSFER_SPEED_METRIC,
+                            GaugeMetrics.VIT_REMOTE_EMB_SDK_EFFECTIVE_SPEED_METRIC,
                             completed_bytes * 1000 / elapsed_ms / (1024 * 1024),
                             tags,
                         )
