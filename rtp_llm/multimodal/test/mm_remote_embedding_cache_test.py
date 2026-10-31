@@ -10,6 +10,7 @@ import torch
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.config.py_config_modules import ProfilingDebugLoggingConfig, VitConfig
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import MultimodalInputsPB
+from rtp_llm.metrics.kmonitor_metric_reporter import AccMetrics, GaugeMetrics
 from rtp_llm.multimodal.kvcm.tensor_object import pack_object, plan_object
 from rtp_llm.multimodal.mm_embedding_cache import MMEmbeddingCache
 from rtp_llm.multimodal.mm_process_engine import MMProcessEngine
@@ -96,6 +97,157 @@ class RemoteCacheTest(unittest.TestCase):
         result = MMRemoteEmbeddingCache(store, **options)
         self.addCleanup(result.close)
         return result
+
+    def metric_values(self, reporter, metric):
+        return [
+            (c.args[1], c.args[2])
+            for c in reporter.call_args_list
+            if c.args[0] == metric
+        ]
+
+    def test_remote_read_metrics_separate_hit_miss_and_error(self):
+        data = pack_object(plan_object((torch.ones(3, 4), None)))
+        store = Store({"key": data})
+        remote = self.remote(store)
+        with patch(
+            "rtp_llm.multimodal.mm_remote_embedding_cache.kmonitor.report"
+        ) as report:
+            # Neither a bypass nor its absent remote key is a remote read.
+            self.assertIsNone(remote.load(None))
+            self.assertFalse(report.called)
+            self.assertIsNotNone(remote.load("key"))
+            self.assertIsNone(remote.load("missing"))
+            data[-1] ^= 1  # Corrupt payload is an error, not a miss/hit.
+            self.assertIsNone(remote.load("key"))
+        self.assertEqual(
+            self.metric_values(report, AccMetrics.VIT_REMOTE_EMB_READ_QPS_METRIC),
+            [(1, {"status": s}) for s in ("hit", "miss", "error")],
+        )
+        self.assertEqual(
+            self.metric_values(report, AccMetrics.VIT_REMOTE_EMB_READ_ERROR_QPS_METRIC),
+            [(0, {}), (0, {}), (1, {})],
+        )
+        rts = self.metric_values(report, GaugeMetrics.VIT_REMOTE_EMB_READ_RT_METRIC)
+        self.assertEqual(
+            [t for _, t in rts], [{"status": s} for s in ("hit", "miss", "error")]
+        )
+        self.assertTrue(all(0 <= v < 1000 for v, _ in rts))
+        self.assertEqual(remote.stats()["inflight_tasks"], 0)
+
+    def test_timed_out_read_reports_once_even_when_worker_fails_later(self):
+        store = Store({"key": pack_object(plan_object((torch.ones(3, 4), None)))})
+        store.read_gate.clear()
+        store.fail_read = True
+        remote = self.remote(store, read_timeout_ms=50)
+        with patch(
+            "rtp_llm.multimodal.mm_remote_embedding_cache.kmonitor.report"
+        ) as report:
+            try:
+                self.assertIsNone(remote.load("key"))
+                self.assertTrue(store.read_started.is_set())
+                self.assertGreater(remote.stats()["inflight_bytes"], 0)
+            finally:
+                store.read_gate.set()
+                remote.close()
+        self.assertEqual(
+            self.metric_values(report, AccMetrics.VIT_REMOTE_EMB_READ_QPS_METRIC),
+            [(1, {"status": "timeout"})],
+        )
+        self.assertEqual(
+            self.metric_values(report, AccMetrics.VIT_REMOTE_EMB_READ_ERROR_QPS_METRIC),
+            [(1, {})],
+        )
+        rt, tags = self.metric_values(
+            report, GaugeMetrics.VIT_REMOTE_EMB_READ_RT_METRIC
+        )[0]
+        self.assertGreaterEqual(rt, 40)  # Milliseconds, not seconds or microseconds.
+        self.assertLess(rt, 500)
+        self.assertEqual(tags, {"status": "timeout"})
+        self.assertEqual(remote.stats()["inflight_tasks"], 0)
+
+    def test_admission_skips_do_not_increment_error_qps(self):
+        data = pack_object(plan_object((torch.ones(3, 4), None)))
+        remote = self.remote(Store({"key": data}), max_inflight_bytes=1, max_pending=1)
+        with patch(
+            "rtp_llm.multimodal.mm_remote_embedding_cache.kmonitor.report"
+        ) as report:
+            self.assertIsNone(remote.load("key"))  # Metadata lookup, no payload budget.
+            self.assertTrue(remote._reserve(0))
+            try:
+                self.assertIsNone(remote.load("key"))  # No admitted IO at all.
+            finally:
+                remote._release(0)
+        self.assertEqual(
+            self.metric_values(report, AccMetrics.VIT_REMOTE_EMB_READ_QPS_METRIC),
+            [(1, {"status": "admission_skip"})],
+        )
+        self.assertEqual(
+            self.metric_values(report, AccMetrics.VIT_REMOTE_EMB_READ_ERROR_QPS_METRIC),
+            [(0, {})],
+        )
+        self.assertEqual(
+            self.metric_values(report, AccMetrics.VIT_REMOTE_EMB_SKIP_QPS_METRIC),
+            [(1, {"operation": "read"})],
+        )
+
+    def test_metric_reporting_failure_preserves_result_and_releases_budget(self):
+        data = pack_object(plan_object((torch.ones(3, 4), None)))
+        remote = self.remote(Store({"key": data}))
+        with patch(
+            "rtp_llm.multimodal.mm_remote_embedding_cache.kmonitor.report",
+            side_effect=RuntimeError("reporter unavailable"),
+        ):
+            self.assertIsNotNone(remote.load("key"))
+        self.assertEqual(remote.stats()["inflight_tasks"], 0)
+        self.assertEqual(remote.stats()["inflight_bytes"], 0)
+
+    def test_remote_write_metrics_follow_completed_background_operations(self):
+        for failed in (False, True):
+            with self.subTest(failed=failed):
+                store = Store()
+                store.fail_write = failed
+                remote = self.remote(store)
+                entry = SimpleNamespace(
+                    pool_owners=[],
+                    result=(torch.ones(3, 4), None),
+                    error=None,
+                    original_devices=(torch.device("cpu"), None),
+                    generation=1,
+                    remote_cache_context={"key": "key", "trace_id": None},
+                )
+                with patch(
+                    "rtp_llm.multimodal.mm_remote_embedding_cache.kmonitor.report"
+                ) as report:
+                    remote.submit_eviction("local-key", entry)
+                    deadline = time.monotonic() + 2
+                    while (
+                        remote.stats()["inflight_tasks"] and time.monotonic() < deadline
+                    ):
+                        time.sleep(0.01)
+                    self.assertEqual(remote.stats()["inflight_tasks"], 0)
+                    remote.close()
+                status = "error" if failed else "success"
+                self.assertEqual(
+                    self.metric_values(
+                        report, AccMetrics.VIT_REMOTE_EMB_WRITE_QPS_METRIC
+                    ),
+                    [(1, {"status": status})],
+                )
+                self.assertEqual(
+                    self.metric_values(
+                        report, AccMetrics.VIT_REMOTE_EMB_WRITE_ERROR_QPS_METRIC
+                    ),
+                    [(int(failed), {})],
+                )
+                self.assertEqual(
+                    len(
+                        self.metric_values(
+                            report, GaugeMetrics.VIT_REMOTE_EMB_WRITE_RT_METRIC
+                        )
+                    ),
+                    1,
+                )
+                self.assertEqual(remote.stats()["inflight_tasks"], 0)
 
     def test_cpu_eviction_whole_result_shared_with_second_worker(self):
         store = Store()

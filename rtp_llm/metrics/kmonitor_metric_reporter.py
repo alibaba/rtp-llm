@@ -85,6 +85,18 @@ class AccMetrics(Enum):
     VIT_EMBEDDING_CACHE_INFLIGHT_QPS_METRIC = "py_rtp_vit_embedding_cache_inflight_qps"
     VIT_EMBEDDING_CACHE_EVICTION_QPS_METRIC = "py_rtp_vit_embedding_cache_eviction_qps"
 
+    # Remote tier only. Read status: hit/miss/admission_skip/timeout/error.
+    # Misses and admission skips are not failures. Error QPS includes timeouts.
+    VIT_REMOTE_EMB_READ_QPS_METRIC = "py_rtp_vit_remote_embedding_cache_read_qps"
+    VIT_REMOTE_EMB_READ_ERROR_QPS_METRIC = (
+        "py_rtp_vit_remote_embedding_cache_read_error_qps"
+    )
+    VIT_REMOTE_EMB_WRITE_QPS_METRIC = "py_rtp_vit_remote_embedding_cache_write_qps"
+    VIT_REMOTE_EMB_WRITE_ERROR_QPS_METRIC = (
+        "py_rtp_vit_remote_embedding_cache_write_error_qps"
+    )
+    VIT_REMOTE_EMB_SKIP_QPS_METRIC = "py_rtp_vit_remote_embedding_cache_skip_qps"
+
 
 class GaugeMetrics(Enum):
     RESPONSE_FIRST_TOKEN_RT_METRIC = "py_rtp_response_first_token_rt"
@@ -124,6 +136,11 @@ class GaugeMetrics(Enum):
     # serialization. source distinguishes mm_embedding_cpp/get_embedding_result;
     # status is success/error. Async submission ACKs are deliberately excluded.
     VIT_REQUEST_RT_METRIC = "py_rtp_vit_request_rt"
+    # Milliseconds, one observation per admitted remote operation. Read includes
+    # queueing, SDK calls, deserialization and device restoration enqueue, without
+    # CUDA synchronization. Write includes packing and SDK save, excluding queueing.
+    VIT_REMOTE_EMB_READ_RT_METRIC = "py_rtp_vit_remote_embedding_cache_read_rt"
+    VIT_REMOTE_EMB_WRITE_RT_METRIC = "py_rtp_vit_remote_embedding_cache_write_rt"
     # Milliseconds per non-empty inspection group, including OSS/HTTP work,
     # excluding input preparation, source handoff wait and GPU embedding.
     GREENNET_RT_METRIC = "py_rtp_greennet_rt"

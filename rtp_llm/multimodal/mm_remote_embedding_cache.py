@@ -19,6 +19,8 @@ from pathlib import Path
 
 import torch
 
+from rtp_llm.metrics import kmonitor
+from rtp_llm.metrics.kmonitor_metric_reporter import AccMetrics, GaugeMetrics
 from rtp_llm.multimodal import emb_deepseek_diagnostics, emb_diagnostics
 from rtp_llm.multimodal.kvcm.tensor_object import (
     pack_object,
@@ -290,6 +292,36 @@ class MMRemoteEmbeddingCache:
             except Exception:
                 pass  # Never prevent IO-task/client release in a finally block.
 
+    @staticmethod
+    def _report_metric(metric, value, tags):
+        try:
+            kmonitor.report(metric, value, tags)
+        except Exception:
+            # Monitoring must not change cache fallback or prevent budget release.
+            logging.warning("MM remote cache metric reporting failed", exc_info=True)
+
+    def _report_operation(self, operation, started, outcome):
+        elapsed_ms = (time.perf_counter() - started) * 1000
+        if operation == "read":
+            qps = AccMetrics.VIT_REMOTE_EMB_READ_QPS_METRIC
+            error_qps = AccMetrics.VIT_REMOTE_EMB_READ_ERROR_QPS_METRIC
+            rt = GaugeMetrics.VIT_REMOTE_EMB_READ_RT_METRIC
+        else:
+            qps = AccMetrics.VIT_REMOTE_EMB_WRITE_QPS_METRIC
+            error_qps = AccMetrics.VIT_REMOTE_EMB_WRITE_ERROR_QPS_METRIC
+            rt = GaugeMetrics.VIT_REMOTE_EMB_WRITE_RT_METRIC
+        tags = {"status": outcome}
+        self._report_metric(qps, 1, tags)
+        self._report_metric(rt, elapsed_ms, tags)
+        # Emit zero for successful calls/misses so a healthy stream has an
+        # explicit zero error series. No request IDs, keys or error text as tags.
+        self._report_metric(error_qps, int(outcome in ("error", "timeout")), {})
+
+    def _report_skip(self, operation):
+        self._report_metric(
+            AccMetrics.VIT_REMOTE_EMB_SKIP_QPS_METRIC, 1, {"operation": operation}
+        )
+
     def _get_client(self):
         with self._client_lock:
             if self._closed:
@@ -401,6 +433,7 @@ class MMRemoteEmbeddingCache:
                 return
             self._pending_writes.add(key)
         if not self._reserve(cost):
+            self._report_skip("write")
             with self._lock:
                 self._pending_writes.discard(key)
             return
@@ -454,6 +487,7 @@ class MMRemoteEmbeddingCache:
                 if client is not None:
                     self._retire_client(client)
             finally:
+                self._report_operation("write", started, outcome)
                 self._benchmark(
                     "remote_store_timing",
                     key,
@@ -487,6 +521,7 @@ class MMRemoteEmbeddingCache:
         timing = {}
         outcome = "error"
         if not self._reserve(0):
+            self._report_skip("read")
             return None
         cost = 0
         future = None
@@ -504,6 +539,7 @@ class MMRemoteEmbeddingCache:
                     key, trace_id=trace_id, timeout_ms=remaining_ms
                 )
                 if size is None:
+                    timing["outcome"] = "miss"
                     timing["sdk_api_ms"] = (time.perf_counter() - api_started) * 1000
                     self._count("miss")
                     self.record("load_miss", key=key, trace_id=trace_id)
@@ -513,6 +549,7 @@ class MMRemoteEmbeddingCache:
                 with self._lock:
                     if self._bytes + 3 * size > self.max_inflight_bytes:
                         self._count("admission_skip")
+                        timing["outcome"] = "admission_skip"
                         return None
                     cost = 3 * size
                     self._bytes += cost
@@ -537,7 +574,7 @@ class MMRemoteEmbeddingCache:
             future = self._executor.submit(read)
             buffer = future.result(timeout=max(0, deadline - time.monotonic()))
             if buffer is None:
-                outcome = "miss_or_admission_skip"
+                outcome = timing["outcome"]
                 return None
             value = unpack_object(
                 buffer, max_bytes=self.max_object_bytes, cuda_device=self.cuda_device
@@ -562,6 +599,7 @@ class MMRemoteEmbeddingCache:
             )
             return value
         except concurrent.futures.TimeoutError:
+            outcome = "timeout"
             self._count("read_timeout")
             if future is not None:
                 future.cancel()
@@ -578,6 +616,7 @@ class MMRemoteEmbeddingCache:
             )
             return None
         finally:
+            self._report_operation("read", started, outcome)
             self._benchmark(
                 "remote_load_timing",
                 key,
