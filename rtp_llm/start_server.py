@@ -556,6 +556,9 @@ def _is_startup_real_warmup_entry_rank(py_env_configs: PyEnvConfigs) -> bool:
 
 
 def _should_run_startup_real_warmup(py_env_configs: PyEnvConfigs) -> bool:
+    flag = os.environ.get("DSV4_STARTUP_REAL_WARMUP", "auto").strip().lower()
+    if flag in ("0", "false", "off", "no"):
+        return False
     runtime_config = py_env_configs.runtime_config
     if not runtime_config.warm_up or not runtime_config.model_warm_up:
         return False
@@ -575,7 +578,9 @@ def _should_run_startup_real_warmup(py_env_configs: PyEnvConfigs) -> bool:
         )
         return False
 
-    return getattr(py_env_configs.model_args, "model_type", "") == "deepseek_v4"
+    return flag in ("1", "true", "on", "yes", "force") or getattr(
+        py_env_configs.model_args, "model_type", ""
+    ) in ("deepseek_v4", "glm_5")
 
 
 def _setup_startup_warmup_health_gate(py_env_configs: PyEnvConfigs):
@@ -775,6 +780,17 @@ def _get_startup_real_warmup_max_len(py_env_configs: PyEnvConfigs):
 
 def _get_startup_real_warmup_token_lens(py_env_configs: PyEnvConfigs):
     max_len = _get_startup_real_warmup_max_len(py_env_configs)
+    configured = os.environ.get("RTP_LLM_STARTUP_REAL_WARMUP_TOKEN_LENS", "").strip()
+    if configured:
+        token_lens = [int(value) for value in configured.split(",")]
+        if not all(
+            STARTUP_REAL_WARMUP_MIN_TOKEN_LEN <= value <= max_len
+            for value in token_lens
+        ):
+            raise ValueError(
+                f"invalid RTP_LLM_STARTUP_REAL_WARMUP_TOKEN_LENS: {token_lens}"
+            )
+        return token_lens
     token_lens = _get_startup_real_warmup_pow2_lens(max_len)
     logging.info(
         "DSV4 startup real warmup uses fixed pow2 token lens through max_seq_len=%d: %s",

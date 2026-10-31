@@ -41,3 +41,9 @@ py_test(
         "//conditions:default": {"gpu": "SM100_ARM_CU13", "gpu_count": "1"},
     }),
 )
+
+py_test(
+    name = "glm5_weight_alias_test",
+    srcs = ["glm5_weight_alias_test.py"],
+    deps = ["//rtp_llm:models", "//rtp_llm:testlib"],
+)

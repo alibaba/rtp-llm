@@ -96,7 +96,7 @@ public:
         resource_context_.cache_manager = std::move(previous_cache_manager_);
     }
 
-    ScopedWarmUpCacheManagerBinding(const ScopedWarmUpCacheManagerBinding&) = delete;
+    ScopedWarmUpCacheManagerBinding(const ScopedWarmUpCacheManagerBinding&)            = delete;
     ScopedWarmUpCacheManagerBinding& operator=(const ScopedWarmUpCacheManagerBinding&) = delete;
 
 private:
@@ -104,18 +104,17 @@ private:
     std::shared_ptr<KVCacheManager> previous_cache_manager_;
 };
 
-std::shared_ptr<KVCacheManager> createGenerationPrefillCudaGraphWarmUpCacheManager(const EngineInitParams& params) {
+std::shared_ptr<KVCacheManager> createPrefillWarmUpCacheManager(const EngineInitParams& params) {
     auto cache_config = CacheConfigCreator::createWarmupConfig(
         params.model_config_, params.parallelism_config, params.kv_cache_config, /*gen_num_per_cycle=*/0);
 
-    RTP_LLM_CHECK_WITH_INFO(cache_config.seq_size_per_block > 0,
-                            "generation prefill CUDA graph warmup requires a positive KV block size");
+    RTP_LLM_CHECK_WITH_INFO(cache_config.seq_size_per_block > 0, "prefill warmup requires a positive KV block size");
 
     // This temporary pool only supplies the KV tensor bound into the captured
     // model. The warmup config publishes complete per-group capacities before
     // KVCacheManager allocates the reserved block 0, as in decode warmup.
     auto cache_manager = std::make_shared<KVCacheManager>(cache_config, /*warmup=*/true);
-    RTP_LLM_CHECK_WITH_INFO(cache_manager->init(), "init generation prefill CUDA graph warmup KV cache manager failed");
+    RTP_LLM_CHECK_WITH_INFO(cache_manager->init(), "init prefill warmup KV cache manager failed");
     return cache_manager;
 }
 
@@ -377,7 +376,7 @@ absl::StatusOr<GenerateStreamPtr> NormalEngine::preRun(const std::shared_ptr<Gen
     RuntimeConfig stream_runtime_config                            = runtime_config;
     stream_runtime_config.fifo_scheduler_config.prefill_chunk_size = 0;
 
-    auto stream = std::make_shared<NormalGenerateStream>(generate_input,
+    auto       stream       = std::make_shared<NormalGenerateStream>(generate_input,
                                                          model_config_,
                                                          stream_runtime_config,
                                                          resource_context_,
@@ -392,15 +391,14 @@ absl::StatusOr<GenerateStreamPtr> NormalEngine::preRun(const std::shared_ptr<Gen
         const size_t reserved_blocks = warmUpReservedBlockCount(stream->seqLength(), reserve_step, seq_size_per_block);
         stream->fakeInitKVBlock(reserved_blocks);
     } else if (mode == preRunMode::prefill_warm_up && resource_context_.cache_manager) {
-        // Generation-prefill CUDA Graph capture needs a temporary real KV pool, while the
+        // Paged prefill warmup needs a temporary real KV pool, while the
         // framework warmup stream deliberately does not allocate request KV
         // blocks. Keep the model-level KV tensor and per-request block table
         // paired by routing every logical warmup block to reserved block zero.
         // This preserves the max-length eager warmup used for memory sizing
         // without consuming or publishing any real cache block.
         const size_t seq_size_per_block = resource_context_.cache_manager->cacheConfig().seq_size_per_block;
-        RTP_LLM_CHECK_WITH_INFO(seq_size_per_block > 0,
-                                "generation prefill CUDA graph warmup requires a positive KV block size");
+        RTP_LLM_CHECK_WITH_INFO(seq_size_per_block > 0, "prefill warmup requires a positive KV block size");
         const size_t reserved_blocks = (stream->seqLength() + seq_size_per_block - 1) / seq_size_per_block;
         stream->fakeInitKVBlock(reserved_blocks);
     } else if (mode == preRunMode::build_system_prompt) {
@@ -548,14 +546,14 @@ WarmUpResult NormalEngine::prefillWarmUp(const EngineInitParams& params) {
     RTP_LLM_FAIL("prefillWarmUp is not supported on non-CUDA platforms");
     return {};
 #else
-    const int64_t token_budget = runtime_config.fifo_scheduler_config.prefill_chunk_size;
-    const bool use_global_budget_warmup = token_budget > 0 && !runtime_config.warm_up_with_loss;
-    const int64_t token_heavy_seq_len = std::max<int64_t>(1, static_cast<int64_t>(getWarmUpInputLength()));
+    const int64_t token_budget             = runtime_config.fifo_scheduler_config.prefill_chunk_size;
+    const bool    use_global_budget_warmup = token_budget > 0 && !runtime_config.warm_up_with_loss;
+    const int64_t token_heavy_seq_len      = std::max<int64_t>(1, static_cast<int64_t>(getWarmUpInputLength()));
 
     auto fake_input = makeFakeInput(static_cast<size_t>(token_heavy_seq_len));
     fake_input->generate_config->num_return_sequences =
         use_global_budget_warmup ? 1 : runtime_config.fifo_scheduler_config.max_context_batch_size;
-    fake_input->generate_config->calculate_loss       = int(runtime_config.warm_up_with_loss);
+    fake_input->generate_config->calculate_loss = int(runtime_config.warm_up_with_loss);
     if (!use_global_budget_warmup) {
         const bool generation_prefill_cuda_graph_requested =
             shouldCreateGenerationPrefillCudaGraph(params.hw_kernel_config,
@@ -563,7 +561,10 @@ WarmUpResult NormalEngine::prefillWarmUp(const EngineInitParams& params) {
                                                    /*primary_graph_is_prefill=*/false,
                                                    params.parallelism_config.role_type,
                                                    params.sp_config.type);
-        if (!generation_prefill_cuda_graph_requested) {
+        // Sparse CP eager warmup also plans and gathers paged KV.
+        const bool cp_sparse_warmup =
+            params.parallelism_config.prefill_cp_config.is_enabled() && params.model_config_.attn_config.is_sparse;
+        if (!generation_prefill_cuda_graph_requested && !cp_sparse_warmup) {
             rtp_llm::setTraceMemory(true);
             executor_.reset(new NormalExecutor(params, nullptr, true, false, 0, mla_ops_type_));
             THROW_IF_STATUSOR_ERROR(preRun(fake_input, preRunMode::prefill_warm_up));
@@ -576,13 +577,13 @@ WarmUpResult NormalEngine::prefillWarmUp(const EngineInitParams& params) {
             return WarmUpResult({device_status.device_memory_status.available_bytes, max_consumed});
         }
 
-        // A normal prefill warmup historically has no CacheManager. Generation
-        // prefill CUDA Graph, however, needs a real KV layout and reserved dummy
+        // A normal prefill warmup historically has no CacheManager. Sparse CP
+        // and generation prefill graphs need a real KV layout and reserved dummy
         // block 0 during construction. Capture against a minimal temporary pool so
         // graph-owned tensors and graph-pool reservations are included in the
         // runtime budget before the production KV pool consumes the remaining
         // memory. Speculative/MTP models stay on their independent warmup path.
-        auto warmup_cache_manager = createGenerationPrefillCudaGraphWarmUpCacheManager(params);
+        auto warmup_cache_manager = createPrefillWarmUpCacheManager(params);
 
         const auto baseline_status    = getGpuExecStatus().device_memory_status;
         const auto baseline_allocated = cuda_graph::graphAllocatedBytes();
@@ -643,9 +644,8 @@ WarmUpResult NormalEngine::prefillWarmUp(const EngineInitParams& params) {
         max_consumed = memory_tracker->maxConsumedBytes();
         token_heavy_result.value().reset();
 
-        const int64_t block_size       = model_config_.attn_config.tokens_per_block;
-        const int64_t row_count =
-            std::min(token_budget, runtime_config.fifo_scheduler_config.max_context_batch_size);
+        const int64_t block_size = model_config_.attn_config.tokens_per_block;
+        const int64_t row_count  = std::min(token_budget, runtime_config.fifo_scheduler_config.max_context_batch_size);
         const int64_t row_heavy_tokens = std::min(token_budget, token_heavy_seq_len);
         const int64_t row_heavy_reuse  = (token_heavy_seq_len - row_heavy_tokens) / block_size * block_size;
         auto          row_heavy_input  = makeFakeInput(static_cast<size_t>(row_heavy_reuse + row_heavy_tokens));
@@ -653,8 +653,8 @@ WarmUpResult NormalEngine::prefillWarmUp(const EngineInitParams& params) {
 
         // Conservatively combine multiple rows with a full chunk per row and a long prefix.
         // Run once without splitting by the scheduler's global token budget.
-        auto row_heavy_result = runPrefillWarmupShape(
-            row_heavy_input, warmup_resource_context, static_cast<int>(row_heavy_reuse), 0);
+        auto row_heavy_result =
+            runPrefillWarmupShape(row_heavy_input, warmup_resource_context, static_cast<int>(row_heavy_reuse), 0);
         THROW_IF_STATUSOR_ERROR(row_heavy_result);
         max_consumed = std::max(max_consumed, memory_tracker->maxConsumedBytes());
         row_heavy_result.value().reset();
@@ -704,7 +704,7 @@ WarmUpResult NormalEngine::decodeWarmUp(const EngineInitParams& params) {
         ScopedWarmUpCacheManagerBinding cache_binding(resource_context_, cache_manager);
         THROW_IF_STATUSOR_ERROR(preRun(fake_input, preRunMode::decode_warm_up));
     }
-    const auto max_consumed         = getGpuExecStatus().device_memory_status.max_consumed_bytes;
+    const auto max_consumed = getGpuExecStatus().device_memory_status.max_consumed_bytes;
     rtp_llm::setTraceMemory(false);
     (void)executor_.reset(nullptr);
     cudaDeviceSynchronize();
