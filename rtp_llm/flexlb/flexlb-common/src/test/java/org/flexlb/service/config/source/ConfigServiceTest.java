@@ -216,6 +216,23 @@ class ConfigServiceTest {
     }
 
     @Test
+    void runtimeUpdatesEnableAndDisableClientFallbackWithoutChangingExistingSnapshots() {
+        FakeConfigSource source = new FakeConfigSource("Nacos", 200, "{\"schemaVersion\":3}");
+        ConfigService service = createService(List.of(environmentSource(Map.of()), source));
+        FlexlbConfig initial = service.loadBalanceConfig();
+        assertThat(initial.isEnableFallback()).isFalse();
+
+        source.emit("{\"schemaVersion\":3,\"enableFallback\":true}");
+        FlexlbConfig enabled = service.loadBalanceConfig();
+        assertThat(enabled.isEnableFallback()).isTrue();
+        assertThat(initial.isEnableFallback()).isFalse();
+
+        source.emit("{\"schemaVersion\":3,\"enableFallback\":false}");
+        assertThat(service.loadBalanceConfig().isEnableFallback()).isFalse();
+        assertThat(enabled.isEnableFallback()).isTrue();
+    }
+
+    @Test
     void runtimeUpdateReplacesDecodeLimitsWithoutChangingExistingSnapshot() {
         FakeConfigSource source = new FakeConfigSource("Nacos", 200, """
                 {"schemaVersion":3,"requestLifecycle":{"request":{"timeoutMs":60000}},

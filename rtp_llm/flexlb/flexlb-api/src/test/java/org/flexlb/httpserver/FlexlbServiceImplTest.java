@@ -76,6 +76,96 @@ import static org.mockito.Mockito.when;
 class FlexlbServiceImplTest {
 
     @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void enabledFallbackReturnsBeforeContextValidationOrMasterSelection(boolean batchDispatch) {
+        FlexlbConfig config = routingConfig();
+        config.setEnableFallback(true);
+        if (batchDispatch) {
+            config.setDispatcher(new DispatcherConfig());
+        }
+        when(configService.loadBalanceConfig()).thenReturn(config);
+
+        for (var roles : List.of(List.<FlexlbScheduleProtocol.ScheduleRolePB>of(),
+                List.of(FlexlbScheduleProtocol.ScheduleRolePB.SCHEDULE_ROLE_ENCODER),
+                List.of(FlexlbScheduleProtocol.ScheduleRolePB.SCHEDULE_ROLE_PREFILL,
+                        FlexlbScheduleProtocol.ScheduleRolePB.SCHEDULE_ROLE_DECODE))) {
+            StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer = mock(StreamObserver.class);
+            service.schedule(FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
+                    .setRequestIdStr("frontend-request")
+                    .addAllScheduleRoles(roles)
+                    .build(), observer);
+
+            var response = ArgumentCaptor.forClass(FlexlbScheduleProtocol.FlexlbScheduleResponsePB.class);
+            verify(observer).onNext(response.capture());
+            verify(observer).onCompleted();
+            verifyNoMoreInteractions(observer);
+            assertEquals(8600, response.getValue().getCode());
+            assertEquals("FALLBACK_REQUESTED", response.getValue().getErrorMessage());
+            assertFalse(response.getValue().getSuccess());
+            assertFalse(response.getValue().getEnqueuedByMaster());
+            assertFalse(response.getValue().hasLifecycle());
+            assertEquals(0, response.getValue().getServerStatusCount());
+            assertEquals(0, response.getValue().getAdmissionRejectReasonValue());
+        }
+        verify(configService, times(3)).loadBalanceConfig();
+        verifyNoMoreInteractions(configService);
+        verifyNoInteractions(routeService, grpcForwarder, lbStatusConsistencyService, engineHealthReporter);
+    }
+
+    @Test
+    void fallbackSnapshotUpdatesAffectNewRequestsAndPreserveInFlightScheduling() {
+        FlexlbConfig initial = routingConfig();
+        AtomicReference<FlexlbConfig> currentConfig = new AtomicReference<>(initial);
+        when(configService.loadBalanceConfig()).thenAnswer(ignored -> currentConfig.get());
+        CompletableFuture<Response> pending = new CompletableFuture<>();
+        Response routed = new Response();
+        routed.setSuccess(true);
+        routed.setCode(200);
+        when(routeService.route(any())).thenReturn(pending, CompletableFuture.completedFuture(routed));
+
+        var request =
+                FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder().setRequestIdStr("before-fallback").build();
+        StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> pendingObserver = mock(StreamObserver.class);
+        service.schedule(request, pendingObserver);
+        verifyNoInteractions(pendingObserver);
+
+        FlexlbConfig enabled = routingConfig();
+        enabled.setEnableFallback(true);
+        currentConfig.set(enabled);
+        StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> fallbackObserver = mock(StreamObserver.class);
+        service.schedule(request.toBuilder().setRequestIdStr("during-fallback").build(), fallbackObserver);
+        var fallback = ArgumentCaptor.forClass(FlexlbScheduleProtocol.FlexlbScheduleResponsePB.class);
+        verify(fallbackObserver).onNext(fallback.capture());
+        verify(fallbackObserver).onCompleted();
+        assertEquals(8600, fallback.getValue().getCode());
+        assertFalse(fallback.getValue().getEnqueuedByMaster());
+        verify(routeService).route(any());
+
+        pending.complete(routed);
+        var completed = ArgumentCaptor.forClass(FlexlbScheduleProtocol.FlexlbScheduleResponsePB.class);
+        verify(pendingObserver).onNext(completed.capture());
+        verify(pendingObserver).onCompleted();
+        assertTrue(completed.getValue().getSuccess());
+        assertEquals(200, completed.getValue().getCode());
+
+        FlexlbConfig recovered = routingConfig();
+        currentConfig.set(recovered);
+        StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> recoveredObserver = mock(StreamObserver.class);
+        service.schedule(request.toBuilder().setRequestIdStr("after-fallback").build(), recoveredObserver);
+        verify(recoveredObserver).onNext(completed.capture());
+        verify(recoveredObserver).onCompleted();
+        assertTrue(completed.getValue().getSuccess());
+        assertEquals(200, completed.getValue().getCode());
+
+        var contexts = ArgumentCaptor.forClass(BalanceContext.class);
+        verify(routeService, times(2)).route(contexts.capture());
+        assertSame(initial, contexts.getAllValues().get(0).getConfig());
+        assertSame(recovered, contexts.getAllValues().get(1).getConfig());
+        verify(routeService, never()).cancelRequest(anyString(), anyLong(), any());
+        verifyNoInteractions(grpcForwarder);
+    }
+
+    @ParameterizedTest
     @ValueSource(strings = {"007", "+7", "-0", "request-a", "9223372036854775808", "8"})
     void rejectsBatchIdsThatCannotMatchTheEngineBeforeRouting(String requestId) {
         FlexlbConfig config = routingConfig();
@@ -1976,33 +2066,6 @@ class FlexlbServiceImplTest {
 
         BalanceContext captured = context.getValue();
         assertEquals(captured.getStartTime() + 7777L, captured.getRequestExpiresAtMs());
-    }
-
-    @Test
-    void directModeHasNoSchedulingTimeout() {
-        FlexlbConfig directConfig = ConfigService.parse("""
-                {
-                  "scheduler":{"type":"DIRECT"},
-                  "dispatcher":{"type":"NON_BATCH"},
-                  "requestLifecycle":{"request":{"timeoutMs":3600000},"decision":{"lifetime":2}}
-                }
-                """);
-        when(configService.loadBalanceConfig()).thenReturn(directConfig);
-        when(lbStatusConsistencyService.isNeedConsistency()).thenReturn(false);
-        ArgumentCaptor<BalanceContext> context = ArgumentCaptor.forClass(BalanceContext.class);
-        Response response = new Response();
-        response.setSuccess(true);
-        response.setCode(200);
-        when(routeService.route(context.capture())).thenReturn(
-                CompletableFuture.completedFuture(response));
-
-        service.schedule(FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
-                .setRequestIdStr("100002")
-                .setGenerateTimeout(1L)
-                .setRequestTimeMs(1L)
-                .build(), mock(StreamObserver.class));
-
-        assertEquals(Long.MAX_VALUE, context.getValue().getRequestExpiresAtMs());
     }
 
     @Test

@@ -253,8 +253,11 @@ UniConfig / Nacos 的 v3 部分更新示例：
 - `optimizer`：启用开关和服务发现轮询间隔。
 - `consistency`：`NONE` / `ZOOKEEPER` tagged union；ZooKeeper 分支拥有连接和 master
   刷新参数。
-- `enableFallback`：默认 `false`；启用时调度入口在转发和路由前返回错误码 `8600`，
-  由调用方执行 domain fallback。
+- `enableFallback`：默认 `false`；每次 Schedule 在入口读取当前快照，启用时在构建调度上下文、
+  校验 batch 载荷、主从判断和转发之前返回 `success=false`、`code=8600`、`enqueued_by_master=false`，
+  不返回选路或 lifecycle，由客户端执行 fallback。适用于 E/PD 以及 BATCH/NON_BATCH 模式。
+  UniConfig/Nacos 热更新生效后，新请求使用新值；关闭时恢复正常调度，已进入调度的请求继续原流程。
+  热更新关闭必须显式设置 `enableFallback=false`，删除字段会保留当前值。
 - `fallbackBatchTokenCapacity`：默认 `1048576`；Engine 未声明
   `max_batch_tokens_size` 和 `max_seq_len` 时使用的最终 batch token 容量兜底值。
   优先使用 Engine 上报的 `max_batch_tokens_size`，其次使用 `max_seq_len`。

@@ -8,6 +8,7 @@ import org.flexlb.balance.scheduler.CancelReason;
 import org.flexlb.balance.scheduler.RequestState;
 import org.flexlb.cache.match.CacheAwareService;
 import org.flexlb.config.ConfigService;
+import org.flexlb.config.FlexlbConfig;
 import org.flexlb.consistency.LBStatusConsistencyService;
 import org.flexlb.consistency.MasterElectService;
 import org.flexlb.dao.BalanceContext;
@@ -127,7 +128,16 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
         ScheduleOrigin errorOrigin = ScheduleOrigin.ENTRY_ERROR;
 
         try {
-            context = buildContext(request);
+            var config = configService.loadBalanceConfig();
+            if (config.isEnableFallback()) {
+                // Return before batch payload validation or any scheduler admission.
+                completeOnce(RequestId.parse(request), null,
+                        buildErrorResponse(StrategyErrorType.FALLBACK_REQUESTED.getErrorCode(),
+                                StrategyErrorType.FALLBACK_REQUESTED.getErrorMsg()),
+                        responseObserver, ScheduleOrigin.CLIENT_FALLBACK, completionClaimed);
+                return;
+            }
+            context = buildContext(request, config);
             BalanceContext requestContext = context;
             boolean consistencyEnabled = masterElectService.isNeedConsistency();
             boolean masterAtEntry = consistencyEnabled
@@ -920,8 +930,7 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
         return builder.build();
     }
 
-    private BalanceContext buildContext(FlexlbScheduleProtocol.FlexlbScheduleRequestPB pb) {
-        var config = configService.loadBalanceConfig();
+    private BalanceContext buildContext(FlexlbScheduleProtocol.FlexlbScheduleRequestPB pb, FlexlbConfig config) {
         BalanceContext ctx = new BalanceContext(config);
         ctx.setRequestMessageBytes(GrpcServerTimingInterceptor.getRequestMessageBytes());
         ctx.recordRequestTiming(pb.getRequestTimeMs(), null);
@@ -1204,6 +1213,7 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
     }
 
     private enum ScheduleOrigin {
+        CLIENT_FALLBACK,
         FORWARDED_TO_MASTER,
         FORWARD_FAILED,
         LOCAL_MASTER,

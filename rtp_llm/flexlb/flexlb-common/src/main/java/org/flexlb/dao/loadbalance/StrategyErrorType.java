@@ -6,6 +6,7 @@ import lombok.Getter;
 public enum StrategyErrorType {
 
     // master schedule error
+    FALLBACK_REQUESTED(8600, false),
     NO_PREFILL_WORKER(8402, true),
     NO_DECODE_WORKER(8403, true),
     NO_PDFUSION_WORKER(8404, true),

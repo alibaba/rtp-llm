@@ -71,6 +71,7 @@ service/
 ```
 gRPC FlexlbService.Schedule (FlexlbGrpcServer, HTTP 端口 + 100)
     ↓ ActiveRequestCounter.acquire()（在途请求计数）
+    ↓ 若 enableFallback=true → 直接返回业务码 8600，由客户端选路
     ↓ 若启用一致性且本机非 master → 转发给 master（master 不可达则降级本地路由）
     ↓ 校验客户端提供的 block_cache_keys 与 cache_key_block_size
 RouteService.route()
@@ -86,7 +87,9 @@ LoadBalancer 策略选 worker（读 EngineWorkerStatus 共享状态 + CacheAware
 后阶段失败 → DefaultRouter.rollBackRoutingFailure() 逐个 LoadBalancer.rollBack() 撤销记账
 ```
 
-Schedule 入口将请求字段转换为 `BalanceContext` / `Request`，本地路由、排队和转发完成回调使用内部上下文。
+Schedule 入口读取当前配置快照；`enableFallback=true` 时，在构建调度上下文、校验 batch 载荷、
+主从判断和转发之前返回 `success=false`、`code=8600`、`enqueued_by_master=false`，不进入调度或派发。
+开关关闭时将请求字段转换为 `BalanceContext` / `Request`，本地路由、排队和转发完成回调使用内部上下文。
 原始 `FlexlbScheduleRequestPB` 仅用于入口解析和向 Master 发起 gRPC 转发；转发 RPC 回调使用提取出的 request ID。
 批量下发所需的 `generate_input` 字节由 `BalanceContext` 保存至下发阶段。
 
