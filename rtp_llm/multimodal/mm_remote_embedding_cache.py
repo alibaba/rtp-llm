@@ -15,6 +15,7 @@ import re
 import threading
 import time
 from collections import Counter
+from contextlib import contextmanager
 from pathlib import Path
 
 import torch
@@ -300,7 +301,7 @@ class MMRemoteEmbeddingCache:
             # Monitoring must not change cache fallback or prevent budget release.
             logging.warning("MM remote cache metric reporting failed", exc_info=True)
 
-    def _report_operation(self, operation, started, outcome):
+    def _report_operation(self, operation, started, outcome, nbytes=0):
         elapsed_ms = (time.perf_counter() - started) * 1000
         if operation == "read":
             qps = AccMetrics.VIT_REMOTE_EMB_READ_QPS_METRIC
@@ -316,6 +317,76 @@ class MMRemoteEmbeddingCache:
         # Emit zero for successful calls/misses so a healthy stream has an
         # explicit zero error series. No request IDs, keys or error text as tags.
         self._report_metric(error_qps, int(outcome in ("error", "timeout")), {})
+        tags = {"operation": operation}
+        accepted_bytes = nbytes if outcome in ("hit", "success") else 0
+        self._report_metric(
+            AccMetrics.VIT_REMOTE_EMB_PAYLOAD_BYTES_PER_SECOND_METRIC,
+            accepted_bytes,
+            tags,
+        )
+        if accepted_bytes:
+            self._report_metric(
+                GaugeMetrics.VIT_REMOTE_EMB_PAYLOAD_BYTES_METRIC, accepted_bytes, tags
+            )
+            if elapsed_ms > 0:
+                self._report_metric(
+                    GaugeMetrics.VIT_REMOTE_EMB_EFFECTIVE_SPEED_METRIC,
+                    accepted_bytes * 1000 / elapsed_ms / (1024 * 1024),
+                    tags,
+                )
+
+    @contextmanager
+    def _observe_stage(self, operation, stage, nbytes=0):
+        """Observe completed SDK work independently of a caller's deadline.
+
+        Stage values are fixed at call sites. Transfer size counts only fully
+        successful SDK calls, including late reads; partial failures are unknown.
+        """
+        started = time.perf_counter()
+        outcome = "success"
+        try:
+            yield
+        except TimeoutError:
+            outcome = "timeout"
+            raise
+        except Exception:
+            outcome = "error"
+            raise
+        finally:
+            elapsed_ms = (time.perf_counter() - started) * 1000
+            tags = {"operation": operation, "stage": stage}
+            outcome_tags = dict(tags, status=outcome)
+            self._report_metric(
+                AccMetrics.VIT_REMOTE_EMB_STAGE_QPS_METRIC, 1, outcome_tags
+            )
+            self._report_metric(
+                GaugeMetrics.VIT_REMOTE_EMB_STAGE_RT_METRIC, elapsed_ms, outcome_tags
+            )
+            self._report_metric(
+                AccMetrics.VIT_REMOTE_EMB_STAGE_ERROR_QPS_METRIC,
+                int(outcome != "success"),
+                tags,
+            )
+            if stage == "transfer":
+                tags = {"operation": operation}
+                completed_bytes = nbytes if outcome == "success" else 0
+                self._report_metric(
+                    AccMetrics.VIT_REMOTE_EMB_TRANSFER_BYTES_PER_SECOND_METRIC,
+                    completed_bytes,
+                    tags,
+                )
+                if completed_bytes:
+                    self._report_metric(
+                        GaugeMetrics.VIT_REMOTE_EMB_TRANSFER_BYTES_METRIC,
+                        completed_bytes,
+                        tags,
+                    )
+                    if elapsed_ms > 0:
+                        self._report_metric(
+                            GaugeMetrics.VIT_REMOTE_EMB_TRANSFER_SPEED_METRIC,
+                            completed_bytes * 1000 / elapsed_ms / (1024 * 1024),
+                            tags,
+                        )
 
     def _report_skip(self, operation):
         self._report_metric(
@@ -452,16 +523,19 @@ class MMRemoteEmbeddingCache:
             api_ms = None
             outcome = "error"
             try:
-                buffer = pack_object(plan)
+                with self._observe_stage("write", "pack"):
+                    buffer = pack_object(plan)
                 emb_diagnostics.eviction_serialized(
                     trace_id, context.get("qwen_origin"), plan, buffer
                 )
                 emb_deepseek_diagnostics.eviction_serialized(
                     trace_id, context.get("deepseek_origin"), plan, buffer
                 )
-                client = self._get_client()
+                with self._observe_stage("write", "client_init"):
+                    client = self._get_client()
                 api_started = time.perf_counter()
-                client.save_one(key, buffer, trace_id=trace_id)
+                with self._observe_stage("write", "transfer", buffer.numel()):
+                    client.save_one(key, buffer, trace_id=trace_id)
                 api_ms = (time.perf_counter() - api_started) * 1000
                 outcome = "success"
                 self._count("write_success")
@@ -478,6 +552,7 @@ class MMRemoteEmbeddingCache:
                     tensors=plan.header["tensors"],
                 )
             except Exception as error:
+                outcome = "timeout" if isinstance(error, TimeoutError) else "error"
                 self.record(
                     "write_error",
                     key=key,
@@ -487,7 +562,7 @@ class MMRemoteEmbeddingCache:
                 if client is not None:
                     self._retire_client(client)
             finally:
-                self._report_operation("write", started, outcome)
+                self._report_operation("write", started, outcome, plan.nbytes)
                 self._benchmark(
                     "remote_store_timing",
                     key,
@@ -519,6 +594,7 @@ class MMRemoteEmbeddingCache:
         deadline = time.monotonic() + timeout_ms / 1000
         started = time.perf_counter()
         timing = {}
+        payload_nbytes = 0
         outcome = "error"
         if not self._reserve(0):
             self._report_skip("read")
@@ -530,14 +606,16 @@ class MMRemoteEmbeddingCache:
             nonlocal cost
             client = None
             try:
-                client = self._get_client()
+                with self._observe_stage("read", "client_init"):
+                    client = self._get_client()
                 remaining_ms = int((deadline - time.monotonic()) * 1000)
                 if remaining_ms <= 0:
                     raise TimeoutError("remote embedding lookup deadline expired")
                 api_started = time.perf_counter()
-                size = client.object_size(
-                    key, trace_id=trace_id, timeout_ms=remaining_ms
-                )
+                with self._observe_stage("read", "metadata"):
+                    size = client.object_size(
+                        key, trace_id=trace_id, timeout_ms=remaining_ms
+                    )
                 if size is None:
                     timing["outcome"] = "miss"
                     timing["sdk_api_ms"] = (time.perf_counter() - api_started) * 1000
@@ -556,7 +634,8 @@ class MMRemoteEmbeddingCache:
                 if time.monotonic() >= deadline:
                     raise TimeoutError("remote embedding transfer deadline expired")
                 buffer = torch.empty(size, dtype=torch.uint8)
-                client.load_one(key, buffer, trace_id=trace_id)
+                with self._observe_stage("read", "transfer", size):
+                    client.load_one(key, buffer, trace_id=trace_id)
                 timing["sdk_api_ms"] = (time.perf_counter() - api_started) * 1000
                 return buffer
             except Exception:
@@ -576,12 +655,15 @@ class MMRemoteEmbeddingCache:
             if buffer is None:
                 outcome = timing["outcome"]
                 return None
-            value = unpack_object(
-                buffer, max_bytes=self.max_object_bytes, cuda_device=self.cuda_device
-            )
-            if not isinstance(value, (list, tuple)) or len(value) not in (2, 3):
-                raise ValueError("remote object is not a multimodal result")
-            plan = plan_object(value, max_bytes=self.max_object_bytes)
+            with self._observe_stage("read", "restore"):
+                value = unpack_object(
+                    buffer,
+                    max_bytes=self.max_object_bytes,
+                    cuda_device=self.cuda_device,
+                )
+                if not isinstance(value, (list, tuple)) or len(value) not in (2, 3):
+                    raise ValueError("remote object is not a multimodal result")
+                plan = plan_object(value, max_bytes=self.max_object_bytes)
             emb_diagnostics.serialized(trace_id, plan, buffer, value, loading=True)
             if self._model_identity.get("model_type") == "deepseek_vl_v2":
                 emb_deepseek_diagnostics.serialized(
@@ -589,6 +671,7 @@ class MMRemoteEmbeddingCache:
                 )
             self._count("hit")
             outcome = "hit"
+            payload_nbytes = buffer.numel()
             self.record(
                 "load_hit",
                 key=key,
@@ -616,7 +699,7 @@ class MMRemoteEmbeddingCache:
             )
             return None
         finally:
-            self._report_operation("read", started, outcome)
+            self._report_operation("read", started, outcome, payload_nbytes)
             self._benchmark(
                 "remote_load_timing",
                 key,

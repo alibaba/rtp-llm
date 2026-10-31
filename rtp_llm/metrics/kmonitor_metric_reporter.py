@@ -97,6 +97,19 @@ class AccMetrics(Enum):
     )
     VIT_REMOTE_EMB_SKIP_QPS_METRIC = "py_rtp_vit_remote_embedding_cache_skip_qps"
 
+    # Bounded operation/stage/status tags; no object IDs or exception text.
+    VIT_REMOTE_EMB_STAGE_QPS_METRIC = "py_rtp_vit_remote_embedding_cache_stage_qps"
+    VIT_REMOTE_EMB_STAGE_ERROR_QPS_METRIC = (
+        "py_rtp_vit_remote_embedding_cache_stage_error_qps"
+    )
+    # Accumulated bytes are exported as B/s, not as an average object size.
+    VIT_REMOTE_EMB_TRANSFER_BYTES_PER_SECOND_METRIC = (
+        "py_rtp_vit_remote_embedding_cache_transfer_bytes_per_second"
+    )
+    VIT_REMOTE_EMB_PAYLOAD_BYTES_PER_SECOND_METRIC = (
+        "py_rtp_vit_remote_embedding_cache_payload_bytes_per_second"
+    )
+
 
 class GaugeMetrics(Enum):
     RESPONSE_FIRST_TOKEN_RT_METRIC = "py_rtp_response_first_token_rt"
@@ -141,6 +154,24 @@ class GaugeMetrics(Enum):
     # CUDA synchronization. Write includes packing and SDK save, excluding queueing.
     VIT_REMOTE_EMB_READ_RT_METRIC = "py_rtp_vit_remote_embedding_cache_read_rt"
     VIT_REMOTE_EMB_WRITE_RT_METRIC = "py_rtp_vit_remote_embedding_cache_write_rt"
+
+    VIT_REMOTE_EMB_STAGE_RT_METRIC = "py_rtp_vit_remote_embedding_cache_stage_rt_ms"
+    # SDK-completed payload bytes and bytes / SDK wall time. SDK calls include
+    # their metadata work; these are not NIC bytes or physical network bandwidth.
+    VIT_REMOTE_EMB_TRANSFER_BYTES_METRIC = (
+        "py_rtp_vit_remote_embedding_cache_transfer_bytes"
+    )
+    VIT_REMOTE_EMB_TRANSFER_SPEED_METRIC = (
+        "py_rtp_vit_remote_embedding_cache_transfer_mib_per_second"
+    )
+    # Only caller-accepted reads / completed writes. A late SDK read after a
+    # caller timeout contributes to transfer metrics, never to payload metrics.
+    VIT_REMOTE_EMB_PAYLOAD_BYTES_METRIC = (
+        "py_rtp_vit_remote_embedding_cache_payload_bytes"
+    )
+    VIT_REMOTE_EMB_EFFECTIVE_SPEED_METRIC = (
+        "py_rtp_vit_remote_embedding_cache_effective_mib_per_second"
+    )
     # Milliseconds per non-empty inspection group, including OSS/HTTP work,
     # excluding input preparation, source handoff wait and GPU embedding.
     GREENNET_RT_METRIC = "py_rtp_greennet_rt"

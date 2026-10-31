@@ -247,7 +247,152 @@ class RemoteCacheTest(unittest.TestCase):
                     ),
                     1,
                 )
+                nbytes = 0 if failed else store.objects["key"].numel()
+                tags = {"operation": "write"}
+                self.assertEqual(
+                    self.metric_values(
+                        report,
+                        AccMetrics.VIT_REMOTE_EMB_TRANSFER_BYTES_PER_SECOND_METRIC,
+                    ),
+                    [(nbytes, tags)],
+                )
+                self.assertEqual(
+                    self.metric_values(
+                        report,
+                        AccMetrics.VIT_REMOTE_EMB_PAYLOAD_BYTES_PER_SECOND_METRIC,
+                    ),
+                    [(nbytes, tags)],
+                )
                 self.assertEqual(remote.stats()["inflight_tasks"], 0)
+
+    def test_transfer_and_accepted_bytes_distinguish_corruption_and_miss(self):
+        data = pack_object(plan_object((torch.ones(3, 4), None)))
+        remote = self.remote(Store({"key": data}))
+        with patch(
+            "rtp_llm.multimodal.mm_remote_embedding_cache.kmonitor.report"
+        ) as report:
+            self.assertIsNotNone(remote.load("key"))
+            self.assertIsNone(remote.load("missing"))
+            data[-1] ^= 1
+            self.assertIsNone(remote.load("key"))
+        tags = {"operation": "read"}
+        self.assertEqual(
+            self.metric_values(
+                report, AccMetrics.VIT_REMOTE_EMB_TRANSFER_BYTES_PER_SECOND_METRIC
+            ),
+            [(data.numel(), tags), (data.numel(), tags)],
+        )
+        self.assertEqual(
+            self.metric_values(
+                report, AccMetrics.VIT_REMOTE_EMB_PAYLOAD_BYTES_PER_SECOND_METRIC
+            ),
+            [(data.numel(), tags), (0, tags), (0, tags)],
+        )
+        self.assertEqual(
+            self.metric_values(
+                report, GaugeMetrics.VIT_REMOTE_EMB_PAYLOAD_BYTES_METRIC
+            ),
+            [(data.numel(), tags)],
+        )
+        errors = self.metric_values(
+            report, AccMetrics.VIT_REMOTE_EMB_STAGE_ERROR_QPS_METRIC
+        )
+        self.assertEqual(
+            [t for v, t in errors if v], [{"operation": "read", "stage": "restore"}]
+        )
+        self.assertGreater(
+            data.numel(), 3 * 4 * 4
+        )  # Serialized header/alignment count too.
+
+    def test_late_success_counts_transfer_but_not_accepted_payload(self):
+        data = pack_object(plan_object((torch.ones(3, 4), None)))
+        store = Store({"key": data})
+        store.read_gate.clear()
+        remote = self.remote(store, read_timeout_ms=30)
+        with patch(
+            "rtp_llm.multimodal.mm_remote_embedding_cache.kmonitor.report"
+        ) as report:
+            try:
+                self.assertIsNone(remote.load("key"))
+                self.assertTrue(store.read_started.is_set())
+                self.assertFalse(
+                    self.metric_values(
+                        report, GaugeMetrics.VIT_REMOTE_EMB_TRANSFER_BYTES_METRIC
+                    )
+                )
+            finally:
+                store.read_gate.set()
+                remote.close()
+        tags = {"operation": "read"}
+        self.assertEqual(
+            self.metric_values(report, AccMetrics.VIT_REMOTE_EMB_READ_ERROR_QPS_METRIC),
+            [(1, {})],
+        )
+        self.assertEqual(
+            self.metric_values(
+                report, AccMetrics.VIT_REMOTE_EMB_PAYLOAD_BYTES_PER_SECOND_METRIC
+            ),
+            [(0, tags)],
+        )
+        self.assertEqual(
+            self.metric_values(
+                report, AccMetrics.VIT_REMOTE_EMB_TRANSFER_BYTES_PER_SECOND_METRIC
+            ),
+            [(data.numel(), tags)],
+        )
+        self.assertFalse(
+            self.metric_values(report, GaugeMetrics.VIT_REMOTE_EMB_PAYLOAD_BYTES_METRIC)
+        )
+        self.assertEqual(remote.stats()["inflight_bytes"], 0)
+
+    def test_partial_transfer_failure_does_not_report_successful_bytes(self):
+        data = pack_object(plan_object((torch.ones(3, 4), None)))
+        store = FakeClient({"key": data})
+        store.fail_load = True
+        remote = self.remote(store)
+        with patch(
+            "rtp_llm.multimodal.mm_remote_embedding_cache.kmonitor.report"
+        ) as report:
+            self.assertIsNone(remote.load("key"))
+        self.assertFalse(
+            self.metric_values(
+                report, GaugeMetrics.VIT_REMOTE_EMB_TRANSFER_BYTES_METRIC
+            )
+        )
+        self.assertEqual(
+            self.metric_values(
+                report, AccMetrics.VIT_REMOTE_EMB_TRANSFER_BYTES_PER_SECOND_METRIC
+            ),
+            [(0, {"operation": "read"})],
+        )
+        errors = self.metric_values(
+            report, AccMetrics.VIT_REMOTE_EMB_STAGE_ERROR_QPS_METRIC
+        )
+        self.assertEqual(
+            [t for v, t in errors if v], [{"operation": "read", "stage": "transfer"}]
+        )
+
+    def test_transfer_metric_units_use_sdk_wall_time_and_mib(self):
+        remote = self.remote(Store())
+        with patch(
+            "rtp_llm.multimodal.mm_remote_embedding_cache.kmonitor.report"
+        ) as report:
+            with patch(
+                "rtp_llm.multimodal.mm_remote_embedding_cache.time.perf_counter",
+                side_effect=[10, 10.25],
+            ):
+                with remote._observe_stage("write", "transfer", 2 * 1024 * 1024):
+                    pass
+        self.assertEqual(
+            self.metric_values(
+                report, GaugeMetrics.VIT_REMOTE_EMB_TRANSFER_SPEED_METRIC
+            ),
+            [(8, {"operation": "write"})],
+        )
+        self.assertEqual(
+            self.metric_values(report, GaugeMetrics.VIT_REMOTE_EMB_STAGE_RT_METRIC),
+            [(250, {"operation": "write", "stage": "transfer", "status": "success"})],
+        )
 
     def test_cpu_eviction_whole_result_shared_with_second_worker(self):
         store = Store()
