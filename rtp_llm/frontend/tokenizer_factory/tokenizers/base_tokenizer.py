@@ -134,6 +134,23 @@ def _uses_remote_tokenizer_code(
     return False
 
 
+try:
+    from transformers.tokenization_utils_tokenizers import TokenizersBackend
+except ImportError:
+    TokenizersBackend = None
+
+try:
+    from transformers.tokenization_utils_fast import PreTrainedTokenizerFast
+except ImportError:
+    PreTrainedTokenizerFast = None
+
+NATIVE_DECODE_IMPLEMENTATIONS = tuple(
+    decode
+    for backend in (TokenizersBackend, PreTrainedTokenizerFast)
+    if (decode := getattr(backend, "_decode", None)) is not None
+)
+
+
 class BaseTokenizer:
     def __init__(
         self, tokenizer_path: str, config_json: Optional[Dict[str, Any]] = None
@@ -295,6 +312,33 @@ class BaseTokenizer:
         return self.tokenizer.decode(token_id, **kwargs)
 
     def batch_decode(self, token_ids: Union[List[int], List[List[int]]], **kwargs):
+        cleanup = kwargs.get("clean_up_tokenization_spaces")
+        if cleanup is None:
+            cleanup = getattr(self.tokenizer, "clean_up_tokenization_spaces", True)
+        decode_impl = getattr(self.tokenizer._decode, "__func__", None)
+        native_tokenizer = getattr(self.tokenizer, "_tokenizer", None)
+        # Only bypass the exact upstream implementation whose semantics match
+        # decode_batch. Custom decoders and cleanup hooks retain the legacy path.
+        if (
+            decode_impl in NATIVE_DECODE_IMPLEMENTATIONS
+            and native_tokenizer is not None
+            and not cleanup
+            and isinstance(token_ids, (list, tuple))
+            and all(isinstance(row, (list, tuple)) for row in token_ids)
+        ):
+            # Transformers 4.x updates this flag in _decode, even when no text
+            # cleanup is requested. An empty legacy batch does not call _decode.
+            if (
+                token_ids
+                and PreTrainedTokenizerFast is not None
+                and decode_impl is getattr(PreTrainedTokenizerFast, "_decode", None)
+            ):
+                self.tokenizer._decode_use_source_tokenizer = kwargs.get(
+                    "use_source_tokenizer", False
+                )
+            return native_tokenizer.decode_batch(
+                token_ids, skip_special_tokens=kwargs.get("skip_special_tokens", False)
+            )
         return [
             self.tokenizer._decode(
                 seq,
