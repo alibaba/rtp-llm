@@ -1,5 +1,6 @@
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include "rtp_llm/cpp/engine_base/EngineBase.h"
+#include "rtp_llm/cpp/distribute/CpuTpBroadcaster.h"
 #include "rtp_llm/cpp/normal_engine/NormalExecutor.h"
 #include "rtp_llm/cpp/normal_engine/NormalEngine.h"
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
@@ -854,7 +855,7 @@ absl::Status NormalEngine::stop() {
     return absl::OkStatus();
 }
 
-void NormalEngine::loop() {
+void NormalEngine::loop() try {
     RTP_LLM_PROFILE_FUNCTION();
     RTP_LLM_LOG_INFO("loop begin");
     c10::InferenceMode inference_guard(true);
@@ -866,6 +867,11 @@ void NormalEngine::loop() {
             THROW_IF_STATUS_ERROR(trySaveStepError());
         }
     }
+} catch (const CpuTpPeerClosed& error) {
+    if (running_) {
+        throw;
+    }
+    RTP_LLM_LOG_INFO("CPU TP peer closed during engine shutdown: %s", error.what());
 }
 
 absl::Status NormalEngine::trySaveStepError() const {

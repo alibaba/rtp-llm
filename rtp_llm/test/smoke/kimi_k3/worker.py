@@ -108,6 +108,18 @@ def stop_process(process, timeout=60):
     try:
         process.wait(timeout=timeout)
     except subprocess.TimeoutExpired:
+        with contextlib.suppress(OSError, subprocess.SubprocessError):
+            subprocess.run(
+                [
+                    "ps",
+                    "-p",
+                    str(process.pid),
+                    "-o",
+                    "pid,ppid,pgid,sid,stat,wchan:32,comm",
+                ],
+                timeout=3,
+                check=False,
+            )
         with contextlib.suppress(ProcessLookupError):
             os.killpg(process.pid, signal.SIGKILL)
         process.wait(timeout=10)
@@ -615,11 +627,18 @@ class Worker:
             # Keep both failures rather than allowing the second to hide the first.
             for name, process in (("request", self.request), ("service", self.service)):
                 try:
-                    stop_process(process)
+                    # 120s frontend + 180s deferred backend + 30s supervisor reap.
+                    stop_process(process, timeout=330 if name == "service" else 60)
                 except Exception as exc:
                     errors.append(f"{name} cleanup: {type(exc).__name__}: {exc}")
             if unexpected_exit is not None:
                 errors.append(f"PD service exited unexpectedly: {unexpected_exit}")
+            # A supervisor may exit zero after reaping a crashed rank. Keep the
+            # role's fresh core dumps in the verdict as well as the artifacts.
+            if self.task is not None:
+                cores = sorted(path.name for path in self.task.glob("core-*") if path.is_file())
+                if cores:
+                    errors.append(f"Service generated core dumps: {cores}")
             if self.service is not None:
                 deadline = time.monotonic() + 60
                 while True:

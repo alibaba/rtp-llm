@@ -214,8 +214,7 @@ ssize_t readAll(int fd, void* buf, std::size_t nbytes) {
             return -1;
         }
         if (n == 0) {
-            // peer closed prematurely
-            return -1;
+            return static_cast<ssize_t>(nbytes - left);
         }
         p += n;
         left -= n;
@@ -449,6 +448,9 @@ void CpuTpBroadcaster::broadcast(void* buf, std::size_t nbytes, int root) {
     } else {
         BroadcastFrameHeader received_header{};
         ssize_t              n = readAll(peer_fds_[0], &received_header, sizeof(received_header));
+        if (n == 0) {
+            throw CpuTpPeerClosed("CpuTpBroadcaster rank 0 closed before frame " + std::to_string(next_sequence_));
+        }
         RTP_LLM_CHECK_WITH_INFO(n == static_cast<ssize_t>(sizeof(received_header)),
                                 "CpuTpBroadcaster frame-header read from rank 0 failed at sequence %llu: %s",
                                 static_cast<unsigned long long>(next_sequence_),

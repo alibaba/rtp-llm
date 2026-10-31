@@ -5,6 +5,7 @@
 #include <future>
 #include <memory>
 #include <string>
+#include "rtp_llm/cpp/distribute/CpuTpBroadcaster.h"
 #include "torch/all.h"
 
 #define private public
@@ -17,6 +18,48 @@
 
 namespace rtp_llm {
 namespace {
+
+class PeerClosedExecutor: public Executor {
+public:
+    PeerClosedExecutor(std::atomic<bool>& running, bool stopping): running_(running), stopping_(stopping) {}
+
+    absl::Status process(const std::list<GenerateStreamPtr>&, int64_t) override {
+        if (stopping_) {
+            running_ = false;
+        }
+        throw CpuTpPeerClosed("peer closed at the next input frame");
+    }
+
+private:
+    std::atomic<bool>& running_;
+    bool               stopping_;
+};
+
+class EnginePeerClosedTest: public DeviceTestBase {
+protected:
+    void checkPeerClose(bool stopping) {
+        auto engine = createMockEngine({});
+        ASSERT_TRUE(engine->stop().ok());
+        // Use the follower path so the real loop reaches process() with no requests.
+        engine->parallelism_config.tp_rank = 1;
+        engine->executor_                 = std::make_unique<PeerClosedExecutor>(engine->running_, stopping);
+        engine->running_                   = true;
+        if (stopping) {
+            EXPECT_NO_THROW(engine->loop());
+        } else {
+            EXPECT_THROW(engine->loop(), CpuTpPeerClosed);
+        }
+        engine->running_ = false;
+    }
+};
+
+TEST_F(EnginePeerClosedTest, StopAllowsCleanPeerClose) {
+    checkPeerClose(true);
+}
+
+TEST_F(EnginePeerClosedTest, RunningEngineRejectsCleanPeerClose) {
+    checkPeerClose(false);
+}
 
 class GatedDecodeStream: public NormalGenerateStream {
 public:
