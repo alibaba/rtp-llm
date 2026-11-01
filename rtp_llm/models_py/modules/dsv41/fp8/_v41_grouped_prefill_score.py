@@ -24,7 +24,7 @@ if not 0 < _MAX_LOGITS_BYTES <= 1024 * 1024 * 1024:
     )
 _MAX_GROUP_ROWS = 4096
 _MAX_LOGITS_INFLATION = 2
-_MAX_REQUESTS = 128
+_MAX_REQUESTS = 1024
 _MIN_BOUNDS_GROUPS = 4
 _MAX_BOUNDS_GROUPS = 256
 
@@ -44,17 +44,20 @@ def _write_score_bounds(
     BLOCK,
     RATIO: tl.constexpr,
 ):
-    # Both tiles are fixed: batch lengths and grouping never enter the JIT key.
+    # Each group spans at most 128 requests, independently of the batch size.
     ids = tl.arange(0, 128)
-    counts = tl.load(key_counts + ids, ids < REQUESTS, other=0).to(tl.int64)
+    counts = tl.load(
+        key_counts + FIRST + ids,
+        (FIRST + ids < STOP) & (FIRST + ids < REQUESTS),
+        other=0,
+    ).to(tl.int64)
     padded = tl.cdiv(tl.maximum(counts, 0), 256) * 256
     offsets = tl.cumsum(padded) - padded
-    origin = tl.sum(tl.where(ids == FIRST, offsets, 0))
     row = BLOCK * 128 + ids
     request = tl.load(request_ids + row, row < ROWS, other=-1).to(tl.int32)
-    safe_request = tl.minimum(tl.maximum(request, 0), 127)
+    safe_request = tl.minimum(tl.maximum(request - FIRST, 0), 127)
     count = tl.gather(counts, safe_request, 0)
-    start = tl.gather(offsets, safe_request, 0) - origin
+    start = tl.gather(offsets, safe_request, 0)
     valid = (
         (request >= FIRST)
         & (request < STOP)
@@ -155,7 +158,8 @@ def _bounds_descriptors(layout):
     """Bounded CPU-only descriptors, with exactly the original per-group CTAs."""
     if not 2 <= len(layout) <= _MAX_BOUNDS_GROUPS:
         return None
-    descriptors, tiles, cursor = [], 0, 0
+    origin = layout[0].rows.start
+    descriptors, tiles, cursor = [], 0, origin
     for group in layout:
         count = group.rows.stop - group.rows.start
         if group.rows.start != cursor or not 0 < count <= _MAX_GROUP_ROWS:
@@ -166,7 +170,7 @@ def _bounds_descriptors(layout):
                 end,
                 group.first,
                 group.stop,
-                cursor,
+                cursor - origin,
                 count,
                 group.scale.numel(),
                 group.width,
@@ -174,7 +178,7 @@ def _bounds_descriptors(layout):
             )
         )
         tiles, cursor = end, group.rows.stop
-    return descriptors, tiles, cursor
+    return descriptors, tiles, cursor - origin
 
 
 @triton.jit(do_not_specialize=["WIDTH", "STRIDE"])
@@ -283,6 +287,8 @@ def _group_layout(keys, rows):
                 next_nonempty += 1
             if next_nonempty == len(keys):
                 break
+            if next_nonempty - first >= 128:
+                break
             next_width = max(width, len(keys[next_nonempty]))
             next_rows = group_rows + sum(rows[stop : next_nonempty + 1])
             next_useful = useful_scores + rows[next_nonempty] * len(keys[next_nonempty])
@@ -332,10 +338,6 @@ def _group_layout(keys, rows):
         )
         row_start += group_rows
         first = stop
-    if all(group.stop - group.first == 1 for group in groups) and (
-        len(groups) == len(keys) or any(len(key) == 0 for key in keys)
-    ):
-        return None
     return tuple(groups)
 
 
@@ -356,7 +358,6 @@ class _GroupedScores:
         self.q, self.sf, self.weights = q, sf, weights
         self.positions, self.ratio, self.shared = positions, ratio, shared
         self.rows, self.layout = rows, layout
-        self.group_rows = tuple(g.rows.stop - g.rows.start for g in layout)
         self.req_ids, self.key_counts = req_ids, key_counts
 
     def split_rows(self, tensor):
@@ -364,8 +365,6 @@ class _GroupedScores:
         return (tensor[group.rows] for group in self.layout)
 
     def _bounds(self):
-        from ._v41_prefill_metadata import try_score_bounds
-
         # This cache is cleared at the existing forward boundary. Identity also
         # guards replacement of positions with an equal-shaped tensor mid-forward.
         cache = self.shared.setdefault("prefill_score_bounds", {})
@@ -386,83 +385,83 @@ class _GroupedScores:
             and _MIN_BOUNDS_GROUPS <= len(self.layout) <= _MAX_BOUNDS_GROUPS
             and not torch.cuda.is_current_stream_capturing()
         ):
-            description = _bounds_descriptors(self.layout)
-            if description is not None:
-                descriptors, tiles, total_rows = description
-                host = torch.tensor(descriptors, dtype=torch.int64, pin_memory=True)
-                device = host.to(self.q.device, non_blocking=True)
-                output = torch.empty(
-                    4 * total_rows, dtype=torch.int32, device=self.q.device
-                )
-                _all_grouped_score_bounds_kernel[(tiles,)](
-                    self.positions,
-                    self.req_ids,
-                    self.key_counts,
-                    device,
-                    output,
-                    self.key_counts.numel(),
-                    len(self.layout),
-                    self.ratio,
-                    num_warps=4,
-                )
-                vectors = output.split(
-                    tuple(n for n in self.group_rows for _ in range(4))
-                )
-                bounds = tuple(
-                    (g.rows, *vectors[4 * i : 4 * i + 4])
-                    for i, g in enumerate(self.layout)
-                )
+            bounds = self._fused_bounds(self.layout)
+            if bounds is not None:
                 cache[key] = (self.positions, self.req_ids, self.key_counts, bounds)
                 return bounds
-        bounds = []
-        for group in self.layout:
-            rows = group.rows
-            if self.key_counts is not None:
-                count = rows.stop - rows.start
-                output = torch.empty(
-                    (4, count), dtype=torch.int32, device=self.q.device
-                )
-                _grouped_score_bounds_kernel[(triton.cdiv(count, 128),)](
-                    self.positions[rows],
-                    self.req_ids[rows],
-                    self.key_counts,
-                    output,
-                    count,
-                    self.key_counts.numel(),
-                    group.first,
-                    group.stop,
-                    group.scale.numel(),
-                    group.width,
-                    self.ratio,
-                    num_warps=4,
-                )
-                starts, ends, zeros, visible = output.unbind(0)
-                bounds.append((rows, starts, ends, zeros, visible))
-                continue
-            zeros, visible = try_score_bounds(
-                self.positions[rows], group.width, self.ratio
-            )
-            counts = self.rows[group.first : group.stop]
-            if all(n == counts[0] for n in counts):
-                starts = torch.arange(
-                    rows.stop - rows.start, device=self.q.device, dtype=torch.int32
-                )
-                starts.div_(counts[0], rounding_mode="floor").mul_(
-                    (group.width + 255) // 256 * 256
-                )
-            else:
-                # Uncommon ragged batches: native fills avoid host uploads or
-                # layout-specialized JIT. Bounds are reused across source layers.
-                starts = torch.empty_like(visible)
-                offset = 0
-                for i, count in enumerate(counts):
-                    starts[offset : offset + count].fill_(
-                        i * ((group.width + 255) // 256 * 256)
-                    )
-                    offset += count
-            bounds.append((rows, starts, starts + visible, zeros, visible))
+        bounds = [self._one_group_bounds(group) for group in self.layout]
         cache[key] = (self.positions, self.req_ids, self.key_counts, tuple(bounds))
         return cache[key][3]
+
+    def _fused_bounds(self, layout):
+        description = _bounds_descriptors(layout)
+        if description is None:
+            return None
+        descriptors, tiles, total_rows = description
+        origin = layout[0].rows.start
+        host = torch.tensor(descriptors, dtype=torch.int64, pin_memory=True)
+        device = host.to(self.q.device, non_blocking=True)
+        output = torch.empty(4 * total_rows, dtype=torch.int32, device=self.q.device)
+        _all_grouped_score_bounds_kernel[(tiles,)](
+            self.positions[origin:],
+            self.req_ids[origin:],
+            self.key_counts,
+            device,
+            output,
+            self.key_counts.numel(),
+            len(layout),
+            self.ratio,
+            num_warps=4,
+        )
+        vectors = output.split(
+            tuple(g.rows.stop - g.rows.start for g in layout for _ in range(4))
+        )
+        return tuple(
+            (g.rows, *vectors[4 * i : 4 * i + 4]) for i, g in enumerate(layout)
+        )
+
+    def _one_group_bounds(self, group):
+        rows = group.rows
+        if self.key_counts is not None:
+            count = rows.stop - rows.start
+            output = torch.empty((4, count), dtype=torch.int32, device=self.q.device)
+            _grouped_score_bounds_kernel[(triton.cdiv(count, 128),)](
+                self.positions[rows],
+                self.req_ids[rows],
+                self.key_counts,
+                output,
+                count,
+                self.key_counts.numel(),
+                group.first,
+                group.stop,
+                group.scale.numel(),
+                group.width,
+                self.ratio,
+                num_warps=4,
+            )
+            return (rows, *output.unbind(0))
+        from ._v41_prefill_metadata import try_score_bounds
+
+        zeros, visible = try_score_bounds(self.positions[rows], group.width, self.ratio)
+        counts = self.rows[group.first : group.stop]
+        if all(n == counts[0] for n in counts):
+            starts = torch.arange(
+                rows.stop - rows.start, device=self.q.device, dtype=torch.int32
+            )
+            starts.div_(counts[0], rounding_mode="floor").mul_(
+                (group.width + 255) // 256 * 256
+            )
+        else:
+            # Uncommon ragged batches: native fills avoid host uploads or
+            # layout-specialized JIT. Bounds are reused across source layers.
+            starts = torch.empty_like(visible)
+            offset = 0
+            for i, count in enumerate(counts):
+                starts[offset : offset + count].fill_(
+                    i * ((group.width + 255) // 256 * 256)
+                )
+                offset += count
+        return rows, starts, starts + visible, zeros, visible
 
     def groups(self, *, mask_tail=True, return_bf16=False):
         """Yield (packed row slice, logits, visible, (zeros, visible)).
@@ -476,7 +475,7 @@ class _GroupedScores:
         """
         from ._indexer_score import fp8_fp4_mqa_indexer_score
 
-        bounds_by_group = self._bounds()
+        bounds_by_group = self._iter_bounds()
         for group, bounds, q, sf, weights in zip(
             self.layout,
             bounds_by_group,
@@ -503,6 +502,26 @@ class _GroupedScores:
                 )
             yield rows, logits, visible, (zeros, visible)
             del logits
+
+    def _iter_bounds(self):
+        # Retain at most 256 groups; larger layouts stream their bounds.
+        if len(self.layout) <= _MAX_BOUNDS_GROUPS:
+            yield from self._bounds()
+            return
+        for first in range(0, len(self.layout), _MAX_BOUNDS_GROUPS):
+            chunk = self.layout[first : first + _MAX_BOUNDS_GROUPS]
+            bounds = (
+                self._fused_bounds(chunk)
+                if len(chunk) >= 2
+                and self.key_counts is not None
+                and not torch.cuda.is_current_stream_capturing()
+                else None
+            )
+            if bounds is not None:
+                yield from bounds
+            else:
+                for group in chunk:
+                    yield self._one_group_bounds(group)
 
 
 def try_grouped_scores(
@@ -577,6 +596,16 @@ def try_grouped_scores(
     layout = _group_layout(keys, rows)
     if layout is None or keys[0].quant.device != q.device:
         return None
+    # TopK/candidate IDs are initialized by Q preparation. An optional
+    # candidate bitmap is not, so it cannot leave standalone zero-key rows.
+    if shared.get("prefill_candidate_mask") is not None:
+        cursor = 0
+        for group in layout:
+            if group.rows.start != cursor:
+                return None
+            cursor = group.rows.stop
+        if cursor != q.shape[0]:
+            return None
     if req_ids is not None or key_counts is not None:
         if not all(
             isinstance(value, torch.Tensor)
