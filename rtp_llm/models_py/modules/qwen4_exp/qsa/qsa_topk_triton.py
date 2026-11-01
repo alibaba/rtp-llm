@@ -135,6 +135,7 @@ def _packed_qsa_tokens(
         tl.store(O + row * 2051 + 2048 + tail, tail_token.to(tl.int32), tail < 3)
 
 
+
 def try_select_qsa_tokens(
     scores,
     lengths,
@@ -182,7 +183,9 @@ def try_select_qsa_tokens(
     ):
         # This bounded, bit-exact radix-key order is validated against the
         # frozen native CUDA TopK, including mixed ties, signed zero and NaNs.
-        # Larger score buffers were slower in full-consumer A/B; retain native.
+        # L20X (SM90) re-measure showed this single-CTA tl.topk variant slower
+        # than the native sbtopk chain at every column width (0.55-0.91x), so
+        # SM90 keeps the radix-select kernel below / the native path.
         output = torch.empty(
             (rows, 2052 if packed_count else 2051),
             device=scores.device,
@@ -200,6 +203,30 @@ def try_select_qsa_tokens(
             num_warps=warps,
         )
         return output
+    if (
+        not packed_count
+        and 1024 <= columns <= 8192
+        and rows <= 32
+        and scores.is_contiguous()
+        and lengths.is_contiguous()
+        and torch.cuda.get_device_capability(scores.device) == (9, 0)
+    ):
+        # SM90 L20X: O(N) C++ radix select + stable 512-wide sort + token
+        # expansion in one launch. The Triton tl.topk and Triton radix-select
+        # variants both measured slower than the native sbtopk chain on L20X
+        # (tl.sort/tl.histogram primitives dominate); the inline-C++ kernel
+        # with shared-memory histograms and a CUB block sort is the SM90
+        # replacement. The kernel masks past-complete blocks internally, so
+        # pre-masked and raw (indexer-style) inputs both work. Bit-exact
+        # against the frozen native TopK order (see the SM90 parity gate in
+        # the qsa-kernel-opt campaign).
+        from rtp_llm.models_py.modules.qwen4_exp.qsa.cub_topk import (
+            try_radix_qsa_tokens,
+        )
+
+        output = try_radix_qsa_tokens(scores, lengths, finite_only=finite_only)
+        if output is not None:
+            return output
     # Paged scoring has already stored -inf past each completed-block limit.
     # Only callers owning that producer contract may skip the duplicate mask.
     if scores_are_masked and scores.is_contiguous():
