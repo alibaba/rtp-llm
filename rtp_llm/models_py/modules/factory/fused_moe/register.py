@@ -19,6 +19,8 @@ _CLI_STRATEGIES = (
     "no_quant_ep_low_latency_deepgemm",
     "w8a8_int8_dp_normal_deepgemm",
     "w8a8_int8_ep_low_latency_deepgemm",
+    "fp8_per_block_dp_normal_deepgemm",
+    "fp8_per_block_ep_low_latency_deepgemm",
 )
 
 
@@ -35,9 +37,7 @@ def _extend_strategy_choices(parser, **_ignored) -> None:
         for name in _CLI_STRATEGIES:
             if name not in merged:
                 merged.append(name)
-        action.choices = (
-            merged if isinstance(action.choices, list) else tuple(merged)
-        )
+        action.choices = merged if isinstance(action.choices, list) else tuple(merged)
         return
     logging.warning(
         "[ppu moe register] --moe_strategy not found; PPU strategies stay unselectable"
@@ -45,6 +45,10 @@ def _extend_strategy_choices(parser, **_ignored) -> None:
 
 
 def _register_strategies(registry, **_ignored) -> None:
+    from rtp_llm.models_py.modules.factory.fused_moe.ppu_impl.strategy.fp8_per_block import (
+        PpuFp8PerBlockDpNormalDeepGemmStrategy,
+        PpuFp8PerBlockEpLowLatencyDeepGemmStrategy,
+    )
     from rtp_llm.models_py.modules.factory.fused_moe.ppu_impl.strategy.no_quant import (
         PpuNoQuantDpNormalDeepGemmStrategy,
         PpuNoQuantEpLowLatencyDeepGemmStrategy,
@@ -58,7 +62,11 @@ def _register_strategies(registry, **_ignored) -> None:
     registry.register(PpuNoQuantEpLowLatencyDeepGemmStrategy())
     registry.register(PpuW8A8Int8DpNormalDeepGemmStrategy())
     registry.register(PpuW8A8Int8EpLowLatencyDeepGemmStrategy())
-    logging.info("[ppu moe register] Registered BF16 + W8A8 INT8 DeepGEMM strategies")
+    registry.register(PpuFp8PerBlockDpNormalDeepGemmStrategy())
+    registry.register(PpuFp8PerBlockEpLowLatencyDeepGemmStrategy())
+    logging.info(
+        "[ppu moe register] Registered BF16 + W8A8 INT8 + FP8 DeepGEMM strategies"
+    )
 
 
 def install() -> None:

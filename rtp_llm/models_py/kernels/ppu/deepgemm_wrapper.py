@@ -1,4 +1,4 @@
-"""PPU DeepGEMM BF16 and W8A8 INT8 GEMM bindings.
+"""PPU DeepGEMM BF16, W8A8 INT8 and FP8 GEMM bindings.
 
 The PPU wheel exposes the legacy ``m_grouped_gemm_bf16_bf16_bf16_nt_*``
 symbols and does not accept CUDA's ``compiled_dims`` keyword. Keeping this
@@ -21,6 +21,7 @@ import torch
 logger = logging.getLogger(__name__)
 
 Int8ScaledTensor = Tuple[torch.Tensor, torch.Tensor]
+Fp8ScaledTensor = Tuple[torch.Tensor, torch.Tensor]
 
 _contiguous_impl: Optional[Callable[..., Any]] = None
 _masked_impl: Optional[Callable[..., Any]] = None
@@ -29,6 +30,10 @@ _int8_dense_impl: Optional[Callable[..., Any]] = None
 _int8_contiguous_impl: Optional[Callable[..., Any]] = None
 _int8_masked_impl: Optional[Callable[..., Any]] = None
 _int8_nopad_impl: Optional[Callable[..., Any]] = None
+_fp8_dense_impl: Optional[Callable[..., Any]] = None
+_fp8_contiguous_impl: Optional[Callable[..., Any]] = None
+_fp8_masked_impl: Optional[Callable[..., Any]] = None
+_fp8_nopad_impl: Optional[Callable[..., Any]] = None
 _initialized = False
 _available: Optional[bool] = None
 
@@ -86,6 +91,8 @@ def _ensure_initialized() -> None:
     global _contiguous_impl, _masked_impl, _nopad_impl
     global _int8_dense_impl, _int8_contiguous_impl, _int8_masked_impl
     global _int8_nopad_impl, _initialized
+    global _fp8_dense_impl, _fp8_contiguous_impl, _fp8_masked_impl
+    global _fp8_nopad_impl
     if _initialized or not has_deep_gemm():
         return
 
@@ -122,6 +129,13 @@ def _ensure_initialized() -> None:
         "m_grouped_gemm_int8_int8_bf16_nt_nopad",
         "m_grouped_int8_gemm_nt_nopad",
     )
+    _fp8_dense_impl = _resolve(deep_gemm, "fp8_gemm_nt")
+    _fp8_contiguous_impl = _resolve(
+        deep_gemm,
+        "m_grouped_gemm_fp8_fp8_bf16_nt_contiguous",
+    )
+    _fp8_masked_impl = _resolve(deep_gemm, "m_grouped_gemm_fp8_fp8_bf16_nt_masked")
+    _fp8_nopad_impl = _resolve(deep_gemm, "m_grouped_gemm_fp8_fp8_bf16_nt_nopad")
     _initialized = True
 
 
@@ -185,6 +199,48 @@ def has_deep_gemm_int8_grouped_nopad() -> bool:
     except Exception:
         return False
     return _int8_nopad_impl is not None
+
+
+def has_deep_gemm_fp8_dense() -> bool:
+    if not has_deep_gemm():
+        return False
+    try:
+        _ensure_initialized()
+    except Exception:
+        return False
+    return _fp8_dense_impl is not None
+
+
+def has_deep_gemm_fp8_grouped() -> bool:
+    if not has_deep_gemm():
+        return False
+    try:
+        _ensure_initialized()
+    except Exception:
+        return False
+    return _fp8_masked_impl is not None and (
+        _fp8_nopad_impl is not None or _fp8_contiguous_impl is not None
+    )
+
+
+def has_deep_gemm_fp8_grouped_masked() -> bool:
+    if not has_deep_gemm():
+        return False
+    try:
+        _ensure_initialized()
+    except Exception:
+        return False
+    return _fp8_masked_impl is not None
+
+
+def has_deep_gemm_fp8_grouped_nopad() -> bool:
+    if not has_deep_gemm():
+        return False
+    try:
+        _ensure_initialized()
+    except Exception:
+        return False
+    return _fp8_nopad_impl is not None
 
 
 def _require(symbol: Optional[Callable[..., Any]], name: str) -> Callable[..., Any]:
@@ -360,6 +416,66 @@ def m_grouped_int8_gemm_nt_nopad(
     impl = _require(
         _int8_nopad_impl,
         "m_grouped_gemm_int8_int8_bf16_nt_nopad",
+    )
+    _grouped_shape(lhs[0], rhs[0], masked=False)
+    impl(lhs, rhs, output, m_indices, m_rows, None)
+
+
+def fp8_gemm_nt(
+    lhs: Fp8ScaledTensor,
+    rhs: Fp8ScaledTensor,
+    output: torch.Tensor,
+) -> None:
+    _ensure_initialized()
+    impl = _require(_fp8_dense_impl, "fp8_gemm_nt")
+    k = lhs[0].shape[1]
+    rhs_k = rhs[0].shape[1]
+    if rhs_k != k:
+        raise ValueError(
+            f"DeepGEMM dense shape mismatch: lhs={lhs[0].shape}, rhs={rhs[0].shape}"
+        )
+    impl(lhs, rhs, output)
+
+
+def m_grouped_fp8_gemm_nt_contiguous(
+    lhs: Fp8ScaledTensor,
+    rhs: Fp8ScaledTensor,
+    output: torch.Tensor,
+    m_indices: torch.Tensor,
+) -> None:
+    _ensure_initialized()
+    impl = _require(
+        _fp8_contiguous_impl,
+        "m_grouped_gemm_fp8_fp8_bf16_nt_contiguous",
+    )
+    _grouped_shape(lhs[0], rhs[0], masked=False)
+    impl(lhs, rhs, output, m_indices, None)
+
+
+def m_grouped_fp8_gemm_nt_masked(
+    lhs: Fp8ScaledTensor,
+    rhs: Fp8ScaledTensor,
+    output: torch.Tensor,
+    masked_m: torch.Tensor,
+    expected_m: int,
+) -> None:
+    _ensure_initialized()
+    impl = _require(_fp8_masked_impl, "m_grouped_gemm_fp8_fp8_bf16_nt_masked")
+    _grouped_shape(lhs[0], rhs[0], masked=True)
+    impl(lhs, rhs, output, masked_m, expected_m, None)
+
+
+def m_grouped_fp8_gemm_nt_nopad(
+    lhs: Fp8ScaledTensor,
+    rhs: Fp8ScaledTensor,
+    output: torch.Tensor,
+    m_indices: torch.Tensor,
+    m_rows: torch.Tensor,
+) -> None:
+    _ensure_initialized()
+    impl = _require(
+        _fp8_nopad_impl,
+        "m_grouped_gemm_fp8_fp8_bf16_nt_nopad",
     )
     _grouped_shape(lhs[0], rhs[0], masked=False)
     impl(lhs, rhs, output, m_indices, m_rows, None)
