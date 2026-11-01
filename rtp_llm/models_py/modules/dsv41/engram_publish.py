@@ -110,7 +110,6 @@ def publish_shard(checkpoint, model_revision, host_id, generation, shard, shards
     devices = layer_devices or {layer: device for layer in layout.layer_ids}
     numas = layer_numas or {layer: numa for layer in layout.layer_ids}
     hash_abi = hash_state_digest(NgramHashState(layout, str(checkpoint)))
-    torch.cuda.set_device(device)
     native = _load_native()
     granularities = {native.host_numa_granularity(numas[layer], devices[layer])
                      for layer in layout.layer_ids}
@@ -146,7 +145,8 @@ def publish_shard(checkpoint, model_revision, host_id, generation, shard, shards
             local_bytes += allocation_bytes
             if local_bytes > budget_bytes:
                 raise ValueError("local shards exceed host budget")
-            owner = native.Owner(allocation_bytes, layer_numa_value, layer_devices_value)
+            with torch.cuda.device(layer_devices_value):
+                owner = native.Owner(allocation_bytes, layer_numa_value, layer_devices_value)
             owners.append(owner)
             digest = load_rows(owner, checkpoint, tensor, snapshots[tensor.relative_path],
                                start, end, columns,

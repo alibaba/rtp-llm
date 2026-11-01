@@ -380,7 +380,7 @@ def prepare_static_engram(store, *, rank, world_size, environ=None, leader_excha
             # This member owns the shard: allocate it here and describe it.
             from rtp_llm.models_py.modules.dsv41.engram_publish import publish_shard
             document = publish_shard(
-                config['checkpoint'], group['model_revision'], member['host_id'],
+                config['checkpoint'], group['model_revision'], shard['host_id'],
                 group['generation'], shard['index'], p,
                 device=config['local_device'], numa=config['local_numa'],
                 release_input_page_cache=config['release_page_cache'])
