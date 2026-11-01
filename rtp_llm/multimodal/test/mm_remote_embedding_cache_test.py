@@ -166,6 +166,77 @@ class RemoteCacheTest(unittest.TestCase):
         self.assertEqual(tags, {"status": "timeout"})
         self.assertEqual(remote.stats()["inflight_tasks"], 0)
 
+    def test_late_metadata_miss_is_not_a_second_caller_outcome(self):
+        gate = threading.Event()
+        started = threading.Event()
+        remote = self.remote(Store(), read_timeout_ms=30)
+
+        def late_miss(*args, **kwargs):
+            started.set()
+            self.assertTrue(gate.wait(3))
+            return None
+
+        with patch.object(remote._client, "object_size", side_effect=late_miss):
+            with patch.object(remote, "record", wraps=remote.record) as record:
+                try:
+                    self.assertIsNone(remote.load("missing", trace_id="late-miss"))
+                    self.assertTrue(started.is_set())
+                finally:
+                    gate.set()
+                    remote.close()
+        outcomes = [c.args[0] for c in record.call_args_list]
+        self.assertEqual(outcomes, ["read_error"])
+        self.assertEqual(remote.stats().get("miss", 0), 0)
+        self.assertEqual(remote.stats()["inflight_tasks"], 0)
+
+    def test_write_rt_includes_queue_and_failure_keeps_generation(self):
+        for failed in (False, True):
+            with self.subTest(failed=failed):
+                store = Store()
+                store.fail_write = failed
+                remote = self.remote(store)
+                gate = threading.Event()
+                blockers = [remote._executor.submit(gate.wait, 3) for _ in range(2)]
+                entry = SimpleNamespace(
+                    pool_owners=[],
+                    result=(torch.ones(3, 4), None),
+                    error=None,
+                    original_devices=(torch.device("cpu"), None),
+                    generation="queued",
+                    remote_cache_context={"key": "key", "trace_id": "queued-write"},
+                )
+                with patch(
+                    "rtp_llm.multimodal.mm_remote_embedding_cache.kmonitor.report"
+                ) as report:
+                    with patch.object(remote, "record", wraps=remote.record) as record:
+                        try:
+                            remote.submit_eviction("local-key", entry)
+                            time.sleep(0.06)
+                        finally:
+                            gate.set()
+                            for blocker in blockers:
+                                blocker.result(timeout=3)
+                            deadline = time.monotonic() + 3
+                            while (
+                                remote.stats()["inflight_tasks"]
+                                and time.monotonic() < deadline
+                            ):
+                                time.sleep(0.005)
+                            remote.close()
+                rt, tags = self.metric_values(
+                    report, GaugeMetrics.VIT_REMOTE_EMB_WRITE_RT_METRIC
+                )[0]
+                self.assertGreaterEqual(rt, 50)
+                self.assertEqual(tags, {"status": "error" if failed else "success"})
+                terminal = [
+                    c
+                    for c in record.call_args_list
+                    if c.args[0] in ("store_success", "write_error")
+                ]
+                self.assertEqual(len(terminal), 1)
+                self.assertEqual(terminal[0].kwargs["generation"], "queued")
+                self.assertEqual(remote.stats()["inflight_bytes"], 0)
+
     def test_sdk_timeout_types_are_classified_in_read_and_stage_metrics(self):
         for error_type in (TimeoutError, concurrent.futures.TimeoutError):
             for method, stage in (("object_size", "metadata"), ("load_one", "transfer")):

@@ -513,6 +513,7 @@ class MMRemoteEmbeddingCache:
             with self._lock:
                 self._pending_writes.discard(key)
             return
+        started = time.perf_counter()
         self.record(
             "cpu_eviction_admitted",
             key=key,
@@ -524,7 +525,7 @@ class MMRemoteEmbeddingCache:
 
         def write():
             client = None
-            started = time.perf_counter()
+            queue_ms = (time.perf_counter() - started) * 1000
             api_ms = None
             outcome = "error"
             try:
@@ -562,6 +563,7 @@ class MMRemoteEmbeddingCache:
                     "write_error",
                     key=key,
                     trace_id=trace_id,
+                    generation=entry.generation,
                     error_type=type(error).__name__,
                 )
                 if client is not None:
@@ -573,9 +575,10 @@ class MMRemoteEmbeddingCache:
                     key,
                     trace_id,
                     wall_ms=(time.perf_counter() - started) * 1000,
+                    queue_ms=queue_ms,
                     sdk_api_ms=api_ms,
                     status=outcome,
-                    scope="eviction_pack_client_init_sdk_save_and_validation",
+                    scope="eviction_queue_pack_client_init_sdk_save_and_validation",
                 )
                 if client is not None:
                     self._release_client(client)
@@ -624,8 +627,6 @@ class MMRemoteEmbeddingCache:
                 if size is None:
                     timing["outcome"] = "miss"
                     timing["sdk_api_ms"] = (time.perf_counter() - api_started) * 1000
-                    self._count("miss")
-                    self.record("load_miss", key=key, trace_id=trace_id)
                     return None
                 if not 0 < size <= self.max_object_bytes:
                     raise ValueError("remote embedding object exceeds byte limit")
@@ -659,6 +660,9 @@ class MMRemoteEmbeddingCache:
             buffer = future.result(timeout=max(0, deadline - time.monotonic()))
             if buffer is None:
                 outcome = timing["outcome"]
+                if outcome == "miss":
+                    self._count("miss")
+                    self.record("load_miss", key=key, trace_id=trace_id)
                 return None
             with self._observe_stage("read", "restore"):
                 value = unpack_object(
