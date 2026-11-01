@@ -150,6 +150,60 @@ class QueueRegistrationCancellationTest {
         }
     }
 
+    @Test
+    void predictedOverloadCannotEvictBeforeRealQueueWaitThreshold() throws Exception {
+        var policy = new org.flexlb.config.PrefillQueueSheddingConfig();
+        policy.setExpectedWaitThresholdMs(1_000L);
+        policy.setMaxWaitMs(3_000L);
+        try (Fixture f = new Fixture(policy)) {
+            when(f.router.select(any(), nullable(String.class))).thenReturn(PlacementResult.blocked(
+                    new PlacementKey(org.flexlb.dao.route.RoleType.PREFILL, null, null)));
+            when(f.router.estimateQueuedWork(any(), nullable(String.class)))
+                    .thenReturn(new PrefillQueueShedding.Estimate(100, 0, Long.MAX_VALUE, 1));
+            var result = f.queue.submit(f.context(920L));
+            verify(f.router, timeout(1000)).select(any(), nullable(String.class));
+            assertThrows(java.util.concurrent.TimeoutException.class, () -> result.get(300, TimeUnit.MILLISECONDS));
+            f.queue.cancel(920L, 0L, CancelReason.CLIENT_CANCELLED);
+            assertEquals(StrategyErrorType.REQUEST_CANCELLED.getErrorCode(), result.get(2, TimeUnit.SECONDS).getCode());
+        }
+    }
+
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(booleans = {false, true})
+    void actualWaitTriggersEvictionWithoutPredictedWork(boolean missingEstimate) throws Exception {
+        var policy = new org.flexlb.config.PrefillQueueSheddingConfig();
+        policy.setExpectedWaitThresholdMs(100L);
+        policy.setMaxWaitMs(3_000L);
+        try (Fixture f = new Fixture(policy)) {
+            when(f.router.select(any(), nullable(String.class))).thenReturn(PlacementResult.blocked(
+                    new PlacementKey(org.flexlb.dao.route.RoleType.PREFILL, null, null)));
+            when(f.router.estimateQueuedWork(any(), nullable(String.class))).thenReturn(missingEstimate ? null
+                    : new PrefillQueueShedding.Estimate(100, 99, 0, 1000));
+            long start = System.nanoTime();
+            var response = f.queue.submit(f.context(921L)).get(3, TimeUnit.SECONDS);
+            assertTrue(TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start) > 100);
+            assertEquals(StrategyErrorType.RESOURCE_EXHAUSTED.getErrorCode(), response.getCode());
+            RequestProtocolTestSupport.awaitCondition(() -> RequestProtocolTestSupport.queuedCount(f.queue) == 0);
+        }
+    }
+
+    @Test
+    void hardDeadlineWinsEvenWithRecoveryAndNoCacheEstimate() throws Exception {
+        var policy = new org.flexlb.config.PrefillQueueSheddingConfig();
+        policy.setExpectedWaitThresholdMs(200L);
+        policy.setMaxWaitMs(200L);
+        policy.setRecovery(new org.flexlb.config.PrefillQueueSheddingConfig.RecoveryConfig());
+        try (Fixture f = new Fixture(policy)) {
+            when(f.router.select(any(), nullable(String.class))).thenReturn(PlacementResult.blocked(
+                    new PlacementKey(org.flexlb.dao.route.RoleType.PREFILL, null, null)));
+            var context = f.context(922L);
+            context.data().setSchedulingMetadata(org.flexlb.dao.SchedulingMetadata.explicit(99,
+                    f.config.resolveExpiresAtMs(System.currentTimeMillis())));
+            assertFalse(f.queue.submit(context).get(2, TimeUnit.SECONDS).isSuccess());
+            assertEquals(CancelReason.DEADLINE_EXCEEDED, context.snapshot().cancellation().reason());
+        }
+    }
+
     private static final class Fixture implements AutoCloseable {
         final FlexlbConfig config = SchedulingTestConfig.batchConfig();
         final RequestWorkerSelector router = mock(RequestWorkerSelector.class);

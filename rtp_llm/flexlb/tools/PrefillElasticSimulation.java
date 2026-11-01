@@ -60,6 +60,7 @@ public class PrefillElasticSimulation {
         final Map<Long, Map<Integer, Cache>> cacheIndex=new HashMap<>();
         final double[] workScores=new double[N];
         final long[] pendingTokens=new long[N];
+        final PrefillQueueShedding.Controller sheddingController = new PrefillQueueShedding.Controller();
         double lastShedding=-100;
         final Random roots, lengths;
         final long[] corpus = new long[50_000];
@@ -213,7 +214,7 @@ public class PrefillElasticSimulation {
             }
         }
         void route() {
-            if(now-lastShedding>=100)migrateLocal();
+            if(now-lastShedding>=PrefillQueueShedding.SOFT_INTERVAL_MS)migrateLocal();
             // Scan all waiting requests once per 20ms scheduling round; blocked affinity cannot block cold work.
             // Optional ablation reorders only each already-present 32-item group, never defers an item.
             idleCount=0;
@@ -244,7 +245,7 @@ public class PrefillElasticSimulation {
                 if(!w.running && !w.collecting){w.collecting=true;w.collectionDue=now+20;event(w.collectionDue,2,null,i,null);}
                 if(!w.running && w.queue.size()>=8)start(i);
             }
-            if(now-lastShedding>=100){shed();lastShedding=now;}
+            if(now-lastShedding>=PrefillQueueShedding.SOFT_INTERVAL_MS){shed();lastShedding=now;}
         }
         void shed() {
             var candidates=new ArrayList<PrefillQueueShedding.Candidate<Query>>();
@@ -256,13 +257,13 @@ public class PrefillElasticSimulation {
                     if(now-cache.touched<TTL)max=Math.max(max,Math.min(q.prefix,cache.tokens));
                 }
                 candidates.add(new PrefillQueueShedding.Candidate<>(q,q.priority,q.id,
-                    new PrefillQueueShedding.Estimate(q.tokens,max,Math.round((q.tokens-max)*1000/TPS),active)));
+                    new PrefillQueueShedding.Estimate(q.tokens,max,Math.round((q.tokens-max)*1000/TPS),active),(long)Math.max(0,now-q.at)));
             }
             double queuedWork=candidates.stream().mapToDouble(item->item.estimate().fleetWorkMs()).sum();
             var observed=trend.observe((long)now,queuedWork,(long)SHED_WAIT,(long)MAX_WAIT);
             if(policy==Policy.ADAPTIVE && observed.grace())graceTicks++;
-            var victims=policy==Policy.ADAPTIVE ? PrefillQueueShedding.adaptiveVictims(candidates,sheddingConfig,observed)
-                    : PrefillQueueShedding.victims(candidates,(long)SHED_WAIT);
+            var victims=policy==Policy.ADAPTIVE ? PrefillQueueShedding.adaptiveVictims(candidates,sheddingConfig,observed,sheddingController,(long)now)
+                    : sheddingController.victims(candidates,(long)SHED_WAIT,(long)MAX_WAIT,(long)now);
             for(Query q:victims) {
                 if(waiting.remove(q.id)!=null){c.dropped++;droppedPriority[priorityIndex(q)]++;
                     long matched=0;for(int i=0;i<active;i++)matched=Math.max(matched,hit(i,q));

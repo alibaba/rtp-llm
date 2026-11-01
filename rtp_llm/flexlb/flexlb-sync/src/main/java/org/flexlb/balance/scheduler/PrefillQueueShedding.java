@@ -4,7 +4,7 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 
-/** Pure overload policy. Work is expressed in milliseconds of one fleet's service capacity. */
+/** Reactive overload policy. Only observed queue age can authorize eviction. */
 public final class PrefillQueueShedding {
     private PrefillQueueShedding() { }
 
@@ -21,7 +21,11 @@ public final class PrefillQueueShedding {
         }
     }
 
-    public record Candidate<T>(T value, int priority, long sequence, Estimate estimate) { }
+    /** waitedMs is actual elapsed time in the placement queue, never a service prediction. */
+    public record Candidate<T>(T value, int priority, long sequence, Estimate estimate, long waitedMs) { }
+
+    /** Fixed control cadence prevents a busy scheduling loop from amplifying soft eviction. */
+    public static final long SOFT_INTERVAL_MS = 1_000L;
 
     public static <T> Comparator<Candidate<T>> evictionOrder() {
         return Comparator.<Candidate<T>>comparingInt(Candidate::priority)
@@ -30,35 +34,56 @@ public final class PrefillQueueShedding {
                 .thenComparing(Comparator.comparingLong((Candidate<T> c) -> c.sequence()).reversed());
     }
 
-    /** Priority dominates cache benefit; exact ties retain older requests. Input is not mutated. */
-    public static <T> List<T> victims(List<Candidate<T>> candidates, long thresholdMs) {
-        double workMs = candidates.stream().mapToDouble(c -> c.estimate().fleetWorkMs()).sum();
-        if (workMs <= thresholdMs) { return List.of(); }
-        var sorted = new ArrayList<>(candidates);
-        sorted.sort(evictionOrder());
-        var victims = new ArrayList<T>();
-        for (var candidate : sorted) {
-            if (workMs <= thresholdMs) { break; }
-            victims.add(candidate.value());
-            workMs -= candidate.estimate().fleetWorkMs();
+    /** Per-pool feedback. Credits are rates integrated over elapsed time, not a fresh
+     * percentage of the same backlog each round. Own evictions are excluded when
+     * detecting natural queue drainage. Never bank unused whole-request credits.
+     */
+    public static final class Controller {
+        private long lastRoundMs = Long.MIN_VALUE;
+        private int remainingAfterEviction;
+        private double credit;
+
+        public <T> List<T> victims(List<Candidate<T>> candidates, long thresholdMs, long maxWaitMs, long nowMs) {
+            return victims(candidates, thresholdMs, maxWaitMs, nowMs, 0.1);
         }
-        return victims;
-    }
-    /** Same bounded recovery decision for production and deterministic traffic experiments. */
-    public static <T> List<T> adaptiveVictims(List<Candidate<T>> candidates,
-            org.flexlb.config.PrefillQueueSheddingConfig config, PrefillTrafficTrend.Snapshot trend) {
-        if (config.getRecovery() == null || trend == null || !trend.grace()) {
-            return victims(candidates, config.getExpectedWaitThresholdMs());
+
+        private <T> List<T> victims(List<Candidate<T>> candidates, long thresholdMs, long maxWaitMs,
+                long nowMs, double maxFraction) {
+            if (lastRoundMs != Long.MIN_VALUE && nowMs - lastRoundMs < SOFT_INTERVAL_MS) { return List.of(); }
+            long elapsedMs = lastRoundMs == Long.MIN_VALUE ? SOFT_INTERVAL_MS
+                    : Math.min(SOFT_INTERVAL_MS, nowMs - lastRoundMs);
+            boolean draining = lastRoundMs != Long.MIN_VALUE && candidates.size() < remainingAfterEviction;
+            lastRoundMs = nowMs;
+            remainingAfterEviction = candidates.size();
+            var overdue = new ArrayList<Candidate<T>>();
+            double rate = 0;
+            for (var candidate : candidates) {
+                if (candidate.waitedMs() <= thresholdMs) { continue; }
+                overdue.add(candidate);
+                rate += (double) elapsedMs / Math.max(SOFT_INTERVAL_MS, maxWaitMs - candidate.waitedMs());
+            }
+            if (overdue.isEmpty() || draining) { credit = 0; return List.of(); }
+            credit += rate;
+            // At most 10% of overdue requests per round; hard deadlines remain independent.
+            int count = Math.min((int) Math.floor(credit), Math.max(1, (int) Math.ceil(overdue.size() * maxFraction)));
+            credit -= Math.floor(credit);
+            overdue.sort(evictionOrder());
+            remainingAfterEviction -= count;
+            return overdue.subList(0, count).stream().map(Candidate::value).toList();
         }
-        if (trend.state() == PrefillTrafficTrend.State.BURST_PROBE) {
-            return victims(candidates, config.getMaxWaitMs());
-        }
-        long threshold = (long) Math.min(config.getMaxWaitMs(),
-                config.getExpectedWaitThresholdMs() * config.getRecovery().getWaitMultiplier());
-        var selected = victims(candidates, threshold);
-        int count = Math.min(selected.size(), Math.max(1,
-                (int) Math.ceil(candidates.size() * config.getRecovery().getMaxEvictionFraction())));
-        return List.copyOf(selected.subList(0, count));
     }
 
+    /** Optional recovery only reduces age-based eviction; prediction never activates it. */
+    public static <T> List<T> adaptiveVictims(List<Candidate<T>> candidates,
+            org.flexlb.config.PrefillQueueSheddingConfig config, PrefillTrafficTrend.Snapshot trend,
+            Controller controller, long nowMs) {
+        long threshold = config.getExpectedWaitThresholdMs();
+        if (config.getRecovery() != null && trend != null && trend.grace()) {
+            threshold = trend.state() == PrefillTrafficTrend.State.BURST_PROBE ? config.getMaxWaitMs()
+                    : (long) Math.min(config.getMaxWaitMs(), threshold * config.getRecovery().getWaitMultiplier());
+        }
+        double maxFraction = config.getRecovery() != null && trend != null && trend.grace()
+                ? Math.min(0.1, config.getRecovery().getMaxEvictionFraction()) : 0.1;
+        return controller.victims(candidates, threshold, config.getMaxWaitMs(), nowMs, maxFraction);
+    }
 }

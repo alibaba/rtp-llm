@@ -13,6 +13,7 @@ final class GlobalQueueEntry {
     final RequestContext context;
     final String routingGroup;
     PrefillQueueShedding.Estimate sheddingEstimate;
+    final long queuedAtNanos = System.nanoTime();
     long sequence;
     volatile boolean removed = true;
     GlobalQueueEntry previous;

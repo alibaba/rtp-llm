@@ -76,6 +76,7 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler imple
     private final double scanBudgetMultiplier;
     private final PrefillQueueSheddingConfig shedding;
     private long nextSheddingNanos;
+    private final Map<String, PrefillQueueShedding.Controller> sheddingControllers = new LinkedHashMap<>();
     private long nextRescueRetryNanos;
     private Set<PlacementKey> idleRescueDomains = Set.of();
     private long nextLocalMigrationNanos;
@@ -783,7 +784,10 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler imple
         lock.lock();
         try {
             if (!(!plan.entry.removed && !plan.entry.context.data().getFuture().isDone())) { return true; }
-            plan.entry.sheddingEstimate = plan.waitKey.role().supportsPrefill() ? plan.estimate : null;
+            plan.entry.sheddingEstimate = plan.waitKey.role().supportsPrefill()
+                    ? plan.estimate != null ? plan.estimate : new PrefillQueueShedding.Estimate(
+                            Math.max(0L, plan.entry.context.data().getRequest().getSeqLen()), 0L, 0L, 1)
+                    : null;
             parked = waitingRequests.park(plan.entry, plan.waitKey, plan.availabilitySequence);
             if (parked && hotspotRescue != null && plan.waitKey.role().supportsPrefill()
                     && plan.entry.context.data().getRequest().getSeqLen() <= hotspotRescue.getMaxInputTokens()) {
@@ -865,8 +869,9 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler imple
 
     /** Only the decision owner removes global entries; all lifecycle effects run outside its lock. */
     private void shedOverloadedQueue() {
-        if (shedding == null || System.nanoTime() < nextSheddingNanos) { return; }
-        nextSheddingNanos = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(100L);
+        long nowNanos = System.nanoTime();
+        if (shedding == null || nowNanos < nextSheddingNanos) { return; }
+        nextSheddingNanos = nowNanos + TimeUnit.MILLISECONDS.toNanos(100L);
         Map<String, List<PrefillQueueShedding.Candidate<GlobalQueueEntry>>> pools = new LinkedHashMap<>();
         List<GlobalQueueEntry> victims = new ArrayList<>();
         List<GlobalQueueEntry> expired = new ArrayList<>();
@@ -887,7 +892,8 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler imple
                 String pool = trafficPool(entry);
                 pools.computeIfAbsent(pool, ignored -> new ArrayList<>()).add(
                         new PrefillQueueShedding.Candidate<>(entry,
-                                entry.priority(), entry.sequence, entry.sheddingEstimate));
+                                entry.priority(), entry.sequence, entry.sheddingEstimate,
+                                Math.max(0L, TimeUnit.NANOSECONDS.toMillis(nowNanos - entry.queuedAtNanos))));
             }
         } finally { lock.unlock(); }
         Map<String, Integer> poolWorkers = new LinkedHashMap<>();
@@ -900,7 +906,7 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler imple
             pool.setValue(pool.getValue().stream().map(candidate -> {
                 var estimate = candidate.estimate();
                 return new PrefillQueueShedding.Candidate<>(candidate.value(), candidate.priority(), candidate.sequence(),
-                        new PrefillQueueShedding.Estimate(estimate.inputTokens(), estimate.hitTokens(), estimate.workMs(), workers));
+                        new PrefillQueueShedding.Estimate(estimate.inputTokens(), estimate.hitTokens(), estimate.workMs(), workers), candidate.waitedMs());
             }).toList());
         }
         for (var entry : expired) {
@@ -920,8 +926,11 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler imple
             var pool = poolEntry.getValue();
             var snapshot = (PrefillTrafficTrend.Snapshot) trends.get(
                     poolEntry.getKey() == null ? "<default>" : "group:" + poolEntry.getKey());
-            victims.addAll(PrefillQueueShedding.adaptiveVictims(pool, shedding, snapshot));
+            var controller = sheddingControllers.computeIfAbsent(poolEntry.getKey(), ignored -> new PrefillQueueShedding.Controller());
+            victims.addAll(PrefillQueueShedding.adaptiveVictims(pool, shedding, snapshot, controller,
+                    TimeUnit.NANOSECONDS.toMillis(nowNanos)));
         }
+        sheddingControllers.keySet().retainAll(pools.keySet());
         lock.lock();
         try {
             victims.removeIf(entry -> entry.context.data().getFuture().isDone()
@@ -940,7 +949,7 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler imple
         for (var entry : expired) { cancel(entry.context, 0L, CancelReason.DEADLINE_EXCEEDED); }
         for (var entry : victims) {
             completeDecisionResponse(entry, buildErrorResponse(StrategyErrorType.RESOURCE_EXHAUSTED,
-                    "Prefill queue overload: HIT_RATE cache eviction"));
+                    "Prefill queue overload: actual queue wait exceeded expectedWaitThresholdMs"));
         }
     }
 
