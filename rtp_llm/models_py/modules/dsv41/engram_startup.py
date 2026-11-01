@@ -178,10 +178,20 @@ def _cohort(env):
     return members
 
 
+def _placement(env, name):
+    raw = env.get(name)
+    if raw is None:
+        return 0
+    if not raw.isdigit() or int(raw) > 4096:
+        raise ExchangeError('INVALID_LOCAL_PLACEMENT')
+    return int(raw)
+
+
 def _descriptors(env, count):
+    """Descriptors may come from files (harness) or be published in-process."""
     raw = env.get(DESCRIPTORS_ENV)
     if raw is None:
-        raise ExchangeError('LOCAL_DESCRIPTORS_REQUIRED')
+        return None
     paths = [item.strip() for item in raw.split(',') if item.strip()]
     if len(paths) != count:
         raise ExchangeError('LOCAL_DESCRIPTOR_COUNT_MISMATCH')
@@ -281,6 +291,9 @@ def build_config(env, world_size):
         return None
     config['tls'] = _tls(env, config['index'], len(config['group']['members']))
     config['local_descriptors'] = _descriptors(env, len(config['local_shards']))
+    config['local_device'] = _placement(env, 'RTP_ENGRAM_LOCAL_DEVICE')
+    config['local_numa'] = _placement(env, 'RTP_ENGRAM_LOCAL_NUMA')
+    config['release_page_cache'] = env.get('RTP_ENGRAM_RELEASE_INPUT_PAGE_CACHE') == '1'
     return config
 
 
@@ -363,12 +376,23 @@ def prepare_static_engram(store, *, rank, world_size, environ=None, leader_excha
     for offset, shard in enumerate(member['shards']):
         if shard['publisher_rank'] != local_rank:
             continue
-        descriptor = Path(descriptors[offset])
-        while not descriptor.exists():
-            if time.monotonic() >= deadline:
-                raise ExchangeError('LOCAL_SHARD_NOT_READY')
-            time.sleep(0.05)
-        store.set(prefix + f'shard/{shard["index"]}', _private_read(descriptor, 1 << 20))
+        if descriptors is None:
+            # This member owns the shard: allocate it here and describe it.
+            from rtp_llm.models_py.modules.dsv41.engram_publish import publish_shard
+            document = publish_shard(
+                config['checkpoint'], group['model_revision'], member['host_id'],
+                group['generation'], shard['index'], p,
+                device=config['local_device'], numa=config['local_numa'],
+                release_input_page_cache=config['release_page_cache'])
+            payload = encode(document)
+        else:
+            descriptor = Path(descriptors[offset])
+            while not descriptor.exists():
+                if time.monotonic() >= deadline:
+                    raise ExchangeError('LOCAL_SHARD_NOT_READY')
+                time.sleep(0.05)
+            payload = _private_read(descriptor, 1 << 20)
+        store.set(prefix + f'shard/{shard["index"]}', payload)
     if local_rank == 0:
         keys = [prefix + f'shard/{s["index"]}' for s in member['shards']]
         _wait(store, keys, deadline)

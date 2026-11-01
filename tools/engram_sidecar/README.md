@@ -5,9 +5,7 @@
 - [一次性 RPC：设计、启动配置、接口与真实跨机验证](framework/STATIC_RPC.md)
 - [N 个实例静态共享语义与地址配置](framework/STATIC_INSTANCE_GROUP.md)
 - [当前审查、使用方法、边界和测试记录](framework/SHARDING_REVIEW_20261030.md)
-- `framework/distributed_plan.py`：按可配置 P 和实例拓扑生成启动命令/环境变量，不执行远程部署。
-- `framework/sharded_checkpoint_owner.py`：每个存储 host 加载自己的 weight/scale 行分片，持有 CUDA HOST_NUMA/FABRIC allocation。
-- `framework/distributed_plan.py`：生成 holder 命令和 `RTP_ENGRAM_*` 环境变量；不生成启动配置文件。
+- `rtp_llm/models_py/modules/dsv41/engram_publish.py`：每个实例在启动时加载自己的 weight/scale 行分片，持有 CUDA HOST_NUMA/FABRIC allocation，并在内存里生成 descriptor（不落文件、无独立 holder 进程）。
 - `rtp_llm/models_py/modules/dsv41/engram_bootstrap.py`：实例启动时校验 P、导入映射并校验每个 shard 的边界样本。
 - `engram_shard_storage.py`：将所有分片拼接为连续 weight/scale 虚拟地址；在线 kernel 直接读内存，无查表 RPC。
 - `framework/test_distributed_storage.py`：可变 P、分片完整性、多实例映射、预算和启动计划的 CPU 测试。
