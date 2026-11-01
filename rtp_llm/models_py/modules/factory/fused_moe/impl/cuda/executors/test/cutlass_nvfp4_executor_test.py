@@ -1,5 +1,6 @@
 import unittest
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import torch
 
@@ -20,6 +21,35 @@ from rtp_llm.utils.model_weight import W
 
 
 class CutlassNvfp4ExecutorTest(unittest.TestCase):
+    def test_marlin_layout_requires_matching_strategy_before_loading(self):
+        import sys
+
+        from rtp_llm.device.device_impl import GpuImpl
+
+        def initialize(device):
+            device.py_env_configs = SimpleNamespace(moe_config=moe)
+
+        with patch.object(GpuImpl, "__init__", initialize), patch.dict(
+            sys.modules, {"pynvml": SimpleNamespace(nvmlInit=lambda: None)}
+        ):
+            for strategy in (
+                "auto",
+                "fp4_no_dp",
+                "fp4_ep_normal",
+                "fp4_ep_low_latency",
+                "nvfp4_cutlass",
+            ):
+                moe = SimpleNamespace(moe_strategy=strategy, fp4_moe_op="marlin")
+                with self.subTest(strategy=strategy), self.assertRaisesRegex(
+                    ValueError, "FP4_MOE_OP=marlin requires MOE_STRATEGY=nvfp4_marlin"
+                ):
+                    CudaImpl()
+            for backend in ("auto", "marlin"):
+                moe = SimpleNamespace(moe_strategy="nvfp4_marlin", fp4_moe_op=backend)
+                self.assertEqual(
+                    CudaImpl().py_env_configs.moe_config.fp4_moe_op, "marlin"
+                )
+
     def test_prefill_runner_uses_optional_tensor_for_swizzled_input_scale(self):
         from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.sm120_nvfp4_prefill import (
             Sm120PrefillMoE,

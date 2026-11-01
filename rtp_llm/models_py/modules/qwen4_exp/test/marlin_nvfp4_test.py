@@ -2,7 +2,6 @@ import unittest
 from types import SimpleNamespace
 
 import torch
-
 from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import (
     ExpertForwardPayload,
 )
@@ -17,8 +16,9 @@ from rtp_llm.utils.model_weight import W
 
 
 @unittest.skipUnless(
-    torch.cuda.is_available() and torch.cuda.get_device_capability() == (12, 0),
-    "requires SM120",
+    torch.cuda.is_available()
+    and torch.cuda.get_device_capability() in ((9, 0), (12, 0)),
+    "requires SM90 or SM120",
 )
 class MarlinNvfp4Test(unittest.TestCase):
     @classmethod
@@ -270,6 +270,75 @@ class MarlinNvfp4Test(unittest.TestCase):
                 executor.execute(
                     payload, activation, expert_map, None, apply_input, None
                 )
+
+    @unittest.skipUnless(
+        torch.cuda.is_available() and torch.cuda.get_device_capability() == (9, 0),
+        "requires Hopper",
+    )
+    def test_hopper_strategy_uses_prepared_weights(self):
+        from rtp_llm.config.model_config import ModelConfig
+        from rtp_llm.config.quant_config import (
+            QWEN4_FP8_NVFP4_RECIPE,
+            ModelOptFp4Config,
+        )
+        from rtp_llm.config.server_config_setup import set_parallelism_config
+        from rtp_llm.device.device_impl import CudaImpl
+        from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
+            MoEConfigAdapter,
+        )
+        from rtp_llm.models_py.modules.factory.fused_moe.factory import FusedMoeFactory
+        from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.strategy.fp4 import (
+            CudaNvfp4MarlinStrategy,
+        )
+        from rtp_llm.ops import MoeConfig, ParallelismConfig
+
+        model = ModelConfig()
+        model.model_type = "qwen4_exp"
+        model.data_type = "bf16"
+        model.expert_num = 8
+        model.hidden_size, model.moe_inter_size, model.moe_k = self.k, self.n, 3
+        model.quant_config = ModelOptFp4Config(
+            bits=4, group_size=16, is_quanted=False, model_recipe=QWEN4_FP8_NVFP4_RECIPE
+        )
+        pc = ParallelismConfig()
+        pc.tp_size = pc.ep_size = pc.ffn_sp_size = pc.world_size = (
+            pc.local_world_size
+        ) = 2
+        set_parallelism_config(pc)
+        moe = MoeConfig()
+        moe.moe_strategy, moe.fp4_moe_op = "nvfp4_marlin", "marlin"
+        moe.use_all_gather, moe.use_deepep_moe = True, False
+        config = MoEConfigAdapter(model, pc, moe)
+        strategy = CudaNvfp4MarlinStrategy()
+        self.assertTrue(strategy.can_handle(config))
+        factory = FusedMoeFactory()
+        self.assertIsInstance(
+            factory.registry.get_strategy(config), CudaNvfp4MarlinStrategy
+        )
+        weights = PreparedWeightDict(
+            {
+                W.moe_w1: self.q1.clone(),
+                W.moe_w2: self.q2.clone(),
+                W.moe_s1: CudaImpl.swizzle_blockscale(self.s1.cpu()),
+                W.moe_s2: CudaImpl.swizzle_blockscale(self.s2.cpu()),
+                W.moe_w1_s2: self.g1,
+                W.moe_w2_s2: self.g2,
+                W.moe_w1_i_s: torch.ones(self.experts, device="cuda"),
+                W.moe_w2_i_s: torch.ones(self.experts, device="cuda"),
+            }
+        )
+        executor = factory.create_fused_moe(config, weights).fused_experts
+        for rows in (1, 64, 256):
+            args = self.inputs(rows)
+            payload = ExpertForwardPayload(
+                expert_x=args[0], expert_topk_ids=args[1], expert_topk_weights=args[2]
+            )
+            actual = executor.execute(
+                payload, "silu", None, None, False, None
+            ).fused_expert_output
+            self.assert_reference(actual, self.reference(*args, 0))
+        model.model_type = "other"
+        self.assertFalse(strategy.can_handle(config))
 
 
 if __name__ == "__main__":

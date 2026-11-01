@@ -21,7 +21,6 @@ CUDA FP8/FP4 selection:
 """
 
 import torch
-
 from rtp_llm.device.device_type import DeviceType, get_device_type
 from rtp_llm.models_py.utils.arch import get_sm, is_cuda
 from rtp_llm.utils.backend_registry import run_backend_registrations
@@ -90,6 +89,7 @@ else:
         CudaNoQuantCppStrategy,
         CudaNoQuantDpNormalStrategy,
         CudaNoQuantEpLowLatencyStrategy,
+        CudaNvfp4MarlinStrategy,
         CudaW4a8Int4PerChannelEpLowLatencyStrategy,
         CudaW4a8Int4PerChannelEpNormalStrategy,
         CudaW4a8Int4PerChannelNoDPStrategy,
@@ -118,7 +118,9 @@ else:
     registry.register(CudaW4a8Int4PerChannelEpLowLatencyStrategy())
     registry.register(CudaW4a8Int4PerChannelEpNormalStrategy())
     registry.register(CudaW4a8Int4PerChannelNoDPStrategy())
-    # Only register FP4 strategies on SM_100+ (and only if CUDA GPU is available)
+    if torch.cuda.is_available() and is_cuda() and get_sm()[0] == 9:
+        registry.register(CudaNvfp4MarlinStrategy())
+    # Hardware-native FP4 strategies require SM100+.
     if torch.cuda.is_available() and is_cuda() and get_sm()[0] >= 10:
         from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.strategy import (
             CudaFp4EpLowLatencyStrategy,

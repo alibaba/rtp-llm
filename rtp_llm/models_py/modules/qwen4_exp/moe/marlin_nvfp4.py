@@ -11,7 +11,6 @@ from pathlib import Path
 import torch
 import triton
 import triton.language as tl
-
 from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import (
     CombineForwardPayload,
     FusedMoeExpertExecutor,
@@ -22,6 +21,10 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import (
 def load_library():
     from torch.utils.cpp_extension import load
 
+    major, minor = torch.cuda.get_device_capability()
+    arch = major * 10 + minor
+    if arch not in (90, 120):
+        raise RuntimeError("Qwen NVFP4 Marlin requires SM90 or SM120")
     root = Path(__file__).resolve().parent / "marlin_kernels"
     kernels = root / "libtorch_stable/moe/marlin_moe_wna16"
     sources = [
@@ -31,7 +34,7 @@ def load_library():
         root / "libtorch_stable/quantization/marlin/gptq_marlin_repack.cu",
     ]
     return load(
-        name="rtp_qwen4_nvfp4_marlin",
+        name=f"rtp_qwen4_nvfp4_marlin_sm{arch}",
         sources=[str(p) for p in sources],
         extra_include_paths=[str(root)],
         extra_cflags=["-O3", "-std=c++17", "-DUSE_CUDA"],
@@ -41,7 +44,7 @@ def load_library():
             "-DUSE_CUDA",
             "--expt-relaxed-constexpr",
             "-static-global-template-stub=false",
-            "-gencode=arch=compute_120,code=sm_120",
+            f"-gencode=arch=compute_{arch},code=sm_{arch}",
         ],
         is_python_module=False,
     )
@@ -593,3 +596,48 @@ class Qwen4DecodeMarlinExecutor(FusedMoeExpertExecutor):
                 payload.expert_topk_weights.to(torch.float32),
             )
         return CombineForwardPayload(fused_expert_output=output)
+
+
+class Qwen4HopperMarlinExecutor(Qwen4DecodeMarlinExecutor):
+    """Use NVFP4 weight-only Marlin for Hopper prefill and decode."""
+
+    @classmethod
+    def executor_type(cls):
+        from rtp_llm.models_py.modules.factory.fused_moe.defs.type import ExecutorType
+
+        return ExecutorType.MARLIN_NVFP4
+
+    @classmethod
+    def check_conditions(cls, checker, config):
+        from rtp_llm.config.quant_config import QWEN4_FP8_NVFP4_RECIPE
+        from rtp_llm.models_py.modules.factory.fused_moe.utils.config_resolver import (
+            MoeConfigResolver,
+        )
+
+        resolver = MoeConfigResolver()
+        quant = config.model_config.quant_config
+        checker.check(resolver.is_bf16(config))
+        checker.check(resolver.get_quant_method(config) == "modelopt_fp4")
+        checker.check(config.model_config.model_type in ("qwen4_exp", "qwen4_exp_mtp"))
+        checker.check(
+            quant is not None
+            and getattr(quant, "model_recipe", None) == QWEN4_FP8_NVFP4_RECIPE
+            and not quant.is_quanted()
+        )
+        checker.check(
+            torch.cuda.is_available() and torch.cuda.get_device_capability() == (9, 0)
+        )
+        checker.check(config.tp_size == config.ep_size)
+        checker.check(config.parallelism_config.get_ffn_tp_size() == 1)
+        checker.check(config.moe_config.fp4_moe_op in ("auto", "marlin"))
+        checker.check(not config.has_redundant_experts)
+        checker.check(not config.model_config.eplb_config.enable_eplb())
+
+    def __init__(self, config, quant_config, weights):
+        from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.cutlass_nvfp4_executor import (
+            CutlassNvfp4Executor,
+        )
+
+        # Reuse the prepared scale views and in-place repacking contract. The
+        # CUTLASS executor is only a weight adapter here; its kernel is not run.
+        super().__init__(CutlassNvfp4Executor(config, quant_config, weights))
