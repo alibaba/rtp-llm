@@ -30,6 +30,152 @@ _BLOCK_N = 64
 
 
 @triton.jit
+def _qsa_paged_score_tiled_kernel(
+    q_ptr,
+    w_ptr,
+    pool_ptr,
+    bt_ptr,
+    ctx_ptr,
+    out_ptr,
+    stride_q_row,
+    next_n,
+    max_ctx_len,
+    max_blocks,
+    pool_blocks,
+    H: tl.constexpr,
+    D: tl.constexpr,
+    block_size: tl.constexpr,
+    TILE_R: tl.constexpr,
+    LANES: tl.constexpr,
+    BN: tl.constexpr,
+    K_TILES: tl.constexpr,
+    STAGES: tl.constexpr,
+):
+    """Tensor-core tiled paged indexer scoring (vLLM qsa_indexer design).
+
+    One program owns TILE_R query rows of one batch and walks K_TILES column
+    tiles, so each gathered pool tile is loaded once for all rows and heads of
+    the group instead of once per (row, head, column-block). Scores run on
+    tensor cores via ``tl.dot(keys, query)``; the per-(row, head) weight is
+    applied to ``relu(dot)`` before the head sum, which reproduces the scalar
+    kernel's ``sum_h weight * relu(dot_h)`` contract exactly for any weight
+    sign.
+    """
+    H_PAD: tl.constexpr = LANES // TILE_R
+    BLOCK_D: tl.constexpr = max(16, triton.next_power_of_2(D))
+    batch = tl.program_id(0)
+    row_tile = tl.program_id(1)
+    k_group = tl.program_id(2)
+
+    row_ids = tl.arange(0, TILE_R)
+    tile_rows = row_tile * TILE_R + row_ids
+    row_live = tile_rows < next_n
+    abs_rows = batch * next_n + tile_rows
+    context = tl.load(ctx_ptr + abs_rows, mask=row_live, other=0)
+
+    lanes = tl.arange(0, LANES)
+    lane_row = lanes // H_PAD
+    lane_head = lanes % H_PAD
+    lane_rows = row_tile * TILE_R + lane_row
+    lane_abs_rows = batch * next_n + lane_rows
+    lane_valid = (lane_rows < next_n) & (lane_head < H)
+
+    dims = tl.arange(0, BLOCK_D)
+    query = tl.load(
+        q_ptr
+        + lane_abs_rows[None, :] * stride_q_row
+        + lane_head[None, :] * D
+        + dims[:, None],
+        mask=lane_valid[None, :] & (dims[:, None] < D),
+        other=0.0,
+    )
+    weights = tl.load(
+        w_ptr + lane_abs_rows[None, :] * H + lane_head[None, :],
+        mask=lane_valid[None, :],
+        other=0.0,
+    )
+
+    columns = tl.arange(0, BN)
+    k_start = k_group * K_TILES
+    k_end = tl.minimum(k_start + K_TILES, tl.cdiv(max_ctx_len, BN))
+    for tile in tl.range(k_start, k_end, num_stages=STAGES):
+        cols = tile * BN + columns
+        col_live = cols < max_ctx_len
+        bi = cols // block_size
+        ei = cols % block_size
+        in_table = bi < max_blocks
+        physical = tl.load(
+            bt_ptr + batch * max_blocks + bi,
+            mask=col_live & in_table,
+            other=0,
+        )
+        has_block = col_live & in_table & (physical > 0) & (physical < pool_blocks)
+        safe_phys = tl.maximum(physical, 0).to(tl.int64)
+        slot = safe_phys * block_size + ei
+        keys = tl.load(
+            pool_ptr + slot[:, None] * D + dims[None, :],
+            mask=has_block[:, None] & (dims[None, :] < D),
+            other=0.0,
+            eviction_policy="evict_first",
+        )
+        scores = tl.dot(keys, query)
+        scores = tl.reshape(scores, (BN, TILE_R, H_PAD))
+        score = tl.sum(
+            tl.maximum(scores, 0.0) * tl.reshape(weights, (1, TILE_R, H_PAD)), 2
+        )
+        valid = has_block[:, None] & (cols[:, None] < context[None, :])
+        tl.store(
+            out_ptr + abs_rows[None, :] * max_ctx_len + cols[:, None],
+            tl.where(valid, score, float("-inf")),
+            mask=col_live[:, None] & row_live[None, :],
+        )
+
+
+def _score_tiled_config(next_n: int, heads: int, batch: int, columns: int) -> tuple:
+    """(TILE_R, BN, K_TILES, stages, warps) for the tiled score kernel.
+
+    Prefill batches share vLLM's tuned tile (64 rows x 16 K-tiles); decode
+    shapes keep one K-tile per program so small batches still spread across
+    the whole device.
+    """
+    h_pad = triton.next_power_of_2(heads)
+    # Keep the dot N dimension (TILE_R * heads) at least 16.
+    tile_r = max(1, 16 // h_pad)
+    if next_n >= 64:
+        return 64, 64, 16, 2, 4
+    while tile_r < next_n and tile_r * h_pad < 64:
+        tile_r *= 2
+    programs = batch * triton.cdiv(columns, 64)
+    if programs < 16384:
+        k_tiles = 1
+    elif programs < 32768:
+        k_tiles = 2
+    elif programs < 131072:
+        k_tiles = 4
+    else:
+        k_tiles = 8
+    return tile_r, 64, k_tiles, 2, 4
+
+
+def _score_tiled_supported(q_bf16, kv_pool, next_n, heads) -> bool:
+    if torch.version.hip is not None or not q_bf16.is_cuda:
+        return False
+    if kv_pool.dtype != torch.bfloat16:
+        return False
+    d = int(q_bf16.shape[3])
+    if d <= 0 or d & (d - 1) or d > 256:
+        return False
+    if heads > 32:
+        return False
+    tile_r = 64 if next_n >= 64 else max(1, 16 // triton.next_power_of_2(heads))
+    if tile_r * heads > 256:
+        return False
+    # Single-row decode launches stay on the scalar kernel: at one query row
+    # the tiled dot's lane padding costs more than it saves.
+    return 2 <= next_n
+
+
+@triton.jit
 def _qsa_paged_score_kernel(
     q_ptr,
     w_ptr,
@@ -200,6 +346,39 @@ def qsa_paged_indexer_score(
 
     # The flattened (batch, token) rows are contiguous, each with H * D values.
     grid = (M, triton.cdiv(max_ctx_len, block_n))
+    if _score_tiled_supported(q_bf16, kv_pool, next_n, H):
+        tile_r, bn, k_tiles, stages, warps = _score_tiled_config(
+            next_n, H, B, max_ctx_len
+        )
+        lanes = tile_r * triton.next_power_of_2(H)
+        tiled_grid = (
+            B,
+            triton.cdiv(next_n, tile_r),
+            triton.cdiv(max_ctx_len, bn * k_tiles),
+        )
+        _qsa_paged_score_tiled_kernel[tiled_grid](
+            q_bf16,
+            weight,
+            kv_pool,
+            block_table,
+            context_lens.view(-1),
+            logits,
+            stride_q_row=H * D,
+            next_n=next_n,
+            max_ctx_len=max_ctx_len,
+            max_blocks=max_blocks,
+            pool_blocks=pool_blocks,
+            H=H,
+            D=D,
+            block_size=block_size,
+            TILE_R=tile_r,
+            LANES=lanes,
+            BN=bn,
+            K_TILES=k_tiles,
+            STAGES=stages,
+            num_warps=warps,
+        )
+        return logits
     _qsa_paged_score_kernel[grid](
         q_bf16,
         weight,
