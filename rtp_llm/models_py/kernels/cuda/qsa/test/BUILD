@@ -3,6 +3,12 @@ load("//rtp_llm/models_py/test:defs.bzl", "models_py_test")
 package(default_visibility = ["//visibility:public"])
 
 models_py_test(
+    name = "sparse_paged_grouped_test",
+    src = "sparse_paged_grouped_test.py",
+    gpu = "H20_CU13",
+)
+
+models_py_test(
     name = "target_metadata_test",
     src = "target_metadata_test.py",
     gpu = "RTX_5000_PRO_CU13",
