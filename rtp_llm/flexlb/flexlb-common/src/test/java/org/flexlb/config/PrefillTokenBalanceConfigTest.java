@@ -9,8 +9,8 @@ class PrefillTokenBalanceConfigTest {
     }
     @Test void optInDefaultsAndValidation() {
         assertNull(ConfigTestFixtures.parse("{}").getRouter().getRoles().getPrefill().getTokenBalance());
-        assertEquals(10000, parse("{}").getRouter().getRoles().getPrefill().getTokenBalance().getWindowMs());
-        for (String value : new String[]{"{\"windowMs\":0}", "{\"maxPendingComputeTokens\":0}",
+        assertEquals(140000, parse("{}").getRouter().getRoles().getPrefill().getTokenBalance().getMaxPendingComputeTokens());
+        for (String value : new String[]{"{\"windowMs\":0}", "{\"windowMs\":10000}", "{\"maxPendingComputeTokens\":0}",
                 "{\"minPrefixHitPercent\":101}", "{\"minPrefixHitPercent\":-1}"}) {
             assertThrows(RuntimeException.class, () -> parse(value));
         }

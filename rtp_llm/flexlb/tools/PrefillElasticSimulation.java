@@ -42,7 +42,8 @@ public class PrefillElasticSimulation {
         double busyUntil, pendingCompute, collectionDue;
         boolean collecting, running;
         long input, hit, compute, useful, count;
-        Worker(long window) { work=new PrefillTokenWorkload(window); }
+        // window remains only as a legacy experiment/CSV label; routing has no history window.
+        Worker(long window) { work=new PrefillTokenWorkload(); }
     }
     static final class Counters {
         long arrivals, completed, dropped, expired, coldArrivals, coldCompleted, coldDropped, coldExpired;
@@ -193,12 +194,12 @@ public class PrefillElasticSimulation {
         void migrateLocal() {
             if(!elastic())return;
             boolean idle=false;
-            for(int i=0;i<active;i++)if(workers[i].work.snapshot((long)now).pendingTokens()==0){idle=true;break;}
+            for(int i=0;i<active;i++)if(workers[i].work.snapshot().pendingTokens()==0){idle=true;break;}
             if(!idle)return;
             var candidates=new ArrayList<Query>();
             for(int i=0;i<active;i++) {
                 var w=workers[i];
-                if(w.work.snapshot((long)now).pendingTokens()<cap)continue;
+                if(w.work.snapshot().pendingTokens()<cap)continue;
                 for(Query q:w.queue)if(q.migratedFrom<0 && q.tokens<=rescueLimit && now-q.at>=5000)candidates.add(q);
             }
             candidates.sort(Comparator.comparingLong(q->q.tokens));
@@ -217,7 +218,7 @@ public class PrefillElasticSimulation {
             // Optional ablation reorders only each already-present 32-item group, never defers an item.
             idleCount=0;
             for(int i=0;i<N;i++) {
-                var snapshot=workers[i].work.snapshot((long)now);
+                var snapshot=workers[i].work.snapshot();
                 workScores[i]=snapshot.score();pendingTokens[i]=snapshot.pendingTokens();
                 if(i<active && pendingTokens[i]==0)idleCount++;
             }
@@ -294,7 +295,6 @@ public class PrefillElasticSimulation {
                     c.expiredCompute+=q.actualWork;w.compute+=q.actualWork;
                     continue;
                 }
-                w.work.complete(q.actualWork,(long)now);
                 Cache old=w.cache.get(q.session);
                 Cache updated=new Cache(Math.max(q.tokens,old==null?0:old.tokens),now);
                 w.cache.put(q.session,updated);
@@ -389,7 +389,7 @@ public class PrefillElasticSimulation {
             for(int i=0;i<N;i++) {
                 Worker w=workers[i];long reserved=w.queue.stream().mapToLong(q->q.reserved).sum();
                 for(Event event:events)if(event.kind==3 && event.worker==i)reserved+=event.batch.stream().mapToLong(q->q.reserved).sum();
-                if(w.work.snapshot((long)endMs).pendingTokens()!=reserved)throw new AssertionError("reservation conservation");
+                if(w.work.snapshot().pendingTokens()!=reserved)throw new AssertionError("reservation conservation");
             }
             long newWorkerCompute=0;for(int i=INITIAL;i<active;i++)newWorkerCompute+=workers[i].compute;
             System.out.printf("NEW_WORKER_COMPUTE policy=%s scene=%s seed=%d tokens=%d%n",policy,scene,seed,newWorkerCompute);

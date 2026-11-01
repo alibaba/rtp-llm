@@ -276,7 +276,7 @@ public final class PrefillState {
         }
     }
 
-    record TerminalObservation(RequestEntry owner, long executionTimeMs, long errorCode, long computeTokens,
+    record TerminalObservation(RequestEntry owner, long executionTimeMs, long errorCode,
             PriorityPreemptionProgress preemptionProgress) { }
 
     public final ReentrantLock lock;
@@ -289,17 +289,17 @@ public final class PrefillState {
     private long pendingTokenLimit;
 
     /** Installed before this endpoint generation is published. */
-    void enableTokenWorkload(long windowMs, long pendingTokenLimit) {
+    void enableTokenWorkload(long pendingTokenLimit) {
         this.pendingTokenLimit = pendingTokenLimit;
-        tokenWorkload = new org.flexlb.balance.strategy.PrefillTokenWorkload(windowMs);
+        tokenWorkload = new org.flexlb.balance.strategy.PrefillTokenWorkload();
     }
 
-    public org.flexlb.balance.strategy.PrefillTokenWorkload.Snapshot tokenWorkload(long nowMs) {
+    public org.flexlb.balance.strategy.PrefillTokenWorkload.Snapshot tokenWorkload() {
         lock.lock();
         try {
             return tokenWorkload == null
                     ? new org.flexlb.balance.strategy.PrefillTokenWorkload.Snapshot(0L, 0L)
-                    : tokenWorkload.snapshot(nowMs);
+                    : tokenWorkload.snapshot();
         } finally { lock.unlock(); }
     }
 
@@ -308,7 +308,7 @@ public final class PrefillState {
     }
 
     private boolean tokenCapacityAvailable() {
-        return tokenWorkload == null || tokenWorkload.snapshot(System.nanoTime() / 1_000_000L).pendingTokens() < pendingTokenLimit;
+        return tokenWorkload == null || tokenWorkload.snapshot().pendingTokens() < pendingTokenLimit;
     }
 
     public org.flexlb.balance.strategy.PrefillTokenWorkload.Reservation planTokenWork(long tokens) {
@@ -846,10 +846,7 @@ public final class PrefillState {
             batch.lastObservedAtMs = Math.max(batch.lastObservedAtMs, reduction.nowMs);
         }
         for (TerminalObservation terminal : reduction.terminals.values()) {
-            if (removeEntry(terminal.owner) && tokenWorkload != null && terminal.errorCode() == 0L
-                    && terminal.preemptionProgress() != PriorityPreemptionProgress.CANCELED) {
-                tokenWorkload.complete(terminal.computeTokens(), System.nanoTime() / 1_000_000L);
-            }
+            removeEntry(terminal.owner);
         }
         for (var phase : reduction.individualPhases.entrySet()) {
             var entry = phase.getKey();
