@@ -45,6 +45,11 @@ def apply_quant_scope_to_pricing(model_config: "ModelConfig", quant_config) -> N
         # Kimi-K2.5: routed experts int4-g32; the ignore list keeps
         # attention/shared-expert/lm_head weights BF16.
         model_config.dense_weight_dtype = "bf16"
+    elif isinstance(quant_config, W4a8Int4PerChannelQuantConfig):
+        # Online W4A8 (--quantization W4A8_INT4_PER_CHANNEL on a BF16
+        # checkpoint): routed experts are int4-g128 in flight while the
+        # dense slice stays BF16.
+        model_config.dense_weight_dtype = "bf16"
     elif isinstance(quant_config, MXFp4QuarkQuantConfig):
         # quark MXFP4 checkpoints quantize the routed experts (and MoE
         # linears) while the dense slice ships BF16.
