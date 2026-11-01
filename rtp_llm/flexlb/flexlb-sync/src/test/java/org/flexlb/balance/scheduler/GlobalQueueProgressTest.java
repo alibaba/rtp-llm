@@ -62,6 +62,7 @@ class GlobalQueueProgressTest {
     void cacheSheddingRemovesLowBenefitOnlyAndDoesNotCrossPools() throws Exception {
         var policy = new org.flexlb.config.PrefillQueueSheddingConfig();
         policy.setExpectedWaitThresholdMs(1_000L);
+        policy.setMaxWaitMs(3_000L);
         try (Fixture f = new Fixture(RoleType.PREFILL, false, policy)) {
             when(f.router.estimateQueuedWork(any(), nullable(String.class))).thenAnswer(call -> {
                 RequestContext ctx = call.getArgument(0);
@@ -71,7 +72,9 @@ class GlobalQueueProgressTest {
                     .when(f.router).select(any(), nullable(String.class));
             f.submit(1201L, "a");
             f.submit(1202L, "a");
-            f.submit(1203L, "b");
+            org.junit.jupiter.api.Assertions.assertThrows(java.util.concurrent.TimeoutException.class,
+                    () -> f.requests.get(1201L).get(600, TimeUnit.MILLISECONDS));
+            f.submit(1203L, "b"); // Fresh pool must not inherit another pool's overdue pressure.
             var response = ArgumentCaptor.forClass(Response.class);
             verify(f.lifecycle, timeout(5_000)).publish(eq(f.contexts.get(1201L)), response.capture(), eq(false));
             assertEquals(org.flexlb.dao.loadbalance.StrategyErrorType.RESOURCE_EXHAUSTED.getErrorCode(), response.getValue().getCode());

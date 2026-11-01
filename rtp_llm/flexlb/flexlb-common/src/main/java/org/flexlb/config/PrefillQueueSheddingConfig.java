@@ -7,9 +7,11 @@ import lombok.Setter;
 @Getter
 @Setter
 public final class PrefillQueueSheddingConfig {
+    /** Actual placement-queue age before soft eviction may start; not predicted work. */
     private long expectedWaitThresholdMs = 30_000L;
+    /** Hard request waiting deadline; recovery never extends it. */
     private long maxWaitMs = 60_000L;
-    /** Null retains the fixed overload policy. Never changes request deadlines. */
+    /** Optional relief may reduce actual-age eviction, never trigger it or extend deadlines. */
     private RecoveryConfig recovery;
 
     @Getter

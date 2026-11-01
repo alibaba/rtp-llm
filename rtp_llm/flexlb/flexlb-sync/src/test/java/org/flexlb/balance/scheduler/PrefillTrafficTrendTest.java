@@ -87,16 +87,16 @@ class PrefillTrafficTrendTest {
         var trend = new PrefillTrafficTrend(config.getRecovery());
         var queue = java.util.List.of(
                 new PrefillQueueShedding.Candidate<>("low", 10, 1,
-                        new PrefillQueueShedding.Estimate(100, 90, 25000, 1)),
+                        new PrefillQueueShedding.Estimate(100, 90, 25000, 1), 59_000),
                 new PrefillQueueShedding.Candidate<>("high", 90, 2,
-                        new PrefillQueueShedding.Estimate(100, 0, 25000, 1)));
+                        new PrefillQueueShedding.Estimate(100, 0, 25000, 1), 59_000));
         var probe = trend.observe(0, 50000, 30000, 60000);
-        assertTrue(PrefillQueueShedding.adaptiveVictims(queue, config, probe).isEmpty());
+        assertTrue(PrefillQueueShedding.adaptiveVictims(queue, config, probe, new PrefillQueueShedding.Controller(), 0).isEmpty());
         var hard = trend.observe(100, 65000, 30000, 60000);
         assertFalse(hard.grace());
-        assertEquals(java.util.List.of("low"), PrefillQueueShedding.adaptiveVictims(queue, config, hard));
+        assertEquals(java.util.List.of("low"), PrefillQueueShedding.adaptiveVictims(queue, config, hard, new PrefillQueueShedding.Controller(), 0));
         assertEquals(java.util.List.of("low"), PrefillQueueShedding.adaptiveVictims(queue, config,
-                trend.observe(5000, 50000, 30000, 60000)));
+                trend.observe(5000, 50000, 30000, 60000), new PrefillQueueShedding.Controller(), 0));
     }
 
 }
