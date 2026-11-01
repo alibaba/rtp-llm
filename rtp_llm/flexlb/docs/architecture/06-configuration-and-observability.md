@@ -399,7 +399,7 @@ Prefill 包含选中、最短 TTFT、最高有效缓存命中候选。`estimated
 最低命中率的候选，记录其中 TTFT 最短的节点地址、TTFT 和命中 Tokens。`OVER_CAP` 的
 `overCapMs` 等于该候选 TTFT 减去上限，表示至少还需增加多少毫秒预算才能使用缓存亲和。
 没有已建模的更高命中候选时省略超出量。`app.cache.affinity.over.cap.ms` 以 TIMER
-记录该超出量，仅在 `OVER_CAP` 路由提交时上报，标签为所选节点 `engineIp` 和 `role`。
+记录该超出量，仅在 `OVER_CAP` 路由提交时上报
 Prometheus 导出为 `flexlb_app_cache_affinity_over_cap_ms_seconds` 的分布系列，值单位为秒；
 展示毫秒时乘以 1000。选路重试及放弃的选择不产生该指标样本。
 
@@ -459,14 +459,14 @@ GlobalQueue 深度，`app.routing.queue.max.length{type=mainQueue}` 展示总排
 M/C 是当前配置下新请求的上限，已排队请求可能沿用旧快照。BATCH 不使用共享 C 限流，
 上述新总量与共享容量序列仅在 QUEUE + NON_BATCH 下上报。
 
-`app.flexlb.decode.reservation.blocked{role=DECODE,engineIp}` 是 GlobalQueue 向所选
+`app.flexlb.decode.reservation.blocked{role=DECODE}` 是 GlobalQueue 向所选
 Decode 端点预留资源失败的尝试 QPS，在进入 Prefill 子队列前、尝试优先级抢占前记录。
 同一请求重试会重复计数，即使随后抢占成功也保留该次受阻计数；该指标不代表最终请求失败率。
 
-`app.flexlb.queue.subqueue.blocked{role,engineIp,reason=SHARED_SUBQUEUE_FULL}` 是入所选
+`app.flexlb.queue.subqueue.blocked{role,reason=SHARED_SUBQUEUE_FULL}` 是入所选
 子队列失败的尝试 QPS：共享 C 满且本机低优等待项也未替换成功时记录一次；同一请求
 多次重试可产生多次样本，不表示最终客户端失败。`app.flexlb.queue.global.residence.ms`
-和 `app.flexlb.queue.subqueue.residence.ms{role,engineIp}` 在请求实际离开各队列时记录
+和 `app.flexlb.queue.subqueue.residence.ms{role}` 在请求实际离开各队列时记录
 本次入队到出队的单调时钟时长，包含交付、取消、抢占、停机等出口；监控按 Timer
 样本计算平均值和分位数。撤回后重入按新的一次停留计时，旧的
 `routing.queue.wait.time.ms` 保持兼容口径。仍在等待的请求不产生 Timer 样本，
@@ -486,20 +486,25 @@ Block Size 保留 `app.cache.block.size{role}`：同一角色的 Worker 共享�
 首次状态到达前 EngineObservation 已初始化，blockSize=0，不上报未就绪值。
 该指标不增加 engineIp 标签；大盘按 BIZ_NAME 与 role 展示，删除旧 model 筛选。
 
-既有 WorkerStatus/cache 的轮询成功周期、RPC 耗时、运行队列时间、任务列表大小、cache key 数
-和 KV 容量指标保留裸 IP 的 `engineIp` 标签。同 IP 多实例使用相同标签上报，Gauge 是逐样本值，
-不表示 IP 合计。缓存预测对照使用实际 WorkerStatus 的实例数选择精确身份：单 Engine 为
-`ip:port`，多 Engine 为 `ip:port@engineIndex`；PV 和路由/cache 内部继续使用完整 logical identity。
+正常请求、缓存、排队和派发的 QPS/Counter，以及逐请求或逐 Step 的耗时与 Tokens 指标，Master 公共身份仍保留。健康检查失败、状态更新超时和
+在途 TTL 清理作为节点定位例外保留地址。逐端点当前占用、队列深度和 KV 水位不属于高频事件计数。
+旧 batchQueue 长度每轮按 role/priority 跨端点求和，消失的优先级不额外补零。
+空端点队列不汇报优先级队列长度，不生成 `priority=0、depth=0` 回退，也不保存上一轮优先级状态。
+
+WorkerStatus/cache 的成功轮询周期、RPC 耗时、运行负载、完成任务表大小和 cache key 数按 role 汇总样本；活跃任务数每 2 秒按 role 汇总当前 WorkerStatus 活跃任务表。
+KV 已用、可用和使用率保留裸 IP，单机总容量按 role 共享，要求同部署同角色容量一致。
+健康检查失败保留引擎地址和错误码。缓存预测对照保留 role/group/taskState/cacheMatchSource，
+不携带引擎地址；PV 和路由/cache 内部继续使用完整 logical identity。
 对照的绝对 Token 差值不依赖分母，输入 Token 数缺失或非正时仍可记录；Counter 和比例仅在
 输入 Token 数为正时报告，不能将绝对差值的样本数量当作加权命中率的分母。
 
 `app.engine.balancing.master.select.detail` 保留原有 `role/success/code` 标签；独立的
-`app.engine.balancing.master.worker.select.detail` 增加有限枚举 `reason` 和精确 `engineIp`。
+`app.engine.balancing.master.worker.select.detail` 增加有限枚举 `reason`。
 `app.engine.worker.info.step.latency.var` 与 `app.engine.worker.info.running.query.len.var`
 按 role 上报逻辑 endpoint 方差，不含 model。后者 Prefill 使用 work-ms，Decode 和状态角色使用
 活动任务数，方差单位分别为 work-ms² 与 count²，不能跨角色混合比较数值。
 Step 延迟方差单位为 ms²。上述指标保留原有名称，通过标签聚合和面板说明表达实际口径。
-`app.cache.hit.count` 和 `app.cache.input.tokens` 是按所选 worker 累计的 Token Counter，
+`app.cache.hit.count` 和 `app.cache.input.tokens` 是按 role 汇总的 Token Counter，
 全局命中率使用同一窗口内的命中 Token 增量除以输入 Token 增量，不能求单请求命中率的平均值。
 `app.engine.zk.master.event` 保留按事件类型上报 `1.0` 的既有 Gauge 口径；
 独立的 `app.engine.zk.master.event.time.ms` 用 epoch-ms Gauge 展示最近事件时间。
@@ -528,7 +533,7 @@ provider：KMonitor 部署上报 `whale-lb.grpc.server.executor.*` 和
 已初始化的空闲线程池持续上报忙碌线程数和排队任务数为 0，总线程数仍包含空闲线程。
 
 `JvmGcMetricsReporter` 接收 JVM 的 GC 通知，每次记录一次回收和本次暂停毫秒数，
-通过 `FlexMonitor` 的 PRECISE COUNTER 上报 `app.jvm.gc.collection.count` 与
+通过 `FlexMonitor` 的 NORMAL COUNTER（20 秒聚合）上报 `app.jvm.gc.collection.count` 与
 `app.jvm.gc.pause.total.ms`。按 `gc`、`collector`、`pid` 区分进程与收集器：
 G1 的 `young` 包含 Mixed，`full` 对应 `G1 Old Generation`，`concurrent` 只统计
 并发周期中的暂停阶段，不表示整个并发标记周期。其它收集器标为 `other`。
@@ -593,7 +598,7 @@ Decode 预留字段 `inputKvTokens = max(0, seqLen)`，
 `cancel_target_unavailable`（RPC 取消地址无法取得）、`request_claim_rejected`（RPC 无法锁定该请求进行抢占）。
 这类失败会结束本次高优先级请求的调度；容量不足、取消 RPC 返回 NOT_FOUND、超时不计入此指标。
 未发生事件时可能没有时间序列，不能据此断言上报链路正常。
-`auto_tpm.request.lifecycle.failures.total{stage}` 是 PRECISE COUNTER，
+`auto_tpm.request.lifecycle.failures.total{stage}` 是 NORMAL COUNTER（20 秒聚合），
 `stage=registration` 记录注册异常，`stage=terminal_cleanup` 记录资源清理失败或请求最终状态提交异常。
 初始化及周期采样对这两个 stage 报告 0，尚未发生异常时也能显示已初始化的计数。
 这些异常保留 request_id 日志供定位，指标标签不包含请求 ID 或错误文本。
@@ -626,8 +631,8 @@ frontend HTTP/gRPC 仍为共享物理地址。protocol 只解释 frontend discov
 N=1 沿用 discovery 的 legacy gRPC port，因而兼容未配置 `worker_status_port` 的 RTP-LLM。
 
 逻辑 worker identity 为 `ip:http_port@engineIndex`，包括 N=1 的 `@0`。
-Encoder、step、阶段耗时及缓存预测对照的 `engineIp` 在 N=1 使用 physical
-`ip:http_port`，在 N>1 使用完整 logical identity `ip:http_port@engineIndex`；上述兼容指标保留裸 IP。
+Encoder 和保留逐端点的记账指标在 N=1 使用 physical `ip:http_port`，
+在 N>1 使用 logical identity `ip:http_port@engineIndex`；step、阶段耗时和缓存预测对照不携带引擎 IP。
 网络连接仍使用
 物理地址。schedule 在 N=1 时省略 `engine_index`，内部 identity 仍保留 index 0。
 
@@ -638,7 +643,7 @@ WorkerStatus 的 `last_step_metrics` 表示最近完成的非空 scheduler step�
 字段缺失表示引擎尚无可用 step 观测；纯 Decode step 的 Prefill 请求数和 Token 数为 0。
 FlexLB 按逻辑 Worker 和 step ID 去重后，通过 `app.engine.worker.step.*` 上报五项数值。
 `phase=prefill` 表示该 step 含 Prefill，`phase=decode` 表示纯 Decode；角色、组和
-`engineIp` 标签沿用 Worker 身份。预算填充率为总调度 Token 数 / Token 预算，包含 Decode Token。
+phase 标签保留，跨引擎汇总采样。预算填充率为总调度 Token 数 / Token 预算，包含 Decode Token。
 
 这些指标是 WorkerStatus 轮询采样，轮询之间完成的中间 step 不会全部保留。KMonitor 使用
 GAUGE + SUMMARY 聚合实际采样值；Micrometer provider 只暴露最近上报值，不提供逐 step 分布。
@@ -680,7 +685,7 @@ Master 身份由公共监控标签区分：
   与准入判断共用同一快照计数逻辑。等待 Decode 且未取得发布名额的候选不计入。
 - `schedule_v2.prefill.inflight_limit`：当前 `dispatcher.maxInflightPerPrefillWorker`。
 
-队列移除后的下一次采样将两项指标补零。使用率按同一 Master、同一 endpoint 的占用数除以上限计算，
+占用量保留 endpoint，队列移除后的下一次采样补零；上限每个 Master 上报一份。使用率按 Master 身份将各 endpoint 占用数匹配到共享上限计算，
 仅使用上限大于零的序列。采样和监控聚合可能平滑瞬时占用；阻塞频率结合
 `PREFILL_INFLIGHT_FULL` 原因指标判断。
 

@@ -165,7 +165,7 @@ public class DefaultBatchDispatcher {
     }
 
     private void registerGauge(String metricName) {
-        monitor.register(metricName, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+        monitor.register(metricName, FlexMetricType.GAUGE, FlexPriorityType.NORMAL);
     }
 
     @Scheduled(fixedRate = 2000)

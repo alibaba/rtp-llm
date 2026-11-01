@@ -188,11 +188,15 @@ public class CacheMetricsReporter {
      * @param inputTokens Number of input tokens
      * @param hitRatio    Hit fraction for this request
      */
-    public void reportCacheHitMetrics(RoleType roleType, String ipIndex, long hitTokens, long inputTokens, double hitRatio) {
+    public void reportCacheHitMetrics(RoleType roleType,
+                                      String ipIndex,
+                                      long hitTokens,
+                                      long inputTokens,
+                                      double hitRatio) {
         if (roleType == null) {
             return;
         }
-        FlexMetricTags baseTags = FlexMetricTags.of("role", roleType.name(), "engineIp", ipIndex);
+        FlexMetricTags baseTags = FlexMetricTags.of("role", roleType.name());
 
         // Report hit token count and hit percentage
         monitor.report(CACHE_HIT_RATIO, baseTags, hitRatio);
@@ -207,7 +211,7 @@ public class CacheMetricsReporter {
         if (roleType == null) {
             return;
         }
-        FlexMetricTags tags = FlexMetricTags.of("role", roleType.name(), "engineIp", ipIndex);
+        FlexMetricTags tags = FlexMetricTags.of("role", roleType.name());
         monitor.report(CACHE_KVCM_PREDICTED_TOKENS, tags, hitTokens);
         if (inputTokens > 0) {
             monitor.report(CACHE_KVCM_PREDICTED_RATIO, tags, hitTokens / (double) inputTokens);
@@ -218,7 +222,7 @@ public class CacheMetricsReporter {
         if (roleType == null) {
             return;
         }
-        FlexMetricTags tags = FlexMetricTags.of("role", roleType.name(), "engineIp", ipIndex);
+        FlexMetricTags tags = FlexMetricTags.of("role", roleType.name());
         monitor.report(CACHE_LOCAL_STANDBY_PREDICTED_TOKENS, tags, hitTokens);
         if (inputTokens > 0) {
             monitor.report(CACHE_LOCAL_STANDBY_PREDICTED_RATIO, tags, hitTokens / (double) inputTokens);
@@ -242,7 +246,7 @@ public class CacheMetricsReporter {
         if (roleType == null) {
             return;
         }
-        FlexMetricTags tags = FlexMetricTags.of("role", roleType.name(), "engineIp", ipIndex);
+        FlexMetricTags tags = FlexMetricTags.of("role", roleType.name());
         if (inputTokens > 0L) {
             monitor.report(CACHE_KVCM_SELECTED_LOCAL_MATCH_TOKENS, tags, localMatchTokens);
             monitor.report(CACHE_KVCM_SELECTED_GLOBAL_MATCH_TOKENS, tags, globalMatchTokens);
@@ -328,7 +332,6 @@ public class CacheMetricsReporter {
         }
         FlexMetricTags tags = FlexMetricTags.of(
                 "role", roleType.name(),
-                "engineIp", engineIp,
                 "decision", decision);
         monitor.report(CACHE_AFFINITY_DECISION, tags, 1.0);
     }
@@ -337,9 +340,7 @@ public class CacheMetricsReporter {
      * Report how far the fastest qualifying higher-hit candidate exceeded the TTFT cutoff.
      */
     public void reportCacheAffinityOverCap(RoleType roleType, String engineIp, long overCapMs) {
-        FlexMetricTags tags = FlexMetricTags.of(
-                "role", roleType.name(),
-                "engineIp", engineIp);
+        FlexMetricTags tags = FlexMetricTags.of("role", roleType.name());
         monitor.report(CACHE_AFFINITY_OVER_CAP_MS, tags, overCapMs);
     }
 

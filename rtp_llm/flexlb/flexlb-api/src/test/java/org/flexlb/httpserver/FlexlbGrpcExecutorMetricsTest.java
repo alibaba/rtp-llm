@@ -60,9 +60,11 @@ class FlexlbGrpcExecutorMetricsTest {
 
         ReflectionTestUtils.invokeMethod(server, "registerMetrics");
         for (String metric : METRICS) {
-            verify(monitor).register(metric, metric.equals(MetricConstant.GRPC_SERVER_EXECUTOR_REJECTED_TASKS)
-                            ? FlexMetricType.COUNTER : FlexMetricType.GAUGE,
-                    FlexPriorityType.PRECISE);
+            verify(monitor).register(metric,
+                    metric.equals(MetricConstant.GRPC_SERVER_EXECUTOR_REJECTED_TASKS)
+                            ? FlexMetricType.COUNTER
+                            : FlexMetricType.GAUGE,
+                    FlexPriorityType.NORMAL);
         }
         verifyNoMoreInteractions(monitor);
     }

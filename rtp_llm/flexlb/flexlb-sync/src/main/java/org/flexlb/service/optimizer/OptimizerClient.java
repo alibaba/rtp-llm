@@ -97,8 +97,8 @@ public class OptimizerClient {
 
     @PostConstruct
     public void init() {
-        monitor.register(MetricConstant.OPTIMIZER_TRACE_QUERY_SKIPPED_QPS, FlexMetricType.QPS, FlexPriorityType.PRECISE);
-        monitor.register(MetricConstant.OPTIMIZER_TRACE_QUERY_FAILED_QPS, FlexMetricType.QPS, FlexPriorityType.PRECISE);
+        monitor.register(MetricConstant.OPTIMIZER_TRACE_QUERY_SKIPPED_QPS, FlexMetricType.QPS, FlexPriorityType.NORMAL);
+        monitor.register(MetricConstant.OPTIMIZER_TRACE_QUERY_FAILED_QPS, FlexMetricType.QPS, FlexPriorityType.NORMAL);
     }
 
     public void traceQuery(Request request, ServerStatus selectedWorker) {

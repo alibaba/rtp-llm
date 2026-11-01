@@ -21,7 +21,7 @@ class GracefulLifecycleReporterTest {
         long afterReport = System.currentTimeMillis();
 
         assertEquals(FlexMetricType.GAUGE, monitor.registeredMetricType);
-        assertEquals(FlexPriorityType.PRECISE, monitor.registeredPriorityType);
+        assertEquals(FlexPriorityType.NORMAL, monitor.registeredPriorityType);
         assertEquals(
                 FlexMetricTags.of("type", "process_ok", "duration_ms", "0"),
                 monitor.reportedTags);

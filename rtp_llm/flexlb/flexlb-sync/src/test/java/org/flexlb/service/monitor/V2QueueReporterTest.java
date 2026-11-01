@@ -49,8 +49,8 @@ class V2QueueReporterTest {
         reporter.preemptedReturn(50, 40, "p1:8000");
         verify(monitor).report(org.flexlb.constant.MetricConstant.AUTO_TPM_VICTIM_COUNT,
                 FlexMetricTags.of("case", "prefill_return_to_main", "stage", "prefill", "action", "requeue",
-                        "from_queue", "prefill", "to_queue", "main", "incoming_priority", "50", "victim_priority", "40",
-                        "endpoint", "p1:8000"),
+                        "from_queue", "prefill", "to_queue", "main", "incoming_priority", "50", "victim_priority",
+                        "40"),
                 1.0);
         org.mockito.Mockito.verifyNoMoreInteractions(monitor);
     }
@@ -60,7 +60,7 @@ class V2QueueReporterTest {
         reporter.mainPreempted(50, 40);
         verify(monitor).report(org.flexlb.constant.MetricConstant.AUTO_TPM_VICTIM_COUNT,
                 FlexMetricTags.of("case", "main_evicted", "stage", "main", "from_queue", "main", "to_queue", "none",
-                        "action", "reject", "incoming_priority", "50", "victim_priority", "40", "endpoint", "all"),
+                        "action", "reject", "incoming_priority", "50", "victim_priority", "40"),
                 1.0);
         for (var phase : List.of(org.flexlb.enums.DecodeTaskPhase.RUNNING,
                 org.flexlb.enums.DecodeTaskPhase.ACCEPTED_NOT_RUNNING,
@@ -74,7 +74,7 @@ class V2QueueReporterTest {
             verify(monitor).report(org.flexlb.constant.MetricConstant.AUTO_TPM_VICTIM_COUNT,
                     FlexMetricTags.of("case", scenario, "stage", "decode_engine", "from_queue", "decode_engine",
                             "to_queue", "none", "action", "return_cancel_instruction", "incoming_priority", "50",
-                            "victim_priority", "40", "endpoint", "d1:8000"),
+                            "victim_priority", "40"),
                     1.0);
         }
         org.mockito.Mockito.verifyNoMoreInteractions(monitor);
@@ -152,10 +152,33 @@ class V2QueueReporterTest {
     }
 
     @Test
+    void endpointChangesKeepBlockDeduplicationButShareMetricTags() {
+        Request request = add("1");
+        reporter.blocked(request, Stage.MAIN_WAITING, QueueBlockReason.SHARED_QUEUE_FULL, "p1:8000");
+        reporter.blocked(request, Stage.MAIN_WAITING, QueueBlockReason.SHARED_QUEUE_FULL, "p2:8000");
+        FlexMetricTags tags = FlexMetricTags.of("queue", "main", "reason", "SHARED_QUEUE_FULL", "priority", "50");
+        verify(monitor, times(2)).report(V2QueueReporter.BLOCKED, tags, 1.0);
+        verify(monitor, times(2)).report(V2QueueReporter.ATTEMPTS, tags, 1.0);
+    }
+
+    @Test
     void monitoringFailureDoesNotFailScheduling() {
         doThrow(new IllegalStateException("monitor unavailable")).when(monitor).report(any(), any(), anyDouble());
         reporter.blocked(add("1"), Stage.MAIN_WAITING, QueueBlockReason.NO_AVAILABLE_PREFILL, "all");
         reporter.sample(table, List.of());
+    }
+
+    @Test
+    void allQueueMetricsUseTwentySecondAggregation() {
+        reporter.init();
+        int registered = 0;
+        for (var invocation : org.mockito.Mockito.mockingDetails(monitor).getInvocations()) {
+            if (invocation.getMethod().getName().equals("register")) {
+                assertEquals(org.flexlb.enums.FlexPriorityType.NORMAL, invocation.getArgument(2));
+                registered++;
+            }
+        }
+        assertEquals(8, registered);
     }
 
     @Test
@@ -187,16 +210,16 @@ class V2QueueReporterTest {
         FlexMetricTags tags = FlexMetricTags.of("endpoint", endpoint.ipPort());
         reporter.samplePrefillInflight(List.of(queue), 4);
         verify(monitor).report(V2QueueReporter.PREFILL_INFLIGHT, tags, 1.0);
-        verify(monitor).report(V2QueueReporter.PREFILL_INFLIGHT_LIMIT, tags, 4.0);
+        verify(monitor).report(V2QueueReporter.PREFILL_INFLIGHT_LIMIT, FlexMetricTags.of(), 4.0);
         clearInvocations(monitor);
 
         reporter.samplePrefillInflight(List.of(queue), 8);
-        verify(monitor).report(V2QueueReporter.PREFILL_INFLIGHT_LIMIT, tags, 8.0);
+        verify(monitor).report(V2QueueReporter.PREFILL_INFLIGHT_LIMIT, FlexMetricTags.of(), 8.0);
         clearInvocations(monitor);
 
         reporter.samplePrefillInflight(List.of(), 8);
         verify(monitor).report(V2QueueReporter.PREFILL_INFLIGHT, tags, 0.0);
-        verify(monitor).report(V2QueueReporter.PREFILL_INFLIGHT_LIMIT, tags, 0.0);
+        verify(monitor).report(V2QueueReporter.PREFILL_INFLIGHT_LIMIT, FlexMetricTags.of(), 8.0);
     }
 
     private Request add(String id) {

@@ -97,7 +97,6 @@ class CacheMetricsReporterTest {
 
         FlexMetricTags tags = FlexMetricTags.of(
                 "role", "PREFILL",
-                "engineIp", "10.0.0.1",
                 "decision", "CACHE_LEADER");
         verify(monitor).report(CACHE_AFFINITY_DECISION, tags, 1.0);
     }
@@ -112,10 +111,9 @@ class CacheMetricsReporterTest {
             reporter.init();
 
             reporter.reportCacheAffinityOverCap(RoleType.PREFILL, "10.0.0.1:8080", 100L);
-            reporter.reportCacheAffinityOverCap(RoleType.PREFILL, "10.0.0.1:8080", 300L);
+            reporter.reportCacheAffinityOverCap(RoleType.PREFILL, "10.0.0.2:8080", 300L);
 
-            var timer = registry.get("flexlb." + CACHE_AFFINITY_OVER_CAP_MS)
-                    .tags("role", "PREFILL", "engineIp", "10.0.0.1:8080").timer();
+            var timer = registry.get("flexlb." + CACHE_AFFINITY_OVER_CAP_MS).tags("role", "PREFILL").timer();
             assertEquals(2, timer.count());
             assertEquals(400.0, timer.totalTime(TimeUnit.MILLISECONDS));
             assertEquals(300.0, timer.max(TimeUnit.MILLISECONDS));
@@ -148,12 +146,12 @@ class CacheMetricsReporterTest {
     }
 
     @Test
-    void should_report_cache_hit_and_input_tokens_as_counters_with_same_worker_tags() {
+    void should_report_cache_hit_and_input_tokens_as_counters_with_same_role_tags() {
         reporter.init();
         reporter.reportCacheHitMetrics(RoleType.PREFILL, "10.0.0.1:8080@0", 20L, 100L, 0.2);
         reporter.reportCacheHitMetrics(RoleType.PREFILL, "10.0.0.1:8080@0", 0L, 200L, 0.0);
 
-        FlexMetricTags tags = FlexMetricTags.of("role", "PREFILL", "engineIp", "10.0.0.1:8080@0");
+        FlexMetricTags tags = FlexMetricTags.of("role", "PREFILL");
         verify(monitor).register(CACHE_HIT_COUNT, FlexMetricType.COUNTER);
         verify(monitor).register(CACHE_INPUT_TOKENS, FlexMetricType.COUNTER);
         verify(monitor).report(CACHE_HIT_COUNT, tags, 20L);
@@ -168,10 +166,9 @@ class CacheMetricsReporterTest {
         reporter.reportKvcmPrediction(RoleType.PREFILL, "10.0.0.1:8080@0", 0, 100);
         reporter.reportLocalStandbyPrediction(RoleType.PREFILL, "10.0.0.1:8080@0", 0, 100);
 
-        FlexMetricTags tags = FlexMetricTags.of("role", "PREFILL", "engineIp", "10.0.0.1:8080@0");
+        FlexMetricTags tags = FlexMetricTags.of("role", "PREFILL");
         verify(monitor).register(CACHE_KVCM_PREDICTED_RATIO, FlexMetricType.GAUGE, FlexPriorityType.NORMAL);
-        verify(monitor).register(CACHE_LOCAL_STANDBY_PREDICTED_RATIO,
-                FlexMetricType.GAUGE, FlexPriorityType.NORMAL);
+        verify(monitor).register(CACHE_LOCAL_STANDBY_PREDICTED_RATIO, FlexMetricType.GAUGE, FlexPriorityType.NORMAL);
         verify(monitor).report(CACHE_KVCM_PREDICTED_TOKENS, tags, 0L);
         verify(monitor).report(CACHE_KVCM_PREDICTED_RATIO, tags, 0.0);
         verify(monitor).report(CACHE_LOCAL_STANDBY_PREDICTED_TOKENS, tags, 0L);
@@ -188,12 +185,11 @@ class CacheMetricsReporterTest {
             reporter.init();
 
             reporter.reportCacheHitMetrics(RoleType.PREFILL, "10.0.0.1:8080", 20L, 100L, 0.2);
-            reporter.reportCacheHitMetrics(RoleType.PREFILL, "10.0.0.1:8080", 0L, 200L, 0.0);
+            reporter.reportCacheHitMetrics(RoleType.PREFILL, "10.0.0.2:8080", 0L, 200L, 0.0);
 
-            double hitTokens = registry.get("flexlb.app.cache.hit.count")
-                    .tags("role", "PREFILL", "engineIp", "10.0.0.1:8080").counter().count();
-            double inputTokens = registry.get("flexlb.app.cache.input.tokens")
-                    .tags("role", "PREFILL", "engineIp", "10.0.0.1:8080").counter().count();
+            double hitTokens = registry.get("flexlb.app.cache.hit.count").tags("role", "PREFILL").counter().count();
+            double inputTokens =
+                    registry.get("flexlb.app.cache.input.tokens").tags("role", "PREFILL").counter().count();
             assertEquals(20.0, hitTokens);
             assertEquals(300.0, inputTokens);
             assertEquals(20.0 / 300.0, hitTokens / inputTokens);
@@ -232,7 +228,7 @@ class CacheMetricsReporterTest {
         reporter.reportKvcmSelectedMatch(RoleType.PREFILL, "10.0.0.1:8080", 64L, 128L, 256L);
         reporter.reportKvcmSelectedMatch(RoleType.PREFILL, "10.0.0.1:8080", 0L, 0L, 512L);
 
-        FlexMetricTags tags = FlexMetricTags.of("role", "PREFILL", "engineIp", "10.0.0.1:8080");
+        FlexMetricTags tags = FlexMetricTags.of("role", "PREFILL");
         verify(monitor).register(CACHE_KVCM_SELECTED_LOCAL_MATCH_TOKENS, FlexMetricType.COUNTER);
         verify(monitor).register(CACHE_KVCM_SELECTED_GLOBAL_MATCH_TOKENS, FlexMetricType.COUNTER);
         verify(monitor).register(CACHE_KVCM_SELECTED_INPUT_TOKENS, FlexMetricType.COUNTER);

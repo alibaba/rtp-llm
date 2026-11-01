@@ -43,10 +43,10 @@ class RequestSchedulerReporterTest {
     void should_register_cancel_qps_metric_as_qps_on_init() {
         reporter.init();
 
-        verify(monitor).register(AUTO_TPM_CANCEL_QPS, FlexMetricType.QPS, FlexPriorityType.PRECISE);
-        verify(monitor).register(AUTO_TPM_CANCEL_REQUEST_COUNT, FlexMetricType.QPS, FlexPriorityType.PRECISE);
-        verify(monitor).register(AUTO_TPM_CANCEL_CONFIRM_COUNT, FlexMetricType.QPS, FlexPriorityType.PRECISE);
-        verify(monitor).register(AUTO_TPM_CANCEL_TIMEOUT_COUNT, FlexMetricType.QPS, FlexPriorityType.PRECISE);
+        verify(monitor).register(AUTO_TPM_CANCEL_QPS, FlexMetricType.QPS, FlexPriorityType.NORMAL);
+        verify(monitor).register(AUTO_TPM_CANCEL_REQUEST_COUNT, FlexMetricType.QPS, FlexPriorityType.NORMAL);
+        verify(monitor).register(AUTO_TPM_CANCEL_CONFIRM_COUNT, FlexMetricType.QPS, FlexPriorityType.NORMAL);
+        verify(monitor).register(AUTO_TPM_CANCEL_TIMEOUT_COUNT, FlexMetricType.QPS, FlexPriorityType.NORMAL);
     }
 
     @Test
@@ -69,33 +69,29 @@ class RequestSchedulerReporterTest {
     void should_report_cancel_request_with_priority_tag() {
         reporter.reportCancelRequest("10.0.0.2:8081", 30);
 
-        verify(monitor).report(AUTO_TPM_CANCEL_REQUEST_COUNT,
-                FlexMetricTags.of("endpoint", "10.0.0.2:8081", "priority", "30"), 1.0);
+        verify(monitor).report(AUTO_TPM_CANCEL_REQUEST_COUNT, FlexMetricTags.of("priority", "30"), 1.0);
     }
 
     @Test
     void should_report_cancel_confirm_with_priority_tag() {
         reporter.reportCancelConfirm("10.0.0.2:8081", 30);
 
-        verify(monitor).report(AUTO_TPM_CANCEL_CONFIRM_COUNT,
-                FlexMetricTags.of("endpoint", "10.0.0.2:8081", "priority", "30"), 1.0);
+        verify(monitor).report(AUTO_TPM_CANCEL_CONFIRM_COUNT, FlexMetricTags.of("priority", "30"), 1.0);
     }
 
     @Test
     void should_report_cancel_timeout_with_incoming_priority_tag() {
         reporter.reportCancelTimeout("10.0.0.2:8081", 70);
 
-        verify(monitor).report(AUTO_TPM_CANCEL_TIMEOUT_COUNT,
-                FlexMetricTags.of("endpoint", "10.0.0.2:8081", "priority", "70"), 1.0);
+        verify(monitor).report(AUTO_TPM_CANCEL_TIMEOUT_COUNT, FlexMetricTags.of("priority", "70"), 1.0);
     }
 
     @Test
-    void reportsLifecycleFailuresAsPreciseCounterIncrements() {
+    void reportsLifecycleFailuresAsNormalCounterIncrements() {
         reporter.init();
         reporter.reportLifecycleFailure("terminal_cleanup");
 
-        verify(monitor).register(REQUEST_LIFECYCLE_FAILURES_TOTAL,
-                FlexMetricType.COUNTER, FlexPriorityType.PRECISE);
+        verify(monitor).register(REQUEST_LIFECYCLE_FAILURES_TOTAL, FlexMetricType.COUNTER, FlexPriorityType.NORMAL);
         verify(monitor).report(REQUEST_LIFECYCLE_FAILURES_TOTAL,
                 FlexMetricTags.of("stage", "terminal_cleanup"), 1.0);
     }
@@ -113,6 +109,21 @@ class RequestSchedulerReporterTest {
         reporter.init();
 
         verify(monitor).register(AUTO_TPM_PREEMPTION_TARGET_INVALID_COUNT, FlexMetricType.QPS, FlexPriorityType.NORMAL);
+    }
+
+    @Test
+    void onlyScheduleLatencyKeepsOneSecondAggregation() {
+        reporter.init();
+        for (var invocation : org.mockito.Mockito.mockingDetails(monitor).getInvocations()) {
+            if (!invocation.getMethod().getName().equals("register")) {
+                continue;
+            }
+            String metric = invocation.getArgument(0);
+            FlexPriorityType priority = invocation.getArgument(2);
+            org.junit.jupiter.api.Assertions.assertEquals(
+                    metric.equals("auto_tpm.schedule.latency_ms") ? FlexPriorityType.PRECISE : FlexPriorityType.NORMAL,
+                    priority, metric);
+        }
     }
 
     @Test

@@ -18,7 +18,7 @@ public class GracefulLifecycleReporter {
 
     public GracefulLifecycleReporter(FlexMonitor monitor) {
         this.monitor = monitor;
-        monitor.register(GRACEFUL_LIFECYCLE_EVENT, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+        monitor.register(GRACEFUL_LIFECYCLE_EVENT, FlexMetricType.GAUGE, FlexPriorityType.NORMAL);
     }
 
     public void reportHealthCheckOffline(long durationMs) {

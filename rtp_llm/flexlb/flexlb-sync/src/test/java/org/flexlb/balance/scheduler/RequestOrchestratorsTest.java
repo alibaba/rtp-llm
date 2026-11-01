@@ -337,4 +337,44 @@ class RequestOrchestratorsTest {
                 mock(RequestSchedulerReporter.class), mock(ConfigService.class), new QueueCapacity(),
                 new ModelMetaConfig(new ServiceRoute()));
     }
+
+    @Test
+    void queuePrioritiesAreSummedWithoutZeroFillingDisappearedPriorities() {
+        EndpointRegistry endpoints = mock(EndpointRegistry.class);
+        PrefillEndpoint first = mock(PrefillEndpoint.class);
+        PrefillEndpoint second = mock(PrefillEndpoint.class);
+        when(first.queuedRequestCountsByPriority()).thenReturn(Map.of(50, 2, 70, 1));
+        when(second.queuedRequestCountsByPriority()).thenReturn(Map.of(50, 3));
+        when(endpoints.snapshotPrefillEndpoints()).thenReturn(Map.of("p1", first, "p2", second));
+        BatchSchedulerReporter reporter = mock(BatchSchedulerReporter.class);
+        SchedulerRuntime runtime = new SchedulerRuntime(mock(RequestRegistry.class), endpoints, reporter,
+                mock(RequestSchedulerReporter.class), mock(ConfigService.class), new QueueCapacity(),
+                new ModelMetaConfig(new ServiceRoute()));
+
+        runtime.report();
+        verify(reporter).reportBatcherQueueDepthByPriority("PREFILL", null, 50, 5);
+        verify(reporter).reportBatcherQueueDepthByPriority("PREFILL", null, 70, 1);
+        org.mockito.Mockito.clearInvocations(reporter);
+        when(endpoints.snapshotPrefillEndpoints()).thenReturn(Map.of());
+        runtime.report();
+        verify(reporter, never()).reportBatcherQueueDepthByPriority(
+                org.mockito.ArgumentMatchers.anyString(), org.mockito.ArgumentMatchers.any(), anyInt(), anyInt());
+    }
+
+    @Test
+    void emptyEndpointDoesNotReportPriorityQueueDepth() {
+        EndpointRegistry endpoints = mock(EndpointRegistry.class);
+        PrefillEndpoint empty = mock(PrefillEndpoint.class);
+        when(empty.queuedRequestCountsByPriority()).thenReturn(Map.of());
+        when(endpoints.snapshotPrefillEndpoints()).thenReturn(Map.of("p1", empty));
+        BatchSchedulerReporter reporter = mock(BatchSchedulerReporter.class);
+        SchedulerRuntime runtime = new SchedulerRuntime(mock(RequestRegistry.class), endpoints, reporter,
+                mock(RequestSchedulerReporter.class), mock(ConfigService.class), new QueueCapacity(),
+                new ModelMetaConfig(new ServiceRoute()));
+
+        runtime.report();
+
+        verify(reporter, never()).reportBatcherQueueDepthByPriority(
+                org.mockito.ArgumentMatchers.anyString(), org.mockito.ArgumentMatchers.any(), anyInt(), anyInt());
+    }
 }

@@ -58,10 +58,10 @@ class BatchSchedulerReporterTest {
     void decodeReservationBlockedRegistersQpsAndReportsWorker() {
         reporter.init();
         reporter.reportDecodeReservationBlocked("decode:8001");
-        verify(monitor).register(org.flexlb.constant.MetricConstant.DECODE_RESERVATION_BLOCKED,
-                FlexMetricType.QPS, FlexPriorityType.PRECISE);
+        verify(monitor).register(org.flexlb.constant.MetricConstant.DECODE_RESERVATION_BLOCKED, FlexMetricType.QPS,
+                FlexPriorityType.NORMAL);
         verify(monitor).report(org.flexlb.constant.MetricConstant.DECODE_RESERVATION_BLOCKED,
-                FlexMetricTags.ofEngine("decode:8001", "role", "DECODE"), 1.0);
+                FlexMetricTags.of("role", "DECODE"), 1.0);
     }
 
     @Test
@@ -78,7 +78,7 @@ class BatchSchedulerReporterTest {
     void should_register_dispatch_reason_metric_on_init() {
         reporter.init();
 
-        verify(monitor).register(ENGINE_BALANCING_MASTER_DISPATCH_REASON, FlexMetricType.QPS, FlexPriorityType.PRECISE);
+        verify(monitor).register(ENGINE_BALANCING_MASTER_DISPATCH_REASON, FlexMetricType.QPS, FlexPriorityType.NORMAL);
         verify(monitor, never()).register(eq(ENGINE_BALANCING_MASTER_SELECT_DETAIL), any(), any());
     }
 
@@ -89,7 +89,6 @@ class BatchSchedulerReporterTest {
         FlexMetricTags tags = FlexMetricTags.of(
                 "type", "batchQueue",
                 "role", "PREFILL",
-                "engineIp", "10.0.0.1",
                 "priority", "70");
         verify(monitor).report(ROUTING_QUEUE_LENGTH, tags, 3.0);
         // Priority buckets never leak into the independent global series
@@ -100,10 +99,7 @@ class BatchSchedulerReporterTest {
     void should_keep_global_batcher_queue_depth_series_untagged_by_priority() {
         reporter.reportBatcherQueueDepth("PREFILL", "10.0.0.1", 5);
 
-        FlexMetricTags tags = FlexMetricTags.of(
-                "type", "batchQueue",
-                "role", "PREFILL",
-                "engineIp", "10.0.0.1");
+        FlexMetricTags tags = FlexMetricTags.of("type", "batchQueue", "role", "PREFILL");
         verify(monitor).report(ROUTING_QUEUE_LENGTH, tags, 5.0);
     }
 
@@ -120,7 +116,7 @@ class BatchSchedulerReporterTest {
     void should_register_global_queue_limit_metric_on_init() {
         reporter.init();
 
-        verify(monitor).register(ROUTING_QUEUE_MAX_LENGTH, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+        verify(monitor).register(ROUTING_QUEUE_MAX_LENGTH, FlexMetricType.GAUGE, FlexPriorityType.NORMAL);
     }
 
     @Test
@@ -130,16 +126,15 @@ class BatchSchedulerReporterTest {
         reporter.reportSharedSubQueue("PDFUSION", 3, 12L, 2);
         reporter.reportSharedSubQueueBlocked("PDFUSION", "10.0.0.2:8080");
 
-        verify(monitor).register(SHARED_SUBQUEUE_WAITING, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
-        verify(monitor).register(SHARED_SUBQUEUE_LIMIT, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
-        verify(monitor).register(SHARED_SUBQUEUE_BLOCKED, FlexMetricType.QPS, FlexPriorityType.PRECISE);
+        verify(monitor).register(SHARED_SUBQUEUE_WAITING, FlexMetricType.GAUGE, FlexPriorityType.NORMAL);
+        verify(monitor).register(SHARED_SUBQUEUE_LIMIT, FlexMetricType.GAUGE, FlexPriorityType.NORMAL);
+        verify(monitor).register(SHARED_SUBQUEUE_BLOCKED, FlexMetricType.QPS, FlexPriorityType.NORMAL);
         verify(monitor).report(TOTAL_QUEUE_WAITING, FlexMetricTags.of(), 7.0);
         verify(monitor).report(SHARED_SUBQUEUE_WAITING, FlexMetricTags.of("role", "PDFUSION"), 3.0);
         verify(monitor).report(SHARED_SUBQUEUE_LIMIT, FlexMetricTags.of("role", "PDFUSION"), 12.0);
         verify(monitor).report(SHARED_SUBQUEUE_ENDPOINT_COUNT, FlexMetricTags.of("role", "PDFUSION"), 2.0);
         verify(monitor).report(SHARED_SUBQUEUE_BLOCKED,
-                FlexMetricTags.ofEngine("10.0.0.2:8080", "role", "PDFUSION",
-                        "reason", "SHARED_SUBQUEUE_FULL"), 1.0);
+                FlexMetricTags.of("role", "PDFUSION", "reason", "SHARED_SUBQUEUE_FULL"), 1.0);
     }
 
     @Test
@@ -151,10 +146,10 @@ class BatchSchedulerReporterTest {
         reporter.reportEngineSubQueueOldestWaitMs("PREFILL", "10.0.0.1:8080", 17L);
 
         FlexMetricTags worker = FlexMetricTags.ofEngine("10.0.0.1:8080", "role", "PREFILL");
-        verify(monitor).register(GLOBAL_QUEUE_RESIDENCE_MS, FlexMetricType.TIMER, FlexPriorityType.PRECISE);
-        verify(monitor).register(ENGINE_SUBQUEUE_RESIDENCE_MS, FlexMetricType.TIMER, FlexPriorityType.PRECISE);
+        verify(monitor).register(GLOBAL_QUEUE_RESIDENCE_MS, FlexMetricType.TIMER, FlexPriorityType.NORMAL);
+        verify(monitor).register(ENGINE_SUBQUEUE_RESIDENCE_MS, FlexMetricType.TIMER, FlexPriorityType.NORMAL);
         verify(monitor).report(GLOBAL_QUEUE_RESIDENCE_MS, FlexMetricTags.of(), 24.0);
-        verify(monitor).report(ENGINE_SUBQUEUE_RESIDENCE_MS, worker, 13.0);
+        verify(monitor).report(ENGINE_SUBQUEUE_RESIDENCE_MS, FlexMetricTags.of("role", "PREFILL"), 13.0);
         verify(monitor).report(GLOBAL_QUEUE_OLDEST_WAIT_MS, FlexMetricTags.of(), 30.0);
         verify(monitor).report(ENGINE_SUBQUEUE_OLDEST_WAIT_MS, worker, 17.0);
     }
@@ -165,7 +160,6 @@ class BatchSchedulerReporterTest {
 
         FlexMetricTags tags = FlexMetricTags.of(
                 "role", "PREFILL",
-                "engineIp", "10.0.0.1",
                 "reason", "batch_full");
         verify(monitor).report(ENGINE_BALANCING_MASTER_DISPATCH_REASON, tags, 1.0);
     }
@@ -174,7 +168,7 @@ class BatchSchedulerReporterTest {
     void batch_dispatch_does_not_count_selected_requests_or_cache_hits_twice() {
         reporter.reportBatchCacheHitMetrics("PREFILL", "10.0.0.1:8080", 120L, 300L);
 
-        FlexMetricTags tags = FlexMetricTags.of("role", "PREFILL", "engineIp", "10.0.0.1:8080");
+        FlexMetricTags tags = FlexMetricTags.of("role", "PREFILL");
         verify(monitor, never()).report(eq(CACHE_HIT_COUNT), any(), anyDouble());
         verify(monitor).report(CACHE_HIT_RATIO, tags, 0.4);
         verify(monitor, never()).report(eq(CACHE_REQUEST_TOTAL), any(), anyDouble());
@@ -191,16 +185,13 @@ class BatchSchedulerReporterTest {
     void should_prepare_all_fixed_window_endpoint_metrics() {
         reporter.prepareEndpointMetrics("PREFILL", "10.0.0.1");
 
-        FlexMetricTags endpointTags = FlexMetricTags.of(
-                "role", "PREFILL",
-                "engineIp", "10.0.0.1");
+        FlexMetricTags endpointTags = FlexMetricTags.of("role", "PREFILL");
         verify(monitor).prepare(DISPATCH_ACK_TIME_MS, endpointTags);
         verify(monitor).prepare(ROUTE_SUBMIT_TIME_MS, endpointTags);
         verify(monitor).prepare(ROUTING_QUEUE_WAIT_TIME_MS, endpointTags);
         for (String reason : new String[]{"batch_full", "fixed_window_timeout", "predicted_execution_cap"}) {
             FlexMetricTags reasonTags = FlexMetricTags.of(
                     "role", "PREFILL",
-                    "engineIp", "10.0.0.1",
                     "reason", reason);
             verify(monitor).prepare(ENGINE_BALANCING_MASTER_DISPATCH_REASON, reasonTags);
         }
@@ -217,11 +208,36 @@ class BatchSchedulerReporterTest {
     void should_register_inflight_max_age_and_ttl_expired_metrics_on_init() {
         reporter.init();
 
-        verify(monitor).register(INFLIGHT_MAX_AGE_MS, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+        verify(monitor).register(INFLIGHT_MAX_AGE_MS, FlexMetricType.GAUGE, FlexPriorityType.NORMAL);
         verify(monitor).register(org.flexlb.constant.MetricConstant.WORKER_STATUS_UNCONFIRMED_REQUEST_COUNT,
-                FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
-        verify(monitor).register(INFLIGHT_TTL_EXPIRED_QPS, FlexMetricType.QPS, FlexPriorityType.PRECISE);
-        verify(monitor).register(DECODE_INPUT_KV_RESERVED_TOKENS, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+                FlexMetricType.GAUGE, FlexPriorityType.NORMAL);
+        verify(monitor).register(INFLIGHT_TTL_EXPIRED_QPS, FlexMetricType.QPS, FlexPriorityType.NORMAL);
+        verify(monitor).register(DECODE_INPUT_KV_RESERVED_TOKENS, FlexMetricType.GAUGE, FlexPriorityType.NORMAL);
+    }
+
+    @Test
+    void normalDispatchEventsNeverCarryWorkerAddresses() {
+        for (String address : new String[]{"10.0.0.1:8080", "10.0.0.2:8080@1"}) {
+            reporter.reportDecodeReservationBlocked(address);
+            reporter.reportSharedSubQueueBlocked("PREFILL", address);
+            reporter.reportEngineSubQueueResidenceMs("PREFILL", address, 5L);
+            reporter.reportBatchWaitTimeMs("PREFILL", address, 5L, 50);
+            reporter.reportDispatchReason("PREFILL", address, "batch_full");
+            reporter.reportBatchCacheHitMetrics("PREFILL", address, 10L, 20L);
+            reporter.reportBatchSize("PREFILL", address, "batch_full", 2);
+            reporter.reportBatchTotalTokens("PREFILL", address, "batch_full", 20L);
+            reporter.reportBatchPredictedTimeMs("PREFILL", address, 5L);
+            reporter.reportBatchActualTimeMs("PREFILL", address, 5L);
+            reporter.reportBatchPredictGapMs("PREFILL", address, 0L);
+            reporter.reportDispatchAckTimeMs("PREFILL", address, 5L);
+            reporter.reportRouteSubmitTimeMs("PREFILL", address, 5L);
+            reporter.reportAckToResponseTimeMs("PREFILL", address, 5L);
+        }
+        for (var invocation : org.mockito.Mockito.mockingDetails(monitor).getInvocations()) {
+            FlexMetricTags tags = invocation.getArgument(1);
+            org.junit.jupiter.api.Assertions.assertFalse(tags.getTags().containsKey("engineIp"));
+            org.junit.jupiter.api.Assertions.assertFalse(tags.getTags().containsKey("endpoint"));
+        }
     }
 
     @Test

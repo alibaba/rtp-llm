@@ -25,8 +25,8 @@ public class KvcmMetricsReporter {
 
     @PostConstruct
     public void init() {
-        monitor.register(KVCM_QUERY_RETRY_QPS, FlexMetricType.QPS, FlexPriorityType.PRECISE);
-        monitor.register(KVCM_QUERY_FAILURE_QPS, FlexMetricType.QPS, FlexPriorityType.PRECISE);
+        monitor.register(KVCM_QUERY_RETRY_QPS, FlexMetricType.QPS, FlexPriorityType.NORMAL);
+        monitor.register(KVCM_QUERY_FAILURE_QPS, FlexMetricType.QPS, FlexPriorityType.NORMAL);
     }
 
     public void reportQueryRetry(int attempt) {
