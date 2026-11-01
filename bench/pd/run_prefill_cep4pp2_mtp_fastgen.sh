@@ -16,6 +16,8 @@
 #               DSV4_FP4_INDEXER_ALLOW_MTP2=1 (MTP depth 2 with the FP4 indexer is opt-in)
 #   RDMA=0      KV cache store over TCP instead of eRDMA (default 1)
 #   PORT        frontend start_port (default 14000)
+#   MAX_BATCH_TOKENS  scheduler token cap of one prefill batch incl. cached prefix (default 1048576); a 32-request
+#               batch of 32K prompts needs 2097152, together with PREFILL_KV_MB=8000 to leave room for activations
 #   PD_SERVING_CP_RANK=0  advertise / publish only CP rank 0 of each PP stage (default off). Only for a TP1-per-rank
 #               decode (PPU DEP8); a TP>1 decode of this branch then plans quarter-block reads of the single peer
 #               and writes them into whole opaque DSV4 blocks (StagePeerGroups.cc planStagePeerSlices), so it
@@ -115,7 +117,7 @@ export GEN_TIMELINE_START_STEP=0
 export GEN_TIMELINE_SYNC=0
 export LINEAR_STEP=1
 export MAX_BATCH_SIZE=1024
-export MAX_BATCH_TOKENS_SIZE=1048576
+export MAX_BATCH_TOKENS_SIZE=${MAX_BATCH_TOKENS:-1048576}
 export NCCL_IB_DISABLE=1
 export NCCL_MAX_P2P_NCHANNELS=8
 export NCCL_MIN_P2P_NCHANNELS=8
