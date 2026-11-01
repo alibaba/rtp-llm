@@ -36,6 +36,50 @@ class GrpcReporterTest {
     private final GrpcReporter reporter = new GrpcReporter(monitor);
 
     @Test
+    void transportStatsKeepExistingNamesAndReadOnlySampleResources() {
+        var pool = mock(java.util.concurrent.ThreadPoolExecutor.class);
+        var group = mock(io.netty.channel.EventLoopGroup.class);
+        var worker = mock(io.netty.util.concurrent.SingleThreadEventExecutor.class);
+        var loops = mock(reactor.netty.resources.LoopResources.class);
+        org.mockito.Mockito.when(loops.onServer(true)).thenReturn(group);
+        org.mockito.Mockito.when(loops.onServerSelect(true)).thenReturn(group);
+        org.mockito.Mockito.when(group.iterator())
+                .thenAnswer(
+                        ignored ->
+                                java.util.List.<io.netty.util.concurrent.EventExecutor>of(worker)
+                                        .iterator());
+        org.mockito.Mockito.when(worker.pendingTasks()).thenReturn(3);
+        org.mockito.Mockito.when(pool.getActiveCount()).thenReturn(2);
+        org.mockito.Mockito.when(pool.getQueue())
+                .thenReturn(new java.util.concurrent.LinkedBlockingQueue<>());
+        reporter.bindTransportStats(pool, group, loops);
+        reporter.reportTransportStats();
+        verify(monitor)
+                .report(
+                        org.flexlb.constant.MetricConstant.ENGINE_BALANCING_THREAD_POOL_INFO,
+                        FlexMetricTags.of(
+                                "threadPool", "gRpcExecutor", "type", "executingTaskThreadSize"),
+                        2d);
+        for (String name :
+                java.util.List.of("serverWorker", "serverSelector", "gRpcEventLoopGroup")) {
+            verify(monitor)
+                    .report(
+                            org.flexlb.constant.MetricConstant
+                                    .ENGINE_BALANCING_EVENT_LOOP_GROUP_INFO,
+                            FlexMetricTags.of("name", name, "type", "active-executor-count"),
+                            1d);
+            verify(monitor)
+                    .report(
+                            org.flexlb.constant.MetricConstant
+                                    .ENGINE_BALANCING_EVENT_LOOP_GROUP_INFO,
+                            FlexMetricTags.of("name", name, "type", "pending-task-total-count"),
+                            3d);
+        }
+        verify(pool, org.mockito.Mockito.never()).shutdown();
+        verify(group, org.mockito.Mockito.never()).shutdownGracefully();
+    }
+
+    @Test
     void registersFinalCallFailuresAtPrecisePriority() {
         reporter.init();
 

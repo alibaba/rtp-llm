@@ -219,7 +219,7 @@ class PrefillPlanningInputChangeTest {
                 config,
                 status,
                 SchedulerTestSupport.dispatcher(),
-                mock(AbstractRequestScheduler.class));
+                mock(RequestLifecycle.class));
     }
 
     private static WorkerStatusResponse response(

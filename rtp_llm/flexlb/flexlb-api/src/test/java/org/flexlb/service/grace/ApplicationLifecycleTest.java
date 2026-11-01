@@ -57,6 +57,7 @@ class ApplicationLifecycleTest {
         context.registerBean(ApplicationLifecycle.class, () -> lifecycle);
         context.registerBean(
                 "servingResource", DisposableBean.class, () -> () -> destroyed.set(true));
+        SchedulingShutdownTest.registerComponents(context);
         context.refresh();
         var closing = CompletableFuture.runAsync(context::close);
         try {
@@ -85,6 +86,7 @@ class ApplicationLifecycleTest {
                             context.getEnvironment(),
                             0L);
             context.registerBean(ApplicationLifecycle.class, () -> lifecycle);
+            SchedulingShutdownTest.registerComponents(context);
             context.refresh();
             context.publishEvent(new ContextClosedEvent(child));
             verifyNoInteractions(consistency, grpc);
@@ -101,6 +103,7 @@ class ApplicationLifecycleTest {
             context.registerBean(
                     GracefulLifecycleReporter.class, () -> mock(GracefulLifecycleReporter.class));
             context.register(ApplicationLifecycle.class);
+            SchedulingShutdownTest.registerComponents(context);
             context.refresh();
             assertNotNull(context.getBean(ApplicationLifecycle.class));
         }

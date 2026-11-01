@@ -23,10 +23,6 @@ final class ResponsePublication implements AutoCloseable {
     final RequestContext owner;
     final boolean delivery;
 
-    ResponsePublication(SchedulerRuntime runtime, RequestContext owner, boolean delivery) {
-        this(runtime.responseCompletions(), owner, delivery);
-    }
-
     ResponsePublication(
             ResponseCompletionExecutor executor, RequestContext owner, boolean delivery) {
         this.owner = Objects.requireNonNull(owner);

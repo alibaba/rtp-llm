@@ -80,6 +80,29 @@ public class MicrometerFlexMonitor implements FlexMonitor {
     }
 
     @Override
+    public <T> void observe(
+            String name,
+            FlexMetricType type,
+            T source,
+            java.util.function.ToDoubleFunction<T> value) {
+        SafeFlexMonitor.run(
+                name,
+                () -> {
+                    Set<String> allowed = ALLOWED_METRICS;
+                    if (allowed != null && !allowed.contains(name)) return;
+                    if (type == FlexMetricType.GAUGE) {
+                        Gauge.builder(METRIC_PREFIX + name, source, value).register(meterRegistry);
+                    } else if (type == FlexMetricType.COUNTER) {
+                        io.micrometer.core.instrument.FunctionCounter.builder(
+                                        METRIC_PREFIX + name, source, value)
+                                .register(meterRegistry);
+                    } else {
+                        throw new IllegalArgumentException("Live metrics require GAUGE or COUNTER");
+                    }
+                });
+    }
+
+    @Override
     public void register(String metricName, FlexMetricType metricType) {
         try {
             Set<String> allowedMetrics = ALLOWED_METRICS;

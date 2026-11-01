@@ -42,7 +42,7 @@ import static org.mockito.Mockito.when;
 /** Cleanup uses current directory membership, including terminal records, rather than live request state. */
 class EndpointCleanupOwnershipTest {
     private FlexlbConfig config;
-    private AbstractRequestScheduler registry;
+    private RequestLifecycle registry;
 
     @BeforeEach
     void setup() {
@@ -87,7 +87,7 @@ class EndpointCleanupOwnershipTest {
                         WorkerStatus.createDiscovered(
                                 RoleType.DECODE, null, "127.0.0.1", 8080, 8081, null),
                         org.flexlb.balance.scheduler.SchedulerTestSupport.repository(
-                                mock(AbstractRequestScheduler.class)));
+                                mock(RequestLifecycle.class)));
         try (var pin = endpoint.tryPinGeneration()) {
             assertNotNull(pin);
             assertNotNull(EndpointTestSupport.reserveUnqueuedDecode(endpoint, pin, id, 1L, 1L, 50));
@@ -216,7 +216,7 @@ class EndpointCleanupOwnershipTest {
                         WorkerStatus.createDiscovered(
                                 RoleType.DECODE, null, "127.0.0.1", 8080, 8081, null),
                         org.flexlb.balance.scheduler.SchedulerTestSupport.repository(
-                                mock(AbstractRequestScheduler.class)));
+                                mock(RequestLifecycle.class)));
         var oldReservation = reserve(endpoint, id, 100L, 150L);
         if (confirmed) {
             EndpointCleanupTestSupport.confirmDecode(endpoint, id);
@@ -461,7 +461,7 @@ class EndpointCleanupOwnershipTest {
                         WorkerStatus.createDiscovered(
                                 RoleType.DECODE, null, "127.0.0.1", 8080, 8081, null),
                         org.flexlb.balance.scheduler.SchedulerTestSupport.repository(
-                                mock(AbstractRequestScheduler.class)));
+                                mock(RequestLifecycle.class)));
         var reservation = reserve(endpoint, id, 100L, 150L);
         EndpointCleanupTestSupport.confirmDecode(endpoint, id);
         assertEquals(

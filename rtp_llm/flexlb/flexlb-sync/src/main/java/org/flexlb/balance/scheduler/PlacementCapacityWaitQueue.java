@@ -25,12 +25,10 @@ final class PlacementCapacityWaitQueue {
     private final Map<GlobalQueueEntry, Domain> membership = new IdentityHashMap<>();
     private final NavigableSet<Domain> ready;
 
-    PlacementCapacityWaitQueue(boolean priorityOrdering, PlacementAvailability availability) {
+    PlacementCapacityWaitQueue(
+            Comparator<GlobalQueueEntry> order, PlacementAvailability availability) {
         this.availability = Objects.requireNonNull(availability, "availability");
-        order =
-                priorityOrdering
-                        ? GlobalQueueEntry.PRIORITY_ORDER
-                        : GlobalQueueEntry.SEQUENCE_ORDER;
+        this.order = Objects.requireNonNull(order, "order");
         ready =
                 new TreeSet<>(
                         (left, right) ->

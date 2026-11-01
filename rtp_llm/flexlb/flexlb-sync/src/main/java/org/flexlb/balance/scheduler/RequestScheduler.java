@@ -4,8 +4,19 @@ import org.flexlb.dao.loadbalance.Response;
 
 import java.util.concurrent.CompletableFuture;
 
-/** Request scheduling and cancellation. Runtime owns service shutdown. */
+/** Request scheduling and cancellation. ApplicationLifecycle owns service shutdown. */
 public interface RequestScheduler {
+    /** Assembly access to shared state transitions, deadlines and settlement. */
+    RequestLifecycle lifecycle();
+
+    void start();
+
+    /** Wait for pending scheduling work until the absolute System.nanoTime deadline. */
+    boolean awaitSchedulingCompletion(long deadlineNanos);
+
+    /** Stop scheduling and release scheduler-owned workers. RequestLifecycle settles requests. */
+    void close();
+
     /**
      * Accept a request and return its scheduling result, not an enqueue acknowledgement.
      * The returned future retains caller cancellation semantics. Response completion
@@ -34,5 +45,7 @@ public interface RequestScheduler {
      * Request cancellation from the owning scheduler. Acceptance does not imply
      * immediate resource release. Returns null when no matching request is known.
      */
-    RequestState cancel(long requestId, long batchId, CancelReason reason);
+    default RequestState cancel(long requestId, long batchId, CancelReason reason) {
+        return lifecycle().cancel(requestId, batchId, reason);
+    }
 }

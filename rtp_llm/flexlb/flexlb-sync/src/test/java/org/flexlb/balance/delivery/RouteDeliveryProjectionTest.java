@@ -1,5 +1,6 @@
 package org.flexlb.balance.delivery;
 
+import org.flexlb.balance.planner.BuiltinGroupPlanner;
 import org.flexlb.balance.planner.GroupPlanner;
 import org.flexlb.balance.prediction.PrefillBatchFeatures;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
@@ -189,18 +190,20 @@ class RouteDeliveryProjectionTest {
                 new QueueSnapshot(
                         1000,
                         true,
-                        GroupPlanner.FIXED_WINDOW,
+                        BuiltinGroupPlanner.FIXED_WINDOW,
                         Comparator.comparingLong(GroupPlanner.Item::requestId),
                         new GroupPlanner.Constraints(64, Long.MAX_VALUE, Long.MAX_VALUE, budget, 0),
                         active,
                         null);
         return RequestTimeEstimationTestSupport.project(
                 new RequestTimeEstimation.Inputs(
-                        queue, new WorkSnapshot(1000, List.of(), List.of(), 0), 0),
+                        queue,
+                        new WorkSnapshot(1000, List.of(), List.of(), 0),
+                        0,
+                        model,
+                        batch ? DispatcherConfig.Type.BATCH : DispatcherConfig.Type.NON_BATCH),
                 new RequestTimeEstimationTestSupport.Probe(
-                        probeIndex + 1, 0, 1000, Long.MAX_VALUE, tokens[probeIndex], 0, 0),
-                model,
-                batch ? DispatcherConfig.Type.BATCH : DispatcherConfig.Type.NON_BATCH);
+                        probeIndex + 1, 0, 1000, Long.MAX_VALUE, tokens[probeIndex], 0, 0));
     }
 
     private static class CountingEvaluator implements PrefillTimePredictor.Evaluator {

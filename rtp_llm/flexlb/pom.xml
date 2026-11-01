@@ -461,6 +461,9 @@
                 <configuration combine.self="override">
                   <includes>
                     <include>**/PrefillQueueRunnerPerformanceTest.java</include>
+                    <include>**/PrefillAdmissionFailurePerformanceTest.java</include>
+                    <include>**/SelectionPerformanceTest.java</include>
+                    <include>**/ProjectionPerformanceTest.java</include>
                   </includes>
                   <groups>performance-regression</groups>
                   <forkCount>1</forkCount>

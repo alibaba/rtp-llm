@@ -67,7 +67,7 @@ class PrefillQueueRunnerQueueTest {
     @org.junit.jupiter.api.Timeout(15)
     void removedCallbackFailureIsRecordedWithoutStoppingLaterQueueWork() throws Exception {
         var service = DeliveryTestSupport.service(config);
-        AbstractRequestScheduler owner =
+        RequestLifecycle owner =
                 SchedulerTestSupport.create(
                         service,
                         mock(DeliveryMetricsReporter.class),
@@ -85,6 +85,16 @@ class PrefillQueueRunnerQueueTest {
                     org.flexlb.balance.endpoint.EndpointTestSupport.unstartedPrefill(
                             config, prefillEndpoint.getStatus(), deliveryStrategy, owner);
             worker = org.flexlb.balance.endpoint.EndpointTestSupport.queueRunner(prefillEndpoint);
+            org.springframework.test.util.ReflectionTestUtils.setField(
+                    worker,
+                    "dependencies",
+                    new PrefillQueueRunner.Dependencies(
+                            org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(owner)
+                                    .deliveries(),
+                            org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(owner)
+                                    .deliveryReporter,
+                            org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(owner)
+                                    ::recordFailure));
             var activeWorker = worker;
             var decode =
                     org.flexlb.balance.endpoint.EndpointTestSupport.decode(
@@ -184,8 +194,11 @@ class PrefillQueueRunnerQueueTest {
             }
             if (RequestProtocolTestSupport.closeAdmissionAndAwaitMutations(owner)) {
                 owner.closeOutstandingAndTerminalize();
-                SchedulerTestSupport.timer(owner.runtime).close();
-                SchedulerTestSupport.closeRequestExecutors(owner.runtime);
+                SchedulerTestSupport.timer(
+                                org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(owner))
+                        .close();
+                SchedulerTestSupport.closeRequestExecutors(
+                        org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(owner));
             }
         }
     }
@@ -337,7 +350,7 @@ class PrefillQueueRunnerQueueTest {
                         config,
                         prefillEndpoint.getStatus(),
                         deliveryStrategy,
-                        mock(AbstractRequestScheduler.class));
+                        mock(RequestLifecycle.class));
         PrefillQueueRunner runtime =
                 org.flexlb.balance.endpoint.EndpointTestSupport.queueRunner(prefillEndpoint);
         runtimes.add(runtime);
@@ -358,7 +371,7 @@ class PrefillQueueRunnerQueueTest {
             throws Exception {
         ConfigService service = mock(ConfigService.class);
         when(service.loadBalanceConfig()).thenReturn(config);
-        AbstractRequestScheduler registry =
+        RequestLifecycle registry =
                 SchedulerTestSupport.create(
                         service,
                         mock(DeliveryMetricsReporter.class),
@@ -517,7 +530,7 @@ class PrefillQueueRunnerQueueTest {
         } else {
             config.getDispatcher().setType(org.flexlb.config.DispatcherConfig.Type.NON_BATCH);
         }
-        AbstractRequestScheduler events = mock(AbstractRequestScheduler.class);
+        RequestLifecycle events = mock(RequestLifecycle.class);
         PrefillQueueRunner runtime =
                 PrefillQueueRunnerTestSupport.create(
                         "stop-test", prefillEndpoint, config, deliveryStrategy, events);
@@ -547,9 +560,7 @@ class PrefillQueueRunnerQueueTest {
                 .when(events)
                 .onQueueEvent(
                         org.mockito.ArgumentMatchers.any(),
-                        org.mockito.ArgumentMatchers.eq(
-                                AbstractRequestScheduler.QueueKind.REJECTED),
-                        org.mockito.ArgumentMatchers.isNull(),
+                        org.mockito.ArgumentMatchers.eq(RequestLifecycle.QueueKind.REJECTED),
                         org.mockito.ArgumentMatchers.any());
         runtime.start();
         assertTrue(runtime.offer(queued));
@@ -606,7 +617,7 @@ class PrefillQueueRunnerQueueTest {
                         prefillEndpoint,
                         config,
                         deliveryStrategy,
-                        mock(AbstractRequestScheduler.class));
+                        mock(RequestLifecycle.class));
         runtimes.add(runtime);
         runtime.start();
         return runtime;

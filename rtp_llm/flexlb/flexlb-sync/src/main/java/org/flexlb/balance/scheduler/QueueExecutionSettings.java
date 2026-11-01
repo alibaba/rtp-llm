@@ -5,8 +5,9 @@ import org.flexlb.config.DecisionPolicyConfig;
 import org.flexlb.config.DispatcherConfig;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.master.WorkerStatus;
+import org.flexlb.util.PriorityOrdering;
 
-import java.util.Objects;
+import java.util.Comparator;
 
 import static com.google.common.base.Preconditions.checkArgument;
 
@@ -14,18 +15,50 @@ import static com.google.common.base.Preconditions.checkArgument;
 public record QueueExecutionSettings(
         boolean priorityOrdering,
         DispatcherConfig.Type dispatcherType,
-        DecisionPolicyConfig.Type grouping,
+        GroupPlanner grouping,
         int maxRequests,
         long collectionWaitMs,
         long executionBudgetMs) {
-    public static QueueExecutionSettings capture(FlexlbConfig config) {
+    private static final Comparator<RequestRoute> PRIORITY_QUEUE_ORDER =
+            (left, right) ->
+                    PriorityOrdering.compareWithRequestId(
+                            left.priority(),
+                            left.enqueueSeq(),
+                            left.requestId(),
+                            right.priority(),
+                            right.enqueueSeq(),
+                            right.requestId());
+    private static final Comparator<RequestRoute> FIFO_QUEUE_ORDER =
+            Comparator.comparingLong(RequestRoute::enqueueSeq);
+    private static final Comparator<GroupPlanner.Item> PRIORITY_PROJECTION_ORDER =
+            (left, right) ->
+                    PriorityOrdering.compareWithRequestId(
+                            left.priority(),
+                            left.enqueueSeq(),
+                            left.requestId(),
+                            right.priority(),
+                            right.enqueueSeq(),
+                            right.requestId());
+    private static final Comparator<GroupPlanner.Item> FIFO_PROJECTION_ORDER =
+            Comparator.comparingLong(GroupPlanner.Item::enqueueSeq)
+                    .thenComparingLong(GroupPlanner.Item::requestId);
+
+    public static Comparator<RequestRoute> queueOrder(boolean priorityOrdering) {
+        return priorityOrdering ? PRIORITY_QUEUE_ORDER : FIFO_QUEUE_ORDER;
+    }
+
+    public static Comparator<GroupPlanner.Item> projectionOrder(boolean priorityOrdering) {
+        return priorityOrdering ? PRIORITY_PROJECTION_ORDER : FIFO_PROJECTION_ORDER;
+    }
+
+    public static QueueExecutionSettings capture(FlexlbConfig config, GroupPlanner grouping) {
         checkArgument(config.isQueue(), "QUEUE settings required");
         var decision = config.decisionPolicy();
         boolean single = decision.getType() == DecisionPolicyConfig.Type.SINGLE;
         return new QueueExecutionSettings(
                 config.isPriorityOrdering(),
                 config.getDispatcher().getType(),
-                decision.getType(),
+                grouping,
                 single ? 1 : decision.resolveMaxRequests(),
                 single ? 0L : Math.max(0L, decision.getMaxCollectionWaitMs()),
                 single || decision.getMaxPredictedExecutionMs() == null
@@ -36,40 +69,28 @@ public record QueueExecutionSettings(
     public GroupPlanner.Constraints constraints(WorkerStatus.EngineObservation engine) {
         return new GroupPlanner.Constraints(
                 maxRequests,
-                schedulingCapacity(engine, PlanningResource.TOKENS),
-                schedulingCapacity(engine, PlanningResource.KV),
+                tokenCapacity(engine),
+                kvCapacity(engine),
                 executionBudgetMs,
                 collectionWaitMs);
     }
 
-    public GroupPlanner groupingPolicy() {
-        return grouping == DecisionPolicyConfig.Type.SINGLE
-                ? GroupPlanner.SINGLE
-                : GroupPlanner.FIXED_WINDOW;
+    /** Compare the effective limits used by constraints, including unknown-capacity normalization. */
+    public static boolean capacityChanged(
+            WorkerStatus.EngineObservation before, WorkerStatus.EngineObservation after) {
+        return tokenCapacity(before) != tokenCapacity(after)
+                || kvCapacity(before) != kvCapacity(after);
     }
 
-    public enum PlanningResource {
-        TOKENS,
-        KV
-    }
-
-    /** The same effective limits drive worker selection and status input invalidation. */
-    public static long schedulingCapacity(
-            WorkerStatus.EngineObservation engine, PlanningResource resource) {
-        Objects.requireNonNull(resource, "resource");
-        if (engine == null) {
-            return Long.MAX_VALUE;
-        }
+    private static long tokenCapacity(WorkerStatus.EngineObservation engine) {
+        if (engine == null) return Long.MAX_VALUE;
         long maximum =
-                resource == PlanningResource.KV
-                        ? engine.totalKvCacheTokens()
-                        : engine.maxBatchTokensSize() > 0L
-                                ? engine.maxBatchTokensSize()
-                                : engine.maxSeqLen();
-        return maximum <= 0L
-                ? Long.MAX_VALUE
-                : resource == PlanningResource.KV
-                        ? Math.clamp(engine.availableKvCacheTokens(), 0L, maximum)
-                        : maximum;
+                engine.maxBatchTokensSize() > 0L ? engine.maxBatchTokensSize() : engine.maxSeqLen();
+        return maximum <= 0L ? Long.MAX_VALUE : maximum;
+    }
+
+    private static long kvCapacity(WorkerStatus.EngineObservation engine) {
+        if (engine == null || engine.totalKvCacheTokens() <= 0L) return Long.MAX_VALUE;
+        return Math.clamp(engine.availableKvCacheTokens(), 0L, engine.totalKvCacheTokens());
     }
 }

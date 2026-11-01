@@ -9,9 +9,15 @@ import org.flexlb.enums.FlexPriorityType;
 public final class SafeFlexMonitor implements FlexMonitor {
 
     private final FlexMonitor delegate;
+    private final FlexMonitor observations;
 
     private SafeFlexMonitor(FlexMonitor delegate) {
+        this(delegate, delegate);
+    }
+
+    private SafeFlexMonitor(FlexMonitor delegate, FlexMonitor observations) {
         this.delegate = delegate;
+        this.observations = observations;
     }
 
     public static FlexMonitor wrap(FlexMonitor monitor) {
@@ -22,6 +28,21 @@ public final class SafeFlexMonitor implements FlexMonitor {
             return monitor;
         }
         return new SafeFlexMonitor(monitor);
+    }
+
+    /** Keep pull metrics independent of the business reporting backend. */
+    public static FlexMonitor wrap(FlexMonitor monitor, FlexMonitor observations) {
+        return new SafeFlexMonitor(
+                monitor instanceof SafeFlexMonitor safe ? safe.delegate : monitor, observations);
+    }
+
+    @Override
+    public <T> void observe(
+            String name,
+            FlexMetricType type,
+            T source,
+            java.util.function.ToDoubleFunction<T> value) {
+        run(name, () -> observations.observe(name, type, source, value));
     }
 
     @Override

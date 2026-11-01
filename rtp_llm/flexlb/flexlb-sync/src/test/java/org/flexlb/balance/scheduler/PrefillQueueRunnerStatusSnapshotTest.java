@@ -46,7 +46,7 @@ class PrefillQueueRunnerStatusSnapshotTest {
                         SchedulingTestConfig.newConfig(),
                         status,
                         SchedulerTestSupport.dispatcher(),
-                        mock(AbstractRequestScheduler.class));
+                        mock(RequestLifecycle.class));
 
         GroupPlanner.Constraints constraints =
                 endpoint.captureRouteProjectionInputs().queue().constraints();
@@ -82,7 +82,7 @@ class PrefillQueueRunnerStatusSnapshotTest {
                         SchedulingTestConfig.newConfig(),
                         status,
                         SchedulerTestSupport.dispatcher(),
-                        mock(AbstractRequestScheduler.class));
+                        mock(RequestLifecycle.class));
 
         GroupPlanner.Constraints capacity =
                 endpoint.captureRouteProjectionInputs().queue().constraints();

@@ -1,5 +1,7 @@
 package org.flexlb.balance.scheduler;
 
+import org.flexlb.balance.eviction.DefaultDecodePreemption;
+import org.flexlb.balance.eviction.PriorityDecodePreemptionPolicy;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.DecodeResources;
 import org.flexlb.balance.endpoint.EndpointTestSupport;
@@ -49,7 +51,7 @@ import static org.mockito.Mockito.when;
 
 class QueuedDecodeWithdrawalTest {
     private FlexlbConfig config;
-    private AbstractRequestScheduler registry;
+    private RequestLifecycle registry;
     private QueuedRequestScheduler queue;
     private DecodePreemption eviction;
     private DecodeEndpoint decode;
@@ -77,22 +79,25 @@ class QueuedDecodeWithdrawalTest {
                         mock(DeliveryMetricsReporter.class),
                         mock(RequestSchedulerReporter.class),
                         mock(RecentCacheKeyTraceReporter.class));
-        queue = (QueuedRequestScheduler) registry;
+        queue = (QueuedRequestScheduler) registry.scheduler();
         eviction =
-                new DecodePreemption(
+                new DefaultDecodePreemption(
                         SchedulerTestSupport.dispatcher(SchedulerTestSupport.runtime(registry)),
                         SchedulerTestSupport.repository(registry),
-                        SchedulerTestSupport.runtime(registry),
+                        SchedulerTestSupport.runtime(registry).tasks(),
+                        SchedulerTestSupport.runtime(registry).taskTimer(),
+                        SchedulerTestSupport.runtime(registry).signals(),
                         mock(RequestSchedulerReporter.class),
                         service,
-                        registry.decodeAdmissionCapacity);
+                        registry.decodeAdmissionCapacity,
+                        new PriorityDecodePreemptionPolicy());
         org.mockito.Mockito.doReturn(true).when(queue).requeue(any());
         decode =
                 EndpointTestSupport.decode(
                         WorkerStatus.createDiscovered(
                                 RoleType.DECODE, null, "127.0.0.1", 8000, 8001, null),
                         org.flexlb.balance.scheduler.SchedulerTestSupport.repository(
-                                mock(AbstractRequestScheduler.class)));
+                                mock(RequestLifecycle.class)));
     }
 
     @AfterEach
@@ -216,16 +221,25 @@ class QueuedDecodeWithdrawalTest {
                         })
                 .when(queue)
                 .requeue(victim);
-        when(prefill.offerPinned(eq(pin), any(), org.mockito.ArgumentMatchers.any()))
+        when(prefill.offerPinned(
+                        eq(pin),
+                        any(),
+                        org.mockito.ArgumentMatchers.any(),
+                        org.mockito.ArgumentMatchers.any()))
                 .thenReturn(accepted);
         var manager =
-                new DecodePreemption(
+                new DefaultDecodePreemption(
                         SchedulerTestSupport.dispatcher(SchedulerTestSupport.runtime(registry)),
                         org.flexlb.balance.scheduler.SchedulerTestSupport.repository(registry),
-                        org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(registry),
+                        org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(registry).tasks(),
+                        org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(registry)
+                                .taskTimer(),
+                        org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(registry)
+                                .signals(),
                         mock(RequestSchedulerReporter.class),
                         SchedulingTestConfig.configService(config),
-                        SchedulingTestConfig.capacity(config));
+                        SchedulingTestConfig.capacity(config),
+                        new PriorityDecodePreemptionPolicy());
         try (var handle = registry.claimAdmissionHandle(100, future);
                 var admissionCompletion2 = RequestProtocolTestSupport.finishOnExit(handle);
                 var plan =
@@ -250,12 +264,16 @@ class QueuedDecodeWithdrawalTest {
             var result = reservation.join();
             assertEquals(replacement.get(), result.reservation());
             assertTrue(plan.accept(decode, result.reservation()));
-            var scheduler = (QueuedRequestScheduler) context.data().getScheduler();
+            var scheduler = (QueuedRequestScheduler) context.data().getScheduler().scheduler();
             assertTrue(result.committed());
             var placement = scheduler.enqueueRoute(plan);
             var offered = org.mockito.ArgumentCaptor.forClass(RequestRoute.class);
             verify(prefill)
-                    .offerPinned(eq(pin), offered.capture(), org.mockito.ArgumentMatchers.any());
+                    .offerPinned(
+                            eq(pin),
+                            offered.capture(),
+                            org.mockito.ArgumentMatchers.any(),
+                            org.mockito.ArgumentMatchers.any());
             assertEquals(
                     accepted
                             ? org.flexlb.balance.PlacementResult.Status.SUCCESS
@@ -676,8 +694,7 @@ class QueuedDecodeWithdrawalTest {
                 };
         int priority =
                 mismatch.equals("equalPriority") ? 30 : mismatch.equals("lowerPriority") ? 29 : 80;
-        assertNull(
-                ((QueuedRequestScheduler) registry).claimWithdrawal(source, attempted, priority));
+        assertNull(AdmissionHandle.tryBeginPreemption(registry, source, attempted, priority));
         assertSame(item, item.ctx().snapshot().route());
         assertEquals(ContextResult.Phase.OPEN, item.ctx().snapshot().phase());
         assertNotNull(item.ctx().snapshot().route());
@@ -687,8 +704,7 @@ class QueuedDecodeWithdrawalTest {
         assertFalse(item.future().isDone());
         verify(item.prefillEp(), never()).removeQueued(any());
         verify(queue, never()).requeue(any());
-        try (var valid =
-                ((QueuedRequestScheduler) registry).claimWithdrawal(decode, reservation, 80)) {
+        try (var valid = AdmissionHandle.tryBeginPreemption(registry, decode, reservation, 80)) {
             assertNotNull(
                     valid,
                     "rejected attempts must leave the valid withdrawal qualification available");

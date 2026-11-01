@@ -14,7 +14,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class PlacementCapacityWaitQueueTest {
     private final PlacementAvailability availability = new PlacementAvailability();
     private final PlacementCapacityWaitQueue queue =
-            new PlacementCapacityWaitQueue(true, availability);
+            new PlacementCapacityWaitQueue(new OrderedRequestQueue(true).order(), availability);
     private long sequence;
     private static final PlacementKey A = PlacementKey.exact(RoleType.PREFILL, "g", "a:8000");
     private static final PlacementKey B = PlacementKey.exact(RoleType.PREFILL, "g", "b:8000");
@@ -54,8 +54,28 @@ class PlacementCapacityWaitQueueTest {
     }
 
     @Test
+    void customOrderIsSharedAcrossAndWithinCapacityDomains() {
+        var order = new OrderedRequestQueue(false).order().reversed();
+        var waiting = new PlacementCapacityWaitQueue(order, availability);
+        var first = entry(90);
+        var second = entry(50);
+        var third = entry(10);
+        waiting.park(first, A, 0);
+        waiting.park(second, B, 0);
+        waiting.park(third, A, 0);
+        waiting.capacityChanged(A);
+        waiting.capacityChanged(B);
+        List<GlobalQueueEntry> resumed = new ArrayList<>();
+        waiting.resumeReady(2, resumed::add);
+        assertEquals(List.of(third, second), resumed);
+        waiting.remove(third);
+        waiting.resumeReady(1, resumed::add);
+        assertEquals(List.of(third, second, first), resumed);
+    }
+
+    @Test
     void fifoIgnoresPriority() {
-        var fifo = new PlacementCapacityWaitQueue(false, availability);
+        var fifo = new PlacementCapacityWaitQueue(new OrderedRequestQueue(false).order(), availability);
         var first = entry(10);
         var second = entry(90);
         fifo.park(first, A, 0);

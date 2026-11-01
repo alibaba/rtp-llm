@@ -8,7 +8,7 @@ import io.grpc.netty.NettyServerBuilder;
 import io.grpc.stub.StreamObserver;
 import io.netty.channel.EventLoopGroup;
 import io.netty.channel.nio.NioEventLoopGroup;
-import org.flexlb.balance.scheduler.AbstractRequestScheduler;
+import org.flexlb.balance.scheduler.RequestLifecycle;
 import org.flexlb.balance.scheduler.RequestScheduler;
 import org.flexlb.config.ConfigService;
 import org.flexlb.consistency.MasterStatusService;
@@ -513,7 +513,7 @@ class FollowerAsyncForwardingNettyTest {
         private final AtomicInteger rejections = new AtomicInteger();
         private final AtomicInteger channelRejections = new AtomicInteger();
         private final RequestScheduler requestScheduler = mock(RequestScheduler.class);
-        private final AbstractRequestScheduler requestState = mock(AbstractRequestScheduler.class);
+        private final RequestLifecycle requestState = mock(RequestLifecycle.class);
         private final int requestQueueCapacity;
         private final ThreadPoolExecutor requestExecutor;
         private final ThreadPoolExecutor channelExecutor;

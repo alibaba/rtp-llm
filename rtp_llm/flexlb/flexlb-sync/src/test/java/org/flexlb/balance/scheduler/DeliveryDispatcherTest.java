@@ -63,7 +63,7 @@ class DeliveryDispatcherTest {
     private EngineGrpcClient grpcClient;
     private FlexlbConfig config;
     private DeliveryDispatcher dispatcher;
-    private SchedulerRuntime runtime;
+    private SchedulerTestServices runtime;
     private TestCallback callback;
 
     @BeforeEach
@@ -1480,7 +1480,7 @@ class DeliveryDispatcherTest {
                         configService,
                         new org.flexlb.service.monitor.DeliveryMetricsReporter(null));
         runtime =
-                new SchedulerRuntime(
+                new SchedulerTestServices(
                         new RequestRepository(),
                         mock(org.flexlb.balance.endpoint.EndpointRegistry.class),
                         mock(org.flexlb.service.monitor.DeliveryMetricsReporter.class),
@@ -1489,7 +1489,10 @@ class DeliveryDispatcherTest {
                         service,
                         mock(EngineGrpcClient.class));
         if (meters != null) {
-            runtime.deliveries().configureDeliveryMetrics(meters);
+            var reporter =
+                    new org.flexlb.service.monitor.DeliveryMetricsReporter(
+                            new org.flexlb.metric.MicrometerFlexMonitor(meters));
+            reporter.registerExecutor(runtime.deliveries());
         }
         return delivery;
     }
@@ -1511,8 +1514,8 @@ class DeliveryDispatcherTest {
             String reason,
             BiConsumer<RequestRoute, DeliveryResult> observer) {
         for (var item : items) {
-            org.springframework.test.util.ReflectionTestUtils.setField(
-                    item.ctx().data().getScheduler(), "runtime", runtime);
+            org.flexlb.balance.scheduler.SchedulerTestServices.bind(
+                    item.ctx().data().getScheduler(), runtime);
             DeliveryClaim claim = item.ctx().snapshot().delivery().identity();
             if (claim.item() != item) {
                 claim =
@@ -1533,13 +1536,11 @@ class DeliveryDispatcherTest {
             org.mockito.Mockito.doAnswer(
                             call -> {
                                 observer.accept(
-                                        item,
-                                        ((TransportResult) call.getArgument(0)).result());
+                                        item, ((TransportResult) call.getArgument(0)).result());
                                 return null;
                             })
                     .when(item.ctx().data().getScheduler())
-                    .onDeliveryFact(
-                            org.mockito.ArgumentMatchers.isA(TransportResult.class));
+                    .onDeliveryFact(org.mockito.ArgumentMatchers.isA(TransportResult.class));
             org.mockito.Mockito.doAnswer(
                             call -> {
                                 var failed = (PreparationFailure) call.getArgument(0);
@@ -1832,7 +1833,7 @@ class DeliveryDispatcherTest {
         prefill.setDebugInfo(debugInfo);
 
         ctx.data().setFuture(new CompletableFuture<>());
-        SchedulerTestSupport.bindOwner(ctx, mock(AbstractRequestScheduler.class));
+        SchedulerTestSupport.bindOwner(ctx, mock(RequestLifecycle.class));
         long now = System.currentTimeMillis();
         ctx.register(requestId, now, Long.MAX_VALUE, 60_000L);
         var route =

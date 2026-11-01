@@ -18,7 +18,7 @@ import java.util.function.BooleanSupplier;
  * owner closes it. Completion callbacks do not own executor shutdown. The scheduler
  * owns request arbitration, lock checks, deadlines and ACK reporting.
  */
-final class ResponseCompletionExecutor implements AutoCloseable {
+public final class ResponseCompletionExecutor implements AutoCloseable {
 
     private final ThreadLocal<Boolean> completing = new ThreadLocal<>();
     private final ThreadPoolExecutor completionWorkers;
@@ -87,7 +87,7 @@ final class ResponseCompletionExecutor implements AutoCloseable {
         }
     }
 
-    boolean isCompletingOnCurrentThread() {
+    public boolean isCompletingOnCurrentThread() {
         return Boolean.TRUE.equals(completing.get());
     }
 

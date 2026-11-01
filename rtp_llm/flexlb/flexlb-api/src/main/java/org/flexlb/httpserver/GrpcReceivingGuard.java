@@ -64,14 +64,7 @@ public final class GrpcReceivingGuard extends ServerStreamTracer.Factory
 
     GrpcReceivingGuard(
             int limit, int controlLimit, long timeoutMillis, Executor business, Executor control) {
-        this(
-                limit,
-                controlLimit,
-                timeoutMillis,
-                business,
-                control,
-                Long.MAX_VALUE,
-        Long.MAX_VALUE);
+        this(limit, controlLimit, timeoutMillis, business, control, Long.MAX_VALUE, Long.MAX_VALUE);
     }
 
     public GrpcReceivingGuard(
@@ -81,12 +74,12 @@ public final class GrpcReceivingGuard extends ServerStreamTracer.Factory
             Executor business,
             Executor control,
             long scheduleByteLimit,
-      long controlByteLimit) {
+            long controlByteLimit) {
         if (limit <= 0
                 || controlLimit <= 0
                 || timeoutMillis <= 0
-        || scheduleByteLimit <= 0
-        || controlByteLimit <= 0) throw new IllegalArgumentException();
+                || scheduleByteLimit <= 0
+                || controlByteLimit <= 0) throw new IllegalArgumentException();
         this.scheduleByteLimit = scheduleByteLimit;
         this.controlByteLimit = controlByteLimit;
         this.limit = limit;
@@ -183,7 +176,8 @@ public final class GrpcReceivingGuard extends ServerStreamTracer.Factory
         }
         if (!lease.admitted) {
             rejected.incrementAndGet();
-      lease.close(Status.RESOURCE_EXHAUSTED.withDescription("receiving request limit reached"));
+            lease.close(
+                    Status.RESOURCE_EXHAUSTED.withDescription("receiving request limit reached"));
             return Runnable::run;
         }
         long delay = Math.max(0, timeoutNanos - (System.nanoTime() - lease.created));

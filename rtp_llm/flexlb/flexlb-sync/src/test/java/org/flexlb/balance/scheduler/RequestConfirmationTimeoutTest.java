@@ -72,9 +72,12 @@ class RequestConfirmationTimeoutTest {
                         SchedulerTestSupport.repository(projector),
                         reporter,
                         DeliveryTestSupport.route(reporter),
-                        new PlacementAvailability());
+                        new PlacementAvailability(),
+                        org.flexlb.balance.planner.BuiltinGroupPlanner.from(
+                                service.loadBalanceConfig()),
+                        order -> org.flexlb.balance.endpoint.PrefillActiveIndex.ordered(16, order));
         var runtime =
-                new SchedulerRuntime(
+                new SchedulerTestServices(
                         SchedulerTestSupport.repository(requests),
                         endpoints,
                         reporter,

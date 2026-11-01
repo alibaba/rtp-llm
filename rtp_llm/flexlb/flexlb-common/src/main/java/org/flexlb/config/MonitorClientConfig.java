@@ -7,6 +7,7 @@ import org.flexlb.metric.MicrometerFlexMonitor;
 import org.flexlb.metric.NoOpFlexMonitor;
 import org.flexlb.metric.SafeFlexMonitor;
 import org.springframework.beans.factory.config.BeanPostProcessor;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnClass;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingClass;
@@ -23,11 +24,18 @@ import org.springframework.context.annotation.Configuration;
 public class MonitorClientConfig {
 
     @Bean
-    public static BeanPostProcessor safeFlexMonitorPostProcessor() {
+    public static BeanPostProcessor safeFlexMonitorPostProcessor(
+            ObjectProvider<MeterRegistry> registries) {
         return new BeanPostProcessor() {
             @Override
             public Object postProcessAfterInitialization(Object bean, String beanName) {
-                return bean instanceof FlexMonitor monitor ? SafeFlexMonitor.wrap(monitor) : bean;
+                if (!(bean instanceof FlexMonitor monitor)) {
+                    return bean;
+                }
+                MeterRegistry registry = registries.getIfAvailable();
+                return registry == null
+                        ? SafeFlexMonitor.wrap(monitor)
+                        : SafeFlexMonitor.wrap(monitor, new MicrometerFlexMonitor(registry));
             }
         };
     }

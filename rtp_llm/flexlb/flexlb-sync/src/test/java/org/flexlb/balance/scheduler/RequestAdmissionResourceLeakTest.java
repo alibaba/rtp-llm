@@ -39,7 +39,7 @@ import static org.mockito.Mockito.when;
  */
 class RequestAdmissionResourceLeakTest {
     private FlexlbConfig config;
-    private AbstractRequestScheduler lifecycle;
+    private RequestLifecycle lifecycle;
 
     @BeforeEach
     void setUp() {
@@ -122,7 +122,8 @@ class RequestAdmissionResourceLeakTest {
         assertEquals(
                 StrategyErrorType.REQUEST_CANCELLED.getErrorCode(),
                 registered.future().join().getCode());
-        SchedulerTestSupport.awaitRequestWork(lifecycle.runtime);
+        SchedulerTestSupport.awaitRequestWork(
+                org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(lifecycle));
         verify(registered.item().decodeEp(), times(1))
                 .release(
                         registered.item().decodeReservation(),
@@ -148,7 +149,8 @@ class RequestAdmissionResourceLeakTest {
             admission.finish();
         }
         registered.future().join();
-        SchedulerTestSupport.awaitRequestWork(lifecycle.runtime);
+        SchedulerTestSupport.awaitRequestWork(
+                org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(lifecycle));
         verify(registered.item().decodeEp(), times(1))
                 .release(
                         registered.item().decodeReservation(),
@@ -213,17 +215,17 @@ class RequestAdmissionResourceLeakTest {
     }
 
     @Test
-    void queuedPrefillPreemptionReturnsPreemptedAndReleasesDecodeOnce() throws Exception {
+    void queueRejectionReleasesDecodeOnceWithoutAffectingOtherRequests() throws Exception {
         Registered victim = registerItem(61L);
         Registered incoming = registerItem(62L);
         RequestProtocolTestSupport.beginRoutePublication(lifecycle, victim);
-        lifecycle.onQueueEvent(
-                victim.item(), AbstractRequestScheduler.QueueKind.PREEMPTED, incoming.item(), null);
+        lifecycle.onQueueEvent(victim.item(), RequestLifecycle.QueueKind.REJECTED, null);
         Response response = victim.future().get(5, TimeUnit.SECONDS);
-        assertEquals(StrategyErrorType.PRIORITY_PREEMPTED.getErrorCode(), response.getCode());
-        assertEquals("preempted by higher-priority request 62", response.getErrorMessage());
-        lifecycle.onQueueEvent(
-                victim.item(), AbstractRequestScheduler.QueueKind.PREEMPTED, incoming.item(), null);
+        assertEquals(StrategyErrorType.DISPATCH_FAILED.getErrorCode(), response.getCode());
+        assertEquals(
+                "Worker scheduling queue rejected request: endpoint publication failed",
+                response.getErrorMessage());
+        lifecycle.onQueueEvent(victim.item(), RequestLifecycle.QueueKind.REJECTED, null);
         lifecycle.cancel(61L, 0L, CancelReason.CLIENT_CANCELLED);
         verify(victim.item().decodeEp(), times(1))
                 .release(
@@ -289,7 +291,8 @@ class RequestAdmissionResourceLeakTest {
                         ? StrategyErrorType.RESOURCE_EXHAUSTED.getErrorCode()
                         : StrategyErrorType.REQUEST_CANCELLED.getErrorCode(),
                 response.getCode());
-        SchedulerTestSupport.awaitRequestWork(lifecycle.runtime);
+        SchedulerTestSupport.awaitRequestWork(
+                org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(lifecycle));
         assertEquals(0, lifecycle.requests.liveRequestCount());
         org.junit.jupiter.api.Assertions.assertFalse(
                 lifecycle.isAdmissionOpen(71L, registered.future()));

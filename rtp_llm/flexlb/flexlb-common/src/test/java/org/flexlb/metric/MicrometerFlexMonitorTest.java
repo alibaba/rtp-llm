@@ -38,6 +38,39 @@ import static org.mockito.Mockito.when;
  */
 class MicrometerFlexMonitorTest {
 
+    @Test
+    void liveMetricsReadCurrentValuesAndRespectTheAllowlist() {
+        var registry = new SimpleMeterRegistry();
+        try {
+            var monitor = new MicrometerFlexMonitor(registry);
+            var value = new java.util.concurrent.atomic.AtomicLong(4);
+            monitor.observe(
+                    "live.gauge",
+                    FlexMetricType.GAUGE,
+                    value,
+                    java.util.concurrent.atomic.AtomicLong::doubleValue);
+            monitor.observe(
+                    "live.counter",
+                    FlexMetricType.COUNTER,
+                    value,
+                    java.util.concurrent.atomic.AtomicLong::doubleValue);
+            assertEquals(4, registry.get("flexlb.live.gauge").gauge().value());
+            assertEquals(4, registry.get("flexlb.live.counter").functionCounter().count());
+            value.set(9);
+            assertEquals(9, registry.get("flexlb.live.gauge").gauge().value());
+            assertEquals(9, registry.get("flexlb.live.counter").functionCounter().count());
+            MicrometerFlexMonitor.setAllowedMetrics(java.util.Set.of());
+            monitor.observe(
+                    "filtered",
+                    FlexMetricType.GAUGE,
+                    value,
+                    java.util.concurrent.atomic.AtomicLong::doubleValue);
+            assertNull(registry.find("flexlb.filtered").gauge());
+        } finally {
+            registry.close();
+        }
+    }
+
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
     void removalFailureOrCallbackKeepsTheSourceReusable(boolean backendFailure) throws Exception {

@@ -23,14 +23,27 @@ public final class PrefillQueueRunnerTestSupport {
             PrefillEndpoint endpoint,
             FlexlbConfig config,
             DeliveryDispatcher delivery,
-            AbstractRequestScheduler scheduler) {
+            RequestLifecycle scheduler) {
+        return create(
+                key,
+                endpoint,
+                config,
+                delivery,
+                scheduler,
+                org.flexlb.balance.planner.BuiltinGroupPlanner.from(config));
+    }
+
+    public static PrefillQueueRunner create(
+            String key,
+            PrefillEndpoint endpoint,
+            FlexlbConfig config,
+            DeliveryDispatcher delivery,
+            RequestLifecycle scheduler,
+            org.flexlb.balance.planner.GroupPlanner grouping) {
         var runtime = new AtomicReference<PrefillQueueRunner>();
         var index =
                 PrefillActiveIndex.ordered(
-                        16,
-                        config.isPriorityOrdering()
-                                ? PrefillQueueRunner.PRIORITY_QUEUE_ORDER
-                                : PrefillQueueRunner.FIFO_QUEUE_ORDER);
+                        16, QueueExecutionSettings.queueOrder(config.isPriorityOrdering()));
         var state = new PrefillState(new ReentrantLock(), index, System::currentTimeMillis);
         var worker =
                 org.mockito.Mockito.mock(
@@ -39,9 +52,10 @@ public final class PrefillQueueRunnerTestSupport {
                                 .useConstructor(
                                         key,
                                         endpoint,
-                                        QueueExecutionSettings.capture(config),
+                                        QueueExecutionSettings.capture(config, grouping),
                                         delivery,
-                                        state)
+                                        state,
+                                        SchedulerTestSupport.queueDependencies(scheduler, config))
                                 .defaultAnswer(org.mockito.Mockito.CALLS_REAL_METHODS));
         org.mockito.Mockito.doAnswer(
                         call -> {

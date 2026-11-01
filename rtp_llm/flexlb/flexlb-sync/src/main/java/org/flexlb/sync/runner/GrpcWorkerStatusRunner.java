@@ -5,39 +5,19 @@ import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.cache.service.CacheAwareService;
 import org.flexlb.dao.master.EndpointTrace.Stage;
 import org.flexlb.dao.master.WorkerStatus;
-import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.EngineRpcService;
 import org.flexlb.engine.grpc.RoleTypeProtoConverter;
 import org.flexlb.enums.BalanceStatusEnum;
 import org.flexlb.service.grpc.EngineStatusConverter;
 import org.flexlb.service.grpc.WorkerStatusRpcClient;
 import org.flexlb.service.monitor.EngineHealthReporter;
-import org.flexlb.util.IdUtils;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.Executor;
 import java.util.concurrent.TimeUnit;
 
-public class GrpcWorkerStatusRunner implements Runnable {
-
-    private static final Logger logger = LoggerFactory.getLogger("syncLogger");
-
-    private final String ipPort;
-    private final String modelName;
-    private final RoleType roleType;
-    private final WorkerStatus workerStatus;
-    private final WorkerStatus.PollLease pollLease;
-    private final EndpointRegistry endpointRegistry;
-    private final EngineHealthReporter engineHealthReporter;
-    private final WorkerStatusRpcClient workerStatusRpcClient;
-    private final long createTimeUs = TimeUnit.NANOSECONDS.toMicros(System.nanoTime());
-    private final String id = IdUtils.fastUuid();
-    private final long syncRequestTimeoutMs;
-    private final CacheAwareService cacheAwareService;
-    private final Executor callbackExecutor;
+public class GrpcWorkerStatusRunner extends AbstractStatusRunner {
 
     public GrpcWorkerStatusRunner(
             String modelName,
@@ -49,50 +29,37 @@ public class GrpcWorkerStatusRunner implements Runnable {
             long syncRequestTimeoutMs,
             CacheAwareService cacheAwareService,
             Executor callbackExecutor) {
-        this.ipPort = workerStatus.getIpPort();
-        this.modelName = modelName;
-        this.workerStatus = workerStatus;
-        this.pollLease = Objects.requireNonNull(pollLease, "pollLease");
+        super(
+                modelName,
+                workerStatus,
+                pollLease,
+                endpointRegistry,
+                engineHealthReporter,
+                workerStatusRpcClient,
+                cacheAwareService,
+                syncRequestTimeoutMs,
+                callbackExecutor);
         workerStatus.requireStatusPollLease(pollLease);
-        this.endpointRegistry = Objects.requireNonNull(endpointRegistry, "endpointRegistry");
-        this.roleType = workerStatus.getRole();
-        this.engineHealthReporter = engineHealthReporter;
-        this.workerStatusRpcClient = workerStatusRpcClient;
-        this.syncRequestTimeoutMs = syncRequestTimeoutMs;
-        this.cacheAwareService = Objects.requireNonNull(cacheAwareService, "cacheAwareService");
-        this.callbackExecutor = callbackExecutor;
+        Objects.requireNonNull(cacheAwareService, "cacheAwareService");
     }
 
     @Override
-    public void run() {
-        pollLease.trace().record(Stage.RUNNER_STARTED);
-        boolean asyncInitiated = false;
-        try {
-            logger.debug("GrpcWorkerStatusRunner run for {}", ipPort);
-            long startTime = TimeUnit.NANOSECONDS.toMicros(System.nanoTime());
+    protected void startRpc() {
+        logger.debug("GrpcWorkerStatusRunner run for {}", ipPort);
+        long startTime = TimeUnit.NANOSECONDS.toMicros(System.nanoTime());
 
-            long latestFinishedTaskVersion =
-                    workerStatus.appliedStatusCursor().latestFinishedTaskVersion();
+        long latestFinishedTaskVersion =
+                workerStatus.appliedStatusCursor().latestFinishedTaskVersion();
 
-            pollLease.trace().recordRpcStarted(syncRequestTimeoutMs);
-            workerStatusRpcClient
-                    .getWorkerStatusAsync(
-                            workerStatus.getIp(),
-                            workerStatus.getGrpcPort(),
-                            latestFinishedTaskVersion,
-                            syncRequestTimeoutMs,
-                            roleType)
-                    .whenComplete(
-                            (response, failure) -> onRpcCompletion(response, failure, startTime));
-            asyncInitiated = true;
-        } catch (RuntimeException | Error failure) {
-            pollLease.trace().record(Stage.RPC_INITIATION_FAILED, failure);
-            throw failure;
-        } finally {
-            if (!asyncInitiated) {
-                pollLease.close();
-            }
-        }
+        pollLease.trace().recordRpcStarted(requestTimeoutMs);
+        workerStatusRpcClient
+                .getWorkerStatusAsync(
+                        workerStatus.getIp(),
+                        workerStatus.getGrpcPort(),
+                        latestFinishedTaskVersion,
+                        requestTimeoutMs,
+                        roleType)
+                .whenComplete((response, failure) -> onRpcCompletion(response, failure, startTime));
     }
 
     private void onRpcCompletion(
@@ -278,8 +245,10 @@ public class GrpcWorkerStatusRunner implements Runnable {
                     modelName, observation.role().name(), startTime);
             engineHealthReporter.reportStatusCheckerSuccess(
                     modelName,
-                    workerStatus,
-                    endpoint,
+                    workerStatus.topologySnapshot(),
+                    workerStatus.committedEngineObservation(),
+                    workerStatus.pollHealth(),
+                    endpoint == null ? java.util.OptionalLong.empty() : endpoint.tryGetLoadMetric(),
                     observation.runningTasks().size(),
                     observation.finishedTasks().size());
         } catch (Throwable telemetryFailure) {
@@ -323,31 +292,8 @@ public class GrpcWorkerStatusRunner implements Runnable {
                 TimeUnit.NANOSECONDS.toMicros(System.nanoTime()) - startTime);
     }
 
-    private void handleException(Throwable ex) {
-        logger.debug(
-                "[gRPC][{}][{}][{}][{}][{}μs]: {}",
-                id,
-                workerStatus.getSite(),
-                ipPort,
-                modelName,
-                TimeUnit.NANOSECONDS.toMicros(System.nanoTime()) - createTimeUs,
-                "gRPC worker status check failed, msg=" + ex.getMessage());
-        if (logger.isDebugEnabled()) {
-            logger.debug(
-                    "Worker poll failure: endpoint={} generation={} trace={}",
-                    ipPort,
-                    workerStatus.getGenerationId(),
-                    workerStatus.trace().snapshot().compact());
-        }
-        boolean timeout =
-                io.grpc.Status.fromThrowable(ex).getCode() == io.grpc.Status.Code.DEADLINE_EXCEEDED;
-        if (timeout) {
-            logger.debug(
-                    "gRPC worker status check timeout, msg={}, ipPort: {}, rt: {}",
-                    ex.getMessage(),
-                    ipPort,
-                    TimeUnit.NANOSECONDS.toMicros(System.nanoTime()) - createTimeUs);
-        }
+    @Override
+    protected void reportRpcFailure(boolean timeout) {
         engineHealthReporter.reportStatusCheckerFail(
                 modelName,
                 timeout

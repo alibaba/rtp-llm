@@ -2,7 +2,7 @@ package org.flexlb.balance.endpoint;
 
 import org.flexlb.balance.endpoint.DecodeResources.CapacityRelease;
 import org.flexlb.balance.endpoint.DecodeResources.ReservationReleaseResult;
-import org.flexlb.balance.scheduler.AbstractRequestScheduler;
+import org.flexlb.balance.scheduler.RequestLifecycle;
 import org.flexlb.balance.scheduler.PlacementAvailability;
 import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
@@ -132,7 +132,7 @@ class DecodeEndpointAdmissionTest {
                 new DecodeEndpoint(
                         status,
                         org.flexlb.balance.scheduler.SchedulerTestSupport.repository(
-                                mock(AbstractRequestScheduler.class)),
+                                mock(RequestLifecycle.class)),
                         availability);
 
         DecodeResources.ReservationHandle speculative;
@@ -961,7 +961,7 @@ class DecodeEndpointAdmissionTest {
 
     @Test
     void versionedReceivedTaskEmitsActivityWithoutAdvancingAcceptance() {
-        AbstractRequestScheduler events = mock(AbstractRequestScheduler.class);
+        RequestLifecycle events = mock(RequestLifecycle.class);
         endpoint =
                 EndpointTestSupport.decode(
                         status,

@@ -25,7 +25,6 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
-import org.springframework.test.util.ReflectionTestUtils;
 
 import java.util.List;
 import java.util.Map;
@@ -56,7 +55,7 @@ class RequestPreemptionRegressionTest {
     private static final DecodeResources.AdmissionCapacity CAPACITY =
             new DecodeResources.AdmissionCapacity(1L, 100L);
 
-    private AbstractRequestScheduler scheduler;
+    private RequestLifecycle scheduler;
     private RequestContext context;
     private DecodeEndpoint decode;
     private PrefillEndpoint prefill;
@@ -78,11 +77,20 @@ class RequestPreemptionRegressionTest {
                         mock(DeliveryMetricsReporter.class),
                         mock(RequestSchedulerReporter.class),
                         mock(RecentCacheKeyTraceReporter.class));
-        SchedulerTestSupport.timer(scheduler.runtime).close();
-        ReflectionTestUtils.setField(scheduler.runtime, "timer", mock(ExpirationTimer.class));
-        SchedulerTestSupport.responseCompletions(scheduler.runtime).close();
-        ReflectionTestUtils.setField(
-                scheduler.runtime, "responseCompletions", new ResponseCompletionExecutor(1));
+        SchedulerTestSupport.timer(
+                        org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(scheduler))
+                .close();
+        org.flexlb.balance.scheduler.SchedulerTestServices.setDependency(
+                org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(scheduler),
+                "timer",
+                mock(ExpirationTimer.class));
+        SchedulerTestSupport.responseCompletions(
+                        org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(scheduler))
+                .close();
+        org.flexlb.balance.scheduler.SchedulerTestServices.setDependency(
+                org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(scheduler),
+                "responseCompletions",
+                new ResponseCompletionExecutor(1));
         context = RequestProtocolTestSupport.context(config, REQUEST_ID);
         context.data()
                 .setRequest(
@@ -160,9 +168,12 @@ class RequestPreemptionRegressionTest {
                                 route, PrefillState.PrefillRequestStatus.Kind.COMPLETED, 0L));
             }
         } finally {
-            SchedulerTestSupport.timer(scheduler.runtime).close();
-            SchedulerTestSupport.closeRequestExecutors(scheduler.runtime);
-            scheduler.closePlacement();
+            SchedulerTestSupport.timer(
+                            org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(scheduler))
+                    .close();
+            SchedulerTestSupport.closeRequestExecutors(
+                    org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(scheduler));
+            scheduler.scheduler().close();
         }
     }
 
@@ -186,7 +197,11 @@ class RequestPreemptionRegressionTest {
         assertAll(
                 "frontend cancellation progresses while remote ownership remains unresolved",
                 () ->
-                        verify(SchedulerTestSupport.dispatcher(scheduler.runtime), times(1))
+                        verify(
+                                        SchedulerTestSupport.dispatcher(
+                                                org.flexlb.balance.scheduler.SchedulerTestSupport
+                                                        .runtime(scheduler)),
+                                        times(1))
                                 .stop(delivery),
                 () -> {
                     var result = response.getNow(null);
@@ -208,8 +223,7 @@ class RequestPreemptionRegressionTest {
                 () -> assertNotEquals(Phase.CLOSED, context.snapshot().phase()),
                 () ->
                         assertFalse(
-                                scheduler
-                                        .runtime
+                                org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(scheduler)
                                         .signals()
                                         .delivery(delivery)
                                         .toCompletableFuture()
@@ -256,8 +270,7 @@ class RequestPreemptionRegressionTest {
                                 "the Context must retain the unresolved attempt"),
                 () ->
                         assertFalse(
-                                scheduler
-                                        .runtime
+                                org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(scheduler)
                                         .signals()
                                         .preemption(preemption)
                                         .toCompletableFuture()
@@ -344,14 +357,18 @@ class RequestPreemptionRegressionTest {
             status.lock.unlock();
         }
         decode.publishStatus(change);
-        SchedulerTestSupport.awaitRequestWork(scheduler.runtime);
+        SchedulerTestSupport.awaitRequestWork(
+                org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(scheduler));
     }
 
     private void drainResponses() throws Exception {
-        SchedulerTestSupport.awaitRequestWork(scheduler.runtime);
+        SchedulerTestSupport.awaitRequestWork(
+                org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(scheduler));
         var drained = new CompletableFuture<Void>();
         SchedulerTestSupport.responsePublication(
-                        SchedulerTestSupport.responseCompletions(scheduler.runtime))
+                        SchedulerTestSupport.responseCompletions(
+                                org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(
+                                        scheduler)))
                 .submit(
                         () -> {
                             drained.complete(null);

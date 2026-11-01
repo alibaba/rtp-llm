@@ -90,7 +90,15 @@ class PdfusionSchedulingTest {
                                         LinearDeliveryFixture.ack(call.getArgument(2))));
         DeliveryDispatcher delivery = new DeliveryDispatcher(grpc, service, reporter);
         EndpointRegistry endpoints =
-                new EndpointRegistry(service, repository, reporter, delivery, availability);
+                new EndpointRegistry(
+                        service,
+                        repository,
+                        reporter,
+                        delivery,
+                        availability,
+                        org.flexlb.balance.planner.BuiltinGroupPlanner.from(
+                                service.loadBalanceConfig()),
+                        order -> org.flexlb.balance.endpoint.PrefillActiveIndex.ordered(16, order));
         WorkerStatus worker =
                 WorkerStatus.createDiscovered(
                         RoleType.PDFUSION, "g1", "127.0.0.1", 8080, 8081, "test");
@@ -120,26 +128,27 @@ class PdfusionSchedulingTest {
         when(model.requiredRoles()).thenReturn(List.of(RoleType.PDFUSION));
         RequestWorkerSelector router =
                 new RequestWorkerSelector(
+                        directory,
                         new CostBasedPrefillStrategy(
-                                directory,
                                 cache,
-                                mock(EngineHealthReporter.class),
-                                org.mockito.Mockito.mock(CacheMetricsReporter.class),
                                 SchedulingTestConfig.configService(
                                         SchedulingTestConfig.newConfig())),
                         new DecodeSelector(
-                                directory,
                                 SchedulingTestConfig.configService(
                                         SchedulingTestConfig.newConfig()),
                                 SchedulingTestConfig.capacity(
                                         SchedulingTestConfig.configService(
                                                         SchedulingTestConfig.newConfig())
                                                 .loadBalanceConfig())),
-                        new VitWorkerSelector(directory),
+                        new VitWorkerSelector(),
+                        null,
+                        mock(EngineHealthReporter.class),
+                        org.mockito.Mockito.mock(CacheMetricsReporter.class),
+                        SchedulingTestConfig.configService(SchedulingTestConfig.newConfig()),
                         model);
-        SchedulerRuntime runtime =
+        SchedulerTestServices runtime =
                 org.mockito.Mockito.spy(
-                        new SchedulerRuntime(
+                        new SchedulerTestServices(
                                 repository,
                                 endpoints,
                                 reporter,
@@ -147,7 +156,7 @@ class PdfusionSchedulingTest {
                                 delivery,
                                 service,
                                 grpc));
-        AbstractRequestScheduler lifecycle =
+        RequestLifecycle lifecycle =
                 SchedulerTestSupport.create(
                         runtime,
                         service,
@@ -156,7 +165,7 @@ class PdfusionSchedulingTest {
                         router,
                         mock(DecodePreemption.class),
                         availability);
-        RequestScheduler scheduler = lifecycle;
+        RequestScheduler scheduler = lifecycle.scheduler();
         try {
             long requestId = 920001L;
             var context = RequestProtocolTestSupport.context(config, requestId);
@@ -209,7 +218,8 @@ class PdfusionSchedulingTest {
                 worker.lock.unlock();
             }
             endpoint.publishStatus(projection);
-            SchedulerTestSupport.awaitRequestWork(lifecycle.runtime);
+            SchedulerTestSupport.awaitRequestWork(
+                    org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(lifecycle));
             assertEquals(
                     0,
                     endpoint.ownership

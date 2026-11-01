@@ -33,6 +33,9 @@ class SafeFlexMonitorTest {
                 java.util.List.<Consumer<FlexMonitor>>of(
                         monitor -> monitor.register("metric", FlexMetricType.GAUGE),
                         monitor ->
+                                monitor.observe(
+                                        "metric", FlexMetricType.GAUGE, "source", String::length),
+                        monitor ->
                                 monitor.register(
                                         "metric", FlexMetricType.TIMER, FlexPriorityType.PRECISE),
                         monitor -> monitor.register("metric", FlexMetricType.QPS, 17),

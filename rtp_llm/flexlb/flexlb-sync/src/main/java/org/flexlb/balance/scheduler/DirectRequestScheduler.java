@@ -1,5 +1,7 @@
 package org.flexlb.balance.scheduler;
 
+import org.flexlb.balance.scheduler.RequestLifecycle.Publication;
+
 import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.delivery.CapacityBoundary;
 import org.flexlb.balance.endpoint.DecodeResources;
@@ -36,12 +38,31 @@ public final class DirectRequestScheduler extends AbstractRequestScheduler {
 
     DirectRequestScheduler(
             RequestWorkerSelector router,
-            SchedulerRuntime runtime,
+            RequestLifecycle lifecycle,
             FlexlbConfig config,
             DecodeResources.AdmissionCapacity capacity,
             RecentCacheKeyTraceReporter traceReporter) {
-        super(runtime, config, capacity, traceReporter);
+        super(lifecycle);
         this.router = Objects.requireNonNull(router, "router");
+    }
+
+    @Override
+    public void start() {}
+
+    @Override
+    public boolean awaitSchedulingCompletion(long deadlineNanos) {
+        return true; // DIRECT has no pending scheduling queue or background planners.
+    }
+
+    @Override
+    public void close() {}
+
+    @Override
+    public void remove(RequestContext request) {}
+
+    @Override
+    public boolean reschedule(RequestRoute previousRoute) {
+        return false;
     }
 
     @Override
@@ -59,11 +80,12 @@ public final class DirectRequestScheduler extends AbstractRequestScheduler {
         }
         try {
             CompletableFuture<Response> future =
-                    register(context, () -> {}, StrategyErrorType.BATCH_SLO_EXPIRED);
+                    lifecycle.register(context, () -> {}, StrategyErrorType.BATCH_SLO_EXPIRED);
             if (future.isDone()) {
                 return future;
             }
-            AdmissionHandle operation = claimAdmissionHandle(context.data().getRequestId(), future);
+            AdmissionHandle operation =
+                    lifecycle.claimAdmissionHandle(context.data().getRequestId(), future);
             if (operation == null) {
                 return future;
             }
@@ -105,7 +127,7 @@ public final class DirectRequestScheduler extends AbstractRequestScheduler {
                                                                         .getDecision()
                                                                         .getLifetime(),
                                                                 now);
-                                        onDeliveryFact(
+                                        lifecycle.onDeliveryFact(
                                                 new RouteDelivered(
                                                         delivery.claim(), visibility, now));
                                         yield null;
@@ -136,7 +158,7 @@ public final class DirectRequestScheduler extends AbstractRequestScheduler {
                     operation.finish();
                 }
                 if (failure != null) {
-                    publish(context, failure, false);
+                    lifecycle.publish(context, failure, false);
                 }
             }
             return future;
@@ -144,8 +166,8 @@ public final class DirectRequestScheduler extends AbstractRequestScheduler {
             Response response =
                     Response.buildErrorResponse(
                             StrategyErrorType.DISPATCH_FAILED, failure.getMessage());
-            if (context != null && context.data().getScheduler() == this) {
-                publish(context, response, false);
+            if (context != null && context.data().getScheduler() == lifecycle) {
+                lifecycle.publish(context, response, false);
                 return context.data().getFuture();
             }
             return CompletableFuture.completedFuture(response);
@@ -198,7 +220,8 @@ public final class DirectRequestScheduler extends AbstractRequestScheduler {
                 try {
                     PrefillState.CommittedHandoff handoff = null;
                     try {
-                        PlacementResult.Status result = this.commitRoute(route, reservationAttempt);
+                        PlacementResult.Status result =
+                                lifecycle.commitRoute(route, reservationAttempt);
                         if (result != PlacementResult.Status.SUCCESS) {
                             return result == PlacementResult.Status.CLOSED
                                     ? PlacementResult.closed()
@@ -221,7 +244,7 @@ public final class DirectRequestScheduler extends AbstractRequestScheduler {
                         }
                         WorkSnapshot precedingWork = handoff.precedingWork().materialize();
                         var claim =
-                                this.claimDelivery(
+                                lifecycle.claimDelivery(
                                         route,
                                         DeliveryClaimKind.ROUTE_DECISION,
                                         0L,
@@ -236,7 +259,7 @@ public final class DirectRequestScheduler extends AbstractRequestScheduler {
                     } finally {
                         Throwable cleanup = DeliveryDispatcher.closeCommitted(List.of(), handoff);
                         if (cleanup != null) {
-                            runtime.recordFailure(cleanup);
+                            lifecycle.tasks.recordFailure(cleanup);
                         }
                     }
                 } finally {

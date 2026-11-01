@@ -30,15 +30,12 @@ public final class RequestData {
     private volatile Request request;
     private volatile SchedulingMetadata schedulingMetadata;
     private volatile CompletableFuture<Response> future;
-    private volatile AbstractRequestScheduler scheduler;
+    private volatile RequestLifecycle scheduler;
 
     @Getter(lombok.AccessLevel.NONE)
     private volatile FutureTask<GenerateInputPayload> generateInput;
 
     private volatile int generateInputSize;
-
-    @Getter(lombok.AccessLevel.NONE)
-    private volatile boolean registered;
 
     @Setter private Context traceContext;
     @Setter private long grpcEntryTime;
@@ -61,27 +58,30 @@ public final class RequestData {
     }
 
     public synchronized void setRequest(Request value) {
-        checkState(!registered || request == value, "registered request inputs are immutable");
+        checkState(
+                !(future instanceof RequestFuture) || request == value,
+                "registered request inputs are immutable");
         request = Objects.requireNonNull(value, "request");
     }
 
     public synchronized void setSchedulingMetadata(SchedulingMetadata value) {
         checkState(
-                !registered || schedulingMetadata == value,
+                !(future instanceof RequestFuture) || schedulingMetadata == value,
                 "registered scheduling metadata is immutable");
         schedulingMetadata = value;
     }
 
     public synchronized void setFuture(CompletableFuture<Response> value) {
         checkState(
-                !registered && !(value instanceof RequestFuture) || future == value,
+                !(future instanceof RequestFuture) && !(value instanceof RequestFuture)
+                        || future == value,
                 "registered request future cannot be replaced or rebound");
         future = value;
     }
 
     /** Binding happens under the Repository -> Context lock; no callbacks execute here. */
-    synchronized void register(AbstractRequestScheduler owner, RequestFuture response) {
-        checkState(!registered && scheduler == null, "request data already registered");
+    synchronized void register(RequestLifecycle owner, RequestFuture response) {
+        checkState(scheduler == null, "request data already registered");
         Objects.requireNonNull(request, "request");
         Objects.requireNonNull(owner, "scheduler");
         Objects.requireNonNull(response, "response");
@@ -92,7 +92,6 @@ public final class RequestData {
         }
         scheduler = owner;
         future = response;
-        registered = true;
     }
 
     public long getRequestId() {
@@ -125,7 +124,7 @@ public final class RequestData {
 
     /** Parsing remains deferred until delivery, and FutureTask memoizes both value and failure. */
     public synchronized void setGenerateInputPb(ByteString bytes) {
-        checkState(!registered, "registered delivery input is immutable");
+        checkState(!(future instanceof RequestFuture), "registered delivery input is immutable");
         ByteString inputBytes = config.getDispatcher().requiresGenerateInput() ? bytes : null;
         generateInputSize = inputBytes == null ? 0 : inputBytes.size();
         generateInput =

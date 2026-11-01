@@ -541,18 +541,17 @@ final class AutoTpmE2EHarness implements AutoCloseable {
         ModelMetaConfig modelMeta = mock(ModelMetaConfig.class);
         when(modelMeta.requiredRoles()).thenReturn(List.of(RoleType.DECODE, RoleType.PREFILL));
         return new RequestWorkerSelector(
-                new CostBasedPrefillStrategy(
-                        workers,
-                        cache,
-                        healthReporter,
-                        org.mockito.Mockito.mock(CacheMetricsReporter.class),
-                        configService),
+                workers,
+                new CostBasedPrefillStrategy(cache, configService),
                 new DecodeSelector(
-                        workers,
                         configService,
                         new org.flexlb.balance.scheduler.PlacementConfiguration()
                                 .decodeAdmissionCapacity(configService)),
-                new VitWorkerSelector(workers),
+                new VitWorkerSelector(),
+                null,
+                healthReporter,
+                org.mockito.Mockito.mock(CacheMetricsReporter.class),
+                configService,
                 modelMeta);
     }
 

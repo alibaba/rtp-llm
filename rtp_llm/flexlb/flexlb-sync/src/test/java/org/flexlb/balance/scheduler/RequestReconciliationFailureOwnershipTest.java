@@ -52,7 +52,10 @@ class RequestReconciliationFailureOwnershipTest {
                         mock(DeliveryMetricsReporter.class),
                         mock(RequestSchedulerReporter.class),
                         mock(RecentCacheKeyTraceReporter.class));
-        ReflectionTestUtils.setField(owner.runtime, "timer", mock(ExpirationTimer.class));
+        org.flexlb.balance.scheduler.SchedulerTestServices.setDependency(
+                org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(owner),
+                "timer",
+                mock(ExpirationTimer.class));
         RequestProtocolTestSupport.register(owner, context);
         var reservation = new DecodeResources.ReservationHandle(1L, 9721L, 3L);
         var decode = RequestProtocolTestSupport.decodeEndpoint();
@@ -110,8 +113,12 @@ class RequestReconciliationFailureOwnershipTest {
         try {
             RequestProtocolTestSupport.applyPrefillStatus(
                     owner, context, prefill, RoleType.PREFILL, failed);
-            SchedulerTestSupport.awaitRequestWork(owner.runtime);
-            assertSame(transientFailure, ReflectionTestUtils.getField(owner.runtime, "failure"));
+            SchedulerTestSupport.awaitRequestWork(
+                    org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(owner));
+            assertSame(
+                    transientFailure,
+                    org.flexlb.balance.scheduler.SchedulerTestServices.failure(
+                            org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(owner)));
             if (matchingDecodeTerminal) {
                 var retained = context.snapshot();
                 assertSame(registration, retained.preemption().identity());
@@ -141,10 +148,16 @@ class RequestReconciliationFailureOwnershipTest {
                             .get(5L, java.util.concurrent.TimeUnit.SECONDS)
                             .isSuccess());
             assertEquals(0L, owner.requests.liveRequestCount());
-            SchedulerTestSupport.awaitRequestWork(owner.runtime);
+            SchedulerTestSupport.awaitRequestWork(
+                    org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(owner));
             assertEquals(
                     0L,
-                    ((Number) ReflectionTestUtils.getField(owner.runtime, "pendingWork"))
+                    ((Number)
+                                    ReflectionTestUtils.getField(
+                                            org.flexlb.balance.scheduler.SchedulerTestSupport
+                                                    .runtime(owner)
+                                                    .tasks(),
+                                            "pendingWork"))
                             .longValue());
         } finally {
             if (context.snapshot().phase() != Phase.CLOSED) {
@@ -157,9 +170,11 @@ class RequestReconciliationFailureOwnershipTest {
                 RequestProtocolTestSupport.applyPrefillStatus(
                         owner, context, prefill, RoleType.PREFILL, failed);
             }
-            SchedulerTestSupport.awaitRequestWork(owner.runtime);
-            SchedulerTestSupport.closeRequestExecutors(owner.runtime);
-            owner.closePlacement();
+            SchedulerTestSupport.awaitRequestWork(
+                    org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(owner));
+            SchedulerTestSupport.closeRequestExecutors(
+                    org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(owner));
+            owner.scheduler().close();
         }
     }
 }

@@ -91,6 +91,54 @@ class PrefillEndpointTest {
 
     @org.junit.jupiter.params.ParameterizedTest
     @org.junit.jupiter.params.provider.ValueSource(booleans = {false, true})
+    void queuePublicationRejectsChangingItsBoundFacilitiesOrSettings(boolean changeSettings) {
+        var settings =
+                org.flexlb.balance.scheduler.QueueExecutionSettings.capture(
+                        config, org.flexlb.balance.planner.BuiltinGroupPlanner.from(config));
+        var dependencies =
+                org.flexlb.balance.scheduler.SchedulerTestSupport.queueDependencies(
+                        requestRuntime.events(), config);
+        var worker = mock(org.flexlb.balance.scheduler.PrefillQueueRunner.class);
+        org.springframework.test.util.ReflectionTestUtils.setField(endpoint, "queueRunner", worker);
+        org.springframework.test.util.ReflectionTestUtils.setField(
+                endpoint, "queueSettings", settings);
+        org.springframework.test.util.ReflectionTestUtils.setField(
+                endpoint, "queueDependencies", dependencies);
+        var otherSettings =
+                changeSettings
+                        ? new org.flexlb.balance.scheduler.QueueExecutionSettings(
+                                !settings.priorityOrdering(),
+                                settings.dispatcherType(),
+                                settings.grouping(),
+                                settings.maxRequests(),
+                                settings.collectionWaitMs(),
+                                settings.executionBudgetMs())
+                        : settings;
+        var otherDependencies =
+                changeSettings
+                        ? dependencies
+                        : org.flexlb.balance.scheduler.SchedulerTestSupport.queueDependencies(
+                                mock(org.flexlb.balance.scheduler.RequestLifecycle.class),
+                                config);
+        try (var pin = endpoint.tryPinGeneration()) {
+            assertThrows(
+                    IllegalArgumentException.class,
+                    () ->
+                            endpoint.offerPinned(
+                                    pin,
+                                    mock(RequestRoute.class),
+                                    otherSettings,
+                                    otherDependencies));
+            org.mockito.Mockito.verifyNoInteractions(worker);
+            var route = mock(RequestRoute.class);
+            org.mockito.Mockito.when(worker.offer(route)).thenReturn(true);
+            assertTrue(endpoint.offerPinned(pin, route, settings, dependencies));
+            verify(worker).offer(route);
+        }
+    }
+
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(booleans = {false, true})
     void staleOrExpiredQueuedSelectionDoesNotAcquireGenerationHandoff(boolean expired) {
         var local =
                 org.mockito.Mockito.spy(
@@ -180,6 +228,161 @@ class PrefillEndpointTest {
                     direct.ownership.admissionSummary(0, direct.requestLimit).occupiedRequests());
         } finally {
             direct.close();
+        }
+    }
+
+    @Test
+    void projectionCapturesNewModelBeforeTheOwnershipChangeSignal() {
+        PrefillEndpoint learning = createLearningEndpoint();
+        try {
+            var before = learning.captureRouteProjectionInputs();
+            var progress = learning.ownership.progress();
+            var originalModel = before.evaluator();
+            long originalPrediction = originalModel.estimateMs(500L, 200L);
+            var features =
+                    new org.flexlb.balance.prediction.PrefillBatchFeatures(
+                            List.of(
+                                    new org.flexlb.balance.prediction.PrefillBatchFeatures.Item(
+                                            500L, 200L)));
+            for (int sample = 0; sample < 4; sample++) {
+                learning.predictor.learn(features, originalPrediction, 100L);
+            }
+
+            assertSame(progress, learning.ownership.progress());
+            var after = learning.captureRouteProjectionInputs();
+            assertNotSame(before, after);
+            assertNotSame(originalModel, after.evaluator());
+            assertSame(learning.predictor.evaluator(), after.evaluator());
+            assertSame(after, learning.captureRouteProjectionInputs());
+            assertSame(originalModel, before.evaluator());
+            assertEquals(originalPrediction, before.evaluator().estimateMs(500L, 200L));
+            assertEquals(before.ownershipVersion(), after.ownershipVersion());
+            assertSame(before.queue(), after.queue());
+            assertSame(before.work(), after.work());
+        } finally {
+            learning.close();
+        }
+    }
+
+    @Test
+    void modelRefreshDoesNotWaitForUnchangedOwnership() throws Exception {
+        var before = endpoint.captureRouteProjectionInputs();
+        var model = mock(PrefillTimePredictor.Evaluator.class);
+        var predictor = mock(PrefillTimePredictor.class);
+        org.mockito.Mockito.when(predictor.evaluator()).thenReturn(model);
+        org.springframework.test.util.ReflectionTestUtils.setField(
+                endpoint, "predictor", predictor);
+
+        try (var executor = Executors.newVirtualThreadPerTaskExecutor()) {
+            endpoint.ownership.queueGuard().lock();
+            try {
+                var after =
+                        executor.submit(endpoint::captureRouteProjectionInputs)
+                                .get(5, TimeUnit.SECONDS);
+                assertSame(model, after.evaluator());
+                assertSame(before.queue(), after.queue());
+                assertSame(before.work(), after.work());
+            } finally {
+                endpoint.ownership.queueGuard().unlock();
+            }
+        }
+    }
+
+    @ParameterizedTest
+    @CsvSource({"false,false", "false,true", "true,false", "true,true"})
+    void delayedModelCaptureCannotReplaceAConcurrentProjectionCache(
+            boolean warmed, boolean ownershipChanges) throws Exception {
+        if (warmed) {
+            endpoint.captureRouteProjectionInputs();
+        }
+        var oldModel = endpoint.predictor.evaluator();
+        var newModel = mock(PrefillTimePredictor.Evaluator.class);
+        var model = new AtomicReference<>(oldModel);
+        var predictor = mock(PrefillTimePredictor.class);
+        var entered = new CountDownLatch(1);
+        var resume = new CountDownLatch(1);
+        org.mockito.Mockito.when(predictor.evaluator())
+                .thenAnswer(
+                        call -> {
+                            var captured = model.get();
+                            if (captured == oldModel) {
+                                entered.countDown();
+                                assertTrue(resume.await(5, TimeUnit.SECONDS));
+                            }
+                            return captured;
+                        });
+        org.springframework.test.util.ReflectionTestUtils.setField(
+                endpoint, "predictor", predictor);
+        try (var executor = Executors.newVirtualThreadPerTaskExecutor()) {
+            var delayed = executor.submit(endpoint::captureRouteProjectionInputs);
+            try {
+                assertTrue(entered.await(5, TimeUnit.SECONDS));
+                model.set(newModel);
+                if (ownershipChanges) {
+                    endpoint.signal(PrefillEndpoint.Signal.INPUT);
+                }
+                var current = endpoint.captureRouteProjectionInputs();
+                resume.countDown();
+                var older = delayed.get(5, TimeUnit.SECONDS);
+                assertSame(oldModel, older.evaluator());
+                assertSame(current.queue(), older.queue());
+                assertSame(current.work(), older.work());
+                assertSame(current, endpoint.captureRouteProjectionInputs());
+            } finally {
+                resume.countDown();
+            }
+        }
+    }
+
+    @Test
+    void projectionCapturesItsModelOutsideTheOwnershipLock() {
+        var evaluator = endpoint.predictor.evaluator();
+        var predictor = mock(PrefillTimePredictor.class);
+        var captures = new AtomicInteger();
+        org.mockito.Mockito.when(predictor.evaluator())
+                .thenAnswer(
+                        call -> {
+                            assertFalse(endpoint.ownership.lock.isHeldByCurrentThread());
+                            captures.incrementAndGet();
+                            return evaluator;
+                        });
+        org.springframework.test.util.ReflectionTestUtils.setField(
+                endpoint, "predictor", predictor);
+
+        var before = endpoint.captureRouteProjectionInputs();
+        assertSame(before, endpoint.captureRouteProjectionInputs());
+        endpoint.signal(PrefillEndpoint.Signal.INPUT);
+        var after = endpoint.captureRouteProjectionInputs();
+        assertNotSame(before, after);
+        assertSame(evaluator, after.evaluator());
+        assertEquals(3, captures.get());
+    }
+
+    @Test
+    void projectionUsesTheActualDispatcherModeInsteadOfTheConfiguredMode() {
+        var dispatcher = mock(DeliveryDispatcher.class);
+        org.mockito.Mockito.when(dispatcher.mode())
+                .thenReturn(org.flexlb.config.DispatcherConfig.Type.NON_BATCH);
+        var actual =
+                new PrefillEndpoint(
+                        EndpointTestSupport.workerStatus(
+                                RoleType.PREFILL, "127.0.0.18", 8080, 8090),
+                        config,
+                        dispatcher,
+                        endpointReporter,
+                        new org.flexlb.balance.scheduler.PlacementAvailability(),
+                        org.flexlb.balance.planner.BuiltinGroupPlanner.from(config),
+                        order -> PrefillActiveIndex.ordered(16, order));
+        try {
+            var inputs = actual.captureRouteProjectionInputs();
+            assertEquals(
+                    org.flexlb.config.DispatcherConfig.Type.BATCH,
+                    config.getDispatcher().getType());
+            assertEquals(org.flexlb.config.DispatcherConfig.Type.NON_BATCH, inputs.deliveryMode());
+            assertSame(actual.predictor.evaluator(), inputs.evaluator());
+            assertSame(inputs, actual.captureRouteProjectionInputs());
+        } finally {
+            actual.close();
         }
     }
 
@@ -593,11 +796,15 @@ class PrefillEndpointTest {
 
         assertDoesNotThrow(() -> reportRejectedBatchMember(endpoint, 1L, 2L));
         assertEquals(
-                360L,
-                endpoint.captureRouteProjectionInputs()
-                        .work()
-                        .totalRemainingWorkMs()
-                        .orElseThrow());
+                360L, endpoint.ownership.committedSnapshot().totalRemainingWorkMs().orElseThrow());
+        var cachedSource =
+                org.springframework.test.util.ReflectionTestUtils.getField(
+                        endpoint, "projectionSource");
+        assertThrows(IllegalStateException.class, endpoint::captureRouteProjectionInputs);
+        assertSame(
+                cachedSource,
+                org.springframework.test.util.ReflectionTestUtils.getField(
+                        endpoint, "projectionSource"));
         assertEquals(
                 1L,
                 endpoint.ownership.admissionSummary(0, endpoint.requestLimit).occupiedRequests());
@@ -850,8 +1057,9 @@ class PrefillEndpointTest {
         verify(endpointReporter)
                 .reportPrefillInflight(
                         eq("127.0.0.1"),
-                        org.mockito.ArgumentMatchers.argThat(
-                                stats -> stats.maxObservedAgeMs() >= 10));
+                        org.mockito.ArgumentMatchers.anyInt(),
+                        org.mockito.ArgumentMatchers.anyInt(),
+                        org.mockito.ArgumentMatchers.longThat(age -> age >= 10));
     }
 
     @Test
@@ -868,8 +1076,9 @@ class PrefillEndpointTest {
         verify(endpointReporter)
                 .reportPrefillInflight(
                         eq("127.0.0.1"),
-                        org.mockito.ArgumentMatchers.argThat(
-                                stats -> stats.maxObservedAgeMs() >= 20));
+                        org.mockito.ArgumentMatchers.anyInt(),
+                        org.mockito.ArgumentMatchers.anyInt(),
+                        org.mockito.ArgumentMatchers.longThat(age -> age >= 20));
     }
 
     @Test
@@ -1789,8 +1998,13 @@ class PrefillEndpointTest {
                         org.flexlb.balance.scheduler.SchedulerTestSupport.repository(
                                 runtime.events()),
                         endpointReporter);
-        routeEndpoint.enableQueueRuntime(
-                org.flexlb.balance.scheduler.QueueExecutionSettings.capture(routeConfig));
+        EndpointTestSupport.enableQueueRuntime(
+                routeEndpoint,
+                org.flexlb.balance.scheduler.QueueExecutionSettings.capture(
+                        routeConfig,
+                        org.flexlb.balance.planner.BuiltinGroupPlanner.from(routeConfig)),
+                org.flexlb.balance.scheduler.SchedulerTestSupport.queueDependencies(
+                        runtime.events(), routeConfig));
         org.flexlb.balance.scheduler.DeliveryTestSupport.afterSelection(
                 EndpointTestSupport.queueRunner(routeEndpoint),
                 items -> {
@@ -1843,8 +2057,13 @@ class PrefillEndpointTest {
                         org.flexlb.balance.scheduler.SchedulerTestSupport.repository(
                                 runtime.events()),
                         endpointReporter);
-        routeEndpoint.enableQueueRuntime(
-                org.flexlb.balance.scheduler.QueueExecutionSettings.capture(routeConfig));
+        EndpointTestSupport.enableQueueRuntime(
+                routeEndpoint,
+                org.flexlb.balance.scheduler.QueueExecutionSettings.capture(
+                        routeConfig,
+                        org.flexlb.balance.planner.BuiltinGroupPlanner.from(routeConfig)),
+                org.flexlb.balance.scheduler.SchedulerTestSupport.queueDependencies(
+                        runtime.events(), routeConfig));
         org.flexlb.balance.scheduler.DeliveryTestSupport.afterSelection(
                 EndpointTestSupport.queueRunner(routeEndpoint),
                 items -> {

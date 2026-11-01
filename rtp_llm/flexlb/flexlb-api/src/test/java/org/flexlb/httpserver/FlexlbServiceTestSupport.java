@@ -1,6 +1,6 @@
 package org.flexlb.httpserver;
 
-import org.flexlb.balance.scheduler.AbstractRequestScheduler;
+import org.flexlb.balance.scheduler.RequestLifecycle;
 import org.flexlb.balance.scheduler.RequestContext;
 import org.flexlb.balance.scheduler.RequestRepository;
 import org.flexlb.balance.scheduler.RequestScheduler;
@@ -26,7 +26,8 @@ final class FlexlbServiceTestSupport {
             org.mockito.Mockito.doCallRealMethod().when(leadership).shouldForwardToMaster();
         }
         if (org.mockito.Mockito.mockingDetails(scheduler).isMock()
-                && !(scheduler instanceof AbstractRequestScheduler)) {
+                && !(scheduler instanceof org.flexlb.balance.scheduler.QueuedRequestScheduler)
+                && !(scheduler instanceof org.flexlb.balance.scheduler.DirectRequestScheduler)) {
             org.mockito.Mockito.lenient()
                     .doAnswer(
                             call -> {

@@ -39,6 +39,7 @@ class SubmissionShutdownDeadlockTest {
     void stoppedSubmissionHoldingAnExternalLockMustNotWaitBehindDrain(boolean queued)
             throws Exception {
         try (Fixture f = new Fixture(queued)) {
+            var repository = f.runtime.requests();
             var beforeAcceptingReturn = new CountDownLatch(1);
             var resumeAcceptingReturn = new CountDownLatch(1);
             var paused = new AtomicBoolean();
@@ -122,8 +123,8 @@ class SubmissionShutdownDeadlockTest {
                                 }
                                 return accepting;
                             })
-                    .when(f.runtime)
-                    .isAccepting();
+                    .when(repository)
+                    .isStopping();
             Thread shutdown =
                     Thread.ofPlatform()
                             .daemon()
@@ -141,7 +142,8 @@ class SubmissionShutdownDeadlockTest {
                 active.start();
                 assertTrue(activeEntered.await(3, TimeUnit.SECONDS));
                 late.start();
-                // Pause after the first intake check; registration must recheck the Runtime gate.
+                // Pause after the first intake check; registration must recheck the repository
+                // gate.
                 assertTrue(beforeAcceptingReturn.await(3, TimeUnit.SECONDS));
                 assertNull(
                         lateContext.data().getScheduler(),
@@ -191,8 +193,8 @@ class SubmissionShutdownDeadlockTest {
     private static final class Fixture implements AutoCloseable {
         final FlexlbConfig config = SchedulingTestConfig.newConfig();
         final RequestWorkerSelector router = mock(RequestWorkerSelector.class);
-        final SchedulerRuntime runtime;
-        final AbstractRequestScheduler scheduler;
+        final SchedulerTestServices runtime;
+        final RequestScheduler scheduler;
 
         Fixture(boolean queued) {
             if (queued) {
@@ -206,8 +208,8 @@ class SubmissionShutdownDeadlockTest {
             var reporter = mock(DeliveryMetricsReporter.class);
             runtime =
                     spy(
-                            new SchedulerRuntime(
-                                    new RequestRepository(),
+                            new SchedulerTestServices(
+                                    spy(new RequestRepository()),
                                     mock(EndpointRegistry.class),
                                     reporter,
                                     mock(RequestSchedulerReporter.class),
@@ -215,17 +217,22 @@ class SubmissionShutdownDeadlockTest {
                                     service,
                                     mock(EngineGrpcClient.class)));
             scheduler =
-                    (AbstractRequestScheduler)
-                            PlacementConfiguration.create(
-                                    runtime,
+                    PlacementConfiguration.create(
+                            runtime.newLifecycle(
                                     config,
-                                    router,
-                                    reporter,
-                                    mock(DecodePreemption.class),
-                                    new PlacementAvailability(),
                                     SchedulingTestConfig.capacity(config),
                                     org.mockito.Mockito.mock(
-                                            org.flexlb.service.RecentCacheKeyTraceReporter.class));
+                                            org.flexlb.service.RecentCacheKeyTraceReporter.class)),
+                            config,
+                            router,
+                            reporter,
+                            mock(DecodePreemption.class),
+                            new PlacementAvailability(),
+                            SchedulingTestConfig.capacity(config),
+                            org.mockito.Mockito.mock(
+                                    org.flexlb.service.RecentCacheKeyTraceReporter.class),
+                            org.flexlb.balance.planner.BuiltinGroupPlanner.from(config),
+                            new OrderedRequestQueue(config.isPriorityOrdering()));
             runtime.registerScheduler(scheduler);
         }
 

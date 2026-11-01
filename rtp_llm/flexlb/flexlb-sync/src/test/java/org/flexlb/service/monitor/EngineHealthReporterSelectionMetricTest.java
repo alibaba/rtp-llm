@@ -1,11 +1,8 @@
 package org.flexlb.service.monitor;
 
-import io.netty.channel.EventLoopGroup;
-import org.flexlb.balance.endpoint.EndpointRegistry;
-import org.flexlb.dao.master.CacheStatus;
+import org.flexlb.balance.endpoint.EndpointStats;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
-import org.flexlb.engine.grpc.EngineGrpcClient;
 import org.flexlb.enums.FlexMetricType;
 import org.flexlb.enums.FlexPriorityType;
 import org.flexlb.metric.FlexMetricTags;
@@ -17,7 +14,6 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
-import reactor.netty.resources.LoopResources;
 
 import static org.flexlb.constant.MetricConstant.CACHE_AVAILABLE_KV_CACHE_TOKENS;
 import static org.flexlb.constant.MetricConstant.CACHE_BLOCK_SIZE;
@@ -42,22 +38,13 @@ import static org.mockito.Mockito.when;
 class EngineHealthReporterSelectionMetricTest {
 
     @Mock private FlexMonitor monitor;
-    @Mock private EngineGrpcClient engineGrpcClient;
-    @Mock private LoopResources loopResources;
-    @Mock private EventLoopGroup serverWorker;
-    @Mock private EventLoopGroup serverSelector;
-    @Mock private EventLoopGroup grpcEventLoop;
-    @Mock private EndpointRegistry workerDirectory;
+    @Mock private EndpointStats workerDirectory;
 
     private EngineHealthReporter reporter;
 
     @BeforeEach
     void setUp() {
-        when(loopResources.onServer(true)).thenReturn(serverWorker);
-        when(loopResources.onServerSelect(true)).thenReturn(serverSelector);
-        when(engineGrpcClient.getEventLoopGroup()).thenReturn(grpcEventLoop);
-        reporter =
-                new EngineHealthReporter(monitor, engineGrpcClient, loopResources, workerDirectory);
+        reporter = new EngineHealthReporter(monitor, workerDirectory);
     }
 
     @ParameterizedTest
@@ -93,22 +80,21 @@ class EngineHealthReporterSelectionMetricTest {
     @ParameterizedTest
     @ValueSource(booleans = {true, false})
     void cacheMetricsKeepEngineAndRoleDimensions(boolean populated) {
-        WorkerStatus worker = mock(WorkerStatus.class);
         var topology = mock(WorkerStatus.TopologySnapshot.class);
         var observation = mock(WorkerStatus.EngineObservation.class);
-        when(worker.topologySnapshot()).thenReturn(topology);
-        when(worker.committedEngineObservation()).thenReturn(observation);
         when(topology.ip()).thenReturn("10.0.0.1");
         when(observation.role()).thenReturn(RoleType.PREFILL);
         if (populated) {
-            CacheStatus cache = mock(CacheStatus.class);
-            when(worker.getCacheStatus()).thenReturn(cache);
-            when(cache.getBlockSize()).thenReturn(16L);
-            when(cache.getCacheKeySize()).thenReturn(7L);
             when(observation.totalKvCacheTokens()).thenReturn(100L);
             when(observation.availableKvCacheTokens()).thenReturn(40L);
         }
-        reporter.reportCacheStatusCheckerSuccess("model", worker, populated ? 20L : 0L);
+        reporter.reportCacheStatusCheckerSuccess(
+                "model",
+                topology,
+                observation,
+                populated ? 20L : 0L,
+                populated ? 16L : null,
+                populated ? 7L : null);
         FlexMetricTags engine =
                 FlexMetricTags.of("model", "model", "engineIp", "10.0.0.1", "role", "PREFILL");
         FlexMetricTags role = FlexMetricTags.of("model", "model", "role", "PREFILL");

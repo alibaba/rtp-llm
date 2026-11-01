@@ -28,7 +28,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * Exact-value contracts for {@link EvictionPlanner#planDecode}: the frozen
+ * Exact-value contracts for {@link PriorityDecodePreemptionPolicy#planDecode}: the frozen
  * decode admission recompute of {@code current − victims + incoming} for
  * slot and KV capacity.
  *
@@ -42,8 +42,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  *   <li>Cost = h × f(priority) × g(phase) [× lengthWaste for KV], with exact numeric values.</li>
  * </ul>
  */
-@DisplayName("EvictionPlanner.planDecode recompute contracts")
-class EvictionPlannerDecodeContractTest {
+@DisplayName("PriorityDecodePreemptionPolicy.planDecode recompute contracts")
+class PriorityDecodePreemptionPolicyTest {
 
     @Test
     void negativeHarmPropagatesDiagnosticFormattingFailure() {
@@ -173,7 +173,8 @@ class EvictionPlannerDecodeContractTest {
             DecodeResources.ResourceSnapshot snapshot,
             PreemptionConfig policy,
             Map<String, String> failures) {
-        return EvictionPlanner.planDecode(request, priority, capacity, snapshot, policy, failures)
+        return new PriorityDecodePreemptionPolicy()
+                .planDecode(request, priority, capacity, snapshot, policy, failures)
                 .proposal();
     }
 
@@ -289,13 +290,18 @@ class EvictionPlannerDecodeContractTest {
             Map<String, String> f = new HashMap<>();
             var ep = endpoint(500L, 1000L, 2, 4L, List.of());
             var decision =
-                    EvictionPlanner.planDecode(
-                            Request.builder().requestId(99L).seqLen(200L).maxNewTokens(0).build(),
-                            70,
-                            ep.capacity(),
-                            ep.snapshot(),
-                            engineOwned(),
-                            f);
+                    new PriorityDecodePreemptionPolicy()
+                            .planDecode(
+                                    Request.builder()
+                                            .requestId(99L)
+                                            .seqLen(200L)
+                                            .maxNewTokens(0)
+                                            .build(),
+                                    70,
+                                    ep.capacity(),
+                                    ep.snapshot(),
+                                    engineOwned(),
+                                    f);
             assertTrue(decision.deficit().fits());
             assertNull(decision.evictionCase());
             assertNull(decision.proposal());
@@ -327,13 +333,18 @@ class EvictionPlannerDecodeContractTest {
             Map<String, String> f = new HashMap<>();
             var ep = endpoint(1000L, 0L, 1, 1L, List.of(accepted(1L, 70, 128L)));
             var decision =
-                    EvictionPlanner.planDecode(
-                            Request.builder().requestId(99L).seqLen(0L).maxNewTokens(0).build(),
-                            70,
-                            ep.capacity(),
-                            ep.snapshot(),
-                            engineOwned(),
-                            f);
+                    new PriorityDecodePreemptionPolicy()
+                            .planDecode(
+                                    Request.builder()
+                                            .requestId(99L)
+                                            .seqLen(0L)
+                                            .maxNewTokens(0)
+                                            .build(),
+                                    70,
+                                    ep.capacity(),
+                                    ep.snapshot(),
+                                    engineOwned(),
+                                    f);
             assertFalse(decision.deficit().fits());
             assertEquals(DecodeEvictionProposal.CASE_SLOT, decision.evictionCase());
             assertNull(decision.proposal());
@@ -344,13 +355,18 @@ class EvictionPlannerDecodeContractTest {
         void slotEvictionCanAlsoSatisfyKvDeficit() {
             var ep = endpoint(100L, 1000L, 1, 1L, List.of(accepted(1L, 30, 512L)));
             var decision =
-                    EvictionPlanner.planDecode(
-                            Request.builder().requestId(99L).seqLen(300L).maxNewTokens(0).build(),
-                            70,
-                            ep.capacity(),
-                            ep.snapshot(),
-                            engineOwned(),
-                            new HashMap<>());
+                    new PriorityDecodePreemptionPolicy()
+                            .planDecode(
+                                    Request.builder()
+                                            .requestId(99L)
+                                            .seqLen(300L)
+                                            .maxNewTokens(0)
+                                            .build(),
+                                    70,
+                                    ep.capacity(),
+                                    ep.snapshot(),
+                                    engineOwned(),
+                                    new HashMap<>());
             assertEquals(DecodeEvictionProposal.CASE_SLOT_AND_KV, decision.evictionCase());
             assertEquals(DecodeEvictionProposal.CASE_SLOT, decision.proposal().evictionCase());
             assertEquals(List.of(1L), victimIds(decision.proposal()));

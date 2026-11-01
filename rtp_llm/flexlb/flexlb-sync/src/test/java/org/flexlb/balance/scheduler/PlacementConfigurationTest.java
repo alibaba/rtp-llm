@@ -72,8 +72,7 @@ class PlacementConfigurationTest {
             spring.register(
                     PlacementAvailability.class,
                     RequestRepository.class,
-                    PlacementConfiguration.class,
-                    SchedulerRuntime.class);
+                    PlacementConfiguration.class);
             spring.refresh();
 
             assertEquals(1, spring.getBeansOfType(DeliveryDispatcher.class).size());
@@ -96,8 +95,15 @@ class PlacementConfigurationTest {
             assertEquals(
                     StrategyErrorType.NO_PREFILL_WORKER.getErrorCode(),
                     future.get(3, TimeUnit.SECONDS).getCode());
+            repository.closeRegistration();
+            scheduler.close();
+            scheduler.lifecycle().stopAdmissionsAndAwaitCompletion();
+            spring.getBean(ExpirationTimer.class).close();
+            spring.getBean(RequestTaskPool.class).close();
+            spring.getBean(ResponseCompletionExecutor.class).close();
+            spring.getBean(ScheduledTaskTimer.class).close();
+            spring.getBean(DeliveryExecution.class).awaitDeliveries();
         }
-        assertTrue(repository.isClosed());
         assertTrue(repository.isClosed());
     }
 }

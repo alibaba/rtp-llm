@@ -16,23 +16,107 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class SchedulerRequestWorkTest {
+    @Test
+    void inlineOwnerCanHandOffCleanupAfterCloseStopsNewSources() throws Exception {
+        var runtime = runtime();
+        var context = requestContext(993011L);
+        var registration = runtime.tasks.registerRequestWork(context);
+        var entered = new CountDownLatch(1);
+        var release = new CountDownLatch(1);
+        var closed = new java.util.concurrent.CompletableFuture<Void>();
+        var closer =
+                new Thread(
+                        () -> {
+                            try {
+                                SchedulerTestSupport.closeRequestWork(runtime);
+                                closed.complete(null);
+                            } catch (Throwable failure) {
+                                closed.completeExceptionally(failure);
+                            }
+                        });
+        try {
+            closer.start();
+            RequestProtocolTestSupport.awaitCondition(
+                    () -> closer.getState() == Thread.State.WAITING);
+            assertStoppedSource(runtime, context);
+            var caller = Thread.currentThread();
+            registration.runInline(
+                    () -> {
+                        org.junit.jupiter.api.Assertions.assertSame(caller, Thread.currentThread());
+                        assertStoppedSource(runtime, requestContext(993012L));
+                        assertThrows(
+                                IllegalStateException.class,
+                                () ->
+                                        runtime.shutdown(
+                                                ShutdownMode.IMMEDIATE, java.time.Duration.ZERO));
+                        runtime.tasks()
+                                .execute(
+                                        context,
+                                        () -> {
+                                            entered.countDown();
+                                            RequestProtocolTestSupport.await(release);
+                                        });
+                    });
+            registration.close();
+            assertStoppedSource(runtime, context);
+            assertTrue(entered.await(5, TimeUnit.SECONDS));
+            assertFalse(
+                    closed.isDone(),
+                    "drain includes the exact cleanup handed off by the inline owner");
+            release.countDown();
+            closed.get(5, TimeUnit.SECONDS);
+            assertEquals(0L, ReflectionTestUtils.getField(runtime.tasks(), "pendingWork"));
+        } finally {
+            registration.close();
+            release.countDown();
+            closer.join(5_000);
+            close(runtime);
+        }
+    }
+
+    @Test
+    void inlineFailureReleasesItsOwnerAndRestoresTheCaller() {
+        var runtime = runtime();
+        var failure = new IllegalStateException("inline failure");
+        try {
+            try (var registration = runtime.tasks.registerRequestWork(requestContext(993013L))) {
+                org.junit.jupiter.api.Assertions.assertSame(
+                        failure,
+                        assertThrows(
+                                IllegalStateException.class,
+                                () ->
+                                        registration.runInline(
+                                                () -> {
+                                                    throw failure;
+                                                })));
+            }
+            assertEquals(0L, ReflectionTestUtils.getField(runtime.tasks(), "pendingWork"));
+            var executing =
+                    (ThreadLocal<?>)
+                            ReflectionTestUtils.getField(runtime.tasks(), "executingRequest");
+            org.junit.jupiter.api.Assertions.assertNull(executing.get());
+        } finally {
+            close(runtime);
+        }
+    }
 
     @Test
     void workerRetainsPlatformDaemonNameAndInheritedContext() throws Exception {
         InheritableThreadLocal<String> inherited = new InheritableThreadLocal<>();
         inherited.set("request-context");
-        SchedulerRuntime executor = runtime();
+        SchedulerTestServices executor = runtime();
         CountDownLatch ran = new CountDownLatch(1);
         AtomicReference<Thread> worker = new AtomicReference<>();
         AtomicReference<String> observedContext = new AtomicReference<>();
         try {
-            executor.executeRequestWork(
-                    requestContext(993000L),
-                    () -> {
-                        worker.set(Thread.currentThread());
-                        observedContext.set(inherited.get());
-                        ran.countDown();
-                    });
+            executor.tasks()
+                    .execute(
+                            requestContext(993000L),
+                            () -> {
+                                worker.set(Thread.currentThread());
+                                observedContext.set(inherited.get());
+                                ran.countDown();
+                            });
             assertTrue(ran.await(5, TimeUnit.SECONDS));
             assertEquals("request-work-1", worker.get().getName());
             assertTrue(worker.get().isDaemon());
@@ -53,22 +137,23 @@ class SchedulerRequestWorkTest {
         CountDownLatch release = new CountDownLatch(1);
         CountDownLatch sameRequestFinished = new CountDownLatch(1);
         CountDownLatch independentFinished = new CountDownLatch(1);
-        SchedulerRuntime executor = runtime();
+        SchedulerTestServices executor = runtime();
         Thread closer = null;
         try {
-            executor.executeRequestWork(
-                    blockedContext,
-                    () -> {
-                        started.countDown();
-                        try {
-                            assertTrue(release.await(5, TimeUnit.SECONDS));
-                        } catch (InterruptedException error) {
-                            throw new AssertionError(error);
-                        }
-                    });
+            executor.tasks()
+                    .execute(
+                            blockedContext,
+                            () -> {
+                                started.countDown();
+                                try {
+                                    assertTrue(release.await(5, TimeUnit.SECONDS));
+                                } catch (InterruptedException error) {
+                                    throw new AssertionError(error);
+                                }
+                            });
             assertTrue(started.await(5, TimeUnit.SECONDS));
-            executor.executeRequestWork(blockedContext, sameRequestFinished::countDown);
-            executor.executeRequestWork(independentContext, independentFinished::countDown);
+            executor.tasks().execute(blockedContext, sameRequestFinished::countDown);
+            executor.tasks().execute(independentContext, independentFinished::countDown);
             assertTrue(independentFinished.await(5, TimeUnit.SECONDS));
             assertTrue(
                     sameRequestFinished.await(5, TimeUnit.SECONDS),
@@ -91,14 +176,14 @@ class SchedulerRequestWorkTest {
 
     @Test
     void rejectedPoolTaskIsReportedToTheCaller() {
-        SchedulerRuntime executor = runtime();
+        SchedulerTestServices executor = runtime();
         ExecutorService workers =
-                (ExecutorService) ReflectionTestUtils.getField(executor, "requestWorkers");
+                (ExecutorService) ReflectionTestUtils.getField(executor.tasks(), "requestWorkers");
         workers.shutdown();
         try {
             assertThrows(
                     RuntimeException.class,
-                    () -> executor.executeRequestWork(requestContext(993003L), () -> {}));
+                    () -> executor.tasks().execute(requestContext(993003L), () -> {}));
         } finally {
             close(executor);
         }
@@ -106,16 +191,17 @@ class SchedulerRequestWorkTest {
 
     @Test
     void failedFactDoesNotPreventLaterFactOrDrain() throws Exception {
-        SchedulerRuntime executor = runtime();
+        SchedulerTestServices executor = runtime();
         CountDownLatch later = new CountDownLatch(1);
         try {
             RequestContext requestContext = requestContext(993004L);
-            executor.executeRequestWork(
-                    requestContext,
-                    () -> {
-                        throw new IllegalStateException("isolated fact");
-                    });
-            executor.executeRequestWork(requestContext, later::countDown);
+            executor.tasks()
+                    .execute(
+                            requestContext,
+                            () -> {
+                                throw new IllegalStateException("isolated fact");
+                            });
+            executor.tasks().execute(requestContext, later::countDown);
             assertTrue(later.await(5, TimeUnit.SECONDS));
             SchedulerTestSupport.closeRequestWork(executor);
             assertEquals(
@@ -130,7 +216,7 @@ class SchedulerRequestWorkTest {
     @org.junit.jupiter.params.provider.ValueSource(booleans = {false, true})
     @org.junit.jupiter.api.Timeout(15)
     void drainWaitsForRunningAndReentrantFacts(boolean close) throws Exception {
-        SchedulerRuntime executor = runtime();
+        SchedulerTestServices executor = runtime();
         RequestContext context = requestContext(993005L);
         CountDownLatch entered = new CountDownLatch(1);
         CountDownLatch release = new CountDownLatch(1);
@@ -152,18 +238,20 @@ class SchedulerRequestWorkTest {
         Thread waiter = new Thread(waitForDrain);
         Thread concurrentWaiter = new Thread(waitForDrain);
         try {
-            executor.executeRequestWork(
-                    context,
-                    () -> {
-                        entered.countDown();
-                        RequestProtocolTestSupport.await(release);
-                        executor.executeRequestWork(
-                                context,
-                                () -> {
-                                    nestedEntered.countDown();
-                                    RequestProtocolTestSupport.await(releaseNested);
-                                });
-                    });
+            executor.tasks()
+                    .execute(
+                            context,
+                            () -> {
+                                entered.countDown();
+                                RequestProtocolTestSupport.await(release);
+                                executor.tasks()
+                                        .execute(
+                                                context,
+                                                () -> {
+                                                    nestedEntered.countDown();
+                                                    RequestProtocolTestSupport.await(releaseNested);
+                                                });
+                            });
             assertTrue(entered.await(5, TimeUnit.SECONDS));
             waiter.start();
             concurrentWaiter.start();
@@ -186,14 +274,16 @@ class SchedulerRequestWorkTest {
             assertEquals(2, interruptsPreserved.get());
             if (close) {
                 assertTrue(
-                        ((ExecutorService) ReflectionTestUtils.getField(executor, "requestWorkers"))
+                        ((ExecutorService)
+                                        ReflectionTestUtils.getField(
+                                                executor.tasks(), "requestWorkers"))
                                 .isTerminated());
                 org.junit.jupiter.api.Assertions.assertThrows(
                         IllegalStateException.class,
-                        () -> executor.executeRequestWork(context, () -> {}));
+                        () -> executor.tasks().execute(context, () -> {}));
             } else {
                 CountDownLatch reopened = new CountDownLatch(1);
-                executor.executeRequestWork(context, reopened::countDown);
+                executor.tasks().execute(context, reopened::countDown);
                 assertTrue(
                         reopened.await(5, TimeUnit.SECONDS),
                         "an idle runtime can accept more work");
@@ -208,37 +298,39 @@ class SchedulerRequestWorkTest {
     }
 
     @org.junit.jupiter.api.Test
-    void nestedWorkRunsOutsideContextMonitorAndIsIncludedInDrain()
-            throws Exception {
-        SchedulerRuntime executor = runtime();
+    void nestedWorkRunsOutsideContextMonitorAndIsIncludedInDrain() throws Exception {
+        SchedulerTestServices executor = runtime();
         RequestContext context = requestContext(993006L);
         var observed = new java.util.concurrent.CopyOnWriteArrayList<Integer>();
         CountDownLatch entered = new CountDownLatch(1);
         CountDownLatch release = new CountDownLatch(1);
         CountDownLatch nested = new CountDownLatch(1);
         try {
-            executor.executeRequestWork(
-                    context,
-                    () -> {
-                        assertFalse(Thread.holdsLock(context));
-                        observed.add(1);
-                        entered.countDown();
-                        RequestProtocolTestSupport.await(release);
-                        executor.executeRequestWork(
-                                context,
-                                () -> {
-                                    assertFalse(Thread.holdsLock(context));
-                                    observed.add(3);
-                                    nested.countDown();
-                                });
-                    });
+            executor.tasks()
+                    .execute(
+                            context,
+                            () -> {
+                                assertFalse(Thread.holdsLock(context));
+                                observed.add(1);
+                                entered.countDown();
+                                RequestProtocolTestSupport.await(release);
+                                executor.tasks()
+                                        .execute(
+                                                context,
+                                                () -> {
+                                                    assertFalse(Thread.holdsLock(context));
+                                                    observed.add(3);
+                                                    nested.countDown();
+                                                });
+                            });
             assertTrue(entered.await(5, TimeUnit.SECONDS));
-            executor.executeRequestWork(
-                    context,
-                    () -> {
-                        assertFalse(Thread.holdsLock(context));
-                        observed.add(2);
-                    });
+            executor.tasks()
+                    .execute(
+                            context,
+                            () -> {
+                                assertFalse(Thread.holdsLock(context));
+                                observed.add(2);
+                            });
             release.countDown();
             assertTrue(nested.await(5, TimeUnit.SECONDS));
             SchedulerTestSupport.awaitRequestWork(executor);
@@ -253,7 +345,7 @@ class SchedulerRequestWorkTest {
     void closeWaitsForRegistrationBeforeSubmissionAndForSourceAfterTaskFinishes() throws Exception {
         var runtime = runtime();
         var context = requestContext(993007L);
-        var registration = runtime.registerRequestWork(context);
+        var registration = runtime.tasks.registerRequestWork(context);
         var ran = new CountDownLatch(1);
         var closer = new Thread(() -> SchedulerTestSupport.closeRequestWork(runtime));
         try {
@@ -283,7 +375,7 @@ class SchedulerRequestWorkTest {
         try {
             assertThrows(
                     RuntimeException.class,
-                    () -> runtime.executeRequestWork(requestContext(993008L), () -> {}));
+                    () -> runtime.tasks().execute(requestContext(993008L), () -> {}));
         } finally {
             close(runtime);
         }
@@ -303,25 +395,28 @@ class SchedulerRequestWorkTest {
         var failure = new AtomicReference<Throwable>();
         var closer = new Thread(() -> SchedulerTestSupport.closeRequestWork(runtime));
         try {
-            runtime.executeRequestWork(
-                    context,
-                    () -> {
-                        entered.countDown();
-                        RequestProtocolTestSupport.await(handoff);
-                        try {
-                            assertStoppedSource(runtime, foreign);
-                            runtime.executeRequestWork(
-                                    context,
-                                    () -> {
-                                        childEntered.countDown();
-                                        RequestProtocolTestSupport.await(releaseChild);
-                                    });
-                        } catch (Throwable problem) {
-                            failure.set(problem);
-                        } finally {
-                            parentDone.countDown();
-                        }
-                    });
+            runtime.tasks()
+                    .execute(
+                            context,
+                            () -> {
+                                entered.countDown();
+                                RequestProtocolTestSupport.await(handoff);
+                                try {
+                                    assertStoppedSource(runtime, foreign);
+                                    runtime.tasks()
+                                            .execute(
+                                                    context,
+                                                    () -> {
+                                                        childEntered.countDown();
+                                                        RequestProtocolTestSupport.await(
+                                                                releaseChild);
+                                                    });
+                                } catch (Throwable problem) {
+                                    failure.set(problem);
+                                } finally {
+                                    parentDone.countDown();
+                                }
+                            });
             assertTrue(entered.await(5, TimeUnit.SECONDS));
             closer.start();
             RequestProtocolTestSupport.awaitCondition(
@@ -346,8 +441,8 @@ class SchedulerRequestWorkTest {
         }
     }
 
-    private static void assertStoppedSource(SchedulerRuntime runtime, RequestContext context) {
-        var registration = runtime.tryRegisterRequestWork(context);
+    private static void assertStoppedSource(SchedulerTestServices runtime, RequestContext context) {
+        var registration = runtime.tasks.tryRegisterRequestWork(context);
         try {
             org.junit.jupiter.api.Assertions.assertNull(registration);
         } finally {
@@ -357,11 +452,11 @@ class SchedulerRequestWorkTest {
         }
     }
 
-    private static SchedulerRuntime runtime() {
+    private static SchedulerTestServices runtime() {
         var service = org.mockito.Mockito.mock(org.flexlb.config.ConfigService.class);
         org.mockito.Mockito.when(service.loadBalanceConfig())
                 .thenReturn(SchedulingTestConfig.batchConfig());
-        return new SchedulerRuntime(
+        return new SchedulerTestServices(
                 new RequestRepository(),
                 org.mockito.Mockito.mock(org.flexlb.balance.endpoint.EndpointRegistry.class),
                 org.mockito.Mockito.mock(org.flexlb.service.monitor.DeliveryMetricsReporter.class),
@@ -371,7 +466,7 @@ class SchedulerRequestWorkTest {
                 org.mockito.Mockito.mock(EngineGrpcClient.class));
     }
 
-    private static void close(SchedulerRuntime runtime) {
+    private static void close(SchedulerTestServices runtime) {
         SchedulerTestSupport.timer(runtime).close();
         SchedulerTestSupport.closeRequestExecutors(runtime);
     }
@@ -379,7 +474,7 @@ class SchedulerRequestWorkTest {
     private static RequestContext requestContext(long requestId) {
         FlexlbConfig config = SchedulingTestConfig.batchConfig();
         RequestContext context = RequestProtocolTestSupport.context(config, requestId);
-        var owner = org.mockito.Mockito.mock(AbstractRequestScheduler.class);
+        var owner = org.mockito.Mockito.mock(RequestLifecycle.class);
         SchedulerTestSupport.bindOwner(context, owner);
         return context;
     }

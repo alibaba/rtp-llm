@@ -47,7 +47,7 @@ class RequestOrchestratorsTest {
         var dispatcher = SchedulerTestSupport.dispatcher();
         var runtime =
                 org.mockito.Mockito.spy(
-                        new SchedulerRuntime(
+                        new SchedulerTestServices(
                                 requests,
                                 endpoints,
                                 mock(DeliveryMetricsReporter.class),
@@ -55,19 +55,23 @@ class RequestOrchestratorsTest {
                                 dispatcher,
                                 configuration(),
                                 mock(EngineGrpcClient.class)));
-        var owner = mock(AbstractRequestScheduler.class);
+        var owner = mock(RequestScheduler.class);
+        when(owner.lifecycle()).thenReturn(mock(RequestLifecycle.class));
         runtime.registerScheduler(owner);
         var first = new IllegalStateException("placement close failed");
         var second = new IllegalStateException("dispatcher failed");
-        doThrow(first).when(owner).closePlacement();
+        doThrow(first).when(owner).close();
         var executions = org.mockito.Mockito.spy(runtime.deliveries());
-        org.springframework.test.util.ReflectionTestUtils.setField(
+        org.flexlb.balance.scheduler.SchedulerTestServices.setDependency(
                 runtime, "deliveries", executions);
         doThrow(second).when(executions).awaitDeliveries();
-        assertSame(first, assertThrows(IllegalStateException.class, () -> SchedulerTestSupport.shutdown(runtime)));
+        assertSame(
+                first,
+                assertThrows(
+                        IllegalStateException.class, () -> SchedulerTestSupport.shutdown(runtime)));
         assertEquals(List.of(second), List.of(first.getSuppressed()));
         verify(endpoints).close();
-        verify(owner).closeOutstandingAndTerminalize();
+        verify(owner.lifecycle()).closeOutstandingAndTerminalize();
         assertTrue((SchedulerTestSupport.cleanupExecutor(runtime)).isShutdown());
     }
 
@@ -79,7 +83,7 @@ class RequestOrchestratorsTest {
         var dispatcher = SchedulerTestSupport.dispatcher();
         var runtime =
                 org.mockito.Mockito.spy(
-                        new SchedulerRuntime(
+                        new SchedulerTestServices(
                                 requests,
                                 endpoints,
                                 mock(DeliveryMetricsReporter.class),
@@ -87,20 +91,21 @@ class RequestOrchestratorsTest {
                                 dispatcher,
                                 configuration(),
                                 mock(EngineGrpcClient.class)));
-        var owner = mock(AbstractRequestScheduler.class);
+        var owner = mock(RequestScheduler.class);
+        when(owner.lifecycle()).thenReturn(mock(RequestLifecycle.class));
         runtime.registerScheduler(owner);
         var executions = org.mockito.Mockito.spy(runtime.deliveries());
-        org.springframework.test.util.ReflectionTestUtils.setField(
+        org.flexlb.balance.scheduler.SchedulerTestServices.setDependency(
                 runtime, "deliveries", executions);
         SchedulerTestSupport.shutdown(runtime);
-        InOrder order = inOrder(requests, owner, runtime, executions, endpoints);
+        InOrder order = inOrder(requests, owner, owner.lifecycle(), runtime, executions, endpoints);
         order.verify(requests).closeRegistration();
-        order.verify(owner).closePlacement();
-        order.verify(runtime).awaitAdmissions();
+        order.verify(owner).close();
+        order.verify(owner.lifecycle()).stopAdmissionsAndAwaitCompletion();
         order.verify(executions).awaitDeliveries();
         order.verify(endpoints).close();
         SchedulerTestSupport.shutdown(runtime);
-        verify(owner).closePlacement();
+        verify(owner).close();
         verify(executions).awaitDeliveries();
     }
 
@@ -112,7 +117,11 @@ class RequestOrchestratorsTest {
         when(requests.closeRegistration()).thenThrow(failure);
         var runtime = runtime(requests, endpoints);
         try {
-            assertSame(failure, assertThrows(IllegalStateException.class, () -> SchedulerTestSupport.shutdown(runtime)));
+            assertSame(
+                    failure,
+                    assertThrows(
+                            IllegalStateException.class,
+                            () -> SchedulerTestSupport.shutdown(runtime)));
         } finally {
             SchedulerTestSupport.closeRequestExecutors(runtime);
             SchedulerTestSupport.timer(runtime).close();
@@ -126,7 +135,9 @@ class RequestOrchestratorsTest {
         when(requests.closeRegistration()).thenReturn(true);
         when(requests.liveRequestCount()).thenReturn(1);
         var runtime = runtime(requests, mock(EndpointRegistry.class));
-        var failure = assertThrows(IllegalStateException.class, () -> SchedulerTestSupport.shutdown(runtime));
+        var failure =
+                assertThrows(
+                        IllegalStateException.class, () -> SchedulerTestSupport.shutdown(runtime));
         assertEquals("Unsettled requests at shutdown: 1", failure.getMessage());
     }
 
@@ -151,7 +162,9 @@ class RequestOrchestratorsTest {
                         });
         start.countDown();
         CompletableFuture.allOf(one, two).get(3, TimeUnit.SECONDS);
-        var reported = assertThrows(IllegalStateException.class, () -> SchedulerTestSupport.shutdown(runtime));
+        var reported =
+                assertThrows(
+                        IllegalStateException.class, () -> SchedulerTestSupport.shutdown(runtime));
         assertTrue(reported == first || reported == second);
         assertEquals(
                 List.of(reported == first ? second : first), List.of(reported.getSuppressed()));
@@ -188,7 +201,7 @@ class RequestOrchestratorsTest {
         DeliveryMetricsReporter reporter = mock(DeliveryMetricsReporter.class);
         RequestSchedulerReporter admissionReporter = mock(RequestSchedulerReporter.class);
         when(requests.isClosed()).thenReturn(true);
-        new SchedulerRuntime(
+        new SchedulerTestServices(
                         requests,
                         registry,
                         reporter,
@@ -232,7 +245,7 @@ class RequestOrchestratorsTest {
         doThrow(new RuntimeException("metrics unavailable"))
                 .when(failingPrefill)
                 .reportBatchMetrics(reporter);
-        new SchedulerRuntime(
+        new SchedulerTestServices(
                         requests,
                         registry,
                         reporter,
@@ -250,9 +263,9 @@ class RequestOrchestratorsTest {
         verify(decode).reportAdmissionMetrics(admissionReporter);
     }
 
-    private static SchedulerRuntime runtime(
+    private static SchedulerTestServices runtime(
             RequestRepository requests, EndpointRegistry endpoints) {
-        return new SchedulerRuntime(
+        return new SchedulerTestServices(
                 requests,
                 endpoints,
                 mock(DeliveryMetricsReporter.class),
@@ -277,7 +290,7 @@ class RequestOrchestratorsTest {
                 .when(decode)
                 .reportBatchMetrics(batches);
 
-        new SchedulerRuntime(
+        new SchedulerTestServices(
                         requests,
                         registry,
                         batches,
@@ -380,7 +393,7 @@ class RequestOrchestratorsTest {
         when(service.loadBalanceConfig()).thenReturn(SchedulingTestConfig.newConfig());
         var runtime =
                 org.mockito.Mockito.spy(
-                        new SchedulerRuntime(
+                        new SchedulerTestServices(
                                 requests,
                                 endpoints,
                                 mock(org.flexlb.service.monitor.DeliveryMetricsReporter.class),
@@ -399,11 +412,11 @@ class RequestOrchestratorsTest {
                 .expireTerminalRecords(anyLong());
     }
 
-    private static SchedulerRuntime maintenanceRuntime(
+    private static SchedulerTestServices maintenanceRuntime(
             RequestRepository requests,
             org.flexlb.balance.endpoint.EndpointRegistry endpoints,
             ConfigService service) {
-        return new SchedulerRuntime(
+        return new SchedulerTestServices(
                 requests,
                 endpoints,
                 mock(org.flexlb.service.monitor.DeliveryMetricsReporter.class),

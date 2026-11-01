@@ -71,7 +71,7 @@ class RequestSchedulerTest {
         when(service.loadBalanceConfig()).thenReturn(config);
         RequestWorkerSelector router = mockRouter();
         RecentCacheKeyTraceReporter trace = mock(RecentCacheKeyTraceReporter.class);
-        AbstractRequestScheduler owner =
+        RequestLifecycle owner =
                 SchedulerTestSupport.create(
                         service,
                         mock(DeliveryMetricsReporter.class),
@@ -80,7 +80,7 @@ class RequestSchedulerTest {
                         router,
                         org.flexlb.balance.eviction.DecodePreemptionTestSupport.mock(),
                         new PlacementAvailability());
-        RequestScheduler scheduler = owner;
+        RequestScheduler scheduler = owner.scheduler();
         try {
             RequestContext vision = context(config, 918L);
             vision.data()
@@ -114,7 +114,8 @@ class RequestSchedulerTest {
             assertSame(owner, pd.data().getScheduler());
             verify(router).select(pd, null);
         } finally {
-            SchedulerTestSupport.shutdown(owner.runtime);
+            SchedulerTestSupport.shutdown(
+                    org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(owner));
         }
     }
 
@@ -128,7 +129,7 @@ class RequestSchedulerTest {
         ConfigService service = mock(ConfigService.class);
         when(service.loadBalanceConfig()).thenReturn(config);
         RequestWorkerSelector router = mockRouter();
-        AbstractRequestScheduler owner =
+        RequestLifecycle owner =
                 SchedulerTestSupport.create(
                         service,
                         mock(DeliveryMetricsReporter.class),
@@ -137,7 +138,7 @@ class RequestSchedulerTest {
                         router,
                         org.flexlb.balance.eviction.DecodePreemptionTestSupport.mock(),
                         new PlacementAvailability());
-        RequestScheduler scheduler = owner;
+        RequestScheduler scheduler = owner.scheduler();
         try {
             RequestContext request = context(config, 919L);
             request.data()
@@ -152,7 +153,8 @@ class RequestSchedulerTest {
             assertEquals(0, owner.requests.liveRequestCount());
             verify(router, never()).select(any(), any());
         } finally {
-            SchedulerTestSupport.shutdown(owner.runtime);
+            SchedulerTestSupport.shutdown(
+                    org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(owner));
         }
     }
 
@@ -162,7 +164,7 @@ class RequestSchedulerTest {
         ConfigService service = mock(ConfigService.class);
         when(service.loadBalanceConfig()).thenReturn(config);
         RequestWorkerSelector router = mockRouter();
-        AbstractRequestScheduler lifecycle =
+        RequestLifecycle lifecycle =
                 org.flexlb.balance.scheduler.SchedulerTestSupport.create(
                         service,
                         mock(DeliveryMetricsReporter.class),
@@ -217,7 +219,7 @@ class RequestSchedulerTest {
         ConfigService service = mock(ConfigService.class);
         when(service.loadBalanceConfig()).thenReturn(config);
         RequestWorkerSelector router = mockRouter();
-        AbstractRequestScheduler lifecycle =
+        RequestLifecycle lifecycle =
                 org.flexlb.balance.scheduler.SchedulerTestSupport.create(
                         service,
                         mock(DeliveryMetricsReporter.class),
@@ -241,7 +243,7 @@ class RequestSchedulerTest {
                             closeSettled.countDown();
                             return result;
                         })
-                .when((QueuedRequestScheduler) lifecycle)
+                .when(lifecycle)
                 .closeRequest(
                         org.mockito.ArgumentMatchers.same(context),
                         any(ContextResult.EndEvidence.class));
@@ -320,7 +322,7 @@ class RequestSchedulerTest {
         ConfigService service = mock(ConfigService.class);
         when(service.loadBalanceConfig()).thenReturn(config);
         RequestWorkerSelector router = mockRouter();
-        AbstractRequestScheduler lifecycle =
+        RequestLifecycle lifecycle =
                 org.flexlb.balance.scheduler.SchedulerTestSupport.create(
                         service,
                         mock(DeliveryMetricsReporter.class),
@@ -432,7 +434,7 @@ class RequestSchedulerTest {
         when(service.loadBalanceConfig()).thenReturn(config);
         RequestWorkerSelector router = mockRouter();
 
-        AbstractRequestScheduler lifecycle = RequestProtocolTestSupport.schedulerMock();
+        RequestLifecycle lifecycle = RequestProtocolTestSupport.schedulerMock();
         RequestContext unavailable = RequestProtocolTestSupport.context(config, 910001L);
         RequestContext healthy = RequestProtocolTestSupport.context(config, 910002L);
         CompletableFuture<Response> first = new CompletableFuture<>();
@@ -515,7 +517,7 @@ class RequestSchedulerTest {
         when(configService.loadBalanceConfig()).thenReturn(config);
         RequestWorkerSelector router = mockRouter();
         EndpointRegistry endpointRegistry = mock(EndpointRegistry.class);
-        AbstractRequestScheduler lifecycle = RequestProtocolTestSupport.schedulerMock();
+        RequestLifecycle lifecycle = RequestProtocolTestSupport.schedulerMock();
         DecodePreemption eviction = org.flexlb.balance.eviction.DecodePreemptionTestSupport.mock();
         PlacementAvailability availability = new PlacementAvailability();
         RequestContext context = context(config, 897L, 90);
@@ -531,7 +533,7 @@ class RequestSchedulerTest {
                             return future;
                         });
         AdmissionHandle handle = RequestProtocolTestSupport.admissionHandle(context);
-        when(lifecycle.claimAdmissionHandle(897L, future)).thenReturn(handle);
+        org.mockito.Mockito.doReturn(handle).when(lifecycle).claimAdmissionHandle(897L, future);
         DecodeEndpoint selectedEndpoint = RequestProtocolTestSupport.decodeEndpoint();
         when(selectedEndpoint.ipPort()).thenReturn("selected-decode:8080");
         RequestRoute selectedRoute = mock(RequestRoute.class);
@@ -576,8 +578,7 @@ class RequestSchedulerTest {
         if (synchronous) {
             execution.complete(result);
         }
-        when(eviction.tryReclaim(context, selectedEndpoint))
-                .thenReturn(execution);
+        when(eviction.tryReclaim(context, selectedEndpoint)).thenReturn(execution);
         RequestScheduler scheduler =
                 RequestProtocolTestSupport.injectPlacementDependencies(
                         lifecycle,
@@ -654,7 +655,8 @@ class RequestSchedulerTest {
             verify(selectedEndpoint, times(hasReservation ? 1 : 0))
                     .markQueued(any(), org.mockito.ArgumentMatchers.eq(reservation));
             if (outcome.equals("closed_rollback_failure")) {
-                verify(lifecycle.runtime).recordFailure(rollbackFailure);
+                org.junit.jupiter.api.Assertions.assertSame(
+                        rollbackFailure, SchedulerTestSupport.failure(lifecycle));
             }
             verify(selectedRoute).close();
             verify(router, times(1)).select(context, null);
@@ -681,7 +683,7 @@ class RequestSchedulerTest {
         when(endpointRegistry.counts(RoleType.PREFILL))
                 .thenReturn(new EndpointRegistry.Counts(0, 1));
         AtomicInteger availableSlots = new AtomicInteger();
-        AbstractRequestScheduler lifecycle = RequestProtocolTestSupport.schedulerMock();
+        RequestLifecycle lifecycle = RequestProtocolTestSupport.schedulerMock();
         RequestContext context = context(config, 899L);
         CompletableFuture<Response> future = new CompletableFuture<>();
         when(lifecycle.register(
@@ -743,7 +745,7 @@ class RequestSchedulerTest {
         when(configService.loadBalanceConfig()).thenReturn(config);
         RequestWorkerSelector router = mockRouter();
         EndpointRegistry endpointRegistry = mock(EndpointRegistry.class);
-        AbstractRequestScheduler lifecycle = RequestProtocolTestSupport.schedulerMock();
+        RequestLifecycle lifecycle = RequestProtocolTestSupport.schedulerMock();
         RequestContext context = context(config, 900L);
         CompletableFuture<Response> future = new CompletableFuture<>();
         when(lifecycle.register(
@@ -784,7 +786,7 @@ class RequestSchedulerTest {
         when(configService.loadBalanceConfig()).thenReturn(config);
         RequestWorkerSelector router = mockRouter();
         EndpointRegistry endpointRegistry = mock(EndpointRegistry.class);
-        AbstractRequestScheduler lifecycle = RequestProtocolTestSupport.schedulerMock();
+        RequestLifecycle lifecycle = RequestProtocolTestSupport.schedulerMock();
         DeliveryMetricsReporter reporter = mock(DeliveryMetricsReporter.class);
         PlacementAvailability availability = new PlacementAvailability();
         RequestContext gate = context(config, 900L);
@@ -875,7 +877,7 @@ class RequestSchedulerTest {
         ConfigService configService = mock(ConfigService.class);
         when(configService.loadBalanceConfig()).thenReturn(config);
         RequestWorkerSelector router = mockRouter();
-        AbstractRequestScheduler lifecycle = RequestProtocolTestSupport.schedulerMock();
+        RequestLifecycle lifecycle = RequestProtocolTestSupport.schedulerMock();
         DecodePreemption decodePreemption =
                 org.flexlb.balance.eviction.DecodePreemptionTestSupport.mock();
         RequestContext lowPriority = context(config, 910L, 10);
@@ -944,7 +946,7 @@ class RequestSchedulerTest {
         ConfigService configService = mock(ConfigService.class);
         when(configService.loadBalanceConfig()).thenReturn(config);
         RequestWorkerSelector router = mockRouter();
-        AbstractRequestScheduler lifecycle = RequestProtocolTestSupport.schedulerMock();
+        RequestLifecycle lifecycle = RequestProtocolTestSupport.schedulerMock();
         PlacementAvailability availability = new PlacementAvailability();
         PlacementKey blocker = PlacementKey.anyGroup(RoleType.PREFILL);
         RequestContext expired = context(config, 801L);
@@ -1007,7 +1009,7 @@ class RequestSchedulerTest {
         ConfigService configService = mock(ConfigService.class);
         when(configService.loadBalanceConfig()).thenReturn(config);
         RequestWorkerSelector router = mockRouter();
-        AbstractRequestScheduler lifecycle = RequestProtocolTestSupport.schedulerMock();
+        RequestLifecycle lifecycle = RequestProtocolTestSupport.schedulerMock();
         PlacementAvailability availability = new PlacementAvailability();
         RequestContext blocked = context(config, 803L);
         RequestContext independent = context(config, 804L);
@@ -1295,7 +1297,7 @@ class RequestSchedulerTest {
         ConfigService configService = mock(ConfigService.class);
         when(configService.loadBalanceConfig()).thenReturn(config);
         RequestWorkerSelector router = mockRouter();
-        AbstractRequestScheduler lifecycle = RequestProtocolTestSupport.schedulerMock();
+        RequestLifecycle lifecycle = RequestProtocolTestSupport.schedulerMock();
         PlacementAvailability availability = new PlacementAvailability();
         RequestContext context = context(config, 807L);
         CompletableFuture<Response> future = new CompletableFuture<>();
@@ -1457,8 +1459,7 @@ class RequestSchedulerTest {
 
         private final RequestWorkerSelector router = mockRouter();
 
-        private final AbstractRequestScheduler lifecycle =
-                RequestProtocolTestSupport.schedulerMock();
+        private final RequestLifecycle lifecycle = RequestProtocolTestSupport.schedulerMock();
 
         private final PlacementAvailability availability = new PlacementAvailability();
 
@@ -1572,7 +1573,8 @@ class RequestSchedulerTest {
                             });
             org.mockito.Mockito.doAnswer(
                             invocation -> {
-                                QueuedRequestScheduler.PlacementPlan plan = invocation.getArgument(0);
+                                QueuedRequestScheduler.PlacementPlan plan =
+                                        invocation.getArgument(0);
                                 RequestContext context =
                                         RequestProtocolTestSupport.planContext(plan);
                                 long requestId = context.data().getRequestId();
@@ -1742,8 +1744,7 @@ class RequestSchedulerTest {
         private final DecodePreemption decodePreemption =
                 org.flexlb.balance.eviction.DecodePreemptionTestSupport.mock();
 
-        private final AbstractRequestScheduler lifecycle =
-                RequestProtocolTestSupport.schedulerMock();
+        private final RequestLifecycle lifecycle = RequestProtocolTestSupport.schedulerMock();
 
         private final PlacementAvailability availability = new PlacementAvailability();
 

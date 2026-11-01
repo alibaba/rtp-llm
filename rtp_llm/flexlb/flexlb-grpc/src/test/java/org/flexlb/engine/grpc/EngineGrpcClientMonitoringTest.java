@@ -153,7 +153,7 @@ class EngineGrpcClientMonitoringTest {
         GrpcReporter reporter = new GrpcReporter(monitor);
         assertDoesNotThrow(reporter::init);
         verify(monitor, times(2)).register(anyString(), any(FlexMetricType.class));
-        verify(monitor, times(4))
+        verify(monitor, times(6))
                 .register(anyString(), any(FlexMetricType.class), any(FlexPriorityType.class));
         assertDoesNotThrow(() -> reporter.reportChannelPoolSize(3));
     }

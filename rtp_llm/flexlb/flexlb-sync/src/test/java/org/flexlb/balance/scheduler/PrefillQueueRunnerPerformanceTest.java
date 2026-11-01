@@ -2,7 +2,6 @@ package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.delivery.CapacityBoundary;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
-import org.flexlb.balance.prediction.PrefillTimePredictor;
 import org.flexlb.balance.projection.RequestTimeEstimation;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.SchedulingMetadata;
@@ -20,7 +19,6 @@ import java.lang.management.ManagementFactory;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
-import java.util.OptionalLong;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 
@@ -275,15 +273,18 @@ class PrefillQueueRunnerPerformanceTest {
                         null,
                         DeliveryTestSupport.service(config),
                         new org.flexlb.service.monitor.DeliveryMetricsReporter(null));
-        AbstractRequestScheduler scheduler = mock(AbstractRequestScheduler.class);
-        var facilities = mock(SchedulerRuntime.class);
+        RequestLifecycle scheduler = mock(RequestLifecycle.class);
+        var facilities = mock(SchedulerTestServices.class);
+        org.flexlb.balance.scheduler.SchedulerTestServices.setDependency(
+                facilities,
+                "deliveryReporter",
+                mock(org.flexlb.service.monitor.DeliveryMetricsReporter.class));
         var boundary = CapacityBoundary.unavailable(CapacityBoundary.Resource.DISPATCH_EXECUTOR);
         var execution = mock(DeliveryExecution.class);
         org.mockito.Mockito.when(facilities.deliveries()).thenReturn(execution);
         org.mockito.Mockito.when(execution.tryReserveDelivery())
                 .thenReturn(CapacityBoundary.Attempt.rejected(boundary));
-        org.springframework.test.util.ReflectionTestUtils.setField(
-                scheduler, "runtime", facilities);
+        org.flexlb.balance.scheduler.SchedulerTestServices.bind(scheduler, facilities);
         PrefillEndpoint endpoint =
                 org.flexlb.balance.endpoint.EndpointTestSupport.realPrefill(
                         status,
@@ -291,9 +292,17 @@ class PrefillQueueRunnerPerformanceTest {
                         delivery,
                         SchedulerTestSupport.repository(scheduler),
                         mock(org.flexlb.service.monitor.DeliveryMetricsReporter.class));
-        endpoint.enableQueueRuntime(QueueExecutionSettings.capture(config));
+        org.springframework.test.util.ReflectionTestUtils.invokeMethod(
+                endpoint,
+                "enableQueueRuntime",
+                QueueExecutionSettings.capture(
+                        config, org.flexlb.balance.planner.BuiltinGroupPlanner.from(config)),
+                SchedulerTestSupport.queueDependencies(scheduler, config));
         PrefillQueueRunner runtime =
                 org.flexlb.balance.endpoint.EndpointTestSupport.queueRunner(endpoint);
+        assertTrue(
+                !org.mockito.Mockito.mockingDetails(runtime).isMock(),
+                "allocation benchmark must measure the real queue runner");
         long now = System.currentTimeMillis();
         List<RequestRoute> items = new ArrayList<>(depth);
         for (int index = 0; index < depth; index++) {
@@ -342,16 +351,5 @@ class PrefillQueueRunnerPerformanceTest {
         context.data().setFuture(new CompletableFuture<Response>());
         return SchedulingTestConfig.createRoute(
                 context, null, null, null, endpoint, null, null, enqueuedAtMs);
-    }
-
-    private static final class BlockingDispatcher extends DeliveryTestSupport.StubDispatcher {
-
-        @Override
-        public CapacityBoundary selectBoundary(
-                List<RequestRoute> candidates,
-                PrefillTimePredictor.Evaluator evaluator,
-                OptionalLong plannedPrediction) {
-            return CapacityBoundary.unavailable(CapacityBoundary.Resource.PREFILL_BATCH);
-        }
     }
 }

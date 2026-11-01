@@ -24,6 +24,59 @@ import static org.mockito.Mockito.when;
 
 class FlexlbGrpcServerMonitoringTest {
 
+    @org.junit.jupiter.api.Test
+    void businessBackendAndRegistryKeepAllOriginalExecutorSeries() {
+        var backend = mock(org.flexlb.metric.FlexMonitor.class);
+        var registry = new SimpleMeterRegistry();
+        var stats = mock(org.flexlb.metric.ExecutorStats.class);
+        var completed = new java.util.concurrent.atomic.AtomicLong(7);
+        when(stats.activeThreads()).thenReturn(2);
+        when(stats.queuedTasks()).thenReturn(3);
+        when(stats.poolSize()).thenReturn(4);
+        when(stats.completedTasks()).thenAnswer(call -> completed.get());
+        try (var context =
+                new org.springframework.context.annotation.AnnotationConfigApplicationContext()) {
+            context.register(org.flexlb.config.MonitorClientConfig.class);
+            context.registerBean(
+                    "businessMonitor", org.flexlb.metric.FlexMonitor.class, () -> backend);
+            context.registerBean(
+                    "meterRegistry",
+                    io.micrometer.core.instrument.MeterRegistry.class,
+                    () -> registry);
+            context.refresh();
+            var monitor = context.getBean(org.flexlb.metric.FlexMonitor.class);
+            new org.flexlb.engine.grpc.monitor.GrpcReporter(monitor)
+                    .registerServerExecutor(stats, 8, completed::get);
+            new org.flexlb.service.monitor.DeliveryMetricsReporter(monitor).registerExecutor(stats);
+            for (String name :
+                    new String[] {
+                        MetricConstant.GRPC_SERVER_EXECUTOR_ACTIVE_THREADS,
+                        MetricConstant.GRPC_SERVER_EXECUTOR_QUEUE_SIZE,
+                        MetricConstant.GRPC_SERVER_EXECUTOR_POOL_SIZE,
+                        MetricConstant.GRPC_SERVER_EXECUTOR_MAX_POOL_SIZE,
+                        MetricConstant.DISPATCH_EXECUTOR_ACTIVE_THREADS,
+                        MetricConstant.DISPATCH_EXECUTOR_QUEUE_SIZE,
+                        MetricConstant.DISPATCH_EXECUTOR_POOL_SIZE
+                    }) {
+                assertNotNull(registry.get("flexlb." + name).gauge());
+            }
+            for (long count : new long[] {7, 19}) {
+                completed.set(count);
+                for (String name :
+                        new String[] {
+                            MetricConstant.GRPC_SERVER_EXECUTOR_COMPLETED_TASKS,
+                            MetricConstant.GRPC_SERVER_EXECUTOR_CALLER_RUNS,
+                            MetricConstant.DISPATCH_EXECUTOR_COMPLETED_TASKS
+                        }) {
+                    org.junit.jupiter.api.Assertions.assertEquals(
+                            count, registry.get("flexlb." + name).functionCounter().count());
+                }
+            }
+        } finally {
+            registry.close();
+        }
+    }
+
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
     void brokenExecutorMetricCannotPreventServerStartup(boolean error) throws Exception {
@@ -62,7 +115,8 @@ class FlexlbGrpcServerMonitoringTest {
                         configService,
                         environment,
                         workerGroup,
-                        registry,
+                        new org.flexlb.engine.grpc.monitor.GrpcReporter(
+                                new org.flexlb.metric.MicrometerFlexMonitor(registry)),
                         new GrpcServerTimingInterceptor(),
                         new GrpcQosHeaderInterceptor());
         try {

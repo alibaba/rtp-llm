@@ -164,13 +164,12 @@ class GrpcReceivingGuardWiringTest {
                 new ThreadPoolExecutor(1, 1, 0, TimeUnit.SECONDS, new LinkedBlockingQueue<>(1));
         var guard = new GrpcReceivingGuard(1, 1000, pool);
         try {
-            set(server, "flexMonitor", monitor);
+            var reporter = new org.flexlb.engine.grpc.monitor.GrpcReporter(monitor);
+            set(server, "grpcReporter", reporter);
             set(server, "receivingGuard", guard);
             set(server, "grpcExecutor", pool);
             set(server, "grpcControlExecutor", control);
-            var registration = FlexlbGrpcServer.class.getDeclaredMethod("registerReceivingMetrics");
-            registration.setAccessible(true);
-            registration.invoke(server);
+            reporter.registerReceivingMetrics();
             server.reportReceivingMetrics();
             verify(monitor, times(11)).register(anyString(), eq(FlexMetricType.GAUGE));
             verify(monitor).report("app.grpc.server.receiving.active", 0d);

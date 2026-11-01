@@ -107,14 +107,14 @@ class EndpointCleanupDeadlockTest {
             var config = SchedulingTestConfig.batchConfig();
             ConfigService service = mock(ConfigService.class);
             when(service.loadBalanceConfig()).thenReturn(config);
-            AbstractRequestScheduler registry = mock(AbstractRequestScheduler.class);
+            RequestLifecycle registry = mock(RequestLifecycle.class);
             ExpirationTimer timer =
                     new ExpirationTimer(
                             org.flexlb.balance.scheduler.SchedulerTestSupport.repository(registry));
             RequestContext requestContext = RequestProtocolTestSupport.context(config, 992L);
             when(SchedulerTestSupport.repository(registry).isCurrent(requestContext))
                     .thenReturn(true);
-            AbstractRequestScheduler requestOwner =
+            RequestLifecycle requestOwner =
                     RequestProtocolTestSupport.initialize(
                             mock(ResponseCompletionExecutor.class), requestContext, timer);
 
@@ -210,7 +210,7 @@ class EndpointCleanupDeadlockTest {
             var config = SchedulingTestConfig.batchConfig();
             ConfigService service = mock(ConfigService.class);
             when(service.loadBalanceConfig()).thenReturn(config);
-            AbstractRequestScheduler registry =
+            RequestLifecycle registry =
                     org.flexlb.balance.scheduler.SchedulerTestSupport.create(
                             service,
                             mock(DeliveryMetricsReporter.class),
@@ -245,7 +245,7 @@ class EndpointCleanupDeadlockTest {
                                                 8081,
                                                 null),
                                         org.flexlb.balance.scheduler.SchedulerTestSupport
-                                                .repository(mock(AbstractRequestScheduler.class))));
+                                                .repository(mock(RequestLifecycle.class))));
                 DecodeResources.ReservationHandle reservation;
                 try (var pin = endpoint.tryPinGeneration()) {
                     assertNotNull(pin);

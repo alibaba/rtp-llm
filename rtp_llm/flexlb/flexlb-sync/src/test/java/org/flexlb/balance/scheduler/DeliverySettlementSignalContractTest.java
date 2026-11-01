@@ -105,7 +105,7 @@ class DeliverySettlementSignalContractTest {
             assertEquals(1, fixture.cleanupRegistry().size());
             assertSame(
                     fixture.releaseFailure,
-                    ReflectionTestUtils.getField(fixture.runtime, "failure"));
+                    org.flexlb.balance.scheduler.SchedulerTestServices.failure(fixture.runtime));
 
             fixture.failRelease.set(false);
             fixture.allowRelease.countDown();
@@ -120,8 +120,8 @@ class DeliverySettlementSignalContractTest {
     private static final class Fixture implements AutoCloseable {
         private static final long ID = 981_001L;
         private static final long BATCH = 981L;
-        final AbstractRequestScheduler scheduler;
-        final SchedulerRuntime runtime;
+        final RequestLifecycle scheduler;
+        final SchedulerTestServices runtime;
         final DeliveryDispatcher dispatcher;
         final PrefillEndpoint prefill;
         final DecodeEndpoint decode;
@@ -153,7 +153,7 @@ class DeliverySettlementSignalContractTest {
                             mock(DeliveryMetricsReporter.class),
                             mock(RequestSchedulerReporter.class),
                             mock(RecentCacheKeyTraceReporter.class));
-            runtime = scheduler.runtime;
+            runtime = org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(scheduler);
             dispatcher = SchedulerTestSupport.dispatcher(runtime);
             when(channel.cancelAsync(
                             any(),
@@ -165,7 +165,7 @@ class DeliverySettlementSignalContractTest {
                                 cancelCalls.incrementAndGet();
                                 return proof;
                             });
-            ReflectionTestUtils.setField(runtime, "engineClient", channel);
+            ReflectionTestUtils.setField(runtime.dispatcher, "grpcClient", channel);
             prefill =
                     spy(
                             EndpointTestSupport.unstartedPrefill(
@@ -288,8 +288,7 @@ class DeliverySettlementSignalContractTest {
 
         private void awaitRelease() throws InterruptedException {
             assertFalse(Thread.holdsLock(context));
-            assertThrows(
-                    IllegalStateException.class, prefill.ownership.queueGuard()::requireHeld);
+            assertThrows(IllegalStateException.class, prefill.ownership.queueGuard()::requireHeld);
             releaseAttempts.incrementAndGet();
             releaseEntered.countDown();
             if (failRelease.get()) {
@@ -320,9 +319,9 @@ class DeliverySettlementSignalContractTest {
         }
 
         long pendingWork() {
-            Object lifecycle = ReflectionTestUtils.getField(runtime, "workLifecycle");
+            Object lifecycle = ReflectionTestUtils.getField(runtime.tasks(), "workLifecycle");
             synchronized (lifecycle) {
-                return (Long) ReflectionTestUtils.getField(runtime, "pendingWork");
+                return (Long) ReflectionTestUtils.getField(runtime.tasks(), "pendingWork");
             }
         }
 
@@ -351,7 +350,9 @@ class DeliverySettlementSignalContractTest {
             }
             try {
                 if (expectsFailure) {
-                    assertThrows(IllegalStateException.class, () -> SchedulerTestSupport.shutdown(runtime));
+                    assertThrows(
+                            IllegalStateException.class,
+                            () -> SchedulerTestSupport.shutdown(runtime));
                 } else {
                     SchedulerTestSupport.shutdown(runtime);
                 }

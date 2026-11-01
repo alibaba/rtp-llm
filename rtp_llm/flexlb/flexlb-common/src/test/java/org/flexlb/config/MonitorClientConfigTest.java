@@ -1,5 +1,8 @@
 package org.flexlb.config;
 
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
+import java.util.concurrent.atomic.AtomicLong;
+import org.junit.jupiter.api.Test;
 import org.flexlb.enums.FlexMetricType;
 import org.flexlb.enums.FlexPriorityType;
 import org.flexlb.metric.FlexMetricTags;
@@ -14,6 +17,7 @@ import javax.annotation.PostConstruct;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.fail;
 
 class MonitorClientConfigTest {
@@ -33,6 +37,56 @@ class MonitorClientConfigTest {
             assertDoesNotThrow(() -> monitor.prepare("metric", null));
             assertDoesNotThrow(monitor::close);
             assertTrue(backend.closed);
+        }
+    }
+
+    @Test
+    void pullMetricsRemainLiveAlongsideAnIndependentBusinessBackend() {
+        var backend = org.mockito.Mockito.mock(FlexMonitor.class);
+        var source = new AtomicLong(7);
+        var registry = new SimpleMeterRegistry();
+        try (var context = new AnnotationConfigApplicationContext()) {
+            context.register(MonitorClientConfig.class);
+            context.registerBean("businessMonitor", FlexMonitor.class, () -> backend);
+            context.registerBean(
+                    "meterRegistry",
+                    io.micrometer.core.instrument.MeterRegistry.class,
+                    () -> registry);
+            context.refresh();
+            var monitor = context.getBean(FlexMonitor.class);
+            monitor.observe(
+                    "delivery_executor_active_threads",
+                    FlexMetricType.GAUGE,
+                    source,
+                    AtomicLong::doubleValue);
+            monitor.observe(
+                    "delivery_executor_completed_tasks",
+                    FlexMetricType.COUNTER,
+                    source,
+                    AtomicLong::doubleValue);
+            monitor.report("business", 3);
+            org.mockito.Mockito.verify(backend).report("business", 3);
+            assertEquals(
+                    7, registry.get("flexlb.delivery_executor_active_threads").gauge().value());
+            assertEquals(
+                    7,
+                    registry.get("flexlb.delivery_executor_completed_tasks")
+                            .functionCounter()
+                            .count());
+            source.set(19);
+            assertEquals(
+                    19, registry.get("flexlb.delivery_executor_active_threads").gauge().value());
+            assertEquals(
+                    19,
+                    registry.get("flexlb.delivery_executor_completed_tasks")
+                            .functionCounter()
+                            .count());
+            org.mockito.Mockito.verify(backend, org.mockito.Mockito.never())
+                    .observe(
+                            org.mockito.ArgumentMatchers.any(),
+                            org.mockito.ArgumentMatchers.any(),
+                            org.mockito.ArgumentMatchers.any(),
+                            org.mockito.ArgumentMatchers.any());
         }
     }
 

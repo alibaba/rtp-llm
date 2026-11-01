@@ -45,11 +45,9 @@ public final class BatchIdGenerator {
         this.currentTimeMillis = Objects.requireNonNull(currentTimeMillis, "currentTimeMillis");
     }
 
-    public static BatchIdGenerator forCurrentProcess(int serverPort) {
+    public static BatchIdGenerator forCurrentProcess() {
         String processIdentity =
                 detectLocalIp()
-                        + ":"
-                        + serverPort
                         + ":"
                         + ProcessHandle.current().pid()
                         + ":"

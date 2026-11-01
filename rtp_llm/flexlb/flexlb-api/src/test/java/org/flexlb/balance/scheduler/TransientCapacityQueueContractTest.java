@@ -153,8 +153,10 @@ class TransientCapacityQueueContractTest {
             var reservation = SchedulerTestSupport.decodeReservation(fixture.decodeEndpoint, id);
             var releaseEntered = new java.util.concurrent.CountDownLatch(1);
             var releaseAllowed = new java.util.concurrent.CountDownLatch(1);
-            Object runtime = ReflectionTestUtils.getField(fixture.runtime, "runtime");
-            Object lifecycle = ReflectionTestUtils.getField(runtime, "workLifecycle");
+            var runtime =
+                    (SchedulerTestServices)
+                            ReflectionTestUtils.getField(fixture.runtime, "runtime");
+            Object lifecycle = ReflectionTestUtils.getField(runtime.tasks(), "workLifecycle");
             Object completions = ReflectionTestUtils.getField(runtime, "responseCompletions");
             var registrations =
                     (java.util.Set<?>) ReflectionTestUtils.getField(completions, "registrations");
@@ -223,7 +225,9 @@ class TransientCapacityQueueContractTest {
                         boolean drained;
                         synchronized (lifecycle) {
                             drained =
-                                    ((Long) ReflectionTestUtils.getField(runtime, "pendingWork"))
+                                    ((Long)
+                                                    ReflectionTestUtils.getField(
+                                                            runtime.tasks(), "pendingWork"))
                                             == 0L;
                         }
                         synchronized (registrations) {
@@ -1159,15 +1163,9 @@ class TransientCapacityQueueContractTest {
             CacheAwareService cache = mock(CacheAwareService.class);
             when(cache.findMatchingEngines(any(), any(), any())).thenReturn(Map.of());
             CostBasedPrefillStrategy prefillSelector =
-                    new CostBasedPrefillStrategy(
-                            workers,
-                            cache,
-                            mock(EngineHealthReporter.class),
-                            org.mockito.Mockito.mock(CacheMetricsReporter.class),
-                            configService);
+                    new CostBasedPrefillStrategy(cache, configService);
             DecodeSelector decodeSelector =
                     new DecodeSelector(
-                            workers,
                             configService,
                             new org.flexlb.balance.scheduler.PlacementConfiguration()
                                     .decodeAdmissionCapacity(configService));
@@ -1175,11 +1173,17 @@ class TransientCapacityQueueContractTest {
             runtime.bindRouter(
                     new RecordingRouter(
                             new RequestWorkerSelector(
+                                    workers,
                                     prefillSelector,
                                     decodeSelector,
-                                    new VitWorkerSelector(workers),
+                                    new VitWorkerSelector(),
+                                    null,
+                                    mock(EngineHealthReporter.class),
+                                    org.mockito.Mockito.mock(CacheMetricsReporter.class),
+                                    configService,
                                     modelMeta(prefillFirst)),
-                            metrics));
+                            metrics,
+                            configService));
         }
 
         private void expandFleet(int prefillCount, int decodeCount, int decodeRunningCount) {
@@ -1321,11 +1325,19 @@ class TransientCapacityQueueContractTest {
         private final RequestWorkerSelector delegate;
         private final PlacementMetrics metrics;
 
-        private RecordingRouter(RequestWorkerSelector delegate, PlacementMetrics metrics) {
+        private RecordingRouter(
+                RequestWorkerSelector delegate,
+                PlacementMetrics metrics,
+                ConfigService configService) {
             super(
+                    mock(EndpointRegistry.class),
                     mock(CostBasedPrefillStrategy.class),
                     mock(DecodeSelector.class),
                     mock(VitWorkerSelector.class),
+                    null,
+                    mock(EngineHealthReporter.class),
+                    mock(CacheMetricsReporter.class),
+                    configService,
                     modelMeta(false));
             this.delegate = delegate;
             this.metrics = metrics;
@@ -1630,6 +1642,15 @@ class TransientCapacityQueueContractTest {
             EngineGrpcClient client = mock(EngineGrpcClient.class);
             when(client.batchEnqueueAsync(any(), org.mockito.ArgumentMatchers.anyInt(), any()))
                     .thenAnswer(invocation -> enqueue(invocation.getArgument(2)));
+            // This in-memory engine has no remote resources after it acknowledges cleanup.
+            when(client.cancelAsync(
+                            any(),
+                            org.mockito.ArgumentMatchers.anyInt(),
+                            any(),
+                            org.mockito.ArgumentMatchers.anyLong()))
+                    .thenReturn(
+                            CompletableFuture.completedFuture(
+                                    EngineGrpcClient.CancelReply.REQUEST_CLEANED));
             return client;
         }
 

@@ -1,5 +1,6 @@
 package org.flexlb.balance.prediction;
 
+import org.flexlb.balance.planner.BuiltinGroupPlanner;
 import org.flexlb.balance.planner.GroupPlanner;
 import org.flexlb.balance.projection.QueueSnapshot;
 import org.flexlb.balance.projection.RequestTimeEstimation;
@@ -79,7 +80,7 @@ class IncrementalPredictionTest {
             if (round % 5 == 0) java.util.Collections.reverse(source);
             var constraints = new GroupPlanner.Constraints(64, 200_000, 300_000, 700, 700);
             var full =
-                    GroupPlanner.FIXED_WINDOW.select(
+                    BuiltinGroupPlanner.FIXED_WINDOW.select(
                             source,
                             constraints,
                             (added, items) ->
@@ -90,14 +91,15 @@ class IncrementalPredictionTest {
                                                     GroupPlanner.Item::hitCache)));
             var batch = model.newBatchPrediction();
             var incremental =
-                    GroupPlanner.FIXED_WINDOW.select(
+                    BuiltinGroupPlanner.FIXED_WINDOW.select(
                             source,
                             constraints,
                             (added, prefix) -> batch.append(added.seqLen(), added.hitCache()));
             assertEquals(full, incremental);
             assertEquals(
-                    GroupPlanner.FIXED_WINDOW.dispatchReason(full, constraints, 2000),
-                    GroupPlanner.FIXED_WINDOW.dispatchReason(incremental, constraints, 2000));
+                    BuiltinGroupPlanner.FIXED_WINDOW.dispatchReason(full, constraints, 2000),
+                    BuiltinGroupPlanner.FIXED_WINDOW.dispatchReason(
+                            incremental, constraints, 2000));
         }
         var oldSession = model.newBatchPrediction();
         var replacement = new FormulaPredictor("42");
@@ -137,20 +139,21 @@ class IncrementalPredictionTest {
                     new QueueSnapshot(
                             1000,
                             true,
-                            org.flexlb.balance.planner.GroupPlanner.FIXED_WINDOW,
+                            org.flexlb.balance.planner.BuiltinGroupPlanner.FIXED_WINDOW,
                             order,
                             new GroupPlanner.Constraints(64, 200_000, 300_000, 700, 700),
                             items,
                             null);
-            var inputs =
-                    new RequestTimeEstimation.Inputs(
-                            queue, new WorkSnapshot(1000, List.of(), List.of(), 0), 0L);
+            var work = new WorkSnapshot(1000, List.of(), List.of(), 0);
             var probe =
                     new RequestTimeEstimationTestSupport.Probe(
                             999, trial % 5, 1000, 100_000, 1 + random.nextInt(32768), 0, 0);
             assertEquals(
-                    RequestTimeEstimationTestSupport.project(inputs, probe, full, policy),
-                    RequestTimeEstimationTestSupport.project(inputs, probe, model, policy));
+                    RequestTimeEstimationTestSupport.project(
+                            new RequestTimeEstimation.Inputs(queue, work, 0L, full, policy), probe),
+                    RequestTimeEstimationTestSupport.project(
+                            new RequestTimeEstimation.Inputs(queue, work, 0L, model, policy),
+                            probe));
         }
     }
 
@@ -205,7 +208,7 @@ class IncrementalPredictionTest {
             items.add(request);
         }
         var selected =
-                GroupPlanner.FIXED_WINDOW.select(
+                BuiltinGroupPlanner.FIXED_WINDOW.select(
                         items,
                         new GroupPlanner.Constraints(64, 100_000, 100_000, 700, 700),
                         RequestTimeEstimation.newGroupPredictor(mode, evaluator));
@@ -219,7 +222,7 @@ class IncrementalPredictionTest {
         // A second snapshot must receive fresh accumulation state.
         assertEquals(
                 selected,
-                GroupPlanner.FIXED_WINDOW.select(
+                BuiltinGroupPlanner.FIXED_WINDOW.select(
                         items,
                         new GroupPlanner.Constraints(64, 100_000, 100_000, 700, 700),
                         RequestTimeEstimation.newGroupPredictor(mode, evaluator)));
@@ -292,17 +295,19 @@ class IncrementalPredictionTest {
                 new QueueSnapshot(
                         1000,
                         true,
-                        org.flexlb.balance.planner.GroupPlanner.FIXED_WINDOW,
+                        org.flexlb.balance.planner.BuiltinGroupPlanner.FIXED_WINDOW,
                         Comparator.comparingLong(GroupPlanner.Item::requestId),
                         new GroupPlanner.Constraints(64, 100_000, 100_000, budget, 0),
                         active,
                         null);
         return RequestTimeEstimationTestSupport.project(
                 new RequestTimeEstimation.Inputs(
-                        queue, new WorkSnapshot(1000, List.of(), List.of(), 0), 0),
-                new RequestTimeEstimationTestSupport.Probe(probeId, 0, 1000, 100_000, 100, 0, 0),
-                evaluator,
-                org.flexlb.config.DispatcherConfig.Type.BATCH);
+                        queue,
+                        new WorkSnapshot(1000, List.of(), List.of(), 0),
+                        0,
+                        evaluator,
+                        org.flexlb.config.DispatcherConfig.Type.BATCH),
+                new RequestTimeEstimationTestSupport.Probe(probeId, 0, 1000, 100_000, 100, 0, 0));
     }
 
     private static GroupPlanner.Item item(long id, long input, int priority, long expires) {

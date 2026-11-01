@@ -1,17 +1,11 @@
 package org.flexlb.balance.scheduler;
 
-import io.micrometer.core.instrument.FunctionCounter;
-import io.micrometer.core.instrument.Gauge;
-import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.util.NamedThreadFactory;
 import org.flexlb.balance.delivery.BatchIdGenerator;
 import org.flexlb.balance.delivery.CapacityBoundary;
 import org.flexlb.balance.endpoint.DecodeResources.AdmissionCapacity;
 import org.flexlb.config.ConfigService;
-import org.flexlb.constant.MetricConstant;
-import org.flexlb.metric.SafeFlexMonitor;
 import org.flexlb.util.Failures;
-import org.springframework.core.env.Environment;
 
 import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
@@ -30,7 +24,7 @@ import java.util.function.Consumer;
 import static com.google.common.base.Preconditions.checkState;
 
 /** Batch admission, transport execution and real RPC response drain. No request policy lives here. */
-final class DeliveryExecution {
+public final class DeliveryExecution implements org.flexlb.metric.ExecutorStats {
     private final Consumer<Throwable> failures;
     private final ThreadPoolExecutor dispatchExecutor;
     private final ThreadPoolExecutor completionExecutor;
@@ -46,61 +40,26 @@ final class DeliveryExecution {
     private volatile boolean acceptingDeliveries = true;
     final AdmissionCapacity decodeDeliveryCapacity;
     final int maxInflightBatches;
-    private BatchIdGenerator batchIds;
+    private final BatchIdGenerator batchIds;
 
-    void configureBatchIds(Environment environment) {
-        if (batchIds == null) {
-            return;
-        }
-        try {
-            batchIds =
-                    BatchIdGenerator.forCurrentProcess(
-                            Integer.parseInt(
-                                    environment.getProperty(
-                                            "server.port",
-                                            System.getProperty("server.port", "7001"))));
-        } catch (NumberFormatException ignored) {
-        }
+    @Override
+    public int activeThreads() {
+        return dispatchExecutor.getActiveCount();
     }
 
-    void configureDeliveryMetrics(MeterRegistry registry) {
-        SafeFlexMonitor.run(
-                MetricConstant.DISPATCH_EXECUTOR_ACTIVE_THREADS,
-                () ->
-                        Gauge.builder(
-                                        "flexlb." + MetricConstant.DISPATCH_EXECUTOR_ACTIVE_THREADS,
-                                        dispatchExecutor,
-                                        ThreadPoolExecutor::getActiveCount)
-                                .description("Dispatch executor active thread count")
-                                .register(registry));
-        SafeFlexMonitor.run(
-                MetricConstant.DISPATCH_EXECUTOR_QUEUE_SIZE,
-                () ->
-                        Gauge.builder(
-                                        "flexlb." + MetricConstant.DISPATCH_EXECUTOR_QUEUE_SIZE,
-                                        dispatchExecutor,
-                                        executor -> executor.getQueue().size())
-                                .description("Dispatch executor pending task queue size")
-                                .register(registry));
-        SafeFlexMonitor.run(
-                MetricConstant.DISPATCH_EXECUTOR_POOL_SIZE,
-                () ->
-                        Gauge.builder(
-                                        "flexlb." + MetricConstant.DISPATCH_EXECUTOR_POOL_SIZE,
-                                        dispatchExecutor,
-                                        ThreadPoolExecutor::getPoolSize)
-                                .description("Dispatch executor current pool size")
-                                .register(registry));
-        SafeFlexMonitor.run(
-                MetricConstant.DISPATCH_EXECUTOR_COMPLETED_TASKS,
-                () ->
-                        FunctionCounter.builder(
-                                        "flexlb."
-                                                + MetricConstant.DISPATCH_EXECUTOR_COMPLETED_TASKS,
-                                        dispatchExecutor,
-                                        ThreadPoolExecutor::getCompletedTaskCount)
-                                .description("Dispatch executor total completed tasks")
-                                .register(registry));
+    @Override
+    public int queuedTasks() {
+        return dispatchExecutor.getQueue().size();
+    }
+
+    @Override
+    public int poolSize() {
+        return dispatchExecutor.getPoolSize();
+    }
+
+    @Override
+    public long completedTasks() {
+        return dispatchExecutor.getCompletedTaskCount();
     }
 
     long nextBatchId() {
@@ -323,7 +282,7 @@ final class DeliveryExecution {
         finishDeliveryDrain();
     }
 
-    void awaitDeliveries() {
+    public void awaitDeliveries() {
         stopDeliveryAdmission();
         boolean interrupted = false;
         synchronized (deliveryDrain) {
@@ -352,10 +311,11 @@ final class DeliveryExecution {
     DeliveryExecution(ConfigService config, Consumer<Throwable> failures) {
         this.failures = failures;
         var configuration = config.loadBalanceConfig();
-        if (configuration.getDispatcher().getType()
-                == org.flexlb.config.DispatcherConfig.Type.BATCH) {
-            batchIds = BatchIdGenerator.forCurrentProcess(Integer.getInteger("server.port", 7001));
-        }
+        batchIds =
+                configuration.getDispatcher().getType()
+                                == org.flexlb.config.DispatcherConfig.Type.BATCH
+                        ? BatchIdGenerator.forCurrentProcess()
+                        : null;
         var sizing = configuration.getInternalRuntime();
         int threads = sizing.getBatchDispatchThreads();
         deliveryAdmissionCapacity = Math.addExact(threads, sizing.getBatchDispatchQueueCapacity());

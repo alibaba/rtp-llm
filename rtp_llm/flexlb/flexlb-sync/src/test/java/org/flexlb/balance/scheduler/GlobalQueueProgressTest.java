@@ -59,6 +59,44 @@ import static org.mockito.Mockito.when;
 class GlobalQueueProgressTest {
 
     @Test
+    void drainCompletesWhenTheLastCapacityEventIsConsumed() throws Exception {
+        try (Fixture f = new Fixture(RoleType.PREFILL)) {
+            ReentrantLock lock = (ReentrantLock) ReflectionTestUtils.getField(f.scheduler, "lock");
+            var result = new CompletableFuture<Boolean>();
+            Thread waiter =
+                    Thread.ofPlatform()
+                            .start(
+                                    () -> {
+                                        lock.lock();
+                                        try {
+                                            // Hold the queue lock until await registers this waiter
+                                            // and releases it.
+                                            f.release("a");
+                                            result.complete(
+                                                    ((QueuedRequestScheduler) f.scheduler)
+                                                            .awaitSchedulingCompletion(
+                                                                    System.nanoTime()
+                                                                            + TimeUnit.SECONDS
+                                                                                    .toNanos(30)));
+                                        } catch (Throwable failure) {
+                                            result.completeExceptionally(failure);
+                                        } finally {
+                                            lock.unlock();
+                                        }
+                                    });
+            try {
+                assertTrue(
+                        result.get(2, TimeUnit.SECONDS),
+                        "consuming the last event must wake drain without another event or timeout");
+            } finally {
+                waiter.interrupt();
+                waiter.join(3000);
+                assertFalse(waiter.isAlive());
+            }
+        }
+    }
+
+    @Test
     void releasingBlockedPlanPublishesCapacityBeforeParking() throws Exception {
         try (Fixture f = new Fixture(RoleType.PREFILL)) {
             AtomicInteger attempts = new AtomicInteger();
@@ -156,7 +194,8 @@ class GlobalQueueProgressTest {
                         }
                     };
             f.submit(997L, "b");
-            verify(f.lifecycle.runtime, timeout(1_000)).recordFailure(failure);
+            RequestProtocolTestSupport.awaitCondition(
+                    () -> SchedulerTestSupport.failure(f.lifecycle) == failure);
             verify(f.mutations.get(997L), timeout(1_000)).finish();
             f.submit(998L, "b");
             awaitCondition(() -> f.admitted.contains(998L));
@@ -227,7 +266,7 @@ class GlobalQueueProgressTest {
             RequestProtocolTestSupport.awaitGlobalCapacityWaiters(f.scheduler, 1);
             QueuedRequestScheduler queue = (QueuedRequestScheduler) f.scheduler;
             RequestContext context = f.contexts.get(991L);
-            queue.queueControl(context, null);
+            queue.remove(context);
             awaitCondition(() -> RequestProtocolTestSupport.queuedCount(queue) == 0);
 
             f.aSlots.set(1);
@@ -372,7 +411,7 @@ class GlobalQueueProgressTest {
                 f.submit(2, "c");
                 await(started);
                 f.requests.get(1L).cancel(false);
-                ((QueuedRequestScheduler) f.scheduler).queueControl(f.contexts.get(1L), null);
+                ((QueuedRequestScheduler) f.scheduler).remove(f.contexts.get(1L));
                 f.submit(3, "d");
                 assertFalse(
                         thirdStarted.await(100, TimeUnit.MILLISECONDS),
@@ -694,7 +733,7 @@ class GlobalQueueProgressTest {
                             "close must retain the pending preemption responsibility");
                 } else {
                     assertTrue(f.requests.get(id).cancel(false));
-                    ((QueuedRequestScheduler) f.scheduler).queueControl(f.contexts.get(id), null);
+                    ((QueuedRequestScheduler) f.scheduler).remove(f.contexts.get(id));
                     awaitCondition(() -> RequestProtocolTestSupport.queuedCount(f.scheduler) == 0);
                     f.submit(1105L, "b");
                     awaitCondition(() -> f.admitted.contains(1105L));
@@ -825,7 +864,7 @@ class GlobalQueueProgressTest {
 
         private final RequestScheduler scheduler;
 
-        private final AbstractRequestScheduler lifecycle;
+        private final RequestLifecycle lifecycle;
 
         private final RoleType role;
 

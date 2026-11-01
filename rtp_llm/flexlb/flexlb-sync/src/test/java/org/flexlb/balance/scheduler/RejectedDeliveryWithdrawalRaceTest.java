@@ -68,9 +68,18 @@ class RejectedDeliveryWithdrawalRaceTest {
                         mock(RecentCacheKeyTraceReporter.class));
         var grpc = mock(EngineGrpcClient.class);
         var dispatcher = new DeliveryDispatcher(grpc, service, reporter);
-        ReflectionTestUtils.setField(owner.runtime, "dispatcher", dispatcher);
-        var execution = org.mockito.Mockito.spy(owner.runtime.deliveries());
-        ReflectionTestUtils.setField(owner.runtime, "deliveries", execution);
+        org.flexlb.balance.scheduler.SchedulerTestServices.setDependency(
+                org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(owner),
+                "dispatcher",
+                dispatcher);
+        var execution =
+                org.mockito.Mockito.spy(
+                        org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(owner)
+                                .deliveries());
+        org.flexlb.balance.scheduler.SchedulerTestServices.setDependency(
+                org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(owner),
+                "deliveries",
+                execution);
         doReturn(701L).when(execution).nextBatchId();
         var ledger = new DeliverySettlementTestSupport();
         var prefill = mock(PrefillEndpoint.class);
@@ -109,9 +118,13 @@ class RejectedDeliveryWithdrawalRaceTest {
                 new PrefillQueueRunner(
                         "rejected-withdrawal",
                         prefill,
-                        QueueExecutionSettings.capture(config),
+                        QueueExecutionSettings.capture(
+                                config,
+                                org.flexlb.balance.planner.BuiltinGroupPlanner.from(config)),
                         dispatcher,
-                        ledger.prefill);
+                        ledger.prefill,
+                        SchedulerTestSupport.queueDependencies(
+                                org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(owner)));
         ReflectionTestUtils.setField(prefill, "queueRunner", worker);
         ReflectionTestUtils.setField(prefill, "ownership", ledger.prefill);
 
@@ -158,8 +171,8 @@ class RejectedDeliveryWithdrawalRaceTest {
                     // This is synchronous on the permit/resource release path, so no timing or
                     // sleeps are needed.
                     var withdrawal =
-                            ((QueuedRequestScheduler) owner)
-                                    .claimWithdrawal(decode, handle, Integer.MAX_VALUE);
+                            AdmissionHandle.tryBeginPreemption(
+                                    owner, decode, handle, Integer.MAX_VALUE);
                     if (withdrawal != null) {
                         invalidWithdrawal.compareAndSet(null, withdrawal);
                     }
@@ -168,13 +181,17 @@ class RejectedDeliveryWithdrawalRaceTest {
         var actualExecutor =
                 (ThreadPoolExecutor)
                         ReflectionTestUtils.getField(
-                                owner.runtime.deliveries(), "dispatchExecutor");
+                                org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(owner)
+                                        .deliveries(),
+                                "dispatchExecutor");
         var rejectingExecutor = mock(ThreadPoolExecutor.class);
         var rejection = new RejectedExecutionException("executor rejected for withdrawal race");
         doThrow(rejection).when(rejectingExecutor).execute(any());
         try {
             ReflectionTestUtils.setField(
-                    owner.runtime.deliveries(), "dispatchExecutor", rejectingExecutor);
+                    org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(owner).deliveries(),
+                    "dispatchExecutor",
+                    rejectingExecutor);
             try {
                 assertNull(
                         worker.processSelection(
@@ -185,7 +202,10 @@ class RejectedDeliveryWithdrawalRaceTest {
                                 null));
             } finally {
                 ReflectionTestUtils.setField(
-                        owner.runtime.deliveries(), "dispatchExecutor", actualExecutor);
+                        org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(owner)
+                                .deliveries(),
+                        "dispatchExecutor",
+                        actualExecutor);
             }
 
             assertTrue(
@@ -198,7 +218,8 @@ class RejectedDeliveryWithdrawalRaceTest {
             assertFalse(response.isSuccess());
             assertTrue(
                     response.getErrorMessage().contains("executor rejected for withdrawal race"));
-            SchedulerTestSupport.awaitRequestWork(owner.runtime);
+            SchedulerTestSupport.awaitRequestWork(
+                    org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(owner));
             assertEquals(0, ledger.prefill.stats().batchCount());
             assertEquals(0, ledger.prefill.stats().locallyOwnedRequests());
             assertEquals(0, decode.resourceSnapshot().activeDispatchPermits());
@@ -219,13 +240,16 @@ class RejectedDeliveryWithdrawalRaceTest {
             verifyNoInteractions(grpc);
         } finally {
             ReflectionTestUtils.setField(
-                    owner.runtime.deliveries(), "dispatchExecutor", actualExecutor);
+                    org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(owner).deliveries(),
+                    "dispatchExecutor",
+                    actualExecutor);
             stopWatching.run();
             var outstanding = invalidWithdrawal.get();
             if (outstanding != null) {
                 outstanding.finish();
             }
-            SchedulerTestSupport.shutdown(owner.runtime);
+            SchedulerTestSupport.shutdown(
+                    org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(owner));
             decode.close();
             org.flexlb.balance.endpoint.EndpointTestSupport.awaitRetirement(decode);
         }

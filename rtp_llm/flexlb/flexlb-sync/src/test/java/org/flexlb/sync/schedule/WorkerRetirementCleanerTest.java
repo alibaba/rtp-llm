@@ -49,10 +49,20 @@ class WorkerRetirementCleanerTest {
             context.registerBean(WorkerRetirementCleaner.class);
             context.refresh();
             var tasks =
-                    context.getBean(ScheduledAnnotationBeanPostProcessor.class).getScheduledTasks();
+                    context
+                            .getBean(ScheduledAnnotationBeanPostProcessor.class)
+                            .getScheduledTasks()
+                            .stream()
+                            .filter(
+                                    task ->
+                                            ((org.springframework.scheduling.support
+                                                                            .ScheduledMethodRunnable)
+                                                                    task.getTask().getRunnable())
+                                                            .getTarget()
+                                                    instanceof WorkerRetirementCleaner)
+                            .toList();
             assertEquals(1, tasks.size());
-            FixedRateTask task =
-                    assertInstanceOf(FixedRateTask.class, tasks.iterator().next().getTask());
+            FixedRateTask task = assertInstanceOf(FixedRateTask.class, tasks.getFirst().getTask());
             assertEquals(1250L, task.getInterval());
         }
     }

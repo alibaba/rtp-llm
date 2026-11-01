@@ -173,7 +173,7 @@ public final class DeliveryTestSupport {
             };
 
     public static void stubRouteDelivery(
-            AbstractRequestScheduler requests,
+            RequestLifecycle requests,
             java.util.function.BiConsumer<DeliveryClaim, DeliveryResult> completed) {
         Mockito.doAnswer(
                         invocation -> {

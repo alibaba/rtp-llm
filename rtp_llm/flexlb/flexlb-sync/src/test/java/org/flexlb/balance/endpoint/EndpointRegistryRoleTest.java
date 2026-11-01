@@ -77,7 +77,10 @@ class EndpointRegistryRoleTest {
                         new org.flexlb.balance.scheduler.RequestRepository(),
                         Mockito.mock(DeliveryMetricsReporter.class),
                         EndpointTestSupport.routeStrategy(requestRuntime),
-                        availability);
+                        availability,
+                        org.flexlb.balance.planner.BuiltinGroupPlanner.from(
+                                configService.loadBalanceConfig()),
+                        order -> org.flexlb.balance.endpoint.PrefillActiveIndex.ordered(16, order));
     }
 
     @AfterEach
@@ -322,7 +325,8 @@ class EndpointRegistryRoleTest {
         EndpointRegistry.Retirement detached =
                 detachUnderGenerationLock(RoleType.PREFILL, secondAddress, secondStatus);
         assertNotNull(detached);
-        EndpointTestSupport.completeRetirement(detached,
+        EndpointTestSupport.completeRetirement(
+                detached,
                 org.mockito.Mockito.mock(org.flexlb.cache.service.CacheAwareService.class),
                 org.slf4j.LoggerFactory.getLogger(getClass()));
         assertEquals(
@@ -367,7 +371,8 @@ class EndpointRegistryRoleTest {
         EndpointRegistry.Retirement detached =
                 detachUnderGenerationLock(RoleType.VIT, ipPort, replacement);
         assertNotNull(detached);
-        EndpointTestSupport.completeRetirement(detached,
+        EndpointTestSupport.completeRetirement(
+                detached,
                 org.mockito.Mockito.mock(org.flexlb.cache.service.CacheAwareService.class),
                 org.slf4j.LoggerFactory.getLogger(getClass()));
         assertNull(registry.get(RoleType.VIT, ipPort));
@@ -436,7 +441,9 @@ class EndpointRegistryRoleTest {
 
         WorkerStatus replacement = status(RoleType.PREFILL, 8300);
         registry.currentOrDiscover(RoleType.PREFILL, address, () -> replacement);
-        assertThrows(IllegalStateException.class, () -> EndpointTestSupport.completeRetirement(retirement, cache, logger));
+        assertThrows(
+                IllegalStateException.class,
+                () -> EndpointTestSupport.completeRetirement(retirement, cache, logger));
         assertSame(replacement, registry.statusSnapshot(RoleType.PREFILL).get(address));
         org.mockito.Mockito.verify(cache, org.mockito.Mockito.times(2))
                 .removeEngineBlockCache(address);
@@ -460,7 +467,8 @@ class EndpointRegistryRoleTest {
     private void retire(RoleType role, String address, WorkerStatus status) {
         EndpointRegistry.Retirement detached = detachUnderGenerationLock(role, address, status);
         assertNotNull(detached);
-        EndpointTestSupport.completeRetirement(detached,
+        EndpointTestSupport.completeRetirement(
+                detached,
                 org.mockito.Mockito.mock(org.flexlb.cache.service.CacheAwareService.class),
                 org.slf4j.LoggerFactory.getLogger(getClass()));
     }

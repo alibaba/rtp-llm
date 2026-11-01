@@ -13,7 +13,6 @@ import org.flexlb.service.RecentCacheKeyTraceReporter;
 import org.flexlb.service.monitor.DeliveryMetricsReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.junit.jupiter.api.Test;
-import org.springframework.test.util.ReflectionTestUtils;
 
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
@@ -41,10 +40,18 @@ class RequestAcknowledgementPreemptionRaceTest {
                         mock(DeliveryMetricsReporter.class),
                         mock(RequestSchedulerReporter.class),
                         mock(RecentCacheKeyTraceReporter.class));
-        SchedulerTestSupport.responseCompletions(owner.runtime).close();
+        SchedulerTestSupport.responseCompletions(
+                        org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(owner))
+                .close();
         var publisher = new ResponseCompletionExecutor(1);
-        ReflectionTestUtils.setField(owner.runtime, "responseCompletions", publisher);
-        ReflectionTestUtils.setField(owner.runtime, "timer", mock(ExpirationTimer.class));
+        org.flexlb.balance.scheduler.SchedulerTestServices.setDependency(
+                org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(owner),
+                "responseCompletions",
+                publisher);
+        org.flexlb.balance.scheduler.SchedulerTestServices.setDependency(
+                org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(owner),
+                "timer",
+                mock(ExpirationTimer.class));
         RequestProtocolTestSupport.register(owner, context);
         var reservation = new DecodeResources.ReservationHandle(1L, 9741L, 3L);
         var decode = RequestProtocolTestSupport.decodeEndpoint();
@@ -145,9 +152,11 @@ class RequestAcknowledgementPreemptionRaceTest {
                     context,
                     decode,
                     DecodeResources.DecodeRequestStatus.terminal(reservation, 0L));
-            SchedulerTestSupport.awaitRequestWork(owner.runtime);
-            SchedulerTestSupport.closeRequestExecutors(owner.runtime);
-            owner.closePlacement();
+            SchedulerTestSupport.awaitRequestWork(
+                    org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(owner));
+            SchedulerTestSupport.closeRequestExecutors(
+                    org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(owner));
+            owner.scheduler().close();
         }
     }
 }

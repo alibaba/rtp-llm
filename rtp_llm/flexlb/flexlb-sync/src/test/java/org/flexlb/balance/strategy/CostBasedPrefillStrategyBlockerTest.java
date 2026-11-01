@@ -1,5 +1,6 @@
 package org.flexlb.balance.strategy;
 
+import org.flexlb.balance.planner.BuiltinGroupPlanner;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.PrefillState;
@@ -68,13 +69,15 @@ class CostBasedPrefillStrategyBlockerTest {
                         new QueueSnapshot(
                                 0L,
                                 true,
-                                GroupPlanner.FIXED_WINDOW,
+                                BuiltinGroupPlanner.FIXED_WINDOW,
                                 Comparator.comparingLong(GroupPlanner.Item::requestId),
                                 new GroupPlanner.Constraints(1, Long.MAX_VALUE, 0L, 0L, 0L),
                                 List.of(),
                                 null),
                         new WorkSnapshot(0L, List.of(), List.of(), 0L),
-                        0L);
+                        0L,
+                        new FormulaPredictor("sum(computeTokens)").evaluator(),
+                        DispatcherConfig.Type.BATCH);
         for (RoleType role : List.of(RoleType.PREFILL, RoleType.PDFUSION)) {
             var projectedWorkers = new AtomicInteger();
             var directory = mock(EndpointRegistry.class);
@@ -86,7 +89,7 @@ class CostBasedPrefillStrategyBlockerTest {
                                 return Map.of();
                             });
             var strategy =
-                    new CostBasedPrefillStrategy(
+                    new StrategyTestSupport.PrefillRoutingFixture(
                             directory,
                             cache,
                             mock(EngineHealthReporter.class),
@@ -118,10 +121,6 @@ class CostBasedPrefillStrategyBlockerTest {
                                     projectedWorkers.incrementAndGet();
                                     return inputs;
                                 });
-                org.springframework.test.util.ReflectionTestUtils.setField(
-                        endpoint, "predictor", new FormulaPredictor("sum(computeTokens)"));
-                org.springframework.test.util.ReflectionTestUtils.setField(
-                        endpoint, "deliveryMode", DispatcherConfig.Type.BATCH);
                 entries.add(new EndpointRegistry.PrefillRoutingEntry("worker-" + index, endpoint));
             }
             var frozen = List.copyOf(entries);

@@ -73,7 +73,10 @@ public class WorkerAddressService {
             engineHealthReporter.reportThreadPoolInfo(
                     ENGINE_BALANCING_THREAD_POOL_INFO,
                     "serviceDiscoveryExecutor",
-                    serviceDiscoveryExecutor);
+                    serviceDiscoveryExecutor.getActiveCount(),
+                    serviceDiscoveryExecutor.getQueue().size(),
+                    serviceDiscoveryExecutor.getCorePoolSize(),
+                    serviceDiscoveryExecutor.getPoolSize());
         } catch (Throwable failure) {
             logger.warn("Failed to report service discovery executor metrics", failure);
         }

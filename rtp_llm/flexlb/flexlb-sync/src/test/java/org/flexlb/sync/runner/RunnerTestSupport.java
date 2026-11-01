@@ -34,12 +34,17 @@ public final class RunnerTestSupport {
 
     public static EndpointRegistry endpointRegistry(ConfigService configService) {
         DeliveryDispatcher delivery = Mockito.mock(DeliveryDispatcher.class);
+        var config = configService.loadBalanceConfig();
         return new EndpointRegistry(
                 configService,
                 new RequestRepository(),
                 Mockito.mock(DeliveryMetricsReporter.class),
                 delivery,
-                new PlacementAvailability());
+                new PlacementAvailability(),
+                config == null
+                        ? org.flexlb.balance.planner.BuiltinGroupPlanner.SINGLE
+                        : org.flexlb.balance.planner.BuiltinGroupPlanner.from(config),
+                order -> org.flexlb.balance.endpoint.PrefillActiveIndex.ordered(16, order));
     }
 
     public static WorkerStatus discovered(

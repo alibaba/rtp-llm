@@ -1,5 +1,9 @@
 package org.flexlb.service.monitor;
 
+import io.micrometer.core.instrument.Meter;
+import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.config.MeterFilter;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.flexlb.enums.FlexMetricType;
 import org.flexlb.enums.FlexPriorityType;
 import org.flexlb.metric.FlexMetricTags;
@@ -12,12 +16,17 @@ import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.context.annotation.AnnotationConfigApplicationContext;
 
 import static org.flexlb.constant.MetricConstant.BATCHER_QUEUE_SIZE;
 import static org.flexlb.constant.MetricConstant.DECODE_INFLIGHT_HARD_KV_RESERVED_TOKENS;
 import static org.flexlb.constant.MetricConstant.DECODE_INFLIGHT_KV_RESERVED_TOKENS;
 import static org.flexlb.constant.MetricConstant.DECODE_TOTAL_LOAD;
 import static org.flexlb.constant.MetricConstant.DISPATCH_ACK_TIME_MS;
+import static org.flexlb.constant.MetricConstant.DISPATCH_EXECUTOR_ACTIVE_THREADS;
+import static org.flexlb.constant.MetricConstant.DISPATCH_EXECUTOR_COMPLETED_TASKS;
+import static org.flexlb.constant.MetricConstant.DISPATCH_EXECUTOR_POOL_SIZE;
+import static org.flexlb.constant.MetricConstant.DISPATCH_EXECUTOR_QUEUE_SIZE;
 import static org.flexlb.constant.MetricConstant.ENGINE_BALANCING_MASTER_DISPATCH_REASON;
 import static org.flexlb.constant.MetricConstant.ENGINE_BALANCING_MASTER_SELECT_DETAIL;
 import static org.flexlb.constant.MetricConstant.INFLIGHT_MAX_AGE_MS;
@@ -27,13 +36,16 @@ import static org.flexlb.constant.MetricConstant.ROUTE_SUBMIT_TIME_MS;
 import static org.flexlb.constant.MetricConstant.ROUTING_QUEUE_LENGTH;
 import static org.flexlb.constant.MetricConstant.ROUTING_QUEUE_WAIT_TIME_MS;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyDouble;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoMoreInteractions;
+import static org.mockito.Mockito.when;
 
 @ExtendWith(MockitoExtension.class)
 class DeliveryMetricsReporterTest {
@@ -45,6 +57,122 @@ class DeliveryMetricsReporterTest {
     @BeforeEach
     void setUp() {
         reporter = new DeliveryMetricsReporter(monitor);
+    }
+
+    @Test
+    void scheduledReportReadsStatsAndKeepsEndpointFailuresIndependent() {
+        var endpoints = mock(org.flexlb.balance.endpoint.EndpointRegistry.class);
+        var prefill = mock(org.flexlb.balance.endpoint.PrefillEndpoint.class);
+        var decode = mock(org.flexlb.balance.endpoint.DecodeEndpoint.class);
+        var requests = mock(RequestSchedulerReporter.class);
+        when(endpoints.endpointSnapshot(org.flexlb.dao.route.RoleType.PREFILL))
+                .thenReturn(java.util.Map.of("prefill", prefill));
+        when(endpoints.endpointSnapshot(org.flexlb.dao.route.RoleType.DECODE))
+                .thenReturn(java.util.Map.of("decode", decode));
+        when(prefill.queueDepth()).thenReturn(7);
+        doThrow(new IllegalStateException("isolated metric failure"))
+                .when(prefill)
+                .reportBatchMetrics(reporter);
+        try (var context = new AnnotationConfigApplicationContext()) {
+            context.registerBean(
+                    org.flexlb.balance.scheduler.RequestRepository.class,
+                    org.flexlb.balance.scheduler.RequestRepository::new);
+            context.registerBean(
+                    org.flexlb.balance.endpoint.EndpointRegistry.class, () -> endpoints);
+            context.registerBean(RequestSchedulerReporter.class, () -> requests);
+            context.registerBean(DeliveryMetricsReporter.class, () -> reporter);
+            context.refresh();
+            assertDoesNotThrow(reporter::report);
+            verify(requests).reportPrefillQueueDepth("prefill", 7);
+            verify(decode).reportBatchMetrics(reporter);
+            verify(decode).reportAdmissionMetrics(requests);
+        }
+    }
+
+    @Test
+    void executorMetricsReadLiveValuesAndKeepCompletedTasksAsACounter() {
+        var registry = new SimpleMeterRegistry();
+        try {
+            var stats = mock(org.flexlb.metric.ExecutorStats.class);
+            when(stats.activeThreads()).thenReturn(2);
+            when(stats.queuedTasks()).thenReturn(3);
+            when(stats.poolSize()).thenReturn(4);
+            when(stats.completedTasks()).thenReturn(7L, 9L);
+            reporter =
+                    new DeliveryMetricsReporter(
+                            new org.flexlb.metric.MicrometerFlexMonitor(registry));
+            reporter.registerExecutor(stats);
+            assertEquals(
+                    2.0,
+                    registry.get("flexlb." + DISPATCH_EXECUTOR_ACTIVE_THREADS).gauge().value());
+            assertEquals(
+                    3.0, registry.get("flexlb." + DISPATCH_EXECUTOR_QUEUE_SIZE).gauge().value());
+            assertEquals(
+                    4.0, registry.get("flexlb." + DISPATCH_EXECUTOR_POOL_SIZE).gauge().value());
+            var completed =
+                    registry.get("flexlb." + DISPATCH_EXECUTOR_COMPLETED_TASKS).functionCounter();
+            assertEquals(7.0, completed.count());
+            assertEquals(9.0, completed.count());
+        } finally {
+            registry.close();
+        }
+    }
+
+    @Test
+    void failingExecutorGaugeRegistrationDoesNotSuppressTheOtherMetrics() {
+        var registry = new SimpleMeterRegistry();
+        try {
+            registry.config()
+                    .meterFilter(
+                            new MeterFilter() {
+                                @Override
+                                public Meter.Id map(Meter.Id id) {
+                                    if (id.getName().endsWith(DISPATCH_EXECUTOR_ACTIVE_THREADS)) {
+                                        throw new IllegalStateException(
+                                                "backend rejected this metric");
+                                    }
+                                    return id;
+                                }
+                            });
+            reporter =
+                    new DeliveryMetricsReporter(
+                            new org.flexlb.metric.MicrometerFlexMonitor(registry));
+            assertDoesNotThrow(
+                    () -> reporter.registerExecutor(mock(org.flexlb.metric.ExecutorStats.class)));
+            assertEquals(3, registry.getMeters().size());
+        } finally {
+            registry.close();
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    void executorBindingUsesTheConfiguredMonitor(boolean withBackend) {
+        var registry = new SimpleMeterRegistry();
+        try (var context = new AnnotationConfigApplicationContext()) {
+            context.registerBean(
+                    FlexMonitor.class,
+                    () ->
+                            withBackend
+                                    ? new org.flexlb.metric.MicrometerFlexMonitor(registry)
+                                    : monitor);
+            if (withBackend) {
+                context.registerBean(MeterRegistry.class, () -> registry);
+            }
+            context.register(DeliveryMetricsReporter.class);
+            context.registerBean(
+                    "executorBinding",
+                    Object.class,
+                    () -> {
+                        context.getBean(DeliveryMetricsReporter.class)
+                                .registerExecutor(mock(org.flexlb.metric.ExecutorStats.class));
+                        return new Object();
+                    });
+            context.refresh();
+            assertEquals(withBackend ? 4 : 0, registry.getMeters().size());
+        } finally {
+            registry.close();
+        }
     }
 
     @ParameterizedTest
@@ -198,8 +326,7 @@ class DeliveryMetricsReporterTest {
 
     @Test
     void prefillSnapshotKeepsTotalOwnershipDistinctFromIndividualOwnership() {
-        reporter.reportPrefillInflight(
-                "10.0.0.1", new org.flexlb.balance.endpoint.PrefillState.Stats(7, 3, 2, 42L));
+        reporter.reportPrefillInflight("10.0.0.1", 2, 7, 42L);
 
         var tags = FlexMetricTags.ofEngine("10.0.0.1", "role", "PREFILL");
         verify(monitor).report(org.flexlb.constant.MetricConstant.INFLIGHT_BATCH_COUNT, tags, 2.0);
@@ -294,23 +421,23 @@ class DeliveryMetricsReporterTest {
 
     @org.junit.jupiter.params.ParameterizedTest
     @org.junit.jupiter.params.provider.ValueSource(longs = {0L, 71L})
-    void deliveryKeepsRouteAndBatchMetricSchemasAndSaturatesTokenSums(long batchId) {
-        var item = org.mockito.Mockito.mock(org.flexlb.balance.scheduler.RequestRoute.class);
-        var endpoint = org.mockito.Mockito.mock(org.flexlb.balance.endpoint.PrefillEndpoint.class);
-        org.mockito.Mockito.when(item.prefillEp()).thenReturn(endpoint);
-        org.mockito.Mockito.when(endpoint.getIp()).thenReturn("10.0.0.1");
-        org.mockito.Mockito.when(item.enqueuedAtMs()).thenReturn(Long.MAX_VALUE);
-        org.mockito.Mockito.when(item.priority()).thenReturn(17);
-        if (batchId != 0L) {
-            org.mockito.Mockito.when(item.hitCache()).thenReturn(Long.MAX_VALUE);
-            org.mockito.Mockito.when(item.seqLen()).thenReturn(Long.MAX_VALUE);
+    void deliveryKeepsRouteAndBatchMetricSchemasWithLargeTokenTotals(long batchId) {
+        if (batchId == 0L) {
+            reporter.reportBatcherQueueSize("PREFILL", "10.0.0.1", 3);
+        } else {
+            reporter.reportBatchDelivery(
+                    "PREFILL",
+                    "10.0.0.1",
+                    batchId,
+                    "batch_full",
+                    3,
+                    2,
+                    Long.MAX_VALUE,
+                    Long.MAX_VALUE,
+                    -1L);
         }
-        reporter.reportDelivery(
-                batchId,
-                batchId == 0L ? null : "batch_full",
-                3,
-                java.util.List.of(item, item),
-                -1L);
+        reporter.reportBatchWaitTimeMs("PREFILL", "10.0.0.1", 0L, 17);
+        reporter.reportBatchWaitTimeMs("PREFILL", "10.0.0.1", 0L, 17);
 
         var tags = FlexMetricTags.ofEngine("10.0.0.1", "role", "PREFILL");
         var priorityTags = FlexMetricTags.ofEngine("10.0.0.1", "role", "PREFILL", "priority", "17");
@@ -348,11 +475,7 @@ class DeliveryMetricsReporterTest {
 
     @Test
     void zeroTokenBatchSkipsCacheSeriesButReportsBatchShapeAndPrediction() {
-        var item = org.mockito.Mockito.mock(org.flexlb.balance.scheduler.RequestRoute.class);
-        var endpoint = org.mockito.Mockito.mock(org.flexlb.balance.endpoint.PrefillEndpoint.class);
-        org.mockito.Mockito.when(item.prefillEp()).thenReturn(endpoint);
-        org.mockito.Mockito.when(endpoint.getIp()).thenReturn("10.0.0.1");
-        reporter.reportDelivery(71L, "batch_full", 0, java.util.List.of(item), 7L);
+        reporter.reportBatchDelivery("PREFILL", "10.0.0.1", 71L, "batch_full", 0, 1, 0L, 0L, 7L);
 
         verify(monitor, never())
                 .report(eq(org.flexlb.constant.MetricConstant.CACHE_HIT_COUNT), any(), anyDouble());
@@ -386,10 +509,6 @@ class DeliveryMetricsReporterTest {
     @org.junit.jupiter.params.ParameterizedTest
     @org.junit.jupiter.params.provider.ValueSource(longs = {0L, 71L})
     void deliveryReportingFailureDoesNotEscapeAfterCommit(long batchId) {
-        var item = org.mockito.Mockito.mock(org.flexlb.balance.scheduler.RequestRoute.class);
-        var endpoint = org.mockito.Mockito.mock(org.flexlb.balance.endpoint.PrefillEndpoint.class);
-        org.mockito.Mockito.when(item.prefillEp()).thenReturn(endpoint);
-        org.mockito.Mockito.when(endpoint.getIp()).thenReturn("10.0.0.1");
         org.mockito.Mockito.doAnswer(
                         call -> {
                             if (BATCHER_QUEUE_SIZE.equals(call.getArgument(0))) {
@@ -400,9 +519,14 @@ class DeliveryMetricsReporterTest {
                 .when(monitor)
                 .report(org.mockito.ArgumentMatchers.anyString(), any(), anyDouble());
         org.junit.jupiter.api.Assertions.assertDoesNotThrow(
-                () ->
-                        reporter.reportDelivery(
-                                batchId, "batch_full", 0, java.util.List.of(item), 0L));
+                () -> {
+                    if (batchId == 0L) {
+                        reporter.reportBatcherQueueSize("PREFILL", "10.0.0.1", 0);
+                    } else {
+                        reporter.reportBatchDelivery(
+                                "PREFILL", "10.0.0.1", batchId, "batch_full", 0, 1, 0L, 0L, 0L);
+                    }
+                });
         verify(monitor).report(eq(BATCHER_QUEUE_SIZE), any(), eq(0.0));
     }
 }

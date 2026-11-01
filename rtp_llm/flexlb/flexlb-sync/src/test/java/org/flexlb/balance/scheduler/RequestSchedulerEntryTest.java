@@ -64,14 +64,15 @@ class RequestSchedulerEntryTest {
                         PlacementResult.rejected(
                                 Response.error(StrategyErrorType.NO_PREFILL_WORKER)));
         try {
-            var result = owner.submit(context);
+            var result = owner.scheduler().submit(context);
             assertSame(context.data().getFuture(), result);
             assertEquals(
                     StrategyErrorType.NO_PREFILL_WORKER.getErrorCode(),
                     result.get(3, TimeUnit.SECONDS).getCode());
             verify(span).setAttribute(FlexlbTrace.SCHEDULE_MODE, mode);
         } finally {
-            SchedulerTestSupport.shutdown(owner.runtime);
+            SchedulerTestSupport.shutdown(
+                    org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(owner));
         }
     }
 
@@ -129,7 +130,8 @@ class RequestSchedulerEntryTest {
                                 owner, route, () -> true);
                 admission.finish();
             }
-            owner.onDeliveryFact(new ContextResult.RouteDelivered(claim, 0L, System.currentTimeMillis()));
+            owner.onDeliveryFact(
+                    new ContextResult.RouteDelivered(claim, 0L, System.currentTimeMillis()));
             var published = pending.get(3, TimeUnit.SECONDS);
             assertTrue(published.isSuccess());
             assertSame(published, context.data().getResponse());
@@ -144,7 +146,8 @@ class RequestSchedulerEntryTest {
             assertTrue(context.data().getRequest().getCacheAffinityKeys().isEmpty());
             assertEquals(java.util.List.of(11L, 12L), original.getBlockCacheKeys());
         } finally {
-            SchedulerTestSupport.shutdown(owner.runtime);
+            SchedulerTestSupport.shutdown(
+                    org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(owner));
         }
     }
 
@@ -178,14 +181,15 @@ class RequestSchedulerEntryTest {
         try {
             assertEquals(
                     StrategyErrorType.GENERATE_INPUT_REQUIRED.getErrorCode(),
-                    owner.submit(context).join().getCode());
+                    owner.scheduler().submit(context).join().getCode());
             assertFalse(owner.requests.retainsIdentity(701L));
         } finally {
-            SchedulerTestSupport.shutdown(owner.runtime);
+            SchedulerTestSupport.shutdown(
+                    org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(owner));
         }
     }
 
-    private static AbstractRequestScheduler owner(
+    private static RequestLifecycle owner(
             FlexlbConfig config, RecentCacheKeyTraceReporter trace, RequestWorkerSelector router) {
         var service = mock(ConfigService.class);
         when(service.loadBalanceConfig()).thenReturn(config);
@@ -199,8 +203,7 @@ class RequestSchedulerEntryTest {
                 new PlacementAvailability());
     }
 
-    private static AbstractRequestScheduler owner(
-            FlexlbConfig config, RecentCacheKeyTraceReporter trace) {
+    private static RequestLifecycle owner(FlexlbConfig config, RecentCacheKeyTraceReporter trace) {
         var service = mock(ConfigService.class);
         when(service.loadBalanceConfig()).thenReturn(config);
         return SchedulerTestSupport.create(

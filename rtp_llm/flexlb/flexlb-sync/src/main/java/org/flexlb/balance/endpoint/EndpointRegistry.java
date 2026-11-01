@@ -1,8 +1,11 @@
 package org.flexlb.balance.endpoint;
 
+import org.flexlb.balance.planner.GroupPlanner;
+import org.flexlb.balance.projection.RequestTimeEstimation;
 import org.flexlb.balance.scheduler.DeliveryDispatcher;
 import org.flexlb.balance.scheduler.PlacementAvailability;
 import org.flexlb.balance.scheduler.RequestRepository;
+import org.flexlb.balance.strategy.PrefillSelectionStrategy;
 import org.flexlb.cache.service.CacheAwareService;
 import org.flexlb.config.ConfigService;
 import org.flexlb.dao.master.EndpointTrace.Stage;
@@ -38,7 +41,7 @@ import static com.google.common.base.Preconditions.checkState;
 
 /** Owns discovered worker identities and their published routing generations. */
 @Component
-public class EndpointRegistry {
+public class EndpointRegistry implements EndpointStats {
 
     /**
      * One non-owning Prefill generation exposed to routing.
@@ -47,10 +50,28 @@ public class EndpointRegistry {
      * and verify that the pinned endpoint is still this exact instance before
      * transferring generation ownership to a request.</p>
      */
-    public record PrefillRoutingEntry(String address, PrefillEndpoint endpoint) {
+    public record PrefillRoutingEntry(String address, PrefillEndpoint endpoint)
+            implements PrefillSelectionStrategy.CandidateInput {
         public PrefillRoutingEntry {
             java.util.Objects.requireNonNull(address, "address");
             java.util.Objects.requireNonNull(endpoint, "endpoint");
+        }
+
+        public String group() {
+            return endpoint.getStatus().topologySnapshot().group();
+        }
+
+        public long generationId() {
+            return endpoint.getStatus().getGenerationId();
+        }
+
+        public long cacheBlockSize() {
+            var cache = endpoint.getStatus().getCacheStatus();
+            return cache == null ? 0L : cache.getBlockSize();
+        }
+
+        public RequestTimeEstimation.Inputs projectionInputs() {
+            return endpoint.captureRouteProjectionInputs();
         }
     }
 
@@ -154,9 +175,18 @@ public class EndpointRegistry {
 
     private final ConfigService configService;
     private final RequestRepository requests;
+
+    @org.springframework.scheduling.annotation.Scheduled(fixedRate = 60_000L)
+    public void maintainExpiration() {
+        if (!requests.isClosed()) evictExpiredOrphans(10_000L, requests::retainsIdentity);
+    }
+
     private final DeliveryMetricsReporter reporter;
     private final DeliveryDispatcher dispatcher;
     private final PlacementAvailability placementAvailability;
+    private final GroupPlanner grouping;
+    private final WorkerQueue.Factory workerQueues;
+
     private final Object lifecycleGate = new Object();
 
     /** Null while open; every closing caller observes the same completed cleanup result. */
@@ -181,12 +211,16 @@ public class EndpointRegistry {
             RequestRepository requests,
             DeliveryMetricsReporter reporter,
             DeliveryDispatcher dispatcher,
-            PlacementAvailability placementAvailability) {
+            PlacementAvailability placementAvailability,
+            GroupPlanner grouping,
+            WorkerQueue.Factory workerQueues) {
         checkArgument(retirementTimeoutMs > 0L, "endpoint retirement timeout must be positive");
         this.configService = java.util.Objects.requireNonNull(configService, "configService");
         this.requests = java.util.Objects.requireNonNull(requests, "requests");
         this.reporter = java.util.Objects.requireNonNull(reporter, "reporter");
         this.dispatcher = java.util.Objects.requireNonNull(dispatcher, "dispatcher");
+        this.grouping = Objects.requireNonNull(grouping);
+        this.workerQueues = Objects.requireNonNull(workerQueues);
         this.placementAvailability =
                 java.util.Objects.requireNonNull(placementAvailability, "placementAvailability");
     }
@@ -262,7 +296,9 @@ public class EndpointRegistry {
      */
     public void decodeRoutingSnapshot(
             String group, List<DecodeResources.DecodeRoutingView> target) {
-        for (Map.Entry<String, DecodeEndpoint> entry : decodeDirectory) {
+        var directory = decodeDirectory;
+        for (int index = 0; index < directory.size(); index++) {
+            var entry = directory.get(index);
             var view = Objects.requireNonNull(entry.getValue().routingView(entry.getKey()));
             if (group == null || group.equals(view.topology().group())) {
                 target.add(view);
@@ -609,7 +645,9 @@ public class EndpointRegistry {
                             configService.loadBalanceConfig(),
                             dispatcher,
                             reporter,
-                            placementAvailability);
+                            placementAvailability,
+                            grouping,
+                            workerQueues);
             case DECODE -> new DecodeEndpoint(status, requests, placementAvailability);
             case VIT -> new WorkerEndpoint(status);
             case FRONTEND -> throw new AssertionError("validated above");
@@ -773,8 +811,6 @@ public class EndpointRegistry {
         Map<String, WorkerEndpoint> endpoints = endpointsByRole.get(role);
         return endpoints == null ? Map.of() : Map.copyOf(endpoints);
     }
-
-    public record Counts(int discovered, int published) {}
 
     /** Cheap role counts; no endpoint or request snapshots are constructed. */
     public Counts counts(RoleType role) {

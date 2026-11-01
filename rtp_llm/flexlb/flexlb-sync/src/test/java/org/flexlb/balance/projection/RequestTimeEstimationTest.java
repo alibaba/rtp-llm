@@ -1,5 +1,6 @@
 package org.flexlb.balance.projection;
 
+import org.flexlb.balance.planner.BuiltinGroupPlanner;
 import org.flexlb.balance.planner.GroupPlanner;
 import org.flexlb.balance.prediction.LearningPredictor;
 import org.flexlb.balance.prediction.PrefillBatchFeatures;
@@ -25,6 +26,134 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class RequestTimeEstimationTest {
 
     @Test
+    void customPlannerIsUsedForEveryProjectedPrefix() {
+        var planner = new org.flexlb.balance.planner.FirstRequestPlanner();
+        var queue =
+                new QueueSnapshot(
+                        31,
+                        true,
+                        planner,
+                        Comparator.comparingLong(GroupPlanner.Item::enqueuedAtMs),
+                        new GroupPlanner.Constraints(16, 1000, 1000, 0, 0),
+                        List.of(new GroupPlanner.Item(1, 0, 1, 10, Long.MAX_VALUE, 10, 0)),
+                        null);
+        var inputs =
+                new RequestTimeEstimation.Inputs(
+                        queue,
+                        emptyWork(31),
+                        0,
+                        new CountingEvaluator(),
+                        org.flexlb.config.DispatcherConfig.Type.BATCH);
+        var result = project(inputs, new Probe(99, 0, 13, Long.MAX_VALUE, 20, 0, 0));
+        assertEquals(30L, result.projectedTtftMsValue());
+        assertEquals(2, planner.selections.get());
+        assertEquals(1, queue.activeItems().size());
+    }
+
+    @Test
+    void reusedProjectionReadsEveryIncomingSchedulingAndPredictionField() {
+        var queue =
+                new QueueSnapshot(
+                        31L,
+                        true,
+                        BuiltinGroupPlanner.SINGLE,
+                        Comparator.comparingInt(GroupPlanner.Item::priority)
+                                .reversed()
+                                .thenComparingLong(GroupPlanner.Item::enqueuedAtMs),
+                        new GroupPlanner.Constraints(1, 1000, 1000, 0, 0),
+                        List.of(new GroupPlanner.Item(1, 0, 1, 10, Long.MAX_VALUE, 10, 0)),
+                        null);
+        var inputs =
+                new RequestTimeEstimation.Inputs(
+                        queue, emptyWork(31), 0, new CountingEvaluator(), routeProjection());
+        var original = new Probe(99, 0, 13, Long.MAX_VALUE, 20, 0, 0);
+        var changed =
+                List.of(
+                        new Probe(99, 1, 13, Long.MAX_VALUE, 20, 0, 0),
+                        new Probe(99, 0, 5, Long.MAX_VALUE, 20, 0, 0),
+                        new Probe(99, 0, 13, Long.MAX_VALUE, 50, 0, 0),
+                        new Probe(99, 0, 13, Long.MAX_VALUE, 20, 7, 7));
+        long[] expected = {20, 20, 60, 23};
+        for (int index = 0; index < changed.size(); index++) {
+            assertEquals(30L, project(inputs, original).projectedTtftMsValue());
+            assertEquals(
+                    expected[index], project(inputs, changed.get(index)).projectedTtftMsValue());
+        }
+        assertEquals(30L, project(inputs, original).projectedTtftMsValue());
+        assertEquals(
+                "INCOMING_ALREADY_ACTIVE",
+                project(inputs, new Probe(1, 0, 13, Long.MAX_VALUE, 20, 0, 0)).detail());
+        assertEquals(
+                "INCOMING_EXPIRED", project(inputs, new Probe(99, 0, 13, 30, 20, 0, 0)).detail());
+        assertEquals(30L, project(inputs, original).projectedTtftMsValue());
+        assertEquals(
+                30L, project(inputs, new Probe(100, 0, 13, 100, 20, 0, 0)).projectedTtftMsValue());
+        var laterQueue =
+                new QueueSnapshot(
+                        150,
+                        true,
+                        BuiltinGroupPlanner.SINGLE,
+                        queue.ordering(),
+                        queue.constraints(),
+                        queue.activeItems(),
+                        null);
+        var later =
+                new RequestTimeEstimation.Inputs(
+                        laterQueue, emptyWork(150), 0, inputs.evaluator(), inputs.deliveryMode());
+        assertEquals(
+                30L, project(later, new Probe(100, 0, 13, 200, 20, 0, 0)).projectedTtftMsValue());
+    }
+
+    @Test
+    void recursiveBatchPredictionCannotOverwriteTheOuterQueueCursor() {
+        var queue =
+                new QueueSnapshot(
+                        31L,
+                        true,
+                        BuiltinGroupPlanner.FIXED_WINDOW,
+                        Comparator.comparingLong(GroupPlanner.Item::requestId),
+                        new GroupPlanner.Constraints(1, 1000, 1000, 0, 30),
+                        List.of(new GroupPlanner.Item(1, 0, 1, 13, Long.MAX_VALUE, 10, 0)),
+                        null);
+        var evaluator =
+                new PrefillTimePredictor.Evaluator() {
+                    public long estimateMs(long tokens, long hit) {
+                        return tokens - hit;
+                    }
+
+                    public double predictBatchMs(PrefillBatchFeatures features) {
+                        var nested =
+                                project(
+                                        new RequestTimeEstimation.Inputs(
+                                                queue,
+                                                emptyWork(31),
+                                                0,
+                                                new CountingEvaluator(),
+                                                routeProjection()),
+                                        new Probe(100L, 0, 13L, Long.MAX_VALUE, 700L, 100L, 200L));
+                        assertEquals(610L, nested.projectedTtftMsValue());
+                        return features.items().stream()
+                                .mapToLong(i -> i.seqLen() - i.hitCache())
+                                .sum();
+                    }
+                };
+        for (int repeat = 0; repeat < 3; repeat++) {
+            var result =
+                    project(
+                            new RequestTimeEstimation.Inputs(
+                                    queue,
+                                    emptyWork(31),
+                                    0,
+                                    evaluator,
+                                    org.flexlb.config.DispatcherConfig.Type.BATCH),
+                            probe());
+            assertEquals(Candidate.State.MODELED, result.state());
+            assertEquals(30L, result.projectedTtftMsValue());
+            assertEquals(1, queue.activeItems().size());
+        }
+    }
+
+    @Test
     void nestedProjectionCannotReplaceTheOuterRequestOrPredictor() {
         var nestedModel = new CountingEvaluator();
         var outerModel =
@@ -33,10 +162,8 @@ class RequestTimeEstimationTest {
                     public long estimateMs(long tokens, long hit) {
                         var nested =
                                 project(
-                                        inputs(31L),
-                                        new Probe(100L, 0, 13L, Long.MAX_VALUE, 700L, 100L, 200L),
-                                        nestedModel,
-                                        routeProjection());
+                                        inputs(31L, nestedModel),
+                                        new Probe(100L, 0, 13L, Long.MAX_VALUE, 700L, 100L, 200L));
                         assertEquals(600L, nested.projectedTtftMsValue());
                         return tokens - hit;
                     }
@@ -48,7 +175,7 @@ class RequestTimeEstimationTest {
                                 .sum();
                     }
                 };
-        var result = project(inputs(31L), probe(), outerModel, routeProjection());
+        var result = project(inputs(31L, outerModel), probe());
         assertEquals(Candidate.State.MODELED, result.state());
         assertEquals(20L, result.projectedTtftMsValue());
         assertEquals(20L, result.incomingPrefillMs());
@@ -76,17 +203,20 @@ class RequestTimeEstimationTest {
                 new QueueSnapshot(
                         31L,
                         true,
-                        org.flexlb.balance.planner.GroupPlanner.FIXED_WINDOW,
+                        org.flexlb.balance.planner.BuiltinGroupPlanner.FIXED_WINDOW,
                         Comparator.comparingLong(GroupPlanner.Item::requestId),
                         new GroupPlanner.Constraints(4, 1000, 1000, 100, 30),
                         List.of(new GroupPlanner.Item(1, 0, 1, 13, Long.MAX_VALUE, 10, 0)),
                         null);
         var result =
                 project(
-                        new RequestTimeEstimation.Inputs(queue, emptyWork(31), 0),
-                        probe(),
-                        evaluator,
-                        org.flexlb.config.DispatcherConfig.Type.BATCH);
+                        new RequestTimeEstimation.Inputs(
+                                queue,
+                                emptyWork(31),
+                                0,
+                                evaluator,
+                                org.flexlb.config.DispatcherConfig.Type.BATCH),
+                        probe());
         assertEquals(Candidate.State.UNAVAILABLE, result.state());
         assertEquals("BATCH_PREDICTION_FAILED", result.detail());
     }
@@ -229,10 +359,10 @@ class RequestTimeEstimationTest {
                                                     new RequestTimeEstimation.Inputs(
                                                             fixedWindow(constraints, List.of()),
                                                             committed,
-                                                            0L),
+                                                            0L,
+                                                            fastEvaluator,
+                                                            delivery),
                                                     incoming,
-                                                    fastEvaluator,
-                                                    delivery,
                                                     100L);
                                     // An expired member forces the existing merge/planner path
                                     // without adding live work.
@@ -241,10 +371,10 @@ class RequestTimeEstimationTest {
                                                     new RequestTimeEstimation.Inputs(
                                                             fixedWindow(constraints, expired),
                                                             committed,
-                                                            0L),
+                                                            0L,
+                                                            genericEvaluator,
+                                                            delivery),
                                                     incoming,
-                                                    genericEvaluator,
-                                                    delivery,
                                                     100L);
                                     assertEquals(generic.state(), fast.state());
                                     assertEquals(
@@ -277,10 +407,12 @@ class RequestTimeEstimationTest {
             var fast =
                     project(
                             new RequestTimeEstimation.Inputs(
-                                    fixedWindow(constraints, List.of()), emptyWork(100L), 0L),
+                                    fixedWindow(constraints, List.of()),
+                                    emptyWork(100L),
+                                    0L,
+                                    fastEvaluator,
+                                    projection(true)),
                             incoming,
-                            fastEvaluator,
-                            projection(true),
                             100L);
             var generic =
                     project(
@@ -291,10 +423,10 @@ class RequestTimeEstimationTest {
                                                     new GroupPlanner.Item(
                                                             1L, 0, 1L, 0L, 99L, 1L, 0L))),
                                     emptyWork(100L),
-                                    0L),
+                                    0L,
+                                    genericEvaluator,
+                                    projection(true)),
                             incoming,
-                            genericEvaluator,
-                            projection(true),
                             100L);
             assertEquals(generic.state(), fast.state());
             assertEquals(generic.detail(), fast.detail());
@@ -314,16 +446,16 @@ class RequestTimeEstimationTest {
                                     new QueueSnapshot(
                                             100L,
                                             true,
-                                            org.flexlb.balance.planner.GroupPlanner.SINGLE,
+                                            org.flexlb.balance.planner.BuiltinGroupPlanner.SINGLE,
                                             Comparator.comparingLong(GroupPlanner.Item::requestId),
                                             constraints,
                                             List.of(),
                                             null),
                                     emptyWork(100L),
-                                    0L),
+                                    0L,
+                                    fastEvaluator,
+                                    projection(batch)),
                             probe(),
-                            fastEvaluator,
-                            projection(batch),
                             100L);
             var generic =
                     project(
@@ -331,7 +463,7 @@ class RequestTimeEstimationTest {
                                     new QueueSnapshot(
                                             100L,
                                             true,
-                                            org.flexlb.balance.planner.GroupPlanner.SINGLE,
+                                            org.flexlb.balance.planner.BuiltinGroupPlanner.SINGLE,
                                             Comparator.comparingLong(GroupPlanner.Item::requestId),
                                             constraints,
                                             List.of(
@@ -339,10 +471,10 @@ class RequestTimeEstimationTest {
                                                             1L, 0, 1L, 0L, 99L, 1L, 0L)),
                                             null),
                                     emptyWork(100L),
-                                    0L),
+                                    0L,
+                                    genericEvaluator,
+                                    projection(batch)),
                             probe(),
-                            genericEvaluator,
-                            projection(batch),
                             100L);
             assertEquals(generic.state(), fast.state());
             assertEquals(generic.projectedTtftMsValue(), fast.projectedTtftMsValue());
@@ -352,7 +484,7 @@ class RequestTimeEstimationTest {
                 new QueueSnapshot(
                         100L,
                         true,
-                        org.flexlb.balance.planner.GroupPlanner.SINGLE,
+                        org.flexlb.balance.planner.BuiltinGroupPlanner.SINGLE,
                         Comparator.comparingLong(GroupPlanner.Item::requestId),
                         new GroupPlanner.Constraints(16, 1_000L, 1_000L, 0L, 0L),
                         List.of(),
@@ -361,10 +493,13 @@ class RequestTimeEstimationTest {
                 IllegalArgumentException.class,
                 () ->
                         project(
-                                new RequestTimeEstimation.Inputs(invalid, emptyWork(100L), 0L),
+                                new RequestTimeEstimation.Inputs(
+                                        invalid,
+                                        emptyWork(100L),
+                                        0L,
+                                        new CountingEvaluator(),
+                                        routeProjection()),
                                 probe(),
-                                new CountingEvaluator(),
-                                routeProjection(),
                                 100L));
     }
 
@@ -373,7 +508,7 @@ class RequestTimeEstimationTest {
         return new QueueSnapshot(
                 100L,
                 true,
-                org.flexlb.balance.planner.GroupPlanner.FIXED_WINDOW,
+                org.flexlb.balance.planner.BuiltinGroupPlanner.FIXED_WINDOW,
                 Comparator.comparingLong(GroupPlanner.Item::enqueueSeq),
                 constraints,
                 active,
@@ -417,7 +552,7 @@ class RequestTimeEstimationTest {
                 new QueueSnapshot(
                         13L,
                         true,
-                        org.flexlb.balance.planner.GroupPlanner.FIXED_WINDOW,
+                        org.flexlb.balance.planner.BuiltinGroupPlanner.FIXED_WINDOW,
                         order,
                         new GroupPlanner.Constraints(1, 1_000_000L, 1_000_000L, 0L, 0L),
                         items,
@@ -425,10 +560,13 @@ class RequestTimeEstimationTest {
         var incoming = new Probe(9999L, 1, 0L, Long.MAX_VALUE, 20L, 0L, 0L);
         var result =
                 project(
-                        new RequestTimeEstimation.Inputs(queue, emptyWork(13L), 0L),
-                        incoming,
-                        new CountingEvaluator(),
-                        routeProjection());
+                        new RequestTimeEstimation.Inputs(
+                                queue,
+                                emptyWork(13L),
+                                0L,
+                                new CountingEvaluator(),
+                                routeProjection()),
+                        incoming);
         assertTrue(result.selectable());
         // 256 live items of priority 0 or 1 must complete before this probe.
         assertEquals(276L, result.projectedTtftMsValue());
@@ -446,17 +584,16 @@ class RequestTimeEstimationTest {
                     new QueueSnapshot(
                             13L,
                             true,
-                            org.flexlb.balance.planner.GroupPlanner.FIXED_WINDOW,
+                            org.flexlb.balance.planner.BuiltinGroupPlanner.FIXED_WINDOW,
                             Comparator.comparingLong(GroupPlanner.Item::enqueueSeq),
                             new GroupPlanner.Constraints(1, 1_000L, 1_000L, 0L, 0L),
                             items,
                             null);
             var known =
                     project(
-                            new RequestTimeEstimation.Inputs(queue, emptyWork(13L), 0L),
-                            probe(),
-                            new CountingEvaluator(),
-                            policy);
+                            new RequestTimeEstimation.Inputs(
+                                    queue, emptyWork(13L), 0L, new CountingEvaluator(), policy),
+                            probe());
             if (expiry > 13L) {
                 assertEquals("INCOMING_ALREADY_ACTIVE", known.detail());
             } else {
@@ -466,10 +603,12 @@ class RequestTimeEstimationTest {
             var unknown =
                     project(
                             new RequestTimeEstimation.Inputs(
-                                    queue, new WorkSnapshot(13L, List.of(), List.of(), 1L), 0L),
-                            probe(),
-                            new CountingEvaluator(),
-                            policy);
+                                    queue,
+                                    new WorkSnapshot(13L, List.of(), List.of(), 1L),
+                                    0L,
+                                    new CountingEvaluator(),
+                                    policy),
+                            probe());
             assertEquals("INCOMING_ALREADY_ACTIVE", unknown.detail());
         }
     }
@@ -482,18 +621,17 @@ class RequestTimeEstimationTest {
                 new QueueSnapshot(
                         13L,
                         true,
-                        org.flexlb.balance.planner.GroupPlanner.FIXED_WINDOW,
+                        org.flexlb.balance.planner.BuiltinGroupPlanner.FIXED_WINDOW,
                         Comparator.comparingLong(GroupPlanner.Item::enqueueSeq),
                         new GroupPlanner.Constraints(1, 1_000L, 1_000L, 0L, 0L),
                         items,
                         null);
         items.clear();
-        var inputs = new RequestTimeEstimation.Inputs(queue, emptyWork(13L), 0L);
-        var policy = routeProjection();
-        assertEquals(
-                "INCOMING_ALREADY_ACTIVE",
-                project(inputs, probe(), new CountingEvaluator(), policy, 13L).detail());
-        var expired = project(inputs, probe(), new CountingEvaluator(), policy, 14L);
+        var inputs =
+                new RequestTimeEstimation.Inputs(
+                        queue, emptyWork(13L), 0L, new CountingEvaluator(), routeProjection());
+        assertEquals("INCOMING_ALREADY_ACTIVE", project(inputs, probe(), 13L).detail());
+        var expired = project(inputs, probe(), 14L);
         assertTrue(expired.selectable());
         assertEquals(20L, expired.projectedTtftMsValue());
         assertEquals(1, queue.activeItems().size());
@@ -520,23 +658,29 @@ class RequestTimeEstimationTest {
                         0L);
         assertEquals(
                 project(
-                        new RequestTimeEstimation.Inputs(emptyQueue(20L), current, 0L),
-                        probe(),
-                        new CountingEvaluator(),
-                        routeProjection()),
+                        new RequestTimeEstimation.Inputs(
+                                emptyQueue(20L),
+                                current,
+                                0L,
+                                new CountingEvaluator(),
+                                routeProjection()),
+                        probe()),
                 project(
-                        new RequestTimeEstimation.Inputs(emptyQueue(20L), cached, 0L),
-                        probe(),
-                        new CountingEvaluator(),
-                        routeProjection()));
+                        new RequestTimeEstimation.Inputs(
+                                emptyQueue(20L),
+                                cached,
+                                0L,
+                                new CountingEvaluator(),
+                                routeProjection()),
+                        probe()));
     }
 
     @Test
     void queueAndWorkComeFromOneCanonicalInput() {
-        RequestTimeEstimation.Inputs inputs = inputs(13L);
         CountingEvaluator evaluator = new CountingEvaluator();
+        RequestTimeEstimation.Inputs inputs = inputs(13L, evaluator);
 
-        Candidate result = project(inputs, probe(), evaluator, routeProjection());
+        Candidate result = project(inputs, probe());
 
         assertTrue(result.selectable());
         assertEquals(20L, result.incomingPrefillMs());
@@ -544,7 +688,9 @@ class RequestTimeEstimationTest {
 
         assertThrows(
                 IllegalArgumentException.class,
-                () -> new RequestTimeEstimation.Inputs(emptyQueue(13L), emptyWork(14L), 0L));
+                () ->
+                        new RequestTimeEstimation.Inputs(
+                                emptyQueue(13L), emptyWork(14L), 0L, evaluator, routeProjection()));
     }
 
     @Test
@@ -560,7 +706,7 @@ class RequestTimeEstimationTest {
         }
 
         assertNotSame(captured, predictor.evaluator());
-        Candidate result = project(inputs(31L), probe(), captured, routeProjection());
+        Candidate result = project(inputs(31L, captured), probe());
         assertTrue(result.selectable());
         assertEquals(
                 before,
@@ -598,16 +744,21 @@ class RequestTimeEstimationTest {
                 0L);
     }
 
-    private static RequestTimeEstimation.Inputs inputs(long capturedAtMs) {
+    private static RequestTimeEstimation.Inputs inputs(
+            long capturedAtMs, PrefillTimePredictor.Evaluator evaluator) {
         return new RequestTimeEstimation.Inputs(
-                emptyQueue(capturedAtMs), emptyWork(capturedAtMs), 0L);
+                emptyQueue(capturedAtMs),
+                emptyWork(capturedAtMs),
+                0L,
+                evaluator,
+                routeProjection());
     }
 
     private static QueueSnapshot emptyQueue(long capturedAtMs) {
         return new QueueSnapshot(
                 capturedAtMs,
                 true,
-                org.flexlb.balance.planner.GroupPlanner.FIXED_WINDOW,
+                org.flexlb.balance.planner.BuiltinGroupPlanner.FIXED_WINDOW,
                 Comparator.comparingLong(GroupPlanner.Item::requestId),
                 new GroupPlanner.Constraints(1, 1_000_000L, 1_000_000L, 0L, 30L),
                 List.of(),

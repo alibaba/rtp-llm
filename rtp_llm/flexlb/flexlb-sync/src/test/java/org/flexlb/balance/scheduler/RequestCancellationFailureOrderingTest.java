@@ -175,13 +175,16 @@ class RequestCancellationFailureOrderingTest {
                         reservation,
                         context.snapshot().createdAtMs());
         var publications = new AtomicInteger();
+        var completions = org.mockito.Mockito.spy(owner.responseCompletions);
+        SchedulerTestServices.setDependency(
+                SchedulerTestSupport.runtime(owner), "responseCompletions", completions);
         doAnswer(
                         call -> {
                             publications.incrementAndGet();
                             return call.callRealMethod();
                         })
-                .when(owner.runtime)
-                .responseCompletions();
+                .when(completions)
+                .register(org.mockito.ArgumentMatchers.any());
         try {
             try (var admission = owner.claimAdmissionHandle(9503L, future)) {
                 assertNotNull(admission);
@@ -230,7 +233,8 @@ class RequestCancellationFailureOrderingTest {
             verify(prefill, times(1)).release(null, route);
             verify(decode, times(1)).release(reservation, DecodeResources.ReleaseReason.EXPIRED);
         } finally {
-            SchedulerTestSupport.shutdown(owner.runtime);
+            SchedulerTestSupport.shutdown(
+                    org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(owner));
         }
     }
 

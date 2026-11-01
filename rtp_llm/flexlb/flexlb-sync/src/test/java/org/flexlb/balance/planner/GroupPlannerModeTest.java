@@ -26,7 +26,8 @@ class GroupPlannerModeTest {
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
     void emptyInputsCannotDispatch(boolean single) {
-        GroupPlanner policy = single ? GroupPlanner.SINGLE : GroupPlanner.FIXED_WINDOW;
+        GroupPlanner policy =
+                single ? BuiltinGroupPlanner.SINGLE : BuiltinGroupPlanner.FIXED_WINDOW;
         var constraints = new Constraints(1, UNLIMITED, UNLIMITED, 0, 0);
         var selection = policy.select(List.<Item>of(), constraints, null);
         assertTrue(selection.items().isEmpty());
@@ -55,7 +56,7 @@ class GroupPlannerModeTest {
                         };
         var constraints = new Constraints(1, 10, 10, 0, 0);
         var selection =
-                GroupPlanner.SINGLE.select(
+                BuiltinGroupPlanner.SINGLE.select(
                         bounded,
                         constraints,
                         (added, prefix) -> {
@@ -63,7 +64,8 @@ class GroupPlannerModeTest {
                         });
         assertEquals(List.of(head), selection.items());
         assertEquals(
-                "single_request", GroupPlanner.SINGLE.dispatchReason(selection, constraints, 100));
+                "single_request",
+                BuiltinGroupPlanner.SINGLE.dispatchReason(selection, constraints, 100));
         assertFalse(selection.fitsKv(10));
     }
 
@@ -71,15 +73,15 @@ class GroupPlannerModeTest {
     void fixedWindowUsesTheOldestSelectedMemberAndWakesAtItsExactDeadline() {
         var items = List.of(item(1, 100, 10), item(2, 90, 10));
         var constraints = new Constraints(3, UNLIMITED, UNLIMITED, 0, 20);
-        var selection = GroupPlanner.FIXED_WINDOW.select(items, constraints, null);
-        assertNull(GroupPlanner.FIXED_WINDOW.dispatchReason(selection, constraints, 109));
+        var selection = BuiltinGroupPlanner.FIXED_WINDOW.select(items, constraints, null);
+        assertNull(BuiltinGroupPlanner.FIXED_WINDOW.dispatchReason(selection, constraints, 109));
         assertEquals(
                 110,
                 GroupPlanner.collectionDeadlineMs(
                         selection.windowOpenedAtMs(), constraints.collectionWindowMs()));
         assertEquals(
                 GroupPlanner.FIXED_WINDOW_TIMEOUT,
-                GroupPlanner.FIXED_WINDOW.dispatchReason(selection, constraints, 110));
+                BuiltinGroupPlanner.FIXED_WINDOW.dispatchReason(selection, constraints, 110));
         assertEquals(items, selection.items());
     }
 
@@ -87,10 +89,11 @@ class GroupPlannerModeTest {
     void fullGroupIsReadyBeforeItsWindowExpires() {
         var constraints = new Constraints(1, UNLIMITED, UNLIMITED, 0, 50);
         var selection =
-                GroupPlanner.FIXED_WINDOW.select(List.of(item(1, 100, 10)), constraints, null);
+                BuiltinGroupPlanner.FIXED_WINDOW.select(
+                        List.of(item(1, 100, 10)), constraints, null);
         assertEquals(
                 GroupPlanner.BATCH_FULL,
-                GroupPlanner.FIXED_WINDOW.dispatchReason(selection, constraints, 100));
+                BuiltinGroupPlanner.FIXED_WINDOW.dispatchReason(selection, constraints, 100));
     }
 
     @Test
@@ -99,7 +102,7 @@ class GroupPlannerModeTest {
         AtomicInteger predictions = new AtomicInteger();
         var constraints = new Constraints(10, UNLIMITED, UNLIMITED, 150, 1000);
         var selection =
-                GroupPlanner.FIXED_WINDOW.select(
+                BuiltinGroupPlanner.FIXED_WINDOW.select(
                         items,
                         constraints,
                         (added, prefix) -> {
@@ -109,16 +112,17 @@ class GroupPlannerModeTest {
         assertEquals(List.of(items.getFirst()), selection.items());
         assertEquals(
                 GroupPlanner.PREDICTED_EXECUTION_CAP,
-                GroupPlanner.FIXED_WINDOW.dispatchReason(selection, constraints, 100));
+                BuiltinGroupPlanner.FIXED_WINDOW.dispatchReason(selection, constraints, 100));
         assertEquals(100, selection.selectedPredictionMs().orElseThrow());
         assertEquals(2, predictions.get());
         var oversizedConstraints = new Constraints(10, 1, 1, 50, 1000);
         var oversized =
-                GroupPlanner.FIXED_WINDOW.select(
+                BuiltinGroupPlanner.FIXED_WINDOW.select(
                         items, oversizedConstraints, (added, prefix) -> 100);
         assertEquals(
                 GroupPlanner.PREDICTED_EXECUTION_CAP,
-                GroupPlanner.FIXED_WINDOW.dispatchReason(oversized, oversizedConstraints, 100));
+                BuiltinGroupPlanner.FIXED_WINDOW.dispatchReason(
+                        oversized, oversizedConstraints, 100));
         assertEquals(List.of(items.getFirst()), oversized.items());
     }
 
@@ -126,8 +130,11 @@ class GroupPlannerModeTest {
     void repeatedSelectionsUseCurrentCapacityAndDoNotRetainPredictionState() {
         var items = List.of(item(1, 100, 10), item(2, 100, 10));
         var before =
-                GroupPlanner.FIXED_WINDOW.select(items, new Constraints(2, 21, 20, 0, 0), null);
-        var after = GroupPlanner.FIXED_WINDOW.select(items, new Constraints(2, 20, 20, 0, 0), null);
+                BuiltinGroupPlanner.FIXED_WINDOW.select(
+                        items, new Constraints(2, 21, 20, 0, 0), null);
+        var after =
+                BuiltinGroupPlanner.FIXED_WINDOW.select(
+                        items, new Constraints(2, 20, 20, 0, 0), null);
         assertEquals(2, before.items().size());
         assertEquals(1, after.items().size());
         assertEquals(2, items.size());
@@ -137,10 +144,10 @@ class GroupPlannerModeTest {
     void waitDeadlineSaturatesAndInvalidInputsAreRejected() {
         var constraints = new Constraints(2, UNLIMITED, UNLIMITED, 0, 20);
         var selection =
-                GroupPlanner.FIXED_WINDOW.select(
+                BuiltinGroupPlanner.FIXED_WINDOW.select(
                         List.of(item(1, Long.MAX_VALUE - 1, 1)), constraints, null);
         assertNull(
-                GroupPlanner.FIXED_WINDOW.dispatchReason(
+                BuiltinGroupPlanner.FIXED_WINDOW.dispatchReason(
                         selection, constraints, Long.MAX_VALUE - 1));
         assertEquals(
                 Long.MAX_VALUE,
@@ -148,12 +155,15 @@ class GroupPlannerModeTest {
         assertThrows(
                 IllegalArgumentException.class,
                 () ->
-                        GroupPlanner.SINGLE.select(
+                        BuiltinGroupPlanner.SINGLE.select(
                                 List.of(), new Constraints(2, UNLIMITED, UNLIMITED, 0, 0), null));
         var invalidDeadline =
-                GroupPlanner.FIXED_WINDOW.select(List.of(item(1, -100, 1)), constraints, null);
+                BuiltinGroupPlanner.FIXED_WINDOW.select(
+                        List.of(item(1, -100, 1)), constraints, null);
         assertThrows(
                 IllegalArgumentException.class,
-                () -> GroupPlanner.FIXED_WINDOW.dispatchReason(invalidDeadline, constraints, -200));
+                () ->
+                        BuiltinGroupPlanner.FIXED_WINDOW.dispatchReason(
+                                invalidDeadline, constraints, -200));
     }
 }

@@ -1,9 +1,14 @@
 package org.flexlb.balance.strategy;
 
+import org.flexlb.balance.planner.BuiltinGroupPlanner;
 import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.PrefillState;
+import org.flexlb.balance.planner.GroupPlanner;
+import org.flexlb.balance.projection.QueueSnapshot;
+import org.flexlb.balance.projection.RequestTimeEstimation;
+import org.flexlb.balance.projection.WorkSnapshot;
 import org.flexlb.balance.scheduler.PlacementKey;
 import org.flexlb.cache.monitor.CacheMetricsReporter;
 import org.flexlb.cache.service.CacheAwareService;
@@ -24,13 +29,16 @@ import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.test.util.ReflectionTestUtils;
 
+import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicLong;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.doReturn;
@@ -46,7 +54,7 @@ class PrefillSelectionContractTest {
     private EndpointRegistry registry;
     private CacheAwareService cache;
     private CacheMetricsReporter metrics;
-    private CostBasedPrefillStrategy strategy;
+    private StrategyTestSupport.PrefillRoutingFixture strategy;
     private Request request;
     private final SchedulingMetadata metadata = SchedulingMetadata.explicit(50, Long.MAX_VALUE);
 
@@ -78,6 +86,226 @@ class PrefillSelectionContractTest {
     @AfterEach
     void tearDown() {
         registry.close();
+    }
+
+    @Test
+    void policyReturnsObservedAdmissionBlockWithoutCallerInterpretation() {
+        var endpoint = publish(registry, RoleType.PREFILL);
+        var queue =
+                new QueueSnapshot(
+                        1000L,
+                        true,
+                        BuiltinGroupPlanner.SINGLE,
+                        Comparator.comparingLong(GroupPlanner.Item::enqueueSeq),
+                        new GroupPlanner.Constraints(1, 10000L, 10000L, 0L, 0L),
+                        List.of(new GroupPlanner.Item(1L, 50, 1L, 1000L, Long.MAX_VALUE, 10L, 0L)),
+                        new QueueSnapshot.AdmissionBlock(
+                                1L,
+                                1L,
+                                new RequestTimeEstimation.AdmissionBlockSemantics(
+                                        "PREFILL_CAPACITY",
+                                        RequestTimeEstimation.AfterProbeAdmission.BLOCKED,
+                                        "PREFILL_CAPACITY")));
+        var input = mock(PrefillSelectionStrategy.CandidateInput.class);
+        when(input.address()).thenReturn(endpoint.ipPort());
+        when(input.group()).thenReturn("g");
+        when(input.projectionInputs())
+                .thenReturn(
+                        new RequestTimeEstimation.Inputs(
+                                queue,
+                                new WorkSnapshot(1000L, List.of(), List.of(), 0L),
+                                0L,
+                                endpoint.predictor.evaluator(),
+                                endpoint.deliveryMode));
+
+        var result =
+                new CostBasedPrefillStrategy(cache, service)
+                        .select(
+                                request,
+                                metadata,
+                                RoleType.PREFILL,
+                                "g",
+                                List.of(input),
+                                () -> 1000L);
+
+        assertEquals(PlacementResult.Status.BLOCKED, result.status());
+        assertEquals(
+                PlacementKey.exact(RoleType.PREFILL, "g", endpoint.ipPort()), result.blocker());
+        assertEquals(
+                StrategyErrorType.RESOURCE_EXHAUSTED.getErrorCode(), result.failure().getCode());
+        assertEquals(
+                Map.of(
+                        "reason",
+                        "PREFILL_CAPACITY",
+                        "selectedEndpoint",
+                        endpoint.ipPort(),
+                        "cacheHitTokens",
+                        0L,
+                        "affinityReason",
+                        ""),
+                result.diagnostics().get("details"));
+        assertNull(result.value());
+    }
+
+    @Test
+    void cacheLookupDelayDoesNotKeepExpiredWorkInTheProjection() {
+        var endpoint = publish(registry, RoleType.PREFILL);
+        var clock = new AtomicLong(1000L);
+        var queue =
+                new QueueSnapshot(
+                        1000L,
+                        true,
+                        BuiltinGroupPlanner.SINGLE,
+                        Comparator.comparingLong(GroupPlanner.Item::enqueueSeq),
+                        new GroupPlanner.Constraints(1, 1000L, 1000L, 0L, 0L),
+                        List.of(new GroupPlanner.Item(1L, 50, 1L, 1000L, 1500L, 10L, 0L)),
+                        null);
+        var snapshot =
+                new RequestTimeEstimation.Inputs(
+                        queue,
+                        new WorkSnapshot(1000L, List.of(), List.of(), 0L),
+                        0L,
+                        endpoint.predictor.evaluator(),
+                        endpoint.deliveryMode);
+        var candidate = mock(PrefillSelectionStrategy.CandidateInput.class);
+        when(candidate.address()).thenReturn(endpoint.ipPort());
+        when(candidate.projectionInputs()).thenReturn(snapshot);
+        var inputs = List.of(candidate);
+        when(cache.findMatchingEngines(any(), any(), any()))
+                .thenAnswer(
+                        call -> {
+                            clock.set(2000L);
+                            return Map.of();
+                        });
+
+        var selected =
+                new CostBasedPrefillStrategy(cache, service)
+                        .select(
+                                request.toBuilder().seqLen(20L).build(),
+                                metadata,
+                                RoleType.PREFILL,
+                                null,
+                                inputs,
+                                clock::get)
+                        .value();
+
+        assertEquals(20L, selected.projectedTtftMs());
+        assertEquals(20L, selected.prefillWorkMs());
+    }
+
+    @Test
+    void filteredCandidatesKeepTheWinnersIdentityWithoutReadingEveryGeneration() {
+        var endpoint = publish(registry, RoleType.PREFILL);
+        var inputs = new java.util.ArrayList<PrefillSelectionStrategy.CandidateInput>();
+        for (int index = 0; index < 4; index++) {
+            var candidate = mock(PrefillSelectionStrategy.CandidateInput.class);
+            when(candidate.address()).thenReturn("worker-" + index);
+            when(candidate.group()).thenReturn(index == 0 ? "other" : "g");
+            when(candidate.generationId()).thenReturn(100L + index);
+            when(candidate.projectionInputs())
+                    .thenAnswer(call -> endpoint.captureRouteProjectionInputs());
+            inputs.add(candidate);
+        }
+        // Index 0 is outside the group; index 1 lacks a predictor. Rank compacts 2 and 3.
+        var snapshot = endpoint.captureRouteProjectionInputs();
+        when(inputs.get(1).projectionInputs())
+                .thenReturn(
+                        new RequestTimeEstimation.Inputs(
+                                snapshot.queue(),
+                                snapshot.work(),
+                                snapshot.ownershipVersion(),
+                                null,
+                                snapshot.deliveryMode()));
+        var policy = new CostBasedPrefillStrategy(cache, service);
+        var result = policy.select(request, metadata, RoleType.PREFILL, "g", inputs, () -> 1000L);
+
+        assertEquals(PlacementResult.Status.SUCCESS, result.status());
+        var selected = result.value();
+        int winner = inputs.indexOf(selected.input());
+        assertTrue(winner >= 2);
+        assertSame(inputs.get(winner), selected.input());
+        assertEquals("worker-" + winner, selected.address());
+        assertEquals(100L + winner, selected.generationId());
+        for (int index = 0; index < inputs.size(); index++) {
+            verify(inputs.get(index), org.mockito.Mockito.times(index == winner ? 1 : 0))
+                    .generationId();
+        }
+    }
+
+    @Test
+    void reusedScratchPreservesEachInputTypeAndPreviouslySelectedIdentity() {
+        var endpoint = publish(registry, RoleType.PREFILL);
+        var entry = new EndpointRegistry.PrefillRoutingEntry(endpoint.ipPort(), endpoint);
+        var synthetic = mock(PrefillSelectionStrategy.CandidateInput.class);
+        when(synthetic.address()).thenReturn("synthetic");
+        when(synthetic.projectionInputs()).thenReturn(endpoint.captureRouteProjectionInputs());
+        var policy = new CostBasedPrefillStrategy(cache, service);
+
+        var first =
+                policy.select(
+                                request,
+                                metadata,
+                                RoleType.PREFILL,
+                                null,
+                                List.of(entry),
+                                () -> 1000L)
+                        .value();
+        var second =
+                policy.select(
+                                request,
+                                metadata,
+                                RoleType.PREFILL,
+                                null,
+                                List.of(synthetic),
+                                () -> 1000L)
+                        .value();
+        var third =
+                policy.select(
+                                request,
+                                metadata,
+                                RoleType.PREFILL,
+                                null,
+                                List.of(entry),
+                                () -> 1000L)
+                        .value();
+
+        assertSame(endpoint, first.input().endpoint());
+        assertSame(synthetic, second.input());
+        assertSame(entry, third.input());
+        assertSame(entry, first.input());
+    }
+
+    @Test
+    void policyResultRetainsOnlyItsOwnScalarPredictionAcrossTheNextProjection() {
+        var endpoint = publish(registry, RoleType.PREFILL);
+        var candidate = mock(PrefillSelectionStrategy.CandidateInput.class);
+        when(candidate.address()).thenReturn(endpoint.ipPort());
+        when(candidate.group()).thenReturn("g");
+        when(candidate.generationId()).thenReturn(endpoint.getStatus().getGenerationId());
+        when(candidate.projectionInputs())
+                .thenAnswer(call -> endpoint.captureRouteProjectionInputs());
+        var inputs = List.of(candidate);
+        when(cache.findMatchingEngines(any(), any(), any()))
+                .thenReturn(Map.of(endpoint.ipPort(), 1), Map.of(endpoint.ipPort(), 2));
+        var policy = new CostBasedPrefillStrategy(cache, service);
+        var firstRequest = request.toBuilder().cacheKeyBlockSize(100L).build();
+        var first =
+                policy.select(firstRequest, metadata, RoleType.PREFILL, "g", inputs, () -> 1000L)
+                        .value();
+        var second =
+                policy.select(
+                                firstRequest.toBuilder().requestId(91002L).seqLen(2000L).build(),
+                                metadata,
+                                RoleType.PREFILL,
+                                "g",
+                                inputs,
+                                () -> 2000L)
+                        .value();
+        assertEquals(100L, first.cacheHitTokens());
+        assertEquals(900L, first.prefillWorkMs());
+        assertEquals(200L, second.cacheHitTokens());
+        assertEquals(1800L, second.prefillWorkMs());
+        assertNotSame(first, second);
     }
 
     @ParameterizedTest
@@ -116,7 +344,8 @@ class PrefillSelectionContractTest {
             assertEquals(Math.max(0L, tokens - effectiveHit), route.prefillWorkMs());
         }
         verify(metrics)
-                .reportRoutingSelectedCacheMatchMetrics(RoleType.PREFILL, routingHit, tokens);
+                .reportSelectionCache(
+                        RoleType.PREFILL, tokens, effectiveHit, routingHit, routingHit);
     }
 
     @ParameterizedTest
@@ -251,8 +480,8 @@ class PrefillSelectionContractTest {
         }
     }
 
-    private CostBasedPrefillStrategy strategy(EndpointRegistry directory) {
-        return new CostBasedPrefillStrategy(
+    private StrategyTestSupport.PrefillRoutingFixture strategy(EndpointRegistry directory) {
+        return new StrategyTestSupport.PrefillRoutingFixture(
                 directory, cache, mock(EngineHealthReporter.class), metrics, service);
     }
 

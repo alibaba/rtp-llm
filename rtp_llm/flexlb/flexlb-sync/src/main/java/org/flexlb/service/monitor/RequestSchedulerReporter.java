@@ -71,38 +71,37 @@ public class RequestSchedulerReporter {
 
     @PostConstruct
     public void init() {
-        monitor.register(AUTO_TPM_REQUEST_COUNT, FlexMetricType.QPS, FlexPriorityType.PRECISE);
-        monitor.register(
-                AUTO_TPM_SCHEDULE_LATENCY_MS, FlexMetricType.TIMER, FlexPriorityType.PRECISE);
-        monitor.register(
-                AUTO_TPM_EVICTION_PLAN_COUNT, FlexMetricType.QPS, FlexPriorityType.PRECISE);
-        monitor.register(
-                AUTO_TPM_EVICTION_COMMIT_COUNT, FlexMetricType.QPS, FlexPriorityType.PRECISE);
-        monitor.register(AUTO_TPM_VICTIM_COUNT, FlexMetricType.QPS, FlexPriorityType.PRECISE);
-        monitor.register(
-                AUTO_TPM_PREFILL_QUEUE_DEPTH, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
-        monitor.register(AUTO_TPM_TTFT_MS, FlexMetricType.TIMER, FlexPriorityType.PRECISE);
-        monitor.register(
-                AUTO_TPM_PRIORITY_PREEMPT_COUNT, FlexMetricType.QPS, FlexPriorityType.PRECISE);
-        monitor.register(
-                AUTO_TPM_DECODE_RUNNING_COUNT, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
-        monitor.register(
-                AUTO_TPM_DECODE_ACCEPTED_COUNT, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
-        monitor.register(
-                AUTO_TPM_CANCEL_REQUEST_COUNT, FlexMetricType.QPS, FlexPriorityType.PRECISE);
-        monitor.register(
-                AUTO_TPM_CANCEL_CONFIRM_COUNT, FlexMetricType.QPS, FlexPriorityType.PRECISE);
-        monitor.register(
-                AUTO_TPM_CANCEL_TIMEOUT_COUNT, FlexMetricType.QPS, FlexPriorityType.PRECISE);
-        monitor.register(AUTO_TPM_CANCEL_QPS, FlexMetricType.QPS, FlexPriorityType.PRECISE);
-        monitor.register(
-                AUTO_TPM_DECODE_ENGINE_LOAD, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
-        monitor.register(AUTO_TPM_VICTIM_KV_TOKENS, FlexMetricType.TIMER, FlexPriorityType.PRECISE);
-        monitor.register(
-                AUTO_TPM_DECODE_RESERVED_COUNT, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
-        monitor.register(
-                AUTO_TPM_DECODE_SHADOW_KV_RESERVED, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
-        log.info("RequestSchedulerReporter initialized");
+        for (String metric :
+                new String[] {
+                    AUTO_TPM_REQUEST_COUNT,
+                    AUTO_TPM_EVICTION_PLAN_COUNT,
+                    AUTO_TPM_EVICTION_COMMIT_COUNT,
+                    AUTO_TPM_VICTIM_COUNT,
+                    AUTO_TPM_PRIORITY_PREEMPT_COUNT,
+                    AUTO_TPM_CANCEL_REQUEST_COUNT,
+                    AUTO_TPM_CANCEL_CONFIRM_COUNT,
+                    AUTO_TPM_CANCEL_TIMEOUT_COUNT,
+                    AUTO_TPM_CANCEL_QPS,
+                }) {
+            monitor.register(metric, FlexMetricType.QPS, FlexPriorityType.PRECISE);
+        }
+        for (String metric :
+                new String[] {
+                    AUTO_TPM_SCHEDULE_LATENCY_MS, AUTO_TPM_TTFT_MS, AUTO_TPM_VICTIM_KV_TOKENS,
+                }) {
+            monitor.register(metric, FlexMetricType.TIMER, FlexPriorityType.PRECISE);
+        }
+        for (String metric :
+                new String[] {
+                    AUTO_TPM_PREFILL_QUEUE_DEPTH,
+                    AUTO_TPM_DECODE_RUNNING_COUNT,
+                    AUTO_TPM_DECODE_ACCEPTED_COUNT,
+                    AUTO_TPM_DECODE_ENGINE_LOAD,
+                    AUTO_TPM_DECODE_RESERVED_COUNT,
+                    AUTO_TPM_DECODE_SHADOW_KV_RESERVED,
+                }) {
+            monitor.register(metric, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+        }
     }
 
     public void reportRequest(int priority) {

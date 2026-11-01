@@ -5,7 +5,7 @@ import ch.qos.logback.core.read.ListAppender;
 import io.grpc.Context;
 import io.grpc.Status;
 import io.grpc.stub.StreamObserver;
-import org.flexlb.balance.scheduler.AbstractRequestScheduler;
+import org.flexlb.balance.scheduler.RequestLifecycle;
 import org.flexlb.balance.scheduler.CancelReason;
 import org.flexlb.balance.scheduler.DeliveryClaimKind;
 import org.flexlb.balance.scheduler.RequestContext;
@@ -62,7 +62,7 @@ class FlexlbServiceImplTest {
     private final java.util.concurrent.ScheduledExecutorService deadlineTimer =
             java.util.concurrent.Executors.newSingleThreadScheduledExecutor();
     private RequestScheduler requestScheduler;
-    private final AbstractRequestScheduler requestState = mock(AbstractRequestScheduler.class);
+    private final RequestLifecycle requestState = mock(RequestLifecycle.class);
     private MasterStatusService masterStatusService;
     private EngineHealthReporter engineHealthReporter;
     private FlexlbGrpcForwarder grpcForwarder;
@@ -1485,11 +1485,11 @@ class FlexlbServiceImplTest {
                             .setSpanKind(io.opentelemetry.api.trace.SpanKind.SERVER)
                             .startSpan();
             var traceContext = io.opentelemetry.context.Context.root().with(span);
-            var captured = new java.util.concurrent.atomic.AtomicReference<RequestContext>();
-            org.mockito.Mockito.doAnswer(
+            CompletableFuture<Response> local = new CompletableFuture<>();
+            when(requestScheduler.submit(any()))
+                    .thenAnswer(
                             inv -> {
                                 RequestContext ctx = inv.getArgument(0);
-                                captured.set(ctx);
                                 long now = System.nanoTime();
                                 org.springframework.test.util.ReflectionTestUtils.setField(
                                         ctx.data(), "serviceStartNanos", now - 40_000_000L);
@@ -1499,10 +1499,8 @@ class FlexlbServiceImplTest {
                                     org.springframework.test.util.ReflectionTestUtils.setField(
                                             ctx.data(), "ackAtNanos", now - 1_000_000L);
                                 }
-                                return null;
-                            })
-                    .when(engineHealthReporter)
-                    .reportArriveDelayTime(any());
+                                return local;
+                            });
             var wire =
                     FlexlbScheduleProtocol.FlexlbScheduleResponsePB.newBuilder()
                             .setSuccess(success)
@@ -1522,11 +1520,9 @@ class FlexlbServiceImplTest {
             }
             CompletableFuture<FlexlbGrpcForwarder.MasterForwardResult> remote =
                     new CompletableFuture<>();
-            CompletableFuture<Response> local = new CompletableFuture<>();
             when(masterStatusService.isNeedConsistency()).thenReturn(forwarded);
             when(masterStatusService.isMaster()).thenReturn(false);
             when(grpcForwarder.forwardScheduleToMaster(any())).thenReturn(remote);
-            when(requestScheduler.submit(any())).thenReturn(local);
             StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer =
                     new StreamObserver<>() {
                         public void onNext(FlexlbScheduleProtocol.FlexlbScheduleResponsePB value) {
@@ -1555,8 +1551,7 @@ class FlexlbServiceImplTest {
             CompletableFuture.runAsync(
                             () -> {
                                 if (forwarded) {
-                                    org.junit.jupiter.api.Assertions.assertNull(
-                                            captured.get().data().getResponse());
+                                    verify(requestScheduler, never()).submit(any());
                                     remote.complete(
                                             FlexlbGrpcForwarder.MasterForwardResult.forwarded(
                                                     wire.build(), "10.0.0.2:7001"));

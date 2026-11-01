@@ -310,7 +310,7 @@ class RequestTimeEstimationTest {
 
         assertThrows(
                 IllegalArgumentException.class,
-                () -> new RequestTimeEstimation.Inputs(queue, later, 0L));
+                () -> new RequestTimeEstimation.Inputs(queue, later, 0L, TOKEN_EVALUATOR, ROUTE));
     }
 
     @Test

@@ -25,6 +25,8 @@ public final class RequestTimeEstimation {
 
     private static final String INVALID_PREDICTION_DETAIL = "PREDICTOR_RETURNED_INVALID_VALUE";
     private final Prediction predictions = new Prediction();
+    private final ProjectedQueue ordered = new ProjectedQueue();
+    private GroupPlanner.Item incoming;
     private boolean inUse;
     private long requestId;
     private int priority;
@@ -50,8 +52,6 @@ public final class RequestTimeEstimation {
             long seqLen,
             long hitCache,
             long routingCacheMatchTokens,
-            PrefillTimePredictor.Evaluator evaluator,
-            DispatcherConfig.Type deliveryMode,
             long planningAtMs) {
         return projectView(
                 inputs,
@@ -62,8 +62,6 @@ public final class RequestTimeEstimation {
                 seqLen,
                 hitCache,
                 routingCacheMatchTokens,
-                evaluator,
-                deliveryMode,
                 planningAtMs,
                 false);
     }
@@ -78,8 +76,6 @@ public final class RequestTimeEstimation {
             long seqLen,
             long hitCache,
             long routingCacheMatchTokens,
-            PrefillTimePredictor.Evaluator evaluator,
-            DispatcherConfig.Type deliveryMode,
             long planningAtMs) {
         return projectView(
                 inputs,
@@ -90,8 +86,6 @@ public final class RequestTimeEstimation {
                 seqLen,
                 hitCache,
                 routingCacheMatchTokens,
-                evaluator,
-                deliveryMode,
                 planningAtMs,
                 true);
     }
@@ -105,8 +99,6 @@ public final class RequestTimeEstimation {
             long seqLen,
             long hitCache,
             long routingCacheMatchTokens,
-            PrefillTimePredictor.Evaluator evaluator,
-            DispatcherConfig.Type deliveryMode,
             long planningAtMs,
             boolean rankOnly) {
         // A predictor may invoke this estimator recursively; isolate its unfinished calculation.
@@ -121,8 +113,6 @@ public final class RequestTimeEstimation {
                             seqLen,
                             hitCache,
                             routingCacheMatchTokens,
-                            evaluator,
-                            deliveryMode,
                             planningAtMs,
                             rankOnly);
         }
@@ -136,8 +126,7 @@ public final class RequestTimeEstimation {
         QueueSnapshot queue = inputs.queue();
         inUse = true;
         try {
-            var projected =
-                    project(queue, inputs.work(), evaluator, deliveryMode, planningAtMs, rankOnly);
+            var projected = project(inputs, planningAtMs, rankOnly);
             return rankOnly ? projected : applyAdmissionPolicy(queue, projected);
         } finally {
             predictions.evaluator = null;
@@ -152,13 +141,9 @@ public final class RequestTimeEstimation {
      * <p>Already committed work forms the engine cursor. Ordered queued groups add only their
      * execution cost. Future arrivals and collection deadlines do not advance the projection clock.
      */
-    private CandidateView project(
-            QueueSnapshot queue,
-            WorkSnapshot committed,
-            PrefillTimePredictor.Evaluator evaluator,
-            DispatcherConfig.Type deliveryMode,
-            long planningAtMs,
-            boolean rankOnly) {
+    private CandidateView project(Inputs inputs, long planningAtMs, boolean rankOnly) {
+        var queue = inputs.queue();
+        var evaluator = inputs.evaluator();
         long projectionAtMs = Math.max(queue.capturedAtMs(), planningAtMs);
         if (evaluator == null) {
             return unavailable("PREDICTOR_MISSING");
@@ -168,9 +153,9 @@ public final class RequestTimeEstimation {
         }
 
         predictions.evaluator = evaluator;
-        predictions.batch = deliveryMode == DispatcherConfig.Type.BATCH;
+        predictions.batch = inputs.deliveryMode() == DispatcherConfig.Type.BATCH;
         try {
-            return projectWithPredictions(queue, committed, projectionAtMs, rankOnly);
+            return projectWithPredictions(queue, inputs.work(), projectionAtMs, rankOnly);
         } catch (PredictionFailure predictionFailure) {
             return unavailable(predictionFailure.detail("PREDICTION_FAILED"));
         }
@@ -207,16 +192,18 @@ public final class RequestTimeEstimation {
         long committedMs = committed.knownRemainingWorkMsAt(projectionAtMs);
 
         // An empty queue has no membership to merge or decision group to build.
-        // Invalid SINGLE constraints still go through the grouping policy's validation.
-        if (!queue.queueScheduling()
-                || queue.activeItems().isEmpty()
-                        && (queue.grouping() == GroupPlanner.FIXED_WINDOW
-                                || constraints.maxRequests() == 1
-                                        && constraints.collectionWindowMs() == 0L
-                                        && constraints.predictedExecutionBudgetMs() == 0L)) {
+        if (!queue.queueScheduling() || queue.activeItems().isEmpty()) {
+            if (queue.queueScheduling()) {
+                queue.grouping().validateConstraints(constraints);
+            }
             return projectSingleton(committedMs, incomingPrefillMs, queue.queueScheduling());
         }
-        return projectQueue(queue, constraints, projectionAtMs, committedMs, incomingPrefillMs);
+        try {
+            return projectQueue(queue, constraints, projectionAtMs, committedMs, incomingPrefillMs);
+        } finally {
+            ordered.active = null;
+            ordered.probe = null;
+        }
     }
 
     private GroupPlanner.Constraints rankingConstraints(GroupPlanner.Constraints source) {
@@ -261,18 +248,24 @@ public final class RequestTimeEstimation {
             long projectionAtMs,
             long committedMs,
             long incomingPrefillMs) {
-        GroupPlanner.Item probe =
-                new GroupPlanner.Item(
-                        requestId,
-                        priority,
-                        Long.MAX_VALUE,
-                        enqueuedAtMs,
-                        expiresAtMs,
-                        seqLen,
-                        predictions.hitCache);
-        ProjectedQueue ordered =
-                ProjectedQueue.create(queue.activeItems(), probe, queue.ordering(), projectionAtMs);
-        if (ordered == null) {
+        if (incoming == null
+                || incoming.requestId() != requestId
+                || incoming.priority() != priority
+                || incoming.enqueuedAtMs() != enqueuedAtMs
+                || incoming.expiresAtMs() != expiresAtMs
+                || incoming.seqLen() != seqLen
+                || incoming.hitCache() != predictions.hitCache) {
+            incoming =
+                    new GroupPlanner.Item(
+                            requestId,
+                            priority,
+                            Long.MAX_VALUE,
+                            enqueuedAtMs,
+                            expiresAtMs,
+                            seqLen,
+                            predictions.hitCache);
+        }
+        if (!ordered.reset(queue.activeItems(), incoming, queue.ordering(), projectionAtMs)) {
             return unavailable("INCOMING_ALREADY_ACTIVE");
         }
         long cursorMs = committedMs;
@@ -342,37 +335,26 @@ public final class RequestTimeEstimation {
      */
     private static final class ProjectedQueue
             implements Iterable<GroupPlanner.Item>, Iterator<GroupPlanner.Item> {
-        private final List<GroupPlanner.Item> active;
-        private final GroupPlanner.Item probe;
-        private final int probeIndex;
-        private final long nowMs;
+        private List<GroupPlanner.Item> active;
+        private GroupPlanner.Item probe;
+        private int probeIndex;
+        private long nowMs;
         private int headIndex;
-        private final boolean initialHeadPruned;
+        private boolean initialHeadPruned;
         // Set by the selection iterator when it reaches the probe, including a rejected tail.
         private int probePosition;
         private int index;
         private int visited;
 
-        private ProjectedQueue(
-                List<GroupPlanner.Item> active,
-                GroupPlanner.Item probe,
-                int probeIndex,
-                long nowMs) {
-            this.active = active;
-            this.probe = probe;
-            this.probeIndex = probeIndex;
-            this.nowMs = nowMs;
-            this.initialHeadPruned = !active.isEmpty() && expiredAt(active.getFirst(), nowMs);
-        }
-
-        private static ProjectedQueue create(
+        private boolean reset(
                 List<GroupPlanner.Item> active,
                 GroupPlanner.Item probe,
                 Comparator<GroupPlanner.Item> order,
                 long nowMs) {
-            for (GroupPlanner.Item item : active) {
+            for (int index = 0; index < active.size(); index++) {
+                var item = active.get(index);
                 if (item.requestId() == probe.requestId() && !expiredAt(item, nowMs)) {
-                    return null;
+                    return false;
                 }
             }
             // Upper bound keeps equal scheduling keys ahead of the new probe.
@@ -385,7 +367,13 @@ public final class RequestTimeEstimation {
                     low = middle + 1;
                 }
             }
-            return new ProjectedQueue(active, probe, low, nowMs);
+            this.active = active;
+            this.probe = probe;
+            this.probeIndex = low;
+            this.nowMs = nowMs;
+            this.headIndex = 0;
+            this.initialHeadPruned = !active.isEmpty() && expiredAt(active.getFirst(), nowMs);
+            return true;
         }
 
         private Candidate.InitialHeadDisposition initialHeadDisposition() {
@@ -576,8 +564,13 @@ public final class RequestTimeEstimation {
         }
     }
 
-    /** Queue and committed work captured under one ownership lock. */
-    public record Inputs(QueueSnapshot queue, WorkSnapshot work, long ownershipVersion) {
+    /** Queue/work captured under one ownership lock, with an immutable model for this projection. */
+    public record Inputs(
+            QueueSnapshot queue,
+            WorkSnapshot work,
+            long ownershipVersion,
+            PrefillTimePredictor.Evaluator evaluator,
+            DispatcherConfig.Type deliveryMode) {
 
         public Inputs {
             // Committed work may reuse an older clock base while its ownership
