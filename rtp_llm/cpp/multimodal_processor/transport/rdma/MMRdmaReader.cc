@@ -37,7 +37,13 @@ bool assembleMMRdmaOutput(const std::vector<torch::Tensor>&      mm_tensors,
                     if (has_pos_id) {
                         return false;
                     }
-                    mm_position_id = mm_tensors[i].to(torch::kCPU);
+                    if (mm_tensors[i].is_cuda()) {
+                        auto options   = mm_tensors[i].options().device(torch::kCPU).pinned_memory(true);
+                        mm_position_id = torch::empty_like(mm_tensors[i], options);
+                        mm_position_id.copy_(mm_tensors[i], /*non_blocking=*/false);
+                    } else {
+                        mm_position_id = mm_tensors[i];
+                    }
                     has_pos_id     = true;
                     break;
                 case MMRdmaSlotPB::EXTRA_INPUT:

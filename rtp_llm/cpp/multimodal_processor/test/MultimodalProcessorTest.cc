@@ -249,6 +249,20 @@ TEST_F(MultimodalProcessorTest, testFeatureHashNonContiguousTensor) {
     EXPECT_TRUE(torch::equal(getMultimodalFeatureHash(cpu_embedding), getMultimodalFeatureHash(gpu_embedding)));
 }
 
+TEST_F(MultimodalProcessorTest, testPackedFeatureHashCpuGpuConsistency) {
+    for (const auto dtype : {torch::kFloat32, torch::kBFloat16}) {
+        auto       first    = torch::arange(24, torch::TensorOptions().dtype(dtype)).reshape({4, 6}).transpose(0, 1);
+        auto       second   = torch::arange(15, torch::TensorOptions().dtype(dtype)).reshape({3, 5});
+        const auto expected = getMultimodalFeatureHashes({first, second});
+        const auto actual   = getMultimodalFeatureHashes({first.to(torch::kCUDA), second.to(torch::kCUDA)});
+        ASSERT_EQ(actual.size(), expected.size());
+        for (size_t i = 0; i < expected.size(); ++i) {
+            EXPECT_TRUE(actual[i].device().is_cpu());
+            EXPECT_TRUE(torch::equal(actual[i], expected[i]));
+        }
+    }
+}
+
 TEST_F(MultimodalProcessorTest, testFeatureHashTailBytes) {
     auto cpu_embedding = torch::arange(39, torch::TensorOptions().dtype(torch::kUInt8)).reshape({3, 13});
     auto gpu_embedding = cpu_embedding.to(torch::kCUDA);

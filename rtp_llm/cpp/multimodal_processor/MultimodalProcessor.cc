@@ -25,8 +25,11 @@ ErrorInfo pinMultimodalTensors(std::vector<torch::Tensor>& tensors, const char* 
             if (tensor.is_cuda()) {
                 auto options =
                     torch::TensorOptions().dtype(tensor.scalar_type()).device(torch::kCPU).pinned_memory(true);
-                // Downstream TP serialization can read the host tensor immediately.
-                tensor = tensor.to(options, /*non_blocking=*/false);
+                // Blocking Tensor::to() can override pinned_memory and allocate pageable CPU storage.
+                // Allocate explicitly, retaining CPU-ready data for downstream TP serialization.
+                auto pinned_tensor = torch::empty_like(tensor, options);
+                pinned_tensor.copy_(tensor, /*non_blocking=*/false);
+                tensor = std::move(pinned_tensor);
             } else {
                 tensor = tensor.pin_memory();
             }

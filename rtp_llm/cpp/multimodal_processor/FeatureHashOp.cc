@@ -17,10 +17,11 @@ torch::Tensor getMultimodalFeatureHash(const torch::Tensor& embedding) {
     const int64_t rows      = embedding.size(0);
     const int64_t row_bytes = embedding.numel() / rows * embedding.element_size();
     TORCH_CHECK(row_bytes > 0, "multimodal feature row is empty");
-    auto hashes = torch::empty({rows}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCPU));
+    const auto hash_options = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCPU);
 #if USING_CUDA
     if (embedding.is_cuda()) {
         const c10::cuda::CUDAGuard guard(embedding.device());
+        auto                       hashes     = torch::empty({rows}, hash_options.pinned_memory(true));
         auto                       emb        = embedding.contiguous();
         auto                       gpu_hashes = torch::empty({rows}, emb.options().dtype(torch::kInt32));
         const cudaStream_t         stream     = c10::cuda::getCurrentCUDAStream(emb.get_device());
@@ -39,6 +40,7 @@ torch::Tensor getMultimodalFeatureHash(const torch::Tensor& embedding) {
         return hashes;
     }
 #endif
+    auto        hashes = torch::empty({rows}, hash_options);
     auto        emb    = embedding.to(torch::kCPU).contiguous();
     const auto* bytes  = static_cast<const uint8_t*>(emb.data_ptr());
     auto*       output = hashes.data_ptr<int32_t>();
@@ -84,7 +86,8 @@ std::vector<torch::Tensor> getMultimodalFeatureHashes(const std::vector<torch::T
         }
         // The blocking ATen copy owns the transfer lifetime and returns CPU-ready
         // hashes. No per-image D2H or stream synchronization is necessary.
-        auto cpu_hashes = gpu_hashes.to(torch::kCPU);
+        auto cpu_hashes = torch::empty_like(gpu_hashes, gpu_hashes.options().device(torch::kCPU).pinned_memory(true));
+        cpu_hashes.copy_(gpu_hashes, /*non_blocking=*/false);
         offset = 0;
         for (const auto& input : inputs) {
             const auto rows = input.size(0);

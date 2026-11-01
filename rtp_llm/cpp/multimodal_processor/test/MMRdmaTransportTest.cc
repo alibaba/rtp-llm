@@ -239,5 +239,25 @@ TEST_F(MMRdmaTransportTest, rejectsUnsetRoleAndInconsistentSplit) {
         {embedding}, {MMRdmaSlotPB::EMBEDDING}, &output_pb, &output));
 }
 
+#if USING_CUDA
+TEST_F(MMRdmaTransportTest, gpuPositionIdsArePinnedAndCpuReady) {
+    const auto         embedding = rowMarkedTensor(7, 4);
+    const auto         expected  = torch::arange(21, torch::TensorOptions().dtype(torch::kInt32)).reshape({7, 3});
+    MultimodalOutputPB output_pb;
+    output_pb.add_split_size(3);
+    output_pb.add_split_size(4);
+    MultimodalOutput output;
+    ASSERT_TRUE(assembleMMRdmaOutput(
+        {embedding, expected.to(torch::kCUDA)}, {MMRdmaSlotPB::EMBEDDING, MMRdmaSlotPB::POS_ID}, &output_pb, &output));
+    ASSERT_TRUE(output.mm_position_ids.has_value());
+    ASSERT_EQ(output.mm_position_ids->size(), 2u);
+    for (const auto& ids : *output.mm_position_ids) {
+        EXPECT_TRUE(ids.device().is_cpu());
+        EXPECT_TRUE(ids.is_pinned());
+    }
+    EXPECT_TRUE(torch::equal(torch::cat(*output.mm_position_ids, 0), expected));
+}
+#endif
+
 }  // namespace
 }  // namespace rtp_llm

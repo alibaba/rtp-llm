@@ -55,6 +55,56 @@ std::shared_ptr<GenerateInput> makeInput() {
 
 class CanonicalMultimodalProcessorTest: public DeviceTestBase {};
 
+#if USING_CUDA
+class CudaOutputProcessor final: public MultimodalProcessor {
+public:
+    CudaOutputProcessor(): MultimodalProcessor(py::none(), modelConfig(kImageToken), 64) {}
+
+    torch::Tensor feature;
+    torch::Tensor extra_input;
+
+private:
+    ErrorResult<MultimodalOutput> MultimodalEmbedding(const std::vector<MultimodalInput>,
+                                                      std::string          = "",
+                                                      int64_t              = 0,
+                                                      grpc::ServerContext* = nullptr) override {
+        MultimodalOutput output;
+        output.mm_features       = {feature};
+        output.mm_extra_input    = std::vector<torch::Tensor>{extra_input};
+        output.mm_feature_hashes = std::vector<torch::Tensor>{torch::tensor({101, 102, 103}, torch::kInt32)};
+        return output;
+    }
+};
+
+TEST_F(CanonicalMultimodalProcessorTest, CudaFeaturesAndExtraInputsArePinnedAndCpuReady) {
+    CudaOutputProcessor processor;
+    for (const auto dtype : {torch::kFloat32, torch::kBFloat16}) {
+        for (const bool transposed : {false, true}) {
+            auto expected = torch::arange(12, torch::TensorOptions().dtype(dtype));
+            expected      = transposed ? expected.reshape({4, 3}).transpose(0, 1) : expected.reshape({3, 4});
+            const auto expected_extra = torch::arange(6, torch::TensorOptions().dtype(torch::kInt32)).reshape({3, 2});
+            processor.feature         = expected.to(torch::kCUDA);
+            processor.extra_input     = expected_extra.to(torch::kCUDA);
+            auto input                = makeInput();
+
+            ASSERT_TRUE(processor.updateMultimodalFeatures(input).ok());
+            ASSERT_TRUE(input->multimodal_features.has_value());
+            ASSERT_EQ(input->multimodal_features->size(), 1u);
+            const auto& feature = input->multimodal_features->front();
+            EXPECT_TRUE(feature.device().is_cpu());
+            EXPECT_TRUE(feature.is_pinned());
+            EXPECT_TRUE(torch::equal(feature, expected));
+            ASSERT_TRUE(input->mm_extra_input.has_value());
+            ASSERT_EQ(input->mm_extra_input->size(), 1u);
+            const auto& extra = input->mm_extra_input->front();
+            EXPECT_TRUE(extra.device().is_cpu());
+            EXPECT_TRUE(extra.is_pinned());
+            EXPECT_TRUE(torch::equal(extra, expected_extra));
+        }
+    }
+}
+#endif
+
 TEST_F(CanonicalMultimodalProcessorTest, SemanticModeStoresCanonicalIdsAndHashSidecar) {
     FeatureHashProcessor processor(kImageToken);
     auto                 input = makeInput();
