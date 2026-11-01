@@ -225,21 +225,21 @@ public class EngineHealthReporter {
         this.monitor.register(CACHE_HIT_COMPARISON_ACTUAL_TOKENS,
                 FlexMetricType.COUNTER, FlexPriorityType.NORMAL);
         this.monitor.register(CACHE_HIT_COMPARISON_KVCM_PREDICTED_TOKENS,
-                FlexMetricType.COUNTER, FlexPriorityType.PRECISE);
+                FlexMetricType.COUNTER, FlexPriorityType.NORMAL);
         this.monitor.register(CACHE_HIT_COMPARISON_INPUT_TOKENS,
                 FlexMetricType.COUNTER, FlexPriorityType.NORMAL);
         this.monitor.register(CACHE_HIT_COMPARISON_DELTA_TOKENS,
-                FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+                FlexMetricType.GAUGE, FlexPriorityType.NORMAL);
         this.monitor.register(CACHE_HIT_COMPARISON_KVCM_LOCAL_DELTA_TOKENS,
-                FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+                FlexMetricType.GAUGE, FlexPriorityType.NORMAL);
         this.monitor.register(CACHE_HIT_COMPARISON_KVCM_GLOBAL_MATCH_DELTA_TOKENS,
-                FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+                FlexMetricType.GAUGE, FlexPriorityType.NORMAL);
         this.monitor.register(CACHE_HIT_COMPARISON_LOCAL_STANDBY_DELTA_TOKENS,
-                FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+                FlexMetricType.GAUGE, FlexPriorityType.NORMAL);
         this.monitor.register(CACHE_HIT_COMPARISON_LOCAL_STANDBY_DELTA_RATIO,
-                FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+                FlexMetricType.GAUGE, FlexPriorityType.NORMAL);
         this.monitor.register(CACHE_HIT_COMPARISON_ACTUAL_RATIO,
-                FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+                FlexMetricType.GAUGE, FlexPriorityType.NORMAL);
         this.monitor.register(CACHE_USED_KV_CACHE_TOKENS, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         this.monitor.register(CACHE_AVAILABLE_KV_CACHE_TOKENS, FlexMetricType.GAUGE);
         this.monitor.register(CACHE_TOTAL_KV_CACHE_TOKENS, FlexMetricType.GAUGE);

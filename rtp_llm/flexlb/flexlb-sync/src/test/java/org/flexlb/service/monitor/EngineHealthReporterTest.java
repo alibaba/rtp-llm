@@ -103,18 +103,18 @@ class EngineHealthReporterTest {
         verify(monitor).register(MetricConstant.CACHE_HIT_COMPARISON_ACTUAL_TOKENS,
                 FlexMetricType.COUNTER, FlexPriorityType.NORMAL);
         verify(monitor).register(MetricConstant.CACHE_HIT_COMPARISON_KVCM_PREDICTED_TOKENS,
-                FlexMetricType.COUNTER, FlexPriorityType.PRECISE);
-        verify(monitor).register(MetricConstant.CACHE_HIT_COMPARISON_DELTA_TOKENS, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+                FlexMetricType.COUNTER, FlexPriorityType.NORMAL);
+        verify(monitor).register(MetricConstant.CACHE_HIT_COMPARISON_DELTA_TOKENS, FlexMetricType.GAUGE, FlexPriorityType.NORMAL);
         verify(monitor).register(MetricConstant.CACHE_HIT_COMPARISON_KVCM_LOCAL_DELTA_TOKENS,
-                FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+                FlexMetricType.GAUGE, FlexPriorityType.NORMAL);
         verify(monitor).register(MetricConstant.CACHE_HIT_COMPARISON_KVCM_GLOBAL_MATCH_DELTA_TOKENS,
-                FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+                FlexMetricType.GAUGE, FlexPriorityType.NORMAL);
         verify(monitor).register(MetricConstant.CACHE_HIT_COMPARISON_LOCAL_STANDBY_DELTA_TOKENS,
-                FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+                FlexMetricType.GAUGE, FlexPriorityType.NORMAL);
         verify(monitor).register(MetricConstant.CACHE_HIT_COMPARISON_LOCAL_STANDBY_DELTA_RATIO,
-                FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+                FlexMetricType.GAUGE, FlexPriorityType.NORMAL);
         verify(monitor).register(MetricConstant.CACHE_HIT_COMPARISON_ACTUAL_RATIO,
-                FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+                FlexMetricType.GAUGE, FlexPriorityType.NORMAL);
     }
 
     @Test

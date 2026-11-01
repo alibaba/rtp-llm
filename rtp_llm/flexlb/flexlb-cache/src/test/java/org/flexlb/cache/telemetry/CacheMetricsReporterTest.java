@@ -169,9 +169,9 @@ class CacheMetricsReporterTest {
         reporter.reportLocalStandbyPrediction(RoleType.PREFILL, "10.0.0.1:8080@0", 0, 100);
 
         FlexMetricTags tags = FlexMetricTags.of("role", "PREFILL", "engineIp", "10.0.0.1:8080@0");
-        verify(monitor).register(CACHE_KVCM_PREDICTED_RATIO, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+        verify(monitor).register(CACHE_KVCM_PREDICTED_RATIO, FlexMetricType.GAUGE, FlexPriorityType.NORMAL);
         verify(monitor).register(CACHE_LOCAL_STANDBY_PREDICTED_RATIO,
-                FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+                FlexMetricType.GAUGE, FlexPriorityType.NORMAL);
         verify(monitor).report(CACHE_KVCM_PREDICTED_TOKENS, tags, 0L);
         verify(monitor).report(CACHE_KVCM_PREDICTED_RATIO, tags, 0.0);
         verify(monitor).report(CACHE_LOCAL_STANDBY_PREDICTED_TOKENS, tags, 0L);
