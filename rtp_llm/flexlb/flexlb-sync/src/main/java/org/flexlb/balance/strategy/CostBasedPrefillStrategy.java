@@ -164,7 +164,7 @@ public class CostBasedPrefillStrategy {
         long fleetMaxHit = 0L;
         boolean rescue = false;
         if (tokenBalance != null) {
-            for (var entry : discovery.candidates()) {
+            for (var entry : discovery.cacheCandidates()) {
                 fleetMaxHit = Math.max(fleetMaxHit,
                         calculateCacheMatch(entry.endpoint(), entry.address(), cacheMatchResults, request).effectiveHitTokens());
             }
@@ -175,7 +175,7 @@ public class CostBasedPrefillStrategy {
                     && seqLen <= escape.getMaxInputTokens();
             if (agedShort && fleetMaxHit > 0L) {
                 rescue = true;
-                for (var entry : discovery.candidates()) {
+                for (var entry : discovery.cacheCandidates()) {
                     long hit = calculateCacheMatch(entry.endpoint(), entry.address(), cacheMatchResults, request).effectiveHitTokens();
                     if (hit == fleetMaxHit && entry.endpoint().ownership.tokenWorkload()
                             .pendingTokens() < tokenBalance.getMaxPendingComputeTokens()) {
@@ -185,7 +185,7 @@ public class CostBasedPrefillStrategy {
                 }
             }
             rescue |= escape != null && route.ctx().prefillMigrationSource() != null;
-            if (!rescue && PrefillTokenBalance.cacheFirst(fleetMaxHit, seqLen, tokenBalance.getMinPrefixHitPercent())
+            if (PrefillTokenBalance.cacheFirst(fleetMaxHit, seqLen, tokenBalance.getMinPrefixHitPercent())
                     && survivors.maximumCacheHit < fleetMaxHit) {
                 return PlacementResult.blocked(roleType);
             }
@@ -198,8 +198,11 @@ public class CostBasedPrefillStrategy {
             // Parallel planners must see earlier choices before asynchronous admission commits.
             // Only scoring + soft reservation are serialized; cache lookup/projection stay parallel.
             synchronized (tokenSelectionLock) {
-                selectedIndex = rescue ? selectRescueCandidate(survivors, roleType, group, seqLen, route.ctx().prefillMigrationSource())
-                        : selectBestCandidate(survivors, survivors.minimumTtftRank, roleType, group, seqLen);
+                selectedIndex = rescue ? selectRescueCandidate(survivors, roleType, group, seqLen, fleetMaxHit, route.ctx().prefillMigrationSource())
+                        : selectTokenBalancedCandidate(survivors, roleType, group, seqLen, fleetMaxHit);
+                if (selectedIndex < 0 && rescue && hasEngineQueueAdmission(survivors)) {
+                    selectedIndex = selectTokenBalancedCandidate(survivors, roleType, group, seqLen, fleetMaxHit);
+                }
                 if (selectedIndex >= 0) {
                     route.reserveTokenPlan(survivors.endpoint(selectedIndex).ownership.planTokenWork(
                             Math.max(0L, seqLen - survivors.cacheHit(selectedIndex))));
@@ -459,15 +462,48 @@ public class CostBasedPrefillStrategy {
         }
         var result = new ArrayList<>(candidates);
         result.sort(order);
+        // Validate at most the bounded shortlist. Final placement rechecks the current cache fleet.
+        result.removeIf(route -> !hasCacheEligibleMigrationTarget(route, fleet));
         return result;
     }
 
-    /** Escape only to truly idle capacity; total input length was bounded before this call. */
-    private int selectRescueCandidate(PrefillCandidateSet candidates, RoleType role, String group, long seqLen, PrefillEndpoint excluded) {
+    private boolean hasCacheEligibleMigrationTarget(RequestRoute route, List<EndpointRegistry.PrefillRoutingEntry> fleet) {
+        var request = route.ctx().data().getRequest();
+        var source = route.prefillEp();
+        if (request == null || source == null) { return false; }
+        String group = source.getStatus().topologySnapshot().group();
+        var pool = fleet.stream().filter(entry -> java.util.Objects.equals(group,
+                entry.endpoint().getStatus().topologySnapshot().group())).toList();
+        var matches = cacheAwareService.findMatchingEngines(request.getBlockCacheKeys(), RoleType.PREFILL,
+                pool.stream().map(EndpointRegistry.PrefillRoutingEntry::address).toList());
+        long[] hits = new long[pool.size()];
+        long maxHit = 0L;
+        for (int i = 0; i < pool.size(); i++) {
+            var entry = pool.get(i);
+            hits[i] = calculateCacheMatch(entry.endpoint(), entry.address(), matches, request).effectiveHitTokens();
+            maxHit = Math.max(maxHit, hits[i]);
+        }
+        boolean cacheFirst = PrefillTokenBalance.cacheFirst(maxHit, request.getSeqLen(), tokenBalance.getMinPrefixHitPercent());
+        for (int i = 0; i < pool.size(); i++) {
+            var endpoint = pool.get(i).endpoint();
+            if (endpoint == source || endpoint.isGenerationRetiringOrRetired()
+                    || !PrefillTokenBalance.eligible(hits[i], maxHit, cacheFirst)) { continue; }
+            var work = endpoint.ownership.tokenWorkload();
+            if (work.pendingTokens() + work.plannedTokens() <= tokenBalance.getHotspotRescue().getMaxIdlePendingTokens()) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** Rescue remains within the same cache-eligible set as ordinary routing. */
+    private int selectRescueCandidate(PrefillCandidateSet candidates, RoleType role, String group, long seqLen, long maxHit, PrefillEndpoint excluded) {
+        boolean cacheFirst = PrefillTokenBalance.cacheFirst(maxHit, seqLen, tokenBalance.getMinPrefixHitPercent());
         double[] scores = new double[candidates.size()];
         java.util.Arrays.fill(scores, Double.POSITIVE_INFINITY);
         double minimum = Double.POSITIVE_INFINITY;
         for (int i = 0; i < candidates.size(); i++) {
+            if (!PrefillTokenBalance.eligible(candidates.cacheHit(i), maxHit, cacheFirst)) { continue; }
             var work = candidates.endpoint(i).ownership.tokenWorkload();
             if (candidates.endpoint(i) == excluded || work.pendingTokens() + work.plannedTokens() > tokenBalance.getHotspotRescue().getMaxIdlePendingTokens()) { continue; }
             scores[i] = work.score() + Math.max(0L, seqLen - candidates.cacheHit(i));
@@ -479,7 +515,10 @@ public class CostBasedPrefillStrategy {
     }
 
     private int selectTokenBalancedCandidate(PrefillCandidateSet candidates, RoleType role, String group, long seqLen) {
-        long maxHit = candidates.maximumCacheHit;
+        return selectTokenBalancedCandidate(candidates, role, group, seqLen, candidates.maximumCacheHit);
+    }
+
+    private int selectTokenBalancedCandidate(PrefillCandidateSet candidates, RoleType role, String group, long seqLen, long maxHit) {
         boolean cacheFirst = PrefillTokenBalance.cacheFirst(maxHit, seqLen, tokenBalance.getMinPrefixHitPercent());
         double[] scores = new double[candidates.size()];
         java.util.Arrays.fill(scores, Double.POSITIVE_INFINITY);
@@ -488,7 +527,8 @@ public class CostBasedPrefillStrategy {
             if (!PrefillTokenBalance.eligible(candidates.cacheHit(i), maxHit, cacheFirst)) { continue; }
             var work = candidates.endpoint(i).ownership.tokenWorkload();
             // Preserve a busy cache leader by parking globally, where existing HIT_RATE shedding applies.
-            if (!PrefillTokenBalance.hasCapacity(work.pendingTokens(), tokenBalance.getMaxPendingComputeTokens())) { continue; }
+            if (!PrefillTokenBalance.hasCapacity(work.pendingTokens(), tokenBalance.getMaxPendingComputeTokens())
+                    && !candidates.endpoint(i).engineQueueAllowsAdmission()) { continue; }
             scores[i] = work.score() + Math.max(0L, seqLen - candidates.cacheHit(i));
             minimum = Math.min(minimum, scores[i]);
         }
@@ -496,6 +536,19 @@ public class CostBasedPrefillStrategy {
         double selectedScore = minimum;
         return tieRotation.next(role, group, candidates.size(), i -> scores[i] == selectedScore,
                 candidates::endpointAddress);
+    }
+
+    private static boolean hasEngineQueueAdmission(PrefillCandidateSet candidates) {
+        for (int i = 0; i < candidates.size(); i++) {
+            if (candidates.endpoint(i).engineQueueAllowsAdmission()) { return true; }
+        }
+        return false;
+    }
+
+    public boolean hasEngineQueueAdmission(RoleType role, String group) {
+        return endpointRegistry.prefillRoutingSnapshot(role).stream()
+                .filter(entry -> group == null || group.equals(entry.endpoint().getStatus().topologySnapshot().group()))
+                .anyMatch(entry -> entry.endpoint().engineQueueAllowsAdmission());
     }
 
     private static double normalizedHitRate(double configuredRate) {
@@ -515,6 +568,7 @@ public class CostBasedPrefillStrategy {
     private record EndpointDiscovery(
             List<EndpointRegistry.PrefillRoutingEntry> directory,
             List<EndpointRegistry.PrefillRoutingEntry> candidates,
+            List<EndpointRegistry.PrefillRoutingEntry> cacheCandidates,
             int registeredCount) {
 
         private EndpointDiscovery {
@@ -527,12 +581,12 @@ public class CostBasedPrefillStrategy {
             return new AbstractList<>() {
                 @Override
                 public String get(int index) {
-                    return candidates.get(index).address();
+                    return cacheCandidates.get(index).address();
                 }
 
                 @Override
                 public int size() {
-                    return candidates.size();
+                    return cacheCandidates.size();
                 }
             };
         }
@@ -631,6 +685,7 @@ public class CostBasedPrefillStrategy {
         List<EndpointRegistry.PrefillRoutingEntry> directory =
                 endpointRegistry.prefillRoutingSnapshot(roleType);
         var matching = new ArrayList<EndpointRegistry.PrefillRoutingEntry>();
+        var cacheCandidates = tokenBalance == null ? matching : new ArrayList<EndpointRegistry.PrefillRoutingEntry>();
         int registered = 0;
         for (EndpointRegistry.PrefillRoutingEntry entry : directory) {
             PrefillEndpoint endpoint = entry.endpoint();
@@ -638,13 +693,15 @@ public class CostBasedPrefillStrategy {
                 continue;
             }
             registered++;
-            if (tokenBalance != null || (endpoint.requestLimit == 0L || endpoint.ownership.progress().outstandingRequests() < endpoint.requestLimit)
+            // Capacity can remove dispatch candidates, but must not redefine cache eligibility.
+            if (tokenBalance != null) { cacheCandidates.add(entry); }
+            if ((endpoint.requestLimit == 0L || endpoint.ownership.progress().outstandingRequests() < endpoint.requestLimit)
                     || preemptQueued && endpoint.ownership.canPreemptQueuedRequest(metadata.priority(), endpoint.requestLimit)) {
                 if (group == null && matching.isEmpty()) { matching.ensureCapacity(directory.size()); }
                 matching.add(entry);
             }
         }
-        return new EndpointDiscovery(directory, matching, registered);
+        return new EndpointDiscovery(directory, matching, cacheCandidates, registered);
     }
 
     private record CacheTokenMatch(

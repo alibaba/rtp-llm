@@ -64,6 +64,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
     public final PrefillTimePredictor predictor;
 
     public final long requestLimit;
+    private final Long engineQueueAdmissionThreshold;
 
     private volatile WorkerBatcher batcher;
     private final DeliveryDispatcher dispatcher;
@@ -106,8 +107,17 @@ public class PrefillEndpoint extends WorkerEndpoint {
         this.projectionOrder = config.isPriorityOrdering() ? PRIORITY_PROJECTION_ORDER : FIFO_PROJECTION_ORDER;
         this.ownership = new PrefillState(new ReentrantLock(), PrefillActiveIndex.disabled(), System::currentTimeMillis);
         var balance = config.getRouter().getRoles().getPrefill().getTokenBalance();
-        if (balance != null) { ownership.enableTokenWorkload(balance.getMaxPendingComputeTokens()); }
+        this.engineQueueAdmissionThreshold = balance == null ? null : balance.getEngineQueueAdmissionThreshold();
+        if (balance != null) { ownership.enableTokenWorkload(balance.getMaxPendingComputeTokens(), this::engineQueueAllowsAdmission); }
 
+    }
+
+    /** Only committed Engine waiting-query telemetry counts. Unknown status is not an empty queue. */
+    public boolean engineQueueAllowsAdmission() {
+        var status = getStatus().committedWorkerStatus();
+        return engineQueueAdmissionThreshold != null && !isGenerationRetiringOrRetired() && status.cursor().statusVersion() >= 0L
+                && status.fields().waitingQueryLen() >= 0L
+                && status.fields().waitingQueryLen() <= engineQueueAdmissionThreshold;
     }
 
     /** Captured under ownership.lock; the shared result is built without that lock. */
@@ -374,7 +384,13 @@ public class PrefillEndpoint extends WorkerEndpoint {
                                     || WorkerBatcher.schedulingCapacity(before, WorkerBatcher.PlanningResource.KV)
                                     != WorkerBatcher.schedulingCapacity(after, WorkerBatcher.PlanningResource.KV);
                         }
+                        boolean queueWasAvailable = engineQueueAllowsAdmission();
                         if (prepared != null) { ws.publishPreparedStatus(prepared); }
+                        if (!queueWasAvailable && engineQueueAllowsAdmission()) {
+                            inputsChanged = true;
+                            result = new PrefillState.StatusReconciliation(result.requestStatuses(), result.batchCompletions(),
+                                    true, true);
+                        }
                         if (inputsChanged) {
                             ownership.schedulingInputsChangedLocked();
                             if (!result.schedulingInputsChanged()) {

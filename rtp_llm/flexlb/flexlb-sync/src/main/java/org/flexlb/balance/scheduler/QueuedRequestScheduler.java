@@ -926,6 +926,10 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler imple
             var pool = poolEntry.getValue();
             var snapshot = (PrefillTrafficTrend.Snapshot) trends.get(
                     poolEntry.getKey() == null ? "<default>" : "group:" + poolEntry.getKey());
+            if (router.hasEngineQueueAdmission(poolEntry.getKey())) {
+                sheddingControllers.remove(poolEntry.getKey());
+                continue;
+            }
             var controller = sheddingControllers.computeIfAbsent(poolEntry.getKey(), ignored -> new PrefillQueueShedding.Controller());
             victims.addAll(PrefillQueueShedding.adaptiveVictims(pool, shedding, snapshot, controller,
                     TimeUnit.NANOSECONDS.toMillis(nowNanos)));

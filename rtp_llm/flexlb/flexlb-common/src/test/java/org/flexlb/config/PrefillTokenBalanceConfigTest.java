@@ -18,6 +18,13 @@ class PrefillTokenBalanceConfigTest {
                 {"router":{"roles":{"prefill":{"tokenBalance":{},"cacheAffinity":{}}}}}
                 """));
     }
+    @Test void engineQueueAdmissionIsAnExplicitOptIn() {
+        assertNull(parse("{}").getRouter().getRoles().getPrefill().getTokenBalance().getEngineQueueAdmissionThreshold());
+        assertEquals(0L, parse("{\"engineQueueAdmissionThreshold\":0}").getRouter().getRoles().getPrefill()
+                .getTokenBalance().getEngineQueueAdmissionThreshold());
+        assertThrows(RuntimeException.class, () -> parse("{\"engineQueueAdmissionThreshold\":-1}"));
+    }
+
     @Test void validatesBoundedHotspotRescue() {
         var rescue = parse("{\"hotspotRescue\":{}}").getRouter().getRoles().getPrefill().getTokenBalance().getHotspotRescue();
         assertEquals(5000, rescue.getMinWaitMs());

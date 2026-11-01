@@ -113,6 +113,11 @@ public class RequestWorkerSelector {
         }
     }
 
+    boolean hasEngineQueueAdmission(String group) {
+        return requiredRoles.stream().filter(RoleType::supportsPrefill)
+                .anyMatch(role -> prefillSelector.hasEngineQueueAdmission(role, group));
+    }
+
     PrefillQueueShedding.Estimate estimateQueuedWork(RequestContext context, String policyGroup) {
         // A pinned VIT selection further restricts the eligible Prefill pool.
         var selectedVit = context.data().getRequest().getSelectedVit();

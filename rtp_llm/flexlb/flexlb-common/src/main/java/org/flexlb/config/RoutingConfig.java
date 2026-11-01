@@ -40,7 +40,11 @@ public final class RoutingConfig {
         private double minPrefixHitPercent = 50.0;
         /** Backpressure at this pending uncached work; one oversized request may enter an empty worker. */
         private long maxPendingComputeTokens = 140_000L;
-        /** Optional escape from an overloaded cache leader for small, aged requests. */
+        /** Optional low Engine waiting-queue watermark (inclusive). Allows token-waterline
+         * overflow only within cache-eligible workers; excludes Master queues and running requests.
+         */
+        private Long engineQueueAdmissionThreshold;
+        /** Optional rescue of small, aged requests to idle cache-eligible workers. */
         private HotspotRescueConfig hotspotRescue;
     }
 

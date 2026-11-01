@@ -80,6 +80,21 @@ class PrefillStateSnapshotTest {
     }
 
     @Test
+    void engineQueueOverrideBypassesTokenWaterlineButRetainsRequestLimit() {
+        var allowed = new java.util.concurrent.atomic.AtomicBoolean(false);
+        state.enableTokenWorkload(90, allowed::get);
+        var first = state.reserveUnqueuedRoute(item(4001), 1, 2).reservation();
+        assertNotNull(first);
+        assertNull(state.reserveUnqueuedRoute(item(4002), 1, 2).reservation());
+        allowed.set(true);
+        var second = state.reserveUnqueuedRoute(item(4002), 1, 2).reservation();
+        assertNotNull(second);
+        assertNull(state.reserveUnqueuedRoute(item(4003), 1, 2).reservation());
+        state.release(first, null); state.release(second, null);
+        assertEquals(0, state.tokenWorkload().score());
+    }
+
+    @Test
     void stableAdmissionSummaryIsReusedOnlyForTheExactInputs() {
         var first = state.admissionSummary(50, 1L);
         assertSame(first, state.admissionSummary(50, 1L));
