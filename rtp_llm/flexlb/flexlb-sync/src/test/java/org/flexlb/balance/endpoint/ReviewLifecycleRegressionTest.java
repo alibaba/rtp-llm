@@ -39,7 +39,9 @@ class ReviewLifecycleRegressionTest {
                 new RequestRepository(),
                 mock(DeliveryMetricsReporter.class),
                 EndpointTestSupport.routeStrategy(EndpointTestSupport.requestRuntime()),
-                new PlacementAvailability());
+                new PlacementAvailability(),
+                org.flexlb.balance.planner.BuiltinGroupPlanner.from(config.loadBalanceConfig()),
+                order -> org.flexlb.balance.endpoint.PrefillActiveIndex.ordered(16, order));
     }
 
     @Test
@@ -83,7 +85,8 @@ class ReviewLifecycleRegressionTest {
             status.lock.unlock();
         }
         try {
-            EndpointTestSupport.completeRetirement(retirement, cache, LoggerFactory.getLogger(getClass()));
+            EndpointTestSupport.completeRetirement(
+                    retirement, cache, LoggerFactory.getLogger(getClass()));
             assertSame(status, registry.statusSnapshot(RoleType.PREFILL).get(address));
             assertSame(
                     status,

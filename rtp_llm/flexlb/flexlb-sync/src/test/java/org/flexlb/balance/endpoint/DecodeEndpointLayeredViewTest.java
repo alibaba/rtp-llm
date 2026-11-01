@@ -432,7 +432,7 @@ class DecodeEndpointLayeredViewTest {
 
     @Test
     void retirementReportsActivePreemptionOwnersExactlyOnce() {
-        var scheduler = mock(org.flexlb.balance.scheduler.AbstractRequestScheduler.class);
+        var scheduler = mock(org.flexlb.balance.scheduler.RequestLifecycle.class);
         endpoint =
                 EndpointTestSupport.decode(
                         status,

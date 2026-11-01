@@ -10,7 +10,7 @@ import io.grpc.netty.NettyChannelBuilder;
 import io.grpc.netty.NettyServerBuilder;
 import io.netty.channel.EventLoopGroup;
 import io.netty.channel.nio.NioEventLoopGroup;
-import org.flexlb.balance.scheduler.AbstractRequestScheduler;
+import org.flexlb.balance.scheduler.RequestLifecycle;
 import org.flexlb.balance.scheduler.CancelReason;
 import org.flexlb.balance.scheduler.DeliveryClaimKind;
 import org.flexlb.balance.scheduler.RequestScheduler;
@@ -383,7 +383,7 @@ class FlexlbForwardHopGuardNettyTest {
         private final AtomicInteger rejections = new AtomicInteger();
         private final MasterStatusService consistency;
         private final RequestScheduler requestScheduler;
-        private final AbstractRequestScheduler requestState = mock(AbstractRequestScheduler.class);
+        private final RequestLifecycle requestState = mock(RequestLifecycle.class);
         private final FlexlbGrpcForwarder forwarder;
         private final EventLoopGroup channelEventLoop;
         private final ExecutorService channelExecutor;

@@ -100,7 +100,9 @@ public class PlanningBench {
                                         items(depth, i),
                                         null),
                                 new WorkSnapshot(1000, List.of(), List.of(), 0),
-                                0L));
+                                0L,
+                                model,
+                                policy));
             }
             var probes = new ArrayList<RequestTimeEstimationTestSupport.Probe>();
             for (int i = 0; i < 64; i++)
@@ -115,8 +117,7 @@ public class PlanningBench {
                         double total = 0;
                         for (var endpoint : endpoints) {
                             var candidate =
-                                    RequestTimeEstimationTestSupport.project(
-                                            endpoint, probe, model, policy);
+                                    RequestTimeEstimationTestSupport.project(endpoint, probe);
                             total += candidate.projectedTtftMsValue();
                         }
                         return total;

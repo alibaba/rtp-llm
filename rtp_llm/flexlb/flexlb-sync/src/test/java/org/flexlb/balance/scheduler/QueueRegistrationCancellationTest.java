@@ -35,6 +35,23 @@ import static org.mockito.Mockito.when;
 
 /** Real registration and queue lifecycle; endpoint selection is isolated by a mock router. */
 class QueueRegistrationCancellationTest {
+    @Test
+    void alternateQueueUsesTheDefaultSchedulerCancellationAndShutdown() throws Exception {
+        try (Fixture f = new Fixture(true, new ListPlacementQueue())) {
+            when(f.router.select(any(), nullable(String.class)))
+                    .thenReturn(
+                            PlacementResult.blocked(
+                                    PlacementKey.anyGroup(org.flexlb.dao.route.RoleType.PREFILL)));
+            var context = f.context(909L);
+            var future = f.queue.submit(context);
+            RequestProtocolTestSupport.awaitGlobalCapacityWaiters(f.queue, 1);
+            f.queue.lifecycle().cancel(context, 0L, CancelReason.CLIENT_CANCELLED);
+            assertFalse(future.get(2, TimeUnit.SECONDS).isSuccess());
+            RequestProtocolTestSupport.awaitCondition(
+                    () -> f.runtime.requests().liveRequestCount() == 0);
+        }
+    }
+
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
     void cancellationSettlesBeforeQueueStartsAndSurvivesShutdown(boolean futureCancellation)
@@ -47,7 +64,7 @@ class QueueRegistrationCancellationTest {
                     assertTrue(future.cancel(false));
                     assertTrue(future.isCancelled());
                 } else {
-                    f.queue.cancel(context, 0L, CancelReason.CLIENT_CANCELLED);
+                    f.queue.lifecycle().cancel(context, 0L, CancelReason.CLIENT_CANCELLED);
                     assertEquals(
                             StrategyErrorType.REQUEST_CANCELLED.getErrorCode(),
                             future.get(2, TimeUnit.SECONDS).getCode());
@@ -139,7 +156,7 @@ class QueueRegistrationCancellationTest {
                     f.queue.submit(
                             context,
                             () -> {
-                                assertSame(f.queue, context.data().getScheduler());
+                                assertSame(f.queue.lifecycle(), context.data().getScheduler());
                                 assertNotNull(context.data().getFuture());
                                 assertEquals(0, RequestProtocolTestSupport.queuedCount(f.queue));
                                 verify(f.router, never()).select(any(), nullable(String.class));
@@ -158,9 +175,11 @@ class QueueRegistrationCancellationTest {
                     f.queue.submit(
                             context,
                             () -> {
-                                assertSame(f.queue, context.data().getScheduler());
+                                assertSame(f.queue.lifecycle(), context.data().getScheduler());
                                 assertNotNull(
-                                        f.queue.cancel(902L, 0L, CancelReason.CLIENT_CANCELLED));
+                                        f.queue
+                                                .lifecycle()
+                                                .cancel(902L, 0L, CancelReason.CLIENT_CANCELLED));
                             });
             assertFalse(result.get(2L, TimeUnit.SECONDS).isSuccess());
             assertEquals(0, RequestProtocolTestSupport.queuedCount(f.queue));
@@ -190,7 +209,7 @@ class QueueRegistrationCancellationTest {
                                             }));
             try {
                 assertTrue(registered.await(2L, TimeUnit.SECONDS));
-                assertNotNull(f.queue.cancel(903L, 0L, CancelReason.CLIENT_CANCELLED));
+                assertNotNull(f.queue.lifecycle().cancel(903L, 0L, CancelReason.CLIENT_CANCELLED));
                 SchedulerTestSupport.shutdown(SchedulerTestSupport.runtime(f.queue));
 
                 assertFalse(submitted.isDone(), "a cancelled hook holds no scheduling resources");
@@ -224,7 +243,7 @@ class QueueRegistrationCancellationTest {
     private static final class Fixture implements AutoCloseable {
         final FlexlbConfig config = SchedulingTestConfig.batchConfig();
         final RequestWorkerSelector router = mock(RequestWorkerSelector.class);
-        final SchedulerRuntime runtime;
+        final SchedulerTestServices runtime;
         final QueuedRequestScheduler queue;
 
         Fixture() {
@@ -232,12 +251,16 @@ class QueueRegistrationCancellationTest {
         }
 
         Fixture(boolean start) {
+            this(start, new OrderedRequestQueue(false));
+        }
+
+        Fixture(boolean start, PlacementQueue placementQueue) {
             SchedulingTestConfig.useFifoQueue(config);
             var service = mock(ConfigService.class);
             when(service.loadBalanceConfig()).thenReturn(config);
             var batches = mock(DeliveryMetricsReporter.class);
             runtime =
-                    new SchedulerRuntime(
+                    new SchedulerTestServices(
                             new RequestRepository(),
                             mock(EndpointRegistry.class),
                             batches,
@@ -251,11 +274,17 @@ class QueueRegistrationCancellationTest {
                             router,
                             batches,
                             mock(DecodePreemption.class),
-                            runtime,
+                            runtime.newLifecycle(
+                                    config,
+                                    SchedulingTestConfig.capacity(config),
+                                    org.mockito.Mockito.mock(
+                                            org.flexlb.service.RecentCacheKeyTraceReporter.class)),
                             new PlacementAvailability(),
                             SchedulingTestConfig.capacity(config),
                             org.mockito.Mockito.mock(
-                                    org.flexlb.service.RecentCacheKeyTraceReporter.class));
+                                    org.flexlb.service.RecentCacheKeyTraceReporter.class),
+                            placementQueue,
+                            org.flexlb.balance.planner.BuiltinGroupPlanner.from(config));
             runtime.registerScheduler(queue);
             if (start) {
                 queue.start();

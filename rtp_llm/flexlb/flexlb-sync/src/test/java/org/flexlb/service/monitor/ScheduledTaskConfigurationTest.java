@@ -77,7 +77,18 @@ class ScheduledTaskConfigurationTest {
             var task =
                     assertInstanceOf(
                             FixedRateTask.class,
-                            processor.getScheduledTasks().iterator().next().getTask());
+                            processor.getScheduledTasks().stream()
+                                    .filter(
+                                            item ->
+                                                    ((org.springframework.scheduling.support
+                                                                                    .ScheduledMethodRunnable)
+                                                                            item.getTask()
+                                                                                    .getRunnable())
+                                                                    .getTarget()
+                                                            instanceof WorkerRetirementCleaner)
+                                    .findFirst()
+                                    .orElseThrow()
+                                    .getTask());
             assertEquals(1250L, task.getInterval());
             assertTrue(polled.await(5, TimeUnit.SECONDS), "the existing cleanup task must execute");
             assertTrue(worker.get().getName().startsWith("task-scheduler"));

@@ -2,7 +2,7 @@ package org.flexlb.balance.eviction;
 
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.DecodeResources;
-import org.flexlb.balance.scheduler.AbstractRequestScheduler;
+import org.flexlb.balance.scheduler.RequestLifecycle;
 import org.flexlb.balance.scheduler.DeliveryDispatcher;
 import org.flexlb.balance.scheduler.RequestContext;
 import org.flexlb.balance.scheduler.SchedulingTestConfig;
@@ -59,17 +59,17 @@ class DecodePreemptionTest {
 
     private DeliveryDispatcher dispatcher;
 
-    private AbstractRequestScheduler requests;
+    private RequestLifecycle requests;
 
     private DecodeEndpoint blockedEndpoint;
 
-    private DecodePreemption acquirer;
+    private DefaultDecodePreemption acquirer;
 
     @BeforeEach
     void setUp() {
         reporter = mock(RequestSchedulerReporter.class);
         dispatcher = mock(DeliveryDispatcher.class);
-        requests = mock(AbstractRequestScheduler.class);
+        requests = mock(RequestLifecycle.class);
         blockedEndpoint = mock(DecodeEndpoint.class);
         var config = SchedulingTestConfig.newConfig();
         SchedulingTestConfig.usePriorityQueue(config);
@@ -80,14 +80,17 @@ class DecodePreemptionTest {
     private void configureAdmission(FlexlbConfig config) {
         acquirer =
                 org.mockito.Mockito.spy(
-                        new DecodePreemption(
+                        new DefaultDecodePreemption(
                                 dispatcher,
                                 org.flexlb.balance.scheduler.SchedulerTestSupport.repository(
                                         requests),
-                                mock(org.flexlb.balance.scheduler.SchedulerRuntime.class),
+                                mock(org.flexlb.balance.scheduler.RequestTaskExecutor.class),
+                                mock(org.flexlb.balance.scheduler.TaskTimer.class),
+                                mock(org.flexlb.balance.scheduler.RequestSignals.class),
                                 reporter,
                                 SchedulingTestConfig.configService(config),
-                                SchedulingTestConfig.capacity(config)));
+                                SchedulingTestConfig.capacity(config),
+                                new PriorityDecodePreemptionPolicy()));
     }
 
     @ParameterizedTest
@@ -181,7 +184,7 @@ class DecodePreemptionTest {
         }
         assertNotNull(outcome);
 
-        var command = ArgumentCaptor.forClass(DecodePreemption.PreemptionCommand.class);
+        var command = ArgumentCaptor.forClass(DefaultDecodePreemption.PreemptionCommand.class);
         verify(acquirer).preempt(org.mockito.ArgumentMatchers.same(context), command.capture());
         assertEquals(completionTimeoutMs, command.getValue().preemptionTimeoutMs());
         assertEquals(50L, command.getValue().cancelAckTimeoutMs());

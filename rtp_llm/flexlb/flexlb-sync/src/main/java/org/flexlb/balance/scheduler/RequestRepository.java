@@ -11,6 +11,11 @@ import java.util.concurrent.ConcurrentMap;
 /** Shared identity directory; request decisions remain with the exact context and its owner. */
 @Component
 public final class RequestRepository {
+    @org.springframework.scheduling.annotation.Scheduled(fixedRate = 60_000L)
+    public void maintainExpiration() {
+        if (!closed) expireTerminalRecords(System.currentTimeMillis() - 10_000L);
+    }
+
     private final Object registrationLock = new Object();
     private final ConcurrentMap<Long, RequestContext> activeRequests = new ConcurrentHashMap<>();
     private final ConcurrentMap<Long, TerminalRecord> terminalRecords = new ConcurrentHashMap<>();
@@ -25,10 +30,10 @@ public final class RequestRepository {
         CLOSED
     }
 
-    public record TerminalRecord(RequestState state, AbstractRequestScheduler owner) {}
+    public record TerminalRecord(RequestState state, RequestLifecycle owner) {}
 
     RegistrationResult register(
-            RequestContext context, AbstractRequestScheduler scheduler, RequestFuture response) {
+            RequestContext context, RequestLifecycle scheduler, RequestFuture response) {
         java.util.Objects.requireNonNull(context);
         java.util.Objects.requireNonNull(scheduler);
         java.util.Objects.requireNonNull(response);
@@ -77,7 +82,7 @@ public final class RequestRepository {
         return terminalRecords.get(requestId);
     }
 
-    public AbstractRequestScheduler ownerOf(long requestId) {
+    public RequestLifecycle ownerOf(long requestId) {
         RequestContext context = findActive(requestId);
         if (context != null) {
             return context.data().getScheduler();
@@ -98,7 +103,7 @@ public final class RequestRepository {
         return exact != null && activeRequests.get(exact.data().getRequestId()) == exact;
     }
 
-    boolean closeRegistration() {
+    public boolean closeRegistration() {
         synchronized (registrationLock) {
             if (closed) {
                 return false;
@@ -108,17 +113,17 @@ public final class RequestRepository {
         }
     }
 
-    void stopAccepting() {
+    public void stopAccepting() {
         synchronized (registrationLock) {
             stopping = true;
         }
     }
 
-    boolean isStopping() {
+    public boolean isStopping() {
         return stopping;
     }
 
-    boolean isClosed() {
+    public boolean isClosed() {
         return closed;
     }
 

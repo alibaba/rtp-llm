@@ -23,7 +23,7 @@ import static com.google.common.base.Preconditions.checkState;
  * DIRECT has no backing queue and cannot accept ACTIVE queue work; QUEUE owns
  * one ordered index shared by its runtime and canonical Prefill ledger.</p>
  */
-public final class PrefillActiveIndex implements Iterable<RequestRoute> {
+public final class PrefillActiveIndex implements WorkerQueue {
     private static final PrefillActiveIndex DISABLED = new PrefillActiveIndex();
 
     private final TreeSet<Entry> queue;
@@ -50,7 +50,7 @@ public final class PrefillActiveIndex implements Iterable<RequestRoute> {
     }
 
     /** Immutable membership; prediction objects are materialized outside the owner lock. */
-    public static final class Capture {
+    public static final class Capture implements WorkerQueue.Snapshot {
         private static final Capture EMPTY = new Capture(List.of());
         private final List<Entry> entries;
         private volatile List<GroupPlanner.Item> projectedItems;
@@ -130,6 +130,10 @@ public final class PrefillActiveIndex implements Iterable<RequestRoute> {
         return version;
     }
 
+    public boolean enabled() {
+        return queue != null;
+    }
+
     public boolean add(RequestRoute item) {
         checkState(queue != null, "DIRECT Prefill generation has no active request index");
         Objects.requireNonNull(item, "item");
@@ -160,6 +164,11 @@ public final class PrefillActiveIndex implements Iterable<RequestRoute> {
 
     public boolean contains(RequestRoute item) {
         return identities != null && identities.containsKey(item);
+    }
+
+    @Override
+    public boolean mayBypass(RequestRoute head, RequestRoute candidate) {
+        return head.priority() == candidate.priority();
     }
 
     public RequestRoute peek() {

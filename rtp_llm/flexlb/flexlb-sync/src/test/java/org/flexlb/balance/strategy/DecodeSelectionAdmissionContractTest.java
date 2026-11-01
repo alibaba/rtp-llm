@@ -161,7 +161,7 @@ class DecodeSelectionAdmissionContractTest {
     private static final class Fixture implements AutoCloseable {
         private final FlexlbConfig config = StrategyTestSupport.config();
         private final EndpointRegistry endpoints;
-        private final DecodeSelector strategy;
+        private final StrategyTestSupport.DecodeRoutingFixture strategy;
         private final DecodeEndpoint queued;
         private final DecodeEndpoint free;
         private final DecodeResources.AdmissionCapacity limits;
@@ -193,7 +193,7 @@ class DecodeSelectionAdmissionContractTest {
             queued = publish(QUEUED_IP);
             free = publish(FREE_IP);
             strategy =
-                    new DecodeSelector(
+                    new StrategyTestSupport.DecodeRoutingFixture(
                             endpoints,
                             SchedulingTestConfig.configService(config),
                             SchedulingTestConfig.capacity(

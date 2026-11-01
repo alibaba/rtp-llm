@@ -65,9 +65,12 @@ class PrefillCompletionProjectionTest {
                         SchedulerTestSupport.repository(projector),
                         reporter,
                         DeliveryTestSupport.route(reporter),
-                        new PlacementAvailability());
+                        new PlacementAvailability(),
+                        org.flexlb.balance.planner.BuiltinGroupPlanner.from(
+                                service.loadBalanceConfig()),
+                        order -> org.flexlb.balance.endpoint.PrefillActiveIndex.ordered(16, order));
         var runtime =
-                new SchedulerRuntime(
+                new SchedulerTestServices(
                         SchedulerTestSupport.repository(requests),
                         endpoints,
                         reporter,
@@ -192,7 +195,8 @@ class PrefillCompletionProjectionTest {
             task.setInputLength(16L);
             task.setPhase(TaskPhase.RUNNING);
             applyStatus(prefill, status(2L, Map.of("101", task), Map.of()));
-            SchedulerTestSupport.awaitRequestWork(requests.runtime);
+            SchedulerTestSupport.awaitRequestWork(
+                    org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(requests));
             RequestContext requestContext = requests.requests.findActive(101L);
             synchronized (requestContext) {
                 assertTrue(
@@ -201,11 +205,13 @@ class PrefillCompletionProjectionTest {
             }
             if (decodeAlreadyAccepted) {
                 applyStatus(decode, decodeStatus(2L, Map.of("101", task)));
-                SchedulerTestSupport.awaitRequestWork(requests.runtime);
+                SchedulerTestSupport.awaitRequestWork(
+                        org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(requests));
             }
 
             applyStatus(prefill, status(3L, Map.of(), Map.of("101", task)));
-            SchedulerTestSupport.awaitRequestWork(requests.runtime);
+            SchedulerTestSupport.awaitRequestWork(
+                    org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(requests));
             assertEquals(
                     0L,
                     prefill.ownership.admissionSummary(0, prefill.requestLimit).occupiedRequests());
@@ -242,7 +248,8 @@ class PrefillCompletionProjectionTest {
             }
 
             applyStatus(prefill, status(4L, Map.of(), Map.of("101", task)));
-            SchedulerTestSupport.awaitRequestWork(requests.runtime);
+            SchedulerTestSupport.awaitRequestWork(
+                    org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(requests));
             assertEquals(
                     0L,
                     prefill.ownership.admissionSummary(0, prefill.requestLimit).occupiedRequests());
@@ -251,7 +258,8 @@ class PrefillCompletionProjectionTest {
             decodeFinished.setFinishedTaskInfo(Map.of("101", task));
             decodeFinished.setLatestFinishedVersion(1L);
             applyStatus(decode, decodeFinished);
-            SchedulerTestSupport.awaitRequestWork(requests.runtime);
+            SchedulerTestSupport.awaitRequestWork(
+                    org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(requests));
             assertEquals(0L, EndpointTestSupport.expectedReservedKv(decode.resourceSnapshot()));
             assertEquals(0, decode.routingView().engineCapacityUsed());
             org.junit.jupiter.api.Assertions.assertNull(
@@ -266,7 +274,7 @@ class PrefillCompletionProjectionTest {
     }
 
     private static boolean visibilityInstalledOrAbsent(
-            AbstractRequestScheduler owner, RequestContext context) {
+            RequestLifecycle owner, RequestContext context) {
         var token = context.snapshot().deadlines().visibility();
         if (token == null) {
             return true;
@@ -274,7 +282,9 @@ class PrefillCompletionProjectionTest {
         var slots =
                 (java.util.Map<?, ?>)
                         org.springframework.test.util.ReflectionTestUtils.getField(
-                                owner.runtime.deadlines(), "slots");
+                                org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(owner)
+                                        .deadlines(),
+                                "slots");
         var slot = slots.get(context);
         if (slot == null) {
             return false;

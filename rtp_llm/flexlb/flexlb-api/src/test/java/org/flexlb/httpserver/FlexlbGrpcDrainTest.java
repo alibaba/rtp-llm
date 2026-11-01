@@ -10,7 +10,7 @@ import io.grpc.ServerInterceptors;
 import io.grpc.netty.NettyChannelBuilder;
 import io.grpc.netty.NettyServerBuilder;
 import io.grpc.stub.StreamObserver;
-import org.flexlb.balance.scheduler.AbstractRequestScheduler;
+import org.flexlb.balance.scheduler.RequestLifecycle;
 import org.flexlb.config.ConfigService;
 import org.flexlb.consistency.MasterStatusService;
 import org.flexlb.dao.loadbalance.Response;
@@ -63,7 +63,7 @@ class FlexlbGrpcDrainTest {
                 FlexlbServiceTestSupport.create(
                         routes,
                         org.flexlb.balance.scheduler.SchedulerTestSupport.repository(
-                                mock(AbstractRequestScheduler.class)),
+                                mock(RequestLifecycle.class)),
                         mock(MasterStatusService.class),
                         mock(EngineHealthReporter.class),
                         mock(FlexlbGrpcForwarder.class),

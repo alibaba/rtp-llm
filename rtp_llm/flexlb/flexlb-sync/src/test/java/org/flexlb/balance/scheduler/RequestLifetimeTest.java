@@ -390,7 +390,7 @@ class RequestLifetimeTest {
         FlexlbConfig config = SchedulingTestConfig.batchConfig();
         ConfigService service = mock(ConfigService.class);
         when(service.loadBalanceConfig()).thenReturn(config);
-        AbstractRequestScheduler registry =
+        RequestLifecycle registry =
                 SchedulerTestSupport.create(
                         service,
                         mock(DeliveryMetricsReporter.class),
@@ -470,9 +470,11 @@ class RequestLifetimeTest {
                             0L,
                             null,
                             System.currentTimeMillis()));
-            SchedulerTestSupport.awaitRequestWork(registry.runtime);
+            SchedulerTestSupport.awaitRequestWork(
+                    org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(registry));
         } finally {
-            SchedulerTestSupport.shutdown(registry.runtime);
+            SchedulerTestSupport.shutdown(
+                    org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(registry));
         }
     }
 
@@ -481,7 +483,7 @@ class RequestLifetimeTest {
     void earlyTimerFiresOnlyAfterSuccessfulInstallation(String outcome) throws Exception {
         Fixture fixture = fixture(true);
         RequestContext context = fixture.requestContext;
-        AbstractRequestScheduler scheduler = fixture.scheduler;
+        RequestLifecycle scheduler = fixture.scheduler;
         var failure = new IllegalStateException("installation failed");
         try (var timer = new ExpirationTimer(scheduler.requests)) {
             var original =
@@ -562,7 +564,7 @@ class RequestLifetimeTest {
     @Test
     void timerChecksInactivityAfterThePublicFutureHasCompleted() throws Exception {
         Fixture fixture = fixture(true);
-        AbstractRequestScheduler registry = fixture.scheduler;
+        RequestLifecycle registry = fixture.scheduler;
         doAnswer(
                         invocation -> {
                             var token = invocation.getArgument(0, ExpirationTimer.Token.class);
@@ -590,7 +592,7 @@ class RequestLifetimeTest {
     @Test
     void timerCloseWaitsForAnAlreadyStartedInactivityHandoff() throws Exception {
         Fixture fixture = fixture(true);
-        AbstractRequestScheduler registry = fixture.scheduler;
+        RequestLifecycle registry = fixture.scheduler;
         CountDownLatch entered = new CountDownLatch(1);
         CountDownLatch release = new CountDownLatch(1);
         doAnswer(
@@ -634,7 +636,7 @@ class RequestLifetimeTest {
     @Test
     void renewedActivityRearmsTheTimerUntilTheNewInactivityDeadline() throws Exception {
         Fixture fixture = fixture(true);
-        AbstractRequestScheduler registry = fixture.scheduler;
+        RequestLifecycle registry = fixture.scheduler;
         long start = fixture.requestContext.snapshot().createdAtMs();
         AtomicLong now = new AtomicLong(start + 100L);
         AtomicInteger checks = new AtomicInteger();
@@ -894,7 +896,7 @@ class RequestLifetimeTest {
         config.getRequestLifecycle().getRequest().setTimeoutMs(60_000L);
         SchedulingTestConfig.useNonBatchDispatcher(config);
         RequestContext context = RequestProtocolTestSupport.context(config, 101L);
-        AbstractRequestScheduler owner = mock(AbstractRequestScheduler.class);
+        RequestLifecycle owner = mock(RequestLifecycle.class);
         var repository = mock(RequestRepository.class);
         when(repository.isCurrent(context)).thenReturn(true);
         org.springframework.test.util.ReflectionTestUtils.setField(owner, "requests", repository);
@@ -924,7 +926,7 @@ class RequestLifetimeTest {
     }
 
     private static void preparePrefillStatusEffects(
-            AbstractRequestScheduler scheduler,
+            RequestLifecycle scheduler,
             RequestContext context,
             RequestRoute item,
             boolean completed) {
@@ -949,7 +951,7 @@ class RequestLifetimeTest {
     }
 
     private static void startPrediction(
-            AbstractRequestScheduler requestOwner, RequestContext requestContext) {
+            RequestLifecycle requestOwner, RequestContext requestContext) {
         predictDelivery(
                 requestContext,
                 emptyWork(System.currentTimeMillis()),
@@ -988,7 +990,7 @@ class RequestLifetimeTest {
     }
 
     private record Fixture(
-            AbstractRequestScheduler scheduler,
+            RequestLifecycle scheduler,
             FlexlbConfig config,
             RequestContext requestContext,
             RequestRoute item) {}

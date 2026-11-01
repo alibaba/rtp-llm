@@ -5,7 +5,7 @@ import org.flexlb.util.PriorityNormalizer;
 import java.util.Comparator;
 
 /** One request identity retained by the model-wide ordered queue. */
-final class GlobalQueueEntry {
+public final class GlobalQueueEntry {
     static final Comparator<GlobalQueueEntry> SEQUENCE_ORDER =
             Comparator.comparingLong(entry -> entry.sequence);
     static final Comparator<GlobalQueueEntry> PRIORITY_ORDER =
@@ -20,12 +20,39 @@ final class GlobalQueueEntry {
     GlobalQueueEntry previous;
     GlobalQueueEntry next;
 
-    GlobalQueueEntry(RequestContext context, String routingGroup) {
+    public GlobalQueueEntry(RequestContext context, String routingGroup) {
         this.context = context;
         this.routingGroup = routingGroup;
     }
 
-    int priority() {
+    public RequestContext context() {
+        return context;
+    }
+
+    public String routingGroup() {
+        return routingGroup;
+    }
+
+    public long sequence() {
+        return sequence;
+    }
+
+    public boolean isRemoved() {
+        return removed;
+    }
+
+    /** Called only by the owning queue while holding its caller's synchronization boundary. */
+    public void markQueued(long sequence) {
+        if (!removed || sequence <= 0) throw new IllegalStateException("invalid queue membership");
+        this.sequence = sequence;
+        removed = false;
+    }
+
+    public void markRemoved() {
+        removed = true;
+    }
+
+    public int priority() {
         int priority = context.data().getPriority();
         // Legacy internal callers can carry 0/invalid input; only the global queue defaults it.
         return PriorityNormalizer.isValid(priority)

@@ -13,6 +13,7 @@ import org.flexlb.balance.prediction.PrefillTimePredictor;
 import org.flexlb.balance.projection.WorkSnapshot;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.DispatcherConfig;
+import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.EngineGrpcClient;
 import org.flexlb.engine.grpc.EngineRpcService;
 import org.flexlb.service.monitor.DeliveryMetricsReporter;
@@ -211,7 +212,7 @@ public class DeliveryDispatcher {
                         .ctx()
                         .data()
                         .getScheduler()
-                        .runtime
+                        .tasks
                         .recordFailure(cleanup);
             }
         }
@@ -244,13 +245,39 @@ public class DeliveryDispatcher {
                                                     response,
                                                     failure)));
         }
+        reportDelivery(batch, claims, prediction);
+    }
+
+    private void reportDelivery(Batch batch, List<DeliveryClaim> claims, long prediction) {
         if (!claims.isEmpty()) {
             try {
-                telemetry.reportDelivery(
+                long nowMs = System.currentTimeMillis();
+                long hitTokens = 0L;
+                long totalTokens = 0L;
+                String engineIp = claims.getFirst().item().prefillEp().getIp();
+                for (var claim : claims) {
+                    var item = claim.item();
+                    telemetry.reportBatchWaitTimeMs(
+                            RoleType.PREFILL.name(),
+                            engineIp,
+                            Math.max(0L, nowMs - item.enqueuedAtMs()),
+                            item.priority());
+                    hitTokens =
+                            com.google.common.math.LongMath.saturatedAdd(
+                                    hitTokens, Math.max(0L, item.hitCache()));
+                    totalTokens =
+                            com.google.common.math.LongMath.saturatedAdd(
+                                    totalTokens, Math.max(0L, item.seqLen()));
+                }
+                telemetry.reportBatchDelivery(
+                        RoleType.PREFILL.name(),
+                        engineIp,
                         batch.batchId(),
                         batch.reason(),
                         batch.remainingQueueDepth(),
-                        claims.stream().map(value -> value.item()).toList(),
+                        claims.size(),
+                        hitTokens,
+                        totalTokens,
                         prediction);
             } catch (Throwable failure) {
                 logFailure("Delivery telemetry", batch.batchId(), failure);
@@ -276,18 +303,10 @@ public class DeliveryDispatcher {
                 }
             } catch (Throwable failure) {
                 try {
-                    member.route()
-                            .ctx()
-                            .data()
-                            .getScheduler()
-                            .onDeliveryFact(
-                                    new ContextResult.PreparationFailure(
-                                            null,
-                                            member.route(),
-                                            String.valueOf(failure.getMessage()),
-                                            System.currentTimeMillis()));
+                    RequestLifecycle.preparationFailed(
+                            member.route(), String.valueOf(failure.getMessage()));
                 } catch (Throwable ownerFailure) {
-                    member.route().ctx().data().getScheduler().runtime.recordFailure(ownerFailure);
+                    member.route().ctx().data().getScheduler().tasks.recordFailure(ownerFailure);
                     logFailure("Claim failure notification", batch.batchId(), ownerFailure);
                 }
             }
@@ -396,7 +415,7 @@ public class DeliveryDispatcher {
                                 new ContextResult.TransportResult(
                                         claim, result, System.currentTimeMillis()));
             } catch (Throwable failure) {
-                claim.owner().data().getScheduler().runtime.recordFailure(failure);
+                claim.owner().data().getScheduler().tasks.recordFailure(failure);
                 logFailure(
                         "Delivery completion request_id=" + claim.item().requestId(),
                         batchId,
@@ -418,18 +437,10 @@ public class DeliveryDispatcher {
                     continue;
                 }
                 try {
-                    member.route()
-                            .ctx()
-                            .data()
-                            .getScheduler()
-                            .onDeliveryFact(
-                                    new ContextResult.PreparationFailure(
-                                            null,
-                                            member.route(),
-                                            String.valueOf(failure.getMessage()),
-                                            System.currentTimeMillis()));
+                    RequestLifecycle.preparationFailed(
+                            member.route(), String.valueOf(failure.getMessage()));
                 } catch (Throwable ownerFailure) {
-                    member.route().ctx().data().getScheduler().runtime.recordFailure(ownerFailure);
+                    member.route().ctx().data().getScheduler().tasks.recordFailure(ownerFailure);
                     logFailure("Preparation failure notification", batch.batchId(), ownerFailure);
                 }
             }
@@ -442,7 +453,7 @@ public class DeliveryDispatcher {
                         .ctx()
                         .data()
                         .getScheduler()
-                        .runtime
+                        .tasks
                         .recordFailure(cleanup);
             }
         }
@@ -531,6 +542,10 @@ public class DeliveryDispatcher {
      */
     enum StopResult {
         NOT_SENT,
+        /**
+         * The remote stop endpoint confirmed cleanup; Context and ledger settlement may remain
+         * pending.
+         */
         REMOTE_CLEANED,
         UNRESOLVED,
         UNSUPPORTED,
@@ -543,9 +558,9 @@ public class DeliveryDispatcher {
 
     /** Accept the entire stop operation; callers do not drive retries or sender completion. */
     CompletableFuture<StopResult> stop(DeliveryClaim claim) {
-        var runtime = claim.owner().data().getScheduler().runtime;
+        var owner = claim.owner().data().getScheduler();
         for (; ; ) {
-            if (runtime.signals().delivery(claim).toCompletableFuture().isDone()) {
+            if (owner.signals.delivery(claim).toCompletableFuture().isDone()) {
                 return CompletableFuture.completedFuture(StopResult.ALREADY_SETTLED);
             }
             var delivery = claim.owner().snapshot().delivery();
@@ -573,13 +588,13 @@ public class DeliveryDispatcher {
             DecodeEndpoint endpoint,
             String detail,
             long timeoutMs) {
-        var runtime = registration.owner().data().getScheduler().runtime;
+        var owner = registration.owner().data().getScheduler();
         var delivery = registration.owner().snapshot().delivery();
         var claim = delivery == null ? null : delivery.identity();
         var answer = new CompletableFuture<PreemptionRegistration.Reply>();
         long expiresAt = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMs);
         var timeout =
-                runtime.scheduleTimeout(
+                owner.taskTimer.schedule(
                         () -> answer.complete(PreemptionRegistration.Reply.UNKNOWN),
                         Math.max(1L, timeoutMs));
         answer.whenComplete((ignored, failure) -> timeout.cancel());
@@ -631,8 +646,8 @@ public class DeliveryDispatcher {
             return previous;
         }
         if (claim != null) {
-            created.runtime
-                    .signals()
+            created.owner
+                    .signals
                     .delivery(claim)
                     .whenComplete((ignored, failure) -> created.close(StopResult.ALREADY_SETTLED));
         }
@@ -640,14 +655,11 @@ public class DeliveryDispatcher {
     }
 
     /** Drain late RPC callbacks before Scheduler closes its fact ingress. */
-    void awaitStops(SchedulerRuntime runtime) {
+    public void awaitStops() {
         Throwable problem = null;
         long deadline =
                 System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(CLEANUP_TIMEOUT_MS + 1_000L);
         for (var task : sessions.values()) {
-            if (task.runtime != runtime) {
-                continue;
-            }
             try {
                 synchronized (task) {
                     while (!task.closed && (task.queued != 0 || task.pending != 0)) {
@@ -682,7 +694,7 @@ public class DeliveryDispatcher {
         private final Object key;
         private final DeliveryClaim claim;
         private final RequestContext context;
-        private final SchedulerRuntime runtime;
+        private final RequestLifecycle owner;
         private final CompletableFuture<StopResult> finished = new CompletableFuture<>();
         private final CompletableFuture<PreemptionRegistration.Reply> firstReply =
                 new CompletableFuture<>();
@@ -704,7 +716,7 @@ public class DeliveryDispatcher {
             this.key = key;
             this.claim = claim;
             this.context = context;
-            this.runtime = context.data().getScheduler().runtime;
+            this.owner = context.data().getScheduler();
         }
 
         private void start() {
@@ -717,11 +729,11 @@ public class DeliveryDispatcher {
             signal();
             boolean accepted = false;
             try {
-                accepted = runtime.executeStopWork(context, this);
+                accepted = owner.tasks.executeStopWork(context, this);
             } catch (RuntimeException | Error failure) {
                 finished.completeExceptionally(failure);
                 close(StopResult.UNRESOLVED);
-                runtime.recordFailure(failure);
+                owner.tasks.recordFailure(failure);
             } finally {
                 if (!accepted) {
                     synchronized (this) {
@@ -758,7 +770,7 @@ public class DeliveryDispatcher {
             } catch (RuntimeException | Error failure) {
                 finished.completeExceptionally(failure);
                 firstReply.complete(PreemptionRegistration.Reply.UNKNOWN);
-                runtime.recordFailure(failure);
+                owner.tasks.recordFailure(failure);
             } finally {
                 boolean unused;
                 synchronized (this) {
@@ -888,7 +900,7 @@ public class DeliveryDispatcher {
             try {
                 var remote =
                         Objects.requireNonNull(
-                                runtime.engineClient.cancelAsync(
+                                grpcClient.cancelAsync(
                                         target == null
                                                 ? claim.item().prefillEp().getIp()
                                                 : target.prefillIp(),
@@ -909,7 +921,7 @@ public class DeliveryDispatcher {
                 rpc.whenComplete((ignored, failure) -> signal());
             } catch (RuntimeException | Error failed) {
                 if (failed instanceof Error) {
-                    runtime.recordFailure(failed);
+                    owner.tasks.recordFailure(failed);
                 }
                 rpc =
                         CompletableFuture.completedFuture(
@@ -924,7 +936,7 @@ public class DeliveryDispatcher {
                 var scheduler = context.data().getScheduler();
                 if (operation != null) {
                     var event =
-                            AbstractRequestScheduler.PreemptionEvent.receipt(
+                            RequestLifecycle.PreemptionEvent.receipt(
                                     operation.registration().reservation(),
                                     operation.endpoint(),
                                     reply,
@@ -933,20 +945,14 @@ public class DeliveryDispatcher {
                     progress =
                             scheduler.onDeliveryFact(
                                     new ContextResult.PreemptionFact(
-                                            operation.registration(),
-                                            event.phase(),
-                                            event.release(),
-                                            event.endpoint(),
-                                            event.reservation(),
-                                            event.detail(),
-                                            event.cleanup()));
+                                            operation.registration(), event));
                 } else if (claim != null) {
                     scheduler.onDeliveryFact(
-                            AbstractRequestScheduler.PreemptionEvent.acknowledgement(claim, reply));
+                            RequestLifecycle.PreemptionEvent.acknowledgement(claim, reply));
                 }
                 evidence = reply;
             } catch (RuntimeException | Error failed) {
-                runtime.recordFailure(failed);
+                owner.tasks.recordFailure(failed);
             } finally {
                 boolean unsupported;
                 synchronized (this) {
@@ -985,7 +991,7 @@ public class DeliveryDispatcher {
 
         private void finish(StopResult result) {
             if (finished.complete(result) && result == StopResult.UNRESOLVED && stopRequested) {
-                runtime.recordFailure(
+                owner.tasks.recordFailure(
                         new IllegalStateException(
                                 "delivery stop ended without release proof: request_id="
                                         + context.data().getRequestId()));

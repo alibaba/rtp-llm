@@ -131,7 +131,7 @@ class RequestCompletionPublicationRaceTest {
         var config = SchedulingTestConfig.batchConfig();
         ConfigService service = mock(ConfigService.class);
         when(service.loadBalanceConfig()).thenReturn(config);
-        AbstractRequestScheduler registry =
+        RequestLifecycle registry =
                 org.flexlb.balance.scheduler.SchedulerTestSupport.create(
                         service,
                         mock(DeliveryMetricsReporter.class),
@@ -146,7 +146,9 @@ class RequestCompletionPublicationRaceTest {
             var responseExecutor =
                     (ResponseCompletionExecutor)
                             org.springframework.test.util.ReflectionTestUtils.getField(
-                                    registry.runtime, "responseCompletions");
+                                    org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(
+                                            registry),
+                                    "responseCompletions");
             var executor =
                     (ExecutorService)
                             org.springframework.test.util.ReflectionTestUtils.getField(
@@ -182,7 +184,7 @@ class RequestCompletionPublicationRaceTest {
         when(config.getInternalRuntime()).thenReturn(runtime);
         ConfigService service = mock(ConfigService.class);
         when(service.loadBalanceConfig()).thenReturn(config);
-        AbstractRequestScheduler scheduler =
+        RequestLifecycle scheduler =
                 org.flexlb.balance.scheduler.SchedulerTestSupport.create(
                         service,
                         mock(DeliveryMetricsReporter.class),
@@ -191,7 +193,9 @@ class RequestCompletionPublicationRaceTest {
         var responseExecutor =
                 (ResponseCompletionExecutor)
                         org.springframework.test.util.ReflectionTestUtils.getField(
-                                scheduler.runtime, "responseCompletions");
+                                org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(
+                                        scheduler),
+                                "responseCompletions");
         int count = 256;
         var callbacks = new java.util.ArrayList<CompletableFuture<Void>>(count);
         var depth = new java.util.concurrent.atomic.AtomicInteger();
@@ -349,7 +353,7 @@ class RequestCompletionPublicationRaceTest {
         ConfigService service = mock(ConfigService.class);
         when(service.loadBalanceConfig()).thenReturn(config);
         DeliveryMetricsReporter reporter = mock(DeliveryMetricsReporter.class);
-        AbstractRequestScheduler registry =
+        RequestLifecycle registry =
                 org.flexlb.balance.scheduler.SchedulerTestSupport.create(
                         service,
                         reporter,
@@ -488,7 +492,8 @@ class RequestCompletionPublicationRaceTest {
 
             resumeCleanup.countDown();
             expiry.get(2L, TimeUnit.SECONDS);
-            SchedulerTestSupport.awaitRequestWork(registry.runtime);
+            SchedulerTestSupport.awaitRequestWork(
+                    org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(registry));
             Response expired = future.get(2L, TimeUnit.SECONDS);
             callback.get(2L, TimeUnit.SECONDS);
             assertFalse(expired.isSuccess());
@@ -561,7 +566,11 @@ class RequestCompletionPublicationRaceTest {
                 failure.setSuccess(false);
                 var terminalPublication =
                         new ResponsePublication(
-                                fixture.scheduler().runtime, fixture.requestContext(), false);
+                                org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(
+                                                fixture.scheduler())
+                                        .responseCompletions(),
+                                fixture.requestContext(),
+                                false);
                 ContextResult.End terminal;
                 RequestState settled;
                 synchronized (fixture.requestContext()) {
@@ -576,7 +585,9 @@ class RequestCompletionPublicationRaceTest {
                                     fixture.requestContext(), terminal);
                 }
                 fixture.scheduler().requests.archive(fixture.requestContext(), settled);
-                fixture.scheduler().runtime.deadlines().remove(fixture.requestContext());
+                org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(fixture.scheduler())
+                        .deadlines()
+                        .remove(fixture.requestContext());
                 var candidate =
                         new ContextResult.ResponseCandidate(
                                 fixture.requestContext(),
@@ -602,8 +613,13 @@ class RequestCompletionPublicationRaceTest {
                                         org.springframework.test.util.ReflectionTestUtils.getField(
                                                 completions, "registrations"))
                                 .isEmpty());
-                SchedulerTestSupport.timer(fixture.scheduler().runtime).close();
-                SchedulerTestSupport.closeRequestExecutors(fixture.scheduler().runtime);
+                SchedulerTestSupport.timer(
+                                org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(
+                                        fixture.scheduler()))
+                        .close();
+                SchedulerTestSupport.closeRequestExecutors(
+                        org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(
+                                fixture.scheduler()));
             }
         }
     }
@@ -638,8 +654,13 @@ class RequestCompletionPublicationRaceTest {
                                                 responseExecutor, "registrations"))
                                 .isEmpty());
             } finally {
-                SchedulerTestSupport.timer(fixture.scheduler().runtime).close();
-                SchedulerTestSupport.closeRequestExecutors(fixture.scheduler().runtime);
+                SchedulerTestSupport.timer(
+                                org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(
+                                        fixture.scheduler()))
+                        .close();
+                SchedulerTestSupport.closeRequestExecutors(
+                        org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(
+                                fixture.scheduler()));
             }
         }
     }
@@ -681,7 +702,9 @@ class RequestCompletionPublicationRaceTest {
                     RequestState.from(fixture.requestContext().snapshot()).state());
         }
         fixture.scheduler().requests.archive(fixture.requestContext(), settled);
-        fixture.scheduler().runtime.deadlines().remove(fixture.requestContext());
+        org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(fixture.scheduler())
+                .deadlines()
+                .remove(fixture.requestContext());
         assertTrue(
                 fixture.publication().complete(RequestFuture.Completion.RESPONSE, success, null));
         assertSame(success, fixture.requestContext().data().getFuture().join());
@@ -717,7 +740,11 @@ class RequestCompletionPublicationRaceTest {
         failure.setSuccess(false);
         var publication =
                 new ResponsePublication(
-                        fixture.scheduler().runtime, fixture.requestContext(), false);
+                        org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(
+                                        fixture.scheduler())
+                                .responseCompletions(),
+                        fixture.requestContext(),
+                        false);
         RequestState settled;
         synchronized (fixture.requestContext()) {
             var terminal =
@@ -730,7 +757,9 @@ class RequestCompletionPublicationRaceTest {
                     SchedulerTestSupport.settleTerminalFixture(fixture.requestContext(), terminal);
         }
         fixture.scheduler().requests.archive(fixture.requestContext(), settled);
-        fixture.scheduler().runtime.deadlines().remove(fixture.requestContext());
+        org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(fixture.scheduler())
+                .deadlines()
+                .remove(fixture.requestContext());
         Response success = new Response();
         success.setSuccess(true);
         assertFalse(
@@ -787,7 +816,7 @@ class RequestCompletionPublicationRaceTest {
     void externalFutureOperationUnderContextLockLeavesRequestUnchanged(TerminalForm form) {
         RequestContext requestContext =
                 RequestProtocolTestSupport.context(SchedulingTestConfig.batchConfig(), 702L);
-        AbstractRequestScheduler requestOwner =
+        RequestLifecycle requestOwner =
                 RequestProtocolTestSupport.initialize(
                         mock(ResponseCompletionExecutor.class),
                         requestContext,
@@ -858,8 +887,9 @@ class RequestCompletionPublicationRaceTest {
                 if (deliveryFailure) {
                     assertDoesNotThrow(reject::run);
                     assertNotNull(
-                            org.springframework.test.util.ReflectionTestUtils.getField(
-                                    fixture.scheduler().runtime, "failure"));
+                            org.flexlb.balance.scheduler.SchedulerTestServices.failure(
+                                    org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(
+                                            fixture.scheduler())));
                 } else {
                     assertThrows(IllegalStateException.class, reject::run);
                 }
@@ -870,8 +900,13 @@ class RequestCompletionPublicationRaceTest {
                 assertFalse(context.data().getFuture().isDone());
             } finally {
                 fixture.publication().close();
-                SchedulerTestSupport.timer(fixture.scheduler().runtime).close();
-                SchedulerTestSupport.closeRequestExecutors(fixture.scheduler().runtime);
+                SchedulerTestSupport.timer(
+                                org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(
+                                        fixture.scheduler()))
+                        .close();
+                SchedulerTestSupport.closeRequestExecutors(
+                        org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(
+                                fixture.scheduler()));
             }
         }
     }
@@ -901,8 +936,13 @@ class RequestCompletionPublicationRaceTest {
                 verify(publisher, org.mockito.Mockito.never()).register(any());
             } finally {
                 fixture.publication().close();
-                SchedulerTestSupport.timer(fixture.scheduler().runtime).close();
-                SchedulerTestSupport.closeRequestExecutors(fixture.scheduler().runtime);
+                SchedulerTestSupport.timer(
+                                org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(
+                                        fixture.scheduler()))
+                        .close();
+                SchedulerTestSupport.closeRequestExecutors(
+                        org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(
+                                fixture.scheduler()));
             }
         }
     }
@@ -920,7 +960,7 @@ class RequestCompletionPublicationRaceTest {
     private static Fixture fixture(ResponseCompletionExecutor responseExecutor, boolean delivered) {
         var config = SchedulingTestConfig.batchConfig();
         RequestContext context = RequestProtocolTestSupport.context(config, 701L);
-        AbstractRequestScheduler owner =
+        RequestLifecycle owner =
                 RequestProtocolTestSupport.initialize(
                         responseExecutor, context, mock(ExpirationTimer.class));
         RequestRoute item =
@@ -947,7 +987,12 @@ class RequestCompletionPublicationRaceTest {
                     new ContextResult.TransportResult(
                             claim, DeliveryResult.delivered(), System.currentTimeMillis()));
         }
-        var publication = new ResponsePublication(owner.runtime, context, true);
+        var publication =
+                new ResponsePublication(
+                        org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(owner)
+                                .responseCompletions(),
+                        context,
+                        true);
         if (delivered) {
             assertTrue(
                     context.selectResponse(
@@ -972,7 +1017,7 @@ class RequestCompletionPublicationRaceTest {
     }
 
     private record Fixture(
-            AbstractRequestScheduler scheduler,
+            RequestLifecycle scheduler,
             RequestContext requestContext,
             DeliveryClaim claim,
             ResponsePublication publication,

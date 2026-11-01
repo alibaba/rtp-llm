@@ -34,6 +34,8 @@ class PollRunnerLifecycleTest {
         "true,SEND",
         "false,REPLY",
         "true,REPLY",
+        "false,TIMEOUT",
+        "true,TIMEOUT",
         "false,EXECUTOR",
         "true,EXECUTOR",
         "false,CALLBACK",
@@ -48,7 +50,10 @@ class PollRunnerLifecycleTest {
         WorkerStatusRpcClient grpc = mock(WorkerStatusRpcClient.class);
         CacheAwareService cache = mock(CacheAwareService.class);
         DynamicCacheIntervalService interval = mock(DynamicCacheIntervalService.class);
-        IllegalStateException failure = new IllegalStateException("poll unavailable");
+        RuntimeException failure =
+                failureAt.equals("TIMEOUT")
+                        ? io.grpc.Status.DEADLINE_EXCEEDED.asRuntimeException()
+                        : new IllegalStateException("poll unavailable");
         EngineHealthReporter reporter =
                 failureAt.equals("CALLBACK")
                         ? mock(
@@ -111,6 +116,26 @@ class PollRunnerLifecycleTest {
         }
         try (WorkerStatus.PollLease next = acquire(status, cachePoll)) {
             assertNotNull(next, "every failed poll must permit the next poll");
+        }
+        if (failureAt.equals("REPLY") || failureAt.equals("TIMEOUT")) {
+            boolean timeout = failureAt.equals("TIMEOUT");
+            if (cachePoll) {
+                verify(reporter)
+                        .reportCacheStatusCheckerFail(
+                                "model",
+                                timeout
+                                        ? org.flexlb.enums.BalanceStatusEnum.CACHE_GRPC_TIMEOUT
+                                        : org.flexlb.enums.BalanceStatusEnum.CACHE_SERVICE_UNAVAILABLE,
+                                RoleType.DECODE);
+            } else {
+                verify(reporter)
+                        .reportStatusCheckerFail(
+                                "model",
+                                timeout
+                                        ? org.flexlb.enums.BalanceStatusEnum.WORKER_STATUS_GRPC_TIMEOUT
+                                        : org.flexlb.enums.BalanceStatusEnum.WORKER_SERVICE_UNAVAILABLE,
+                                RoleType.DECODE);
+            }
         }
         if (failureAt.equals("CALLBACK")) {
             if (cachePoll) {

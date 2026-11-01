@@ -41,7 +41,7 @@ class RequestSchedulerModeTest {
             assertEquals(
                     StrategyErrorType.DISPATCH_FAILED.getErrorCode(),
                     original.get(3, TimeUnit.SECONDS).getCode());
-            f.requests.runtime.awaitAdmissions();
+            f.requests.stopAdmissionsAndAwaitCompletion();
             verify(f.router, times(1)).select(f.context, null);
             assertEquals(
                     0,
@@ -62,7 +62,7 @@ class RequestSchedulerModeTest {
             assertEquals(
                     StrategyErrorType.DISPATCH_FAILED.getErrorCode(),
                     original.get(3, TimeUnit.SECONDS).getCode());
-            f.requests.runtime.awaitAdmissions();
+            f.requests.stopAdmissionsAndAwaitCompletion();
             assertEquals(
                     0,
                     org.flexlb.balance.scheduler.SchedulerTestSupport.repository(f.requests)
@@ -101,7 +101,7 @@ class RequestSchedulerModeTest {
             assertEquals(
                     StrategyErrorType.REQUEST_CANCELLED.getErrorCode(),
                     original.get(3, TimeUnit.SECONDS).getCode());
-            f.requests.runtime.awaitAdmissions();
+            f.requests.stopAdmissionsAndAwaitCompletion();
             verify(f.router, times(1)).select(f.context, null);
         } finally {
             release.countDown();
@@ -137,7 +137,14 @@ class RequestSchedulerModeTest {
                     new DirectRequestScheduler(
                                     queued.router,
                                     org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(
-                                            queued.requests),
+                                                    queued.requests)
+                                            .newLifecycle(
+                                                    directConfig,
+                                                    SchedulingTestConfig.capacity(directConfig),
+                                                    org.mockito.Mockito.mock(
+                                                            org.flexlb.service
+                                                                    .RecentCacheKeyTraceReporter
+                                                                    .class)),
                                     directConfig,
                                     SchedulingTestConfig.capacity(directConfig),
                                     org.mockito.Mockito.mock(
@@ -193,7 +200,7 @@ class RequestSchedulerModeTest {
             }
             verify(f.router, times(outcome.equals("REJECTED") || outcome.equals("THROW") ? 1 : 0))
                     .select(f.context, null);
-            f.requests.runtime.awaitAdmissions();
+            f.requests.stopAdmissionsAndAwaitCompletion();
             assertEquals(0, f.requests.requests.liveRequestCount());
             SchedulerTestSupport.runtime(f.scheduler).requests().stopAccepting();
             SchedulerTestSupport.shutdown(SchedulerTestSupport.runtime(f.scheduler));
@@ -233,7 +240,7 @@ class RequestSchedulerModeTest {
 
     private static final class Fixture implements AutoCloseable {
         final RequestWorkerSelector router = mock(RequestWorkerSelector.class);
-        final AbstractRequestScheduler requests;
+        final RequestLifecycle requests;
         final RequestContext context;
         final QueuedRequestScheduler queue;
         final RequestScheduler scheduler;
@@ -275,7 +282,7 @@ class RequestSchedulerModeTest {
                             router,
                             mock(DecodePreemption.class),
                             new PlacementAvailability());
-            scheduler = requests;
+            scheduler = requests.scheduler();
             queue =
                     scheduler instanceof QueuedRequestScheduler queuedScheduler
                             ? queuedScheduler
@@ -291,11 +298,12 @@ class RequestSchedulerModeTest {
             if (queue != null) {
                 queue.close();
             }
-            requests.runtime.awaitAdmissions();
+            requests.stopAdmissionsAndAwaitCompletion();
             SchedulerTestSupport.timer(
                             org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(requests))
                     .close();
-            SchedulerTestSupport.awaitRequestWork(requests.runtime);
+            SchedulerTestSupport.awaitRequestWork(
+                    org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(requests));
             requests.closeOutstandingAndTerminalize();
             SchedulerTestSupport.closeRequestExecutors(
                     org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(requests));

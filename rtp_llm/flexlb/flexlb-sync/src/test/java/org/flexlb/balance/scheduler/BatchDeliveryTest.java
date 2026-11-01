@@ -93,6 +93,45 @@ import static org.mockito.Mockito.when;
 @Timeout(15)
 class BatchDeliveryTest {
     @Test
+    void deliveryTelemetrySaturatesTotalsAndDoesNotNeedACopiedRouteList() {
+        var reporter = mock(DeliveryMetricsReporter.class);
+        var dispatcher =
+                new DeliveryDispatcher(
+                        null,
+                        DeliveryTestSupport.service(SchedulingTestConfig.batchConfig()),
+                        reporter);
+        var item = mock(RequestRoute.class);
+        var endpoint = mock(PrefillEndpoint.class);
+        when(item.prefillEp()).thenReturn(endpoint);
+        when(endpoint.getIp()).thenReturn("127.0.0.1");
+        when(item.enqueuedAtMs()).thenReturn(Long.MAX_VALUE);
+        when(item.hitCache()).thenReturn(Long.MAX_VALUE);
+        when(item.seqLen()).thenReturn(Long.MAX_VALUE);
+        when(item.priority()).thenReturn(17);
+        var claim = mock(DeliveryClaim.class);
+        when(claim.item()).thenReturn(item);
+        var batch = mock(DeliveryDispatcher.Batch.class);
+        when(batch.batchId()).thenReturn(71L);
+        when(batch.reason()).thenReturn("batch_full");
+        when(batch.remainingQueueDepth()).thenReturn(3);
+        ReflectionTestUtils.invokeMethod(
+                dispatcher, "reportDelivery", batch, List.of(claim, claim), 7L);
+        verify(reporter, org.mockito.Mockito.times(2))
+                .reportBatchWaitTimeMs("PREFILL", "127.0.0.1", 0L, 17);
+        verify(reporter)
+                .reportBatchDelivery(
+                        "PREFILL",
+                        "127.0.0.1",
+                        71L,
+                        "batch_full",
+                        3,
+                        2,
+                        Long.MAX_VALUE,
+                        Long.MAX_VALUE,
+                        7L);
+    }
+
+    @Test
     void singleDecisionStillUsesBatchOwnershipAndEngineAcknowledgement() {
         try (var f =
                 new LinearDeliveryFixture(
@@ -552,14 +591,14 @@ final class LinearDeliveryFixture implements AutoCloseable {
     final PrefillEndpoint prefill = mock(PrefillEndpoint.class);
     final DecodeEndpoint decode =
             org.flexlb.balance.scheduler.SchedulerTestSupport.mockDecodeEndpoint();
-    final AbstractRequestScheduler owner = mock(AbstractRequestScheduler.class);
+    final RequestLifecycle owner = mock(RequestLifecycle.class);
     final PrefillState.BatchReservation reservation = mock(PrefillState.BatchReservation.class);
     final PrefillState.CommittedHandoff handoff = mock(PrefillState.CommittedHandoff.class);
     final ReentrantLock queueLock = new ReentrantLock();
     final PrefillState queueOwnership =
             new PrefillState(
                     queueLock,
-                    PrefillActiveIndex.ordered(16, PrefillQueueRunner.PRIORITY_QUEUE_ORDER),
+                    PrefillActiveIndex.ordered(16, QueueExecutionSettings.queueOrder(true)),
                     System::currentTimeMillis);
     final AtomicBoolean handoffClosed = new AtomicBoolean();
     final List<String> events = new CopyOnWriteArrayList<>();
@@ -573,7 +612,7 @@ final class LinearDeliveryFixture implements AutoCloseable {
     final Set<Long> lostClaims = ConcurrentHashMap.newKeySet();
     final Set<Long> refusedSends = ConcurrentHashMap.newKeySet();
     final Set<Long> blockedDecode = ConcurrentHashMap.newKeySet();
-    final SchedulerRuntime runtime;
+    final SchedulerTestServices runtime;
     final DeliveryDispatcher dispatcher;
     final PrefillQueueRunner worker;
     final PrefillTimePredictor.Evaluator evaluator =
@@ -621,7 +660,7 @@ final class LinearDeliveryFixture implements AutoCloseable {
         dispatcher = new DeliveryDispatcher(grpc, service, reporter);
         runtime =
                 spy(
-                        new SchedulerRuntime(
+                        new SchedulerTestServices(
                                 new RequestRepository(),
                                 mock(EndpointRegistry.class),
                                 reporter,
@@ -630,16 +669,20 @@ final class LinearDeliveryFixture implements AutoCloseable {
                                 service,
                                 mock(EngineGrpcClient.class)));
         var execution = spy(runtime.deliveries());
-        ReflectionTestUtils.setField(runtime, "deliveries", execution);
+        org.flexlb.balance.scheduler.SchedulerTestServices.setDependency(
+                runtime, "deliveries", execution);
         doReturn(701L).when(execution).nextBatchId();
-        ReflectionTestUtils.setField(owner, "runtime", runtime);
+        org.flexlb.balance.scheduler.SchedulerTestServices.bind(owner, runtime);
         worker =
                 new PrefillQueueRunner(
                         "contract",
                         prefill,
-                        QueueExecutionSettings.capture(config),
+                        QueueExecutionSettings.capture(
+                                config,
+                                org.flexlb.balance.planner.BuiltinGroupPlanner.from(config)),
                         dispatcher,
-                        queueOwnership);
+                        queueOwnership,
+                        SchedulerTestSupport.queueDependencies(runtime));
         when(prefill.getIp()).thenReturn("127.0.0.1");
         when(prefill.getGrpcPort()).thenReturn(8090);
         when(prefill.reserveBatch(any(), anyLong(), anyInt()))
@@ -938,7 +981,8 @@ final class LinearDeliveryFixture implements AutoCloseable {
         } else {
             assertSame(
                     expectedShutdownFailure,
-                    assertThrows(RuntimeException.class, () -> SchedulerTestSupport.shutdown(runtime)));
+                    assertThrows(
+                            RuntimeException.class, () -> SchedulerTestSupport.shutdown(runtime)));
         }
     }
 }

@@ -14,6 +14,19 @@ import org.flexlb.enums.FlexPriorityType;
 public interface FlexMonitor extends AutoCloseable {
 
     /**
+     * Read a live gauge or cumulative counter at collection time. Spring assembly binds
+     * these sources to MeterRegistry independently of the business reporting backend.
+     * A service binds each name once; replacing sources or unregistering bindings is unsupported.
+     */
+    default <T> void observe(
+            String name,
+            FlexMetricType type,
+            T source,
+            java.util.function.ToDoubleFunction<T> value) {
+        throw new UnsupportedOperationException("Live metric binding requires a pull backend");
+    }
+
+    /**
      * Register monitoring metric
      *
      * @param metricName Metric name

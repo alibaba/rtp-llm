@@ -86,7 +86,7 @@ class GenerateInputPreparationTest {
                 RequestRepository.RegistrationResult.REGISTERED,
                 repository.register(
                         context,
-                        mock(AbstractRequestScheduler.class),
+                        mock(RequestLifecycle.class),
                         new RequestFuture((kind, value, failure) -> true)));
         assertThrows(
                 IllegalStateException.class,
@@ -143,7 +143,7 @@ class GenerateInputPreparationTest {
                         new PlacementAvailability());
         var queue = registry;
         try {
-            var future = queue.submit(context);
+            var future = queue.scheduler().submit(context);
             assertTrue(
                     entered.await(3, TimeUnit.SECONDS), "submit returns while planning is blocked");
             if (deadline) {
@@ -158,7 +158,7 @@ class GenerateInputPreparationTest {
             release.countDown();
             assertEquals(deadline ? 8431 : 8504, future.get(3, TimeUnit.SECONDS).getCode());
             RequestProtocolTestSupport.close(queue);
-            registry.runtime.awaitAdmissions();
+            registry.stopAdmissionsAndAwaitCompletion();
             verify(router, never())
                     .select(any(), org.mockito.ArgumentMatchers.nullable(String.class));
             assertEquals(

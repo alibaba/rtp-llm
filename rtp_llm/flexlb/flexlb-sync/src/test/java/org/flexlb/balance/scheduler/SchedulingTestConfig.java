@@ -146,22 +146,16 @@ public final class SchedulingTestConfig {
         return new PlacementConfiguration().decodeAdmissionCapacity(configService(config));
     }
 
-    public static org.flexlb.balance.eviction.EvictionPlanner.DecodeEvictionDecision planDecode(
-            org.flexlb.dao.loadbalance.Request request,
-            int priority,
-            org.flexlb.balance.endpoint.DecodeResources.AdmissionCapacity capacity,
-            org.flexlb.balance.endpoint.DecodeResources.ResourceSnapshot snapshot,
-            PreemptionConfig preemption,
-            java.util.Map<String, String> failures) {
-        return org.springframework.test.util.ReflectionTestUtils.invokeMethod(
-                org.flexlb.balance.eviction.EvictionPlanner.class,
-                "planDecode",
-                request,
-                priority,
-                capacity,
-                snapshot,
-                preemption,
-                failures);
+    public static org.flexlb.balance.eviction.DecodePreemptionPolicy.DecodeEvictionDecision
+            planDecode(
+                    org.flexlb.dao.loadbalance.Request request,
+                    int priority,
+                    org.flexlb.balance.endpoint.DecodeResources.AdmissionCapacity capacity,
+                    org.flexlb.balance.endpoint.DecodeResources.ResourceSnapshot snapshot,
+                    PreemptionConfig preemption,
+                    java.util.Map<String, String> failures) {
+        return new org.flexlb.balance.eviction.PriorityDecodePreemptionPolicy()
+                .planDecode(request, priority, capacity, snapshot, preemption, failures);
     }
 
     private SchedulingTestConfig() {}

@@ -37,10 +37,10 @@ public final class SchedulerTestSupport {
         };
     }
 
-    private static final Map<AbstractRequestScheduler, RequestRepository> mockRepositories =
+    private static final Map<RequestLifecycle, RequestRepository> mockRepositories =
             new WeakHashMap<>();
 
-    public static synchronized RequestRepository repository(AbstractRequestScheduler owner) {
+    public static synchronized RequestRepository repository(RequestLifecycle owner) {
         if (owner == null) {
             return null;
         }
@@ -49,7 +49,7 @@ public final class SchedulerTestSupport {
                 : mockRepositories.computeIfAbsent(owner, SchedulerTestSupport::mockRepository);
     }
 
-    private static RequestRepository mockRepository(AbstractRequestScheduler owner) {
+    private static RequestRepository mockRepository(RequestLifecycle owner) {
         var repository = mock(RequestRepository.class);
         when(repository.ownerOf(anyLong())).thenReturn(owner);
         when(repository.findActive(anyLong()))
@@ -64,7 +64,7 @@ public final class SchedulerTestSupport {
         return repository;
     }
 
-    public static void bindOwner(RequestContext context, AbstractRequestScheduler owner) {
+    public static void bindOwner(RequestContext context, RequestLifecycle owner) {
         if (context.data().getScheduler() == null) {
             // Minimal fixtures may bind an owner without registering a runnable request.
             ReflectionTestUtils.setField(context.data(), "scheduler", owner);

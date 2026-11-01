@@ -49,7 +49,7 @@ import static org.mockito.Mockito.when;
 class RequestDeliveryLockContractTest {
 
     private FlexlbConfig config;
-    private AbstractRequestScheduler lifecycle;
+    private RequestLifecycle lifecycle;
 
     @BeforeEach
     void setUp() {
@@ -105,7 +105,7 @@ class RequestDeliveryLockContractTest {
                         });
         var runtime = SchedulerTestSupport.runtime(lifecycle);
         var execution = org.mockito.Mockito.spy(runtime.deliveries());
-        org.springframework.test.util.ReflectionTestUtils.setField(
+        org.flexlb.balance.scheduler.SchedulerTestServices.setDependency(
                 runtime, "deliveries", execution);
         org.mockito.Mockito.doAnswer(
                         call -> {
@@ -127,7 +127,7 @@ class RequestDeliveryLockContractTest {
                 new PrefillState(
                         new java.util.concurrent.locks.ReentrantLock(),
                         org.flexlb.balance.endpoint.PrefillActiveIndex.ordered(
-                                1, PrefillQueueRunner.PRIORITY_QUEUE_ORDER),
+                                1, QueueExecutionSettings.queueOrder(true)),
                         System::currentTimeMillis);
         assertSame(
                 registered.item(),
@@ -140,9 +140,13 @@ class RequestDeliveryLockContractTest {
                         new PrefillQueueRunner(
                                 "atomic-prepare",
                                 endpoint,
-                                QueueExecutionSettings.capture(config),
+                                QueueExecutionSettings.capture(
+                                        config,
+                                        org.flexlb.balance.planner.BuiltinGroupPlanner.from(
+                                                config)),
                                 strategy,
-                                state));
+                                state,
+                                SchedulerTestSupport.queueDependencies(runtime)));
         // Stop at the queue commit edge so the test can inspect preparation/cancellation atomicity.
         org.mockito.Mockito.doReturn(null)
                 .when(worker)
@@ -405,7 +409,7 @@ class RequestDeliveryLockContractTest {
                 new PrefillState(
                         new java.util.concurrent.locks.ReentrantLock(),
                         org.flexlb.balance.endpoint.PrefillActiveIndex.ordered(
-                                1, PrefillQueueRunner.PRIORITY_QUEUE_ORDER),
+                                1, QueueExecutionSettings.queueOrder(true)),
                         System::currentTimeMillis);
         java.util.concurrent.atomic.AtomicInteger releases =
                 new java.util.concurrent.atomic.AtomicInteger();
@@ -425,7 +429,8 @@ class RequestDeliveryLockContractTest {
                             if (released) {
                                 releases.incrementAndGet();
                             }
-                            assertThrows(IllegalStateException.class, state.queueGuard()::requireHeld);
+                            assertThrows(
+                                    IllegalStateException.class, state.queueGuard()::requireHeld);
                             return released;
                         });
         CountDownLatch queuePublished = new CountDownLatch(1);
@@ -496,7 +501,8 @@ class RequestDeliveryLockContractTest {
                                         .getRequestState(registered.item().requestId(), 0L)
                                         .state()
                                 == RequestState.Phase.CANCELLED);
-        SchedulerTestSupport.awaitRequestWork(lifecycle.runtime);
+        SchedulerTestSupport.awaitRequestWork(
+                org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(lifecycle));
         verify(prefill).release(null, registered.item());
         assertEquals(1, releases.get());
         assertTrue(state.captureQueue(1).items().isEmpty());
@@ -709,7 +715,8 @@ class RequestDeliveryLockContractTest {
                 claim.owner().data().getScheduler(), claim, DeliveryResult.delivered());
         assertSame(terminal, RequestProtocolTestSupport.awaitResult(registered.future()));
         assertEquals(RequestState.Phase.COMPLETED, RequestState.from(original.snapshot()).state());
-        SchedulerTestSupport.awaitRequestWork(lifecycle.runtime);
+        SchedulerTestSupport.awaitRequestWork(
+                org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(lifecycle));
         RequestState retiredRecord0 =
                 SchedulerTestSupport.repository(lifecycle)
                         .getRequestState(original.data().getRequestId(), 0L);

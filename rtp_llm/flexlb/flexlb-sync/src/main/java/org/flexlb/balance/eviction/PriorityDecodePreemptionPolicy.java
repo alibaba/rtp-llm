@@ -17,16 +17,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
-/** Pure victim selection for the selected Prefill or Decode generation. */
-public final class EvictionPlanner {
-
-    private EvictionPlanner() {}
-
-    public static boolean isLowerPriority(int incomingPriority, int candidatePriority) {
-        return PriorityNormalizer.hasPriority(incomingPriority)
-                && PriorityNormalizer.hasPriority(candidatePriority)
-                && candidatePriority < incomingPriority;
-    }
+/** Pure victim selection for the selected Decode generation. */
+public final class PriorityDecodePreemptionPolicy implements DecodePreemptionPolicy {
 
     /** A decode plan never mixes Master-local removal with Engine Cancel. */
     private enum VictimOwnership {
@@ -59,21 +51,9 @@ public final class EvictionPlanner {
                             Comparator.reverseOrder())
                     .thenComparingLong(DecodeRequestView::requestId);
 
-    /** One snapshot's capacity decision and its optional single-ownership eviction. */
-    public record DecodeEvictionDecision(CapacityDeficit deficit, DecodeEvictionProposal proposal) {
-        public String evictionCase() {
-            if (deficit.requests() > 0L && deficit.needsKv()) {
-                return DecodeEvictionProposal.CASE_SLOT_AND_KV;
-            }
-            if (deficit.requests() > 0L) {
-                return DecodeEvictionProposal.CASE_SLOT;
-            }
-            return deficit.needsKv() ? DecodeEvictionProposal.CASE_KV : null;
-        }
-    }
-
     /** Plan the cheapest single-ownership eviction for this snapshot's capacity deficit. */
-    static DecodeEvictionDecision planDecode(
+    @Override
+    public DecodeEvictionDecision planDecode(
             Request request,
             int incomingPriority,
             AdmissionCapacity capacity,

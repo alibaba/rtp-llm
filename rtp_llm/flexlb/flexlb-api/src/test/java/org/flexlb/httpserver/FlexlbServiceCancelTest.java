@@ -2,7 +2,7 @@ package org.flexlb.httpserver;
 
 import io.grpc.Status;
 import io.grpc.stub.StreamObserver;
-import org.flexlb.balance.scheduler.AbstractRequestScheduler;
+import org.flexlb.balance.scheduler.RequestLifecycle;
 import org.flexlb.balance.scheduler.CancelReason;
 import org.flexlb.balance.scheduler.DeliveryClaimKind;
 import org.flexlb.balance.scheduler.RequestScheduler;
@@ -35,7 +35,7 @@ import static org.mockito.Mockito.when;
 class FlexlbServiceCancelTest {
 
     private RequestScheduler requestScheduler;
-    private final AbstractRequestScheduler requestState = mock(AbstractRequestScheduler.class);
+    private final RequestLifecycle requestState = mock(RequestLifecycle.class);
     private MasterStatusService consistencyService;
     private FlexlbGrpcForwarder forwarder;
     private FlexlbServiceImpl service;

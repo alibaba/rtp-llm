@@ -23,6 +23,94 @@ import java.util.Map;
 
 /** Package-local fixtures built only from the frozen endpoint-facing ports. */
 final class StrategyTestSupport {
+    /** Exercise the real routing owner together with its policy, including exact pin handoff. */
+    static final class PrefillRoutingFixture {
+        final CostBasedPrefillStrategy policy;
+        final org.flexlb.balance.scheduler.RequestWorkerSelector routing;
+
+        PrefillRoutingFixture(
+                EndpointRegistry registry,
+                org.flexlb.cache.service.CacheAwareService cache,
+                org.flexlb.service.monitor.EngineHealthReporter health,
+                org.flexlb.cache.monitor.CacheMetricsReporter metrics,
+                ConfigService config) {
+            policy = new CostBasedPrefillStrategy(cache, config);
+            routing =
+                    new org.flexlb.balance.scheduler.RequestWorkerSelector(
+                            registry,
+                            policy,
+                            Mockito.mock(DecodeSelector.class),
+                            Mockito.mock(VitWorkerSelector.class),
+                            null,
+                            health,
+                            metrics,
+                            config,
+                            Mockito.mock(org.flexlb.config.ModelMetaConfig.class));
+        }
+
+        org.flexlb.balance.PlacementResult<
+                        org.flexlb.dao.loadbalance.ServerStatus,
+                        org.flexlb.balance.scheduler.PlacementKey>
+                select(
+                        org.flexlb.dao.loadbalance.Request request,
+                        org.flexlb.dao.SchedulingMetadata metadata,
+                        RoleType role,
+                        String group,
+                        RequestRoute route) {
+            return org.springframework.test.util.ReflectionTestUtils.invokeMethod(
+                    routing, "selectPrefill", request, metadata, role, group, route);
+        }
+
+        int selectBestCandidate(
+                PrefillCandidateSet candidates,
+                long minimum,
+                RoleType role,
+                String group,
+                long tokens) {
+            return policy.selectBestCandidate(candidates, minimum, role, group, tokens);
+        }
+    }
+
+    static final class DecodeRoutingFixture {
+        final org.flexlb.balance.scheduler.RequestWorkerSelector routing;
+
+        DecodeRoutingFixture(
+                EndpointRegistry registry,
+                ConfigService config,
+                org.flexlb.balance.endpoint.DecodeResources.AdmissionCapacity capacity) {
+            routing =
+                    new org.flexlb.balance.scheduler.RequestWorkerSelector(
+                            registry,
+                            Mockito.mock(CostBasedPrefillStrategy.class),
+                            new DecodeSelector(config, capacity),
+                            Mockito.mock(VitWorkerSelector.class),
+                            null,
+                            Mockito.mock(org.flexlb.service.monitor.EngineHealthReporter.class),
+                            Mockito.mock(org.flexlb.cache.monitor.CacheMetricsReporter.class),
+                            config,
+                            Mockito.mock(org.flexlb.config.ModelMetaConfig.class));
+        }
+
+        org.flexlb.balance.PlacementResult<org.flexlb.dao.loadbalance.ServerStatus, RoleType>
+                select(
+                        org.flexlb.dao.loadbalance.Request request,
+                        org.flexlb.dao.SchedulingMetadata metadata,
+                        String group,
+                        RequestRoute route) {
+            org.flexlb.balance.PlacementResult<
+                            org.flexlb.dao.loadbalance.ServerStatus,
+                            org.flexlb.balance.scheduler.PlacementKey>
+                    result =
+                            org.springframework.test.util.ReflectionTestUtils.invokeMethod(
+                                    routing, "selectDecode", request, metadata, group, route);
+            return new org.flexlb.balance.PlacementResult<>(
+                    result.status(),
+                    result.value(),
+                    result.failure(),
+                    result.blocker() == null ? null : result.blocker().role(),
+                    result.diagnostics());
+        }
+    }
 
     private StrategyTestSupport() {}
 
@@ -59,7 +147,7 @@ final class StrategyTestSupport {
     }
 
     static org.flexlb.balance.PlacementResult<RequestRoute, RoleType> select(
-            DecodeSelector selector,
+            DecodeRoutingFixture selector,
             org.flexlb.dao.loadbalance.Request request,
             org.flexlb.dao.SchedulingMetadata metadata,
             String group) {
@@ -69,7 +157,7 @@ final class StrategyTestSupport {
     static org.flexlb.balance.PlacementResult<
                     RequestRoute, org.flexlb.balance.scheduler.PlacementKey>
             select(
-                    CostBasedPrefillStrategy selector,
+                    PrefillRoutingFixture selector,
                     org.flexlb.dao.loadbalance.Request request,
                     org.flexlb.dao.SchedulingMetadata metadata,
                     RoleType role,
@@ -77,11 +165,32 @@ final class StrategyTestSupport {
         return select(request, route -> selector.select(request, metadata, role, group, route));
     }
 
-    static RequestRoute select(VitWorkerSelector selector, long id, RoleType role, String group) {
+    static RequestRoute select(
+            EndpointRegistry endpoints,
+            VitSelectionStrategy selector,
+            long id,
+            RoleType role,
+            String group) {
         RequestRoute route =
                 scope(org.flexlb.dao.loadbalance.Request.builder().requestId(id).build());
+        com.google.common.base.Preconditions.checkArgument(role == RoleType.VIT);
+        ConfigService configService = Mockito.mock(ConfigService.class);
+        Mockito.when(configService.loadBalanceConfig()).thenReturn(config());
+        var router =
+                new org.flexlb.balance.scheduler.RequestWorkerSelector(
+                        endpoints,
+                        Mockito.mock(PrefillSelectionStrategy.class),
+                        Mockito.mock(DecodeSelectionStrategy.class),
+                        selector,
+                        null,
+                        Mockito.mock(org.flexlb.service.monitor.EngineHealthReporter.class),
+                        Mockito.mock(org.flexlb.cache.monitor.CacheMetricsReporter.class),
+                        configService,
+                        Mockito.mock(org.flexlb.config.ModelMetaConfig.class));
         try {
-            if (selector.select(id, role, group, route) != null) {
+            if (org.springframework.test.util.ReflectionTestUtils.invokeMethod(
+                            router, "selectVit", id, group, route)
+                    != null) {
                 return route;
             }
             route.close();
@@ -117,7 +226,10 @@ final class StrategyTestSupport {
                 requests,
                 Mockito.mock(DeliveryMetricsReporter.class),
                 delivery,
-                new PlacementAvailability());
+                new PlacementAvailability(),
+                org.flexlb.balance.planner.BuiltinGroupPlanner.from(
+                        configService.loadBalanceConfig()),
+                order -> org.flexlb.balance.endpoint.PrefillActiveIndex.ordered(16, order));
     }
 
     static WorkerStatus workerStatus(
@@ -197,7 +309,22 @@ final class StrategyTestSupport {
                             pin,
                             exactItem,
                             org.flexlb.balance.scheduler.QueueExecutionSettings.capture(
-                                    exactItem.ctx().data().getConfig()));
+                                    exactItem.ctx().data().getConfig(),
+                                    org.flexlb.balance.planner.BuiltinGroupPlanner.from(
+                                            exactItem.ctx().data().getConfig())),
+                            org.flexlb.balance.endpoint.EndpointTestSupport.queueRunner(endpoint)
+                                            == null
+                                    ? org.flexlb.balance.scheduler.SchedulerTestSupport
+                                            .queueDependencies(
+                                                    exactItem.ctx().data().getScheduler(),
+                                                    exactItem.ctx().data().getConfig())
+                                    : (org.flexlb.balance.scheduler.PrefillQueueRunner.Dependencies)
+                                            org.springframework.test.util.ReflectionTestUtils
+                                                    .getField(
+                                                            org.flexlb.balance.endpoint
+                                                                    .EndpointTestSupport
+                                                                    .queueRunner(endpoint),
+                                                            "dependencies"));
         }
     }
 

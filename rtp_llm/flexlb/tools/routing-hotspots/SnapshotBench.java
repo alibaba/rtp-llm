@@ -103,6 +103,9 @@ public class SnapshotBench {
                         strategy,
                         mock(DeliveryMetricsReporter.class),
                         new PlacementAvailability());
+        Field predictorField = PrefillEndpoint.class.getDeclaredField("predictor");
+        predictorField.setAccessible(true);
+        predictorField.set(endpoint, model);
         var state = endpoint.ownership;
         var lock = state.queueGuard();
         var enableQueue =
@@ -110,7 +113,7 @@ public class SnapshotBench {
         enableQueue.setAccessible(true);
         lock.lock();
         try {
-            enableQueue.invoke(state, PrefillQueueRunner.PRIORITY_QUEUE_ORDER);
+            enableQueue.invoke(state, QueueExecutionSettings.queueOrder(true));
         } finally {
             lock.unlock();
         }
@@ -149,8 +152,7 @@ public class SnapshotBench {
                 checksum += inputs.queue().activeItems().size();
                 if (project)
                     checksum +=
-                            RequestTimeEstimationTestSupport.project(
-                                            inputs, PROBE, model, strategy.mode())
+                            RequestTimeEstimationTestSupport.project(inputs, PROBE)
                                     .projectedTtftMsValue();
             }
         }

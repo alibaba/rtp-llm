@@ -90,18 +90,15 @@ public class ProjectionDifferential {
                                     : List.of(),
                             List.of(),
                             0);
-            var inputs =
-                    new RequestTimeEstimation.Inputs(
-                            new QueueSnapshot(
-                                    1000,
-                                    true,
-                                    org.flexlb.balance.planner.GroupPlanner.FIXED_WINDOW,
-                                    order,
-                                    limits,
-                                    items,
-                                    null),
-                            committed,
-                            0L);
+            var queue =
+                    new QueueSnapshot(
+                            1000,
+                            true,
+                            org.flexlb.balance.planner.GroupPlanner.FIXED_WINDOW,
+                            order,
+                            limits,
+                            items,
+                            null);
             var probe =
                     new RequestTimeEstimationTestSupport.Probe(
                             trial % 50 == 0 ? 1 : 999999,
@@ -114,10 +111,9 @@ public class ProjectionDifferential {
             for (var policy : List.of(batchPolicy, routePolicy)) {
                 var candidate =
                         RequestTimeEstimationTestSupport.project(
-                                inputs,
+                                new RequestTimeEstimation.Inputs(
+                                        queue, committed, 0L, model, policy),
                                 probe,
-                                model,
-                                policy,
                                 new long[] {1000, 1001, 1010, 1020}[trial % 4]);
                 add(digest, candidate);
                 states.merge(candidate.state().name(), 1, Integer::sum);

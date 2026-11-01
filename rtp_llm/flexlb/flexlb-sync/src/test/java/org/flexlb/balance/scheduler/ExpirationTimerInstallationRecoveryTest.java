@@ -201,7 +201,7 @@ class ExpirationTimerInstallationRecoveryTest {
 
     private static final class Fixture implements AutoCloseable {
         final RequestContext context;
-        final AbstractRequestScheduler owner = mock(AbstractRequestScheduler.class);
+        final RequestLifecycle owner = mock(RequestLifecycle.class);
         final AtomicLong clock = new AtomicLong(1002L);
         final ExpirationTimer timer;
         final ScheduledThreadPoolExecutor executor = spy(new ScheduledThreadPoolExecutor(1));

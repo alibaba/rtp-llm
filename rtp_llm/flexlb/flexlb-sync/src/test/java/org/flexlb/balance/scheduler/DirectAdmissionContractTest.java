@@ -125,7 +125,9 @@ class DirectAdmissionContractTest {
                             any(),
                             eq(RoleType.PREFILL),
                             any(),
-                            org.mockito.ArgumentMatchers.any(RequestRoute.class));
+                            org.mockito.ArgumentMatchers.anyList(),
+                            org.mockito.ArgumentMatchers.any(
+                                    java.util.function.LongSupplier.class));
         }
     }
 
@@ -309,8 +311,8 @@ class DirectAdmissionContractTest {
                                                     == ContextResult.SendState.DELIVERED);
                                 }
                                 assertFalse(
-                                        fixture.requests
-                                                .runtime
+                                        org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(
+                                                        fixture.requests)
                                                 .signals()
                                                 .delivery(claim)
                                                 .toCompletableFuture()
@@ -330,8 +332,8 @@ class DirectAdmissionContractTest {
                                         RequestState.Phase.COMPLETED,
                                         context.snapshot().terminalRecord().state());
                                 assertTrue(
-                                        fixture.requests
-                                                .runtime
+                                        org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(
+                                                        fixture.requests)
                                                 .signals()
                                                 .delivery(claim)
                                                 .toCompletableFuture()
@@ -382,8 +384,8 @@ class DirectAdmissionContractTest {
                 // A broken sender gate must fail this test without hanging runtime shutdown.
                 DeliveryClaim claim = claimed.get();
                 if (claim != null
-                        && !fixture.requests
-                                .runtime
+                        && !org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(
+                                        fixture.requests)
                                 .signals()
                                 .delivery(claim)
                                 .toCompletableFuture()
@@ -409,8 +411,9 @@ class DirectAdmissionContractTest {
             var prefill = spy(fixture.prefill);
             var context = fixture.context(104L);
             var future =
-                    fixture.scheduler.register(
-                            context, () -> {}, StrategyErrorType.BATCH_SLO_EXPIRED);
+                    fixture.scheduler
+                            .lifecycle()
+                            .register(context, () -> {}, StrategyErrorType.BATCH_SLO_EXPIRED);
             var primary = new IllegalStateException("Prefill commit unavailable");
             var cleanup = new IllegalStateException("Decode cleanup observer failed");
             org.mockito.Mockito.doThrow(primary)
@@ -423,7 +426,7 @@ class DirectAdmissionContractTest {
                             })
                     .when(fixture.decode)
                     .dispatch(any(), eq(DecodeResources.DispatchOutcome.ABANDONED));
-            try (var mutation = fixture.scheduler.claimAdmissionHandle(104L, future);
+            try (var mutation = fixture.scheduler.lifecycle().claimAdmissionHandle(104L, future);
                     var completion = RequestProtocolTestSupport.finishOnExit(mutation);
                     var admission =
                             SchedulingTestConfig.prepareRoute(
@@ -454,7 +457,7 @@ class DirectAdmissionContractTest {
                         .dispatch(any(), eq(DecodeResources.DispatchOutcome.ABANDONED));
                 assertEquals(0, fixture.decode.resourceSnapshot().activeDispatchPermits());
             } finally {
-                fixture.scheduler.cancel(104L, 0L, CancelReason.CLIENT_CANCELLED);
+                fixture.scheduler.lifecycle().cancel(104L, 0L, CancelReason.CLIENT_CANCELLED);
             }
             assertNull(EndpointTestSupport.decodeReservation(fixture.decode, 104L));
             fixture.assertNoPrefillOwnership();
@@ -472,28 +475,24 @@ class DirectAdmissionContractTest {
                                 assertEquals(
                                         1,
                                         fixture.decode.resourceSnapshot().activeDispatchPermits());
-                                fixture.scheduler.cancel(108L, 0L, CancelReason.CLIENT_CANCELLED);
+                                fixture.scheduler
+                                        .lifecycle()
+                                        .cancel(108L, 0L, CancelReason.CLIENT_CANCELLED);
                                 return handoff;
                             })
                     .when(prefill)
                     .commit(any(org.flexlb.balance.endpoint.PrefillState.CommitPlan.class));
+            fixture.bindPrefill(prefill);
+            var selected = fixture.prefillSelection(prefill);
             when(fixture.prefillSelector.select(
                             eq(context.data().getRequest()),
                             eq(context.data().getSchedulingMetadata()),
                             eq(RoleType.PREFILL),
                             any(),
-                            org.mockito.ArgumentMatchers.any(RequestRoute.class)))
-                    .thenAnswer(
-                            call ->
-                                    PlacementResult.success(
-                                            call.getArgument(4, RequestRoute.class)
-                                                    .add(
-                                                            prefill.tryPinGeneration(),
-                                                            Fixture.metadata(prefill, 108L),
-                                                            30_000L,
-                                                            prefill.ownership
-                                                                    .progress()
-                                                                    .ownershipVersion())));
+                            org.mockito.ArgumentMatchers.anyList(),
+                            org.mockito.ArgumentMatchers.any(
+                                    java.util.function.LongSupplier.class)))
+                    .thenReturn(selected);
             assertFalse(fixture.scheduler.submit(context).get(2, TimeUnit.SECONDS).isSuccess());
             SchedulerTestSupport.awaitRequestWork(fixture.runtime);
             assertNull(EndpointTestSupport.decodeReservation(fixture.decode, 108L));
@@ -525,14 +524,22 @@ class DirectAdmissionContractTest {
                             fixture.router,
                             mock(DeliveryMetricsReporter.class),
                             mock(DecodePreemption.class),
-                            fixture.runtime,
+                            fixture.runtime.newLifecycle(
+                                    config,
+                                    SchedulingTestConfig.capacity(config),
+                                    org.mockito.Mockito.mock(
+                                            org.flexlb.service.RecentCacheKeyTraceReporter.class)),
                             new PlacementAvailability(),
                             SchedulingTestConfig.capacity(config),
                             org.mockito.Mockito.mock(
-                                    org.flexlb.service.RecentCacheKeyTraceReporter.class))) {
+                                    org.flexlb.service.RecentCacheKeyTraceReporter.class),
+                            new OrderedRequestQueue(config.isPriorityOrdering()),
+                            org.flexlb.balance.planner.BuiltinGroupPlanner.from(config))) {
                 var context = RequestProtocolTestSupport.context(config, 109L);
-                var future = queue.register(context, () -> {}, StrategyErrorType.BATCH_SLO_EXPIRED);
-                try (var handle = queue.claimAdmissionHandle(109L, future);
+                var future =
+                        queue.lifecycle()
+                                .register(context, () -> {}, StrategyErrorType.BATCH_SLO_EXPIRED);
+                try (var handle = queue.lifecycle().claimAdmissionHandle(109L, future);
                         var finish = RequestProtocolTestSupport.finishOnExit(handle)) {
                     assertNotNull(handle);
                     var selected =
@@ -581,7 +588,7 @@ class DirectAdmissionContractTest {
                                 queue.enqueueRoute(plan).status());
                         org.junit.jupiter.api.Assertions.assertSame(
                                 exact, context.snapshot().route());
-                        verify(prefill).offerPinned(any(), eq(exact), any());
+                        verify(prefill).offerPinned(any(), eq(exact), any(), any());
                         verify(fixture.decode, never())
                                 .release(any(), eq(DecodeResources.ReleaseReason.LOCAL_ROLLBACK));
                         assertEquals(1L, prefill.ownership.progress().queueDepth());
@@ -611,7 +618,15 @@ class DirectAdmissionContractTest {
             try (var queue =
                     (QueuedRequestScheduler)
                             PlacementConfiguration.create(
-                                    fixture.requests.runtime,
+                                    org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(
+                                                    fixture.requests)
+                                            .newLifecycle(
+                                                    config,
+                                                    SchedulingTestConfig.capacity(config),
+                                                    org.mockito.Mockito.mock(
+                                                            org.flexlb.service
+                                                                    .RecentCacheKeyTraceReporter
+                                                                    .class)),
                                     config,
                                     fixture.router,
                                     mock(DeliveryMetricsReporter.class),
@@ -619,8 +634,9 @@ class DirectAdmissionContractTest {
                                     new PlacementAvailability(),
                                     SchedulingTestConfig.capacity(config),
                                     org.mockito.Mockito.mock(
-                                            org.flexlb.service.RecentCacheKeyTraceReporter
-                                                    .class))) {
+                                            org.flexlb.service.RecentCacheKeyTraceReporter.class),
+                                    org.flexlb.balance.planner.BuiltinGroupPlanner.from(config),
+                                    new OrderedRequestQueue(config.isPriorityOrdering()))) {
                 var request = RequestProtocolTestSupport.context(config, 102L);
                 request.data()
                         .setRequest(request.data().getRequest().toBuilder().seqLen(32L).build());
@@ -664,7 +680,7 @@ class DirectAdmissionContractTest {
 
     private static final class Fixture implements AutoCloseable {
         private final FlexlbConfig config = SchedulingTestConfig.newConfig();
-        private final AbstractRequestScheduler requests;
+        private final RequestLifecycle requests;
         private final EndpointRegistry endpoints;
         private final DeliveryDispatcher queuedDelivery;
         private final PrefillEndpoint prefill;
@@ -672,7 +688,7 @@ class DirectAdmissionContractTest {
         private final CostBasedPrefillStrategy prefillSelector;
         private final DirectRequestScheduler scheduler;
         private final RequestWorkerSelector router;
-        private final SchedulerRuntime runtime;
+        private final SchedulerTestServices runtime;
 
         private Fixture() {
             this(16, 1);
@@ -695,10 +711,21 @@ class DirectAdmissionContractTest {
             queuedDelivery = spy(DeliveryTestSupport.route(reporter));
             var repository = new RequestRepository();
             endpoints =
-                    new EndpointRegistry(service, repository, reporter, queuedDelivery, placement);
+                    spy(
+                            new EndpointRegistry(
+                                    service,
+                                    repository,
+                                    reporter,
+                                    queuedDelivery,
+                                    placement,
+                                    org.flexlb.balance.planner.BuiltinGroupPlanner.from(
+                                            service.loadBalanceConfig()),
+                                    order ->
+                                            org.flexlb.balance.endpoint.PrefillActiveIndex.ordered(
+                                                    16, order)));
             runtime =
                     spy(
-                            new SchedulerRuntime(
+                            new SchedulerTestServices(
                                     repository,
                                     endpoints,
                                     reporter,
@@ -712,7 +739,15 @@ class DirectAdmissionContractTest {
             when(model.requiredRoles()).thenReturn(List.of(RoleType.PREFILL, RoleType.DECODE));
             router =
                     new RequestWorkerSelector(
-                            prefillSelector, decodeSelector, mock(VitWorkerSelector.class), model);
+                            endpoints,
+                            prefillSelector,
+                            decodeSelector,
+                            mock(VitWorkerSelector.class),
+                            null,
+                            mock(org.flexlb.service.monitor.EngineHealthReporter.class),
+                            mock(org.flexlb.cache.monitor.CacheMetricsReporter.class),
+                            service,
+                            model);
             requests =
                     SchedulerTestSupport.create(
                             runtime,
@@ -722,7 +757,7 @@ class DirectAdmissionContractTest {
                             router,
                             mock(DecodePreemption.class),
                             placement);
-            scheduler = (DirectRequestScheduler) requests;
+            scheduler = (DirectRequestScheduler) requests.scheduler();
             WorkerStatus worker = worker(RoleType.PREFILL, "127.0.0.1");
             worker.lock.lock();
             try {
@@ -743,49 +778,65 @@ class DirectAdmissionContractTest {
                             EndpointTestSupport.decode(
                                     worker(RoleType.DECODE, "127.0.0.2"), repository));
             applyWorkerStatus(decode, Map.of(), Map.of());
+            bindPrefill(prefill);
             when(prefillSelector.select(
                             any(),
                             any(),
                             eq(RoleType.PREFILL),
                             any(),
-                            org.mockito.ArgumentMatchers.any(RequestRoute.class)))
-                    .thenAnswer(
-                            call -> {
-                                var request =
-                                        call.getArgument(
-                                                0, org.flexlb.dao.loadbalance.Request.class);
-                                var pin = prefill.tryPinGeneration();
-                                assertNotNull(pin);
-                                return PlacementResult.success(
-                                        call.getArgument(4, RequestRoute.class)
-                                                .add(
-                                                        pin,
-                                                        metadata(prefill, request.getRequestId()),
-                                                        30_000L,
-                                                        prefill.ownership
-                                                                .progress()
-                                                                .ownershipVersion()));
-                            });
+                            org.mockito.ArgumentMatchers.anyList(),
+                            org.mockito.ArgumentMatchers.any(
+                                    java.util.function.LongSupplier.class)))
+                    .thenAnswer(call -> prefillSelection(prefill));
             when(decodeSelector.select(
                             any(),
+                            org.mockito.ArgumentMatchers.any(),
                             any(),
-                            any(),
-                            org.mockito.ArgumentMatchers.any(RequestRoute.class)))
-                    .thenAnswer(
+                            org.mockito.ArgumentMatchers.anyList(),
+                            org.mockito.ArgumentMatchers.any()))
+                    .thenAnswer(call -> PlacementResult.success(decode.routingView()));
+            doAnswer(
                             call -> {
-                                var request =
-                                        call.getArgument(
-                                                0, org.flexlb.dao.loadbalance.Request.class);
-                                var pin = decode.tryPinGeneration();
-                                assertNotNull(pin);
-                                return PlacementResult.success(
-                                        call.getArgument(3, RequestRoute.class)
-                                                .add(
-                                                        pin,
-                                                        metadata(decode, request.getRequestId()),
-                                                        -1L,
-                                                        decode.placementVersion()));
-                            });
+                                call.getArgument(1, List.class).add(decode.routingView());
+                                return null;
+                            })
+                    .when(endpoints)
+                    .decodeRoutingSnapshot(any(), any());
+            doAnswer(call -> decode.tryPinGeneration())
+                    .when(endpoints)
+                    .captureDecodeGeneration(any());
+        }
+
+        private void bindPrefill(PrefillEndpoint selected) {
+            String address = selected.ipPort();
+            org.mockito.Mockito.doReturn(
+                            List.of(new EndpointRegistry.PrefillRoutingEntry(address, selected)))
+                    .when(endpoints)
+                    .prefillRoutingSnapshot(RoleType.PREFILL);
+            doAnswer(call -> selected.tryPinGeneration())
+                    .when(endpoints)
+                    .capture(RoleType.PREFILL, address);
+        }
+
+        private PlacementResult<
+                        org.flexlb.balance.strategy.PrefillSelectionStrategy.Selection<
+                                org.flexlb.balance.strategy.PrefillSelectionStrategy
+                                        .CandidateInput>,
+                        PlacementKey>
+                prefillSelection(PrefillEndpoint selected) {
+            return PlacementResult.success(
+                    new org.flexlb.balance.strategy.PrefillSelectionStrategy.Selection<>(
+                            selected.ipPort(),
+                            selected.getStatus().getGenerationId(),
+                            selected.ownership.progress().ownershipVersion(),
+                            30_000L,
+                            30_000L,
+                            0L,
+                            0L,
+                            0L,
+                            null,
+                            1,
+                            new EndpointRegistry.PrefillRoutingEntry(selected.ipPort(), selected)));
         }
 
         private RequestContext context(long requestId) {
@@ -841,7 +892,8 @@ class DirectAdmissionContractTest {
                 worker.lock.unlock();
             }
             endpoint.publishStatus(projection);
-            SchedulerTestSupport.awaitRequestWork(requests.runtime);
+            SchedulerTestSupport.awaitRequestWork(
+                    org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(requests));
         }
 
         @Override

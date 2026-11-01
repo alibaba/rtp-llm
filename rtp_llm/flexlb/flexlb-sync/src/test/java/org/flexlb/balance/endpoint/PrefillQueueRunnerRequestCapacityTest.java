@@ -65,13 +65,7 @@ class PrefillQueueRunnerRequestCapacityTest {
             assertEquals(8, fixture.endpoint.ownership.captureQueue(20).items().size());
             assertTrue(fixture.endpoint.ownership.requestCapacityAvailable(2, 2));
             verify(fixture.runtime.events(), times(0))
-                    .onQueueEvent(
-                            any(),
-                            org.mockito.Mockito.eq(
-                                    org.flexlb.balance.scheduler.AbstractRequestScheduler.QueueKind
-                                            .PREEMPTED),
-                            any(),
-                            org.mockito.Mockito.isNull());
+                    .onQueueEvent(any(), org.mockito.Mockito.any(), org.mockito.Mockito.isNull());
             assertFalse(fixture.endpoint.removeQueued(item(config, fixture.endpoint, 1L)));
             assertTrue(fixture.endpoint.removeQueued(routes.getFirst()));
             assertEquals(7, fixture.endpoint.ownership.captureQueue(20).items().size());
@@ -230,13 +224,7 @@ class PrefillQueueRunnerRequestCapacityTest {
                             .admissionSummary(0, 0L)
                             .occupiedRequests());
             verify(requests.events(), times(0))
-                    .onQueueEvent(
-                            any(),
-                            org.mockito.Mockito.eq(
-                                    org.flexlb.balance.scheduler.AbstractRequestScheduler.QueueKind
-                                            .PREEMPTED),
-                            any(),
-                            org.mockito.Mockito.isNull());
+                    .onQueueEvent(any(), org.mockito.Mockito.any(), org.mockito.Mockito.isNull());
             RequestRoute next = item(config, endpoint, 3L);
             assertTrue(runtime.offer(next));
             assertEquals(
@@ -308,8 +296,12 @@ class PrefillQueueRunnerRequestCapacityTest {
         try (Fixture fixture = fixture(config)) {
             CountDownLatch prepared = new CountDownLatch(1);
             AtomicInteger groupSize = new AtomicInteger();
-            fixture.endpoint.enableQueueRuntime(
-                    org.flexlb.balance.scheduler.QueueExecutionSettings.capture(config));
+            EndpointTestSupport.enableQueueRuntime(
+                    fixture.endpoint,
+                    org.flexlb.balance.scheduler.QueueExecutionSettings.capture(
+                            config, org.flexlb.balance.planner.BuiltinGroupPlanner.from(config)),
+                    org.flexlb.balance.scheduler.SchedulerTestSupport.queueDependencies(
+                            fixture.runtime.events(), config));
             var worker = EndpointTestSupport.queueRunner(fixture.endpoint);
             org.flexlb.balance.scheduler.DeliveryTestSupport.selectWith(
                     worker,

@@ -20,7 +20,7 @@ import static com.google.common.base.Preconditions.checkState;
  * in O(1) without leaving a removed entry behind a blocked head. Ready retries use
  * a separate ordered index and share the scan budget with forward progress.</p>
  */
-final class OrderedRequestQueue {
+public final class OrderedRequestQueue implements PlacementQueue {
 
     private static final int PRIORITY_LEVELS = PriorityNormalizer.MAX_PRIORITY + 1;
 
@@ -33,7 +33,7 @@ final class OrderedRequestQueue {
     private int size;
     private long nextSequence;
 
-    OrderedRequestQueue(boolean priorityOrdering) {
+    public OrderedRequestQueue(boolean priorityOrdering) {
         this.priorityOrdering = priorityOrdering;
         this.order =
                 priorityOrdering
@@ -43,7 +43,7 @@ final class OrderedRequestQueue {
         this.buckets = new Bucket[priorityOrdering ? PRIORITY_LEVELS : 1];
     }
 
-    void add(GlobalQueueEntry entry) {
+    public void add(GlobalQueueEntry entry) {
         entry.sequence = ++nextSequence;
         insert(entry, false);
     }
@@ -68,16 +68,16 @@ final class OrderedRequestQueue {
         pendingPriorities.set(index);
     }
 
-    int[] priorityCounts() {
+    public int[] priorityCounts() {
         return priorityCounts.clone();
     }
 
-    int size() {
+    public int size() {
         return size;
     }
 
     /** Rare route withdrawal: restore the original position without issuing a new sequence. */
-    void restore(GlobalQueueEntry entry) {
+    public void restore(GlobalQueueEntry entry) {
         checkState(
                 entry.removed && entry.sequence > 0L,
                 "only a previously removed entry can be restored");
@@ -88,7 +88,7 @@ final class OrderedRequestQueue {
      * Continue an ordered scan, counting every examined entry against the budget.
      * Eligibility may remove entries, but must not requeue an already selected entry.
      */
-    List<GlobalQueueEntry> scanForPlanningCandidates(
+    public List<GlobalQueueEntry> scanForPlanningCandidates(
             int candidateLimit, int scanBudget, Predicate<GlobalQueueEntry> eligible) {
         if (candidateLimit <= 0 || scanBudget <= 0) {
             return List.of();
@@ -120,19 +120,19 @@ final class OrderedRequestQueue {
         return result;
     }
 
-    boolean hasUnscannedRequests() {
+    public boolean hasUnscannedRequests() {
         return !pendingPriorities.isEmpty() || !readyRetries.isEmpty();
     }
 
     /** Make an awakened request directly available to the next bounded scan. */
-    void markRequestReadyForRetry(GlobalQueueEntry entry) {
+    public void markRequestReadyForRetry(GlobalQueueEntry entry) {
         if (entry.removed) {
             return;
         }
         readyRetries.add(entry);
     }
 
-    boolean remove(GlobalQueueEntry entry) {
+    public boolean remove(GlobalQueueEntry entry) {
         if (entry.removed) {
             return false;
         }
@@ -150,7 +150,7 @@ final class OrderedRequestQueue {
         return true;
     }
 
-    List<GlobalQueueEntry> drain() {
+    public List<GlobalQueueEntry> drain() {
         List<GlobalQueueEntry> entries = new ArrayList<>(size);
         for (Bucket bucket : buckets) {
             if (bucket == null) {
@@ -164,6 +164,11 @@ final class OrderedRequestQueue {
         }
         checkState(size == 0, "ordered queue drain left active entries");
         return entries;
+    }
+
+    @Override
+    public Comparator<GlobalQueueEntry> order() {
+        return order;
     }
 
     private static final class Bucket {

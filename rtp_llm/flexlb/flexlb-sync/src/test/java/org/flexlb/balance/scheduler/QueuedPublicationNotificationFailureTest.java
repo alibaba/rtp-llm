@@ -95,7 +95,10 @@ class QueuedPublicationNotificationFailureTest {
             var low = fixture.context(9311L, 20);
             var oldRoute = fixture.publish(low);
             var incoming = fixture.context(9312L, 80);
-            var handle = fixture.queue.claimAdmissionHandle(9312L, incoming.data().getFuture());
+            var handle =
+                    fixture.queue
+                            .lifecycle()
+                            .claimAdmissionHandle(9312L, incoming.data().getFuture());
             assertNotNull(handle);
             var failure = new IllegalStateException("physical offer failed before enqueue");
             fixture.physicalFailure = failure;
@@ -151,10 +154,11 @@ class QueuedPublicationNotificationFailureTest {
             queue =
                     (QueuedRequestScheduler)
                             SchedulerTestSupport.create(
-                                    service,
-                                    mock(DeliveryMetricsReporter.class),
-                                    reporter,
-                                    mock(RecentCacheKeyTraceReporter.class));
+                                            service,
+                                            mock(DeliveryMetricsReporter.class),
+                                            reporter,
+                                            mock(RecentCacheKeyTraceReporter.class))
+                                    .scheduler();
             prefill =
                     spy(
                             EndpointTestSupport.realPrefill(
@@ -166,22 +170,26 @@ class QueuedPublicationNotificationFailureTest {
                                             18101,
                                             null),
                                     config,
-                                    SchedulerTestSupport.dispatcher(queue.runtime),
-                                    queue.requests,
+                                    SchedulerTestSupport.dispatcher(
+                                            org.flexlb.balance.scheduler.SchedulerTestSupport
+                                                    .runtime(queue.lifecycle())),
+                                    queue.lifecycle().requests,
                                     mock(DeliveryMetricsReporter.class)));
             decode =
                     spy(
                             EndpointTestSupport.decode(
                                     WorkerStatus.createDiscovered(
                                             RoleType.DECODE, null, "127.0.0.1", 18200, 18201, null),
-                                    queue.requests));
+                                    queue.lifecycle().requests));
             doAnswer(
                             call -> {
                                 assertThrows(
                                         IllegalStateException.class,
                                         PrefillQueueRunnerTestSupport.state(
-                                                        EndpointTestSupport.queueRunner(prefill))
-                                                .queueGuard()::requireHeld);
+                                                                EndpointTestSupport.queueRunner(
+                                                                        prefill))
+                                                        .queueGuard()
+                                                ::requireHeld);
                                 if (metricsFailure != null
                                         && call.getArgument(0, Integer.class) == 20) {
                                     throw metricsFailure;
@@ -193,12 +201,15 @@ class QueuedPublicationNotificationFailureTest {
             doAnswer(
                             call -> {
                                 var exact =
-                                        queue.requests.findActive(
-                                                call.getArgument(
-                                                                0,
-                                                                DecodeResources.ReservationHandle
-                                                                        .class)
-                                                        .requestId());
+                                        queue.lifecycle()
+                                                .requests
+                                                .findActive(
+                                                        call.getArgument(
+                                                                        0,
+                                                                        DecodeResources
+                                                                                .ReservationHandle
+                                                                                .class)
+                                                                .requestId());
                                 assertFalse(exact != null && Thread.holdsLock(exact));
                                 if (releaseFailure != null
                                         && java.util.Objects.equals(
@@ -217,7 +228,7 @@ class QueuedPublicationNotificationFailureTest {
                                 return call.callRealMethod();
                             })
                     .when(prefill)
-                    .offerPinned(any(), any(), any());
+                    .offerPinned(any(), any(), any(), any());
         }
 
         RequestContext context(long id, int priority) {
@@ -251,8 +262,9 @@ class QueuedPublicationNotificationFailureTest {
 
         RequestRoute publish(RequestContext context) {
             var handle =
-                    queue.claimAdmissionHandle(
-                            context.data().getRequestId(), context.data().getFuture());
+                    queue.lifecycle()
+                            .claimAdmissionHandle(
+                                    context.data().getRequestId(), context.data().getFuture());
             try (var plan = RequestProtocolTestSupport.plan(context, select(context))) {
                 assertNotNull(handle);
                 var publication = queue.enqueueRoute(plan);
@@ -283,14 +295,18 @@ class QueuedPublicationNotificationFailureTest {
         public void close() {
             metricsFailure = releaseFailure = physicalFailure = null;
             prefill.close();
-            if (RequestProtocolTestSupport.closeAdmissionAndAwaitMutations(queue)) {
-                queue.closeOutstandingAndTerminalize();
+            if (RequestProtocolTestSupport.closeAdmissionAndAwaitMutations(queue.lifecycle())) {
+                queue.lifecycle().closeOutstandingAndTerminalize();
             }
-            for (var context : queue.requests.snapshotActive()) {
-                queue.scheduleClose(context);
+            for (var context : queue.lifecycle().requests.snapshotActive()) {
+                queue.lifecycle().scheduleClose(context);
             }
-            SchedulerTestSupport.timer(queue.runtime).close();
-            SchedulerTestSupport.closeRequestExecutors(queue.runtime);
+            SchedulerTestSupport.timer(
+                            org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(
+                                    queue.lifecycle()))
+                    .close();
+            SchedulerTestSupport.closeRequestExecutors(
+                    org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(queue.lifecycle()));
         }
     }
 }

@@ -1,7 +1,7 @@
 package org.flexlb.balance.endpoint;
 
-import org.flexlb.balance.scheduler.AbstractRequestScheduler;
-import org.flexlb.balance.strategy.CostBasedPrefillStrategy;
+import org.flexlb.balance.scheduler.RequestLifecycle;
+import org.flexlb.balance.scheduler.RequestWorkerSelector;
 import org.flexlb.config.ConfigTestSupport;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.loadbalance.AdmissionRejectReason;
@@ -27,10 +27,9 @@ class PrefillAdmissionFailurePerformanceTest {
     @Test
     void unchangedFleetDoesNotAllocatePerWorker() throws Throwable {
         var classify =
-                MethodHandles.privateLookupIn(
-                                CostBasedPrefillStrategy.class, MethodHandles.lookup())
+                MethodHandles.privateLookupIn(RequestWorkerSelector.class, MethodHandles.lookup())
                         .findStatic(
-                                CostBasedPrefillStrategy.class,
+                                RequestWorkerSelector.class,
                                 "classifyWorkerCapacity",
                                 MethodType.methodType(
                                         AdmissionRejectReason.class,
@@ -43,7 +42,7 @@ class PrefillAdmissionFailurePerformanceTest {
         config.setDispatcher(ConfigTestSupport.nonBatch());
         config.getDispatcher().setMaxInflightPerPrefillWorker(1);
         var delivery = org.flexlb.balance.scheduler.SchedulerTestSupport.dispatcher();
-        var events = mock(AbstractRequestScheduler.class);
+        var events = mock(RequestLifecycle.class);
         var reporter = mock(DeliveryMetricsReporter.class);
         long singleWorkerAllocation = 0L;
         for (int workerCount : new int[] {1, 64, 512, 1024}) {

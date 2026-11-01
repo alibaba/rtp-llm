@@ -53,13 +53,13 @@ class RequestTerminalSettlementTest {
         var queue = mock(QueuedRequestScheduler.class);
         var timeoutEvidence =
                 java.util.Map.<String, Object>of("cause", "DECODE placement unavailable");
-        AbstractRequestScheduler requestOwner =
+        RequestLifecycle requestOwner =
                 RequestProtocolTestSupport.initialize(
                         mock(ResponseCompletionExecutor.class),
                         context,
                         mock(ExpirationTimer.class));
         org.springframework.test.util.ReflectionTestUtils.setField(
-                requestOwner, "latestQueueWaitSnapshot", timeoutEvidence);
+                requestOwner.scheduler(), "latestQueueWaitSnapshot", timeoutEvidence);
         var admission = RequestProtocolTestSupport.beginAdmission(requestOwner, context);
         assertNotNull(admission);
         admission.recordDiagnostics(java.util.Map.of("cause", "earlier placement"));
@@ -75,7 +75,7 @@ class RequestTerminalSettlementTest {
     @Test
     void oldDecodeRetirementCannotRemoveANewSchedulingGeneration() {
         var context = RequestProtocolTestSupport.context(SchedulingTestConfig.newConfig(), 4202L);
-        AbstractRequestScheduler requestOwner =
+        RequestLifecycle requestOwner =
                 RequestProtocolTestSupport.initialize(
                         mock(ResponseCompletionExecutor.class),
                         context,
@@ -85,7 +85,8 @@ class RequestTerminalSettlementTest {
                 context,
                 RequestProtocolTestSupport.decodeEndpoint(),
                 new DecodeResources.ReservationHandle(1L, 4202L, 7L));
-        SchedulerTestSupport.awaitRequestWork(requestOwner.runtime);
+        SchedulerTestSupport.awaitRequestWork(
+                org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(requestOwner));
         assertTrue((context.snapshot().phase() == Phase.OPEN));
         assertFalse(context.data().getFuture().isDone());
     }
@@ -106,7 +107,8 @@ class RequestTerminalSettlementTest {
 
         RequestProtocolTestSupport.decodeRetired(
                 f.scheduler(), f.requestContext(), source, reservation);
-        SchedulerTestSupport.awaitRequestWork(f.scheduler().runtime);
+        SchedulerTestSupport.awaitRequestWork(
+                org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(f.scheduler()));
 
         assertTrue((f.requestContext().snapshot().phase() == Phase.OPEN));
         assertFalse(f.requestContext().data().getFuture().isDone());
@@ -133,7 +135,8 @@ class RequestTerminalSettlementTest {
 
         RequestProtocolTestSupport.decodeRetired(
                 f.scheduler(), f.requestContext(), f.item().decodeEp(), RESERVATION);
-        SchedulerTestSupport.awaitRequestWork(f.scheduler().runtime);
+        SchedulerTestSupport.awaitRequestWork(
+                org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(f.scheduler()));
 
         assertTrue(RequestProtocolTestSupport.preemptionFinished(claim));
         assertNotNull(
@@ -214,7 +217,8 @@ class RequestTerminalSettlementTest {
             assertEquals(
                     RequestState.Phase.FAILED,
                     RequestState.from(f.requestContext().snapshot()).state());
-            SchedulerTestSupport.awaitRequestWork(f.scheduler().runtime);
+            SchedulerTestSupport.awaitRequestWork(
+                    org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(f.scheduler()));
             assertNotNull(cleanupThread.get());
             assertNotEquals(Thread.currentThread().getName(), cleanupThread.get());
         }
@@ -252,7 +256,8 @@ class RequestTerminalSettlementTest {
                                 update ->
                                         update.kind()
                                                 == DecodeResources.PreemptionUpdate.Kind.FINISHED));
-        SchedulerTestSupport.awaitRequestWork(f.scheduler().runtime);
+        SchedulerTestSupport.awaitRequestWork(
+                org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(f.scheduler()));
         assertTrue((stage(f.requestContext()) == Stage.FINISHED));
         assertTrue(RequestProtocolTestSupport.preemptionFinished(claim));
     }
@@ -305,11 +310,8 @@ class RequestTerminalSettlementTest {
                                     RequestProtocolTestSupport.activePreemption(
                                             f.requestContext()));
                             assertFalse(
-                                    preemption
-                                            .owner()
-                                            .data()
-                                            .getScheduler()
-                                            .runtime
+                                    org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(
+                                                    preemption.owner().data().getScheduler())
                                             .signals()
                                             .preemption(preemption)
                                             .toCompletableFuture()
@@ -327,8 +329,9 @@ class RequestTerminalSettlementTest {
         if (notificationFails) {
             assertSame(
                     notificationFailure,
-                    org.springframework.test.util.ReflectionTestUtils.getField(
-                            f.scheduler().runtime, "failure"));
+                    org.flexlb.balance.scheduler.SchedulerTestServices.failure(
+                            org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(
+                                    f.scheduler())));
         }
         assertTrue(
                 RequestProtocolTestSupport.awaitResult(f.requestContext().data().getFuture())
@@ -336,11 +339,8 @@ class RequestTerminalSettlementTest {
         assertEquals(
                 org.flexlb.balance.preemption.VictimResolution.Outcome.DELIVERY_RESUMED,
                 RequestProtocolTestSupport.awaitResult(
-                                preemption
-                                        .owner()
-                                        .data()
-                                        .getScheduler()
-                                        .runtime
+                                org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(
+                                                preemption.owner().data().getScheduler())
                                         .signals()
                                         .preemption(preemption)
                                         .toCompletableFuture())
@@ -402,10 +402,8 @@ class RequestTerminalSettlementTest {
                                             f.requestContext()));
                             assertTrue(RequestProtocolTestSupport.preemptionFinished(claim));
                             assertFalse(
-                                    claim.owner()
-                                            .data()
-                                            .getScheduler()
-                                            .runtime
+                                    org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(
+                                                    claim.owner().data().getScheduler())
                                             .signals()
                                             .preemption(claim)
                                             .toCompletableFuture()
@@ -420,7 +418,8 @@ class RequestTerminalSettlementTest {
                         f.requestContext().snapshot().lastWorkerAtMs() + 1L);
         var failed = prefillFailure(f, role, observedAtMs);
         f.scheduler().onEngineEvidence(f.requestContext(), failed);
-        SchedulerTestSupport.awaitRequestWork(f.scheduler().runtime);
+        SchedulerTestSupport.awaitRequestWork(
+                org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(f.scheduler()));
         assertFalse((stage(f.requestContext()) == Stage.FINISHED));
         assertFalse(RequestProtocolTestSupport.preemptionFinished(claim));
         assertFalse(f.requestContext().data().getFuture().isDone());
@@ -428,29 +427,30 @@ class RequestTerminalSettlementTest {
                 .publishCapacity(org.flexlb.balance.endpoint.DecodeEndpoint.CapacityEdge.BOTH);
         var retained = f.requestContext().snapshot();
         f.scheduler().onEngineEvidence(f.requestContext(), failed);
-        SchedulerTestSupport.awaitRequestWork(f.scheduler().runtime);
+        SchedulerTestSupport.awaitRequestWork(
+                org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(f.scheduler()));
         assertSame(retained, f.requestContext().snapshot());
         verify(f.item().decodeEp(), times(1))
                 .updatePreemption(4L, DecodeResources.PreemptionUpdate.finished(RESERVATION));
         f.scheduler()
                 .onEngineEvidence(f.requestContext(), prefillFailure(f, role, observedAtMs + 1L));
-        SchedulerTestSupport.awaitRequestWork(f.scheduler().runtime);
+        SchedulerTestSupport.awaitRequestWork(
+                org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(f.scheduler()));
         verify(f.item().decodeEp(), times(2))
                 .updatePreemption(4L, DecodeResources.PreemptionUpdate.finished(RESERVATION));
         assertEquals(
                 RequestState.Phase.FAILED,
                 RequestState.from(f.requestContext().snapshot()).state());
-        SchedulerTestSupport.awaitRequestWork(f.scheduler().runtime);
+        SchedulerTestSupport.awaitRequestWork(
+                org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(f.scheduler()));
         RequestProtocolTestSupport.awaitCondition(
                 () -> stage(f.requestContext()) == Stage.FINISHED);
         assertTrue((stage(f.requestContext()) == Stage.FINISHED));
         assertEquals(
                 org.flexlb.balance.preemption.VictimResolution.Outcome.REQUEST_END,
                 RequestProtocolTestSupport.awaitResult(
-                                claim.owner()
-                                        .data()
-                                        .getScheduler()
-                                        .runtime
+                                org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(
+                                                claim.owner().data().getScheduler())
                                         .signals()
                                         .preemption(claim)
                                         .toCompletableFuture())
@@ -495,7 +495,8 @@ class RequestTerminalSettlementTest {
                                     Thread.holdsLock(f.requestContext()),
                                     "Decode ledger updates must not run under the Context lock");
                             return org.flexlb.balance.endpoint.DecodeResources.ResourceChange.of(
-                                    org.flexlb.balance.endpoint.DecodeResources.MutationStatus.APPLIED,
+                                    org.flexlb.balance.endpoint.DecodeResources.MutationStatus
+                                            .APPLIED,
                                     false);
                         });
         doAnswer(
@@ -508,10 +509,8 @@ class RequestTerminalSettlementTest {
                                     priorityCanceled,
                                     RequestProtocolTestSupport.preemptionFinished(claim));
                             assertFalse(
-                                    claim.owner()
-                                            .data()
-                                            .getScheduler()
-                                            .runtime
+                                    org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(
+                                                    claim.owner().data().getScheduler())
                                             .signals()
                                             .preemption(claim)
                                             .toCompletableFuture()
@@ -541,10 +540,8 @@ class RequestTerminalSettlementTest {
                 .publishCapacity(org.flexlb.balance.endpoint.DecodeEndpoint.CapacityEdge.BOTH);
         assertEquals(
                 priorityCanceled,
-                claim.owner()
-                        .data()
-                        .getScheduler()
-                        .runtime
+                org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(
+                                claim.owner().data().getScheduler())
                         .signals()
                         .preemption(claim)
                         .toCompletableFuture()
@@ -590,10 +587,8 @@ class RequestTerminalSettlementTest {
                 RequestProtocolTestSupport.<Long>inspect(
                         f.scheduler(), requestContext, "inactivityExpiresAtMsLocked"));
         assertFalse(
-                delivery.owner()
-                        .data()
-                        .getScheduler()
-                        .runtime
+                org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(
+                                delivery.owner().data().getScheduler())
                         .signals()
                         .delivery(delivery)
                         .toCompletableFuture()
@@ -603,10 +598,12 @@ class RequestTerminalSettlementTest {
                 delivery.owner().data().getScheduler(),
                 delivery,
                 DeliveryResult.notSent(new IllegalStateException("expired before send")));
-        SchedulerTestSupport.awaitRequestWork(f.scheduler().runtime);
+        SchedulerTestSupport.awaitRequestWork(
+                org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(f.scheduler()));
         RequestState ended = RequestState.from(requestContext.snapshot());
         assertEquals(RequestState.Phase.CANCELLED, ended.state());
-        SchedulerTestSupport.awaitRequestWork(f.scheduler().runtime);
+        SchedulerTestSupport.awaitRequestWork(
+                org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(f.scheduler()));
         assertTrue((stage(requestContext) == Stage.FINISHED));
         assertTrue(RequestProtocolTestSupport.preemptionFinished(claim));
         assertNull(requestContext.snapshot().route());
@@ -658,7 +655,8 @@ class RequestTerminalSettlementTest {
         assertSame(
                 delivered,
                 RequestProtocolTestSupport.awaitResult(f.requestContext().data().getFuture()));
-        SchedulerTestSupport.awaitRequestWork(f.scheduler().runtime);
+        SchedulerTestSupport.awaitRequestWork(
+                org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(f.scheduler()));
         RequestProtocolTestSupport.awaitCondition(
                 () -> stage(f.requestContext()) == Stage.FINISHED);
         assertTrue((stage(f.requestContext()) == Stage.FINISHED));
@@ -672,7 +670,8 @@ class RequestTerminalSettlementTest {
         if (retirement) {
             RequestProtocolTestSupport.decodeRetired(
                     f.scheduler(), f.requestContext(), f.item().decodeEp(), RESERVATION);
-            SchedulerTestSupport.awaitRequestWork(f.scheduler().runtime);
+            SchedulerTestSupport.awaitRequestWork(
+                    org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(f.scheduler()));
         } else {
             RequestProtocolTestSupport.applyDecodeStatus(
                     f.scheduler(),
@@ -686,7 +685,8 @@ class RequestTerminalSettlementTest {
         assertEquals(
                 RequestState.Phase.CANCELLED,
                 RequestState.from(f.requestContext().snapshot()).state());
-        SchedulerTestSupport.awaitRequestWork(f.scheduler().runtime);
+        SchedulerTestSupport.awaitRequestWork(
+                org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(f.scheduler()));
         assertTrue((stage(f.requestContext()) == Stage.FINISHED));
         assertFalse(
                 RequestProtocolTestSupport.awaitResult(f.requestContext().data().getFuture())
@@ -740,7 +740,8 @@ class RequestTerminalSettlementTest {
                 RequestState.Phase.FAILED, RequestState.from(requestContext.snapshot()).state());
         RequestProtocolTestSupport.transport(
                 delivery.owner().data().getScheduler(), delivery, DeliveryResult.delivered());
-        SchedulerTestSupport.awaitRequestWork(f.scheduler().runtime);
+        SchedulerTestSupport.awaitRequestWork(
+                org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(f.scheduler()));
         RequestProtocolTestSupport.awaitCondition(() -> stage(requestContext) == Stage.FINISHED);
         assertTrue((stage(requestContext) == Stage.FINISHED));
         assertFalse(
@@ -783,7 +784,8 @@ class RequestTerminalSettlementTest {
                 "unsettled resource retains inactivity watch");
         org.springframework.test.util.ReflectionTestUtils.invokeMethod(
                 f.scheduler(), "scheduleClose", context);
-        SchedulerTestSupport.awaitRequestWork(f.scheduler().runtime);
+        SchedulerTestSupport.awaitRequestWork(
+                org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(f.scheduler()));
         assertEquals(
                 Stage.FINISHED,
                 stage(context),
@@ -806,7 +808,8 @@ class RequestTerminalSettlementTest {
                 "late frontend failure cannot revoke completed execution evidence");
         org.springframework.test.util.ReflectionTestUtils.invokeMethod(
                 f.scheduler(), "scheduleClose", context);
-        SchedulerTestSupport.awaitRequestWork(f.scheduler().runtime);
+        SchedulerTestSupport.awaitRequestWork(
+                org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(f.scheduler()));
         assertEquals(Stage.FINISHED, stage(context));
         verify(f.item().prefillEp(), times(1)).release(null, f.item());
         assertNull(context.snapshot().deadlines().inactivity());
@@ -863,12 +866,13 @@ class RequestTerminalSettlementTest {
                 f.scheduler()
                         .onPreemption(
                                 claim,
-                                new AbstractRequestScheduler.PreemptionEvent(
+                                new RequestLifecycle.PreemptionEvent(
                                         null, false, f.item().decodeEp(), RESERVATION, "cleaned"));
         assertEquals(resourceSettled, applied);
         verify(f.item().decodeEp()).updatePreemption(4L, proof);
         if (resourceSettled) {
-            SchedulerTestSupport.awaitRequestWork(f.scheduler().runtime);
+            SchedulerTestSupport.awaitRequestWork(
+                    org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(f.scheduler()));
             assertTrue(RequestProtocolTestSupport.preemptionFinished(claim));
             assertFalse(
                     RequestProtocolTestSupport.awaitResult(f.requestContext().data().getFuture())
@@ -895,7 +899,7 @@ class RequestTerminalSettlementTest {
                 f.scheduler()
                         .onPreemption(
                                 claim,
-                                new AbstractRequestScheduler.PreemptionEvent(
+                                new RequestLifecycle.PreemptionEvent(
                                         null,
                                         false,
                                         f.item().decodeEp(),
@@ -912,7 +916,9 @@ class RequestTerminalSettlementTest {
     void transientTerminalTimerFailureRetriesAfterActualResourceSettlement(int failures) {
         Fixture f = fixture(true, true);
         var context = f.requestContext();
-        var timer = f.scheduler().runtime.deadlines();
+        var timer =
+                org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(f.scheduler())
+                        .deadlines();
         org.mockito.Mockito.clearInvocations(timer);
         var expected = new IllegalStateException("timer update failed");
         var attempts = new java.util.concurrent.atomic.AtomicInteger();
@@ -957,7 +963,8 @@ class RequestTerminalSettlementTest {
                                                         "original terminal failure",
                                                         false,
                                                         false))));
-        SchedulerTestSupport.awaitRequestWork(f.scheduler().runtime);
+        SchedulerTestSupport.awaitRequestWork(
+                org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(f.scheduler()));
         var original = context.snapshot().outcome();
         assertEquals("original terminal failure", original.detail());
         assertFalse(RequestProtocolTestSupport.awaitResult(context.data().getFuture()).isSuccess());
@@ -984,7 +991,8 @@ class RequestTerminalSettlementTest {
             } else {
                 f.scheduler().scheduleClose(context);
             }
-            SchedulerTestSupport.awaitRequestWork(f.scheduler().runtime);
+            SchedulerTestSupport.awaitRequestWork(
+                    org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(f.scheduler()));
         }
         assertEquals(
                 Phase.CLOSED,
@@ -1018,7 +1026,7 @@ class RequestTerminalSettlementTest {
                 RequestProtocolTestSupport.context(config, RESERVATION.requestId());
         var publisher = mock(ResponseCompletionExecutor.class);
         var timer = mock(ExpirationTimer.class);
-        AbstractRequestScheduler requestOwner =
+        RequestLifecycle requestOwner =
                 RequestProtocolTestSupport.initialize(publisher, context, timer);
         when(SchedulerTestSupport.engineClient(requestOwner)
                         .cancelAsync(any(), anyInt(), any(), anyLong()))
@@ -1064,7 +1072,7 @@ class RequestTerminalSettlementTest {
     }
 
     private record Fixture(
-            AbstractRequestScheduler scheduler,
+            RequestLifecycle scheduler,
             RequestContext requestContext,
             RequestRoute item,
             AdmissionHandle admission) {}

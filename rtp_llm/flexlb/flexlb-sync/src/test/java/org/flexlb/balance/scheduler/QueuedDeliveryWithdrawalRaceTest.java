@@ -77,7 +77,9 @@ class QueuedDeliveryWithdrawalRaceTest {
                                                     })));
             try {
                 assertTrue(prepared.await(5, TimeUnit.SECONDS));
-                fixture.owner.cancel(fixture.context, 0L, CancelReason.CLIENT_CANCELLED);
+                fixture.owner
+                        .lifecycle()
+                        .cancel(fixture.context, 0L, CancelReason.CLIENT_CANCELLED);
                 assertFalse(fixture.future.get(2, TimeUnit.SECONDS).isSuccess());
                 SchedulerTestSupport.awaitRequestWork(fixture.runtime);
                 assertEquals(ContextResult.Phase.CLOSED, fixture.context.snapshot().phase());
@@ -88,13 +90,15 @@ class QueuedDeliveryWithdrawalRaceTest {
                 allowCommit.countDown();
                 selection.get(5, TimeUnit.SECONDS);
                 if (fixture.context.snapshot().phase() == ContextResult.Phase.OPEN) {
-                    fixture.owner.closeRequest(
-                            fixture.context,
-                            ContextResult.EndEvidence.failure(
-                                    fixture.route,
-                                    ContextResult.EndKind.FRONTEND,
-                                    StrategyErrorType.REQUEST_CANCELLED,
-                                    "test cleanup"));
+                    fixture.owner
+                            .lifecycle()
+                            .closeRequest(
+                                    fixture.context,
+                                    ContextResult.EndEvidence.failure(
+                                            fixture.route,
+                                            ContextResult.EndKind.FRONTEND,
+                                            StrategyErrorType.REQUEST_CANCELLED,
+                                            "test cleanup"));
                 }
             }
         }
@@ -124,7 +128,11 @@ class QueuedDeliveryWithdrawalRaceTest {
                         fixture.decode.resourceSnapshot().activeDispatchPermits(),
                         "pause after the real delivery lease is acquired and before queue commit");
                 withdrawal =
-                        fixture.owner.claimWithdrawal(fixture.decode, fixture.reservation, 100);
+                        AdmissionHandle.tryBeginPreemption(
+                                fixture.owner.lifecycle(),
+                                fixture.decode,
+                                fixture.reservation,
+                                100);
                 assertNull(
                         withdrawal,
                         "a prepared sender must exclude a concurrent queued withdrawal");
@@ -149,7 +157,8 @@ class QueuedDeliveryWithdrawalRaceTest {
     void queuedWithdrawalExcludesPreparationAndItsRollbackRestoresDelivery() throws Exception {
         try (var fixture = new Fixture()) {
             var withdrawal =
-                    fixture.owner.claimWithdrawal(fixture.decode, fixture.reservation, 100);
+                    AdmissionHandle.tryBeginPreemption(
+                            fixture.owner.lifecycle(), fixture.decode, fixture.reservation, 100);
             assertNotNull(
                     withdrawal,
                     "an exact queued reservation without a dispatch lease remains withdrawable");
@@ -207,7 +216,7 @@ class QueuedDeliveryWithdrawalRaceTest {
 
     private static final class Fixture implements AutoCloseable {
         final EngineGrpcClient client = mock(EngineGrpcClient.class);
-        final SchedulerRuntime runtime;
+        final SchedulerTestServices runtime;
         final QueuedRequestScheduler owner;
         final PrefillEndpoint prefill;
         final DecodeEndpoint decode;
@@ -244,9 +253,19 @@ class QueuedDeliveryWithdrawalRaceTest {
             var repository = new RequestRepository();
             var availability = new PlacementAvailability();
             var directory =
-                    new EndpointRegistry(service, repository, reporter, dispatcher, availability);
+                    new EndpointRegistry(
+                            service,
+                            repository,
+                            reporter,
+                            dispatcher,
+                            availability,
+                            org.flexlb.balance.planner.BuiltinGroupPlanner.from(
+                                    service.loadBalanceConfig()),
+                            order ->
+                                    org.flexlb.balance.endpoint.PrefillActiveIndex.ordered(
+                                            16, order));
             runtime =
-                    new SchedulerRuntime(
+                    new SchedulerTestServices(
                             repository,
                             directory,
                             reporter,
@@ -260,10 +279,15 @@ class QueuedDeliveryWithdrawalRaceTest {
                             mock(RequestWorkerSelector.class),
                             reporter,
                             mock(DecodePreemption.class),
-                            runtime,
+                            runtime.newLifecycle(
+                                    config,
+                                    new DecodeResources.AdmissionCapacity(64L, 90),
+                                    mock(RecentCacheKeyTraceReporter.class)),
                             availability,
                             new DecodeResources.AdmissionCapacity(64L, 90),
-                            mock(RecentCacheKeyTraceReporter.class));
+                            mock(RecentCacheKeyTraceReporter.class),
+                            new OrderedRequestQueue(config.isPriorityOrdering()),
+                            org.flexlb.balance.planner.BuiltinGroupPlanner.from(config));
             runtime.registerScheduler(owner);
             var pStatus =
                     WorkerStatus.createDiscovered(
@@ -279,13 +303,20 @@ class QueuedDeliveryWithdrawalRaceTest {
                                 org.flexlb.config.FlexlbConfig.class,
                                 DeliveryDispatcher.class,
                                 DeliveryMetricsReporter.class,
-                                PlacementAvailability.class
+                                PlacementAvailability.class,
+                                org.flexlb.balance.planner.GroupPlanner.class,
+                                org.flexlb.balance.endpoint.WorkerQueue.Factory.class
                             },
                             pStatus,
                             config,
                             dispatcher,
                             reporter,
-                            availability);
+                            availability,
+                            org.flexlb.balance.planner.BuiltinGroupPlanner.from(config),
+                            (org.flexlb.balance.endpoint.WorkerQueue.Factory)
+                                    order ->
+                                            org.flexlb.balance.endpoint.PrefillActiveIndex.ordered(
+                                                    16, order));
             decode =
                     construct(
                             DecodeEndpoint.class,
@@ -302,16 +333,19 @@ class QueuedDeliveryWithdrawalRaceTest {
             var state =
                     new PrefillState(
                             new ReentrantLock(),
-                            PrefillActiveIndex.ordered(16, PrefillQueueRunner.PRIORITY_QUEUE_ORDER),
+                            PrefillActiveIndex.ordered(16, QueueExecutionSettings.queueOrder(true)),
                             System::currentTimeMillis);
             ReflectionTestUtils.setField(prefill, "ownership", state);
             batcher =
                     new PrefillQueueRunner(
                             "withdrawal-race",
                             prefill,
-                            QueueExecutionSettings.capture(config),
+                            QueueExecutionSettings.capture(
+                                    config,
+                                    org.flexlb.balance.planner.BuiltinGroupPlanner.from(config)),
                             dispatcher,
-                            state);
+                            state,
+                            SchedulerTestSupport.queueDependencies(runtime));
             ReflectionTestUtils.setField(prefill, "queueRunner", batcher);
             var runtimeState =
                     Class.forName("org.flexlb.balance.scheduler.PrefillQueueRunner$RuntimeState");
@@ -336,7 +370,9 @@ class QueuedDeliveryWithdrawalRaceTest {
                                     .addTokenIds(1)
                                     .build()
                                     .toByteString());
-            future = owner.register(context, () -> {}, StrategyErrorType.RESOURCE_EXHAUSTED);
+            future =
+                    owner.lifecycle()
+                            .register(context, () -> {}, StrategyErrorType.RESOURCE_EXHAUSTED);
             try (var pin = decode.tryPinGeneration()) {
                 reservation =
                         decode.tryReserveQueuedRequest(
@@ -364,25 +400,27 @@ class QueuedDeliveryWithdrawalRaceTest {
                             reservation,
                             System.currentTimeMillis());
             responseTemplate.setServerStatus(List.of(route.prefill(), route.decode()));
-            var admission = owner.claimAdmissionHandle(context.data().getRequestId(), future);
+            var admission =
+                    owner.lifecycle().claimAdmissionHandle(context.data().getRequestId(), future);
             assertNotNull(admission);
             assertEquals(
                     org.flexlb.balance.PlacementResult.Status.SUCCESS,
-                    owner.commitRoute(
-                            route,
-                            new AbstractRequestScheduler.Publication() {
-                                private boolean published;
+                    owner.lifecycle()
+                            .commitRoute(
+                                    route,
+                                    new RequestLifecycle.Publication() {
+                                        private boolean published;
 
-                                @Override
-                                public void publish() {
-                                    published = batcher.offer(route);
-                                }
+                                        @Override
+                                        public void publish() {
+                                            published = batcher.offer(route);
+                                        }
 
-                                @Override
-                                public boolean published() {
-                                    return published;
-                                }
-                            }));
+                                        @Override
+                                        public boolean published() {
+                                            return published;
+                                        }
+                                    }));
             admission.finish();
         }
 
@@ -414,7 +452,12 @@ class QueuedDeliveryWithdrawalRaceTest {
             }
             for (String field : List.of("requestWorkers", "cleanupExecutor")) {
                 assertTrue(
-                        ((ExecutorService) ReflectionTestUtils.getField(runtime, field))
+                        ((ExecutorService)
+                                        ReflectionTestUtils.getField(
+                                                field.equals("requestWorkers")
+                                                        ? runtime.tasks()
+                                                        : runtime.taskTimer(),
+                                                field))
                                 .isTerminated(),
                         field + " must terminate after the execution registrations drain");
             }

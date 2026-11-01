@@ -1,7 +1,6 @@
 package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.delivery.DeliveryResult;
-import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.DecodeResources;
 import org.flexlb.balance.preemption.PreemptionCancelPhase;
 import org.flexlb.dao.loadbalance.Response;
@@ -19,13 +18,6 @@ public final class ContextResult {
     public enum UpdateKind {
         APPLIED,
         NO_CHANGE,
-        STALE
-    }
-
-    public enum ClaimKind {
-        GRANTED,
-        BLOCKED,
-        REJECTED,
         STALE
     }
 
@@ -114,7 +106,7 @@ public final class ContextResult {
             EndKind kind, TerminalOutcome outcome, StrategyErrorType errorType, String detail) {}
 
     public record EndEvidence(
-            RequestRoute route,
+            @lombok.With(lombok.AccessLevel.PACKAGE) RequestRoute route,
             EndKind kind,
             RoleType role,
             boolean success,
@@ -186,19 +178,6 @@ public final class ContextResult {
             }
             return failure(
                     route, EndKind.DELIVERY_FAILURE, StrategyErrorType.DISPATCH_FAILED, detail);
-        }
-
-        EndEvidence withoutRoute() {
-            return new EndEvidence(
-                    null,
-                    kind,
-                    role,
-                    success,
-                    errorCode,
-                    errorType,
-                    detail,
-                    prefillSettled,
-                    decodeSettled);
         }
     }
 
@@ -289,16 +268,11 @@ public final class ContextResult {
             implements DeliveryEvidence {}
 
     public record PreemptionFact(
-            PreemptionRegistration attempt,
-            PreemptionCancelPhase phase,
-            boolean release,
-            DecodeEndpoint endpoint,
-            DecodeResources.ReservationHandle reservation,
-            String detail,
-            CleanupAcknowledgement cleanup)
+            PreemptionRegistration attempt, RequestLifecycle.PreemptionEvent event)
             implements DeliveryFact {
         public PreemptionFact {
             Objects.requireNonNull(attempt, "attempt");
+            Objects.requireNonNull(event, "event");
         }
     }
 
@@ -399,8 +373,8 @@ public final class ContextResult {
 
     public record DeliveryFacts(
             DeliveryClaim identity,
-            SendState send,
-            boolean acknowledged,
+            @lombok.With(lombok.AccessLevel.PACKAGE) SendState send,
+            @lombok.With(lombok.AccessLevel.PACKAGE) boolean acknowledged,
             CancelReason abandonment,
             boolean executionFinished,
             boolean prefillProof,
@@ -410,10 +384,6 @@ public final class ContextResult {
         @Override
         public RequestContext owner() {
             return identity.owner();
-        }
-
-        DeliveryFacts withSendState(SendState next) {
-            return recordResult(next, abandonment, prefillProof, decodeProof);
         }
 
         DeliveryFacts recordResult(
@@ -446,18 +416,6 @@ public final class ContextResult {
             return recordResult(next, reason, prefillProof, decodeProof);
         }
 
-        DeliveryFacts acknowledge() {
-            return new DeliveryFacts(
-                    identity,
-                    send,
-                    true,
-                    abandonment,
-                    executionFinished,
-                    prefillProof,
-                    decodeProof,
-                    startedAtMs);
-        }
-
         DeliveryFacts recordEnd(CancelReason abandoned, boolean completed) {
             return new DeliveryFacts(
                     identity,
@@ -475,20 +433,10 @@ public final class ContextResult {
             PreemptionRegistration identity,
             PreemptionCancelPhase phase,
             boolean cancelAcknowledged,
-            boolean finished,
-            EndEvidence pendingTerminal,
-            boolean confirmationPending,
-            boolean restorationObserved) {
-        PreemptionFacts observeRestoration() {
-            return new PreemptionFacts(
-                    identity,
-                    phase,
-                    cancelAcknowledged,
-                    finished,
-                    pendingTerminal,
-                    confirmationPending,
-                    true);
-        }
+            @lombok.With(lombok.AccessLevel.PACKAGE) boolean finished,
+            @lombok.With(lombok.AccessLevel.PACKAGE) EndEvidence pendingTerminal,
+            @lombok.With(lombok.AccessLevel.PACKAGE) boolean confirmationPending,
+            @lombok.With(lombok.AccessLevel.PACKAGE) boolean restorationObserved) {
 
         PreemptionFacts recordReport(
                 PreemptionCancelPhase next, EndEvidence terminal, boolean ledgerCommitted) {
@@ -501,39 +449,6 @@ public final class ContextResult {
                     confirmationPending,
                     restorationObserved);
         }
-
-        PreemptionFacts awaitConfirmation() {
-            return new PreemptionFacts(
-                    identity,
-                    phase,
-                    cancelAcknowledged,
-                    finished,
-                    pendingTerminal,
-                    true,
-                    restorationObserved);
-        }
-
-        PreemptionFacts finish() {
-            return new PreemptionFacts(
-                    identity,
-                    phase,
-                    cancelAcknowledged,
-                    true,
-                    pendingTerminal,
-                    confirmationPending,
-                    restorationObserved);
-        }
-
-        PreemptionFacts retainTerminal(EndEvidence terminal) {
-            return new PreemptionFacts(
-                    identity,
-                    phase,
-                    cancelAcknowledged,
-                    finished,
-                    terminal,
-                    confirmationPending,
-                    restorationObserved);
-        }
     }
 
     public record CloseFacts(
@@ -541,7 +456,7 @@ public final class ContextResult {
             boolean decodeSettled,
             boolean notificationsDone,
             boolean timersDone,
-            boolean expired,
+            @lombok.With(lombok.AccessLevel.PACKAGE) boolean expired,
             boolean notificationsAttempted) {
         CloseFacts withSettlement(boolean prefillSettled, boolean decodeSettled) {
             return new CloseFacts(
@@ -556,16 +471,6 @@ public final class ContextResult {
         CloseFacts mergeSettlement(boolean prefillSettled, boolean decodeSettled) {
             return withSettlement(
                     this.prefillSettled || prefillSettled, this.decodeSettled || decodeSettled);
-        }
-
-        CloseFacts markExpired() {
-            return new CloseFacts(
-                    prefillSettled,
-                    decodeSettled,
-                    notificationsDone,
-                    timersDone,
-                    true,
-                    notificationsAttempted);
         }
 
         CloseFacts beginEnding(EndEvidence evidence, boolean prefillCompleted) {
@@ -642,8 +547,6 @@ public final class ContextResult {
     }
 
     public sealed interface Claim<T extends GrantValue> permits Granted, Blocked, Rejected, Stale {
-        ClaimKind kind();
-
         Snapshot before();
 
         Snapshot after();
@@ -656,22 +559,12 @@ public final class ContextResult {
             Objects.requireNonNull(after);
             Objects.requireNonNull(value);
         }
-
-        @Override
-        public ClaimKind kind() {
-            return ClaimKind.GRANTED;
-        }
     }
 
     public record Blocked<T extends GrantValue>(Snapshot before, Snapshot after, Blocker blocker)
             implements Claim<T> {
         public Blocked {
             Objects.requireNonNull(blocker);
-        }
-
-        @Override
-        public ClaimKind kind() {
-            return ClaimKind.BLOCKED;
         }
     }
 
@@ -680,19 +573,9 @@ public final class ContextResult {
         public Rejected {
             Objects.requireNonNull(reason);
         }
-
-        @Override
-        public ClaimKind kind() {
-            return ClaimKind.REJECTED;
-        }
     }
 
     public record Stale<T extends GrantValue>(Snapshot before) implements Claim<T> {
-        @Override
-        public ClaimKind kind() {
-            return ClaimKind.STALE;
-        }
-
         @Override
         public Snapshot after() {
             return before;

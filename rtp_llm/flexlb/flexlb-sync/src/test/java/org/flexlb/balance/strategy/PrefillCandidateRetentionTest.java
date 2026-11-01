@@ -20,7 +20,6 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.Mockito.anyDouble;
 import static org.mockito.Mockito.anyLong;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.eq;
@@ -29,6 +28,49 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 class PrefillCandidateRetentionTest {
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(booleans = {false, true})
+    void failedSelectionClearsEveryCapturedCandidate(boolean failDuringCapture) throws Exception {
+        var service = mock(ConfigService.class);
+        when(service.loadBalanceConfig()).thenReturn(StrategyTestSupport.config());
+        var cache = mock(CacheAwareService.class);
+        var first = mock(PrefillSelectionStrategy.CandidateInput.class);
+        var second = mock(PrefillSelectionStrategy.CandidateInput.class);
+        when(first.group()).thenReturn("g");
+        when(first.address()).thenReturn("first");
+        if (failDuringCapture) {
+            when(second.group()).thenThrow(new IllegalStateException("capture failed"));
+        } else {
+            when(second.group()).thenReturn("g");
+            when(second.address()).thenReturn("second");
+            when(cache.findMatchingEngines(any(), any(), any()))
+                    .thenThrow(new IllegalStateException("cache failed"));
+        }
+        var policy = new CostBasedPrefillStrategy(cache, service);
+        var field = CostBasedPrefillStrategy.class.getDeclaredField("CANDIDATES");
+        field.setAccessible(true);
+        var scratch = (ThreadLocal<?>) field.get(null);
+        try {
+            org.junit.jupiter.api.Assertions.assertThrows(
+                    IllegalStateException.class,
+                    () ->
+                            policy.select(
+                                    Request.builder().requestId(9L).seqLen(100L).build(),
+                                    SchedulingMetadata.explicit(50, Long.MAX_VALUE),
+                                    RoleType.PREFILL,
+                                    "g",
+                                    List.of(first, second),
+                                    () -> 1000L));
+            var retained = (PrefillCandidateSet) scratch.get();
+            assertTrue(
+                    java.util.Arrays.stream(retained.capturedSources)
+                            .allMatch(java.util.Objects::isNull));
+            assertTrue(!retained.inUse);
+        } finally {
+            scratch.remove();
+        }
+    }
+
     @Test
     void completedSelectionReleasesTheRetiredFleetOnAnIdlePlannerThread() throws Exception {
         CacheAwareService cache = mock(CacheAwareService.class);
@@ -74,7 +116,7 @@ class PrefillCandidateRetentionTest {
                                         invocation.getArgument(0).equals(List.of(1L)) ? 1 : 2));
         var metrics = mock(CacheMetricsReporter.class);
         var strategy =
-                new CostBasedPrefillStrategy(
+                new StrategyTestSupport.PrefillRoutingFixture(
                         registry, cache, mock(EngineHealthReporter.class), metrics, service);
         var outer =
                 Request.builder()
@@ -108,17 +150,16 @@ class PrefillCandidateRetentionTest {
                             return null;
                         })
                 .when(metrics)
-                .reportCacheHitMetrics(eq(RoleType.PREFILL), anyLong(), anyDouble());
+                .reportSelectionCache(
+                        eq(RoleType.PREFILL), anyLong(), anyLong(), anyLong(), anyLong());
         try {
             try (var selected =
                     StrategyTestSupport.select(strategy, outer, metadata, RoleType.PREFILL, null)
                             .value()) {
                 assertNotNull(selected);
             }
-            verify(metrics).reportRoutingSelectedCacheMatchMetrics(RoleType.PREFILL, 100L, 1000L);
-            verify(metrics).reportRoutingSelectedCacheMatchMetrics(RoleType.PREFILL, 200L, 2000L);
-            verify(metrics).reportRoutingCandidateMaxCacheMatchMetrics(RoleType.PREFILL, 100L);
-            verify(metrics).reportRoutingCandidateMaxCacheMatchMetrics(RoleType.PREFILL, 200L);
+            verify(metrics).reportSelectionCache(RoleType.PREFILL, 1000L, 100L, 100L, 100L);
+            verify(metrics).reportSelectionCache(RoleType.PREFILL, 2000L, 200L, 200L, 200L);
         } finally {
             registry.close();
         }
@@ -143,7 +184,7 @@ class PrefillCandidateRetentionTest {
                         registry, RoleType.PREFILL, status.getIpPort(), status);
         when(cache.findMatchingEngines(any(), any(), any())).thenReturn(Map.of());
         var strategy =
-                new CostBasedPrefillStrategy(
+                new StrategyTestSupport.PrefillRoutingFixture(
                         registry,
                         cache,
                         mock(EngineHealthReporter.class),

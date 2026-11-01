@@ -77,11 +77,8 @@ class RequestInflightRecoveryTest {
             f.drain();
             assertTrue(f.owner.requests.isCurrent(f.context));
             assertFalse(
-                    f.claim
-                            .owner()
-                            .data()
-                            .getScheduler()
-                            .runtime
+                    org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(
+                                    f.claim.owner().data().getScheduler())
                             .signals()
                             .delivery(f.claim)
                             .toCompletableFuture()
@@ -107,11 +104,8 @@ class RequestInflightRecoveryTest {
                     "Both exact endpoint terminals have released ownership; the sender has exited",
                     () ->
                             assertTrue(
-                                    f.claim
-                                            .owner()
-                                            .data()
-                                            .getScheduler()
-                                            .runtime
+                                    org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(
+                                                    f.claim.owner().data().getScheduler())
                                             .signals()
                                             .delivery(f.claim)
                                             .toCompletableFuture()
@@ -152,11 +146,8 @@ class RequestInflightRecoveryTest {
             assertEquals(1L, f.decode.routingView().totalLoad());
             assertTrue(f.decode.ownership(f.reservation).owned());
             assertFalse(
-                    f.claim
-                            .owner()
-                            .data()
-                            .getScheduler()
-                            .runtime
+                    org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(
+                                    f.claim.owner().data().getScheduler())
                             .signals()
                             .delivery(f.claim)
                             .toCompletableFuture()
@@ -224,10 +215,13 @@ class RequestInflightRecoveryTest {
     @Test
     void retry001SameLogicalRetryCannotReplaceUnknownAttempt() throws Exception {
         try (Fixture f = new Fixture()) {
-            f.send(DeliveryResult.uncertain(new IllegalStateException("accepted then socket reset")));
+            f.send(
+                    DeliveryResult.uncertain(
+                            new IllegalStateException("accepted then socket reset")));
             var duplicate = RequestProtocolTestSupport.register(f.owner, f.context);
 
-            assertTrue(duplicate.isDone(), "a retry of the active logical request must be rejected");
+            assertTrue(
+                    duplicate.isDone(), "a retry of the active logical request must be rejected");
             assertFalse(duplicate.join().isSuccess());
             assertTrue(f.owner.requests.isCurrent(f.context));
             f.assertNextDecodeReservationRejected();
@@ -269,17 +263,26 @@ class RequestInflightRecoveryTest {
                         (org.flexlb.balance.endpoint.PrefillState)
                                 ReflectionTestUtils.getField(f.prefill, "ownership");
                 ReflectionTestUtils.setField(
-                        f.owner.runtime.deliveries(), "decodeDeliveryCapacity", f.capacity);
+                        org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(f.owner)
+                                .deliveries(),
+                        "decodeDeliveryCapacity",
+                        f.capacity);
                 var worker =
                         new PrefillQueueRunner(
                                 "ordered-prefix",
                                 f.prefill,
-                                QueueExecutionSettings.capture(f.config),
+                                QueueExecutionSettings.capture(
+                                        f.config,
+                                        org.flexlb.balance.planner.BuiltinGroupPlanner.from(
+                                                f.config)),
                                 new DeliveryDispatcher(
                                         null,
                                         DeliveryTestSupport.service(f.config),
                                         new DeliveryMetricsReporter(null)),
-                                state);
+                                state,
+                                SchedulerTestSupport.queueDependencies(
+                                        org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(
+                                                f.owner)));
                 var boundary =
                         worker.processSelection(
                                 List.of(f.route, behindHead),
@@ -317,7 +320,7 @@ class RequestInflightRecoveryTest {
     private static final class Fixture implements AutoCloseable {
         static final long REQUEST_ID = 101L;
         static final long BATCH_ID = 51L;
-        final AbstractRequestScheduler owner;
+        final RequestLifecycle owner;
         final FlexlbConfig config;
         final EndpointRegistry endpoints;
         final PrefillEndpoint prefill;
@@ -350,8 +353,16 @@ class RequestInflightRecoveryTest {
                             owner.requests,
                             reporter,
                             DeliveryTestSupport.route(reporter),
-                            new PlacementAvailability());
-            ReflectionTestUtils.setField(owner.runtime, "endpoints", endpoints);
+                            new PlacementAvailability(),
+                            org.flexlb.balance.planner.BuiltinGroupPlanner.from(
+                                    service.loadBalanceConfig()),
+                            order ->
+                                    org.flexlb.balance.endpoint.PrefillActiveIndex.ordered(
+                                            16, order));
+            org.flexlb.balance.scheduler.SchedulerTestServices.setDependency(
+                    org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(owner),
+                    "endpoints",
+                    endpoints);
             when(SchedulerTestSupport.engineClient(owner)
                             .cancelAsync(any(), anyInt(), any(), anyLong()))
                     .thenReturn(
@@ -384,7 +395,8 @@ class RequestInflightRecoveryTest {
                 ReflectionTestUtils.invokeMethod(
                         prefillState,
                         "enableQueueLocked",
-                        Comparator.comparingLong(RequestRoute::requestId));
+                        org.flexlb.balance.endpoint.PrefillActiveIndex.ordered(
+                                16, Comparator.comparingLong(RequestRoute::requestId)));
             } finally {
                 prefillState.queueGuard().unlock();
             }
@@ -555,7 +567,8 @@ class RequestInflightRecoveryTest {
         }
 
         void drain() {
-            SchedulerTestSupport.awaitRequestWork(owner.runtime);
+            SchedulerTestSupport.awaitRequestWork(
+                    org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(owner));
         }
 
         void assertNextDecodeReservationRejected() {
@@ -583,10 +596,8 @@ class RequestInflightRecoveryTest {
             assertFalse(decode.ownership(reservation).owned());
             assertTrue(prefillState.batchCapacityAvailable(1));
             assertTrue(
-                    claim.owner()
-                            .data()
-                            .getScheduler()
-                            .runtime
+                    org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(
+                                    claim.owner().data().getScheduler())
                             .signals()
                             .delivery(claim)
                             .toCompletableFuture()
@@ -600,10 +611,8 @@ class RequestInflightRecoveryTest {
             // Inject strong proof only AFTER each test's assertions. This prevents an unrelated
             // shutdown timeout from hiding the missing terminal-settlement assertion.
             if (claim != null
-                    && !claim.owner()
-                            .data()
-                            .getScheduler()
-                            .runtime
+                    && !org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(
+                                    claim.owner().data().getScheduler())
                             .signals()
                             .delivery(claim)
                             .toCompletableFuture()
@@ -617,7 +626,8 @@ class RequestInflightRecoveryTest {
             drain();
             endpoints.close();
             drain();
-            SchedulerTestSupport.shutdown(owner.runtime);
+            SchedulerTestSupport.shutdown(
+                    org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(owner));
         }
     }
 

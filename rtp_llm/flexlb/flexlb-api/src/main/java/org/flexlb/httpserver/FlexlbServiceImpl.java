@@ -120,7 +120,10 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
 
         try {
             context = buildContext(request);
-            engineHealthReporter.reportArriveDelayTime(context);
+            engineHealthReporter.reportArriveDelayTime(
+                    context.data().getRequest().getRequestTimeMs(),
+                    context.data().getGrpcEntryTime(),
+                    context.data().getStartTime());
             boolean shouldForward = masterStatusView.shouldForwardToMaster();
             if (!shouldForward) {
                 ScheduleOrigin origin =
@@ -826,7 +829,19 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
             }
         }
         if (ctx != null) {
-            engineHealthReporter.reportBalancingService(ctx);
+            var outcome = ctx.data().getResponse();
+            if (outcome != null) {
+                engineHealthReporter.reportBalancingService(
+                        outcome.getCode(), System.currentTimeMillis() - ctx.data().getStartTime());
+                if (outcome.getServerStatus() != null) {
+                    for (var server : outcome.getServerStatus()) {
+                        if (server.getRole() != null) {
+                            engineHealthReporter.reportSelectionResult(
+                                    server.getRole(), outcome.isSuccess(), outcome.getCode());
+                        }
+                    }
+                }
+            }
             if (isAdmissionRequest(ctx)) {
                 reportPrioritySchedule(ctx, response);
             }

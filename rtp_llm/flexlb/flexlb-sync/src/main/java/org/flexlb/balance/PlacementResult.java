@@ -67,6 +67,12 @@ public record PlacementResult<V, B>(
         return new PlacementResult<>(Status.CLOSED, null, null, null, null);
     }
 
+    @SuppressWarnings("unchecked")
+    public <T> PlacementResult<T, B> asFailure() {
+        checkArgument(status != Status.SUCCESS, "successful placement has a value");
+        return (PlacementResult<T, B>) this;
+    }
+
     public enum Status {
         SUCCESS,
         REJECTED,

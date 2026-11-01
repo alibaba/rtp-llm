@@ -6,7 +6,7 @@ import io.grpc.Status;
 import io.grpc.stub.StreamObserver;
 import io.netty.channel.EventLoopGroup;
 import io.netty.channel.nio.NioEventLoopGroup;
-import org.flexlb.balance.scheduler.AbstractRequestScheduler;
+import org.flexlb.balance.scheduler.RequestLifecycle;
 import org.flexlb.balance.scheduler.RequestScheduler;
 import org.flexlb.config.ConfigService;
 import org.flexlb.consistency.MasterStatusService;
@@ -91,7 +91,7 @@ class ScheduleForwardMatrixTest {
 
     // ---- shared mocks for the schedule() matrix ----
     private RequestScheduler requestScheduler;
-    private final AbstractRequestScheduler requestState = mock(AbstractRequestScheduler.class);
+    private final RequestLifecycle requestState = mock(RequestLifecycle.class);
     private MasterStatusService consistency;
     private EngineHealthReporter engineHealthReporter;
     private FlexlbGrpcForwarder grpcForwarder;

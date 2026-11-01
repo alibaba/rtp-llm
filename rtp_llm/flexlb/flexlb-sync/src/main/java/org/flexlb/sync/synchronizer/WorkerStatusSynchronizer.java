@@ -113,15 +113,33 @@ public final class WorkerStatusSynchronizer {
     private void reportExecutorMetrics() {
         try {
             engineHealthReporter.reportThreadPoolInfo(
-                    ENGINE_BALANCING_THREAD_POOL_INFO, "engineSyncExecutor", engineSyncExecutor);
+                    ENGINE_BALANCING_THREAD_POOL_INFO,
+                    "engineSyncExecutor",
+                    engineSyncExecutor.getActiveCount(),
+                    engineSyncExecutor.getQueue().size(),
+                    engineSyncExecutor.getCorePoolSize(),
+                    engineSyncExecutor.getPoolSize());
             engineHealthReporter.reportThreadPoolInfo(
-                    ENGINE_BALANCING_THREAD_POOL_INFO, "statusCheckExecutor", statusCheckExecutor);
+                    ENGINE_BALANCING_THREAD_POOL_INFO,
+                    "statusCheckExecutor",
+                    statusCheckExecutor.getActiveCount(),
+                    statusCheckExecutor.getQueue().size(),
+                    statusCheckExecutor.getCorePoolSize(),
+                    statusCheckExecutor.getPoolSize());
             engineHealthReporter.reportThreadPoolInfo(
                     ENGINE_BALANCING_THREAD_POOL_INFO,
                     "statusApplicationExecutor",
-                    statusApplicationExecutor);
+                    statusApplicationExecutor.getActiveCount(),
+                    statusApplicationExecutor.getQueue().size(),
+                    statusApplicationExecutor.getCorePoolSize(),
+                    statusApplicationExecutor.getPoolSize());
             engineHealthReporter.reportThreadPoolInfo(
-                    ENGINE_BALANCING_THREAD_POOL_INFO, "cacheStatusExecutor", cacheStatusExecutor);
+                    ENGINE_BALANCING_THREAD_POOL_INFO,
+                    "cacheStatusExecutor",
+                    cacheStatusExecutor.getActiveCount(),
+                    cacheStatusExecutor.getQueue().size(),
+                    cacheStatusExecutor.getCorePoolSize(),
+                    cacheStatusExecutor.getPoolSize());
         } catch (Throwable failure) {
             logger.warn("Failed to report worker sync executor metrics", failure);
         }

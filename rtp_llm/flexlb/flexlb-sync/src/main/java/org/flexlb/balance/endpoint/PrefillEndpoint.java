@@ -21,7 +21,6 @@ import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.service.monitor.DeliveryMetricsReporter;
 import org.flexlb.util.Failures;
-import org.flexlb.util.PriorityOrdering;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -90,24 +89,13 @@ public class PrefillEndpoint extends WorkerEndpoint {
     private volatile PrefillQueueRunner queueRunner;
     // Guarded by ownership.queueGuard(); policy exists before the execution thread starts.
     private QueueExecutionSettings queueSettings;
+    private PrefillQueueRunner.Dependencies queueDependencies;
     private final DeliveryDispatcher dispatcher;
+    private final WorkerQueue.Factory workerQueues;
     private final DispatcherConfig.Type dispatcherType;
     public final DispatcherConfig.Type deliveryMode;
     private volatile Comparator<GroupPlanner.Item> projectionOrder;
     private volatile ProjectionSource projectionSource;
-
-    private static final Comparator<GroupPlanner.Item> PRIORITY_PROJECTION_ORDER =
-            (left, right) ->
-                    PriorityOrdering.compareWithRequestId(
-                            left.priority(),
-                            left.enqueueSeq(),
-                            left.requestId(),
-                            right.priority(),
-                            right.enqueueSeq(),
-                            right.requestId());
-    private static final Comparator<GroupPlanner.Item> FIFO_PROJECTION_ORDER =
-            Comparator.comparingLong(GroupPlanner.Item::enqueueSeq)
-                    .thenComparingLong(GroupPlanner.Item::requestId);
 
     public final PrefillState ownership;
 
@@ -120,7 +108,9 @@ public class PrefillEndpoint extends WorkerEndpoint {
             FlexlbConfig config,
             DeliveryDispatcher dispatcher,
             DeliveryMetricsReporter reporter,
-            PlacementAvailability placementAvailability) {
+            PlacementAvailability placementAvailability,
+            GroupPlanner grouping,
+            WorkerQueue.Factory workerQueues) {
         super(status);
         this.reporter = java.util.Objects.requireNonNull(reporter, "reporter");
         this.placementAvailability =
@@ -131,15 +121,16 @@ public class PrefillEndpoint extends WorkerEndpoint {
                         ? new LearningPredictor()
                         : new FormulaPredictor(estimator.getExpression());
         this.dispatcher = dispatcher;
-        this.dispatcherType = config.getDispatcher().getType();
-        this.queueSettings = config.isQueue() ? QueueExecutionSettings.capture(config) : null;
+        this.workerQueues = java.util.Objects.requireNonNull(workerQueues);
+        this.queueSettings =
+                config.isQueue() ? QueueExecutionSettings.capture(config, grouping) : null;
         this.requestLimit =
                 config.getDispatcher().getType() == DispatcherConfig.Type.NON_BATCH
                         ? config.getDispatcher().getMaxInflightPerPrefillWorker()
                         : 0L;
+        this.dispatcherType = config.getDispatcher().getType();
         this.deliveryMode = dispatcher.mode();
-        this.projectionOrder =
-                config.isPriorityOrdering() ? PRIORITY_PROJECTION_ORDER : FIFO_PROJECTION_ORDER;
+        this.projectionOrder = QueueExecutionSettings.projectionOrder(config.isPriorityOrdering());
         this.ownership =
                 new PrefillState(
                         new ReentrantLock(),
@@ -167,41 +158,55 @@ public class PrefillEndpoint extends WorkerEndpoint {
                             : queueSettings.constraints(getStatus().committedEngineObservation());
             this.admissionBlock = admissionBlock;
             this.queueEnabled = queueSettings != null;
-            this.grouping = queueSettings == null ? null : queueSettings.groupingPolicy();
+            this.grouping = queueSettings == null ? null : queueSettings.grouping();
             this.capturedOrder = projectionOrder;
         }
 
-        private RequestTimeEstimation.Inputs materialize() {
+        private RequestTimeEstimation.Inputs materialize(
+                PrefillTimePredictor.Evaluator evaluator, RequestTimeEstimation.Inputs observed) {
             RequestTimeEstimation.Inputs result = materialized;
-            if (result != null) {
+            if (result != null && result.evaluator() == evaluator) {
                 return result;
             }
             synchronized (this) {
-                if (materialized == null) {
-                    var queueSnapshot =
-                            new org.flexlb.balance.projection.QueueSnapshot(
-                                    ownership.capturedAtMs(),
-                                    queueEnabled,
-                                    grouping,
-                                    capturedOrder,
-                                    constraints,
-                                    ownership.active().projectedItems(),
-                                    admissionBlock);
-                    materialized =
-                            new RequestTimeEstimation.Inputs(
-                                    queueSnapshot,
-                                    ownership.work().materialize(),
-                                    version.ownershipVersion());
+                result = materialized;
+                if (result != null && result.evaluator() == evaluator) {
+                    return result;
+                }
+                var queueSnapshot =
+                        result == null
+                                ? new org.flexlb.balance.projection.QueueSnapshot(
+                                        ownership.capturedAtMs(),
+                                        queueEnabled,
+                                        grouping,
+                                        capturedOrder,
+                                        constraints,
+                                        ownership.active().projectedItems(),
+                                        admissionBlock)
+                                : result.queue();
+                var updated =
+                        new RequestTimeEstimation.Inputs(
+                                queueSnapshot,
+                                result == null ? ownership.work().materialize() : result.work(),
+                                version.ownershipVersion(),
+                                evaluator,
+                                deliveryMode);
+                // A delayed model capture must not replace concurrently published inputs.
+                if (result == observed) {
+                    materialized = updated;
                     // The cached projection must not retain completed request contexts.
                     ownership = null;
                 }
-                return materialized;
+                return updated;
             }
         }
     }
 
     public RequestTimeEstimation.Inputs captureRouteProjectionInputs() {
-        ProjectionSource source = projectionSource;
+        ProjectionSource observed = projectionSource;
+        var observedInputs = observed == null ? null : observed.materialized;
+        var evaluator = predictor == null ? null : predictor.evaluator();
+        ProjectionSource source = observed;
         if (source == null || source.version != ownership.progress()) {
             ownership.queueGuard().lock();
             try {
@@ -214,25 +219,34 @@ public class PrefillEndpoint extends WorkerEndpoint {
             } finally {
                 ownership.queueGuard().unlock();
             }
+        } else if (observedInputs != null && observedInputs.evaluator() == evaluator) {
+            return observedInputs;
         }
-        // Concurrent callers share one source per version. A late build only
+        // Concurrent callers share one source per ownership version. A late build only
         // fills its own source; it can never overwrite a newer capture.
-        return source.materialize();
+        return source.materialize(evaluator, source == observed ? observedInputs : null);
     }
 
     /**
      * Publish one exact route after validating its generation pin.
      */
     public boolean offerPinned(
-            GenerationPin exactPin, RequestRoute exactRoute, QueueExecutionSettings settings) {
+            GenerationPin exactPin,
+            RequestRoute exactRoute,
+            QueueExecutionSettings settings,
+            PrefillQueueRunner.Dependencies dependencies) {
         requirePinnedGeneration(exactPin);
         if (queueRunner == null) {
-            enableQueueRuntime(settings);
+            enableQueueRuntime(settings, dependencies);
         }
+        checkArgument(
+                queueDependencies == dependencies && queueSettings.equals(settings),
+                "queue generation is already bound to different runtime facilities or settings");
         return queueRunner.offer(exactRoute);
     }
 
-    public void enableQueueRuntime(QueueExecutionSettings settings) {
+    private void enableQueueRuntime(
+            QueueExecutionSettings settings, PrefillQueueRunner.Dependencies dependencies) {
         ownership.queueGuard().lock();
         try {
             if (queueRunner != null) {
@@ -242,17 +256,17 @@ public class PrefillEndpoint extends WorkerEndpoint {
                     settings != null && settings.dispatcherType() == dispatcherType,
                     "queued admission requires a compatible QUEUE configuration");
             ownership.enableQueueLocked(
-                    settings.priorityOrdering()
-                            ? PrefillQueueRunner.PRIORITY_QUEUE_ORDER
-                            : PrefillQueueRunner.FIFO_QUEUE_ORDER);
+                    workerQueues.create(
+                            QueueExecutionSettings.queueOrder(settings.priorityOrdering())));
             PrefillQueueRunner newRunner =
-                    new PrefillQueueRunner(ipPort(), this, settings, dispatcher, ownership);
+                    new PrefillQueueRunner(
+                            ipPort(), this, settings, dispatcher, ownership, dependencies);
             queueSettings = settings;
-            projectionOrder =
-                    settings.priorityOrdering() ? PRIORITY_PROJECTION_ORDER : FIFO_PROJECTION_ORDER;
+            queueDependencies = dependencies;
+            projectionOrder = QueueExecutionSettings.projectionOrder(settings.priorityOrdering());
             projectionSource = null;
-            queueRunner = newRunner;
             newRunner.start();
+            queueRunner = newRunner;
         } finally {
             ownership.queueGuard().unlock();
         }
@@ -457,28 +471,12 @@ public class PrefillEndpoint extends WorkerEndpoint {
                         if (prepared != null && !observation.alive()) {
                             beginRetirement();
                         }
-                        boolean inputsChanged = result.schedulingInputsChanged();
-                        if (prepared != null && !inputsChanged) {
-                            var before = ws.committedEngineObservation();
-                            var after = observation.engine();
-                            inputsChanged =
-                                    QueueExecutionSettings.schedulingCapacity(
-                                                            before,
-                                                            QueueExecutionSettings.PlanningResource
-                                                                    .TOKENS)
-                                                    != QueueExecutionSettings.schedulingCapacity(
-                                                            after,
-                                                            QueueExecutionSettings.PlanningResource
-                                                                    .TOKENS)
-                                            || QueueExecutionSettings.schedulingCapacity(
-                                                            before,
-                                                            QueueExecutionSettings.PlanningResource
-                                                                    .KV)
-                                                    != QueueExecutionSettings.schedulingCapacity(
-                                                            after,
-                                                            QueueExecutionSettings.PlanningResource
-                                                                    .KV);
-                        }
+                        boolean inputsChanged =
+                                result.schedulingInputsChanged()
+                                        || prepared != null
+                                                && QueueExecutionSettings.capacityChanged(
+                                                        ws.committedEngineObservation(),
+                                                        observation.engine());
                         if (prepared != null) {
                             ws.publishPreparedStatus(prepared);
                         }
@@ -512,27 +510,9 @@ public class PrefillEndpoint extends WorkerEndpoint {
                                                         item.hitCache(),
                                                         0L,
                                                         Math.max(0L, item.seqLen())));
-                        try {
-                            predictions.put(
-                                    batch.getKey(),
-                                    PrefillPredictionBoundary.predictCommittedBatchMs(
-                                            predictor.evaluator(), features));
-                        } catch (RuntimeException predictionFailure) {
-                            try {
-                                logger.error(
-                                        "Prefill batch repack prediction failed; using default formula "
-                                                + "engine={} surviving_requests={}",
-                                        getIp(),
-                                        batch.getValue().size(),
-                                        predictionFailure);
-                            } catch (RuntimeException ignoredLoggingFailure) {
-                                // Prediction logging cannot block membership settlement.
-                            }
-                            predictions.put(
-                                    batch.getKey(),
-                                    PrefillPredictionBoundary.predictCommittedBatchMs(
-                                            DEFAULT_BATCH_PREDICTOR, features));
-                        }
+                        predictions.put(
+                                batch.getKey(),
+                                predictRemainingBatch(features, batch.getValue().size()));
                     }
                 }
             }
@@ -540,6 +520,27 @@ public class PrefillEndpoint extends WorkerEndpoint {
         } catch (Throwable failure) {
             beginRetirement();
             throw Failures.propagate(failure, "Prefill status reduction/publication failed");
+        }
+    }
+
+    /** Model failures use the existing default formula; callers run prediction outside queueGuard. */
+    private long predictRemainingBatch(PrefillBatchFeatures features, int survivingRequests) {
+        try {
+            return PrefillPredictionBoundary.predictCommittedBatchMs(
+                    predictor.evaluator(), features);
+        } catch (RuntimeException predictionFailure) {
+            try {
+                logger.error(
+                        "Prefill batch repack prediction failed; using default formula "
+                                + "engine={} surviving_requests={}",
+                        getIp(),
+                        survivingRequests,
+                        predictionFailure);
+            } catch (RuntimeException ignoredLoggingFailure) {
+                // Prediction logging cannot block membership settlement.
+            }
+            return PrefillPredictionBoundary.predictCommittedBatchMs(
+                    DEFAULT_BATCH_PREDICTOR, features);
         }
     }
 
@@ -642,10 +643,15 @@ public class PrefillEndpoint extends WorkerEndpoint {
         return ownership.committedSnapshot().totalRemainingWorkMs();
     }
 
+    /** Current number of requests waiting for this worker. */
+    public int queueDepth() {
+        return ownership.progress().queueDepth();
+    }
+
     // ==================== Metrics ====================
     /**
      * Report per-worker batch metrics via the given reporter.
-     * Called periodically by {@link org.flexlb.balance.scheduler.SchedulerRuntime}.
+     * Called periodically by {@link org.flexlb.service.monitor.DeliveryMetricsReporter}.
      */
     public void reportBatchMetrics(DeliveryMetricsReporter reporter) {
         int queueSize = ownership.progress().queueDepth();
@@ -662,7 +668,12 @@ public class PrefillEndpoint extends WorkerEndpoint {
                             reporter.reportBatcherQueueDepthByPriority(
                                     RoleType.PREFILL.name(), getIp(), priority, size));
         }
-        reporter.reportPrefillInflight(getIp(), ownership.stats());
+        var stats = ownership.stats();
+        reporter.reportPrefillInflight(
+                getIp(),
+                stats.batchCount(),
+                stats.locallyOwnedRequests(),
+                stats.maxObservedAgeMs());
     }
 
     private Throwable reportBatchCompletions(

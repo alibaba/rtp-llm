@@ -333,8 +333,29 @@ public class CacheMetricsReporter {
             return;
         }
 
+        monitor.report(CACHE_ROUTING_CANDIDATE_MAX_HIT_TOKENS,
+                FlexMetricTags.of("role", roleType.name()), hitTokens);
+    }
+
+    /** Effective hits and routing matches belong to the same successfully selected request. */
+    public void reportSelectionCache(
+            RoleType roleType,
+            long totalTokens,
+            long effectiveHit,
+            long selectedMatch,
+            long maximumMatch) {
         FlexMetricTags tags = FlexMetricTags.of("role", roleType.name());
-        monitor.report(CACHE_ROUTING_CANDIDATE_MAX_HIT_TOKENS, tags, hitTokens);
+        monitor.report(CACHE_HIT_COUNT, tags, effectiveHit);
+        monitor.report(
+                CACHE_HIT_RATIO,
+                tags,
+                totalTokens > 0L ? effectiveHit / (double) totalTokens : 0.0);
+        monitor.report(CACHE_REQUEST_TOTAL, tags, 1.0);
+        if (totalTokens > 0L) {
+            monitor.report(CACHE_ROUTING_SELECTED_MATCH_HIT_TOKENS, tags, selectedMatch);
+            monitor.report(CACHE_ROUTING_SELECTED_MATCH_TOTAL_TOKENS, tags, totalTokens);
+        }
+        monitor.report(CACHE_ROUTING_CANDIDATE_MAX_HIT_TOKENS, tags, maximumMatch);
     }
 
     /** Report the outcome of a cache-affinity routing decision. */

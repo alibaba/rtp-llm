@@ -248,7 +248,7 @@ public final class RequestContext {
                         && close.prefillSettled()
                         && close.decodeSettled();
         if (rolledBack && pendingEnd != null) {
-            pendingEnd = pendingEnd.withoutRoute();
+            pendingEnd = pendingEnd.withRoute(null);
         }
         boolean admissionFailure =
                 result == PublicationResult.FAILED && outcome == null && cancellation == null;
@@ -258,7 +258,7 @@ public final class RequestContext {
         if (retained.pendingTerminal() != null
                 && !(admissionFailure && retained.pendingTerminal().kind() == EndKind.SHUTDOWN)) {
             var end = retained.pendingTerminal();
-            retainEnd(rolledBack ? end.withoutRoute() : end, nowMs);
+            retainEnd(rolledBack ? end.withRoute(null) : end, nowMs);
         }
         if (pendingEnd == null && outcome == null && retained.pendingRetirement() != null) {
             var retired = retained.pendingRetirement();
@@ -372,7 +372,7 @@ public final class RequestContext {
                 || nowMs - lastWorkerAtMs >= inactivityMs) {
             return new Rejected<>(before, before, Rejection.CANCELLED);
         }
-        delivery = delivery.withSendState(SendState.SENDING);
+        delivery = delivery.withSend(SendState.SENDING);
         return new Granted<>(before, refresh(nowMs), exact);
     }
 
@@ -496,7 +496,7 @@ public final class RequestContext {
                 && (isDecode
                         ? evidence.kind() == EngineKind.ALLOCATED
                         : evidence.kind() == EngineKind.ACTIVE)) {
-            preemption = preemption.observeRestoration();
+            preemption = preemption.withRestorationObserved(true);
         }
         if (terminal && delivery != null) {
             delivery =
@@ -658,7 +658,7 @@ public final class RequestContext {
                                             : diagnosis.errorType(),
                                     diagnosis == null ? "request inactive" : diagnosis.detail());
                 }
-                close = close.markExpired();
+                close = close.withExpired(true);
                 retainEnd(
                         EndEvidence.failure(
                                 route,
@@ -846,7 +846,7 @@ public final class RequestContext {
                 return new Rejected<>(before, before, Rejection.INVALID_STATE);
             }
             if (preemption != null && !preemption.finished() && !delivery.acknowledged()) {
-                preemption = preemption.awaitConfirmation();
+                preemption = preemption.withConfirmationPending(true);
                 return new Blocked<>(before, refresh(candidate.nowMs()), Blocker.PREEMPTION);
             }
             long activity = Math.max(lastWorkerAtMs, delivery.startedAtMs());
@@ -868,7 +868,7 @@ public final class RequestContext {
                 return new Rejected<>(before, refresh(candidate.nowMs()), Rejection.CANCELLED);
             }
             if (!delivery.acknowledged()) {
-                delivery = delivery.acknowledge();
+                delivery = delivery.withAcknowledged(true);
             }
         } else if (candidate.kind() == ResponseKind.TERMINAL && outcome == null
                 || candidate.kind() == ResponseKind.CANCELLATION && cancellation == null) {
@@ -881,6 +881,23 @@ public final class RequestContext {
     }
 
     /** Publisher capacity is reserved by Scheduler before freezing the outcome. */
+    synchronized boolean readyToClose(EndKind ending) {
+        return !waitsForPlacement(ending) && !waitsForPreemption(ending);
+    }
+
+    private boolean waitsForPlacement(EndKind ending) {
+        return placement != null && !(ending == EndKind.DELIVERY_FAILURE && cancellation == null);
+    }
+
+    private boolean waitsForPreemption(EndKind ending) {
+        return preemption != null
+                && !preemption.finished()
+                && !(ending == EndKind.DELIVERY_FAILURE && cancellation == null)
+                && ending != EndKind.FRONTEND
+                && ending != EndKind.INACTIVITY
+                && ending != EndKind.RETIREMENT;
+    }
+
     public synchronized Update beginClose(EndEvidence evidence, long nowMs) {
         var before = state;
         if (key == null) {
@@ -895,21 +912,8 @@ public final class RequestContext {
         if (evidence != null) {
             retainEnd(evidence, nowMs);
         }
-        boolean deliveryFailure =
-                cancellation == null
-                        && pendingEnd != null
-                        && pendingEnd.kind() == EndKind.DELIVERY_FAILURE;
-        if (placement != null && !deliveryFailure) {
-            return update(before, refresh(nowMs));
-        }
-        if (outcome == null
-                && preemption != null
-                && !preemption.finished()
-                && !deliveryFailure
-                && (pendingEnd == null
-                        || pendingEnd.kind() != EndKind.FRONTEND
-                                && pendingEnd.kind() != EndKind.INACTIVITY
-                                && pendingEnd.kind() != EndKind.RETIREMENT)) {
+        EndKind ending = pendingEnd == null ? null : pendingEnd.kind();
+        if (waitsForPlacement(ending) || outcome == null && waitsForPreemption(ending)) {
             return update(before, refresh(nowMs));
         }
         if (outcome == null && pendingEnd == null) {
@@ -939,7 +943,7 @@ public final class RequestContext {
                     && (close.expired()
                             || pendingEnd.kind() == EndKind.RETIREMENT
                                     && pendingEnd.decodeSettled())) {
-                preemption = preemption.finish();
+                preemption = preemption.withFinished(true);
             }
             pendingEnd = null;
         }
@@ -967,7 +971,7 @@ public final class RequestContext {
         if (delivery != null
                 && delivery.identity().kind() == DeliveryClaimKind.ROUTE_DECISION
                 && delivery.send() == SendState.NOT_STARTED) {
-            delivery = delivery.withSendState(SendState.ROUTE_CLOSED);
+            delivery = delivery.withSend(SendState.ROUTE_CLOSED);
         }
         close = close.recordProgress(progress, preemption == null || preemption.finished());
         if (preemption != null
@@ -978,7 +982,7 @@ public final class RequestContext {
                         || delivery.abandonment() != null
                                 && delivery.prefillProof()
                                 && delivery.decodeProof())) {
-            preemption = preemption.finish();
+            preemption = preemption.withFinished(true);
         }
         if (close.prefillSettled()
                 && close.decodeSettled()
@@ -1010,9 +1014,7 @@ public final class RequestContext {
             close = close.retainEnd(evidence);
             return;
         }
-        boolean deliveryFailure =
-                cancellation == null && evidence.kind() == EndKind.DELIVERY_FAILURE;
-        if (placement != null && !deliveryFailure) {
+        if (waitsForPlacement(evidence.kind())) {
             var previous = placement.pendingTerminal();
             boolean better =
                     previous == null
@@ -1030,18 +1032,13 @@ public final class RequestContext {
                             placement.inactivityExpired() || evidence.kind() == EndKind.INACTIVITY);
             return;
         }
-        if (preemption != null
-                && !preemption.finished()
-                && !deliveryFailure
-                && evidence.kind() != EndKind.FRONTEND
-                && evidence.kind() != EndKind.INACTIVITY
-                && evidence.kind() != EndKind.RETIREMENT) {
+        if (waitsForPreemption(evidence.kind())) {
             var previous = preemption.pendingTerminal();
             boolean better =
                     previous == null
                             || evidence.kind() == EndKind.WORKER
                                     && previous.kind() != EndKind.WORKER;
-            preemption = preemption.retainTerminal(better ? evidence : previous);
+            preemption = preemption.withPendingTerminal(better ? evidence : previous);
             return;
         }
         if (pendingEnd == null
@@ -1159,50 +1156,25 @@ public final class RequestContext {
             inactivityAt =
                     oldInactivity.atMs(); // Existing wake-up will recheck the latest activity.
         }
-        boolean sameRequest =
-                requestAt <= 0L
-                        ? oldRequest == null
-                        : oldRequest != null && oldRequest.atMs() == requestAt;
-        boolean sameVisibility =
-                visibilityAt <= 0L
-                        ? oldVisibility == null
-                        : oldVisibility != null && oldVisibility.atMs() == visibilityAt;
-        boolean sameInactivity =
-                inactivityAt <= 0L
-                        ? oldInactivity == null
-                        : oldInactivity != null && oldInactivity.atMs() == inactivityAt;
-        if (sameRequest && sameVisibility && sameInactivity) {
-            return;
-        }
         long revision = deadlines.revision() + 1L;
-        var request =
-                sameRequest
-                        ? oldRequest
-                        : requestAt <= 0L
-                                ? null
-                                : new ExpirationTimer.Token(
-                                        this, ExpirationTimer.Kind.REQUEST, revision, requestAt);
+        var request = deadlineToken(oldRequest, ExpirationTimer.Kind.REQUEST, revision, requestAt);
         var visibility =
-                sameVisibility
-                        ? oldVisibility
-                        : visibilityAt <= 0L
-                                ? null
-                                : new ExpirationTimer.Token(
-                                        this,
-                                        ExpirationTimer.Kind.VISIBILITY,
-                                        revision,
-                                        visibilityAt);
+                deadlineToken(
+                        oldVisibility, ExpirationTimer.Kind.VISIBILITY, revision, visibilityAt);
         var inactivity =
-                sameInactivity
-                        ? oldInactivity
-                        : inactivityAt <= 0L
-                                ? null
-                                : new ExpirationTimer.Token(
-                                        this,
-                                        ExpirationTimer.Kind.INACTIVITY,
-                                        revision,
-                                        inactivityAt);
-        deadlines = new ExpirationTimer.Plan(revision, request, visibility, inactivity);
+                deadlineToken(
+                        oldInactivity, ExpirationTimer.Kind.INACTIVITY, revision, inactivityAt);
+        if (request != oldRequest || visibility != oldVisibility || inactivity != oldInactivity) {
+            deadlines = new ExpirationTimer.Plan(revision, request, visibility, inactivity);
+        }
+    }
+
+    private ExpirationTimer.Token deadlineToken(
+            ExpirationTimer.Token previous, ExpirationTimer.Kind kind, long revision, long atMs) {
+        if (atMs <= 0L) return null;
+        return previous != null && previous.atMs() == atMs
+                ? previous
+                : new ExpirationTimer.Token(this, kind, revision, atMs);
     }
 
     private Update update(Snapshot before, Snapshot after) {

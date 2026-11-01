@@ -65,7 +65,7 @@ class ExpirationTimerTest {
                         mock(org.flexlb.service.monitor.DeliveryMetricsReporter.class),
                         mock(org.flexlb.service.monitor.RequestSchedulerReporter.class),
                         mock(org.flexlb.service.RecentCacheKeyTraceReporter.class));
-        var runtime = owner.runtime;
+        var runtime = org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(owner);
         var timer = runtime.deadlines();
         ((ScheduledThreadPoolExecutor) ReflectionTestUtils.getField(timer, "executor"))
                 .shutdownNow();
@@ -139,7 +139,7 @@ class ExpirationTimerTest {
             assertEquals(ContextResult.Phase.CLOSED, context.snapshot().phase());
             assertEquals(0, runtime.requests().liveRequestCount());
             assertEquals(0, ReflectionTestUtils.getField(timer, "registrations"));
-            assertEquals(0L, ReflectionTestUtils.getField(runtime, "pendingWork"));
+            assertEquals(0L, ReflectionTestUtils.getField(runtime.tasks(), "pendingWork"));
         } finally {
             SchedulerTestSupport.shutdown(runtime);
         }
@@ -374,7 +374,7 @@ class ExpirationTimerTest {
             String kind, boolean earlyFire, boolean installed, boolean cancel) {
         var requests = mock(RequestRepository.class);
         var context = registeredContext();
-        var owner = mock(AbstractRequestScheduler.class);
+        var owner = mock(RequestLifecycle.class);
         when(context.data()).thenReturn(data(owner));
         when(requests.isCurrent(context)).thenReturn(true);
         var timer = new ExpirationTimer(requests);
@@ -444,7 +444,7 @@ class ExpirationTimerTest {
         return context;
     }
 
-    private static RequestData data(AbstractRequestScheduler owner) {
+    private static RequestData data(RequestLifecycle owner) {
         var data = new RequestData(new FlexlbConfig());
         var request = mock(Request.class);
         data.setRequest(request);
@@ -455,7 +455,7 @@ class ExpirationTimerTest {
 
     private static final class Fixture implements AutoCloseable {
         private final RequestContext context = registeredContext();
-        private final AbstractRequestScheduler owner = mock(AbstractRequestScheduler.class);
+        private final RequestLifecycle owner = mock(RequestLifecycle.class);
         private final ExpirationTimer timer;
         private final java.util.EnumMap<ExpirationTimer.Kind, Object> handles;
         private final ScheduledFuture<?> inactivityTask;

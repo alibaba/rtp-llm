@@ -39,7 +39,10 @@ class EndpointRetirementLinearizationTest {
                                 requestRuntime.events()),
                         mock(DeliveryMetricsReporter.class),
                         EndpointTestSupport.routeStrategy(requestRuntime),
-                        new PlacementAvailability());
+                        new PlacementAvailability(),
+                        org.flexlb.balance.planner.BuiltinGroupPlanner.from(
+                                configService.loadBalanceConfig()),
+                        order -> org.flexlb.balance.endpoint.PrefillActiveIndex.ordered(16, order));
         String prefillAddress = "127.0.0.1:8100";
         String decodeAddress = "127.0.0.1:8200";
         WorkerStatus prefillStatus = status(RoleType.PREFILL, 8100);

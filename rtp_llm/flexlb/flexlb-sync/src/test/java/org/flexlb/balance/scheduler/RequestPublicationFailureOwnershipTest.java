@@ -153,7 +153,8 @@ class RequestPublicationFailureOwnershipTest {
                                 return true;
                             });
             var originalTimer = f.runtime.deadlines();
-            ReflectionTestUtils.setField(f.runtime, "timer", timer);
+            org.flexlb.balance.scheduler.SchedulerTestServices.setDependency(
+                    f.runtime, "timer", timer);
             var closing =
                     workers.submit(
                             () ->
@@ -178,7 +179,8 @@ class RequestPublicationFailureOwnershipTest {
                     settlement.get(5, TimeUnit.SECONDS);
                 }
                 SchedulerTestSupport.awaitRequestWork(f.runtime);
-                ReflectionTestUtils.setField(f.runtime, "timer", originalTimer);
+                org.flexlb.balance.scheduler.SchedulerTestServices.setDependency(
+                        f.runtime, "timer", originalTimer);
             }
             assertEquals(Phase.CLOSED, context.snapshot().phase());
             verify(endpoint, times(1)).release(null, route);
@@ -280,7 +282,8 @@ class RequestPublicationFailureOwnershipTest {
             if (timerFailure) {
                 var timer = spy(originalTimer);
                 doThrow(failure).when(timer).update(eq(context), any());
-                ReflectionTestUtils.setField(f.runtime, "timer", timer);
+                org.flexlb.balance.scheduler.SchedulerTestServices.setDependency(
+                        f.runtime, "timer", timer);
             } else {
                 doThrow(failure).when(route).successResponse(anyBoolean());
             }
@@ -305,7 +308,8 @@ class RequestPublicationFailureOwnershipTest {
                 assertEquals(1, f.runtime.requests().liveRequestCount());
                 verify(endpoint, never()).release(org.mockito.ArgumentMatchers.isNull(), any());
             } finally {
-                ReflectionTestUtils.setField(f.runtime, "timer", originalTimer);
+                org.flexlb.balance.scheduler.SchedulerTestServices.setDependency(
+                        f.runtime, "timer", originalTimer);
                 doCallRealMethod().when(route).successResponse(anyBoolean());
             }
             originalTimer.update(context, context.snapshot().deadlines());
@@ -455,8 +459,10 @@ class RequestPublicationFailureOwnershipTest {
         try (var f = new Fixture()) {
             var context = RequestProtocolTestSupport.context(f.config, 9304L);
             var future = RequestProtocolTestSupport.register(f.owner, context);
-            var source = f.runtime.registerRequestWork(context);
-            SchedulerRuntime.WorkRegistration accepted;
+            org.flexlb.balance.scheduler.SchedulerTestServices.setDependency(
+                    f.runtime, "tasks", spy(f.runtime.tasks));
+            var source = f.runtime.tasks.registerRequestWork(context);
+            RequestTaskPool.WorkRegistration accepted;
             try {
                 accepted = spy(source);
             } catch (RuntimeException | Error failure) {
@@ -471,9 +477,9 @@ class RequestPublicationFailureOwnershipTest {
                                         firstRegistration.getAndSet(false)
                                                 ? accepted
                                                 : call.callRealMethod())
-                        .when(runtime)
+                        .when(runtime.tasks)
                         .registerRequestWork(context);
-                ReflectionTestUtils.setField(f.owner, "runtime", runtime);
+                org.flexlb.balance.scheduler.SchedulerTestServices.bind(f.owner, runtime);
                 var originalTimer = f.runtime.deadlines();
                 var timer = spy(originalTimer);
                 var started = new CountDownLatch(1);
@@ -489,7 +495,8 @@ class RequestPublicationFailureOwnershipTest {
                                 })
                         .when(timer)
                         .update(eq(context), any());
-                ReflectionTestUtils.setField(runtime, "timer", timer);
+                org.flexlb.balance.scheduler.SchedulerTestServices.setDependency(
+                        runtime, "timer", timer);
                 var failure = new IllegalStateException("submit failed");
                 doAnswer(
                                 call -> {
@@ -542,16 +549,17 @@ class RequestPublicationFailureOwnershipTest {
                     assertEquals(0, f.runtime.requests().liveRequestCount());
                 } finally {
                     finish.countDown();
-                    doCallRealMethod().when(runtime).registerRequestWork(context);
-                    ReflectionTestUtils.setField(runtime, "timer", originalTimer);
-                    ReflectionTestUtils.setField(f.owner, "runtime", f.runtime);
+                    doCallRealMethod().when(runtime.tasks).registerRequestWork(context);
+                    org.flexlb.balance.scheduler.SchedulerTestServices.setDependency(
+                            runtime, "timer", originalTimer);
+                    org.flexlb.balance.scheduler.SchedulerTestServices.bind(f.owner, f.runtime);
                 }
             }
         }
     }
 
     @SuppressWarnings("unchecked")
-    private static Set<ResponsePublication> registrations(SchedulerRuntime runtime) {
+    private static Set<ResponsePublication> registrations(SchedulerTestServices runtime) {
         var registered =
                 (Set<ResponsePublication>)
                         ReflectionTestUtils.getField(
@@ -563,8 +571,8 @@ class RequestPublicationFailureOwnershipTest {
 
     private static final class Fixture implements AutoCloseable {
         private final org.flexlb.config.FlexlbConfig config = SchedulingTestConfig.newConfig();
-        private final AbstractRequestScheduler owner;
-        private final SchedulerRuntime runtime;
+        private final RequestLifecycle owner;
+        private final SchedulerTestServices runtime;
 
         private Fixture() {
             config.setScheduler(ConfigTestSupport.direct());
@@ -577,7 +585,7 @@ class RequestPublicationFailureOwnershipTest {
                             mock(DeliveryMetricsReporter.class),
                             mock(RequestSchedulerReporter.class),
                             mock(RecentCacheKeyTraceReporter.class));
-            runtime = owner.runtime;
+            runtime = org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(owner);
         }
 
         @Override

@@ -53,7 +53,7 @@ class RequestInactivityTest {
     // Explicit observation/check timestamps advance virtual time without waiting for wall time.
     private static final long TIMEOUT_MS = TimeUnit.HOURS.toMillis(1L);
 
-    private AbstractRequestScheduler registry;
+    private RequestLifecycle registry;
     private RequestContext requestContext;
     private RequestRoute item;
     private PrefillEndpoint prefill;
@@ -86,7 +86,9 @@ class RequestInactivityTest {
                         org.mockito.ArgumentMatchers.anyLong()))
                 .thenReturn(cleanup);
         org.springframework.test.util.ReflectionTestUtils.setField(
-                registry.runtime, "engineClient", channel);
+                org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(registry).dispatcher,
+                "grpcClient",
+                channel);
         RequestContext context = RequestProtocolTestSupport.context(config, REQUEST_ID);
         CompletableFuture<Response> future = RequestProtocolTestSupport.register(registry, context);
         requestContext = registry.requests.findActive(REQUEST_ID);
@@ -150,7 +152,8 @@ class RequestInactivityTest {
         } else {
             active(RoleType.DECODE, System.currentTimeMillis());
         }
-        SchedulerTestSupport.awaitRequestWork(registry.runtime);
+        SchedulerTestSupport.awaitRequestWork(
+                org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(registry));
         assertTrue(
                 scheduled.isCancelled(),
                 "engine evidence must cancel the obsolete scheduled callback");
@@ -169,12 +172,17 @@ class RequestInactivityTest {
         acknowledgeDelivery();
         long firstAt = registeredAtMs + TIMEOUT_MS;
         active(source, firstAt);
-        SchedulerTestSupport.awaitRequestWork(registry.runtime);
+        SchedulerTestSupport.awaitRequestWork(
+                org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(registry));
         var oldPlan = requestContext.snapshot().deadlines();
-        var workers = SchedulerTestSupport.requestWorkers(registry.runtime);
+        var workers =
+                SchedulerTestSupport.requestWorkers(
+                        org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(registry));
         var observer = org.mockito.Mockito.spy(workers);
         org.springframework.test.util.ReflectionTestUtils.setField(
-                registry.runtime, "requestWorkers", observer);
+                org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(registry).tasks(),
+                "requestWorkers",
+                observer);
         try {
             for (int index = 1; index <= 1_000; index++) {
                 active(source, firstAt + index);
@@ -186,7 +194,9 @@ class RequestInactivityTest {
             verify(observer, never()).execute(any(Runnable.class));
         } finally {
             org.springframework.test.util.ReflectionTestUtils.setField(
-                    registry.runtime, "requestWorkers", workers);
+                    org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(registry).tasks(),
+                    "requestWorkers",
+                    workers);
         }
         RequestProtocolTestSupport.expireInactiveRequest(
                 registry, requestContext, firstAt + 1_000 + TIMEOUT_MS - 1);
@@ -225,7 +235,9 @@ class RequestInactivityTest {
         assertNotNull(
                 active.after().deadlines().visibility(),
                 "pending timer installation is real work even when status does not advance");
-        var timer = SchedulerTestSupport.timer(registry.runtime);
+        var timer =
+                SchedulerTestSupport.timer(
+                        org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(registry));
         timer.update(requestContext, active.after().deadlines());
         timer.update(requestContext, completed.after().deadlines());
         assertNotNull(scheduledVisibility());
@@ -253,7 +265,7 @@ class RequestInactivityTest {
         RequestContext foreign = mock(RequestContext.class);
         RequestData foreignData = mock(RequestData.class);
         when(foreign.data()).thenReturn(foreignData);
-        when(foreignData.getScheduler()).thenReturn(mock(AbstractRequestScheduler.class));
+        when(foreignData.getScheduler()).thenReturn(mock(RequestLifecycle.class));
         registry.onEngineEvidence(
                 foreign,
                 new EngineEvidence(
@@ -385,12 +397,14 @@ class RequestInactivityTest {
         CountDownLatch started = new CountDownLatch(workers);
         CountDownLatch release = new CountDownLatch(1);
         for (int i = 0; i < workers; i++) {
-            registry.runtime.executeRequestWork(
-                    requestContext,
-                    () -> {
-                        started.countDown();
-                        RequestProtocolTestSupport.await(release);
-                    });
+            org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(registry)
+                    .tasks()
+                    .execute(
+                            requestContext,
+                            () -> {
+                                started.countDown();
+                                RequestProtocolTestSupport.await(release);
+                            });
         }
         try {
             assertTrue(started.await(1L, TimeUnit.SECONDS));
@@ -423,7 +437,8 @@ class RequestInactivityTest {
         } finally {
             release.countDown();
         }
-        SchedulerTestSupport.awaitRequestWork(registry.runtime);
+        SchedulerTestSupport.awaitRequestWork(
+                org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(registry));
         assertFalse(item.future().get(1L, TimeUnit.SECONDS).isSuccess());
     }
 
@@ -448,7 +463,12 @@ class RequestInactivityTest {
                 RequestState.Phase.CANCEL_REQUESTED,
                 registry.cancel(REQUEST_ID, 0L, CancelReason.CLIENT_CANCELLED).state());
         assertEquals(1, registry.requests.liveRequestCount());
-        assertFalse(registry.runtime.signals().delivery(claim).toCompletableFuture().isDone());
+        assertFalse(
+                org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(registry)
+                        .signals()
+                        .delivery(claim)
+                        .toCompletableFuture()
+                        .isDone());
 
         synchronized (requestContext) {
             assertEquals(
@@ -563,19 +583,32 @@ class RequestInactivityTest {
     }
 
     private void assertExpiredAndReleased(RequestState.Phase expectedState) {
-        if (!registry.runtime.signals().delivery(claim).toCompletableFuture().isDone()) {
+        if (!org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(registry)
+                .signals()
+                .delivery(claim)
+                .toCompletableFuture()
+                .isDone()) {
             assertEquals(
                     1, registry.requests.liveRequestCount(), "expiry retains cleanup ownership");
             cleanup.complete(EngineGrpcClient.CancelReply.REQUEST_CLEANED);
             if (!deliveryCompleted) {
                 assertFalse(
-                        registry.runtime.signals().delivery(claim).toCompletableFuture().isDone(),
+                        org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(registry)
+                                .signals()
+                                .delivery(claim)
+                                .toCompletableFuture()
+                                .isDone(),
                         "early cleanup cannot release the sender");
                 completeDelivery(
                         DeliveryResult.uncertain(new IllegalStateException("sender exited")));
             }
-            registry.runtime.signals().delivery(claim).toCompletableFuture().join();
-            SchedulerTestSupport.awaitRequestWork(registry.runtime);
+            org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(registry)
+                    .signals()
+                    .delivery(claim)
+                    .toCompletableFuture()
+                    .join();
+            SchedulerTestSupport.awaitRequestWork(
+                    org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(registry));
         }
         assertEquals(
                 0,
@@ -599,7 +632,9 @@ class RequestInactivityTest {
     }
 
     private ScheduledFuture<?> scheduledVisibility() {
-        var timer = SchedulerTestSupport.timer(registry.runtime);
+        var timer =
+                SchedulerTestSupport.timer(
+                        org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(registry));
         var slots =
                 (java.util.Map<?, ?>)
                         org.springframework.test.util.ReflectionTestUtils.getField(timer, "slots");

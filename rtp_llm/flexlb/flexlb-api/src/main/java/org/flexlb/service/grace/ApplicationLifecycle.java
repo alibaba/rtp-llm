@@ -1,5 +1,18 @@
 package org.flexlb.service.grace;
 
+import org.flexlb.balance.scheduler.CancelReason;
+import org.flexlb.balance.scheduler.DeliveryDispatcher;
+import org.flexlb.balance.scheduler.DeliveryExecution;
+import org.flexlb.balance.scheduler.ExpirationTimer;
+import org.flexlb.balance.scheduler.RequestLifecycle;
+import org.flexlb.balance.scheduler.RequestRepository;
+import org.flexlb.balance.scheduler.RequestScheduler;
+import org.flexlb.balance.scheduler.RequestTaskPool;
+import org.flexlb.balance.scheduler.ResponseCompletionExecutor;
+import org.flexlb.balance.scheduler.ScheduledTaskTimer;
+import org.flexlb.balance.endpoint.EndpointRegistry;
+import org.flexlb.util.Failures;
+import java.util.LinkedHashSet;
 import lombok.extern.slf4j.Slf4j;
 import org.flexlb.consistency.MasterStatusService;
 import org.flexlb.httpserver.FlexlbGrpcServer;
@@ -22,6 +35,88 @@ import java.util.concurrent.TimeUnit;
 @Slf4j
 @Component
 public class ApplicationLifecycle implements ApplicationContextAware {
+
+    private RequestScheduler scheduler;
+    private RequestRepository requests;
+    private EndpointRegistry endpoints;
+    private DeliveryExecution deliveries;
+    private RequestTaskPool tasks;
+    private ExpirationTimer deadlines;
+    private ResponseCompletionExecutor completions;
+    private ScheduledTaskTimer taskTimer;
+    private DeliveryDispatcher dispatcher;
+
+    @Autowired
+    public void configureScheduling(
+            RequestScheduler scheduler,
+            RequestRepository requests,
+            EndpointRegistry endpoints,
+            DeliveryExecution deliveries,
+            RequestTaskPool tasks,
+            ExpirationTimer deadlines,
+            ResponseCompletionExecutor completions,
+            ScheduledTaskTimer taskTimer,
+            DeliveryDispatcher dispatcher) {
+        this.scheduler = scheduler;
+        this.requests = requests;
+        this.endpoints = endpoints;
+        this.deliveries = deliveries;
+        this.tasks = tasks;
+        this.deadlines = deadlines;
+        this.completions = completions;
+        this.taskTimer = taskTimer;
+        this.dispatcher = dispatcher;
+    }
+
+    private void closeScheduling() {
+        if (scheduler == null || requests.isClosed()) return;
+        requests.stopAccepting();
+        Throwable failure =
+                Failures.run(
+                        null,
+                        () ->
+                                scheduler.awaitSchedulingCompletion(
+                                        System.nanoTime() + TimeUnit.SECONDS.toNanos(30L)));
+        if (!requests.closeRegistration()) return;
+        failure = Failures.run(failure, scheduler::close);
+        var owners = new LinkedHashSet<RequestLifecycle>();
+        owners.add(scheduler.lifecycle());
+        for (var context : requests.snapshotActive()) owners.add(context.data().getScheduler());
+        for (var owner : owners)
+            failure = Failures.run(failure, owner::stopAdmissionsAndAwaitCompletion);
+        for (var context : requests.snapshotActive()) {
+            failure =
+                    Failures.run(
+                            failure,
+                            () ->
+                                    context.data()
+                                            .getScheduler()
+                                            .cancel(context, 0L, CancelReason.SHUTDOWN));
+        }
+        failure = Failures.run(failure, deliveries::awaitDeliveries);
+        for (var owner : owners)
+            failure = Failures.run(failure, () -> owner.awaitDeliveryCleanup(true));
+        failure = Failures.run(failure, endpoints::close);
+        for (var owner : owners)
+            failure = Failures.run(failure, () -> owner.awaitDeliveryCleanup(false));
+        failure = Failures.run(failure, deadlines::close);
+        failure = Failures.run(failure, tasks::awaitIdle);
+        for (var owner : owners)
+            failure = Failures.run(failure, owner::closeOutstandingAndTerminalize);
+        failure = Failures.run(failure, dispatcher::awaitStops);
+        failure = Failures.run(failure, tasks::close);
+        failure = Failures.run(failure, completions::close);
+        failure = Failures.run(failure, taskTimer::close);
+        failure = Failures.run(failure, tasks::throwIfFailed);
+        if (requests.liveRequestCount() != 0)
+            failure =
+                    Failures.append(
+                            failure,
+                            new IllegalStateException(
+                                    "unsettled requests at shutdown: "
+                                            + requests.liveRequestCount()));
+        Failures.rethrow(failure, "application scheduling shutdown failed");
+    }
 
     private static final long DEFAULT_WARM_UP_WAIT_MS = 3_000L;
 
@@ -102,6 +197,11 @@ public class ApplicationLifecycle implements ApplicationContextAware {
     }
 
     public synchronized boolean offline() {
+        if (tasks != null
+                && (tasks.isExecutingOnCurrentThread()
+                        || completions.isCompletingOnCurrentThread())) {
+            throw new IllegalStateException("shutdown cannot wait for its own request callback");
+        }
         if (shutdownCompletedSuccessfully) {
             return true;
         }
@@ -123,6 +223,7 @@ public class ApplicationLifecycle implements ApplicationContextAware {
         // Keep scheduler, forwarder and transport dependencies alive until all
         // accepted RPCs finish. The platform owns the forced-kill deadline.
         grpcServer.drain();
+        closeScheduling();
         shutdownCompletedSuccessfully = true;
         reporter.reportDuration(
                 GracefulLifecycleReporter.Event.SHUTDOWN_COMPLETE,

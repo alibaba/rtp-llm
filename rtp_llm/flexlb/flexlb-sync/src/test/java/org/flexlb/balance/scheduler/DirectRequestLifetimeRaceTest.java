@@ -1,6 +1,7 @@
 package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.PlacementResult;
+import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.PrefillState;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
@@ -48,11 +49,17 @@ class DirectRequestLifetimeRaceTest {
         var prefillSelector = mock(CostBasedPrefillStrategy.class);
         var model = mock(ModelMetaConfig.class);
         when(model.requiredRoles()).thenReturn(List.of(RoleType.PDFUSION));
+        var endpoints = mock(org.flexlb.balance.endpoint.EndpointRegistry.class);
         var router =
                 new RequestWorkerSelector(
+                        endpoints,
                         prefillSelector,
                         mock(DecodeSelector.class),
                         mock(VitWorkerSelector.class),
+                        null,
+                        mock(org.flexlb.service.monitor.EngineHealthReporter.class),
+                        mock(org.flexlb.cache.monitor.CacheMetricsReporter.class),
+                        service,
                         model);
         var requests =
                 org.flexlb.balance.scheduler.SchedulerTestSupport.create(
@@ -99,12 +106,42 @@ class DirectRequestLifetimeRaceTest {
                             org.mockito.ArgumentMatchers.eq(context.data().getSchedulingMetadata()),
                             org.mockito.ArgumentMatchers.eq(RoleType.PDFUSION),
                             org.mockito.ArgumentMatchers.eq(null),
-                            org.mockito.ArgumentMatchers.any(RequestRoute.class)))
-                    .thenAnswer(
-                            call ->
-                                    PlacementResult.success(
-                                            call.getArgument(4, RequestRoute.class)
-                                                    .add(pin, metadata, 30_000L, 0L)));
+                            org.mockito.ArgumentMatchers.anyList(),
+                            org.mockito.ArgumentMatchers.any(
+                                    java.util.function.LongSupplier.class)))
+                    .thenReturn(
+                            PlacementResult.success(
+                                    new org.flexlb.balance.strategy.PrefillSelectionStrategy
+                                            .Selection<>(
+                                            "127.0.0.1:8080",
+                                            1L,
+                                            0L,
+                                            30_000L,
+                                            30_000L,
+                                            0L,
+                                            0L,
+                                            0L,
+                                            null,
+                                            1,
+                                            new EndpointRegistry.PrefillRoutingEntry(
+                                                    "127.0.0.1:8080", prefill))));
+            var status =
+                    org.flexlb.dao.master.WorkerStatus.createDiscovered(
+                            RoleType.PDFUSION, null, "127.0.0.1", 8080, 8081, null);
+            when(prefill.getStatus()).thenReturn(status);
+            when(pin.generationId()).thenReturn(1L);
+            var state = mock(PrefillState.class);
+            when(state.requestCapacityAvailable(
+                            org.mockito.ArgumentMatchers.anyLong(),
+                            org.mockito.ArgumentMatchers.anyInt()))
+                    .thenReturn(true);
+            org.springframework.test.util.ReflectionTestUtils.setField(prefill, "ownership", state);
+            when(endpoints.prefillRoutingSnapshot(RoleType.PDFUSION))
+                    .thenReturn(
+                            java.util.List.of(
+                                    new org.flexlb.balance.endpoint.EndpointRegistry
+                                            .PrefillRoutingEntry("127.0.0.1:8080", prefill)));
+            when(endpoints.capture(RoleType.PDFUSION, "127.0.0.1:8080")).thenReturn(pin);
 
             AtomicBoolean lateConfirmation = new AtomicBoolean();
             doAnswer(
@@ -131,7 +168,7 @@ class DirectRequestLifetimeRaceTest {
                     .onDeliveryFact(
                             org.mockito.ArgumentMatchers.isA(ContextResult.RouteDelivered.class));
 
-            var returned = requests.submit(context);
+            var returned = requests.scheduler().submit(context);
             assertSame(context.data().getFuture(), returned);
             var response = returned.get(2L, TimeUnit.SECONDS);
             assertFalse(returned.isCompletedExceptionally());

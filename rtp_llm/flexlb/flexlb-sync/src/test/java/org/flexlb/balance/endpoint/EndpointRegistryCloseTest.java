@@ -1,6 +1,6 @@
 package org.flexlb.balance.endpoint;
 
-import org.flexlb.balance.scheduler.AbstractRequestScheduler;
+import org.flexlb.balance.scheduler.RequestLifecycle;
 import org.flexlb.balance.scheduler.PlacementAvailability;
 import org.flexlb.cache.service.CacheAwareService;
 import org.flexlb.config.ConfigService;
@@ -268,8 +268,10 @@ class EndpointRegistryCloseTest {
                 assertTrue(closing.await(2, TimeUnit.SECONDS));
                 assertThrows(TimeoutException.class, () -> owner.get(50, TimeUnit.MILLISECONDS));
             } finally {
-                EndpointTestSupport.completeRetirement(detached,
-                        mock(CacheAwareService.class), LoggerFactory.getLogger(getClass()));
+                EndpointTestSupport.completeRetirement(
+                        detached,
+                        mock(CacheAwareService.class),
+                        LoggerFactory.getLogger(getClass()));
             }
             owner.get(2, TimeUnit.SECONDS);
             registry.close();
@@ -333,8 +335,10 @@ class EndpointRegistryCloseTest {
                 finalizer =
                         executor.submit(
                                 () ->
-                                        EndpointTestSupport.completeRetirement(retirement,
-                                                cache, LoggerFactory.getLogger(getClass())));
+                                        EndpointTestSupport.completeRetirement(
+                                                retirement,
+                                                cache,
+                                                LoggerFactory.getLogger(getClass())));
                 assertTrue(finalizerEntered.await(2, TimeUnit.SECONDS));
                 assertThrows(
                         TimeoutException.class,
@@ -347,7 +351,8 @@ class EndpointRegistryCloseTest {
             } finally {
                 finishFinalizer.countDown();
                 if (finalizer == null) {
-                    EndpointTestSupport.completeRetirement(retirement, cache, LoggerFactory.getLogger(getClass()));
+                    EndpointTestSupport.completeRetirement(
+                            retirement, cache, LoggerFactory.getLogger(getClass()));
                 }
             }
         }
@@ -457,7 +462,9 @@ class EndpointRegistryCloseTest {
             }
             assertTimeoutPreemptively(
                     java.time.Duration.ofSeconds(2),
-                    () -> EndpointTestSupport.completeRetirement(retirement, cache, LoggerFactory.getLogger(getClass())));
+                    () ->
+                            EndpointTestSupport.completeRetirement(
+                                    retirement, cache, LoggerFactory.getLogger(getClass())));
             assertSame(status, registry.statusSnapshot(RoleType.PREFILL).get(address));
             assertFalse(status.isActiveGeneration());
             assertSame(
@@ -583,7 +590,8 @@ class EndpointRegistryCloseTest {
         assertFalse(
                 notifiedOutsideLock.get(),
                 "detach only returns ownership; it must not publish inline");
-        EndpointTestSupport.completeRetirement(retirement, mock(CacheAwareService.class), LoggerFactory.getLogger(getClass()));
+        EndpointTestSupport.completeRetirement(
+                retirement, mock(CacheAwareService.class), LoggerFactory.getLogger(getClass()));
         assertTrue(notifiedOutsideLock.get());
         assertTrue(endpoint.isGenerationRetiringOrRetired());
         assertTrue(registry.statusSnapshot(RoleType.VIT).isEmpty());
@@ -664,10 +672,12 @@ class EndpointRegistryCloseTest {
         return new EndpointRegistry(
                 config,
                 org.flexlb.balance.scheduler.SchedulerTestSupport.repository(
-                        mock(AbstractRequestScheduler.class)),
+                        mock(RequestLifecycle.class)),
                 mock(DeliveryMetricsReporter.class),
                 org.flexlb.balance.scheduler.SchedulerTestSupport.dispatcher(),
-                availability);
+                availability,
+                org.flexlb.balance.planner.BuiltinGroupPlanner.from(config.loadBalanceConfig()),
+                order -> org.flexlb.balance.endpoint.PrefillActiveIndex.ordered(16, order));
     }
 
     @SuppressWarnings("unchecked")

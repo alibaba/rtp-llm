@@ -81,8 +81,8 @@ class DecodeSelectorTest {
         return createDecodeRegistry(decodeStatuses);
     }
 
-    private DecodeSelector availableStrategy(EndpointRegistry registry) {
-        return new DecodeSelector(
+    private StrategyTestSupport.DecodeRoutingFixture availableStrategy(EndpointRegistry registry) {
+        return new StrategyTestSupport.DecodeRoutingFixture(
                 registry,
                 configService,
                 SchedulingTestConfig.capacity(configService.loadBalanceConfig()));
@@ -142,8 +142,8 @@ class DecodeSelectorTest {
     void should_handle_empty_worker_map_when_no_workers_available() {
         EndpointRegistry emptyRegistry = StrategyTestSupport.endpointRegistry(configService);
         EndpointRegistry engineWorkerStatus = emptyRegistry;
-        DecodeSelector decodeSelector =
-                new DecodeSelector(
+        StrategyTestSupport.DecodeRoutingFixture decodeSelector =
+                new StrategyTestSupport.DecodeRoutingFixture(
                         engineWorkerStatus,
                         configService,
                         SchedulingTestConfig.capacity(configService.loadBalanceConfig()));
@@ -189,7 +189,7 @@ class DecodeSelectorTest {
         var inputs = request(1_000, 1_001L);
         PlacementResult<RequestRoute, RoleType> result =
                 StrategyTestSupport.select(
-                        new DecodeSelector(
+                        new StrategyTestSupport.DecodeRoutingFixture(
                                 racing,
                                 configService,
                                 SchedulingTestConfig.capacity(configService.loadBalanceConfig())),
@@ -215,7 +215,7 @@ class DecodeSelectorTest {
         decodeStatuses.put("127.0.0.2:8080", createWorkerStatus("127.0.0.2", "inner"));
         EndpointRegistry registry = Mockito.spy(decodeRegistry());
         try {
-            DecodeSelector selector = availableStrategy(registry);
+            StrategyTestSupport.DecodeRoutingFixture selector = availableStrategy(registry);
             Mockito.doAnswer(
                             call -> {
                                 call.callRealMethod();
@@ -243,7 +243,7 @@ class DecodeSelectorTest {
         EndpointRegistry registry = Mockito.spy(decodeRegistry());
         try {
             var view = decodeRoutingSnapshot(registry, null).getFirst();
-            DecodeSelector selector = availableStrategy(registry);
+            StrategyTestSupport.DecodeRoutingFixture selector = availableStrategy(registry);
             Mockito.doAnswer(
                             call -> {
                                 List<DecodeResources.DecodeRoutingView> target =
@@ -337,11 +337,6 @@ class DecodeSelectorTest {
     }
 
     private static void assertScratchReleased(Object scratch) {
-        var views =
-                (java.util.ArrayList<?>)
-                        org.springframework.test.util.ReflectionTestUtils.getField(
-                                scratch, "views");
-        Assertions.assertTrue(views.isEmpty());
         var addresses =
                 (String[])
                         org.springframework.test.util.ReflectionTestUtils.getField(
@@ -366,7 +361,7 @@ class DecodeSelectorTest {
         registerWorker("127.0.0.1", 10_000, 9_000);
         registerWorker("127.0.0.2", 10_000, 9_000);
         registerWorker("127.0.0.3", 10_000, 9_000);
-        DecodeSelector strategy = availableStrategy(decodeRegistry());
+        StrategyTestSupport.DecodeRoutingFixture strategy = availableStrategy(decodeRegistry());
         Map<String, Integer> counts = new HashMap<>();
         for (int i = 0; i < 12; i++) {
             ServerStatus selected = selectStatus(strategy, request(1_000L, 1_000L + i), null);
@@ -381,7 +376,8 @@ class DecodeSelectorTest {
 
         decodeStatuses.put("127.0.0.1:8080", worker1);
 
-        DecodeSelector decodeSelector = availableStrategy(decodeRegistry());
+        StrategyTestSupport.DecodeRoutingFixture decodeSelector =
+                availableStrategy(decodeRegistry());
         Request inputs = request(1_000, 1_000L);
 
         ServerStatus status = selectStatus(decodeSelector, inputs, "group-a");
@@ -411,7 +407,7 @@ class DecodeSelectorTest {
         reserveQueued(decodeEndpoint(registry, "127.0.0.1:8080"), 92L, 0L, 0L, 50);
         reserveQueued(decodeEndpoint(registry, "127.0.0.2:8080"), 93L, 0L, 0L, 50);
         // The fixed request cap is 10: running ratios are .2/.1, KV ratios .05/.15.
-        DecodeSelector strategy = availableStrategy(registry);
+        StrategyTestSupport.DecodeRoutingFixture strategy = availableStrategy(registry);
         for (int i = 0; i < 10; i++) {
             ServerStatus selected = selectStatus(strategy, request(1_000L, 1_000L + i), null);
             Assertions.assertEquals(expectedIp, selected.getServerIp());
@@ -433,7 +429,7 @@ class DecodeSelectorTest {
         registerWorker("127.0.0.17", 1_000_000, 800_000);
         EndpointRegistry registry = decodeRegistry();
         reserveQueued(decodeEndpoint(registry, "127.0.0.17:8080"), 91L, 0L, 0L, 50);
-        DecodeSelector strategy = availableStrategy(registry);
+        StrategyTestSupport.DecodeRoutingFixture strategy = availableStrategy(registry);
         java.util.Set<String> selected = new java.util.HashSet<>();
         for (int i = 0; i < 16; i++) {
             selected.add(selectStatus(strategy, request(1L, 10_000L + i), null).getServerIp());
@@ -487,7 +483,7 @@ class DecodeSelectorTest {
         EndpointRegistry registry = decodeRegistry();
         reserveQueued(decodeEndpoint(registry, "127.0.0.1:8080"), 91L, 0L, 1_200L, 50);
         reserveQueued(decodeEndpoint(registry, "127.0.0.2:8080"), 92L, 0L, 200L, 50);
-        DecodeSelector strategy = availableStrategy(registry);
+        StrategyTestSupport.DecodeRoutingFixture strategy = availableStrategy(registry);
         for (int i = 0; i < 4; i++) {
             Assertions.assertEquals(
                     "127.0.0.2",
@@ -517,7 +513,7 @@ class DecodeSelectorTest {
         configureCost(expression);
         registerWorker("127.0.0.1", 10_000L, 10_000L);
         registerWorker("127.0.0.2", 10_000L, 10_000L);
-        DecodeSelector strategy = availableStrategy(decodeRegistry());
+        StrategyTestSupport.DecodeRoutingFixture strategy = availableStrategy(decodeRegistry());
 
         var inputs = request(100L, 1_001L);
         IllegalStateException error =
@@ -554,7 +550,7 @@ class DecodeSelectorTest {
         reserveQueued(decodeEndpoint(registry, "127.0.0.1:8080"), 91L, 0L, 0L, 50);
         reserveQueued(decodeEndpoint(registry, "127.0.0.1:8080"), 92L, 0L, 0L, 50);
         reserveQueued(decodeEndpoint(registry, "127.0.0.2:8080"), 93L, 0L, 0L, 50);
-        DecodeSelector strategy = availableStrategy(registry);
+        StrategyTestSupport.DecodeRoutingFixture strategy = availableStrategy(registry);
         for (int i = 0; i < 4; i++) {
             Assertions.assertEquals(
                     "127.0.0.2",
@@ -584,7 +580,7 @@ class DecodeSelectorTest {
         reservePinned(local, 91L, 0L, 0L, 50);
         Assertions.assertEquals(
                 2, decodeEndpoint(registry, "127.0.0.1:8080").routingView().totalLoad());
-        DecodeSelector strategy = availableStrategy(registry);
+        StrategyTestSupport.DecodeRoutingFixture strategy = availableStrategy(registry);
         for (int i = 0; i < 4; i++) {
             Assertions.assertEquals(
                     "127.0.0.2",
@@ -642,7 +638,7 @@ class DecodeSelectorTest {
         registerWorker("127.0.0.2", 1_000, 800);
         EndpointRegistry registry = decodeRegistry();
         reserveQueued(decodeEndpoint(registry, "127.0.0.2:8080"), 91L, 0L, 0L, 50);
-        DecodeSelector decodeSelector = availableStrategy(registry);
+        StrategyTestSupport.DecodeRoutingFixture decodeSelector = availableStrategy(registry);
         Request inputs = request(500, 2_000L);
 
         ServerStatus status = selectStatus(decodeSelector, inputs, null);
@@ -656,7 +652,8 @@ class DecodeSelectorTest {
         configService.loadBalanceConfig().setScheduler(ConfigTestSupport.direct());
         registerWorker("127.0.0.1", 1_000, 50);
         registerWorker("127.0.0.2", 1_000, 100);
-        DecodeSelector decodeSelector = availableStrategy(decodeRegistry());
+        StrategyTestSupport.DecodeRoutingFixture decodeSelector =
+                availableStrategy(decodeRegistry());
         Request inputs = request(200, 3_000L);
 
         ServerStatus status = selectStatus(decodeSelector, inputs, null);
@@ -670,7 +667,7 @@ class DecodeSelectorTest {
         configureCost(expression);
         registerWorker("127.0.0.1", 128L, 128L);
         registerWorker("127.0.0.2", 256L, 256L);
-        DecodeSelector strategy = availableStrategy(decodeRegistry());
+        StrategyTestSupport.DecodeRoutingFixture strategy = availableStrategy(decodeRegistry());
         Request inputs = request(257L, 3_050L);
         inputs = inputs.toBuilder().maxNewTokens(1).build();
 
@@ -685,7 +682,7 @@ class DecodeSelectorTest {
     @Test
     void unknownPhysicalCapacityDoesNotBecomeATerminalRejection() {
         registerWorker("127.0.0.1", 0L, 0L);
-        DecodeSelector strategy = availableStrategy(decodeRegistry());
+        StrategyTestSupport.DecodeRoutingFixture strategy = availableStrategy(decodeRegistry());
 
         PlacementResult<RequestRoute, RoleType> result =
                 StrategyTestSupport.select(strategy, request(1_000_000L, 3_051L), SCHEDULING, null);
@@ -728,8 +725,8 @@ class DecodeSelectorTest {
                                 .kvBudget(endpoint.routingView().totalKv()));
         Assertions.assertEquals(0L, endpoint.routingView().dispatchUsage().expectedKvUsed());
 
-        DecodeSelector strategy =
-                new DecodeSelector(
+        StrategyTestSupport.DecodeRoutingFixture strategy =
+                new StrategyTestSupport.DecodeRoutingFixture(
                         registry,
                         configService,
                         SchedulingTestConfig.capacity(configService.loadBalanceConfig()));
@@ -789,7 +786,7 @@ class DecodeSelectorTest {
         EndpointRegistry registry = decodeRegistry();
         // The cheaper endpoint cannot fit this request, so readiness must win.
         reserveQueued(decodeEndpoint(registry, "127.0.0.2:8080"), 91L, 0L, 0L, 50);
-        DecodeSelector strategy = availableStrategy(registry);
+        StrategyTestSupport.DecodeRoutingFixture strategy = availableStrategy(registry);
         Request inputs = request(300L, 5L);
 
         ServerStatus selected = selectStatus(strategy, inputs, null);
@@ -809,7 +806,7 @@ class DecodeSelectorTest {
         registerWorker("127.0.0.1", 1000, 100);
         registerWorker("127.0.0.2", 1000, 100);
         EndpointRegistry registry = decodeRegistry();
-        DecodeSelector strategy = availableStrategy(registry);
+        StrategyTestSupport.DecodeRoutingFixture strategy = availableStrategy(registry);
         Map<String, Integer> counts = new HashMap<>();
         for (int index = 0; index < 10; index++) {
             long requestId = 123L + index;
@@ -839,7 +836,7 @@ class DecodeSelectorTest {
         registerWorker("127.0.0.2", 1000L, 0L);
         EndpointRegistry registry = decodeRegistry();
         reserveQueued(decodeEndpoint(registry, "127.0.0.2:8080"), 91L, 0L, 0L, 50);
-        DecodeSelector strategy = availableStrategy(registry);
+        StrategyTestSupport.DecodeRoutingFixture strategy = availableStrategy(registry);
         for (long requestId = 200L; requestId < 204L; requestId++) {
             ServerStatus selected = selectStatus(strategy, request(200L, requestId), null);
             Assertions.assertNotNull(selected);
@@ -879,7 +876,7 @@ class DecodeSelectorTest {
         registerWorker("127.0.0.2", 1_000, 1_000);
         EndpointRegistry registry = decodeRegistry();
         reserveQueued(decodeEndpoint(registry, "127.0.0.2:8080"), 91L, 0L, 0L, 50);
-        DecodeSelector strategy = availableStrategy(registry);
+        StrategyTestSupport.DecodeRoutingFixture strategy = availableStrategy(registry);
         Request inputs = request(0L, 30_000L);
         int lowerLoadSelections = 0;
         int higherLoadSelections = 0;
@@ -910,7 +907,7 @@ class DecodeSelectorTest {
             reservePinned(endpoint, 400L + i, 0, 0, 50);
         }
 
-        DecodeSelector strategy = availableStrategy(registry);
+        StrategyTestSupport.DecodeRoutingFixture strategy = availableStrategy(registry);
 
         Request request = Request.builder().seqLen(1).requestId(500L).build();
 
@@ -1000,7 +997,7 @@ class DecodeSelectorTest {
     }
 
     private static ServerStatus selectStatus(
-            DecodeSelector strategy, Request inputs, String group) {
+            StrategyTestSupport.DecodeRoutingFixture strategy, Request inputs, String group) {
         PlacementResult<RequestRoute, RoleType> result =
                 StrategyTestSupport.select(strategy, inputs, SCHEDULING, group);
         if (result.status() != PlacementResult.Status.SUCCESS) {

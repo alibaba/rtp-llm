@@ -90,7 +90,8 @@ class RequestAdmissionExpirationRaceTest {
                     cleanupFailure,
                     assertThrows(
                             IllegalStateException.class, registry::closeOutstandingAndTerminalize));
-            SchedulerTestSupport.awaitRequestWork(registry.runtime);
+            SchedulerTestSupport.awaitRequestWork(
+                    org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(registry));
             assertSame(cleanupFailure, SchedulerTestSupport.failure(registry));
             assertEquals(
                     4,
@@ -106,18 +107,25 @@ class RequestAdmissionExpirationRaceTest {
             for (var context : contexts) {
                 registry.scheduleClose(context);
             }
-            SchedulerTestSupport.awaitRequestWork(registry.runtime);
+            SchedulerTestSupport.awaitRequestWork(
+                    org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(registry));
             assertEquals(
                     4,
                     releases.get(),
                     "duplicate cleanup must not release an archived request again");
             assertEquals(0, SchedulerTestSupport.repository(registry).liveRequestCount());
             CompletableFuture.runAsync(
-                            SchedulerTestSupport.responseCompletions(registry.runtime)::close)
+                            SchedulerTestSupport.responseCompletions(
+                                            org.flexlb.balance.scheduler.SchedulerTestSupport
+                                                    .runtime(registry))
+                                    ::close)
                     .get(2L, TimeUnit.SECONDS);
         } finally {
-            SchedulerTestSupport.timer(registry.runtime).close();
-            SchedulerTestSupport.closeRequestExecutors(registry.runtime);
+            SchedulerTestSupport.timer(
+                            org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(registry))
+                    .close();
+            SchedulerTestSupport.closeRequestExecutors(
+                    org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(registry));
         }
     }
 
@@ -169,20 +177,28 @@ class RequestAdmissionExpirationRaceTest {
                         future.completeExceptionally(new IllegalStateException("caller failure")));
                 assertTrue(future.isCompletedExceptionally());
             }
-            SchedulerTestSupport.awaitRequestWork(registry.runtime);
+            SchedulerTestSupport.awaitRequestWork(
+                    org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(registry));
             assertSame(cleanupFailure, SchedulerTestSupport.failure(registry));
             assertEquals(SchedulerTestSupport.Stage.FINISHED, SchedulerTestSupport.stage(context));
             assertEquals(0, SchedulerTestSupport.repository(registry).liveRequestCount());
             CompletableFuture.runAsync(
-                            SchedulerTestSupport.responseCompletions(registry.runtime)::close)
+                            SchedulerTestSupport.responseCompletions(
+                                            org.flexlb.balance.scheduler.SchedulerTestSupport
+                                                    .runtime(registry))
+                                    ::close)
                     .get(2L, TimeUnit.SECONDS);
             registry.scheduleClose(context);
-            SchedulerTestSupport.awaitRequestWork(registry.runtime);
+            SchedulerTestSupport.awaitRequestWork(
+                    org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(registry));
             assertEquals(0, SchedulerTestSupport.repository(registry).liveRequestCount());
             verify(prefill, times(2)).release(null, item);
         } finally {
-            SchedulerTestSupport.timer(registry.runtime).close();
-            SchedulerTestSupport.closeRequestExecutors(registry.runtime);
+            SchedulerTestSupport.timer(
+                            org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(registry))
+                    .close();
+            SchedulerTestSupport.closeRequestExecutors(
+                    org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(registry));
         }
     }
 

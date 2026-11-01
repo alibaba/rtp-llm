@@ -20,11 +20,13 @@ class GroupPlannerTwinWorkloadTest {
         Constraints limits = new Constraints(8, 1_000_000L, 22_000_000L, 0L, 400L);
         List<Item> burst =
                 LongStream.rangeClosed(1, 16).mapToObj(id -> item(id, 0L, 128L)).toList();
-        Selection<Item> first = GroupPlanner.FIXED_WINDOW.select(burst, limits, null);
+        Selection<Item> first = BuiltinGroupPlanner.FIXED_WINDOW.select(burst, limits, null);
         Selection<Item> second =
-                GroupPlanner.FIXED_WINDOW.select(burst.subList(8, 16), limits, null);
-        assertEquals("batch_full", GroupPlanner.FIXED_WINDOW.dispatchReason(first, limits, 0L));
-        assertEquals("batch_full", GroupPlanner.FIXED_WINDOW.dispatchReason(second, limits, 0L));
+                BuiltinGroupPlanner.FIXED_WINDOW.select(burst.subList(8, 16), limits, null);
+        assertEquals(
+                "batch_full", BuiltinGroupPlanner.FIXED_WINDOW.dispatchReason(first, limits, 0L));
+        assertEquals(
+                "batch_full", BuiltinGroupPlanner.FIXED_WINDOW.dispatchReason(second, limits, 0L));
         assertEquals(8, first.items().size());
         assertEquals(8, second.items().size());
 
@@ -32,13 +34,16 @@ class GroupPlannerTwinWorkloadTest {
         for (long id = 1; id <= 16; id++) {
             long arrival = (id - 1) * 2_000L;
             List<Item> pending = List.of(item(id, arrival, 128L));
-            Selection<Item> timeout = GroupPlanner.FIXED_WINDOW.select(pending, limits, null);
+            Selection<Item> timeout =
+                    BuiltinGroupPlanner.FIXED_WINDOW.select(pending, limits, null);
             assertEquals(
                     null,
-                    GroupPlanner.FIXED_WINDOW.dispatchReason(timeout, limits, arrival + 399L));
+                    BuiltinGroupPlanner.FIXED_WINDOW.dispatchReason(
+                            timeout, limits, arrival + 399L));
             assertEquals(
                     "fixed_window_timeout",
-                    GroupPlanner.FIXED_WINDOW.dispatchReason(timeout, limits, arrival + 400L));
+                    BuiltinGroupPlanner.FIXED_WINDOW.dispatchReason(
+                            timeout, limits, arrival + 400L));
             assertEquals(1, timeout.items().size());
             sparseDispatched.add(timeout.items().getFirst().requestId());
         }
@@ -57,13 +62,14 @@ class GroupPlannerTwinWorkloadTest {
         Constraints small = new Constraints(8, 1_000_000L, 22_000_000L, 0L, 400L);
         Constraints large = new Constraints(32, 1_000_000L, 22_000_000L, 0L, 400L);
 
-        Selection<Item> full = GroupPlanner.FIXED_WINDOW.select(arrivals, small, null);
-        assertEquals("batch_full", GroupPlanner.FIXED_WINDOW.dispatchReason(full, small, 350L));
-        Selection<Item> timeout = GroupPlanner.FIXED_WINDOW.select(arrivals, large, null);
-        assertEquals(null, GroupPlanner.FIXED_WINDOW.dispatchReason(timeout, large, 350L));
+        Selection<Item> full = BuiltinGroupPlanner.FIXED_WINDOW.select(arrivals, small, null);
+        assertEquals(
+                "batch_full", BuiltinGroupPlanner.FIXED_WINDOW.dispatchReason(full, small, 350L));
+        Selection<Item> timeout = BuiltinGroupPlanner.FIXED_WINDOW.select(arrivals, large, null);
+        assertEquals(null, BuiltinGroupPlanner.FIXED_WINDOW.dispatchReason(timeout, large, 350L));
         assertEquals(
                 "fixed_window_timeout",
-                GroupPlanner.FIXED_WINDOW.dispatchReason(timeout, large, 400L));
+                BuiltinGroupPlanner.FIXED_WINDOW.dispatchReason(timeout, large, 400L));
         assertEquals(full.items(), timeout.items());
     }
 
@@ -73,14 +79,14 @@ class GroupPlannerTwinWorkloadTest {
         // 900*3=2,700 tokens and exceeds the 2,000-token compute limit.
         List<Item> arrivals = List.of(item(1L, 0L, 100L), item(2L, 0L, 900L), item(3L, 0L, 100L));
         Constraints limits = new Constraints(8, 2_000L, 22_000_000L, 0L, 400L);
-        Selection<Item> result = GroupPlanner.FIXED_WINDOW.select(arrivals, limits, null);
+        Selection<Item> result = BuiltinGroupPlanner.FIXED_WINDOW.select(arrivals, limits, null);
 
         assertEquals(List.of(1L, 2L), result.items().stream().map(Item::requestId).toList());
         assertEquals(1_800L, result.paddedTokens());
         assertTrue(result.fitsCompute(2_000L));
         assertEquals(
                 "fixed_window_timeout",
-                GroupPlanner.FIXED_WINDOW.dispatchReason(result, limits, 400L));
+                BuiltinGroupPlanner.FIXED_WINDOW.dispatchReason(result, limits, 400L));
     }
 
     private static Item item(long id, long arrivalMs, long tokens) {

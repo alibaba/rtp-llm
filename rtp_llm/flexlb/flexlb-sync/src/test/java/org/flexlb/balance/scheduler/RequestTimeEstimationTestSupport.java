@@ -80,7 +80,7 @@ public final class RequestTimeEstimationTestSupport {
         return new QueueSnapshot(
                 NOW_MS,
                 queueScheduling,
-                org.flexlb.balance.planner.GroupPlanner.FIXED_WINDOW,
+                org.flexlb.balance.planner.BuiltinGroupPlanner.FIXED_WINDOW,
                 ordering,
                 constraints,
                 ordered,
@@ -135,7 +135,7 @@ public final class RequestTimeEstimationTestSupport {
             Probe probe,
             org.flexlb.config.DispatcherConfig.Type deliveryMode) {
         return project(
-                new RequestTimeEstimation.Inputs(queue, work, 0L), probe, evaluator, deliveryMode);
+                new RequestTimeEstimation.Inputs(queue, work, 0L, evaluator, deliveryMode), probe);
     }
 
     /** Virtual request evaluated against one frozen endpoint snapshot. */
@@ -157,19 +157,12 @@ public final class RequestTimeEstimationTestSupport {
     }
 
     public static RequestTimeEstimation.Candidate project(
-            RequestTimeEstimation.Inputs inputs,
-            Probe probe,
-            PrefillTimePredictor.Evaluator evaluator,
-            org.flexlb.config.DispatcherConfig.Type deliveryMode) {
-        return project(inputs, probe, evaluator, deliveryMode, inputs.queue().capturedAtMs());
+            RequestTimeEstimation.Inputs inputs, Probe probe) {
+        return project(inputs, probe, inputs.queue().capturedAtMs());
     }
 
     public static RequestTimeEstimation.Candidate project(
-            RequestTimeEstimation.Inputs inputs,
-            Probe probe,
-            PrefillTimePredictor.Evaluator evaluator,
-            org.flexlb.config.DispatcherConfig.Type deliveryMode,
-            long planningAtMs) {
+            RequestTimeEstimation.Inputs inputs, Probe probe, long planningAtMs) {
         RequestTimeEstimation.CandidateView view =
                 RequestTimeEstimation.current()
                         .projectView(
@@ -181,8 +174,6 @@ public final class RequestTimeEstimationTestSupport {
                                 probe.seqLen(),
                                 probe.hitCache(),
                                 probe.routingCacheMatchTokens(),
-                                evaluator,
-                                deliveryMode,
                                 planningAtMs);
         return immutable(view);
     }

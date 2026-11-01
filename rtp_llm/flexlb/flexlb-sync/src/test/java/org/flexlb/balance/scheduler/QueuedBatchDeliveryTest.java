@@ -1,5 +1,6 @@
 package org.flexlb.balance.scheduler;
 
+import org.flexlb.balance.delivery.CapacityBoundary;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.DecodeResources;
 import org.flexlb.balance.endpoint.DeliverySettlementTestSupport;
@@ -62,13 +63,26 @@ import static org.mockito.Mockito.when;
 
 /** Real executor, request context and endpoint ledgers; only the Engine transport is simulated. */
 class QueuedBatchDeliveryTest {
+    @Test
+    void dispatchCapacityAndListenerUseTheBoundFacilitiesWithoutReadingTheRequest() {
+        var item = mock(RequestRoute.class);
+        var boundary = CapacityBoundary.unavailable(CapacityBoundary.Resource.DISPATCH_EXECUTOR);
+        assertEquals(
+                org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(registry)
+                        .deliveries()
+                        .deliveryCapacityAvailable(),
+                worker.capacityAvailable(item, boundary));
+        worker.watchCapacity(item, boundary, () -> {}).run();
+        verifyNoInteractions(item);
+    }
+
     private static final long TIMEOUT_MS = TimeUnit.HOURS.toMillis(1);
     private final CountDownLatch releaseExecutor = new CountDownLatch(1);
     private final CompletableFuture<EngineRpcService.EnqueueBatchResponsePB> reply =
             new CompletableFuture<>();
     private DeliverySettlementTestSupport ledger = new DeliverySettlementTestSupport();
     private FlexlbConfig config;
-    private AbstractRequestScheduler registry;
+    private RequestLifecycle registry;
     private DeliveryDispatcher dispatcher;
     private EngineGrpcClient grpc;
     private PrefillEndpoint prefill;
@@ -105,10 +119,19 @@ class QueuedBatchDeliveryTest {
                             return reply;
                         });
         dispatcher = new DeliveryDispatcher(grpc, service, reporter);
-        var execution = org.mockito.Mockito.spy(registry.runtime.deliveries());
-        ReflectionTestUtils.setField(registry.runtime, "deliveries", execution);
+        var execution =
+                org.mockito.Mockito.spy(
+                        org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(registry)
+                                .deliveries());
+        org.flexlb.balance.scheduler.SchedulerTestServices.setDependency(
+                org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(registry),
+                "deliveries",
+                execution);
         org.mockito.Mockito.doReturn(201L).when(execution).nextBatchId();
-        ReflectionTestUtils.setField(registry.runtime, "dispatcher", dispatcher);
+        org.flexlb.balance.scheduler.SchedulerTestServices.setDependency(
+                org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(registry),
+                "dispatcher",
+                dispatcher);
         prefill = mock(PrefillEndpoint.class);
         when(prefill.getIp()).thenReturn("127.0.0.1");
         when(prefill.getGrpcPort()).thenReturn(8090);
@@ -152,16 +175,22 @@ class QueuedBatchDeliveryTest {
                         new PrefillQueueRunner(
                                 "queued-delivery",
                                 prefill,
-                                QueueExecutionSettings.capture(config),
+                                QueueExecutionSettings.capture(
+                                        config,
+                                        org.flexlb.balance.planner.BuiltinGroupPlanner.from(
+                                                config)),
                                 dispatcher,
-                                ledger.prefill));
+                                ledger.prefill,
+                                SchedulerTestSupport.queueDependencies(
+                                        org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(
+                                                registry))));
         ReflectionTestUtils.setField(prefill, "queueRunner", worker);
         ReflectionTestUtils.setField(prefill, "ownership", ledger.prefill);
         if (config.getDispatcher().getType() == org.flexlb.config.DispatcherConfig.Type.NON_BATCH) {
             return;
         }
         CountDownLatch entered = new CountDownLatch(1);
-        registry.runtime
+        org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(registry)
                 .deliveries()
                 .tryReserveDelivery()
                 .value()
@@ -182,7 +211,9 @@ class QueuedBatchDeliveryTest {
         awaitDispatchTasks();
         reply.complete(
                 EngineRpcService.EnqueueBatchResponsePB.newBuilder().setBatchId(201L).build());
-        registry.runtime.deliveries().awaitDeliveries();
+        org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(registry)
+                .deliveries()
+                .awaitDeliveries();
         if (RequestProtocolTestSupport.closeAdmissionAndAwaitMutations(registry)) {
             registry.closeOutstandingAndTerminalize();
             SchedulerTestSupport.timer(SchedulerTestSupport.runtime(registry)).close();
@@ -248,7 +279,8 @@ class QueuedBatchDeliveryTest {
         if (all) {
             assertFalse(second.future().get(5, TimeUnit.SECONDS).isSuccess());
         }
-        SchedulerTestSupport.awaitRequestWork(registry.runtime);
+        SchedulerTestSupport.awaitRequestWork(
+                org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(registry));
         assertOccupancy(survivors, survivors);
         assertEquals(survivors, decode.routingView().engineCapacityUsed());
         assertEquals(survivors, decode.routingView().inflightHardKv());
@@ -284,7 +316,10 @@ class QueuedBatchDeliveryTest {
         assertEquals(0, decode.routingView().engineCapacityUsed());
         assertEquals(0, decode.routingView().inflightHardKv());
         assertEquals(0, EndpointTestSupport.expectedReservedKv(decode.resourceSnapshot()));
-        var admission = registry.runtime.deliveries().tryReserveDelivery();
+        var admission =
+                org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(registry)
+                        .deliveries()
+                        .tryReserveDelivery();
         assertTrue(admission.accepted(), "admission permit must be available after RPC completion");
         admission.value().close();
     }
@@ -335,7 +370,7 @@ class QueuedBatchDeliveryTest {
         if (!ack) {
             reply.complete(ack(1L));
         }
-        registry.runtime
+        org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(registry)
                 .signals()
                 .delivery(requestContext.snapshot().delivery().identity())
                 .toCompletableFuture()
@@ -394,7 +429,8 @@ class QueuedBatchDeliveryTest {
                                 })
                         .get(2, TimeUnit.SECONDS);
                 cleanupProof.complete(EngineGrpcClient.CancelReply.REQUEST_CLEANED);
-                SchedulerTestSupport.awaitRequestWork(registry.runtime);
+                SchedulerTestSupport.awaitRequestWork(
+                        org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(registry));
                 assertOccupancy(1, 1); // sender has not yet returned, even with remote proof
             } finally {
                 releaseRpc.countDown();
@@ -439,13 +475,17 @@ class QueuedBatchDeliveryTest {
                                                 && failed.route() == item
                                                 && failed.detail().equals(failure.getMessage())));
         assertFalse(item.future().get(5, TimeUnit.SECONDS).isSuccess());
-        SchedulerTestSupport.awaitRequestWork(registry.runtime);
+        SchedulerTestSupport.awaitRequestWork(
+                org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(registry));
         assertOccupancy(0, 0);
         assertEquals(0, decode.routingView().engineCapacityUsed());
         assertEquals(0, decode.routingView().inflightHardKv());
         assertEquals(0, EndpointTestSupport.expectedReservedKv(decode.resourceSnapshot()));
         verifyNoInteractions(grpc);
-        var admission = registry.runtime.deliveries().tryReserveDelivery();
+        var admission =
+                org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(registry)
+                        .deliveries()
+                        .tryReserveDelivery();
         assertTrue(admission.accepted(), "admission permit must be available after RPC completion");
         admission.value().close();
     }
@@ -457,25 +497,37 @@ class QueuedBatchDeliveryTest {
         var original =
                 (ThreadPoolExecutor)
                         ReflectionTestUtils.getField(
-                                registry.runtime.deliveries(), "dispatchExecutor");
+                                org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(registry)
+                                        .deliveries(),
+                                "dispatchExecutor");
         ThreadPoolExecutor rejected = mock(ThreadPoolExecutor.class);
         doThrow(rejection).when(rejected).execute(any());
-        ReflectionTestUtils.setField(registry.runtime.deliveries(), "dispatchExecutor", rejected);
+        ReflectionTestUtils.setField(
+                org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(registry).deliveries(),
+                "dispatchExecutor",
+                rejected);
         try {
             submit(List.of(item));
         } finally {
             ReflectionTestUtils.setField(
-                    registry.runtime.deliveries(), "dispatchExecutor", original);
+                    org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(registry)
+                            .deliveries(),
+                    "dispatchExecutor",
+                    original);
         }
         assertFalse(item.future().get(5, TimeUnit.SECONDS).isSuccess());
-        SchedulerTestSupport.awaitRequestWork(registry.runtime);
+        SchedulerTestSupport.awaitRequestWork(
+                org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(registry));
         verify(rejected, times(1)).execute(any());
         assertOccupancy(0, 0);
         assertEquals(0, decode.routingView().engineCapacityUsed());
         assertEquals(0, decode.routingView().inflightHardKv());
         assertEquals(0, EndpointTestSupport.expectedReservedKv(decode.resourceSnapshot()));
         verifyNoInteractions(grpc);
-        var admission = registry.runtime.deliveries().tryReserveDelivery();
+        var admission =
+                org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(registry)
+                        .deliveries()
+                        .tryReserveDelivery();
         assertTrue(admission.accepted(), "admission permit must be available after RPC completion");
         admission.value().close();
     }
@@ -488,7 +540,8 @@ class QueuedBatchDeliveryTest {
         releaseExecutor.countDown();
         awaitDispatchTasks();
         assertFalse(item.future().get(5, TimeUnit.SECONDS).isSuccess());
-        SchedulerTestSupport.awaitRequestWork(registry.runtime);
+        SchedulerTestSupport.awaitRequestWork(
+                org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(registry));
         assertOccupancy(0, 0);
         assertEquals(0, decode.routingView().engineCapacityUsed());
         assertEquals(0, decode.routingView().inflightHardKv());
@@ -526,7 +579,8 @@ class QueuedBatchDeliveryTest {
         }
         releaseExecutor.countDown();
         awaitDispatchTasks();
-        SchedulerTestSupport.awaitRequestWork(registry.runtime);
+        SchedulerTestSupport.awaitRequestWork(
+                org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(registry));
         for (int index = 0; index < items.size(); index++) {
             if ((invalidMask & (1 << index)) != 0) {
                 assertFalse(items.get(index).future().get(5, TimeUnit.SECONDS).isSuccess());
@@ -568,7 +622,8 @@ class QueuedBatchDeliveryTest {
                 DeliverySettlementTestSupport.decodeStatus(decode, item.requestId(), true);
             }
         }
-        SchedulerTestSupport.awaitRequestWork(registry.runtime);
+        SchedulerTestSupport.awaitRequestWork(
+                org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(registry));
         for (int index = 0; index < items.size(); index++) {
             if ((invalidMask & (1 << index)) != 0) {
                 registry.cancel(items.get(index).requestId(), 0L, CancelReason.CLIENT_CANCELLED);
@@ -578,7 +633,10 @@ class QueuedBatchDeliveryTest {
         assertEquals(0, decode.routingView().engineCapacityUsed());
         assertEquals(0, decode.routingView().inflightHardKv());
         assertEquals(0, EndpointTestSupport.expectedReservedKv(decode.resourceSnapshot()));
-        var admission = registry.runtime.deliveries().tryReserveDelivery();
+        var admission =
+                org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(registry)
+                        .deliveries()
+                        .tryReserveDelivery();
         assertTrue(admission.accepted(), "admission permit must be available after RPC completion");
         admission.value().close();
     }
@@ -628,7 +686,9 @@ class QueuedBatchDeliveryTest {
         assertTrue(callbackExited.await(2, TimeUnit.SECONDS));
         assertTrue(first.future().get(2, TimeUnit.SECONDS).isSuccess());
         assertTrue(second.future().get(2, TimeUnit.SECONDS).isSuccess());
-        registry.runtime.deliveries().awaitDeliveries();
+        org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(registry)
+                .deliveries()
+                .awaitDeliveries();
         for (var route : List.of(first, second)) {
             assertEquals(
                     ContextResult.SendState.DELIVERED, route.ctx().snapshot().delivery().send());
@@ -639,14 +699,16 @@ class QueuedBatchDeliveryTest {
                                             registry, prefill, RoleType.PREFILL, status));
             DeliverySettlementTestSupport.decodeStatus(decode, route.requestId(), true);
         }
-        SchedulerTestSupport.awaitRequestWork(registry.runtime);
+        SchedulerTestSupport.awaitRequestWork(
+                org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(registry));
         assertOccupancy(0, 0);
         assertEquals(0, decode.routingView().engineCapacityUsed());
         assertEquals(0, decode.resourceSnapshot().activeDispatchPermits());
         assertEquals(0, registry.requests.liveRequestCount());
         assertSame(
                 observerFailure,
-                ReflectionTestUtils.getField(registry.runtime, "failure"),
+                org.flexlb.balance.scheduler.SchedulerTestServices.failure(
+                        org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(registry)),
                 "background evidence failures must survive into shutdown reporting");
     }
 
@@ -716,7 +778,9 @@ class QueuedBatchDeliveryTest {
         reply.complete(ack.build());
         assertTrue(first.future().get(2, TimeUnit.SECONDS).isSuccess());
         assertTrue(second.future().get(2, TimeUnit.SECONDS).isSuccess());
-        registry.runtime.deliveries().awaitDeliveries();
+        org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(registry)
+                .deliveries()
+                .awaitDeliveries();
         for (var route : List.of(first, second)) {
             assertEquals(
                     ContextResult.SendState.DELIVERED, route.ctx().snapshot().delivery().send());
@@ -727,12 +791,16 @@ class QueuedBatchDeliveryTest {
                                             registry, prefill, RoleType.PREFILL, status));
             DeliverySettlementTestSupport.decodeStatus(decode, route.requestId(), true);
         }
-        SchedulerTestSupport.awaitRequestWork(registry.runtime);
+        SchedulerTestSupport.awaitRequestWork(
+                org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(registry));
         assertOccupancy(0, 0);
         assertEquals(0, decode.routingView().engineCapacityUsed());
         assertEquals(0, decode.resourceSnapshot().activeDispatchPermits());
         assertEquals(0, registry.requests.liveRequestCount());
-        assertSame(permitFailure, ReflectionTestUtils.getField(registry.runtime, "failure"));
+        assertSame(
+                permitFailure,
+                org.flexlb.balance.scheduler.SchedulerTestServices.failure(
+                        org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(registry)));
         assertTrue(java.util.Arrays.asList(permitFailure.getSuppressed()).contains(handoffFailure));
     }
 
@@ -829,7 +897,9 @@ class QueuedBatchDeliveryTest {
                                     cancelHead ? head.requestId() : candidate.requestId(),
                                     0L,
                                     CancelReason.CLIENT_CANCELLED);
-                            SchedulerTestSupport.awaitRequestWork(registry.runtime);
+                            SchedulerTestSupport.awaitRequestWork(
+                                    org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(
+                                            registry));
                             return call.callRealMethod();
                         })
                 .when(worker)
@@ -841,7 +911,10 @@ class QueuedBatchDeliveryTest {
                     ledger.prefill.captureQueue(10).items());
             assertEquals(0, other.resourceSnapshot().activeDispatchPermits());
             assertEquals(0, ledger.prefill.stats().batchCount());
-            var permit = registry.runtime.deliveries().tryReserveDelivery();
+            var permit =
+                    org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(registry)
+                            .deliveries()
+                            .tryReserveDelivery();
             assertTrue(permit.accepted());
             permit.value().close();
             if (!cancelHead) {
@@ -935,7 +1008,10 @@ class QueuedBatchDeliveryTest {
                         prefill,
                         (QueueExecutionSettings) ReflectionTestUtils.getField(worker, "settings"),
                         dispatcher,
-                        ledger.prefill);
+                        ledger.prefill,
+                        SchedulerTestSupport.queueDependencies(
+                                org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(
+                                        registry)));
         ReflectionTestUtils.setField(prefill, "queueRunner", worker);
         var head = item(1L);
         var blocker = blockDecode();
@@ -969,7 +1045,7 @@ class QueuedBatchDeliveryTest {
             boolean priorityOrdering, DecisionPolicyConfig.Type grouping, int maxRequests) {
         ReflectionTestUtils.setField(prefill, "predictor", new FormulaPredictor("1"));
         ReflectionTestUtils.setField(
-                registry.runtime.deliveries(),
+                org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(registry).deliveries(),
                 "decodeDeliveryCapacity",
                 new DecodeResources.AdmissionCapacity(1, 100L));
         worker =
@@ -980,12 +1056,16 @@ class QueuedBatchDeliveryTest {
                                 new QueueExecutionSettings(
                                         priorityOrdering,
                                         config.getDispatcher().getType(),
-                                        grouping,
+                                        org.flexlb.balance.planner.BuiltinGroupPlanner.valueOf(
+                                                grouping.name()),
                                         maxRequests,
                                         0L,
                                         0L),
                                 dispatcher,
-                                ledger.prefill));
+                                ledger.prefill,
+                                SchedulerTestSupport.queueDependencies(
+                                        org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(
+                                                registry))));
         ReflectionTestUtils.setField(prefill, "queueRunner", worker);
     }
 
@@ -1074,7 +1154,10 @@ class QueuedBatchDeliveryTest {
             assertEquals(0, later.decodeEp().resourceSnapshot().activeDispatchPermits());
             assertFalse(head.future().isDone());
             if (!batch) {
-                verify(registry.runtime.deliveries(), org.mockito.Mockito.never())
+                verify(
+                                org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(registry)
+                                        .deliveries(),
+                                org.mockito.Mockito.never())
                         .tryReserveDelivery();
                 verify(prefill, org.mockito.Mockito.never())
                         .reserveBatch(any(), anyLong(), anyInt());
@@ -1136,13 +1219,10 @@ class QueuedBatchDeliveryTest {
 
     private void configureOrderedQueue(
             boolean priority, DecisionPolicyConfig.Type grouping, int maxRequests) {
-        ledger =
-                new DeliverySettlementTestSupport(
-                        priority
-                                ? PrefillQueueRunner.PRIORITY_QUEUE_ORDER
-                                : PrefillQueueRunner.FIFO_QUEUE_ORDER);
+        ledger = new DeliverySettlementTestSupport(QueueExecutionSettings.queueOrder(priority));
         ReflectionTestUtils.setField(prefill, "ownership", ledger.prefill);
-        var execution = registry.runtime.deliveries();
+        var execution =
+                org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(registry).deliveries();
         org.mockito.Mockito.doCallRealMethod().when(execution).nextBatchId();
         enableBypass(priority, grouping, maxRequests);
     }
@@ -1180,12 +1260,15 @@ class QueuedBatchDeliveryTest {
                         new QueueExecutionSettings(
                                 true,
                                 config.getDispatcher().getType(),
-                                org.flexlb.config.DecisionPolicyConfig.Type.SINGLE,
+                                org.flexlb.balance.planner.BuiltinGroupPlanner.SINGLE,
                                 1,
                                 0L,
                                 0L),
                         dispatcher,
-                        ledger.prefill);
+                        ledger.prefill,
+                        SchedulerTestSupport.queueDependencies(
+                                org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(
+                                        registry)));
         ReflectionTestUtils.setField(prefill, "queueRunner", worker);
         var head = item(1L);
         var other = anotherDecode();
@@ -1198,7 +1281,11 @@ class QueuedBatchDeliveryTest {
             assertEquals(List.of(head, next), ledger.prefill.captureQueue(10).items());
             assertFalse(worker.canBypass(head, next));
             assertEquals(0, ledger.prefill.stats().batchCount());
-            verify(registry.runtime.deliveries(), org.mockito.Mockito.never()).tryReserveDelivery();
+            verify(
+                            org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(registry)
+                                    .deliveries(),
+                            org.mockito.Mockito.never())
+                    .tryReserveDelivery();
             verify(prefill, org.mockito.Mockito.never()).reserveBatch(any(), anyLong(), anyInt());
             verifyNoInteractions(grpc);
         } finally {
@@ -1221,12 +1308,15 @@ class QueuedBatchDeliveryTest {
                         new QueueExecutionSettings(
                                 true,
                                 config.getDispatcher().getType(),
-                                org.flexlb.config.DecisionPolicyConfig.Type.FIXED_WINDOW,
+                                org.flexlb.balance.planner.BuiltinGroupPlanner.FIXED_WINDOW,
                                 3,
                                 0L,
                                 1_000L),
                         dispatcher,
-                        ledger.prefill);
+                        ledger.prefill,
+                        SchedulerTestSupport.queueDependencies(
+                                org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(
+                                        registry)));
         var head = item(1L);
         var other = anotherDecode();
         var first = item(2L, null, other, 50);
@@ -1408,7 +1498,9 @@ class QueuedBatchDeliveryTest {
         ThreadPoolExecutor executor =
                 (ThreadPoolExecutor)
                         ReflectionTestUtils.getField(
-                                registry.runtime.deliveries(), "dispatchExecutor");
+                                org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(registry)
+                                        .deliveries(),
+                                "dispatchExecutor");
         if (executor.isShutdown()) {
             assertTrue(
                     executor.awaitTermination(5, TimeUnit.SECONDS),

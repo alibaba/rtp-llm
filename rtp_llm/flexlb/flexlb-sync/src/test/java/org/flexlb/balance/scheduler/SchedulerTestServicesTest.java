@@ -12,6 +12,8 @@ import org.flexlb.service.monitor.DeliveryMetricsReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.junit.jupiter.api.Test;
 
+import java.time.Duration;
+
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -23,6 +25,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.any;
+import static org.mockito.Mockito.anyLong;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.inOrder;
@@ -31,7 +34,33 @@ import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
-class SchedulerRuntimeTest {
+class SchedulerTestServicesTest {
+    @Test
+    void drainEscalatesToImmediateAndFreezesAdmissionAfterItsDeadline() {
+        var config = SchedulingTestConfig.newConfig();
+        var service = mock(ConfigService.class);
+        when(service.loadBalanceConfig()).thenReturn(config);
+        var runtime =
+                new SchedulerTestServices(
+                        new RequestRepository(),
+                        mock(EndpointRegistry.class),
+                        mock(DeliveryMetricsReporter.class),
+                        mock(RequestSchedulerReporter.class),
+                        SchedulerTestSupport.dispatcher(),
+                        service,
+                        mock(EngineGrpcClient.class));
+        var scheduler = mock(RequestScheduler.class);
+        when(scheduler.lifecycle()).thenReturn(mock(RequestLifecycle.class));
+        when(scheduler.awaitSchedulingCompletion(anyLong())).thenReturn(false);
+        runtime.registerScheduler(scheduler);
+
+        ShutdownResult result = runtime.shutdown(ShutdownMode.DRAIN, Duration.ZERO);
+
+        assertFalse(result.drained());
+        assertTrue(result.forced());
+        verify(scheduler).close();
+    }
+
     @Test
     @org.junit.jupiter.api.Timeout(15)
     void deferredCloseCannotBlockItsRequestWorkSource() throws Exception {
@@ -41,19 +70,22 @@ class SchedulerRuntimeTest {
             var release = new java.util.concurrent.CountDownLatch(1);
             var sourceReturned = new java.util.concurrent.CompletableFuture<Void>();
             try {
-                f.runtime.executeRequestWork(
-                        context,
-                        () -> {
-                            try (var accepted = f.runtime.registerRequestWork(context)) {
-                                accepted.submitClose(
-                                        () -> {
-                                            entered.countDown();
-                                            RequestProtocolTestSupport.await(release);
-                                        },
-                                        false);
-                            }
-                            sourceReturned.complete(null);
-                        });
+                f.runtime
+                        .tasks()
+                        .execute(
+                                context,
+                                () -> {
+                                    try (var accepted =
+                                            f.runtime.tasks.registerRequestWork(context)) {
+                                        accepted.submitClose(
+                                                () -> {
+                                                    entered.countDown();
+                                                    RequestProtocolTestSupport.await(release);
+                                                },
+                                                false);
+                                    }
+                                    sourceReturned.complete(null);
+                                });
                 assertTrue(entered.await(2, java.util.concurrent.TimeUnit.SECONDS));
                 sourceReturned.get(2, java.util.concurrent.TimeUnit.SECONDS);
             } finally {
@@ -73,23 +105,31 @@ class SchedulerRuntimeTest {
         var executions = new java.util.concurrent.atomic.AtomicInteger();
         try {
             org.springframework.test.util.ReflectionTestUtils.setField(
-                    f.runtime, "requestWorkers", rejected);
+                    f.runtime.tasks(), "requestWorkers", rejected);
             assertThrows(
                     AssertionError.class,
                     () ->
-                            f.runtime.executeRequestWork(
-                                    RequestProtocolTestSupport.context(f.config, 9110L),
-                                    () -> {
-                                        executions.incrementAndGet();
-                                    }));
+                            f.runtime
+                                    .tasks()
+                                    .execute(
+                                            RequestProtocolTestSupport.context(f.config, 9110L),
+                                            () -> {
+                                                executions.incrementAndGet();
+                                            }));
             assertTimeoutPreemptively(
                     java.time.Duration.ofSeconds(5),
                     () -> SchedulerTestSupport.awaitRequestWork(f.runtime));
             assertEquals(0, executions.get());
         } finally {
             org.springframework.test.util.ReflectionTestUtils.setField(
-                    f.runtime, "requestWorkers", workers);
-            assertSame(error, assertThrows(AssertionError.class, () -> f.runtime.shutdown(ShutdownMode.IMMEDIATE, java.time.Duration.ZERO)));
+                    f.runtime.tasks(), "requestWorkers", workers);
+            assertSame(
+                    error,
+                    assertThrows(
+                            AssertionError.class,
+                            () ->
+                                    f.runtime.shutdown(
+                                            ShutdownMode.IMMEDIATE, java.time.Duration.ZERO)));
         }
     }
 
@@ -98,8 +138,7 @@ class SchedulerRuntimeTest {
     void externalFutureCancellationRemainsSynchronousAndItsSourceBlocksWorkClose()
             throws Exception {
         try (var f = new Fixture(false)) {
-            var scheduler =
-                    (AbstractRequestScheduler) SchedulerTestSupport.initializedScheduler(f.runtime);
+            var scheduler = SchedulerTestSupport.initializedScheduler(f.runtime).lifecycle();
             var context = RequestProtocolTestSupport.context(f.config, 9103L);
             var result = RequestProtocolTestSupport.register(scheduler, context);
             var entered = new java.util.concurrent.CountDownLatch(1);
@@ -150,10 +189,9 @@ class SchedulerRuntimeTest {
     @Test
     void directStartupUsesOneSchedulerAndRejectsQueueRequests() {
         try (var f = new Fixture(false)) {
-            var scheduler =
-                    (AbstractRequestScheduler) SchedulerTestSupport.initializedScheduler(f.runtime);
-            assertInstanceOf(DirectRequestScheduler.class, scheduler);
-            assertSame(scheduler, SchedulerTestSupport.initializedScheduler(f.runtime));
+            var scheduler = SchedulerTestSupport.initializedScheduler(f.runtime).lifecycle();
+            assertInstanceOf(DirectRequestScheduler.class, scheduler.scheduler());
+            assertSame(scheduler.scheduler(), SchedulerTestSupport.initializedScheduler(f.runtime));
             var wrongMode = new RequestContext(SchedulingTestConfig.newConfig());
             wrongMode
                     .data()
@@ -169,7 +207,7 @@ class SchedulerRuntimeTest {
                                     .setRequestId(991L)
                                     .build()
                                     .toByteString());
-            var rejected = scheduler.submit(wrongMode).join();
+            var rejected = scheduler.scheduler().submit(wrongMode).join();
             assertFalse(rejected.isSuccess());
             assertEquals(
                     "request configuration does not match scheduler mode",
@@ -178,7 +216,7 @@ class SchedulerRuntimeTest {
             assertSame(f.config, new RequestContext(f.config).data().getConfig());
             assertThrows(
                     IllegalStateException.class,
-                    () -> f.runtime.registerScheduler(mock(AbstractRequestScheduler.class)));
+                    () -> f.runtime.registerScheduler(mock(RequestScheduler.class)));
         }
     }
 
@@ -193,7 +231,7 @@ class SchedulerRuntimeTest {
                     SchedulerTestSupport.initializedScheduler(f.runtime));
             assertThrows(
                     IllegalStateException.class,
-                    () -> f.runtime.registerScheduler(mock(AbstractRequestScheduler.class)));
+                    () -> f.runtime.registerScheduler(mock(RequestScheduler.class)));
         }
     }
 
@@ -203,7 +241,7 @@ class SchedulerRuntimeTest {
         f.close();
         assertThrows(
                 IllegalStateException.class,
-                () -> f.runtime.registerScheduler(mock(AbstractRequestScheduler.class)));
+                () -> f.runtime.registerScheduler(mock(RequestScheduler.class)));
     }
 
     @Test
@@ -215,7 +253,7 @@ class SchedulerRuntimeTest {
         var dispatcher = SchedulerTestSupport.dispatcher();
         var runtime =
                 org.mockito.Mockito.spy(
-                        new SchedulerRuntime(
+                        new SchedulerTestServices(
                                 new RequestRepository(),
                                 endpoints,
                                 mock(DeliveryMetricsReporter.class),
@@ -223,29 +261,33 @@ class SchedulerRuntimeTest {
                                 dispatcher,
                                 service,
                                 mock(EngineGrpcClient.class)));
-        var scheduler = mock(AbstractRequestScheduler.class);
+        var scheduler = mock(RequestScheduler.class);
+        when(scheduler.lifecycle()).thenReturn(mock(RequestLifecycle.class));
         var expected = new IllegalStateException("placement close failed");
-        doThrow(expected).when(scheduler).closePlacement();
+        doThrow(expected).when(scheduler).close();
         var deliveries = spy(runtime.deliveries());
-        org.springframework.test.util.ReflectionTestUtils.setField(
+        org.flexlb.balance.scheduler.SchedulerTestServices.setDependency(
                 runtime, "deliveries", deliveries);
         runtime.registerScheduler(scheduler);
 
-        assertSame(expected, assertThrows(IllegalStateException.class, () -> runtime.shutdown(ShutdownMode.IMMEDIATE, java.time.Duration.ZERO)));
+        assertSame(
+                expected,
+                assertThrows(
+                        IllegalStateException.class,
+                        () -> runtime.shutdown(ShutdownMode.IMMEDIATE, java.time.Duration.ZERO)));
 
-        var order = inOrder(scheduler, runtime, deliveries, endpoints);
-        order.verify(scheduler).closePlacement();
-        order.verify(runtime).awaitAdmissions();
+        var order = inOrder(scheduler, scheduler.lifecycle(), runtime, deliveries, endpoints);
+        order.verify(scheduler).close();
+        order.verify(scheduler.lifecycle()).stopAdmissionsAndAwaitCompletion();
         order.verify(deliveries).awaitDeliveries();
         order.verify(endpoints).close();
-        order.verify(scheduler).closeOutstandingAndTerminalize();
+        order.verify(scheduler.lifecycle()).closeOutstandingAndTerminalize();
     }
 
     @Test
     void stoppingRejectsRegistrationWhileAcceptedRequestWorkCanContinue() throws Exception {
         try (var f = new Fixture()) {
-            var scheduler =
-                    (AbstractRequestScheduler) SchedulerTestSupport.initializedScheduler(f.runtime);
+            var scheduler = SchedulerTestSupport.initializedScheduler(f.runtime).lifecycle();
             var accepted = RequestProtocolTestSupport.context(f.config, 9101L);
             var result = RequestProtocolTestSupport.register(scheduler, accepted);
             assertFalse(result.isDone());
@@ -261,7 +303,7 @@ class SchedulerRuntimeTest {
             assertNull(rejected.data().getScheduler());
 
             var continued = new java.util.concurrent.CompletableFuture<Void>();
-            f.runtime.executeRequestWork(accepted, () -> continued.complete(null));
+            f.runtime.tasks().execute(accepted, () -> continued.complete(null));
             continued.get(1, java.util.concurrent.TimeUnit.SECONDS);
             assertFalse(result.isDone());
         }
@@ -272,11 +314,11 @@ class SchedulerRuntimeTest {
         try (var f = new Fixture()) {
             var cancelledWork = new java.util.concurrent.CompletableFuture<Void>();
             var cancellation =
-                    f.runtime.scheduleTimeout(() -> cancelledWork.complete(null), 60_000L);
+                    f.runtime.taskTimer().schedule(() -> cancelledWork.complete(null), 60_000L);
             cancellation.cancel();
 
             var otherWork = new java.util.concurrent.CompletableFuture<Void>();
-            f.runtime.scheduleTimeout(() -> otherWork.complete(null), 0L);
+            f.runtime.taskTimer().schedule(() -> otherWork.complete(null), 0L);
             otherWork.get(1, java.util.concurrent.TimeUnit.SECONDS);
             assertFalse(cancelledWork.isDone());
             assertTrue(SchedulerTestSupport.cleanupExecutor(f.runtime).getQueue().isEmpty());
@@ -286,12 +328,14 @@ class SchedulerRuntimeTest {
     @Test
     void shutdownCancelsEveryExactOwnerInTheSharedRequestDirectory() {
         try (var f = new Fixture()) {
-            var installed =
-                    (AbstractRequestScheduler) SchedulerTestSupport.initializedScheduler(f.runtime);
+            var installed = SchedulerTestSupport.initializedScheduler(f.runtime).lifecycle();
             var other =
                     new DirectRequestScheduler(
                             mock(RequestWorkerSelector.class),
-                            f.runtime,
+                            f.runtime.newLifecycle(
+                                    f.config,
+                                    SchedulingTestConfig.capacity(f.config),
+                                    mock(RecentCacheKeyTraceReporter.class)),
                             f.config,
                             SchedulingTestConfig.capacity(f.config),
                             mock(RecentCacheKeyTraceReporter.class));
@@ -313,25 +357,34 @@ class SchedulerRuntimeTest {
     @Test
     void failedCancellationDoesNotPreventOtherOwnersFromSettling() {
         try (var f = new Fixture()) {
-            var installed =
-                    (AbstractRequestScheduler) SchedulerTestSupport.initializedScheduler(f.runtime);
+            var installed = SchedulerTestSupport.initializedScheduler(f.runtime).lifecycle();
             var other =
                     spy(
                             new DirectRequestScheduler(
                                     mock(RequestWorkerSelector.class),
-                                    f.runtime,
+                                    f.runtime.newLifecycle(
+                                            f.config,
+                                            SchedulingTestConfig.capacity(f.config),
+                                            mock(RecentCacheKeyTraceReporter.class)),
                                     f.config,
                                     SchedulingTestConfig.capacity(f.config),
                                     mock(RecentCacheKeyTraceReporter.class)));
+            var lifecycle = SchedulerTestSupport.spyLifecycle(other);
             var otherContext = RequestProtocolTestSupport.context(f.config, 9105L);
             var otherResult = RequestProtocolTestSupport.register(other, otherContext);
             var installedResult =
                     RequestProtocolTestSupport.register(
                             installed, RequestProtocolTestSupport.context(f.config, 9106L));
             var expected = new IllegalStateException("cancellation failed");
-            doThrow(expected).when(other).cancel(otherContext, 0L, CancelReason.SHUTDOWN);
+            doThrow(expected).when(lifecycle).cancel(otherContext, 0L, CancelReason.SHUTDOWN);
 
-            assertSame(expected, assertThrows(IllegalStateException.class, () -> f.runtime.shutdown(ShutdownMode.IMMEDIATE, java.time.Duration.ZERO)));
+            assertSame(
+                    expected,
+                    assertThrows(
+                            IllegalStateException.class,
+                            () ->
+                                    f.runtime.shutdown(
+                                            ShutdownMode.IMMEDIATE, java.time.Duration.ZERO)));
 
             assertFalse(installedResult.join().isSuccess());
             assertFalse(otherResult.join().isSuccess());
@@ -348,7 +401,7 @@ class SchedulerRuntimeTest {
         var endpoints = mock(EndpointRegistry.class);
         var runtime =
                 org.mockito.Mockito.spy(
-                        new SchedulerRuntime(
+                        new SchedulerTestServices(
                                 new RequestRepository(),
                                 endpoints,
                                 mock(DeliveryMetricsReporter.class),
@@ -361,17 +414,27 @@ class SchedulerRuntimeTest {
                     spy(
                             new DirectRequestScheduler(
                                     mock(RequestWorkerSelector.class),
-                                    runtime,
+                                    runtime.newLifecycle(
+                                            config,
+                                            SchedulingTestConfig.capacity(config),
+                                            mock(RecentCacheKeyTraceReporter.class)),
                                     config,
                                     SchedulingTestConfig.capacity(config),
                                     mock(RecentCacheKeyTraceReporter.class)));
+            var lifecycle = SchedulerTestSupport.spyLifecycle(owner);
             var context = RequestProtocolTestSupport.context(config, 9107L);
             var result = RequestProtocolTestSupport.register(owner, context);
             var expected =
                     new IllegalStateException("cancellation failed before scheduler registration");
-            doThrow(expected).when(owner).cancel(context, 0L, CancelReason.SHUTDOWN);
+            doThrow(expected).when(lifecycle).cancel(context, 0L, CancelReason.SHUTDOWN);
 
-            assertSame(expected, assertThrows(IllegalStateException.class, () -> runtime.shutdown(ShutdownMode.IMMEDIATE, java.time.Duration.ZERO)));
+            assertSame(
+                    expected,
+                    assertThrows(
+                            IllegalStateException.class,
+                            () ->
+                                    runtime.shutdown(
+                                            ShutdownMode.IMMEDIATE, java.time.Duration.ZERO)));
 
             assertFalse(result.join().isSuccess());
             assertEquals(0, runtime.requests().liveRequestCount());
@@ -434,7 +497,11 @@ class SchedulerRuntimeTest {
             }
             assertSame(
                     taskFails ? taskFailure : submissionFailure,
-                    assertThrows(IllegalStateException.class, () -> f.runtime.shutdown(ShutdownMode.IMMEDIATE, java.time.Duration.ZERO)));
+                    assertThrows(
+                            IllegalStateException.class,
+                            () ->
+                                    f.runtime.shutdown(
+                                            ShutdownMode.IMMEDIATE, java.time.Duration.ZERO)));
         }
     }
 
@@ -444,8 +511,7 @@ class SchedulerRuntimeTest {
     void futureCallbackRejectsSelfShutdownBeforeMutationAndExternalShutdownStillDrains(
             boolean asynchronousAck) throws Exception {
         try (var f = new Fixture(false)) {
-            var owner =
-                    (AbstractRequestScheduler) SchedulerTestSupport.initializedScheduler(f.runtime);
+            var owner = SchedulerTestSupport.initializedScheduler(f.runtime).lifecycle();
             var context = RequestProtocolTestSupport.context(f.config, 9201L);
             var future = RequestProtocolTestSupport.register(owner, context);
             var observed = new java.util.concurrent.CompletableFuture<Throwable>();
@@ -461,7 +527,12 @@ class SchedulerRuntimeTest {
                                 assertSame(caller, Thread.currentThread());
                             }
                             var rejected =
-                                    assertThrows(IllegalStateException.class, () -> f.runtime.shutdown(ShutdownMode.IMMEDIATE, java.time.Duration.ZERO));
+                                    assertThrows(
+                                            IllegalStateException.class,
+                                            () ->
+                                                    f.runtime.shutdown(
+                                                            ShutdownMode.IMMEDIATE,
+                                                            java.time.Duration.ZERO));
                             assertTrue(
                                     rejected.getMessage()
                                             .contains("own request work or response callback"));
@@ -518,9 +589,10 @@ class SchedulerRuntimeTest {
                 assertNull(observed.get(5, java.util.concurrent.TimeUnit.SECONDS));
             }
             try (var closer = java.util.concurrent.Executors.newSingleThreadExecutor()) {
-                closer.submit(() -> {
-                            SchedulerTestSupport.shutdown(f.runtime);
-                        })
+                closer.submit(
+                                () -> {
+                                    SchedulerTestSupport.shutdown(f.runtime);
+                                })
                         .get(5, java.util.concurrent.TimeUnit.SECONDS);
             }
             assertFalse(
@@ -530,10 +602,55 @@ class SchedulerRuntimeTest {
         }
     }
 
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(booleans = {false, true})
+    void ownedWorkRejectsShutdownBeforeWaitingForTheShutdownMonitor(boolean responseCallback)
+            throws Exception {
+        try (var f = new Fixture()) {
+            var context = RequestProtocolTestSupport.context(f.config, 9202L);
+            var rejected = new java.util.concurrent.CompletableFuture<Void>();
+            Runnable reenterShutdown =
+                    () -> {
+                        try {
+                            var failure =
+                                    assertThrows(
+                                            IllegalStateException.class,
+                                            () ->
+                                                    f.runtime.shutdown(
+                                                            ShutdownMode.IMMEDIATE, Duration.ZERO));
+                            assertTrue(
+                                    failure.getMessage()
+                                            .contains("own request work or response callback"));
+                            rejected.complete(null);
+                        } catch (Throwable failure) {
+                            rejected.completeExceptionally(failure);
+                        }
+                    };
+            // Model shutdown holding its monitor while waiting for this registered owner.
+            try {
+                synchronized (f.runtime) {
+                    if (responseCallback) {
+                        var response = new java.util.concurrent.CompletableFuture<Void>();
+                        response.thenRun(reenterShutdown);
+                        new ResponsePublication(f.runtime.responseCompletions(), context, false)
+                                .submit(() -> response.complete(null));
+                    } else {
+                        f.runtime.tasks().execute(context, reenterShutdown);
+                    }
+                    rejected.get(5, java.util.concurrent.TimeUnit.SECONDS);
+                    assertTrue(f.runtime.isAccepting(), "rejection must not start shutdown");
+                }
+            } finally {
+                // Release the modeled shutdown lock before cleanup, including on a red test.
+                rejected.get(5, java.util.concurrent.TimeUnit.SECONDS);
+            }
+        }
+    }
+
     private static final class Fixture implements AutoCloseable {
         final FlexlbConfig config = SchedulingTestConfig.newConfig();
         final EndpointRegistry endpoints = mock(EndpointRegistry.class);
-        final SchedulerRuntime runtime;
+        final SchedulerTestServices runtime;
 
         Fixture() {
             this(false);
@@ -546,7 +663,7 @@ class SchedulerRuntimeTest {
             when(service.loadBalanceConfig()).thenReturn(config);
             var reporter = mock(DeliveryMetricsReporter.class);
             runtime =
-                    new SchedulerRuntime(
+                    new SchedulerTestServices(
                             new RequestRepository(),
                             endpoints,
                             reporter,
@@ -556,7 +673,11 @@ class SchedulerRuntimeTest {
                             mock(EngineGrpcClient.class));
             runtime.registerScheduler(
                     PlacementConfiguration.create(
-                            runtime,
+                            runtime.newLifecycle(
+                                    config,
+                                    SchedulingTestConfig.capacity(config),
+                                    org.mockito.Mockito.mock(
+                                            org.flexlb.service.RecentCacheKeyTraceReporter.class)),
                             config,
                             mock(RequestWorkerSelector.class),
                             reporter,
@@ -564,7 +685,9 @@ class SchedulerRuntimeTest {
                             new PlacementAvailability(),
                             SchedulingTestConfig.capacity(config),
                             org.mockito.Mockito.mock(
-                                    org.flexlb.service.RecentCacheKeyTraceReporter.class)));
+                                    org.flexlb.service.RecentCacheKeyTraceReporter.class),
+                            org.flexlb.balance.planner.BuiltinGroupPlanner.from(config),
+                            new OrderedRequestQueue(config.isPriorityOrdering())));
         }
 
         public void close() {

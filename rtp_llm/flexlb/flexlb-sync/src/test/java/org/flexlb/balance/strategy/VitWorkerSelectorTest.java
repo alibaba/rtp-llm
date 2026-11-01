@@ -31,7 +31,7 @@ class VitWorkerSelectorTest {
         ConfigService configService = Mockito.mock(ConfigService.class);
         Mockito.when(configService.loadBalanceConfig()).thenReturn(new FlexlbConfig());
         endpoints = StrategyTestSupport.endpointRegistry(configService);
-        strategy = new VitWorkerSelector(endpoints);
+        strategy = new VitWorkerSelector();
     }
 
     @AfterEach
@@ -43,12 +43,12 @@ class VitWorkerSelectorTest {
     void rejectsNonVitSelection() {
         assertThrows(
                 IllegalArgumentException.class,
-                () -> StrategyTestSupport.select(strategy, 1L, RoleType.PREFILL, null));
+                () -> StrategyTestSupport.select(endpoints, strategy, 1L, RoleType.PREFILL, null));
     }
 
     @Test
     void returnsNullWithoutVitWorkers() {
-        assertNull(StrategyTestSupport.select(strategy, 2L, RoleType.VIT, null));
+        assertNull(StrategyTestSupport.select(endpoints, strategy, 2L, RoleType.VIT, null));
     }
 
     @Test
@@ -56,7 +56,7 @@ class VitWorkerSelectorTest {
         registerVit("127.0.0.3", 8080, "group-a");
 
         try (RequestRoute selected =
-                StrategyTestSupport.select(strategy, 3L, RoleType.VIT, "group-a")) {
+                StrategyTestSupport.select(endpoints, strategy, 3L, RoleType.VIT, "group-a")) {
             assertNotNull(selected);
             assertEquals(RoleType.VIT, StrategyTestSupport.vit(selected).getRole());
             assertEquals(3L, StrategyTestSupport.vit(selected).getRequestId());
@@ -70,7 +70,7 @@ class VitWorkerSelectorTest {
     @Test
     void skipsOtherGroups() {
         registerVit("127.0.0.4", 8080, "group-a");
-        assertNull(StrategyTestSupport.select(strategy, 4L, RoleType.VIT, "group-b"));
+        assertNull(StrategyTestSupport.select(endpoints, strategy, 4L, RoleType.VIT, "group-b"));
     }
 
     @Test
@@ -82,7 +82,8 @@ class VitWorkerSelectorTest {
 
         for (int request = 0; request < 3_000; request++) {
             try (RequestRoute selected =
-                    StrategyTestSupport.select(strategy, 10_000L + request, RoleType.VIT, null)) {
+                    StrategyTestSupport.select(
+                            endpoints, strategy, 10_000L + request, RoleType.VIT, null)) {
                 assertNotNull(selected);
                 counts.merge(StrategyTestSupport.vit(selected).getServerIp(), 1, Integer::sum);
             }
@@ -111,11 +112,12 @@ class VitWorkerSelectorTest {
                                 "127.0.0.4:8080"))
                 .when(directory)
                 .endpointAddressSnapshot(RoleType.VIT);
-        VitWorkerSelector grouped = new VitWorkerSelector(directory);
+        VitWorkerSelector grouped = new VitWorkerSelector();
         Map<String, Integer> counts = new HashMap<>();
         for (int request = 0; request < 4_000; request++) {
             try (RequestRoute selected =
-                    StrategyTestSupport.select(grouped, request, RoleType.VIT, "target")) {
+                    StrategyTestSupport.select(
+                            directory, grouped, request, RoleType.VIT, "target")) {
                 assertNotNull(selected);
                 assertEquals("target", StrategyTestSupport.vit(selected).getGroup());
                 counts.merge(StrategyTestSupport.vit(selected).getServerIp(), 1, Integer::sum);

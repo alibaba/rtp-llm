@@ -105,7 +105,7 @@ class RequestResourceAccountingTest {
         var releaseFailure = new IllegalStateException("Prefill release failed");
         when(prefill.release(null, item)).thenThrow(releaseFailure);
         var first =
-                AbstractRequestScheduler.releaseResources(
+                RequestLifecycle.releaseResources(
                         item, DecodeResources.ReleaseReason.NOT_SENT, false, false);
         assertFalse(first.prefillSettled());
         assertTrue(first.decodeSettled());
@@ -115,7 +115,7 @@ class RequestResourceAccountingTest {
 
         org.mockito.Mockito.doReturn(true).when(prefill).release(null, item);
         var retry =
-                AbstractRequestScheduler.releaseResources(
+                RequestLifecycle.releaseResources(
                         item,
                         DecodeResources.ReleaseReason.NOT_SENT,
                         first.prefillSettled(),
@@ -288,7 +288,8 @@ class RequestResourceAccountingTest {
             applyStatus(
                     f.prefill,
                     status(RoleType.PREFILL, 2L, Map.of(), Map.of("101", failed), TOTAL_KV));
-            SchedulerTestSupport.awaitRequestWork(f.requests.runtime);
+            SchedulerTestSupport.awaitRequestWork(
+                    org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(f.requests));
             assertEquals(ContextResult.Phase.ENDING, f.item.ctx().snapshot().phase());
             assertEquals(1, f.decode.resourceSnapshot().runningCount());
             assertEquals(1, SchedulerTestSupport.repository(f.requests).liveRequestCount());
@@ -324,7 +325,8 @@ class RequestResourceAccountingTest {
                     acquisition.handle().dispatch().status());
             // Endpoint ownership can advance before its notification reaches the context.
             f.requests.cancel(ID, 0, CancelReason.CLIENT_CANCELLED);
-            SchedulerTestSupport.awaitRequestWork(f.requests.runtime);
+            SchedulerTestSupport.awaitRequestWork(
+                    org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(f.requests));
             assertEquals(1, SchedulerTestSupport.repository(f.requests).liveRequestCount());
             assertEquals(ContextResult.Phase.ENDING, f.item.ctx().snapshot().phase());
             assertEquals(0, f.prefill.ownership.stats().locallyOwnedRequests());
@@ -444,7 +446,8 @@ class RequestResourceAccountingTest {
             applyStatus(
                     f.prefill,
                     status(RoleType.PREFILL, 2L, Map.of(), Map.of("101", task(ID)), TOTAL_KV));
-            SchedulerTestSupport.awaitRequestWork(f.requests.runtime);
+            SchedulerTestSupport.awaitRequestWork(
+                    org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(f.requests));
             assertTrue(
                     f.item.ctx().snapshot().deadlines().visibility() == null,
                     "Prefill completion cannot rearm visibility checks after Decode acceptance");
@@ -556,8 +559,8 @@ class RequestResourceAccountingTest {
     }
 
     private static final class Fixture implements AutoCloseable {
-        final AbstractRequestScheduler requests;
-        final SchedulerRuntime runtime;
+        final RequestLifecycle requests;
+        final SchedulerTestServices runtime;
         final PrefillEndpoint prefill;
         final DecodeEndpoint decode;
         final RequestRoute item;
@@ -593,7 +596,9 @@ class RequestResourceAccountingTest {
             var channel = mock(EngineGrpcClient.class);
             when(channel.cancelAsync(any(), anyInt(), any(), anyLong())).thenReturn(cleanup);
             org.springframework.test.util.ReflectionTestUtils.setField(
-                    requests.runtime, "engineClient", channel);
+                    org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(requests).dispatcher,
+                    "grpcClient",
+                    channel);
             var projector = requests;
             var endpoints =
                     new EndpointRegistry(
@@ -601,9 +606,14 @@ class RequestResourceAccountingTest {
                             SchedulerTestSupport.repository(projector),
                             reporter,
                             DeliveryTestSupport.route(reporter),
-                            new PlacementAvailability());
-            runtime = requests.runtime;
-            org.springframework.test.util.ReflectionTestUtils.setField(
+                            new PlacementAvailability(),
+                            org.flexlb.balance.planner.BuiltinGroupPlanner.from(
+                                    service.loadBalanceConfig()),
+                            order ->
+                                    org.flexlb.balance.endpoint.PrefillActiveIndex.ordered(
+                                            16, order));
+            runtime = org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(requests);
+            org.flexlb.balance.scheduler.SchedulerTestServices.setDependency(
                     runtime, "endpoints", endpoints);
             var worker =
                     WorkerStatus.createDiscovered(
@@ -731,7 +741,8 @@ class RequestResourceAccountingTest {
         }
 
         void assertEmpty() {
-            SchedulerTestSupport.awaitRequestWork(requests.runtime);
+            SchedulerTestSupport.awaitRequestWork(
+                    org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(requests));
             assertEquals(
                     0,
                     SchedulerTestSupport.repository(requests).liveRequestCount(),
@@ -795,12 +806,13 @@ class RequestResourceAccountingTest {
 
         void proveCleanup() throws Exception {
             cleanup.complete(EngineGrpcClient.CancelReply.REQUEST_CLEANED);
-            requests.runtime
+            org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(requests)
                     .signals()
                     .delivery(item.ctx().snapshot().delivery().identity())
                     .toCompletableFuture()
                     .get(2, TimeUnit.SECONDS);
-            SchedulerTestSupport.awaitRequestWork(requests.runtime);
+            SchedulerTestSupport.awaitRequestWork(
+                    org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(requests));
         }
 
         void expire() {

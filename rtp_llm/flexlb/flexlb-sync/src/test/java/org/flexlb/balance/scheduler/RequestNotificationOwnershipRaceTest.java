@@ -47,11 +47,12 @@ class RequestNotificationOwnershipRaceTest {
         var owner =
                 (QueuedRequestScheduler)
                         SchedulerTestSupport.create(
-                                service,
-                                mock(DeliveryMetricsReporter.class),
-                                mock(RequestSchedulerReporter.class),
-                                mock(RecentCacheKeyTraceReporter.class));
-        var runtime = owner.runtime;
+                                        service,
+                                        mock(DeliveryMetricsReporter.class),
+                                        mock(RequestSchedulerReporter.class),
+                                        mock(RecentCacheKeyTraceReporter.class))
+                                .scheduler();
+        var runtime = org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(owner.lifecycle());
         var context = RequestProtocolTestSupport.context(config, 9401L);
         var future = RequestProtocolTestSupport.register(owner, context);
         var originalTimer = runtime.deadlines();
@@ -80,10 +81,10 @@ class RequestNotificationOwnershipRaceTest {
                         })
                 .when(timer)
                 .update(eq(context), any());
-        ReflectionTestUtils.setField(runtime, "timer", timer);
+        org.flexlb.balance.scheduler.SchedulerTestServices.setDependency(runtime, "timer", timer);
         var workStarted = new CountDownLatch(1);
         var finishWork = new CountDownLatch(1);
-        try (var work = runtime.registerRequestWork(context)) {
+        try (var work = runtime.tasks.registerRequestWork(context)) {
             work.submitClose(
                     () -> {
                         workStarted.countDown();
@@ -131,18 +132,20 @@ class RequestNotificationOwnershipRaceTest {
             assertTrue(publications(runtime).isEmpty());
             assertEquals(
                     0L,
-                    ((Number) ReflectionTestUtils.getField(runtime, "pendingWork")).longValue());
+                    ((Number) ReflectionTestUtils.getField(runtime.tasks(), "pendingWork"))
+                            .longValue());
             assertNull(SchedulerTestSupport.failure(owner));
         } finally {
             finishWork.countDown();
             finishNotification.countDown();
-            ReflectionTestUtils.setField(runtime, "timer", originalTimer);
+            org.flexlb.balance.scheduler.SchedulerTestServices.setDependency(
+                    runtime, "timer", originalTimer);
             SchedulerTestSupport.shutdown(runtime);
         }
     }
 
     @SuppressWarnings("unchecked")
-    private static Set<ResponsePublication> publications(SchedulerRuntime runtime) {
+    private static Set<ResponsePublication> publications(SchedulerTestServices runtime) {
         var values =
                 (Set<ResponsePublication>)
                         ReflectionTestUtils.getField(

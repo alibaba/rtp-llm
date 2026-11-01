@@ -82,7 +82,7 @@ class PreemptionRegistrationTest {
                 .setSchedulingMetadata(org.flexlb.dao.SchedulingMetadata.explicit(50, 100_000L));
         context.data()
                 .register(
-                        mock(AbstractRequestScheduler.class),
+                        mock(RequestLifecycle.class),
                         new RequestFuture((kind, response, failure) -> false));
         assertThrows(
                 IllegalStateException.class,

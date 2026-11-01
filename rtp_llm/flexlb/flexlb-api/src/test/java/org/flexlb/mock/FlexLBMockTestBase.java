@@ -7,7 +7,7 @@ import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
-import org.flexlb.balance.scheduler.AbstractRequestScheduler;
+import org.flexlb.balance.scheduler.RequestLifecycle;
 import org.flexlb.balance.scheduler.DeliveryDispatcher;
 import org.flexlb.balance.scheduler.PlacementKey;
 import org.flexlb.balance.scheduler.RequestContext;
@@ -53,7 +53,7 @@ import static org.mockito.Mockito.withSettings;
 /**
  * Base class for mock-worker integration tests.
  *
- * <p>Sets up a real {@link AbstractRequestScheduler} backed by a real
+ * <p>Sets up a real {@link RequestLifecycle} backed by a real
  * {@link EngineGrpcClient} that creates real Netty gRPC channels to
  * mock workers.  No Spring Boot context, no model loading, no GPU.
  *
@@ -62,7 +62,7 @@ import static org.mockito.Mockito.withSettings;
  *
  * <p>Architecture:
  * <pre>
- * Real AbstractRequestScheduler (test-only composition root)
+ * Real RequestLifecycle (test-only composition root)
  *   ├── Real DeliveryDispatcher
  *   │     └── Real EngineGrpcClient (real Netty channels)
  *   │           ↕  real gRPC (Netty)

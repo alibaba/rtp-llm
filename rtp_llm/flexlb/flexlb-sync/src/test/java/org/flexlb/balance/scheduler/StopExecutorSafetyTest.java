@@ -44,13 +44,13 @@ class StopExecutorSafetyTest {
                     }
                 };
         try {
-            assertTrue(runtime.executeStopWork(context, workflow));
+            assertTrue(runtime.tasks.executeStopWork(context, workflow));
             assertTrue(entered.await(2, TimeUnit.SECONDS));
-            assertTrue(runtime.executeStopWork(context, workflow));
+            assertTrue(runtime.tasks.executeStopWork(context, workflow));
             for (int i = 0; i < 100; i++) {
-                assertFalse(runtime.executeStopWork(context, workflow));
+                assertFalse(runtime.tasks.executeStopWork(context, workflow));
             }
-            try (var local = runtime.registerRequestWork(context)) {
+            try (var local = runtime.tasks.registerRequestWork(context)) {
                 local.submitClose(locallySettled::countDown, false);
             }
             assertTrue(locallySettled.await(2, TimeUnit.SECONDS));
@@ -71,7 +71,7 @@ class StopExecutorSafetyTest {
         var started = new java.util.concurrent.atomic.AtomicBoolean();
         org.junit.jupiter.api.Assertions.assertThrows(
                 IllegalStateException.class,
-                () -> runtime.executeStopWork(context(), () -> started.set(true)));
+                () -> runtime.tasks.executeStopWork(context(), () -> started.set(true)));
         assertFalse(started.get());
     }
 
@@ -84,7 +84,7 @@ class StopExecutorSafetyTest {
         var normal = new CountDownLatch(1);
         try {
             for (int i = 0; i < size; i++) {
-                runtime.executeStopWork(
+                runtime.tasks.executeStopWork(
                         context(),
                         () -> {
                             assertTrue(Thread.currentThread().isVirtual());
@@ -93,7 +93,7 @@ class StopExecutorSafetyTest {
                         });
             }
             assertTrue(entered.await(3, TimeUnit.SECONDS));
-            runtime.executeRequestWork(context(), normal::countDown);
+            runtime.tasks().execute(context(), normal::countDown);
             assertTrue(normal.await(1, TimeUnit.SECONDS));
             SchedulerTestSupport.awaitRequestWork(runtime);
         } finally {
@@ -111,15 +111,16 @@ class StopExecutorSafetyTest {
         var stop = new CountDownLatch(1);
         try {
             for (int i = 0; i < workers.getMaximumPoolSize(); i++) {
-                runtime.executeRequestWork(
-                        context(),
-                        () -> {
-                            entered.countDown();
-                            RequestProtocolTestSupport.await(release);
-                        });
+                runtime.tasks()
+                        .execute(
+                                context(),
+                                () -> {
+                                    entered.countDown();
+                                    RequestProtocolTestSupport.await(release);
+                                });
             }
             assertTrue(entered.await(3, TimeUnit.SECONDS));
-            runtime.executeStopWork(context(), stop::countDown);
+            runtime.tasks.executeStopWork(context(), stop::countDown);
             assertTrue(stop.await(1, TimeUnit.SECONDS));
         } finally {
             release.countDown();
@@ -147,20 +148,22 @@ class StopExecutorSafetyTest {
                             }
                         });
         try {
-            runtime.executeStopWork(
+            runtime.tasks.executeStopWork(
                     context,
                     () -> {
                         entered.countDown();
                         RequestProtocolTestSupport.await(handoff);
-                        runtime.executeRequestWork(
-                                context,
-                                () ->
-                                        runtime.executeStopWork(
-                                                context,
-                                                () -> {
-                                                    finalEntered.countDown();
-                                                    RequestProtocolTestSupport.await(releaseFinal);
-                                                }));
+                        runtime.tasks()
+                                .execute(
+                                        context,
+                                        () ->
+                                                runtime.tasks.executeStopWork(
+                                                        context,
+                                                        () -> {
+                                                            finalEntered.countDown();
+                                                            RequestProtocolTestSupport.await(
+                                                                    releaseFinal);
+                                                        }));
                     });
             assertTrue(entered.await(3, TimeUnit.SECONDS));
             closer.start();
@@ -186,7 +189,7 @@ class StopExecutorSafetyTest {
         var runtime = runtime();
         var result = new CompletableFuture<Boolean>();
         try {
-            runtime.executeStopWork(
+            runtime.tasks.executeStopWork(
                     context(),
                     () -> {
                         try {
@@ -206,7 +209,7 @@ class StopExecutorSafetyTest {
     void rejectedStopSubmissionIsReportedAndRemainsDrained() throws Exception {
         var runtime = runtime();
         ReflectionTestUtils.setField(
-                runtime,
+                runtime.tasks(),
                 "stopWorkers",
                 (java.util.concurrent.Executor)
                         work -> {
@@ -215,10 +218,12 @@ class StopExecutorSafetyTest {
         try {
             assertThrows(
                     java.util.concurrent.RejectedExecutionException.class,
-                    () -> runtime.executeStopWork(context(), () -> {}));
+                    () -> runtime.tasks.executeStopWork(context(), () -> {}));
             SchedulerTestSupport.awaitRequestWork(runtime);
         } finally {
-            assertThrows(RuntimeException.class, () -> runtime.shutdown(ShutdownMode.IMMEDIATE, java.time.Duration.ZERO));
+            assertThrows(
+                    RuntimeException.class,
+                    () -> runtime.shutdown(ShutdownMode.IMMEDIATE, java.time.Duration.ZERO));
         }
     }
 
@@ -227,7 +232,7 @@ class StopExecutorSafetyTest {
         var runtime = runtime();
         var cleanup =
                 new DeliveryDispatcher(
-                        null,
+                        runtime.engineClient,
                         DeliveryTestSupport.service(SchedulingTestConfig.batchConfig()),
                         new org.flexlb.service.monitor.DeliveryMetricsReporter(null));
         var client = runtime.engineClient;
@@ -249,7 +254,8 @@ class StopExecutorSafetyTest {
         try {
             for (int i = 0; i < 30; i++) {
                 var context = context();
-                ReflectionTestUtils.setField(context.data().getScheduler(), "runtime", runtime);
+                org.flexlb.balance.scheduler.SchedulerTestServices.bind(
+                        context.data().getScheduler(), runtime);
                 when(context.snapshot().delivery()).thenReturn(null);
                 when(context.snapshot().cancellation()).thenReturn(null);
                 var claim =
@@ -281,9 +287,9 @@ class StopExecutorSafetyTest {
         return mock(RequestContext.class, RETURNS_DEEP_STUBS);
     }
 
-    private SchedulerRuntime runtime() {
+    private SchedulerTestServices runtime() {
         var config = DeliveryTestSupport.service(SchedulingTestConfig.batchConfig());
-        return new SchedulerRuntime(
+        return new SchedulerTestServices(
                 new RequestRepository(),
                 mock(org.flexlb.balance.endpoint.EndpointRegistry.class),
                 mock(org.flexlb.service.monitor.DeliveryMetricsReporter.class),

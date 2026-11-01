@@ -15,14 +15,13 @@ import org.flexlb.balance.projection.WorkSnapshot;
 import org.flexlb.balance.scheduler.DeliveryDispatcher.Member;
 import org.flexlb.config.DispatcherConfig;
 import org.flexlb.dao.master.WorkerStatus;
+import org.flexlb.dao.route.RoleType;
 import org.flexlb.util.Failures;
 import org.flexlb.util.Logger;
-import org.flexlb.util.PriorityOrdering;
 
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
-import java.util.Comparator;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -146,21 +145,6 @@ public final class PrefillQueueRunner {
         }
     }
 
-    /** Priority descending, then enqueue order and request identity. */
-    public static final Comparator<RequestRoute> PRIORITY_QUEUE_ORDER =
-            (left, right) ->
-                    PriorityOrdering.compareWithRequestId(
-                            left.priority(),
-                            left.enqueueSeq(),
-                            left.requestId(),
-                            right.priority(),
-                            right.enqueueSeq(),
-                            right.requestId());
-
-    /** FIFO order: unique monotonic enqueue sequence. */
-    public static final Comparator<RequestRoute> FIFO_QUEUE_ORDER =
-            Comparator.comparingLong(RequestRoute::enqueueSeq);
-
     private static final Map<String, Object> INITIAL_QUEUE_WAIT_SNAPSHOT =
             Map.of("cause", "waiting for Prefill decision");
 
@@ -188,6 +172,24 @@ public final class PrefillQueueRunner {
     /** Canonical request ownership guarded exclusively by {@link #queueGuard}. */
     private final PrefillState prefillState;
 
+    private final Dependencies dependencies;
+
+    /** Fixed facilities for this queue generation; request callbacks retain their own owner. */
+    public static final class Dependencies {
+        final DeliveryExecution deliveries;
+        final org.flexlb.service.monitor.DeliveryMetricsReporter reporter;
+        final java.util.function.Consumer<Throwable> failures;
+
+        Dependencies(
+                DeliveryExecution deliveries,
+                org.flexlb.service.monitor.DeliveryMetricsReporter reporter,
+                java.util.function.Consumer<Throwable> failures) {
+            this.deliveries = Objects.requireNonNull(deliveries);
+            this.reporter = Objects.requireNonNull(reporter);
+            this.failures = Objects.requireNonNull(failures);
+        }
+    }
+
     private final Thread workerThread;
     private final CancellationException normalStopFailure;
     private final IllegalStateException stopAcknowledgementFailure;
@@ -208,8 +210,10 @@ public final class PrefillQueueRunner {
             PrefillEndpoint prefillEp,
             QueueExecutionSettings settings,
             DeliveryDispatcher dispatcher,
-            PrefillState prefillState) {
+            PrefillState prefillState,
+            Dependencies dependencies) {
         this.key = key;
+        this.dependencies = Objects.requireNonNull(dependencies);
         this.prefillEndpoint = Objects.requireNonNull(prefillEp, "prefillEndpoint");
         this.settings = Objects.requireNonNull(settings);
         this.prefillState = Objects.requireNonNull(prefillState, "prefillState");
@@ -219,7 +223,7 @@ public final class PrefillQueueRunner {
                     signal(true);
                     prefillEndpoint.signal(PrefillEndpoint.Signal.PLACEMENT);
                 };
-        this.grouping = settings.groupingPolicy();
+        this.grouping = settings.grouping();
         this.dispatcher = Objects.requireNonNull(dispatcher, "dispatcher");
         this.normalStopFailure =
                 new CancellationException("FlexLB worker scheduling queue stopped: " + key);
@@ -405,10 +409,7 @@ public final class PrefillQueueRunner {
                             .data()
                             .getScheduler()
                             .onQueueEvent(
-                                    item,
-                                    AbstractRequestScheduler.QueueKind.REJECTED,
-                                    null,
-                                    terminalFailure);
+                                    item, RequestLifecycle.QueueKind.REJECTED, terminalFailure);
                     boolean acknowledged =
                             prefillState.updateQueue(
                                             PrefillState.QueueChange.ACK_STOP,
@@ -506,7 +507,7 @@ public final class PrefillQueueRunner {
         } finally {
             queueGuard.unlock();
         }
-        Preparation prep = new Preparation(candidates.getFirst(), candidates.size());
+        Preparation prep = new Preparation(candidates.size());
         try (prep) {
             try {
                 prep.acquire(candidates, evaluator);
@@ -546,12 +547,7 @@ public final class PrefillQueueRunner {
                     prep.transferred = true;
                     dispatcher.deliverBatch(command);
                 } else {
-                    publishRoutes(
-                            prep.members,
-                            prep.predictions,
-                            precedingWork,
-                            prep.runtime,
-                            prep.committed);
+                    publishRoutes(prep.members, prep.predictions, precedingWork, prep.committed);
                     prep.committed = null;
                 }
                 if (!removedFailedMember) {
@@ -566,18 +562,8 @@ public final class PrefillQueueRunner {
                                 Failures.run(
                                         failure,
                                         () ->
-                                                member.route()
-                                                        .ctx()
-                                                        .data()
-                                                        .getScheduler()
-                                                        .onDeliveryFact(
-                                                                new ContextResult
-                                                                        .PreparationFailure(
-                                                                        null,
-                                                                        member.route(),
-                                                                        detail,
-                                                                        System
-                                                                                .currentTimeMillis())));
+                                                RequestLifecycle.preparationFailed(
+                                                        member.route(), detail));
                     }
                 }
                 if (prep.committed != null) {
@@ -595,7 +581,6 @@ public final class PrefillQueueRunner {
             List<Member> members,
             long[] predictions,
             WorkSnapshot precedingWork,
-            SchedulerRuntime runtime,
             PrefillState.CommittedHandoff committed) {
         DeliveryClaim[] claims = new DeliveryClaim[members.size()];
         for (int index = 0; index < members.size(); index++) {
@@ -613,23 +598,15 @@ public final class PrefillQueueRunner {
                                         member.decode());
             } catch (Throwable failure) {
                 try {
-                    member.route()
-                            .ctx()
-                            .data()
-                            .getScheduler()
-                            .onDeliveryFact(
-                                    new ContextResult.PreparationFailure(
-                                            null,
-                                            member.route(),
-                                            String.valueOf(failure.getMessage()),
-                                            System.currentTimeMillis()));
+                    RequestLifecycle.preparationFailed(
+                            member.route(), String.valueOf(failure.getMessage()));
                 } catch (Throwable ownerFailure) {
-                    runtime.recordFailure(ownerFailure);
+                    dependencies.failures.accept(ownerFailure);
                 }
             }
         }
         long unstarted = 0L;
-        List<RequestRoute> delivered = new ArrayList<>(claims.length);
+        int delivered = 0;
         Throwable failure = null;
         for (int index = 0; index < claims.length; index++) {
             DeliveryClaim claim = claims[index];
@@ -656,24 +633,40 @@ public final class PrefillQueueRunner {
                                                         .getLifetime(),
                                                 nowMs),
                                         nowMs));
-                delivered.add(claim.item());
+                delivered++;
             } catch (Throwable problem) {
+                claims[index] = null;
                 failure = Failures.append(failure, problem);
             }
         }
         failure = Failures.append(failure, DeliveryDispatcher.closeCommitted(members, committed));
         members.clear();
         if (failure != null) {
-            runtime.recordFailure(failure);
+            dependencies.failures.accept(failure);
             try {
                 Logger.error("Route publication failed", failure);
             } catch (Throwable ignored) {
             }
         }
-        if (!delivered.isEmpty()) {
+        reportRoutes(claims, delivered, committed.remainingQueueDepth());
+    }
+
+    private void reportRoutes(DeliveryClaim[] claims, int delivered, int remainingQueueDepth) {
+        if (delivered != 0) {
             try {
-                runtime.deliveryReporter()
-                        .reportDelivery(0L, null, committed.remainingQueueDepth(), delivered, 0L);
+                long nowMs = System.currentTimeMillis();
+                String engineIp = prefillEndpoint.getIp();
+                for (var claim : claims) {
+                    if (claim != null) {
+                        dependencies.reporter.reportBatchWaitTimeMs(
+                                RoleType.PREFILL.name(),
+                                engineIp,
+                                Math.max(0L, nowMs - claim.item().enqueuedAtMs()),
+                                claim.item().priority());
+                    }
+                }
+                dependencies.reporter.reportBatcherQueueSize(
+                        RoleType.PREFILL.name(), engineIp, remainingQueueDepth);
             } catch (Throwable monitoringFailure) {
                 Logger.error("Route delivery telemetry failed", monitoringFailure);
             }
@@ -681,31 +674,24 @@ public final class PrefillQueueRunner {
     }
 
     boolean capacityAvailable(RequestRoute item, CapacityBoundary boundary) {
-        var runtime = item.ctx().data().getScheduler().runtime;
         return switch (boundary.resource()) {
-            case DISPATCH_EXECUTOR -> runtime.deliveries().deliveryCapacityAvailable();
+            case DISPATCH_EXECUTOR -> dependencies.deliveries.deliveryCapacityAvailable();
             case PREFILL_REQUEST ->
                     prefillState.requestCapacityAvailable(prefillEndpoint.requestLimit, 1);
             case PREFILL_BATCH ->
                     prefillEndpoint.ownership.batchCapacityAvailable(
-                            runtime.deliveries().maxInflightBatches);
+                            dependencies.deliveries.maxInflightBatches);
             case DECODE_ENGINE ->
                     item.decodeEp()
                             .shouldRetryDispatch(
                                     item.decodeReservation(),
-                                    runtime.deliveries().decodeDeliveryCapacity);
+                                    dependencies.deliveries.decodeDeliveryCapacity);
         };
     }
 
     Runnable watchCapacity(RequestRoute item, CapacityBoundary boundary, Runnable wake) {
         return switch (boundary.resource()) {
-            case DISPATCH_EXECUTOR ->
-                    item.ctx()
-                            .data()
-                            .getScheduler()
-                            .runtime
-                            .deliveries()
-                            .watchDeliveryCapacity(wake);
+            case DISPATCH_EXECUTOR -> dependencies.deliveries.watchDeliveryCapacity(wake);
             case DECODE_ENGINE -> {
                 yield item.decodeEp().watchEngineDispatchCapacity(wake);
             }
@@ -783,20 +769,13 @@ public final class PrefillQueueRunner {
                 item.ctx()
                         .data()
                         .getScheduler()
-                        .onQueueEvent(item, AbstractRequestScheduler.QueueKind.EXPIRED, null, null);
+                        .onQueueEvent(item, RequestLifecycle.QueueKind.EXPIRED, null);
             } else {
-                item.ctx()
-                        .data()
-                        .getScheduler()
-                        .onDeliveryFact(
-                                new ContextResult.PreparationFailure(
-                                        null,
-                                        item,
-                                        String.valueOf(failure.cause().getMessage()),
-                                        System.currentTimeMillis()));
+                RequestLifecycle.preparationFailed(
+                        item, String.valueOf(failure.cause().getMessage()));
             }
         } catch (Throwable callbackFailure) {
-            item.ctx().data().getScheduler().runtime.recordFailure(callbackFailure);
+            dependencies.failures.accept(callbackFailure);
             problem =
                     Failures.run(
                             problem,
@@ -895,8 +874,7 @@ public final class PrefillQueueRunner {
                         snapshot.queueVersion(),
                         snapshot.schedulingInputVersion(),
                         Math.min(
-                                GroupPlanner.collectionDeadlineMs(
-                                        selection.windowOpenedAtMs(), settings.collectionWaitMs()),
+                                grouping.nextCheckAtMs(selection, constraints),
                                 first.expiresAtMs()),
                         "Prefill collection window");
             }
@@ -1099,7 +1077,6 @@ public final class PrefillQueueRunner {
 
     private final class Preparation implements AutoCloseable {
         final boolean batch = settings.dispatcherType() == DispatcherConfig.Type.BATCH;
-        final SchedulerRuntime runtime;
         final ArrayList<Member> members;
         final long[] predictions;
         DeliveryExecution.DeliveryPermit executionPermit;
@@ -1111,8 +1088,7 @@ public final class PrefillQueueRunner {
         CapacityBoundary boundary;
         RequestRoute blocked;
 
-        Preparation(RequestRoute first, int size) {
-            runtime = first.ctx().data().getScheduler().runtime;
+        Preparation(int size) {
             members = new ArrayList<>(size);
             predictions = batch ? null : new long[size];
         }
@@ -1178,7 +1154,8 @@ public final class PrefillQueueRunner {
                                                 .decodeEp()
                                                 .shouldRetryDispatch(
                                                         bypassedHead.decodeReservation(),
-                                                        runtime.deliveries()
+                                                        dependencies
+                                                                .deliveries
                                                                 .decodeDeliveryCapacity)) {
                                     return null;
                                 }
@@ -1206,16 +1183,16 @@ public final class PrefillQueueRunner {
             }
             if (batch && members.isEmpty()) {
                 try {
-                    var execution = runtime.deliveries().tryReserveDelivery();
+                    var execution = dependencies.deliveries.tryReserveDelivery();
                     if (!execution.accepted()) {
                         return execution.boundary();
                     }
                     executionPermit = execution.value();
-                    batchId = runtime.deliveries().nextBatchId();
+                    batchId = dependencies.deliveries.nextBatchId();
                     checkState(batchId > 0L, "batch id supplier returned a non-positive id");
                     var acquired =
                             prefillEndpoint.reserveBatch(
-                                    item, batchId, runtime.deliveries().maxInflightBatches);
+                                    item, batchId, dependencies.deliveries.maxInflightBatches);
                     if (acquired.status() != PrefillState.CapacityStatus.ACQUIRED) {
                         return switch (acquired.status()) {
                             case CAPACITY_FULL ->
@@ -1246,7 +1223,7 @@ public final class PrefillQueueRunner {
             } catch (InvalidPrefillPredictionException failure) {
                 return CapacityBoundary.failed(failure);
             }
-            var attempt = Member.prepare(item, runtime.deliveries().decodeDeliveryCapacity);
+            var attempt = Member.prepare(item, dependencies.deliveries.decodeDeliveryCapacity);
             if (!attempt.accepted()) {
                 return attempt.boundary();
             }

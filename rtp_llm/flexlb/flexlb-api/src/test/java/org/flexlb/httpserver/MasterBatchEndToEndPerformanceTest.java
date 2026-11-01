@@ -66,7 +66,6 @@ import org.junit.jupiter.params.provider.MethodSource;
 import org.slf4j.LoggerFactory;
 import org.springframework.mock.env.MockEnvironment;
 import org.springframework.test.util.ReflectionTestUtils;
-import reactor.netty.resources.LoopResources;
 
 import java.io.BufferedReader;
 import java.io.ByteArrayInputStream;
@@ -109,8 +108,8 @@ import static org.mockito.Mockito.withSettings;
  * Loopback end-to-end regression for the Master scheduling delivery path.
  *
  * <p>The exercised path is:
- * client call -> Netty Master gRPC server -> FlexlbServiceImpl -> AbstractRequestScheduler
- * -> AbstractRequestScheduler -> PrefillQueueRunner. BATCH continues through EngineGrpcClient
+ * client call -> Netty Master gRPC server -> FlexlbServiceImpl -> RequestLifecycle
+ * -> RequestLifecycle -> PrefillQueueRunner. BATCH continues through EngineGrpcClient
  * to a Netty mock engine; NON_BATCH publishes the route decision to the frontend.
  * The worker capacities are fixed by the fixture, while worker selection uses the
  * production RequestWorkerSelector with cost-based Prefill and Decode selection.
@@ -363,22 +362,21 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
         CacheMetricsReporter cacheMetrics = new CacheMetricsReporter();
         ReflectionTestUtils.setField(cacheMetrics, "monitor", new NoOpFlexMonitor());
         CostBasedPrefillStrategy prefillSelector =
-                new CostBasedPrefillStrategy(
-                        engineWorkerStatus,
-                        cache,
-                        createNoOpEngineHealthReporter(),
-                        cacheMetrics,
-                        configService);
+                new CostBasedPrefillStrategy(cache, configService);
         ModelMetaConfig modelMeta = mock(ModelMetaConfig.class, withSettings().stubOnly());
         when(modelMeta.requiredRoles()).thenReturn(List.of(RoleType.DECODE, RoleType.PREFILL));
         return new RequestWorkerSelector(
+                engineWorkerStatus,
                 prefillSelector,
                 new DecodeSelector(
-                        engineWorkerStatus,
                         configService,
                         new org.flexlb.balance.scheduler.PlacementConfiguration()
                                 .decodeAdmissionCapacity(configService)),
-                new VitWorkerSelector(engineWorkerStatus),
+                new VitWorkerSelector(),
+                null,
+                createNoOpEngineHealthReporter(),
+                cacheMetrics,
+                configService,
                 modelMeta);
     }
 
@@ -456,12 +454,7 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
     }
 
     private EngineHealthReporter createNoOpEngineHealthReporter() {
-        LoopResources constructorOnlyLoopResources = useNative -> grpcClientEventLoopGroup();
-        return new EngineHealthReporter(
-                new NoOpFlexMonitor(),
-                grpcClient,
-                constructorOnlyLoopResources,
-                engineWorkerStatus);
+        return new EngineHealthReporter(new NoOpFlexMonitor(), engineWorkerStatus);
     }
 
     @AfterEach
