@@ -76,9 +76,14 @@ public final class PrefillObservation {
             var entry = state.requests.get(task.requestId());
             if (entry == null || entry.ownership != OwnershipStage.COMMITTED
                     || entry.batch != null && (task.batchId() <= 0L || entry.batch.batchId != task.batchId())) { continue; }
-            var next = new TerminalObservation(entry, task.executionTimeMs(), task.errorCode(), task.priorityPreemptionProgress());
+            // Older engines omit inputLength: retain the routing estimate in that case.
+            long input = task.inputLength() > 0L ? task.inputLength() : Math.max(0L, entry.route.seqLen());
+            long hit = task.inputLength() > 0L ? task.prefixLength() : entry.route.hitCache();
+            long compute = input - Math.clamp(hit, 0L, input);
+            var next = new TerminalObservation(entry, task.executionTimeMs(), task.errorCode(), compute, task.priorityPreemptionProgress());
             facts.merge(task.requestId(), next, (first, other) -> new TerminalObservation(first.owner(),
                     Math.max(first.executionTimeMs(), other.executionTimeMs()), first.errorCode() != 0L ? first.errorCode() : other.errorCode(),
+                    Math.max(first.computeTokens(), other.computeTokens()),
                     PriorityPreemptionProgress.merge(first.preemptionProgress(), other.preemptionProgress())));
         }
         return facts;

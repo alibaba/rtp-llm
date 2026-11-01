@@ -6,6 +6,31 @@ import java.util.ArrayList;
 import static org.junit.jupiter.api.Assertions.*;
 
 class PrefillTokenWorkloadTest {
+    @Test void disabledWindowNeverReadsClockOrRetainsCompletions() {
+        var work = new PrefillTokenWorkload(0, () -> { throw new AssertionError("window disabled"); });
+        work.accept(100);
+        work.release(100);
+        work.complete(900);
+        assertEquals(0, work.snapshot().score());
+    }
+
+    @Test void enabledWindowExpiresCompletedWorkWithoutChangingAdmission() {
+        var now = new java.util.concurrent.atomic.AtomicLong(1000);
+        var work = new PrefillTokenWorkload(10_000, now::get);
+        work.accept(100);
+        work.complete(700);
+        now.set(2000);
+        work.complete(300);
+        assertEquals(1100, work.snapshot().score());
+        assertEquals(100, work.snapshot().pendingTokens());
+        now.set(10_999);
+        assertEquals(1000, work.snapshot().completedTokens());
+        now.set(11_000);
+        assertEquals(400, work.snapshot().score());
+        now.set(12_000);
+        assertEquals(100, work.snapshot().score());
+    }
+
     @Test void abandonedPlansReleaseExactlyOnceWithoutConsumingHardCapacity() {
         var work = new PrefillTokenWorkload();
         var plan = work.plan(1000);

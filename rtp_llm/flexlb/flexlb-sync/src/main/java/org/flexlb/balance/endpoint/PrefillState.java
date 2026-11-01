@@ -276,7 +276,7 @@ public final class PrefillState {
         }
     }
 
-    record TerminalObservation(RequestEntry owner, long executionTimeMs, long errorCode,
+    record TerminalObservation(RequestEntry owner, long executionTimeMs, long errorCode, long computeTokens,
             PriorityPreemptionProgress preemptionProgress) { }
 
     public final ReentrantLock lock;
@@ -295,9 +295,13 @@ public final class PrefillState {
     }
 
     void enableTokenWorkload(long pendingTokenLimit, java.util.function.BooleanSupplier engineQueueAdmission) {
+        enableTokenWorkload(pendingTokenLimit, engineQueueAdmission, 0L);
+    }
+
+    void enableTokenWorkload(long pendingTokenLimit, java.util.function.BooleanSupplier engineQueueAdmission, long windowMs) {
         this.engineQueueAdmission = java.util.Objects.requireNonNull(engineQueueAdmission);
         this.pendingTokenLimit = pendingTokenLimit;
-        tokenWorkload = new org.flexlb.balance.strategy.PrefillTokenWorkload();
+        tokenWorkload = new org.flexlb.balance.strategy.PrefillTokenWorkload(windowMs);
     }
 
     public org.flexlb.balance.strategy.PrefillTokenWorkload.Snapshot tokenWorkload() {
@@ -853,7 +857,10 @@ public final class PrefillState {
             batch.lastObservedAtMs = Math.max(batch.lastObservedAtMs, reduction.nowMs);
         }
         for (TerminalObservation terminal : reduction.terminals.values()) {
-            removeEntry(terminal.owner);
+            if (removeEntry(terminal.owner) && tokenWorkload != null && terminal.errorCode() == 0L
+                    && terminal.preemptionProgress() != PriorityPreemptionProgress.CANCELED) {
+                tokenWorkload.complete(terminal.computeTokens());
+            }
         }
         for (var phase : reduction.individualPhases.entrySet()) {
             var entry = phase.getKey();
