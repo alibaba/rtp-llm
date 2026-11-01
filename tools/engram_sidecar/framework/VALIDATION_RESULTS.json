@@ -1,0 +1,154 @@
+{
+  "base_main_commit": "492ecf45b3ef55b22fd4882622abfdb2e2f664f2",
+  "bootstrap_probe": {
+    "consumer_native_counters_zero_after_close": true,
+    "cross_host": true,
+    "layer_cases": 12,
+    "lookup_exact": true,
+    "revision": "v2",
+    "torch_attach_current_allocated_delta_bytes": 0
+  },
+  "concurrent_consumer_execution_tested": false,
+  "cpu_tests": {
+    "bazel_gpu_count": 0,
+    "bazel_original_main_wrapper": true,
+    "bazel_owner_host": {
+      "test_engram_bootstrap": {
+        "passed": 29,
+        "skipped": 0
+      },
+      "test_engram_model_attach": {
+        "passed": 19,
+        "skipped": 0
+      }
+    },
+    "bazel_test_result_cache_disabled": true,
+    "fixture_each_host": {
+      "passed": 10,
+      "skipped": 0
+    },
+    "harness_each_host": {
+      "passed": 16,
+      "skipped": 0
+    }
+  },
+  "fixture": {
+    "all_rows_distinct_raw_and_decoded": true,
+    "decode_steps": [
+      0,
+      1,
+      7
+    ],
+    "fused_gate_shape_4_5120_tested": false,
+    "gated_residual_path": "generic/reference",
+    "hidden_shape_tail": [
+      2,
+      128
+    ],
+    "layer_count": 2,
+    "other_cases": [
+      "mixed8",
+      "prefill33",
+      "empty"
+    ],
+    "table_rows": [
+      4097,
+      514
+    ],
+    "valid_history_tokens": [
+      0,
+      1,
+      3
+    ]
+  },
+  "fixture_revision": "engram-framework-fixture-main-492ecf45-v2",
+  "model_hook_runs": {
+    "cross_host": {
+      "consumer_checkpoint_has_tables": false,
+      "forward_max_abs_error": 0.0009765625,
+      "forward_max_bound_ratio": 0.5,
+      "graph_mode_rejected": true,
+      "hash_exact": true,
+      "layer_cases": 12,
+      "lookup_exact": true,
+      "mask_exact": true,
+      "pointers_match_native": true,
+      "process_exit_code": 0,
+      "repeated_hook_reused_mapping": true,
+      "status": "PASS",
+      "wkv_exact": true
+    },
+    "same_host": {
+      "consumer_checkpoint_has_tables": false,
+      "forward_max_abs_error": 0.0009765625,
+      "forward_max_bound_ratio": 0.5,
+      "graph_mode_rejected": true,
+      "hash_exact": true,
+      "layer_cases": 12,
+      "lookup_exact": true,
+      "mask_exact": true,
+      "pointers_match_native": true,
+      "process_exit_code": 0,
+      "repeated_hook_reused_mapping": true,
+      "status": "PASS",
+      "wkv_exact": true
+    }
+  },
+  "not_validated": [
+    "complete LLM checkpoint and serving",
+    "HTTP requests",
+    "engine CUDA Graph",
+    "fused Triton gate for HC4/hidden5120",
+    "sCR and live unload/reload",
+    "hardware fault recovery",
+    "production capacity",
+    "100 microsecond overhead target and latency SLO",
+    "concurrent independent serving instances"
+  ],
+  "numerical_policy": {
+    "bf16_ulps": 2,
+    "near_zero_absolute_floor": 1e-05,
+    "threshold_selected_before_run": true
+  },
+  "owner_backing": {
+    "allocation_count": 2,
+    "physical_bytes": 4194304
+  },
+  "owner_teardown": {
+    "native_resource_and_failure_counters": {
+      "cleanup_failures": 0,
+      "contexts": 0,
+      "deferred_cleanups": 0,
+      "imports": 0,
+      "mappings": 0,
+      "owner_allocations": 0,
+      "reservations": 0,
+      "view_storages": 0
+    },
+    "note": "Native counters do not measure all driver memory; zero total GPU memory is not claimed.",
+    "private_bundle_and_capability_files_removed": true,
+    "process_exited": true,
+    "status": "CLOSED"
+  },
+  "runtime": {
+    "cuda_runtime": "13.0",
+    "native_libraries": [
+      "libth_transformer_config.so",
+      "librtp_compute_ops.so"
+    ],
+    "torch": "2.11.0+cu130"
+  },
+  "same_owner_generation": true,
+  "schema_version": 1,
+  "scope": "Real Engram model loading/preparation hooks and layer forward; no complete LLM or HTTP server",
+  "validated_on": "2026-10-16",
+  "validated_python_sources_sha256": {
+    "rtp_llm/models_py/model_desc/deepseek_v41_model.py": "e33370044db8156125cea22b356147ffaeec3abe5adc15147fbbd3e252c65489",
+    "rtp_llm/models_py/modules/dsv41/engram_bootstrap.py": "b2f53c10b37efbadf945fb838fc2cae0727c6fb71d1c6cf7b42972dafb4d61ee",
+    "rtp_llm/models_py/modules/dsv41/engram_model_attach.py": "7d12add1d31203a358d26d56ac7157afee65dc8923bedba57a1f23126080004f",
+    "tools/engram_sidecar/framework/checkpoint_fixture.py": "242b922478abcb74eaff646500d27aa68c9f1a14ba1a1f9744d885426ca45654",
+    "tools/engram_sidecar/framework/consumer_model_hook.py": "117c44e4ab2f107eb63bf1a2682c132daff55950dafd2a61f59581ca5f9a8583",
+    "tools/engram_sidecar/framework/test_checkpoint_fixture.py": "1a9fffb329799561372afeacc87f1a144889fa870ab97b62428a65ab97e9f33c",
+    "tools/engram_sidecar/framework/test_consumer_model_hook.py": "af7186e946b4490e1fd6b492a3949e581550b060026a12e372f4e7a7a1409914"
+  }
+}

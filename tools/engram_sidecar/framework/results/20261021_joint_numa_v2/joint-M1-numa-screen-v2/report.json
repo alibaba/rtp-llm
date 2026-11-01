@@ -1,0 +1,715 @@
+{
+  "complete": {
+    "cases": [
+      "layers1-14-M1-eager",
+      "layers1-14-M1-graph"
+    ],
+    "counters": {
+      "cleanup_failures": 0,
+      "contexts": 0,
+      "deferred_cleanups": 0,
+      "imports": 0,
+      "mappings": 0,
+      "owner_allocations": 0,
+      "reservations": 0,
+      "view_storages": 0
+    },
+    "decode_step_slo": "NOT_MEASURED",
+    "layer_mode": "together",
+    "scope": "selected-layer serial lookup component; no inter-layer model computation"
+  },
+  "component_threshold_status": "FAIL_OBSERVED",
+  "full_decode_slo": "NOT_MEASURED",
+  "independent_restarts": 1,
+  "memory": {
+    "1": {
+      "actual_source_prepare_wall_time": "NOT_RECORDED; no phase timestamps",
+      "alias": {
+        "cuda_allocated_delta_bytes": 0,
+        "scale_alias": true,
+        "weight_alias": true
+      },
+      "complete_pinned": {
+        "expected_node": 0,
+        "expected_pages": 1546900,
+        "node_pages": {
+          "0": 1546900
+        },
+        "page_bytes": 65536,
+        "resident_bytes": 101377638400,
+        "resident_pages": 1546900
+      },
+      "complete_source_before_and_after": [
+        {
+          "expected_node": 1,
+          "expected_pages": 1549304,
+          "file": "model-00047-of-00048.safetensors",
+          "file_bytes": 101535150936,
+          "node_pages": {
+            "1": 1549304
+          },
+          "page_bytes": 65536,
+          "resident_bytes": 101535186944,
+          "resident_pages": 1549304
+        }
+      ],
+      "eviction_prevented": false,
+      "phases": {
+        "after_load": {
+          "slack_after_budget_bytes": {
+            "host": 397343719424,
+            "pinned_node": 149441019904,
+            "shm": 173500268544,
+            "source_node": 90858586112,
+            "visible_cgroup_0": 182451044352
+          },
+          "verified_admission": true
+        },
+        "before_prefault": {
+          "slack_after_budget_bytes": {
+            "host": 296102461440,
+            "pinned_node": 149577990144,
+            "shm": 173500268544,
+            "source_node": 91017314304,
+            "visible_cgroup_0": 182453665792
+          },
+          "verified_admission": true
+        },
+        "prefaulted": {
+          "slack_after_budget_bytes": {
+            "host": 397258981376,
+            "pinned_node": 149363752960,
+            "shm": 173500268544,
+            "source_node": 90852425728,
+            "visible_cgroup_0": 182455762944
+          },
+          "verified_admission": true
+        }
+      },
+      "source_cpu": 72
+    },
+    "14": {
+      "actual_source_prepare_wall_time": "NOT_RECORDED; no phase timestamps",
+      "alias": {
+        "cuda_allocated_delta_bytes": 0,
+        "scale_alias": true,
+        "weight_alias": true
+      },
+      "complete_pinned": {
+        "expected_node": 0,
+        "expected_pages": 1546943,
+        "node_pages": {
+          "0": 1546943
+        },
+        "page_bytes": 65536,
+        "resident_bytes": 101380456448,
+        "resident_pages": 1546943
+      },
+      "complete_source_before_and_after": [
+        {
+          "expected_node": 1,
+          "expected_pages": 1549346,
+          "file": "model-00048-of-00048.safetensors",
+          "file_bytes": 101537926640,
+          "node_pages": {
+            "1": 1549346
+          },
+          "page_bytes": 65536,
+          "resident_bytes": 101537939456,
+          "resident_pages": 1549346
+        }
+      ],
+      "eviction_prevented": false,
+      "phases": {
+        "after_load": {
+          "slack_after_budget_bytes": {
+            "host": 283052343296,
+            "pinned_node": 47915663360,
+            "shm": 72119812096,
+            "source_node": 90712113152,
+            "visible_cgroup_0": 81098768384
+          },
+          "verified_admission": true
+        },
+        "before_prefault": {
+          "slack_after_budget_bytes": {
+            "host": 194312339456,
+            "pinned_node": 48038739968,
+            "shm": 72119812096,
+            "source_node": 90783678464,
+            "visible_cgroup_0": 81095098368
+          },
+          "verified_admission": true
+        },
+        "prefaulted": {
+          "slack_after_budget_bytes": {
+            "host": 296126906368,
+            "pinned_node": 48184623104,
+            "shm": 72119812096,
+            "source_node": 90964099072,
+            "visible_cgroup_0": 81098833920
+          },
+          "verified_admission": true
+        }
+      },
+      "source_cpu": 72
+    }
+  },
+  "no_timing_or_outliers_subtracted": true,
+  "paired_observations": 400,
+  "positive_threshold_unique_pairs": 1,
+  "privacy": "all original payloads scanned; tar owner/time/mode metadata normalized only",
+  "raw_records_verified": 1600,
+  "run": {
+    "baseline": "independent source mmap -> complete _PinnedSharedTable; extra copy is experiment control",
+    "batches": [
+      1
+    ],
+    "checkpoint_metadata": {
+      "config_sha256": "sha256:8be45ce0476004a3f529fd896115a4a2e800a129ad2d3ec05b16050f52e21879",
+      "tokenizer_sha256": "sha256:c90dfa01249db1be4245780a052ede752e1361c612ac6d08e2bdada7d599476b"
+    },
+    "discard_private_source_cache": true,
+    "identity": {
+      "dataset_id": "sha256:f21f16f50765aad579aa25970379231befba73ed37184ba5d6235e0415b3a1de",
+      "generation": "ff3a2e5c-1b54-44a2-9c07-f304ecee8a46",
+      "hash_abi": "sha256:62e044e152f52eb205cca83d2ea456a20ce7b426f7139a2c4fd03eea3fd2fd09",
+      "manifest_sha256": "sha256:c0b7ea39fbdbbfdba60655dd7e790a3c7fe25b064027454ebd7fe14792e93137",
+      "model_revision": "DeepSeek-V4.1-Flash-index-74b0686a3d289198"
+    },
+    "layer_groups": [
+      [
+        1,
+        14
+      ]
+    ],
+    "layer_mode": "together",
+    "layers": [
+      1,
+      14
+    ],
+    "local_cpu": 0,
+    "local_gpu_host_numa": 0,
+    "memory_headroom_bytes": 17179869184,
+    "modes": [
+      "eager",
+      "graph"
+    ],
+    "samples": 100,
+    "schema_version": 1,
+    "scope": "lookup components only; serial independent layers; excludes hash/WKV/gate/model/HTTP",
+    "seed": 20261021,
+    "source_cache_numa": 1,
+    "source_headers": {
+      "model-00047-of-00048.safetensors": "sha256:9055d06658af74f431f6675f6880f187b24a3f648b3f70ae949edc328b7702fc",
+      "model-00048-of-00048.safetensors": "sha256:ffc9da89096525ea191d967531f8063db66327b0880a9d2f4d7d73a42d641f28"
+    },
+    "source_sha256": {
+      "rtp_llm/models_py/modules/dsv41/_engram_triton.py": "ec688fb3c7c3f3458015ac6ed070ecf36f1b5e52841900c84512ed7380f908a4",
+      "rtp_llm/models_py/modules/dsv41/engram.py": "611cab73f2eb2b5e48e93ae818969c8ea5d81a0979685be2a8d4ac5be7685ab1",
+      "rtp_llm/models_py/modules/dsv41/engram_bootstrap.py": "4d5fd31f1691f9e37569677bcc0e924319b7b74715932648bdc9c9f528c998cc",
+      "rtp_llm/models_py/modules/dsv41/engram_storage.py": "d38665e51fecf4808bc9a6e322d76571ea0fe34b66c99e6919be869bfa0fbf4f",
+      "tools/engram_sidecar/framework/checkpoint_latency.py": "eca09dda5ec8379f699e26789b6e30b87e1c3002887b9678cc5e35f3bde23511",
+      "tools/engram_sidecar/framework/checkpoint_lookup.py": "c75237eaf1fddecec92eff440136eceb2ffe1206d5118cc3ac9847d0b0157a71",
+      "tools/engram_sidecar/latency/bench_consumer.py": "1b02ed07ee9ed009f76a68da70816c7abf9032cbd37ec9ea789468688578a69d"
+    }
+  },
+  "run_status": "COMPLETE_WITH_ZERO_NATIVE_COUNTERS",
+  "source_commit": "415ef274e19e45f71e705802500ed5488a057289",
+  "source_files": [
+    {
+      "commit_match": true,
+      "file": "rtp_llm/models_py/modules/dsv41/_engram_triton.py",
+      "sha256": "ec688fb3c7c3f3458015ac6ed070ecf36f1b5e52841900c84512ed7380f908a4"
+    },
+    {
+      "commit_match": true,
+      "file": "rtp_llm/models_py/modules/dsv41/engram.py",
+      "sha256": "611cab73f2eb2b5e48e93ae818969c8ea5d81a0979685be2a8d4ac5be7685ab1"
+    },
+    {
+      "commit_match": true,
+      "file": "rtp_llm/models_py/modules/dsv41/engram_bootstrap.py",
+      "sha256": "4d5fd31f1691f9e37569677bcc0e924319b7b74715932648bdc9c9f528c998cc"
+    },
+    {
+      "commit_match": true,
+      "file": "rtp_llm/models_py/modules/dsv41/engram_storage.py",
+      "sha256": "d38665e51fecf4808bc9a6e322d76571ea0fe34b66c99e6919be869bfa0fbf4f"
+    },
+    {
+      "commit_match": true,
+      "file": "tools/engram_sidecar/framework/checkpoint_latency.py",
+      "sha256": "eca09dda5ec8379f699e26789b6e30b87e1c3002887b9678cc5e35f3bde23511"
+    },
+    {
+      "commit_match": true,
+      "file": "tools/engram_sidecar/framework/checkpoint_lookup.py",
+      "sha256": "c75237eaf1fddecec92eff440136eceb2ffe1206d5118cc3ac9847d0b0157a71"
+    },
+    {
+      "commit_match": true,
+      "file": "tools/engram_sidecar/latency/bench_consumer.py",
+      "sha256": "1b02ed07ee9ed009f76a68da70816c7abf9032cbd37ec9ea789468688578a69d"
+    }
+  ],
+  "statistics": [
+    {
+      "batch": 1,
+      "case": "layers1-14-M1-eager",
+      "clock": "cpu_submit_to_event_complete",
+      "distribution": "hot",
+      "layers": [
+        1,
+        14
+      ],
+      "local": {
+        "max_us": 164.833,
+        "mean_us": 109.10210000000001,
+        "min_us": 90.784,
+        "n": 100,
+        "over_threshold_count": 76,
+        "over_threshold_fraction": 0.76,
+        "p50_us": 110.113,
+        "p95_us": 125.088,
+        "p99_9_us": 164.833,
+        "p99_us": 136.257,
+        "quantile_method": "nearest_rank",
+        "stdev_us": 11.400100347365367,
+        "threshold_us": 100.0
+      },
+      "mode": "eager",
+      "paired": {
+        "max_us": 225.952,
+        "mean_us": 29.43556,
+        "min_us": -8.480999999999995,
+        "n": 100,
+        "over_threshold_count": 1,
+        "over_threshold_fraction": 0.01,
+        "p50_us": 27.456999999999994,
+        "p95_us": 54.337,
+        "p99_9_us": 225.952,
+        "p99_us": 79.45700000000001,
+        "quantile_method": "nearest_rank",
+        "stdev_us": 26.28332595442213,
+        "threshold_us": 100.0
+      },
+      "remote": {
+        "max_us": 336.353,
+        "mean_us": 138.53766,
+        "min_us": 118.176,
+        "n": 100,
+        "over_threshold_count": 100,
+        "over_threshold_fraction": 1.0,
+        "p50_us": 137.249,
+        "p95_us": 154.881,
+        "p99_9_us": 336.353,
+        "p99_us": 192.929,
+        "quantile_method": "nearest_rank",
+        "stdev_us": 22.781857775528316,
+        "threshold_us": 100.0
+      },
+      "threshold_observation": "FAIL_OBSERVED"
+    },
+    {
+      "batch": 1,
+      "case": "layers1-14-M1-eager",
+      "clock": "gpu_eager_event_interval",
+      "distribution": "hot",
+      "layers": [
+        1,
+        14
+      ],
+      "local": {
+        "max_us": 144.31999623775482,
+        "mean_us": 94.89823944866657,
+        "min_us": 77.02399790287018,
+        "n": 100,
+        "over_threshold_count": 27,
+        "over_threshold_fraction": 0.27,
+        "p50_us": 96.12800180912018,
+        "p95_us": 110.62400043010712,
+        "p99_9_us": 144.31999623775482,
+        "p99_us": 121.21599912643433,
+        "quantile_method": "nearest_rank",
+        "stdev_us": 10.647379639702844,
+        "threshold_us": 100.0
+      },
+      "mode": "eager",
+      "paired": {
+        "max_us": 224.09600019454956,
+        "mean_us": 29.31360013782978,
+        "min_us": -5.152001976966858,
+        "n": 100,
+        "over_threshold_count": 1,
+        "over_threshold_fraction": 0.01,
+        "p50_us": 27.775995433330536,
+        "p95_us": 53.05600166320801,
+        "p99_9_us": 224.09600019454956,
+        "p99_us": 79.71200346946716,
+        "quantile_method": "nearest_rank",
+        "stdev_us": 25.572623834877533,
+        "threshold_us": 100.0
+      },
+      "remote": {
+        "max_us": 320.76799869537354,
+        "mean_us": 124.21183958649635,
+        "min_us": 104.41599786281586,
+        "n": 100,
+        "over_threshold_count": 100,
+        "over_threshold_fraction": 1.0,
+        "p50_us": 122.81599640846252,
+        "p95_us": 139.3599957227707,
+        "p99_9_us": 320.76799869537354,
+        "p99_us": 179.29600179195404,
+        "quantile_method": "nearest_rank",
+        "stdev_us": 22.467596002501868,
+        "threshold_us": 100.0
+      },
+      "threshold_observation": "FAIL_OBSERVED"
+    },
+    {
+      "batch": 1,
+      "case": "layers1-14-M1-eager",
+      "clock": "cpu_submit_to_event_complete",
+      "distribution": "random",
+      "layers": [
+        1,
+        14
+      ],
+      "local": {
+        "max_us": 152.737,
+        "mean_us": 110.78437,
+        "min_us": 90.784,
+        "n": 100,
+        "over_threshold_count": 74,
+        "over_threshold_fraction": 0.74,
+        "p50_us": 112.48,
+        "p95_us": 127.073,
+        "p99_9_us": 152.737,
+        "p99_us": 149.6,
+        "quantile_method": "nearest_rank",
+        "stdev_us": 11.673311903358874,
+        "threshold_us": 100.0
+      },
+      "mode": "eager",
+      "paired": {
+        "max_us": 81.408,
+        "mean_us": 26.78689,
+        "min_us": -14.528999999999996,
+        "n": 100,
+        "over_threshold_count": 0,
+        "over_threshold_fraction": 0.0,
+        "p50_us": 26.688000000000002,
+        "p95_us": 51.32900000000001,
+        "p99_9_us": 81.408,
+        "p99_us": 69.79299999999999,
+        "quantile_method": "nearest_rank",
+        "stdev_us": 19.614653756768178,
+        "threshold_us": 100.0
+      },
+      "remote": {
+        "max_us": 201.184,
+        "mean_us": 137.57126,
+        "min_us": 117.056,
+        "n": 100,
+        "over_threshold_count": 100,
+        "over_threshold_fraction": 1.0,
+        "p50_us": 138.208,
+        "p95_us": 154.305,
+        "p99_9_us": 201.184,
+        "p99_us": 184.385,
+        "quantile_method": "nearest_rank",
+        "stdev_us": 12.812514307207621,
+        "threshold_us": 100.0
+      },
+      "threshold_observation": "NO_OBSERVED_VIOLATION"
+    },
+    {
+      "batch": 1,
+      "case": "layers1-14-M1-eager",
+      "clock": "gpu_eager_event_interval",
+      "distribution": "random",
+      "layers": [
+        1,
+        14
+      ],
+      "local": {
+        "max_us": 134.36800241470337,
+        "mean_us": 96.30879998207092,
+        "min_us": 76.86399668455124,
+        "n": 100,
+        "over_threshold_count": 48,
+        "over_threshold_fraction": 0.48,
+        "p50_us": 97.50399738550186,
+        "p95_us": 111.84000223875046,
+        "p99_9_us": 134.36800241470337,
+        "p99_us": 134.17600095272064,
+        "quantile_method": "nearest_rank",
+        "stdev_us": 11.031516921243618,
+        "threshold_us": 100.0
+      },
+      "mode": "eager",
+      "paired": {
+        "max_us": 81.37599378824234,
+        "mean_us": 26.79039992392063,
+        "min_us": -11.04000210762024,
+        "n": 100,
+        "over_threshold_count": 0,
+        "over_threshold_fraction": 0.0,
+        "p50_us": 26.079997420310974,
+        "p95_us": 50.07999390363693,
+        "p99_9_us": 81.37599378824234,
+        "p99_us": 69.59999352693558,
+        "quantile_method": "nearest_rank",
+        "stdev_us": 18.845019987676505,
+        "threshold_us": 100.0
+      },
+      "remote": {
+        "max_us": 187.1359944343567,
+        "mean_us": 123.09919990599155,
+        "min_us": 103.07200253009796,
+        "n": 100,
+        "over_threshold_count": 100,
+        "over_threshold_fraction": 1.0,
+        "p50_us": 123.83999675512314,
+        "p95_us": 139.0399932861328,
+        "p99_9_us": 187.1359944343567,
+        "p99_us": 169.5999950170517,
+        "quantile_method": "nearest_rank",
+        "stdev_us": 12.496170654101418,
+        "threshold_us": 100.0
+      },
+      "threshold_observation": "NO_OBSERVED_VIOLATION"
+    },
+    {
+      "batch": 1,
+      "case": "layers1-14-M1-graph",
+      "clock": "cpu_submit_to_event_complete",
+      "distribution": "hot",
+      "layers": [
+        1,
+        14
+      ],
+      "local": {
+        "max_us": 63.584,
+        "mean_us": 42.5438,
+        "min_us": 33.984,
+        "n": 100,
+        "over_threshold_count": 0,
+        "over_threshold_fraction": 0.0,
+        "p50_us": 42.976,
+        "p95_us": 51.104,
+        "p99_9_us": 63.584,
+        "p99_us": 55.52,
+        "quantile_method": "nearest_rank",
+        "stdev_us": 4.800469118742459,
+        "threshold_us": 100.0
+      },
+      "mode": "graph",
+      "paired": {
+        "max_us": 17.728,
+        "mean_us": 5.55601,
+        "min_us": -12.927000000000007,
+        "n": 100,
+        "over_threshold_count": 0,
+        "over_threshold_fraction": 0.0,
+        "p50_us": 6.656000000000006,
+        "p95_us": 16.223999999999997,
+        "p99_9_us": 17.728,
+        "p99_us": 17.599999999999994,
+        "quantile_method": "nearest_rank",
+        "stdev_us": 7.532138501773583,
+        "threshold_us": 100.0
+      },
+      "remote": {
+        "max_us": 56.768,
+        "mean_us": 48.09981,
+        "min_us": 41.568,
+        "n": 100,
+        "over_threshold_count": 0,
+        "over_threshold_fraction": 0.0,
+        "p50_us": 48.448,
+        "p95_us": 55.744,
+        "p99_9_us": 56.768,
+        "p99_us": 56.544,
+        "quantile_method": "nearest_rank",
+        "stdev_us": 4.113229759434792,
+        "threshold_us": 100.0
+      },
+      "threshold_observation": "NO_OBSERVED_VIOLATION"
+    },
+    {
+      "batch": 1,
+      "case": "layers1-14-M1-graph",
+      "clock": "gpu_graph_event_interval",
+      "distribution": "hot",
+      "layers": [
+        1,
+        14
+      ],
+      "local": {
+        "max_us": 16.736000776290894,
+        "mean_us": 12.712319968268275,
+        "min_us": 11.807999573647976,
+        "n": 100,
+        "over_threshold_count": 0,
+        "over_threshold_fraction": 0.0,
+        "p50_us": 12.480000033974648,
+        "p95_us": 13.75999953597784,
+        "p99_9_us": 16.736000776290894,
+        "p99_us": 14.655999839305878,
+        "quantile_method": "nearest_rank",
+        "stdev_us": 0.8160768281735795,
+        "threshold_us": 100.0
+      },
+      "mode": "graph",
+      "paired": {
+        "max_us": 7.520000450313091,
+        "mean_us": 5.560640087351203,
+        "min_us": 2.208000048995018,
+        "n": 100,
+        "over_threshold_count": 0,
+        "over_threshold_fraction": 0.0,
+        "p50_us": 5.727999843657017,
+        "p95_us": 7.136001251637936,
+        "p99_9_us": 7.520000450313091,
+        "p99_us": 7.424000650644302,
+        "quantile_method": "nearest_rank",
+        "stdev_us": 0.9843822313590205,
+        "threshold_us": 100.0
+      },
+      "remote": {
+        "max_us": 19.42400075495243,
+        "mean_us": 18.27296005561948,
+        "min_us": 17.503999173641205,
+        "n": 100,
+        "over_threshold_count": 0,
+        "over_threshold_fraction": 0.0,
+        "p50_us": 18.112000077962875,
+        "p95_us": 19.328000023961067,
+        "p99_9_us": 19.42400075495243,
+        "p99_us": 19.392000511288643,
+        "quantile_method": "nearest_rank",
+        "stdev_us": 0.5549109755980393,
+        "threshold_us": 100.0
+      },
+      "threshold_observation": "NO_OBSERVED_VIOLATION"
+    },
+    {
+      "batch": 1,
+      "case": "layers1-14-M1-graph",
+      "clock": "cpu_submit_to_event_complete",
+      "distribution": "random",
+      "layers": [
+        1,
+        14
+      ],
+      "local": {
+        "max_us": 157.856,
+        "mean_us": 50.91406,
+        "min_us": 36.8,
+        "n": 100,
+        "over_threshold_count": 1,
+        "over_threshold_fraction": 0.01,
+        "p50_us": 50.048,
+        "p95_us": 56.736,
+        "p99_9_us": 157.856,
+        "p99_us": 60.896,
+        "quantile_method": "nearest_rank",
+        "stdev_us": 11.67001909408892,
+        "threshold_us": 100.0
+      },
+      "mode": "graph",
+      "paired": {
+        "max_us": 21.855999999999995,
+        "mean_us": -1.2774399999999995,
+        "min_us": -102.01599999999999,
+        "n": 100,
+        "over_threshold_count": 0,
+        "over_threshold_fraction": 0.0,
+        "p50_us": -0.03200000000000358,
+        "p95_us": 10.080000000000005,
+        "p99_9_us": 21.855999999999995,
+        "p99_us": 19.553000000000004,
+        "quantile_method": "nearest_rank",
+        "stdev_us": 12.661508414339897,
+        "threshold_us": 100.0
+      },
+      "remote": {
+        "max_us": 69.088,
+        "mean_us": 49.63662,
+        "min_us": 43.2,
+        "n": 100,
+        "over_threshold_count": 0,
+        "over_threshold_fraction": 0.0,
+        "p50_us": 49.952,
+        "p95_us": 56.128,
+        "p99_9_us": 69.088,
+        "p99_us": 57.697,
+        "quantile_method": "nearest_rank",
+        "stdev_us": 4.344273278190496,
+        "threshold_us": 100.0
+      },
+      "threshold_observation": "NO_OBSERVED_VIOLATION"
+    },
+    {
+      "batch": 1,
+      "case": "layers1-14-M1-graph",
+      "clock": "gpu_graph_event_interval",
+      "distribution": "random",
+      "layers": [
+        1,
+        14
+      ],
+      "local": {
+        "max_us": 24.288000538945198,
+        "mean_us": 20.74944001622498,
+        "min_us": 11.776000261306763,
+        "n": 100,
+        "over_threshold_count": 0,
+        "over_threshold_fraction": 0.0,
+        "p50_us": 20.416000857949257,
+        "p95_us": 23.871999233961105,
+        "p99_9_us": 24.288000538945198,
+        "p99_us": 24.25600029528141,
+        "quantile_method": "nearest_rank",
+        "stdev_us": 2.064077825162951,
+        "threshold_us": 100.0
+      },
+      "mode": "graph",
+      "paired": {
+        "max_us": 7.0399995893239975,
+        "mean_us": -0.1395199727267027,
+        "min_us": -3.9999987930059433,
+        "n": 100,
+        "over_threshold_count": 0,
+        "over_threshold_fraction": 0.0,
+        "p50_us": -0.12800097465515137,
+        "p95_us": 2.528000622987747,
+        "p99_9_us": 7.0399995893239975,
+        "p99_us": 5.695999599993229,
+        "quantile_method": "nearest_rank",
+        "stdev_us": 1.8501564303117952,
+        "threshold_us": 100.0
+      },
+      "remote": {
+        "max_us": 23.744000121951103,
+        "mean_us": 20.609920043498278,
+        "min_us": 18.49599927663803,
+        "n": 100,
+        "over_threshold_count": 0,
+        "over_threshold_fraction": 0.0,
+        "p50_us": 20.416000857949257,
+        "p95_us": 21.983999758958817,
+        "p99_9_us": 23.744000121951103,
+        "p99_us": 22.207999601960182,
+        "quantile_method": "nearest_rank",
+        "stdev_us": 0.8509451822710921,
+        "threshold_us": 100.0
+      },
+      "threshold_observation": "NO_OBSERVED_VIOLATION"
+    }
+  ],
+  "trace_scope": "recorded eager/Graph trace hash parity and source use of same IDs verified; trace bytes not regenerated"
+}

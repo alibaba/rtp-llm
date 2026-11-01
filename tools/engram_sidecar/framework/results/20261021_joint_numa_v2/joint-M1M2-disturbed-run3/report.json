@@ -1,0 +1,1174 @@
+{
+  "complete": {
+    "cases": [
+      "layers1-14-M1-eager",
+      "layers1-14-M1-graph",
+      "layers1-14-M2-eager",
+      "layers1-14-M2-graph"
+    ],
+    "counters": {
+      "cleanup_failures": 0,
+      "contexts": 0,
+      "deferred_cleanups": 0,
+      "imports": 0,
+      "mappings": 0,
+      "owner_allocations": 0,
+      "reservations": 0,
+      "view_storages": 0
+    },
+    "decode_step_slo": "NOT_MEASURED",
+    "layer_mode": "together",
+    "scope": "selected-layer serial lookup component; no inter-layer model computation"
+  },
+  "component_threshold_status": "FAIL_OBSERVED",
+  "full_decode_slo": "NOT_MEASURED",
+  "independent_restarts": 1,
+  "memory": {
+    "1": {
+      "actual_source_prepare_wall_time": "NOT_RECORDED; no phase timestamps",
+      "alias": {
+        "cuda_allocated_delta_bytes": 0,
+        "scale_alias": true,
+        "weight_alias": true
+      },
+      "complete_pinned": {
+        "expected_node": 0,
+        "expected_pages": 1546900,
+        "node_pages": {
+          "0": 1546900
+        },
+        "page_bytes": 65536,
+        "resident_bytes": 101377638400,
+        "resident_pages": 1546900
+      },
+      "complete_source_before_and_after": [
+        {
+          "expected_node": 1,
+          "expected_pages": 1549304,
+          "file": "model-00047-of-00048.safetensors",
+          "file_bytes": 101535150936,
+          "node_pages": {
+            "1": 1549304
+          },
+          "page_bytes": 65536,
+          "resident_bytes": 101535186944,
+          "resident_pages": 1549304
+        }
+      ],
+      "eviction_prevented": false,
+      "phases": {
+        "after_load": {
+          "slack_after_budget_bytes": {
+            "host": 397343850496,
+            "pinned_node": 147251986432,
+            "shm": 173500268544,
+            "source_node": 91211038720,
+            "visible_cgroup_0": 180693368832
+          },
+          "verified_admission": true
+        },
+        "before_prefault": {
+          "slack_after_budget_bytes": {
+            "host": 282920026112,
+            "pinned_node": 146993971200,
+            "shm": 173500268544,
+            "source_node": 91147272192,
+            "visible_cgroup_0": 180693368832
+          },
+          "verified_admission": true
+        },
+        "prefaulted": {
+          "slack_after_budget_bytes": {
+            "host": 397181845504,
+            "pinned_node": 147207159808,
+            "shm": 173500268544,
+            "source_node": 91097006080,
+            "visible_cgroup_0": 180693303296
+          },
+          "verified_admission": true
+        }
+      },
+      "source_cpu": 72
+    },
+    "14": {
+      "actual_source_prepare_wall_time": "NOT_RECORDED; no phase timestamps",
+      "alias": {
+        "cuda_allocated_delta_bytes": 0,
+        "scale_alias": true,
+        "weight_alias": true
+      },
+      "complete_pinned": {
+        "expected_node": 0,
+        "expected_pages": 1546943,
+        "node_pages": {
+          "0": 1546943
+        },
+        "page_bytes": 65536,
+        "resident_bytes": 101380456448,
+        "resident_pages": 1546943
+      },
+      "complete_source_before_and_after": [
+        {
+          "expected_node": 1,
+          "expected_pages": 1549346,
+          "file": "model-00048-of-00048.safetensors",
+          "file_bytes": 101537926640,
+          "node_pages": {
+            "1": 1549346
+          },
+          "page_bytes": 65536,
+          "resident_bytes": 101537939456,
+          "resident_pages": 1549346
+        }
+      ],
+      "eviction_prevented": false,
+      "phases": {
+        "after_load": {
+          "slack_after_budget_bytes": {
+            "host": 283417051136,
+            "pinned_node": 47164293120,
+            "shm": 72119812096,
+            "source_node": 91187773440,
+            "visible_cgroup_0": 80579788800
+          },
+          "verified_admission": true
+        },
+        "before_prefault": {
+          "slack_after_budget_bytes": {
+            "host": 194478997504,
+            "pinned_node": 47152955392,
+            "shm": 72119812096,
+            "source_node": 91241644032,
+            "visible_cgroup_0": 80578281472
+          },
+          "verified_admission": true
+        },
+        "prefaulted": {
+          "slack_after_budget_bytes": {
+            "host": 295749746688,
+            "pinned_node": 47003140096,
+            "shm": 72119812096,
+            "source_node": 91128856576,
+            "visible_cgroup_0": 80579854336
+          },
+          "verified_admission": true
+        }
+      },
+      "source_cpu": 72
+    }
+  },
+  "no_timing_or_outliers_subtracted": true,
+  "paired_observations": 80000,
+  "positive_threshold_unique_pairs": 397,
+  "privacy": "all original payloads scanned; tar owner/time/mode metadata normalized only",
+  "raw_records_verified": 320000,
+  "run": {
+    "baseline": "independent source mmap -> complete _PinnedSharedTable; extra copy is experiment control",
+    "batches": [
+      1,
+      2
+    ],
+    "checkpoint_metadata": {
+      "config_sha256": "sha256:8be45ce0476004a3f529fd896115a4a2e800a129ad2d3ec05b16050f52e21879",
+      "tokenizer_sha256": "sha256:c90dfa01249db1be4245780a052ede752e1361c612ac6d08e2bdada7d599476b"
+    },
+    "discard_private_source_cache": true,
+    "identity": {
+      "dataset_id": "sha256:f21f16f50765aad579aa25970379231befba73ed37184ba5d6235e0415b3a1de",
+      "generation": "ff3a2e5c-1b54-44a2-9c07-f304ecee8a46",
+      "hash_abi": "sha256:62e044e152f52eb205cca83d2ea456a20ce7b426f7139a2c4fd03eea3fd2fd09",
+      "manifest_sha256": "sha256:c0b7ea39fbdbbfdba60655dd7e790a3c7fe25b064027454ebd7fe14792e93137",
+      "model_revision": "DeepSeek-V4.1-Flash-index-74b0686a3d289198"
+    },
+    "layer_groups": [
+      [
+        1,
+        14
+      ]
+    ],
+    "layer_mode": "together",
+    "layers": [
+      1,
+      14
+    ],
+    "local_cpu": 0,
+    "local_gpu_host_numa": 0,
+    "memory_headroom_bytes": 17179869184,
+    "modes": [
+      "eager",
+      "graph"
+    ],
+    "samples": 10000,
+    "schema_version": 1,
+    "scope": "lookup components only; serial independent layers; excludes hash/WKV/gate/model/HTTP",
+    "seed": 20261023,
+    "source_cache_numa": 1,
+    "source_headers": {
+      "model-00047-of-00048.safetensors": "sha256:9055d06658af74f431f6675f6880f187b24a3f648b3f70ae949edc328b7702fc",
+      "model-00048-of-00048.safetensors": "sha256:ffc9da89096525ea191d967531f8063db66327b0880a9d2f4d7d73a42d641f28"
+    },
+    "source_sha256": {
+      "rtp_llm/models_py/modules/dsv41/_engram_triton.py": "ec688fb3c7c3f3458015ac6ed070ecf36f1b5e52841900c84512ed7380f908a4",
+      "rtp_llm/models_py/modules/dsv41/engram.py": "611cab73f2eb2b5e48e93ae818969c8ea5d81a0979685be2a8d4ac5be7685ab1",
+      "rtp_llm/models_py/modules/dsv41/engram_bootstrap.py": "4d5fd31f1691f9e37569677bcc0e924319b7b74715932648bdc9c9f528c998cc",
+      "rtp_llm/models_py/modules/dsv41/engram_storage.py": "d38665e51fecf4808bc9a6e322d76571ea0fe34b66c99e6919be869bfa0fbf4f",
+      "tools/engram_sidecar/framework/checkpoint_latency.py": "eca09dda5ec8379f699e26789b6e30b87e1c3002887b9678cc5e35f3bde23511",
+      "tools/engram_sidecar/framework/checkpoint_lookup.py": "c75237eaf1fddecec92eff440136eceb2ffe1206d5118cc3ac9847d0b0157a71",
+      "tools/engram_sidecar/latency/bench_consumer.py": "1b02ed07ee9ed009f76a68da70816c7abf9032cbd37ec9ea789468688578a69d"
+    }
+  },
+  "run_status": "COMPLETE_WITH_ZERO_NATIVE_COUNTERS",
+  "source_commit": "415ef274e19e45f71e705802500ed5488a057289",
+  "source_files": [
+    {
+      "commit_match": true,
+      "file": "rtp_llm/models_py/modules/dsv41/_engram_triton.py",
+      "sha256": "ec688fb3c7c3f3458015ac6ed070ecf36f1b5e52841900c84512ed7380f908a4"
+    },
+    {
+      "commit_match": true,
+      "file": "rtp_llm/models_py/modules/dsv41/engram.py",
+      "sha256": "611cab73f2eb2b5e48e93ae818969c8ea5d81a0979685be2a8d4ac5be7685ab1"
+    },
+    {
+      "commit_match": true,
+      "file": "rtp_llm/models_py/modules/dsv41/engram_bootstrap.py",
+      "sha256": "4d5fd31f1691f9e37569677bcc0e924319b7b74715932648bdc9c9f528c998cc"
+    },
+    {
+      "commit_match": true,
+      "file": "rtp_llm/models_py/modules/dsv41/engram_storage.py",
+      "sha256": "d38665e51fecf4808bc9a6e322d76571ea0fe34b66c99e6919be869bfa0fbf4f"
+    },
+    {
+      "commit_match": true,
+      "file": "tools/engram_sidecar/framework/checkpoint_latency.py",
+      "sha256": "eca09dda5ec8379f699e26789b6e30b87e1c3002887b9678cc5e35f3bde23511"
+    },
+    {
+      "commit_match": true,
+      "file": "tools/engram_sidecar/framework/checkpoint_lookup.py",
+      "sha256": "c75237eaf1fddecec92eff440136eceb2ffe1206d5118cc3ac9847d0b0157a71"
+    },
+    {
+      "commit_match": true,
+      "file": "tools/engram_sidecar/latency/bench_consumer.py",
+      "sha256": "1b02ed07ee9ed009f76a68da70816c7abf9032cbd37ec9ea789468688578a69d"
+    }
+  ],
+  "statistics": [
+    {
+      "batch": 1,
+      "case": "layers1-14-M1-eager",
+      "clock": "cpu_submit_to_event_complete",
+      "distribution": "hot",
+      "layers": [
+        1,
+        14
+      ],
+      "local": {
+        "max_us": 1339.62,
+        "mean_us": 113.1724494,
+        "min_us": 94.752,
+        "n": 10000,
+        "over_threshold_count": 9908,
+        "over_threshold_fraction": 0.9908,
+        "p50_us": 111.137,
+        "p95_us": 125.696,
+        "p99_9_us": 442.209,
+        "p99_us": 152.544,
+        "quantile_method": "nearest_rank",
+        "stdev_us": 26.795832116884142,
+        "threshold_us": 100.0
+      },
+      "mode": "eager",
+      "paired": {
+        "max_us": 109892.32800000001,
+        "mean_us": 38.0183586,
+        "min_us": -1161.444,
+        "n": 10000,
+        "over_threshold_count": 92,
+        "over_threshold_fraction": 0.0092,
+        "p50_us": 25.855999999999995,
+        "p95_us": 40.96000000000001,
+        "p99_9_us": 828.163,
+        "p99_us": 96.38399999999999,
+        "quantile_method": "nearest_rank",
+        "stdev_us": 1099.4318839460404,
+        "threshold_us": 100.0
+      },
+      "remote": {
+        "max_us": 110006.728,
+        "mean_us": 151.190808,
+        "min_us": 119.937,
+        "n": 10000,
+        "over_threshold_count": 10000,
+        "over_threshold_fraction": 1.0,
+        "p50_us": 136.8,
+        "p95_us": 154.72,
+        "p99_9_us": 972.995,
+        "p99_us": 216.064,
+        "quantile_method": "nearest_rank",
+        "stdev_us": 1099.2011660459013,
+        "threshold_us": 100.0
+      },
+      "threshold_observation": "FAIL_OBSERVED"
+    },
+    {
+      "batch": 1,
+      "case": "layers1-14-M1-eager",
+      "clock": "gpu_eager_event_interval",
+      "distribution": "hot",
+      "layers": [
+        1,
+        14
+      ],
+      "local": {
+        "max_us": 1316.864013671875,
+        "mean_us": 96.75362876877189,
+        "min_us": 80.12799918651581,
+        "n": 10000,
+        "over_threshold_count": 1945,
+        "over_threshold_fraction": 0.1945,
+        "p50_us": 95.04000097513199,
+        "p95_us": 107.96800255775452,
+        "p99_9_us": 349.7920036315918,
+        "p99_us": 131.67999684810638,
+        "quantile_method": "nearest_rank",
+        "stdev_us": 24.04360161122443,
+        "threshold_us": 100.0
+      },
+      "mode": "eager",
+      "paired": {
+        "max_us": 109856.61116242409,
+        "mean_us": 37.638493115454914,
+        "min_us": -1155.8400094509125,
+        "n": 10000,
+        "over_threshold_count": 87,
+        "over_threshold_fraction": 0.0087,
+        "p50_us": 25.439999997615814,
+        "p95_us": 39.135999977588654,
+        "p99_9_us": 726.4959886670113,
+        "p99_us": 91.23200178146362,
+        "quantile_method": "nearest_rank",
+        "stdev_us": 1098.940587574092,
+        "threshold_us": 100.0
+      },
+      "remote": {
+        "max_us": 109955.13916015625,
+        "mean_us": 134.3921218842268,
+        "min_us": 105.24799674749374,
+        "n": 10000,
+        "over_threshold_count": 10000,
+        "over_threshold_fraction": 1.0,
+        "p50_us": 120.28799951076508,
+        "p95_us": 136.63999736309052,
+        "p99_9_us": 818.9759850502014,
+        "p99_us": 194.46399807929993,
+        "quantile_method": "nearest_rank",
+        "stdev_us": 1098.7578591800511,
+        "threshold_us": 100.0
+      },
+      "threshold_observation": "FAIL_OBSERVED"
+    },
+    {
+      "batch": 1,
+      "case": "layers1-14-M1-eager",
+      "clock": "cpu_submit_to_event_complete",
+      "distribution": "random",
+      "layers": [
+        1,
+        14
+      ],
+      "local": {
+        "max_us": 1456.932,
+        "mean_us": 116.3218352,
+        "min_us": 100.865,
+        "n": 10000,
+        "over_threshold_count": 10000,
+        "over_threshold_fraction": 1.0,
+        "p50_us": 115.488,
+        "p95_us": 125.536,
+        "p99_9_us": 269.537,
+        "p99_us": 135.105,
+        "quantile_method": "nearest_rank",
+        "stdev_us": 21.085948439191466,
+        "threshold_us": 100.0
+      },
+      "mode": "eager",
+      "paired": {
+        "max_us": 1237.22,
+        "mean_us": 24.7573613,
+        "min_us": -1316.068,
+        "n": 10000,
+        "over_threshold_count": 83,
+        "over_threshold_fraction": 0.0083,
+        "p50_us": 23.104,
+        "p95_us": 38.176,
+        "p99_9_us": 794.946,
+        "p99_us": 90.816,
+        "quantile_method": "nearest_rank",
+        "stdev_us": 40.3421387580773,
+        "threshold_us": 100.0
+      },
+      "remote": {
+        "max_us": 1373.284,
+        "mean_us": 141.0791965,
+        "min_us": 123.136,
+        "n": 10000,
+        "over_threshold_count": 10000,
+        "over_threshold_fraction": 1.0,
+        "p50_us": 138.464,
+        "p95_us": 151.137,
+        "p99_9_us": 908.898,
+        "p99_us": 209.057,
+        "quantile_method": "nearest_rank",
+        "stdev_us": 35.132413129619884,
+        "threshold_us": 100.0
+      },
+      "threshold_observation": "FAIL_OBSERVED"
+    },
+    {
+      "batch": 1,
+      "case": "layers1-14-M1-eager",
+      "clock": "gpu_eager_event_interval",
+      "distribution": "random",
+      "layers": [
+        1,
+        14
+      ],
+      "local": {
+        "max_us": 1430.3679466247559,
+        "mean_us": 100.19233921170235,
+        "min_us": 86.20800077915192,
+        "n": 10000,
+        "over_threshold_count": 4626,
+        "over_threshold_fraction": 0.4626,
+        "p50_us": 99.5199978351593,
+        "p95_us": 108.73600095510483,
+        "p99_9_us": 237.69600689411163,
+        "p99_us": 118.04799735546112,
+        "quantile_method": "nearest_rank",
+        "stdev_us": 18.802870710915442,
+        "threshold_us": 100.0
+      },
+      "mode": "eager",
+      "paired": {
+        "max_us": 1231.6159904003143,
+        "mean_us": 24.481577602773903,
+        "min_us": -1306.2079474329948,
+        "n": 10000,
+        "over_threshold_count": 73,
+        "over_threshold_fraction": 0.0073,
+        "p50_us": 22.943995893001556,
+        "p95_us": 36.671996116638184,
+        "p99_9_us": 757.2159841656685,
+        "p99_us": 85.24799346923828,
+        "quantile_method": "nearest_rank",
+        "stdev_us": 37.63465558109183,
+        "threshold_us": 100.0
+      },
+      "remote": {
+        "max_us": 1350.2399921417236,
+        "mean_us": 124.67391681447626,
+        "min_us": 108.0000028014183,
+        "n": 10000,
+        "over_threshold_count": 10000,
+        "over_threshold_fraction": 1.0,
+        "p50_us": 122.30399996042252,
+        "p95_us": 133.66399705410004,
+        "p99_9_us": 857.4079871177673,
+        "p99_us": 189.02400135993958,
+        "quantile_method": "nearest_rank",
+        "stdev_us": 33.30251256308693,
+        "threshold_us": 100.0
+      },
+      "threshold_observation": "FAIL_OBSERVED"
+    },
+    {
+      "batch": 1,
+      "case": "layers1-14-M1-graph",
+      "clock": "cpu_submit_to_event_complete",
+      "distribution": "hot",
+      "layers": [
+        1,
+        14
+      ],
+      "local": {
+        "max_us": 91201.136,
+        "mean_us": 54.4137275,
+        "min_us": 37.76,
+        "n": 10000,
+        "over_threshold_count": 57,
+        "over_threshold_fraction": 0.0057,
+        "p50_us": 43.936,
+        "p95_us": 49.824,
+        "p99_9_us": 303.585,
+        "p99_us": 61.568,
+        "quantile_method": "nearest_rank",
+        "stdev_us": 911.7901694482047,
+        "threshold_us": 100.0
+      },
+      "mode": "graph",
+      "paired": {
+        "max_us": 2389.512,
+        "mean_us": -3.3875188999999994,
+        "min_us": -91100.207,
+        "n": 10000,
+        "over_threshold_count": 12,
+        "over_threshold_fraction": 0.0012,
+        "p50_us": 5.631,
+        "p95_us": 11.233000000000004,
+        "p99_9_us": 123.553,
+        "p99_us": 17.023000000000003,
+        "quantile_method": "nearest_rank",
+        "stdev_us": 911.7488914462403,
+        "threshold_us": 100.0
+      },
+      "remote": {
+        "max_us": 2482.92,
+        "mean_us": 51.0262086,
+        "min_us": 43.2,
+        "n": 10000,
+        "over_threshold_count": 60,
+        "over_threshold_fraction": 0.006,
+        "p50_us": 49.761,
+        "p95_us": 55.329,
+        "p99_9_us": 168.033,
+        "p99_us": 63.392,
+        "quantile_method": "nearest_rank",
+        "stdev_us": 30.187948531463448,
+        "threshold_us": 100.0
+      },
+      "threshold_observation": "FAIL_OBSERVED"
+    },
+    {
+      "batch": 1,
+      "case": "layers1-14-M1-graph",
+      "clock": "gpu_graph_event_interval",
+      "distribution": "hot",
+      "layers": [
+        1,
+        14
+      ],
+      "local": {
+        "max_us": 52.000001072883606,
+        "mean_us": 14.298732800409198,
+        "min_us": 13.183999806642532,
+        "n": 10000,
+        "over_threshold_count": 0,
+        "over_threshold_fraction": 0.0,
+        "p50_us": 14.015999622642994,
+        "p95_us": 15.359999611973763,
+        "p99_9_us": 29.08799983561039,
+        "p99_us": 17.08799973130226,
+        "quantile_method": "nearest_rank",
+        "stdev_us": 1.4443249329101808,
+        "threshold_us": 100.0
+      },
+      "mode": "graph",
+      "paired": {
+        "max_us": 14.303999952971935,
+        "mean_us": 5.6878432217985395,
+        "min_us": -32.416000962257385,
+        "n": 10000,
+        "over_threshold_count": 0,
+        "over_threshold_fraction": 0.0,
+        "p50_us": 5.823999643325806,
+        "p95_us": 7.008000276982784,
+        "p99_9_us": 12.12799921631813,
+        "p99_us": 7.519999518990517,
+        "quantile_method": "nearest_rank",
+        "stdev_us": 1.3757619611819756,
+        "threshold_us": 100.0
+      },
+      "remote": {
+        "max_us": 29.85600009560585,
+        "mean_us": 19.986576022207736,
+        "min_us": 18.81599985063076,
+        "n": 10000,
+        "over_threshold_count": 0,
+        "over_threshold_fraction": 0.0,
+        "p50_us": 19.936000928282738,
+        "p95_us": 20.800000056624413,
+        "p99_9_us": 26.784000918269157,
+        "p99_us": 21.95199951529503,
+        "quantile_method": "nearest_rank",
+        "stdev_us": 0.7257267775775673,
+        "threshold_us": 100.0
+      },
+      "threshold_observation": "NO_OBSERVED_VIOLATION"
+    },
+    {
+      "batch": 1,
+      "case": "layers1-14-M1-graph",
+      "clock": "cpu_submit_to_event_complete",
+      "distribution": "random",
+      "layers": [
+        1,
+        14
+      ],
+      "local": {
+        "max_us": 1004.835,
+        "mean_us": 52.6724718,
+        "min_us": 43.392,
+        "n": 10000,
+        "over_threshold_count": 57,
+        "over_threshold_fraction": 0.0057,
+        "p50_us": 51.136,
+        "p95_us": 58.56,
+        "p99_9_us": 201.537,
+        "p99_us": 67.456,
+        "quantile_method": "nearest_rank",
+        "stdev_us": 23.416836863893568,
+        "threshold_us": 100.0
+      },
+      "mode": "graph",
+      "paired": {
+        "max_us": 1335.172,
+        "mean_us": 1.4441545,
+        "min_us": -951.779,
+        "n": 10000,
+        "over_threshold_count": 8,
+        "over_threshold_fraction": 0.0008,
+        "p50_us": 1.5040000000000049,
+        "p95_us": 7.776000000000003,
+        "p99_9_us": 81.76100000000001,
+        "p99_us": 12.928000000000004,
+        "quantile_method": "nearest_rank",
+        "stdev_us": 32.45845294671374,
+        "threshold_us": 100.0
+      },
+      "remote": {
+        "max_us": 1387.268,
+        "mean_us": 54.1166263,
+        "min_us": 46.592,
+        "n": 10000,
+        "over_threshold_count": 58,
+        "over_threshold_fraction": 0.0058,
+        "p50_us": 52.928,
+        "p95_us": 59.104,
+        "p99_9_us": 137.121,
+        "p99_us": 67.424,
+        "quantile_method": "nearest_rank",
+        "stdev_us": 22.814757424821515,
+        "threshold_us": 100.0
+      },
+      "threshold_observation": "FAIL_OBSERVED"
+    },
+    {
+      "batch": 1,
+      "case": "layers1-14-M1-graph",
+      "clock": "gpu_graph_event_interval",
+      "distribution": "random",
+      "layers": [
+        1,
+        14
+      ],
+      "local": {
+        "max_us": 32.86400064826012,
+        "mean_us": 21.559516799543054,
+        "min_us": 15.552000142633915,
+        "n": 10000,
+        "over_threshold_count": 0,
+        "over_threshold_fraction": 0.0,
+        "p50_us": 21.31200022995472,
+        "p95_us": 25.855999439954758,
+        "p99_9_us": 30.592000111937523,
+        "p99_us": 27.871999889612198,
+        "quantile_method": "nearest_rank",
+        "stdev_us": 2.0832798881580494,
+        "threshold_us": 100.0
+      },
+      "mode": "graph",
+      "paired": {
+        "max_us": 1329.9839664250612,
+        "mean_us": 1.713609608169645,
+        "min_us": -10.8800008893013,
+        "n": 10000,
+        "over_threshold_count": 3,
+        "over_threshold_fraction": 0.0003,
+        "p50_us": 1.5680007636547089,
+        "p95_us": 4.031999036669731,
+        "p99_9_us": 8.160000666975975,
+        "p99_us": 5.087999626994133,
+        "quantile_method": "nearest_rank",
+        "stdev_us": 20.105550226341723,
+        "threshold_us": 100.0
+      },
+      "remote": {
+        "max_us": 1351.8719673156738,
+        "mean_us": 23.2731264077127,
+        "min_us": 20.160000771284103,
+        "n": 10000,
+        "over_threshold_count": 3,
+        "over_threshold_fraction": 0.0003,
+        "p50_us": 22.624000906944275,
+        "p95_us": 25.02400055527687,
+        "p99_9_us": 28.79999950528145,
+        "p99_us": 26.30399912595749,
+        "quantile_method": "nearest_rank",
+        "stdev_us": 20.054290785820836,
+        "threshold_us": 100.0
+      },
+      "threshold_observation": "FAIL_OBSERVED"
+    },
+    {
+      "batch": 2,
+      "case": "layers1-14-M2-eager",
+      "clock": "cpu_submit_to_event_complete",
+      "distribution": "hot",
+      "layers": [
+        1,
+        14
+      ],
+      "local": {
+        "max_us": 1051.364,
+        "mean_us": 113.789542,
+        "min_us": 98.145,
+        "n": 10000,
+        "over_threshold_count": 9970,
+        "over_threshold_fraction": 0.997,
+        "p50_us": 112.513,
+        "p95_us": 125.217,
+        "p99_9_us": 282.336,
+        "p99_us": 138.88,
+        "quantile_method": "nearest_rank",
+        "stdev_us": 16.31515566783339,
+        "threshold_us": 100.0
+      },
+      "mode": "eager",
+      "paired": {
+        "max_us": 1179.268,
+        "mean_us": 27.202698,
+        "min_us": -863.011,
+        "n": 10000,
+        "over_threshold_count": 95,
+        "over_threshold_fraction": 0.0095,
+        "p50_us": 25.504000000000005,
+        "p95_us": 40.896000000000015,
+        "p99_9_us": 437.985,
+        "p99_us": 95.872,
+        "quantile_method": "nearest_rank",
+        "stdev_us": 35.50851468147881,
+        "threshold_us": 100.0
+      },
+      "remote": {
+        "max_us": 1314.084,
+        "mean_us": 140.99224,
+        "min_us": 122.592,
+        "n": 10000,
+        "over_threshold_count": 10000,
+        "over_threshold_fraction": 1.0,
+        "p50_us": 138.209,
+        "p95_us": 153.184,
+        "p99_9_us": 552.61,
+        "p99_us": 212.097,
+        "quantile_method": "nearest_rank",
+        "stdev_us": 32.658564990871845,
+        "threshold_us": 100.0
+      },
+      "threshold_observation": "FAIL_OBSERVED"
+    },
+    {
+      "batch": 2,
+      "case": "layers1-14-M2-eager",
+      "clock": "gpu_eager_event_interval",
+      "distribution": "hot",
+      "layers": [
+        1,
+        14
+      ],
+      "local": {
+        "max_us": 1026.3359546661377,
+        "mean_us": 96.64386880472303,
+        "min_us": 82.49600231647491,
+        "n": 10000,
+        "over_threshold_count": 1922,
+        "over_threshold_fraction": 0.1922,
+        "p50_us": 95.58399766683578,
+        "p95_us": 106.59199953079224,
+        "p99_9_us": 244.73600089550018,
+        "p99_us": 119.77600306272507,
+        "quantile_method": "nearest_rank",
+        "stdev_us": 15.579637230564812,
+        "threshold_us": 100.0
+      },
+      "mode": "eager",
+      "paired": {
+        "max_us": 1172.8000566363335,
+        "mean_us": 27.226771216094495,
+        "min_us": -857.5999587774277,
+        "n": 10000,
+        "over_threshold_count": 89,
+        "over_threshold_fraction": 0.0089,
+        "p50_us": 25.536000728607178,
+        "p95_us": 39.39199447631836,
+        "p99_9_us": 407.9680144786835,
+        "p99_us": 95.16799449920654,
+        "quantile_method": "nearest_rank",
+        "stdev_us": 34.103780927338235,
+        "threshold_us": 100.0
+      },
+      "remote": {
+        "max_us": 1291.2640571594238,
+        "mean_us": 123.87064002081752,
+        "min_us": 107.35999792814255,
+        "n": 10000,
+        "over_threshold_count": 10000,
+        "over_threshold_fraction": 1.0,
+        "p50_us": 121.2799996137619,
+        "p95_us": 134.2719942331314,
+        "p99_9_us": 499.55201148986816,
+        "p99_us": 191.77600741386414,
+        "quantile_method": "nearest_rank",
+        "stdev_us": 31.257628767697096,
+        "threshold_us": 100.0
+      },
+      "threshold_observation": "FAIL_OBSERVED"
+    },
+    {
+      "batch": 2,
+      "case": "layers1-14-M2-eager",
+      "clock": "cpu_submit_to_event_complete",
+      "distribution": "random",
+      "layers": [
+        1,
+        14
+      ],
+      "local": {
+        "max_us": 1093.859,
+        "mean_us": 117.7020917,
+        "min_us": 101.056,
+        "n": 10000,
+        "over_threshold_count": 10000,
+        "over_threshold_fraction": 1.0,
+        "p50_us": 116.769,
+        "p95_us": 126.785,
+        "p99_9_us": 280.833,
+        "p99_us": 136.897,
+        "quantile_method": "nearest_rank",
+        "stdev_us": 18.871145087696483,
+        "threshold_us": 100.0
+      },
+      "mode": "eager",
+      "paired": {
+        "max_us": 1096.483,
+        "mean_us": 24.9807313,
+        "min_us": -952.7069999999999,
+        "n": 10000,
+        "over_threshold_count": 86,
+        "over_threshold_fraction": 0.0086,
+        "p50_us": 23.519999999999996,
+        "p95_us": 37.855999999999995,
+        "p99_9_us": 729.794,
+        "p99_us": 87.648,
+        "quantile_method": "nearest_rank",
+        "stdev_us": 37.03107902845258,
+        "threshold_us": 100.0
+      },
+      "remote": {
+        "max_us": 1216.579,
+        "mean_us": 142.682823,
+        "min_us": 125.856,
+        "n": 10000,
+        "over_threshold_count": 10000,
+        "over_threshold_fraction": 1.0,
+        "p50_us": 140.225,
+        "p95_us": 151.841,
+        "p99_9_us": 895.747,
+        "p99_us": 208.993,
+        "quantile_method": "nearest_rank",
+        "stdev_us": 32.82150298608019,
+        "threshold_us": 100.0
+      },
+      "threshold_observation": "FAIL_OBSERVED"
+    },
+    {
+      "batch": 2,
+      "case": "layers1-14-M2-eager",
+      "clock": "gpu_eager_event_interval",
+      "distribution": "random",
+      "layers": [
+        1,
+        14
+      ],
+      "local": {
+        "max_us": 1066.6879415512085,
+        "mean_us": 101.40647042319179,
+        "min_us": 85.53600311279297,
+        "n": 10000,
+        "over_threshold_count": 5452,
+        "over_threshold_fraction": 0.5452,
+        "p50_us": 100.5759984254837,
+        "p95_us": 109.95200276374817,
+        "p99_9_us": 243.6479926109314,
+        "p99_us": 119.55200135707855,
+        "quantile_method": "nearest_rank",
+        "stdev_us": 18.17363265098707,
+        "threshold_us": 100.0
+      },
+      "mode": "eager",
+      "paired": {
+        "max_us": 1089.5679742097855,
+        "mean_us": 24.803228789567946,
+        "min_us": -941.3759410381317,
+        "n": 10000,
+        "over_threshold_count": 79,
+        "over_threshold_fraction": 0.0079,
+        "p50_us": 23.263998329639435,
+        "p95_us": 36.639995872974396,
+        "p99_9_us": 722.0799773931503,
+        "p99_us": 83.93600583076477,
+        "quantile_method": "nearest_rank",
+        "stdev_us": 36.19899236802373,
+        "threshold_us": 100.0
+      },
+      "remote": {
+        "max_us": 1192.9919719696045,
+        "mean_us": 126.20969921275973,
+        "min_us": 110.78400164842606,
+        "n": 10000,
+        "over_threshold_count": 10000,
+        "over_threshold_fraction": 1.0,
+        "p50_us": 123.83999675512314,
+        "p95_us": 134.43200290203094,
+        "p99_9_us": 871.0079789161682,
+        "p99_us": 190.3039962053299,
+        "quantile_method": "nearest_rank",
+        "stdev_us": 32.19231789797129,
+        "threshold_us": 100.0
+      },
+      "threshold_observation": "FAIL_OBSERVED"
+    },
+    {
+      "batch": 2,
+      "case": "layers1-14-M2-graph",
+      "clock": "cpu_submit_to_event_complete",
+      "distribution": "hot",
+      "layers": [
+        1,
+        14
+      ],
+      "local": {
+        "max_us": 985.186,
+        "mean_us": 45.0376326,
+        "min_us": 37.76,
+        "n": 10000,
+        "over_threshold_count": 58,
+        "over_threshold_fraction": 0.0058,
+        "p50_us": 43.744,
+        "p95_us": 48.128,
+        "p99_9_us": 271.296,
+        "p99_us": 63.264,
+        "quantile_method": "nearest_rank",
+        "stdev_us": 25.468717606275685,
+        "threshold_us": 100.0
+      },
+      "mode": "graph",
+      "paired": {
+        "max_us": 898.211,
+        "mean_us": 5.7416233000000005,
+        "min_us": -933.73,
+        "n": 10000,
+        "over_threshold_count": 8,
+        "over_threshold_fraction": 0.0008,
+        "p50_us": 6.047999999999995,
+        "p95_us": 11.839999999999996,
+        "p99_9_us": 88.99199999999999,
+        "p99_us": 16.609,
+        "quantile_method": "nearest_rank",
+        "stdev_us": 31.56807089680643,
+        "threshold_us": 100.0
+      },
+      "remote": {
+        "max_us": 969.379,
+        "mean_us": 50.7792559,
+        "min_us": 43.84,
+        "n": 10000,
+        "over_threshold_count": 51,
+        "over_threshold_fraction": 0.0051,
+        "p50_us": 49.888,
+        "p95_us": 54.305,
+        "p99_9_us": 134.208,
+        "p99_us": 62.24,
+        "quantile_method": "nearest_rank",
+        "stdev_us": 19.21536975202963,
+        "threshold_us": 100.0
+      },
+      "threshold_observation": "FAIL_OBSERVED"
+    },
+    {
+      "batch": 2,
+      "case": "layers1-14-M2-graph",
+      "clock": "gpu_graph_event_interval",
+      "distribution": "hot",
+      "layers": [
+        1,
+        14
+      ],
+      "local": {
+        "max_us": 46.04800045490265,
+        "mean_us": 14.129644791409373,
+        "min_us": 13.055999763309956,
+        "n": 10000,
+        "over_threshold_count": 0,
+        "over_threshold_fraction": 0.0,
+        "p50_us": 13.887999579310417,
+        "p95_us": 15.200000256299973,
+        "p99_9_us": 42.97599941492081,
+        "p99_us": 15.936000272631645,
+        "quantile_method": "nearest_rank",
+        "stdev_us": 1.8614682436158625,
+        "threshold_us": 100.0
+      },
+      "mode": "graph",
+      "paired": {
+        "max_us": 206.94399625062943,
+        "mean_us": 6.0812640316784385,
+        "min_us": -25.79200081527233,
+        "n": 10000,
+        "over_threshold_count": 1,
+        "over_threshold_fraction": 0.0001,
+        "p50_us": 6.144000217318535,
+        "p95_us": 7.583999074995518,
+        "p99_9_us": 13.760000467300415,
+        "p99_us": 8.224000222980976,
+        "quantile_method": "nearest_rank",
+        "stdev_us": 2.612748289588689,
+        "threshold_us": 100.0
+      },
+      "remote": {
+        "max_us": 220.67199647426605,
+        "mean_us": 20.210908823087813,
+        "min_us": 19.13600042462349,
+        "n": 10000,
+        "over_threshold_count": 1,
+        "over_threshold_fraction": 0.0001,
+        "p50_us": 20.031999796628952,
+        "p95_us": 21.31200022995472,
+        "p99_9_us": 28.76799926161766,
+        "p99_us": 22.655999287962914,
+        "quantile_method": "nearest_rank",
+        "stdev_us": 2.1909508921958207,
+        "threshold_us": 100.0
+      },
+      "threshold_observation": "FAIL_OBSERVED"
+    },
+    {
+      "batch": 2,
+      "case": "layers1-14-M2-graph",
+      "clock": "cpu_submit_to_event_complete",
+      "distribution": "random",
+      "layers": [
+        1,
+        14
+      ],
+      "local": {
+        "max_us": 107561.664,
+        "mean_us": 63.921493,
+        "min_us": 41.856,
+        "n": 10000,
+        "over_threshold_count": 58,
+        "over_threshold_fraction": 0.0058,
+        "p50_us": 51.648,
+        "p95_us": 61.248,
+        "p99_9_us": 144.385,
+        "p99_us": 70.112,
+        "quantile_method": "nearest_rank",
+        "stdev_us": 1075.1721278092768,
+        "threshold_us": 100.0
+      },
+      "mode": "graph",
+      "paired": {
+        "max_us": 2145.414,
+        "mean_us": -9.387700500000001,
+        "min_us": -107446.97600000001,
+        "n": 10000,
+        "over_threshold_count": 12,
+        "over_threshold_fraction": 0.0012,
+        "p50_us": 0.8960000000000008,
+        "p95_us": 8.031999999999996,
+        "p99_9_us": 162.784,
+        "p99_us": 12.608000000000004,
+        "quantile_method": "nearest_rank",
+        "stdev_us": 1074.9589615265777,
+        "threshold_us": 100.0
+      },
+      "remote": {
+        "max_us": 2196.23,
+        "mean_us": 54.5337925,
+        "min_us": 45.952,
+        "n": 10000,
+        "over_threshold_count": 56,
+        "over_threshold_fraction": 0.0056,
+        "p50_us": 53.248,
+        "p95_us": 58.464,
+        "p99_9_us": 211.456,
+        "p99_us": 66.208,
+        "quantile_method": "nearest_rank",
+        "stdev_us": 29.3152286647852,
+        "threshold_us": 100.0
+      },
+      "threshold_observation": "FAIL_OBSERVED"
+    },
+    {
+      "batch": 2,
+      "case": "layers1-14-M2-graph",
+      "clock": "gpu_graph_event_interval",
+      "distribution": "random",
+      "layers": [
+        1,
+        14
+      ],
+      "local": {
+        "max_us": 829.8559784889221,
+        "mean_us": 22.202860809117556,
+        "min_us": 15.231999568641186,
+        "n": 10000,
+        "over_threshold_count": 1,
+        "over_threshold_fraction": 0.0001,
+        "p50_us": 20.927999168634415,
+        "p95_us": 29.37600016593933,
+        "p99_9_us": 44.64000090956688,
+        "p99_us": 32.48000144958496,
+        "quantile_method": "nearest_rank",
+        "stdev_us": 8.841221749855817,
+        "threshold_us": 100.0
+      },
+      "mode": "graph",
+      "paired": {
+        "max_us": 165.5999943614006,
+        "mean_us": 0.9263263938948512,
+        "min_us": -808.1599790602922,
+        "n": 10000,
+        "over_threshold_count": 3,
+        "over_threshold_fraction": 0.0003,
+        "p50_us": 1.6319993883371353,
+        "p95_us": 4.416000097990036,
+        "p99_9_us": 9.920001029968262,
+        "p99_us": 5.632000043988228,
+        "quantile_method": "nearest_rank",
+        "stdev_us": 8.926363040807864,
+        "threshold_us": 100.0
+      },
+      "remote": {
+        "max_us": 185.08799374103546,
+        "mean_us": 23.129187203012407,
+        "min_us": 19.90400068461895,
+        "n": 10000,
+        "over_threshold_count": 3,
+        "over_threshold_fraction": 0.0003,
+        "p50_us": 22.943999618291855,
+        "p95_us": 25.536000728607178,
+        "p99_9_us": 29.279999434947968,
+        "p99_us": 26.784000918269157,
+        "quantile_method": "nearest_rank",
+        "stdev_us": 2.8893804171892357,
+        "threshold_us": 100.0
+      },
+      "threshold_observation": "FAIL_OBSERVED"
+    }
+  ],
+  "trace_scope": "recorded eager/Graph trace hash parity and source use of same IDs verified; trace bytes not regenerated"
+}

@@ -1,0 +1,158 @@
+{
+  "schema_version": 1,
+  "date": "2026-10-16",
+  "baseline": "492ecf45b3ef55b22fd4882622abfdb2e2f664f2",
+  "scope": "four_concurrent_real_checkpoint_lookup_processes",
+  "status": "PASS",
+  "topology": {
+    "owner_hosts": 1,
+    "consumer_hosts": 1,
+    "owner_consumer_on_distinct_hosts": true,
+    "consumer_processes": 4,
+    "distinct_consumer_gpu_ordinals": [
+      0,
+      1,
+      2,
+      3
+    ],
+    "consumer_containers": 1,
+    "owner_containers": 1
+  },
+  "unique_owner_physical_bytes": 202758946816,
+  "physical_backing_is_not_sum_of_consumer_mapping_bytes": true,
+  "barrier": {
+    "same_dataset_and_generation": true,
+    "simultaneous_attach_verified": true,
+    "all_four_process_identities_alive_before_release": true,
+    "per_consumer_imports": [
+      2,
+      2,
+      2,
+      2
+    ],
+    "per_consumer_mappings": [
+      2,
+      2,
+      2,
+      2
+    ],
+    "per_consumer_owner_allocations": [
+      0,
+      0,
+      0,
+      0
+    ],
+    "bootstrap_sample_verification_before_barrier": true
+  },
+  "cases_per_consumer": 12,
+  "total_case_executions": 48,
+  "case_definition_reference": "REAL_CHECKPOINT_LOOKUP_RESULTS.json#/consumer/cases",
+  "consumers": [
+    {
+      "device": 0,
+      "status": "PASS",
+      "exit_code": 0,
+      "allocation_count": 2,
+      "bootstrap_first_middle_last_verified": true,
+      "no_consumer_checkpoint_tables": true,
+      "torch_attach_allocated_bytes": 0,
+      "torch_peak_increment_bytes": 1234432,
+      "closed_counters": {
+        "cleanup_failures": 0,
+        "contexts": 0,
+        "deferred_cleanups": 0,
+        "imports": 0,
+        "mappings": 0,
+        "owner_allocations": 0,
+        "reservations": 0,
+        "view_storages": 0
+      },
+      "exact_bf16_cases": 12
+    },
+    {
+      "device": 1,
+      "status": "PASS",
+      "exit_code": 0,
+      "allocation_count": 2,
+      "bootstrap_first_middle_last_verified": true,
+      "no_consumer_checkpoint_tables": true,
+      "torch_attach_allocated_bytes": 0,
+      "torch_peak_increment_bytes": 1234432,
+      "closed_counters": {
+        "cleanup_failures": 0,
+        "contexts": 0,
+        "deferred_cleanups": 0,
+        "imports": 0,
+        "mappings": 0,
+        "owner_allocations": 0,
+        "reservations": 0,
+        "view_storages": 0
+      },
+      "exact_bf16_cases": 12
+    },
+    {
+      "device": 2,
+      "status": "PASS",
+      "exit_code": 0,
+      "allocation_count": 2,
+      "bootstrap_first_middle_last_verified": true,
+      "no_consumer_checkpoint_tables": true,
+      "torch_attach_allocated_bytes": 0,
+      "torch_peak_increment_bytes": 1234432,
+      "closed_counters": {
+        "cleanup_failures": 0,
+        "contexts": 0,
+        "deferred_cleanups": 0,
+        "imports": 0,
+        "mappings": 0,
+        "owner_allocations": 0,
+        "reservations": 0,
+        "view_storages": 0
+      },
+      "exact_bf16_cases": 12
+    },
+    {
+      "device": 3,
+      "status": "PASS",
+      "exit_code": 0,
+      "allocation_count": 2,
+      "bootstrap_first_middle_last_verified": true,
+      "no_consumer_checkpoint_tables": true,
+      "torch_attach_allocated_bytes": 0,
+      "torch_peak_increment_bytes": 1234432,
+      "closed_counters": {
+        "cleanup_failures": 0,
+        "contexts": 0,
+        "deferred_cleanups": 0,
+        "imports": 0,
+        "mappings": 0,
+        "owner_allocations": 0,
+        "reservations": 0,
+        "view_storages": 0
+      },
+      "exact_bf16_cases": 12
+    }
+  ],
+  "post_exit": {
+    "all_four_lookup_processes_exited": true,
+    "gpu_compute_process_count": 0,
+    "consumer_gpu_memory_used_mib": [
+      0,
+      0,
+      0,
+      0
+    ],
+    "owner_retained_and_ready": true
+  },
+  "whole_test_elapsed_seconds": 9.449917582795024,
+  "elapsed_includes_startup_and_checks": true,
+  "online_latency_benchmark": false,
+  "full_model_http_validated": false,
+  "not_established": [
+    "full_model_projection_gate_attention_moe_or_scheduler_execution",
+    "four_independent_complete_rtp_serving_instances",
+    "production_latency_or_bandwidth",
+    "additional_100_microseconds_target",
+    "cuda_graph_or_owner_failover"
+  ]
+}

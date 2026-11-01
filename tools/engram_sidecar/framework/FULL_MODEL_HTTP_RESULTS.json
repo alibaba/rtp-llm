@@ -1,0 +1,198 @@
+{
+  "schema_version": 1,
+  "date": "2026-10-16",
+  "baseline": "492ecf45b3ef55b22fd4882622abfdb2e2f664f2",
+  "scope": "complete_real_checkpoint_single_instance_eager_http_smoke",
+  "status": "PASS_HTTP_SMOKE_AND_ORDERED_TEARDOWN",
+  "model": {
+    "checkpoint": "deepseek-ai/DeepSeek-V4.1-Flash",
+    "runtime_model_type": "deepseek_v41",
+    "text_layers": 40,
+    "layer_truncation": false,
+    "engram_layers": [
+      1,
+      14
+    ]
+  },
+  "deployment": {
+    "complete_rtp_instances": 1,
+    "model_worker_processes": 4,
+    "tensor_parallel": 4,
+    "expert_parallel": 4,
+    "data_parallel": 1,
+    "role": "PDFUSION",
+    "owner_on_distinct_host_and_container": true,
+    "consumer_contains_full_engram_tables": false,
+    "unique_owner_allocations": 2,
+    "unique_owner_physical_bytes": 202758946816,
+    "execution": "eager",
+    "speculative_decoding": false
+  },
+  "health": {
+    "path": "/health",
+    "status": 200,
+    "body": "ok",
+    "observation_phase": "serving_before_shutdown",
+    "current_endpoint_availability_not_claimed": true
+  },
+  "request": {
+    "path": "/v1/chat/completions",
+    "model": "deepseek_v41",
+    "messages": [
+      {
+        "role": "user",
+        "content": "你好，请用一句话介绍自己。"
+      }
+    ],
+    "max_tokens": 32,
+    "temperature": 0,
+    "stream": false,
+    "thinking": {
+      "type": "disabled"
+    }
+  },
+  "response": {
+    "id": "chat-",
+    "model": "",
+    "object": "chat.completion",
+    "message": {
+      "role": "assistant",
+      "content": "你好！我是DeepSeek，由深度求索公司创造的AI助手，随时准备为你提供帮助和解答问题！",
+      "partial": false
+    },
+    "finish_reason": "stop",
+    "usage": {
+      "prompt_tokens": 12,
+      "total_tokens": 38,
+      "completion_tokens": 26
+    },
+    "pd_sep": false,
+    "prefill_cuda_graph_status": "not_requested"
+  },
+  "response_metadata_note": "The actual server returned an empty model string and id chat-. They are preserved here, not replaced by the request model or a fabricated id.",
+  "cleanup": {
+    "status": "PASS",
+    "order": [
+      "all_consumer_task_processes_exited",
+      "explicit_owner_stop",
+      "owner_closed_and_exited"
+    ],
+    "consumer": {
+      "remaining_task_processes": 0,
+      "gpu_memory_used_mib": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "health_after_shutdown": "connection_refused",
+      "automatic_complete_process_cleanup": false,
+      "identified_orphan_processes_requiring_additional_term": 5,
+      "orphan_identity_checks": [
+        "pid",
+        "start_ticks",
+        "uid",
+        "process_group",
+        "task_marker"
+      ],
+      "per_worker_native_zero_counter_reports_not_claimed": true
+    },
+    "owner": {
+      "retained_backing_while_waiting_for_explicit_stop": true,
+      "status": "CLOSED",
+      "process_exited": true,
+      "native_counters": {
+        "cleanup_failures": 0,
+        "contexts": 0,
+        "deferred_cleanups": 0,
+        "imports": 0,
+        "mappings": 0,
+        "owner_allocations": 0,
+        "reservations": 0,
+        "view_storages": 0
+      }
+    },
+    "owner_stop_bound_to_verified_consumer_cleanup_snapshot": true,
+    "private_bootstrap_cleanup": {
+      "removed_private_bootstrap_files": [
+        "bundle.json",
+        "capabilities.json"
+      ],
+      "manifest_retained": true
+    }
+  },
+  "runtime_preflight_result": "FULL_MODEL_RUNTIME_RESULTS.json",
+  "not_established": [
+    "local_table_baseline_numerical_equivalence",
+    "warmed_latency_or_production_throughput",
+    "additional_100_microseconds_engram_overhead_target",
+    "multiple_independent_complete_rtp_serving_instances",
+    "pd_disaggregation",
+    "speculative_decoding",
+    "cuda_graph",
+    "owner_failover_or_production_lifecycle"
+  ],
+  "timing_scope": "One initial eager smoke request. Service timing is not an Engram overhead measurement or latency acceptance.",
+  "framework_runtime": {
+    "all_four_ranks_started": true,
+    "ranks": [
+      {
+        "rank": 0,
+        "external_engram_layers": [
+          1,
+          14
+        ],
+        "engram_jit_warmup_done": true,
+        "engram_lookup_warmup_max_tokens": 118,
+        "prefill_jit_warmup_done": true
+      },
+      {
+        "rank": 1,
+        "external_engram_layers": [
+          1,
+          14
+        ],
+        "engram_jit_warmup_done": true,
+        "engram_lookup_warmup_max_tokens": 118,
+        "prefill_jit_warmup_done": true
+      },
+      {
+        "rank": 2,
+        "external_engram_layers": [
+          1,
+          14
+        ],
+        "engram_jit_warmup_done": true,
+        "engram_lookup_warmup_max_tokens": 118,
+        "prefill_jit_warmup_done": true
+      },
+      {
+        "rank": 3,
+        "external_engram_layers": [
+          1,
+          14
+        ],
+        "engram_jit_warmup_done": true,
+        "engram_lookup_warmup_max_tokens": 118,
+        "prefill_jit_warmup_done": true
+      }
+    ]
+  },
+  "known_nonblocking_limitations": [
+    {
+      "component": "JIT snapshot/cache manager",
+      "observation": "JIT_CACHE_FAIL_OPEN after watchdog import failure; continued with cold start",
+      "performance_followup_required": true
+    },
+    {
+      "component": "PyTorch elementwise kernel disk cache",
+      "observation": "Configured cache directory could not be created; that kernel disk cache was disabled",
+      "performance_followup_required": true
+    },
+    {
+      "component": "MLOPart",
+      "observation": "Localization unavailable and disabled; request still completed",
+      "performance_followup_required": true
+    }
+  ]
+}

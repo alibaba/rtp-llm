@@ -1,0 +1,240 @@
+{
+  "schema_version": 1,
+  "record_kind": "same_main_native_runtime_build_and_import_validation",
+  "validation_date_utc": "2026-10-16T14:30:55.317884+00:00",
+  "source": {
+    "main_commit": "492ecf45b3ef55b22fd4882622abfdb2e2f664f2",
+    "native_tracked_changes": [],
+    "reviewed_native_roots": [
+      "BUILD",
+      ".bazelrc",
+      "WORKSPACE",
+      "rtp_llm/cpp",
+      "third_party",
+      "csrc",
+      "src",
+      "internal_source",
+      "rtp_llm/models_py/bindings"
+    ],
+    "native_source_matches_main": true,
+    "engram_integration_changes_present_elsewhere": true,
+    "whole_checkout_claimed_pristine": false
+  },
+  "build_configuration": {
+    "bazel_version": "6.4.0",
+    "platform": "linux_aarch64",
+    "config": "cuda13_arm",
+    "batch_mode": true,
+    "host_jvm_max_heap_gib": 6,
+    "jobs": 4,
+    "local_ram_resources_mib": 65536,
+    "supervisor_anonymous_memory_guard_bytes": 85899345920,
+    "supervisor_time_limit_seconds": 7200,
+    "same_task_output_cache_reused": true,
+    "repository_checksum_validation_preserved": true,
+    "python_wheels_from_verified_task_offline_cache": true,
+    "repository_build_files_or_locks_modified_by_this_step": false
+  },
+  "build_attempts": [
+    {
+      "target": "//:th_transformer",
+      "jobs": 2,
+      "status": "cancelled_by_operator",
+      "bazel_exit_code": 8,
+      "elapsed_seconds": 1629.679,
+      "reason": "Graceful interruption solely to increase parallelism; not a compilation failure. Existing cache preserved, and prior build processes exited before the next build started."
+    },
+    {
+      "target": "//:th_transformer",
+      "jobs": 4,
+      "status": "passed",
+      "bazel_exit_code": 0,
+      "supervisor_stop_reason": null,
+      "elapsed_seconds": 476.494,
+      "executed_actions": 199,
+      "peak_cgroup_bytes": 41706913792,
+      "peak_cgroup_anonymous_bytes": 12912164864
+    },
+    {
+      "target": "//:th_grammar_tokenizer_info",
+      "jobs": 4,
+      "status": "passed",
+      "bazel_exit_code": 0,
+      "supervisor_stop_reason": null,
+      "elapsed_seconds": 6.006,
+      "executed_actions": 9,
+      "peak_cgroup_anonymous_bytes": 1020395520
+    }
+  ],
+  "artifacts": [
+    {
+      "name": "libth_transformer_config.so",
+      "sha256": "2af0dbe3432c3bc0b9a4049b309ddd2d80545511b84796df4e9b9911ef96cf12",
+      "size_bytes": 74564200,
+      "repository_runtime_path": "rtp_llm/libs/libth_transformer_config.so",
+      "source": "same-checkout bazel-bin output",
+      "bounded_module_import_path_matches_built_artifact": true,
+      "ldd_unresolved_dependencies": []
+    },
+    {
+      "name": "librtp_compute_ops.so",
+      "sha256": "df64561a327ab79c808afb51be252e14d1bf4b445b3de6bd7f055ff666207e56",
+      "size_bytes": 774335600,
+      "repository_runtime_path": "rtp_llm/libs/librtp_compute_ops.so",
+      "source": "same-checkout bazel-bin output",
+      "bounded_module_import_path_matches_built_artifact": true,
+      "ldd_unresolved_dependencies": []
+    },
+    {
+      "name": "libth_transformer.so",
+      "sha256": "36b693db825789bb193c488a48f82bc23ccacfe95dbc1fbced2053ef81cd9658",
+      "size_bytes": 1241995520,
+      "repository_runtime_path": "rtp_llm/libs/libth_transformer.so",
+      "source": "same-checkout bazel-bin output",
+      "bounded_module_import_path_matches_built_artifact": true,
+      "ldd_unresolved_dependencies": []
+    },
+    {
+      "name": "libth_grammar_tokenizer_info.so",
+      "sha256": "0005d29292605d22eed27fd8cf68c03d6752668810fb99df126064612a27d8df",
+      "size_bytes": 14587128,
+      "repository_runtime_path": "rtp_llm/libs/libth_grammar_tokenizer_info.so",
+      "source": "same-checkout bazel-bin output",
+      "bounded_module_import_path_matches_built_artifact": true,
+      "ldd_unresolved_dependencies": []
+    }
+  ],
+  "runtime_layout": {
+    "library_installation": "Non-overwriting symbolic links to exact build outputs.",
+    "relative_dependency_tree": "rtp_llm/libs/_solib_local links to the same build dependency tree so embedded $ORIGIN RPATH entries remain valid.",
+    "libpython_resolution": "Task process adds its own interpreter LIBDIR for standalone ldd; main ops explicitly loads that same interpreter library before config import.",
+    "git_excludes": "Only the four exact module paths and their _solib_local support directory were added to local Git excludes.",
+    "system_environment_modified": false
+  },
+  "validation_layers": {
+    "four_library_elf_resolution": {
+      "status": "passed",
+      "unresolved_dependency_count": 0
+    },
+    "four_library_real_import": {
+      "status": "passed",
+      "entrypoint": "rtp_llm.ops.ensure_engine_ops_loaded followed by direct grammar module import",
+      "all_module_origins_verified": true,
+      "fallback_modules_used": false
+    },
+    "python_module_imports": {
+      "status": "passed",
+      "modules": [
+        "rtp_llm.start_server",
+        "rtp_llm.models.deepseek_v41",
+        "rtp_llm.openai.renderers.deepseekv41_renderer"
+      ]
+    },
+    "full_model_http_runtime_entrypoint": {
+      "status": "passed",
+      "command": "python -m tools.engram_sidecar.framework.full_model_http runtime --load-native",
+      "exit_code": 0,
+      "elapsed_seconds": 7.084,
+      "entrypoint_source_sha256": "df5bb24c4624c5b5b50d251cc58df1343c23ece97e62688d45a137ca62af0e75",
+      "required_package_availability_checked": true,
+      "native_import_checked": true,
+      "success_marker": "FULL_HTTP_NATIVE_IMPORT_OK",
+      "prerequisites_resolved": [
+        "Missing fastsafetensors/tilelang and their exact-main locked dependency closure were installed additively.",
+        "PYTHONPATH includes the verified prebuilt 128 GiB-capacity Engram VMM extension."
+      ],
+      "note": "This entrypoint checks package availability, ELF resolution and native/Python imports; it does not load a model checkpoint or generate tokens."
+    },
+    "full_llm_http": {
+      "status": "not_run",
+      "full_model_weights_loaded_by_this_step": false,
+      "model_inference_or_token_generation_run_by_this_step": false,
+      "successful_http_chat_claimed": false
+    }
+  },
+  "gpu_isolation": {
+    "CUDA_VISIBLE_DEVICES": "",
+    "GPU_COUNT": "0",
+    "torch_cuda_initialized_after_import": false,
+    "model_or_gpu_workload_started": false
+  },
+  "runtime_versions": {
+    "torch": "2.11.0+cu130",
+    "torch_cuda": "13.0"
+  },
+  "raw_evidence": "Original build results, memory samples, ldd output, module origins and mapped-library hashes are retained in the private task evidence directory; private paths and machine identifiers are intentionally omitted here.",
+  "engram_vmm_extension": {
+    "module": "engram_native_dev_492ecf45",
+    "sha256": "61bcd7bc3fcdeb094e627762b0daba68230a538453508348a846f070fdf34dd6",
+    "size_bytes": 1910312,
+    "capacity_bytes": 137438953472,
+    "prebuilt_artifact_identity_checked": true,
+    "jit_build_performed_by_this_step": false,
+    "gpu_allocation_performed_by_this_step": false
+  },
+  "additional_main_locked_packages": {
+    "lock_file": "deps/requirements_lock_cuda13_arm.txt",
+    "lock_sha256": "e4a1f21276296cfb417940661ae5dca92711ae20d073e16cb49e737e1061770a",
+    "installation_mode": [
+      "offline",
+      "require-hashes",
+      "no-deps",
+      "binary-only"
+    ],
+    "all_prior_distribution_versions_unchanged": true,
+    "prior_distribution_count": 125,
+    "new_distribution_count": 6,
+    "package_real_imports_passed": true,
+    "packages": [
+      {
+        "name": "cloudpickle",
+        "version": "3.1.2",
+        "wheel_filename": "cloudpickle-3.1.2-py3-none-any.whl",
+        "wheel_sha256": "9acb47f6afd73f60dc1df93bb801b472f05ff42fa6c84167d25cb206be1fbf4a",
+        "wheel_size_bytes": 22228
+      },
+      {
+        "name": "fastsafetensors",
+        "version": "0.1.20+ali",
+        "wheel_filename": "fastsafetensors-0.1.20+ali-cp310-cp310-linux_aarch64.whl",
+        "wheel_sha256": "c2a9945c4a11a4b8afa8eafe20d51aaf5b77ab1bfe6decd66d2c65396a213605",
+        "wheel_size_bytes": 172568
+      },
+      {
+        "name": "ml-dtypes",
+        "version": "0.5.4",
+        "wheel_filename": "ml_dtypes-0.5.4-cp310-cp310-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl",
+        "wheel_sha256": "b4b801ebe0b477be666696bda493a9be8356f1f0057a57f1e35cd26928823e5a",
+        "wheel_size_bytes": 5051883
+      },
+      {
+        "name": "tilelang",
+        "version": "0.1.15+cuda.gita35f8ddf",
+        "wheel_filename": "tilelang-0.1.15+cuda.gita35f8ddf-cp39-abi3-linux_aarch64.whl",
+        "wheel_sha256": "6339b01ef7d2042faaa0b0e5f61fc6d362e6800aeca66fdf49d88c858b8dd3da",
+        "wheel_size_bytes": 40640637
+      },
+      {
+        "name": "torch-c-dlpack-ext",
+        "version": "0.1.5",
+        "wheel_filename": "torch_c_dlpack_ext-0.1.5-cp310-cp310-manylinux_2_24_aarch64.manylinux_2_28_aarch64.whl",
+        "wheel_sha256": "ba3d88f0f7d5e1d9c3d4a3179037fc8e261c3b77ac1fad23edc0d3a9214ef193",
+        "wheel_size_bytes": 432066
+      },
+      {
+        "name": "z3-solver",
+        "version": "4.13.0.0",
+        "wheel_filename": "z3_solver-4.13.0.0+local.ali-py2.py3-none-manylinux2014_aarch64.whl",
+        "wheel_sha256": "e94170200c64f5d67295529e0568b15ba59a5f3b29c496402f8c941aec4aaa9b",
+        "wheel_size_bytes": 55642139
+      }
+    ],
+    "metadata_identity_note": "The original main-locked z3-solver wheel has filename version 4.13.0.0+local.ali and METADATA version 4.13.0.0. Its exact locked SHA was verified; the wheel was not repacked. No existing Torch or NVIDIA package was replaced."
+  },
+  "observed_warnings": [
+    {
+      "message": "Failed to load C++ FusedRopeKVCacheOp: cannot import FusedRopeKVCacheDecodeOp from librtp_compute_ops.rtp_llm_ops.",
+      "effect_on_this_validation": "The real runtime entrypoint completed with exit code 0. Optional-path behavior during complete model execution is not established by this import-only validation."
+    }
+  ]
+}

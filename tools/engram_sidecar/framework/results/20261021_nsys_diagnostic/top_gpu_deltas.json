@@ -1,0 +1,492 @@
+[
+  {
+    "gpu_delta_us": 34.112000837922096,
+    "local": {
+      "between_lookup_gap_us": [
+        0.192
+      ],
+      "completion_api_us": 15.968,
+      "event_minus_lookup_span_us": 6.624000576615334,
+      "gpu_event_us": 22.336000576615334,
+      "last_lookup_to_sync_return_us": 9.229,
+      "launch_api_us": 13.536,
+      "lookup_kernel_us": [
+        7.648,
+        7.872
+      ],
+      "lookup_span_us": 15.712,
+      "nvtx_to_graph_launch_us": 32.288,
+      "order_index": 0,
+      "submit_us": 50.432,
+      "sync_call_us": 17.568,
+      "thread_nivcsw_count": 0,
+      "thread_nvcsw_count": 0,
+      "wall_us": 68.0
+    },
+    "pair_id": 1988,
+    "remote": {
+      "between_lookup_gap_us": [
+        0.16
+      ],
+      "completion_api_us": 12.96,
+      "event_minus_lookup_span_us": 40.608001414537426,
+      "gpu_event_us": 56.44800141453743,
+      "last_lookup_to_sync_return_us": 9.325,
+      "launch_api_us": 46.976,
+      "lookup_kernel_us": [
+        7.744,
+        7.936
+      ],
+      "lookup_span_us": 15.84,
+      "nvtx_to_graph_launch_us": 32.736,
+      "order_index": 1,
+      "submit_us": 85.824,
+      "sync_call_us": 15.105,
+      "thread_nivcsw_count": 0,
+      "thread_nvcsw_count": 0,
+      "wall_us": 100.929
+    },
+    "wall_delta_us": 32.929
+  },
+  {
+    "gpu_delta_us": 24.60799738764763,
+    "local": {
+      "between_lookup_gap_us": [
+        0.16
+      ],
+      "completion_api_us": 17.696,
+      "event_minus_lookup_span_us": 6.208000836610793,
+      "gpu_event_us": 23.104000836610794,
+      "last_lookup_to_sync_return_us": 7.792,
+      "launch_api_us": 13.44,
+      "lookup_kernel_us": [
+        7.392,
+        9.344
+      ],
+      "lookup_span_us": 16.896,
+      "nvtx_to_graph_launch_us": 30.592,
+      "order_index": 1,
+      "submit_us": 46.24,
+      "sync_call_us": 19.36,
+      "thread_nivcsw_count": 0,
+      "thread_nvcsw_count": 0,
+      "wall_us": 65.6
+    },
+    "pair_id": 7161,
+    "remote": {
+      "between_lookup_gap_us": [
+        0.16
+      ],
+      "completion_api_us": 13.6,
+      "event_minus_lookup_span_us": 31.039998224258422,
+      "gpu_event_us": 47.71199822425842,
+      "last_lookup_to_sync_return_us": 9.648,
+      "launch_api_us": 36.128,
+      "lookup_kernel_us": [
+        8.064,
+        8.448
+      ],
+      "lookup_span_us": 16.672,
+      "nvtx_to_graph_launch_us": 33.92,
+      "order_index": 0,
+      "submit_us": 76.512,
+      "sync_call_us": 15.968,
+      "thread_nivcsw_count": 0,
+      "thread_nvcsw_count": 0,
+      "wall_us": 92.48
+    },
+    "wall_delta_us": 26.88000000000001
+  },
+  {
+    "gpu_delta_us": 18.20799894630909,
+    "local": {
+      "between_lookup_gap_us": [
+        0.16
+      ],
+      "completion_api_us": 21.056,
+      "event_minus_lookup_span_us": 5.952000295281412,
+      "gpu_event_us": 24.25600029528141,
+      "last_lookup_to_sync_return_us": 8.098,
+      "launch_api_us": 12.992,
+      "lookup_kernel_us": [
+        8.864,
+        9.28
+      ],
+      "lookup_span_us": 18.304,
+      "nvtx_to_graph_launch_us": 29.696,
+      "order_index": 0,
+      "submit_us": 44.064,
+      "sync_call_us": 22.656,
+      "thread_nivcsw_count": 0,
+      "thread_nvcsw_count": 0,
+      "wall_us": 66.72
+    },
+    "pair_id": 67,
+    "remote": {
+      "between_lookup_gap_us": [
+        0.16
+      ],
+      "completion_api_us": 6.496,
+      "event_minus_lookup_span_us": 22.3359992415905,
+      "gpu_event_us": 42.4639992415905,
+      "last_lookup_to_sync_return_us": 17.09,
+      "launch_api_us": 70.368,
+      "lookup_kernel_us": [
+        10.752,
+        9.216
+      ],
+      "lookup_span_us": 20.128,
+      "nvtx_to_graph_launch_us": 118.976,
+      "order_index": 1,
+      "submit_us": 193.217,
+      "sync_call_us": 12.128,
+      "thread_nivcsw_count": 0,
+      "thread_nvcsw_count": 0,
+      "wall_us": 205.345
+    },
+    "wall_delta_us": 138.625
+  },
+  {
+    "gpu_delta_us": 16.95999875664711,
+    "local": {
+      "between_lookup_gap_us": [
+        0.128
+      ],
+      "completion_api_us": 12.128,
+      "event_minus_lookup_span_us": 10.752001482248307,
+      "gpu_event_us": 33.952001482248306,
+      "last_lookup_to_sync_return_us": 18.864,
+      "launch_api_us": 31.04,
+      "lookup_kernel_us": [
+        13.28,
+        9.792
+      ],
+      "lookup_span_us": 23.2,
+      "nvtx_to_graph_launch_us": 95.553,
+      "order_index": 1,
+      "submit_us": 135.552,
+      "sync_call_us": 16.608,
+      "thread_nivcsw_count": 0,
+      "thread_nvcsw_count": 0,
+      "wall_us": 152.16
+    },
+    "pair_id": 5893,
+    "remote": {
+      "between_lookup_gap_us": [
+        0.16
+      ],
+      "completion_api_us": 43.904,
+      "event_minus_lookup_span_us": 32.00000023889542,
+      "gpu_event_us": 50.912000238895416,
+      "last_lookup_to_sync_return_us": 85.681,
+      "launch_api_us": 136.928,
+      "lookup_kernel_us": [
+        9.664,
+        9.088
+      ],
+      "lookup_span_us": 18.912,
+      "nvtx_to_graph_launch_us": 103745.302,
+      "order_index": 0,
+      "submit_us": 103922.551,
+      "sync_call_us": 53.152,
+      "thread_nivcsw_count": 1,
+      "thread_nvcsw_count": 0,
+      "wall_us": 103975.703
+    },
+    "wall_delta_us": 103823.54299999999
+  },
+  {
+    "gpu_delta_us": 14.848001301288605,
+    "local": {
+      "between_lookup_gap_us": [
+        0.16
+      ],
+      "completion_api_us": 14.112,
+      "event_minus_lookup_span_us": 5.312000419616698,
+      "gpu_event_us": 22.5600004196167,
+      "last_lookup_to_sync_return_us": 7.948,
+      "launch_api_us": 13.152,
+      "lookup_kernel_us": [
+        7.808,
+        9.28
+      ],
+      "lookup_span_us": 17.248,
+      "nvtx_to_graph_launch_us": 43.36,
+      "order_index": 1,
+      "submit_us": 60.576,
+      "sync_call_us": 16.128,
+      "thread_nivcsw_count": 0,
+      "thread_nvcsw_count": 0,
+      "wall_us": 76.704
+    },
+    "pair_id": 1758,
+    "remote": {
+      "between_lookup_gap_us": [
+        0.16
+      ],
+      "completion_api_us": 9.472,
+      "event_minus_lookup_span_us": 20.416001720905303,
+      "gpu_event_us": 37.408001720905304,
+      "last_lookup_to_sync_return_us": 10.028,
+      "launch_api_us": 26.56,
+      "lookup_kernel_us": [
+        8.384,
+        8.448
+      ],
+      "lookup_span_us": 16.992,
+      "nvtx_to_graph_launch_us": 32.768,
+      "order_index": 0,
+      "submit_us": 70.144,
+      "sync_call_us": 12.384,
+      "thread_nivcsw_count": 0,
+      "thread_nvcsw_count": 0,
+      "wall_us": 82.528
+    },
+    "wall_delta_us": 5.824000000000012
+  },
+  {
+    "gpu_delta_us": 13.37600126862526,
+    "local": {
+      "between_lookup_gap_us": [
+        0.16
+      ],
+      "completion_api_us": 17.184,
+      "event_minus_lookup_span_us": 7.999999477624893,
+      "gpu_event_us": 23.903999477624893,
+      "last_lookup_to_sync_return_us": 9.296,
+      "launch_api_us": 14.624,
+      "lookup_kernel_us": [
+        7.008,
+        8.736
+      ],
+      "lookup_span_us": 15.904,
+      "nvtx_to_graph_launch_us": 31.04,
+      "order_index": 0,
+      "submit_us": 48.256,
+      "sync_call_us": 18.912,
+      "thread_nivcsw_count": 0,
+      "thread_nvcsw_count": 0,
+      "wall_us": 67.168
+    },
+    "pair_id": 2539,
+    "remote": {
+      "between_lookup_gap_us": [
+        0.16
+      ],
+      "completion_api_us": 17.696,
+      "event_minus_lookup_span_us": 17.856000746250153,
+      "gpu_event_us": 37.28000074625015,
+      "last_lookup_to_sync_return_us": 9.584,
+      "launch_api_us": 24.576,
+      "lookup_kernel_us": [
+        10.08,
+        9.184
+      ],
+      "lookup_span_us": 19.424,
+      "nvtx_to_graph_launch_us": 31.872,
+      "order_index": 1,
+      "submit_us": 61.568,
+      "sync_call_us": 20.16,
+      "thread_nivcsw_count": 0,
+      "thread_nvcsw_count": 0,
+      "wall_us": 81.728
+    },
+    "wall_delta_us": 14.559999999999988
+  },
+  {
+    "gpu_delta_us": 13.087999075651169,
+    "local": {
+      "between_lookup_gap_us": [
+        0.16
+      ],
+      "completion_api_us": 22.72,
+      "event_minus_lookup_span_us": 6.399999369621277,
+      "gpu_event_us": 26.335999369621277,
+      "last_lookup_to_sync_return_us": 8.682,
+      "launch_api_us": 12.16,
+      "lookup_kernel_us": [
+        10.24,
+        9.536
+      ],
+      "lookup_span_us": 19.936,
+      "nvtx_to_graph_launch_us": 27.264,
+      "order_index": 1,
+      "submit_us": 41.856,
+      "sync_call_us": 24.32,
+      "thread_nivcsw_count": 0,
+      "thread_nvcsw_count": 0,
+      "wall_us": 66.176
+    },
+    "pair_id": 1493,
+    "remote": {
+      "between_lookup_gap_us": [
+        0.16
+      ],
+      "completion_api_us": 20.832,
+      "event_minus_lookup_span_us": 19.999998445272446,
+      "gpu_event_us": 39.423998445272446,
+      "last_lookup_to_sync_return_us": 8.97,
+      "launch_api_us": 26.592,
+      "lookup_kernel_us": [
+        9.856,
+        9.408
+      ],
+      "lookup_span_us": 19.424,
+      "nvtx_to_graph_launch_us": 30.048,
+      "order_index": 0,
+      "submit_us": 60.065,
+      "sync_call_us": 22.624,
+      "thread_nivcsw_count": 0,
+      "thread_nvcsw_count": 0,
+      "wall_us": 82.689
+    },
+    "wall_delta_us": 16.51299999999999
+  },
+  {
+    "gpu_delta_us": 12.223999947309494,
+    "local": {
+      "between_lookup_gap_us": [
+        0.192
+      ],
+      "completion_api_us": 19.616,
+      "event_minus_lookup_span_us": 7.10400041460991,
+      "gpu_event_us": 25.98400041460991,
+      "last_lookup_to_sync_return_us": 9.771,
+      "launch_api_us": 12.352,
+      "lookup_kernel_us": [
+        9.408,
+        9.28
+      ],
+      "lookup_span_us": 18.88,
+      "nvtx_to_graph_launch_us": 31.008,
+      "order_index": 0,
+      "submit_us": 47.872,
+      "sync_call_us": 21.248,
+      "thread_nivcsw_count": 0,
+      "thread_nvcsw_count": 0,
+      "wall_us": 69.12
+    },
+    "pair_id": 1591,
+    "remote": {
+      "between_lookup_gap_us": [
+        0.192
+      ],
+      "completion_api_us": 16.992,
+      "event_minus_lookup_span_us": 19.072000361919404,
+      "gpu_event_us": 38.2080003619194,
+      "last_lookup_to_sync_return_us": 11.083,
+      "launch_api_us": 27.456,
+      "lookup_kernel_us": [
+        9.216,
+        9.728
+      ],
+      "lookup_span_us": 19.136,
+      "nvtx_to_graph_launch_us": 35.168,
+      "order_index": 1,
+      "submit_us": 67.744,
+      "sync_call_us": 19.392,
+      "thread_nivcsw_count": 0,
+      "thread_nvcsw_count": 0,
+      "wall_us": 87.136
+    },
+    "wall_delta_us": 18.01599999999999
+  },
+  {
+    "gpu_delta_us": 11.80800050497055,
+    "local": {
+      "between_lookup_gap_us": [
+        0.128
+      ],
+      "completion_api_us": 19.585,
+      "event_minus_lookup_span_us": 5.7279990932941445,
+      "gpu_event_us": 24.831999093294144,
+      "last_lookup_to_sync_return_us": 8.233,
+      "launch_api_us": 13.664,
+      "lookup_kernel_us": [
+        9.568,
+        9.408
+      ],
+      "lookup_span_us": 19.104,
+      "nvtx_to_graph_launch_us": 31.52,
+      "order_index": 1,
+      "submit_us": 47.392,
+      "sync_call_us": 21.472,
+      "thread_nivcsw_count": 0,
+      "thread_nvcsw_count": 0,
+      "wall_us": 68.864
+    },
+    "pair_id": 1194,
+    "remote": {
+      "between_lookup_gap_us": [
+        0.16
+      ],
+      "completion_api_us": 19.841,
+      "event_minus_lookup_span_us": 17.087999598264695,
+      "gpu_event_us": 36.639999598264694,
+      "last_lookup_to_sync_return_us": 9.257,
+      "launch_api_us": 23.904,
+      "lookup_kernel_us": [
+        10.08,
+        9.312
+      ],
+      "lookup_span_us": 19.552,
+      "nvtx_to_graph_launch_us": 32.864,
+      "order_index": 0,
+      "submit_us": 61.024,
+      "sync_call_us": 21.728,
+      "thread_nivcsw_count": 0,
+      "thread_nvcsw_count": 0,
+      "wall_us": 82.752
+    },
+    "wall_delta_us": 13.887999999999991
+  },
+  {
+    "gpu_delta_us": 11.296000331640244,
+    "local": {
+      "between_lookup_gap_us": [
+        0.16
+      ],
+      "completion_api_us": 19.584,
+      "event_minus_lookup_span_us": 6.23999919629097,
+      "gpu_event_us": 25.82399919629097,
+      "last_lookup_to_sync_return_us": 7.536,
+      "launch_api_us": 13.856,
+      "lookup_kernel_us": [
+        10.336,
+        9.088
+      ],
+      "lookup_span_us": 19.584,
+      "nvtx_to_graph_launch_us": 25.952,
+      "order_index": 1,
+      "submit_us": 43.2,
+      "sync_call_us": 21.28,
+      "thread_nivcsw_count": 0,
+      "thread_nvcsw_count": 0,
+      "wall_us": 64.48
+    },
+    "pair_id": 8957,
+    "remote": {
+      "between_lookup_gap_us": [
+        0.16
+      ],
+      "completion_api_us": 20.0,
+      "event_minus_lookup_span_us": 17.663999527931214,
+      "gpu_event_us": 37.11999952793121,
+      "last_lookup_to_sync_return_us": 9.296,
+      "launch_api_us": 24.032,
+      "lookup_kernel_us": [
+        10.272,
+        9.024
+      ],
+      "lookup_span_us": 19.456,
+      "nvtx_to_graph_launch_us": 32.288,
+      "order_index": 0,
+      "submit_us": 59.776,
+      "sync_call_us": 22.432,
+      "thread_nivcsw_count": 0,
+      "thread_nvcsw_count": 0,
+      "wall_us": 82.208
+    },
+    "wall_delta_us": 17.727999999999994
+  }
+]

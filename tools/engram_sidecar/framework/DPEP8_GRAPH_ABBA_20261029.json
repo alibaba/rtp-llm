@@ -1,0 +1,995 @@
+{
+  "schema": "engram-dpep8-abba-sanitized-v1",
+  "date": "2026-10-29",
+  "source_commit": "f6b880c258811e666346bdd7cf34e48436a4ec85",
+  "release_baseline": "cb42b084a8a6350daa70897555f18d5f1b47f58e",
+  "scope": "single chronological A1 B1 B2 A2 cycle; request mean wall time, not per-step/GPU SLO",
+  "step_100us_acceptance": "NOT_ESTABLISHED",
+  "summary": [
+    {
+      "prompt_tokens": 12,
+      "completion_tokens": 256,
+      "local_request_mean_tpot_ms": 19.197825490196074,
+      "egm_request_mean_tpot_ms": 19.23250196078431,
+      "egm_minus_local_mean_us": 34.67647058823786,
+      "paired_delta_range_us": [
+        -70.78823529411966,
+        231.88627450980857
+      ],
+      "paired_deltas_us": [
+        -70.78823529411966,
+        -69.60784313725526,
+        47.21568627451779,
+        231.88627450980857
+      ],
+      "above_100us": 1,
+      "pairs": 4,
+      "all_text_equal": true,
+      "comparable": true
+    },
+    {
+      "prompt_tokens": 652,
+      "completion_tokens": 256,
+      "local_request_mean_tpot_ms": 19.213560784313724,
+      "egm_request_mean_tpot_ms": 19.232538235294115,
+      "egm_minus_local_mean_us": 18.97745098039195,
+      "paired_delta_range_us": [
+        -61.55686274510299,
+        101.88235294117476
+      ],
+      "paired_deltas_us": [
+        -61.55686274510299,
+        101.88235294117476,
+        -48.29019607842929,
+        83.87450980392532
+      ],
+      "above_100us": 1,
+      "pairs": 4,
+      "all_text_equal": true,
+      "comparable": true
+    },
+    {
+      "prompt_tokens": 2572,
+      "completion_tokens": 256,
+      "local_request_mean_tpot_ms": 19.276229411764707,
+      "egm_request_mean_tpot_ms": 19.6638862745098,
+      "egm_minus_local_mean_us": 387.6568627450961,
+      "paired_delta_range_us": [
+        -283.78039215686294,
+        707.9176470588209
+      ],
+      "paired_deltas_us": [
+        597.568627450979,
+        528.9215686274474,
+        707.9176470588209,
+        -283.78039215686294
+      ],
+      "above_100us": 3,
+      "pairs": 4,
+      "all_text_equal": true,
+      "comparable": true
+    }
+  ],
+  "records": [
+    {
+      "phase": "A1",
+      "prompt_tokens": 12,
+      "index": 0,
+      "warmup": true,
+      "seed": 11,
+      "status": "ok",
+      "completion_tokens": 256,
+      "reuse_len": 0,
+      "engine_stream_average_tpot_ms": 19.365101960784312,
+      "content_sha256": "de33e32671f4dac6b26719e5830c977de2122f5b90c4198e6d5a02d09b355723",
+      "reasoning_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "warnings": []
+    },
+    {
+      "phase": "A1",
+      "prompt_tokens": 12,
+      "index": 1,
+      "warmup": false,
+      "seed": 11,
+      "status": "ok",
+      "completion_tokens": 256,
+      "reuse_len": 0,
+      "engine_stream_average_tpot_ms": 19.246780392156865,
+      "content_sha256": "de33e32671f4dac6b26719e5830c977de2122f5b90c4198e6d5a02d09b355723",
+      "reasoning_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "warnings": []
+    },
+    {
+      "phase": "A1",
+      "prompt_tokens": 12,
+      "index": 2,
+      "warmup": false,
+      "seed": 23,
+      "status": "ok",
+      "completion_tokens": 256,
+      "reuse_len": 0,
+      "engine_stream_average_tpot_ms": 19.146298039215683,
+      "content_sha256": "de33e32671f4dac6b26719e5830c977de2122f5b90c4198e6d5a02d09b355723",
+      "reasoning_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "warnings": []
+    },
+    {
+      "phase": "A1",
+      "prompt_tokens": 652,
+      "index": 0,
+      "warmup": true,
+      "seed": 11,
+      "status": "ok",
+      "completion_tokens": 256,
+      "reuse_len": 0,
+      "engine_stream_average_tpot_ms": 19.251337254901962,
+      "content_sha256": "4a4d56ad534e54231513c5af6f7b789011015bc58c012fd2cbd7755ee5c4d931",
+      "reasoning_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "warnings": []
+    },
+    {
+      "phase": "A1",
+      "prompt_tokens": 652,
+      "index": 1,
+      "warmup": false,
+      "seed": 11,
+      "status": "ok",
+      "completion_tokens": 256,
+      "reuse_len": 0,
+      "engine_stream_average_tpot_ms": 19.28974117647059,
+      "content_sha256": "4a4d56ad534e54231513c5af6f7b789011015bc58c012fd2cbd7755ee5c4d931",
+      "reasoning_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "warnings": []
+    },
+    {
+      "phase": "A1",
+      "prompt_tokens": 652,
+      "index": 2,
+      "warmup": false,
+      "seed": 23,
+      "status": "ok",
+      "completion_tokens": 256,
+      "reuse_len": 0,
+      "engine_stream_average_tpot_ms": 19.27150588235294,
+      "content_sha256": "4a4d56ad534e54231513c5af6f7b789011015bc58c012fd2cbd7755ee5c4d931",
+      "reasoning_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "warnings": []
+    },
+    {
+      "phase": "A1",
+      "prompt_tokens": 2572,
+      "index": 0,
+      "warmup": true,
+      "seed": 11,
+      "status": "ok",
+      "completion_tokens": 256,
+      "reuse_len": 0,
+      "engine_stream_average_tpot_ms": 19.16847843137255,
+      "content_sha256": "23ca0f29380e308350b00b87ba5b31a8487db7a99308954ab2922f23fea8b572",
+      "reasoning_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "warnings": []
+    },
+    {
+      "phase": "A1",
+      "prompt_tokens": 2572,
+      "index": 1,
+      "warmup": false,
+      "seed": 11,
+      "status": "ok",
+      "completion_tokens": 256,
+      "reuse_len": 0,
+      "engine_stream_average_tpot_ms": 19.28658823529412,
+      "content_sha256": "23ca0f29380e308350b00b87ba5b31a8487db7a99308954ab2922f23fea8b572",
+      "reasoning_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "warnings": []
+    },
+    {
+      "phase": "A1",
+      "prompt_tokens": 2572,
+      "index": 2,
+      "warmup": false,
+      "seed": 23,
+      "status": "ok",
+      "completion_tokens": 256,
+      "reuse_len": 0,
+      "engine_stream_average_tpot_ms": 19.200074509803922,
+      "content_sha256": "23ca0f29380e308350b00b87ba5b31a8487db7a99308954ab2922f23fea8b572",
+      "reasoning_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "warnings": []
+    },
+    {
+      "phase": "B1",
+      "prompt_tokens": 12,
+      "index": 0,
+      "warmup": true,
+      "seed": 11,
+      "status": "ok",
+      "completion_tokens": 256,
+      "reuse_len": 0,
+      "engine_stream_average_tpot_ms": 19.45266274509804,
+      "content_sha256": "de33e32671f4dac6b26719e5830c977de2122f5b90c4198e6d5a02d09b355723",
+      "reasoning_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "warnings": []
+    },
+    {
+      "phase": "B1",
+      "prompt_tokens": 12,
+      "index": 1,
+      "warmup": false,
+      "seed": 11,
+      "status": "ok",
+      "completion_tokens": 256,
+      "reuse_len": 0,
+      "engine_stream_average_tpot_ms": 19.175992156862744,
+      "content_sha256": "de33e32671f4dac6b26719e5830c977de2122f5b90c4198e6d5a02d09b355723",
+      "reasoning_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "warnings": []
+    },
+    {
+      "phase": "B1",
+      "prompt_tokens": 12,
+      "index": 2,
+      "warmup": false,
+      "seed": 23,
+      "status": "ok",
+      "completion_tokens": 256,
+      "reuse_len": 0,
+      "engine_stream_average_tpot_ms": 19.1935137254902,
+      "content_sha256": "de33e32671f4dac6b26719e5830c977de2122f5b90c4198e6d5a02d09b355723",
+      "reasoning_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "warnings": []
+    },
+    {
+      "phase": "B1",
+      "prompt_tokens": 652,
+      "index": 0,
+      "warmup": true,
+      "seed": 11,
+      "status": "ok",
+      "completion_tokens": 256,
+      "reuse_len": 0,
+      "engine_stream_average_tpot_ms": 19.1424,
+      "content_sha256": "4a4d56ad534e54231513c5af6f7b789011015bc58c012fd2cbd7755ee5c4d931",
+      "reasoning_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "warnings": []
+    },
+    {
+      "phase": "B1",
+      "prompt_tokens": 652,
+      "index": 1,
+      "warmup": false,
+      "seed": 11,
+      "status": "ok",
+      "completion_tokens": 256,
+      "reuse_len": 0,
+      "engine_stream_average_tpot_ms": 19.22818431372549,
+      "content_sha256": "4a4d56ad534e54231513c5af6f7b789011015bc58c012fd2cbd7755ee5c4d931",
+      "reasoning_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "warnings": []
+    },
+    {
+      "phase": "B1",
+      "prompt_tokens": 652,
+      "index": 2,
+      "warmup": false,
+      "seed": 23,
+      "status": "ok",
+      "completion_tokens": 256,
+      "reuse_len": 0,
+      "engine_stream_average_tpot_ms": 19.22321568627451,
+      "content_sha256": "4a4d56ad534e54231513c5af6f7b789011015bc58c012fd2cbd7755ee5c4d931",
+      "reasoning_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "warnings": []
+    },
+    {
+      "phase": "B1",
+      "prompt_tokens": 2572,
+      "index": 0,
+      "warmup": true,
+      "seed": 11,
+      "status": "ok",
+      "completion_tokens": 256,
+      "reuse_len": 0,
+      "engine_stream_average_tpot_ms": 19.306286274509805,
+      "content_sha256": "23ca0f29380e308350b00b87ba5b31a8487db7a99308954ab2922f23fea8b572",
+      "reasoning_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "warnings": []
+    },
+    {
+      "phase": "B1",
+      "prompt_tokens": 2572,
+      "index": 1,
+      "warmup": false,
+      "seed": 11,
+      "status": "ok",
+      "completion_tokens": 256,
+      "reuse_len": 0,
+      "engine_stream_average_tpot_ms": 19.884156862745098,
+      "content_sha256": "23ca0f29380e308350b00b87ba5b31a8487db7a99308954ab2922f23fea8b572",
+      "reasoning_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "warnings": []
+    },
+    {
+      "phase": "B1",
+      "prompt_tokens": 2572,
+      "index": 2,
+      "warmup": false,
+      "seed": 23,
+      "status": "ok",
+      "completion_tokens": 256,
+      "reuse_len": 0,
+      "engine_stream_average_tpot_ms": 19.907992156862743,
+      "content_sha256": "23ca0f29380e308350b00b87ba5b31a8487db7a99308954ab2922f23fea8b572",
+      "reasoning_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "warnings": []
+    },
+    {
+      "phase": "B2",
+      "prompt_tokens": 12,
+      "index": 0,
+      "warmup": true,
+      "seed": 11,
+      "status": "ok",
+      "completion_tokens": 256,
+      "reuse_len": 0,
+      "engine_stream_average_tpot_ms": 19.3084431372549,
+      "content_sha256": "de33e32671f4dac6b26719e5830c977de2122f5b90c4198e6d5a02d09b355723",
+      "reasoning_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "warnings": []
+    },
+    {
+      "phase": "B2",
+      "prompt_tokens": 12,
+      "index": 1,
+      "warmup": false,
+      "seed": 11,
+      "status": "ok",
+      "completion_tokens": 256,
+      "reuse_len": 0,
+      "engine_stream_average_tpot_ms": 19.22774901960784,
+      "content_sha256": "de33e32671f4dac6b26719e5830c977de2122f5b90c4198e6d5a02d09b355723",
+      "reasoning_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "warnings": []
+    },
+    {
+      "phase": "B2",
+      "prompt_tokens": 12,
+      "index": 2,
+      "warmup": false,
+      "seed": 23,
+      "status": "ok",
+      "completion_tokens": 256,
+      "reuse_len": 0,
+      "engine_stream_average_tpot_ms": 19.332752941176473,
+      "content_sha256": "de33e32671f4dac6b26719e5830c977de2122f5b90c4198e6d5a02d09b355723",
+      "reasoning_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "warnings": []
+    },
+    {
+      "phase": "B2",
+      "prompt_tokens": 652,
+      "index": 0,
+      "warmup": true,
+      "seed": 11,
+      "status": "ok",
+      "completion_tokens": 256,
+      "reuse_len": 0,
+      "engine_stream_average_tpot_ms": 19.185717647058823,
+      "content_sha256": "4a4d56ad534e54231513c5af6f7b789011015bc58c012fd2cbd7755ee5c4d931",
+      "reasoning_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "warnings": []
+    },
+    {
+      "phase": "B2",
+      "prompt_tokens": 652,
+      "index": 1,
+      "warmup": false,
+      "seed": 11,
+      "status": "ok",
+      "completion_tokens": 256,
+      "reuse_len": 0,
+      "engine_stream_average_tpot_ms": 19.255666666666666,
+      "content_sha256": "4a4d56ad534e54231513c5af6f7b789011015bc58c012fd2cbd7755ee5c4d931",
+      "reasoning_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "warnings": []
+    },
+    {
+      "phase": "B2",
+      "prompt_tokens": 652,
+      "index": 2,
+      "warmup": false,
+      "seed": 23,
+      "status": "ok",
+      "completion_tokens": 256,
+      "reuse_len": 0,
+      "engine_stream_average_tpot_ms": 19.223086274509807,
+      "content_sha256": "4a4d56ad534e54231513c5af6f7b789011015bc58c012fd2cbd7755ee5c4d931",
+      "reasoning_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "warnings": []
+    },
+    {
+      "phase": "B2",
+      "prompt_tokens": 2572,
+      "index": 0,
+      "warmup": true,
+      "seed": 11,
+      "status": "ok",
+      "completion_tokens": 256,
+      "reuse_len": 0,
+      "engine_stream_average_tpot_ms": 19.29032156862745,
+      "content_sha256": "23ca0f29380e308350b00b87ba5b31a8487db7a99308954ab2922f23fea8b572",
+      "reasoning_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "warnings": []
+    },
+    {
+      "phase": "B2",
+      "prompt_tokens": 2572,
+      "index": 1,
+      "warmup": false,
+      "seed": 11,
+      "status": "ok",
+      "completion_tokens": 256,
+      "reuse_len": 0,
+      "engine_stream_average_tpot_ms": 19.660105882352937,
+      "content_sha256": "23ca0f29380e308350b00b87ba5b31a8487db7a99308954ab2922f23fea8b572",
+      "reasoning_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "warnings": []
+    },
+    {
+      "phase": "B2",
+      "prompt_tokens": 2572,
+      "index": 2,
+      "warmup": false,
+      "seed": 23,
+      "status": "ok",
+      "completion_tokens": 256,
+      "reuse_len": 0,
+      "engine_stream_average_tpot_ms": 19.20329019607843,
+      "content_sha256": "23ca0f29380e308350b00b87ba5b31a8487db7a99308954ab2922f23fea8b572",
+      "reasoning_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "warnings": []
+    },
+    {
+      "phase": "A2",
+      "prompt_tokens": 12,
+      "index": 0,
+      "warmup": true,
+      "seed": 11,
+      "status": "ok",
+      "completion_tokens": 256,
+      "reuse_len": 0,
+      "engine_stream_average_tpot_ms": 19.316639215686273,
+      "content_sha256": "de33e32671f4dac6b26719e5830c977de2122f5b90c4198e6d5a02d09b355723",
+      "reasoning_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "warnings": []
+    },
+    {
+      "phase": "A2",
+      "prompt_tokens": 12,
+      "index": 1,
+      "warmup": false,
+      "seed": 11,
+      "status": "ok",
+      "completion_tokens": 256,
+      "reuse_len": 0,
+      "engine_stream_average_tpot_ms": 19.297356862745097,
+      "content_sha256": "de33e32671f4dac6b26719e5830c977de2122f5b90c4198e6d5a02d09b355723",
+      "reasoning_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "warnings": []
+    },
+    {
+      "phase": "A2",
+      "prompt_tokens": 12,
+      "index": 2,
+      "warmup": false,
+      "seed": 23,
+      "status": "ok",
+      "completion_tokens": 256,
+      "reuse_len": 0,
+      "engine_stream_average_tpot_ms": 19.100866666666665,
+      "content_sha256": "de33e32671f4dac6b26719e5830c977de2122f5b90c4198e6d5a02d09b355723",
+      "reasoning_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "warnings": []
+    },
+    {
+      "phase": "A2",
+      "prompt_tokens": 652,
+      "index": 0,
+      "warmup": true,
+      "seed": 11,
+      "status": "ok",
+      "completion_tokens": 256,
+      "reuse_len": 0,
+      "engine_stream_average_tpot_ms": 19.1387568627451,
+      "content_sha256": "4a4d56ad534e54231513c5af6f7b789011015bc58c012fd2cbd7755ee5c4d931",
+      "reasoning_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "warnings": []
+    },
+    {
+      "phase": "A2",
+      "prompt_tokens": 652,
+      "index": 1,
+      "warmup": false,
+      "seed": 11,
+      "status": "ok",
+      "completion_tokens": 256,
+      "reuse_len": 0,
+      "engine_stream_average_tpot_ms": 19.15378431372549,
+      "content_sha256": "4a4d56ad534e54231513c5af6f7b789011015bc58c012fd2cbd7755ee5c4d931",
+      "reasoning_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "warnings": []
+    },
+    {
+      "phase": "A2",
+      "prompt_tokens": 652,
+      "index": 2,
+      "warmup": false,
+      "seed": 23,
+      "status": "ok",
+      "completion_tokens": 256,
+      "reuse_len": 0,
+      "engine_stream_average_tpot_ms": 19.13921176470588,
+      "content_sha256": "4a4d56ad534e54231513c5af6f7b789011015bc58c012fd2cbd7755ee5c4d931",
+      "reasoning_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "warnings": []
+    },
+    {
+      "phase": "A2",
+      "prompt_tokens": 2572,
+      "index": 0,
+      "warmup": true,
+      "seed": 11,
+      "status": "ok",
+      "completion_tokens": 256,
+      "reuse_len": 0,
+      "engine_stream_average_tpot_ms": 19.140682352941177,
+      "content_sha256": "23ca0f29380e308350b00b87ba5b31a8487db7a99308954ab2922f23fea8b572",
+      "reasoning_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "warnings": []
+    },
+    {
+      "phase": "A2",
+      "prompt_tokens": 2572,
+      "index": 1,
+      "warmup": false,
+      "seed": 11,
+      "status": "ok",
+      "completion_tokens": 256,
+      "reuse_len": 0,
+      "engine_stream_average_tpot_ms": 19.13118431372549,
+      "content_sha256": "23ca0f29380e308350b00b87ba5b31a8487db7a99308954ab2922f23fea8b572",
+      "reasoning_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "warnings": []
+    },
+    {
+      "phase": "A2",
+      "prompt_tokens": 2572,
+      "index": 2,
+      "warmup": false,
+      "seed": 23,
+      "status": "ok",
+      "completion_tokens": 256,
+      "reuse_len": 0,
+      "engine_stream_average_tpot_ms": 19.48707058823529,
+      "content_sha256": "23ca0f29380e308350b00b87ba5b31a8487db7a99308954ab2922f23fea8b572",
+      "reasoning_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "warnings": []
+    }
+  ],
+  "private_raw_archive_sha256": {
+    "A1": "d71b2ba4638c861001f934033672b8e3f6dde489ceb91098caa4c7288a682ff4",
+    "B1": "70952ca0783269fc4cf7421f1a6b4940355684df77d3933ca6e8aaf0ceaa9f47",
+    "B2": "61133bd3c000101a9ff0b6febca52a80eb6f1f396b9d1c79b2a6196dbf643beb",
+    "A2": "52cf0768b5cd1f4a61251d5dc1261360904205ad581a05bb0297d21e7e7fe397"
+  },
+  "diagnostic_traces": {
+    "pinned11": {
+      "scope": "profiled 8-step diagnostic on active decode rank0; not ABBA timing or 100us acceptance",
+      "trace_sha256": "6505b30bcbd90ecc95d957c744887fe5b27662517c1e6fdaacc6ede4b1ddf53e",
+      "graphs": [
+        {
+          "graph_index": 0,
+          "kernel_count": 915,
+          "gpu_kernel_span_us": 7216.994140625,
+          "lookup_kernel_us": [
+            13.056,
+            13.12
+          ],
+          "lookup_kernel_sum_us": 26.176,
+          "inject_kernel_us": [
+            4.864,
+            4.704
+          ],
+          "cpu_launch_us": 882.817
+        },
+        {
+          "graph_index": 1,
+          "kernel_count": 915,
+          "gpu_kernel_span_us": 15907.8505859375,
+          "lookup_kernel_us": [
+            12.416,
+            12.448
+          ],
+          "lookup_kernel_sum_us": 24.864,
+          "inject_kernel_us": [
+            4.64,
+            4.672
+          ],
+          "cpu_launch_us": 768.385
+        },
+        {
+          "graph_index": 2,
+          "kernel_count": 915,
+          "gpu_kernel_span_us": 15857.41943359375,
+          "lookup_kernel_us": [
+            12.48,
+            11.457
+          ],
+          "lookup_kernel_sum_us": 23.937,
+          "inject_kernel_us": [
+            4.448,
+            4.48
+          ],
+          "cpu_launch_us": 668.289
+        },
+        {
+          "graph_index": 3,
+          "kernel_count": 915,
+          "gpu_kernel_span_us": 15226.5029296875,
+          "lookup_kernel_us": [
+            11.904,
+            11.488
+          ],
+          "lookup_kernel_sum_us": 23.392,
+          "inject_kernel_us": [
+            4.736,
+            4.736
+          ],
+          "cpu_launch_us": 641.441
+        },
+        {
+          "graph_index": 4,
+          "kernel_count": 915,
+          "gpu_kernel_span_us": 15263.59228515625,
+          "lookup_kernel_us": [
+            11.681,
+            11.52
+          ],
+          "lookup_kernel_sum_us": 23.201,
+          "inject_kernel_us": [
+            4.992,
+            4.608
+          ],
+          "cpu_launch_us": 637.121
+        },
+        {
+          "graph_index": 5,
+          "kernel_count": 915,
+          "gpu_kernel_span_us": 15344.64892578125,
+          "lookup_kernel_us": [
+            10.976,
+            11.648
+          ],
+          "lookup_kernel_sum_us": 22.624000000000002,
+          "inject_kernel_us": [
+            5.185,
+            4.896
+          ],
+          "cpu_launch_us": 609.825
+        },
+        {
+          "graph_index": 6,
+          "kernel_count": 915,
+          "gpu_kernel_span_us": 15154.279296875,
+          "lookup_kernel_us": [
+            10.528,
+            10.272
+          ],
+          "lookup_kernel_sum_us": 20.8,
+          "inject_kernel_us": [
+            4.48,
+            4.416
+          ],
+          "cpu_launch_us": 623.745
+        },
+        {
+          "graph_index": 7,
+          "kernel_count": 915,
+          "gpu_kernel_span_us": 14665.73193359375,
+          "lookup_kernel_us": [
+            11.68,
+            9.472
+          ],
+          "lookup_kernel_sum_us": 21.152,
+          "inject_kernel_us": [
+            4.512,
+            4.704
+          ],
+          "cpu_launch_us": 650.305
+        }
+      ],
+      "top_kernels_by_cumulative_duration": [
+        {
+          "name": "void deep_gemm::sm100_fp8_fp4_mega_moe_impl<1920u, 5120u, 2304u, 384u, 0u, 6u, 16u, 128u, 128u, 8u, 8u, 128u, 128u, 15360u, 245760u, 11u, 5120u, 128u, 128u, 256u, 152u, 8u, true, false, true, cutlass::detail::float_e2m1_unpacksmem_t, 32u, false, 4608u, 5120u, 5120u, 2304u, 0u, 4u, 4u, 8u, 2u, 512u, 5u, 48u, 960u, 30720u, deep_gemm::sched::TaskInfo<false> >(void*, int*, unsigned int, float, float, deep_gemm::layout::SymBuffer<8u>, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, unsigned char const*)",
+          "count": 320,
+          "cumulative_us": 72077.81399999997
+        },
+        {
+          "name": "void sm100::prefill::fused_norm_rope_attn_rope_cast_fwd::core_attn::fwd_kernel<sm100::prefill::fused_norm_rope_attn_rope_cast_fwd::core_attn::Kernel<sm100::prefill::fused_norm_rope_attn_rope_cast_fwd::core_attn::Config{(SparseAttnFwdMode)1, (ModelType)0, (ModelType)1, 64u, false}> >(sm100::prefill::fused_norm_rope_attn_rope_cast_fwd::core_attn::Kernel<sm100::prefill::fused_norm_rope_attn_rope_cast_fwd::core_attn::Config{(SparseAttnFwdMode)1, (ModelType)0, (ModelType)1, 64u, false}>::Params, sm100::prefill::fused_norm_rope_attn_rope_cast_fwd::core_attn::Kernel<sm100::prefill::fused_norm_rope_attn_rope_cast_fwd::core_attn::Config{(SparseAttnFwdMode)1, (ModelType)0, (ModelType)1, 64u, false}>::TMAParams, sm100::prefill::fused_norm_rope_attn_rope_cast_fwd::core_attn::Kernel<sm100::prefill::fused_norm_rope_attn_rope_cast_fwd::core_attn::Config{(SparseAttnFwdMode)1, (ModelType)0, (ModelType)1, 64u, false}>::AuxParams)",
+          "count": 304,
+          "cumulative_us": 6561.222000000006
+        },
+        {
+          "name": "void deep_gemm::sm100_fp8_fp4_gemm_1d1d_impl<(cute::UMMA::Major)0, (cute::UMMA::Major)0, 32u, 32u, 32u, 0u, 5120u, 8192u, 16u, 128u, 128u, 1u, 128u, 128u, 128u, 12u, 2u, 128u, 128u, 2u, true, 152u, true, true, (deep_gemm::GemmType)0, false, cutlass::float_e4m3_t, cutlass::float_e4m3_t, cutlass::bfloat16_t, deep_gemm::epilogue::operators::Identity, deep_gemm::SM100FP8GemmLocalExecutionPolicy>(int*, unsigned int, unsigned int, unsigned int, deep_gemm::EpilogueOperatorArgs, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, deep_gemm::SM100FP8GemmLocalExecutionPolicy::Arguments)",
+          "count": 320,
+          "cumulative_us": 3780.6589999999974
+        },
+        {
+          "name": "void deep_gemm::sm100_mega_mhc_impl<5120u, 40u, 152u, true, true, false, 0u>(CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, deep_gemm::layout::mega_mhc::MixArgs, deep_gemm::layout::mega_mhc::NormArgs, void*, unsigned long*)",
+          "count": 320,
+          "cumulative_us": 3688.2449999999985
+        },
+        {
+          "name": "void deep_gemm::sm100_mega_mhc_impl<5120u, 40u, 152u, true, true, true, 0u>(CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, deep_gemm::layout::mega_mhc::MixArgs, deep_gemm::layout::mega_mhc::NormArgs, void*, unsigned long*)",
+          "count": 296,
+          "cumulative_us": 3335.9819999999936
+        },
+        {
+          "name": "void deep_gemm::sm100_fp8_fp4_gemm_1d1d_impl<(cute::UMMA::Major)0, (cute::UMMA::Major)0, 32u, 32u, 32u, 0u, 1024u, 4096u, 16u, 128u, 128u, 8u, 128u, 128u, 128u, 12u, 2u, 128u, 128u, 2u, true, 152u, true, true, (deep_gemm::GemmType)4, false, cutlass::float_e4m3_t, cutlass::float_e4m3_t, cutlass::float_e4m3_t, deep_gemm::epilogue::operators::CastToFP8<deep_gemm::epilogue::operators::Group32FP8QuantPolicy, false>, deep_gemm::SM100FP8GemmLocalExecutionPolicy>(int*, unsigned int, unsigned int, unsigned int, deep_gemm::EpilogueOperatorArgs, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, deep_gemm::SM100FP8GemmLocalExecutionPolicy::Arguments)",
+          "count": 320,
+          "cumulative_us": 2979.793000000002
+        },
+        {
+          "name": "void deep_gemm::sm100_fp8_fp4_gemm_1d1d_impl<(cute::UMMA::Major)0, (cute::UMMA::Major)0, 32u, 32u, 32u, 0u, 32768u, 1280u, 32u, 224u, 128u, 1u, 128u, 128u, 64u, 6u, 2u, 128u, 128u, 1u, false, 152u, false, true, (deep_gemm::GemmType)0, false, cutlass::float_e4m3_t, cutlass::float_e4m3_t, cutlass::bfloat16_t, deep_gemm::epilogue::operators::Identity, deep_gemm::SM100FP8GemmLocalExecutionPolicy>(int*, unsigned int, unsigned int, unsigned int, deep_gemm::EpilogueOperatorArgs, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, deep_gemm::SM100FP8GemmLocalExecutionPolicy::Arguments)",
+          "count": 256,
+          "cumulative_us": 2723.8879999999995
+        },
+        {
+          "name": "void deep_gemm::sm100_fp8_fp4_gemm_1d1d_impl<(cute::UMMA::Major)0, (cute::UMMA::Major)0, 32u, 32u, 32u, 0u, 4608u, 5120u, 16u, 128u, 128u, 1u, 128u, 128u, 128u, 12u, 2u, 128u, 128u, 2u, true, 152u, true, true, (deep_gemm::GemmType)0, false, cutlass::float_e4m3_t, cutlass::float_e4m3_t, cutlass::bfloat16_t, deep_gemm::epilogue::operators::Identity, deep_gemm::SM100FP8GemmLocalExecutionPolicy>(int*, unsigned int, unsigned int, unsigned int, deep_gemm::EpilogueOperatorArgs, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, deep_gemm::SM100FP8GemmLocalExecutionPolicy::Arguments)",
+          "count": 320,
+          "cumulative_us": 2700.680000000004
+        },
+        {
+          "name": "void deep_gemm::sm100_fp8_fp4_gemm_1d1d_impl<(cute::UMMA::Major)0, (cute::UMMA::Major)0, 32u, 32u, 32u, 0u, 1792u, 5120u, 16u, 128u, 128u, 1u, 128u, 128u, 128u, 12u, 2u, 128u, 128u, 2u, true, 152u, true, true, (deep_gemm::GemmType)0, false, cutlass::float_e4m3_t, cutlass::float_e4m3_t, cutlass::bfloat16_t, deep_gemm::epilogue::operators::Identity, deep_gemm::SM100FP8GemmLocalExecutionPolicy>(int*, unsigned int, unsigned int, unsigned int, deep_gemm::EpilogueOperatorArgs, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, deep_gemm::SM100FP8GemmLocalExecutionPolicy::Arguments)",
+          "count": 320,
+          "cumulative_us": 2644.871
+        },
+        {
+          "name": "void deep_gemm::sm100_bf16_mega_gate_impl<5120u, 384u, 256u, 1u, 8u, 3u, 6u, false, true, false, false, false, false, false, false>(CUtensorMap_st, CUtensorMap_st, float const*, float const*, bool const*, bool const*, bool const*, bool const*, deep_gemm::layout::mega_gate::RoutingArgs, void*, void*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int)",
+          "count": 320,
+          "cumulative_us": 2594.4740000000006
+        },
+        {
+          "name": "void deep_gemm::sm100_fp8_fp4_gemm_1d1d_impl<(cute::UMMA::Major)0, (cute::UMMA::Major)0, 32u, 32u, 32u, 0u, 5120u, 2304u, 16u, 128u, 128u, 1u, 128u, 128u, 128u, 12u, 2u, 128u, 128u, 2u, true, 152u, true, true, (deep_gemm::GemmType)0, false, cutlass::float_e4m3_t, cutlass::float_e4m3_t, cutlass::bfloat16_t, deep_gemm::epilogue::operators::Identity, deep_gemm::SM100FP8GemmLocalExecutionPolicy>(int*, unsigned int, unsigned int, unsigned int, deep_gemm::EpilogueOperatorArgs, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, deep_gemm::SM100FP8GemmLocalExecutionPolicy::Arguments)",
+          "count": 320,
+          "cumulative_us": 1893.5079999999984
+        },
+        {
+          "name": "nvjet_sm100_tss_512x8_64x3_1x1_h_bz_splitK_TNT",
+          "count": 8,
+          "cumulative_us": 1719.3049999999998
+        },
+        {
+          "name": "_query_norm_quant_kernel",
+          "count": 320,
+          "cumulative_us": 965.6680000000003
+        },
+        {
+          "name": "_fused_qkv_rope_cache_kernel",
+          "count": 320,
+          "cumulative_us": 844.802
+        },
+        {
+          "name": "_pack_mega_moe_inputs_optimized_kernel",
+          "count": 320,
+          "cumulative_us": 789.9220000000003
+        }
+      ],
+      "note": "GPU span is first-to-last kernel with the launch correlation. Cumulative durations are not wall time when streams overlap."
+    },
+    "egm12": {
+      "scope": "profiled 8-step diagnostic on active decode rank0; not ABBA timing or 100us acceptance",
+      "trace_sha256": "8a9f86cc2ce25ffed3996bb97311c07c9081aba4aa79049db11e75bf09b2c25b",
+      "graphs": [
+        {
+          "graph_index": 0,
+          "kernel_count": 915,
+          "gpu_kernel_span_us": 7221.80908203125,
+          "lookup_kernel_us": [
+            9.664,
+            9.696
+          ],
+          "lookup_kernel_sum_us": 19.36,
+          "inject_kernel_us": [
+            4.96,
+            4.384
+          ],
+          "cpu_launch_us": 929.858
+        },
+        {
+          "graph_index": 1,
+          "kernel_count": 915,
+          "gpu_kernel_span_us": 7228.05029296875,
+          "lookup_kernel_us": [
+            9.472,
+            9.952
+          ],
+          "lookup_kernel_sum_us": 19.424,
+          "inject_kernel_us": [
+            4.704,
+            4.48
+          ],
+          "cpu_launch_us": 908.993
+        },
+        {
+          "graph_index": 2,
+          "kernel_count": 915,
+          "gpu_kernel_span_us": 15017.6689453125,
+          "lookup_kernel_us": [
+            9.632,
+            9.376
+          ],
+          "lookup_kernel_sum_us": 19.008,
+          "inject_kernel_us": [
+            4.704,
+            4.512
+          ],
+          "cpu_launch_us": 739.937
+        },
+        {
+          "graph_index": 3,
+          "kernel_count": 915,
+          "gpu_kernel_span_us": 14919.90869140625,
+          "lookup_kernel_us": [
+            9.28,
+            9.568
+          ],
+          "lookup_kernel_sum_us": 18.848,
+          "inject_kernel_us": [
+            4.576,
+            4.736
+          ],
+          "cpu_launch_us": 733.954
+        },
+        {
+          "graph_index": 4,
+          "kernel_count": 915,
+          "gpu_kernel_span_us": 14646.18017578125,
+          "lookup_kernel_us": [
+            9.184,
+            9.344
+          ],
+          "lookup_kernel_sum_us": 18.528,
+          "inject_kernel_us": [
+            4.544,
+            4.448
+          ],
+          "cpu_launch_us": 695.777
+        },
+        {
+          "graph_index": 5,
+          "kernel_count": 915,
+          "gpu_kernel_span_us": 14710.5654296875,
+          "lookup_kernel_us": [
+            8.96,
+            9.024
+          ],
+          "lookup_kernel_sum_us": 17.984,
+          "inject_kernel_us": [
+            4.736,
+            4.384
+          ],
+          "cpu_launch_us": 708.673
+        },
+        {
+          "graph_index": 6,
+          "kernel_count": 915,
+          "gpu_kernel_span_us": 14785.50830078125,
+          "lookup_kernel_us": [
+            9.184,
+            9.6
+          ],
+          "lookup_kernel_sum_us": 18.784,
+          "inject_kernel_us": [
+            4.448,
+            4.416
+          ],
+          "cpu_launch_us": 678.242
+        },
+        {
+          "graph_index": 7,
+          "kernel_count": 915,
+          "gpu_kernel_span_us": 14034.787109375,
+          "lookup_kernel_us": [
+            9.568,
+            9.696
+          ],
+          "lookup_kernel_sum_us": 19.264,
+          "inject_kernel_us": [
+            4.48,
+            4.288
+          ],
+          "cpu_launch_us": 664.289
+        }
+      ],
+      "top_kernels_by_cumulative_duration": [
+        {
+          "name": "void deep_gemm::sm100_fp8_fp4_mega_moe_impl<1920u, 5120u, 2304u, 384u, 0u, 6u, 16u, 128u, 128u, 8u, 8u, 128u, 128u, 15360u, 245760u, 11u, 5120u, 128u, 128u, 256u, 152u, 8u, true, false, true, cutlass::detail::float_e2m1_unpacksmem_t, 32u, false, 4608u, 5120u, 5120u, 2304u, 0u, 4u, 4u, 8u, 2u, 512u, 5u, 48u, 960u, 30720u, deep_gemm::sched::TaskInfo<false> >(void*, int*, unsigned int, float, float, deep_gemm::layout::SymBuffer<8u>, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, unsigned char const*)",
+          "count": 320,
+          "cumulative_us": 59873.93900000003
+        },
+        {
+          "name": "void sm100::prefill::fused_norm_rope_attn_rope_cast_fwd::core_attn::fwd_kernel<sm100::prefill::fused_norm_rope_attn_rope_cast_fwd::core_attn::Kernel<sm100::prefill::fused_norm_rope_attn_rope_cast_fwd::core_attn::Config{(SparseAttnFwdMode)1, (ModelType)0, (ModelType)1, 64u, false}> >(sm100::prefill::fused_norm_rope_attn_rope_cast_fwd::core_attn::Kernel<sm100::prefill::fused_norm_rope_attn_rope_cast_fwd::core_attn::Config{(SparseAttnFwdMode)1, (ModelType)0, (ModelType)1, 64u, false}>::Params, sm100::prefill::fused_norm_rope_attn_rope_cast_fwd::core_attn::Kernel<sm100::prefill::fused_norm_rope_attn_rope_cast_fwd::core_attn::Config{(SparseAttnFwdMode)1, (ModelType)0, (ModelType)1, 64u, false}>::TMAParams, sm100::prefill::fused_norm_rope_attn_rope_cast_fwd::core_attn::Kernel<sm100::prefill::fused_norm_rope_attn_rope_cast_fwd::core_attn::Config{(SparseAttnFwdMode)1, (ModelType)0, (ModelType)1, 64u, false}>::AuxParams)",
+          "count": 304,
+          "cumulative_us": 6477.902999999998
+        },
+        {
+          "name": "void deep_gemm::sm100_fp8_fp4_gemm_1d1d_impl<(cute::UMMA::Major)0, (cute::UMMA::Major)0, 32u, 32u, 32u, 0u, 5120u, 8192u, 16u, 128u, 128u, 1u, 128u, 128u, 128u, 12u, 2u, 128u, 128u, 2u, true, 152u, true, true, (deep_gemm::GemmType)0, false, cutlass::float_e4m3_t, cutlass::float_e4m3_t, cutlass::bfloat16_t, deep_gemm::epilogue::operators::Identity, deep_gemm::SM100FP8GemmLocalExecutionPolicy>(int*, unsigned int, unsigned int, unsigned int, deep_gemm::EpilogueOperatorArgs, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, deep_gemm::SM100FP8GemmLocalExecutionPolicy::Arguments)",
+          "count": 320,
+          "cumulative_us": 3829.4169999999986
+        },
+        {
+          "name": "void deep_gemm::sm100_mega_mhc_impl<5120u, 40u, 152u, true, true, false, 0u>(CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, deep_gemm::layout::mega_mhc::MixArgs, deep_gemm::layout::mega_mhc::NormArgs, void*, unsigned long*)",
+          "count": 320,
+          "cumulative_us": 3779.269999999999
+        },
+        {
+          "name": "void deep_gemm::sm100_mega_mhc_impl<5120u, 40u, 152u, true, true, true, 0u>(CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, deep_gemm::layout::mega_mhc::MixArgs, deep_gemm::layout::mega_mhc::NormArgs, void*, unsigned long*)",
+          "count": 296,
+          "cumulative_us": 3439.623999999997
+        },
+        {
+          "name": "void deep_gemm::sm100_fp8_fp4_gemm_1d1d_impl<(cute::UMMA::Major)0, (cute::UMMA::Major)0, 32u, 32u, 32u, 0u, 1024u, 4096u, 16u, 128u, 128u, 8u, 128u, 128u, 128u, 12u, 2u, 128u, 128u, 2u, true, 152u, true, true, (deep_gemm::GemmType)4, false, cutlass::float_e4m3_t, cutlass::float_e4m3_t, cutlass::float_e4m3_t, deep_gemm::epilogue::operators::CastToFP8<deep_gemm::epilogue::operators::Group32FP8QuantPolicy, false>, deep_gemm::SM100FP8GemmLocalExecutionPolicy>(int*, unsigned int, unsigned int, unsigned int, deep_gemm::EpilogueOperatorArgs, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, deep_gemm::SM100FP8GemmLocalExecutionPolicy::Arguments)",
+          "count": 320,
+          "cumulative_us": 2997.859000000002
+        },
+        {
+          "name": "void deep_gemm::sm100_fp8_fp4_gemm_1d1d_impl<(cute::UMMA::Major)0, (cute::UMMA::Major)0, 32u, 32u, 32u, 0u, 32768u, 1280u, 32u, 224u, 128u, 1u, 128u, 128u, 64u, 6u, 2u, 128u, 128u, 1u, false, 152u, false, true, (deep_gemm::GemmType)0, false, cutlass::float_e4m3_t, cutlass::float_e4m3_t, cutlass::bfloat16_t, deep_gemm::epilogue::operators::Identity, deep_gemm::SM100FP8GemmLocalExecutionPolicy>(int*, unsigned int, unsigned int, unsigned int, deep_gemm::EpilogueOperatorArgs, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, deep_gemm::SM100FP8GemmLocalExecutionPolicy::Arguments)",
+          "count": 256,
+          "cumulative_us": 2727.823
+        },
+        {
+          "name": "void deep_gemm::sm100_fp8_fp4_gemm_1d1d_impl<(cute::UMMA::Major)0, (cute::UMMA::Major)0, 32u, 32u, 32u, 0u, 4608u, 5120u, 16u, 128u, 128u, 1u, 128u, 128u, 128u, 12u, 2u, 128u, 128u, 2u, true, 152u, true, true, (deep_gemm::GemmType)0, false, cutlass::float_e4m3_t, cutlass::float_e4m3_t, cutlass::bfloat16_t, deep_gemm::epilogue::operators::Identity, deep_gemm::SM100FP8GemmLocalExecutionPolicy>(int*, unsigned int, unsigned int, unsigned int, deep_gemm::EpilogueOperatorArgs, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, deep_gemm::SM100FP8GemmLocalExecutionPolicy::Arguments)",
+          "count": 320,
+          "cumulative_us": 2714.3410000000013
+        },
+        {
+          "name": "void deep_gemm::sm100_fp8_fp4_gemm_1d1d_impl<(cute::UMMA::Major)0, (cute::UMMA::Major)0, 32u, 32u, 32u, 0u, 1792u, 5120u, 16u, 128u, 128u, 1u, 128u, 128u, 128u, 12u, 2u, 128u, 128u, 2u, true, 152u, true, true, (deep_gemm::GemmType)0, false, cutlass::float_e4m3_t, cutlass::float_e4m3_t, cutlass::bfloat16_t, deep_gemm::epilogue::operators::Identity, deep_gemm::SM100FP8GemmLocalExecutionPolicy>(int*, unsigned int, unsigned int, unsigned int, deep_gemm::EpilogueOperatorArgs, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, deep_gemm::SM100FP8GemmLocalExecutionPolicy::Arguments)",
+          "count": 320,
+          "cumulative_us": 2639.689000000003
+        },
+        {
+          "name": "void deep_gemm::sm100_bf16_mega_gate_impl<5120u, 384u, 256u, 1u, 8u, 3u, 6u, false, true, false, false, false, false, false, false>(CUtensorMap_st, CUtensorMap_st, float const*, float const*, bool const*, bool const*, bool const*, bool const*, deep_gemm::layout::mega_gate::RoutingArgs, void*, void*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int)",
+          "count": 320,
+          "cumulative_us": 2597.795000000003
+        },
+        {
+          "name": "void deep_gemm::sm100_fp8_fp4_gemm_1d1d_impl<(cute::UMMA::Major)0, (cute::UMMA::Major)0, 32u, 32u, 32u, 0u, 5120u, 2304u, 16u, 128u, 128u, 1u, 128u, 128u, 128u, 12u, 2u, 128u, 128u, 2u, true, 152u, true, true, (deep_gemm::GemmType)0, false, cutlass::float_e4m3_t, cutlass::float_e4m3_t, cutlass::bfloat16_t, deep_gemm::epilogue::operators::Identity, deep_gemm::SM100FP8GemmLocalExecutionPolicy>(int*, unsigned int, unsigned int, unsigned int, deep_gemm::EpilogueOperatorArgs, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, deep_gemm::SM100FP8GemmLocalExecutionPolicy::Arguments)",
+          "count": 320,
+          "cumulative_us": 1897.1230000000003
+        },
+        {
+          "name": "nvjet_sm100_tss_512x8_64x3_1x1_h_bz_splitK_TNT",
+          "count": 8,
+          "cumulative_us": 1713.732
+        },
+        {
+          "name": "_query_norm_quant_kernel",
+          "count": 320,
+          "cumulative_us": 963.6200000000008
+        },
+        {
+          "name": "_fused_qkv_rope_cache_kernel",
+          "count": 320,
+          "cumulative_us": 858.0160000000001
+        },
+        {
+          "name": "_pack_mega_moe_inputs_optimized_kernel",
+          "count": 320,
+          "cumulative_us": 788.5760000000004
+        }
+      ],
+      "note": "GPU span is first-to-last kernel with the launch correlation. Cumulative durations are not wall time when streams overlap."
+    }
+  }
+}

@@ -1,0 +1,84 @@
+{
+  "completed_cases": [
+    "layer1-M1-eager",
+    "layer1-M1-graph",
+    "layer1-M2-eager",
+    "layer1-M2-graph",
+    "layer1-M4-eager",
+    "layer1-M4-graph",
+    "layer1-M8-eager",
+    "layer1-M8-graph",
+    "layer1-M16-eager",
+    "layer1-M16-graph",
+    "layer1-M32-eager",
+    "layer1-M32-graph",
+    "layer1-M64-eager",
+    "layer1-M64-graph"
+  ],
+  "diagnostic": {
+    "mapping": "PROT_READ|MAP_SHARED",
+    "mapping_closed": true,
+    "node_pages": {
+      "0": 1287941,
+      "1": 259002
+    },
+    "numa1_fraction": 0.1674282762842587,
+    "page_size_bytes": 65536,
+    "resident_pages": 1546943
+  },
+  "failed_layer": 14,
+  "final_log_states": [
+    {
+      "decode_step_slo": "NOT_MEASURED",
+      "layer": 14,
+      "logical_bytes": 101380404048,
+      "scope": "real_single_layer_lookup_only",
+      "status": "BASELINE_LOADING"
+    },
+    {
+      "completed": [
+        "layer1-M1-eager",
+        "layer1-M1-graph",
+        "layer1-M2-eager",
+        "layer1-M2-graph",
+        "layer1-M4-eager",
+        "layer1-M4-graph",
+        "layer1-M8-eager",
+        "layer1-M8-graph",
+        "layer1-M16-eager",
+        "layer1-M16-graph",
+        "layer1-M32-eager",
+        "layer1-M32-graph",
+        "layer1-M64-eager",
+        "layer1-M64-graph"
+      ],
+      "decode_step_slo": "NOT_MEASURED",
+      "error_type": "RuntimeError",
+      "scope": "real_single_layer_lookup_only",
+      "status": "FAILED_RETAINED_UNTIL_PROCESS_EXIT"
+    },
+    {
+      "decode_step_slo": "NOT_MEASURED",
+      "error_type": "RuntimeError",
+      "scope": "real_single_layer_lookup_only",
+      "status": "FAILED"
+    }
+  ],
+  "interpretation": "Post-failure diagnostic proves mixed NUMA placement of the retained layer14 baseline. Generic RuntimeError does not establish the exact throw site. Later operator cleanup is not original-run native-resource PASS.",
+  "original_complete_json_present": false,
+  "original_run_status": "PARTIAL_FAILED",
+  "private_evidence_sha256": {
+    "cleanup_summary": "55f031871fc646d02775a12c90a3f698e9b580c08f44b341cdadd82c75014942",
+    "diagnose": "6339267393f5561348604267701fe5454107fda1cf6241dc1d03a366d5f9bec8"
+  },
+  "retained_table_bytes": 101380404048,
+  "separate_operator_cleanup": {
+    "checkpoint_source_modified": false,
+    "host_shm_modified": false,
+    "no_compute_pids_before_or_after": true,
+    "original_process_absent": true,
+    "shm_after_bytes": 0,
+    "shm_before_bytes": 101380456448,
+    "status": "CLEANED_EXACT_TWO_FILES"
+  }
+}

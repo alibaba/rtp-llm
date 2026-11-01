@@ -1,0 +1,229 @@
+{
+  "schema_version": 1,
+  "date": "2026-10-16",
+  "baseline": "492ecf45b3ef55b22fd4882622abfdb2e2f664f2",
+  "scope": "real_checkpoint_cross_host_lookup_only",
+  "checkpoint": "deepseek-ai/DeepSeek-V4.1-Flash",
+  "distinct_hosts_and_containers": true,
+  "owner": {
+    "status_at_lookup": "READY",
+    "allocation_count": 2,
+    "logical_table_bytes": 202758032400,
+    "physical_bytes": 202758946816,
+    "retained_after_probe_for_full_model_experiment": true,
+    "cleanup_not_claimed": true
+  },
+  "oracle": {
+    "status": "ORACLE_PREPARED",
+    "cases": 3,
+    "cuda_initialized": false,
+    "logical_table_bytes": 202758032400,
+    "published_samples_matched": true,
+    "selected_rows": {
+      "1": 199,
+      "14": 199
+    }
+  },
+  "consumer": {
+    "status": "PASS",
+    "allocation_count": 2,
+    "bootstrap_first_middle_last_verified": true,
+    "cases": [
+      {
+        "case": "boundary_and_4gib",
+        "exact_bf16_bits": true,
+        "index_dtype": "torch.int64",
+        "layer": 1,
+        "shape": [
+          1,
+          9,
+          256
+        ]
+      },
+      {
+        "case": "boundary_and_4gib",
+        "exact_bf16_bits": true,
+        "index_dtype": "torch.int32",
+        "layer": 1,
+        "shape": [
+          1,
+          9,
+          256
+        ]
+      },
+      {
+        "case": "boundary_and_4gib",
+        "exact_bf16_bits": true,
+        "index_dtype": "torch.int64",
+        "layer": 14,
+        "shape": [
+          1,
+          9,
+          256
+        ]
+      },
+      {
+        "case": "boundary_and_4gib",
+        "exact_bf16_bits": true,
+        "index_dtype": "torch.int32",
+        "layer": 14,
+        "shape": [
+          1,
+          9,
+          256
+        ]
+      },
+      {
+        "case": "tokenizer_prefill",
+        "exact_bf16_bits": true,
+        "index_dtype": "torch.int64",
+        "layer": 1,
+        "shape": [
+          8,
+          24,
+          256
+        ]
+      },
+      {
+        "case": "tokenizer_prefill",
+        "exact_bf16_bits": true,
+        "index_dtype": "torch.int32",
+        "layer": 1,
+        "shape": [
+          8,
+          24,
+          256
+        ]
+      },
+      {
+        "case": "tokenizer_prefill",
+        "exact_bf16_bits": true,
+        "index_dtype": "torch.int64",
+        "layer": 14,
+        "shape": [
+          8,
+          24,
+          256
+        ]
+      },
+      {
+        "case": "tokenizer_prefill",
+        "exact_bf16_bits": true,
+        "index_dtype": "torch.int32",
+        "layer": 14,
+        "shape": [
+          8,
+          24,
+          256
+        ]
+      },
+      {
+        "case": "decode_history",
+        "exact_bf16_bits": true,
+        "index_dtype": "torch.int64",
+        "layer": 1,
+        "shape": [
+          1,
+          24,
+          256
+        ]
+      },
+      {
+        "case": "decode_history",
+        "exact_bf16_bits": true,
+        "index_dtype": "torch.int32",
+        "layer": 1,
+        "shape": [
+          1,
+          24,
+          256
+        ]
+      },
+      {
+        "case": "decode_history",
+        "exact_bf16_bits": true,
+        "index_dtype": "torch.int64",
+        "layer": 14,
+        "shape": [
+          1,
+          24,
+          256
+        ]
+      },
+      {
+        "case": "decode_history",
+        "exact_bf16_bits": true,
+        "index_dtype": "torch.int32",
+        "layer": 14,
+        "shape": [
+          1,
+          24,
+          256
+        ]
+      }
+    ],
+    "logical_table_bytes": 202758032400,
+    "physical_bytes": 202758946816,
+    "no_consumer_checkpoint_tables": true,
+    "torch_attach_allocated_bytes": 0,
+    "torch_peak_increment_bytes": 1234432
+  },
+  "consumer_cleanup": {
+    "status": "CLOSED",
+    "counters": {
+      "cleanup_failures": 0,
+      "contexts": 0,
+      "deferred_cleanups": 0,
+      "imports": 0,
+      "mappings": 0,
+      "owner_allocations": 0,
+      "reservations": 0,
+      "view_storages": 0
+    },
+    "process_exited": true
+  },
+  "memory_accounting_observation": {
+    "scope": "Observed Owner container cgroup on this driver/kernel/runtime only; not all ancestors or other platform versions.",
+    "nvidia_driver_version": "580.95.05",
+    "linux_kernel_version": "6.6.71",
+    "base_page_bytes": 65536,
+    "cuda_allocation_granularity_bytes": 2097152,
+    "egm_nvidiactl_mapping_rss_bytes": [
+      101378424832,
+      101380521984
+    ],
+    "exact_nvidiactl_large_mapping_RSS_bytes": 202758946816,
+    "exact_match_to_EGM_physical_bytes": true,
+    "process_VmRSS_bytes": 203914018816,
+    "process_smaps_RSS_bytes": 203914018816,
+    "container_memory_current_bytes": 10979508224,
+    "host_same_cgroup_memory_current_bytes": 10966990848,
+    "cgroup_memory_peak_bytes": 15146745856,
+    "cgroup_file_device_inode_matches": true,
+    "target_self_init_cgroups_equal": true,
+    "memory_events": {
+      "low": 0,
+      "high": 0,
+      "max": 0,
+      "oom": 0,
+      "oom_kill": 0,
+      "oom_group_kill": 0
+    },
+    "host_container_current_samples_atomic": false,
+    "measurement_read_only": true,
+    "conclusion": "This container memory.current does not account for EGM at its physical size. Container memory.max alone is not an EGM capacity/admission guarantee; retain explicit EGM budgets and NUMA admission."
+  },
+  "full_model_http": {
+    "status": "in_progress_not_passed_at_recording"
+  },
+  "not_established": [
+    "full_attention_moe_wkv_or_scheduler_execution_in_this_probe",
+    "full_model_http_success",
+    "local_table_baseline_model_equivalence",
+    "production_latency_or_bandwidth",
+    "additional_100_microseconds_target",
+    "concurrent_independent_full_serving_instances",
+    "cuda_graph_or_owner_failover",
+    "uniform_memcg_accounting_across_other_platforms"
+  ]
+}

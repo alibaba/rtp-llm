@@ -1,0 +1,38 @@
+{
+  "review_base": "f1b723d5f",
+  "date": "2026-10-30T03:03:19.457877+00:00",
+  "core_cpu": {
+    "tests": 204,
+    "passed": 204,
+    "skipped": 0
+  },
+  "framework_cpu": {
+    "tests": 219,
+    "passed": 219,
+    "skipped": 0
+  },
+  "cuda_lifecycle": {
+    "tests": 1,
+    "passed": 1,
+    "shard_counts": [
+      2,
+      3
+    ],
+    "same_host": true,
+    "tensor_aliases": true,
+    "graph_replay": true,
+    "unmap_release_balance": true
+  },
+  "environment": {
+    "architecture": "aarch64",
+    "torch": "2.11.0+cu130",
+    "prebuilt_native": true
+  },
+  "limitations": [
+    "No fresh multi-host full-model regression",
+    "No P>2 multi-host validation",
+    "No performance claim",
+    "Bazel targets edited but bazel test not executed"
+  ],
+  "live_serving_code_replaced": false
+}

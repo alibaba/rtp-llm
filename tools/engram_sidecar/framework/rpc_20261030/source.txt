@@ -1,0 +1,11 @@
+/workspace/conda310/lib/python3.10/site-packages/torch/cuda/__init__.py:61: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.
+  import pynvml  # type: ignore[import]
+{"status": "HOLDER_READY", "host": "e01-cn-fhh4jm45401-a0003", "shard": 0, "backing_bytes": 69206016}
+/workspace/conda310/lib/python3.10/site-packages/torch/cuda/__init__.py:61: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.
+  import pynvml  # type: ignore[import]
+/workspace/conda310/lib/python3.10/site-packages/torch/cuda/__init__.py:61: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.
+  import pynvml  # type: ignore[import]
+{"status": "WORKER_PASS", "instance": "i0", "rank": 1, "startup_ms": 269.73, "dataset_id": "sha256:fba7fdfda9fc4388a849305e4ee4ec626a6fdadbc48d8811f328714e64aa2d9e", "rpc_listener_closed": true, "graph_replays": 100, "counters_balanced": true, "imports": 4, "releases": 4, "maps": 4, "unmaps": 4, "reserves": 2, "frees": 2}
+{"status": "WORKER_PASS", "instance": "i0", "rank": 0, "startup_ms": 264.0, "dataset_id": "sha256:fba7fdfda9fc4388a849305e4ee4ec626a6fdadbc48d8811f328714e64aa2d9e", "rpc_listener_closed": true, "graph_replays": 100, "counters_balanced": true, "imports": 4, "releases": 4, "maps": 4, "unmaps": 4, "reserves": 2, "frees": 2}
+{"status": "PASS", "instance": "i0", "consumers_exited": true}
+{"status": "CLOSED", "counters_balanced": true}

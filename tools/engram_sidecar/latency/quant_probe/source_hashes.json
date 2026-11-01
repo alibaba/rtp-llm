@@ -1,0 +1,8 @@
+{
+  "rtp_llm/models_py/bindings/cuda/kernels/per_token_group_quant_8bit.cu": "ed42d348eb19939dedba54b03a1d4ba77bc6d328a1c189f33d2ac915fb95e6db",
+  "rtp_llm/models_py/bindings/cuda/kernels/per_token_group_quant_8bit_v2.cu": "0893136036e2cc7942e608020e075083fe1e93ffcb83c2087fe9773da244eaa8",
+  "rtp_llm/models_py/bindings/cuda/kernels/per_token_group_quant_8bit.h": "a528178b4bcc8399f782500334e07fd9f1f161a994f9966ea8b011cfc4b8b118",
+  "rtp_llm/models_py/bindings/cuda/kernels/per_token_group_quant_8bit_v2.h": "52e4777edabb4f4f10affb6cb002d17bf2232242012623f0dd3412d73d7093a5",
+  "rtp_llm/models_py/bindings/cuda/kernels/util.h": "c8ec6c3a2f8bccd180c680a43d25298c1ca284060c5786b51c6c23fadef8fcbb",
+  "rtp_llm/models_py/bindings/cuda/kernels/vec_dtypes.cuh": "6ad945b402f7eedfdc19097c774082e95c0875557b8f60c238bb98f96b2abff2"
+}

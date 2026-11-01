@@ -1,0 +1,272 @@
+{
+  "absolute": [
+    {
+      "clock": "gpu_graph_event_interval",
+      "path": "local_raw",
+      "stats": {
+        "max_us": 64.41599875688553,
+        "mean_us": 24.90339519493282,
+        "min_us": 19.519999623298645,
+        "n": 10000,
+        "over_threshold_count": 0,
+        "p50_us": 24.70399998128414,
+        "p95_us": 27.936000376939774,
+        "p99_9_us": 38.975998759269714,
+        "p99_us": 30.432000756263733,
+        "quantile_method": "nearest_rank",
+        "threshold_us": 100
+      }
+    },
+    {
+      "clock": "gpu_graph_event_interval",
+      "path": "remote_raw",
+      "stats": {
+        "max_us": 56.44800141453743,
+        "mean_us": 24.3970688033849,
+        "min_us": 20.576000213623047,
+        "n": 10000,
+        "over_threshold_count": 0,
+        "p50_us": 24.351999163627625,
+        "p95_us": 26.655999943614006,
+        "p99_9_us": 37.11999952793121,
+        "p99_us": 28.00000086426735,
+        "quantile_method": "nearest_rank",
+        "threshold_us": 100
+      }
+    },
+    {
+      "clock": "cpu_submit_to_event_complete",
+      "path": "local_raw",
+      "stats": {
+        "max_us": 1307.044,
+        "mean_us": 70.048101,
+        "min_us": 55.936,
+        "n": 10000,
+        "over_threshold_count": 99,
+        "p50_us": 68.064,
+        "p95_us": 76.961,
+        "p99_9_us": 341.793,
+        "p99_us": 95.52,
+        "quantile_method": "nearest_rank",
+        "threshold_us": 100
+      }
+    },
+    {
+      "clock": "cpu_submit_to_event_complete",
+      "path": "remote_raw",
+      "stats": {
+        "max_us": 103975.703,
+        "mean_us": 79.52333639999999,
+        "min_us": 57.184,
+        "n": 10000,
+        "over_threshold_count": 80,
+        "p50_us": 67.713,
+        "p95_us": 75.84,
+        "p99_9_us": 218.337,
+        "p99_us": 88.641,
+        "quantile_method": "nearest_rank",
+        "threshold_us": 100
+      }
+    }
+  ],
+  "batch": 1,
+  "between_lookup_gap_max_us": 0.193,
+  "cache_claim": "scratch_disturbed_not_guaranteed_cold",
+  "causal_attribution": "UNDETERMINED",
+  "counts": {
+    "completion_associated": 20000,
+    "invocations": 20000,
+    "launch_associated": 20000,
+    "lookup_kernels": 40000,
+    "nvtx_associated": 20000,
+    "paired_samples": 10000,
+    "positive_gpu_over100": 0,
+    "positive_wall_over100": 18,
+    "raw_clock_records": 40000,
+    "scratch_kernels_excluded": 20000,
+    "submit_delta_over100": 16,
+    "sync_delta_over100": 2,
+    "unexpected_labels": 0,
+    "unresolved_expected_invocations": 0
+  },
+  "decode_slo": "NOT_MEASURED",
+  "global_trace_completeness": "NOT_ASSERTED",
+  "graph_output_checks": 3,
+  "highlighted_scheduler_evidence": {
+    "observed_out_in_pairs": 1,
+    "pair_id": 5893,
+    "recorded_off_cpu_us": 66.496,
+    "scope": "same-thread rows within matching NVTX; incomplete collection possible; does not explain the approximately 104 ms wall interval",
+    "thread_involuntary_switch_count": 1
+  },
+  "independent_profile_runs": 1,
+  "layer_count": 2,
+  "lookup_kernel_max_us": 15.328,
+  "measurement_status": "PROFILE_ONLY",
+  "native_counters": {
+    "cleanup_failures": 0,
+    "contexts": 0,
+    "deferred_cleanups": 0,
+    "imports": 0,
+    "mappings": 0,
+    "owner_allocations": 0,
+    "reservations": 0,
+    "view_storages": 0
+  },
+  "paired": [
+    {
+      "clock": "gpu_graph_event_interval",
+      "stats": {
+        "max_us": 34.112000837922096,
+        "mean_us": -0.5063263915479184,
+        "min_us": -39.80799950659275,
+        "n": 10000,
+        "over_threshold_count": 0,
+        "p50_us": -0.4160013049840927,
+        "p95_us": 2.240000292658806,
+        "p99_9_us": 11.19999960064888,
+        "p99_us": 3.6159995943307877,
+        "quantile_method": "nearest_rank",
+        "threshold_us": 100
+      }
+    },
+    {
+      "clock": "cpu_submit_to_event_complete",
+      "stats": {
+        "max_us": 103823.54299999999,
+        "mean_us": 9.475235399999999,
+        "min_us": -1231.9720000000002,
+        "n": 10000,
+        "over_threshold_count": 18,
+        "p50_us": -0.35200000000000387,
+        "p95_us": 7.1370000000000005,
+        "p99_9_us": 138.625,
+        "p99_us": 14.559999999999988,
+        "quantile_method": "nearest_rank",
+        "threshold_us": 100
+      }
+    }
+  ],
+  "prior_comparison": {
+    "benchmark_diagnostic_code_changed": true,
+    "dataset_identity_equal": true,
+    "fix_or_slo_pass_claimed": false,
+    "invocation_order_mismatches": 0,
+    "model_and_lookup_source_sha256_equal": true,
+    "prior_gpu_tails_reproduced": false,
+    "prior_gpu_tails_retained": true,
+    "row_trace_sha256_equal": true,
+    "trace_seed_equal": true
+  },
+  "privacy": "Timing-only derived records. No original Nsight files, commands, private paths, host/process IDs, UUIDs, memory addresses or handles included.",
+  "profiler_start_success": true,
+  "profiler_stop_success": true,
+  "raw_statistics_recomputed_and_match": true,
+  "redacted_warnings": [
+    {
+      "code": "MISSING_MMAP_FOR_SYMBOLS",
+      "severity": 2,
+      "text": "MMAP events missing before symbol resolution; process identifier removed."
+    },
+    {
+      "code": "POSSIBLE_NVTX_EVENT_LOSS",
+      "severity": 2,
+      "text": "Not all NVTX events might have been collected."
+    },
+    {
+      "code": "POSSIBLE_CUDA_EVENT_LOSS",
+      "severity": 2,
+      "text": "Not all CUDA events might have been collected."
+    },
+    {
+      "code": "POSSIBLE_OS_RUNTIME_EVENT_LOSS",
+      "severity": 2,
+      "text": "Not all OS runtime libraries events might have been collected."
+    }
+  ],
+  "schema_version": 1,
+  "scope": "two serial independent full-table lookup components; IDs-ready to BF16-output-ready; excludes hash, WKV, gate, intervening model computation and HTTP",
+  "scratch_kernels_outside_markers": true,
+  "source_sha256": {
+    "association_tool": "59f217f9c7965fefee5704792a62b5d2a045edd633f467e0ea151e09492a1252",
+    "audit_tool": "9f3f260972de31192812b01924045c5cd55a1732b1d72fc4c6ca829ed5d28dd6",
+    "benchmark_prior": "eca09dda5ec8379f699e26789b6e30b87e1c3002887b9678cc5e35f3bde23511",
+    "benchmark_profile": "0846ffa7424442263efb8e3bf99b3d1153d8855b4c33243925c70a9fb9072280",
+    "lookup_kernel_source": "ec688fb3c7c3f3458015ac6ed070ecf36f1b5e52841900c84512ed7380f908a4",
+    "nsys_report": "81e06ae654c8bb195ae047e27c86cbbf01b35649b767365cd21b6097fc195e99",
+    "original_raw": "e42d68647a787aa9db5eeafd6b175c1778d905674828214c7e4a6e37bc572d24",
+    "original_summary": "aa5c2de09607b103b92f6d48aa5fdb165c4ad24975be614467d86ec9f3b95aae",
+    "sqlite": "f647b4ea215487ecd4020283c99e88f189a0b27222b75d8b0b88563fa97f56ee"
+  },
+  "submit_over100_pair_ids": [
+    5893,
+    7528,
+    5647,
+    9184,
+    7563,
+    4298,
+    9229,
+    97,
+    67,
+    1477,
+    6424,
+    5341,
+    1201,
+    6664,
+    6148,
+    6976
+  ],
+  "sync_over100_pair_ids": [
+    3539,
+    6968
+  ],
+  "top_gpu_pair_ids": [
+    1988,
+    7161,
+    67,
+    5893,
+    1758,
+    2539,
+    1493,
+    1591,
+    1194,
+    8957
+  ],
+  "top_negative_gpu_pair_ids": [
+    7435,
+    7136,
+    372,
+    28,
+    1741
+  ],
+  "top_negative_wall_pair_ids": [
+    2443,
+    6812,
+    787,
+    5755,
+    4099
+  ],
+  "wall_outlier_pair_ids": [
+    5893,
+    7528,
+    5647,
+    9184,
+    3539,
+    6968,
+    7563,
+    4298,
+    9229,
+    97,
+    67,
+    1477,
+    6424,
+    5341,
+    1201,
+    6664,
+    6148,
+    6976
+  ],
+  "warning_counts": {
+    "severity_2": 4
+  }
+}

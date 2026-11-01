@@ -1,0 +1,4 @@
+# Tested CUDA13 ARM wheel. Obtain the matching artifact through your configured
+# dependency source; this file deliberately does not embed a private index URL.
+deep-gemm==2.8.1+057ca59 \
+    --hash=sha256:e6474ca387758f11da7aff2851215cfe5230ed6b54cce0fabf5a880b5b56827c

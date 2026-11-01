@@ -1,0 +1,81 @@
+{
+  "archive_bytes": 7443711,
+  "archive_sha256": "3443e9182659a6749ae985f43c11468838399d0d1de091f4042d9b9d63fed153",
+  "files": {
+    "baseline-alias-layer1.json": {
+      "bytes": 85,
+      "sha256": "9bc78dfc4b250fece74daa543477853c83381142f3e361b27e95f6de84ba868a"
+    },
+    "baseline-alias-layer14.json": {
+      "bytes": 85,
+      "sha256": "9bc78dfc4b250fece74daa543477853c83381142f3e361b27e95f6de84ba868a"
+    },
+    "complete.json": {
+      "bytes": 486,
+      "sha256": "aef3c560cbcb354fca19570b80e862d339d5e282c28f41d714e68ea464611ef4"
+    },
+    "layers1-14-M1-eager/samples.jsonl": {
+      "bytes": 34876017,
+      "sha256": "d70b97df0bf3495721df200af0c8c0a718445ff2f8e6a31494af60bc833e3c3a"
+    },
+    "layers1-14-M1-eager/summary.json": {
+      "bytes": 17923,
+      "sha256": "6c994acab6293dba13b74063c830e3122015d4c045b4d2f28b266f473ae92ceb"
+    },
+    "layers1-14-M1-graph/samples.jsonl": {
+      "bytes": 34814981,
+      "sha256": "1081f10115bf92f54ad9df7efaea69f594ec6325fb0ebc96935ff7181dab9f7a"
+    },
+    "layers1-14-M1-graph/summary.json": {
+      "bytes": 82504,
+      "sha256": "1ff1f5c42f5d77edd70d0ba62494442c95167d9c981b3d6c346f21a357b7a5a8"
+    },
+    "layers1-14-M2-eager/samples.jsonl": {
+      "bytes": 34894496,
+      "sha256": "355efe6d7cfbe00e1ef664bda952bdbbade3a779c5ae06fa2f350e33d59fcd56"
+    },
+    "layers1-14-M2-eager/summary.json": {
+      "bytes": 17933,
+      "sha256": "7f7c2936e8ea8dff5e45d950ffe8f7741e71c8c4a18555469f73eef30eccf3f6"
+    },
+    "layers1-14-M2-graph/samples.jsonl": {
+      "bytes": 34815014,
+      "sha256": "5bff319735d94ca27db4950426a7a7ea6545ddf2cfa1c0176abef2c5aee6c661"
+    },
+    "layers1-14-M2-graph/summary.json": {
+      "bytes": 82544,
+      "sha256": "c4981f18830fc3de26d5b2571b7a0baa785504b6f2872636f54004163fdf264e"
+    },
+    "memory-layer1-after.json": {
+      "bytes": 281,
+      "sha256": "df3e5628e39c353551588b784d1655d9d0da236c76b8d6e1121547eab4aa8fae"
+    },
+    "memory-layer1-before.json": {
+      "bytes": 280,
+      "sha256": "c04a2cd7acb41e6c8f32416a6c856662e35a558ff067cd8a6424ec0ebc29312c"
+    },
+    "memory-layer14-after.json": {
+      "bytes": 279,
+      "sha256": "2a89a03cda70d222f589974c31f14221c200d35c617723e1727aa679686cb42e"
+    },
+    "memory-layer14-before.json": {
+      "bytes": 281,
+      "sha256": "fb5cca538579bb0bb12cf97d31406e40ae8e2e7fffe653a4b8a1ba9c232da6be"
+    },
+    "run.json": {
+      "bytes": 2421,
+      "sha256": "0810e10a4b510e1cf53359313d60bce38accfa54dd856002bc6283473d98af41"
+    },
+    "source-cache-layer1.json": {
+      "bytes": 2741,
+      "sha256": "97c17f6ea79dfc0d43c007ebbc08c80e297d11235a8a4807ae6aec95bc6e5fc9"
+    },
+    "source-cache-layer14.json": {
+      "bytes": 2740,
+      "sha256": "c11ed22c9d80d9a119790ac5b2e07f96f807dccdaa3d7129e86ec9007eb3cdab"
+    }
+  },
+  "normalization": "tar/gzip ownership, mode and time only; original member bytes unchanged",
+  "original_archive_bytes": 7883017,
+  "original_archive_sha256": "98134abb0abe79f3d33176518d832efef51121b6a0deb89b0587378dd08ca57b"
+}

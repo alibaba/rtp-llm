@@ -1,0 +1,65 @@
+{
+  "archive_bytes": 51082,
+  "archive_sha256": "bddc25f9d26690bc91fa9ab347462e9f746c9d13e2329286dc67e609ef699f9a",
+  "files": {
+    "baseline-alias-layer1.json": {
+      "bytes": 85,
+      "sha256": "9bc78dfc4b250fece74daa543477853c83381142f3e361b27e95f6de84ba868a"
+    },
+    "baseline-alias-layer14.json": {
+      "bytes": 85,
+      "sha256": "9bc78dfc4b250fece74daa543477853c83381142f3e361b27e95f6de84ba868a"
+    },
+    "complete.json": {
+      "bytes": 432,
+      "sha256": "678521d69caa640e7fcf0db33d42879096e4f6270ce1ec9ef0a4a3af8469c380"
+    },
+    "layers1-14-M1-eager/samples.jsonl": {
+      "bytes": 347068,
+      "sha256": "7c904353e49034774e5379ab953d0dbf482a76f76053ea9c03de38accf6ed29c"
+    },
+    "layers1-14-M1-eager/summary.json": {
+      "bytes": 17814,
+      "sha256": "ac4a486b245d50f6697a240746b940b1ec1360737413269dab9519d3782f6f5a"
+    },
+    "layers1-14-M1-graph/samples.jsonl": {
+      "bytes": 346536,
+      "sha256": "aba5b4f98e6681a00ddd914d733bd9c41aa5f9289218204dc42fee6e8d41e177"
+    },
+    "layers1-14-M1-graph/summary.json": {
+      "bytes": 82434,
+      "sha256": "a3151471c36c5fadf2145239e9508ed9dcf9ad64c186bf34c6954459f0683fdf"
+    },
+    "memory-layer1-after.json": {
+      "bytes": 281,
+      "sha256": "bdbf7f9ed29a110d19ef19a120436c298cadfaad871f022b1b923bebdfebf13a"
+    },
+    "memory-layer1-before.json": {
+      "bytes": 279,
+      "sha256": "2c7bc329e524b21fd35e5af974d24c460b6609a6445a0d20792bcf7dc82d400c"
+    },
+    "memory-layer14-after.json": {
+      "bytes": 279,
+      "sha256": "9d4d87319e0255a04b16e6b62f339395fbcee53eb1310df37268128888981a45"
+    },
+    "memory-layer14-before.json": {
+      "bytes": 281,
+      "sha256": "82c2f93aa947ec46a5f6f854e45aaac7f9ebb98b27ccd0bbcd7e96214859a003"
+    },
+    "run.json": {
+      "bytes": 2412,
+      "sha256": "9590eddf9eccd7c5ced8e30fe13ae0ab5c5727072ddd0036b01d878358f06986"
+    },
+    "source-cache-layer1.json": {
+      "bytes": 2740,
+      "sha256": "5f5e7d3d4c0784e4815684d27e2d27a8a3249e9795d5d4b676e692ce4e3970e3"
+    },
+    "source-cache-layer14.json": {
+      "bytes": 2740,
+      "sha256": "6f95e45c859d09efd1a65dfd5fe7af13a7bc756db543718753d7b0f04a3c645d"
+    }
+  },
+  "normalization": "tar/gzip ownership, mode and time only; original member bytes unchanged",
+  "original_archive_bytes": 54266,
+  "original_archive_sha256": "56a2157cdcc866b3bbd1338aa8e8138a6e701f2c58623b777c1b096462fd25ba"
+}

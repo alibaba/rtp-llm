@@ -1,0 +1,164 @@
+{
+  "schema_version": 1,
+  "date": "2026-10-16",
+  "scope": "HTTP service entrypoint and V4.1 attention lazy-import closure only; no model, service or GPU kernel launched by these probes",
+  "main_commit": "492ecf45b3ef55b22fd4882622abfdb2e2f664f2",
+  "main_lock_sha256": "e4a1f21276296cfb417940661ae5dca92711ae20d073e16cb49e737e1061770a",
+  "packages_before": 131,
+  "packages_after": 137,
+  "added": {
+    "jsonschema": "4.26.0",
+    "jsonschema-specifications": "2025.9.1",
+    "referencing": "0.37.0",
+    "rpds-py": "0.30.0",
+    "tiktoken": "0.7.0",
+    "flash-mla": "1.0.0+2e5429f"
+  },
+  "changed_existing": {},
+  "wheels": {
+    "jsonschema": {
+      "version": "4.26.0",
+      "filename": "jsonschema-4.26.0-py3-none-any.whl",
+      "bytes": 90630,
+      "sha256": "d489f15263b8d200f8387e64b4c3a75f06629559fb73deb8fdfb525f2dab50ce"
+    },
+    "jsonschema-specifications": {
+      "version": "2025.9.1",
+      "filename": "jsonschema_specifications-2025.9.1-py3-none-any.whl",
+      "bytes": 18437,
+      "sha256": "98802fee3a11ee76ecaca44429fda8a41bff98b00a0f2838151b113f210cc6fe"
+    },
+    "referencing": {
+      "version": "0.37.0",
+      "filename": "referencing-0.37.0-py3-none-any.whl",
+      "bytes": 26766,
+      "sha256": "381329a9f99628c9069361716891d34ad94af76e461dcb0335825aecc7692231"
+    },
+    "rpds-py": {
+      "version": "0.30.0",
+      "filename": "rpds_py-0.30.0-cp310-cp310-manylinux_2_17_aarch64.manylinux2014_aarch64.whl",
+      "bytes": 389696,
+      "sha256": "389a2d49eded1896c3d48b0136ead37c48e221b391c052fba3f4055c367f60a6"
+    },
+    "tiktoken": {
+      "version": "0.7.0",
+      "filename": "tiktoken-0.7.0-cp310-cp310-manylinux_2_17_aarch64.manylinux2014_aarch64.whl",
+      "bytes": 1048795,
+      "sha256": "79383a6e2c654c6040e5f8506f3750db9ddd71b550c724e673203b4f6b4b4590"
+    },
+    "flash-mla": {
+      "version": "1.0.0+2e5429f",
+      "filename": "flash_mla-1.0.0+2e5429f-cp310-cp310-linux_aarch64.whl",
+      "bytes": 11705217,
+      "sha256": "4e729f23823e02ef95e5c94a1d41b9031e8e4b00682f0c44392f480fed15899e"
+    }
+  },
+  "installation": {
+    "exact_main_lock_wheel_hashes_verified": true,
+    "offline": true,
+    "require_hashes": true,
+    "no_deps": true,
+    "only_binary": true,
+    "all_preexisting_distribution_versions_preserved": true,
+    "main_lock_unchanged": true
+  },
+  "native_sha256": {
+    "librtp_compute_ops.so": "sha256:df64561a327ab79c808afb51be252e14d1bf4b445b3de6bd7f055ff666207e56",
+    "libth_grammar_tokenizer_info.so": "sha256:0005d29292605d22eed27fd8cf68c03d6752668810fb99df126064612a27d8df",
+    "libth_transformer.so": "sha256:36b693db825789bb193c488a48f82bc23ccacfe95dbc1fbced2053ef81cd9658",
+    "libth_transformer_config.so": "sha256:2af0dbe3432c3bc0b9a4049b309ddd2d80545511b84796df4e9b9911ef96cf12"
+  },
+  "four_native_libraries_unchanged": true,
+  "runtime_exit_code": 0,
+  "cuda_visible_devices": "",
+  "cuda_initialized": false,
+  "real_imports": [
+    "rtp_llm.ops.ensure_engine_ops_loaded",
+    "libth_grammar_tokenizer_info",
+    "rtp_llm.start_server",
+    "rtp_llm.models.deepseek_v41",
+    "rtp_llm.openai.renderers.deepseekv41_renderer",
+    "rtp_llm.dash_sc.app.DashScApp",
+    "rtp_llm.frontend.frontend_app.FrontendApp",
+    "rtp_llm.server.backend_manager.BackendManager",
+    "rtp_llm.start_backend_server",
+    "flash_mla.flash_mla_sparse_fwd",
+    "flash_mla.flash_mla_with_kvcache",
+    "flash_mla.get_mla_metadata",
+    "flash_mla.cuda"
+  ],
+  "cpu_tests": {
+    "local_passed": 16,
+    "remote_passed": 16,
+    "skipped": 0
+  },
+  "validated_source_sha256": {
+    "tools/engram_sidecar/framework/full_model_http.py": "928bb4bbac1e7681b30a12d2c18974ccbf3375b15cd8783cff96c56ff48a951f",
+    "tools/engram_sidecar/framework/test_full_model_http.py": "203e1964a9546630ad012195dc98da42678167f9b6dc1c64ec65e79a66d9238e"
+  },
+  "known_warning": "GPU-hidden optional FusedRopeKVCacheDecodeOp fallback warning remains; the visible-GPU import path was checked separately.",
+  "full_model_http_validated": false,
+  "not_established": [
+    "model_construction_or_weight_loading",
+    "worker_readiness",
+    "http_endpoint_health",
+    "chat_response",
+    "complete_model_numerical_or_performance_acceptance"
+  ],
+  "rounds": [
+    {
+      "scope": "service_entrypoint_imports",
+      "packages_before": 131,
+      "packages_after": 136,
+      "added": {
+        "jsonschema": "4.26.0",
+        "jsonschema-specifications": "2025.9.1",
+        "referencing": "0.37.0",
+        "rpds-py": "0.30.0",
+        "tiktoken": "0.7.0"
+      },
+      "changed_existing": {},
+      "cpu_tests": {
+        "local_passed": 15,
+        "remote_passed": 15,
+        "skipped": 0
+      }
+    },
+    {
+      "scope": "attention_lazy_imports",
+      "packages_before": 136,
+      "packages_after": 137,
+      "added": {
+        "flash-mla": "1.0.0+2e5429f"
+      },
+      "changed_existing": {},
+      "cpu_tests": {
+        "local_passed": 16,
+        "remote_passed": 16,
+        "skipped": 0
+      }
+    }
+  ],
+  "flash_mla_binding": {
+    "cuda_initialized": false,
+    "native_file": "cuda.cpython-310-aarch64-linux-gnu.so",
+    "native_bytes": 57849456,
+    "native_sha256": "ed6f31406334415554b32512278bb919868ce84d09e5fe9de0549902c5fe9d75",
+    "native_entrypoints": {
+      "sparse_prefill_fwd": true,
+      "sparse_decode_fwd": true
+    },
+    "interface_backend_is_imported_cuda": true,
+    "python_entrypoints": {
+      "flash_mla_sparse_fwd": {
+        "callable": true
+      },
+      "flash_mla_with_kvcache": {
+        "callable": true
+      },
+      "get_mla_metadata": {
+        "callable": true
+      }
+    }
+  }
+}

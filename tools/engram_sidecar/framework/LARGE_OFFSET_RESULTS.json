@@ -1,0 +1,130 @@
+{
+  "schema_version": 1,
+  "date": "2026-10-16",
+  "baseline": "492ecf45b3ef55b22fd4882622abfdb2e2f664f2",
+  "scope": "enlarged-native-and-cross-host-address-correctness",
+  "native_source_sha256": "42616195e04ca9a309f49b5dc4a1d1e23bb15a9034b3826790dcdd07563dde95",
+  "native_gpu_tests": {
+    "host_count": 2,
+    "tests_per_host": 9,
+    "passed": true,
+    "attach_close_cycles_per_host": 100
+  },
+  "large_offset": {
+    "owner": [
+      {
+        "allocation_bytes": 4431282176,
+        "counters": {
+          "cleanup_failures": 0,
+          "contexts": 1,
+          "deferred_cleanups": 0,
+          "imports": 0,
+          "mappings": 1,
+          "owner_allocations": 1,
+          "reservations": 1,
+          "view_storages": 0
+        },
+        "device": 0,
+        "granularity": 2097152,
+        "logical_bytes": 4429252872,
+        "numa": 0,
+        "sampled_rows": [
+          0,
+          16777215,
+          16777216,
+          16777472
+        ],
+        "scale_offset": 4295033088,
+        "scope": "large_offset_probe",
+        "status": "READY",
+        "weight_byte_offsets": [
+          0,
+          4294967040,
+          4294967296,
+          4295032832
+        ]
+      },
+      {
+        "counters": {
+          "cleanup_failures": 0,
+          "contexts": 0,
+          "deferred_cleanups": 0,
+          "imports": 0,
+          "mappings": 0,
+          "owner_allocations": 0,
+          "reservations": 0,
+          "view_storages": 0
+        },
+        "status": "CLOSED"
+      }
+    ],
+    "consumer": [
+      {
+        "cases": [
+          {
+            "exact_bf16_bytes": true,
+            "index_dtype": "torch.int64",
+            "invalid_rows_zero": true,
+            "rows": [
+              0,
+              16777215,
+              16777216,
+              16777472,
+              -1,
+              16777473,
+              2147483647
+            ]
+          },
+          {
+            "exact_bf16_bytes": true,
+            "index_dtype": "torch.int32",
+            "invalid_rows_zero": true,
+            "rows": [
+              0,
+              16777215,
+              16777216,
+              16777472,
+              -1,
+              16777473,
+              2147483647
+            ]
+          }
+        ],
+        "driver_free_delta_bytes": 2097152,
+        "logical_shared_bytes": 4429252872,
+        "no_full_table_hbm_copy": true,
+        "scope": "large_offset_native_triton_only",
+        "status": "PASS",
+        "torch_attach_allocated_bytes": 0,
+        "torch_peak_delta_bytes": 7680
+      },
+      {
+        "counters": {
+          "cleanup_failures": 0,
+          "contexts": 0,
+          "deferred_cleanups": 0,
+          "imports": 0,
+          "mappings": 0,
+          "owner_allocations": 0,
+          "reservations": 0,
+          "view_storages": 0
+        },
+        "status": "CLOSED"
+      }
+    ],
+    "distinct_hosts_and_containers": true,
+    "owner_stopped_after_consumer_exit": true,
+    "private_capabilities_removed": true,
+    "post_cleanup_compute_processes": 0,
+    "owner_process_exited": true
+  },
+  "not_established": [
+    "real_189_GiB_checkpoint_loaded",
+    "full_llm_http",
+    "production_performance",
+    "additional_100_microseconds_target",
+    "concurrent_independent_full_serving_instances",
+    "cuda_graph_or_owner_failover"
+  ],
+  "native_binary_sha256": "61bcd7bc3fcdeb094e627762b0daba68230a538453508348a846f070fdf34dd6"
+}
