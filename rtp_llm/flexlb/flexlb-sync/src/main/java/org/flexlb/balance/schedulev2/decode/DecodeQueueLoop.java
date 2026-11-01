@@ -75,12 +75,13 @@ public final class DecodeQueueLoop {
      * 没事可做时最多等这么久再扫一遍，兜底没有发出变化通知的情况。
      */
     static final long IDLE_WAIT_MS = 50L;
+    private static final int MIN_PUBLICATIONS_PER_ROUND = 100;
     private final EndpointRegistry endpointRegistry;
     /**
-     * 仅由 Decode 循环线程使用，每轮重置为已注册 Decode 端点数，成功发布一条请求扣减一次。
-     * waiting 与 reserved 共用额度，容量阻塞、取消和失败不扣减。
+     * 仅由 Decode 循环线程使用，记录本轮已成功发布的请求数。
+     * waiting 与 reserved 共用计数，容量阻塞、取消和失败不计入。
      */
-    private int scanQuota;
+    private int publishedThisRound;
 
     private final DecodeQueue decodeQueue;
     private final LoopSignal loopSignal;
@@ -191,11 +192,16 @@ public final class DecodeQueueLoop {
      * 处理一轮，返回这一轮有没有请求发布、换了状态或离开队列。
      */
     boolean runOnce() {
-        scanQuota = endpointRegistry.getEndpointCount(RoleType.DECODE);
+        publishedThisRound = 0;
         boolean moved = checkPublished();
         moved |= dispatchReserved();
         moved |= reserveWaiting();
         return moved;
+    }
+
+    private boolean canPublishMore() {
+        return publishedThisRound < Math.max(MIN_PUBLICATIONS_PER_ROUND,
+                endpointRegistry.getEndpointCount(RoleType.DECODE));
     }
 
     /**
@@ -269,7 +275,7 @@ public final class DecodeQueueLoop {
         Set<DecodeEndpoint> fullEndpoints = Collections.newSetFromMap(new IdentityHashMap<>());
         boolean moved = false;
         Iterator<Request> iterator = decodeQueue.reservedIterator();
-        while (iterator.hasNext() && scanQuota > 0) {
+        while (iterator.hasNext() && canPublishMore()) {
             Request request = iterator.next();
             if (request.stage().isEnded()) {
                 releaseNow(request);
@@ -379,7 +385,7 @@ public final class DecodeQueueLoop {
         decodeQueue.removeReserved(request);
         if (request.publish(Stage.DECODE_RESERVED,
                 List.of(request.prefillChoice().serverStatus(), choice.serverStatus()))) {
-            scanQuota--;
+            publishedThisRound++;
             cleanup.releasePublished(request);
             decodeQueue.addPublished(request);
             for (DecodeEndpoint.DecodeRequestView victim : choice.preemptedRequests()) {
@@ -453,7 +459,7 @@ public final class DecodeQueueLoop {
         Set<String> blockedGroups = new HashSet<>();
         boolean moved = false;
         Iterator<Request> iterator = decodeQueue.waitingIterator();
-        while (iterator.hasNext() && scanQuota > 0) {
+        while (iterator.hasNext() && canPublishMore()) {
             Request request = iterator.next();
             if (request.stage() != Stage.DECODE_WAITING) {
                 decodeQueue.removeWaiting(request);
@@ -665,7 +671,7 @@ public final class DecodeQueueLoop {
             }
             if (request.publish(Stage.DECODE_WAITING,
                     List.of(request.prefillChoice().serverStatus(), choice.serverStatus()))) {
-                scanQuota--;
+                publishedThisRound++;
                 cleanup.releasePublished(request);
                 decodeQueue.addPublished(request);
             } else {

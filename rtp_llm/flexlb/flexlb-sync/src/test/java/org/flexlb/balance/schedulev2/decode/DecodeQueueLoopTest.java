@@ -152,33 +152,68 @@ class DecodeQueueLoopTest {
     }
 
     @Test
-    void publicationBudgetTracksDecodeCountEachRound() {
-        config.getRouter().getRoles().getDecode().getAvailability().setMaxEngineRequests(20L);
-        for (int i = 0; i < 6; i++) {
+    void publicationBudgetHasMinimumOfOneHundredAndTracksLargerDecodeCount() {
+        config.getRouter().getRoles().getDecode().getAvailability().setMaxEngineRequests(500L);
+        for (int i = 0; i < 252; i++) {
             addWaiting(Integer.toString(i + 1));
         }
-        when(endpointRegistry.getEndpointCount(RoleType.DECODE)).thenReturn(3);
+        when(endpointRegistry.getEndpointCount(RoleType.DECODE)).thenReturn(1);
         assertTrue(loop.runOnce());
-        assertEquals(3, decodeQueue.waitingCount());
-        when(endpointRegistry.getEndpointCount(RoleType.DECODE)).thenReturn(2);
+        assertEquals(152, decodeQueue.waitingCount());
+        assertEquals(100, decodeQueue.publishedCount());
+        when(endpointRegistry.getEndpointCount(RoleType.DECODE)).thenReturn(150);
         assertTrue(loop.runOnce());
+        assertEquals(2, decodeQueue.waitingCount());
+        assertEquals(250, decodeQueue.publishedCount());
+    }
+
+    @Test
+    void publicationBudgetIncreasesWhenDecodeExpandsDuringRound() {
+        config.getRouter().getRoles().getDecode().getAvailability().setMaxEngineRequests(500L);
+        AtomicInteger decodeCount = new AtomicInteger(1);
+        when(endpointRegistry.getEndpointCount(RoleType.DECODE)).thenAnswer(call -> decodeCount.get());
+        for (int i = 1; i <= 151; i++) {
+            Request request = addWaiting(Integer.toString(i));
+            if (i == 100) {
+                request.future().thenRun(() -> decodeCount.set(150));
+            }
+        }
+        assertTrue(loop.runOnce());
+        assertEquals(150, decodeQueue.publishedCount());
         assertEquals(1, decodeQueue.waitingCount());
-        when(endpointRegistry.getEndpointCount(RoleType.DECODE)).thenReturn(0);
-        assertFalse(loop.runOnce());
-        assertEquals(1, decodeQueue.waitingCount());
+    }
+
+    @Test
+    void publicationBudgetDecreasesWhenDecodeShrinksDuringRound() {
+        config.getRouter().getRoles().getDecode().getAvailability().setMaxEngineRequests(500L);
+        AtomicInteger decodeCount = new AtomicInteger(150);
+        when(endpointRegistry.getEndpointCount(RoleType.DECODE)).thenAnswer(call -> decodeCount.get());
+        for (int i = 1; i <= 151; i++) {
+            Request request = addWaiting(Integer.toString(i));
+            if (i == 50) {
+                request.future().thenRun(() -> decodeCount.set(1));
+            }
+        }
+        assertTrue(loop.runOnce());
+        assertEquals(100, decodeQueue.publishedCount());
+        assertEquals(51, decodeQueue.waitingCount());
     }
 
     @Test
     void reservedAndWaitingSharePublicationBudget() {
         when(endpointRegistry.getEndpointCount(RoleType.DECODE)).thenReturn(1);
-        config.getRouter().getRoles().getDecode().getAvailability().setMaxEngineRequests(20L);
+        config.getRouter().getRoles().getDecode().getAvailability().setMaxEngineRequests(200L);
         Request reserved = addReserved("1");
-        Request waiting = addWaiting("2");
+        for (int i = 2; i <= 101; i++) {
+            addWaiting(Integer.toString(i));
+        }
         assertTrue(loop.runOnce());
         assertEquals(Stage.PUBLISHED, reserved.stage());
-        assertEquals(Stage.DECODE_WAITING, waiting.stage());
+        assertEquals(100, decodeQueue.publishedCount());
+        assertEquals(1, decodeQueue.waitingCount());
         assertTrue(loop.runOnce());
-        assertEquals(Stage.PUBLISHED, waiting.stage());
+        assertEquals(101, decodeQueue.publishedCount());
+        assertEquals(0, decodeQueue.waitingCount());
     }
 
     @Test
@@ -187,11 +222,12 @@ class DecodeQueueLoopTest {
         doReturn(PlacementResult.blocked(RoleType.DECODE)).when(selector).select(any(), any(), any());
         doAnswer(call -> SelectedRole.decode(emptyDecode.tryHold(), emptyDecodeStatus())).when(emptyDecodeFinder)
                 .find(any(), any());
-        Request first = addWaiting("1");
-        Request second = addWaiting("2");
+        for (int i = 1; i <= 101; i++) {
+            addWaiting(Integer.toString(i));
+        }
         assertTrue(loop.runOnce());
-        assertEquals(Stage.PUBLISHED, first.stage());
-        assertEquals(Stage.DECODE_WAITING, second.stage());
+        assertEquals(100, decodeQueue.publishedCount());
+        assertEquals(1, decodeQueue.waitingCount());
     }
 
     @Test
