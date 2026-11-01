@@ -144,11 +144,7 @@ class RequestSchedulerModeTest {
                                                     org.mockito.Mockito.mock(
                                                             org.flexlb.service
                                                                     .RecentCacheKeyTraceReporter
-                                                                    .class)),
-                                    directConfig,
-                                    SchedulingTestConfig.capacity(directConfig),
-                                    org.mockito.Mockito.mock(
-                                            org.flexlb.service.RecentCacheKeyTraceReporter.class))
+                                                                    .class)))
                             .submit(laterDirect);
             assertSame(future, laterDirect.data().getFuture());
             assertEquals(

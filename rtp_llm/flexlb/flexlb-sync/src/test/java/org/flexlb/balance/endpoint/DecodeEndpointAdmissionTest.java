@@ -2,8 +2,8 @@ package org.flexlb.balance.endpoint;
 
 import org.flexlb.balance.endpoint.DecodeResources.CapacityRelease;
 import org.flexlb.balance.endpoint.DecodeResources.ReservationReleaseResult;
-import org.flexlb.balance.scheduler.RequestLifecycle;
 import org.flexlb.balance.scheduler.PlacementAvailability;
+import org.flexlb.balance.scheduler.RequestLifecycle;
 import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerStatusResponse;
@@ -562,8 +562,7 @@ class DecodeEndpointAdmissionTest {
         assertEquals(DecodeResources.EngineDispatchPermitAcquireStatus.ACQUIRED, first.status());
         var blocked = endpoint.acquireDispatchPermit(reservations.get(32L), capacity);
         assertEquals(
-                DecodeResources.EngineDispatchPermitAcquireStatus.CAPACITY_FULL,
-                blocked.status());
+                DecodeResources.EngineDispatchPermitAcquireStatus.CAPACITY_FULL, blocked.status());
         assertTrue(first.handle().release());
 
         var retry = endpoint.acquireDispatchPermit(reservations.get(32L), capacity);

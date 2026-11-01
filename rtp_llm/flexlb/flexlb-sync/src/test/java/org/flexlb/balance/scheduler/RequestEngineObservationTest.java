@@ -15,6 +15,7 @@ import static org.flexlb.balance.scheduler.ContextResult.Update;
 import static org.flexlb.balance.scheduler.ContextResult.UpdateKind;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertNull;
@@ -75,6 +76,8 @@ class RequestEngineObservationTest {
                                         1200L))
                         .after();
         assertNotSame(first, later);
+        assertSame(first.facts(), later.facts(), "activity alone must preserve control facts");
+        assertSame(first.deadlines(), later.deadlines(), "existing timer wake-up remains valid");
         var laterDuplicate =
                 context.recordEngineEvidence(
                         new EngineEvidence(
@@ -121,11 +124,36 @@ class RequestEngineObservationTest {
                                 "first cancellation"));
         assertNull(first.cancellation());
         assertNull(later.cancellation());
-        assertNotNull(cancelled.after().cancellation());
-        assertEquals("first cancellation", cancelled.after().cancellation().detail());
+        assertTrue(cancelled);
+        assertNotNull(context.snapshot().cancellation());
+        assertEquals("first cancellation", context.snapshot().cancellation().detail());
         assertEquals(1100L, first.lastWorkerAtMs());
         assertSame(fixture.delivery(), first.delivery().identity());
         assertNull(first.outcome());
+    }
+
+    @Test
+    void equalResponseValuesCannotReplaceTheSelectedResponseIdentity() {
+        var context = RequestCleanupPassTest.endingContext(7504L);
+        var selected =
+                new ContextResult.ResponseCandidate(
+                        context,
+                        ContextResult.ResponseKind.TERMINAL,
+                        context.snapshot().outcome(),
+                        1002L);
+        var equalCandidate =
+                new ContextResult.ResponseCandidate(
+                        context, selected.kind(), selected.result(), selected.nowMs());
+        assertEquals(selected, equalCandidate);
+        assertSame(selected, RequestCleanupPassTest.granted(context.selectResponse(selected)));
+        var committed = context.snapshot();
+        var rejected =
+                assertInstanceOf(
+                        ContextResult.Rejected.class, context.selectResponse(equalCandidate));
+        assertEquals(ContextResult.Rejection.ALREADY_SELECTED, rejected.reason());
+        assertSame(selected, committed.selectedResponse());
+        assertSame(committed, context.snapshot());
+        assertSame(selected, RequestCleanupPassTest.granted(context.selectResponse(selected)));
     }
 
     private static void verifyAtomicObservation(RoleType role) throws Exception {

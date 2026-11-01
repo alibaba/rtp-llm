@@ -1,18 +1,15 @@
 package org.flexlb.balance.scheduler;
 
-import org.flexlb.balance.scheduler.RequestLifecycle.Publication;
-
 import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.delivery.CapacityBoundary;
 import org.flexlb.balance.endpoint.DecodeResources;
 import org.flexlb.balance.endpoint.PrefillState;
 import org.flexlb.balance.prediction.PrefillPredictionBoundary;
 import org.flexlb.balance.projection.WorkSnapshot;
-import org.flexlb.config.FlexlbConfig;
+import org.flexlb.balance.scheduler.RequestLifecycle.Publication;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.route.RoleType;
-import org.flexlb.service.RecentCacheKeyTraceReporter;
 import org.flexlb.util.Failures;
 import org.flexlb.util.Logger;
 
@@ -36,12 +33,7 @@ public final class DirectRequestScheduler extends AbstractRequestScheduler {
 
     private final RequestWorkerSelector router;
 
-    DirectRequestScheduler(
-            RequestWorkerSelector router,
-            RequestLifecycle lifecycle,
-            FlexlbConfig config,
-            DecodeResources.AdmissionCapacity capacity,
-            RecentCacheKeyTraceReporter traceReporter) {
+    DirectRequestScheduler(RequestWorkerSelector router, RequestLifecycle lifecycle) {
         super(lifecycle);
         this.router = Objects.requireNonNull(router, "router");
     }
@@ -243,12 +235,7 @@ public final class DirectRequestScheduler extends AbstractRequestScheduler {
                                     Response.error(StrategyErrorType.DISPATCH_FAILED));
                         }
                         WorkSnapshot precedingWork = handoff.precedingWork().materialize();
-                        var claim =
-                                lifecycle.claimDelivery(
-                                        route,
-                                        DeliveryClaimKind.ROUTE_DECISION,
-                                        0L,
-                                        member.decode());
+                        var claim = member.claimDelivery(DeliveryClaimKind.ROUTE_DECISION, 0L);
                         if (claim == null) {
                             return PlacementResult.closed();
                         }
@@ -323,6 +310,8 @@ public final class DirectRequestScheduler extends AbstractRequestScheduler {
 
         @Override
         public void publish() {
+            var data = route.ctx().data();
+            data.initializeWorkerQueue(data.getEnqueueTime());
             result =
                     route.prefillEp()
                             .reserveUnqueuedRoute(route.prefillPin(), route, route.prefillWorkMs());

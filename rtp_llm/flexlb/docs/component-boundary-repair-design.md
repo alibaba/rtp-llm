@@ -223,12 +223,12 @@ classDiagram
 
 PlacementCapacityWaitQueue 实际只接收 PlacementQueue 提供的 Comparator，不持有整个队列或调用其生命周期。图中的关系表示共享排序契约。
 
-| 契约 | 最终能力 | 明确不负责 |
-| --- | --- | --- |
-| PlacementQueue | add、restore、remove、markReadyForRetry、scan、hasUnscannedRequests、size、priorityCounts、drain、order | Context 终态、用户响应、资源释放 |
-| WorkerQueue | add、remove、contains、peek、size、isEmpty、clear、version、capture、iterator、mayBypass | RPC、取消响应、容量账本 |
-| GroupPlanner | select、dispatchReason、nextCheckAtMs、validateConstraints | 队列修改、资源预留、线程唤醒执行 |
-| QueueExecutionSettings | 不可变限额及全局/Worker/投影排序规则 | 按枚举在业务路径里构造实现 |
+| 契约                   | 最终能力                                                                                                | 明确不负责                       |
+| ---------------------- | ------------------------------------------------------------------------------------------------------- | -------------------------------- |
+| PlacementQueue         | add、restore、remove、markReadyForRetry、scan、hasUnscannedRequests、size、priorityCounts、drain、order | Context 终态、用户响应、资源释放 |
+| WorkerQueue            | add、remove、contains、peek、size、isEmpty、clear、version、capture、iterator、mayBypass                | RPC、取消响应、容量账本          |
+| GroupPlanner           | select、dispatchReason、nextCheckAtMs、validateConstraints                                              | 队列修改、资源预留、线程唤醒执行 |
+| QueueExecutionSettings | 不可变限额及全局/Worker/投影排序规则                                                                    | 按枚举在业务路径里构造实现       |
 
 落地方式：
 
@@ -271,18 +271,18 @@ classDiagram
 
 ## 类的增删与修改
 
-| 项目 | 处理 |
-| --- | --- |
-| PlacementQueue、WorkerQueue、VitSelectionStrategy | 新增 3 个顶层接口 |
-| GroupPlanner | 原类型改为接口，值协议保留；不新增并行的旧入口 |
-| BuiltinGroupPlanner | 新增 1 个默认实现类型，接收原 enum 算法 |
-| ExecutorStats | 从 DeliveryMetricsReporter 的嵌套接口移到 common.metric；移除旧声明 |
-| CapacityReader、EndpointStats | 窄接口嵌套在所属现有组件；不新增顶层管理类 |
-| OrderedRequestQueue、PrefillActiveIndex、VitWorkerSelector | 保留实现，直接实现对应接口 |
-| RequestWorkerSelector | 删除 BLOCKED 容量重解释与多节点容量错误汇总；保留读快照、精确 pin、路由交接 |
-| DecodeSelector | 返回完整选择/容量拒绝结果；classifyCapacityFailure 变为内部实现 |
-| PlacementConfiguration、QueueExecutionSettings、PrefillState、PrefillQueueRunner、QueueSnapshot、RequestTimeEstimation | 接入统一装配/队列/组批契约，移除具体实现选择分支 |
-| EngineHealthReporter、DeliveryMetricsReporter、GrpcReporter、FlexMonitor 及其实现、FlexlbGrpcServer | 收拢统计源采集与后端绑定，移除业务类直接注册后端的代码 |
+| 项目                                                                                                                   | 处理                                                                        |
+| ---------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------- |
+| PlacementQueue、WorkerQueue、VitSelectionStrategy                                                                      | 新增 3 个顶层接口                                                           |
+| GroupPlanner                                                                                                           | 原类型改为接口，值协议保留；不新增并行的旧入口                              |
+| BuiltinGroupPlanner                                                                                                    | 新增 1 个默认实现类型，接收原 enum 算法                                     |
+| ExecutorStats                                                                                                          | 从 DeliveryMetricsReporter 的嵌套接口移到 common.metric；移除旧声明         |
+| CapacityReader、EndpointStats                                                                                          | 窄接口嵌套在所属现有组件；不新增顶层管理类                                  |
+| OrderedRequestQueue、PrefillActiveIndex、VitWorkerSelector                                                             | 保留实现，直接实现对应接口                                                  |
+| RequestWorkerSelector                                                                                                  | 删除 BLOCKED 容量重解释与多节点容量错误汇总；保留读快照、精确 pin、路由交接 |
+| DecodeSelector                                                                                                         | 返回完整选择/容量拒绝结果；classifyCapacityFailure 变为内部实现             |
+| PlacementConfiguration、QueueExecutionSettings、PrefillState、PrefillQueueRunner、QueueSnapshot、RequestTimeEstimation | 接入统一装配/队列/组批契约，移除具体实现选择分支                            |
+| EngineHealthReporter、DeliveryMetricsReporter、GrpcReporter、FlexMonitor 及其实现、FlexlbGrpcServer                    | 收拢统计源采集与后端绑定，移除业务类直接注册后端的代码                      |
 
 新增文件主要是接口及原算法的默认实现；不能把搬移算成减量。实际净代码量在实现后统计，核心类显式方法不超过 30，变更方法不超过 100 行。
 
@@ -297,3 +297,12 @@ classDiagram
 - 最终运行完整 UT、Sync/API perf 和 750P/750D 对照，核对 allocation、CPU、吞吐与 P99。接口调用是否影响内联必须实测，不能事先保证零成本。
 
 当前旧结果仍为未验收：API 14/16，选点 750/BATCH CPU 对原基线 +0.54%。实施后必须在相同口径下通过零回退门禁，不能把失败的当前版本当作放宽后的唯一基线。
+
+## RequestLifecycle 职责收敛（2026-11-01）
+
+- Lifecycle 保留准入、取消、超时、投递/抢占与终态之间的状态裁决，以及请求结算流程。实际发送/停止已由 Dispatcher 执行，资源操作已通过 Endpoint 的精确句柄执行，不把这些状态裁决重复放入组件。
+- Lifecycle 不再保存 QUEUE/DIRECT 模式或 Worker 队列执行依赖。QueuedRequestScheduler 显式接收已有的队列执行依赖；更换调度器不要求装配默认队列设施。
+- Worker 排队时间和序号在实际入队入口初始化；首次信息在移除、恢复和重新投递时保持不变。DIRECT 的准入入口保留原有时间语义。Queue 接口不增加取消、超时和资源结算职责。
+- RPC CancelReply 的解释归 Dispatcher；Lifecycle 只接收已解释的事实。请求状态与抢占的账本交接保持原来的锁顺序和精确身份检查。
+- 响应构造、发布及提交失败后的补救归现有 ResponsePublication；删除 CloseTask 包装对象。Lifecycle 继续决定响应和终态，Reporter 继续只消费统计值。
+- 契约测试同时覆盖自定义队列、策略、调度器和抢占替换；架构测试禁止 Lifecycle 引用具体队列/策略及解释传输回执，禁止队列与调度器绑定具体选择策略或指标后端。本轮不新增生产类型、线程池、锁或配置。

@@ -1,8 +1,20 @@
 package org.flexlb.balance.eviction;
 
-import org.flexlb.balance.endpoint.DecodeResources.*;
+import org.flexlb.balance.endpoint.DecodeResources.CapacityRelease;
+import org.flexlb.balance.endpoint.DecodeResources.CapacityUsage;
+import org.flexlb.balance.endpoint.DecodeResources.DecodeRequestView;
+import org.flexlb.balance.endpoint.DecodeResources.DecodeRoutingView;
+import org.flexlb.balance.endpoint.DecodeResources.ReservationHandle;
+import org.flexlb.balance.endpoint.DecodeResources.ResourceSnapshot;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
-import org.flexlb.balance.scheduler.*;
+import org.flexlb.balance.scheduler.DeliveryDispatcher;
+import org.flexlb.balance.scheduler.PlacementConfiguration;
+import org.flexlb.balance.scheduler.RequestContext;
+import org.flexlb.balance.scheduler.RequestFuture;
+import org.flexlb.balance.scheduler.RequestLifecycle;
+import org.flexlb.balance.scheduler.RequestScheduler;
+import org.flexlb.balance.scheduler.SchedulerTestSupport;
+import org.flexlb.balance.scheduler.SchedulingTestConfig;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.PreemptionConfig;
 import org.flexlb.config.VictimStage;
@@ -21,9 +33,19 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 
-import static org.junit.jupiter.api.Assertions.*;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.Mockito.*;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.spy;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
+import static org.mockito.Mockito.when;
 
 /** Independent implementations exercise the public extension points and executor authority. */
 class CustomDecodePreemptionContractTest {

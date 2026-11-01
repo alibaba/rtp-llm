@@ -1,8 +1,8 @@
 package org.flexlb.balance.scheduler;
 
-import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.DecodeResources;
+import org.flexlb.dao.loadbalance.Response;
 
 import java.util.Map;
 import java.util.Objects;

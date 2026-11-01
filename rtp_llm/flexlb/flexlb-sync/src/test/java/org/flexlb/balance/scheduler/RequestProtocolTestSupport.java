@@ -291,11 +291,8 @@ final class RequestProtocolTestSupport {
             RequestContext context,
             CancelReason reason,
             String detail) {
-        var claim =
-                context.requestCancel(
-                        new Cancellation(
-                                0L, reason, false, System.currentTimeMillis(), null, detail));
-        return claim.kind() == ContextResult.UpdateKind.APPLIED;
+        return context.requestCancel(
+                new Cancellation(0L, reason, false, System.currentTimeMillis(), null, detail));
     }
 
     /**
@@ -579,7 +576,6 @@ final class RequestProtocolTestSupport {
                                 StrategyErrorType.DISPATCH_FAILED,
                                 detail),
                         System.currentTimeMillis())
-                .after()
                 .outcome();
     }
 

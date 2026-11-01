@@ -242,6 +242,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
         checkArgument(
                 queueDependencies == dependencies && queueSettings.equals(settings),
                 "queue generation is already bound to different runtime facilities or settings");
+        exactRoute.ctx().data().initializeWorkerQueue(System.currentTimeMillis());
         return queueRunner.offer(exactRoute);
     }
 

@@ -1,7 +1,5 @@
 package org.flexlb.balance.scheduler;
 
-import org.springframework.test.util.ReflectionTestUtils;
-
 import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.DecodeResources;
@@ -30,6 +28,7 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.EnumSource;
 import org.junit.jupiter.params.provider.ValueSource;
+import org.springframework.test.util.ReflectionTestUtils;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -107,12 +106,7 @@ class RequestWorkerSelectorTest {
                                                 org.mockito.Mockito.mock(
                                                         org.flexlb.service
                                                                 .RecentCacheKeyTraceReporter
-                                                                .class)),
-                                        config,
-                                        SchedulingTestConfig.capacity(config),
-                                        org.mockito.Mockito.mock(
-                                                org.flexlb.service.RecentCacheKeyTraceReporter
-                                                        .class))
+                                                                .class)))
                                 .defaultAnswer(
                                         invocation -> {
                                             if (AbstractRequestScheduler.class.isAssignableFrom(
@@ -851,12 +845,10 @@ class RequestWorkerSelectorTest {
                                                                         .RecentCacheKeyTraceReporter
                                                                         .class)),
                                         new PlacementAvailability(),
-                                        SchedulingTestConfig.capacity(config),
-                                        org.mockito.Mockito.mock(
-                                                org.flexlb.service.RecentCacheKeyTraceReporter
-                                                        .class),
                                         new OrderedRequestQueue(config.isPriorityOrdering()),
-                                        org.flexlb.balance.planner.BuiltinGroupPlanner.from(config))
+                                        org.flexlb.balance.planner.BuiltinGroupPlanner.from(config),
+                                        SchedulerTestSupport.queueDependencies(
+                                                SchedulerTestSupport.runtime(requests)))
                                 .defaultAnswer(
                                         invocation ->
                                                 AbstractRequestScheduler.class.isAssignableFrom(

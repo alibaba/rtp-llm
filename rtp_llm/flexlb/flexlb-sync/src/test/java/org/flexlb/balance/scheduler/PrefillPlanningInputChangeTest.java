@@ -216,10 +216,7 @@ class PrefillPlanningInputChangeTest {
 
     private static PrefillEndpoint endpoint(FlexlbConfig config, WorkerStatus status) {
         return EndpointTestSupport.unstartedPrefill(
-                config,
-                status,
-                SchedulerTestSupport.dispatcher(),
-                mock(RequestLifecycle.class));
+                config, status, SchedulerTestSupport.dispatcher(), mock(RequestLifecycle.class));
     }
 
     private static WorkerStatusResponse response(

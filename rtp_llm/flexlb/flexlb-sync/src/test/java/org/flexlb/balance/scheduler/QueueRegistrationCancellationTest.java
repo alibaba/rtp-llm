@@ -280,11 +280,9 @@ class QueueRegistrationCancellationTest {
                                     org.mockito.Mockito.mock(
                                             org.flexlb.service.RecentCacheKeyTraceReporter.class)),
                             new PlacementAvailability(),
-                            SchedulingTestConfig.capacity(config),
-                            org.mockito.Mockito.mock(
-                                    org.flexlb.service.RecentCacheKeyTraceReporter.class),
                             placementQueue,
-                            org.flexlb.balance.planner.BuiltinGroupPlanner.from(config));
+                            org.flexlb.balance.planner.BuiltinGroupPlanner.from(config),
+                            runtime.queueDependencies);
             runtime.registerScheduler(queue);
             if (start) {
                 queue.start();

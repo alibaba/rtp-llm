@@ -1,11 +1,10 @@
 package org.flexlb.balance.endpoint;
 
-import org.flexlb.balance.scheduler.RequestLifecycle;
 import org.flexlb.balance.delivery.CapacityBoundary;
 import org.flexlb.balance.delivery.DeliveryResult;
-import org.flexlb.balance.scheduler.RequestLifecycle;
 import org.flexlb.balance.scheduler.DeliveryClaim;
 import org.flexlb.balance.scheduler.DeliveryDispatcher;
+import org.flexlb.balance.scheduler.RequestLifecycle;
 import org.flexlb.balance.scheduler.RequestRoute;
 import org.flexlb.cache.service.CacheAwareService;
 import org.flexlb.dao.master.WorkerStatus;
@@ -771,8 +770,7 @@ public final class EndpointTestSupport {
             org.mockito.Mockito.mock(DeliveryMetricsReporter.class);
 
     static class TestRequestRuntime {
-        private final RequestLifecycle requests =
-                org.mockito.Mockito.mock(RequestLifecycle.class);
+        private final RequestLifecycle requests = org.mockito.Mockito.mock(RequestLifecycle.class);
         private final RequestLifecycle events = requests;
         private final List<PrefillRetirement> prefillRetirements = new CopyOnWriteArrayList<>();
 

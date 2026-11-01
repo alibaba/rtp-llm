@@ -20,8 +20,8 @@ import org.junit.jupiter.params.provider.EnumSource;
 
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.ExecutorService;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
@@ -549,15 +549,14 @@ class RequestCompletionPublicationRaceTest {
                     .submit(() -> blockedFuture.completeOwned(new Response()));
             try {
                 assertTrue(entered.await(2, TimeUnit.SECONDS));
-                org.springframework.test.util.ReflectionTestUtils.invokeMethod(
-                        fixture.scheduler(),
-                        "publishSelected",
-                        fixture.publication(),
-                        fixture.candidate(),
-                        RequestFuture.Completion.RESPONSE,
-                        fixture.response(),
-                        null,
-                        false);
+                fixture.publication()
+                        .publish(
+                                fixture.candidate(),
+                                RequestFuture.Completion.RESPONSE,
+                                fixture.response(),
+                                null,
+                                false,
+                                fixture.scheduler().deliveryReporter);
                 assertNull(
                         fixture.requestContext().snapshot().selectedResponse(),
                         "queued ACK must remain unselected");
@@ -607,6 +606,7 @@ class RequestCompletionPublicationRaceTest {
                         fixture.requestContext().data().getFuture().get(2, TimeUnit.SECONDS));
             } finally {
                 resume.countDown();
+                fixture.publication().close();
                 completions.close();
                 assertTrue(
                         ((java.util.Set<?>)

@@ -11,9 +11,19 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.concurrent.locks.ReentrantLock;
 
-import static org.flexlb.balance.endpoint.PrefillState.QueueChange.*;
-import static org.junit.jupiter.api.Assertions.*;
-import static org.mockito.Mockito.*;
+import static org.flexlb.balance.endpoint.PrefillState.QueueChange.ACK_STOP;
+import static org.flexlb.balance.endpoint.PrefillState.QueueChange.ENQUEUE;
+import static org.flexlb.balance.endpoint.PrefillState.QueueChange.REMOVE;
+import static org.flexlb.balance.endpoint.PrefillState.QueueChange.REMOVE_UNEXPIRED;
+import static org.flexlb.balance.endpoint.PrefillState.QueueChange.STOP;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 class WorkerQueueContractTest {
     @ParameterizedTest

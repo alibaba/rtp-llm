@@ -3,8 +3,10 @@ package org.flexlb.balance.eviction;
 import org.flexlb.balance.endpoint.DecodeResources;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.scheduler.RequestContext;
+
 import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
+
 import static com.google.common.base.Preconditions.checkArgument;
 
 /**

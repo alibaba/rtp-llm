@@ -22,18 +22,15 @@ final class BatchCodec {
     static EngineRpcService.EnqueueBatchRequestPB prepare(
             long batchId, List<DeliveryClaim> claims) {
         try {
+            var first = claims.getFirst();
+            var config = first.owner().data().getConfig();
             var builder =
                     EngineRpcService.EnqueueBatchRequestPB.newBuilder()
                             .setBatchId(batchId)
                             .setFetchAttachTimeoutMs(
-                                    claims.getFirst()
-                                            .owner()
-                                            .data()
-                                            .getConfig()
-                                            .getDispatcher()
-                                            .getFetchAttachTimeoutMs());
+                                    config.getDispatcher().getFetchAttachTimeoutMs());
             var addresses = new RoleAddresses();
-            long firstRank = claims.getFirst().item().prefillDpRank();
+            long firstRank = first.item().prefillDpRank();
             var firstSlot =
                     EngineRpcService.EnqueueBatchDpSlotPB.newBuilder().setDpRank((int) firstRank);
             Map<Long, EngineRpcService.EnqueueBatchDpSlotPB.Builder> slots = null;
@@ -197,7 +194,8 @@ final class BatchCodec {
 
     private static EngineRpcService.GenerateInputPB input(
             RequestRoute item, RoleAddresses addresses) throws Exception {
-        var prepared = item.ctx().data().getGenerateInput();
+        var data = item.ctx().data();
+        var prepared = data.getGenerateInput();
         if (prepared == null) {
             throw new IllegalArgumentException(
                     "generateInputPb is missing for request " + item.requestId());
@@ -206,9 +204,9 @@ final class BatchCodec {
         checkArgument(
                 input.getRequestId() == item.requestId(),
                 "request_id mismatch between schedule request and GenerateInputPB");
-        if (FlexlbTrace.isEnabled() && item.ctx().data().getTraceContext() != null) {
+        if (FlexlbTrace.isEnabled() && data.getTraceContext() != null) {
             try {
-                var carrier = FlexlbTrace.inject(item.ctx().data().getTraceContext());
+                var carrier = FlexlbTrace.inject(data.getTraceContext());
                 String parent = carrier.get("traceparent");
                 if (parent != null && !parent.isEmpty()) {
                     input.getRequestInfoBuilder()

@@ -73,7 +73,7 @@ class RequestCancellationFailureOrderingTest {
                         false);
         var end = context.beginClose(failure, 1003L);
         if (cancelFirst) {
-            assertNotNull(end.after().placement());
+            assertNotNull(end.placement());
             assertEquals(Phase.OPEN, context.snapshot().phase());
             assertNull(context.snapshot().outcome());
             assertEquals(EndKind.FRONTEND, context.snapshot().placement().pendingTerminal().kind());
@@ -119,7 +119,7 @@ class RequestCancellationFailureOrderingTest {
                         false);
         var end = context.beginClose(failure, 1003L);
         if (cancelFirst) {
-            assertNotNull(end.after().preemption());
+            assertNotNull(end.preemption());
             assertEquals(Phase.ENDING, context.snapshot().phase());
             assertFirstCause(context);
             assertEquals(

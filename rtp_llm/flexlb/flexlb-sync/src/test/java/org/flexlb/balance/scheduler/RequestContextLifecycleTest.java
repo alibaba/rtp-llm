@@ -1408,8 +1408,8 @@ class RequestContextLifecycleTest {
                                     false,
                                     false),
                             System.currentTimeMillis());
-            assertNull(ending.after().outcome());
-            assertNotNull(ending.after().placement());
+            assertNull(ending.outcome());
+            assertNotNull(ending.placement());
         }
         admission.terminate(Response.error(StrategyErrorType.RESOURCE_EXHAUSTED));
         assertEquals(

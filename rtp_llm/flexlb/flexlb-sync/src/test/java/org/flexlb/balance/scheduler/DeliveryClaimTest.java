@@ -732,7 +732,7 @@ class DeliveryClaimTest {
             try {
                 f.owner.onPreemption(
                         attempt,
-                        RequestLifecycle.PreemptionEvent.receipt(
+                        DeliveryDispatcher.preemptionReply(
                                 attempt.reservation(),
                                 f.decode,
                                 EngineGrpcClient.CancelReply.REQUEST_FENCED,
@@ -2587,7 +2587,7 @@ class DeliveryClaimTest {
             assertSame(newAttempt, f.context.snapshot().preemption().identity());
 
             var event =
-                    RequestLifecycle.PreemptionEvent.receipt(
+                    DeliveryDispatcher.preemptionReply(
                             oldAttempt.reservation(),
                             f.decode,
                             EngineGrpcClient.CancelReply.REQUEST_CLEANED,
@@ -3048,7 +3048,7 @@ class DeliveryClaimTest {
                     decode, DecodeResources.DecodeRequestStatus.terminal(reservation, 0L));
             var closing =
                     context.beginClose(context.snapshot().pendingEnd(), System.currentTimeMillis());
-            assertNotNull(closing.after().outcome());
+            assertNotNull(closing.outcome());
         }
 
         void applyDecodeTerminal() {

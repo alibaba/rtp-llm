@@ -7,14 +7,10 @@ import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.preemption.CancelTarget;
 import org.flexlb.balance.preemption.PreemptionCancelPhase;
 import org.flexlb.balance.preemption.VictimResolution;
-import org.flexlb.config.FlexlbConfig;
-import org.flexlb.dao.loadbalance.AdmissionRejectReason;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.route.RoleType;
-import org.flexlb.engine.grpc.EngineGrpcClient.CancelReply;
 import org.flexlb.service.RecentCacheKeyTraceReporter;
-import org.flexlb.service.monitor.DeliveryMetricsReporter;
 import org.flexlb.telemetry.FlexlbTrace;
 import org.flexlb.util.Failures;
 import org.flexlb.util.Logger;
@@ -24,23 +20,19 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
-import java.util.concurrent.TimeoutException;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.TimeoutException;
 
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkState;
 import static org.flexlb.balance.scheduler.ContextResult.Abandonment;
-import static org.flexlb.balance.scheduler.ContextResult.CancelEvidenceKind;
 import static org.flexlb.balance.scheduler.ContextResult.Cancellation;
 import static org.flexlb.balance.scheduler.ContextResult.CancellationFacts;
 import static org.flexlb.balance.scheduler.ContextResult.Claim;
-import static org.flexlb.balance.scheduler.ContextResult.Stale;
 import static org.flexlb.balance.scheduler.ContextResult.CleanupAcknowledgement;
 import static org.flexlb.balance.scheduler.ContextResult.CloseProgress;
 import static org.flexlb.balance.scheduler.ContextResult.DeliveryEvidence;
 import static org.flexlb.balance.scheduler.ContextResult.DeliveryFact;
-import static org.flexlb.balance.scheduler.ContextResult.End;
 import static org.flexlb.balance.scheduler.ContextResult.EndEvidence;
 import static org.flexlb.balance.scheduler.ContextResult.EndKind;
 import static org.flexlb.balance.scheduler.ContextResult.EngineEvidence;
@@ -60,6 +52,7 @@ import static org.flexlb.balance.scheduler.ContextResult.RouteDelivered;
 import static org.flexlb.balance.scheduler.ContextResult.RoutePermit;
 import static org.flexlb.balance.scheduler.ContextResult.SendState;
 import static org.flexlb.balance.scheduler.ContextResult.Snapshot;
+import static org.flexlb.balance.scheduler.ContextResult.Stale;
 import static org.flexlb.balance.scheduler.ContextResult.TransportResult;
 import static org.flexlb.balance.scheduler.ContextResult.Update;
 import static org.flexlb.balance.scheduler.ContextResult.UpdateKind;
@@ -86,7 +79,6 @@ public class RequestLifecycle {
 
     private RequestScheduler owner;
     private Scheduling scheduling;
-    static final AtomicLong WORKER_SEQUENCE = new AtomicLong();
     final RequestRepository requests;
     final RequestTaskPool tasks;
     final ExpirationTimer expirationTimer;
@@ -95,10 +87,8 @@ public class RequestLifecycle {
     final ResponseCompletionExecutor responseCompletions;
     final org.flexlb.service.monitor.DeliveryMetricsReporter deliveryReporter;
     final TaskTimer taskTimer;
-    final PrefillQueueRunner.Dependencies queueDependencies;
 
     final DecodeResources.AdmissionCapacity decodeAdmissionCapacity;
-    private final boolean queued;
     private final RecentCacheKeyTraceReporter cacheTrace;
 
     private final Object admissionLock = new Object();
@@ -182,8 +172,6 @@ public class RequestLifecycle {
             ResponseCompletionExecutor responseCompletions,
             org.flexlb.service.monitor.DeliveryMetricsReporter deliveryReporter,
             TaskTimer taskTimer,
-            DeliveryExecution deliveries,
-            FlexlbConfig config,
             DecodeResources.AdmissionCapacity capacity,
             RecentCacheKeyTraceReporter cacheTrace) {
         this.requests = Objects.requireNonNull(requests);
@@ -194,10 +182,6 @@ public class RequestLifecycle {
         this.responseCompletions = Objects.requireNonNull(responseCompletions);
         this.deliveryReporter = Objects.requireNonNull(deliveryReporter);
         this.taskTimer = Objects.requireNonNull(taskTimer);
-        this.queueDependencies =
-                new PrefillQueueRunner.Dependencies(
-                        deliveries, deliveryReporter, tasks::recordFailure);
-        this.queued = config.isQueue();
         this.decodeAdmissionCapacity = Objects.requireNonNull(capacity);
         this.cacheTrace = Objects.requireNonNull(cacheTrace);
     }
@@ -311,7 +295,7 @@ public class RequestLifecycle {
             if (accepted == null) {
                 return null;
             }
-            Update update;
+            boolean changed;
             synchronized (ctx) {
                 var state = ctx.snapshot();
                 if (state.phase() == Phase.CLOSED) {
@@ -325,7 +309,7 @@ public class RequestLifecycle {
                                 : reason == CancelReason.DEADLINE_EXCEEDED
                                         ? StrategyErrorType.BATCH_SLO_EXPIRED
                                         : StrategyErrorType.REQUEST_CANCELLED;
-                update =
+                changed =
                         ctx.requestCancel(
                                 new Cancellation(
                                         batchId,
@@ -336,12 +320,12 @@ public class RequestLifecycle {
                                         evidence == null
                                                 ? message
                                                 : String.valueOf(evidence.get("cause"))));
-                if (update.kind() == UpdateKind.APPLIED && evidence != null) {
+                if (changed && evidence != null) {
                     ctx.data().setSchedulingDiagnostics(evidence);
                 }
             }
             Throwable failure = null;
-            if (update.kind() == UpdateKind.APPLIED) {
+            if (changed) {
                 failure = Failures.run(null, () -> this.scheduling.remove(ctx));
                 failure = Failures.run(failure, () -> advanceRequest(ctx, ctx.snapshot()));
             }
@@ -561,12 +545,6 @@ public class RequestLifecycle {
             if (!(bound instanceof Granted<RoutePermit>)) {
                 return PlacementResult.Status.CLOSED;
             }
-        }
-        if (ctx.data().getWorkerEnqueueSequence() == 0L) {
-            ctx.data()
-                    .initializeWorkerQueue(
-                            queued ? System.currentTimeMillis() : ctx.data().getEnqueueTime(),
-                            WORKER_SEQUENCE.incrementAndGet());
         }
         Throwable failure = Failures.run(null, publication::publish);
         boolean published = publication.published();
@@ -916,7 +894,9 @@ public class RequestLifecycle {
                     }
                 } else {
                     if (state.preemption() == null || state.preemption().finished()) {
-                        publication = CloseTask.registerPublication(responseCompletions, ctx, true);
+                        publication =
+                                ResponsePublication.reserve(
+                                        responseCompletions, ctx, true, tasks::recordFailure);
                     }
                     var acknowledged =
                             ctx.selectResponse(
@@ -960,10 +940,10 @@ public class RequestLifecycle {
                             tasks::recordFailure,
                             () -> expirationTimer.update(ctx, ctx.snapshot().deadlines())),
                     "delivery deadline installation failed");
-            publishSelected(publication, candidate, RESPONSE, response, null, false);
+            publication.publish(candidate, RESPONSE, response, null, false, deliveryReporter);
             return true;
         } catch (RuntimeException | Error failed) {
-            new CloseTask(ctx, publication, candidate, null).fail(failed);
+            publicationFailed(ctx, publication, candidate, failed);
             throw failed;
         } finally {
             if (publication != null) {
@@ -1006,42 +986,6 @@ public class RequestLifecycle {
                 DecodeResources.ReservationHandle reservation,
                 String detail) {
             this(phase, release, endpoint, reservation, detail, null);
-        }
-
-        static PreemptionEvent receipt(
-                DecodeResources.ReservationHandle reservation,
-                DecodeEndpoint endpoint,
-                CancelReply reply,
-                String detail,
-                DeliveryClaim delivery) {
-            var phase =
-                    switch (reply) {
-                        case ACCEPTED, REQUEST_FENCED -> PreemptionCancelPhase.CANCEL_REQUESTED;
-                        case NOT_FOUND -> PreemptionCancelPhase.NOT_FOUND_STALE;
-                        case FAILED, UNSUPPORTED -> PreemptionCancelPhase.CANCEL_UNKNOWN;
-                        case REQUEST_CLEANED -> null;
-                    };
-            return new PreemptionEvent(
-                    phase,
-                    false,
-                    reply == CancelReply.REQUEST_CLEANED ? endpoint : null,
-                    reply == CancelReply.REQUEST_CLEANED ? reservation : null,
-                    reply == CancelReply.REQUEST_CLEANED ? detail : null,
-                    delivery == null ? null : acknowledgement(delivery, reply));
-        }
-
-        static CleanupAcknowledgement acknowledgement(DeliveryClaim delivery, CancelReply reply) {
-            return new CleanupAcknowledgement(
-                    delivery,
-                    switch (reply) {
-                        case REQUEST_CLEANED -> CancelEvidenceKind.CLEANED;
-                        case REQUEST_FENCED -> CancelEvidenceKind.FENCED;
-                        case ACCEPTED -> CancelEvidenceKind.ACKNOWLEDGED;
-                        case NOT_FOUND -> CancelEvidenceKind.NOT_FOUND;
-                        case UNSUPPORTED -> CancelEvidenceKind.UNSUPPORTED;
-                        case FAILED -> CancelEvidenceKind.UNKNOWN;
-                    },
-                    System.currentTimeMillis());
         }
 
         PreemptionRegistration.Reply progress(boolean applied) {
@@ -1110,7 +1054,7 @@ public class RequestLifecycle {
                                             event.detail(),
                                             false,
                                             true);
-                    var update =
+                    recorded =
                             ctx.completePreemption(
                                     attempt,
                                     new PreemptionReport(
@@ -1122,7 +1066,6 @@ public class RequestLifecycle {
                                             event.release(),
                                             terminal),
                                     System.currentTimeMillis());
-                    recorded = update.kind() == UpdateKind.APPLIED;
                     applied = recorded && (endpoint == null || committed);
                 }
                 // A stale attempt must not discard a current delivery's cleanup proof.
@@ -1225,7 +1168,7 @@ public class RequestLifecycle {
         boolean committed = !capacityChanged || mutation != null && mutation.status().applied();
         boolean recorded;
         synchronized (ctx) {
-            var update =
+            recorded =
                     ctx.completePreemption(
                             attempt,
                             new PreemptionReport(
@@ -1235,7 +1178,6 @@ public class RequestLifecycle {
                                     false,
                                     terminal),
                             System.currentTimeMillis());
-            recorded = update.kind() == UpdateKind.APPLIED;
             if (!committed) {
                 return;
             }
@@ -1289,11 +1231,12 @@ public class RequestLifecycle {
                             && before.selectedResponse() == null
                             && !ctx.data().getFuture().isDone()) {
                         publication =
-                                CloseTask.registerPublication(responseCompletions, ctx, false);
+                                ResponsePublication.reserve(
+                                        responseCompletions, ctx, false, tasks::recordFailure);
                     }
-                    var update = ctx.beginClose(evidence, System.currentTimeMillis());
-                    if (update.after().outcome() != null) {
-                        var outcome = update.after().outcome();
+                    var after = ctx.beginClose(evidence, System.currentTimeMillis());
+                    if (after.outcome() != null) {
+                        var outcome = after.outcome();
                         if (publication != null) {
                             candidate =
                                     new ResponseCandidate(
@@ -1305,27 +1248,36 @@ public class RequestLifecycle {
                                 ctx.selectResponse(candidate);
                             }
                             boolean batched =
-                                    update.after().delivery() != null
-                                            && update.after().delivery().identity().kind()
+                                    after.delivery() != null
+                                            && after.delivery().identity().kind()
                                                     == DeliveryClaimKind.BATCH_ENQUEUE;
-                            response = CloseTask.response(outcome, before.route(), batched);
+                            response =
+                                    ResponsePublication.response(outcome, before.route(), batched);
                         }
                     } else if (publication != null) {
                         publication.close();
                         publication = null;
                     }
                 }
-                var task = new CloseTask(ctx, publication, candidate, response);
                 if (deferred) {
-                    execution.submit(task);
+                    var selectedPublication = publication;
+                    var selectedCandidate = candidate;
+                    var selectedResponse = response;
+                    execution.submit(
+                            () ->
+                                    runClose(
+                                            ctx,
+                                            selectedPublication,
+                                            selectedCandidate,
+                                            selectedResponse));
                     handedOff = true;
                 } else {
                     handedOff = true;
-                    task.run();
+                    runClose(ctx, publication, candidate, response);
                 }
             } catch (RuntimeException | Error failed) {
                 if (!handedOff && (execution == null || !execution.hasTaskOwner())) {
-                    new CloseTask(ctx, publication, candidate, null).fail(failed);
+                    publicationFailed(ctx, publication, candidate, failed);
                     Failures.run(failed, () -> scheduleClose(ctx));
                 }
                 throw failed;
@@ -1340,185 +1292,108 @@ public class RequestLifecycle {
     }
 
     /** Publishes the selected response; physical effects run through the request's close lane. */
-    private final class CloseTask implements Runnable {
-        private final RequestContext ctx;
-        private final ResponsePublication publication;
-        private final ResponseCandidate candidate;
-        private final Response response;
-
-        private CloseTask(
-                RequestContext ctx,
-                ResponsePublication publication,
-                ResponseCandidate candidate,
-                Response response) {
-            this.ctx = ctx;
-            this.publication = publication;
-            this.candidate = candidate;
-            this.response = response;
-        }
-
-        private static ResponsePublication registerPublication(
-                ResponseCompletionExecutor executor, RequestContext ctx, boolean delivery) {
-            var publication =
-                    recover(
-                            ctx.data().getScheduler().tasks::recordFailure,
-                            () -> {
-                                return new ResponsePublication(executor, ctx, delivery);
-                            });
-            if (publication == null) {
-                throw new IllegalStateException("frontend publication is closed");
-            }
-            return publication;
-        }
-
-        private static Response response(End outcome, RequestRoute route, boolean batched) {
-            if (outcome.outcome().phase() == RequestState.Phase.COMPLETED && route != null) {
-                return route.successResponse(batched);
-            }
-            return outcome.errorType() == StrategyErrorType.RESOURCE_EXHAUSTED
-                    ? Response.error(
-                            outcome.errorType(),
-                            AdmissionRejectReason.RESOURCE_EXHAUSTED,
-                            outcome.detail())
-                    : Response.buildErrorResponse(outcome.errorType(), outcome.detail());
-        }
-
-        @Override
-        public void run() {
-            try {
-                Throwable failure = Failures.run(null, () -> scheduleClose(ctx));
-                if (publication != null) {
-                    failure =
-                            Failures.run(
-                                    failure,
-                                    () ->
-                                            publishSelected(
-                                                    publication,
-                                                    candidate,
-                                                    RequestFuture.Completion.RESPONSE,
-                                                    response,
-                                                    null,
-                                                    false));
-                }
-                if (failure != null) {
-                    tasks.recordFailure(failure);
-                }
-                Failures.rethrow(failure, "request close failed");
-            } catch (RuntimeException | Error failed) {
-                fail(failed);
-                throw failed;
-            } finally {
-                if (publication != null) {
-                    publication.close();
-                }
-            }
-        }
-
-        private static Throwable notifyOwners(RequestLifecycle owner, RequestContext ctx) {
-            var deadlines = ctx.snapshot().deadlines();
-            Throwable timerFailure =
-                    owner.expirationTimer.needsUpdate(ctx, deadlines)
-                            ? Failures.run(null, () -> owner.expirationTimer.update(ctx, deadlines))
-                            : null;
-            var state = ctx.snapshot();
-            if (state.phase() != Phase.ENDING) {
-                return timerFailure;
-            }
-            boolean timersDone = !owner.expirationTimer.needsUpdate(ctx, deadlines);
-            Throwable failure = null;
-            var delivery = state.delivery();
-            if (!state.close().notificationsAttempted()
-                    && delivery != null
-                    && (delivery.abandonment() != null || state.cancellation() != null)) {
-                failure = Failures.run(null, () -> owner.dispatcher.stop(delivery.identity()));
-                if (failure != null) {
-                    ctx.completeClose(
-                            new CloseProgress(false, false, false, false, timersDone),
-                            System.currentTimeMillis());
-                    return Failures.append(timerFailure, failure);
-                }
-            }
-            var preemption = state.preemption();
-            if (timersDone
-                    && !state.close().notificationsDone()
-                    && preemption != null
-                    && preemption.finished()) {
+    private void runClose(
+            RequestContext ctx,
+            ResponsePublication publication,
+            ResponseCandidate candidate,
+            Response response) {
+        try {
+            Throwable failure = Failures.run(null, () -> scheduleClose(ctx));
+            if (publication != null) {
                 failure =
                         Failures.run(
-                                null,
+                                failure,
                                 () ->
-                                        owner.signals.resolvePreemption(
-                                                preemption.identity(),
-                                                new VictimResolution(
-                                                        ctx.data().getRequestId(),
-                                                        VictimResolution.Outcome.REQUEST_END)));
+                                        publication.publish(
+                                                candidate,
+                                                RESPONSE,
+                                                response,
+                                                null,
+                                                false,
+                                                deliveryReporter));
             }
-            ctx.completeClose(
-                    new CloseProgress(
-                            true,
-                            false,
-                            false,
-                            failure == null
-                                    && timersDone
-                                    && (preemption == null || preemption.finished()),
-                            timersDone),
-                    System.currentTimeMillis());
-            return Failures.append(timerFailure, failure);
+            if (failure != null) tasks.recordFailure(failure);
+            Failures.rethrow(failure, "request close failed");
+        } catch (RuntimeException | Error failed) {
+            publicationFailed(ctx, publication, candidate, failed);
+            throw failed;
+        } finally {
+            if (publication != null) publication.close();
         }
+    }
 
-        private boolean publishExternal(
-                RequestFuture.Completion completion, Throwable failure, boolean synchronous) {
-            try {
-                Throwable cleanup =
-                        Failures.run(null, () -> RequestLifecycle.this.scheduling.remove(ctx));
-                cleanup = Failures.run(cleanup, () -> closeRequest(ctx, null));
-                if (cleanup != null) {
-                    tasks.recordFailure(cleanup);
-                }
-                return publishSelected(
-                        publication, candidate, completion, response, failure, synchronous);
-            } catch (RuntimeException | Error failed) {
-                publishFallback(failed, completion, response, failure, synchronous);
-                throw failed;
-            } finally {
-                publication.close();
-            }
+    private void publicationFailed(
+            RequestContext ctx,
+            ResponsePublication publication,
+            ResponseCandidate candidate,
+            Throwable failed) {
+        if (ctx.snapshot().phase() == Phase.OPEN) {
+            recover(
+                    tasks::recordFailure,
+                    () -> expirationTimer.update(ctx, ctx.snapshot().deadlines()));
         }
-
-        private void publishFallback(
-                Throwable failed,
-                RequestFuture.Completion completion,
-                Response response,
-                Throwable failure,
-                boolean synchronous) {
-            if (publication == null || publication.hasCompletionOwner() || candidate == null) {
-                return;
-            }
-            Failures.run(
+        if (publication != null) {
+            publication.publishAfterFailure(
                     failed,
-                    () -> {
-                        try (var fallback =
-                                new ResponsePublication(
-                                        responseCompletions, ctx, publication.delivery)) {
-                            publishSelected(
-                                    fallback,
-                                    candidate,
-                                    completion,
-                                    response,
-                                    failure,
-                                    synchronous);
-                        }
-                    });
+                    candidate,
+                    RequestFuture.Completion.FAILURE,
+                    null,
+                    failed,
+                    false,
+                    deliveryReporter);
         }
+    }
 
-        private void fail(Throwable failed) {
-            if (ctx.snapshot().phase() == Phase.OPEN) {
-                recover(
-                        tasks::recordFailure,
-                        () -> expirationTimer.update(ctx, ctx.snapshot().deadlines()));
-            }
-            publishFallback(failed, RequestFuture.Completion.FAILURE, null, failed, false);
+    private Throwable notifyOwners(RequestContext ctx) {
+        var deadlines = ctx.snapshot().deadlines();
+        Throwable timerFailure =
+                expirationTimer.needsUpdate(ctx, deadlines)
+                        ? Failures.run(null, () -> expirationTimer.update(ctx, deadlines))
+                        : null;
+        var state = ctx.snapshot();
+        if (state.phase() != Phase.ENDING) {
+            return timerFailure;
         }
+        boolean timersDone = !expirationTimer.needsUpdate(ctx, deadlines);
+        Throwable failure = null;
+        var delivery = state.delivery();
+        if (!state.close().notificationsAttempted()
+                && delivery != null
+                && (delivery.abandonment() != null || state.cancellation() != null)) {
+            failure = Failures.run(null, () -> dispatcher.stop(delivery.identity()));
+            if (failure != null) {
+                ctx.completeClose(
+                        new CloseProgress(false, false, false, false, timersDone),
+                        System.currentTimeMillis());
+                return Failures.append(timerFailure, failure);
+            }
+        }
+        var preemption = state.preemption();
+        if (timersDone
+                && !state.close().notificationsDone()
+                && preemption != null
+                && preemption.finished()) {
+            failure =
+                    Failures.run(
+                            null,
+                            () ->
+                                    signals.resolvePreemption(
+                                            preemption.identity(),
+                                            new VictimResolution(
+                                                    ctx.data().getRequestId(),
+                                                    VictimResolution.Outcome.REQUEST_END)));
+        }
+        ctx.completeClose(
+                new CloseProgress(
+                        true,
+                        false,
+                        false,
+                        failure == null
+                                && timersDone
+                                && (preemption == null || preemption.finished()),
+                        timersDone),
+                System.currentTimeMillis());
+        return Failures.append(timerFailure, failure);
     }
 
     void scheduleClose(RequestContext ctx) {
@@ -1559,7 +1434,7 @@ public class RequestLifecycle {
     private void finishClose(RequestContext ctx) {
         Throwable failure = null;
         for (int pass = 0; pass < 3 && ctx.snapshot().phase() == Phase.ENDING; pass++) {
-            Throwable problem = CloseTask.notifyOwners(this, ctx);
+            Throwable problem = notifyOwners(ctx);
             var reason = ctx.releaseReason();
             var state = ctx.snapshot();
             if (reason != null) {
@@ -1650,42 +1525,6 @@ public class RequestLifecycle {
                 ctx, RequestFuture.Completion.RESPONSE, response, null, synchronous);
     }
 
-    private boolean publishSelected(
-            ResponsePublication publication,
-            ResponseCandidate candidate,
-            RequestFuture.Completion completion,
-            Response response,
-            Throwable failure,
-            boolean synchronous) {
-        var ctx = publication.owner;
-        var task =
-                (java.util.function.BooleanSupplier)
-                        () -> {
-                            if (publication.delivery && ctx.data().getAckAtMs() > 0L) {
-                                var delivery = ctx.snapshot().delivery();
-                                try {
-                                    deliveryReporter.reportLatency(
-                                            DeliveryMetricsReporter.Latency.DISPATCH_ACK,
-                                            RoleType.PREFILL.name(),
-                                            delivery.identity().item().prefillEp().getIp(),
-                                            Math.max(
-                                                    0L,
-                                                    ctx.data().getAckAtMs()
-                                                            - delivery.startedAtMs()));
-                                } catch (Throwable ignored) {
-                                }
-                            }
-                            var selected = ctx.selectResponse(candidate);
-                            return selected instanceof Granted<ResponseCandidate>
-                                    && publication.complete(completion, response, failure);
-                        };
-        if (synchronous) {
-            return publication.completeNow(task);
-        }
-        publication.submit(task);
-        return true;
-    }
-
     final boolean completeExternal(
             RequestContext ctx,
             RequestFuture.Completion completion,
@@ -1696,91 +1535,93 @@ public class RequestLifecycle {
             throw new IllegalStateException(
                     "Future callbacks require the Context lock to be released");
         }
-        if (ctx.data().getScheduler() != this || !requests.isCurrent(ctx)) {
-            return false;
-        }
+        if (ctx.data().getScheduler() != this || !requests.isCurrent(ctx)) return false;
         try (var accepted = tasks.tryRegisterRequestWork(ctx)) {
-            if (accepted == null) {
-                return false;
-            }
-            ResponsePublication publication;
-            ResponseCandidate candidate;
-            synchronized (ctx) {
-                var before = ctx.snapshot();
-                boolean cancelled = completion == RequestFuture.Completion.CANCELLATION;
-                if (before.phase() != Phase.OPEN
-                        || before.selectedResponse() != null
-                        || ctx.data().getFuture().isDone()
-                        || before.cancellation() != null
-                                && (!cancelled
-                                        || before.cancellation().reason()
-                                                == CancelReason.DEADLINE_EXCEEDED)) {
-                    return false;
-                }
-                boolean success =
-                        completion == RequestFuture.Completion.RESPONSE
-                                && (response == null || response.isSuccess());
-                if (success
-                        || before.delivery() != null
-                        || before.engine().decodeAccepted()
-                        || before.preemption() != null
-                        || before.placement() != null && !cancelled) {
-                    return false;
-                }
-                publication = new ResponsePublication(responseCompletions, ctx, false);
-                try {
+            if (accepted == null) return false;
+            ResponsePublication publication = null;
+            try {
+                ResponseCandidate candidate;
+                synchronized (ctx) {
+                    var before = ctx.snapshot();
+                    boolean cancelled = completion == RequestFuture.Completion.CANCELLATION;
+                    if (before.phase() != Phase.OPEN
+                            || before.selectedResponse() != null
+                            || ctx.data().getFuture().isDone()
+                            || before.cancellation() != null
+                                    && (!cancelled
+                                            || before.cancellation().reason()
+                                                    == CancelReason.DEADLINE_EXCEEDED)) {
+                        return false;
+                    }
+                    boolean success =
+                            completion == RESPONSE && (response == null || response.isSuccess());
+                    if (success
+                            || before.delivery() != null
+                            || before.engine().decodeAccepted()
+                            || before.preemption() != null
+                            || before.placement() != null && !cancelled) {
+                        return false;
+                    }
+                    publication = new ResponsePublication(responseCompletions, ctx, false);
                     if (cancelled) {
-                        String message = CancelReason.CLIENT_CANCELLED.getMessage();
-                        var diagnostics =
-                                this.scheduling.describeWait(
-                                        ctx, CancelReason.CLIENT_CANCELLED, message);
+                        var reason = CancelReason.CLIENT_CANCELLED;
+                        var diagnostics = scheduling.describeWait(ctx, reason, reason.getMessage());
                         if (before.cancellation() == null) {
+                            String cause =
+                                    diagnostics == null
+                                            ? null
+                                            : String.valueOf(diagnostics.get("cause"));
                             var cancel =
                                     ctx.requestCancel(
                                             Cancellation.frontend(
-                                                    System.currentTimeMillis(),
-                                                    diagnostics == null
-                                                            ? null
-                                                            : String.valueOf(
-                                                                    diagnostics.get("cause"))));
-                            if (cancel.kind() != UpdateKind.APPLIED) {
-                                publication.close();
-                                return false;
-                            }
+                                                    System.currentTimeMillis(), cause));
+                            if (!cancel) return false;
                         }
-                        candidate =
-                                new ResponseCandidate(
-                                        ctx,
-                                        ResponseKind.CANCELLATION,
-                                        null,
-                                        System.currentTimeMillis());
                     } else {
                         var end =
                                 ctx.beginClose(
                                         EndEvidence.externalFailure(
                                                 before.route(), response, failure),
                                         System.currentTimeMillis());
-                        if (end.after().outcome() == null) {
-                            publication.close();
-                            return false;
-                        }
-                        candidate =
-                                new ResponseCandidate(
-                                        ctx,
-                                        completion == RequestFuture.Completion.FAILURE
-                                                ? ResponseKind.EXTERNAL_FAILURE
-                                                : ResponseKind.TERMINAL,
-                                        end.after().outcome(),
-                                        System.currentTimeMillis());
+                        if (end.outcome() == null) return false;
                     }
+                    candidate =
+                            new ResponseCandidate(
+                                    ctx,
+                                    cancelled
+                                            ? ResponseKind.CANCELLATION
+                                            : completion == RequestFuture.Completion.FAILURE
+                                                    ? ResponseKind.EXTERNAL_FAILURE
+                                                    : ResponseKind.TERMINAL,
+                                    cancelled ? null : ctx.snapshot().outcome(),
+                                    System.currentTimeMillis());
                     ctx.selectResponse(candidate);
-                } catch (RuntimeException | Error error) {
-                    publication.close();
-                    throw error;
                 }
+                try {
+                    Throwable cleanup = Failures.run(null, () -> scheduling.remove(ctx));
+                    cleanup = Failures.run(cleanup, () -> closeRequest(ctx, null));
+                    if (cleanup != null) tasks.recordFailure(cleanup);
+                    return publication.publish(
+                            candidate,
+                            completion,
+                            response,
+                            failure,
+                            synchronous,
+                            deliveryReporter);
+                } catch (RuntimeException | Error failed) {
+                    publication.publishAfterFailure(
+                            failed,
+                            candidate,
+                            completion,
+                            response,
+                            failure,
+                            synchronous,
+                            deliveryReporter);
+                    throw failed;
+                }
+            } finally {
+                if (publication != null) publication.close();
             }
-            return new CloseTask(ctx, publication, candidate, response)
-                    .publishExternal(completion, failure, synchronous);
         }
     }
 

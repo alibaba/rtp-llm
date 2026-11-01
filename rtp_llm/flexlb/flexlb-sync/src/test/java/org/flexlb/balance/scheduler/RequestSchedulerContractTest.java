@@ -52,11 +52,7 @@ class RequestSchedulerContractTest {
                                             SchedulingTestConfig.capacity(f.config),
                                             org.mockito.Mockito.mock(
                                                     org.flexlb.service.RecentCacheKeyTraceReporter
-                                                            .class)),
-                            f.config,
-                            SchedulingTestConfig.capacity(f.config),
-                            org.mockito.Mockito.mock(
-                                    org.flexlb.service.RecentCacheKeyTraceReporter.class));
+                                                            .class)));
             var ownContext = f.context(942L);
             var ownFuture =
                     f.requests.register(ownContext, () -> {}, StrategyErrorType.BATCH_SLO_EXPIRED);
@@ -106,11 +102,7 @@ class RequestSchedulerContractTest {
                                             SchedulingTestConfig.capacity(f.config),
                                             org.mockito.Mockito.mock(
                                                     org.flexlb.service.RecentCacheKeyTraceReporter
-                                                            .class)),
-                            f.config,
-                            SchedulingTestConfig.capacity(f.config),
-                            org.mockito.Mockito.mock(
-                                    org.flexlb.service.RecentCacheKeyTraceReporter.class));
+                                                            .class)));
             var oldContext = f.context(944L);
             var oldFuture =
                     other.lifecycle()
@@ -337,11 +329,9 @@ class RequestSchedulerContractTest {
                             reporter,
                             mock(DecodePreemption.class),
                             new PlacementAvailability(),
-                            SchedulingTestConfig.capacity(f.config),
-                            org.mockito.Mockito.mock(
-                                    org.flexlb.service.RecentCacheKeyTraceReporter.class),
                             org.flexlb.balance.planner.BuiltinGroupPlanner.from(f.config),
-                            new OrderedRequestQueue(f.config.isPriorityOrdering())));
+                            new OrderedRequestQueue(f.config.isPriorityOrdering()),
+                            runtime.queueDependencies));
             try {
                 var owner = SchedulerTestSupport.initializedScheduler(runtime).lifecycle();
                 var request = f.context(100);

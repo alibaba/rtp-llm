@@ -1,13 +1,13 @@
 package org.flexlb.balance.scheduler;
 
-import org.flexlb.balance.eviction.DefaultDecodePreemption;
-import org.flexlb.balance.eviction.PriorityDecodePreemptionPolicy;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.DecodeResources;
 import org.flexlb.balance.endpoint.EndpointTestSupport;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.eviction.DecodePreemption;
+import org.flexlb.balance.eviction.DefaultDecodePreemption;
+import org.flexlb.balance.eviction.PriorityDecodePreemptionPolicy;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.VictimStage;

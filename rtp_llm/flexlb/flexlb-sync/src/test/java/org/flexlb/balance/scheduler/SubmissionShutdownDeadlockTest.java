@@ -228,11 +228,9 @@ class SubmissionShutdownDeadlockTest {
                             reporter,
                             mock(DecodePreemption.class),
                             new PlacementAvailability(),
-                            SchedulingTestConfig.capacity(config),
-                            org.mockito.Mockito.mock(
-                                    org.flexlb.service.RecentCacheKeyTraceReporter.class),
                             org.flexlb.balance.planner.BuiltinGroupPlanner.from(config),
-                            new OrderedRequestQueue(config.isPriorityOrdering()));
+                            new OrderedRequestQueue(config.isPriorityOrdering()),
+                            runtime.queueDependencies);
             runtime.registerScheduler(scheduler);
         }
 

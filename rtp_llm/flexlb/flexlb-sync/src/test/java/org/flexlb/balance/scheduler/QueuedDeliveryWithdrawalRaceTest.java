@@ -284,10 +284,9 @@ class QueuedDeliveryWithdrawalRaceTest {
                                     new DecodeResources.AdmissionCapacity(64L, 90),
                                     mock(RecentCacheKeyTraceReporter.class)),
                             availability,
-                            new DecodeResources.AdmissionCapacity(64L, 90),
-                            mock(RecentCacheKeyTraceReporter.class),
                             new OrderedRequestQueue(config.isPriorityOrdering()),
-                            org.flexlb.balance.planner.BuiltinGroupPlanner.from(config));
+                            org.flexlb.balance.planner.BuiltinGroupPlanner.from(config),
+                            runtime.queueDependencies);
             runtime.registerScheduler(owner);
             var pStatus =
                     WorkerStatus.createDiscovered(

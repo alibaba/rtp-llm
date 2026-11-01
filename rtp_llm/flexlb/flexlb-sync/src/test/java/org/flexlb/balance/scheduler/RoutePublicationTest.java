@@ -25,7 +25,6 @@ import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isA;
-import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.any;
 import static org.mockito.Mockito.anyLong;
 import static org.mockito.Mockito.argThat;
@@ -33,7 +32,6 @@ import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.eq;
 import static org.mockito.Mockito.isA;
-import static org.mockito.Mockito.isNull;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
@@ -184,9 +182,9 @@ class RoutePublicationTest {
                                 f.predictions.put(
                                         claim.item().requestId(),
                                         f.duration(
-                                        ((RouteDelivered) call.getArgument(0))
+                                                ((RouteDelivered) call.getArgument(0))
                                                         .predictedAtMs(),
-                                        ((RouteDelivered) call.getArgument(0)).nowMs()));
+                                                ((RouteDelivered) call.getArgument(0)).nowMs()));
                                 return null;
                             })
                     .when(f.owner)
@@ -254,9 +252,9 @@ class RoutePublicationTest {
                             call -> {
                                 cumulative.add(
                                         f.duration(
-                                        ((RouteDelivered) call.getArgument(0))
+                                                ((RouteDelivered) call.getArgument(0))
                                                         .predictedAtMs(),
-                                        ((RouteDelivered) call.getArgument(0)).nowMs()));
+                                                ((RouteDelivered) call.getArgument(0)).nowMs()));
                                 return null;
                             })
                     .when(f.owner)

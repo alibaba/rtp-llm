@@ -586,16 +586,7 @@ public final class PrefillQueueRunner {
         for (int index = 0; index < members.size(); index++) {
             Member member = members.get(index);
             try {
-                claims[index] =
-                        member.route()
-                                .ctx()
-                                .data()
-                                .getScheduler()
-                                .claimDelivery(
-                                        member.route(),
-                                        DeliveryClaimKind.ROUTE_DECISION,
-                                        0L,
-                                        member.decode());
+                claims[index] = member.claimDelivery(DeliveryClaimKind.ROUTE_DECISION, 0L);
             } catch (Throwable failure) {
                 try {
                     RequestLifecycle.preparationFailed(
@@ -616,18 +607,15 @@ public final class PrefillQueueRunner {
             unstarted = saturatedAdd(unstarted, predictions[index]);
             try {
                 long nowMs = System.currentTimeMillis();
-                claim.owner()
-                        .data()
-                        .getScheduler()
+                var data = claim.owner().data();
+                data.getScheduler()
                         .onDeliveryFact(
                                 new ContextResult.RouteDelivered(
                                         claim,
                                         PrefillPredictionBoundary.predictedVisibilityDeadlineMs(
                                                 precedingWork,
                                                 unstarted,
-                                                claim.owner()
-                                                        .data()
-                                                        .getConfig()
+                                                data.getConfig()
                                                         .getRequestLifecycle()
                                                         .getDecision()
                                                         .getLifetime(),
@@ -829,10 +817,15 @@ public final class PrefillQueueRunner {
             }
         }
         PrefillTimePredictor.Evaluator evaluator = prefillEndpoint.predictor.evaluator();
+        // First try dispatching from the queue head in normal queue order.
         var result = decideGroup(snapshot, null, evaluator, constraints);
         if (settings.priorityOrdering()
                 && result.unavailable() != null
                 && result.unavailable().resource() == CapacityBoundary.Resource.DECODE_ENGINE) {
+            // The head's Decode endpoint is full. Try one queue-permitted bypass batch on
+            // other Decode endpoints, using fresh queue/capacity snapshots after the first attempt.
+            // Dispatch happens inside decideGroup; keep the original result so the run loop
+            // continues waiting for the blocked head rather than a bypass candidate.
             decideGroup(
                     prefillState.captureQueue(Math.max(2, maxRequests)),
                     head,

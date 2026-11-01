@@ -490,7 +490,8 @@ class DecodeStateTest {
         assertTrue(state.ownership(reservation).owned());
         assertEquals(1, state.routingView("decode").totalLoad());
 
-        var terminal = calibrate(state, status, Map.of(), Map.of("77", task(77L, TaskPhase.RUNNING)));
+        var terminal =
+                calibrate(state, status, Map.of(), Map.of("77", task(77L, TaskPhase.RUNNING)));
         assertEquals(DecodeRequestStatus.Kind.TERMINAL, terminal.getFirst().kind());
         assertFalse(state.ownership(reservation).owned());
         assertEquals(0, state.routingView("decode").totalLoad());

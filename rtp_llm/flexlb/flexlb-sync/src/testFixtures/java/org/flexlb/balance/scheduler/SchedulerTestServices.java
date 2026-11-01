@@ -111,7 +111,6 @@ public final class SchedulerTestServices {
                         "responseCompletions",
                         "deliveryReporter",
                         "taskTimer",
-                        "queueDependencies",
                         "timer")
                 .contains(name)) return;
         synchronized (owners) {
@@ -140,8 +139,7 @@ public final class SchedulerTestServices {
                     "dispatcher",
                     "responseCompletions",
                     "deliveryReporter",
-                    "taskTimer",
-                    "queueDependencies"
+                    "taskTimer"
                 }) {
             try {
                 var source = SchedulerTestServices.class.getDeclaredField(name);
@@ -171,8 +169,6 @@ public final class SchedulerTestServices {
                         responseCompletions(),
                         deliveryReporter,
                         taskTimer(),
-                        deliveries(),
-                        config,
                         capacity,
                         trace);
         owners.put(owner, this);

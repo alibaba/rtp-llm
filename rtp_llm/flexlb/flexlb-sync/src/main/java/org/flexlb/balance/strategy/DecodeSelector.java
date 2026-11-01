@@ -1,7 +1,5 @@
 package org.flexlb.balance.strategy;
 
-import java.util.ArrayList;
-import java.util.Map;
 import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.endpoint.DecodeResources;
 import org.flexlb.balance.endpoint.DecodeResources.AdmissionCapacity;
@@ -18,8 +16,10 @@ import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.util.PriorityNormalizer;
 
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 
 import static com.google.common.base.Preconditions.checkState;

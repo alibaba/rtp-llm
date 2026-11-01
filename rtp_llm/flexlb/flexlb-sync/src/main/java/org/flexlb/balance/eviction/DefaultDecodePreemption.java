@@ -1,6 +1,5 @@
 package org.flexlb.balance.eviction;
 
-import org.flexlb.balance.scheduler.RequestLifecycle;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.DecodeResources;
 import org.flexlb.balance.endpoint.DecodeResources.AdmissionCapacity;
@@ -12,10 +11,11 @@ import org.flexlb.balance.scheduler.AdmissionHandle;
 import org.flexlb.balance.scheduler.DeliveryDispatcher;
 import org.flexlb.balance.scheduler.PreemptionRegistration;
 import org.flexlb.balance.scheduler.RequestContext;
+import org.flexlb.balance.scheduler.RequestLifecycle;
 import org.flexlb.balance.scheduler.RequestRepository;
+import org.flexlb.balance.scheduler.RequestSignals;
 import org.flexlb.balance.scheduler.RequestTaskExecutor;
 import org.flexlb.balance.scheduler.TaskTimer;
-import org.flexlb.balance.scheduler.RequestSignals;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.PreemptionConfig;
 import org.flexlb.config.VictimStage;
