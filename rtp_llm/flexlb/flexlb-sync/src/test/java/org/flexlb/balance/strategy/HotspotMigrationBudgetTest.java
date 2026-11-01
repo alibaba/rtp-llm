@@ -22,7 +22,6 @@ import java.util.concurrent.atomic.AtomicInteger;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.anyInt;
-import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
@@ -88,7 +87,7 @@ class HotspotMigrationBudgetTest {
         ReflectionTestUtils.setField(endpoint, "ownership", ownership);
         when(endpoint.getStatus()).thenReturn(StrategyTestSupport.workerStatus(RoleType.PREFILL, null,
                 "10.0.0." + id, 8080, 8081, true, 10_000, 10_000));
-        when(ownership.tokenWorkload(anyLong())).thenReturn(new PrefillTokenWorkload.Snapshot(0L, idle ? 0L : 1000L));
+        when(ownership.tokenWorkload()).thenReturn(new PrefillTokenWorkload.Snapshot(idle ? 0L : 1000L));
         when(ownership.progress()).thenReturn(mock(PrefillState.Progress.class));
         var routes = List.of(route(100, id + 1));
         when(ownership.captureQueue(anyInt())).thenReturn(new PrefillState.QueueSnapshot(1, 1, routes, routes.getFirst()));

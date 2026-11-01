@@ -243,7 +243,6 @@ final class FlexlbConfigValidator {
         if (balance != null) {
             range(balance.getMinPrefixHitPercent(), 0, RoutingConfig.PERCENTAGE_SCALE,
                     "router.roles.prefill.tokenBalance.minPrefixHitPercent");
-            positive(balance.getWindowMs(), "router.roles.prefill.tokenBalance.windowMs");
             positive(balance.getMaxPendingComputeTokens(),
                     "router.roles.prefill.tokenBalance.maxPendingComputeTokens");
             var rescue = balance.getHotspotRescue();
