@@ -23,9 +23,10 @@ prefix-cache hit. Every request decodes exactly
 time (not counted) so first-request JIT compilation does not land in the run.
 
 Per request the output records the scheduled time, the time the request was
-handed to the connection, every SSE chunk's arrival and the server
-completion-token counter, so TTFT, time to the second token and the steady TPOT
-can be derived.
+handed to the connection, every SSE chunk's arrival, the server
+completion-token counter and the prefill-side prefix reuse length
+(aux_info prefill_total_reuse_len), so TTFT, time to the second token, the
+steady TPOT and the actual cache hit of every request can be checked.
 
 The summary reports the arrival check (achieved rate, inter-send gap p50 / p99 /
 max deviation from 1/qps, worst lateness against the schedule), TTFT / tok2 /
@@ -59,6 +60,7 @@ def build_body(args, prompt, idx):
         "seed": 42,
         "stream": True,
         "stream_options": {"include_usage": True},
+        "aux_info": True,
         "extra_configs": {"ignore_eos": True},
     }
     if args.d_addrs:
@@ -77,7 +79,7 @@ def build_body(args, prompt, idx):
 async def one(session, url, body, idx, t_target):
     t_send = time.time()
     t0 = time.monotonic()
-    chunks, toks, err, finish = [], [], None, None
+    chunks, toks, err, finish, reuse = [], [], None, None, None
     try:
         async with session.post(
             url, data=body, headers={"Content-Type": "application/json"}
@@ -99,6 +101,9 @@ async def one(session, url, body, idx, t_target):
                     if "error_code" in d or "error" in d:
                         err = str(d)[:200]
                         break
+                    aux = d.get("aux_info")
+                    if aux and aux.get("prefill_total_reuse_len") is not None:
+                        reuse = aux["prefill_total_reuse_len"]
                     ch = (d.get("choices") or [{}])[0]
                     if ch.get("finish_reason"):
                         finish = ch["finish_reason"]
@@ -119,6 +124,7 @@ async def one(session, url, body, idx, t_target):
         "toks": toks,
         "finish": finish,
         "err": err,
+        "prefill_reuse": reuse,
     }
 
 
@@ -181,6 +187,9 @@ def summarize(args, rows, t0):
         if xs:
             tq.append(statistics.median(xs))
     res["tpot_p50_by_quarter"] = tq[:4]
+    reuse = [r.get("prefill_reuse") for r in ok if r.get("prefill_reuse") is not None]
+    if reuse:
+        res["prefill_reuse_min"], res["prefill_reuse_max"] = min(reuse), max(reuse)
     res["output_tokens"] = sum(r["toks"][-1] for r in ok)
     end = max(r["t_send"] + r["chunks"][-1] for r in ok) if ok else t0
     res["wall_s"] = end - t0
