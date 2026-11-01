@@ -9,7 +9,7 @@ import weakref
 from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import nullcontext
 from pathlib import Path
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 from unittest.mock import Mock, patch
 
 import torch
@@ -85,16 +85,14 @@ class EngramPrefetchTest(unittest.TestCase):
             context = patch.object(torch.cuda, name, value)
             context.start()
             self.addCleanup(context.stop)
-        context = patch.dict(
-            sys.modules,
-            {
-                "rtp_llm.models_py.modules.dsv41": SimpleNamespace(
-                    _profiler=SimpleNamespace(
-                        record_function_range=lambda name: nullcontext()
-                    )
-                )
-            },
+        # Stub only the profiler boundary. Keep real sibling-module imports,
+        # notably the external attachment guard now called by model.forward.
+        package = ModuleType("rtp_llm.models_py.modules.dsv41")
+        package.__path__ = [str(Path(__file__).resolve().parents[1])]
+        package._profiler = SimpleNamespace(
+            record_function_range=lambda name: nullcontext()
         )
+        context = patch.dict(sys.modules, {package.__name__: package})
         context.start()
         self.addCleanup(context.stop)
 
@@ -454,6 +452,17 @@ class EngramPrefetchTest(unittest.TestCase):
             attention_inputs=SimpleNamespace(is_prefill=True, is_target_verify=False)
         )
         return model, inputs
+
+    def test_model_real_attachment_guard_rejects_before_prefetch(self):
+        model, inputs = self._model()
+        model._engram_attachment = SimpleNamespace(external=True, phase="FAILED")
+        with self.assertRaisesRegex(RuntimeError, "EXTERNAL_ENGRAM_NOT_READY"):
+            model(inputs)
+        model._prepare_engram.assert_not_called()
+        model._prepare_image_features.assert_not_called()
+        model.parent_forward.assert_not_called()
+        self.embedding.assert_not_called()
+        self.assertFalse(model._engram_forward_active)
 
     def test_model_prepare_exception_cleans_metadata_without_launching_lookup(self):
         model, inputs = self._model()

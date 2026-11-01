@@ -664,6 +664,7 @@ class V41KernelJitWarmupTest(unittest.TestCase):
         )
         embed = mock.Mock()
         embed.weight = torch.empty((2, 32))
+        embed.table_shape = tuple(embed.weight.shape)
         embed._num_sms = 2
         layer = types.SimpleNamespace(
             embed_tokens=embed,
