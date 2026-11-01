@@ -21,6 +21,12 @@ models_py_test(
 )
 
 models_py_test(
+    name = "indexer_paged_score_tiled_test",
+    src = "indexer_paged_score_tiled_test.py",
+    gpu = "H20_CU13",
+)
+
+models_py_test(
     name = "sparse_fmha_test",
     src = "sparse_fmha_test.py",
     gpu = "RTX_5000_PRO_CU13",
