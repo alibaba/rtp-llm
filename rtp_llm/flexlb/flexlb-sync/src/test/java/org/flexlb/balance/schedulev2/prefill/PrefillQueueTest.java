@@ -33,14 +33,15 @@ class PrefillQueueTest {
     private final PrefillEndpoint endpoint = V2TestSupport.prefillEndpoint("p1:8000");
     private final PrefillQueue queue = endpoint.prefillQueue();
     private final RequestSchedulerReporter reporter = mock(RequestSchedulerReporter.class);
+    private final java.util.concurrent.atomic.AtomicLong nextQueueSeq = new java.util.concurrent.atomic.AtomicLong();
 
     @Test
     void cleanupDoesNotWaitForQueueMonitor() throws Exception {
         Request normal = request("normal");
         Request expired = request("expired");
+        V2TestSupport.dispatch(queue, new DispatchedRequest(normal, 10L, 5L));
+        V2TestSupport.dispatch(queue, new DispatchedRequest(expired, 10L, 5L));
         publish(expired);
-        queue.addDispatched(new DispatchedRequest(normal, 10L, 5L));
-        queue.addDispatched(new DispatchedRequest(expired, 10L, 5L));
         assertEquals(null, queue.tryAcquirePublishSlot(normal, 2));
         assertEquals(null, queue.tryAcquirePublishSlot(expired, 2));
         try (var executor = java.util.concurrent.Executors.newSingleThreadExecutor()) {
@@ -59,7 +60,7 @@ class PrefillQueueTest {
     @Test
     void concurrentDeleteReleasesAndNotifiesOnce() throws Exception {
         Request request = request("delete-once");
-        queue.addDispatched(new DispatchedRequest(request, 10L, 5L));
+        V2TestSupport.dispatch(queue, new DispatchedRequest(request, 10L, 5L));
         assertEquals(null, queue.tryAcquirePublishSlot(request, 1));
         var notifications = new java.util.concurrent.atomic.AtomicInteger();
         queue.onCapacityChanged(notifications::incrementAndGet);
@@ -79,6 +80,7 @@ class PrefillQueueTest {
         }
         assertEquals(1, notifications.get());
         assertEquals(0L, queue.inflightCount());
+        assertEquals(0L, queue.estimatedWorkMs(0L));
         assertEquals(org.flexlb.balance.schedulev2.QueueBlockReason.RESERVATION_CHANGED,
                 queue.tryAcquirePublishSlot(request, 1));
     }
@@ -86,9 +88,9 @@ class PrefillQueueTest {
     @Test
     void expiryKeepsEngineStatusThatArrivesAfterTimeoutDecision() {
         Request request = request("late-status");
-        publish(request);
         var record = org.mockito.Mockito.spy(new DispatchedRequest(request, 10L, 5L));
-        queue.addDispatched(record);
+        V2TestSupport.dispatch(queue, record);
+        publish(request);
         assertEquals(null, queue.tryAcquirePublishSlot(request, 1));
         org.mockito.Mockito.doAnswer(call -> {
             V2TestSupport.reportTasks(queue, Map.of(request.requestId(), TaskPhase.RUNNING), Map.of());
@@ -119,8 +121,8 @@ class PrefillQueueTest {
     @Test
     void finishedOnlyReportReleasesClaimWithoutConfirmationTimeout() {
         Request request = request("finished-only");
+        V2TestSupport.dispatch(queue, new DispatchedRequest(request, 10L, 5L));
         publish(request);
-        queue.addDispatched(new DispatchedRequest(request, 10L, 5L));
         assertEquals(null, queue.tryAcquirePublishSlot(request, 1));
         V2TestSupport.reportTasks(queue, Map.of(), Map.of(request.requestId(), TaskPhase.RUNNING));
 
@@ -136,8 +138,8 @@ class PrefillQueueTest {
     @Test
     void waitingRequestExpiresWhenItsStatusStopsUpdating() {
         Request request = request("waiting");
+        V2TestSupport.dispatch(queue, new DispatchedRequest(request, 10L, 5L));
         publish(request);
-        queue.addDispatched(new DispatchedRequest(request, 10L, 5L));
         assertEquals(null, queue.tryAcquirePublishSlot(request, 1));
         V2TestSupport.reportTasks(queue, Map.of("waiting", TaskPhase.PENDING), Map.of());
         queue.removeRequestStatusExpired(System.currentTimeMillis(), 1000L, reporter);
@@ -155,7 +157,7 @@ class PrefillQueueTest {
     @Test
     void inflightLimitCountsDispatchedAndUnknownEngineRequests() {
         Request published = request("1");
-        queue.addDispatched(new DispatchedRequest(published, 10L, 5L));
+        V2TestSupport.dispatch(queue, new DispatchedRequest(published, 10L, 5L));
         assertEquals(null, queue.tryAcquirePublishSlot(published, 4));
         V2TestSupport.report(endpoint, 1L, 1_000L, 1_000L, Map.of("other", TaskPhase.RUNNING));
 
@@ -168,7 +170,7 @@ class PrefillQueueTest {
     @Test
     void kvCheckSubtractsOnlyRequestsTheEngineHasNotReported() {
         Request published = request("1");
-        queue.addDispatched(new DispatchedRequest(published, 60L, 5L));
+        V2TestSupport.dispatch(queue, new DispatchedRequest(published, 60L, 5L));
         assertEquals(null, queue.tryAcquirePublishSlot(published, 4));
         V2TestSupport.report(endpoint, 1L, 100L, 1_000L, Map.of());
 
@@ -192,8 +194,8 @@ class PrefillQueueTest {
     void missingActiveReportReleasesClaimAndLateFinishedDoesNotReleaseAgain() {
         Request reported = request("1");
         Request notReported = request("2");
-        queue.addDispatched(new DispatchedRequest(reported, 10L, 5L));
-        queue.addDispatched(new DispatchedRequest(notReported, 10L, 5L));
+        V2TestSupport.dispatch(queue, new DispatchedRequest(reported, 10L, 5L));
+        V2TestSupport.dispatch(queue, new DispatchedRequest(notReported, 10L, 5L));
         assertEquals(null, queue.tryAcquirePublishSlot(reported, 1));
         V2TestSupport.report(endpoint, 1L, 1_000L, 1_000L, Map.of("1", TaskPhase.RUNNING));
 
@@ -215,12 +217,12 @@ class PrefillQueueTest {
         Request unpublished = request("1");
         Request reported = request("2");
         Request notReported = request("3");
+        V2TestSupport.dispatch(queue, new DispatchedRequest(unpublished, 10L, 5L));
+        DispatchedRequest record = new DispatchedRequest(reported, 10L, 5L);
+        V2TestSupport.dispatch(queue, record);
+        V2TestSupport.dispatch(queue, new DispatchedRequest(notReported, 10L, 5L));
         publish(reported);
         publish(notReported);
-        queue.addDispatched(new DispatchedRequest(unpublished, 10L, 5L));
-        DispatchedRequest record = new DispatchedRequest(reported, 10L, 5L);
-        queue.addDispatched(record);
-        queue.addDispatched(new DispatchedRequest(notReported, 10L, 5L));
         V2TestSupport.report(endpoint, 1L, 1_000L, 1_000L, Map.of("2", TaskPhase.RUNNING));
         long publishedAtMs = notReported.publishedAtMs();
         record.updateStatus(WorkView.Phase.ENGINE_RUNNING, publishedAtMs + 50L);
@@ -242,11 +244,11 @@ class PrefillQueueTest {
     @Test
     void decodeWaitingCandidatesDoNotConsumeActiveTaskLimit() {
         for (int i = 0; i < 20; i++) {
-            queue.addDispatched(new DispatchedRequest(request("candidate-" + i), 10L, 5L));
+            V2TestSupport.dispatch(queue, new DispatchedRequest(request("candidate-" + i), 10L, 5L));
         }
         assertTrue(queue.hasDispatchSlot(4));
         Request first = request("first");
-        queue.addDispatched(new DispatchedRequest(first, 10L, 5L));
+        V2TestSupport.dispatch(queue, new DispatchedRequest(first, 10L, 5L));
         assertEquals(null, queue.tryAcquirePublishSlot(first, 1));
         assertFalse(queue.hasDispatchSlot(1));
         queue.releasePublishSlot(first);
@@ -256,7 +258,7 @@ class PrefillQueueTest {
     @Test
     void engineAcknowledgementDoesNotDoubleCountPublishedTask() {
         Request first = request("first");
-        queue.addDispatched(new DispatchedRequest(first, 10L, 5L));
+        V2TestSupport.dispatch(queue, new DispatchedRequest(first, 10L, 5L));
         assertEquals(null, queue.tryAcquirePublishSlot(first, 4));
         V2TestSupport.report(endpoint, 1L, 1000L, 1000L,
                 Map.of("first", TaskPhase.RUNNING, "external", TaskPhase.PENDING));
@@ -277,7 +279,7 @@ class PrefillQueueTest {
         try {
             for (int i = 0; i < 16; i++) {
                 Request request = request("concurrent-" + i);
-                queue.addDispatched(new DispatchedRequest(request, 10L, 5L));
+                V2TestSupport.dispatch(queue, new DispatchedRequest(request, 10L, 5L));
                 futures.add(workers.submit(() -> {
                     start.await();
                     if (queue.tryAcquirePublishSlot(request, 4) == null) {
@@ -300,11 +302,13 @@ class PrefillQueueTest {
     @Test
     void loadViewHasWaitingItemsDispatchedWorkAndUnknownCount() {
         Request waiting = request("w");
+        waiting.setQueueSeq(1L);
         V2TestSupport.choose(waiting, endpoint, 4L, 20L);
         waiting.moveTo(Stage.MAIN_WAITING, Stage.PREFILL_WAITING);
         queue.addWaiting(waiting);
         Request dispatched = request("d");
-        queue.addDispatched(new DispatchedRequest(dispatched, 10L, 30L));
+        dispatched.setQueueSeq(2L);
+        V2TestSupport.dispatch(queue, new DispatchedRequest(dispatched, 10L, 30L));
         V2TestSupport.report(endpoint, 1L, 1_000L, 1_000L, Map.of("d", TaskPhase.RUNNING, "x", TaskPhase.PENDING));
         GroupPlanner.Constraints constraints = new GroupPlanner.Constraints(1, Long.MAX_VALUE, Long.MAX_VALUE, 0L, 0L);
         Comparator<GroupPlanner.Item> order = Comparator.comparingLong(GroupPlanner.Item::enqueueSeq);
@@ -322,37 +326,37 @@ class PrefillQueueTest {
     }
 
     private static void publish(Request request) {
-        request.moveTo(Stage.MAIN_WAITING, Stage.PREFILL_WAITING);
-        request.moveTo(Stage.PREFILL_WAITING, Stage.DECODE_WAITING);
         request.publish(Stage.DECODE_WAITING, List.of());
     }
 
     @Test
-    void ttftCountsRequestOnceWhileItMovesFromWaitingToDispatched() {
+    void predictedWorkCountsRequestOnceWhileItMovesFromWaitingToDispatched() {
         Request earlier = request("1");
         earlier.setQueueSeq(1L);
         V2TestSupport.choose(earlier, endpoint, 0L, 10L);
         earlier.moveTo(Stage.MAIN_WAITING, Stage.PREFILL_WAITING);
         queue.addWaiting(earlier);
-        Request incoming = request("2");
-        incoming.setQueueSeq(2L);
-        assertEquals(25L, queue.estimatedTtftMs(incoming, 15L));
+        assertEquals(25L, queue.estimatedWorkMs(15L));
 
         queue.addDispatched(new DispatchedRequest(earlier, 16L, 10L));
-        assertEquals(25L, queue.estimatedTtftMs(incoming, 15L));
+        assertEquals(25L, queue.estimatedWorkMs(15L));
         earlier.moveTo(Stage.PREFILL_WAITING, Stage.DECODE_WAITING);
         queue.removeWaiting(earlier);
-        assertEquals(25L, queue.estimatedTtftMs(incoming, 15L));
+        assertEquals(25L, queue.estimatedWorkMs(15L));
+        earlier.publish(Stage.DECODE_WAITING, List.of());
+        assertEquals(25L, queue.estimatedWorkMs(15L));
+        V2TestSupport.reportTasks(queue, Map.of(), Map.of("1", TaskPhase.RUNNING));
+        assertEquals(15L, queue.estimatedWorkMs(15L));
     }
 
     @Test
-    void ttftDoesNotInventDurationForUnknownEngineWork() {
+    void predictedWorkDoesNotInventDurationForUnknownEngineWork() {
         V2TestSupport.report(endpoint, 1L, 1_000L, 1_000L, Map.of("other", TaskPhase.RUNNING));
-        assertEquals(-1L, queue.estimatedTtftMs(request("1"), 15L));
+        assertEquals(-1L, queue.estimatedWorkMs(15L));
     }
 
     @Test
-    void highPriorityTtftExcludesLowerPriorityWaitingWork() {
+    void predictedWorkIncludesLowerPriorityWaitingWorkWithoutChangingQueueOrder() {
         PrefillQueue priorityQueue = new PrefillQueue(endpoint, true);
         Request low = V2TestSupport.request(config, "low", 10, 16L);
         low.setQueueSeq(1L);
@@ -361,13 +365,162 @@ class PrefillQueueTest {
         priorityQueue.addWaiting(low);
         Request high = V2TestSupport.request(config, "high", 80, 16L);
         high.setQueueSeq(2L);
+        V2TestSupport.choose(high, endpoint, 0L, 15L);
+        high.moveTo(Stage.MAIN_WAITING, Stage.PREFILL_WAITING);
+        priorityQueue.addWaiting(high);
 
-        assertEquals(15L, priorityQueue.estimatedTtftMs(high, 15L));
+        assertEquals("high", priorityQueue.waitingIterator().next().requestId());
+        assertEquals(130L, priorityQueue.estimatedWorkMs(15L));
         priorityQueue.addDispatched(new DispatchedRequest(low, 16L, 100L));
-        assertEquals(115L, priorityQueue.estimatedTtftMs(high, 15L));
+        assertEquals(130L, priorityQueue.estimatedWorkMs(15L));
+    }
+
+    @Test
+    void duplicateWaitingAndRemovalDoNotChangePredictedWorkTwice() {
+        Request waiting = addWaiting("waiting", 10L);
+        assertEquals(10L, waiting.selectedPrefill().predictedMs());
+        queue.addWaiting(waiting);
+        assertEquals(10L, waiting.selectedPrefill().predictedMs());
+        assertEquals(10L, queue.estimatedWorkMs(0L));
+        queue.removeWaiting(waiting);
+        waiting.setSelectedPrefill(null);
+        queue.removeWaiting(waiting);
+        assertEquals(0L, queue.estimatedWorkMs(0L));
+    }
+
+    @Test
+    void returnedRequestUsesNewPredictionWhenItEntersQueueAgain() {
+        Request waiting = addWaiting("returned", 10L);
+        queue.removeWaiting(waiting);
+        V2TestSupport.choose(waiting, endpoint, 0L, 30L);
+        queue.addWaiting(waiting);
+        assertEquals(30L, waiting.selectedPrefill().predictedMs());
+        assertEquals(30L, queue.estimatedWorkMs(0L));
+    }
+
+    @Test
+    void zeroPredictedWorkStillTracksTransferAndRemoval() {
+        Request waiting = addWaiting("zero-work", 0L);
+        assertEquals(1, queue.waitingCount());
+        assertEquals(0L, waiting.selectedPrefill().predictedMs());
+        queue.addDispatched(new DispatchedRequest(waiting, 16L, 0L));
+        queue.removeWaiting(waiting);
+        assertEquals(1, queue.dispatchedCount());
+        assertEquals(15L, queue.estimatedWorkMs(15L));
+        assertTrue(queue.removeDispatched(waiting));
+        assertFalse(queue.removeDispatched(waiting));
+        assertEquals(0L, queue.estimatedWorkMs(0L));
+    }
+
+    @Test
+    void removingDispatchedDuringTransferLeavesOnlyWaitingPrediction() {
+        Request waiting = addWaiting("transfer", 10L);
+        queue.addDispatched(new DispatchedRequest(waiting, 16L, 10L));
+        assertEquals(10L, queue.estimatedWorkMs(0L));
+        assertTrue(queue.removeDispatched(waiting));
+        assertEquals(10L, queue.estimatedWorkMs(0L));
+        queue.removeWaiting(waiting);
+        assertEquals(0L, queue.estimatedWorkMs(0L));
+    }
+
+    @Test
+    void cancelledRequestDoesNotAddDispatchedRecordAfterWaitingCleanup() {
+        Request waiting = addWaiting("cancelled-transfer", 10L);
+        assertTrue(waiting.moveTo(Stage.PREFILL_WAITING, Stage.CANCELLED));
+        queue.removeWaiting(waiting);
+        queue.addDispatched(new DispatchedRequest(waiting, 16L, 10L));
+        assertEquals(0, queue.dispatchedCount());
+        assertFalse(queue.removeDispatched(waiting));
+        assertEquals(0L, queue.estimatedWorkMs(0L));
+    }
+
+    @Test
+    void duplicateDispatchedAddsCountSameRequestOnce() {
+        Request waiting = addWaiting("same-request", 10L);
+        DispatchedRequest record = new DispatchedRequest(waiting, 16L, 10L);
+        queue.addDispatched(record);
+        queue.addDispatched(record);
+        queue.addDispatched(new DispatchedRequest(waiting, 16L, 10L));
+        assertEquals(1, queue.dispatchedCount());
+        assertEquals(10L, queue.estimatedWorkMs(0L));
+        queue.removeWaiting(waiting);
+        assertEquals(10L, queue.estimatedWorkMs(0L));
+        assertTrue(queue.removeDispatched(waiting));
+        assertEquals(0L, queue.estimatedWorkMs(0L));
+    }
+
+    @Test
+    void predictedWorkAccumulatesManyRequestsAndReturnsToZero() {
+        var requests = new java.util.ArrayList<Request>();
+        for (int i = 0; i < 1000; i++) {
+            requests.add(addWaiting("large-queue-" + i, 3_600_000L));
+        }
+        assertEquals(3_600_000_015L, queue.estimatedWorkMs(15L));
+        for (Request request : requests) {
+            queue.addDispatched(new DispatchedRequest(request, 16L, request.selectedPrefill().predictedMs()));
+            queue.removeWaiting(request);
+        }
+        assertEquals(3_600_000_000L, queue.estimatedWorkMs(0L));
+        for (Request request : requests) {
+            queue.removeDispatched(request);
+        }
+        assertEquals(0L, queue.estimatedWorkMs(0L));
+    }
+
+    @Test
+    void readingPredictedWorkDoesNotVisitDispatchedRecords() {
+        DispatchedRequest record = org.mockito.Mockito.spy(new DispatchedRequest(request("record"), 16L, 10L));
+        V2TestSupport.dispatch(queue, record);
+        org.mockito.Mockito.clearInvocations(record);
+        assertEquals(25L, queue.estimatedWorkMs(15L));
+        verifyNoInteractions(record);
+    }
+
+    @Test
+    void statusExpiryRemovesPredictedWorkOnce() {
+        Request expired = request("expired-work");
+        V2TestSupport.dispatch(queue, new DispatchedRequest(expired, 16L, 10L));
+        publish(expired);
+        assertEquals(10L, queue.estimatedWorkMs(0L));
+        queue.removeRequestStatusExpired(expired.publishedAtMs() + 1000L, 1000L, reporter);
+        queue.removeRequestStatusExpired(expired.publishedAtMs() + 2000L, 1000L, reporter);
+        assertEquals(0L, queue.estimatedWorkMs(0L));
+    }
+
+    @Test
+    void concurrentTransfersAndDeletesLeaveNoPredictedWork() throws Exception {
+        try (var executor = java.util.concurrent.Executors.newFixedThreadPool(8)) {
+            var tasks = new java.util.ArrayList<java.util.concurrent.Future<?>>();
+            for (int i = 0; i < 100; i++) {
+                String id = "work-" + i;
+                tasks.add(executor.submit(() -> {
+                    Request waiting = addWaiting(id, 10L);
+                    queue.addDispatched(new DispatchedRequest(waiting, 16L, 10L));
+                    queue.removeWaiting(waiting);
+                    queue.removeDispatched(waiting);
+                }));
+            }
+            for (var task : tasks) {
+                task.get(2, java.util.concurrent.TimeUnit.SECONDS);
+            }
+        }
+        assertEquals(0, queue.waitingCount());
+        assertEquals(0, queue.dispatchedCount());
+        assertEquals(0L, queue.estimatedWorkMs(0L));
+    }
+
+    private Request addWaiting(String id, long predictedMs) {
+        Request request = request(id);
+        request.setQueueSeq(nextQueueSeq.incrementAndGet());
+        V2TestSupport.choose(request, endpoint, 0L, predictedMs);
+        request.moveTo(Stage.MAIN_WAITING, Stage.PREFILL_WAITING);
+        queue.addWaiting(request);
+        return request;
     }
 
     private Request request(String requestId) {
-        return V2TestSupport.request(config, requestId, 50, 16L);
+        Request request = V2TestSupport.request(config, requestId, 50, 16L);
+        request.setQueueSeq(nextQueueSeq.incrementAndGet());
+        return request;
     }
 }

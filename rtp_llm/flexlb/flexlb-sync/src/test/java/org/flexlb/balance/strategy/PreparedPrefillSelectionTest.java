@@ -7,8 +7,8 @@ import org.flexlb.balance.scheduler.DefaultRouter;
 import org.flexlb.balance.schedulev2.V2TestSupport;
 import org.flexlb.balance.schedulev2.prefill.PrefillPicker;
 import org.flexlb.balance.schedulev2.prefill.PrefillQueueRegistry;
-import org.flexlb.balance.schedulev2.request.PrefillChoice;
 import org.flexlb.balance.schedulev2.request.Request;
+import org.flexlb.balance.schedulev2.request.SelectedPrefill;
 import org.flexlb.balance.schedulev2.request.Stage;
 import org.flexlb.cache.domain.CacheMatchResult;
 import org.flexlb.cache.domain.CacheMatchSource;
@@ -92,18 +92,18 @@ class PreparedPrefillSelectionTest {
         doThrow(new AssertionError("cache IO must stay in preparation")).when(cache).findMatchingEngines(any());
 
         try (SelectedRole selected = picker.pick(a, RoleType.PREFILL, "g", aInputs).value()) {
-            a.setPrefillChoice(PrefillChoice.from(selected, a.seqLen()));
+            a.setSelectedPrefill(SelectedPrefill.from(selected, a.seqLen()));
         }
-        assertSame(first, a.prefillChoice().endpoint());
+        assertSame(first, a.selectedPrefill().endpoint());
         a.moveTo(Stage.MAIN_WAITING, Stage.PREFILL_WAITING);
         queues.addWaiting(a);
 
         // B 的材料早已准备好，但最终决策要看到 A 新增的 10ms 排队负载：P1=20ms，P2=15ms。
         try (SelectedRole selected = picker.pick(b, RoleType.PREFILL, "g", bInputs).value()) {
-            b.setPrefillChoice(PrefillChoice.from(selected, b.seqLen()));
+            b.setSelectedPrefill(SelectedPrefill.from(selected, b.seqLen()));
         }
-        assertSame(second, b.prefillChoice().endpoint());
-        assertEquals(15L, b.prefillChoice().serverStatus().getPrefillTime());
+        assertSame(second, b.selectedPrefill().endpoint());
+        assertEquals(15L, b.selectedPrefill().serverStatus().getPrefillTime());
         verify(cache, times(2)).findMatchingEngines(any());
     }
 
@@ -128,7 +128,7 @@ class PreparedPrefillSelectionTest {
         PrefillInputs refreshed = picker.prepare(request.ctx(), RoleType.PREFILL, "g");
         assertEquals(1, refreshed.candidates().size());
         try (SelectedRole selected = picker.pick(request, RoleType.PREFILL, "g", refreshed).value()) {
-            assertSame(second, PrefillChoice.from(selected, request.seqLen()).endpoint());
+            assertSame(second, SelectedPrefill.from(selected, request.seqLen()).endpoint());
         }
     }
 

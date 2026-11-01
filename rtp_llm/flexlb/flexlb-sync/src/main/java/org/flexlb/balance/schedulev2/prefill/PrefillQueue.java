@@ -9,6 +9,7 @@ import org.flexlb.balance.schedulev2.LoopSignal;
 import org.flexlb.balance.schedulev2.QueueBlockReason;
 import org.flexlb.balance.schedulev2.request.Request;
 import org.flexlb.balance.schedulev2.request.RequestOrder;
+import org.flexlb.balance.schedulev2.request.SelectedPrefill;
 import org.flexlb.balance.schedulev2.request.Stage;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.enums.TaskPhase;
@@ -57,6 +58,11 @@ public final class PrefillQueue {
      */
     private final ConcurrentHashMap<String, DispatchedRequest> dispatched = new ConcurrentHashMap<>();
     /**
+     * 只保护记录增删和预测工作量更新，不包含状态扫描、容量释放或通知。
+     */
+    private final Object requestRecordsLock = new Object();
+    private volatile long totalPredictedWorkMs;
+    /**
      * 等待请求或已 dispatch 记录每变一次加一，选 Prefill 时用来判断负载视图有没有变。
      */
     private final AtomicLong changeVersion = new AtomicLong();
@@ -78,10 +84,17 @@ public final class PrefillQueue {
         return signal;
     }
 
-    public synchronized void addWaiting(Request request) {
+    public void addWaiting(Request request) {
+        SelectedPrefill selectedPrefill = request.selectedPrefill();
+        if (selectedPrefill == null || request.stage() != Stage.PREFILL_WAITING) {
+            return;
+        }
         request.setPrefillQueuedAtMs(System.currentTimeMillis());
-        if (waiting.add(request)) {
-            changeVersion.incrementAndGet();
+        synchronized (requestRecordsLock) {
+            if (waiting.add(request)) {
+                totalPredictedWorkMs += selectedPrefill.predictedMs();
+                changeVersion.incrementAndGet();
+            }
         }
         if (request.stage() != Stage.PREFILL_WAITING) {
             removeWaiting(request);
@@ -114,9 +127,14 @@ public final class PrefillQueue {
         return pendingReturns.poll();
     }
 
-    public synchronized void removeWaiting(Request request) {
-        if (waiting.remove(request)) {
-            changeVersion.incrementAndGet();
+    public void removeWaiting(Request request) {
+        synchronized (requestRecordsLock) {
+            if (waiting.remove(request)) {
+                if (!dispatched.containsKey(request.requestId())) {
+                    totalPredictedWorkMs -= request.selectedPrefill().predictedMs();
+                }
+                changeVersion.incrementAndGet();
+            }
         }
     }
 
@@ -131,17 +149,28 @@ public final class PrefillQueue {
         return waiting.size();
     }
 
-    public synchronized void addDispatched(DispatchedRequest record) {
-        dispatched.put(record.request().requestId(), record);
-        changeVersion.incrementAndGet();
+    /**
+     * 记录从 waiting 交给 Decode 的请求。工作量已在入队时计入，转移不改变总量。
+     */
+    public void addDispatched(DispatchedRequest record) {
+        synchronized (requestRecordsLock) {
+            if (record.request().stage() != Stage.PREFILL_WAITING) {
+                return;
+            }
+            DispatchedRequest existingRecord = dispatched.putIfAbsent(record.request().requestId(), record);
+            if (existingRecord != null) {
+                return;
+            }
+            changeVersion.incrementAndGet();
+        }
     }
 
     /**
-     * 只移除这个请求对象的记录，返回是否移除了。条件删除成功后，后续获取名额会发现记录已失效。
+     * 移除请求 ID 对应的记录，返回是否移除了。条件删除成功后，后续获取名额会发现记录已失效。
      */
     public boolean removeDispatched(Request request) {
         DispatchedRequest record = dispatched.get(request.requestId());
-        if (record == null || record.request() != request) {
+        if (record == null) {
             return false;
         }
         boolean removedSuccess = removeRequestRecord(record);
@@ -155,12 +184,17 @@ public final class PrefillQueue {
     }
 
     private boolean removeRequestRecord(DispatchedRequest dispatchedRequest) {
-        boolean removeSuccess = dispatched.remove(dispatchedRequest.request().requestId(), dispatchedRequest);
-        if (!removeSuccess) {
-            return false;
+        synchronized (requestRecordsLock) {
+            boolean removeSuccess = dispatched.remove(dispatchedRequest.request().requestId(), dispatchedRequest);
+            if (!removeSuccess) {
+                return false;
+            }
+            if (!waiting.contains(dispatchedRequest.request())) {
+                totalPredictedWorkMs -= dispatchedRequest.predictedMs();
+            }
+            changeVersion.incrementAndGet();
+            return true;
         }
-        changeVersion.incrementAndGet();
-        return true;
     }
 
     public int dispatchedCount() {
@@ -286,7 +320,7 @@ public final class PrefillQueue {
      */
     public QueueBlockReason tryAcquirePublishSlot(Request request, int maxInflight) {
         DispatchedRequest record = dispatched.get(request.requestId());
-        if (record == null || record.request() != request || request.stage().isEnded()) {
+        if (record == null || request.stage().isEnded()) {
             return QueueBlockReason.RESERVATION_CHANGED;
         }
         QueueBlockReason reason = activeTasks.tryAcquire(record, maxInflight);
@@ -306,37 +340,16 @@ public final class PrefillQueue {
     }
 
     /**
-     * 用最新的排队与在途记录计算 TTFT，只累加已经预测好的耗时，不调用预测器。
+     * 当前累计预测工作量加新请求自身耗时，用于选路评分，不承诺实际等待时间。
      * <p>
-     * 队列线程先加 dispatched 再移除 waiting，过渡期间同一个请求只能算一次。
-     * 锁只保护这一台机器的内存记录，避免读到转换了一半的计数。未知引擎任务不虚构耗时，返回 -1。
+     * 工作量在记录增删时更新，waiting 与 dispatched 的过渡记录只算一次，不按新请求优先级过滤。
+     * 读取不遍历队列，也不获取记录锁。未知引擎任务不虚构耗时，返回 -1。
      */
-    public synchronized long estimatedTtftMs(Request incoming, long predictedMs) {
+    public long estimatedWorkMs(long predictedMs) {
         if (unknownRequestCount > 0L) {
             return -1L;
         }
-        long total = predictedMs;
-        for (DispatchedRequest record : dispatched.values()) {
-            if (!record.request().stage().isEnded()) {
-                total = addDuration(total, record.predictedMs());
-            }
-        }
-        long nowMs = System.currentTimeMillis();
-        for (Request request : waiting) {
-            if (waiting.comparator().compare(request, incoming) >= 0) {
-                break;
-            }
-            if (request.stage() != Stage.PREFILL_WAITING || request.ctx().requestExpired(nowMs)
-                    || dispatched.containsKey(request.requestId())) {
-                continue;
-            }
-            total = addDuration(total, request.prefillChoice().predictedMs());
-        }
-        return total;
-    }
-
-    private static long addDuration(long total, long duration) {
-        return total > Long.MAX_VALUE - duration ? Long.MAX_VALUE : total + duration;
+        return totalPredictedWorkMs + predictedMs;
     }
 
     /**
@@ -349,7 +362,7 @@ public final class PrefillQueue {
         List<GroupPlanner.Item> items = new ArrayList<>();
         for (Request request : waiting) {
             long seqLen = request.seqLen();
-            long hitCache = request.prefillChoice() == null ? 0L : request.prefillChoice().hitCacheTokens();
+            long hitCache = request.selectedPrefill() == null ? 0L : request.selectedPrefill().hitCacheTokens();
             items.add(new GroupPlanner.Item(request.requestId(), request.priority(), request.queueSeq(),
                     request.createdAtMs(), request.ctx().getRequestExpiresAtMs(), seqLen, Math.min(hitCache, seqLen)));
         }

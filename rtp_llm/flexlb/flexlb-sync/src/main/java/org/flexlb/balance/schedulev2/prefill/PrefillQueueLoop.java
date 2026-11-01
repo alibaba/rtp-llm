@@ -7,8 +7,8 @@ import org.flexlb.balance.schedulev2.QueueBlockReason;
 import org.flexlb.balance.schedulev2.RequestCleanup;
 import org.flexlb.balance.schedulev2.RequestStatusTimeout;
 import org.flexlb.balance.schedulev2.main.MainQueue;
-import org.flexlb.balance.schedulev2.request.PrefillChoice;
 import org.flexlb.balance.schedulev2.request.Request;
+import org.flexlb.balance.schedulev2.request.SelectedPrefill;
 import org.flexlb.balance.schedulev2.request.Stage;
 import org.flexlb.config.ConfigService;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
@@ -143,7 +143,7 @@ public final class PrefillQueueLoop {
         }
         Integer preemptorPriority = request.queueProgress().prefillReturnPriority();
         queue.removeWaiting(request);
-        request.setPrefillChoice(null);
+        request.setSelectedPrefill(null);
         request.setPrefillDecidedAtMs(0L);
         request.setPrefillQueuedAtMs(0L);
         cleanup.releaseQueueSlot(request);
@@ -174,7 +174,7 @@ public final class PrefillQueueLoop {
             if (request.queueProgress().prefillReturnPriority() != null) {
                 continue;
             }
-            long kvTokens = request.prefillChoice().kvTokens(request.seqLen());
+            long kvTokens = request.selectedPrefill().kvTokens(request.seqLen());
             if (!queue.hasDispatchSlot(maxInflight)) {
                 queueReporter.blocked(request, Stage.PREFILL_WAITING, QueueBlockReason.PREFILL_INFLIGHT_FULL,
                         queue.endpoint().ipPort());
@@ -196,7 +196,7 @@ public final class PrefillQueueLoop {
     }
 
     private void dispatch(PrefillQueue queue, Request request, long kvTokens) {
-        PrefillChoice choice = request.prefillChoice();
+        SelectedPrefill choice = request.selectedPrefill();
         // 先加记录再推进阶段：推进成功后请求随时可能结束，结束时的清理要能找到这条记录
         queue.addDispatched(new DispatchedRequest(request, kvTokens, choice.predictedMs()));
         if (!request.moveTo(Stage.PREFILL_WAITING, Stage.DECODE_WAITING)) {
@@ -210,7 +210,7 @@ public final class PrefillQueueLoop {
         sendToDecodeQueue.accept(request);
     }
 
-    private static void reportSelection(PrefillChoice choice) {
+    private static void reportSelection(SelectedPrefill choice) {
         try {
             choice.commitTelemetry().run();
         } catch (RuntimeException failure) {

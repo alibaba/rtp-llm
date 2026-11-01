@@ -219,7 +219,7 @@ public class RequestSchedulerV2 {
             try (WorkerEndpoint.EndpointHold hold = prefillCheck.hold(request)) {
                 if (hold == null) {
                     cleanup.returnToMain(request, Stage.DECODE_WAITING);
-                } else if (request.publish(Stage.DECODE_WAITING, List.of(request.prefillChoice().serverStatus()))) {
+                } else if (request.publish(Stage.DECODE_WAITING, List.of(request.selectedPrefill().serverStatus()))) {
                     cleanup.releasePublished(request);
                 }
             } finally {

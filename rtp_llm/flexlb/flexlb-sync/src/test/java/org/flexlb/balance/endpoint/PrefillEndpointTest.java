@@ -102,7 +102,7 @@ class PrefillEndpointTest {
     void finishedOnlyStatusReleasesV2PrefillClaim() {
         var queue = createV2Queue();
         var request = V2TestSupport.request(SchedulingTestConfig.newConfig(), "901", 50, 10);
-        queue.addDispatched(new DispatchedRequest(request, 10L, 5L));
+        V2TestSupport.dispatch(queue, new DispatchedRequest(request, 10L, 5L));
         assertNull(queue.tryAcquirePublishSlot(request, 1));
         assertEquals(1L, queue.inflightCount());
         WorkerStatusResponse response = new WorkerStatusResponse();
@@ -122,7 +122,7 @@ class PrefillEndpointTest {
         org.springframework.test.util.ReflectionTestUtils.setField(request, "publishedAtMs",
                 System.currentTimeMillis() - 10_000L);
         var record = new DispatchedRequest(request, 10L, 5L);
-        queue.addDispatched(record);
+        V2TestSupport.dispatch(queue, record);
         assertNull(queue.tryAcquirePublishSlot(request, 1));
         assertTrue(record.statusExpired(System.currentTimeMillis(), 1000L));
         WorkerStatusResponse response = new WorkerStatusResponse();

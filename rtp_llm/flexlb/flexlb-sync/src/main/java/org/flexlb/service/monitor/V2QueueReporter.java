@@ -162,7 +162,7 @@ public class V2QueueReporter {
             if (stage.isEnded() || stage == Stage.PUBLISHED) {
                 continue;
             }
-            var choice = request.prefillChoice();
+            var choice = request.selectedPrefill();
             String endpoint = stage == Stage.PREFILL_WAITING && choice != null ? choice.endpoint().ipPort() : "all";
             QueueKey key = new QueueKey(queueName(stage), endpoint);
             counts.merge(key, 1L, Long::sum);

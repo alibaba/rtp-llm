@@ -86,7 +86,7 @@ class V2QueueReporterTest {
         Request prefill = add("2");
         V2TestSupport.choose(prefill, V2TestSupport.prefillEndpoint("p1:8000"), 0L, 10L);
         prefill.moveTo(Stage.MAIN_WAITING, Stage.PREFILL_WAITING);
-        V2TestSupport.register(prefills, prefill.prefillChoice().endpoint());
+        V2TestSupport.register(prefills, prefill.selectedPrefill().endpoint());
         prefills.addWaiting(prefill);
         Request decode = add("3");
         decode.moveTo(Stage.MAIN_WAITING, Stage.PREFILL_WAITING);

@@ -120,7 +120,7 @@ public class CostBasedPrefillStrategy {
     }
 
     /**
-     * 调度线程根据当前队列计算最终 TTFT，再沿用缓存亲和与同分轮询规则选点。
+     * 调度线程读取当前队列的累计预测工作量作为耗时评分，再沿用缓存亲和与同分轮询规则选点。
      * 新增或重启的节点没有对应材料时重新准备，不能把旧节点的缓存和耗时套到新节点上。
      */
     public PlacementResult<SelectedRole, RoleType> selectPrepared(BalanceContext context,

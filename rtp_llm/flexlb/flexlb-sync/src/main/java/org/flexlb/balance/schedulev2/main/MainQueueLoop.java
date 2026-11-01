@@ -12,8 +12,8 @@ import org.flexlb.balance.schedulev2.SelectionResult;
 import org.flexlb.balance.schedulev2.prefill.PrefillPicker;
 import org.flexlb.balance.schedulev2.prefill.PrefillQueue;
 import org.flexlb.balance.schedulev2.prefill.PrefillQueueRegistry;
-import org.flexlb.balance.schedulev2.request.PrefillChoice;
 import org.flexlb.balance.schedulev2.request.Request;
+import org.flexlb.balance.schedulev2.request.SelectedPrefill;
 import org.flexlb.balance.schedulev2.request.Stage;
 import org.flexlb.balance.strategy.PrefillInputs;
 import org.flexlb.balance.strategy.SelectedRole;
@@ -66,7 +66,7 @@ public final class MainQueueLoop {
      */
     private final RoleType prefillRole;
     /**
-     * 选好 Prefill 后把请求交给 Prefill 队列，请求上已经带着选好的 {@link PrefillChoice}。
+     * 选好 Prefill 后把请求交给 Prefill 队列，请求上已经带着选好的 {@link SelectedPrefill}。
      */
     private final Consumer<Request> sendToPrefillQueue;
     /**
@@ -235,9 +235,9 @@ public final class MainQueueLoop {
     }
 
     private boolean sendPicked(Request request, SelectedRole selected, FlexlbConfig config) {
-        PrefillChoice choice;
+        SelectedPrefill choice;
         try {
-            choice = PrefillChoice.from(selected, request.seqLen());
+            choice = SelectedPrefill.from(selected, request.seqLen());
         } catch (RuntimeException failure) {
             request.fail(StrategyErrorType.DISPATCH_FAILED, "prefill selection failed: " + failure.getMessage());
             return true;
@@ -250,7 +250,7 @@ public final class MainQueueLoop {
                     choice.endpoint().ipPort());
             return false;
         }
-        request.setPrefillChoice(choice);
+        request.setSelectedPrefill(choice);
         if (!request.moveTo(Stage.MAIN_WAITING, Stage.PREFILL_WAITING)) {
             // 选的过程中请求已经结束
             cleanup.releaseQueueSlot(request);
@@ -264,7 +264,7 @@ public final class MainQueueLoop {
     /**
      * 先尝试占共享名额；满了只标记选中 Prefill 队列里的一个低优先级请求，等待 Prefill 线程退回并归还名额。
      */
-    private boolean reserveQueueSlot(Request request, PrefillChoice choice, FlexlbConfig config) {
+    private boolean reserveQueueSlot(Request request, SelectedPrefill choice, FlexlbConfig config) {
         int endpointCount = endpointRegistry.getEndpointCount(prefillRole);
         if (!queueCapacity.tryReserveEngineSubQueueSlot(config, prefillRole, endpointCount)) {
             if (!config.isPriorityOrdering()

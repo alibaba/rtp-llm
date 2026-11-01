@@ -85,7 +85,7 @@ public final class RequestCleanup {
             queue.removeDispatched(request);
         }
         releaseQueueSlot(request);
-        request.setPrefillChoice(null);
+        request.setSelectedPrefill(null);
         request.setPrefillDecidedAtMs(0L);
         request.setPrefillQueuedAtMs(0L);
         if (request.moveTo(expected, Stage.MAIN_WAITING)) {

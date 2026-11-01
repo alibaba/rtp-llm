@@ -1,8 +1,8 @@
 package org.flexlb.balance.schedulev2.prefill;
 
 import org.flexlb.balance.endpoint.PrefillEndpoint;
-import org.flexlb.balance.schedulev2.request.PrefillChoice;
 import org.flexlb.balance.schedulev2.request.Request;
+import org.flexlb.balance.schedulev2.request.SelectedPrefill;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.springframework.stereotype.Component;
 
@@ -63,7 +63,7 @@ public class PrefillQueueRegistry {
             request.fail(StrategyErrorType.DISPATCH_FAILED, "prefill queues are shutting down");
             return;
         }
-        PrefillChoice choice = request.prefillChoice();
+        SelectedPrefill choice = request.selectedPrefill();
         PrefillQueue queue = find(choice.endpoint());
         if (queue == null) {
             request.fail(StrategyErrorType.DISPATCH_FAILED, "prefill endpoint queue has retired");
@@ -111,7 +111,7 @@ public class PrefillQueueRegistry {
      * 请求选中的 Prefill 的队列，没选或队列已移除时返回 null。
      */
     public PrefillQueue find(Request request) {
-        PrefillChoice choice = request.prefillChoice();
+        SelectedPrefill choice = request.selectedPrefill();
         if (choice == null) {
             return null;
         }

@@ -83,7 +83,7 @@ class PrefillQueueLoopTest {
 
         assertEquals(Stage.MAIN_WAITING, request.stage());
         assertFalse(request.future().isDone());
-        assertNull(request.prefillChoice());
+        assertNull(request.selectedPrefill());
         assertTrue(sentToDecode.isEmpty());
         assertEquals(0, queueCapacity.engineSubQueueWaiting(RoleType.PREFILL));
         assertEquals(1L, queueCapacity.globalQueueAndEngineSubQueueCount());
@@ -189,7 +189,7 @@ class PrefillQueueLoopTest {
         assertFalse(loop.runOnce());
 
         assertEquals(Stage.MAIN_WAITING, request.stage());
-        assertNull(request.prefillChoice());
+        assertNull(request.selectedPrefill());
         assertEquals(1, mainQueue.size());
         assertEquals(0, queueCapacity.engineSubQueueWaiting(RoleType.PREFILL));
         assertEquals(1L, queueCapacity.globalQueueAndEngineSubQueueCount());
@@ -371,7 +371,7 @@ class PrefillQueueLoopTest {
         }).when(endpointRegistry).get(RoleType.PREFILL, "p1:8000");
         queues.start(queue -> new PrefillQueueLoop(queue, queues, cleanup, mainQueue, endpointRegistry, configService,
                 reporter, request -> {
-                    if (request.prefillChoice().endpoint() == other) {
+                    if (request.selectedPrefill().endpoint() == other) {
                         secondSent.complete(request);
                     }
                 }, mock(V2QueueReporter.class)));

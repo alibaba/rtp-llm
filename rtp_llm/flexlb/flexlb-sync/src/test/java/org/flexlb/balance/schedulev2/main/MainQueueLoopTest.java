@@ -99,9 +99,9 @@ class MainQueueLoopTest {
         assertTrue(loop.runOnce());
 
         assertEquals(List.of(request), sent);
-        assertSame(endpoint, request.prefillChoice().endpoint());
-        assertEquals(4L, request.prefillChoice().hitCacheTokens());
-        assertEquals(30L, request.prefillChoice().predictedMs());
+        assertSame(endpoint, request.selectedPrefill().endpoint());
+        assertEquals(4L, request.selectedPrefill().hitCacheTokens());
+        assertEquals(30L, request.selectedPrefill().predictedMs());
         verify(hold).close();
         assertEquals(Stage.PREFILL_WAITING, request.stage());
         assertEquals(0, mainQueue.size());

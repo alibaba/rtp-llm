@@ -2,10 +2,12 @@ package org.flexlb.balance.schedulev2;
 
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
+import org.flexlb.balance.schedulev2.prefill.DispatchedRequest;
 import org.flexlb.balance.schedulev2.prefill.PrefillQueue;
 import org.flexlb.balance.schedulev2.prefill.PrefillQueueRegistry;
-import org.flexlb.balance.schedulev2.request.PrefillChoice;
 import org.flexlb.balance.schedulev2.request.Request;
+import org.flexlb.balance.schedulev2.request.SelectedPrefill;
+import org.flexlb.balance.schedulev2.request.Stage;
 import org.flexlb.balance.strategy.SelectedRole;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
@@ -129,10 +131,23 @@ public final class V2TestSupport {
     /**
      * 直接给请求设置选好的 Prefill，跳过主队列。
      */
-    public static PrefillChoice choose(Request request, PrefillEndpoint endpoint, long hitCache, long predictedMs) {
-        PrefillChoice choice = new PrefillChoice(endpoint, new ServerStatus(), hitCache, predictedMs, () -> {});
-        request.setPrefillChoice(choice);
+    public static SelectedPrefill choose(Request request, PrefillEndpoint endpoint, long hitCache, long predictedMs) {
+        SelectedPrefill choice = new SelectedPrefill(endpoint, new ServerStatus(), hitCache, predictedMs, () -> {});
+        request.setSelectedPrefill(choice);
         return choice;
+    }
+
+    /**
+     * 从初始请求走完 Prefill 入队和交给 Decode 的过程，工作量只在入队时增加。
+     */
+    public static void dispatch(PrefillQueue queue, DispatchedRequest record) {
+        Request request = record.request();
+        choose(request, queue.endpoint(), 0L, record.predictedMs());
+        org.junit.jupiter.api.Assertions.assertTrue(request.moveTo(Stage.MAIN_WAITING, Stage.PREFILL_WAITING));
+        queue.addWaiting(request);
+        queue.addDispatched(record);
+        org.junit.jupiter.api.Assertions.assertTrue(request.moveTo(Stage.PREFILL_WAITING, Stage.DECODE_WAITING));
+        queue.removeWaiting(request);
     }
 
     private static WorkerStatus.TaskObservation task(String requestId, TaskPhase phase) {

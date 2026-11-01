@@ -49,6 +49,6 @@ public final class PrefillPicker {
                                                       PrefillInputs inputs) {
         return prefillStrategy.selectPrepared(request.ctx(), role, group, inputs,
                 candidate -> candidate.endpoint().prefillQueue()
-                        .estimatedTtftMs(request, candidate.predictedMs()));
+                        .estimatedWorkMs(candidate.predictedMs()));
     }
 }

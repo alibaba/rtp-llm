@@ -34,7 +34,7 @@ public final class PrefillPublishCheck {
     }
 
     public boolean isAvailable(Request request) {
-        PrefillEndpoint endpoint = request.prefillChoice().endpoint();
+        PrefillEndpoint endpoint = request.selectedPrefill().endpoint();
         return !endpoint.isRetired() && endpoints.get(endpoint.getStatus().getRole(), endpoint.ipPort()) == endpoint;
     }
 
@@ -42,7 +42,7 @@ public final class PrefillPublishCheck {
      * 节点准备下线、已移除或同地址已被替换时返回 null。
      */
     public WorkerEndpoint.EndpointHold hold(Request request) {
-        PrefillEndpoint endpoint = request.prefillChoice().endpoint();
+        PrefillEndpoint endpoint = request.selectedPrefill().endpoint();
         WorkerEndpoint.EndpointHold hold = endpoints.hold(endpoint.getStatus().getRole(), endpoint.ipPort());
         if (hold == null) {
             return null;

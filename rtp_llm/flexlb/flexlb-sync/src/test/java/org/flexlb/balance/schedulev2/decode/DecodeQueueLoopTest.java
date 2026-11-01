@@ -239,9 +239,16 @@ class DecodeQueueLoopTest {
         when(prefill.prefillQueue()).thenReturn(queue);
         var requests = new java.util.ArrayList<Request>();
         for (int i = 1; i <= 6; i++) {
-            Request request = addWaiting(Integer.toString(i));
+            Request request = V2TestSupport.request(config, Integer.toString(i), 50, 16L);
+            request.setQueueSeq(i);
             V2TestSupport.choose(request, prefill, 0L, 0L);
+            request.moveTo(Stage.MAIN_WAITING, Stage.PREFILL_WAITING);
+            queue.addWaiting(request);
             queue.addDispatched(new DispatchedRequest(request, 16L, 0L));
+            request.moveTo(Stage.PREFILL_WAITING, Stage.DECODE_WAITING);
+            queue.removeWaiting(request);
+            requestTable.add(request);
+            decodeQueue.addWaiting(request);
             requests.add(request);
         }
         doAnswer(call -> queue.tryAcquirePublishSlot(call.getArgument(0), call.getArgument(1))).when(prefillCheck)
@@ -309,7 +316,7 @@ class DecodeQueueLoopTest {
         assertEquals(Stage.PUBLISHED, request.stage());
         Response response = request.future().join();
         assertTrue(response.isSuccess());
-        assertEquals(List.of(request.prefillChoice().serverStatus(), decodeStatus), response.getServerStatus());
+        assertEquals(List.of(request.selectedPrefill().serverStatus(), decodeStatus), response.getServerStatus());
         assertEquals(0, decodeQueue.reservedCount());
         assertEquals(0, requestTable.size());
         assertEquals(0L, queueCapacity.globalQueueAndEngineSubQueueCount());
@@ -525,7 +532,7 @@ class DecodeQueueLoopTest {
         assertEquals(Stage.PUBLISHED, first.stage());
         assertEquals(Stage.PUBLISHED, second.stage());
         assertSame(emptyDecode, second.decodeChoice().endpoint());
-        assertEquals(List.of(second.prefillChoice().serverStatus(), emptyStatus),
+        assertEquals(List.of(second.selectedPrefill().serverStatus(), emptyStatus),
                 second.future().join().getServerStatus());
         assertNotNull(emptyDecode.reservationHandle("2"));
         assertEquals(1L, emptyDecode.routingView().totalLoad());
@@ -840,7 +847,7 @@ class DecodeQueueLoopTest {
     private void assertReturnedToMain(Request request) {
         assertEquals(Stage.MAIN_WAITING, request.stage());
         assertFalse(request.future().isDone());
-        assertNull(request.prefillChoice());
+        assertNull(request.selectedPrefill());
         assertNull(request.decodeChoice());
         assertEquals(0L, request.prefillDecidedAtMs());
         assertEquals(1, mainQueue.size());

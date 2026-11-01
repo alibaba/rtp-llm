@@ -384,7 +384,7 @@ public final class DecodeQueueLoop {
         }
         decodeQueue.removeReserved(request);
         if (request.publish(Stage.DECODE_RESERVED,
-                List.of(request.prefillChoice().serverStatus(), choice.serverStatus()))) {
+                List.of(request.selectedPrefill().serverStatus(), choice.serverStatus()))) {
             publishedThisRound++;
             cleanup.releasePublished(request);
             decodeQueue.addPublished(request);
@@ -514,7 +514,7 @@ public final class DecodeQueueLoop {
     private String groupOf(Request request) {
         String group = router.resolvePolicyGroup(request.ctx());
         if (StringUtils.isBlank(group)) {
-            return request.prefillChoice().serverStatus().getGroup();
+            return request.selectedPrefill().serverStatus().getGroup();
         }
         return group;
     }
@@ -528,7 +528,7 @@ public final class DecodeQueueLoop {
         if (reason == null) {
             return true;
         }
-        queueReporter.blocked(request, request.stage(), reason, request.prefillChoice().endpoint().ipPort());
+        queueReporter.blocked(request, request.stage(), reason, request.selectedPrefill().endpoint().ipPort());
         return false;
     }
 
@@ -670,7 +670,7 @@ public final class DecodeQueueLoop {
                 return true;
             }
             if (request.publish(Stage.DECODE_WAITING,
-                    List.of(request.prefillChoice().serverStatus(), choice.serverStatus()))) {
+                    List.of(request.selectedPrefill().serverStatus(), choice.serverStatus()))) {
                 publishedThisRound++;
                 cleanup.releasePublished(request);
                 decodeQueue.addPublished(request);

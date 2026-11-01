@@ -15,23 +15,23 @@ import org.flexlb.dao.loadbalance.ServerStatus;
  * @param predictedMs      预估的 Prefill 耗时
  * @param commitTelemetry  dispatch 时上报的选路指标
  */
-public record PrefillChoice(PrefillEndpoint endpoint,
-                            ServerStatus serverStatus,
-                            long hitCacheTokens,
-                            long predictedMs,
-                            Runnable commitTelemetry) {
+public record SelectedPrefill(PrefillEndpoint endpoint,
+                              ServerStatus serverStatus,
+                              long hitCacheTokens,
+                              long predictedMs,
+                              Runnable commitTelemetry) {
 
     /**
      * 从选择结果取出需要的信息，并关闭选择结果持有的机器 hold，排队期间不阻止这台机器下线。
      */
-    public static PrefillChoice from(SelectedRole selected, long seqLen) {
+    public static SelectedPrefill from(SelectedRole selected, long seqLen) {
         WorkerEndpoint.EndpointHold hold = selected.takeEndpointHold();
         try {
             ServerStatus serverStatus = selected.serverStatus();
             DebugInfo debugInfo = serverStatus.getDebugInfo();
             long hitCache = debugInfo == null ? 0L : debugInfo.getHitCacheLen();
             long hitCacheTokens = Math.max(0L, Math.min(seqLen, hitCache));
-            return new PrefillChoice((PrefillEndpoint) hold.endpoint(), serverStatus, hitCacheTokens,
+            return new SelectedPrefill((PrefillEndpoint) hold.endpoint(), serverStatus, hitCacheTokens,
                     selected.prefillWorkMs(), selected.takeCommitTelemetry());
         } finally {
             hold.close();

@@ -48,7 +48,7 @@ public final class Request {
     /**
      * 主队列给它选的 Prefill。进入 PREFILL_WAITING 前设置；这台 Prefill 下线、请求退回主队列时清空。
      */
-    private volatile PrefillChoice prefillChoice;
+    private volatile SelectedPrefill selectedPrefill;
     /**
      * 最近一次进入 Prefill 队列的时间，KV 不够时用来判断队头是否等得太久。
      */
@@ -156,12 +156,12 @@ public final class Request {
         return queueSlotRole.getAndSet(null);
     }
 
-    public PrefillChoice prefillChoice() {
-        return prefillChoice;
+    public SelectedPrefill selectedPrefill() {
+        return selectedPrefill;
     }
 
-    public void setPrefillChoice(PrefillChoice prefillChoice) {
-        this.prefillChoice = prefillChoice;
+    public void setSelectedPrefill(SelectedPrefill selectedPrefill) {
+        this.selectedPrefill = selectedPrefill;
     }
 
     public long prefillDecidedAtMs() {
