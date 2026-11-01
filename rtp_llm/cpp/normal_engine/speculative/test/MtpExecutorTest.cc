@@ -2274,7 +2274,7 @@ void MtpExecutorTest::runSingleBatchDecodeScenario(bool with_prefill_only) {
     auto sampler_output =
         SamplerOutput{torch::tensor({3, 2, 0, 0, 0}, torch::kInt32).reshape({(int64_t)batch_size, 5})};
     sampler_output.all_probs = torch::tensor(target_sample_all_probs_data)
-                                   .reshape({(int64_t)batch_size, (int64_t)(propose_step + 1), (int64_t)vocab_size});
+                                   .reshape({(int64_t)(batch_size * (propose_step + 1)), (int64_t)vocab_size});
     components.fake_sampler->setInputs({sampler_input});
     components.fake_sampler->setOutputs({sampler_output});
 
@@ -4626,7 +4626,7 @@ TEST_F(MtpExecutorTest, testMultiBatchDecode) {
     auto sampler_output =
         SamplerOutput{torch::tensor({3, 2, 0, 0, 0, 3, 0, 2, 2, 1}, torch::kInt32).reshape({(int64_t)batch_size, 5})};
     sampler_output.all_probs = torch::tensor(target_sample_all_probs_data)
-                                   .reshape({(int64_t)batch_size, (int64_t)(propose_step + 1), (int64_t)vocab_size});
+                                   .reshape({(int64_t)(batch_size * (propose_step + 1)), (int64_t)vocab_size});
     components.fake_sampler->setInputs({sampler_input});
     components.fake_sampler->setOutputs({sampler_output});
 

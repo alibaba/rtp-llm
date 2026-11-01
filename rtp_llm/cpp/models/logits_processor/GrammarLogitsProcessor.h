@@ -39,25 +39,36 @@ public:
     // device-side next-step state, so the normal-decode async device-state
     // fast path must keep the pre-sampler wait for streams carrying it.
     bool isStateful() const override {
-        return !updateTimedOut();
+        // The stream-facing committed length still advances after grammar is disabled.
+        return true;
     }
 
+    // Sticky once either MTP verification or committed updates exceed the shared
+    // budget three times consecutively. Each stage resets only its own streak.
     bool updateTimedOut() const;
 
+    // A verification reaching the timeout limit preserves its computed mask/cap;
+    // subsequent calls bypass the matcher.
     ErrorResult<int> prepareSpeculative(const SpecLogitsProcessorRequest& request) override;
 
     std::optional<int64_t> committedOutputLen() const override;
 
 private:
+    static constexpr int kConsecutiveTimeoutLimit = 3;
+
     class DecodeMaskBuilder;
 
     ErrorInfo acceptCommittedLocked(const int32_t* tokens, size_t n);
+    // Caller must hold state_mutex_.
+    bool grammarDisabled() const;
+    void reportTimeout(const char* stage, int64_t elapsed_us, int token_count) const;
 
     std::shared_ptr<RtpGrammarMatcher> matcher_;
     int64_t                            eos_token_id_         = 0;
     int64_t                            committed_output_len_ = 0;
     int                                update_timeout_ms_;
-    bool                               update_timed_out_ = false;
+    int                                consecutive_update_timeouts_ = 0;
+    int                                consecutive_verify_timeouts_ = 0;
     kmonitor::MetricsReporterPtr       metrics_reporter_;
     const std::string                  stream_log_tag_;
     std::unique_ptr<DecodeMaskBuilder> decode_mask_builder_;

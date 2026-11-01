@@ -91,8 +91,9 @@ def init_grammar_group_args(parser, grammar_config, grammar_admission_config):
         type=_positive_int,
         default=10,
         help=(
-            "Positive wall-clock budget in milliseconds for one stream's CPU grammar state update. "
-            "An update exceeding the budget disables grammar for the rest of that stream; "
+            "Positive wall-clock budget in milliseconds for each CPU MTP grammar verification "
+            "or committed state update. Each stage counts consecutive overruns independently; "
+            "three overruns in either stage disable grammar for the rest of that stream. "
             "non-positive values are rejected."
         ),
     )

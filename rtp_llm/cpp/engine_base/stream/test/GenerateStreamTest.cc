@@ -8,15 +8,18 @@
 #include "rtp_llm/cpp/engine_base/grammar/XGrammarBackend.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include "rtp_llm/cpp/models/logits_processor/GrammarLogitsProcessor.h"
+#include "rtp_llm/cpp/models/logits_processor/SpecLogitsProcessor.h"
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
 #include "rtp_llm/cpp/testing/TestBase.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/utils/Exception.h"
 #include "autil/EnvUtil.h"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <future>
+#include <limits>
 #include <mutex>
 #include <thread>
 #include <vector>
@@ -107,12 +110,12 @@ public:
     }
 
     GenerateStreamPtr createContextStream(std::vector<int>                input_ids,
-                                          std::shared_ptr<GenerateConfig> generate_config = nullptr) {
+                                          std::shared_ptr<GenerateConfig> generate_config  = nullptr,
+                                          const ResourceContext&          resource_context = {}) {
         std::shared_ptr<GenerateInput> generate_input(new GenerateInput());
         if (!generate_config) {
             generate_config = std::make_shared<GenerateConfig>();
         }
-        ResourceContext resource_context;
         generate_input->generate_config = generate_config;
         generate_input->begin_time_us   = autil::TimeUtility::currentTimeInMicroSeconds();
         generate_input->input_ids =
@@ -192,7 +195,7 @@ protected:
         }
         auto processor = std::make_shared<GrammarLogitsProcessor>(matcher.value());
         // The native startup boundary requires a positive budget; force only the
-        // test instance to expire after its first synchronous update without sleeping.
+        // test instance to count each synchronous update as slow without sleeping.
         processor->update_timeout_ms_ = 0;
         return processor;
     }
@@ -381,10 +384,10 @@ TEST_F(GenerateStreamTest, generationPrefillCudaGraphReplayStatusIsReturnedInAux
               "replayed");
 }
 
-TEST_F(GenerateStreamTest, grammarUpdateTimeoutPersistsThroughFinalDecodeOutput) {
+TEST_F(GenerateStreamTest, threeGrammarUpdateTimeoutsKeepDecodeOutputAndDisableOnlyGrammar) {
     auto builder = GenerateStreamBuilder();
     auto stream  = std::dynamic_pointer_cast<NormalGenerateStream>(builder.createContextStream({1, 2, 3}));
-    stream->generateConfig()->max_new_tokens = 2;
+    stream->generateConfig()->max_new_tokens = 8;
     stream->generateConfig()->is_streaming   = true;
     stream->generateConfig()->aux_info       = true;
     stream->generate_status_->status.store(StreamState::RUNNING);
@@ -393,37 +396,139 @@ TEST_F(GenerateStreamTest, grammarUpdateTimeoutPersistsThroughFinalDecodeOutput)
     stream->logits_processor_list_.push_back(processor);
     EXPECT_FALSE(stream->xgrammarUpdateTimedOut());
 
-    updateOneToken(stream, 'a');
-    ASSERT_FALSE(stream->hasError());
-    EXPECT_TRUE(stream->xgrammarUpdateTimedOut());
-    ASSERT_TRUE(stream->hasOutput());
-    auto first = stream->nextOutput(1);
-    ASSERT_TRUE(first.ok());
-    ASSERT_EQ(first.value().generate_outputs.size(), 1);
-    EXPECT_TRUE(first.value().generate_outputs[0].aux_info.xgrammar_update_timeout);
-    EXPECT_FALSE(first.value().generate_outputs[0].finished);
-    EXPECT_EQ(first.value().generate_outputs[0].output_ids.item<int32_t>(), 'a');
+    for (int round = 0; round < 8; ++round) {
+        SCOPED_TRACE(round);
+        // A fast third commit resets the first two slow samples. The next
+        // three slow commits disable grammar; subsequent fast commits keep it off.
+        processor->update_timeout_ms_ = round == 2 || round >= 6 ? std::numeric_limits<int>::max() : 0;
+        SamplerInputs inputs;
+        inputs.logits = torch::zeros({1, 128}, torch::kFloat32);
+        ASSERT_FALSE(processor->process(inputs, 0, 1).has_value());
+        EXPECT_EQ(inputs.logits[0]['a'].item<float>(), 0.0f);
+        if (round < 6) {
+            EXPECT_LT(inputs.logits[0]['b'].item<float>(), -1e20f);
+        } else {
+            EXPECT_TRUE(torch::equal(inputs.logits, torch::zeros_like(inputs.logits)));
+        }
+        const int32_t token = round < 6 ? 'a' : 'b';
+        updateOneToken(stream, token);
+        ASSERT_FALSE(stream->hasError()) << stream->statusInfo().ToString();
+        EXPECT_FALSE(stream->hasEvent(StreamEvents::Error));
+        EXPECT_EQ(stream->xgrammarUpdateTimedOut(), round >= 5);
+        EXPECT_EQ(processor->updateTimedOut(), round >= 5);
+        EXPECT_EQ(stream->outputTokenLen(), round + 1);
+        EXPECT_EQ(processor->committedOutputLen(), round + 1);
+        EXPECT_TRUE(processor->isStateful());
+        EXPECT_FALSE(stream->validateLogitsProcessorState().has_value());
+        ASSERT_TRUE(stream->hasOutput());
 
-    // 'b' violates a*, but after timeout generation must continue without a
-    // matcher rejection or a committed-output-length parity error.
-    updateOneToken(stream, 'b');
-    ASSERT_FALSE(stream->hasError());
-    EXPECT_EQ(stream->outputTokenLen(), 2);
-    EXPECT_FALSE(processor->committedOutputLen().has_value());
-    ASSERT_TRUE(stream->hasOutput());
-    auto final = stream->nextOutput(1);
-    ASSERT_TRUE(final.ok());
-    ASSERT_EQ(final.value().generate_outputs.size(), 1);
-    EXPECT_TRUE(final.value().generate_outputs[0].aux_info.xgrammar_update_timeout);
-    EXPECT_TRUE(final.value().generate_outputs[0].finished);
-    EXPECT_EQ(final.value().generate_outputs[0].output_ids.item<int32_t>(), 'b');
+        auto output = stream->nextOutput(1);
+        ASSERT_TRUE(output.ok()) << output.status().ToString();
+        ASSERT_EQ(output.value().generate_outputs.size(), 1);
+        const auto& generated = output.value().generate_outputs[0];
+        EXPECT_TRUE(torch::equal(generated.output_ids, torch::full({1, 1}, token, torch::kInt32)));
+        EXPECT_EQ(generated.aux_info.xgrammar_update_timeout, round >= 5);
+        EXPECT_EQ(generated.finished, round == 7);
+        if (round == 1 || round == 4) {
+            // Empty updates at the stream/processor boundary neither add a
+            // sample nor erase the two pending slow commits.
+            for (const int budget : {0, std::numeric_limits<int>::max()}) {
+                processor->update_timeout_ms_ = budget;
+                ASSERT_FALSE(stream->updateLogitProcessorStatus(torch::empty({1, 0}, torch::kInt32), 0).has_value());
+                EXPECT_FALSE(stream->xgrammarUpdateTimedOut());
+                EXPECT_EQ(processor->committedOutputLen(), round + 1);
+            }
+        }
+    }
+    EXPECT_FALSE(stream->hasOutput());
+    auto finished = stream->nextOutput(1);
+    ASSERT_FALSE(finished.ok());
+    EXPECT_EQ(finished.status().code(), ErrorCode::FINISHED);
 }
 
-TEST_F(GenerateStreamTest, grammarUpdateTimeoutPersistsThroughFinalMtpOutput) {
-    auto builder = GenerateStreamBuilder();
-    auto stream  = std::dynamic_pointer_cast<NormalGenerateStream>(builder.createContextStream({1, 2, 3}));
-    stream->generateConfig()->max_new_tokens = 2;
-    stream->generateConfig()->is_streaming   = false;
+TEST_F(GenerateStreamTest, threeGrammarUpdateTimeoutsKeepMtpOutputIncludingMaxTokensBoundary) {
+    // Finish on the third slow commit or the following degraded commit,
+    // with both complete and truncated two-token MTP windows.
+    for (const int max_new_tokens : {5, 6, 7, 8}) {
+        SCOPED_TRACE(max_new_tokens);
+        auto builder = GenerateStreamBuilder();
+        // Successful multi-token commits consult the cache topology even when
+        // this MHA fixture has no linear-attention blocks to swap.
+        ResourceContext resource_context;
+        resource_context.cache_manager = std::make_shared<KVCacheManager>(builder.init_config());
+        ASSERT_TRUE(resource_context.cache_manager->init());
+        auto stream = std::dynamic_pointer_cast<NormalGenerateStream>(
+            builder.createContextStream({1, 2, 3}, nullptr, resource_context));
+        ASSERT_EQ(stream->currentBatchSize(), 1);
+        stream->generateConfig()->max_new_tokens = max_new_tokens;
+        stream->generateConfig()->is_streaming   = max_new_tokens != 6;
+        stream->generateConfig()->aux_info       = true;
+        stream->generate_status_->status.store(StreamState::RUNNING);
+        auto processor = makeTimeoutGrammarProcessor();
+        ASSERT_TRUE(processor);
+        stream->logits_processor_list_.push_back(processor);
+        auto sp_output_buffer    = std::make_shared<SpeculativeExecutorStreamOutput>();
+        sp_output_buffer->tokens = torch::zeros({1, 2}, torch::kInt32);
+        stream->setSPOutputBuffer(sp_output_buffer);
+        EXPECT_FALSE(stream->xgrammarUpdateTimedOut());
+
+        for (int round = 0; round < (max_new_tokens + 1) / 2; ++round) {
+            SCOPED_TRACE(round);
+            const int32_t        token = round < 3 ? 'a' : 'b';
+            StreamSpecUpdateInfo update_info{
+                .new_tokens          = torch::full({1, 2}, token, torch::kInt32),
+                .num_new_tokens      = 2,
+                .draft_token         = -1,
+                .draft_hidden_states = torch::Tensor(),
+                .draft_token_probs   = torch::Tensor(),
+            };
+            stream->specUpdate(update_info);
+            ASSERT_FALSE(stream->hasError()) << stream->statusInfo().ToString();
+            EXPECT_FALSE(stream->hasEvent(StreamEvents::Error));
+            EXPECT_EQ(stream->xgrammarUpdateTimedOut(), round >= 2);
+            EXPECT_EQ(processor->updateTimedOut(), round >= 2);
+            const int committed = std::min((round + 1) * 2, max_new_tokens);
+            EXPECT_EQ(stream->outputTokenLen(), committed);
+            EXPECT_EQ(processor->committedOutputLen(), committed);
+            EXPECT_TRUE(processor->isStateful());
+            EXPECT_FALSE(stream->validateLogitsProcessorState().has_value());
+            EXPECT_EQ(sp_output_buffer->tokens[0][0].item<int32_t>(), token);
+
+            const bool finished = committed == max_new_tokens;
+            if (!stream->isStreaming() && !finished) {
+                EXPECT_FALSE(stream->hasOutput());
+                continue;
+            }
+            ASSERT_TRUE(stream->hasOutput());
+            auto output = stream->nextOutput(1);
+            ASSERT_TRUE(output.ok()) << output.status().ToString();
+            ASSERT_EQ(output.value().generate_outputs.size(), 1);
+            const auto& generated  = output.value().generate_outputs[0];
+            const int   output_len = stream->isStreaming() ? committed - round * 2 : max_new_tokens;
+            EXPECT_TRUE(torch::equal(generated.output_ids, torch::full({1, output_len}, token, torch::kInt32)));
+            EXPECT_EQ(generated.aux_info.xgrammar_update_timeout, round >= 2);
+            EXPECT_EQ(generated.finished, finished);
+        }
+        EXPECT_FALSE(stream->hasOutput());
+        auto finished = stream->nextOutput(1);
+        ASSERT_FALSE(finished.ok());
+        EXPECT_EQ(finished.status().code(), ErrorCode::FINISHED);
+    }
+}
+
+TEST_F(GenerateStreamTest, threeGrammarVerifyTimeoutsSurviveFastMtpCommitsAndReachAuxInfo) {
+    constexpr int   kStep   = 2;
+    constexpr int   kVocab  = 128;
+    constexpr int   kWords  = kVocab / 32;
+    auto            builder = GenerateStreamBuilder();
+    ResourceContext resource_context;
+    resource_context.cache_manager = std::make_shared<KVCacheManager>(builder.init_config());
+    ASSERT_TRUE(resource_context.cache_manager->init());
+    auto stream = std::dynamic_pointer_cast<NormalGenerateStream>(
+        builder.createContextStream({1, 2, 3}, nullptr, resource_context));
+    ASSERT_EQ(stream->currentBatchSize(), 1);
+    stream->generateConfig()->max_new_tokens = 8;
+    stream->generateConfig()->is_streaming   = true;
     stream->generateConfig()->aux_info       = true;
     stream->generate_status_->status.store(StreamState::RUNNING);
     auto processor = makeTimeoutGrammarProcessor();
@@ -433,32 +538,114 @@ TEST_F(GenerateStreamTest, grammarUpdateTimeoutPersistsThroughFinalMtpOutput) {
     sp_output_buffer->tokens = torch::zeros({1, 2}, torch::kInt32);
     stream->setSPOutputBuffer(sp_output_buffer);
 
-    for (int32_t token : {'a', 'b'}) {
+    for (int round = 0; round < 4; ++round) {
+        SCOPED_TRACE(round);
+        const int32_t                    draft[] = {'a', 'b'};
+        std::vector<int32_t>             mask((kStep + 1) * kWords, 0);
+        const SpecLogitsProcessorRequest request{draft, kStep, mask.data(), kWords, kVocab};
+        processor->update_timeout_ms_ = round < 3 ? 0 : std::numeric_limits<int>::max();
+        const auto cap                = processor->prepareSpeculative(request);
+        ASSERT_TRUE(cap.ok()) << cap.status().ToString();
+        EXPECT_EQ(cap.value(), round < 3 ? 1 : kStep);
+        EXPECT_EQ(processor->committedOutputLen(), round * kStep);
+        EXPECT_EQ(stream->outputTokenLen(), round * kStep);
+        EXPECT_EQ(stream->xgrammarUpdateTimedOut(), round >= 2);
+        if (round < 3) {
+            // Both rows preceding the rejected draft token retain the grammar.
+            for (int row = 0; row < 2; ++row) {
+                EXPECT_NE(static_cast<uint32_t>(mask[row * kWords + 'a' / 32]) & (1u << ('a' % 32)), 0u);
+                EXPECT_EQ(static_cast<uint32_t>(mask[row * kWords + 'b' / 32]) & (1u << ('b' % 32)), 0u);
+            }
+        } else {
+            // Only the next verification bypasses grammar, including the bonus row.
+            for (const auto word : mask) {
+                EXPECT_EQ(word, SpecLogitsProcessorRequest::kBitmaskAllowAll);
+            }
+        }
+
+        // These commits are always fast. They must not erase the independent
+        // verify streak. The third round keeps its computed result; b can first
+        // be produced by the following unconstrained verification.
+        processor->update_timeout_ms_ = std::numeric_limits<int>::max();
+        const auto accepted =
+            torch::tensor(std::vector<int32_t>{'a', round < 3 ? 'a' : 'b'}, torch::kInt32).reshape({1, kStep});
         StreamSpecUpdateInfo update_info{
-            .new_tokens          = torch::full({1, 1}, token, torch::kInt32),
-            .num_new_tokens      = 1,
+            .new_tokens          = accepted,
+            .num_new_tokens      = kStep,
             .draft_token         = -1,
             .draft_hidden_states = torch::Tensor(),
             .draft_token_probs   = torch::Tensor(),
         };
         stream->specUpdate(update_info);
-        ASSERT_FALSE(stream->hasError());
-        EXPECT_TRUE(stream->xgrammarUpdateTimedOut());
-        if (token == 'a') {
-            EXPECT_FALSE(stream->hasOutput());
-        }
+        ASSERT_FALSE(stream->hasError()) << stream->statusInfo().ToString();
+        EXPECT_EQ(processor->committedOutputLen(), (round + 1) * kStep);
+        EXPECT_TRUE(processor->isStateful());
+        EXPECT_EQ(stream->outputTokenLen(), (round + 1) * kStep);
+        EXPECT_FALSE(stream->validateLogitsProcessorState().has_value());
+        EXPECT_EQ(stream->xgrammarUpdateTimedOut(), round >= 2);
+        EXPECT_EQ(sp_output_buffer->tokens[0][0].item<int32_t>(), round < 3 ? 'a' : 'b');
+        ASSERT_TRUE(stream->hasOutput());
+        auto output = stream->nextOutput(1);
+        ASSERT_TRUE(output.ok()) << output.status().ToString();
+        ASSERT_EQ(output.value().generate_outputs.size(), 1);
+        const auto& generated = output.value().generate_outputs[0];
+        EXPECT_TRUE(torch::equal(generated.output_ids, accepted));
+        EXPECT_EQ(generated.aux_info.xgrammar_update_timeout, round >= 2);
+        EXPECT_EQ(generated.finished, round == 3);
     }
+    auto finished = stream->nextOutput(1);
+    ASSERT_FALSE(finished.ok());
+    EXPECT_EQ(finished.status().code(), ErrorCode::FINISHED);
+}
 
-    EXPECT_EQ(stream->outputTokenLen(), 2);
-    EXPECT_FALSE(processor->committedOutputLen().has_value());
-    ASSERT_TRUE(stream->hasOutput());
-    auto final = stream->nextOutput(1);
-    ASSERT_TRUE(final.ok());
-    ASSERT_EQ(final.value().generate_outputs.size(), 1);
-    EXPECT_TRUE(final.value().generate_outputs[0].aux_info.xgrammar_update_timeout);
-    EXPECT_TRUE(final.value().generate_outputs[0].finished);
-    EXPECT_TRUE(torch::equal(final.value().generate_outputs[0].output_ids,
-                             torch::tensor({{static_cast<int32_t>('a'), static_cast<int32_t>('b')}}, torch::kInt32)));
+TEST_F(GenerateStreamTest, grammarRejectionOnThirdSlowCommitStillFailsWithoutPublishingOutput) {
+    for (const bool speculative : {false, true}) {
+        SCOPED_TRACE(speculative);
+        auto builder = GenerateStreamBuilder();
+        auto stream  = std::dynamic_pointer_cast<NormalGenerateStream>(builder.createContextStream({1, 2, 3}));
+        stream->generateConfig()->max_new_tokens = 5;
+        stream->generateConfig()->is_streaming   = true;
+        stream->generate_status_->status.store(StreamState::RUNNING);
+        auto processor = makeTimeoutGrammarProcessor();
+        ASSERT_TRUE(processor);
+        stream->logits_processor_list_.push_back(processor);
+        auto sp_output_buffer    = std::make_shared<SpeculativeExecutorStreamOutput>();
+        sp_output_buffer->tokens = torch::zeros({1, 2}, torch::kInt32);
+        stream->setSPOutputBuffer(sp_output_buffer);
+        for (int round = 0; round < 2; ++round) {
+            if (speculative) {
+                stream->specUpdate(
+                    {.new_tokens = torch::full({1, 1}, 'a', torch::kInt32), .num_new_tokens = 1, .draft_token = -1});
+            } else {
+                updateOneToken(stream, 'a');
+            }
+            ASSERT_FALSE(stream->hasError());
+            ASSERT_TRUE(stream->nextOutput(1).ok());
+            EXPECT_FALSE(stream->xgrammarUpdateTimedOut());
+        }
+        if (speculative) {
+            // A valid prefix followed by a rejected token must roll back the
+            // whole commit, even when this would be the third slow update.
+            stream->specUpdate(
+                {.new_tokens     = torch::tensor(std::vector<int32_t>{'a', 'b'}, torch::kInt32).reshape({1, 2}),
+                 .num_new_tokens = 2,
+                 .draft_token    = -1});
+            EXPECT_EQ(sp_output_buffer->tokens[0][0].item<int32_t>(), 'a');
+        } else {
+            updateOneToken(stream, 'b');
+        }
+        ASSERT_TRUE(stream->hasError());
+        EXPECT_EQ(stream->statusInfo().code(), ErrorCode::GRAMMAR_PARSER_REJECTED_TOKEN);
+        EXPECT_TRUE(stream->hasEvent(StreamEvents::Error));
+        EXPECT_FALSE(stream->xgrammarUpdateTimedOut());
+        EXPECT_FALSE(processor->updateTimedOut());
+        EXPECT_TRUE(processor->isStateful());
+        EXPECT_EQ(processor->committedOutputLen(), 2);
+        EXPECT_FALSE(stream->hasOutput());
+        auto output = stream->nextOutput(1);
+        ASSERT_FALSE(output.ok());
+        EXPECT_EQ(output.status().code(), ErrorCode::GRAMMAR_PARSER_REJECTED_TOKEN);
+    }
 }
 
 TEST_F(GenerateStreamTest, mtpUpdateKeepsLastGpuProposalWhenNextProposalIsMissing) {

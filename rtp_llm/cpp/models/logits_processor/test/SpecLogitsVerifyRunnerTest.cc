@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <limits>
 #include <memory>
 #include <optional>
@@ -6,10 +7,22 @@
 #include <gtest/gtest.h>
 #include <torch/torch.h>
 
+#include "rtp_llm/cpp/engine_base/grammar/XGrammarBackend.h"
 #include "rtp_llm/cpp/models/logits_processor/BaseLogitsProcessor.h"
+#include "rtp_llm/cpp/models/logits_processor/GrammarLogitsProcessor.h"
 #include "rtp_llm/cpp/models/logits_processor/SpecLogitsProcessor.h"
 #include "rtp_llm/cpp/models/logits_processor/SpecLogitsVerifyRunner.h"
+#include "rtp_llm/cpp/models/logits_processor/ThinkModeLogitsProcessor.h"
 #include "rtp_llm/cpp/utils/ErrorCode.h"
+
+#if USING_CUDA
+#include <c10/cuda/CUDAGuard.h>
+#include <c10/cuda/CUDAException.h>
+#include <cuda_runtime.h>
+#include <atomic>
+#include <chrono>
+#include <future>
+#endif
 
 namespace rtp_llm {
 namespace {
@@ -81,6 +94,24 @@ SpecLogitsVerifyRunner::LaunchTask makeTask(size_t total_streams, int propose_st
 bool allowedBit(const torch::Tensor& packed_mask, int64_t row, int64_t token) {
     const auto word = static_cast<uint32_t>(packed_mask[row][token / 32].item<int32_t>());
     return ((word >> (token % 32)) & 1u) != 0u;
+}
+
+std::shared_ptr<GrammarLogitsProcessor> makeGrammarProcessor() {
+    std::vector<std::string> vocab;
+    for (int i = 0; i < 128; ++i) {
+        vocab.emplace_back(1, static_cast<char>(i));
+    }
+    xgrammar::TokenizerInfo tokenizer_info(vocab, xgrammar::VocabType::RAW, 128, std::vector<int32_t>{0});
+    GrammarConfig           config;
+    config.num_workers = 1;
+    auto backend       = XGrammarBackend::create(tokenizer_info.SerializeJSON(), config);
+    auto matcher       = backend->createMatcherFromKey({"regex", "a*"});
+    EXPECT_TRUE(matcher.ok()) << matcher.status().ToString();
+    if (!matcher.ok()) {
+        return nullptr;
+    }
+    return std::make_shared<GrammarLogitsProcessor>(
+        matcher.value(), /*eos_token_id=*/0, std::numeric_limits<int>::max());
 }
 
 void syncResult(const SpecLogitsVerifyRunner::LaunchResult& result) {
@@ -309,5 +340,567 @@ TEST(SpecLogitsVerifyRunnerTest, LeadingVerifyAnchorIsNotPassedAsProposal) {
     EXPECT_TRUE(result.has_active_processor);
     EXPECT_EQ((std::vector<int32_t>{11, 12, 13}), processor->observedTokens());
 }
+
+TEST(SpecLogitsVerifyRunnerTest, ThreeTimeoutsDegradeOnlyTheirRequestAndKeepIndependentThinkingMasks) {
+    constexpr int kStep     = 2;
+    constexpr int kVocab    = 128;
+    constexpr int kBegin    = 7;
+    constexpr int kBoundary = 8;
+    constexpr int kSuffix   = 9;
+
+    auto input                   = std::make_shared<GenerateInput>();
+    input->input_ids             = torch::tensor({11, 12}, torch::kInt32);
+    input->generate_config       = std::make_shared<GenerateConfig>();
+    auto& config                 = *input->generate_config;
+    config.in_think_mode         = true;
+    config.max_thinking_tokens   = 3;
+    config.begin_think_token_ids = {kBegin};
+    config.end_think_token_ids   = {kBoundary, kSuffix};
+
+    // Hand-compose independent processors; the baseline factory still selects
+    // grammar instead of installing a separate ThinkMode processor.
+    auto degraded         = makeGrammarProcessor();
+    auto healthy          = makeGrammarProcessor();
+    auto thinking_grammar = makeGrammarProcessor();
+    auto thinking         = ThinkModeLogitsProcessor::fromGenerateInput(input, 1);
+    ASSERT_TRUE(degraded);
+    ASSERT_TRUE(healthy);
+    ASSERT_TRUE(thinking_grammar);
+    ASSERT_TRUE(thinking);
+    degraded->update_timeout_ms_         = 0;
+    thinking_grammar->update_timeout_ms_ = 0;
+    const auto accepted                  = torch::full({1, 1}, 'a', torch::kInt32);
+    for (int round = 0; round < 3; ++round) {
+        SCOPED_TRACE(round);
+        ASSERT_FALSE(degraded->updateStatus(accepted, 1).has_value());
+        ASSERT_FALSE(healthy->updateStatus(accepted, 1).has_value());
+        ASSERT_FALSE(thinking_grammar->updateStatus(accepted, 1).has_value());
+        ASSERT_FALSE(thinking->updateStatus(accepted, 1).has_value());
+        EXPECT_EQ(degraded->updateTimedOut(), round == 2);
+        EXPECT_FALSE(healthy->updateTimedOut());
+        EXPECT_EQ(thinking_grammar->updateTimedOut(), round == 2);
+        EXPECT_TRUE(degraded->isStateful());
+        EXPECT_TRUE(thinking_grammar->isStateful());
+    }
+
+    auto task = makeTask(/*total_streams=*/3, kStep, kVocab);
+    task.draft_tokens =
+        torch::tensor(std::vector<int32_t>{'b', 'b', 'a', 'b', kBoundary, kBegin}, torch::kInt32).reshape({3, kStep});
+    task.active = {{degraded, 0}, {healthy, 1}, {thinking_grammar, 2}, {thinking, 2}};
+    SpecLogitsVerifyRunner runner;
+    auto                   result = runner.run(task);
+    syncResult(result);
+    ASSERT_EQ(result.processor_errors.size(), 3);
+    for (const auto& error : result.processor_errors) {
+        ASSERT_FALSE(error.has_value());
+    }
+    ASSERT_EQ(result.packed_allow_mask_cpu_lifetime.size(0), 3 * (kStep + 1));
+    EXPECT_EQ(result.spec_cap_cpu[0].item<int32_t>(), kStep);
+    EXPECT_EQ(result.spec_cap_cpu[1].item<int32_t>(), 1);
+    EXPECT_EQ(result.spec_cap_cpu[2].item<int32_t>(), 1);
+
+    const auto& packed = result.packed_allow_mask_cpu_lifetime;
+    for (int row = 0; row <= kStep; ++row) {
+        for (int token = 0; token < kVocab; ++token) {
+            EXPECT_TRUE(allowedBit(packed, row, token)) << "row=" << row << " token=" << token;
+        }
+    }
+    for (int row = 0; row < 2; ++row) {
+        EXPECT_TRUE(allowedBit(packed, kStep + 1 + row, 'a'));
+        EXPECT_FALSE(allowedBit(packed, kStep + 1 + row, 'b'));
+        for (int token = 0; token < kVocab; ++token) {
+            const bool expected = token == (row == 0 ? kBoundary : kSuffix);
+            EXPECT_EQ(allowedBit(packed, 2 * (kStep + 1) + row, token), expected)
+                << "thinking row=" << row << " token=" << token;
+        }
+    }
+
+    auto options = torch::TensorOptions().dtype(torch::kFloat32);
+#if USING_CUDA
+    options = options.device(torch::kCUDA);
+#endif
+    auto logits = torch::zeros({3 * (kStep + 1), kVocab}, options);
+    SpecLogitsVerifyRunner::applyMaskToLogits(logits, result, kVocab);
+    const auto logits_cpu = logits.cpu();
+    EXPECT_TRUE(torch::equal(logits_cpu.narrow(0, 0, kStep + 1), torch::zeros({kStep + 1, kVocab})));
+    EXPECT_LT(logits_cpu[kStep + 1]['b'].item<float>(), -1e20f);
+    EXPECT_EQ(logits_cpu[2 * (kStep + 1)][kBoundary].item<float>(), 0.0f);
+    EXPECT_LT(logits_cpu[2 * (kStep + 1)][0].item<float>(), -1e20f);
+    EXPECT_EQ(logits_cpu[2 * (kStep + 1) + 1][kSuffix].item<float>(), 0.0f);
+    EXPECT_LT(logits_cpu[2 * (kStep + 1) + 1][0].item<float>(), -1e20f);
+    EXPECT_LT(logits_cpu[2 * (kStep + 1) + 1][kBegin].item<float>(), -1e20f);
+    EXPECT_EQ(degraded->committedOutputLen(), 3);
+    EXPECT_EQ(healthy->committedOutputLen(), 3);
+    EXPECT_EQ(thinking_grammar->committedOutputLen(), 3);
+    EXPECT_EQ(thinking->committedOutputLen(), 3);
+
+    // Degraded grammar stops rejecting commits. The independent baseline
+    // ThinkMode processor still consumes its complete forced ending sequence.
+    ASSERT_FALSE(degraded->updateStatus(torch::full({1, 2}, 'b', torch::kInt32), 2).has_value());
+    const auto after_thinking =
+        torch::tensor(std::vector<int32_t>{kBoundary, kSuffix, 'b'}, torch::kInt32).reshape({1, 3});
+    ASSERT_FALSE(thinking_grammar->updateStatus(after_thinking, 3).has_value());
+    ASSERT_FALSE(thinking->updateStatus(after_thinking, 3).has_value());
+    EXPECT_EQ(degraded->committedOutputLen(), 5);
+    EXPECT_EQ(healthy->committedOutputLen(), 3);
+    EXPECT_EQ(thinking_grammar->committedOutputLen(), 6);
+    EXPECT_EQ(thinking->committedOutputLen(), 6);
+    EXPECT_FALSE(healthy->updateTimedOut());
+}
+
+TEST(SpecLogitsVerifyRunnerTest, FastVerifyResetsStreakAndThirdTimeoutPreservesCurrentResults) {
+    constexpr int kStep    = 2;
+    constexpr int kVocab   = 128;
+    auto          degraded = makeGrammarProcessor();
+    auto          healthy  = makeGrammarProcessor();
+    ASSERT_TRUE(degraded);
+    ASSERT_TRUE(healthy);
+    auto task         = makeTask(/*total_streams=*/2, kStep, kVocab);
+    task.draft_tokens = torch::tensor(std::vector<int32_t>{'a', 'b', 'a', 'b'}, torch::kInt32).reshape({2, kStep});
+    task.active       = {{degraded, 0}, {healthy, 1}};
+    SpecLogitsVerifyRunner runner;
+    const auto             normal = runner.run(task);
+    syncResult(normal);
+    ASSERT_FALSE(normal.processor_errors[0].has_value());
+    ASSERT_FALSE(normal.processor_errors[1].has_value());
+    // The runner reuses its buffers. Keep an independent snapshot of all rows,
+    // including the unused suffix, to compare with the third slow result.
+    const auto normal_mask = normal.packed_allow_mask_cpu_lifetime.clone();
+    const auto normal_caps = normal.spec_cap_cpu.clone();
+    for (int round = 0; round < 7; ++round) {
+        SCOPED_TRACE(round);
+        degraded->update_timeout_ms_ = round == 2 || round == 6 ? std::numeric_limits<int>::max() : 0;
+        auto result                  = runner.run(task);
+        syncResult(result);
+        ASSERT_EQ(result.processor_errors.size(), 2);
+        ASSERT_FALSE(result.processor_errors[0].has_value());
+        ASSERT_FALSE(result.processor_errors[1].has_value());
+        const bool timed_out = round >= 5;
+        const bool bypass    = round == 6;
+        EXPECT_EQ(degraded->updateTimedOut(), timed_out);
+        EXPECT_FALSE(healthy->updateTimedOut());
+        EXPECT_EQ(degraded->committedOutputLen(), round * kStep);
+        EXPECT_EQ(result.spec_cap_cpu[0].item<int32_t>(), bypass ? kStep : 1);
+        EXPECT_EQ(result.spec_cap_cpu[1].item<int32_t>(), 1);
+        const auto& packed = result.packed_allow_mask_cpu_lifetime;
+        ASSERT_EQ(packed.size(0), 2 * (kStep + 1));
+        if (!bypass) {
+            EXPECT_TRUE(torch::equal(packed, normal_mask));
+            EXPECT_TRUE(torch::equal(result.spec_cap_cpu, normal_caps));
+        } else {
+            EXPECT_TRUE(
+                packed.narrow(0, 0, kStep + 1).eq(SpecLogitsProcessorRequest::kBitmaskAllowAll).all().item<bool>());
+        }
+        EXPECT_TRUE(torch::equal(packed.narrow(0, kStep + 1, kStep + 1), normal_mask.narrow(0, kStep + 1, kStep + 1)));
+        if (result.packed_allow_mask_gpu.defined()) {
+            EXPECT_TRUE(torch::equal(result.packed_allow_mask_gpu.cpu(), packed));
+            EXPECT_TRUE(torch::equal(result.spec_cap_gpu.cpu(), result.spec_cap_cpu));
+        }
+        for (int row = 0; row <= kStep; ++row) {
+            if (bypass) {
+                for (int token = 0; token < kVocab; ++token) {
+                    EXPECT_TRUE(allowedBit(packed, row, token)) << "row=" << row << " token=" << token;
+                }
+            } else if (row < kStep) {
+                EXPECT_TRUE(allowedBit(packed, row, 'a'));
+                EXPECT_FALSE(allowedBit(packed, row, 'b'));
+            }
+            if (row < kStep) {
+                EXPECT_TRUE(allowedBit(packed, kStep + 1 + row, 'a'));
+                EXPECT_FALSE(allowedBit(packed, kStep + 1 + row, 'b'));
+            }
+        }
+        if (round == 1 || round == 4) {
+            for (const int budget : {0, std::numeric_limits<int>::max()}) {
+                degraded->update_timeout_ms_ = budget;
+                ASSERT_FALSE(degraded->updateStatus(torch::empty({1, 0}, torch::kInt32), 0).has_value());
+                EXPECT_FALSE(degraded->updateTimedOut());
+                EXPECT_EQ(degraded->committedOutputLen(), round * kStep);
+            }
+        }
+        // Fast commits reset only the update streak. The third slow verify
+        // still commits its constrained result; only the bypass round uses 'b'.
+        degraded->update_timeout_ms_ = std::numeric_limits<int>::max();
+        ASSERT_FALSE(
+            degraded->updateStatus(torch::full({1, kStep}, bypass ? 'b' : 'a', torch::kInt32), kStep).has_value());
+        ASSERT_FALSE(healthy->updateStatus(torch::full({1, kStep}, 'a', torch::kInt32), kStep).has_value());
+        EXPECT_EQ(degraded->committedOutputLen(), (round + 1) * kStep);
+        EXPECT_EQ(healthy->committedOutputLen(), (round + 1) * kStep);
+        EXPECT_TRUE(degraded->isStateful());
+    }
+}
+
+TEST(SpecLogitsVerifyRunnerTest, ThirdSlowVerifyPreservesCapBoundariesAndBonusMaskUntilNextRound) {
+    constexpr int kStep  = 2;
+    constexpr int kVocab = 128;
+    for (const int expected_cap : {0, kStep}) {
+        SCOPED_TRACE(expected_cap);
+        auto processor = makeGrammarProcessor();
+        ASSERT_TRUE(processor);
+        auto task         = makeTask(/*total_streams=*/1, kStep, kVocab);
+        task.draft_tokens = torch::full({1, kStep}, 'a', torch::kInt32);
+        if (expected_cap == 0) {
+            task.draft_tokens[0][0] = 'b';
+        }
+        task.active = {{processor, 0}};
+        SpecLogitsVerifyRunner runner;
+        const auto             normal = runner.run(task);
+        syncResult(normal);
+        ASSERT_FALSE(normal.processor_errors[0].has_value());
+        ASSERT_EQ(normal.spec_cap_cpu[0].item<int32_t>(), expected_cap);
+        const auto normal_mask = normal.packed_allow_mask_cpu_lifetime.clone();
+        const auto normal_caps = normal.spec_cap_cpu.clone();
+        EXPECT_TRUE(allowedBit(normal_mask, expected_cap, 'a'));
+        EXPECT_FALSE(allowedBit(normal_mask, expected_cap, 'b'));
+
+        for (int round = 0; round < 4; ++round) {
+            SCOPED_TRACE(round);
+            const bool bypass             = round == 3;
+            processor->update_timeout_ms_ = bypass ? std::numeric_limits<int>::max() : 0;
+            auto result                   = runner.run(task);
+            syncResult(result);
+            ASSERT_FALSE(result.processor_errors[0].has_value());
+            EXPECT_EQ(processor->updateTimedOut(), round >= 2);
+            EXPECT_EQ(processor->committedOutputLen(), 0);
+            if (bypass) {
+                EXPECT_EQ(result.spec_cap_cpu[0].item<int32_t>(), kStep);
+                EXPECT_TRUE(result.packed_allow_mask_cpu_lifetime.eq(SpecLogitsProcessorRequest::kBitmaskAllowAll)
+                                .all()
+                                .item<bool>());
+            } else {
+                EXPECT_TRUE(torch::equal(result.packed_allow_mask_cpu_lifetime, normal_mask));
+                EXPECT_TRUE(torch::equal(result.spec_cap_cpu, normal_caps));
+            }
+            if (result.packed_allow_mask_gpu.defined()) {
+                EXPECT_TRUE(torch::equal(result.packed_allow_mask_gpu.cpu(), result.packed_allow_mask_cpu_lifetime));
+                EXPECT_TRUE(torch::equal(result.spec_cap_gpu.cpu(), result.spec_cap_cpu));
+            }
+        }
+    }
+}
+
+TEST(SpecLogitsVerifyRunnerTest, RealErrorOnThirdSlowVerifyIsNotHiddenByTimeout) {
+    constexpr int kStep   = 2;
+    constexpr int kVocab  = 128;
+    auto          failing = makeGrammarProcessor();
+    auto          healthy = makeGrammarProcessor();
+    ASSERT_TRUE(failing);
+    ASSERT_TRUE(healthy);
+    failing->update_timeout_ms_ = 0;
+    auto task                   = makeTask(/*total_streams=*/2, kStep, kVocab);
+    task.draft_tokens = torch::tensor(std::vector<int32_t>{'a', 'b', 'a', 'b'}, torch::kInt32).reshape({2, kStep});
+    task.active       = {{failing, 0}, {healthy, 1}};
+    SpecLogitsVerifyRunner runner;
+    for (int round = 0; round < 2; ++round) {
+        auto result = runner.run(task);
+        syncResult(result);
+        ASSERT_EQ(result.processor_errors.size(), 2);
+        ASSERT_FALSE(result.processor_errors[0].has_value());
+        ASSERT_FALSE(result.processor_errors[1].has_value());
+        EXPECT_FALSE(failing->updateTimedOut());
+        EXPECT_EQ(result.spec_cap_cpu[0].item<int32_t>(), 1);
+    }
+    // Exercise the real verify validation path after two slow successes.
+    failing->eos_token_id_ = kVocab;
+    auto result            = runner.run(task);
+    syncResult(result);
+    ASSERT_EQ(result.processor_errors.size(), 2);
+    ASSERT_TRUE(result.processor_errors[0].has_value());
+    EXPECT_EQ(result.processor_errors[0]->code(), ErrorCode::GRAMMAR_EOS_OUT_OF_VOCAB);
+    EXPECT_FALSE(result.processor_errors[1].has_value());
+    EXPECT_EQ(result.spec_cap_cpu[0].item<int32_t>(), 0);
+    EXPECT_EQ(result.spec_cap_cpu[1].item<int32_t>(), 1);
+    EXPECT_FALSE(failing->updateTimedOut());
+    EXPECT_FALSE(healthy->updateTimedOut());
+    EXPECT_EQ(failing->committedOutputLen(), 0);
+    EXPECT_EQ(healthy->committedOutputLen(), 0);
+    for (int row = 0; row < kStep; ++row) {
+        EXPECT_TRUE(allowedBit(result.packed_allow_mask_cpu_lifetime, kStep + 1 + row, 'a'));
+        EXPECT_FALSE(allowedBit(result.packed_allow_mask_cpu_lifetime, kStep + 1 + row, 'b'));
+    }
+}
+
+#if USING_CUDA
+namespace {
+
+// A bounded wait makes an accidental synchronous upload fail without hanging
+// the test. Release the stream even when an assertion exits the scope early.
+class BlockedCudaStream {
+public:
+    explicit BlockedCudaStream(c10::cuda::CUDAStream stream): stream_(stream), ready_(release_.get_future().share()) {
+        C10_CUDA_CHECK(cudaLaunchHostFunc(
+            stream_.stream(),
+            [](void* data) {
+                auto& blocker     = *static_cast<BlockedCudaStream*>(data);
+                blocker.timed_out = blocker.ready_.wait_for(std::chrono::seconds(5)) == std::future_status::timeout;
+            },
+            this));
+    }
+
+    ~BlockedCudaStream() {
+        release_.set_value();
+        stream_.synchronize();
+    }
+
+    std::atomic<bool> timed_out{false};
+
+private:
+    c10::cuda::CUDAStream    stream_;
+    std::promise<void>       release_;
+    std::shared_future<void> ready_;
+};
+
+}  // namespace
+
+TEST(SpecLogitsVerifyRunnerTest, PendingGrammarMaskSurvivesThirdCommitTimeoutAndNextRoundAllowsAllTokens) {
+    constexpr int              kStep  = 2;
+    constexpr int              kVocab = 128;
+    const auto                 stream = c10::cuda::getStreamFromPool();
+    c10::cuda::CUDAStreamGuard guard(stream);
+    auto                       processor = makeGrammarProcessor();
+    ASSERT_TRUE(processor);
+    processor->update_timeout_ms_ = 0;
+    const auto accepted           = torch::full({1, 1}, 'a', torch::kInt32);
+    for (int round = 0; round < 2; ++round) {
+        ASSERT_FALSE(processor->updateStatus(accepted, 1).has_value());
+        EXPECT_FALSE(processor->updateTimedOut());
+    }
+
+    auto task         = makeTask(/*total_streams=*/1, kStep, kVocab);
+    task.draft_tokens = torch::tensor(std::vector<int32_t>{'a', 'b'}, torch::kInt32).reshape({1, kStep});
+    task.active       = {{processor, 0}};
+    SpecLogitsVerifyRunner runner;
+    // Allocate the runner's pinned/device buffers and warm the mask kernel
+    // before the callback prevents any work on this non-default CUDA stream.
+    processor->update_timeout_ms_ = std::numeric_limits<int>::max();
+    auto warm                     = runner.run(task);
+    ASSERT_FALSE(warm.processor_errors[0].has_value());
+    auto logits = torch::ones({kStep + 1, kVocab}, torch::TensorOptions().device(torch::kCUDA));
+    SpecLogitsVerifyRunner::applyMaskToLogits(logits, warm, kVocab);
+    warm.consumed_event->record(stream.unwrap());
+    logits.fill_(1.0f);
+    stream.synchronize();
+
+    SpecLogitsVerifyRunner::LaunchResult pending;
+    {
+        BlockedCudaStream blocker(stream);
+        pending = runner.run(task);
+        ASSERT_FALSE(pending.processor_errors[0].has_value());
+        ASSERT_TRUE(pending.ready_event);
+        EXPECT_FALSE(pending.ready_event->query());
+        EXPECT_EQ(pending.spec_cap_cpu[0].item<int32_t>(), 1);
+        const auto*                mask = pending.packed_allow_mask_cpu_lifetime.data_ptr<int32_t>();
+        const std::vector<int32_t> snapshot(mask, mask + pending.packed_allow_mask_cpu_lifetime.numel());
+
+        // Only the commit path is timed out in this regression. The preceding
+        // fast verify calls must not reset its two prior slow commits.
+        processor->update_timeout_ms_ = 0;
+        ASSERT_FALSE(processor->updateStatus(accepted, 1).has_value());
+        EXPECT_TRUE(processor->updateTimedOut());
+        EXPECT_TRUE(processor->isStateful());
+        EXPECT_EQ(processor->committedOutputLen(), 3);
+        std::vector<int32_t>             allow_mask((kStep + 1) * (kVocab / 32), 0);
+        const int32_t                    next_draft[] = {'b', 'b'};
+        const SpecLogitsProcessorRequest request{next_draft, kStep, allow_mask.data(), kVocab / 32, kVocab};
+        const auto                       next_cap = processor->prepareSpeculative(request);
+        ASSERT_TRUE(next_cap.ok()) << next_cap.status().ToString();
+        EXPECT_EQ(next_cap.value(), kStep);
+        EXPECT_TRUE(std::all_of(allow_mask.begin(), allow_mask.end(), [](int32_t word) {
+            return word == SpecLogitsProcessorRequest::kBitmaskAllowAll;
+        }));
+        ASSERT_FALSE(processor->updateStatus(torch::full({1, 2}, 'b', torch::kInt32), 2).has_value());
+        EXPECT_EQ(processor->committedOutputLen(), 5);
+        EXPECT_TRUE(std::equal(snapshot.begin(), snapshot.end(), mask));
+        EXPECT_EQ(pending.spec_cap_cpu[0].item<int32_t>(), 1);
+
+        SpecLogitsVerifyRunner::applyMaskToLogits(logits, pending, kVocab);
+        pending.consumed_event->record(stream.unwrap());
+        EXPECT_FALSE(blocker.timed_out.load()) << "MTP mask upload waited for preceding GPU work";
+        EXPECT_FALSE(pending.ready_event->query());
+    }
+    EXPECT_TRUE(torch::equal(pending.packed_allow_mask_gpu.cpu(), pending.packed_allow_mask_cpu_lifetime));
+    EXPECT_EQ(pending.spec_cap_gpu.cpu()[0].item<int32_t>(), 1);
+    const auto constrained_logits = logits.cpu();
+    for (int row = 0; row < 2; ++row) {
+        EXPECT_EQ(constrained_logits[row]['a'].item<float>(), 1.0f);
+        EXPECT_LT(constrained_logits[row]['b'].item<float>(), -1e20f);
+    }
+
+    // The previous snapshot has now been consumed. Reusing the same runner must
+    // overwrite every old mask row, including the bonus row, and restore cap=P.
+    task.draft_tokens = torch::full({1, kStep}, 'b', torch::kInt32);
+    auto next         = runner.run(task);
+    ASSERT_FALSE(next.processor_errors[0].has_value());
+    EXPECT_EQ(next.spec_cap_cpu[0].item<int32_t>(), kStep);
+    EXPECT_TRUE(
+        next.packed_allow_mask_cpu_lifetime.eq(SpecLogitsProcessorRequest::kBitmaskAllowAll).all().item<bool>());
+    logits.fill_(1.0f);
+    SpecLogitsVerifyRunner::applyMaskToLogits(logits, next, kVocab);
+    next.consumed_event->record(stream.unwrap());
+    stream.synchronize();
+    EXPECT_EQ(next.spec_cap_gpu.cpu()[0].item<int32_t>(), kStep);
+    EXPECT_TRUE(torch::equal(logits.cpu(), torch::ones({kStep + 1, kVocab})));
+    EXPECT_TRUE(processor->updateTimedOut());
+    EXPECT_EQ(processor->committedOutputLen(), 5);
+}
+
+TEST(SpecLogitsVerifyRunnerTest, PendingMaskSurvivesThirdVerifyTimeoutWithCurrentResultsPreserved) {
+    constexpr int              kStep     = 2;
+    constexpr int              kVocab    = 128;
+    constexpr int              kBegin    = 7;
+    constexpr int              kBoundary = 8;
+    const auto                 stream    = c10::cuda::getStreamFromPool();
+    c10::cuda::CUDAStreamGuard guard(stream);
+    auto                       input = std::make_shared<GenerateInput>();
+    input->input_ids                 = torch::tensor({11, 12}, torch::kInt32);
+    input->generate_config           = std::make_shared<GenerateConfig>();
+    auto& config                     = *input->generate_config;
+    config.in_think_mode             = true;
+    config.max_thinking_tokens       = 3;
+    config.begin_think_token_ids     = {kBegin};
+    config.end_think_token_ids       = {kBoundary};
+    auto degraded                    = makeGrammarProcessor();
+    auto healthy                     = makeGrammarProcessor();
+    auto thinking                    = ThinkModeLogitsProcessor::fromGenerateInput(input, 1);
+    ASSERT_TRUE(degraded);
+    ASSERT_TRUE(healthy);
+    ASSERT_TRUE(thinking);
+    const std::vector<BaseLogitsProcessorPtr> processors{degraded, healthy, thinking};
+    const auto                                accepted = torch::full({1, 1}, 'a', torch::kInt32);
+    // Close thinking independently. Its existing post-thinking policy keeps
+    // masking the opening marker after grammar is disabled.
+    ASSERT_FALSE(degraded->updateStatus(accepted, 1).has_value());
+    ASSERT_FALSE(healthy->updateStatus(accepted, 1).has_value());
+    ASSERT_FALSE(thinking->updateStatus(torch::full({1, 1}, kBoundary, torch::kInt32), 1).has_value());
+
+    auto task         = makeTask(/*total_streams=*/2, kStep, kVocab);
+    task.draft_tokens = torch::tensor(std::vector<int32_t>{'a', 'b', 'a', 'b'}, torch::kInt32).reshape({2, kStep});
+    task.active       = {{degraded, 0}, {healthy, 1}, {thinking, 0}};
+    SpecLogitsVerifyRunner runner;
+    auto                   warm = runner.run(task);
+    ASSERT_FALSE(warm.processor_errors[0].has_value());
+    ASSERT_FALSE(warm.processor_errors[1].has_value());
+    auto logits = torch::ones({2 * (kStep + 1), kVocab}, torch::TensorOptions().device(torch::kCUDA));
+    SpecLogitsVerifyRunner::applyMaskToLogits(logits, warm, kVocab);
+    warm.consumed_event->record(stream.unwrap());
+    logits.fill_(1.0f);
+    stream.synchronize();
+
+    degraded->update_timeout_ms_ = 0;
+    auto first                   = runner.run(task);
+    syncResult(first);
+    ASSERT_FALSE(first.processor_errors[0].has_value());
+    ASSERT_FALSE(first.processor_errors[1].has_value());
+    EXPECT_EQ(first.spec_cap_cpu[0].item<int32_t>(), 1);
+    EXPECT_FALSE(degraded->updateTimedOut());
+    degraded->update_timeout_ms_ = std::numeric_limits<int>::max();
+    for (const auto& processor : processors) {
+        ASSERT_FALSE(processor->updateStatus(accepted, 1).has_value());
+    }
+
+    SpecLogitsVerifyRunner::LaunchResult pending;
+    {
+        BlockedCudaStream blocker(stream);
+        degraded->update_timeout_ms_ = 0;
+        pending                      = runner.run(task);  // second slow verify, upload remains pending
+        ASSERT_FALSE(pending.processor_errors[0].has_value());
+        ASSERT_FALSE(pending.processor_errors[1].has_value());
+        ASSERT_TRUE(pending.ready_event);
+        EXPECT_FALSE(pending.ready_event->query());
+        EXPECT_FALSE(degraded->updateTimedOut());
+        const auto*                mask = pending.packed_allow_mask_cpu_lifetime.data_ptr<int32_t>();
+        const std::vector<int32_t> snapshot(mask, mask + pending.packed_allow_mask_cpu_lifetime.numel());
+        degraded->update_timeout_ms_ = std::numeric_limits<int>::max();
+        for (const auto& processor : processors) {
+            ASSERT_FALSE(processor->updateStatus(accepted, 1).has_value());
+        }
+
+        // A fast commit cannot erase the verify streak. The third verification
+        // keeps the same mask and truncated cap as a healthy grammar request.
+        const int32_t        draft[] = {'a', 'b'};
+        std::vector<int32_t> normal_mask((kStep + 1) * (kVocab / 32), SpecLogitsProcessorRequest::kBitmaskAllowAll);
+        const SpecLogitsProcessorRequest normal_request{draft, kStep, normal_mask.data(), kVocab / 32, kVocab};
+        const auto                       normal_cap = healthy->prepareSpeculative(normal_request);
+        ASSERT_TRUE(normal_cap.ok()) << normal_cap.status().ToString();
+        ASSERT_EQ(normal_cap.value(), 1);
+        degraded->update_timeout_ms_ = 0;
+        std::vector<int32_t>             allow_mask(normal_mask.size(), SpecLogitsProcessorRequest::kBitmaskAllowAll);
+        const SpecLogitsProcessorRequest request{draft, kStep, allow_mask.data(), kVocab / 32, kVocab};
+        const auto                       cap = degraded->prepareSpeculative(request);
+        ASSERT_TRUE(cap.ok()) << cap.status().ToString();
+        EXPECT_EQ(cap.value(), normal_cap.value());
+        EXPECT_EQ(allow_mask, normal_mask);
+        EXPECT_TRUE(degraded->updateTimedOut());
+        EXPECT_TRUE(degraded->isStateful());
+        EXPECT_FALSE(healthy->updateTimedOut());
+        EXPECT_EQ(degraded->committedOutputLen(), 3);
+
+        // Bypass starts with the next call and overwrites every row, even when
+        // its destination initially rejects every token and the draft is illegal.
+        std::fill(allow_mask.begin(), allow_mask.end(), 0);
+        const int32_t                    next_draft[] = {'b', 'b'};
+        const SpecLogitsProcessorRequest next_request{next_draft, kStep, allow_mask.data(), kVocab / 32, kVocab};
+        const auto                       next_cap = degraded->prepareSpeculative(next_request);
+        ASSERT_TRUE(next_cap.ok()) << next_cap.status().ToString();
+        EXPECT_EQ(next_cap.value(), kStep);
+        EXPECT_TRUE(std::all_of(allow_mask.begin(), allow_mask.end(), [](int32_t word) {
+            return word == SpecLogitsProcessorRequest::kBitmaskAllowAll;
+        }));
+        EXPECT_TRUE(std::equal(snapshot.begin(), snapshot.end(), mask));
+        EXPECT_EQ(pending.spec_cap_cpu[0].item<int32_t>(), 1);
+        EXPECT_EQ(pending.spec_cap_cpu[1].item<int32_t>(), 1);
+        SpecLogitsVerifyRunner::applyMaskToLogits(logits, pending, kVocab);
+        pending.consumed_event->record(stream.unwrap());
+        EXPECT_FALSE(blocker.timed_out.load());
+        EXPECT_FALSE(pending.ready_event->query());
+    }
+    EXPECT_TRUE(torch::equal(pending.packed_allow_mask_gpu.cpu(), pending.packed_allow_mask_cpu_lifetime));
+    EXPECT_TRUE(torch::equal(pending.spec_cap_gpu.cpu(), pending.spec_cap_cpu));
+    const auto healthy_mask = pending.packed_allow_mask_cpu_lifetime.narrow(0, kStep + 1, kStep + 1).clone();
+    const auto old_logits   = logits.cpu();
+    for (int stream_idx = 0; stream_idx < 2; ++stream_idx) {
+        for (int row = 0; row < 2; ++row) {
+            EXPECT_EQ(old_logits[stream_idx * (kStep + 1) + row]['a'].item<float>(), 1.0f);
+            EXPECT_LT(old_logits[stream_idx * (kStep + 1) + row]['b'].item<float>(), -1e20f);
+        }
+    }
+
+    degraded->update_timeout_ms_ = std::numeric_limits<int>::max();
+    task.draft_tokens = torch::tensor(std::vector<int32_t>{'b', 'b', 'a', 'b'}, torch::kInt32).reshape({2, kStep});
+    auto next         = runner.run(task);
+    ASSERT_FALSE(next.processor_errors[0].has_value());
+    ASSERT_FALSE(next.processor_errors[1].has_value());
+    EXPECT_EQ(next.spec_cap_cpu[0].item<int32_t>(), kStep);
+    EXPECT_EQ(next.spec_cap_cpu[1].item<int32_t>(), 1);
+    EXPECT_TRUE(torch::equal(next.packed_allow_mask_cpu_lifetime.narrow(0, kStep + 1, kStep + 1), healthy_mask));
+    logits.fill_(1.0f);
+    SpecLogitsVerifyRunner::applyMaskToLogits(logits, next, kVocab);
+    next.consumed_event->record(stream.unwrap());
+    stream.synchronize();
+    const auto next_logits = logits.cpu();
+    for (int row = 0; row <= kStep; ++row) {
+        for (int token = 0; token < kVocab; ++token) {
+            const bool allowed = token != kBegin;
+            EXPECT_EQ(allowedBit(next.packed_allow_mask_cpu_lifetime, row, token), allowed);
+            if (allowed) {
+                EXPECT_EQ(next_logits[row][token].item<float>(), 1.0f);
+            } else {
+                EXPECT_LT(next_logits[row][token].item<float>(), -1e20f);
+            }
+        }
+    }
+    for (int row = 0; row < 2; ++row) {
+        EXPECT_EQ(next_logits[kStep + 1 + row]['a'].item<float>(), 1.0f);
+        EXPECT_LT(next_logits[kStep + 1 + row]['b'].item<float>(), -1e20f);
+    }
+    EXPECT_TRUE(torch::equal(next.packed_allow_mask_gpu.cpu(), next.packed_allow_mask_cpu_lifetime));
+    EXPECT_TRUE(torch::equal(next.spec_cap_gpu.cpu(), next.spec_cap_cpu));
+    EXPECT_TRUE(degraded->updateTimedOut());
+    EXPECT_FALSE(healthy->updateTimedOut());
+    for (const auto& processor : processors) {
+        EXPECT_EQ(processor->committedOutputLen(), 3);
+    }
+}
+#endif
 
 }  // namespace rtp_llm

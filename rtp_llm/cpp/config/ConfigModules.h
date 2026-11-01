@@ -276,9 +276,9 @@ struct KVCacheConfig {
     size_t      kvcm_asyncwrapper_thread_num         = 16;
     size_t      kvcm_asyncwrapper_queue_size         = 1000;
     // Retained for parsing compatibility; BTC remote broadcasts inherit the task deadline.
-    int         kvcm_get_broadcast_timeout           = 15000;
-    int         kvcm_put_broadcast_timeout           = 15000;
-    std::string kvcm_client_config                   = "";
+    int         kvcm_get_broadcast_timeout = 15000;
+    int         kvcm_put_broadcast_timeout = 15000;
+    std::string kvcm_client_config         = "";
     void        insertMultiTaskPromptTokens(std::string task_id, std::vector<int64_t> tokens_id);
     std::string to_string() const;
 };
@@ -519,7 +519,8 @@ struct GrammarConfig {
     std::string tokenizer_info_json;
     // Total byte cap split between xgrammar's cache and the engine verdict LRU; <=0 = unlimited.
     int64_t compiler_cache_bytes = 2L * 1024L * 1024L * 1024L;
-    // Positive wall-clock budget in ms for a stream's CPU state update; exceeding it disables its grammar.
+    // Positive wall-clock budget in ms for each CPU MTP verification or committed update.
+    // Each stage tracks its own streak; three consecutive overruns disable grammar for the stream.
     int         update_timeout_ms = 10;
     std::string to_string() const;
 };
