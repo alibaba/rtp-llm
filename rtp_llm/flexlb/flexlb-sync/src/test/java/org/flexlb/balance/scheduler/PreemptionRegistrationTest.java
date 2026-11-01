@@ -13,7 +13,6 @@ import static org.flexlb.balance.scheduler.ContextResult.EndKind;
 import static org.flexlb.balance.scheduler.ContextResult.EngineEvidence;
 import static org.flexlb.balance.scheduler.ContextResult.EngineKind;
 import static org.flexlb.balance.scheduler.ContextResult.PreemptionReport;
-import static org.flexlb.balance.scheduler.ContextResult.UpdateKind;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
@@ -116,7 +115,7 @@ class PreemptionRegistrationTest {
                         "local failure",
                         false,
                         false);
-        assertNull(context.beginClose(failure, 1002L).after().outcome());
+        assertNull(context.beginClose(failure, 1002L).outcome());
         assertSame(failure, context.snapshot().preemption().pendingTerminal());
         assertInstanceOf(
                 Blocked.class,
@@ -168,7 +167,6 @@ class PreemptionRegistrationTest {
                                         true,
                                         false),
                                 1002L)
-                        .after()
                         .outcome());
         assertTrue(advance(registration, PreemptionCancelPhase.NOT_FOUND_STALE));
         assertInstanceOf(
@@ -199,12 +197,8 @@ class PreemptionRegistrationTest {
 
     private static boolean advance(PreemptionRegistration exact, PreemptionCancelPhase phase) {
         return exact.owner()
-                        .completePreemption(
-                                exact,
-                                new PreemptionReport(phase, false, false, false, null),
-                                1001L)
-                        .kind()
-                == UpdateKind.APPLIED;
+                .completePreemption(
+                        exact, new PreemptionReport(phase, false, false, false, null), 1001L);
     }
 
     private static boolean finish(PreemptionRegistration exact) {

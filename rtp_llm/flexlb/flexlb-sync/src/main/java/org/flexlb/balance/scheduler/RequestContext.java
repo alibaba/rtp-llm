@@ -109,11 +109,10 @@ public final class RequestContext {
         return data;
     }
 
-    public synchronized Update register(
+    public synchronized void register(
             long requestId, long nowMs, long expiresAtMs, long inactivityTimeoutMs) {
-        var before = state;
         if (key != null) {
-            return update(before, before);
+            return;
         }
         if (inactivityTimeoutMs <= 0L) {
             throw new IllegalArgumentException("positive inactivity timeout required");
@@ -122,8 +121,7 @@ public final class RequestContext {
         createdAtMs = lastWorkerAtMs = nowMs;
         absoluteDeadline = expiresAtMs;
         inactivityMs = inactivityTimeoutMs;
-        var after = refresh(nowMs);
-        return update(before, after);
+        commitSnapshot(nowMs);
     }
 
     public synchronized Snapshot snapshot() {
@@ -154,7 +152,7 @@ public final class RequestContext {
         }
         var token = new PlacementToken(this, ++sequence, withdrawing);
         placement = new PlacementFacts(token, withdrawing, withdrawing != null, null, null, false);
-        return new Granted<>(before, refresh(before.updatedAtMs()), token);
+        return new Granted<>(before, commitSnapshot(before.updatedAtMs()), token);
     }
 
     public synchronized Claim<RoutePermit> bindPlacement(
@@ -194,7 +192,7 @@ public final class RequestContext {
             }
             return new Granted<>(
                     before,
-                    refresh(before.updatedAtMs()),
+                    commitSnapshot(before.updatedAtMs()),
                     new RoutePermit(
                             this,
                             exact,
@@ -219,7 +217,7 @@ public final class RequestContext {
                 close.withSettlement(
                         false, acquired.decodeEp() == null || acquired.decodeReservation() == null);
         boolean publishable = phase == Phase.OPEN && cancellation == null;
-        var after = refresh(before.updatedAtMs());
+        var after = commitSnapshot(before.updatedAtMs());
         var permit = new RoutePermit(this, exact, acquired, publishable);
         return publishable
                 ? new Granted<>(before, after, permit)
@@ -285,7 +283,7 @@ public final class RequestContext {
                             "request inactive during placement"),
                     nowMs);
         }
-        var after = refresh(nowMs);
+        var after = commitSnapshot(nowMs);
         return update(before, after);
     }
 
@@ -329,7 +327,7 @@ public final class RequestContext {
                             StrategyErrorType.BATCH_SLO_EXPIRED,
                             cancellation.detail()),
                     nowMs);
-            return new Rejected<>(before, refresh(nowMs), Rejection.CANCELLED);
+            return new Rejected<>(before, commitSnapshot(nowMs), Rejection.CANCELLED);
         }
         var claim = new DeliveryClaim(this, ++sequence, exact, kind, batchId);
         var prepared =
@@ -348,7 +346,7 @@ public final class RequestContext {
     /** Scheduler retains this monitor from preparation through Decode transfer and publication. */
     synchronized void publishDelivery(DeliveryFacts prepared) {
         delivery = prepared;
-        refresh(prepared.startedAtMs());
+        commitSnapshot(prepared.startedAtMs());
     }
 
     public synchronized Claim<DeliveryClaim> beginSend(DeliveryClaim exact, long nowMs) {
@@ -373,7 +371,7 @@ public final class RequestContext {
             return new Rejected<>(before, before, Rejection.CANCELLED);
         }
         delivery = delivery.withSend(SendState.SENDING);
-        return new Granted<>(before, refresh(nowMs), exact);
+        return new Granted<>(before, commitSnapshot(nowMs), exact);
     }
 
     public synchronized Update recordDeliveryResult(DeliveryEvidence evidence) {
@@ -385,7 +383,7 @@ public final class RequestContext {
                 return new Update(UpdateKind.STALE, before, before);
             }
             retainEnd(EndEvidence.deliveryFailure(route, failed), failed.nowMs());
-            var after = refresh(failed.nowMs());
+            var after = commitSnapshot(failed.nowMs());
             return update(before, after);
         }
         if (delivery == null || delivery.identity() != exact || phase == Phase.CLOSED) {
@@ -470,7 +468,7 @@ public final class RequestContext {
                 || d != previous.decodeProof()) {
             delivery = previous.recordResult(send, abandoned, p, d);
         }
-        var after = refresh(evidence.nowMs());
+        var after = commitSnapshot(evidence.nowMs());
         return update(before, after);
     }
 
@@ -550,34 +548,34 @@ public final class RequestContext {
                         evidence.nowMs());
             }
         }
-        var after = refresh(evidence.nowMs());
+        var after = commitSnapshot(evidence.nowMs());
         return update(before, after);
     }
 
-    public synchronized Update requestCancel(Cancellation request) {
+    public synchronized boolean requestCancel(Cancellation request) {
         var before = state;
         if (key == null) {
-            return new Update(UpdateKind.STALE, before, before);
+            return false;
         }
         Objects.requireNonNull(request.reason());
         long batchId = delivery == null ? 0L : delivery.identity().batchId();
         if (request.expectedBatchId() != 0L && request.expectedBatchId() != batchId) {
-            return new Update(UpdateKind.STALE, before, before);
+            return false;
         }
         if (phase != Phase.OPEN) {
-            return update(before, before);
+            return false;
         }
         if (cancellation != null) {
-            return update(before, before);
+            return false;
         }
         if (request.reason() == CancelReason.DEADLINE_EXCEEDED
                 && delivery != null
                 && cancellation == null) {
-            return update(before, before);
+            return false;
         }
         boolean beforeSend = delivery == null;
         if (request.frontend() && (selected != null || !beforeSend)) {
-            return update(before, before);
+            return false;
         }
         StrategyErrorType error =
                 request.errorType() != null
@@ -607,7 +605,7 @@ public final class RequestContext {
                 EndEvidence.failure(
                         route, EndKind.FRONTEND, cancellation.errorType(), cancellation.detail()),
                 request.nowMs());
-        return update(before, refresh(request.nowMs()));
+        return commitSnapshot(request.nowMs()) != before;
     }
 
     public synchronized Update recordDeadline(
@@ -635,7 +633,7 @@ public final class RequestContext {
                             exact.kind() == ExpirationTimer.Kind.INACTIVITY
                                     ? null
                                     : deadlines.inactivity());
-            return update(before, refresh(nowMs));
+            return update(before, commitSnapshot(nowMs));
         }
         if (exact.kind() == ExpirationTimer.Kind.VISIBILITY) {
             engine = engine.expireVisibility();
@@ -701,7 +699,7 @@ public final class RequestContext {
                 }
             }
         }
-        var after = refresh(nowMs);
+        var after = commitSnapshot(nowMs);
         return update(before, after);
     }
 
@@ -733,7 +731,7 @@ public final class RequestContext {
                         null,
                         false,
                         false);
-        return new Granted<>(before, refresh(before.updatedAtMs()), registration);
+        return new Granted<>(before, commitSnapshot(before.updatedAtMs()), registration);
     }
 
     public synchronized Claim<PreemptionRegistration> prepareReconciliation(
@@ -771,21 +769,21 @@ public final class RequestContext {
         return new Granted<>(before, before, exact);
     }
 
-    public synchronized Update completePreemption(
+    public synchronized boolean completePreemption(
             PreemptionRegistration exact, PreemptionReport report, long nowMs) {
         var before = state;
         if (preemption == null || preemption.identity() != exact || phase == Phase.CLOSED) {
-            return new Update(UpdateKind.STALE, before, before);
+            return false;
         }
         var previous = preemption;
         if (previous.finished() && report.phase() != null) {
-            return update(before, before);
+            return false;
         }
         var next = report.phase() == null ? previous.phase() : report.phase();
         if (report.phase() != null
                 && next != previous.phase()
                 && !previous.phase().canTransitionTo(next)) {
-            return update(before, before);
+            return false;
         }
         var terminal = report.terminal() == null ? previous.pendingTerminal() : report.terminal();
         preemption = previous.recordReport(next, terminal, report.ledgerCommitted());
@@ -812,8 +810,7 @@ public final class RequestContext {
                 retainEnd(terminal, nowMs);
             }
         }
-        var after = refresh(nowMs);
-        return update(before, after);
+        return commitSnapshot(nowMs) != before;
     }
 
     public synchronized Claim<ResponseCandidate> selectResponse(ResponseCandidate candidate) {
@@ -847,7 +844,7 @@ public final class RequestContext {
             }
             if (preemption != null && !preemption.finished() && !delivery.acknowledged()) {
                 preemption = preemption.withConfirmationPending(true);
-                return new Blocked<>(before, refresh(candidate.nowMs()), Blocker.PREEMPTION);
+                return new Blocked<>(before, commitSnapshot(candidate.nowMs()), Blocker.PREEMPTION);
             }
             long activity = Math.max(lastWorkerAtMs, delivery.startedAtMs());
             if (candidate.nowMs() - activity >= inactivityMs) {
@@ -865,7 +862,8 @@ public final class RequestContext {
                                 StrategyErrorType.BATCH_SLO_EXPIRED,
                                 "request inactive before confirmation"),
                         candidate.nowMs());
-                return new Rejected<>(before, refresh(candidate.nowMs()), Rejection.CANCELLED);
+                return new Rejected<>(
+                        before, commitSnapshot(candidate.nowMs()), Rejection.CANCELLED);
             }
             if (!delivery.acknowledged()) {
                 delivery = delivery.withAcknowledged(true);
@@ -877,7 +875,7 @@ public final class RequestContext {
         if (candidate.kind() != ResponseKind.CONFIRMATION) {
             selected = candidate;
         }
-        return new Granted<>(before, refresh(candidate.nowMs()), candidate);
+        return new Granted<>(before, commitSnapshot(candidate.nowMs()), candidate);
     }
 
     /** Publisher capacity is reserved by Scheduler before freezing the outcome. */
@@ -898,26 +896,26 @@ public final class RequestContext {
                 && ending != EndKind.RETIREMENT;
     }
 
-    public synchronized Update beginClose(EndEvidence evidence, long nowMs) {
+    public synchronized Snapshot beginClose(EndEvidence evidence, long nowMs) {
         var before = state;
         if (key == null) {
-            return new Update(UpdateKind.STALE, before, before);
+            return before;
         }
         if (phase == Phase.CLOSED) {
-            return update(before, before);
+            return before;
         }
         if (evidence != null && evidence.route() != null && evidence.route() != route) {
-            return new Update(UpdateKind.STALE, before, before);
+            return before;
         }
         if (evidence != null) {
             retainEnd(evidence, nowMs);
         }
         EndKind ending = pendingEnd == null ? null : pendingEnd.kind();
         if (waitsForPlacement(ending) || outcome == null && waitsForPreemption(ending)) {
-            return update(before, refresh(nowMs));
+            return commitSnapshot(nowMs);
         }
         if (outcome == null && pendingEnd == null) {
-            return update(before, before);
+            return before;
         }
         if (outcome == null) {
             outcome = classify(pendingEnd);
@@ -947,7 +945,7 @@ public final class RequestContext {
             }
             pendingEnd = null;
         }
-        return update(before, refresh(nowMs));
+        return commitSnapshot(nowMs);
     }
 
     public synchronized DecodeResources.ReleaseReason releaseReason() {
@@ -963,10 +961,9 @@ public final class RequestContext {
                                 : DecodeResources.ReleaseReason.COUNTERPART_FINISHED;
     }
 
-    public synchronized Update completeClose(CloseProgress progress, long nowMs) {
-        var before = state;
+    public synchronized void completeClose(CloseProgress progress, long nowMs) {
         if (phase != Phase.ENDING) {
-            return new Update(UpdateKind.STALE, before, before);
+            return;
         }
         if (delivery != null
                 && delivery.identity().kind() == DeliveryClaimKind.ROUTE_DECISION
@@ -1005,8 +1002,7 @@ public final class RequestContext {
             preemption = null;
             pendingEnd = null;
         }
-        var after = refresh(nowMs);
-        return update(before, after);
+        commitSnapshot(nowMs);
     }
 
     private void retainEnd(EndEvidence evidence, long nowMs) {
@@ -1187,86 +1183,62 @@ public final class RequestContext {
         return cachedNoChange;
     }
 
-    private Snapshot refresh(long nowMs) {
+    private Snapshot commitSnapshot(long nowMs) {
         if (key != null) {
             deriveDeadlines();
         }
-        if (Objects.equals(state.placement(), placement)) {
-            placement = state.placement();
-        }
-        if (Objects.equals(state.delivery(), delivery)) {
-            delivery = state.delivery();
-        }
-        if (Objects.equals(state.engine(), engine)) {
-            engine = state.engine();
-        }
-        if (Objects.equals(state.preemption(), preemption)) {
-            preemption = state.preemption();
-        }
-        if (Objects.equals(state.close(), close)) {
-            close = state.close();
-        }
-        if (Objects.equals(state.pendingEnd(), pendingEnd)) {
-            pendingEnd = state.pendingEnd();
-        }
-        boolean sameFacts =
-                state.key() == key
-                        && state.createdAtMs() == createdAtMs
-                        && state.phase() == phase
-                        && state.route() == route
-                        && state.placement() == placement
-                        && state.delivery() == delivery
-                        && state.engine() == engine
-                        && state.preemption() == preemption
-                        && state.cancellation() == cancellation
-                        && state.outcome() == outcome
-                        && state.pendingEnd() == pendingEnd
-                        && state.selectedResponse() == selected
-                        && state.close() == close
-                        && state.deadlines() == deadlines
-                        && state.terminalRecord() == terminalRecord;
+
+        var facts = captureFacts();
+        // Selections and terminal facts are write-once; timer changes carry revisions.
+        boolean sameFacts = facts.equals(state.facts());
         if (sameFacts && state.lastWorkerAtMs() == lastWorkerAtMs) {
             return state;
         }
-        var facts =
-                sameFacts
-                        ? state.facts()
-                        : new SnapshotFacts(
-                                key,
-                                createdAtMs,
-                                phase,
-                                route,
-                                placement,
-                                delivery,
-                                engine,
-                                preemption,
-                                cancellation,
-                                outcome,
-                                pendingEnd,
-                                selected,
-                                close,
-                                deadlines,
-                                terminalRecord,
-                                canRelease(),
-                                phase == Phase.OPEN
-                                        && route != null
-                                        && delivery == null
-                                        && cancellation == null
-                                        && preemption == null
-                                        && pendingEnd == null
-                                        && (placement == null
-                                                || placement.published()
-                                                        && placement.operation().withdrawing()
-                                                                == null
-                                                        && placement.pendingTerminal() == null
-                                                        && placement.pendingRetirement() == null
-                                                        && !placement.inactivityExpired()));
+
         state =
                 new Snapshot(
-                        facts,
+                        sameFacts ? state.facts() : facts,
                         lastWorkerAtMs,
                         Math.max(state.updatedAtMs(), nowMs),
                         inactivityExpiresAtMs());
         return state;
+    }
+
+    private SnapshotFacts captureFacts() {
+        return new SnapshotFacts(
+                key,
+                createdAtMs,
+                phase,
+                route,
+                placement,
+                delivery,
+                engine,
+                preemption,
+                cancellation,
+                outcome,
+                pendingEnd,
+                selected,
+                close,
+                deadlines,
+                terminalRecord,
+                canRelease(),
+                canPrepareDelivery());
+    }
+
+    private boolean canPrepareDelivery() {
+        if (phase != Phase.OPEN
+                || route == null
+                || delivery != null
+                || cancellation != null
+                || preemption != null
+                || pendingEnd != null) {
+            return false;
+        }
+        return placement == null
+                || placement.published()
+                        && placement.operation().withdrawing() == null
+                        && placement.pendingTerminal() == null
+                        && placement.pendingRetirement() == null
+                        && !placement.inactivityExpired();
     }
 }

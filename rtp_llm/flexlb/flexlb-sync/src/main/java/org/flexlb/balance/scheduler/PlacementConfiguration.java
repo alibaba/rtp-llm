@@ -3,28 +3,28 @@ package org.flexlb.balance.scheduler;
 import org.flexlb.balance.endpoint.DecodeResources.AdmissionCapacity;
 import org.flexlb.balance.endpoint.PrefillActiveIndex;
 import org.flexlb.balance.endpoint.WorkerQueue;
-import org.flexlb.balance.planner.GroupPlanner;
-import org.flexlb.balance.planner.BuiltinGroupPlanner;
-import org.flexlb.balance.strategy.PrefillSelectionStrategy;
-import org.flexlb.balance.strategy.CostBasedPrefillStrategy;
-import org.flexlb.balance.strategy.DecodeSelectionStrategy;
-import org.flexlb.balance.strategy.DecodeSelector;
-import org.flexlb.balance.strategy.VitSelectionStrategy;
-import org.flexlb.balance.strategy.VitWorkerSelector;
-import org.flexlb.cache.service.CacheAwareService;
 import org.flexlb.balance.eviction.DecodePreemption;
 import org.flexlb.balance.eviction.DecodePreemptionPolicy;
 import org.flexlb.balance.eviction.DefaultDecodePreemption;
 import org.flexlb.balance.eviction.PriorityDecodePreemptionPolicy;
-import org.flexlb.service.monitor.RequestSchedulerReporter;
+import org.flexlb.balance.planner.BuiltinGroupPlanner;
+import org.flexlb.balance.planner.GroupPlanner;
+import org.flexlb.balance.strategy.CostBasedPrefillStrategy;
+import org.flexlb.balance.strategy.DecodeSelectionStrategy;
+import org.flexlb.balance.strategy.DecodeSelector;
+import org.flexlb.balance.strategy.PrefillSelectionStrategy;
+import org.flexlb.balance.strategy.VitSelectionStrategy;
+import org.flexlb.balance.strategy.VitWorkerSelector;
+import org.flexlb.cache.service.CacheAwareService;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.service.RecentCacheKeyTraceReporter;
 import org.flexlb.service.monitor.DeliveryMetricsReporter;
+import org.flexlb.service.monitor.RequestSchedulerReporter;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.Lazy;
-import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
 
 /** Assembles the scheduler, Prefill delivery, and Decode preemption from startup config. */
 @Configuration(proxyBeanMethods = false)
@@ -83,8 +83,6 @@ public class PlacementConfiguration {
             ResponseCompletionExecutor completions,
             DeliveryMetricsReporter reporter,
             TaskTimer timer,
-            DeliveryExecution deliveries,
-            ConfigService config,
             AdmissionCapacity capacity,
             RecentCacheKeyTraceReporter trace) {
         return new RequestLifecycle(
@@ -96,8 +94,6 @@ public class PlacementConfiguration {
                 completions,
                 reporter,
                 timer,
-                deliveries,
-                config.loadBalanceConfig(),
                 capacity,
                 trace);
     }
@@ -199,10 +195,10 @@ public class PlacementConfiguration {
             PlacementAvailability availability,
             RequestLifecycle lifecycle,
             ConfigService configService,
-            AdmissionCapacity capacity,
-            RecentCacheKeyTraceReporter traceReporter,
             GroupPlanner grouping,
-            @Lazy PlacementQueue queue) {
+            @Lazy PlacementQueue queue,
+            DeliveryExecution deliveries,
+            RequestTaskPool tasks) {
         FlexlbConfig config = configService.loadBalanceConfig();
         RequestScheduler scheduler =
                 create(
@@ -212,10 +208,10 @@ public class PlacementConfiguration {
                         reporter,
                         decodePreemption,
                         availability,
-                        capacity,
-                        traceReporter,
                         grouping,
-                        queue);
+                        queue,
+                        new PrefillQueueRunner.Dependencies(
+                                deliveries, reporter, tasks::recordFailure));
         return scheduler;
     }
 
@@ -226,10 +222,9 @@ public class PlacementConfiguration {
             DeliveryMetricsReporter reporter,
             DecodePreemption decodePreemption,
             PlacementAvailability availability,
-            AdmissionCapacity capacity,
-            RecentCacheKeyTraceReporter traceReporter,
             GroupPlanner grouping,
-            PlacementQueue placementQueue) {
+            PlacementQueue placementQueue,
+            PrefillQueueRunner.Dependencies queueDependencies) {
         if (config.isQueue()) {
             QueuedRequestScheduler queue =
                     new QueuedRequestScheduler(
@@ -239,13 +234,12 @@ public class PlacementConfiguration {
                             decodePreemption,
                             lifecycle,
                             availability,
-                            capacity,
-                            traceReporter,
                             placementQueue,
-                            grouping);
+                            grouping,
+                            queueDependencies);
             queue.start();
             return queue;
         }
-        return new DirectRequestScheduler(router, lifecycle, config, capacity, traceReporter);
+        return new DirectRequestScheduler(router, lifecycle);
     }
 }

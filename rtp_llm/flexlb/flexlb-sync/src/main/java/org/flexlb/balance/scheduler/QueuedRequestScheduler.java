@@ -1,19 +1,17 @@
 package org.flexlb.balance.scheduler;
 
-import org.flexlb.balance.scheduler.RequestLifecycle.Publication;
-
-import org.flexlb.balance.planner.GroupPlanner;
 import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.DecodeResources;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.eviction.DecodePreemption;
+import org.flexlb.balance.planner.GroupPlanner;
+import org.flexlb.balance.scheduler.RequestLifecycle.Publication;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.loadbalance.AdmissionRejectReason;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.route.RoleType;
-import org.flexlb.service.RecentCacheKeyTraceReporter;
 import org.flexlb.service.monitor.DeliveryMetricsReporter;
 import org.flexlb.util.Failures;
 import org.flexlb.util.Logger;
@@ -70,6 +68,7 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler
     private final DecodePreemption decodePreemption;
     private final PlacementAvailability availability;
     private final QueueExecutionSettings queueSettings;
+    private final PrefillQueueRunner.Dependencies queueDependencies;
     private final int plannerCount;
     private final double scanBudgetMultiplier;
     private final ReentrantLock lock = new ReentrantLock();
@@ -112,11 +111,11 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler
             DecodePreemption decodePreemption,
             RequestLifecycle lifecycle,
             PlacementAvailability availability,
-            DecodeResources.AdmissionCapacity capacity,
-            RecentCacheKeyTraceReporter traceReporter,
             PlacementQueue queue,
-            GroupPlanner grouping) {
+            GroupPlanner grouping,
+            PrefillQueueRunner.Dependencies queueDependencies) {
         super(lifecycle);
+        this.queueDependencies = Objects.requireNonNull(queueDependencies);
         this.queueSettings = QueueExecutionSettings.capture(config, grouping);
         this.router = Objects.requireNonNull(router, "router");
         this.reporter = Objects.requireNonNull(reporter, "reporter");
@@ -719,11 +718,7 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler
         public void publish() {
             RequestRoute routing = plan.result.value();
             if (routing.prefillEp()
-                    .offerPinned(
-                            routing.prefillPin(),
-                            route,
-                            queueSettings,
-                            lifecycle.queueDependencies)) {
+                    .offerPinned(routing.prefillPin(), route, queueSettings, queueDependencies)) {
                 published = true;
                 plan.published = true;
                 plan.pendingDecodeRollback = null;

@@ -1,7 +1,16 @@
 package org.flexlb.service.grace;
 
 import org.flexlb.balance.endpoint.EndpointRegistry;
-import org.flexlb.balance.scheduler.*;
+import org.flexlb.balance.scheduler.DeliveryDispatcher;
+import org.flexlb.balance.scheduler.DeliveryExecution;
+import org.flexlb.balance.scheduler.ExpirationTimer;
+import org.flexlb.balance.scheduler.RequestContext;
+import org.flexlb.balance.scheduler.RequestLifecycle;
+import org.flexlb.balance.scheduler.RequestRepository;
+import org.flexlb.balance.scheduler.RequestScheduler;
+import org.flexlb.balance.scheduler.RequestTaskPool;
+import org.flexlb.balance.scheduler.ResponseCompletionExecutor;
+import org.flexlb.balance.scheduler.ScheduledTaskTimer;
 import org.flexlb.consistency.MasterStatusService;
 import org.flexlb.httpserver.FlexlbGrpcServer;
 import org.junit.jupiter.api.Test;
@@ -13,9 +22,19 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 
-import static org.junit.jupiter.api.Assertions.*;
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.anyLong;
-import static org.mockito.Mockito.*;
+import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.inOrder;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 /** Exercises the production application shutdown entry, rather than a test runtime's teardown. */
 class SchedulingShutdownTest {

@@ -332,7 +332,8 @@ class QueuedBatchDeliveryTest {
         RequestContext requestContext = registry.requests.findActive(1L);
         long lastStatus = System.currentTimeMillis() - TIMEOUT_MS + 10_000L;
         ReflectionTestUtils.setField(requestContext, "lastWorkerAtMs", lastStatus);
-        ReflectionTestUtils.invokeMethod(requestContext, "refresh", System.currentTimeMillis());
+        ReflectionTestUtils.invokeMethod(
+                requestContext, "commitSnapshot", System.currentTimeMillis());
         submit(List.of(item));
         releaseExecutor.countDown();
         awaitDispatchTasks();
@@ -811,7 +812,7 @@ class QueuedBatchDeliveryTest {
                 "schedulingMetadata",
                 org.flexlb.dao.SchedulingMetadata.explicit(context.data().getPriority(), past));
         ReflectionTestUtils.setField(context, "absoluteDeadline", past);
-        ReflectionTestUtils.invokeMethod(context, "refresh", System.currentTimeMillis());
+        ReflectionTestUtils.invokeMethod(context, "commitSnapshot", System.currentTimeMillis());
     }
 
     @ParameterizedTest

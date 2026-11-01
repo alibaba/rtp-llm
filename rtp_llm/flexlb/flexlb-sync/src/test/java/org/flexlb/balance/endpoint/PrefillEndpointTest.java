@@ -118,8 +118,7 @@ class PrefillEndpointTest {
                 changeSettings
                         ? dependencies
                         : org.flexlb.balance.scheduler.SchedulerTestSupport.queueDependencies(
-                                mock(org.flexlb.balance.scheduler.RequestLifecycle.class),
-                                config);
+                                mock(org.flexlb.balance.scheduler.RequestLifecycle.class), config);
         try (var pin = endpoint.tryPinGeneration()) {
             assertThrows(
                     IllegalArgumentException.class,
@@ -131,9 +130,22 @@ class PrefillEndpointTest {
                                     otherDependencies));
             org.mockito.Mockito.verifyNoInteractions(worker);
             var route = mock(RequestRoute.class);
-            org.mockito.Mockito.when(worker.offer(route)).thenReturn(true);
+            var context = new org.flexlb.balance.scheduler.RequestContext(config);
+            org.mockito.Mockito.when(route.ctx()).thenReturn(context);
+            org.mockito.Mockito.when(worker.offer(route))
+                    .thenAnswer(
+                            ignored -> {
+                                assertTrue(context.data().getWorkerEnqueueSequence() > 0L);
+                                assertTrue(context.data().getFirstWorkerEnqueueTime() > 0L);
+                                return true;
+                            });
             assertTrue(endpoint.offerPinned(pin, route, settings, dependencies));
-            verify(worker).offer(route);
+            long sequence = context.data().getWorkerEnqueueSequence();
+            long firstEnqueue = context.data().getFirstWorkerEnqueueTime();
+            assertTrue(endpoint.offerPinned(pin, route, settings, dependencies));
+            assertEquals(sequence, context.data().getWorkerEnqueueSequence());
+            assertEquals(firstEnqueue, context.data().getFirstWorkerEnqueueTime());
+            verify(worker, org.mockito.Mockito.times(2)).offer(route);
         }
     }
 

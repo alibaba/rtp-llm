@@ -214,6 +214,65 @@ class SchedulerArchitectureTest {
                                 "RequestRoute must not assign request FIFO identity"));
     }
 
+    @Test
+    void lifecycleCannotChooseQueueRulesOrInterpretTransportReplies() throws IOException {
+        for (Class<?> dependency :
+                new Class<?>[] {
+                    OrderedRequestQueue.class,
+                    org.flexlb.balance.endpoint.PrefillActiveIndex.class,
+                    QueueExecutionSettings.class,
+                    PrefillQueueRunner.Dependencies.class,
+                    org.flexlb.engine.grpc.EngineGrpcClient.CancelReply.class,
+                    org.flexlb.balance.eviction.DefaultDecodePreemption.class,
+                    org.flexlb.balance.planner.BuiltinGroupPlanner.class
+                }) {
+            assertNoImplementationDependency(RequestLifecycle.class, dependency);
+        }
+        assertNoDependency(RequestLifecycle.class, org.flexlb.config.FlexlbConfig.class);
+        inspectCalls(
+                RequestLifecycle.class,
+                (owner, name) ->
+                        assertFalse(
+                                owner.equals(
+                                                Type.getInternalName(
+                                                        org.flexlb.config.FlexlbConfig.class))
+                                        && java.util.Set.of(
+                                                        "isQueue",
+                                                        "isDirect",
+                                                        "queueScheduler",
+                                                        "decisionPolicy")
+                                                .contains(name),
+                                "lifecycle must not choose scheduling or queue rules"));
+        inspectCalls(
+                RequestLifecycle.class,
+                (owner, name) ->
+                        assertFalse(
+                                owner.equals(Type.getInternalName(RequestData.class))
+                                        && name.equals("initializeWorkerQueue"),
+                                "queue entry owns its FIFO identity"));
+    }
+
+    @Test
+    void schedulingAndQueuesCannotSelectConcreteStrategiesOrMonitoringBackends()
+            throws IOException {
+        for (Class<?> consumer :
+                new Class<?>[] {
+                    DirectRequestScheduler.class, QueuedRequestScheduler.class,
+                    OrderedRequestQueue.class, org.flexlb.balance.endpoint.PrefillActiveIndex.class
+                }) {
+            for (Class<?> dependency :
+                    new Class<?>[] {
+                        org.flexlb.balance.strategy.CostBasedPrefillStrategy.class,
+                        org.flexlb.balance.strategy.DecodeSelector.class,
+                        org.flexlb.balance.strategy.VitWorkerSelector.class,
+                        io.micrometer.core.instrument.MeterRegistry.class,
+                        org.flexlb.metric.MicrometerFlexMonitor.class
+                    }) {
+                assertNoImplementationDependency(consumer, dependency);
+            }
+        }
+    }
+
     private static void assertNoImplementationDependency(Class<?> consumer, Class<?> forbidden)
             throws IOException {
         assertNoDependency(consumer, forbidden);

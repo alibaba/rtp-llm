@@ -125,15 +125,18 @@ class PollRunnerLifecycleTest {
                                 "model",
                                 timeout
                                         ? org.flexlb.enums.BalanceStatusEnum.CACHE_GRPC_TIMEOUT
-                                        : org.flexlb.enums.BalanceStatusEnum.CACHE_SERVICE_UNAVAILABLE,
+                                        : org.flexlb.enums.BalanceStatusEnum
+                                                .CACHE_SERVICE_UNAVAILABLE,
                                 RoleType.DECODE);
             } else {
                 verify(reporter)
                         .reportStatusCheckerFail(
                                 "model",
                                 timeout
-                                        ? org.flexlb.enums.BalanceStatusEnum.WORKER_STATUS_GRPC_TIMEOUT
-                                        : org.flexlb.enums.BalanceStatusEnum.WORKER_SERVICE_UNAVAILABLE,
+                                        ? org.flexlb.enums.BalanceStatusEnum
+                                                .WORKER_STATUS_GRPC_TIMEOUT
+                                        : org.flexlb.enums.BalanceStatusEnum
+                                                .WORKER_SERVICE_UNAVAILABLE,
                                 RoleType.DECODE);
             }
         }

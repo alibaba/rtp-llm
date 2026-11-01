@@ -24,6 +24,8 @@ import static com.google.common.base.Preconditions.checkState;
 /** Request input and telemetry. Lifecycle decisions belong to the exact RequestContext. */
 @Getter
 public final class RequestData {
+    private static final java.util.concurrent.atomic.AtomicLong WORKER_SEQUENCE =
+            new java.util.concurrent.atomic.AtomicLong();
     private final FlexlbConfig config;
     private final long startTime = System.currentTimeMillis();
     private final long serviceStartNanos = System.nanoTime();
@@ -180,6 +182,12 @@ public final class RequestData {
                             .blockCacheKeys(java.util.List.of())
                             .cacheAffinityKeys(java.util.List.of())
                             .build();
+        }
+    }
+
+    public synchronized void initializeWorkerQueue(long nowMs) {
+        if (workerEnqueueSequence == 0L) {
+            initializeWorkerQueue(nowMs, WORKER_SEQUENCE.incrementAndGet());
         }
     }
 

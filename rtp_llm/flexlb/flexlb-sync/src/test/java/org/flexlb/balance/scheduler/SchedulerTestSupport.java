@@ -244,12 +244,11 @@ public final class SchedulerTestSupport {
                 new ContextResult.CloseProgress(true, false, false, true, true),
                 System.currentTimeMillis());
         org.junit.jupiter.api.Assertions.assertNotNull(context.releaseReason());
-        var update =
-                context.completeClose(
-                        new ContextResult.CloseProgress(false, true, true, false, false),
-                        System.currentTimeMillis());
-        org.junit.jupiter.api.Assertions.assertNotNull(update.after().terminalRecord());
-        return update.after().terminalRecord();
+        context.completeClose(
+                new ContextResult.CloseProgress(false, true, true, false, false),
+                System.currentTimeMillis());
+        org.junit.jupiter.api.Assertions.assertNotNull(context.snapshot().terminalRecord());
+        return context.snapshot().terminalRecord();
     }
 
     enum Stage {
@@ -418,22 +417,18 @@ public final class SchedulerTestSupport {
                                                 eviction,
                                                 runtime.newLifecycle(snapshot, capacity, trace),
                                                 availability,
-                                                capacity,
-                                                trace,
                                                 new OrderedRequestQueue(
                                                         snapshot.isPriorityOrdering()),
                                                 org.flexlb.balance.planner.BuiltinGroupPlanner.from(
-                                                        snapshot))
+                                                        snapshot),
+                                                queueDependencies(runtime))
                                         .defaultAnswer(CALLS_REAL_METHODS))
                         : mock(
                                 DirectRequestScheduler.class,
                                 withSettings()
                                         .useConstructor(
                                                 router,
-                                                runtime.newLifecycle(snapshot, capacity, trace),
-                                                snapshot,
-                                                capacity,
-                                                trace)
+                                                runtime.newLifecycle(snapshot, capacity, trace))
                                         .defaultAnswer(CALLS_REAL_METHODS));
         runtime.registerScheduler(owner);
         if (owner instanceof QueuedRequestScheduler queue && startPlacement) {

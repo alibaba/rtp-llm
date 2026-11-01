@@ -12,7 +12,6 @@ import static org.flexlb.balance.scheduler.ContextResult.CloseProgress;
 import static org.flexlb.balance.scheduler.ContextResult.EndEvidence;
 import static org.flexlb.balance.scheduler.ContextResult.EndKind;
 import static org.flexlb.balance.scheduler.ContextResult.Phase;
-import static org.flexlb.balance.scheduler.ContextResult.UpdateKind;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
@@ -47,34 +46,38 @@ class RequestCleanupArchiveRaceTest {
                             () -> {
                                 ready.countDown();
                                 assertTrue(start.await(5, TimeUnit.SECONDS));
-                                return context.completeClose(
-                                        RequestCleanupPassTest.released(true, true), 1002L);
+                                synchronized (context) {
+                                    context.completeClose(
+                                            RequestCleanupPassTest.released(true, true), 1002L);
+                                    return context.snapshot();
+                                }
                             });
             var effects =
                     workers.submit(
                             () -> {
                                 ready.countDown();
                                 assertTrue(start.await(5, TimeUnit.SECONDS));
-                                return context.completeClose(
-                                        new CloseProgress(true, false, false, true, true), 1002L);
+                                synchronized (context) {
+                                    context.completeClose(
+                                            new CloseProgress(true, false, false, true, true),
+                                            1002L);
+                                    return context.snapshot();
+                                }
                             });
             assertTrue(ready.await(5, TimeUnit.SECONDS));
             start.countDown();
-            var update = resources.get(5, TimeUnit.SECONDS);
+            var released = resources.get(5, TimeUnit.SECONDS);
             var notified = effects.get(5, TimeUnit.SECONDS);
             var current = context.snapshot();
             assertNotNull(current.terminalRecord());
             assertTrue(
-                    update.after().terminalRecord() != null
-                            || notified.after().terminalRecord() != null,
+                    released.terminalRecord() != null || notified.terminalRecord() != null,
                     "the last real obligation must close atomically");
             assertEquals(Phase.CLOSED, current.phase());
             assertNull(current.route());
             assertNull(context.releaseReason());
-            var duplicate =
-                    context.completeClose(RequestCleanupPassTest.released(true, true), 1003L);
-            assertEquals(UpdateKind.STALE, duplicate.kind());
-            assertSame(duplicate.before(), duplicate.after());
+            context.completeClose(RequestCleanupPassTest.released(true, true), 1003L);
+            assertSame(current, context.snapshot());
         } finally {
             start.countDown();
             workers.shutdownNow();

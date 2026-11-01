@@ -335,10 +335,7 @@ class SchedulerTestServicesTest {
                             f.runtime.newLifecycle(
                                     f.config,
                                     SchedulingTestConfig.capacity(f.config),
-                                    mock(RecentCacheKeyTraceReporter.class)),
-                            f.config,
-                            SchedulingTestConfig.capacity(f.config),
-                            mock(RecentCacheKeyTraceReporter.class));
+                                    mock(RecentCacheKeyTraceReporter.class)));
             var installedResult =
                     RequestProtocolTestSupport.register(
                             installed, RequestProtocolTestSupport.context(f.config, 9103L));
@@ -365,10 +362,7 @@ class SchedulerTestServicesTest {
                                     f.runtime.newLifecycle(
                                             f.config,
                                             SchedulingTestConfig.capacity(f.config),
-                                            mock(RecentCacheKeyTraceReporter.class)),
-                                    f.config,
-                                    SchedulingTestConfig.capacity(f.config),
-                                    mock(RecentCacheKeyTraceReporter.class)));
+                                            mock(RecentCacheKeyTraceReporter.class))));
             var lifecycle = SchedulerTestSupport.spyLifecycle(other);
             var otherContext = RequestProtocolTestSupport.context(f.config, 9105L);
             var otherResult = RequestProtocolTestSupport.register(other, otherContext);
@@ -417,10 +411,7 @@ class SchedulerTestServicesTest {
                                     runtime.newLifecycle(
                                             config,
                                             SchedulingTestConfig.capacity(config),
-                                            mock(RecentCacheKeyTraceReporter.class)),
-                                    config,
-                                    SchedulingTestConfig.capacity(config),
-                                    mock(RecentCacheKeyTraceReporter.class)));
+                                            mock(RecentCacheKeyTraceReporter.class))));
             var lifecycle = SchedulerTestSupport.spyLifecycle(owner);
             var context = RequestProtocolTestSupport.context(config, 9107L);
             var result = RequestProtocolTestSupport.register(owner, context);
@@ -683,11 +674,9 @@ class SchedulerTestServicesTest {
                             reporter,
                             mock(DecodePreemption.class),
                             new PlacementAvailability(),
-                            SchedulingTestConfig.capacity(config),
-                            org.mockito.Mockito.mock(
-                                    org.flexlb.service.RecentCacheKeyTraceReporter.class),
                             org.flexlb.balance.planner.BuiltinGroupPlanner.from(config),
-                            new OrderedRequestQueue(config.isPriorityOrdering())));
+                            new OrderedRequestQueue(config.isPriorityOrdering()),
+                            runtime.queueDependencies));
         }
 
         public void close() {

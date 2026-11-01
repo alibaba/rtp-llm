@@ -1,7 +1,5 @@
 package org.flexlb.balance.scheduler;
 
-import org.flexlb.balance.eviction.DefaultDecodePreemption;
-import org.flexlb.balance.eviction.PriorityDecodePreemptionPolicy;
 import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.delivery.CapacityBoundary;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
@@ -9,6 +7,8 @@ import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.eviction.DecodePreemption;
+import org.flexlb.balance.eviction.DefaultDecodePreemption;
+import org.flexlb.balance.eviction.PriorityDecodePreemptionPolicy;
 import org.flexlb.balance.strategy.CostBasedPrefillStrategy;
 import org.flexlb.balance.strategy.DecodeSelector;
 import org.flexlb.balance.strategy.VitWorkerSelector;
@@ -140,12 +140,11 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
                         deliveryReporter,
                         decodePreemption,
                         placementAvailability,
-                        capacity,
-                        new org.flexlb.service.RecentCacheKeyTraceReporter(),
                         org.flexlb.balance.planner.BuiltinGroupPlanner.from(
                                 configService.loadBalanceConfig()),
                         new OrderedRequestQueue(
-                                configService.loadBalanceConfig().isPriorityOrdering()));
+                                configService.loadBalanceConfig().isPriorityOrdering()),
+                        runtime.queueDependencies);
         runtime.registerScheduler(scheduler);
     }
 

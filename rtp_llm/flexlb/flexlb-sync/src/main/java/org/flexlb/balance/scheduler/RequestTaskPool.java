@@ -1,12 +1,14 @@
 package org.flexlb.balance.scheduler;
 
+import org.flexlb.util.Failures;
+import org.flexlb.util.Logger;
+
 import java.util.Objects;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
-import org.flexlb.util.Logger;
-import org.flexlb.util.Failures;
+
 import static com.google.common.base.Preconditions.checkState;
 
 /** Executes and accounts for request tasks, including cleanup continuations during shutdown. */

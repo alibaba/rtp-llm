@@ -1,5 +1,7 @@
 package org.flexlb.service.grace;
 
+import lombok.extern.slf4j.Slf4j;
+import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.scheduler.CancelReason;
 import org.flexlb.balance.scheduler.DeliveryDispatcher;
 import org.flexlb.balance.scheduler.DeliveryExecution;
@@ -10,13 +12,10 @@ import org.flexlb.balance.scheduler.RequestScheduler;
 import org.flexlb.balance.scheduler.RequestTaskPool;
 import org.flexlb.balance.scheduler.ResponseCompletionExecutor;
 import org.flexlb.balance.scheduler.ScheduledTaskTimer;
-import org.flexlb.balance.endpoint.EndpointRegistry;
-import org.flexlb.util.Failures;
-import java.util.LinkedHashSet;
-import lombok.extern.slf4j.Slf4j;
 import org.flexlb.consistency.MasterStatusService;
 import org.flexlb.httpserver.FlexlbGrpcServer;
 import org.flexlb.listener.ApplicationWarmupState;
+import org.flexlb.util.Failures;
 import org.flexlb.util.Logger;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.context.ApplicationContext;
@@ -29,6 +28,7 @@ import org.springframework.core.env.Environment;
 import org.springframework.stereotype.Component;
 
 import java.util.Arrays;
+import java.util.LinkedHashSet;
 import java.util.concurrent.TimeUnit;
 
 /** Owns the fixed application online, health and graceful-shutdown workflow. */

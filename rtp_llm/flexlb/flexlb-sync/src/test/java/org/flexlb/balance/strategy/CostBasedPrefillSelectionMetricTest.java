@@ -176,8 +176,7 @@ class CostBasedPrefillSelectionMetricTest {
                         first,
                         settings,
                         org.flexlb.balance.scheduler.SchedulerTestSupport.queueDependencies(
-                                mock(org.flexlb.balance.scheduler.RequestLifecycle.class),
-                                config));
+                                mock(org.flexlb.balance.scheduler.RequestLifecycle.class), config));
             }
             try (RequestRoute selected = select()) {
                 assertEquals("10.0.0.2", selected.prefill().getServerIp());

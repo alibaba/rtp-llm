@@ -530,11 +530,9 @@ class DirectAdmissionContractTest {
                                     org.mockito.Mockito.mock(
                                             org.flexlb.service.RecentCacheKeyTraceReporter.class)),
                             new PlacementAvailability(),
-                            SchedulingTestConfig.capacity(config),
-                            org.mockito.Mockito.mock(
-                                    org.flexlb.service.RecentCacheKeyTraceReporter.class),
                             new OrderedRequestQueue(config.isPriorityOrdering()),
-                            org.flexlb.balance.planner.BuiltinGroupPlanner.from(config))) {
+                            org.flexlb.balance.planner.BuiltinGroupPlanner.from(config),
+                            fixture.runtime.queueDependencies)) {
                 var context = RequestProtocolTestSupport.context(config, 109L);
                 var future =
                         queue.lifecycle()
@@ -632,11 +630,9 @@ class DirectAdmissionContractTest {
                                     mock(DeliveryMetricsReporter.class),
                                     mock(DecodePreemption.class),
                                     new PlacementAvailability(),
-                                    SchedulingTestConfig.capacity(config),
-                                    org.mockito.Mockito.mock(
-                                            org.flexlb.service.RecentCacheKeyTraceReporter.class),
                                     org.flexlb.balance.planner.BuiltinGroupPlanner.from(config),
-                                    new OrderedRequestQueue(config.isPriorityOrdering()))) {
+                                    new OrderedRequestQueue(config.isPriorityOrdering()),
+                                    fixture.runtime.queueDependencies)) {
                 var request = RequestProtocolTestSupport.context(config, 102L);
                 request.data()
                         .setRequest(request.data().getRequest().toBuilder().seqLen(32L).build());

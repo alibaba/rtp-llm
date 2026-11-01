@@ -4,6 +4,7 @@ import com.google.common.collect.MapMaker;
 import org.flexlb.balance.delivery.CapacityBoundary;
 import org.flexlb.balance.delivery.DeliveryResult;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
+import org.flexlb.balance.endpoint.DecodeResources;
 import org.flexlb.balance.endpoint.DecodeResources.AdmissionCapacity;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.PrefillState;
@@ -57,12 +58,60 @@ public class DeliveryDispatcher {
         this.telemetry = Objects.requireNonNull(telemetry);
     }
 
+    static RequestLifecycle.PreemptionEvent preemptionReply(
+            DecodeResources.ReservationHandle reservation,
+            DecodeEndpoint endpoint,
+            EngineGrpcClient.CancelReply reply,
+            String detail,
+            DeliveryClaim delivery) {
+        var phase =
+                switch (reply) {
+                    case ACCEPTED, REQUEST_FENCED ->
+                            org.flexlb.balance.preemption.PreemptionCancelPhase.CANCEL_REQUESTED;
+                    case NOT_FOUND ->
+                            org.flexlb.balance.preemption.PreemptionCancelPhase.NOT_FOUND_STALE;
+                    case FAILED, UNSUPPORTED ->
+                            org.flexlb.balance.preemption.PreemptionCancelPhase.CANCEL_UNKNOWN;
+                    case REQUEST_CLEANED -> null;
+                };
+        return new RequestLifecycle.PreemptionEvent(
+                phase,
+                false,
+                reply == EngineGrpcClient.CancelReply.REQUEST_CLEANED ? endpoint : null,
+                reply == EngineGrpcClient.CancelReply.REQUEST_CLEANED ? reservation : null,
+                reply == EngineGrpcClient.CancelReply.REQUEST_CLEANED ? detail : null,
+                delivery == null ? null : cleanupAcknowledgement(delivery, reply));
+    }
+
+    private static ContextResult.CleanupAcknowledgement cleanupAcknowledgement(
+            DeliveryClaim delivery, EngineGrpcClient.CancelReply reply) {
+        return new ContextResult.CleanupAcknowledgement(
+                delivery,
+                switch (reply) {
+                    case REQUEST_CLEANED -> ContextResult.CancelEvidenceKind.CLEANED;
+                    case REQUEST_FENCED -> ContextResult.CancelEvidenceKind.FENCED;
+                    case ACCEPTED -> ContextResult.CancelEvidenceKind.ACKNOWLEDGED;
+                    case NOT_FOUND -> ContextResult.CancelEvidenceKind.NOT_FOUND;
+                    case UNSUPPORTED -> ContextResult.CancelEvidenceKind.UNSUPPORTED;
+                    case FAILED -> ContextResult.CancelEvidenceKind.UNKNOWN;
+                },
+                System.currentTimeMillis());
+    }
+
     public DispatcherConfig.Type mode() {
         return mode;
     }
 
     record Member(RequestRoute route, DecodeEndpoint.EngineDispatchPermit decode)
             implements AutoCloseable {
+        DeliveryClaim claimDelivery(DeliveryClaimKind kind, long batchId) {
+            return route.ctx().data().getScheduler().claimDelivery(route, kind, batchId, decode);
+        }
+
+        void recordFailure(Throwable failure) {
+            route.ctx().data().getScheduler().tasks.recordFailure(failure);
+        }
+
         static CapacityBoundary.Attempt<Member> prepare(
                 RequestRoute route, AdmissionCapacity capacity) {
             var endpoint = route.decodeEp();
@@ -178,18 +227,15 @@ public class DeliveryDispatcher {
             }
             for (DeliveryClaim claim : claims) {
                 long now = System.currentTimeMillis();
-                claim.owner()
-                        .data()
-                        .getScheduler()
+                var data = claim.owner().data();
+                data.getScheduler()
                         .onDeliveryFact(
                                 new ContextResult.Prediction(
                                         claim,
                                         PrefillPredictionBoundary.predictedVisibilityDeadlineMs(
                                                 batch.precedingWork(),
                                                 prediction,
-                                                claim.owner()
-                                                        .data()
-                                                        .getConfig()
+                                                data.getConfig()
                                                         .getRequestLifecycle()
                                                         .getDecision()
                                                         .getLifetime(),
@@ -206,14 +252,7 @@ public class DeliveryDispatcher {
         } finally {
             Throwable cleanup = closeCommitted(batch.members(), batch.handoff());
             if (cleanup != null) {
-                batch.members()
-                        .getFirst()
-                        .route()
-                        .ctx()
-                        .data()
-                        .getScheduler()
-                        .tasks
-                        .recordFailure(cleanup);
+                batch.members().getFirst().recordFailure(cleanup);
             }
         }
         if (call.response() == null) {
@@ -288,16 +327,7 @@ public class DeliveryDispatcher {
     private void claim(Batch batch, List<DeliveryClaim> claims) {
         for (Member member : batch.members()) {
             try {
-                var claim =
-                        member.route()
-                                .ctx()
-                                .data()
-                                .getScheduler()
-                                .claimDelivery(
-                                        member.route(),
-                                        DeliveryClaimKind.BATCH_ENQUEUE,
-                                        batch.batchId(),
-                                        member.decode());
+                var claim = member.claimDelivery(DeliveryClaimKind.BATCH_ENQUEUE, batch.batchId());
                 if (claim != null) {
                     claims.add(claim);
                 }
@@ -306,7 +336,7 @@ public class DeliveryDispatcher {
                     RequestLifecycle.preparationFailed(
                             member.route(), String.valueOf(failure.getMessage()));
                 } catch (Throwable ownerFailure) {
-                    member.route().ctx().data().getScheduler().tasks.recordFailure(ownerFailure);
+                    member.recordFailure(ownerFailure);
                     logFailure("Claim failure notification", batch.batchId(), ownerFailure);
                 }
             }
@@ -355,17 +385,14 @@ public class DeliveryDispatcher {
             }
             long now = System.nanoTime();
             for (var item : items) {
-                item.ctx().data().setBatchDispatchedNanos(now);
+                var data = item.ctx().data();
+                data.setBatchDispatchedNanos(now);
                 FlexlbTrace.setScheduleAttribute(
-                        item.ctx().data().getTraceContext(), FlexlbTrace.BATCH_ID, batch.batchId());
+                        data.getTraceContext(), FlexlbTrace.BATCH_ID, batch.batchId());
                 FlexlbTrace.setScheduleAttribute(
-                        item.ctx().data().getTraceContext(),
-                        FlexlbTrace.BATCH_SIZE,
-                        (long) items.size());
+                        data.getTraceContext(), FlexlbTrace.BATCH_SIZE, (long) items.size());
                 FlexlbTrace.setScheduleAttribute(
-                        item.ctx().data().getTraceContext(),
-                        FlexlbTrace.DISPATCH_REASON,
-                        batch.reason());
+                        data.getTraceContext(), FlexlbTrace.DISPATCH_REASON, batch.reason());
             }
             String ip = endpoint.getIp();
             int port = endpoint.getGrpcPort();
@@ -394,28 +421,27 @@ public class DeliveryDispatcher {
         long responseNanos = System.nanoTime();
         for (int i = 0; i < claims.size(); i++) {
             var claim = claims.get(i);
+            var data = claim.owner().data();
             var result = results.get(i);
             if (result.status() == DeliveryResult.Status.DELIVERED
                     || result.status() == DeliveryResult.Status.PREFILL_REJECTED) {
                 try {
                     FlexlbTrace.setScheduleDuration(
-                            claim.owner().data().getTraceContext(),
+                            data.getTraceContext(),
                             FlexlbTrace.ENQUEUE_BATCH_MS,
-                            claim.owner().data().getBatchDispatchedNanos(),
+                            data.getBatchDispatchedNanos(),
                             responseNanos);
                 } catch (Throwable failure) {
                     logFailure("Response trace", batchId, failure);
                 }
             }
             try {
-                claim.owner()
-                        .data()
-                        .getScheduler()
+                data.getScheduler()
                         .onDeliveryFact(
                                 new ContextResult.TransportResult(
                                         claim, result, System.currentTimeMillis()));
             } catch (Throwable failure) {
-                claim.owner().data().getScheduler().tasks.recordFailure(failure);
+                data.getScheduler().tasks.recordFailure(failure);
                 logFailure(
                         "Delivery completion request_id=" + claim.item().requestId(),
                         batchId,
@@ -440,21 +466,14 @@ public class DeliveryDispatcher {
                     RequestLifecycle.preparationFailed(
                             member.route(), String.valueOf(failure.getMessage()));
                 } catch (Throwable ownerFailure) {
-                    member.route().ctx().data().getScheduler().tasks.recordFailure(ownerFailure);
+                    member.recordFailure(ownerFailure);
                     logFailure("Preparation failure notification", batch.batchId(), ownerFailure);
                 }
             }
         } finally {
             Throwable cleanup = closeCommitted(batch.members(), batch.handoff());
             if (cleanup != null) {
-                batch.members()
-                        .getFirst()
-                        .route()
-                        .ctx()
-                        .data()
-                        .getScheduler()
-                        .tasks
-                        .recordFailure(cleanup);
+                batch.members().getFirst().recordFailure(cleanup);
             }
         }
         report(
@@ -936,7 +955,7 @@ public class DeliveryDispatcher {
                 var scheduler = context.data().getScheduler();
                 if (operation != null) {
                     var event =
-                            RequestLifecycle.PreemptionEvent.receipt(
+                            preemptionReply(
                                     operation.registration().reservation(),
                                     operation.endpoint(),
                                     reply,
@@ -947,8 +966,7 @@ public class DeliveryDispatcher {
                                     new ContextResult.PreemptionFact(
                                             operation.registration(), event));
                 } else if (claim != null) {
-                    scheduler.onDeliveryFact(
-                            RequestLifecycle.PreemptionEvent.acknowledgement(claim, reply));
+                    scheduler.onDeliveryFact(cleanupAcknowledgement(claim, reply));
                 }
                 evidence = reply;
             } catch (RuntimeException | Error failed) {

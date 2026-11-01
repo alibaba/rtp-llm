@@ -1,8 +1,5 @@
 package org.flexlb.balance.eviction;
 
-import org.flexlb.balance.scheduler.RequestTaskExecutor;
-import org.flexlb.balance.scheduler.TaskTimer;
-import org.flexlb.balance.scheduler.RequestLifecycle;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.DecodeResources;
 import org.flexlb.balance.endpoint.DecodeResources.DecodeRequestView;
@@ -11,9 +8,12 @@ import org.flexlb.balance.preemption.PreemptionCancelPhase;
 import org.flexlb.balance.preemption.VictimResolution;
 import org.flexlb.balance.scheduler.CancelReason;
 import org.flexlb.balance.scheduler.PreemptionRegistration;
+import org.flexlb.balance.scheduler.RequestLifecycle;
+import org.flexlb.balance.scheduler.RequestTaskExecutor;
 import org.flexlb.balance.scheduler.SchedulerTestServices;
 import org.flexlb.balance.scheduler.SchedulerTestSupport;
 import org.flexlb.balance.scheduler.SchedulingTestConfig;
+import org.flexlb.balance.scheduler.TaskTimer;
 import org.flexlb.config.ConfigService;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.engine.grpc.EngineGrpcClient;

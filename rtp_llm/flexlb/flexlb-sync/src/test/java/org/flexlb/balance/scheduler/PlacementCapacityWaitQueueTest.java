@@ -75,7 +75,9 @@ class PlacementCapacityWaitQueueTest {
 
     @Test
     void fifoIgnoresPriority() {
-        var fifo = new PlacementCapacityWaitQueue(new OrderedRequestQueue(false).order(), availability);
+        var fifo =
+                new PlacementCapacityWaitQueue(
+                        new OrderedRequestQueue(false).order(), availability);
         var first = entry(10);
         var second = entry(90);
         fifo.park(first, A, 0);

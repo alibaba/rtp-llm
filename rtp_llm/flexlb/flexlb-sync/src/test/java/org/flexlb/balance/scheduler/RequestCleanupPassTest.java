@@ -19,7 +19,6 @@ import static org.flexlb.balance.scheduler.ContextResult.Granted;
 import static org.flexlb.balance.scheduler.ContextResult.Phase;
 import static org.flexlb.balance.scheduler.ContextResult.PublicationResult;
 import static org.flexlb.balance.scheduler.ContextResult.Rejected;
-import static org.flexlb.balance.scheduler.ContextResult.UpdateKind;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
@@ -36,8 +35,7 @@ class RequestCleanupPassTest {
     void partialCompletionRetainsProofAndCannotRewriteAnArchivedRequest() {
         RequestContext context = endingContext(7301L);
         assertNotNull(context.releaseReason());
-        assertEquals(
-                UpdateKind.APPLIED, context.completeClose(released(true, false), 1002L).kind());
+        context.completeClose(released(true, false), 1002L);
         assertTrue(context.snapshot().close().prefillSettled());
         assertFalse(context.snapshot().close().decodeSettled());
         context.completeClose(released(false, false), 1004L);
@@ -45,21 +43,23 @@ class RequestCleanupPassTest {
                 context.snapshot().close().prefillSettled(),
                 "completed physical proof is monotonic");
         assertFalse(context.snapshot().close().decodeSettled());
-        var closed = context.completeClose(released(true, true), 1005L);
-        assertEquals(Phase.CLOSED, closed.after().phase());
-        assertNotNull(closed.after().terminalRecord());
+        context.completeClose(released(true, true), 1005L);
+        var closed = context.snapshot();
+        assertEquals(Phase.CLOSED, closed.phase());
+        assertNotNull(closed.terminalRecord());
         assertNull(context.snapshot().route());
-        assertEquals(UpdateKind.STALE, context.completeClose(released(true, true), 1006L).kind());
-        assertSame(closed.after().terminalRecord(), context.snapshot().terminalRecord());
+        context.completeClose(released(true, true), 1006L);
+        assertSame(closed, context.snapshot());
+        assertSame(closed.terminalRecord(), context.snapshot().terminalRecord());
     }
 
     static <T extends GrantValue> T granted(Claim<T> claim) {
         return ((Granted<T>) assertInstanceOf(Granted.class, claim)).value();
     }
 
-    static ContextResult.End ended(ContextResult.Update update) {
-        assertNotNull(update.after().outcome());
-        return update.after().outcome();
+    static ContextResult.End ended(ContextResult.Snapshot snapshot) {
+        assertNotNull(snapshot.outcome());
+        return snapshot.outcome();
     }
 
     static CloseProgress released(boolean prefill, boolean decode) {
@@ -182,7 +182,6 @@ class RequestCleanupPassTest {
                                         false,
                                         false),
                                 1001L)
-                        .after()
                         .outcome());
         assertNull(context.snapshot().outcome());
         context.completePlacement(placement, PublicationResult.FAILED, 1002L);
@@ -254,7 +253,7 @@ class RequestCleanupPassTest {
         assertNull(context.releaseReason(), "the producer still owns placement completion");
         context.completePlacement(placement, PublicationResult.FAILED, 1003L);
         if (!notificationsFinished) {
-            assertSame(outcome, context.beginClose(null, 1004L).after().outcome());
+            assertSame(outcome, context.beginClose(null, 1004L).outcome());
             context.completeClose(new CloseProgress(true, false, false, true, true), 1004L);
         }
         assertEquals(
