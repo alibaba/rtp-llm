@@ -3,23 +3,26 @@
 from typing import Any, Optional
 
 import torch
+
 from rtp_llm.models_py.distributed.deepep_wrapper import DeepEPWrapper
+from rtp_llm.models_py.kernels.ppu.int8_kernel.int8_quant import per_token_quant_int8
 from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
     MoEConfigAdapter,
+)
+from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import (
+    ExpertForwardPayload,
 )
 from rtp_llm.models_py.modules.factory.fused_moe.defs.quant_config import (
     FusedMoEQuantConfig,
 )
 from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.routers.deepep_normal_router import (
+    DeepepNormalRouterFp8PerBlock,
     DeepepNormalRouterNoQuant,
 )
 from rtp_llm.models_py.modules.factory.fused_moe.utils.config_resolver import (
     MoeConfigResolver,
 )
-
-from rtp_llm.models_py.kernels.ppu.int8_kernel.int8_quant import (
-    per_token_quant_int8,
-)
+from rtp_llm.ops.compute_ops import trt_fp8_quantize_128
 
 
 class PpuDeepepNormalRouterNoQuant(DeepepNormalRouterNoQuant):
@@ -85,3 +88,48 @@ class PpuDeepepNormalRouterW8A8Int8(PpuDeepepNormalRouterNoQuant):
             raise ValueError(f"W8A8 DeepEP Normal expects BF16 input, got {a1.dtype}")
         tp_expert_a1 = torch.narrow(a1, 0, slice_begin, slice_size)
         return per_token_quant_int8(tp_expert_a1)
+
+
+class PpuDeepepNormalRouterFp8PerBlock(DeepepNormalRouterFp8PerBlock):
+    """FP8 per-block router without CUDA SM capability checks.
+
+    Quantizes each local token once with ``trt_fp8_quantize_128`` and dispatches
+    the FP8 data together with its ``(M, K // 128)`` per-group scale.
+    """
+
+    QUANT_METHOD = "FP8_PER_BLOCK"
+
+    @classmethod
+    def check_conditions(cls, checker: Any, config: MoEConfigAdapter) -> None:
+        resolver = MoeConfigResolver()
+        checker.check(resolver.is_ep_enabled(config))
+        checker.check(not resolver.use_low_latency(config))
+        checker.check(resolver.get_quant_method(config) == cls.QUANT_METHOD)
+        checker.check(DeepEPWrapper.supported())
+
+    def _do_quant_fp8_per_block(
+        self, a1: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if a1.dtype != torch.bfloat16:
+            raise ValueError(f"FP8 DeepEP Normal expects BF16 input, got {a1.dtype}")
+        return trt_fp8_quantize_128(a1, False)
+
+    def prepare(
+        self,
+        a1: torch.Tensor,
+        a1_scale: Optional[torch.Tensor],
+        a2_scale: Optional[torch.Tensor],
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+    ) -> "ExpertForwardPayload":
+        payload = super().prepare(a1, a1_scale, a2_scale, topk_weights, topk_ids)
+        # DeepEP returns partition-local expert ids; the base class only remaps
+        # them to global ids on the non-FP8 path, so redo it here for the
+        # executor's `_to_local_expert_ids`.
+        if payload.expert_topk_ids.numel() != 0:
+            payload.expert_topk_ids = torch.where(
+                payload.expert_topk_ids == -1,
+                self.expert_num - 1 if self.rank_expert_offset == 0 else 0,
+                payload.expert_topk_ids + self.rank_expert_offset,
+            )
+        return payload

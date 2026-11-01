@@ -6,6 +6,38 @@ from typing import Any, Dict, Optional
 
 import torch
 import torch.nn.functional as F
+
+from rtp_llm.models_py.kernels.ppu.deepgemm_warmup import (
+    WarmupMode,
+    get_deep_gemm_warmup_mode,
+    resolve_deep_gemm_warmup_max_tokens,
+    warmup_grouped_bf16_gemm,
+    warmup_grouped_fp8_gemm,
+    warmup_grouped_int8_gemm,
+)
+from rtp_llm.models_py.kernels.ppu.deepgemm_wrapper import (
+    configure_deep_gemm_num_sms,
+    deep_gemm_default_num_sms,
+    has_deep_gemm_bf16_grouped,
+    has_deep_gemm_bf16_grouped_nopad,
+    has_deep_gemm_fp8_grouped,
+    has_deep_gemm_fp8_grouped_nopad,
+    has_deep_gemm_int8_grouped,
+    has_deep_gemm_int8_grouped_nopad,
+    m_grouped_bf16_gemm_nt_contiguous,
+    m_grouped_bf16_gemm_nt_masked,
+    m_grouped_bf16_gemm_nt_nopad,
+    m_grouped_fp8_gemm_nt_contiguous,
+    m_grouped_fp8_gemm_nt_masked,
+    m_grouped_fp8_gemm_nt_nopad,
+    m_grouped_int8_gemm_nt_contiguous,
+    m_grouped_int8_gemm_nt_masked,
+    m_grouped_int8_gemm_nt_nopad,
+)
+from rtp_llm.models_py.kernels.ppu.int8_kernel.fused_silu_mul_int8_quant import (
+    silu_and_mul_masked_per_token_quant_int8_fwd,
+)
+from rtp_llm.models_py.kernels.ppu.int8_kernel.int8_quant import per_token_quant_int8
 from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
     MoEConfigAdapter,
 )
@@ -18,51 +50,30 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs.quant_config import (
     FusedMoEQuantConfig,
 )
 from rtp_llm.models_py.modules.factory.fused_moe.defs.type import ExecutorType
-from rtp_llm.models_py.modules.factory.fused_moe.utils.config_resolver import (
-    MoeConfigResolver,
-)
-from rtp_llm.models_py.triton_kernels.common.activation import (
-    silu_and_mul,
-    silu_mul_masked_bf16_no_post_quant_fwd,
-)
-from rtp_llm.models_py.kernels.ppu.int8_kernel.int8_quant import (
-    per_token_quant_int8,
-)
-from rtp_llm.models_py.triton_kernels.moe.ep_kernels import ep_gather
-from rtp_llm.models_py.utils.math import align, ceil_div
-from rtp_llm.models_py.utils.memory import dispose_tensor
-from rtp_llm.utils.model_weight import W
-
-from rtp_llm.models_py.kernels.ppu.deepgemm_warmup import (
-    WarmupMode,
-    get_deep_gemm_warmup_mode,
-    resolve_deep_gemm_warmup_max_tokens,
-    warmup_grouped_bf16_gemm,
-    warmup_grouped_int8_gemm,
-)
-from rtp_llm.models_py.kernels.ppu.deepgemm_wrapper import (
-    configure_deep_gemm_num_sms,
-    deep_gemm_default_num_sms,
-    has_deep_gemm_bf16_grouped,
-    has_deep_gemm_bf16_grouped_nopad,
-    has_deep_gemm_int8_grouped,
-    has_deep_gemm_int8_grouped_nopad,
-    m_grouped_bf16_gemm_nt_contiguous,
-    m_grouped_bf16_gemm_nt_masked,
-    m_grouped_bf16_gemm_nt_nopad,
-    m_grouped_int8_gemm_nt_contiguous,
-    m_grouped_int8_gemm_nt_masked,
-    m_grouped_int8_gemm_nt_nopad,
-)
-from rtp_llm.models_py.kernels.ppu.int8_kernel.fused_silu_mul_int8_quant import (
-    silu_and_mul_masked_per_token_quant_int8_fwd,
-)
 from rtp_llm.models_py.modules.factory.fused_moe.ppu_impl.kernels.ep_kernels import (
     ep_scatter_bf16,
     ep_scatter_int8,
     ep_scatter_v2_bf16,
     ep_scatter_v2_int8,
 )
+from rtp_llm.models_py.modules.factory.fused_moe.utils.config_resolver import (
+    MoeConfigResolver,
+)
+from rtp_llm.models_py.triton_kernels.common.activation import (
+    MaskedSiluInputLayout,
+    silu_and_mul,
+    silu_mul_masked_bf16_no_post_quant_fwd,
+    silu_mul_masked_fp8_post_quant_fwd,
+)
+from rtp_llm.models_py.triton_kernels.moe.ep_kernels import (
+    ep_gather,
+    ep_scatter,
+    ep_scatter_v2,
+)
+from rtp_llm.models_py.utils.math import align, ceil_div
+from rtp_llm.models_py.utils.memory import dispose_tensor
+from rtp_llm.ops.compute_ops import trt_fp8_quantize_128
+from rtp_llm.utils.model_weight import W
 
 logger = logging.getLogger(__name__)
 
@@ -90,12 +101,11 @@ class DeepGemmBf16HybridExecutor(FusedMoeExpertExecutor):
 
     @classmethod
     def check_conditions(cls, checker: Any, config: MoEConfigAdapter) -> None:
-        from rtp_llm.models_py.modules.factory.fused_moe.utils.config_resolver import (
-            MoeConfigResolver,
-        )
-
         from rtp_llm.models_py.kernels.ppu.deepgemm_wrapper import (
             has_deep_gemm_bf16_grouped,
+        )
+        from rtp_llm.models_py.modules.factory.fused_moe.utils.config_resolver import (
+            MoeConfigResolver,
         )
 
         resolver = MoeConfigResolver()
@@ -475,7 +485,7 @@ class DeepGemmBf16HybridExecutor(FusedMoeExpertExecutor):
             device=device,
             dtype=torch.bfloat16,
         )
-        ppu_silu_and_mul_bf16(down_input, gateup_output)
+        silu_and_mul(down_input, gateup_output)
         dispose_tensor(gateup_output)
 
         # Step 4: Down GEMM (deepgemm bf16)
@@ -812,6 +822,385 @@ class DeepGemmInt8HybridExecutor(DeepGemmBf16HybridExecutor):
                 )
             else:
                 m_grouped_int8_gemm_nt_contiguous(
+                    (down_q, down_scale),
+                    (self.w2, self.w2_scale),
+                    down_output,
+                    m_indices,
+                )
+        dispose_tensor(down_q)
+        dispose_tensor(down_scale)
+
+        gather_out = torch.empty(
+            hidden_states_shape, device=device, dtype=torch.bfloat16
+        )
+        ep_gather(down_output, topk_idx, topk_weights, output_index, gather_out)
+        dispose_tensor(down_output)
+        return CombineForwardPayload(fused_expert_output=gather_out)
+
+
+class DeepGemmFp8HybridExecutor(DeepGemmBf16HybridExecutor):
+    """FP8 per-block [128,128] expert GEMMs on the DeepEP Normal path.
+
+    The router dispatches FP8 activations with per-token-group scales
+    (``trt_fp8_quantize_128`` layout, ``(M, K // 128)`` row-major FP32); the
+    PPU wheel's grouped FP8 GEMMs consume exactly that scale layout.
+    """
+
+    QUANT_METHOD = "FP8_PER_BLOCK"
+
+    @classmethod
+    def check_conditions(cls, checker: Any, config: MoEConfigAdapter) -> None:
+        resolver = MoeConfigResolver()
+        checker.check(resolver.get_quant_method(config) == cls.QUANT_METHOD)
+        checker.check(resolver.is_bf16(config))
+        checker.check(has_deep_gemm_fp8_grouped())
+        checker.check(not config.enable_cuda_graph)
+
+    def __init__(
+        self,
+        config: MoEConfigAdapter,
+        quant_config: FusedMoEQuantConfig,
+        weights: Dict[str, torch.Tensor],
+    ):
+        super().__init__(config, quant_config, weights)
+        self.w1_scale = weights[W.moe_s1]
+        self.w2_scale = weights[W.moe_s2]
+        if self.w1.dtype != torch.float8_e4m3fn or self.w2.dtype != torch.float8_e4m3fn:
+            raise ValueError(
+                f"FP8 MoE expects FP8 weights, got {self.w1.dtype}/{self.w2.dtype}"
+            )
+        if self.w1_scale.dtype != torch.float32 or self.w2_scale.dtype != torch.float32:
+            raise ValueError(
+                "FP8 MoE expects FP32 scales, got "
+                f"{self.w1_scale.dtype}/{self.w2_scale.dtype}"
+            )
+        if self.hidden_size % self.DEEPGEMM_BLOCK_SHAPE[1] != 0:
+            raise ValueError(
+                f"FP8 MoE hidden size {self.hidden_size} is not 128-aligned"
+            )
+        if self.intermediate_size % self.DEEPGEMM_BLOCK_SHAPE[1] != 0:
+            raise ValueError(
+                f"FP8 MoE intermediate size {self.intermediate_size} is not 128-aligned"
+            )
+        if self.w1_scale.shape != (
+            self.num_local_experts,
+            self.intermediate_size // self.DEEPGEMM_BLOCK_SHAPE[0],
+            self.hidden_size // self.DEEPGEMM_BLOCK_SHAPE[1],
+        ):
+            raise ValueError(
+                f"w1 scale shape {self.w1_scale.shape} does not match "
+                f"{self.w1.shape} with 128x128 blocks"
+            )
+        if self.w2_scale.shape != (
+            self.num_local_experts,
+            self.hidden_size // self.DEEPGEMM_BLOCK_SHAPE[0],
+            self.intermediate_size // 2 // self.DEEPGEMM_BLOCK_SHAPE[1],
+        ):
+            raise ValueError(
+                f"w2 scale shape {self.w2_scale.shape} does not match "
+                f"{self.w2.shape} with 128x128 blocks"
+            )
+
+        self.use_nopad = (
+            has_deep_gemm_fp8_grouped_nopad()
+            and os.environ.get("MOE_FP8_NOPAD", "1") == "1"
+        )
+        logger.info(
+            "[DeepGemmFp8HybridExecutor] prefill GEMM layout: %s",
+            "nopad" if self.use_nopad else "contiguous(128-padded)",
+        )
+        self._warmup_fp8_kernels()
+
+    def _warmup_fp8_kernels(self) -> None:
+        try:
+            warmup_mode, max_masked_m, max_prefill_m = self._get_warmup_limits()
+            if warmup_mode == "skip":
+                return
+            for weight in (
+                (self.w1, self.w1_scale),
+                (self.w2, self.w2_scale),
+            ):
+                if max_masked_m:
+                    warmup_grouped_fp8_gemm(
+                        weight,
+                        max_m=max_masked_m,
+                        layout="masked",
+                        mode=warmup_mode,
+                        num_sms=self.num_gemm_sms,
+                    )
+                warmup_grouped_fp8_gemm(
+                    weight,
+                    max_m=max_prefill_m,
+                    layout="nopad" if self.use_nopad else "contiguous",
+                    mode=warmup_mode,
+                    num_sms=self.num_gemm_sms,
+                )
+        except Exception:
+            logger.exception("DeepGEMM FP8 warmup failed; execution will use lazy JIT")
+
+    def _get_dispatch_scale(self, payload: ExpertForwardPayload) -> torch.Tensor:
+        hidden_states = payload.expert_x
+        hidden_states_scale = payload.expert_x_scale
+        if hidden_states.dtype != torch.float8_e4m3fn:
+            raise ValueError(
+                f"FP8 DeepEP Normal expected FP8 input, got {hidden_states.dtype}"
+            )
+        if hidden_states_scale is None or hidden_states_scale.dtype != torch.float32:
+            raise ValueError("FP8 DeepEP Normal expected an FP32 per-group scale")
+        if hidden_states_scale.shape != (
+            hidden_states.shape[0],
+            self.hidden_size // self.DEEPGEMM_BLOCK_SHAPE[1],
+        ):
+            raise ValueError(
+                f"input scale shape {hidden_states_scale.shape} does not match "
+                f"({hidden_states.shape[0]}, {self.hidden_size // 128})"
+            )
+        return hidden_states_scale.contiguous()
+
+    def execute_masked(
+        self,
+        payload: ExpertForwardPayload,
+        activation: str,
+        expert_map: Optional[torch.Tensor],
+        a2_scale: Optional[torch.Tensor],
+        apply_router_weight_on_input: bool,
+        extra_expert_args: Optional[dict[str, Any]],
+    ) -> CombineForwardPayload:
+        with configure_deep_gemm_num_sms(self.num_gemm_sms):
+            hidden_states = payload.expert_x
+            hidden_states_scale = self._get_dispatch_scale(payload)
+            topk_idx = self._to_local_expert_ids(payload.expert_topk_ids)
+            topk_weights = payload.expert_topk_weights
+            tokens_per_expert = payload.expert_tokens_meta.expert_num_tokens
+
+            token_num = hidden_states.shape[0]
+            num_experts = tokens_per_expert.shape[0]
+            alignment = align(token_num, self.EXPERT_ALIGNMENT)
+            expected_m = min(alignment, ceil_div(token_num * self.top_k, num_experts))
+            device = hidden_states.device
+            hidden_states_shape = hidden_states.shape
+
+            input_q = torch.empty(
+                (self.num_experts_per_partition, alignment, self.hidden_size),
+                device=device,
+                dtype=torch.float8_e4m3fn,
+            )
+            input_scale = torch.empty(
+                (
+                    self.num_experts_per_partition,
+                    alignment,
+                    self.hidden_size // self.DEEPGEMM_BLOCK_SHAPE[1],
+                ),
+                device=device,
+                dtype=torch.float32,
+            )
+            output_index = torch.empty_like(topk_idx)
+            expert_start_loc = torch.empty_like(tokens_per_expert)
+            ep_scatter_v2(
+                hidden_states,
+                hidden_states_scale,
+                topk_idx,
+                alignment,
+                expert_start_loc,
+                input_q.view(
+                    self.num_experts_per_partition * alignment, self.hidden_size
+                ),
+                input_scale,
+                output_index,
+                scale_ue8m0=False,
+            )
+            dispose_tensor(hidden_states)
+            dispose_tensor(hidden_states_scale)
+
+            gateup_output = torch.empty(
+                (self.num_experts_per_partition, alignment, self.intermediate_size),
+                device=device,
+                dtype=torch.bfloat16,
+            )
+            m_grouped_fp8_gemm_nt_masked(
+                (input_q, input_scale),
+                (self.w1, self.w1_scale),
+                gateup_output,
+                tokens_per_expert,
+                expected_m,
+            )
+            dispose_tensor(input_q)
+            dispose_tensor(input_scale)
+
+            down_q = torch.empty(
+                (
+                    self.num_experts_per_partition,
+                    alignment,
+                    self.intermediate_size // 2,
+                ),
+                device=device,
+                dtype=torch.float8_e4m3fn,
+            )
+            down_scale = torch.empty(
+                (
+                    self.num_experts_per_partition,
+                    alignment,
+                    self.intermediate_size // 2 // self.DEEPGEMM_BLOCK_SHAPE[0],
+                ),
+                device=device,
+                dtype=torch.float32,
+            )
+            silu_mul_masked_fp8_post_quant_fwd(
+                input=gateup_output,
+                output=down_q,
+                output_scale=down_scale,
+                quant_group_size=self.DEEPGEMM_BLOCK_SHAPE[0],
+                masked_m=tokens_per_expert,
+                expected_m=expected_m,
+                input_layout=MaskedSiluInputLayout.BATCH_TOKEN_ALIGNMENT,
+                scale_ue8m0=False,
+            )
+            dispose_tensor(gateup_output)
+
+            down_output = torch.empty(
+                (self.num_experts_per_partition, alignment, self.hidden_size),
+                device=device,
+                dtype=torch.bfloat16,
+            )
+            m_grouped_fp8_gemm_nt_masked(
+                (down_q, down_scale),
+                (self.w2, self.w2_scale),
+                down_output,
+                tokens_per_expert,
+                expected_m,
+            )
+            dispose_tensor(down_q)
+            dispose_tensor(down_scale)
+
+            gather_out = torch.empty(
+                hidden_states_shape, device=device, dtype=torch.bfloat16
+            )
+            ep_gather(
+                down_output.view(-1, self.hidden_size),
+                topk_idx,
+                topk_weights,
+                output_index,
+                gather_out,
+            )
+            dispose_tensor(down_output)
+            return CombineForwardPayload(fused_expert_output=gather_out)
+
+    def execute_contiguous(
+        self,
+        payload: ExpertForwardPayload,
+        activation: str,
+        expert_map: Optional[torch.Tensor],
+        a2_scale: Optional[torch.Tensor],
+        apply_router_weight_on_input: bool,
+        extra_expert_args: Optional[dict[str, Any]],
+    ) -> CombineForwardPayload:
+        hidden_states = payload.expert_x
+        hidden_states_scale = self._get_dispatch_scale(payload)
+        topk_idx = self._to_local_expert_ids(payload.expert_topk_ids)
+        topk_weights = payload.expert_topk_weights
+        tokens_per_expert = payload.expert_tokens_meta.expert_num_tokens_cpu
+        if tokens_per_expert is None:
+            tokens_per_expert = (
+                payload.expert_tokens_meta.expert_num_tokens.cpu().tolist()
+            )
+        if isinstance(tokens_per_expert, torch.Tensor):
+            tokens_per_expert = tokens_per_expert.tolist()
+
+        expert_alignment = 1 if self.use_nopad else self.EXPERT_ALIGNMENT
+        aligned_tokens = [align(count, expert_alignment) for count in tokens_per_expert]
+        all_tokens = sum(aligned_tokens)
+        device = hidden_states.device
+        hidden_states_shape = hidden_states.shape
+        if all_tokens <= 0:
+            return CombineForwardPayload(
+                fused_expert_output=torch.zeros(
+                    hidden_states_shape,
+                    device=device,
+                    dtype=payload.expert_x_origin_dtype,
+                )
+            )
+
+        token_counts = torch.tensor(
+            aligned_tokens, dtype=torch.int32, pin_memory=True, device="cpu"
+        ).to(device=device, non_blocking=True)
+        expert_start_loc = torch.empty_like(token_counts)
+        m_indices = torch.empty(all_tokens, device=device, dtype=torch.int32)
+        output_index = torch.empty_like(topk_idx)
+        input_q = torch.empty(
+            (all_tokens, self.hidden_size), device=device, dtype=torch.float8_e4m3fn
+        )
+        input_scale = torch.empty(
+            (all_tokens, self.hidden_size // self.DEEPGEMM_BLOCK_SHAPE[1]),
+            device=device,
+            dtype=torch.float32,
+        )
+        ep_scatter(
+            hidden_states,
+            hidden_states_scale,
+            topk_idx,
+            token_counts,
+            expert_start_loc,
+            input_q,
+            input_scale,
+            m_indices,
+            output_index,
+            scale_ue8m0=False,
+            align_m=expert_alignment,
+        )
+        # ep_scatter fills m_indices only for occupied slots; clamp guards
+        # against stale values in unoccupied trailing slots.
+        m_indices.clamp_(min=0, max=self.num_experts_per_partition - 1)
+        dispose_tensor(hidden_states)
+        dispose_tensor(hidden_states_scale)
+
+        gateup_output = torch.empty(
+            (all_tokens, self.intermediate_size),
+            device=device,
+            dtype=torch.bfloat16,
+        )
+        with configure_deep_gemm_num_sms(self.num_gemm_sms):
+            if self.use_nopad:
+                m_grouped_fp8_gemm_nt_nopad(
+                    (input_q, input_scale),
+                    (self.w1, self.w1_scale),
+                    gateup_output,
+                    m_indices,
+                    token_counts,
+                )
+            else:
+                m_grouped_fp8_gemm_nt_contiguous(
+                    (input_q, input_scale),
+                    (self.w1, self.w1_scale),
+                    gateup_output,
+                    m_indices,
+                )
+        dispose_tensor(input_q)
+        dispose_tensor(input_scale)
+
+        down_bf16 = torch.empty(
+            (all_tokens, self.intermediate_size // 2),
+            device=device,
+            dtype=torch.bfloat16,
+        )
+        silu_and_mul(down_bf16, gateup_output)
+        dispose_tensor(gateup_output)
+        down_q, down_scale = trt_fp8_quantize_128(down_bf16, False)
+        dispose_tensor(down_bf16)
+
+        down_output = torch.empty(
+            (all_tokens, self.hidden_size), device=device, dtype=torch.bfloat16
+        )
+        with configure_deep_gemm_num_sms(self.num_gemm_sms):
+            if self.use_nopad:
+                m_grouped_fp8_gemm_nt_nopad(
+                    (down_q, down_scale),
+                    (self.w2, self.w2_scale),
+                    down_output,
+                    m_indices,
+                    token_counts,
+                )
+            else:
+                m_grouped_fp8_gemm_nt_contiguous(
                     (down_q, down_scale),
                     (self.w2, self.w2_scale),
                     down_output,
