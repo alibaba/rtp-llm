@@ -55,6 +55,9 @@ In RDMA mode the decode side reads KV from P, so P NIC tx is the KV byte count.
 | `an_uniform_load.py <run.jsonl> ...` | `pd_uniform_load.py` runs → send rate, first-token completion rate, TTFT p50/p90 and per-quarter p50, tok2, TPOT, output length / finish reasons, decode concurrency, tokens per chunk. |
 | `prefill_batches.py <engine.log> '<len-*.json>'` | how many requests P prefilled per forward (from the `publish pd plan kv cache` lines of a stage-1 rank). |
 | `thread_cpu.py snap/diff` | CPU seconds per thread name of all `rtp_llm` processes between two snapshots. |
+| `an_burst_compare.py <out_dir> <tcp_tags> <rdma_tags>` | TCP vs RDMA for gated whole-batch runs repeated several times (comma-separated tags per transport): per-round medians (the round is the sample), round 0 and failed rounds dropped, pooled TTFT / tok2 / gap12 / TPOT with standard errors, and the RDMA gain on tok2 pooled and per run pair. |
+| `an_burst_wire.py <out_dir> <tag>` | per gated round: KV GB on the wire, 1%-99% send window and rate, share sent by the last first token (TCP cache-store sockets or P NIC tx). |
+| `an_burst_stages.py <out_dir> <tag> <engine.log>` | per gated round: when PP stage 0 / stage 1 finished their requests (`publish pd plan kv cache` lines), next to the first tokens. |
 
 ## Run scripts
 
@@ -75,6 +78,16 @@ python3 an_prefix_cN.py h31-c32-rdma rdma
 PEER=10.0.0.2 RDMA_DEV=erdma_0 GATE=1.0 bash run_prefix_gated.sh g31-c8-rdma prompts_32k_hit31k1k.json 8 5
 python3 an_prefix_gated.py g31-c8-rdma rdma
 python3 prefill_batches.py logs/engine.log 'len-g31-c8-rdma-32k-*.json'
+
+# burst of 16-32 requests in one prefill batch (much KV, little new compute), TCP vs RDMA, each run twice:
+# P with CP_FORCE_SINGLE_PREFILL=0, max_context_batch_size = conc, MAX_BATCH_TOKENS_SIZE=2097152, kv_cache_mem_mb 8000;
+# decode with CACHE_STORE_RDMA_CONNECT_TIMEOUT_MS=10000 and CACHE_STORE_RDMA_QP_COUNT_PER_CONNECTION=2 (8 QPs per
+# connection exhaust the prefill NIC's MR table at 32 in-flight requests). Restart P and D when switching transport.
+python3 make_prefix_prompts.py --base prompts_32k_x24.json --tokenizer /path/to/DeepSeek-V4-Flash \
+    --hit 32512 --count 800 --seed 70000 --tag A --out h32a_x800.json
+PEER=10.0.0.2 RDMA_DEV=erdma_0 bash run_prefix_burst.sh b32-rdma-1 h32a_x800.json 32 8 1     # TCP: no RDMA_DEV
+python3 an_burst_compare.py out b32-tcp-1,b32-tcp-2 b32-rdma-1,b32-rdma-2
+python3 an_burst_wire.py out b32-tcp-1
 ```
 
 The first round after a P restart runs with a cold prefix cache; drop it.
