@@ -1,3 +1,4 @@
+import concurrent.futures
 import json
 import threading
 import time
@@ -164,6 +165,78 @@ class RemoteCacheTest(unittest.TestCase):
         self.assertLess(rt, 500)
         self.assertEqual(tags, {"status": "timeout"})
         self.assertEqual(remote.stats()["inflight_tasks"], 0)
+
+    def test_sdk_timeout_types_are_classified_in_read_and_stage_metrics(self):
+        for error_type in (TimeoutError, concurrent.futures.TimeoutError):
+            for method, stage in (("object_size", "metadata"), ("load_one", "transfer")):
+                with self.subTest(error_type=error_type, stage=stage):
+                    data = pack_object(plan_object((torch.ones(3, 4), None)))
+                    store = Store({"key": data})
+                    remote = self.remote(store)
+                    with patch.object(store, method, side_effect=error_type("SDK deadline")):
+                        with patch(
+                            "rtp_llm.multimodal.mm_remote_embedding_cache.kmonitor.report"
+                        ) as report:
+                            self.assertIsNone(remote.load("key"))
+                            remote.close()
+                    self.assertEqual(remote.stats()["read_timeout"], 1)
+                    self.assertEqual(remote.stats()["inflight_tasks"], 0)
+                    self.assertEqual(remote.stats()["inflight_bytes"], 0)
+                    self.assertEqual(
+                        self.metric_values(report, AccMetrics.VIT_REMOTE_EMB_READ_QPS_METRIC),
+                        [(1, {"status": "timeout"})],
+                    )
+                    self.assertEqual(
+                        self.metric_values(report, AccMetrics.VIT_REMOTE_EMB_READ_ERROR_QPS_METRIC),
+                        [(1, {})],
+                    )
+                    self.assertIn(
+                        (1, {"operation": "read", "stage": stage, "status": "timeout"}),
+                        self.metric_values(report, AccMetrics.VIT_REMOTE_EMB_STAGE_QPS_METRIC),
+                    )
+                    self.assertEqual(
+                        self.metric_values(report, AccMetrics.VIT_REMOTE_EMB_PAYLOAD_BYTES_PER_SECOND_METRIC),
+                        [(0, {"operation": "read"})],
+                    )
+
+    def test_sdk_timeout_types_are_classified_in_write_and_stage_metrics(self):
+        for error_type in (TimeoutError, concurrent.futures.TimeoutError):
+            with self.subTest(error_type=error_type):
+                store = Store()
+                remote = self.remote(store)
+                entry = SimpleNamespace(
+                    pool_owners=[], result=(torch.ones(3, 4), None), error=None,
+                    original_devices=(torch.device("cpu"), None), generation=1,
+                    remote_cache_context={"key": "key", "trace_id": None},
+                )
+                with patch.object(store, "save_one", side_effect=error_type("SDK deadline")):
+                    with patch(
+                        "rtp_llm.multimodal.mm_remote_embedding_cache.kmonitor.report"
+                    ) as report:
+                        remote.submit_eviction("local-key", entry)
+                        deadline = time.monotonic() + 2
+                        while remote.stats()["inflight_tasks"] and time.monotonic() < deadline:
+                            time.sleep(0.01)
+                        self.assertEqual(remote.stats()["inflight_tasks"], 0)
+                        remote.close()
+                self.assertEqual(remote.stats()["inflight_tasks"], 0)
+                self.assertEqual(remote.stats()["inflight_bytes"], 0)
+                self.assertEqual(
+                    self.metric_values(report, AccMetrics.VIT_REMOTE_EMB_WRITE_QPS_METRIC),
+                    [(1, {"status": "timeout"})],
+                )
+                self.assertEqual(
+                    self.metric_values(report, AccMetrics.VIT_REMOTE_EMB_WRITE_ERROR_QPS_METRIC),
+                    [(1, {})],
+                )
+                self.assertIn(
+                    (1, {"operation": "write", "stage": "transfer", "status": "timeout"}),
+                    self.metric_values(report, AccMetrics.VIT_REMOTE_EMB_STAGE_QPS_METRIC),
+                )
+                self.assertEqual(
+                    self.metric_values(report, AccMetrics.VIT_REMOTE_EMB_PAYLOAD_BYTES_PER_SECOND_METRIC),
+                    [(0, {"operation": "write"})],
+                )
 
     def test_admission_skips_do_not_increment_error_qps(self):
         data = pack_object(plan_object((torch.ones(3, 4), None)))

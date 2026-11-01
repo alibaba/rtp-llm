@@ -34,6 +34,10 @@ from rtp_llm.multimodal.mm_preprocess_result import (
 )
 
 
+# Python 3.10 keeps future wait timeouts separate from built-in IO timeouts.
+_TIMEOUT_ERRORS = (TimeoutError, concurrent.futures.TimeoutError)
+
+
 class MMRemoteEmbeddingCache:
     def __init__(
         self,
@@ -347,7 +351,7 @@ class MMRemoteEmbeddingCache:
         outcome = "success"
         try:
             yield
-        except TimeoutError:
+        except _TIMEOUT_ERRORS:
             outcome = "timeout"
             raise
         except Exception:
@@ -553,7 +557,7 @@ class MMRemoteEmbeddingCache:
                     tensors=plan.header["tensors"],
                 )
             except Exception as error:
-                outcome = "timeout" if isinstance(error, TimeoutError) else "error"
+                outcome = "timeout" if isinstance(error, _TIMEOUT_ERRORS) else "error"
                 self.record(
                     "write_error",
                     key=key,
@@ -682,7 +686,7 @@ class MMRemoteEmbeddingCache:
                 tensors=plan.header["tensors"],
             )
             return value
-        except concurrent.futures.TimeoutError:
+        except _TIMEOUT_ERRORS:
             outcome = "timeout"
             self._count("read_timeout")
             if future is not None:
