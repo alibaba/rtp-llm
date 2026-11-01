@@ -449,21 +449,39 @@ class SparsePagedLongQueryGridTest(unittest.TestCase):
         return (q, cache, table, lengths, selected), expected, has_count
 
     def _check(self, query_len, *, tp2_geometry=False):
-        import rtp_llm.models_py.modules.qwen4_exp.qsa.sparse_paged_fmha as module
+        import importlib
+
+        module = importlib.import_module(
+            "rtp_llm.models_py.modules.qwen4_exp.qsa.sparse_paged_fmha"
+        )
 
         inputs, expected, has_count = self.inputs(query_len, tp2_geometry=tp2_geometry)
-        kernel = module._sparse_paged_online_split_kernel
+        q, cache, table, lengths, selected = inputs
+        selected_width = int(selected.shape[2]) - int(has_count)
+        grouped = hasattr(module, "_grouped_split_supported") and (
+            module._grouped_split_supported(
+                q, cache, selected, page_size=64, selected_width=selected_width
+            )
+        )
+        if grouped:
+            _, _, _, splits = module._grouped_split_config(
+                int(q.shape[0]) * query_len, int(cache.shape[2]), selected_width
+            )
+            kernel = module._sparse_paged_grouped_split_kernel
+            expected_grid = (int(q.shape[0]) * query_len * splits, int(cache.shape[2]))
+            expected_splits = splits
+        else:
+            kernel = module._sparse_paged_online_split_kernel
+            expected_grid = (int(q.shape[0]) * query_len * 8, int(q.shape[1]))
+            expected_splits = 8
         with patch.object(kernel, "run", wraps=kernel.run) as invoked:
             actual = sparse_paged_gqa_attn(
                 *inputs, page_size=64, selected_has_count=has_count
             )
             torch.cuda.synchronize()
         self.assertEqual(invoked.call_count, 1)
-        self.assertEqual(
-            tuple(invoked.call_args.kwargs["grid"]),
-            (inputs[0].shape[0] * query_len * 8, inputs[0].shape[1]),
-        )
-        self.assertEqual(invoked.call_args.kwargs["NUM_SPLITS"], 8)
+        self.assertEqual(tuple(invoked.call_args.kwargs["grid"]), expected_grid)
+        self.assertEqual(invoked.call_args.kwargs["NUM_SPLITS"], expected_splits)
         torch.testing.assert_close(actual, expected, atol=0, rtol=0)
 
     def test_long_query_split_grid_boundaries(self):

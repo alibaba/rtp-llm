@@ -235,6 +235,266 @@ def _sparse_paged_online_split_kernel(
         tl.store(base + D + 1, normalizer)
 
 
+def _grouped_split_supported(
+    q: torch.Tensor,
+    kv_cache: torch.Tensor,
+    selected: torch.Tensor,
+    *,
+    page_size: int,
+    selected_width: int,
+) -> bool:
+    """Gate the tensor-core grouped kernel to proven SM90 geometry.
+
+    Shape-only checks; no tensor contents are read and no device synchronisation
+    happens, so the gate is safe during CUDA graph capture.
+    """
+    if torch.version.hip is not None or not q.is_cuda:
+        return False
+    if torch.cuda.get_device_capability(q.device) != (9, 0):
+        return False
+    if q.dtype != torch.bfloat16 or q.dim() != 4:
+        return False
+    if kv_cache.dtype not in (torch.bfloat16, torch.float8_e4m3fn):
+        return False
+    if kv_cache.dim() != 5 or int(kv_cache.shape[1]) != 2:
+        return False
+    heads, kv_heads = int(q.shape[1]), int(kv_cache.shape[2])
+    if kv_heads <= 0 or heads % kv_heads:
+        return False
+    group = heads // kv_heads
+    # tl.dot needs M >= 16; keep the register tile bounded.
+    block_m = max(16, triton.next_power_of_2(group))
+    if group > 32 or block_m > 32:
+        return False
+    if not (16 <= q.shape[3] <= 256) or q.shape[3] & (q.shape[3] - 1):
+        return False
+    if kv_cache.shape[3] != page_size or kv_cache.shape[4] != q.shape[3]:
+        return False
+    if page_size <= 0 or page_size & (page_size - 1):
+        return False
+    if selected.dim() != 3 or selected.dtype != torch.int32:
+        return False
+    if selected_width <= 0:
+        return False
+    return kv_cache.stride(-1) == 1
+
+
+def _grouped_split_config(rows: int, kv_heads: int, selected_width: int) -> tuple:
+    """(BLOCK_N, num_warps, num_stages, num_splits) for the grouped kernel.
+
+    rows = batch * query_len. Splits keep small decode/verify batches parallel
+    across SMs; prefill rows already saturate the device with one split.
+    Starting table ported from the vLLM sm90 tuning shape; retuned per-benchmark.
+    """
+    base = rows * kv_heads
+    if base > 4096:
+        splits = 1
+    elif base > 512:
+        splits = 2
+    elif base > 64:
+        splits = 4
+    else:
+        splits = 8
+    # BLOCK_N=128 measured fastest for prefill on SM90: fewer tiles amortise
+    # the per-tile gather setup, and the bf16 dot operands still fit in shared
+    # memory with two pipeline stages.
+    block_n = 128 if base > 64 else 32
+    tiles = triton.cdiv(selected_width, block_n)
+    # The merge kernel indexes splits with tl.arange, so the split count itself
+    # must be a power of two.
+    splits = min(splits, 1 << (tiles.bit_length() - 1))
+    return block_n, 4, 2, splits
+
+
+@triton.jit
+def _sparse_paged_grouped_split_kernel(
+    q_ptr,
+    cache_ptr,
+    cache_scale_ptr,
+    block_table_ptr,
+    kv_lens_ptr,
+    selected_ptr,
+    partial_ptr,
+    stride_q_b,
+    stride_q_h,
+    stride_q_s,
+    stride_cache_page,
+    stride_cache_kv,
+    stride_cache_h,
+    stride_cache_token,
+    stride_scale_page,
+    stride_scale_kv,
+    stride_scale_h,
+    stride_scale_token,
+    stride_bt_b,
+    stride_bt_block,
+    stride_len_b,
+    stride_len_s,
+    stride_sel_b,
+    stride_sel_s,
+    selected_width,
+    max_blocks,
+    cache_blocks,
+    HAS_COUNT: tl.constexpr,
+    FP8_CACHE: tl.constexpr,
+    H_Q: tl.constexpr,
+    GROUP_SIZE: tl.constexpr,
+    QUERY_LEN: tl.constexpr,
+    PAGE_SIZE: tl.constexpr,
+    D: tl.constexpr,
+    SCALE: tl.constexpr,
+    NUM_SPLITS: tl.constexpr,
+    NUM_TILES: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+):
+    """Tensor-core grouped sparse paged GQA.
+
+    One program owns a full GQA group (all query heads of one query row sharing
+    one KV head), so each gathered K/V tile is loaded once per group instead of
+    once per head, and QK^T / PV run on tensor cores via tl.dot. The group is
+    the MMA M dimension; both dot operands keep the wgmma-friendly sourcing
+    (A from registers, B from the pipelined gather tiles).
+    """
+    partition = tl.program_id(0)
+    kv_head = tl.program_id(1)
+    batch = partition // (QUERY_LEN * NUM_SPLITS)
+    query = (partition // NUM_SPLITS) % QUERY_LEN
+    split = partition % NUM_SPLITS
+
+    heads = tl.arange(0, BLOCK_M)
+    rd = tl.arange(0, D)
+    live = heads < GROUP_SIZE
+    q = tl.load(
+        q_ptr
+        + batch * stride_q_b
+        + (kv_head * GROUP_SIZE + heads)[:, None] * stride_q_h
+        + query * stride_q_s
+        + rd[None, :],
+        mask=live[:, None],
+        other=0.0,
+    )
+
+    row = selected_ptr + batch * stride_sel_b + query * stride_sel_s
+    kv_len = tl.load(kv_lens_ptr + batch * stride_len_b + query * stride_len_s)
+    count = (
+        tl.minimum(tl.maximum(tl.load(row + selected_width), 0), selected_width)
+        if HAS_COUNT
+        else selected_width
+    )
+    tiles = tl.cdiv(count, BLOCK_N)
+    tile_start = split * NUM_TILES // NUM_SPLITS
+    tile_end = tl.minimum((split + 1) * NUM_TILES // NUM_SPLITS, tiles)
+
+    maximum = tl.full([BLOCK_M], float("-inf"), tl.float32)
+    normalizer = tl.zeros([BLOCK_M], tl.float32)
+    acc = tl.zeros([BLOCK_M, D], tl.float32)
+
+    columns = tl.arange(0, BLOCK_N)
+    out_rows = (batch * H_Q + kv_head * GROUP_SIZE + heads) * QUERY_LEN + query
+    for tile in range(tile_start, tile_end):
+        offset = tile * BLOCK_N + columns
+        index = tl.load(row + offset, mask=offset < count, other=-1)
+        logical = index // PAGE_SIZE
+        candidate = (offset < count) & (index >= 0) & (index < kv_len)
+        physical = tl.load(
+            block_table_ptr + batch * stride_bt_b + logical * stride_bt_block,
+            mask=candidate & (logical < max_blocks),
+            other=0,
+        )
+        valid = (
+            candidate
+            & (logical < max_blocks)
+            & (physical > 0)
+            & (physical < cache_blocks)
+        )
+        safe_page = tl.maximum(physical, 0).to(tl.int64)
+        page_slot = tl.maximum(index, 0) % PAGE_SIZE
+        keys = tl.load(
+            cache_ptr
+            + safe_page[None, :] * stride_cache_page
+            + kv_head * stride_cache_h
+            + page_slot[None, :] * stride_cache_token
+            + rd[:, None],
+            mask=valid[None, :],
+            other=0.0,
+        )
+        values = tl.load(
+            cache_ptr
+            + safe_page[:, None] * stride_cache_page
+            + stride_cache_kv
+            + kv_head * stride_cache_h
+            + page_slot[:, None] * stride_cache_token
+            + rd[None, :],
+            mask=valid[:, None],
+            other=0.0,
+        )
+        if FP8_CACHE:
+            # Per-token scales factor out of both dots: the K scale multiplies
+            # the score column after the QK dot, and the V scale folds into the
+            # attention weights before the PV dot. This keeps the tile-wide
+            # work to a single exact fp8->bf16 conversion.
+            key_scale = tl.load(
+                cache_scale_ptr
+                + safe_page * stride_scale_page
+                + kv_head * stride_scale_h
+                + page_slot * stride_scale_token,
+                mask=valid,
+                other=0.0,
+            )
+            value_scale = tl.load(
+                cache_scale_ptr
+                + safe_page * stride_scale_page
+                + stride_scale_kv
+                + kv_head * stride_scale_h
+                + page_slot * stride_scale_token,
+                mask=valid,
+                other=0.0,
+            )
+            keys = keys.to(tl.bfloat16)
+            values = values.to(tl.bfloat16)
+            scores = tl.dot(q, keys)
+            scores = scores * (key_scale * SCALE)[None, :]
+            scores = tl.where(valid[None, :], scores, float("-inf"))
+            next_max = tl.maximum(maximum, tl.max(scores, 1))
+            alpha = tl.where(next_max == float("-inf"), 0.0, tl.exp(maximum - next_max))
+            weights = tl.where(
+                valid[None, :], tl.exp(scores - next_max[:, None]), 0.0
+            )
+            # The softmax normalizer stays in raw probability space; only the PV
+            # operand carries the per-token V scale.
+            normalizer = normalizer * alpha + tl.sum(weights, 1)
+            pv = weights * value_scale[None, :]
+            acc = acc * alpha[:, None] + tl.dot(pv.to(tl.bfloat16), values)
+            maximum = next_max
+        else:
+            keys = keys.to(tl.bfloat16)
+            values = values.to(tl.bfloat16)
+            scores = tl.dot(q, keys) * SCALE
+            scores = tl.where(valid[None, :], scores, float("-inf"))
+            next_max = tl.maximum(maximum, tl.max(scores, 1))
+            alpha = tl.where(next_max == float("-inf"), 0.0, tl.exp(maximum - next_max))
+            weights = tl.where(
+                valid[None, :], tl.exp(scores - next_max[:, None]), 0.0
+            )
+            acc = acc * alpha[:, None] + tl.dot(weights.to(tl.bfloat16), values)
+            normalizer = normalizer * alpha + tl.sum(weights, 1)
+            maximum = next_max
+
+    if NUM_SPLITS == 1:
+        out = tl.where(normalizer[:, None] > 0, acc / normalizer[:, None], 0.0)
+        tl.store(
+            partial_ptr + out_rows[:, None] * D + rd[None, :],
+            out,
+            mask=live[:, None],
+        )
+    else:
+        base = (out_rows * NUM_SPLITS + split) * (D + 2)
+        tl.store(partial_ptr + base[:, None] + rd[None, :], acc, mask=live[:, None])
+        tl.store(partial_ptr + base + D, maximum, mask=live)
+        tl.store(partial_ptr + base + D + 1, normalizer, mask=live)
+
+
 @triton.jit
 def _merge_sparse_paged_splits_kernel(
     partial_ptr,
@@ -438,6 +698,73 @@ def sparse_paged_gqa_attn(
     if selected_width == 0:
         output.zero_()
         if output_gate is not None:
+            output = output * torch.sigmoid(output_gate.transpose(1, 2))
+        return output
+    if _grouped_split_supported(
+        q, kv_cache, selected, page_size=page_size, selected_width=selected_width
+    ):
+        kv_heads = int(kv_cache.shape[2])
+        group = q_heads // kv_heads
+        block_n, warps, stages, splits = _grouped_split_config(
+            batch * query_len, kv_heads, selected_width
+        )
+        partial = (
+            torch.empty(
+                (batch, q_heads, query_len, splits, head_dim + 2),
+                dtype=torch.float32,
+                device=q.device,
+            )
+            if splits > 1
+            else output
+        )
+        _sparse_paged_grouped_split_kernel[(batch * query_len * splits, kv_heads)](
+            q,
+            kv_cache,
+            scale_pointer,
+            block_table,
+            kv_lens,
+            selected,
+            partial,
+            *q.stride()[:3],
+            *kv_cache.stride()[:4],
+            *scale_strides,
+            *block_table.stride(),
+            *kv_lens.stride(),
+            *selected.stride()[:2],
+            selected_width,
+            int(block_table.shape[1]),
+            cache_blocks,
+            HAS_COUNT=selected_has_count,
+            FP8_CACHE=scale_view is not None,
+            H_Q=q_heads,
+            GROUP_SIZE=group,
+            QUERY_LEN=query_len,
+            PAGE_SIZE=page_size,
+            D=head_dim,
+            SCALE=1.0 / float(head_dim) ** 0.5,
+            NUM_SPLITS=splits,
+            NUM_TILES=triton.cdiv(selected_width, block_n),
+            BLOCK_M=max(16, triton.next_power_of_2(group)),
+            BLOCK_N=block_n,
+            num_warps=warps,
+            num_stages=stages,
+        )
+        if splits > 1:
+            if output_gate is not None:
+                output = torch.empty(
+                    (batch, query_len, q_heads, head_dim), device=q.device, dtype=q.dtype
+                ).transpose(1, 2)
+            _merge_sparse_paged_splits_kernel[(batch * q_heads * query_len,)](
+                partial,
+                output,
+                output_gate if output_gate is not None else output,
+                D=head_dim,
+                NUM_SPLITS=splits,
+                HEADS=q_heads,
+                QUERIES=query_len,
+                WITH_GATE=output_gate is not None,
+            )
+        elif output_gate is not None:
             output = output * torch.sigmoid(output_gate.transpose(1, 2))
         return output
     splits = min(8, triton.next_power_of_2(triton.cdiv(selected_width, block_k)))
