@@ -104,11 +104,11 @@ public class CacheMetricsReporter {
         // Cache hit rate metrics
         monitor.register(CACHE_HIT_COUNT, FlexMetricType.COUNTER);
         monitor.register(CACHE_HIT_RATIO, FlexMetricType.GAUGE);
-        monitor.register(CACHE_KVCM_PREDICTED_TOKENS, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
-        monitor.register(CACHE_KVCM_PREDICTED_RATIO, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+        monitor.register(CACHE_KVCM_PREDICTED_TOKENS, FlexMetricType.GAUGE, FlexPriorityType.NORMAL);
+        monitor.register(CACHE_KVCM_PREDICTED_RATIO, FlexMetricType.GAUGE, FlexPriorityType.NORMAL);
         monitor.register(CACHE_LOCAL_STANDBY_BLOCK_SIZE, FlexMetricType.GAUGE);
-        monitor.register(CACHE_LOCAL_STANDBY_PREDICTED_TOKENS, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
-        monitor.register(CACHE_LOCAL_STANDBY_PREDICTED_RATIO, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+        monitor.register(CACHE_LOCAL_STANDBY_PREDICTED_TOKENS, FlexMetricType.GAUGE, FlexPriorityType.NORMAL);
+        monitor.register(CACHE_LOCAL_STANDBY_PREDICTED_RATIO, FlexMetricType.GAUGE, FlexPriorityType.NORMAL);
         monitor.register(CACHE_INPUT_TOKENS, FlexMetricType.COUNTER);
         monitor.register(CACHE_KVCM_SELECTED_LOCAL_MATCH_TOKENS, FlexMetricType.COUNTER);
         monitor.register(CACHE_KVCM_SELECTED_GLOBAL_MATCH_TOKENS, FlexMetricType.COUNTER);
