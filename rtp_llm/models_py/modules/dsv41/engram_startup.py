@@ -9,9 +9,9 @@ The exchanged package stays in memory and is handed to the model attach through
 """
 from __future__ import annotations
 import base64
-from datetime import timedelta
 import hashlib
 import json
+import logging
 import os
 from pathlib import Path
 import ssl
@@ -379,11 +379,16 @@ def prepare_static_engram(store, *, rank, world_size, environ=None, leader_excha
         if descriptors is None:
             # This member owns the shard: allocate it here and describe it.
             from rtp_llm.models_py.modules.dsv41.engram_publish import publish_shard
+            if env.get('RTP_ENGRAM_LOCAL_DEVICE') is None or env.get('RTP_ENGRAM_LOCAL_NUMA') is None:
+                logging.getLogger(__name__).warning(
+                    'RTP_ENGRAM_LOCAL_DEVICE/RTP_ENGRAM_LOCAL_NUMA unset; the self-published'
+                    ' shard allocates on device %d / NUMA %d by default',
+                    config['local_device'], config['local_numa'])
             document = publish_shard(
                 config['checkpoint'], group['model_revision'], shard['host_id'],
                 group['generation'], shard['index'], p,
                 device=config['local_device'], numa=config['local_numa'],
-                release_input_page_cache=config['release_page_cache'])
+                release_input_page_cache=config['release_page_cache'], deadline=deadline)
             payload = encode(document)
         else:
             descriptor = Path(descriptors[offset])

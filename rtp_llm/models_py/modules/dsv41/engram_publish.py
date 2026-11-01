@@ -13,12 +13,24 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import time
 from pathlib import Path
 from uuid import uuid4
 
 DEFAULT_CHUNK_BYTES = 64 << 20
 # Allocations must outlive every consumer; the process keeps them here.
 _KEEPERS = {}
+
+
+def _placement_map(raw, layers, default, label):
+    """Complete an explicit per-layer map; partial placement fails loudly."""
+    if raw is None:
+        return {layer: default for layer in layers}
+    if type(raw) is not dict or set(raw) != set(layers):
+        raise ValueError(f"layer {label} map must cover exactly the model's Engram layers")
+    if any(type(node) is not int or node < 0 for node in raw.values()):
+        raise ValueError(f"layer {label} IDs must be nonnegative local integers")
+    return {layer: raw[layer] for layer in layers}
 
 
 def shard_layout(tensor, weight_shape, shard, shards, granularity):
@@ -41,14 +53,15 @@ def shard_layout(tensor, weight_shape, shard, shards, granularity):
 def load_rows(owner, root, tensor, snapshot, start, end, columns,
               *, discard_file_cache=False, chunk_bytes=DEFAULT_CHUNK_BYTES):
     """Read exact FP8/scale bytes without creating full-file tensor mappings."""
-    from rtp_llm.models_py.modules.dsv41.engram_checkpoint import (
-        _cache_page_size, _discard_consumed_pages, _open_tensor_source, _read_exact,
-    )
-
     if not 0 <= start < end <= tensor.shape[0] or columns != tensor.shape[1]:
         raise ValueError("invalid shard row range")
     if not columns <= chunk_bytes <= DEFAULT_CHUNK_BYTES:
         raise ValueError("chunk must hold a row and fit the native load ceiling")
+
+    from rtp_llm.models_py.modules.dsv41.engram_checkpoint import (
+        _cache_page_size, _discard_consumed_pages, _open_tensor_source, _read_exact,
+    )
+
     page_size = _cache_page_size(discard_file_cache)
     rows_per_chunk = chunk_bytes // columns
     digest = hashlib.sha256()
@@ -88,8 +101,12 @@ def _expected_layout(layout, model_revision, hash_abi):
 def publish_shard(checkpoint, model_revision, host_id, generation, shard, shards,
                   *, device=0, numa=0, layer_devices=None, layer_numas=None,
                   max_allocation_bytes=None, budget_bytes=None,
-                  release_input_page_cache=False):
-    """Allocate one shard here, fill it from ``checkpoint`` and describe it."""
+                  release_input_page_cache=False, deadline=None):
+    """Allocate one shard here, fill it from ``checkpoint`` and describe it.
+
+    ``deadline`` (monotonic seconds) bounds the load loop so a stalled host
+    fails locally instead of only timing out its cohort peers.
+    """
     import torch
 
     from rtp_llm.models_py.modules.dsv41.engram import EngramLayout, NgramHashState
@@ -107,8 +124,8 @@ def publish_shard(checkpoint, model_revision, host_id, generation, shard, shards
     config = json.loads((checkpoint / "config.json").read_text())
     config = {**config, **config.get("text_config", {})}
     layout = EngramLayout(config)
-    devices = layer_devices or {layer: device for layer in layout.layer_ids}
-    numas = layer_numas or {layer: numa for layer in layout.layer_ids}
+    devices = _placement_map(layer_devices, layout.layer_ids, device, "device")
+    numas = _placement_map(layer_numas, layout.layer_ids, numa, "NUMA")
     hash_abi = hash_state_digest(NgramHashState(layout, str(checkpoint)))
     native = _load_native()
     granularities = {native.host_numa_granularity(numas[layer], devices[layer])
@@ -121,6 +138,7 @@ def publish_shard(checkpoint, model_revision, host_id, generation, shard, shards
     if budget_bytes is None:
         budget_bytes = HARD_MAX_TOTAL_ALLOCATION_BYTES
     validate_capacity(max_allocation_bytes, budget_bytes)
+    load_chunk = min(DEFAULT_CHUNK_BYTES, native.max_load_chunk_bytes)
     plan = inspect_checkpoint(
         checkpoint, _expected_layout(layout, model_revision, hash_abi),
         allocation_granularity=granularity, budget_bytes=HARD_MAX_TOTAL_ALLOCATION_BYTES,
@@ -132,31 +150,43 @@ def publish_shard(checkpoint, model_revision, host_id, generation, shard, shards
             with _open_tensor_source(checkpoint, snapshot) as (source, _):
                 _discard_consumed_pages(source, 0, snapshot.stat_token[2], page_size)
     owners, tensors, local_bytes = [], {}, 0
-    for layer_plan in plan.layers:
-        layer_devices_value = devices[layer_plan.layer_id]
-        layer_numa_value = numas[layer_plan.layer_id]
-        weight_shape = next(t.shape for t in layer_plan.tensors if t.name.endswith(".weight"))
-        for tensor in layer_plan.tensors:
-            rows, columns = tensor.shape
-            start, end, allocation_bytes = shard_layout(
-                tensor, weight_shape, shard, shards, granularity)
-            if allocation_bytes > max_allocation_bytes:
-                raise ValueError("local shard exceeds allocation limit")
-            local_bytes += allocation_bytes
-            if local_bytes > budget_bytes:
-                raise ValueError("local shards exceed host budget")
-            with torch.cuda.device(layer_devices_value):
-                owner = native.Owner(allocation_bytes, layer_numa_value, layer_devices_value)
-            owners.append(owner)
-            digest = load_rows(owner, checkpoint, tensor, snapshots[tensor.relative_path],
-                               start, end, columns,
-                               discard_file_cache=release_input_page_cache)
-            tensors[tensor.name] = dict(
-                shape=list(tensor.shape), allocation_id=str(uuid4()),
-                handle=base64.b64encode(owner.export_handle()).decode("ascii"),
-                row_begin=start, row_end=end, logical_bytes=(end - start) * columns,
-                allocation_bytes=allocation_bytes, allocation_granularity=granularity,
-                sha256=digest)
+    try:
+        for layer_plan in plan.layers:
+            layer_devices_value = devices[layer_plan.layer_id]
+            layer_numa_value = numas[layer_plan.layer_id]
+            weight_shape = next(t.shape for t in layer_plan.tensors if t.name.endswith(".weight"))
+            for tensor in layer_plan.tensors:
+                if deadline is not None and time.monotonic() > deadline:
+                    raise ValueError("LOCAL_SHARD_PUBLISH_TIMEOUT")
+                rows, columns = tensor.shape
+                start, end, allocation_bytes = shard_layout(
+                    tensor, weight_shape, shard, shards, granularity)
+                if allocation_bytes > max_allocation_bytes:
+                    raise ValueError("local shard exceeds allocation limit")
+                local_bytes += allocation_bytes
+                if local_bytes > budget_bytes:
+                    raise ValueError("local shards exceed host budget")
+                with torch.cuda.device(layer_devices_value):
+                    owner = native.Owner(allocation_bytes, layer_numa_value, layer_devices_value)
+                owners.append(owner)
+                digest = load_rows(owner, checkpoint, tensor, snapshots[tensor.relative_path],
+                                   start, end, columns,
+                                   discard_file_cache=release_input_page_cache,
+                                   chunk_bytes=load_chunk)
+                tensors[tensor.name] = dict(
+                    shape=list(tensor.shape), allocation_id=str(uuid4()),
+                    handle=base64.b64encode(owner.export_handle()).decode("ascii"),
+                    row_begin=start, row_end=end, logical_bytes=(end - start) * columns,
+                    allocation_bytes=allocation_bytes, allocation_granularity=granularity,
+                    sha256=digest)
+    except BaseException:
+        # A partial shard is useless: hand the memory back before unwinding.
+        for owner in reversed(owners):
+            try:
+                owner.close()
+            except Exception:
+                pass
+        raise
     document = dict(schema_version=2, shard=shard, shards=shards, generation=generation,
                     model_revision=model_revision, hash_abi=hash_abi, host_id=host_id,
                     owner_id=host_id, owner_incarnation=str(uuid4()), tensors=tensors)
