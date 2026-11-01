@@ -131,6 +131,15 @@ inline __device__ __nv_bfloat162 hadd2(__nv_bfloat162 a, __nv_bfloat162 b) {
 }
 #endif  // ENABLE_BF16
 
+// Make vector operators visible during template definition for two-phase lookup.
+inline __device__ float2 operator*(float2 a, float2 b) { return make_float2(a.x * b.x, a.y * b.y); }
+inline __device__ float2 operator+(float2 a, float2 b) { return make_float2(a.x + b.x, a.y + b.y); }
+inline __device__ float2 operator-(float2 a, float2 b) { return make_float2(a.x - b.x, a.y - b.y); }
+
+inline __device__ float2 operator*(float2 a, float  b) { return make_float2(a.x * b, a.y * b); }
+inline __device__ float2 operator+(float2 a, float  b) { return make_float2(a.x + b, a.y + b); }
+inline __device__ float2 operator-(float2 a, float  b) { return make_float2(a.x - b, a.y - b); }
+
 template<typename T>
 inline __device__ T add(T a, T b) {
     return a + b;
@@ -839,13 +848,5 @@ template<> struct packed_as<__nv_fp8x2_e4m3, 1> { using type = __nv_fp8_e4m3;  }
 template<> struct packed_as<__nv_fp8_e5m2,  2> { using type = __nv_fp8x2_e5m2; };
 template<> struct packed_as<__nv_fp8x2_e5m2, 1> { using type = __nv_fp8_e5m2;  };
 #endif
-
-inline __device__ float2 operator*(float2 a, float2 b) { return make_float2(a.x * b.x, a.y * b.y); }
-inline __device__ float2 operator+(float2 a, float2 b) { return make_float2(a.x + b.x, a.y + b.y); }
-inline __device__ float2 operator-(float2 a, float2 b) { return make_float2(a.x - b.x, a.y - b.y); }
-
-inline __device__ float2 operator*(float2 a, float  b) { return make_float2(a.x * b, a.y * b); }
-inline __device__ float2 operator+(float2 a, float  b) { return make_float2(a.x + b, a.y + b); }
-inline __device__ float2 operator-(float2 a, float  b) { return make_float2(a.x - b, a.y - b); }
 
 }  // namespace rtp_llm
