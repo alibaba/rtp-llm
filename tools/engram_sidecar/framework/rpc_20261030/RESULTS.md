@@ -48,7 +48,8 @@ framework 的 225 项包含上述 14 项 plan/storage，不能再重复相加。
 ```bash
 python3 -m unittest \
   rtp_llm.models_py.modules.dsv41.test.test_engram_exchange \
-  tools.engram_sidecar.framework.test_distributed_storage
+  rtp_llm.models_py.modules.dsv41.test.test_engram_descriptors \
+  rtp_llm.models_py.modules.dsv41.test.test_engram_publish
 ```
 
 CUDA 探针使用 `native/probe_static_exchange_cuda.py`。给两端准备 [STATIC_RPC.md](../STATIC_RPC.md) 所述 startup config，固定 N=2、P=2、每实例 world_size=2、publisher_rank=0、同一 generation 和证书指纹表；checkpoint 指向本次实验的**新空目录**，不要指向真实模型。两端 config 只包含本地 shard descriptor 路径。证书和 native 扩展按文档准备。

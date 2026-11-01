@@ -38,7 +38,8 @@ flowchart TB
 
 ## 配置与自动接入
 
-拓扑输入由 `distributed_plan.py` 处理。既有 `instances`、`storage_hosts`、`storage_host_count=P` 保持不变；增加：
+> **状态（2026-11-01）**：`distributed_plan.py` 与 `sharded_checkpoint_owner.py` 已删除，不再有独立的持片进程和启动计划生成器；持片现由每个实例在 `prepare_static_engram()` 内完成
+> （`rtp_llm/models_py/modules/dsv41/engram_publish.publish_shard`）。下文的环境变量契约、组成员推导和校验语义仍然有效；凡是提到"生成计划 / 启动 holder"的步骤，一律替换为"直接把环境变量设到实例的每个 host 上"。
 
 ```json
 {
@@ -66,14 +67,14 @@ flowchart TB
 }
 ```
 
-`distributed_plan.py` 不再生成任何 JSON 启动配置；它把契约直接写进每个实例的 `consumers[].env`：
+启动器不再生成任何 JSON 启动配置；它把契约直接写进每个实例的环境变量：
 
 ```
 RTP_ENGRAM_COHORT=10.0.0.1:29483,10.0.0.2:29483   # N 个实例端点，顺序=实例索引
 RTP_ENGRAM_INSTANCE_INDEX=0                        # 本实例索引
 ENGRAM_SHARD_COUNT=4                               # P
 RTP_ENGRAM_MODEL_REVISION=<rev>
-RTP_ENGRAM_LOCAL_DESCRIPTORS=<shard-a.json>,<shard-b.json>   # 本实例每个本地 host 一个
+RTP_ENGRAM_LOCAL_DESCRIPTORS=<shard-a.json>,<shard-b.json>   # 可选；仅离线诊断模式需要
 RTP_ENGRAM_CHECKPOINT=/models/DeepSeek
 RTP_ENGRAM_COHORT_TIMEOUT=1800                     # 可选
 RTP_ENGRAM_TLS_DIR=/run/engram/pki                 # 可选；不设则走 plain HTTP
@@ -91,18 +92,11 @@ P 可配置为 2–64，N 为 1–64。每个实例至少持有一个分片；�
 
 1. 为本次组启动生成一个 UUID；确定 N/P、完整成员表、host 身份及 rank 顺序。所有节点必须处于可共享的 NVLink/IMEX 域，并具有相应权限。IP 可达不代表 Fabric 可导入。
 2. 给每个实例的 rank 0 提供它自己的证书、私钥、CA 和相同的完整证书指纹表；使用平台 PKI。证书 SAN 必须覆盖 coordinator IP/域名。不要把 CA 私钥分发到业务节点。
-3. 在已有开发/业务容器内生成计划：
-
-   ```bash
-   python3 -m tools.engram_sidecar.framework.distributed_plan \
-     --config /private/group.json \
-     --output-directory /private/generated-plan
-   ```
-
-4. 读取 `launch-plan.json`，在对应 host 启动每条 `holders[].argv`。这是容器内的分片持有进程，不是新 sidecar。启动器负责保活和组退出顺序。
-5. 把 `consumers[].env` 里的 `RTP_ENGRAM_*` 设到对应实例的所有 host 环境里。**无需人工收集/复制 Fabric handle，也不需要分发任何启动配置文件**。
+3. 按上节契约确定每个实例的 `RTP_ENGRAM_*` 取值（`generation`、成员表和分片归属由 `RTP_ENGRAM_COHORT`/`RTP_ENGRAM_INSTANCE_INDEX`/`ENGRAM_SHARD_COUNT` 确定性推导）。
+4. 把 `RTP_ENGRAM_*` 设到对应实例的所有 host 环境里，并显式给出 `RTP_ENGRAM_LOCAL_DEVICE`/`RTP_ENGRAM_LOCAL_NUMA`（缺省回落 device 0/NUMA 0 并打印警告）。
+   没有额外的持片进程需要启动：**无需人工收集/复制 Fabric handle，也不需要分发任何启动配置文件**。
 6. 对每个实例设置 `consumers[].env` 后启动原有 RTP 命令。`BackendManager.start()` 在 DistributedServer 就绪后、NCCL/模型创建前调用 `prepare_static_engram()`。
-7. 启动适配器等待本机 holder 的 descriptor，经现有 Store 汇集到 rank 0；跨实例自动交换完整元数据；所有 worker 自动生成私有本地缓存并沿现有 bootstrap 导入、GPU 样本校验，再进行模型 warmup/Graph。
+7. 每个 host 在该 rank 内为自己持有的分片分配、加载并导出 descriptor，经现有 Store 汇集到 rank 0；跨实例自动交换完整元数据；所有 worker 自动生成私有本地缓存并沿现有 bootstrap 导入、GPU 样本校验，再进行模型 warmup/Graph。
 8. 模型自身 ready 后才接流量。交换完成仅表示元数据齐备，不等于所有 GPU/模型已 ready。
 
 测试证书可由下列工具生成（两天有效，仅开发实验）：
@@ -135,11 +129,12 @@ python3 -m tools.engram_sidecar.framework.make_exchange_test_certs \
 - `engram_startup.py`：已有 Store 汇集/广播、rank 0 交换、本地缓存。
 - `engram_descriptors.py`：RPC 和离线工具共用同一分片校验。
 - `rtp_llm/server/backend_manager.py`：模型创建前的启动钩子；未设置环境变量时立即跳过。
-- `distributed_plan.py`：生成 holder 命令和 `RTP_ENGRAM_*` 环境变量；离线 bundle 模式已移除。
+- `engram_publish.py`：进程内持片（分配/加载/导出 descriptor）；`release(generation)` 供进程退出或探针释放。
+- `engram_capacity.py`：单次分配与整机预算的硬上限。
 - `native/probe_static_exchange_cuda.py`：双 host、双实例、每实例两个 worker 的真实 CUDA 集成探针。
 
 ## 测试与已知限制
 
 结果见 [本轮验证记录](rpc_20261030/RESULTS.md)。本轮将 startup 适配器、真实 TCPStore、跨容器 mTLS、跨 host Fabric 映射、样本校验和 Graph 串联测试；没有重启已有完整 P/D 服务，也没有把小表读取冒称为完整模型 chat 或 decode 性能结果。
 
-BackendManager 已接入钩子，但该新 RPC 路径的完整模型 chat、完整 checkpoint 启动时间及 <100 μs decode 增量尚需单独验收。启动器目前仍需启动各 host 的 holder 进程；本次不包括 C2 调度、运行时健康探测和高可用。一个 holder/host 失效需整组停止/重建，不能通过重连 RPC 修复已经失效的映射。
+BackendManager 已接入钩子，但该新 RPC 路径的完整模型 chat、完整 checkpoint 启动时间及 <100 μs decode 增量尚需单独验收。持片已并入模型进程，不再需要单独的 holder 进程；但仍不包括 C2 调度、运行时健康探测和高可用。一个 host 失效需整组停止/重建，不能通过重连 RPC 修复已经失效的映射。

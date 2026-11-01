@@ -36,3 +36,26 @@ class ShardLayoutTest(unittest.TestCase):
 
     def test_release_of_an_empty_generation_is_a_noop(self):
         self.assertEqual(p.release('missing-generation'), [])
+
+
+class PlacementMapTest(unittest.TestCase):
+    def test_absent_map_uses_the_scalar_default(self):
+        self.assertEqual(p._placement_map(None, [1, 2], 3, 'device'), {1: 3, 2: 3})
+
+    def test_partial_or_non_integer_maps_are_rejected(self):
+        for raw in ({1: 0}, {1: 0, 2: 0, 3: 1}, {1: 0, 2: True}, {1: 0, 2: -1}, 'cuda:1'):
+            with self.subTest(raw=raw), self.assertRaises(ValueError):
+                p._placement_map(raw, [1, 2], 0, 'NUMA')
+
+    def test_explicit_map_is_honoured_per_layer(self):
+        self.assertEqual(p._placement_map({1: 2, 2: 3}, [1, 2], 0, 'device'), {1: 2, 2: 3})
+
+
+class LoadRowsBoundsTest(unittest.TestCase):
+    def test_row_range_and_chunk_bounds_are_checked_before_any_read(self):
+        tensor = Tensor('layers.1.engram.embed.weight', (100, 64))
+        for start, end, columns, chunk in [(1, 1, 64, 4096), (0, 101, 64, 4096),
+                                           (0, 10, 32, 4096), (0, 10, 64, 0),
+                                           (0, 10, 64, (64 << 20) + 1)]:
+            with self.subTest(case=(start, end, columns, chunk)), self.assertRaises(ValueError):
+                p.load_rows(None, None, tensor, None, start, end, columns, chunk_bytes=chunk)

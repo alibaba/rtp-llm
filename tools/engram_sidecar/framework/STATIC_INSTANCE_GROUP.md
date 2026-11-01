@@ -31,12 +31,12 @@
 
 ## 当前代码已实现什么
 
-`distributed_plan.py` 新增 `instance_count`，并检查：
+这些检查现在由 `engram_startup.build_group()` 在启动时执行（原 `distributed_plan.py` 已删除）：
 
 1. N 与完整实例列表一致，实例 ID 唯一。
 2. P 个存储 host 各自有明确所属实例。
 3. N 个实例每个都至少持有一个 shard；拒绝纯消费者及组外 holder。
-4. 输出每个 holder 的 instance_id 和各实例的 held_shards。
+4. 把每片的 `host_id`、`publisher_rank` 写进成员表，供各实例在进程内持片。
 
 现有实现是一 host 一 holder。两个实例声明同一存储 host 时，需要用该 storage_host 的 instance_id 明确归属；不会自行重复加载。每个实例都须有分片，所以在这个实现限制下需要 P≥N。同机更多实例各持独立分片的布局尚未实现，不能把它混称为已支持的物理 host 分片。
 
@@ -56,4 +56,4 @@
 
 退出必须先停止所有使用该组的模型 worker、排空 GPU 和 Graph，再释放任一持有分片的 backing。一个实例持有的分片退出，会影响依赖它的其他实例；当前没有自动补片或缩组继续服务。
 
-初次静态成员配置变更的历史验证（本轮新增 RPC 验证见 STATIC_RPC.md）：`test_distributed_storage` 12/12 通过；framework 本地回归共 223 项，其中 209 通过、14 项因本机缺少 Torch 跳过。本次没有新增跨机模型或性能测试结果。
+初次静态成员配置变更的历史验证（本轮新增 RPC 验证见 STATIC_RPC.md）：当时的 `test_distributed_storage` 12/12 通过（该文件随后随独立持片工具一起删除，其 descriptor 负例已迁移到 `rtp_llm/models_py/modules/dsv41/test/test_engram_descriptors.py`）；framework 本地回归共 223 项，其中 209 通过、14 项因本机缺少 Torch 跳过。本次没有新增跨机模型或性能测试结果。

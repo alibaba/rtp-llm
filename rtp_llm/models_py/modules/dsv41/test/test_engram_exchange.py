@@ -259,6 +259,41 @@ class IntraInstanceTest(unittest.TestCase):
                 s.prepare_static_engram(store, rank=0, world_size=2, environ=env)
         self.assertNotIn(prefix + 'package', store.data)
 
+    def test_self_published_shards_describe_their_own_host(self):
+        from rtp_llm.models_py.modules.dsv41 import engram_publish
+        from unittest.mock import patch
+
+        env = cohort_env(2)
+        config, docs = derived(env, world_size=2)
+        store = MemoryStore()
+        published = []
+
+        def publish(checkpoint, revision, host_id, generation, shard, shards, **kwargs):
+            self.assertEqual(checkpoint, env[s.CHECKPOINT_ENV])
+            self.assertEqual(revision, config['group']['model_revision'])
+            self.assertEqual(generation, config['group']['generation'])
+            self.assertEqual(shards, 2)
+            self.assertEqual(host_id, f'127.0.0.1#{shard}')  # the shard's own host, not the member's
+            self.assertIsNotNone(kwargs['deadline'])
+            published.append((host_id, shard))
+            return docs[shard]
+
+        def exchange(cfg, local, deadline):
+            return package(cfg['group'], local)
+
+        with patch.object(engram_publish, 'publish_shard', publish), \
+                self.assertLogs('rtp_llm.models_py.modules.dsv41.engram_startup', 'WARNING'):
+            with ThreadPoolExecutor(2) as pool:
+                results = [pool.submit(s.prepare_static_engram, store, rank=i, world_size=2,
+                                       environ=dict(env), leader_exchange=exchange)
+                           for i in range(2)]
+                [result.result() for result in results]
+        self.assertEqual(sorted(published), [('127.0.0.1#0', 0), ('127.0.0.1#1', 1)])
+        staged = b.staged_package()
+        self.assertIsNotNone(staged)
+        self.assertEqual(staged['generation'], config['group']['generation'])
+        self.assertEqual(store.data, {})  # descriptors went through Store, not files
+
     def test_unconfigured_models_do_nothing(self):
         self.assertIsNone(s.prepare_static_engram(None, rank=0, world_size=8, environ={}))
 

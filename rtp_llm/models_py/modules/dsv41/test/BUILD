@@ -203,6 +203,24 @@ py_test(
 ]
 
 py_test(
+    name = "test_engram_descriptors",
+    size = "small",
+    srcs = ["test_engram_descriptors.py"],
+    main = "test_engram_descriptors.py",
+    deps = ["//rtp_llm/models_py:engram_descriptors_cpu"],
+    legacy_create_init = 0,
+)
+
+py_test(
+    name = "test_engram_publish",
+    size = "small",
+    srcs = ["test_engram_publish.py"],
+    main = "test_engram_publish.py",
+    deps = ["//rtp_llm/models_py:engram_publish_cpu"],
+    legacy_create_init = 0,
+)
+
+py_test(
     name = "test_engram_exchange",
     size = "small",
     srcs = ["test_engram_exchange.py"],

@@ -36,11 +36,7 @@
 
 `tools/engram_sidecar` 是历史目录名称，不表示继续部署 sidecar。分布式 holder 是每个存储 host 上持有**本 host 分片**的进程；没有独占完整 Engram 的中心 owner。
 
-通用入口：
-
-```bash
-python3 -m tools.engram_sidecar.framework.distributed_plan --config topology.json > launch-plan.json
-```
+通用入口（历史）：`distributed_plan.py` 已随独立持片工具删除，持片改由模型进程内的 `engram_publish.publish_shard` 完成，不再有启动计划 JSON。下面的配置示例仅用于说明 N/P 与实例的对应关系。
 
 示例配置：
 
