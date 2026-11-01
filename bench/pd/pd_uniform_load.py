@@ -63,6 +63,8 @@ def build_body(args, prompt, idx):
         "aux_info": True,
         "extra_configs": {"ignore_eos": True},
     }
+    if args.force_sp_accept:
+        payload["extra_configs"]["force_sp_accept"] = True
     if args.d_addrs:
         ip, port = args.d_addrs[idx % len(args.d_addrs)].rsplit(":", 1)
         payload["extra_configs"]["role_addrs"] = [
@@ -243,6 +245,12 @@ async def main():
         default="",
         help="comma list of decode DP-rank http ip:port; request i is pinned to entry i %% n "
         "(stands in for an external balancer when the prefill frontend routes every request to one rank)",
+    )
+    ap.add_argument(
+        "--force-sp-accept",
+        action="store_true",
+        help="set generate_config force_sp_accept: the decode side accepts every MTP draft token "
+        "(perf simulation, outputs are not valid text; TPOT then has to be rescaled to the target acceptance)",
     )
     args = ap.parse_args()
     args.d_addrs = [a for a in args.d_addrs.split(",") if a]

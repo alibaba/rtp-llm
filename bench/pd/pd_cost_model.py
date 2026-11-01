@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """Cost model: homogeneous 5kpro PD vs heterogeneous (5kpro P -> PPU D) vs homogeneous PPU PD.
 
-DeepSeek-V4-Flash, 32K input, MTP 2+1 at acceptance 2.3, decode at TPOT <= 15 ms. All capacities are measured
-(docs/project-progress.md §94-§97). For each prefix-hit ratio the script reports:
+DeepSeek-V4-Flash, 32K input, MTP 2+1 at acceptance 2.3, decode at TPOT <= 15 ms. All capacities are measured. For each prefix-hit ratio the script reports:
 
   1. prefill cost efficiency per GPU: 5kpro vs PPU (req/s per GPU, req/s per cost unit);
   2. the ideal (fractional) P:D ratio of each system, its QPS per GPU and QPS per cost unit, and the gain of the
@@ -12,6 +11,10 @@ DeepSeek-V4-Flash, 32K input, MTP 2+1 at acceptance 2.3, decode at TPOT <= 15 ms
      share of the over-provisioned side and of the whole system (cost-weighted), and QPS per cost unit.
 
 usage: pd_cost_model.py [--out-tokens 1024] [--price-5kpro 1.0] [--price-ppu 1.6] [--5kpro-hosts 4] [--ppu-hosts 5]
+                        [--hits 0.875,0.5 --k5-p 4.89,1.75 --ppu-tp4-p 2.97,0.88 --ppu-d-tok-s 8030 --k5-d-tok-s 661
+                         --label "MTP 2+1 real acceptance"]
+The built-in capacities are the 10-29 round (MTP 2+1 forced 2.3); the --hits / --*-p / --*-d-tok-s options replace
+them with another round's measurements (the example is the 10-30 round, MTP 2+1 with real acceptance).
 """
 import argparse
 import itertools
@@ -19,22 +22,22 @@ import itertools
 HITS = [0.0, 16384 / 32768, 24576 / 32768, 28672 / 32768, 30720 / 32768, 31744 / 32768]
 # Prefill instance capacity (req/s at saturation) per prefix-hit level, measured.
 P_CAP = {
-    # 5kpro-4 CEP4PP2 MTP3 fastgen, 8 GPUs (§96, §97.2): cold 0.9 sustained / 1.0 burst; hits: overload first-token rate
+    # 5kpro CEP4PP2 MTP3 fastgen, 8 GPUs: cold 0.9 sustained / 1.0 burst; hits: overload first-token rate
     "5kpro_cep4pp2": {
         "hw": "5kpro",
         "gpus": 8,
         "cap": [0.92, 1.74, 3.02, 4.86, 10.07, 11.66],
     },
-    # ppu5 PPU TP4 x EP1, no MTP, 4 GPUs (§95.2, §97.3)
+    # PPU TP4 x EP1, no MTP, 4 GPUs
     "ppu_tp4": {"hw": "ppu", "gpus": 4, "cap": [0.48, 0.93, 1.78, 3.21, 5.14, 7.04]},
-    # ppu5 PPU TP8 x EP1, 8 GPUs
+    # PPU TP8 x EP1, 8 GPUs
     "ppu_tp8": {"hw": "ppu", "gpus": 8, "cap": [0.55, 1.04, 1.97, 3.51, 5.40, 5.31]},
 }
 # Decode instance capacity: output tok/s at TPOT <= 15 ms, MTP 2+1 forced acceptance 2.3.
 D_CAP = {
-    # ppu4 DEP8 + DSV4_PPU_DECODE_FUSIONS=1 (§97.4): cc80 15.2 ms / 5264 tok/s
+    # PPU DEP8 + DSV4_PPU_DECODE_FUSIONS=1: cc80 15.2 ms / 5264 tok/s
     "ppu_dep8": {"hw": "ppu", "gpus": 8, "tok_s": 5264.0},
-    # 5kpro-4 TP4 PDFUSION decode-only (§95.1): 15 ms line at cc8
+    # 5kpro TP4 PDFUSION decode-only: 15 ms line at cc8
     "5kpro_tp4": {"hw": "5kpro", "gpus": 4, "tok_s": 541.0},
 }
 SYSTEMS = {
@@ -119,7 +122,40 @@ def main():
     ap.add_argument("--price-ppu", type=float, default=1.6, help="cost of one PPU GPU")
     ap.add_argument("--5kpro-hosts", dest="h5", type=int, default=4)
     ap.add_argument("--ppu-hosts", dest="hp", type=int, default=5)
+    ap.add_argument(
+        "--hits",
+        default="",
+        help="comma list of prefix-hit ratios (e.g. 0.875,0.5); replaces the built-in levels, and then every "
+        "--*-p list below must have one value per level",
+    )
+    ap.add_argument("--k5-p", default="", help="5kpro CEP4PP2 P req/s per level (comma list)")
+    ap.add_argument("--ppu-tp4-p", default="", help="PPU TP4 P req/s per level (comma list)")
+    ap.add_argument(
+        "--ppu-tp8-p",
+        default="",
+        help="PPU TP8 P req/s per level (comma list); defaults to the TP4 values per GPU when --hits is given",
+    )
+    ap.add_argument("--ppu-d-tok-s", type=float, default=0.0, help="PPU DEP8 D output tok/s at the TPOT line")
+    ap.add_argument("--k5-d-tok-s", type=float, default=0.0, help="5kpro TP4 D output tok/s at the TPOT line")
+    ap.add_argument("--label", default="MTP 2+1 @ 2.3", help="MTP / acceptance caliber printed in the header")
     a = ap.parse_args()
+    global HITS
+    if a.hits:
+        HITS = [float(x) for x in a.hits.split(",")]
+        if not (a.k5_p and a.ppu_tp4_p):
+            ap.error("--hits needs --k5-p and --ppu-tp4-p")
+    for key, val in (("5kpro_cep4pp2", a.k5_p), ("ppu_tp4", a.ppu_tp4_p), ("ppu_tp8", a.ppu_tp8_p)):
+        if val:
+            P_CAP[key]["cap"] = [float(x) for x in val.split(",")]
+    if a.hits and not a.ppu_tp8_p:
+        P_CAP["ppu_tp8"]["cap"] = [2 * x for x in P_CAP["ppu_tp4"]["cap"]]
+    for key, cap in P_CAP.items():
+        if len(cap["cap"]) != len(HITS):
+            ap.error("%s has %d capacities for %d hit levels" % (key, len(cap["cap"]), len(HITS)))
+    if a.ppu_d_tok_s:
+        D_CAP["ppu_dep8"]["tok_s"] = a.ppu_d_tok_s
+    if a.k5_d_tok_s:
+        D_CAP["5kpro_tp4"]["tok_s"] = a.k5_d_tok_s
     price = {"5kpro": a.price_5kpro, "ppu": a.price_ppu}
     hosts = {"5kpro": a.h5, "ppu": a.hp}
     pct = lambda h: (
@@ -127,8 +163,8 @@ def main():
     )
 
     print(
-        "# 32K 输入，输出 %d，MTP 2+1 @ 2.3，TPOT ≤ 15ms；卡价 5kpro %.2f、PPU %.2f；机器上限 %d 台 5kpro、%d 台 PPU（每台 8 卡）\n"
-        % (a.out_tokens, a.price_5kpro, a.price_ppu, a.h5, a.hp)
+        "# 32K 输入，输出 %d，%s，TPOT ≤ 15ms；卡价 5kpro %.2f、PPU %.2f；机器上限 %d 台 5kpro、%d 台 PPU（每台 8 卡）\n"
+        % (a.out_tokens, a.label, a.price_5kpro, a.price_ppu, a.h5, a.hp)
     )
 
     print("## 1. Prefill 单卡性价比（5kpro CEP4PP2 vs PPU TP4 / TP8）\n")
