@@ -180,7 +180,7 @@ public class PrefillElasticSimulation {
                 if(i>=active || escape && (pendingTokens[i]>0 || i==q.migratedFrom))continue;
                 // Same backpressure for both policies isolates ranking from admission changes.
                 if(policy!=Policy.SHORT_TTFT && pendingTokens[i]>=cap){scores[i]=Double.POSITIVE_INFINITY;continue;}
-                if((windowPolicy() || policy==Policy.CACHE_ONLY) && !escape && !PrefillTokenBalance.eligible((long)hits[i],max,affinity)) {
+                if((windowPolicy() || policy==Policy.CACHE_ONLY) && !PrefillTokenBalance.eligible((long)hits[i],max,affinity)) {
                     scores[i]=Double.POSITIVE_INFINITY;continue;
                 }
                 double score=!windowPolicy()
@@ -206,7 +206,15 @@ public class PrefillElasticSimulation {
             candidates.sort(Comparator.comparingLong(q->q.tokens));
             int moved=0;
             for(Query q:candidates) {
-                if(moved++>=4)break;
+                if(moved>=4)break;
+                long max=0;
+                for(int i=0;i<active;i++)max=Math.max(max,hit(i,q));
+                boolean affinity=PrefillTokenBalance.cacheFirst(max,q.tokens,50);
+                boolean eligibleIdle=false;
+                for(int i=0;i<active;i++)if(i!=q.worker && workers[i].work.snapshot().pendingTokens()==0
+                        && PrefillTokenBalance.eligible(hit(i,q),max,affinity)){eligibleIdle=true;break;}
+                if(!eligibleIdle)continue;
+                moved++;
                 var w=workers[q.worker];
                 if(!w.queue.remove(q))throw new AssertionError("migration ownership");
                 w.pendingCompute-=q.reserved;w.work.release(q.reserved);

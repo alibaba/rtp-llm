@@ -187,6 +187,29 @@ class QueueRegistrationCancellationTest {
         }
     }
 
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(booleans = {false, true})
+    void lowEngineQueueSuppressesSoftEvictionButNotHardDeadline(boolean batch) throws Exception {
+        var policy = new org.flexlb.config.PrefillQueueSheddingConfig();
+        policy.setExpectedWaitThresholdMs(100L);
+        policy.setMaxWaitMs(800L);
+        try (Fixture f = new Fixture(policy, batch)) {
+            when(f.router.select(any(), nullable(String.class))).thenReturn(PlacementResult.blocked(
+                    new PlacementKey(org.flexlb.dao.route.RoleType.PREFILL, null, null)));
+            when(f.router.estimateQueuedWork(any(), nullable(String.class)))
+                    .thenReturn(new PrefillQueueShedding.Estimate(100, 0, Long.MAX_VALUE, 1));
+            when(f.router.hasEngineQueueAdmission(null)).thenReturn(true);
+            var context = f.context(923L);
+            context.data().setSchedulingMetadata(org.flexlb.dao.SchedulingMetadata.explicit(50,
+                    f.config.resolveExpiresAtMs(System.currentTimeMillis())));
+            var result = f.queue.submit(context);
+            assertThrows(java.util.concurrent.TimeoutException.class, () -> result.get(400, TimeUnit.MILLISECONDS));
+            assertFalse(result.get(2, TimeUnit.SECONDS).isSuccess());
+            assertEquals(CancelReason.DEADLINE_EXCEEDED, context.snapshot().cancellation().reason());
+            verify(f.router, atLeastOnce()).hasEngineQueueAdmission(null);
+        }
+    }
+
     @Test
     void hardDeadlineWinsEvenWithRecoveryAndNoCacheEstimate() throws Exception {
         var policy = new org.flexlb.config.PrefillQueueSheddingConfig();
@@ -212,12 +235,18 @@ class QueueRegistrationCancellationTest {
 
         Fixture() { this(null); }
 
-        Fixture(org.flexlb.config.PrefillQueueSheddingConfig policy) {
+        Fixture(org.flexlb.config.PrefillQueueSheddingConfig policy) { this(policy, false); }
+
+        Fixture(org.flexlb.config.PrefillQueueSheddingConfig policy, boolean batch) {
             config.queueScheduler().setPrefillQueueShedding(policy);
             SchedulingTestConfig.useFifoQueue(config);
             if (policy != null) {
                 SchedulingTestConfig.useNonBatchDispatcher(config);
                 config.queueScheduler().getDecision().setType(org.flexlb.config.DecisionPolicyConfig.Type.SINGLE);
+            }
+            if (batch) {
+                SchedulingTestConfig.useBatchDispatcher(config);
+                config.getRouter().getRoles().getPrefill().setTokenBalance(new org.flexlb.config.RoutingConfig.TokenBalanceConfig());
             }
             var service = mock(ConfigService.class);
             when(service.loadBalanceConfig()).thenReturn(config);

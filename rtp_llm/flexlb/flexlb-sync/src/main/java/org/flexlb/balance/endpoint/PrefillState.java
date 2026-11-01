@@ -287,9 +287,15 @@ public final class PrefillState {
     final LongSupplier clock;
     private org.flexlb.balance.strategy.PrefillTokenWorkload tokenWorkload;
     private long pendingTokenLimit;
+    private java.util.function.BooleanSupplier engineQueueAdmission = () -> false;
 
     /** Installed before this endpoint generation is published. */
     void enableTokenWorkload(long pendingTokenLimit) {
+        enableTokenWorkload(pendingTokenLimit, () -> false);
+    }
+
+    void enableTokenWorkload(long pendingTokenLimit, java.util.function.BooleanSupplier engineQueueAdmission) {
+        this.engineQueueAdmission = java.util.Objects.requireNonNull(engineQueueAdmission);
         this.pendingTokenLimit = pendingTokenLimit;
         tokenWorkload = new org.flexlb.balance.strategy.PrefillTokenWorkload();
     }
@@ -308,7 +314,8 @@ public final class PrefillState {
     }
 
     private boolean tokenCapacityAvailable() {
-        return tokenWorkload == null || tokenWorkload.snapshot().pendingTokens() < pendingTokenLimit;
+        return tokenWorkload == null || tokenWorkload.snapshot().pendingTokens() < pendingTokenLimit
+                || engineQueueAdmission.getAsBoolean();
     }
 
     public org.flexlb.balance.strategy.PrefillTokenWorkload.Reservation planTokenWork(long tokens) {

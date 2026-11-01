@@ -42,7 +42,7 @@ class HotspotMigrationBudgetTest {
         for (int i = 0; i < 200; i++) {
             var endpoint = endpoint(i, i >= 100);
             var routes = new ArrayList<RequestRoute>();
-            for (int j = 0; j < 64; j++) { routes.add(route(100, i * 64L + j + 1)); }
+            for (int j = 0; j < 64; j++) { var route = route(100, i * 64L + j + 1); when(route.prefillEp()).thenReturn(endpoint); routes.add(route); }
             when(endpoint.ownership.captureQueue(anyInt())).thenAnswer(call -> {
                 int limit = call.getArgument(0);
                 checks.addAndGet(limit);
@@ -73,12 +73,37 @@ class HotspotMigrationBudgetTest {
         var source = endpoint(0, false);
         var idle = endpoint(1, true);
         var routes = List.of(route(400, 1), route(100, 2), route(200, 3), route(100, 4));
+        for (var route : routes) { when(route.prefillEp()).thenReturn(source); }
         when(source.ownership.captureQueue(anyInt())).thenReturn(new PrefillState.QueueSnapshot(1, 1, routes, routes.getFirst()));
         when(registry.prefillRoutingSnapshot(RoleType.PREFILL)).thenReturn(List.of(
                 new EndpointRegistry.PrefillRoutingEntry("a", source), new EndpointRegistry.PrefillRoutingEntry("b", idle)));
         var strategy = new CostBasedPrefillStrategy(registry, mock(CacheAwareService.class),
                 mock(EngineHealthReporter.class), mock(CacheMetricsReporter.class), SchedulingTestConfig.configService(config));
         assertEquals(List.of(routes.get(1), routes.get(3)), strategy.hotspotMigrationCandidates(2));
+    }
+
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.CsvSource({"9,0,false", "9,5,false", "9,9,true", "4,0,false", "4,2,true", "0,0,true"})
+    void migrationCannotTradeCacheEligibilityForAnIdleWorker(int sourceHit, int idleHit, boolean allowed) {
+        var config = SchedulingTestConfig.newConfig();
+        var balance = new RoutingConfig.TokenBalanceConfig();
+        balance.setMaxPendingComputeTokens(100L);
+        balance.setHotspotRescue(new RoutingConfig.HotspotRescueConfig());
+        config.getRouter().getRoles().getPrefill().setTokenBalance(balance);
+        var registry = mock(EndpointRegistry.class);
+        var source = endpoint(0, false);
+        var idle = endpoint(1, true);
+        var route = route(1000, 1);
+        when(route.prefillEp()).thenReturn(source);
+        when(source.ownership.captureQueue(anyInt())).thenReturn(new PrefillState.QueueSnapshot(1, 1, List.of(route), route));
+        when(registry.prefillRoutingSnapshot(RoleType.PREFILL)).thenReturn(List.of(
+                new EndpointRegistry.PrefillRoutingEntry("a", source), new EndpointRegistry.PrefillRoutingEntry("b", idle)));
+        var cache = mock(CacheAwareService.class);
+        when(cache.findMatchingEngines(org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.any()))
+                .thenReturn(java.util.Map.of("a", sourceHit, "b", idleHit));
+        var strategy = new CostBasedPrefillStrategy(registry, cache, mock(EngineHealthReporter.class),
+                mock(CacheMetricsReporter.class), SchedulingTestConfig.configService(config));
+        assertEquals(allowed ? List.of(route) : List.of(), strategy.hotspotMigrationCandidates(1));
     }
 
     private PrefillEndpoint endpoint(int id, boolean idle) {
@@ -100,6 +125,8 @@ class HotspotMigrationBudgetTest {
         when(route.enqueueSeq()).thenReturn(sequence);
         when(route.decodeEp()).thenReturn(mock(DecodeEndpoint.class));
         var context = new RequestContext(SchedulingTestConfig.newConfig());
+        context.data().setRequest(org.flexlb.dao.loadbalance.Request.builder().requestId(sequence).seqLen(tokens)
+                .blockCacheKeys(List.of(1L,2L,3L,4L,5L,6L,7L,8L,9L)).cacheKeyBlockSize(100L).build());
         context.register(sequence, System.currentTimeMillis() - 6000, Long.MAX_VALUE, 60_000);
         when(route.ctx()).thenReturn(context);
         return route;

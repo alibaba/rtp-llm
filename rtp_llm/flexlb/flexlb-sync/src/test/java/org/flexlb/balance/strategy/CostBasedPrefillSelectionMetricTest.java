@@ -408,6 +408,167 @@ class CostBasedPrefillSelectionMetricTest {
     }
 
     @Test
+    void tokenBalanceMustNotParkOnCountFullWorkerWhileAnotherWorkerCanAdmit() {
+        registry.close();
+        config.getDispatcher().setMaxInflightPerPrefillWorker(2);
+        config.getRouter().getRoles().getPrefill().setTokenBalance(new RoutingConfig.TokenBalanceConfig());
+        registry = StrategyTestSupport.endpointRegistry(SchedulingTestConfig.configService(config));
+        publish("10.0.0.1", 8080); publish("10.0.0.2", 8080);
+        strategy = new CostBasedPrefillStrategy(registry, cache, reporter, cacheReporter,
+                SchedulingTestConfig.configService(config));
+        var a = (PrefillEndpoint) registry.get(RoleType.PREFILL, "10.0.0.1:8080");
+        var b = (PrefillEndpoint) registry.get(RoleType.PREFILL, "10.0.0.2:8080");
+        var leases = new java.util.ArrayList<org.flexlb.balance.endpoint.PrefillState.RouteReservation>();
+        for (int i = 0; i < 2; i++) {
+            var route = mock(RequestRoute.class);
+            when(route.requestId()).thenReturn(8000L + i);
+            when(route.seqLen()).thenReturn(10L);
+            var lease = a.ownership.reserveUnqueuedRoute(route, 1, 2).reservation();
+            assertTrue(lease != null);
+            leases.add(lease);
+        }
+        var busy = mock(RequestRoute.class);
+        when(busy.requestId()).thenReturn(9000L);
+        when(busy.seqLen()).thenReturn(10_000L);
+        var busyLease = b.ownership.reserveUnqueuedRoute(busy, 1, 2).reservation();
+        assertTrue(busyLease != null);
+        try (var selected = select()) {
+            assertEquals(b, selected.prefillEp(), "count-full A has fewer tokens but cannot accept the route");
+            var accepted = selected.prefillEp().ownership.reserveUnqueuedRoute(selected, 1, 2).reservation();
+            assertTrue(accepted != null, "selected worker must accept without waiting for an unrelated completion");
+            b.ownership.release(accepted, null);
+        } finally {
+            for (var lease : leases) { a.ownership.release(lease, null); }
+            b.ownership.release(busyLease, null);
+        }
+    }
+
+    @ParameterizedTest
+    @CsvSource({"9,0,BLOCKED", "9,8,BLOCKED", "9,9,SUCCESS", "4,0,BLOCKED", "4,2,SUCCESS", "0,0,SUCCESS"})
+    void countFullWorkerStillDefinesCacheEligibility(int leaderHit, int availableHit, PlacementResult.Status expected) {
+        configureEngineQueueAdmission();
+        publish("10.0.0.2", 8080);
+        var a = (PrefillEndpoint) registry.get(RoleType.PREFILL, "10.0.0.1:8080");
+        var b = (PrefillEndpoint) registry.get(RoleType.PREFILL, "10.0.0.2:8080");
+        var leases = new java.util.ArrayList<org.flexlb.balance.endpoint.PrefillState.RouteReservation>();
+        try {
+            for (long id = 0; id < a.requestLimit; id++) {
+                var busy = mock(RequestRoute.class);
+                when(busy.requestId()).thenReturn(8000L + id);
+                when(busy.seqLen()).thenReturn(10L);
+                var lease = a.ownership.reserveUnqueuedRoute(busy, 1, a.requestLimit).reservation();
+                assertTrue(lease != null); leases.add(lease);
+            }
+            context.data().setRequest(context.data().getRequest().toBuilder()
+                    .blockCacheKeys(List.of(1L,2L,3L,4L,5L,6L,7L,8L,9L)).cacheKeyBlockSize(100L).build());
+            when(cache.findMatchingEngines(any(), any(), any())).thenAnswer(call -> {
+                List<String> addresses = call.getArgument(2);
+                return java.util.stream.Stream.of(Map.entry(a.ipPort(), leaderHit), Map.entry(b.ipPort(), availableHit))
+                        .filter(entry -> addresses.contains(entry.getKey()))
+                        .collect(java.util.stream.Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue));
+            });
+            var result = StrategyTestSupport.select(strategy, context.data().getRequest(), context.data().getSchedulingMetadata(), RoleType.PREFILL, null);
+            try (var selected = result.value()) {
+                assertEquals(expected, result.status());
+                if (expected == PlacementResult.Status.SUCCESS) { assertEquals(b, selected.prefillEp()); }
+            }
+            for (var lease : leases) { a.ownership.release(lease, null); }
+            leases.clear();
+            org.mockito.Mockito.doReturn(Map.of(a.ipPort(), leaderHit)).when(cache).findMatchingEngines(any(), any(), any());
+            try (var selected = select()) {
+                if (leaderHit > 0) { assertEquals(a, selected.prefillEp(), "released cache capacity resumes selection"); }
+            }
+        } finally { for (var lease : leases) { a.ownership.release(lease, null); } }
+    }
+
+    @Test
+    void engineWaitingThresholdBypassesTokenCapAndWakesOnQueueDrainWithUnchangedTotal() {
+        configureEngineQueueAdmission();
+        var a = (PrefillEndpoint) registry.get(RoleType.PREFILL, "10.0.0.1:8080");
+        var busy = mock(RequestRoute.class);
+        when(busy.requestId()).thenReturn(9000L);
+        when(busy.seqLen()).thenReturn(2_100_000L);
+        var lease = a.ownership.reserveUnqueuedRoute(busy, 1, 0).reservation();
+        try {
+            updateEngineQueue(a, 1, 0);
+            assertTrue(!a.engineQueueAllowsAdmission());
+            var blocked = StrategyTestSupport.select(strategy, context.data().getRequest(), context.data().getSchedulingMetadata(), RoleType.PREFILL, null);
+            assertEquals(PlacementResult.Status.BLOCKED, blocked.status());
+            // No completion, no decrease in total Engine count: waiting -> running must wake routing.
+            var change = updateEngineQueue(a, 0, 1);
+            assertTrue(change.reconciliation().capacityReleased());
+            assertTrue(change.reconciliation().schedulingInputsChanged());
+            assertTrue(a.engineQueueAllowsAdmission());
+            try (var selected = select()) {
+                assertEquals(a, selected.prefillEp());
+                var admitted = a.ownership.reserveUnqueuedRoute(selected, 1, 10).reservation();
+                assertTrue(admitted != null);
+                a.ownership.release(admitted, null);
+            }
+            updateEngineQueue(a, -1, 1);
+            assertTrue(!a.engineQueueAllowsAdmission(), "unknown waiting count must not bypass admission");
+        } finally { a.ownership.release(lease, null); }
+    }
+
+    @ParameterizedTest
+    @ValueSource(ints = {0, 5})
+    void lowEngineQueueCannotDowngradeCacheWhenLeaderIsSaturated(int fallbackHit) {
+        configureEngineQueueAdmission();
+        publish("10.0.0.2", 8080);
+        var a = (PrefillEndpoint) registry.get(RoleType.PREFILL, "10.0.0.1:8080");
+        var b = (PrefillEndpoint) registry.get(RoleType.PREFILL, "10.0.0.2:8080");
+        var busy = mock(RequestRoute.class);
+        when(busy.requestId()).thenReturn(9000L);
+        when(busy.seqLen()).thenReturn(2_100_000L);
+        var lease = a.ownership.reserveUnqueuedRoute(busy, 1, 0).reservation();
+        try {
+            updateEngineQueue(a, 1, 0);
+            updateEngineQueue(b, 0, 0);
+            context.data().setRequest(context.data().getRequest().toBuilder()
+                    .blockCacheKeys(List.of(1L,2L,3L,4L,5L,6L,7L,8L,9L)).cacheKeyBlockSize(100L).build());
+            when(cache.findMatchingEngines(any(), any(), any())).thenReturn(Map.of(a.ipPort(), 9, b.ipPort(), fallbackHit));
+            var blocked = StrategyTestSupport.select(strategy, context.data().getRequest(), context.data().getSchedulingMetadata(), RoleType.PREFILL, null);
+            if (blocked.value() != null) { blocked.value().close(); }
+            assertEquals(PlacementResult.Status.BLOCKED, blocked.status());
+            updateEngineQueue(a, 0, 1);
+            try (var selected = select()) {
+                assertEquals(a, selected.prefillEp(), "low queue may bypass tokens only on a cache-eligible worker");
+                assertEquals(900L, selected.hitCache());
+            }
+            assertTrue(strategy.hasEngineQueueAdmission(RoleType.PREFILL, null));
+            assertTrue(!strategy.hasEngineQueueAdmission(RoleType.PREFILL, "other"), "another pool cannot grant relief");
+        } finally { a.ownership.release(lease, null); }
+    }
+
+    private void configureEngineQueueAdmission() {
+        registry.close();
+        var balance = new RoutingConfig.TokenBalanceConfig();
+        balance.setEngineQueueAdmissionThreshold(0L);
+        config.getRouter().getRoles().getPrefill().setTokenBalance(balance);
+        config.getDispatcher().setMaxInflightPerPrefillWorker(10);
+        registry = StrategyTestSupport.endpointRegistry(SchedulingTestConfig.configService(config));
+        publish("10.0.0.1", 8080);
+        strategy = new CostBasedPrefillStrategy(registry, cache, reporter, cacheReporter,
+                SchedulingTestConfig.configService(config));
+    }
+
+    private org.flexlb.balance.endpoint.WorkerEndpoint.StatusChange.Prefill updateEngineQueue(
+            PrefillEndpoint endpoint, long waiting, long running) {
+        var status = endpoint.getStatus();
+        var response = StrategyTestSupport.response(RoleType.PREFILL, true, 1_000_000L, 1_000_000L,
+                status.appliedStatusCursor().statusVersion() + 1L);
+        response.setWaitingQueryLen(waiting);
+        response.setRunningQueryLen(running);
+        status.lock.lock();
+        try {
+            var change = endpoint.applyPreparedStatus(status,
+                    status.prepareNewStatus(WorkerStatusTestSupport.freezeStatusResponse(status, response)));
+            endpoint.publishStatus(change);
+            return (org.flexlb.balance.endpoint.WorkerEndpoint.StatusChange.Prefill) change;
+        } finally { status.lock.unlock(); }
+    }
+
+    @Test
     void tokenBalanceIgnoresTtftAndUsesAcceptedUncachedWork() {
         registry.close();
         config.getRouter().getRoles().getPrefill().setTokenBalance(new RoutingConfig.TokenBalanceConfig());
@@ -452,7 +613,7 @@ class CostBasedPrefillSelectionMetricTest {
     }
 
     @Test
-    void agedShortRequestUsesNewIdleWorkerButFreshAndLongRequestsKeepAffinity() {
+    void agedShortRequestsRescueOnlyToCacheEligibleWorkers() {
         registry.close();
         var balance = new RoutingConfig.TokenBalanceConfig();
         balance.setHotspotRescue(new RoutingConfig.HotspotRescueConfig());
@@ -467,8 +628,9 @@ class CostBasedPrefillSelectionMetricTest {
         when(running.seqLen()).thenReturn(200_000L);
         var lease = source.ownership.reserveUnqueuedRoute(running, 10000, 0).reservation();
         when(cache.findMatchingEngines(any(), any(), any())).thenReturn(Map.of("10.0.0.1:8080", 9));
-        for (int phase = 0; phase < 4; phase++) {
+        for (int phase = 0; phase < 5; phase++) {
             if (phase == 1) { publish("10.0.0.2", 8080); }
+            if (phase == 4) { when(cache.findMatchingEngines(any(), any(), any())).thenReturn(Map.of("10.0.0.1:8080", 9, "10.0.0.2:8080", 9)); }
             long length = phase == 3 ? 40000L : 1000L;
             var ctx = new RequestContext(config);
             ctx.data().setRequest(Request.builder().requestId(10001L + phase).seqLen(length).rawPriority(50)
@@ -478,10 +640,10 @@ class CostBasedPrefillSelectionMetricTest {
             ctx.register(ctx.data().getRequestId(), phase == 2 ? now : now - 10000, now + 60000, 60000);
             try (var route = new RequestRoute(ctx)) {
                 var result = strategy.select(ctx.data().getRequest(), ctx.data().getSchedulingMetadata(), RoleType.PREFILL, null, route);
-                if (phase == 1) {
+                if (phase == 4) {
                     assertEquals(PlacementResult.Status.SUCCESS, result.status());
                     assertEquals("10.0.0.2", route.prefill().getServerIp());
-                    assertEquals(0, route.hitCache(), "migration must account for cold recomputation");
+                    assertEquals(900, route.hitCache(), "rescue must retain cache eligibility");
                 } else {
                     assertEquals(PlacementResult.Status.BLOCKED, result.status());
                 }

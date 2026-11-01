@@ -245,6 +245,10 @@ final class FlexlbConfigValidator {
                     "router.roles.prefill.tokenBalance.minPrefixHitPercent");
             positive(balance.getMaxPendingComputeTokens(),
                     "router.roles.prefill.tokenBalance.maxPendingComputeTokens");
+            if (balance.getEngineQueueAdmissionThreshold() != null) {
+                nonNegative(balance.getEngineQueueAdmissionThreshold(),
+                        "router.roles.prefill.tokenBalance.engineQueueAdmissionThreshold");
+            }
             var rescue = balance.getHotspotRescue();
             if (rescue != null) {
                 positive(rescue.getMinWaitMs(), "router.roles.prefill.tokenBalance.hotspotRescue.minWaitMs");
