@@ -10,11 +10,24 @@ import torch
 from rtp_llm.models_py.kernels.cuda.fp8_kernel.get_best_config import (
     get_cutlass_groupgemm_best_config,
 )
-from rtp_llm.models_py.utils.arch import is_cuda
+from rtp_llm.models_py.utils.arch import is_cuda, is_ppu
 from rtp_llm.models_py.utils.math import align
 
 if is_cuda():
     from rtp_kernel.fp8_group_gemm import fp8_grouped_gemm_ptpc
+
+    from rtp_llm.ops.compute_ops import (
+        per_tensor_quant_fp8,
+        per_token_group_quant_fp8,
+        per_token_group_quant_fp8_v2,
+        per_token_group_quant_int8,
+        per_token_quant_fp8,
+    )
+elif is_ppu():
+    # The group/token quant kernels build for PPU; the CUTLASS grouped GEMM
+    # (rtp_kernel) is NVIDIA-only, so callers on PPU must not reach
+    # cutlass_moe_mm_fp8_scaled.
+    fp8_grouped_gemm_ptpc = None
 
     from rtp_llm.ops.compute_ops import (
         per_tensor_quant_fp8,
