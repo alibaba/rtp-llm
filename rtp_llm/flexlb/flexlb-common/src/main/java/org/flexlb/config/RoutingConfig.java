@@ -39,7 +39,10 @@ public final class RoutingConfig {
         /** Above this percentage, the largest reusable prefix wins without a TTFT cap. */
         private double minPrefixHitPercent = 50.0;
         /** Backpressure at this pending uncached work; one oversized request may enter an empty worker. */
-        private long maxPendingComputeTokens = 140_000L;
+        private long maxPendingComputeTokens = 2_000_000L;
+        /** Include recently completed uncached tokens in ranking only; disabled by default. */
+        private boolean enableWindow = false;
+        private long windowMs = 10_000L;
         /** Optional low Engine waiting-queue watermark (inclusive). Allows token-waterline
          * overflow only within cache-eligible workers; excludes Master queues and running requests.
          */

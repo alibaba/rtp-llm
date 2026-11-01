@@ -108,7 +108,8 @@ public class PrefillEndpoint extends WorkerEndpoint {
         this.ownership = new PrefillState(new ReentrantLock(), PrefillActiveIndex.disabled(), System::currentTimeMillis);
         var balance = config.getRouter().getRoles().getPrefill().getTokenBalance();
         this.engineQueueAdmissionThreshold = balance == null ? null : balance.getEngineQueueAdmissionThreshold();
-        if (balance != null) { ownership.enableTokenWorkload(balance.getMaxPendingComputeTokens(), this::engineQueueAllowsAdmission); }
+        if (balance != null) { ownership.enableTokenWorkload(balance.getMaxPendingComputeTokens(), this::engineQueueAllowsAdmission,
+                balance.isEnableWindow() ? balance.getWindowMs() : 0L); }
 
     }
 

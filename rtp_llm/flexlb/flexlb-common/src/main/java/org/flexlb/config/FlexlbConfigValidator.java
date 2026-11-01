@@ -241,6 +241,7 @@ final class FlexlbConfigValidator {
         }
         var balance = prefill.getTokenBalance();
         if (balance != null) {
+            positive(balance.getWindowMs(), "router.roles.prefill.tokenBalance.windowMs");
             range(balance.getMinPrefixHitPercent(), 0, RoutingConfig.PERCENTAGE_SCALE,
                     "router.roles.prefill.tokenBalance.minPrefixHitPercent");
             positive(balance.getMaxPendingComputeTokens(),

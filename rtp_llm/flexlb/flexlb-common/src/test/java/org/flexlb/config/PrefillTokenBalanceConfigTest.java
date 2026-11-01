@@ -9,8 +9,8 @@ class PrefillTokenBalanceConfigTest {
     }
     @Test void optInDefaultsAndValidation() {
         assertNull(ConfigTestFixtures.parse("{}").getRouter().getRoles().getPrefill().getTokenBalance());
-        assertEquals(140000, parse("{}").getRouter().getRoles().getPrefill().getTokenBalance().getMaxPendingComputeTokens());
-        for (String value : new String[]{"{\"windowMs\":0}", "{\"windowMs\":10000}", "{\"maxPendingComputeTokens\":0}",
+        assertEquals(2_000_000, parse("{}").getRouter().getRoles().getPrefill().getTokenBalance().getMaxPendingComputeTokens());
+        for (String value : new String[]{"{\"windowMs\":0}", "{\"maxPendingComputeTokens\":0}",
                 "{\"minPrefixHitPercent\":101}", "{\"minPrefixHitPercent\":-1}"}) {
             assertThrows(RuntimeException.class, () -> parse(value));
         }
@@ -18,10 +18,16 @@ class PrefillTokenBalanceConfigTest {
                 {"router":{"roles":{"prefill":{"tokenBalance":{},"cacheAffinity":{}}}}}
                 """));
     }
-    @Test void engineQueueAdmissionIsAnExplicitOptIn() {
-        assertNull(parse("{}").getRouter().getRoles().getPrefill().getTokenBalance().getEngineQueueAdmissionThreshold());
-        assertEquals(0L, parse("{\"engineQueueAdmissionThreshold\":0}").getRouter().getRoles().getPrefill()
-                .getTokenBalance().getEngineQueueAdmissionThreshold());
+    @Test void windowAndEngineQueueAdmissionAreExplicitOptIns() {
+        var defaults = parse("{}").getRouter().getRoles().getPrefill().getTokenBalance();
+        assertFalse(defaults.isEnableWindow());
+        assertEquals(10_000, defaults.getWindowMs());
+        assertNull(defaults.getEngineQueueAdmissionThreshold());
+        var enabled = parse("{\"enableWindow\":true,\"windowMs\":5000,\"engineQueueAdmissionThreshold\":0}")
+                .getRouter().getRoles().getPrefill().getTokenBalance();
+        assertTrue(enabled.isEnableWindow());
+        assertEquals(5000, enabled.getWindowMs());
+        assertEquals(0L, enabled.getEngineQueueAdmissionThreshold());
         assertThrows(RuntimeException.class, () -> parse("{\"engineQueueAdmissionThreshold\":-1}"));
     }
 
@@ -29,7 +35,7 @@ class PrefillTokenBalanceConfigTest {
         var rescue = parse("{\"hotspotRescue\":{}}").getRouter().getRoles().getPrefill().getTokenBalance().getHotspotRescue();
         assertEquals(5000, rescue.getMinWaitMs());
         for (String value : new String[]{"{\"minWaitMs\":0}", "{\"maxInputTokens\":0}",
-                "{\"maxIdlePendingTokens\":-1}", "{\"maxIdlePendingTokens\":140000}"}) {
+                "{\"maxIdlePendingTokens\":-1}", "{\"maxIdlePendingTokens\":2000000}"}) {
             assertThrows(RuntimeException.class, () -> parse("{\"hotspotRescue\":" + value + "}"));
         }
     }

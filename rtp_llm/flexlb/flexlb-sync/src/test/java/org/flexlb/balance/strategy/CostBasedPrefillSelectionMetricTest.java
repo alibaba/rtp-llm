@@ -587,7 +587,7 @@ class CostBasedPrefillSelectionMetricTest {
         assertEquals(0, strategy.selectBestCandidate(set, 1, RoleType.PREFILL, null, 1000));
         var route = mock(RequestRoute.class);
         when(route.requestId()).thenReturn(123456L);
-        when(route.seqLen()).thenReturn(200_000L);
+        when(route.seqLen()).thenReturn(2_100_000L);
         var lease = a.ownership.reserveUnqueuedRoute(route, 1, 0).reservation();
         // A saturated cache leader parks globally instead of losing the prefix on an idle worker.
         assertEquals(-1, strategy.selectBestCandidate(set, 1, RoleType.PREFILL, null, 1000));
@@ -625,7 +625,7 @@ class CostBasedPrefillSelectionMetricTest {
         var source = (PrefillEndpoint) registry.get(RoleType.PREFILL, "10.0.0.1:8080");
         var running = mock(RequestRoute.class);
         when(running.requestId()).thenReturn(99999L);
-        when(running.seqLen()).thenReturn(200_000L);
+        when(running.seqLen()).thenReturn(2_100_000L);
         var lease = source.ownership.reserveUnqueuedRoute(running, 10000, 0).reservation();
         when(cache.findMatchingEngines(any(), any(), any())).thenReturn(Map.of("10.0.0.1:8080", 9));
         for (int phase = 0; phase < 5; phase++) {
