@@ -4,6 +4,8 @@ from dataclasses import dataclass
 
 import torch
 
+from .qsa_step_plan import Qwen4ExpPrefillStepPlan
+
 
 @dataclass(frozen=True)
 class IncrementalPrefillPlan:
@@ -30,6 +32,10 @@ class IncrementalPrefillPlan:
     state_table: torch.Tensor
     rope_cos: torch.Tensor
     rope_sin: torch.Tensor
+    # The frozen per-step metadata this layer's plan was assembled from.
+    # Selection/FMHA consumers read its per-step constants instead of
+    # rebuilding them; the fallbacks keep direct constructions working.
+    step: Qwen4ExpPrefillStepPlan | None = None
 
 
 @dataclass(frozen=True)
