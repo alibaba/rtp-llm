@@ -19,7 +19,7 @@ public final class NativeClient implements AutoCloseable {
                          int outputTokens, Outcome outcome, String grpcCode, long errorCode, String message) {}
     private final java.util.function.Supplier<List<String>> masters;
     private final java.util.function.Consumer<Event.Builder> events;
-    private final MediaClient vision = new MediaClient();
+    private final MediaClient vision;
     private final Map<String, ManagedChannel> channels = new HashMap<>();
     private final Map<Long, Call> active = new HashMap<>();
     private final ScheduledThreadPoolExecutor timers = new ScheduledThreadPoolExecutor(1,
@@ -35,6 +35,10 @@ public final class NativeClient implements AutoCloseable {
         this(masters, event -> {});
     }
     NativeClient(java.util.function.Supplier<List<String>> masters, java.util.function.Consumer<Event.Builder> events) {
+        this(masters, events, MediaInput.IMAGE_TOKEN);
+    }
+    NativeClient(java.util.function.Supplier<List<String>> masters, java.util.function.Consumer<Event.Builder> events, int imageToken) {
+        vision = new MediaClient(imageToken);
         this.masters = Objects.requireNonNull(masters); this.events = Objects.requireNonNull(events);
         timers.setRemoveOnCancelPolicy(true);
     }

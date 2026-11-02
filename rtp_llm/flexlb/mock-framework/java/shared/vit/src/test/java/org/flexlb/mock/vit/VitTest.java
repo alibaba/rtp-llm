@@ -16,10 +16,16 @@ import static org.junit.jupiter.api.Assertions.*;
 
 class VitTest {
     @TempDir Path directory;
+    String checkpoint() throws Exception {
+        new ObjectMapper().writeValue(directory.resolve("config.json").toFile(), Map.of(
+            "image_token_id", 1000, "text_config", Map.of("hidden_size", 4),
+            "vision_config", Map.of("patch_size", 14, "downsample_ratio", 3, "min_pixels", 0, "max_image_tokens", 1024)));
+        return directory.toString();
+    }
     VitConfig config(String expression,long device,long host,long hashes,int wait) throws Exception {
         var path=directory.resolve(UUID.randomUUID()+".json");
         new ObjectMapper().writeValue(path.toFile(),Map.of("id","vit-0","component_role","vit","component",Map.of("config",Map.of(
-            "mock.vit.hidden.size",4,"mock.vit.min.pixels",0,"mm_cache_gpu_max_bytes",device,"mm_cache_cpu_max_bytes",host,"mm_hash_key_cache_max_bytes",hashes,
+            "checkpoint_path",checkpoint(),"mm_cache_gpu_max_bytes",device,"mm_cache_cpu_max_bytes",host,"mm_hash_key_cache_max_bytes",hashes,
             "gpu_max_batch_size",8,"gpu_batch_wait_ms",wait,"mock.compute",Map.of("forward",Map.of("expression",expression))))));
         return VitConfig.load(path);
     }
@@ -141,7 +147,7 @@ class VitTest {
     @Test void queueOverflowFailsClaimsAndStopEndsEveryOutstandingWaiter() throws Exception {
         var path=directory.resolve("bounded.json");
         new ObjectMapper().writeValue(path.toFile(),Map.of("id","vit-0","component_role","vit","component",Map.of("config",Map.of(
-            "gpu_max_batch_size",1,"vit_concurrency",1,"vit_max_queue_size",1,"mock.compute",Map.of("forward",Map.of("expression","1000"))))));
+            "checkpoint_path",checkpoint(),"gpu_max_batch_size",1,"vit_concurrency",1,"vit_max_queue_size",1,"mock.compute",Map.of("forward",Map.of("expression","1000"))))));
         var config=VitConfig.load(path);
         try(var cache=new VitCache(config);var scheduler=new VitScheduler(config,cache)) {
             var first=cache.acquire(new VitGeometry.Image("a",28,28,1));scheduler.submit(List.of(first));

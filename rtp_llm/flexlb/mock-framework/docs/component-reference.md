@@ -106,11 +106,7 @@ vit:
   deployment:
     replicas: 1
   config:
-    mock.vit.patch.size: 14
-    mock.vit.spatial.merge.size: 3
-    mock.vit.min.pixels: 295936
-    mock.vit.max.tokens: 1024
-    mock.vit.hidden.size: 4096
+    checkpoint_path: ./model
     gpu_max_batch_size: 8
     gpu_batch_wait_ms: 10
     vit_concurrency: 64
@@ -121,9 +117,26 @@ vit:
     mock.compute.forward.expression: "2 + 0.00001 * totalImagePixels"
 ```
 
-图像输入携带明确的 width/height（原生 mm_preprocess_config），Mock 不下载/解码实际图片。几何使用固定源码的 V4.1 `plan_image_grid`/`num_image_tokens`：先按最小像素数放大、按 patch 对齐，必要时按最大 token 数缩小，最终 rows=llm_h*(llm_w+1)+2；默认 patch=14、downsample=3、min_pixels=295936、max_tokens=1024。尺寸缺失、视频、音频和 tensor 输入仍明确拒绝，不能把任意真实图片预处理宣称为已支持。
+模型元数据沿用 real 的入口：Case 的 `checkpoint_path` 指向模型目录（相对路径以 case.yaml 所在目录为基准），Whale 使用 `CHECKPOINT_PATH`。仅读取该目录的 config.json，不加载权重；V 必须提供，纯文本 P/D 和 Client 可省略。多模态运行时 Client、P/D、V 指向同一份模型配置。文件保持 real 结构，例如：
 
-回放数据保留原始 token、URL/尺寸与单个占位位置 Image.offset；已删除 Image.length，旧图片数据需要重新生成。Player 使用 -200 作为 Mock 占位标记；Engine 的 `mock.multimodal.image.token.id` 默认 -200，可为原生调用方配置其模型实际标记。标记出现次数必须与媒体数一致。P 的内部 Prepared 保存规范化语义 token 和 cache-only spans，缓存 hash 不再替换语义 token。Native GenerateInput 不携带布局；仅 P→D 的 GenerateRequest.multimodal_cache_spans 携带缓存身份。P/D 按原生逐块滚动算法将语义 token 与重叠 span 身份共同混入 key；同一媒体身份必须在两端得到相同 key。当前 cache-key seed 固定为 0，不宣称不同 checkpoint 的命名空间已自动推导。
+```json
+{
+  "image_token_id": 1000,
+  "vision_config": {
+    "patch_size": 14,
+    "downsample_ratio": 3,
+    "min_pixels": 295936,
+    "max_image_tokens": 1024
+  },
+  "text_config": {"hidden_size": 4096}
+}
+```
+
+image_token_id 必须使用所选模型的实际值，示例值不代表 DSV4.1 的固定标记。text_config.hidden_size 控制视觉结果的逻辑字节预算。无关模型字段忽略；所需几何字段缺失或非法直接报错。
+
+图像输入携带明确的 width/height（原生 mm_preprocess_config），Mock 不下载/解码实际图片。几何使用固定源码的 V4.1 `plan_image_grid`/`num_image_tokens`：先按最小像素数放大、按 patch 对齐，必要时按最大 token 数缩小，最终 rows=llm_h*(llm_w+1)+2；参数直接读取 checkpoint_path/config.json 中的 vision_config.patch_size、vision_config.downsample_ratio、vision_config.min_pixels、vision_config.max_image_tokens，不另设 Mock 覆盖值。尺寸缺失、视频、音频和 tensor 输入仍明确拒绝，不能把任意真实图片预处理宣称为已支持。
+
+回放数据保留原始 token、URL/尺寸与单个占位位置 Image.offset；已删除 Image.length，旧图片数据需要重新生成。Client 与 P/D 从同一模型目录读取 image_token_id，LoadClient 将回放中的图片位置编码为该值。直接构造请求的测试工具在不提供模型目录时仍使用 -200 约定；部署真实模型输入时必须提供对应目录。标记出现次数必须与媒体数一致。P 的内部 Prepared 保存规范化语义 token 和 cache-only spans，缓存 hash 不再替换语义 token。Native GenerateInput 不携带布局；仅 P→D 的 GenerateRequest.multimodal_cache_spans 携带缓存身份。P/D 按原生逐块滚动算法将语义 token 与重叠 span 身份共同混入 key；同一媒体身份必须在两端得到相同 key。当前 cache-key seed 固定为 0，不宣称不同 checkpoint 的命名空间已自动推导。
 
 V 以 miss 的图片组成 ForwardBatch，复用公式和 SimulatedCompute。计算完成后登记缓存、通知等待者；Compute 不直接改变缓存。命中和在途合并不重复计入 forward。提供 real 名称的 py_rtp_vit_embedding_forward_rt、batch_size、cache 指标及 mock_vit_theoretical_forward_rt；元数据模拟不能代替真实模型计时校准。
 
@@ -230,7 +243,6 @@ real 默认值和映射以 `rtp_llm/server/server_args`、`rtp_llm/config/engine
 | 参数 | 含义 |
 | --- | --- |
 | mock.cache.memory.blocks | P/D Host 逻辑块预算，默认 0；不是 real 的 memory_cache_size_mb。本模型不加载层/head/dtype 来计算每块字节数，所以忽略 memory_cache_size_mb，不能把 MB 当块数。 |
-| mock.vit.patch.size / mock.vit.spatial.merge.size / mock.vit.hidden.size | V 简化几何模型，默认 14 / 3 / 4096，不冒充 real 的模型加载配置。 |
 | mock.compute.forward.expression | 必填，Forward 公式，结果单位 ms。 |
 | mock.compute.forward.noise.stddev.ms / stddev.ratio / max.deviation.ms / seed | 有界噪声，详见 Compute；数值后缀均相对 mock.compute.forward.noise。 |
 | mock.compute.decode.tokens.per.step | D 平均每轮进度，与真实投机机制不同。 |

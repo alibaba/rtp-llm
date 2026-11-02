@@ -76,5 +76,24 @@ public final class EngineConfig {
         return result;
     }
 
+    /** Read the native checkpoint metadata only; weights are never loaded. */
+    public static JsonNode model(JsonNode config) throws IOException {
+        var path = config.get("checkpoint_path");
+        if (path == null) return JSON.createObjectNode();
+        if (!path.isTextual() || path.asText().isBlank())
+            throw new IllegalArgumentException("checkpoint_path must be a model directory");
+        var model = read(Path.of(path.asText()).resolve("config.json"));
+        if (!model.isObject()) throw new IllegalArgumentException("Model config.json must be an object");
+        return model;
+    }
+
+    public static int imageToken(JsonNode model, int fallback) {
+        var value = model.get("image_token_id");
+        if (value == null && !model.has("vision_config")) return fallback;
+        if (value == null || !value.isIntegralNumber() || !value.canConvertToInt() || value.intValue() < 0)
+            throw new IllegalArgumentException("Model image_token_id must be a nonnegative int32");
+        return value.intValue();
+    }
+
     private EngineConfig() {}
 }

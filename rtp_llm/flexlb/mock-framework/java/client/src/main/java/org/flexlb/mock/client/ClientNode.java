@@ -15,6 +15,7 @@ import org.flexlb.mock.client.ClientProtocol.*;
 public final class ClientNode implements ClientProtocol, AutoCloseable {
     private static final ObjectMapper JSON = new ObjectMapper();
     private final String id;
+    private final int imageToken;
     private final Path topology, directory;
     private final ClientMetrics metrics = new ClientMetrics();
     private final HttpClient http = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(2)).build();
@@ -26,6 +27,10 @@ public final class ClientNode implements ClientProtocol, AutoCloseable {
     private volatile boolean closed;
 
     public ClientNode(String id, Path topology, Path directory) throws IOException {
+        this(id, topology, directory, org.flexlb.mock.multimodal.MediaInput.IMAGE_TOKEN);
+    }
+    private ClientNode(String id, Path topology, Path directory, int imageToken) throws IOException {
+        this.imageToken = imageToken;
         this.id = id; this.topology = topology; this.directory = directory;
         api = new ApiServer(new InetSocketAddress("127.0.0.1", 0)).bind(ClientProtocol.class, this).metrics(metrics::scrape).start();
     }
@@ -56,7 +61,7 @@ public final class ClientNode implements ClientProtocol, AutoCloseable {
         Files.createDirectories(playback.getParent()); Files.createDirectory(playback);
         save(playback.resolve("plan.json"), args);
         if (worker != null) worker.close();
-        worker = new LoadClient(args, metrics, topology, playback.resolve("requests.binpb.zst"), id);
+        worker = new LoadClient(args, metrics, topology, playback.resolve("requests.binpb.zst"), id, imageToken);
         workerSequence = args.sequence();
         return new Ack(true);
     }
@@ -198,11 +203,18 @@ public final class ClientNode implements ClientProtocol, AutoCloseable {
     public static void main(String[] args) throws Exception {
         if (args.length != 0) throw new IllegalArgumentException("Use runner environment");
         var config = JSON.readTree(Path.of(required("MOCK_CONFIG_FILE")).toFile());
-        if (!config.path("component").path("config").isEmpty()) throw new IllegalArgumentException("Client configuration belongs to client/start");
+        var settings = config.path("component").path("config");
+        settings.fieldNames().forEachRemaining(name -> {
+            if (!name.equals("checkpoint_path")) throw new IllegalArgumentException("Unknown Client setting: " + name);
+        });
+        int imageToken = org.flexlb.mock.runtime.EngineConfig.imageToken(
+            org.flexlb.mock.runtime.EngineConfig.model(settings), org.flexlb.mock.multimodal.MediaInput.IMAGE_TOKEN);
         var directory = Path.of(required("MOCK_OUTPUT_DIR"));
-        try (var node = new ClientNode(required("MOCK_NODE_ID"), Path.of(required("MOCK_TOPOLOGY_FILE")), directory)) {
+        try (var node = new ClientNode(required("MOCK_NODE_ID"), Path.of(required("MOCK_TOPOLOGY_FILE")), directory, imageToken)) {
             var hook = new Thread(node::close, "client-shutdown"); Runtime.getRuntime().addShutdownHook(hook);
-            save(directory.resolve("effective-config.json"), Map.of("id", node.id));
+            var effective = JSON.createObjectNode().put("id", node.id);
+            if (settings.has("checkpoint_path")) effective.set("checkpoint_path", settings.get("checkpoint_path"));
+            save(directory.resolve("effective-config.json"), effective);
             save(directory.resolve("endpoints.json"), Map.of("id", node.id, "role", "client", "control", node.url(),
                 "rpc", URI.create(node.url()).getAuthority(), "metrics", node.url() + "/metrics"));
             node.api.publishReady(Path.of(required("MOCK_READY_FILE")));

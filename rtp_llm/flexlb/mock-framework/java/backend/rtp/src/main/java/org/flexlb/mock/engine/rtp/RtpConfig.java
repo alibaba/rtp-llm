@@ -19,7 +19,7 @@ public record RtpConfig(String id, Role role, int blockSize, int deviceBlocks, i
                         boolean reuseCache, boolean deviceCache, int hostBlocks, EvictionPolicy hostPolicy,
                         Watermark deviceWatermark, Watermark hostWatermark, boolean disableDecodeFirstReuse, int maxSeqLen, int maxBatchTokens,
                         int maxGenerateBatchSize, int maxInitedKvStreams, int maxUncachedBatchTokens, int cpSize, boolean cpEnabled, int tpSize, int dpSize,
-                        JsonNode business, ComputeModel compute) {
+                        JsonNode business, ComputeModel compute, int imageToken) {
     public static final int REQUEST_LIMIT = 1024;
     private static final ObjectMapper JSON = new ObjectMapper();
 
@@ -90,11 +90,11 @@ public record RtpConfig(String id, Role role, int blockSize, int deviceBlocks, i
             nativeInt(config, "max_inited_kv_cache_streams", 0, 0, Integer.MAX_VALUE),
             nativeInt(config, "max_batch_tokens_without_cache", 0, 0, Integer.MAX_VALUE),
             cpSize, cpEnabled, tpSize, dpSize,
-            config, compute);
+            config, compute, EngineConfig.imageToken(EngineConfig.model(config), org.flexlb.mock.multimodal.MediaInput.IMAGE_TOKEN));
     }
 
     public AdmissionConfig endpoint() {
-        return new AdmissionConfig(id, role, blockSize, tpSize, maxSeqLen, maxBatchTokens, compute, nativeInt(business, "mock.multimodal.image.token.id", -200, Integer.MIN_VALUE, Integer.MAX_VALUE));
+        return new AdmissionConfig(id, role, blockSize, tpSize, maxSeqLen, maxBatchTokens, compute, imageToken);
     }
 
     public ObjectNode effective() {
@@ -115,7 +115,8 @@ public record RtpConfig(String id, Role role, int blockSize, int deviceBlocks, i
             .put("block_tree_memory_evict_high_watermark_ratio", hostWatermark.high());
         if (role == Role.prefill) {
             result.put("max_inited_kv_cache_streams", maxInitedKvStreams).put("max_batch_tokens_without_cache", maxUncachedBatchTokens); }
-        result.put("concurrency_limit", maxGenerateBatchSize).put("mock.multimodal.image.token.id", endpoint().imageToken());
+        if (business.has("checkpoint_path")) result.set("checkpoint_path", business.get("checkpoint_path"));
+        result.put("concurrency_limit", maxGenerateBatchSize);
         boolean control = nativeBool(business,"enable_remote_cache",false);
         String events = business.path("kv_cache_event_publisher_type").asText("none");
         if (control || !events.equals("none")) {

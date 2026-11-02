@@ -45,12 +45,16 @@ def command():
             '-jar', str(ROOT / 'java/host/target/mock-engine-service-1.0-SNAPSHOT-all.jar')]
 
 
-def environment(role, port):
+def environment(role, port, model):
     env = {key: value for key, value in os.environ.items() if not key.startswith('MOCK_')}
     env.update(ROLE_TYPE=role.upper(), START_PORT=str(port), MOCK_COMPUTE_FORWARD_EXPRESSION='1',
                MOCK_BIND_HOST='0.0.0.0', MOCK_ADVERTISE_HOST='127.0.0.1')
     if role == 'vit':
-        env['MOCK_VIT_HIDDEN_SIZE'] = '4'
+        model.mkdir()
+        (model / 'config.json').write_text(json.dumps({'image_token_id': 1000,
+            'text_config': {'hidden_size': 4}, 'vision_config': {'patch_size': 14, 'downsample_ratio': 3,
+            'min_pixels': 0, 'max_image_tokens': 1024}}))
+        env['CHECKPOINT_PATH'] = str(model)
     else:
         env.update(SEQ_SIZE_PER_BLOCK='16', MAX_SEQ_LEN='4096', TEST_BLOCK_NUM='9', RESERVE_BLOCK_RATIO='0')
     return env
@@ -60,9 +64,12 @@ def environment(role, port):
 @pytest.mark.parametrize('role', ['prefill', 'decode', 'vit'])
 def test_service_restarts_without_case_artifacts(tmp_path, role, source):
     port = ports()
-    env = environment(role, port)
+    model = tmp_path / 'model'
+    env = environment(role, port, model)
     if source == 'file':
         config = {'mock.compute.forward.expression': '1'}
+        if role == 'vit':
+            config['checkpoint_path'] = str(model)
         component = {'config': config}
         if role != 'vit':
             component['engine'] = 'rtp'
@@ -106,7 +113,7 @@ def test_service_restarts_without_case_artifacts(tmp_path, role, source):
 
 def test_fatal_vit_compute_failure_exits_the_service(tmp_path):
     port = ports()
-    env = environment('vit', port)
+    env = environment('vit', port, tmp_path / 'model')
     env['MOCK_COMPUTE_FORWARD_EXPRESSION'] = '-1'
     log = tmp_path / 'process.log'
     with log.open('w') as stream:

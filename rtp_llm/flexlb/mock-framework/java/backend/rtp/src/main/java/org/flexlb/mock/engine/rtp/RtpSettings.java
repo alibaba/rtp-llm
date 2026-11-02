@@ -10,7 +10,7 @@ import org.flexlb.mock.runtime.EngineConfig;
 /** Only implemented native settings enter the effective configuration. */
 final class RtpSettings {
     private static final Set<String> COMMON = Set.of(
-        "test_block_num", "reserve_block_ratio", "device_eviction_policy", "seq_size_per_block", "reuse_cache",
+        "checkpoint_path", "test_block_num", "reserve_block_ratio", "device_eviction_policy", "seq_size_per_block", "reuse_cache",
         "enable_device_cache", "disable_decode_first_malloc_device_reuse", "max_seq_len", "max_batch_tokens_size",
         "kv_cache_event_publisher_type", "kv_cache_event_manager_endpoint", "kv_cache_event_instance_id",
         "kv_cache_event_instance_group", "kv_cache_event_host_ip_port", "kv_cache_event_snapshot_interval_ms",
@@ -31,7 +31,7 @@ final class RtpSettings {
     }
     static Set<String> mockNames() {
         var names = new HashSet<>(ComputeModel.settingNames());
-        names.addAll(Set.of("mock.cache.memory.blocks", "mock.multimodal.image.token.id"));
+        names.add("mock.cache.memory.blocks");
         return Set.copyOf(names);
     }
     static ObjectNode normalize(JsonNode config, Role role) {

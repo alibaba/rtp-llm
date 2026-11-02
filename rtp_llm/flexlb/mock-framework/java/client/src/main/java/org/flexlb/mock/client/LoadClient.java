@@ -21,6 +21,7 @@ final class LoadClient implements AutoCloseable {
     private final Map<String, Long> outcomes = new TreeMap<>();
     private final List<String> errors = new ArrayList<>();
     private final CompletableFuture<State> completion = new CompletableFuture<>();
+    private final int imageToken;
     private Thread player, dispatcher;
     private boolean begun, producerDone;
     private volatile boolean stopped;
@@ -28,13 +29,17 @@ final class LoadClient implements AutoCloseable {
     private long issued, finished, drainDeadline = Long.MAX_VALUE;
 
     LoadClient(Shard plan, ClientMetrics metrics, java.nio.file.Path topology, java.nio.file.Path evidence, String id) throws Exception {
+        this(plan, metrics, topology, evidence, id, org.flexlb.mock.multimodal.MediaInput.IMAGE_TOKEN);
+    }
+    LoadClient(Shard plan, ClientMetrics metrics, java.nio.file.Path topology, java.nio.file.Path evidence, String id, int imageToken) throws Exception {
+        this.imageToken = imageToken;
         this.plan = plan; this.metrics = metrics;
         queue = new ArrayBlockingQueue<>(plan.queue_capacity());
         for (var outcome : NativeClient.Outcome.values()) outcomes.put(outcome.name(), 0L);
         discovery = new MasterDiscovery(topology, plan.masters());
         try { journal = new RequestJournal(evidence, id, plan); }
         catch (Exception error) { discovery.close(); throw error; }
-        client = new NativeClient(discovery::routes, journal::record);
+        client = new NativeClient(discovery::routes, journal::record, imageToken);
         // A lost begin command must not leave a prepared worker alive forever.
         dispatcher = Thread.ofVirtual().name("client-dispatch").start(this::dispatch);
     }
@@ -101,7 +106,7 @@ final class LoadClient implements AutoCloseable {
                             .setGenerateConfig(GenerateConfigPB.newBuilder().setMaxNewTokens(item.input().getMaxNewTokens())
                                 .setIgnoreEos(true).setCanUsePdSeparation(true).setReturnIncremental(true));
                         for (var image : item.input().getImagesList()) {
-                            input.setTokenIds(image.getOffset(), org.flexlb.mock.multimodal.MediaInput.IMAGE_TOKEN);
+                            input.setTokenIds(image.getOffset(), imageToken);
                             input.addMultimodalInputs(MultimodalInputPB.newBuilder().setMultimodalType(1).setMultimodalUrl(image.getUrl())
                                 .setMmPreprocessConfig(MMPreprocessConfigPB.newBuilder().setWidth(image.getWidth()).setHeight(image.getHeight())));
                         }

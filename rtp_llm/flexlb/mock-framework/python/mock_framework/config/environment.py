@@ -121,6 +121,13 @@ def compile_environment(raw, *, directory=None):
         native = _load_component_config(component.get('config', {}), role, directory)
         if role == 'master':
             _validate_master_config(native)
+        if 'checkpoint_path' in native:
+            checkpoint = Path(text(native['checkpoint_path'], f'{role}.checkpoint_path'))
+            if not checkpoint.is_absolute():
+                if directory is None:
+                    raise ConfigError(f'{role}.checkpoint_path: relative model directory requires a Case directory')
+                checkpoint = Path(directory) / checkpoint
+            native = {**native, 'checkpoint_path': str(checkpoint.resolve())}
         result[role] = {'deployment': deployment, 'config': expand_config(native)}
         if 'engine' in component:
             result[role]['engine'] = component['engine']

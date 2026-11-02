@@ -13,12 +13,11 @@ public record VitConfig(String id, int patch, int merge, int hidden, int minPixe
     public static VitConfig load(Path path) throws Exception {
         return load(EngineConfig.read(path));
     }
-    private static final Set<String> NATIVE = Set.of("gpu_max_batch_size", "gpu_batch_wait_ms", "vit_concurrency", "vit_max_queue_size",
+    private static final Set<String> NATIVE = Set.of("checkpoint_path", "gpu_max_batch_size", "gpu_batch_wait_ms", "vit_concurrency", "vit_max_queue_size",
         "mm_cache_gpu_max_bytes", "mm_cache_cpu_max_bytes", "mm_hash_key_cache_max_bytes");
     private static Set<String> mockNames() {
         var names = new HashSet<>(ComputeModel.settingNames());
         names.removeIf(name -> !name.startsWith("mock.compute.forward."));
-        names.addAll(Set.of("mock.vit.patch.size", "mock.vit.spatial.merge.size", "mock.vit.hidden.size", "mock.vit.min.pixels", "mock.vit.max.tokens"));
         return Set.copyOf(names);
     }
     public static VitConfig fromEnvironment(String id, Map<String, String> env) throws Exception {
@@ -40,29 +39,35 @@ public record VitConfig(String id, int patch, int merge, int hidden, int minPixe
         var config = root.path("component").path("config");
         if (!config.isObject()) throw new IllegalArgumentException("V config must be an object");
         config = EngineConfig.normalize(config, NATIVE, mockNames());
+        var model = EngineConfig.model(config);
+        if (model.isEmpty()) throw new IllegalArgumentException("ViT requires checkpoint_path with model config.json");
+        var vision = model.path("vision_config");
+        if (!vision.isObject()) throw new IllegalArgumentException("Model vision_config must be an object");
+        var text = model.path("text_config");
+        if (!text.isObject()) throw new IllegalArgumentException("Model text_config must be an object");
         var compute = ComputeModel.fromSettings(config, Map.of());
         var effective = new ObjectMapper().createObjectNode().put("id", root.path("id").asText()).put("role", "vit");
         int batchSize = integer(config,"gpu_max_batch_size",1,1,1024);
         int concurrency = integer(config,"vit_concurrency",64,1,65536);
         int pending = integer(config,"vit_max_queue_size",64,0,65536);
-        var result = new VitConfig(root.path("id").asText(), integer(config,"mock.vit.patch.size",14,1,1024), integer(config,"mock.vit.spatial.merge.size",3,1,32), integer(config,"mock.vit.hidden.size",4096,1,65536),
-            integer(config,"mock.vit.min.pixels",295936,0,Integer.MAX_VALUE), integer(config,"mock.vit.max.tokens",1024,4,1048576),
+        var result = new VitConfig(root.path("id").asText(), integer(vision,"patch_size",null,1,1024), integer(vision,"downsample_ratio",null,1,32), integer(text,"hidden_size",null,1,65536),
+            integer(vision,"min_pixels",null,0,Integer.MAX_VALUE), integer(vision,"max_image_tokens",null,4,1048576),
             batchSize, integer(config,"gpu_batch_wait_ms",10,0,60000), Math.addExact(concurrency,pending),
             number(config,"mm_cache_gpu_max_bytes",2147483648L), number(config,"mm_cache_cpu_max_bytes",2147483648L), number(config,"mm_hash_key_cache_max_bytes",268435456L),compute,effective);
-        effective.put("mock.vit.patch.size",result.patch).put("mock.vit.spatial.merge.size",result.merge).put("mock.vit.hidden.size",result.hidden)
+        effective.put("checkpoint_path",config.path("checkpoint_path").asText())
             .put("gpu_max_batch_size",result.batchSize).put("gpu_batch_wait_ms",result.batchSize == 1 ? 0 : result.waitMs)
             .put("vit_concurrency",concurrency).put("vit_max_queue_size",pending)
-            .put("mock.vit.min.pixels",result.minPixels).put("mock.vit.max.tokens",result.maxTokens).put("mm_cache_gpu_max_bytes",result.deviceBytes).put("mm_cache_cpu_max_bytes",result.hostBytes).put("mm_hash_key_cache_max_bytes",result.hashBytes);
+            .put("mm_cache_gpu_max_bytes",result.deviceBytes).put("mm_cache_cpu_max_bytes",result.hostBytes).put("mm_hash_key_cache_max_bytes",result.hashBytes);
         compute.effectiveSettings().fields().forEachRemaining(entry -> {
             if (mockNames().contains(entry.getKey())) effective.set(entry.getKey(), entry.getValue());
         });
         return result;
     }
-    private static int integer(JsonNode node,String key,int fallback,int low,int high) {
-        long value = number(node,key,fallback); if (value < low || value > high) throw new IllegalArgumentException("Invalid V " + key); return (int)value;
+    private static int integer(JsonNode node,String key,Integer fallback,int low,int high) {
+        long value = number(node,key,fallback == null ? null : fallback.longValue()); if (value < low || value > high) throw new IllegalArgumentException("Invalid V " + key); return (int)value;
     }
-    private static long number(JsonNode node,String key,long fallback) {
-        var value = node.get(key); if (value == null) return fallback;
+    private static long number(JsonNode node,String key,Long fallback) {
+        var value = node.get(key); if (value == null) { if (fallback == null) throw new IllegalArgumentException("Missing model setting: " + key); return fallback; }
         if (value.isIntegralNumber() || value.isTextual() && value.textValue().matches("[+]?\\d+")) {
             try {
                 long result = Long.parseLong(value.asText());

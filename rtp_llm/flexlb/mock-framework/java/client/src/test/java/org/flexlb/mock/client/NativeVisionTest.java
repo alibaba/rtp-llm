@@ -25,8 +25,12 @@ class NativeVisionTest {
     @TempDir Path directory;
     int port() throws Exception { try(var socket=new ServerSocket(0)) { return socket.getLocalPort(); } }
     EngineHostApi.Instance create(EngineHost host,String role) throws Exception {
-        var config=role.equals("vit")?Map.of("mock.vit.hidden.size",4,"mock.vit.min.pixels",0,"mm_cache_gpu_max_bytes",1024,"mock.compute",Map.of("forward",Map.of("expression","5")))
-            :Map.of("seq_size_per_block",2,"max_seq_len",128,"test_block_num",32,"reserve_block_ratio",0,"reuse_cache",true,"mock.compute",Map.of("forward",Map.of("expression","1")));
+        var model = directory.resolve("model"); Files.createDirectories(model);
+        new ObjectMapper().writeValue(model.resolve("config.json").toFile(), Map.of("image_token_id", 1000,
+            "text_config", Map.of("hidden_size", 4), "vision_config", Map.of("patch_size", 14,
+                "downsample_ratio", 3, "min_pixels", 0, "max_image_tokens", 1024)));
+        var config=role.equals("vit")?Map.of("checkpoint_path",model.toString(),"mm_cache_gpu_max_bytes",1024,"mock.compute",Map.of("forward",Map.of("expression","5")))
+            :Map.of("checkpoint_path",model.toString(),"seq_size_per_block",2,"max_seq_len",128,"test_block_num",32,"reserve_block_ratio",0,"reuse_cache",true,"mock.compute",Map.of("forward",Map.of("expression","1")));
         var path=directory.resolve(role+"-0");Files.createDirectories(path);
         new ObjectMapper().writeValue(path.resolve("config.json").toFile(),Map.of("id",role+"-0","component_role",role,"component",role.equals("vit")?Map.of("config",config):Map.of("engine","rtp","config",config),"environment",Map.of()));
         return host.create(new EngineHostApi.Create(role+"-0",port(),port()));
@@ -62,9 +66,9 @@ class NativeVisionTest {
                     } catch(Exception error) { response.onError(Status.INTERNAL.withCause(error).asRuntimeException()); }
                 }
             }).build().start();
-            try(var client=new NativeClient("127.0.0.1:"+master.getPort())) {
+            try(var client=new NativeClient(() -> List.of("127.0.0.1:"+master.getPort()), event -> {}, 1000)) {
                 for(long id:List.of(1L,2L,3L)) {
-                    var input=GenerateInputPB.newBuilder().setRequestId(id).addAllTokenIds(id == 3 ? List.of(10,-200) : List.of(10,-200,20))
+                    var input=GenerateInputPB.newBuilder().setRequestId(id).addAllTokenIds(id == 3 ? List.of(10,1000) : List.of(10,1000,20))
                         .addMultimodalInputs(MultimodalInputPB.newBuilder().setMultimodalType(1).setMultimodalUrl("same-image")
                             .setMmPreprocessConfig(MMPreprocessConfigPB.newBuilder().setWidth(56).setHeight(28)))
                         .setGenerateConfig(GenerateConfigPB.newBuilder().setMaxNewTokens(3).setIgnoreEos(true).setReturnIncremental(true).setCanUsePdSeparation(true)).build();
