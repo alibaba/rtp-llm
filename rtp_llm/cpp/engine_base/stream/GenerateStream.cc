@@ -998,12 +998,14 @@ bool GenerateStream::needsAsyncBookkeepingJoinForKvReservation() const {
     }
 
     const auto state = getMtpAsyncDeviceState();
-    // pending_async_bookkeeping_ is shared by normal decode and MTP.  Normal
-    // decode never publishes MtpAsyncDeviceState, so it must not be forced to
-    // wait on an MTP-only cache snapshot.  MTP publishes the state before it
-    // claims the async worker, making a non-zero epoch a stable mode marker.
+    // Normal decode can reserve from its published next length while the host
+    // commit is pending. Without device input there is no published length:
+    // join before allocation reads seqLength(), otherwise a page crossing can
+    // leave the next model input with the previous step's shorter block table.
+    // MTP publishes its state before claiming the worker, so a nonzero epoch
+    // distinguishes its page-table snapshot from normal decode.
     if (state.epoch == 0) {
-        return false;
+        return getNormalAsyncDeviceState().next_real_seq_len <= 0;
     }
     if (!hasMtpCacheSnapshot(state) || state.next_seq_len_upper_bound <= 0 || stream_cache_resource_ == nullptr) {
         return true;
