@@ -18,7 +18,6 @@ import sys
 import time
 from contextlib import suppress
 from pathlib import Path
-from urllib.parse import urlparse
 
 from filelock import FileLock, Timeout
 
@@ -254,51 +253,6 @@ def modify_bazel_wrapper_pythonpath(wrapper_path):
         return False
 
 
-REMOTE_JIT_AUTO = "auto"
-
-
-def bootstrap_remote_jit_dir():
-    # Expand $VAR references the same way the server arg parser does: this
-    # wrapper runs before the test and owns the only chance to bootstrap the
-    # directory and hand child processes a normalized absolute path. A literal
-    # "$VAR/..." is not POSIX-absolute, so without expansion every $VAR-form
-    # REMOTE_JIT_DIR is refused here and silently dropped for the server.
-    # REMOTE_JIT_DIR=auto is the CI-safe form: a plain word survives every
-    # quoting/expansion layer of the CI command assembly (a $VAR reference
-    # gets expanded on the runner, where the variable is empty, and reached
-    # bazel as "/main/jit_cache" in run 85063732), and resolves here from
-    # HIPPO_APP_WORKDIR, which nativelink injects into every remote action.
-    if os.environ.get("REMOTE_JIT_DIR", "").strip() == REMOTE_JIT_AUTO:
-        workdir = os.environ.get("HIPPO_APP_WORKDIR", "").strip()
-        if not workdir:
-            os.environ.pop("REMOTE_JIT_DIR", None)  # child servers inherit the env
-            logging.warning(
-                "[JIT] REMOTE_JIT_DIR=auto refused (HIPPO_APP_WORKDIR unset); cold start later"
-            )
-            return
-        os.environ["REMOTE_JIT_DIR"] = str(Path(workdir) / "main" / "jit_cache")
-    remote = os.path.expandvars(os.environ.get("REMOTE_JIT_DIR", "")).strip()
-    if not remote or urlparse(remote).scheme:
-        return
-    try:
-        root = Path(remote).expanduser()
-        if not root.is_absolute():
-            raise OSError(f"not an absolute path: {remote}")
-        if root.is_symlink() or root.parent.is_symlink():
-            raise OSError(f"symlinked path: {remote}")
-        try:
-            root.mkdir(parents=True)
-        except FileExistsError:
-            if not root.is_dir() or not os.access(root, os.R_OK | os.W_OK | os.X_OK):
-                raise OSError(f"unusable directory: {remote}")
-        else:
-            root.chmod(0o1777)  # protect direct children of a shared root
-        os.environ["REMOTE_JIT_DIR"] = str(root)
-    except (OSError, RuntimeError) as e:
-        os.environ.pop("REMOTE_JIT_DIR", None)  # child servers inherit the env
-        logging.warning(f"[JIT] REMOTE_JIT_DIR refused ({e}); cold start later")
-
-
 def _flashinfer_op_is_stale(op_dir: Path) -> bool:
     rules_path = op_dir / "build.ninja"
     try:
@@ -407,25 +361,26 @@ def _evict_dangling_flashinfer_ops(workspace: Path) -> None:
 
 def setup_jit_cache(cache_dir=None, packages=None):
     logging.info("[Package Setup] setup_jit_cache starting")
-    bootstrap_remote_jit_dir()
-    # The workspace must be the actual FlashInfer cache directory, never HOME:
-    # on CI workers HOME transitively contains the FUSE-mounted model library,
-    # and the eviction scan below would then crawl every .git/objects fanout
-    # (measured minutes per test action at 0% GPU).
+    # 缓存基根前置唯一确定：传入 cache_dir 直接用，未传回落 HOME。路径解析
+    # （auto 等）只在 server 参数解析（jit_group_args 的 --remote_jit_dir）
+    # 一处；本函数不做任何派生，组件目录一律简单 join。
+    base = Path(cache_dir) if cache_dir else Path.home()
+    base.mkdir(parents=True, exist_ok=True)
+
+    # workspace 必须是真实 FlashInfer 缓存目录，驱逐只扫其 cached_ops 子目录，
+    # 不会爬基根本体。
     cache_env.configure_writable_cache_env(
         "FLASHINFER_WORKSPACE_BASE",
-        Path.home() / ".cache" / "flashinfer",
+        base / "flashinfer",
         "flashinfer",
     )
     _evict_dangling_flashinfer_ops(Path(os.environ["FLASHINFER_WORKSPACE_BASE"]))
-    # The managed v2 scope workspaces (the server-side jit_cache_manager
-    # redirects flashinfer ops there) are invisible to the default-root scan
-    # above: stale ops whose build.ninja embeds per-action runfiles include
-    # paths survive there and break the next cold-start consumer that touches
-    # the same op (run 85063732: fused_moe_trtllm_sm100 shipped includes from
-    # a destroyed runfiles tree). Scan every scope's flashinfer workspace too.
-    # The tree is cross-UID shared: neighbor scopes may be unreadable or the
-    # tree itself may be deleted mid-scan, so the glob is guarded.
+    # server 侧 jit_cache_manager 会把 flashinfer op 重定向到受管 v2 scope 工
+    # 作区，上面的默认根扫描看不到它们：build.ninja 内嵌 per-action runfiles
+    # include 路径的陈旧 op 会存活并毒化下一个冷启动消费者（run 85063732：
+    # fused_moe_trtllm_sm100 从已销毁的 runfiles 树带出 include）。也扫每个
+    # scope 的 flashinfer 工作区。树是跨 UID 共享的：邻居 scope 可能不可读或
+    # 整树在扫描中被删，glob 有守卫。
     try:
         v2_scopes = sorted(
             Path("/tmp/rtp-llm/.jit_cache/v2").glob("*/flashinfer")
@@ -434,25 +389,29 @@ def setup_jit_cache(cache_dir=None, packages=None):
         v2_scopes = []
     for scope_workspace in v2_scopes:
         _evict_dangling_flashinfer_ops(scope_workspace)
+
+    # triton 自带内容寻址 key（kernel 源/constexpr/目标 arch），只需解释器 ABI
+    # tag 目录（launcher 嵌入 CPython ABI，同机 cp310/cp312 lane 并存）。
     cache_env.configure_writable_cache_env(
-        "TRITON_CACHE_DIR", Path.home() / ".triton" / "cache", "triton"
+        "TRITON_CACHE_DIR",
+        base / "triton_disk" / ("cp%d%d" % sys.version_info[:2]),
+        "triton",
     )
 
-    requested_cache_dir = cache_dir or Path.home() / ".cache"
-    cache_dir = cache_env.ensure_writable_directory(requested_cache_dir)
-    if cache_dir is None:
-        cache_dir = cache_env.ensure_writable_directory(
+    package_dir = cache_env.ensure_writable_directory(base / "python_packages")
+    if package_dir is None:
+        package_dir = cache_env.ensure_writable_directory(
             cache_env.local_jit_fallback("python_packages")
         )
-    if cache_dir is None:
+    if package_dir is None:
         raise OSError("no writable Python package cache directory")
 
-    # DeepGEMM's NVCC compiler changes into the JIT tmp directory before
-    # compiling. A relative cache path would then be resolved a second time
-    # and make the generated kernel.cu unreachable. Normalize both the default
-    # and caller-provided path before launching the actual test process.
+    # DeepGEMM 的 NVCC 编译前会 chdir 进 JIT tmp 目录：相对缓存路径会被二次
+    # 解析导致 kernel.cu 不可达。默认与传入路径都先归一化再启动测试进程。
     cache_env.configure_writable_cache_env(
-        "DG_JIT_CACHE_DIR", Path.home() / ".deep_gemm", "deep_gemm"
+        "DG_JIT_CACHE_DIR",
+        base / "deep_gemm",
+        "deep_gemm",
     )
     logging.info(
         f"[Package Setup] Set DG_JIT_CACHE_DIR: {os.environ['DG_JIT_CACHE_DIR']}"
@@ -467,7 +426,7 @@ def setup_jit_cache(cache_dir=None, packages=None):
     # Copy packages to cache with file locking
     copied_paths = []
     for package_name in packages:
-        site_packages_path = copy_package_with_lock(package_name, cache_dir)
+        site_packages_path = copy_package_with_lock(package_name, package_dir)
         if site_packages_path:
             copied_paths.append(site_packages_path)
 
