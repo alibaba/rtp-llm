@@ -461,7 +461,7 @@ public class CostBasedPrefillStrategy {
             EndpointDiscovery discovery) {
         List<Long> blockCacheKeys = balanceContext.getRequest().getBlockCacheKeys();
         return cacheAwareService.findMatchingEngines(
-                blockCacheKeys, roleType, discovery.addresses());
+                blockCacheKeys, roleType, discovery.addresses(), balanceContext.getRequest().getCacheKeyBlockSize());
     }
 
     private record CacheTokenMatch(

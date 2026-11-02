@@ -34,10 +34,19 @@ public class DefaultCacheAwareService implements CacheAwareService {
     private final KvCacheManager kvCacheManager;
     private final CacheMetricsReporter cacheMetricsReporter;
 
+    private final org.flexlb.engine.grpc.KvcmGrpcClient kvcm;
+    private final java.util.concurrent.atomic.AtomicLong nextKvcmWarning = new java.util.concurrent.atomic.AtomicLong();
+
+    public DefaultCacheAwareService(KvCacheManager manager, CacheMetricsReporter reporter) {
+        this(manager, reporter, null);
+    }
+
     @Autowired
     public DefaultCacheAwareService(
             KvCacheManager kvCacheManager,
-            CacheMetricsReporter cacheMetricsReporter) {
+            CacheMetricsReporter cacheMetricsReporter,
+            org.flexlb.engine.grpc.KvcmGrpcClient kvcm) {
+        this.kvcm = kvcm;
         this.kvCacheManager = java.util.Objects.requireNonNull(
                 kvCacheManager, "kvCacheManager");
         this.cacheMetricsReporter = java.util.Objects.requireNonNull(
@@ -45,28 +54,30 @@ public class DefaultCacheAwareService implements CacheAwareService {
     }
 
     @Override
-    public Map<String, Integer> findMatchingEngines(
-            List<Long> blockCacheKeys,
-            RoleType roleType,
-            List<String> candidateEngineIpPorts) {
-
-        long startTime = TimeUnit.NANOSECONDS.toMicros(System.nanoTime());
-
-        if (blockCacheKeys == null || blockCacheKeys.isEmpty()) {
-            return Collections.emptyMap();
+    public Map<String, Integer> findMatchingEngines(List<Long> keys, RoleType role,
+            List<String> candidates, long blockSize) {
+        if (keys == null || keys.isEmpty() || candidates.isEmpty()) return Map.of();
+        long started = TimeUnit.NANOSECONDS.toMicros(System.nanoTime());
+        if (kvcm != null && kvcm.enabled()) {
+            try {
+                var result = kvcm.findMatchingEngines(keys, blockSize, candidates);
+                reportFindLatency(role, started, FIND_METRIC_SUCCESS);
+                return result;
+            } catch (RuntimeException failure) {
+                reportFindLatency(role, started, FIND_METRIC_FAILURE);
+                long now = System.nanoTime(), next = nextKvcmWarning.get();
+                if (now >= next && nextKvcmWarning.compareAndSet(next, now + TimeUnit.SECONDS.toNanos(30)))
+                    log.warn("KVCM lookup failed; using synchronized Engine cache index: {}", failure.toString());
+            }
         }
-
-        final Map<String, Integer> resultMap;
         try {
-            resultMap = kvCacheManager.findMatchingEngines(
-                    blockCacheKeys, candidateEngineIpPorts);
-        } catch (RuntimeException e) {
-            reportFindLatency(roleType, startTime, FIND_METRIC_FAILURE);
-            log.error("Error finding matching engines for role: {}", roleType, e);
-            throw e;
+            var result = kvCacheManager.findMatchingEngines(keys, candidates);
+            reportFindLatency(role, started, FIND_METRIC_SUCCESS);
+            return result;
+        } catch (RuntimeException failure) {
+            reportFindLatency(role, started, FIND_METRIC_FAILURE);
+            throw failure;
         }
-        reportFindLatency(roleType, startTime, FIND_METRIC_SUCCESS);
-        return resultMap;
     }
 
     private void reportFindLatency(

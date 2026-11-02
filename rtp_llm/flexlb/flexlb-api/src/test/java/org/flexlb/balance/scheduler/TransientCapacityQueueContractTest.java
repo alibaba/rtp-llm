@@ -422,7 +422,7 @@ class TransientCapacityQueueContractTest {
             var exhausted = statusResponse(RoleType.PREFILL, 2L, false);
             exhausted.setAvailableKvCacheTokens(0L);
             fixture.runtime.applyStatus(fixture.prefillStatus, exhausted);
-            when(fixture.cache.findMatchingEngines(any(), any(), any()))
+            when(fixture.cache.findMatchingEngines(any(), any(), any(), org.mockito.ArgumentMatchers.anyLong()))
                     .thenReturn(Map.of(Fixture.PREFILL_ADDRESS, 9, "127.0.0.2:18080", 1));
             var context = fixture.context(994_001L, 50, 1_000L);
             context.getRequest().setCacheKeyBlockSize(100L);
@@ -483,7 +483,7 @@ class TransientCapacityQueueContractTest {
                     "127.0.0.2:18080", initializedStatus(RoleType.PREFILL, "127.0.0.2", 18080));
             var d2 = (DecodeEndpoint) publishEndpoint(fixture.runtime.endpointRegistry(), RoleType.DECODE,
                     "127.0.0.2:18081", initializedStatus(RoleType.DECODE, "127.0.0.2", 18081));
-            when(fixture.cache.findMatchingEngines(any(), any(), any()))
+            when(fixture.cache.findMatchingEngines(any(), any(), any(), org.mockito.ArgumentMatchers.anyLong()))
                     .thenReturn(Map.of(Fixture.PREFILL_ADDRESS, 9, "127.0.0.2:18080", 1));
             var bContext = fixture.context(995_002L, priorityOrdering ? 80 : 10, 1_000L);
             bContext.getRequest().setCacheKeyBlockSize(100L);
@@ -515,7 +515,7 @@ class TransientCapacityQueueContractTest {
             assertEquals(List.of(), fixture.submission.requestIds());
 
             if (recovery.equals("other_prefill")) {
-                when(fixture.cache.findMatchingEngines(any(), any(), any())).thenAnswer(invocation -> {
+                when(fixture.cache.findMatchingEngines(any(), any(), any(), org.mockito.ArgumentMatchers.anyLong())).thenAnswer(invocation -> {
                     List<Long> keys = invocation.getArgument(0);
                     return keys != null && !keys.isEmpty() && keys.getFirst() == 2L
                             ? Map.of("127.0.0.2:18080", 9) : Map.of(Fixture.PREFILL_ADDRESS, 9);
@@ -570,7 +570,7 @@ class TransientCapacityQueueContractTest {
             } else {
                 boolean cancelHead = recovery.equals("cancel_head") || recovery.equals("cache_changed");
                 if (recovery.equals("cache_changed")) {
-                    when(fixture.cache.findMatchingEngines(any(), any(), any()))
+                    when(fixture.cache.findMatchingEngines(any(), any(), any(), org.mockito.ArgumentMatchers.anyLong()))
                             .thenReturn(Map.of(Fixture.PREFILL_ADDRESS, 1, "127.0.0.2:18080", 9));
                 }
                 if (cancelHead) {
@@ -1480,7 +1480,7 @@ class TransientCapacityQueueContractTest {
 
             WorkerDirectory workers =
                     new WorkerDirectory(runtime.endpointRegistry());
-            when(cache.findMatchingEngines(any(), any(), any()))
+            when(cache.findMatchingEngines(any(), any(), any(), org.mockito.ArgumentMatchers.anyLong()))
                     .thenReturn(Map.of());
             CostBasedPrefillStrategy prefillSelector =
                     new CostBasedPrefillStrategy(

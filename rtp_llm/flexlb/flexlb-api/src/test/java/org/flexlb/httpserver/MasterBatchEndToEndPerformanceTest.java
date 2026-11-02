@@ -326,7 +326,7 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
     @Override
     protected DefaultRouter createRouter() {
         CacheAwareService cache = mock(CacheAwareService.class, withSettings().stubOnly());
-        when(cache.findMatchingEngines(any(), any(), any()))
+        when(cache.findMatchingEngines(any(), any(), any(), org.mockito.ArgumentMatchers.anyLong()))
                 .thenReturn(Map.of());
         CostBasedPrefillStrategy prefillSelector =
                 new CostBasedPrefillStrategy(

@@ -82,10 +82,36 @@ class DefaultCacheAwareServiceTest {
         IllegalStateException actual = assertThrows(
                 IllegalStateException.class,
                 () -> service.findMatchingEngines(
-                        keys, RoleType.PREFILL, candidates));
+                        keys, RoleType.PREFILL, candidates, 0L));
 
         assertSame(failure, actual);
         verify(metrics).reportFindMatchingEnginesRT(
                 eq(RoleType.PREFILL), anyLong(), eq("1"));
+    }
+
+    @Test void enabledUsesKvcmAndFailureFallsBackToExistingIndex() {
+        var cache = mock(KvCacheManager.class);
+        var kvcm = mock(org.flexlb.engine.grpc.KvcmGrpcClient.class);
+        var service = new DefaultCacheAwareService(cache, mock(CacheMetricsReporter.class), kvcm);
+        var keys = List.of(11L, 22L); var candidates = List.of("127.0.0.1:18080");
+        when(kvcm.enabled()).thenReturn(true);
+        when(kvcm.findMatchingEngines(keys, 16, candidates)).thenReturn(java.util.Map.of(candidates.getFirst(), 2));
+        org.junit.jupiter.api.Assertions.assertEquals(java.util.Map.of(candidates.getFirst(), 2),
+                service.findMatchingEngines(keys, RoleType.PREFILL, candidates, 16));
+        org.mockito.Mockito.verifyNoInteractions(cache);
+        when(kvcm.findMatchingEngines(keys, 16, candidates)).thenThrow(new IllegalStateException("unavailable"));
+        when(cache.findMatchingEngines(keys, candidates)).thenReturn(java.util.Map.of(candidates.getFirst(), 1));
+        org.junit.jupiter.api.Assertions.assertEquals(java.util.Map.of(candidates.getFirst(), 1),
+                service.findMatchingEngines(keys, RoleType.PREFILL, candidates, 16));
+    }
+
+    @Test void disabledBypassesKvcmEvenWithConfiguredTopology() {
+        var cache = mock(KvCacheManager.class);
+        var kvcm = mock(org.flexlb.engine.grpc.KvcmGrpcClient.class);
+        var service = new DefaultCacheAwareService(cache, mock(CacheMetricsReporter.class), kvcm);
+        service.findMatchingEngines(List.of(11L), RoleType.PREFILL, List.of("host:1"), 16);
+        org.mockito.Mockito.verify(kvcm).enabled();
+        org.mockito.Mockito.verifyNoMoreInteractions(kvcm);
+        verify(cache).findMatchingEngines(List.of(11L), List.of("host:1"));
     }
 }
