@@ -469,7 +469,7 @@ cc_library(
     hdrs = ["engram_transition.h"],
     textual_hdrs = glob(["engram/**/*.cuh", "engram/**/*.h"]),
     copts = cuda_default_copts_without_arch() + [
-        "-O3", "-std=c++20",
+        "-O3", "-std=c++17",
         "-U__CUDA_NO_HALF_OPERATORS__", "-U__CUDA_NO_HALF_CONVERSIONS__",
         "-U__CUDA_NO_HALF2_OPERATORS__", "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
         "-nvcc_options=expt-relaxed-constexpr", "-nvcc_options=expt-extended-lambda",

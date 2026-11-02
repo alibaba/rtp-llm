@@ -112,14 +112,7 @@ CUTLASS_DEVICE void sm100_store_cd(smem_t&                                      
                 uint32_t values[kNumElemsPerLoad];
                 DG_STATIC_ASSERT(kNumElemsPerLoad == 4 or kNumElemsPerLoad == 8 or kNumElemsPerLoad == 32,
                                  "Invalid load width");
-                using tmem_load_t = cute::conditional_t<kNumElemsPerLoad == 32,
-                                                        cute::SM100_TMEM_LOAD_32dp32b32x,
-                                                        cute::conditional_t<kNumElemsPerLoad == 8,
-                                                                            cute::SM100_TMEM_LOAD_32dp32b8x,
-                                                                            cute::SM100_TMEM_LOAD_32dp32b4x>>;
-                [&]<size_t... Is>(cute::index_sequence<Is...>) {
-                    tmem_load_t::copy(tmem_addr, values[Is]...);
-                }(cute::make_index_sequence<kNumElemsPerLoad>{});
+                ptx::tmem_load_32dp32b<kNumElemsPerLoad>(tmem_addr, values);
                 cutlass::arch::fence_view_async_tmem_load();
                 epilogue_operator.apply_values(values);
 #pragma unroll

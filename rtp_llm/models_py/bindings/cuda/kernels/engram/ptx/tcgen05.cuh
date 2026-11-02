@@ -222,6 +222,11 @@ struct SM100_MMA_F16BF16_WS_SS {
 };
 
 /// Tensor memory operations
+template<typename Loader, size_t... Is>
+CUTLASS_DEVICE void tmem_load_impl(const uint32_t tmem_addr, uint32_t* values, cute::index_sequence<Is...>) {
+    Loader::copy(tmem_addr, values[Is]...);
+}
+
 template<uint32_t kNumValues>
 CUTLASS_DEVICE void tmem_load_32dp32b(const uint32_t tmem_addr, uint32_t* values) {
     DG_STATIC_ASSERT(kNumValues == 4 or kNumValues == 8 or kNumValues == 16 or kNumValues == 32 or kNumValues == 64
@@ -240,9 +245,7 @@ CUTLASS_DEVICE void tmem_load_32dp32b(const uint32_t tmem_addr, uint32_t* values
                                                     cute::conditional_t<kNumValues == 64,
                                                                         cute::SM100_TMEM_LOAD_32dp32b64x,
                                                                         cute::SM100_TMEM_LOAD_32dp32b128x>>>>>;
-    [&]<size_t... Is>(cute::index_sequence<Is...>) {
-        Loader::copy(tmem_addr, values[Is]...);
-    }(cute::make_index_sequence<kNumValues>{});
+    tmem_load_impl<Loader>(tmem_addr, values, cute::make_index_sequence<kNumValues>{});
 }
 
 CUTLASS_DEVICE void umma_arrive_no_elect(cutlass::arch::ClusterTransactionBarrier& barrier) {
