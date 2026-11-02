@@ -22,6 +22,11 @@ DEFAULT_CHUNK_BYTES = 64 << 20
 _KEEPERS = {}
 
 
+def _check_deadline(deadline):
+    if deadline is not None and time.monotonic() >= deadline:
+        raise ValueError("LOCAL_SHARD_PUBLISH_TIMEOUT")
+
+
 def _placement_map(raw, layers, default, label):
     """Complete an explicit per-layer map; partial placement fails loudly."""
     if raw is None:
@@ -51,7 +56,7 @@ def shard_layout(tensor, weight_shape, shard, shards, granularity):
 
 
 def load_rows(owner, root, tensor, snapshot, start, end, columns,
-              *, discard_file_cache=False, chunk_bytes=DEFAULT_CHUNK_BYTES):
+              *, discard_file_cache=False, chunk_bytes=DEFAULT_CHUNK_BYTES, deadline=None):
     """Read exact FP8/scale bytes without creating full-file tensor mappings."""
     if not 0 <= start < end <= tensor.shape[0] or columns != tensor.shape[1]:
         raise ValueError("invalid shard row range")
@@ -62,6 +67,7 @@ def load_rows(owner, root, tensor, snapshot, start, end, columns,
         _cache_page_size, _discard_consumed_pages, _open_tensor_source, _read_exact,
     )
 
+    _check_deadline(deadline)
     page_size = _cache_page_size(discard_file_cache)
     rows_per_chunk = chunk_bytes // columns
     digest = hashlib.sha256()
@@ -74,10 +80,13 @@ def load_rows(owner, root, tensor, snapshot, start, end, columns,
         source.seek(consumed)
         discarded = consumed
         for row in range(start, end, rows_per_chunk):
+            _check_deadline(deadline)
             length = min(rows_per_chunk, end - row) * columns
             payload = _read_exact(source, length)
+            _check_deadline(deadline)
             digest.update(payload)
             owner.load(payload, offset)
+            _check_deadline(deadline)
             offset += length
             consumed += length
             del payload
@@ -85,6 +94,7 @@ def load_rows(owner, root, tensor, snapshot, start, end, columns,
                 discarded = _discard_consumed_pages(source, discarded, consumed, page_size)
         if page_size is not None:
             _discard_consumed_pages(source, discarded, consumed, page_size)
+    _check_deadline(deadline)
     if offset != (end - start) * columns:
         raise RuntimeError("shard row range has an unexpected byte count")
     return "sha256:" + digest.hexdigest()
@@ -104,9 +114,11 @@ def publish_shard(checkpoint, model_revision, host_id, generation, shard, shards
                   release_input_page_cache=False, deadline=None):
     """Allocate one shard here, fill it from ``checkpoint`` and describe it.
 
-    ``deadline`` (monotonic seconds) bounds the load loop so a stalled host
-    fails locally instead of only timing out its cohort peers.
+    ``deadline`` is checked before/after every I/O and load chunk. Blocking
+    OS/driver calls cannot be interrupted here; a process watchdog is still
+    needed for a genuinely stuck syscall. No extra work enters online lookup.
     """
+    _check_deadline(deadline)
     import torch
 
     from rtp_llm.models_py.modules.dsv41.engram import EngramLayout, NgramHashState
@@ -144,6 +156,15 @@ def publish_shard(checkpoint, model_revision, host_id, generation, shard, shards
         allocation_granularity=granularity, budget_bytes=HARD_MAX_TOTAL_ALLOCATION_BYTES,
         max_allocation_bytes=HARD_MAX_ALLOCATION_BYTES)
     snapshots = {snapshot.relative_path: snapshot for snapshot in plan.files}
+    # Validate the entire local padded footprint before the first allocation.
+    local_sizes = [shard_layout(t, next(x.shape for x in layer.tensors
+                    if x.name.endswith('.weight')), shard, shards, granularity)[2]
+                   for layer in plan.layers for t in layer.tensors]
+    if any(size > min(max_allocation_bytes, native.max_allocation_bytes) for size in local_sizes):
+        raise ValueError("local shard exceeds allocation limit")
+    if sum(local_sizes) > budget_bytes:
+        raise ValueError("local shards exceed host budget")
+    _check_deadline(deadline)
     page_size = _cache_page_size(release_input_page_cache)
     if page_size is not None:
         for snapshot in plan.files:
@@ -156,8 +177,7 @@ def publish_shard(checkpoint, model_revision, host_id, generation, shard, shards
             layer_numa_value = numas[layer_plan.layer_id]
             weight_shape = next(t.shape for t in layer_plan.tensors if t.name.endswith(".weight"))
             for tensor in layer_plan.tensors:
-                if deadline is not None and time.monotonic() > deadline:
-                    raise ValueError("LOCAL_SHARD_PUBLISH_TIMEOUT")
+                _check_deadline(deadline)
                 rows, columns = tensor.shape
                 start, end, allocation_bytes = shard_layout(
                     tensor, weight_shape, shard, shards, granularity)
@@ -172,20 +192,24 @@ def publish_shard(checkpoint, model_revision, host_id, generation, shard, shards
                 digest = load_rows(owner, checkpoint, tensor, snapshots[tensor.relative_path],
                                    start, end, columns,
                                    discard_file_cache=release_input_page_cache,
-                                   chunk_bytes=load_chunk)
+                                   chunk_bytes=load_chunk, deadline=deadline)
                 tensors[tensor.name] = dict(
                     shape=list(tensor.shape), allocation_id=str(uuid4()),
                     handle=base64.b64encode(owner.export_handle()).decode("ascii"),
                     row_begin=start, row_end=end, logical_bytes=(end - start) * columns,
                     allocation_bytes=allocation_bytes, allocation_granularity=granularity,
                     sha256=digest)
-    except BaseException:
+    except BaseException as original:
         # A partial shard is useless: hand the memory back before unwinding.
+        failed = []
         for owner in reversed(owners):
             try:
                 owner.close()
-            except Exception:
-                pass
+            except BaseException:
+                failed.append(owner)
+        if failed:
+            _KEEPERS.setdefault(generation, []).extend(reversed(failed))
+            raise RuntimeError("LOCAL_SHARD_CLEANUP_INCOMPLETE") from original
         raise
     document = dict(schema_version=2, shard=shard, shards=shards, generation=generation,
                     model_revision=model_revision, hash_abi=hash_abi, host_id=host_id,
@@ -195,12 +219,19 @@ def publish_shard(checkpoint, model_revision, host_id, generation, shard, shards
 
 
 def release(generation):
-    """Drop the allocations of one generation (process shutdown or restart)."""
+    """Test-only retirement AFTER all local/remote consumers drain and exit.
+
+    Never use as an in-process serving restart: remote graphs may hold pointers.
+    Failed native closes retain their references so cleanup can be retried.
+    """
     owners = _KEEPERS.pop(generation, [])
-    failures = []
+    failures, retained = [], []
     for owner in reversed(owners):
         try:
             owner.close()
         except Exception as error:  # native close is best effort at exit
             failures.append(error)
+            retained.append(owner)
+    if retained:
+        _KEEPERS[generation] = list(reversed(retained))
     return failures
