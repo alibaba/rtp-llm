@@ -2403,6 +2403,86 @@ MtpBatchStreamProcessor::prepareDSparkPackedTargetVerifyModelInput(const DSparkR
     return result;
 }
 
+MtpBatchStreamProcessor::DSparkPackedTargetLayout
+MtpBatchStreamProcessor::prepareDSparkBoundedTargetVerifyModelInput(const DSparkRoundState&     round_state,
+                                                                    GptModelInputs&             model_input,
+                                                                    const torch::Tensor&        proposals,
+                                                                    const torch::Tensor&        confidence_rates,
+                                                                    const std::vector<int64_t>& stable_order,
+                                                                    int64_t                     total_draft_budget,
+                                                                    TensorHolder&               host_holder,
+                                                                    torch::Tensor&              valid_draft_lengths,
+                                                                    torch::Tensor*              owned_proposals) {
+    RTP_LLM_PROFILE_SCOPE("mtp.prepare_dspark_bounded_target");
+    RTP_LLM_CHECK_WITH_INFO(round_state.anchors.defined() && round_state.anchors.numel() > 0,
+                            "dspark bounded verify: a nonempty round is required");
+    const int64_t batch_size = round_state.anchors.numel();
+    RTP_LLM_CHECK_WITH_INFO(confidence_rates.defined() && confidence_rates.is_cuda()
+                                && confidence_rates.scalar_type() == torch::kFloat32 && confidence_rates.is_contiguous()
+                                && confidence_rates.dim() == 2 && confidence_rates.size(0) == batch_size
+                                && confidence_rates.size(1) == static_cast<int64_t>(propose_step_),
+                            "dspark bounded verify: confidence rates must be CUDA FP32 [batch, gamma]");
+    RTP_LLM_CHECK_WITH_INFO(total_draft_budget >= 0 && total_draft_budget <= confidence_rates.numel(),
+                            "dspark bounded verify: draft budget is outside [0, batch * gamma]");
+    RTP_LLM_CHECK_WITH_INFO(stable_order.size() == static_cast<size_t>(batch_size),
+                            "dspark bounded verify: stable identity order must contain every row");
+    std::vector<bool> seen(static_cast<size_t>(batch_size), false);
+    for (const int64_t row : stable_order) {
+        RTP_LLM_CHECK_WITH_INFO(row >= 0 && row < batch_size && !seen[row],
+                                "dspark bounded verify: stable identity order must be a row permutation");
+        seen[row] = true;
+    }
+
+#if USING_CUDA
+    // The target consumes contiguous prefixes. Strided inputs retain the
+    // existing conversion path instead of introducing another copy launch.
+    if (total_draft_budget < confidence_rates.numel() && round_state.committed_ends.defined()
+        && round_state.committed_ends.is_contiguous()) {
+        auto fused = tryMtpDSparkBudgetedVerifyPrepare(confidence_rates,
+                                                       stable_order,
+                                                       round_state.anchors,
+                                                       proposals,
+                                                       round_state.engram_windows,
+                                                       round_state.position_bases,
+                                                       round_state.committed_ends,
+                                                       total_draft_budget,
+                                                       at::cuda::getCurrentCUDAStream().stream(),
+                                                       owned_proposals != nullptr);
+        if (fused.packed.tokens.defined()) {
+            DSparkPackedTargetLayout result;
+            result.packed_to_dense              = std::move(fused.packed_to_dense);
+            result.dense_tokens                 = std::move(fused.dense_tokens);
+            result.dense_position_ids           = std::move(fused.dense_positions);
+            valid_draft_lengths                 = std::move(fused.valid_draft_lengths);
+            model_input.combo_tokens            = std::move(fused.packed.tokens);
+            model_input.input_lengths           = std::move(fused.packed.input_lengths);
+            model_input.lm_output_indexes       = std::move(fused.packed.lm_indexes);
+            model_input.combo_position_ids      = std::move(fused.packed.positions);
+            model_input.sequence_lengths        = emptyInt32OnCuda({0});
+            model_input.prefix_lengths          = round_state.committed_ends;
+            model_input.sequence_lengths_plus_1 = std::move(fused.sequence_lengths_plus_1);
+            model_input.last_hidden_states      = torch::Tensor();
+            model_input.is_target_verify        = true;
+            if (round_state.engram_windows.defined()) {
+                model_input.engram_token_windows = std::move(fused.packed.history);
+            }
+            if (owned_proposals) {
+                *owned_proposals = std::move(fused.packed.proposals);
+            }
+            return result;
+        }
+    }
+#endif
+
+    auto order_cpu = torch::tensor(stable_order, torch::kInt64).pin_memory();
+    host_holder.hold_host(order_cpu);
+    auto order = order_cpu.to(confidence_rates.device(), /*non_blocking=*/true);
+    valid_draft_lengths =
+        speculative::SpeculativeSampler::buildValidDraftLengths(confidence_rates, order, total_draft_budget);
+    return prepareDSparkPackedTargetVerifyModelInput(
+        round_state, model_input, proposals, valid_draft_lengths, total_draft_budget, host_holder, owned_proposals);
+}
+
 void MtpBatchStreamProcessor::expandDSparkTargetVerifyPositionIdsFromProposal(GptModelInputs& model_input) const {
     if (!model_input.combo_position_ids.defined() || model_input.combo_position_ids.numel() == 0) {
         return;

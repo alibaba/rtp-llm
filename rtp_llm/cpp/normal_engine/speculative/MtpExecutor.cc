@@ -2146,7 +2146,19 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         {
             RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(prepare_dspark_target_and_tp_sync)");
             if (isTpRank0()) {
-                if (dspark_packed_verify_ && draft_sampler_output.valid_draft_lengths.defined()) {
+                if (dspark_packed_verify_ && dspark_verify_plan.draft_budget >= 0
+                    && !draft_sampler_output.valid_draft_lengths.defined()) {
+                    packed_target_layout = batch_stream_processor_->prepareDSparkBoundedTargetVerifyModelInput(
+                        dspark_round_state,
+                        model_input,
+                        draft_sampler_output.token_ids,
+                        draft_sampler_output.confidence_rates,
+                        dspark_verify_plan.stable_order,
+                        dspark_verify_plan.draft_budget,
+                        buffer_holder_,
+                        draft_sampler_output.valid_draft_lengths,
+                        &draft_sampler_output.token_ids);
+                } else if (dspark_packed_verify_ && draft_sampler_output.valid_draft_lengths.defined()) {
                     packed_target_layout = batch_stream_processor_->prepareDSparkPackedTargetVerifyModelInput(
                         dspark_round_state,
                         model_input,
@@ -3247,7 +3259,10 @@ MtpExecutor::runDSparkProposal(GptModelInputs&                                  
             draft_sampler_output.valid_draft_lengths = torch::full({proposal_input.input_lengths.size(0)},
                                                                    fake_draft_budget,
                                                                    round_state.anchors.options().dtype(torch::kInt32));
-        } else if (verify_plan.draft_budget >= 0) {
+        } else if (verify_plan.draft_budget >= 0 && !dspark_packed_verify_) {
+            // Packed verification plans prefixes together with its final
+            // inputs in prepareDSparkBoundedTargetVerifyModelInput. The host
+            // budget and identity order were already frozen before sampling.
             auto order_cpu = torch::tensor(verify_plan.stable_order, torch::kInt64).pin_memory();
             buffer_holder_.hold_host(order_cpu);
             auto order = order_cpu.to(draft_sampler_output.confidence_rates.device(), /*non_blocking=*/true);

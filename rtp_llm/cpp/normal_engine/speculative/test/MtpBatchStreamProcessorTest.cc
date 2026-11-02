@@ -1,4 +1,5 @@
 #include <atomic>
+#include <algorithm>
 #include <condition_variable>
 #include <mutex>
 #include <stdexcept>
@@ -14,6 +15,9 @@
 #include "kmonitor/client/metric/GaugeMetric.h"
 
 #if USING_CUDA
+#include <ATen/cuda/CUDAGraph.h>
+#include <ATen/cuda/CUDAContext.h>
+#include <c10/cuda/CUDAGuard.h>
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
 #endif
 
@@ -2489,6 +2493,292 @@ TEST_F(MtpBatchStreamProcessorTest, testDSparkPackedAuxFeaturesKeepRequestTokenL
     }
     EXPECT_EQ(expected_packed_values, toVec<float>(retained_features));
 }
+
+#if USING_CUDA
+void expectDSparkBoundedVerifyInputsEqual(const GptModelInputs&                                    actual,
+                                          const MtpBatchStreamProcessor::DSparkPackedTargetLayout& actual_layout,
+                                          const GptModelInputs&                                    expected,
+                                          const MtpBatchStreamProcessor::DSparkPackedTargetLayout& expected_layout) {
+    auto same = [](const torch::Tensor& a, const torch::Tensor& b, const char* field) {
+        SCOPED_TRACE(field);
+        ASSERT_EQ(a.defined(), b.defined());
+        if (a.defined() && b.defined()) {
+            EXPECT_EQ(a.scalar_type(), b.scalar_type());
+            EXPECT_EQ(a.sizes().vec(), b.sizes().vec());
+            EXPECT_TRUE(torch::equal(a, b));
+        }
+    };
+    same(actual.combo_tokens, expected.combo_tokens, "combo_tokens");
+    same(actual.combo_position_ids, expected.combo_position_ids, "combo_position_ids");
+    same(actual.input_lengths, expected.input_lengths, "input_lengths");
+    same(actual.prefix_lengths, expected.prefix_lengths, "prefix_lengths");
+    same(actual.sequence_lengths, expected.sequence_lengths, "sequence_lengths");
+    same(actual.sequence_lengths_plus_1, expected.sequence_lengths_plus_1, "sequence_lengths_plus_1");
+    same(actual.lm_output_indexes, expected.lm_output_indexes, "lm_output_indexes");
+    same(actual.engram_token_windows, expected.engram_token_windows, "engram_token_windows");
+    same(actual.kv_cache_block_id, expected.kv_cache_block_id, "kv_cache_block_id");
+    same(actual_layout.dense_tokens, expected_layout.dense_tokens, "dense_tokens");
+    same(actual_layout.dense_position_ids, expected_layout.dense_position_ids, "dense_position_ids");
+    same(actual_layout.packed_to_dense, expected_layout.packed_to_dense, "packed_to_dense");
+    EXPECT_EQ(actual.is_target_verify, expected.is_target_verify);
+}
+
+TEST_F(MtpBatchStreamProcessorTest, testDSparkBoundedVerifyMatchesPlannerAndPackedPreparation) {
+    const c10::cuda::CUDAGuard guard(0);
+    const auto                 ints = torch::TensorOptions().device(torch::kCUDA).dtype(torch::kInt32);
+    for (int64_t gamma : {5, 9}) {
+        ModelConfig                 model_config;
+        PDSepConfig                 pd_sep_config;
+        ProfilingDebugLoggingConfig profiling_config;
+        CacheConfig                 cache_config = makeProcessorCacheConfig();
+        SpeculativeExecutionConfig  sp_config;
+        sp_config.type              = SP_TYPE_DSPARK;
+        sp_config.gen_num_per_cycle = gamma;
+        MtpBatchStreamProcessor processor(
+            model_config, pd_sep_config, profiling_config, cache_config, sp_config, false);
+        for (int64_t batch : {1, 2, 48}) {
+            for (int64_t factor : {1, 3}) {
+                for (bool has_engram : {false, true}) {
+                    SCOPED_TRACE(::testing::Message() << "gamma=" << gamma << " batch=" << batch << " factor=" << factor
+                                                      << " engram=" << has_engram);
+                    MtpBatchStreamProcessor::DSparkRoundState state;
+                    state.anchors        = torch::arange(batch, ints) * 100 + 10;
+                    state.committed_ends = torch::arange(batch, ints) * 7 + 15;
+                    state.position_bases = torch::arange(batch * factor, ints).reshape({batch, factor}) * 11;
+                    if (has_engram) {
+                        state.engram_windows = state.anchors.unsqueeze(1) - torch::arange(4, ints).unsqueeze(0);
+                    }
+                    auto proposals =
+                        torch::arange(batch * gamma * 2, ints).reshape({batch, gamma * 2}).slice(1, 0, gamma * 2, 2)
+                        + 1000;
+                    // Equal scores force stable identity tie-breaking, including
+                    // partial prefixes. B1 and gamma9 exercise the old fallback.
+                    auto                 rates = torch::ones({batch, gamma}, ints.dtype(torch::kFloat32));
+                    std::vector<int64_t> order;
+                    for (int64_t row = batch - 1; row >= 0; --row) {
+                        order.push_back(row);
+                    }
+                    const auto order_d = torch::tensor(order, ints.dtype(torch::kInt64));
+                    for (int64_t budget : {int64_t(0), 3 * batch, gamma * batch}) {
+                        SCOPED_TRACE(budget);
+                        TensorHolder holder;
+                        auto         expected_lengths =
+                            speculative::SpeculativeSampler::buildValidDraftLengths(rates, order_d, budget);
+                        GptModelInputs expected, actual;
+                        expected.kv_cache_block_id = torch::arange(batch * 2, ints).reshape({1, batch, 2});
+                        actual.kv_cache_block_id   = expected.kv_cache_block_id;
+                        auto expected_owned        = proposals;
+                        auto expected_layout       = processor.prepareDSparkPackedTargetVerifyModelInput(
+                            state, expected, proposals, expected_lengths, budget, holder, &expected_owned);
+                        auto          graph_proposals = proposals.clone();
+                        torch::Tensor actual_lengths, actual_owned;
+                        auto          actual_layout = processor.prepareDSparkBoundedTargetVerifyModelInput(state,
+                                                                                                  actual,
+                                                                                                  graph_proposals,
+                                                                                                  rates,
+                                                                                                  order,
+                                                                                                  budget,
+                                                                                                  holder,
+                                                                                                  actual_lengths,
+                                                                                                  &actual_owned);
+                        EXPECT_TRUE(torch::equal(actual_lengths, expected_lengths));
+                        EXPECT_EQ(actual_lengths.sum().item<int64_t>(), budget);
+                        expectDSparkBoundedVerifyInputsEqual(actual, actual_layout, expected, expected_layout);
+                        EXPECT_TRUE(torch::equal(actual_owned, expected_owned));
+                        EXPECT_NE(actual_owned.data_ptr(), graph_proposals.data_ptr());
+                        graph_proposals.fill_(-1);
+                        EXPECT_TRUE(torch::equal(actual_owned, proposals));
+                        if (gamma == 5 && batch == 48 && factor == 3 && has_engram && budget == 3 * batch) {
+                            // The legacy path materializes a contiguous prefix
+                            // even when committed ends are a strided GPU view.
+                            auto strided_state = state;
+                            strided_state.committed_ends =
+                                torch::stack({state.committed_ends, state.committed_ends}, 1).select(1, 0);
+                            ASSERT_FALSE(strided_state.committed_ends.is_contiguous());
+                            GptModelInputs expected_strided, actual_strided;
+                            auto           expected_strided_owned = proposals;
+                            auto           expected_strided_layout =
+                                processor.prepareDSparkPackedTargetVerifyModelInput(strided_state,
+                                                                                    expected_strided,
+                                                                                    proposals,
+                                                                                    expected_lengths,
+                                                                                    budget,
+                                                                                    holder,
+                                                                                    &expected_strided_owned);
+                            torch::Tensor strided_lengths, strided_owned;
+                            auto strided_layout = processor.prepareDSparkBoundedTargetVerifyModelInput(strided_state,
+                                                                                                       actual_strided,
+                                                                                                       proposals,
+                                                                                                       rates,
+                                                                                                       order,
+                                                                                                       budget,
+                                                                                                       holder,
+                                                                                                       strided_lengths,
+                                                                                                       &strided_owned);
+                            EXPECT_TRUE(actual_strided.prefix_lengths.is_contiguous());
+                            EXPECT_TRUE(torch::equal(strided_lengths, expected_lengths));
+                            EXPECT_EQ(strided_lengths.sum().item<int64_t>(), budget);
+                            EXPECT_TRUE(torch::equal(strided_owned, expected_strided_owned));
+                            EXPECT_NE(strided_owned.data_ptr(), proposals.data_ptr());
+                            expectDSparkBoundedVerifyInputsEqual(
+                                actual_strided, strided_layout, expected_strided, expected_strided_layout);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+TEST_F(MtpBatchStreamProcessorTest, testDSparkBoundedVerifyRetainsRoundsAcrossReorderAndShrink) {
+    const c10::cuda::CUDAGuard  guard(0);
+    ModelConfig                 model_config;
+    PDSepConfig                 pd_sep_config;
+    ProfilingDebugLoggingConfig profiling_config;
+    CacheConfig                 cache_config = makeProcessorCacheConfig();
+    SpeculativeExecutionConfig  sp_config;
+    sp_config.type              = SP_TYPE_DSPARK;
+    sp_config.gen_num_per_cycle = 5;
+    MtpBatchStreamProcessor processor(model_config, pd_sep_config, profiling_config, cache_config, sp_config, false);
+    const auto              ints  = torch::TensorOptions().device(torch::kCUDA).dtype(torch::kInt32);
+    constexpr int64_t       batch = 48, gamma = 5;
+    MtpBatchStreamProcessor::DSparkRoundState initial;
+    initial.anchors                = torch::arange(batch, ints) * 100 + 10;
+    initial.committed_ends         = torch::arange(batch, ints) * 7 + 15;
+    initial.position_bases         = torch::arange(batch * 3, ints).reshape({batch, 3}) * 11;
+    initial.engram_windows         = initial.anchors.unsqueeze(1) - torch::arange(4, ints).unsqueeze(0);
+    auto                 proposals = torch::arange(batch * gamma, ints).reshape({batch, gamma}) + 1000;
+    auto                 rates     = torch::ones({batch, gamma}, ints.dtype(torch::kFloat32));
+    std::vector<int64_t> order;
+    for (int64_t row = 0; row < batch; ++row) {
+        order.push_back(row);
+    }
+    TensorHolder   holder;
+    GptModelInputs retained;
+    torch::Tensor  retained_lengths, retained_owned;
+    const int64_t  budget          = 3 * batch + 1;
+    auto           retained_layout = processor.prepareDSparkBoundedTargetVerifyModelInput(
+        initial, retained, proposals, rates, order, budget, holder, retained_lengths, &retained_owned);
+    auto token_snapshot    = retained.combo_tokens.clone();
+    auto position_snapshot = retained.combo_position_ids.clone();
+    auto history_snapshot  = retained.engram_token_windows.clone();
+    auto dense_snapshot    = retained_layout.dense_tokens.clone();
+    auto owned_snapshot    = retained_owned.clone();
+    auto length_snapshot   = retained_lengths.clone();
+
+    // Reversing the batch changes physical rows, but equal-score decisions
+    // remain attached to the same stable identities.
+    auto permutation             = torch::arange(batch - 1, -1, -1, ints.dtype(torch::kInt64));
+    auto reverse_state           = initial;
+    reverse_state.anchors        = initial.anchors.index_select(0, permutation);
+    reverse_state.committed_ends = initial.committed_ends.index_select(0, permutation);
+    reverse_state.position_bases = initial.position_bases.index_select(0, permutation);
+    reverse_state.engram_windows = initial.engram_windows.index_select(0, permutation);
+    std::reverse(order.begin(), order.end());
+    GptModelInputs reordered;
+    torch::Tensor  reordered_lengths;
+    processor.prepareDSparkBoundedTargetVerifyModelInput(reverse_state,
+                                                         reordered,
+                                                         proposals.index_select(0, permutation),
+                                                         rates,
+                                                         order,
+                                                         budget,
+                                                         holder,
+                                                         reordered_lengths);
+    EXPECT_TRUE(torch::equal(reordered_lengths, retained_lengths.index_select(0, permutation)));
+
+    // Shrink/reorder and mutate the original borrowed proposal source, as a
+    // later sampler graph replay would. Earlier round outputs stay owned.
+    proposals.fill_(-2);
+    for (int64_t smaller_batch : {7, 2, 1}) {
+        auto state           = reverse_state;
+        state.anchors        = reverse_state.anchors.narrow(0, 0, smaller_batch);
+        state.committed_ends = reverse_state.committed_ends.narrow(0, 0, smaller_batch);
+        state.position_bases = reverse_state.position_bases.narrow(0, 0, smaller_batch);
+        state.engram_windows = reverse_state.engram_windows.narrow(0, 0, smaller_batch);
+        std::vector<int64_t> smaller_order;
+        for (int64_t row = smaller_batch - 1; row >= 0; --row) {
+            smaller_order.push_back(row);
+        }
+        GptModelInputs smaller;
+        torch::Tensor  lengths;
+        processor.prepareDSparkBoundedTargetVerifyModelInput(state,
+                                                             smaller,
+                                                             proposals.narrow(0, 0, smaller_batch),
+                                                             rates.narrow(0, 0, smaller_batch),
+                                                             smaller_order,
+                                                             3 * smaller_batch,
+                                                             holder,
+                                                             lengths);
+        EXPECT_EQ(lengths.sum().item<int64_t>(), 3 * smaller_batch);
+    }
+    EXPECT_TRUE(torch::equal(retained.combo_tokens, token_snapshot));
+    EXPECT_TRUE(torch::equal(retained.combo_position_ids, position_snapshot));
+    EXPECT_TRUE(torch::equal(retained.engram_token_windows, history_snapshot));
+    EXPECT_TRUE(torch::equal(retained_layout.dense_tokens, dense_snapshot));
+    EXPECT_TRUE(torch::equal(retained_owned, owned_snapshot));
+    EXPECT_TRUE(torch::equal(retained_lengths, length_snapshot));
+}
+
+TEST_F(MtpBatchStreamProcessorTest, testDSparkBoundedVerifyCaptureReplaysCurrentDeviceInputs) {
+    const c10::cuda::CUDAGuard       guard(0);
+    const auto                       stream = at::cuda::getStreamFromPool();
+    const c10::cuda::CUDAStreamGuard stream_guard(stream);
+    ModelConfig                      model_config;
+    PDSepConfig                      pd_sep_config;
+    ProfilingDebugLoggingConfig      profiling_config;
+    CacheConfig                      cache_config = makeProcessorCacheConfig();
+    SpeculativeExecutionConfig       sp_config;
+    sp_config.type              = SP_TYPE_DSPARK;
+    sp_config.gen_num_per_cycle = 5;
+    MtpBatchStreamProcessor processor(model_config, pd_sep_config, profiling_config, cache_config, sp_config, false);
+    const auto              ints  = torch::TensorOptions().device(torch::kCUDA).dtype(torch::kInt32);
+    constexpr int64_t       batch = 48, gamma = 5, budget = 144;
+    MtpBatchStreamProcessor::DSparkRoundState state;
+    state.anchors                  = torch::arange(batch, ints) * 100 + 10;
+    state.committed_ends           = torch::arange(batch, ints) * 7 + 15;
+    state.position_bases           = torch::arange(batch * 3, ints).reshape({batch, 3}) * 11;
+    state.engram_windows           = state.anchors.unsqueeze(1) - torch::arange(4, ints).unsqueeze(0);
+    auto                 proposals = torch::arange(batch * gamma, ints).reshape({batch, gamma}) + 1000;
+    auto                 rates     = torch::ones({batch, gamma}, ints.dtype(torch::kFloat32));
+    std::vector<int64_t> order;
+    for (int64_t row = batch - 1; row >= 0; --row) {
+        order.push_back(row);
+    }
+    const auto     order_d = torch::tensor(order, ints.dtype(torch::kInt64));
+    TensorHolder   holder;
+    GptModelInputs captured;
+    torch::Tensor  captured_lengths, captured_owned;
+    auto           run = [&]() {
+        return processor.prepareDSparkBoundedTargetVerifyModelInput(
+            state, captured, proposals, rates, order, budget, holder, captured_lengths, &captured_owned);
+    };
+    run();
+    stream.synchronize();
+    at::cuda::CUDAGraph graph;
+    graph.capture_begin();
+    auto captured_layout = run();
+    graph.capture_end();
+    for (int round = 0; round < 3; ++round) {
+        state.anchors.add_(1);
+        state.committed_ends.add_(3);
+        state.position_bases.add_(2);
+        state.engram_windows.add_(1);
+        proposals.add_(10);
+        rates.fill_(1.0f);
+        rates.narrow(0, round * 7, 7).zero_();
+        graph.replay();
+        auto expected_lengths = speculative::SpeculativeSampler::buildValidDraftLengths(rates, order_d, budget);
+        GptModelInputs expected;
+        auto           expected_owned  = proposals;
+        auto           expected_layout = processor.prepareDSparkPackedTargetVerifyModelInput(
+            state, expected, proposals, expected_lengths, budget, holder, &expected_owned);
+        EXPECT_TRUE(torch::equal(captured_lengths, expected_lengths));
+        EXPECT_TRUE(torch::equal(captured_owned, expected_owned));
+        expectDSparkBoundedVerifyInputsEqual(captured, captured_layout, expected, expected_layout);
+    }
+}
+#endif
 
 TEST_F(MtpBatchStreamProcessorTest, testDSparkPackedVerifyRejectsInvalidMetadata) {
     ModelConfig                 model_config;

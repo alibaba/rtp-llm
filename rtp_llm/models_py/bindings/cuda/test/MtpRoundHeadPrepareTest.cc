@@ -3,8 +3,19 @@
 #include <c10/cuda/CUDAGuard.h>
 #include <c10/cuda/CUDAStream.h>
 #include <torch/torch.h>
+#include <ATen/cuda/CUDAGraph.h>
+#include <ATen/record_function.h>
+#include <torch/csrc/autograd/profiler_kineto.h>
+#include <torch/csrc/profiler/api.h>
 
+#include <algorithm>
+#include <chrono>
+#include <cmath>
+#include <cstdlib>
+#include <limits>
 #include <memory>
+#include <numeric>
+#include <iostream>
 #include <vector>
 
 #include "rtp_llm/models_py/bindings/cuda/kernels/mtp_target_verify_prepare.h"
@@ -576,6 +587,531 @@ TEST_F(MtpRoundHeadPrepareTest, RejectsInvalidHostMetadataBeforeLaunching) {
     rows[0].token_count  = 6;
     rows[0].token_stride = -1;
     EXPECT_ANY_THROW(invokeMtpDSparkRoundHeadPrepare(rows, anchors, ends, combo, 6, 0, stream_));
+}
+
+// Compatibility oracle: the unchanged dense preparation plus the original
+// Torch planner and cumsum/searchsorted/gather packing chain. It deliberately
+// does not reuse the new kernel's sort keys or prefix-product implementation.
+MtpDSparkBudgetedVerifyInputs oldBudgetedVerify(const torch::Tensor&        rates,
+                                                const std::vector<int64_t>& stable_order,
+                                                const torch::Tensor&        anchors,
+                                                const torch::Tensor&        proposals,
+                                                const torch::Tensor&        history,
+                                                const torch::Tensor&        bases,
+                                                const torch::Tensor&        prefixes,
+                                                int64_t                     budget,
+                                                cudaStream_t                stream,
+                                                bool                        copy_proposals = true,
+                                                const torch::Tensor&        prebuilt_order = {}) {
+    const auto                    batch = rates.size(0), gamma = rates.size(1), width = gamma + 1;
+    const auto                    i32 = anchors.options(), i64 = i32.dtype(torch::kInt64);
+    MtpDSparkBudgetedVerifyInputs out;
+    if (budget == 0) {
+        out.valid_draft_lengths = torch::zeros({batch}, i32);
+    } else {
+        auto order = prebuilt_order;
+        if (!order.defined()) {
+            auto order_cpu = torch::tensor(stable_order, torch::kInt64).pin_memory();
+            order          = order_cpu.to(rates.device(), true);
+        }
+        auto valid          = torch::isfinite(rates).logical_and(rates.ge(0.0)).logical_and(rates.le(1.0));
+        auto clean          = torch::where(valid, rates, torch::zeros_like(rates));
+        auto scores         = std::get<0>(clean.cumprod(1).cummin(1)).index_select(0, order);
+        auto selected_order = torch::argsort(scores.reshape({-1}), true, 0, true);
+        auto selected       = torch::zeros({rates.numel()}, i32);
+        selected.index_fill_(0, selected_order.narrow(0, 0, budget), 1);
+        auto sorted_lengths     = selected.reshape({batch, gamma}).sum(1, false, torch::kInt32);
+        out.valid_draft_lengths = torch::empty({batch}, i32);
+        out.valid_draft_lengths.index_copy_(0, order, sorted_lengths);
+    }
+    auto dense               = tryMtpDSparkVerifyPrepare(anchors, proposals, history, bases, stream, copy_proposals);
+    out.dense_tokens         = dense.tokens.reshape({batch, width});
+    out.dense_positions      = dense.positions;
+    out.packed.input_lengths = out.valid_draft_lengths + 1;
+    auto ends                = out.packed.input_lengths.cumsum(0, torch::kInt64);
+    auto starts              = ends - out.packed.input_lengths;
+    auto rows                = torch::arange(batch + budget, i64);
+    auto owners              = at::searchsorted(ends, rows, false, true).clamp(0, batch - 1);
+    auto positions           = (rows - starts.index_select(0, owners)).clamp(0, gamma);
+    out.packed_to_dense      = owners * width + positions;
+    out.packed.tokens        = dense.tokens.index_select(0, out.packed_to_dense);
+    if (dense.positions.defined()) {
+        out.packed.positions =
+            dense.positions.reshape({batch * width, -1}).index_select(0, out.packed_to_dense).reshape({-1});
+    }
+    if (dense.history.defined()) {
+        out.packed.history = dense.history.index_select(0, out.packed_to_dense);
+    }
+    out.packed.proposals        = dense.proposals;
+    out.packed.lm_indexes       = rows.to(torch::kInt32);
+    out.sequence_lengths_plus_1 = prefixes + 1;
+    return out;
+}
+
+void expectBudgetedVerifyEqual(const MtpDSparkBudgetedVerifyInputs& actual,
+                               const MtpDSparkBudgetedVerifyInputs& expected) {
+    const std::vector<std::pair<torch::Tensor, torch::Tensor>> fields{
+        {actual.valid_draft_lengths, expected.valid_draft_lengths},
+        {actual.packed_to_dense, expected.packed_to_dense},
+        {actual.dense_tokens, expected.dense_tokens},
+        {actual.dense_positions, expected.dense_positions},
+        {actual.sequence_lengths_plus_1, expected.sequence_lengths_plus_1},
+        {actual.packed.tokens, expected.packed.tokens},
+        {actual.packed.input_lengths, expected.packed.input_lengths},
+        {actual.packed.lm_indexes, expected.packed.lm_indexes},
+        {actual.packed.history, expected.packed.history},
+        {actual.packed.positions, expected.packed.positions},
+        {actual.packed.proposals, expected.packed.proposals}};
+    for (size_t field = 0; field < fields.size(); ++field) {
+        SCOPED_TRACE(field);
+        const auto& left  = fields[field].first;
+        const auto& right = fields[field].second;
+        ASSERT_EQ(left.defined(), right.defined());
+        if (right.defined()) {
+            EXPECT_EQ(left.sizes(), right.sizes());
+            EXPECT_EQ(left.scalar_type(), right.scalar_type());
+            EXPECT_EQ(left.device(), right.device());
+            EXPECT_TRUE(left.is_contiguous());
+            EXPECT_TRUE(torch::equal(left, right));
+        }
+    }
+}
+
+std::vector<int32_t> independentBudgetFrontier(const std::vector<float>&   rates,
+                                               const std::vector<int64_t>& order,
+                                               int64_t                     gamma,
+                                               int64_t                     budget) {
+    std::vector<int32_t> lengths(order.size(), 0);
+    std::vector<double>  scores(order.size(), 1.0);
+    auto                 clean = [](float value) {
+        return std::isfinite(value) && value >= 0.0f && value <= 1.0f ? static_cast<double>(value) : 0.0;
+    };
+    for (size_t row = 0; row < order.size(); ++row) {
+        scores[row] = clean(rates[row * gamma]);
+    }
+    for (int64_t step = 0; step < budget; ++step) {
+        int64_t winner = -1;
+        for (auto row : order) {
+            if (lengths[row] < gamma && (winner < 0 || scores[row] > scores[winner])) {
+                winner = row;
+            }
+        }
+        if (++lengths[winner] < gamma) {
+            scores[winner] *= clean(rates[winner * gamma + lengths[winner]]);
+        }
+    }
+    return lengths;
+}
+
+TEST_F(MtpRoundHeadPrepareTest, BudgetedVerifyMatchesIndependentDyadicFrontier) {
+    const auto                 i32 = cudaInt32();
+    const std::vector<int64_t> order{1, 0};
+    auto                       anchors   = torch::tensor({11, 12}, i32);
+    auto                       proposals = torch::tensor({{21, 22}, {31, 32}}, i32);
+    auto                       prefixes  = torch::tensor({7, 8}, i32);
+    for (int pattern = 0; pattern < 81; ++pattern) {
+        std::vector<float> values(4);
+        int                remaining = pattern;
+        for (auto& value : values) {
+            value = static_cast<float>(remaining % 3) * 0.5f;
+            remaining /= 3;
+        }
+        auto rates = torch::tensor(values, i32.dtype(torch::kFloat32)).reshape({2, 2});
+        for (int budget = 0; budget < 4; ++budget) {
+            SCOPED_TRACE(::testing::Message() << "pattern=" << pattern << " budget=" << budget);
+            auto actual = tryMtpDSparkBudgetedVerifyPrepare(
+                rates, order, anchors, proposals, {}, {}, prefixes, budget, stream_, true);
+            auto expected = torch::tensor(independentBudgetFrontier(values, order, 2, budget), torch::kInt32);
+            ASSERT_TRUE(actual.valid_draft_lengths.defined());
+            EXPECT_TRUE(torch::equal(actual.valid_draft_lengths.cpu(), expected));
+        }
+    }
+}
+
+TEST_F(MtpRoundHeadPrepareTest, BudgetedVerifyMatchesOldPlannerAndPackingForShapesStridesAndOptions) {
+    const auto i32 = cudaInt32(), fp32 = i32.dtype(torch::kFloat32);
+    for (int64_t batch : {2, 3, 31, 32, 47, 48, 49, 64, 128}) {
+        for (int64_t gamma : {1, 5, 8}) {
+            std::vector<int64_t> order(batch);
+            std::iota(order.rbegin(), order.rend(), 0);
+            auto rates   = torch::rand({batch, gamma}, fp32);
+            auto anchors = torch::arange(batch * 2, i32).slice(0, 0, batch * 2, 2);
+            auto proposals =
+                torch::arange(batch * gamma * 2, i32).reshape({batch, gamma * 2}).slice(1, 0, gamma * 2, 2);
+            auto history  = torch::arange(batch * 8, i32).reshape({batch, 8}).slice(1, 0, 8, 2);
+            auto prefixes = (torch::arange(batch * 2, i32) + 37).slice(0, 0, batch * 2, 2);
+            for (int64_t factor : {0, 1, 3}) {
+                auto bases =
+                    factor ?
+                        torch::arange(batch * factor * 2, i32).reshape({batch, factor * 2}).slice(1, 0, factor * 2, 2) :
+                        torch::Tensor();
+                auto live_history = factor == 1 ? torch::Tensor() : history;
+                for (int64_t budget : {int64_t{0}, int64_t{1}, batch * gamma / 2, batch * gamma - 1}) {
+                    SCOPED_TRACE(::testing::Message()
+                                 << "B=" << batch << " G=" << gamma << " F=" << factor << " budget=" << budget);
+                    auto expected = oldBudgetedVerify(
+                        rates, order, anchors, proposals, live_history, bases, prefixes, budget, stream_);
+                    auto actual = tryMtpDSparkBudgetedVerifyPrepare(
+                        rates, order, anchors, proposals, live_history, bases, prefixes, budget, stream_, true);
+                    expectBudgetedVerifyEqual(actual, expected);
+                    EXPECT_EQ(actual.valid_draft_lengths.sum().item<int64_t>(), budget);
+                }
+            }
+        }
+    }
+}
+
+TEST_F(MtpRoundHeadPrepareTest, BudgetedVerifyPreservesFloatBoundarySubnormalAndStableTieDecisions) {
+    const float                           nan    = std::numeric_limits<float>::quiet_NaN();
+    const float                           inf    = std::numeric_limits<float>::infinity();
+    const float                           tiny   = std::numeric_limits<float>::denorm_min();
+    const float                           normal = std::numeric_limits<float>::min();
+    const std::vector<std::vector<float>> patterns{
+        {0.01f, 0.01f, 0.15f, 1.0f, 1.0f, 0.01f, 0.01f, 0.15f, 1.0f, 1.0f},
+        {normal, 0.5f, 0.5f, 0.5f, 1.0f, normal, 0.5f, 0.5f, 0.5f, std::nextafter(1.0f, 0.0f)},
+        {tiny, 1.0f, 1.0f, 1.0f, 1.0f, -tiny, 1.0f, 1.0f, 1.0f, 1.0f},
+        {1.0f, nan, inf, -inf, -0.0f, std::nextafter(1.0f, inf), 0.0f, -0.1f, 1.1f, 1.0f},
+        {0.5f, 1.0f, 0.5f, 1.0f, 0.5f, 0.5f, 1.0f, 0.5f, 1.0f, 0.5f},
+        {1.0f, std::nextafter(0.5f, 1.0f), 0.5f, 0.25f, 0.5f, 1.0f, 0.5f, std::nextafter(0.5f, 0.0f), 0.25f, 0.5f}};
+    auto anchors   = torch::tensor({5, 7}, cudaInt32());
+    auto proposals = torch::arange(10, cudaInt32()).reshape({2, 5});
+    auto prefixes  = torch::tensor({std::numeric_limits<int32_t>::max(), 37}, cudaInt32());
+    auto bases     = torch::tensor({{std::numeric_limits<int32_t>::max()}, {-17}}, cudaInt32());
+    for (const auto& values : patterns) {
+        auto rates      = torch::tensor(values, cudaInt32().dtype(torch::kFloat32)).reshape({2, 5});
+        auto saved_bits = rates.view(torch::kInt32).clone();
+        for (const std::vector<int64_t>& order : {std::vector<int64_t>{0, 1}, std::vector<int64_t>{1, 0}}) {
+            for (int64_t budget = 0; budget < 10; ++budget) {
+                auto expected =
+                    oldBudgetedVerify(rates, order, anchors, proposals, {}, bases, prefixes, budget, stream_);
+                auto actual = tryMtpDSparkBudgetedVerifyPrepare(
+                    rates, order, anchors, proposals, {}, bases, prefixes, budget, stream_, true);
+                expectBudgetedVerifyEqual(actual, expected);
+            }
+        }
+        EXPECT_TRUE(torch::equal(rates.view(torch::kInt32), saved_bits));
+    }
+}
+
+TEST_F(MtpRoundHeadPrepareTest, BudgetedVerifyRejectsUnsupportedLayoutsAndMalformedIdentityOrder) {
+    for (const auto& shape : {std::make_pair(1, 5), std::make_pair(129, 5), std::make_pair(48, 9)}) {
+        const auto           batch = shape.first, gamma = shape.second;
+        std::vector<int64_t> order(batch);
+        std::iota(order.begin(), order.end(), 0);
+        auto out = tryMtpDSparkBudgetedVerifyPrepare(torch::ones({batch, gamma}, cudaInt32().dtype(torch::kFloat32)),
+                                                     order,
+                                                     torch::zeros({batch}, cudaInt32()),
+                                                     torch::zeros({batch, gamma}, cudaInt32()),
+                                                     {},
+                                                     {},
+                                                     torch::zeros({batch}, cudaInt32()),
+                                                     0,
+                                                     stream_);
+        EXPECT_FALSE(out.packed.tokens.defined());
+    }
+    auto rates     = torch::ones({2, 5}, cudaInt32().dtype(torch::kFloat32));
+    auto anchors   = torch::zeros({2}, cudaInt32());
+    auto proposals = torch::zeros({2, 5}, cudaInt32());
+    auto prefixes  = torch::zeros({2}, cudaInt32());
+    auto invoke    = [&](const std::vector<int64_t>& order) {
+        return tryMtpDSparkBudgetedVerifyPrepare(rates, order, anchors, proposals, {}, {}, prefixes, 3, stream_);
+    };
+    EXPECT_ANY_THROW(invoke({0}));
+    EXPECT_ANY_THROW(invoke({0, 0}));
+    EXPECT_ANY_THROW(invoke({-1, 0}));
+    EXPECT_ANY_THROW(invoke({0, 2}));
+    EXPECT_FALSE(tryMtpDSparkBudgetedVerifyPrepare(rates, {0, 1}, anchors, proposals, {}, {}, prefixes, 10, stream_)
+                     .packed.tokens.defined());
+    EXPECT_FALSE(
+        tryMtpDSparkBudgetedVerifyPrepare(rates.cpu(), {0, 1}, anchors, proposals, {}, {}, prefixes, 3, stream_)
+            .packed.tokens.defined());
+    EXPECT_FALSE(tryMtpDSparkBudgetedVerifyPrepare(
+                     rates, {0, 1}, anchors.to(torch::kInt64), proposals, {}, {}, prefixes, 3, stream_)
+                     .packed.tokens.defined());
+}
+
+TEST_F(MtpRoundHeadPrepareTest, BudgetedVerifyCaptureOwnsOrderAndReplayRefreshesEveryDeviceInput) {
+    const auto           i32   = cudaInt32();
+    constexpr int64_t    batch = 48, gamma = 5, budget = batch * 3;
+    auto                 rates     = torch::rand({batch, gamma}, i32.dtype(torch::kFloat32));
+    auto                 anchors   = torch::arange(batch, i32);
+    auto                 proposals = torch::arange(batch * gamma, i32).reshape({batch, gamma});
+    auto                 history   = torch::arange(batch * 4, i32).reshape({batch, 4});
+    auto                 bases     = torch::arange(batch * 3, i32).reshape({batch, 3});
+    auto                 prefixes  = torch::arange(batch, i32) + 100;
+    std::vector<int64_t> expected_order(batch);
+    std::iota(expected_order.rbegin(), expected_order.rend(), 0);
+    auto warm = tryMtpDSparkBudgetedVerifyPrepare(
+        rates, expected_order, anchors, proposals, history, bases, prefixes, budget, stream_, true);
+    ASSERT_EQ(cudaStreamSynchronize(stream_), cudaSuccess);
+    at::cuda::CUDAGraph           graph(true);
+    MtpDSparkBudgetedVerifyInputs captured;
+    {
+        auto temporary_order = expected_order;
+        graph.capture_begin();
+        captured = tryMtpDSparkBudgetedVerifyPrepare(
+            rates, temporary_order, anchors, proposals, history, bases, prefixes, budget, stream_, true);
+        graph.capture_end();
+    }
+    size_t nodes = 0;
+    ASSERT_EQ(cudaGraphGetNodes(graph.raw_cuda_graph(), nullptr, &nodes), cudaSuccess);
+    EXPECT_EQ(nodes, 1);
+    for (int replay = 0; replay < 3; ++replay) {
+        rates.fill_(replay == 0 ? 1.0f : 0.5f);
+        rates.select(0, replay).fill_(std::numeric_limits<float>::quiet_NaN());
+        anchors.add_(37);
+        proposals.add_(71);
+        history.add_(101);
+        bases.add_(13);
+        prefixes.add_(17);
+        graph.replay();
+        auto expected =
+            oldBudgetedVerify(rates, expected_order, anchors, proposals, history, bases, prefixes, budget, stream_);
+        expectBudgetedVerifyEqual(captured, expected);
+    }
+    auto saved_tokens    = captured.dense_tokens.clone();
+    auto saved_proposals = captured.packed.proposals.clone();
+    proposals.fill_(-999);
+    EXPECT_TRUE(torch::equal(captured.dense_tokens, saved_tokens));
+    EXPECT_TRUE(torch::equal(captured.packed.proposals, saved_proposals));
+}
+
+TEST_F(MtpRoundHeadPrepareTest, BudgetedVerifyCleanMicrobenchmarkAndOptionalTrace) {
+    const auto           i32   = cudaInt32();
+    constexpr int64_t    batch = 48, gamma = 5, budget = batch * 3;
+    std::vector<int64_t> order(batch);
+    std::iota(order.rbegin(), order.rend(), 0);
+    auto          rates     = torch::rand({batch, gamma}, i32.dtype(torch::kFloat32));
+    auto          anchors   = torch::arange(batch, i32);
+    auto          proposals = torch::arange(batch * gamma, i32).reshape({batch, gamma});
+    auto          history   = torch::arange(batch * 4, i32).reshape({batch, 4});
+    torch::Tensor bases;  // Original B48 trace has Engram history and no positions.
+    auto          prefixes = torch::arange(batch, i32) + 100;
+    auto          run      = [&](bool fused) {
+        return fused ? tryMtpDSparkBudgetedVerifyPrepare(
+                           rates, order, anchors, proposals, history, bases, prefixes, budget, stream_, true) :
+                                     oldBudgetedVerify(rates, order, anchors, proposals, history, bases, prefixes, budget, stream_);
+    };
+    expectBudgetedVerifyEqual(run(true), run(false));
+    for (int warmup = 0; warmup < 10; ++warmup) {
+        run(false);
+        run(true);
+    }
+    ASSERT_EQ(cudaStreamSynchronize(stream_), cudaSuccess);
+    for (bool fused : {false, true}) {
+        std::vector<double> cpu_us, event_us;
+        for (int sample = 0; sample < 7; ++sample) {
+            cudaEvent_t begin, end;
+            ASSERT_EQ(cudaEventCreate(&begin), cudaSuccess);
+            ASSERT_EQ(cudaEventCreate(&end), cudaSuccess);
+            ASSERT_EQ(cudaEventRecord(begin, stream_), cudaSuccess);
+            const auto start = std::chrono::steady_clock::now();
+            for (int repeat = 0; repeat < 32; ++repeat) {
+                run(fused);
+            }
+            cpu_us.push_back(std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - start).count()
+                             / 32);
+            ASSERT_EQ(cudaEventRecord(end, stream_), cudaSuccess);
+            ASSERT_EQ(cudaEventSynchronize(end), cudaSuccess);
+            float milliseconds = 0;
+            ASSERT_EQ(cudaEventElapsedTime(&milliseconds, begin, end), cudaSuccess);
+            event_us.push_back(milliseconds * 1000.0 / 32);
+            ASSERT_EQ(cudaEventDestroy(begin), cudaSuccess);
+            ASSERT_EQ(cudaEventDestroy(end), cudaSuccess);
+        }
+        std::sort(cpu_us.begin(), cpu_us.end());
+        std::sort(event_us.begin(), event_us.end());
+        std::cout << "dspark_postsample_bench B=48 gamma=5 budget=144 queries=192 mode=" << (fused ? "fused" : "old")
+                  << " cpu_enqueue_median_us=" << cpu_us[3] << " cuda_event_interval_median_us=" << event_us[3]
+                  << " warmup=10 samples=7 repeats=32 profiler=off" << std::endl;
+    }
+    const char* trace_path = std::getenv("RTP_DSPARK_POSTSAMPLE_TRACE");
+    if (trace_path && trace_path[0]) {
+        using namespace torch::autograd::profiler;
+        const ProfilerConfig         config(ProfilerState::KINETO);
+        const std::set<ActivityType> activities{ActivityType::CPU, ActivityType::CUDA};
+        prepareProfiler(config, activities);
+        enableProfiler(config, activities);
+        struct ProfilerCleanup {
+            bool active = true;
+            ~ProfilerCleanup() {
+                if (active) {
+                    try {
+                        torch::autograd::profiler::disableProfiler();
+                    } catch (...) {}
+                }
+            }
+        } cleanup;
+        for (int repeat = 0; repeat < 3; ++repeat) {
+            {
+                RECORD_FUNCTION("dspark_postsample.old_chain", std::vector<c10::IValue>());
+                run(false);
+            }
+            {
+                RECORD_FUNCTION("dspark_postsample.fused", std::vector<c10::IValue>());
+                run(true);
+            }
+        }
+        ASSERT_EQ(cudaStreamSynchronize(stream_), cudaSuccess);
+        auto result    = disableProfiler();
+        cleanup.active = false;
+        result->save(trace_path);
+        std::cout << "dspark_postsample_trace=" << trace_path << std::endl;
+    }
+}
+
+TEST_F(MtpRoundHeadPrepareTest, BudgetedVerifyGraphGpuBenchmark) {
+    const auto           i32   = cudaInt32();
+    constexpr int64_t    batch = 48, gamma = 5, budget = batch * 3;
+    constexpr int        replays_per_batch = 128, warmup_batches = 10, samples = 7;
+    std::vector<int64_t> order(batch);
+    std::iota(order.rbegin(), order.rend(), 0);
+    auto rates     = torch::rand({batch, gamma}, i32.dtype(torch::kFloat32));
+    auto anchors   = torch::arange(batch, i32);
+    auto proposals = torch::arange(batch * gamma, i32).reshape({batch, gamma});
+    auto history   = torch::arange(batch * 4, i32).reshape({batch, 4});
+    auto prefixes  = torch::arange(batch, i32) + 100;
+    // Both order tensors outlive every captured graph. The baseline captures
+    // the production H2D upload explicitly, while its helper consumes the
+    // already allocated device tensor and creates no temporary host source.
+    auto order_host   = torch::tensor(order, torch::kInt64).pin_memory();
+    auto order_device = torch::empty({batch}, i32.dtype(torch::kInt64));
+    order_device.copy_(order_host, true);
+    auto warm_old =
+        oldBudgetedVerify(rates, order, anchors, proposals, history, {}, prefixes, budget, stream_, true, order_device);
+    auto warm_new = tryMtpDSparkBudgetedVerifyPrepare(
+        rates, order, anchors, proposals, history, {}, prefixes, budget, stream_, true);
+    expectBudgetedVerifyEqual(warm_new, warm_old);
+    ASSERT_EQ(cudaStreamSynchronize(stream_), cudaSuccess);
+
+    at::cuda::CUDAGraph           old_step(true), fused_step(true);
+    MtpDSparkBudgetedVerifyInputs old_outputs, fused_outputs;
+    old_step.capture_begin();
+    order_device.copy_(order_host, true);
+    old_outputs =
+        oldBudgetedVerify(rates, order, anchors, proposals, history, {}, prefixes, budget, stream_, true, order_device);
+    old_step.capture_end();
+    old_step.instantiate();
+    fused_step.capture_begin();
+    fused_outputs = tryMtpDSparkBudgetedVerifyPrepare(
+        rates, order, anchors, proposals, history, {}, prefixes, budget, stream_, true);
+    fused_step.capture_end();
+    fused_step.instantiate();
+    ASSERT_EQ(cudaGraphLaunch(old_step.raw_cuda_graph_exec(), stream_), cudaSuccess);
+    ASSERT_EQ(cudaGraphLaunch(fused_step.raw_cuda_graph_exec(), stream_), cudaSuccess);
+    expectBudgetedVerifyEqual(fused_outputs, old_outputs);
+    ASSERT_EQ(cudaStreamSynchronize(stream_), cudaSuccess);
+
+    struct StepNodeCounts {
+        size_t total = 0, kernels = 0, h2d = 0, d2d = 0, d2h = 0, other_copies = 0, other = 0;
+    };
+    auto count_nodes = [](cudaGraph_t graph) {
+        StepNodeCounts counts;
+        TORCH_CHECK(cudaGraphGetNodes(graph, nullptr, &counts.total) == cudaSuccess, "cannot count step graph nodes");
+        std::vector<cudaGraphNode_t> nodes(counts.total);
+        TORCH_CHECK(cudaGraphGetNodes(graph, nodes.data(), &counts.total) == cudaSuccess,
+                    "cannot read step graph nodes");
+        for (auto node : nodes) {
+            cudaGraphNodeType type;
+            TORCH_CHECK(cudaGraphNodeGetType(node, &type) == cudaSuccess, "cannot read step node type");
+            if (type == cudaGraphNodeTypeKernel) {
+                ++counts.kernels;
+            } else if (type == cudaGraphNodeTypeMemcpy) {
+                cudaMemcpy3DParms copy{};
+                TORCH_CHECK(cudaGraphMemcpyNodeGetParams(node, &copy) == cudaSuccess, "cannot read graph copy kind");
+                switch (copy.kind) {
+                    case cudaMemcpyHostToDevice:
+                        ++counts.h2d;
+                        break;
+                    case cudaMemcpyDeviceToDevice:
+                        ++counts.d2d;
+                        break;
+                    case cudaMemcpyDeviceToHost:
+                        ++counts.d2h;
+                        break;
+                    default:
+                        ++counts.other_copies;
+                        break;
+                }
+            } else {
+                ++counts.other;
+            }
+        }
+        return counts;
+    };
+    const StepNodeCounts counts[2] = {count_nodes(old_step.raw_cuda_graph()), count_nodes(fused_step.raw_cuda_graph())};
+    EXPECT_EQ(counts[1].total, 1);
+    EXPECT_EQ(counts[1].kernels, 1);
+    EXPECT_EQ(counts[0].h2d, 1);
+
+    // Measurement only: a single native launch runs 128 dependent copies of
+    // the step graph. This keeps even the one-kernel candidate supplied with
+    // GPU work without CPU launch gaps between individual step replays.
+    // CapturedGraph releases exec before graph on every return/exception path.
+    CapturedGraph old_batch, fused_batch;
+    auto          make_batch = [](cudaGraph_t step, CapturedGraph& output) {
+        TORCH_CHECK(cudaGraphCreate(&output.graph, 0) == cudaSuccess, "cannot create measurement graph");
+        cudaGraphNode_t previous = nullptr;
+        for (int replay = 0; replay < replays_per_batch; ++replay) {
+            cudaGraphNode_t child;
+            TORCH_CHECK(
+                cudaGraphAddChildGraphNode(&child, output.graph, previous ? &previous : nullptr, previous ? 1 : 0, step)
+                    == cudaSuccess,
+                "cannot append measurement replay");
+            previous = child;
+        }
+        TORCH_CHECK(cudaGraphInstantiate(&output.executable, output.graph, nullptr, nullptr, 0) == cudaSuccess,
+                    "cannot instantiate measurement graph");
+    };
+    make_batch(old_step.raw_cuda_graph(), old_batch);
+    make_batch(fused_step.raw_cuda_graph(), fused_batch);
+    for (int warmup = 0; warmup < warmup_batches; ++warmup) {
+        ASSERT_EQ(cudaGraphLaunch(old_batch.executable, stream_), cudaSuccess);
+        ASSERT_EQ(cudaGraphLaunch(fused_batch.executable, stream_), cudaSuccess);
+    }
+    ASSERT_EQ(cudaStreamSynchronize(stream_), cudaSuccess);
+    expectBudgetedVerifyEqual(fused_outputs, old_outputs);
+
+    struct TimingEvents {
+        cudaEvent_t begin = nullptr, end = nullptr;
+        ~TimingEvents() {
+            if (end) {
+                cudaEventDestroy(end);
+            }
+            if (begin) {
+                cudaEventDestroy(begin);
+            }
+        }
+    } events;
+    ASSERT_EQ(cudaEventCreate(&events.begin), cudaSuccess);
+    ASSERT_EQ(cudaEventCreate(&events.end), cudaSuccess);
+    std::vector<double>   gpu_us[2];
+    const cudaGraphExec_t executables[2] = {old_batch.executable, fused_batch.executable};
+    for (int sample = 0; sample < samples; ++sample) {
+        for (int mode = 0; mode < 2; ++mode) {
+            ASSERT_EQ(cudaEventRecord(events.begin, stream_), cudaSuccess);
+            ASSERT_EQ(cudaGraphLaunch(executables[mode], stream_), cudaSuccess);
+            ASSERT_EQ(cudaEventRecord(events.end, stream_), cudaSuccess);
+            ASSERT_EQ(cudaEventSynchronize(events.end), cudaSuccess);
+            float milliseconds = 0;
+            ASSERT_EQ(cudaEventElapsedTime(&milliseconds, events.begin, events.end), cudaSuccess);
+            gpu_us[mode].push_back(milliseconds * 1000.0 / replays_per_batch);
+        }
+    }
+    expectBudgetedVerifyEqual(fused_outputs, old_outputs);
+    for (int mode = 0; mode < 2; ++mode) {
+        std::sort(gpu_us[mode].begin(), gpu_us[mode].end());
+        std::cout << "dspark_postsample_graph_gpu_bench B=48 gamma=5 budget=144 queries=192 mode="
+                  << (mode ? "fused" : "old") << " pipeline_median_us=" << gpu_us[mode][samples / 2]
+                  << " pipeline_min_us=" << gpu_us[mode].front() << " pipeline_max_us=" << gpu_us[mode].back()
+                  << " step_nodes=" << counts[mode].total << " kernel_nodes=" << counts[mode].kernels
+                  << " h2d_nodes=" << counts[mode].h2d << " d2d_nodes=" << counts[mode].d2d
+                  << " d2h_nodes=" << counts[mode].d2h << " other_copy_nodes=" << counts[mode].other_copies
+                  << " other_nodes=" << counts[mode].other << " child_replays=" << replays_per_batch
+                  << " warmup_batches=" << warmup_batches << " samples=" << samples
+                  << " copies=included gpu_graph_scheduling=included host_per_op_dispatch=excluded profiler=off"
+                  << std::endl;
+    }
 }
 
 }  // namespace

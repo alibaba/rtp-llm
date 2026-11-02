@@ -3830,21 +3830,43 @@ TEST_F(MtpExecutorTest, testDSparkAdaptiveProposalReturnsFrozenChosenBudget) {
     input.input_lengths  = torch::full({batch}, gamma, i32);
     input.prefix_lengths = torch::full({batch}, 2, i32);
     MtpBatchStreamProcessor::DSparkRoundState round;
-    round.anchors = torch::tensor({1, 1}, i32);
+    round.anchors        = torch::tensor({1, 1}, i32);
+    round.committed_ends = input.prefix_lengths;
     SamplerOutput draft;
     int64_t       forward_us = 0;
     const auto    chosen     = executor.runDSparkProposal(input, groups, round, draft, forward_us);
     EXPECT_EQ(chosen.budget_per_request, 2);
     EXPECT_EQ(chosen.draft_budget, 4);
+    EXPECT_EQ(chosen.request_ids, (std::vector<int64_t>{20, 10}));
+    EXPECT_EQ(chosen.stable_order, (std::vector<int64_t>{1, 0}));
     EXPECT_TRUE(chosen.start_event);
-    EXPECT_TRUE(torch::equal(draft.valid_draft_lengths.cpu(), torch::tensor({3, 1}, torch::kInt32)));
-    EXPECT_EQ(draft.valid_draft_lengths.sum().item<int64_t>(), chosen.draft_budget);
+    EXPECT_FALSE(draft.valid_draft_lengths.defined());
     EXPECT_EQ(executor.dspark_verify_budget_, 1);
     // The update during proposal is visible only to the next round.
     const auto next = executor.prepareDSparkVerifyPlan(groups);
     EXPECT_EQ(next.budget_per_request, 0);
     EXPECT_EQ(next.draft_budget, 0);
     EXPECT_EQ(chosen.draft_budget, 4);
+    // Length materialization is deferred until target preparation. Even after
+    // the controller has selected zero for the next round, this round consumes
+    // its frozen budget and identity order, rather than consulting it again.
+    GptModelInputs target_input;
+    const auto     layout =
+        executor.batch_stream_processor_->prepareDSparkBoundedTargetVerifyModelInput(round,
+                                                                                     target_input,
+                                                                                     draft.token_ids,
+                                                                                     draft.confidence_rates,
+                                                                                     chosen.stable_order,
+                                                                                     chosen.draft_budget,
+                                                                                     executor.buffer_holder_,
+                                                                                     draft.valid_draft_lengths,
+                                                                                     &draft.token_ids);
+    EXPECT_TRUE(torch::equal(draft.valid_draft_lengths.cpu(), torch::tensor({3, 1}, torch::kInt32)));
+    EXPECT_EQ(draft.valid_draft_lengths.sum().item<int64_t>(), chosen.draft_budget);
+    EXPECT_EQ(target_input.combo_tokens.numel(), batch + chosen.draft_budget);
+    ASSERT_TRUE(layout.packed_to_dense.defined());
+    EXPECT_EQ(layout.packed_to_dense.numel(), 6);
+    EXPECT_TRUE(chosen.start_event);
 }
 
 TEST_F(MtpExecutorTest, testDSparkAdaptiveObservationUsesCudaEventsAndOwnsRequestIdentities) {

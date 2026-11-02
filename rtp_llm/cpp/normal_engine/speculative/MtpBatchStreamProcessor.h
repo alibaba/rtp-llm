@@ -279,6 +279,20 @@ public:
                                                                        TensorHolder&           host_holder,
                                                                        torch::Tensor* owned_proposals = nullptr);
 
+    // Plan confidence prefixes and materialize packed verification inputs
+    // together. The host-known budget fixes every output shape; the identity
+    // permutation must have been frozen before sampling this round's drafts.
+    // Unsupported CUDA geometries retain the existing planner/packing path.
+    DSparkPackedTargetLayout prepareDSparkBoundedTargetVerifyModelInput(const DSparkRoundState&     round_state,
+                                                                        GptModelInputs&             model_input,
+                                                                        const torch::Tensor&        proposals,
+                                                                        const torch::Tensor&        confidence_rates,
+                                                                        const std::vector<int64_t>& stable_order,
+                                                                        int64_t                     total_draft_budget,
+                                                                        TensorHolder&               host_holder,
+                                                                        torch::Tensor&              valid_draft_lengths,
+                                                                        torch::Tensor* owned_proposals = nullptr);
+
     // Async target preparation runs before proposal sampling completes. Build
     // its verify-width positions locally from the TP-synchronized proposal
     // metadata; no second pre-proposal broadcast is needed.

@@ -19,6 +19,31 @@ MtpDSparkVerifyInputs tryMtpDSparkVerifyPrepare(const torch::Tensor& anchors,
                                                 cudaStream_t         stream,
                                                 bool                 copy_proposals = false);
 
+struct MtpDSparkBudgetedVerifyInputs {
+    MtpDSparkVerifyInputs packed;
+    torch::Tensor         valid_draft_lengths, packed_to_dense, dense_tokens, dense_positions, sequence_lengths_plus_1;
+};
+
+// One launch computes bounded confidence lengths and both packed/dense verify
+// outputs. Supports CUDA FP32 [B,G] rates, 2 <= B <= 128, 1 <= G <= 8, and
+// B*G <= 1024. Integer sources follow tryMtpDSparkVerifyPrepare's int32/stride
+// contract. Zero budget is supported; full budget retains the dense fallback.
+// The pre-proposal identity permutation is copied into kernel arguments; no
+// host pointer or upload survives this call. A captured graph therefore keeps
+// that permutation, while all device input contents may change on replay.
+// Unsupported inputs return undefined packed.tokens before any launch. An
+// invalid host permutation throws before allocation or launch.
+MtpDSparkBudgetedVerifyInputs tryMtpDSparkBudgetedVerifyPrepare(const torch::Tensor&        rates,
+                                                                const std::vector<int64_t>& stable_order_host,
+                                                                const torch::Tensor&        anchors,
+                                                                const torch::Tensor&        proposals,
+                                                                const torch::Tensor&        history,
+                                                                const torch::Tensor&        position_bases,
+                                                                const torch::Tensor&        prefix_lengths,
+                                                                int64_t                     total_draft_budget,
+                                                                cudaStream_t                stream,
+                                                                bool                        copy_proposals = false);
+
 // Assemble both page tables directly from device snapshots and pinned host
 // suffixes. Returns false without launching for unsupported layouts/devices.
 bool tryMtpGatherPageSnapshots(const torch::Tensor&              physical_host,
