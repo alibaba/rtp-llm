@@ -6,6 +6,15 @@ key, in-place mutation invalidation, the strict-validation bypass and the
 per-step selection constants the selection/FMHA consumers read. All cases
 run on CPU tensors with SimpleNamespace contexts, mirroring the fixture
 style of qsa_runtime_test.
+
+Entry fidelity: the tests call the geometry seam exactly the way the
+production selection router does (qsa_context.select_*_prefill_tokens ->
+qsa_prefill._incremental_prefill_selection -> _draft_incremental_prefill_
+geometry) with the same mode flags, the direct-call style qsa_runtime_test
+uses; the full selection entry itself requires CUDA q/raw keys and mutates
+the side pools, which these cache-semantics cases deliberately avoid. The
+strict flag is pinned per test because the asserted cache behavior only
+exists with validation demoted.
 """
 
 import unittest
@@ -32,6 +41,16 @@ class Qwen4ExpStepPlanTest(unittest.TestCase):
 
     def setUp(self):
         qsa_step_plan.clear_step_plan_cache()
+        # Hermetic strict flag: the cache under test only exists with the
+        # production default (validation demoted). An ambient
+        # RTP_LLM_QSA_STRICT_VALIDATION=1 (e.g. exported for a strict bench
+        # run) must not flip these assertions; the strict-bypass test
+        # overrides this to "1" itself.
+        strict_off = patch.dict(
+            "os.environ", {"RTP_LLM_QSA_STRICT_VALIDATION": "0"}
+        )
+        strict_off.start()
+        self.addCleanup(strict_off.stop)
         self.stats0 = qsa_step_plan.step_plan_cache_stats()
         self.rope = SimpleNamespace(
             style=RopeStyle.Mrope,
@@ -43,6 +62,14 @@ class Qwen4ExpStepPlanTest(unittest.TestCase):
             mrope_interleaved=True,
             indexer_is_neox_style=True,
             base=10_000.0,
+        )
+        self.base_rope = SimpleNamespace(
+            style=RopeStyle.Base,
+            index_factor=3,
+            dim=4,
+            indexer_is_neox_style=True,
+            base=10_000.0,
+            scale=1.0,
         )
         self.indexer = SimpleNamespace(
             head_dim=self.D,
@@ -57,7 +84,9 @@ class Qwen4ExpStepPlanTest(unittest.TestCase):
         stats = qsa_step_plan.step_plan_cache_stats()
         return {key: stats[key] - self.stats0[key] for key in stats}
 
-    def _context(self, prefixes, lengths, *, shared=None, layer=0):
+    def _context(
+        self, prefixes, lengths, *, shared=None, layer=0, is_mtp_draft=False
+    ):
         """One per-layer context; ``shared`` reuses a previous step's inputs."""
         batch = len(lengths)
         input_lengths = torch.tensor(lengths, dtype=torch.int32)
@@ -121,20 +150,52 @@ class Qwen4ExpStepPlanTest(unittest.TestCase):
                 seq_size_per_block=self.PAGE,
             ),
             indexer_state_inputs=state_inputs,
+            is_mtp_draft=is_mtp_draft,
         )
 
-    def _geometry(self, context, token_count):
+    def _geometry(
+        self,
+        context,
+        token_count,
+        *,
+        draft=False,
+        draft_prefix_reuse=False,
+        rope_config=None,
+    ):
+        """Enter the geometry exactly as the production selection router does.
+
+        Production mode routing (qwen4_exp._qsa_selected_indices):
+        target prefix reuse -> select_prefix_reuse_prefill_tokens ->
+        _incremental_prefill_selection(draft=False) ->
+        geometry(draft=False, draft_prefix_reuse=False)  [the default here];
+        MTP post-rejection commit -> select_draft_incremental_prefill_tokens
+        -> geometry(draft=True) on an is_mtp_draft context;
+        MTP draft prefix hit -> select_draft_prefix_reuse_prefill_tokens ->
+        geometry(draft=False, draft_prefix_reuse=True). The geometry default
+        draft=True would instead require the explicit MTP draft context.
+        """
         return context._draft_incremental_prefill_geometry(
             indexer=self.indexer,
             token_count=token_count,
             device=torch.device("cpu"),
-            rope_config=self.rope,
+            rope_config=rope_config if rope_config is not None else self.rope,
+            draft=draft,
+            draft_prefix_reuse=draft_prefix_reuse,
         )
 
     def test_second_layer_hits_the_frozen_plan_and_rebinds_its_pools(self):
         first = self._context([8], [5])
         plan_one = self._geometry(first, 5)
-        second = self._context([8], [5], shared=(first.main_inputs, first.indexer_kv_inputs, first.indexer_state_inputs), layer=1)
+        second = self._context(
+            [8],
+            [5],
+            shared=(
+                first.main_inputs,
+                first.indexer_kv_inputs,
+                first.indexer_state_inputs,
+            ),
+            layer=1,
+        )
         plan_two = self._geometry(second, 5)
 
         self.assertIs(plan_two.step, plan_one.step)
@@ -152,7 +213,9 @@ class Qwen4ExpStepPlanTest(unittest.TestCase):
         context = self._context([8], [5])
         plan_one = self._geometry(context, 5)
         # A value-preserving in-place write still bumps the tensor version.
-        context.main_inputs.combo_position_ids.copy_(context.main_inputs.combo_position_ids)
+        context.main_inputs.combo_position_ids.copy_(
+            context.main_inputs.combo_position_ids
+        )
         for inputs in (context.indexer_kv_inputs, context.indexer_state_inputs):
             inputs.combo_position_ids.copy_(inputs.combo_position_ids)
         plan_two = self._geometry(context, 5)
@@ -194,9 +257,14 @@ class Qwen4ExpStepPlanTest(unittest.TestCase):
             rope_config=self.rope,
             rope_dtype=torch.bfloat16,
         )
+        # MTP post-rejection commit: Base RoPE on an explicit draft context.
+        draft = self._context([8], [3], is_mtp_draft=True)
+        draft_plan = self._geometry(draft, 3, draft=True, rope_config=self.base_rope)
         self.assertEqual(plan.step.mode, "prefix_reuse")
         self.assertEqual(cold.mode, "cold_prefill")
+        self.assertEqual(draft_plan.step.mode, "draft_incremental")
         self.assertIsNot(cold, plan.step)
+        self.assertIsNot(draft_plan.step, plan.step)
 
         found = qsa_step_plan.lookup_prefill_step_plan(context.main_inputs, 5)
         self.assertIs(found, plan.step)
