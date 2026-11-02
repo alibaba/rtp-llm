@@ -1,9 +1,14 @@
 """fmha_inputs; validation/layout planning does not own mutation state."""
 
+import itertools
 from typing import Optional
 
 import torch
 
+from rtp_llm.models_py.model_desc.qwen4_exp_runtime.qsa_cache_views import (
+    qsa_assert_valid,
+    qsa_strict_validation_enabled,
+)
 from rtp_llm.ops.compute_ops import LayerKVCache
 
 from .fmha_plans import IncrementalPrefillInputs, PagedInputs, PrefillRequest
@@ -271,16 +276,17 @@ def _prepare_incremental_prefill_inputs(
     batch = int(input_lengths.numel())
     if batch <= 0 or int(prefixes.numel()) != batch:
         raise ValueError("qwen4_exp incremental prefill lengths and prefixes disagree")
+    # Request-data checks run on the pinned host mirrors; free fail-fast.
+    if bool(torch.any(input_lengths <= 0)):
+        raise ValueError("qwen4_exp incremental prefill input lengths must be positive")
+    if bool(torch.any(prefixes < 0)):
+        raise ValueError("qwen4_exp incremental prefill prefixes must be non-negative")
     input_lengths_device = input_lengths.to(
         device=qkv.device, dtype=torch.int32, non_blocking=True
     )
     prefixes_device = prefixes.to(
         device=qkv.device, dtype=torch.int32, non_blocking=True
     )
-    if bool(torch.any(input_lengths_device <= 0).item()):
-        raise ValueError("qwen4_exp incremental prefill input lengths must be positive")
-    if bool(torch.any(prefixes_device < 0).item()):
-        raise ValueError("qwen4_exp incremental prefill prefixes must be non-negative")
 
     cu_seqlens = self.attn_inputs.cu_seqlens_device
     expected_cu = torch.zeros(batch + 1, dtype=torch.int32, device=qkv.device)
@@ -291,12 +297,24 @@ def _prepare_incremental_prefill_inputs(
         or tuple(cu_seqlens.shape) != (batch + 1,)
         or cu_seqlens.dtype != torch.int32
         or cu_seqlens.device != qkv.device
-        or not bool(torch.equal(cu_seqlens, expected_cu))
     ):
         raise ValueError(
             "qwen4_exp incremental prefill cu_seqlens do not match input lengths"
         )
-    tokens = int(expected_cu[-1].item())
+    if qsa_strict_validation_enabled():
+        if not bool(torch.equal(cu_seqlens, expected_cu)):
+            raise ValueError(
+                "qwen4_exp incremental prefill cu_seqlens do not match input lengths"
+            )
+    else:
+        qsa_assert_valid(
+            (cu_seqlens == expected_cu).all(),
+            "qwen4_exp incremental prefill cu_seqlens do not match input lengths",
+        )
+    # Host cumsum on the pinned mirrors replaces the device readback.
+    lengths_list = input_lengths.tolist()
+    cu_host = list(itertools.accumulate(lengths_list, initial=0))
+    tokens = cu_host[-1]
     if int(qkv.shape[0]) != tokens:
         raise ValueError(
             "qwen4_exp incremental prefill cu_seqlens do not partition qkv: "
@@ -314,16 +332,22 @@ def _prepare_incremental_prefill_inputs(
             "qwen4_exp incremental prefill selection and qkv must share CUDA"
         )
 
-    block_table = self.attn_inputs.kv_cache_kernel_block_id_device
-    page_size = self._validate_main_paged_geometry(
-        kv_cache.kv_cache_base,
-        block_table,
-        prefixes_device,
-        input_lengths_device,
-        qkv.device,
-    )
+    if qsa_strict_validation_enabled():
+        # The production path validated this same cache/block_table/geometry in
+        # validate_qsa_before_side_write before the projection; the repeat
+        # here is redundant. Strict mode keeps it for direct component calls.
+        block_table = self.attn_inputs.kv_cache_kernel_block_id_device
+        page_size = self._validate_main_paged_geometry(
+            kv_cache.kv_cache_base,
+            block_table,
+            prefixes_device,
+            input_lengths_device,
+            qkv.device,
+        )
+    else:
+        block_table = self.attn_inputs.kv_cache_kernel_block_id_device
+        page_size = int(self.attn_configs.kernel_tokens_per_block)
 
-    cu_host = expected_cu.cpu().tolist()
     requests = []
     for request_idx in range(batch):
         start, end = cu_host[request_idx : request_idx + 2]
@@ -332,7 +356,10 @@ def _prepare_incremental_prefill_inputs(
             1, query_len + 1, dtype=torch.int32, device=qkv.device
         )
         request_selection = selected_indices[start:end]
-        if request_selection.numel():
+        if qsa_strict_validation_enabled() and request_selection.numel():
+            # The per-request selection re-check duplicates the FMHA entry
+            # validation (_validate_sparse_paged_indices is a superset);
+            # strict mode keeps it for its exact per-request diagnostics.
             if int(request_selection.min().item()) < -1:
                 raise ValueError("selected indices may only use -1 as padding")
             invalid_visible = (request_selection >= 0) & (

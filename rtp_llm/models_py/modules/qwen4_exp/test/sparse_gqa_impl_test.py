@@ -27,6 +27,11 @@ from rtp_llm.models_py.modules.qwen4_exp.test.reference.sparse_fmha import (
 _H_Q, _H_KV, _D = 24, 2, 256
 _DEV = "cuda"
 
+# Cases here assert the legacy per-check validation errors (raises before the
+# main-cache write, exact messages). Keep them on the strict path; production
+# demotes those checks to async device asserts.
+os.environ.setdefault("RTP_LLM_QSA_STRICT_VALIDATION", "1")
+
 
 def _write_packed_kv_to_cache(qkv, cache, block_table, prefixes, input_lengths):
     q_width = _H_Q * _D
