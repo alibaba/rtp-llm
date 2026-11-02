@@ -29,6 +29,13 @@ public final class FlexlbConfig {
     private ConsistencyConfig consistency = new NoConsistencyConfig();
     private boolean enableFallback;
     private long fallbackBatchTokenCapacity = 1_048_576L;
+    private EngineGrpcConfig engineGrpc = new EngineGrpcConfig();
+
+    @Getter
+    @Setter
+    public static final class EngineGrpcConfig {
+        private int kvCacheMaxInboundMessageBytes = 128 * 1024 * 1024;
+    }
 
     @JsonIgnore
     private final InternalRuntimeSettings internalRuntime = new InternalRuntimeSettings();

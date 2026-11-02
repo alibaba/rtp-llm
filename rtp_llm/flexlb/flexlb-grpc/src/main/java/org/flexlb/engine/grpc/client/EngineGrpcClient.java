@@ -10,6 +10,8 @@ import io.grpc.ManagedChannel;
 import io.grpc.Status;
 import io.netty.channel.EventLoopGroup;
 import org.flexlb.config.CacheMatchConfiguration;
+import org.flexlb.config.ConfigService;
+import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.master.WorkerHost;
 import org.flexlb.engine.grpc.EngineRpcService;
 import org.flexlb.engine.grpc.GrpcCallTrace;
@@ -44,8 +46,13 @@ import java.util.function.Function;
 @Component
 public class EngineGrpcClient implements EngineAddressResolver.Listener {
 
-    @Value("${flexlb.engine-grpc.kv-cache-max-inbound-message-bytes:134217728}")
-    private int kvCacheMaxInboundMessageBytes = 128 * 1024 * 1024;
+    private FlexlbConfig.EngineGrpcConfig engineGrpcConfig =
+            new FlexlbConfig.EngineGrpcConfig();
+
+    @Autowired
+    void configureEngineGrpc(ConfigService configService) {
+        engineGrpcConfig = configService.loadBalanceConfig().getEngineGrpc();
+    }
 
     private final GrpcChannelFactory channelFactory;
     private final GrpcChannelPool<EngineChannelKey> channelPool;
@@ -605,7 +612,7 @@ public class EngineGrpcClient implements EngineAddressResolver.Listener {
                 ip,
                 port,
                 stub -> stub.rpcServiceStub()
-                        .withMaxInboundMessageSize(kvCacheMaxInboundMessageBytes)
+                        .withMaxInboundMessageSize(engineGrpcConfig.getKvCacheMaxInboundMessageBytes())
                         .getCacheStatus(request),
                 requestTimeoutMs,
                 ServiceType.CACHE_STATUS);
