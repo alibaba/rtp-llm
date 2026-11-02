@@ -21,3 +21,9 @@ py_library(
         "//rtp_llm/cpp/model_rpc/proto:flexlb_schedule_service_py_proto",
     ]
 )
+
+py_library(
+    name = "navi_sched_adapter",
+    srcs = ["navi_sched_adapter.py"],
+    visibility = ["//visibility:public"],
+)

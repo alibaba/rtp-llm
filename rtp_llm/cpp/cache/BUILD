@@ -367,6 +367,7 @@ cc_library(
     }),
     visibility = ["//visibility:public"],
     deps = [
+        "@navi_sched_cpp//:navi_sched",
         "//rtp_llm/cpp/cache/events:kv_cache_event_publisher",
         ":cache_async_context",
         ":cache_core",

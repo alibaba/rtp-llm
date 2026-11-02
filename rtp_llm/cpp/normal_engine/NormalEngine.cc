@@ -20,6 +20,9 @@
 #include "autil/TimeUtility.h"
 #include "rtp_llm/cpp/normal_engine/speculative/MtpExecutor.h"
 #include <c10/core/InferenceMode.h>
+#include "aios/navi_sched/adapters/rtp_llm/RtpLLMAdapter.h"
+#include <atomic>
+#include <limits>
 #include <algorithm>
 #include <chrono>
 #include <cstdlib>
@@ -155,6 +158,109 @@ private:
     int64_t                      baseline_reserved_   = 0;
 };
 #endif
+bool shouldLogNaviSchedulerTiming(int64_t batch_id) {
+    return batch_id > 0 && batch_id % 128 == 0;
+}
+
+bool shouldLogNaviLatencyComponents() {
+    static std::atomic<uint64_t> batch_count{0};
+    const auto                   count = batch_count.fetch_add(1, std::memory_order_relaxed) + 1;
+    return count <= 4096 || count % 512 == 0;
+}
+
+bool getPrefillBatchQueries(const std::list<GenerateStreamPtr>&             streams,
+                            std::vector<navi_sched::NaviSchedLatencyQuery>& queries) {
+    queries.clear();
+    queries.reserve(streams.size());
+    for (const auto& stream : streams) {
+        if (!stream || stream->isFakeStream()) {
+            continue;
+        }
+        if (!stream->isContextStream()) {
+            queries.clear();
+            return false;
+        }
+        navi_sched::NaviSchedLatencyQuery query;
+        query.requestId                     = stream->streamId();
+        query.totalTokenCount               = stream->inputLength();
+        query.cacheHitTokenCount            = std::min(stream->initialReuseLength(), stream->inputLength());
+        const auto& cache_resource          = stream->kvCache().cacheResource(0);
+        query.hybridCandidateBlockCount     = cache_resource.hybridCandidateBlockNum();
+        query.hybridFlatMatchedBlockCount   = cache_resource.hybridFlatMatchedBlockNum();
+        query.hybridMinFullReuseBlockCount  = cache_resource.hybridMinFullReuseBlockNum();
+        query.hybridSelectedReuseBlockCount = cache_resource.hybridSelectedReuseBlockNum();
+        queries.emplace_back(query);
+    }
+    return !queries.empty();
+}
+
+bool validateNaviSchedPhysicalBatch(const std::list<GenerateStreamPtr>& streams) {
+    size_t  request_count = 0;
+    int64_t group_id      = -1;
+    int     group_size    = -1;
+    bool    navi_sched    = false;
+    for (const auto& stream : streams) {
+        if (!stream || stream->isFakeStream()) {
+            continue;
+        }
+        ++request_count;
+        if (!stream->isNaviSched()) {
+            if (navi_sched) {
+                return false;
+            }
+            continue;
+        }
+        if (!navi_sched) {
+            navi_sched = true;
+            group_id   = stream->groupId();
+            group_size = stream->groupSize();
+        } else if (stream->groupId() != group_id || stream->groupSize() != group_size) {
+            return false;
+        }
+    }
+    if (!navi_sched) {
+        return true;
+    }
+    return group_id > 0 && group_size > 0 && request_count == static_cast<size_t>(group_size)
+           && std::all_of(streams.begin(), streams.end(), [](const auto& stream) {
+                  return !stream || stream->isFakeStream() || stream->isNaviSched();
+              });
+}
+
+int64_t getPrefillExecutionStartTimeUs(const std::list<GenerateStreamPtr>& streams) {
+    int64_t execution_start_time_us = std::numeric_limits<int64_t>::max();
+    for (const auto& stream : streams) {
+        if (!stream || stream->isFakeStream()) {
+            continue;
+        }
+        const auto can_run_time_us = stream->canRunTimeUs();
+        if (can_run_time_us <= 0) {
+            return 0;
+        }
+        execution_start_time_us = std::min(execution_start_time_us, can_run_time_us);
+    }
+    return execution_start_time_us == std::numeric_limits<int64_t>::max() ? 0 : execution_start_time_us;
+}
+
+void reportNaviSchedExecutionLoad(const std::shared_ptr<navi_sched::NaviSchedAgent>& agent, SchedulerBase& scheduler) {
+    if (!agent) {
+        return;
+    }
+    auto                                           waitingTasks = scheduler.waitingTaskList();
+    std::vector<navi_sched::NaviSchedLatencyQuery> waitingRequests;
+    waitingRequests.reserve(waitingTasks.size());
+    for (const auto& task : waitingTasks) {
+        navi_sched::NaviSchedLatencyQuery query;
+        query.totalTokenCount    = task.input_length;
+        query.cacheHitTokenCount = std::min(task.prefix_length, task.input_length);
+        waitingRequests.emplace_back(query);
+    }
+    auto runningRequests =
+        std::max<int64_t>(0, scheduler.onflightStreams() - static_cast<int64_t>(waitingRequests.size()));
+    navi_sched::reportRtpLLMExecutionLoad(
+        agent, waitingRequests, runningRequests, autil::TimeUtility::currentTimeInMicroSeconds());
+}
+
 }  // anonymous namespace
 
 NormalEngine::NormalEngine(const EngineInitParams&                       params,
@@ -768,6 +874,7 @@ void NormalEngine::initializeAndPublishCacheManager(ResourceContext&            
                                                     const std::function<bool(KVCacheManager&)>& initializer) {
     RTP_LLM_CHECK_WITH_INFO(cache_manager != nullptr, "cache manager candidate must not be null");
     RTP_LLM_CHECK_WITH_INFO(initializer != nullptr, "cache manager initializer must not be null");
+    cache_manager->setNaviSchedAgent(resource_context.navi_sched_agent);
     if (!initializer(*cache_manager)) {
         RTP_LLM_FAIL("init kv cache manager failed");
     }
@@ -1008,6 +1115,7 @@ absl::Status NormalEngine::step() try {
             RTP_LLM_PROFILE_SCOPE_DYNAMIC("engine.normal.schedule(reserve_step=%d)", reserve_step_);
             CHECK_AND_ASSIGN(streams, scheduler_->schedule());
         }
+        reportNaviSchedExecutionLoad(resource_context_.navi_sched_agent, *scheduler_);
         if (parallelism_config.dp_size > 1) {
             RTP_LLM_PROFILE_SCOPE("engine.normal.may_add_fake_stream_work");
             mayAddFakeStream(streams);
@@ -1044,7 +1152,228 @@ absl::Status NormalEngine::step() try {
             step_profiler_.startStep();
         }
         RTP_LLM_PROFILE_SCOPE_DYNAMIC("engine.normal.execute(stream_size=%zu)", streams.size());
+        std::vector<navi_sched::NaviSchedLatencyQuery> prefillQueries;
+        const bool                                     validNaviSchedBatch = validateNaviSchedPhysicalBatch(streams);
+        const bool                                     hasPrefillBatch =
+            resource_context_.navi_sched_agent && getPrefillBatchQueries(streams, prefillQueries);
+        const bool recordPrefillBatch = hasPrefillBatch && validNaviSchedBatch;
+        if (!validNaviSchedBatch) {
+            RTP_LLM_LOG_WARNING("discard split or mixed NaviSched physical batch: physical_requests=%zu",
+                                streams.size());
+        }
+        const auto executionStartTimeUs = recordPrefillBatch ? getPrefillExecutionStartTimeUs(streams) : 0;
+        if (recordPrefillBatch) {
+            int64_t batch_id = 0;
+            for (const auto& stream : streams) {
+                if (!stream || stream->isFakeStream()) {
+                    continue;
+                }
+                batch_id = stream->groupId();
+                break;
+            }
+            if (shouldLogNaviSchedulerTiming(batch_id)) {
+                int64_t earliest_create_time_us  = std::numeric_limits<int64_t>::max();
+                int64_t earliest_enqueue_time_us = std::numeric_limits<int64_t>::max();
+                int64_t enqueue_to_canrun_us     = 0;
+                int64_t canrun_to_running_us     = 0;
+                int64_t loading_cache_us         = 0;
+                int64_t load_done_to_running_us  = 0;
+                for (const auto& stream : streams) {
+                    if (!stream || stream->isFakeStream()) {
+                        continue;
+                    }
+                    earliest_create_time_us  = std::min(earliest_create_time_us, stream->enqueueTime());
+                    earliest_enqueue_time_us = std::min(earliest_enqueue_time_us, stream->schedulerEnqueueTimeUs());
+                    enqueue_to_canrun_us     = std::max(enqueue_to_canrun_us, stream->enqueueToCanRunUs());
+                    canrun_to_running_us     = std::max(canrun_to_running_us, stream->canRunToRunningUs());
+                    loading_cache_us         = std::max(loading_cache_us, stream->loadingCacheLatencyUs());
+                    load_done_to_running_us  = std::max(load_done_to_running_us, stream->loadDoneToRunningUs());
+                }
+                const auto start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
+                RTP_LLM_LOG_INFO("[navi-queue-timing] batch_id=%ld requests=%zu create_to_start_us=%ld "
+                                 "scheduler_queue_us=%ld enqueue_to_canrun_us=%ld canrun_to_running_us=%ld "
+                                 "loading_cache_us=%ld load_done_to_running_us=%ld",
+                                 batch_id,
+                                 prefillQueries.size(),
+                                 earliest_create_time_us == std::numeric_limits<int64_t>::max() ?
+                                     -1 :
+                                     start_time_us - earliest_create_time_us,
+                                 earliest_enqueue_time_us == std::numeric_limits<int64_t>::max() ?
+                                     -1 :
+                                     start_time_us - earliest_enqueue_time_us,
+                                 enqueue_to_canrun_us,
+                                 canrun_to_running_us,
+                                 loading_cache_us,
+                                 load_done_to_running_us);
+            }
+        }
+        if (recordPrefillBatch && !navi_sched::startRetainedRtpLLMBatches(prefillQueries, executionStartTimeUs)) {
+            RTP_LLM_LOG_WARNING("failed to start retained NaviSched batch");
+        }
+        auto processBeginTimeUs = autil::TimeUtility::currentTimeInMicroSeconds();
         status = executor_->process(streams, tps_schedule_time_us);
+        auto processEndTimeUs   = autil::TimeUtility::currentTimeInMicroSeconds();
+        if (status.ok() && hasPrefillBatch) {
+            if (shouldLogNaviLatencyComponents()) {
+                int64_t batch_id                            = 0;
+                int64_t cache_hit_tokens                    = 0;
+                int64_t cache_miss_tokens                   = 0;
+                int64_t device_reuse_tokens                 = 0;
+                int64_t memory_reuse_tokens                 = 0;
+                int64_t remote_reuse_tokens                 = 0;
+                int64_t kv_block_init_sum_us                = 0;
+                int64_t kv_block_init_max_us                = 0;
+                int64_t kv_cache_key_sum_us                 = 0;
+                int64_t kv_prefill_metric_sum_us            = 0;
+                int64_t kv_allocator_sum_us                 = 0;
+                int64_t kv_cache_match_sum_us               = 0;
+                int64_t kv_cache_status_report_sum_us       = 0;
+                int64_t kv_eviction_select_sum_us           = 0;
+                int64_t kv_eviction_select_lock_wait_sum_us = 0;
+                int64_t kv_eviction_select_lock_hold_sum_us = 0;
+                int64_t kv_eviction_free_sum_us             = 0;
+                int64_t kv_eviction_metrics_sum_us          = 0;
+                int64_t kv_load_setup_sum_us                = 0;
+                int64_t kv_load_setup_max_us                = 0;
+                int64_t kv_load_max_us                      = 0;
+                int64_t miss_tokens_max                     = 0;
+                int64_t miss_tokens_min                     = std::numeric_limits<int64_t>::max();
+                int64_t hit_tokens_max                      = 0;
+                int64_t total_tokens_max                    = 0;
+                int64_t earliest_canrun_us                  = std::numeric_limits<int64_t>::max();
+                int64_t latest_running_us                   = 0;
+                double  miss_square_sum                     = 0.0;
+                double  hit_miss_sum                        = 0.0;
+                for (const auto& query : prefillQueries) {
+                    const auto miss_tokens = query.totalTokenCount - query.cacheHitTokenCount;
+                    cache_hit_tokens += query.cacheHitTokenCount;
+                    cache_miss_tokens += miss_tokens;
+                    miss_tokens_max  = std::max(miss_tokens_max, miss_tokens);
+                    miss_tokens_min  = std::min(miss_tokens_min, miss_tokens);
+                    hit_tokens_max   = std::max(hit_tokens_max, query.cacheHitTokenCount);
+                    total_tokens_max = std::max(total_tokens_max, query.totalTokenCount);
+                    miss_square_sum += static_cast<double>(miss_tokens) * miss_tokens;
+                    hit_miss_sum += static_cast<double>(query.cacheHitTokenCount) * miss_tokens;
+                }
+                for (const auto& stream : streams) {
+                    if (!stream || stream->isFakeStream()) {
+                        continue;
+                    }
+                    if (batch_id == 0) {
+                        batch_id = stream->groupId();
+                    }
+                    device_reuse_tokens += stream->deviceReuseLength();
+                    memory_reuse_tokens += stream->hostReuseLength();
+                    remote_reuse_tokens += stream->remoteReuseLength();
+                    kv_block_init_sum_us += stream->kvBlockInitLatencyUs();
+                    kv_block_init_max_us  = std::max(kv_block_init_max_us, stream->kvBlockInitLatencyUs());
+                    const auto& breakdown = stream->kvCacheMallocBreakdown();
+                    kv_cache_key_sum_us += breakdown.cache_key_cost_time_us;
+                    kv_prefill_metric_sum_us += breakdown.prefill_metric_cost_time_us;
+                    kv_allocator_sum_us += breakdown.allocator_cost_time_us;
+                    kv_cache_match_sum_us += breakdown.match_cost_time_us;
+                    kv_cache_status_report_sum_us += breakdown.cache_status_report_cost_time_us;
+                    kv_eviction_select_sum_us += breakdown.eviction_select_cost_time_us;
+                    kv_eviction_select_lock_wait_sum_us += breakdown.eviction_select_lock_wait_time_us;
+                    kv_eviction_select_lock_hold_sum_us += breakdown.eviction_select_lock_hold_time_us;
+                    kv_eviction_free_sum_us += breakdown.eviction_free_cost_time_us;
+                    kv_eviction_metrics_sum_us += breakdown.eviction_metrics_cost_time_us;
+                    kv_load_setup_sum_us += stream->kvCacheLoadSetupLatencyUs();
+                    kv_load_setup_max_us = std::max(kv_load_setup_max_us, stream->kvCacheLoadSetupLatencyUs());
+                    kv_load_max_us       = std::max(kv_load_max_us, stream->loadingCacheLatencyUs());
+                    if (stream->canRunTimeUs() > 0) {
+                        earliest_canrun_us = std::min(earliest_canrun_us, stream->canRunTimeUs());
+                    }
+                    if (stream->canRunTimeUs() > 0 && stream->canRunToRunningUs() >= 0) {
+                        latest_running_us =
+                            std::max(latest_running_us, stream->canRunTimeUs() + stream->canRunToRunningUs());
+                    }
+                }
+                const auto kv_stage_wall_us =
+                    earliest_canrun_us == std::numeric_limits<int64_t>::max() || latest_running_us == 0 ?
+                        0 :
+                        latest_running_us - earliest_canrun_us;
+                const auto preparation_us =
+                    processBeginTimeUs - (executionStartTimeUs > 0 ? executionStartTimeUs : processBeginTimeUs);
+                const auto process_us = processEndTimeUs - processBeginTimeUs;
+                const auto post_kv_wait_us =
+                    latest_running_us > 0 ? std::max<int64_t>(0, processBeginTimeUs - latest_running_us) : 0;
+                const auto* mtp_executor = dynamic_cast<const MtpExecutor*>(executor_.get());
+                const auto  mtp_timing   = mtp_executor ? mtp_executor->getLastPrefillTiming() : MtpPrefillTiming();
+                RTP_LLM_LOG_INFO("[navi-latency-components] batch_id=%ld requests=%zu hit_tokens=%ld miss_tokens=%ld "
+                                 "device_reuse_tokens=%ld memory_reuse_tokens=%ld remote_reuse_tokens=%ld "
+                                 "miss_tokens_min=%ld miss_tokens_max=%ld hit_tokens_max=%ld total_tokens_max=%ld "
+                                 "miss_square_sum=%.0f hit_miss_sum=%.0f kv_block_init_sum_us=%ld "
+                                 "kv_block_init_max_us=%ld kv_cache_key_sum_us=%ld kv_prefill_metric_sum_us=%ld "
+                                 "kv_allocator_sum_us=%ld kv_cache_match_sum_us=%ld "
+                                 "kv_cache_status_report_sum_us=%ld "
+                                 "kv_eviction_select_sum_us=%ld kv_eviction_free_sum_us=%ld "
+                                 "kv_eviction_metrics_sum_us=%ld "
+                                 "kv_eviction_select_lock_wait_sum_us=%ld "
+                                 "kv_eviction_select_lock_hold_sum_us=%ld "
+                                 "kv_load_setup_sum_us=%ld kv_load_setup_max_us=%ld "
+                                 "kv_load_max_us=%ld kv_stage_wall_us=%ld post_kv_wait_us=%ld "
+                                 "preparation_us=%ld process_us=%ld total_us=%ld "
+                                 "mtp_valid=%d mtp_execute_tokens=%ld mtp_max_seq_len=%ld "
+                                 "mtp_gather_us=%ld mtp_tp_sync_us=%ld mtp_target_forward_us=%ld "
+                                 "mtp_target_sample_us=%ld mtp_draft_prepare_us=%ld mtp_draft_forward_us=%ld "
+                                 "mtp_draft_sample_us=%ld mtp_dispatch_us=%ld mtp_prefill_total_us=%ld",
+                                 batch_id,
+                                 prefillQueries.size(),
+                                 cache_hit_tokens,
+                                 cache_miss_tokens,
+                                 device_reuse_tokens,
+                                 memory_reuse_tokens,
+                                 remote_reuse_tokens,
+                                 miss_tokens_min == std::numeric_limits<int64_t>::max() ? 0 : miss_tokens_min,
+                                 miss_tokens_max,
+                                 hit_tokens_max,
+                                 total_tokens_max,
+                                 miss_square_sum,
+                                 hit_miss_sum,
+                                 kv_block_init_sum_us,
+                                 kv_block_init_max_us,
+                                 kv_cache_key_sum_us,
+                                 kv_prefill_metric_sum_us,
+                                 kv_allocator_sum_us,
+                                 kv_cache_match_sum_us,
+                                 kv_cache_status_report_sum_us,
+                                 kv_eviction_select_sum_us,
+                                 kv_eviction_free_sum_us,
+                                 kv_eviction_metrics_sum_us,
+                                 kv_eviction_select_lock_wait_sum_us,
+                                 kv_eviction_select_lock_hold_sum_us,
+                                 kv_load_setup_sum_us,
+                                 kv_load_setup_max_us,
+                                 kv_load_max_us,
+                                 kv_stage_wall_us,
+                                 post_kv_wait_us,
+                                 preparation_us,
+                                 process_us,
+                                 preparation_us + process_us,
+                                 mtp_timing.valid,
+                                 mtp_timing.execute_token_size,
+                                 mtp_timing.max_seq_len,
+                                 mtp_timing.gather_model_input_us,
+                                 mtp_timing.tp_sync_input_us,
+                                 mtp_timing.target_model_forward_us,
+                                 mtp_timing.target_model_sample_us,
+                                 mtp_timing.draft_model_prepare_us,
+                                 mtp_timing.draft_model_forward_us,
+                                 mtp_timing.draft_model_sample_us,
+                                 mtp_timing.dispatch_output_us,
+                                 mtp_timing.prefill_step_total_us);
+            }
+            const auto latencyUs =
+                processEndTimeUs - (executionStartTimeUs > 0 ? executionStartTimeUs : processBeginTimeUs);
+            if (recordPrefillBatch) {
+                navi_sched::recordRtpLLMPrefillBatch(
+                    resource_context_.navi_sched_agent, prefillQueries, latencyUs, processEndTimeUs);
+            } else {
+                navi_sched::recordRtpLLMObservedPrefillBatch(
+                    resource_context_.navi_sched_agent, prefillQueries, latencyUs, processEndTimeUs);
+            }
+        }
         if (propose_params_) {
             step_profiler_.finishStep();
         }

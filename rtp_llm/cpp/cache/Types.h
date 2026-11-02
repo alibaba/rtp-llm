@@ -88,6 +88,15 @@ enum class MallocStatus : uint8_t {
     INTERNAL_ERROR,
 };
 
+struct CacheAllocationEvictionTiming {
+    int64_t select_us{0};
+    int64_t lock_wait_us{0};
+    int64_t lock_hold_us{0};
+    int64_t free_us{0};
+    int64_t metrics_us{0};
+};
+inline thread_local CacheAllocationEvictionTiming cache_allocation_eviction_timing;
+
 struct MallocResult {
     MallocResult() = default;
 
@@ -125,6 +134,29 @@ struct MallocResult {
     int64_t load_prepare_latency_us = 0;
     int64_t device_input_length     = 0;
     bool    load_attempted          = false;
+
+    int64_t             cache_key_cost_time_us            = 0;
+    int64_t             prefill_metric_cost_time_us       = 0;
+    int64_t             allocator_cost_time_us            = 0;
+    int64_t             cache_status_report_cost_time_us  = 0;
+    int64_t             eviction_select_cost_time_us      = 0;
+    int64_t             eviction_select_lock_wait_time_us = 0;
+    int64_t             eviction_select_lock_hold_time_us = 0;
+    int64_t             eviction_free_cost_time_us        = 0;
+    int64_t             eviction_metrics_cost_time_us     = 0;
+
+    void add(const MallocResult& other) {
+        match_cost_time_us += other.match_cost_time_us;
+        cache_key_cost_time_us += other.cache_key_cost_time_us;
+        prefill_metric_cost_time_us += other.prefill_metric_cost_time_us;
+        allocator_cost_time_us += other.allocator_cost_time_us;
+        cache_status_report_cost_time_us += other.cache_status_report_cost_time_us;
+        eviction_select_cost_time_us += other.eviction_select_cost_time_us;
+        eviction_select_lock_wait_time_us += other.eviction_select_lock_wait_time_us;
+        eviction_select_lock_hold_time_us += other.eviction_select_lock_hold_time_us;
+        eviction_free_cost_time_us += other.eviction_free_cost_time_us;
+        eviction_metrics_cost_time_us += other.eviction_metrics_cost_time_us;
+    }
 };
 
 struct FreeInfo {

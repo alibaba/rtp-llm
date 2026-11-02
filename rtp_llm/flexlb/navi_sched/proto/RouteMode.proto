@@ -1,0 +1,30 @@
+syntax = "proto3";
+
+import "arpc/proto/rpc_extensions.proto";
+
+package navi_sched;
+
+option cc_generic_services = true;
+
+message RouteModeRequest {
+    bool update = 1;
+    string master_address = 2;
+    bool watch = 3;
+    uint64 generation = 4;
+    int64 timeout_ms = 5;
+}
+
+message RouteModeResponse {
+    string master_address = 1;
+    uint64 generation = 2;
+    bool accepted = 3;
+    string error = 4;
+}
+
+service RouteModeService {
+    option (arpc.global_service_id) = 6100;
+
+    rpc route_mode(RouteModeRequest) returns (RouteModeResponse) {
+        option (arpc.local_method_id) = 6101;
+    }
+}

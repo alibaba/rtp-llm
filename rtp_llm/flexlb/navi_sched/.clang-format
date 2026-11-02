@@ -1,0 +1,25 @@
+---
+BasedOnStyle: Google
+ColumnLimit: 90
+IndentWidth: 4
+ContinuationIndentWidth: 4
+AccessModifierOffset: -4
+AlignAfterOpenBracket: Align
+AlignOperands: true
+BreakBeforeBraces: Custom
+BraceWrapping:
+  AfterFunction: true
+BreakConstructorInitializers: BeforeComma
+ConstructorInitializerAllOnOneLineOrOnePerLine: true
+ConstructorInitializerIndentWidth: 4
+BinPackArguments: true
+BinPackParameters: true
+AllowAllArgumentsOnNextLine: true
+AllowAllParametersOfDeclarationOnNextLine: true
+AllowShortFunctionsOnASingleLine: All
+AllowShortLambdasOnASingleLine: All
+SortIncludes: false
+FixNamespaceComments: false
+SpacesBeforeTrailingComments: 1
+PointerAlignment: Right
+...

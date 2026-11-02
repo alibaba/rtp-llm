@@ -2,6 +2,7 @@
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include "rtp_llm/cpp/engine_base/stream/StreamCacheResource.h"
 #include "rtp_llm/cpp/config/RoleTypes.h"
+#include "autil/TimeUtility.h"
 #include <cstdlib>
 #include <string>
 
@@ -62,7 +63,11 @@ void GenerateStateMachine::handleWaiting() {
         if (stream != nullptr) {
             stream->recordWaitLatency();
         }
+        const auto kv_block_init_begin_us = autil::TimeUtility::currentTimeInMicroSeconds();
         auto result = stream_cache_resource_->initKVBlock();
+        if (stream != nullptr) {
+            stream->addKVBlockInitLatencyUs(autil::TimeUtility::currentTimeInMicroSeconds() - kv_block_init_begin_us);
+        }
         if (!result.ok()) {
             const auto role_type              = stream_cache_resource_->resourceContext().role_type;
             const bool retryable_prefill_init = (role_type == RoleType::PDFUSION || role_type == RoleType::PREFILL)
@@ -76,7 +81,12 @@ void GenerateStateMachine::handleWaiting() {
             releaseResource();
             return;
         }
+        const auto kv_cache_load_setup_begin_us = autil::TimeUtility::currentTimeInMicroSeconds();
         bool ret = stream_cache_resource_->asyncLoadCache();
+        if (stream != nullptr) {
+            stream->addKVCacheLoadSetupLatencyUs(autil::TimeUtility::currentTimeInMicroSeconds()
+                                                 - kv_cache_load_setup_begin_us);
+        }
         // 设置 LoadInitiated 标志，表示已尝试asyncLoadCache. 当前实现即便asyncLoadCache失败也不再重试
         reportEvent(StreamEvents::LoadInitiated);
         if (ret) {

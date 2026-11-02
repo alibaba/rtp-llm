@@ -511,6 +511,10 @@ CoordinatorCacheManager::prepareKVCache(const CacheKeysType&                 cac
     prepared.matched_device_blocks                 = match_result.matched_device_blocks;
     prepared.total_logical_blocks =
         load_context ? load_context->localMatchedBlocks() : match_result.matched_device_blocks;
+    kv_resource.cacheResource(0).setHybridReuseDebug(match_result.candidate_blocks,
+                                   match_result.flat_matched_blocks,
+                                   match_result.min_full_reuse_blocks,
+                                   prepared.total_logical_blocks);
     const auto& group_sets = block_tree_cache_->groupSets();
     if (prepared.total_logical_blocks > 0) {
         for (const auto& group_set : group_sets) {

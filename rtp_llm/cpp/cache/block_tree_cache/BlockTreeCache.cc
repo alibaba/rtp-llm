@@ -1,3 +1,4 @@
+#include "rtp_llm/cpp/cache/block_tree_cache/ScopeRollback.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCache.h"
 
 #include <algorithm>
@@ -176,7 +177,13 @@ size_t BlockTreeCache::insert(const CacheKeysType&                              
 }
 
 int BlockTreeCache::evictForGroup(std::string_view group_tag, size_t num_blocks) {
+    const auto lock_wait_begin_us = currentTimeUs();
     std::lock_guard<std::mutex> lock(mutex_);
+    const auto lock_acquired_us = currentTimeUs();
+    cache_allocation_eviction_timing.lock_wait_us += lock_acquired_us - lock_wait_begin_us;
+    block_tree_cache_detail::ScopeRollback lock_timing([&] {
+        cache_allocation_eviction_timing.lock_hold_us += currentTimeUs() - lock_acquired_us;
+    });
     if (!config_.isTierEnabled(Tier::DEVICE)) {
         return 0;
     }
@@ -251,6 +258,11 @@ void BlockTreeCache::setEventPublisher(KVCacheEventPublisherPtr        publisher
                                        const std::vector<std::string>& required_group_tags) {
     std::lock_guard<std::mutex> lock(mutex_);
     tree_->setEventPublisher(std::move(publisher), required_group_tags);
+}
+
+void BlockTreeCache::setStateObserver(BlockTreeStateObserver observer) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    tree_->setStateObserver(std::move(observer));
 }
 
 KVCacheSnapshot BlockTreeCache::logicalCacheSnapshot() const {

@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
+#include "aios/navi_sched/adapters/rtp_llm/RtpLLMAdapter.h"
 #include "rtp_llm/cpp/cache/events/KVCMPublisher.h"
 
 #include <algorithm>
@@ -349,6 +350,7 @@ bool KVCacheManager::init() {
     }
     coordinator_manager_->attachBlockTreeCache(block_tree_cache_);
     initCacheEventPublisher();
+    initNaviSchedCacheReporting();
 
     if (metrics_reporter_) {
         stop_.store(false, std::memory_order_relaxed);
@@ -422,11 +424,24 @@ MallocResult KVCacheManager::malloc(const MallocInfo& malloc_info) {
                         seq_size_per_block,
                         config_.cache_key_hash_seed);
     }
+    const auto key_end_us = currentTimeUs();
     reportPrefillCacheHitMetrics(malloc_info, keys_initialized_now);
+    const auto metric_end_us = currentTimeUs();
+    navi_sched::resetRtpLLMCacheReportLatency();
+    cache_allocation_eviction_timing = {};
 
     MallocResult  result             = coordinator_manager_->malloc(malloc_info);
     const int64_t malloc_end_time_us = currentTimeUs();
     result.malloc_begin_time_us      = malloc_begin_time_us;
+    result.cache_key_cost_time_us = key_end_us - malloc_begin_time_us;
+    result.prefill_metric_cost_time_us = metric_end_us - key_end_us;
+    result.allocator_cost_time_us = malloc_end_time_us - metric_end_us;
+    result.cache_status_report_cost_time_us = navi_sched::takeRtpLLMCacheReportLatencyUs();
+    result.eviction_select_cost_time_us = cache_allocation_eviction_timing.select_us;
+    result.eviction_select_lock_wait_time_us = cache_allocation_eviction_timing.lock_wait_us;
+    result.eviction_select_lock_hold_time_us = cache_allocation_eviction_timing.lock_hold_us;
+    result.eviction_free_cost_time_us = cache_allocation_eviction_timing.free_us;
+    result.eviction_metrics_cost_time_us = cache_allocation_eviction_timing.metrics_us;
     if (result.load_attempted) {
         result.load_prepare_latency_us = std::max<int64_t>(malloc_end_time_us - result.match_end_time_us, 0);
     }
@@ -773,6 +788,41 @@ bool KVCacheManager::executeFunction(const FunctionRequestPB& request, FunctionR
         return true;
     }
     return true;
+}
+
+
+void KVCacheManager::initNaviSchedCacheReporting() {
+    if (!navi_sched_agent_ || !block_tree_cache_ || warmup_) {
+        return;
+    }
+    int64_t linear_step = config_.seq_size_per_block;
+    bool hybrid_tail_required = false;
+    for (const auto& group : config_.groups()) {
+        if (group.policy.enable_prefix_reuse && group.policy.active_tail_blocks != 0) {
+            hybrid_tail_required = true;
+            linear_step = std::max<int64_t>(linear_step, group.spec->seq_size_per_block);
+        }
+    }
+    const auto info = getKVCacheInfo(-1, false);
+    navi_sched::reportRtpLLMCacheStatus(
+        navi_sched_agent_, info.total_kv_cache / std::max<size_t>(1, info.block_size),
+        info.block_size, linear_step, hybrid_tail_required, currentTimeUs());
+    std::weak_ptr<navi_sched::NaviSchedAgent> agent = navi_sched_agent_;
+    block_tree_cache_->setStateObserver([agent, hybrid_tail_required](const BlockTreeCacheState& state) {
+        auto locked_agent = agent.lock();
+        if (!locked_agent) {
+            return;
+        }
+        const auto start_us = currentTimeUs();
+        auto changed = std::make_shared<const navi_sched::NaviSchedBlockHashes>(
+            navi_sched::NaviSchedBlockHashes{
+                static_cast<navi_sched::NaviSchedBlockHashes::value_type>(state.key)});
+        auto empty = std::make_shared<const navi_sched::NaviSchedBlockHashes>();
+        navi_sched::reportRtpLLMCacheStateChanged(
+            locked_agent, changed, state.present ? changed : empty,
+            state.full_ready ? changed : empty, state.tail_ready ? changed : empty,
+            hybrid_tail_required, start_us, state.cached_blocks);
+    });
 }
 
 bool KVCacheManager::hasTailSparseReuseGroup() const {

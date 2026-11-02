@@ -23,3 +23,9 @@ def extension_frontend_lib_deps():
 
 def internal_only_deps():
     pass
+
+def extension_whl_requires():
+    return []
+
+def navi_sched_test_deps():
+    return []

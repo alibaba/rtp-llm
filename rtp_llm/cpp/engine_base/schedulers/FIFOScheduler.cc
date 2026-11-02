@@ -104,6 +104,10 @@ FIFOScheduler::enqueueGroup(const vector<GenerateStreamPtr>& streams) {
         }
     }
 
+    const bool navi_sched_group =
+        !streams.empty() && std::all_of(streams.begin(), streams.end(), [](const auto& stream) {
+            return stream && stream->isNaviSched();
+        });
     if (valid_streams.empty()) {
         return {std::move(enqueue_successes), streams};
     }
@@ -112,6 +116,23 @@ FIFOScheduler::enqueueGroup(const vector<GenerateStreamPtr>& streams) {
         max_inited_kv_cache_streams_ > 0 && valid_streams.size() > max_inited_kv_cache_streams_;
     const bool exceeds_batch_limit            = valid_streams.size() > max_generate_batch_size_;
     const bool fallback_to_individual_streams = exceeds_inited_kv_limit || exceeds_batch_limit;
+    const bool exceeds_navi_execution_limit   = navi_sched_group && !fitsNaviSchedExecutionLimits(valid_streams);
+    if (navi_sched_group
+        && (valid_streams.size() != streams.size() || fallback_to_individual_streams || exceeds_navi_execution_limit)) {
+        for (const auto& stream : valid_streams) {
+            stream->reportError(ErrorCode::MALLOC_FAILED, "NaviSched requires atomic batch admission");
+        }
+        std::fill(enqueue_successes.begin(), enqueue_successes.end(), false);
+        RTP_LLM_LOG_WARNING("NaviSched group rejected atomically: group_size=%zu valid=%zu "
+                            "max_generate_batch_size=%zu max_batch_tokens_size=%zu "
+                            "max_inited_kv_cache_streams=%zu",
+                            streams.size(),
+                            valid_streams.size(),
+                            max_generate_batch_size_,
+                            max_batch_tokens_size_,
+                            max_inited_kv_cache_streams_);
+        return {std::move(enqueue_successes), streams};
+    }
     if (fallback_to_individual_streams) {
         RTP_LLM_LOG_DEBUG("enqueue group exceeds scheduler limits; fallback to individual streams: "
                           "group_size=%zu max_generate_batch_size=%zu max_inited_kv_cache_streams=%zu",
@@ -489,6 +510,25 @@ void FIFOScheduler::advanceLoadingGroup(StreamGroup& group) {
     }
 }
 
+bool FIFOScheduler::advanceLoadingNaviSchedGroup(StreamGroup& group) {
+    bool failed = false;
+    for (const auto& stream : group) {
+        auto state = stream->moveToNext();
+        if (state == StreamState::WAITING) {
+            state = stream->moveToNext();
+        }
+        failed = failed || state == StreamState::FINISHED;
+    }
+    if (!failed) {
+        return true;
+    }
+    RTP_LLM_LOG_WARNING("NaviSched group failed while loading cache: group_id=%ld requests=%zu",
+                        group.front()->groupId(),
+                        group.size());
+    cancelStreams(group);
+    return false;
+}
+
 void FIFOScheduler::moveGroupToNewStreams(StreamGroup& group) {
     for (auto it = group.begin(); it != group.end();) {
         accountBatchMetrics(*it);
@@ -510,13 +550,86 @@ void FIFOScheduler::dispatchPreparedGroup(StreamGroup& group) {
     }
 }
 
+bool FIFOScheduler::isNaviSchedGroup(const StreamGroup& group) const {
+    return !group.empty() && std::all_of(group.begin(), group.end(), [](const auto& stream) {
+        return stream && stream->isNaviSched();
+    });
+}
+
+bool FIFOScheduler::fitsNaviSchedExecutionLimits(const std::vector<GenerateStreamPtr>& streams) const {
+    if (streams.empty() || streams.size() > max_generate_batch_size_
+        || (cp_force_single_prefill_ && streams.size() > 1)) {
+        return false;
+    }
+    if (streams.size() == 1) {
+        return true;
+    }
+    size_t max_context_length = 0;
+    for (const auto& stream : streams) {
+        if (!stream) {
+            return false;
+        }
+        max_context_length = std::max(max_context_length, static_cast<size_t>(stream->contextLength()));
+    }
+    return max_batch_tokens_size_ > 0 && max_context_length <= (max_batch_tokens_size_ - 1) / streams.size();
+}
+
+bool FIFOScheduler::canAdmitNaviSchedGroup(const StreamGroup& group) const {
+    StreamGroup admitted;
+    size_t      uninitialized_streams = 0;
+    for (const auto& stream : group) {
+        if (!stream || stream->hasError() || !evaluateRunningBatch(admitted, stream)) {
+            return false;
+        }
+        admitted.push_back(stream);
+        if (stream->curBlocksNum() == 0) {
+            ++uninitialized_streams;
+        }
+    }
+    return max_inited_kv_cache_streams_ == 0
+           || countInitedKVCacheStreams() + uninitialized_streams <= max_inited_kv_cache_streams_;
+}
+
+void FIFOScheduler::evaluateWaitingNaviSchedGroup(StreamGroup& group) {
+    if (!canAdmitNaviSchedGroup(group)) {
+        return;
+    }
+
+    bool failed = false;
+    for (const auto& stream : group) {
+        if (!stream->hasEvent(StreamEvents::CanRun)) {
+            stream->reportEvent(StreamEvents::CanRun);
+        }
+        if (stream->moveToNext() == StreamState::FINISHED) {
+            failed = true;
+        }
+    }
+    if (failed) {
+        RTP_LLM_LOG_WARNING("NaviSched group failed during atomic admission: group_id=%ld requests=%zu",
+                            group.front()->groupId(),
+                            group.size());
+        cancelStreams(group);
+        return;
+    }
+    StreamGroup admitted;
+    admitted.splice(admitted.end(), group);
+    dispatchPreparedGroup(admitted);
+}
+
 void FIFOScheduler::evaluateLoadingCacheGroupQueue() {
     if (loading_cache_group_queue_.empty()) {
         return;
     }
 
     auto& group = loading_cache_group_queue_.front();
-    advanceLoadingGroup(group);
+    if (isNaviSchedGroup(group)) {
+        if (!advanceLoadingNaviSchedGroup(group)) {
+            loading_cache_group_queue_.pop_front();
+            return;
+        }
+    } else {
+        advanceLoadingGroup(group);
+    }
     if (group.empty()) {
         loading_cache_group_queue_.pop_front();
         return;
@@ -550,6 +663,15 @@ void FIFOScheduler::evaluateWaitingGroupQueue() {
     // Evaluate at most one waiting group per scheduling round.
     auto&        group         = waiting_group_queue_.front();
     const size_t original_size = group.size();
+    if (isNaviSchedGroup(group)
+        && std::any_of(group.begin(), group.end(), [](const auto& stream) { return stream->hasError(); })) {
+        RTP_LLM_LOG_WARNING("cancel NaviSched group atomically after a member failed: group_id=%ld requests=%zu",
+                            group.front()->groupId(),
+                            group.size());
+        cancelStreams(group);
+        waiting_group_queue_.pop_front();
+        return;
+    }
     for (auto it = group.begin(); it != group.end();) {
         if ((*it)->hasError()) {
             (*it)->moveToNext();
@@ -560,6 +682,14 @@ void FIFOScheduler::evaluateWaitingGroupQueue() {
     }
     if (group.empty()) {
         waiting_group_queue_.pop_front();
+        return;
+    }
+
+    if (isNaviSchedGroup(group)) {
+        evaluateWaitingNaviSchedGroup(group);
+        if (group.empty()) {
+            waiting_group_queue_.pop_front();
+        }
         return;
     }
 

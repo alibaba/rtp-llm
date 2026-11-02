@@ -488,7 +488,7 @@ void PrefillRpcServer::enqueueRequest(PrefillGenerateContext& prefill_context) {
     RTP_LLM_PROFILE_FUNCTION();
     RTP_LLM_LOG_DEBUG("request [%ld] trans query", prefill_context.request_id);
     RTP_LLM_LOG_DEBUG("request [%ld] trans to stream success", prefill_context.request_id);
-    auto stream = engine_->enqueue(prefill_context.generate_input);
+    auto stream = enqueueWithNaviSchedBatch(prefill_context.generate_input, prefill_context.server_context);
     prefill_context.setStream(stream);
     RTP_LLM_LOG_DEBUG("request [%ld] enqueue success", prefill_context.request_id);
 }

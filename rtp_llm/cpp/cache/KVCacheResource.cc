@@ -457,6 +457,32 @@ void KVCacheResource::setDeviceReuseBlockNum(size_t device_reuse_blocks_num) {
     device_reuse_block_num_ = device_reuse_blocks_num;
 }
 
+void KVCacheResource::setHybridReuseDebug(int candidate_blocks,
+                                          int flat_matched_blocks,
+                                          int min_full_blocks,
+                                          int selected_blocks) {
+    hybrid_candidate_block_num_      = candidate_blocks;
+    hybrid_flat_matched_block_num_   = flat_matched_blocks;
+    hybrid_min_full_reuse_block_num_ = min_full_blocks;
+    hybrid_selected_reuse_block_num_ = selected_blocks;
+}
+
+int KVCacheResource::hybridCandidateBlockNum() const {
+    return hybrid_candidate_block_num_;
+}
+
+int KVCacheResource::hybridFlatMatchedBlockNum() const {
+    return hybrid_flat_matched_block_num_;
+}
+
+int KVCacheResource::hybridMinFullReuseBlockNum() const {
+    return hybrid_min_full_reuse_block_num_;
+}
+
+int KVCacheResource::hybridSelectedReuseBlockNum() const {
+    return hybrid_selected_reuse_block_num_;
+}
+
 size_t KVCacheResource::memoryReuseBlockNum() const {
     return memory_reuse_block_num_;
 }

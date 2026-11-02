@@ -54,7 +54,8 @@ class BackendRPCServerVisitorValidateInputTest(unittest.IsolatedAsyncioTestCase)
         ), patch(
             "rtp_llm.server.backend_rpc_server_visitor.HostService"
         ) as host_service_type, patch(
-            "rtp_llm.server.backend_rpc_server_visitor.MasterClient"
+            "rtp_llm.server.backend_rpc_server_visitor.MasterClient",
+            autospec=True,
         ):
             host_service_type.return_value.service_available = False
             self.visitor = BackendRPCServerVisitor(
