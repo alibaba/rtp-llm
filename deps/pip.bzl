@@ -30,6 +30,12 @@ PIP_INDEX_ENVSUBST = [
     "PIP_EXTRA_INDEX_URL",
 ]
 
+# Intel XPU: torch, torchvision and triton-xpu built for XPU are served by the
+# PyTorch XPU index, injected through the same envsubst channel.
+PIP_XPU_INDEX_ARGS = [
+    "--extra-index-url=${PIP_XPU_INDEX_URL:-https://download.pytorch.org/whl/xpu}",
+]
+
 # FlashInfer 0.6.9 plans decode on the CPU; avoid Python scalar-Tensor iteration.
 # Apply directly to the Python wheels used by the CUDA 12.9/13 lines (both
 # the 8c4f4dcf and e87d610f fork builds plus upstream stock).
@@ -137,6 +143,16 @@ def pip_deps():
         extra_pip_args = PIP_EXTRA_ARGS + PIP_INDEX_ARGS,
         envsubst = PIP_INDEX_ENVSUBST,
         timeout = 12000,
+    )
+
+    # No python_interpreter: rules_python then uses `python3` from PATH, which
+    # --config=xpu forwards, so this resolves with the active environment.
+    pip_parse(
+        name = "pip_xpu_torch",
+        requirements_lock = "@rtp_pip_deps//:requirements_lock_xpu.txt",
+        extra_pip_args = PIP_EXTRA_ARGS + PIP_INDEX_ARGS + PIP_XPU_INDEX_ARGS,
+        envsubst = PIP_INDEX_ENVSUBST + ["PIP_XPU_INDEX_URL"],
+        timeout = 3600,
     )
 
     # Havenask compatibility parse: internal BUILD files (e.g. internal rdma)

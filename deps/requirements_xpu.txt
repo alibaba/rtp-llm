@@ -1,0 +1,6 @@
+-r requirements_base.txt
+# Intel XPU (--config=xpu). torch and torchvision built for XPU come from the
+# PyTorch XPU index (see update_xpu_lock.sh). torch pins triton-xpu and the
+# SYCL / oneMKL runtimes it needs, so no oneAPI install is required to run.
+torch==2.13.0+xpu
+torchvision==0.28.0+xpu
