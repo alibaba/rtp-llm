@@ -1,0 +1,28 @@
+syntax = "proto3";
+package flexlb.mock.input;
+option java_package = "org.flexlb.mock.client.input";
+option java_outer_classname = "ClientInput";
+
+// Playback data only; request identities and send pacing belong to the coordinator/Player.
+message Request {
+  repeated int32 token_ids = 1;
+  int32 max_new_tokens = 2;
+  optional int32 priority = 3; // Absent means 50.
+  repeated Image images = 5; // Raw media placeholders; expansion belongs to the engine.
+  optional int64 arrival_offset_ms = 4; // Relative to the source start, before replay_speed.
+}
+// Storage chunk only; unrelated to Master or Engine execution batches.
+message InputChunk {
+  uint64 sequence = 1;
+  repeated Request requests = 2;
+  optional uint64 total_requests = 3; // Final chunk only, with no requests.
+}
+
+message Image {
+  string url = 1;
+  int32 width = 2;
+  int32 height = 3;
+  int32 offset = 4;
+  reserved 5;
+  reserved "length";
+}

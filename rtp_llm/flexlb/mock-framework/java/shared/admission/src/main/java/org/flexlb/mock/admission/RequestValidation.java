@@ -1,0 +1,22 @@
+package org.flexlb.mock.admission;
+
+import io.grpc.Status;
+import org.flexlb.engine.grpc.EngineRpcService.GenerateInputPB;
+
+/** Common support boundary for local Prefill, P/D Prefill and Decode admission. */
+final class RequestValidation {
+    private RequestValidation() {}
+
+    static void supported(GenerateInputPB input) {
+        var g = input.getGenerateConfig();
+        if (g.getPrefillOnly())
+            throw Status.UNIMPLEMENTED.withDescription("Mock does not support prefill_only").asRuntimeException();
+        if (g.hasAdapterName() || !g.getUniqueKey().isEmpty()
+                || g.getNumBeams() > 1 || g.getNumReturnSequences() > 1 || g.getVariableNumBeamsCount() > 0
+                || g.getReturnPromptLogits() || g.getReturnHiddenStates() || g.getReturnLogits() || g.getReturnAllHiddenStates()
+                || g.getReturnLogprobs() || g.getTopLogprobs() != 0
+                || g.getReturnAllProbs() || g.getReturnSoftmaxProbs() || g.getReturnCumLogProbs() || g.getCalculateLoss() != 0
+                || g.getStopWordsList().getRowsCount() > 0 || g.getSpEdit() || g.getSpInputLookup())
+            throw Status.UNIMPLEMENTED.withDescription("Unsupported adapter, sequence shape or output mode").asRuntimeException();
+    }
+}
