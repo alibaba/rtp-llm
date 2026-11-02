@@ -143,7 +143,7 @@ class BatchDeliveryTest {
                                                         .SINGLE))) {
             var first = f.item(1L, 10L);
             f.item(2L, 20L);
-            ReflectionTestUtils.invokeMethod(f.worker, "processQueue");
+            QueuedRequestScheduler.schedulePrefill(f.worker);
             f.drain();
             assertEquals(List.of(first), f.committedItems);
             assertEquals(List.of(1L), f.sentIds());
@@ -614,7 +614,7 @@ final class LinearDeliveryFixture implements AutoCloseable {
     final Set<Long> blockedDecode = ConcurrentHashMap.newKeySet();
     final SchedulerTestServices runtime;
     final DeliveryDispatcher dispatcher;
-    final PrefillQueueRunner worker;
+    final RequestExecution worker;
     final PrefillTimePredictor.Evaluator evaluator =
             spy(
                     new PrefillTimePredictor.Evaluator() {
@@ -674,7 +674,7 @@ final class LinearDeliveryFixture implements AutoCloseable {
         doReturn(701L).when(execution).nextBatchId();
         org.flexlb.balance.scheduler.SchedulerTestServices.bind(owner, runtime);
         worker =
-                new PrefillQueueRunner(
+                new RequestExecution(
                         "contract",
                         prefill,
                         QueueExecutionSettings.capture(

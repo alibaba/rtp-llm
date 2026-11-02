@@ -1,6 +1,5 @@
 package org.flexlb.balance.endpoint;
 
-import org.flexlb.balance.planner.GroupPlanner;
 import org.flexlb.balance.scheduler.RequestRoute;
 import org.flexlb.util.PriorityNormalizer;
 
@@ -23,7 +22,7 @@ import static com.google.common.base.Preconditions.checkState;
  * DIRECT has no backing queue and cannot accept ACTIVE queue work; QUEUE owns
  * one ordered index shared by its runtime and canonical Prefill ledger.</p>
  */
-public final class PrefillActiveIndex implements WorkerQueue {
+public final class PrefillActiveIndex implements PrefillRequestQueue {
     private static final PrefillActiveIndex DISABLED = new PrefillActiveIndex();
 
     private final TreeSet<Entry> queue;
@@ -49,64 +48,25 @@ public final class PrefillActiveIndex implements WorkerQueue {
         priorityCounts = null;
     }
 
-    /** Immutable membership; prediction objects are materialized outside the owner lock. */
-    public static final class Capture implements WorkerQueue.Snapshot {
+    /** Frozen membership and order; request state remains owned by its context. */
+    public static final class Capture implements PrefillRequestQueue.Snapshot {
         private static final Capture EMPTY = new Capture(List.of());
-        private final List<Entry> entries;
-        private volatile List<GroupPlanner.Item> projectedItems;
+        private final List<RequestRoute> items;
 
         private Capture(Collection<Entry> entries) {
-            this.entries = List.copyOf(entries);
+            items = entries.stream().map(entry -> entry.request).toList();
         }
 
-        public List<GroupPlanner.Item> projectedItems() {
-            List<GroupPlanner.Item> result = projectedItems;
-            if (result != null) {
-                return result;
-            }
-            synchronized (this) {
-                if (projectedItems == null) {
-                    projectedItems =
-                            List.of(
-                                    entries.stream()
-                                            .map(Entry::projectedItem)
-                                            .toArray(GroupPlanner.Item[]::new));
-                }
-                return projectedItems;
-            }
-        }
+        public List<RequestRoute> items() { return items; }
     }
 
-    /** One identity in the active index; survives membership snapshot rebuilds. */
     private static final class Entry {
         private final RequestRoute request;
         private final long sequence;
-        private volatile GroupPlanner.Item projectedItem;
 
         private Entry(RequestRoute request, long sequence) {
             this.request = request;
             this.sequence = sequence;
-        }
-
-        private GroupPlanner.Item projectedItem() {
-            GroupPlanner.Item result = projectedItem;
-            if (result != null) {
-                return result;
-            }
-            synchronized (this) {
-                if (projectedItem == null) {
-                    projectedItem =
-                            new GroupPlanner.Item(
-                                    request.requestId(),
-                                    request.priority(),
-                                    request.enqueueSeq(),
-                                    request.enqueuedAtMs(),
-                                    request.expiresAtMs(),
-                                    request.seqLen(),
-                                    request.hitCache());
-                }
-                return projectedItem;
-            }
         }
     }
 
@@ -164,11 +124,6 @@ public final class PrefillActiveIndex implements WorkerQueue {
 
     public boolean contains(RequestRoute item) {
         return identities != null && identities.containsKey(item);
-    }
-
-    @Override
-    public boolean mayBypass(RequestRoute head, RequestRoute candidate) {
-        return head.priority() == candidate.priority();
     }
 
     public RequestRoute peek() {

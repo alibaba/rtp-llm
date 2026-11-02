@@ -145,7 +145,7 @@ class RouteAdmissionPolicyTest {
 
     @ParameterizedTest
     @EnumSource(RequestTimeEstimation.AfterProbeAdmission.class)
-    void unknownEngineCursorCannotProveOvertakeOfBlockedHead(
+    void unknownWorkPreservesCapturedAdmissionSemanticsForHigherPriorityProbe(
             RequestTimeEstimation.AfterProbeAdmission afterProbe) {
         GroupPlanner.Item head = item(1L, 50, 1L, 100L);
         WorkSnapshot unknownWork = RequestTimeEstimationTestSupport.work(List.of(), List.of(), 1L);
@@ -164,8 +164,12 @@ class RouteAdmissionPolicyTest {
                                 11L),
                         ROUTE);
 
-        assertEquals(RequestTimeEstimation.Candidate.State.BLOCKED, result.state());
-        assertEquals("HEAD_CAPACITY_BLOCKED", result.detail());
+        assertEquals(
+                afterProbe == RequestTimeEstimation.AfterProbeAdmission.BLOCKED
+                        ? RequestTimeEstimation.Candidate.State.BLOCKED
+                        : RequestTimeEstimation.Candidate.State.UNAVAILABLE,
+                result.state());
+        assertEquals("AFTER_PROBE_CAPACITY_UNKNOWN", result.detail());
         assertEquals(RequestTimeEstimation.Candidate.UNKNOWN, result.projectedTtftMsValue());
         assertEquals(15L, result.incomingPrefillMs());
         assertEquals(7L, result.cacheHitTokens());

@@ -137,7 +137,7 @@ class RequestDeliveryLockContractTest {
                         System.currentTimeMillis()));
         var worker =
                 org.mockito.Mockito.spy(
-                        new PrefillQueueRunner(
+                        new RequestExecution(
                                 "atomic-prepare",
                                 endpoint,
                                 QueueExecutionSettings.capture(

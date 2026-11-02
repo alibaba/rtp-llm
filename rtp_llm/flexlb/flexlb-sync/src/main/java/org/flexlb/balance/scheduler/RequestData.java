@@ -185,13 +185,13 @@ public final class RequestData {
         }
     }
 
-    public synchronized void initializeWorkerQueue(long nowMs) {
+    public synchronized void initializeExecutionOrder(long nowMs) {
         if (workerEnqueueSequence == 0L) {
-            initializeWorkerQueue(nowMs, WORKER_SEQUENCE.incrementAndGet());
+            initializeExecutionOrder(nowMs, WORKER_SEQUENCE.incrementAndGet());
         }
     }
 
-    synchronized void initializeWorkerQueue(long nowMs, long sequence) {
+    synchronized void initializeExecutionOrder(long nowMs, long sequence) {
         if (workerEnqueueSequence == 0L) {
             firstWorkerEnqueueTime = nowMs;
             workerEnqueueSequence = sequence;

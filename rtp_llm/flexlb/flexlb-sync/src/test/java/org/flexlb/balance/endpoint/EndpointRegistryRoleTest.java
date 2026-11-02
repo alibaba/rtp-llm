@@ -124,7 +124,7 @@ class EndpointRegistryRoleTest {
                             throw failure;
                         })
                 .when(availability)
-                .changed(Mockito.any(), Mockito.eq(address));
+                .changed(Mockito.argThat(endpoint -> endpoint.ipPort().equals(address)));
 
         assertSame(
                 failure,

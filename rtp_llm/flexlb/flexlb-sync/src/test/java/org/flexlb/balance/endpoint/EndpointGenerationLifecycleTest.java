@@ -57,7 +57,7 @@ class EndpointGenerationLifecycleTest {
                     executor.submit(
                             () -> {
                                 waiterStarted.countDown();
-                                lifecycle.awaitRetirement();
+                                lifecycle.awaitRetirement(30_000L);
                             });
             assertTrue(waiterStarted.await(1, TimeUnit.SECONDS));
             assertFalse(concurrentClose.isDone());
@@ -97,9 +97,9 @@ class EndpointGenerationLifecycleTest {
         assertThrows(IllegalStateException.class, () -> lifecycle.completeRetirement(null));
         lifecycle.beginCleanup();
         assertThrows(IllegalStateException.class, lifecycle::beginCleanup);
-        assertThrows(IllegalStateException.class, lifecycle::awaitRetirement);
+        assertThrows(IllegalStateException.class, () -> lifecycle.awaitRetirement(30_000L));
         lifecycle.completeRetirement(null);
-        lifecycle.awaitRetirement();
+        lifecycle.awaitRetirement(30_000L);
         assertFalse(lifecycle.tryStartCleanup());
     }
 
@@ -116,7 +116,7 @@ class EndpointGenerationLifecycleTest {
                     executor.submit(
                             () -> {
                                 waiterStarted.countDown();
-                                lifecycle.awaitRetirement();
+                                lifecycle.awaitRetirement(30_000L);
                             });
 
             assertTrue(waiterStarted.await(1, TimeUnit.SECONDS));
@@ -151,7 +151,7 @@ class EndpointGenerationLifecycleTest {
                                 Thread.currentThread().interrupt();
                                 waiterStarted.countDown();
                                 try {
-                                    lifecycle.awaitRetirement();
+                                    lifecycle.awaitRetirement(30_000L);
                                 } finally {
                                     assertTrue(
                                             Thread.interrupted(),
@@ -176,7 +176,7 @@ class EndpointGenerationLifecycleTest {
         }
 
         IllegalStateException repeatedObservation =
-                assertThrows(IllegalStateException.class, lifecycle::awaitRetirement);
+                assertThrows(IllegalStateException.class, () -> lifecycle.awaitRetirement(30_000L));
         assertSame(failure, repeatedObservation);
     }
 

@@ -55,8 +55,8 @@ class RequestOrchestratorsTest {
                                 dispatcher,
                                 configuration(),
                                 mock(EngineGrpcClient.class)));
-        var owner = mock(RequestScheduler.class);
-        when(owner.lifecycle()).thenReturn(mock(RequestLifecycle.class));
+        var owner = mock(AbstractRequestScheduler.class);
+        org.springframework.test.util.ReflectionTestUtils.setField(owner, "lifecycle", mock(RequestLifecycle.class));
         runtime.registerScheduler(owner);
         var first = new IllegalStateException("placement close failed");
         var second = new IllegalStateException("dispatcher failed");
@@ -71,7 +71,7 @@ class RequestOrchestratorsTest {
                         IllegalStateException.class, () -> SchedulerTestSupport.shutdown(runtime)));
         assertEquals(List.of(second), List.of(first.getSuppressed()));
         verify(endpoints).close();
-        verify(owner.lifecycle()).closeOutstandingAndTerminalize();
+        verify(SchedulerTestServices.lifecycle(owner)).closeOutstandingAndTerminalize();
         assertTrue((SchedulerTestSupport.cleanupExecutor(runtime)).isShutdown());
     }
 
@@ -91,17 +91,17 @@ class RequestOrchestratorsTest {
                                 dispatcher,
                                 configuration(),
                                 mock(EngineGrpcClient.class)));
-        var owner = mock(RequestScheduler.class);
-        when(owner.lifecycle()).thenReturn(mock(RequestLifecycle.class));
+        var owner = mock(AbstractRequestScheduler.class);
+        org.springframework.test.util.ReflectionTestUtils.setField(owner, "lifecycle", mock(RequestLifecycle.class));
         runtime.registerScheduler(owner);
         var executions = org.mockito.Mockito.spy(runtime.deliveries());
         org.flexlb.balance.scheduler.SchedulerTestServices.setDependency(
                 runtime, "deliveries", executions);
         SchedulerTestSupport.shutdown(runtime);
-        InOrder order = inOrder(requests, owner, owner.lifecycle(), runtime, executions, endpoints);
+        InOrder order = inOrder(requests, owner, SchedulerTestServices.lifecycle(owner), runtime, executions, endpoints);
         order.verify(requests).closeRegistration();
         order.verify(owner).close();
-        order.verify(owner.lifecycle()).stopAdmissionsAndAwaitCompletion();
+        order.verify(SchedulerTestServices.lifecycle(owner)).stopAdmissionsAndAwaitCompletion();
         order.verify(executions).awaitDeliveries();
         order.verify(endpoints).close();
         SchedulerTestSupport.shutdown(runtime);

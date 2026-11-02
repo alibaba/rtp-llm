@@ -55,7 +55,7 @@ class ReviewLifecycleRegressionTest {
         var failure = new IllegalStateException("cleanup failed");
         lifecycle.completeRetirement(failure);
         assertFalse(finalized.get());
-        assertSame(failure, assertThrows(IllegalStateException.class, lifecycle::awaitRetirement));
+        assertSame(failure, assertThrows(IllegalStateException.class, () -> lifecycle.awaitRetirement(30_000L)));
     }
 
     @Test

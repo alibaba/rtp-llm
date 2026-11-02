@@ -2,7 +2,7 @@ package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.endpoint.DecodeResources.AdmissionCapacity;
 import org.flexlb.balance.endpoint.PrefillActiveIndex;
-import org.flexlb.balance.endpoint.WorkerQueue;
+import org.flexlb.balance.endpoint.PrefillRequestQueue;
 import org.flexlb.balance.eviction.DecodePreemption;
 import org.flexlb.balance.eviction.DecodePreemptionPolicy;
 import org.flexlb.balance.eviction.DefaultDecodePreemption;
@@ -127,8 +127,8 @@ public class PlacementConfiguration {
     }
 
     @Bean
-    @ConditionalOnMissingBean(WorkerQueue.Factory.class)
-    public WorkerQueue.Factory workerQueues() {
+    @ConditionalOnMissingBean(PrefillRequestQueue.Factory.class)
+    public PrefillRequestQueue.Factory workerQueues() {
         return order -> PrefillActiveIndex.ordered(16, order);
     }
 
@@ -186,6 +186,15 @@ public class PlacementConfiguration {
                 availability.getMaxKvUsagePercent());
     }
 
+    @Bean
+    @Lazy
+    public RequestSchedulerEntry requestSchedulerEntry(RequestScheduler scheduler,
+            RequestLifecycle lifecycle, @Lazy RequestWorkerSelector router,
+            ConfigService configService) {
+        return new RequestSchedulerEntry(scheduler, lifecycle, router,
+                configService.loadBalanceConfig().isQueue());
+    }
+
     @Bean(destroyMethod = "")
     @ConditionalOnMissingBean(RequestScheduler.class)
     public RequestScheduler requestScheduler(
@@ -210,12 +219,15 @@ public class PlacementConfiguration {
                         availability,
                         grouping,
                         queue,
-                        new PrefillQueueRunner.Dependencies(
-                                deliveries, reporter, tasks::recordFailure));
+                        new RequestExecution.Dependencies(
+                                deliveries,
+                                reporter,
+                                tasks::recordFailure,
+                                QueuedRequestScheduler::runPrefill));
         return scheduler;
     }
 
-    static RequestScheduler create(
+    static AbstractRequestScheduler create(
             RequestLifecycle lifecycle,
             FlexlbConfig config,
             RequestWorkerSelector router,
@@ -224,7 +236,7 @@ public class PlacementConfiguration {
             PlacementAvailability availability,
             GroupPlanner grouping,
             PlacementQueue placementQueue,
-            PrefillQueueRunner.Dependencies queueDependencies) {
+            RequestExecution.Dependencies queueDependencies) {
         if (config.isQueue()) {
             QueuedRequestScheduler queue =
                     new QueuedRequestScheduler(

@@ -124,8 +124,8 @@ class DeliveryClaimTest {
     void queueNotificationFailureCannotStrandAnAcceptedCancellation() throws Exception {
         try (var f = new Fixture()) {
             var failure = new IllegalStateException("queue notification failed");
-            var scheduler = (RequestLifecycle.Scheduling) f.owner.scheduler();
-            doThrow(failure).when(scheduler).remove(f.context);
+            var scheduler = (RequestScheduler) org.flexlb.balance.scheduler.SchedulerTestServices.scheduler(f.owner);
+            doThrow(failure).when(scheduler).onRequestChanged(f.context);
 
             assertSame(
                     failure,
@@ -3170,7 +3170,7 @@ class DeliveryClaimTest {
                 retireDecode();
             }
             SchedulerTestSupport.runtime(owner).requests().stopAccepting();
-            ((QueuedRequestScheduler) owner.scheduler()).close();
+            ((QueuedRequestScheduler) org.flexlb.balance.scheduler.SchedulerTestServices.scheduler(owner)).close();
             SchedulerTestSupport.timer(
                             org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(owner))
                     .close();

@@ -165,7 +165,7 @@ class PdfusionSchedulingTest {
                         router,
                         mock(DecodePreemption.class),
                         availability);
-        RequestScheduler scheduler = lifecycle.scheduler();
+        AbstractRequestScheduler scheduler = ((AbstractRequestScheduler) org.flexlb.balance.scheduler.SchedulerTestServices.scheduler(lifecycle));
         try {
             long requestId = 920001L;
             var context = RequestProtocolTestSupport.context(config, requestId);
@@ -175,7 +175,7 @@ class PdfusionSchedulingTest {
                                     .setRequestId(requestId)
                                     .build()
                                     .toByteString());
-            Response response = scheduler.submit(context).get(3, TimeUnit.SECONDS);
+            Response response = SchedulerTestServices.entry(scheduler).submit(context).get(3, TimeUnit.SECONDS);
             assertTrue(
                     response.isSuccess(), "PDFUSION route failed: " + response.getErrorMessage());
             assertEquals(

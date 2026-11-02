@@ -322,7 +322,7 @@ final class RequestProtocolTestSupport {
     }
 
     /** Rewire an already-bound owner only for protocol/fault-injection fixtures. */
-    static RequestScheduler injectPlacementDependencies(
+    static AbstractRequestScheduler injectPlacementDependencies(
             RequestLifecycle owner,
             org.flexlb.config.ConfigService service,
             RequestWorkerSelector router,
@@ -330,8 +330,8 @@ final class RequestProtocolTestSupport {
             org.flexlb.balance.eviction.DecodePreemption eviction,
             PlacementAvailability availability) {
         var config = service.loadBalanceConfig();
-        ReflectionTestUtils.setField(owner.scheduler(), "router", router);
-        if (owner.scheduler() instanceof QueuedRequestScheduler queue) {
+        ReflectionTestUtils.setField(org.flexlb.balance.scheduler.SchedulerTestServices.scheduler(owner), "router", router);
+        if (org.flexlb.balance.scheduler.SchedulerTestServices.scheduler(owner) instanceof QueuedRequestScheduler queue) {
             ReflectionTestUtils.setField(queue, "decodePreemption", eviction);
             ReflectionTestUtils.setField(queue, "reporter", reporter);
             ReflectionTestUtils.setField(
@@ -363,16 +363,16 @@ final class RequestProtocolTestSupport {
             availability.addListener(listener);
             org.mockito.Mockito.doCallRealMethod()
                     .when(queue)
-                    .remove(org.mockito.ArgumentMatchers.any());
-            if (!((Thread) ReflectionTestUtils.getField(queue, "decisionThread")).isAlive()) {
+                    .onRequestChanged(org.mockito.ArgumentMatchers.any());
+            if (!((Thread) SchedulerTestSupport.decisionThread(queue)).isAlive()) {
                 queue.start();
             }
         }
-        return owner.scheduler();
+        return (AbstractRequestScheduler) org.flexlb.balance.scheduler.SchedulerTestServices.scheduler(owner);
     }
 
     static void close(RequestLifecycle lifecycle) {
-        close(lifecycle.scheduler());
+        close(org.flexlb.balance.scheduler.SchedulerTestServices.scheduler(lifecycle));
     }
 
     static void close(RequestScheduler scheduler) {
@@ -410,7 +410,7 @@ final class RequestProtocolTestSupport {
     }
 
     static CompletableFuture<Response> register(RequestScheduler owner, RequestContext context) {
-        return register(owner.lifecycle(), context);
+        return register(SchedulerTestSupport.lifecycle(owner), context);
     }
 
     static CompletableFuture<Response> register(RequestLifecycle owner, RequestContext context) {
@@ -783,7 +783,7 @@ final class RequestProtocolTestSupport {
 
     static void awaitGlobalCapacityWaiters(RequestLifecycle scheduler, int expected)
             throws InterruptedException {
-        Object coordinator = scheduler.scheduler();
+        Object coordinator = org.flexlb.balance.scheduler.SchedulerTestServices.scheduler(scheduler);
         var lock = (ReentrantLock) ReflectionTestUtils.getField(coordinator, "lock");
         var waitQueue =
                 (PlacementCapacityWaitQueue)

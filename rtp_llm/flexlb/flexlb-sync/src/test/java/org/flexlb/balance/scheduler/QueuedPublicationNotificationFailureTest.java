@@ -68,8 +68,8 @@ class QueuedPublicationNotificationFailureTest {
             var actual = fixture.publish(incoming);
 
             var items =
-                    PrefillQueueRunnerTestSupport.capture(
-                                    EndpointTestSupport.queueRunner(fixture.prefill))
+                    RequestExecutionTestSupport.capture(
+                                    EndpointTestSupport.requestExecution(fixture.prefill))
                             .items();
             assertEquals(3, items.size());
             assertTrue(items.containsAll(List.of(firstRoute, secondRoute, actual)));
@@ -96,8 +96,7 @@ class QueuedPublicationNotificationFailureTest {
             var oldRoute = fixture.publish(low);
             var incoming = fixture.context(9312L, 80);
             var handle =
-                    fixture.queue
-                            .lifecycle()
+                    SchedulerTestServices.lifecycle(fixture.queue)
                             .claimAdmissionHandle(9312L, incoming.data().getFuture());
             assertNotNull(handle);
             var failure = new IllegalStateException("physical offer failed before enqueue");
@@ -117,8 +116,8 @@ class QueuedPublicationNotificationFailureTest {
                 assertFalse(fixture.decode.ownership(acquired.decodeReservation()).owned());
                 assertEquals(
                         List.of(oldRoute),
-                        PrefillQueueRunnerTestSupport.capture(
-                                        EndpointTestSupport.queueRunner(fixture.prefill))
+                        RequestExecutionTestSupport.capture(
+                                        EndpointTestSupport.requestExecution(fixture.prefill))
                                 .items());
                 assertTrue(fixture.decode.ownership(oldRoute.decodeReservation()).owned());
             } finally {
@@ -153,12 +152,11 @@ class QueuedPublicationNotificationFailureTest {
             when(service.loadBalanceConfig()).thenReturn(config);
             queue =
                     (QueuedRequestScheduler)
-                            SchedulerTestSupport.create(
+                            SchedulerTestServices.scheduler(SchedulerTestSupport.create(
                                             service,
                                             mock(DeliveryMetricsReporter.class),
                                             reporter,
-                                            mock(RecentCacheKeyTraceReporter.class))
-                                    .scheduler();
+                                            mock(RecentCacheKeyTraceReporter.class)));
             prefill =
                     spy(
                             EndpointTestSupport.realPrefill(
@@ -172,21 +170,21 @@ class QueuedPublicationNotificationFailureTest {
                                     config,
                                     SchedulerTestSupport.dispatcher(
                                             org.flexlb.balance.scheduler.SchedulerTestSupport
-                                                    .runtime(queue.lifecycle())),
-                                    queue.lifecycle().requests,
+                                                    .runtime(SchedulerTestServices.lifecycle(queue))),
+                                    SchedulerTestServices.lifecycle(queue).requests,
                                     mock(DeliveryMetricsReporter.class)));
             decode =
                     spy(
                             EndpointTestSupport.decode(
                                     WorkerStatus.createDiscovered(
                                             RoleType.DECODE, null, "127.0.0.1", 18200, 18201, null),
-                                    queue.lifecycle().requests));
+                                    SchedulerTestServices.lifecycle(queue).requests));
             doAnswer(
                             call -> {
                                 assertThrows(
                                         IllegalStateException.class,
-                                        PrefillQueueRunnerTestSupport.state(
-                                                                EndpointTestSupport.queueRunner(
+                                        RequestExecutionTestSupport.state(
+                                                                EndpointTestSupport.requestExecution(
                                                                         prefill))
                                                         .queueGuard()
                                                 ::requireHeld);
@@ -201,7 +199,7 @@ class QueuedPublicationNotificationFailureTest {
             doAnswer(
                             call -> {
                                 var exact =
-                                        queue.lifecycle()
+                                        SchedulerTestServices.lifecycle(queue)
                                                 .requests
                                                 .findActive(
                                                         call.getArgument(
@@ -262,7 +260,7 @@ class QueuedPublicationNotificationFailureTest {
 
         RequestRoute publish(RequestContext context) {
             var handle =
-                    queue.lifecycle()
+                    SchedulerTestServices.lifecycle(queue)
                             .claimAdmissionHandle(
                                     context.data().getRequestId(), context.data().getFuture());
             try (var plan = RequestProtocolTestSupport.plan(context, select(context))) {
@@ -295,18 +293,18 @@ class QueuedPublicationNotificationFailureTest {
         public void close() {
             metricsFailure = releaseFailure = physicalFailure = null;
             prefill.close();
-            if (RequestProtocolTestSupport.closeAdmissionAndAwaitMutations(queue.lifecycle())) {
-                queue.lifecycle().closeOutstandingAndTerminalize();
+            if (RequestProtocolTestSupport.closeAdmissionAndAwaitMutations(SchedulerTestServices.lifecycle(queue))) {
+                SchedulerTestServices.lifecycle(queue).closeOutstandingAndTerminalize();
             }
-            for (var context : queue.lifecycle().requests.snapshotActive()) {
-                queue.lifecycle().scheduleClose(context);
+            for (var context : SchedulerTestServices.lifecycle(queue).requests.snapshotActive()) {
+                SchedulerTestServices.lifecycle(queue).scheduleClose(context);
             }
             SchedulerTestSupport.timer(
                             org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(
-                                    queue.lifecycle()))
+                                    SchedulerTestServices.lifecycle(queue)))
                     .close();
             SchedulerTestSupport.closeRequestExecutors(
-                    org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(queue.lifecycle()));
+                    org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(SchedulerTestServices.lifecycle(queue)));
         }
     }
 }

@@ -124,8 +124,7 @@ public class EndpointRegistry implements EndpointStats {
             // The continuation owns the fence from this point onward. A bounded
             // wait failure cannot discard a still-draining generation.
             endpoint.onRetired(finalizeExact);
-            Throwable failure =
-                    Failures.run(null, () -> placementAvailability.changed(status, address));
+            Throwable failure = Failures.run(null, () -> placementAvailability.changed(endpoint));
             failure = Failures.run(failure, endpoint::close);
             // Pin release queues cleanup on this same pool. Its workers must return
             // rather than wait for their own queued cleanup; onRetired owns completion.
@@ -185,7 +184,7 @@ public class EndpointRegistry implements EndpointStats {
     private final DeliveryDispatcher dispatcher;
     private final PlacementAvailability placementAvailability;
     private final GroupPlanner grouping;
-    private final WorkerQueue.Factory workerQueues;
+    private final PrefillRequestQueue.Factory workerQueues;
 
     private final Object lifecycleGate = new Object();
 
@@ -213,7 +212,7 @@ public class EndpointRegistry implements EndpointStats {
             DeliveryDispatcher dispatcher,
             PlacementAvailability placementAvailability,
             GroupPlanner grouping,
-            WorkerQueue.Factory workerQueues) {
+            PrefillRequestQueue.Factory workerQueues) {
         checkArgument(retirementTimeoutMs > 0L, "endpoint retirement timeout must be positive");
         this.configService = java.util.Objects.requireNonNull(configService, "configService");
         this.requests = java.util.Objects.requireNonNull(requests, "requests");
@@ -411,7 +410,7 @@ public class EndpointRegistry implements EndpointStats {
                                 address);
                         return exact;
                     });
-            placementAvailability.changed(status, address);
+            placementAvailability.changed(exact);
             return candidate;
         } catch (Throwable publicationFailure) {
             failure = publicationFailure;

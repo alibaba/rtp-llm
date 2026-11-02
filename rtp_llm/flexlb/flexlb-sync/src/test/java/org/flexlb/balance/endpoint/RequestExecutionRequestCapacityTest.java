@@ -3,8 +3,8 @@ package org.flexlb.balance.endpoint;
 import org.flexlb.balance.delivery.CapacityBoundary;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
 import org.flexlb.balance.scheduler.DeliveryDispatcher;
-import org.flexlb.balance.scheduler.PrefillQueueRunner;
-import org.flexlb.balance.scheduler.PrefillQueueRunnerTestSupport;
+import org.flexlb.balance.scheduler.RequestExecution;
+import org.flexlb.balance.scheduler.RequestExecutionTestSupport;
 import org.flexlb.balance.scheduler.RequestContext;
 import org.flexlb.balance.scheduler.RequestRoute;
 import org.flexlb.balance.scheduler.SchedulingTestConfig;
@@ -45,7 +45,7 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /** The configured limit, real worker publication lock and canonical request ledger together. */
-class PrefillQueueRunnerRequestCapacityTest {
+class RequestExecutionRequestCapacityTest {
 
     @ParameterizedTest
     @org.junit.jupiter.params.provider.ValueSource(booleans = {false, true})
@@ -189,8 +189,8 @@ class PrefillQueueRunnerRequestCapacityTest {
         when(predictor.evaluator()).thenReturn(mock(PrefillTimePredictor.Evaluator.class));
         ReflectionTestUtils.setField(endpoint, "predictor", predictor);
         var requests = EndpointTestSupport.requestRuntime();
-        PrefillQueueRunner runtime =
-                PrefillQueueRunnerTestSupport.create(
+        RequestExecution runtime =
+                RequestExecutionTestSupport.create(
                         "failed-reservation",
                         endpoint,
                         config,
@@ -205,7 +205,7 @@ class PrefillQueueRunnerRequestCapacityTest {
                             invocation -> {
                                 assertEquals(
                                         1L,
-                                        PrefillQueueRunnerTestSupport.state(runtime)
+                                        RequestExecutionTestSupport.state(runtime)
                                                 .admissionSummary(0, 0L)
                                                 .occupiedRequests(),
                                         "eligibility failure must happen before queue publication");
@@ -217,10 +217,10 @@ class PrefillQueueRunnerRequestCapacityTest {
             assertSame(
                     failure,
                     assertThrows(IllegalStateException.class, () -> runtime.offer(incoming)));
-            assertEquals(List.of(previous), PrefillQueueRunnerTestSupport.capture(runtime).items());
+            assertEquals(List.of(previous), RequestExecutionTestSupport.capture(runtime).items());
             assertEquals(
                     1L,
-                    PrefillQueueRunnerTestSupport.state(runtime)
+                    RequestExecutionTestSupport.state(runtime)
                             .admissionSummary(0, 0L)
                             .occupiedRequests());
             verify(requests.events(), times(0))
@@ -228,11 +228,10 @@ class PrefillQueueRunnerRequestCapacityTest {
             RequestRoute next = item(config, endpoint, 3L);
             assertTrue(runtime.offer(next));
             assertEquals(
-                    List.of(previous, next),
-                    PrefillQueueRunnerTestSupport.capture(runtime).items());
+                    List.of(previous, next), RequestExecutionTestSupport.capture(runtime).items());
             assertEquals(
                     2L,
-                    PrefillQueueRunnerTestSupport.state(runtime)
+                    RequestExecutionTestSupport.state(runtime)
                             .admissionSummary(0, 0L)
                             .occupiedRequests());
         } finally {
@@ -250,8 +249,8 @@ class PrefillQueueRunnerRequestCapacityTest {
                         WorkerStatus.createDiscovered(
                                 RoleType.PREFILL, "test", "127.0.0.1", 8080, 9090, "test"));
         var requests = EndpointTestSupport.requestRuntime();
-        PrefillQueueRunner runtime =
-                PrefillQueueRunnerTestSupport.create(
+        RequestExecution runtime =
+                RequestExecutionTestSupport.create(
                         "retiring-publication",
                         endpoint,
                         config,
@@ -261,7 +260,7 @@ class PrefillQueueRunnerRequestCapacityTest {
                         invocation -> {
                             assertEquals(
                                     0L,
-                                    PrefillQueueRunnerTestSupport.state(runtime)
+                                    RequestExecutionTestSupport.state(runtime)
                                             .admissionSummary(0, 0L)
                                             .occupiedRequests(),
                                     "retirement rejects queue publication before occupying a request seat");
@@ -275,10 +274,10 @@ class PrefillQueueRunnerRequestCapacityTest {
             assertFalse(runtime.offer(item));
             assertEquals(
                     0L,
-                    PrefillQueueRunnerTestSupport.state(runtime)
+                    RequestExecutionTestSupport.state(runtime)
                             .admissionSummary(0, 0L)
                             .occupiedRequests());
-            assertTrue(PrefillQueueRunnerTestSupport.capture(runtime).items().isEmpty());
+            assertTrue(RequestExecutionTestSupport.capture(runtime).items().isEmpty());
             assertFalse(endpoint.release(null, item));
         } finally {
             assertNull(runtime.stopAndAwait());
@@ -302,7 +301,8 @@ class PrefillQueueRunnerRequestCapacityTest {
                             config, org.flexlb.balance.planner.BuiltinGroupPlanner.from(config)),
                     org.flexlb.balance.scheduler.SchedulerTestSupport.queueDependencies(
                             fixture.runtime.events(), config));
-            var worker = EndpointTestSupport.queueRunner(fixture.endpoint);
+            var worker = EndpointTestSupport.requestExecution(fixture.endpoint);
+            assertTrue(org.mockito.Mockito.mockingDetails(worker).isMock());
             org.flexlb.balance.scheduler.DeliveryTestSupport.selectWith(
                     worker,
                     (items, reason, evaluator, prediction, real) -> {

@@ -156,7 +156,7 @@ class RequestAcknowledgementPreemptionRaceTest {
                     org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(owner));
             SchedulerTestSupport.closeRequestExecutors(
                     org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(owner));
-            owner.scheduler().close();
+            org.flexlb.balance.scheduler.SchedulerTestServices.scheduler(owner).close();
         }
     }
 }

@@ -382,8 +382,10 @@ class RequestContextLifecycleTest {
 
     @Test
     void rejectedDuplicateSubmitCannotReplaceTheCanonicalCancellation() {
-        var queue = (QueuedRequestScheduler) lifecycle.scheduler();
-        org.mockito.Mockito.doNothing().when(queue).remove(org.mockito.ArgumentMatchers.any());
+        var queue = (QueuedRequestScheduler) org.flexlb.balance.scheduler.SchedulerTestServices.scheduler(lifecycle);
+        org.mockito.Mockito.doNothing()
+                .when(queue)
+                .onRequestChanged(org.mockito.ArgumentMatchers.any());
         RequestContext context = context(804L);
         CompletableFuture<Response> canonical =
                 RequestProtocolTestSupport.register(lifecycle, context);
@@ -391,7 +393,7 @@ class RequestContextLifecycleTest {
 
         assertEquals(
                 StrategyErrorType.INVALID_REQUEST.getErrorCode(),
-                queue.submit(context).join().getCode());
+                SchedulerTestServices.entry(queue).submit(context).join().getCode());
         assertEquals(ContextResult.Phase.CLOSED, context.snapshot().phase());
         assertNull(lifecycle.requests.findActive(804L));
 
@@ -422,9 +424,9 @@ class RequestContextLifecycleTest {
                 RequestProtocolTestSupport.register(lifecycle, context(802L));
         assertFalse(replacement.isDone());
         assertSame(replacement, lifecycle.requests.findActive(802L).data().getFuture());
-        var queue = (QueuedRequestScheduler) lifecycle.scheduler();
-        queue.remove(old);
-        assertNull(queue.lifecycle().cancel(old, 0L, CancelReason.SHUTDOWN));
+        var queue = (QueuedRequestScheduler) org.flexlb.balance.scheduler.SchedulerTestServices.scheduler(lifecycle);
+        queue.onRequestChanged(old);
+        assertNull(SchedulerTestServices.lifecycle(queue).cancel(old, 0L, CancelReason.SHUTDOWN));
         assertSame(replacement, lifecycle.requests.findActive(802L).data().getFuture());
         assertFalse(
                 replacement.isDone(),
@@ -471,8 +473,10 @@ class RequestContextLifecycleTest {
     @ValueSource(booleans = {false, true})
     void futureCancelDuringAdmissionIsSynchronousAndTheAdmissionOwnerSettlesIt(
             boolean mayInterruptIfRunning) {
-        QueuedRequestScheduler queue = (QueuedRequestScheduler) lifecycle.scheduler();
-        org.mockito.Mockito.doNothing().when(queue).remove(org.mockito.ArgumentMatchers.any());
+        QueuedRequestScheduler queue = (QueuedRequestScheduler) org.flexlb.balance.scheduler.SchedulerTestServices.scheduler(lifecycle);
+        org.mockito.Mockito.doNothing()
+                .when(queue)
+                .onRequestChanged(org.mockito.ArgumentMatchers.any());
         CompletableFuture<Response> future =
                 RequestProtocolTestSupport.register(lifecycle, context(10003L));
         RequestContext requestContext = lifecycle.requests.findActive(10003L);
@@ -490,7 +494,7 @@ class RequestContextLifecycleTest {
                 0,
                 org.flexlb.balance.scheduler.SchedulerTestSupport.repository(lifecycle)
                         .liveRequestCount());
-        verify(queue).remove(requestContext);
+        verify(queue).onRequestChanged(requestContext);
     }
 
     @ParameterizedTest
@@ -784,8 +788,10 @@ class RequestContextLifecycleTest {
 
     @Test
     void globalWaitingCancellationDoesNotWaitForDecisionOwnerTicket() throws Exception {
-        QueuedRequestScheduler queue = (QueuedRequestScheduler) lifecycle.scheduler();
-        org.mockito.Mockito.doNothing().when(queue).remove(org.mockito.ArgumentMatchers.any());
+        QueuedRequestScheduler queue = (QueuedRequestScheduler) org.flexlb.balance.scheduler.SchedulerTestServices.scheduler(lifecycle);
+        org.mockito.Mockito.doNothing()
+                .when(queue)
+                .onRequestChanged(org.mockito.ArgumentMatchers.any());
         RequestContext context = context(1002L);
         CompletableFuture<Response> future =
                 RequestProtocolTestSupport.register(lifecycle, context);
@@ -794,7 +800,7 @@ class RequestContextLifecycleTest {
                 RequestState.Phase.CANCELLED,
                 lifecycle.cancel(1002L, 0L, CancelReason.CLIENT_CANCELLED).state());
         assertNull(lifecycle.requests.findActive(1002L));
-        verify(queue).remove(context);
+        verify(queue).onRequestChanged(context);
 
         assertEquals(
                 StrategyErrorType.REQUEST_CANCELLED.getErrorCode(),

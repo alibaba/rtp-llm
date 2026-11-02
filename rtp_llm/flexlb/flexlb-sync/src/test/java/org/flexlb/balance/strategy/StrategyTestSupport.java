@@ -312,18 +312,18 @@ final class StrategyTestSupport {
                                     exactItem.ctx().data().getConfig(),
                                     org.flexlb.balance.planner.BuiltinGroupPlanner.from(
                                             exactItem.ctx().data().getConfig())),
-                            org.flexlb.balance.endpoint.EndpointTestSupport.queueRunner(endpoint)
+                            org.flexlb.balance.endpoint.EndpointTestSupport.requestExecution(endpoint)
                                             == null
                                     ? org.flexlb.balance.scheduler.SchedulerTestSupport
                                             .queueDependencies(
                                                     exactItem.ctx().data().getScheduler(),
                                                     exactItem.ctx().data().getConfig())
-                                    : (org.flexlb.balance.scheduler.PrefillQueueRunner.Dependencies)
+                                    : (org.flexlb.balance.scheduler.RequestExecution.Dependencies)
                                             org.springframework.test.util.ReflectionTestUtils
                                                     .getField(
                                                             org.flexlb.balance.endpoint
                                                                     .EndpointTestSupport
-                                                                    .queueRunner(endpoint),
+                                                                    .requestExecution(endpoint),
                                                             "dependencies"));
         }
     }

@@ -25,12 +25,12 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
-class WorkerQueueContractTest {
+class PrefillRequestQueueContractTest {
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
-    void replacementMayForbidBypassButCannotBypassAnExpiredOwner(boolean alternative) {
+    void replacementPreservesExactOwnershipAndRejectsAnExpiredOwner(boolean alternative) {
         var order = Comparator.comparingLong(RequestRoute::enqueueSeq);
-        WorkerQueue queue =
+        PrefillRequestQueue queue =
                 alternative ? new ListQueue(order) : PrefillActiveIndex.ordered(4, order);
         var state = new PrefillState(new ReentrantLock(), queue, () -> 100L);
         var head = route(1, 1);
@@ -41,7 +41,7 @@ class WorkerQueueContractTest {
         state.updateQueue(ENQUEUE, next, 100);
         state.queueGuard().lock();
         try {
-            assertEquals(!alternative, state.canBypassLocked(head, next));
+            assertTrue(state.canBypassLocked(head, next));
             when(head.requestExpired(100)).thenReturn(true);
             assertFalse(state.canBypassLocked(head, next));
         } finally {
@@ -53,7 +53,7 @@ class WorkerQueueContractTest {
     @ValueSource(booleans = {false, true})
     void replacementKeepsExactOwnershipAndStableSnapshots(boolean alternative) {
         var order = Comparator.comparingLong(RequestRoute::enqueueSeq);
-        WorkerQueue queue =
+        PrefillRequestQueue queue =
                 alternative ? new ListQueue(order) : PrefillActiveIndex.ordered(4, order);
         var state = new PrefillState(new ReentrantLock(), queue, () -> 100L);
         var first = route(1, 1);
@@ -67,7 +67,7 @@ class WorkerQueueContractTest {
         assertSame(first, queue.peek());
         assertEquals(
                 List.of(1L, 2L),
-                snapshot.projectedItems().stream().map(GroupPlanner.Item::requestId).toList());
+                snapshot.items().stream().map(RequestRoute::requestId).toList());
         assertNull(state.updateQueue(REMOVE, stale, 100));
         assertEquals(version, queue.version());
         when(first.requestExpired(100)).thenReturn(true);
@@ -79,8 +79,8 @@ class WorkerQueueContractTest {
         assertTrue(queue.isEmpty());
         assertSame(second, state.updateQueue(ACK_STOP, second, 100));
         assertEquals(0, state.stats().locallyOwnedRequests());
-        assertEquals(2, snapshot.projectedItems().size());
-        assertThrows(UnsupportedOperationException.class, () -> snapshot.projectedItems().clear());
+        assertEquals(2, snapshot.items().size());
+        assertThrows(UnsupportedOperationException.class, () -> snapshot.items().clear());
     }
 
     private static RequestRoute route(long id, long sequence) {
@@ -92,7 +92,7 @@ class WorkerQueueContractTest {
     }
 
     /** Deliberately uses different storage from PrefillActiveIndex. */
-    private static final class ListQueue implements WorkerQueue {
+    private static final class ListQueue implements PrefillRequestQueue {
         private final List<RequestRoute> items = new ArrayList<>();
         private final Comparator<RequestRoute> order;
         private long version;
@@ -160,19 +160,7 @@ class WorkerQueueContractTest {
         }
 
         public Snapshot capture() {
-            var copy =
-                    items.stream()
-                            .map(
-                                    item ->
-                                            new GroupPlanner.Item(
-                                                    item.requestId(),
-                                                    item.priority(),
-                                                    item.enqueueSeq(),
-                                                    item.enqueuedAtMs(),
-                                                    item.expiresAtMs(),
-                                                    item.seqLen(),
-                                                    item.hitCache()))
-                            .toList();
+            var copy = List.copyOf(items);
             return () -> copy;
         }
     }

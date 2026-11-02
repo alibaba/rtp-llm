@@ -116,7 +116,7 @@ class RequestWorkerSelectorTest {
                                             return org.mockito.Answers.RETURNS_DEFAULTS.answer(
                                                     invocation);
                                         }));
-        requests = org.mockito.Mockito.spy(algorithm.lifecycle());
+        requests = org.mockito.Mockito.spy(SchedulerTestServices.lifecycle(algorithm));
         ReflectionTestUtils.setField(algorithm, "lifecycle", requests);
         org.mockito.Mockito.doReturn(mock(AdmissionHandle.class))
                 .when(requests)
@@ -241,7 +241,7 @@ class RequestWorkerSelectorTest {
             when(capture.materialize())
                     .thenThrow(new IllegalStateException("snapshot materialization failed"));
         }
-        Response response = scheduler(router, context).submit(context).join();
+        Response response = SchedulerTestServices.entry(scheduler(router, context)).submit(context).join();
         if (materializationFails) {
             assertEquals(StrategyErrorType.DISPATCH_FAILED.getErrorCode(), response.getCode());
             verify(permit, never()).dispatch();
@@ -308,7 +308,7 @@ class RequestWorkerSelectorTest {
 
         assertEquals(
                 StrategyErrorType.RESOURCE_EXHAUSTED.getErrorCode(),
-                scheduler(router, context).submit(context).join().getCode());
+                SchedulerTestServices.entry(scheduler(router, context)).submit(context).join().getCode());
         verify(prefillSelector)
                 .select(
                         org.mockito.ArgumentMatchers.eq(context.data().getRequest()),
@@ -350,7 +350,7 @@ class RequestWorkerSelectorTest {
                         new PrefillState.ReservationResult<>(
                                 PrefillState.CapacityStatus.ACQUIRED, registration));
 
-        assertTrue(scheduler(router(), context).submit(context).join().isSuccess());
+        assertTrue(SchedulerTestServices.entry(scheduler(router(), context)).submit(context).join().isSuccess());
 
         var evidence = org.mockito.ArgumentCaptor.forClass(ContextResult.DeliveryFact.class);
         verify(requests).onDeliveryFact(evidence.capture());
@@ -412,8 +412,7 @@ class RequestWorkerSelectorTest {
             when(((DecodeEndpoint) decode.endpoint).ownership(reservation))
                     .thenReturn(org.flexlb.balance.endpoint.DecodeResources.Ownership.CONFIRMED);
             assertTrue(
-                    scheduler(router(), context)
-                            .submit(context)
+                    SchedulerTestServices.entry(scheduler(router(), context)).submit(context)
                             .get(2L, TimeUnit.SECONDS)
                             .isSuccess());
             assertTrue(context.data().getFuture().get(2L, TimeUnit.SECONDS).isSuccess());
@@ -483,9 +482,9 @@ class RequestWorkerSelectorTest {
                         failure,
                         assertThrows(
                                 AssertionError.class,
-                                () -> scheduler(router(), context).submit(context)));
+                                () -> SchedulerTestServices.entry(scheduler(router(), context)).submit(context)));
             } else {
-                var returned = scheduler(router(), context).submit(context);
+                var returned = SchedulerTestServices.entry(scheduler(router(), context)).submit(context);
                 assertEquals(context.data().getFuture(), returned);
             }
             Response response = context.data().getFuture().get(2L, TimeUnit.SECONDS);
@@ -757,7 +756,7 @@ class RequestWorkerSelectorTest {
                             if (direct) {
                                 doThrow(primary).when(requests).commitRoute(any(), any());
                                 try (routing) {
-                                    ((DirectRequestScheduler) requests.scheduler())
+                                    ((DirectRequestScheduler) org.flexlb.balance.scheduler.SchedulerTestServices.scheduler(requests))
                                             .commitDirectRoute(context, routing);
                                 }
                             } else {
@@ -1347,7 +1346,7 @@ class RequestWorkerSelectorTest {
                         org.mockito.ArgumentMatchers.any(java.util.function.LongSupplier.class));
     }
 
-    private RequestScheduler scheduler(RequestWorkerSelector router, RequestContext context) {
+    private AbstractRequestScheduler scheduler(RequestWorkerSelector router, RequestContext context) {
 
         when(configService.loadBalanceConfig()).thenReturn(context.data().getConfig());
         return RequestProtocolTestSupport.injectPlacementDependencies(

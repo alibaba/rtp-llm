@@ -67,8 +67,6 @@ import static org.flexlb.util.Failures.recover;
 public class RequestLifecycle {
     /** Internal notifications after lifecycle state changes; callers use submit/cancel. */
     public interface Scheduling {
-        void remove(RequestContext request);
-
         boolean reschedule(RequestRoute previousRoute);
 
         default Map<String, Object> describeWait(
@@ -326,7 +324,7 @@ public class RequestLifecycle {
             }
             Throwable failure = null;
             if (changed) {
-                failure = Failures.run(null, () -> this.scheduling.remove(ctx));
+                failure = Failures.run(null, () -> owner.onRequestChanged(ctx));
                 failure = Failures.run(failure, () -> advanceRequest(ctx, ctx.snapshot()));
             }
             var deadlines = ctx.snapshot().deadlines();
@@ -472,7 +470,7 @@ public class RequestLifecycle {
                         Throwable failure = null;
                         if (update.before().cancellation() == null
                                 && update.after().cancellation() != null) {
-                            failure = Failures.run(null, () -> this.scheduling.remove(ctx));
+                            failure = Failures.run(null, () -> owner.onRequestChanged(ctx));
                         }
                         failure = Failures.run(failure, () -> advanceRequest(ctx, ctx.snapshot()));
                         Failures.rethrow(failure, "deadline effects failed");
@@ -1598,7 +1596,7 @@ public class RequestLifecycle {
                     ctx.selectResponse(candidate);
                 }
                 try {
-                    Throwable cleanup = Failures.run(null, () -> scheduling.remove(ctx));
+                    Throwable cleanup = Failures.run(null, () -> owner.onRequestChanged(ctx));
                     cleanup = Failures.run(cleanup, () -> closeRequest(ctx, null));
                     if (cleanup != null) tasks.recordFailure(cleanup);
                     return publication.publish(
@@ -1645,8 +1643,4 @@ public class RequestLifecycle {
         Failures.rethrow(failure, "request shutdown finalization failed");
     }
 
-    /** The algorithm owns timing; this component owns cancellation and settlement. */
-    public RequestScheduler scheduler() {
-        return owner;
-    }
 }

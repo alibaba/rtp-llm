@@ -36,7 +36,7 @@ class RequestSchedulerModeTest {
         try (Fixture f = new Fixture(queued)) {
             when(f.router.select(f.context, null))
                     .thenThrow(new IllegalStateException("selection failed"));
-            var original = f.scheduler.submit(f.context);
+            var original = SchedulerTestServices.entry(f.scheduler).submit(f.context);
             assertSame(original, f.context.data().getFuture());
             assertEquals(
                     StrategyErrorType.DISPATCH_FAILED.getErrorCode(),
@@ -57,7 +57,7 @@ class RequestSchedulerModeTest {
         try (Fixture f = new Fixture(queued)) {
             when(f.router.resolvePolicyGroup(f.context))
                     .thenThrow(new IllegalStateException("policy unavailable"));
-            var original = f.scheduler.submit(f.context);
+            var original = SchedulerTestServices.entry(f.scheduler).submit(f.context);
             assertSame(original, f.context.data().getFuture());
             assertEquals(
                     StrategyErrorType.DISPATCH_FAILED.getErrorCode(),
@@ -88,10 +88,10 @@ class RequestSchedulerModeTest {
                                 assertTrue(release.await(3, TimeUnit.SECONDS));
                                 throw new IllegalStateException("late selection failure");
                             });
-            var submitted = executor.submit(() -> f.scheduler.submit(f.context));
+            var submitted = executor.submit(() -> SchedulerTestServices.entry(f.scheduler).submit(f.context));
             try {
                 assertTrue(selecting.await(3, TimeUnit.SECONDS));
-                f.scheduler.cancel(
+                SchedulerTestServices.entry(f.scheduler).cancel(
                         f.context.data().getRequestId(), 0, CancelReason.CLIENT_CANCELLED);
             } finally {
                 release.countDown();
@@ -118,7 +118,7 @@ class RequestSchedulerModeTest {
                     .setGenerateInputPb(com.google.protobuf.ByteString.copyFromUtf8("input"));
             assertEquals(
                     StrategyErrorType.DISPATCH_FAILED.getErrorCode(),
-                    direct.scheduler.submit(laterQueue).join().getCode());
+                    SchedulerTestServices.entry(direct.scheduler).submit(laterQueue).join().getCode());
             assertEquals(
                     0,
                     org.flexlb.balance.scheduler.SchedulerTestSupport.repository(direct.requests)
@@ -134,7 +134,7 @@ class RequestSchedulerModeTest {
                             PlacementResult.rejected(
                                     Response.error(StrategyErrorType.NO_PREFILL_WORKER)));
             var future =
-                    new DirectRequestScheduler(
+                    SchedulerTestServices.entry(new DirectRequestScheduler(
                                     queued.router,
                                     org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(
                                                     queued.requests)
@@ -144,7 +144,7 @@ class RequestSchedulerModeTest {
                                                     org.mockito.Mockito.mock(
                                                             org.flexlb.service
                                                                     .RecentCacheKeyTraceReporter
-                                                                    .class)))
+                                                                    .class))))
                             .submit(laterDirect);
             assertSame(future, laterDirect.data().getFuture());
             assertEquals(
@@ -179,7 +179,7 @@ class RequestSchedulerModeTest {
             if (outcome.equals("STOPPED")) {
                 SchedulerTestSupport.runtime(f.scheduler).requests().stopAccepting();
             }
-            var future = f.scheduler.submit(f.context);
+            var future = SchedulerTestServices.entry(f.scheduler).submit(f.context);
             StrategyErrorType expected =
                     switch (outcome) {
                         case "REJECTED" -> StrategyErrorType.NO_PREFILL_WORKER;
@@ -239,7 +239,7 @@ class RequestSchedulerModeTest {
         final RequestLifecycle requests;
         final RequestContext context;
         final QueuedRequestScheduler queue;
-        final RequestScheduler scheduler;
+        final AbstractRequestScheduler scheduler;
 
         Fixture(boolean queued) {
             this(queued, false, true, queued);
@@ -278,7 +278,7 @@ class RequestSchedulerModeTest {
                             router,
                             mock(DecodePreemption.class),
                             new PlacementAvailability());
-            scheduler = requests.scheduler();
+            scheduler = ((AbstractRequestScheduler) org.flexlb.balance.scheduler.SchedulerTestServices.scheduler(requests));
             queue =
                     scheduler instanceof QueuedRequestScheduler queuedScheduler
                             ? queuedScheduler

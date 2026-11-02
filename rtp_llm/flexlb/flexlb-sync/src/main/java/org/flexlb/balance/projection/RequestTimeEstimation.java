@@ -42,31 +42,7 @@ public final class RequestTimeEstimation {
         return ESTIMATORS.get();
     }
 
-    /** Borrowed result: read or copy it before this thread's next projectView call. */
-    public CandidateView projectView(
-            Inputs inputs,
-            long requestId,
-            int priority,
-            long enqueuedAtMs,
-            long expiresAtMs,
-            long seqLen,
-            long hitCache,
-            long routingCacheMatchTokens,
-            long planningAtMs) {
-        return projectView(
-                inputs,
-                requestId,
-                priority,
-                enqueuedAtMs,
-                expiresAtMs,
-                seqLen,
-                hitCache,
-                routingCacheMatchTokens,
-                planningAtMs,
-                false);
-    }
-
-    /** Rank known serial work without converting a transient KV wait into a cache miss. */
+    /** Borrowed ranking result; admission is applied separately by the selection strategy. */
     public CandidateView projectRankingView(
             Inputs inputs,
             long requestId,
@@ -77,34 +53,10 @@ public final class RequestTimeEstimation {
             long hitCache,
             long routingCacheMatchTokens,
             long planningAtMs) {
-        return projectView(
-                inputs,
-                requestId,
-                priority,
-                enqueuedAtMs,
-                expiresAtMs,
-                seqLen,
-                hitCache,
-                routingCacheMatchTokens,
-                planningAtMs,
-                true);
-    }
-
-    private CandidateView projectView(
-            Inputs inputs,
-            long requestId,
-            int priority,
-            long enqueuedAtMs,
-            long expiresAtMs,
-            long seqLen,
-            long hitCache,
-            long routingCacheMatchTokens,
-            long planningAtMs,
-            boolean rankOnly) {
         // A predictor may invoke this estimator recursively; isolate its unfinished calculation.
         if (inUse) {
             return new RequestTimeEstimation()
-                    .projectView(
+                    .projectRankingView(
                             inputs,
                             requestId,
                             priority,
@@ -113,8 +65,7 @@ public final class RequestTimeEstimation {
                             seqLen,
                             hitCache,
                             routingCacheMatchTokens,
-                            planningAtMs,
-                            rankOnly);
+                            planningAtMs);
         }
         this.requestId = requestId;
         this.priority = priority;
@@ -123,11 +74,9 @@ public final class RequestTimeEstimation {
         this.seqLen = seqLen;
         predictions.hitCache = hitCache;
         predictions.routingCacheMatchTokens = routingCacheMatchTokens;
-        QueueSnapshot queue = inputs.queue();
         inUse = true;
         try {
-            var projected = project(inputs, planningAtMs, rankOnly);
-            return rankOnly ? projected : applyAdmissionPolicy(queue, projected);
+            return project(inputs, planningAtMs);
         } finally {
             predictions.evaluator = null;
             predictions.batchPrediction = null;
@@ -141,7 +90,7 @@ public final class RequestTimeEstimation {
      * <p>Already committed work forms the engine cursor. Ordered queued groups add only their
      * execution cost. Future arrivals and collection deadlines do not advance the projection clock.
      */
-    private CandidateView project(Inputs inputs, long planningAtMs, boolean rankOnly) {
+    private CandidateView project(Inputs inputs, long planningAtMs) {
         var queue = inputs.queue();
         var evaluator = inputs.evaluator();
         long projectionAtMs = Math.max(queue.capturedAtMs(), planningAtMs);
@@ -155,15 +104,15 @@ public final class RequestTimeEstimation {
         predictions.evaluator = evaluator;
         predictions.batch = inputs.deliveryMode() == DispatcherConfig.Type.BATCH;
         try {
-            return projectWithPredictions(queue, inputs.work(), projectionAtMs, rankOnly);
+            return projectWithPredictions(queue, inputs.work(), projectionAtMs);
         } catch (PredictionFailure predictionFailure) {
             return unavailable(predictionFailure.detail("PREDICTION_FAILED"));
         }
     }
 
     private CandidateView projectWithPredictions(
-            QueueSnapshot queue, WorkSnapshot committed, long projectionAtMs, boolean rankOnly) {
-        var constraints = rankOnly ? rankingConstraints(queue.constraints()) : queue.constraints();
+            QueueSnapshot queue, WorkSnapshot committed, long projectionAtMs) {
+        var constraints = rankingConstraints(queue.constraints());
         if (committed.containsRequest(requestId)) {
             return unavailable("INCOMING_ALREADY_COMMITTED");
         }
@@ -180,13 +129,6 @@ public final class RequestTimeEstimation {
                     incomingPrefillMs,
                     Candidate.InitialHeadDisposition.NONE,
                     "PREFILL_KV_CAPACITY");
-        }
-
-        if (!rankOnly && committed.hasUnknownWork()) {
-            if (containsActiveRequest(queue, requestId)) {
-                return unavailable("INCOMING_ALREADY_ACTIVE");
-            }
-            return unmodeledEngineWork(incomingPrefillMs);
         }
 
         long committedMs = committed.knownRemainingWorkMsAt(projectionAtMs);
@@ -315,15 +257,6 @@ public final class RequestTimeEstimation {
         }
     }
 
-    private static boolean containsActiveRequest(QueueSnapshot queue, long requestId) {
-        for (GroupPlanner.Item item : queue.activeItems()) {
-            if (item.requestId() == requestId) {
-                return true;
-            }
-        }
-        return false;
-    }
-
     private static boolean expiredAt(GroupPlanner.Item item, long nowMs) {
         return item.expiresAtMs() <= 0L || nowMs >= item.expiresAtMs();
     }
@@ -450,15 +383,6 @@ public final class RequestTimeEstimation {
                 0L,
                 Candidate.InitialHeadDisposition.NONE,
                 detail);
-    }
-
-    private CandidateView unmodeledEngineWork(long incomingPrefillMs) {
-        return candidate(
-                Candidate.State.UNMODELED_ENGINE_WORK,
-                Candidate.UNKNOWN,
-                incomingPrefillMs,
-                Candidate.InitialHeadDisposition.NONE,
-                "ENGINE_WORK_UNOBSERVABLE");
     }
 
     private CandidateView blocked(

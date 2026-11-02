@@ -7,7 +7,7 @@ import io.grpc.stub.StreamObserver;
 import io.netty.channel.EventLoopGroup;
 import io.netty.channel.nio.NioEventLoopGroup;
 import org.flexlb.balance.scheduler.RequestLifecycle;
-import org.flexlb.balance.scheduler.RequestScheduler;
+import org.flexlb.balance.scheduler.RequestSchedulerEntry;
 import org.flexlb.config.ConfigService;
 import org.flexlb.consistency.MasterStatusService;
 import org.flexlb.dao.loadbalance.Response;
@@ -90,7 +90,7 @@ class ScheduleForwardMatrixTest {
             StrategyErrorType.BATCH_SLO_EXPIRED.getErrorCode();
 
     // ---- shared mocks for the schedule() matrix ----
-    private RequestScheduler requestScheduler;
+    private RequestSchedulerEntry requestScheduler;
     private final RequestLifecycle requestState = mock(RequestLifecycle.class);
     private MasterStatusService consistency;
     private EngineHealthReporter engineHealthReporter;
@@ -105,7 +105,7 @@ class ScheduleForwardMatrixTest {
 
     @BeforeEach
     void setUp() {
-        requestScheduler = mock(RequestScheduler.class);
+        requestScheduler = mock(RequestSchedulerEntry.class);
         consistency = mock(MasterStatusService.class);
         engineHealthReporter = mock(EngineHealthReporter.class);
         grpcForwarder = mock(FlexlbGrpcForwarder.class);

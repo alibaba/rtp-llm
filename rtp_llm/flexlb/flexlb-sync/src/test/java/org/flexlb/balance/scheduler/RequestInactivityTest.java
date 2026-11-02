@@ -427,7 +427,7 @@ class RequestInactivityTest {
             org.springframework.test.util.ReflectionTestUtils.setField(
                     requestContext, "delivery", aged);
             org.springframework.test.util.ReflectionTestUtils.invokeMethod(
-                    requestContext, "refresh", System.currentTimeMillis());
+                    requestContext, "commitSnapshot", System.currentTimeMillis());
             registry.onDeadline(
                     requestContext.snapshot().deadlines().inactivity(), System.currentTimeMillis());
             completeDelivery(DeliveryResult.delivered());

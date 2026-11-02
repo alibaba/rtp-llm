@@ -77,8 +77,7 @@ class QueuedDeliveryWithdrawalRaceTest {
                                                     })));
             try {
                 assertTrue(prepared.await(5, TimeUnit.SECONDS));
-                fixture.owner
-                        .lifecycle()
+                SchedulerTestServices.lifecycle(fixture.owner)
                         .cancel(fixture.context, 0L, CancelReason.CLIENT_CANCELLED);
                 assertFalse(fixture.future.get(2, TimeUnit.SECONDS).isSuccess());
                 SchedulerTestSupport.awaitRequestWork(fixture.runtime);
@@ -90,8 +89,7 @@ class QueuedDeliveryWithdrawalRaceTest {
                 allowCommit.countDown();
                 selection.get(5, TimeUnit.SECONDS);
                 if (fixture.context.snapshot().phase() == ContextResult.Phase.OPEN) {
-                    fixture.owner
-                            .lifecycle()
+                    SchedulerTestServices.lifecycle(fixture.owner)
                             .closeRequest(
                                     fixture.context,
                                     ContextResult.EndEvidence.failure(
@@ -129,7 +127,7 @@ class QueuedDeliveryWithdrawalRaceTest {
                         "pause after the real delivery lease is acquired and before queue commit");
                 withdrawal =
                         AdmissionHandle.tryBeginPreemption(
-                                fixture.owner.lifecycle(),
+                                SchedulerTestServices.lifecycle(fixture.owner),
                                 fixture.decode,
                                 fixture.reservation,
                                 100);
@@ -158,7 +156,7 @@ class QueuedDeliveryWithdrawalRaceTest {
         try (var fixture = new Fixture()) {
             var withdrawal =
                     AdmissionHandle.tryBeginPreemption(
-                            fixture.owner.lifecycle(), fixture.decode, fixture.reservation, 100);
+                            SchedulerTestServices.lifecycle(fixture.owner), fixture.decode, fixture.reservation, 100);
             assertNotNull(
                     withdrawal,
                     "an exact queued reservation without a dispatch lease remains withdrawable");
@@ -220,7 +218,7 @@ class QueuedDeliveryWithdrawalRaceTest {
         final QueuedRequestScheduler owner;
         final PrefillEndpoint prefill;
         final DecodeEndpoint decode;
-        final PrefillQueueRunner batcher;
+        final RequestExecution batcher;
         final RequestContext context;
         final CompletableFuture<Response> future;
         final DecodeResources.ReservationHandle reservation;
@@ -304,7 +302,7 @@ class QueuedDeliveryWithdrawalRaceTest {
                                 DeliveryMetricsReporter.class,
                                 PlacementAvailability.class,
                                 org.flexlb.balance.planner.GroupPlanner.class,
-                                org.flexlb.balance.endpoint.WorkerQueue.Factory.class
+                                org.flexlb.balance.endpoint.PrefillRequestQueue.Factory.class
                             },
                             pStatus,
                             config,
@@ -312,7 +310,7 @@ class QueuedDeliveryWithdrawalRaceTest {
                             reporter,
                             availability,
                             org.flexlb.balance.planner.BuiltinGroupPlanner.from(config),
-                            (org.flexlb.balance.endpoint.WorkerQueue.Factory)
+                            (org.flexlb.balance.endpoint.PrefillRequestQueue.Factory)
                                     order ->
                                             org.flexlb.balance.endpoint.PrefillActiveIndex.ordered(
                                                     16, order));
@@ -336,7 +334,7 @@ class QueuedDeliveryWithdrawalRaceTest {
                             System::currentTimeMillis);
             ReflectionTestUtils.setField(prefill, "ownership", state);
             batcher =
-                    new PrefillQueueRunner(
+                    new RequestExecution(
                             "withdrawal-race",
                             prefill,
                             QueueExecutionSettings.capture(
@@ -345,9 +343,9 @@ class QueuedDeliveryWithdrawalRaceTest {
                             dispatcher,
                             state,
                             SchedulerTestSupport.queueDependencies(runtime));
-            ReflectionTestUtils.setField(prefill, "queueRunner", batcher);
+            ReflectionTestUtils.setField(prefill, "requestExecution", batcher);
             var runtimeState =
-                    Class.forName("org.flexlb.balance.scheduler.PrefillQueueRunner$RuntimeState");
+                    Class.forName("org.flexlb.balance.scheduler.RequestExecution$RuntimeState");
             @SuppressWarnings({"rawtypes", "unchecked"})
             Object running = Enum.valueOf((Class) runtimeState, "RUNNING");
             // Drive the real selection directly so the regression controls both transaction
@@ -370,7 +368,7 @@ class QueuedDeliveryWithdrawalRaceTest {
                                     .build()
                                     .toByteString());
             future =
-                    owner.lifecycle()
+                    SchedulerTestServices.lifecycle(owner)
                             .register(context, () -> {}, StrategyErrorType.RESOURCE_EXHAUSTED);
             try (var pin = decode.tryPinGeneration()) {
                 reservation =
@@ -400,11 +398,11 @@ class QueuedDeliveryWithdrawalRaceTest {
                             System.currentTimeMillis());
             responseTemplate.setServerStatus(List.of(route.prefill(), route.decode()));
             var admission =
-                    owner.lifecycle().claimAdmissionHandle(context.data().getRequestId(), future);
+                    SchedulerTestServices.lifecycle(owner).claimAdmissionHandle(context.data().getRequestId(), future);
             assertNotNull(admission);
             assertEquals(
                     org.flexlb.balance.PlacementResult.Status.SUCCESS,
-                    owner.lifecycle()
+                    SchedulerTestServices.lifecycle(owner)
                             .commitRoute(
                                     route,
                                     new RequestLifecycle.Publication() {

@@ -165,7 +165,7 @@ public final class RequestTimeEstimationTestSupport {
             RequestTimeEstimation.Inputs inputs, Probe probe, long planningAtMs) {
         RequestTimeEstimation.CandidateView view =
                 RequestTimeEstimation.current()
-                        .projectView(
+                        .projectRankingView(
                                 inputs,
                                 probe.requestId(),
                                 probe.priority(),
@@ -175,7 +175,7 @@ public final class RequestTimeEstimationTestSupport {
                                 probe.hitCache(),
                                 probe.routingCacheMatchTokens(),
                                 planningAtMs);
-        return immutable(view);
+        return immutable(RequestTimeEstimation.applyAdmissionPolicy(inputs.queue(), view));
     }
 
     private static RequestTimeEstimation.Candidate immutable(

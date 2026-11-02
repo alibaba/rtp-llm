@@ -87,13 +87,6 @@ public class EngineStatusConverter {
         };
     }
 
-    /**
-     * Convert CacheStatusPB to CacheStatus
-     */
-    public static CacheStatus convertToCacheStatus(EngineRpcService.CacheStatusPB cacheStatusPB) {
-        return convertToCacheStatus(cacheStatusPB, null);
-    }
-
     public static CacheStatus convertToCacheStatus(
             EngineRpcService.CacheStatusPB cacheStatusPB, Set<Long> retainedKeys) {
         CacheStatus cacheStatus = new CacheStatus();

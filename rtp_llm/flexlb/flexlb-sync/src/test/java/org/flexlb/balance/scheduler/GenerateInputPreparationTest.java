@@ -143,7 +143,7 @@ class GenerateInputPreparationTest {
                         new PlacementAvailability());
         var queue = registry;
         try {
-            var future = queue.scheduler().submit(context);
+            var future = SchedulerTestServices.entry((AbstractRequestScheduler) org.flexlb.balance.scheduler.SchedulerTestServices.scheduler(queue)).submit(context);
             assertTrue(
                     entered.await(3, TimeUnit.SECONDS), "submit returns while planning is blocked");
             if (deadline) {

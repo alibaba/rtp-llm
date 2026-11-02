@@ -58,34 +58,34 @@ class RequestSchedulerContractTest {
                     f.requests.register(ownContext, () -> {}, StrategyErrorType.BATCH_SLO_EXPIRED);
             var foreignContext = f.context(943L);
             var foreignFuture =
-                    other.lifecycle()
+                    SchedulerTestServices.lifecycle(other)
                             .register(
                                     foreignContext, () -> {}, StrategyErrorType.BATCH_SLO_EXPIRED);
             try {
-                assertNull(other.lifecycle().cancel(942L, 0L, CancelReason.CLIENT_CANCELLED));
-                assertNull(f.scheduler.cancel(943L, 0L, CancelReason.CLIENT_CANCELLED));
+                assertNull(SchedulerTestServices.lifecycle(other).cancel(942L, 0L, CancelReason.CLIENT_CANCELLED));
+                assertNull(SchedulerTestServices.entry(f.scheduler).cancel(943L, 0L, CancelReason.CLIENT_CANCELLED));
                 assertFalse(ownFuture.isDone());
                 assertFalse(foreignFuture.isDone());
                 assertNull(SchedulerTestSupport.cancellationReason(ownContext));
                 assertNull(SchedulerTestSupport.cancellationReason(foreignContext));
 
-                assertNotNull(other.lifecycle().cancel(943L, 0L, CancelReason.CLIENT_CANCELLED));
+                assertNotNull(SchedulerTestServices.lifecycle(other).cancel(943L, 0L, CancelReason.CLIENT_CANCELLED));
                 foreignFuture.get(3, TimeUnit.SECONDS);
-                assertNull(f.scheduler.cancel(943L, 0L, CancelReason.CLIENT_CANCELLED));
-                assertNotNull(other.lifecycle().cancel(943L, 0L, CancelReason.CLIENT_CANCELLED));
-                assertNull(other.lifecycle().cancel(943L, 17L, CancelReason.CLIENT_CANCELLED));
+                assertNull(SchedulerTestServices.entry(f.scheduler).cancel(943L, 0L, CancelReason.CLIENT_CANCELLED));
+                assertNotNull(SchedulerTestServices.lifecycle(other).cancel(943L, 0L, CancelReason.CLIENT_CANCELLED));
+                assertNull(SchedulerTestServices.lifecycle(other).cancel(943L, 17L, CancelReason.CLIENT_CANCELLED));
 
-                assertNotNull(f.scheduler.cancel(942L, 0L, CancelReason.CLIENT_CANCELLED));
+                assertNotNull(SchedulerTestServices.entry(f.scheduler).cancel(942L, 0L, CancelReason.CLIENT_CANCELLED));
                 // Direct registration does not create a global queue entry; consume its control
                 // ticket explicitly.
                 if (queued) {
-                    ((QueuedRequestScheduler) f.requests.scheduler()).remove(ownContext);
+                    ((QueuedRequestScheduler) org.flexlb.balance.scheduler.SchedulerTestServices.scheduler(f.requests)).onRequestChanged(ownContext);
                 }
                 ownFuture.get(3, TimeUnit.SECONDS);
-                assertNull(other.lifecycle().cancel(942L, 0L, CancelReason.CLIENT_CANCELLED));
-                assertNotNull(f.scheduler.cancel(942L, 0L, CancelReason.CLIENT_CANCELLED));
+                assertNull(SchedulerTestServices.lifecycle(other).cancel(942L, 0L, CancelReason.CLIENT_CANCELLED));
+                assertNotNull(SchedulerTestServices.entry(f.scheduler).cancel(942L, 0L, CancelReason.CLIENT_CANCELLED));
             } finally {
-                other.lifecycle().cancel(943L, 0L, CancelReason.CLIENT_CANCELLED);
+                SchedulerTestServices.lifecycle(other).cancel(943L, 0L, CancelReason.CLIENT_CANCELLED);
             }
         }
     }
@@ -105,10 +105,10 @@ class RequestSchedulerContractTest {
                                                             .class)));
             var oldContext = f.context(944L);
             var oldFuture =
-                    other.lifecycle()
+                    SchedulerTestServices.lifecycle(other)
                             .register(oldContext, () -> {}, StrategyErrorType.BATCH_SLO_EXPIRED);
             try {
-                other.lifecycle().cancel(944L, 0L, CancelReason.CLIENT_CANCELLED);
+                SchedulerTestServices.lifecycle(other).cancel(944L, 0L, CancelReason.CLIENT_CANCELLED);
                 oldFuture.get(3, TimeUnit.SECONDS);
                 var repository = f.requests.requests;
                 assertTrue(
@@ -119,14 +119,14 @@ class RequestSchedulerContractTest {
                 var future =
                         f.requests.register(
                                 replacement, () -> {}, StrategyErrorType.BATCH_SLO_EXPIRED);
-                assertNull(other.lifecycle().cancel(944L, 0L, CancelReason.CLIENT_CANCELLED));
-                other.lifecycle().cancel(oldContext, 0L, CancelReason.CLIENT_CANCELLED);
+                assertNull(SchedulerTestServices.lifecycle(other).cancel(944L, 0L, CancelReason.CLIENT_CANCELLED));
+                SchedulerTestServices.lifecycle(other).cancel(oldContext, 0L, CancelReason.CLIENT_CANCELLED);
                 assertFalse(future.isDone());
                 assertNull(SchedulerTestSupport.cancellationReason(replacement));
-                assertNotNull(f.scheduler.cancel(944L, 0L, CancelReason.CLIENT_CANCELLED));
+                assertNotNull(SchedulerTestServices.entry(f.scheduler).cancel(944L, 0L, CancelReason.CLIENT_CANCELLED));
                 future.get(3, TimeUnit.SECONDS);
             } finally {
-                other.lifecycle().cancel(944L, 0L, CancelReason.CLIENT_CANCELLED);
+                SchedulerTestServices.lifecycle(other).cancel(944L, 0L, CancelReason.CLIENT_CANCELLED);
             }
         }
     }
@@ -152,7 +152,7 @@ class RequestSchedulerContractTest {
             try (var admission = f.requests.claimAdmissionHandle(900, future);
                     var admissionCompletion1 = RequestProtocolTestSupport.finishOnExit(admission)) {
                 assertNotNull(admission);
-                f.scheduler.cancel(900, 0, CancelReason.CLIENT_CANCELLED);
+                SchedulerTestServices.entry(f.scheduler).cancel(900, 0, CancelReason.CLIENT_CANCELLED);
             }
             future.get(3, TimeUnit.SECONDS);
             SchedulerTestSupport.runtime(f.scheduler).requests().stopAccepting();
@@ -172,7 +172,7 @@ class RequestSchedulerContractTest {
             ExpirationTimer.Token deadline =
                     RequestProtocolTestSupport.field(request, "inactivityDeadline");
             assertNotNull(deadline);
-            f.scheduler.cancel(901, 0, CancelReason.CLIENT_CANCELLED);
+            SchedulerTestServices.entry(f.scheduler).cancel(901, 0, CancelReason.CLIENT_CANCELLED);
             future.get(3, TimeUnit.SECONDS);
             SchedulerTestSupport.runtime(f.scheduler).requests().stopAccepting();
             SchedulerTestSupport.shutdown(SchedulerTestSupport.runtime(f.scheduler));
@@ -191,8 +191,7 @@ class RequestSchedulerContractTest {
 
             var decision =
                     (Thread)
-                            org.springframework.test.util.ReflectionTestUtils.getField(
-                                    f.scheduler, "decisionThread");
+                            SchedulerTestSupport.decisionThread(f.scheduler);
             var planners =
                     (java.util.concurrent.ExecutorService)
                             org.springframework.test.util.ReflectionTestUtils.getField(
@@ -212,8 +211,7 @@ class RequestSchedulerContractTest {
                                     f.scheduler, "planners");
             var decision =
                     (Thread)
-                            org.springframework.test.util.ReflectionTestUtils.getField(
-                                    f.scheduler, "decisionThread");
+                            SchedulerTestSupport.decisionThread(f.scheduler);
             var failure = new IllegalStateException("delivery cleanup failed");
             runtime.recordFailure(failure);
             runtime.requests().stopAccepting();
@@ -245,7 +243,7 @@ class RequestSchedulerContractTest {
                                         .stopAccepting();
                                 return rejection();
                             });
-            var submission = executor.submit(() -> f.scheduler.submit(request));
+            var submission = executor.submit(() -> SchedulerTestServices.entry(f.scheduler).submit(request));
             assertFalse(submission.get(3, TimeUnit.SECONDS).get(3, TimeUnit.SECONDS).isSuccess());
             SchedulerTestSupport.shutdown(SchedulerTestSupport.runtime(f.scheduler));
         }
@@ -275,21 +273,21 @@ class RequestSchedulerContractTest {
                     executor.submit(
                             () ->
                                     queued
-                                            ? f.scheduler.submit(f.context(96), pause)
-                                            : f.scheduler.submit(f.context(96)));
+                                            ? SchedulerTestServices.entry(f.scheduler).submit(f.context(96), pause)
+                                            : SchedulerTestServices.entry(f.scheduler).submit(f.context(96)));
             var second =
                     executor.submit(
                             () ->
                                     queued
-                                            ? f.scheduler.submit(f.context(97), pause)
-                                            : f.scheduler.submit(f.context(97)));
+                                            ? SchedulerTestServices.entry(f.scheduler).submit(f.context(97), pause)
+                                            : SchedulerTestServices.entry(f.scheduler).submit(f.context(97)));
             try {
                 assertTrue(
                         entered.await(3, TimeUnit.SECONDS),
                         "submissions must not serialize on an exclusive lock");
                 SchedulerTestSupport.runtime(f.scheduler).requests().stopAccepting();
 
-                assertFalse(f.scheduler.submit(f.context(95)).get(3, TimeUnit.SECONDS).isSuccess());
+                assertFalse(SchedulerTestServices.entry(f.scheduler).submit(f.context(95)).get(3, TimeUnit.SECONDS).isSuccess());
             } finally {
                 resume.countDown();
             }
@@ -333,7 +331,7 @@ class RequestSchedulerContractTest {
                             new OrderedRequestQueue(f.config.isPriorityOrdering()),
                             runtime.queueDependencies));
             try {
-                var owner = SchedulerTestSupport.initializedScheduler(runtime).lifecycle();
+                var owner = SchedulerTestSupport.lifecycle(SchedulerTestSupport.initializedScheduler(runtime));
                 var request = f.context(100);
                 var future = owner.register(request, () -> {}, StrategyErrorType.BATCH_SLO_EXPIRED);
 
@@ -367,20 +365,20 @@ class RequestSchedulerContractTest {
     @Test
     void stoppingIntakeIsIdempotentAndRejectsNewRequests() throws Exception {
         try (Fixture f = new Fixture(false)) {
-            RequestScheduler api = f.scheduler;
+            AbstractRequestScheduler api = f.scheduler;
 
             var request = f.context(1);
             when(f.router.select(request, null)).thenReturn(rejection());
             assertEquals(
                     StrategyErrorType.NO_PREFILL_WORKER.getErrorCode(),
-                    api.submit(request).get(3, TimeUnit.SECONDS).getCode());
+                    SchedulerTestServices.entry(api).submit(request).get(3, TimeUnit.SECONDS).getCode());
             SchedulerTestSupport.runtime(api).requests().stopAccepting();
             SchedulerTestSupport.runtime(api).requests().stopAccepting();
             SchedulerTestSupport.shutdown(SchedulerTestSupport.runtime(api));
 
             assertEquals(
                     StrategyErrorType.DISPATCH_FAILED.getErrorCode(),
-                    api.submit(f.context(2)).join().getCode());
+                    SchedulerTestServices.entry(api).submit(f.context(2)).join().getCode());
             verify(f.router, times(1)).select(any(), any());
         }
     }
@@ -392,7 +390,7 @@ class RequestSchedulerContractTest {
         CountDownLatch release = new CountDownLatch(1);
         try (Fixture f = new Fixture(queued);
                 var executor = Executors.newVirtualThreadPerTaskExecutor()) {
-            RequestScheduler api = f.scheduler;
+            AbstractRequestScheduler api = f.scheduler;
             var request = f.context(10);
             when(f.router.select(request, null))
                     .thenAnswer(
@@ -401,7 +399,7 @@ class RequestSchedulerContractTest {
                                 RequestProtocolTestSupport.await(release);
                                 return rejection();
                             });
-            var submission = executor.submit(() -> api.submit(request));
+            var submission = executor.submit(() -> SchedulerTestServices.entry(api).submit(request));
             try {
                 assertTrue(selecting.await(3, TimeUnit.SECONDS));
                 SchedulerTestSupport.runtime(api).requests().stopAccepting();
@@ -411,7 +409,7 @@ class RequestSchedulerContractTest {
                         "draining must not close accepted admission");
                 assertEquals(
                         StrategyErrorType.DISPATCH_FAILED.getErrorCode(),
-                        api.submit(f.context(11)).join().getCode());
+                        SchedulerTestServices.entry(api).submit(f.context(11)).join().getCode());
             } finally {
                 release.countDown();
             }
@@ -433,7 +431,7 @@ class RequestSchedulerContractTest {
     void registeredWorkCanStartAdmissionAfterStopAndCancellationStillWorks(boolean queued)
             throws Exception {
         try (Fixture f = new Fixture(queued)) {
-            RequestScheduler api = f.scheduler;
+            AbstractRequestScheduler api = f.scheduler;
             var request = f.context(20);
             var future =
                     f.requests.register(request, () -> {}, StrategyErrorType.BATCH_SLO_EXPIRED);
@@ -441,22 +439,22 @@ class RequestSchedulerContractTest {
             try (var admission = f.requests.claimAdmissionHandle(20, future);
                     var admissionCompletion3 = RequestProtocolTestSupport.finishOnExit(admission)) {
                 assertNotNull(admission);
-                assertNotNull(api.cancel(20, 0, CancelReason.CLIENT_CANCELLED));
+                assertNotNull(SchedulerTestServices.entry(api).cancel(20, 0, CancelReason.CLIENT_CANCELLED));
             }
             assertEquals(
                     StrategyErrorType.REQUEST_CANCELLED.getErrorCode(),
                     future.get(3, TimeUnit.SECONDS).getCode());
             SchedulerTestSupport.shutdown(SchedulerTestSupport.runtime(api));
 
-            assertNotNull(api.cancel(20, 0, CancelReason.CLIENT_CANCELLED));
-            assertNull(api.cancel(999, 0, CancelReason.CLIENT_CANCELLED));
+            assertNotNull(SchedulerTestServices.entry(api).cancel(20, 0, CancelReason.CLIENT_CANCELLED));
+            assertNull(SchedulerTestServices.entry(api).cancel(999, 0, CancelReason.CLIENT_CANCELLED));
         }
     }
 
     @Test
     void cancelledFutureDoesNotHideAnOutstandingAdmission() throws Exception {
         try (Fixture f = new Fixture(true)) {
-            RequestScheduler api = f.scheduler;
+            AbstractRequestScheduler api = f.scheduler;
             var request = f.context(30);
             var future =
                     f.requests.register(request, () -> {}, StrategyErrorType.BATCH_SLO_EXPIRED);
@@ -479,7 +477,7 @@ class RequestSchedulerContractTest {
         CountDownLatch publishing = new CountDownLatch(1);
         CountDownLatch release = new CountDownLatch(1);
         try (Fixture f = new Fixture(false)) {
-            RequestScheduler api = f.scheduler;
+            AbstractRequestScheduler api = f.scheduler;
             var request = f.context(40);
             var future =
                     f.requests.register(request, () -> {}, StrategyErrorType.BATCH_SLO_EXPIRED);
@@ -527,7 +525,7 @@ class RequestSchedulerContractTest {
     @Test
     void cleanupFailureIsRetainedForShutdownReporting() throws Exception {
         try (Fixture f = new Fixture(false)) {
-            RequestScheduler api = f.scheduler;
+            AbstractRequestScheduler api = f.scheduler;
             var request = f.context(50);
             var future =
                     f.requests.register(request, () -> {}, StrategyErrorType.BATCH_SLO_EXPIRED);
@@ -621,7 +619,7 @@ class RequestSchedulerContractTest {
                         org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(f.requests),
                         "timer",
                         originalTimer);
-                f.scheduler.cancel(940L, 0L, CancelReason.CLIENT_CANCELLED);
+                SchedulerTestServices.entry(f.scheduler).cancel(940L, 0L, CancelReason.CLIENT_CANCELLED);
             }
         }
     }
@@ -630,7 +628,7 @@ class RequestSchedulerContractTest {
         final FlexlbConfig config = SchedulingTestConfig.newConfig();
         final RequestWorkerSelector router = mock(RequestWorkerSelector.class);
         final RequestLifecycle requests;
-        final RequestScheduler scheduler;
+        final AbstractRequestScheduler scheduler;
 
         Fixture(boolean queued) {
             if (queued) {
@@ -651,7 +649,7 @@ class RequestSchedulerContractTest {
                             router,
                             mock(DecodePreemption.class),
                             new PlacementAvailability());
-            scheduler = requests.scheduler();
+            scheduler = ((AbstractRequestScheduler) org.flexlb.balance.scheduler.SchedulerTestServices.scheduler(requests));
         }
 
         RequestContext context(long id) {

@@ -37,7 +37,8 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
     private final BindingRouter router;
     private final EndpointRegistry registry;
     private final DecodePreemption decodePreemption;
-    private final RequestScheduler scheduler;
+    private final AbstractRequestScheduler scheduler;
+    private final RequestSchedulerEntry entry;
     private final SchedulerTestServices runtime;
     private volatile boolean deliveryPaused;
     private final java.util.Set<Runnable> deliveryListeners =
@@ -88,8 +89,8 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
         org.springframework.test.util.ReflectionTestUtils.setField(
                 runtime,
                 "queueDependencies",
-                new PrefillQueueRunner.Dependencies(
-                        facilities, deliveryReporter, runtime::recordFailure));
+                new RequestExecution.Dependencies(
+                        facilities, deliveryReporter, runtime::recordFailure, QueuedRequestScheduler::runPrefill));
         // Keep transport and Dispatcher real; inject capacity pressure at its infrastructure owner.
         org.mockito.Mockito.doAnswer(
                         invocation ->
@@ -145,6 +146,8 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
                         new OrderedRequestQueue(
                                 configService.loadBalanceConfig().isPriorityOrdering()),
                         runtime.queueDependencies);
+        this.entry = new RequestSchedulerEntry(scheduler, SchedulerTestServices.lifecycle(scheduler), router,
+                configService.loadBalanceConfig().isQueue());
         runtime.registerScheduler(scheduler);
     }
 
@@ -152,7 +155,11 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
         return requests;
     }
 
-    public RequestScheduler scheduler() {
+    public RequestSchedulerEntry entry() {
+        return entry;
+    }
+
+    public AbstractRequestScheduler scheduler() {
         return scheduler;
     }
 

@@ -1,8 +1,10 @@
 package org.flexlb.httpserver;
 
+import org.flexlb.balance.scheduler.SchedulerTestServices;
+
 import org.flexlb.balance.scheduler.RequestContext;
 import org.flexlb.balance.scheduler.RequestRepository;
-import org.flexlb.balance.scheduler.RequestScheduler;
+import org.flexlb.balance.scheduler.RequestSchedulerEntry;
 import org.flexlb.config.ConfigService;
 import org.flexlb.consistency.MasterStatusView;
 import org.flexlb.service.monitor.DeliveryMetricsReporter;
@@ -12,7 +14,19 @@ import org.flexlb.service.monitor.RequestSchedulerReporter;
 /** Assembles API fixtures through the same scheduler and configuration as production. */
 final class FlexlbServiceTestSupport {
     static FlexlbServiceImpl create(
-            RequestScheduler scheduler,
+            org.flexlb.balance.scheduler.AbstractRequestScheduler scheduler,
+            RequestRepository requests, MasterStatusView leadership, EngineHealthReporter health,
+            FlexlbGrpcForwarder forwarder, ConfigService config, DeliveryMetricsReporter batches,
+            ServerScheduleLatencyRecorder latency, RequestSchedulerReporter reporter) {
+        var router = (org.flexlb.balance.scheduler.RequestWorkerSelector)
+                org.springframework.test.util.ReflectionTestUtils.getField(scheduler, "router");
+        return create(new RequestSchedulerEntry(scheduler, SchedulerTestServices.lifecycle(scheduler), router,
+                config.loadBalanceConfig().isQueue()), requests, leadership, health,
+                forwarder, config, batches, latency, reporter);
+    }
+
+    static FlexlbServiceImpl create(
+            RequestSchedulerEntry scheduler,
             RequestRepository requests,
             MasterStatusView leadership,
             EngineHealthReporter health,
@@ -24,9 +38,7 @@ final class FlexlbServiceTestSupport {
         if (org.mockito.Mockito.mockingDetails(leadership).isMock()) {
             org.mockito.Mockito.doCallRealMethod().when(leadership).shouldForwardToMaster();
         }
-        if (org.mockito.Mockito.mockingDetails(scheduler).isMock()
-                && !(scheduler instanceof org.flexlb.balance.scheduler.QueuedRequestScheduler)
-                && !(scheduler instanceof org.flexlb.balance.scheduler.DirectRequestScheduler)) {
+        if (org.mockito.Mockito.mockingDetails(scheduler).isMock()) {
             org.mockito.Mockito.lenient()
                     .doAnswer(
                             call -> {

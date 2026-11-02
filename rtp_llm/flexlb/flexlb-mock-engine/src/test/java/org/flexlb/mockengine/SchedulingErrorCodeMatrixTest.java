@@ -342,7 +342,7 @@ class SchedulingErrorCodeMatrixTest {
 
     private static final class Fixture implements AutoCloseable {
         final AutoTpmE2EHarness harness;
-        final org.flexlb.balance.scheduler.RequestScheduler service;
+        final org.flexlb.balance.scheduler.RequestSchedulerEntry service;
 
         Fixture(String mode) {
             this(mode, 100);

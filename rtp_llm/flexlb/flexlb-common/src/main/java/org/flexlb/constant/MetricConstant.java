@@ -220,7 +220,7 @@ public class MetricConstant {
 
     /**
      * FlexLB batcher queue size — number of pending (not-yet-batched) requests
-     * in the per-engine PrefillQueueRunner queue.
+     * in the per-engine RequestExecution queue.
      * <p>Reported by DeliveryMetricsReporter with role and engineIp tags.
      * Independent metric name to avoid tag schema conflict with {@link #ROUTING_QUEUE_LENGTH}
      * (which uses type=batchQueue tag for backward compatibility).

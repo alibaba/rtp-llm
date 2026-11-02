@@ -53,11 +53,11 @@ class CustomRequestSchedulerContractTest {
     void cancellationFencesAnAdmissionAlreadyStartedByACustomScheduler() throws Exception {
         try (ManualScheduler scheduler = new ManualScheduler(true)) {
             var context = RequestProtocolTestSupport.context(scheduler.config, 81004L);
-            var result = scheduler.submit(context);
+            var result = scheduler.entry.submit(context);
             var admission = scheduler.lifecycle.claimAdmissionHandle(81004L, result);
             assertNotNull(admission);
             try {
-                scheduler.cancel(81004L, 0L, CancelReason.CLIENT_CANCELLED);
+                scheduler.entry.cancel(81004L, 0L, CancelReason.CLIENT_CANCELLED);
                 assertFalse(scheduler.lifecycle.isAdmissionOpen(81004L, result));
                 assertFalse(scheduler.advance());
             } finally {
@@ -102,9 +102,9 @@ class CustomRequestSchedulerContractTest {
             throws Exception {
         try (ManualScheduler scheduler = new ManualScheduler(alternative)) {
             var context = RequestProtocolTestSupport.context(scheduler.config, 81001L);
-            var result = scheduler.submit(context);
+            var result = scheduler.entry.submit(context);
             assertFalse(result.isDone());
-            scheduler.cancel(81001L, 0L, CancelReason.CLIENT_CANCELLED);
+            scheduler.entry.cancel(81001L, 0L, CancelReason.CLIENT_CANCELLED);
             assertEquals(
                     StrategyErrorType.REQUEST_CANCELLED.getErrorCode(),
                     result.get(2, TimeUnit.SECONDS).getCode());
@@ -122,7 +122,7 @@ class CustomRequestSchedulerContractTest {
             throws Exception {
         try (ManualScheduler scheduler = new ManualScheduler(alternative)) {
             var context = RequestProtocolTestSupport.context(scheduler.config, 81002L);
-            var result = scheduler.submit(context);
+            var result = scheduler.entry.submit(context);
             var deadline = context.snapshot().deadlines().request();
             scheduler.lifecycle.onDeadline(deadline, deadline.atMs());
             assertFalse(result.get(2, TimeUnit.SECONDS).isSuccess());
@@ -139,7 +139,7 @@ class CustomRequestSchedulerContractTest {
     void customSchedulingTurnCanCompleteARegisteredRequest(boolean alternative) throws Exception {
         try (ManualScheduler scheduler = new ManualScheduler(alternative)) {
             var context = RequestProtocolTestSupport.context(scheduler.config, 81003L);
-            var result = scheduler.submit(context);
+            var result = scheduler.entry.submit(context);
             assertFalse(result.isDone());
             assertTrue(scheduler.advance());
             assertEquals(
@@ -154,6 +154,7 @@ class CustomRequestSchedulerContractTest {
         final FlexlbConfig config = SchedulingTestConfig.batchConfig();
         final SchedulerTestServices runtime;
         final RequestLifecycle lifecycle;
+        final RequestSchedulerEntry entry;
         final PlacementQueue queue;
         final RequestWorkerSelector selector = mock(RequestWorkerSelector.class);
 
@@ -181,27 +182,29 @@ class CustomRequestSchedulerContractTest {
                             config,
                             SchedulingTestConfig.capacity(config),
                             mock(RecentCacheKeyTraceReporter.class));
+            entry = new RequestSchedulerEntry(this, lifecycle, selector, config.isQueue());
             runtime.registerScheduler(this);
         }
 
         @Override
-        public RequestLifecycle lifecycle() {
-            return lifecycle;
+        public long schedule(long nowNanos) {
+            return Long.MAX_VALUE;
         }
 
         @Override
-        public CompletableFuture<Response> submit(RequestContext request) {
-            var future = lifecycle.register(request, () -> {}, StrategyErrorType.BATCH_SLO_EXPIRED);
+        public void onEndpointChanged(org.flexlb.balance.endpoint.WorkerEndpoint endpoint) {}
+
+        @Override
+        public void onRequest(RequestContext request) {
             synchronized (queue) {
-                if (!future.isDone() && request.snapshot().cancellation() == null) {
+                if (!request.data().getFuture().isDone() && request.snapshot().cancellation() == null) {
                     queue.add(new GlobalQueueEntry(request, null));
                 }
             }
-            return future;
         }
 
         @Override
-        public void remove(RequestContext request) {
+        public void onRequestChanged(RequestContext request) {
             synchronized (queue) {
                 for (var entry : queue.drain()) {
                     if (entry.context != request) queue.restore(entry);
@@ -225,16 +228,6 @@ class CustomRequestSchedulerContractTest {
             var result = selector.select(selected.context, selected.routingGroup);
             lifecycle.publish(selected.context, result.failure(), false);
             return true;
-        }
-
-        @Override
-        public void start() {}
-
-        @Override
-        public boolean awaitSchedulingCompletion(long deadlineNanos) {
-            synchronized (queue) {
-                return queue.size() == 0;
-            }
         }
 
         @Override

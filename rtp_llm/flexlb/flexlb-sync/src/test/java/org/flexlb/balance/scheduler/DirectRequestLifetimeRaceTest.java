@@ -171,7 +171,7 @@ class DirectRequestLifetimeRaceTest {
                     .onDeliveryFact(
                             org.mockito.ArgumentMatchers.isA(ContextResult.RouteDelivered.class));
 
-            var returned = requests.scheduler().submit(context);
+            var returned = SchedulerTestServices.entry((AbstractRequestScheduler) org.flexlb.balance.scheduler.SchedulerTestServices.scheduler(requests)).submit(context);
             assertSame(context.data().getFuture(), returned);
             var response = returned.get(2L, TimeUnit.SECONDS);
             assertFalse(returned.isCompletedExceptionally());

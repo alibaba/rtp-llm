@@ -470,7 +470,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
             }
         }
         if (edge != CapacityEdge.DISPATCH) {
-            placementAvailability.changed(getStatus(), ipPort());
+            placementAvailability.changed(this);
         }
     }
 }

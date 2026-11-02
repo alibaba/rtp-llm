@@ -79,7 +79,7 @@ class QueuedDecodeWithdrawalTest {
                         mock(DeliveryMetricsReporter.class),
                         mock(RequestSchedulerReporter.class),
                         mock(RecentCacheKeyTraceReporter.class));
-        queue = (QueuedRequestScheduler) registry.scheduler();
+        queue = (QueuedRequestScheduler) org.flexlb.balance.scheduler.SchedulerTestServices.scheduler(registry);
         eviction =
                 new DefaultDecodePreemption(
                         SchedulerTestSupport.dispatcher(SchedulerTestSupport.runtime(registry)),
@@ -264,7 +264,7 @@ class QueuedDecodeWithdrawalTest {
             var result = reservation.join();
             assertEquals(replacement.get(), result.reservation());
             assertTrue(plan.accept(decode, result.reservation()));
-            var scheduler = (QueuedRequestScheduler) context.data().getScheduler().scheduler();
+            var scheduler = (QueuedRequestScheduler) SchedulerTestServices.scheduler(context.data().getScheduler());
             assertTrue(result.committed());
             var placement = scheduler.enqueueRoute(plan);
             var offered = org.mockito.ArgumentCaptor.forClass(RequestRoute.class);

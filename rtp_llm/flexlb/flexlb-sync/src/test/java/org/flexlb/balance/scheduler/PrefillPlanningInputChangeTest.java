@@ -70,7 +70,7 @@ class PrefillPlanningInputChangeTest {
         PrefillEndpoint endpoint = endpoint(config, status);
         var before = endpoint.captureRouteProjectionInputs();
         var progress = endpoint.ownership.progress();
-        var worker = EndpointTestSupport.queueRunner(endpoint);
+        var worker = EndpointTestSupport.requestExecution(endpoint);
         clearInvocations(worker);
 
         apply(endpoint, response(2, newBatchTokens, newSeqLen, newAvailableKv, newTotalKv));
@@ -107,7 +107,7 @@ class PrefillPlanningInputChangeTest {
         PrefillEndpoint endpoint = endpoint(config, status);
         var before = endpoint.captureRouteProjectionInputs();
         var progress = endpoint.ownership.progress();
-        var worker = EndpointTestSupport.queueRunner(endpoint);
+        var worker = EndpointTestSupport.requestExecution(endpoint);
         clearInvocations(worker);
 
         apply(endpoint, response(2, 200, 999, 200, 100));
@@ -129,7 +129,7 @@ class PrefillPlanningInputChangeTest {
         WorkerStatus status = status();
         publishInitial(status, response(1, 1000, 1000, 0, 100));
         PrefillEndpoint endpoint = endpoint(config, status);
-        PrefillQueueRunner worker = EndpointTestSupport.queueRunner(endpoint);
+        RequestExecution worker = EndpointTestSupport.requestExecution(endpoint);
         CountDownLatch selected = new CountDownLatch(1);
         doAnswer(
                         invocation -> {
@@ -176,7 +176,7 @@ class PrefillPlanningInputChangeTest {
         }
     }
 
-    private static void awaitKvWait(PrefillQueueRunner worker, PrefillEndpoint endpoint) {
+    private static void awaitKvWait(RequestExecution worker, PrefillEndpoint endpoint) {
         Condition condition =
                 (Condition)
                         ReflectionTestUtils.getField(

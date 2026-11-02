@@ -573,7 +573,7 @@ class RequestTimeEstimationTest {
     }
 
     @Test
-    void duplicateIdentityUsesLiveMembershipAndKeepsUnknownWorkConservative() {
+    void duplicateIdentityUsesLiveMembershipRegardlessOfUnknownWork() {
         var policy = routeProjection();
         for (long expiry : new long[] {-1L, 0L, 12L, 13L, 14L, Long.MAX_VALUE}) {
             var items =
@@ -609,7 +609,9 @@ class RequestTimeEstimationTest {
                                     new CountingEvaluator(),
                                     policy),
                             probe());
-            assertEquals("INCOMING_ALREADY_ACTIVE", unknown.detail());
+            assertEquals(known.state(), unknown.state());
+            assertEquals(known.detail(), unknown.detail());
+            assertEquals(known.projectedTtftMsValue(), unknown.projectedTtftMsValue());
         }
     }
 

@@ -37,6 +37,7 @@ import java.util.concurrent.TimeUnit;
 public class ApplicationLifecycle implements ApplicationContextAware {
 
     private RequestScheduler scheduler;
+    private RequestLifecycle lifecycle;
     private RequestRepository requests;
     private EndpointRegistry endpoints;
     private DeliveryExecution deliveries;
@@ -56,8 +57,9 @@ public class ApplicationLifecycle implements ApplicationContextAware {
             ExpirationTimer deadlines,
             ResponseCompletionExecutor completions,
             ScheduledTaskTimer taskTimer,
-            DeliveryDispatcher dispatcher) {
+            DeliveryDispatcher dispatcher, RequestLifecycle lifecycle) {
         this.scheduler = scheduler;
+        this.lifecycle = lifecycle;
         this.requests = requests;
         this.endpoints = endpoints;
         this.deliveries = deliveries;
@@ -75,12 +77,12 @@ public class ApplicationLifecycle implements ApplicationContextAware {
                 Failures.run(
                         null,
                         () ->
-                                scheduler.awaitSchedulingCompletion(
+                                requests.awaitResponses(
                                         System.nanoTime() + TimeUnit.SECONDS.toNanos(30L)));
         if (!requests.closeRegistration()) return;
         failure = Failures.run(failure, scheduler::close);
         var owners = new LinkedHashSet<RequestLifecycle>();
-        owners.add(scheduler.lifecycle());
+        owners.add(lifecycle);
         for (var context : requests.snapshotActive()) owners.add(context.data().getScheduler());
         for (var owner : owners)
             failure = Failures.run(failure, owner::stopAdmissionsAndAwaitCompletion);
