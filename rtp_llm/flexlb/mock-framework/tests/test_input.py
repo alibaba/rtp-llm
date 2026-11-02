@@ -6,7 +6,7 @@ import subprocess
 import pytest
 import zstandard
 
-from helpers.input import MAGIC, MAX_FRAME, MAX_BATCH_REQUESTS, read_inputs, write_inputs, pb
+from helpers.input import MAGIC, MAX_FRAME, MAX_CHUNK_REQUESTS, read_inputs, write_inputs, pb
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -19,12 +19,12 @@ def requests(count=2050):
         yield request
 
 
-def frame(batch, *, checksum=True):
-    encoded = zstandard.ZstdCompressor(write_checksum=checksum).compress(batch.SerializeToString())
+def frame(chunk, *, checksum=True):
+    encoded = zstandard.ZstdCompressor(write_checksum=checksum).compress(chunk.SerializeToString())
     return struct.pack('>I', len(encoded)) + encoded
 
 
-def test_round_trip_multiple_batches_and_optional_zero_priority(tmp_path):
+def test_round_trip_multiple_chunks_and_optional_zero_priority(tmp_path):
     path = tmp_path / 'input.binpb.zst'
     write_inputs(path, requests())
     assert list(read_inputs(path)) == list(requests())
@@ -53,7 +53,7 @@ def test_invalid_or_unknown_fields_are_rejected_by_writer_and_reader(tmp_path, i
     with pytest.raises(ValueError):
         write_inputs(path, [input_request])
     assert not path.exists()
-    path.write_bytes(MAGIC + frame(pb.Batch(sequence=1, requests=[input_request])))
+    path.write_bytes(MAGIC + frame(pb.InputChunk(sequence=1, requests=[input_request])))
     with pytest.raises(ValueError):
         list(read_inputs(path))
 
@@ -62,25 +62,25 @@ def test_invalid_or_unknown_fields_are_rejected_by_writer_and_reader(tmp_path, i
                                   'oversized-length', 'oversized-content', 'no-checksum', 'trailing', 'too-many', 'extra-frame'])
 def test_bad_input_cannot_be_mistaken_for_a_complete_file(tmp_path, damage):
     request = next(requests())
-    data = frame(pb.Batch(sequence=1, requests=[request]))
-    seal = frame(pb.Batch(sequence=2, total_requests=1))
+    data = frame(pb.InputChunk(sequence=1, requests=[request]))
+    seal = frame(pb.InputChunk(sequence=2, total_requests=1))
     content = MAGIC + data + seal
     if damage == 'legacy-json': content = b'{"token_ids":[1],"max_new_tokens":3}\n'
     if damage == 'truncated': content = content[:-1]
     if damage == 'missing-seal': content = MAGIC + data
-    if damage == 'bad-count': content = MAGIC + data + frame(pb.Batch(sequence=2, total_requests=2))
-    if damage == 'sequence': content = MAGIC + frame(pb.Batch(sequence=2, requests=[request]))
+    if damage == 'bad-count': content = MAGIC + data + frame(pb.InputChunk(sequence=2, total_requests=2))
+    if damage == 'sequence': content = MAGIC + frame(pb.InputChunk(sequence=2, requests=[request]))
     if damage == 'checksum': content = MAGIC + data[:-1] + bytes([data[-1] ^ 1]) + seal
     if damage == 'oversized-length': content = MAGIC + struct.pack('>I', MAX_FRAME + 1)
     if damage == 'oversized-content':
         encoded = zstandard.ZstdCompressor(write_checksum=True).compress(b'\0' * (MAX_FRAME + 1))
         content = MAGIC + struct.pack('>I', len(encoded)) + encoded
-    if damage == 'no-checksum': content = MAGIC + frame(pb.Batch(sequence=1, requests=[request]), checksum=False) + seal
+    if damage == 'no-checksum': content = MAGIC + frame(pb.InputChunk(sequence=1, requests=[request]), checksum=False) + seal
     if damage == 'trailing': content += b'extra'
     if damage == 'extra-frame':
         encoded = data[4:] + zstandard.ZstdCompressor(write_checksum=True).compress(b'')
         content = MAGIC + struct.pack('>I', len(encoded)) + encoded + seal
-    if damage == 'too-many': content = MAGIC + frame(pb.Batch(sequence=1, requests=[request] * (MAX_BATCH_REQUESTS + 1)))
+    if damage == 'too-many': content = MAGIC + frame(pb.InputChunk(sequence=1, requests=[request] * (MAX_CHUNK_REQUESTS + 1)))
     path = tmp_path / 'bad.binpb.zst'
     path.write_bytes(content)
     with pytest.raises(ValueError):
