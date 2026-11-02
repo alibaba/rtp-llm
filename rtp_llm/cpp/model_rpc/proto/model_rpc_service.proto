@@ -553,6 +553,8 @@ message CacheStatusPB {
     int64 version = 4;
     map<int64, bool> cache_keys = 5;
     MultimodalCacheStatusPB multimodal_cache = 6;
+    // Prefer this list when nonempty; otherwise fall back to legacy cache_keys.
+    repeated sfixed64 cache_key_list = 7 [packed = true];
 }
 
 message MultimodalCacheStatusPB {
