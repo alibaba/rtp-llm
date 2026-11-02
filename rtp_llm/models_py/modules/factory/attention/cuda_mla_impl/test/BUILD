@@ -192,3 +192,10 @@ py_test(
     deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
     tags = ["manual"],
 )
+
+py_test(
+    name = "cp_kv_prefetch_test",
+    srcs = ["cp_kv_prefetch_test.py"],
+    deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
+    tags = ["manual"],
+)

@@ -78,6 +78,66 @@ def _reference(op, ckv, kpe):
 
 
 class PackedKVGatherTest(unittest.TestCase):
+    def test_optimized_remap_default_and_explicit_disable(self):
+        history = torch.tensor([[10], [20]])
+        indices = torch.tensor([1, 0])
+        destination = torch.empty_like(history)
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(cp._REMAP_HISTORY_TOPK_DEFAULT, "1")
+            result = cp._prepare_gathered_cp_kv(
+                history, indices, destination, use_cuda_graph=False
+            )
+            self.assertIsInstance(result, cp._RankMajorKv)
+            self.assertIs(result.values, history)
+            os.environ["RTP_CP_REMAP_HISTORY_TOPK"] = "0"
+            result = cp._prepare_gathered_cp_kv(
+                history, indices, destination, use_cuda_graph=False
+            )
+            self.assertIs(result, destination)
+            self.assertEqual(result.tolist(), [[20], [10]])
+
+    def test_padded_rope_positions_keep_empty_ranks_collective_eligible(self):
+        # B1 len=2, zigzag CP4: ranks 0/1 each own one real row; 2/3 only pad.
+        positions = torch.tensor([13, 14], dtype=torch.int32)
+        for rank in range(4):
+            op = _op(torch.arange(2), size=4)
+            op.full_rope_pos_ids = None
+            op.total_global_ids = torch.tensor(
+                [rank] if rank < 2 else [], dtype=torch.long
+            )
+            op.total_local_ids = torch.tensor([0] if rank < 2 else [], dtype=torch.long)
+            op._refresh_full_rope_positions(positions, 2)
+            expected = torch.tensor(
+                [13 + rank if rank < 2 else 0, 0], dtype=torch.int32
+            )
+            torch.testing.assert_close(op.full_rope_pos_ids, expected, rtol=0, atol=0)
+            self.assertIsNotNone(op.full_rope_pos_ids)
+
+    def test_padded_rope_graph_replay_clears_stale_positions(self):
+        op = _op(torch.arange(2), graph=True)
+        op.full_rope_pos_ids = None
+        op.total_global_ids = torch.tensor([0], dtype=torch.long)
+        op.total_local_ids = torch.tensor([1], dtype=torch.long)
+        positions = torch.tensor([9], dtype=torch.int32)
+        op._refresh_full_rope_positions(positions, 2)
+        before = op.full_rope_pos_ids
+        op.total_global_ids = op.total_global_ids[:0]
+        op.total_local_ids = op.total_local_ids[:0]
+        op._refresh_full_rope_positions(positions, 2)
+        self.assertIs(op.full_rope_pos_ids, before)
+        self.assertEqual(before.tolist(), [0, 0])
+        with self.assertRaisesRegex(RuntimeError, "shape/dtype/device changed"):
+            op._refresh_full_rope_positions(positions, 3)
+        with self.assertRaisesRegex(RuntimeError, "shape/dtype/device changed"):
+            op._refresh_full_rope_positions(positions.to(torch.int64), 2)
+        # A padded graph bucket can later receive real rows again. Its storage
+        # must stay stable while only valid positions are restored.
+        op.total_global_ids = torch.tensor([0], dtype=torch.long)
+        op.total_local_ids = torch.tensor([0], dtype=torch.long)
+        op._refresh_full_rope_positions(positions, 2)
+        self.assertIs(op.full_rope_pos_ids, before)
+        self.assertEqual(before.tolist(), [9, 0])
+
     def test_early_kv_context_covers_projection_and_indexer_failures(self):
         for failure, host_backed, cross_layer in [
             (f, h, c)
@@ -130,7 +190,7 @@ class PackedKVGatherTest(unittest.TestCase):
                     raise ValueError("projection")
                 return torch.ones(2, 4, dtype=torch.bfloat16)
 
-            def indexer(*_):
+            def indexer(*_, **kwargs):
                 events.append("indexer")
                 if failure == "indexer":
                     raise ValueError("indexer")
@@ -155,6 +215,7 @@ class PackedKVGatherTest(unittest.TestCase):
                 forward=attend,
             )
             layer = SimpleNamespace(
+                indexer=None,
                 q_lora_rank=2,
                 kv_lora_rank=2,
                 qk_rope_head_dim=2,
@@ -171,6 +232,9 @@ class PackedKVGatherTest(unittest.TestCase):
                 o_proj=lambda x: x,
                 parallelism_config=SimpleNamespace(get_attn_tp_size=lambda: 1),
                 _run_sparse_indexer=indexer,
+            )
+            layer._forward_impl = lambda *args, **kwargs: MlaAttention._forward_impl(
+                layer, *args, **kwargs
             )
             if failure:
                 with self.assertRaisesRegex(ValueError, failure):
