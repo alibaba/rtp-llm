@@ -20,6 +20,7 @@ public final class NativeClient implements AutoCloseable {
     private final java.util.function.Supplier<List<String>> masters;
     private final java.util.function.Consumer<Event.Builder> events;
     private final MediaClient vision;
+    private final long cacheKeySeed;
     private final Map<String, ManagedChannel> channels = new HashMap<>();
     private final Map<Long, Call> active = new HashMap<>();
     private final ScheduledThreadPoolExecutor timers = new ScheduledThreadPoolExecutor(1,
@@ -38,6 +39,10 @@ public final class NativeClient implements AutoCloseable {
         this(masters, events, MediaInput.IMAGE_TOKEN);
     }
     NativeClient(java.util.function.Supplier<List<String>> masters, java.util.function.Consumer<Event.Builder> events, int imageToken) {
+        this(masters, events, imageToken, 0L);
+    }
+    NativeClient(java.util.function.Supplier<List<String>> masters, java.util.function.Consumer<Event.Builder> events, int imageToken, long seed) {
+        cacheKeySeed = seed;
         vision = new MediaClient(imageToken);
         this.masters = Objects.requireNonNull(masters); this.events = Objects.requireNonNull(events);
         timers.setRemoveOnCancelPolicy(true);
@@ -60,6 +65,9 @@ public final class NativeClient implements AutoCloseable {
                 || input.getGenerateConfig().getNumBeams() > 1 || input.getGenerateConfig().getNumReturnSequences() > 1)
             throw new IllegalArgumentException("Client currently requires matching single-sequence request metadata");
         if (input.getGenerateConfig().getTimeoutMs() > 0) budget = Math.min(budget, TimeUnit.MILLISECONDS.toNanos(input.getGenerateConfig().getTimeoutMs()));
+        if (input.getMultimodalInputsCount() == 0 && request.getCacheKeyBlockSize() > 0)
+            request = request.toBuilder().clearBlockCacheKeys().addAllBlockCacheKeys(
+                MediaInput.sequence(MediaInput.text(input), Math.toIntExact(request.getCacheKeyBlockSize()), cacheKeySeed).keys()).build();
         Call call;
         synchronized (this) {
             if (closed || closing) throw new IllegalStateException("Client closed");
@@ -187,7 +195,7 @@ public final class NativeClient implements AutoCloseable {
                             visionPrepared = true;
                             request = request.toBuilder().setGenerateInput(media.toByteString()).setSeqLen(prepared.input().getTokenIdsCount())
                                 .setSelectedVit(selected).clearBlockCacheKeys().addAllBlockCacheKeys(
-                                    request.getCacheKeyBlockSize() > 0 ? MediaInput.cacheKeys(prepared, Math.toIntExact(request.getCacheKeyBlockSize())) : java.util.List.of()).build();
+                                    request.getCacheKeyBlockSize() > 0 ? MediaInput.sequence(prepared, Math.toIntExact(request.getCacheKeyBlockSize()), cacheKeySeed).keys() : java.util.List.of()).build();
                             schedule(0);
                         }
                     } catch (RuntimeException error) { fail(error); }

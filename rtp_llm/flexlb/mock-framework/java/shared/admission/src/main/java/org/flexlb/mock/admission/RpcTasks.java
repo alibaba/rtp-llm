@@ -7,17 +7,17 @@ import org.flexlb.mock.engine.Scheduler;
 /** Translation at the native RTP boundary; scheduling state contains no protobuf objects. */
 final class RpcTasks {
     static Scheduler.Input input(GenerateInputPB input, String identity, long started, long rpcDeadline,
-                                    boolean retained, int blockSize) {
-        return input(org.flexlb.mock.multimodal.MediaInput.text(input), identity, started, rpcDeadline, retained, blockSize);
+                                    boolean retained, int blockSize, long seed) {
+        return input(org.flexlb.mock.multimodal.MediaInput.text(input), identity, started, rpcDeadline, retained, blockSize, seed);
     }
     static Scheduler.Input input(org.flexlb.mock.multimodal.MediaInput.Prepared prepared, String identity, long started, long rpcDeadline,
-                                 boolean retained, int blockSize) {
+                                 boolean retained, int blockSize, long seed) {
         var input = prepared.input();
         long deadline = Math.min(rpcDeadline, input.getGenerateConfig().getTimeoutMs() == 0 ? Long.MAX_VALUE
             : after(started, TimeUnit.MILLISECONDS.toNanos(input.getGenerateConfig().getTimeoutMs())));
         return new Scheduler.Input(identity, input.getRequestId(), input.hasGroupId() ? input.getGroupId().getValue() : 0,
             input.getTokenIdsCount(), input.getGenerateConfig().getMaxNewTokens(), input.getPriority(), started, deadline,
-            org.flexlb.mock.multimodal.MediaInput.sequence(prepared, blockSize), input.getGenerateConfig().getReuseCache(), retained, input.getGenerateConfig().getMinNewTokens(), input.getGenerateConfig().getIgnoreEos());
+            org.flexlb.mock.multimodal.MediaInput.sequence(prepared, blockSize, seed), input.getGenerateConfig().getReuseCache(), retained, input.getGenerateConfig().getMinNewTokens(), input.getGenerateConfig().getIgnoreEos());
     }
     static TaskInfoPB task(Scheduler.Task task) {
         var result = TaskInfoPB.newBuilder().setRequestId(task.requestId()).setBatchId(task.batchId())

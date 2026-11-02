@@ -80,7 +80,7 @@ public final class KvcmReporter implements AutoCloseable {
     }
     private ObjectNode snapshot(CacheMetadata.Snapshot snapshot) {
         var root = report(); var blocks = ((ArrayNode) root.path("events")).addObject().put("event_type", "EVENT_BLOCK_SNAPSHOT")
-            .putObject("block_snapshot").putArray("blocks");
+            .putObject("block_snapshot").put("key_count", snapshot.keys(HBM).size()).putArray("blocks");
         for (long key : new TreeSet<>(snapshot.keys(HBM)))
             spec(blocks.addObject().put("block_key", Long.toString(key)).put("medium", "hbm"));
         return root;

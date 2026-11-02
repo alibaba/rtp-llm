@@ -3,7 +3,8 @@ package org.flexlb.mock.cache;
 import java.util.*;
 
 /** Immutable semantic input and cache-only media identity; no model or RPC dependency. */
-public record CacheSequence(int blockSize, List<Integer> tokens, List<Span> spans) {
+public record CacheSequence(int blockSize, List<Integer> tokens, List<Span> spans, long seed) {
+    public CacheSequence(int blockSize, List<Integer> tokens, List<Span> spans) { this(blockSize, tokens, spans, 0); }
     public record Span(int offset, List<Integer> rowHashes) {
         public Span { rowHashes = List.copyOf(rowHashes); }
     }
@@ -24,7 +25,7 @@ public record CacheSequence(int blockSize, List<Integer> tokens, List<Span> span
     public List<Long> keys(int computedOutputTokens, int outputToken) {
         if (computedOutputTokens < 0) throw new IllegalArgumentException("Negative computed output length");
         int length = Math.addExact(tokens.size(), computedOutputTokens);
-        var keys = new ArrayList<Long>(); long hash = 0;
+        var keys = new ArrayList<Long>(); long hash = seed;
         for (int start = 0; (long) start + blockSize <= length; start += blockSize) {
             for (int i = start; i < start + blockSize; i++)
                 hash = roll(hash, i < tokens.size() ? tokens.get(i) : outputToken);

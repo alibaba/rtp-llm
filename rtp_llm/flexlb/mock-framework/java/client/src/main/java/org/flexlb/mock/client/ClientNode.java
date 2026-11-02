@@ -16,6 +16,8 @@ public final class ClientNode implements ClientProtocol, AutoCloseable {
     private static final ObjectMapper JSON = new ObjectMapper();
     private final String id;
     private final int imageToken;
+    private final int blockSize;
+    private final long cacheKeySeed;
     private final Path topology, directory;
     private final ClientMetrics metrics = new ClientMetrics();
     private final HttpClient http = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(2)).build();
@@ -27,10 +29,10 @@ public final class ClientNode implements ClientProtocol, AutoCloseable {
     private volatile boolean closed;
 
     public ClientNode(String id, Path topology, Path directory) throws IOException {
-        this(id, topology, directory, org.flexlb.mock.multimodal.MediaInput.IMAGE_TOKEN);
+        this(id, topology, directory, org.flexlb.mock.multimodal.MediaInput.IMAGE_TOKEN, 0, 0L);
     }
-    private ClientNode(String id, Path topology, Path directory, int imageToken) throws IOException {
-        this.imageToken = imageToken;
+    private ClientNode(String id, Path topology, Path directory, int imageToken, int blockSize, long seed) throws IOException {
+        this.imageToken = imageToken; this.blockSize = blockSize; this.cacheKeySeed = seed;
         this.id = id; this.topology = topology; this.directory = directory;
         api = new ApiServer(new InetSocketAddress("127.0.0.1", 0)).bind(ClientProtocol.class, this).metrics(metrics::scrape).start();
     }
@@ -61,7 +63,7 @@ public final class ClientNode implements ClientProtocol, AutoCloseable {
         Files.createDirectories(playback.getParent()); Files.createDirectory(playback);
         save(playback.resolve("plan.json"), args);
         if (worker != null) worker.close();
-        worker = new LoadClient(args, metrics, topology, playback.resolve("requests.binpb.zst"), id, imageToken);
+        worker = new LoadClient(args, metrics, topology, playback.resolve("requests.binpb.zst"), id, imageToken, blockSize, cacheKeySeed);
         workerSequence = args.sequence();
         return new Ack(true);
     }
@@ -205,14 +207,18 @@ public final class ClientNode implements ClientProtocol, AutoCloseable {
         var config = JSON.readTree(Path.of(required("MOCK_CONFIG_FILE")).toFile());
         var settings = config.path("component").path("config");
         settings.fieldNames().forEachRemaining(name -> {
-            if (!name.equals("checkpoint_path")) throw new IllegalArgumentException("Unknown Client setting: " + name);
+            if (!java.util.Set.of("checkpoint_path", "seq_size_per_block").contains(name)) throw new IllegalArgumentException("Unknown Client setting: " + name);
         });
         int imageToken = org.flexlb.mock.runtime.EngineConfig.imageToken(
             org.flexlb.mock.runtime.EngineConfig.model(settings), org.flexlb.mock.multimodal.MediaInput.IMAGE_TOKEN);
+        int blockSize = settings.path("seq_size_per_block").asInt(0);
+        if (settings.has("seq_size_per_block") && (!settings.path("seq_size_per_block").isIntegralNumber() || !settings.path("seq_size_per_block").canConvertToInt() || blockSize < 1))
+            throw new IllegalArgumentException("Client seq_size_per_block must be positive int32");
+        long seed = org.flexlb.mock.runtime.EngineConfig.cacheKeySeed(settings);
         var directory = Path.of(required("MOCK_OUTPUT_DIR"));
-        try (var node = new ClientNode(required("MOCK_NODE_ID"), Path.of(required("MOCK_TOPOLOGY_FILE")), directory, imageToken)) {
+        try (var node = new ClientNode(required("MOCK_NODE_ID"), Path.of(required("MOCK_TOPOLOGY_FILE")), directory, imageToken, blockSize, seed)) {
             var hook = new Thread(node::close, "client-shutdown"); Runtime.getRuntime().addShutdownHook(hook);
-            var effective = JSON.createObjectNode().put("id", node.id);
+            var effective = JSON.createObjectNode().put("id", node.id).put("seq_size_per_block", blockSize).put("cache_key_hash_seed", seed);
             if (settings.has("checkpoint_path")) effective.set("checkpoint_path", settings.get("checkpoint_path"));
             save(directory.resolve("effective-config.json"), effective);
             save(directory.resolve("endpoints.json"), Map.of("id", node.id, "role", "client", "control", node.url(),

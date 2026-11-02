@@ -1,0 +1,55 @@
+{
+  "master": {
+    "FLEXLB_CONFIG": "{\"scheduler\":{\"type\":\"DIRECT\"},\"dispatcher\":{\"type\":\"NON_BATCH\"},\"requestLifecycle\":{\"request\":{\"timeoutMs\":60000}},\"cacheMatching\":{\"type\":\"KVCM\",\"medium\":[\"hbm\"]}}",
+    "MODEL_SERVICE_CONFIG": "{\"service_id\":\"aigc.text-generation.generation.mock\",\"role_endpoints\":[{\"group\":\"group\",\"prefill_endpoint\":{\"address\":\"prefill-domain\",\"protocol\":\"grpc\"},\"decode_endpoint\":{\"address\":\"decode-domain\",\"protocol\":\"grpc\"},\"vit_endpoint\":{\"address\":\"vit-domain\",\"protocol\":\"grpc\"}}],\"kvcm\":{\"address\":\"kvcm-meta-domain\",\"port\":6381,\"namespace\":\"dsv41-kvcm\"}}"
+  },
+  "frontend": {
+    "MODEL_TYPE": "deepseek_v41",
+    "CHECKPOINT_PATH": "/model",
+    "SEQ_SIZE_PER_BLOCK": "128"
+  },
+  "vit": {
+    "ROLE_TYPE": "VIT",
+    "MODEL_TYPE": "deepseek_v41",
+    "CHECKPOINT_PATH": "/model",
+    "START_PORT": "8088",
+    "MOCK_VIT_SKIP_DOWNLOAD": "false",
+    "MOCK_COMPUTE_FORWARD_EXPRESSION": "1 + batchSize"
+  },
+  "prefill": {
+    "ROLE_TYPE": "PREFILL",
+    "MODEL_TYPE": "deepseek_v41",
+    "CHECKPOINT_PATH": "/model",
+    "START_PORT": "8088",
+    "SEQ_SIZE_PER_BLOCK": "128",
+    "TEST_BLOCK_NUM": "1025",
+    "RESERVE_BLOCK_RATIO": "0",
+    "REUSE_CACHE": "true",
+    "ENABLE_DEVICE_CACHE": "true",
+    "ENABLE_MEMORY_CACHE": "false",
+    "ENABLE_REMOTE_CACHE": "false",
+    "MOCK_COMPUTE_FORWARD_EXPRESSION": "1 + batchSize",
+    "KV_CACHE_EVENT_PUBLISHER_TYPE": "kvcm",
+    "KV_CACHE_EVENT_MANAGER_ENDPOINT": "http://kvcm-meta-http:6492",
+    "KV_CACHE_EVENT_INSTANCE_GROUP": "dsv41-kvcm",
+    "KV_CACHE_EVENT_INSTANCE_ID": "dsv41-kvcm_128"
+  },
+  "decode": {
+    "ROLE_TYPE": "DECODE",
+    "MODEL_TYPE": "deepseek_v41",
+    "CHECKPOINT_PATH": "/model",
+    "START_PORT": "8088",
+    "SEQ_SIZE_PER_BLOCK": "128",
+    "TEST_BLOCK_NUM": "1025",
+    "RESERVE_BLOCK_RATIO": "0",
+    "REUSE_CACHE": "true",
+    "ENABLE_DEVICE_CACHE": "true",
+    "ENABLE_MEMORY_CACHE": "false",
+    "ENABLE_REMOTE_CACHE": "false",
+    "MOCK_COMPUTE_FORWARD_EXPRESSION": "1 + batchSize",
+    "KV_CACHE_EVENT_PUBLISHER_TYPE": "kvcm",
+    "KV_CACHE_EVENT_MANAGER_ENDPOINT": "http://kvcm-meta-http:6492",
+    "KV_CACHE_EVENT_INSTANCE_GROUP": "dsv41-kvcm",
+    "KV_CACHE_EVENT_INSTANCE_ID": "dsv41-kvcm_128"
+  }
+}

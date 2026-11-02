@@ -23,7 +23,7 @@ class KvcmProtocolTest {
         var root = JSON.<ObjectNode>valueToTree(RtpNodeTest.configuration(role));
         var values = (ObjectNode)root.path("component").path("config");
         values.put("kv_cache_event_manager_endpoint",endpoint).put("reuse_cache",true)
-            .put("kv_cache_event_instance_id","test-instance").put("kv_cache_event_instance_group","test-group");
+            .put("kv_cache_event_host_ip_port","127.0.0.1:18080").put("kv_cache_event_instance_id","test-instance").put("kv_cache_event_instance_group","test-group");
         if (events) values.put("kv_cache_event_publisher_type","kvcm");
         else values.put("enable_remote_cache",true);
         var path = directory.resolve(role + ".json"); JSON.writeValue(path.toFile(),root); return RtpConfig.load(path);
@@ -111,7 +111,7 @@ class KvcmProtocolTest {
             var root = JSON.<ObjectNode>valueToTree(RtpNodeTest.configuration("prefill"));
             var values = (ObjectNode) root.path("component").path("config");
             values.put("kv_cache_event_publisher_type", "kvcm").put("kv_cache_event_manager_endpoint", meta.endpoint())
-                .put("kv_cache_event_instance_id", "host-only").put("reuse_cache", true)
+                .put("kv_cache_event_host_ip_port", "127.0.0.1:18080").put("kv_cache_event_instance_id", "host-only").put("reuse_cache", true)
                 .put("enable_device_cache", false).put("enable_memory_cache", true).put("mock.cache.memory.blocks", 8);
             try (var node = RtpNode.start(RtpConfig.load(root))) {
                 await(() -> meta.has("EVENT_BLOCK_SNAPSHOT"));
