@@ -144,7 +144,7 @@ public interface EngineScheduler extends AutoCloseable {
 
     record Task(long requestId, long batchId, int inputLength, int prefixLength, int priority,
                 ReportedPhase phase, int iterations, long waitingMillis, long executionMillis,
-                long endTimeMillis, RequestFailure failure) {}
+                long endTimeMillis, RequestFailure failure, boolean prefixLengthValid) {}
 
     /**
      * Captures active and finished request state for Master polling.

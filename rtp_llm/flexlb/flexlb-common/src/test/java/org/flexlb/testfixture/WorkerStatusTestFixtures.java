@@ -72,7 +72,7 @@ public final class WorkerStatusTestFixtures {
                 response.getMaxSeqLen(),
                 response.getMaxBatchTokensSize(),
                 response.getRunningQueryLen(),
-                response.getWaitingQueryLen());
+                response.getWaitingQueryLen(), 0L, 0, 0);
         return worker.bindStatusObservation(
                 engine,
                 response.isAlive(),
@@ -111,7 +111,7 @@ public final class WorkerStatusTestFixtures {
                 task.getBatchId(),
                 task.getPhase(),
                 task.getExecutionTimeMs(),
-                task.getPriorityPreemptionProgress());
+                task.getPriorityPreemptionProgress(), false);
     }
 
 }

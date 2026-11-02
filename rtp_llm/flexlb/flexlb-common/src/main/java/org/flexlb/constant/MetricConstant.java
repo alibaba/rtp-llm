@@ -5,6 +5,14 @@ package org.flexlb.constant;
  * Use with standard monitoring libraries like Micrometer/Prometheus
  */
 public class MetricConstant {
+    public static final String CACHE_LOCAL_STANDBY_MAPPING_COUNT = "app.cache.local.standby.mapping.count";
+    public static final String CACHE_LOCAL_STANDBY_CAPACITY_REJECTED_QPS = "app.cache.local.standby.capacity.rejected.qps";
+    public static final String CACHE_MATCH_STANDBY_FALLBACK_QPS = "app.cache.match.standby.fallback.qps";
+    public static final String CACHE_MATCH_SOURCE_CHANGE_QPS = "app.cache.match.source.change.qps";
+    public static final String CACHE_MATCH_ACTIVE_SOURCE = "app.cache.match.active.source";
+    public static final String KVCM_QUERY_RETRY_QPS = "app.cache.kvcm.query.retry.qps";
+    public static final String KVCM_QUERY_FAILURE_QPS = "app.cache.kvcm.query.failure.qps";
+
 
     public static final String NETTY_DIRECT_RESERVED_BYTES = "app.netty.direct.reserved.bytes";
     public static final String NETTY_DIRECT_PINNED_BYTES = "app.netty.direct.pinned.bytes";

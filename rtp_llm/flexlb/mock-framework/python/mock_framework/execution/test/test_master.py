@@ -162,6 +162,7 @@ def test_real_master_routes_to_isolated_rtp_processes(
         native["cacheMatching"] = {
             "type": "KVCM",
             "medium": ["hbm"],
+            "globalKvsHostCount": 0,
             "requestTimeoutMs": 3000,
         }
         master_config["FLEXLB_CONFIG"] = json.dumps(native)

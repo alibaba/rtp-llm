@@ -117,6 +117,10 @@ mock.compute.eos.seed: 20260922
 
 Java Master 与 Engine RPC 的源码对照基线为 `ba26ddf1dd86c02bcee3cc6eee966ca59e4ae7a6`（`feature/dsv41-dev-main-202161013`）。直接调用 P 的多 token 请求需开启 `can_use_pd_separation`，并提供一个有效的 Decode 地址。`prefill_kv_handoff.computed_kv_end` 表示已计算 prompt 的排他边界，不含首个采样 token。
 
+Master 在 KVCM 模式下查询 MetaService，不再同步 P/D 完整缓存键。查询失败时使用有容量和 TTL 限制的 Local Standby 预测，按 Engine 代次隔离，健康恢复后回到 KVCM。LOCAL_SYNC 继续使用 Engine 同步索引。ViT 缓存同步独立于 KVCM 模式。
+
+WorkerStatusPB 的缓存 traits 使用字段 23–27，ViT 的 `mm_inflight_inputs` 使用字段 28。Master 与 Engine 需使用同一份协议构建。当前 KVCM 对齐范围为显式 namespace、Full Attention、单 Engine/端点和 CP=1。
+
 KVCM 接入使用以下配置。
 
 ```yaml

@@ -58,6 +58,8 @@ P/D/V 的资源候选绑定同一个 CI 镜像，按实际节点架构选择资�
 3. 在 Whale 的部署页保存目标 zone 配置，检查启动命令、镜像、资源覆盖和 ENV 的差异。修改 zone 配置后提交当前部署。更换服务配置版本时，在发布页面选中对应版本和目标部署。
 4. 回读 Carbon 启动计划、镜像、健康探针和 VIP 注册端口。确认各角色就绪、`engine_started` 日志中的 `effective_config` 与预期一致，再从 Frontend 发一条真实请求。滚动更新后观察成功率、TTFT 和 Prefill 复用率回稳。
 
+启用 KVCM 时，将 Master 的 `cacheMatching.type` 设为 `KVCM`，并显式设置 `medium: [hbm]`、`globalKvsHostCount: 0`、`enableP2p: false`。Engine 的事件实例 ID 必须与 Master 查询的 `<namespace>_<cacheKeyBlockSize>` 一致。
+
 ## CP 与 block size
 
 使用支持显式 Prefill CP 的 Frontend。Frontend 和 Mock Prefill 的 `SEQ_SIZE_PER_BLOCK` 都填 **CP 前的基础块大小**，`PREFILL_CP_SIZE` 填相同值，Frontend 额外设 `PREFILL_CP_KV_CACHE_SHARDED=1`。两端按基础块滚动哈希，每组取最后一个 key，Master 的路由跨度为基础块大小 × CP。Mock P/D 的 `CACHE_KEY_HASH_SEED` 与 Frontend 生效值对齐。
