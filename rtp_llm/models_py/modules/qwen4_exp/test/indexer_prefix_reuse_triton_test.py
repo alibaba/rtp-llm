@@ -177,6 +177,43 @@ class IndexerPrefixReuseTritonTest(unittest.TestCase):
             len(lengths), maximum, self.HEADS, 128
         )
 
+    def assert_fused_matches_reference(self, args):
+        """Run both writers on cloned pools and require bit-for-bit equality."""
+        kv_ref, state_ref = args["kv"].clone(), args["state"].clone()
+        kv_fused, state_fused = args["kv"].clone(), args["state"].clone()
+        with patch.dict(
+            os.environ, {"RTP_LLM_QSA_STRICT_VALIDATION": "0"}
+        ):
+            reference = write_indexer_cache(
+                args["raw"],
+                args["cu"],
+                args["prefixes_i64"],
+                args["rope_cos"],
+                args["rope_sin"],
+                args["k_gamma"],
+                kv_ref,
+                args["kv_table"],
+                state_ref,
+                args["state_table"],
+                ratio=self.RATIO,
+                kv_tokens_per_block=self.PAGE,
+                state_tokens_per_block=self.PAGE,
+                norm_eps=self.EPS,
+                capture_undo=True,
+                rope_is_token_aligned=True,
+            )
+            fused = self.write(args, kv_fused, state_fused)
+        self.assertIsNotNone(fused)
+        torch.testing.assert_close(state_fused, state_ref, rtol=0, atol=0)
+        torch.testing.assert_close(kv_fused, kv_ref, rtol=0, atol=0)
+        torch.testing.assert_close(
+            fused["padded_q"], self.expected_padded_q(args), rtol=0, atol=0
+        )
+        restore_indexer_cache(fused["undo"])
+        restore_indexer_cache(reference["undo"])
+        torch.testing.assert_close(kv_fused, args["kv"], rtol=0, atol=0)
+        torch.testing.assert_close(state_fused, args["state"], rtol=0, atol=0)
+
     def test_fused_matches_vectorized_writer_bit_for_bit(self):
         cases = (
             ([0, 0], [128, 4]),  # aligned starts; divisible + one-group tail
@@ -188,72 +225,71 @@ class IndexerPrefixReuseTritonTest(unittest.TestCase):
         )
         for prefixes, lengths in cases:
             with self.subTest(prefixes=prefixes, lengths=lengths):
-                args = self.inputs(prefixes, lengths)
-                kv_ref, state_ref = args["kv"].clone(), args["state"].clone()
-                kv_fused, state_fused = args["kv"].clone(), args["state"].clone()
-                with patch.dict(
-                    os.environ, {"RTP_LLM_QSA_STRICT_VALIDATION": "0"}
+                self.assert_fused_matches_reference(self.inputs(prefixes, lengths))
+
+    def strided_inputs(self, prefixes, lengths, seed=20261103, extra_columns=0):
+        """Rebuild q/raw as zero-copy ``split_projected`` cross-column views.
+
+        Production hands the writer qkv-projection views whose token rows
+        stride the full projection width, not ``heads * 128``; ``extra_columns``
+        pads the width so the row stride also exceeds the minimum the gate
+        requires.
+        """
+        args = self.inputs(prefixes, lengths, seed)
+        tokens = sum(lengths)
+        qk = torch.randn(
+            tokens,
+            self.HEADS * 128 + 128 + extra_columns,
+            device="cuda",
+            dtype=torch.bfloat16,
+        )
+        q, token_k = torch.split(qk, [self.HEADS * 128, 128], dim=-1)
+        args["q"] = q.reshape(tokens, self.HEADS, 128)
+        args["raw"] = token_k.reshape(tokens, 1, 128).squeeze(-2)
+        self.assertFalse(args["q"].is_contiguous())
+        self.assertFalse(args["raw"].is_contiguous())
+        return args
+
+    def test_fused_matches_strided_projection_views_bit_for_bit(self):
+        for prefixes, lengths in (
+            ([0, 0], [128, 4]),  # aligned starts; divisible + one-group tail
+            ([128, 128], [129, 7]),  # prefix reuse crossing pages, non-divisible
+            ([384, 128, 0], [260, 1, 131]),  # batch > 1, mixed prefixes/lengths
+        ):
+            for extra_columns in (0, 64):
+                with self.subTest(
+                    prefixes=prefixes,
+                    lengths=lengths,
+                    extra_columns=extra_columns,
                 ):
-                    reference = write_indexer_cache(
-                        args["raw"],
-                        args["cu"],
-                        args["prefixes_i64"],
-                        args["rope_cos"],
-                        args["rope_sin"],
-                        args["k_gamma"],
-                        kv_ref,
-                        args["kv_table"],
-                        state_ref,
-                        args["state_table"],
-                        ratio=self.RATIO,
-                        kv_tokens_per_block=self.PAGE,
-                        state_tokens_per_block=self.PAGE,
-                        norm_eps=self.EPS,
-                        capture_undo=True,
-                        rope_is_token_aligned=True,
+                    args = self.strided_inputs(
+                        prefixes, lengths, extra_columns=extra_columns
                     )
-                    fused = self.write(args, kv_fused, state_fused)
-                self.assertIsNotNone(fused)
-                torch.testing.assert_close(state_fused, state_ref, rtol=0, atol=0)
-                torch.testing.assert_close(kv_fused, kv_ref, rtol=0, atol=0)
-                torch.testing.assert_close(
-                    fused["padded_q"], self.expected_padded_q(args), rtol=0, atol=0
-                )
-                restore_indexer_cache(fused["undo"])
-                restore_indexer_cache(reference["undo"])
-                torch.testing.assert_close(kv_fused, args["kv"], rtol=0, atol=0)
-                torch.testing.assert_close(state_fused, args["state"], rtol=0, atol=0)
+                    self.assert_fused_matches_reference(args)
 
     def test_fused_declines_unsupported_geometry_without_mutation(self):
         args = self.inputs([128], [132])
         before = args["kv"].clone(), args["state"].clone()
-        projection = torch.randn(
-            sum(args["lengths"]) + 16, 256, device="cuda", dtype=torch.bfloat16
+        # Stride patterns the kernels cannot address decline: interleaved q
+        # heads (head stride != 128) and a strided raw-key row (element
+        # stride != 1). The cross-column qkv views production produces have
+        # contiguous 128-wide segments and are covered by the strided golden
+        # test above.
+        tokens = sum(args["lengths"])
+        wide_q = torch.randn(
+            tokens, self.HEADS, 256, device="cuda", dtype=torch.bfloat16
         )
-        strided = projection[8:, -128:]
-        self.assertFalse(strided.is_contiguous())
-        declined = write_prefix_reuse_prefill(
-            args["q"],
-            strided,
-            args["cu"],
-            args["prefixes_i32"],
-            args["lengths"],
-            args["prefix_values"],
-            args["current_cos"],
-            args["current_sin"],
-            args["rope_cos"],
-            args["rope_sin"],
-            args["q_gamma"],
-            args["k_gamma"],
-            args["kv"],
-            args["kv_table"],
-            args["state"],
-            args["state_table"],
-            kv_tokens_per_block=self.PAGE,
-            state_tokens_per_block=self.PAGE,
-            norm_eps=self.EPS,
-        )
-        self.assertIsNone(declined)
+        interleaved_q = wide_q[:, :, :128]
+        self.assertFalse(interleaved_q.is_contiguous())
+        bad_q = dict(args)
+        bad_q["q"] = interleaved_q
+        self.assertIsNone(self.write(bad_q, args["kv"], args["state"]))
+        wide_raw = torch.randn(tokens, 256, device="cuda", dtype=torch.bfloat16)
+        strided_raw = wide_raw[:, ::2]
+        self.assertFalse(strided_raw.is_contiguous())
+        bad_raw = dict(args)
+        bad_raw["raw"] = strided_raw
+        self.assertIsNone(self.write(bad_raw, args["kv"], args["state"]))
         # A prefix that is not page aligned must decline before any write.
         misaligned = dict(args)
         misaligned["prefix_values"] = [4]
