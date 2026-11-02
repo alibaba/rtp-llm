@@ -1,6 +1,15 @@
 load("//:def.bzl", "copts")
 load("//bazel:arch_select.bzl", "torch_deps")
 
+cc_test(
+    name = "decode_graph_batch_limit_test",
+    srcs = ["DecodeGraphBatchLimitTest.cc"],
+    deps = [
+        "//rtp_llm/cpp/cuda_graph:decode_graph_batch_limit",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
 cc_library(
     name = "test_cuda_graph_runner_libs",
     srcs = [

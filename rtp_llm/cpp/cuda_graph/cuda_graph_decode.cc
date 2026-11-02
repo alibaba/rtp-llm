@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_runner.h"
+#include "rtp_llm/cpp/cuda_graph/DecodeGraphBatchLimit.h"
 #if USING_CUDA
 #include <cuda_runtime.h>
 #endif
@@ -9,6 +10,9 @@ void CudaGraphRunner::replayDecode(int bs) {
 }
 
 std::vector<int> CudaGraphRunner::getDecodeBatchSizesToCapture() {
+    // Reject impossible capture sizes before constructing views into buffers
+    // allocated for max_bs_. The same limit bounds scheduler admission.
+    (void)decodeGraphBatchLimit(max_bs_, decode_capture_batch_sizes_);
     // If decode_capture_batch_sizes_ is provided from Python, use it directly
     if (!decode_capture_batch_sizes_.empty()) {
         RTP_LLM_LOG_INFO("Using decode capture batch sizes from Python: %zu sizes", decode_capture_batch_sizes_.size());

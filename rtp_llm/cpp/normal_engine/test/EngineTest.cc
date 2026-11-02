@@ -22,6 +22,36 @@ class NormalEngineTest: public DeviceTestBase {
 public:
 };
 
+TEST_F(NormalEngineTest, testDecodeGraphCapacityCapsScheduler) {
+    ModelConfig   model_config;
+    RuntimeConfig runtime_config;
+    KVCacheConfig kv_cache_config;
+    auto          params = createEngineInitParams(CustomConfig{}, model_config, runtime_config, kv_cache_config);
+    params.runtime_config.warm_up                      = false;
+    params.runtime_config.max_generate_batch_size      = 96;
+    params.concurrency_config.concurrency_limit        = 96;
+    params.hw_kernel_config.enable_cuda_graph          = true;
+    params.hw_kernel_config.decode_capture_batch_sizes = {64};
+    params.pd_sep_config.role_type                     = RoleType::DECODE;
+    NormalExecutor::test_model_factory                 = [vocab = model_config.vocab_size](const GptModelInitParams&) {
+        return std::make_unique<MockModel>(vocab);
+    };
+    std::shared_ptr<NormalEngine> engine;
+    try {
+        engine = std::make_shared<NormalEngine>(params, nullptr);
+    } catch (...) {
+        NormalExecutor::test_model_factory = nullptr;
+        throw;
+    }
+    NormalExecutor::test_model_factory = nullptr;
+    ASSERT_TRUE(engine->stop().ok());
+    auto* scheduler = dynamic_cast<FIFOScheduler*>(engine->scheduler_.get());
+    ASSERT_NE(scheduler, nullptr);
+    EXPECT_EQ(engine->runtime_config.max_generate_batch_size, 64);
+    EXPECT_EQ(scheduler->max_generate_batch_size_, 64);
+    EXPECT_EQ(params.runtime_config.max_generate_batch_size, 96);
+}
+
 TEST_F(NormalEngineTest, testInt8KVCache) {
     CustomConfig config;
     config.kv_cache_data_type = DataType::TYPE_INT8;

@@ -16,6 +16,7 @@
 #include "autil/EnvUtil.h"
 #include "autil/TimeUtility.h"
 #include "rtp_llm/cpp/normal_engine/speculative/MtpExecutor.h"
+#include "rtp_llm/cpp/cuda_graph/DecodeGraphBatchLimit.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include <algorithm>
 #include <chrono>
@@ -167,6 +168,16 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
                    params.parallelism_config.dp_rank * params.parallelism_config.tp_size
                        + params.parallelism_config.tp_rank) {
     RTP_LLM_LOG_INFO(__PRETTY_FUNCTION__);
+    if (params.hw_kernel_config.enable_cuda_graph && pd_sep_config.role_type != RoleType::PREFILL) {
+        const int graph_batch_limit = decodeGraphBatchLimit(params.concurrency_config.concurrency_limit,
+                                                            params.hw_kernel_config.decode_capture_batch_sizes);
+        if (runtime_config.max_generate_batch_size > graph_batch_limit) {
+            RTP_LLM_LOG_WARNING("Limit max_generate_batch_size from %ld to %d to match decode CUDA graph capacity",
+                                static_cast<long>(runtime_config.max_generate_batch_size),
+                                graph_batch_limit);
+            runtime_config.max_generate_batch_size = graph_batch_limit;
+        }
+    }
     if (propose_params_) {
         reserve_step_ = propose_params_->gen_num_per_circle + 1;
     } else {

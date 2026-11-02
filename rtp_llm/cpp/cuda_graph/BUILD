@@ -1,6 +1,12 @@
 load("//bazel:arch_select.bzl", "torch_deps")
 
 cc_library(
+    name = "decode_graph_batch_limit",
+    hdrs = ["DecodeGraphBatchLimit.h"],
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "cuda_graph_base",
     hdrs = [
         "cuda_graph_base.h",
@@ -64,6 +70,7 @@ cc_library(
         "cuda_graph_decode.cc",
     ],
     deps = torch_deps() + [
+        ":decode_graph_batch_limit",
         ":cuda_graph_base",
         ":cuda_graph_hdrs_lib",
         "//rtp_llm/models_py/bindings/core:exec_ops_hdr",
