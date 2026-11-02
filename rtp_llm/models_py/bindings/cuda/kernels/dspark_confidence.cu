@@ -13,6 +13,76 @@ namespace {
 
 constexpr int kStatsColumns = 6;
 
+struct DraftCommitParams {
+    const int32_t* sampled;
+    const int64_t* candidates;
+    const float*   probabilities;
+    const int64_t* map;
+    int32_t*       tokens_out;
+    float*         probabilities_out;
+    int32_t*       candidates_out;
+    const void*    embeddings;
+    void*          next_embedding;
+    int64_t        sampled_stride, candidate_stride, probability_stride, map_stride, map_size;
+    int64_t        token_stride, output_probability_stride, output_candidate_stride;
+    int64_t        width, output_width, embedding_rows, embedding_width, embedding_row_stride, embedding_col_stride;
+};
+
+template<typename Bits>
+__global__ void dsparkDraftStepCommitKernel(DraftCommitParams p) {
+    const int64_t      row = blockIdx.x;
+    __shared__ int32_t next_token;
+    if (threadIdx.x == 0) {
+        int64_t token = p.sampled[row * p.sampled_stride];
+        if (p.candidates) {
+            CUDA_KERNEL_ASSERT(token >= 0 && token < p.width);
+            token = p.candidates[row * p.candidate_stride + token];
+        }
+        if (p.map) {
+            CUDA_KERNEL_ASSERT(token >= 0 && token < p.map_size);
+            token = p.map[token * p.map_stride];
+        }
+        next_token                         = static_cast<int32_t>(token);
+        p.tokens_out[row * p.token_stride] = next_token;
+        if (p.next_embedding) {
+            CUDA_KERNEL_ASSERT(next_token >= 0 && next_token < p.embedding_rows);
+        }
+    }
+
+    // A mapped compact distribution retains its original draft vocabulary
+    // coordinates, exactly like zero_().scatter_() in the existing path.
+    const bool scatter_probabilities = p.probabilities_out && p.candidates && !p.candidates_out;
+    if (scatter_probabilities) {
+        for (int64_t column = threadIdx.x; column < p.output_width; column += blockDim.x) {
+            p.probabilities_out[row * p.output_probability_stride + column] = 0.0f;
+        }
+    }
+    __syncthreads();
+    for (int64_t column = threadIdx.x; column < p.width; column += blockDim.x) {
+        if (p.probabilities_out) {
+            int64_t output_column = column;
+            if (scatter_probabilities) {
+                output_column = p.candidates[row * p.candidate_stride + column];
+                CUDA_KERNEL_ASSERT(output_column >= 0 && output_column < p.output_width);
+            }
+            p.probabilities_out[row * p.output_probability_stride + output_column] =
+                p.probabilities[row * p.probability_stride + column];
+        }
+        if (p.candidates_out) {
+            p.candidates_out[row * p.output_candidate_stride + column] =
+                static_cast<int32_t>(p.candidates[row * p.candidate_stride + column]);
+        }
+    }
+    if (p.next_embedding) {
+        const auto* weights = static_cast<const Bits*>(p.embeddings);
+        auto*       output  = static_cast<Bits*>(p.next_embedding);
+        for (int64_t column = threadIdx.x; column < p.embedding_width; column += blockDim.x) {
+            output[row * p.embedding_width + column] =
+                weights[static_cast<int64_t>(next_token) * p.embedding_row_stride + column * p.embedding_col_stride];
+        }
+    }
+}
+
 struct LengthView {
     const void* data     = nullptr;
     int64_t     stride   = 0;
@@ -181,6 +251,98 @@ __global__ void dsparkConfidenceRatesKernel(const Embedding* embeddings, Confide
 }
 
 }  // namespace
+
+bool tryDSparkDraftStepCommit(const torch::Tensor& sampled_tokens,
+                              const torch::Tensor& candidate_ids,
+                              const torch::Tensor& probabilities,
+                              const torch::Tensor& d2t_map,
+                              const torch::Tensor& markov_w1,
+                              const torch::Tensor& output_tokens,
+                              const torch::Tensor& output_probabilities,
+                              const torch::Tensor& output_candidate_ids,
+                              const torch::Tensor& next_embedding) {
+    if (!sampled_tokens.defined() || !sampled_tokens.is_cuda() || sampled_tokens.dim() != 1
+        || sampled_tokens.scalar_type() != torch::kInt32 || !output_tokens.defined() || !markov_w1.defined()
+        || markov_w1.dim() != 2
+        || (markov_w1.scalar_type() != torch::kFloat32 && markov_w1.scalar_type() != torch::kFloat16
+            && markov_w1.scalar_type() != torch::kBFloat16)) {
+        return false;
+    }
+    const auto    device           = sampled_tokens.device();
+    const int64_t batch            = sampled_tokens.size(0);
+    const auto    vector_on_device = [&](const torch::Tensor& tensor, c10::ScalarType dtype) {
+        return tensor.is_cuda() && tensor.device() == device && tensor.dim() == 1 && tensor.size(0) == batch
+               && tensor.scalar_type() == dtype;
+    };
+    const auto rows_on_device = [&](const torch::Tensor& tensor, c10::ScalarType dtype, int64_t width) {
+        return tensor.is_cuda() && tensor.device() == device && tensor.dim() == 2 && tensor.size(0) == batch
+               && tensor.size(1) == width && tensor.stride(1) == 1 && tensor.scalar_type() == dtype
+               && (batch <= 1 || tensor.stride(0) >= width);
+    };
+    if (!vector_on_device(output_tokens, torch::kInt32) || !markov_w1.is_cuda() || markov_w1.device() != device
+        || (batch > 1 && output_tokens.stride(0) <= 0) || batch > std::numeric_limits<int32_t>::max()
+        || (probabilities.defined() && probabilities.dim() != 2)
+        || (candidate_ids.defined() && candidate_ids.dim() != 2)
+        || (output_probabilities.defined() && output_probabilities.dim() != 2)) {
+        return false;
+    }
+    const int64_t width = probabilities.defined() ? probabilities.size(1) :
+                          candidate_ids.defined() ? candidate_ids.size(1) :
+                                                    0;
+    if ((probabilities.defined() && !rows_on_device(probabilities, torch::kFloat32, width))
+        || (candidate_ids.defined() && !rows_on_device(candidate_ids, torch::kInt64, width))
+        || (d2t_map.defined()
+            && (!d2t_map.is_cuda() || d2t_map.device() != device || d2t_map.dim() != 1
+                || d2t_map.scalar_type() != torch::kInt64))
+        || (output_probabilities.defined()
+            && (!probabilities.defined()
+                || !rows_on_device(output_probabilities, torch::kFloat32, output_probabilities.size(1))
+                || (!candidate_ids.defined() && output_probabilities.size(1) != width)))
+        || (output_candidate_ids.defined()
+            && (!candidate_ids.defined() || !rows_on_device(output_candidate_ids, torch::kInt32, width)
+                || (output_probabilities.defined() && output_probabilities.size(1) != width)))
+        || (next_embedding.defined()
+            && (!rows_on_device(next_embedding, markov_w1.scalar_type(), markov_w1.size(1))
+                || !next_embedding.is_contiguous()))) {
+        return false;
+    }
+    if (batch == 0) {
+        return true;
+    }
+    const c10::cuda::CUDAGuard guard(device);
+    DraftCommitParams          params{
+        sampled_tokens.data_ptr<int32_t>(),
+        candidate_ids.defined() ? candidate_ids.data_ptr<int64_t>() : nullptr,
+        probabilities.defined() ? probabilities.data_ptr<float>() : nullptr,
+        d2t_map.defined() ? d2t_map.data_ptr<int64_t>() : nullptr,
+        output_tokens.data_ptr<int32_t>(),
+        output_probabilities.defined() ? output_probabilities.data_ptr<float>() : nullptr,
+        output_candidate_ids.defined() ? output_candidate_ids.data_ptr<int32_t>() : nullptr,
+        markov_w1.data_ptr(),
+        next_embedding.defined() ? next_embedding.data_ptr() : nullptr,
+        sampled_tokens.stride(0),
+        candidate_ids.defined() ? candidate_ids.stride(0) : 0,
+        probabilities.defined() ? probabilities.stride(0) : 0,
+        d2t_map.defined() ? d2t_map.stride(0) : 0,
+        d2t_map.defined() ? d2t_map.numel() : 0,
+        output_tokens.stride(0),
+        output_probabilities.defined() ? output_probabilities.stride(0) : 0,
+        output_candidate_ids.defined() ? output_candidate_ids.stride(0) : 0,
+        candidate_ids.defined() || output_probabilities.defined() || output_candidate_ids.defined() ? width : 0,
+        output_probabilities.defined() ? output_probabilities.size(1) : 0,
+        markov_w1.size(0),
+        markov_w1.size(1),
+        markov_w1.stride(0),
+        markov_w1.stride(1)};
+    const auto stream = at::cuda::getCurrentCUDAStream();
+    if (markov_w1.element_size() == 4) {
+        dsparkDraftStepCommitKernel<uint32_t><<<static_cast<int>(batch), 256, 0, stream>>>(params);
+    } else {
+        dsparkDraftStepCommitKernel<uint16_t><<<static_cast<int>(batch), 256, 0, stream>>>(params);
+    }
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    return true;
+}
 
 torch::Tensor tryDSparkConfidenceStats(const torch::Tensor& confidence_rates,
                                        const torch::Tensor& accept_len,

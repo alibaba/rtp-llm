@@ -46,9 +46,7 @@ bool dsparkHasMixedSamplingParams(const std::list<GenerateStreamPtr>& streams) {
     if (streams.empty()) {
         return false;
     }
-    const auto normalized_p = [](float p) {
-        return std::abs(p) < 1e-7f || std::abs(p - 1.0f) < 1e-7f ? 1.0f : p;
-    };
+    const auto normalized_p = [](float p) { return std::abs(p) < 1e-7f || std::abs(p - 1.0f) < 1e-7f ? 1.0f : p; };
     const auto effective_controls = [&](const auto& config) {
         if (!config->stochastic()) {
             return std::pair<int, float>{1, 1.0f};
@@ -288,29 +286,14 @@ bool SpeculativeSampler::replayRejectionGraph(SpeculativeSamplerOutput& output,
         const int32_t* valid_lengths =
             valid_draft_lengths.defined() ? valid_draft_lengths.data_ptr<int32_t>() : nullptr;
         const int32_t* target_candidate_ids = nullptr;
-        const float* accept_target_probs = nullptr;
-        const float* accept_draft_probs = nullptr;
-        void* args[]        = {&draft_probs,
-                               &draft_ids,
-                               &samples,
-                               &target_probs,
-                               &target_ids,
-                               &stride,
-                               &output_ids,
-                               &output_lengths,
-                               &do_sample,
-                               &rows,
-                               &steps,
-                               &vocab,
-                               &draft_point_mass,
-                               &target_point_mass,
-                               &force,
-                               &finalize,
-                               &valid_lengths,
-                               &target_candidate_ids,
-                               &accept_target_probs,
-                               &accept_draft_probs};
-        auto  params        = entry->kernel_params;
+        const float*   accept_target_probs  = nullptr;
+        const float*   accept_draft_probs   = nullptr;
+        void*          args[]               = {
+            &draft_probs,         &draft_ids,         &samples,   &target_probs, &target_ids,    &stride,
+            &output_ids,          &output_lengths,    &do_sample, &rows,         &steps,         &vocab,
+            &draft_point_mass,    &target_point_mass, &force,     &finalize,     &valid_lengths, &target_candidate_ids,
+            &accept_target_probs, &accept_draft_probs};
+        auto params         = entry->kernel_params;
         params.gridDim.x    = rows;
         params.kernelParams = args;
         C10_CUDA_CHECK(cudaGraphExecKernelNodeSetParams(entry->executable, entry->kernel, &params));
@@ -704,16 +687,18 @@ SamplerOutput SpeculativeSampler::sampleDSparkDraftEager(const torch::Tensor& ba
 #if USING_CUDA
     // The executor selects the fixed-width policy for this batch. Candidate
     // IDs preserve the original vocabulary coordinates for rejection.
-    const int64_t compact_width =
-        !point_mass_path && force_topk > 0
-            && force_topk <= 4096 && force_topk < static_cast<int64_t>(draft_vocab_size) ? force_topk : 0;
+    const int64_t compact_width      = !point_mass_path && force_topk > 0 && force_topk <= 4096
+                                          && force_topk < static_cast<int64_t>(draft_vocab_size) ?
+                                           force_topk :
+                                           0;
     const bool sample_from_strided_q = !point_mass_path && compact_width == 0 && !top_k.defined() && !top_p.defined();
 #else
     const int64_t compact_width         = 0;
     const bool    sample_from_strided_q = false;
 #endif
 
-    bool fused_greedy_output = false;
+    bool fused_greedy_output  = false;
+    bool fused_sampled_output = false;
 #if USING_CUDA
     fused_greedy_output = point_mass_path && propose_step_ > 0 && markov_w1.is_cuda()
                           && markov_w1.device() == base_logits.device() && markov_w1.dim() == 2
@@ -721,24 +706,37 @@ SamplerOutput SpeculativeSampler::sampleDSparkDraftEager(const torch::Tensor& ba
                           && (!d2t_map_.defined()
                               || (d2t_map_.device() == base_logits.device() && d2t_map_.scalar_type() == torch::kInt64
                                   && d2t_map_.dim() == 1 && d2t_map_.numel() >= draft_vocab_size));
+    fused_sampled_output = !point_mass_path && markov_w1.is_cuda() && markov_w1.device() == base_logits.device()
+                           && markov_w1.dim() == 2
+                           && (markov_w1.scalar_type() == torch::kFloat32 || markov_w1.scalar_type() == torch::kFloat16
+                               || markov_w1.scalar_type() == torch::kBFloat16);
 #endif
-    auto token_matrix    = fused_greedy_output ? torch::empty({batch_size, static_cast<int64_t>(propose_step_)},
-                                                           base_logits.options().dtype(torch::kInt32)) :
-                                                 torch::Tensor();
-    auto previous_tokens = anchors.reshape({batch_size});
+    auto token_matrix = fused_greedy_output || fused_sampled_output ?
+                            torch::empty({batch_size, static_cast<int64_t>(propose_step_)},
+                                         base_logits.options().dtype(torch::kInt32)) :
+                            torch::Tensor();
+    // Same-stream GEMM consumes this scratch before the following commit
+    // overwrites it. Every result column remains owned by this invocation.
+    auto sampled_embedding = fused_sampled_output && propose_step_ > 1 ?
+                                 torch::empty({batch_size, markov_w1.size(1)}, markov_w1.options()) :
+                                 torch::Tensor();
+    auto previous_tokens   = anchors.reshape({batch_size});
     if (previous_tokens.scalar_type() != torch::kInt32 && previous_tokens.scalar_type() != torch::kInt64) {
         previous_tokens = previous_tokens.to(torch::kLong);
     }
     auto all_probabilities =
         point_mass_path ?
             torch::Tensor() :
-            torch::empty({batch_size, static_cast<int64_t>(propose_step_),
-                          compact_width > 0 && !d2t_map_.defined() ? compact_width : static_cast<int64_t>(draft_vocab_size)},
-                         torch::TensorOptions().dtype(torch::kFloat32).device(base_logits.device()));
-    auto all_probability_indices = compact_width > 0 && !d2t_map_.defined() ?
-        torch::empty({batch_size, static_cast<int64_t>(propose_step_), compact_width},
-                     torch::TensorOptions().dtype(torch::kInt32).device(base_logits.device())) :
-        torch::Tensor();
+            torch::empty(
+                {batch_size,
+                 static_cast<int64_t>(propose_step_),
+                 compact_width > 0 && !d2t_map_.defined() ? compact_width : static_cast<int64_t>(draft_vocab_size)},
+                torch::TensorOptions().dtype(torch::kFloat32).device(base_logits.device()));
+    auto all_probability_indices =
+        compact_width > 0 && !d2t_map_.defined() ?
+            torch::empty({batch_size, static_cast<int64_t>(propose_step_), compact_width},
+                         torch::TensorOptions().dtype(torch::kInt32).device(base_logits.device())) :
+            torch::Tensor();
     // Filtered paths need contiguous per-step scratch. Reuse it across steps
     // because each step fully rewrites it before sampling on the same stream.
     const auto sampling_width = compact_width > 0 ? compact_width : static_cast<int64_t>(draft_vocab_size);
@@ -855,6 +853,34 @@ SamplerOutput SpeculativeSampler::sampleDSparkDraftEager(const torch::Tensor& ba
                 draft_q = filtered_probabilities;
             }
             sampled_draft_tokens = execSampleFromProbs(draft_q).to(torch::kInt32);
+#if USING_CUDA
+            if (fused_sampled_output) {
+                auto output_probabilities =
+                    compact_width > 0 || filter_draft ? all_probabilities.select(1, step) : torch::Tensor();
+                auto output_candidates =
+                    all_probability_indices.defined() ? all_probability_indices.select(1, step) : torch::Tensor();
+                auto next_embedding =
+                    step + 1 < static_cast<int64_t>(propose_step_) ? sampled_embedding : torch::Tensor();
+                auto tokens = token_matrix.select(1, step);
+                if (tryDSparkDraftStepCommit(sampled_draft_tokens,
+                                             compact_indices,
+                                             draft_q,
+                                             d2t_map_,
+                                             markov_w1,
+                                             tokens,
+                                             output_probabilities,
+                                             output_candidates,
+                                             next_embedding)) {
+                    token_columns.push_back(tokens);
+                    previous_tokens  = tokens;
+                    markov_embedding = std::move(next_embedding);
+                    continue;
+                }
+                // A later unsupported step may follow committed columns;
+                // their views stay valid for the final compatibility stack.
+                fused_sampled_output = false;
+            }
+#endif
             if (compact_width > 0) {
                 if (d2t_map_.defined()) {
                     all_probabilities.select(1, step).zero_().scatter_(1, compact_indices.to(torch::kLong), draft_q);
@@ -879,7 +905,8 @@ SamplerOutput SpeculativeSampler::sampleDSparkDraftEager(const torch::Tensor& ba
     }
 
     SamplerOutput output;
-    output.token_ids = fused_greedy_output ? token_matrix : torch::stack(token_columns, 1).contiguous();
+    output.token_ids =
+        fused_greedy_output || fused_sampled_output ? token_matrix : torch::stack(token_columns, 1).contiguous();
     if (!point_mass_path) {
         output.all_probs         = std::move(all_probabilities);
         output.all_probs_indices = std::move(all_probability_indices);
@@ -925,17 +952,17 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
 
     auto draft_token_ids = draft_sampler_output.token_ids;
 
-    auto       draft_token_probs       = draft_sampler_output.all_probs;
-    auto       target_token_probs      = target_sampler_output.all_probs;
-    auto       draft_candidate_ids     = draft_sampler_output.all_probs_indices;
-    auto       target_candidate_ids    = target_sampler_output.all_probs_indices;
+    auto draft_token_probs    = draft_sampler_output.all_probs;
+    auto target_token_probs   = target_sampler_output.all_probs;
+    auto draft_candidate_ids  = draft_sampler_output.all_probs_indices;
+    auto target_candidate_ids = target_sampler_output.all_probs_indices;
     if (draft_candidate_ids.defined() && !target_candidate_ids.defined()) {
         // A compact draft can pair with a dense target only through the
         // original full-vocabulary rejection interface.
-        auto dense = torch::zeros({draft_token_probs.size(0), draft_token_probs.size(1),
-                                   target_token_probs.size(2)}, draft_token_probs.options());
+        auto dense = torch::zeros({draft_token_probs.size(0), draft_token_probs.size(1), target_token_probs.size(2)},
+                                  draft_token_probs.options());
         dense.scatter_(2, draft_candidate_ids.to(torch::kLong), draft_token_probs);
-        draft_token_probs = std::move(dense);
+        draft_token_probs   = std::move(dense);
         draft_candidate_ids = torch::Tensor();
     }
     const bool draft_probs_point_mass = draft_sampler_output.token_ids_are_point_mass;

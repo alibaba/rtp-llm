@@ -2,6 +2,7 @@
 
 #include <ATen/cuda/CUDAContext.h>
 #include <ATen/cuda/CUDAGeneratorImpl.h>
+#include <ATen/cuda/CUDAGraphsUtils.cuh>
 #include <c10/cuda/CUDAGuard.h>
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
@@ -136,6 +137,46 @@ std::tuple<uint64_t, uint64_t> get_seed_and_offset(int increment_size, std::opti
     std::lock_guard<std::mutex> lock(gen->mutex_);
     at::PhiloxCudaState         rng_engine_inputs = gen->philox_cuda_state(increment_size);
     return {rng_engine_inputs.seed_.val, rng_engine_inputs.offset_.val};
+}
+
+void get_sampling_seed_offsets(const std::vector<at::Generator>& generators,
+                               int64_t                           batch_size,
+                               int                               increment_size,
+                               int64_t*                          seeds,
+                               int64_t*                          offsets) {
+    TORCH_CHECK(batch_size >= 0 && static_cast<uint64_t>(batch_size) <= generators.size(),
+                "sampling generators must contain every batch row");
+    TORCH_CHECK(increment_size >= 0, "sampling RNG increment must be nonnegative");
+    if (batch_size == 0) {
+        return;
+    }
+    TORCH_CHECK(seeds != nullptr && offsets != nullptr, "sampling seed/offset outputs must be nonnull");
+    // A captured PhiloxCudaState contains device pointers rather than scalar
+    // seed/offset values. These host arrays cannot represent that graph state.
+    at::cuda::assertNotCapturing("Cannot materialize sampling seed/offset host arrays during CUDA graph capture");
+    const auto& default_generator = at::cuda::detail::getDefaultCUDAGenerator();
+    const auto  row_increment     = ((static_cast<uint64_t>(increment_size) + 3) / 4) * 4;
+    auto        generator_for_row = [&](int64_t row) {
+        return at::check_generator<at::CUDAGeneratorImpl>(generators[row].defined() ? generators[row] :
+                                                                                      default_generator);
+    };
+    for (int64_t begin = 0; begin < batch_size;) {
+        auto*   generator = generator_for_row(begin);
+        int64_t end       = begin + 1;
+        while (end < batch_size && generator_for_row(end) == generator) {
+            ++end;
+        }
+        const auto count = static_cast<uint64_t>(end - begin);
+        TORCH_CHECK(row_increment == 0 || count <= std::numeric_limits<uint64_t>::max() / row_increment,
+                    "sampling RNG increment overflow");
+        std::lock_guard<std::mutex> lock(generator->mutex_);
+        const auto                  state = generator->philox_cuda_state(row_increment * count);
+        for (int64_t row = begin; row < end; ++row) {
+            seeds[row]   = static_cast<int64_t>(state.seed_.val);
+            offsets[row] = static_cast<int64_t>(state.offset_.val + (row - begin) * row_increment);
+        }
+        begin = end;
+    }
 }
 
 void sampling_from_probs(torch::Tensor                probs,

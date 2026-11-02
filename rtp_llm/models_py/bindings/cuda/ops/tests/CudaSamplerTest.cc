@@ -10,12 +10,14 @@
 #include <ATen/cuda/CUDAGeneratorImpl.h>
 #include <cuda_runtime.h>
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <functional>
 #include <iostream>
 #include <limits>
 #include <string>
 #include <vector>
+#include <c10/cuda/CUDAGuard.h>
 using namespace std;
 using namespace rtp_llm;
 
@@ -117,6 +119,186 @@ protected:
         return std::vector<float>(cpu.data_ptr<float>(), cpu.data_ptr<float>() + cpu.numel());
     }
 };
+
+TEST_F(CudaSamplerTest, testBatchedSeedOffsetsMatchSequentialGeneratorDraws) {
+    auto default_generator = at::cuda::detail::getDefaultCUDAGenerator();
+    struct RestoreGenerator {
+        at::Generator generator;
+        torch::Tensor state;
+        ~RestoreGenerator() {
+            generator.set_state(state);
+        }
+    } restore_default{default_generator, default_generator.get_state()};
+    auto first  = torch::make_generator<at::CUDAGeneratorImpl>();
+    auto second = torch::make_generator<at::CUDAGeneratorImpl>();
+    // Include adjacent aliases, an undefined/explicit-default run, and a
+    // returning nonadjacent generator. This matches verify's gamma+1 tiling.
+    std::vector<at::Generator> generators{
+        first, first, first, first, first, first, {}, default_generator, {}, second, second, first, {}, first};
+    const auto           batch_size = static_cast<int64_t>(generators.size());
+    std::vector<int64_t> seeds(batch_size), offsets(batch_size), expected_seeds(batch_size),
+        expected_offsets(batch_size);
+    for (const int increment : {0, 1, 5, 32}) {
+        SCOPED_TRACE(increment);
+        first.set_current_seed(0x123456789abcdef0ULL);
+        second.set_current_seed(0xfedcba9876543210ULL);
+        default_generator.set_current_seed(20261102);
+        const auto first_state   = first.get_state();
+        const auto second_state  = second.get_state();
+        const auto default_state = default_generator.get_state();
+        for (int64_t row = 0; row < batch_size; ++row) {
+            const auto values = get_seed_and_offset(
+                increment, generators[row].defined() ? std::make_optional(generators[row]) : std::nullopt);
+            expected_seeds[row]   = static_cast<int64_t>(std::get<0>(values));
+            expected_offsets[row] = static_cast<int64_t>(std::get<1>(values));
+        }
+        const auto expected_first   = first.get_state();
+        const auto expected_second  = second.get_state();
+        const auto expected_default = default_generator.get_state();
+        first.set_state(first_state);
+        second.set_state(second_state);
+        default_generator.set_state(default_state);
+        get_sampling_seed_offsets(generators, batch_size, increment, seeds.data(), offsets.data());
+        EXPECT_EQ(seeds, expected_seeds);
+        EXPECT_EQ(offsets, expected_offsets);
+        EXPECT_TRUE(torch::equal(first.get_state(), expected_first));
+        EXPECT_TRUE(torch::equal(second.get_state(), expected_second));
+        EXPECT_TRUE(torch::equal(default_generator.get_state(), expected_default));
+        // A subsequent caller must see exactly the same generator state.
+        EXPECT_EQ(first.get_offset(), static_cast<uint64_t>(expected_offsets.back()) + ((increment + 3) / 4) * 4);
+    }
+    EXPECT_NO_THROW(get_sampling_seed_offsets({}, 0, 32, nullptr, nullptr));
+    EXPECT_THROW(get_sampling_seed_offsets(generators, batch_size + 1, 32, seeds.data(), offsets.data()), c10::Error);
+    EXPECT_THROW(get_sampling_seed_offsets(generators, batch_size, -1, seeds.data(), offsets.data()), c10::Error);
+}
+
+TEST_F(CudaSamplerTest, testBatchedSeedOffsetsRejectCapture) {
+    auto generator = torch::make_generator<at::CUDAGeneratorImpl>();
+    generator.set_current_seed(20261102);
+    const auto                 state  = generator.get_state();
+    auto                       stream = at::cuda::getStreamFromPool();
+    c10::cuda::CUDAStreamGuard guard(stream);
+    int64_t                    seed = -1, offset = -1;
+    ASSERT_EQ(cudaStreamBeginCapture(stream.stream(), cudaStreamCaptureModeThreadLocal), cudaSuccess);
+    EXPECT_THROW(get_sampling_seed_offsets({generator}, 1, 32, &seed, &offset), c10::Error);
+    cudaGraph_t graph = nullptr;
+    ASSERT_EQ(cudaStreamEndCapture(stream.stream(), &graph), cudaSuccess);
+    ASSERT_EQ(cudaGraphDestroy(graph), cudaSuccess);
+    EXPECT_TRUE(torch::equal(generator.get_state(), state));
+    EXPECT_EQ(seed, -1);
+    EXPECT_EQ(offset, -1);
+}
+
+TEST_F(CudaSamplerTest, testPersistentSeedDeviceSlicesPreserveSamplingAndRefreshOffsets) {
+    const auto            device_i64    = torch::TensorOptions().device(torch::kCUDA).dtype(torch::kInt64);
+    const auto            pinned_i64    = torch::TensorOptions().pinned_memory(true).dtype(torch::kInt64);
+    auto                  seed_host     = torch::full({4}, -91, pinned_i64);
+    auto                  offset_host   = torch::full({4}, -91, pinned_i64);
+    auto                  seed_device   = torch::full({4}, -91, device_i64);
+    auto                  offset_device = torch::full({4}, -91, device_i64);
+    GreedySamplingBuffers buffers{seed_host.narrow(0, 1, 2),
+                                  offset_host.narrow(0, 1, 2),
+                                  torch::empty({2}, pinned_i64),
+                                  2,
+                                  seed_device.narrow(0, 1, 2),
+                                  offset_device.narrow(0, 1, 2)};
+    auto                  generator = torch::make_generator<at::CUDAGeneratorImpl>();
+    generator.set_current_seed(20261102);
+    auto logits = torch::linspace(-1.0, 1.0, 16, device_i64.dtype(torch::kFloat32)).repeat({2, 1});
+    auto sample = [&](bool persistent) {
+        auto         tokens = torch::zeros({2, 2}, device_i64.dtype(torch::kInt32));
+        auto         q      = torch::empty_like(logits);
+        GreedyParams params({logits.clone(),
+                             pinnedIntTensor({-1, -1}),
+                             pinnedIntTensor({1, 1}),
+                             tokens,
+                             1,
+                             pinnedIntTensor({0, 0}),
+                             pinnedFloatTensor({0.95f, 0.7f}),
+                             pinnedFloatTensor({1.0f, 1.0f})});
+        params.generator        = {generator, generator};
+        params.output_all_probs = q;
+        params.sampling_buffers = persistent ? &buffers : nullptr;
+        execSampleGreedy(params);
+        return std::make_pair(tokens, q);
+    };
+    for (int round = 0; round < 3; ++round) {
+        const auto state          = generator.get_state();
+        const auto expected       = sample(false);
+        const auto expected_state = generator.get_state();
+        generator.set_state(state);
+        const auto actual = sample(true);
+        EXPECT_TRUE(torch::equal(actual.first, expected.first));
+        EXPECT_TRUE(torch::equal(actual.second, expected.second));
+        EXPECT_TRUE(torch::equal(generator.get_state(), expected_state));
+        EXPECT_EQ(buffers.seed_device.data_ptr(), seed_device.narrow(0, 1, 2).data_ptr());
+        EXPECT_EQ(buffers.offset_device.data_ptr(), offset_device.narrow(0, 1, 2).data_ptr());
+        EXPECT_TRUE(torch::equal(seed_device.cpu(), torch::tensor({-91L, 20261102L, 20261102L, -91L}, torch::kInt64)));
+        EXPECT_TRUE(torch::equal(offset_device.cpu(),
+                                 torch::tensor({-91L, round * 64L, round * 64L + 32, -91L}, torch::kInt64)));
+    }
+}
+
+TEST_F(CudaSamplerTest, testBatchedSeedOffsetsCpuBenchmark) {
+    constexpr int64_t          batch_size = 48 * 6;
+    std::vector<at::Generator> tiled, independent, defaults(batch_size);
+    for (int64_t row = 0; row < batch_size; ++row) {
+        auto generator = torch::make_generator<at::CUDAGeneratorImpl>();
+        generator.set_current_seed(20261102 + row);
+        independent.push_back(generator);
+        if (row % 6 == 0) {
+            tiled.push_back(generator);
+        } else {
+            tiled.push_back(tiled.back());
+        }
+    }
+    auto default_generator = at::cuda::detail::getDefaultCUDAGenerator();
+    struct RestoreDefault {
+        at::Generator generator;
+        torch::Tensor state;
+        ~RestoreDefault() {
+            generator.set_state(state);
+        }
+    } restore_default{default_generator, default_generator.get_state()};
+    std::vector<int64_t> seeds(batch_size), offsets(batch_size);
+    for (const auto& fixture : {std::make_pair("verify_48x6", &tiled),
+                                std::make_pair("independent_288", &independent),
+                                std::make_pair("default_288", &defaults)}) {
+        auto run = [&](bool batched) {
+            if (batched) {
+                get_sampling_seed_offsets(*fixture.second, batch_size, 32, seeds.data(), offsets.data());
+            } else {
+                for (int64_t row = 0; row < batch_size; ++row) {
+                    const auto& generator = (*fixture.second)[row];
+                    auto        values =
+                        get_seed_and_offset(32, generator.defined() ? std::make_optional(generator) : std::nullopt);
+                    seeds[row]   = static_cast<int64_t>(std::get<0>(values));
+                    offsets[row] = static_cast<int64_t>(std::get<1>(values));
+                }
+            }
+        };
+        auto measure = [&](bool batched) {
+            for (int warmup = 0; warmup < 10; ++warmup) {
+                run(batched);
+            }
+            std::vector<double> times;
+            for (int sample = 0; sample < 7; ++sample) {
+                const auto start = std::chrono::steady_clock::now();
+                for (int repeat = 0; repeat < 32; ++repeat) {
+                    run(batched);
+                }
+                times.push_back(
+                    std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - start).count() / 32);
+            }
+            std::sort(times.begin(), times.end());
+            return times[times.size() / 2];
+        };
+        const auto legacy_us  = measure(false);
+        const auto batched_us = measure(true);
+        std::cout << "seed_offset_cpu fixture=" << fixture.first << " rows=" << batch_size
+                  << " legacy_median_us=" << legacy_us << " batched_median_us=" << batched_us << std::endl;
+    }
+}
 
 TEST_F(CudaSamplerTest, testDeepSelect4096ReturnsOriginalValues) {
     const auto* properties = at::cuda::getDeviceProperties(0);

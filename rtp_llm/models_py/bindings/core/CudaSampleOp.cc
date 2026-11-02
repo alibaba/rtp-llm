@@ -200,14 +200,15 @@ std::pair<torch::Tensor, torch::Tensor> makeSamplingSeedOffsetTensors(const std:
     auto seed_ptr = seed_h.data_ptr<int64_t>();
     auto off_ptr  = offset_h.data_ptr<int64_t>();
 
-    for (int64_t i = 0; i < batch_size; ++i) {
-        // Undefined generator entries intentionally use PyTorch's default CUDA generator.
-        auto generator      = (i < static_cast<int64_t>(generators.size()) && generators[i].defined()) ?
-                                  std::make_optional(generators[i]) :
-                                  std::nullopt;
-        auto [seed, offset] = get_seed_and_offset(increment, generator);
-        seed_ptr[i]         = static_cast<int64_t>(seed);
-        off_ptr[i]          = static_cast<int64_t>(offset);
+    get_sampling_seed_offsets(generators, batch_size, increment, seed_ptr, off_ptr);
+
+    if (use_persistent_buffers && sampling_buffers->seed_device.defined()
+        && sampling_buffers->offset_device.defined()) {
+        auto seed_d   = sampling_buffers->seed_device.narrow(0, 0, batch_size);
+        auto offset_d = sampling_buffers->offset_device.narrow(0, 0, batch_size);
+        seed_d.copy_(seed_h, /*non_blocking=*/true);
+        offset_d.copy_(offset_h, /*non_blocking=*/true);
+        return {seed_d, offset_d};
     }
 
     auto seed_d   = seed_h.to(torch::kCUDA, /*non_blocking=*/use_persistent_buffers).contiguous();

@@ -290,6 +290,8 @@ struct GreedySamplingBuffers {
     torch::Tensor offset_host;
     torch::Tensor output_ids_ptrs_host;
     size_t        max_batch_size = 0;
+    torch::Tensor seed_device;
+    torch::Tensor offset_device;
 };
 
 struct GreedyParams {
@@ -331,8 +333,8 @@ struct GreedyParams {
     // the fused greedy top-1 path may then skip materializing the one-hot
     // [batch, vocab] matrix and only write the token. Default false keeps
     // the legacy fully-materialized all_probs contract for every caller.
-    bool all_probs_point_mass = false;
-    int  force_topk           = 0;
+    bool                         all_probs_point_mass = false;
+    int                          force_topk           = 0;
     std::optional<torch::Tensor> output_all_probs_indices;
 };
 
