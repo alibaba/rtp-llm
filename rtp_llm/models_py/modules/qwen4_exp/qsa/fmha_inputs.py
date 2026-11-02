@@ -9,6 +9,9 @@ from rtp_llm.models_py.model_desc.qwen4_exp_runtime.qsa_cache_views import (
     qsa_assert_valid,
     qsa_strict_validation_enabled,
 )
+from rtp_llm.models_py.model_desc.qwen4_exp_runtime.qsa_step_plan import (
+    lookup_prefill_step_plan,
+)
 from rtp_llm.ops.compute_ops import LayerKVCache
 
 from .fmha_plans import IncrementalPrefillInputs, PagedInputs, PrefillRequest
@@ -247,7 +250,15 @@ def _prepare_incremental_prefill_inputs(
     kv_cache: Optional[LayerKVCache],
     selected_indices: torch.Tensor,
 ) -> IncrementalPrefillInputs:
-    """Build ragged per-request paged plans before the production writer."""
+    """Build ragged per-request paged plans before the production writer.
+
+    The layer-independent planning metadata (device length/prefix mirrors, cu
+    boundaries, per-request visible-KV rows) is frozen once per model step in
+    a ``Qwen4ExpPrefillStepPlan`` by the QSA geometry pass; on a plan hit
+    this per-layer planner consumes those fields and only rebuilds what is
+    actually layer-local (the selected-index views). Without a plan it falls
+    back to the legacy inline build.
+    """
     if not self._is_prefix_reuse_prefill():
         raise RuntimeError("qwen4_exp incremental prefill requires an explicit prefix")
     if qkv.dim() != 2:
@@ -281,16 +292,37 @@ def _prepare_incremental_prefill_inputs(
         raise ValueError("qwen4_exp incremental prefill input lengths must be positive")
     if bool(torch.any(prefixes < 0)):
         raise ValueError("qwen4_exp incremental prefill prefixes must be non-negative")
-    input_lengths_device = input_lengths.to(
-        device=qkv.device, dtype=torch.int32, non_blocking=True
-    )
-    prefixes_device = prefixes.to(
-        device=qkv.device, dtype=torch.int32, non_blocking=True
-    )
+    # The frozen step plan (when this step's QSA pass produced one) replaces
+    # the device mirrors, the cu reconstruction and the per-request KV rows.
+    lengths_list = input_lengths.tolist()
+    prefix_list = prefixes.tolist()
+    step = lookup_prefill_step_plan(self.attn_inputs, sum(lengths_list))
+    if (
+        step is not None
+        and step.kv_lens_rows is not None
+        and step.cu_host is not None
+        and step.input_lengths_i32 is not None
+        and step.prefixes_i32 is not None
+        and step.lengths == lengths_list
+        and step.prefix_values == prefix_list
+        and step.device == qkv.device
+        and step.batch_size == batch
+    ):
+        input_lengths_device = step.input_lengths_i32
+        prefixes_device = step.prefixes_i32
+        cu_host = step.cu_host
+    else:
+        step = None
+        input_lengths_device = input_lengths.to(
+            device=qkv.device, dtype=torch.int32, non_blocking=True
+        )
+        prefixes_device = prefixes.to(
+            device=qkv.device, dtype=torch.int32, non_blocking=True
+        )
+        # Host cumsum on the pinned mirrors replaces the device readback.
+        cu_host = list(itertools.accumulate(lengths_list, initial=0))
 
     cu_seqlens = self.attn_inputs.cu_seqlens_device
-    expected_cu = torch.zeros(batch + 1, dtype=torch.int32, device=qkv.device)
-    expected_cu[1:] = input_lengths_device.cumsum(0)
     if (
         cu_seqlens is None
         or cu_seqlens.dim() != 1
@@ -301,19 +333,19 @@ def _prepare_incremental_prefill_inputs(
         raise ValueError(
             "qwen4_exp incremental prefill cu_seqlens do not match input lengths"
         )
-    if qsa_strict_validation_enabled():
-        if not bool(torch.equal(cu_seqlens, expected_cu)):
-            raise ValueError(
-                "qwen4_exp incremental prefill cu_seqlens do not match input lengths"
+    if step is None:
+        expected_cu = torch.zeros(batch + 1, dtype=torch.int32, device=qkv.device)
+        expected_cu[1:] = input_lengths_device.cumsum(0)
+        if qsa_strict_validation_enabled():
+            if not bool(torch.equal(cu_seqlens, expected_cu)):
+                raise ValueError(
+                    "qwen4_exp incremental prefill cu_seqlens do not match input lengths"
+                )
+        else:
+            qsa_assert_valid(
+                (cu_seqlens == expected_cu).all(),
+                "qwen4_exp incremental prefill cu_seqlens do not match input lengths",
             )
-    else:
-        qsa_assert_valid(
-            (cu_seqlens == expected_cu).all(),
-            "qwen4_exp incremental prefill cu_seqlens do not match input lengths",
-        )
-    # Host cumsum on the pinned mirrors replaces the device readback.
-    lengths_list = input_lengths.tolist()
-    cu_host = list(itertools.accumulate(lengths_list, initial=0))
     tokens = cu_host[-1]
     if int(qkv.shape[0]) != tokens:
         raise ValueError(
@@ -352,9 +384,14 @@ def _prepare_incremental_prefill_inputs(
     for request_idx in range(batch):
         start, end = cu_host[request_idx : request_idx + 2]
         query_len = end - start
-        kv_lens = prefixes_device[request_idx] + torch.arange(
-            1, query_len + 1, dtype=torch.int32, device=qkv.device
-        )
+        if step is not None:
+            kv_lens_row = step.kv_lens_rows[request_idx]
+            kv_lens_vec = kv_lens_row.reshape(-1)
+        else:
+            kv_lens_vec = prefixes_device[request_idx] + torch.arange(
+                1, query_len + 1, dtype=torch.int32, device=qkv.device
+            )
+            kv_lens_row = kv_lens_vec.unsqueeze(0).contiguous()
         request_selection = selected_indices[start:end]
         if qsa_strict_validation_enabled() and request_selection.numel():
             # The per-request selection re-check duplicates the FMHA entry
@@ -363,7 +400,7 @@ def _prepare_incremental_prefill_inputs(
             if int(request_selection.min().item()) < -1:
                 raise ValueError("selected indices may only use -1 as padding")
             invalid_visible = (request_selection >= 0) & (
-                request_selection >= kv_lens.unsqueeze(-1)
+                request_selection >= kv_lens_vec.unsqueeze(-1)
             )
             if bool(torch.any(invalid_visible).item()):
                 raise ValueError(
@@ -374,7 +411,7 @@ def _prepare_incremental_prefill_inputs(
             PrefillRequest(
                 start,
                 end,
-                kv_lens.unsqueeze(0).contiguous(),
+                kv_lens_row,
                 request_selection.unsqueeze(0).contiguous(),
             )
         )
