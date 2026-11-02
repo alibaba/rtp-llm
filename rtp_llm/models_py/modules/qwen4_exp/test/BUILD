@@ -178,6 +178,13 @@ py_test(
     exec_properties = {'gpu':'A10'},
 )
 
+# CPU-only frozen step-plan cache behavior (hit/invalidation/mode keying).
+py_test(
+    name = "qsa_step_plan_test",
+    srcs = ["qsa_step_plan_test.py"],
+    deps = ["//rtp_llm:testlib"],
+)
+
 py_test(
     name = "qsa_topk_triton_test",
     srcs = ["qsa_topk_triton_test.py", "topk_reference.py"],
