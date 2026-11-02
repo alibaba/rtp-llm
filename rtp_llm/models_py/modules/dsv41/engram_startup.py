@@ -14,6 +14,7 @@ import json
 import logging
 import os
 from pathlib import Path
+import socket
 import ssl
 import threading
 import time
@@ -37,6 +38,7 @@ CHECKPOINT_ENV = 'RTP_ENGRAM_CHECKPOINT'
 COUNT_ENV = 'ENGRAM_SHARD_COUNT'
 RANKS_ENV = 'RTP_ENGRAM_RANKS_PER_INSTANCE'
 GENERATION_ENV = 'RTP_ENGRAM_GENERATION'
+PORT_ENV = 'RTP_ENGRAM_COHORT_PORT'
 DEFAULT_TIMEOUT = 1800
 
 
@@ -162,13 +164,24 @@ def _cohort(env):
     raw = env.get(COHORT_ENV)
     if raw is None:
         return None
+    default_port = env.get(PORT_ENV)
+    if default_port is not None and (not default_port.isdigit() or not 1 <= int(default_port) <= 65535):
+        raise ExchangeError('INVALID_COHORT')
     members = []
     for item in raw.split(','):
         item = item.strip()
         if not item:
             continue
+        # A bare host takes the shared cohort port; "host:port" still works for
+        # a deployment that has to spread the exchange servers over ports.
         host, _, port = item.rpartition(':')
-        if not host or not port.isdigit() or not 1 <= int(port) <= 65535:
+        if not host:
+            host, port = item, ''
+        if not port:
+            if default_port is None:
+                raise ExchangeError('COHORT_PORT_REQUIRED')
+            port = default_port
+        if not port.isdigit() or not 1 <= int(port) <= 65535:
             raise ExchangeError('INVALID_COHORT')
         members.append((host, int(port)))
     if not members:
@@ -176,6 +189,34 @@ def _cohort(env):
     if len({host for host, _ in members}) != len(members):
         raise ExchangeError('DISTINCT_STORAGE_HOST_ADDRESSES_REQUIRED')
     return members
+
+
+def _local_addresses():
+    """IPv4 addresses this process can be reached on, for index discovery."""
+    found = set()
+    try:
+        for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
+            found.add(info[4][0])
+    except OSError:
+        pass
+    return found
+
+
+def _instance_index(env, cohort):
+    raw = env.get(INDEX_ENV)
+    if raw is not None:
+        if not raw.isdigit() or not 0 <= int(raw) < len(cohort):
+            raise ExchangeError('INVALID_INSTANCE_INDEX')
+        return int(raw)
+    # The platform only has to hand over the address list: a host that appears
+    # in it exactly once knows which shard it is.
+    local = _local_addresses()
+    matches = [i for i, (host, _) in enumerate(cohort) if host in local]
+    if not matches:
+        raise ExchangeError('INSTANCE_INDEX_REQUIRED')
+    if len(matches) > 1:
+        raise ExchangeError('AMBIGUOUS_LOCAL_ADDRESS')
+    return matches[0]
 
 
 def _placement(env, name):
@@ -242,10 +283,7 @@ def build_group(env, world_size):
     revision = env.get(REVISION_ENV)
     if not revision:
         raise ExchangeError('MODEL_REVISION_REQUIRED')
-    raw_index = env.get(INDEX_ENV, '0')
-    if not raw_index.isdigit() or not 0 <= int(raw_index) < instances:
-        raise ExchangeError('INVALID_INSTANCE_INDEX')
-    index = int(raw_index)
+    index = _instance_index(env, cohort)
     raw_ranks = env.get(RANKS_ENV)
     if raw_ranks is not None and (not raw_ranks.isdigit() or int(raw_ranks) <= 0):
         raise ExchangeError('INVALID_RANKS_PER_INSTANCE')

@@ -7,6 +7,7 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest import mock
 from uuid import UUID
 
 from rtp_llm.models_py.modules.dsv41 import engram_bootstrap as b
@@ -392,6 +393,29 @@ class DeploymentIdentityTest(unittest.TestCase):
                              [f'127.0.0.{i+1}' for i in range(p)])
         with self.assertRaisesRegex(e.ExchangeError, 'MUST_MATCH_COHORT'):
             s.build_group(cohort_env(4, instances=2), 8)
+
+    def test_bare_hosts_take_the_shared_port(self):
+        explicit = s.build_group(cohort_env(2), 4)['group']
+        env = cohort_env(2)
+        env[s.COHORT_ENV] = '127.0.0.1,127.0.0.2'
+        env[s.PORT_ENV] = '29500'
+        self.assertEqual(s.build_group(env, 4)['group'], explicit)
+        del env[s.PORT_ENV]
+        with self.assertRaisesRegex(e.ExchangeError, 'COHORT_PORT_REQUIRED'):
+            s.build_group(env, 4)
+
+    def test_instance_index_is_discovered_from_the_local_address(self):
+        env = cohort_env(2)
+        del env[s.INDEX_ENV]
+        self.assertEqual(s.build_group(env, 4)['index'], 0)
+        with mock.patch.object(s, '_local_addresses', lambda: {'127.0.0.2'}):
+            self.assertEqual(s.build_group(env, 4)['index'], 1)
+        with mock.patch.object(s, '_local_addresses', lambda: {'10.9.9.9'}):
+            with self.assertRaisesRegex(e.ExchangeError, 'INSTANCE_INDEX_REQUIRED'):
+                s.build_group(env, 4)
+        with mock.patch.object(s, '_local_addresses', lambda: {'127.0.0.1', '127.0.0.2'}):
+            with self.assertRaisesRegex(e.ExchangeError, 'AMBIGUOUS_LOCAL_ADDRESS'):
+                s.build_group(env, 4)
 
     def test_generation_defaults_and_duplicate_hosts(self):
         env = cohort_env(2)

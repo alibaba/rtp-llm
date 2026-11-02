@@ -70,28 +70,31 @@ flowchart TB
 启动器不再生成任何 JSON 启动配置；它把契约直接写进每个实例的环境变量：
 
 ```
-RTP_ENGRAM_COHORT=10.0.0.1:29483,10.0.0.2:29483   # N 个存储 host，host 互不相同，顺序=实例索引
-RTP_ENGRAM_INSTANCE_INDEX=0                        # 本实例在 cohort 中的下标
-ENGRAM_SHARD_COUNT=2                               # 可选；缺省=cohort 长度（一 host 一片），显式给出时必须一致
-RTP_ENGRAM_MODEL_REVISION=<rev>                    # 同一 cohort 内一致
-RTP_ENGRAM_GENERATION=<uuid>                       # 可选；缺省由 cohort+revision 推导
-RTP_ENGRAM_CHECKPOINT=/models/DeepSeek             # 本机完整 checkpoint
-RTP_ENGRAM_LOCAL_DEVICE=0                          # 建议显式给出；缺省回落 0 并告警
-RTP_ENGRAM_LOCAL_NUMA=0                            # 建议显式给出；该 NUMA node 需有足够空闲内存
-RTP_ENGRAM_MAX_ALLOCATION_BYTES=137438953472       # 必填；默认仅 1GiB
+RTP_ENGRAM_COHORT=10.0.0.1,10.0.0.2             # 共享一份 Engram 的 host 列表，顺序=part 序号
+RTP_ENGRAM_COHORT_PORT=29483                      # 列表项不带端口时需要；所有 host 用同一端口
+RTP_ENGRAM_INSTANCE_INDEX=0                       # 可选；缺省=本机 IP 在列表中的位置
+RTP_ENGRAM_MODEL_REVISION=<rev>                   # 同一 cohort 内一致
+RTP_ENGRAM_CHECKPOINT=/models/DeepSeek            # 本机完整 checkpoint
+RTP_ENGRAM_LOCAL_DEVICE=0                         # 建议显式给出；缺省回落 0 并告警
+RTP_ENGRAM_LOCAL_NUMA=0                           # 建议显式给出；该 NUMA node 需有足够空闲内存
+RTP_ENGRAM_MAX_ALLOCATION_BYTES=137438953472      # 必填；默认仅 1GiB
 RTP_ENGRAM_MAX_TOTAL_ALLOCATION_BYTES=274877906944 # 必填；默认仅 8GiB
-RTP_ENGRAM_RANKS_PER_INSTANCE=4                    # 可选；torch gang 跨多个 cohort 成员时需要
-RTP_ENGRAM_LOCAL_DESCRIPTORS=<shard-a.json>,<shard-b.json>   # 可选；仅离线诊断模式需要
-RTP_ENGRAM_COHORT_TIMEOUT=1800                     # 可选
-RTP_ENGRAM_TLS_DIR=/run/engram/pki                 # 可选；不设则走 plain HTTP
+RTP_ENGRAM_RANKS_PER_INSTANCE=4                   # 可选；torch gang 跨多个 cohort 成员时需要
+RTP_ENGRAM_GENERATION=<uuid>                      # 可选；缺省由 cohort+revision 推导
+RTP_ENGRAM_LOCAL_DESCRIPTORS=<a.json>,<b.json>    # 可选；仅离线诊断模式需要
+RTP_ENGRAM_COHORT_TIMEOUT=1800                    # 可选
+RTP_ENGRAM_TLS_DIR=/run/engram/pki                # 可选；不设则走 plain HTTP
 ```
 
-平台只需要给出 **`RTP_ENGRAM_COHORT` 地址列表 + 本机 `RTP_ENGRAM_INSTANCE_INDEX`**：列表长度就是
-"几个实例共享一份 Engram"，分片数、成员表、shard 归属、store 命名空间全部由它推导。`ENGRAM_SHARD_COUNT`
-可以不给；给了只做一致性校验。
+平台只需要给出 **host 列表**（外加一个共享端口）：列表里有几台 host，就是几个 part 在共享这份 Engram，
+顺序即 part 序号；分片数、成员表、shard 归属、store 命名空间全部由它推导。
 
-`RTP_ENGRAM_GENERATION` 是可选的诊断用覆盖值（例如想在一次实验里给两轮启动不同的名字）。它的语义是
-group digest 的一部分：同一个 cohort 内必须一致，否则交换时 `GROUP_MISMATCH`。
+本条中的 `RTP_ENGRAM_INSTANCE_INDEX`（“本机是第几片”）也不是必填的：程序会把本机 IPv4 与列表比对，
+命中恰好一项就用它的位置。只有当容器不在 host 网络、本机 IP 与列表项对不上时，才需要显式给出，否则会报
+`INSTANCE_INDEX_REQUIRED`；命中多项则报 `AMBIGUOUS_LOCAL_ADDRESS`。
+
+`ENGRAM_SHARD_COUNT` 同样可以不给；给了只做一致性校验。`RTP_ENGRAM_GENERATION` 是可选的诊断用覆盖值，
+缺省由 host 列表+revision 推导（`ip,ip` + 端口 与 `ip:port,ip:port` 推导结果相同）。
 
 **重启约束**：只能整组（整个 cohort / 整个 gang）一起重启，并且要等旧进程退出、fabric 分配释放之后再起新的。
 单独重启某个成员是未支持的行为——它会按同一个命名空间读到上一轮发布的 handle，而那些 handle 指向的分配
