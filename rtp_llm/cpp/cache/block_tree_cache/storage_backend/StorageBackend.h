@@ -46,13 +46,14 @@ enum class StorageQuarantineReason {
     RPC_TIMEOUT,
     RPC_ERROR,
     INVALID_RESPONSE,
+    SDK_ERROR,
 };
 
 struct StorageQuarantineCounts {
     size_t task_count{0};
     size_t block_count{0};
 };
-using StorageQuarantineBreakdown = std::array<std::array<StorageQuarantineCounts, 4>, 2>;
+using StorageQuarantineBreakdown = std::array<std::array<StorageQuarantineCounts, 5>, 2>;
 
 // The backend accepted an operation but cannot prove that DMA/RDMA has
 // stopped touching its buffers. StorageBackend replaces request pins with
@@ -80,6 +81,13 @@ public:
 
 // A shared workflow budget expired before any payload I/O was submitted.
 class StorageDeadlineExceeded: public std::runtime_error {
+public:
+    using std::runtime_error::runtime_error;
+};
+
+// Derived code may use this only with explicit not-submitted or completed
+// payload proof. A generic SDK error is not such a proof.
+class StorageOperationBufferSafeFailure: public std::runtime_error {
 public:
     using std::runtime_error::runtime_error;
 };
@@ -132,7 +140,7 @@ private:
     friend class StorageBackend;
 };
 
-// Asynchronous facade for synchronous derived I/O. Owners must call shutdown
+// Asynchronous facade for derived I/O. Owners must call shutdown
 // before derived backend state starts destruction.
 class StorageBackend {
 public:
@@ -151,6 +159,9 @@ public:
     virtual ~StorageBackend();
     // Atomic replacement allows attaching the cache reporter before or after init.
     void setStageMetricsReporter(std::shared_ptr<BlockTreeCacheMetricsReporter> reporter);
+    virtual BlockTreeQueueSizes queueSizes() const {
+        return executor_ ? executor_->queueSizes() : BlockTreeQueueSizes{};
+    }
 
     // Initialization is single-attempt. A failed start may permanently stop
     // an injected executor; create a fresh backend/executor to retry.
@@ -167,12 +178,20 @@ public:
     void read(StorageRequest request, std::shared_ptr<StorageBackendMatchMeta> match_meta, Done done);
     StorageWriteTask prepareWrite(StorageRequest request);
     // Returns admission only, not the I/O result; never waits for completion.
-    // Source pins live until execution or rejection.
+    // Source pins live through payload completion and publication.
     bool write(StorageWriteTask task);
     // Must not be called from backend I/O or completion callbacks.
     void shutdown();
 
 protected:
+    using Task = StorageBackendExecutor::Task;
+    // The completion callable only checks results and updates local state; it
+    // must not start blocking I/O on the RPC completion/settlement thread.
+    using ReadCompletion = std::function<void(Task)>;
+    // Only a pool worker may publish or abort a write. On queue rejection the
+    // result can still check the rank responses and settle the source pins.
+    using WriteResult = std::function<void(bool on_worker)>;
+    using WriteCompletion = std::function<void(WriteResult)>;
     const CacheTopology&      topology() const;
     const DeviceBlockPoolPtr& devicePool(const std::string& tag) const;
     std::vector<BlockInfo>    convertIndexToBuffer(int layer_id, const std::string& tag, int block_id) const;
@@ -185,7 +204,20 @@ protected:
     virtual StorageMatchResult matchImpl(const StorageRequest& request)                             = 0;
     virtual void               readImpl(const StorageRequest&                           request,
                                         const std::shared_ptr<StorageBackendMatchMeta>& match_meta) = 0;
+    // Synchronous payloads run on one worker. A deferred payload spans dispatch through completion.
+    virtual bool usesAsyncPayload(const StorageRequest&, bool /*is_write*/) const noexcept { return false; }
+    // False preserves the synchronous path. True transfers completion to done;
+    // the request and pins remain alive until its callable has been settled.
+    virtual bool readAsyncImpl(const StorageRequest&, const std::shared_ptr<StorageBackendMatchMeta>&, ReadCompletion) {
+        return false;
+    }
     virtual void               writeImpl(const StorageRequest& request)                             = 0;
+    // False means the write finished on this worker. True keeps the request and
+    // its source pins alive until the result passed to done has been settled.
+    virtual bool startWriteImpl(const StorageRequest& request, WriteCompletion) {
+        writeImpl(request);
+        return false;
+    }
     virtual void               shutdownImpl() noexcept {}
     virtual void               onRemoteCacheSkipped(const char*) noexcept {}
     virtual void               onQuarantined(bool, StorageQuarantineReason, size_t) noexcept {}
@@ -199,7 +231,7 @@ private:
         FINALIZING,
         STOPPED
     };
-    using Operation = std::function<void(Lifecycle outcome)>;
+    using Operation = std::function<void(Lifecycle outcome, Task finished)>;
 
     std::shared_ptr<storage_backend_detail::StorageTaskState>
     prepare(StorageRequest request, bool for_write = false, uint64_t trace_id = 0);
@@ -213,7 +245,8 @@ private:
                                         const char*           operation,
                                         uint64_t              trace_id) const noexcept;
     void validateRequest(const StorageRequest& request, bool allow_null_blocks) const;
-    bool dispatch(Operation operation, BlockTreeTaskClass task_class, bool run_inline = false);
+    bool dispatch(Operation operation, BlockTreeTaskClass task_class, bool run_inline = false,
+                  std::optional<StorageBackendExecutor::Clock::time_point> io_deadline = std::nullopt);
     void                                 taskFinished();
     void quarantineTask(const std::shared_ptr<storage_backend_detail::StorageTaskState>& state,
                         bool                                                             is_write,

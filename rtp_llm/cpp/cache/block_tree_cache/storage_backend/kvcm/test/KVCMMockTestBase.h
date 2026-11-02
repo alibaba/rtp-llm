@@ -162,6 +162,40 @@ public:
     std::optional<kv_cache_manager::ClientErrorCode> load_status;
     std::optional<kv_cache_manager::ClientErrorCode> save_status;
 
+    kv_cache_manager::ClientErrorCode loadKvCachesForTagWithStatus(
+        const std::string& tag, const kv_cache_manager::UriStrVec& uris,
+        kv_cache_manager::BlockBuffers& buffers,
+        const std::shared_ptr<kv_cache_manager::TransferTraceInfo>& trace,
+        TransferCompletion* completion, std::optional<std::chrono::steady_clock::time_point> deadline) override {
+        if (completion) *completion = TransferCompletion::NOT_SUBMITTED;
+        if (deadline && std::chrono::steady_clock::now() >= *deadline) return kv_cache_manager::ER_SDK_TIMEOUT;
+        if (completion) *completion = TransferCompletion::UNKNOWN;
+        const auto code = loadKvCachesForTagWithStatus(tag, uris, buffers, trace);
+        if (completion) {
+            // Explicit SDK codes model attempted I/O. A failed legacy boolean
+            // mock supplies no evidence that an SDK call was submitted.
+            *completion = code == kv_cache_manager::ER_OK ? TransferCompletion::PAYLOAD_COMPLETE :
+                          load_status ? TransferCompletion::UNKNOWN : TransferCompletion::NOT_SUBMITTED;
+        }
+        return code;
+    }
+
+    std::pair<kv_cache_manager::ClientErrorCode, kv_cache_manager::UriStrVec> saveKvCachesForTagWithStatus(
+        const std::string& tag, const kv_cache_manager::UriStrVec& uris,
+        const kv_cache_manager::BlockBuffers& buffers,
+        const std::shared_ptr<kv_cache_manager::TransferTraceInfo>& trace,
+        TransferCompletion* completion, std::optional<std::chrono::steady_clock::time_point> deadline) override {
+        if (completion) *completion = TransferCompletion::NOT_SUBMITTED;
+        if (deadline && std::chrono::steady_clock::now() >= *deadline) return {kv_cache_manager::ER_SDK_TIMEOUT, {}};
+        if (completion) *completion = TransferCompletion::UNKNOWN;
+        auto result = saveKvCachesForTagWithStatus(tag, uris, buffers, trace);
+        if (completion) {
+            *completion = result.first == kv_cache_manager::ER_OK ? TransferCompletion::PAYLOAD_COMPLETE :
+                          save_status ? TransferCompletion::UNKNOWN : TransferCompletion::NOT_SUBMITTED;
+        }
+        return result;
+    }
+
     MOCK_METHOD(bool,
                 initForPools,
                 (const ConfigMap&,
