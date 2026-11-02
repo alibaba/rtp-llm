@@ -212,14 +212,20 @@ void registerPyOpDefs(pybind11::module& m) {
         .def_readwrite("input_hiddens", &PyModelInputs::input_hiddens, "Input hidden states tensor")
         .def_readwrite("attention_inputs", &PyModelInputs::attention_inputs, "Attention inputs structure")
         .def_readwrite(
-            "bert_embedding_inputs", &PyModelInputs::bert_embedding_inputs, "BERT embedding inputs structure");
+            "bert_embedding_inputs", &PyModelInputs::bert_embedding_inputs, "BERT embedding inputs structure")
+        .def_readwrite("capture_hidden_states",
+                       &PyModelInputs::capture_hidden_states,
+                       "Capture configured hidden states for this homogeneous target-prefill batch");
 
     pybind11::class_<PyModelOutputs>(m, "PyModelOutputs")
         .def(pybind11::init<>(), "Default constructor")
         .def(pybind11::init<torch::Tensor>(),
              pybind11::arg("hidden_states"),
              "Initialize with hidden states tensor only (params_ptr defaults to nullptr)")
-        .def(pybind11::init([](torch::Tensor hidden_states, pybind11::object params_obj) {
+        .def(pybind11::init([](torch::Tensor                hidden_states,
+                               pybind11::object             params_obj,
+                               std::optional<torch::Tensor> captured_hidden_states,
+                               std::optional<std::string>   capture_error) {
                  // Try to cast to shared_ptr, return nullptr if conversion fails
                  std::shared_ptr<rtp_llm::ParamsBase> params_ptr     = nullptr;
                  py::object                           py_attn_params = py::none();
@@ -230,13 +236,22 @@ void registerPyOpDefs(pybind11::module& m) {
                      //  RTP_LLM_LOG_INFO("Failed to cast params_obj to shared_ptr<ParamsBase>: %s", e.what());
                      py_attn_params = params_obj;
                  }
-                 return PyModelOutputs(hidden_states, params_ptr, py_attn_params);
+                 auto outputs                   = PyModelOutputs(hidden_states, params_ptr, py_attn_params);
+                 outputs.captured_hidden_states = std::move(captured_hidden_states);
+                 outputs.capture_error          = std::move(capture_error);
+                 return outputs;
              }),
              pybind11::arg("hidden_states"),
-             pybind11::arg("params_ptr"),
-             "Initialize with hidden states tensor and params pointer")
-        .def_readwrite("hidden_states", &PyModelOutputs::hidden_states, "Hidden states output tensor")
-        .def_readwrite("params_ptr", &PyModelOutputs::params_ptr, "Parameters pointer");
+             pybind11::arg("params_ptr")             = pybind11::none(),
+             pybind11::arg("captured_hidden_states") = std::nullopt,
+             pybind11::arg("capture_error")          = std::nullopt,
+             "Initialize with canonical hidden states and optional training capture")
+        .def_readwrite("hidden_states", &PyModelOutputs::hidden_states, "Canonical final hidden states output tensor")
+        .def_readwrite(
+            "captured_hidden_states", &PyModelOutputs::captured_hidden_states, "Optional packed training hidden states")
+        .def_readwrite("capture_error", &PyModelOutputs::capture_error, "Recoverable training capture diagnostic")
+        .def_readwrite("params_ptr", &PyModelOutputs::params_ptr, "Parameters pointer")
+        .def_readwrite("py_attn_params", &PyModelOutputs::py_attn_params, "Python attention parameters");
 }
 
 }  // namespace torch_ext

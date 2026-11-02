@@ -40,6 +40,24 @@ absl::Status NormalBatchStreamProcessor::dispatch(const StreamGroups& stream_gro
     return output_dispatcher_->dispatch(stream_groups, merge_outputs);
 }
 
+absl::Status NormalBatchStreamProcessor::dispatchPrefillOnly(const StreamGroups& stream_groups) const {
+    for (const auto& stream : stream_groups.allStreams()) {
+        StreamUpdateInfo update_info{torch::empty({stream->currentBatchSize(), 0}, torch::kInt32),
+                                     /*num_new_tokens=*/0,
+                                     {},
+                                     {},
+                                     {},
+                                     {},
+                                     {},
+                                     {},
+                                     {},
+                                     {},
+                                     /*update_remote_generate=*/false};
+        stream->update(update_info);
+    }
+    return absl::OkStatus();
+}
+
 absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(const StreamGroups& stream_groups,
                                                                             TensorHolder&       host_holder,
                                                                             bool                record_lengths) const {

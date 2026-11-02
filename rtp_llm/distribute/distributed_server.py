@@ -395,8 +395,16 @@ class DistributedServer(object):
     def choose_backend_stop_step(
         self, timeout: float, local_step: int, arm_stop, cancel_armed_stop
     ) -> int:
-        """Atomically commit one future MTP stop step across all ranks."""
+        """Commit an MTP step or a NormalEngine terminal boundary on every rank.
+
+        EngineBase wire values: -1 is unsupported; -2 requests terminal stop.
+        Terminal target 0 is an opaque commit token, never an idle-step budget.
+        """
         if self.world_size <= 1:
+            if local_step == -2:
+                raise BackendStopConsensusError(
+                    "terminal TP engine requires a matching multi-rank backend world"
+                )
             return -1
         step_keys = [
             self.BACKEND_SHUTDOWN_STEP_KEY + str(rank)
@@ -414,9 +422,10 @@ class DistributedServer(object):
         step_published = False
         armed_target = None
         armed_ack_published = False
+        terminal_boundary_observed = False
 
         def abort_and_wait(message: str) -> None:
-            nonlocal armed_target
+            nonlocal armed_target, terminal_boundary_observed
             decision = self.store.compare_set(
                 self.BACKEND_SHUTDOWN_STEP_DECISION_KEY,
                 "",
@@ -426,11 +435,37 @@ class DistributedServer(object):
                 raise BackendStopConsensusError(
                     "stop-step success became visible after this rank failed to arm"
                 )
-            if armed_target is not None and armed_target >= 0:
+            # A missing/unarmed local target proves nothing about peer collectives.
+            # Resolve the protocol before authorizing any force-stop fallback.
+            if not self.store.check(step_keys):
+                raise BackendStopConsensusError(
+                    f"{message}; incomplete backend stop capabilities"
+                )
+            steps = [int(self.store.get(key).decode("utf-8")) for key in step_keys]
+            terminal = -2 in steps
+            if terminal:
+                if not all(step == -2 for step in steps):
+                    raise BackendStopConsensusError(
+                        f"{message}; incompatible backend terminal-stop capabilities"
+                    )
+                try:
+                    # A follower may time out before root's control thread arrives.
+                    # Even after abort, root must drive the same terminal broadcast;
+                    # every rank must observe it before cancellation can be safe.
+                    if not terminal_boundary_observed:
+                        arm_stop(0)
+                        terminal_boundary_observed = True
+                    cancel_armed_stop()
+                except Exception as error:
+                    raise BackendStopConsensusError(
+                        f"{message}; terminal cancellation boundary not established"
+                    ) from error
+            elif armed_target is not None and armed_target >= 0:
                 cancel_armed_stop()
             armed_target = None
             self.store.set(
-                self.BACKEND_SHUTDOWN_STEP_CANCEL_KEY + str(self.rank), "ready"
+                self.BACKEND_SHUTDOWN_STEP_CANCEL_KEY + str(self.rank),
+                "terminal_ready" if terminal else "ready",
             )
             cancel_deadline = time.monotonic() + timeout
             while not self.store.check(cancelled_keys):
@@ -439,6 +474,13 @@ class DistributedServer(object):
                         f"{message}; cancellation rendezvous timed out"
                     )
                 time.sleep(0.1)
+            if terminal and any(
+                self.store.get(key).decode("utf-8") != "terminal_ready"
+                for key in cancelled_keys
+            ):
+                raise BackendStopConsensusError(
+                    f"{message}; peer did not acknowledge the terminal boundary"
+                )
             raise TimeoutError(message)
 
         while True:
@@ -468,9 +510,16 @@ class DistributedServer(object):
                     steps = [
                         int(self.store.get(key).decode("utf-8")) for key in step_keys
                     ]
-                    candidate = (
-                        -1 if any(step < 0 for step in steps) else max(steps) + 256
-                    )
+                    if -2 in steps:
+                        if not all(step == -2 for step in steps):
+                            abort_and_wait(
+                                "incompatible backend terminal-stop capabilities"
+                            )
+                        candidate = 0
+                    else:
+                        candidate = (
+                            -1 if any(step < 0 for step in steps) else max(steps) + 256
+                        )
                     chosen = self.store.compare_set(
                         self.BACKEND_SHUTDOWN_TARGET_KEY, "", str(candidate)
                     ).decode("utf-8")
@@ -480,6 +529,8 @@ class DistributedServer(object):
                         try:
                             if target_step >= 0:
                                 arm_stop(target_step)
+                                if local_step == -2:
+                                    terminal_boundary_observed = True
                         except Exception:
                             abort_and_wait("backend stop-step arming failed")
                     if not armed_ack_published:

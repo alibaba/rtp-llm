@@ -43,6 +43,17 @@ public:
     int64_t num_layers  = 0;
     int64_t hidden_size = 0;
 
+    // Startup-only target-prefill capture profile. An empty layer list disables capture.
+    std::vector<int64_t>    hidden_state_capture_layer_ids = {};
+    HiddenStateCaptureDtype hidden_state_capture_dtype     = HiddenStateCaptureDtype::BF16;
+    // Positive per-owner limits, including published objects awaiting receiver deletion.
+    // Defaults do not enable capture or account for temporary GPU/staging headroom.
+    int64_t hidden_state_capture_max_inflight_samples = 64;
+    int64_t hidden_state_capture_max_inflight_bytes   = 1073741824;  // 1 GiB payload
+    int64_t hidden_state_capture_max_inflight_tokens  = 131072;
+    int64_t hidden_state_capture_max_pending_batches  = 8;
+    int64_t hidden_state_capture_poll_interval_ms     = 1000;  // No timeout-based refund.
+
     // Attention configuration - contains all attention-related params
     AttentionConfigs      attn_config;
     LinearAttentionConfig linear_attention_config;

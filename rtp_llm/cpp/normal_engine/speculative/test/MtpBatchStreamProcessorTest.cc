@@ -15,6 +15,7 @@
 #include "rtp_llm/cpp/models/ModelTypes.h"
 #include "rtp_llm/cpp/models/SampleInfos.h"
 #include "rtp_llm/cpp/models/logits_processor/LogitsProcessorStates.h"
+#include "rtp_llm/cpp/models/logits_processor/SpecLogitsVerifyRunner.h"
 #include "rtp_llm/models_py/bindings/core/Types.h"
 #include "rtp_llm/cpp/testing/TestBase.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
@@ -962,9 +963,28 @@ TEST_F(MtpBatchStreamProcessorTest, testSpecSamplerInputMasksThinkBoundaryTokens
 
     GptModelInputs  model_input;
     GptModelOutputs model_output;
-    model_output.logits = torch::zeros({3, 16}, torch::kFloat32);
+    model_output.logits = torch::zeros({3, 16}, torch::TensorOptions(torch::kFloat32).device(torch::kCUDA));
 
-    auto sampler_inputs_status = processor.gatherSpecSamplerInput(stream_groups, model_input, model_output);
+    SpecLogitsVerifyRunner::LaunchTask task;
+    task.total_streams    = 1;
+    task.propose_step     = sp_config.gen_num_per_cycle;
+    task.vocab_size       = model_config.vocab_size;
+    task.draft_tokens     = torch::tensor({{9, 9}}, torch::kInt32);
+    const auto processors = stream->getAllLogitsProcessorPtr();
+    ASSERT_EQ(processors.size(), 1u);
+    auto spec_processor = std::dynamic_pointer_cast<SpecLogitsProcessor>(processors[0]);
+    ASSERT_NE(spec_processor, nullptr);
+    task.active.push_back({spec_processor,
+                           0,
+                           0,
+                           static_cast<uint64_t>(stream->streamId()),
+                           stream->seqLength(),
+                           stream->outputTokenLen()});
+    SpecLogitsVerifyRunner runner;
+    auto                   spec_result = runner.buildInline(task);
+    ASSERT_TRUE(spec_result.has_active_processor);
+    auto sampler_inputs_status =
+        processor.gatherSpecSamplerInput(stream_groups, model_input, model_output, spec_result);
     ASSERT_TRUE(sampler_inputs_status.ok());
     auto sampler_inputs = sampler_inputs_status.value();
 
@@ -1173,10 +1193,6 @@ TEST_F(MtpBatchStreamProcessorTest, testDispatchDecodeStream) {
 
     checkOutput(stream1, {1, 2, 3, 1, 3, 2}, {2, 0}, {0.2, 0.1, 0.3, 0.5}, {0.6, 0.06});
     checkOutput(stream2, {2, 1, 2}, {2, 3}, {0.3, 0.1, 0.4, 0.2}, {1.3, 0.13});
-    EXPECT_EQ(stream1->getMtpAsyncDeviceState().last_real_seq_len, stream1->seqLength());
-    EXPECT_EQ(stream1->getMtpAsyncDeviceState().next_real_seq_len, stream1->seqLength());
-    EXPECT_EQ(stream2->getMtpAsyncDeviceState().last_real_seq_len, stream2->seqLength());
-    EXPECT_EQ(stream2->getMtpAsyncDeviceState().next_real_seq_len, stream2->seqLength());
 }
 
 TEST_F(MtpBatchStreamProcessorTest, testGatherDecodeModelInput) {

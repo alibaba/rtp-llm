@@ -1,4 +1,6 @@
 #include <memory>
+#include <future>
+#include <chrono>
 #include "torch/all.h"
 #include "gtest/gtest.h"
 #include "rtp_llm/cpp/engine_base/schedulers/GatherBatchScheduler.h"
@@ -37,10 +39,12 @@ protected:
                                                       /*metrics_reporter=*/nullptr);
     }
 
-    std::shared_ptr<GenerateStream> makeStream() {
-        auto query             = std::make_shared<GenerateInput>();
-        query->input_ids       = torch::tensor({1, 2, 3}, torch::kInt32);
-        query->generate_config = std::make_shared<GenerateConfig>();
+    std::shared_ptr<GenerateStream> makeStream(int max_new_tokens = 8192, int64_t request_id = 0) {
+        auto query                             = std::make_shared<GenerateInput>();
+        query->input_ids                       = torch::tensor({1, 2, 3}, torch::kInt32);
+        query->generate_config                 = std::make_shared<GenerateConfig>();
+        query->generate_config->max_new_tokens = max_new_tokens;
+        query->request_id                      = request_id;
         return std::make_shared<NormalGenerateStream>(
             query, model_config_, runtime_config_, resource_context_, nullptr);
     }
@@ -220,6 +224,109 @@ TEST_F(GatherBatchSchedulerTest, testPyModelGuardAllowsBatchGatherWhenRunningEmp
     ASSERT_TRUE(streams_status.ok());
     ASSERT_EQ(scheduler->waitingStreamsSize(), 0);
     ASSERT_EQ(scheduler->runningStreamsSize(), 3);
+}
+
+TEST_F(GatherBatchSchedulerTest, testMixedIndependentEnqueuesSplitOnlyTheFullGatherWindow) {
+    for (bool zero_first : {false, true}) {
+        SCOPED_TRACE(zero_first);
+        auto scheduler = makeScheduler(/*load_python_model=*/true);
+        setGatherBatchSize(*scheduler, 3);
+        auto first  = makeStream(zero_first ? 0 : 2, 30);
+        auto second = makeStream(zero_first ? 2 : 0, 20);
+        auto third  = makeStream(zero_first ? 0 : 2, 10);
+        auto fourth = makeStream(zero_first ? 0 : 2, 0);
+        for (const auto& stream : {first, second, third, fourth}) {
+            ASSERT_TRUE(scheduler->enqueue(stream).ok());
+        }
+        auto result = scheduler->schedule();
+        ASSERT_TRUE(result.ok());
+        // Preserve streamId sorting, but never pull fourth across the original N=3 window.
+        EXPECT_EQ(std::vector<GenerateStreamPtr>(result->begin(), result->end()),
+                  (std::vector<GenerateStreamPtr>{third, first}));
+        EXPECT_EQ(scheduler->gather_batch_size_, 1);
+        EXPECT_EQ(scheduler->waitingStreamsSize(), 2);
+        EXPECT_FALSE(second->hasEvent(StreamEvents::CanRun));
+        EXPECT_FALSE(fourth->hasEvent(StreamEvents::CanRun));
+        EXPECT_FALSE(hasMixedExecutionModes(*result));
+        // A still-running batch must not absorb either deferred mode.
+        result = scheduler->schedule();
+        ASSERT_TRUE(result.ok());
+        EXPECT_EQ(result->size(), 2u);
+        first->reportEvent(StreamEvents::GenerateDone);
+        third->reportEvent(StreamEvents::GenerateDone);
+        result = scheduler->schedule();
+        ASSERT_TRUE(result.ok());
+        ASSERT_EQ(result->size(), 1u);
+        EXPECT_EQ(result->front(), second);
+        second->reportEvent(StreamEvents::GenerateDone);
+        result = scheduler->schedule();
+        ASSERT_TRUE(result.ok());
+        ASSERT_EQ(result->size(), 1u);
+        EXPECT_EQ(result->front(), fourth);
+        EXPECT_EQ(scheduler->waitingStreamsSize(), 0);
+        for (const auto& stream : {first, second, third, fourth}) {
+            EXPECT_FALSE(stream->hasError());
+        }
+    }
+}
+
+TEST_F(GatherBatchSchedulerTest, testMixedQueueStillWaitsForConfiguredGatherSize) {
+    auto scheduler = makeScheduler(/*load_python_model=*/true);
+    setGatherBatchSize(*scheduler, 3);
+    auto zero     = makeStream(0);
+    auto positive = makeStream(2);
+    ASSERT_TRUE(scheduler->enqueue(zero).ok());
+    ASSERT_TRUE(scheduler->enqueue(positive).ok());
+    auto pending = std::async(std::launch::async, [&] { return scheduler->schedule(); });
+    EXPECT_EQ(pending.wait_for(std::chrono::milliseconds(50)), std::future_status::timeout);
+    auto peer = makeStream(0);
+    // Always unblock the future, including when the assertion above reports a regression.
+    EXPECT_TRUE(scheduler->enqueue(peer).ok());
+    auto result = pending.get();
+    ASSERT_TRUE(result.ok());
+    EXPECT_EQ(result->size(), 2u);
+    EXPECT_FALSE(hasMixedExecutionModes(*result));
+    EXPECT_EQ(positive->getStatus(), StreamState::WAITING);
+}
+
+TEST_F(GatherBatchSchedulerTest, testNewGatherSettingStillGatesDeferredMixedTail) {
+    auto scheduler = makeScheduler(/*load_python_model=*/true);
+    setGatherBatchSize(*scheduler, 2);
+    auto zero     = makeStream(0);
+    auto positive = makeStream(2);
+    ASSERT_TRUE(scheduler->enqueue(zero).ok());
+    ASSERT_TRUE(scheduler->enqueue(positive).ok());
+    auto result = scheduler->schedule();
+    ASSERT_TRUE(result.ok());
+    ASSERT_EQ(result->size(), 1u);
+    EXPECT_EQ(result->front(), zero);
+    setGatherBatchSize(*scheduler, 2);
+    zero->reportEvent(StreamEvents::GenerateDone);
+    result = scheduler->schedule();  // running work wakes the existing wait predicate
+    ASSERT_TRUE(result.ok());
+    EXPECT_TRUE(result->empty());
+    EXPECT_EQ(scheduler->gather_batch_size_, 2);
+    EXPECT_FALSE(positive->hasEvent(StreamEvents::CanRun));
+    auto peer = makeStream(2);
+    ASSERT_TRUE(scheduler->enqueue(peer).ok());
+    result = scheduler->schedule();
+    ASSERT_TRUE(result.ok());
+    EXPECT_EQ(result->size(), 2u);
+    EXPECT_EQ(scheduler->gather_batch_size_, 1);
+}
+
+TEST_F(GatherBatchSchedulerTest, testExplicitMixedGroupRemainsUnsupportedAndAtomic) {
+    auto                           scheduler = makeScheduler(/*load_python_model=*/true);
+    std::vector<GenerateStreamPtr> streams{makeStream(0), makeStream(2)};
+    auto                           result = scheduler->enqueueGroup(streams);
+    EXPECT_EQ(result.first, (std::vector<bool>{false, false}));
+    EXPECT_EQ(result.second, streams);
+    EXPECT_EQ(scheduler->waitingStreamsSize(), 0);
+    for (const auto& stream : streams) {
+        EXPECT_EQ(stream->statusInfo().code(), ErrorCode::UNKNOWN_ERROR);
+        EXPECT_FALSE(stream->hasEvent(StreamEvents::CanRun));
+        EXPECT_EQ(stream->curBlocksNum(), 0u);
+    }
 }
 
 }  // namespace rtp_llm

@@ -11,6 +11,7 @@ from types import SimpleNamespace
 from typing import Dict, List, Optional
 
 import torch
+
 from rtp_llm.models_py import prefill_optimization as _prefill_optimization
 
 try:
@@ -817,11 +818,6 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
         global_2d = triton_convert_req_index_to_global_index(
             req_id=self.precomputed_req_ids,
             block_table=self.block_table,
-            # REBASE CONFLICT CONTEXT(e2e00e570): source branch used
-            # `token_indices=topk_2d, BLOCK_SIZE=self.token_per_block`; new base
-            # uses explicit `TOKENS_PER_BLOCK_FOR_BLOCK_TABLE` and
-            # `ENTRIES_PER_BLOCK`. Keep that API while preserving the source
-            # branch's normalized `topk_2d` rows.
             token_indices=topk_2d,
             TOKENS_PER_BLOCK_FOR_BLOCK_TABLE=self.token_per_block,
             ENTRIES_PER_BLOCK=self.token_per_block,
@@ -1294,9 +1290,7 @@ class SparseMlaCpImpl(SparseMlaImpl):
         """Create fmha_params, run plan() via prepare(), then pack CP indices into
         cp_params for the indexer to consume. plan() already filled
         full_rope_pos_ids and precomputed_req_ids on fmha_impl."""
-        # REBASE CONFLICT CONTEXT(e2e00e570): source branch introduced a longer
-        # `create_params` implementation; new base has the same fields expressed
-        # through the compact `_pick()` helper. Keep the compact base form.
+
         self.fmha_params = rtp_llm_ops.SparseMlaParams()
         self.rope_params = self.fmha_params
         # Owner-grain RR contract: plan() reads self.fmha_impl.kv_owner_tokens_per_block

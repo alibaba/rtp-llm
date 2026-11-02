@@ -49,6 +49,8 @@ message RoleAddrPB {
 }
 
 message GenerateConfigPB {
+    // Omitted and explicit zero are indistinguishable for this proto3 scalar.
+    // Both retain the target-prefill/internal-zero behavior; negative values are invalid.
     int32 max_new_tokens = 1;
     int32 num_beams = 2;
     int32 num_return_sequences = 3;
@@ -117,6 +119,11 @@ message GenerateConfigPB {
     bool return_logprobs = 64;
     uint32 top_logprobs = 65;
     bool frontend_metric_streaming = 66;
+    // Explicit target-prefill assertion: true requires max_new_tokens == 0.
+    // Keep the main feature's field number without renumbering the GLM branch fields.
+    bool prefill_only = 76;
+    // Training side-channel intent, independent of normal generation and LM head.
+    bool capture_hidden_states = 77;
 }
 
 message MMPreprocessConfigPB {
@@ -284,6 +291,8 @@ enum ErrorCodePB {
     P2P_CONNECTOR_WORKER_READ_CANCELED = 23;
     P2P_CONNECTOR_WORKER_READ_TIMEOUT = 24;
     P2P_CONNECTOR_WORKER_READ_TRANSFER_NOT_DONE = 25;
+    INVALID_PARAMS = 26;
+    EXECUTION_EXCEPTION = 27;
 }
 
 // transfer between prefill and decode

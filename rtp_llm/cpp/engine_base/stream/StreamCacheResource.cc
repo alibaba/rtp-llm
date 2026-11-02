@@ -209,10 +209,7 @@ static bool applyP2PSideChannelToStream(const std::shared_ptr<FusedAsyncReadCont
         memcpy(sp_output_buffer->tokens.data_ptr<int>(),
                payload->propose_tokens.data(),
                payload->propose_tokens.size() * sizeof(int));
-        // REBASE CONFLICT CONTEXT(build-fix): dsv4_on_dev copied the full
-        // propose-token tensor for xgrammar, while feature/glm5_cu13 split
-        // target/propose GPU tensors for MTP graft prefill cudagraph. Keep
-        // one CUDA int32 option and publish target plus draft-token slices.
+
         c10::DeviceGuard runtime_device_guard(getTorchCudaDevice());
         const auto       cuda_i32 = runtimeCudaI32Options();
         auto             flat_gpu = sp_output_buffer->tokens.reshape({-1}).to(cuda_i32, /*non_blocking=*/true);
@@ -291,6 +288,7 @@ void StreamCacheResource::init(int batch_size) {
 
 void StreamCacheResource::releaseResource() {
     RTP_LLM_PROFILE_FUNCTION();
+    stream_->cancelHiddenStateCapture();
     if (!resource_context_.cache_manager) {
         return;
     }
@@ -486,6 +484,10 @@ absl::Status StreamCacheResource::incrKVBlock(size_t reserve_step, int seq_len_o
 
 bool StreamCacheResource::asyncLoadCache() {
     RTP_LLM_PROFILE_FUNCTION();
+    // P-side capture needs every prompt position; D must still import the P->D KV handoff.
+    if (stream_->generateConfig()->isPrefillOnly() || stream_->requiresFullContextForHiddenStateCapture()) {
+        return false;
+    }
     if (!resource_context_.cache_manager || !resource_context_.cache_manager->hasActiveConnectors()) {
         return false;
     }
@@ -649,7 +651,7 @@ int StreamCacheResource::mallocFailedTimes() const {
 bool StreamCacheResource::reuseCache() const {
     // AND logic: global REUSE_CACHE=1 AND per-request reuse_cache both must be true.
     // Per-request field flows frontend → FlexLB → engine via protobuf.
-    return resource_context_.reuse_cache && stream_->reuseCache();
+    return !stream_->generateConfig()->isPrefillOnly() && resource_context_.reuse_cache && stream_->reuseCache();
 }
 
 bool StreamCacheResource::enableRemoteCache() const {
@@ -670,6 +672,9 @@ bool StreamCacheResource::enableTieredMemoryCache() const {
 
 void StreamCacheResource::loadCacheSync() {
     RTP_LLM_PROFILE_FUNCTION();
+    if (stream_->generateConfig()->isPrefillOnly() || stream_->requiresFullContextForHiddenStateCapture()) {
+        return;
+    }
     if (!resource_context_.cache_manager || !resource_context_.cache_manager->hasActiveConnectors()) {
         return;
     }

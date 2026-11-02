@@ -1,6 +1,7 @@
 import gc
 import logging
 import os
+import sys
 import threading
 import time
 from typing import Optional
@@ -283,10 +284,11 @@ class BackendManager(object):
 
     def stop(self) -> None:
         """Stop the backend manager and cleanup resources"""
+        # A shutdown failure must be visible on success, but must not replace an
+        # original training/service exception when called from its finally block.
+        original_error = sys.exc_info()[1]
         self._mark_not_serving()
-        # REBASE CONFLICT CONTEXT(cdc1b18b6): source branch made stop idempotent
-        # and stops the engine before unmounting NFS; keep that with the new base
-        # BackendManager structure.
+
         if self._stopped.is_set():
             logging.info("BackendManager already stopped")
             return
@@ -358,9 +360,10 @@ class BackendManager(object):
             if engine_stop_error is None:
                 try:
                     self._rendezvous_backend_ranks("engine_stopped")
-                except Exception:
-                    # Retain the engine resources through this bounded rendezvous,
-                    # but always proceed with local cleanup if a peer has failed.
+                except Exception as e:
+                    # Keep resources through the rendezvous, then clean up locally
+                    # without reporting an incomplete all-rank stop as success.
+                    engine_stop_error = e
                     logging.exception("backend engine-stop rendezvous failed")
             try:
                 logging.info("stopping backend engine before unmounting nfs paths")
@@ -374,14 +377,19 @@ class BackendManager(object):
                 try:
                     _nfs_manager.unmount_all()
                     logging.info("all nfs paths unmounted")
-                except Exception:
+                except Exception as e:
                     logging.exception("nfs unmount failed during backend shutdown")
                     if engine_stop_error is None:
-                        raise
-            if engine_stop_error is not None:
-                raise engine_stop_error
-            if drain_error is not None:
-                raise drain_error
+                        engine_stop_error = e
+            shutdown_error = engine_stop_error or drain_error
+            if shutdown_error is not None:
+                if original_error is None:
+                    raise shutdown_error
+                logging.error(
+                    "preserving original exception %r after backend shutdown failure: %r",
+                    original_error,
+                    shutdown_error,
+                )
 
     def _mark_not_serving(self) -> None:
         if self.engine is not None:
@@ -441,7 +449,11 @@ class BackendManager(object):
             engine.arm_stop,
             engine.cancel_armed_stop,
         )
-        if target_step >= 0:
+        if local_step == -2 and target_step == 0:
+            logging.info(
+                "backend coordinated terminal stop selected via TP input broadcast"
+            )
+        elif target_step >= 0:
             logging.info(
                 "backend coordinated stop target selected: local_step=%d target_step=%d",
                 local_step,
