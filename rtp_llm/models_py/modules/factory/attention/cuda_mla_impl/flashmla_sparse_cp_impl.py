@@ -65,6 +65,9 @@ from .flashmla_sparse_impl import (
 )
 from .glm53_prefill_workspace import Glm53PrefillWorkspace
 
+# Preserve the historical default when the rollback implementation is selected.
+_REMAP_HISTORY_TOPK_DEFAULT = "1" if PREFILL_OPTIMIZATIONS_ENABLED else "0"
+
 
 class _RankMajorKv(NamedTuple):
     """Gathered storage and the logical-token to physical-row mapping.
@@ -85,7 +88,10 @@ def _prepare_gathered_cp_kv(history, restore_indices, destination, *, use_cuda_g
     # Graph and cross-layer slot reuse retain their existing restored layout.
     if (
         not use_cuda_graph
-        and prefill_optimization_setting("RTP_CP_REMAP_HISTORY_TOPK", "0") == "1"
+        and prefill_optimization_setting(
+            "RTP_CP_REMAP_HISTORY_TOPK", _REMAP_HISTORY_TOPK_DEFAULT
+        )
+        == "1"
     ):
         return _RankMajorKv(history, restore_indices)
     if destination is None:
@@ -940,37 +946,7 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
             self.use_cuda_graph,
         )
 
-        # Pack rope positions for the local padded q/k buffer; padding rows keep
-        # pos=0 and are never selected by total_local_ids.
-        if n_q > 0:
-            positions_d = mla_params.positions_d
-            full_rope_size = int(local_tokens)
-            if self.use_cuda_graph and self.full_rope_pos_ids is not None:
-                if (
-                    self.full_rope_pos_ids.size(0) != full_rope_size
-                    or self.full_rope_pos_ids.dtype != positions_d.dtype
-                    or self.full_rope_pos_ids.device != positions_d.device
-                ):
-                    raise RuntimeError(
-                        "CP sparse MLA full_rope_pos_ids shape/dtype/device changed "
-                        "during CUDA graph replay"
-                    )
-                full_rope = self.full_rope_pos_ids
-                full_rope.zero_()
-            else:
-                full_rope = torch.zeros(
-                    full_rope_size,
-                    dtype=positions_d.dtype,
-                    device=positions_d.device,
-                )
-            full_rope[self.total_local_ids] = positions_d[self.total_global_ids]
-            self.full_rope_pos_ids = full_rope
-        else:
-            if self.use_cuda_graph and self.full_rope_pos_ids is not None:
-                raise RuntimeError(
-                    "CP sparse MLA full_rope_pos_ids became None during CUDA graph replay"
-                )
-            self.full_rope_pos_ids = None
+        self._refresh_full_rope_positions(mla_params.positions_d, int(local_tokens))
 
         # Gather path: prefill-only, gated by USE_GATHER_PATH (mirrors non-CP).
         gather_enabled = (
@@ -1231,6 +1207,30 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
             reverse_indices=reverse_indices,
         )
         return out
+
+    def _refresh_full_rope_positions(self, positions_d, local_tokens):
+        # Empty-Q ranks still own padded K rows and must enter the same Indexer
+        # collectives as peers. None would disable prologue prefetch only on
+        # those ranks, reversing Indexer/KV communication order for short inputs.
+        if self.use_cuda_graph and self.full_rope_pos_ids is not None:
+            full_rope = self.full_rope_pos_ids
+            if (
+                full_rope.size(0) != local_tokens
+                or full_rope.dtype != positions_d.dtype
+                or full_rope.device != positions_d.device
+            ):
+                raise RuntimeError(
+                    "CP sparse MLA full_rope_pos_ids shape/dtype/device changed "
+                    "during CUDA graph replay"
+                )
+            full_rope.zero_()
+        else:
+            full_rope = torch.zeros(
+                local_tokens, dtype=positions_d.dtype, device=positions_d.device
+            )
+        if self.total_global_ids.numel() > 0:
+            full_rope[self.total_local_ids] = positions_d[self.total_global_ids]
+        self.full_rope_pos_ids = full_rope
 
     def write_kv(self, compressed_kv, k_pe, kv_cache, gathered_kv=None):
         if gathered_kv is None and _prefill_optimization.ENABLED:
@@ -1510,7 +1510,12 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
         if prepared_kv is not None:
             pass  # The producer event was joined by SparseMlaCpImpl.
         elif self.kv_cache_sharded:
-            if prefill_optimization_setting("RTP_CP_REMAP_HISTORY_TOPK", "0") == "1":
+            if (
+                prefill_optimization_setting(
+                    "RTP_CP_REMAP_HISTORY_TOPK", _REMAP_HISTORY_TOPK_DEFAULT
+                )
+                == "1"
+            ):
                 rank_major = self._gather_sharded_kv_cache(
                     kv_cache, fused_kv, return_rank_major=True
                 )
@@ -2165,7 +2170,9 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
                 pass  # The producer event was joined by SparseMlaCpImpl.
             elif self.kv_cache_sharded:
                 if (
-                    prefill_optimization_setting("RTP_CP_REMAP_HISTORY_TOPK", "0")
+                    prefill_optimization_setting(
+                        "RTP_CP_REMAP_HISTORY_TOPK", _REMAP_HISTORY_TOPK_DEFAULT
+                    )
                     == "1"
                 ):
                     rank_major = self._gather_sharded_kv_cache(
@@ -2590,7 +2597,10 @@ class SparseMlaCpImpl(SparseMlaImpl):
         )
         keep_rank_major = (
             not op.use_cuda_graph
-            and prefill_optimization_setting("RTP_CP_REMAP_HISTORY_TOPK", "0") == "1"
+            and prefill_optimization_setting(
+                "RTP_CP_REMAP_HISTORY_TOPK", _REMAP_HISTORY_TOPK_DEFAULT
+            )
+            == "1"
         )
         # The fused padded GPU pack writes local directly. With rank-major
         # attention, no consumer needs a full logical-history destination.
