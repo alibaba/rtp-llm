@@ -2037,6 +2037,43 @@ TEST_F(StreamCacheResourceTest, testP2PFirstTokenEnqueuesDecodeDuplicateForSuppr
     EXPECT_TRUE(stream_->hasOutput());
 }
 
+TEST_F(StreamCacheResourceTest, testP2PFirstTokenWithVariableBeamsStartingAtOne) {
+    prepareResource(/*reuse_cache=*/true, RoleType::DECODE);
+    stream_->generateConfig()->pd_separation      = true;
+    stream_->generateConfig()->variable_num_beams = {1, 2};
+    ASSERT_FALSE(stream_->usesBeamSearchTokenLayoutForCurrentStep());
+    auto& resource = stream_->streamCacheResource();
+
+    auto matched_resource = std::make_shared<KVCacheResource>();
+    matched_resource->cacheKeys().push_back(1);
+    auto broadcast_result                               = std::make_shared<P2PBroadcastClient::Result>("first-token");
+    auto server_result                                  = std::make_shared<DecodeLoadHelper::Result>();
+    server_result->done_                                = true;
+    server_result->success_                             = true;
+    server_result->side_channel_payload.has_data        = true;
+    server_result->side_channel_payload.has_first_token = true;
+    server_result->side_channel_payload.first_token_id  = 7;
+    auto collector                                      = std::make_shared<P2PConnectorMetricsCollector>();
+    auto context = std::make_shared<P2PConnectorAsyncReadContext>(matched_resource,
+                                                                  broadcast_result,
+                                                                  server_result,
+                                                                  collector,
+                                                                  /*lease_query_timeout_ms=*/0,
+                                                                  /*no_transfer=*/true);
+    context->checkDone();
+    ASSERT_TRUE(context->success());
+    resource.p2p_load_context_ = context;
+
+    const size_t old_seq_length = stream_->seqLength();
+    const size_t old_output_pos = stream_->last_output_pos_;
+    ASSERT_TRUE(resource.loadCacheDone());
+    EXPECT_EQ(stream_->seqLength(), old_seq_length + 1);
+    EXPECT_EQ(stream_->last_output_pos_, old_output_pos + 1);
+    EXPECT_EQ(stream_->last_output_pos_, stream_->seqLength());
+    EXPECT_TRUE(stream_->hasOutput());
+    EXPECT_EQ(stream_->completeTokenIdsVec(0).back(), 7);
+}
+
 TEST_F(StreamCacheResourceTest, testP2PDsparkHandoffAcceptsAbsentAndZeroElementTensors) {
     for (int shape_case : {0, 1, 2}) {
         SCOPED_TRACE(shape_case);

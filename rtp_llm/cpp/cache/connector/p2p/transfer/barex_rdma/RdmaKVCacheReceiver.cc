@@ -25,7 +25,7 @@ bool RdmaKVCacheReceiver::startTcpServer(uint32_t listen_port,
                                          int tcp_worker_thread_count,
                                          int tcp_anet_rpc_thread_num,
                                          int tcp_anet_rpc_queue_num,
-                                         int tcp_worker_queue_size) {
+                                         uint32_t tcp_worker_queue_size) {
     tcp_server_ = std::make_shared<transfer::TcpServer>();
     if (!tcp_server_->init(tcp_io_thread_count,
                            tcp_worker_thread_count,
@@ -33,7 +33,7 @@ bool RdmaKVCacheReceiver::startTcpServer(uint32_t listen_port,
                            true,
                            static_cast<uint32_t>(tcp_anet_rpc_thread_num),
                            static_cast<uint32_t>(tcp_anet_rpc_queue_num),
-                           static_cast<uint32_t>(tcp_worker_queue_size))) {
+                           tcp_worker_queue_size)) {
         RTP_LLM_LOG_WARNING("create tcp server failed");
         return false;
     }
@@ -58,7 +58,7 @@ bool RdmaKVCacheReceiver::init(uint32_t listen_port,
                                int tcp_anet_rpc_thread_num,
                                int tcp_anet_rpc_queue_num,
                                int64_t wait_check_interval_us,
-                               int tcp_worker_queue_size,
+                               uint32_t tcp_worker_queue_size,
                                int rdma_transfer_worker_thread_count,
                                int rdma_transfer_worker_queue_size,
                                bool p2p_rdma_enable_h2d_copy,

@@ -314,6 +314,24 @@ TEST_F(P2PConnectorSchedulerTest, InvalidLoadConfigurationUsesBoundedSharedFallb
     }
 }
 
+TEST(P2PConnectorConfigTest, ProductionConfigNormalizesLoadTimeoutBeforeInit) {
+    RuntimeConfig     runtime;
+    CacheStoreConfig  cache_store;
+    ParallelismConfig parallelism;
+    for (auto role : {RoleType::PREFILL, RoleType::DECODE}) {
+        for (int64_t timeout : {int64_t{-1}, int64_t{0}, int64_t{900000}, int64_t{2147483648LL}}) {
+            PDSepConfig pd_sep;
+            pd_sep.role_type             = role;
+            pd_sep.load_cache_timeout_ms = timeout;
+            const auto config            = P2PConnectorConfig::create(runtime, cache_store, parallelism, pd_sep, 1, 1);
+            const auto expected          = timeout <= 0 ? PDSepConfig{}.load_cache_timeout_ms :
+                                                          std::min<int64_t>(timeout, std::numeric_limits<int32_t>::max());
+            EXPECT_EQ(config.scheduler_config.load_cache_timeout_ms, expected);
+            EXPECT_EQ(config.worker_config.load_cache_timeout_ms, expected);
+        }
+    }
+}
+
 TEST(P2PConnectorConfigTest, LoadTimeoutComesFromSharedPDSepConfig) {
     RuntimeConfig runtime;
     CacheStoreConfig cache_store;
@@ -715,6 +733,7 @@ TEST_F(P2PConnectorSchedulerTest, KickoffExceptionRetainsLeaseAndCanCancelWithou
     EXPECT_TRUE(context->done());
     EXPECT_FALSE(context->success());
     EXPECT_TRUE(context->resourceHoldPending());
+    EXPECT_NO_THROW(context->checkDone());
     EXPECT_TRUE(context->needCancel());
     EXPECT_NO_THROW(context->cancel(tp_broadcast_client_));
     for (int i = 0; i < 1000 && context->needCancel(); ++i) {

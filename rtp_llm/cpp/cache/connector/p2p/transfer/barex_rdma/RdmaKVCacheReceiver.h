@@ -31,7 +31,7 @@ public:
               int tcp_anet_rpc_thread_num = 3,
               int tcp_anet_rpc_queue_num = 100,
               int64_t wait_check_interval_us = 1000,
-              int tcp_worker_queue_size = 500,
+              uint32_t tcp_worker_queue_size = 500,
               int rdma_transfer_worker_thread_count = 16,
               int rdma_transfer_worker_queue_size = 100,
               bool p2p_rdma_enable_h2d_copy = false,
@@ -66,7 +66,7 @@ private:
                         int tcp_worker_thread_count,
                         int tcp_anet_rpc_thread_num = 3,
                         int tcp_anet_rpc_queue_num = 100,
-                        int tcp_worker_queue_size = 500);
+                        uint32_t tcp_worker_queue_size = 500);
 
 private:
     std::shared_ptr<TcpServer>           tcp_server_;

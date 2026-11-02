@@ -3187,9 +3187,9 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
                     self.assertEqual(raised.exception.rtp_error_code, result.error_code)
                 visitor.get_master_route_addrs.assert_awaited_once_with(input_obj)
 
-    def _decode_batch_visitor_and_inputs(self):
+    def _frontend_batch_visitor_and_inputs(self):
         config = PDSepConfig()
-        config.role_type = RoleType.DECODE
+        config.role_type = RoleType.FRONTEND
         visitor = BackendRPCServerVisitor(
             max_seq_len=self.model_config.max_seq_len,
             seq_size_per_block=64,
@@ -3209,7 +3209,7 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
         return visitor, inputs
 
     async def test_batch_enqueue_pd_uses_one_pair(self):
-        visitor, inputs = self._decode_batch_visitor_and_inputs()
+        visitor, inputs = self._frontend_batch_visitor_and_inputs()
         pair = [
             RoleAddr(role=RoleType.PREFILL, ip="prefill", http_port=10000, grpc_port=10001),
             RoleAddr(role=RoleType.DECODE, ip="decode", http_port=20000, grpc_port=20001),
@@ -3226,12 +3226,12 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
         self.assertEqual(await visitor.batch_enqueue(inputs), [])
 
     async def test_batch_enqueue_pd_empty(self):
-        visitor, _ = self._decode_batch_visitor_and_inputs()
+        visitor, _ = self._frontend_batch_visitor_and_inputs()
         self.assertEqual(await visitor.batch_enqueue([]), [])
 
     async def test_batch_enqueue_routes_each_request_for_batch_infer(self):
         pd_sep_config = PDSepConfig()
-        pd_sep_config.role_type = RoleType.PDFUSION
+        pd_sep_config.role_type = RoleType.DECODE
         visitor = BackendRPCServerVisitor(
             max_seq_len=self.model_config.max_seq_len,
             seq_size_per_block=64,

@@ -66,6 +66,7 @@ class _FakeInput:
     headers = None
     enqueued_by_master: bool = False
     prompt_length: int = 17
+    mm_inputs: list = field(default_factory=list)
 
     def __init__(
         self,
@@ -89,6 +90,7 @@ class _FakeInput:
         self.request_id = request_id
         self.token_ids = token_ids if token_ids is not None else _FakeTokenIds()
         self.headers = None
+        self.mm_inputs = []
         self.enqueued_by_master = enqueued_by_master
         self.prompt_length = prompt_length
 
@@ -291,6 +293,40 @@ class BackendRPCServerVisitorRouteIpsTest(unittest.IsolatedAsyncioTestCase):
         visitor.master_config = None
         visitor.host_service = _FakeHostService()
         visitor.backend_role_list = [RoleType.PREFILL, RoleType.DECODE]
+        route_span = _FakeRouteSpan()
+
+        async def get_master_route_addrs(route_input):
+            route_input.generate_config.role_addrs.append(
+                RoleAddr(role=RoleType.PREFILL, ip="master", http_port=1, grpc_port=2)
+            )
+            return None
+
+        async def get_domain_route_addrs(route_input):
+            route_input.generate_config.role_addrs.append(
+                RoleAddr(role=RoleType.DECODE, ip="domain", http_port=3, grpc_port=4)
+            )
+
+        visitor.get_master_route_addrs = get_master_route_addrs
+        visitor.get_domain_route_addrs = get_domain_route_addrs
+
+        with patch(
+            "rtp_llm.server.backend_rpc_server_visitor.start_internal_span",
+            return_value=route_span,
+        ), patch("rtp_llm.server.backend_rpc_server_visitor.kmonitor"):
+            await visitor.route_ips(_FakeInput())
+
+        self.assertEqual(
+            route_span.attributes["rtp_llm.route.source"],
+            "master+domain_fallback",
+        )
+
+    async def test_route_ips_text_only_does_not_require_configured_vit(self):
+        visitor = BackendRPCServerVisitor.__new__(BackendRPCServerVisitor)
+        visitor._local_prefill_addresses = []
+        visitor._mm_cache_routing = False
+        visitor.master_config = None
+        visitor.host_service = _FakeHostService()
+        visitor.backend_role_list = [RoleType.PREFILL, RoleType.DECODE, RoleType.VIT]
         route_span = _FakeRouteSpan()
 
         async def get_master_route_addrs(route_input):

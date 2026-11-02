@@ -71,12 +71,14 @@ class TestPCPAll2AllAttnOp(unittest.TestCase):
         cp_size: int,
         rank: int,
         device: torch.device = torch.device("cuda"),
+        prefix_lengths: List[int] | None = None,
     ) -> torch.Tensor:
         indices: List[int] = []
-        # Match the C++ CP planner: shuffle indices are window-relative.
-        for new_len in new_lengths:
+        # Match the C++ CP planner's absolute positions; retain padding sentinels.
+        prefixes = prefix_lengths if prefix_lengths is not None else [0] * len(new_lengths)
+        for new_len, prefix in zip(new_lengths, prefixes):
             positions = zigzag_positions_for_rank(new_len, cp_size, rank)
-            indices.extend(positions)
+            indices.extend(pos + prefix if pos >= 0 else pos for pos in positions)
         return torch.tensor(indices, dtype=torch.int32, device=device)
 
     # ---- mock builders ----
@@ -383,6 +385,7 @@ class TestPCPAll2AllAttnOp(unittest.TestCase):
                 cp_size,
                 r,
                 device=self.device,
+                prefix_lengths=prefix_lengths,
             )
             for r in range(cp_size)
         ]
@@ -500,7 +503,9 @@ class TestPCPAll2AllAttnOp(unittest.TestCase):
             [65, 131], [2, 2], 4, 16, prefix_lengths=[64, 128], device=self.device
         )
         all_shuffle = [
-            self._build_shuffle_indices([8, 8], 4, rank, device=self.device)
+            self._build_shuffle_indices(
+                [8, 8], 4, rank, device=self.device, prefix_lengths=[64, 128]
+            )
             for rank in range(4)
         ]
         inputs.context_parallel_info.prefill_shuffle_indices = all_shuffle[0]

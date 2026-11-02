@@ -132,7 +132,8 @@ class BackendRPCServerVisitor:
         self.mm_model_config = mm_model_config
         self._mm_cache_routing = (
             vit_separation == VitSeparation.VIT_SEPARATION_REMOTE
-            and getattr(pd_sep_config, "role_type", None) == RoleType.FRONTEND
+            and getattr(pd_sep_config, "role_type", None)
+            in (RoleType.FRONTEND, RoleType.PREFILL)
             and mm_model_config is not None
         )
         self.source_ip = str(getattr(server_config, "ip", "") or "")
@@ -812,7 +813,14 @@ class BackendRPCServerVisitor:
                         )
                     )
                     final_roles.add(RoleType.PREFILL)
-            missing_roles = [role for role in self.backend_role_list if role not in final_roles]
+            needs_vit = bool(input.mm_inputs) or bool(
+                getattr(getattr(input, "v41_inputs", None), "images", None)
+            )
+            missing_roles = [
+                role
+                for role in self.backend_role_list
+                if role not in final_roles and (role != RoleType.VIT or needs_vit)
+            ]
             if not input.generate_config.role_addrs or missing_roles:
                 route_error = FtRuntimeException(
                     ExceptionType.ROUTE_ERROR,
