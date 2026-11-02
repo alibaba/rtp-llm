@@ -1238,6 +1238,17 @@ class MixedFrontendBatchTest(unittest.IsolatedAsyncioTestCase):
         visitor.model_rpc_client = SimpleNamespace(batch_enqueue=AsyncMock(return_value=["result"]))
         return visitor
 
+    async def test_pdfusion_batch_keeps_local_execution_without_per_item_master_routes(self):
+        visitor = self.make_visitor()
+        visitor.pd_sep_config.role_type = RoleType.PDFUSION
+        visitor.host_service.service_available = True
+        inputs = [_FakeRouteInput(), _FakeRouteInput()]
+        result = await visitor.batch_enqueue(inputs)
+        self.assertEqual(result, ["result"])
+        visitor.route_ips.assert_not_awaited()
+        visitor.host_service.get_backend_role_addrs.assert_not_called()
+        visitor.model_rpc_client.batch_enqueue.assert_awaited_once_with(inputs)
+
     async def test_mixed_frontend_resolves_pdfusion_without_master_enqueue(self):
         visitor = self.make_visitor()
         fusion = RoleAddr(role=RoleType.PDFUSION, ip="fusion", http_port=9000, grpc_port=9001)

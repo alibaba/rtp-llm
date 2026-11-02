@@ -38,6 +38,33 @@ py_test(
     ],
 )
 
+
+py_test(
+    name = "openai_comparer_test",
+    srcs = glob(
+        ["*.py", "test/openai_comparer_test.py"],
+        exclude = ["entry.py"],
+    ),
+    main = "test/openai_comparer_test.py",
+    imports = [".."],
+    deps = [
+        "//rtp_llm/test/utils:device_resource",
+        "//rtp_llm/test/utils:maga_server_manager",
+        "//rtp_llm/test/utils:test_util",
+        "//rtp_llm:dashscope",
+        "//rtp_llm:fastapi",
+        "//rtp_llm:jieba",
+        "//rtp_llm:json5",
+        "//rtp_llm:openai",
+        "//rtp_llm:partial_json_parser",
+        "//rtp_llm:psutil",
+        "//rtp_llm:pydantic",
+        "//rtp_llm:testlib",
+        "//rtp_llm:tiktoken",
+        "//rtp_llm:uvicorn",
+    ],
+)
+
 py_test(
     name = "dash_cancel_state_test",
     srcs = [
