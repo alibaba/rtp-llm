@@ -1,5 +1,6 @@
 package org.flexlb.service.grpc;
 
+import org.flexlb.config.CacheMatchConfiguration;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.EngineGrpcClient;
@@ -17,9 +18,12 @@ public class EngineGrpcService {
     private static final Logger logger = LoggerFactory.getLogger("syncLogger");
 
     private final EngineGrpcClient engineGrpcClient;
+    private final CacheMatchConfiguration cacheConfiguration;
 
-    public EngineGrpcService(EngineGrpcClient engineGrpcClient) {
+    public EngineGrpcService(EngineGrpcClient engineGrpcClient,
+                             CacheMatchConfiguration cacheConfiguration) {
         this.engineGrpcClient = engineGrpcClient;
+        this.cacheConfiguration = cacheConfiguration;
     }
 
     public CompletableFuture<EngineRpcService.WorkerStatusPB> getWorkerStatusAsync(
@@ -39,7 +43,8 @@ public class EngineGrpcService {
     public CompletableFuture<EngineRpcService.CacheStatusPB> getCacheStatusAsync(
             String ip, int grpcPort, WorkerStatus workerStatus, long cacheVersion,
             long requestTimeoutMs, RoleType roleType) {
-        boolean needCacheKeys = workerStatus.getRole().requiresCacheKeys();
+        boolean needCacheKeys = workerStatus.getRole().requiresCacheKeys()
+                && (RoleType.VIT.equals(roleType) || !cacheConfiguration.isKvcmEnabled());
         EngineRpcService.CacheVersionPB request = EngineRpcService.CacheVersionPB.newBuilder()
                 .setLatestCacheVersion((int) cacheVersion)
                 .setNeedCacheKeys(needCacheKeys)

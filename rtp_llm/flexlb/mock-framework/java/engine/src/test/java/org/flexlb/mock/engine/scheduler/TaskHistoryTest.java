@@ -7,7 +7,7 @@ import static org.junit.jupiter.api.Assertions.*;
 
 class TaskHistoryTest {
     private static EngineScheduler.Task task(long id) {
-        return new EngineScheduler.Task(id, 0, 1, 0, 0, EngineScheduler.ReportedPhase.RECEIVED, 0, 0, 0, -1, null);
+        return new EngineScheduler.Task(id, 0, 1, 0, 0, EngineScheduler.ReportedPhase.RECEIVED, 0, 0, 0, -1, null, false);
     }
     @Test void laggingReadersKeepCurrentStateAndReceiveExplicitGapEvidence() {
         var history = new TaskHistory();

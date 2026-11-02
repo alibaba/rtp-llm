@@ -10,9 +10,9 @@
    <exclusions><exclusion><groupId>*</groupId><artifactId>*</artifactId></exclusion></exclusions></dependency>
 <!-- Native CacheStatusPB uses the primitive cache map from flexlb-common. -->
 <dependency><groupId>it.unimi.dsi</groupId><artifactId>fastutil</artifactId><version>8.5.15</version></dependency>
-<dependency><groupId>io.grpc</groupId><artifactId>grpc-netty</artifactId><version>1.65.0</version></dependency>
-<dependency><groupId>io.grpc</groupId><artifactId>grpc-protobuf</artifactId><version>1.65.0</version></dependency>
-<dependency><groupId>io.grpc</groupId><artifactId>grpc-stub</artifactId><version>1.65.0</version></dependency>
+<dependency><groupId>io.grpc</groupId><artifactId>grpc-netty</artifactId><version>1.65.1</version></dependency>
+<dependency><groupId>io.grpc</groupId><artifactId>grpc-protobuf</artifactId><version>1.65.1</version></dependency>
+<dependency><groupId>io.grpc</groupId><artifactId>grpc-stub</artifactId><version>1.65.1</version></dependency>
 <dependency><groupId>com.google.protobuf</groupId><artifactId>protobuf-java</artifactId><version>3.25.1</version></dependency>
 <dependency><groupId>org.flexlb</groupId><artifactId>flexlb-common</artifactId><version>1.0.0-SNAPSHOT</version>
       <exclusions><exclusion><groupId>*</groupId><artifactId>*</artifactId></exclusion></exclusions>

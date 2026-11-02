@@ -615,7 +615,7 @@ class WorkerBatcherSchedulingTest {
                 0L,
                 1_000_000L,
                 0L,
-                0L);
+                0L, 0L, 0, 0);
     }
 
     private static void await(CountDownLatch latch) {
