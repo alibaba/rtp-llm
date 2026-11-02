@@ -22,8 +22,8 @@ class RtpSchedulerTest {
     private RtpConfig config(String role, String expression, int batchSize, int tokenBudget) throws Exception {
         var json = new ObjectMapper(); ObjectNode root = json.valueToTree(RtpNodeTest.configuration(role));
         var config = (ObjectNode) root.path("component").path("config");
-        config.put("seq_size_per_block", 2).put("max_generate_batch_size", batchSize).put("max_batch_tokens_size", tokenBudget);
-        ((ObjectNode) config.path("compute").path("forward")).put("expression", expression);
+        config.put("seq_size_per_block", 2).put("concurrency_limit", batchSize).put("max_batch_tokens_size", tokenBudget);
+        ((ObjectNode) config.path("mock.compute").path("forward")).put("expression", expression);
         var path = directory.resolve(role + ".json"); json.writeValue(path.toFile(), root); return RtpConfig.load(path);
     }
     private static Scheduler.Input input(long id, boolean retained) {
@@ -285,7 +285,7 @@ class RtpSchedulerTest {
             var json = new ObjectMapper(); ObjectNode root = json.valueToTree(RtpNodeTest.configuration("decode"));
             var settings = (ObjectNode) root.path("component").path("config");
             settings.put("seq_size_per_block", 128);
-            ((ObjectNode) settings.path("compute")).putObject("decode").put("draft_tokens", 4).put("acceptance_rate", 0);
+            ((ObjectNode) settings.path("mock.compute")).putObject("decode").put("draft.tokens", 4).put("acceptance.rate", 0);
             var path = directory.resolve("spec-" + capacity + ".json"); json.writeValue(path.toFile(), root);
             var config = RtpConfig.load(path);
             try (var cache = new KvCache(config.blockSize(), capacity, 0, KvCache.EvictionPolicy.LRU)) {

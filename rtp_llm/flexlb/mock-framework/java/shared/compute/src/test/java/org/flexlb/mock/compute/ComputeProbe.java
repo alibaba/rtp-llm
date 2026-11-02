@@ -14,7 +14,13 @@ public final class ComputeProbe {
         var root = new ObjectMapper().enable(JsonParser.Feature.STRICT_DUPLICATE_DETECTION)
             .enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS).readTree(Path.of(args[0]).toFile());
         if (root.path("environment").has("compute")) throw new IllegalArgumentException("Compute belongs in component.config");
-        var models = ComputeModel.fromJson(root.path("component").path("config").path("compute"));
+        var settings = new ObjectMapper().createObjectNode();
+        var config = root.path("component").path("config");
+        for (String key : ComputeModel.settingNames()) {
+            var value = config.at("/" + key.replace('.', '/'));
+            if (!value.isMissingNode()) settings.set(key, value);
+        }
+        var models = ComputeModel.fromSettings(settings, Map.of());
         var request = new ForwardBatch.Request("request", 10, 2, 32, 0, 8, 0, List.of());
         var batch = new ForwardBatch("batch", List.of(new ForwardBatch.Partition(0, List.of(request))));
         var sample = models.plan(Role.prefill, "prefill-0", batch);

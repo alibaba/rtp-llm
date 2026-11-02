@@ -19,8 +19,8 @@ class VitTest {
     VitConfig config(String expression,long device,long host,long hashes,int wait) throws Exception {
         var path=directory.resolve(UUID.randomUUID()+".json");
         new ObjectMapper().writeValue(path.toFile(),Map.of("id","vit-0","component_role","vit","component",Map.of("config",Map.of(
-            "hidden_size",4,"mm_cache_gpu_max_bytes",device,"mm_cache_cpu_max_bytes",host,"mm_hash_key_cache_max_bytes",hashes,
-            "gpu_batch_wait_ms",wait,"compute",Map.of("forward",Map.of("expression",expression))))));
+            "mock.vit.hidden.size",4,"mm_cache_gpu_max_bytes",device,"mm_cache_cpu_max_bytes",host,"mm_hash_key_cache_max_bytes",hashes,
+            "gpu_max_batch_size",8,"gpu_batch_wait_ms",wait,"mock.compute",Map.of("forward",Map.of("expression",expression))))));
         return VitConfig.load(path);
     }
     static MultimodalInputsPB input(String key) {
@@ -119,7 +119,7 @@ class VitTest {
     @Test void queueOverflowFailsClaimsAndStopEndsEveryOutstandingWaiter() throws Exception {
         var path=directory.resolve("bounded.json");
         new ObjectMapper().writeValue(path.toFile(),Map.of("id","vit-0","component_role","vit","component",Map.of("config",Map.of(
-            "gpu_max_batch_size",1,"mm_max_queue_size",1,"compute",Map.of("forward",Map.of("expression","1000"))))));
+            "gpu_max_batch_size",1,"mm_max_queue_size",1,"mock.compute",Map.of("forward",Map.of("expression","1000"))))));
         var config=VitConfig.load(path);
         try(var cache=new VitCache(config);var scheduler=new VitScheduler(config,cache)) {
             var first=cache.acquire(new VitGeometry.Image("a",28,28,1));scheduler.submit(List.of(first));
@@ -170,7 +170,7 @@ class VitTest {
         var config=config("1",16,16,1024,0);
         var path=directory.resolve("backend.json");
         new ObjectMapper().writeValue(path.toFile(),Map.of("id","vit-0","component_role","vit",
-            "component",Map.of("engine","rtp","config",Map.of("compute",Map.of("forward",Map.of("expression","1"))))));
+            "component",Map.of("engine","rtp","config",Map.of("mock.compute",Map.of("forward",Map.of("expression","1"))))));
         assertTrue(assertThrows(IllegalArgumentException.class,()->VitConfig.load(path)).getMessage().contains("shared implementation"));
         assertEquals("vit",config.effective().path("role").asText());
     }

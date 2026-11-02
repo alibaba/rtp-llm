@@ -1,8 +1,8 @@
 package org.flexlb.mock.engine.rtp;
 
 import org.flexlb.mock.admission.AdmissionConfig;
+import org.flexlb.mock.runtime.EngineConfig;
 
-import com.fasterxml.jackson.core.JsonParser;
 import com.fasterxml.jackson.databind.*;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.io.IOException;
@@ -21,9 +21,7 @@ public record RtpConfig(String id, Role role, int blockSize, int deviceBlocks, i
                         int maxGenerateBatchSize, int maxInitedKvStreams, int maxUncachedBatchTokens, int cpSize, boolean cpEnabled, int tpSize, int dpSize,
                         JsonNode business, ComputeModel compute) {
     public static final int REQUEST_LIMIT = 1024;
-    private static final ObjectMapper JSON = new ObjectMapper()
-        .enable(JsonParser.Feature.STRICT_DUPLICATE_DETECTION)
-        .enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS);
+    private static final ObjectMapper JSON = new ObjectMapper();
 
     public RtpConfig {
         if (id == null || id.isBlank() || (role != Role.prefill && role != Role.decode)
@@ -38,7 +36,17 @@ public record RtpConfig(String id, Role role, int blockSize, int deviceBlocks, i
     @Override public JsonNode business() { return business.deepCopy(); }
 
     public static RtpConfig load(Path path) throws IOException {
-        JsonNode root = JSON.readTree(path.toFile());
+        return load(EngineConfig.read(path));
+    }
+
+    public static RtpConfig fromEnvironment(String id, Role role, Map<String, String> env) throws IOException {
+        var root = JSON.createObjectNode().put("id", id).put("component_role", role.name());
+        var component = root.putObject("component").put("engine", "rtp");
+        component.set("config", EngineConfig.environment(env, RtpSettings.environmentNames(role), RtpSettings.mockNames()));
+        return load(root);
+    }
+
+    public static RtpConfig load(JsonNode root) throws IOException {
         String component = root.path("component_role").asText();
         Role role;
         try { role = Role.valueOf(component); } catch (RuntimeException error) { throw new IllegalArgumentException("Missing/invalid RTP component role", error); }
@@ -49,32 +57,28 @@ public record RtpConfig(String id, Role role, int blockSize, int deviceBlocks, i
         if (config.has("capacity") || config.has("capacity.device_blocks") || config.has("capacity.reserve_blocks"))
             throw new IllegalArgumentException("Removed Mock capacity settings: use test_block_num and reserve_block_ratio");
         config = RtpSettings.normalize(config, role);
-        var pending = RtpSettings.pending(config);
         // Native pools reserve block zero; test_block_num counts that physical block too.
         int blocks = nativeInt(config, "test_block_num", null, 2, Integer.MAX_VALUE) - 1;
         int ratio = nativeInt(config, "reserve_block_ratio", 5, 0, 100);
         int reserve = (int) ((long) blocks * ratio / 100);
-        for (String tier : List.of("enable_disk_cache", "enable_remote_cache"))
-            if (nativeBool(config, tier, false)) throw new IllegalArgumentException(tier + " is not connected in the RTP Mock yet");
         var policy = policy(config, "device_eviction_policy");
         var hostPolicy = policy(config, "memory_eviction_policy");
         boolean hostEnabled = nativeBool(config, "enable_memory_cache", false);
-        int hostBlocks = config.has("memory_cache_blocks")
-            ? nativeInt(config, "memory_cache_blocks", null, 1, Integer.MAX_VALUE) : 0;
-        if (hostEnabled && hostBlocks == 0) throw new IllegalArgumentException("enable_memory_cache requires memory_cache_blocks");
-        int cpSize = nativeInt(config, "cp_size", 1, 1, Integer.MAX_VALUE);
+        int hostBlocks = config.has("mock.cache.memory.blocks")
+            ? nativeInt(config, "mock.cache.memory.blocks", null, 0, Integer.MAX_VALUE) : 0;
+        if (hostEnabled && hostBlocks == 0) throw new IllegalArgumentException("enable_memory_cache requires mock.cache.memory.blocks");
         int tpSize = nativeInt(config, "tp_size", 1, 1, Integer.MAX_VALUE);
         int dpSize = nativeInt(config, "dp_size", 1, 1, Integer.MAX_VALUE);
-        boolean cpEnabled = nativeBool(config, "cp_enabled", false);
-        if (dpSize != 1 || nativeInt(config, "dp_rank", 0, 0, Integer.MAX_VALUE) != 0)
-            throw new IllegalArgumentException("RTP node currently supports dp_size=1, dp_rank=0 only");
+        String cpMethod = cpMethod(config);
+        // PrefillCPConfig.is_enabled(): general CP uses the TP group.
+        boolean cpEnabled = Set.of("ALL_GATHER", "ALL_GATHER_WITH_OVERLAP", "ALLTOALL").contains(cpMethod);
+        int cpSize = cpEnabled ? tpSize : 1;
         if (root.path("environment").has("compute")) throw new IllegalArgumentException("Removed environment.compute: use component.config.compute");
-        var compute = ComputeModel.fromJson(config.path("compute"), Map.of(
+        var compute = ComputeModel.fromSettings(config, Map.of(
             "cpSize", (double) cpSize, "cpEnabled", cpEnabled ? 1.0 : 0.0, "tpSize", (double) tpSize, "dpSize", (double) dpSize));
         if (role == Role.prefill && !compute.configuration().decode().equals(new DecodeSpec(null, null, null, null)))
             throw new IllegalArgumentException("Decode progress settings belong in Decode compute");
         if (!root.path("id").isTextual()) throw new IllegalArgumentException("Node id must be a string");
-        if (!pending.isEmpty()) System.err.println("RTP " + root.path("id").asText() + " settings pending implementation (not effective): " + pending);
         return new RtpConfig(root.path("id").textValue(), role,
             nativeInt(config, "seq_size_per_block", null, 1, Integer.MAX_VALUE), blocks, reserve, policy,
             nativeBool(config, "reuse_cache", false), nativeBool(config, "enable_device_cache", true),
@@ -82,7 +86,7 @@ public record RtpConfig(String id, Role role, int blockSize, int deviceBlocks, i
             nativeBool(config, "disable_decode_first_malloc_device_reuse", false),
             nativeInt(config, "max_seq_len", null, 1, Integer.MAX_VALUE),
             nativeInt(config, "max_batch_tokens_size", 0, 0, Integer.MAX_VALUE),
-            nativeInt(config, "max_generate_batch_size", 1, 1, REQUEST_LIMIT),
+            nativeInt(config, "concurrency_limit", 32, 1, REQUEST_LIMIT),
             nativeInt(config, "max_inited_kv_cache_streams", 0, 0, Integer.MAX_VALUE),
             nativeInt(config, "max_batch_tokens_without_cache", 0, 0, Integer.MAX_VALUE),
             cpSize, cpEnabled, tpSize, dpSize,
@@ -102,20 +106,28 @@ public record RtpConfig(String id, Role role, int blockSize, int deviceBlocks, i
             .put("reuse_cache", reuseCache).put("enable_device_cache", deviceCache)
             .put("disable_decode_first_malloc_device_reuse", disableDecodeFirstReuse)
             .put("max_seq_len", maxSeqLen).put("max_batch_tokens_size", maxBatchTokens)
-            .put("dp_size", dpSize).put("dp_rank", 0).put("tp_size", tpSize).put("cp_size", cpSize).put("cp_enabled", cpEnabled)
-            .put("enable_memory_cache", hostBlocks > 0).put("memory_cache_blocks", hostBlocks)
+            .put("dp_size", dpSize).put("tp_size", tpSize).put("cp_rotate_method", cpMethod(business))
+            .put("enable_memory_cache", hostBlocks > 0).put("mock.cache.memory.blocks", hostBlocks)
             .put("memory_eviction_policy", hostPolicy.name().toLowerCase(Locale.ROOT))
             .put("block_tree_device_evict_low_watermark_ratio", deviceWatermark.low())
             .put("block_tree_device_evict_high_watermark_ratio", deviceWatermark.high())
             .put("block_tree_memory_evict_low_watermark_ratio", hostWatermark.low())
-            .put("block_tree_memory_evict_high_watermark_ratio", hostWatermark.high())
-            .put("enable_disk_cache", false).put("enable_remote_cache", false);
-        if (role == Role.prefill) { result.remove("load_cache_timeout_ms"); result.put("prefill_retry_times", 0);
+            .put("block_tree_memory_evict_high_watermark_ratio", hostWatermark.high());
+        if (role == Role.prefill) {
             result.put("max_inited_kv_cache_streams", maxInitedKvStreams).put("max_batch_tokens_without_cache", maxUncachedBatchTokens); }
-        result.put("max_generate_batch_size", maxGenerateBatchSize).put("local_request_limit", REQUEST_LIMIT);
-        result.set("requested_config", business()); result.set("pending_config", RtpSettings.pending(business));
-        result.set("compute", compute.effectiveConfiguration());
+        result.put("concurrency_limit", maxGenerateBatchSize);
+        result.setAll((ObjectNode) compute.effectiveSettings());
         return result;
+    }
+
+    private static String cpMethod(JsonNode config) {
+        var value = config.get("cp_rotate_method");
+        if (value == null) return "DISABLED";
+        if (value.isTextual()) {
+            String method = value.textValue().toUpperCase(Locale.ROOT);
+            if (Set.of("DISABLED", "UNKNOWN", "ALL_GATHER", "ALL_GATHER_WITH_OVERLAP", "ALLTOALL", "PREFILL_CP").contains(method)) return method;
+        }
+        throw new IllegalArgumentException("Invalid cp_rotate_method");
     }
 
     private static EvictionPolicy policy(JsonNode config, String key) {

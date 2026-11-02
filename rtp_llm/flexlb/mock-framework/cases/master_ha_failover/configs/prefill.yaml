@@ -1,19 +1,18 @@
 max_seq_len: 1048576
-cp_size: 4
-cp_enabled: true
+cp_rotate_method: ALL_GATHER
 tp_size: 4
 dp_size: 1
 seq_size_per_block: 512
 reuse_cache: false
 enable_device_cache: true
-# host cache 尚未接通，当前 Case 只启用 device cache。
+# 本 Case 关闭 Host cache。
 enable_memory_cache: false
 enable_disk_cache: false
 reserve_block_ratio: 1
 enable_remote_cache: false
 device_eviction_policy: lru
 memory_eviction_policy: lru
-# 待实现的背压/驱逐参数仅进入 pending_config，不作为当前生效能力。
+# 异步队列背压未模拟，以下 real 参数忽略。
 block_tree_business_queue_max_size: 10000
 block_tree_transfer_queue_max_size: 10000
 memory_cache_sync_timeout_ms: 10000
@@ -21,19 +20,19 @@ block_tree_device_evict_low_watermark_ratio: 0.82
 block_tree_device_evict_high_watermark_ratio: 0.9
 block_tree_memory_evict_low_watermark_ratio: 0.9
 block_tree_memory_evict_high_watermark_ratio: 0.94
-max_generate_batch_size: 64
+concurrency_limit: 64
 max_batch_tokens_size: 512000
-# 待实现的准入限制保留原值，不能据此宣称已对齐原调度行为。
+# P 普通队列的未缓存 token 配额和初始化 KV 数量上限。
 max_batch_tokens_without_cache: 50000
 max_inited_kv_cache_streams: 128
 prefill_retry_times: 0
 prefill_max_wait_timeout_ms: 600000
 max_rpc_timeout_ms: 7200000
 test_block_num: 21554
-# 原 preset 的显式 Host 块容量；Host 组件接线留待后续实现。
-memory_cache_blocks: 52295
+# Host 逻辑块预算，仅 enable_memory_cache=true 时使用。
+mock.cache.memory.blocks: 52295
 # 原 DSv4 legacy_unverified 校准公式；DeepSeek preset 的 1.23 倍率直接乘入公式，不启用噪声。
-compute:
+mock.compute:
   forward:
     expression: 1.23 * (max(196, -68.612174288157 + 0.993068319341 * (max(0, 287.3980926717 + 2.30134977837751 * batchSize + 0.158123254797307
       * sum(hitCacheTokens / 1024.) + 0.575522710053703 * sum(computeTokens / 1024.) + 0.0517623430739831 * sum(computeTokens

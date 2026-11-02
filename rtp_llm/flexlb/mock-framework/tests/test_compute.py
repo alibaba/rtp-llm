@@ -19,7 +19,7 @@ def test_top_level_compute_is_rejected(case_data, compile_data):
 
 def test_python_compile_to_java_formula_noise_and_timer(case_data, compile_data, tmp_path):
     case_data['environment']['prefill']['config'].update({
-        'compute.forward.expression': '2 * (param(baseMs, 1) + 0.5*totalComputeTokens)',
+        'mock.compute.forward.expression': '2 * (param(baseMs, 1) + 0.5*totalComputeTokens)',
     })
     compiled = compile_data(case_data)
     config = tmp_path / 'component.json'

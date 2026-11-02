@@ -30,13 +30,13 @@ class EngineHostTest {
     private void config(String id, String role) throws Exception {
         var json = new ObjectMapper(); ObjectNode value = json.valueToTree(configuration(role));
         value.put("id", id);
-        ((ObjectNode)value.path("component").path("config").path("compute").path("forward")).put("expression", "1000");
+        ((ObjectNode)value.path("component").path("config").path("mock.compute").path("forward")).put("expression", "1000");
         var path = directory.resolve(id); Files.createDirectory(path);
         json.writeValue(path.resolve("config.json").toFile(), value);
     }
     static Map<String,Object> configuration(String role) {
         return Map.of("id",role+"-0","component_role",role,"component",Map.of("engine","rtp","config",Map.of("seq_size_per_block",16,
-            "max_seq_len",4096,"test_block_num",9,"reserve_block_ratio",0,"compute",Map.of("forward",Map.of("expression","1 + batchSize")))),"environment",Map.of());
+            "max_seq_len",4096,"test_block_num",9,"reserve_block_ratio",0,"mock.compute",Map.of("forward",Map.of("expression","1 + batchSize")))),"environment",Map.of());
     }
     @Test void stoppingOneObjectPreservesOtherInstancesAndDoesNotReuseAnIdentity() throws Exception {
         config("prefill-0", "prefill"); config("decode-0", "decode"); config("prefill-1", "prefill");

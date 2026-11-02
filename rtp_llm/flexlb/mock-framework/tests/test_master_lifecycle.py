@@ -185,7 +185,7 @@ def test_real_master_replacement_with_uninterrupted_client_plan(tmp_path, batche
         native['scheduler']['decision'] = {'type': 'FIXED_WINDOW', 'maxRequests': 2, 'maxCollectionWaitMs': 20}
         config['FLEXLB_CONFIG'] = json.dumps(native)
     engine = {'engine': 'rtp', 'config': {'seq_size_per_block': 16, 'test_block_num': 256,
-        'reserve_block_ratio': 0, 'max_seq_len': 4096, 'compute.forward.expression': '1 + batchSize'}}
+        'reserve_block_ratio': 0, 'max_seq_len': 4096, 'mock.compute.forward.expression': '1 + batchSize'}}
     from helpers.input import write_inputs, pb
     source = tmp_path / 'traffic.binpb.zst'
     write_inputs(source, (pb.Request(token_ids=[1, 2, 3], max_new_tokens=3) for _ in range(800)))
@@ -279,7 +279,7 @@ def test_native_restart_preserves_address_and_refreshes_only_current_discovery(t
     config['FLEXLB_CONFIG'] = json.dumps(json.loads(config['FLEXLB_CONFIG']) | {
         'grpcServer': {'shutdownQuietPeriodMs': 5000}})
     engine = {'engine': 'rtp', 'config': {'seq_size_per_block': 16, 'test_block_num': 256,
-        'max_seq_len': 4096, 'compute.forward.expression': '1'}}
+        'max_seq_len': 4096, 'mock.compute.forward.expression': '1'}}
     document = dict(id='restart', describe='Native restart and current discovery',
         environment={'master': {'config': config}, 'prefill': engine, 'decode': engine},
         phases=[dict(id='lifecycle', describe='restart', timeout='120s', steps=[

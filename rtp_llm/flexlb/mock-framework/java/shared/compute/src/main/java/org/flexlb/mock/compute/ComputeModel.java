@@ -60,6 +60,50 @@ public final class ComputeModel {
         return new ComputeModel(JSON.treeToValue(node, ComputeSpec.class), constants);
     }
 
+    private static final Map<String, String> SETTINGS = Map.ofEntries(
+        Map.entry("forward.expression", "forward.expression"),
+        Map.entry("forward.noise.stddev.ms", "forward.noise.stddev_ms"),
+        Map.entry("forward.noise.stddev.ratio", "forward.noise.stddev_ratio"),
+        Map.entry("forward.noise.max.deviation.ms", "forward.noise.max_deviation_ms"),
+        Map.entry("forward.noise.seed", "forward.noise.seed"),
+        Map.entry("decode.draft.tokens", "decode.draft_tokens"),
+        Map.entry("decode.acceptance.rate", "decode.acceptance_rate"),
+        Map.entry("decode.tokens.per.step", "decode.tokens_per_step"),
+        Map.entry("decode.seed", "decode.seed"),
+        Map.entry("eos.probability", "eos.probability"),
+        Map.entry("eos.seed", "eos.seed"));
+
+    public static Set<String> settingNames() {
+        var names = new HashSet<String>();
+        SETTINGS.keySet().forEach(key -> names.add("mock.compute." + key));
+        return Set.copyOf(names);
+    }
+
+    /** Input is normalized by the component; ENV strings share the record validators. */
+    public static ComputeModel fromSettings(JsonNode settings, Map<String, Double> constants) throws IOException {
+        var spec = JSON.createObjectNode();
+        for (var entry : SETTINGS.entrySet()) {
+            var value = settings.get("mock.compute." + entry.getKey());
+            if (value == null) continue;
+            if (value.isTextual() && !entry.getKey().equals("forward.expression")) {
+                value = JSON.readTree(value.textValue());
+                if (value == null || !value.isNumber()) throw new IllegalArgumentException("Expected number: mock.compute." + entry.getKey());
+            }
+            String[] path = entry.getValue().split("\\.");
+            var target = spec;
+            for (int index = 0; index < path.length - 1; index++) target = target.withObject("/" + path[index]);
+            target.set(path[path.length - 1], value);
+        }
+        return fromJson(spec, constants);
+    }
+
+    public JsonNode effectiveSettings() {
+        var result = JSON.createObjectNode();
+        var spec = effectiveConfiguration();
+        SETTINGS.forEach((key, path) -> result.set("mock.compute." + key, spec.at("/" + path.replace('.', '/'))));
+        return result;
+    }
+
     public int kvReserveTokens() { return decode.reserveTokens(); }
 
     public ComputeSpec configuration() { return configuration; }

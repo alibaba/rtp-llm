@@ -26,7 +26,7 @@ class LocalPrefillTest {
     RtpConfig config(String expression) throws Exception {
         var json = new ObjectMapper(); ObjectNode root = json.valueToTree(RtpNodeTest.configuration("prefill"));
         ((ObjectNode) root.path("component").path("config")).put("seq_size_per_block", 2).put("reuse_cache", true);
-        ((ObjectNode) root.path("component").path("config").path("compute").path("forward")).put("expression", expression);
+        ((ObjectNode) root.path("component").path("config").path("mock.compute").path("forward")).put("expression", expression);
         var path = directory.resolve("config.json"); json.writeValue(path.toFile(), root); return RtpConfig.load(path);
     }
 
@@ -200,7 +200,7 @@ class LocalPrefillTest {
         var json = new ObjectMapper(); ObjectNode root = json.valueToTree(RtpNodeTest.configuration("prefill"));
         var settings = (ObjectNode) root.path("component").path("config");
         settings.put("seq_size_per_block", 2).put("reuse_cache", true).put("enable_device_cache", false)
-            .put("enable_memory_cache", true).put("memory_cache_blocks", 8);
+            .put("enable_memory_cache", true).put("mock.cache.memory.blocks", 8);
         var path = directory.resolve("host.json"); json.writeValue(path.toFile(), root); var config = RtpConfig.load(path);
         try (var cache = new KvCache(config.blockSize(), 8, 0, KvCache.EvictionPolicy.LRU, false, 8, KvCache.EvictionPolicy.LRU, null, null);
              var engine = new LocalPrefill(config.endpoint(), cache, RtpScheduler.factory(config))) {

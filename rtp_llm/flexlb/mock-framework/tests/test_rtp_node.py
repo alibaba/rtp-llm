@@ -31,7 +31,7 @@ def test_runner_starts_isolated_packaged_rtp_nodes_and_native_client_reads_them(
     environment = {role: {'engine': 'rtp', 'config': {'SEQ_SIZE_PER_BLOCK': '16', 'MAX_SEQ_LEN': '4096',
                     'TEST_BLOCK_NUM': '9', 'RESERVE_BLOCK_RATIO': '0'}} for role in ('prefill', 'decode')}
     for group in environment.values():
-        group['config']['compute.forward.expression'] = '1 + batchSize'
+        group['config']['mock.compute.forward.expression'] = '1 + batchSize'
     data = {'id': 'native_node_probe', 'describe': '仅验证节点启动及原生状态协议', 'environment': environment,
             'phases': [{'id': 'observe', 'describe': '测试客户端在此期间读取原生状态', 'timeout': '15s',
                         'steps': [{'id': 'addresses', 'describe': '检查发现地址后保留节点供测试客户端读取',
@@ -114,7 +114,8 @@ def test_runner_starts_isolated_packaged_rtp_nodes_and_native_client_reads_them(
                 assert len(native_blocks) == 1 and float(native_blocks[0].rsplit(' ', 1)[1]) == 8
                 assert 'mock_engine_' not in metrics
                 effective = json.loads((directory / 'effective-config.json').read_text())
-                assert 'scale' not in effective['compute']['forward']['noise']
+                assert effective['mock.compute.forward.noise.stddev.ms'] == 0
+                assert effective['mock.compute.forward.noise.stddev.ratio'] == 0
             assert (await task)['status'] == 'PASS'
         finally:
             if not task.done():
