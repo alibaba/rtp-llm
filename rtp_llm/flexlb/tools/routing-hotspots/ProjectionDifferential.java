@@ -101,7 +101,7 @@ public class ProjectionDifferential {
             for (var policy : List.of(batchPolicy, routePolicy)) {
                 var candidate = RouteProjection.project(inputs, probe, model, policy);
                 add(digest, candidate);
-                states.merge(candidate.state().name(), 1, Integer::sum);
+                states.merge(candidate.detail(), 1, Integer::sum);
             }
         }
         System.out.println(
