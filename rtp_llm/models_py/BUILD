@@ -122,7 +122,7 @@ filegroup(
 
 py_library(
     name = "modules",
-    srcs = glob([
+    srcs = ["mla_routes.py"] + glob([
         "modules/*.py",
         "modules/**/*.py",
     ]),
@@ -143,7 +143,7 @@ py_library(
         "//rtp_llm/models_py/distributed:user_buffers",
     ] + select({
         # cuda13 locks ship flashinfer-python and deep-ep.
-        "@//:using_cuda13_x86": flashinfer + deep + ["//rtp_llm:nvidia-cutlass-dsl"],
+        "@//:using_cuda13_x86": flashinfer + deep + ["//rtp_llm:nvidia-cutlass-dsl", "//rtp_llm:cuda-linear-attention", "@k31_native_mqa//:mqa"],
         "@//:using_cuda13_arm": flashinfer + deep + ["//rtp_llm:nvidia-cutlass-dsl"],
         "@//:using_cuda12": flashinfer + deep,
         "@//:using_ppu": deep,

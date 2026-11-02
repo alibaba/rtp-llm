@@ -273,3 +273,19 @@ class KimiK3LoadFp8Weight(LoadQuantPerBlockFp8Weight):
         result[self.kernel.name] = weight
         result[self.scale.name] = scale
         return result
+
+
+class KimiK31LoadIndexerFp8Weight(KimiK3LoadFp8Weight):
+    """Reuse K3 static block quantization; retain all replicated Indexer heads."""
+
+    w8a8_weight_list = {
+        W.mla_indexer_qb_w: W.mla_indexer_qb_s,
+        W.mla_indexer_k_w: W.mla_indexer_k_s,
+    }
+
+    def _split(self, tensor, load_config):
+        self.tp_ranges = {"axis": 0, "parallel": "replicated",
+                          "replicated": [(0, tensor[self.kernel.name].shape[0])]}
+        # Own exact quantized storage independently of loader staging.
+        return {name: value.clone(memory_format=torch.contiguous_format)
+                for name, value in tensor.items()}

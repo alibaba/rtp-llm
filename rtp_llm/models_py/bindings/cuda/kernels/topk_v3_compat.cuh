@@ -25,6 +25,9 @@ SGL_DEVICE To cast(const From& value) {
     } else if constexpr (std::is_same_v<To, float> &&
                          std::is_same_v<From, fp16_t>) {
         return __half2float(value);
+    } else if constexpr (std::is_same_v<To, float2> &&
+                         std::is_same_v<From, __half2>) {
+        return __half22float2(value);
     } else {
         return static_cast<To>(value);
     }

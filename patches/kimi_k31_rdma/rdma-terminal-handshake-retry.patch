@@ -1,0 +1,133 @@
+--- a/internal_source/rtp_llm/cpp/disaggregate/cache_store/RdmaClientHostConnections.cpp
++++ b/internal_source/rtp_llm/cpp/disaggregate/cache_store/RdmaClientHostConnections.cpp
+@@ -4,10 +4,50 @@
+ #include "autil/EnvUtil.h"
+ 
+ #include <unistd.h>
++#include <algorithm>
++#include <atomic>
++#include <chrono>
++#include <thread>
+ 
+ #include "rtp_llm/cpp/utils/Logger.h"
+ 
+ namespace rtp_llm {
++
++namespace {
++struct InitialHandshakeBatch {
++    std::atomic<uint32_t> completed{0};
++    std::atomic<uint32_t> failed{0};
++};
++
++class InitialHandshakeCallback final: public RdmaClientConnectionCallback {
++public:
++    InitialHandshakeCallback(const std::shared_ptr<RdmaClientHostConnections>& pool,
++                             const std::shared_ptr<InitialHandshakeBatch>& batch):
++        RdmaClientConnectionCallback(pool), batch_(batch) {}
++
++    void OnConnectSuccess(const std::shared_ptr<::accl::barex::XConnection>& connection) override {
++        RdmaClientConnectionCallback::OnConnectSuccess(connection);
++        if (!settled_.exchange(true)) {
++            ++batch_->completed;
++        }
++    }
++
++    void OnConnectFailed(const std::shared_ptr<::accl::barex::XConnection>& connection) override {
++        RdmaClientConnectionCallback::OnConnectFailed(connection);
++        // The same callback also reports a disconnect after a successful
++        // connection. That event must not become an initial-handshake retry.
++        if (!settled_.exchange(true)) {
++            ++batch_->failed;
++            ++batch_->completed;
++        }
++    }
++
++private:
++    std::shared_ptr<InitialHandshakeBatch> batch_;
++    std::atomic<bool> settled_{false};
++};
++}  // namespace
++
+ 
+ RdmaClientHostConnections::RdmaClientHostConnections(const std::shared_ptr<MemoryUtil>& memory_util,
+                                                      const std::string&                 host,
+@@ -79,29 +119,62 @@
+ 
+ std::shared_ptr<RdmaConnection>
+ RdmaClientHostConnections::newRdmaConnection(const std::shared_ptr<::accl::barex::XClientTransport>& client, bool reuse_available) {
+-    // new xconnection first
+-    auto callback = std::make_shared<RdmaClientConnectionCallback>(shared_from_this());
+-    for (int i = 0; i < qp_count_per_rdma_connection_; i++) {  // 多建一些连接
+-        client->Connect(::accl::barex::TCP_V4, host_, port_, callback);
+-    }
+-
+-    std::shared_ptr<RdmaConnection> rdma_connection;
+-    for (int i = 0; i < connect_timeout_ms_; i++) {
+-        // A handshake can fail while another request returns a usable lease.
+-        // FillConnectionPool deliberately waits for newly created connections.
++    using Clock = std::chrono::steady_clock;
++    const auto deadline = Clock::now() + std::chrono::milliseconds(connect_timeout_ms_);
++    constexpr auto retry_backoff = std::chrono::milliseconds(500);
++    auto start_handshakes = [&] {
++        auto batch = std::make_shared<InitialHandshakeBatch>();
++        for (uint32_t i = 0; i < qp_count_per_rdma_connection_; ++i) {
++            // One callback per QP distinguishes its initial terminal result
++            // from a disconnect after the QP has already become usable.
++            auto callback = std::make_shared<InitialHandshakeCallback>(shared_from_this(), batch);
++            client->Connect(::accl::barex::TCP_V4, host_, port_, callback);
++        }
++        return batch;
++    };
++    auto batch = start_handshakes();
++    uint32_t batches = 1;
++    auto retry_at = deadline;
++    bool retry_scheduled = false;
++    while (Clock::now() < deadline) {
+         if (reuse_available) {
+             auto reused = getRdmaConnectionFromConnectionPool(available_connections_, true);
+             if (reused != nullptr) {
+                 return reused;
+             }
+         }
+-        auto rdma_connection = getRdmaConnectionFromConnectionPool(newly_connections_, true);
+-        if (rdma_connection != nullptr) {
+-            return rdma_connection;
+-        }
+-        usleep(1000);
+-    }
+-
++        const auto now = Clock::now();
++        const bool settled = batch->completed.load() == qp_count_per_rdma_connection_;
++        const bool initial_failed = batch->failed.load() > 0;
++        if (!retry_scheduled && settled) {
++            retry_at = now + retry_backoff;
++            retry_scheduled = true;
++        }
++        const bool replace_failed_batch = settled && initial_failed;
++        if (retry_scheduled && now >= retry_at && now < deadline) {
++            RTP_LLM_LOG_WARNING("replenish rdma handshakes to %s:%u, batch %u within acquire deadline, initial_failed=%u",
++                                host_.c_str(), port_, batches + 1,
++                                batch->failed.load());
++            batch = start_handshakes();
++            ++batches;
++            retry_scheduled = false;
++        }
++        // Newly completed QPs are shared by all acquires. Before borrowing
++        // another caller's replacement, replenish this caller's known failed
++        // batch; otherwise that caller may lose its lease and never retry.
++        // Recycled leases were checked above and can always be reused.
++        if (!replace_failed_batch || !retry_scheduled) {
++            auto connection = getRdmaConnectionFromConnectionPool(newly_connections_, true);
++            if (connection != nullptr) {
++                return connection;
++            }
++        }
++        const auto remaining = deadline - Clock::now();
++        if (remaining > Clock::duration::zero()) {
++            std::this_thread::sleep_for(std::min(remaining,
++                std::chrono::duration_cast<Clock::duration>(std::chrono::milliseconds(1))));
++        }
++    }
+     return getRdmaConnectionFromConnectionPool(newly_connections_, false);
+ }
+ 

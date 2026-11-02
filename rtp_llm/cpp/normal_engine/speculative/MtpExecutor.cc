@@ -25,6 +25,7 @@
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include <algorithm>
 #include <cstring>
+#include <optional>
 #include <sstream>
 #if USING_CUDA
 #include <ATen/cuda/CUDAContext.h>
@@ -736,8 +737,12 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
                          const std::shared_ptr<KVCacheManager>&         cache_manager,
                          MlaOpsType                                     mla_ops_type,
                          int32_t                                        kv_cache_group_num,
-                         bool                                           warm_up):
+                         bool                                           warm_up,
+                         std::function<void()>                          profile_step_start,
+                         std::function<void()>                          profile_step_finish):
     Executor(),
+    profile_step_start_(std::move(profile_step_start)),
+    profile_step_finish_(std::move(profile_step_finish)),
     cache_manager_(cache_manager),
     metrics_reporter_(params.metrics_reporter),
     tps_reporter_(MetricsLoopReporter<RtpLLMTokenPSMetrics, RtpLLMTokenPSMetricsCollector>(
@@ -1180,6 +1185,8 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
         executor_collector.tp_sync_input_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
     }
 
+    startProfileStep(model_input.is_fake_stream);
+    RTP_LLM_PROFILE_SCOPE("executor.mtp.active_prefill");
     metrics_collector.not_skip = true;
 
     // Any return or exception after DSpark PD work becomes possible must drain
@@ -1586,6 +1593,7 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     MtpBatchStreamProcessor::DSparkRoundState dspark_round_state;
     size_t                                    batch_size = 0;
 
+    std::optional<ProfilingScope> profile_cycle;
     if (is_dspark_) {
         // Proposal and target verification are two model phases with different
         // token widths and cache roles. Keep the target gather output intact;
@@ -1608,6 +1616,9 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
             }
             ensureModelInputsOnCuda(proposal_input, "decode.dspark_proposal_after_tp_sync");
         }
+        startProfileStep(proposal_input.is_fake_stream);
+        profile_cycle.emplace(proposal_input.is_fake_stream ? "executor.mtp.fake_decode_cycle" :
+                                                             "executor.mtp.active_decode_cycle");
         batch_size = proposal_input.input_lengths.size(0);
 
         // Release previous-round staging, then overlap target metadata
@@ -1653,6 +1664,9 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
             }
             ensureModelInputsOnCuda(model_input, "decode.after_tp_sync");
         }
+        startProfileStep(model_input.is_fake_stream);
+        profile_cycle.emplace(model_input.is_fake_stream ? "executor.mtp.fake_decode_cycle" :
+                                                          "executor.mtp.active_decode_cycle");
         batch_size = model_input.input_lengths.size(0);
 
         releaseAllModelBuffers(/*defer_reclaim=*/true);
@@ -2679,7 +2693,27 @@ void MtpExecutor::prepareStreams(const std::list<GenerateStreamPtr>& streams,
     reject_mixed_execution_modes(decode_streams);
 }
 
+void MtpExecutor::startProfileStep(bool is_fake_stream) {
+    // All TP ranks reach this only after synchronizing a non-skipped input.
+    // Idle polls and EP participation with a synthetic empty-owner stream
+    // must not consume the requested number of real inference cycles.
+    if (!is_fake_stream && !profile_step_started_ && profile_step_start_) {
+        profile_step_start_();
+        profile_step_started_ = true;
+    }
+}
+
 absl::Status MtpExecutor::process(const std::list<GenerateStreamPtr>& streams, int64_t schedule_time_us) {
+    struct ProfileStepGuard {
+        bool& started;
+        const std::function<void()>& finish;
+        ~ProfileStepGuard() {
+            if (started && finish) {
+                finish();
+            }
+            started = false;
+        }
+    } profile_guard{profile_step_started_, profile_step_finish_};
     RTP_LLM_PROFILE_SCOPE_DYNAMIC("executor.mtp.process(stream_size=%zu,mtp_step=%zu)", streams.size(), propose_step_);
     const int64_t process_start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
     if (schedule_time_us <= 0) {

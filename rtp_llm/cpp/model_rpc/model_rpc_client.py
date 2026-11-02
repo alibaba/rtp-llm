@@ -999,6 +999,7 @@ def trans_output(
                 decode_remote_reuse_len=aux_info_pb.decode_remote_reuse_len,
                 decode_memory_reuse_len=aux_info_pb.decode_memory_reuse_len,
                 decode_disk_reuse_len=aux_info_pb.decode_disk_reuse_len,
+                speculative_metrics=dict(aux_info_pb.speculative_metrics),
                 speculative_draft_rounds=aux_info_pb.speculative_draft_rounds,
                 speculative_accepted_tokens_per_pos=list(
                     aux_info_pb.speculative_accepted_tokens_per_pos

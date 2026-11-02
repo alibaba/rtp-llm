@@ -27,6 +27,8 @@ _CLASS_TO_MODULE: Dict[str, str] = {
     "KimiK25": "rtp_llm.models.kimi_k25.kimi_k25",
     "KimiK3": "rtp_llm.models.kimi_k3.kimi_k3",
     "KimiK3Mtp": "rtp_llm.models.kimi_k3.kimi_k3",
+    "KimiK31": "rtp_llm.models.kimi_k3.kimi_k31",
+    "KimiK31Mtp": "rtp_llm.models.kimi_k3.kimi_k31",
     "KimiLinear": "rtp_llm.models.kimi_linear.kimi_linear",
     "Llama": "rtp_llm.models.llama",
     "Baichuan": "rtp_llm.models.llama",

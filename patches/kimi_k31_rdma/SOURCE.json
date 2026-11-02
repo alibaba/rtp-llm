@@ -1,0 +1,28 @@
+{
+  "origin_commit": "675c6a5536cf81fb9aaa928b1b6c17e3bec706aa",
+  "scope": "Retain private PD connection fixes on the current internal base, including its existing partial-QP reuse fix; no RPC retry or timeout expansion",
+  "steps": [
+    {
+      "patch": "rdma-recycled-lease.patch",
+      "before": {
+        "internal_source/rtp_llm/cpp/disaggregate/cache_store/RdmaClientHostConnections.cpp": "bcf2ccaac41bbb2ec5eec42c22305ddae9d7675d44d2ef531a1d02c30f2f06d4",
+        "internal_source/rtp_llm/cpp/disaggregate/cache_store/RdmaClientHostConnections.h": "f3a7005538845783f91818c6bc40e633ebb1945893031cf2b9c8ff2c3d51f34c"
+      },
+      "after": {
+        "internal_source/rtp_llm/cpp/disaggregate/cache_store/RdmaClientHostConnections.cpp": "d169a60de6c993f6176be3c5cc4cf1be7251d5e4cd09b75b80ba7f0f0a03da01",
+        "internal_source/rtp_llm/cpp/disaggregate/cache_store/RdmaClientHostConnections.h": "7c16e51ea04cdc2e95ca47c5266b3809f5ca09fd31d01950d1d5848895044037"
+      },
+      "patch_sha256": "c93c4b7eeeeaf52b4c89cb427a80db797e202d2b8e13d1d890c2626b67909246"
+    },
+    {
+      "patch": "rdma-terminal-handshake-retry.patch",
+      "before": {
+        "internal_source/rtp_llm/cpp/disaggregate/cache_store/RdmaClientHostConnections.cpp": "d169a60de6c993f6176be3c5cc4cf1be7251d5e4cd09b75b80ba7f0f0a03da01"
+      },
+      "after": {
+        "internal_source/rtp_llm/cpp/disaggregate/cache_store/RdmaClientHostConnections.cpp": "bcde94d4a1c5585f30bb31f4893d67ef907d79768f1f115991578be0fd601a2d"
+      },
+      "patch_sha256": "1a62ff01fefc00334f008c9caf5af9ea9fb2cda44759f940ef4c11d7770bd752"
+    }
+  ]
+}

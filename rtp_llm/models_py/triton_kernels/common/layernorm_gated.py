@@ -337,26 +337,46 @@ class FusedRMSNormGated(torch.nn.Module):
         self.launch_pdl = weight.is_cuda and torch.cuda.get_device_capability(weight.device)[0] >= 9
 
     def forward(self, x: torch.Tensor, gate: torch.Tensor) -> torch.Tensor:
-        if x.ndim != 2 or x.shape[1] != 128 or gate.shape != x.shape:
-            raise ValueError("FusedRMSNormGated expects matching [rows, 128] inputs")
+        if x.ndim not in (2, 3) or x.shape[-1] != 128 or gate.shape != x.shape:
+            raise ValueError("FusedRMSNormGated expects matching [..., 128] inputs")
         if not x.is_cuda or x.device != gate.device or x.device != self.weight.device:
-            raise ValueError("FusedRMSNormGated inputs and weight must share a CUDA device")
+            raise ValueError(
+                "FusedRMSNormGated inputs and weight must share a CUDA device"
+            )
         # The native kernel requires packed x, while gate supports row strides.
-        x = x.contiguous()
-        if gate.stride(-1) != 1:
+        shape = x.shape
+        heads = x.shape[1] if x.ndim == 3 else 1
+        x = x.contiguous().view(-1, 128)
+        if gate.stride(-1) != 1 or (gate.ndim == 3 and gate.stride(1) != 128):
             gate = gate.contiguous()
         y = torch.empty_like(x)
         rows = x.shape[0]
         if rows == 0:
-            return y
+            return y.reshape(shape)
         rstd = torch.empty((rows,), dtype=torch.float32, device=x.device)
         layer_norm_gated_fwd_kernel[(triton.cdiv(rows, 16),)](
-            x, gate, y, self.weight, None, None, None, None, rstd,
-            self.eps, rows, H=1, g_stride_n=gate.stride(0), D=128,
-            BT=16, BD=128, ACTIVATION="sigmoid", IS_RMS_NORM=True,
-            num_warps=8, launch_pdl=self.launch_pdl,
+            x,
+            gate,
+            y,
+            self.weight,
+            None,
+            None,
+            None,
+            None,
+            rstd,
+            self.eps,
+            rows,
+            H=heads,
+            g_stride_n=gate.stride(0),
+            D=128,
+            BT=16,
+            BD=128,
+            ACTIVATION="sigmoid",
+            IS_RMS_NORM=True,
+            num_warps=8,
+            launch_pdl=self.launch_pdl,
         )
-        return y
+        return y.reshape(shape)
 
 
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
@@ -447,4 +467,95 @@ def fused_q_kv_rmsnorm(q, kv, q_weight, kv_weight, eps):
             launch_pdl=_supports_pdl(q.device.index),
             num_warps=8 if block >= 2048 else 4,
         )
+    return q_out, kv_out
+
+
+def _validate_q_kv_norm(q, kv, q_weight, kv_weight):
+    if q.ndim != 2 or kv.ndim != 2 or q.shape[0] != kv.shape[0]:
+        raise ValueError("K3 MLA norms require rank-2 Q/KV with equal token counts")
+    for x, weight in ((q, q_weight), (kv, kv_weight)):
+        if not x.is_cuda or x.device != q.device or weight.device != q.device:
+            raise ValueError("K3 MLA norms require CUDA tensors on the same device")
+        if x.dtype != torch.bfloat16 or weight.dtype != torch.bfloat16:
+            raise ValueError("K3 MLA norms require BF16 tensors")
+        if x.stride(-1) != 1 or not weight.is_contiguous():
+            raise ValueError("K3 MLA norms require contiguous features and weights")
+        if weight.ndim != 1 or weight.numel() != x.shape[1] or x.shape[1] <= 0:
+            raise ValueError("K3 MLA norm weight shape does not match input")
+
+
+
+@triton.jit
+def _grouped_q_kv_rmsnorm_kernel(
+    Q, KV, QW, KVW, QO, KVO, SUFFIX,
+    N: tl.constexpr, QS: tl.constexpr, KVS: tl.constexpr,
+    KVOS: tl.constexpr, SS: tl.constexpr, SUFFIX_DIM: tl.constexpr,
+    QSIZE: tl.constexpr, KVSIZE: tl.constexpr,
+    EPS: tl.constexpr, ROWS: tl.constexpr,
+    QB: tl.constexpr, KVB: tl.constexpr, PDL: tl.constexpr,
+):
+    # Each branch keeps its own reduction width; latent512 is not padded to
+    # Q's 2048-wide reduction. Strided projection views need no contiguous copy.
+    rows = (tl.program_id(0) * ROWS + tl.arange(0, ROWS)).to(tl.int64)
+    if tl.program_id(1) == 0:
+        qc = tl.arange(0, QB)
+        qw = tl.load(QW + qc, qc < QSIZE, other=0).to(tl.float32)
+        if PDL:
+            tl.extra.cuda.gdc_wait()
+            tl.extra.cuda.gdc_launch_dependents()
+        qx = tl.load(Q + rows[:, None] * QS + qc[None, :],
+                     (rows[:, None] < N) & (qc[None, :] < QSIZE), other=0).to(tl.float32)
+        qy = qx * tl.rsqrt(tl.sum(qx * qx, 1) / QSIZE + EPS)[:, None] * qw[None, :]
+        tl.store(QO + rows[:, None] * QSIZE + qc[None, :], qy,
+                 (rows[:, None] < N) & (qc[None, :] < QSIZE))
+    else:
+        kc = tl.arange(0, KVB)
+        kw = tl.load(KVW + kc, kc < KVSIZE, other=0).to(tl.float32)
+        if PDL:
+            tl.extra.cuda.gdc_wait()
+            tl.extra.cuda.gdc_launch_dependents()
+        kx = tl.load(KV + rows[:, None] * KVS + kc[None, :],
+                     (rows[:, None] < N) & (kc[None, :] < KVSIZE), other=0).to(tl.float32)
+        ky = kx * tl.rsqrt(tl.sum(kx * kx, 1) / KVSIZE + EPS)[:, None] * kw[None, :]
+        tl.store(KVO + rows[:, None] * KVOS + kc[None, :], ky,
+                 (rows[:, None] < N) & (kc[None, :] < KVSIZE))
+        if SUFFIX_DIM:
+            sc = tl.arange(0, KVB)
+            sv = tl.load(SUFFIX + rows[:, None] * SS + sc[None, :],
+                         (rows[:, None] < N) & (sc[None, :] < SUFFIX_DIM), other=0)
+            tl.store(KVO + rows[:, None] * KVOS + KVSIZE + sc[None, :], sv,
+                     (rows[:, None] < N) & (sc[None, :] < SUFFIX_DIM))
+
+
+
+def grouped_q_kv_rmsnorm(q, kv, q_weight, kv_weight, eps, *, kv_suffix=None):
+    """Prefill BF16 norm: four rows per CTA, one launch, FP32 then one cast."""
+    _validate_q_kv_norm(q, kv, q_weight, kv_weight)
+    if kv_suffix is not None and (
+        kv_suffix.ndim != 2 or kv_suffix.shape[0] != q.shape[0]
+        or kv_suffix.device != kv.device or kv_suffix.dtype != kv.dtype
+        or kv_suffix.stride(-1) != 1
+    ):
+        raise ValueError("KV suffix must have matching BF16 rows and contiguous features")
+    if q.shape[0] < 128 or (q.shape[1], kv.shape[1]) != (1536, 512):
+        # Keep the established short-input reduction and rounding. Packing is
+        # fused only into the grouped producer that already owns long Prefill.
+        q_out, kv_out = fused_q_kv_rmsnorm(q, kv, q_weight, kv_weight, eps)
+        if kv_suffix is not None:
+            kv_out = torch.cat((kv_out, kv_suffix), dim=-1)[:, :kv.shape[1]]
+        return q_out, kv_out
+    q_out = torch.empty(q.shape, device=q.device, dtype=q.dtype)
+    suffix_dim = 0 if kv_suffix is None else kv_suffix.shape[1]
+    storage = torch.empty((kv.shape[0], kv.shape[1] + suffix_dim), device=kv.device, dtype=kv.dtype)
+    kv_out = storage[:, :kv.shape[1]]
+    if not q.shape[0]:
+        return q_out, kv_out
+    _grouped_q_kv_rmsnorm_kernel[(triton.cdiv(q.shape[0], 4), 2)](
+        q, kv, q_weight, kv_weight, q_out, kv_out, kv if kv_suffix is None else kv_suffix,
+        q.shape[0], q.stride(0), kv.stride(0), storage.stride(0),
+        0 if kv_suffix is None else kv_suffix.stride(0), suffix_dim,
+        q.shape[1], kv.shape[1], eps,
+        4, triton.next_power_of_2(q.shape[1]), triton.next_power_of_2(kv.shape[1]),
+        _supports_pdl(q.device.index), num_warps=8,
+    )
     return q_out, kv_out

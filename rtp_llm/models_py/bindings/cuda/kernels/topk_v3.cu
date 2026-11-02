@@ -1,17 +1,125 @@
 #include "topk_v3.h"
 #include "topk_v3.cuh"
+#include "dsa_range_topk.cuh"
 
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAGuard.h>
 #include <cuda_runtime.h>
 #include <torch/all.h>
+#include <cub/block/block_reduce.cuh>
+#include <c10/cuda/CUDAException.h>
 
 #include <algorithm>
 #include <cstdint>
+#include <climits>
 #include <limits>
 
 namespace torch_ext {
 namespace {
+
+struct DsaFloatMinimum {
+    __device__ float operator()(float a, float b) const { return fminf(a, b); }
+};
+
+// Float radix selection is reused unchanged. Only rows whose boundary score
+// has more candidates than remaining slots need the global-position radix
+// refinement below. Even an all-equal row remains exact without a history-sized
+// key array, a stable argsort, or a model-level query loop.
+__global__ void repair_dsa_boundary(const float* scores, const int32_t* positions,
+                                    const int32_t* raw, float* output_scores,
+                                    int32_t* output_positions, int64_t score_stride,
+                                    int64_t position_stride, int cols, int k) {
+    constexpr int B = 256;
+    using FloatReduce = cub::BlockReduce<float, B>;
+    using IntReduce = cub::BlockReduce<int, B>;
+    __shared__ union { FloatReduce::TempStorage f; IntReduce::TempStorage i; } temp;
+    __shared__ float pivot;
+    __shared__ int valid_count, selected_ties, total_ties, emit_count, remaining;
+    __shared__ uint32_t prefix, histogram[256];
+    const int tx = threadIdx.x;
+    const int64_t row = blockIdx.x;
+    scores += row * score_stride;
+    positions += row * position_stride;
+    raw += row * k;
+    output_scores += row * k;
+    output_positions += row * k;
+    float minimum = INFINITY;
+    int valid = 0;
+    for (int i = tx; i < k; i += B) {
+        const int index = raw[i];
+        const float value = index >= 0 && index < cols ? scores[index] : -INFINITY;
+        const int position = index >= 0 && index < cols ? positions[index] : -1;
+        const bool live = isfinite(value) && position >= 0;
+        output_scores[i] = live ? value : -INFINITY;
+        output_positions[i] = live ? position : -1;
+        if (live) { minimum = fminf(minimum, value); ++valid; }
+    }
+    const float reduced_minimum = FloatReduce(temp.f).Reduce(minimum, DsaFloatMinimum{});
+    if (tx == 0) pivot = reduced_minimum;
+    __syncthreads();
+    const int reduced_valid = IntReduce(temp.i).Sum(valid);
+    if (tx == 0) valid_count = reduced_valid;
+    __syncthreads();
+    if (valid_count < k) return;
+    int selected_equal = 0;
+    for (int i = tx; i < k; i += B) selected_equal += output_scores[i] == pivot;
+    const int reduced_selected = IntReduce(temp.i).Sum(selected_equal);
+    if (tx == 0) selected_ties = reduced_selected;
+    __syncthreads();
+    int equal = 0;
+    for (int i = tx; i < cols; i += B) equal += scores[i] == pivot && positions[i] >= 0;
+    const int reduced_equal = IntReduce(temp.i).Sum(equal);
+    if (tx == 0) total_ties = reduced_equal;
+    __syncthreads();
+    if (total_ties == selected_ties) return;
+    if (tx == 0) { prefix = 0; remaining = selected_ties; }
+    __syncthreads();
+    // Select the smallest remaining global positions amongst equal scores.
+    for (int round = 0; round < 4; ++round) {
+        histogram[tx] = 0;
+        __syncthreads();
+        const uint32_t mask = round == 0 ? 0u : (0xffffffffu << (32 - round * 8));
+        const int shift = 24 - round * 8;
+        for (int i = tx; i < cols; i += B) {
+            const int position = positions[i];
+            const uint32_t p = static_cast<uint32_t>(position);
+            if (scores[i] == pivot && position >= 0 && (p & mask) == prefix)
+                atomicAdd(&histogram[(p >> shift) & 255u], 1u);
+        }
+        __syncthreads();
+        if (tx == 0) {
+            int before = 0;
+            for (uint32_t bin = 0; bin < 256; ++bin) {
+                if (before + histogram[bin] >= remaining) {
+                    prefix |= bin << shift;
+                    remaining -= before;
+                    break;
+                }
+                before += histogram[bin];
+            }
+        }
+        __syncthreads();
+    }
+    if (tx == 0) emit_count = 0;
+    __syncthreads();
+    // Read raw indices, not the output being compacted in place.
+    for (int i = tx; i < k; i += B) {
+        const int index = raw[i];
+        if (index >= 0 && index < cols && scores[index] > pivot) {
+            const int slot = atomicAdd(&emit_count, 1);
+            output_scores[slot] = scores[index];
+            output_positions[slot] = positions[index];
+        }
+    }
+    __syncthreads();
+    for (int i = tx; i < cols; i += B) {
+        const int position = positions[i];
+        if (scores[i] == pivot && position >= 0 && static_cast<uint32_t>(position) <= prefix) {
+            const int slot = atomicAdd(&emit_count, 1);
+            if (slot < k) { output_scores[slot] = pivot; output_positions[slot] = position; }
+        }
+    }
+}
 
 namespace impl = device::topk;
 using impl::TopKProblem;
@@ -377,6 +485,93 @@ void topk_v3(const torch::Tensor& scores,
                                         params, k, max_seq_len, stream);
     TORCH_CHECK(error == cudaSuccess,
                 "DeepSeek V4 TopK launch failed: ", cudaGetErrorString(error));
+}
+
+void dsa_repair_topk_candidates(const torch::Tensor& scores,
+                                const torch::Tensor& positions,
+                                const torch::Tensor& raw_indices,
+                                torch::Tensor& output_scores,
+                                torch::Tensor& output_positions) {
+    TORCH_CHECK(scores.is_cuda() && scores.dtype() == torch::kFloat32 && scores.dim() == 2 && scores.stride(1) == 1,
+                "DSA candidate scores must be CUDA FP32 rows");
+    TORCH_CHECK(raw_indices.dim() == 2, "Raw candidate indices must have two dimensions");
+    const int64_t rows = scores.size(0), columns = scores.size(1), k = raw_indices.size(1);
+    TORCH_CHECK(columns > 0 && columns <= INT_MAX && rows <= UINT_MAX && k > 0 && k <= 2048,
+                "DSA candidate dimensions exceed the supported range");
+    TORCH_CHECK(positions.dtype() == torch::kInt32 && positions.stride(-1) == 1 &&
+                    ((positions.dim() == 1 && positions.size(0) == columns) ||
+                     (positions.dim() == 2 && positions.sizes() == scores.sizes())), "Invalid global position layout");
+    TORCH_CHECK(raw_indices.dim() == 2 && raw_indices.size(0) == rows && raw_indices.dtype() == torch::kInt32 && raw_indices.is_contiguous(),
+                "Raw candidates must be contiguous INT32");
+    TORCH_CHECK(output_scores.sizes() == raw_indices.sizes() && output_positions.sizes() == raw_indices.sizes() &&
+                    output_scores.dtype() == torch::kFloat32 && output_positions.dtype() == torch::kInt32 &&
+                    output_scores.is_contiguous() && output_positions.is_contiguous(), "Invalid bounded candidate output");
+    TORCH_CHECK(positions.device() == scores.device() && raw_indices.device() == scores.device() &&
+                    output_scores.device() == scores.device() && output_positions.device() == scores.device(),
+                "DSA candidates must share a CUDA device");
+    if (rows == 0) return;
+    const c10::cuda::CUDAGuard guard(scores.device());
+    repair_dsa_boundary<<<rows, 256, 0, at::cuda::getCurrentCUDAStream(scores.get_device())>>>(
+        scores.data_ptr<float>(), positions.data_ptr<int32_t>(), raw_indices.data_ptr<int32_t>(),
+        output_scores.data_ptr<float>(), output_positions.data_ptr<int32_t>(), scores.stride(0),
+        positions.dim() == 1 ? 0 : positions.stride(0), columns, k);
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+
+struct BoundedDsaTopKParams {
+ const float* scores;const int32_t* positions;const int32_t* starts;const int32_t* ends;
+ float* selected_scores;int32_t* selected_positions;
+ int64_t score_stride,position_stride;uint32_t width,topk;
+ __device__ device::k31_range_topk::TopKProblem problem(uint32_t row) const {
+  const uint32_t start=min(static_cast<uint32_t>(max(starts ? starts[row] : 0,0)),width);
+  const uint32_t end=max(start,min(static_cast<uint32_t>(max(ends ? ends[row] : static_cast<int32_t>(width),0)),width));
+  return device::k31_range_topk::TopKProblem{scores+row*score_stride+start,positions+row*position_stride+start,
+                           selected_scores+row*topk,selected_positions+row*topk,topk,end-start};
+ }
+};
+template<class Implementation>
+__global__ __launch_bounds__(device::topk::TopKConfig::kBlockSize,device::topk::TopKConfig::kOccupancy)
+void select_bounded(const __grid_constant__ BoundedDsaTopKParams params) {
+ device::enable_smem_spilling();
+ const auto problem=params.problem(blockIdx.x);
+ for(uint32_t i=threadIdx.x;i<problem.topk;i+=blockDim.x){problem.out[i]=-1;problem.output_scores[i]=-CUDART_INF_F;}
+ __syncthreads();
+ if(problem.seq_len<=problem.topk){
+  for(uint32_t i=threadIdx.x;i<problem.seq_len;i+=blockDim.x)problem.emit(i,i);
+  return;
+ }
+ __shared__ device::topk::MaxSmem<typename Implementation::Smem> smem;
+ if((reinterpret_cast<uintptr_t>(problem.in)&15u)==0)Implementation::template forward<true>(problem,&smem);
+ else Implementation::template forward<false>(problem,&smem);
+}
+void dsa_select_topk_candidates(torch::Tensor scores,torch::Tensor positions,
+                 c10::optional<torch::Tensor> starts,c10::optional<torch::Tensor> ends,
+                 torch::Tensor out_scores,torch::Tensor out_positions,int64_t topk){
+ TORCH_CHECK(scores.is_cuda()&&scores.scalar_type()==torch::kFloat32&&scores.dim()==2&&scores.stride(1)==1,"FP32 CUDA score rows required");
+ const int64_t rows=scores.size(0),width=scores.size(1);
+ TORCH_CHECK(width<=INT32_MAX&&(topk==512||topk==1024||topk==2048),"Unsupported selector geometry");
+ for(auto v:{positions,out_positions})TORCH_CHECK(v.is_cuda()&&v.device()==scores.device()&&v.scalar_type()==torch::kInt32,"INT32 metadata on the score device required");
+ TORCH_CHECK((positions.dim()==1&&positions.size(0)==width)||(positions.dim()==2&&positions.sizes()==scores.sizes()),"Position shape mismatch");
+ TORCH_CHECK(positions.stride(-1)==1,"Range/position layout mismatch");
+ TORCH_CHECK(out_scores.is_cuda()&&out_scores.device()==scores.device()&&out_scores.scalar_type()==torch::kFloat32&&out_scores.is_contiguous()&&out_scores.size(0)==rows&&out_scores.size(1)==topk,"FP32 output shape mismatch");
+ TORCH_CHECK(out_positions.is_contiguous()&&out_positions.size(0)==rows&&out_positions.size(1)==topk,"Index output shape mismatch");
+ for(const auto& bound:{starts,ends}) if(bound.has_value())
+  TORCH_CHECK(bound->is_cuda() && bound->device()==scores.device() &&
+              bound->scalar_type()==torch::kInt32 && bound->dim()==1 &&
+              bound->is_contiguous() && bound->numel()==rows,"INT32 range metadata required");
+ TORCH_CHECK(rows<=UINT32_MAX,"Too many selector rows");
+ if(!rows)return;
+ TORCH_CHECK(out_scores.storage().data_ptr().get()!=scores.storage().data_ptr().get() &&
+             out_positions.storage().data_ptr().get()!=positions.storage().data_ptr().get(),
+             "Selector outputs must not alias input storage");
+ const c10::cuda::CUDAGuard guard(scores.device());
+ BoundedDsaTopKParams p{scores.data_ptr<float>(),positions.data_ptr<int32_t>(),starts ? starts->data_ptr<int32_t>() : nullptr,ends ? ends->data_ptr<int32_t>() : nullptr,out_scores.data_ptr<float>(),out_positions.data_ptr<int32_t>(),scores.stride(0),positions.dim()==2?positions.stride(0):0,static_cast<uint32_t>(width),static_cast<uint32_t>(topk)};
+ const auto stream=at::cuda::getCurrentCUDAStream(scores.get_device());
+ if(width<=device::k31_range_topk::TopKRegister<1>::kMaxSeqLen)select_bounded<device::k31_range_topk::TopKRegister<1>><<<rows,device::topk::TopKConfig::kBlockSize,0,stream>>>(p);
+ else if(width<=device::k31_range_topk::TopKRegister<2>::kMaxSeqLen)select_bounded<device::k31_range_topk::TopKRegister<2>><<<rows,device::topk::TopKConfig::kBlockSize,0,stream>>>(p);
+ else if(width<=device::k31_range_topk::TopKRegister<4>::kMaxSeqLen)select_bounded<device::k31_range_topk::TopKRegister<4>><<<rows,device::topk::TopKConfig::kBlockSize,0,stream>>>(p);
+ else select_bounded<device::k31_range_topk::TopKStreaming><<<rows,device::topk::TopKConfig::kBlockSize,0,stream>>>(p);
+ TORCH_CHECK(cudaGetLastError()==cudaSuccess,"Bounded selector launch failed");
 }
 
 }  // namespace torch_ext

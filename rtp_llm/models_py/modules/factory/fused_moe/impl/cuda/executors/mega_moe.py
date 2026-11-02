@@ -212,7 +212,13 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
         from rtp_llm.utils.model_weight import W
 
         cfg = self.cfg
-        self._mega_kernel, transform_weights, _ = mega_moe_functions(self.activation)
+        self._mega_backend_override = getattr(cfg, "mega_moe_backend", None)
+        import deep_gemm
+
+        self._mega_backend = self._mega_backend_override or deep_gemm
+        self._mega_kernel, transform_weights, _ = mega_moe_functions(
+            self.activation, backend=self._mega_backend
+        )
         self._activation_kwargs = {}
         if self.activation == "situ":
             self._activation_kwargs = situ_kwargs(
@@ -281,6 +287,7 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
             intermediate_hidden=inter,
             use_fp8_dispatch=True,
             activation=self.activation,
+            backend=self._mega_backend_override,
         )
         # Single-layer staging output. All MoE layers execute sequentially, so one
         # process-local buffer is enough and avoids O(layers) persistent memory.
@@ -322,10 +329,10 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
                 "MegaMoE JIT warmup must not run inside CUDA graph capture"
             )
 
-        import deep_gemm
         import torch.distributed as dist
 
         cfg = self.cfg
+        deep_gemm = self._mega_backend
         num_sms = int(deep_gemm.get_num_sms())
         token_counts = self._resolve_jit_warmup_token_counts(num_sms)
         if not token_counts:
@@ -333,6 +340,7 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
 
         max_tokens_per_rank = int(cfg.max_tokens_per_rank)
         warmup_key = (
+            self._mega_backend,
             cfg.ep_size,
             cfg.n_routed_experts,
             cfg.n_local_experts,

@@ -33,4 +33,20 @@ void topk_v3(const torch::Tensor& logits,
              int64_t k,
              int64_t max_seq_len);
 
+// Repair a native float TopK's boundary ties using true global positions.
+// Scores have already been sanitized to -inf for every invalid candidate.
+// Valid global positions must be unique within each row. Output is unordered;
+// the caller canonicalizes only the bounded K candidates, never the history.
+void dsa_repair_topk_candidates(const torch::Tensor& scores,
+                                const torch::Tensor& positions,
+                                const torch::Tensor& raw_indices,
+                                torch::Tensor& output_scores,
+                                torch::Tensor& output_positions);
+
+// Unordered score/global-position pairs. Bounds exclude unread MQA columns;
+// holes, non-finite values, signed zero and ties are handled inside selection.
+void dsa_select_topk_candidates(torch::Tensor scores, torch::Tensor positions,
+    c10::optional<torch::Tensor> starts, c10::optional<torch::Tensor> ends,
+    torch::Tensor output_scores, torch::Tensor output_positions, int64_t topk);
+
 }  // namespace torch_ext

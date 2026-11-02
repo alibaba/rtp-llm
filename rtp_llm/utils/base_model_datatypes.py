@@ -153,6 +153,7 @@ class AuxInfo:
     decode_disk_reuse_len: int = 0
 
     multimodal_lengths: Dict[int, int] = field(default_factory=dict)
+    speculative_metrics: Dict[str, int] = field(default_factory=dict)
     speculative_draft_rounds: int = 0
     speculative_accepted_tokens_per_pos: List[int] = field(default_factory=list)
     generation_prefill_cuda_graph_status: str = (

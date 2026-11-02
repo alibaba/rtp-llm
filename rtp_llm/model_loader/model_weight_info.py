@@ -639,20 +639,28 @@ class ModelDeployWeightInfo:
             raise Exception("Unknown database class")
 
     @staticmethod
-    def _ckpt_tensor_name_to_regex(tensor_name: str) -> re.Pattern[str]:
+    def _ckpt_tensor_name_to_regex(tensor_name: str, layer_ids=None) -> re.Pattern[str]:
         placeholder_pattern = re.compile(r"\{[^{}]+\}")
         pattern_parts = []
         pos = 0
         for match in placeholder_pattern.finditer(tensor_name):
             pattern_parts.append(re.escape(tensor_name[pos : match.start()]))
-            pattern_parts.append(r"\d+")
+            if match.group() == "{i}" and layer_ids is not None:
+                # A runtime layer view must not read shards belonging only to
+                # omitted layers. Other placeholders (e.g. experts) retain
+                # their existing wildcard semantics; explicit remaps are
+                # already literal checkpoint names.
+                ids = "|".join(str(i) for i in layer_ids)
+                pattern_parts.append("(?:" + ids + ")" if ids else "(?!)")
+            else:
+                pattern_parts.append(r"\d+")
             pos = match.end()
         pattern_parts.append(re.escape(tensor_name[pos:]))
         return re.compile(r"^" + "".join(pattern_parts) + r"$")
 
     @classmethod
     def _collect_ckpt_tensor_name_regexes(
-        cls, weight_info: ModelWeightInfo
+        cls, weight_info: ModelWeightInfo, layer_ids=None
     ) -> List[re.Pattern[str]]:
         tensor_names = set()
 
@@ -682,14 +690,16 @@ class ModelDeployWeightInfo:
                 collect_from_weight(layer_weights)
 
         return [
-            cls._ckpt_tensor_name_to_regex(tensor_name)
+            cls._ckpt_tensor_name_to_regex(tensor_name, layer_ids)
             for tensor_name in sorted(tensor_names)
         ]
 
     def _filter_ckpt_files_by_weight_info(
         self, database: CkptDatabase, weight_info: ModelWeightInfo
     ):
-        required_tensor_patterns = self._collect_ckpt_tensor_name_regexes(weight_info)
+        required_tensor_patterns = self._collect_ckpt_tensor_name_regexes(
+            weight_info, layer_ids=range(self._num_layers)
+        )
         database.filter_by_tensor_name_regexes(required_tensor_patterns)
 
     def create_dynamic_weights(self) -> List[AtomicWeight]:

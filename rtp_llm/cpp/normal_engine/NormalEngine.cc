@@ -299,7 +299,9 @@ void NormalEngine::initExecutor(const EngineInitParams&                        p
                                 std::unique_ptr<ProposeModelEngineInitParams>& propose_params) {
     if (propose_params_) {
         executor_.reset(new MtpExecutor(
-            params, propose_params, resource_context_.cache_manager, mla_ops_type_, kv_cache_group_num_));
+            params, propose_params, resource_context_.cache_manager, mla_ops_type_, kv_cache_group_num_, false,
+            [this]() { step_profiler_.startStep(); },
+            [this]() { step_profiler_.finishStep(); }));
     } else {
         executor_.reset(new NormalExecutor(
             params,
@@ -1046,17 +1048,10 @@ absl::Status NormalEngine::step() try {
     }
 
     {
-        // NormalExecutor drives startStep/finishStep via callbacks; MtpExecutor
-        // has no callbacks yet, so bracket the propose path here on the engine
-        // loop thread (Kineto requires enable/disable on the same thread).
-        if (propose_params_) {
-            step_profiler_.startStep();
-        }
+        // Executors start the profiling step after TP agrees to execute real
+        // work. Kineto start/finish remain on this engine loop thread.
         RTP_LLM_PROFILE_SCOPE_DYNAMIC("engine.normal.execute(stream_size=%zu)", streams.size());
         status = executor_->process(streams, tps_schedule_time_us);
-        if (propose_params_) {
-            step_profiler_.finishStep();
-        }
     }
 
     // report step metrics

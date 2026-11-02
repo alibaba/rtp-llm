@@ -181,6 +181,7 @@ void registerPyOpDefs(pybind11::module& m) {
     pybind11::class_<PyAttentionInputs>(m, "PyAttentionInputs")
         .def(pybind11::init<>())
         .def_readwrite("is_prefill", &PyAttentionInputs::is_prefill)
+        .def_readwrite("is_warmup", &PyAttentionInputs::is_warmup)
         .def_readwrite("is_cuda_graph", &PyAttentionInputs::is_cuda_graph)
         .def_readwrite("is_target_verify", &PyAttentionInputs::is_target_verify)
         .def_readwrite("is_mtp_draft_update", &PyAttentionInputs::is_mtp_draft_update)

@@ -28,9 +28,12 @@ Caller passes:
 Returns:
   out     [B, S, T] fp32
 
-Shapes constraints (V4-Flash defaults):
-  H = 64, D = 128 — both fit in registers per program; we tile S × T.
+Launch configurations:
+  H32/D128 prefill uses a dynamic head loop and S32/T128 tiles; other
+  shapes retain the V4 S16/T256 configuration. Both tile S × T without
+  materializing the head dimension.
 """
+
 from __future__ import annotations
 
 from typing import Optional
@@ -57,6 +60,9 @@ def _v4_indexer_score_fwd(
     kv_ptr,  # [B, T, D]    bf16
     w_ptr,  # [B, S, H]    fp32 (caller casts)
     q_pos_ptr,  # [B, S] int32, or 0 if APPLY_MASK==False
+    k_pos_ptr,
+    q_request_ptr,
+    k_request_ptr,
     out_ptr,  # [B, S, T] fp32
     # strides
     q_b,
@@ -67,6 +73,9 @@ def _v4_indexer_score_fwd(
     w_b,
     w_s: tl.constexpr,  # w strides; h-stride==1 assumed
     qpos_b,  # q_pos stride for B; s-stride==1
+    kpos_b,
+    qrequest_b,
+    krequest_b,
     out_b,
     out_s,  # out strides; t-stride==1 assumed
     # geometry
@@ -80,13 +89,16 @@ def _v4_indexer_score_fwd(
     BLOCK_T: tl.constexpr,
     # toggles
     APPLY_MASK: tl.constexpr,
+    GLOBAL_KEY_POSITIONS: tl.constexpr,
+    REQUEST_MASK: tl.constexpr,
+    DYNAMIC_HEAD_LOOP: tl.constexpr = False,
 ):
     """One program covers one (b, s_block, t_block) tile.
 
     Inner loop streams over H heads, computing
       score[s, t] = sum_h relu(sum_d q[s,h,d] * k[t,d]) * w[s,h]
-    using fp32 accumulators.  D and H are kept as compile-time constants
-    so each per-head dot is unrolled into a 1-shot tile load + reduce.
+    using fp32 accumulators. H32 prefill keeps the head loop dynamic to
+    avoid spilling the fully unrolled sequence of dot/reduce operations.
     """
     pid_b = tl.program_id(0).to(tl.int64)
     pid_s = tl.program_id(1).to(tl.int64)
@@ -120,27 +132,55 @@ def _v4_indexer_score_fwd(
         thr = (q_pos + 1) // COMPRESS_RATIO  # [BLOCK_S]
         # mask[s, t] = (t < thr[s])
         # broadcast t_off [BLOCK_T] vs thr [BLOCK_S]
-        causal = t_off[None, :] < thr[:, None]  # [BLOCK_S, BLOCK_T]
+        if GLOBAL_KEY_POSITIONS:
+            key_pos = tl.load(k_pos_ptr + pid_b * kpos_b + t_off, mask=t_mask, other=0)
+        else:
+            key_pos = t_off
+        causal = key_pos[None, :] < thr[:, None]  # [BLOCK_S, BLOCK_T]
     else:
         causal = tl.full((BLOCK_S, BLOCK_T), True, dtype=tl.int1)
+    if REQUEST_MASK:
+        q_request = tl.load(
+            q_request_ptr + pid_b * qrequest_b + s_off, mask=s_mask, other=-1
+        )
+        k_request = tl.load(
+            k_request_ptr + pid_b * krequest_b + t_off, mask=t_mask, other=-2
+        )
+        causal = causal & (q_request[:, None] == k_request[None, :])
 
     acc = tl.zeros((BLOCK_S, BLOCK_T), dtype=tl.float32)
 
-    for h in tl.static_range(H):
-        # q[s, h, d] tile [BLOCK_S, D] — keep bf16 for tensor-core mma.
-        q_ptrs = q_ptr + pid_b * q_b + s_off[:, None] * q_s + h * q_h + d_idx[None, :]
-        q_tile = tl.load(q_ptrs, mask=s_mask[:, None], other=0.0)  # [BLOCK_S, D] bf16
-
-        # dot: [BLOCK_S, D] x [D, BLOCK_T] = [BLOCK_S, BLOCK_T]
-        # bf16 inputs + out_dtype=fp32 accumulator = BF16 tensor core path.
-        # k_t was pre-transposed above the H loop.
-        score = tl.dot(q_tile, k_t, out_dtype=tl.float32)
-
-        # ReLU (V4 indexer math), then per-head weighted accumulate
-        score = tl.where(score > 0.0, score, 0.0)
-        w_ptrs = w_ptr + pid_b * w_b + s_off * w_s + h
-        w = tl.load(w_ptrs, mask=s_mask, other=0.0).to(tl.float32)  # [BLOCK_S]
-        acc += score * w[:, None]
+    if DYNAMIC_HEAD_LOOP:
+        # Use the actual positions/request IDs for interleaved CP rows/keys.
+        # Padded lanes can only keep an empty tile active; all accesses and
+        # output stores remain tail-masked, so they cannot hide a live pair.
+        if tl.sum(causal.to(tl.int32)) > 0:
+            for h in range(H):
+                q_ptrs = (
+                    q_ptr
+                    + pid_b * q_b
+                    + s_off[:, None] * q_s
+                    + h * q_h
+                    + d_idx[None, :]
+                )
+                q_tile = tl.load(q_ptrs, mask=s_mask[:, None], other=0.0)
+                score = tl.dot(q_tile, k_t, out_dtype=tl.float32)
+                score = tl.where(score > 0.0, score, 0.0)
+                w_ptrs = w_ptr + pid_b * w_b + s_off * w_s + h
+                w = tl.load(w_ptrs, mask=s_mask, other=0.0).to(tl.float32)
+                acc += score * w[:, None]
+    else:
+        # Preserve the established V4/decode configuration for other shapes.
+        for h in tl.static_range(H):
+            q_ptrs = (
+                q_ptr + pid_b * q_b + s_off[:, None] * q_s + h * q_h + d_idx[None, :]
+            )
+            q_tile = tl.load(q_ptrs, mask=s_mask[:, None], other=0.0)
+            score = tl.dot(q_tile, k_t, out_dtype=tl.float32)
+            score = tl.where(score > 0.0, score, 0.0)
+            w_ptrs = w_ptr + pid_b * w_b + s_off * w_s + h
+            w = tl.load(w_ptrs, mask=s_mask, other=0.0).to(tl.float32)
+            acc += score * w[:, None]
 
     # Write masked output: invalid s/t rows stay as 0 (won't be read by
     # topk).  Causal-masked entries get -inf so the downstream topk
@@ -159,6 +199,11 @@ def v4_indexer_score(
         torch.Tensor
     ] = None,  # [B, S] int32 — global Q position; None for no mask
     compress_ratio: int = 1,
+    *,
+    kv_positions: Optional[torch.Tensor] = None,
+    query_requests: Optional[torch.Tensor] = None,
+    key_requests: Optional[torch.Tensor] = None,
+    out: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     """V4 indexer fused score.  See module docstring for the kernel math.
 
@@ -194,22 +239,60 @@ def v4_indexer_score(
         # passing a tiny dummy avoids a Triton constexpr branch on a real ptr
         q_pos = torch.empty(1, dtype=torch.int32, device=q.device)
 
-    out = torch.empty((B, S, T), dtype=torch.float32, device=q.device)
+    if kv_positions is not None:
+        if (
+            not apply_mask
+            or kv_positions.shape != (B, T)
+            or kv_positions.dtype != torch.int32
+        ):
+            raise ValueError("global Indexer key positions require causal Q positions")
+        kv_positions = kv_positions.contiguous()
+    request_mask = query_requests is not None
+    if request_mask != (key_requests is not None):
+        raise ValueError("query/key request masks must be supplied together")
+    if request_mask:
+        if (
+            query_requests.shape != (B, S)
+            or key_requests.shape != (B, T)
+            or query_requests.dtype != torch.int32
+            or key_requests.dtype != torch.int32
+        ):
+            raise ValueError("Indexer request IDs must match complete Q/K rows")
+        query_requests, key_requests = (
+            query_requests.contiguous(),
+            key_requests.contiguous(),
+        )
+    if out is None:
+        out = torch.empty((B, S, T), dtype=torch.float32, device=q.device)
+    elif (
+        out.shape != (B, S, T)
+        or out.dtype != torch.float32
+        or out.device != q.device
+        or out.stride(-1) != 1
+    ):
+        raise ValueError("Indexer score output buffer does not match the score matrix")
     if S == 0 or T == 0:
         return out
 
-    # Tile sizes tuned on SM100 (GB200) for V4-Flash 64k+CP=4 (S=T=16384,
-    # H=64, D=128).  Best config across the 4-of-4 shape sweep was
-    # BLOCK_S=16 / BLOCK_T=256 / num_warps=4 / num_stages=2, with the
-    # BF16 tensor-core mma path enabled in the kernel above.  Smaller
-    # BLOCK_S beats the previous BLOCK_S=32 default because each program
-    # streams Q across 64 heads — fewer rows × wider T columns gives
-    # better Q reuse and more T-axis parallelism per SM.
-    # Triton 3.4 rejects tl.dot tiles with M or N below 16.  Short prompts
-    # can produce S/T < 16, so keep the MMA tile at the legal minimum and
-    # rely on the masks above to discard padded rows/columns.
-    BLOCK_S = 16
-    BLOCK_T = 256 if T >= 256 else max(16, triton.next_power_of_2(T))
+    # SM103 H32 prefill avoids register spills from full head unrolling.
+    # Query-CP cache hits can have fewer than 32 local rows. Their full
+    # head unrolling spills to the CUDA thread stack even for tiny Q.
+    # Reuse the existing loop for these masked Prefill rows; Decode keeps
+    # its established dispatch. Complete Q/K inputs remain unchanged.
+    dynamic_heads = (
+        apply_mask
+        and H == 32
+        and D == 128
+        and T >= 128
+        and (S >= 32 or (request_mask and kv_positions is not None))
+    )
+    if dynamic_heads:
+        BLOCK_S, BLOCK_T = 32, 128
+    else:
+        # Existing V4 H64 configuration, also used for decode and tiny KV.
+        # Keep MMA dimensions >=16 and mask short/tail tiles.
+        BLOCK_S = 16
+        BLOCK_T = 256 if T >= 256 else max(16, triton.next_power_of_2(T))
 
     grid = (B, triton.cdiv(S, BLOCK_S), triton.cdiv(T, BLOCK_T))
 
@@ -218,6 +301,9 @@ def v4_indexer_score(
         kv,
         weights,
         q_pos,
+        kv_positions if kv_positions is not None else q_pos,
+        query_requests if request_mask else q_pos,
+        key_requests if request_mask else q_pos,
         out,
         q.stride(0),
         q.stride(1),
@@ -227,6 +313,9 @@ def v4_indexer_score(
         weights.stride(0),
         weights.stride(1),
         q_pos.stride(0) if apply_mask else 0,
+        kv_positions.stride(0) if kv_positions is not None else 0,
+        query_requests.stride(0) if request_mask else 0,
+        key_requests.stride(0) if request_mask else 0,
         out.stride(0),
         out.stride(1),
         S=S,
@@ -237,6 +326,9 @@ def v4_indexer_score(
         BLOCK_S=BLOCK_S,
         BLOCK_T=BLOCK_T,
         APPLY_MASK=apply_mask,
+        GLOBAL_KEY_POSITIONS=kv_positions is not None,
+        REQUEST_MASK=request_mask,
+        DYNAMIC_HEAD_LOOP=dynamic_heads,
         num_warps=4,
         num_stages=2,
     )

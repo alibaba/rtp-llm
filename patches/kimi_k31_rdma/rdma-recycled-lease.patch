@@ -1,0 +1,46 @@
+--- a/internal_source/rtp_llm/cpp/disaggregate/cache_store/RdmaClientHostConnections.cpp
++++ b/internal_source/rtp_llm/cpp/disaggregate/cache_store/RdmaClientHostConnections.cpp
+@@ -47,7 +47,7 @@
+         return rdma_connection;
+     }
+ 
+-    rdma_connection = newRdmaConnection(client);
++    rdma_connection = newRdmaConnection(client, true);
+     if (rdma_connection == nullptr) {
+         RTP_LLM_LOG_WARNING("new available connections to %s:%u failed", host_.c_str(), port_);
+     }
+@@ -78,7 +78,7 @@
+ }
+ 
+ std::shared_ptr<RdmaConnection>
+-RdmaClientHostConnections::newRdmaConnection(const std::shared_ptr<::accl::barex::XClientTransport>& client) {
++RdmaClientHostConnections::newRdmaConnection(const std::shared_ptr<::accl::barex::XClientTransport>& client, bool reuse_available) {
+     // new xconnection first
+     auto callback = std::make_shared<RdmaClientConnectionCallback>(shared_from_this());
+     for (int i = 0; i < qp_count_per_rdma_connection_; i++) {  // 多建一些连接
+@@ -87,6 +87,14 @@
+ 
+     std::shared_ptr<RdmaConnection> rdma_connection;
+     for (int i = 0; i < connect_timeout_ms_; i++) {
++        // A handshake can fail while another request returns a usable lease.
++        // FillConnectionPool deliberately waits for newly created connections.
++        if (reuse_available) {
++            auto reused = getRdmaConnectionFromConnectionPool(available_connections_, true);
++            if (reused != nullptr) {
++                return reused;
++            }
++        }
+         auto rdma_connection = getRdmaConnectionFromConnectionPool(newly_connections_, true);
+         if (rdma_connection != nullptr) {
+             return rdma_connection;
+--- a/internal_source/rtp_llm/cpp/disaggregate/cache_store/RdmaClientHostConnections.h
++++ b/internal_source/rtp_llm/cpp/disaggregate/cache_store/RdmaClientHostConnections.h
+@@ -31,7 +31,7 @@
+     std::shared_ptr<RdmaConnection>
+     getRdmaConnectionFromConnectionPool(std::set<std::shared_ptr<::accl::barex::XConnection>>& connection_pool,
+                                         bool                                                   all_connected);
+-    std::shared_ptr<RdmaConnection> newRdmaConnection(const std::shared_ptr<::accl::barex::XClientTransport>& client);
++    std::shared_ptr<RdmaConnection> newRdmaConnection(const std::shared_ptr<::accl::barex::XClientTransport>& client, bool reuse_available = false);
+     void doRecycleConnections(const std::vector<std::shared_ptr<::accl::barex::XConnection>>& connections);
+ 
+ private:

@@ -29,6 +29,11 @@ public:
     // Per-stream verify errors from SpecLogitsVerifyRunner (main #1006 contract).
     std::vector<std::optional<ErrorInfo>> processor_errors;
 
+    // Opt-in tiny pinned copy, covered by transfer_done_event. No per-cycle
+    // log, extra synchronization, or collective is required for acceptance stats.
+    torch::Tensor acceptance_candidates_cpu;
+    uint64_t acceptance_cycle_id = 0;
+
     SpeculativeSamplerOutput(): transfer_done_event(std::make_shared<torch::Event>(cuda_graph::makeGraphEvent())) {}
 };
 

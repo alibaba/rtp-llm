@@ -43,6 +43,10 @@ struct PrefillCPConfig {
     bool kv_cache_sharded = false;
     // Explicit prefill CP size for decode-side fixed/SWA ring sizing; 0 = unset.
     int64_t prefill_cp_size = 0;
+    // Hybrid models share CP token ownership with SP while binding head TP
+    // per layer. Keep physical TP for linear state/weights; sparse attention
+    // explicitly binds replicated heads at model initialization.
+    bool preserve_tp_layout = false;
     bool    is_enabled() const {
         return method != CPRotateMethod::DISABLED && method != CPRotateMethod::UNKNOWN
                && method != CPRotateMethod::PREFILL_CP;
@@ -95,16 +99,16 @@ struct ParallelismConfig {
     PrefillCPConfig prefill_cp_config;
 
     int64_t get_attn_tp_size() const {
-        return prefill_cp_config.is_enabled() ? 1 : tp_size;
+        return prefill_cp_config.is_enabled() && !prefill_cp_config.preserve_tp_layout ? 1 : tp_size;
     }
     int64_t get_attn_tp_rank() const {
-        return prefill_cp_config.is_enabled() ? 0 : tp_rank;
+        return prefill_cp_config.is_enabled() && !prefill_cp_config.preserve_tp_layout ? 0 : tp_rank;
     }
     int64_t get_ffn_tp_size() const {
-        return prefill_cp_config.is_enabled() ? 1 : ffn_tp_size;
+        return prefill_cp_config.is_enabled() && !prefill_cp_config.preserve_tp_layout ? 1 : ffn_tp_size;
     }
     int64_t get_ffn_tp_rank() const {
-        return prefill_cp_config.is_enabled() ? 0 : ffn_tp_rank;
+        return prefill_cp_config.is_enabled() && !prefill_cp_config.preserve_tp_layout ? 0 : ffn_tp_rank;
     }
     std::string to_string() const;
 };

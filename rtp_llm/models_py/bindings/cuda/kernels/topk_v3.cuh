@@ -88,61 +88,38 @@ SGL_DEVICE uint32_t extract_coarse_bin(float x) {
     return key >> (16 - kBits);
 }
 
-// Smallest fp32 value `v` for which `extract_coarse_bin<kBits>(v) >= bin`, i.e. the
-// lower fp32 boundary of coarse bin `bin`. Because `extract_coarse_bin` is monotonic
-// non-decreasing in its argument, the collect pass can classify an element with two
-// fp32 comparisons against these boundaries instead of recomputing the fp16 bin --
-// removing the F2F conversion and bit-twiddle from the (compute-bound) second pass.
-// Returns -inf for bin 0 (everything qualifies) and +inf for bins past the top.
-template<uint32_t kBits>
-SGL_DEVICE float coarse_bin_lower_bound(uint32_t bin) {
-    constexpr uint32_t kShift = 16 - kBits;
-    const uint32_t     key    = bin << kShift;  // ordered16 key at the low edge of `bin`
-    // ordered16 -> fp16 value (inverse of the transform in extract_coarse_bin);
-    // finite keys only.
-    const auto to_finite_val = [](uint32_t okey) -> float {
-        const uint16_t ob = static_cast<uint16_t>(okey);
-        const uint16_t hb = (ob & 0x8000) ? static_cast<uint16_t>(ob ^ 0x8000) : static_cast<uint16_t>(~ob);
-        return cast<float>(*reinterpret_cast<const fp16_t*>(&hb));
-    };
-    // Fast path, hoisted above the per-key special cases so both keys are
-    // range-checked at once: `key` and `key - 1` both land in the finite band
-    // [0x0401, 0xFBFF] -- every boundary a finite-score threshold produces.
-    // fp16 rounds to nearest, so the fp32 boundary is the midpoint between the
-    // fp16 values at `key` and `key - 1`. (Verified bit-exact against the slow
-    // path for every bin of kBits 10 and 12, and measured faster than either
-    // per-key dispatch or an ordered-bit decrement trick -- the two conversions
-    // are independent and issue in parallel.)
-    if (key - 0x0401u <= 0xFBFFu - 0x0401u && bin < (1u << kBits)) {
-        return 0.5f * (to_finite_val(key) + to_finite_val(key - 1));
-    }
-    // Slow path: an edge of `bin` touches the +/-inf keys or NaN key space.
-    // The ordered-key line is: [0, 0x03FF) negative-NaN space, 0x03FF = -inf,
-    // [0x0400, 0xFC00) finite, 0xFC00 = +inf, (0xFC00, 0xFFFF] positive-NaN
-    // space. Treat the +/-inf keys as +/-65536 (one ideal step past fp16 max,
-    // so the midpoint lands exactly on +/-65520 -- the fp32->fp16
-    // round-to-nearest overflow threshold) and saturate NaN-space keys, keeping
-    // the returned boundaries finite-or-inf and monotone. Otherwise a threshold
-    // bin at/next to the inf bin gets NaN boundaries, the collect pass matches
-    // nothing, and rows whose scores contain >= topk (+/-)inf or >65504 values
-    // come back short -- the padded slots then illegal-address downstream.
-    if (bin == 0)
-        return -FLT_MAX;
-    if (bin >= (1u << kBits))
-        return FLT_MAX;
-    const auto to_val = [&](uint32_t okey) -> float {
-        constexpr float k_Inf = std::numeric_limits<float>::infinity();
-        if (okey < 0x03FFu)
-            return -k_Inf;
-        if (okey == 0x03FFu)
-            return -65536.0f;
-        if (okey == 0xFC00u)
-            return 65536.0f;
-        if (okey > 0xFC00u)
-            return FLT_MAX;
-        return to_finite_val(okey);
-    };
-    return 0.5f * (to_val(key) + to_val(key - 1));
+constexpr float infinity_value() {
+    return std::numeric_limits<float>::infinity();
+}
+
+// FP32 bin bounds reused from SGLang 5e79333c95c162abf079548fe40a6a2bca6c5409.
+// Includes round-to-even and signed-zero handling; no score quantization.
+template <uint32_t kBits>
+SGL_DEVICE float2 coarse_bin_bounds(uint32_t bin) {
+  constexpr uint32_t kShift = 16 - kBits;
+  static_assert(kShift >= 1, "edge keys must be even for the rounding rule below");
+  constexpr uint32_t kNegInfBin = 0x03FFu >> kShift;  // bin holding the -inf key
+  constexpr uint32_t kInfBin = 0xFC00u >> kShift;     // bin holding the +inf key
+  // ordered16 edge keys, {lo, hi} packed in the {low, high} halves.
+  const uint32_t keys = (bin << kShift) | ((bin + 1) << (kShift + 16));
+  // ordered16 -> fp16 bits per half: ~key below 0x8000 (negative), key ^ 0x8000 above.
+  const auto to_fp32 = [](uint32_t k) {
+    const uint32_t bits = k ^ 0x80008000u ^ ((~k >> 15) & 0x00010001u) * 0x7FFFu;
+    return cast<float2>(*reinterpret_cast<const __half2*>(&bits));
+  };
+  const auto [v_lo, v_hi] = to_fp32(keys);
+  const auto [u_lo, u_hi] = to_fp32(keys - 0x00010001u);
+  // Exact midpoints of adjacent fp16 values; the clamp puts one against inf on the
+  // +/-65520 overflow point.
+  const auto midpoint = [](float a, float b) { return fminf(fmaxf(0.5f * (a + b), -65520.0f), 65520.0f); };
+  const int32_t lo = __float_as_int(midpoint(v_lo, u_lo));
+  const int32_t hi = __float_as_int(midpoint(v_hi, u_hi));
+  // Ties round to even and edge keys are even, so negative edges sit one ulp above
+  // the midpoint. A zero hi steps past +0.
+  const float lo_edge = __int_as_float(lo + (lo >> 31));
+  const float hi_edge = __int_as_float(hi + (hi >> 31) + (hi == 0));
+  // Edges inside the NaN key space: every score is >= lo, none is >= hi.
+  return {bin <= kNegInfBin ? -infinity_value() : lo_edge, bin >= kInfBin ? infinity_value() : hi_edge};
 }
 
 SGL_DEVICE uint32_t warp_inclusive_sum(uint32_t lane_id, uint32_t val) {
@@ -815,8 +792,9 @@ struct TopKRegister: TopKRadixBase<12> {
         // Phase 3: collect by two fp32 boundaries (raw indices; transform applied later)
         const auto topk          = problem.topk;
         const auto threshold_bin = smem->threshold_bin;
-        const auto v_hi          = coarse_bin_lower_bound<kHistBits>(threshold_bin + 1);
-        const auto v_lo          = coarse_bin_lower_bound<kHistBits>(threshold_bin);
+        const auto bounds = coarse_bin_bounds<kHistBits>(threshold_bin);
+        const float v_hi = bounds.y;
+        const float v_lo = bounds.x;
         const auto is_above      = [&](float val) { return is_nan(val) || val >= v_hi; };
         // Deterministic positions: count per thread, take a thread-order block
         // prefix, then emit/append in the same iteration order. The atomicAdd
@@ -938,8 +916,9 @@ public:
         // v_lo <= val < v_hi (bin == threshold). This drops the F2F + bit-twiddle from
         // the second full pass over the input.
         const auto  threshold_bin = smem->threshold_bin;
-        const float v_hi          = coarse_bin_lower_bound<kHistBits>(threshold_bin + 1);
-        const float v_lo          = coarse_bin_lower_bound<kHistBits>(threshold_bin);
+        const auto bounds = coarse_bin_bounds<kHistBits>(threshold_bin);
+        const float v_hi = bounds.y;
+        const float v_lo = bounds.x;
         const auto  topk          = problem.topk;
         // Deterministic positions: one extra counting sweep, a thread-order
         // block prefix, then emit/append in the same iteration order. The
@@ -1081,8 +1060,9 @@ private:
         // across ranks, so v_hi/v_lo are too.
         const auto  topk          = problem.topk;
         const auto  threshold_bin = smem->threshold_bin;
-        const float v_hi          = coarse_bin_lower_bound<kHistBits>(threshold_bin + 1);
-        const float v_lo          = coarse_bin_lower_bound<kHistBits>(threshold_bin);
+        const auto bounds = coarse_bin_bounds<kHistBits>(threshold_bin);
+        const float v_hi = bounds.y;
+        const float v_lo = bounds.x;
         const auto  cur_out       = is_primary ? problem.out : smem->tmp_out;
         // Deterministic per-rank positions: counting sweep, thread-order block
         // prefix, then emit/append in the same iteration order. Replaces the

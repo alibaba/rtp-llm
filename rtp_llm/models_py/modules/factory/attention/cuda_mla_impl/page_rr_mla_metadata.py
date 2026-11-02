@@ -37,7 +37,7 @@ class PageRRMlaMetadata:
         self.block_tables = None
         self.query_block_tables = None
 
-    def prepare_prefill(self, inputs) -> None:
+    def prepare_prefill(self, inputs, *, sparse_query_positions: bool = False) -> None:
         """Reuse framework request metadata; add Page-RR owner-only cache slots."""
         if inputs.prefix_lengths is None:
             raise ValueError("MLA Page-RR Prefill requires prefix lengths")
@@ -113,11 +113,31 @@ class PageRRMlaMetadata:
                 kernel_page_size=self.kernel_page_size, cp_size=self.cp_size,
                 cp_rank=self.cp_rank, block=128, debug=True,
             )
+        if sparse_query_positions:
+            # Dense MLA needs only slots. Sparse Indexer additionally consumes
+            # the request identity and absolute position of each packed Q row.
+            # Keep this opt-in so the shared dense path adds no row-wise work.
+            rows = torch.arange(total_q, dtype=torch.int32, device=device)
+            padded_rows = rows if fixed_q_len else rows + padding
+            width = fixed_q_len or self.max_q
+            if total_q:
+                self.batch_indice_d = torch.div(
+                    padded_rows, width, rounding_mode="floor"
+                )
+                self.positions_d = prefixes.index_select(
+                    0, self.batch_indice_d.long()
+                ) + torch.remainder(padded_rows, width)
+            else:
+                self.batch_indice_d = rows
+                self.positions_d = rows.clone()
         stream = torch.cuda.current_stream(device)
         for tensor in (lengths, prefixes, self.qo_indptr_d,
                        self.prefill_ragged_kv_len_indptr_d, self.kv_lens_d,
                        table, padding, self.slot_mapping):
             tensor.record_stream(stream)
+        if sparse_query_positions:
+            self.positions_d.record_stream(stream)
+            self.batch_indice_d.record_stream(stream)
 
     def prepare_decode(
         self,

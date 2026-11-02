@@ -1,5 +1,8 @@
 #include "rtp_llm/cpp/normal_engine/speculative/SpeculativeSampler.h"
 #include <algorithm>
+#include <atomic>
+#include <cstdlib>
+#include <string>
 #include <vector>
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/cpp/utils/DebugUtils.h"
@@ -299,6 +302,22 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
     sample_output.accept_tokens = output_token_ids_d;
     sample_output.accept_len    = output_accepted_token_num_d;
 
+    static const bool acceptance_stats = [] {
+        const char* value = std::getenv("RTP_MTP_ACCEPTANCE_STATS");
+        return value && std::string(value) == "1";
+    }();
+    if (acceptance_stats) {
+        static std::atomic<uint64_t> next_cycle_id{1};
+        RTP_LLM_CHECK_WITH_INFO(draft_token_ids_d_t.dim() == 2
+                                    && draft_token_ids_d_t.size(0) == batch_size
+                                    && draft_token_ids_d_t.size(1) == static_cast<int64_t>(propose_step_),
+                                "acceptance stats require real [requests,proposal_steps] candidate rows");
+        sample_output.acceptance_candidates_cpu =
+            torch::empty({batch_size, static_cast<int64_t>(propose_step_)},
+                         torch::TensorOptions().dtype(torch::kInt32).device(torch::kCPU).pinned_memory(true));
+        sample_output.acceptance_candidates_cpu.copy_(draft_token_ids_d_t, /*non_blocking=*/true);
+        sample_output.acceptance_cycle_id = next_cycle_id.fetch_add(1, std::memory_order_relaxed);
+    }
     sample_output.accept_tokens_cpu = sample_output.accept_tokens.to(torch::kCPU, true);
     sample_output.accept_len_cpu    = sample_output.accept_len.to(torch::kCPU, true);
     std::vector<ReturnAllProbsMode> response_modes;

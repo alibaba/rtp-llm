@@ -99,7 +99,7 @@ cc_library(
 cc_library(
     name = "cuda_no_aux_tc",
     srcs = ["no_aux_tc_kernels.cu"],
-    hdrs = ["no_aux_tc_kernels.h"],
+    hdrs = ["no_aux_tc_kernels.h", "kimi_k3_router_radix.cuh"],
     deps = [
         "//rtp_llm/models_py/bindings/cuda:cuda_host_utils",
         "//rtp_llm/models_py/bindings/cuda:launch_utils",
@@ -238,6 +238,7 @@ cc_library(
     srcs = ["topk_v3.cu"],
     hdrs = [
         "topk_v3.h",
+        "dsa_range_topk.cuh",
         "topk_v3.cuh",
         "topk_v3_compat.cuh",
     ],

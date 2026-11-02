@@ -12,6 +12,7 @@
 #endif
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cstdlib>
 #include <map>
 #include <limits>
@@ -2063,6 +2064,7 @@ void MtpBatchStreamProcessor::prepareDecodeSpecUpdateInfo(
         // after replacing .item() with a device-side index.
         int cur_accept_len = accept_len[batch_idx_out].item<int>();
 
+
         torch::Tensor last_hidden_states;
         if (propose_step_ > 1 && !is_dspark_) {
             last_hidden_states =
@@ -2083,6 +2085,29 @@ void MtpBatchStreamProcessor::prepareDecodeSpecUpdateInfo(
         }
         spec_update_info.speculative_propose_step = propose_step_;
         spec_update_info.accepted_draft_tokens    = std::max(0, cur_accept_len - 1);
+        if (spec_decode_output.acceptance_candidates_cpu.defined()) {
+            RTP_LLM_CHECK_WITH_INFO(cur_batch_size == 1 && next_batch_size == 1,
+                                    "acceptance accounting requires one logical row per request");
+            const auto& candidate_rows = spec_decode_output.acceptance_candidates_cpu;
+            RTP_LLM_CHECK_WITH_INFO(candidate_rows.device().is_cpu() && candidate_rows.scalar_type() == torch::kInt32
+                                        && candidate_rows.is_contiguous() && candidate_rows.size(1) == propose_step_,
+                                    "acceptance candidates must own contiguous ready CPU int32 rows");
+            const auto* data = candidate_rows.data_ptr<int32_t>() + batch_idx_out * propose_step_;
+            std::vector<int> candidates(data, data + propose_step_);
+            const auto& config = *stream->generateConfig();
+            size_t tail_length = 0;
+            for (const auto& stop : config.stop_words_list) {
+                if (!stop.empty()) tail_length = std::max(tail_length, stop.size() - 1);
+            }
+            tail_length = std::min(tail_length, static_cast<size_t>(stream->seqLength()));
+            const int valid = eligibleSpeculativeCandidates(
+                candidates, stream->getLatestTokens(tail_length), stream->seqLength() - stream->inputLength(),
+                stream->maxTokenNum() - stream->seqLength(), config.min_new_tokens,
+                stream->specialTokens().eos_token_id, config.ignore_eos, config.stop_words_list);
+            spec_update_info.speculative_round = SpeculativeRoundMetrics{
+                spec_decode_output.acceptance_cycle_id, stream->seqLength(), static_cast<int>(propose_step_),
+                valid, spec_update_info.accepted_draft_tokens, stream->forceSpAccept()};
+        }
         // Per-stream verify errors from SpecLogitsVerifyRunner ride the update
         // path so grammar/think mask failures reach the stream (main #1006).
         const size_t stream_idx = spec_update_infos.size();

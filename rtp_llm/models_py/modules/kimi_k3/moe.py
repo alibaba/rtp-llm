@@ -20,7 +20,7 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
     MoEConfigAdapter,
 )
 from rtp_llm.utils.model_weight import W
-from rtp_llm.ops import MoeConfig
+from rtp_llm.ops import MoeConfig, RoleType
 from .router import KimiK3Router
 from rtp_llm.models_py.modules.factory.linear import LinearFactory
 from rtp_llm.models_py.modules.factory.linear.impl.cuda.f16_linear import (

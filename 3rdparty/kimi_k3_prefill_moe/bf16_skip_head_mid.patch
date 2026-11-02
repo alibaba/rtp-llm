@@ -1,0 +1,56 @@
+diff --git a/csrc/jit_kernels/impls/sm100_bf16_gemm.hpp b/csrc/jit_kernels/impls/sm100_bf16_gemm.hpp
+--- a/csrc/jit_kernels/impls/sm100_bf16_gemm.hpp
++++ b/csrc/jit_kernels/impls/sm100_bf16_gemm.hpp
+@@ -89 +89,2 @@
+-                            const std::optional<float>& alpha) {
++                            const std::optional<float>& alpha,
++                            const std::optional<std::string>& epilogue_type = std::nullopt) {
+@@ -114 +115 @@
+-    const auto tensor_map_cd = make_tma_cd_desc(d, m, n,
++    const auto tensor_map_cd = make_tma_cd_desc(d, m, static_cast<int>(d.size(-1)),
+@@ -134 +135 @@
+-        .epilogue = make_epilogue_input(m, n, std::nullopt, alpha)
++        .epilogue = make_epilogue_input(m, n, epilogue_type, alpha)
+diff --git a/csrc/apis/attention.hpp b/csrc/apis/attention.hpp
+--- a/csrc/apis/attention.hpp
++++ b/csrc/apis/attention.hpp
+@@ -11,0 +12 @@
++#include "../jit_kernels/impls/sm100_bf16_gemm.hpp"
+@@ -20,0 +22,28 @@
++
++static void bf16_gemm_nt_skip_head_mid(const torch::Tensor& a,
++                                       const torch::Tensor& b,
++                                       const torch::Tensor& d,
++                                       const std::tuple<int, int, int>& head_splits,
++                                       const std::string& compiled_dims) {
++    const auto major_a = get_major_type_ab(a);
++    const auto major_b = get_major_type_ab(b);
++    check_major_type_cd(d);
++    const auto [m, k] = get_shape<2>(a);
++    const auto [n, b_k] = get_shape<2>(b);
++    const auto [d_m, d_n] = get_shape<2>(d);
++    const auto [left, mid, right] = head_splits;
++    DG_HOST_ASSERT(m == d_m and k == b_k and n > 0 and k > 0);
++    DG_HOST_ASSERT(a.scalar_type() == torch::kBFloat16);
++    DG_HOST_ASSERT(b.scalar_type() == torch::kBFloat16);
++    DG_HOST_ASSERT(d.scalar_type() == torch::kBFloat16);
++    DG_HOST_ASSERT(left > 0 and mid > 0 and right > 0);
++    DG_HOST_ASSERT(n % (left + right) == 0);
++    DG_HOST_ASSERT(d_n == n + n / (left + right) * mid);
++    DG_HOST_ASSERT(jit->device.get_arch_major() == 10);
++    if (m == 0)
++        return;
++    const auto epilogue_type = std::format(
++        "epilogue::transform::EpilogueHeadSplits<{}, {}, {}>", left, mid, right);
++    sm100_bf16_gemm(a, b, std::nullopt, d, m, n, k, major_a, major_b,
++                    compiled_dims, std::nullopt, epilogue_type);
++}
+@@ -617,0 +647,3 @@
++    m.def("bf16_gemm_nt_skip_head_mid", &bf16_gemm_nt_skip_head_mid,
++          py::arg("a"), py::arg("b"), py::arg("d"), py::arg("head_splits"),
++          py::arg("compiled_dims") = "nk");
+diff --git a/deep_gemm/__init__.py b/deep_gemm/__init__.py
+--- a/deep_gemm/__init__.py
++++ b/deep_gemm/__init__.py
+@@ -58,0 +59 @@
++    bf16_gemm_nt_skip_head_mid,

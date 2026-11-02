@@ -9,6 +9,7 @@ from rtp_llm.models_py.modules import RMSNorm
 from rtp_llm.models_py.modules.factory import LinearFactory
 from rtp_llm.models_py.modules.factory.attention.attn_factory import MlaImplBase
 from rtp_llm.models_py.modules.hybrid.indexer import Indexer
+from rtp_llm.models_py.mla_routes import run_sparse_indexer
 from rtp_llm.ops import AttentionConfigs, HWKernelConfig, ParallelismConfig
 from rtp_llm.ops.compute_ops import LayerKVCache
 from rtp_llm.utils.model_weight import W
@@ -114,25 +115,13 @@ class MlaAttention(nn.Module):
         if self.indexer is None or kv_cache is None:
             return None
         q_for_indexer = q_c if self.q_lora_rank > 0 else q_view
-        topk_indices = self.indexer(
+        return run_sparse_indexer(
+            self.indexer,
             hidden_states,
             q_for_indexer,
             kv_cache,
-            fmha_impl.fmha_params,
-            fmha_impl.attn_inputs,
-            use_fast_path=not fmha_impl.is_sparse(),
-            cp_params=fmha_impl.cp_params,
+            fmha_impl,
         )
-        attn_inputs = fmha_impl.attn_inputs
-        if (
-            attn_inputs.is_prefill
-            and attn_inputs.cache_store_inputs is not None
-            and attn_inputs.cache_store_writer is not None
-        ):
-            attn_inputs.cache_store_writer.write(
-                attn_inputs.cache_store_inputs, kv_cache
-            )
-        return topk_indices
 
     def forward(
         self,

@@ -290,6 +290,8 @@ struct PyContextParallelParams {
 // counterpart carries a _device suffix.
 struct PyAttentionInputs {
     bool          is_prefill{false};
+    // Startup memory/JIT warmup owns only reserved KV block zero.
+    bool          is_warmup{false};
     bool          is_target_verify{false};
     std::optional<rtp_llm::LinearReplayInputs> linear_replay;
     torch::Tensor prefix_lengths;

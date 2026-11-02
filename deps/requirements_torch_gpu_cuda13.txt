@@ -1,5 +1,8 @@
 -r requirements_base.txt
 
+# K3/K3.1 paged KDA with FP32 checkpoints; freeze the verified cuLA ABI.
+http://artlab.alibaba-inc.com/1/pypi/rtp_llm/cuda_linear_attention/cuda_linear_attention-0.1.dev88+dcce4719.cu132-cp310-cp310-linux_x86_64.whl#sha256=aad30390809c5d4b4e017a779f046e383407c0add52f700b43917e7c5ecdc4d4
+
 # CUDA 13.2 / torch 2.11+cu130 / triton 3.6.0 dep set.
 # Includes official DeepEP main@a56d6156 built against NCCL 2.30.4 and
 # NVSHMEM 3.5.19, plus the RTP FlashInfer 0.6.9 CUDA 13.2 wheels.
@@ -69,3 +72,6 @@ tabulate==0.9.0
 
 # TileLang 0.1.15 TVM FFI ABI.
 apache-tvm-ffi==0.1.12
+
+# Exact Python helper ABI declared by cuda-linear-attention dev88.
+https://artlab.alibaba-inc.com/1/pypi/rtp_llm/flash_linear_attention/flash_linear_attention-0.5.0+rtp.3a9ce1c.6-py3-none-any.whl#sha256=20db1cc279f59abf8f18d20cc9fa575eeb152cf781cc4bff78e5a1d8a77141de

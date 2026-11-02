@@ -63,7 +63,7 @@ class KimiK3ModelConfig(ModelConfig):
         # K3's nested quantization metadata describes only routed experts.
         # The generic loader promotes it to a model-wide scheme, which would
         # quantize ordinary projections as well. Keep this policy model-local.
-        is_draft = self.model_type == "kimi_k3_mtp"
+        is_draft = self.is_mtp
         selected = self.config_dtype if is_draft else (act_type or self.config_dtype)
         if not selected or WEIGHT_TYPE.from_str(selected) != WEIGHT_TYPE.BF16:
             raise ValueError("Kimi K3 requires BF16 compute")
@@ -95,10 +95,15 @@ class KimiK3(BaseModel):
     """Kimi K3 text target using RTP's model and cache interfaces."""
 
     WEIGHT_PREFIX = "language_model."
+    HF_MODEL_TYPE = "kimi_k3"
+    MODEL_TYPE = "kimi_k3"
+    CONFIG_CLASS = KimiK3ModelConfig
+    TARGET_MODEL_CLASS = None
+    ENABLE_MULTIMODAL = True
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        if type(self) is KimiK3:
+        if not self.model_config.is_mtp:
             parallelism = self.parallelism_config
             cp = parallelism.prefill_cp_config
             local_shards = parallelism.tp_size if cp.kv_cache_sharded else 1
@@ -154,7 +159,7 @@ class KimiK3(BaseModel):
         with open(config_path, encoding="utf-8") as reader:
             config_json = json.load(reader)
         config = cls._from_config_json(config_json, ckpt_path)
-        if not config.is_mtp:
+        if not config.is_mtp and cls.ENABLE_MULTIMODAL:
             from rtp_llm.multimodal.multimodal_mixins.kimi_k3.kimi_k3_config import (
                 configure_kimi_k3_multimodal,
             )
@@ -171,18 +176,18 @@ class KimiK3(BaseModel):
             raise ValueError("Kimi K3 config must contain an object-valued text_config")
 
         model_type = config_json.get("model_type")
-        if model_type != "kimi_k3":
-            raise ValueError(f"expected outer model_type='kimi_k3', got {model_type!r}")
+        if model_type != cls.HF_MODEL_TYPE:
+            raise ValueError(f"expected outer model_type={cls.HF_MODEL_TYPE!r}, got {model_type!r}")
         if text_config.get("model_type") != "kimi_linear":
             raise ValueError(
                 "expected text_config.model_type='kimi_linear', got "
                 f"{text_config.get('model_type')!r}"
             )
 
-        config = KimiK3ModelConfig()
+        config = cls.CONFIG_CLASS()
         config.ckpt_path = ckpt_path
         config.tokenizer_path = ckpt_path
-        config.model_type = "kimi_k3"
+        config.model_type = cls.MODEL_TYPE
 
         cls._parse_basic_config(config_json, text_config, config)
         cls._parse_attention_config(text_config, config)
@@ -581,11 +586,12 @@ class KimiK3(BaseModel):
 
 
 class KimiK3Mtp(KimiK3):
+    MODEL_TYPE = "kimi_k3_mtp"
     """The independent, recurrent K3 MTP layer from a draft-only checkpoint."""
 
     @classmethod
     def speculative_weight_alias_names(cls, target_model, draft_model_config):
-        if type(target_model) is not KimiK3:
+        if type(target_model) is not (cls.TARGET_MODEL_CLASS or KimiK3):
             raise TypeError("Native K3 MTP requires a K3 target owner")
         for field in ("vocab_size", "hidden_size", "data_type", "enable_fp32_lm_head"):
             if getattr(target_model.model_config, field) != getattr(
@@ -623,8 +629,8 @@ class KimiK3Mtp(KimiK3):
     @classmethod
     def _from_config_json(cls, config_json, ckpt_path=""):
         text = config_json.get("text_config", {})
-        if config_json.get("model_type") != "kimi_k3":
-            raise ValueError("K3 MTP requires a kimi_k3 checkpoint")
+        if config_json.get("model_type") != cls.HF_MODEL_TYPE:
+            raise ValueError(f"MTP requires a {cls.HF_MODEL_TYPE} checkpoint")
         source_layer = text.get("num_hidden_layers")
         if type(source_layer) is not int or source_layer < 1:
             raise ValueError("K3 MTP requires a positive num_hidden_layers")
@@ -637,10 +643,10 @@ class KimiK3Mtp(KimiK3):
             "full_attn_layers", []
         ) or schedule_layer in schedule.get("kda_layers", []):
             raise ValueError(f"K3 MTP checkpoint layer {source_layer} must be full MLA")
-        config = KimiK3ModelConfig()
+        config = cls.CONFIG_CLASS()
         config.ckpt_path = ckpt_path
         config.tokenizer_path = ckpt_path
-        config.model_type = "kimi_k3_mtp"
+        config.model_type = cls.MODEL_TYPE
         config.is_mtp = True
         cls._parse_basic_config(config_json, text, config)
         cls._parse_attention_config(text, config)

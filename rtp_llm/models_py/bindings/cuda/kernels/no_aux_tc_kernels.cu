@@ -20,6 +20,7 @@
 #include "rtp_llm/models_py/bindings/cuda/launch_utils.h"
 #include "rtp_llm/models_py/bindings/cuda/cuda_host_utils.h"
 #include "no_aux_tc_kernels.h"
+#include "kimi_k3_router_radix.cuh"
 #include <cooperative_groups.h>
 #include <cooperative_groups/reduce.h>
 
@@ -196,7 +197,7 @@ public:
 
         for (int i = 0; i < max_arr_len_; ++i) {
             val_arr_[i] = dummy_;
-            idx_arr_[i] = 0;
+            idx_arr_[i] = cuda::std::numeric_limits<idxT>::max();
         }
     }
 
@@ -257,7 +258,8 @@ template<int capacity, bool greater, typename T, typename idxT, bool is_stable>
 class WarpSelect: public WarpSort<capacity, greater, T, idxT, is_stable> {
 public:
     __device__ WarpSelect(idxT k, T dummy):
-        WarpSort<capacity, greater, T, idxT, is_stable>(k, dummy), k_th_(dummy), k_th_lane_((k - 1) % WARP_SIZE) {
+        WarpSort<capacity, greater, T, idxT, is_stable>(k, dummy), k_th_(dummy),
+        k_th_idx_(cuda::std::numeric_limits<idxT>::max()), k_th_lane_((k - 1) % WARP_SIZE) {
 
         extern __shared__ char smem_buf[];  // extern __shared__ T smem_buf[];
 
@@ -314,7 +316,7 @@ public:
     __device__ void done() {
         if (smem_buf_len_) {
             T    val = (lane_ < smem_buf_len_) ? val_smem_[lane_] : dummy_;
-            idxT idx = (lane_ < smem_buf_len_) ? idx_smem_[lane_] : 0;
+            idxT idx = (lane_ < smem_buf_len_) ? idx_smem_[lane_] : cuda::std::numeric_limits<idxT>::max();
             merge_buf_(val, idx);
         }
 
@@ -690,6 +692,21 @@ void invokeFusedSigmoidTopk(float const*       router_logits,
                             bool               renormalize,
                             double const       routed_scaling_factor,
                             cudaStream_t const stream) {
+    // The C++17 radix candidate is qualified for Blackwell Prefill shapes.
+    // Keep the existing path for small Decode/verify batches and int64 ids.
+    if constexpr (std::is_same_v<IdxT, int32_t>) {
+        if (num_tokens >= 1024 && num_experts == 896 && topk == 16
+            && get_sm() >= 100 && get_sm() < 110) {
+            kimi_k3_router_radix::RouteRadixParams params{
+                router_logits, correction_bias, topk_values, topk_indices,
+                nullptr, static_cast<int>(num_tokens), num_experts, topk, topk, 0,
+                static_cast<float>(routed_scaling_factor), renormalize ? 1 : 0, 1, 1};
+            kimi_k3_router_radix::route_radix_kernel<false, float>
+                <<<num_tokens, 224, 0, stream>>>(params);
+            check_cuda_error();
+            return;
+        }
+    }
     fused_sigmoid_topk_kernel<IdxT><<<num_tokens, 256, 2048, stream>>>(router_logits,
                                                                       correction_bias,
                                                                       topk_values,

@@ -4,26 +4,27 @@ import inspect
 import math
 
 
-def mega_moe_functions(activation):
+def mega_moe_functions(activation, *, backend=None):
     """Keep the kernel, weight transform and workspace in one library ABI.
 
     DeepGEMM 2.8.2 separates SiTU/BF16-shared experts from the generic FP8
     shared-expert implementation. Their symmetric layouts are not interchangeable.
     """
-    import deep_gemm
+    if backend is None:
+        import deep_gemm as backend
 
     try:
         if activation == "situ":
             return (
-                deep_gemm.fp8_fp4_mega_moe_k3,
-                deep_gemm.transform_weights_for_mega_moe_k3,
-                deep_gemm.get_symm_buffer_for_mega_moe_k3,
+                backend.fp8_fp4_mega_moe_k3,
+                backend.transform_weights_for_mega_moe_k3,
+                backend.get_symm_buffer_for_mega_moe_k3,
             )
         if activation == "swiglu":
             return (
-                deep_gemm.fp8_fp4_mega_moe,
-                deep_gemm.transform_weights_for_mega_moe,
-                deep_gemm.get_symm_buffer_for_mega_moe,
+                backend.fp8_fp4_mega_moe,
+                backend.transform_weights_for_mega_moe,
+                backend.get_symm_buffer_for_mega_moe,
             )
     except AttributeError as error:
         raise RuntimeError(

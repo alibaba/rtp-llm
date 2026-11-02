@@ -438,14 +438,19 @@ void CacheConfigCreator::configureDecodeLinearPool(CacheConfig&             conf
             || group.policy.memory_placement != CacheMemoryPlacement::DEVICE || group.policy.explicit_block_num > 0) {
             continue;
         }
-        constexpr uint64_t kTailBlocksPerStream = 2;
+        // Match LinearCacheManager's retained tails, then reserve the next
+        // destination before an in-flight round releases those old states.
+        // At a page boundary a full Decode cohort can need this extra block
+        // for every stream, not just for the few reserve streams below.
+        const uint64_t kTailBlocksPerStream =
+            std::max<uint64_t>(2, group.policy.active_tail_blocks) + 1;
         constexpr uint64_t kReserveStreams = 4;
         RTP_LLM_CHECK_WITH_INFO(runtime_config.max_generate_batch_size > 0,
                                 "Decode LINEAR pool requires positive concurrency, got %ld",
                                 static_cast<long>(runtime_config.max_generate_batch_size));
         const uint64_t concurrency = static_cast<uint64_t>(runtime_config.max_generate_batch_size);
-        RTP_LLM_CHECK_WITH_INFO(concurrency <= std::numeric_limits<uint32_t>::max() / kTailBlocksPerStream
-                                                  - kReserveStreams,
+        RTP_LLM_CHECK_WITH_INFO(concurrency + kReserveStreams
+                                   <= std::numeric_limits<uint32_t>::max() / kTailBlocksPerStream,
                                 "Decode LINEAR pool block count overflows uint32: concurrency=%lu",
                                 static_cast<unsigned long>(concurrency));
         group.policy.explicit_block_num = static_cast<uint32_t>(kTailBlocksPerStream * (concurrency + kReserveStreams));

@@ -6,8 +6,11 @@
 #include <cuda_bf16.h>
 #include <cuda_fp8.h>
 #include <c10/cuda/CUDAGuard.h>
+#include <c10/cuda/CUDAException.h>
 #include <ATen/cuda/CUDAContext.h>
 #include <cmath>
+#include <cstdlib>
+#include <cstdint>
 #include <type_traits>
 
 namespace rtp_llm {
@@ -476,6 +479,38 @@ __inline__ __device__ Tout scaled_convert_typed(const Tin& x, const float scale)
 
 }  // namespace fp8
 
+#ifndef USE_ROCM
+// Warp-per-row vector copies follow SGLang f92199b's set_mla_kv_buffer
+// (Apache-2.0). The pinned implementation uses ordinary vector loads/stores;
+// its historical "TMA" docstring does not imply cp.async.bulk instructions.
+// Keep slot zero valid and skip every negative PageRR/padding slot.
+__global__ void cache_mla_bf16_warp_rows(const char* __restrict__ latent,
+                                       const char* __restrict__ suffix,
+                                       char* __restrict__ cache,
+                                       const int64_t* __restrict__ slots,
+                                       int64_t rows,
+                                       int64_t latent_stride,
+                                       int64_t suffix_stride,
+                                       int64_t block_stride,
+                                       int64_t entry_stride,
+                                       int64_t page_size) {
+    const int64_t row = static_cast<int64_t>(blockIdx.x) * 8 + threadIdx.x / 32;
+    if (row >= rows) return;
+    const int64_t slot = slots[row];
+    if (slot < 0) return;
+    const int lane = threadIdx.x % 32;
+    const auto* src = reinterpret_cast<const uint4*>(latent + row * latent_stride);
+    const auto a = src[lane];
+    const auto b = src[lane + 32];
+    const auto rope = reinterpret_cast<const uint32_t*>(suffix + row * suffix_stride)[lane];
+    char* destination = cache + (slot / page_size) * block_stride + (slot % page_size) * entry_stride;
+    auto* dst = reinterpret_cast<uint4*>(destination);
+    dst[lane] = a;
+    dst[lane + 32] = b;
+    reinterpret_cast<uint32_t*>(destination + 1024)[lane] = rope;
+}
+#endif
+
 // Concat and cache MLA kernel (non-dynamic-scaling version)
 template<typename scalar_t, typename cache_t, Fp8KVCacheDataType kv_dt>
 __global__ void
@@ -875,6 +910,8 @@ void concat_and_cache_mla(torch::Tensor&     kv_c,          // [num_tokens, kv_l
         TORCH_CHECK(kv_cache.size(2) == kv_lora_rank + pe_dim);
     }
 
+    if (num_tokens == 0) return;
+
     int kv_c_stride  = kv_c.stride(0);
     int k_pe_stride  = k_pe.stride(0);
     int block_stride = kv_cache.stride(0);
@@ -882,6 +919,36 @@ void concat_and_cache_mla(torch::Tensor&     kv_c,          // [num_tokens, kv_l
 
     const c10::cuda::CUDAGuard device_guard(kv_c.device());
     const cudaStream_t         stream = c10::cuda::getCurrentCUDAStream();
+
+#ifndef USE_ROCM
+    // Static policy permits an isolated legacy/new A/B in separate processes.
+    // Small Decode writes and every quantized/unaligned layout retain the
+    // existing implementation. No scale or arithmetic semantics change.
+    static const bool vector_bf16_writer = [] {
+        const char* value = std::getenv("RTP_MLA_BF16_CACHE_WRITER");
+        TORCH_CHECK(value == nullptr || std::string(value) == "auto" || std::string(value) == "legacy",
+                    "RTP_MLA_BF16_CACHE_WRITER must be auto or legacy");
+        return value == nullptr || std::string(value) == "auto";
+    }();
+    if (vector_bf16_writer && num_tokens >= 128 && kv_cache_dtype == "auto"
+        && kv_c.scalar_type() == torch::kBFloat16 && k_pe.scalar_type() == torch::kBFloat16
+        && kv_cache.scalar_type() == torch::kBFloat16 && slot_mapping.scalar_type() == torch::kInt64
+        && kv_lora_rank == 512 && pe_dim == 64 && kv_c.stride(1) == 1 && k_pe.stride(1) == 1
+        && kv_cache.stride(2) == 1 && slot_mapping.stride(0) == 1
+        && reinterpret_cast<uintptr_t>(kv_c.data_ptr()) % 16 == 0
+        && reinterpret_cast<uintptr_t>(k_pe.data_ptr()) % 4 == 0
+        && reinterpret_cast<uintptr_t>(kv_cache.data_ptr()) % 16 == 0
+        && kv_c_stride % 8 == 0 && k_pe_stride % 2 == 0
+        && block_stride % 8 == 0 && entry_stride % 8 == 0) {
+        cache_mla_bf16_warp_rows<<<(num_tokens + 7) / 8, 256, 0, stream>>>(
+            static_cast<const char*>(kv_c.data_ptr()), static_cast<const char*>(k_pe.data_ptr()),
+            static_cast<char*>(kv_cache.data_ptr()), slot_mapping.data_ptr<int64_t>(), num_tokens,
+            static_cast<int64_t>(kv_c_stride) * 2, static_cast<int64_t>(k_pe_stride) * 2,
+            static_cast<int64_t>(block_stride) * 2, static_cast<int64_t>(entry_stride) * 2, block_size);
+        C10_CUDA_KERNEL_LAUNCH_CHECK();
+        return;
+    }
+#endif
 
     if (kv_cache_dtype == "fp8_ds_mla") {
         dim3 grid(num_tokens);

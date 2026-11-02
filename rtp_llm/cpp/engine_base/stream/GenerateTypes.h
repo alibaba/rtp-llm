@@ -1,6 +1,7 @@
 #pragma once
 #include "rtp_llm/cpp/multimodal_processor/V41Input.h"
 #include <cstdint>
+#include "rtp_llm/cpp/engine_base/stream/SpeculativeAcceptance.h"
 #include <optional>
 #include <sstream>
 #include <string>
@@ -152,6 +153,7 @@ struct AuxInfo {
     int32_t                      decode_disk_reuse_len    = 0;
     int32_t                      speculative_draft_rounds = 0;
     std::vector<int32_t>         speculative_accepted_tokens_per_pos;
+    std::map<std::string, int64_t> speculative_metrics;
     std::string                  generation_prefill_cuda_graph_status = "not_requested";
     std::optional<torch::Tensor> cum_log_probs;
     std::optional<torch::Tensor> all_probs;

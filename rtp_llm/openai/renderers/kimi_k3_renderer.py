@@ -1380,3 +1380,4 @@ class KimiK3Renderer(CustomChatRenderer):
 
 
 register_renderer("kimi_k3", KimiK3Renderer)
+register_renderer("kimi_k31", KimiK3Renderer)

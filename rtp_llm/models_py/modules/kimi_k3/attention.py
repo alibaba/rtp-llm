@@ -53,6 +53,13 @@ class KimiK3KDA(KdaAttention):
                 )
             )
         input_projection, forget_projection, output_projection = projections
+        if getattr(runtime, "dsa", None) is not None and input_projection.weight.dtype == torch.bfloat16:
+            from rtp_llm.models_py.modules.factory.linear.impl.cuda.bf16_comm_fusion import prepare_bf16_projection
+
+            prepare_bf16_projection(input_projection, alignment=128)
+            prepare_bf16_projection(output_projection)
+            weights[K3W.KDA_INPUT] = input_projection.weight.T
+            weights[W.linear_attn_out_w] = output_projection.weight.T
         from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp8_gemm_linear import (
             CudaFp8GEMMLinear,
         )

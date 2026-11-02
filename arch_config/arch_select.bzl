@@ -47,6 +47,16 @@ _PPU_LOCK_SKIPPED = [
 
 def requirement(names):
     for name in names:
+        if name == "cuda-linear-attention":
+            native.py_library(
+                name = name,
+                deps = select({
+                    "@rtp_llm//:using_cuda13_x86": [requirement_gpu_cuda13(name)],
+                    "//conditions:default": [],
+                }),
+                visibility = ["//visibility:public"],
+            )
+            continue
         if name == "flash-mla-legacy":
             # Compatibility label: current CUDA13 FlashMLA includes legacy ops.
             native.py_library(

@@ -1745,12 +1745,13 @@ class MlaDcpCommunicator:
         all_gather_into(local_q.view(wire_dtype), output.view(wire_dtype), Group.TP)
         return output
 
-    def combine(self, partial_o, partial_lse, local_seq_lens):
+    def combine(self, partial_o, partial_lse, local_seq_lens, *, output_dim=None):
         import triton
 
         tokens, heads, dim = partial_o.shape
+        expected_dim = self.latent_dim if output_dim is None else output_dim
         if (
-            heads != self.heads or dim != self.latent_dim
+            heads != self.heads or dim != expected_dim or dim <= 0 or dim % 2
             or partial_o.dtype != torch.bfloat16 or not partial_o.is_contiguous()
             or partial_lse.shape != (tokens, heads) or partial_lse.dtype != torch.float32
             or not partial_lse.is_contiguous() or local_seq_lens.numel() != tokens

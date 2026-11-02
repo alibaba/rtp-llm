@@ -46,7 +46,9 @@ public:
                          const std::shared_ptr<KVCacheManager>&         cache_manager,
                          MlaOpsType                                     mla_ops_type       = MlaOpsType::AUTO,
                          int32_t                                        kv_cache_group_num = 1,
-                         bool                                           warm_up            = false);
+                         bool                                           warm_up            = false,
+                         std::function<void()>                          profile_step_start = nullptr,
+                         std::function<void()>                          profile_step_finish = nullptr);
 
     absl::Status process(const std::list<GenerateStreamPtr>& streams, int64_t schedule_time_us = 0) override;
     bool         updateEplbConfig(const EPLBConfig& config) override;
@@ -256,6 +258,10 @@ protected:
     void releaseAllModelBuffers(bool defer_reclaim = false);
 
 private:
+    void startProfileStep(bool is_fake_stream);
+    std::function<void()> profile_step_start_;
+    std::function<void()> profile_step_finish_;
+    bool profile_step_started_ = false;
     static torch::Tensor snapshotMutableHostInputToCuda(const torch::Tensor& tensor, TensorHolder& holder);
 
     static bool canEarlyReturnTargetOnlyPrefill(int64_t dp_size, bool enable_ffn_disaggregate);

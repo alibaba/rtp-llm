@@ -30,11 +30,13 @@ class KdaMetadata(object):
         prefill_conv1d_meta: Optional[CausalConv1dMetadata] = None,
         is_target_verify: bool = False,
         prefill_paged_conv_meta=None,
+        query_layout=None,
     ):
         self.prefill_conv1d_meta = prefill_conv1d_meta
         self.is_target_verify = is_target_verify
         self.prefill_paged_conv_meta = prefill_paged_conv_meta
         self.prefill_cuda_inputs = {}
+        self.query_layout = query_layout
 
     def get_prefill_conv1d_meta(self) -> Optional[CausalConv1dMetadata]:
         return self.prefill_conv1d_meta
@@ -145,6 +147,32 @@ class KdaPrefill(KdaBase):
                 position = (prefix - 1) // seq_size_per_block
                 if position >= table.shape[1] or int(table[row, position]) <= 0:
                     raise ValueError("KDA convolution is missing a cached prefix state")
+
+    @staticmethod
+    def _warmup_cache_inputs(attn_inputs, cache_tensor):
+        if cache_tensor is None or not getattr(attn_inputs, "is_warmup", False):
+            return attn_inputs, cache_tensor
+        # The engine aliases dummy history to reserved block zero. cuLA uses
+        # zero to mean a virtual request and would skip its temporal compute.
+        # Give startup probes a private valid state slot instead; preserve
+        # real-request validation and never publish into the original cache.
+        import copy
+
+        table = attn_inputs.kv_cache_kernel_block_id
+        if table.device.type != "cpu":
+            raise ValueError("KDA startup cache probes require host block IDs")
+        view = copy.copy(attn_inputs)
+        slots = torch.arange(
+            1, table.shape[0] + 1, dtype=table.dtype, device=table.device
+        )[:, None]
+        view.kv_cache_kernel_block_id = torch.where(table >= 0, slots, table)
+        view.kv_cache_kernel_block_id_device = view.kv_cache_kernel_block_id.to(
+            device=cache_tensor.device, non_blocking=True
+        )
+        scratch = cache_tensor.new_zeros(
+            (max(2, table.shape[0] + 1), cache_tensor.shape[1])
+        )
+        return view, scratch
 
     def _conv1d(
         self,
@@ -298,6 +326,9 @@ class KdaPrefill(KdaBase):
                 kv_cache.kv_cache_base.shape[0], -1
             )
             seq_size_per_block = kv_cache.seq_size_per_block
+        attn_inputs, kv_cache_tensor = self._warmup_cache_inputs(
+            attn_inputs, kv_cache_tensor
+        )
         attn_out = self._compute_attention(
             mixed_qkv,
             forget_gate,

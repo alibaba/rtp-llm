@@ -1,0 +1,91 @@
+# SPDX-License-Identifier: Apache-2.0
+"""IEEE FP32 head weights, adapted from GLM 15ae7b0d's fused projection.
+
+BF16 hidden values are widened in registers. The FP32 weight product, Q-scale
+and model scaling retain the existing FP32 contract; TF32 is never selected.
+"""
+from typing import Optional
+import torch
+import triton
+import triton.language as tl
+MAX_K = 8192
+
+@triton.jit
+def _fused_logits_head_gate_kernel(x_ptr, w_ptr, qs_ptr, out_ptr, scale_const, T, K: tl.constexpr, N: tl.constexpr, stride_x_t, stride_w_n, stride_w_k, stride_qs_t, stride_o_t, BLOCK_M: tl.constexpr, BLOCK_K: tl.constexpr, BLOCK_N: tl.constexpr, W_IS_TRANSPOSED: tl.constexpr):
+    pid_m = tl.program_id(0).to(tl.int64)
+    offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M).to(tl.int64)
+    mask_m = offs_m < T
+    offs_n = tl.arange(0, BLOCK_N)
+    mask_n = offs_n < N
+    acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+    for k0 in range(0, K, BLOCK_K):
+        offs_k = k0 + tl.arange(0, BLOCK_K)
+        mask_k = offs_k < K
+        x = tl.load(x_ptr + offs_m[:, None] * stride_x_t + offs_k[None, :], mask=mask_m[:, None] & mask_k[None, :], other=0.0).to(tl.float32)
+        if W_IS_TRANSPOSED:
+            w = tl.load(w_ptr + offs_k[:, None] * stride_w_k + offs_n[None, :] * stride_w_n, mask=mask_k[:, None] & mask_n[None, :], other=0.0).to(tl.float32)
+            acc += tl.dot(x, w, out_dtype=tl.float32, input_precision='ieee')
+        else:
+            w = tl.load(w_ptr + offs_n[:, None] * stride_w_n + offs_k[None, :] * stride_w_k, mask=mask_n[:, None] & mask_k[None, :], other=0.0).to(tl.float32)
+            acc += tl.dot(x, tl.trans(w), out_dtype=tl.float32, input_precision='ieee')
+    qs = tl.load(qs_ptr + offs_m[:, None] * stride_qs_t + offs_n[None, :], mask=mask_m[:, None] & mask_n[None, :], other=0.0)
+    out = acc * qs * scale_const
+    tl.store(out_ptr + offs_m[:, None] * stride_o_t + offs_n[None, :], out, mask=mask_m[:, None] & mask_n[None, :])
+
+@triton.jit
+def _fused_logits_head_gate_small_t_kernel(x_ptr, w_ptr, qs_ptr, out_ptr, scale_const, K: tl.constexpr, stride_x_t, stride_w_n, stride_w_k, stride_qs_t, stride_o_t, BLOCK_K: tl.constexpr):
+    t = tl.program_id(0).to(tl.int64)
+    n = tl.program_id(1)
+    offs_k = tl.arange(0, BLOCK_K)
+    mask_k = offs_k < K
+    x = tl.load(x_ptr + t * stride_x_t + offs_k, mask=mask_k, other=0.0).to(tl.float32)
+    w = tl.load(w_ptr + n * stride_w_n + offs_k * stride_w_k, mask=mask_k, other=0.0).to(tl.float32)
+    acc = tl.sum(x * w, axis=0)
+    qs = tl.load(qs_ptr + t * stride_qs_t + n).to(tl.float32)
+    out = acc * qs * scale_const
+    tl.store(out_ptr + t * stride_o_t + n, out)
+
+def _baseline_logits_head_gate(x: torch.Tensor, q_scale: torch.Tensor, weights_proj: torch.nn.Module, scale_const: float) -> torch.Tensor:
+    x_fp32 = x.float()
+    w = weights_proj(x_fp32)
+    if q_scale.dim() == 2:
+        q_scale_b = q_scale.unsqueeze(-1)
+    else:
+        q_scale_b = q_scale
+    return w.unsqueeze(-1) * q_scale_b * scale_const
+
+def fused_logits_head_gate(x: torch.Tensor, q_scale: torch.Tensor, weight: torch.Tensor, scale_const: float, fallback_proj: Optional[torch.nn.Module]=None) -> torch.Tensor:
+    assert x.dim() == 2
+    assert weight.dim() == 2
+    (T, K) = x.shape
+    (N, K_w) = weight.shape
+    assert K == K_w, f'x.shape[1]={K} but weight.shape[1]={K_w}'
+    if q_scale.dim() == 3:
+        assert q_scale.shape[-1] == 1
+        qs_2d = q_scale.squeeze(-1)
+    elif q_scale.dim() == 2:
+        qs_2d = q_scale
+    else:
+        raise ValueError(f'q_scale must be 2-D or 3-D, got {q_scale.shape}')
+    assert qs_2d.shape == (T, N), f'q_scale shape {qs_2d.shape} != (T={T}, N={N})'
+    use_fast_path = x.is_cuda and weight.device == x.device and qs_2d.device == x.device and x.dtype in (torch.bfloat16, torch.float16) and weight.dtype in (torch.bfloat16, torch.float16, torch.float32) and x.is_contiguous() and (K <= MAX_K) and (qs_2d.dtype == torch.float32) and qs_2d.is_contiguous()
+    if not use_fast_path:
+        if fallback_proj is None:
+            raise ValueError('fused_logits_head_gate fast path unsupported and no fallback_proj provided')
+        return _baseline_logits_head_gate(x, q_scale, fallback_proj, scale_const)
+    out_2d = torch.empty((T, N), dtype=torch.float32, device=x.device)
+    if T == 0:
+        return out_2d.unsqueeze(-1)
+    w_is_transposed = weight.stride(0) < weight.stride(1)
+    if T <= 32:
+        BLOCK_K = triton.next_power_of_2(K)
+        num_warps = 4 if K >= 4096 else 2
+        _fused_logits_head_gate_small_t_kernel[T, N](x, weight, qs_2d, out_2d, float(scale_const), K, x.stride(0), weight.stride(0), weight.stride(1), qs_2d.stride(0), out_2d.stride(0), BLOCK_K=BLOCK_K, num_warps=num_warps)
+    else:
+        BLOCK_M = 32
+        BLOCK_K = 128
+        BLOCK_N = triton.next_power_of_2(max(N, 16))
+        grid = (triton.cdiv(T, BLOCK_M),)
+        num_warps = 4 if N <= 128 else 8
+        _fused_logits_head_gate_kernel[grid](x, weight, qs_2d, out_2d, float(scale_const), T, K, N, x.stride(0), weight.stride(0), weight.stride(1), qs_2d.stride(0), out_2d.stride(0), BLOCK_M=BLOCK_M, BLOCK_K=BLOCK_K, BLOCK_N=BLOCK_N, W_IS_TRANSPOSED=w_is_transposed, num_warps=num_warps, num_stages=3)
+    return out_2d.unsqueeze(-1)

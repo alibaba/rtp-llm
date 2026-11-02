@@ -112,6 +112,10 @@ class KdaAttention(nn.Module):
                 all_gather(hidden, Group.TP) if self.tp_size > 1 else hidden
             )
             fused = self.input(full_hidden)
+        layout = getattr(metadata, "query_layout", None)
+        if layout is not None:
+            fused = layout.gather_natural(fused)
+            attention_inputs = layout.natural_attention(attention_inputs)
         logical_width = 4 * self.width + self.fa_width + self.heads
         if fused.shape[-1] < logical_width:
             raise ValueError(
@@ -153,8 +157,14 @@ class KdaAttention(nn.Module):
             )
         else:
             output = self.norm(
-                output.reshape(-1, self.dim), gate.reshape(-1, self.dim)
+                output.reshape(-1, self.heads, self.dim),
+                gate.reshape(-1, self.heads, self.dim),
             )
+        if layout is not None:
+            if self._fp8_output_norm:
+                values, scales = layout.scatter_rankmajor(values, scales)
+            else:
+                output, _ = layout.scatter_rankmajor(output.reshape(-1, self.width))
         use_fused_rs = (
             self._fp8_collective is not None
             and self._fp8_collective.eligible_rs(

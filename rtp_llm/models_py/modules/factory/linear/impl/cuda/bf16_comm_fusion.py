@@ -11,6 +11,23 @@ from rtp_llm.models_py.distributed.collective_torch import (
 )
 
 
+def prepare_bf16_projection(projection, *, alignment=1):
+    """Bind a contiguous NN weight once; optionally zero-pad output channels."""
+    weight = projection.weight
+    if weight.ndim != 2 or weight.dtype != torch.bfloat16 or projection.bias is not None:
+        raise ValueError("BF16 collective requires a bias-free BF16 matrix")
+    if alignment <= 0:
+        raise ValueError("BF16 projection alignment must be positive")
+    logical_n, k = weight.shape
+    physical_n = (logical_n + alignment - 1) // alignment * alignment
+    prepared = weight.T.contiguous() if physical_n == logical_n else weight.new_zeros((k, physical_n))
+    if physical_n != logical_n:
+        prepared[:, :logical_n].copy_(weight.T)
+    projection.weight = prepared.T
+    projection.logical_out_features = logical_n
+    return prepared
+
+
 class Bf16CollectiveProjection:
     """Own prefill workspaces; decode keeps its existing graph-local policy."""
 

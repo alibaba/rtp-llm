@@ -621,7 +621,8 @@ class KimiK3Weight(ModelDeployWeightInfo):
         """
 
         cfg = self._mla_config()
-        replicate_query_heads = self.role_type == RoleType.DECODE
+        replicate_query_heads = self._replicate_mla_query_heads()
+        projection_tp_size, projection_tp_rank = self._mla_projection_parallelism()
 
         def _mla(name, suffix, process_fun, *, replicated=False):
             weight_cls = _MlaReplicatedWeight if replicated else MlaAttnAtomicWeight
@@ -670,8 +671,8 @@ class KimiK3Weight(ModelDeployWeightInfo):
                 ],
                 functools.partial(
                     _merge_mla_input_projections,
-                    tp_size=self.tp_size,
-                    tp_rank=self.tp_rank,
+                    tp_size=projection_tp_size,
+                    tp_rank=projection_tp_rank,
                 ),
                 config=cfg,
             ),
@@ -715,6 +716,12 @@ class KimiK3Weight(ModelDeployWeightInfo):
             _KimiK3MlaKVWeight(sub_weights=kv_weights, name=W.mla_kv_b_w)
         )
         return weights
+
+    def _mla_projection_parallelism(self):
+        return self.tp_size, self.tp_rank
+
+    def _replicate_mla_query_heads(self):
+        return self.role_type == RoleType.DECODE
 
     def _create_rope_w(self) -> Optional[AtomicWeight]:
         # Main's MLA implementations already support absent RoPE weights.

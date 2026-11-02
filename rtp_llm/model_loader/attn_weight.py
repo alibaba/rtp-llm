@@ -4,7 +4,7 @@ import torch
 from pydantic import BaseModel
 from rtp_llm.model_loader.load_config import LoadConfig
 from rtp_llm.model_loader.weight_module import AtomicWeight
-from rtp_llm.utils.model_weight import CkptWeightInfo, identity, W
+from rtp_llm.utils.model_weight import CkptWeightInfo, identity, sp_id, W
 
 
 class AttnConfig(BaseModel):
@@ -38,6 +38,7 @@ class MlaConfig(BaseModel):
     v_head_dim: int = -1
     use_mla: bool = False
     q_use_lora: bool = False
+    replicated: bool = False
 
 
 class MlaAttnAtomicWeight(AtomicWeight):
@@ -53,6 +54,9 @@ class MlaAttnAtomicWeight(AtomicWeight):
     ):
         self.config = config
         super().__init__(name, weights, process_fun, data_type, *args, **kwargs)
+
+    def _get_split_func(self):
+        return sp_id if getattr(self.config, "replicated", False) else super()._get_split_func()
 
     @property
     def head_num(self) -> int:

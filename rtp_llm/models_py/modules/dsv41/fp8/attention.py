@@ -18,7 +18,6 @@ import os
 import threading
 import weakref
 from contextlib import contextmanager, suppress
-from functools import lru_cache
 from typing import Any, Dict, NamedTuple, Optional, Tuple, Union
 
 import deep_gemm
@@ -76,22 +75,9 @@ from rtp_llm.models_py.modules.dsv41.utils import (
     merge_v41_qkv_weights,
 )
 from rtp_llm.models_py.utils.memory import dispose_tensor
-
-
-@lru_cache(maxsize=1)
-def _configure_flash_mla_l2_persist() -> None:
-    """Configure the process-wide FlashMLA policy once, before inference.
-
-    Per-call persisting-L2 setup invokes cudaDeviceSetLimit and can block the
-    host behind previously queued layer work. Disable it by default. An
-    explicit FLASH_MLA_NO_L2_PERSIST=0 restores the wheel's original policy;
-    the wheel tests presence rather than value, so remove the native flag in
-    that case. Cache this initialization so later layers do not reset it.
-    """
-    if os.environ.get("FLASH_MLA_NO_L2_PERSIST", "1") == "0":
-        os.environ.pop("FLASH_MLA_NO_L2_PERSIST", None)
-    else:
-        os.environ.setdefault("FLASH_MLA_NO_L2_PERSIST", "1")
+from rtp_llm.models_py.utils.flash_mla_policy import (
+    configure_flash_mla_l2_persist as _configure_flash_mla_l2_persist,
+)
 
 
 from rtp_llm.models_py.modules.dsv41.attn_type import (

@@ -13,8 +13,10 @@ if TYPE_CHECKING:
 
 
 @torch.compile(backend="inductor")
-def gate_sigmoid_mul(attn_out: torch.Tensor, gate: torch.Tensor) -> torch.Tensor:
-    return attn_out * gate.sigmoid()
+def gate_sigmoid_mul(attn_out: torch.Tensor, gate: torch.Tensor,
+                     valid_mask: torch.Tensor | None = None) -> torch.Tensor:
+    result = attn_out * gate.sigmoid()
+    return result if valid_mask is None else torch.where(valid_mask[:, None], result, 0)
 
 @triton.jit
 def _silu_and_mul_kernel(

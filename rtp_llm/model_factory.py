@@ -25,6 +25,7 @@ from rtp_llm.device.device_type import is_hip
 from rtp_llm.model_factory_register import _model_factory, ensure_model_registered
 from rtp_llm.ops import (
     ProfilingDebugLoggingConfig,
+    RoleType,
     SpeculativeType,
     TaskType,
     VitSeparation,
@@ -152,7 +153,7 @@ class ModelFactory:
             or sp_type == SpeculativeType.DSPARK
         ):
             model_type = propose_model_config.model_type
-            if model_type in ("deepseek-v3-mtp", "mixtbstars-mtp", "kimi_k3_mtp"):
+            if model_type in ("deepseek-v3-mtp", "mixtbstars-mtp", "kimi_k3_mtp", "kimi_k31_mtp"):
                 logging.warning(
                     f"create sp model type is {model_type}, so change the sp type to mtp"
                 )
@@ -412,6 +413,25 @@ class ModelFactory:
             engine_config: EngineConfig to update
             model_config: ModelConfig containing model information
         """
+        runtime = getattr(model_config, "k3_runtime_config", None)
+        parallel = engine_config.parallelism_config
+        if (
+            getattr(runtime, "dsa", None) is not None
+            and parallel.role_type == RoleType.PREFILL
+            and parallel.tp_size > 1
+        ):
+            from rtp_llm.ops import CPRotateMethod
+
+            cp = parallel.prefill_cp_config
+            if not cp.kv_cache_sharded:
+                raise ValueError("K3.1 query CP requires PageRR cache sharding")
+            cp.method = CPRotateMethod.ALL_GATHER
+            cp.prefill_cp_size = parallel.tp_size
+            cp.preserve_tp_layout = True
+            logging.info(
+                "K3.1 automatic Prefill query CP=%d, KDA retains TP layout",
+                parallel.tp_size,
+            )
         # Finalize scheduler config based on ModelConfig (only once, for main model)
         finalize_scheduler_config(
             fifo_scheduler_config=engine_config.runtime_config.fifo_scheduler_config,

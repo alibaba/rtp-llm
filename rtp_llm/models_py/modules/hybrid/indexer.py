@@ -27,6 +27,8 @@ class Indexer(nn.Module):
         hw_kernel_config: Optional["HWKernelConfig"] = None,
         parallelism_config: Optional[ParallelismConfig] = None,
         scale_fmt: Optional[str] = "none",
+        dsa_config: Optional[Any] = None,
+        indexer_op: Optional[nn.Module] = None,
     ):
         super().__init__()
         self.layer_idx = layer_idx
@@ -35,7 +37,10 @@ class Indexer(nn.Module):
         self.index_head_dim = attn_config.indexer_head_dim
         self.index_topk = attn_config.indexer_topk
 
-        self.rope_head_dim = attn_config.rope_head_dim
+        self.dsa_config = dsa_config
+        self.rope_head_dim = (
+            attn_config.rope_head_dim if dsa_config is None else dsa_config.index_rope_dim
+        )
         self.block_size = 128  # quantization block size (128)
         self.head_kv = 1
         self.scale_fmt = scale_fmt  # FP8 quantization format
@@ -75,12 +80,22 @@ class Indexer(nn.Module):
             W.mla_indexer_weights_proj_w,
             None,
             None,
-            quant_config=quant_config,
+            quant_config=quant_config if dsa_config is None else None,
             hw_kernel_config=hw_kernel_config,
         )
-        self.cos_sin_cache = global_weights[W.rope_cos_sin_cache]
+        head_weight = getattr(self.weights_proj, "weight", None)
+        self._fp32_head_weight = (
+            head_weight if dsa_config is not None and head_weight is not None
+            and head_weight.is_cuda and head_weight.dtype == torch.float32
+            and head_weight.ndim == 2 and head_weight.shape[0] == self.index_n_heads
+            and head_weight.shape[1] <= 8192 else None
+        )
+        self.cos_sin_cache = (
+            global_weights[W.rope_cos_sin_cache]
+            if self.rope_head_dim else None
+        )
 
-        self.indexer_op = IndexerOp(
+        self.indexer_op = indexer_op if indexer_op is not None else IndexerOp(
             index_n_heads=self.index_n_heads,
             index_head_dim=self.index_head_dim,
             index_topk=self.index_topk,
@@ -91,10 +106,18 @@ class Indexer(nn.Module):
             scale_fmt=self.scale_fmt,
             is_neox_style=self.is_neox_style,
         )
+        if dsa_config is not None:
+            if indexer_op is None:
+                raise ValueError("model-specific DSA requires an explicit Indexer execution backend")
+            self._quantize_q_k = indexer_op.encode_q_k
+            self._compute_topk = indexer_op.compute_topk
 
     def _prefill_cp_enabled(self) -> bool:
         if self.parallelism_config is None:
             return False
+        if self.dsa_config is not None:
+            # Effective DSA CP is layer-local; KDA and outer TP/SP are unchanged.
+            return self.parallelism_config.tp_size > 1
         return self.parallelism_config.prefill_cp_config.is_enabled()
 
     def _is_sparse_prefill_cp(self, attention_inputs: Any) -> bool:
@@ -102,8 +125,16 @@ class Indexer(nn.Module):
 
     # TODO: fuse kernel here
     def _get_logits_head_gate(
-        self, x: torch.Tensor, q_scale: torch.Tensor
+        self, x: torch.Tensor, q_scale: torch.Tensor, *, is_prefill: bool = False
     ) -> torch.Tensor:
+        if is_prefill and self._fp32_head_weight is not None:
+            from rtp_llm.models_py.kernels.cuda.dsa_head_weights_fp32 import fused_logits_head_gate
+
+            return fused_logits_head_gate(
+                x, q_scale, self._fp32_head_weight,
+                self.softmax_scale * self.weights_scale,
+                fallback_proj=self.weights_proj,
+            )
         x = x.float()
         weights = self.weights_proj(x)
         scale = self.softmax_scale * self.weights_scale
@@ -123,6 +154,8 @@ class Indexer(nn.Module):
         k = self.wk(x)
         k = self.k_norm(k)
 
+        if self.rope_head_dim == 0 and self.dsa_config is not None:
+            return q, k
         if self._prefill_cp_enabled():
             assert cp_params is not None
             query, key = self.indexer_op.apply_rope_and_rotate_q_k_cp(
@@ -220,7 +253,9 @@ class Indexer(nn.Module):
         q_fp8, q_scale = self._quantize_q_k(
             query, key, kv_cache, fmha_params, attention_inputs, cp_params
         )
-        weights = self._get_logits_head_gate(hidden_states, q_scale)
+        weights = self._get_logits_head_gate(
+            hidden_states, q_scale, is_prefill=attention_inputs.is_prefill
+        )
         return self._compute_topk(
             q_fp8, weights, kv_cache, fmha_params, attention_inputs, cp_params
         )

@@ -173,6 +173,7 @@ GenerateOutputs NormalGenerateStream::prepareGenerateOutput(const StreamUpdateIn
 
             generate_output.aux_info.multimodal_lengths = generate_input_->multimodalLengths();
 
+            generate_output.aux_info.speculative_metrics = speculative_acceptance_stats_.values();
             generate_output.aux_info.speculative_draft_rounds            = sp_iter_count_;
             generate_output.aux_info.speculative_accepted_tokens_per_pos = speculative_accepted_tokens_per_pos_;
             generate_output.aux_info.generation_prefill_cuda_graph_status =
@@ -261,6 +262,12 @@ void NormalGenerateStream::updateOutput(const StreamUpdateInfo& update_info) {
     }
 
     finished_ = needFinish();
+    // EOS/stop/max length have now fixed the actual committed prefix. This
+    // executes under the existing stream mutex and adds no GPU synchronization.
+    if (update_info.speculative_round.has_value()) {
+        const auto& round = *update_info.speculative_round;
+        speculative_acceptance_stats_.record(round, std::max(0, seqLength() - round.sequence_length_before));
+    }
     if (finished_) {
         reportEventWithoutLock(StreamEvents::GenerateDone);
         fillSubGenerateStatus(StreamState::FINISHED);

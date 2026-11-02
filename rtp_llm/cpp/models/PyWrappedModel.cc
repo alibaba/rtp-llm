@@ -357,6 +357,7 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
     RTP_LLM_PROFILE_SCOPE("py_model.buildPyAttentionInputs");
     DevicePerfWrapper            wrapper(enable_device_perf_, "py model buildPyAttentionInputs");
     torch_ext::PyAttentionInputs py_attn_inputs;
+    py_attn_inputs.is_warmup = inputs.warmup;
     const int64_t token_count = inputs.combo_tokens.defined() ? inputs.combo_tokens.numel() : 0;
     if (const auto* replay = inputs.targetLinearReplay()) {
         py_attn_inputs.linear_replay = *replay;

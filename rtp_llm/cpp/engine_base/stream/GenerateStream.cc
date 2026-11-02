@@ -1173,7 +1173,10 @@ size_t GenerateStream::maxTokenNum() const {
 }
 
 bool GenerateStream::needFinish() {
-    return seqLength() >= maxTokenNum() || needFinishBySPTokens();
+    // A multi-token update may contain EOS before the maximum-length token.
+    // Apply stop matching even when the same update also reaches the limit.
+    const bool stopped = needFinishBySPTokens();
+    return stopped || seqLength() >= maxTokenNum();
 }
 
 bool GenerateStream::needFinishBySPTokens() {
@@ -1320,6 +1323,10 @@ void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info) {
         complete_token_ids_->setSeqLength(seqLength());
     }
 
+    // Resolve the committed prefix before logit processors, recurrent cache
+    // selection and the next proposal token observe it. update() above already
+    // bounded the history by max length; EOS/stop may shorten it further.
+    needFinishBySPTokens();
     int nxt_cached_len   = seqLength() - 1;
     int accept_token_num = nxt_cached_len - cur_cached_len;
 
@@ -1341,7 +1348,7 @@ void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info) {
     }
 
     // update speculative output buffer
-    int  target_last_token = new_tokens.data_ptr<int>()[num_new_tokens - 1];
+    int  target_last_token = complete_token_ids_->data(0)[seqLength() - 1];
     int* spec_tokens       = sp_output_buffer_->tokens.data_ptr<int>();
     spec_tokens[0]         = target_last_token;
     if (update_info.draft_token >= 0) {
@@ -1419,7 +1426,7 @@ void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info) {
 
     // update normal output buffer
     StreamUpdateInfo output_info{new_tokens,
-                                 num_new_tokens,
+                                 accept_token_num,
                                  torch::Tensor(),
                                  torch::Tensor(),
                                  torch::Tensor(),
@@ -1431,6 +1438,7 @@ void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info) {
                                  update_info.update_remote_generate,
                                  update_info.force_update_info};
     output_info.speculative_token_begin = per_token_probs ? token_begin : -1;
+    output_info.speculative_round = update_info.speculative_round;
     updateOutput(output_info);
     // Async dispatch waits for the last draft KV consumer before specUpdate.
     // Reclaim behind the committed length, retaining any capacity already

@@ -17,8 +17,11 @@ from rtp_llm.models_py.distributed.collective_torch import (
 from rtp_llm.models_py.model_desc.block_map import (
     get_attention_inputs_value,
     get_group_tags_for_layers,
+    get_layer_caches_for_groups,
     get_primary_attention_inputs,
     select_attention_inputs_for_layer,
+    select_attention_inputs_for_tag,
+    select_fmha_impl_for_group,
     select_fmha_impl_for_layer,
 )
 from rtp_llm.models_py.modules import KdaMetadata
@@ -32,6 +35,7 @@ from rtp_llm.models_py.modules.kimi_k3.attention import (
 from rtp_llm.models_py.modules.factory.linear.impl.cuda.f16_linear import CudaF16Linear
 from rtp_llm.models_py.modules.kimi_k3.moe import KimiK3LatentMoE
 from rtp_llm.models_py.modules.kimi_k3.residual import KimiK3AttentionResidual
+from rtp_llm.models_py.modules.kimi_k3.dsa_model_adapter import KimiK31ModelAdapter
 from rtp_llm.models_py.triton_kernels.causal_conv1d.paged_short_conv_prefill import (
     prepare_paged_short_conv_metadata,
 )
@@ -142,11 +146,14 @@ class KimiK3DecoderLayer(nn.Module):
                 weights[K3W.MLP_RES_PROJ],
                 config.layernorm_eps,
             )
-        self.attention = (
-            KimiK3KDA(config, parallelism, weights, hardware)
-            if self.layer_type == HybridAttentionType.LINEAR
-            else KimiK3MLA(config, parallelism, weights, index, hardware)
-        )
+        if self.layer_type == HybridAttentionType.LINEAR:
+            self.attention = KimiK3KDA(config, parallelism, weights, hardware)
+        elif getattr(config.k3_runtime_config, "dsa", None) is not None:
+            from rtp_llm.models_py.modules.kimi_k3.dsa import KimiK31DSA
+
+            self.attention = KimiK31DSA(config, parallelism, weights, index, hardware)
+        else:
+            self.attention = KimiK3MLA(config, parallelism, weights, index, hardware)
         self.mlp = (
             KimiK3LatentMoE(
                 config, parallelism, weights, index, moe_config, hardware, moe_capacity
@@ -217,7 +224,7 @@ class KimiK3DecoderLayer(nn.Module):
         return self.apply_mlp(hidden, mlp_input, valid_mask)
 
 
-class KimiK3Model(GptModelBase):
+class KimiK3Model(KimiK31ModelAdapter, GptModelBase):
     requires_sequence_parallel_padding = True
 
     def __init__(
@@ -260,6 +267,16 @@ class KimiK3Model(GptModelBase):
             parallelism_config.tp_size,
             parallelism_config.tp_rank,
         )
+        cp = parallelism_config.prefill_cp_config
+        self.prefill_query_cp = (
+            getattr(model_config.k3_runtime_config, "dsa", None) is not None
+            and parallelism_config.role_type == RoleType.PREFILL
+            and cp.is_enabled() and cp.preserve_tp_layout
+        )
+        self.requires_sequence_parallel_padding = not self.prefill_query_cp
+        self.requires_token_position_ids = self.prefill_query_cp
+        self.requires_fixed_capacity_mtp_draft_prefill = self.prefill_query_cp
+        self._max_generate_batch_size = int(max_generate_batch_size)
         # The K3 owner passes global physical rows; SP sends only its local shard
         # into MoE. Projection warmup and collectives retain the global capacity.
         self._max_moe_tokens = int(max_moe_tokens)
@@ -273,7 +290,8 @@ class KimiK3Model(GptModelBase):
             self.tp_size,
         )
         self.embed_tokens = Embedding(
-            model_config, parallelism_config, weights.get_global_weight(W.embedding)
+            model_config, parallelism_config, weights.get_global_weight(W.embedding),
+            replicated=self.prefill_query_cp,
         )
         self.multimodal_embedding_injector = MultimodalEmbeddingInjector()
         self.layers = nn.ModuleList(
@@ -288,6 +306,7 @@ class KimiK3Model(GptModelBase):
             )
             for i in range(self.layer_num)
         )
+        self._setup_dsa()
         self._fp8_collective = None
         self.norm = RMSNorm(
             weights.get_global_weight(W.final_ln_gamma), model_config.layernorm_eps
@@ -305,6 +324,7 @@ class KimiK3Model(GptModelBase):
 
     def initialize(self, init_resource) -> bool:
         ready = super().initialize(init_resource)
+        self._initialize_mtp_hidden_handoff(init_resource)
         self._initialize_fp8_collective()
         self._initialize_bf16_collective(init_resource)
         from rtp_llm.models_py.modules.kimi_k3.kernel_jit_warmup import (
@@ -320,7 +340,8 @@ class KimiK3Model(GptModelBase):
         from rtp_llm.models_py.modules.factory.linear.impl.cuda.f16_linear import CudaF16Linear
         from rtp_llm.models_py.modules.factory.linear.impl.cuda.bf16_comm_fusion import Bf16CollectiveProjection
 
-        attentions = [layer.attention for layer in self.layers]
+        attentions = [layer.attention for layer in self.layers
+                      if not getattr(layer.attention, "prefill_query_cp", False)]
         if not attentions or any(
             not isinstance(projection, CudaF16Linear)
             or projection.weight.dtype != torch.bfloat16
@@ -401,6 +422,8 @@ class KimiK3Model(GptModelBase):
     def prepare_fmha_impl(
         self, inputs, is_cuda_graph=False, cuda_graph_selection_mode=None
     ):
+        if self.dsa_workspace is not None:
+            return self._prepare_dsa(inputs, is_cuda_graph)
         from rtp_llm.models_py.modules.factory.attention.attn_factory import get_mla_impl
         from rtp_llm.models_py.modules.kimi_k3.mla import KimiK3MlaImpl
 
@@ -477,15 +500,22 @@ class KimiK3Model(GptModelBase):
         sequence_parallel_input=False,
         gather_output=True,
     ):
+        if fmha_impl is None:
+            fmha_impl = self.prepare_fmha_impl(inputs)
+        layout = self._query_layout
         if hidden is None:
             # Construct the target embedding in this frame. Passing the
             # full-token tensor from the caller keeps its storage alive until
             # all layers return, even after SP narrows it to local rows.
             # feat/k3_dev releases that storage during the layer loop.
             hidden = self._embed_inputs(inputs)
-        physical_rows = inputs.input_ids.shape[0]
+        physical_rows = inputs.input_ids.shape[0] if layout is None else layout.physical_rows
         local_rows = physical_rows // self.tp_size
-        if not sequence_parallel_input:
+        if layout is not None:
+            if hidden.shape[0] != local_rows:
+                raise ValueError("CP and SP must share local row ownership")
+            hidden.masked_fill_(~layout.local_valid[:, None], 0)
+        elif not sequence_parallel_input:
             hidden = hidden.narrow(
                 0, self.tp_rank * local_rows, local_rows
             ).contiguous()
@@ -493,7 +523,9 @@ class KimiK3Model(GptModelBase):
         # A device mask must be refreshed at replay; Python logical row counts
         # cannot be captured into the graph. The runner owns this metadata.
         valid_mask = primary.valid_token_mask
-        if valid_mask is not None:
+        if layout is not None:
+            valid_mask = layout.local_valid
+        elif valid_mask is not None:
             valid_mask = valid_mask.narrow(0, self.tp_rank * local_rows, local_rows)
         paged_conv_meta = None
         # Native MTP is MLA-only. Conv metadata performs host-side sequence
@@ -506,16 +538,24 @@ class KimiK3Model(GptModelBase):
             )
         ):
             paged_conv_meta = prepare_paged_short_conv_metadata(
-                primary.cu_seqlens, hidden.device
+                primary.cu_seqlens if layout is None else layout.cu_host, hidden.device
             )
         metadata = KdaMetadata(
             is_target_verify=primary.is_target_verify,
             prefill_paged_conv_meta=paged_conv_meta,
+            query_layout=layout,
         )
         if fmha_impl is None:
             fmha_impl = self.prepare_fmha_impl(inputs)
         anchors = hidden.new_empty((local_rows, self.num_blocks, hidden.shape[-1]))
         for index, layer in enumerate(self.layers):
+            if getattr(layer.attention, "indexer", None) is not None:
+                tags = ("full", "indexer_kv")
+                attention_inputs = select_attention_inputs_for_tag(get_attention_inputs_value(inputs), "full")
+                fmha = {tag: select_fmha_impl_for_group(fmha_impl, tag) for tag in tags}
+                cache = get_layer_caches_for_groups(self.kv_cache, index, tags) if self.kv_cache else None
+                hidden = layer(hidden, anchors, fmha, cache, attention_inputs, metadata, valid_mask)
+                continue
             attention_inputs = select_attention_inputs_for_layer(
                 inputs, self.kv_cache, index
             )
@@ -530,9 +570,10 @@ class KimiK3Model(GptModelBase):
             )
         if self.num_blocks:
             hidden = self.final_residual(hidden, anchors)
+        hidden = self._publish_mtp_prefill_hidden(hidden)
         return (
             all_gather(hidden, Group.TP)
-            if gather_output and self.tp_size > 1
+            if gather_output and self.tp_size > 1 and layout is None
             else hidden
         )
 

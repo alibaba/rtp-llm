@@ -102,6 +102,7 @@ class PackedCulaKdaPrefill:
     initial_states: torch.Tensor
     checkpoints: torch.Tensor
     padding_ranges: tuple[tuple[int, int], ...]
+    host_tensors: tuple[torch.Tensor, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -218,10 +219,21 @@ def prepare_cula_kda_prefill_metadata(
     device = cache_states.device
     heads = cache_states.shape[1]
     single_sequence = len(initial_blocks) == 1
+    pinned = device.type == "cuda"
     cpu_cu = (
         None
         if single_sequence
-        else torch.tensor(cu_values, dtype=torch.int32, pin_memory=True)
+        else torch.tensor(cu_values, dtype=torch.int32, device="cpu", pin_memory=pinned)
+    )
+    # These mappings do not depend on projection results. Direct tensor(...,
+    # device="cuda") inserts a blocking upload behind the queued input GEMM.
+    # Keep immutable pinned sources alive with this round's metadata and queue
+    # exact integer copies on the consumer stream instead.
+    cpu_initial = torch.tensor(initial_blocks, dtype=torch.int64, device="cpu", pin_memory=pinned)
+    cpu_checkpoints = torch.tensor(checkpoint_blocks, dtype=torch.int64, device="cpu", pin_memory=pinned)
+    cpu_offsets = (
+        None if single_sequence
+        else torch.tensor(offsets, dtype=torch.int32, device="cpu", pin_memory=pinned)
     )
     packed = PackedCulaKdaPrefill(
         cu_seqlens=None if single_sequence else cpu_cu.to(device, non_blocking=True),
@@ -229,12 +241,10 @@ def prepare_cula_kda_prefill_metadata(
         checkpoint_offsets=(
             None
             if single_sequence
-            else torch.tensor(offsets, dtype=torch.int32, device=device)
+            else cpu_offsets.to(device, non_blocking=True)
         ),
-        initial_blocks=torch.tensor(initial_blocks, dtype=torch.int64, device=device),
-        checkpoint_blocks=torch.tensor(
-            checkpoint_blocks, dtype=torch.int64, device=device
-        ),
+        initial_blocks=cpu_initial.to(device, non_blocking=True),
+        checkpoint_blocks=cpu_checkpoints.to(device, non_blocking=True),
         initial_states=torch.empty(
             (len(initial_blocks), heads, 128, 128), dtype=torch.float32, device=device
         ),
@@ -244,6 +254,10 @@ def prepare_cula_kda_prefill_metadata(
             device=device,
         ),
         padding_ranges=tuple(padding),
+        host_tensors=tuple(
+            value for value in (cpu_cu, cpu_initial, cpu_checkpoints, cpu_offsets)
+            if value is not None
+        ),
     )
     return CulaKdaPrefillMetadata(block_size, sequences, packed)
 

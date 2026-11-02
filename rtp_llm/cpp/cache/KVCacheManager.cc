@@ -381,6 +381,13 @@ MallocResult KVCacheManager::malloc(const MallocInfo& malloc_info) {
     const int64_t malloc_begin_time_us = currentTimeUs();
     RTP_LLM_CHECK(malloc_info.batch_kv_cache_resource && malloc_info.complete_token_ids);
 
+    // P/D admission allocates blocks before it can acquire a replay slot. A
+    // completed cohort may have retired its last GPU references without another
+    // forward to reap them; waiting for replay here would deadlock admission.
+    if (linear_replay_retirement_) {
+        linear_replay_retirement_->reap();
+    }
+
     const int  seq_size_per_block = config_.seq_size_per_block;
     const bool is_first_malloc    = !malloc_info.batch_kv_cache_resource->curBlocksNum();
     // A first malloc that failed with MallocStatus::RETRYABLE_RESOURCE_EXHAUSTED leaves the stream
@@ -465,6 +472,9 @@ uint64_t KVCacheManager::allocationGeneration() const {
 bool KVCacheManager::waitForAllocationChange(uint64_t observed_generation,
                                              int64_t  timeout_ms,
                                              int64_t  minimum_wait_ms) {
+    if (linear_replay_retirement_) {
+        linear_replay_retirement_->reap();
+    }
     const auto                   state = allocation_wait_state_;
     std::unique_lock<std::mutex> lock(state->mutex);
     const auto backoff_ms = std::min(std::max<int64_t>(minimum_wait_ms, 0), std::max<int64_t>(timeout_ms, 0));
@@ -481,6 +491,12 @@ bool KVCacheManager::waitForAllocationChange(uint64_t observed_generation,
             return state->stopped.load(std::memory_order_acquire)
                    || state->generation.load(std::memory_order_acquire) != observed_generation;
         });
+    }
+    // Events can finish while admission is waiting and no model is running.
+    // Reclamation notifies this same wait state, so release its mutex first.
+    lock.unlock();
+    if (linear_replay_retirement_) {
+        linear_replay_retirement_->reap();
     }
     return state->generation.load(std::memory_order_acquire) != observed_generation;
 }
@@ -858,6 +874,11 @@ KVCacheInfo KVCacheManager::getKVCacheInfo(int64_t latest_version, bool need_cac
     if (!coordinator_manager_) {
         RTP_LLM_LOG_ERROR("getKVCacheInfo called before KVCacheManager initialized");
         return info;
+    }
+
+    // Keep routing capacity current even when no request has reached malloc.
+    if (linear_replay_retirement_) {
+        linear_replay_retirement_->reap();
     }
 
     if (need_cache_keys && block_tree_cache_) {

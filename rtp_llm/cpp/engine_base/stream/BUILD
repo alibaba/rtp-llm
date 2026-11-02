@@ -18,6 +18,7 @@ cc_library(
     name = "generate_types",
     hdrs = [
         "GenerateTypes.h",
+        "SpeculativeAcceptance.h",
     ],
     deps = [
         "//rtp_llm/cpp/models:position_ids_generator",

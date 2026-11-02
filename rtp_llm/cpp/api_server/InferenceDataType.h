@@ -100,6 +100,7 @@ public:
         json.Jsonize("disk_reuse_len", disk_reuse_len, disk_reuse_len);
         json.Jsonize("prefill_disk_reuse_len", prefill_disk_reuse_len, prefill_disk_reuse_len);
         json.Jsonize("decode_disk_reuse_len", decode_disk_reuse_len, decode_disk_reuse_len);
+        json.Jsonize("speculative_metrics", speculative_metrics, speculative_metrics);
         json.Jsonize("speculative_draft_rounds", speculative_draft_rounds, speculative_draft_rounds);
         json.Jsonize("speculative_accepted_tokens_per_pos",
                      speculative_accepted_tokens_per_pos,

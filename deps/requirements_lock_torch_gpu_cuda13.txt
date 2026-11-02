@@ -3983,3 +3983,11 @@ zstandard==0.25.0 \
     --hash=sha256:fd7a5004eb1980d3cefe26b2685bcb0b17989901a70a1040d1ac86f1d898c551 \
     --hash=sha256:ffef5a74088f1e09947aecf91011136665152e0b4b359c42be3373897fb39b01
     # via -r deps/requirements_base.txt
+
+cuda-linear-attention @ http://artlab.alibaba-inc.com/1/pypi/rtp_llm/cuda_linear_attention/cuda_linear_attention-0.1.dev88+dcce4719.cu132-cp310-cp310-linux_x86_64.whl \
+    --hash=sha256:aad30390809c5d4b4e017a779f046e383407c0add52f700b43917e7c5ecdc4d4
+    # K3.1: same cuLA checkpoint ABI as the preserved production baseline.
+
+flash-linear-attention @ https://artlab.alibaba-inc.com/1/pypi/rtp_llm/flash_linear_attention/flash_linear_attention-0.5.0+rtp.3a9ce1c.6-py3-none-any.whl \
+    --hash=sha256:20db1cc279f59abf8f18d20cc9fa575eeb152cf781cc4bff78e5a1d8a77141de
+    # via cuda-linear-attention

@@ -83,6 +83,7 @@ arch_with_version_dep = select({
 })
 
 requirement([
+    "cuda-linear-attention",
     "sentencepiece",
     "transformers",
     "pynvml",
@@ -663,6 +664,7 @@ py_package(
     packages = [
         "rtp_llm",
     ] + select({
+        "@//:using_cuda13_x86": deep + ["deep_gemm_mqa"],
         "@//:using_cuda12": deep,
         "//conditions:default": [],
     }),
@@ -734,7 +736,10 @@ whl_reqs = [
     # OTel trace runtime; keep the pinned protobuf compatibility constraint.
     "opentelemetry-sdk==1.44.0",
     "opentelemetry-exporter-otlp-proto-http==1.15.0",
-] + grpcio_tools_req + setuptools_req + whl_deps() + platform_deps() + xft_dep + ml_pin_reqs()
+] + grpcio_tools_req + setuptools_req + whl_deps() + select({
+    "@//:using_cuda13_x86": ["cuda-linear-attention @ http://artlab.alibaba-inc.com/1/pypi/rtp_llm/cuda_linear_attention/cuda_linear_attention-0.1.dev88+dcce4719.cu132-cp310-cp310-linux_x86_64.whl"],
+    "//conditions:default": [],
+}) + platform_deps() + xft_dep + ml_pin_reqs()
 
 # Frontend-only requirement set: the frontend lane is CPU serving (HTTP + gRPC
 # client + tokenizer), so the engine's platform CUDA tree (whl_deps: torch-cuda,

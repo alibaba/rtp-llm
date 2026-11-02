@@ -52,6 +52,7 @@ struct StreamUpdateInfo {
     const torch::Tensor custom_output{};
     // Absolute start of per-token MTP probabilities [batch, tokens, vocab].
     int64_t speculative_token_begin = -1;
+    std::optional<SpeculativeRoundMetrics> speculative_round;
 };
 
 struct StreamSpecUpdateInfo {
@@ -79,6 +80,7 @@ struct StreamSpecUpdateInfo {
     // Per-accepted-token target distributions [stream_batch, accepted, vocab].
     // Never populated from draft_token_probs.
     torch::Tensor all_probs;
+    std::optional<SpeculativeRoundMetrics> speculative_round;
 };
 
 struct SpeculativeExecutorStreamOutput {
@@ -950,6 +952,7 @@ protected:
     size_t                             iter_count_    = 0;
     size_t                             sp_iter_count_ = 0;
     std::vector<int32_t>               speculative_accepted_tokens_per_pos_;
+    SpeculativeAcceptanceStats        speculative_acceptance_stats_;
     size_t                             last_output_pos_      = 0;
     int                                initial_reuse_length_ = 0;
     int                                reuse_length_         = 0;

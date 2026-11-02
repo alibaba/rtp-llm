@@ -31,18 +31,20 @@ def estimate_mega_moe_symm_buffer_bytes(
     intermediate_hidden: int,
     use_fp8_dispatch: bool = True,
     activation: str = "swiglu",
+    backend=None,
 ) -> int | None:
     try:
-        import deep_gemm
+        if backend is None:
+            import deep_gemm as backend
 
         # The SiTU backend has its own workspace and token-alignment contract.
         if activation == "situ":
-            alignment = int(deep_gemm._C.get_token_alignment_for_mega_moe_k3())
+            alignment = int(backend._C.get_token_alignment_for_mega_moe_k3())
             capacity = (
                 (num_max_tokens_per_rank + alignment - 1) // alignment * alignment
             )
             return int(
-                deep_gemm._C.get_symm_buffer_size_for_mega_moe_k3(
+                backend._C.get_symm_buffer_size_for_mega_moe_k3(
                     group_size,
                     num_experts,
                     capacity,
@@ -54,7 +56,7 @@ def estimate_mega_moe_symm_buffer_bytes(
                 )[0]
             )
         return int(
-            deep_gemm._C.get_symm_buffer_size_for_mega_moe(
+            backend._C.get_symm_buffer_size_for_mega_moe(
                 group_size,
                 num_experts,
                 num_max_tokens_per_rank,
@@ -78,8 +80,10 @@ def _get_or_create_mega_buf(
     intermediate_hidden,
     use_fp8_dispatch,
     activation,
+    backend=None,
 ):
-    import deep_gemm
+    if backend is None:
+        import deep_gemm as backend
 
     key = (
         id(group),
@@ -90,8 +94,10 @@ def _get_or_create_mega_buf(
         intermediate_hidden,
         bool(use_fp8_dispatch),
         activation,
+        id(backend),
     )
-    buf = _MEGA_BUF_CACHE.get(key)
+    cached = _MEGA_BUF_CACHE.get(key)
+    buf = cached[1] if cached is not None else None
     if buf is None:
         try:
             group_size = int(group.size())
@@ -107,6 +113,7 @@ def _get_or_create_mega_buf(
                 intermediate_hidden=intermediate_hidden,
                 use_fp8_dispatch=use_fp8_dispatch,
                 activation=activation,
+                backend=backend,
             )
             if group_size > 0
             else None
@@ -121,11 +128,11 @@ def _get_or_create_mega_buf(
             activation=activation,
         )
         if activation == "situ":
-            buf = deep_gemm.get_symm_buffer_for_mega_moe_k3(
+            buf = backend.get_symm_buffer_for_mega_moe_k3(
                 **allocation_kwargs, mma_type="fp8xfp4"
             )
         else:
-            buf = deep_gemm.get_symm_buffer_for_mega_moe(
+            buf = backend.get_symm_buffer_for_mega_moe(
                 **allocation_kwargs, use_fp8_dispatch=use_fp8_dispatch
             )
         actual_bytes = None
@@ -174,7 +181,9 @@ def _get_or_create_mega_buf(
                 intermediate_hidden,
                 estimated_bytes / (1024**3),
             )
-        _MEGA_BUF_CACHE[key] = buf
+        # Retain the backend while its buffer is cached, so its identity cannot
+        # be recycled for another library with an incompatible workspace ABI.
+        _MEGA_BUF_CACHE[key] = (backend, buf)
     return buf
 
 

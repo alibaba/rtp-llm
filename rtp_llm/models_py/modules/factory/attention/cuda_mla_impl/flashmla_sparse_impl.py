@@ -43,7 +43,7 @@ from rtp_llm.ops import (
 from rtp_llm.ops.compute_ops import KVCache, PyAttentionInputs, rtp_llm_ops
 from rtp_llm.utils.model_weight import W
 
-from .rope_emb_new import NewMlaRotaryEmbeddingOp
+from .rope_emb_new import NewMlaRotaryEmbeddingOp, NoopMlaRotaryEmbeddingOp
 
 
 # for bf16 prefill && decode
@@ -325,6 +325,8 @@ class SparseMlaImpl(MlaImplBase):
         is_cuda_graph: bool = False,
         parallelism_config: Optional[ParallelismConfig] = None,
         fmha_impl: Optional[SparseMlaOp] = None,
+        apply_rope: bool = True,
+        fmha_impl_kwargs: Optional[Dict[str, Any]] = None,
     ) -> None:
         super().__init__(
             attn_configs=attn_configs,
@@ -370,11 +372,16 @@ class SparseMlaImpl(MlaImplBase):
             attn_configs.softmax_extra_scale,
             attn_configs.indexer_topk,
             parallelism_config=parallelism_config,
+            **(fmha_impl_kwargs or {}),
         )
 
-        self.rope_impl = NewMlaRotaryEmbeddingOp(
-            cos_sin_cache=cos_sin_cache,
-            is_neox_style=self.attn_configs.rope_config.is_neox_style,
+        self.rope_impl = (
+            NewMlaRotaryEmbeddingOp(
+                cos_sin_cache=cos_sin_cache,
+                is_neox_style=self.attn_configs.rope_config.is_neox_style,
+            )
+            if apply_rope
+            else NoopMlaRotaryEmbeddingOp()
         )
 
         self.kv_cache_write_op = MlaKVCacheWriteOp(
@@ -522,7 +529,7 @@ class SparseMlaImpl(MlaImplBase):
         # Apply RoPE to q_pe and k_pe
         q_pe = q[:, :, self.nope_head_dim :]
         self.rope_impl.forward(q_pe, k_pe, self.rope_params)
-        self.kv_cache_write_op.forward(compressed_kv, k_pe, kv_cache, self.rope_params)
+        self._write_kv_cache(compressed_kv, k_pe, kv_cache)
         common.apply_write_cache_store(
             self.write_cache_store_impl, self.attn_inputs, kv_cache
         )
@@ -541,9 +548,16 @@ class SparseMlaImpl(MlaImplBase):
         )
 
         # Apply output BMM to get final output
-        output = self._apply_output_bmm(attn_output, layer_id)
+        output = (
+            attn_output
+            if getattr(self.fmha_impl, "projects_values", False)
+            else self._apply_output_bmm(attn_output, layer_id)
+        )
 
         return output
+
+    def _write_kv_cache(self, compressed_kv, k_pe, kv_cache):
+        self.kv_cache_write_op.forward(compressed_kv, k_pe, kv_cache, self.rope_params)
 
     def prepare_cuda_graph(self, attn_inputs: PyAttentionInputs):
         self.prepare(attn_inputs, forbid_realloc=True)
