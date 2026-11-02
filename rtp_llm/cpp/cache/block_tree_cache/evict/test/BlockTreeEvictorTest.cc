@@ -1397,8 +1397,8 @@ TEST_F(BlockTreeEvictorTest, RunEvictionTaskReleasesPendingSourceBeforeSettledCa
 
     EXPECT_EQ(evictor_->pending_release_counts_.at(device_pool_.get()), 0u);
     EXPECT_EQ(settled_count, 1u);
-    EXPECT_EQ(host_pool->frozenBlocksNum(), 0u);
-    EXPECT_EQ(device_pool_->frozenBlocksNum(), 0u);
+    EXPECT_EQ(host_pool->referencedBlocksNum(BlockTreeRefType::FROZEN), 0u);
+    EXPECT_EQ(device_pool_->referencedBlocksNum(BlockTreeRefType::FROZEN), 0u);
     GroupSetResource&       resource = insertedNode(result)->group_set_resources[0];
     const MultiNodeResource source{0, Tier::DEVICE, {{insertedNode(result), {source_block}}}};
     evictor_->suspendCandidate(insertedNode(result), 0, Tier::DEVICE);
@@ -1936,8 +1936,8 @@ TEST_F(BlockTreeEvictorTest, BatchAdmissionRejectionRollsBackEveryPlannedDescrip
     EXPECT_EQ(evictor_->candidateCount(/*group_set_id=*/0, Tier::DEVICE), 2u);
     EXPECT_EQ(host_pool->freeBlocksNum(), 2u);
     EXPECT_EQ(host_pool->referencedBlocksNum(BlockTreeRefType::EVICTION), 0u);
-    EXPECT_EQ(host_pool->frozenBlocksNum(), 0u);
-    EXPECT_EQ(device_pool_->frozenBlocksNum(), 0u);
+    EXPECT_EQ(host_pool->referencedBlocksNum(BlockTreeRefType::FROZEN), 0u);
+    EXPECT_EQ(device_pool_->referencedBlocksNum(BlockTreeRefType::FROZEN), 0u);
     EXPECT_EQ(settled_count, 0u);
     EXPECT_TRUE(evictor_->heaps_[0].pending_timings.empty());
     for (const auto& [node, source] : sources) {
@@ -2014,8 +2014,8 @@ TEST_F(BlockTreeEvictorTest, BatchQueueTimeoutRollsBackEveryPlannedDescriptorOnc
     EXPECT_EQ(evictor_->candidateCount(/*group_set_id=*/0, Tier::DEVICE), 2u);
     EXPECT_EQ(host_pool->freeBlocksNum(), 2u);
     EXPECT_EQ(host_pool->referencedBlocksNum(BlockTreeRefType::EVICTION), 0u);
-    EXPECT_EQ(host_pool->frozenBlocksNum(), 0u);
-    EXPECT_EQ(device_pool_->frozenBlocksNum(), 0u);
+    EXPECT_EQ(host_pool->referencedBlocksNum(BlockTreeRefType::FROZEN), 0u);
+    EXPECT_EQ(device_pool_->referencedBlocksNum(BlockTreeRefType::FROZEN), 0u);
     EXPECT_EQ(settled_events, (std::vector<bool>{false}));
     EXPECT_TRUE(evictor_->heaps_[0].pending_timings.empty());
     for (const auto& [node, source] : sources) {

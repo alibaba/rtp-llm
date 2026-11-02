@@ -195,6 +195,7 @@ cc_binary(
         ":benchmark_cli",
         ":transfer_benchmark_runner",
         ":tree_benchmark_runner",
+        "//rtp_llm/cpp/cache/block_tree_cache",
     ] + select({
         "@//:using_cuda": [
             "@local_config_cuda//cuda:cuda_headers",

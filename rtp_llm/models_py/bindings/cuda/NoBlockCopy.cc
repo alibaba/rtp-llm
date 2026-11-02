@@ -227,10 +227,10 @@ std::shared_ptr<DeviceHostCopyStreams> acquireDeviceHostCopyStreams(int device_i
         if (h2d == d2h || h2d == nullptr || d2h == nullptr) {
             throw std::runtime_error("copy direction streams are not distinct non-default streams");
         }
-        auto pair  = std::make_shared<CudaDeviceHostCopyStreams>(device_index, h2d, d2h);
-        h2d        = nullptr;
-        d2h        = nullptr;
-        entry      = pair;
+        auto pair = std::make_shared<CudaDeviceHostCopyStreams>(device_index, h2d, d2h);
+        h2d       = nullptr;
+        d2h       = nullptr;
+        entry     = pair;
         RTP_LLM_LOG_INFO("copy streams initialized device=%d owner=%p h2d=%p d2h=%p",
                          device_index,
                          pair.get(),
@@ -246,6 +246,18 @@ std::shared_ptr<DeviceHostCopyStreams> acquireDeviceHostCopyStreams(int device_i
         }
         throw;
     }
+}
+
+std::mutex& cudaBatchSubmitMutex(int device_index) {
+    static std::mutex                                           registry_mutex;
+    static std::unordered_map<int, std::unique_ptr<std::mutex>> mutexes;
+
+    std::lock_guard<std::mutex> registry_lock(registry_mutex);
+    auto&                       mutex = mutexes[device_index];
+    if (!mutex) {
+        mutex = std::make_unique<std::mutex>();
+    }
+    return *mutex;
 }
 
 void releaseStagedMemoryCopyScratch(StagedMemoryCopyScratch& scratch) {
@@ -411,19 +423,26 @@ BatchedMemoryCopyStatus execBatchedMemoryCopy(const BatchedMemoryCopyParams&    
     cudaMemcpyAttributes attr{};
     attr.srcAccessOrder = cudaMemcpySrcAccessOrderStream;
     size_t attr_idx     = 0;
-#if CUDART_VERSION >= 13000
-    const auto submit_error =
-        cudaMemcpyBatchAsync(dsts.data(), srcs.data(), sizes.data(), dsts.size(), &attr, &attr_idx, 1, stream);
-#else
+#if CUDART_VERSION < 13000
     std::vector<void*> mutable_srcs;
     mutable_srcs.reserve(srcs.size());
     for (auto* src : srcs) {
         mutable_srcs.push_back(const_cast<void*>(src));
     }
-    size_t     fail_idx     = 0;
+    size_t fail_idx = 0;
+#endif
+    // cuMemcpyBatchAsync_v2 in the deployed CUDA stack is not safe under
+    // concurrent host submissions. Share the API-entry lock with 3D copies,
+    // releasing it before waiting on the direction-specific copy stream.
+    std::unique_lock<std::mutex> submit_lock(cudaBatchSubmitMutex(params.device_index));
+#if CUDART_VERSION >= 13000
+    const auto submit_error =
+        cudaMemcpyBatchAsync(dsts.data(), srcs.data(), sizes.data(), dsts.size(), &attr, &attr_idx, 1, stream);
+#else
     const auto submit_error = cudaMemcpyBatchAsync(
         dsts.data(), mutable_srcs.data(), sizes.data(), dsts.size(), &attr, &attr_idx, 1, &fail_idx, stream);
 #endif
+    submit_lock.unlock();
     if (submit_error != cudaSuccess) {
         RTP_LLM_LOG_WARNING("execBatchedMemoryCopy failed phase=submit device=%d stream=%p tiles=%zu error_code=%d "
                             "error=%s",

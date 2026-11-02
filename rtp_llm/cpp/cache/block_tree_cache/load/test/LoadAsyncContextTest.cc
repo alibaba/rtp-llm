@@ -110,6 +110,9 @@ public:
     void failNextRead() {
         fail_read_ = true;
     }
+    void timeoutNextRead() {
+        timeout_read_ = true;
+    }
     bool readPending() const {
         return executor_->pendingCount() != 0;
     }
@@ -146,6 +149,10 @@ protected:
         return pending_match_;
     }
     void readImpl(const StorageRequest& request, const std::shared_ptr<StorageBackendMatchMeta>& match_meta) override {
+        if (timeout_read_) {
+            timeout_read_ = false;
+            throw StorageOperationTimeout("read timed out", StorageQuarantineReason::SDK_TIMEOUT);
+        }
         if (fail_read_) {
             fail_read_ = false;
             throw std::runtime_error("read failed");
@@ -177,6 +184,7 @@ private:
     std::shared_ptr<TestMatchMeta>        read_match_meta_;
     bool                                  fail_match_{false};
     bool                                  fail_read_{false};
+    bool                                  timeout_read_{false};
 };
 
 std::shared_ptr<const CacheTopology> makeTopology(std::vector<CacheGroupType> types = {CacheGroupType::FULL}) {
@@ -595,6 +603,68 @@ TEST(LoadAsyncContextTest, BackendReadFailureMarksCommittedContextFailedAndRelea
     EXPECT_EQ(pool->refCount(block), 1u);
     pool->decRef(block);
     coordinator->shutdown();
+}
+
+TEST(LoadAsyncContextTest, BackendTimeoutSurvivesLocalTransferFailureAndSettlement) {
+    for (bool backend_first : {false, true}) {
+        SCOPED_TRACE(backend_first);
+        size_t commits     = 0;
+        size_t aborts      = 0;
+        auto   coordinator = makeCoordinator(commits, aborts);
+        auto   backend     = std::make_shared<ManualBackend>();
+        auto   pool        = std::make_shared<TestBlockPool>();
+        auto   block       = pool->malloc().value();
+        pool->incRef(block);
+        initBackend(*backend, pool);
+        TransferDescriptor local;
+        local.source_tier = Tier::HOST;
+        auto context      = coordinator->create({local}, {false}, 0, backend, makeRequest(1));
+        ASSERT_TRUE(coordinator->registerContext(context));
+        context->setMatchCallback([&](LoadAsyncContext& current, size_t) {
+            current.setBackendTargetBlock(0, 0, block);
+            return current.commit();
+        });
+        size_t callbacks = 0;
+        context->onDone([&](ErrorInfo error) {
+            EXPECT_EQ(error.code(), ErrorCode::DEADLINE_EXCEEDED);
+            EXPECT_NE(error.ToString().find("read timed out"), std::string::npos);
+            EXPECT_TRUE(pool->isFrozen(block));
+            ++callbacks;
+        });
+        context->setSettlementReadyCallback([](const auto& ready) {
+            EXPECT_FALSE(ready->aggregateSuccess());
+            EXPECT_TRUE(ready->settle(false));
+        });
+        context->startBackendMatch();
+        backend->completeMatch(1);
+        backend->timeoutNextRead();
+        if (backend_first) {
+            backend->completeRead();
+        } else {
+            ASSERT_TRUE(context->completeTransfers(1, false));
+        }
+        EXPECT_FALSE(context->done());
+        EXPECT_EQ(callbacks, 0u);
+        if (backend_first) {
+            ASSERT_TRUE(context->completeTransfers(1, false));
+        } else {
+            backend->completeRead();
+        }
+
+        EXPECT_TRUE(context->done());
+        EXPECT_FALSE(context->success());
+        EXPECT_EQ(context->mallocStatus(), MallocStatus::NONE);
+        EXPECT_EQ(context->errorInfo().code(), ErrorCode::DEADLINE_EXCEEDED);
+        EXPECT_EQ(callbacks, 1u);
+        context->onDone([&](ErrorInfo error) {
+            EXPECT_EQ(error.code(), ErrorCode::DEADLINE_EXCEEDED);
+            EXPECT_NE(error.ToString().find("read timed out"), std::string::npos);
+            ++callbacks;
+        });
+        EXPECT_EQ(callbacks, 2u);
+        pool->decRef(block);
+        coordinator->shutdown();
+    }
 }
 
 TEST(LoadAsyncContextTest, DuplicateHandleTagIsRejectedBeforeMatch) {

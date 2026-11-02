@@ -247,10 +247,44 @@ class GpuLockEntryTest(unittest.TestCase):
                     resource.return_value.__enter__.return_value.gpu_ids = ["1", "3"]
                     self.assertEqual(main(), 17)
                     probe.assert_called_once_with()
-                    resource.assert_called_once_with(2)
+                    resource.assert_called_once_with(2, cuda_info=("NVIDIA A10", 4))
                     jit_setup.setup_jit_cache.assert_called_once_with()
                     resource.return_value.__exit__.assert_called_once()
                     self.assertEqual(os.environ["CUDA_VISIBLE_DEVICES"], "1,3")
+
+
+class CudaProbeReuseTest(unittest.TestCase):
+    """main()'s probe result must reach DeviceResource without a re-probe."""
+
+    @staticmethod
+    def _env_without_visible_devices():
+        return {
+            k: v
+            for k, v in os.environ.items()
+            if k not in ("CUDA_VISIBLE_DEVICES", "HIP_VISIBLE_DEVICES")
+        }
+
+    def test_reused_probe_skips_the_second_cuda_probe(self):
+        with patch.dict(
+            os.environ, self._env_without_visible_devices(), clear=True
+        ), patch("rtp_llm.test.utils.device_resource.get_cuda_info") as probe, patch(
+            "rtp_llm.test.utils.device_resource.subprocess.run"
+        ) as run:
+            resource = DeviceResource(2, cuda_info=("NVIDIA A10", 4))
+            self.assertEqual(list(resource.total_gpus), [0, 1, 2, 3])
+            probe.assert_not_called()
+            run.assert_not_called()
+
+    def test_default_construction_still_probes_once(self):
+        with patch.dict(
+            os.environ, self._env_without_visible_devices(), clear=True
+        ), patch(
+            "rtp_llm.test.utils.device_resource.get_cuda_info",
+            return_value=("NVIDIA A10", 2),
+        ) as probe:
+            resource = DeviceResource(1)
+            self.assertEqual(list(resource.total_gpus), [0, 1])
+            probe.assert_called_once_with()
 
 
 class GpuFreeMemoryBudgetTest(unittest.TestCase):

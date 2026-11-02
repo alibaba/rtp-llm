@@ -94,12 +94,14 @@ private:
     void markAborted();
     void rebuildMatchedBlocksByTier();
     void onBackendMatch(size_t matched_blocks_num, std::shared_ptr<StorageBackendMatchMeta> match_meta, bool success);
-    void onBackendRead(bool success);
+    void onBackendRead(ErrorInfo error);
     void failBeforeCommit();
     void failCommit();
     void finishIfReadyLocked(bool& notify, SettlementReadyCallback& settlement_ready_callback);
     void dispatchCompletion(bool notify, SettlementReadyCallback settlement_ready_callback);
     void notifyCompletion();
+
+    ErrorInfo completionErrorLocked() const;
 
     std::shared_ptr<LoadContextCoordinator> coordinator_;
     const uint64_t                          context_id_;
@@ -130,6 +132,7 @@ private:
     std::atomic<size_t>       remaining_join_count_{0};
     int64_t                   join_start_time_us_{0};
     bool                      has_failure_{false};
+    ErrorInfo                 error_info_{ErrorInfo::OkStatus()};
     bool                      settlement_ready_{false};
     SettlementReadyCallback   settlement_ready_callback_;
     std::vector<DoneCallback> callbacks_;

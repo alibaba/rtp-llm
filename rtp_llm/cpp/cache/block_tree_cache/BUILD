@@ -89,6 +89,7 @@ cc_library(
         "transfer/CrcTransferService.cc",
         "transfer/CrcDumpWriterMetadata.cc",
         "transfer/DeviceHostCopyStrategy.cc",
+        "transfer/Cuda3DBatchDeviceHostCopyStrategy.cc",
         "transfer/DeviceHostTransferExecutor.cc",
         "transfer/HostDiskTransferExecutor.cc",
         "transfer/DeviceDiskTransferExecutor.cc",

@@ -46,7 +46,7 @@ safetensors
 sentence-transformers==2.7.0
 sentencepiece==0.2.0
 setproctitle
-setuptools==75.8.0
+setuptools==70.3.0
 sympy
 thrift
 tiktoken==0.7.0

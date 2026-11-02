@@ -1,12 +1,11 @@
 """RDMA arch-selects, shared verbatim by the public tree and the internal overlay.
 
-The internal overlay overrides the @arch_config repository with
-internal_source/bazel, which shadows the whole public arch_config/ directory
-(Bazel refuses main-repo labels into it: it is a repository root, not a
-package). The internal arch_select.bzl therefore cannot load
-arch_config/arch_select.bzl — these definitions live in the main repo's
-bazel/ package instead, which is loadable from any repository, and both
-arch_select.bzl files re-export them.
+The closed-source checkout no longer shadows @arch_config: both trees load the
+same arch_config/arch_select.bzl, and that file re-exports the definitions
+here. They still live in the main repo's bazel/ package rather than in
+arch_config/ because @arch_config is a repository root, not a package, so
+main-repo labels (the @rtp_llm//... impl targets below) cannot be expressed
+from inside it — the definitions must be loadable from any repository.
 """
 
 def cache_store_deps():

@@ -104,8 +104,8 @@ inline ErrorInfo transferStatusToErrorInfo(TransferStatus status) {
 // and NOT_EXECUTED means no target was committed to the caller. The copy may
 // have been skipped or discarded after a batch CRC failure; target bytes can change.
 // An empty block_errors vector represents a uniform result until the task boundary expands it.
-// status.code() preserves unknown completion for recovery; copy_error summarizes diagnostics.
-// status keeps all failure messages.
+// copy_error summarizes diagnostic priority. Unknown completion takes priority in
+// status.code() so CRC evidence cannot hide outstanding I/O; status keeps all failure messages.
 struct TransferResult {
     TransferResult() = default;
     explicit TransferResult(size_t block_count): block_errors(block_count, CacheCopyError::NOT_EXECUTED) {}
@@ -133,11 +133,11 @@ struct TransferResult {
             copy_error = other.copy_error;
             return;
         }
-        const auto code =
-            status.code() == ErrorCode::TRANSFER_COMPLETION_UNKNOWN
-                || other.status.code() == ErrorCode::TRANSFER_COMPLETION_UNKNOWN ?
-                ErrorCode::TRANSFER_COMPLETION_UNKNOWN :
-                (other.copy_error > copy_error ? other.status.code() : status.code());
+        const bool completion_unknown = status.code() == ErrorCode::TRANSFER_COMPLETION_UNKNOWN
+                                        || other.status.code() == ErrorCode::TRANSFER_COMPLETION_UNKNOWN;
+        const auto code = completion_unknown            ? ErrorCode::TRANSFER_COMPLETION_UNKNOWN :
+                          other.copy_error > copy_error ? other.status.code() :
+                                                          status.code();
         status          = ErrorInfo(code, status.ToString() + "; " + other.status.ToString());
         copy_error      = std::max(copy_error, other.copy_error);
     }
@@ -157,11 +157,21 @@ struct TransferResult {
     std::vector<CacheCopyError> block_errors;
 };
 
+struct DeviceHostCopyTemplate {
+    size_t member_index;
+    void*  device_base;
+    size_t host_offset;
+    size_t width_bytes;
+    size_t layer_count;
+    size_t device_pitch;
+};
+
 struct DeviceHostCopyOptions {
     size_t staged_sm_min_tile_count{16};
     size_t staged_sm_min_bytes{64 * 1024};
     bool   staged_sm_copy_enabled{true};
     bool   cuda_batch_copy_enabled{true};
+    bool   cuda_3d_batch_copy_enabled{true};
 };
 
 struct HostBufferView {

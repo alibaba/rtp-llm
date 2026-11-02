@@ -11,7 +11,6 @@ IBlockPool::IBlockPool(std::shared_ptr<const BlockPoolConfigBase> config): confi
     RTP_LLM_CHECK(config_ != nullptr);
     RTP_LLM_CHECK(config_->physical_block_count > 1);
     allocated_.assign(config_->physical_block_count, 0);
-    frozen_blocks_.assign(config_->physical_block_count, 0);
     tree_refcounts_.assign(config_->physical_block_count, 0);
     for (std::vector<uint32_t>& typed_refcounts : tree_refcounts_by_type_) {
         typed_refcounts.assign(config_->physical_block_count, 0);
@@ -43,7 +42,8 @@ std::string IBlockPool::debugString() const {
         << ", load_ref_blocks=" << tree_referenced_block_counts_[treeRefTypeIndex(BlockTreeRefType::LOAD)]
         << ", eviction_target_ref_blocks="
         << tree_referenced_block_counts_[treeRefTypeIndex(BlockTreeRefType::EVICTION)]
-        << ", store_ref_blocks=" << tree_referenced_block_counts_[treeRefTypeIndex(BlockTreeRefType::STORE)] << "}";
+        << ", store_ref_blocks=" << tree_referenced_block_counts_[treeRefTypeIndex(BlockTreeRefType::STORE)]
+        << ", frozen_ref_blocks=" << tree_referenced_block_counts_[treeRefTypeIndex(BlockTreeRefType::FROZEN)] << "}";
     return oss.str();
 }
 
@@ -96,6 +96,7 @@ void IBlockPool::incTreeRef(BlockIdxType block, BlockTreeRefType ref_type) {
 }
 
 void IBlockPool::incTreeRef(const BlockIdList& blocks, BlockTreeRefType ref_type) {
+    RTP_LLM_CHECK(ref_type != BlockTreeRefType::FROZEN);
     const size_t ref_type_index = treeRefTypeIndex(ref_type);
     mutateAllocatedBlocks(
         blocks,
@@ -121,30 +122,21 @@ void IBlockPool::incTreeRefNoLock(BlockIdxType block, size_t ref_type_index) {
     updateAvailableBlocksNumNoLock(block, was_available);
 }
 
-void IBlockPool::freezeBlock(BlockIdxType block, BlockTreeRefType ref_type) noexcept {
+void IBlockPool::freezeBlock(BlockIdxType block) noexcept {
     std::lock_guard<std::mutex> lock(mutex_);
     checkInitializedNoLock();
     checkAllocatedNoLock(block);
-    RTP_LLM_CHECK(ref_type == BlockTreeRefType::LOAD || ref_type == BlockTreeRefType::EVICTION);
-    if (frozen_blocks_[block] != 0) {
+    if (treeRefCountNoLock(block, BlockTreeRefType::FROZEN) != 0) {
         return;
     }
-    incTreeRefNoLock(block, treeRefTypeIndex(ref_type));
-    frozen_blocks_[block] = 1;
-    ++frozen_count_;
+    incTreeRefNoLock(block, treeRefTypeIndex(BlockTreeRefType::FROZEN));
 }
 
 bool IBlockPool::isFrozen(BlockIdxType block) const {
     std::lock_guard<std::mutex> lock(mutex_);
     checkInitializedNoLock();
     RTP_LLM_CHECK(validBlockNoLock(block));
-    return frozen_blocks_[block] != 0;
-}
-
-size_t IBlockPool::frozenBlocksNum() const {
-    std::lock_guard<std::mutex> lock(mutex_);
-    checkInitializedNoLock();
-    return frozen_count_;
+    return treeRefCountNoLock(block, BlockTreeRefType::FROZEN) != 0;
 }
 
 void IBlockPool::decTreeRef(BlockIdxType block, BlockTreeRefType ref_type) {
@@ -152,6 +144,7 @@ void IBlockPool::decTreeRef(BlockIdxType block, BlockTreeRefType ref_type) {
 }
 
 void IBlockPool::decTreeRef(const BlockIdList& blocks, BlockTreeRefType ref_type) {
+    RTP_LLM_CHECK(ref_type != BlockTreeRefType::FROZEN);
     const size_t ref_type_index = treeRefTypeIndex(ref_type);
     mutateAllocatedBlocks(
         blocks,

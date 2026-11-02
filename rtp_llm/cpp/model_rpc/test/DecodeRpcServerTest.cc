@@ -1,8 +1,10 @@
 #include <gtest/gtest.h>
 
 #include <chrono>
+#include <stdexcept>
 #include <thread>
 
+#include "rtp_llm/cpp/cache/block_tree_cache/load/LoadAsyncContext.h"
 #include "rtp_llm/cpp/model_rpc/DecodeRpcServer.h"
 #include "rtp_llm/cpp/model_rpc/QueryConverter.h"
 #include "rtp_llm/cpp/model_rpc/RpcErrorCode.h"
@@ -53,6 +55,108 @@ public:
 private:
     std::shared_ptr<RpcServerRuntimeMeta> meta_ = std::make_shared<RpcServerRuntimeMeta>();
     DecodeRpcServer                       server_;
+};
+
+class AllocationErrorContext final: public LoadAsyncContext {
+public:
+    AllocationErrorContext(const std::shared_ptr<LoadContextCoordinator>& coordinator, ErrorInfo error):
+        LoadAsyncContext({}, {}, 0, 1, coordinator), error_(std::move(error)) {}
+
+    ErrorInfo errorInfo() const override {
+        return error_;
+    }
+
+private:
+    ErrorInfo error_;
+};
+
+// Allocate and free real blocks; inject only the completed backend load result.
+class AllocationErrorCacheManager final: public CoordinatorCacheManager {
+public:
+    AllocationErrorCacheManager(const CacheConfig& config, ErrorInfo error):
+        CoordinatorCacheManager(config), error_(std::move(error)) {}
+
+    size_t allocated_blocks{0};
+    size_t released_blocks{0};
+
+    void free(const FreeInfo& info) override {
+        released_blocks += info.batch_kv_cache_resource->curBlocksNum();
+        CoordinatorCacheManager::free(info);
+    }
+
+protected:
+    MallocResult initMallocForCommonLen(const MallocInfo& info) override {
+        auto result = CoordinatorCacheManager::initMallocForCommonLen(info);
+        if (result.success) {
+            auto coordinator = std::make_shared<LoadContextCoordinator>([](const auto&) { return true; }, [](auto&) {});
+            auto context     = std::make_shared<AllocationErrorContext>(coordinator, error_);
+            RTP_LLM_CHECK(coordinator->registerContext(context));
+            context->setSettlementReadyCallback([](const auto& ready) { EXPECT_TRUE(ready->settle(false)); });
+            result.async_context  = std::move(context);
+            result.load_attempted = true;
+        }
+        return result;
+    }
+
+    MallocResult incrMalloc(const MallocInfo& info) override {
+        auto result      = CoordinatorCacheManager::incrMalloc(info);
+        allocated_blocks = info.batch_kv_cache_resource->curBlocksNum();
+        return result;
+    }
+
+private:
+    ErrorInfo error_;
+};
+
+class AllocationErrorEngine final: public EngineBase {
+public:
+    static EngineInitParams parameters() {
+        EngineInitParams params;
+        params.model_config_.max_seq_len = 16;
+        return params;
+    }
+
+    explicit AllocationErrorEngine(ErrorInfo error): EngineBase(parameters()) {
+        const auto config = test::makeSimpleMhaCacheConfig(1, 8, 2, DataType::TYPE_FP16);
+        cache             = std::make_shared<KVCacheManager>(config, false, nullptr);
+        if (!cache->init()) {
+            throw std::runtime_error("allocation test cache initialization failed");
+        }
+        allocator = std::make_shared<AllocationErrorCacheManager>(config, std::move(error));
+        if (!allocator->init()) {
+            throw std::runtime_error("allocation test allocator initialization failed");
+        }
+        cache->coordinator_manager_     = allocator;
+        resource_context_.cache_manager = cache;
+        resource_context_.role_type     = RoleType::DECODE;
+    }
+
+    GenerateStreamPtr makeStream(const std::shared_ptr<GenerateInput>& input) override {
+        const auto params = parameters();
+        stream            = std::make_shared<NormalGenerateStream>(
+            input, params.model_config_, params.runtime_config, resource_context_, nullptr);
+        return stream;
+    }
+    GenerateStreamPtr enqueue(const std::shared_ptr<GenerateInput>& input) override {
+        ADD_FAILURE() << "failed allocation reached engine enqueue";
+        return makeStream(input);
+    }
+    void enqueue(GenerateStreamPtr&) override {
+        ADD_FAILURE() << "failed allocation reached engine enqueue";
+    }
+    absl::Status stop() override {
+        return absl::OkStatus();
+    }
+    absl::StatusOr<GenerateStreamPtr> preRun(const std::shared_ptr<GenerateInput>&, preRunMode) override {
+        return absl::UnimplementedError("unused in allocation test");
+    }
+    KVCacheInfo getCacheStatusInfo(int64_t, bool) override {
+        return {};
+    }
+
+    std::shared_ptr<KVCacheManager>              cache;
+    std::shared_ptr<AllocationErrorCacheManager> allocator;
+    GenerateStreamPtr                            stream;
 };
 
 GroupBase makeRpcGroup(std::string tag) {
@@ -569,6 +673,48 @@ TEST(DecodeRpcServerTest, NonCancelledGenerateRequestReadPreservesFailure) {
 }
 
 class PrefillCompletionRpcTest: public DeviceTestBase {};
+
+TEST_F(PrefillCompletionRpcTest, AllocationLoadTimeoutPreservesDeadlineAndReleasesResources) {
+    for (bool timeout : {false, true}) {
+        SCOPED_TRACE(timeout);
+        const auto backend_code = timeout ? ErrorCode::DEADLINE_EXCEEDED : ErrorCode::EXECUTION_EXCEPTION;
+        auto engine = std::make_shared<AllocationErrorEngine>(ErrorInfo(backend_code, "injected backend load failure"));
+        const auto      initial_free_blocks = engine->cache->freeBlocksNum();
+        DecodeRpcServer server;
+        server.engine_ = engine;
+        DecodeRpcContext             rpc_context{nullptr};
+        kmonitor::MetricsReporterPtr reporter;
+        auto                         meta = std::make_shared<RpcServerRuntimeMeta>();
+        DecodeGenerateContext        context(rpc_context, 0, nullptr, reporter, meta);
+        context.request_id  = 45;
+        context.request_key = "allocation-load-failure";
+        auto* input         = context.allocate_request.mutable_input();
+        input->set_request_id(context.request_id);
+        input->add_token_ids(1);
+        input->add_token_ids(2);
+        input->add_token_ids(3);
+        input->mutable_generate_config()->set_max_new_tokens(1);
+        input->mutable_generate_config()->set_num_beams(1);
+        input->mutable_generate_config()->set_num_return_sequences(1);
+
+        server.allocateResource(context);
+
+        EXPECT_EQ(context.error_status.error_code(),
+                  timeout ? grpc::StatusCode::DEADLINE_EXCEEDED : grpc::StatusCode::INTERNAL);
+        EXPECT_EQ(context.error_info.code(), timeout ? ErrorCode::LOAD_CACHE_TIMEOUT : ErrorCode::MALLOC_FAILED);
+        EXPECT_NE(context.error_status.error_message().find("injected backend load failure"), std::string::npos);
+        ASSERT_NE(engine->stream, nullptr);
+        EXPECT_TRUE(engine->stream->isFinished());
+        EXPECT_TRUE(engine->stream->streamCacheResource().isResourceReleased());
+        EXPECT_EQ(engine->stream->streamCacheResource().curBlocksNum(), 0);
+        EXPECT_GT(engine->allocator->allocated_blocks, 0u);
+        EXPECT_EQ(engine->allocator->released_blocks, engine->allocator->allocated_blocks);
+        EXPECT_EQ(engine->cache->freeBlocksNum(), initial_free_blocks);
+        EXPECT_EQ(context.retry_times, 1);
+        EXPECT_FALSE(engine->stream->hasEvent(StreamEvents::LoadInitiated));
+        context.markRpcHandlingCompleted();
+    }
+}
 
 TEST_F(PrefillCompletionRpcTest, SettlesWithoutDecodeAndPreservesProtocolFailures) {
     class CompletionService final: public RpcService::Service {

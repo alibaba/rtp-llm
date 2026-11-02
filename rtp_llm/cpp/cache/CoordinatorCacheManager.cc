@@ -471,6 +471,7 @@ std::vector<KVCachePoolMetricsSnapshot> CoordinatorCacheManager::poolMetricsSnap
         snapshot.load_ref_blocks            = pool->referencedBlocksNum(BlockTreeRefType::LOAD);
         snapshot.eviction_target_ref_blocks = pool->referencedBlocksNum(BlockTreeRefType::EVICTION);
         snapshot.store_ref_blocks           = pool->referencedBlocksNum(BlockTreeRefType::STORE);
+        snapshot.frozen_ref_blocks          = pool->referencedBlocksNum(BlockTreeRefType::FROZEN);
         snapshot.used_ratio                 = snapshot.total_blocks == 0 ?
                                                   0.0f :
                                                   static_cast<float>(100.0 * (snapshot.total_blocks - snapshot.available_blocks)

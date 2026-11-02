@@ -1,19 +1,26 @@
 load('@bazel_tools//tools/build_defs/repo:git.bzl', "git_repository", "new_git_repository")
 load("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive", "http_file")
-
 # Sanitize a dependency so that it works correctly from code that includes
 # TensorFlow as a submodule.
 def clean_dep(dep):
     return str(Label(dep))
 
+# Pass-through wrappers (the gitlab mirror map is retired: closed CI fetches
+# github directly, like the always-unmapped googletest/havenask deps).
+def mirror_git(**kwargs):
+    git_repository(**kwargs)
+
+def mirror_new_git(**kwargs):
+    new_git_repository(**kwargs)
+
 def git_deps():
-    git_repository(
+    mirror_git(
         name = "rules_cc",
         remote = "https://github.com/bazelbuild/rules_cc.git",
         commit = "1477dbab59b401daa94acedbeaefe79bf9112167",
     )
 
-    git_repository(
+    mirror_git(
         name = "rules_python",
         remote = "https://github.com/bazelbuild/rules_python.git",
         commit = "084b877c98b580839ceab2b071b02fc6768f3de6",
@@ -25,21 +32,21 @@ def git_deps():
         ],
     )
 
-    new_git_repository(
+    mirror_new_git(
         name = "cutlass_h_moe",
         remote = "https://github.com/NVIDIA/cutlass.git",
         commit = "19b4c5e065e7e5bbc8082dfc7dbd792bdac850fc",
         build_file = str(Label("@rtp_llm//3rdparty/cutlass:cutlass.BUILD")),
     )
 
-    new_git_repository(
+    mirror_new_git(
         name = "cutlass4.0",
         remote = "https://github.com/NVIDIA/cutlass.git",
         commit = "dc4817921edda44a549197ff3a9dcf5df0636e7b",
         build_file = str(Label("@rtp_llm//3rdparty/cutlass:cutlass.BUILD")),
     )
 
-    git_repository(
+    mirror_git(
         name = "com_google_googletest",
         remote = "https://github.com/google/googletest.git",
         commit = "f8d7d77c06936315286eb55f8de22cd23c188571",
@@ -78,7 +85,7 @@ def git_deps():
         sha256 = "c3e5e9fdd5004dcb542feda5ee4f0ff0744628baf8ed2dd5d66f8ca1197cb1a1",
     )
 
-    git_repository(
+    mirror_git(
         name = "com_google_absl",
         remote = "https://github.com/abseil/abseil-cpp.git",
         patch_cmds = [
@@ -97,7 +104,7 @@ def git_deps():
         path = "3rdparty/protobuf",
     )
 
-    new_git_repository(
+    mirror_new_git(
         name = "rapidjson",
         remote = "https://github.com/Tencent/rapidjson.git",
         # tag = "v1.1.0",
@@ -106,7 +113,7 @@ def git_deps():
         build_file = clean_dep("@rtp_llm//3rdparty/rapidjson:rapidjson.BUILD"),
     )
 
-    new_git_repository(
+    mirror_new_git(
         name = "havenask",
         remote = "https://github.com/alibaba/havenask.git",
         commit = "3c973500afbd40933eb0a80cfdfb6592274377fb",
@@ -119,7 +126,7 @@ def git_deps():
         build_file = clean_dep("@rtp_llm//3rdparty/kmonitor:kmonitor.BUILD"),
     )
 
-    new_git_repository(
+    mirror_new_git(
         name = "nacos_sdk_cpp",
         remote = "https://github.com/nacos-group/nacos-sdk-cpp.git",
         commit = "2b4104d2524776dff236a228ad2abff4676fb916",
@@ -140,7 +147,7 @@ def git_deps():
         ],
     )
 
-    git_repository(
+    mirror_git(
         name = "grpc",
         remote = "https://github.com/grpc/grpc.git",
         commit = "109c570727c3089fef655edcdd0dd02cc5958010",

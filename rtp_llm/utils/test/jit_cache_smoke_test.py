@@ -372,7 +372,19 @@ class JitCacheSmokeTest(unittest.TestCase):
         # services use. Both phases share this path so restored artifacts keep
         # resolving the absolute build path baked into them.
         self.local_root = _runtime_dir(f"jit_local_{config.model_name}") / ".jit_cache"
-        remote = os.environ.get("REMOTE_JIT_DIR", "").strip()
+        # Expand $VAR references the same way the server arg parser does: this file
+        # also does its own Path() math on the remote root, not just pass-through.
+        remote = os.path.expandvars(os.environ.get("REMOTE_JIT_DIR", "")).strip()
+        if remote == "auto":
+            # The CI-safe sentinel: resolve it the same way the wrapper and the
+            # server parser do, so the test's Path() math matches the server's
+            # published location even when the wrapper did not run first.
+            workdir = os.environ.get("HIPPO_APP_WORKDIR", "").strip()
+            if not workdir:
+                raise unittest.SkipTest(
+                    "REMOTE_JIT_DIR=auto without HIPPO_APP_WORKDIR; wrapper missing?"
+                )
+            remote = str(Path(workdir) / "main" / "jit_cache")
         if not remote:  # an environment gap, not a regression: keep the two apart
             raise unittest.SkipTest("REMOTE_JIT_DIR unset; CI injects it")
         try:
