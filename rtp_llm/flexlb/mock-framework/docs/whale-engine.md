@@ -48,6 +48,8 @@ HTTP 为 START_PORT，gRPC 为 START_PORT+1；平台探针访问 HTTP `/health`�
 
 ## 部署接线边界
 
+`CHECKPOINT_PATH` 可以使用平台注入的 OSS 模型目录；Java 启动时通过 C2 Fuse 的原生只读挂载协议解析为本地目录，只读取 config.json。与 real RTP 一致，host Fuse 使用 HIPPO_FUSE_PORT、HIPPO_SLAVE_IP 和 HIPPO_APP_WORKDIR，sidecar Fuse 使用 28006 端口及 /mnt/fuse。模板须提供 /mnt/fuse 的共享卷和 HostToContainer 传播。有效配置记录本地挂载路径，避免输出带凭据的 OSS URI；不在部署 ENV 中注入下载程序。
+
 这些文件提供可构建的镜像和服务入口，不自动修改 Whale 模板、发布角色或注册 VIP。接入目标部署时，使用其现有角色发现、探针、资源和停止宽限设置。Master 仍是独立 JVM，不起本地 ZK 或 Mock 集群管理器。
 
 `/metrics` 是 Prometheus 导出；目标部署必须配置实际采集链路。它不等于已经接入 KMonitor，原生指标命名也不代表采集器已经抓到数据。KMonitor SDK/平台采集接线需另行验证，不能以端点存在代替验收。
