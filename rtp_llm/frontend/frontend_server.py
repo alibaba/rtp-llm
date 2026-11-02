@@ -602,6 +602,20 @@ class FrontendServer(object):
                 )
             assert self._frontend_worker is not None
             prompts = req.get("prompt_batch", [])
+            if len(prompts) > 1:
+                # Pipeline uses base_request_id + item index. Reserve the whole
+                # sequence range so another batch/single request cannot reuse it.
+                with self._global_controller.lock:
+                    sequence = self._global_controller.request_counter.value + 1
+                    if sequence % 4096 + len(prompts) > 4096:
+                        sequence += (-sequence) % 4096
+                    self._global_controller.request_counter.value = sequence + len(prompts) - 1
+            request_id = generate_request_id(
+                self.py_env_configs.server_config.ip,
+                self.py_env_configs.server_config.server_port,
+                self.server_id,
+                sequence,
+            )
             generate_config = req.get("generate_config", {})
             result = await self._frontend_worker.batch_infer(
                 prompts=prompts,

@@ -44,6 +44,10 @@ public:
     GenerateStreamCall(grpc::ServerContext*, const GenerateInputPB*, grpc::ServerWriter<GenerateOutputsPB>*) override {
         return grpc::Status(grpc::StatusCode::ABORTED, "selected role handler");
     }
+    grpc::Status
+    BatchGenerateCall(grpc::ServerContext*, const BatchGenerateInputPB*, BatchGenerateOutputsPB*) override {
+        return grpc::Status(grpc::StatusCode::ABORTED, "selected batch handler");
+    }
 };
 }  // namespace
 
@@ -55,5 +59,16 @@ TEST(RemoteRpcServiceImplTest, GenerateUsesSelectedLocalServerVirtualDispatch) {
     const auto          status = service.GenerateStreamCall(&context, &request, nullptr);
     EXPECT_EQ(status.error_code(), grpc::StatusCode::ABORTED);
     EXPECT_EQ(status.error_message(), "selected role handler");
+}
+
+TEST(RemoteRpcServiceImplTest, BatchUsesSelectedLocalServerVirtualDispatch) {
+    RemoteRpcServiceImpl service;
+    service.local_server_ = std::make_shared<DispatchTestServer>();
+    grpc::ServerContext    context;
+    BatchGenerateInputPB   request;
+    BatchGenerateOutputsPB response;
+    const auto             status = service.BatchGenerateCall(&context, &request, &response);
+    EXPECT_EQ(status.error_code(), grpc::StatusCode::ABORTED);
+    EXPECT_EQ(status.error_message(), "selected batch handler");
 }
 }  // namespace rtp_llm

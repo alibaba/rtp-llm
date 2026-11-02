@@ -97,6 +97,7 @@ cc_library(
         "//rtp_llm/cpp/model_rpc:tensor_pb_convert",
         "//rtp_llm/cpp/cache/connector/p2p/transfer:basic_types",
         "//rtp_llm/cpp/engine_base/stream:complete_token_ids",
+        "//rtp_llm/cpp/engine_base/stream:generate_types",
         "//rtp_llm/cpp/utils:core_utils",
         "//rtp_llm/cpp/utils:rpc_completion_queue",
         "//rtp_llm/cpp/utils:grpc_address_util",
