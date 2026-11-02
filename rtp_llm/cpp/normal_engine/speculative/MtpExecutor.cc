@@ -24,6 +24,7 @@
 #include "rtp_llm/cpp/models/logits_processor/TreeLogitsProcessor.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include <algorithm>
+#include <chrono>
 #include <cstring>
 #include <sstream>
 #if USING_CUDA
@@ -1377,8 +1378,7 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
                                                               params.profiling_debug_logging_config,
                                                               cache_config,
                                                               params.sp_config,
-                                                              false,
-                                                              isTpRank0() ? metrics_reporter_ : nullptr));
+                                                              false));
 
     LogitsProcessorFactory::init(params.model_config_,
                                  params.grammar_config,
@@ -2212,6 +2212,23 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
 
     spec_logits_processor_present = isTpRank0() && !model_input.is_fake_stream && hasSpecLogitsProcessor(streams);
 
+    auto&      sp_metrics        = metrics_collector.sp_engine_collector;
+    const bool measure_main_wait = useStreamAsync() && isTpRank0() && !model_input.is_fake_stream;
+    if (measure_main_wait) {
+        sp_metrics.main_thread_wait_bookkeeping_us = 0;
+        sp_metrics.main_thread_wait_spec_verify_us = 0;
+    }
+    // These joins run on normal_engine_loop. Measure only its remaining host
+    // wait, not the worker's full task duration or CUDA stream completion.
+    auto sync_previous_bookkeeping = [&] {
+        const auto start = std::chrono::steady_clock::now();
+        spec_bookkeeping_runner_.sync(cuda_graph::graphGetCurrentStream());
+        if (measure_main_wait) {
+            sp_metrics.main_thread_wait_bookkeeping_us +=
+                std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - start).count();
+        }
+    };
+
     auto draft_tokens_ready_event = std::make_shared<torch::Event>(cuda_graph::makeGraphEvent());
     draft_tokens_ready_event->record(cuda_graph::graphGetCurrentStream());
 
@@ -2220,7 +2237,7 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         if (useStreamAsync() && useDropBroadSync()) {
             RTP_LLM_PROFILE_SCOPE_DYNAMIC(
                 "executor.mtp.decode_step(wait_prev_bookkeeping_pre_spec_logits,stream_count=%zu)", streams.size());
-            spec_bookkeeping_runner_.sync(cuda_graph::graphGetCurrentStream());
+            sync_previous_bookkeeping();
             stream_groups                           = StreamGroups(streams);
             prev_bookkeeping_synced_for_spec_logits = true;
         }
@@ -2322,7 +2339,7 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         if (useStreamAsync() && useDropBroadSync()) {
             RTP_LLM_PROFILE_SCOPE_DYNAMIC(
                 "executor.mtp.decode_step(wait_prev_bookkeeping_pre_spec_logits,stream_count=%zu)", streams.size());
-            spec_bookkeeping_runner_.sync(cuda_graph::graphGetCurrentStream());
+            sync_previous_bookkeeping();
             stream_groups                           = StreamGroups(streams);
             prev_bookkeeping_synced_for_spec_logits = true;
         }
@@ -2337,7 +2354,12 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
 
     if (spec_logits_async_launched) {
         RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(wait_spec_logits_verify_async)");
+        const auto start = std::chrono::steady_clock::now();
         spec_logits_verify_async_runner_.sync(cuda_graph::graphGetCurrentStream());
+        if (measure_main_wait) {
+            sp_metrics.main_thread_wait_spec_verify_us =
+                std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - start).count();
+        }
     }
     if (spec_logits_processor_present && !spec_logits_result->has_active_processor) {
         return absl::InternalError("MTP async spec logits processor is present but no verify artifact was produced; "
@@ -2365,7 +2387,7 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
             if (useStreamAsync() && useDropBroadSync() && !prev_bookkeeping_synced_for_spec_logits) {
                 RTP_LLM_PROFILE_SCOPE_DYNAMIC(
                     "executor.mtp.decode_step(wait_prev_bookkeeping_pre_sampler,stream_count=%zu)", streams.size());
-                spec_bookkeeping_runner_.sync(cuda_graph::graphGetCurrentStream());
+                sync_previous_bookkeeping();
                 // Rebuild after waiting so cached maxSeqLen/batch sizes reflect
                 // the host stream state that sampler input is about to read.
                 stream_groups = StreamGroups(streams);

@@ -23,9 +23,7 @@ public:
     explicit NormalOutputDispatcher(std::vector<int64_t> output_vocab_ids = {}, int async_worker_count = 0);
     ~NormalOutputDispatcher();
 
-    absl::Status dispatch(const StreamGroups&                 stream_groups,
-                          const MergedOutput&                 merge_outputs,
-                          const kmonitor::MetricsReporterPtr& metrics_reporter = nullptr) const;
+    absl::Status dispatch(const StreamGroups& stream_groups, const MergedOutput& merge_outputs) const;
 
 private:
     bool restoreCurrentTokenIds(const GenerateStreamPtr& stream,

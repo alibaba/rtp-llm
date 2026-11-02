@@ -11,7 +11,6 @@
 #include "torch/all.h"
 #include "gtest/gtest.h"
 #include "autil/EnvUtil.h"
-#include "kmonitor/client/metric/GaugeMetric.h"
 
 #if USING_CUDA
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
@@ -1279,13 +1278,6 @@ TEST_F(MtpBatchStreamProcessorTest, testSpecSamplerInputMasksThinkBoundaryTokens
 }
 
 TEST_F(MtpBatchStreamProcessorTest, testPrefillDispatch) {
-    auto monitor = std::make_shared<kmonitor::KMonitor>("mtp_prefill_update_test");
-    monitor->SetServiceName("");
-    auto  reporter = std::make_shared<kmonitor::MetricsReporter>(monitor, "", kmonitor::MetricsTags());
-    auto* metrics  = reporter->getMetricsGroup<RtpLLMStreamUpdateMetrics>();
-    auto* latency =
-        dynamic_cast<kmonitor::GaugeMetric*>(metrics->latency_us_metric->DeclareMetric(&reporter->getTags()));
-    ASSERT_NE(latency, nullptr);
     ModelConfig                 model_config;
     RuntimeConfig               runtime_config;
     SpeculativeExecutionConfig  sp_config;
@@ -1308,7 +1300,7 @@ TEST_F(MtpBatchStreamProcessorTest, testPrefillDispatch) {
     streams.emplace_back(stream2);
 
     MtpBatchStreamProcessor processor(
-        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, sp_config, false, reporter);
+        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, sp_config, false);
 
     StreamGroups stream_groups(streams);
 
@@ -1331,31 +1323,21 @@ TEST_F(MtpBatchStreamProcessorTest, testPrefillDispatch) {
 
     checkOutput(stream1, {2, 1}, {1, 2}, {0.2, 0.1, 0.3, 0.5}, {0.3, 0.4});
     checkOutput(stream2, {1, 2, 3}, {3, 0}, {0.3, 0.1, 0.4, 0.2}, {1.7, 1.8});
-    EXPECT_EQ(latency->calculator_.Count(), 0);
-    metrics->latency_us_metric->UndeclareMetric(latency);
 }
 
 TEST_F(MtpBatchStreamProcessorTest, testDispatchDecodeStream) {
-    class SlowUpdateProcessor: public BaseLogitsProcessor {
+    class TrackingUpdateProcessor: public BaseLogitsProcessor {
     public:
         std::optional<ErrorInfo> process(const SamplerInputs&, size_t, size_t) override {
             return std::nullopt;
         }
         void                     updateMultiSeqStatus(const std::vector<int>&) override {}
         std::optional<ErrorInfo> updateStatus(const torch::Tensor&, int32_t count) override {
-            std::this_thread::sleep_for(std::chrono::milliseconds(2));
             accepted_tokens += count;
             return std::nullopt;
         }
         int accepted_tokens = 0;
     };
-    auto monitor = std::make_shared<kmonitor::KMonitor>("mtp_decode_update_test");
-    monitor->SetServiceName("");
-    auto  reporter = std::make_shared<kmonitor::MetricsReporter>(monitor, "", kmonitor::MetricsTags());
-    auto* metrics  = reporter->getMetricsGroup<RtpLLMStreamUpdateMetrics>();
-    auto* latency =
-        dynamic_cast<kmonitor::GaugeMetric*>(metrics->latency_us_metric->DeclareMetric(&reporter->getTags()));
-    ASSERT_NE(latency, nullptr);
     ModelConfig                 model_config;
     RuntimeConfig               runtime_config;
     SpeculativeExecutionConfig  sp_config;
@@ -1382,7 +1364,7 @@ TEST_F(MtpBatchStreamProcessorTest, testDispatchDecodeStream) {
     GenerateStreamPtr stream2 = createContextStream(model_config, runtime_config, resource_context, {2, 1}, 2);
     stream1->setIsContextStream(false);
     stream2->setIsContextStream(false);
-    auto logits_processor = std::make_shared<SlowUpdateProcessor>();
+    auto logits_processor = std::make_shared<TrackingUpdateProcessor>();
     stream1->logits_processor_list_.push_back(logits_processor);
 
     auto stream_groups = StreamGroups({stream1, stream2});
@@ -1402,7 +1384,7 @@ TEST_F(MtpBatchStreamProcessorTest, testDispatchDecodeStream) {
         torch::tensor({0.2f, 0.1f, 0.3f, 0.5f, 0.3f, 0.1f, 0.4f, 0.2f}, torch::kFloat32).reshape({2, 4});
 
     MtpBatchStreamProcessor processor(
-        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, sp_config, false, reporter);
+        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, sp_config, false);
 
     auto status = processor.dispatchDecode(stream_groups, spec_decode_output, std::move(draft_prefill_output));
     EXPECT_TRUE(status.ok());
@@ -1410,9 +1392,6 @@ TEST_F(MtpBatchStreamProcessorTest, testDispatchDecodeStream) {
     checkOutput(stream1, {1, 2, 3, 1, 3, 2}, {2, 0}, {0.2, 0.1, 0.3, 0.5}, {0.6, 0.06});
     checkOutput(stream2, {2, 1, 2}, {2, 3}, {0.3, 0.1, 0.4, 0.2}, {1.3, 0.13});
     EXPECT_EQ(logits_processor->accepted_tokens, 5);
-    EXPECT_EQ(latency->calculator_.Count(), 1);
-    EXPECT_GE(latency->calculator_.Min(), 2000);
-    metrics->latency_us_metric->UndeclareMetric(latency);
     // Device-state real_seq_len publication moved to the executor layer
     // (MtpExecutor::publishSyncMtpDeviceState); dispatchDecode itself only
     // performs host bookkeeping now, so no device-state asserts here.

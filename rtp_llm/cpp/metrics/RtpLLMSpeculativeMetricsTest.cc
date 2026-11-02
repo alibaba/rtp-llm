@@ -95,6 +95,75 @@ TEST_F(RtpLLMSpeculativeMetricsTest, ReportsZeroDecisionBeforeAcceptanceIsReady)
     expectSnapshot({{"0", expected}});
 }
 
+TEST_F(RtpLLMSpeculativeMetricsTest, SkipsUnsetMainThreadWaitsButReportsEachZeroWait) {
+    RtpLLMSpeculativeEngineMetricsCollector collector;
+    report(collector);
+    expectSnapshot({{"0", latencySamples()}});
+
+    collector.main_thread_wait_bookkeeping_us = 0;
+    report(collector);
+    auto bookkeeping_expected = latencySamples();
+    bookkeeping_expected.emplace("rtp_llm_mtp_main_thread_wait_bookkeeping_us", std::vector<double>{0});
+    expectSnapshot({{"0", bookkeeping_expected}});
+
+    collector                                 = {};
+    collector.main_thread_wait_spec_verify_us = 0;
+    report(collector);
+    auto verify_expected = latencySamples();
+    verify_expected.emplace("rtp_llm_mtp_main_thread_wait_spec_verify_us", std::vector<double>{0});
+    expectSnapshot({{"0", verify_expected}});
+}
+
+TEST_F(RtpLLMSpeculativeMetricsTest, MainThreadWaitSamplesStayIndependentAcrossRounds) {
+    RtpLLMSpeculativeEngineMetricsCollector collector;
+    collector.main_thread_wait_bookkeeping_us = 17;
+    collector.main_thread_wait_spec_verify_us = 43;
+    report(collector);
+
+    collector                                 = {};
+    collector.main_thread_wait_bookkeeping_us = 5;
+    report(collector);
+
+    collector                                 = {};
+    collector.main_thread_wait_spec_verify_us = 11;
+    report(collector);
+
+    collector = {};
+    report(collector);
+
+    Samples expected{{"rtp_llm_sp_step_latency_us", {0, 0, 0, 0}},
+                     {"rtp_llm_sp_propose_step_latency_us", {0, 0, 0, 0}},
+                     {"rtp_llm_sp_score_step_latency_us", {0, 0, 0, 0}},
+                     {"rtp_llm_sp_speculative_sampler_latency_us", {0, 0, 0, 0}},
+                     {"rtp_llm_mtp_main_thread_wait_bookkeeping_us", {17, 5}},
+                     {"rtp_llm_mtp_main_thread_wait_spec_verify_us", {43, 11}}};
+    expectSnapshot({{"0", expected}});
+
+    report(collector);
+    expectSnapshot({{"0", latencySamples()}});
+    expectSnapshot({});
+}
+
+TEST_F(RtpLLMSpeculativeMetricsTest, DifferentDPRanksKeepIndependentMainThreadWaits) {
+    RtpLLMSpeculativeEngineMetricsCollector rank_zero;
+    rank_zero.main_thread_wait_bookkeeping_us = 13;
+    rank_zero.main_thread_wait_spec_verify_us = 37;
+    report(rank_zero, "0");
+
+    RtpLLMSpeculativeEngineMetricsCollector rank_one;
+    rank_one.main_thread_wait_bookkeeping_us = 59;
+    rank_one.main_thread_wait_spec_verify_us = 7;
+    report(rank_one, "1");
+
+    auto zero_expected = latencySamples();
+    zero_expected.insert(
+        {{"rtp_llm_mtp_main_thread_wait_bookkeeping_us", {13}}, {"rtp_llm_mtp_main_thread_wait_spec_verify_us", {37}}});
+    auto one_expected = latencySamples();
+    one_expected.insert(
+        {{"rtp_llm_mtp_main_thread_wait_bookkeeping_us", {59}}, {"rtp_llm_mtp_main_thread_wait_spec_verify_us", {7}}});
+    expectSnapshot({{"0", zero_expected}, {"1", one_expected}});
+}
+
 TEST_F(RtpLLMSpeculativeMetricsTest, UsesCompletedBudgetInsteadOfProposalWidth) {
     RtpLLMSpeculativeEngineMetricsCollector collector;
     collector.step_latency_us              = 120;

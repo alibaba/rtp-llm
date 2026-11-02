@@ -144,3 +144,35 @@ cc_test(
     exec_properties = {"gpu": "L20_CU13"},
     tags = ["L20_CU13"],
 )
+
+cc_test(
+    name = "mtp_main_thread_wait_test",
+    args = ["--gtest_filter=MtpExecutorTest.testMainThreadWait*"],
+    srcs = glob([
+        "MtpExecutorTest.cc",
+    ]),
+    data = [],
+    copts = test_copts,
+    deps = [
+        "//rtp_llm/cpp/cache",
+        "//rtp_llm/cpp/cache/test:cache_config_test_utils",
+        "//rtp_llm/cpp/config:config_modules",
+        "//rtp_llm/cpp/engine_base/schedulers",
+        "//rtp_llm/cpp/models",
+        "//rtp_llm/cpp/normal_engine",
+        "//rtp_llm/cpp/normal_engine/test:mock_engine",
+        "//rtp_llm/cpp/testing:device_test_utils",
+        "//rtp_llm/models_py/bindings/cuda/ops:cuda_impl",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+        "@local_config_cuda//cuda:cuda_headers",
+        "@local_config_cuda//cuda:cudart",
+    ] + torch_deps() + cuda13_torch_link_deps,
+    env = {
+        "TEST_USING_DEVICE": "CUDA",
+        "RTP_LLM_STREAM_ASYNC": "1",
+        "RTP_LLM_DROP_BROAD_SYNC": "1",
+    },
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
+)
