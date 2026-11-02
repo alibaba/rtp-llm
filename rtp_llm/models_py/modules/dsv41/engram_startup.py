@@ -39,6 +39,8 @@ COUNT_ENV = 'ENGRAM_SHARD_COUNT'
 RANKS_ENV = 'RTP_ENGRAM_RANKS_PER_INSTANCE'
 GENERATION_ENV = 'RTP_ENGRAM_GENERATION'
 PORT_ENV = 'RTP_ENGRAM_COHORT_PORT'
+# Only the first member listens, only during startup; everything else is outbound.
+DEFAULT_COHORT_PORT = 29483
 DEFAULT_TIMEOUT = 1800
 
 
@@ -178,9 +180,9 @@ def _cohort(env):
         if not host:
             host, port = item, ''
         if not port:
-            if default_port is None:
-                raise ExchangeError('COHORT_PORT_REQUIRED')
             port = default_port
+        if not port:
+            port = str(DEFAULT_COHORT_PORT)
         if not port.isdigit() or not 1 <= int(port) <= 65535:
             raise ExchangeError('INVALID_COHORT')
         members.append((host, int(port)))

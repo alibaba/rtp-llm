@@ -401,8 +401,9 @@ class DeploymentIdentityTest(unittest.TestCase):
         env[s.PORT_ENV] = '29500'
         self.assertEqual(s.build_group(env, 4)['group'], explicit)
         del env[s.PORT_ENV]
-        with self.assertRaisesRegex(e.ExchangeError, 'COHORT_PORT_REQUIRED'):
-            s.build_group(env, 4)
+        defaulted = s.build_group(env, 4)['group']
+        self.assertEqual(defaulted['members'][0]['shards'][0]['host_id'], '127.0.0.1')
+        self.assertEqual(s.build_group(dict(env, **{s.PORT_ENV: '29500'}), 4)['group'], explicit)
 
     def test_instance_index_is_discovered_from_the_local_address(self):
         env = cohort_env(2)
