@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+
 import torch
 
 from rtp_llm.models_py.utils.cache_payload_view import (
@@ -12,6 +14,41 @@ from rtp_llm.models_py.utils.cache_payload_view import (
 from rtp_llm.ops.compute_ops import LayerKVCache, PyAttentionInputs
 
 _same_tensor_metadata = same_tensor_metadata
+
+
+def qsa_strict_validation_enabled() -> bool:
+    """Whether QSA keeps the legacy host-synchronous per-check validation.
+
+    Production leaves ``RTP_LLM_QSA_STRICT_VALIDATION`` unset: engine and
+    allocator invariants become device-side asserts (a violation traps the
+    device and surfaces fail-stop at the next host synchronization), while
+    request-data checks stay on pinned host tensors. Tests and CI set the
+    variable to ``1`` to restore the per-check host validation with its exact
+    legacy diagnostics. The flag is read on every call so tests can toggle it
+    with ``patch.dict(os.environ, ...)``.
+    """
+    return os.environ.get("RTP_LLM_QSA_STRICT_VALIDATION", "") not in (
+        "",
+        "0",
+        "false",
+        "False",
+    )
+
+
+def qsa_assert_valid(verdict: torch.Tensor, message: str) -> None:
+    """Enqueue an async device assert for a CUDA verdict; host-check CPU ones.
+
+    ``verdict`` is a 0-dim boolean that is True when the invariant holds.
+    CUDA verdicts never synchronize the host: an invalid verdict traps the
+    device assert and the process fails at the next host synchronization,
+    which is the intended fail-stop contract for engine/allocator bugs.
+    CPU verdicts are checked on the host because no synchronization cost
+    exists there, preserving the legacy fail-fast behavior for CPU fixtures.
+    """
+    if verdict.is_cuda:
+        torch._assert_async(verdict, message)
+    elif not bool(verdict):
+        raise RuntimeError(message)
 
 
 def _typed_2d_pool(
@@ -58,6 +95,42 @@ def _block_table(
     return table
 
 
+def _required_blocks_verdict(
+    table: torch.Tensor,
+    required_columns: torch.Tensor,
+    *,
+    pool_blocks: int,
+) -> torch.Tensor:
+    """0-dim boolean verdict for the required-block invariants (True=valid).
+
+    Mirrors :func:`_validate_required_blocks` without any host
+    synchronization: the triton one-launch reduction runs when supported,
+    otherwise plain torch ops produce the same combined verdict.
+    """
+    if required_columns.dim() != 1 or int(required_columns.numel()) != int(
+        table.shape[0]
+    ):
+        raise RuntimeError("QSA block table has invalid required-column geometry")
+    required_columns = required_columns.to(device=table.device)
+    if table.is_cuda and torch.version.hip is None:
+        from rtp_llm.models_py.modules.qwen4_exp.qsa.qsa_validation_triton import (
+            is_supported,
+            required_blocks_verdict,
+        )
+
+        if is_supported(table, required_columns):
+            return required_blocks_verdict(table, required_columns, pool_blocks)
+    columns = torch.arange(int(table.shape[1]), device=table.device).unsqueeze(0)
+    required = columns < required_columns.unsqueeze(1)
+    negative_columns = torch.any(required_columns < 0)
+    uncovered_columns = torch.any(required_columns > int(table.shape[1]))
+    invalid_required = torch.any(required & ((table <= 0) | (table >= pool_blocks)))
+    invalid_physical = torch.any(table >= pool_blocks)
+    return ~(
+        negative_columns | uncovered_columns | invalid_required | invalid_physical
+    )
+
+
 def _validate_required_blocks(
     table: torch.Tensor,
     required_columns: torch.Tensor,
@@ -70,25 +143,18 @@ def _validate_required_blocks(
         table.shape[0]
     ):
         raise RuntimeError(f"QSA cache {tag!r} has invalid required-column geometry")
+    verdict = _required_blocks_verdict(table, required_columns, pool_blocks=pool_blocks)
+    # Synchronize once on the normal path.  Keep the specific diagnostics on
+    # the rare error path, where the extra synchronizations do not affect TPOT.
+    if bool(verdict.item()):
+        return
     required_columns = required_columns.to(device=table.device)
-    if table.is_cuda and torch.version.hip is None:
-        from rtp_llm.models_py.modules.qwen4_exp.qsa.qsa_validation_triton import (
-            is_supported,
-            required_blocks_are_valid,
-        )
-
-        if is_supported(table, required_columns) and required_blocks_are_valid(
-            table, required_columns, pool_blocks
-        ):
-            return
     columns = torch.arange(int(table.shape[1]), device=table.device).unsqueeze(0)
     required = columns < required_columns.unsqueeze(1)
     negative_columns = torch.any(required_columns < 0)
     uncovered_columns = torch.any(required_columns > int(table.shape[1]))
     invalid_required = torch.any(required & ((table <= 0) | (table >= pool_blocks)))
     invalid_physical = torch.any(table >= pool_blocks)
-    # Synchronize once on the normal path.  Keep the specific diagnostics on
-    # the rare error path, where the extra synchronizations do not affect TPOT.
     if bool(
         (
             negative_columns | uncovered_columns | invalid_required | invalid_physical

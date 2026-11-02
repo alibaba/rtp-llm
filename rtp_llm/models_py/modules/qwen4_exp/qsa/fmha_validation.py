@@ -2,6 +2,11 @@
 
 import torch
 
+from rtp_llm.models_py.model_desc.qwen4_exp_runtime.qsa_cache_views import (
+    qsa_assert_valid,
+    qsa_strict_validation_enabled,
+)
+
 
 def _validate_main_paged_geometry(
     self,
@@ -12,7 +17,15 @@ def _validate_main_paged_geometry(
     device: torch.device,
     graph_capture: bool = False,
 ) -> int:
-    """Validate all pages that a paged prefill/decode may observe."""
+    """Validate all pages that a paged prefill/decode may observe.
+
+    Length signs for the non-graph path are pre-checked by the caller on the
+    pinned host tensors (``prefix_lengths`` / ``input_lengths`` /
+    ``sequence_lengths`` mirrors); this function only moves the device copies
+    needed for the geometry verdict below.  The block-table invariants are
+    engine/allocator guarantees, so the production path folds them into one
+    async device assert instead of three host-synchronizing scalar reads.
+    """
     batch_size = int(sequence_bases.numel())
     if (
         sequence_bases.dim() != 1
@@ -31,20 +44,17 @@ def _validate_main_paged_geometry(
         if graph_capture
         else False
     )
+    if invalid_lengths:
+        raise RuntimeError(
+            "qwen4_exp QSA paged sequence bases must be non-negative and "
+            "query lengths positive"
+        )
     if not graph_capture:
         sequence_bases = sequence_bases.to(
             device=device, dtype=torch.int32, non_blocking=True
         )
         query_lengths = query_lengths.to(
             device=device, dtype=torch.int32, non_blocking=True
-        )
-        invalid_lengths = bool(torch.any(sequence_bases < 0).item()) or bool(
-            torch.any(query_lengths <= 0).item()
-        )
-    if invalid_lengths:
-        raise RuntimeError(
-            "qwen4_exp QSA paged sequence bases must be non-negative and "
-            "query lengths positive"
         )
 
     page_size = int(self.attn_configs.kernel_tokens_per_block)
@@ -106,33 +116,51 @@ def _validate_main_paged_geometry(
             "qwen4_exp QSA paged main cache must be packed 2-D or HND 5-D"
         )
 
-    if (
-        not graph_capture
-        and block_table.numel()
-        and int(block_table.max().item()) >= cache_blocks
-    ):
-        raise RuntimeError(
-            "qwen4_exp QSA paged main block table contains an "
-            "out-of-range physical block"
-        )
     visible_ends = sequence_bases + query_lengths
     required_columns = (visible_ends + page_size - 1) // page_size
-    if bool(torch.any(required_columns > int(block_table.shape[1])).item()):
-        raise RuntimeError(
-            "qwen4_exp QSA paged main block table does not cover the visible KV"
-        )
     if graph_capture:
         return page_size
+    if qsa_strict_validation_enabled():
+        # Legacy per-check host validation with its exact diagnostics.
+        if block_table.numel() and int(block_table.max().item()) >= cache_blocks:
+            raise RuntimeError(
+                "qwen4_exp QSA paged main block table contains an "
+                "out-of-range physical block"
+            )
+        if bool(torch.any(required_columns > int(block_table.shape[1])).item()):
+            raise RuntimeError(
+                "qwen4_exp QSA paged main block table does not cover the visible KV"
+            )
+        columns = torch.arange(
+            int(block_table.shape[1]), device=block_table.device
+        ).unsqueeze(0)
+        required = columns < required_columns.unsqueeze(1)
+        invalid = required & ((block_table <= 0) | (block_table >= cache_blocks))
+        if bool(torch.any(invalid).item()):
+            raise RuntimeError(
+                "qwen4_exp QSA paged visible KV resolves to an unallocated "
+                "or out-of-range physical block"
+            )
+        return page_size
+    # One async device verdict replaces three host-synchronizing scalar reads.
+    # The whole-table out-of-range term keeps the legacy ``block_table.max()``
+    # check's coverage of stale columns beyond the visible KV.
+    covered = required_columns <= int(block_table.shape[1])
     columns = torch.arange(
         int(block_table.shape[1]), device=block_table.device
     ).unsqueeze(0)
     required = columns < required_columns.unsqueeze(1)
-    invalid = required & ((block_table <= 0) | (block_table >= cache_blocks))
-    if bool(torch.any(invalid).item()):
-        raise RuntimeError(
-            "qwen4_exp QSA paged visible KV resolves to an unallocated "
-            "or out-of-range physical block"
-        )
+    invalid_blocks = (block_table <= 0) | (block_table >= cache_blocks)
+    verdict = (
+        torch.any(~covered)
+        | torch.any(block_table >= cache_blocks)
+        | torch.any(required & invalid_blocks)
+    )
+    qsa_assert_valid(
+        ~verdict,
+        "qwen4_exp QSA paged main block table does not cover or resolve the "
+        "visible KV",
+    )
     return page_size
 
 
@@ -204,6 +232,14 @@ def validate_qsa_before_side_write(
     else:
         sequence_bases = self.attn_inputs.sequence_lengths
         query_lengths = torch.ones_like(sequence_bases)
+    # Host fail-fast on the pinned length mirrors; free, and it lets
+    # _validate_main_paged_geometry drop its own device-synchronizing sign
+    # reads for the non-graph path.
+    if bool(torch.any(sequence_bases < 0)) or bool(torch.any(query_lengths <= 0)):
+        raise RuntimeError(
+            "qwen4_exp QSA paged sequence bases must be non-negative and "
+            "query lengths positive"
+        )
     if int(hidden_states.shape[0]) != int(query_lengths.sum().item()):
         raise RuntimeError(
             "qwen4_exp QSA paged token count does not match batch/query geometry"
