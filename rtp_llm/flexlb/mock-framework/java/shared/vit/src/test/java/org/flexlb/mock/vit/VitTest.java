@@ -99,21 +99,21 @@ class VitTest {
         var config=config("1",16,16,1024,0);
         try(var cache=new VitCache(config)) {
             var images=List.of(new VitGeometry.Image("a",56,28,2),new VitGeometry.Image("b",56,28,2),new VitGeometry.Image("c",56,28,2));
-            for(var image:images) { var claim=cache.acquire(image);cache.complete(claim,null); }
+            for(var image:images) { var claim=cache.acquire(List.of(image.key())).getFirst();cache.publish(claim,image,null); }
             assertEquals("",cache.tier("a"));assertNotNull(cache.hash("a"));
             assertEquals("cpu",cache.tier("b"));assertEquals("gpu",cache.tier("c"));
-            assertFalse(cache.acquire(images.get(1)).producer());
+            assertFalse(cache.acquire(List.of(images.get(1).key())).getFirst().producer());
             assertEquals("gpu",cache.tier("b"));assertEquals("cpu",cache.tier("c"));
             assertTrue(cache.snapshot().get("py_rtp_vit_embedding_cache_bytes") == 32.0);
         }
     }
     @Test void failedProducerReleasesTheClaimAndOldCompletionCannotPublishANewGeneration() throws Exception {
         try(var cache=new VitCache(config("1",16,16,1024,0))) {
-            var image=new VitGeometry.Image("a",56,28,2);var first=cache.acquire(image);var joined=cache.acquire(image);
+            var image=new VitGeometry.Image("a",56,28,2);var first=cache.acquire(List.of(image.key())).getFirst();var joined=cache.acquire(List.of(image.key())).getFirst();
             assertFalse(joined.producer());assertSame(first.result(),joined.result());
-            cache.complete(first,new IllegalStateException("failed"));assertTrue(joined.result().isCompletedExceptionally());
-            var fresh=cache.acquire(image);cache.complete(first,null);assertFalse(fresh.result().isDone());
-            cache.complete(fresh,null);assertEquals(image,fresh.result().join());
+            cache.publish(first,null,new IllegalStateException("failed"));assertTrue(joined.result().isCompletedExceptionally());
+            var fresh=cache.acquire(List.of(image.key())).getFirst();cache.publish(first,image,null);assertFalse(fresh.result().isDone());
+            cache.publish(fresh,image,null);assertEquals(image,fresh.result().join());
         }
     }
     @Test void oneWaiterDeadlineDoesNotCancelAnotherWaiterOrTheSharedForward() throws Exception {
@@ -149,18 +149,18 @@ class VitTest {
         var changed=media.toBuilder().setMmPreprocessConfig(media.getMmPreprocessConfig().toBuilder().setMmTimeoutMs(2)).build();
         assertEquals(MediaInput.key(media),MediaInput.key(changed));
     }
-    @Test void queueOverflowFailsClaimsAndStopEndsEveryOutstandingWaiter() throws Exception {
+    @Test void queueOverflowRejectsWorkAndStopCompletesEveryStageWaiter() throws Exception {
         var path=directory.resolve("bounded.json");
         new ObjectMapper().writeValue(path.toFile(),Map.of("id","vit-0","component_role","vit","component",Map.of("config",Map.of(
-            "checkpoint_path",checkpoint(),"gpu_max_batch_size",1,"vit_concurrency",1,"vit_max_queue_size",1,"mock.compute",Map.of("forward",Map.of("expression","1000"))))));
-        var config=VitConfig.load(path);
-        try(var cache=new VitCache(config);var scheduler=new VitScheduler(config,cache)) {
-            var first=cache.acquire(new VitGeometry.Image("a",28,28,1));scheduler.submit(first);
+            "checkpoint_path",checkpoint(),"gpu_max_batch_size",1,"vit_concurrency",1,"vit_max_queue_size",0,"mock.compute",Map.of("forward",Map.of("expression","1000"))))));
+        try(var scheduler=new VitScheduler(VitConfig.load(path))) {
+            var first=scheduler.submit(new VitGeometry.Image("a",28,28,1));
             long end=System.nanoTime()+TimeUnit.SECONDS.toNanos(2);
-            while(scheduler.snapshot().get("mock_vit_running_image_count") == 0) { assertTrue(System.nanoTime()<end);Thread.sleep(2); }
-            var second=cache.acquire(new VitGeometry.Image("b",28,28,1));scheduler.submit(second);
-            var rejected=assertThrows(StatusRuntimeException.class,()->cache.acquire(new VitGeometry.Image("c",28,28,1)));
-            assertEquals(Status.Code.RESOURCE_EXHAUSTED,rejected.getStatus().getCode());scheduler.close();
+            while(scheduler.snapshot().get("mock_vit_running_image_count")==0) { assertTrue(System.nanoTime()<end);Thread.sleep(2); }
+            var second=scheduler.submit(new VitGeometry.Image("b",28,28,1));
+            assertEquals(Status.Code.RESOURCE_EXHAUSTED,assertThrows(StatusRuntimeException.class,
+                ()->scheduler.submit(new VitGeometry.Image("c",28,28,1))).getStatus().getCode());
+            scheduler.close();
             assertThrows(ExecutionException.class,()->first.result().get(2,TimeUnit.SECONDS));
             assertThrows(ExecutionException.class,()->second.result().get(2,TimeUnit.SECONDS));
         }
@@ -184,16 +184,42 @@ class VitTest {
         }
     }
 
-    @Test void queuedWorkWithNoConsumersIsRemovedWithoutAnotherForward() throws Exception {
-        try(var cache=new VitCache(config("120",16,16,1024,0));
-            var scheduler=new VitScheduler(config("120",16,16,1024,0),cache)) {
-            var first=cache.acquire(new VitGeometry.Image("a",28,28,1));scheduler.submit(first);
+    @Test void queuedStageCanBeCancelledWithoutAnotherForward() throws Exception {
+        try(var scheduler=new VitScheduler(config("120",16,16,1024,0))) {
+            var first=scheduler.submit(new VitGeometry.Image("a",28,28,1));
             long end=System.nanoTime()+TimeUnit.SECONDS.toNanos(2);
-            while(scheduler.snapshot().get("mock_vit_running_image_count") == 0) { assertTrue(System.nanoTime()<end);Thread.sleep(2); }
-            var abandoned=cache.acquire(new VitGeometry.Image("b",28,28,1));scheduler.submit(abandoned);VitCache.release(abandoned);
+            while(scheduler.snapshot().get("mock_vit_running_image_count")==0) { assertTrue(System.nanoTime()<end);Thread.sleep(2); }
+            var abandoned=scheduler.submit(new VitGeometry.Image("b",28,28,1));
+            assertTrue(scheduler.cancel(abandoned)); assertFalse(scheduler.cancel(first));
             first.result().get(2,TimeUnit.SECONDS);
             assertThrows(ExecutionException.class,()->abandoned.result().get(2,TimeUnit.SECONDS));
-            assertEquals(0, scheduler.snapshot().get("mock_vit_running_image_count"));
+            assertEquals(0,scheduler.snapshot().get("mock_vit_running_image_count"));
+        }
+    }
+
+    @Test void admissionIsReleasedAfterSharedResultPublication() throws Exception {
+        var settings=config("100",1024,1024,1024,0,Map.of("vit_concurrency",1,"vit_max_queue_size",0));
+        var published=new CountDownLatch(1); var finishPublication=new CountDownLatch(1);
+        try(var cache=new VitCache(settings);var scheduler=new VitScheduler(settings);
+            var preparation=new VitPreparation(settings,cache,scheduler,new VitMetrics())) {
+            var claims=preparation.submit(input("first"));
+            var notified=claims.getFirst().result().thenRun(()->{
+                published.countDown();
+                try { assertTrue(finishPublication.await(2,TimeUnit.SECONDS)); }
+                catch(InterruptedException error) { Thread.currentThread().interrupt();throw new RuntimeException(error); }
+            });
+            try {
+                assertTrue(published.await(2,TimeUnit.SECONDS));
+                assertNotNull(cache.hash(MediaInput.key(input("first").getMultimodalInputs(0))));
+                assertEquals(1,preparation.inflight());
+                assertEquals(Status.Code.RESOURCE_EXHAUSTED,assertThrows(StatusRuntimeException.class,
+                    ()->preparation.submit(input("second"))).getStatus().getCode());
+            } finally { finishPublication.countDown(); }
+            notified.get(2,TimeUnit.SECONDS); claims.forEach(VitCache::release);
+            long until=System.nanoTime()+TimeUnit.SECONDS.toNanos(2);
+            while(preparation.inflight()!=0) { assertTrue(System.nanoTime()<until);Thread.sleep(2); }
+            var next=preparation.submit(input("second"));
+            next.getFirst().result().get(2,TimeUnit.SECONDS);next.forEach(VitCache::release);
         }
     }
 

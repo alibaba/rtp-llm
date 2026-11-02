@@ -355,6 +355,9 @@ Python 运行时按以下边界组织。`RunEnvironment` 装配实例并安排�
 
 multimodal 供 Client、P 接入层和 ViT 共用媒体标识、输入转换及 TCP 调用；图片几何、模拟输出 hash 生成和缓存大小计算归 ViT 的 VitGeometry。它们不反向依赖 ViT 服务实现。shared/metrics 只保留 MetricTags 和 WindowMetrics；RTP 指标名称、单位及 TPS/容量统计放在后端 RtpMetrics，ViT 仍使用 VitMetrics。指标记录不参与模拟计算；窗口统计在 scrape 时推进，因此同一目标应由一个采集者抓取，额外 scrape 会改变窗口划分。
 
+ViT 的终态分三步：VitScheduler 只完成已准备图片的计算阶段 Future，不依赖 VitCache；VitPreparation.Task 等待阶段结果，统一调用 VitCache.publish 发布成功/失败，随后移除任务、释放准入额度。VitCache 保留同 key 的共享结果条目、等待者和驻留淘汰，不再从 pending 数量推导执行额度。mm_inflight_inputs 来源于 Preparation 的在途任务数，包含发布尚未返回的任务。排队取消通过阶段 Future 返回给任务所有者；已经选入 Forward 的工作保留到实际完成。关闭同样由 Preparation 收口任务终态，Cache.close 仅关闭缓存驻留。
+
+
 KvTransfer 是接入层使用的零耗时异步 PD 传输执行器，放在 admission 包内，不作为公共调度接口。传输开始与完成仍通过 EngineLoop 交给 Scheduler 处理；移动执行器不改变资源使用权和 LOAD ACK 顺序。KvCache/BlockTree 目前固定为 RTP Full-KV，保留已有模块，不声明仅替换 Scheduler 就能兼容任意后端，也不增加缓存抽象或新模块。
 
 共享指代码复用，不是不同实例共享资源。本批按职责重写 LocalPrefill/DecodeAdmission：它们保留原生校验、ALLOCATE/LOAD/GENERATE 协议状态和响应编码，通过公共 Scheduler.Request 句柄与 EngineLoop 交互；RpcTasks 只转换输入与状态编码，RpcErrors 负责原生错误码；上报阶段、准入等待时间和终态完成记录由 RtpScheduler 提交。RtpScheduler 无 gRPC/protobuf/执行器依赖，拥有 FIFO、持续 running、资源准入和执行结果提交。

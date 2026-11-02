@@ -8,15 +8,13 @@ import java.util.concurrent.atomic.AtomicReference;
 /** Byte-budgeted embedding/hash LRU. Results held by callers outlive cache residency. */
 final class VitCache implements AutoCloseable {
     record Claim(String key, CompletableFuture<VitGeometry.Image> result, AtomicInteger users, boolean producer,
-                 AtomicReference<VitGeometry.Image> prepared, AtomicReference<Runnable> abandoned) {
-        VitGeometry.Image image() { return prepared.get(); }
-        void prepare(VitGeometry.Image image) { prepared.set(image); }
+                 AtomicReference<Runnable> abandoned) {
         void onAbandon(Runnable action) { abandoned.set(action); if(users.get()==0) action.run(); }
     }
     private final VitConfig config;
     private final VitMetrics metrics;
     private record Pending(CompletableFuture<VitGeometry.Image> result, AtomicInteger users,
-                           AtomicReference<VitGeometry.Image> prepared, AtomicReference<Runnable> abandoned) {}
+                           AtomicReference<Runnable> abandoned) {}
     private final Map<String, Pending> pending = new HashMap<>();
     private final LinkedHashMap<String, VitGeometry.Image> device = new LinkedHashMap<>(16,.75f,true), host = new LinkedHashMap<>(16,.75f,true), hashes = new LinkedHashMap<>(16,.75f,true);
     private long deviceBytes, hostBytes, hashBytes;
@@ -24,10 +22,7 @@ final class VitCache implements AutoCloseable {
     VitCache(VitConfig config) { this(config, new VitMetrics()); }
     VitCache(VitConfig config, VitMetrics metrics) { this.config = config; this.metrics = metrics; }
     synchronized List<Claim> acquire(List<String> keys) {
-        long missing=keys.stream().distinct().filter(key -> !pending.containsKey(key) && !device.containsKey(key) && !host.containsKey(key)).count();
         if(closed) throw new IllegalStateException("V cache closed");
-        if(pending.size()+missing>config.queueSize())
-            throw io.grpc.Status.RESOURCE_EXHAUSTED.withDescription("V unique media admission full").asRuntimeException();
         var claims=new ArrayList<Claim>();
         try { for(var key:keys) claims.add(acquire(key)); return List.copyOf(claims); }
         catch(RuntimeException error) {
@@ -39,9 +34,6 @@ final class VitCache implements AutoCloseable {
             throw error;
         }
     }
-    synchronized Claim acquire(VitGeometry.Image image) {
-        var claim=acquire(image.key()); if(claim.producer()) claim.prepare(image); return claim;
-    }
     private Claim acquire(String key) {
         if(closed) throw new IllegalStateException("V cache closed");
         var result=device.get(key);
@@ -49,38 +41,47 @@ final class VitCache implements AutoCloseable {
         if(result!=null) {
             metrics.events.increment("py_rtp_vit_embedding_cache_hit_qps");
             return new Claim(key,CompletableFuture.completedFuture(result),new AtomicInteger(1),false,
-                new AtomicReference<>(result),new AtomicReference<>());
+                new AtomicReference<>());
         }
         var waiting=pending.get(key);
         boolean producer=waiting==null;
         if(producer) {
-            if(pending.size()>=config.queueSize()) throw io.grpc.Status.RESOURCE_EXHAUSTED.withDescription("V unique media admission full").asRuntimeException();
-            waiting=new Pending(new CompletableFuture<>(),new AtomicInteger(),new AtomicReference<>(),new AtomicReference<>());
+            waiting=new Pending(new CompletableFuture<>(),new AtomicInteger(),new AtomicReference<>());
             pending.put(key,waiting);
         }
         metrics.events.increment(producer?"py_rtp_vit_embedding_cache_miss_qps":"py_rtp_vit_embedding_cache_inflight_qps");
         waiting.users.incrementAndGet();
-        return new Claim(key,waiting.result,waiting.users,producer,waiting.prepared,waiting.abandoned);
+        return new Claim(key,waiting.result,waiting.users,producer,waiting.abandoned);
     }
-    void complete(Claim claim, Throwable error) {
-        synchronized (this) {
+    void publish(Claim claim, VitGeometry.Image image, Throwable error) {
+        synchronized(this) {
             var current=pending.get(claim.key());
             if(current==null || current.result!=claim.result) return;
-            pending.remove(claim.key());
-            if (error == null && !closed) {
-                retain(claim.image());
-                long charge = hashBytes(claim.image());
-                if (charge <= config.hashBytes()) {
-                    var previous = hashes.remove(claim.key()); if (previous != null) hashBytes -= hashBytes(previous);
-                    while (hashBytes + charge > config.hashBytes() && !hashes.isEmpty()) {
-                        var old = hashes.pollFirstEntry(); hashBytes -= hashBytes(old.getValue());
+            if(error==null && closed) error=io.grpc.Status.UNAVAILABLE.withDescription("V cache stopped").asRuntimeException();
+            if(error==null) {
+                try {
+                    if(image==null || !image.key().equals(claim.key())) throw new IllegalArgumentException("V result identity mismatch");
+                    retain(image);
+                    long charge=hashBytes(image);
+                    if(charge<=config.hashBytes()) {
+                        var previous=hashes.remove(claim.key()); if(previous!=null) hashBytes-=hashBytes(previous);
+                        while(hashBytes+charge>config.hashBytes() && !hashes.isEmpty()) {
+                            var old=hashes.pollFirstEntry(); hashBytes-=hashBytes(old.getValue());
+                        }
+                        hashes.put(claim.key(),image); hashBytes+=charge;
                     }
-                    hashes.put(claim.key(),claim.image()); hashBytes += charge;
+                } catch(RuntimeException failure) {
+                    error=failure;
+                    var gpu=device.remove(claim.key()); if(gpu!=null) deviceBytes-=bytes(gpu);
+                    var cpu=host.remove(claim.key()); if(cpu!=null) hostBytes-=bytes(cpu);
+                    var hash=hashes.remove(claim.key()); if(hash!=null) hashBytes-=hashBytes(hash);
                 }
             }
+            pending.remove(claim.key());
         }
-        // Completion callbacks may acquire scheduler/RPC locks; never run them under the cache lock.
-        if (error == null) claim.result.complete(claim.image()); else claim.result.completeExceptionally(error);
+        // Storage and metadata are visible before consumers observe the terminal result.
+        // Never execute consumer callbacks under the cache lock.
+        if(error==null) claim.result.complete(image); else claim.result.completeExceptionally(error);
     }
     private void retain(VitGeometry.Image image) {
         if (device.containsKey(image.key()) || host.containsKey(image.key())) return;
@@ -105,7 +106,6 @@ final class VitCache implements AutoCloseable {
     }
     long bytes(VitGeometry.Image image) { return image.bytes(config.hidden(),2); }
     private static long hashBytes(VitGeometry.Image image) { return (long)image.rows()*4 + image.key().length(); }
-    synchronized int inflight() { return pending.size(); }
     synchronized VitGeometry.Image hash(String key) { return hashes.get(key); }
     synchronized String tier(String key) { return device.containsKey(key) ? "gpu" : host.containsKey(key) ? "cpu" : ""; }
     synchronized Set<String> keys() { return Set.copyOf(hashes.keySet()); }
@@ -117,12 +117,8 @@ final class VitCache implements AutoCloseable {
             "py_rtp_vit_embedding_cache_bytes", (double) (deviceBytes + hostBytes),
             "mock_vit_hash_cache_bytes", (double) hashBytes);
     }
-    @Override public void close() {
-        List<CompletableFuture<VitGeometry.Image>> waiting;
-        synchronized (this) {
-            if (closed) return; closed=true;
-            waiting=pending.values().stream().map(Pending::result).toList(); pending.clear(); device.clear();host.clear();hashes.clear();deviceBytes=hostBytes=hashBytes=0;
-        }
-        waiting.forEach(f -> f.completeExceptionally(io.grpc.Status.UNAVAILABLE.withDescription("V stopped").asRuntimeException()));
+    @Override public synchronized void close() {
+        closed=true; device.clear(); host.clear(); hashes.clear(); deviceBytes=hostBytes=hashBytes=0;
+        // Preparation owns terminal publication for outstanding entries.
     }
 }

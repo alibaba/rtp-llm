@@ -20,22 +20,10 @@ final class VitService extends MultimodalRpcServiceGrpc.MultimodalRpcServiceImpl
     private final String instance=UUID.randomUUID().toString();
     private final ExecutorService replies=Executors.newVirtualThreadPerTaskExecutor();
     private volatile boolean closed;
-    VitService(VitConfig config) { this.config=config;cache=new VitCache(config,metrics);scheduler=new VitScheduler(config,cache,metrics);preparation=new VitPreparation(config,cache,scheduler,metrics); }
+    VitService(VitConfig config) { this.config=config;cache=new VitCache(config,metrics);scheduler=new VitScheduler(config,metrics);preparation=new VitPreparation(config,cache,scheduler,metrics); }
     private List<VitCache.Claim> submit(MultimodalInputsPB input) {
         if(closed) throw Status.UNAVAILABLE.withDescription("V stopped").asRuntimeException();
-        VitGeometry.validate(input,config.skipDownload());
-        var media=input.getMultimodalInputsList();
-        var claims=cache.acquire(media.stream().map(MediaInput::key).toList());
-        long timeout=input.getTimeoutMs()>0?input.getTimeoutMs():media.stream()
-            .mapToInt(value->value.getMmPreprocessConfig().getMmTimeoutMs()).filter(value->value>0).max().orElse(config.timeoutMs());
-        long deadline=System.nanoTime()+TimeUnit.MILLISECONDS.toNanos(timeout);
-        try {
-            for(int i=0;i<claims.size();i++) if(claims.get(i).producer()) preparation.submit(claims.get(i),media.get(i),deadline);
-        } catch(RuntimeException error) {
-            claims.stream().filter(VitCache.Claim::producer).forEach(claim->cache.complete(claim,error));
-            claims.forEach(VitCache::release); throw error;
-        }
-        return claims;
+        return preparation.submit(input);
     }
     private List<VitGeometry.Image> compute(MultimodalInputsPB input, Context context) throws Exception {
         long started = System.nanoTime();
@@ -132,7 +120,7 @@ final class VitService extends MultimodalRpcServiceGrpc.MultimodalRpcServiceImpl
         });
     }
     @Override public void getWorkerStatus(StatusVersionPB input,StreamObserver<WorkerStatusPB> response) {
-        try { scheduler.checkHealthy();response.onNext(WorkerStatusPB.newBuilder().setRole("VIT").setAlive(true).setStatusVersion(1).setMmInflightInputs(com.google.protobuf.Int64Value.of(cache.inflight())).build());response.onCompleted(); }
+        try { scheduler.checkHealthy();response.onNext(WorkerStatusPB.newBuilder().setRole("VIT").setAlive(true).setStatusVersion(1).setMmInflightInputs(com.google.protobuf.Int64Value.of(preparation.inflight())).build());response.onCompleted(); }
         catch(RuntimeException error) { response.onError(Status.UNAVAILABLE.withCause(error).asRuntimeException()); }
     }
     @Override public void getCacheStatus(CacheVersionPB input,StreamObserver<CacheStatusPB> response) {

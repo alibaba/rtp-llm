@@ -97,7 +97,7 @@ Engine 是运行实例的概念，prefill/decode/vit 是 Engine 的角色；RTP/
 
 P/D/V 都实现 `EngineInstance` 生命周期句柄，各自拥有端口、队列、缓存和产物目录；V 拥有自己的调度器。本地同一个 `EngineHost` 平等管理三种 Engine；Whale 每 Pod 直接启动一个 Engine，无需 EngineHost。统一产物是 `java/host/target/mock-engine-service-1.0-SNAPSHOT-all.jar`，同时包含通用单实例入口和本地宿主入口，不为 V 单独打包。Master 始终独立 JVM。
 
-原生 `RemoteMultimodalEmbedding` 的一个请求可含多张图。缓存未命中的每份唯一媒体进入同一条异步准备链：准入 → 执行器排队 → 获取尺寸 → GPU 就绪队列 → Forward → 结果发布。RPC 等待线程、准备执行器和 Forward 执行线程分开；HTTP 慢读不会占用 Forward 线程。缓存命中直接返回，在途重复请求共用同一生产者和额度。`vit_concurrency` 限制准备执行器工作线程数，线程持续持有到该媒体计算完成；`vit_max_queue_size` 是额外等待额度，已接纳的唯一媒体总数不超过两者之和，GPU 就绪队列也按这个总预算派生。满时返回 RESOURCE_EXHAUSTED。
+原生 `RemoteMultimodalEmbedding` 的一个请求可含多张图。缓存未命中的每份唯一媒体进入同一条异步准备链：准入 → 执行器排队 → 获取尺寸 → GPU 就绪队列 → Forward → 结果发布。RPC 等待线程、准备执行器和 Forward 执行线程分开；HTTP 慢读不会占用 Forward 线程。缓存命中直接返回，在途重复请求共用同一生产者和额度。`vit_concurrency` 限制准备执行器工作线程数，线程持续持有到该媒体计算完成；`vit_max_queue_size` 是额外等待额度，已接纳的唯一媒体总数不超过两者之和，GPU 就绪队列也按这个总预算派生。满时返回 RESOURCE_EXHAUSTED。任务额度由 VitPreparation 持有，直到共享结果发布完成后才释放；Scheduler 的完成通知只表示计算阶段结束。缓存条目的成功/失败发布采用身份校验，旧任务和重复完成不会覆盖新条目。
 
 `gpu_max_batch_size=1` 串行执行一份就绪媒体工作项且不等待合批；大于 1 时按工作项数和收集窗口合批。同一 RPC 的多图分别准备，可进入不同 Forward，全部结果就绪后才完成 RPC。单张图的 patch/row 不拆分。最后一个等待者取消时，尚未执行的任务移出队列，进行中的下载中断；已经选入 Forward 的任务保留额度到实际计算/发布结束。状态查询不经过这些阻塞执行器。
 
