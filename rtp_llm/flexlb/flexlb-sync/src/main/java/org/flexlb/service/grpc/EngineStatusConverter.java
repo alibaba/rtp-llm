@@ -92,7 +92,10 @@ public class EngineStatusConverter {
      */
     public static CacheStatus convertToCacheStatus(EngineRpcService.CacheStatusPB cacheStatusPB) {
         // Own the key set independently from the protobuf message graph.
-        return convertToCacheStatus(cacheStatusPB, new HashSet<>(cacheStatusPB.getCacheKeysMap().keySet()));
+        return convertToCacheStatus(cacheStatusPB, new HashSet<>(
+                cacheStatusPB.getCacheKeyListCount() > 0
+                        ? cacheStatusPB.getCacheKeyListList()
+                        : cacheStatusPB.getCacheKeysMap().keySet()));
     }
 
     /** Reuse an already owned key set for an acknowledged, unchanged version. */
