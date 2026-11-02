@@ -619,18 +619,30 @@ void PrefillRpcServer::multimodalProcess(PrefillGenerateContext& prefill_context
                 serializeErrorMsg(prefill_context.request_key, prefill_context.request_info, result);
             return;
         }
-
-        auto mutable_request = const_cast<GenerateInputPB*>(prefill_context.rpc_context.request);
-        mutable_request->clear_token_ids();
-        // TODO(xinfei.sxf) optimize copy
-        auto* ids_ptr = input->input_ids.data_ptr<int32_t>();
-        for (size_t i = 0; i < input->input_ids.numel(); i++) {
-            mutable_request->add_token_ids(ids_ptr[i]);
-        }
     }
     if (prefill_context.hasError()) {
         logPrefillFailureTrace("multimodal_process_failed", prefill_context);
     }
+}
+
+std::unique_ptr<GenerateInputPB>
+PrefillRpcServer::makeRemoteAllocateInput(const PrefillGenerateContext& prefill_context) const {
+    auto request = std::make_unique<GenerateInputPB>(*prefill_context.rpc_context.request);
+    if (mm_processor_ != nullptr && prefill_context.generate_input->multimodal_inputs) {
+        // Allocation retries reconstruct the local input from rpc_context.request.
+        // Keep that original prompt immutable: expanding a video twice interprets
+        // its generated frame tags as additional media with no corresponding URLs.
+        const auto& input_ids = prefill_context.generate_input->input_ids;
+        request->clear_token_ids();
+        const auto* ids = input_ids.data_ptr<int32_t>();
+        for (int64_t i = 0; i < input_ids.numel(); ++i) {
+            request->add_token_ids(ids[i]);
+        }
+    }
+    request->clear_group_size();
+    request->clear_group_id();
+    request->mutable_generate_config()->clear_group_timeout();
+    return request;
 }
 
 void PrefillRpcServer::remoteAllocateResource(PrefillGenerateContext& prefill_context) {
@@ -658,12 +670,7 @@ void PrefillRpcServer::remoteAllocateResource(PrefillGenerateContext& prefill_co
     alloc_request.set_stage(RemoteStage::ALLOCATE);
     alloc_request.set_client_id(process_id_);
     alloc_request.set_request_id(prefill_context.request_id);
-    // TODO(xinfei.sxf) reduce copy
-    GenerateInputPB* new_request = new GenerateInputPB(*prefill_context.rpc_context.request);
-    new_request->clear_group_size();
-    new_request->clear_group_id();
-    new_request->mutable_generate_config()->clear_group_timeout();
-    alloc_request.set_allocated_input(new_request);
+    alloc_request.set_allocated_input(makeRemoteAllocateInput(prefill_context).release());
     for (auto& addrs : prefill_context.prefill_worker_cache_store_addrs) {
         alloc_request.add_peer_addrs(addrs);
     }

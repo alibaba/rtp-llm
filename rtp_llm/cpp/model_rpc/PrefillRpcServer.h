@@ -71,6 +71,8 @@ private:
     void         pollRemoteOutput(PrefillGenerateContext& prefill_context);
     void         reportPrefillRecentCacheKeyMetricsOnce(PrefillGenerateContext& prefill_context);
 
+    std::unique_ptr<GenerateInputPB> makeRemoteAllocateInput(const PrefillGenerateContext& prefill_context) const;
+
     static bool shouldUsePdSeparation(const GenerateConfigPB& generate_config);
 
 private:

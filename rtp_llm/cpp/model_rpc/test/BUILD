@@ -47,6 +47,15 @@ test_deps = [
     "@havenask//aios/autil:zlib",
 ] + torch_deps() + device_impl_target() + cuda13_torch_link_deps
 
+cc_test(
+    name = "prefill_multimodal_retry_test",
+    srcs = ["PrefillMultimodalRetryTest.cc"],
+    copts = test_copts,
+    deps = test_deps + ["//rtp_llm/cpp/multimodal_processor:multimodal_processor"],
+    env = {"TEST_USING_DEVICE": "CUDA"},
+    exec_properties = {"gpu": "H20"},
+)
+
 # cc_test(
 #     name = "model_rpc_server_test",
 #     srcs = [
