@@ -2226,8 +2226,7 @@ protected:
     void demote() {
         auto cache = manager_->blockTreeCache();
         // Capacity is 16: a positive ratio below 1/16 targets zero used
-        // blocks. Pending loads are ineligible; completed live requests keep
-        // their device references even if the tree's copy is demoted again.
+        // blocks. Pending loads and request-held device blocks are ineligible.
         BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::DEVICE, 0.01);
         BlockTreeCacheTestPeer::runMaintenanceForTest(*cache);
     }
@@ -2338,11 +2337,20 @@ protected:
             ASSERT_NO_FATAL_FAILURE(devicePayload(*req, /*write=*/false, 2));
         }
         if (concurrent) {
-            // Completion re-admits A/B to the eviction heap. The low watermark
-            // demotes their tree copies again, but the live requests above must
-            // still see the original GPU bytes through their request references.
-            ASSERT_NO_FATAL_FAILURE(hostPayload(a));
-            ASSERT_NO_FATAL_FAILURE(hostPayload(b));
+            // A/B keep their device copies while load_a/load_b hold request
+            // references. The same watermark still demotes the idle C/D blocks.
+            {
+                std::lock_guard<std::mutex> lock(cache->mutex_);
+                for (const auto* req : {&a, &b}) {
+                    const auto path = cache->tree()->findNode(req->keys);
+                    ASSERT_EQ(path.size(), 2u);
+                    for (const auto* node : path) {
+                        const auto& resource = node->group_set_resources[0];
+                        EXPECT_EQ(resource.transfer_state, GroupSetTransferState::IDLE);
+                        EXPECT_TRUE(resource.hasTier(Tier::DEVICE));
+                    }
+                }
+            }
             ASSERT_NO_FATAL_FAILURE(hostPayload(c));
             ASSERT_NO_FATAL_FAILURE(hostPayload(d));
         }
@@ -2358,10 +2366,18 @@ protected:
                 ADD_FAILURE() << "unexpected transfer direction";
             }
         }
-        EXPECT_EQ(d2h, concurrent ? 12u : 4u);  // Initial A/B, then C/D and re-demoted A/B.
+        EXPECT_EQ(d2h, concurrent ? 8u : 4u);  // Initial A/B, then only idle C/D.
         EXPECT_EQ(h2d, 4u);
         manager_->free(FreeInfo{load_a.resource, load_a.tokens});
         manager_->free(FreeInfo{load_b.resource, load_b.tokens});
+        if (concurrent) {
+            // Releasing the request references makes A/B eligible again.
+            demote();
+            BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
+            BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::DEVICE, 0.0);
+            ASSERT_NO_FATAL_FAILURE(hostPayload(a));
+            ASSERT_NO_FATAL_FAILURE(hostPayload(b));
+        }
         BlockTreeCacheTestPeer::reclaimBlocksForTest(*cache, 100, Tier::DEVICE);
         BlockTreeCacheTestPeer::reclaimBlocksForTest(*cache, 100, Tier::HOST);
         EXPECT_EQ(manager_->freeBlocksNum(), 16u);
