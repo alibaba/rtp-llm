@@ -151,9 +151,13 @@ TEST_F(SamplerTest, testMixedDynamicBeamTransitionsUseIndependentOutput) {
                          torch::Tensor(),
                          false,
                          false,  // skip_logits_probs_restore
+                         0,      // force_topk
                          false,  // all_probs_point_mass
                          cum_log_probs,
                          torch::Tensor(),
+                         torch::Tensor(),  // all_probs_indices
+                         torch::Tensor(),  // raw_logprobs_logits
+                         torch::Tensor(),  // raw_logprobs_row_indices
                          generators};
 
     auto device_history_inputs          = inputs;
@@ -246,9 +250,13 @@ TEST_F(SamplerTest, testGeneralSampling) {
         torch::Tensor(),  // finished_mask
         false,            // return_original_all_probs
         false,            // skip_logits_probs_restore
+        0,                // force_topk
         false,            // all_probs_point_mass
         cum_log_probs.clone(),
         torch::Tensor(),  // all_probs
+        torch::Tensor(),  // all_probs_indices
+        torch::Tensor(),  // raw_logprobs_logits
+        torch::Tensor(),  // raw_logprobs_row_indices
         generator,
     };
 
