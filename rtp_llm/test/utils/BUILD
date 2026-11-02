@@ -29,6 +29,8 @@ py_library(
 py_library(
     name = "jit_sys_path_setup",
     srcs = ["jit_sys_path_setup.py"],
+    # Standalone gpu_lock bootstrap must not import the heavy rtp_llm package.
+    imports = [".", "../../utils"],
     deps = [":filelock", "//rtp_llm:jit_cache_env"],
 )
 

@@ -140,6 +140,9 @@ def test_remote_inputs_include_wheel_but_not_absolute_override(tmp_path, mode):
 
     wheel = bundle(tmp_path)
     override = remote_wheels.overrides(tmp_path, PIN)
+    cuda13_override = tmp_path / "deps/requirements_cuda13_overrides.txt"
+    cuda13_override.parent.mkdir()
+    cuda13_override.write_text("nvidia-nccl-cu13==2.30.4\n")
     helper = tmp_path / "_build/remote_wheels.py"
     helper.parent.mkdir()
     shutil.copyfile(remote_wheels.__file__, helper)
@@ -155,3 +158,4 @@ def test_remote_inputs_include_wheel_but_not_absolute_override(tmp_path, mode):
     assert str((wheel.parent / remote_wheels.MANIFEST).relative_to(tmp_path)) in files
     assert str(helper.relative_to(tmp_path)) in files
     assert str(override.relative_to(tmp_path)) not in files
+    assert str(cuda13_override.relative_to(tmp_path)) in files

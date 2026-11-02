@@ -1390,7 +1390,7 @@ class BuildPackagingContractTest(TestCase):
                 profiles["py_ut_sm100_arm"]["ignore_paths"],
             )
             self.assertEqual(internal_profiles["py_ut_ppu"].get("minimum_count"), 1)
-            self.assertEqual(internal_profiles["py_ut_ppu"].get("expected_count"), 23)
+            self.assertEqual(internal_profiles["py_ut_ppu"].get("expected_count"), 24)
 
             sm100_arm_env = internal_config["tool"]["rtp_llm"]["pytest_ci"]["gpu_env"][
                 "SM100_ARM"

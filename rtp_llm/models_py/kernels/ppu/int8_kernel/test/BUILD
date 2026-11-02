@@ -15,6 +15,7 @@ py_test(
         "//conditions:default": ["@platforms//:incompatible"],
     }),
     deps = [
+        "@pip_dsv4_test_pytest//:pkg",
         "//rtp_llm/models_py:internal_kernels",
         "//rtp_llm/models_py:ppu_modules",
     ] + [":torch"],

@@ -10,6 +10,7 @@ a specific version of flashinfer different from the system-installed one.
 
 import hashlib
 import importlib.metadata
+import importlib.util
 import logging
 import os
 import re
@@ -24,7 +25,28 @@ from urllib.parse import urlparse
 
 from filelock import FileLock, Timeout
 
-from rtp_llm.utils import jit_cache_env as cache_env
+# Bazel's gpu_lock imports this helper before the test's runtime dependency paths
+# are active. Its declared imports expose the same pure utility without loading
+# rtp_llm.__init__ (and torch/triton/ops) during that bootstrap phase.
+def _standalone_cache_env_available():
+    if __package__ or "rtp_llm.utils.jit_cache_env" in sys.modules:
+        return False
+    try:
+        candidate = importlib.util.find_spec("jit_cache_env")
+    except (ImportError, ValueError):
+        return False
+    expected = Path(__file__).resolve().parents[2] / "utils/jit_cache_env.py"
+    return (
+        candidate is not None
+        and candidate.origin is not None
+        and Path(candidate.origin).resolve() == expected
+    )
+
+
+if _standalone_cache_env_available():
+    import jit_cache_env as cache_env
+else:
+    from rtp_llm.utils import jit_cache_env as cache_env
 
 
 def get_package_info(package_name):

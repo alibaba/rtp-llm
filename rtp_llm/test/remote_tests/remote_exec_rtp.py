@@ -566,6 +566,7 @@ def _collect_base_files(rootdir: Path) -> List[str]:
         "internal_source/pyproject.toml",
         "setup.py",
         "setup.cfg",
+        "deps/requirements_cuda13_overrides.txt",
         "conftest.py",
         "internal_source/ci/prepare_venv.py",
         "internal_source/ci/prepare_rocm_deps.sh",

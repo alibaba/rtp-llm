@@ -20,6 +20,7 @@ py_test(
     }),
     visibility = ["//visibility:public"],
     deps = [
+        "@pip_dsv4_test_pytest//:pkg",
         "//rtp_llm/models_py:ppu_modules",
     ] + [":torch"],
 )
