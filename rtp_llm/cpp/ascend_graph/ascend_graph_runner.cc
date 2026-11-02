@@ -127,6 +127,9 @@ std::vector<int> AscendGraphRunner::getDecodeBatchSizesToCapture() {
 
     std::vector<int> capture_bs;
     int              max_generate_batch_size = max_bs_;
+    RTP_LLM_CHECK_WITH_INFO(max_generate_batch_size > 0,
+                            "AscendGraphRunner: max_context_batch_size (concurrency_limit) must be > 0, got %d",
+                            max_generate_batch_size);
     RTP_LLM_LOG_INFO("max_generate_batch_size for ascend graph: %d", max_generate_batch_size);
     for (int i : {1, 8, 16, 24, 32}) {
         if (i <= max_generate_batch_size) {
@@ -202,6 +205,13 @@ bool AscendGraphRunner::canRun(const PyModelInputs& inputs, CudaGraphState& stat
                                 kv_cache_group_num_);
             return false;
         }
+    } else if (kv_cache_group_num_ > 1) {
+        // Captured with multiple tag groups but this batch carries none: the
+        // per-tag block tables captured in the graph cannot be updated, so
+        // fall back to eager (bidirectional guard, same as CudaGraphRunner).
+        RTP_LLM_LOG_WARNING("Hybrid kv cache captured %d groups but inputs carry no per-tag groups, fallback to normal run.",
+                            kv_cache_group_num_);
+        return false;
     }
 
     return tryGetRealGraphDecodeBatchSize(inputs, state);
@@ -510,6 +520,19 @@ void AscendGraphRunner::captureOneGraphInstance(int key, const char* key_type) {
                 outputs             = py_outputs_obj.cast<PyModelOutputs>();
             } catch (const py::error_already_set& e) {
                 RTP_LLM_LOG_ERROR("Ascend graph capture forward failed for %s %d: %s", key_type, key, e.what());
+                // Fail closed: end the capture session so the graph object is
+                // never destroyed while still capturing.
+                try {
+                    ascend_graph::graphCaptureEnd(graph);
+                } catch (const std::exception& end_err) {
+                    RTP_LLM_LOG_ERROR("Ascend graph captureEnd after failure also failed: %s", end_err.what());
+                }
+                throw;
+            } catch (...) {
+                try {
+                    ascend_graph::graphCaptureEnd(graph);
+                } catch (...) {
+                }
                 throw;
             }
             // Copy forward output into persistent buffer so replay-time readers have a stable address.
@@ -745,7 +768,10 @@ void AscendGraphRunner::prepareInputs(const PyModelInputs& inputs, CudaGraphStat
         py_model_inputs.attention_inputs.input_lengths.slice(0, state.current_batch_size, max_bs_).fill_(0);
         py_model_inputs.attention_inputs.input_lengths_device.slice(0, state.current_batch_size, max_bs_).fill_(0);
         py_model_inputs.attention_inputs.sequence_lengths.slice(0, state.current_batch_size, max_bs_).fill_(0);
-        py_model_inputs.attention_inputs.sequence_lengths_plus_1_device.slice(0, state.current_batch_size, max_bs_).fill_(0);
+        // Dummy rows follow the CUDA-graph contract: ctx = 1 (i.e. plus_1 = 1,
+        // position 0 of reserved block 0) so captured gather/scatter chains
+        // never see negative indices for padded rows.
+        py_model_inputs.attention_inputs.sequence_lengths_plus_1_device.slice(0, state.current_batch_size, max_bs_).fill_(1);
         py_model_inputs.attention_inputs.decode_cu_seqlens_device.slice(0, state.current_batch_size + 1, max_bs_ + 1).fill_(0);
         if (py_model_inputs.attention_inputs.prefix_lengths.defined()
             && py_model_inputs.attention_inputs.prefix_lengths.numel() > 0) {

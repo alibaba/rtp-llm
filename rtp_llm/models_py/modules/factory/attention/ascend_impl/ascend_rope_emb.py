@@ -8,7 +8,7 @@ from rtp_llm.ops import AttentionConfigs, RopeStyle, check_rope_cache, get_rope_
 def _gen_base_halves_cache(rope_dim: int, rope_theta: float, max_pos: int) -> torch.Tensor:
     """Python-side halves [cos|sin] cache, mirroring C++ genBaseCache
     (non-interleaved). MRoPE reuses the base rotary formula: the three-axis
-    positions index into this cache per frequency section."""
+    positions index into this cache per frequency slot."""
     device = torch.device("npu") if torch.npu.is_available() else torch.device("cpu")
     inv_freq = 1.0 / (
         rope_theta
@@ -17,6 +17,58 @@ def _gen_base_halves_cache(rope_dim: int, rope_theta: float, max_pos: int) -> to
     t = torch.arange(max_pos, device=device, dtype=torch.float32)
     freqs = torch.outer(t, inv_freq)
     return torch.cat([freqs.cos(), freqs.sin()], dim=-1).contiguous()
+
+
+def mrope_interleaved_axis_of_freq(mrope_section, rotary_pairs: int, device) -> torch.Tensor:
+    """Axis (0=T/1=H/2=W) of each rotary frequency slot under the repo-wide
+    interleaved-MRoPE contract — a literal mirror of the kernel's
+    get_mrope_position_dim: slot tidx is H when tidx%%3==1 and tidx<3*dim2, W
+    when tidx%%3==2 and tidx<3*dim3, otherwise T. Sections must sum to
+    rotary_pairs and fit the strided slots (same as the ROCm host validation)."""
+    if (len(mrope_section) != 3
+            or any(int(s) < 0 for s in mrope_section)
+            or sum(int(s) for s in mrope_section) != rotary_pairs):
+        raise RuntimeError(
+            f"interleaved MRoPE sections {mrope_section} must have 3 entries "
+            f"summing to rotary_pairs={rotary_pairs}")
+    tidx = torch.arange(rotary_pairs, device=device)
+    axes = torch.zeros(rotary_pairs, dtype=torch.long, device=device)
+    axes[(tidx % 3 == 1) & (tidx < 3 * int(mrope_section[1]))] = 1
+    axes[(tidx % 3 == 2) & (tidx < 3 * int(mrope_section[2]))] = 2
+    if int((axes == 1).sum()) != int(mrope_section[1]) or int((axes == 2).sum()) != int(mrope_section[2]):
+        raise RuntimeError(
+            f"interleaved MRoPE sections {mrope_section} exceed the THW strided "
+            f"slot capacity of rotary_pairs={rotary_pairs}")
+    return axes
+
+
+def apply_mrope_interleaved(query, key, positions, mrope_section, cos_sin_cache):
+    """Interleaved MRoPE (mrope_interleaved=true, Qwen3-VL/Qwen3.5) following
+    the repo-wide contract: THW slot-cycling axis assignment (see
+    mrope_interleaved_axis_of_freq) and lo/hi half-split pairing within
+    rope_dim, identical to the CUDA/ROCm kernels and the reference test in
+    rocm_impl/test/test_aiter_prefill_op.py. cos_sin_cache is the halves
+    [cos|sin] cache of total width rope_dim; dims beyond rope_dim pass through.
+    """
+    rope_dim = cos_sin_cache.shape[-1]
+    half = rope_dim // 2
+    axes = mrope_interleaved_axis_of_freq(mrope_section, half, positions.device)
+    pos = positions.long()[:, axes]                      # [T, half]
+    freq_idx = torch.arange(half, device=pos.device)
+    cos = cos_sin_cache[pos, freq_idx].unsqueeze(1)      # [T, 1, half]
+    sin = cos_sin_cache[pos, half + freq_idx].unsqueeze(1)
+
+    def rot(x):
+        lo = x[..., :half]
+        hi = x[..., half:rope_dim]
+        out = torch.empty_like(x)
+        out[..., :half] = lo * cos - hi * sin
+        out[..., half:rope_dim] = hi * cos + lo * sin
+        out[..., rope_dim:] = x[..., rope_dim:]
+        return out
+
+    query.copy_(rot(query))
+    key.copy_(rot(key))
 
 
 class AscendRotaryEmbeddingOp:
@@ -140,39 +192,10 @@ class AscendRotaryEmbeddingOp:
             key.copy_(k_out.view_as(key))
             return
 
-        # Interleaved MRoPE (Qwen3.5): pure-torch reference path. Global
-        # adjacent-pair (2f, 2f+1) rotation; frequency f picks its axis
-        # section's position. Only the first rope_dim dims are rotated
-        # (partial_rotary_factor < 1 supported).
-        cache = self.cos_sin_cache
-        rope_dim = cache.shape[-1]
-        half = rope_dim // 2
-        t_end = self.mrope_section[0]
-        h_end = t_end + self.mrope_section[1]
-        axis_of_freq = torch.zeros(half, dtype=torch.long, device=positions.device)
-        axis_of_freq[t_end:h_end] = 1
-        axis_of_freq[h_end:] = 2
-        pos = positions.long()[:, axis_of_freq]          # [T, half]
-        # gather per-frequency cos/sin: result[t, f] = cache[pos[t, f], f].
-        # Both indices must be advanced (a plain slice would hoist the
-        # advanced dims and change the result shape).
-        freq_idx = torch.arange(half, device=pos.device)
-        cos = cache[pos, freq_idx].unsqueeze(1)          # [T, 1, half]
-        sin = cache[pos, half + freq_idx].unsqueeze(1)   # [T, 1, half]
-
-        def rot(x):
-            r = x[..., :rope_dim]
-            x1 = r[..., 0::2]
-            x2 = r[..., 1::2]
-            o1 = x1 * cos - x2 * sin
-            o2 = x1 * sin + x2 * cos
-            out = x.clone()
-            out[..., 0:rope_dim:2] = o1
-            out[..., 1:rope_dim:2] = o2
-            return out
-
-        query.copy_(rot(query))
-        key.copy_(rot(key))
+        # Interleaved MRoPE (mrope_interleaved=true): repo-wide contract —
+        # THW slot-cycling axis assignment + lo/hi half-split pairing, same
+        # math as the CUDA/ROCm kernels (see apply_mrope_interleaved).
+        apply_mrope_interleaved(query, key, positions, self.mrope_section, self.cos_sin_cache)
 
     def _prepare_warmup_cache_indices(self, num_tokens, device):
         batch_indices = torch.zeros(num_tokens, dtype=torch.int32, device=device)

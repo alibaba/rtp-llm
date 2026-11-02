@@ -4,9 +4,10 @@ load("@arch_config//:arch_select.bzl", "torch_deps")
 # Ascend ACL Graph core (decode-only).
 #
 # Mirrors //rtp_llm/cpp/cuda_graph:cuda_graph_impl but wraps
-# c10_npu::NPUGraph instead of at::cuda::CUDAGraph. Built only on Ascend;
-# the TU compiles to no-op stubs on other platforms so it is safe to depend
-# on unconditionally.
+# c10_npu::NPUGraph instead of at::cuda::CUDAGraph. Ascend-only: the sources
+# compile against torch_npu/CANN headers and are NOT buildable on other
+# platforms — depend on it only behind a `@//:using_ascend` select (as
+# cpp/models/BUILD does).
 
 cc_library(
     name = "ascend_graph_hdrs_lib",
@@ -21,6 +22,10 @@ cc_library(
         "//rtp_llm/models_py/bindings:op_defs",
     ],
     copts = copts(),
+    target_compatible_with = select({
+        "@//:using_ascend": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
     visibility = ["//visibility:public"],
 )
 
@@ -55,6 +60,10 @@ cc_library(
     copts = copts() + select({
         "@//:using_ascend": ["-Wno-error"],
         "//conditions:default": [],
+    }),
+    target_compatible_with = select({
+        "@//:using_ascend": [],
+        "//conditions:default": ["@platforms//:incompatible"],
     }),
     visibility = ["//visibility:public"],
     alwayslink = 1,
