@@ -12,6 +12,10 @@ from rtp_llm.models_py.modules.qwen4_exp.qsa.sparse_paged_fmha import (
     sparse_paged_gqa_attn,
 )
 
+# The packed-count rejection case asserts the legacy ValueError; keep it on
+# the strict path (production demotes the check to an async device assert).
+os.environ.setdefault("RTP_LLM_QSA_STRICT_VALIDATION", "1")
+
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
 class QsaPackedCountTest(unittest.TestCase):

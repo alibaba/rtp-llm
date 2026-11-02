@@ -11,6 +11,11 @@ from rtp_llm.models_py.modules.qwen4_exp.qsa.sparse_paged_fmha import (
 
 _DEVICE = "cuda"
 
+# Kernel-entry cases here assert the legacy per-check validation errors
+# (exact ValueError messages). Keep them on the strict path; production
+# demotes the entry validation to an async device assert.
+os.environ.setdefault("RTP_LLM_QSA_STRICT_VALIDATION", "1")
+
 
 class SparsePagedIndexValidationTest(unittest.TestCase):
     def test_valid_indices_use_one_scalar_read(self):
