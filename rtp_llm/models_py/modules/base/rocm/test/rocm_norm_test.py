@@ -4,7 +4,7 @@ from unittest import SkipTest, TestCase, main
 import torch
 from torch import dtype as _dtype
 
-from rtp_llm.models_py.modules import RMSNorm, RMSNormTorch
+from rtp_llm.models_py.modules import RMSNorm, RMSNormTorch, RMSResNorm, RMSResNormTorch
 
 
 class NormTest(TestCase):
@@ -37,6 +37,23 @@ class NormTest(TestCase):
                 num_tokens=params[0], hidden_size=params[1], dtype=params[2]
             ):
                 self._run_rms_norm_test(*params)
+
+    def test_rms_res_norm_odd_hidden_size(self):
+        for dtype in self.DTYPES:
+            with self.subTest(dtype=dtype):
+                torch.manual_seed(0)
+                weight = torch.randn(769, dtype=dtype)
+                hidden_states = torch.randn(7, 769, dtype=dtype)
+                residual = torch.randn_like(hidden_states)
+
+                expected = RMSResNormTorch(weight)(hidden_states, residual)
+                actual = RMSResNorm(weight)(hidden_states, residual)
+                torch.testing.assert_close(
+                    actual,
+                    expected,
+                    atol=5e-2,
+                    rtol=5e-2,
+                )
 
 
 if __name__ == "__main__":

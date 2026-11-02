@@ -4,7 +4,7 @@ import torch
 import torch.nn.functional as F
 from aiter import layernorm2d_fwd as layernorm2d_fwd
 from aiter import layernorm2d_fwd_with_add as layernorm2d_fwd_with_add
-from aiter import rms_norm
+from aiter import rms_norm, rmsnorm2d_fwd_opus, rmsnorm2d_fwd_with_add_opus
 from aiter import rmsnorm2d_fwd_with_add as fused_add_rmsnorm
 from torch import nn
 
@@ -22,6 +22,17 @@ from rtp_llm.ops.compute_ops import rtp_llm_ops
 # existing ROCm LayerNorm test coverage.
 _LAYER_NORM2D_MIN_TOKENS = 32
 _LAYER_NORM2D_MAX_HIDDEN = 768
+
+
+def _requires_opus_rmsnorm(hidden_states: torch.Tensor) -> bool:
+    # AITER's module_rmsnorm_quant HIP fast path uses 4-byte vector accesses for
+    # 2-byte inputs and corrupts row boundaries when the hidden size is odd.
+    return (
+        hidden_states.dim() == 2
+        and hidden_states.element_size() == 2
+        and hidden_states.shape[-1] <= 8192
+        and hidden_states.shape[-1] % 2 == 1
+    )
 
 
 class LayerNorm(BaseLayerNorm):
@@ -53,6 +64,10 @@ class RMSNorm(BaseNorm):
         super().__init__(weight, eps)
 
     def forward(self, hidden_states: torch.Tensor):
+        if _requires_opus_rmsnorm(hidden_states):
+            return rmsnorm2d_fwd_opus(
+                hidden_states, self.weight.data, self.variance_epsilon
+            )
         return rms_norm(hidden_states, self.weight.data, self.variance_epsilon)
 
 
@@ -65,15 +80,25 @@ class RMSResNorm(BaseResNorm):
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         output = torch.empty_like(hidden_states)
         residual_out = torch.empty_like(hidden_states)
-        fused_add_rmsnorm(
-            output,
-            hidden_states,
-            residual,
-            residual_out,
-            self.weight.data,
-            self.variance_epsilon,
-            0,
-        )
+        if _requires_opus_rmsnorm(hidden_states):
+            rmsnorm2d_fwd_with_add_opus(
+                output,
+                hidden_states,
+                residual,
+                residual_out,
+                self.weight.data,
+                self.variance_epsilon,
+            )
+        else:
+            fused_add_rmsnorm(
+                output,
+                hidden_states,
+                residual,
+                residual_out,
+                self.weight.data,
+                self.variance_epsilon,
+                0,
+            )
         return output, residual_out
 
 
