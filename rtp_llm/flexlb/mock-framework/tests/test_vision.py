@@ -28,9 +28,9 @@ def test_vision_playback_through_real_master(tmp_path, mode):
         'requestLifecycle': {'request': {'timeoutMs': 5000}},
         'grpcServer': {'executorCoreSize': 4, 'executorMaxSize': 8, 'executorQueueSize': 64, 'shutdownQuietPeriodMs': 10}})
     engine = {'engine': 'rtp', 'config': {'seq_size_per_block': 2, 'test_block_num': 128,
-        'reserve_block_ratio': 0, 'max_seq_len': 128, 'compute.forward.expression': '1'}}
-    vision = {'config': {'hidden_size': 4, 'mm_cache_gpu_max_bytes': 1024,
-        'mm_cache_cpu_max_bytes': 1024, 'compute.forward.expression': '2 + batchSize'}}
+        'reserve_block_ratio': 0, 'max_seq_len': 128, 'mock.compute.forward.expression': '1'}}
+    vision = {'config': {'mock.vit.hidden.size': 4, 'mm_cache_gpu_max_bytes': 1024,
+        'mm_cache_cpu_max_bytes': 1024, 'mock.compute.forward.expression': '2 + batchSize'}}
     data = {'id': 'vision_playback', 'describe': 'Native V selection, metadata preparation, P/D generation',
         'environment': {'master': {'config': native}, 'prefill': engine, 'decode': engine, 'vit': vision, 'client': {'config': {}}},
         'phases': [{'id': 'traffic', 'describe': 'Play media requests', 'timeout': '30s', 'steps': [
@@ -74,7 +74,7 @@ def test_vit_is_a_shared_engine_without_backend_configuration():
     from mock_framework.config.environment import compile_environment
     from mock_framework.config.errors import ConfigError
 
-    vision = {'config': {'compute.forward.expression': '1'}}
+    vision = {'config': {'mock.compute.forward.expression': '1'}}
     assert 'engine' not in compile_environment({'vit': vision})['vit']
     with pytest.raises(ConfigError):
         compile_environment({'vit': dict(vision, engine='rtp')})

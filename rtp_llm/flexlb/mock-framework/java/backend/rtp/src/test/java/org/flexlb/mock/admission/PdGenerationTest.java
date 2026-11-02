@@ -28,11 +28,11 @@ class PdGenerationTest {
         var json = new ObjectMapper(); ObjectNode root = json.valueToTree(RtpNodeTest.configuration(role));
         ((ObjectNode) root.path("component").path("config")).put("seq_size_per_block", 2).put("reuse_cache", true);
         ((ObjectNode) root.path("component").path("config")).put("test_block_num", blocks + 1);
-        ((ObjectNode) root.path("component").path("config").path("compute").path("forward")).put("expression", Integer.toString(millis));
+        ((ObjectNode) root.path("component").path("config").path("mock.compute").path("forward")).put("expression", Integer.toString(millis));
         models.forEach((key, value) -> {
-            var compute = (ObjectNode) root.path("component").path("config").path("compute");
+            var compute = (ObjectNode) root.path("component").path("config").path("mock.compute");
             if (key.equals("settings")) ((ObjectNode) root.path("component").path("config")).setAll((ObjectNode) json.valueToTree(value));
-            else if (key.equals("compute")) compute.setAll((ObjectNode) json.valueToTree(value));
+            else if (key.equals("mock.compute")) compute.setAll((ObjectNode) json.valueToTree(value));
             else compute.set(key, json.valueToTree(value));
         });
         var path = directory.resolve(role + ".json"); json.writeValue(path.toFile(), root);
@@ -477,7 +477,7 @@ class PdGenerationTest {
     }
 
     @Test void acceptedDraftsAdvanceSeveralTokensWhileBudgetTailStaysExact() throws Exception {
-        try (var p = node("prefill", 8, 1); var d = node("decode", 16, 1, Map.of("decode", Map.of("draft_tokens", 3, "acceptance_rate", 1)));
+        try (var p = node("prefill", 8, 1); var d = node("decode", 16, 1, Map.of("decode", Map.of("draft.tokens", 3, "acceptance.rate", 1)));
                 var call = new Call(p, input(d, 1, 5, 10, 2000, true))) {
             call.output(1, false, 1); call.output(5, false, 4); call.output(9, false, 4); call.output(10, true, 1);
             assertEquals("completed", call.next()); assertEquals(3, metric(d, "rtp_llm_model_forward_seconds_count", "role=\"decode\""));
@@ -488,8 +488,8 @@ class PdGenerationTest {
     }
 
     @Test void rejectedDraftsStillPayForAllVerificationWork() throws Exception {
-        try (var p = node("prefill", 8, 1); var d = node("decode", 16, 1, Map.of("decode", Map.of("draft_tokens", 3, "acceptance_rate", 0),
-                "compute", Map.of("forward", Map.of("expression", "totalStepTokens")))); var call = new Call(p, input(d, 1, 5, 10, 2000, true))) {
+        try (var p = node("prefill", 8, 1); var d = node("decode", 16, 1, Map.of("decode", Map.of("draft.tokens", 3, "acceptance.rate", 0),
+                "mock.compute", Map.of("forward", Map.of("expression", "totalStepTokens")))); var call = new Call(p, input(d, 1, 5, 10, 2000, true))) {
             for (int n = 1; n <= 10; n++) call.output(n, n == 10, 1);
             assertEquals("completed", call.next()); assertEquals(9, metric(d, "rtp_llm_model_forward_seconds_count", "role=\"decode\""));
             assertEquals(36, metric(d, "rtp_llm_forward_tokens_total", "kind=\"compute\""));
@@ -499,7 +499,7 @@ class PdGenerationTest {
 
     @Test void tailMustReserveTheFullVerificationWindowEvenWhenOnlyOneOutputFits() throws Exception {
         try (var p = node("prefill", 8, 1); var d = node("decode", 8, 1,
-                Map.of("decode", Map.of("draft_tokens", 3, "acceptance_rate", 1)));
+                Map.of("decode", Map.of("draft.tokens", 3, "acceptance.rate", 1)));
                 var call = new Call(p, input(d, 1, 5, 10, 2000, true))) {
             call.output(1, false, 1); call.output(5, false, 4); call.output(9, false, 4);
             assertEquals(602, code(call.error(Status.Code.RESOURCE_EXHAUSTED)));
@@ -510,7 +510,7 @@ class PdGenerationTest {
 
     @Test void excessiveDraftLookaheadFailsTheRequestWithoutIntegerOverflowOrEngineFailure() throws Exception {
         try (var p = node("prefill", 8, 1); var d = node("decode", 8, 1,
-                Map.of("decode", Map.of("draft_tokens", 2147483646, "acceptance_rate", 0)));
+                Map.of("decode", Map.of("draft.tokens", 2147483646, "acceptance.rate", 0)));
                 var call = new Call(p, input(d, 1, 5, 4, 2000, true))) {
             assertEquals(602, code(call.error(Status.Code.RESOURCE_EXHAUSTED)));
             assertEquals(0, metric(d, "rtp_llm_model_forward_seconds_count", "role=\"decode\""));
@@ -532,7 +532,7 @@ class PdGenerationTest {
         int expected = new org.flexlb.mock.compute.StoppingModel(new org.flexlb.mock.api.model.StoppingSpec(.2, 42L)).complete("77", 0, 20, 3, 20, false).committedTokens();
         for (int draft : new int[]{0, 3}) {
             try (var p = node("prefill", 16, 1, Map.of("eos", Map.of("probability", .2, "seed", 42)));
-                    var d = node("decode", 16, 1, Map.of("decode", Map.of("draft_tokens", draft, "acceptance_rate", 1), "eos", Map.of("probability", .2, "seed", 42)))) {
+                    var d = node("decode", 16, 1, Map.of("decode", Map.of("draft.tokens", draft, "acceptance.rate", 1), "eos", Map.of("probability", .2, "seed", 42)))) {
                 var input = input(d, 77, 5, 20, 2000, true).toBuilder(); input.getGenerateConfigBuilder().setMinNewTokens(3);
                 try (var call = new Call(p, input.build())) {
                     int sum = 0; boolean finished = false;
@@ -557,7 +557,7 @@ class PdGenerationTest {
 
     @Test void decodeOwnsItsEosAndTruncationDoesNotRefundSpeculativeVerification() throws Exception {
         try (var p = node("prefill", 16, 1); var d = node("decode", 16, 1,
-                Map.of("decode", Map.of("draft_tokens", 4, "acceptance_rate", 1), "eos", Map.of("probability", 1)))) {
+                Map.of("decode", Map.of("draft.tokens", 4, "acceptance.rate", 1), "eos", Map.of("probability", 1)))) {
             var input = input(d, 1, 5, 20, 2000, true).toBuilder(); input.getGenerateConfigBuilder().setMinNewTokens(3);
             try (var call = new Call(p, input.build())) {
                 call.output(1, false, 1); call.output(3, true, 2); assertEquals("completed", call.next());
@@ -569,12 +569,12 @@ class PdGenerationTest {
     }
 
     @Test void candidateFiveWithFourPositionsLeftFinishesWithoutOvershoot() throws Exception {
-        for (var progress : List.<Map<String, Object>>of(Map.of("tokens_per_step", 5), Map.of("draft_tokens", 4, "acceptance_rate", 1))) {
+        for (var progress : List.<Map<String, Object>>of(Map.of("tokens.per.step", 5), Map.of("draft.tokens", 4, "acceptance.rate", 1))) {
             try (var p = node("prefill", 16, 1); var d = node("decode", 16, 1, Map.of("decode", progress));
                     var call = new Call(p, input(d, 1, 5, 5, 2000, true))) {
                 call.output(1, false, 1); call.output(5, true, 4); assertEquals("completed", call.next());
                 assertEquals(4, metric(d, "rtp_llm_forward_tokens_total", "kind=\"output\""));
-                assertEquals(progress.containsKey("draft_tokens") ? 5 : 1,
+                assertEquals(progress.containsKey("draft.tokens") ? 5 : 1,
                     metric(d, "rtp_llm_forward_tokens_total", "kind=\"compute\""));
             }
         }
@@ -582,7 +582,7 @@ class PdGenerationTest {
 
     @Test void averageDecodeProgressDoesNotInventSpeculativeCompute() throws Exception {
         try (var p = node("prefill", 16, 1); var d = node("decode", 16, 1,
-                Map.of("decode", Map.of("tokens_per_step", 2.6)));
+                Map.of("decode", Map.of("tokens.per.step", 2.6)));
                 var call = new Call(p, input(d, 1, 3, 8, 2000, true))) {
             call.output(1, false, 1);
             call.output(4, false, 3);
@@ -797,7 +797,7 @@ class PdGenerationTest {
         }
     }
     @Test void masterBatchWaitsForAllDecodePreparationsAndExecutesOnePrefillForward() throws Exception {
-        var settings = Map.<String, Object>of("settings", Map.of("max_generate_batch_size", 4, "max_batch_tokens_size", 100));
+        var settings = Map.<String, Object>of("settings", Map.of("concurrency_limit", 4, "max_batch_tokens_size", 100));
         try (var p = node("prefill", 16, 10, settings); var d = node("decode", 8, 1);
              var holder = d.node.cache().acquire(8, List.of()).lease();
              var workers = Executors.newVirtualThreadPerTaskExecutor()) {
@@ -816,7 +816,7 @@ class PdGenerationTest {
     }
 
     @Test void failedDecodePreparationDoesNotDiscardTheSuccessfulBatchMember() throws Exception {
-        var settings = Map.<String, Object>of("settings", Map.of("max_generate_batch_size", 4, "max_batch_tokens_size", 100));
+        var settings = Map.<String, Object>of("settings", Map.of("concurrency_limit", 4, "max_batch_tokens_size", 100));
         try (var p = node("prefill", 16, 10, settings); var d = node("decode", 8, 1)) {
             var ack = enqueue(p, 2000, input(d, 711, 5, 3, 2000, true), input(d, 712, 50, 3, 2000, true));
             assertEquals(1, ack.getSuccessesCount()); assertEquals(711, ack.getSuccesses(0).getRequestId());
@@ -828,7 +828,7 @@ class PdGenerationTest {
     }
 
     @Test void cancellingOneMemberDuringBatchPreparationUnblocksTheRemainingGroup() throws Exception {
-        var settings = Map.<String, Object>of("settings", Map.of("max_generate_batch_size", 4, "max_batch_tokens_size", 100));
+        var settings = Map.<String, Object>of("settings", Map.of("concurrency_limit", 4, "max_batch_tokens_size", 100));
         try (var p = node("prefill", 16, 10, settings); var d = node("decode", 8, 1);
              var holder = d.node.cache().acquire(8, List.of()).lease();
              var workers = Executors.newVirtualThreadPerTaskExecutor()) {
@@ -850,7 +850,7 @@ class PdGenerationTest {
     }
 
     @Test void rejectedPrefillMemberKeepsNativeInputErrorAndReleasesItsPreparedDecode() throws Exception {
-        var settings = Map.<String, Object>of("settings", Map.of("max_generate_batch_size", 4,
+        var settings = Map.<String, Object>of("settings", Map.of("concurrency_limit", 4,
             "max_batch_tokens_size", 100, "max_seq_len", 8));
         try (var p = node("prefill", 16, 10, settings); var d = node("decode", 16, 1)) {
             var ack = enqueue(p, 2000, input(d, 731, 5, 3, 2000, true), input(d, 732, 8, 3, 2000, true));

@@ -111,7 +111,7 @@ def main():
         for role in ("prefill", "decode"):
             engines.append(start_node(role + "-0", engine_jar, {"engine": "rtp", "config": {
                 "seq_size_per_block": 16, "test_block_num": 8192, "reserve_block_ratio": 0,
-                "max_seq_len": 4096, "compute": {"forward": {"expression": "10"}}}}))
+                "max_seq_len": 4096, "mock.compute": {"forward": {"expression": "10"}}}}))
         # Reserve the HTTP/gRPC pair together while selecting a local port.
         while True:
             with socket.socket() as first, socket.socket() as second:

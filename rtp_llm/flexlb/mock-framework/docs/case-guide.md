@@ -193,3 +193,5 @@ environment:
 路径相对 `case.yaml` 解析，不依赖启动时的工作目录；只读取本地 YAML/JSON mapping，不加载远程配置。文件内容就是原 `config` mapping：Master 文件保存原生环境变量字符串（`FLEXLB_CONFIG`、`MODEL_SERVICE_CONFIG`），Engine 文件保存容量、调度和 Compute 参数。`engine` 后端选择、部署数量、资源/堆设置，以及 phase、step、流量与判定参数仍放在 Case YAML。Client 的发压参数也留在 Case。
 
 编译时读取文件并沿用内联配置的重复键、点路径冲突和 Master JSON 校验，结果展开到原有组件配置和运行产物，Runner/Java 不需要重新读取源文件。不增加文件继承或覆盖合并；小配置与测试夹具仍可直接使用内联 mapping。
+
+Engine 配置名、Mock 参数命名、ENV 映射和忽略规则见[组件配置参考](component-reference.md#engine-配置规则)。Case 使用每实例文件作为唯一配置源；共享 JVM 不从进程 ENV 覆盖业务配置。

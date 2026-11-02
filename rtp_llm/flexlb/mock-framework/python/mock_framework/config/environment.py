@@ -18,9 +18,18 @@ def expand_config(raw):
         raise ConfigError('config: expected mapping')
     result = {}
     leaves = set()
-    for key, value in raw.items():
-        if not isinstance(key, str):
-            raise ConfigError('Configuration keys must be strings')
+    def entries(mapping, prefix=''):
+        for key, value in mapping.items():
+            if not isinstance(key, str):
+                raise ConfigError('Configuration keys must be strings')
+            path = prefix + key
+            # Mock configuration is a namespace, while native nested payloads stay opaque.
+            if (path == 'mock' or path.startswith('mock.')) and isinstance(value, dict) and value:
+                yield from entries(value, path + '.')
+            else:
+                yield path, value
+
+    for key, value in entries(raw):
         parts = key.split('.')
         if any(not part for part in parts):
             raise ConfigError(f'Empty dotted path component: {key}')

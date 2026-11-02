@@ -40,10 +40,10 @@ environment:
       REUSE_CACHE: "true"
       TEST_BLOCK_NUM: "1025"
       RESERVE_BLOCK_RATIO: "5"
-      compute.forward.expression: "param(baseMs, 1) + 0.01*totalComputeTokens"
+      mock.compute.forward.expression: "param(baseMs, 1) + 0.01*totalComputeTokens"
 ```
 
-原生字段支持 server_args 小写或 Whale 大写 env 名，同一字段同时提供两种写法报错；整数/布尔接受对应原生文本，其余原生内容保留，但不能据此宣称功能已模拟。当前要求显式 block size、max sequence length 和 test_block_num，只支持 `dp_size=1`、`dp_rank=0`；P/D 批量上限取 1–1024，默认 1。Mock 一个 Engine 表示完整计算体，不拆 CP/TP/DP rank 或模拟 rank 间通信；内部并行的影响由整 Engine 的性能公式、容量和调度配置表达。block size 是本 Engine 的逻辑分配粒度，PD 不根据 CP 数乘除。配置导入时应先统一容量口径。不加载模型层/head 或 GPU 布局，不从部署内存推导 KV 块数。
+原生配置保留 real 的名称和单位，例如 `concurrency_limit`、`seq_size_per_block`、`test_block_num`；同一字段同时写大小写两种形式会报错。P/D 的 `concurrency_limit` 默认 32，范围 1–1024，控制每轮请求数。Mock 必须显式提供 `seq_size_per_block`、`max_seq_len`、`test_block_num`：本地没有 GPU/模型配置，不能复用 real 的硬件探测和自动容量推导。一个 Engine 表示完整计算体，不创建 CP/TP/DP rank 或模拟通信，不根据并行度隐式换算容量、block size 或已校准的公式。具体支持项和输入规则见下文“Engine 配置规则”。
 
 RTP 请求公共支持范围集中在 `RequestValidation`，本地单 token、P/D Prefill 及 Decode ALLOCATE 均使用它：adapter/unique_key、多 beam/多返回、stop words、sp_edit/sp_input_lookup、额外 logits/hidden/prob/loss 输出明确拒绝。路径只保留自身角色、长度、路由和协议阶段规则。测试通过实际 gRPC 同时验证 max_new_tokens=1/2 和 D ALLOCATE，防止参数只在一条路径被拒绝。
 
@@ -55,7 +55,7 @@ RTP 请求公共支持范围集中在 `RequestValidation`，本地单 token、P/
 
 PD 只执行调度器之间的交接，不模拟 KV 数据传输。P/D 只使用原生 RemoteGenerate TCP 连接，不注册自定义回调服务，也不跨节点比对 prompt、块布局或 cache keys。P 必须等自身 Scheduler 报告首轮 Forward 完成后才发送 LOAD；D 对已分配的请求执行零耗时异步传输事件，完成后回复 LOAD ACK。P 收到 ACK 才释放源 KV，然后发送 GENERATE 或 PREFILL_COMPLETE，D Scheduler 决定开始计算或结束。两端块大小各自独立，KV 的申请、持有、释放及 finished 记录仍归各自 Scheduler 管理。
 
-接入层信任正常 P 生产者发送的 LOAD 和首 Token 完成事实，不模拟损坏的 KV 数据、假冒来源、迟到的跨请求交接或生产传输恢复。请求取消、总 deadline、节点关闭和下游 RPC 失败仍必须终止在途任务并回收资源。零耗时传输没有独立加载计时器；显式传入的 load_cache_timeout_ms 记入 pending_config，不宣称生效。
+接入层信任正常 P 生产者发送的 LOAD 和首 Token 完成事实，不模拟损坏的 KV 数据、假冒来源、迟到的跨请求交接或生产传输恢复。请求取消、总 deadline、节点关闭和下游 RPC 失败仍必须终止在途任务并回收资源。零耗时传输没有独立加载计时器；real 的 `load_cache_timeout_ms` 在此模型中忽略。
 
 原生 EnqueueBatch/EnqueueGroup 当前只支持 DP rank 0，支持文本及经 ViT 准备的输入。Batch 接入已选择 PD 协议，不套用普通 GenerateStreamCall 的分流条件：max_new_tokens=1 也正常接纳，can_use_pd_separation 不改变 Batch 协议。首 Token 达到长度上限时，通过 PREFILL_COMPLETE 结束 D，不重复输出 Token，也不执行 Decode Forward。普通单 Token RPC 仍走本地 Prefill；非 PD 的多 Token 本地生成和 prefill_only 尚未模拟，明确返回 UNIMPLEMENTED。
 
@@ -79,7 +79,7 @@ WorkerStatus 报真实等待/执行任务、finished/version，available_concurr
 
 对齐当前 real BlockTree：开启 Device cache 时，Host 读取成功后把已有有效前缀注册到 Device，再移除 Host 副本；关闭 Device cache 时，Host 源保留，Device 工作副本不注册。申请失败不能消费 Host。驱逐候选按所在层的直接子节点判断叶子，不要求整棵树的全局叶子；Full-KV 前缀被删除时，所有失效后缀跨层清理。Device 水位触发时向 Host 转存；Host 分配失败时保留 Device 源，不为了转存强制删除 Host 缓存，也不退化成丢弃 Device。未配置 Host 时水位回收可以直接删除 Device 索引。紧急 Device 分配允许直接回收 Device 缓存及失效后缀，不额外删除无关 Host 根。层间移动保持逻辑 key 和索引版本，真正插入/删除才改变 key 版本。Host 不计入 WorkerStatus/CacheStatus 的 Device 执行容量。
 
-容量使用原生 `test_block_num` 和 `reserve_block_ratio`。Device 可用块数=test_block_num−1；Host 使用 `memory_cache_blocks` 个块。reserve 默认 5%，约束首次分配，运行中增长可以使用预留。需求超过单实例上限为永久不足，暂时被其他请求占用为可重试；增长一次补齐差额，失败不留下半次新增分配。容量不足后的等待/结束决定仍在 Scheduler，运行中的 RTP Decode 增长失败会结束该请求，不实现主动换出。显式投机的首次 D 分配也包含 reserveStep，在 PD 交接前准备目标容量。
+容量使用原生 `test_block_num` 和 `reserve_block_ratio`。Device 可用块数=test_block_num−1；Host 使用 `mock.cache.memory.blocks` 个块。reserve 默认 5%，约束首次分配，运行中增长可以使用预留。需求超过单实例上限为永久不足，暂时被其他请求占用为可重试；增长一次补齐差额，失败不留下半次新增分配。容量不足后的等待/结束决定仍在 Scheduler，运行中的 RTP Decode 增长失败会结束该请求，不实现主动换出。显式投机的首次 D 分配也包含 reserveStep，在 PD 交接前准备目标容量。
 
 容量失败处理沿用上述边界：首次 `acquire` 返回 RETRYABLE 时，P 留在 waiting、D 留在容量等待阶段；同一容量版本不重复申请，资源释放后唤醒重试，并保留请求原 deadline。PERMANENT 立即结束单请求，返回容量错误 602；等待中超时返回 603，取消和超时后不再分配。运行中 Decode 的 `ensureCapacity` 无论暂时还是永久不足，都结束该请求，等待其 Compute/PD 使用归零后释放引用，其他请求继续；释放的容量可供等待请求重新准入。不增加抢占、请求换出或重新排队重算接口。
 
@@ -89,7 +89,7 @@ Scheduler 与 KV 管理器按 Token 交互：`acquire(requiredTokens, keys)` 首
 
 不再每轮调用 markValid，也不在 Lease 中重复保存计算进度。Scheduler 在成功终态且所有 Compute/PD 使用结束后调用 `publish(keys, validTokens)`，一次声明有效范围并注册完整 prompt 块；KV 管理器校验有效范围未超过已分配容量、key 数未超过完整有效块数。`publish` 不关闭租约，`close` 只释放请求引用。投机拒绝区域、预留空间、失败/取消请求不发布，生成内容暂不额外建立前缀索引。多个请求可共享已注册的不可变 Device 块。缓存索引引用与请求物理引用独立：索引可以在请求运行中注销或迁往 Host，请求仍保留原 Device 块，最后一个引用释放才归还物理容量。acquire/publish 仅在同步事务内临时保护完整前缀。状态中的 referenced 只统计仍同时被索引和请求引用的 Device 物理块；注销或转存后仍被请求持有的块计入 held。Host-only 的私有 Device 副本与 Host 记作两层真实占用。
 
-Device/Host 水位按物理占用比例工作：达到 high 后，尽量回收到 low，未达到 low 时保留触发状态。加载、发布、增长和请求释放完成后同步检查，顺序为 Host、Device，不建后台扫描线程；运行中请求的引用可能使物理占用暂时无法下降。`enable_memory_cache` 要求显式正数 `memory_cache_blocks`。Disk/Remote 仍拒绝开启。Host 传输超时保留在 pending_config，本地瞬间完成不使用该超时。Host-only 写回暂保留可容纳的部分前缀，尚未对齐 real 的整批目标预分配与整批失败回滚；Device+Host 主路径不依赖此简化。异步传输队列、Disk/Remote 和 Hybrid/SWA/Linear 布局仍不实现。
+Device/Host 水位按物理占用比例工作：达到 high 后，尽量回收到 low，未达到 low 时保留触发状态。加载、发布、增长和请求释放完成后同步检查，顺序为 Host、Device，不建后台扫描线程；运行中请求的引用可能使物理占用暂时无法下降。`enable_memory_cache` 要求显式正数 `mock.cache.memory.blocks`。Disk/Remote 及 Host 传输超时参数直接忽略，本地瞬间完成不使用这些参数。Host-only 写回暂保留可容纳的部分前缀，尚未对齐 real 的整批目标预分配与整批失败回滚；Device+Host 主路径不依赖此简化。异步传输队列、Disk/Remote 和 Hybrid/SWA/Linear 布局仍不实现。
 
 ## 通用 V 与输入准备
 
@@ -106,9 +106,9 @@ vit:
   deployment:
     replicas: 1
   config:
-    patch_size: 14
-    spatial_merge_size: 2
-    hidden_size: 4096
+    mock.vit.patch.size: 14
+    mock.vit.spatial.merge.size: 2
+    mock.vit.hidden.size: 4096
     gpu_max_batch_size: 8
     gpu_max_batch_images: 200
     gpu_batch_wait_ms: 10
@@ -116,7 +116,7 @@ vit:
     mm_cache_gpu_max_bytes: 67108864
     mm_cache_cpu_max_bytes: 268435456
     mm_hash_key_cache_max_bytes: 16777216
-    compute.forward.expression: "2 + 0.00001 * totalImagePixels"
+    mock.compute.forward.expression: "2 + 0.00001 * totalImagePixels"
 ```
 
 图像输入携带明确的 width/height（原生 mm_preprocess_config），不下载/解码实际图片。输出行数为 ceil(width/(patch_size*spatial_merge_size))*ceil(height/(patch_size*spatial_merge_size))。这是可配置的 Mock 几何模型，不宣称复现某个真实视觉模型的 resize/crop。首版只接受 IMAGE URL 身份和显式尺寸；视频、音频、tensor 输入、V4.1 prepared patches 在 V 模块边界明确拒绝，不由 Client 或 P 的核心校验器按多模态类别拒绝。数据文件的 Image.length 要事先按模型几何生成，旧数据仅离线转换，不新增运行时兼容格式。
@@ -131,7 +131,11 @@ Client 按 Master 的 V-only route 选 V，读取元数据、准备特征 token�
 
 VP 同 JVM 和跨进程都走 TCP gRPC，只传 shape/dtype、split_size 和逐行 INT32 hash，不生成 embedding payload，也不伪造 RDMA lease。Mock P 校验形状、长度和展开 span 后使用；此响应不能交给真实 tensor 解码器，VP 网络带宽和 GPU 内存复制不在模拟范围内。
 
-Whale 的 P/D/V 统一使用 `java -jar java/host/target/mock-engine-service-1.0-SNAPSHOT-all.jar`，无需 Python Runner、`MOCK_HOST_PORT`、`MOCK_COMPONENTS_DIR` 或宿主管理服务。入口 `EngineMain` 从 `MOCK_CONFIG_FILE` 中的 component_role 决定启动哪个 Engine；设置 MOCK_OUTPUT_DIR、MOCK_READY_FILE，以及固定 MOCK_RPC_PORT、MOCK_CONTROL_PORT。实例配置采用与 Runner 相同的 id/component_role/component.config 结构，P/D 另外提供 component.engine。通过 MOCK_BIND_HOST=0.0.0.0 和 MOCK_ADVERTISE_HOST=PodIP 区分监听和发现地址。每个实例独立写入 effective-config、endpoints 和 ready；关闭删除 ready，旧产物目录拒绝覆盖。共享 JVM 的实例沿用同一进程地址，各自端口不同。无论是否共 JVM，VP/PD 都走 TCP、只传元数据。
+P/D/V 的单实例入口统一为 `java -jar java/host/target/mock-engine-service-1.0-SNAPSHOT-all.jar`。本地 Host 使用每实例配置文件，多个实例共享 JVM 时仍保留各自配置；不从进程 ENV 覆盖实例业务参数。
+
+独立 JVM 可选择两种输入方式：设置 `MOCK_CONFIG_FILE` 时，只读取文件中的 id/component_role/component.config；未设置时，只读取业务 ENV，身份由 `ROLE_TYPE=PREFILL|DECODE|VIT` 与 `MOCK_NODE_ID=prefill-0|decode-0|vit-0` 提供。文件和 ENV 不叠加，没有第二套默认值。P/D 文件还需提供 `component.engine: rtp`。
+
+入口目前仍要求框架变量 `MOCK_OUTPUT_DIR`、`MOCK_READY_FILE`，可设置 `MOCK_RPC_PORT`、`MOCK_CONTROL_PORT`、`MOCK_BIND_HOST`、`MOCK_ADVERTISE_HOST`。这些控制监听地址和产物，不属于 Engine 模型参数。每实例独立写 effective-config、endpoints、ready；关闭删除 ready，旧产物目录拒绝覆盖。此处描述启动入口，不表示已完成 Whale 镜像和平台部署。无论是否共 JVM，VP/PD 都走 TCP、只传元数据。
 
 ## Compute、Forward、Decode 和 EOS
 
@@ -142,7 +146,7 @@ environment:
   prefill:
     engine: rtp
     config:
-      compute:
+      mock.compute:
         forward:
           expression: "1.23 * (1 + 0.01*totalComputeTokens)"
         eos:
@@ -151,17 +155,17 @@ environment:
   decode:
     engine: rtp
     config:
-      compute:
+      mock.compute:
         forward:
           expression: "19.5 + 0.175*batchSize"
         decode:
-          tokens_per_step: 2.6
+          tokens.per.step: 2.6
         eos:
           probability: 0.0025
           seed: 20260922
 ```
 
-RtpConfig 只加载 ComputeSpec；ComputeModel 组合 FormulaForward、可选噪声、DecodeStepModel 和 StoppingModel。非默认 Decode 进度参数只允许配置在 D，P/D 都可以配置 EOS。旧字段、未知字段、null、错误类型或缺少必要 seed 明确拒绝，没有别名和兼容分支。模型校验来自 Java，Python 只编译组件配置结构。effective-config 顶层保存生效值，requested_config 保存请求配置，pending_config 单列仍未实现的原生参数。
+RtpConfig 只加载 ComputeSpec；ComputeModel 组合 FormulaForward、可选噪声、DecodeStepModel 和 StoppingModel。非默认 Decode 进度参数只允许配置在 D，P/D 都可以配置 EOS。旧字段、未知字段、null、错误类型或缺少必要 seed 明确拒绝，没有别名和兼容分支。模型校验来自 Java，Python 只编译组件配置结构。effective-config 只保存生效值及解析后的模型参数，原始输入由 Runner 的 config.json 保留；不再产生 pending_config。
 
 调度前 Compute.prepare 固定请求快照和本轮验证量/KV 需求，不抽投机接受量。Forward 完成后 Compute.completed 依次计算接受后的候选产出、EOS 和长度截断，返回 committedTokens/finished。Scheduler 只校验请求仍有效并提交结果、更新队列、处理资源和 PD；不判断正常结束是 EOS 还是达到上限。取消、超时、关闭和计算失败仍走独立失败路径，不能成为正常 finished，也不能因旧回调再提交 token。
 
@@ -171,9 +175,9 @@ ForwardBatch 保留请求长度、实际缓存命中、已生成长度、stepTok
 
 公式复用生产 ArithmeticFormula 的 param(name, value)、sum 等函数，单位 ms，保留到 ns；非法变量、负值、非有限值和溢出拒绝。逐请求变量只在 sum 中使用：inputTokens/hitCacheTokens/computeTokens/hasHitCache/outputTokens/generatedTokens/contextTokens/stepTokens/priority/imageCount/imagePixels；batch 使用 batchSize、dpRank、total/max 派生变量。RTP 额外绑定 cpSize、cpEnabled（0/1）、tpSize、dpSize，只有显式引用才参与计算，不自动缩放已有拟合公式。默认 FormulaForward 不猜测多个 DP 的组合方式。
 
-倍率直接乘入 forward.expression，不提供独立 scale/noise.scale。噪声位于 forward.noise，默认 stddev_ms/stddev_ratio=0；启用时要求 seed 和正 max_deviation_ms，扰动有界、最终耗时不小于 0。seed、Engine 身份、角色和 batch 身份固定一次耗时样本，取消批次不补完成指标。当前 DeepSeek Case 不启用噪声。
+倍率直接乘入 forward.expression，不提供独立 scale/noise.scale。噪声位于 forward.noise，默认 stddev.ms/stddev.ratio=0；启用时要求 seed 和正 max.deviation.ms，扰动有界、最终耗时不小于 0。seed、Engine 身份、角色和 batch 身份固定一次耗时样本，取消批次不补完成指标。当前 DeepSeek Case 不启用噪声。
 
-Decode 有两种互斥模型。默认普通模式每轮一个 token；平均模式 tokens_per_step>=1 按 ceil((n+1)*v)−ceil(n*v) 产生候选数量，每轮每请求计一个 target 输入，不虚构 draft/accept 统计。显式投机模式配置 draft_tokens、acceptance_rate、seed：抽取接受前缀 A，候选产出为 A+1；固定独立接受率 α、草稿长 k 时 E[C]=1+α+…+α^k。这是可复现的统计近似，不模拟真实 MTP 的 logits、draft 张量和独立 draft KV；P 的初始化成本包含在 P 整体公式中。
+Decode 有两种互斥模型。默认普通模式每轮一个 token；平均模式 tokens.per.step>=1 按 ceil((n+1)*v)−ceil(n*v) 产生候选数量，每轮每请求计一个 target 输入，不虚构 draft/accept 统计。显式投机模式配置 draft.tokens、acceptance.rate、seed：抽取接受前缀 A，候选产出为 A+1；固定独立接受率 α、草稿长 k 时 E[C]=1+α+…+α^k。这是可复现的统计近似，不模拟真实 MTP 的 logits、draft 张量和独立 draft KV；P 的初始化成本包含在 P 整体公式中。
 
 长度边界在接受结果后统一处理。显式投机模式按固定 k 个草稿、k+1 个验证位置及 seq_len+k+1 的 KV 预留执行（普通 Decode reserveStep=0），对齐当前 RTP 的固定验证窗口；不能因为只剩 R 个输出位置就提前缩小验证量。候选产出 5 个而只剩 4 个时，只提交 4 个并返回 finished=true，验证成本仍按完整计划累计。平均进度模型每轮仍计一个 target 输入，KV 仅覆盖最终可能提交的输出前缀。EOS 只检查接受后的候选 token，按绝对输出位置生成固定概率事件；相同 seed、请求身份和概率下，改变 batch、轮宽、接受模型或调用顺序不会重抽已经走过的位置。拒绝的草稿不参与结束判断。
 
@@ -181,44 +185,64 @@ StoppingModel 遵守 min_new_tokens，ignore_eos 只屏蔽 EOS，不屏蔽长度
 
 real 依据：MtpExecutor::decodeStep 先 target verify Forward，再执行 speculative_sampler；MtpBatchStreamProcessor::prepareDecodeSpecUpdateInfo 提取接受后的 token，GenerateStream::specUpdate 经 NormalGenerateStream::updateOutput 检查 EOS/max；CompleteTokenIds::matchEosToken 截断到第一个 EOS。PrefillRpcServer::remoteLoadCacheEnd 保留 LOAD ACK、释放源 KV 和 PREFILL_COMPLETE 顺序。当前 Mock 不支持 stop words/beam search 等未实现条件，显式请求会拒绝。
 
-## P/D 配置治理
+## Engine 配置规则
 
-组件只接受已登记、角色适用的原生参数；支持小写字段或对应大写环境变量名，两者同时出现、未知参数、已删除参数和错放角色的参数报错。Python 不复制这份字段表，RTP 的字段归属与待实现参数校验位于 RtpSettings，实际值解析位于 RtpConfig。没有静默透传一批未消费配置的入口。
+Case 的 `component.config` 可内联 YAML，或引用相对 Case 目录的配置文件。Python 只展开点号和组织实例，不维护 Engine 参数默认值。Java 的 `EngineConfig` 负责输入转换，`RtpConfig`、`VitConfig` 负责默认值、范围和语义；没有配置源基类或覆盖层。
 
-CP/TP/DP 保留在执行配置及 effective-config 中，不转成来源说明。一个 Mock Engine 仍表示整体计算单元；不创建内部 rank，不模拟并行通信。当前执行域仍只支持 dp_size=1、dp_rank=0，其他值明确拒绝；保留 dp_size 并不表示已经支持内部多 DP。并行度作为公式输入，已校准的公式、容量和 block size 不再隐式换算。
+已实现且语义对齐的 real 参数沿用 real 命名。未实现的 real 参数直接忽略，值不参与校验，也不进入 effective-config。例如磁盘/远端缓存、独立加载/重试超时、异步传输队列、模型路径、设备与尚未模拟的并行通信参数；出现这些参数不代表 Mock 实现了对应能力。原生参数拼写错误也会被忽略，因此复用 real 配置后应核对 effective-config 中真正生效的字段。
 
-下表是当前 DeepSeek HA 配置的处理结果。待实现参数保留实际数值、校验类型与范围，但只进入 pending_config，不表示行为已经对齐。Host 容量、策略和水位已经接通；开启尚不存在的 disk/remote cache 仍拒绝启动；其他待实现项允许保留并警告，相关调度、压力和超时结论不得作为已对齐结果。
+Mock 专用参数使用小写点号名称，例如 `mock.compute.forward.expression`；也可写成嵌套 YAML。未知 Mock 参数、大小写错误、空对象、null、路径冲突和重复输入均报错。Mock 不接受旧的 compute/memory_cache_blocks 等别名作为覆盖入口。
 
-| 参数 | P | D | 当前处理 |
-| --- | --- | --- | --- |
-| cp_size / cp_enabled | 4 / true | 1 / false | 保留，公式可读取；不模拟内部 CP。 |
-| tp_size / dp_size | 4 / 1 | 1 / 1 | 保留；tp_size 还用于原生状态上报。 |
-| max_seq_len | 1048576 | 1048576 | 生效。 |
-| seq_size_per_block / test_block_num | 512 / 21554 | 128 / 221485 | 本地容量生效；PD 按 token 交接。 |
-| reserve_block_ratio | 1 | 8 | 生效，百分比。 |
-| max_generate_batch_size | 64 | 128 | P/D 统一入口，生效；删除 max_context_batch_size。 |
-| max_batch_tokens_size | 512000 | 1048576 | P token/矩形准入生效；D 不作为每轮 verify token 上限。 |
-| max_batch_tokens_without_cache | 50000 | 不配置 | P 普通队列按未缓存 token 配额准入；D 不配置。 |
-| max_inited_kv_cache_streams | 128 | 不配置 | P 初始化 KV 数量限制和超大组退回条件均生效；D 不配置。 |
-| reuse_cache / enable_device_cache / device_eviction_policy | false / true / lru | false / true / lru | 保留现有语义，不为接 Host 而打开 reuse。 |
-| enable_memory_cache / memory_cache_blocks | true / 52295 | false / 不配置 | P Host 容量生效，本地瞬间周转。 |
-| memory_eviction_policy | lru | 不配置 | P Host 策略/水位生效；D 不配置。 |
-| block_tree_device_evict_low/high_watermark_ratio | 0.82 / 0.9 | 0.82 / 0.9 | Device 水位生效；释放资源时同步回收到低水位。 |
-| block_tree_memory_evict_low/high_watermark_ratio | 0.9 / 0.94 | 不配置 | P Host 策略/水位生效；D 不配置。 |
-| block_tree_business_queue_max_size / block_tree_transfer_queue_max_size | 10000 / 10000 | 10000 / 10000 | 待实现队列背压，不以无界队列冒充等价实现。 |
-| memory_cache_sync_timeout_ms | 10000 | 不配置 | P 本地瞬间传输不使用，保留 pending_config。 |
-| enable_disk_cache / enable_remote_cache | false / false | false / false | 明确关闭；开启拒绝。 |
-| prefill_retry_times | 0 | 不配置 | 当前不重试；非零值列为待实现。 |
-| prefill_max_wait_timeout_ms | 600000 | 不配置 | P 待实现独立等待期限。 |
-| max_rpc_timeout_ms | 7200000 | 7200000 | 待实现独立 RPC 上限；已有请求总期限不因此失效。 |
-| load_cache_timeout_ms | 不配置 | 可记录原配置 | 零耗时交接不使用独立加载超时，D 显式配置记入 pending_config。 |
-| compute | 1.23 * (原公式)，不配噪声 | 19.5+0.175*batchSize | 保留，不按 CP/TP 二次缩放。 |
-| compute.eos | probability=0.0025，seed=20260922 | 同 P | 参数保留；固定长度回放通过 ignore_eos 屏蔽 EOS。 |
-| compute.decode.tokens_per_step | 不配置 | 2.6 | D 平均进度模型，不等于真实投机参数。 |
+### 已实现的 real 参数
 
-以下参数从当前 Case 删除，不复刻 native 线程池、轮询和描述符分批：block_tree_transfer_worker_count、memory_cache_max_descriptors_per_transfer_batch、prefill_prepare_resource_pool_size、prefill_stop_stream_wait_timeout_ms、decode_retry_interval_ms。取消、资源释放和有界请求生命周期仍必须实现，不能随这些参数一起删除。
+| 参数 | 默认值/约束 | 行为 |
+| --- | --- | --- |
+| seq_size_per_block / max_seq_len / test_block_num | 必填；正数，test_block_num ≥ 2 | 逻辑分配粒度、序列上限、Device 物理块数（含 null block）。 |
+| concurrency_limit | 32，1–1024 | P/D 每轮请求数上限；real 的 ConcurrencyConfig 输入经 engine_config.py 写入内部 max_generate_batch_size。 |
+| reserve_block_ratio | 5，0–100 | 首次分配预留百分比。 |
+| reuse_cache / enable_device_cache | false / true | 前缀复用和 Device 索引。 |
+| enable_memory_cache | false | Host 缓存开关；开启时须同时给出正数 mock.cache.memory.blocks。 |
+| tp_size / dp_size | 1 / 1，正整数 | real 并行配置；tp_size 用于原生状态/接入元数据，二者分别绑定公式 tpSize/dpSize，不模拟 rank 间执行。 |
+| cp_rotate_method | DISABLED | 沿用 real PrefillCPConfig；ALL_GATHER、ALL_GATHER_WITH_OVERLAP、ALLTOALL 开启通用 CP，cpSize=tp_size、cpEnabled=1，否则为 1/0。PREFILL_CP 是独立策略，当前未模拟，prefill_cp_size 等专用参数忽略。 |
+| max_batch_tokens_size | 0 | P 的 batch token/矩形准入；0 仍可执行 singleton。 |
+| max_batch_tokens_without_cache / max_inited_kv_cache_streams | 0 / 0 | 仅 P 生效；0 不启用对应限制。 |
+| device_eviction_policy / memory_eviction_policy | lru | real 内部配置属性，支持 lru/lfu/fifo；real server_args 没有对应公开 ENV，仅文件输入。 |
+| disable_decode_first_malloc_device_reuse | false | real 内部 CacheConfig 属性，文件输入；不杜撰公开 ENV 名。 |
+| block_tree_device_evict_low/high_watermark_ratio | 0.82 / 0.90 | Device 水位。 |
+| block_tree_memory_evict_low/high_watermark_ratio | 0.90 / 0.94 | Host 水位。 |
+| gpu_max_batch_size / gpu_max_batch_images / gpu_batch_wait_ms | 1 / 200 / 10 ms | 仅 V；batch=1 时有效等待为 0。 |
+| mm_max_queue_size | 1024 | V 等待队列容量。 |
+| mm_cache_gpu_max_bytes / mm_cache_cpu_max_bytes | 各 2 GiB | V embedding 缓存逻辑预算，单位 byte。 |
+| mm_hash_key_cache_max_bytes | 256 MiB | V hash 缓存逻辑预算，单位 byte。 |
 
-decode_retry_times、decode_retry_timeout_ms 在当前 real C++ 执行代码中没有读取处，不迁入 Mock。当前 P 的 cp_force_single_prefill=false、D 不执行对应 Prefill 准入，均省略；未来 P 启用该限制时只需增加逻辑调度约束。prefill_retry_timeout_ms 当前因重试次数为 0 省略，非零重试的次数与预算一起待实现。
+real 默认值和映射以 `rtp_llm/server/server_args`、`rtp_llm/config/engine_config.py`、`rtp_llm/config/py_config_modules.py` 和 `rtp_llm/cpp/config/ConfigModules.h` 为依据。Mock 不用真实 GPU 分配这些预算，也不按实例伪造物理资源消耗。
+
+### Mock 参数
+
+| 参数 | 含义 |
+| --- | --- |
+| mock.cache.memory.blocks | P/D Host 逻辑块预算，默认 0；不是 real 的 memory_cache_size_mb。本模型不加载层/head/dtype 来计算每块字节数，所以忽略 memory_cache_size_mb，不能把 MB 当块数。 |
+| mock.vit.patch.size / mock.vit.spatial.merge.size / mock.vit.hidden.size | V 简化几何模型，默认 14 / 2 / 4096，不冒充 real 的模型加载配置。 |
+| mock.compute.forward.expression | 必填，Forward 公式，结果单位 ms。 |
+| mock.compute.forward.noise.stddev.ms / stddev.ratio / max.deviation.ms / seed | 有界噪声，详见 Compute；数值后缀均相对 mock.compute.forward.noise。 |
+| mock.compute.decode.tokens.per.step | D 平均每轮进度，与真实投机机制不同。 |
+| mock.compute.decode.draft.tokens / acceptance.rate / seed | D 简化投机模型；相对 mock.compute.decode。 |
+| mock.compute.eos.probability / seed | P/D 的概率停止模型。 |
+
+### ENV 输入
+
+real 公开参数按其 server_args 声明读取 ENV。P/D 上表的公开项对应大写下划线名，例如 `CONCURRENCY_LIMIT`、`SEQ_SIZE_PER_BLOCK`、`TP_SIZE`、`DP_SIZE`、`CP_ROTATE_METHOD`。V 的三个 batch 参数分别使用 `VIT_GPU_MAX_BATCH_SIZE`、`VIT_GPU_MAX_BATCH_IMAGES`、`VIT_GPU_BATCH_WAIT_MS`，其余为 `MM_MAX_QUEUE_SIZE`、`MM_CACHE_GPU_MAX_BYTES`、`MM_CACHE_CPU_MAX_BYTES`、`MM_HASH_KEY_CACHE_MAX_BYTES`。不会从这些 ENV 名反推另一套默认值。
+
+Mock 名称的点号转换为下划线并大写，例如 `mock.compute.decode.tokens.per.step` → `MOCK_COMPUTE_DECODE_TOKENS_PER_STEP`。`MOCK_COMPUTE_*`、`MOCK_CACHE_*`、`MOCK_VIT_*` 是严格校验的业务命名空间；框架启动变量另行处理。只读取已声明的业务字段，其他进程 ENV 不写入配置产物。
+
+```sh
+ROLE_TYPE=DECODE MOCK_NODE_ID=decode-0 \
+SEQ_SIZE_PER_BLOCK=128 MAX_SEQ_LEN=32768 TEST_BLOCK_NUM=1025 \
+CONCURRENCY_LIMIT=32 MOCK_COMPUTE_FORWARD_EXPRESSION='19.5 + 0.175 * batchSize' \
+MOCK_COMPUTE_DECODE_TOKENS_PER_STEP=2.6 \
+MOCK_OUTPUT_DIR=/tmp/mock-decode-0 MOCK_READY_FILE=/tmp/mock-decode-0/ready.json \
+java -jar java/host/target/mock-engine-service-1.0-SNAPSHOT-all.jar
+```
 
 ## Client 原生收发核心
 

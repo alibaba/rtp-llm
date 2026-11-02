@@ -47,49 +47,51 @@ class RtpConfigTest {
         assertThrows(IllegalArgumentException.class, () -> load(root));
     }
 
-    @Test void rejectsUnsupportedDpAndRemovedMockCapacitySettings() throws Exception {
+    @Test void unsupportedRealSettingsAreIgnoredWithoutValidatingTheirValues() throws Exception {
         var root = root(); var config = (ObjectNode) root.path("component").path("config");
-        config.put("dp_size", 2); assertThrows(IllegalArgumentException.class, () -> load(root));
-        config.remove("dp_size"); config.putObject("capacity").put("device_blocks", 8);
-        assertThrows(IllegalArgumentException.class, () -> load(root));
+        var before = load(root).effective();
+        for (String key : java.util.List.of("dp_rank", "enable_disk_cache", "enable_remote_cache", "memory_cache_size_mb",
+                "prefill_retry_times", "load_cache_timeout_ms", "some_future_real_setting")) config.putObject(key).put("anything", true);
+        assertEquals(before, load(root).effective());
+        assertFalse(load(root).business().has("memory_cache_size_mb"));
     }
 
     @Test void rejectsOldComputeAndInvalidOrMisplacedModels() throws Exception {
         var root = root(); var config = (ObjectNode) root.path("component").path("config");
         ((ObjectNode) root.path("environment")).putObject("compute");
         assertThrows(IllegalArgumentException.class, () -> load(root)); ((ObjectNode) root.path("environment")).remove("compute");
-        var compute = (ObjectNode) config.path("compute");
+        var compute = (ObjectNode) config.path("mock.compute");
         compute.putObject("eos").put("probability", .1);
         assertThrows(Exception.class, () -> load(root));
         ((ObjectNode) compute.path("eos")).put("seed", 42);
         assertEquals(.1, load(root).compute().configuration().eos().probability());
         ((ObjectNode) compute.path("eos")).put("extra", 1); assertThrows(Exception.class, () -> load(root));
-        compute.remove("eos"); compute.putObject("decode").put("tokens_per_step", 2.6);
+        compute.remove("eos"); compute.putObject("decode").put("tokens.per.step", 2.6);
         assertThrows(IllegalArgumentException.class, () -> load(root));
     }
 
     @Test void componentLoaderOwnsDuplicateFieldsAndEnvelopeValidation() throws Exception {
         var path = directory.resolve("duplicate.json");
-        Files.writeString(path, JSON.writeValueAsString(root()).replace("\"compute\":{", "\"compute\":{},\"compute\":{"));
+        Files.writeString(path, JSON.writeValueAsString(root()).replace("\"mock.compute\":{", "\"mock.compute\":{},\"mock.compute\":{"));
         assertThrows(java.io.IOException.class, () -> RtpConfig.load(path));
     }
 
     @Test void requiresExplicitGeometryAndMatchingRoleFormula() throws Exception {
         var root = root(); var config = (ObjectNode) root.path("component").path("config");
         config.remove("seq_size_per_block"); assertThrows(IllegalArgumentException.class, () -> load(root));
-        config.put("seq_size_per_block", 16); config.remove("compute");
-        assertThrows(IllegalArgumentException.class, () -> load(root));
+        config.put("seq_size_per_block", 16); config.remove("mock.compute");
+        assertThrows(Exception.class, () -> load(root));
     }
     @Test void fractionalDecodeModelLoadsAndItsEffectiveConfigurationCanBeReadBack() throws Exception {
         var root = root(); root.put("component_role", "decode");
         var config = (ObjectNode) root.path("component").path("config");
-        ((ObjectNode) config.path("compute")).putObject("decode").put("tokens_per_step", 2.6);
+        ((ObjectNode) config.path("mock.compute")).putObject("decode").put("tokens.per.step", 2.6);
         var model = load(root);
         assertEquals(2.6, model.compute().configuration().decode().tokens_per_step());
-        config.set("compute", model.effective().get("compute"));
+        ((ObjectNode) root.path("component")).set("config", model.effective());
         assertEquals(2.6, load(root).compute().configuration().decode().tokens_per_step());
     }
-    @Test void nativeEvictionOrderingUsesOnlyTreeAndRejectsUnimplementedTiers() throws Exception {
+    @Test void nativeEvictionOrderingUsesOnlyTreeAndHostRequiresExplicitLogicalCapacity() throws Exception {
         var root = root(); var config = (ObjectNode) root.path("component").path("config");
         assertEquals("lru", load(root).effective().path("device_eviction_policy").asText());
         for (String policy : java.util.List.of("lru", "lfu", "fifo")) {
@@ -99,26 +101,43 @@ class RtpConfigTest {
         config.put("device_eviction_policy", "tree"); assertThrows(IllegalArgumentException.class, () -> load(root));
         config.remove("device_eviction_policy"); config.put("DEVICE_EVICTION_POLICY", "LFU");
         assertEquals("lfu", load(root).effective().path("device_eviction_policy").asText());
-        for (String tier : java.util.List.of("enable_memory_cache", "enable_disk_cache", "enable_remote_cache")) {
-            config.put(tier, true); assertThrows(IllegalArgumentException.class, () -> load(root)); config.remove(tier);
-        }
+        config.put("enable_memory_cache", true);
+        assertThrows(IllegalArgumentException.class, () -> load(root));
     }
 
     @Test void bindsParallelismToTheFormulaWithoutImplicitScaling() throws Exception {
         var root = root(); var config = (ObjectNode) root.path("component").path("config");
-        config.put("cp_size", 4).put("cp_enabled", true).put("tp_size", 4).put("dp_size", 1);
-        config.putObject("compute").putObject("forward").put("expression", "cpSize + tpSize + dpSize + cpEnabled");
+        config.put("cp_rotate_method", "ALL_GATHER").put("tp_size", 4).put("dp_size", 1);
+        config.putObject("mock.compute").putObject("forward").put("expression", "cpSize + tpSize + dpSize + cpEnabled");
         var parsed = load(root);
         var request = new org.flexlb.mock.compute.ForwardBatch.Request("r", 2, 0, 1, 0, 1, 50, java.util.List.of());
         var batch = new org.flexlb.mock.compute.ForwardBatch("b", java.util.List.of(
             new org.flexlb.mock.compute.ForwardBatch.Partition(0, java.util.List.of(request))));
         assertEquals(java.time.Duration.ofMillis(10), parsed.compute().plan(parsed.role(), parsed.id(), batch).planned());
-        assertEquals(4, parsed.effective().path("cp_size").intValue()); assertTrue(parsed.effective().path("cp_enabled").booleanValue());
-        config.putObject("compute").putObject("forward").put("expression", "2");
+        assertEquals(4, parsed.cpSize()); assertTrue(parsed.cpEnabled());
+        assertEquals("ALL_GATHER", parsed.effective().path("cp_rotate_method").asText());
+        config.putObject("mock.compute").putObject("forward").put("expression", "2");
         assertEquals(java.time.Duration.ofMillis(2), load(root).compute().plan(parsed.role(), parsed.id(), batch).planned());
     }
 
-    @Test void deferredSettingsAreValidatedAndNeverReportedAsEffective() throws Exception {
+    @Test void nativeParallelismSelectsFormulaConstantsWithoutSpawningRanks() throws Exception {
+        var root = root(); var config = (ObjectNode) root.path("component").path("config");
+        config.put("tp_size", 4).put("dp_size", 3);
+        assertEquals(3, load(root).dpSize());
+        assertFalse(load(root).cpEnabled()); assertEquals(1, load(root).cpSize());
+        for (String method : java.util.List.of("ALL_GATHER", "ALL_GATHER_WITH_OVERLAP", "alltoall")) {
+            config.put("cp_rotate_method", method);
+            assertTrue(load(root).cpEnabled()); assertEquals(4, load(root).cpSize());
+        }
+        // The special PREFILL_CP path is distinct from general CP in real PrefillCPConfig.
+        config.put("cp_rotate_method", "PREFILL_CP").put("prefill_cp_size", 2);
+        assertFalse(load(root).cpEnabled()); assertEquals(1, load(root).cpSize());
+        assertFalse(load(root).effective().has("prefill_cp_size"));
+        config.put("cp_rotate_method", "misspelled");
+        assertThrows(IllegalArgumentException.class, () -> load(root));
+    }
+
+    @Test void implementedSettingsValidateWhileUnsupportedSettingsDoNotBecomeEffective() throws Exception {
         var root = root(); var config = (ObjectNode) root.path("component").path("config");
         config.put("max_batch_tokens_without_cache", 50000).put("max_inited_kv_cache_streams", 128)
             .put("prefill_retry_times", 3).put("block_tree_device_evict_low_watermark_ratio", .82)
@@ -126,9 +145,8 @@ class RtpConfigTest {
         var effective = load(root).effective();
         assertEquals(50000, effective.path("max_batch_tokens_without_cache").intValue());
         assertEquals(128, effective.path("max_inited_kv_cache_streams").intValue());
-        assertFalse(effective.path("pending_config").has("max_inited_kv_cache_streams"));
-        assertEquals(3, effective.path("pending_config").path("prefill_retry_times").intValue());
-        assertEquals(0, effective.path("prefill_retry_times").intValue());
+        assertFalse(effective.has("pending_config"));
+        assertFalse(effective.has("prefill_retry_times"));
         assertFalse(effective.has("config"));
         config.put("max_inited_kv_cache_streams", -1); assertThrows(IllegalArgumentException.class, () -> load(root));
         config.put("max_inited_kv_cache_streams", 128).put("block_tree_device_evict_low_watermark_ratio", .99);
@@ -140,29 +158,47 @@ class RtpConfigTest {
         ((ObjectNode) root.path("component").path("config")).put("load_cache_timeout_ms", 5000);
         var effective = load(root).effective();
         assertFalse(effective.has("load_cache_timeout_ms"));
-        assertEquals(5000, effective.path("pending_config").path("load_cache_timeout_ms").intValue());
+        assertFalse(effective.has("pending_config"));
     }
 
-    @Test void rejectsTyposRemovedKnobsAndSettingsCopiedToTheWrongRole() throws Exception {
-        for (String key : java.util.List.of("max_context_batch_size", "max_generate_batch_szie", "decode_retry_times", "load_cache_timeout_ms")) {
+    @Test void mockSettingsRejectTyposCasingNullsAndCollisions() throws Exception {
+        for (String key : java.util.List.of("mock.compute.forward.expresson", "mock.Compute.forward.expression", "MOCK_COMPUTE_FORWARD_EXPRESSION", "mock.cache.memory_blocks")) {
             var root = root(); ((ObjectNode) root.path("component").path("config")).put(key, 10);
-            assertTrue(assertThrows(IllegalArgumentException.class, () -> load(root)).getMessage().contains(key));
+            assertThrows(IllegalArgumentException.class, () -> load(root));
         }
-        var root = root(); root.put("component_role", "decode");
-        ((ObjectNode) root.path("component").path("config")).put("prefill_retry_timeout_ms", 100);
+        var root = root(); var config = (ObjectNode) root.path("component").path("config");
+        config.put("mock.compute.forward.expression", "2");
         assertThrows(IllegalArgumentException.class, () -> load(root));
+        config.remove("mock.compute.forward.expression"); config.putNull("mock.cache.memory.blocks");
+        assertThrows(IllegalArgumentException.class, () -> load(root));
+    }
+
+    @Test void fileAndEnvironmentResolveToIdenticalModelsAndDefaults() throws Exception {
+        for (String role : java.util.List.of("prefill", "decode")) {
+            var root = JSON.<ObjectNode>valueToTree(RtpNodeTest.configuration(role));
+            var config = (ObjectNode) root.path("component").path("config");
+            config.put("cp_rotate_method", "ALL_GATHER").put("tp_size", 4).put("dp_size", 3);
+            config.put("enable_memory_cache", true).put("mock.cache.memory.blocks", 20);
+            var parsed = load(root);
+            var env = new java.util.HashMap<String, String>();
+            parsed.business().fields().forEachRemaining(entry -> env.put(entry.getKey().toUpperCase(java.util.Locale.ROOT).replace('.', '_'), entry.getValue().asText()));
+            env.put("CREDENTIAL", "never-record-this");
+            assertEquals(parsed.effective(), RtpConfig.fromEnvironment(parsed.id(), parsed.role(), env).effective());
+            assertEquals(32, parsed.maxGenerateBatchSize());
+            assertFalse(parsed.effective().has("max_generate_batch_size"));
+            env.put("MOCK_COMPUTE_UNKNOWN", "1");
+            assertThrows(IllegalArgumentException.class, () -> RtpConfig.fromEnvironment(parsed.id(), parsed.role(), env));
+        }
     }
     @Test void enablesHostAndReportsStorageSettingsAsEffective() throws Exception {
         var root = root(); var config = (ObjectNode) root.path("component").path("config");
-        config.put("enable_memory_cache", true).put("memory_cache_blocks", 32).put("memory_eviction_policy", "fifo");
+        config.put("enable_memory_cache", true).put("mock.cache.memory.blocks", 32).put("memory_eviction_policy", "fifo");
         var parsed = load(root); var effective = parsed.effective();
         assertEquals(32, parsed.hostBlocks()); assertEquals("fifo", effective.path("memory_eviction_policy").asText());
         assertTrue(effective.path("enable_memory_cache").booleanValue());
-        assertFalse(effective.path("pending_config").has("memory_cache_blocks"));
-        assertFalse(effective.path("pending_config").has("memory_eviction_policy"));
-        assertFalse(effective.path("pending_config").has("block_tree_device_evict_low_watermark_ratio"));
-        config.put("memory_cache_blocks", 0); assertThrows(IllegalArgumentException.class, () -> load(root));
-        config.put("memory_cache_blocks", 32).put("block_tree_memory_evict_low_watermark_ratio", .95);
+        assertEquals(32, effective.path("mock.cache.memory.blocks").intValue());
+        config.put("mock.cache.memory.blocks", 0); assertThrows(IllegalArgumentException.class, () -> load(root));
+        config.put("mock.cache.memory.blocks", 32).put("block_tree_memory_evict_low_watermark_ratio", .95);
         assertThrows(IllegalArgumentException.class, () -> load(root));
     }
 

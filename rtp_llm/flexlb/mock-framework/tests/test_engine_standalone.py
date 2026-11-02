@@ -10,17 +10,18 @@ from urllib.request import urlopen
 import pytest
 
 
+@pytest.mark.parametrize('source', ['file', 'env'])
 @pytest.mark.parametrize('role', ['prefill', 'decode', 'vit'])
-def test_one_engine_per_process_uses_the_common_jar_without_a_manager(tmp_path, role):
+def test_one_engine_per_process_uses_the_common_jar_without_a_manager(tmp_path, role, source):
     root = Path(__file__).resolve().parents[1]
     java = str(Path(os.environ['JAVA_HOME']) / 'bin/java')
     output = tmp_path / 'output'
     output.mkdir()
     config = tmp_path / 'config.json'
-    values = {'compute': {'forward': {'expression': '1'}}}
+    values = {'mock.compute': {'forward': {'expression': '1'}}}
     component = {'config': values}
     if role == 'vit':
-        values['hidden_size'] = 4
+        values['mock.vit.hidden.size'] = 4
     else:
         component['engine'] = 'rtp'
         values.update(seq_size_per_block=16, max_seq_len=4096, test_block_num=9, reserve_block_ratio=0)
@@ -34,6 +35,15 @@ def test_one_engine_per_process_uses_the_common_jar_without_a_manager(tmp_path, 
     env.update(MOCK_CONFIG_FILE=str(config), MOCK_OUTPUT_DIR=str(output), MOCK_READY_FILE=str(ready),
         MOCK_RPC_PORT=str(rpc_port), MOCK_CONTROL_PORT=str(control_port),
         MOCK_BIND_HOST='0.0.0.0', MOCK_ADVERTISE_HOST='127.0.0.1')
+    if source == 'env':
+        env.pop('MOCK_CONFIG_FILE')
+        env.update(ROLE_TYPE=role.upper(), MOCK_NODE_ID=role + '-0', MOCK_COMPUTE_FORWARD_EXPRESSION='1')
+        if role == 'vit':
+            env['MOCK_VIT_HIDDEN_SIZE'] = '4'
+        else:
+            env.update(SEQ_SIZE_PER_BLOCK='16', MAX_SEQ_LEN='4096', TEST_BLOCK_NUM='9', RESERVE_BLOCK_RATIO='0')
+    else:
+        env['MOCK_COMPUTE_FORWARD_EXPRESSION'] = 'invalid expression: file must ignore this'
     command = [java, '-XX:ActiveProcessorCount=2', '-jar',
         str(root / 'java/host/target/mock-engine-service-1.0-SNAPSHOT-all.jar')]
     with (output / 'process.log').open('w') as log:
@@ -47,6 +57,7 @@ def test_one_engine_per_process_uses_the_common_jar_without_a_manager(tmp_path, 
             endpoint = json.loads((output / 'endpoints.json').read_text())
             effective = json.loads((output / 'effective-config.json').read_text())
             assert effective['id'] == endpoint['id'] == role + '-0'
+            assert effective['mock.compute.forward.expression'] == '1'
             assert endpoint['role'] == role
             assert endpoint['rpc'] == f'127.0.0.1:{rpc_port}'
             assert endpoint['control'] == f'http://127.0.0.1:{control_port}'

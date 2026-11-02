@@ -97,6 +97,18 @@ def test_config_collisions(raw):
         expand_config(raw)
 
 
+def test_mock_nested_and_dotted_input_share_one_namespace():
+    nested = {'mock': {'compute': {'forward': {'expression': '1'}, 'cp': {'size': 4}}}}
+    mixed = {'mock.compute': {'forward.expression': '1'}, 'mock.compute.cp.size': 4}
+    assert expand_config(nested) == expand_config(mixed)
+    for raw in (
+        {'mock.compute': {'forward': {'expression': '1'}}, 'mock.compute.forward.expression': '2'},
+        {'mock.compute.forward.expression': '1', 'mock': {'compute': {'forward': {'expression': '2'}}}},
+    ):
+        with pytest.raises(ConfigError, match='collision'):
+            expand_config(raw)
+
+
 def test_native_payload_and_duplicate_keys(case_data, compile_data):
     assert expand_config({'raw_json': {'original.key': 'untouched'}}) == {'raw_json': {'original.key': 'untouched'}}
     case_data['environment']['master']['config']['FLEXLB_CONFIG'] = '{"scheduler":{},"scheduler":{}}'
@@ -109,7 +121,7 @@ def test_component_config_file_matches_inline_config_and_resolves_from_case_dire
         role, case_data, compile_data, tmp_path, monkeypatch):
     import yaml
     if role not in case_data['environment']:
-        case_data['environment'][role] = {'config': {'compute.forward.expression': '1'}}
+        case_data['environment'][role] = {'config': {'mock.compute.forward.expression': '1'}}
         if role == 'decode':
             case_data['environment'][role]['engine'] = 'rtp'
     expected = compile_data(case_data).environment

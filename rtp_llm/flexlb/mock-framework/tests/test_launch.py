@@ -95,7 +95,7 @@ def test_cli_generates_a_readable_launch_file_and_refuses_overwrite(case, artifa
 def test_vision_uses_the_same_mixed_host_without_a_backend_tag(case, artifacts):
     framework, java, prometheus = artifacts
     environment = dict(case.environment)
-    environment['vit'] = {'deployment': {'replicas': 1}, 'config': {'compute': {'forward': {'expression': '1'}}}}
+    environment['vit'] = {'deployment': {'replicas': 1}, 'config': {'mock.compute': {'forward': {'expression': '1'}}}}
     case = replace(case, environment=environment)
     launch = local_launch(case, java, prometheus, framework=framework)
     assert launch['components']['vit'] == launch['components']['prefill']

@@ -8,14 +8,16 @@ import java.util.concurrent.CountDownLatch;
 public final class EngineMain {
     public static void main(String[] args) throws Exception {
         if (args.length != 0) throw new IllegalArgumentException("Use instance configuration variables");
-        Path configuration = Path.of(required("MOCK_CONFIG_FILE"));
+        String configuration = System.getenv("MOCK_CONFIG_FILE");
         Path output = Path.of(required("MOCK_OUTPUT_DIR"));
         Path ready = Path.of(required("MOCK_READY_FILE"));
         int rpcPort = port("MOCK_RPC_PORT"), controlPort = port("MOCK_CONTROL_PORT");
         if (rpcPort != 0 && rpcPort == controlPort)
             throw new IllegalArgumentException("RPC and control ports must differ");
         Files.createDirectories(output);
-        try (var node = EngineInstances.start(configuration, output, rpcPort, controlPort)) {
+        try (var node = configuration == null
+                ? EngineInstances.startEnvironment(System.getenv(), output, rpcPort, controlPort)
+                : EngineInstances.start(Path.of(configuration), output, rpcPort, controlPort)) {
             var hook = new Thread(() -> {
                 try { node.close(); } finally { deleteReady(ready); }
             }, "engine-shutdown");
