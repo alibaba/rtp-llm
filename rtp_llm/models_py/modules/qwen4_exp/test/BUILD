@@ -268,6 +268,12 @@ qwen4_test(
 )
 
 qwen4_test(
+    name = "qsa_tma_prefill_test",
+    src = "qsa/tma_prefill_test.py",
+    gpu = "RTX_5000_PRO_CU13",
+)
+
+qwen4_test(
     name = "sparse_gqa_impl_test",
     src = "qsa/sparse_gqa_impl_test.py",
     gpu = "L20_CU13",

@@ -601,6 +601,9 @@ class SparseGqaFmhaImpl(FMHAImplBase):
         from rtp_llm.models_py.modules.qwen4_exp.qsa.sparse_fmha import (
             sparse_prefill_attn,
         )
+        from rtp_llm.models_py.modules.qwen4_exp.qsa.tma_prefill import (
+            try_causal_qsa_prefill,
+        )
 
         tokens = int(qkv.shape[0])
         q, k, v = torch.split(qkv, [self.q_width, self.kv_width, self.kv_width], dim=-1)
@@ -637,16 +640,26 @@ class SparseGqaFmhaImpl(FMHAImplBase):
             seq_q = q[offset:end].reshape(1, seq_len, self.head_num, self.head_dim)
             seq_k = k[offset:end].reshape(1, seq_len, self.kv_head_num, self.head_dim)
             seq_v = v[offset:end].reshape(1, seq_len, self.kv_head_num, self.head_dim)
-            seq_out = sparse_prefill_attn(
-                seq_q.transpose(1, 2).contiguous(),
-                seq_k.transpose(1, 2).contiguous(),
-                seq_v.transpose(1, 2).contiguous(),
-                selected_indices[offset:end].unsqueeze(0).contiguous(),
-                **validation_kwargs,
-            )
+            seq_q = seq_q.transpose(1, 2)
+            seq_k = seq_k.transpose(1, 2)
+            seq_v = seq_v.transpose(1, 2)
+            seq_selected = selected_indices[offset:end].unsqueeze(0).contiguous()
+            seq_out = None
+            # Together with the 2051-column selection, 512 scored blocks
+            # identify the four-token compression layout.
+            if trusted_selected and self.attn_configs.indexer_topk == 512:
+                seq_out = try_causal_qsa_prefill(seq_q, seq_k, seq_v, seq_selected)
+            if seq_out is None:
+                seq_out = sparse_prefill_attn(
+                    seq_q.contiguous(),
+                    seq_k.contiguous(),
+                    seq_v.contiguous(),
+                    seq_selected,
+                    **validation_kwargs,
+                )
             outputs.append(seq_out.transpose(1, 2).reshape(seq_len, self.q_width))
             offset = end
-        output = torch.cat(outputs, dim=0)
+        output = outputs[0] if len(outputs) == 1 else torch.cat(outputs, dim=0)
         if uses_stored_selection:
             self._selected_indices = None
         return output
