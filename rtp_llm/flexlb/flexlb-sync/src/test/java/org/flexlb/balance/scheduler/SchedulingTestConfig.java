@@ -13,7 +13,8 @@ import java.util.EnumSet;
 /** Test-only builders for the public scheduler and dispatcher variants. */
 public final class SchedulingTestConfig {
 
-    private SchedulingTestConfig() {}
+    private SchedulingTestConfig() {
+    }
 
     public static FlexlbConfig batchConfig() {
         FlexlbConfig config = newConfig();
@@ -23,10 +24,9 @@ public final class SchedulingTestConfig {
 
     public static SchedulerConfig usePriorityQueue(FlexlbConfig config) {
         SchedulerConfig queue = activeQueueOrNew(config);
-        QueueOrderingConfig priority =
-                queue.getOrdering().getType() == QueueOrderingConfig.Type.PRIORITY
-                        ? queue.getOrdering()
-                        : QueueOrderingConfig.priority();
+        QueueOrderingConfig priority = queue.getOrdering().getType()
+                == QueueOrderingConfig.Type.PRIORITY
+                ? queue.getOrdering() : QueueOrderingConfig.priority();
         queue.setOrdering(priority);
         config.setScheduler(queue);
         return queue;
@@ -47,7 +47,8 @@ public final class SchedulingTestConfig {
 
     public static DecisionPolicyConfig useFixedWindowDecision(FlexlbConfig config) {
         SchedulerConfig queue = activeQueueOrNew(config);
-        if (queue.getDecision().getType() == DecisionPolicyConfig.Type.FIXED_WINDOW) {
+        if (queue.getDecision().getType()
+                == DecisionPolicyConfig.Type.FIXED_WINDOW) {
             return queue.getDecision();
         }
         DecisionPolicyConfig fixedWindow = new DecisionPolicyConfig();
@@ -69,7 +70,8 @@ public final class SchedulingTestConfig {
 
     public static DispatcherConfig useNonBatchDispatcher(FlexlbConfig config) {
         configureRequiredValues(config);
-        if (config.getDispatcher().getType() == DispatcherConfig.Type.NON_BATCH) {
+        if (config.getDispatcher().getType()
+                == DispatcherConfig.Type.NON_BATCH) {
             return config.getDispatcher();
         }
         DispatcherConfig nonBatch = DispatcherConfig.nonBatch();
@@ -89,20 +91,18 @@ public final class SchedulingTestConfig {
 
     public static void allowVictim(FlexlbConfig config, VictimStage stage) {
         PreemptionConfig preemption = preemption(config);
-        EnumSet<VictimStage> stages =
-                preemption.getAllowedVictimStages().isEmpty()
-                        ? EnumSet.noneOf(VictimStage.class)
-                        : EnumSet.copyOf(preemption.getAllowedVictimStages());
+        EnumSet<VictimStage> stages = preemption.getAllowedVictimStages().isEmpty()
+                ? EnumSet.noneOf(VictimStage.class)
+                : EnumSet.copyOf(preemption.getAllowedVictimStages());
         stages.add(stage);
         preemption.setAllowedVictimStages(stages);
     }
 
     public static void disallowVictim(FlexlbConfig config, VictimStage stage) {
         PreemptionConfig preemption = preemption(config);
-        EnumSet<VictimStage> stages =
-                preemption.getAllowedVictimStages().isEmpty()
-                        ? EnumSet.noneOf(VictimStage.class)
-                        : EnumSet.copyOf(preemption.getAllowedVictimStages());
+        EnumSet<VictimStage> stages = preemption.getAllowedVictimStages().isEmpty()
+                ? EnumSet.noneOf(VictimStage.class)
+                : EnumSet.copyOf(preemption.getAllowedVictimStages());
         stages.remove(stage);
         preemption.setAllowedVictimStages(stages);
     }

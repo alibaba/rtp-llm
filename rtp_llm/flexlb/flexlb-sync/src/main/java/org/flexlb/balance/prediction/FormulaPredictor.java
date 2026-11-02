@@ -25,7 +25,8 @@ import org.slf4j.LoggerFactory;
  * batch completion. This immutable implementation records the sample without
  * replacing its evaluator.
  */
-public class FormulaPredictor implements PrefillTimePredictor, PrefillTimePredictor.Evaluator {
+public class FormulaPredictor
+        implements PrefillTimePredictor, PrefillTimePredictor.Evaluator {
 
     private static final Logger logger = LoggerFactory.getLogger("syncLogger");
     private final String formulaIdentity;
@@ -37,7 +38,8 @@ public class FormulaPredictor implements PrefillTimePredictor, PrefillTimePredic
      * @param formulaString the cost formula expression
      */
     public FormulaPredictor(String formulaString) {
-        this.formulaIdentity = java.util.Objects.requireNonNull(formulaString, "formulaString");
+        this.formulaIdentity = java.util.Objects.requireNonNull(
+                formulaString, "formulaString");
         this.formula = PrefillTimeFormula.parse(formulaString);
         logger.trace("formula predictor created");
     }
@@ -55,7 +57,8 @@ public class FormulaPredictor implements PrefillTimePredictor, PrefillTimePredic
     @Override
     public long estimateMs(long totalTokens, long hitTokens) {
         PrefillTimeVariableBindings.EvaluationVariables vars =
-                PrefillTimeVariableBindings.singleRequestVariables(totalTokens, hitTokens);
+                PrefillTimeVariableBindings.singleRequestVariables(
+                        totalTokens, hitTokens);
         return formula.evaluate(vars.topLevelVars(), vars.itemVars());
     }
 
@@ -66,7 +69,8 @@ public class FormulaPredictor implements PrefillTimePredictor, PrefillTimePredic
         }
         PrefillTimeVariableBindings.EvaluationVariables vars =
                 PrefillTimeVariableBindings.batchVariables(features);
-        return formula.evaluateAsDouble(vars.topLevelVars(), vars.itemVars());
+        return formula.evaluateAsDouble(
+                vars.topLevelVars(), vars.itemVars());
     }
 
     @Override
@@ -82,12 +86,10 @@ public class FormulaPredictor implements PrefillTimePredictor, PrefillTimePredic
     }
 
     @Override
-    public LearningResult learn(PrefillBatchFeatures features, long predictedMs, long actualMs) {
-        logger.debug(
-                "learn sample: batchSize={} predictedMs={} actualMs={}",
-                features != null ? features.batchSize() : 0,
-                predictedMs,
-                actualMs);
+    public LearningResult learn(
+            PrefillBatchFeatures features, long predictedMs, long actualMs) {
+        logger.debug("learn sample: batchSize={} predictedMs={} actualMs={}",
+                features != null ? features.batchSize() : 0, predictedMs, actualMs);
         return LearningResult.MODEL_UNCHANGED;
     }
 }

@@ -19,8 +19,7 @@ class SchedulingMetadataTest {
             }
         }
         for (int priority : new int[] {1, 49, 50, 100}) {
-            SchedulingMetadata header =
-                    SchedulingMetadata.of(0, String.valueOf(priority), 10_000L, 50);
+            SchedulingMetadata header = SchedulingMetadata.of(0, String.valueOf(priority), 10_000L, 50);
             assertEquals(priority, header.priority());
             assertEquals(SchedulingMetadata.PrioritySource.EXPLICIT, header.source());
             SchedulingMetadata proto = SchedulingMetadata.of(priority, "invalid", 10_000L, 50);
@@ -46,7 +45,7 @@ class SchedulingMetadataTest {
 
     @Test
     void missingPriorityUsesConfiguredDefault() {
-        for (String header : new String[] {null, "", "   "}) {
+        for (String header : new String[]{null, "", "   "}) {
             SchedulingMetadata metadata = SchedulingMetadata.of(0, header, 10_000L, 60);
 
             assertEquals(60, metadata.priority());
@@ -69,12 +68,10 @@ class SchedulingMetadataTest {
 
     @Test
     void nonPositiveExpirationIsRejected() {
-        for (long expiresAtMs : new long[] {0L, -1L}) {
-            assertThrows(
-                    IllegalArgumentException.class,
+        for (long expiresAtMs : new long[]{0L, -1L}) {
+            assertThrows(IllegalArgumentException.class,
                     () -> SchedulingMetadata.explicit(50, expiresAtMs));
-            assertThrows(
-                    IllegalArgumentException.class,
+            assertThrows(IllegalArgumentException.class,
                     () -> SchedulingMetadata.of(0, null, expiresAtMs, 60));
         }
     }

@@ -12,7 +12,6 @@ import java.util.Set;
 public final class PreemptionConfig {
 
     private Set<VictimStage> allowedVictimStages = EnumSet.allOf(VictimStage.class);
-
     /** Maximum wait for the Engine terminal after the cancellation ACK phase. */
     private long timeoutMs = 1000;
 

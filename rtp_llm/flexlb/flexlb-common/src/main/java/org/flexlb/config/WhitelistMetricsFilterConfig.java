@@ -24,7 +24,7 @@ import java.util.stream.Collectors;
  * Metric whitelist — the single configurable {@code flexlb.} exposure
  * filter: only {@code flexlb.} prefixed metrics matching the comma-separated
  * {@code flexlb.monitor.metric-whitelist} command-line property are
- * registered/reported, so deployments (e.g. the Mock framework) can
+ * registered/reported, so deployments (e.g. the online_eval harness) can
  * trim the exposition surface down to exactly the series their collector
  * consumes.
  *
@@ -93,13 +93,12 @@ public class WhitelistMetricsFilterConfig {
 
     public WhitelistMetricsFilterConfig(
             @Value("${flexlb.monitor.metric-whitelist:" + DEFAULT_METRIC_WHITELIST + "}")
-                    String metricWhitelist) {
+            String metricWhitelist) {
         this.allowedMetrics = new PrefixAllowSet(parseWhitelist(metricWhitelist));
         if (this.allowedMetrics.isEmpty()) {
-            log.warn(
-                    "flexlb.monitor.metric-whitelist is empty/blank: denying every "
-                            + "flexlb.* metric (fail-safe; configure a comma-separated prefix "
-                            + "list via --flexlb.monitor.metric-whitelist)");
+            log.warn("flexlb.monitor.metric-whitelist is empty/blank: denying every "
+                    + "flexlb.* metric (fail-safe; configure a comma-separated prefix "
+                    + "list via --flexlb.monitor.metric-whitelist)");
         }
     }
 
@@ -148,8 +147,7 @@ public class WhitelistMetricsFilterConfig {
                     return MeterFilterReply.NEUTRAL;
                 }
                 return allowedMetrics.contains(name.substring(METRIC_PREFIX.length()))
-                        ? MeterFilterReply.NEUTRAL
-                        : MeterFilterReply.DENY;
+                        ? MeterFilterReply.NEUTRAL : MeterFilterReply.DENY;
             }
         };
     }

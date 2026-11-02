@@ -1,5 +1,6 @@
 package org.flexlb.balance.endpoint;
 
+import org.flexlb.testfixture.WorkerStatusTestFixtures;
 import org.flexlb.balance.delivery.CapacityBoundary;
 import org.flexlb.balance.delivery.DeliveryMetrics;
 import org.flexlb.balance.delivery.DeliveryResult;
@@ -9,9 +10,10 @@ import org.flexlb.balance.scheduler.EndpointEventProjector;
 import org.flexlb.balance.scheduler.RequestRegistry;
 import org.flexlb.balance.scheduler.RequestSlot.DeliveryClaim;
 import org.flexlb.balance.scheduler.RouteDeliveryStrategy;
+import org.flexlb.balance.scheduler.RequestExecution;
 import org.flexlb.balance.scheduler.ScheduledRequest;
 import org.flexlb.dao.master.WorkerStatus;
-import org.flexlb.dao.master.WorkerStatusResponse;
+import org.flexlb.testfixture.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
 
 import java.util.ArrayList;
@@ -21,51 +23,67 @@ import java.util.concurrent.CopyOnWriteArrayList;
 /** Shared fixtures which exercise only the frozen endpoint-facing ports. */
 public final class EndpointTestSupport {
 
-    private EndpointTestSupport() {}
+    private EndpointTestSupport() {
+    }
 
     static EndpointEventProjector noopEventSink() {
         return org.mockito.Mockito.mock(EndpointEventProjector.class);
     }
 
-    static WorkerStatus workerStatus(RoleType role, String ip, int port, int grpcPort) {
-        return WorkerStatus.createDiscovered(role, null, ip, port, grpcPort, null);
+    static WorkerStatus workerStatus(
+            RoleType role,
+            String ip,
+            int port,
+            int grpcPort) {
+        return WorkerStatusTestFixtures.readyForScheduling(WorkerStatus.createDiscovered(
+                role, null, ip, port, grpcPort, null));
     }
 
     static WorkerStatus workerStatus(
-            RoleType role, String group, String ip, int port, int grpcPort, String site) {
-        return WorkerStatus.createDiscovered(role, group, ip, port, grpcPort, site);
+            RoleType role,
+            String group,
+            String ip,
+            int port,
+            int grpcPort,
+            String site) {
+        return WorkerStatusTestFixtures.readyForScheduling(WorkerStatus.createDiscovered(
+                role, group, ip, port, grpcPort, site));
     }
 
-    static Runnable applyStatus(WorkerEndpoint endpoint, WorkerStatusResponse response) {
+    static Runnable applyStatus(
+            WorkerEndpoint endpoint,
+            WorkerStatusResponse response) {
         WorkerStatus status = endpoint.getStatus();
         prepareResponse(status, response);
         status.lock.lock();
         try {
-            WorkerStatus.PreparedStatus prepared =
-                    status.prepareNewStatus(status.freezeStatusResponse(response));
-            Runnable projection = endpoint.applyPreparedStatus(status, prepared);
-            status.recordSuccessfulPoll(response.isAlive());
+            WorkerStatus.PreparedStatus prepared = WorkerStatusTestFixtures.prepare(status, WorkerStatusTestFixtures.observation(status, response));
+            Runnable projection =
+                    endpoint.applyPreparedStatus(status, prepared);
             return projection;
         } finally {
             status.lock.unlock();
         }
     }
 
-    static void publishStatus(WorkerStatus status, WorkerStatusResponse response) {
+    static void publishStatus(
+            WorkerStatus status,
+            WorkerStatusResponse response) {
         prepareResponse(status, response);
         status.lock.lock();
         try {
-            WorkerStatus.PreparedStatus prepared =
-                    status.prepareNewStatus(status.freezeStatusResponse(response));
+            WorkerStatus.PreparedStatus prepared = WorkerStatusTestFixtures.prepare(status, WorkerStatusTestFixtures.observation(status, response));
             status.publishPreparedStatus(prepared);
-            status.recordSuccessfulPoll(response.isAlive());
         } finally {
             status.lock.unlock();
         }
     }
 
     static WorkerEndpoint publishEndpoint(
-            EndpointRegistry registry, RoleType role, String address, WorkerStatus status) {
+            EndpointRegistry registry,
+            RoleType role,
+            String address,
+            WorkerStatus status) {
         WorkerStatusResponse response = new WorkerStatusResponse();
         response.setRole(role);
         response.setAlive(true);
@@ -83,31 +101,36 @@ public final class EndpointTestSupport {
         prepareResponse(status, response);
         status.lock.lock();
         try {
-            WorkerStatus.PreparedStatus prepared =
-                    status.prepareNewStatus(status.freezeStatusResponse(response));
-            return registry.publishPreparedEndpoint(address, status, prepared).endpoint();
+            WorkerStatus.PreparedStatus prepared = WorkerStatusTestFixtures.prepare(status, WorkerStatusTestFixtures.observation(status, response));
+            return registry.publishPreparedEndpoint(
+                    address, status, prepared).endpoint();
         } finally {
             status.lock.unlock();
         }
     }
 
-    private static void prepareResponse(WorkerStatus status, WorkerStatusResponse response) {
+    private static void prepareResponse(
+            WorkerStatus status,
+            WorkerStatusResponse response) {
         // This helper models a successful status poll for an active generation.
         // Retirement tests must exercise the explicit dead-status path instead.
         response.setAlive(true);
         if (response.getRole() == null) {
             response.setRole(status.getRole());
         }
-        long committedVersion = status.appliedStatusCursor().statusVersion();
+        long committedVersion =
+                status.appliedStatusCursor().statusVersion();
         Long responseVersion = response.getStatusVersion();
         if (responseVersion == null
                 || responseVersion <= 0L
                 || responseVersion <= committedVersion) {
-            response.setStatusVersion(Math.max(1L, committedVersion + 1L));
+            response.setStatusVersion(Math.max(
+                    1L, committedVersion + 1L));
         }
         if (response.getLatestFinishedVersion() == null) {
             response.setLatestFinishedVersion(
-                    status.appliedStatusCursor().latestFinishedTaskVersion());
+                    status.appliedStatusCursor()
+                            .latestFinishedTaskVersion());
         }
     }
 
@@ -116,38 +139,40 @@ public final class EndpointTestSupport {
     }
 
     static DeliveryStrategy routeStrategy(TestRequestRuntime runtime) {
-        RouteDeliveryStrategy route = new RouteDeliveryStrategy(runtime.requests(), NOOP_TELEMETRY);
-        DeliveryStrategy delivery = org.mockito.Mockito.mock(DeliveryStrategy.class);
-        org.mockito.Mockito.when(delivery.projectionPolicy()).thenReturn(route.projectionPolicy());
-        org.mockito.Mockito.when(
-                        delivery.projectGroupDurationMs(
-                                org.mockito.Mockito.anyList(), org.mockito.Mockito.any()))
-                .thenAnswer(
-                        invocation ->
-                                route.projectGroupDurationMs(
-                                        invocation.getArgument(0), invocation.getArgument(1)));
-        org.mockito.Mockito.when(
-                        delivery.prepare(
-                                org.mockito.Mockito.anyList(),
-                                org.mockito.Mockito.any(),
-                                org.mockito.Mockito.any()))
-                .thenAnswer(
-                        invocation -> {
-                            List<ScheduledRequest> candidates = invocation.getArgument(0);
-                            DeliveryStrategy.Transaction transaction =
-                                    org.mockito.Mockito.mock(DeliveryStrategy.Transaction.class);
-                            org.mockito.Mockito.when(transaction.items()).thenReturn(List.of());
-                            org.mockito.Mockito.when(transaction.blockedItem())
-                                    .thenReturn(candidates.getFirst());
-                            org.mockito.Mockito.when(transaction.blockedResult())
-                                    .thenReturn(PARKED_BOUNDARY);
-                            return transaction;
-                        });
+        RouteDeliveryStrategy route = new RouteDeliveryStrategy(
+                runtime.requests(), NOOP_TELEMETRY);
+        DeliveryStrategy delivery = org.mockito.Mockito.mock(
+                DeliveryStrategy.class);
+        org.mockito.Mockito.when(delivery.projectionPolicy())
+                .thenReturn(route.projectionPolicy());
+        org.mockito.Mockito.when(delivery.projectGroupDurationMs(
+                        org.mockito.Mockito.anyList(),
+                        org.mockito.Mockito.any()))
+                .thenAnswer(invocation -> route.projectGroupDurationMs(
+                        invocation.getArgument(0), invocation.getArgument(1)));
+        org.mockito.Mockito.when(delivery.prepare(
+                        org.mockito.Mockito.anyList(),
+                        org.mockito.Mockito.any(),
+                        org.mockito.Mockito.any()))
+                .thenAnswer(invocation -> {
+                    List<ScheduledRequest> candidates = invocation.getArgument(0);
+                    DeliveryStrategy.Transaction transaction =
+                            org.mockito.Mockito.mock(
+                                    DeliveryStrategy.Transaction.class);
+                    org.mockito.Mockito.when(transaction.items())
+                            .thenReturn(List.of());
+                    org.mockito.Mockito.when(transaction.blockedItem())
+                            .thenReturn(candidates.getFirst());
+                    org.mockito.Mockito.when(transaction.blockedResult())
+                            .thenReturn(PARKED_BOUNDARY);
+                    return transaction;
+                });
         return delivery;
     }
 
     static DeliveryStrategy liveRouteStrategy(TestRequestRuntime runtime) {
-        return new RouteDeliveryStrategy(runtime.requests(), NOOP_TELEMETRY);
+        return new RouteDeliveryStrategy(
+                runtime.requests(), NOOP_TELEMETRY);
     }
 
     private static final CapacityBoundary PARKED_BOUNDARY =
@@ -159,16 +184,17 @@ public final class EndpointTestSupport {
                         }
 
                         @Override
-                        public void addListener(Runnable listener) {}
+                        public void addListener(Runnable listener) {
+                        }
 
                         @Override
-                        public void removeListener(Runnable listener) {}
+                        public void removeListener(Runnable listener) {
+                        }
                     },
                     new RouteProjection.AdmissionBlockSemantics(
                             "test delivery parked",
                             RouteProjection.AfterProbeAdmission.BLOCKED,
-                            "test delivery parked",
-                            RoleType.PREFILL));
+                            "test delivery parked"));
 
     static boolean offer(PrefillEndpoint endpoint, ScheduledRequest item) {
         try (WorkerEndpoint.GenerationPin pin = endpoint.tryPinGeneration()) {
@@ -192,9 +218,12 @@ public final class EndpointTestSupport {
     static void commitUnqueued(PrefillEndpoint endpoint, long requestId, long predictedMs) {
         ScheduledRequest item = org.mockito.Mockito.mock(ScheduledRequest.class);
         org.mockito.Mockito.when(item.requestId()).thenReturn(requestId);
+        RequestExecution execution = org.mockito.Mockito.mock(RequestExecution.class);
+        org.mockito.Mockito.when(execution.requestId()).thenReturn(requestId);
+        org.mockito.Mockito.when(item.execution()).thenReturn(execution);
         try (var reservation = reserveUnqueued(endpoint, item, predictedMs);
-                var commit = endpoint.tryBeginRouteCommitAdmission();
-                var handoff = commit.commit(List.of(item), List.of(reservation))) {
+             var commit = endpoint.tryBeginRouteCommitAdmission();
+             var handoff = commit.commit(List.of(item), List.of(reservation))) {
             // The endpoint ledger owns this request until authoritative termination.
         }
     }
@@ -208,12 +237,14 @@ public final class EndpointTestSupport {
             throw new IllegalArgumentException("batch requires at least one item");
         }
         List<ScheduledRequest> items = List.copyOf(exactItems);
-        PrefillState.ReservationResult<PrefillState.BatchReservation> result =
-                endpoint.reserveBatch(items.get(0), batchId, Integer.MAX_VALUE);
+        PrefillState.ReservationResult<PrefillState.BatchReservation> result = endpoint.reserveBatch(
+                items.get(0), batchId, Integer.MAX_VALUE);
         if (result.status() != PrefillState.CapacityStatus.ACQUIRED) {
-            throw new IllegalStateException("batch reservation rejected: " + result.status());
+            throw new IllegalStateException(
+                    "batch reservation rejected: " + result.status());
         }
-        try (PrefillState.BatchReservation reservation = result.reservation()) {
+        try (PrefillState.BatchReservation reservation =
+                     result.reservation()) {
             return reservation.commit(items, predictedMs);
         }
     }
@@ -226,69 +257,54 @@ public final class EndpointTestSupport {
             throw new IllegalArgumentException("route group requires an item");
         }
         List<ScheduledRequest> items = List.copyOf(exactItems);
-        List<PrefillState.RouteReservation> reservations = new ArrayList<>(items.size());
-        boolean committed = false;
-        try {
-            for (ScheduledRequest item : items) {
-                PrefillState.ReservationResult<PrefillState.RouteReservation> result =
-                        endpoint.reserveRouteOwnership(item, predictedMs);
-                if (result.status() != PrefillState.CapacityStatus.ACQUIRED) {
-                    throw new IllegalStateException(
-                            "route reservation rejected: " + result.status());
+        List<PrefillState.RouteReservation> reservations =
+                new ArrayList<>(items.size());
+        PrefillEndpoint.RouteCommitAdmission admission = endpoint.tryBeginRouteCommitAdmission();
+        if (admission == null) {
+            throw new IllegalStateException("route endpoint retired");
+        }
+        try (admission) {
+            try {
+                for (ScheduledRequest item : items) {
+                    var result = admission.reserve(item, predictedMs);
+                    if (result.status() != PrefillState.CapacityStatus.ACQUIRED) {
+                        throw new IllegalStateException("route reservation rejected: " + result.status());
+                    }
+                    reservations.add(result.reservation());
                 }
-                reservations.add(result.reservation());
-            }
-            PrefillEndpoint.RouteCommitAdmission admission =
-                    endpoint.tryBeginRouteCommitAdmission();
-            if (admission == null) {
-                throw new IllegalStateException("route endpoint retired");
-            }
-            PrefillState.CommittedHandoff handoff;
-            try (admission) {
-                handoff = admission.commit(items, reservations);
-            }
-            committed = true;
-            return List.of(handoff);
-        } finally {
-            if (!committed) {
-                for (int index = reservations.size() - 1; index >= 0; index--) {
-                    reservations.get(index).close();
-                }
+                return List.of(admission.commit(items, reservations));
+            } finally {
+                reservations.forEach(PrefillState.RouteReservation::close);
             }
         }
     }
 
-    static final DeliveryMetrics NOOP_TELEMETRY = org.mockito.Mockito.mock(DeliveryMetrics.class);
+    static final DeliveryMetrics NOOP_TELEMETRY =
+            org.mockito.Mockito.mock(DeliveryMetrics.class);
 
     static class TestRequestRuntime {
-        private final RequestRegistry requests = org.mockito.Mockito.mock(RequestRegistry.class);
+        private final RequestRegistry requests =
+                org.mockito.Mockito.mock(RequestRegistry.class);
         private final EndpointEventProjector events =
                 org.mockito.Mockito.mock(EndpointEventProjector.class);
-        private final List<PrefillRetirement> prefillRetirements = new CopyOnWriteArrayList<>();
-        private final List<ScheduledRequest> offerFailures = new CopyOnWriteArrayList<>();
-
+        private final List<PrefillRetirement> prefillRetirements =
+                new CopyOnWriteArrayList<>();
+        private final List<ScheduledRequest> offerFailures =
+                new CopyOnWriteArrayList<>();
         TestRequestRuntime() {
-            org.flexlb.balance.scheduler.DeliveryStrategyTestSupport.stubRouteDelivery(
-                    requests, this::onCompleted);
-            org.mockito.Mockito.doAnswer(
-                            invocation -> {
-                                onQueueOfferFailure(
-                                        invocation.getArgument(0), invocation.getArgument(1));
-                                return null;
-                            })
-                    .when(events)
-                    .onQueueOfferFailure(org.mockito.Mockito.any(), org.mockito.Mockito.any());
-            org.mockito.Mockito.doAnswer(
-                            invocation -> {
-                                prefillRetirements.add(
-                                        new PrefillRetirement(
-                                                invocation.getArgument(0),
-                                                invocation.getArgument(1)));
-                                return null;
-                            })
-                    .when(events)
-                    .onPrefillGenerationRetired(
-                            org.mockito.Mockito.any(), org.mockito.Mockito.anyList());
+            org.flexlb.balance.scheduler.DeliveryStrategyTestSupport.stubRouteDelivery(requests, this::onCompleted);
+            org.mockito.Mockito.doAnswer(invocation -> {
+                onQueueOfferFailure(
+                        invocation.getArgument(0), invocation.getArgument(1));
+                return null;
+            }).when(events).onQueueOfferFailure(
+                    org.mockito.Mockito.any(), org.mockito.Mockito.any());
+            org.mockito.Mockito.doAnswer(invocation -> {
+                prefillRetirements.add(new PrefillRetirement(
+                        invocation.getArgument(0), invocation.getArgument(1)));
+                return null;
+            }).when(events).onPrefillGenerationRetired(
+                    org.mockito.Mockito.any(), org.mockito.Mockito.anyList());
         }
 
         RequestRegistry requests() {
@@ -299,9 +315,14 @@ public final class EndpointTestSupport {
             return events;
         }
 
-        void onCompleted(DeliveryClaim claim, DeliveryResult result) {}
+        void onCompleted(
+                DeliveryClaim claim,
+                DeliveryResult result) {
+        }
 
-        void onQueueOfferFailure(ScheduledRequest item, Throwable error) {
+        void onQueueOfferFailure(
+                ScheduledRequest item,
+                Throwable error) {
             offerFailures.add(item);
         }
 
@@ -312,11 +333,15 @@ public final class EndpointTestSupport {
         List<ScheduledRequest> offerFailures() {
             return List.copyOf(offerFailures);
         }
+
     }
 
-    record PrefillRetirement(PrefillEndpoint endpoint, List<ScheduledRequest> ownedItems) {
+    record PrefillRetirement(
+            PrefillEndpoint endpoint,
+            List<RequestExecution> ownedItems) {
         PrefillRetirement {
             ownedItems = List.copyOf(ownedItems);
         }
     }
+
 }

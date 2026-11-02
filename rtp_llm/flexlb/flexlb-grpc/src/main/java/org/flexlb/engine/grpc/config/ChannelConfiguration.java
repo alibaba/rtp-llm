@@ -32,11 +32,11 @@ public class ChannelConfiguration {
         return new ThreadPoolExecutor(
                 config.getInternalRuntime().getGrpcClientExecutorThreads(),
                 config.getInternalRuntime().getGrpcClientExecutorThreads(),
-                5,
-                TimeUnit.MINUTES,
-                new LinkedBlockingQueue<>(
-                        config.getInternalRuntime().getGrpcClientExecutorQueueCapacity()),
-                new NamedThreadFactory("engine-grpc-client-executor"));
+                5, TimeUnit.MINUTES,
+                new LinkedBlockingQueue<>(config.getInternalRuntime().getGrpcClientExecutorQueueCapacity()),
+                new NamedThreadFactory("engine-grpc-client-executor"),
+                new GrpcCallbackCallerRunsPolicy()
+        );
     }
 
     /**
@@ -53,11 +53,11 @@ public class ChannelConfiguration {
         return new ThreadPoolExecutor(
                 16,
                 16,
-                5,
-                TimeUnit.MINUTES,
+                5, TimeUnit.MINUTES,
                 new LinkedBlockingQueue<>(2000),
                 new NamedThreadFactory("flexlb-forwarder-channel-executor"),
-                new ThreadPoolExecutor.AbortPolicy());
+                new GrpcCallbackCallerRunsPolicy()
+        );
     }
 
     @Bean
@@ -77,13 +77,15 @@ public class ChannelConfiguration {
                 SelectorProvider.provider(),
                 DefaultSelectStrategyFactory.INSTANCE,
                 RejectedExecutionHandlers.reject(),
-                PlatformDependent::newMpscQueue);
+                PlatformDependent::newMpscQueue
+        );
     }
 
     @Bean(destroyMethod = "")
     public EventLoopGroup grpcServerEventLoopGroup() {
         return new NioEventLoopGroup(
                 config.getInternalRuntime().getGrpcServerWorkerEventLoopThreads(),
-                new DefaultThreadFactory("grpc-server-elg"));
+                new DefaultThreadFactory("grpc-server-elg")
+        );
     }
 }

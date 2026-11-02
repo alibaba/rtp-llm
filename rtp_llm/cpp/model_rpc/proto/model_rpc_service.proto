@@ -165,6 +165,8 @@ message GenerateConfigPB {
     // Explicit target-prefill assertion. true requires max_new_tokens == 0 and cannot be combined with
     // return_prompt_logits. false/omitted does not change the legacy bare-zero behavior above.
     bool prefill_only = 76;
+    bool return_logprobs = 77;
+    uint32 top_logprobs = 78;
 }
 
 message MMPreprocessConfigPB {
@@ -193,9 +195,10 @@ message MultimodalInputsPB {
     bool support_rdma = 2;
     // Correlates frontend, ViT and content-inspection work.
     int64 request_id = 3;
-    V41RequestInputsPB v41_inputs = 5;
-    // Remaining request budget for typed prepared images (no URL configs).
+    // Remaining request budget for backend multimodal processing.
     int64 timeout_ms = 4;
+    reserved 5;
+    reserved "v41_inputs";
 }
 
 enum TensorDataTypePB {
@@ -269,34 +272,6 @@ message RequestInfoPB {
     TraceContextPB trace_context = 6;
 }
 
-message MultimodalTokenSpanPB {
-    int32 offset = 1;
-    int32 length = 2;
-}
-
-message MultimodalTokenLayoutPB {
-    reserved 1;
-    // In ViT output segment order, including all segments of a video.
-    repeated MultimodalTokenSpanPB spans = 2;
-}
-
-message V41ImageInputPB {
-    int32 start = 1;
-    int32 n_vit_h = 2;
-    int32 n_vit_w = 3;
-    TensorPB patches = 4;
-    repeated int32 types = 5;
-    string content_sha256 = 6;
-    string processor_identity = 7;
-}
-
-message V41RequestInputsPB {
-    int32 schema_version = 1;
-    repeated sint32 token_types = 2;
-    repeated bool image_mask = 3;
-    repeated V41ImageInputPB images = 4;
-}
-
 message GenerateInputPB {
     int64 request_id = 1;
     repeated int32 token_ids = 2;
@@ -311,9 +286,8 @@ message GenerateInputPB {
     // priority). Used as a metrics tag on engine-side TPS
     // reporting; never affects engine scheduling.
     int32 priority = 10;
-    // token_ids are already expanded when this field is present.
-    MultimodalTokenLayoutPB multimodal_token_layout = 11;
-    V41RequestInputsPB v41_inputs = 12;
+    reserved 11, 12;
+    reserved "multimodal_token_layout", "v41_inputs";
 }
 
 message AuxInfoPB {
@@ -349,6 +323,8 @@ message AuxInfoPB {
     int32 disk_reuse_len = 31;
     int32 prefill_disk_reuse_len = 32;
     int32 decode_disk_reuse_len = 33;
+    // Sticky once either MTP verification or updates exceed the budget three times consecutively.
+    bool xgrammar_update_timeout = 34;
 }
 
 message PromptLogitsOutputPB {
@@ -371,6 +347,14 @@ message FlattenOutputPB {
     PromptLogitsOutputPB prompt_logits = 9;
     // Output of the deployment-registered post-layers CustomHandler.
     TensorPB custom_output = 10;
+    TensorPB token_logprobs = 11;
+    TensorPB top_logprob_token_ids = 12;
+    TensorPB top_logprobs = 13;
+    // Per output, the compact logprob tensors describe
+    // output_ids[offset:offset + count].  Thinking/controller tokens before
+    // offset intentionally have no real probability row.
+    repeated int32 logprobs_offsets = 14;
+    repeated int32 logprobs_counts = 15;
 }
 
 message GenerateOutputsPB {
@@ -440,6 +424,22 @@ enum RemoteStage {
     PREFILL_COMPLETE = 3;
 }
 
+// Internal Prefill-to-Decode cache identity for one fully assembled
+// multimodal embedding segment. This deliberately lives on GenerateRequestPB,
+// not GenerateInputPB: model-specific image layout remains a backend concern
+// and cannot be supplied by a frontend request.
+message MultimodalCacheSpanPB {
+    int32 offset = 1;
+    repeated sint32 row_hashes = 2;
+}
+
+// An explicit producer assertion, sent only after the Prefill forward and KV
+// transfer succeed. The exclusive end excludes the first sampled token, whose
+// KV has not been computed. Message presence distinguishes unknown from zero.
+message PrefillKvHandoffPB {
+    int64 computed_kv_end = 1;
+}
+
 message GenerateRequestPB {
     RemoteStage stage = 1;
     int64 request_id = 2;
@@ -452,6 +452,8 @@ message GenerateRequestPB {
     repeated int32 position_ids = 9;
     TensorPB propose_probs = 10;
     TensorPB propose_hidden = 11;
+    repeated MultimodalCacheSpanPB multimodal_cache_spans = 12;
+    PrefillKvHandoffPB prefill_kv_handoff = 13;
 }
 
 // In the TP case, the decode master broadcasts to decode workers.
@@ -607,11 +609,6 @@ message CheckHealthResponsePB {
     string health = 1;
 }
 
-message UpdateEplbConfigRequestPB {
-    string mode = 1;
-    int32 update_time = 2;
-}
-
 enum TaskPhase {
     TASK_PHASE_PENDING = 0;
     TASK_PHASE_RECEIVED = 1;
@@ -650,6 +647,12 @@ message UpdateWeightsRequestPB {
     string method = 3;
 }
 
+enum KvCacheGroupModePB {
+    KV_CACHE_GROUP_MODE_UNSPECIFIED = 0;
+    KV_CACHE_GROUP_MODE_FULL_ATTENTION_ONLY = 1;
+    KV_CACHE_GROUP_MODE_WITH_MAMBA = 2;
+}
+
 message WorkerStatusPB {
     string role = 1;              // 字符串角色名，如 "PREFILL"，向后兼容
     // LocalRpcServer::GetWorkerStatus currently does not populate this field, so
@@ -678,6 +681,11 @@ message WorkerStatusPB {
     // avoid constructing a group that the Engine can never admit.
     int64 max_seq_len = 21;
     int64 max_batch_tokens_size = 22;
+    // ViT-owned, deduplicated media work: admitted queue + execution + publication.
+    // Absence means an old worker or an incomplete proxy snapshot, NOT zero load.
+    google.protobuf.Int64Value mm_inflight_inputs = 23;
+    // Keep field 25 aligned with FlexLB's WorkerStatusPB.
+    KvCacheGroupModePB kv_cache_group_mode = 25;
 }
 
 message EmbeddingInputPB {
@@ -732,6 +740,10 @@ message MemoryOperationRequestPB {
     repeated CopyItem copy_items = 1;
     CopyDirection copy_direction = 2;
     int64 timeout_ms = 3;
+    // Diagnostic identity only; absent on older peers. Never used for allocation or routing.
+    uint64 transfer_trace_id = 4;
+    int64 transfer_request_id = 5;
+    bool has_transfer_request_id = 6;
 }
 
 message MemoryOperationResponsePB {
@@ -839,6 +851,9 @@ enum RemoteOpType {
     REMOTE_OPERATION_UNSPECIFIED = 0;
     REMOTE_OPERATION_READ = 1;
     REMOTE_OPERATION_WRITE = 2;
+    REMOTE_OPERATION_REMOVE_CACHE = 3;
+    REMOTE_OPERATION_GET_LOCATIONS_BY_BACKEND = 4;
+    REMOTE_OPERATION_GET_HOST_CACHE_STATE = 5;
 }
 
 message RemoteBoolMasksTypePB { repeated bool values = 1; }
@@ -849,11 +864,35 @@ message RemoteBlockMaskPB {
     }
 }
 
+// The ordered incarnation list certifies that every member closed admission
+// and drained. It prevents an idle rank from exiting while a busy DP rank runs.
+message ShutdownRequestPB {
+    string          group_id          = 1;
+    repeated string drained_instances = 2;
+    bool            begin_shutdown    = 3;
+    int64           deadline_unix_ms  = 4;
+    // Optional release provenance. An empty instance id is the legacy protocol
+    // and does not imply that rank 0 (the scalar default) holds the certificate.
+    // A sender advertises only its own rank/incarnation, bound to this exact
+    // drained_instances vector. This is a trusted-worker protocol, not auth.
+    uint32 sender_rank        = 5;
+    string sender_instance_id = 6;
+}
+
+message ShutdownResponsePB {
+    bool            draining          = 1;
+    uint64 onflight = 2;
+    string instance_id = 3;
+    repeated string drained_instances = 4;
+    int64 deadline_unix_ms = 5;
+}
+
 message FunctionRequestPB {
     oneof request {
         MemoryOperationRequestPB mem_request = 1;
         RemoteOperationRequestPB remote_request = 2;
         P2PConnectorBroadcastTpRequestPB p2p_request = 3;
+        ShutdownRequestPB shutdown_request = 4;
     }
 }
 
@@ -868,6 +907,51 @@ message RemoteOperationRequestPB {
     repeated int32 block_ids = 4;
     repeated string uris = 5;
     repeated string group_tags = 6;
+    // Metadata operations are served by TP rank 0 for this backend's instance.
+    RemoteMetadataRequestPB metadata = 7;
+    // Remaining task budget for READ/WRITE; metadata operations keep their own policy.
+    int64 timeout_ms = 8;
+}
+
+message RemoteMetadataRequestPB {
+    // KVCM QueryType: 0=instance default, 1=batch, 2=prefix, 4=Mamba.
+    int32 query_type = 1;
+    repeated int64 block_keys = 2;
+    repeated int64 token_ids = 3;
+    RemoteBlockMaskPB block_mask = 4;
+    int32 backend_type = 5; // KVCM StorageType; one backend per request
+    repeated string location_spec_names = 6;
+    repeated string medium = 7;
+    // P2P-only host selection; newer KVCM SDKs use top_k_host_count plus L2.
+    int32 p2p_host_count = 8;
+}
+
+message RemoteLocationSpecPB {
+    string name = 1;
+    string uri = 2;
+}
+
+message RemoteCacheLocationPB {
+    repeated RemoteLocationSpecPB specs = 1;
+    int32 backend_type = 2;
+    int32 spec_size = 3;
+}
+
+message RemoteBackendKeyLocationsPB {
+    repeated RemoteCacheLocationPB locations = 1;
+}
+
+message RemoteHostCacheMatchPB {
+    string host_ip_port = 1;
+    int64 local = 2;
+    // Legacy SDK details. New SDKs do not provide or reconstruct these values.
+    int64 p2p_1_fetch = 3;
+    int64 p2p_1_total_match = 4;
+    // Presence distinguishes an unsupported global estimate from a real zero.
+    // This is the SDK's union-prefix estimate, not either legacy P2P metric.
+    oneof global_match {
+        int64 global = 5;
+    }
 }
 
 enum RemoteTransferStatusPB {
@@ -875,13 +959,25 @@ enum RemoteTransferStatusPB {
     REMOTE_TRANSFER_STATUS_SUCCESS = 1;
     REMOTE_TRANSFER_STATUS_FAILED = 2;
     REMOTE_TRANSFER_STATUS_TIMEOUT = 3;
+    // SDK failure/exception without proof that caller buffers are safe.
+    REMOTE_TRANSFER_STATUS_COMPLETION_UNKNOWN = 4;
+    // Explicit local-before-I/O rejection or SDK BUFFER_SAFE result. Unlike the
+    // legacy FAILED value, this status carries a buffer-lifetime guarantee.
+    REMOTE_TRANSFER_STATUS_FAILED_BUFFER_SAFE = 5;
 }
 
 message RemoteOperationResponsePB {
     RemoteBlockMaskPB succeed_block = 1;  // for read/write, TODO
     repeated string actual_uris = 2; // only for write
-    // Legacy workers return UNSPECIFIED on RPC success.
+    // Application-level result; UNSPECIFIED supplies no completion proof.
     RemoteTransferStatusPB transfer_status = 3;
+    repeated RemoteHostCacheMatchPB hosts = 4;
+    repeated RemoteBackendKeyLocationsPB backend_locations = 5;
+    // Caller-buffer proof for every READ/WRITE, independent of Decode publication.
+    // True means this worker submitted no payload I/O, or that all of its
+    // submitted payload I/O stopped accessing caller buffers. It does not prove
+    // a metadata commit or remote target drain. Absent/false remains unknown.
+    bool payload_buffer_safe = 6;
 }
 
 message FunctionResponsePB {
@@ -889,6 +985,7 @@ message FunctionResponsePB {
         MemoryOperationResponsePB mem_response = 1;
         RemoteOperationResponsePB remote_response = 2;
         P2PConnectorBroadcastTpResponsePB p2p_response = 3;
+        ShutdownResponsePB shutdown_response = 4;
     }
 }
 
@@ -984,7 +1081,6 @@ service RpcService {
     rpc RemoteFinishNew(RemoteFinishRequestPB) returns (EmptyPB);
 
     rpc CheckHealth(EmptyPB) returns (CheckHealthResponsePB);
-    rpc UpdateEplbConfig(UpdateEplbConfigRequestPB) returns (EmptyPB);
     rpc SetPause(EmptyPB) returns (EmptyPB);
     rpc SetRestart(EmptyPB) returns (EmptyPB);
     rpc SetLogLevel(SetLogLevelRequestPB) returns (EmptyPB);

@@ -32,18 +32,19 @@ public class EngineLocalView {
     /**
      * Custom ForkJoin thread pool for parallel computation
      */
-    private final ForkJoinPool customPool =
-            new ForkJoinPool(Math.min(Runtime.getRuntime().availableProcessors(), 8));
+    private final ForkJoinPool customPool = new ForkJoinPool(Math.min(Runtime.getRuntime().availableProcessors(), 8));
 
     /**
      * Cache metrics reporter
      */
-    @Autowired private CacheMetricsReporter cacheMetricsReporter;
+    @Autowired
+    private CacheMetricsReporter cacheMetricsReporter;
 
     /**
      * Dynamic sync interval manager
      */
-    @Autowired private DynamicCacheIntervalService dynamicIntervalManager;
+    @Autowired
+    private DynamicCacheIntervalService dynamicIntervalManager;
 
     /**
      * Calculate diff result
@@ -65,23 +66,17 @@ public class EngineLocalView {
         Set<Long> removedBlocks = ConcurrentHashMap.newKeySet(128);
 
         // Use custom ForkJoin thread pool to parallel compute added and removed cache blocks
-        ForkJoinTask<?> addedTask =
-                customPool.submit(
-                        () ->
-                                newCacheBlocks.parallelStream()
-                                        .filter(
-                                                blockCacheKey ->
-                                                        !oldCacheBlocks.contains(blockCacheKey))
-                                        .forEach(addedBlocks::add));
+        ForkJoinTask<?> addedTask = customPool.submit(() ->
+            newCacheBlocks.parallelStream()
+                 .filter(blockCacheKey -> !oldCacheBlocks.contains(blockCacheKey))
+                 .forEach(addedBlocks::add)
+        );
 
-        ForkJoinTask<?> removedTask =
-                customPool.submit(
-                        () ->
-                                oldCacheBlocks.parallelStream()
-                                        .filter(
-                                                blockCacheKey ->
-                                                        !newCacheBlocks.contains(blockCacheKey))
-                                        .forEach(removedBlocks::add));
+        ForkJoinTask<?> removedTask = customPool.submit(() ->
+            oldCacheBlocks.parallelStream()
+                .filter(blockCacheKey -> !newCacheBlocks.contains(blockCacheKey))
+                .forEach(removedBlocks::add)
+        );
 
         addedTask.join();
         removedTask.join();
@@ -93,11 +88,12 @@ public class EngineLocalView {
         dynamicIntervalManager.updateDiffStatistics(diffSize);
 
         return DiffResult.builder()
-                .engineIp(engineIPort)
-                .addedBlocks(addedBlocks)
-                .removedBlocks(removedBlocks)
-                .version("1.0.0")
-                .build();
+            .engineIp(engineIPort)
+            .addedBlocks(addedBlocks)
+            .removedBlocks(removedBlocks)
+            .version("1.0.0")
+            .build();
+
     }
 
     /**
@@ -108,14 +104,10 @@ public class EngineLocalView {
      */
     public void addOrUpdateCacheBlock(String engineIPort, Long blockCacheKey) {
         if (engineIPort == null || blockCacheKey == null) {
-            log.warn(
-                    "Invalid parameters: engineIPort={}, blockCacheKey={}",
-                    engineIPort,
-                    blockCacheKey);
+            log.warn("Invalid parameters: engineIPort={}, blockCacheKey={}", engineIPort, blockCacheKey);
             return;
         }
-        Set<Long> engineCache =
-                engineViews.computeIfAbsent(engineIPort, k -> ConcurrentHashMap.newKeySet());
+        Set<Long> engineCache = engineViews.computeIfAbsent(engineIPort, k -> ConcurrentHashMap.newKeySet());
 
         engineCache.add(blockCacheKey);
     }
@@ -148,7 +140,7 @@ public class EngineLocalView {
     }
 
     /**
-     * Remove all cache blocks of an engine
+     * Detach all cache blocks of an engine
      *
      * @param engineIPort Engine IP
      */
@@ -157,6 +149,8 @@ public class EngineLocalView {
             return;
         }
 
+        // Production retirement removes this view only after global cleanup
+        // succeeds, while holding this generation's cacheMutationLock.
         Set<Long> removed = engineViews.remove(engineIPort);
         // Warn if removal fails
         if (removed == null) {
@@ -168,6 +162,10 @@ public class EngineLocalView {
      * Get all cache block IDs of an engine
      *
      * @param engineIPort Engine IP
+     * <p>Returns a borrowed mutable set, not a snapshot. Callers iterating it
+     * must hold the owning generation's cacheMutationLock for the entire use.
+     * The global index lock does not protect writes to this local view.
+     *
      * @return Cache block ID set
      */
     public Set<Long> getEngineCacheBlocks(String engineIPort) {
@@ -185,6 +183,7 @@ public class EngineLocalView {
 
         engineViews.clear();
         log.info("Cleared engine local view");
+
     }
 
     public int size(String engineIpPort) {
@@ -200,4 +199,5 @@ public class EngineLocalView {
     public int getEngineViewsMapSize() {
         return engineViews.size();
     }
+
 }

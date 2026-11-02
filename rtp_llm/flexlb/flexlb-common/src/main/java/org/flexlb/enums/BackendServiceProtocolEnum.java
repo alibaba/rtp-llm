@@ -4,6 +4,7 @@ import lombok.Getter;
 
 @Getter
 public enum BackendServiceProtocolEnum {
+
     HTTP("http"),
 
     HTTPS("https"),

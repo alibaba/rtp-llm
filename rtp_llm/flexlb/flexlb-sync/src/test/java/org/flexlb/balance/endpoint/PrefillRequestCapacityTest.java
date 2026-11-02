@@ -1,10 +1,12 @@
 package org.flexlb.balance.endpoint;
 
+import org.flexlb.balance.scheduler.RequestExecution;
 import org.flexlb.balance.scheduler.ScheduledRequest;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.enums.PriorityPreemptionProgress;
 import org.flexlb.enums.TaskPhase;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.BeforeEach;
 
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -26,35 +28,77 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 class PrefillRequestCapacityTest {
+    private final WorkerStatus schedulingWorker = mock(WorkerStatus.class);
     private final ReentrantLock lock = new ReentrantLock();
-    private final PrefillState state =
-            new PrefillState(
-                    lock,
-                    PrefillActiveIndex.ordered(
-                            16, Comparator.comparingLong(ScheduledRequest::requestId)),
-                    () -> {});
+    private final PrefillState state = new PrefillState(lock,
+            PrefillActiveIndex.ordered(16, Comparator.comparingLong(ScheduledRequest::requestId)), () -> { });
+
+    @BeforeEach
+    void workerIsAvailable() {
+        when(schedulingWorker.isAvailableForScheduling()).thenReturn(true);
+    }
 
     @Test
-    void waitingPreparedAndCommittedRequestsShareOneCount() {
-        ScheduledRequest queued = item(1), immediate = item(2);
-        assertTrue(enqueue(queued, 2L));
-        var registration = reserve(immediate, 2L).reservation();
-        assertNotNull(registration);
-        assertEquals(2L, state.observedRequestCount());
-        assertFalse(enqueue(item(3), 2L));
-        assertEquals(PrefillState.CapacityStatus.CAPACITY_FULL, reserve(item(3), 2L).status());
-        try (var handoff = commit(immediate, registration)) {
-            assertEquals(2L, state.observedRequestCount());
+    void waitingDoesNotConsumeSlotsButPreparedAndCommittedRoutesDo() {
+        ScheduledRequest queued = item(1), immediate = item(2), next = item(3);
+        assertTrue(enqueue(queued, 0L));
+        assertTrue(enqueue(next, 0L));
+        var immediateLease = reserve(immediate, 2L).reservation();
+        assertNotNull(immediateLease);
+        var queuedLease = state.reserveRoute(queued, 10L, 2L).reservation();
+        assertNotNull(queuedLease);
+        assertFalse(state.routeAvailability(2L, schedulingWorker).isAvailable());
+        assertEquals(PrefillState.CapacityStatus.CAPACITY_FULL, state.reserveRoute(next, 10L, 2L).status());
+        assertEquals(PrefillState.CapacityStatus.CAPACITY_FULL, reserve(item(4), 2L).status());
+        try (var handoff = commit(immediate, immediateLease)) { }
+        immediateLease.close();
+        assertFalse(state.routeAvailability(2L, schedulingWorker).isAvailable(), "handoff/ACK cannot release inflight work");
+        assertTrue(state.terminalizeCommittedItem(immediate.execution()));
+        assertFalse(state.terminalizeCommittedItem(immediate.execution()));
+        assertTrue(state.routeAvailability(2L, schedulingWorker).isAvailable());
+        var nextLease = state.reserveRoute(next, 10L, 2L).reservation();
+        assertNotNull(nextLease);
+        queuedLease.close();
+        queuedLease.close();
+        assertTrue(state.routeAvailability(2L, schedulingWorker).isAvailable());
+        assertEquals(2L, state.observedRequestCount(), "rollback preserves queued ownership");
+        try (var retry = state.reserveRoute(queued, 10L, 2L).reservation()) {
+            assertNotNull(retry);
+            queuedLease.close();
+            assertFalse(state.routeAvailability(2L, schedulingWorker).isAvailable(), "stale lease cannot release the retry");
         }
-        registration.close();
-        assertEquals(
-                2L,
-                state.observedRequestCount(),
-                "ACK and capability closure cannot release Engine ownership");
-        assertTrue(state.terminalizeCommittedItem(immediate));
-        assertFalse(state.terminalizeCommittedItem(immediate));
-        assertTrue(enqueue(item(3), 2L));
-        assertEquals(2L, state.observedRequestCount());
+        nextLease.close();
+    }
+
+    @Test
+    void concurrentQueuedPreparationsCannotOversellOneSendSlot() throws Exception {
+        var queued = new ArrayList<ScheduledRequest>();
+        var leases = new ArrayList<PrefillState.RouteReservation>();
+        for (int id = 1; id <= 32; id++) {
+            ScheduledRequest request = item(id);
+            assertTrue(enqueue(request, 0L));
+            queued.add(request);
+        }
+        try (var executor = Executors.newFixedThreadPool(8)) {
+            var attempts = new ArrayList<Future<PrefillState.ReservationResult<PrefillState.RouteReservation>>>();
+            for (ScheduledRequest request : queued) {
+                attempts.add(executor.submit(() -> state.reserveRoute(request, 10L, 1L)));
+            }
+            for (var attempt : attempts) {
+                var result = attempt.get(5, TimeUnit.SECONDS);
+                if (result.status() == PrefillState.CapacityStatus.ACQUIRED) {
+                    leases.add(result.reservation());
+                } else {
+                    assertEquals(PrefillState.CapacityStatus.CAPACITY_FULL, result.status());
+                }
+            }
+            assertEquals(1, leases.size());
+            assertEquals(32L, state.observedRequestCount());
+            leases.forEach(PrefillState.RouteReservation::close);
+            assertTrue(state.routeAvailability(1L, schedulingWorker).isAvailable());
+        } finally {
+            leases.forEach(PrefillState.RouteReservation::close);
+        }
     }
 
     @Test
@@ -64,11 +108,8 @@ class PrefillRequestCapacityTest {
         var localObservation = observed(1);
         var foreign = observed(2);
         heartbeat(Map.of("local", localObservation, "foreign", foreign, "duplicate", foreign), 2L);
-        assertEquals(
-                2L,
-                state.observedRequestCount(),
-                "early Engine observation and prepared local ownership are one request");
-        try (var handoff = commit(local, registration)) {}
+        assertEquals(2L, state.observedRequestCount(), "early Engine observation and prepared local ownership are one request");
+        try (var handoff = commit(local, registration)) { }
         registration.close();
         heartbeat(Map.of("local", localObservation, "foreign", foreign), 2L);
         assertEquals(2L, state.observedRequestCount());
@@ -82,10 +123,7 @@ class PrefillRequestCapacityTest {
     void scalarEngineWorkIsCountedWithoutInventingIdentity() {
         var registration = reserve(item(1), 4L).reservation();
         heartbeat(Map.of(), 2L);
-        assertEquals(
-                3L,
-                state.observedRequestCount(),
-                "unseen local shadow cannot explain unidentified Engine work");
+        assertEquals(3L, state.observedRequestCount(), "unseen local shadow cannot explain unidentified Engine work");
         assertEquals(PrefillState.CapacityStatus.CAPACITY_FULL, reserve(item(2), 3L).status());
         registration.close();
         assertEquals(2L, state.observedRequestCount());
@@ -111,18 +149,17 @@ class PrefillRequestCapacityTest {
         ScheduledRequest first = item(1), second = item(2);
         assertTrue(enqueue(first, 0L));
         assertTrue(enqueue(second, 0L));
-        var generation = new EndpointGenerationLifecycle(() -> {});
-        var reservation =
-                state.reserveBatch(first, 10L, 1, generation.tryAcquireHandoff()).reservation();
-        try (var handoff = reservation.commit(List.of(first, second), 0L)) {}
-        assertFalse(state.batchAvailability(1).isAvailable());
+        var generation = new EndpointGenerationLifecycle(() -> { });
+        var reservation = state.reserveBatch(first, 10L, 1, generation.tryAcquireHandoff()).reservation();
+        try (var handoff = reservation.commit(List.of(first, second), 0L)) { }
+        assertFalse(state.batchAvailability(1, schedulingWorker).isAvailable());
         assertTrue(enqueue(item(3), 0L));
-        assertTrue(state.terminalizeCommittedItem(first));
+        assertTrue(state.terminalizeCommittedItem(first.execution()));
         assertEquals(2L, state.observedRequestCount());
-        assertFalse(state.batchAvailability(1).isAvailable());
-        assertTrue(state.terminalizeCommittedItem(second));
+        assertFalse(state.batchAvailability(1, schedulingWorker).isAvailable());
+        assertTrue(state.terminalizeCommittedItem(second.execution()));
         assertEquals(1L, state.observedRequestCount());
-        assertTrue(state.batchAvailability(1).isAvailable());
+        assertTrue(state.batchAvailability(1, schedulingWorker).isAvailable());
     }
 
     @Test
@@ -132,7 +169,7 @@ class PrefillRequestCapacityTest {
         old.close();
         var current = reserve(item(1), 1L).reservation();
         old.close();
-        assertFalse(state.terminalizeCommittedItem(previous));
+        assertFalse(state.terminalizeCommittedItem(previous.execution()));
         assertEquals(1L, state.observedRequestCount());
         current.close();
         assertEquals(0L, state.observedRequestCount());
@@ -141,13 +178,10 @@ class PrefillRequestCapacityTest {
     @Test
     void immediateAdmissionChecksCurrentCapacityAfterOtherOwnershipChanges() {
         assertTrue(state.canAcceptRequest(2L));
-        assertTrue(enqueue(item(1), 2L));
-        assertNotNull(
-                reserve(item(2), 2L).reservation(),
+        assertNotNull(reserve(item(1), 2L).reservation());
+        assertNotNull(reserve(item(2), 2L).reservation(),
                 "an intervening ownership mutation does not invalidate remaining capacity");
-        assertEquals(
-                PrefillState.CapacityStatus.CAPACITY_FULL,
-                reserve(item(3), 2L).status(),
+        assertEquals(PrefillState.CapacityStatus.CAPACITY_FULL, reserve(item(3), 2L).status(),
                 "the old available snapshot cannot authorize overselling current capacity");
     }
 
@@ -158,13 +192,10 @@ class PrefillRequestCapacityTest {
         try (var reader = Executors.newSingleThreadExecutor()) {
             lock.lock();
             try {
-                assertFalse(
-                        reader.submit(() -> state.canAcceptRequest(1L)).get(5, TimeUnit.SECONDS));
-                assertTrue(
-                        reader.submit(() -> state.canAcceptRequest(2L)).get(5, TimeUnit.SECONDS));
+                assertFalse(reader.submit(() -> state.canAcceptRequest(1L)).get(5, TimeUnit.SECONDS));
+                assertTrue(reader.submit(() -> state.canAcceptRequest(2L)).get(5, TimeUnit.SECONDS));
                 assertTrue(state.terminalizeActiveUnderLock(queued));
-                assertTrue(
-                        reader.submit(() -> state.canAcceptRequest(1L)).get(5, TimeUnit.SECONDS),
+                assertTrue(reader.submit(() -> state.canAcceptRequest(1L)).get(5, TimeUnit.SECONDS),
                         "removal publishes capacity before the ownership lock is released");
             } finally {
                 lock.unlock();
@@ -178,18 +209,15 @@ class PrefillRequestCapacityTest {
         CountDownLatch selected = new CountDownLatch(contenders);
         CountDownLatch admit = new CountDownLatch(1);
         try (var executor = Executors.newFixedThreadPool(contenders)) {
-            List<Future<PrefillState.ReservationResult<PrefillState.RouteReservation>>> attempts =
-                    new ArrayList<>();
+            List<Future<PrefillState.ReservationResult<PrefillState.RouteReservation>>> attempts = new ArrayList<>();
             for (int i = 0; i < contenders; i++) {
                 ScheduledRequest request = item(i + 1);
-                attempts.add(
-                        executor.submit(
-                                () -> {
-                                    assertTrue(state.canAcceptRequest(1L));
-                                    selected.countDown();
-                                    assertTrue(admit.await(5, TimeUnit.SECONDS));
-                                    return reserve(request, 1L);
-                                }));
+                attempts.add(executor.submit(() -> {
+                    assertTrue(state.canAcceptRequest(1L));
+                    selected.countDown();
+                    assertTrue(admit.await(5, TimeUnit.SECONDS));
+                    return reserve(request, 1L);
+                }));
             }
             try {
                 assertTrue(selected.await(5, TimeUnit.SECONDS));
@@ -230,11 +258,10 @@ class PrefillRequestCapacityTest {
 
     @Test
     void failedQueueInsertionDoesNotConsumePublishedCapacity() {
-        var direct = new PrefillState(lock, PrefillActiveIndex.disabled(), () -> {});
+        var direct = new PrefillState(lock, PrefillActiveIndex.disabled(), () -> { });
         lock.lock();
         try {
-            assertThrows(
-                    IllegalStateException.class, () -> direct.enqueueActiveUnderLock(item(1), 1L));
+            assertThrows(IllegalStateException.class, () -> direct.enqueueActiveUnderLock(item(1), 1L));
             assertTrue(direct.canAcceptRequest(1L));
             assertEquals(0L, direct.observedRequestCount());
         } finally {
@@ -250,40 +277,28 @@ class PrefillRequestCapacityTest {
         when(engine.waitingQueryLen()).thenReturn(2L);
         when(observation.engine()).thenReturn(engine);
         when(observation.finishedTasks()).thenReturn(Map.of());
-        var result =
-                state.reconcileWorkerStatus(
-                        observation,
-                        unused -> 0L,
-                        () -> {
-                            assertFalse(state.canAcceptRequest(2L));
-                            assertTrue(state.canAcceptRequest(3L));
-                        },
-                        () -> {});
+        var result = state.reconcileWorkerStatus(observation, unused -> 0L, () -> {
+            assertFalse(state.canAcceptRequest(2L));
+            assertTrue(state.canAcceptRequest(3L));
+        }, () -> { });
         assertNull(result.publicationFailure());
         heartbeat(Map.of(), 1L);
         assertTrue(state.canAcceptRequest(2L));
     }
 
-    private PrefillState.ReservationResult<PrefillState.RouteReservation> reserve(
-            ScheduledRequest item, long limit) {
+    private PrefillState.ReservationResult<PrefillState.RouteReservation> reserve(ScheduledRequest item, long limit) {
         return state.reserveUnqueuedRoute(item, 0L, limit);
     }
 
-    private PrefillState.CommittedHandoff commit(
-            ScheduledRequest item, PrefillState.RouteReservation registration) {
-        return state.commitRouteGroup(
-                List.of(item),
-                List.of(registration),
-                new EndpointGenerationLifecycle(() -> {}).tryAcquireHandoff());
+    private PrefillState.CommittedHandoff commit(ScheduledRequest item, PrefillState.RouteReservation registration) {
+        return state.commitRouteGroup(List.of(item), List.of(registration),
+                new EndpointGenerationLifecycle(() -> { }).tryAcquireHandoff());
     }
 
     private boolean enqueue(ScheduledRequest item, long limit) {
         lock.lock();
-        try {
-            return state.enqueueActiveUnderLock(item, limit);
-        } finally {
-            lock.unlock();
-        }
+        try { return state.enqueueActiveUnderLock(item, limit); }
+        finally { lock.unlock(); }
     }
 
     private void heartbeat(Map<String, WorkerStatus.TaskObservation> tasks, long reportedActive) {
@@ -297,26 +312,16 @@ class PrefillRequestCapacityTest {
     }
 
     private static WorkerStatus.TaskObservation observed(long id) {
-        return new WorkerStatus.TaskObservation(
-                id,
-                0L,
-                0L,
-                0L,
-                0L,
-                0L,
-                0L,
-                0L,
-                0L,
-                "",
-                0L,
-                TaskPhase.RUNNING,
-                0L,
-                PriorityPreemptionProgress.NONE);
+        return new WorkerStatus.TaskObservation(id, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, "", 0L,
+                TaskPhase.RUNNING, 0L, PriorityPreemptionProgress.NONE);
     }
 
     private static ScheduledRequest item(long id) {
         ScheduledRequest item = mock(ScheduledRequest.class);
         when(item.requestId()).thenReturn(id);
+        RequestExecution execution = mock(RequestExecution.class);
+        when(execution.requestId()).thenReturn(id);
+        when(item.execution()).thenReturn(execution);
         return item;
     }
 }

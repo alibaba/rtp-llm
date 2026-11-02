@@ -25,11 +25,14 @@ import static org.mockito.Mockito.when;
 @DisplayName("AppStateHookServer Tests")
 class AppStateHookServerTest {
 
-    @Mock private ApplicationLifecycle applicationLifecycle;
+    @Mock
+    private ApplicationLifecycle applicationLifecycle;
 
-    @Mock private GracefulLifecycleReporter lifecycleReporter;
+    @Mock
+    private GracefulLifecycleReporter lifecycleReporter;
 
-    @Mock private ServerRequest serverRequest;
+    @Mock
+    private ServerRequest serverRequest;
 
     private AppStateHookServer server;
 
@@ -41,8 +44,7 @@ class AppStateHookServerTest {
     @Test
     @DisplayName("Should return 200 for localhost request when process is ready")
     void handleProcessOk_ShouldReturn200_WhenLocalhostRequestAndProcessReady() {
-        when(serverRequest.remoteAddress())
-                .thenReturn(Optional.of(new InetSocketAddress("127.0.0.1", 12345)));
+        when(serverRequest.remoteAddress()).thenReturn(Optional.of(new InetSocketAddress("127.0.0.1", 12345)));
 
         server.onApplicationReady();
 
@@ -56,10 +58,7 @@ class AppStateHookServerTest {
     @Test
     @DisplayName("Should return 200 for loopback request when process is ready")
     void handleProcessOk_ShouldReturn200_WhenLoopbackRequestAndProcessReady() {
-        when(serverRequest.remoteAddress())
-                .thenReturn(
-                        Optional.of(
-                                new InetSocketAddress(InetAddress.getLoopbackAddress(), 12345)));
+        when(serverRequest.remoteAddress()).thenReturn(Optional.of(new InetSocketAddress(InetAddress.getLoopbackAddress(), 12345)));
 
         server.onApplicationReady();
 
@@ -73,8 +72,7 @@ class AppStateHookServerTest {
     @Test
     @DisplayName("Should return 503 for local request when process is not ready")
     void handleProcessOk_ShouldReturn503_WhenLocalRequestAndProcessNotReady() {
-        when(serverRequest.remoteAddress())
-                .thenReturn(Optional.of(new InetSocketAddress("127.0.0.1", 12345)));
+        when(serverRequest.remoteAddress()).thenReturn(Optional.of(new InetSocketAddress("127.0.0.1", 12345)));
 
         Mono<ServerResponse> result = server.handleProcessOk(serverRequest);
 
@@ -86,8 +84,7 @@ class AppStateHookServerTest {
     @Test
     @DisplayName("Should return 403 for non-local request")
     void handleProcessOk_ShouldReturn403_WhenNonLocalRequest() {
-        when(serverRequest.remoteAddress())
-                .thenReturn(Optional.of(new InetSocketAddress("192.168.1.100", 12345)));
+        when(serverRequest.remoteAddress()).thenReturn(Optional.of(new InetSocketAddress("192.168.1.100", 12345)));
 
         server.onApplicationReady();
 
@@ -114,10 +111,8 @@ class AppStateHookServerTest {
 
     @Test
     @DisplayName("Should return 200 for local host address request when process is ready")
-    void handleProcessOk_ShouldReturn200_WhenLocalHostAddressRequestAndProcessReady()
-            throws UnknownHostException {
-        when(serverRequest.remoteAddress())
-                .thenReturn(Optional.of(new InetSocketAddress(InetAddress.getLocalHost(), 12345)));
+    void handleProcessOk_ShouldReturn200_WhenLocalHostAddressRequestAndProcessReady() throws UnknownHostException {
+        when(serverRequest.remoteAddress()).thenReturn(Optional.of(new InetSocketAddress(InetAddress.getLocalHost(), 12345)));
 
         server.onApplicationReady();
 
@@ -131,8 +126,7 @@ class AppStateHookServerTest {
     @Test
     @DisplayName("Should return 200 when shutdown completes successfully")
     void handleAppStop_ShouldReturn200_WhenShutdownCompletes() {
-        when(serverRequest.remoteAddress())
-                .thenReturn(Optional.of(new InetSocketAddress("127.0.0.1", 12345)));
+        when(serverRequest.remoteAddress()).thenReturn(Optional.of(new InetSocketAddress("127.0.0.1", 12345)));
         when(applicationLifecycle.offline()).thenReturn(true);
 
         Mono<ServerResponse> result = server.handleAppStop(serverRequest);
@@ -147,8 +141,7 @@ class AppStateHookServerTest {
     @Test
     @DisplayName("Should return 503 when shutdown leaves active requests pending")
     void handleAppStop_ShouldReturn503_WhenShutdownIncomplete() {
-        when(serverRequest.remoteAddress())
-                .thenReturn(Optional.of(new InetSocketAddress("127.0.0.1", 12345)));
+        when(serverRequest.remoteAddress()).thenReturn(Optional.of(new InetSocketAddress("127.0.0.1", 12345)));
         when(applicationLifecycle.offline()).thenReturn(false);
 
         Mono<ServerResponse> result = server.handleAppStop(serverRequest);

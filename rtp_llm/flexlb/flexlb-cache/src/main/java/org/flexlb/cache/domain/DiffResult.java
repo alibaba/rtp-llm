@@ -22,17 +22,20 @@ import java.util.Set;
 @AllArgsConstructor
 public class DiffResult implements Serializable {
 
-    @Serial private static final long serialVersionUID = 1L;
+    @Serial
+    private static final long serialVersionUID = 1L;
 
     /**
      * Added cache blocks
      */
-    @Builder.Default private Set<Long> addedBlocks = Collections.emptySet();
+    @Builder.Default
+    private Set<Long> addedBlocks = Collections.emptySet();
 
     /**
      * Removed cache blocks
      */
-    @Builder.Default private Set<Long> removedBlocks = Collections.emptySet();
+    @Builder.Default
+    private Set<Long> removedBlocks = Collections.emptySet();
 
     /**
      * Engine IP

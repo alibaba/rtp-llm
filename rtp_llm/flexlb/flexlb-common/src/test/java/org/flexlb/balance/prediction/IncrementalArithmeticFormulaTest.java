@@ -1,16 +1,8 @@
 package org.flexlb.balance.prediction;
 
 import org.junit.jupiter.api.Test;
-
-import java.util.ArrayList;
-import java.util.List;
-import java.util.Map;
-import java.util.Random;
-import java.util.Set;
-
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertNotNull;
-import static org.junit.jupiter.api.Assertions.assertThrows;
+import java.util.*;
+import static org.junit.jupiter.api.Assertions.*;
 
 class IncrementalArithmeticFormulaTest {
     private final Random random = new Random(20260917);
@@ -28,10 +20,8 @@ class IncrementalArithmeticFormulaTest {
                 items.add(item);
                 cursor.append(item);
                 double[] vars = {value(), value()};
-                assertEquals(
-                        Double.doubleToLongBits(formula.evaluateAsDouble(vars, items)),
-                        Double.doubleToLongBits(cursor.evaluate(vars)),
-                        text + " prefix=" + items.size());
+                assertEquals(Double.doubleToLongBits(formula.evaluateAsDouble(vars, items)),
+                        Double.doubleToLongBits(cursor.evaluate(vars)), text + " prefix=" + items.size());
             }
         }
     }
@@ -40,12 +30,10 @@ class IncrementalArithmeticFormulaTest {
     void emptyCursorCannotAccidentallyReplaceScalarEmptyBatchSemantics() {
         var formula = ArithmeticFormula.parse("sum(x)", Map.of("x", 0), Set.of(), true);
         var cursor = formula.newAggregation();
-        assertThrows(IllegalStateException.class, () -> cursor.evaluate(new double[] {42}));
-        assertEquals(42, formula.evaluateAsDouble(new double[] {42}, List.of()));
-        cursor.append(new double[] {-0.0});
-        assertEquals(
-                Double.doubleToLongBits(0.0),
-                Double.doubleToLongBits(cursor.evaluate(new double[] {42})));
+        assertThrows(IllegalStateException.class, () -> cursor.evaluate(new double[]{42}));
+        assertEquals(42, formula.evaluateAsDouble(new double[]{42}, List.of()));
+        cursor.append(new double[]{-0.0});
+        assertEquals(Double.doubleToLongBits(0.0), Double.doubleToLongBits(cursor.evaluate(new double[]{42})));
     }
 
     private double value() {
@@ -69,14 +57,8 @@ class IncrementalArithmeticFormulaTest {
             case 3 -> "log(" + a + ")";
             case 4 -> "exp(" + a + ")";
             case 5 -> "max(" + a + "," + expression(depth - 1) + ")";
-            default ->
-                    "("
-                            + a
-                            + ")"
-                            + "+-*/^".charAt(random.nextInt(5))
-                            + "("
-                            + expression(depth - 1)
-                            + ")";
+            default -> "(" + a + ")" + "+-*/^".charAt(random.nextInt(5))
+                    + "(" + expression(depth - 1) + ")";
         };
     }
 }

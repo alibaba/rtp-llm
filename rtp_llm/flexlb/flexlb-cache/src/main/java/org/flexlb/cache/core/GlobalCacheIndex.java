@@ -1,6 +1,8 @@
 package org.flexlb.cache.core;
 
 import lombok.extern.slf4j.Slf4j;
+import org.flexlb.dao.master.EndpointTrace;
+import org.flexlb.dao.master.EndpointTrace.Stage;
 import org.springframework.stereotype.Component;
 
 import java.util.Collections;
@@ -25,8 +27,7 @@ public class GlobalCacheIndex {
     /**
      * Core storage structure: block_hash_id -> Set<engine_ip:engine_port>
      */
-    private final ConcurrentHashMap<Long, Set<String>> blockToEnginesMap =
-            new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<Long, Set<String>> blockToEnginesMap = new ConcurrentHashMap<>();
 
     /**
      * Serializes index mutations and mapping-count updates
@@ -37,7 +38,6 @@ public class GlobalCacheIndex {
      * Statistics
      */
     private final LongAdder totalMappings = new LongAdder();
-
     /** Per-caller compaction storage; cache queries never retain this array. */
     private final ThreadLocal<String[]> prefixCandidates =
             ThreadLocal.withInitial(() -> new String[0]);
@@ -48,20 +48,25 @@ public class GlobalCacheIndex {
      * @param blockCacheKey Cache block hash value
      * @param engineIpPort  Engine IP:Port
      */
-    public void addCacheBlock(Long blockCacheKey, String engineIpPort) {
+    public void addCacheBlock(Long blockCacheKey, String engineIpPort, EndpointTrace.Poll pollTrace) {
         if (blockCacheKey == null || engineIpPort == null) {
-            log.warn(
-                    "Invalid parameters: blockCacheKey={}, engineIpPort={}",
-                    blockCacheKey,
-                    engineIpPort);
+            log.warn("Invalid parameters: blockCacheKey={}, engineIpPort={}", blockCacheKey, engineIpPort);
             return;
         }
 
-        lock.lock();
+        boolean contended = !lock.tryLock();
+        if (contended) {
+            if (pollTrace != null) {
+                pollTrace.record(Stage.CACHE_INDEX_LOCK_ATTEMPT);
+            }
+            lock.lock();
+        }
         try {
-            Set<String> engines =
-                    blockToEnginesMap.computeIfAbsent(
-                            blockCacheKey, k -> ConcurrentHashMap.newKeySet());
+            if (contended && pollTrace != null) {
+                pollTrace.record(Stage.CACHE_INDEX_LOCK_ACQUIRED);
+            }
+            Set<String> engines = blockToEnginesMap.computeIfAbsent(
+                    blockCacheKey, k -> ConcurrentHashMap.newKeySet());
 
             boolean added = engines.add(engineIpPort);
             if (added) {
@@ -69,6 +74,9 @@ public class GlobalCacheIndex {
             }
         } finally {
             lock.unlock();
+            if (contended && pollTrace != null) {
+                pollTrace.record(Stage.CACHE_INDEX_LOCK_RELEASED);
+            }
         }
     }
 
@@ -78,13 +86,22 @@ public class GlobalCacheIndex {
      * @param engineIp      Engine IP
      * @param blockCacheKey Cache block hash value
      */
-    public void removeCacheBlock(String engineIp, Long blockCacheKey) {
+    public void removeCacheBlock(String engineIp, Long blockCacheKey, EndpointTrace.Poll pollTrace) {
         if (blockCacheKey == null || engineIp == null) {
             return;
         }
 
-        lock.lock();
+        boolean contended = !lock.tryLock();
+        if (contended) {
+            if (pollTrace != null) {
+                pollTrace.record(Stage.CACHE_INDEX_LOCK_ATTEMPT);
+            }
+            lock.lock();
+        }
         try {
+            if (contended && pollTrace != null) {
+                pollTrace.record(Stage.CACHE_INDEX_LOCK_ACQUIRED);
+            }
             Set<String> engines = blockToEnginesMap.get(blockCacheKey);
             if (engines == null) {
                 return;
@@ -101,35 +118,52 @@ public class GlobalCacheIndex {
             }
         } finally {
             lock.unlock();
+            if (contended && pollTrace != null) {
+                pollTrace.record(Stage.CACHE_INDEX_LOCK_RELEASED);
+            }
         }
     }
 
     /**
      * Remove an engine
      *
+     * <p>The caller must keep the owning generation's cacheMutationLock held
+     * from obtaining blockCacheKeys until this method returns. The index lock
+     * protects global mappings; it does not freeze the borrowed local key set.
+     *
      * @param engineIp Engine IP
      */
-    public void removeAllCacheBlockOfEngine(String engineIp) {
-        if (engineIp == null) {
+    public void removeAllCacheBlockOfEngine(String engineIp, Set<Long> blockCacheKeys, EndpointTrace trace) {
+        if (engineIp == null || blockCacheKeys == null || blockCacheKeys.isEmpty()) {
             return;
         }
 
+        long scannedKeys = 0L;
+        long removedMappings = 0L;
+        // Only this generation's owned keys are visited. Cache maintenance is
+        // isolated from health polling; periodic unlock/relock is not needed
+        // for heartbeat progress and a non-fair lock cannot guarantee handoff.
+        if (trace != null) {trace.record(Stage.CACHE_INDEX_LOCK_ATTEMPT);}
         lock.lock();
         try {
-            blockToEnginesMap.forEach(
-                    (blockCacheKey, engines) -> {
-                        boolean removed = engines.remove(engineIp);
-                        if (removed) {
-                            totalMappings.decrement();
-
-                            // Remove entire entry if no engine owns this cache block
-                            if (engines.isEmpty()) {
-                                blockToEnginesMap.remove(blockCacheKey);
-                            }
-                        }
-                    });
+            if (trace != null) {trace.record(Stage.CACHE_INDEX_LOCK_ACQUIRED);}
+            for (Long key : blockCacheKeys) {
+                scannedKeys++;
+                Set<String> engines = blockToEnginesMap.get(key);
+                if (engines != null && engines.remove(engineIp)) {
+                    removedMappings++;
+                    totalMappings.decrement();
+                    if (engines.isEmpty()) {
+                        blockToEnginesMap.remove(key);
+                    }
+                }
+            }
         } finally {
             lock.unlock();
+            if (trace != null) {
+                trace.record(Stage.CACHE_INDEX_LOCK_RELEASED);
+                trace.recordCleanupCounts(scannedKeys, removedMappings);
+            }
         }
     }
 
@@ -140,8 +174,8 @@ public class GlobalCacheIndex {
      * @param blockCacheKeys Ordered cache block hash value list
      * @return Map<EngineIP:EnginePort, PrefixMatchLength>
      */
-    public Map<String, Integer> batchCalculatePrefixMatchLength(
-            List<String> engineIpPorts, List<Long> blockCacheKeys) {
+    public Map<String, Integer> batchCalculatePrefixMatchLength(List<String> engineIpPorts,
+                                                                List<Long> blockCacheKeys) {
 
         if (isEmpty(engineIpPorts) || isEmpty(blockCacheKeys)) {
             return Collections.emptyMap();
@@ -156,10 +190,11 @@ public class GlobalCacheIndex {
      * @param blockCacheKeys Ordered cache block hash value list
      * @return Map<EngineIP:EnginePort, PrefixMatchLength>
      */
-    private Map<String, Integer> calculatePrefixMatchLength(
-            List<String> engineIpPorts, List<Long> blockCacheKeys) {
+    private Map<String, Integer> calculatePrefixMatchLength(List<String> engineIpPorts,
+                                                            List<Long> blockCacheKeys) {
 
-        Set<String> firstBlockOwners = getEnginesForBlock(blockCacheKeys.getFirst());
+        Set<String> firstBlockOwners = getEnginesForBlock(
+                blockCacheKeys.getFirst());
         if (firstBlockOwners.isEmpty()) {
             return Collections.emptyMap();
         }
@@ -176,7 +211,8 @@ public class GlobalCacheIndex {
             candidates[index] = engineIpPorts.get(index);
         }
         int survivorCount = 0;
-        for (int candidateIndex = 0; candidateIndex < engineIpPorts.size(); candidateIndex++) {
+        for (int candidateIndex = 0;
+                candidateIndex < engineIpPorts.size(); candidateIndex++) {
             String candidate = candidates[candidateIndex];
             if (firstBlockOwners.contains(candidate)) {
                 candidates[survivorCount++] = candidate;
@@ -187,10 +223,13 @@ public class GlobalCacheIndex {
         }
 
         Map<String, Integer> result = null;
-        for (int blockIndex = 1; blockIndex < blockCacheKeys.size(); blockIndex++) {
-            Set<String> blockOwners = getEnginesForBlock(blockCacheKeys.get(blockIndex));
+        for (int blockIndex = 1;
+                blockIndex < blockCacheKeys.size(); blockIndex++) {
+            Set<String> blockOwners = getEnginesForBlock(
+                    blockCacheKeys.get(blockIndex));
             int nextSurvivorCount = 0;
-            for (int candidateIndex = 0; candidateIndex < survivorCount; candidateIndex++) {
+            for (int candidateIndex = 0;
+                    candidateIndex < survivorCount; candidateIndex++) {
                 String candidate = candidates[candidateIndex];
                 if (blockOwners.contains(candidate)) {
                     candidates[nextSurvivorCount++] = candidate;

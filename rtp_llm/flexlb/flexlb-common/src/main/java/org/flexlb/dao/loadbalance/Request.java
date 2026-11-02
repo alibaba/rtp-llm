@@ -15,7 +15,8 @@ import java.util.concurrent.TimeUnit;
 @ToString
 @JsonIgnoreProperties(ignoreUnknown = true)
 public class Request {
-    public static final long DEFAULT_GENERATE_TIMEOUT_MS = TimeUnit.HOURS.toMillis(1L);
+    public static final long DEFAULT_GENERATE_TIMEOUT_MS =
+            TimeUnit.HOURS.toMillis(1L);
 
     @ToString.Exclude
     @JsonProperty("block_cache_keys")
@@ -62,6 +63,7 @@ public class Request {
     @JsonProperty("force_disable_sp_run")
     private boolean forceDisableSpRun = false;
 
+
     @JsonProperty("model")
     private String model = "";
 
@@ -73,4 +75,5 @@ public class Request {
      */
     @JsonProperty("priority")
     private int priority = 0;
+
 }

@@ -2,8 +2,8 @@ package org.flexlb.balance.eviction;
 
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
-import org.flexlb.balance.scheduler.RequestRegistry;
 import org.flexlb.balance.scheduler.RequestSlot.AdmissionHandle;
+import org.flexlb.balance.scheduler.RequestRegistry;
 import org.flexlb.balance.scheduler.RouteAdmission;
 import org.flexlb.balance.scheduler.ScheduledRequest.DecodeBinding;
 import org.flexlb.balance.scheduler.SchedulingTestConfig;
@@ -72,15 +72,14 @@ class EvictionManagerTryAdmitTest {
         requests = mock(RequestRegistry.class);
         admission = mock(RouteAdmission.class);
         blockedEndpoint = mock(WorkerEndpoint.class);
-        manager =
-                new EvictionManager(
-                        reporter, cancelChannel, preemptionCoordinator, requests, deliveryReporter);
+        manager = new EvictionManager(
+                reporter, cancelChannel, preemptionCoordinator, requests,
+                deliveryReporter);
     }
 
     @ParameterizedTest
     @ValueSource(longs = {1_000L, 2_750L})
-    void enginePreemptionUsesFrozenAdmissionAndConfiguredCompletionTimeout(
-            long completionTimeoutMs) {
+    void enginePreemptionUsesFrozenAdmissionAndConfiguredCompletionTimeout(long completionTimeoutMs) {
         var config = SchedulingTestConfig.newConfig();
         SchedulingTestConfig.usePriorityQueue(config);
         PreemptionConfig preemption = new PreemptionConfig();
@@ -94,24 +93,15 @@ class EvictionManagerTryAdmitTest {
         var endpoint = mock(DecodeEndpoint.class);
         var routing = mock(DecodeEndpoint.DecodeRoutingView.class);
         var view = mock(DecodeEndpoint.LayeredAdmissionView.class);
-        var victim =
-                new DecodeEndpoint.DecodeRequestView(
-                        901L,
-                        30,
-                        128L,
-                        128L,
-                        DecodeTaskPhase.ACCEPTED_NOT_RUNNING,
-                        true,
-                        11L,
-                        false,
-                        false);
+        var victim = new DecodeEndpoint.DecodeRequestView(901L, 30, 128L, 128L,
+                DecodeTaskPhase.ACCEPTED_NOT_RUNNING, true, 11L, false, false);
         when(endpoint.ipPort()).thenReturn("127.0.0.1:8080");
         when(endpoint.resourceSnapshot()).thenReturn(view);
         when(view.routing()).thenReturn(routing);
         when(view.reserved()).thenReturn(Map.of());
         when(view.confirmed()).thenReturn(List.of(victim));
-        when(routing.placementUsage())
-                .thenReturn(new DecodeEndpoint.CapacityUsage(1L, 20_000L, 10_000L, 0L, 10_000L));
+        when(routing.placementUsage()).thenReturn(
+                new DecodeEndpoint.CapacityUsage(1L, 20_000L, 10_000L, 0L, 10_000L));
 
         when(cancelChannel.isSupported(endpoint)).thenReturn(true);
         when(preemptionCoordinator.preempt(any())).thenReturn(new CompletableFuture<>());
@@ -121,8 +111,7 @@ class EvictionManagerTryAdmitTest {
         incoming.setPriority(70);
         var context = new BalanceContext(config);
         context.setRequest(incoming);
-        context.setSchedulingMetadata(
-                SchedulingMetadata.explicit(70, System.currentTimeMillis() + 60_000L));
+        context.setSchedulingMetadata(SchedulingMetadata.explicit(70, System.currentTimeMillis() + 60_000L));
         var future = new CompletableFuture<Response>();
         when(requests.claimAdmissionHandle(902L, future)).thenReturn(mock(AdmissionHandle.class));
         var frozenRequest = DecodeBinding.capture(context);
@@ -141,8 +130,7 @@ class EvictionManagerTryAdmitTest {
         assertSame(endpoint, command.getValue().endpoint());
         assertSame(frozenRequest.capacity(), command.getValue().capacity());
         assertEquals(frozenRequest.hardKvTokens(), command.getValue().incomingKvTokens());
-        assertEquals(
-                frozenRequest.expectedKvTokens(), command.getValue().incomingExpectedKvTokens());
+        assertEquals(frozenRequest.expectedKvTokens(), command.getValue().incomingExpectedKvTokens());
         assertEquals(List.of(victim), command.getValue().victims());
     }
 
@@ -156,10 +144,12 @@ class EvictionManagerTryAdmitTest {
         verifyNoInteractions(deliveryReporter);
     }
 
-    private boolean tryAdmit(BalanceContext context, CompletableFuture<Response> future) {
+    private boolean tryAdmit(BalanceContext context,
+                             CompletableFuture<Response> future) {
         DecodeBinding frozenRequest = DecodeBinding.capture(context);
         when(admission.decodeBinding()).thenReturn(frozenRequest);
-        return manager.tryAdmit(context, future, admission, blockedEndpoint);
+        return manager.tryAdmit(
+                context, future, admission, blockedEndpoint);
     }
 
     // ─── Shutdown ────────────────────────────────────────────────────────
@@ -228,10 +218,7 @@ class EvictionManagerTryAdmitTest {
         // still declines, but for a DIFFERENT reason (no preemption policy),
         // proving the priority guard itself passed.
         BalanceContext ctx = ctx(1);
-        when(ctx.getConfig())
-                .thenReturn(
-                        org.flexlb.balance.scheduler.SchedulingTestConfig
-                                .newConfig()); // FIFO = no preemption
+        when(ctx.getConfig()).thenReturn(org.flexlb.balance.scheduler.SchedulingTestConfig.newConfig()); // FIFO = no preemption
         assertFalse(tryAdmit(ctx, new CompletableFuture<>()));
         // It passed the priority guard but declined on preemption policy,
         // proving priority=1 is accepted by hasPriority.
@@ -243,10 +230,7 @@ class EvictionManagerTryAdmitTest {
     @DisplayName("FIFO ordering (no preemption policy) never evicts")
     void fifoOrderingNeverEvicts() {
         BalanceContext ctx = ctx(50);
-        when(ctx.getConfig())
-                .thenReturn(
-                        org.flexlb.balance.scheduler.SchedulingTestConfig
-                                .newConfig()); // default=QUEUE+FIFO
+        when(ctx.getConfig()).thenReturn(org.flexlb.balance.scheduler.SchedulingTestConfig.newConfig()); // default=QUEUE+FIFO
         assertFalse(tryAdmit(ctx, new CompletableFuture<>()));
         assertZeroSideEffect();
     }
@@ -269,8 +253,7 @@ class EvictionManagerTryAdmitTest {
         when(ctx.getRequest()).thenReturn(new Request());
         when(ctx.getPriority()).thenReturn(priority);
         when(ctx.requestExpired(anyLong())).thenReturn(false);
-        when(ctx.getConfig())
-                .thenReturn(org.flexlb.balance.scheduler.SchedulingTestConfig.newConfig());
+        when(ctx.getConfig()).thenReturn(org.flexlb.balance.scheduler.SchedulingTestConfig.newConfig());
         return ctx;
     }
 }

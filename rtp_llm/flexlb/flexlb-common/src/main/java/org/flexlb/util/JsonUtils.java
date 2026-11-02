@@ -51,8 +51,7 @@ public class JsonUtils {
             }
             return res;
         } catch (Throwable e) {
-            throw StatusEnum.JSON_MAPPER_ERROR.toException(
-                    "msg=" + e.getMessage() + ", text=" + text, e);
+            throw StatusEnum.JSON_MAPPER_ERROR.toException("msg=" + e.getMessage() + ", text=" + text, e);
         }
     }
 
@@ -99,8 +98,7 @@ public class JsonUtils {
         try {
             return WRITER.writeValueAsString(object);
         } catch (JsonProcessingException error) {
-            throw StatusEnum.JSON_MAPPER_ERROR.toException(
-                    "Failed to convert object to json string!", error);
+            throw StatusEnum.JSON_MAPPER_ERROR.toException("Failed to convert object to json string!", error);
         }
     }
 

@@ -5,7 +5,8 @@ public record VictimTerminal(long requestId) {
 
     public VictimTerminal {
         if (requestId <= 0) {
-            throw new IllegalArgumentException("requestId must be positive");
+            throw new IllegalArgumentException(
+                    "requestId must be positive");
         }
     }
 }

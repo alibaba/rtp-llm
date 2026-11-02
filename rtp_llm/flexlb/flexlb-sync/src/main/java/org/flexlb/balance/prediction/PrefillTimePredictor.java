@@ -57,5 +57,6 @@ public interface PrefillTimePredictor {
      *
      * @return whether a replacement evaluator was published
      */
-    LearningResult learn(PrefillBatchFeatures features, long predictedMs, long actualMs);
+    LearningResult learn(
+            PrefillBatchFeatures features, long predictedMs, long actualMs);
 }

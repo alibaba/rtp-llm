@@ -51,6 +51,10 @@ cc_library(
 py_library(
     name = "model_rpc_service_py_proto",
     srcs = [":model_rpc_service_py"],
+    deps = [
+        "//rtp_llm:grpcio",
+        "//rtp_llm:protobuf",
+    ],
     visibility = ["//visibility:public"],
 )
 

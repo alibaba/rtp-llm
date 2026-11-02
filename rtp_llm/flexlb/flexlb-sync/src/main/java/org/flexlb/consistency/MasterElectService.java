@@ -6,4 +6,8 @@ public interface MasterElectService {
     boolean isNeedConsistency();
 
     boolean isMaster();
+
+    default long getLeadershipEpoch() {
+        return 0L;
+    }
 }

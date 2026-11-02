@@ -14,4 +14,5 @@ public class MasterChangeNotifyReq {
 
     private String reqIp;
     private String roleId;
+
 }

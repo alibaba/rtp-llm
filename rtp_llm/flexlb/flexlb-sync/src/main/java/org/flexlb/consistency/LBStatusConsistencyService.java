@@ -10,6 +10,8 @@ import org.springframework.core.env.Environment;
 import org.springframework.stereotype.Component;
 
 import javax.annotation.PreDestroy;
+import java.net.InetAddress;
+import java.net.UnknownHostException;
 import java.util.LinkedHashMap;
 import java.util.Map;
 
@@ -26,8 +28,8 @@ public class LBStatusConsistencyService implements MasterElectService {
     private String roleId;
     private String localHostIp;
 
-    public LBStatusConsistencyService(
-            ZookeeperMasterElectService zookeeperMasterElectService, Environment environment) {
+    public LBStatusConsistencyService(ZookeeperMasterElectService zookeeperMasterElectService,
+                                      Environment environment) {
         this.zookeeperMasterElectService = zookeeperMasterElectService;
         this.environment = environment;
         this.init();
@@ -35,7 +37,11 @@ public class LBStatusConsistencyService implements MasterElectService {
 
     public void init() {
         log.info("start init LBStatusConsistencyService.");
-        localHostIp = MasterHost.resolve(environment);
+        try {
+            localHostIp = InetAddress.getLocalHost().getHostAddress();
+        } catch (UnknownHostException e) {
+            throw new RuntimeException(e);
+        }
         // Read from Spring Environment to respect --server.port= CLI args;
         // fall back to JVM system property.
         serverPort = environment.getProperty("server.port");
@@ -50,6 +56,7 @@ public class LBStatusConsistencyService implements MasterElectService {
             return;
         }
         log.info("start init ZookeeperMasterElectService.");
+
     }
 
     public void start() {
@@ -88,6 +95,11 @@ public class LBStatusConsistencyService implements MasterElectService {
             return false;
         }
         return zookeeperMasterElectService.isMaster();
+    }
+
+    @Override
+    public long getLeadershipEpoch() {
+        return zookeeperMasterElectService.getLeadershipEpoch();
     }
 
     public void refreshMasterHost(boolean forceSync) {

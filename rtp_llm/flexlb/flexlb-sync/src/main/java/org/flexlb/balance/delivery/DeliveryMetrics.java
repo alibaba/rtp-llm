@@ -19,14 +19,18 @@ public final class DeliveryMetrics {
         this.reporter = Objects.requireNonNull(reporter, "reporter");
     }
 
-    public void routesDelivered(int remainingQueueDepth, List<ScheduledRequest> exactItems) {
+    public void routesDelivered(
+            int remainingQueueDepth,
+            List<ScheduledRequest> exactItems) {
         try {
             if (exactItems.isEmpty()) {
                 return;
             }
             ScheduledRequest head = exactItems.get(0);
             String engineIp = prefillIp(head);
-            reporter.reportBatcherQueueSize(PREFILL_ROLE, engineIp, remainingQueueDepth);
+            reporter.reportBatcherQueueSize(
+                    PREFILL_ROLE, engineIp,
+                    remainingQueueDepth);
             long nowMs = System.currentTimeMillis();
             for (ScheduledRequest item : exactItems) {
                 reporter.reportBatchWaitTimeMs(
@@ -52,8 +56,11 @@ public final class DeliveryMetrics {
             }
             ScheduledRequest head = dispatched.get(0);
             String engineIp = prefillIp(head);
-            reporter.reportDispatchReason(PREFILL_ROLE, engineIp, decisionReason);
-            reporter.reportBatcherQueueSize(PREFILL_ROLE, engineIp, remainingQueueDepth);
+            reporter.reportDispatchReason(
+                    PREFILL_ROLE, engineIp, decisionReason);
+            reporter.reportBatcherQueueSize(
+                    PREFILL_ROLE, engineIp,
+                    remainingQueueDepth);
             long nowMs = System.currentTimeMillis();
             long hitTokens = 0L;
             long totalTokens = 0L;
@@ -66,10 +73,14 @@ public final class DeliveryMetrics {
                 hitTokens = saturatedAdd(hitTokens, item.hitCache());
                 totalTokens = saturatedAdd(totalTokens, item.seqLen());
             }
-            reporter.reportBatchCacheHitMetrics(PREFILL_ROLE, engineIp, hitTokens, totalTokens);
-            reporter.reportBatchSize(PREFILL_ROLE, engineIp, decisionReason, dispatched.size());
-            reporter.reportBatchTotalTokens(PREFILL_ROLE, engineIp, decisionReason, totalTokens);
-            reporter.reportBatchPredictedTimeMs(PREFILL_ROLE, engineIp, Math.max(0L, predictedMs));
+            reporter.reportBatchCacheHitMetrics(
+                    PREFILL_ROLE, engineIp, hitTokens, totalTokens);
+            reporter.reportBatchSize(
+                    PREFILL_ROLE, engineIp, decisionReason, dispatched.size());
+            reporter.reportBatchTotalTokens(
+                    PREFILL_ROLE, engineIp, decisionReason, totalTokens);
+            reporter.reportBatchPredictedTimeMs(
+                    PREFILL_ROLE, engineIp, Math.max(0L, predictedMs));
         } catch (Throwable failure) {
             Logger.warn("Batch dispatch telemetry isolated", failure);
         }
@@ -81,6 +92,7 @@ public final class DeliveryMetrics {
 
     private static long saturatedAdd(long left, long right) {
         long nonNegative = Math.max(0L, right);
-        return left > Long.MAX_VALUE - nonNegative ? Long.MAX_VALUE : left + nonNegative;
+        return left > Long.MAX_VALUE - nonNegative
+                ? Long.MAX_VALUE : left + nonNegative;
     }
 }

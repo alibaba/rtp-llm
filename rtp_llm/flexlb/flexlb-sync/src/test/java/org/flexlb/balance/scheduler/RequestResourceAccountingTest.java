@@ -1,5 +1,6 @@
 package org.flexlb.balance.scheduler;
 
+import org.flexlb.testfixture.WorkerStatusTestFixtures;
 import org.flexlb.balance.delivery.DeliveryMetrics;
 import org.flexlb.balance.delivery.DeliveryResult;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
@@ -7,33 +8,39 @@ import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.PrefillState;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
+import org.flexlb.balance.projection.WorkSnapshot;
 import org.flexlb.balance.scheduler.RequestSlot.DeliveryClaim;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.SchedulerConfig;
 import org.flexlb.dao.loadbalance.Response;
-import org.flexlb.dao.master.TaskInfo;
+import org.flexlb.testfixture.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
-import org.flexlb.dao.master.WorkerStatusResponse;
+import org.flexlb.testfixture.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.TaskPhase;
+import org.flexlb.service.monitor.StatusFailureReporter;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
-import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.EnumSource;
+import org.junit.jupiter.params.provider.CsvSource;
 
+import java.lang.ref.WeakReference;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
@@ -45,6 +52,75 @@ class RequestResourceAccountingTest {
     private static final long EXPECTED_KV = 320L;
     private static final long TOTAL_KV = 10_000L;
     private static final long TTL = TimeUnit.HOURS.toMillis(1);
+
+    @ParameterizedTest
+    @CsvSource({"false, false", "false, true", "true, false", "true, true"})
+    void statusTrackingRetainsOnlyExecutionAfterDelivery(boolean batchDelivery, boolean reportingFails) throws Exception {
+        try (Fixture f = new Fixture(false, batchDelivery)) {
+            CountDownLatch reportingEntered = new CountDownLatch(1);
+            CountDownLatch finishReporting = new CountDownLatch(1);
+            AtomicInteger reportedKeys = new AtomicInteger();
+            InputReferences input = observeInput(f.item, reportingEntered, finishReporting, reportedKeys, reportingFails);
+            try {
+                if (batchDelivery) { f.publishBatch(); } else { f.publishRoute(); }
+                assertTrue(reportingEntered.await(2, TimeUnit.SECONDS));
+                assertNotNull(input.context().get(), "response reporting owns the complete input");
+                f.assertHandedOff();
+            } finally {
+                finishReporting.countDown();
+            }
+            if (reportingFails) {
+                var failure = assertThrows(java.util.concurrent.ExecutionException.class,
+                        () -> input.reporting().get(2, TimeUnit.SECONDS));
+                assertEquals("metrics unavailable", failure.getCause().getMessage());
+            } else {
+                input.reporting().get(2, TimeUnit.SECONDS);
+            }
+            assertEquals(2, reportedKeys.get());
+            f.item = null; // Drop the test caller's scheduling input; keep all live ledgers.
+            for (int attempt = 0; attempt < 20 && !input.context().refersTo(null); attempt++) {
+                System.gc();
+                Thread.sleep(50L);
+            }
+            assertTrue(input.scheduled().refersTo(null), "status sync must not retain the scheduling object");
+            assertTrue(input.context().refersTo(null), "status sync must not retain BalanceContext");
+            assertTrue(input.request().refersTo(null), "status sync must not retain the original request/keys");
+            assertTrue(input.payload().refersTo(null), "status sync must not retain the serialized input");
+            f.assertHandedOff();
+
+            TaskInfo task = task(ID);
+            f.decodeStatus(Map.of("101", task), Map.of(), TOTAL_KV - HARD_KV);
+            assertEquals(1, f.decode.resourceSnapshot().runningCount());
+            f.requests.cancelRequest(ID, 0, CancelReason.CLIENT_CANCELLED);
+            assertEquals(1, f.requests.liveRequestCount());
+            applyStatus(f.prefill, status(RoleType.PREFILL, 2L, Map.of(), Map.of("101", task), TOTAL_KV));
+            f.decodeStatus(Map.of(), Map.of("101", task), TOTAL_KV);
+            f.assertEmpty();
+            f.assertCapacityReusable();
+        }
+    }
+
+    private static InputReferences observeInput(ScheduledRequest item, CountDownLatch entered,
+            CountDownLatch finish, AtomicInteger reportedKeys, boolean reportingFails) {
+        var context = item.ctx();
+        context.getRequest().setBlockCacheKeys(List.of(11L, 22L));
+        context.getRequest().setCacheAffinityKeys(List.of("image-key"));
+        var reporting = item.future().whenComplete((response, error) -> {
+            entered.countDown();
+            RequestLifecycleTestSupport.await(finish);
+            reportedKeys.set(context.getRequest().getBlockCacheKeys().size());
+            assertEquals(List.of("image-key"), context.getRequest().getCacheAffinityKeys());
+            if (reportingFails) { throw new IllegalStateException("metrics unavailable"); }
+        });
+        return new InputReferences(new WeakReference<>(item), new WeakReference<>(context),
+                new WeakReference<>(context.getRequest()), new WeakReference<>(context.getGenerateInputPb()), reporting);
+    }
+
+    private record InputReferences(WeakReference<ScheduledRequest> scheduled,
+            WeakReference<org.flexlb.dao.BalanceContext> context,
+            WeakReference<org.flexlb.dao.loadbalance.Request> request,
+            WeakReference<com.google.protobuf.ByteString> payload,
+            CompletableFuture<Response> reporting) { }
 
     @ParameterizedTest
     @EnumSource(LocalEnd.class)
@@ -99,19 +175,11 @@ class RequestResourceAccountingTest {
     }
 
     @ParameterizedTest
-    @EnumSource(
-            value = DeliveryResult.Status.class,
-            names = {"DELIVERED", "UNCERTAIN", "TIMED_OUT"})
-    void responseOrAmbiguousTransportRetainsResourcesUntilInactivity(DeliveryResult.Status result)
-            throws Exception {
+    @EnumSource(value = DeliveryResult.Status.class, names = {"DELIVERED", "UNCERTAIN", "TIMED_OUT"})
+    void responseOrAmbiguousTransportRetainsResourcesUntilInactivity(DeliveryResult.Status result) throws Exception {
         try (Fixture f = new Fixture()) {
             DeliveryClaim claim = f.handoff();
-            claim.complete(
-                    new DeliveryResult(
-                            result,
-                            result == DeliveryResult.Status.DELIVERED
-                                    ? null
-                                    : new IllegalStateException("reply lost")));
+            claim.complete(new DeliveryResult(result, result == DeliveryResult.Status.DELIVERED ? null : new IllegalStateException("reply lost")));
             if (result == DeliveryResult.Status.DELIVERED) {
                 assertTrue(f.item.future().get(2, TimeUnit.SECONDS).isSuccess());
             }
@@ -128,11 +196,8 @@ class RequestResourceAccountingTest {
     void localRollbackCannotReleaseAnEngineOwnerWhoseProjectionHasNotArrived() throws Exception {
         try (Fixture f = new Fixture()) {
             var acquisition = f.decode.acquireDispatchPermit(f.reservation, f.capacity);
-            assertEquals(
-                    DecodeEndpoint.EngineDispatchPermitAcquireStatus.ACQUIRED,
-                    acquisition.status());
-            assertEquals(
-                    DecodeEndpoint.EngineDispatchPermitTransferStatus.TRANSFERRED,
+            assertEquals(DecodeEndpoint.EngineDispatchPermitAcquireStatus.ACQUIRED, acquisition.status());
+            assertEquals(DecodeEndpoint.EngineDispatchPermitTransferStatus.TRANSFERRED,
                     acquisition.permit().dispatch());
             // Endpoint ownership can advance before its notification reaches the slot.
             f.requests.cancelRequest(ID, 0, CancelReason.CLIENT_CANCELLED);
@@ -159,27 +224,20 @@ class RequestResourceAccountingTest {
     }
 
     @Test
-    void runningDecodeWinsAgainstUncertainTransportAndTerminalReclaimsBothEndpoints()
-            throws Exception {
+    void runningDecodeWinsAgainstUncertainTransportAndTerminalReclaimsBothEndpoints() throws Exception {
         try (Fixture f = new Fixture()) {
             DeliveryClaim claim = f.handoff();
             TaskInfo running = task(ID);
             f.decodeStatus(Map.of("101", running), Map.of(), TOTAL_KV - HARD_KV);
             assertEquals(1, f.decode.resourceSnapshot().runningCount());
             assertEquals(1, f.decode.routingView().engineCapacityUsed());
-            assertEquals(
-                    0,
-                    f.decode.routingView().inflightHardKv(),
-                    "Engine status replaces the local KV prediction");
-            claim.complete(
-                    DeliveryResult.uncertain(new IllegalStateException("late transport failure")));
+            assertEquals(0, f.decode.routingView().inflightHardKv(), "Engine status replaces the local KV prediction");
+            claim.complete(DeliveryResult.uncertain(new IllegalStateException("late transport failure")));
             assertTrue(f.item.future().get(2, TimeUnit.SECONDS).isSuccess());
             assertEquals(1, f.requests.liveRequestCount());
             assertEquals(1, f.decode.resourceSnapshot().runningCount());
             assertEquals(1, f.prefill.getLocallyOwnedRequestCount());
-            applyStatus(
-                    f.prefill,
-                    status(RoleType.PREFILL, 2L, Map.of(), Map.of("101", running), TOTAL_KV));
+            applyStatus(f.prefill, status(RoleType.PREFILL, 2L, Map.of(), Map.of("101", running), TOTAL_KV));
             f.decodeStatus(Map.of(), Map.of("101", running), TOTAL_KV);
             f.assertEmpty();
             f.assertCapacityReusable();
@@ -187,30 +245,21 @@ class RequestResourceAccountingTest {
     }
 
     @ParameterizedTest
-    @CsvSource({
-        "RUNNING, RECEIVED",
-        "RUNNING, PENDING",
-        "KV_ALLOCATED, RECEIVED",
-        "KV_ALLOCATED, PENDING"
-    })
-    void decodePhaseRegressionStillDeliversTerminalWithoutInactivity(
-            TaskPhase confirmed, TaskPhase regressed) throws Exception {
+    @CsvSource({"RUNNING, RECEIVED", "RUNNING, PENDING", "KV_ALLOCATED, RECEIVED", "KV_ALLOCATED, PENDING"})
+    void decodePhaseRegressionStillDeliversTerminalWithoutInactivity(TaskPhase confirmed, TaskPhase regressed)
+            throws Exception {
         try (Fixture f = new Fixture()) {
             f.handoff().complete(DeliveryResult.delivered());
             assertTrue(f.item.future().get(2, TimeUnit.SECONDS).isSuccess());
-            applyStatus(
-                    f.prefill,
-                    status(RoleType.PREFILL, 2L, Map.of(), Map.of("101", task(ID)), TOTAL_KV));
+            applyStatus(f.prefill, status(RoleType.PREFILL, 2L, Map.of(), Map.of("101", task(ID)), TOTAL_KV));
             TaskInfo active = task(ID);
             active.setPhase(confirmed);
             f.decodeStatus(Map.of("101", active), Map.of(), TOTAL_KV - HARD_KV);
             TaskInfo stillPresent = task(ID);
             stillPresent.setPhase(regressed);
             f.decodeStatus(Map.of("101", stillPresent), Map.of(), TOTAL_KV);
-            assertEquals(
-                    RequestState.Phase.ACKNOWLEDGED, f.requests.getRequestState(ID, 0).state());
-            // No inactivity expiry, sweep, sleep or shutdown is allowed to make this assertion
-            // pass.
+            assertEquals(RequestState.Phase.ACKNOWLEDGED, f.requests.getRequestState(ID, 0).state());
+            // No inactivity expiry, sweep, sleep or shutdown is allowed to make this assertion pass.
             f.decodeStatus(Map.of(), Map.of("101", task(ID)), TOTAL_KV);
             f.assertEmpty();
             f.assertCapacityReusable();
@@ -225,9 +274,7 @@ class RequestResourceAccountingTest {
             assertEquals(1, f.decode.resourceSnapshot().runningCount());
             f.expire();
             f.assertEmpty();
-            assertEquals(
-                    TOTAL_KV - HARD_KV,
-                    f.decode.realKvAvailable(),
+            assertEquals(TOTAL_KV - HARD_KV, f.decode.realKvAvailable(),
                     "local expiry must not rewrite the last physical Engine KV sample");
             f.assertCapacityReusable();
         }
@@ -241,32 +288,20 @@ class RequestResourceAccountingTest {
             f.expire();
             f.assertEmpty();
             var replacementRef = new AtomicReference<DecodeEndpoint.ReservationHandle>();
-            RequestLifecycleTestSupport.awaitCondition(
-                    () -> {
-                        if (replacementRef.get() != null) {
-                            return true;
-                        }
-                        f.decode.evictExpiredRequests(0, ignored -> false);
-                        try (var pin = f.decode.tryPinGeneration()) {
-                            replacementRef.set(
-                                    f.decode.reserve(pin, ID, HARD_KV * 2, EXPECTED_KV * 2, 50));
-                        }
-                        return replacementRef.get() != null;
-                    });
+            RequestLifecycleTestSupport.awaitCondition(() -> {
+                if (replacementRef.get() != null) { return true; }
+                f.decode.evictExpiredRequests(0, ignored -> false);
+                try (var pin = f.decode.tryPinGeneration()) {
+                    replacementRef.set(f.decode.reserve(pin, ID, HARD_KV * 2, EXPECTED_KV * 2, 50));
+                }
+                return replacementRef.get() != null;
+            });
             var replacement = replacementRef.get();
             assertNotEquals(oldReservation.reservationToken(), replacement.reservationToken());
             oldClaim.complete(DeliveryResult.delivered());
             f.expire();
-            assertFalse(
-                    f.decode
-                            .release(oldReservation, DecodeEndpoint.ReleaseReason.EXPIRED)
-                            .released());
-            assertFalse(
-                    f.decode
-                            .release(
-                                    oldReservation,
-                                    DecodeEndpoint.ReleaseReason.COUNTERPART_FINISHED)
-                            .released());
+            assertFalse(f.decode.release(oldReservation, DecodeEndpoint.ReleaseReason.EXPIRED).released());
+            assertFalse(f.decode.release(oldReservation, DecodeEndpoint.ReleaseReason.COUNTERPART_FINISHED).released());
             assertEquals(HARD_KV * 2, f.decode.routingView().inflightHardKv());
             assertEquals(EXPECTED_KV * 2, f.decode.routingView().inflightExpectedKv());
             assertEquals(replacement, f.decode.reservationHandle(ID));
@@ -275,134 +310,109 @@ class RequestResourceAccountingTest {
         }
     }
 
-    private enum LocalEnd {
-        CANCEL,
-        FUTURE_CANCEL,
-        EXPIRE,
-        SHUTDOWN
-    }
+    private enum LocalEnd { CANCEL, FUTURE_CANCEL, EXPIRE, SHUTDOWN }
 
     private static final class Fixture implements AutoCloseable {
+        final org.flexlb.config.FlexlbConfig config;
         final RequestRegistry requests;
         final SchedulerRuntime runtime;
         final PrefillEndpoint prefill;
         final DecodeEndpoint decode;
-        final ScheduledRequest item;
+        ScheduledRequest item;
         final DecodeEndpoint.ReservationHandle reservation;
         final PrefillState.RouteReservation routeReservation;
         final PrefillState.CommittedHandoff prefillHandoff;
         final RequestSlot.AdmissionHandle admission;
-        final DecodeEndpoint.AdmissionCapacity capacity =
-                new DecodeEndpoint.AdmissionCapacity(1, 90);
+        final DecodeEndpoint.AdmissionCapacity capacity = new DecodeEndpoint.AdmissionCapacity(1, 90);
         long version = 1;
 
-        Fixture() {
-            this(false);
-        }
+        Fixture() { this(false); }
 
-        Fixture(boolean keepAdmissionOpen) {
-            var config = SchedulingTestConfig.newConfig();
-            config.setScheduler(SchedulerConfig.direct());
-            SchedulingTestConfig.useNonBatchDispatcher(config).setMaxInflightPerPrefillWorker(1);
+        Fixture(boolean keepAdmissionOpen) { this(keepAdmissionOpen, false); }
+
+        Fixture(boolean keepAdmissionOpen, boolean batchDelivery) {
+            config = SchedulingTestConfig.newConfig();
+            if (batchDelivery) {
+                SchedulingTestConfig.useFifoQueue(config);
+                SchedulingTestConfig.useBatchDispatcher(config).setMaxInflightPerPrefillWorker(1);
+            } else {
+                config.setScheduler(SchedulerConfig.direct());
+                SchedulingTestConfig.useNonBatchDispatcher(config).setMaxInflightPerPrefillWorker(1);
+            }
             config.getRequestLifecycle().getRequest().setTimeoutMs(TTL);
             ConfigService service = mock(ConfigService.class);
             when(service.loadBalanceConfig()).thenReturn(config);
             var reporter = mock(BatchSchedulerReporter.class);
             var requestReporter = mock(RequestSchedulerReporter.class);
             requests = new RequestRegistry(service, reporter, requestReporter);
-            var projector = new EndpointEventProjector(requests);
-            var endpoints =
-                    new EndpointRegistry(
-                            service,
-                            projector,
-                            reporter,
-                            new RouteDeliveryStrategy(requests, new DeliveryMetrics(reporter)),
-                            new PlacementAvailability());
+            var projector = new EndpointEventProjector(requests, mock(StatusFailureReporter.class));
+            var endpoints = new EndpointRegistry(service, projector, reporter,
+                    new RouteDeliveryStrategy(requests, new DeliveryMetrics(reporter)), new PlacementAvailability());
             runtime = new SchedulerRuntime(requests, endpoints, reporter, requestReporter);
-            var worker =
-                    WorkerStatus.createDiscovered(
-                            RoleType.PREFILL, "g", "127.0.0.1", 8080, 8081, "test");
+            var worker = WorkerStatusTestFixtures.readyForScheduling(WorkerStatus.createDiscovered(RoleType.PREFILL, "g", "127.0.0.1", 8080, 8081, "test"));
             worker.lock.lock();
             try {
-                prefill =
-                        (PrefillEndpoint)
-                                endpoints
-                                        .publishPreparedEndpoint(
-                                                worker.getIpPort(),
-                                                worker,
-                                                worker.prepareNewStatus(
-                                                        worker.freezeStatusResponse(
-                                                                status(
-                                                                        RoleType.PREFILL,
-                                                                        1,
-                                                                        Map.of(),
-                                                                        Map.of(),
-                                                                        TOTAL_KV))))
-                                        .endpoint();
-            } finally {
-                worker.lock.unlock();
-            }
-            decode =
-                    new DecodeEndpoint(
-                            WorkerStatus.createDiscovered(
-                                    RoleType.DECODE, "g", "127.0.0.2", 8080, 8081, "test"),
-                            projector);
+                prefill = (PrefillEndpoint) endpoints.publishPreparedEndpoint(worker.getIpPort(), worker,
+                        WorkerStatusTestFixtures.prepare(worker, WorkerStatusTestFixtures.observation(worker, status(RoleType.PREFILL, 1, Map.of(), Map.of(), TOTAL_KV)))).endpoint();
+            } finally { worker.lock.unlock(); }
+            decode = new DecodeEndpoint(WorkerStatusTestFixtures.readyForScheduling(WorkerStatus.createDiscovered(RoleType.DECODE, "g", "127.0.0.2", 8080, 8081, "test")), projector);
             decodeStatus(Map.of(), Map.of(), TOTAL_KV);
             try (var pin = decode.tryPinGeneration()) {
                 reservation = decode.reserve(pin, ID, HARD_KV, EXPECTED_KV, 50);
             }
             assertNotNull(reservation);
             var context = RequestLifecycleTestSupport.context(config, ID);
+            if (batchDelivery) {
+                context.setGenerateInputPb(com.google.protobuf.ByteString.copyFrom(new byte[1024 * 1024]));
+            }
             var future = requests.register(context);
-            item =
-                    new ScheduledRequest(
-                            context,
-                            future,
-                            new Response(),
-                            null,
-                            null,
-                            prefill,
-                            decode,
-                            reservation,
-                            System.currentTimeMillis());
+            item = new ScheduledRequest(context, future, new Response(), null, null, prefill, decode, reservation, System.currentTimeMillis());
             var held = new AtomicReference<PrefillState.RouteReservation>();
             admission = requests.claimAdmissionHandle(ID, future);
             assertNotNull(admission);
             try (var pin = prefill.tryPinGeneration()) {
-                assertTrue(
-                        requests.commitItemForPublication(
-                                item,
-                                () -> {
-                                    var result = prefill.reserveUnqueuedRoute(pin, item, 30_000);
-                                    assertEquals(
-                                            PrefillState.CapacityStatus.ACQUIRED, result.status());
-                                    held.set(result.reservation());
-                                    return true;
-                                }));
+                assertTrue(requests.commitItemForPublication(item, () -> {
+                    var result = prefill.reserveUnqueuedRoute(pin, item, 30_000);
+                    assertEquals(PrefillState.CapacityStatus.ACQUIRED, result.status());
+                    held.set(result.reservation());
+                    return true;
+                }));
             }
             routeReservation = held.get();
             try (var commit = prefill.tryBeginRouteCommitAdmission()) {
                 assertNotNull(commit);
                 prefillHandoff = commit.commit(List.of(item), List.of(routeReservation));
             }
-            if (!keepAdmissionOpen) {
-                admission.close();
-            }
+            if (!keepAdmissionOpen) { admission.close(); }
         }
 
         DeliveryClaim handoff() {
             var acquisition = decode.acquireDispatchPermit(reservation, capacity);
-            assertEquals(
-                    DecodeEndpoint.EngineDispatchPermitAcquireStatus.ACQUIRED,
-                    acquisition.status());
+            assertEquals(DecodeEndpoint.EngineDispatchPermitAcquireStatus.ACQUIRED, acquisition.status());
             var member = new PrefillAdmissionResources.Member(item, acquisition.permit());
             try (var owner = PrefillAdmissionResources.createCommittedOwner(List.of(member))) {
                 owner.bindPrefillHandoff(prefillHandoff);
-                var claim =
-                        RequestLifecycleTestSupport.claimBatchWithoutPrediction(
-                                requests, item, 1L, () -> owner.transferToEndpoint(item));
+                var claim = requests.requestSlot(item.requestId()).claimDelivery(
+                        item, DeliveryClaimKind.BATCH_ENQUEUE, 1L, () -> owner.transferToEndpoint(item));
                 assertNotNull(claim);
                 return claim;
+            }
+        }
+
+        void publishBatch() {
+            handoff().complete(DeliveryResult.delivered());
+        }
+
+        void publishRoute() {
+            var acquisition = decode.acquireDispatchPermit(reservation, capacity);
+            assertEquals(DecodeEndpoint.EngineDispatchPermitAcquireStatus.ACQUIRED, acquisition.status());
+            var member = new PrefillAdmissionResources.Member(item, acquisition.permit());
+            try (var owner = PrefillAdmissionResources.createCommittedOwner(List.of(member))) {
+                owner.bindPrefillHandoff(prefillHandoff);
+                DeliveryClaim claim = requests.claimRouteDelivery(item, owner);
+                assertNotNull(claim);
+                requests.publishRoute(claim,
+                        new WorkSnapshot(System.currentTimeMillis(), List.of(), List.of(), 0L), 0L);
             }
         }
 
@@ -417,17 +427,14 @@ class RequestResourceAccountingTest {
             assertReserved();
             assertEquals(0, decode.resourceSnapshot().activeDispatchPermits());
             assertEquals(1, decode.routingView().engineCapacityUsed());
-            assertFalse(
-                    capacity.evaluate(decode.routingView().dispatchUsage(), HARD_KV, EXPECTED_KV)
-                            .fits());
+            assertFalse(capacity.evaluate(decode.routingView().dispatchUsage(), HARD_KV, EXPECTED_KV).fits());
         }
 
         void assertEmpty() {
             assertEquals(0, requests.liveRequestCount(), "request inflight");
             assertEquals(0, prefill.queuedRequestCount(), "Prefill queue membership");
             assertEquals(0, prefill.getLocallyOwnedRequestCount(), "Prefill inflight");
-            assertEquals(
-                    0, prefill.getIndividuallyTrackedRequestCount(), "Prefill individual lease");
+            assertEquals(0, prefill.getIndividuallyTrackedRequestCount(), "Prefill individual lease");
             assertEquals(0, prefill.getInflightBatchCount(), "Prefill batch occupancy");
             var view = decode.resourceSnapshot();
             assertEquals(0, view.routing().inflightHardKv(), "Decode hard KV reservation");
@@ -446,24 +453,14 @@ class RequestResourceAccountingTest {
                 var next = decode.reserve(pin, 999L, HARD_KV, EXPECTED_KV, 50);
                 assertNotNull(next);
                 var permit = decode.acquireDispatchPermit(next, capacity);
-                assertEquals(
-                        DecodeEndpoint.EngineDispatchPermitAcquireStatus.ACQUIRED, permit.status());
+                assertEquals(DecodeEndpoint.EngineDispatchPermitAcquireStatus.ACQUIRED, permit.status());
                 assertTrue(permit.permit().release());
                 decode.release(next, DecodeEndpoint.ReleaseReason.LOCAL_ROLLBACK);
             }
             // A second exact request must be able to use the sole Prefill slot too.
-            var nextContext = RequestLifecycleTestSupport.context(item.ctx().getConfig(), 999L);
-            var next =
-                    new ScheduledRequest(
-                            nextContext,
-                            new CompletableFuture<>(),
-                            new Response(),
-                            null,
-                            null,
-                            prefill,
-                            null,
-                            null,
-                            System.currentTimeMillis());
+            var nextContext = RequestLifecycleTestSupport.context(config, 999L);
+            var next = new ScheduledRequest(nextContext, new CompletableFuture<>(),
+                    new Response(), null, null, prefill, null, null, System.currentTimeMillis());
             try (var pin = prefill.tryPinGeneration()) {
                 var result = prefill.reserveUnqueuedRoute(pin, next, 1);
                 assertEquals(PrefillState.CapacityStatus.ACQUIRED, result.status());
@@ -472,16 +469,10 @@ class RequestResourceAccountingTest {
             assertEmpty();
         }
 
-        void expire() {
-            requests.expireInactiveRequest(
-                    requests.requestSlot(ID), System.currentTimeMillis() + TTL + 1);
-        }
-
-        void decodeStatus(
-                Map<String, TaskInfo> running, Map<String, TaskInfo> finished, long freeKv) {
+        void expire() { requests.expireInactiveRequest(requests.requestSlot(ID), System.currentTimeMillis() + TTL + 1); }
+        void decodeStatus(Map<String, TaskInfo> running, Map<String, TaskInfo> finished, long freeKv) {
             applyStatus(decode, status(RoleType.DECODE, version++, running, finished, freeKv));
         }
-
         @Override
         public void close() {
             try {
@@ -503,12 +494,8 @@ class RequestResourceAccountingTest {
         return task;
     }
 
-    private static WorkerStatusResponse status(
-            RoleType role,
-            long version,
-            Map<String, TaskInfo> running,
-            Map<String, TaskInfo> finished,
-            long freeKv) {
+    private static WorkerStatusResponse status(RoleType role, long version, Map<String, TaskInfo> running,
+                                                Map<String, TaskInfo> finished, long freeKv) {
         var response = new WorkerStatusResponse();
         response.setRole(role);
         response.setAlive(true);
@@ -526,13 +513,8 @@ class RequestResourceAccountingTest {
         var worker = endpoint.getStatus();
         Runnable projection;
         worker.lock.lock();
-        try {
-            projection =
-                    endpoint.applyPreparedStatus(
-                            worker, worker.prepareNewStatus(worker.freezeStatusResponse(response)));
-        } finally {
-            worker.lock.unlock();
-        }
+        try { projection = endpoint.applyPreparedStatus(worker, WorkerStatusTestFixtures.prepare(worker, WorkerStatusTestFixtures.observation(worker, response))); }
+        finally { worker.lock.unlock(); }
         projection.run();
     }
 }

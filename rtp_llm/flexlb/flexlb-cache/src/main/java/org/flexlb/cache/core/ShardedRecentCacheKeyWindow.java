@@ -15,11 +15,11 @@ import java.util.function.LongSupplier;
 @Component
 public class ShardedRecentCacheKeyWindow {
     private final RecentCacheKeyWindow window;
+    private long leadershipEpoch = Long.MIN_VALUE;
 
     @Autowired
     public ShardedRecentCacheKeyWindow(ConfigService configService) {
-        this(
-                RecentCacheKeyWindow.resolveTimeWindowMs(configService),
+        this(RecentCacheKeyWindow.resolveTimeWindowMs(configService),
                 RecentCacheKeyWindow.resolveMaxCacheKeys(configService),
                 System::currentTimeMillis);
     }
@@ -28,7 +28,21 @@ public class ShardedRecentCacheKeyWindow {
         this.window = new RecentCacheKeyWindow(timeWindowMs, maxCacheKeys, nowSupplier);
     }
 
-    public RecentCacheKeyWindow.Snapshot record(long requestId, List<Long> cacheKeys) {
+    public synchronized RecentCacheKeyWindow.Snapshot record(long requestId, List<Long> cacheKeys) {
         return window.record(cacheKeys);
     }
+
+    public synchronized RecentCacheKeyWindow.Snapshot recordForLeader(long epoch, List<Long> cacheKeys) {
+        if (leadershipEpoch != epoch) {
+            window.reset();
+            leadershipEpoch = epoch;
+        }
+        return window.record(cacheKeys);
+    }
+
+    public synchronized void reset() {
+        window.reset();
+        leadershipEpoch = Long.MIN_VALUE;
+    }
+
 }

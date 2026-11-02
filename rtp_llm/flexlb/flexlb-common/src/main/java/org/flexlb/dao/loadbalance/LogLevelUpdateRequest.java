@@ -11,4 +11,5 @@ public class LogLevelUpdateRequest {
 
     @JsonProperty("log_level")
     private LogLevel logLevel;
+
 }

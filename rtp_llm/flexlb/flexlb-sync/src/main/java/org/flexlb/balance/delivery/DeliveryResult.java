@@ -8,7 +8,8 @@ public record DeliveryResult(Status status, Throwable cause) {
             throw new IllegalArgumentException("delivery status is required");
         }
         if ((status == Status.DELIVERED) == (cause != null)) {
-            throw new IllegalArgumentException("only unsuccessful delivery requires a cause");
+            throw new IllegalArgumentException(
+                    "only unsuccessful delivery requires a cause");
         }
     }
 

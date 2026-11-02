@@ -14,9 +14,7 @@ class ResponseCopyTest {
 
     @Test
     void copiesAllResponseDataWithoutSharingMutableObjects() throws Exception {
-        Response source =
-                mapper.readValue(
-                        """
+        Response source = mapper.readValue("""
                 {
                   "server_status": [{
                     "role": "PREFILL", "server_ip": "127.0.0.1",
@@ -32,26 +30,24 @@ class ResponseCopyTest {
                   "success": true, "code": 202, "error_message": "detail",
                   "real_master_host": "master:9000", "queue_length": 11,
                   "enqueued_by_master": true, "ready": false,
+                  "requires_generate_input": false,
                   "admission_reject_reason": "RESOURCE_EXHAUSTED",
                   "worker_summary": {
                     "PREFILL": {"discovered": 12, "alive": 13, "maxQueueTokens": 14},
                     "DECODE": null
                   }
                 }
-                """,
-                        Response.class);
+                """, Response.class);
 
         Response copy = Response.copyOf(source);
         assertEquals(mapper.valueToTree(source), mapper.valueToTree(copy));
         assertNotSame(source, copy);
         assertNotSame(source.getServerStatus(), copy.getServerStatus());
         assertNotSame(source.getServerStatus().get(0), copy.getServerStatus().get(0));
-        assertNotSame(
-                source.getServerStatus().get(0).getDebugInfo(),
+        assertNotSame(source.getServerStatus().get(0).getDebugInfo(),
                 copy.getServerStatus().get(0).getDebugInfo());
         assertNotSame(source.getWorkerSummary(), copy.getWorkerSummary());
-        assertNotSame(
-                source.getWorkerSummary().get("PREFILL"), copy.getWorkerSummary().get("PREFILL"));
+        assertNotSame(source.getWorkerSummary().get("PREFILL"), copy.getWorkerSummary().get("PREFILL"));
 
         copy.getServerStatus().get(0).getDebugInfo().setQueueSize(99);
         copy.getServerStatus().get(0).setServerIp("changed");
@@ -86,8 +82,7 @@ class ResponseCopyTest {
         assertEquals(type.getErrorCode(), failure.getCode());
         assertEquals(type.buildErrorMessage("delivery failed"), failure.getErrorMessage());
         assertEquals(AdmissionRejectReason.UNSPECIFIED, failure.getAdmissionRejectReason());
-        assertEquals(
-                type.buildErrorMessage(null),
+        assertEquals(type.buildErrorMessage(null),
                 Response.buildErrorResponse(type, null).getErrorMessage());
     }
 
@@ -100,6 +95,8 @@ class ResponseCopyTest {
         Response copy = Response.copyOf(new Response());
         assertNull(copy.getServerStatus());
         assertNull(copy.getWorkerSummary());
+        assertNull(copy.getRequiresGenerateInput());
+        assertFalse(mapper.valueToTree(copy).has("requires_generate_input"));
         assertNull(ServerStatus.copyOf(new ServerStatus()).getDebugInfo());
         assertTrue(copy.isReady());
     }

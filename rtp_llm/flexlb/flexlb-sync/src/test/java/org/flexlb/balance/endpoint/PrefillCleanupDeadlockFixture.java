@@ -1,32 +1,23 @@
 package org.flexlb.balance.endpoint;
 
+import org.flexlb.balance.scheduler.RequestExecution;
 import org.flexlb.balance.scheduler.ScheduledRequest;
-
 import java.util.Comparator;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.LongPredicate;
-
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertNotNull;
-import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.when;
+import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.Mockito.*;
 
 /** Package-local admission APIs exercised through real committed requests. */
 public final class PrefillCleanupDeadlockFixture {
     private final AtomicLong clock = new AtomicLong(100);
     private final ReentrantLock lock = new ReentrantLock();
-    private final PrefillState state =
-            new PrefillState(
-                    lock,
-                    PrefillActiveIndex.ordered(
-                            4, Comparator.comparingLong(ScheduledRequest::requestId)),
-                    clock::get,
-                    () -> {});
-    private final EndpointGenerationLifecycle generation =
-            new EndpointGenerationLifecycle(() -> {});
+    private final PrefillState state = new PrefillState(lock,
+            PrefillActiveIndex.ordered(4, Comparator.comparingLong(ScheduledRequest::requestId)),
+            clock::get, () -> { });
+    private final EndpointGenerationLifecycle generation = new EndpointGenerationLifecycle(() -> { });
     private final ScheduledRequest next;
 
     public PrefillCleanupDeadlockFixture(long requestId, boolean batch) {
@@ -34,9 +25,7 @@ public final class PrefillCleanupDeadlockFixture {
         next = item(requestId + 1);
         if (batch) {
             enqueue(first);
-            try (var reservation =
-                    state.reserveBatch(first, 1L, 2, generation.tryAcquireHandoff())
-                            .reservation()) {
+            try (var reservation = state.reserveBatch(first, 1L, 2, generation.tryAcquireHandoff()).reservation()) {
                 assertNotNull(reservation);
                 try (var handoff = reservation.commit(List.of(first), 20L)) {
                     assertNotNull(handoff);
@@ -45,11 +34,8 @@ public final class PrefillCleanupDeadlockFixture {
         } else {
             try (var reservation = state.reserveUnqueuedRoute(first, 20L, 0L).reservation()) {
                 assertNotNull(reservation);
-                try (var handoff =
-                        state.commitRouteGroup(
-                                List.of(first),
-                                List.of(reservation),
-                                generation.tryAcquireHandoff())) {
+                try (var handoff = state.commitRouteGroup(
+                        List.of(first), List.of(reservation), generation.tryAcquireHandoff())) {
                     assertNotNull(handoff);
                 }
             }
@@ -69,25 +55,25 @@ public final class PrefillCleanupDeadlockFixture {
     }
 
     public void reserveNextBatch() {
-        try (var reservation =
-                state.reserveBatch(next, 2L, 2, generation.tryAcquireHandoff()).reservation()) {
+        try (var reservation = state.reserveBatch(next, 2L, 2, generation.tryAcquireHandoff()).reservation()) {
             assertNotNull(reservation);
         }
     }
 
     private void enqueue(ScheduledRequest item) {
         lock.lock();
-        try {
-            assertTrue(state.enqueueActiveUnderLock(item, Long.MAX_VALUE));
-        } finally {
-            lock.unlock();
-        }
+        try { assertTrue(state.enqueueActiveUnderLock(item, Long.MAX_VALUE)); }
+        finally { lock.unlock(); }
     }
 
     private static ScheduledRequest item(long id) {
         ScheduledRequest item = mock(ScheduledRequest.class);
         when(item.requestId()).thenReturn(id);
+        RequestExecution execution = mock(RequestExecution.class);
+        when(execution.requestId()).thenReturn(id);
+        when(item.execution()).thenReturn(execution);
         when(item.seqLen()).thenReturn(100L);
+        when(execution.seqLen()).thenReturn(100L);
         return item;
     }
 }

@@ -51,9 +51,7 @@ public class MicrometerFlexMonitor implements FlexMonitor {
      */
     public static void setAllowedMetrics(Set<String> metrics) {
         ALLOWED_METRICS = metrics;
-        log.info(
-                "MicrometerFlexMonitor allowlist set: {} metrics",
-                metrics == null ? "unlimited" : metrics.size());
+        log.info("MicrometerFlexMonitor allowlist set: {} metrics", metrics == null ? "unlimited" : metrics.size());
     }
 
     private final MeterRegistry meterRegistry;
@@ -70,8 +68,7 @@ public class MicrometerFlexMonitor implements FlexMonitor {
      */
     public MicrometerFlexMonitor(MeterRegistry meterRegistry) {
         this.meterRegistry = meterRegistry;
-        log.debug(
-                "MicrometerFlexMonitor initialized with MeterRegistry: {}",
+        log.debug("MicrometerFlexMonitor initialized with MeterRegistry: {}",
                 meterRegistry.getClass().getSimpleName());
     }
 
@@ -85,8 +82,7 @@ public class MicrometerFlexMonitor implements FlexMonitor {
     }
 
     @Override
-    public void register(
-            String metricName, FlexMetricType metricType, FlexPriorityType priorityType) {
+    public void register(String metricName, FlexMetricType metricType, FlexPriorityType priorityType) {
         register(metricName, metricType);
     }
 
@@ -168,23 +164,17 @@ public class MicrometerFlexMonitor implements FlexMonitor {
     }
 
     private Counter counter(MetricKey key) {
-        return counterCache.computeIfAbsent(
-                key,
-                ignored ->
-                        Counter.builder(key.name())
-                                .tags(resolveTags(key.metricsTags()))
-                                .register(meterRegistry));
+        return counterCache.computeIfAbsent(key, ignored -> Counter.builder(key.name())
+                .tags(resolveTags(key.metricsTags()))
+                .register(meterRegistry));
     }
 
     private Timer timer(MetricKey key) {
-        return timerCache.computeIfAbsent(
-                key,
-                ignored ->
-                        Timer.builder(key.name())
-                                .tags(resolveTags(key.metricsTags()))
-                                .publishPercentileHistogram(true)
-                                .publishPercentiles(0.5, 0.9, 0.95, 0.99)
-                                .register(meterRegistry));
+        return timerCache.computeIfAbsent(key, ignored -> Timer.builder(key.name())
+                .tags(resolveTags(key.metricsTags()))
+                .publishPercentileHistogram(true)
+                .publishPercentiles(0.5, 0.9, 0.95, 0.99)
+                .register(meterRegistry));
     }
 
     /**
@@ -201,16 +191,13 @@ public class MicrometerFlexMonitor implements FlexMonitor {
     }
 
     private GaugeEntry gaugeEntry(MetricKey key) {
-        return gaugeCache.computeIfAbsent(
-                key,
-                ignored -> {
-                    AtomicDouble value = new AtomicDouble(0.0);
-                    Gauge gauge =
-                            Gauge.builder(key.name(), value, AtomicDouble::get)
-                                    .tags(resolveTags(key.metricsTags()))
-                                    .register(meterRegistry);
-                    return new GaugeEntry(value, gauge);
-                });
+        return gaugeCache.computeIfAbsent(key, ignored -> {
+            AtomicDouble value = new AtomicDouble(0.0);
+            Gauge gauge = Gauge.builder(key.name(), value, AtomicDouble::get)
+                    .tags(resolveTags(key.metricsTags()))
+                    .register(meterRegistry);
+            return new GaugeEntry(value, gauge);
+        });
     }
 
     /**
@@ -230,14 +217,14 @@ public class MicrometerFlexMonitor implements FlexMonitor {
         return tags;
     }
 
-    private record MetricKey(String name, FlexMetricTags metricsTags) {}
+    private record MetricKey(String name, FlexMetricTags metricsTags) {
+    }
 
-    private record GaugeEntry(AtomicDouble value, Gauge gauge) {}
+    private record GaugeEntry(AtomicDouble value, Gauge gauge) {
+    }
 
     @Override
     public String toString() {
-        return "MicrometerFlexMonitor{meterRegistry="
-                + meterRegistry.getClass().getSimpleName()
-                + "}";
+        return "MicrometerFlexMonitor{meterRegistry=" + meterRegistry.getClass().getSimpleName() + "}";
     }
 }

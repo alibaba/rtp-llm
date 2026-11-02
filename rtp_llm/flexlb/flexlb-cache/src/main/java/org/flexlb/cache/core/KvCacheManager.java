@@ -3,6 +3,7 @@ package org.flexlb.cache.core;
 import lombok.extern.slf4j.Slf4j;
 import org.flexlb.cache.domain.DiffResult;
 import org.flexlb.cache.monitor.CacheMetricsReporter;
+import org.flexlb.dao.master.EndpointTrace;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
@@ -12,6 +13,7 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * KV cache manager
@@ -25,14 +27,22 @@ import java.util.Set;
 @Component
 public class KvCacheManager {
 
-    @Autowired private GlobalCacheIndex globalCacheIndex;
+    @Autowired
+    private GlobalCacheIndex globalCacheIndex;
 
-    @Autowired private EngineLocalView engineLocalView;
+    @Autowired
+    private EngineLocalView engineLocalView;
 
     /**
      * Cache metrics reporter
      */
-    @Autowired private CacheMetricsReporter cacheMetricsReporter;
+    @Autowired
+    private CacheMetricsReporter cacheMetricsReporter;
+
+    // An interrupted add may have reached only the local view. Retain just that
+    // key for replay; the next diff recovers the remaining changes from the views.
+    // Callers serialize each address through its generation's cache lock.
+    private final Map<String, Long> pendingAdditions = new ConcurrentHashMap<>();
 
     @PostConstruct
     public void init() {
@@ -52,8 +62,9 @@ public class KvCacheManager {
      * @param candidateEngineIpPorts exact live candidate addresses
      * @return Engine matching result map, key: engineIpPort, value: prefixMatchLength
      */
-    public Map<String /*engineIpPort*/, Integer /*prefixMatchLength*/> findMatchingEngines(
-            List<Long> blockCacheKeys, List<String> candidateEngineIpPorts) {
+    public Map<String/*engineIpPort*/, Integer/*prefixMatchLength*/> findMatchingEngines(
+            List<Long> blockCacheKeys,
+            List<String> candidateEngineIpPorts) {
 
         if (blockCacheKeys == null || blockCacheKeys.isEmpty()) {
             return Collections.emptyMap();
@@ -71,9 +82,16 @@ public class KvCacheManager {
      * @param role           Engine role
      * @param newCacheBlocks New cache block set (blockCacheKeys)
      */
-    public void updateEngineCache(String engineIPort, String role, Set<Long> newCacheBlocks) {
+    public void updateEngineCache(
+            String engineIPort, String role, Set<Long> newCacheBlocks, EndpointTrace.Poll pollTrace) {
         if (engineIPort == null || newCacheBlocks == null) {
             return;
+        }
+
+        Long pending = pendingAdditions.get(engineIPort);
+        if (pending != null) {
+            addCacheBlock(engineIPort, pending, pollTrace);
+            pendingAdditions.remove(engineIPort);
         }
 
         // Calculate diff
@@ -82,42 +100,47 @@ public class KvCacheManager {
             return;
         }
 
-        // Apply added cache blocks
-        for (Long addedBlock : diffResult.getAddedBlocks()) {
-            boolean contains = newCacheBlocks.contains(addedBlock);
-            if (contains) {
-                // Update local view
-                engineLocalView.addOrUpdateCacheBlock(engineIPort, addedBlock);
-                // Update global index
-                globalCacheIndex.addCacheBlock(addedBlock, engineIPort);
-            }
+        for (Long key : diffResult.getAddedBlocks()) {
+            addCacheBlock(engineIPort, key, pollTrace);
         }
-
-        // Apply removed cache blocks
-        for (Long removedBlock : diffResult.getRemovedBlocks()) {
-            // Remove from local view
-            engineLocalView.removeCacheBlock(engineIPort, removedBlock);
-            // Remove from global index
-            globalCacheIndex.removeCacheBlock(engineIPort, removedBlock);
+        for (Long key : diffResult.getRemovedBlocks()) {
+            // Retain ownership until global removal succeeds for cleanup/replay.
+            globalCacheIndex.removeCacheBlock(engineIPort, key, pollTrace);
+            engineLocalView.removeCacheBlock(engineIPort, key);
         }
 
         // Report metrics
         cacheMetricsReporter.reportEngineLocalMetrics(
                 engineIPort.split(":")[0], role, engineLocalView.size(engineIPort));
-        cacheMetricsReporter.reportGlobalCacheMetrics(
-                globalCacheIndex.totalBlocks(), globalCacheIndex.totalMappings());
+        cacheMetricsReporter.reportGlobalCacheMetrics(globalCacheIndex.totalBlocks(), globalCacheIndex.totalMappings());
         cacheMetricsReporter.reportEngineViewsMapSize(engineLocalView.getEngineViewsMapSize());
     }
 
+    private void addCacheBlock(String address, Long key, EndpointTrace.Poll pollTrace) {
+        try {
+            // Track ownership first, including a global write that fails midway.
+            engineLocalView.addOrUpdateCacheBlock(address, key);
+            globalCacheIndex.addCacheBlock(key, address, pollTrace);
+        } catch (RuntimeException | Error failure) {
+            pendingAdditions.put(address, key);
+            throw failure;
+        }
+    }
+
     /** Remove both local and global cache-index state for one engine. */
-    public void removeEngineCache(String engineIpPort) {
+    public void removeEngineCache(String engineIpPort, EndpointTrace trace) {
         if (engineIpPort == null) {
             return;
         }
+        // The cache lock excludes writers. Retain ownership on failure so a
+        // retry can safely repeat removal of any already-removed mappings.
+        Set<Long> removedBlocks = engineLocalView.getEngineCacheBlocks(engineIpPort);
+        globalCacheIndex.removeAllCacheBlockOfEngine(engineIpPort, removedBlocks, trace);
         engineLocalView.removeAllCacheBlockOfEngine(engineIpPort);
-        globalCacheIndex.removeAllCacheBlockOfEngine(engineIpPort);
+        pendingAdditions.remove(engineIpPort);
         cacheMetricsReporter.reportGlobalCacheMetrics(
-                globalCacheIndex.totalBlocks(), globalCacheIndex.totalMappings());
+                globalCacheIndex.totalBlocks(),
+                globalCacheIndex.totalMappings());
     }
 
     /**
@@ -127,10 +150,10 @@ public class KvCacheManager {
 
         globalCacheIndex.clear();
         engineLocalView.clear();
+        pendingAdditions.clear();
 
         // Report
-        cacheMetricsReporter.reportGlobalCacheMetrics(
-                globalCacheIndex.totalBlocks(), globalCacheIndex.totalMappings());
+        cacheMetricsReporter.reportGlobalCacheMetrics(globalCacheIndex.totalBlocks(), globalCacheIndex.totalMappings());
 
         log.info("Cleared all cache data");
     }

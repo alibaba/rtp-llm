@@ -4,6 +4,7 @@ import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
 import org.flexlb.config.ConfigService;
 
+import java.util.Arrays;
 import java.util.List;
 import java.util.function.LongSupplier;
 
@@ -39,6 +40,8 @@ public class RecentCacheKeyWindow {
     private int keyTail;
     private int keySize;
     private int uniqueSize;
+    private boolean historyStarted;
+    private long historyStartMs;
 
     RecentCacheKeyWindow(long timeWindowMs, long maxCacheKeys, LongSupplier nowSupplier) {
         this.timeWindowMs = normalizeTimeWindowMs(timeWindowMs);
@@ -55,8 +58,7 @@ public class RecentCacheKeyWindow {
         this.tableCounts = new int[hashTableCapacity];
         this.tableStates = new byte[hashTableCapacity];
 
-        log.info(
-                "Recent cache-key pool config: timeWindowMs={}, maxCacheKeys={}, hashTableCapacity={}",
+        log.info("Recent cache-key pool config: timeWindowMs={}, maxCacheKeys={}, hashTableCapacity={}",
                 this.timeWindowMs,
                 this.maxCacheKeys,
                 hashTableCapacity);
@@ -69,20 +71,40 @@ public class RecentCacheKeyWindow {
     Snapshot record(List<Long> cacheKeys, long nowMs) {
         long requestOccurrences;
         long requestHitOccurrences;
+        long historyCoverageMs;
         synchronized (this) {
+            if (!historyStarted) {
+                historyStarted = true;
+                historyStartMs = nowMs;
+            }
             evictExpired(nowMs);
             requestOccurrences = countNonNull(cacheKeys);
             requestHitOccurrences = countHits(cacheKeys);
+            historyCoverageMs = Math.min(timeWindowMs, Math.max(0L, nowMs - historyStartMs));
 
             if (requestOccurrences > 0L) {
                 retainRequest(cacheKeys, requestOccurrences, nowMs);
             }
+
         }
 
         if (log.isDebugEnabled()) {
             logRequest(nowMs, requestOccurrences, requestHitOccurrences);
         }
-        return new Snapshot(timeWindowMs, requestOccurrences, requestHitOccurrences);
+        return new Snapshot(timeWindowMs, requestOccurrences, requestHitOccurrences, historyCoverageMs);
+    }
+
+    public synchronized void reset() {
+        if (!historyStarted) {
+            return;
+        }
+        Arrays.fill(tableStates, EMPTY);
+        entryHead = 0;
+        entrySize = 0;
+        keyTail = 0;
+        keySize = 0;
+        uniqueSize = 0;
+        historyStarted = false;
     }
 
     private long countNonNull(List<Long> cacheKeys) {
@@ -117,19 +139,21 @@ public class RecentCacheKeyWindow {
 
     private void retainRequest(List<Long> cacheKeys, long requestOccurrences, long nowMs) {
         if (requestOccurrences > maxCacheKeys) {
-            log.debug(
-                    "Recent cache-key request exceeds pool capacity; skip retaining request: "
+            historyStartMs = Math.max(historyStartMs, nowMs);
+            log.debug("Recent cache-key request exceeds pool capacity; skip retaining request: "
                             + "requestCacheKeys={}, maxCacheKeys={}",
                     requestOccurrences,
                     maxCacheKeys);
             return;
         }
 
-        while (keySize + requestOccurrences > maxCacheKeys && evictOldestEntry()) {
-            // Make enough room for the current request.
+        while (keySize + requestOccurrences > maxCacheKeys && entrySize > 0) {
+            historyStartMs = Math.max(historyStartMs, entryTimestampMs[entryHead]);
+            evictOldestEntry();
         }
-        while (entrySize >= maxCacheKeys && evictOldestEntry()) {
-            // Keep one entry slot for the current request.
+        while (entrySize >= maxCacheKeys) {
+            historyStartMs = Math.max(historyStartMs, entryTimestampMs[entryHead]);
+            evictOldestEntry();
         }
 
         int start = keyTail;
@@ -250,12 +274,8 @@ public class RecentCacheKeyWindow {
     }
 
     private void logRequest(long nowMs, long requestOccurrences, long requestHitOccurrences) {
-        double hitRatio =
-                requestOccurrences > 0L
-                        ? requestHitOccurrences / (double) requestOccurrences
-                        : 0.0D;
-        log.debug(
-                "Recent cache-key request: nowMs={}, requestCacheKeys={}, hitCacheKeys={}, "
+        double hitRatio = requestOccurrences > 0L ? requestHitOccurrences / (double) requestOccurrences : 0.0D;
+        log.debug("Recent cache-key request: nowMs={}, requestCacheKeys={}, hitCacheKeys={}, "
                         + "hitRatio={}, poolCacheKeys={}, poolUniqueCacheKeys={}, poolDuplicateCacheKeys={}, "
                         + "poolEntries={}, maxCacheKeys={}, timeWindowMs={}",
                 nowMs,
@@ -274,48 +294,33 @@ public class RecentCacheKeyWindow {
         if (configService == null || configService.loadBalanceConfig() == null) {
             return DEFAULT_TIME_WINDOW_MS;
         }
-        return configService
-                .loadBalanceConfig()
-                .getObservability()
-                .getCacheHit()
-                .getRecentKeyWindow()
-                .getDurationMs();
+        return configService.loadBalanceConfig().getObservability().getCacheHit()
+                .getRecentKeyWindow().getDurationMs();
     }
 
     static long resolveMaxCacheKeys(ConfigService configService) {
         if (configService == null || configService.loadBalanceConfig() == null) {
             return DEFAULT_MAX_CACHE_KEYS;
         }
-        return configService
-                .loadBalanceConfig()
-                .getObservability()
-                .getCacheHit()
-                .getRecentKeyWindow()
-                .getMaxKeyOccurrences();
+        return configService.loadBalanceConfig().getObservability().getCacheHit()
+                .getRecentKeyWindow().getMaxKeyOccurrences();
     }
 
     private static long normalizeTimeWindowMs(long candidateMs) {
         if (candidateMs > 0L) {
             return candidateMs;
         }
-        log.warn(
-                "Invalid cacheHitTimeWindowMs: {}, fallback to default: {}",
-                candidateMs,
-                DEFAULT_TIME_WINDOW_MS);
+        log.warn("Invalid cacheHitTimeWindowMs: {}, fallback to default: {}", candidateMs, DEFAULT_TIME_WINDOW_MS);
         return DEFAULT_TIME_WINDOW_MS;
     }
 
     private static int normalizeCapacity(long candidate) {
         if (candidate <= 0L) {
-            log.warn(
-                    "Invalid cacheHitMaxCacheKeys: {}, fallback to default: {}",
-                    candidate,
-                    DEFAULT_MAX_CACHE_KEYS);
+            log.warn("Invalid cacheHitMaxCacheKeys: {}, fallback to default: {}", candidate, DEFAULT_MAX_CACHE_KEYS);
             return (int) DEFAULT_MAX_CACHE_KEYS;
         }
         if (candidate > MAX_ARRAY_SIZE) {
-            log.warn(
-                    "cacheHitMaxCacheKeys is too large for preallocated arrays: {}, cap to {}",
+            log.warn("cacheHitMaxCacheKeys is too large for preallocated arrays: {}, cap to {}",
                     candidate,
                     MAX_ARRAY_SIZE);
             return MAX_ARRAY_SIZE;
@@ -324,8 +329,7 @@ public class RecentCacheKeyWindow {
     }
 
     private static int hashTableCapacityFor(int maxCacheKeys) {
-        long needed =
-                Math.max(MIN_HASH_TABLE_SIZE, (long) Math.ceil(maxCacheKeys / HASH_LOAD_FACTOR));
+        long needed = Math.max(MIN_HASH_TABLE_SIZE, (long) Math.ceil(maxCacheKeys / HASH_LOAD_FACTOR));
         int capacity = MIN_HASH_TABLE_SIZE;
         while (capacity < needed && capacity < (1 << 30)) {
             capacity <<= 1;
@@ -353,11 +357,17 @@ public class RecentCacheKeyWindow {
         private final long timeWindowMs;
         private final long requestOccurrences;
         private final long requestHitOccurrences;
+        private final long historyCoverageMs;
 
-        Snapshot(long timeWindowMs, long requestOccurrences, long requestHitOccurrences) {
+        Snapshot(long timeWindowMs, long requestOccurrences, long requestHitOccurrences, long historyCoverageMs) {
             this.timeWindowMs = timeWindowMs;
             this.requestOccurrences = requestOccurrences;
             this.requestHitOccurrences = requestHitOccurrences;
+            this.historyCoverageMs = historyCoverageMs;
+        }
+
+        public boolean isHistoryComplete() {
+            return historyCoverageMs >= timeWindowMs;
         }
     }
 }

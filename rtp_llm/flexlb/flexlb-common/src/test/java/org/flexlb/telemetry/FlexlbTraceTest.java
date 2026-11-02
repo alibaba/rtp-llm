@@ -46,17 +46,15 @@ class FlexlbTraceTest {
     void setUp() {
         GlobalOpenTelemetry.resetForTest();
         exporter = new RecordingExporter();
-        SdkTracerProvider provider =
-                SdkTracerProvider.builder()
-                        .setSampler(Sampler.alwaysOn())
-                        .addSpanProcessor(SimpleSpanProcessor.create(exporter))
-                        .build();
-        sdk =
-                OpenTelemetrySdk.builder()
-                        .setTracerProvider(provider)
-                        .setPropagators(
-                                ContextPropagators.create(W3CTraceContextPropagator.getInstance()))
-                        .build();
+        SdkTracerProvider provider = SdkTracerProvider.builder()
+                .setSampler(Sampler.alwaysOn())
+                .addSpanProcessor(SimpleSpanProcessor.create(exporter))
+                .build();
+        sdk = OpenTelemetrySdk.builder()
+                .setTracerProvider(provider)
+                .setPropagators(ContextPropagators.create(
+                        W3CTraceContextPropagator.getInstance()))
+                .build();
         GlobalOpenTelemetry.set(sdk);
         FlexlbTrace.configure(sdk, "");
     }
@@ -82,27 +80,18 @@ class FlexlbTraceTest {
             FlexlbTrace.setScheduleAttribute(context, AttributeKey.stringKey("mode"), "BATCH");
             FlexlbTrace.setScheduleAttribute(context, AttributeKey.booleanKey("batch"), true);
             FlexlbTrace.markBusinessError(context, 500, "FLEXLB_INTERNAL_ERROR");
+            FlexlbTrace.recordPlacement(context, System.nanoTime(), "BLOCKED", Map.of("workers", 42), null);
+            FlexlbTrace.recordScheduleFailure(context, 8431, "ERROR", Map.of("queueDepth", 2463));
             FlexlbTrace.finish(owner, new IllegalStateException("ignored"));
             FlexlbTrace.finishWithGrpcStatus(owner, "INTERNAL", 13, false);
             assertTrue(owner.isRecording());
             assertTrue(exporter.spans.isEmpty());
-            Context parent =
-                    Context.root()
-                            .with(
-                                    Span.wrap(
-                                            SpanContext.createFromRemoteParent(
-                                                    "11111111111111111111111111111111",
-                                                    "2222222222222222",
-                                                    TraceFlags.getSampled(),
-                                                    TraceState.builder()
-                                                            .put("vendor", "one")
-                                                            .build())));
+            Context parent = Context.root().with(Span.wrap(SpanContext.createFromRemoteParent(
+                    "11111111111111111111111111111111", "2222222222222222", TraceFlags.getSampled(),
+                    TraceState.builder().put("vendor", "one").build())));
             Map<String, String> carrier = FlexlbTrace.inject(parent);
             assertEquals("vendor=one", carrier.get("tracestate"));
-            assertEquals(
-                    carrier,
-                    FlexlbTrace.inject(
-                            FlexlbTrace.extract(Context.root(), carrier, new MapGetter())));
+            assertEquals(carrier, FlexlbTrace.inject(FlexlbTrace.extract(Context.root(), carrier, new MapGetter())));
         } finally {
             owner.end();
         }
@@ -117,7 +106,7 @@ class FlexlbTraceTest {
         assertEquals("FLEXLB_INTERNAL_ERROR", FlexlbTrace.scheduleFailureType(500));
         // QUEUE_FULL (8502) was removed with the synthetic queue-capacity limit.
         assertEquals("FLEXLB_SCHEDULE_FAILED", FlexlbTrace.scheduleFailureType(8502));
-        for (int code : new int[] {8406, 8514, 8430, 8431, 8432}) {
+        for (int code : new int[] {8406, 8409, 8514, 8430, 8431, 8432}) {
             assertEquals("FLEXLB_BUSINESS_REJECTED", FlexlbTrace.scheduleFailureType(code));
         }
         for (int code : new int[] {8402, 8511, 8513, 8202, -1}) {
@@ -134,12 +123,11 @@ class FlexlbTraceTest {
             Map<String, String> carrier = FlexlbTrace.inject(rootContext);
             assertTrue(carrier.get("traceparent").startsWith("00-"));
 
-            Context extracted = FlexlbTrace.extract(Context.root(), carrier, new MapGetter());
-            assertEquals(
-                    root.getSpanContext().getTraceId(),
+            Context extracted = FlexlbTrace.extract(
+                    Context.root(), carrier, new MapGetter());
+            assertEquals(root.getSpanContext().getTraceId(),
                     Span.fromContext(extracted).getSpanContext().getTraceId());
-            assertEquals(
-                    root.getSpanContext().getSpanId(),
+            assertEquals(root.getSpanContext().getSpanId(),
                     Span.fromContext(extracted).getSpanContext().getSpanId());
         } finally {
             root.end();
@@ -155,8 +143,8 @@ class FlexlbTraceTest {
             FlexlbTrace.setScheduleAttribute(context, FlexlbTrace.SCHEDULE_MODE, "BATCH");
             FlexlbTrace.setScheduleAttribute(context, FlexlbTrace.BATCH_ID, 42L);
             FlexlbTrace.setScheduleAttribute(context, FlexlbTrace.ENQUEUED_BY_MASTER, true);
-            FlexlbTrace.setScheduleDuration(
-                    context, FlexlbTrace.BATCH_WAIT_MS, 1_000_000L, 8_000_000L);
+            FlexlbTrace.setScheduleDuration(context, FlexlbTrace.BATCH_WAIT_MS,
+                    1_000_000L, 8_000_000L);
         } finally {
             root.end();
         }
@@ -169,6 +157,66 @@ class FlexlbTraceTest {
         assertEquals(42L, rootData.getAttributes().get(FlexlbTrace.BATCH_ID));
         assertEquals(true, rootData.getAttributes().get(FlexlbTrace.ENQUEUED_BY_MASTER));
         assertEquals(7L, rootData.getAttributes().get(FlexlbTrace.BATCH_WAIT_MS));
+    }
+
+    @Test
+    void placementFollowsExplicitContextAcrossThreadsWithoutAnotherSpan() throws Exception {
+        Span root = FlexlbTrace.startServer("Schedule", Context.root());
+        Context context = root.storeInContext(Context.root());
+        Thread worker = new Thread(() -> {
+            FlexlbTrace.recordPlacement(context, System.nanoTime(), "BLOCKED",
+                    Map.of("workers", 42, "role", "PREFILL", "cause", "capacity"), null);
+            FlexlbTrace.recordPlacement(context, System.nanoTime(), "SUCCESS", null, null);
+        });
+        worker.start();
+        worker.join(3000);
+        assertFalse(worker.isAlive());
+        FlexlbTrace.finish(root);
+
+        assertEquals(1, exporter.spans.size());
+        SpanData data = exporter.spans.getFirst();
+        assertEquals(StatusCode.OK, data.getStatus().getStatusCode());
+        assertEquals(2, data.getEvents().size());
+        assertEquals(42L, data.getEvents().getFirst().getAttributes()
+                .get(AttributeKey.longKey("flexlb.placement.registered_workers")));
+        assertEquals("SUCCESS", data.getAttributes().get(AttributeKey.stringKey("flexlb.placement.outcome")));
+        assertEquals(-1L, data.getAttributes().get(AttributeKey.longKey("flexlb.placement.registered_workers")));
+        assertEquals("UNKNOWN", data.getAttributes().get(AttributeKey.stringKey("flexlb.placement.cause")));
+    }
+
+    @Test
+    void sdkBoundsEventsAndFinalFailureSurvivesEventLimit() {
+        Span root = FlexlbTrace.startServer("Schedule", Context.root());
+        Context context = root.storeInContext(Context.root());
+        for (int attempt = 0; attempt < 1000; attempt++) {
+            FlexlbTrace.recordPlacement(context, System.nanoTime(), "BLOCKED",
+                    Map.of("workers", 42), null);
+        }
+        FlexlbTrace.recordScheduleFailure(context, 8431, "FLEXLB_BUSINESS_REJECTED",
+                Map.of("queueDepth", 2463, "cause", "PREFILL placement unavailable"));
+        FlexlbTrace.markBusinessError(context, 8431, "FLEXLB_BUSINESS_REJECTED");
+        FlexlbTrace.finish(root);
+
+        SpanData data = exporter.spans.getFirst();
+        assertTrue(data.getEvents().size() <= 128);
+        assertEquals(1001, data.getTotalRecordedEvents());
+        assertEquals(8431L, data.getAttributes().get(FlexlbTrace.SCHEDULE_CODE));
+        assertEquals(2463L, data.getAttributes().get(AttributeKey.longKey("flexlb.queue.depth")));
+        assertEquals(StatusCode.ERROR, data.getStatus().getStatusCode());
+    }
+
+    @Test
+    void placementErrorIsBoundedAndObservationFailureDoesNotEscape() {
+        Span root = FlexlbTrace.startServer("Schedule", Context.root());
+        Context context = root.storeInContext(Context.root());
+        FlexlbTrace.recordPlacement(context, System.nanoTime(), "ERROR", null,
+                new IllegalStateException("x".repeat(1000)));
+        FlexlbTrace.finish(root);
+        assertEquals(256, exporter.spans.getFirst().getEvents().getFirst().getAttributes()
+                .get(AttributeKey.stringKey("flexlb.placement.exception.message")).length());
+        Context broken = new ThrowingSpan().storeInContext(Context.root());
+        FlexlbTrace.recordPlacement(broken, System.nanoTime(), "ERROR", null, null);
+        FlexlbTrace.recordScheduleFailure(broken, 500, "ERROR", null);
     }
 
     /**
@@ -189,9 +237,8 @@ class FlexlbTraceTest {
         SpanData span = exporter.spans.get(0);
         assertEquals("request_id", FlexlbTrace.REQUEST_ID.getKey());
         assertEquals("3540218608800727041", span.getAttributes().get(FlexlbTrace.REQUEST_ID));
-        assertFalse(
-                span.getAttributes().asMap().keySet().stream()
-                        .anyMatch(key -> key.getKey().equals("rtp_llm.request_id")));
+        assertFalse(span.getAttributes().asMap().keySet().stream()
+                .anyMatch(key -> key.getKey().equals("rtp_llm.request_id")));
     }
 
     /**
@@ -264,11 +311,8 @@ class FlexlbTraceTest {
 
         @Override
         public SpanContext getSpanContext() {
-            return SpanContext.create(
-                    "11111111111111111111111111111111",
-                    "2222222222222222",
-                    TraceFlags.getSampled(),
-                    TraceState.getDefault());
+            return SpanContext.create("11111111111111111111111111111111", "2222222222222222",
+                    TraceFlags.getSampled(), TraceState.getDefault());
         }
 
         @Override

@@ -20,13 +20,13 @@ import java.util.function.Predicate;
  */
 final class OrderedRequestQueue {
 
-    private static final int PRIORITY_LEVELS = PriorityNormalizer.MAX_PRIORITY + 1;
+    private static final int PRIORITY_LEVELS =
+            PriorityNormalizer.MAX_PRIORITY + 1;
 
     private static final Comparator<GlobalQueueEntry> SEQUENCE_ORDER =
             Comparator.comparingLong(entry -> entry.sequence);
     private static final Comparator<GlobalQueueEntry> PRIORITY_ORDER =
-            Comparator.<GlobalQueueEntry>comparingInt(entry -> entry.priority)
-                    .reversed()
+            Comparator.<GlobalQueueEntry>comparingInt(entry -> entry.priority).reversed()
                     .thenComparing(SEQUENCE_ORDER);
 
     private final boolean priorityOrdering;
@@ -44,7 +44,8 @@ final class OrderedRequestQueue {
     void add(GlobalQueueEntry entry) {
         entry.sequence = ++nextSequence;
         if (priorityOrdering) {
-            Bucket bucket = priorityBuckets[entry.priority];
+            Bucket bucket =
+                    priorityBuckets[entry.priority];
             if (bucket == null) {
                 bucket = new Bucket();
                 priorityBuckets[entry.priority] = bucket;
@@ -87,10 +88,10 @@ final class OrderedRequestQueue {
         }
         List<GlobalQueueEntry> result = new ArrayList<>(Math.min(candidateLimit, size));
         for (int checked = 0; checked < scanBudget && result.size() < candidateLimit; checked++) {
-            int priority =
-                    priorityOrdering ? pendingPriorities.previousSetBit(PRIORITY_LEVELS - 1) : -1;
-            Bucket bucket =
-                    priorityOrdering ? (priority < 0 ? null : priorityBuckets[priority]) : fifo;
+            int priority = priorityOrdering
+                    ? pendingPriorities.previousSetBit(PRIORITY_LEVELS - 1) : -1;
+            Bucket bucket = priorityOrdering
+                    ? (priority < 0 ? null : priorityBuckets[priority]) : fifo;
             if (bucket == null) {
                 break;
             }
@@ -110,7 +111,8 @@ final class OrderedRequestQueue {
     }
 
     boolean hasUnscannedRequests() {
-        return priorityOrdering ? !pendingPriorities.isEmpty() : fifo.hasPendingRequests();
+        return priorityOrdering ? !pendingPriorities.isEmpty()
+                : fifo.hasPendingRequests();
     }
 
     /** Start scanning at this request, or keep an existing earlier scan position. */
@@ -155,7 +157,8 @@ final class OrderedRequestQueue {
             drainBucket(fifo, entries);
         }
         if (size != 0) {
-            throw new IllegalStateException("ordered queue drain left active entries");
+            throw new IllegalStateException(
+                    "ordered queue drain left active entries");
         }
         return entries;
     }
@@ -176,11 +179,14 @@ final class OrderedRequestQueue {
 
     private void unlink(GlobalQueueEntry entry) {
         if (!entry.linked) {
-            throw new IllegalStateException("ordered queue entry is not linked");
+            throw new IllegalStateException(
+                    "ordered queue entry is not linked");
         }
-        Bucket bucket = priorityOrdering ? priorityBuckets[entry.priority] : fifo;
+        Bucket bucket = priorityOrdering
+                ? priorityBuckets[entry.priority] : fifo;
         if (bucket == null) {
-            throw new IllegalStateException("ordered queue bucket is missing");
+            throw new IllegalStateException(
+                    "ordered queue bucket is missing");
         }
         bucket.remove(entry);
         if (priorityOrdering && !bucket.hasPendingRequests()) {
@@ -188,7 +194,9 @@ final class OrderedRequestQueue {
         }
     }
 
-    private void drainBucket(Bucket bucket, List<GlobalQueueEntry> entries) {
+    private void drainBucket(
+            Bucket bucket,
+            List<GlobalQueueEntry> entries) {
         while (!bucket.isEmpty()) {
             GlobalQueueEntry entry = bucket.head;
             markRemoved(entry);
@@ -200,7 +208,8 @@ final class OrderedRequestQueue {
         private GlobalQueueEntry head;
         private GlobalQueueEntry tail;
         private GlobalQueueEntry nextToScan;
-        private final NavigableSet<GlobalQueueEntry> readyRetries = new TreeSet<>(SEQUENCE_ORDER);
+        private final NavigableSet<GlobalQueueEntry> readyRetries =
+                new TreeSet<>(SEQUENCE_ORDER);
 
         boolean hasPendingRequests() {
             return nextToScan != null || !readyRetries.isEmpty();
@@ -227,7 +236,8 @@ final class OrderedRequestQueue {
 
         void add(GlobalQueueEntry entry) {
             if (entry.linked || entry.previous != null || entry.next != null) {
-                throw new IllegalStateException("ordered queue entry is already linked");
+                throw new IllegalStateException(
+                        "ordered queue entry is already linked");
             }
             entry.previous = tail;
             if (tail == null) {
@@ -248,7 +258,8 @@ final class OrderedRequestQueue {
             }
             if (previous == null) {
                 if (head != entry) {
-                    throw new IllegalStateException("ordered queue head linkage is inconsistent");
+                    throw new IllegalStateException(
+                            "ordered queue head linkage is inconsistent");
                 }
                 head = next;
             } else {
@@ -256,7 +267,8 @@ final class OrderedRequestQueue {
             }
             if (next == null) {
                 if (tail != entry) {
-                    throw new IllegalStateException("ordered queue tail linkage is inconsistent");
+                    throw new IllegalStateException(
+                            "ordered queue tail linkage is inconsistent");
                 }
                 tail = previous;
             } else {
@@ -269,20 +281,14 @@ final class OrderedRequestQueue {
 
         void restore(GlobalQueueEntry entry) {
             GlobalQueueEntry before = head;
-            while (before != null && before.sequence < entry.sequence) {
-                before = before.next;
-            }
+            while (before != null && before.sequence < entry.sequence) { before = before.next; }
             if (before == null) {
                 add(entry);
                 return;
             }
             entry.next = before;
             entry.previous = before.previous;
-            if (before.previous == null) {
-                head = entry;
-            } else {
-                before.previous.next = entry;
-            }
+            if (before.previous == null) { head = entry; } else { before.previous.next = entry; }
             before.previous = entry;
             entry.linked = true;
         }

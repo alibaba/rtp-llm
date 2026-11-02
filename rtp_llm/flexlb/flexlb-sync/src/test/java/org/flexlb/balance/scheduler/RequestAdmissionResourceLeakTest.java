@@ -44,11 +44,8 @@ class RequestAdmissionResourceLeakTest {
         config = SchedulingTestConfig.batchConfig();
         ConfigService service = mock(ConfigService.class);
         when(service.loadBalanceConfig()).thenReturn(config);
-        lifecycle =
-                new RequestRegistry(
-                        service,
-                        mock(BatchSchedulerReporter.class),
-                        mock(RequestSchedulerReporter.class));
+        lifecycle = new RequestRegistry(service, mock(BatchSchedulerReporter.class),
+                mock(RequestSchedulerReporter.class));
     }
 
     @AfterEach
@@ -65,13 +62,11 @@ class RequestAdmissionResourceLeakTest {
         Registered registered = registerItem(1L);
         try (AdmissionHandle admission = lifecycle.claimAdmissionHandle(1L, registered.future())) {
             assertNotNull(admission);
-            assertEquals(
-                    PlacementResult.Status.BLOCKED,
+            assertEquals(PlacementResult.Status.BLOCKED,
                     lifecycle.commitRoute(registered.item(), () -> false));
             assertNull(activeItem(1L));
             assertTrue(lifecycle.isAdmissionOpen(1L, registered.future()));
-            verify(registered.item().decodeEp(), never())
-                    .release(any(), eq(DecodeEndpoint.ReleaseReason.COUNTERPART_FINISHED));
+            verify(registered.item().decodeEp(), never()).release(any(), eq(DecodeEndpoint.ReleaseReason.COUNTERPART_FINISHED));
         }
     }
 
@@ -80,14 +75,8 @@ class RequestAdmissionResourceLeakTest {
         Registered registered = registerItem(2L);
         try (AdmissionHandle admission = lifecycle.claimAdmissionHandle(2L, registered.future())) {
             assertNotNull(admission);
-            assertThrows(
-                    IllegalStateException.class,
-                    () ->
-                            lifecycle.commitRoute(
-                                    registered.item(),
-                                    () -> {
-                                        throw new IllegalStateException("publication failed");
-                                    }));
+            assertThrows(IllegalStateException.class, () -> lifecycle.commitRoute(
+                    registered.item(), () -> { throw new IllegalStateException("publication failed"); }));
             assertNull(activeItem(2L));
             assertTrue(lifecycle.isAdmissionOpen(2L, registered.future()));
         }
@@ -97,20 +86,15 @@ class RequestAdmissionResourceLeakTest {
     void duplicatePublicationDoesNotReleaseCanonicalDecodeReservation() {
         Registered registered = registerItem(3L);
         RequestLifecycleTestSupport.bindRoute(lifecycle, registered);
-        assertEquals(
-                PlacementResult.Status.CLOSED,
+        assertEquals(PlacementResult.Status.CLOSED,
                 lifecycle.commitRoute(registered.item(), () -> true));
-        assertSame(registered.item(), activeItem(3L));
-        verify(registered.item().decodeEp(), never())
-                .release(any(), eq(DecodeEndpoint.ReleaseReason.COUNTERPART_FINISHED));
+        assertSame(registered.item().execution(), activeItem(3L));
+        verify(registered.item().decodeEp(), never()).release(any(), eq(DecodeEndpoint.ReleaseReason.COUNTERPART_FINISHED));
         lifecycle.cancelRequest(3L, 0L, CancelReason.CLIENT_CANCELLED);
-        assertEquals(
-                StrategyErrorType.REQUEST_CANCELLED.getErrorCode(),
-                registered.future().join().getCode());
-        verify(registered.item().decodeEp(), times(1))
-                .release(
-                        registered.item().decodeReservation(),
-                        DecodeEndpoint.ReleaseReason.COUNTERPART_FINISHED);
+        assertEquals(StrategyErrorType.REQUEST_CANCELLED.getErrorCode(), registered.future().join().getCode());
+        verify(registered.item().decodeEp(), times(1)).release(
+                registered.item().decodeReservation(),
+                DecodeEndpoint.ReleaseReason.COUNTERPART_FINISHED);
     }
 
     @Test
@@ -118,20 +102,16 @@ class RequestAdmissionResourceLeakTest {
         Registered registered = registerItem(4L);
         AdmissionHandle admission = lifecycle.claimAdmissionHandle(4L, registered.future());
         assertNotNull(admission);
-        assertEquals(
-                PlacementResult.Status.SUCCESS,
+        assertEquals(PlacementResult.Status.SUCCESS,
                 lifecycle.commitRoute(registered.item(), () -> true));
-        assertEquals(
-                RequestState.Phase.CANCEL_REQUESTED,
+        assertEquals(RequestState.Phase.CANCEL_REQUESTED,
                 lifecycle.cancelRequest(4L, 0L, CancelReason.CLIENT_CANCELLED).state());
-        verify(registered.item().decodeEp(), never())
-                .release(any(), eq(DecodeEndpoint.ReleaseReason.COUNTERPART_FINISHED));
+        verify(registered.item().decodeEp(), never()).release(any(), eq(DecodeEndpoint.ReleaseReason.COUNTERPART_FINISHED));
         admission.close();
         registered.future().join();
-        verify(registered.item().decodeEp(), times(1))
-                .release(
-                        registered.item().decodeReservation(),
-                        DecodeEndpoint.ReleaseReason.COUNTERPART_FINISHED);
+        verify(registered.item().decodeEp(), times(1)).release(
+                registered.item().decodeReservation(),
+                DecodeEndpoint.ReleaseReason.COUNTERPART_FINISHED);
     }
 
     @Test
@@ -142,30 +122,19 @@ class RequestAdmissionResourceLeakTest {
                 RequestLifecycleTestSupport.bindRoute(lifecycle, registered);
                 CountDownLatch start = new CountDownLatch(1);
                 long requestId = id;
-                var canceled =
-                        executor.submit(
-                                () -> {
-                                    RequestLifecycleTestSupport.await(start);
-                                    lifecycle.cancelRequest(
-                                            requestId, 0L, CancelReason.CLIENT_CANCELLED);
-                                });
-                var completed =
-                        executor.submit(
-                                () -> {
-                                    RequestLifecycleTestSupport.await(start);
-                                    registered
-                                            .future()
-                                            .complete(
-                                                    Response.error(
-                                                            StrategyErrorType.INVALID_REQUEST));
-                                });
+                var canceled = executor.submit(() -> {
+                    RequestLifecycleTestSupport.await(start);
+                    lifecycle.cancelRequest(requestId, 0L, CancelReason.CLIENT_CANCELLED);
+                });
+                var completed = executor.submit(() -> {
+                    RequestLifecycleTestSupport.await(start);
+                    registered.future().complete(Response.error(StrategyErrorType.INVALID_REQUEST));
+                });
                 start.countDown();
                 canceled.get(5, TimeUnit.SECONDS);
                 completed.get(5, TimeUnit.SECONDS);
                 verify(registered.item().decodeEp(), timeout(1000).times(1))
-                        .release(
-                                registered.item().decodeReservation(),
-                                DecodeEndpoint.ReleaseReason.COUNTERPART_FINISHED);
+                        .release(registered.item().decodeReservation(), DecodeEndpoint.ReleaseReason.COUNTERPART_FINISHED);
             }
         }
     }
@@ -176,38 +145,35 @@ class RequestAdmissionResourceLeakTest {
         RequestLifecycleTestSupport.bindRoute(lifecycle, registered);
         assertTrue(lifecycle.closeAdmissionAndAwaitMutations());
         lifecycle.closeOutstandingAndTerminalize();
-        verify(registered.item().decodeEp(), times(1))
-                .release(
-                        registered.item().decodeReservation(),
-                        DecodeEndpoint.ReleaseReason.COUNTERPART_FINISHED);
+        verify(registered.item().decodeEp(), times(1)).release(
+                registered.item().decodeReservation(),
+                DecodeEndpoint.ReleaseReason.COUNTERPART_FINISHED);
         lifecycle.closeOutstandingAndTerminalize();
-        verify(registered.item().decodeEp(), times(1))
-                .release(
-                        registered.item().decodeReservation(),
-                        DecodeEndpoint.ReleaseReason.COUNTERPART_FINISHED);
+        verify(registered.item().decodeEp(), times(1)).release(
+                registered.item().decodeReservation(),
+                DecodeEndpoint.ReleaseReason.COUNTERPART_FINISHED);
         lifecycle.closeExpiration();
         lifecycle.closePublisher();
     }
 
     @Test
-    void queuedPrefillPreemptionReturnsPreemptedAndReleasesDecodeOnce() throws Exception {
+    void yieldedVictimReturnsPreemptedAndReleasesDecodeOnce() throws Exception {
         Registered victim = registerItem(61L);
         Registered incoming = registerItem(62L);
         RequestLifecycleTestSupport.bindRoute(lifecycle, victim);
-        lifecycle.onQueuedItemPreempted(victim.item(), incoming.item());
+        lifecycle.finishYielded(victim.item(), "preempted by higher-priority request 62");
         Response response = victim.future().get(5, TimeUnit.SECONDS);
         assertEquals(StrategyErrorType.PRIORITY_PREEMPTED.getErrorCode(), response.getCode());
         assertEquals("preempted by higher-priority request 62", response.getErrorMessage());
-        lifecycle.onQueuedItemPreempted(victim.item(), incoming.item());
+        lifecycle.finishYielded(victim.item(), "preempted by higher-priority request 62");
         lifecycle.cancelRequest(61L, 0L, CancelReason.CLIENT_CANCELLED);
-        verify(victim.item().decodeEp(), times(1))
-                .release(
-                        victim.item().decodeReservation(),
-                        DecodeEndpoint.ReleaseReason.COUNTERPART_FINISHED);
+        verify(victim.item().decodeEp(), times(1)).release(
+                victim.item().decodeReservation(),
+                DecodeEndpoint.ReleaseReason.COUNTERPART_FINISHED);
         assertTrue(lifecycle.isAdmissionOpen(62L, incoming.future()));
     }
 
-    private ScheduledRequest activeItem(long requestId) {
+    private RequestExecution activeItem(long requestId) {
         RequestSlot slot = lifecycle.requestSlot(requestId);
         synchronized (slot) {
             return slot.activeItem();
@@ -219,17 +185,7 @@ class RequestAdmissionResourceLeakTest {
         var future = lifecycle.register(context);
         DecodeEndpoint decode = mock(DecodeEndpoint.class);
         var reservation = new DecodeEndpoint.ReservationHandle(1L, requestId, 1L);
-        return new Registered(
-                new ScheduledRequest(
-                        context,
-                        future,
-                        new Response(),
-                        null,
-                        null,
-                        null,
-                        decode,
-                        reservation,
-                        System.currentTimeMillis()),
-                future);
+        return new Registered(new ScheduledRequest(context, future, new Response(), null, null,
+                null, decode, reservation, System.currentTimeMillis()), future);
     }
 }

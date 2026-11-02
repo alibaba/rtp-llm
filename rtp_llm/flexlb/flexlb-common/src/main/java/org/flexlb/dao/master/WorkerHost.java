@@ -16,27 +16,22 @@ public class WorkerHost {
      * Host IP address
      */
     private final String ip;
-
     /**
      * HTTP port
      */
     private final int httpPort;
-
     /**
      * gRPC port (typically httpPort + 1)
      */
     private final int grpcPort;
-
     /**
      * C++ HTTP service port
      */
     private final int httpServerPort;
-
     /**
      * Data center/site information
      */
     private final String site;
-
     /**
      * Worker group name
      */
@@ -52,8 +47,7 @@ public class WorkerHost {
      * @param site           Data center/site information
      * @param group          Worker group name
      */
-    public WorkerHost(
-            String ip, int httpPort, int grpcPort, int httpServerPort, String site, String group) {
+    public WorkerHost(String ip, int httpPort, int grpcPort, int httpServerPort, String site, String group) {
         this.ip = ip;
         this.httpPort = httpPort;
         this.grpcPort = grpcPort;
@@ -116,4 +110,5 @@ public class WorkerHost {
     public static WorkerHost of(String ip, int port, String site) {
         return new WorkerHost(ip, port, site);
     }
+
 }

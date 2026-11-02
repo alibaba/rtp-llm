@@ -35,8 +35,10 @@ public final class SelectedRole implements AutoCloseable {
                     "SelectedRole requires successful response metadata");
         }
         WorkerEndpoint endpoint = generationPin.endpoint();
-        if (endpoint.getStatus().getGenerationId() != generationPin.generationId()) {
-            throw new IllegalArgumentException("selection pin does not match endpoint generation");
+        if (endpoint.getStatus().getGenerationId()
+                != generationPin.generationId()) {
+            throw new IllegalArgumentException(
+                    "selection pin does not match endpoint generation");
         }
         if (!Objects.equals(serverStatus.getServerIp(), endpoint.getIp())
                 || serverStatus.getHttpPort() != endpoint.getHttpPort()) {
@@ -50,12 +52,15 @@ public final class SelectedRole implements AutoCloseable {
             throw new IllegalArgumentException(
                     "Prefill selection requires a Prefill endpoint role");
         }
-        if (serverStatus.getRole() == RoleType.DECODE && !(endpoint instanceof DecodeEndpoint)) {
-            throw new IllegalArgumentException("Decode selection requires a Decode endpoint role");
+        if (serverStatus.getRole() == RoleType.DECODE
+                && !(endpoint instanceof DecodeEndpoint)) {
+            throw new IllegalArgumentException(
+                    "Decode selection requires a Decode endpoint role");
         }
         this.prefillWorkMs = prefillWorkMs;
         if (placementVersion < 0L) {
-            throw new IllegalArgumentException("placementVersion must be non-negative");
+            throw new IllegalArgumentException(
+                    "placementVersion must be non-negative");
         }
         this.placementVersion = placementVersion;
     }
@@ -65,9 +70,7 @@ public final class SelectedRole implements AutoCloseable {
             ServerStatus serverStatus,
             long prefillWorkMs) {
         return prefill(
-                generationPin,
-                serverStatus,
-                prefillWorkMs,
+                generationPin, serverStatus, prefillWorkMs,
                 endpointPlacementVersion(generationPin));
     }
 
@@ -80,14 +83,20 @@ public final class SelectedRole implements AutoCloseable {
             if (generationPin != null) {
                 generationPin.close();
             }
-            throw new IllegalArgumentException("Prefill work must be non-negative");
+            throw new IllegalArgumentException(
+                    "Prefill work must be non-negative");
         }
-        return createOwned(generationPin, serverStatus, prefillWorkMs, placementVersion);
+        return createOwned(
+                generationPin, serverStatus, prefillWorkMs,
+                placementVersion);
     }
 
     public static SelectedRole decode(
-            WorkerEndpoint.GenerationPin generationPin, ServerStatus serverStatus) {
-        return decode(generationPin, serverStatus, endpointPlacementVersion(generationPin));
+            WorkerEndpoint.GenerationPin generationPin,
+            ServerStatus serverStatus) {
+        return decode(
+                generationPin, serverStatus,
+                endpointPlacementVersion(generationPin));
     }
 
     public static SelectedRole decode(
@@ -104,8 +113,10 @@ public final class SelectedRole implements AutoCloseable {
     }
 
     public static SelectedRole stateless(
-            WorkerEndpoint.GenerationPin generationPin, ServerStatus serverStatus) {
-        return createOwned(generationPin, serverStatus, -1L, 0L);
+            WorkerEndpoint.GenerationPin generationPin,
+            ServerStatus serverStatus) {
+        return createOwned(
+                generationPin, serverStatus, -1L, 0L);
     }
 
     /** Calling a factory consumes the pin, including every validation failure. */
@@ -115,7 +126,9 @@ public final class SelectedRole implements AutoCloseable {
             long prefillWorkMs,
             long placementVersion) {
         try {
-            return new SelectedRole(generationPin, serverStatus, prefillWorkMs, placementVersion);
+            return new SelectedRole(
+                    generationPin, serverStatus, prefillWorkMs,
+                    placementVersion);
         } catch (RuntimeException | Error failure) {
             if (generationPin != null) {
                 generationPin.close();
@@ -130,7 +143,8 @@ public final class SelectedRole implements AutoCloseable {
 
     public long prefillWorkMs() {
         if (prefillWorkMs < 0L) {
-            throw new IllegalStateException("selection does not carry Prefill work");
+            throw new IllegalStateException(
+                    "selection does not carry Prefill work");
         }
         return prefillWorkMs;
     }
@@ -139,7 +153,8 @@ public final class SelectedRole implements AutoCloseable {
         return placementVersion;
     }
 
-    private static long endpointPlacementVersion(WorkerEndpoint.GenerationPin pin) {
+    private static long endpointPlacementVersion(
+            WorkerEndpoint.GenerationPin pin) {
         if (pin == null) {
             return 0L;
         }
@@ -162,7 +177,8 @@ public final class SelectedRole implements AutoCloseable {
 
     private WorkerEndpoint.GenerationPin requireOwnedPin() {
         if (generationPin == null) {
-            throw new IllegalStateException("selected endpoint generation was already consumed");
+            throw new IllegalStateException(
+                    "selected endpoint generation was already consumed");
         }
         return generationPin;
     }

@@ -41,7 +41,7 @@ class DispatchFailureTest extends FlexLBMockTestBase {
         assertEquals(StrategyErrorType.DISPATCH_FAILED.getErrorCode(), response.getCode());
         assertEquals(1, mockPrefillWorker.getEnqueueCount(), response.getErrorMessage());
         assertEquals(0, mockDecodeWorker.getEnqueueCount());
-        InflightAssertions.assertPrefillInflightEmpty(getPrefillEndpoint());
+        InflightAssertions.assertResourcesReleasedWithin(getPrefillEndpoint(), null, 1_000);
 
         mockPrefillWorker.setBehavior(MockWorkerBehavior.builder().build());
         Response recovered = submitRequest(7002).get(5, TimeUnit.SECONDS);

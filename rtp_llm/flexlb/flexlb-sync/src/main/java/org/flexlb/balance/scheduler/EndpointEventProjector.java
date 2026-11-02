@@ -4,6 +4,9 @@ import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.PrefillState;
 import org.flexlb.dao.route.RoleType;
+import org.flexlb.dao.master.EndpointTrace.Stage;
+import org.flexlb.engine.grpc.GrpcFailure;
+import org.flexlb.service.monitor.StatusFailureReporter;
 import org.flexlb.util.Logger;
 import org.springframework.stereotype.Component;
 
@@ -18,43 +21,51 @@ import java.util.Objects;
 @Component
 public final class EndpointEventProjector {
     private final RequestRegistry scheduler;
+    private final StatusFailureReporter failureReporter;
 
-    public EndpointEventProjector(RequestRegistry scheduler) {
+    public EndpointEventProjector(RequestRegistry scheduler, StatusFailureReporter failureReporter) {
         this.scheduler = Objects.requireNonNull(scheduler, "scheduler");
+        this.failureReporter = Objects.requireNonNull(failureReporter, "failureReporter");
     }
 
     public void onPrefillStatus(
-            PrefillEndpoint source, RoleType role, List<PrefillState.WorkerStatusFact> facts) {
+            PrefillEndpoint source,
+            RoleType role,
+            List<PrefillState.WorkerStatusFact> facts) {
         projectPrefillStatus(source, role, facts);
     }
 
-    public void onDecodeStatus(DecodeEndpoint source, List<DecodeEndpoint.WorkerStatusFact> facts) {
+    public void onDecodeStatus(
+            DecodeEndpoint source,
+            List<DecodeEndpoint.WorkerStatusFact> facts) {
         projectDecodeStatus(source, facts);
     }
 
     public void onPrefillGenerationRetired(
-            PrefillEndpoint endpoint, List<ScheduledRequest> ownedItems) {
+            PrefillEndpoint endpoint,
+            List<RequestExecution> ownedItems) {
         if (endpoint == null || ownedItems == null) {
             return;
         }
         try {
             projectPrefillRetirementFacts(endpoint, ownedItems);
         } catch (Throwable failure) {
-            logErrorNoFail(
-                    "Endpoint event projection isolated: event={}", "prefill retirement", failure);
+            logErrorNoFail("Endpoint event projection isolated: event={}",
+                    "prefill retirement", failure);
         }
     }
 
     public void onDecodeGenerationRetired(
-            DecodeEndpoint endpoint, List<DecodeEndpoint.ReservationHandle> ownedReservations) {
+            DecodeEndpoint endpoint,
+            List<DecodeEndpoint.ReservationHandle> ownedReservations) {
         if (endpoint == null || ownedReservations == null) {
             return;
         }
         try {
             projectDecodeRetirementFacts(endpoint, ownedReservations);
         } catch (Throwable failure) {
-            logErrorNoFail(
-                    "Endpoint event projection isolated: event={}", "decode retirement", failure);
+            logErrorNoFail("Endpoint event projection isolated: event={}",
+                    "decode retirement", failure);
         }
     }
 
@@ -62,67 +73,73 @@ public final class EndpointEventProjector {
         scheduler.onQueuedItemExpired(exactItem);
     }
 
-    public void onQueuedItemPreempted(ScheduledRequest victim, ScheduledRequest incoming) {
-        try {
-            scheduler.onQueuedItemPreempted(victim, incoming);
-        } catch (Throwable failure) {
-            logErrorNoFail(
-                    "Queued preemption projection failed: request_id={}",
-                    victim.requestId(),
-                    failure);
-        }
-    }
-
-    public void onQueueOfferFailure(ScheduledRequest exactItem, Throwable cause) {
+    public void onQueueOfferFailure(
+            ScheduledRequest exactItem, Throwable cause) {
         scheduler.onQueueOfferFailure(exactItem, cause);
     }
 
-    public void onPreparedDeliveryFailure(ScheduledRequest exactItem, Throwable cause) {
+    public void onPreparedDeliveryFailure(
+            ScheduledRequest exactItem, Throwable cause) {
         scheduler.failDeliveryPreparation(exactItem, cause);
     }
 
     private void projectPrefillStatus(
-            PrefillEndpoint source, RoleType role, List<PrefillState.WorkerStatusFact> facts) {
+            PrefillEndpoint source,
+            RoleType role,
+            List<PrefillState.WorkerStatusFact> facts) {
         for (PrefillState.WorkerStatusFact fact : facts) {
             try {
                 scheduler.processPrefillStatus(source, role, fact);
             } catch (Throwable failure) {
+                reportStatusFailure(role, failure);
                 logErrorNoFail(
                         "Prefill status fact projection isolated: request_id={} engine={}",
-                        fact.item().requestId(),
-                        source.getIp(),
+                        fact.item().requestId(), source.getIp(),
                         failure);
             }
         }
     }
 
     private void projectDecodeStatus(
-            DecodeEndpoint source, List<DecodeEndpoint.WorkerStatusFact> facts) {
+            DecodeEndpoint source,
+            List<DecodeEndpoint.WorkerStatusFact> facts) {
         for (DecodeEndpoint.WorkerStatusFact fact : facts) {
             try {
                 scheduler.processDecodeStatus(source, fact);
             } catch (Throwable failure) {
+                reportStatusFailure(RoleType.DECODE, failure);
                 logErrorNoFail(
                         "Decode status fact projection isolated: request_id={} engine={}",
                         fact.reservation().requestId(),
-                        source.getIp(),
-                        failure);
+                        source.getIp(), failure);
             }
         }
     }
 
+    private void reportStatusFailure(RoleType role, Throwable failure) {
+        try {
+            GrpcFailure.Analysis analysis = GrpcFailure.analyze(failure);
+            failureReporter.report(role, "worker_status", Stage.STATUS_PROJECTION_FAILED,
+                    analysis.confirmedLocalFailure() ? analysis.kind().name() : "STATUS_PROJECTION_FAILED",
+                    analysis);
+        } catch (RuntimeException | Error ignoredDiagnosticFailure) {
+            // Continue projecting the remaining exact facts.
+        }
+    }
+
     private void projectPrefillRetirementFacts(
-            PrefillEndpoint retiredEndpoint, List<ScheduledRequest> ownedItems) {
+            PrefillEndpoint retiredEndpoint,
+            List<RequestExecution> ownedItems) {
         for (int index = 0; index < ownedItems.size(); index++) {
-            ScheduledRequest exactItem = ownedItems.get(index);
+            RequestExecution exactItem = ownedItems.get(index);
             try {
-                scheduler.projectPrefillRetirementItem(retiredEndpoint, exactItem);
+                scheduler.projectPrefillRetirementItem(
+                        retiredEndpoint, exactItem);
             } catch (Throwable failure) {
                 logErrorNoFail(
                         "Prefill retirement item projection isolated: request_id={} engine={}",
                         exactItem == null ? -1 : exactItem.requestId(),
-                        retiredEndpoint.getIp(),
-                        failure);
+                        retiredEndpoint.getIp(), failure);
             }
         }
     }
@@ -131,9 +148,11 @@ public final class EndpointEventProjector {
             DecodeEndpoint retiredEndpoint,
             List<DecodeEndpoint.ReservationHandle> ownedReservations) {
         for (int index = 0; index < ownedReservations.size(); index++) {
-            DecodeEndpoint.ReservationHandle reservation = ownedReservations.get(index);
+            DecodeEndpoint.ReservationHandle reservation =
+                    ownedReservations.get(index);
             try {
-                scheduler.projectDecodeRetirementReservation(retiredEndpoint, reservation);
+                scheduler.projectDecodeRetirementReservation(
+                        retiredEndpoint, reservation);
             } catch (Throwable failure) {
                 logErrorNoFail(
                         "Decode retirement reservation projection isolated: "
@@ -152,4 +171,5 @@ public final class EndpointEventProjector {
             // Continue projecting the remaining exact facts.
         }
     }
+
 }

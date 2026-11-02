@@ -23,18 +23,14 @@ public enum StatusEnum {
     INTERNAL_ERROR(500, "InternalError", "Internal server error!", FlexLBException.class),
     NETTY_CATCH_ERROR(519, "NettyCatchError", "Netty catch error!", NettyCatchException.class),
     JSON_MAPPER_ERROR(522, "JsonMapperError", "Json mapper error!", JsonMapperException.class),
-    READ_TIME_OUT(
-            523, "ReadEngineTimeout", "Read Engine time out!", EngineReadTimeoutException.class),
+    READ_TIME_OUT(523, "ReadEngineTimeout", "Read Engine time out!", EngineReadTimeoutException.class),
 
     ALL(-9, "ALL", "All.", FlexLBException.class),
 
     /*------------------------------------------- Retryable Errors 80xx -------------------------------------------*/
 
-    ENGINE_ABNORMAL_DISCONNECT_EXCEPTION(
-            8000,
-            "EngineAbnormalDisconnectException",
-            "Engine abnormal disconnect!",
-            EngineAbnormalDisconnectException.class),
+    ENGINE_ABNORMAL_DISCONNECT_EXCEPTION(8000, "EngineAbnormalDisconnectException", "Engine abnormal disconnect!", EngineAbnormalDisconnectException.class),
+
     ;
 
     private final int code;
@@ -45,8 +41,7 @@ public enum StatusEnum {
 
     private final Class<? extends FlexLBException> exceptionClz;
 
-    public static final Map<Integer, Function<String, FlexLBException>> statusExceptionMapper =
-            new HashMap<>();
+    public static final Map<Integer, Function<String, FlexLBException>> statusExceptionMapper = new HashMap<>();
 
     static {
         for (StatusEnum statusEnum : StatusEnum.values()) {
@@ -54,8 +49,7 @@ public enum StatusEnum {
         }
     }
 
-    StatusEnum(
-            int code, String name, String message, Class<? extends FlexLBException> exceptionClz) {
+    StatusEnum(int code, String name, String message, Class<? extends FlexLBException> exceptionClz) {
         this.code = code;
         this.name = name;
         this.message = message;
@@ -72,8 +66,7 @@ public enum StatusEnum {
             msg = this.message + ": " + exceptionMsg;
         }
         try {
-            return getExceptionClz()
-                    .getDeclaredConstructor(int.class, String.class, String.class)
+            return getExceptionClz().getDeclaredConstructor(int.class, String.class, String.class)
                     .newInstance(this.code, this.name, msg);
         } catch (Throwable e) {
             return new FlexLBException(this.code, this.name, msg);
@@ -90,8 +83,7 @@ public enum StatusEnum {
             msg = this.message + ": " + exceptionMsg;
         }
         try {
-            return getExceptionClz()
-                    .getDeclaredConstructor(int.class, String.class, String.class, Throwable.class)
+            return getExceptionClz().getDeclaredConstructor(int.class, String.class, String.class, Throwable.class)
                     .newInstance(this.code, this.name, msg, cause);
         } catch (Throwable e) {
             return new FlexLBException(this.code, this.name, msg, cause);

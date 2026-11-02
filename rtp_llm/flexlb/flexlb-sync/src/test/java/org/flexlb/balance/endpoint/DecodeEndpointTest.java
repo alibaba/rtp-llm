@@ -1,8 +1,8 @@
 package org.flexlb.balance.endpoint;
 
-import org.flexlb.dao.master.TaskInfo;
+import org.flexlb.testfixture.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
-import org.flexlb.dao.master.WorkerStatusResponse;
+import org.flexlb.testfixture.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.TaskPhase;
 import org.junit.jupiter.api.BeforeEach;
@@ -21,12 +21,15 @@ class DecodeEndpointTest {
 
     private WorkerStatus status;
     private DecodeEndpoint endpoint;
-    private final Map<Long, DecodeEndpoint.ReservationHandle> reservations = new HashMap<>();
+    private final Map<Long, DecodeEndpoint.ReservationHandle> reservations =
+            new HashMap<>();
 
     @BeforeEach
     void setUp() {
-        status = EndpointTestSupport.workerStatus(RoleType.DECODE, "10.0.0.1", 8080, 8081);
-        endpoint = new DecodeEndpoint(status, EndpointTestSupport.noopEventSink());
+        status = EndpointTestSupport.workerStatus(
+                RoleType.DECODE, "10.0.0.1", 8080, 8081);
+        endpoint = new DecodeEndpoint(
+                status, EndpointTestSupport.noopEventSink());
     }
 
     @Test
@@ -219,8 +222,7 @@ class DecodeEndpointTest {
 
     /** Expiration removes the queued phase and all incremental counters together. */
     @Test
-    void evictExpiredRequests_prunesQueuedPhase_andRestoresEngineLoad()
-            throws InterruptedException {
+    void evictExpiredRequests_prunesQueuedPhase_andRestoresEngineLoad() throws InterruptedException {
         updateStatus(null, null, 10000);
         reserve(100L, 500, 500);
         reserve(101L, 500, 500);
@@ -258,10 +260,8 @@ class DecodeEndpointTest {
         counter.set(value);
     }
 
-    private void updateStatus(
-            Map<String, TaskInfo> running,
-            Map<String, TaskInfo> finished,
-            long availableKvCacheTokens) {
+    private void updateStatus(Map<String, TaskInfo> running, Map<String, TaskInfo> finished,
+                              long availableKvCacheTokens) {
         WorkerStatusResponse response = new WorkerStatusResponse();
         response.setRunningTaskInfo(running);
         response.setFinishedTaskInfo(finished);
@@ -270,7 +270,8 @@ class DecodeEndpointTest {
         EndpointTestSupport.applyStatus(endpoint, response);
     }
 
-    private DecodeEndpoint.ReservationHandle reserve(long requestId, long hardKv, long expectedKv) {
+    private DecodeEndpoint.ReservationHandle reserve(
+            long requestId, long hardKv, long expectedKv) {
         try (WorkerEndpoint.GenerationPin pin = endpoint.tryPinGeneration()) {
             assertNotNull(pin);
             DecodeEndpoint.ReservationHandle reservation =
@@ -281,7 +282,8 @@ class DecodeEndpointTest {
     }
 
     private void release(long requestId) {
-        DecodeEndpoint.ReservationHandle reservation = reservations.get(requestId);
+        DecodeEndpoint.ReservationHandle reservation =
+                reservations.get(requestId);
         if (reservation != null) {
             endpoint.release(reservation, DecodeEndpoint.ReleaseReason.LOCAL_ROLLBACK);
         }
@@ -302,10 +304,9 @@ class DecodeEndpointTest {
 
     private DecodeEndpoint.EngineDispatchPermit acquirePermit(long requestId) {
         DecodeEndpoint.EngineDispatchPermitAcquisition acquisition =
-                endpoint.acquireDispatchPermit(
-                        reservations.get(requestId), new DecodeEndpoint.AdmissionCapacity(0, 100L));
-        assertEquals(
-                DecodeEndpoint.EngineDispatchPermitAcquireStatus.ACQUIRED, acquisition.status());
+                endpoint.acquireDispatchPermit(reservations.get(requestId), new DecodeEndpoint.AdmissionCapacity(0, 100L));
+        assertEquals(DecodeEndpoint.EngineDispatchPermitAcquireStatus.ACQUIRED,
+                acquisition.status());
         assertNotNull(acquisition.permit());
         return acquisition.permit();
     }

@@ -1,5 +1,6 @@
 package org.flexlb.balance.strategy;
 
+import org.flexlb.testfixture.WorkerStatusTestFixtures;
 import org.flexlb.balance.delivery.CapacityBoundary;
 import org.flexlb.balance.delivery.DeliveryMetrics;
 import org.flexlb.balance.delivery.DeliveryStrategy;
@@ -15,9 +16,8 @@ import org.flexlb.balance.scheduler.RouteDeliveryStrategy;
 import org.flexlb.balance.scheduler.ScheduledRequest;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
-import org.flexlb.dao.master.CacheStatus;
 import org.flexlb.dao.master.WorkerStatus;
-import org.flexlb.dao.master.WorkerStatusResponse;
+import org.flexlb.testfixture.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.mockito.Mockito;
@@ -28,7 +28,8 @@ import java.util.Map;
 /** Package-local fixtures built only from the frozen endpoint-facing ports. */
 final class StrategyTestSupport {
 
-    private StrategyTestSupport() {}
+    private StrategyTestSupport() {
+    }
 
     static FlexlbConfig config() {
         FlexlbConfig config = new FlexlbConfig();
@@ -57,21 +58,21 @@ final class StrategyTestSupport {
             boolean alive,
             long availableKv,
             long totalKv) {
-        WorkerStatus status =
-                WorkerStatus.createDiscovered(role, group, ip, httpPort, grpcPort, "test-site");
-        WorkerStatusResponse response =
-                response(
-                        role,
-                        alive,
-                        availableKv,
-                        totalKv,
-                        Math.max(1L, status.appliedStatusCursor().statusVersion() + 1L));
+        WorkerStatus status = WorkerStatus.createDiscovered(
+                role, group, ip, httpPort, grpcPort, "test-site");
+        WorkerStatusResponse response = response(
+                role, alive, availableKv, totalKv,
+                Math.max(1L, status.appliedStatusCursor().statusVersion() + 1L));
         publish(status, response);
         return status;
     }
 
     static WorkerStatusResponse response(
-            RoleType role, boolean alive, long availableKv, long totalKv, long statusVersion) {
+            RoleType role,
+            boolean alive,
+            long availableKv,
+            long totalKv,
+            long statusVersion) {
         WorkerStatusResponse response = new WorkerStatusResponse();
         response.setRole(role);
         response.setAlive(alive);
@@ -82,42 +83,51 @@ final class StrategyTestSupport {
         return response;
     }
 
-    static void publish(WorkerStatus status, WorkerStatusResponse response) {
+    static void publish(
+            WorkerStatus status, WorkerStatusResponse response) {
         status.lock.lock();
         try {
-            WorkerStatus.PreparedStatus prepared =
-                    status.prepareNewStatus(status.freezeStatusResponse(response));
+            WorkerStatus.PreparedStatus prepared = WorkerStatusTestFixtures.prepare(status, WorkerStatusTestFixtures.observation(status, response));
             status.publishPreparedStatus(prepared);
-            status.recordSuccessfulPoll(response.isAlive());
         } finally {
             status.lock.unlock();
         }
     }
 
     static WorkerEndpoint publishEndpoint(
-            EndpointRegistry registry, RoleType role, String address, WorkerStatus source) {
-        WorkerStatus status =
-                WorkerStatus.createDiscovered(
-                        role,
-                        source.getGroup(),
-                        source.getIp(),
-                        source.getPort(),
-                        source.getGrpcPort(),
-                        source.getSite());
+            EndpointRegistry registry,
+            RoleType role,
+            String address,
+            WorkerStatus source) {
+        WorkerStatus status = WorkerStatus.createDiscovered(
+                role,
+                source.getGroup(),
+                source.getIp(),
+                source.getPort(),
+                source.getGrpcPort(),
+                source.getSite());
         WorkerStatus.StatusObservation observation =
                 status.bindStatusObservation(
-                        source.committedEngineObservation(), true, 1L, 0L, Map.of());
+                        source.committedEngineObservation(),
+                        true,
+                        1L,
+                        0L,
+                        Map.of());
         status.lock.lock();
         try {
-            WorkerStatus.PreparedStatus prepared = status.prepareNewStatus(observation);
-            return registry.publishPreparedEndpoint(address, status, prepared).endpoint();
+            WorkerStatus.PreparedStatus prepared =
+                    WorkerStatusTestFixtures.prepare(status, observation);
+            return registry.publishPreparedEndpoint(
+                    address, status, prepared).endpoint();
         } finally {
             status.lock.unlock();
         }
     }
 
-    static boolean offer(PrefillEndpoint endpoint, ScheduledRequest exactItem) {
-        try (WorkerEndpoint.GenerationPin pin = endpoint.tryPinGeneration()) {
+    static boolean offer(
+            PrefillEndpoint endpoint, ScheduledRequest exactItem) {
+        try (WorkerEndpoint.GenerationPin pin =
+                     endpoint.tryPinGeneration()) {
             return pin != null && endpoint.offerPinned(pin, exactItem);
         }
     }
@@ -128,37 +138,28 @@ final class StrategyTestSupport {
             long predictedMs,
             List<? extends ScheduledRequest> exactItems) {
         if (exactItems.isEmpty()) {
-            throw new IllegalArgumentException("committed batch requires at least one item");
+            throw new IllegalArgumentException(
+                    "committed batch requires at least one item");
         }
         List<ScheduledRequest> items = List.copyOf(exactItems);
         PrefillState.ReservationResult<PrefillState.BatchReservation> result =
-                endpoint.reserveBatch(items.getFirst(), batchId, Integer.MAX_VALUE);
+                endpoint.reserveBatch(
+                        items.getFirst(), batchId, Integer.MAX_VALUE);
         if (result.status() != PrefillState.CapacityStatus.ACQUIRED) {
-            throw new IllegalStateException("batch reservation rejected: " + result.status());
+            throw new IllegalStateException(
+                    "batch reservation rejected: " + result.status());
         }
-        try (PrefillState.BatchReservation reservation = result.reservation()) {
+        try (PrefillState.BatchReservation reservation =
+                     result.reservation()) {
             return reservation.commit(items, predictedMs);
         }
     }
 
-    static void setCacheStatus(WorkerStatus status, long blockSize, long availableKv) {
-        CacheStatus cache = new CacheStatus();
-        cache.setBlockSize(blockSize);
-        cache.setAvailableKvCache(availableKv);
-        WorkerStatusResponse response =
-                response(
-                        status.getRole(),
-                        status.pollHealth().reportedAlive(),
-                        status.getAvailableKvCacheTokens(),
-                        status.getTotalKvCacheTokens(),
-                        Math.max(1L, status.appliedStatusCursor().statusVersion() + 1L));
-        response.setCacheStatus(cache);
-        publish(status, response);
-    }
-
     private static final class TestRequestRuntime {
-        private final RequestRegistry requests = Mockito.mock(RequestRegistry.class);
-        private final EndpointEventProjector events = Mockito.mock(EndpointEventProjector.class);
+        private final RequestRegistry requests =
+                Mockito.mock(RequestRegistry.class);
+        private final EndpointEventProjector events =
+                Mockito.mock(EndpointEventProjector.class);
 
         RequestRegistry requests() {
             return requests;
@@ -171,26 +172,28 @@ final class StrategyTestSupport {
 
     /** Keep selection-owned queues parked without replacing admission internals. */
     private static DeliveryStrategy parkedDelivery(RequestRegistry requests) {
-        RouteDeliveryStrategy route = new RouteDeliveryStrategy(requests, NOOP_METRICS);
+        RouteDeliveryStrategy route = new RouteDeliveryStrategy(
+                requests, NOOP_METRICS);
         DeliveryStrategy delivery = Mockito.mock(DeliveryStrategy.class);
-        Mockito.when(delivery.projectionPolicy()).thenReturn(route.projectionPolicy());
-        Mockito.when(delivery.projectGroupDurationMs(Mockito.anyList(), Mockito.any()))
-                .thenAnswer(
-                        invocation ->
-                                route.projectGroupDurationMs(
-                                        invocation.getArgument(0), invocation.getArgument(1)));
-        Mockito.when(delivery.prepare(Mockito.anyList(), Mockito.any(), Mockito.any()))
-                .thenAnswer(
-                        invocation -> {
-                            List<ScheduledRequest> candidates = invocation.getArgument(0);
-                            DeliveryStrategy.Transaction transaction =
-                                    Mockito.mock(DeliveryStrategy.Transaction.class);
-                            Mockito.when(transaction.items()).thenReturn(List.of());
-                            Mockito.when(transaction.blockedItem())
-                                    .thenReturn(candidates.getFirst());
-                            Mockito.when(transaction.blockedResult()).thenReturn(PARKED_BOUNDARY);
-                            return transaction;
-                        });
+        Mockito.when(delivery.projectionPolicy())
+                .thenReturn(route.projectionPolicy());
+        Mockito.when(delivery.projectGroupDurationMs(
+                        Mockito.anyList(), Mockito.any()))
+                .thenAnswer(invocation -> route.projectGroupDurationMs(
+                        invocation.getArgument(0), invocation.getArgument(1)));
+        Mockito.when(delivery.prepare(
+                        Mockito.anyList(), Mockito.any(), Mockito.any()))
+                .thenAnswer(invocation -> {
+                    List<ScheduledRequest> candidates = invocation.getArgument(0);
+                    DeliveryStrategy.Transaction transaction =
+                            Mockito.mock(DeliveryStrategy.Transaction.class);
+                    Mockito.when(transaction.items()).thenReturn(List.of());
+                    Mockito.when(transaction.blockedItem())
+                            .thenReturn(candidates.getFirst());
+                    Mockito.when(transaction.blockedResult())
+                            .thenReturn(PARKED_BOUNDARY);
+                    return transaction;
+                });
         return delivery;
     }
 
@@ -203,16 +206,18 @@ final class StrategyTestSupport {
                         }
 
                         @Override
-                        public void addListener(Runnable listener) {}
+                        public void addListener(Runnable listener) {
+                        }
 
                         @Override
-                        public void removeListener(Runnable listener) {}
+                        public void removeListener(Runnable listener) {
+                        }
                     },
                     new RouteProjection.AdmissionBlockSemantics(
                             "test delivery parked",
                             RouteProjection.AfterProbeAdmission.BLOCKED,
-                            "test delivery parked",
-                            RoleType.PREFILL));
+                            "test delivery parked"));
 
-    private static final DeliveryMetrics NOOP_METRICS = Mockito.mock(DeliveryMetrics.class);
+    private static final DeliveryMetrics NOOP_METRICS =
+            Mockito.mock(DeliveryMetrics.class);
 }

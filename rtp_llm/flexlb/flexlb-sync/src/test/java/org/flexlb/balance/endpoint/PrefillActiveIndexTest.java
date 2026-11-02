@@ -24,9 +24,33 @@ import static org.mockito.Mockito.when;
 
 class PrefillActiveIndexTest {
     private static final Comparator<ScheduledRequest> ORDER =
-            Comparator.comparingInt(ScheduledRequest::priority)
-                    .reversed()
+            Comparator.comparingInt(ScheduledRequest::priority).reversed()
                     .thenComparingLong(ScheduledRequest::enqueueSeq);
+
+    @Test
+    void decodeSubscriptionIsSharedAndReleasedWithLastQueuedIdentity() {
+        Runnable wake = () -> { };
+        var index = PrefillActiveIndex.ordered(16, ORDER, wake);
+        var decode = mock(DecodeEndpoint.class);
+        var first = item(1, 50);
+        var second = item(2, 50);
+        when(first.decodeEp()).thenReturn(decode);
+        when(second.decodeEp()).thenReturn(decode);
+        index.add(first);
+        index.add(second);
+        assertFalse(index.add(first));
+        verify(decode, times(1)).addEngineDispatchCapacityListener(wake);
+        index.remove(first);
+        verify(decode, times(0)).removeEngineDispatchCapacityListener(wake);
+        index.remove(second);
+        assertFalse(index.remove(second));
+        verify(decode, times(1)).removeEngineDispatchCapacityListener(wake);
+        index.add(first);
+        index.clear();
+        index.clear();
+        verify(decode, times(2)).addEngineDispatchCapacityListener(wake);
+        verify(decode, times(2)).removeEngineDispatchCapacityListener(wake);
+    }
 
     @Test
     void additionsAndRemovalsMatchReferenceOrderAndPreserveOldCaptures() {
@@ -52,8 +76,7 @@ class PrefillActiveIndexTest {
             assertEquals(expected, index.capture().items());
             for (int priority = 0; priority <= 100; priority++) {
                 int exactPriority = priority;
-                assertEquals(
-                        expected.stream().filter(item -> item.priority() == exactPriority).count(),
+                assertEquals(expected.stream().filter(item -> item.priority() == exactPriority).count(),
                         index.size(priority));
             }
             assertSame(index.capture(), index.capture());
@@ -95,17 +118,14 @@ class PrefillActiveIndexTest {
             var tasks = new ArrayList<java.util.concurrent.Future<?>>();
             for (int i = 0; i < 64; i++) {
                 var capture = i % 2 == 0 ? old : current;
-                tasks.add(
-                        pool.submit(
-                                () -> {
-                                    assertTrue(start.await(5, TimeUnit.SECONDS));
-                                    return capture.projectedItems();
-                                }));
+                tasks.add(pool.submit(() -> {
+                    assertTrue(start.await(5, TimeUnit.SECONDS));
+                    return capture.projectedItems();
+                }));
             }
             start.countDown();
             for (int i = 0; i < tasks.size(); i++) {
-                assertSame(
-                        (i % 2 == 0 ? old : current).projectedItems(),
+                assertSame((i % 2 == 0 ? old : current).projectedItems(),
                         tasks.get(i).get(5, TimeUnit.SECONDS));
             }
         }

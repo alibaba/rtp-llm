@@ -22,4 +22,5 @@ public interface DynamicCacheIntervalService {
      * @return current interval in milliseconds
      */
     long getCurrentIntervalMs();
+
 }

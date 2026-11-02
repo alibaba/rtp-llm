@@ -9,8 +9,7 @@ import org.junit.jupiter.api.Test;
 import java.util.List;
 
 class ServiceRouteTest {
-    private static final String ROUTE_JSON =
-            """
+    private static final String ROUTE_JSON = """
             {
               "service_id": "aigc.text-generation.generation.engine_service",
               "prefill_endpoint": {
@@ -48,8 +47,8 @@ class ServiceRouteTest {
 
     @Test
     void testConfigLoaderList() {
-        List<ServiceRoute> serviceRoutes =
-                JsonUtils.toObject("[" + ROUTE_JSON + "]", new TypeReference<>() {});
+        List<ServiceRoute> serviceRoutes = JsonUtils.toObject("[" + ROUTE_JSON + "]", new TypeReference<>() {
+        });
         assertStandardRoute(serviceRoutes.getFirst());
     }
 
@@ -71,8 +70,7 @@ class ServiceRouteTest {
 
     @Test
     void should_load_pd_fusion_and_vit_endpoints() throws Exception {
-        String json =
-                """
+        String json = """
                 {
                   "service_id": "test.service",
                   "role_endpoints": [{
@@ -85,10 +83,8 @@ class ServiceRouteTest {
 
         ServiceRoute serviceRoute = objectMapper.readValue(json, ServiceRoute.class);
 
-        Assertions.assertTrue(
-                serviceRoute
-                        .getAllRoleTypes()
-                        .containsAll(List.of(RoleType.PDFUSION, RoleType.VIT)));
+        Assertions.assertTrue(serviceRoute.getAllRoleTypes().containsAll(
+                List.of(RoleType.PDFUSION, RoleType.VIT)));
         Assertions.assertEquals(1, serviceRoute.getRoleEndpoints(RoleType.PDFUSION).size());
         Assertions.assertEquals(1, serviceRoute.getRoleEndpoints(RoleType.VIT).size());
     }

@@ -3,6 +3,7 @@ package org.flexlb.dao.pv;
 import lombok.Data;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Response;
+import org.flexlb.telemetry.FlexlbTrace;
 
 import java.util.Map;
 
@@ -31,16 +32,18 @@ public class PvLogData {
     private String requestState;
     private String realMasterHost;
     private Map<String, Object> schedulingDiagnostics;
+    private String traceId;
+    private String spanId;
+    private Boolean traceSampled;
 
-    public PvLogData(
-            BalanceContext ctx,
-            int code,
-            String admissionRejectReason,
-            String scheduleOrigin,
-            long batchId,
-            String requestState,
-            String realMasterHost,
-            long completedAtMs) {
+    public PvLogData(BalanceContext ctx,
+                     int code,
+                     String admissionRejectReason,
+                     String scheduleOrigin,
+                     long batchId,
+                     String requestState,
+                     String realMasterHost,
+                     long completedAtMs) {
         this.requestId = ctx.getRequestId();
         this.seqLen = ctx.getRequest().getSeqLen();
         this.response = ctx.getResponse();
@@ -48,6 +51,12 @@ public class PvLogData {
         this.success = ctx.isSuccess();
         if (!success) {
             this.schedulingDiagnostics = ctx.getSchedulingDiagnostics();
+            var span = FlexlbTrace.spanContext(ctx.getTraceContext());
+            if (span != null) {
+                this.traceId = span.getTraceId();
+                this.spanId = span.getSpanId();
+                this.traceSampled = span.isSampled();
+            }
         }
         this.enqueueTime = ctx.getEnqueueTime();
         this.startTime = ctx.getStartTime();

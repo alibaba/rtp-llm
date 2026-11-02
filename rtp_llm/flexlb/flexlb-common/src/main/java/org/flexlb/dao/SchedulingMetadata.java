@@ -18,8 +18,7 @@ public final class SchedulingMetadata {
 
     private SchedulingMetadata(int priority, PrioritySource source, long expiresAtMs) {
         if (expiresAtMs <= 0) {
-            throw new IllegalArgumentException(
-                    "schedule deadline must be a positive Unix timestamp");
+            throw new IllegalArgumentException("schedule deadline must be a positive Unix timestamp");
         }
         this.priority = priority;
         this.source = source;
@@ -27,13 +26,17 @@ public final class SchedulingMetadata {
     }
 
     /** Normalize the caller priority once and bind it to the absolute expiry. */
-    public static SchedulingMetadata of(
-            int rawProtoPriority, String qosHeader, long expiresAtMs, int defaultPriority) {
-        int priority = PriorityNormalizer.normalize(rawProtoPriority, qosHeader, defaultPriority);
-        boolean explicit =
-                PriorityNormalizer.isValid(rawProtoPriority)
-                        || PriorityNormalizer.isValid(PriorityNormalizer.parseHeader(qosHeader));
-        PrioritySource source = explicit ? PrioritySource.EXPLICIT : PrioritySource.DEFAULT;
+    public static SchedulingMetadata of(int rawProtoPriority,
+                                        String qosHeader,
+                                        long expiresAtMs,
+                                        int defaultPriority) {
+        int priority = PriorityNormalizer.normalize(
+                rawProtoPriority, qosHeader, defaultPriority);
+        boolean explicit = PriorityNormalizer.isValid(rawProtoPriority)
+                || PriorityNormalizer.isValid(PriorityNormalizer.parseHeader(qosHeader));
+        PrioritySource source = explicit
+                ? PrioritySource.EXPLICIT
+                : PrioritySource.DEFAULT;
         return new SchedulingMetadata(priority, source, expiresAtMs);
     }
 

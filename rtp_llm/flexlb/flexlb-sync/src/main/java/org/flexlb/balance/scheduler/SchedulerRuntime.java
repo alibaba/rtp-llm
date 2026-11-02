@@ -31,7 +31,7 @@ final class SchedulerRuntime {
             EndpointRegistry endpoints,
             BatchSchedulerReporter reporter,
             RequestSchedulerReporter admissionReporter) {
-        this(requests, endpoints, reporter, admissionReporter, () -> {});
+        this(requests, endpoints, reporter, admissionReporter, () -> { });
     }
 
     @Autowired
@@ -41,7 +41,8 @@ final class SchedulerRuntime {
             BatchSchedulerReporter reporter,
             RequestSchedulerReporter admissionReporter,
             RequestScheduler scheduler) {
-        this(requests, endpoints, reporter, admissionReporter, scheduler::closePlacement);
+        this(requests, endpoints, reporter, admissionReporter,
+                scheduler::closePlacement);
     }
 
     private SchedulerRuntime(
@@ -53,8 +54,10 @@ final class SchedulerRuntime {
         this.requests = Objects.requireNonNull(requests, "requests");
         this.endpoints = Objects.requireNonNull(endpoints, "endpoints");
         this.reporter = Objects.requireNonNull(reporter, "reporter");
-        this.admissionReporter = Objects.requireNonNull(admissionReporter, "admissionReporter");
-        this.closePlacement = Objects.requireNonNull(closePlacement, "closePlacement");
+        this.admissionReporter = Objects.requireNonNull(
+                admissionReporter, "admissionReporter");
+        this.closePlacement = Objects.requireNonNull(
+                closePlacement, "closePlacement");
     }
 
     @Scheduled(fixedRate = EXPIRATION_MAINTENANCE_INTERVAL_MS)
@@ -74,14 +77,17 @@ final class SchedulerRuntime {
 
     private void reportSchedulerInflight() {
         try {
-            reporter.reportSchedulerInflightSize(requests.liveRequestCount());
+            reporter.reportSchedulerInflightSize(
+                    requests.liveRequestCount());
             // Age of the oldest scheduler-ledger inflight entry: with a
             // healthy TTL the size gauge alone cannot distinguish "busy"
             // from "leaking"; a max age creeping toward the TTL window is
             // the leak signature.
-            reporter.reportSchedulerInflightMaxAgeMs(requests.oldestLiveSlotAgeMs());
+            reporter.reportSchedulerInflightMaxAgeMs(
+                    requests.oldestLiveSlotAgeMs());
         } catch (RuntimeException failure) {
-            warnIsolated("Failed to report scheduler inflight metrics", failure);
+            warnIsolated(
+                    "Failed to report scheduler inflight metrics", failure);
         }
     }
 
@@ -90,7 +96,9 @@ final class SchedulerRuntime {
         try {
             endpoints = this.endpoints.snapshotPrefillEndpoints();
         } catch (RuntimeException failure) {
-            warnIsolated("Failed to snapshot Prefill endpoints for metrics", failure);
+            warnIsolated(
+                    "Failed to snapshot Prefill endpoints for metrics",
+                    failure);
             return;
         }
         for (Map.Entry<String, PrefillEndpoint> entry : endpoints.entrySet()) {
@@ -98,7 +106,8 @@ final class SchedulerRuntime {
                 entry.getValue().reportBatchMetrics(reporter);
             } catch (RuntimeException failure) {
                 warnIsolated(
-                        "Failed to report Prefill endpoint metrics: endpoint=" + entry.getKey(),
+                        "Failed to report Prefill endpoint metrics: endpoint="
+                                + entry.getKey(),
                         failure);
             }
             try {
@@ -106,7 +115,8 @@ final class SchedulerRuntime {
                         entry.getKey(), entry.getValue().queuedRequestCount());
             } catch (RuntimeException failure) {
                 warnIsolated(
-                        "Failed to report Prefill admission metrics: endpoint=" + entry.getKey(),
+                        "Failed to report Prefill admission metrics: endpoint="
+                                + entry.getKey(),
                         failure);
             }
         }
@@ -117,7 +127,9 @@ final class SchedulerRuntime {
         try {
             endpoints = this.endpoints.snapshotDecodeEndpoints();
         } catch (RuntimeException failure) {
-            warnIsolated("Failed to snapshot Decode endpoints for metrics", failure);
+            warnIsolated(
+                    "Failed to snapshot Decode endpoints for metrics",
+                    failure);
             return;
         }
         for (Map.Entry<String, DecodeEndpoint> entry : endpoints.entrySet()) {
@@ -125,20 +137,23 @@ final class SchedulerRuntime {
                 entry.getValue().reportBatchMetrics(reporter);
             } catch (RuntimeException failure) {
                 warnIsolated(
-                        "Failed to report Decode endpoint metrics: endpoint=" + entry.getKey(),
+                        "Failed to report Decode endpoint metrics: endpoint="
+                                + entry.getKey(),
                         failure);
             }
             try {
                 entry.getValue().reportAdmissionMetrics(admissionReporter);
             } catch (RuntimeException failure) {
                 warnIsolated(
-                        "Failed to report Decode admission metrics: endpoint=" + entry.getKey(),
+                        "Failed to report Decode admission metrics: endpoint="
+                                + entry.getKey(),
                         failure);
             }
         }
     }
 
-    private static void warnIsolated(String message, RuntimeException failure) {
+    private static void warnIsolated(
+            String message, RuntimeException failure) {
         try {
             Logger.warn(message, failure);
         } catch (Throwable ignored) {

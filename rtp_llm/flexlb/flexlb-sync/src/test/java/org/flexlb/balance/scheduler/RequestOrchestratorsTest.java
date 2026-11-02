@@ -30,7 +30,8 @@ class RequestOrchestratorsTest {
 
     @Test
     void shutdownOwnsOneStrictCloseOrder() {
-        RequestRegistry lifecycle = mock(RequestRegistry.class);
+        RequestRegistry lifecycle =
+                mock(RequestRegistry.class);
         EndpointRegistry registry = mock(EndpointRegistry.class);
         when(lifecycle.closeAdmissionAndAwaitMutations()).thenReturn(true);
 
@@ -46,7 +47,8 @@ class RequestOrchestratorsTest {
 
     @Test
     void shutdownNonOwnerDoesNotRepeatAnyCloseLeaf() {
-        RequestRegistry lifecycle = mock(RequestRegistry.class);
+        RequestRegistry lifecycle =
+                mock(RequestRegistry.class);
         EndpointRegistry registry = mock(EndpointRegistry.class);
         when(lifecycle.closeAdmissionAndAwaitMutations()).thenReturn(false);
 
@@ -60,7 +62,8 @@ class RequestOrchestratorsTest {
 
     @Test
     void shutdownPreservesPrimaryFailureButStillExecutesEveryLeaf() {
-        RequestRegistry lifecycle = mock(RequestRegistry.class);
+        RequestRegistry lifecycle =
+                mock(RequestRegistry.class);
         EndpointRegistry registry = mock(EndpointRegistry.class);
         RuntimeException primary = new RuntimeException("outstanding");
         RuntimeException expiration = new RuntimeException("expiration");
@@ -72,8 +75,9 @@ class RequestOrchestratorsTest {
         doThrow(endpoints).when(registry).close();
         doThrow(publisher).when(lifecycle).closePublisher();
 
-        RuntimeException thrown =
-                assertThrows(RuntimeException.class, () -> runtime(lifecycle, registry).shutdown());
+        RuntimeException thrown = assertThrows(
+                RuntimeException.class,
+                () -> runtime(lifecycle, registry).shutdown());
 
         assertSame(primary, thrown);
         assertEquals(3, thrown.getSuppressed().length);
@@ -85,42 +89,41 @@ class RequestOrchestratorsTest {
 
     @Test
     void expirationOrchestratorPassesOnlyTheExactRegistrySweeper() {
-        RequestRegistry lifecycle = mock(RequestRegistry.class);
+        RequestRegistry lifecycle =
+                mock(RequestRegistry.class);
         EndpointRegistry registry = mock(EndpointRegistry.class);
         AtomicBoolean exactOwnershipPredicateObserved = new AtomicBoolean();
-        doAnswer(
-                        invocation -> {
-                            java.util.function.LongPredicate owns = invocation.getArgument(1);
-                            exactOwnershipPredicateObserved.set(owns.test(91L));
-                            return null;
-                        })
-                .when(registry)
-                .evictExpiredOrphans(anyLong(), any());
-        doAnswer(
-                        invocation -> {
-                            java.util.function.BiConsumer<Long, java.util.function.LongPredicate>
-                                    sweeper = invocation.getArgument(0);
-                            sweeper.accept(123L, requestId -> requestId == 91L);
-                            return null;
-                        })
-                .when(lifecycle)
-                .maintainExpiration(any());
+        doAnswer(invocation -> {
+            java.util.function.LongPredicate owns = invocation.getArgument(1);
+            exactOwnershipPredicateObserved.set(owns.test(91L));
+            return null;
+        }).when(registry).evictExpiredOrphans(anyLong(), any());
+        doAnswer(invocation -> {
+            java.util.function.BiConsumer<Long, java.util.function.LongPredicate>
+                    sweeper = invocation.getArgument(0);
+            sweeper.accept(123L, requestId -> requestId == 91L);
+            return null;
+        }).when(lifecycle).maintainExpiration(any());
 
         runtime(lifecycle, registry).maintainExpiration();
 
         verify(registry).evictExpiredOrphans(anyLong(), any());
-        org.junit.jupiter.api.Assertions.assertTrue(exactOwnershipPredicateObserved.get());
+        org.junit.jupiter.api.Assertions.assertTrue(
+                exactOwnershipPredicateObserved.get());
     }
 
     @Test
     void metricsDoNothingAfterLifecycleShutdownBegins() {
-        RequestRegistry lifecycle = mock(RequestRegistry.class);
+        RequestRegistry lifecycle =
+                mock(RequestRegistry.class);
         EndpointRegistry registry = mock(EndpointRegistry.class);
         BatchSchedulerReporter reporter = mock(BatchSchedulerReporter.class);
-        RequestSchedulerReporter admissionReporter = mock(RequestSchedulerReporter.class);
+        RequestSchedulerReporter admissionReporter =
+                mock(RequestSchedulerReporter.class);
         when(lifecycle.isShuttingDown()).thenReturn(true);
 
-        new SchedulerRuntime(lifecycle, registry, reporter, admissionReporter).report();
+        new SchedulerRuntime(
+                lifecycle, registry, reporter, admissionReporter).report();
 
         verify(lifecycle, never()).liveRequestCount();
         verify(registry, never()).snapshotPrefillEndpoints();
@@ -129,10 +132,12 @@ class RequestOrchestratorsTest {
 
     @Test
     void metricsIsolateEveryEndpointLeafAndContinueTraversal() {
-        RequestRegistry lifecycle = mock(RequestRegistry.class);
+        RequestRegistry lifecycle =
+                mock(RequestRegistry.class);
         EndpointRegistry registry = mock(EndpointRegistry.class);
         BatchSchedulerReporter reporter = mock(BatchSchedulerReporter.class);
-        RequestSchedulerReporter admissionReporter = mock(RequestSchedulerReporter.class);
+        RequestSchedulerReporter admissionReporter =
+                mock(RequestSchedulerReporter.class);
         PrefillEndpoint failingPrefill = mock(PrefillEndpoint.class);
         PrefillEndpoint healthyPrefill = mock(PrefillEndpoint.class);
         DecodeEndpoint decode = mock(DecodeEndpoint.class);
@@ -143,10 +148,10 @@ class RequestOrchestratorsTest {
         when(registry.snapshotPrefillEndpoints()).thenReturn(prefill);
         when(registry.snapshotDecodeEndpoints()).thenReturn(Map.of("d1", decode));
         doThrow(new RuntimeException("metrics unavailable"))
-                .when(failingPrefill)
-                .reportBatchMetrics(reporter);
+                .when(failingPrefill).reportBatchMetrics(reporter);
 
-        new SchedulerRuntime(lifecycle, registry, reporter, admissionReporter).report();
+        new SchedulerRuntime(
+                lifecycle, registry, reporter, admissionReporter).report();
 
         verify(reporter).reportSchedulerInflightSize(7);
         verify(failingPrefill).reportBatchMetrics(reporter);
@@ -157,7 +162,8 @@ class RequestOrchestratorsTest {
         verify(decode).reportAdmissionMetrics(admissionReporter);
     }
 
-    private static SchedulerRuntime runtime(RequestRegistry requests, EndpointRegistry endpoints) {
+    private static SchedulerRuntime runtime(
+            RequestRegistry requests, EndpointRegistry endpoints) {
         return new SchedulerRuntime(
                 requests,
                 endpoints,
