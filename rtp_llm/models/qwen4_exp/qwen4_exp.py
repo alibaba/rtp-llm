@@ -30,11 +30,6 @@ class Qwen4Exp(Qwen35Moe):
     residual and checkpoint-required PLE/QSA paths are always connected.
     """
 
-    @classmethod
-    def _parse_mm_config(cls, config_json: dict, config: ModelConfig):
-        super()._parse_mm_config(config_json, config)
-        config.mm_related_params.config["qsa_text_only"] = True
-
     @staticmethod
     def get_weight_cls():
         return Qwen4ExpWeight

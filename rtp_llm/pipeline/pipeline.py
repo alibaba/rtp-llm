@@ -71,18 +71,10 @@ class Pipeline(object):
         master_config=None,
         parallelism_config=None,
         prefill_cp_config=None,
-        model_config=None,
     ):
         self.pd_sep_config = pd_sep_config
         self.tokenizer = tokenizer
         self._special_tokens: SpecialTokens = special_tokens
-        self._qsa_text_only = bool(
-            (model_config and getattr(model_config, "enable_qwen4_qsa", False))
-            or (
-                mm_related_params
-                and mm_related_params.config.get("qsa_text_only", False)
-            )
-        )
         self._mm_token: str = ""
         if mm_related_params:
             self._mm_token = mm_related_params.special_tokens.get(
@@ -102,7 +94,6 @@ class Pipeline(object):
             master_config=master_config,
             parallelism_config=parallelism_config,
             prefill_cp_config=prefill_cp_config,
-            model_config=model_config if self._qsa_text_only else None,
         )
 
     async def close(self) -> None:
@@ -195,11 +186,6 @@ class Pipeline(object):
         urls: Optional[List[str]] = None,
         **kwargs: Any,
     ) -> AsyncGenerator[GenerateResponse, None]:
-        if urls and self._qsa_text_only:
-            raise FtRuntimeException(
-                ExceptionType.UNSUPPORTED_OPERATION,
-                "Qwen3.8-Flash-Next QSA currently supports text inputs only",
-            )
         begin_time = current_time_ms()
 
         if request_id == None:

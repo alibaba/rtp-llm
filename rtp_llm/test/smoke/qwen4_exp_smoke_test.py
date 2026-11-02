@@ -345,8 +345,28 @@ class Qwen4SM120ScenariosTest(unittest.TestCase):
         else:
             self.assertFalse(replay, "Eager target replayed an MTP CUDA graph")
 
-    def test_06_post_state_generation(self):
-        self.check_chat_goldens("after_state_checks")
+    def test_06_generation_after_rejected_multimodal_request(self):
+        from rtp_llm.config.exceptions import ExceptionType
+
+        response = self.session.post(
+            self.url("/"),
+            json={
+                "prompt": "Describe the image.",
+                "images": ["https://example.invalid/image.png"],
+                "generate_config": {"max_new_tokens": 1},
+            },
+            timeout=30,
+        )
+        (self.output_dir / "multimodal_rejection.json").write_text(response.text)
+        self.assertFalse(response.ok, response.text)
+        error = response.json()
+        self.assertEqual(
+            error["error_code"], int(ExceptionType.MM_NOT_SUPPORTED_ERROR), error
+        )
+        self.assertIn(
+            "qwen4_exp QSA currently supports text inputs only", error["message"]
+        )
+        self.check_chat_goldens("after_rejected_multimodal_request")
 
 
 if __name__ == "__main__":
