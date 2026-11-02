@@ -20,6 +20,7 @@ py_library(
 py_library(
     name = "common",
     srcs = glob(["common/*.py"]),
+    deps = ["//rtp_llm/models_py:optimization_settings"],
     visibility = ["//visibility:public"]
 )
 

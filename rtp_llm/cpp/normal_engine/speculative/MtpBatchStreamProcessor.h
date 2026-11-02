@@ -109,19 +109,20 @@ torch::Tensor reshapeMtpTargetAllProbs(const torch::Tensor& all_probs,
 // bookkeeping. Never resolve these tensors through a stream's mutable state:
 // an overlapped forward may already be publishing a newer generation.
 struct MtpDecodeDispatchSnapshot {
-    torch::Tensor all_probs;
-    torch::Tensor last_hidden_states;
-    torch::Tensor target_tokens;
+    torch::Tensor                 all_probs;
+    torch::Tensor                 last_hidden_states;
+    torch::Tensor                 target_tokens;
     std::shared_ptr<torch::Event> ready;
+    bool                          compact_point_mass = false;
 };
 
 // all_probs and last_hidden_states must already own storage independent of
 // graph outputs. accepted_indices is the batch INT64 (accept_len - 1) vector.
 // Records readiness AFTER the batch token gather and all prior producer work.
 MtpDecodeDispatchSnapshot makeMtpDecodeDispatchSnapshot(const torch::Tensor& all_probs,
-                                                       const torch::Tensor& last_hidden_states,
-                                                       const torch::Tensor& accept_tokens,
-                                                       const torch::Tensor& accepted_indices);
+                                                        const torch::Tensor& last_hidden_states,
+                                                        const torch::Tensor& accept_tokens,
+                                                        const torch::Tensor& accepted_indices);
 
 class MtpBatchStreamProcessor: public NormalBatchStreamProcessor {
 public:
@@ -157,7 +158,7 @@ public:
                                 const speculative::SpeculativeSamplerOutput& spec_decode_output,
                                 const MergedOutput&                          draft_prefill_output,
                                 MtpTargetLogprobs                            target_logprobs,
-                                const MtpDecodeDispatchSnapshot*            snapshot = nullptr) const;
+                                const MtpDecodeDispatchSnapshot*             snapshot = nullptr) const;
 
     // Wait for accepted lengths/tokens and reduce only accepted target rows.
     // Idempotent for an already-finalized payload so an early async finalize
@@ -172,8 +173,9 @@ public:
     // Like DSpARK, assemble each request from its published GPU state. Caller
     // owns forward claims; FULL KV mappings cannot be released while gathering.
     // No CPU token history or worker-owned SP mirrors are read here.
-    std::optional<GptModelInputs> tryGatherDecodeForwardInput(
-        const std::list<GenerateStreamPtr>& streams, TensorHolder& host_holder) const;
+    std::optional<GptModelInputs> tryGatherDecodeForwardInput(const std::list<GenerateStreamPtr>& streams,
+                                                              TensorHolder&                       host_holder,
+                                                              bool compact_point_mass = false) const;
 
     absl::StatusOr<SamplerInputs>
     gatherSpecSamplerInput(const StreamGroups&                         stream_groups,
@@ -183,7 +185,7 @@ public:
 
     void prepareDecodeDraftModelInput(const StreamGroups& stream_groups,
                                       GptModelInputs&     model_input,
-                                      TensorHolder&       host_holder);
+                                      TensorHolder&       host_holder) const;
 
     void prepareOneStepSpecDecodeModelInput(const StreamGroups& stream_groups,
                                             GptModelInputs&     model_input,
@@ -246,7 +248,7 @@ protected:
                                      const MergedOutput&                          draft_prefill_output,
                                      MtpTargetLogprobs&                           target_logprobs,
                                      std::vector<StreamSpecUpdateInfo>&           spec_update_infos,
-                                     const MtpDecodeDispatchSnapshot*            snapshot = nullptr) const;
+                                     const MtpDecodeDispatchSnapshot*             snapshot = nullptr) const;
 
     void gatherHiddenStates(const StreamGroups& stream_groups, GptModelInputs& model_input) const;
 

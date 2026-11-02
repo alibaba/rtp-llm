@@ -12,7 +12,7 @@ import tempfile
 import traceback
 import unittest
 from datetime import timedelta
-from types import SimpleNamespace
+from types import MethodType, SimpleNamespace
 from unittest.mock import Mock, PropertyMock, patch
 
 import torch
@@ -137,6 +137,120 @@ class PackedKVGatherTest(unittest.TestCase):
         op._refresh_full_rope_positions(positions, 2)
         self.assertIs(op.full_rope_pos_ids, before)
         self.assertEqual(before.tolist(), [9, 0])
+
+    @unittest.skipUnless(torch.cuda.is_available(), "requires CUDA")
+    def test_packed_indexed_write_matches_legacy_cache_bytes(self):
+        from rtp_llm.models_py.triton_kernels.sparse_mla import cp_cache_fusion
+
+        device = "cuda"
+        torch.manual_seed(37)
+        base = torch.randn(4, 1600, dtype=torch.bfloat16, device=device)
+        ckv, pe = base[:, 1024:1536], base[:, 1536:1600]
+        restore = torch.tensor([7, 0, 3, 4, 1], device=device)
+        slots = torch.tensor([12, -1, 3, 5, -1], device=device)
+        op = _op(restore)
+        op.kv_cache_sharded = True
+        op.sharded_slot_mapping = slots
+        op.mla_params = SimpleNamespace(slot_mapping=slots)
+        op.kv_cache_write_op = SimpleNamespace(
+            kv_cache_type="fp8_ds_mla", forward=Mock()
+        )
+        actual = torch.zeros((4, 4, 656), dtype=torch.uint8, device=device)
+        expected = torch.zeros_like(actual)
+        for _ in range(3):
+            # Strided QKV source and two distinct rank payloads. No real NCCL
+            # needed: this compares fused write's exact physical cache bytes.
+            legacy_k = torch.cat((ckv.contiguous(), ckv + 1))
+            legacy_pe = torch.cat((pe.contiguous(), pe + 1))
+            self.assertTrue(
+                cp_cache_fusion.try_indexed_cache_write(
+                    legacy_k, legacy_pe, restore, slots, expected
+                )
+            )
+            with (
+                patch.object(cp._prefill_optimization, "ENABLED", True),
+                patch.object(
+                    cp, "all_gather", side_effect=lambda t, **_: torch.cat((t, t + 1))
+                ) as gather,
+            ):
+                op.write_kv(ckv, pe, SimpleNamespace(kv_cache_base=actual))
+            self.assertEqual(gather.call_count, 1)
+            op.kv_cache_write_op.forward.assert_not_called()
+            self.assertTrue(torch.equal(actual, expected))
+            ckv = ckv + 0.5
+            pe = pe - 0.5
+
+    def test_prefill_fusion_keeps_packed_gather_and_indexed_write(self):
+        from rtp_llm.models_py.triton_kernels.sparse_mla import cp_cache_fusion
+
+        for mixed in (False, True):
+            for fused in (False, True):
+                for sharded in (False, True):
+                    with self.subTest(mixed=mixed, fused=fused, sharded=sharded):
+                        base = torch.arange(4 * 13).reshape(4, 13).float()
+                        ckv, kpe = base[:, 1:9], base[:, 9:12]
+                        if mixed:
+                            kpe = kpe.double()
+                        restore = torch.tensor([7, 0, 3, 4, 1])
+                        slots = torch.tensor([12, -1, 3, 5, -1])
+                        op = _op(restore)
+                        op.kv_cache_sharded = sharded
+                        op.sharded_slot_mapping = slots
+                        op.mla_params = SimpleNamespace(slot_mapping=slots)
+                        op.kv_cache_write_op = SimpleNamespace(
+                            kv_cache_type="fp8_ds_mla", forward=Mock()
+                        )
+                        cache = SimpleNamespace(
+                            kv_cache_base=torch.zeros(1, dtype=torch.uint8)
+                        )
+                        with (
+                            patch.object(cp._prefill_optimization, "ENABLED", True),
+                            patch.object(
+                                cp,
+                                "all_gather",
+                                side_effect=lambda t, **_: torch.cat((t, t + 1)),
+                            ) as gather,
+                            patch.object(
+                                cp_cache_fusion,
+                                "try_indexed_cache_write",
+                                return_value=fused,
+                            ) as write,
+                        ):
+                            op.write_kv(ckv, kpe, cache)
+                        self.assertEqual(gather.call_count, 2 if mixed else 1)
+                        raw_k, raw_pe, ids, actual_slots, _ = write.call_args.args
+                        torch.testing.assert_close(raw_k, torch.cat((ckv, ckv + 1)))
+                        torch.testing.assert_close(raw_pe, torch.cat((kpe, kpe + 1)))
+                        self.assertIs(ids, restore)
+                        self.assertIs(actual_slots, slots)
+                        if fused:
+                            op.kv_cache_write_op.forward.assert_not_called()
+                        else:
+                            got = op.kv_cache_write_op.forward.call_args.args
+                            torch.testing.assert_close(got[0], raw_k[restore])
+                            torch.testing.assert_close(got[1], raw_pe[restore])
+
+    def test_prefill_fusion_keeps_rank_major_without_prestarted_gather(self):
+        restore = torch.tensor([3, 0, 1])
+        slots = torch.tensor([1, -1, 0])
+        op = _op(restore)
+        op.kv_cache_sharded = True
+        op.sharded_slot_mapping = op._rank_major_source_slots = slots
+        op.rank_major_slot_mapping = cp._rank_major_slot_mapping(slots, restore, 4)
+        op.mla_params = object()
+        op.kv_cache_write_op = SimpleNamespace(forward=Mock())
+        ckv, pe = torch.ones(2, 8), torch.ones(2, 2)
+        with (
+            patch.object(cp._prefill_optimization, "ENABLED", True),
+            patch.object(
+                cp, "all_gather", side_effect=lambda t, **_: torch.cat((t, t + 1))
+            ) as gather,
+        ):
+            op.write_kv(ckv, pe, object())
+        self.assertEqual(gather.call_count, 1)
+        args = op.kv_cache_write_op.forward.call_args
+        torch.testing.assert_close(args.args[0], torch.cat((ckv, ckv + 1)))
+        self.assertIs(args.kwargs["slot_mapping_override"], op.rank_major_slot_mapping)
 
     def test_early_kv_context_covers_projection_and_indexer_failures(self):
         for failure, host_backed, cross_layer in [

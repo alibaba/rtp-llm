@@ -198,3 +198,13 @@ py_test(
     deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
     tags = ["manual"],
 )
+
+py_test(
+    name = "cp_kv_prefetch_gpu_test",
+    srcs = ["cp_kv_prefetch_gpu_test.py"],
+    deps = [
+        "//rtp_llm/models_py/standalone:py_standalone_testlib",
+        "//rtp_llm:testlib",
+    ],
+    tags = ["manual", "H20", "open_skip"],
+)

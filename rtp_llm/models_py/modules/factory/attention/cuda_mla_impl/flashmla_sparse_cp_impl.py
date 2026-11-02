@@ -1042,6 +1042,7 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
         compressed_kv: torch.Tensor,
         k_pe: torch.Tensor,
         overlap: bool = False,
+        defer_restore: bool = False,
     ) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.cuda.Stream]]:
         """Gather both main-KV components once, optionally alongside the Q BMM.
 
@@ -1103,7 +1104,7 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
                 gathered = gathered.reshape(-1, packed.size(-1))
                 restored = (
                     gathered
-                    if rank_major_slots is not None
+                    if rank_major_slots is not None or defer_restore
                     else gathered[self.kv_restore_unpad_indices]
                 )
                 restored_ckv, restored_k_pe = restored.split(
@@ -1115,7 +1116,7 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
                 gathered_k_pe = all_gather(k_pe, group=Group.TP, role="mla_kpe")
                 restored_ckv = gathered_ckv.reshape(-1, compressed_kv.size(-1))
                 restored_k_pe = gathered_k_pe.reshape(-1, k_pe.size(-1))
-                if rank_major_slots is None:
+                if rank_major_slots is None and not defer_restore:
                     restored_ckv = restored_ckv[self.kv_restore_unpad_indices]
                     restored_k_pe = restored_k_pe[self.kv_restore_unpad_indices]
         return restored_ckv, restored_k_pe, gather_stream
@@ -1233,15 +1234,17 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
         self.full_rope_pos_ids = full_rope
 
     def write_kv(self, compressed_kv, k_pe, kv_cache, gathered_kv=None):
-        if gathered_kv is None and _prefill_optimization.ENABLED:
-            gathered_ckv = all_gather(
-                compressed_kv.contiguous(), group=Group.TP, role="mla_ckv"
+        # Rank-major slots already eliminate restore. For logical slots, retain
+        # indexed quantize+write fusion without sacrificing the packed gather.
+        indexed_write = (
+            gathered_kv is None
+            and _prefill_optimization.ENABLED
+            and self._rank_major_write_slots() is None
+        )
+        if indexed_write:
+            gathered_ckv, gathered_k_pe, _ = self.gather_kv(
+                compressed_kv, k_pe, defer_restore=True
             )
-            gathered_ckv = gathered_ckv.reshape(-1, compressed_kv.size(-1))
-            gathered_k_pe = all_gather(
-                k_pe.contiguous(), group=Group.TP, role="mla_kpe"
-            )
-            gathered_k_pe = gathered_k_pe.reshape(-1, k_pe.size(-1))
 
             if (
                 _prefill_optimization.ENABLED
