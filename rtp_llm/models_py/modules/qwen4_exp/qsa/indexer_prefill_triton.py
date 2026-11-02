@@ -594,6 +594,8 @@ def _prefix_reuse_q_prep(
     STATE_BLOCKS,
     MAX_ROWS,
     HEADS,
+    Q_STRIDE,
+    RAW_STRIDE,
     EPS: tl.constexpr,
 ):
     request, row, head = tl.program_id(0), tl.program_id(1), tl.program_id(2)
@@ -621,7 +623,9 @@ def _prefix_reuse_q_prep(
         lane0 = tl.arange(0, 32)
         column0 = lane0 * 4
         for j in tl.static_range(4):
-            key_value = tl.load(raw + token64 * 128 + column0 + j).to(tl.float32)
+            key_value = tl.load(
+                raw + token64 * RAW_STRIDE + column0 + j
+            ).to(tl.float32)
             tl.store(
                 state_pool + slot * 128 + column0 + j,
                 key_value,
@@ -632,7 +636,9 @@ def _prefix_reuse_q_prep(
     # rounding boundaries.
     lane = tl.arange(0, 32)
     column = lane * 4
-    offset = (token64 * HEADS + head) * 128
+    # Cross-column qkv views: token rows stride the projection width, the
+    # 128-wide head segment itself stays contiguous.
+    offset = token64 * Q_STRIDE + head * 128
     a = tl.load(q + offset + column).to(tl.float32)
     b = tl.load(q + offset + column + 1).to(tl.float32)
     c = tl.load(q + offset + column + 2).to(tl.float32)
@@ -675,6 +681,7 @@ def _prefix_reuse_k_compress(
     kv_pool,
     KV_WIDTH: tl.constexpr,
     KV_BLOCKS,
+    RAW_STRIDE,
     EPS: tl.constexpr,
 ):
     request, group = tl.program_id(0), tl.program_id(1)
@@ -685,13 +692,13 @@ def _prefix_reuse_k_compress(
     if valid:
         d = tl.arange(0, INDEXER_HEAD_DIM)
         block = start + group * 4
-        base = block.to(tl.int64) * 128
+        base = block.to(tl.int64) * RAW_STRIDE
         # fp32 group mean in the staged writer's member accumulation order,
         # then the staged writer's BF16 round trip before the k-norm.
         v0 = tl.load(raw + base + d).to(tl.float32)
-        v1 = tl.load(raw + base + 128 + d).to(tl.float32)
-        v2 = tl.load(raw + base + 256 + d).to(tl.float32)
-        v3 = tl.load(raw + base + 384 + d).to(tl.float32)
+        v1 = tl.load(raw + base + RAW_STRIDE + d).to(tl.float32)
+        v2 = tl.load(raw + base + 2 * RAW_STRIDE + d).to(tl.float32)
+        v3 = tl.load(raw + base + 3 * RAW_STRIDE + d).to(tl.float32)
         pooled = (((v0 + v1) + v2) + v3) * 0.25
         pooled = pooled.to(tl.bfloat16).to(tl.float32)
         # k-norm variance in the eager mean's 32-lane x 4-adjacent order.
@@ -760,11 +767,15 @@ def write_prefix_reuse_prefill(
     """Fused prefix-reuse preparation; ``None`` for unsupported geometry.
 
     ``q`` is the RAW (un-normed) packed projection ``[tokens, heads, 128]``
-    and ``raw_keys`` its key head ``[tokens, 128]``, both bf16. The caller
-    owns a frozen ``Qwen4ExpPrefillStepPlan`` hit and guarantees the geometry
-    this writer specializes on: ratio 4, 128-token KV/state pages with equal
-    page-aligned prefixes and 128-wide heads, so every completed group's four
-    source rows lie inside this invocation's packed rows. ``current_cos`` /
+    and ``raw_keys`` its key head ``[tokens, 128]``, both bf16. Both may be
+    zero-copy cross-column views of the packed qkv projection (the
+    ``split_projected`` layout): ``q`` with strides ``(S, 128, 1)`` where
+    ``S >= heads * 128``, and ``raw_keys`` with strides ``(S2, 1)`` where
+    ``S2 >= 128``; any other layout declines. The caller owns a frozen
+    ``Qwen4ExpPrefillStepPlan`` hit and guarantees the geometry this writer
+    specializes on: ratio 4, 128-token KV/state pages with equal
+    page-aligned prefixes and 128-wide heads, so every completed group's
+    four source rows lie inside this invocation's packed rows. ``current_cos`` /
     ``current_sin`` carry one per-token rotation row and ``rope_cos`` /
     ``rope_sin`` one block-start row per packed token (the token-aligned
     tables the staged writer consumes).
@@ -802,8 +813,11 @@ def write_prefix_reuse_prefill(
         and raw_keys.dtype == torch.bfloat16
         and tuple(q.shape) == (tokens, head_num, 128)
         and tuple(raw_keys.shape) == (tokens, 128)
-        and q.is_contiguous()
-        and raw_keys.is_contiguous()
+        and q.stride(2) == 1
+        and q.stride(1) == 128
+        and q.stride(0) >= head_num * 128
+        and raw_keys.stride(1) == 1
+        and raw_keys.stride(0) >= 128
         and cu_seqlens.dtype == torch.int32
         and tuple(cu_seqlens.shape) == (batch + 1,)
         and cu_seqlens.is_contiguous()
@@ -922,6 +936,8 @@ def write_prefix_reuse_prefill(
             STATE_BLOCKS=state_pool.shape[0],
             MAX_ROWS=maximum,
             HEADS=head_num,
+            Q_STRIDE=q.stride(0),
+            RAW_STRIDE=raw_keys.stride(0),
             EPS=norm_eps,
             num_warps=1,
             enable_fp_fusion=False,
@@ -938,6 +954,7 @@ def write_prefix_reuse_prefill(
                 kv_pool,
                 KV_WIDTH=kv_table.shape[1],
                 KV_BLOCKS=kv_pool.shape[0],
+                RAW_STRIDE=raw_keys.stride(0),
                 EPS=norm_eps,
                 num_warps=4,
                 enable_fp_fusion=False,
