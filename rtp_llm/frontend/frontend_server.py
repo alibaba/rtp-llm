@@ -1107,7 +1107,7 @@ class FrontendServer(object):
         request_metrics = self._request_metrics.begin(
             rank_id=self.rank_id,
             server_id=self.server_id,
-            source=str(req.get("source", "unkown")),
+            source=metric_tags["source"],
             streaming=is_streaming,
             priority=metric_tags["priority"],
         )

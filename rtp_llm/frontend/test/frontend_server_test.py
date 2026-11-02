@@ -594,6 +594,22 @@ class FrontendServerTest(TestCase):
                         0,
                     )
 
+    def test_inference_metrics_use_bounded_source(self):
+        server = self.frontend_server
+        server._metric_sources = {str(index) for index in range(128)}
+        for source in ("overflow", "x" * 129):
+            with self.subTest(source=source), patch.object(
+                server._request_metrics, "begin", wraps=server._request_metrics.begin
+            ) as begin:
+                response = asyncio.run(
+                    self._async_run(
+                        req={"prompt": "hello", "source": source},
+                        raw_request=FakeRawRequest(),
+                    )
+                )
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(begin.call_args.kwargs["source"], "__other__")
+
     def test_metric_tag_cardinality_is_bounded(self):
         server = self.frontend_server
         for index in range(128):

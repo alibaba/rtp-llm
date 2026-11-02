@@ -53,6 +53,39 @@ class FrontendRequestMetricsTest(unittest.TestCase):
             priority=priority,
         )
 
+    def test_batch_metrics_visit_each_unit_linearly(self):
+        from rtp_llm.frontend import frontend_request_metrics as module
+
+        state = self.begin(streaming=False)
+        count = 256
+        with patch.object(
+            module, "_tps_counters", wraps=module._tps_counters
+        ) as counters:
+            with patch.object(
+                module, "_merge_snapshots", wraps=module._merge_snapshots
+            ) as merge:
+                for unit in range(count):
+                    frame = {
+                        "_frontend_metric_unit_id": unit,
+                        "frontend_input_len": 32,
+                        "frontend_output_len": 1,
+                        "context_token_num": 32,
+                        "context_token_num_with_cache": 32,
+                        "context_execute_time_us": 100,
+                        "context_execute_time_with_cache_us": 100,
+                        "_frontend_output_batch_size": 1,
+                    }
+                    state.observe_tps(frame)
+                    state.observe(frame)
+                state.finish()
+                # Bound total traversal work, including the final report.
+                self.assertLessEqual(counters.call_count, 2 * count)
+                self.assertLessEqual(merge.call_count, 2)
+        self.assertEqual(
+            self.sink.values(GaugeMetrics.FRONTEND_INPUT_LENGTH_METRIC),
+            [32 * count],
+        )
+
     def test_stale_unit_counters_do_not_hide_another_units_progress(self):
         for raw_backend in (False, True):
             with self.subTest(raw_backend=raw_backend):

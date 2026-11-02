@@ -483,7 +483,7 @@ class FrontendRequestMetricState:
         self._last_backend_batch_size: Dict[Any, int] = {}
         self._last_backend_output_len: Dict[Any, int] = {}
         self._fallback_generate_token_num: Dict[Any, int] = {}
-        self._snapshot: Optional[_RequestSnapshot] = None
+        self._tps_totals = {False: _TpsCounters(), True: _TpsCounters()}
         self._last_tps_counters = _TpsCounters()
         self._unit_tps_high_water: Dict[Tuple[bool, Any], _TpsCounters] = {}
         self._finished = False
@@ -518,11 +518,13 @@ class FrontendRequestMetricState:
         if self._finished:
             return
         first_frame_delta = 0
+        changed_snapshots = {}
         for unit_id, unit_response in _request_units(response):
             snapshot = _request_snapshot(unit_response)
             if snapshot is None:
                 continue
             self._unit_snapshots[unit_id] = snapshot
+            changed_snapshots[unit_id] = snapshot
             if snapshot.output_len is None:
                 continue
 
@@ -538,12 +540,11 @@ class FrontendRequestMetricState:
                 )
                 first_frame_delta += output_delta
 
-        self._snapshot = _merge_snapshots(self._unit_snapshots.values())
         # Once the raw backend side-channel has produced a snapshot it is the
         # sole TPS source. Outward frames may carry newer request-level MTP or
         # beam counters and must not advance the engine-aligned high-water.
         if not self._tps_unit_snapshots:
-            self._record_tps_progress(self._unit_snapshots, backend=False)
+            self._record_tps_progress(changed_snapshots, backend=False)
         if self._first_output_ms is None and first_frame_delta > 0:
             self._first_output_ms = self._owner.now_ms() if now_ms is None else now_ms
             self._first_output_len = first_frame_delta
@@ -582,6 +583,7 @@ class FrontendRequestMetricState:
     def _observe_tps(self, response: Any) -> None:
         if self._finished:
             return
+        changed_snapshots = {}
         for unit_id, unit_response in _request_units(response):
             self._report_sp_tpot_samples(unit_id, unit_response)
             snapshot = _request_snapshot(unit_response)
@@ -596,7 +598,8 @@ class FrontendRequestMetricState:
                     unit_response,
                     snapshot,
                 )
-        self._record_tps_progress(self._tps_unit_snapshots, backend=True)
+                changed_snapshots[unit_id] = self._tps_unit_snapshots[unit_id]
+        self._record_tps_progress(changed_snapshots, backend=True)
 
     def _observe_nonstream_first_token(
         self,
@@ -664,12 +667,6 @@ class FrontendRequestMetricState:
             attempt,
             first_output_ms,
             first_token_count,
-        )
-        self._first_output_ms = min(
-            candidate[1] for candidate in self._nonstream_first_outputs.values()
-        )
-        self._first_output_len = sum(
-            candidate[2] for candidate in self._nonstream_first_outputs.values()
         )
 
     def _backend_tps_snapshot(
@@ -785,24 +782,22 @@ class FrontendRequestMetricState:
     ) -> None:
         if not snapshots:
             return
-        unit_counters = []
+        counters = self._tps_totals[backend]
         for unit_id, snapshot in snapshots.items():
             key = (backend, unit_id)
-            _, high_water = _tps_counter_delta(
+            unit_delta, high_water = _tps_counter_delta(
                 _tps_counters(snapshot),
                 self._unit_tps_high_water.get(key, _TpsCounters()),
             )
             self._unit_tps_high_water[key] = high_water
-            unit_counters.append(high_water)
-        # Clamp executed counters before summing units. Otherwise an old frame
-        # for one unit can conceal fresh progress in another. Request lengths
-        # and beam widths remain untouched and may legitimately shrink.
-        counters = _TpsCounters(
-            **{
-                field: sum(getattr(unit, field) for unit in unit_counters)
-                for field in _TpsCounters.__dataclass_fields__
-            }
-        )
+            # Add only this unit's progress; stale frames cannot subtract work.
+            counters = _TpsCounters(
+                **{
+                    field: getattr(counters, field) + getattr(unit_delta, field)
+                    for field in _TpsCounters.__dataclass_fields__
+                }
+            )
+        self._tps_totals[backend] = counters
         delta, high_water = _tps_counter_delta(counters, self._last_tps_counters)
         self._owner._record_tps_delta(delta)
         # Token/time high-water marks advance independently. The container
@@ -838,12 +833,20 @@ class FrontendRequestMetricState:
         duration_ms = max(end_ms - self._start_ms, 0.0)
         report(GaugeMetrics.FRONTEND_REQUEST_RT_MS_METRIC, duration_ms, tags)
 
+        # Request summaries are consumed only at finish, not on each batch item.
+        if self._nonstream_first_outputs:
+            self._first_output_ms = min(
+                candidate[1] for candidate in self._nonstream_first_outputs.values()
+            )
+            self._first_output_len = sum(
+                candidate[2] for candidate in self._nonstream_first_outputs.values()
+            )
         ttft_ms: Optional[float] = None
         if self._first_output_ms is not None:
             ttft_ms = max(self._first_output_ms - self._start_ms, 0.0)
             report(GaugeMetrics.FRONTEND_TTFT_MS_METRIC, ttft_ms, tags)
 
-        snapshot = self._snapshot
+        snapshot = _merge_snapshots(self._unit_snapshots.values())
         if snapshot is None:
             return
         backend_snapshot = _merge_snapshots(
