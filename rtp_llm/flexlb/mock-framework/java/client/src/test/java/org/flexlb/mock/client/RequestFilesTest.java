@@ -18,10 +18,10 @@ class RequestFilesTest {
     static Shard shard(RequestFiles.Part part, int index, int stride) {
         return new Shard(1, null, part.path(), part.count(), index, stride, 100, part.sha256(), 1000000000.0, null, 1, 4, 1000, 1000);
     }
-    static byte[] frame(Batch batch) throws Exception {
+    static byte[] frame(InputChunk chunk) throws Exception {
         try (var compressor = new ZstdCompressCtx().setLevel(3).setContentSize(true).setChecksum(true);
              var bytes = new ByteArrayOutputStream(); var out = new DataOutputStream(bytes)) {
-            var encoded = compressor.compress(batch.toByteArray());
+            var encoded = compressor.compress(chunk.toByteArray());
             out.writeInt(encoded.length); out.write(encoded); return bytes.toByteArray();
         }
     }
@@ -94,23 +94,23 @@ class RequestFilesTest {
     }
     @Test void malformedFramesNeverPublishShards() throws Exception {
         var request = InputFixture.request();
-        byte[] data = frame(Batch.newBuilder().setSequence(1).addRequests(request).build());
-        byte[] seal = frame(Batch.newBuilder().setSequence(2).setTotalRequests(1).build());
+        byte[] data = frame(InputChunk.newBuilder().setSequence(1).addRequests(request).build());
+        byte[] seal = frame(InputChunk.newBuilder().setSequence(2).setTotalRequests(1).build());
         var cases = new ArrayList<byte[]>();
         cases.add(data); // Missing final seal.
         cases.add(Arrays.copyOf(data, data.length - 1));
-        cases.add(frame(Batch.newBuilder().setSequence(2).addRequests(request).build()));
-        cases.add(frame(Batch.newBuilder().setSequence(1).addRequests(Request.getDefaultInstance()).build()));
+        cases.add(frame(InputChunk.newBuilder().setSequence(2).addRequests(request).build()));
+        cases.add(frame(InputChunk.newBuilder().setSequence(1).addRequests(Request.getDefaultInstance()).build()));
         var corrupt = data.clone(); corrupt[corrupt.length - 1] ^= 1; cases.add(corrupt);
         try (var bytes = new ByteArrayOutputStream()) {
-            bytes.write(data); bytes.write(frame(Batch.newBuilder().setSequence(2).setTotalRequests(2).build())); cases.add(bytes.toByteArray());
+            bytes.write(data); bytes.write(frame(InputChunk.newBuilder().setSequence(2).setTotalRequests(2).build())); cases.add(bytes.toByteArray());
         }
         try (var bytes = new ByteArrayOutputStream()) {
             bytes.write(data); bytes.write(seal); bytes.write(1); cases.add(bytes.toByteArray());
         }
         try (var compressor = new ZstdCompressCtx().setLevel(3).setChecksum(true).setContentSize(true);
              var bytes = new ByteArrayOutputStream(); var out = new DataOutputStream(bytes)) {
-            byte[] first = compressor.compress(Batch.newBuilder().setSequence(1).addRequests(request).build().toByteArray());
+            byte[] first = compressor.compress(InputChunk.newBuilder().setSequence(1).addRequests(request).build().toByteArray());
             byte[] extra = compressor.compress(new byte[0]);
             out.writeInt(first.length + extra.length); out.write(first); out.write(extra); out.write(seal);
             cases.add(bytes.toByteArray());
