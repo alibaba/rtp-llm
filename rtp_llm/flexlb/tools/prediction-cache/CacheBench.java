@@ -38,7 +38,11 @@ public class CacheBench {
                     var probe = new RouteProjection.Probe(999999, 0, 1000, 1_000_000,
                             1024 + p * 32, p * 8, p * 8);
                     for (int e = 0; e < 5; e++) {
-                        var result = RouteProjection.project(snapshots.get((p + e) & 63), probe, model, policy);
+                        var input = snapshots.get((p + e) & 63);
+                        if (name.endsWith("_invalidated")) {
+                            input = new RouteProjection.Inputs(input.queue(), input.work(), p + 1);
+                        }
+                        var result = RouteProjection.project(input, probe, model, policy);
                         checksum += result.requiredProjectedTtftMs();
                     }
                     count++;
@@ -66,5 +70,6 @@ public class CacheBench {
         bench("route512_churn", model, route, 512, true, 700);
         bench("route512_wide", model, route, 512, false, 1_000_000);
         bench("route512_no_budget", model, route, 512, false, 0);
+        bench("batch128_invalidated", model, batch, 128, false, 700);
     }
 }

@@ -29,3 +29,12 @@ and 4,000 candidate projections, including FIFO/priority and expiry behavior.
 directory. Batch is a control: its append-only formula prediction already exists
 in the baseline. The change reuses Route planning offsets during service projection
 and eliminates rescanning old members as a prefix grows.
+
+For endpoint-prefix-cache comparisons, use a baseline containing the preceding
+Route prefix optimization. Snapshot instances are endpoint-local and reused
+across consecutive probes. `batch128_invalidated` constructs a fresh snapshot on
+every endpoint probe to measure cache-build overhead without any warm hits.
+The snapshot memo only retains ready groups entirely before the insertion point,
+including their one-member boundary lookahead. Expiration, model/delivery changes,
+or queue/work/scheduling-input version changes prevent reuse. Warm-vs-uncached
+differential and concurrent-publication checks live in `QueuePrefixCacheTest`.

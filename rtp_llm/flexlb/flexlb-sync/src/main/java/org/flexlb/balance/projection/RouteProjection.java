@@ -222,8 +222,21 @@ public final class RouteProjection {
         }
     }
 
-    /** Queue and committed work captured under one ownership lock. */
-    public record Inputs(QueueSnapshot queue, WorkSnapshot work, long ownershipVersion) {
+    /**
+     * Queue and committed work captured under one ownership lock. The derived
+     * memo belongs only to this exact snapshot; replacing queue/work/constraints
+     * must construct new Inputs rather than carry its memo into another version.
+     * A null memo disables reuse for differential verification.
+     */
+    public record Inputs(
+            QueueSnapshot queue,
+            WorkSnapshot work,
+            long ownershipVersion,
+            QueuePrefixCache prefixCache) {
+
+        public Inputs(QueueSnapshot queue, WorkSnapshot work, long ownershipVersion) {
+            this(queue, work, ownershipVersion, new QueuePrefixCache());
+        }
 
         public Inputs(QueueSnapshot queue, WorkSnapshot work) {
             this(queue, work, 0L);
@@ -340,7 +353,12 @@ public final class RouteProjection {
                     hitCache,
                     routingCacheMatchTokens);
             return projector.project(
-                    inputs.queue(), inputs.work(), evaluator, deliveryProjection, planningAtMs);
+                    inputs.queue(),
+                    inputs.work(),
+                    evaluator,
+                    deliveryProjection,
+                    planningAtMs,
+                    inputs.prefixCache());
         }
     }
 
