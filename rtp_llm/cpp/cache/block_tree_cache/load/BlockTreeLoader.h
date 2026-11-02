@@ -21,6 +21,9 @@ class BlockTransferDispatcher;
 class BlockTreeTaskPool;
 
 struct BlockTreeMatchResult {
+    size_t candidate_blocks{0};
+    size_t flat_matched_blocks{0};
+    size_t min_full_reuse_blocks{0};
     size_t                                              matched_device_blocks{0};
     std::vector<MultiNodeResource>                      matched_device_resources;
     std::shared_ptr<LoadAsyncContext>                   async_context;

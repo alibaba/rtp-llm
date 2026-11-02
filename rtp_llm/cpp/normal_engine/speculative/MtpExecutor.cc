@@ -1099,9 +1099,18 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
         total_execute_length,
         total_length);
 
+    const auto prefill_step_start_us = autil::TimeUtility::currentTimeInMicroSeconds();
+    auto& timing = last_prefill_timing_;
     RtpLLMExecutorMetricsCollector& executor_collector = metrics_collector.executor_collector;
 
     StreamGroups    stream_groups(streams);
+    const auto complete_timing = [&](const absl::Status& status) {
+        timing.prefill_step_total_us = autil::TimeUtility::currentTimeInMicroSeconds() - prefill_step_start_us;
+        timing.execute_token_size = stream_groups.modelExecuteTokenSize();
+        timing.max_seq_len = stream_groups.maxSeqLen();
+        timing.valid = status.ok();
+        return status;
+    };
     GptModelInputs  model_input;
     GptModelOutputs model_output;
     SamplerOutput   sampler_output;
@@ -1125,6 +1134,7 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
         RETURN_IF_STATUS_OR_ERROR(model_input_status);
         model_input                              = std::move(model_input_status.value());
         executor_collector.gather_model_input_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
+        timing.gather_model_input_us = executor_collector.gather_model_input_us;
     }
     {
         RTP_LLM_PROFILE_SCOPE("executor.mtp.prefill_step(tp_sync_input)");
@@ -1136,6 +1146,7 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
             return absl::OkStatus();
         }
         executor_collector.tp_sync_input_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
+        timing.tp_sync_input_us = executor_collector.tp_sync_input_us;
     }
 
     metrics_collector.not_skip = true;
@@ -1200,7 +1211,8 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
         int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
         model_output          = std::move(forwardModel(model_.get(), model_input, ModelInputsModelRole::TARGET));
         maybeOverrideLastHiddenWithMtpBuffer(model_output, *model_, cp_enabled ? -1 : model_input.combo_tokens.numel());
-        model_forward_us += autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
+        timing.target_model_forward_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
+        model_forward_us += timing.target_model_forward_us;
     }
 
     // eplb
@@ -1228,7 +1240,10 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
             return absl::OkStatus();
         }
         if (isTpRank0()) {
-            return batch_stream_processor_->dispatchPrefillOnly(stream_groups);
+            const auto dispatch_start_us = autil::TimeUtility::currentTimeInMicroSeconds();
+            const auto result = batch_stream_processor_->dispatchPrefillOnly(stream_groups);
+            timing.dispatch_output_us = autil::TimeUtility::currentTimeInMicroSeconds() - dispatch_start_us;
+            return complete_timing(result);
         }
         return absl::OkStatus();
     }
@@ -1237,6 +1252,7 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
     // dummy sampled token solely to preserve the ordinary shifted draft shape;
     // DSpARK keeps its commit-only prompt geometry and never consumes it.
     if (isTpRank0() && !alignment_only) {
+        const auto sample_start_us = autil::TimeUtility::currentTimeInMicroSeconds();
         bool update_draft_input = target_only && !is_dspark_;
         if (target_only) {
             if (!is_dspark_) {
@@ -1268,6 +1284,7 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
             batch_stream_processor_->updatePrefillPostDraftModelInput(
                 stream_groups, model_input, model_output, sampler_output, buffer_holder_);
         }
+        timing.target_model_sample_us = autil::TimeUtility::currentTimeInMicroSeconds() - sample_start_us;
     }
 
     if (cp_enabled && (!isTpRank0() || alignment_only)) {
@@ -1277,6 +1294,7 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
     // draft model prefill
     {
         RTP_LLM_PROFILE_SCOPE("executor.mtp.prefill_step(draft_model_forward)");
+        const auto prepare_start_us = autil::TimeUtility::currentTimeInMicroSeconds();
         // CP and DSpARK target hidden states are rank-local. Do not broadcast
         // rank 0's copy; after syncing the remaining inputs, every rank binds
         // the normalized output produced by its own target forward.
@@ -1294,6 +1312,8 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
         if (cp_enabled || is_dspark_) {
             model_input.last_hidden_states = model_output.all_hidden_states;
         }
+        timing.draft_model_prepare_us = autil::TimeUtility::currentTimeInMicroSeconds() - prepare_start_us;
+        start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
         if (is_dspark_) {
             batch_stream_processor_->validatePrefillDSparkCommitInput(model_input);
             // Seeding = commit only: prompt-suffix feature rows into the
@@ -1308,7 +1328,8 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
         } else {
             draft_model_output = std::move(forwardModel(draft_model_.get(), model_input, ModelInputsModelRole::DRAFT));
         }
-        model_forward_us += autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
+        timing.draft_model_forward_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
+        model_forward_us += timing.draft_model_forward_us;
     }
 
     const bool dspark_cache_store_ok = finishDSparkPrefillCachePublication(model_input, streams);
@@ -1344,7 +1365,10 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
         cudaSyncAndCheck();
         releaseAllModelBuffers();
         if (isTpRank0()) {
-            return batch_stream_processor_->dispatchPrefillOnly(stream_groups);
+            const auto dispatch_start_us = autil::TimeUtility::currentTimeInMicroSeconds();
+            const auto result = batch_stream_processor_->dispatchPrefillOnly(stream_groups);
+            timing.dispatch_output_us = autil::TimeUtility::currentTimeInMicroSeconds() - dispatch_start_us;
+            return complete_timing(result);
         }
         return absl::OkStatus();
     }
@@ -1366,6 +1390,7 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
     // draft model sample
     {
         RTP_LLM_PROFILE_SCOPE("executor.mtp.prefill_step(draft_model_sample)");
+        const auto sample_start_us = autil::TimeUtility::currentTimeInMicroSeconds();
         if (is_dspark_) {
             // Seeding is commit-only: there is no proposal to sample. The
             // decode worker produces the first proposal at its round head.
@@ -1374,6 +1399,7 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
             draft_sampler_output.all_probs = fast_topk_sampler_output.all_probs;
             draft_sampler_output.token_ids = fast_topk_sampler_output.token_ids;
         }
+        timing.draft_model_sample_us = autil::TimeUtility::currentTimeInMicroSeconds() - sample_start_us;
     }
 
     // collect metrics
@@ -1384,16 +1410,18 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
     // dispatch
     {
         RTP_LLM_PROFILE_SCOPE("executor.mtp.prefill_step(dispatch_output)");
+        const auto dispatch_start_us = autil::TimeUtility::currentTimeInMicroSeconds();
         auto result =
             batch_stream_processor_->dispatchPrefill(stream_groups,
                                                      {std::move(model_output), std::move(sampler_output)},
                                                      {std::move(draft_model_output), std::move(draft_sampler_output)},
                                                      draft_last_hidden_states);
+        timing.dispatch_output_us = autil::TimeUtility::currentTimeInMicroSeconds() - dispatch_start_us;
         RTP_LLM_LOG_DEBUG("dispatch done");
 
         releaseAllModelBuffers();
 
-        return result;
+        return complete_timing(result);
     }
 }
 
@@ -2497,6 +2525,7 @@ absl::Status MtpExecutor::process(const std::list<GenerateStreamPtr>& streams, i
     RTP_LLM_PROFILE_SCOPE_DYNAMIC("executor.mtp.process(stream_size=%zu,mtp_step=%zu)", streams.size(), propose_step_);
 
     const int64_t process_start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
+    last_prefill_timing_ = MtpPrefillTiming();
     if (schedule_time_us <= 0) {
         schedule_time_us = process_start_time_us;
     }

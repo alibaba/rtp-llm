@@ -1,6 +1,7 @@
 #include "rtp_llm/cpp/model_rpc/PrefillBatchRpcServer.h"
 
 #include "autil/Scope.h"
+#include "aios/navi_sched/adapters/rtp_llm/RtpLLMAdapter.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/telemetry/PhaseSpanSynthesizer.h"
 #include "rtp_llm/cpp/utils/AtomicUtil.h"
@@ -24,6 +25,10 @@
 
 using namespace std;
 namespace rtp_llm {
+namespace {
+bool shouldLogNaviBatchTiming(int64_t batch_id) { return batch_id > 0 && batch_id % 128 == 0; }
+}
+
 
 // Dedicated managed executor for idle priority-cancel cleanup. Tasks submitted
 // here never wait for a prepare/Fetch operation to exit; operation owners only
@@ -852,6 +857,9 @@ size_t DeferredPrefillContextMap::size() const {
 PrefillBatchRpcServer::PrefillBatchRpcServer() = default;
 
 PrefillBatchRpcServer::~PrefillBatchRpcServer() {
+    if (navi_sched_agent_) {
+        navi_sched::setRtpLLMForwardBatchHandler(navi_sched_agent_, {});
+    }
     beginShutdown();
     deferred_contexts_->cancelAll(grpc::Status(grpc::StatusCode::UNAVAILABLE, "Prefill batch server is shutting down"));
     if (prepare_resource_worker_pool_) {
@@ -872,6 +880,128 @@ grpc::Status PrefillBatchRpcServer::init(const EngineInitParams&                
         return ret;
     }
     initThreadPools();
+    if (navi_sched_agent_) {
+        const bool registered = navi_sched::setRtpLLMForwardBatchHandler(
+            navi_sched_agent_,
+            [this](const std::vector<navi_sched::NaviSchedForwardedRequest>& requests,
+                   int64_t                                                   batch_id,
+                   const navi_sched::NaviSchedBatchFinishReporterPtr&        finish_reporter) {
+                const auto handler_begin_time_us = currentTimeUs();
+                if (requests.empty() || batch_id <= 0 || !finish_reporter) {
+                    RTP_LLM_LOG_WARNING("NaviSched forward batch rejected invalid envelope: requests=%zu batch_id=%ld "
+                                        "finish_reporter=%d",
+                                        requests.size(),
+                                        batch_id,
+                                        static_cast<int>(finish_reporter != nullptr));
+                    return false;
+                }
+                const auto invalid_request = std::find_if(requests.begin(), requests.end(), [&](const auto& request) {
+                    return request.timedOut || request.expectedBatchSize != static_cast<int64_t>(requests.size());
+                });
+                if (invalid_request != requests.end()) {
+                    RTP_LLM_LOG_WARNING("NaviSched forward batch rejected partial batch: batch_id=%ld requests=%zu "
+                                        "expected=%ld timed_out=%d",
+                                        batch_id,
+                                        requests.size(),
+                                        invalid_request->expectedBatchSize,
+                                        static_cast<int>(invalid_request->timedOut));
+                    return false;
+                }
+
+                EnqueueGroupRequestPB group_request;
+                group_request.set_batch_id(batch_id);
+                group_request.set_dp_rank(static_cast<int32_t>(maga_init_params_.parallelism_config.dp_rank));
+                group_request.set_navi_sched(true);
+                auto retained_batch            = std::make_shared<navi_sched::NaviSchedBatch>();
+                retained_batch->batchId        = batch_id;
+                retained_batch->finishReporter = finish_reporter;
+                retained_batch->requestIds.reserve(requests.size());
+                for (const auto& forwarded : requests) {
+                    auto* input = group_request.add_requests()->mutable_input();
+                    if (!input->ParseFromString(forwarded.payload) || input->request_id() != forwarded.requestId) {
+                        RTP_LLM_LOG_WARNING("NaviSched forward batch payload rejected: batch_id=%ld request_id=%ld "
+                                            "payload_size=%zu parsed_request_id=%ld",
+                                            batch_id,
+                                            forwarded.requestId,
+                                            forwarded.payload.size(),
+                                            input->request_id());
+                        return false;
+                    }
+                    retained_batch->requestIds.push_back(forwarded.requestId);
+                }
+                const auto parse_done_time_us = currentTimeUs();
+                const auto retain_result      = navi_sched::retainRtpLLMReadyBatchWithResult(retained_batch);
+                if (!retain_result) {
+                    RTP_LLM_LOG_WARNING("NaviSched forward batch retain failed: batch_id=%ld requests=%zu status=%d "
+                                        "conflicting_request_id=%lu retained_requests=%zu first_request_id=%lu",
+                                        batch_id,
+                                        requests.size(),
+                                        static_cast<int>(retain_result.status),
+                                        retain_result.requestId,
+                                        retain_result.retainedRequestCount,
+                                        retained_batch->requestIds.front());
+                    return false;
+                }
+                auto enqueue_lease = navi_sched::acquireRtpLLMRetainedBatchLease(retained_batch->requestIds.front());
+                if (!enqueue_lease) {
+                    navi_sched::abortRetainedRtpLLMBatch(retained_batch->requestIds.front());
+                    RTP_LLM_LOG_WARNING("NaviSched forward batch lease acquisition failed: batch_id=%ld "
+                                        "first_request_id=%lu",
+                                        batch_id,
+                                        retained_batch->requestIds.front());
+                    return false;
+                }
+                const auto retain_done_time_us = currentTimeUs();
+
+                EnqueueBatchResponsePB response;
+                const auto             status               = EnqueueGroup(nullptr, &group_request, &response);
+                const auto             enqueue_done_time_us = currentTimeUs();
+                const bool             accepted             = status.ok() && response.errors().empty()
+                                      && response.successes_size() == group_request.requests_size();
+                if (shouldLogNaviBatchTiming(batch_id)) {
+                    int64_t last_arrival_time_us = 0;
+                    for (const auto& forwarded : requests) {
+                        last_arrival_time_us = std::max(last_arrival_time_us, forwarded.agentArrivalTimeUs);
+                    }
+                    RTP_LLM_LOG_INFO("[navi-queue-timing] batch_id=%ld requests=%zu "
+                                     "arrival_to_handler_us=%ld parse_us=%ld retain_us=%ld enqueue_group_us=%ld "
+                                     "handler_total_us=%ld accepted=%d",
+                                     batch_id,
+                                     requests.size(),
+                                     last_arrival_time_us > 0 ? handler_begin_time_us - last_arrival_time_us : -1,
+                                     parse_done_time_us - handler_begin_time_us,
+                                     retain_done_time_us - parse_done_time_us,
+                                     enqueue_done_time_us - retain_done_time_us,
+                                     enqueue_done_time_us - handler_begin_time_us,
+                                     static_cast<int>(accepted));
+                }
+                if (!accepted) {
+                    std::string errors;
+                    for (const auto& error : response.errors()) {
+                        if (!errors.empty()) {
+                            errors.append("; ");
+                        }
+                        errors.append(std::to_string(error.request_id()))
+                            .append(":")
+                            .append(error.error_info().error_message());
+                    }
+                    RTP_LLM_LOG_WARNING("NaviSched forward batch enqueue rejected: batch_id=%ld status=%s "
+                                        "requests=%d successes=%d errors=%d details=[%s]",
+                                        batch_id,
+                                        status.error_message().c_str(),
+                                        group_request.requests_size(),
+                                        response.successes_size(),
+                                        response.errors_size(),
+                                        errors.c_str());
+                } else {
+                    enqueue_lease->dismiss();
+                }
+                return accepted;
+            });
+        if (!registered) {
+            return grpc::Status(grpc::StatusCode::INTERNAL, "failed to register NaviSched forward batch handler");
+        }
+    }
     return grpc::Status::OK;
 }
 
@@ -1081,6 +1211,7 @@ grpc::Status PrefillBatchRpcServer::admitGroup(const EnqueueGroupRequestPB* requ
         BatchSlot slot;
         slot.input                   = std::move(input_copy);
         slot.fetch_attach_timeout_ms = request->fetch_attach_timeout_ms();
+        slot.navi_sched = request->navi_sched();
         slots.push_back(std::move(slot));
     }
 
@@ -1176,6 +1307,11 @@ void PrefillBatchRpcServer::buildSlotContexts(std::vector<BatchSlot>& slots) {
         auto deferred                   = std::make_shared<DeferredPrefillContext>();
         deferred->context               = std::move(pfx_ctx);
         deferred->input                 = slot.input;
+        const auto& generate_config = slot.input->generate_config();
+        deferred->local_execution =
+            !(generate_config.max_new_tokens() > 1 && generate_config.num_beams() <= 1
+              && generate_config.variable_num_beams().empty() && generate_config.num_return_sequences() <= 1
+              && generate_config.can_use_pd_separation());
         deferred->request_guard         = std::move(guard);
         if (auto span = startBatchLogicalSpan(*slot.input); span != nullptr) {
             deferred->context->trace_span_guard = std::make_unique<telemetry::GrpcStatusSpanGuard>(
@@ -1275,6 +1411,23 @@ std::vector<PrefillBatchRpcServer::PrepareResult> PrefillBatchRpcServer::prepare
             finishSlotOperation(slot->input->request_id(), slot->deferred);
             continue;
         }
+        if (slot->deferred->local_execution) {
+            auto& ctx = *slot->deferred->context;
+            auto error = prepareInput(*slot->input, ctx.generate_input,
+                ctx.trace_span_guard ? ctx.trace_span_guard->sharedSpan() : nullptr, nullptr);
+            result->prepared = error.ok();
+            if (error.ok()) {
+                ctx.request_info = ctx.generate_input->request_info;
+            } else {
+                result->stage_status = statusFromErrorInfo(error);
+                ctx.error_info = error;
+                ctx.error_status = result->stage_status;
+                slot->deferred->commitTerminalStatus(result->stage_status);
+                ctx.tryMarkOtherTerminal();
+            }
+            finishSlotOperation(slot->input->request_id(), slot->deferred);
+            continue;
+        }
         try {
             auto future =
                 prepare_resource_worker_pool_->async([this, slot, result, max_retry_times, max_retry_timeout_ms] {
@@ -1355,6 +1508,7 @@ grpc::Status PrefillBatchRpcServer::enqueueGroupStreams(std::vector<ReadySlot>& 
         auto& prefill_context = *ready_slot.deferred->context;
         prefill_context.stat_info.nextStage();
         generate_inputs.push_back(prefill_context.generate_input);
+        generate_inputs.back()->navi_sched = ready_slot.slot->navi_sched;
     }
 
     std::vector<bool>              enqueue_successes;
@@ -1428,6 +1582,16 @@ std::shared_ptr<DeferredPrefillContext> PrefillBatchRpcServer::storeSlot(BatchSl
                                                                          EnqueueBatchResponsePB* response) {
     const auto request_id = slot.input->request_id();
     auto       deferred   = slot.deferred;
+    if (slot.navi_sched) {
+        deferred->retained_batch_lease = navi_sched::acquireRtpLLMRetainedBatchLease(request_id);
+        if (!deferred->retained_batch_lease) {
+            const grpc::Status status(grpc::StatusCode::FAILED_PRECONDITION,
+                                      "NaviSched retained batch lease is missing");
+            deferred->cancel(status);
+            addBatchError(response, request_id, status.error_code(), status.error_message());
+            return nullptr;
+        }
+    }
 
     const auto store_status = deferred_contexts_->store(request_id, deferred);
     if (!store_status.ok()) {
@@ -1532,7 +1696,12 @@ grpc::Status PrefillBatchRpcServer::FetchResponse(grpc::ServerContext*          
         prefill_context.server_context     = context;
         prefill_context.rpc_context.writer = writer;
         try {
-            status = finishStream(prefill_context);
+            if (deferred->local_execution) {
+                status = pollStreamOutput(context, prefill_context.request_key, writer, prefill_context.getStream());
+                meta_->dequeue(prefill_context.request_id, prefill_context.getStream());
+            } else {
+                status = finishStream(prefill_context);
+            }
         } catch (const std::exception& e) {
             status =
                 grpc::Status(grpc::StatusCode::INTERNAL,
@@ -1546,6 +1715,9 @@ grpc::Status PrefillBatchRpcServer::FetchResponse(grpc::ServerContext*          
         deferred_contexts_->finish(request_id, deferred.get());
         status = preferPriorityPreemption(prefill_context, status);
         deferred->commitTerminalStatus(status);
+        if (status.ok() && deferred->retained_batch_lease) {
+            deferred->retained_batch_lease->dismiss();
+        }
         if (!status.ok()) {
             prefill_context.error_status = status;
         }

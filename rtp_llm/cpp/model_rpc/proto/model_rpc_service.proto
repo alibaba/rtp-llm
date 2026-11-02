@@ -996,6 +996,7 @@ message EnqueueGroupRequestPB {
     int32 dp_rank = 2;
     repeated EnqueueGroupInputPB requests = 3;
     int64 fetch_attach_timeout_ms = 4;
+    bool navi_sched = 5;
 }
 
 message EnqueueBatchSuccessPB {

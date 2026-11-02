@@ -173,6 +173,12 @@ public:
     size_t deviceReuseBlockNum() const;
     void   setDeviceReuseBlockNum(size_t device_reuse_blocks_num);
 
+    void setHybridReuseDebug(int candidate_blocks, int flat_matched_blocks, int min_full_blocks, int selected_blocks);
+    int  hybridCandidateBlockNum() const;
+    int  hybridFlatMatchedBlockNum() const;
+    int  hybridMinFullReuseBlockNum() const;
+    int  hybridSelectedReuseBlockNum() const;
+
     size_t memoryReuseBlockNum() const;
     void   setMemoryReuseBlockNum(size_t memory_reuse_blocks_num);
 
@@ -202,6 +208,10 @@ private:
     bool                  cache_keys_are_cp_canonical_{false};
 
     size_t device_reuse_block_num_{0};
+    int    hybrid_candidate_block_num_{-1};
+    int    hybrid_flat_matched_block_num_{-1};
+    int    hybrid_min_full_reuse_block_num_{-1};
+    int    hybrid_selected_reuse_block_num_{-1};
     size_t memory_reuse_block_num_{0};
     size_t disk_reuse_block_num_{0};
     size_t storage_backend_reuse_block_num_{0};

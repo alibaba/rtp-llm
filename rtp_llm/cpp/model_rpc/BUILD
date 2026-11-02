@@ -94,6 +94,7 @@ cc_library(
     ),
     visibility = ["//visibility:public"],
     deps = [
+        "@navi_sched_cpp//:navi_sched",
         ":embedding_arpc_deps",
         ":model_rpc_pool",
         ":response_buffer",

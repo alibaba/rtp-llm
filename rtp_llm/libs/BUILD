@@ -53,6 +53,18 @@ filegroup(
     ],
 )
 
+copy_files(
+    name = "copy_navi_sched_libs",
+    srcs = [
+        "@navi_sched_cpp//adapters/rtp_llm:copy_navi_sched_elf",
+        "@navi_sched_cpp//adapters/rtp_llm:copy_navi_sched_ev",
+        "@navi_sched_cpp//adapters/rtp_llm:copy_navi_sched_lz4",
+        "@navi_sched_cpp//adapters/rtp_llm:copy_navi_sched_navi_sched",
+        "@navi_sched_cpp//adapters/rtp_llm:copy_navi_sched_zstd",
+        "@navi_sched_cpp//adapters/rtp_llm:copy_navi_sched_tbb",
+    ],
+)
+
 filegroup(
     name = "whl_package_libs",
     srcs = [],
@@ -65,5 +77,6 @@ filegroup(
         ":libth_grammar_tokenizer_info_so",
         ":libth_transformer_config_so",
         ":libth_transformer_so",
+        ":copy_navi_sched_libs",
     ],
 )

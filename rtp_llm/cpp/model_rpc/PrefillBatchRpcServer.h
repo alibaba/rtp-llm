@@ -13,6 +13,10 @@
 #include "autil/LockFreeThreadPool.h"
 #include "rtp_llm/cpp/model_rpc/PrefillRpcServer.h"
 
+namespace navi_sched {
+class RtpLLMRetainedBatchLease;
+}
+
 namespace rtp_llm {
 
 class PriorityCancelExecutor;
@@ -32,6 +36,8 @@ struct DeferredPrefillContext {
     // because RPCContext keeps a raw pointer into input.
     std::unique_ptr<PrefillGenerateContext> context;
     std::shared_ptr<grpc::Alarm>            ttl_alarm;
+    bool local_execution{false};
+    std::shared_ptr<navi_sched::RtpLLMRetainedBatchLease> retained_batch_lease;
 
     ~DeferredPrefillContext();
     void cancel(const grpc::Status& status);
@@ -155,6 +161,7 @@ private:
         std::shared_ptr<DeferredPrefillContext> deferred;
         grpc::Status                            registration_status = grpc::Status::OK;
         int64_t                                 fetch_attach_timeout_ms{0};
+        bool navi_sched{false};
     };
 
     struct PrepareResult {

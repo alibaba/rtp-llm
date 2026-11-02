@@ -141,6 +141,7 @@ public:
     BlockTreeKeySnapshot                      getKeySnapshot(int64_t latest_version = -1) const;
     void setEventPublisher(KVCacheEventPublisherPtr publisher, const std::vector<std::string>& required_group_tags);
     KVCacheSnapshot logicalCacheSnapshot() const;
+    void setStateObserver(BlockTreeStateObserver observer);
     bool            abortPendingLoad(const std::shared_ptr<AsyncContext>& context);
 
     BlockIndicesType matchedBlocksForGroup(std::string_view                      group_tag,

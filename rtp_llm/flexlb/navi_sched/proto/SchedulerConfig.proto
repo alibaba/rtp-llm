@@ -1,0 +1,42 @@
+syntax = "proto3";
+
+import "arpc/proto/rpc_extensions.proto";
+
+package navi_sched;
+
+option cc_generic_services = true;
+
+message SchedulerConfigRequest {
+    bool update = 1;
+    string config_json = 2;
+    string hardware = 3;
+}
+
+message SchedulerConfigAgentResult {
+    string ip = 1;
+    bool updated = 2;
+    string error = 3;
+    string effective_hash = 4;
+    string effective_config_json = 5;
+    string hardware = 6;
+}
+
+message SchedulerConfigResponse {
+    string config_json = 1;
+    uint64 generation = 2;
+    bool accepted = 3;
+    string error = 4;
+    uint64 target_agent_count = 5;
+    uint64 updated_agent_count = 6;
+    uint64 failed_agent_count = 7;
+    repeated SchedulerConfigAgentResult agent_results = 8;
+    string hardware = 9;
+}
+
+service SchedulerConfigService {
+    option (arpc.global_service_id) = 6110;
+
+    rpc scheduler_config(SchedulerConfigRequest) returns (SchedulerConfigResponse) {
+        option (arpc.local_method_id) = 6111;
+    }
+}

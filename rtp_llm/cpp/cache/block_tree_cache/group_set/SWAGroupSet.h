@@ -18,6 +18,10 @@ public:
 
     // SWA window lock: only lock nodes within sliding_window_size from path tail.
     size_t computeReuseBlockCount(size_t matched_block_count) const override;
+    size_t matchWindowBlocks() const override {
+        return sliding_window_size_ / seq_size_per_block_ +
+               static_cast<size_t>(sliding_window_size_ % seq_size_per_block_ != 0);
+    }
 
     size_t slidingWindowSize() const {
         return sliding_window_size_;

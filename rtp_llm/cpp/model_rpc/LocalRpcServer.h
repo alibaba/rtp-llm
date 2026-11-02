@@ -29,11 +29,16 @@
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 
+namespace navi_sched {
+class NaviSchedAgent;
+}
+
 namespace rtp_llm {
+class NaviSchedRtpBatchHandler;
 class LocalRpcServer {
 public:
     LocalRpcServer() {}
-    virtual ~LocalRpcServer() {}
+    virtual ~LocalRpcServer();
     virtual grpc::Status init(const EngineInitParams&                                maga_init_params,
                               std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> propose_params,
                               py::object                                             mm_process_engine);
@@ -119,6 +124,10 @@ protected:
         return context && context->IsCancelled();
     }
 
+    grpc::Status initNaviSchedAgent();
+    void stopNaviSchedAgent();
+    std::shared_ptr<GenerateStream> enqueueWithNaviSchedBatch(
+        const std::shared_ptr<GenerateInput>& input, grpc::ServerContext* context);
     grpc::Status serializeErrorMsg(const std::string& request_key, ErrorInfo error_info);
     grpc::Status
     serializeErrorMsg(const std::string& request_key, const RequestInfo& request_info, ErrorInfo error_info);
@@ -155,6 +164,8 @@ protected:
     virtual TorchAllocatorDumpResultPB dumpTorchAllocatorOnCurrentProcess(const std::string& dump_id);
 
 protected:
+    std::shared_ptr<navi_sched::NaviSchedAgent> navi_sched_agent_;
+    std::shared_ptr<NaviSchedRtpBatchHandler> navi_sched_batch_handler_;
     std::shared_ptr<EngineBase>           engine_;
     std::shared_ptr<MultimodalProcessor>  mm_processor_;
     EngineInitParams                      maga_init_params_;

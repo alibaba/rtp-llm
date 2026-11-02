@@ -38,6 +38,21 @@ struct MtpMetricsCollector {
     bool not_skip = false;
 };
 
+struct MtpPrefillTiming {
+    bool    valid                   = false;
+    int64_t gather_model_input_us   = 0;
+    int64_t tp_sync_input_us        = 0;
+    int64_t target_model_forward_us = 0;
+    int64_t target_model_sample_us  = 0;
+    int64_t draft_model_prepare_us  = 0;
+    int64_t draft_model_forward_us  = 0;
+    int64_t draft_model_sample_us   = 0;
+    int64_t dispatch_output_us      = 0;
+    int64_t prefill_step_total_us   = 0;
+    int64_t execute_token_size      = 0;
+    int64_t max_seq_len             = 0;
+};
+
 class MtpExecutor: public Executor {
 public:
     explicit MtpExecutor(const EngineInitParams&                        params,
@@ -49,6 +64,10 @@ public:
 
     absl::Status process(const std::list<GenerateStreamPtr>& streams, int64_t schedule_time_us = 0) override;
     bool         updateEplbConfig(const EPLBConfig& config) override;
+
+    const MtpPrefillTiming& getLastPrefillTiming() const {
+        return last_prefill_timing_;
+    }
 
     void setTargetModel(std::unique_ptr<ModelBase> model) {
         model_ = std::move(model);
@@ -322,5 +341,6 @@ private:
     torch::Stream dspark_cache_store_sync_stream_;
     torch::Tensor dspark_cache_store_status_;
     std::function<bool(bool)> dspark_cache_store_status_reducer_for_test_;
+    MtpPrefillTiming last_prefill_timing_;
 };
 }  // namespace rtp_llm
