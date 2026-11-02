@@ -139,6 +139,11 @@ def _sparse_prefill_grouped_kernel(
     pid_b = tl.program_id(1).to(tl.int64)
     pid_kv = tl.program_id(2)
     pid_s = tl.program_id(0).to(tl.int64)
+    if SM120_GQA_PV:
+        # Causal selections grow with the query position. Schedule the longer
+        # rows first so the last wave is not dominated by the most expensive
+        # queries (the balanced causal scheduling used by FlashInfer PR #4714).
+        pid_s = tl.num_programs(0) - 1 - pid_s
     rh = tl.arange(0, BLK_H)
     rd = tl.arange(0, D)
     q = tl.load(

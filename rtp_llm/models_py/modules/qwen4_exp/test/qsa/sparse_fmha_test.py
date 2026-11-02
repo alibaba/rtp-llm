@@ -60,6 +60,40 @@ class SparseFmhaTest(unittest.TestCase):
                     )
                     self.assertTrue((actual[:, :, 0] == 0).all())
 
+    def test_query_scheduling_preserves_batch_head_and_row_coordinates(self):
+        # Cross multiple CTA waves with the production selection width. Only
+        # two duplicate keys are valid, separated by empty tiles; empty rows
+        # must still be written to their original output coordinates.
+        for gqa in (6, 12):
+            with self.subTest(gqa=gqa):
+                batch, kv_heads, rows, keys = 2, 2, 513, 257
+                q = torch.zeros(
+                    batch, kv_heads * gqa, rows, _D, device=_DEV, dtype=torch.bfloat16
+                )
+                k = torch.zeros(batch, kv_heads, keys, _D, device=_DEV, dtype=q.dtype)
+                v = (
+                    torch.arange(batch, device=_DEV).view(batch, 1, 1, 1) * 64
+                    + torch.arange(kv_heads, device=_DEV).view(1, kv_heads, 1, 1) * 32
+                    + torch.arange(keys, device=_DEV).view(1, 1, keys, 1) % 32
+                    + (torch.arange(_D, device=_DEV).view(1, 1, 1, _D) % 4) / 4
+                ).to(q.dtype)
+                index = (
+                    torch.arange(rows, device=_DEV).view(1, rows) * 17
+                    + torch.arange(batch, device=_DEV).view(batch, 1) * 13
+                ) % keys
+                selected = torch.full(
+                    (batch, rows, 2051), -1, device=_DEV, dtype=torch.int32
+                )
+                selected[..., 3] = index
+                selected[..., -1] = index
+                selected[:, [0, 256, rows - 1]] = -1
+                expected = v.gather(
+                    2, index[:, None, :, None].expand(batch, kv_heads, rows, _D)
+                ).repeat_interleave(gqa, dim=1)
+                expected[:, :, [0, 256, rows - 1]] = 0
+                actual = sparse_prefill_attn(q, k, v, selected)
+                torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
     def test_long_prompts_use_grid_x_for_both_kernels(self):
         for heads, width in ((1, 1), (3, 256)):
             with self.subTest(heads=heads):
