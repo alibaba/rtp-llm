@@ -13,7 +13,7 @@ import org.flexlb.mock.engine.RequestState;
 final class PrefillGeneration implements AutoCloseable {
     private final AdmissionConfig config;
     private final LocalPrefill requests;
-    private final org.flexlb.mock.multimodal.MediaClient vision = new org.flexlb.mock.multimodal.MediaClient();
+    private final org.flexlb.mock.multimodal.MediaClient vision;
     private final RpcChannels channels = new RpcChannels();
     private final ExecutorService workers = Executors.newVirtualThreadPerTaskExecutor();
     private final ScheduledThreadPoolExecutor deadlines = new ScheduledThreadPoolExecutor(1,
@@ -27,7 +27,8 @@ final class PrefillGeneration implements AutoCloseable {
     private boolean closed;
 
     PrefillGeneration(AdmissionConfig config, LocalPrefill requests) {
-        this.config = config; this.requests = requests; deadlines.setRemoveOnCancelPolicy(true);
+        this.config = config;
+        vision = new org.flexlb.mock.multimodal.MediaClient(config.imageToken()); this.requests = requests; deadlines.setRemoveOnCancelPolicy(true);
     }
 
     void generate(GenerateInputPB input, StreamObserver<GenerateOutputsPB> observer) {
@@ -102,7 +103,7 @@ final class PrefillGeneration implements AutoCloseable {
         var live = new ArrayList<Call>(); var inputs = new ArrayList<LocalPrefill.Submission>();
         for (var call : calls) synchronized (call) {
             if (!call.terminal && !call.prepared.isCompletedExceptionally()) {
-                live.add(call); inputs.add(new LocalPrefill.Submission(call.input, call.deadline));
+                live.add(call); inputs.add(new LocalPrefill.Submission(call.media, call.deadline));
             }
         }
         if (live.isEmpty()) return;
@@ -182,6 +183,7 @@ final class PrefillGeneration implements AutoCloseable {
         final String target;
         final long started = System.nanoTime(), deadline;
         final Context.CancellableContext context;
+        org.flexlb.mock.multimodal.MediaInput.Prepared media;
         LocalPrefill.Session source;
         RequestState.Use transferUse;
         Future<?> worker;
@@ -201,7 +203,8 @@ final class PrefillGeneration implements AutoCloseable {
         void run() { context.run(this::exchange); }
         void exchange() {
             try {
-                input = vision.prepare(input, deadline);
+                media = vision.prepare(input, deadline);
+                input = media.input();
                 var inbox = new Inbox(error -> {
                     synchronized (this) { if (source != null && !source.result.isDone()) finish(error); }
                 });
@@ -213,7 +216,7 @@ final class PrefillGeneration implements AutoCloseable {
                 if (deadline != Long.MAX_VALUE) allocationInput.getGenerateConfigBuilder().setTimeoutMs((int) Math.min(Integer.MAX_VALUE,
                     Math.max(1, TimeUnit.NANOSECONDS.toMillis(deadline - System.nanoTime()))));
                 stream.onNext(GenerateRequestPB.newBuilder().setStage(RemoteStage.ALLOCATE).setRequestId(input.getRequestId()).setClientId(config.id())
-                    .setInput(allocationInput).build());
+                    .setInput(allocationInput).addAllMultimodalCacheSpans(media.spans()).build());
                 var allocated = inbox.next();
                 if (allocated == null || allocated.hasFlattenOutput() || allocated.hasErrorInfo() && allocated.getErrorInfo().getErrorCodeValue() != 0)
                     throw Status.DATA_LOSS.withDescription("Invalid ALLOCATE acknowledgement").asRuntimeException();
@@ -224,7 +227,7 @@ final class PrefillGeneration implements AutoCloseable {
                 synchronized (this) {
                     if (terminal) return;
                     if (batchSource == null)
-                        source = requests.submit(input, deadline, true);
+                        source = requests.submit(media, deadline, true, started);
                     admitted.complete(null);
                 }
                 if (inbox.failure != null) throw Status.fromThrowable(inbox.failure)
@@ -239,7 +242,7 @@ final class PrefillGeneration implements AutoCloseable {
                 long ttft = System.nanoTime() - started;
                 boolean prefillFinished = first.output().getFlattenOutput().getFinished(0);
                 int prefillReuse = first.output().getFlattenOutput().getAuxInfo(0).getTotalReuseLen();
-                send(LocalResponse.token(input, input.getTokenIds(input.getTokenIdsCount() - 1), 1, 1, prefillReuse, ttft, prefillFinished, true));
+                send(LocalResponse.token(input, LocalResponse.sampledToken(input), 1, 1, prefillReuse, ttft, prefillFinished, true));
                 var loaded = inbox.next();
                 if (loaded == null || !loaded.hasErrorInfo() || loaded.getErrorInfo().getErrorCodeValue() != 0)
                     throw Status.DATA_LOSS.withDescription("Invalid LOAD acknowledgement").asRuntimeException();
@@ -250,7 +253,7 @@ final class PrefillGeneration implements AutoCloseable {
                     transferUse.close(); transferUse = null;
                 }
                 if (prefillFinished) stream.onNext(frame(RemoteStage.PREFILL_COMPLETE));
-                else stream.onNext(frame(RemoteStage.GENERATE).toBuilder().setFirstGenerateTokenId(input.getTokenIds(input.getTokenIdsCount() - 1)).build());
+                else stream.onNext(frame(RemoteStage.GENERATE).toBuilder().setFirstGenerateTokenId(LocalResponse.sampledToken(input)).build());
                 stream.onCompleted();
                 boolean finished = prefillFinished;
                 for (GenerateOutputsPB output; (output = inbox.next()) != null;) {
@@ -271,7 +274,11 @@ final class PrefillGeneration implements AutoCloseable {
             catch (ExecutionException error) { finish(Status.INTERNAL.withCause(error.getCause()).asRuntimeException()); }
             catch (RuntimeException error) { finish(error); }
         }
-        GenerateRequestPB frame(RemoteStage stage) { return GenerateRequestPB.newBuilder().setStage(stage).setRequestId(input.getRequestId()).setClientId(config.id()).build(); }
+        GenerateRequestPB frame(RemoteStage stage) {
+            var frame = GenerateRequestPB.newBuilder().setStage(stage).setRequestId(input.getRequestId()).setClientId(config.id());
+            if (stage == RemoteStage.GENERATE) frame.setPrefillKvHandoff(PrefillKvHandoffPB.newBuilder().setComputedKvEnd(input.getTokenIdsCount()));
+            return frame.build();
+        }
         void send(GenerateOutputsPB value) { output.add(value); }
         synchronized void finish(Throwable error) {
             if (terminal) return;

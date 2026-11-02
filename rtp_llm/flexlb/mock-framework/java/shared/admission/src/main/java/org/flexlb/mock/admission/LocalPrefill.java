@@ -8,6 +8,7 @@ import org.flexlb.engine.grpc.EngineRpcService.*;
 import org.flexlb.mock.api.model.Types.Role;
 import org.flexlb.mock.engine.*;
 import org.flexlb.mock.cache.KvCache;
+import org.flexlb.mock.multimodal.MediaInput;
 
 /** Prepared-input submission boundary; callers own media preparation and network delivery. */
 final class LocalPrefill implements AutoCloseable {
@@ -34,7 +35,7 @@ final class LocalPrefill implements AutoCloseable {
         void expire() { finish(Status.DEADLINE_EXCEEDED.withDescription("RPC deadline expired"), 603); }
         private void finish(Status status, long code) { engine.finish(request, RpcErrors.scheduling(status, code)); }
         private Result success(Scheduler.Request request, boolean finished) {
-            return new Result(LocalResponse.token(input, input.getTokenIds(input.getTokenIdsCount() - 1), 1, 1, request.reused(), System.nanoTime() - request.input().started(), finished, false), Status.OK, 0);
+            return new Result(LocalResponse.token(input, LocalResponse.sampledToken(input), 1, 1, request.reused(), System.nanoTime() - request.input().started(), finished, false), Status.OK, 0);
         }
         @Override public void output(Scheduler.Request request, Scheduler.Output output) {
             if (retained) result.complete(success(request, output.finished()));
@@ -52,12 +53,16 @@ final class LocalPrefill implements AutoCloseable {
         return submit(input, rpcDeadline, retained, System.nanoTime());
     }
     Session submit(GenerateInputPB input, long rpcDeadline, boolean retained, long started) {
+        return submit(MediaInput.text(input), rpcDeadline, retained, started);
+    }
+    Session submit(MediaInput.Prepared prepared, long rpcDeadline, boolean retained, long started) {
+        var input = prepared.input();
         validatePrepared(input, retained);
         long deadline = Math.min(rpcDeadline, input.getGenerateConfig().getTimeoutMs() <= 0 ? Long.MAX_VALUE
             : RpcTasks.after(started, java.util.concurrent.TimeUnit.MILLISECONDS.toNanos(input.getGenerateConfig().getTimeoutMs())));
         var session = new Session(input, retained);
         try {
-            session.request = engine.input(RpcTasks.input(input, Long.toString(input.getRequestId()), started,
+            session.request = engine.input(RpcTasks.input(prepared, Long.toString(input.getRequestId()), started,
                 deadline, retained, config.blockSize()), session);
         } catch (RequestFailure failure) {
             throw rpcFailure(failure);
@@ -65,7 +70,10 @@ final class LocalPrefill implements AutoCloseable {
         return session;
     }
 
-    record Submission(GenerateInputPB input, long deadline) {}
+    record Submission(MediaInput.Prepared prepared, long deadline) {
+        Submission(GenerateInputPB input, long deadline) { this(MediaInput.text(input), deadline); }
+        GenerateInputPB input() { return prepared.input(); }
+    }
     record Admission(Session session, RuntimeException failure) {}
 
     synchronized List<Admission> submit(List<Submission> batch) {
@@ -78,7 +86,7 @@ final class LocalPrefill implements AutoCloseable {
             try {
                 validatePrepared(item.input(), true);
                 var session = new Session(item.input(), true);
-                var input = RpcTasks.input(item.input(), Long.toString(item.input().getRequestId()),
+                var input = RpcTasks.input(item.prepared(), Long.toString(item.input().getRequestId()),
                     System.nanoTime(), item.deadline(), true, config.blockSize());
                 sessions.add(session); positions.add(i); items.add(new Scheduler.InputItem(input, session));
             } catch (RuntimeException failure) { results.set(i, new Admission(null, failure)); }

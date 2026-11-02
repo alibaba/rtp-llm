@@ -101,9 +101,9 @@ final class LoadClient implements AutoCloseable {
                             .setGenerateConfig(GenerateConfigPB.newBuilder().setMaxNewTokens(item.input().getMaxNewTokens())
                                 .setIgnoreEos(true).setCanUsePdSeparation(true).setReturnIncremental(true));
                         for (var image : item.input().getImagesList()) {
+                            input.setTokenIds(image.getOffset(), org.flexlb.mock.multimodal.MediaInput.IMAGE_TOKEN);
                             input.addMultimodalInputs(MultimodalInputPB.newBuilder().setMultimodalType(1).setMultimodalUrl(image.getUrl())
                                 .setMmPreprocessConfig(MMPreprocessConfigPB.newBuilder().setWidth(image.getWidth()).setHeight(image.getHeight())));
-                            input.getMultimodalTokenLayoutBuilder().addSpans(MultimodalTokenSpanPB.newBuilder().setOffset(image.getOffset()).setLength(image.getLength()));
                         }
                         var request = FlexlbScheduleRequestPB.newBuilder().setRequestId(item.request_id())
                             .setSeqLen(item.input().getTokenIdsList().size()).setMaxNewTokens(item.input().getMaxNewTokens())

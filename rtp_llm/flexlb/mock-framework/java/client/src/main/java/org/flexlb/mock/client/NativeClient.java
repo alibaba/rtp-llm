@@ -180,9 +180,10 @@ public final class NativeClient implements AutoCloseable {
                             System.nanoTime() + Math.max(0, context.getDeadline().timeRemaining(TimeUnit.NANOSECONDS)));
                         synchronized (Call.this) {
                             if (terminal) return;
-                            input = prepared; visionPrepared = true;
-                            request = request.toBuilder().setGenerateInput(prepared.toByteString()).setSeqLen(prepared.getTokenIdsCount())
-                                .setSelectedVit(selected).clearBlockCacheKeys().build();
+                            visionPrepared = true;
+                            request = request.toBuilder().setGenerateInput(media.toByteString()).setSeqLen(prepared.input().getTokenIdsCount())
+                                .setSelectedVit(selected).clearBlockCacheKeys().addAllBlockCacheKeys(
+                                    request.getCacheKeyBlockSize() > 0 ? MediaInput.cacheKeys(prepared, Math.toIntExact(request.getCacheKeyBlockSize())) : java.util.List.of()).build();
                             schedule(0);
                         }
                     } catch (RuntimeException error) { fail(error); }

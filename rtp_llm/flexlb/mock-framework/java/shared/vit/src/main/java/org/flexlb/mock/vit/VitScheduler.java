@@ -28,7 +28,6 @@ final class VitScheduler implements AutoCloseable {
     synchronized void submit(List<VitCache.Claim> claims) {
         if (closed || failure != null) throw Status.UNAVAILABLE.withDescription("V scheduler stopped").asRuntimeException();
         if (claims.isEmpty()) return;
-        if (config.batchSize() > 1 && claims.size() > config.batchImages()) throw MediaInput.invalid("Image count exceeds V forward budget");
         if (waiting.size() >= config.queueSize()) {
             metrics.events.increment("py_rtp_vit_embedding_overload_qps");
             throw Status.RESOURCE_EXHAUSTED.withDescription("V waiting queue full").asRuntimeException();
@@ -44,9 +43,12 @@ final class VitScheduler implements AutoCloseable {
                 TimeUnit.NANOSECONDS.timedWait(this,until-System.nanoTime());
             if (closed) return null;
             var jobs=new ArrayList<Job>(); int images=0;
-            int limit=config.batchSize()==1?Integer.MAX_VALUE:config.batchImages();
-            while (!waiting.isEmpty() && jobs.size()<config.batchSize() && images+waiting.getFirst().claims.size()<=limit) {
-                var job=waiting.remove();jobs.add(job);images+=job.claims.size();
+            int limit=config.batchSize()==1?Integer.MAX_VALUE:config.batchSize();
+            while (!waiting.isEmpty() && jobs.size() < config.batchSize() && images < limit) {
+                var job = waiting.remove();
+                int count = Math.min(job.claims.size(), limit - images);
+                jobs.add(new Job(job.claims.subList(0,count),job.enqueued)); images += count;
+                if (count < job.claims.size()) waiting.addFirst(new Job(job.claims.subList(count,job.claims.size()),job.enqueued));
             }
             running=images; return jobs;
         }

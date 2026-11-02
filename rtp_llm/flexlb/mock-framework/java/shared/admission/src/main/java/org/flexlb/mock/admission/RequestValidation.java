@@ -14,6 +14,7 @@ final class RequestValidation {
         if (g.hasAdapterName() || !g.getUniqueKey().isEmpty()
                 || g.getNumBeams() > 1 || g.getNumReturnSequences() > 1 || g.getVariableNumBeamsCount() > 0
                 || g.getReturnPromptLogits() || g.getReturnHiddenStates() || g.getReturnLogits() || g.getReturnAllHiddenStates()
+                || g.getReturnLogprobs() || g.getTopLogprobs() != 0
                 || g.getReturnAllProbs() || g.getReturnSoftmaxProbs() || g.getReturnCumLogProbs() || g.getCalculateLoss() != 0
                 || g.getStopWordsList().getRowsCount() > 0 || g.getSpEdit() || g.getSpInputLookup())
             throw Status.UNIMPLEMENTED.withDescription("Unsupported adapter, sequence shape or output mode").asRuntimeException();

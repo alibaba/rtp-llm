@@ -27,9 +27,35 @@ final class VitGeometry {
         return ByteString.copyFrom(output.array());
     }
 
-    static List<Image> images(MultimodalInputsPB input, int patch, int merge) {
+    /** The DSV4.1 grid planner, without pixel decode or tensor materialization. */
+    static int rows(int width, int height, int patch, int downsample, int minPixels, int maxTokens) {
+        if ((long) width * height < minPixels) {
+            double scale = Math.sqrt((double) minPixels / ((long) width * height));
+            width = (int) (width * scale); height = (int) (height * scale);
+        }
+        int resizedW = ((width + patch - 1) / patch) * patch;
+        int resizedH = ((height + patch - 1) / patch) * patch;
+        int llmW = (resizedW / patch + downsample - 1) / downsample;
+        int llmH = (resizedH / patch + downsample - 1) / downsample;
+        if ((long) llmH * (llmW + 1) + 2 > maxTokens) {
+            double ratio = (double) height / width;
+            double maxW = Math.sqrt((maxTokens - 2) / ratio + .25) - .5;
+            double maxH = maxW * ratio;
+            int cell = Math.multiplyExact(patch, downsample);
+            if (maxW < 1) { resizedH = ((maxTokens - 2) / 2) * cell; resizedW = cell; }
+            else if (maxH < 1) { resizedH = cell; resizedW = (maxTokens - 3) * cell; }
+            else {
+                double scale = Math.min(Math.floor(maxW) * cell / width, Math.floor(maxH) * cell / height);
+                resizedH = (int) Math.floor(height * scale / patch) * patch;
+                resizedW = (int) Math.floor(width * scale / patch) * patch;
+            }
+            llmW = (resizedW / patch + downsample - 1) / downsample;
+            llmH = (resizedH / patch + downsample - 1) / downsample;
+        }
+        return Math.toIntExact((long) llmH * (llmW + 1) + 2);
+    }
+    static List<Image> images(MultimodalInputsPB input, int patch, int merge, int minPixels, int maxTokens) {
         if (input.getTimeoutMs()<0 || input.getTimeoutMs()>3600000) throw MediaInput.invalid("V timeout must be in 0..3600000 ms");
-        if (input.hasV41Inputs()) throw Status.UNIMPLEMENTED.withDescription("Prepared V4.1 patch layout needs its own image geometry model").asRuntimeException();
         if (input.getMultimodalInputsCount() < 1 || input.getMultimodalInputsCount() > 256)
             throw MediaInput.invalid("Expected 1..256 images");
         var result = new ArrayList<Image>();
@@ -40,9 +66,7 @@ final class VitGeometry {
             int width = shape.getWidth(), height = shape.getHeight();
             if (width < 1 || height < 1 || width > 32768 || height > 32768)
                 throw MediaInput.invalid("Mock image inputs require explicit width/height in mm_preprocess_config, in 1..32768");
-            long stride = (long) patch * merge;
-            long rows = Math.multiplyExact((width + stride - 1) / stride, (height + stride - 1) / stride);
-            if (rows < 1 || rows > 1048576) throw MediaInput.invalid("Image output exceeds row limit");
+            long rows = rows(width, height, patch, merge, minPixels, maxTokens);
             result.add(new Image(MediaInput.key(media), width, height, (int) rows));
         }
         if (result.stream().mapToLong(Image::rows).sum() > 1048576) throw MediaInput.invalid("Request output exceeds row limit");

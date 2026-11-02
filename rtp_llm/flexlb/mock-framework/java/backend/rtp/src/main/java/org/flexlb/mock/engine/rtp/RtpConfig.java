@@ -94,7 +94,7 @@ public record RtpConfig(String id, Role role, int blockSize, int deviceBlocks, i
     }
 
     public AdmissionConfig endpoint() {
-        return new AdmissionConfig(id, role, blockSize, tpSize, maxSeqLen, maxBatchTokens, compute);
+        return new AdmissionConfig(id, role, blockSize, tpSize, maxSeqLen, maxBatchTokens, compute, nativeInt(business, "mock.multimodal.image.token.id", -200, Integer.MIN_VALUE, Integer.MAX_VALUE));
     }
 
     public ObjectNode effective() {
@@ -115,7 +115,17 @@ public record RtpConfig(String id, Role role, int blockSize, int deviceBlocks, i
             .put("block_tree_memory_evict_high_watermark_ratio", hostWatermark.high());
         if (role == Role.prefill) {
             result.put("max_inited_kv_cache_streams", maxInitedKvStreams).put("max_batch_tokens_without_cache", maxUncachedBatchTokens); }
-        result.put("concurrency_limit", maxGenerateBatchSize);
+        result.put("concurrency_limit", maxGenerateBatchSize).put("mock.multimodal.image.token.id", endpoint().imageToken());
+        boolean control = nativeBool(business,"enable_remote_cache",false);
+        String events = business.path("kv_cache_event_publisher_type").asText("none");
+        if (control || !events.equals("none")) {
+            for (String key : List.of("kv_cache_event_manager_endpoint","kv_cache_event_instance_id","kv_cache_event_instance_group","kv_cache_event_host_ip_port"))
+                if (business.has(key)) result.set(key,business.get(key));
+            result.put("kv_cache_event_publisher_type",events)
+                .put("kv_cache_event_snapshot_interval_ms",nativeInt(business,"kv_cache_event_snapshot_interval_ms",600000,1,Integer.MAX_VALUE))
+                .put("enable_remote_cache",control);
+            result.putObject("kvcm_capabilities").put("payload_io",false).put("hbm_events",events.equals("kvcm"));
+        }
         result.setAll((ObjectNode) compute.effectiveSettings());
         return result;
     }
@@ -166,7 +176,7 @@ public record RtpConfig(String id, Role role, int blockSize, int deviceBlocks, i
         }
         throw new IllegalArgumentException("Invalid/missing integer setting: " + key);
     }
-    private static boolean nativeBool(JsonNode config, String key, boolean fallback) {
+    static boolean nativeBool(JsonNode config, String key, boolean fallback) {
         var value = config.get(key);
         if (value == null) return fallback;
         if (value.isBoolean()) return value.booleanValue();

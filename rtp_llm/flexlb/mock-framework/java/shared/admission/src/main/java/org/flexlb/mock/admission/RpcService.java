@@ -22,9 +22,10 @@ public final class RpcService extends RpcServiceGrpc.RpcServiceImplBase implemen
     private volatile boolean closed;
 
     public RpcService(AdmissionConfig config, KvCache cache, Scheduler.Factory schedulers) {
-        this.config = config; this.cache = cache;
+        this.config = config;
+        this.cache = cache;
         requests = config.role() == org.flexlb.mock.api.model.Types.Role.prefill ? new LocalPrefill(config, cache, schedulers) : null;
-        vision = requests == null ? null : new org.flexlb.mock.multimodal.MediaClient();
+        vision = requests == null ? null : new org.flexlb.mock.multimodal.MediaClient(config.imageToken());
         decode = requests == null ? new DecodeAdmission(config, cache, schedulers) : null;
         generation = requests == null ? null : new PrefillGeneration(config, requests);
     }
@@ -46,6 +47,19 @@ public final class RpcService extends RpcServiceGrpc.RpcServiceImplBase implemen
         if (requests == null) decode.checkHealthy(); else requests.checkHealthy();
     }
     public String scrapeMetrics() { return requests == null ? decode.scrapeMetrics() : requests.scrapeMetrics(); }
+
+    @Override public void executeFunction(FunctionRequestPB input, StreamObserver<FunctionResponsePB> response) {
+        if (input.hasRemoteRequest()) {
+            var operation = input.getRemoteRequest().getOp();
+            if (operation == RemoteOpType.REMOTE_OPERATION_READ || operation == RemoteOpType.REMOTE_OPERATION_WRITE) {
+                // No SDK or external I/O was submitted: failure is explicitly buffer-safe.
+                response.onNext(FunctionResponsePB.newBuilder().setRemoteResponse(RemoteOperationResponsePB.newBuilder()
+                    .setTransferStatus(RemoteTransferStatusPB.REMOTE_TRANSFER_STATUS_FAILED_BUFFER_SAFE).setPayloadBufferSafe(true)).build());
+                response.onCompleted(); return;
+            }
+        }
+        response.onError(Status.UNIMPLEMENTED.withDescription("KVCM payload SDK and metadata backend operations are not simulated").asRuntimeException());
+    }
 
     @Override public StreamObserver<GenerateRequestPB> remoteGenerate(StreamObserver<GenerateOutputsPB> observer) {
         return decode == null ? super.remoteGenerate(observer) : decode.open(observer);
@@ -132,7 +146,7 @@ public final class RpcService extends RpcServiceGrpc.RpcServiceImplBase implemen
             long version = statusVersion.updateAndGet(previous -> Math.max(previous + 1, micros));
             var tasks = requests == null ? decode.snapshot(request.getLatestFinishedVersion()) : requests.snapshot(request.getLatestFinishedVersion());
             return WorkerStatusPB.newBuilder().setRole("RoleType." + role)
-                .setRoleType(RoleTypePB.valueOf("ROLE_TYPE_" + role)).setAlive(true)
+                .setRoleType(RoleTypePB.valueOf("ROLE_TYPE_" + role)).setAlive(true).setKvCacheGroupMode(KvCacheGroupModePB.KV_CACHE_GROUP_MODE_FULL_ATTENTION_ONLY)
                 .setDpSize(1).setDpRank(0).setTpSize(config.tpSize()).setPrecision("FP16")
                 .setStatusVersion(version).setMaxSeqLen(config.maxSeqLen()).setMaxBatchTokensSize(config.maxBatchTokens())
                 .setTotalKvCache(tokens(snapshot.totalBlocks())).setAvailableKvCache(tokens(snapshot.availableBlocks()))

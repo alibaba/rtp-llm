@@ -15,5 +15,5 @@ FLEXLB_CONFIG: '{"schemaVersion":3,"scheduler":{"type":"QUEUE","ordering":{"type
   - 8, 0) * sum(hitCacheTokens / 1024.) + 0.00981382840761646 * max(batchSize - 16, 0) * sum(hitCacheTokens / 1024.)
   - 0.0299132587297009 * max(batchSize - 24, 0) * sum(hitCacheTokens / 1024.) + 0.0447455122487382 * max(batchSize -
   8, 0) * sum(computeTokens / 1024.) + 0.0104635312001851 * max(batchSize - 16, 0) * sum(computeTokens / 1024.) + 0.0542737877321807
-  * max(batchSize - 24, 0) * sum(computeTokens / 1024.))))"},"cacheAffinity":{"maxExtraTtftMs":20,"minPrefixHitPercent":20}},"decode":{"availability":{"maxEngineRequests":132,"maxKvUsagePercent":90}}}},"workerRegistry":{"health":{"statusPollIntervalMs":20,"statusRpcTimeoutMs":1000,"statusStaleAfterMs":10000,"cleanupIntervalMs":3000}}}'
+  * max(batchSize - 24, 0) * sum(computeTokens / 1024.))))"},"cacheAffinity":{"maxExtraTtftMs":20,"minPrefixHitPercent":20}},"decode":{"availability":{"maxEngineRequests":132,"maxKvUsagePercent":90}}}},"workerRegistry":{"health":{"statusPollIntervalMs":20,"statusRpcTimeoutMs":1000,"cleanupIntervalMs":3000}}}'
 MODEL_SERVICE_CONFIG: '{"service_id":"aigc.text-generation.generation.mock","role_endpoints":[{"group":"group","prefill_endpoint":{"address":"p-domain","protocol":"grpc"},"decode_endpoint":{"address":"d-domain","protocol":"grpc"}}]}'

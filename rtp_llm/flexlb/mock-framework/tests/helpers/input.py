@@ -35,10 +35,10 @@ def _validate(request):
         raise ValueError('Too many images')
     for image in request.images:
         if (not image.url.strip() or len(image.url) > 4096 or not 1 <= image.width <= 32768
-                or not 1 <= image.height <= 32768 or image.offset < end or image.length < 1
-                or image.offset + image.length > len(request.token_ids)):
+                or not 1 <= image.height <= 32768 or image.offset < end
+                or image.offset >= len(request.token_ids)):
             raise ValueError('Invalid expanded image span or geometry')
-        end = image.offset + image.length
+        end = image.offset + 1
 
 
 def write_inputs(path, requests):

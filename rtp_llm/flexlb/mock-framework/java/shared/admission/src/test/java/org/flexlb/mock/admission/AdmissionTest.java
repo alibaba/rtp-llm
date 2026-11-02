@@ -53,7 +53,7 @@ class AdmissionTest {
         for (var role : List.of(Role.prefill, Role.decode)) {
             var created = new AtomicReference<RejectingScheduler>();
             try (var cache = new KvCache(2, 8, 0, KvCache.EvictionPolicy.LRU);
-                 var service = new RpcService(new AdmissionConfig("test", role, 2, 1, 4096, 0, compute), cache,
+                 var service = new RpcService(new AdmissionConfig("test", role, 2, 1, 4096, 0, compute, -200), cache,
                      (lock, supplied) -> {
                          assertSame(cache, supplied);
                          assertNull(created.get(), "One scheduler per instance");

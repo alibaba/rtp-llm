@@ -8,11 +8,16 @@ import org.flexlb.mock.engine.Scheduler;
 final class RpcTasks {
     static Scheduler.Input input(GenerateInputPB input, String identity, long started, long rpcDeadline,
                                     boolean retained, int blockSize) {
+        return input(org.flexlb.mock.multimodal.MediaInput.text(input), identity, started, rpcDeadline, retained, blockSize);
+    }
+    static Scheduler.Input input(org.flexlb.mock.multimodal.MediaInput.Prepared prepared, String identity, long started, long rpcDeadline,
+                                 boolean retained, int blockSize) {
+        var input = prepared.input();
         long deadline = Math.min(rpcDeadline, input.getGenerateConfig().getTimeoutMs() == 0 ? Long.MAX_VALUE
             : after(started, TimeUnit.MILLISECONDS.toNanos(input.getGenerateConfig().getTimeoutMs())));
         return new Scheduler.Input(identity, input.getRequestId(), input.hasGroupId() ? input.getGroupId().getValue() : 0,
             input.getTokenIdsCount(), input.getGenerateConfig().getMaxNewTokens(), input.getPriority(), started, deadline,
-            PrefixKeys.completeBlocks(input, blockSize), input.getGenerateConfig().getReuseCache(), retained, input.getGenerateConfig().getMinNewTokens(), input.getGenerateConfig().getIgnoreEos());
+            org.flexlb.mock.multimodal.MediaInput.cacheKeys(prepared, blockSize), input.getGenerateConfig().getReuseCache(), retained, input.getGenerateConfig().getMinNewTokens(), input.getGenerateConfig().getIgnoreEos());
     }
     static TaskInfoPB task(Scheduler.Task task) {
         var result = TaskInfoPB.newBuilder().setRequestId(task.requestId()).setBatchId(task.batchId())

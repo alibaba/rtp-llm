@@ -77,7 +77,7 @@ final class DecodeAdmission implements AutoCloseable {
                 validate(frame);
                 call.input = frame.getInput();
                 call.client = frame.getClientId();
-                call.request = engine.input(RpcTasks.input(call.input, call.client + "/" + call.input.getRequestId(),
+                call.request = engine.input(RpcTasks.input(new org.flexlb.mock.multimodal.MediaInput.Prepared(call.input, frame.getMultimodalCacheSpansList()), call.client + "/" + call.input.getRequestId(),
                     call.started, call.rpcDeadline, false, config.blockSize()), call);
                 return;
             }
@@ -93,6 +93,9 @@ final class DecodeAdmission implements AutoCloseable {
                 call.stage = Stage.FINISHING;
                 engine.control(call.request, Control.PREFILL_COMPLETE);
             } else if (frame.getStage() == RemoteStage.GENERATE && call.stage == Stage.LOADED) {
+                if (frame.hasPrefillKvHandoff() && (!frame.getClientId().equals(call.client)
+                        || frame.getPrefillKvHandoff().getComputedKvEnd() != call.input.getTokenIdsCount()))
+                    throw Status.INVALID_ARGUMENT.withDescription("Prefill KV handoff does not match loaded prompt").asRuntimeException();
                 if (frame.getProposeTokenIdsCount() > 0 || frame.getPositionIdsCount() > 0 || frame.hasProposeProbs() || frame.hasProposeHidden())
                     throw Status.UNIMPLEMENTED.withDescription("Speculative/position handoff is not supported").asRuntimeException();
                 if (call.input.getGenerateConfig().getMaxNewTokens() == 1)

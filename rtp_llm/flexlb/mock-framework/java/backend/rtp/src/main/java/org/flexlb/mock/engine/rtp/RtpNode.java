@@ -21,6 +21,7 @@ public final class RtpNode implements org.flexlb.mock.runtime.EngineInstance {
     private final org.flexlb.mock.runtime.EngineAddress address = org.flexlb.mock.runtime.EngineAddress.local();
     private Server rpc;
     private ApiServer api;
+    private KvcmPublisher publisher;
 
     private RtpNode(RtpConfig config, Scheduler.Factory schedulers) {
         this.config = Objects.requireNonNull(config);
@@ -50,6 +51,7 @@ public final class RtpNode implements org.flexlb.mock.runtime.EngineInstance {
             node.rpc = builder.build().start();
             node.api = new ApiServer(node.address.listener(controlPort)).health(node::checkHealthy).metrics(node.service::scrapeMetrics);
             node.api.start();
+            node.publisher = KvcmPublisher.start(config, node.cache, node.rpcAddress());
             return node;
         } catch (IOException | RuntimeException error) { node.close(); throw error; }
     }
@@ -66,8 +68,9 @@ public final class RtpNode implements org.flexlb.mock.runtime.EngineInstance {
         var result = new LinkedHashMap<String, Object>();
         result.put("id", config.id()); result.put("role", config.role().name()); result.put("engine", "rtp");
         result.put("rpc", rpcAddress()); result.put("control", address.http(api.port())); result.put("metrics", address.http(api.port()) + "/metrics");
-        result.put("supported_rpc", prefill ? List.of("CheckHealth", "GetWorkerStatus", "GetCacheStatus", "GenerateStreamCall", "EnqueueBatch", "EnqueueGroup", "FetchResponse", "Cancel")
-            : List.of("CheckHealth", "GetWorkerStatus", "GetCacheStatus", "RemoteGenerate"));
+        result.put("supported_rpc", prefill ? List.of("ExecuteFunction", "CheckHealth", "GetWorkerStatus", "GetCacheStatus", "GenerateStreamCall", "EnqueueBatch", "EnqueueGroup", "FetchResponse", "Cancel")
+            : List.of("ExecuteFunction", "CheckHealth", "GetWorkerStatus", "GetCacheStatus", "RemoteGenerate"));
+        if (publisher != null) result.put("kvcm",publisher.status());
         result.put("local_generation", prefill ? Map.of("max_new_tokens", 1, "multimodal", true) : Map.of());
         result.put("pd_generation", prefill ? Map.of("rpc", "GenerateStreamCall", "decode_target", "role_addrs", "multimodal", true) : Map.of());
         result.put("remote_generation", prefill ? Map.of() : Map.of("stages", List.of("ALLOCATE", "LOAD", "GENERATE", "PREFILL_COMPLETE"), "multimodal", true, "load", true));
@@ -93,7 +96,9 @@ public final class RtpNode implements org.flexlb.mock.runtime.EngineInstance {
         } catch (RuntimeException error) {
             if (failure == null) failure = error; else failure.addSuppressed(error);
         } finally {
-            try { if (api != null) api.close(); } finally { cache.close(); }
+            try { if (publisher != null) publisher.close(); } finally {
+                try { if (api != null) api.close(); } finally { cache.close(); }
+            }
         }
         if (failure != null) throw failure;
     }

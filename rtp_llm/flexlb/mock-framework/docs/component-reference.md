@@ -107,25 +107,29 @@ vit:
     replicas: 1
   config:
     mock.vit.patch.size: 14
-    mock.vit.spatial.merge.size: 2
+    mock.vit.spatial.merge.size: 3
+    mock.vit.min.pixels: 295936
+    mock.vit.max.tokens: 1024
     mock.vit.hidden.size: 4096
     gpu_max_batch_size: 8
-    gpu_max_batch_images: 200
     gpu_batch_wait_ms: 10
-    mm_max_queue_size: 1024
+    vit_concurrency: 64
+    vit_max_queue_size: 64
     mm_cache_gpu_max_bytes: 67108864
     mm_cache_cpu_max_bytes: 268435456
     mm_hash_key_cache_max_bytes: 16777216
     mock.compute.forward.expression: "2 + 0.00001 * totalImagePixels"
 ```
 
-图像输入携带明确的 width/height（原生 mm_preprocess_config），不下载/解码实际图片。输出行数为 ceil(width/(patch_size*spatial_merge_size))*ceil(height/(patch_size*spatial_merge_size))。这是可配置的 Mock 几何模型，不宣称复现某个真实视觉模型的 resize/crop。首版只接受 IMAGE URL 身份和显式尺寸；视频、音频、tensor 输入、V4.1 prepared patches 在 V 模块边界明确拒绝，不由 Client 或 P 的核心校验器按多模态类别拒绝。数据文件的 Image.length 要事先按模型几何生成，旧数据仅离线转换，不新增运行时兼容格式。
+图像输入携带明确的 width/height（原生 mm_preprocess_config），Mock 不下载/解码实际图片。几何使用固定源码的 V4.1 `plan_image_grid`/`num_image_tokens`：先按最小像素数放大、按 patch 对齐，必要时按最大 token 数缩小，最终 rows=llm_h*(llm_w+1)+2；默认 patch=14、downsample=3、min_pixels=295936、max_tokens=1024。尺寸缺失、视频、音频和 tensor 输入仍明确拒绝，不能把任意真实图片预处理宣称为已支持。
+
+回放数据保留原始 token、URL/尺寸与单个占位位置 Image.offset；已删除 Image.length，旧图片数据需要重新生成。Player 使用 -200 作为 Mock 占位标记；Engine 的 `mock.multimodal.image.token.id` 默认 -200，可为原生调用方配置其模型实际标记。标记出现次数必须与媒体数一致。P 的内部 Prepared 保存规范化语义 token 和 cache-only spans，缓存 hash 不再替换语义 token。Native GenerateInput 不携带布局；仅 P→D 的 GenerateRequest.multimodal_cache_spans 携带缓存身份。P/D 按原生逐块滚动算法将语义 token 与重叠 span 身份共同混入 key；同一媒体身份必须在两端得到相同 key。当前 cache-key seed 固定为 0，不宣称不同 checkpoint 的命名空间已自动推导。
 
 V 以 miss 的图片组成 ForwardBatch，复用公式和 SimulatedCompute。计算完成后登记缓存、通知等待者；Compute 不直接改变缓存。命中和在途合并不重复计入 forward。提供 real 名称的 py_rtp_vit_embedding_forward_rt、batch_size、cache 指标及 mock_vit_theoretical_forward_rt；元数据模拟不能代替真实模型计时校准。
 
 Embedding Device/Host 按逻辑 rows*hidden_size*BF16(2 bytes) 计费，各自 LRU；Device 淘汰转存 Host，Host 淘汰移除 embedding。Hash 独立按行数和 key 字节计费，因此 hash_hit 与 embedding_hit 不等价。在途计算使用独立 claim，失败移除，旧 claim 的迟到完成不能覆盖新 claim。消费者持有不可变结果，不依赖缓存继续驻留。缓存 key 对齐 Linux real MultimodalInput 的 URL/type/preprocess 身份，hash 内容是稳定模拟值，不宣称与实际 tensor 的 hash 相等。
 
-Client 按 Master 的 V-only route 选 V，读取元数据、准备特征 token，再带 selected_vit 请求完整 P/D 路由；Master 切换使 pin 失效时重新取一次 V 路由。P 在输入准备完成后才把规范化 token 序列交给 KV/Scheduler，并用同一输入准备 D ALLOCATE 和 PD 交接。P 的输入准备发生在调度锁外，受原请求 deadline/取消约束；这段准备暂不计入 P Scheduler 的队列快照，但计入 Client 端到端耗时。D 接收已准备输入，不重复编码。
+Client 按 Master 的 V-only route 选 V，读取元数据、计算路由长度和缓存 key，再带 selected_vit 与原始输入请求完整 P/D 路由；Master 切换使 pin 失效时重新取一次 V 路由。P 在输入准备完成后才把规范化 token 序列交给 KV/Scheduler，并用同一输入准备 D ALLOCATE 和 PD 交接。P 的输入准备发生在调度锁外，受原请求 deadline/取消约束；这段准备暂不计入 P Scheduler 的队列快照，但计入 Client 端到端耗时。D 接收已准备输入，不重复编码。
 
 本地单 token 的输入准备由 RpcService 负责，P/D 单请求和 Master batch 由 PrefillGeneration 负责；LocalPrefill 的单个与批量提交只接受已准备输入，拒绝尚带媒体内容的请求，不调用 V。本地入口保留准备前的请求开始时间；各路径沿用原请求 deadline，不在准备完成后重置超时预算。
 
@@ -214,8 +218,8 @@ Mock 专用参数使用小写点号名称，例如 `mock.compute.forward.express
 | disable_decode_first_malloc_device_reuse | false | real 内部 CacheConfig 属性，文件输入；不杜撰公开 ENV 名。 |
 | block_tree_device_evict_low/high_watermark_ratio | 0.82 / 0.90 | Device 水位。 |
 | block_tree_memory_evict_low/high_watermark_ratio | 0.90 / 0.94 | Host 水位。 |
-| gpu_max_batch_size / gpu_max_batch_images / gpu_batch_wait_ms | 1 / 200 / 10 ms | 仅 V；batch=1 时有效等待为 0。 |
-| mm_max_queue_size | 1024 | V 等待队列容量。 |
+| gpu_max_batch_size / gpu_batch_wait_ms | 1 / 10 ms | 仅 V；batch=1 为逐请求执行且等待为 0；>1 同时限制 Forward 工作块数与媒体数，较大图片组分轮执行。 |
+| vit_concurrency / vit_max_queue_size | 64 / 64 | 异步准入总额度及 GPU 就绪队列上限按两者之和派生；旧 mm_max_queue_size/gpu_max_batch_images 已移除。 |
 | mm_cache_gpu_max_bytes / mm_cache_cpu_max_bytes | 各 2 GiB | V embedding 缓存逻辑预算，单位 byte。 |
 | mm_hash_key_cache_max_bytes | 256 MiB | V hash 缓存逻辑预算，单位 byte。 |
 
@@ -226,7 +230,7 @@ real 默认值和映射以 `rtp_llm/server/server_args`、`rtp_llm/config/engine
 | 参数 | 含义 |
 | --- | --- |
 | mock.cache.memory.blocks | P/D Host 逻辑块预算，默认 0；不是 real 的 memory_cache_size_mb。本模型不加载层/head/dtype 来计算每块字节数，所以忽略 memory_cache_size_mb，不能把 MB 当块数。 |
-| mock.vit.patch.size / mock.vit.spatial.merge.size / mock.vit.hidden.size | V 简化几何模型，默认 14 / 2 / 4096，不冒充 real 的模型加载配置。 |
+| mock.vit.patch.size / mock.vit.spatial.merge.size / mock.vit.hidden.size | V 简化几何模型，默认 14 / 3 / 4096，不冒充 real 的模型加载配置。 |
 | mock.compute.forward.expression | 必填，Forward 公式，结果单位 ms。 |
 | mock.compute.forward.noise.stddev.ms / stddev.ratio / max.deviation.ms / seed | 有界噪声，详见 Compute；数值后缀均相对 mock.compute.forward.noise。 |
 | mock.compute.decode.tokens.per.step | D 平均每轮进度，与真实投机机制不同。 |
@@ -235,7 +239,7 @@ real 默认值和映射以 `rtp_llm/server/server_args`、`rtp_llm/config/engine
 
 ### ENV 输入
 
-real 公开参数按其 server_args 声明读取 ENV。P/D 上表的公开项对应大写下划线名，例如 `CONCURRENCY_LIMIT`、`SEQ_SIZE_PER_BLOCK`、`TP_SIZE`、`DP_SIZE`、`CP_ROTATE_METHOD`。V 的三个 batch 参数分别使用 `VIT_GPU_MAX_BATCH_SIZE`、`VIT_GPU_MAX_BATCH_IMAGES`、`VIT_GPU_BATCH_WAIT_MS`，其余为 `MM_MAX_QUEUE_SIZE`、`MM_CACHE_GPU_MAX_BYTES`、`MM_CACHE_CPU_MAX_BYTES`、`MM_HASH_KEY_CACHE_MAX_BYTES`。不会从这些 ENV 名反推另一套默认值。
+real 公开参数按其 server_args 声明读取 ENV。P/D 上表的公开项对应大写下划线名，例如 `CONCURRENCY_LIMIT`、`SEQ_SIZE_PER_BLOCK`、`TP_SIZE`、`DP_SIZE`、`CP_ROTATE_METHOD`。V 的 batch 参数分别使用 `VIT_GPU_MAX_BATCH_SIZE`、`VIT_GPU_BATCH_WAIT_MS`，队列参数为 `VIT_CONCURRENCY`、`VIT_MAX_QUEUE_SIZE`；缓存参数为 `MM_CACHE_GPU_MAX_BYTES`、`MM_CACHE_CPU_MAX_BYTES`、`MM_HASH_KEY_CACHE_MAX_BYTES`。不会从这些 ENV 名反推另一套默认值。
 
 Mock 名称的点号转换为下划线并大写，例如 `mock.compute.decode.tokens.per.step` → `MOCK_COMPUTE_DECODE_TOKENS_PER_STEP`。`MOCK_COMPUTE_*`、`MOCK_CACHE_*`、`MOCK_VIT_*` 是严格校验的业务命名空间；框架启动变量另行处理。只读取已声明的业务字段，其他进程 ENV 不写入配置产物。
 
@@ -247,6 +251,28 @@ MOCK_COMPUTE_DECODE_TOKENS_PER_STEP=2.6 \
 START_PORT=8088 \
 java -jar java/host/target/mock-engine-service-1.0-SNAPSHOT-all.jar
 ```
+
+## DSV4.1 Engine / KVCM 契约
+
+ViT 的 GetWorkerStatus 总是显式提供 `mm_inflight_inputs`（包括真实零值），计数来自去重后的媒体所有权；缓存命中不增加，重复等待者不重复增加，排队/执行/缓存结果发布完成前不提前减少。RPC 等待者数不是该指标。状态查询不经过阻塞的结果等待执行器。当前没有 GPU 预取、graph、内容检查和实际下载模型，不把这些参数当作已实现能力。
+
+P 在 GENERATE 阶段发送 `prefill_kv_handoff.computed_kv_end`，为已计算 prompt 的排他边界，不包含首个采样 token。D 校验请求身份、已 LOAD 阶段和边界；缺省字段保留原生旧调用兼容，显式错误断言拒绝。未实现的 logprobs 请求明确返回 UNIMPLEMENTED，不伪造概率输出。
+
+KVCM 使用 real 的 Meta HTTP 请求格式：`/api/registerInstance` 与 `/api/reportEvent`，支持 NODE_REGISTER、HEARTBEAT、BLOCK_SNAPSHOT、BLOCK_ADD、BLOCK_DELETE、HOST_DOWN。注册/节点失效会重新注册并恢复快照；事件来自本实例真实逻辑 HBM 缓存，失败/取消请求不产生成功缓存。采样变化按一秒周期收敛，ACK 成功后才推进已发送视图；不引入无界事件历史。HOST_DOWN 在实例关闭时尽力发送，服务端仍需按心跳失效处理意外退出。
+
+```yaml
+kv_cache_event_publisher_type: kvcm
+kv_cache_event_manager_endpoint: http://<meta-http-host>:<port>
+kv_cache_event_instance_group: mock-experiment
+kv_cache_event_instance_id: prefill-0
+kv_cache_event_snapshot_interval_ms: 600000
+```
+
+manager_endpoint 必须是直接 Meta HTTP 地址；本批不实现 VIP/Meta RPC 发现。instance_id 缺省为实例 ID 加启动 UUID，host_ip_port 缺省为实际 RPC 地址。关闭事件发布、仅配置 enable_remote_cache=true 时仍可注册并保持控制心跳，NODE_REGISTER 不宣称有 HBM 事件；心跳 extra_info 中的 rtp_remote_cache_enabled 单独记录，不能被解释成数据面已经接通。正式环境需使用匹配的 model_name 和实例组。
+
+`ExecuteFunction` 采用原生 FunctionRequest/Response：READ/WRITE 当前未提交任何外部 I/O，返回 FAILED_BUFFER_SAFE 且 payload_buffer_safe=true；其他未实现的 KVCM SDK 元数据操作返回 UNIMPLEMENTED。ShutdownRequest 的跨 rank 停机协调未模拟，返回 UNIMPLEMENTED，不生成排空证明；实例停止继续使用已有的进程生命周期和 TERM 清理路径。
+
+当前缓存仍为 Full-KV 逻辑模型，只注册一个 Full spec；没有 DSV4.1 Full/SWA/Linear 混合池、GDR、真实远端 payload 读写及完成 Decode KV 向远端 DRAM 的提交。注册/事件接线测试不等于这些能力已经验证，不能用本模型给出上述容量和真实命中结论。端点能力明确标记 payload_io=false。
 
 ## Client 原生收发核心
 

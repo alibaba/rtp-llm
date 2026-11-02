@@ -139,7 +139,7 @@ class DecodeAdmissionTest {
         for (boolean disabled : List.of(false, true)) {
             try (var node = node(disabled); var call = new Call(node, 0)) {
                 var input = input("p", 1, 5, 0);
-                var keys = PrefixKeys.completeBlocks(input.getInput(), 2);
+                var keys = org.flexlb.mock.multimodal.MediaInput.cacheKeys(org.flexlb.mock.multimodal.MediaInput.text(input.getInput()), 2);
                 try (var lease = node.node.cache().acquire(6, List.of()).lease()) {
                     lease.publish(keys, 5);
                 }
@@ -171,6 +171,21 @@ class DecodeAdmissionTest {
             call.close();
             await(() -> node.status().getAvailableKvCache() == 16);
             assertEquals(1, node.status().getFinishedTaskListCount());
+        }
+    }
+
+    @Test void explicitPrefillHandoffRejectsUncomputedTokenAndWrongProducer() throws Exception {
+        for (boolean wrongProducer : List.of(false,true)) {
+            try (var node = node(false); var call = new Call(node, 0)) {
+                call.request.onNext(input("p", 1, 5, 0)); call.ack();
+                call.request.onNext(GenerateRequestPB.newBuilder().setRequestId(1).setStage(RemoteStage.LOAD).build());
+                assertInstanceOf(GenerateOutputsPB.class,call.replies.poll(3,TimeUnit.SECONDS));
+                call.request.onNext(GenerateRequestPB.newBuilder().setRequestId(1).setStage(RemoteStage.GENERATE)
+                    .setClientId(wrongProducer ? "" : "p")
+                    .setPrefillKvHandoff(PrefillKvHandoffPB.newBuilder().setComputedKvEnd(wrongProducer ? 5 : 6)).build());
+                call.error(Status.Code.INVALID_ARGUMENT);
+                await(() -> node.status().getAvailableKvCache() == 16);
+            }
         }
     }
 

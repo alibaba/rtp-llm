@@ -29,7 +29,7 @@ def test_vision_playback_through_real_master(tmp_path, mode):
         'grpcServer': {'executorCoreSize': 4, 'executorMaxSize': 8, 'executorQueueSize': 64, 'shutdownQuietPeriodMs': 10}})
     engine = {'engine': 'rtp', 'config': {'seq_size_per_block': 2, 'test_block_num': 128,
         'reserve_block_ratio': 0, 'max_seq_len': 128, 'mock.compute.forward.expression': '1'}}
-    vision = {'config': {'mock.vit.hidden.size': 4, 'mm_cache_gpu_max_bytes': 1024,
+    vision = {'config': {'mock.vit.hidden.size': 4, 'mock.vit.min.pixels': 0, 'mm_cache_gpu_max_bytes': 1024,
         'mm_cache_cpu_max_bytes': 1024, 'mock.compute.forward.expression': '2 + batchSize'}}
     data = {'id': 'vision_playback', 'describe': 'Native V selection, metadata preparation, P/D generation',
         'environment': {'master': {'config': native}, 'prefill': engine, 'decode': engine, 'vit': vision, 'client': {'config': {}}},
@@ -43,8 +43,8 @@ def test_vision_playback_through_real_master(tmp_path, mode):
         component = data['environment'][role]
         (tmp_path / 'configs' / f'{role}.yaml').write_text(yaml.safe_dump(component['config']))
         data['environment'][role] = {**component, 'config': f'configs/{role}.yaml'}
-    requests = [pb.Request(token_ids=[10, 0, 0, 20], max_new_tokens=3,
-        images=[pb.Image(url='mock://image-' + str(i % 2), width=56, height=28, offset=1, length=2)]) for i in range(8)]
+    requests = [pb.Request(token_ids=[10, 0, 20], max_new_tokens=3,
+        images=[pb.Image(url='mock://image-' + str(i % 2), width=56, height=28, offset=1)]) for i in range(8)]
     write_inputs(tmp_path / 'requests.binpb.zst', requests)
     path = tmp_path / 'case.yaml'
     path.write_text(yaml.safe_dump(data))

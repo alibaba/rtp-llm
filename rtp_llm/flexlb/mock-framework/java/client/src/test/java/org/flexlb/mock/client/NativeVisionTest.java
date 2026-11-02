@@ -25,7 +25,7 @@ class NativeVisionTest {
     @TempDir Path directory;
     int port() throws Exception { try(var socket=new ServerSocket(0)) { return socket.getLocalPort(); } }
     EngineHostApi.Instance create(EngineHost host,String role) throws Exception {
-        var config=role.equals("vit")?Map.of("mock.vit.hidden.size",4,"mm_cache_gpu_max_bytes",1024,"mock.compute",Map.of("forward",Map.of("expression","5")))
+        var config=role.equals("vit")?Map.of("mock.vit.hidden.size",4,"mock.vit.min.pixels",0,"mm_cache_gpu_max_bytes",1024,"mock.compute",Map.of("forward",Map.of("expression","5")))
             :Map.of("seq_size_per_block",2,"max_seq_len",128,"test_block_num",32,"reserve_block_ratio",0,"reuse_cache",true,"mock.compute",Map.of("forward",Map.of("expression","1")));
         var path=directory.resolve(role+"-0");Files.createDirectories(path);
         new ObjectMapper().writeValue(path.resolve("config.json").toFile(),Map.of("id",role+"-0","component_role",role,"component",role.equals("vit")?Map.of("config",config):Map.of("engine","rtp","config",config),"environment",Map.of()));
@@ -63,17 +63,16 @@ class NativeVisionTest {
                 }
             }).build().start();
             try(var client=new NativeClient("127.0.0.1:"+master.getPort())) {
-                for(long id:List.of(1L,2L)) {
-                    var input=GenerateInputPB.newBuilder().setRequestId(id).addAllTokenIds(List.of(10,0,0,20))
+                for(long id:List.of(1L,2L,3L)) {
+                    var input=GenerateInputPB.newBuilder().setRequestId(id).addAllTokenIds(id == 3 ? List.of(10,-200) : List.of(10,-200,20))
                         .addMultimodalInputs(MultimodalInputPB.newBuilder().setMultimodalType(1).setMultimodalUrl("same-image")
                             .setMmPreprocessConfig(MMPreprocessConfigPB.newBuilder().setWidth(56).setHeight(28)))
-                        .setMultimodalTokenLayout(MultimodalTokenLayoutPB.newBuilder().addSpans(MultimodalTokenSpanPB.newBuilder().setOffset(1).setLength(2)))
                         .setGenerateConfig(GenerateConfigPB.newBuilder().setMaxNewTokens(3).setIgnoreEos(true).setReturnIncremental(true).setCanUsePdSeparation(true)).build();
-                    var request=FlexlbScheduleRequestPB.newBuilder().setRequestId(id).setSeqLen(4).setMaxNewTokens(3).setGenerateInput(input.toByteString()).build();
+                    var request=FlexlbScheduleRequestPB.newBuilder().setRequestId(id).setSeqLen(input.getTokenIdsCount()).setMaxNewTokens(3).setGenerateInput(input.toByteString()).build();
                     var result=client.send(request,Duration.ofSeconds(8)).completion().toCompletableFuture().get(10,TimeUnit.SECONDS);
                     assertEquals(NativeClient.Outcome.success,result.outcome(),result.toString());assertEquals(3,result.outputTokens());
                 }
-                assertEquals(6,stages.get());assertEquals(3,host.status(new None()).size());
+                assertEquals(8,stages.get());assertEquals(3,host.status(new None()).size());
                 host.stop(new EngineHostApi.Stop("vit-0"));assertEquals(2,host.status(new None()).size());
             } finally { master.shutdownNow().awaitTermination(2,TimeUnit.SECONDS);pChannel.shutdownNow().awaitTermination(2,TimeUnit.SECONDS); }
         }

@@ -83,8 +83,7 @@ class PdGenerationTest {
     private static GenerateInputPB image(GenerateInputPB input, int port) {
         var result = input.toBuilder().addMultimodalInputs(MultimodalInputPB.newBuilder()
             .setMultimodalType(1).setMultimodalUrl("image"))
-            .setMultimodalTokenLayout(MultimodalTokenLayoutPB.newBuilder()
-                .addSpans(MultimodalTokenSpanPB.newBuilder().setOffset(1).setLength(1)));
+            .setTokenIds(1, org.flexlb.mock.multimodal.MediaInput.IMAGE_TOKEN);
         result.getGenerateConfigBuilder().addRoleAddrs(RoleAddrPB.newBuilder()
             .setRole(RoleAddrPB.RoleType.VIT).setIp("127.0.0.1").setGrpcPort(port));
         return result.build();
@@ -127,8 +126,9 @@ class PdGenerationTest {
                 }
             }
             // Cache identity must use the prepared hash, not the image placeholder token.
-            var prepared = image(input(d, 0, 4, 1, 3000, true), vision.getPort()).toBuilder().setTokenIds(1, 777).build();
-            var keys = PrefixKeys.completeBlocks(prepared, 2);
+            var prepared = image(input(d, 0, 4, 1, 3000, true), vision.getPort()).toBuilder().clearMultimodalInputs().build();
+            var keys = org.flexlb.mock.multimodal.MediaInput.cacheKeys(new org.flexlb.mock.multimodal.MediaInput.Prepared(prepared,
+                List.of(MultimodalCacheSpanPB.newBuilder().setOffset(1).addRowHashes(777).build())), 2);
             var cached = rpc.getCacheStatus(CacheVersionPB.newBuilder().setNeedCacheKeys(true).build());
             assertTrue(keys.stream().allMatch(cached.getCacheKeysMap()::containsKey));
             assertEquals(6, calls.size());

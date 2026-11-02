@@ -27,6 +27,7 @@ final class VitCache implements AutoCloseable {
         if (result != null) { metrics.events.increment("py_rtp_vit_embedding_cache_hit_qps"); return new Claim(image, CompletableFuture.completedFuture(result),new AtomicInteger(1),false); }
         var waiting = pending.get(image.key());
         if (waiting != null) { metrics.events.increment("py_rtp_vit_embedding_cache_inflight_qps"); waiting.users.incrementAndGet();return new Claim(image,waiting.result,waiting.users,false); }
+        if (pending.size() >= config.queueSize()) throw io.grpc.Status.RESOURCE_EXHAUSTED.withDescription("V unique media admission full").asRuntimeException();
         metrics.events.increment("py_rtp_vit_embedding_cache_miss_qps"); waiting = new Pending(new CompletableFuture<>(),new AtomicInteger(1));pending.put(image.key(),waiting);
         return new Claim(image,waiting.result,waiting.users,true);
     }
@@ -69,6 +70,7 @@ final class VitCache implements AutoCloseable {
     static void release(Claim claim) { if(claim.users.decrementAndGet()<0) throw new IllegalStateException("V claim released twice"); }
     long bytes(VitGeometry.Image image) { return image.bytes(config.hidden(),2); }
     private static long hashBytes(VitGeometry.Image image) { return (long)image.rows()*4 + image.key().length(); }
+    synchronized int inflight() { return pending.size(); }
     synchronized VitGeometry.Image hash(String key) { return hashes.get(key); }
     synchronized String tier(String key) { return device.containsKey(key) ? "gpu" : host.containsKey(key) ? "cpu" : ""; }
     synchronized Set<String> keys() { return Set.copyOf(hashes.keySet()); }

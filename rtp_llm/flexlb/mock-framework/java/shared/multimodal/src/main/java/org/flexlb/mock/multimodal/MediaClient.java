@@ -10,6 +10,9 @@ import org.flexlb.engine.grpc.MultimodalRpcServiceGrpc;
 public final class MediaClient implements AutoCloseable {
     private final Map<String,ManagedChannel> channels=new HashMap<>();
     private boolean closed;
+    private final int imageToken;
+    public MediaClient() { this(MediaInput.IMAGE_TOKEN); }
+    public MediaClient(int imageToken) { this.imageToken = imageToken; }
     private synchronized ManagedChannel channel(String address) {
         if(closed) throw Status.UNAVAILABLE.withDescription("Vision client closed").asRuntimeException();
         return channels.computeIfAbsent(address,a->ManagedChannelBuilder.forTarget(a).usePlaintext().build());
@@ -20,17 +23,17 @@ public final class MediaClient implements AutoCloseable {
         return MultimodalRpcServiceGrpc.newBlockingStub(channel(MediaInput.address(input))).withDeadlineAfter(remaining,TimeUnit.NANOSECONDS)
             .remoteMultimodalEmbedding(MediaInput.media(input));
     }
-    public GenerateInputPB routingInput(GenerateInputPB input,long deadline) {
+    public MediaInput.Prepared routingInput(GenerateInputPB input,long deadline) {
         long remaining=deadline-System.nanoTime();
         if(remaining<=0) throw Status.DEADLINE_EXCEEDED.withDescription("Request expired acquiring vision hashes").asRuntimeException();
         var request=MultimodalHashRequestPB.newBuilder().addAllKeys(input.getMultimodalInputsList().stream().map(MediaInput::key).distinct().toList())
             .setInputs(MediaInput.media(input)).setTimeoutMs(Math.max(1,TimeUnit.NANOSECONDS.toMillis(remaining))).build();
         var metadata=MultimodalRpcServiceGrpc.newBlockingStub(channel(MediaInput.address(input))).withDeadlineAfter(remaining,TimeUnit.NANOSECONDS).getMultimodalHashes(request);
-        return MediaInput.applyHashes(input,metadata);
+        return MediaInput.applyHashes(input,metadata,imageToken);
     }
-    public GenerateInputPB prepare(GenerateInputPB input,long deadline) {
-        if(!MediaInput.present(input)) return input;
-        return MediaInput.apply(input,fetch(input,deadline)).toBuilder().clearMultimodalInputs().clearMultimodalTokenLayout().clearV41Inputs().build();
+    public MediaInput.Prepared prepare(GenerateInputPB input,long deadline) {
+        if(!MediaInput.present(input)) return MediaInput.text(input);
+        return MediaInput.apply(input,fetch(input,deadline),imageToken);
     }
     @Override public void close() {
         List<ManagedChannel> owned;

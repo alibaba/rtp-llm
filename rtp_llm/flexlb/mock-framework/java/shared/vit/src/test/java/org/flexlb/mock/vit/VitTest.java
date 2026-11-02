@@ -19,7 +19,7 @@ class VitTest {
     VitConfig config(String expression,long device,long host,long hashes,int wait) throws Exception {
         var path=directory.resolve(UUID.randomUUID()+".json");
         new ObjectMapper().writeValue(path.toFile(),Map.of("id","vit-0","component_role","vit","component",Map.of("config",Map.of(
-            "mock.vit.hidden.size",4,"mm_cache_gpu_max_bytes",device,"mm_cache_cpu_max_bytes",host,"mm_hash_key_cache_max_bytes",hashes,
+            "mock.vit.hidden.size",4,"mock.vit.min.pixels",0,"mm_cache_gpu_max_bytes",device,"mm_cache_cpu_max_bytes",host,"mm_hash_key_cache_max_bytes",hashes,
             "gpu_max_batch_size",8,"gpu_batch_wait_ms",wait,"mock.compute",Map.of("forward",Map.of("expression",expression))))));
         return VitConfig.load(path);
     }
@@ -34,6 +34,28 @@ class VitTest {
     static ManagedChannel channel(VitNode node) {
         return ManagedChannelBuilder.forTarget((String)node.endpoints().get("rpc")).usePlaintext().build();
     }
+    @Test void geometryMatchesNativeDsv41PlannerAtPinnedSource() {
+        // Values evaluated from ba26ddf1dd plan_image_grid/num_image_tokens, not this Java implementation.
+        int[][] vectors = {{1,1,184},{56,28,202},{512,512,184},{1024,1024,652},{1920,1080,968},
+            {32768,1,1024},{1,32768,1024},{3840,2160,968},{513,777,268}};
+        for (int[] v : vectors) assertEquals(v[2],VitGeometry.rows(v[0],v[1],14,3,295936,1024));
+    }
+    @Test void statusCountsUniqueMediaUntilPublicationCompletes() throws Exception {
+        try (var node=VitNode.start(config("200",1024,1024,1024,0),0,0)) {
+            var channel=channel(node);
+            try {
+                var rpc=MultimodalRpcServiceGrpc.newBlockingStub(channel).withDeadlineAfter(2,TimeUnit.SECONDS);
+                rpc.asyncSubmitEmbedding(input("shared"));
+                rpc.asyncSubmitEmbedding(input("shared"));
+                var status=rpc.getWorkerStatus(StatusVersionPB.getDefaultInstance());
+                assertTrue(status.hasMmInflightInputs()); assertEquals(1,status.getMmInflightInputs().getValue());
+                long until=System.nanoTime()+TimeUnit.SECONDS.toNanos(2);
+                while (rpc.getWorkerStatus(StatusVersionPB.getDefaultInstance()).getMmInflightInputs().getValue()!=0) {
+                    assertTrue(System.nanoTime()<until); Thread.sleep(5);
+                }
+            } finally { channel.shutdownNow().awaitTermination(2,TimeUnit.SECONDS); }
+        }
+    }
     @Test void mergesRequestsIntoOneForwardAndReturnsOnlyMetadata() throws Exception {
         try(var node=VitNode.start(config("2 + batchSize",1024,1024,1024,150),0,0);
             var threads=Executors.newVirtualThreadPerTaskExecutor()) {
@@ -44,9 +66,9 @@ class VitTest {
                 gate.countDown();
                 for(var future:futures) {
                     var output=future.get(5,TimeUnit.SECONDS);
-                    assertEquals(List.of(2L,4L),output.getMultimodalEmbedding().getShapeList());
+                    assertEquals(List.of(5L,4L),output.getMultimodalEmbedding().getShapeList());
                     assertTrue(output.getMultimodalEmbedding().getBf16Data().isEmpty());
-                    assertEquals(8,output.getMultimodalFeatureHash().getInt32Data().size());assertEquals(List.of(2),output.getSplitSizeList());
+                    assertEquals(20,output.getMultimodalFeatureHash().getInt32Data().size());assertEquals(List.of(5),output.getSplitSizeList());
                 }
                 var metadata=MultimodalRpcServiceGrpc.newBlockingStub(channel).getMultimodalHashes(MultimodalHashRequestPB.newBuilder()
                     .addKeys(MediaInput.key(input("image-0").getMultimodalInputs(0))).build());
@@ -90,23 +112,23 @@ class VitTest {
                 var shortWait=threads.submit(()->assertThrows(StatusRuntimeException.class,()->MultimodalRpcServiceGrpc.newBlockingStub(channel)
                     .withDeadlineAfter(40,TimeUnit.MILLISECONDS).remoteMultimodalEmbedding(input("same"))));
                 var output=MultimodalRpcServiceGrpc.newBlockingStub(channel).withDeadlineAfter(3,TimeUnit.SECONDS).remoteMultimodalEmbedding(input("same"));
-                shortWait.get(3,TimeUnit.SECONDS);assertEquals(2,output.getMultimodalEmbedding().getShape(0));
+                shortWait.get(3,TimeUnit.SECONDS);assertEquals(5,output.getMultimodalEmbedding().getShape(0));
             } finally { channel.shutdownNow().awaitTermination(2,TimeUnit.SECONDS); }
         }
     }
     @Test void malformedMetadataAndSpanMismatchAreRejectedBeforePAllocation() throws Exception {
-        var nativeInput=GenerateInputPB.newBuilder().setRequestId(1).addAllTokenIds(List.of(10,0,0,20))
+        var nativeInput=GenerateInputPB.newBuilder().setRequestId(1).addAllTokenIds(List.of(10,-200,20))
             .addAllMultimodalInputs(input("x").getMultimodalInputsList())
-            .setMultimodalTokenLayout(MultimodalTokenLayoutPB.newBuilder().addSpans(MultimodalTokenSpanPB.newBuilder().setOffset(1).setLength(2))).build();
+            .build();
         var hashes=VitGeometry.hashes(MediaInput.key(input("x").getMultimodalInputs(0)),2);
         var output=MultimodalOutputPB.newBuilder().addSplitSize(2)
             .setMultimodalEmbedding(TensorPB.newBuilder().setDataType(TensorPB.DataType.BF16).addShape(2).addShape(4))
             .setMultimodalFeatureHash(TensorPB.newBuilder().setDataType(TensorPB.DataType.INT32).addShape(2).setInt32Data(hashes)).build();
-        var prepared=MediaInput.apply(nativeInput,output);assertEquals(10,prepared.getTokenIds(0));assertEquals(20,prepared.getTokenIds(3));
-        assertNotEquals(nativeInput.getTokenIdsList(),prepared.getTokenIdsList());
-        assertThrows(StatusRuntimeException.class,()->MediaInput.apply(nativeInput,output.toBuilder().clearSplitSize().addSplitSize(1).build()));
-        assertThrows(StatusRuntimeException.class,()->MediaInput.apply(nativeInput,output.toBuilder().clearMultimodalFeatureHash().build()));
-        assertThrows(StatusRuntimeException.class,()->VitGeometry.images(MultimodalInputsPB.getDefaultInstance(),14,2));
+        var prepared=MediaInput.apply(nativeInput,output,MediaInput.IMAGE_TOKEN);assertEquals(10,prepared.input().getTokenIds(0));assertEquals(20,prepared.input().getTokenIds(3));
+        assertNotEquals(nativeInput.getTokenIdsList(),prepared.input().getTokenIdsList());
+        assertThrows(StatusRuntimeException.class,()->MediaInput.apply(nativeInput,output.toBuilder().clearSplitSize().addSplitSize(1).build(),MediaInput.IMAGE_TOKEN));
+        assertThrows(StatusRuntimeException.class,()->MediaInput.apply(nativeInput,output.toBuilder().clearMultimodalFeatureHash().build(),MediaInput.IMAGE_TOKEN));
+        assertThrows(StatusRuntimeException.class,()->VitGeometry.images(MultimodalInputsPB.getDefaultInstance(),14,3,0,1024));
     }
     @Test void cacheKeyUsesLinuxNativeIdentityAndExcludesTimeout() {
         String[] values={"https://example.com/image.png","中文url"};
@@ -119,17 +141,15 @@ class VitTest {
     @Test void queueOverflowFailsClaimsAndStopEndsEveryOutstandingWaiter() throws Exception {
         var path=directory.resolve("bounded.json");
         new ObjectMapper().writeValue(path.toFile(),Map.of("id","vit-0","component_role","vit","component",Map.of("config",Map.of(
-            "gpu_max_batch_size",1,"mm_max_queue_size",1,"mock.compute",Map.of("forward",Map.of("expression","1000"))))));
+            "gpu_max_batch_size",1,"vit_concurrency",1,"vit_max_queue_size",1,"mock.compute",Map.of("forward",Map.of("expression","1000"))))));
         var config=VitConfig.load(path);
         try(var cache=new VitCache(config);var scheduler=new VitScheduler(config,cache)) {
             var first=cache.acquire(new VitGeometry.Image("a",28,28,1));scheduler.submit(List.of(first));
             long end=System.nanoTime()+TimeUnit.SECONDS.toNanos(2);
             while(scheduler.snapshot().get("mock_vit_running_image_count") == 0) { assertTrue(System.nanoTime()<end);Thread.sleep(2); }
             var second=cache.acquire(new VitGeometry.Image("b",28,28,1));scheduler.submit(List.of(second));
-            var overflow=cache.acquire(new VitGeometry.Image("c",28,28,1));
-            var rejected=assertThrows(StatusRuntimeException.class,()->scheduler.submit(List.of(overflow)));
-            assertEquals(Status.Code.RESOURCE_EXHAUSTED,rejected.getStatus().getCode());cache.complete(overflow,rejected);
-            assertTrue(overflow.result().isCompletedExceptionally());scheduler.close();
+            var rejected=assertThrows(StatusRuntimeException.class,()->cache.acquire(new VitGeometry.Image("c",28,28,1)));
+            assertEquals(Status.Code.RESOURCE_EXHAUSTED,rejected.getStatus().getCode());scheduler.close();
             assertThrows(ExecutionException.class,()->first.result().get(2,TimeUnit.SECONDS));
             assertThrows(ExecutionException.class,()->second.result().get(2,TimeUnit.SECONDS));
         }

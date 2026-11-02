@@ -11,12 +11,11 @@ import org.flexlb.engine.grpc.EngineRpcService.*;
 public final class MediaInput {
     private MediaInput() {}
     public static boolean present(GenerateInputPB input) {
-        return input.getMultimodalInputsCount() > 0 || input.hasV41Inputs();
+        return input.getMultimodalInputsCount() > 0;
     }
     public static MultimodalInputsPB media(GenerateInputPB input) {
         var media=MultimodalInputsPB.newBuilder().setRequestId(input.getRequestId())
             .addAllMultimodalInputs(input.getMultimodalInputsList()).setTimeoutMs(input.getGenerateConfig().getTimeoutMs());
-        if(input.hasV41Inputs()) media.setV41Inputs(input.getV41Inputs());
         return media.build();
     }
     public static String key(MultimodalInputPB input) {
@@ -41,8 +40,14 @@ public final class MediaInput {
         }
         hash^=hash>>>47;hash*=m;return hash^(hash>>>47);
     }
+    public static final int IMAGE_TOKEN = -200;
+    public record Prepared(GenerateInputPB input, List<MultimodalCacheSpanPB> spans) {
+        public Prepared { spans = List.copyOf(spans); }
+    }
+    public static Prepared text(GenerateInputPB input) { return new Prepared(input, List.of()); }
+
     /** Inputs already contain expanded token spans, as on the native wire. */
-    public static GenerateInputPB apply(GenerateInputPB input, MultimodalOutputPB output) {
+    public static Prepared apply(GenerateInputPB input, MultimodalOutputPB output, int imageToken) {
         var tensor = output.getMultimodalEmbedding(); var hashes = output.getMultimodalFeatureHash();
         if (output.getOutputRdmaSlotsCount() != 0 || !tensor.getFp32Data().isEmpty() || !tensor.getBf16Data().isEmpty()
                 || !tensor.getFp16Data().isEmpty() || !tensor.getInt32Data().isEmpty()
@@ -54,9 +59,9 @@ public final class MediaInput {
         if (output.hasMultimodalPosId() || output.getMultimodalExtraInputCount() != 0 || !hashes.getFp32Data().isEmpty()
                 || !hashes.getBf16Data().isEmpty() || !hashes.getFp16Data().isEmpty())
             throw Status.DATA_LOSS.withDescription("Unexpected vision tensor payload").asRuntimeException();
-        return applyRows(input,output.getSplitSizeList(),hashes.getInt32Data());
+        return applyRows(input,output.getSplitSizeList(),hashes.getInt32Data(),imageToken);
     }
-    public static GenerateInputPB applyHashes(GenerateInputPB input, MultimodalHashResponsePB metadata) {
+    public static Prepared applyHashes(GenerateInputPB input, MultimodalHashResponsePB metadata, int imageToken) {
         var entries=new HashMap<String,MultimodalHashEntryPB>();
         for(var entry:metadata.getEntriesList()) {
             if(entries.putIfAbsent(entry.getKey(),entry)!=null) throw Status.DATA_LOSS.withDescription("Duplicate vision hash entry").asRuntimeException();
@@ -70,25 +75,60 @@ public final class MediaInput {
             sizes.add(entry.getSplitSize(0));payload=payload.concat(entry.getFeatureHashes());
             if(payload.size()>4*1048576) throw Status.RESOURCE_EXHAUSTED.withDescription("Vision hashes exceed request limit").asRuntimeException();
         }
-        return applyRows(input,sizes,payload);
+        return applyRows(input,sizes,payload,imageToken);
     }
-    private static GenerateInputPB applyRows(GenerateInputPB input,List<Integer> sizes,ByteString payload) {
-        var spans = input.getMultimodalTokenLayout().getSpansList();
-        if (spans.size() != input.getMultimodalInputsCount() || sizes.size() != spans.size())
-            throw invalid("Each image requires one expanded token span");
+    private static Prepared applyRows(GenerateInputPB input, List<Integer> sizes, ByteString payload, int imageToken) {
+        if (sizes.size() != input.getMultimodalInputsCount()) throw invalid("Image output count mismatch");
         var data = payload.asReadOnlyByteBuffer().order(ByteOrder.LITTLE_ENDIAN);
-        var prepared = input.toBuilder(); int previousEnd = 0;
-        for (int i = 0; i < spans.size(); i++) {
-            var span = spans.get(i); int length = sizes.get(i);
-            if (length < 1 || span.getLength() != length || span.getOffset() < previousEnd
-                    || (long) span.getOffset() + length > input.getTokenIdsCount() || data.remaining() < (long) length * 4)
-                throw invalid("Expanded image token span differs from V output");
-            for (int n = 0; n < length; n++) prepared.setTokenIds(span.getOffset() + n, data.getInt());
-            previousEnd = span.getOffset() + length;
+        var result = input.toBuilder().clearTokenIds().clearMultimodalInputs();
+        var spans = new ArrayList<MultimodalCacheSpanPB>();
+        int image = 0;
+        for (int token : input.getTokenIdsList()) {
+            if (token != imageToken) { result.addTokenIds(token); continue; }
+            if (image >= sizes.size()) throw invalid("Too many image placeholders");
+            int rows = sizes.get(image++);
+            if (rows < 1 || (long) result.getTokenIdsCount() + rows > 1048576 || data.remaining() < (long) rows * 4)
+                throw invalid("Invalid image output length");
+            var span = MultimodalCacheSpanPB.newBuilder().setOffset(result.getTokenIdsCount());
+            for (int row = 0; row < rows; row++) {
+                result.addTokenIds(imageToken);
+                span.addRowHashes(data.getInt());
+            }
+            spans.add(span.build());
         }
-        if (data.hasRemaining()) throw Status.DATA_LOSS.withDescription("Excess vision hashes").asRuntimeException();
-        return prepared.build();
+        if (image != sizes.size() || data.hasRemaining()) throw invalid("Image placeholders and hashes differ");
+        return new Prepared(result.build(), spans);
     }
+
+    /** Mirrors CompleteTokenIds::multimodalCacheIdentity and the native rolling block hash. */
+    public static List<Long> cacheKeys(Prepared prepared, int blockSize) {
+        if (blockSize < 1) throw invalid("Invalid cache block size");
+        validateSpans(prepared.input(), prepared.spans());
+        var keys = new ArrayList<Long>(); long hash = 0;
+        int length = prepared.input().getTokenIdsCount();
+        for (int start = 0; start + blockSize <= length; start += blockSize) {
+            for (int i = start; i < start + blockSize; i++) hash = roll(hash, prepared.input().getTokenIds(i));
+            for (var span : prepared.spans()) {
+                int begin = Math.max(start, span.getOffset());
+                int end = Math.min(start + blockSize, span.getOffset() + span.getRowHashesCount());
+                if (begin >= end) continue;
+                for (int value : new int[]{-42, begin-start, span.getRowHashesCount(), begin-span.getOffset(), end-begin}) hash = roll(hash,value);
+                for (int i = begin; i < end; i++) hash = roll(hash, span.getRowHashes(i-span.getOffset()));
+            }
+            keys.add(hash);
+        }
+        return List.copyOf(keys);
+    }
+    public static void validateSpans(GenerateInputPB input, List<MultimodalCacheSpanPB> spans) {
+        long previous = 0;
+        for (var span : spans) {
+            long end = (long) span.getOffset() + span.getRowHashesCount();
+            if (span.getOffset() < previous || span.getRowHashesCount() < 1 || end > input.getTokenIdsCount())
+                throw invalid("Invalid multimodal cache span");
+            previous = end;
+        }
+    }
+    private static long roll(long hash, long value) { return hash ^ (value + 0x9e3779b97f4a7c15L + (hash << 12) + (hash >> 32)); }
     public static String address(GenerateInputPB input) {
         var addresses = input.getGenerateConfig().getRoleAddrsList().stream().filter(a -> a.getRole() == RoleAddrPB.RoleType.VIT).toList();
         if (addresses.size() != 1 || addresses.getFirst().getIp().isBlank() || addresses.getFirst().getGrpcPort() < 1 || addresses.getFirst().getGrpcPort() > 65535)

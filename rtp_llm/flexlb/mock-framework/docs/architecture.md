@@ -428,3 +428,5 @@ PROMETHEUS_BIN=/path/to/prometheus ./scripts/check.sh
 EngineInstances 只完成配置解析和实例装配，返回实例及生效配置。EngineHost 负责本地实验的 effective-config/endpoints/ready 文件，并保留新实例不可覆盖旧产物的约束。EngineMain 不依赖这些文件，使用 START_PORT 启动单个服务，在日志中输出配置和地址；平台发现与重拉不经过 Python Runner。
 
 Engine 的 HTTP 与原生健康检查读取现有 Loop/Scheduler 失败状态，不采集指标。独立进程每秒调用同一检查，不可恢复失败退出。不开新的健康管理模块，不把普通请求失败当作 Engine 故障。
+
+本分支使用 DSV4.1 的原始多模态 RPC 与内部 PD cache spans；Prepared 输入准备仍在 Scheduler 之前完成，Scheduler 只消费长度和规范化 key。KVCM 控制/事件由 RTP 实例拥有，运行在独立的有界周期任务中，不把 HTTP 或 SDK 调用放进调度锁。具体范围见组件参考中的 DSV4.1 Engine / KVCM 契约。
