@@ -21,6 +21,7 @@ _CLI_STRATEGIES = (
     "w8a8_int8_ep_low_latency_deepgemm",
     "fp8_per_block_dp_normal_deepgemm",
     "fp8_per_block_ep_low_latency_deepgemm",
+    "fp8_per_block_pure_tp",
 )
 
 
@@ -48,6 +49,7 @@ def _register_strategies(registry, **_ignored) -> None:
     from rtp_llm.models_py.modules.factory.fused_moe.ppu_impl.strategy.fp8_per_block import (
         PpuFp8PerBlockDpNormalDeepGemmStrategy,
         PpuFp8PerBlockEpLowLatencyDeepGemmStrategy,
+        PpuFp8PerBlockPureTpStrategy,
     )
     from rtp_llm.models_py.modules.factory.fused_moe.ppu_impl.strategy.no_quant import (
         PpuNoQuantDpNormalDeepGemmStrategy,
@@ -64,6 +66,7 @@ def _register_strategies(registry, **_ignored) -> None:
     registry.register(PpuW8A8Int8EpLowLatencyDeepGemmStrategy())
     registry.register(PpuFp8PerBlockDpNormalDeepGemmStrategy())
     registry.register(PpuFp8PerBlockEpLowLatencyDeepGemmStrategy())
+    registry.register(PpuFp8PerBlockPureTpStrategy())
     logging.info(
         "[ppu moe register] Registered BF16 + W8A8 INT8 + FP8 DeepGEMM strategies"
     )
