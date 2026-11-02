@@ -45,6 +45,21 @@ class VitTest {
     static ManagedChannel channel(VitNode node) {
         return ManagedChannelBuilder.forTarget((String)node.endpoints().get("rpc")).usePlaintext().build();
     }
+    @Test void acceptsNativeFrontendTwoHourRpcBudgetForEmbeddingAndHashRequests() throws Exception {
+        try (var node=VitNode.start(config("1",1024,1024,1024,0),0,0)) {
+            var channel=channel(node);
+            try {
+                var rpc=MultimodalRpcServiceGrpc.newBlockingStub(channel).withDeadlineAfter(3,TimeUnit.SECONDS);
+                var media=input("native-timeout").toBuilder().setTimeoutMs(7200000).build();
+                var output=rpc.remoteMultimodalEmbedding(media);
+                assertEquals(List.of(5),output.getSplitSizeList());
+                var hashes=rpc.getMultimodalHashes(MultimodalHashRequestPB.newBuilder()
+                    .setTimeoutMs(7200000).setInputs(media)
+                    .addKeys(MediaInput.key(media.getMultimodalInputs(0))).build());
+                assertTrue(hashes.getEntries(0).getHashHit());
+            } finally { channel.shutdownNow().awaitTermination(2,TimeUnit.SECONDS); }
+        }
+    }
     @Test void geometryMatchesNativeDsv41PlannerAtPinnedSource() {
         // Values evaluated from ba26ddf1dd plan_image_grid/num_image_tokens, not this Java implementation.
         int[][] vectors = {{1,1,184},{56,28,202},{512,512,184},{1024,1024,652},{1920,1080,968},

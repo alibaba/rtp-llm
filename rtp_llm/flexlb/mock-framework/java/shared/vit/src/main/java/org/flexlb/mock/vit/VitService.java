@@ -77,7 +77,7 @@ final class VitService extends MultimodalRpcServiceGrpc.MultimodalRpcServiceImpl
         var context=Context.current(); reply(response,()-> {
             if(input.getKeysCount()>256 || input.getKeysList().stream().anyMatch(k->k.isBlank() || k.length()>4096)) throw MediaInput.invalid("Oversized hash query");
             Map<String,VitGeometry.Image> computed=new HashMap<>();
-            if(input.getTimeoutMs()<0 || input.getTimeoutMs()>3600000) throw MediaInput.invalid("Invalid hash request timeout");
+            if(input.getTimeoutMs()<0) throw MediaInput.invalid("Invalid hash request timeout");
             if(input.hasInputs()) {
                 var media=input.getInputs();
                 VitGeometry.validate(media,config.skipDownload());

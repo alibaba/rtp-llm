@@ -54,7 +54,7 @@ final class VitGeometry {
         return Math.toIntExact((long) llmH * (llmW + 1) + 2);
     }
     static void validate(MultimodalInputsPB input, boolean skipDownload) {
-        if(input.getTimeoutMs()<0 || input.getTimeoutMs()>3600000) throw MediaInput.invalid("Invalid media timeout");
+        if(input.getTimeoutMs()<0) throw MediaInput.invalid("Invalid media timeout");
         if(input.getMultimodalInputsCount()<1 || input.getMultimodalInputsCount()>256) throw MediaInput.invalid("Expected 1..256 images");
         for(var media:input.getMultimodalInputsList()) {
             if(media.getMultimodalType()!=1 || media.hasMultimodalTensor())
