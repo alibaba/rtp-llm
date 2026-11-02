@@ -1,6 +1,7 @@
 #include <limits>
 #include <functional>
 #include "rtp_llm/cpp/model_rpc/PDRequestUtils.h"
+#include "rtp_llm/cpp/model_rpc/BatchStreamOutputCollector.h"
 #include <memory>
 
 #include <gtest/gtest.h>
@@ -69,6 +70,49 @@ TEST(DecodeRpcServerTest, ShouldUsePDSeparationIgnoresUniqueKeyPresence) {
 
     config->set_unique_key("user-cache-key");
     EXPECT_TRUE(checkPDSupport(request).supported);
+}
+
+TEST(DecodeRpcServerTest, BatchResultKeepsFirstTokenAndPrefillOnlyOptionalOutputs) {
+    BatchStreamOutputCollector collector(/*logits_index=*/1);
+    const auto                 loss          = torch::tensor({0.25f});
+    const auto                 hidden        = torch::ones({1, 3});
+    const auto                 logits        = torch::tensor({1.0f, 2.0f, 3.0f});
+    const auto                 prompt_scores = torch::tensor({-0.5f, -0.25f});
+    GenerateOutputs            first;
+    first.request_id                       = 42;
+    auto& prefill                          = first.generate_outputs.emplace_back();
+    prefill.output_ids                     = torch::tensor({{100}}, torch::kInt32);
+    prefill.finished                       = false;
+    prefill.aux_info.output_len            = 1;
+    prefill.loss                           = loss;
+    prefill.hidden_states                  = hidden;
+    prefill.logits                         = logits;
+    prefill.prompt_logits                  = PromptLogitsOutput{};
+    prefill.prompt_logits->target_logprobs = prompt_scores;
+    ASSERT_TRUE(collector.add(std::move(first)).ok());
+
+    GenerateOutputs next;
+    next.request_id            = 42;
+    auto& decode               = next.generate_outputs.emplace_back();
+    decode.output_ids          = torch::tensor({{101, 102}}, torch::kInt32);
+    decode.finished            = true;
+    decode.aux_info.output_len = 3;
+    decode.logits              = torch::zeros({3});
+    ASSERT_TRUE(collector.add(std::move(next)).ok());
+    const auto result = collector.finish();
+    ASSERT_EQ(result.generate_outputs.size(), 1);
+    const auto& output = result.generate_outputs[0];
+    EXPECT_EQ(result.request_id, 42);
+    EXPECT_TRUE(output.finished);
+    EXPECT_TRUE(torch::equal(output.output_ids, torch::tensor({{100, 101, 102}}, torch::kInt32)));
+    ASSERT_TRUE(output.loss.has_value());
+    ASSERT_TRUE(output.hidden_states.has_value());
+    ASSERT_TRUE(output.logits.has_value());
+    ASSERT_TRUE(output.prompt_logits.has_value());
+    EXPECT_TRUE(torch::equal(*output.loss, loss));
+    EXPECT_TRUE(torch::equal(*output.hidden_states, hidden));
+    EXPECT_TRUE(torch::equal(*output.logits, logits));
+    EXPECT_TRUE(torch::equal(output.prompt_logits->target_logprobs, prompt_scores));
 }
 
 TEST(DecodeRpcServerTest, DecodeEntranceHandoffUsesInternalKeyAndPreservesBusinessKey) {

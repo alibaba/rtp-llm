@@ -189,6 +189,7 @@ TEST_F(DecodeLoadHelperTest, LoadReturnsPlanDigestMismatchBeforeTransferDeadline
 
 TEST_F(DecodeLoadHelperTest, LoadRejectsSuccessfulResponseWithoutFirstToken) {
     server_->service()->setFirstGenerateTokenId(0);
+    server_->service()->setHasFirstGenerateToken(false);
     const int64_t deadline_ms = currentTimeMs() + 5000;
 
     auto result = client_->load(1011,
