@@ -15,10 +15,17 @@ write, sparse paged attention).  Reports, per forward:
 
 * ``Memcpy DtoH`` count and byte distribution from a torch.profiler chrome
   trace, plus ``cudaStreamSynchronize`` / ``cudaMemcpyAsync`` call counts;
-* per-layer wall from CUDA events and host perf counters;
-* the top DtoH sources by their innermost ``cpu_op`` (correlation-linked), so
-  P1's validation demotion can be verified by a before/after diff of this
-  table.
+* the top DtoH sources with their host callers: each DtoH is linked to its
+  ``cudaMemcpyAsync`` cuda_runtime call, then to the innermost enclosing
+  ``cpu_op`` (``aten::item`` and friends) and the nearest ``qwen4.*``
+  ``user_annotation`` range, so the remaining syncs point at concrete
+  functions instead of ``<unlinked>``;
+* per-layer host python time for the prep / side-write / score / topk /
+  fmha-prep / fmha segments, measured with ``perf_counter`` wrappers around
+  the stable module seams (the probes add no synchronization), to verify the
+  P2 frozen step-plan orchestration cut;
+* frozen step-plan cache hit/miss counters (P2) plus the first forward's
+  wall (plan build) against the steady state (plan hit).
 
 ``RTP_LLM_QSA_STRICT_VALIDATION=1`` restores the legacy host-synchronous
 validation and is reported in the header; compare both modes on the same
@@ -31,12 +38,13 @@ Run directly (GPU host, repo on PYTHONPATH ahead of the installed wheel):
 """
 
 import argparse
+import bisect
 import json
 import os
 import statistics
 import tempfile
 import time
-from collections import Counter
+from collections import Counter, defaultdict
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -56,9 +64,15 @@ from rtp_llm.models.qwen4_exp.qwen4_exp_kv_cache import (
     INDEXER_STATE_TAG,
 )
 from rtp_llm.models_py.model_desc import qwen3_next, qwen4_exp
+from rtp_llm.models_py.model_desc.qwen4_exp_runtime import (
+    qsa_geometry,
+    qsa_prefill,
+    qsa_step_plan,
+)
 from rtp_llm.models_py.model_desc.qwen4_exp_runtime.qsa_context import (
     Qwen4ExpQSARuntimeContext,
 )
+from rtp_llm.models_py.modules.qwen4_exp.qsa import fmha_inputs, indexer_paged_score
 from rtp_llm.models_py.modules.qwen4_exp.qsa.sparse_gqa_impl import SparseGqaFmhaImpl
 from rtp_llm.utils.model_weight import W
 
@@ -281,38 +295,90 @@ def _measure_wall(fixture, attention, fmha, warmup, iters):
     return event_ms, walls
 
 
+_RUNTIME_APIS = (
+    "cudaStreamSynchronize",
+    "cudaDeviceSynchronize",
+    "cudaMemcpyAsync",
+    "cudaEventSynchronize",
+    "cudaStreamWaitEvent",
+    "cudaEventRecord",
+)
+
+
+class _TraceIntervals:
+    """CPU-side events indexed by (pid, tid) for timestamp containment."""
+
+    def __init__(self):
+        self._by_thread = defaultdict(list)
+        self._starts = {}
+
+    def add(self, event) -> None:
+        if event.get("ph") != "X":
+            return
+        key = (event.get("pid"), event.get("tid"))
+        start = event.get("ts")
+        dur = event.get("dur", 0) or 0
+        if start is None:
+            return
+        self._by_thread[key].append((float(start), float(dur), event.get("name", "")))
+
+    def finish(self) -> None:
+        for key, intervals in self._by_thread.items():
+            intervals.sort(key=lambda item: item[0])
+            self._starts[key] = [item[0] for item in intervals]
+
+    def innermost(self, key, timestamp: float, limit: int = 512):
+        """Name of the innermost interval containing ``timestamp``.
+
+        Durations are not monotonic, so the scan walks backwards over the
+        most recent starts; the enclosing op of a cudaMemcpyAsync is always
+        among the nearest ones. The bound keeps adversarial traces linear.
+        """
+        intervals = self._by_thread.get(key)
+        if not intervals:
+            return None
+        idx = bisect.bisect_right(self._starts[key], timestamp) - 1
+        best = None
+        checked = 0
+        while idx >= 0 and checked < limit:
+            start, dur, name = intervals[idx]
+            if start + dur > timestamp:
+                if best is None or dur < best[1]:
+                    best = (name, dur)
+            checked += 1
+            idx -= 1
+        return best[0] if best else None
+
+
 def _parse_trace(path):
     """Summarize DtoH memcpys, runtime sync APIs and cpu_op attribution."""
     with open(path) as handle:
         events = json.load(handle).get("traceEvents", [])
-    correlation_to_op = {}
     runtime_counts = Counter()
+    memcpy_apis = {}
+    cpu_ops = _TraceIntervals()
+    annotations = _TraceIntervals()
     memcpy_events = []
     busy_us = 0
     for event in events:
         category = event.get("cat")
         name = event.get("name", "")
-        if category == "cpu_op":
-            correlation = event.get("args", {}).get("correlation")
-            if correlation is not None:
-                correlation_to_op.setdefault(correlation, name)
-        elif category == "cuda_runtime":
-            if any(
-                api in name
-                for api in (
-                    "cudaStreamSynchronize",
-                    "cudaDeviceSynchronize",
-                    "cudaMemcpyAsync",
-                    "cudaEventSynchronize",
-                    "cudaStreamWaitEvent",
-                    "cudaEventRecord",
-                )
-            ):
+        if category == "cuda_runtime":
+            if any(api in name for api in _RUNTIME_APIS):
                 runtime_counts[name] += 1
+            correlation = event.get("args", {}).get("correlation")
+            if "Memcpy" in name and correlation is not None:
+                memcpy_apis[correlation] = event
+        elif category == "cpu_op":
+            cpu_ops.add(event)
+        elif category == "user_annotation":
+            annotations.add(event)
         elif category == "gpu_memcpy" and "DtoH" in name:
             memcpy_events.append(event)
         elif category in ("kernel",) and event.get("ph") == "X":
             busy_us += event.get("dur", 0) or 0
+    cpu_ops.finish()
+    annotations.finish()
 
     by_source = Counter()
     bytes_by_source = Counter()
@@ -320,7 +386,15 @@ def _parse_trace(path):
     total_bytes = 0
     for event in memcpy_events:
         correlation = event.get("args", {}).get("correlation")
-        source = correlation_to_op.get(correlation, "<unlinked>")
+        api_event = memcpy_apis.get(correlation)
+        if api_event is None:
+            source = "<unlinked: no cudaMemcpyAsync runtime event>"
+        else:
+            key = (api_event.get("pid"), api_event.get("tid"))
+            timestamp = float(api_event.get("ts", 0))
+            op = cpu_ops.innermost(key, timestamp) or "<no enclosing cpu_op>"
+            annotation = annotations.innermost(key, timestamp)
+            source = f"{op} @{annotation}" if annotation else op
         byte_count = int(event.get("args", {}).get("bytes") or 0)
         by_source[source] += 1
         bytes_by_source[source] += byte_count
@@ -338,6 +412,49 @@ def _parse_trace(path):
         "runtime_counts": runtime_counts,
         "busy_us": busy_us,
     }
+
+
+_SEGMENT_NS = defaultdict(int)
+
+
+def _timed_segment(name: str, func):
+    """Wrap one stable seam; perf_counter pairs add no synchronization."""
+
+    def wrapper(*args, **kwargs):
+        start = time.perf_counter_ns()
+        try:
+            return func(*args, **kwargs)
+        finally:
+            _SEGMENT_NS[name] += time.perf_counter_ns() - start
+
+    return wrapper
+
+
+def _install_segment_timers() -> None:
+    """Time the QSA prep/fmha-prep seams the P2 plan is meant to shrink."""
+    qsa_geometry._draft_incremental_prefill_geometry = _timed_segment(
+        "prep (qsa geometry + step plan)", qsa_geometry._draft_incremental_prefill_geometry
+    )
+    qsa_prefill._incremental_prefill_selection = _timed_segment(
+        "qsa-select (side write + score + topk)",
+        qsa_prefill._incremental_prefill_selection,
+    )
+    Qwen4ExpQSARuntimeContext._write_indexer_cache_transactional = _timed_segment(
+        "side-write (incremental writer)",
+        Qwen4ExpQSARuntimeContext._write_indexer_cache_transactional,
+    )
+    indexer_paged_score.qsa_paged_indexer_score = _timed_segment(
+        "score (paged indexer score)", indexer_paged_score.qsa_paged_indexer_score
+    )
+    qsa_prefill.select_qsa_paged_tokens = _timed_segment(
+        "topk (select_qsa_paged_tokens)", qsa_prefill.select_qsa_paged_tokens
+    )
+    fmha_inputs._prepare_incremental_prefill_inputs = _timed_segment(
+        "fmha-prep (incremental inputs)", fmha_inputs._prepare_incremental_prefill_inputs
+    )
+    SparseGqaFmhaImpl.forward = _timed_segment(
+        "fmha (main KV write + paged attn)", SparseGqaFmhaImpl.forward
+    )
 
 
 def main():
@@ -369,7 +486,13 @@ def main():
     fixture = _Fixture(device, args.prefix, args.new_tokens)
     fmha = SparseGqaFmhaImpl(attn_configs, fixture.inputs)
 
+    _install_segment_timers()
+    plan_stats_before = qsa_step_plan.step_plan_cache_stats()
+    torch.cuda.synchronize()
+    first_clock = time.perf_counter()
     output = fixture.forward(attention, fmha)
+    torch.cuda.synchronize()
+    first_ms = (time.perf_counter() - first_clock) * 1000.0
     if tuple(output.shape) != (args.new_tokens, HIDDEN):
         raise SystemExit(f"unexpected output shape {tuple(output.shape)}")
 
@@ -416,11 +539,31 @@ def main():
         )
         print(f"  DtoH byte buckets: {buckets}")
     print("-" * 72)
-    print("top DtoH sources (innermost cpu_op via correlation):")
+    print("top DtoH sources (cpu_op @ qwen4 range, via cudaMemcpyAsync):")
     for source, count in summary["by_source"].most_common(12):
         per_forward = count / forwards
         bytes_forward = summary["bytes_by_source"][source] / forwards
         print(f"  {per_forward:8.2f}/forward  {bytes_forward:10.0f} B/forward  {source}")
+    print("-" * 72)
+    total_forwards = 1 + args.warmup + args.iters + args.profile_iters
+    print(
+        "host python segments (perf_counter, per forward; nested, not additive):"
+    )
+    for name in sorted(_SEGMENT_NS):
+        segment_ms = _SEGMENT_NS[name] / 1e6 / total_forwards
+        print(f"  {segment_ms:8.3f} ms/forward  {name}")
+    plan_stats = qsa_step_plan.step_plan_cache_stats()
+    plan_delta = {
+        key: plan_stats[key] - plan_stats_before[key] for key in plan_stats
+    }
+    print(
+        "step plan cache: "
+        + "  ".join(f"{key}={plan_delta[key]}" for key in plan_delta)
+    )
+    print(
+        f"first forward (plan build included): {first_ms:.3f} ms vs steady-state"
+        f" event wall mean={statistics.mean(event_ms):.3f} ms"
+    )
     print("-" * 72)
     print(
         "layer wall (CUDA events): "
