@@ -64,7 +64,7 @@ class RequestSchedulerEntryTest {
                         PlacementResult.rejected(
                                 Response.error(StrategyErrorType.NO_PREFILL_WORKER)));
         try {
-            var result = owner.scheduler().submit(context);
+            var result = SchedulerTestServices.entry((AbstractRequestScheduler) org.flexlb.balance.scheduler.SchedulerTestServices.scheduler(owner)).submit(context);
             assertSame(context.data().getFuture(), result);
             assertEquals(
                     StrategyErrorType.NO_PREFILL_WORKER.getErrorCode(),
@@ -181,7 +181,7 @@ class RequestSchedulerEntryTest {
         try {
             assertEquals(
                     StrategyErrorType.GENERATE_INPUT_REQUIRED.getErrorCode(),
-                    owner.scheduler().submit(context).join().getCode());
+                    SchedulerTestServices.entry((AbstractRequestScheduler) org.flexlb.balance.scheduler.SchedulerTestServices.scheduler(owner)).submit(context).join().getCode());
             assertFalse(owner.requests.retainsIdentity(701L));
         } finally {
             SchedulerTestSupport.shutdown(

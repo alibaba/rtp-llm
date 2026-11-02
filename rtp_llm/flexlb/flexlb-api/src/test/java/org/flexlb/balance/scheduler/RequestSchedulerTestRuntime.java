@@ -40,7 +40,8 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
     private final RequestRepository requests = new RequestRepository();
     private final PlacementAvailability placementAvailability = new PlacementAvailability();
     private final EndpointRegistry registry;
-    private final RequestScheduler scheduler;
+    private final AbstractRequestScheduler scheduler;
+    private final RequestSchedulerEntry entry;
     private final SchedulerTestServices runtime;
     private final BindingRouter router;
 
@@ -114,8 +115,11 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
             org.flexlb.balance.scheduler.SchedulerTestServices.setDependency(
                     runtime,
                     "queueDependencies",
-                    new PrefillQueueRunner.Dependencies(
-                            deliveryExecution, deliveryReporter, runtime::recordFailure));
+                    new RequestExecution.Dependencies(
+                            deliveryExecution,
+                            deliveryReporter,
+                            runtime::recordFailure,
+                            QueuedRequestScheduler::runPrefill));
             org.mockito.Mockito.doAnswer(
                             invocation -> {
                                 preparationBarrier.run();
@@ -151,14 +155,18 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
                         new OrderedRequestQueue(
                                 configService.loadBalanceConfig().isPriorityOrdering()),
                         runtime.queueDependencies);
+        entry = new RequestSchedulerEntry(scheduler, SchedulerTestServices.lifecycle(scheduler), router,
+                configService.loadBalanceConfig().isQueue());
         runtime.registerScheduler(scheduler);
     }
+
+    public RequestSchedulerEntry entry() { return entry; }
 
     public RequestRepository requestRegistry() {
         return requests;
     }
 
-    public RequestScheduler scheduler() {
+    public AbstractRequestScheduler scheduler() {
         return scheduler;
     }
 

@@ -29,6 +29,12 @@ import static com.google.common.base.Preconditions.checkState;
 /** Shared test setup and teardown for scheduler protocol tests. */
 public final class SchedulerTestServices {
 
+    public static RequestSchedulerEntry entry(AbstractRequestScheduler scheduler) {
+        return new RequestSchedulerEntry(scheduler, SchedulerTestServices.lifecycle(scheduler),
+                (RequestWorkerSelector) org.springframework.test.util.ReflectionTestUtils.getField(
+                        scheduler, "router"), scheduler instanceof QueuedRequestScheduler);
+    }
+
     private static final long EXPIRATION_MAINTENANCE_INTERVAL_MS = 60_000L;
     private static final Duration DEFAULT_SHUTDOWN_TIMEOUT = Duration.ofSeconds(30L);
 
@@ -40,7 +46,7 @@ public final class SchedulerTestServices {
     private final LongSupplier clock;
 
     private final DeliveryExecution deliveries;
-    final PrefillQueueRunner.Dependencies queueDependencies;
+    final RequestExecution.Dependencies queueDependencies;
     final EngineGrpcClient engineClient;
 
     private final RequestSignals signals = new RequestSignals();
@@ -59,7 +65,11 @@ public final class SchedulerTestServices {
         return taskTimer;
     }
 
-    final RequestTaskPool tasks = new RequestTaskPool(this::recordFailure);
+    final RequestTaskPool tasks = new RequestTaskPool();
+
+    public static RequestScheduler scheduler(RequestLifecycle owner) {
+        return (RequestScheduler) org.springframework.test.util.ReflectionTestUtils.getField(owner, "owner");
+    }
 
     public RequestTaskExecutor tasks() {
         return tasks;
@@ -83,9 +93,15 @@ public final class SchedulerTestServices {
     private static final java.util.Map<RequestLifecycle, SchedulerTestServices> owners =
             java.util.Collections.synchronizedMap(new java.util.WeakHashMap<>());
 
+    public static RequestLifecycle lifecycle(RequestScheduler scheduler) {
+        if (scheduler instanceof AbstractRequestScheduler concrete) return concrete.lifecycle;
+        return (RequestLifecycle) org.springframework.test.util.ReflectionTestUtils.getField(
+                scheduler, "lifecycle");
+    }
+
     public static SchedulerTestServices forOwner(Object value) {
         var owner =
-                value instanceof RequestLifecycle r ? r : ((RequestScheduler) value).lifecycle();
+                value instanceof RequestLifecycle r ? r : lifecycle((RequestScheduler) value);
         synchronized (owners) {
             var found = owners.get(owner);
             if (found != null) return found;
@@ -245,8 +261,8 @@ public final class SchedulerTestServices {
         this.deliveryReporter = Objects.requireNonNull(deliveryReporter, "deliveryReporter");
         deliveryReporter.registerExecutor(deliveries);
         this.queueDependencies =
-                new PrefillQueueRunner.Dependencies(
-                        deliveries, deliveryReporter, this::recordFailure);
+                new RequestExecution.Dependencies(
+                        deliveries, deliveryReporter, this::recordFailure, QueuedRequestScheduler::runPrefill);
         this.requestReporter = Objects.requireNonNull(requestReporter, "requestReporter");
         this.dispatcher = Objects.requireNonNull(dispatcher, "dispatcher");
         if (org.springframework.test.util.ReflectionTestUtils.getField(dispatcher, "grpcClient")
@@ -419,7 +435,7 @@ public final class SchedulerTestServices {
     /**
      * Stops accepting requests and settles the scheduler within one bounded lifecycle operation.
      * DRAIN keeps requests already registered before the cutoff eligible for placement. If the
-     * placement queue does not drain before the deadline, the operation escalates to IMMEDIATE.
+     * accepted responses do not complete before the deadline, the operation escalates to IMMEDIATE.
      */
     public ShutdownResult shutdown(ShutdownMode requestedMode, Duration timeout) {
         Objects.requireNonNull(requestedMode, "requestedMode");
@@ -444,7 +460,7 @@ public final class SchedulerTestServices {
             if (requestedMode == ShutdownMode.DRAIN) {
                 try {
                     drained =
-                            scheduler == null || scheduler.awaitSchedulingCompletion(deadlineNanos);
+                            requests.awaitResponses(deadlineNanos);
                 } catch (Throwable failure) {
                     firstFailure = failure;
                 }
@@ -460,7 +476,7 @@ public final class SchedulerTestServices {
             }
             var owners = new java.util.LinkedHashSet<RequestLifecycle>();
             if (scheduler != null) {
-                owners.add(scheduler.lifecycle());
+                owners.add(lifecycle(scheduler));
             }
             for (var context : requests.snapshotActive()) {
                 owners.add(context.data().getScheduler());

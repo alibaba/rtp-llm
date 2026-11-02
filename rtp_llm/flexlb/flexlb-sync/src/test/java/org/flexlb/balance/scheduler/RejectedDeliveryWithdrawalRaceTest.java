@@ -115,7 +115,7 @@ class RejectedDeliveryWithdrawalRaceTest {
                                 RoleType.DECODE, null, "127.0.0.1", 8080, 8081, null),
                         SchedulerTestSupport.repository(owner));
         var worker =
-                new PrefillQueueRunner(
+                new RequestExecution(
                         "rejected-withdrawal",
                         prefill,
                         QueueExecutionSettings.capture(
@@ -125,7 +125,7 @@ class RejectedDeliveryWithdrawalRaceTest {
                         ledger.prefill,
                         SchedulerTestSupport.queueDependencies(
                                 org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(owner)));
-        ReflectionTestUtils.setField(prefill, "queueRunner", worker);
+        ReflectionTestUtils.setField(prefill, "requestExecution", worker);
         ReflectionTestUtils.setField(prefill, "ownership", ledger.prefill);
 
         var context = RequestProtocolTestSupport.context(config, 1L);

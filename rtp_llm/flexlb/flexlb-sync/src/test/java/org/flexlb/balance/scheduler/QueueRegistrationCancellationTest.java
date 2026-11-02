@@ -43,9 +43,9 @@ class QueueRegistrationCancellationTest {
                             PlacementResult.blocked(
                                     PlacementKey.anyGroup(org.flexlb.dao.route.RoleType.PREFILL)));
             var context = f.context(909L);
-            var future = f.queue.submit(context);
+            var future = SchedulerTestServices.entry(f.queue).submit(context);
             RequestProtocolTestSupport.awaitGlobalCapacityWaiters(f.queue, 1);
-            f.queue.lifecycle().cancel(context, 0L, CancelReason.CLIENT_CANCELLED);
+            SchedulerTestServices.lifecycle(f.queue).cancel(context, 0L, CancelReason.CLIENT_CANCELLED);
             assertFalse(future.get(2, TimeUnit.SECONDS).isSuccess());
             RequestProtocolTestSupport.awaitCondition(
                     () -> f.runtime.requests().liveRequestCount() == 0);
@@ -58,13 +58,13 @@ class QueueRegistrationCancellationTest {
             throws Exception {
         try (Fixture f = new Fixture(false)) {
             var context = f.context(908L);
-            var future = f.queue.submit(context);
+            var future = SchedulerTestServices.entry(f.queue).submit(context);
             try {
                 if (futureCancellation) {
                     assertTrue(future.cancel(false));
                     assertTrue(future.isCancelled());
                 } else {
-                    f.queue.lifecycle().cancel(context, 0L, CancelReason.CLIENT_CANCELLED);
+                    SchedulerTestServices.lifecycle(f.queue).cancel(context, 0L, CancelReason.CLIENT_CANCELLED);
                     assertEquals(
                             StrategyErrorType.REQUEST_CANCELLED.getErrorCode(),
                             future.get(2, TimeUnit.SECONDS).getCode());
@@ -97,7 +97,7 @@ class QueueRegistrationCancellationTest {
                                 return "g";
                             });
             RequestContext context = f.context(906L);
-            var submit = executor.submit(() -> f.queue.submit(context));
+            var submit = executor.submit(() -> SchedulerTestServices.entry(f.queue).submit(context));
             try {
                 assertTrue(enteringQueue.await(2, TimeUnit.SECONDS));
                 var future = context.data().getFuture();
@@ -126,7 +126,7 @@ class QueueRegistrationCancellationTest {
                             PlacementResult.blocked(
                                     new PlacementKey(
                                             org.flexlb.dao.route.RoleType.DECODE, "g", null)));
-            var future = f.queue.submit(f.context(907L));
+            var future = SchedulerTestServices.entry(f.queue).submit(f.context(907L));
             RequestProtocolTestSupport.awaitGlobalCapacityWaiters(f.queue, 1);
             assertTrue(
                     cancel
@@ -153,10 +153,10 @@ class QueueRegistrationCancellationTest {
                             });
             RequestContext context = f.context(901L);
             var result =
-                    f.queue.submit(
+                    SchedulerTestServices.entry(f.queue).submit(
                             context,
                             () -> {
-                                assertSame(f.queue.lifecycle(), context.data().getScheduler());
+                                assertSame(SchedulerTestServices.lifecycle(f.queue), context.data().getScheduler());
                                 assertNotNull(context.data().getFuture());
                                 assertEquals(0, RequestProtocolTestSupport.queuedCount(f.queue));
                                 verify(f.router, never()).select(any(), nullable(String.class));
@@ -172,13 +172,12 @@ class QueueRegistrationCancellationTest {
         try (Fixture f = new Fixture()) {
             RequestContext context = f.context(902L);
             var result =
-                    f.queue.submit(
+                    SchedulerTestServices.entry(f.queue).submit(
                             context,
                             () -> {
-                                assertSame(f.queue.lifecycle(), context.data().getScheduler());
+                                assertSame(SchedulerTestServices.lifecycle(f.queue), context.data().getScheduler());
                                 assertNotNull(
-                                        f.queue
-                                                .lifecycle()
+                                        SchedulerTestServices.lifecycle(f.queue)
                                                 .cancel(902L, 0L, CancelReason.CLIENT_CANCELLED));
                             });
             assertFalse(result.get(2L, TimeUnit.SECONDS).isSuccess());
@@ -196,7 +195,7 @@ class QueueRegistrationCancellationTest {
             var submitted =
                     executor.submit(
                             () ->
-                                    f.queue.submit(
+                                    SchedulerTestServices.entry(f.queue).submit(
                                             f.context(903L),
                                             () -> {
                                                 registered.countDown();
@@ -209,7 +208,7 @@ class QueueRegistrationCancellationTest {
                                             }));
             try {
                 assertTrue(registered.await(2L, TimeUnit.SECONDS));
-                assertNotNull(f.queue.lifecycle().cancel(903L, 0L, CancelReason.CLIENT_CANCELLED));
+                assertNotNull(SchedulerTestServices.lifecycle(f.queue).cancel(903L, 0L, CancelReason.CLIENT_CANCELLED));
                 SchedulerTestSupport.shutdown(SchedulerTestSupport.runtime(f.queue));
 
                 assertFalse(submitted.isDone(), "a cancelled hook holds no scheduling resources");
@@ -226,7 +225,7 @@ class QueueRegistrationCancellationTest {
     void failedHookTerminatesRequestAndRejectedSubmissionsDoNotInvokeHook() throws Exception {
         try (Fixture f = new Fixture()) {
             var result =
-                    f.queue.submit(
+                    SchedulerTestServices.entry(f.queue).submit(
                             f.context(904L),
                             () -> {
                                 throw new IllegalStateException("listener installation failed");
@@ -235,7 +234,7 @@ class QueueRegistrationCancellationTest {
             verify(f.router, never()).select(any(), nullable(String.class));
             SchedulerTestSupport.runtime(f.queue).requests().stopAccepting();
             AtomicBoolean called = new AtomicBoolean();
-            assertFalse(f.queue.submit(f.context(905L), () -> called.set(true)).get().isSuccess());
+            assertFalse(SchedulerTestServices.entry(f.queue).submit(f.context(905L), () -> called.set(true)).get().isSuccess());
             assertFalse(called.get());
         }
     }

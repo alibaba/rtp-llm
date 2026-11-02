@@ -37,11 +37,12 @@ import static com.google.common.base.Preconditions.checkState;
 import static com.google.common.math.LongMath.saturatedAdd;
 
 /**
- * QUEUE execution for one Prefill generation, with SINGLE or FIXED_WINDOW decisions. NON_BATCH
+ * Submission of queued requests, coordinating Prefill, Decode and delivery capacity.
+ * The owning RequestScheduler supplies every scheduling decision. NON_BATCH
  * publishes individual routes; BATCH sends an engine batch. DIRECT does not use this executor.
  * Endpoint state owns request identities and capacity.
  */
-public final class PrefillQueueRunner {
+public final class RequestExecution {
 
     /** Frozen decision evidence; the log representation is materialized only on failure. */
     @lombok.RequiredArgsConstructor(access = lombok.AccessLevel.PRIVATE)
@@ -108,7 +109,7 @@ public final class PrefillQueueRunner {
     }
 
     /** Exact predicate captured by one scheduling cycle. */
-    private record QueueCycle(
+    public record Decision(
             RequestRoute request,
             CapacityBoundary unavailable,
             long queueVersion,
@@ -116,11 +117,11 @@ public final class PrefillQueueRunner {
             long wakeAtMs,
             String waitReason) {
 
-        private static final QueueCycle NO_ACTION = new QueueCycle(null, null, 0L, 0L, 0L, null);
+        public static final Decision NO_ACTION = new Decision(null, null, 0L, 0L, 0L, null);
 
-        private static QueueCycle capacityBlocked(
+        public static Decision capacityBlocked(
                 RequestRoute item, CapacityBoundary unavailable, long queueVersion) {
-            return new QueueCycle(
+            return new Decision(
                     Objects.requireNonNull(item),
                     Objects.requireNonNull(unavailable),
                     queueVersion,
@@ -129,13 +130,13 @@ public final class PrefillQueueRunner {
                     unavailable.resource().getDescription());
         }
 
-        private static QueueCycle awaitingSchedulingChange(
+        public static Decision awaitingSchedulingChange(
                 RequestRoute head,
                 long queueVersion,
                 long schedulingInputVersion,
                 long wakeAtMs,
                 String waitReason) {
-            return new QueueCycle(
+            return new Decision(
                     Objects.requireNonNull(head),
                     null,
                     queueVersion,
@@ -174,16 +175,35 @@ public final class PrefillQueueRunner {
 
     private final Dependencies dependencies;
 
+    public PrefillEndpoint prefillEndpoint() {
+        return prefillEndpoint;
+    }
+
+    public PrefillState.QueueSnapshot captureQueue(int limit) {
+        return prefillState.captureQueue(limit);
+    }
+
+    public QueueExecutionSettings settings() {
+        return settings;
+    }
+
+    public GroupPlanner grouping() {
+        return grouping;
+    }
+
     /** Fixed facilities for this queue generation; request callbacks retain their own owner. */
     public static final class Dependencies {
+        final java.util.function.Consumer<RequestExecution> run;
         final DeliveryExecution deliveries;
         final org.flexlb.service.monitor.DeliveryMetricsReporter reporter;
         final java.util.function.Consumer<Throwable> failures;
 
-        Dependencies(
+        public Dependencies(
                 DeliveryExecution deliveries,
                 org.flexlb.service.monitor.DeliveryMetricsReporter reporter,
-                java.util.function.Consumer<Throwable> failures) {
+                java.util.function.Consumer<Throwable> failures,
+                java.util.function.Consumer<RequestExecution> run) {
+            this.run = Objects.requireNonNull(run);
             this.deliveries = Objects.requireNonNull(deliveries);
             this.reporter = Objects.requireNonNull(reporter);
             this.failures = Objects.requireNonNull(failures);
@@ -200,12 +220,12 @@ public final class PrefillQueueRunner {
     public final Runnable capacityAvailableSignal;
 
     /** Exact active head for which this worker is waiting on a capacity event. */
-    private QueueCycle capacityBlockedHead;
+    private Decision capacityBlockedHead;
 
     /** Last waiting decision; timeout readers never acquire queueGuard. */
     private volatile QueueWaitSnapshot latestQueueWaitSnapshot;
 
-    public PrefillQueueRunner(
+    public RequestExecution(
             String key,
             PrefillEndpoint prefillEp,
             QueueExecutionSettings settings,
@@ -236,16 +256,45 @@ public final class PrefillQueueRunner {
                         .uncaughtExceptionHandler(
                                 (thread, failure) ->
                                         Logger.error(
-                                                "PrefillQueueRunner[{}] thread died unexpectedly",
+                                                "RequestExecution[{}] thread died unexpectedly",
                                                 key,
                                                 failure))
-                        .unstarted(this::runLoop);
+                        .unstarted(this::run);
+    }
+
+    private void run() {
+        Throwable terminalFailure = normalStopFailure;
+        try {
+            dependencies.run.accept(this);
+        } catch (Throwable failure) {
+            terminalFailure = failure;
+        } finally {
+            try {
+                Throwable cleanup = stopAndDrain(terminalFailure, false);
+                if (terminalFailure != normalStopFailure) {
+                    Failures.append(terminalFailure, cleanup);
+                    Logger.error("RequestExecution[{}] scheduling failed", key, terminalFailure);
+                } else if (cleanup != null) {
+                    Logger.error("RequestExecution[{}] shutdown failed", key, cleanup);
+                }
+            } finally {
+                markStopped();
+            }
+        }
+    }
+
+    public boolean stopping() {
+        return drainClaimed;
+    }
+
+    private synchronized void markStopped() {
+        runtimeState = RuntimeState.STOPPED;
     }
 
     public synchronized void start() {
         if (runtimeState != RuntimeState.NEW) {
             throw new IllegalStateException(
-                    "Prefill queue runner cannot start from " + runtimeState);
+                    "Request execution cannot start from " + runtimeState);
         }
         runtimeState = RuntimeState.STARTING;
         try {
@@ -301,7 +350,7 @@ public final class PrefillQueueRunner {
     /** Caller holds P lock; availability only probes the already subscribed resource. */
     public AdmissionBlock admissionBlockLocked() {
         queueGuard.requireHeld();
-        QueueCycle blocked = capacityBlockedHead;
+        Decision blocked = capacityBlockedHead;
         return blocked == null
                         || !prefillState.queueWaitCurrentLocked(
                                 blocked.request(), 0L, 0L, true, System.currentTimeMillis())
@@ -345,7 +394,7 @@ public final class PrefillQueueRunner {
         return failure;
     }
 
-    private Throwable stopAndDrain(Throwable terminalFailure, boolean interruptWorker) {
+    Throwable stopAndDrain(Throwable terminalFailure, boolean interruptWorker) {
         boolean alreadyStopping;
         synchronized (this) {
             alreadyStopping = drainClaimed;
@@ -474,7 +523,7 @@ public final class PrefillQueueRunner {
     }
 
     /** Capture fixed-size counters without formatting the PV record on the scheduling loop. */
-    private void recordQueueWait(RequestRoute head, String reason) {
+    public void recordQueueWait(RequestRoute head, String reason) {
         PrefillState.QueueCounters counters = prefillState.captureQueueCounters();
         DecodeRoutingView decode = head.decodeEp() == null ? null : head.decodeEp().routingView();
         latestQueueWaitSnapshot = new QueueWaitSnapshot(key, reason, counters, decode);
@@ -482,7 +531,7 @@ public final class PrefillQueueRunner {
 
     // ==================== Queue ownership and projection ====================
 
-    private GroupPlanner.Constraints schedulingConstraints() {
+    public GroupPlanner.Constraints schedulingConstraints() {
         WorkerStatus status = prefillEndpoint.getStatus();
         var engine = status == null ? null : status.committedEngineObservation();
         return settings.constraints(engine);
@@ -491,7 +540,7 @@ public final class PrefillQueueRunner {
     // ==================== Delivery ownership ====================
 
     /** Prepare an ordered prefix, commit once, and hand off outside all owner locks. */
-    CapacityBoundary processSelection(
+    public CapacityBoundary processSelection(
             List<RequestRoute> candidates,
             String reason,
             PrefillTimePredictor.Evaluator evaluator,
@@ -698,10 +747,10 @@ public final class PrefillQueueRunner {
         }
     }
 
-    private QueueCycle commitBoundary(
+    public Decision commitBoundary(
             RequestRoute blockedItem, CapacityBoundary blockedResult, long queueVersion) {
         if (blockedItem == null || blockedResult == null) {
-            return QueueCycle.NO_ACTION;
+            return Decision.NO_ACTION;
         }
         boolean capacityBlocked = blockedResult.unavailable();
         boolean failed = blockedResult.status() == CapacityBoundary.Status.FAILED;
@@ -709,12 +758,12 @@ public final class PrefillQueueRunner {
         queueGuard.lock();
         try {
             if (drainClaimed) {
-                return QueueCycle.NO_ACTION;
+                return Decision.NO_ACTION;
             }
             long nowMs = System.currentTimeMillis();
             if (capacityBlocked) {
                 if (!prefillState.queueWaitCurrentLocked(blockedItem, 0L, 0L, true, nowMs)) {
-                    return QueueCycle.NO_ACTION;
+                    return Decision.NO_ACTION;
                 }
             } else if (failed) {
                 removed =
@@ -728,23 +777,16 @@ public final class PrefillQueueRunner {
             queueGuard.unlock();
         }
         if (capacityBlocked) {
-            long version =
-                    settings.priorityOrdering()
-                                    && blockedResult.resource()
-                                            == CapacityBoundary.Resource.DECODE_ENGINE
-                            ? queueVersion
-                            : 0L;
-            return QueueCycle.capacityBlocked(blockedItem, blockedResult, version);
+            return Decision.capacityBlocked(blockedItem, blockedResult, queueVersion);
         }
         if (removed) {
             removeAndNotify(blockedItem, blockedResult, true);
         }
-        return QueueCycle.NO_ACTION;
+        return Decision.NO_ACTION;
     }
 
     /** Once removed, the request must be notified even if a capacity listener fails. */
-    private void removeAndNotify(
-            RequestRoute item, CapacityBoundary failure, boolean alreadyRemoved) {
+    void removeAndNotify(RequestRoute item, CapacityBoundary failure, boolean alreadyRemoved) {
         if (!alreadyRemoved
                 && prefillState.updateQueue(
                                 PrefillState.QueueChange.REMOVE, item, System.currentTimeMillis())
@@ -769,7 +811,7 @@ public final class PrefillQueueRunner {
                             problem,
                             () ->
                                     Logger.error(
-                                            "PrefillQueueRunner[{}] removed request callback failed request_id={}",
+                                            "RequestExecution[{}] removed request callback failed request_id={}",
                                             key,
                                             item.requestId(),
                                             callbackFailure));
@@ -779,194 +821,17 @@ public final class PrefillQueueRunner {
 
     // ==================== Group decisions ====================
 
-    private QueueCycle processQueue() {
-        int maxRequests = settings.maxRequests();
-        PrefillState.QueueSnapshot snapshot = prefillState.captureQueue(maxRequests);
-        RequestRoute head = snapshot.head();
-        if (head == null) {
-            return QueueCycle.NO_ACTION;
-        }
-        long nowMs = System.currentTimeMillis();
-        var requestState = head.ctx().snapshot();
-        if (requestState.placement() != null && !requestState.placement().published()) {
-            return QueueCycle.awaitingSchedulingChange(
-                    head,
-                    snapshot.queueVersion(),
-                    snapshot.schedulingInputVersion(),
-                    Long.MAX_VALUE,
-                    "Route commit in progress");
-        }
-        if (head.requestExpired(nowMs)) {
-            removeAndNotify(head, null, false);
-            return QueueCycle.NO_ACTION;
-        }
-        GroupPlanner.Constraints constraints = schedulingConstraints();
-        if (Math.max(0L, head.seqLen()) > constraints.batchKvCapacity()) {
-            return QueueCycle.awaitingSchedulingChange(
-                    head,
-                    snapshot.queueVersion(),
-                    snapshot.schedulingInputVersion(),
-                    head.expiresAtMs(),
-                    "Prefill KV capacity exhausted");
-        }
-        for (int index = 1; index < Math.min(maxRequests, snapshot.items().size()); index++) {
-            RequestRoute member = snapshot.items().get(index);
-            if (member.requestExpired(nowMs)) {
-                removeAndNotify(member, null, false);
-                return QueueCycle.NO_ACTION;
-            }
-        }
-        PrefillTimePredictor.Evaluator evaluator = prefillEndpoint.predictor.evaluator();
-        // First try dispatching from the queue head in normal queue order.
-        var result = decideGroup(snapshot, null, evaluator, constraints);
-        if (settings.priorityOrdering()
-                && result.unavailable() != null
-                && result.unavailable().resource() == CapacityBoundary.Resource.DECODE_ENGINE) {
-            // The head's Decode endpoint is full. Try one queue-permitted bypass batch on
-            // other Decode endpoints, using fresh queue/capacity snapshots after the first attempt.
-            // Dispatch happens inside decideGroup; keep the original result so the run loop
-            // continues waiting for the blocked head rather than a bypass candidate.
-            decideGroup(
-                    prefillState.captureQueue(Math.max(2, maxRequests)),
-                    head,
-                    evaluator,
-                    schedulingConstraints());
-        }
-        return result;
-    }
-
-    private QueueCycle decideGroup(
-            PrefillState.QueueSnapshot snapshot,
-            RequestRoute bypassedHead,
-            PrefillTimePredictor.Evaluator evaluator,
-            GroupPlanner.Constraints constraints) {
-        var candidates =
-                bypassedHead == null ? snapshot.items() : bypassCandidates(snapshot, bypassedHead);
-        if (candidates.isEmpty()) {
-            return QueueCycle.NO_ACTION;
-        }
-        RequestRoute first = candidates.getFirst();
-        try {
-            var predictor =
-                    settings.executionBudgetMs() > 0L
-                            ? RequestTimeEstimation.newGroupPredictor(
-                                    settings.dispatcherType(), evaluator)
-                            : null;
-            long planningAtMs = System.currentTimeMillis();
-            var selection = grouping.select(candidates, constraints, predictor);
-            if (selection.items().isEmpty()) {
-                return QueueCycle.NO_ACTION;
-            }
-            String reason =
-                    bypassedHead == null
-                            ? grouping.dispatchReason(selection, constraints, planningAtMs)
-                            : "decode_head_bypass";
-            if (reason == null) {
-                return QueueCycle.awaitingSchedulingChange(
-                        first,
-                        snapshot.queueVersion(),
-                        snapshot.schedulingInputVersion(),
-                        Math.min(
-                                grouping.nextCheckAtMs(selection, constraints),
-                                first.expiresAtMs()),
-                        "Prefill collection window");
-            }
-            // Recheck advisory capacity after prediction, before acquiring hard-capacity leases.
-            constraints = schedulingConstraints();
-            if ((selection.items().size() > 1
-                            && !selection.fitsCompute(constraints.batchTokenCapacity()))
-                    || !selection.fitsKv(constraints.batchKvCapacity())) {
-                return QueueCycle.NO_ACTION;
-            }
-            OptionalLong prediction =
-                    settings.dispatcherType() != DispatcherConfig.Type.BATCH
-                                    || selection.selectedPredictionMs().isEmpty()
-                            ? OptionalLong.empty()
-                            : OptionalLong.of(
-                                    PrefillPredictionBoundary.committedDecisionGroupMs(
-                                            selection.selectedPredictionMs().getAsDouble()));
-            var boundary =
-                    processSelection(
-                            selection.items(), reason, evaluator, prediction, bypassedHead);
-            return commitBoundary(first, boundary, snapshot.queueVersion());
-        } catch (InvalidPrefillPredictionException failure) {
-            return commitBoundary(
-                    candidates.get(failure.memberIndex()),
-                    CapacityBoundary.failed(failure),
-                    snapshot.queueVersion());
-        }
-    }
-
     /** Checks ordering and the queue-owned allowance; it neither reserves nor consumes capacity. */
-    public boolean canBypass(RequestRoute head, RequestRoute candidate) {
+    boolean queueAllowsBypass(RequestRoute head, RequestRoute candidate) {
         queueGuard.lock();
         try {
-            return settings.priorityOrdering() && prefillState.canBypassLocked(head, candidate);
+            return prefillState.canBypassLocked(head, candidate);
         } finally {
             queueGuard.unlock();
         }
     }
 
-    /** Only the immediate blocked head may be skipped; a second blocked member stops this batch. */
-    private List<RequestRoute> bypassCandidates(
-            PrefillState.QueueSnapshot snapshot, RequestRoute head) {
-        if (snapshot.head() != head) {
-            return List.of();
-        }
-        int end = 1;
-        while (end < snapshot.items().size() && canBypass(head, snapshot.items().get(end))) {
-            end++;
-        }
-        return snapshot.items().subList(1, end);
-    }
-
     // ==================== Internal: Run loop ====================
-
-    private void runLoop() {
-        try {
-            while (!drainClaimed && !Thread.currentThread().isInterrupted()) {
-                try {
-                    awaitWork(null);
-                    if (drainClaimed) {
-                        return;
-                    }
-                    QueueCycle result = processQueue();
-                    if (result.waitReason() != null) {
-                        recordQueueWait(result.request(), result.waitReason());
-                    }
-                    if (result.request() != null) {
-                        awaitWork(result);
-                    }
-                } catch (InterruptedException interruption) {
-                    Thread.currentThread().interrupt();
-                    return;
-                } catch (Throwable failure) {
-                    try {
-                        Logger.error(
-                                "PrefillQueueRunner[{}] stopped after an unexpected loop failure",
-                                key,
-                                failure);
-                    } catch (Throwable ignoredLoggingFailure) {
-                    }
-                    Throwable cleanup = stopAndDrain(failure, false);
-                    if (cleanup != null) {
-                        try {
-                            Logger.error(
-                                    "PrefillQueueRunner[{}] failure cleanup exposed invariants",
-                                    key,
-                                    cleanup);
-                        } catch (Throwable ignoredLoggingFailure) {
-                        }
-                    }
-                    return;
-                }
-            }
-        } finally {
-            synchronized (this) {
-                runtimeState = RuntimeState.STOPPED;
-            }
-        }
-    }
 
     /**
      * All waits share the queue lock and exact queue predicate. Capacity waits
@@ -974,7 +839,7 @@ public final class PrefillQueueRunner {
      * A null decision waits for the first item; other decisions retain their
      * exact head and either resource or queue/input-version predicate.
      */
-    private void awaitWork(QueueCycle waiting) throws InterruptedException {
+    public void awaitWork(Decision waiting) throws InterruptedException {
         boolean capacityWait = waiting != null && waiting.unavailable() != null;
         queueGuard.lockInterruptibly();
         try {
@@ -1023,7 +888,7 @@ public final class PrefillQueueRunner {
     /** Called after Prefill or Decode capacity changes, outside endpoint locks. */
 
     /** Own the blocked head, its listener and projection invalidation under queueGuard. */
-    private void setCapacityBlockedHeadLocked(QueueCycle blocked) {
+    private void setCapacityBlockedHeadLocked(Decision blocked) {
         queueGuard.requireHeld();
         if (capacityBlockedHead == blocked) {
             return;

@@ -13,7 +13,7 @@ import io.netty.channel.nio.NioEventLoopGroup;
 import org.flexlb.balance.scheduler.CancelReason;
 import org.flexlb.balance.scheduler.DeliveryClaimKind;
 import org.flexlb.balance.scheduler.RequestLifecycle;
-import org.flexlb.balance.scheduler.RequestScheduler;
+import org.flexlb.balance.scheduler.RequestSchedulerEntry;
 import org.flexlb.balance.scheduler.RequestState;
 import org.flexlb.config.ConfigService;
 import org.flexlb.consistency.MasterStatusService;
@@ -382,7 +382,7 @@ class FlexlbForwardHopGuardNettyTest {
         private final AtomicInteger inboundCalls = new AtomicInteger();
         private final AtomicInteger rejections = new AtomicInteger();
         private final MasterStatusService consistency;
-        private final RequestScheduler requestScheduler;
+        private final RequestSchedulerEntry requestScheduler;
         private final RequestLifecycle requestState = mock(RequestLifecycle.class);
         private final FlexlbGrpcForwarder forwarder;
         private final EventLoopGroup channelEventLoop;
@@ -401,7 +401,7 @@ class FlexlbForwardHopGuardNettyTest {
             ConfigService configService = mock(ConfigService.class);
             when(configService.loadBalanceConfig())
                     .thenReturn(org.flexlb.mock.TestFlexlbConfigs.create());
-            requestScheduler = mock(RequestScheduler.class);
+            requestScheduler = mock(RequestSchedulerEntry.class);
             Response local = new Response();
             local.setSuccess(true);
             local.setCode(200);

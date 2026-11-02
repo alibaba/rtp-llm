@@ -30,6 +30,14 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 class PlacementConfigurationTest {
+    static class RequestConsumer {
+        final RequestSchedulerEntry entry;
+
+        RequestConsumer(@org.springframework.context.annotation.Lazy RequestSchedulerEntry entry) {
+            this.entry = entry;
+        }
+    }
+
     @ParameterizedTest
     @EnumSource(DispatcherConfig.Type.class)
     void springAssemblyUsesOneDispatcherBeforeServingAndRuntimeCloses(
@@ -70,6 +78,7 @@ class PlacementConfigurationTest {
             spring.registerBean(EngineGrpcClient.class, () -> mock(EngineGrpcClient.class));
             spring.registerBean(DeliveryDispatcher.class, () -> batchDispatcher);
             spring.register(
+                    RequestConsumer.class,
                     PlacementAvailability.class,
                     RequestRepository.class,
                     PlacementConfiguration.class);
@@ -90,14 +99,14 @@ class PlacementConfigurationTest {
             }
             repository = spring.getBean(RequestRepository.class);
             request.data().setGenerateInputPb(com.google.protobuf.ByteString.copyFromUtf8("input"));
-            var future = scheduler.submit(request);
+            var future = spring.getBean(RequestConsumer.class).entry.submit(request);
             assertSame(future, request.data().getFuture());
             assertEquals(
                     StrategyErrorType.NO_PREFILL_WORKER.getErrorCode(),
                     future.get(3, TimeUnit.SECONDS).getCode());
             repository.closeRegistration();
             scheduler.close();
-            scheduler.lifecycle().stopAdmissionsAndAwaitCompletion();
+            SchedulerTestSupport.lifecycle(scheduler).stopAdmissionsAndAwaitCompletion();
             spring.getBean(ExpirationTimer.class).close();
             spring.getBean(RequestTaskPool.class).close();
             spring.getBean(ResponseCompletionExecutor.class).close();

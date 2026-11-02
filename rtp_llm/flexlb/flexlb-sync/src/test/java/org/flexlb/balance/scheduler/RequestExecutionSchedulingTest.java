@@ -50,15 +50,63 @@ import static org.mockito.Mockito.when;
 /**
  * Concurrency contracts at the final, threaded Prefill scheduling boundary.
  */
-class PrefillQueueRunnerSchedulingTest {
+class RequestExecutionSchedulingTest {
 
-    private final List<PrefillQueueRunner> runtimes = new ArrayList<>();
+    private final List<RequestExecution> runtimes = new ArrayList<>();
 
     @AfterEach
     void stopRuntimes() {
-        for (PrefillQueueRunner runtime : runtimes) {
+        for (RequestExecution runtime : runtimes) {
             assertNull(runtime.stopAndAwait());
         }
+    }
+
+    @Test
+    @Timeout(value = 10, unit = TimeUnit.SECONDS)
+    void replacementSchedulerControlsWhenRequestsExecute() {
+        var config = fixedConfig();
+        var endpoint = stableEndpoint(stableStatus());
+        var permitted = new AtomicBoolean();
+        var waiting = new CountDownLatch(1);
+        java.util.function.Function<RequestExecution, RequestExecution.Decision> scheduler =
+                mock(java.util.function.Function.class);
+        when(scheduler.apply(any()))
+                .thenAnswer(
+                        call -> {
+                            RequestExecution execution = call.getArgument(0);
+                            if (permitted.get()) {
+                                return QueuedRequestScheduler.schedulePrefill(execution);
+                            }
+                            var snapshot = execution.captureQueue(1);
+                            waiting.countDown();
+                            return RequestExecution.Decision.awaitingSchedulingChange(
+                                    snapshot.head(),
+                                    snapshot.queueVersion(),
+                                    snapshot.schedulingInputVersion(),
+                                    Long.MAX_VALUE,
+                                    "custom scheduler waiting");
+                        });
+        var runtime =
+                RequestExecutionTestSupport.create(
+                        "custom-scheduler",
+                        endpoint,
+                        config,
+                        SchedulerTestSupport.dispatcher(),
+                        mock(RequestLifecycle.class),
+                        new org.flexlb.balance.planner.FirstRequestPlanner(),
+                        scheduler::apply);
+        var boundary = new EventDrivenBlock();
+        boundary.install(runtime);
+        runtimes.add(runtime);
+        runtime.start();
+        assertTrue(runtime.offer(item(config, endpoint, 99101L, 50, System.currentTimeMillis())));
+        await(waiting);
+        verify(runtime, org.mockito.Mockito.never())
+                .processSelection(any(), any(), any(), any(), any());
+        permitted.set(true);
+        runtime.signal(false);
+        await(boundary.firstAttempt);
+        verify(scheduler, org.mockito.Mockito.atLeastOnce()).apply(runtime);
     }
 
     @Test
@@ -68,7 +116,7 @@ class PrefillQueueRunnerSchedulingTest {
         var endpoint = stableEndpoint(stableStatus());
         var planner = new org.flexlb.balance.planner.FirstRequestPlanner();
         var runtime =
-                PrefillQueueRunnerTestSupport.create(
+                RequestExecutionTestSupport.create(
                         "custom-planner",
                         endpoint,
                         config,
@@ -80,7 +128,7 @@ class PrefillQueueRunnerSchedulingTest {
         runtimes.add(runtime);
         var first = item(config, endpoint, 101L, 50, System.currentTimeMillis());
         runtime.start();
-        var lock = PrefillQueueRunnerTestSupport.state(runtime).queueGuard();
+        var lock = RequestExecutionTestSupport.state(runtime).queueGuard();
         lock.lock();
         try {
             assertTrue(runtime.offer(first));
@@ -96,13 +144,13 @@ class PrefillQueueRunnerSchedulingTest {
 
     @Test
     void admissionBlockRequiresTheSharedOwnershipLock() {
-        PrefillQueueRunner runtime =
+        RequestExecution runtime =
                 runningRuntime(
                         singleConfig(),
                         mock(PrefillEndpoint.class),
                         SchedulerTestSupport.dispatcher());
         assertThrows(IllegalStateException.class, runtime::admissionBlockLocked);
-        var lock = PrefillQueueRunnerTestSupport.state(runtime).queueGuard();
+        var lock = RequestExecutionTestSupport.state(runtime).queueGuard();
         lock.lock();
         try {
             assertNull(runtime.admissionBlockLocked());
@@ -129,7 +177,7 @@ class PrefillQueueRunnerSchedulingTest {
                         mock(RecentCacheKeyTraceReporter.class));
         PrefillEndpoint endpoint = stableEndpoint(stableStatus());
         EventDrivenBlock delivery = new EventDrivenBlock();
-        PrefillQueueRunner runtime = runningRuntime(config, endpoint, delivery);
+        RequestExecution runtime = runningRuntime(config, endpoint, delivery);
         doAnswer(
                         call -> {
                             runtime.signal(false);
@@ -179,9 +227,7 @@ class PrefillQueueRunnerSchedulingTest {
                         SchedulerTestSupport.Stage.ROUTING, SchedulerTestSupport.stage(context));
                 assertEquals(0, delivery.attempts.get());
                 // The wait is unbounded even when a request deadline elapses during publication.
-                var decision =
-                        org.springframework.test.util.ReflectionTestUtils.invokeMethod(
-                                runtime, "processQueue");
+                var decision = QueuedRequestScheduler.schedulePrefill(runtime);
                 assertEquals(
                         Long.MAX_VALUE,
                         org.springframework.test.util.ReflectionTestUtils.getField(
@@ -212,8 +258,8 @@ class PrefillQueueRunnerSchedulingTest {
     void routeCommitFinishingAfterSnapshotCannotMixPlacementFacts() throws Exception {
         FlexlbConfig config = singleConfig();
         PrefillEndpoint endpoint = stableEndpoint(stableStatus());
-        PrefillQueueRunner worker =
-                PrefillQueueRunnerTestSupport.create(
+        RequestExecution worker =
+                RequestExecutionTestSupport.create(
                         "commit-snapshot-race",
                         endpoint,
                         config,
@@ -246,7 +292,7 @@ class PrefillQueueRunnerSchedulingTest {
                 .when(observation)
                 .snapshot();
         org.mockito.Mockito.doReturn(observation).when(route).ctx();
-        var queue = PrefillQueueRunnerTestSupport.state(worker);
+        var queue = RequestExecutionTestSupport.state(worker);
         queue.queueGuard().lock();
         try {
             assertSame(
@@ -274,9 +320,7 @@ class PrefillQueueRunnerSchedulingTest {
                                     committed.countDown();
                                 }
                             });
-            var decision =
-                    org.springframework.test.util.ReflectionTestUtils.invokeMethod(
-                            worker, "processQueue");
+            var decision = QueuedRequestScheduler.schedulePrefill(worker);
             completion.get(2, TimeUnit.SECONDS);
             assertEquals(
                     Long.MAX_VALUE,
@@ -318,7 +362,7 @@ class PrefillQueueRunnerSchedulingTest {
         }
         PrefillEndpoint endpoint = stableEndpoint(stableStatus());
         EventDrivenBlock delivery = new EventDrivenBlock(resource);
-        PrefillQueueRunner runtime = runningRuntime(config, endpoint, delivery);
+        RequestExecution runtime = runningRuntime(config, endpoint, delivery);
         RequestRoute head = item(config, endpoint, 1L, 50, System.currentTimeMillis());
 
         assertTrue(runtime.offer(head));
@@ -336,7 +380,7 @@ class PrefillQueueRunnerSchedulingTest {
 
         TimeUnit.MILLISECONDS.sleep(100L);
         assertEquals(1, delivery.attempts.get(), "a capacity miss must not be polled");
-        assertSame(head, PrefillQueueRunnerTestSupport.capture(runtime).items().getFirst());
+        assertSame(head, RequestExecutionTestSupport.capture(runtime).items().getFirst());
 
         delivery.firstCapacity.release();
         await(delivery.secondAttempt);
@@ -354,7 +398,7 @@ class PrefillQueueRunnerSchedulingTest {
         TimeUnit.MILLISECONDS.sleep(100L);
         assertEquals(
                 2, delivery.attempts.get(), "one capacity signal must trigger exactly one retry");
-        assertSame(head, PrefillQueueRunnerTestSupport.capture(runtime).items().getFirst());
+        assertSame(head, RequestExecutionTestSupport.capture(runtime).items().getFirst());
         assertNull(runtime.stopAndAwait());
         assertTrue(delivery.parkedCapacity.listeners.isEmpty());
     }
@@ -365,7 +409,7 @@ class PrefillQueueRunnerSchedulingTest {
         FlexlbConfig config = singleConfig();
         PrefillEndpoint endpoint = stableEndpoint(stableStatus());
         EventDrivenBlock delivery = new EventDrivenBlock();
-        PrefillQueueRunner runtime = runningRuntime(config, endpoint, delivery);
+        RequestExecution runtime = runningRuntime(config, endpoint, delivery);
         assertTrue(runtime.offer(item(config, endpoint, 12L, 50, System.currentTimeMillis())));
         await(delivery.firstCapacity.subscribed);
         delivery.firstCapacity.removeFailure = new IllegalStateException("listener removal failed");
@@ -373,10 +417,10 @@ class PrefillQueueRunnerSchedulingTest {
         // Release on this thread; removal runs on the scheduling thread.
         delivery.firstCapacity.release();
         await(delivery.firstCapacity.removed);
-        CompletableFuture.supplyAsync(() -> PrefillQueueRunnerTestSupport.capture(runtime))
+        CompletableFuture.supplyAsync(() -> RequestExecutionTestSupport.capture(runtime))
                 .get(2, TimeUnit.SECONDS);
         assertNull(runtime.stopAndAwait());
-        assertTrue(PrefillQueueRunnerTestSupport.capture(runtime).items().isEmpty());
+        assertTrue(RequestExecutionTestSupport.capture(runtime).items().isEmpty());
     }
 
     @Test
@@ -385,7 +429,7 @@ class PrefillQueueRunnerSchedulingTest {
         FlexlbConfig config = singleConfig();
         PrefillEndpoint endpoint = stableEndpoint(stableStatus());
         EventDrivenBlock delivery = new EventDrivenBlock();
-        PrefillQueueRunner runtime =
+        RequestExecution runtime =
                 boundaryRuntime(
                         "stop-failure", endpoint, config, delivery, mock(RequestLifecycle.class));
         runtime.start();
@@ -400,13 +444,13 @@ class PrefillQueueRunnerSchedulingTest {
             assertTrue(delivery.firstCapacity.listeners.isEmpty());
             assertTrue(
                     CompletableFuture.supplyAsync(
-                                    () -> PrefillQueueRunnerTestSupport.capture(runtime))
+                                    () -> RequestExecutionTestSupport.capture(runtime))
                             .get(2, TimeUnit.SECONDS)
                             .items()
                             .isEmpty(),
                     "stop must drain and release the queue lock");
             assertTrue(
-                    PrefillQueueRunnerTestSupport.state(runtime)
+                    RequestExecutionTestSupport.state(runtime)
                             .retireGenerationOwnership()
                             .ownedItems()
                             .isEmpty(),
@@ -425,7 +469,7 @@ class PrefillQueueRunnerSchedulingTest {
         FlexlbConfig config = singleConfig();
         PrefillEndpoint endpoint = stableEndpoint(stableStatus());
         RequestLifecycle events = mock(RequestLifecycle.class);
-        PrefillQueueRunner runtime =
+        RequestExecution runtime =
                 boundaryRuntime(
                         "stop-notification-failure",
                         endpoint,
@@ -434,7 +478,7 @@ class PrefillQueueRunnerSchedulingTest {
                         events);
         RequestRoute request = item(config, endpoint, 915L, 50, System.currentTimeMillis());
         SchedulerTestSupport.bindOwner(request.ctx(), events);
-        var state = PrefillQueueRunnerTestSupport.state(runtime);
+        var state = RequestExecutionTestSupport.state(runtime);
         state.queueGuard().lock();
         try {
             assertSame(
@@ -462,12 +506,12 @@ class PrefillQueueRunnerSchedulingTest {
         SchedulingTestConfig.useBatchDispatcher(config);
         PrefillEndpoint endpoint = stableEndpoint(stableStatus());
         RequestLifecycle events = mock(RequestLifecycle.class);
-        PrefillQueueRunner runtime =
+        RequestExecution runtime =
                 boundaryRuntime(
                         "removal-failure", endpoint, config, new EventDrivenBlock(), events);
         RequestRoute request = item(config, endpoint, 914L, 50, System.currentTimeMillis());
         SchedulerTestSupport.bindOwner(request.ctx(), events);
-        var state = PrefillQueueRunnerTestSupport.state(runtime);
+        var state = RequestExecutionTestSupport.state(runtime);
         state.queueGuard().lock();
         try {
             assertSame(
@@ -528,11 +572,11 @@ class PrefillQueueRunnerSchedulingTest {
                         return CapacityBoundary.failed(failure);
                     }
                 };
-        PrefillQueueRunner runtime =
+        RequestExecution runtime =
                 boundaryRuntime("removal-notification", endpoint, config, delivery, events);
         RequestRoute request = item(config, endpoint, 916L, 50, System.currentTimeMillis());
         SchedulerTestSupport.bindOwner(request.ctx(), events);
-        var state = PrefillQueueRunnerTestSupport.state(runtime);
+        var state = RequestExecutionTestSupport.state(runtime);
         state.queueGuard().lock();
         try {
             assertSame(
@@ -543,7 +587,7 @@ class PrefillQueueRunnerSchedulingTest {
             state.queueGuard().unlock();
         }
         try {
-            org.springframework.test.util.ReflectionTestUtils.invokeMethod(runtime, "processQueue");
+            QueuedRequestScheduler.schedulePrefill(runtime);
             verify(events)
                     .onDeliveryFact(
                             org.mockito.ArgumentMatchers.any(ContextResult.DeliveryFact.class));
@@ -569,8 +613,8 @@ class PrefillQueueRunnerSchedulingTest {
                                 RoleType.PREFILL, "test", "127.0.0.1", 8080, 9090, null),
                         SchedulerTestSupport.dispatcher(),
                         mock(RequestLifecycle.class));
-        PrefillQueueRunner runtime =
-                org.flexlb.balance.endpoint.EndpointTestSupport.queueRunner(endpoint);
+        RequestExecution runtime =
+                org.flexlb.balance.endpoint.EndpointTestSupport.requestExecution(endpoint);
         delivery.install(runtime);
         runtimes.add(runtime);
         runtime.start();
@@ -613,8 +657,8 @@ class PrefillQueueRunnerSchedulingTest {
                                 RoleType.PREFILL, null, "127.0.0.1", 8080, 9090, null),
                         SchedulerTestSupport.dispatcher(),
                         mock(RequestLifecycle.class));
-        PrefillQueueRunner worker =
-                org.flexlb.balance.endpoint.EndpointTestSupport.queueRunner(endpoint);
+        RequestExecution worker =
+                org.flexlb.balance.endpoint.EndpointTestSupport.requestExecution(endpoint);
         runtimes.add(worker);
         var occupied = item(config, endpoint, 31L, 50, System.currentTimeMillis());
         var reservation = endpoint.ownership.reserveUnqueuedRoute(occupied, 1L, 1L).reservation();
@@ -657,8 +701,8 @@ class PrefillQueueRunnerSchedulingTest {
                                 RoleType.PREFILL, "test", "127.0.0.1", 8080, 9090, null),
                         SchedulerTestSupport.dispatcher(),
                         mock(RequestLifecycle.class));
-        PrefillQueueRunner runtime =
-                org.flexlb.balance.endpoint.EndpointTestSupport.queueRunner(endpoint);
+        RequestExecution runtime =
+                org.flexlb.balance.endpoint.EndpointTestSupport.requestExecution(endpoint);
         delivery.install(runtime);
         runtimes.add(runtime);
         runtime.start();
@@ -687,8 +731,7 @@ class PrefillQueueRunnerSchedulingTest {
                 1,
                 delivery.attempts.get(),
                 "publishing backlog must not retry the capacity-blocked head");
-        assertEquals(
-                List.of(head, backlog), PrefillQueueRunnerTestSupport.capture(runtime).items());
+        assertEquals(List.of(head, backlog), RequestExecutionTestSupport.capture(runtime).items());
     }
 
     @Test
@@ -703,8 +746,8 @@ class PrefillQueueRunnerSchedulingTest {
                                 RoleType.PREFILL, "test", "127.0.0.1", 8080, 9090, null),
                         SchedulerTestSupport.dispatcher(),
                         mock(RequestLifecycle.class));
-        PrefillQueueRunner runtime =
-                org.flexlb.balance.endpoint.EndpointTestSupport.queueRunner(endpoint);
+        RequestExecution runtime =
+                org.flexlb.balance.endpoint.EndpointTestSupport.requestExecution(endpoint);
         delivery.install(runtime);
         runtimes.add(runtime);
         runtime.start();
@@ -742,7 +785,7 @@ class PrefillQueueRunnerSchedulingTest {
             }
             await(started);
             // A normal queue reader must progress while materialization is blocked.
-            CompletableFuture.supplyAsync(() -> PrefillQueueRunnerTestSupport.capture(runtime))
+            CompletableFuture.supplyAsync(() -> RequestExecutionTestSupport.capture(runtime))
                     .get(2, TimeUnit.SECONDS);
             finish.countDown();
             var shared = first.get(2, TimeUnit.SECONDS);
@@ -769,8 +812,8 @@ class PrefillQueueRunnerSchedulingTest {
                                 RoleType.PREFILL, "test", "127.0.0.1", 8080, 9090, null),
                         SchedulerTestSupport.dispatcher(),
                         mock(RequestLifecycle.class));
-        PrefillQueueRunner runtime =
-                org.flexlb.balance.endpoint.EndpointTestSupport.queueRunner(endpoint);
+        RequestExecution runtime =
+                org.flexlb.balance.endpoint.EndpointTestSupport.requestExecution(endpoint);
         delivery.install(runtime);
         runtimes.add(runtime);
         runtime.start();
@@ -847,15 +890,15 @@ class PrefillQueueRunnerSchedulingTest {
                         })
                 .when(execution)
                 .tryReserveDelivery();
-        PrefillQueueRunner runtime =
-                PrefillQueueRunnerTestSupport.create(
+        RequestExecution runtime =
+                RequestExecutionTestSupport.create(
                         "revoked-selection",
                         endpoint,
                         config,
                         SchedulerTestSupport.dispatcher(),
                         scheduler);
         runtimes.add(runtime);
-        var ownership = PrefillQueueRunnerTestSupport.state(runtime);
+        var ownership = RequestExecutionTestSupport.state(runtime);
         doAnswer(
                         call -> {
                             runtime.signal(false);
@@ -912,7 +955,7 @@ class PrefillQueueRunnerSchedulingTest {
                     0,
                     delivery.prepareCalls.get(),
                     "a selection containing a revoked identity cannot prepare");
-            List<RequestRoute> remaining = PrefillQueueRunnerTestSupport.capture(runtime).items();
+            List<RequestRoute> remaining = RequestExecutionTestSupport.capture(runtime).items();
             assertEquals(1, remaining.size());
             assertSame(first, remaining.getFirst());
         } finally {
@@ -924,9 +967,9 @@ class PrefillQueueRunnerSchedulingTest {
         }
     }
 
-    private PrefillQueueRunner runningRuntime(
+    private RequestExecution runningRuntime(
             FlexlbConfig config, PrefillEndpoint endpoint, BoundaryDelivery boundary) {
-        PrefillQueueRunner worker =
+        RequestExecution worker =
                 boundaryRuntime(
                         "scheduling-test",
                         endpoint,
@@ -938,23 +981,23 @@ class PrefillQueueRunnerSchedulingTest {
         return worker;
     }
 
-    private static PrefillQueueRunner boundaryRuntime(
+    private static RequestExecution boundaryRuntime(
             String key,
             PrefillEndpoint endpoint,
             FlexlbConfig config,
             BoundaryDelivery boundary,
             RequestLifecycle scheduler) {
-        PrefillQueueRunner worker =
-                PrefillQueueRunnerTestSupport.create(
+        RequestExecution worker =
+                RequestExecutionTestSupport.create(
                         key, endpoint, config, SchedulerTestSupport.dispatcher(), scheduler);
         boundary.install(worker);
         return worker;
     }
 
-    private PrefillQueueRunner runningRuntime(
+    private RequestExecution runningRuntime(
             FlexlbConfig config, PrefillEndpoint endpoint, DeliveryDispatcher delivery) {
-        PrefillQueueRunner runtime =
-                PrefillQueueRunnerTestSupport.create(
+        RequestExecution runtime =
+                RequestExecutionTestSupport.create(
                         "scheduling-test",
                         endpoint,
                         config,
@@ -1071,7 +1114,7 @@ class PrefillQueueRunnerSchedulingTest {
                 PrefillTimePredictor.Evaluator evaluator,
                 OptionalLong plannedPrediction);
 
-        void install(PrefillQueueRunner worker) {
+        void install(RequestExecution worker) {
             doAnswer(
                             call ->
                                     selectBoundary(

@@ -24,8 +24,17 @@ import static com.google.common.base.Preconditions.checkState;
 public final class PlacementAvailability {
 
     @FunctionalInterface
-    interface Listener {
+    public interface Listener {
         void onAvailabilityChanged(PlacementKey key);
+
+        default void onEndpointChanged(org.flexlb.balance.endpoint.WorkerEndpoint endpoint) {
+            var status = endpoint.getStatus();
+            onAvailabilityChanged(
+                    PlacementKey.exact(
+                            status.getRole(),
+                            status.topologySnapshot().group(),
+                            endpoint.ipPort()));
+        }
     }
 
     private final AtomicLong sequence = new AtomicLong();
@@ -33,12 +42,12 @@ public final class PlacementAvailability {
     private final ConcurrentMap<PlacementKey, Long> lastChanged = new ConcurrentHashMap<>();
     private final Set<Listener> listeners = ConcurrentHashMap.newKeySet();
 
-    void addListener(Listener candidate) {
+    public void addListener(Listener candidate) {
         Objects.requireNonNull(candidate, "listener");
         listeners.add(candidate);
     }
 
-    void removeListener(Listener candidate) {
+    public void removeListener(Listener candidate) {
         if (candidate != null) {
             listeners.remove(candidate);
         }
@@ -49,6 +58,15 @@ public final class PlacementAvailability {
         changed(
                 PlacementKey.exact(worker.getRole(), worker.topologySnapshot().group(), address),
                 worker);
+    }
+
+    public void changed(org.flexlb.balance.endpoint.WorkerEndpoint endpoint) {
+        var status = Objects.requireNonNull(endpoint, "endpoint").getStatus();
+        changed(
+                PlacementKey.exact(
+                        status.getRole(), status.topologySnapshot().group(), endpoint.ipPort()),
+                status,
+                endpoint);
     }
 
     /**
@@ -64,6 +82,13 @@ public final class PlacementAvailability {
     }
 
     private void changed(PlacementKey key, WorkerStatus worker) {
+        changed(key, worker, null);
+    }
+
+    private void changed(
+            PlacementKey key,
+            WorkerStatus worker,
+            org.flexlb.balance.endpoint.WorkerEndpoint endpoint) {
         Objects.requireNonNull(key, "key");
         long next = sequence.incrementAndGet();
         if (worker != null && !worker.isActiveGeneration()) {
@@ -86,7 +111,8 @@ public final class PlacementAvailability {
         // avoids three global-lock acquisitions for every endpoint release.
         for (Listener listener : listeners) {
             try {
-                listener.onAvailabilityChanged(key);
+                if (endpoint == null) listener.onAvailabilityChanged(key);
+                else listener.onEndpointChanged(endpoint);
             } catch (Throwable failure) {
                 Logger.warn("Placement availability listener failed", failure);
             }

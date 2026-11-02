@@ -119,6 +119,29 @@ public final class RequestRepository {
         }
     }
 
+    /** Wait only for accepted response futures; resource settlement follows separately. */
+    public boolean awaitResponses(long deadlineNanos) {
+        if (!stopping) throw new IllegalStateException("stop accepting requests before draining");
+        for (var context : snapshotActive()) {
+            var response = context.data().getFuture();
+            if (response.isDone()) continue;
+            long remaining = deadlineNanos == Long.MAX_VALUE
+                    ? Long.MAX_VALUE : deadlineNanos - System.nanoTime();
+            if (remaining <= 0L) return false;
+            try {
+                response.get(remaining, java.util.concurrent.TimeUnit.NANOSECONDS);
+            } catch (java.util.concurrent.ExecutionException | java.util.concurrent.CancellationException completed) {
+                // A failed or cancelled response is finished; lifecycle still owns settlement.
+            } catch (java.util.concurrent.TimeoutException timeout) {
+                return false;
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+                return false;
+            }
+        }
+        return true;
+    }
+
     public boolean isStopping() {
         return stopping;
     }

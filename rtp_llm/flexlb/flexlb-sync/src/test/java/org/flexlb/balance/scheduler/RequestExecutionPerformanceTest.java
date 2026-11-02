@@ -28,7 +28,7 @@ import static org.mockito.Mockito.mock;
 
 /** Route-time queue capture regression on the final Prefill runtime boundary. */
 @Tag("performance-regression")
-class PrefillQueueRunnerPerformanceTest {
+class RequestExecutionPerformanceTest {
 
     private static final int[] QUEUE_DEPTHS = {0, 1, 32, 128, 512};
     private static final int MEASUREMENT_ROUNDS = 5;
@@ -37,9 +37,9 @@ class PrefillQueueRunnerPerformanceTest {
     @Timeout(value = 30, unit = TimeUnit.SECONDS)
     void queueWaitSnapshotCaptureDoesNotScaleWithRequestCount() throws Throwable {
         var capture =
-                MethodHandles.privateLookupIn(PrefillQueueRunner.class, MethodHandles.lookup())
+                MethodHandles.privateLookupIn(RequestExecution.class, MethodHandles.lookup())
                         .findVirtual(
-                                PrefillQueueRunner.class,
+                                RequestExecution.class,
                                 "recordQueueWait",
                                 MethodType.methodType(
                                         void.class, RequestRoute.class, String.class));
@@ -57,10 +57,9 @@ class PrefillQueueRunnerPerformanceTest {
         // Both depths populate every priority bucket. Additional requests must not add capture
         // work.
         for (int depth : new int[] {128, 512, 4096}) {
-            PrefillQueueRunner runtime = runtimeWithDepth(depth);
+            RequestExecution runtime = runtimeWithDepth(depth);
             try {
-                RequestRoute head =
-                        PrefillQueueRunnerTestSupport.capture(runtime).items().getFirst();
+                RequestRoute head = RequestExecutionTestSupport.capture(runtime).items().getFirst();
                 for (int i = 0; i < operations; i++) {
                     capture.invokeExact(runtime, head, "Prefill capacity exhausted");
                 }
@@ -113,19 +112,19 @@ class PrefillQueueRunnerPerformanceTest {
         long threadId = Thread.currentThread().threadId();
         int operations = 100_000;
         for (int depth : QUEUE_DEPTHS) {
-            PrefillQueueRunner runtime = runtimeWithDepth(depth);
+            RequestExecution runtime = runtimeWithDepth(depth);
             try {
                 if (depth > 0) {
                     var capture =
                             MethodHandles.privateLookupIn(
-                                            PrefillQueueRunner.class, MethodHandles.lookup())
+                                            RequestExecution.class, MethodHandles.lookup())
                                     .findVirtual(
-                                            PrefillQueueRunner.class,
+                                            RequestExecution.class,
                                             "recordQueueWait",
                                             MethodType.methodType(
                                                     void.class, RequestRoute.class, String.class));
                     RequestRoute head =
-                            PrefillQueueRunnerTestSupport.capture(runtime).items().getFirst();
+                            RequestExecutionTestSupport.capture(runtime).items().getFirst();
                     capture.invokeExact(runtime, head, "Prefill capacity exhausted");
                     assertEquals(depth, runtime.getLatestQueueWaitSnapshot().get("queueDepth"));
                 }
@@ -189,7 +188,7 @@ class PrefillQueueRunnerPerformanceTest {
         long threadId = Thread.currentThread().threadId();
 
         for (int depth : QUEUE_DEPTHS) {
-            PrefillQueueRunner runtime = runtimeWithDepth(depth);
+            RequestExecution runtime = runtimeWithDepth(depth);
             PrefillEndpoint endpoint =
                     (PrefillEndpoint)
                             org.springframework.test.util.ReflectionTestUtils.getField(
@@ -260,7 +259,7 @@ class PrefillQueueRunnerPerformanceTest {
         }
     }
 
-    private static PrefillQueueRunner runtimeWithDepth(int depth) throws InterruptedException {
+    private static RequestExecution runtimeWithDepth(int depth) throws InterruptedException {
         FlexlbConfig config = SchedulingTestConfig.newConfig();
         SchedulingTestConfig.usePriorityQueue(config);
         SchedulingTestConfig.useSingleDecision(config);
@@ -298,8 +297,8 @@ class PrefillQueueRunnerPerformanceTest {
                 QueueExecutionSettings.capture(
                         config, org.flexlb.balance.planner.BuiltinGroupPlanner.from(config)),
                 SchedulerTestSupport.queueDependencies(scheduler, config));
-        PrefillQueueRunner runtime =
-                org.flexlb.balance.endpoint.EndpointTestSupport.queueRunner(endpoint);
+        RequestExecution runtime =
+                org.flexlb.balance.endpoint.EndpointTestSupport.requestExecution(endpoint);
         assertTrue(
                 !org.mockito.Mockito.mockingDetails(runtime).isMock(),
                 "allocation benchmark must measure the real queue runner");
@@ -328,11 +327,11 @@ class PrefillQueueRunnerPerformanceTest {
             assertTrue(runtime.offer(item));
         }
         long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
-        while (PrefillQueueRunnerTestSupport.state(runtime).progress().queueDepth() != depth
+        while (RequestExecutionTestSupport.state(runtime).progress().queueDepth() != depth
                 && System.nanoTime() < deadline) {
             TimeUnit.MILLISECONDS.sleep(1L);
         }
-        assertEquals(depth, PrefillQueueRunnerTestSupport.state(runtime).progress().queueDepth());
+        assertEquals(depth, RequestExecutionTestSupport.state(runtime).progress().queueDepth());
         return runtime;
     }
 

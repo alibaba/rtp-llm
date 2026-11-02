@@ -52,7 +52,7 @@ import static org.mockito.Mockito.when;
 
 /**
  * Real endpoint ledgers, status reducers, request ownership and capacity gates.
- * Transport replies are injected; this does not run an Engine or a PrefillQueueRunner thread.
+ * Transport replies are injected; this does not run an Engine or a RequestExecution thread.
  *
  * A rejected reply plus NOT_FOUND is deliberately insufficient to release Decode.
  * The red cases supply exact terminal evidence from BOTH endpoints before requiring settlement.
@@ -268,7 +268,7 @@ class RequestInflightRecoveryTest {
                         "decodeDeliveryCapacity",
                         f.capacity);
                 var worker =
-                        new PrefillQueueRunner(
+                        new RequestExecution(
                                 "ordered-prefix",
                                 f.prefill,
                                 QueueExecutionSettings.capture(

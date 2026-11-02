@@ -53,8 +53,7 @@ class RoutePublicationTest {
                         })) {
             var first = f.item(1L, 10L);
             var second = f.item(2L, 20L);
-            org.springframework.test.util.ReflectionTestUtils.invokeMethod(
-                    f.worker, "processQueue");
+            QueuedRequestScheduler.schedulePrefill(f.worker);
             assertEquals(List.of(first), f.committedItems);
             assertEquals(List.of(1L), f.claimIds());
             assertArrayEquals(new long[] {10L}, f.committedRoutePredictions);
@@ -80,12 +79,10 @@ class RoutePublicationTest {
             var second = f.item(2L, 20L);
             org.mockito.Mockito.doReturn(-1L).when(f.evaluator).estimateMs(20L, 0L);
             when(f.handoff.removedFailedMember()).thenReturn(budget == 0L);
-            org.springframework.test.util.ReflectionTestUtils.invokeMethod(
-                    f.worker, "processQueue");
+            QueuedRequestScheduler.schedulePrefill(f.worker);
             if (budget > 0L) {
                 assertEquals(List.of(first), f.queueOwnership.captureQueue(10).items());
-                org.springframework.test.util.ReflectionTestUtils.invokeMethod(
-                        f.worker, "processQueue");
+                QueuedRequestScheduler.schedulePrefill(f.worker);
             }
             assertEquals(List.of(1L), f.claimIds());
             assertEquals(java.util.Set.of(2L), f.preparationFailures.keySet());
@@ -106,12 +103,10 @@ class RoutePublicationTest {
                             config.decisionPolicy().setMaxPredictedExecutionMs(1_000L);
                         })) {
             var first = f.item(1L, 10L);
-            org.springframework.test.util.ReflectionTestUtils.invokeMethod(
-                    f.worker, "processQueue");
+            QueuedRequestScheduler.schedulePrefill(f.worker);
             assertTrue(f.claims.isEmpty(), "NON_BATCH must still honor its decision window");
             var second = f.item(2L, 20L);
-            org.springframework.test.util.ReflectionTestUtils.invokeMethod(
-                    f.worker, "processQueue");
+            QueuedRequestScheduler.schedulePrefill(f.worker);
             assertEquals(List.of(first, second), f.committedItems);
             assertEquals(List.of(1L, 2L), f.claimIds());
             assertArrayEquals(new long[] {10L, 20L}, f.committedRoutePredictions);

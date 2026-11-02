@@ -46,13 +46,12 @@ class RequestNotificationOwnershipRaceTest {
         when(service.loadBalanceConfig()).thenReturn(config);
         var owner =
                 (QueuedRequestScheduler)
-                        SchedulerTestSupport.create(
+                        SchedulerTestServices.scheduler(SchedulerTestSupport.create(
                                         service,
                                         mock(DeliveryMetricsReporter.class),
                                         mock(RequestSchedulerReporter.class),
-                                        mock(RecentCacheKeyTraceReporter.class))
-                                .scheduler();
-        var runtime = org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(owner.lifecycle());
+                                        mock(RecentCacheKeyTraceReporter.class)));
+        var runtime = org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(SchedulerTestServices.lifecycle(owner));
         var context = RequestProtocolTestSupport.context(config, 9401L);
         var future = RequestProtocolTestSupport.register(owner, context);
         var originalTimer = runtime.deadlines();

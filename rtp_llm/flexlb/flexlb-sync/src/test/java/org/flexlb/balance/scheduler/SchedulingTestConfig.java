@@ -71,7 +71,8 @@ public final class SchedulingTestConfig {
         org.springframework.test.util.ReflectionTestUtils.setField(
                 selected, "decodeIndex", (byte) (decodeEndpoint == null ? -1 : 1));
         RequestRoute route = RequestRoute.create(context, selected, reservation);
-        context.data().initializeWorkerQueue(enqueuedAtMs, fixtureQueueSequence.incrementAndGet());
+        context.data()
+                .initializeExecutionOrder(enqueuedAtMs, fixtureQueueSequence.incrementAndGet());
         return route;
     }
 

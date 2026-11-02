@@ -8,7 +8,7 @@ import io.opentelemetry.api.trace.Span;
 import org.flexlb.balance.scheduler.CancelReason;
 import org.flexlb.balance.scheduler.RequestContext;
 import org.flexlb.balance.scheduler.RequestRepository;
-import org.flexlb.balance.scheduler.RequestScheduler;
+import org.flexlb.balance.scheduler.RequestSchedulerEntry;
 import org.flexlb.balance.scheduler.RequestState;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
@@ -53,7 +53,7 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
 
     private static final org.slf4j.Logger pvLogger = LoggerFactory.getLogger("pvLogger");
 
-    private final RequestScheduler scheduler;
+    private final RequestSchedulerEntry requestEntry;
     private final FlexlbConfig config;
     private final RequestRepository requestState;
     private final MasterStatusView masterStatusView;
@@ -65,7 +65,7 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
 
     @Autowired
     public FlexlbServiceImpl(
-            @Lazy RequestScheduler scheduler,
+            @Lazy RequestSchedulerEntry requestEntry,
             ConfigService configService,
             RequestRepository requestState,
             MasterStatusService masterStatusService,
@@ -75,7 +75,7 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
             ServerScheduleLatencyRecorder serverLatencyRecorder,
             RequestSchedulerReporter requestSchedulerReporter) {
         this(
-                scheduler,
+                requestEntry,
                 configService.loadBalanceConfig(),
                 requestState,
                 (MasterStatusView) masterStatusService,
@@ -87,7 +87,7 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
     }
 
     FlexlbServiceImpl(
-            RequestScheduler scheduler,
+            RequestSchedulerEntry requestEntry,
             FlexlbConfig config,
             RequestRepository requestState,
             MasterStatusView masterStatusView,
@@ -96,7 +96,7 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
             DeliveryMetricsReporter deliveryMetricsReporter,
             ServerScheduleLatencyRecorder serverLatencyRecorder,
             RequestSchedulerReporter requestSchedulerReporter) {
-        this.scheduler = scheduler;
+        this.requestEntry = requestEntry;
         this.config = config;
         this.requestState = requestState;
         this.masterStatusView = masterStatusView;
@@ -670,7 +670,7 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
     private FlexlbScheduleProtocol.FlexlbCancelResponsePB cancelLocally(
             FlexlbScheduleProtocol.FlexlbCancelRequestPB request) {
         RequestState snapshot =
-                scheduler.cancel(
+                requestEntry.cancel(
                         request.getRequestId(),
                         request.getBatchId(),
                         toCancelReason(request.getReason()));
@@ -756,7 +756,7 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
 
     private CompletableFuture<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> routeLocally(
             RequestContext ctx, Runnable onRegistered) {
-        return scheduler
+        return requestEntry
                 .submit(ctx, onRegistered)
                 .thenApply(
                         response -> {

@@ -89,10 +89,10 @@ class SubmissionShutdownDeadlockTest {
                                         try {
                                             activeResult.complete(
                                                     queued
-                                                            ? f.scheduler.submit(
+                                                            ? SchedulerTestServices.entry(f.scheduler).submit(
                                                                     activeContext,
                                                                     waitForExternalLock)
-                                                            : f.scheduler.submit(activeContext));
+                                                            : SchedulerTestServices.entry(f.scheduler).submit(activeContext));
                                         } catch (Throwable failure) {
                                             activeResult.completeExceptionally(failure);
                                         }
@@ -105,7 +105,7 @@ class SubmissionShutdownDeadlockTest {
                                     () -> {
                                         externalLock.lock();
                                         try {
-                                            lateResult.complete(f.scheduler.submit(lateContext));
+                                            lateResult.complete(SchedulerTestServices.entry(f.scheduler).submit(lateContext));
                                         } catch (Throwable failure) {
                                             lateResult.completeExceptionally(failure);
                                         } finally {
@@ -194,7 +194,7 @@ class SubmissionShutdownDeadlockTest {
         final FlexlbConfig config = SchedulingTestConfig.newConfig();
         final RequestWorkerSelector router = mock(RequestWorkerSelector.class);
         final SchedulerTestServices runtime;
-        final RequestScheduler scheduler;
+        final AbstractRequestScheduler scheduler;
 
         Fixture(boolean queued) {
             if (queued) {

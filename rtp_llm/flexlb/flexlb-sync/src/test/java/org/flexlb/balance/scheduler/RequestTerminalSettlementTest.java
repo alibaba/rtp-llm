@@ -59,7 +59,7 @@ class RequestTerminalSettlementTest {
                         context,
                         mock(ExpirationTimer.class));
         org.springframework.test.util.ReflectionTestUtils.setField(
-                requestOwner.scheduler(), "latestQueueWaitSnapshot", timeoutEvidence);
+                org.flexlb.balance.scheduler.SchedulerTestServices.scheduler(requestOwner), "latestQueueWaitSnapshot", timeoutEvidence);
         var admission = RequestProtocolTestSupport.beginAdmission(requestOwner, context);
         assertNotNull(admission);
         admission.recordDiagnostics(java.util.Map.of("cause", "earlier placement"));

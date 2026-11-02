@@ -208,7 +208,7 @@ class RequestTimeEstimationTest {
     }
 
     @Test
-    void emptyQueueCannotProjectDeliveryBeyondAvailableKv() {
+    void rankingDoesNotTreatTransientKvCapacityAsExecutionAdmission() {
         var limits = new GroupPlanner.Constraints(4, Long.MAX_VALUE, 19L, 0L, 30L);
         for (org.flexlb.config.DispatcherConfig.Type delivery : List.of(BATCH, ROUTE)) {
             var result =
@@ -218,8 +218,8 @@ class RequestTimeEstimationTest {
                             TOKEN_EVALUATOR,
                             probe(99L, 50, 20L, 0L),
                             delivery);
-            assertEquals(Candidate.State.BLOCKED, result.state());
-            assertEquals("PREFILL_KV_CAPACITY", result.detail());
+            assertEquals(Candidate.State.MODELED, result.state());
+            assertEquals(20L, result.projectedTtftMsValue());
             assertEquals(Candidate.InitialHeadDisposition.NONE, result.initialHeadDisposition());
         }
     }
@@ -478,7 +478,7 @@ class RequestTimeEstimationTest {
     }
 
     @Test
-    void unknownRequestWorkIsExplicitlyUnmodeled() {
+    void unknownRequestWorkDoesNotInventExecutionCost() {
         Candidate candidate =
                 project(
                         queue(true, constraints(1, 0L), List.of()),
@@ -487,15 +487,14 @@ class RequestTimeEstimationTest {
                         probe(99L, 50, 20L, 0L),
                         ROUTE);
 
-        assertEquals(Candidate.State.UNMODELED_ENGINE_WORK, candidate.state());
-        assertEquals("ENGINE_WORK_UNOBSERVABLE", candidate.detail());
-        assertFalse(candidate.selectable());
-        assertTrue(candidate.engineWorkUnmodeled());
+        assertEquals(Candidate.State.MODELED, candidate.state());
+        assertTrue(candidate.selectable());
+        assertEquals(20L, candidate.projectedTtftMsValue());
         assertEquals(20L, candidate.incomingPrefillMs());
     }
 
     @Test
-    void unknownRepackedBatchWorkIsExplicitlyUnmodeled() {
+    void unknownRepackedBatchWorkDoesNotInventExecutionCost() {
         WorkSnapshot unknown =
                 work(
                         List.of(),
@@ -514,9 +513,9 @@ class RequestTimeEstimationTest {
                         probe(99L, 50, 20L, 0L),
                         ROUTE);
 
-        assertEquals(Candidate.State.UNMODELED_ENGINE_WORK, result.state());
-        assertEquals("ENGINE_WORK_UNOBSERVABLE", result.detail());
-        assertFalse(result.selectable());
+        assertEquals(Candidate.State.MODELED, result.state());
+        assertTrue(result.selectable());
+        assertEquals(20L, result.projectedTtftMsValue());
     }
 
     @Test

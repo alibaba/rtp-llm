@@ -683,8 +683,8 @@ class PrefillStateSnapshotTest {
         assertSame(after.work(), added.work());
         assertEquals(
                 List.of(queued.requestId()),
-                before.active().projectedItems().stream()
-                        .map(org.flexlb.balance.planner.GroupPlanner.Item::requestId)
+                before.active().items().stream()
+                        .map(org.flexlb.balance.scheduler.RequestRoute::requestId)
                         .toList());
         EndpointTestSupport.rollback(reservation);
         assertSame(added.active(), capture().active());

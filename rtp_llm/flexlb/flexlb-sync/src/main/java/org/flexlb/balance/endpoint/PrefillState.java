@@ -377,7 +377,10 @@ public final class PrefillState {
 
     /** Queue and committed work captured at one ownership linearization point. */
     public record Snapshot(
-            Progress version, long capturedAtMs, WorkerQueue.Snapshot active, WorkCapture work) {
+            Progress version,
+            long capturedAtMs,
+            PrefillRequestQueue.Snapshot active,
+            WorkCapture work) {
         public Snapshot {
             Objects.requireNonNull(active, "missing active queue snapshot");
             Objects.requireNonNull(work, "missing committed work snapshot");
@@ -488,7 +491,7 @@ public final class PrefillState {
     }
 
     /** Non-owning index containing only ACTIVE RequestRoute identities. */
-    private WorkerQueue activeIndex;
+    private PrefillRequestQueue activeIndex;
 
     /** Canonical request ownership, changed only under the endpoint lock. */
     final Map<Long, RequestEntry> requests = new HashMap<>();
@@ -530,7 +533,7 @@ public final class PrefillState {
                         outstandingRequestCount);
     }
 
-    public PrefillState(ReentrantLock lock, WorkerQueue activeIndex, LongSupplier clock) {
+    public PrefillState(ReentrantLock lock, PrefillRequestQueue activeIndex, LongSupplier clock) {
         this.lock = Objects.requireNonNull(lock, "lock");
         this.queueGuard = new QueueGuard();
         this.activeIndex = Objects.requireNonNull(activeIndex, "activeIndex");
@@ -550,7 +553,7 @@ public final class PrefillState {
     }
 
     /** Enable waiting work without replacing the ledger of existing DIRECT reservations. */
-    void enableQueueLocked(WorkerQueue queue) {
+    void enableQueueLocked(PrefillRequestQueue queue) {
         queueGuard.requireHeld();
         if (!activeIndex.enabled()) {
             checkArgument(queue.enabled(), "worker queue must support admission");
@@ -732,7 +735,6 @@ public final class PrefillState {
                 && activeIndex.contains(candidate)
                 && !head.requestExpired(clock.getAsLong())
                 && !candidate.requestExpired(clock.getAsLong())
-                && activeIndex.mayBypass(head, candidate)
                 && head.decodeEp() != null
                 && candidate.decodeEp() != null
                 && head.decodeEp() != candidate.decodeEp();

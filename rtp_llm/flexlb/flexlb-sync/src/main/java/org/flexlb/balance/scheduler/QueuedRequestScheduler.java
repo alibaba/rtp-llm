@@ -1,12 +1,19 @@
 package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.PlacementResult;
+import org.flexlb.balance.delivery.CapacityBoundary;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.DecodeResources;
+import org.flexlb.balance.endpoint.PrefillState;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.eviction.DecodePreemption;
 import org.flexlb.balance.planner.GroupPlanner;
+import org.flexlb.balance.prediction.InvalidPrefillPredictionException;
+import org.flexlb.balance.prediction.PrefillPredictionBoundary;
+import org.flexlb.balance.prediction.PrefillTimePredictor;
+import org.flexlb.balance.projection.RequestTimeEstimation;
 import org.flexlb.balance.scheduler.RequestLifecycle.Publication;
+import org.flexlb.config.DispatcherConfig;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.loadbalance.AdmissionRejectReason;
 import org.flexlb.dao.loadbalance.Response;
@@ -23,13 +30,13 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.OptionalLong;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.ReentrantLock;
 
 import static com.google.common.base.Preconditions.checkState;
@@ -47,7 +54,7 @@ import static org.flexlb.dao.loadbalance.Response.buildErrorResponse;
  * selected from the complete live candidate fleet before the endpoint runtime
  * receives it. A bounded set of in-flight requests controls how many
  * independent routes can be prepared together; request collection and grouping
- * remain exclusively endpoint-runtime concerns. The queue lock protects only
+ * are decided by this scheduler for each endpoint. The queue lock protects only
  * index operations; route projection and RPCs are never performed while it is
  * held.</p>
  *
@@ -56,10 +63,189 @@ import static org.flexlb.dao.loadbalance.Response.buildErrorResponse;
  * later requests from trying the same worker with different resource demands.
  * Planning is bounded and parallel; completed plans are published without waiting
  * for earlier planners. Arrivals and wakeups do not invalidate in-flight work.
- * PrefillQueueRunner owns SINGLE/FIXED_WINDOW grouping.</p>
+ * This scheduler owns SINGLE/FIXED_WINDOW grouping.</p>
  */
-public final class QueuedRequestScheduler extends AbstractRequestScheduler
-        implements AutoCloseable {
+public final class QueuedRequestScheduler extends AbstractRequestScheduler {
+
+    public static void runPrefill(RequestExecution execution) {
+        runPrefill(execution, QueuedRequestScheduler::schedulePrefill);
+    }
+
+    public static void runPrefill(
+            RequestExecution execution,
+            java.util.function.Function<RequestExecution, RequestExecution.Decision> decisions) {
+        while (!execution.stopping() && !Thread.currentThread().isInterrupted()) {
+            try {
+                execution.awaitWork(null);
+                if (execution.stopping()) {
+                    return;
+                }
+                RequestExecution.Decision result = decisions.apply(execution);
+                if (result.waitReason() != null) {
+                    execution.recordQueueWait(result.request(), result.waitReason());
+                }
+                if (result.request() != null) {
+                    execution.awaitWork(result);
+                }
+            } catch (InterruptedException interruption) {
+                Thread.currentThread().interrupt();
+                return;
+            }
+        }
+    }
+
+    public static RequestExecution.Decision schedulePrefill(RequestExecution execution) {
+        int maxRequests = execution.settings().maxRequests();
+        PrefillState.QueueSnapshot snapshot = execution.captureQueue(maxRequests);
+        RequestRoute head = snapshot.head();
+        if (head == null) {
+            return RequestExecution.Decision.NO_ACTION;
+        }
+        long nowMs = System.currentTimeMillis();
+        var requestState = head.ctx().snapshot();
+        if (requestState.placement() != null && !requestState.placement().published()) {
+            return RequestExecution.Decision.awaitingSchedulingChange(
+                    head,
+                    snapshot.queueVersion(),
+                    snapshot.schedulingInputVersion(),
+                    Long.MAX_VALUE,
+                    "Route commit in progress");
+        }
+        if (head.requestExpired(nowMs)) {
+            execution.removeAndNotify(head, null, false);
+            return RequestExecution.Decision.NO_ACTION;
+        }
+        GroupPlanner.Constraints constraints = execution.schedulingConstraints();
+        if (Math.max(0L, head.seqLen()) > constraints.batchKvCapacity()) {
+            return RequestExecution.Decision.awaitingSchedulingChange(
+                    head,
+                    snapshot.queueVersion(),
+                    snapshot.schedulingInputVersion(),
+                    head.expiresAtMs(),
+                    "Prefill KV capacity exhausted");
+        }
+        for (int index = 1; index < Math.min(maxRequests, snapshot.items().size()); index++) {
+            RequestRoute member = snapshot.items().get(index);
+            if (member.requestExpired(nowMs)) {
+                execution.removeAndNotify(member, null, false);
+                return RequestExecution.Decision.NO_ACTION;
+            }
+        }
+        PrefillTimePredictor.Evaluator evaluator =
+                execution.prefillEndpoint().predictor.evaluator();
+        // First try dispatching from the queue head in normal queue order.
+        var result = decideGroup(execution, snapshot, null, evaluator, constraints);
+        if (execution.settings().priorityOrdering()
+                && result.unavailable() != null
+                && result.unavailable().resource() == CapacityBoundary.Resource.DECODE_ENGINE) {
+            // The head's Decode endpoint is full. Try one queue-permitted bypass batch on
+            // other Decode endpoints, using fresh queue/capacity snapshots after the first attempt.
+            // Dispatch happens inside decideGroup; keep the original result so the run loop
+            // continues waiting for the blocked head rather than a bypass candidate.
+            decideGroup(
+                    execution,
+                    execution.captureQueue(Math.max(2, maxRequests)),
+                    head,
+                    evaluator,
+                    execution.schedulingConstraints());
+        }
+        return result;
+    }
+
+    private static RequestExecution.Decision decideGroup(
+            RequestExecution execution,
+            PrefillState.QueueSnapshot snapshot,
+            RequestRoute bypassedHead,
+            PrefillTimePredictor.Evaluator evaluator,
+            GroupPlanner.Constraints constraints) {
+        var candidates =
+                bypassedHead == null
+                        ? snapshot.items()
+                        : bypassCandidates(execution, snapshot, bypassedHead);
+        if (candidates.isEmpty()) {
+            return RequestExecution.Decision.NO_ACTION;
+        }
+        RequestRoute first = candidates.getFirst();
+        try {
+            var predictor =
+                    execution.settings().executionBudgetMs() > 0L
+                            ? RequestTimeEstimation.newGroupPredictor(
+                                    execution.settings().dispatcherType(), evaluator)
+                            : null;
+            long planningAtMs = System.currentTimeMillis();
+            var selection = execution.grouping().select(candidates, constraints, predictor);
+            if (selection.items().isEmpty()) {
+                return RequestExecution.Decision.NO_ACTION;
+            }
+            String reason =
+                    bypassedHead == null
+                            ? execution
+                                    .grouping()
+                                    .dispatchReason(selection, constraints, planningAtMs)
+                            : "decode_head_bypass";
+            if (reason == null) {
+                return RequestExecution.Decision.awaitingSchedulingChange(
+                        first,
+                        snapshot.queueVersion(),
+                        snapshot.schedulingInputVersion(),
+                        Math.min(
+                                execution.grouping().nextCheckAtMs(selection, constraints),
+                                first.expiresAtMs()),
+                        "Prefill collection window");
+            }
+            // Recheck advisory capacity after prediction, before acquiring hard-capacity leases.
+            constraints = execution.schedulingConstraints();
+            if ((selection.items().size() > 1
+                            && !selection.fitsCompute(constraints.batchTokenCapacity()))
+                    || !selection.fitsKv(constraints.batchKvCapacity())) {
+                return RequestExecution.Decision.NO_ACTION;
+            }
+            OptionalLong prediction =
+                    execution.settings().dispatcherType() != DispatcherConfig.Type.BATCH
+                                    || selection.selectedPredictionMs().isEmpty()
+                            ? OptionalLong.empty()
+                            : OptionalLong.of(
+                                    PrefillPredictionBoundary.committedDecisionGroupMs(
+                                            selection.selectedPredictionMs().getAsDouble()));
+            var boundary =
+                    execution.processSelection(
+                            selection.items(), reason, evaluator, prediction, bypassedHead);
+            long retryOnQueueChange =
+                    execution.settings().priorityOrdering()
+                                    && boundary != null
+                                    && boundary.resource()
+                                            == CapacityBoundary.Resource.DECODE_ENGINE
+                            ? snapshot.queueVersion()
+                            : 0L;
+            return execution.commitBoundary(first, boundary, retryOnQueueChange);
+        } catch (InvalidPrefillPredictionException failure) {
+            return execution.commitBoundary(
+                    candidates.get(failure.memberIndex()),
+                    CapacityBoundary.failed(failure),
+                    snapshot.queueVersion());
+        }
+    }
+
+    public static boolean canBypass(RequestExecution execution,
+            RequestRoute head, RequestRoute candidate) {
+        return execution.settings().priorityOrdering()
+                && head.priority() == candidate.priority()
+                && execution.queueAllowsBypass(head, candidate);
+    }
+
+    /** Only the immediate blocked head may be skipped; a second blocked member stops this batch. */
+    private static List<RequestRoute> bypassCandidates(
+            RequestExecution execution, PrefillState.QueueSnapshot snapshot, RequestRoute head) {
+        if (snapshot.head() != head) {
+            return List.of();
+        }
+        int end = 1;
+        while (end < snapshot.items().size()
+                && canBypass(execution, head, snapshot.items().get(end))) {
+            end++;
+        }
+        return snapshot.items().subList(1, end);
+    }
 
     private static final int MIN_PLANNER_THREADS = 1;
 
@@ -68,12 +254,11 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler
     private final DecodePreemption decodePreemption;
     private final PlacementAvailability availability;
     private final QueueExecutionSettings queueSettings;
-    private final PrefillQueueRunner.Dependencies queueDependencies;
+    private final RequestExecution.Dependencies queueDependencies;
     private final int plannerCount;
     private final double scanBudgetMultiplier;
     private final ReentrantLock lock = new ReentrantLock();
     // Decision work and graceful drain wait for different predicates on this condition.
-    private final Condition changed = lock.newCondition();
     private final PlacementQueue orderedQueue;
     private final PlacementCapacityWaitQueue waitingRequests;
 
@@ -99,10 +284,21 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler
             Map.of("cause", "waiting for placement");
 
     private final ExecutorService planners;
-    private final Thread decisionThread;
+    private final SchedulerLoop schedulingLoop;
+    private boolean closeDrained;
     private final AtomicBoolean closed = new AtomicBoolean();
     private final PlacementAvailability.Listener availabilityListener =
-            key -> postEvent(new QueueEvent(EventKind.CAPACITY, null, null, key));
+            new PlacementAvailability.Listener() {
+                @Override
+                public void onAvailabilityChanged(PlacementKey key) {
+                    postEvent(new QueueEvent(EventKind.CAPACITY, null, null, key));
+                }
+
+                @Override
+                public void onEndpointChanged(WorkerEndpoint endpoint) {
+                    QueuedRequestScheduler.this.onEndpointChanged(endpoint);
+                }
+            };
 
     public QueuedRequestScheduler(
             FlexlbConfig config,
@@ -113,9 +309,15 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler
             PlacementAvailability availability,
             PlacementQueue queue,
             GroupPlanner grouping,
-            PrefillQueueRunner.Dependencies queueDependencies) {
+            RequestExecution.Dependencies queueDependencies) {
         super(lifecycle);
-        this.queueDependencies = Objects.requireNonNull(queueDependencies);
+        Objects.requireNonNull(queueDependencies);
+        this.queueDependencies =
+                new RequestExecution.Dependencies(
+                        queueDependencies.deliveries,
+                        queueDependencies.reporter,
+                        queueDependencies.failures,
+                        QueuedRequestScheduler::runPrefill);
         this.queueSettings = QueueExecutionSettings.capture(config, grouping);
         this.router = Objects.requireNonNull(router, "router");
         this.reporter = Objects.requireNonNull(reporter, "reporter");
@@ -131,23 +333,29 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler
                 Executors.newFixedThreadPool(
                         this.plannerCount,
                         Thread.ofPlatform().daemon().name("flexlb-global-planner-", 1).factory());
-        this.decisionThread = new Thread(this::runDecisionLoop, "flexlb-global-decision");
-        this.decisionThread.setDaemon(true);
-        this.decisionThread.setUncaughtExceptionHandler(
-                (thread, failure) -> {
-                    Logger.error("Global queue decision thread failed", failure);
-                    close();
+        this.schedulingLoop = new SchedulerLoop(
+                Thread.ofPlatform().daemon().name("flexlb-global-decision")
+                        .uncaughtExceptionHandler((thread, failure) -> {
+                            Logger.error("Global queue decision thread failed", failure);
+                            close();
+                        }),
+                this,
+                () -> {
+                    closed.set(true);
+                    availability.removeListener(availabilityListener);
+                    planners.shutdown();
+                    drainOnClose();
                 });
         availability.addListener(availabilityListener);
     }
 
     /** Start scheduler workers before accepting requests. */
     public void start() {
-        decisionThread.start();
+        schedulingLoop.start();
     }
 
     @Override
-    public void remove(RequestContext request) {
+    public void onRequestChanged(RequestContext request) {
         postEvent(new QueueEvent(EventKind.INVALIDATE, null, request, null));
     }
 
@@ -171,60 +379,10 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler
                 : latestQueueWaitSnapshot;
     }
 
-    /** Enqueue without selecting an endpoint on the ingress thread. */
     @Override
-    public CompletableFuture<Response> submit(RequestContext context) {
-        return submit(context, () -> {});
-    }
-
-    @Override
-    public CompletableFuture<Response> submit(RequestContext context, Runnable onRegistered) {
-        Objects.requireNonNull(onRegistered, "onRegistered");
-        CompletableFuture<Response> vitResult =
-                RequestSchedulerEntry.tryCompleteVitRequest(context, requests, router);
-        if (vitResult != null) {
-            return vitResult;
-        }
-        if (context != null && context.data().getConfig().isDirect()) {
-            return CompletableFuture.completedFuture(
-                    buildErrorResponse(
-                            StrategyErrorType.DISPATCH_FAILED,
-                            "request configuration does not match scheduler mode"));
-        }
-        if (closed.get()) {
-            return CompletableFuture.completedFuture(
-                    buildErrorResponse(
-                            StrategyErrorType.DISPATCH_FAILED,
-                            "request scheduler is not accepting new requests"));
-        }
-        try {
-            if (context != null
-                    && (context.data().getRequestExpiresAtMs() <= 0L
-                            || System.currentTimeMillis()
-                                    >= context.data().getRequestExpiresAtMs())) {
-                context.data().setSchedulingDiagnostics(latestQueueWaitSnapshot);
-            }
-            CompletableFuture<Response> future =
-                    lifecycle.register(context, onRegistered, StrategyErrorType.RESOURCE_EXHAUSTED);
-            var state = context == null ? null : context.snapshot();
-            if (!future.isDone() && state.phase() == Phase.OPEN && state.cancellation() == null) {
-                if (!trySubmitRegistered(context)) {
-                    shutdownRequest(context);
-                }
-            } else if (context != null
-                    && context.data().getScheduler() == lifecycle
-                    && context.data().getFuture() == future) {
-                lifecycle.closeRequest(context, null);
-            }
-            return future;
-        } catch (RuntimeException failure) {
-            Response response =
-                    buildErrorResponse(StrategyErrorType.DISPATCH_FAILED, failure.getMessage());
-            if (context != null && context.data().getScheduler() == lifecycle) {
-                lifecycle.publish(context, response, false);
-                return context.data().getFuture();
-            }
-            return CompletableFuture.completedFuture(response);
+    public void onRequest(RequestContext context) {
+        if (!trySubmitRegistered(context)) {
+            shutdownRequest(context);
         }
     }
 
@@ -275,7 +433,7 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler
                 return false;
             }
             events.addLast(event);
-            changed.signalAll();
+            schedulingLoop.wake();
             return true;
         } finally {
             lock.unlock();
@@ -320,78 +478,65 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler
                 }
             }
         }
-        if (placementDrainedLocked()) {
-            changed.signalAll();
+    }
+
+    @Override
+    public long schedule(long nowNanos) {
+        if (closed.get() && !closeDrained) {
+            drainOnClose();
+            closeDrained = true;
+        }
+        PlacementPlan completed;
+        List<GlobalQueueEntry> candidates;
+        lock.lock();
+        try {
+            consumeEventsLocked();
+            completed = completedPlans.pollFirst();
+        } finally {
+            lock.unlock();
+        }
+        if (completed != null) {
+            processCompletedPlan(completed);
+        }
+        lock.lock();
+        try {
+            // A completed route can publish capacity or invalidate queued work.
+            // Apply those index changes before selecting the next planning slots.
+            consumeEventsLocked();
+            int slots = plannerCount - inFlight.size();
+            candidates = closed.get() || slots == 0 ? List.of() : planningCandidates(slots);
+            inFlight.addAll(candidates);
+        } finally {
+            lock.unlock();
+        }
+        candidates.forEach(this::submitPlan);
+        lock.lock();
+        try {
+            if (closed.get() && inFlight.isEmpty() && pendingPreemptions.isEmpty()) {
+                schedulingLoop.stop();
+                return Long.MAX_VALUE;
+            }
+            boolean ready = !events.isEmpty() || !completedPlans.isEmpty()
+                    || (!closed.get() && inFlight.size() < plannerCount
+                            && (orderedQueue.hasUnscannedRequests() || waitingRequests.hasReadyRequests()));
+            return ready ? nowNanos : Long.MAX_VALUE;
+        } finally {
+            lock.unlock();
         }
     }
 
-    private void runDecisionLoop() {
-        boolean drained = false;
-        try {
-            while (true) {
-                if (closed.get() && !drained) {
-                    drainOnClose();
-                    drained = true;
-                }
-                PlacementPlan completed;
-                List<GlobalQueueEntry> candidates;
-                lock.lock();
-                try {
-                    if (closed.get() && inFlight.isEmpty() && pendingPreemptions.isEmpty()) {
-                        break;
-                    }
-                    consumeEventsLocked();
-                    completed = completedPlans.pollFirst();
-                } finally {
-                    lock.unlock();
-                }
-                if (completed != null) {
-                    processCompletedPlan(completed);
-                }
-                lock.lock();
-                try {
-                    // A completed route can publish capacity or invalidate queued work.
-                    // Apply those index changes before selecting the next planning slots.
-                    consumeEventsLocked();
-                    int slots = plannerCount - inFlight.size();
-                    candidates = closed.get() || slots == 0 ? List.of() : planningCandidates(slots);
-                    inFlight.addAll(candidates);
-                } finally {
-                    lock.unlock();
-                }
-                candidates.forEach(this::submitPlan);
-                lock.lock();
-                try {
-                    // Arrivals and plan publication use this same lock. Check work again
-                    // after effects; a signal while effects ran must never be lost.
-                    while (events.isEmpty()
-                            && completedPlans.isEmpty()
-                            && (!closed.get()
-                                    || drained
-                                            && (!inFlight.isEmpty()
-                                                    || !pendingPreemptions.isEmpty()))
-                            && (inFlight.size() == plannerCount
-                                    || closed.get()
-                                    || (!orderedQueue.hasUnscannedRequests()
-                                            && !waitingRequests.hasReadyRequests()))) {
-                        try {
-                            changed.await();
-                        } catch (InterruptedException interruption) {
-                            if (closed.get()) {
-                                Thread.currentThread().interrupt();
-                            }
-                        }
-                    }
-                } finally {
-                    lock.unlock();
-                }
-            }
-        } finally {
-            closed.set(true);
-            availability.removeListener(availabilityListener);
-            planners.shutdown();
-            drainOnClose();
-        }
+    @Override
+    public void onEndpointChanged(WorkerEndpoint endpoint) {
+        var status = Objects.requireNonNull(endpoint, "endpoint").getStatus();
+        postEvent(
+                new QueueEvent(
+                        EventKind.CAPACITY,
+                        null,
+                        null,
+                        PlacementKey.exact(
+                                status.getRole(),
+                                status.topologySnapshot().group(),
+                                endpoint.ipPort())));
     }
 
     private void submitPlan(GlobalQueueEntry entry) {
@@ -445,7 +590,7 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler
         lock.lock();
         try {
             completedPlans.addLast(plan);
-            changed.signalAll();
+            schedulingLoop.wake();
         } finally {
             lock.unlock();
         }
@@ -510,7 +655,7 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler
                                 && !plan.entry.context.data().getFuture().isDone())) {
                     orderedQueue.markRequestReadyForRetry(plan.entry);
                 }
-                changed.signalAll();
+                schedulingLoop.wake();
             } finally {
                 lock.unlock();
             }
@@ -781,7 +926,7 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler
             waitingRequests.remove(entry);
             preemptionQuotaWaiters.remove(entry);
             queuedEntries.remove(entry.context, entry);
-            changed.signalAll();
+            schedulingLoop.wake();
         } finally {
             if (acquire) {
                 lock.unlock();
@@ -818,7 +963,7 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler
             events.clear();
             queuedEntries.clear();
         } finally {
-            changed.signalAll();
+            schedulingLoop.wake();
             lock.unlock();
         }
         for (GlobalQueueEntry entry : abandoned) {
@@ -859,58 +1004,13 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler
     }
 
     @Override
-    public boolean awaitSchedulingCompletion(long deadlineNanos) {
-        if (Thread.currentThread() == decisionThread) {
-            return true;
-        }
-        boolean interrupted = false;
-        lock.lock();
-        try {
-            while (!placementDrainedLocked() && !closed.get()) {
-                long remaining =
-                        deadlineNanos == Long.MAX_VALUE
-                                ? Long.MAX_VALUE
-                                : deadlineNanos - System.nanoTime();
-                if (remaining <= 0L) {
-                    break;
-                }
-                try {
-                    changed.awaitNanos(remaining);
-                } catch (InterruptedException interruption) {
-                    interrupted = true;
-                    break;
-                }
-            }
-        } finally {
-            lock.unlock();
-        }
-        if (interrupted) {
-            Thread.currentThread().interrupt();
-        }
-        lock.lock();
-        try {
-            return placementDrainedLocked() || closed.get();
-        } finally {
-            lock.unlock();
-        }
-    }
-
-    private boolean placementDrainedLocked() {
-        return queuedEntries.isEmpty()
-                && events.isEmpty()
-                && completedPlans.isEmpty()
-                && inFlight.isEmpty()
-                && pendingPreemptions.isEmpty();
-    }
-
-    @Override
     public void close() {
         Throwable failure = Failures.run(null, decodePreemption::freezeAdmission);
         if (closed.compareAndSet(false, true)) {
             availability.removeListener(availabilityListener);
             lock.lock();
             try {
-                changed.signalAll();
+                schedulingLoop.wake();
             } finally {
                 lock.unlock();
             }
@@ -919,15 +1019,7 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler
         }
         // Every caller observes the same drain, including a second shutdown owner.
         boolean interrupted = false;
-        if (Thread.currentThread() != decisionThread) {
-            while (decisionThread.isAlive()) {
-                try {
-                    decisionThread.join();
-                } catch (InterruptedException interruption) {
-                    interrupted = true;
-                }
-            }
-        }
+        schedulingLoop.awaitStopped();
         while (!planners.isTerminated()) {
             try {
                 planners.awaitTermination(Long.MAX_VALUE, TimeUnit.NANOSECONDS);

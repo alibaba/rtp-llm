@@ -16,8 +16,4 @@ public abstract class AbstractRequestScheduler
         this.decodeAdmissionCapacity = lifecycle.decodeAdmissionCapacity;
     }
 
-    @Override
-    public final RequestLifecycle lifecycle() {
-        return lifecycle;
-    }
 }

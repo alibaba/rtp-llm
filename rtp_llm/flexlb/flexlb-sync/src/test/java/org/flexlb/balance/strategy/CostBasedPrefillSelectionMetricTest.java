@@ -152,7 +152,7 @@ class CostBasedPrefillSelectionMetricTest {
         assertEquals(8, before.queue().constraints().maxRequests());
         assertEquals(windowMs, before.queue().constraints().collectionWindowMs());
         assertNull(
-                org.springframework.test.util.ReflectionTestUtils.getField(first, "queueRunner"));
+                org.springframework.test.util.ReflectionTestUtils.getField(first, "requestExecution"));
         org.flexlb.balance.endpoint.EndpointTestSupport.enableQueueRuntime(
                 second,
                 settings,

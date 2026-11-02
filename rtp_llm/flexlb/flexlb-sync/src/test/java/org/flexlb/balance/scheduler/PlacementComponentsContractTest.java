@@ -1,6 +1,6 @@
 package org.flexlb.balance.scheduler;
 
-import org.flexlb.balance.endpoint.WorkerQueue;
+import org.flexlb.balance.endpoint.PrefillRequestQueue;
 import org.flexlb.balance.eviction.DecodePreemption;
 import org.flexlb.balance.eviction.DecodePreemptionPolicy;
 import org.flexlb.balance.planner.GroupPlanner;
@@ -22,7 +22,7 @@ class PlacementComponentsContractTest {
         when(config.loadBalanceConfig()).thenReturn(SchedulingTestConfig.batchConfig());
         var scheduler = mock(RequestScheduler.class);
         var queue = new ListPlacementQueue();
-        var workers = mock(WorkerQueue.Factory.class);
+        var workers = mock(PrefillRequestQueue.Factory.class);
         var grouping = mock(GroupPlanner.class);
         PrefillSelectionStrategy prefill = mock(PrefillSelectionStrategy.class);
         DecodeSelectionStrategy decode =
@@ -37,7 +37,7 @@ class PlacementComponentsContractTest {
                 .withBean(ConfigService.class, () -> config)
                 .withBean(RequestScheduler.class, () -> scheduler)
                 .withBean(PlacementQueue.class, () -> queue)
-                .withBean(WorkerQueue.Factory.class, () -> workers)
+                .withBean(PrefillRequestQueue.Factory.class, () -> workers)
                 .withBean(GroupPlanner.class, () -> grouping)
                 .withBean(PrefillSelectionStrategy.class, () -> prefill)
                 .withBean(DecodeSelectionStrategy.class, () -> decode)
@@ -51,7 +51,10 @@ class PlacementComponentsContractTest {
                                     .containsExactly(scheduler);
                             assertThat(context.getBeansOfType(PlacementQueue.class).values())
                                     .containsExactly(queue);
-                            assertThat(context.getBeansOfType(WorkerQueue.Factory.class).values())
+                            assertThat(
+                                            context.getBeansOfType(
+                                                            PrefillRequestQueue.Factory.class)
+                                                    .values())
                                     .containsExactly(workers);
                             assertThat(context.getBeansOfType(GroupPlanner.class).values())
                                     .containsExactly(grouping);

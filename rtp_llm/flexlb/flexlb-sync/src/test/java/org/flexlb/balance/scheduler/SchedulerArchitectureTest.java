@@ -49,9 +49,9 @@ class SchedulerArchitectureTest {
     @Test
     void queueExecutionDoesNotDefineOrderingOrCollectionPolicy() throws IOException {
         assertNoImplementationDependency(
-                PrefillQueueRunner.class, org.flexlb.util.PriorityOrdering.class);
+                RequestExecution.class, org.flexlb.util.PriorityOrdering.class);
         inspectCalls(
-                PrefillQueueRunner.class,
+                RequestExecution.class,
                 (owner, name) ->
                         assertFalse(
                                 owner.equals(Type.getInternalName(GroupPlanner.class))
@@ -82,9 +82,9 @@ class SchedulerArchitectureTest {
 
     @Test
     void queueExecutionCannotChooseFacilitiesFromAnIndividualRequest() throws IOException {
-        assertNoImplementationDependency(PrefillQueueRunner.class, SchedulerTestServices.class);
+        assertNoImplementationDependency(RequestExecution.class, SchedulerTestServices.class);
         inspectCalls(
-                PrefillQueueRunner.class,
+                RequestExecution.class,
                 (owner, name) ->
                         assertFalse(
                                 owner.equals(Type.getInternalName(RequestLifecycle.class))
@@ -135,18 +135,17 @@ class SchedulerArchitectureTest {
         org.junit.jupiter.api.Assertions.assertEquals(
                 AbstractRequestScheduler.class, QueuedRequestScheduler.class.getSuperclass());
         assertFalse(RequestLifecycle.class.isAssignableFrom(AbstractRequestScheduler.class));
-        assertFalse(AutoCloseable.class.isAssignableFrom(DirectRequestScheduler.class));
+        assertTrue(AutoCloseable.class.isAssignableFrom(DirectRequestScheduler.class));
     }
 
     @Test
     void schedulingContractExposesTimingHooksButKeepsSettlementInTheSharedLifecycle() {
         org.junit.jupiter.api.Assertions.assertEquals(
                 java.util.Set.of(
-                        "submit",
-                        "cancel",
-                        "lifecycle",
-                        "start",
-                        "awaitSchedulingCompletion",
+                        "onRequest",
+                        "onRequestChanged",
+                        "onEndpointChanged",
+                        "schedule",
                         "close"),
                 Arrays.stream(RequestScheduler.class.getDeclaredMethods())
                         .map(java.lang.reflect.Method::getName)
@@ -166,11 +165,18 @@ class SchedulerArchitectureTest {
                         .anyMatch(
                                 method ->
                                         java.util.Set.of(
-                                                        "submit",
-                                                        "schedule",
+                                                                                        "schedule",
                                                         "commitDirectRoute",
                                                         "enqueueRoute")
                                                 .contains(method.getName())));
+    }
+
+    @Test
+    void defaultSchedulersDoNotExposeRequestAdmissionOrCancellation() {
+        for (var type : java.util.List.of(DirectRequestScheduler.class, QueuedRequestScheduler.class)) {
+            assertFalse(Arrays.stream(type.getMethods())
+                    .anyMatch(method -> java.util.Set.of("submit", "cancel", "lifecycle").contains(method.getName())));
+        }
     }
 
     @Test
@@ -210,7 +216,7 @@ class SchedulerArchitectureTest {
                 (owner, name) ->
                         assertFalse(
                                 owner.equals(Type.getInternalName(RequestContext.class))
-                                        && name.equals("initializeWorkerQueue"),
+                                        && name.equals("initializeExecutionOrder"),
                                 "RequestRoute must not assign request FIFO identity"));
     }
 
@@ -221,7 +227,7 @@ class SchedulerArchitectureTest {
                     OrderedRequestQueue.class,
                     org.flexlb.balance.endpoint.PrefillActiveIndex.class,
                     QueueExecutionSettings.class,
-                    PrefillQueueRunner.Dependencies.class,
+                    RequestExecution.Dependencies.class,
                     org.flexlb.engine.grpc.EngineGrpcClient.CancelReply.class,
                     org.flexlb.balance.eviction.DefaultDecodePreemption.class,
                     org.flexlb.balance.planner.BuiltinGroupPlanner.class
@@ -248,7 +254,7 @@ class SchedulerArchitectureTest {
                 (owner, name) ->
                         assertFalse(
                                 owner.equals(Type.getInternalName(RequestData.class))
-                                        && name.equals("initializeWorkerQueue"),
+                                        && name.equals("initializeExecutionOrder"),
                                 "queue entry owns its FIFO identity"));
     }
 

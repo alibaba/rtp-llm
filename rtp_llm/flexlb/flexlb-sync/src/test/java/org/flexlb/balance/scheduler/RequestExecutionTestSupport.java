@@ -10,15 +10,15 @@ import org.springframework.test.util.ReflectionTestUtils;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.ReentrantLock;
 
-public final class PrefillQueueRunnerTestSupport {
+public final class RequestExecutionTestSupport {
 
-    private PrefillQueueRunnerTestSupport() {}
+    private RequestExecutionTestSupport() {}
 
     static CapacityBoundary boundaryOnly(RequestRoute item, CapacityBoundary boundary) {
         return boundary;
     }
 
-    public static PrefillQueueRunner create(
+    public static RequestExecution create(
             String key,
             PrefillEndpoint endpoint,
             FlexlbConfig config,
@@ -33,21 +33,46 @@ public final class PrefillQueueRunnerTestSupport {
                 org.flexlb.balance.planner.BuiltinGroupPlanner.from(config));
     }
 
-    public static PrefillQueueRunner create(
+    public static RequestExecution create(
             String key,
             PrefillEndpoint endpoint,
             FlexlbConfig config,
             DeliveryDispatcher delivery,
             RequestLifecycle scheduler,
             org.flexlb.balance.planner.GroupPlanner grouping) {
-        var runtime = new AtomicReference<PrefillQueueRunner>();
+        return create(
+                key,
+                endpoint,
+                config,
+                delivery,
+                scheduler,
+                grouping,
+                QueuedRequestScheduler::schedulePrefill);
+    }
+
+    public static RequestExecution create(
+            String key,
+            PrefillEndpoint endpoint,
+            FlexlbConfig config,
+            DeliveryDispatcher delivery,
+            RequestLifecycle scheduler,
+            org.flexlb.balance.planner.GroupPlanner grouping,
+            java.util.function.Function<RequestExecution, RequestExecution.Decision> scheduling) {
+        var dependencies = SchedulerTestSupport.queueDependencies(scheduler, config);
+        var controlled =
+                new RequestExecution.Dependencies(
+                        dependencies.deliveries,
+                        dependencies.reporter,
+                        dependencies.failures,
+                        execution -> QueuedRequestScheduler.runPrefill(execution, scheduling));
+        var runtime = new AtomicReference<RequestExecution>();
         var index =
                 PrefillActiveIndex.ordered(
                         16, QueueExecutionSettings.queueOrder(config.isPriorityOrdering()));
         var state = new PrefillState(new ReentrantLock(), index, System::currentTimeMillis);
         var worker =
                 org.mockito.Mockito.mock(
-                        PrefillQueueRunner.class,
+                        RequestExecution.class,
                         org.mockito.Mockito.withSettings()
                                 .useConstructor(
                                         key,
@@ -55,7 +80,7 @@ public final class PrefillQueueRunnerTestSupport {
                                         QueueExecutionSettings.capture(config, grouping),
                                         delivery,
                                         state,
-                                        SchedulerTestSupport.queueDependencies(scheduler, config))
+                                        controlled)
                                 .defaultAnswer(org.mockito.Mockito.CALLS_REAL_METHODS));
         org.mockito.Mockito.doAnswer(
                         call -> {
@@ -67,18 +92,18 @@ public final class PrefillQueueRunnerTestSupport {
                         })
                 .when(worker)
                 .offer(org.mockito.ArgumentMatchers.any());
-        org.springframework.test.util.ReflectionTestUtils.setField(endpoint, "queueRunner", worker);
+        org.springframework.test.util.ReflectionTestUtils.setField(endpoint, "requestExecution", worker);
         org.springframework.test.util.ReflectionTestUtils.setField(endpoint, "ownership", state);
         DeliveryTestSupport.installQueueFixture(worker, delivery);
         runtime.set(worker);
         return runtime.get();
     }
 
-    public static PrefillState.QueueSnapshot capture(PrefillQueueRunner runtime) {
+    public static PrefillState.QueueSnapshot capture(RequestExecution runtime) {
         return state(runtime).captureQueue(Integer.MAX_VALUE);
     }
 
-    public static PrefillState state(PrefillQueueRunner runtime) {
+    public static PrefillState state(RequestExecution runtime) {
         return (PrefillState) ReflectionTestUtils.getField(runtime, "prefillState");
     }
 }

@@ -18,7 +18,7 @@ import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.spy;
 
-class PrefillQueueRunnerStatusSnapshotTest {
+class RequestExecutionStatusSnapshotTest {
 
     @ParameterizedTest
     @CsvSource({

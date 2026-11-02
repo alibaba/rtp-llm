@@ -43,6 +43,21 @@ public final class RequestRoute implements GroupPlanner.Input, AutoCloseable {
     private long decodeVersion;
     private final DecodeResources.ReservationHandle decodeReservation;
 
+    // Cached immutable planning input; queue implementations only store request identities.
+    private volatile GroupPlanner.Item planningInput;
+
+    public GroupPlanner.Item planningInput() {
+        var result = planningInput;
+        if (result != null) return result;
+        synchronized (this) {
+            if (planningInput == null) {
+                planningInput = new GroupPlanner.Item(requestId(), priority(), enqueueSeq(),
+                        enqueuedAtMs(), expiresAtMs(), seqLen(), hitCache());
+            }
+            return planningInput;
+        }
+    }
+
     /** Construction is thread confined; prepare publishes the completed route. */
     public RequestRoute(RequestContext context) {
         this(context, null, null);

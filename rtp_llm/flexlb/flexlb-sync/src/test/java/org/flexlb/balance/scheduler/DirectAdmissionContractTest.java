@@ -84,14 +84,12 @@ class DirectAdmissionContractTest {
             var first =
                     executor.submit(
                             () ->
-                                    fixture.scheduler
-                                            .submit(fixture.context(201L))
+                                    SchedulerTestServices.entry(fixture.scheduler).submit(fixture.context(201L))
                                             .get(2L, TimeUnit.SECONDS));
             var second =
                     executor.submit(
                             () ->
-                                    fixture.scheduler
-                                            .submit(fixture.context(202L))
+                                    SchedulerTestServices.entry(fixture.scheduler).submit(fixture.context(202L))
                                             .get(2L, TimeUnit.SECONDS));
             var responses =
                     List.of(first.get(3L, TimeUnit.SECONDS), second.get(3L, TimeUnit.SECONDS));
@@ -136,7 +134,7 @@ class DirectAdmissionContractTest {
             throws Exception {
         try (Fixture fixture = new Fixture()) {
             Response response =
-                    fixture.scheduler.submit(fixture.context(101L)).get(2L, TimeUnit.SECONDS);
+                    SchedulerTestServices.entry(fixture.scheduler).submit(fixture.context(101L)).get(2L, TimeUnit.SECONDS);
 
             assertTrue(response.isSuccess());
             assertFalse(response.isEnqueuedByMaster());
@@ -217,8 +215,7 @@ class DirectAdmissionContractTest {
                     assertTimeoutPreemptively(
                             Duration.ofSeconds(2),
                             () ->
-                                    fixture.scheduler
-                                            .submit(fixture.context(102L))
+                                    SchedulerTestServices.entry(fixture.scheduler).submit(fixture.context(102L))
                                             .get(2L, TimeUnit.SECONDS));
 
             assertFalse(response.isSuccess());
@@ -273,7 +270,7 @@ class DirectAdmissionContractTest {
                     .acquireDispatchPermit(any(), any());
 
             Response response =
-                    fixture.scheduler.submit(fixture.context(103L)).get(2L, TimeUnit.SECONDS);
+                    SchedulerTestServices.entry(fixture.scheduler).submit(fixture.context(103L)).get(2L, TimeUnit.SECONDS);
 
             assertTrue(raced.get());
             assertFalse(
@@ -374,7 +371,7 @@ class DirectAdmissionContractTest {
 
             try {
                 Response response =
-                        fixture.scheduler.submit(fixture.context(105L)).get(2L, TimeUnit.SECONDS);
+                        SchedulerTestServices.entry(fixture.scheduler).submit(fixture.context(105L)).get(2L, TimeUnit.SECONDS);
 
                 assertTrue(raced.get());
                 assertTrue(response.isSuccess());
@@ -411,8 +408,7 @@ class DirectAdmissionContractTest {
             var prefill = spy(fixture.prefill);
             var context = fixture.context(104L);
             var future =
-                    fixture.scheduler
-                            .lifecycle()
+                    SchedulerTestServices.lifecycle(fixture.scheduler)
                             .register(context, () -> {}, StrategyErrorType.BATCH_SLO_EXPIRED);
             var primary = new IllegalStateException("Prefill commit unavailable");
             var cleanup = new IllegalStateException("Decode cleanup observer failed");
@@ -426,7 +422,7 @@ class DirectAdmissionContractTest {
                             })
                     .when(fixture.decode)
                     .dispatch(any(), eq(DecodeResources.DispatchOutcome.ABANDONED));
-            try (var mutation = fixture.scheduler.lifecycle().claimAdmissionHandle(104L, future);
+            try (var mutation = SchedulerTestServices.lifecycle(fixture.scheduler).claimAdmissionHandle(104L, future);
                     var completion = RequestProtocolTestSupport.finishOnExit(mutation);
                     var admission =
                             SchedulingTestConfig.prepareRoute(
@@ -457,7 +453,7 @@ class DirectAdmissionContractTest {
                         .dispatch(any(), eq(DecodeResources.DispatchOutcome.ABANDONED));
                 assertEquals(0, fixture.decode.resourceSnapshot().activeDispatchPermits());
             } finally {
-                fixture.scheduler.lifecycle().cancel(104L, 0L, CancelReason.CLIENT_CANCELLED);
+                SchedulerTestServices.lifecycle(fixture.scheduler).cancel(104L, 0L, CancelReason.CLIENT_CANCELLED);
             }
             assertNull(EndpointTestSupport.decodeReservation(fixture.decode, 104L));
             fixture.assertNoPrefillOwnership();
@@ -475,8 +471,7 @@ class DirectAdmissionContractTest {
                                 assertEquals(
                                         1,
                                         fixture.decode.resourceSnapshot().activeDispatchPermits());
-                                fixture.scheduler
-                                        .lifecycle()
+                                SchedulerTestServices.lifecycle(fixture.scheduler)
                                         .cancel(108L, 0L, CancelReason.CLIENT_CANCELLED);
                                 return handoff;
                             })
@@ -493,7 +488,7 @@ class DirectAdmissionContractTest {
                             org.mockito.ArgumentMatchers.any(
                                     java.util.function.LongSupplier.class)))
                     .thenReturn(selected);
-            assertFalse(fixture.scheduler.submit(context).get(2, TimeUnit.SECONDS).isSuccess());
+            assertFalse(SchedulerTestServices.entry(fixture.scheduler).submit(context).get(2, TimeUnit.SECONDS).isSuccess());
             SchedulerTestSupport.awaitRequestWork(fixture.runtime);
             assertNull(EndpointTestSupport.decodeReservation(fixture.decode, 108L));
             assertEquals(0, fixture.decode.resourceSnapshot().activeDispatchPermits());
@@ -535,9 +530,9 @@ class DirectAdmissionContractTest {
                             fixture.runtime.queueDependencies)) {
                 var context = RequestProtocolTestSupport.context(config, 109L);
                 var future =
-                        queue.lifecycle()
+                        SchedulerTestServices.lifecycle(queue)
                                 .register(context, () -> {}, StrategyErrorType.BATCH_SLO_EXPIRED);
-                try (var handle = queue.lifecycle().claimAdmissionHandle(109L, future);
+                try (var handle = SchedulerTestServices.lifecycle(queue).claimAdmissionHandle(109L, future);
                         var finish = RequestProtocolTestSupport.finishOnExit(handle)) {
                     assertNotNull(handle);
                     var selected =
@@ -603,8 +598,7 @@ class DirectAdmissionContractTest {
     void queueActivationPreservesExistingDirectReservations() throws Exception {
         try (Fixture fixture = new Fixture(4, 2)) {
             assertTrue(
-                    fixture.scheduler
-                            .submit(fixture.context(101L))
+                    SchedulerTestServices.entry(fixture.scheduler).submit(fixture.context(101L))
                             .get(2, TimeUnit.SECONDS)
                             .isSuccess());
 
@@ -639,7 +633,7 @@ class DirectAdmissionContractTest {
                 request.data()
                         .setRequest(
                                 request.data().getRequest().toBuilder().maxNewTokens(16).build());
-                assertTrue(queue.submit(request).get(3, TimeUnit.SECONDS).isSuccess());
+                assertTrue(SchedulerTestServices.entry(queue).submit(request).get(3, TimeUnit.SECONDS).isSuccess());
                 assertEquals(
                         2,
                         fixture.prefill
@@ -753,7 +747,7 @@ class DirectAdmissionContractTest {
                             router,
                             mock(DecodePreemption.class),
                             placement);
-            scheduler = (DirectRequestScheduler) requests.scheduler();
+            scheduler = (DirectRequestScheduler) org.flexlb.balance.scheduler.SchedulerTestServices.scheduler(requests);
             WorkerStatus worker = worker(RoleType.PREFILL, "127.0.0.1");
             worker.lock.lock();
             try {

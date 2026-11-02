@@ -12,7 +12,7 @@ import org.flexlb.balance.scheduler.PlacementKey;
 import org.flexlb.balance.scheduler.RequestContext;
 import org.flexlb.balance.scheduler.RequestLifecycle;
 import org.flexlb.balance.scheduler.RequestRoute;
-import org.flexlb.balance.scheduler.RequestScheduler;
+import org.flexlb.balance.scheduler.RequestSchedulerEntry;
 import org.flexlb.balance.scheduler.RequestSchedulerTestRuntime;
 import org.flexlb.balance.scheduler.RequestWorkerSelector;
 import org.flexlb.config.ConfigService;
@@ -81,7 +81,7 @@ public abstract class FlexLBMockTestBase {
 
     protected MockDecodeWorker mockDecodeWorker;
 
-    protected RequestScheduler scheduler;
+    protected RequestSchedulerEntry scheduler;
 
     protected EndpointRegistry endpointRegistry;
 
@@ -212,7 +212,7 @@ public abstract class FlexLBMockTestBase {
                         createRequestSchedulerReporter(),
                         grpcClient);
         endpointRegistry = schedulerRuntime.endpointRegistry();
-        scheduler = schedulerRuntime.scheduler();
+        scheduler = schedulerRuntime.entry();
 
         // 7. Engine status is mocked by default; E2E subclasses can use the real registry-backed
         // view.

@@ -12,7 +12,7 @@ import org.mockito.Mockito;
 import java.util.List;
 import java.util.OptionalLong;
 
-/** Transport/config fixtures. Queue decisions are stubbed on PrefillQueueRunner, never on Dispatcher. */
+/** Transport/config fixtures. Queue decisions are stubbed on RequestExecution, never on Dispatcher. */
 public final class DeliveryTestSupport {
     public static org.flexlb.config.ConfigService service(org.flexlb.config.FlexlbConfig config) {
         var service = Mockito.mock(org.flexlb.config.ConfigService.class);
@@ -68,8 +68,7 @@ public final class DeliveryTestSupport {
         }
     }
 
-    public static void installQueueFixture(
-            PrefillQueueRunner worker, DeliveryDispatcher dispatcher) {
+    public static void installQueueFixture(RequestExecution worker, DeliveryDispatcher dispatcher) {
         if (!(dispatcher instanceof StubDispatcher stub)) {
             return;
         }
@@ -96,7 +95,7 @@ public final class DeliveryTestSupport {
     }
 
     public static CapacityBoundary process(
-            PrefillQueueRunner worker,
+            RequestExecution worker,
             List<RequestRoute> items,
             String reason,
             PrefillTimePredictor.Evaluator evaluator,
@@ -105,7 +104,7 @@ public final class DeliveryTestSupport {
     }
 
     public static void afterSelection(
-            PrefillQueueRunner worker, java.util.function.Consumer<List<RequestRoute>> selected) {
+            RequestExecution worker, java.util.function.Consumer<List<RequestRoute>> selected) {
         Mockito.doAnswer(
                         call -> {
                             selected.accept(call.getArgument(0));
@@ -126,7 +125,7 @@ public final class DeliveryTestSupport {
                 java.util.function.Supplier<CapacityBoundary> real);
     }
 
-    public static void selectWith(PrefillQueueRunner worker, Selection selection) {
+    public static void selectWith(RequestExecution worker, Selection selection) {
         Mockito.doAnswer(
                         call ->
                                 selection.select(
@@ -147,7 +146,7 @@ public final class DeliveryTestSupport {
                         Mockito.any(), Mockito.any(), Mockito.any(), Mockito.any(), Mockito.any());
     }
 
-    public static void beforeCommit(PrefillQueueRunner worker, Runnable hook) {
+    public static void beforeCommit(RequestExecution worker, Runnable hook) {
         Mockito.doAnswer(
                         call -> {
                             hook.run();

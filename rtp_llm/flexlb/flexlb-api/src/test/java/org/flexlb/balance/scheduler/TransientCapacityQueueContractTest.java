@@ -90,12 +90,12 @@ class TransientCapacityQueueContractTest {
         config.decisionPolicy().setMaxCollectionWaitMs(60_000L);
         config.getRouter().getRoles().getDecode().getAvailability().setMaxEngineRequests(1L);
         try (Fixture fixture = new Fixture(null, config)) {
-            var low = fixture.runtime.scheduler().submit(fixture.context(990_001L, 20));
+            var low = fixture.runtime.entry().submit(fixture.context(990_001L, 20));
             awaitCondition(
                     () -> fixture.prefillEndpoint.ownership.progress().queueDepth() == 1, 2_000L);
             var oldReservation =
                     SchedulerTestSupport.decodeReservation(fixture.decodeEndpoint, 990_001L);
-            var high = fixture.runtime.scheduler().submit(fixture.context(990_002L, 80));
+            var high = fixture.runtime.entry().submit(fixture.context(990_002L, 80));
             awaitCondition(
                     () ->
                             SchedulerTestSupport.decodeReservation(fixture.decodeEndpoint, 990_002L)
@@ -109,7 +109,7 @@ class TransientCapacityQueueContractTest {
             assertFalse(high.isDone());
             assertEquals(1, fixture.prefillEndpoint.ownership.progress().queueDepth());
             assertEquals(1, fixture.decodeEndpoint.routingView().totalLoad());
-            fixture.runtime.scheduler().cancel(990_002L, 0L, CancelReason.CLIENT_CANCELLED);
+            fixture.runtime.entry().cancel(990_002L, 0L, CancelReason.CLIENT_CANCELLED);
             assertFalse(high.get(2, TimeUnit.SECONDS).isSuccess());
             awaitCondition(
                     () ->
@@ -127,7 +127,7 @@ class TransientCapacityQueueContractTest {
                     List.of(),
                     fixture.submission.requestIds(),
                     "neither queued route was sent to the engine");
-            fixture.runtime.scheduler().cancel(990_001L, 0L, CancelReason.CLIENT_CANCELLED);
+            fixture.runtime.entry().cancel(990_001L, 0L, CancelReason.CLIENT_CANCELLED);
             assertFalse(low.get(2, TimeUnit.SECONDS).isSuccess());
             assertEquals(0, fixture.decodeEndpoint.routingView().totalLoad());
             assertEquals(0, fixture.prefillEndpoint.ownership.progress().queueDepth());
@@ -144,7 +144,7 @@ class TransientCapacityQueueContractTest {
         try (Fixture fixture = new Fixture(null, config)) {
             long id = 991_001L;
             var context = fixture.context(id, 20);
-            var response = fixture.runtime.scheduler().submit(context);
+            var response = fixture.runtime.entry().submit(context);
             awaitCondition(
                     () ->
                             fixture.prefillEndpoint.ownership.progress().queueDepth() == 1
@@ -186,7 +186,7 @@ class TransientCapacityQueueContractTest {
                     CompletableFuture.runAsync(
                             () ->
                                     fixture.runtime
-                                            .scheduler()
+                                            .entry()
                                             .cancel(id, 0L, CancelReason.CLIENT_CANCELLED));
             try {
                 assertTrue(releaseEntered.await(2, TimeUnit.SECONDS));
@@ -283,7 +283,7 @@ class TransientCapacityQueueContractTest {
             fixture.runtime.applyStatus(
                     fixture.prefillStatus, statusResponse(RoleType.PREFILL, 2L, true));
             CompletableFuture<Response> retried =
-                    fixture.runtime.scheduler().submit(fixture.context(requestId, 50, 128_000L));
+                    fixture.runtime.entry().submit(fixture.context(requestId, 50, 128_000L));
             assertFalse(retried.isDone());
 
             fixture.runtime.applyStatus(
@@ -337,7 +337,7 @@ class TransientCapacityQueueContractTest {
                 context.data()
                         .setSchedulingMetadata(SchedulingMetadata.explicit(50, absoluteDeadline));
                 contexts.add(context);
-                futures.add(fixture.runtime.scheduler().submit(context));
+                futures.add(fixture.runtime.entry().submit(context));
             }
 
             awaitCondition(
@@ -503,7 +503,7 @@ class TransientCapacityQueueContractTest {
     void prefillPressureRetainsAndLaterDispatchesTheOriginalRequest() throws Exception {
         try (Fixture fixture = new Fixture(RoleType.PREFILL)) {
             CompletableFuture<Response> waiting =
-                    fixture.runtime.scheduler().submit(fixture.context(101L));
+                    fixture.runtime.entry().submit(fixture.context(101L));
 
             assertFalse(waiting.isDone());
             assertEquals(1, fixture.runtime.requestRegistry().pendingDeliveryRequestCount());
@@ -521,7 +521,7 @@ class TransientCapacityQueueContractTest {
     void decodePressureRetainsAndLaterDispatchesTheOriginalRequest() throws Exception {
         try (Fixture fixture = new Fixture(RoleType.DECODE)) {
             CompletableFuture<Response> waiting =
-                    fixture.runtime.scheduler().submit(fixture.context(201L));
+                    fixture.runtime.entry().submit(fixture.context(201L));
 
             assertFalse(waiting.isDone());
             assertEquals(List.of(), fixture.submission.requestIds());
@@ -543,9 +543,9 @@ class TransientCapacityQueueContractTest {
             fixture.config.decisionPolicy().setMaxCollectionWaitMs(50L);
             fixture.submission.holdCompletions();
             CompletableFuture<Response> older =
-                    fixture.runtime.scheduler().submit(fixture.context(251L, 50));
+                    fixture.runtime.entry().submit(fixture.context(251L, 50));
             CompletableFuture<Response> later =
-                    fixture.runtime.scheduler().submit(fixture.context(252L, 50));
+                    fixture.runtime.entry().submit(fixture.context(252L, 50));
 
             awaitCondition(
                     () -> fixture.runtime.requestRegistry().pendingDeliveryRequestCount() >= 2,
@@ -570,8 +570,8 @@ class TransientCapacityQueueContractTest {
             fixture.config.decisionPolicy().setMaxRequests(2);
             fixture.config.decisionPolicy().setMaxCollectionWaitMs(50L);
             fixture.submission.holdCompletions();
-            fixture.runtime.scheduler().submit(fixture.context(261L, 50));
-            fixture.runtime.scheduler().submit(fixture.context(262L, 80));
+            fixture.runtime.entry().submit(fixture.context(261L, 50));
+            fixture.runtime.entry().submit(fixture.context(262L, 80));
 
             awaitCondition(
                     () -> fixture.runtime.requestRegistry().pendingDeliveryRequestCount() >= 2,
@@ -590,8 +590,8 @@ class TransientCapacityQueueContractTest {
     void releasedDecodeCapacityPreservesFifo() throws Exception {
         try (Fixture fixture = new Fixture(RoleType.DECODE)) {
             fixture.submission.holdCompletions();
-            fixture.runtime.scheduler().submit(fixture.context(271L, 50));
-            fixture.runtime.scheduler().submit(fixture.context(272L, 50));
+            fixture.runtime.entry().submit(fixture.context(271L, 50));
+            fixture.runtime.entry().submit(fixture.context(272L, 50));
 
             awaitCapacityWaiters(fixture.runtime.scheduler(), 2);
             fixture.releaseCapacity();
@@ -607,8 +607,8 @@ class TransientCapacityQueueContractTest {
     void duplicateCapacitySignalsCannotOversellOneDecodeSlot() throws Exception {
         try (Fixture fixture = new Fixture(RoleType.DECODE)) {
             fixture.submission.holdCompletions();
-            fixture.runtime.scheduler().submit(fixture.context(281L, 50));
-            fixture.runtime.scheduler().submit(fixture.context(282L, 50));
+            fixture.runtime.entry().submit(fixture.context(281L, 50));
+            fixture.runtime.entry().submit(fixture.context(282L, 50));
 
             awaitCapacityWaiters(fixture.runtime.scheduler(), 2);
             fixture.releaseCapacity();
@@ -641,7 +641,7 @@ class TransientCapacityQueueContractTest {
 
         try (Fixture fixture = new Fixture(RoleType.DECODE, config)) {
             CompletableFuture<Response> waiting =
-                    fixture.runtime.scheduler().submit(fixture.context(301L, 50, 128_000L));
+                    fixture.runtime.entry().submit(fixture.context(301L, 50, 128_000L));
             awaitCapacityWaiters(fixture.runtime.scheduler(), 1);
             assertFalse(waiting.isDone());
             assertEquals(
@@ -677,7 +677,7 @@ class TransientCapacityQueueContractTest {
         config.queueScheduler().getOrdering().setPreemption(preemption);
         try (Fixture fixture = new Fixture(RoleType.DECODE, config)) {
             CompletableFuture<Response> waiting =
-                    fixture.runtime.scheduler().submit(fixture.context(302L, 50, 128_000L));
+                    fixture.runtime.entry().submit(fixture.context(302L, 50, 128_000L));
             awaitCondition(() -> fixture.metrics.totalPlacementAttempts() > 0, 2_000L);
             assertTrue(fixture.metrics.totalPlacementAttempts() > 0);
             assertFalse(waiting.isDone());
@@ -736,7 +736,8 @@ class TransientCapacityQueueContractTest {
 
     @Test
     @Timeout(20)
-    void batchCreditsLimitDispatchWhileAdditionalRequestsRemainOnTheWorkerQueue() throws Exception {
+    void batchCreditsLimitDispatchWhileAdditionalRequestsRemainOnThePrefillRequestQueue()
+            throws Exception {
         FlexlbConfig config = config();
         config.queueScheduler().setOrdering(new QueueOrderingConfig());
         config.decisionPolicy().setMaxRequests(2);
@@ -755,7 +756,7 @@ class TransientCapacityQueueContractTest {
                                     .mapToObj(
                                             requestId ->
                                                     fixture.runtime
-                                                            .scheduler()
+                                                            .entry()
                                                             .submit(fixture.context(requestId, 50)))
                                     .toList());
 
@@ -778,7 +779,7 @@ class TransientCapacityQueueContractTest {
                             .mapToObj(
                                     requestId ->
                                             fixture.runtime
-                                                    .scheduler()
+                                                    .entry()
                                                     .submit(fixture.context(requestId, 50)))
                             .toList());
 
@@ -849,7 +850,7 @@ class TransientCapacityQueueContractTest {
         try (Fixture fixture = new Fixture(null, config)) {
             fixture.submission.blockPreparation();
             CompletableFuture<Response> waiting =
-                    fixture.runtime.scheduler().submit(fixture.context(501L, 50, 128_000L));
+                    fixture.runtime.entry().submit(fixture.context(501L, 50, 128_000L));
             assertTrue(fixture.submission.awaitPreparation(2, TimeUnit.SECONDS));
 
             fixture.runtime.applyStatus(
@@ -915,7 +916,7 @@ class TransientCapacityQueueContractTest {
             for (long requestId = 700L; requestId < 706L; requestId++) {
                 responses.add(
                         fixture.runtime
-                                .scheduler()
+                                .entry()
                                 .submit(fixture.context(requestId, 50, 128_000L)));
             }
 
@@ -975,7 +976,7 @@ class TransientCapacityQueueContractTest {
             for (long requestId = 800L; requestId < 802L; requestId++) {
                 admitted.add(
                         fixture.runtime
-                                .scheduler()
+                                .entry()
                                 .submit(fixture.context(requestId, 50, 128_000L)));
             }
 
@@ -997,7 +998,7 @@ class TransientCapacityQueueContractTest {
             for (long requestId = 802L; requestId < 806L; requestId++) {
                 waiting.add(
                         fixture.runtime
-                                .scheduler()
+                                .entry()
                                 .submit(fixture.context(requestId, 50, 128_000L)));
             }
 
@@ -1069,7 +1070,7 @@ class TransientCapacityQueueContractTest {
             fixture.runtime.applyStatus(spareStatus, statusResponse(RoleType.DECODE, 2L, true));
 
             CompletableFuture<Response> waiting =
-                    fixture.runtime.scheduler().submit(fixture.context(requestId, 50, 128_000L));
+                    fixture.runtime.entry().submit(fixture.context(requestId, 50, 128_000L));
             awaitCapacityWaiters(fixture.runtime.scheduler(), 1);
             assertFalse(waiting.isDone());
             assertEquals(0, fixture.prefillEndpoint.ownership.progress().queueDepth());

@@ -12,9 +12,6 @@ import static com.google.common.base.Preconditions.checkState;
 /** One endpoint-generation admission gate and its retirement drain. */
 final class EndpointGenerationLifecycle {
 
-    private static final long DEFAULT_RETIREMENT_TIMEOUT_MS =
-            Long.getLong("flexlb.endpoint.retirement.timeout.ms", 30_000L);
-
     private enum RetirementPhase {
         ACCEPTING_HANDOFFS,
         RETIRING,
@@ -99,10 +96,6 @@ final class EndpointGenerationLifecycle {
     /** Run finalization only after successful local cleanup, including after a wait timeout. */
     void onRetired(Runnable completion) {
         retirementCompleted.thenRun(Objects.requireNonNull(completion, "completion"));
-    }
-
-    void awaitRetirement() {
-        awaitRetirement(DEFAULT_RETIREMENT_TIMEOUT_MS);
     }
 
     void awaitRetirement(long timeoutMs) {

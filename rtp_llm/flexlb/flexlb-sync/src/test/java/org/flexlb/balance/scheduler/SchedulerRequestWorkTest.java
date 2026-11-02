@@ -206,7 +206,8 @@ class SchedulerRequestWorkTest {
             SchedulerTestSupport.closeRequestWork(executor);
             assertEquals(
                     "isolated fact",
-                    ((Throwable) ReflectionTestUtils.getField(executor, "failure")).getMessage());
+                    assertThrows(IllegalStateException.class, executor.tasks::throwIfFailed)
+                            .getMessage());
         } finally {
             close(executor);
         }

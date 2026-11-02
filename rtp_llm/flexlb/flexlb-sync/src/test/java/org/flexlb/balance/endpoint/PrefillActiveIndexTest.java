@@ -48,7 +48,7 @@ class PrefillActiveIndexTest {
         assertEquals(0, index.size(101));
         assertEquals(0L, index.version());
         assertSame(empty, index.capture());
-        assertTrue(empty.projectedItems().isEmpty());
+        assertTrue(empty.items().isEmpty());
         assertFalse(index.iterator().hasNext());
         assertSame(index, PrefillActiveIndex.disabled());
     }
@@ -117,7 +117,7 @@ class PrefillActiveIndexTest {
         for (int priority = 0; priority <= 100; priority++) {
             assertEquals(0, index.size(priority));
         }
-        assertTrue(index.capture().projectedItems().isEmpty());
+        assertTrue(index.capture().items().isEmpty());
         assertEquals(expected.stream().map(RequestRoute::requestId).toList(), ids(beforeClear));
     }
 
@@ -133,15 +133,16 @@ class PrefillActiveIndexTest {
         index.forEach(ordered::add);
         assertEquals(List.of(first, second), ordered);
         var captured = index.capture();
-        var projected = captured.projectedItems();
+        var projected = captured.items();
         assertEquals(2, projected.size());
-        assertEquals(projected.getFirst(), projected.getLast());
+        assertSame(first, projected.getFirst());
+        assertSame(second, projected.getLast());
         assertNotSame(projected.getFirst(), projected.getLast());
         assertTrue(index.remove(first));
         assertSame(second, index.peek());
-        assertSame(projected.getLast(), index.capture().projectedItems().getFirst());
-        assertSame(projected, captured.projectedItems());
-        assertEquals(2, captured.projectedItems().size());
+        assertSame(projected.getLast(), index.capture().items().getFirst());
+        assertSame(projected, captured.items());
+        assertEquals(2, captured.items().size());
     }
 
     @Test
@@ -162,23 +163,23 @@ class PrefillActiveIndexTest {
                         pool.submit(
                                 () -> {
                                     assertTrue(start.await(5, TimeUnit.SECONDS));
-                                    return capture.projectedItems();
+                                    return capture.items();
                                 }));
             }
             start.countDown();
             for (int i = 0; i < tasks.size(); i++) {
                 assertSame(
-                        (i % 2 == 0 ? old : current).projectedItems(),
+                        (i % 2 == 0 ? old : current).items(),
                         tasks.get(i).get(5, TimeUnit.SECONDS));
             }
         }
-        assertSame(old.projectedItems().getFirst(), current.projectedItems().getFirst());
-        verify(first, times(1)).seqLen();
-        assertThrows(UnsupportedOperationException.class, () -> current.projectedItems().clear());
+        assertSame(old.items().getFirst(), current.items().getFirst());
+        verify(first, org.mockito.Mockito.never()).seqLen();
+        assertThrows(UnsupportedOperationException.class, () -> current.items().clear());
     }
 
     @Test
-    void failedMaterializationCanBeRetriedWithoutPublishingPartialResult() {
+    void captureDoesNotReadPlanningInputs() {
         var index = PrefillActiveIndex.ordered(2, ORDER);
         var first = item(1, 50);
         var second = item(2, 40);
@@ -186,21 +187,21 @@ class PrefillActiveIndexTest {
         index.add(first);
         index.add(second);
         var captured = index.capture();
-        assertThrows(IllegalStateException.class, captured::projectedItems);
-        assertEquals(2, captured.projectedItems().size());
-        assertSame(captured.projectedItems(), captured.projectedItems());
-        verify(first, times(1)).seqLen();
+        assertEquals(2, captured.items().size());
+        assertSame(captured.items(), captured.items());
+        verify(first, org.mockito.Mockito.never()).seqLen();
+        verify(second, org.mockito.Mockito.never()).seqLen();
     }
 
     private static List<Long> ids(PrefillActiveIndex.Capture capture) {
-        return capture.projectedItems().stream()
-                .map(org.flexlb.balance.planner.GroupPlanner.Item::requestId)
+        return capture.items().stream()
+                .map(org.flexlb.balance.scheduler.RequestRoute::requestId)
                 .toList();
     }
 
     @SuppressWarnings("unchecked")
     private static int capturedSize(PrefillActiveIndex.Capture capture) {
-        return ((List<Object>) ReflectionTestUtils.getField(capture, "entries")).size();
+        return capture.items().size();
     }
 
     private static RequestRoute item(long id, int priority) {

@@ -460,7 +460,7 @@
                 <id>default-test</id>
                 <configuration combine.self="override">
                   <includes>
-                    <include>**/PrefillQueueRunnerPerformanceTest.java</include>
+                    <include>**/RequestExecutionPerformanceTest.java</include>
                     <include>**/PrefillAdmissionFailurePerformanceTest.java</include>
                     <include>**/SelectionPerformanceTest.java</include>
                     <include>**/ProjectionPerformanceTest.java</include>

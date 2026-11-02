@@ -32,6 +32,8 @@ public final class DirectRequestScheduler extends AbstractRequestScheduler {
     }
 
     private final RequestWorkerSelector router;
+    private final java.util.concurrent.ConcurrentLinkedQueue<RequestContext> pending =
+            new java.util.concurrent.ConcurrentLinkedQueue<>();
 
     DirectRequestScheduler(RequestWorkerSelector router, RequestLifecycle lifecycle) {
         super(lifecycle);
@@ -39,18 +41,24 @@ public final class DirectRequestScheduler extends AbstractRequestScheduler {
     }
 
     @Override
-    public void start() {}
+    public long schedule(long nowNanos) {
+        RequestContext request;
+        while ((request = pending.poll()) != null) {
+            dispatchRegistered(request);
+        }
+        return Long.MAX_VALUE;
+    }
 
     @Override
-    public boolean awaitSchedulingCompletion(long deadlineNanos) {
-        return true; // DIRECT has no pending scheduling queue or background planners.
-    }
+    public void onEndpointChanged(org.flexlb.balance.endpoint.WorkerEndpoint endpoint) {}
 
     @Override
     public void close() {}
 
     @Override
-    public void remove(RequestContext request) {}
+    public void onRequestChanged(RequestContext request) {
+        pending.remove(request);
+    }
 
     @Override
     public boolean reschedule(RequestRoute previousRoute) {
@@ -58,111 +66,84 @@ public final class DirectRequestScheduler extends AbstractRequestScheduler {
     }
 
     @Override
-    public CompletableFuture<Response> submit(RequestContext context) {
-        CompletableFuture<Response> vitResult =
-                RequestSchedulerEntry.tryCompleteVitRequest(context, requests, router);
-        if (vitResult != null) {
-            return vitResult;
+    public void onRequest(RequestContext context) {
+        pending.add(Objects.requireNonNull(context, "context"));
+    }
+
+    private void dispatchRegistered(RequestContext context) {
+        CompletableFuture<Response> future = context.data().getFuture();
+        AdmissionHandle operation =
+                lifecycle.claimAdmissionHandle(context.data().getRequestId(), future);
+        if (operation == null) {
+            return;
         }
-        if (context != null && context.data().getConfig().isQueue()) {
-            return CompletableFuture.completedFuture(
-                    Response.buildErrorResponse(
-                            StrategyErrorType.DISPATCH_FAILED,
-                            "request configuration does not match scheduler mode"));
-        }
+        Response failure = Response.error(StrategyErrorType.DISPATCH_FAILED);
+        boolean operationFinished = false;
         try {
-            CompletableFuture<Response> future =
-                    lifecycle.register(context, () -> {}, StrategyErrorType.BATCH_SLO_EXPIRED);
-            if (future.isDone()) {
-                return future;
-            }
-            AdmissionHandle operation =
-                    lifecycle.claimAdmissionHandle(context.data().getRequestId(), future);
-            if (operation == null) {
-                return future;
-            }
-            Response failure = Response.error(StrategyErrorType.DISPATCH_FAILED);
-            boolean operationFinished = false;
-            try {
-                var selection = router.select(context, router.resolvePolicyGroup(context));
-                context.data().setSchedulingDiagnostics(selection.diagnostics());
-                switch (selection.status()) {
-                    case SUCCESS -> {
-                        PlacementResult<RouteDelivery, PlacementKey> committed = null;
-                        try (RequestRoute routing = selection.value()) {
-                            committed = commitDirectRoute(context, routing);
-                        } catch (RuntimeException | Error cleanupFailure) {
-                            if (committed == null
-                                    || committed.status() != PlacementResult.Status.SUCCESS) {
-                                throw cleanupFailure;
-                            }
-                            Logger.warn(
-                                    "DIRECT selection cleanup failed after handoff: request_id={}",
-                                    context.data().getRequestId(),
-                                    cleanupFailure);
+            var selection = router.select(context, router.resolvePolicyGroup(context));
+            context.data().setSchedulingDiagnostics(selection.diagnostics());
+            switch (selection.status()) {
+                case SUCCESS -> {
+                    PlacementResult<RouteDelivery, PlacementKey> committed = null;
+                    try (RequestRoute routing = selection.value()) {
+                        committed = commitDirectRoute(context, routing);
+                    } catch (RuntimeException | Error cleanupFailure) {
+                        if (committed == null
+                                || committed.status() != PlacementResult.Status.SUCCESS) {
+                            throw cleanupFailure;
                         }
-                        failure =
-                                switch (committed.status()) {
-                                    case SUCCESS -> {
-                                        RouteDelivery delivery = committed.value();
-                                        operation.finish();
-                                        operationFinished = true;
-                                        long now = System.currentTimeMillis();
-                                        long visibility =
-                                                PrefillPredictionBoundary
-                                                        .predictedVisibilityDeadlineMs(
-                                                                delivery.precedingWork(),
-                                                                delivery.unstartedWorkMs(),
-                                                                context.data()
-                                                                        .getConfig()
-                                                                        .getRequestLifecycle()
-                                                                        .getDecision()
-                                                                        .getLifetime(),
-                                                                now);
-                                        lifecycle.onDeliveryFact(
-                                                new RouteDelivered(
-                                                        delivery.claim(), visibility, now));
-                                        yield null;
-                                    }
-                                    case REJECTED -> committed.failure();
-                                    case CLOSED ->
-                                            Response.error(StrategyErrorType.REQUEST_CANCELLED);
-                                    case BLOCKED ->
-                                            Response.error(StrategyErrorType.RESOURCE_EXHAUSTED);
-                                };
+                        Logger.warn(
+                                "DIRECT selection cleanup failed after handoff: request_id={}",
+                                context.data().getRequestId(),
+                                cleanupFailure);
                     }
-                    case BLOCKED ->
-                            failure =
-                                    selection.failure() != null
-                                            ? selection.failure()
-                                            : Response.error(
-                                                    selection.blocker().role().getErrorType());
-                    case REJECTED -> failure = selection.failure();
-                    case CLOSED -> failure = Response.error(StrategyErrorType.REQUEST_CANCELLED);
+                    failure =
+                            switch (committed.status()) {
+                                case SUCCESS -> {
+                                    RouteDelivery delivery = committed.value();
+                                    operation.finish();
+                                    operationFinished = true;
+                                    long now = System.currentTimeMillis();
+                                    long visibility =
+                                            PrefillPredictionBoundary.predictedVisibilityDeadlineMs(
+                                                    delivery.precedingWork(),
+                                                    delivery.unstartedWorkMs(),
+                                                    context.data()
+                                                            .getConfig()
+                                                            .getRequestLifecycle()
+                                                            .getDecision()
+                                                            .getLifetime(),
+                                                    now);
+                                    lifecycle.onDeliveryFact(
+                                            new RouteDelivered(delivery.claim(), visibility, now));
+                                    yield null;
+                                }
+                                case REJECTED -> committed.failure();
+                                case CLOSED -> Response.error(StrategyErrorType.REQUEST_CANCELLED);
+                                case BLOCKED ->
+                                        Response.error(StrategyErrorType.RESOURCE_EXHAUSTED);
+                            };
                 }
-            } catch (RuntimeException selectionFailure) {
-                Logger.warn(
-                        "DIRECT admission failed: request_id={}",
-                        context.data().getRequestId(),
-                        selectionFailure);
-            } finally {
-                if (!operationFinished) {
-                    operation.finish();
-                }
-                if (failure != null) {
-                    lifecycle.publish(context, failure, false);
-                }
+                case BLOCKED ->
+                        failure =
+                                selection.failure() != null
+                                        ? selection.failure()
+                                        : Response.error(selection.blocker().role().getErrorType());
+                case REJECTED -> failure = selection.failure();
+                case CLOSED -> failure = Response.error(StrategyErrorType.REQUEST_CANCELLED);
             }
-            return future;
-        } catch (RuntimeException failure) {
-            Response response =
-                    Response.buildErrorResponse(
-                            StrategyErrorType.DISPATCH_FAILED, failure.getMessage());
-            if (context != null && context.data().getScheduler() == lifecycle) {
-                lifecycle.publish(context, response, false);
-                return context.data().getFuture();
+        } catch (RuntimeException selectionFailure) {
+            Logger.warn(
+                    "DIRECT admission failed: request_id={}",
+                    context.data().getRequestId(),
+                    selectionFailure);
+        } finally {
+            if (!operationFinished) {
+                operation.finish();
             }
-            return CompletableFuture.completedFuture(response);
+            if (failure != null) {
+                lifecycle.publish(context, failure, false);
+            }
         }
     }
 
@@ -311,7 +292,7 @@ public final class DirectRequestScheduler extends AbstractRequestScheduler {
         @Override
         public void publish() {
             var data = route.ctx().data();
-            data.initializeWorkerQueue(data.getEnqueueTime());
+            data.initializeExecutionOrder(data.getEnqueueTime());
             result =
                     route.prefillEp()
                             .reserveUnqueuedRoute(route.prefillPin(), route, route.prefillWorkMs());

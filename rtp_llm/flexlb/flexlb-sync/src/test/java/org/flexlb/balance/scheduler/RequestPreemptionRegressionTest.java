@@ -173,7 +173,7 @@ class RequestPreemptionRegressionTest {
                     .close();
             SchedulerTestSupport.closeRequestExecutors(
                     org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(scheduler));
-            scheduler.scheduler().close();
+            org.flexlb.balance.scheduler.SchedulerTestServices.scheduler(scheduler).close();
         }
     }
 

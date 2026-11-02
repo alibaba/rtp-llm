@@ -40,9 +40,8 @@ import static org.mockito.Mockito.when;
 class SchedulingShutdownTest {
     static void registerComponents(AnnotationConfigApplicationContext context) {
         var scheduler = mock(RequestScheduler.class);
-        when(scheduler.lifecycle()).thenReturn(mock(RequestLifecycle.class));
-        when(scheduler.awaitSchedulingCompletion(anyLong())).thenReturn(true);
         context.registerBean(RequestScheduler.class, () -> scheduler);
+        context.registerBean(RequestLifecycle.class, () -> mock(RequestLifecycle.class));
         context.registerBean(RequestRepository.class, RequestRepository::new);
         context.registerBean(EndpointRegistry.class, () -> mock(EndpointRegistry.class));
         context.registerBean(DeliveryExecution.class, () -> mock(DeliveryExecution.class));
@@ -72,7 +71,6 @@ class SchedulingShutdownTest {
                         f.completions,
                         f.timer);
         order.verify(f.grpc).drain();
-        order.verify(f.scheduler).awaitSchedulingCompletion(anyLong());
         order.verify(f.scheduler).close();
         order.verify(f.owner).stopAdmissionsAndAwaitCompletion();
         order.verify(f.deliveries).awaitDeliveries();
@@ -177,8 +175,6 @@ class SchedulingShutdownTest {
 
         Fixture(RequestTaskPool tasks) {
             this.tasks = tasks;
-            when(scheduler.lifecycle()).thenReturn(owner);
-            when(scheduler.awaitSchedulingCompletion(anyLong())).thenReturn(true);
             application =
                     new ApplicationLifecycle(
                             mock(MasterStatusService.class),
@@ -195,7 +191,7 @@ class SchedulingShutdownTest {
                     deadlines,
                     completions,
                     timer,
-                    dispatcher);
+                    dispatcher, owner);
         }
     }
 }

@@ -145,7 +145,7 @@ class CustomDecodePreemptionContractTest {
                 .thenReturn(Map.of(first.requestId(), first, chosen.requestId(), chosen));
         var owner = mock(RequestLifecycle.class);
         var scheduler = mock(RequestScheduler.class);
-        when(owner.scheduler()).thenReturn(scheduler);
+        org.springframework.test.util.ReflectionTestUtils.setField(owner, "owner", scheduler);
         var dispatcher = mock(DeliveryDispatcher.class);
         var context = new RequestContext(config);
         context.data()

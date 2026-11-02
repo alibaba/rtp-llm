@@ -9,7 +9,7 @@ import org.flexlb.balance.scheduler.CancelReason;
 import org.flexlb.balance.scheduler.DeliveryClaimKind;
 import org.flexlb.balance.scheduler.RequestContext;
 import org.flexlb.balance.scheduler.RequestLifecycle;
-import org.flexlb.balance.scheduler.RequestScheduler;
+import org.flexlb.balance.scheduler.RequestSchedulerEntry;
 import org.flexlb.balance.scheduler.RequestState;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
@@ -61,7 +61,7 @@ class FlexlbServiceImplTest {
 
     private final java.util.concurrent.ScheduledExecutorService deadlineTimer =
             java.util.concurrent.Executors.newSingleThreadScheduledExecutor();
-    private RequestScheduler requestScheduler;
+    private RequestSchedulerEntry requestScheduler;
     private final RequestLifecycle requestState = mock(RequestLifecycle.class);
     private MasterStatusService masterStatusService;
     private EngineHealthReporter engineHealthReporter;
@@ -77,7 +77,7 @@ class FlexlbServiceImplTest {
     @BeforeEach
     void setUp() {
         org.flexlb.telemetry.FlexlbTrace.configure(io.opentelemetry.api.OpenTelemetry.noop(), "");
-        requestScheduler = mock(RequestScheduler.class);
+        requestScheduler = mock(RequestSchedulerEntry.class);
         masterStatusService = mock(MasterStatusService.class);
         engineHealthReporter = mock(EngineHealthReporter.class);
         grpcForwarder = mock(FlexlbGrpcForwarder.class);

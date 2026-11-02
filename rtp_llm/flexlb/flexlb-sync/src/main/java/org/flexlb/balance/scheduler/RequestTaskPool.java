@@ -7,18 +7,12 @@ import java.util.Objects;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
-import java.util.function.Consumer;
 
 import static com.google.common.base.Preconditions.checkState;
 
 /** Executes and accounts for request tasks, including cleanup continuations during shutdown. */
 public final class RequestTaskPool implements RequestTaskExecutor {
-    private final Consumer<Throwable> onFailure;
     private Throwable failure;
-
-    public RequestTaskPool() {
-        this.onFailure = this::recordFailure;
-    }
 
     void recordFailure(Throwable cause) {
         synchronized (workLifecycle) {
@@ -30,10 +24,6 @@ public final class RequestTaskPool implements RequestTaskExecutor {
         synchronized (workLifecycle) {
             Failures.rethrow(failure, "request work failed");
         }
-    }
-
-    RequestTaskPool(Consumer<Throwable> onFailure) {
-        this.onFailure = onFailure;
     }
 
     public boolean isExecutingOnCurrentThread() {
@@ -165,7 +155,7 @@ public final class RequestTaskPool implements RequestTaskExecutor {
                 }
                 started = true;
             }
-            onFailure.accept(cause);
+            recordFailure(cause);
             release();
         }
 
@@ -182,7 +172,7 @@ public final class RequestTaskPool implements RequestTaskExecutor {
             try {
                 work.run();
             } catch (Throwable failure) {
-                onFailure.accept(failure);
+                recordFailure(failure);
                 try {
                     Logger.error(
                             "Request work failed: request_id={}",

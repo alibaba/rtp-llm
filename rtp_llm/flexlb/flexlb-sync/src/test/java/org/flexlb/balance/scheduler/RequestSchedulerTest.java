@@ -80,7 +80,7 @@ class RequestSchedulerTest {
                         router,
                         org.flexlb.balance.eviction.DecodePreemptionTestSupport.mock(),
                         new PlacementAvailability());
-        RequestScheduler scheduler = owner.scheduler();
+        AbstractRequestScheduler scheduler = ((AbstractRequestScheduler) org.flexlb.balance.scheduler.SchedulerTestServices.scheduler(owner));
         try {
             RequestContext vision = context(config, 918L);
             vision.data()
@@ -89,7 +89,7 @@ class RequestSchedulerTest {
             Response selected = new Response();
             selected.setSuccess(true);
             when(router.routeVit(vision)).thenReturn(selected);
-            assertSame(selected, scheduler.submit(vision).join());
+            assertSame(selected, SchedulerTestServices.entry(scheduler).submit(vision).join());
             assertEquals(0, owner.requests.liveRequestCount());
             assertEquals(0, RequestProtocolTestSupport.queuedCount(scheduler));
             assertNull(vision.data().getScheduler());
@@ -100,7 +100,7 @@ class RequestSchedulerTest {
             missingPayload.data().setGenerateInputPb(null);
             assertEquals(
                     StrategyErrorType.GENERATE_INPUT_REQUIRED.getErrorCode(),
-                    scheduler.submit(missingPayload).join().getCode());
+                    SchedulerTestServices.entry(scheduler).submit(missingPayload).join().getCode());
             assertEquals(0, owner.requests.liveRequestCount());
 
             RequestContext pd = context(config, 918L);
@@ -110,7 +110,7 @@ class RequestSchedulerTest {
                                     Response.error(StrategyErrorType.NO_PREFILL_WORKER)));
             assertEquals(
                     StrategyErrorType.NO_PREFILL_WORKER.getErrorCode(),
-                    scheduler.submit(pd).get(5, TimeUnit.SECONDS).getCode());
+                    SchedulerTestServices.entry(scheduler).submit(pd).get(5, TimeUnit.SECONDS).getCode());
             assertSame(owner, pd.data().getScheduler());
             verify(router).select(pd, null);
         } finally {
@@ -138,7 +138,7 @@ class RequestSchedulerTest {
                         router,
                         org.flexlb.balance.eviction.DecodePreemptionTestSupport.mock(),
                         new PlacementAvailability());
-        RequestScheduler scheduler = owner.scheduler();
+        AbstractRequestScheduler scheduler = ((AbstractRequestScheduler) org.flexlb.balance.scheduler.SchedulerTestServices.scheduler(owner));
         try {
             RequestContext request = context(config, 919L);
             request.data()
@@ -148,7 +148,7 @@ class RequestSchedulerTest {
                                     .build());
             assertEquals(
                     StrategyErrorType.VIT_ROUTE_STALE.getErrorCode(),
-                    scheduler.submit(request).join().getCode());
+                    SchedulerTestServices.entry(scheduler).submit(request).join().getCode());
             assertNull(request.data().getScheduler());
             assertEquals(0, owner.requests.liveRequestCount());
             verify(router, never()).select(any(), any());
@@ -177,7 +177,7 @@ class RequestSchedulerTest {
                             assertTrue(context.data().getFuture().cancel(false));
                             throw new IllegalStateException("policy group unavailable");
                         });
-        RequestScheduler scheduler =
+        AbstractRequestScheduler scheduler =
                 RequestProtocolTestSupport.injectPlacementDependencies(
                         lifecycle,
                         service,
@@ -186,7 +186,7 @@ class RequestSchedulerTest {
                         org.flexlb.balance.eviction.DecodePreemptionTestSupport.mock(),
                         new PlacementAvailability());
         try {
-            CompletableFuture<Response> future = scheduler.submit(context);
+            CompletableFuture<Response> future = SchedulerTestServices.entry(scheduler).submit(context);
             assertTrue(future.isCancelled());
             RequestProtocolTestSupport.awaitCondition(
                     () -> lifecycle.requests.liveRequestCount() == 0);
@@ -475,7 +475,7 @@ class RequestSchedulerTest {
         org.mockito.Mockito.doReturn(PlacementResult.success(mock(RequestRoute.class)))
                 .when(RequestProtocolTestSupport.publication(lifecycle))
                 .enqueueRoute(RequestProtocolTestSupport.matchingPlan(healthy, healthyRoute));
-        RequestScheduler scheduler =
+        AbstractRequestScheduler scheduler =
                 RequestProtocolTestSupport.injectPlacementDependencies(
                         lifecycle,
                         service,
@@ -484,9 +484,9 @@ class RequestSchedulerTest {
                         org.flexlb.balance.eviction.DecodePreemptionTestSupport.mock(),
                         new PlacementAvailability());
         try {
-            scheduler.submit(unavailable);
+            SchedulerTestServices.entry(scheduler).submit(unavailable);
             verify(router, timeout(500)).select(unavailable, "unavailable-group");
-            scheduler.submit(healthy);
+            SchedulerTestServices.entry(scheduler).submit(healthy);
             verify(router, timeout(500)).select(healthy, healthyGroup);
             verify(RequestProtocolTestSupport.publication(lifecycle), timeout(500))
                     .enqueueRoute(RequestProtocolTestSupport.matchingPlan(healthy, healthyRoute));
@@ -579,7 +579,7 @@ class RequestSchedulerTest {
             execution.complete(result);
         }
         when(eviction.tryReclaim(context, selectedEndpoint)).thenReturn(execution);
-        RequestScheduler scheduler =
+        AbstractRequestScheduler scheduler =
                 RequestProtocolTestSupport.injectPlacementDependencies(
                         lifecycle,
                         configService,
@@ -589,7 +589,7 @@ class RequestSchedulerTest {
                         availability);
         CompletableFuture<Void> closing = null;
         try {
-            scheduler.submit(context);
+            SchedulerTestServices.entry(scheduler).submit(context);
             verify(eviction, timeout(1_000)).tryReclaim(context, selectedEndpoint);
             if (outcome.equals("cancelled")) {
                 assertTrue(future.cancel(false));
@@ -643,8 +643,7 @@ class RequestSchedulerTest {
             }
             Thread decision =
                     (Thread)
-                            org.springframework.test.util.ReflectionTestUtils.getField(
-                                    scheduler, "decisionThread");
+                            SchedulerTestSupport.decisionThread(scheduler);
             assertTrue(
                     publicationThreads.stream().allMatch(thread -> thread == decision),
                     "both initial publication and preemption completion belong to the decision thread");
@@ -712,7 +711,7 @@ class RequestSchedulerTest {
                                 Response.buildErrorResponse(
                                         StrategyErrorType.NO_PREFILL_WORKER, null)));
         PlacementAvailability availability = new PlacementAvailability();
-        RequestScheduler scheduler =
+        AbstractRequestScheduler scheduler =
                 RequestProtocolTestSupport.injectPlacementDependencies(
                         lifecycle,
                         configService,
@@ -721,7 +720,7 @@ class RequestSchedulerTest {
                         org.flexlb.balance.eviction.DecodePreemptionTestSupport.mock(),
                         availability);
         try {
-            scheduler.submit(context);
+            SchedulerTestServices.entry(scheduler).submit(context);
             verify(RequestProtocolTestSupport.publication(lifecycle), timeout(1_000))
                     .enqueueRoute(RequestProtocolTestSupport.matchingPlan(context, route));
             verify(router, after(100).times(1)).select(context, null);
@@ -764,7 +763,7 @@ class RequestSchedulerTest {
                         PlacementResult.rejected(
                                 Response.buildErrorResponse(
                                         StrategyErrorType.NO_PREFILL_WORKER, null)));
-        RequestScheduler scheduler =
+        AbstractRequestScheduler scheduler =
                 RequestProtocolTestSupport.injectPlacementDependencies(
                         lifecycle,
                         configService,
@@ -772,7 +771,7 @@ class RequestSchedulerTest {
                         mock(DeliveryMetricsReporter.class),
                         org.flexlb.balance.eviction.DecodePreemptionTestSupport.mock(),
                         new PlacementAvailability());
-        scheduler.submit(context);
+        SchedulerTestServices.entry(scheduler).submit(context);
         verify(router, timeout(1_000)).select(context, null);
         RequestProtocolTestSupport.close(scheduler);
     }
@@ -845,7 +844,7 @@ class RequestSchedulerTest {
                     .enqueueRoute(RequestProtocolTestSupport.matchingPlan(context, route));
             contexts.add(context);
         }
-        RequestScheduler scheduler =
+        AbstractRequestScheduler scheduler =
                 RequestProtocolTestSupport.injectPlacementDependencies(
                         lifecycle,
                         configService,
@@ -854,10 +853,10 @@ class RequestSchedulerTest {
                         org.flexlb.balance.eviction.DecodePreemptionTestSupport.mock(),
                         availability);
         try {
-            scheduler.submit(gate);
+            SchedulerTestServices.entry(scheduler).submit(gate);
             assertTrue(gatePlanningStarted.await(5, TimeUnit.SECONDS));
             for (RequestContext context : contexts) {
-                scheduler.submit(context);
+                SchedulerTestServices.entry(scheduler).submit(context);
             }
             releaseGatePlanning.countDown();
             assertTrue(
@@ -915,7 +914,7 @@ class RequestSchedulerTest {
                         PlacementResult.rejected(
                                 Response.buildErrorResponse(
                                         StrategyErrorType.NO_PREFILL_WORKER, null)));
-        RequestScheduler scheduler =
+        AbstractRequestScheduler scheduler =
                 RequestProtocolTestSupport.injectPlacementDependencies(
                         lifecycle,
                         configService,
@@ -924,9 +923,9 @@ class RequestSchedulerTest {
                         decodePreemption,
                         new PlacementAvailability());
         try {
-            scheduler.submit(lowPriority);
+            SchedulerTestServices.entry(scheduler).submit(lowPriority);
             verify(router, timeout(1_000)).select(lowPriority, null);
-            scheduler.submit(highPriority);
+            SchedulerTestServices.entry(scheduler).submit(highPriority);
             verify(router, timeout(1_000)).select(highPriority, null);
             assertFalse(lowFuture.isDone());
         } finally {
@@ -978,7 +977,7 @@ class RequestSchedulerTest {
         when(lifecycle.claimAdmissionHandle(802L, followerFuture))
                 .thenReturn(mock(AdmissionHandle.class));
         when(router.select(any(), any())).thenReturn(PlacementResult.blocked(blocker));
-        RequestScheduler scheduler =
+        AbstractRequestScheduler scheduler =
                 RequestProtocolTestSupport.injectPlacementDependencies(
                         lifecycle,
                         configService,
@@ -986,8 +985,8 @@ class RequestSchedulerTest {
                         mock(DeliveryMetricsReporter.class),
                         org.flexlb.balance.eviction.DecodePreemptionTestSupport.mock(),
                         availability);
-        scheduler.submit(expired);
-        scheduler.submit(follower);
+        SchedulerTestServices.entry(scheduler).submit(expired);
+        SchedulerTestServices.entry(scheduler).submit(follower);
         // Both independent requests may plan before the capacity event. Wait for
         // actual park registration so the event represents exactly one retry.
         RequestProtocolTestSupport.awaitGlobalCapacityWaiters(scheduler, 2);
@@ -1065,7 +1064,7 @@ class RequestSchedulerTest {
                 .when(RequestProtocolTestSupport.publication(lifecycle))
                 .enqueueRoute(
                         RequestProtocolTestSupport.matchingPlan(independent, independentRoute));
-        RequestScheduler scheduler =
+        AbstractRequestScheduler scheduler =
                 RequestProtocolTestSupport.injectPlacementDependencies(
                         lifecycle,
                         configService,
@@ -1074,8 +1073,8 @@ class RequestSchedulerTest {
                         org.flexlb.balance.eviction.DecodePreemptionTestSupport.mock(),
                         availability);
         try {
-            scheduler.submit(blocked);
-            scheduler.submit(independent);
+            SchedulerTestServices.entry(scheduler).submit(blocked);
+            SchedulerTestServices.entry(scheduler).submit(independent);
             verify(RequestProtocolTestSupport.publication(lifecycle), timeout(1_000).times(1))
                     .enqueueRoute(RequestProtocolTestSupport.matchingPlan(blocked, blockedRoute));
             verify(RequestProtocolTestSupport.publication(lifecycle), timeout(1_000))
@@ -1247,7 +1246,7 @@ class RequestSchedulerTest {
                         return null;
                     };
             try {
-                fixture.scheduler.submit(first.context);
+                SchedulerTestServices.entry(fixture.scheduler).submit(first.context);
                 assertTrue(publicationStarted.await(5, TimeUnit.SECONDS));
                 fixture.releaseSlots(1);
                 assertTrue(headFuture.complete(new Response()));
@@ -1256,7 +1255,7 @@ class RequestSchedulerTest {
                         callbacks.size(),
                         "the queue must not attach a second lifecycle callback");
                 CapacityRequest second = fixture.createRequest(841L, independent);
-                fixture.scheduler.submit(second.context);
+                SchedulerTestServices.entry(fixture.scheduler).submit(second.context);
                 allowPublication.countDown();
                 second.future.get(5, TimeUnit.SECONDS);
                 // Ready waiters progress without another event or completion callback.
@@ -1330,7 +1329,7 @@ class RequestSchedulerTest {
         org.mockito.Mockito.doReturn(PlacementResult.success(committed))
                 .when(RequestProtocolTestSupport.publication(lifecycle))
                 .enqueueRoute(RequestProtocolTestSupport.matchingPlan(context, freshRoute));
-        RequestScheduler scheduler =
+        AbstractRequestScheduler scheduler =
                 RequestProtocolTestSupport.injectPlacementDependencies(
                         lifecycle,
                         configService,
@@ -1339,7 +1338,7 @@ class RequestSchedulerTest {
                         org.flexlb.balance.eviction.DecodePreemptionTestSupport.mock(),
                         availability);
         try {
-            scheduler.submit(context);
+            SchedulerTestServices.entry(scheduler).submit(context);
             verify(RequestProtocolTestSupport.publication(lifecycle), timeout(1_000))
                     .enqueueRoute(RequestProtocolTestSupport.matchingPlan(context, freshRoute));
             verify(router, times(2)).select(context, null);
@@ -1356,7 +1355,7 @@ class RequestSchedulerTest {
                     .thenThrow(
                             new IllegalStateException(
                                     "configuration unavailable after initialization"));
-            CompletableFuture<Response> future = fixture.scheduler.submit(fixture.context);
+            CompletableFuture<Response> future = SchedulerTestServices.entry(fixture.scheduler).submit(fixture.context);
 
             assertSame(fixture.future, future);
             assertEquals(
@@ -1374,7 +1373,7 @@ class RequestSchedulerTest {
         Fixture fixture = new Fixture(true);
 
         Response response =
-                fixture.scheduler.submit(fixture.context).orTimeout(3, TimeUnit.SECONDS).join();
+                SchedulerTestServices.entry(fixture.scheduler).submit(fixture.context).orTimeout(3, TimeUnit.SECONDS).join();
 
         assertEquals(StrategyErrorType.NO_PREFILL_WORKER.getErrorCode(), response.getCode());
         verify(fixture.router, timeout(1_000)).select(fixture.context, null);
@@ -1387,7 +1386,7 @@ class RequestSchedulerTest {
         Fixture fixture = new Fixture(true);
         when(fixture.router.select(fixture.context, null))
                 .thenReturn(PlacementResult.blocked(PlacementKey.anyGroup(RoleType.PREFILL)));
-        CompletableFuture<Response> waiting = fixture.scheduler.submit(fixture.context);
+        CompletableFuture<Response> waiting = SchedulerTestServices.entry(fixture.scheduler).submit(fixture.context);
 
         verify(fixture.router, timeout(1_000)).select(fixture.context, null);
         verify(fixture.decodePreemption, never()).tryReclaim(any(), any());
@@ -1401,7 +1400,7 @@ class RequestSchedulerTest {
         Fixture fixture = new Fixture(false);
         when(fixture.router.select(fixture.context, null))
                 .thenReturn(PlacementResult.blocked(PlacementKey.anyGroup(RoleType.DECODE)));
-        CompletableFuture<Response> waiting = fixture.scheduler.submit(fixture.context);
+        CompletableFuture<Response> waiting = SchedulerTestServices.entry(fixture.scheduler).submit(fixture.context);
 
         verify(fixture.router, timeout(1_000)).select(fixture.context, null);
         assertFalse(waiting.isDone());
@@ -1416,7 +1415,7 @@ class RequestSchedulerTest {
         when(fixture.router.select(fixture.context, null))
                 .thenThrow(new IllegalStateException("selector failed"));
 
-        CompletableFuture<Response> returned = fixture.scheduler.submit(fixture.context);
+        CompletableFuture<Response> returned = SchedulerTestServices.entry(fixture.scheduler).submit(fixture.context);
 
         assertEquals(fixture.future, returned);
         assertEquals(StrategyErrorType.DISPATCH_FAILED.getErrorCode(), returned.join().getCode());
@@ -1489,7 +1488,7 @@ class RequestSchedulerTest {
 
         private final CompletableFuture<Response> headFuture;
 
-        private final RequestScheduler scheduler;
+        private final AbstractRequestScheduler scheduler;
 
         private final FlexlbConfig config;
 
@@ -1659,7 +1658,7 @@ class RequestSchedulerTest {
 
         private void submitBlockedRequests() throws InterruptedException {
             for (CapacityRequest request : requests) {
-                scheduler.submit(request.context);
+                SchedulerTestServices.entry(scheduler).submit(request.context);
             }
             RequestProtocolTestSupport.awaitGlobalCapacityWaiters(scheduler, requests.size());
         }
@@ -1683,7 +1682,7 @@ class RequestSchedulerTest {
             long requestId = nextIndependentId++;
             PrefillEndpoint independent = mockPrefillEndpoint("independent-" + requestId, 8080);
             CapacityRequest request = createRequest(requestId, independent);
-            scheduler.submit(request.context);
+            SchedulerTestServices.entry(scheduler).submit(request.context);
             request.future.get(5, TimeUnit.SECONDS);
         }
 
@@ -1752,7 +1751,7 @@ class RequestSchedulerTest {
 
         private final CompletableFuture<Response> future = new CompletableFuture<>();
 
-        private final RequestScheduler scheduler;
+        private final AbstractRequestScheduler scheduler;
 
         private Fixture(boolean priority) {
             if (priority) {

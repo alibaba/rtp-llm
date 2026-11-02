@@ -32,7 +32,7 @@ public final class EndpointTestSupport {
 
     public static void awaitRetirement(WorkerEndpoint endpoint) {
         Object lifecycle = ReflectionTestUtils.getField(endpoint, "generationLifecycle");
-        ReflectionTestUtils.invokeMethod(lifecycle, "awaitRetirement");
+        ReflectionTestUtils.invokeMethod(lifecycle, "awaitRetirement", 30_000L);
     }
 
     public static List<DecodeResources.DecodeRoutingView> decodeRoutingSnapshot(
@@ -306,7 +306,7 @@ public final class EndpointTestSupport {
         }
         var worker =
                 org.mockito.Mockito.mock(
-                        org.flexlb.balance.scheduler.PrefillQueueRunner.class,
+                        org.flexlb.balance.scheduler.RequestExecution.class,
                         org.mockito.Mockito.withSettings()
                                 .useConstructor(
                                         status.getIpPort(),
@@ -332,7 +332,7 @@ public final class EndpointTestSupport {
                 .when(worker)
                 .offer(org.mockito.ArgumentMatchers.any());
         org.flexlb.balance.scheduler.DeliveryTestSupport.installQueueFixture(worker, delivery);
-        org.springframework.test.util.ReflectionTestUtils.setField(endpoint, "queueRunner", worker);
+        org.springframework.test.util.ReflectionTestUtils.setField(endpoint, "requestExecution", worker);
         org.springframework.test.util.ReflectionTestUtils.setField(
                 endpoint,
                 "queueSettings",
@@ -345,10 +345,10 @@ public final class EndpointTestSupport {
         return endpoint;
     }
 
-    public static org.flexlb.balance.scheduler.PrefillQueueRunner queueRunner(
+    public static org.flexlb.balance.scheduler.RequestExecution requestExecution(
             PrefillEndpoint endpoint) {
-        return (org.flexlb.balance.scheduler.PrefillQueueRunner)
-                org.springframework.test.util.ReflectionTestUtils.getField(endpoint, "queueRunner");
+        return (org.flexlb.balance.scheduler.RequestExecution)
+                org.springframework.test.util.ReflectionTestUtils.getField(endpoint, "requestExecution");
     }
 
     public static DecodeEndpoint decode(
@@ -430,7 +430,7 @@ public final class EndpointTestSupport {
                             GenerationPin pin,
                             RequestRoute route,
                             org.flexlb.balance.scheduler.QueueExecutionSettings settings,
-                            org.flexlb.balance.scheduler.PrefillQueueRunner.Dependencies
+                            org.flexlb.balance.scheduler.RequestExecution.Dependencies
                                     dependencies) {
                         enableQueueRuntime(this, settings, dependencies);
                         return super.offerPinned(pin, route, settings, dependencies);
@@ -443,11 +443,11 @@ public final class EndpointTestSupport {
     public static void enableQueueRuntime(
             PrefillEndpoint endpoint,
             org.flexlb.balance.scheduler.QueueExecutionSettings settings,
-            org.flexlb.balance.scheduler.PrefillQueueRunner.Dependencies dependencies) {
+            org.flexlb.balance.scheduler.RequestExecution.Dependencies dependencies) {
         var state = endpoint.ownership;
         state.queueGuard().lock();
         try {
-            if (queueRunner(endpoint) != null) {
+            if (requestExecution(endpoint) != null) {
                 return;
             }
             state.enableQueueLocked(
@@ -461,7 +461,7 @@ public final class EndpointTestSupport {
                                     endpoint, "dispatcher");
             var worker =
                     org.mockito.Mockito.mock(
-                            org.flexlb.balance.scheduler.PrefillQueueRunner.class,
+                            org.flexlb.balance.scheduler.RequestExecution.class,
                             org.mockito.Mockito.withSettings()
                                     .useConstructor(
                                             endpoint.ipPort(),
@@ -473,7 +473,7 @@ public final class EndpointTestSupport {
                                     .defaultAnswer(org.mockito.Mockito.CALLS_REAL_METHODS));
             org.flexlb.balance.scheduler.DeliveryTestSupport.installQueueFixture(worker, delivery);
             org.springframework.test.util.ReflectionTestUtils.setField(
-                    endpoint, "queueRunner", worker);
+                    endpoint, "requestExecution", worker);
             org.springframework.test.util.ReflectionTestUtils.setField(
                     endpoint, "queueSettings", settings);
             org.springframework.test.util.ReflectionTestUtils.setField(
@@ -613,10 +613,10 @@ public final class EndpointTestSupport {
                             item.ctx().data().getConfig(),
                             org.flexlb.balance.planner.BuiltinGroupPlanner.from(
                                     item.ctx().data().getConfig())),
-                    queueRunner(endpoint) != null
-                            ? (org.flexlb.balance.scheduler.PrefillQueueRunner.Dependencies)
+                    requestExecution(endpoint) != null
+                            ? (org.flexlb.balance.scheduler.RequestExecution.Dependencies)
                                     org.springframework.test.util.ReflectionTestUtils.getField(
-                                            queueRunner(endpoint), "dependencies")
+                                            requestExecution(endpoint), "dependencies")
                             : org.flexlb.balance.scheduler.SchedulerTestSupport.queueDependencies(
                                     item.ctx().data().getScheduler(),
                                     item.ctx().data().getConfig()));

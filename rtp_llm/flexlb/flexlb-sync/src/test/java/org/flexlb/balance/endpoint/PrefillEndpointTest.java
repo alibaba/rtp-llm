@@ -98,8 +98,8 @@ class PrefillEndpointTest {
         var dependencies =
                 org.flexlb.balance.scheduler.SchedulerTestSupport.queueDependencies(
                         requestRuntime.events(), config);
-        var worker = mock(org.flexlb.balance.scheduler.PrefillQueueRunner.class);
-        org.springframework.test.util.ReflectionTestUtils.setField(endpoint, "queueRunner", worker);
+        var worker = mock(org.flexlb.balance.scheduler.RequestExecution.class);
+        org.springframework.test.util.ReflectionTestUtils.setField(endpoint, "requestExecution", worker);
         org.springframework.test.util.ReflectionTestUtils.setField(
                 endpoint, "queueSettings", settings);
         org.springframework.test.util.ReflectionTestUtils.setField(
@@ -215,7 +215,7 @@ class PrefillEndpointTest {
         directConfig.setDispatcher(ConfigTestSupport.nonBatch());
         PrefillEndpoint direct = routeEndpoint(directConfig, "127.0.0.8");
         try {
-            assertNull(EndpointTestSupport.queueRunner(direct));
+            assertNull(EndpointTestSupport.requestExecution(direct));
             var empty = direct.captureRouteProjectionInputs();
             assertFalse(empty.queue().queueScheduling());
             assertSame(empty, direct.captureRouteProjectionInputs());
@@ -704,7 +704,7 @@ class PrefillEndpointTest {
                             return null;
                         })
                 .when(availability)
-                .changed(org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.any());
+                .changed(org.mockito.ArgumentMatchers.any());
         var first = createRequestRoute(90L, 100L, 0L);
         PrefillState.RouteReservation open;
         try (var pin = endpoint.tryPinGeneration()) {
@@ -755,7 +755,7 @@ class PrefillEndpointTest {
                             return null;
                         })
                 .when(availability)
-                .changed(org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.any());
+                .changed(org.mockito.ArgumentMatchers.any());
         var first = createRequestRoute(90L, 100L, 0L);
         var preparation = EndpointTestSupport.reserveUnqueued(endpoint, first, 10L);
         assertTrue(endpoint.release(null, first));
@@ -2018,7 +2018,7 @@ class PrefillEndpointTest {
                 org.flexlb.balance.scheduler.SchedulerTestSupport.queueDependencies(
                         runtime.events(), routeConfig));
         org.flexlb.balance.scheduler.DeliveryTestSupport.afterSelection(
-                EndpointTestSupport.queueRunner(routeEndpoint),
+                EndpointTestSupport.requestExecution(routeEndpoint),
                 items -> {
                     firstPreparation.countDown();
                 });
@@ -2077,7 +2077,7 @@ class PrefillEndpointTest {
                 org.flexlb.balance.scheduler.SchedulerTestSupport.queueDependencies(
                         runtime.events(), routeConfig));
         org.flexlb.balance.scheduler.DeliveryTestSupport.afterSelection(
-                EndpointTestSupport.queueRunner(routeEndpoint),
+                EndpointTestSupport.requestExecution(routeEndpoint),
                 items -> {
                     preparationCount.incrementAndGet();
                     firstPreparation.countDown();
