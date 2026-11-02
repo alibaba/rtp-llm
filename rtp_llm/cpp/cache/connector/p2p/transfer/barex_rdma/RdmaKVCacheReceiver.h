@@ -29,7 +29,8 @@ public:
               int      rdma_max_block_pairs_per_connection = 0,
               int      tcp_anet_rpc_thread_num               = 3,
               int      tcp_anet_rpc_queue_num                = 100,
-              int64_t  wait_check_interval_us                = 1000);
+              int64_t  wait_check_interval_us              = 1000,
+              uint32_t tcp_worker_queue_size               = 500);
 
     /// @brief 将 block 内存注册为 RDMA MR
     bool                regMem(const BlockInfo& block_info, uint64_t aligned_size = 0) override;
@@ -58,7 +59,8 @@ private:
                         int      tcp_io_thread_count,
                         int      tcp_worker_thread_count,
                         int      tcp_anet_rpc_thread_num = 3,
-                        int      tcp_anet_rpc_queue_num  = 100);
+                        int      tcp_anet_rpc_queue_num  = 100,
+                        uint32_t tcp_worker_queue_size   = 500);
 
 private:
     std::shared_ptr<TcpServer>           tcp_server_;

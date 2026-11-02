@@ -158,19 +158,18 @@ class PCPAll2AllAttnOp:
                 for i, cl in enumerate(chunk_lens)
             ]
         )
-        # CP shuffle indices are relative to this new-token window. Only valid
-        # rows are appended, at absolute positions after the cached prefix.
+        # The CP planner publishes absolute positions, including cached prefixes.
+        # Filter padding against each request's new-token interval.
         new_lengths = self.cp_info.prefill_actual_input_lengths_cpu.to(self.device)
         prefix_lengths = attention_inputs.prefix_lengths.to(self.device)
-        valid = (self.all_shuffle_indices >= 0) & (
-            self.all_shuffle_indices < new_lengths[self.append_batch_indice]
+        window_start = prefix_lengths[self.append_batch_indice]
+        valid = (self.all_shuffle_indices >= window_start) & (
+            self.all_shuffle_indices < window_start + new_lengths[self.append_batch_indice]
         )
         self.append_indices = [
             torch.nonzero(rank_valid, as_tuple=True)[0] for rank_valid in valid
         ]
-        self.append_positions = (
-            self.all_shuffle_indices + prefix_lengths[self.append_batch_indice]
-        )
+        self.append_positions = self.all_shuffle_indices
 
         self.has_prefix = self.attn_inputs.prefix_lengths.any().item()
         if self.has_prefix:

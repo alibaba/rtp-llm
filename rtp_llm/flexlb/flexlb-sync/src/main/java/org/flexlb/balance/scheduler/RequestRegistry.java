@@ -577,9 +577,15 @@ public class RequestRegistry {
 
     private static CancelTarget cancelTarget(ScheduledRequest item) {
         ServerStatus prefill = item == null ? null : item.prefill();
-        return prefill == null
-                ? null
-                : new CancelTarget(prefill.getServerIp(), prefill.getGrpcPort());
+        ServerStatus decode = item == null ? null : item.decode();
+        if (prefill == null || decode == null || prefill.getServerIp() == null
+                || prefill.getServerIp().isBlank() || prefill.getGrpcPort() <= 0) {
+            return null;
+        }
+        String ip = prefill.getServerIp();
+        String host = ip.contains(":") && !ip.startsWith("[") ? "[" + ip + "]" : ip;
+        return new CancelTarget(
+                decode.getServerIp(), decode.getGrpcPort(), host + ":" + prefill.getGrpcPort());
     }
 
     public int liveRequestCount() {

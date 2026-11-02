@@ -357,7 +357,7 @@ public class EngineGrpcClient extends AbstractGrpcClient {
     }
 
     /**
-     * AutoTPM priority-preemption Cancel to the victim's original Prefill.
+     * AutoTPM priority-preemption Cancel to Decode, carrying the original Prefill route.
      * No transport retry (channel is built with disableRetry); idempotency
      * rides on request_id.
      */

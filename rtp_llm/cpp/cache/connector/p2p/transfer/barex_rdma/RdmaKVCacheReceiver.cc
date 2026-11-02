@@ -24,14 +24,16 @@ bool RdmaKVCacheReceiver::startTcpServer(uint32_t listen_port,
                                          int      tcp_io_thread_count,
                                          int      tcp_worker_thread_count,
                                          int      tcp_anet_rpc_thread_num,
-                                         int      tcp_anet_rpc_queue_num) {
+                                         int      tcp_anet_rpc_queue_num,
+                                         uint32_t tcp_worker_queue_size) {
     tcp_server_ = std::make_shared<transfer::TcpServer>();
     if (!tcp_server_->init(tcp_io_thread_count,
                            tcp_worker_thread_count,
                            listen_port,
                            true,
                            static_cast<uint32_t>(tcp_anet_rpc_thread_num),
-                           static_cast<uint32_t>(tcp_anet_rpc_queue_num))) {
+                           static_cast<uint32_t>(tcp_anet_rpc_queue_num),
+                           tcp_worker_queue_size)) {
         RTP_LLM_LOG_WARNING("create tcp server failed");
         return false;
     }
@@ -55,7 +57,8 @@ bool RdmaKVCacheReceiver::init(uint32_t listen_port,
                                int      rdma_max_block_pairs_per_connection,
                                int      tcp_anet_rpc_thread_num,
                                int      tcp_anet_rpc_queue_num,
-                               int64_t  wait_check_interval_us) {
+                               int64_t  wait_check_interval_us,
+                               uint32_t tcp_worker_queue_size) {
     rdma_client_ = createRdmaClient(
         rdma_memory_manager_, rdma_io_thread_count, rdma_worker_thread_count, rdma_connections_per_host);
     if (!rdma_client_) {
@@ -78,7 +81,8 @@ bool RdmaKVCacheReceiver::init(uint32_t listen_port,
                         tcp_io_thread_count,
                         tcp_worker_thread_count,
                         tcp_anet_rpc_thread_num,
-                        tcp_anet_rpc_queue_num)) {
+                        tcp_anet_rpc_queue_num,
+                        tcp_worker_queue_size)) {
         return false;
     }
 

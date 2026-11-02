@@ -56,6 +56,7 @@ from rtp_llm.utils.base_model_datatypes import (
 )
 from rtp_llm.utils.grpc_host_channel_pool import GrpcHostChannelPool
 from rtp_llm.utils.grpc_util import (
+    trans_from_tensor,
     trans_option,
     trans_option_cast,
     trans_tensor,
@@ -1472,23 +1473,16 @@ class ModelRpcClient(object):
             if self._role_type in (RoleType.PDFUSION, RoleType.PREFILL, RoleType.DECODE)
             else None
         )
-        address_list = self._addresses
+        address_list, target_address, response_role_addrs = (
+            self._select_address_and_response_role_addrs(input_py)
+        )
         for role_addr in input_py.generate_config.role_addrs:
             if role_addr.role in (RoleType.DECODE, RoleType.PDFUSION) and role_addr.ip:
-                address_list = [_format_host_port(role_addr.ip, role_addr.grpc_port)]
                 selected_role = role_addr.role
                 break
-
-        if not address_list:
-            raise ValueError(f"No address found for request: {input_py.request_id}")
-        # Select target address before entering the try block so it is always
-        # available to the error handlers below (surfaced in logs only)
-        # details to identify which backend peer dropped the connection).
-        target_address = address_list[input_py.request_id % len(address_list)]
         logging.debug(
             f"request: [{input_py.request_id}] send to address: {target_address}"
         )
-        response_role_addrs = self._build_response_role_addrs(input_py, target_address)
         stream_done = False
         terminal_seen = False
         terminal_read_task = None

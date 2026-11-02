@@ -70,12 +70,14 @@ class TestPCPAll2AllAttnOp(unittest.TestCase):
         cp_size: int,
         rank: int,
         device: torch.device = torch.device("cuda"),
+        prefix_lengths: List[int] | None = None,
     ) -> torch.Tensor:
         indices: List[int] = []
-        # Match the C++ CP planner: shuffle indices are window-relative.
-        for new_len in new_lengths:
+        # Match the C++ CP planner's absolute positions; retain padding sentinels.
+        prefixes = prefix_lengths if prefix_lengths is not None else [0] * len(new_lengths)
+        for new_len, prefix in zip(new_lengths, prefixes):
             positions = zigzag_positions_for_rank(new_len, cp_size, rank)
-            indices.extend(positions)
+            indices.extend(pos + prefix if pos >= 0 else pos for pos in positions)
         return torch.tensor(indices, dtype=torch.int32, device=device)
 
     # ---- mock builders ----
@@ -344,6 +346,7 @@ class TestPCPAll2AllAttnOp(unittest.TestCase):
                 cp_size,
                 r,
                 device=self.device,
+                prefix_lengths=prefix_lengths,
             )
             for r in range(cp_size)
         ]

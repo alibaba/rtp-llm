@@ -427,6 +427,30 @@ class ModelRpcClientTest(TestCase):
             responses.extend(res.generate_outputs)
         return responses
 
+    def test_trans_input_serializes_v41_image_patches(self):
+        image = SimpleNamespace(
+            start=0,
+            n_vit_h=1,
+            n_vit_w=1,
+            types=torch.tensor([1], dtype=torch.int32),
+            patches=torch.tensor([[1.0, 2.0]], dtype=torch.float32),
+            content_sha256="image-content",
+            processor_identity="processor",
+        )
+        request = GenerateInput(
+            request_id=42,
+            token_ids=torch.tensor([1], dtype=torch.int32),
+            generate_config=GenerateConfig(max_new_tokens=1),
+        )
+        request.v41_inputs = SimpleNamespace(
+            token_types=[1], image_mask=torch.tensor([True]), images=[image]
+        )
+        actual = trans_input(request).v41_inputs
+        self.assertEqual(len(actual.images), 1)
+        self.assertEqual(actual.images[0].content_sha256, image.content_sha256)
+        self.assertEqual(actual.images[0].patches.shape, [1, 2])
+        self.assertEqual(actual.images[0].patches.fp32_data, image.patches.numpy().tobytes())
+
     def test_trans_input_serializes_typed_request_info(self):
         input_py = GenerateInput(
             request_id=123,
@@ -1843,6 +1867,24 @@ class ModelRpcClientTest(TestCase):
                 )
                 self.assertIn("request_id=326", caught.exception.message)
                 self.assertIn("DECODE or PDFUSION", caught.exception.message)
+
+    def test_streaming_frontend_incomplete_route_is_rejected(self):
+        client = ModelRpcClient(["local:9000"], {}, role_type=RoleType.FRONTEND)
+        request = GenerateInput(
+            token_ids=torch.tensor([1, 2]),
+            generate_config=GenerateConfig(
+                role_addrs=[_prefill_role_addr("prefill", 9001)]
+            ),
+            request_id=328,
+            mm_inputs=[],
+        )
+        async def consume():
+            async for _ in client.enqueue(request):
+                self.fail("incomplete routing must not produce an output")
+
+        with self.assertRaises(FtRuntimeException) as caught:
+            asyncio.run(consume())
+        self.assertEqual(caught.exception.exception_type, ExceptionType.ROUTE_ERROR)
 
     def test_pdfusion_without_explicit_route_keeps_local_execution(self):
         client = ModelRpcClient(["fusion:9000"], {}, role_type=RoleType.PDFUSION)

@@ -2,6 +2,7 @@
 
 #include <chrono>
 #include <cstdint>
+#include <utility>
 
 #include "rtp_llm/cpp/cache/connector/p2p/transfer/barex_rdma/RdmaInterface.h"
 #include "rtp_llm/cpp/cache/connector/p2p/transfer/tcp/TcpKVCacheSender.h"
@@ -16,7 +17,10 @@ namespace transfer {
 namespace {
 
 TransferBackendPair createTcpBackend(const TransferBackendConfig&       config,
+                                     TransferBackendRole                 role,
                                      const kmonitor::MetricsReporterPtr& metrics_reporter) {
+    TransferBackendPair result;
+    if (role == TransferBackendRole::kSender) {
     auto sender = std::make_shared<tcp::TcpKVCacheSender>(metrics_reporter);
     const auto idle_ms = config.tcp_channel_idle_ttl_ms > 0 ? config.tcp_channel_idle_ttl_ms : int64_t{0};
     const auto sweep_n = config.tcp_channel_sweep_interval_calls > 0
@@ -28,31 +32,39 @@ TransferBackendPair createTcpBackend(const TransferBackendConfig&       config,
         RTP_LLM_LOG_ERROR("createTcpBackend: TcpKVCacheSender init failed");
         return {};
     }
-
+        result.sender = std::move(sender);
+    } else {
     auto receiver = std::make_shared<tcp::TcpKVCacheReceiver>(metrics_reporter);
     if (!receiver->init(config.cache_store_listen_port,
                         config.messager_io_thread_count,
                         config.messager_worker_thread_count,
                         static_cast<uint32_t>(config.cache_store_tcp_anet_rpc_thread_num),
                         static_cast<uint32_t>(config.cache_store_tcp_anet_rpc_queue_num),
-                        config.transfer_wait_check_interval_us)) {
+                            config.transfer_wait_check_interval_us,
+                            static_cast<uint32_t>(config.cache_store_tcp_worker_queue_size))) {
         RTP_LLM_LOG_ERROR("createTcpBackend: TcpKVCacheReceiver init failed");
         return {};
     }
-
-    return {sender, receiver};
+        result.receiver = std::move(receiver);
+    }
+    return result;
 }
 
 TransferBackendPair createBarexRdmaBackend(const TransferBackendConfig&       config,
+                                           TransferBackendRole                 role,
                                            const kmonitor::MetricsReporterPtr& metrics_reporter) {
     auto memory_manager = barex_rdma::createRdmaMemoryManager();
 
+    if (role == TransferBackendRole::kSender) {
     auto sender = std::make_shared<barex_rdma::RdmaKVCacheSender>(memory_manager, metrics_reporter);
     if (!sender->init(config.messager_io_thread_count,
                       config.messager_io_thread_count,
                       config.messager_worker_thread_count)) {
         RTP_LLM_LOG_ERROR("createBarexRdmaBackend: RdmaKVCacheSender init failed");
         return {};
+    }
+
+        return {sender, nullptr};
     }
 
     auto receiver = std::make_shared<barex_rdma::RdmaKVCacheReceiver>(memory_manager, metrics_reporter);
@@ -65,24 +77,26 @@ TransferBackendPair createBarexRdmaBackend(const TransferBackendConfig&       co
                         config.rdma_max_block_pairs_per_connection,
                         config.cache_store_tcp_anet_rpc_thread_num,
                         config.cache_store_tcp_anet_rpc_queue_num,
-                        config.transfer_wait_check_interval_us)) {
+                        config.transfer_wait_check_interval_us,
+                        static_cast<uint32_t>(config.cache_store_tcp_worker_queue_size))) {
         RTP_LLM_LOG_ERROR("createBarexRdmaBackend: RdmaKVCacheReceiver init failed");
         return {};
     }
 
-    return {sender, receiver};
+    return {nullptr, receiver};
 }
 
 }  // anonymous namespace
 
 TransferBackendPair createTransferBackend(TransferBackend                     backend,
                                           const TransferBackendConfig&         config,
+                                          TransferBackendRole                 role,
                                           const kmonitor::MetricsReporterPtr& metrics_reporter) {
     switch (backend) {
         case TransferBackend::kTcp:
-            return createTcpBackend(config, metrics_reporter);
+            return createTcpBackend(config, role, metrics_reporter);
         case TransferBackend::kBarexRdma:
-            return createBarexRdmaBackend(config, metrics_reporter);
+            return createBarexRdmaBackend(config, role, metrics_reporter);
         default:
             RTP_LLM_LOG_ERROR("createTransferBackend: unknown backend");
             return {};

@@ -111,7 +111,7 @@ namespace {
 
 torch::Tensor buildFirstTokenUpdateTokens(GenerateStream* stream, int32_t first_token_id) {
     const auto next_batch_size = static_cast<int64_t>(stream->nextBatchSize());
-    if (!stream->hasNumBeams()) {
+    if (!stream->usesBeamSearchTokenLayoutForCurrentStep()) {
         auto tokens = torch::empty({next_batch_size, 1}, torch::kInt32);
         std::fill(tokens.data_ptr<int32_t>(), tokens.data_ptr<int32_t>() + next_batch_size, first_token_id);
         return tokens;

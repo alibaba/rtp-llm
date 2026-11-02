@@ -1,6 +1,9 @@
 package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.PlacementResult;
+import org.flexlb.balance.preemption.CancelTarget;
+import org.flexlb.dao.loadbalance.ServerStatus;
+import org.springframework.test.util.ReflectionTestUtils;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.scheduler.RequestLifecycleTestSupport.Registered;
 import org.flexlb.balance.scheduler.RequestSlot.AdmissionHandle;
@@ -68,6 +71,28 @@ class RequestRegistryTest {
             lifecycle.closeExpiration();
             lifecycle.closePublisher();
         }
+    }
+
+    @Test
+    void cancelTargetUsesDecodeAndPreservesIpv6PrefillControlRoute() {
+        ServerStatus prefill = mock(ServerStatus.class);
+        when(prefill.getServerIp()).thenReturn("2001:db8::1");
+        when(prefill.getGrpcPort()).thenReturn(9090);
+        ServerStatus decode = mock(ServerStatus.class);
+        when(decode.getServerIp()).thenReturn("10.0.0.2");
+        when(decode.getGrpcPort()).thenReturn(9091);
+        ScheduledRequest item = new ScheduledRequest(
+                context(100L), new CompletableFuture<>(), new Response(),
+                prefill, decode, null, mock(DecodeEndpoint.class),
+                new DecodeEndpoint.ReservationHandle(1L, 100L, 1L),
+                System.currentTimeMillis());
+
+        CancelTarget target = ReflectionTestUtils.invokeMethod(
+                RequestRegistry.class, "cancelTarget", item);
+
+        assertNotNull(target);
+        assertTrue(target.isRoutable());
+        assertEquals(new CancelTarget("10.0.0.2", 9091, "[2001:db8::1]:9090"), target);
     }
 
     @Test
