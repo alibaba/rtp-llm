@@ -480,22 +480,23 @@ def _validate_inputs(
         ("out_indices", out_indices, (T, topk), torch.int64),
         ("out_weights", out_weights, (T, topk), torch.float32),
     )
+    device = x.device
     for name, tensor, expected_shape, expected_dtype in specs:
         if not tensor.is_cuda:
             raise RuntimeError(
                 f"fused MegaMoE input packer requires CUDA tensors; {name} "
                 f"is on {tensor.device}"
             )
-        if tensor.device != x.device:
-            raise ValueError(f"{name} must be on {x.device}, got {tensor.device}")
-        if tuple(tensor.shape) != expected_shape:
+        if tensor.device != device:
+            raise ValueError(f"{name} must be on {device}, got {tensor.device}")
+        if tensor.shape != expected_shape:
             raise ValueError(
                 f"{name} shape mismatch: expected {expected_shape}, "
                 f"got {tuple(tensor.shape)}"
             )
         if tensor.dtype != expected_dtype:
             raise ValueError(f"{name} must be {expected_dtype}, got {tensor.dtype}")
-        if tensor.dim() > 1 and tensor.stride(-1) != 1:
+        if tensor.stride(-1) != 1:
             raise ValueError(
                 f"{name} must be contiguous in its last dimension; "
                 f"got stride={tensor.stride()}"
