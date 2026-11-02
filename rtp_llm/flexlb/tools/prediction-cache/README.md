@@ -38,3 +38,30 @@ The snapshot memo only retains ready groups entirely before the insertion point,
 including their one-member boundary lookahead. Expiration, model/delivery changes,
 or queue/work/scheduling-input version changes prevent reuse. Warm-vs-uncached
 differential and concurrent-publication checks live in `QueuePrefixCacheTest`.
+
+## Contended planner benchmark
+
+```sh
+JAVA_HOME=/path/to/jdk21 python3 tools/prediction-cache/concurrent.py /path/to/baseline/rtp_llm/flexlb /tmp/concurrent-planning
+```
+
+This compares the pre-endpoint-cache revision with the current revision using
+identical source, formula, probes, and 128-member queues. Cases use 1/8/64 calling
+threads, a shared endpoint, ten shared endpoints, and shared snapshots replaced on
+every operation. Replacement preserves request data to keep the correctness oracle
+constant while exercising version invalidation and concurrent cache publication.
+Every projection is checked against an expected complete candidate record.
+
+Three JVM forks per revision alternate order. Each case runs a 700 ms warmup and
+two 700 ms measurement rounds. Metrics are the median of six rounds: wall-clock
+throughput, calling-thread CPU/allocation per operation, histogram P99 (1% buckets),
+and summed calling-thread Java monitor blocked time divided by operation count.
+An operation visits one or ten endpoints as named. Monitor time covers all Java
+monitors on the worker threads; use a separate JFR to attribute contention.
+The shared atomic operation sequence and correctness checks add harness overhead
+equally to both versions. This is a closed-loop local projection stress test,
+without RPC, actual queue mutation, admission commits/retries, or full scheduler
+latency. Thread counts above available cores also exercise oversubscription.
+
+For a focused 64-thread shared-endpoint JFR, pass any second argument to
+`ConcurrentBench`; profile timings must not be mixed with benchmark timings.
