@@ -16,6 +16,18 @@ import static org.junit.jupiter.api.Assertions.*;
 
 class VitTest {
     @TempDir Path directory;
+    @Test void textOnlyV41EnvelopeDoesNotRequireVisionPreparation() {
+        var input = GenerateInputPB.newBuilder().addTokenIds(42)
+            .setV41Inputs(V41RequestInputsPB.newBuilder().setSchemaVersion(1).addTokenTypes(0))
+            .setGenerateConfig(GenerateConfigPB.newBuilder().setTimeoutMs(-1)).build();
+        try (var client = new org.flexlb.mock.multimodal.MediaClient()) {
+            // No V address is provided: a text-only request must not open a V RPC.
+            assertSame(input, client.prepare(input, Long.MAX_VALUE));
+        }
+        assertTrue(MediaInput.present(input.toBuilder().setV41Inputs(input.getV41Inputs().toBuilder()
+            .addImages(V41ImageInputPB.getDefaultInstance())).build()));
+        assertTrue(MediaInput.present(input.toBuilder().addAllMultimodalInputs(input("image").getMultimodalInputsList()).build()));
+    }
     VitConfig config(String expression,long device,long host,long hashes,int wait) throws Exception {
         var path=directory.resolve(UUID.randomUUID()+".json");
         new ObjectMapper().writeValue(path.toFile(),Map.of("id","vit-0","component_role","vit","component",Map.of("config",Map.of(

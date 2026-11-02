@@ -11,7 +11,8 @@ import org.flexlb.engine.grpc.EngineRpcService.*;
 public final class MediaInput {
     private MediaInput() {}
     public static boolean present(GenerateInputPB input) {
-        return input.getMultimodalInputsCount() > 0 || input.hasV41Inputs();
+        // V4.1 Frontend also sends the typed envelope for text-only requests.
+        return input.getMultimodalInputsCount() > 0 || input.getV41Inputs().getImagesCount() > 0;
     }
     public static MultimodalInputsPB media(GenerateInputPB input) {
         var media=MultimodalInputsPB.newBuilder().setRequestId(input.getRequestId())
