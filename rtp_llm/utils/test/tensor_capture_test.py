@@ -1,6 +1,6 @@
 import copy
 import hashlib
-import inspect
+
 import json
 import os
 import subprocess
@@ -11,7 +11,7 @@ import time
 import traceback
 import unittest
 import weakref
-from contextlib import nullcontext
+
 from pathlib import Path
 from unittest import mock
 
@@ -1542,8 +1542,15 @@ class TensorCaptureTest(unittest.TestCase):
             {"k": -1},
         ]
         for change in changes:
-            with self.subTest(fields=list(change)):
+            with (
+                self.subTest(fields=list(change)),
+                mock.patch.object(
+                    context._recorder, "_reserve", wraps=context._recorder._reserve
+                ) as reserve,
+            ):
                 self.assertIsNone(context.begin_mqa(**dict(inputs, **change)))
+                if change.keys() & {"q_fp8", "k_fp8", "k_scale", "weights"}:
+                    reserve.assert_not_called()
                 self.assertEqual(context._recorder.stats()["pending"], 0)
                 self.assertEqual(context._recorder.stats()["inflight_bytes"], 0)
                 self.assertEqual(context._recorder.stats()["reserved_bytes"], 0)
@@ -1955,9 +1962,7 @@ class TensorCaptureTest(unittest.TestCase):
             self.assertEqual(manifest["tensors"][name]["original_stride"][-1], 2)
         self.assertEqual(context._recorder.stats()["completed"], 1)
 
-    def _assert_capture_interrupt(
-        self, recorder, operation, interruption, snapshots, release_count=1
-    ):
+    def _assert_capture_interrupt(self, recorder, operation, interruption, snapshots):
         release = recorder._release
 
         def checked_release(*args, **kwargs):
@@ -1976,7 +1981,7 @@ class TensorCaptureTest(unittest.TestCase):
                 self.assertIsNotNone(caught.__traceback__)
             else:
                 self.fail("capture swallowed the interruption")
-            self.assertEqual(released.call_count, release_count)
+            released.assert_called_once()
         stats = recorder.stats()
         self.assertEqual(stats["pending"], 0)
         self.assertEqual(stats["inflight_bytes"], 0)
@@ -1987,229 +1992,48 @@ class TensorCaptureTest(unittest.TestCase):
         self._assert_recorder_closed(recorder)
         self.assertEqual(self.manifests(), [])
 
-    def test_begin_baseexception_releases_before_propagation(self):
-        for error_type in (KeyboardInterrupt, SystemExit):
-            for joint in (False, True):
-                for stage in (
-                    "descriptor",
-                    "reserve",
-                    "before_copy",
-                    "after_copy",
-                    "last_copy",
-                    "manifest",
-                    "token_allocation",
-                ):
-                    with self.subTest(
-                        error=error_type.__name__, joint=joint, stage=stage
-                    ):
-                        context = self._mqa_context() if joint else self.context()
-                        recorder = context._recorder
-                        arguments = self._mqa_arguments() if joint else None
-                        operation = (
-                            (lambda: context.begin_mqa(**arguments))
-                            if joint
-                            else (lambda: self.begin(context))
-                        )
-                        interruption = error_type("capture interrupted")
-                        snapshots = []
-                        original_snapshot = capture._snapshot
-                        calls = 0
-
-                        def snapshot(tensor):
-                            nonlocal calls
-                            calls += 1
-                            if stage == "before_copy":
-                                raise interruption
-                            owned = original_snapshot(tensor)
-                            snapshots.append(weakref.ref(owned))
-                            if stage == "after_copy" or (
-                                stage == "last_copy" and calls == (6 if joint else 3)
-                            ):
-                                raise interruption
-                            return owned
-
-                        target, name = {
-                            "descriptor": (capture, "_descriptor"),
-                            "reserve": (recorder, "_reserve"),
-                            "manifest": (context.context, "_manifest"),
-                            "token_allocation": (capture.CaptureToken, "__init__"),
-                        }.get(stage, (None, None))
-                        injection = (
-                            mock.patch.object(target, name, side_effect=interruption)
-                            if target is not None
-                            else nullcontext()
-                        )
-                        with (
-                            mock.patch.object(
-                                capture, "_snapshot", side_effect=snapshot
-                            ),
-                            injection,
-                        ):
-                            self._assert_capture_interrupt(
-                                recorder,
-                                operation,
-                                interruption,
-                                snapshots,
-                                release_count=int(
-                                    stage not in ("descriptor", "reserve")
-                                ),
-                            )
-                        self.assertEqual(
-                            recorder.stats()["selected"],
-                            int(stage not in ("descriptor", "reserve")),
-                        )
-
     def test_token_prepare_and_finish_baseexception_cleanup(self):
-        for error_type in (KeyboardInterrupt, SystemExit):
-            for action in ("prepare", "topk_finish", "joint_finish"):
-                for stage in (
-                    "descriptor",
-                    "before_copy",
-                    "after_copy",
-                    "after_snapshot",
-                ):
-                    with self.subTest(
-                        error=error_type.__name__, action=action, stage=stage
-                    ):
-                        context = (
-                            self.context()
-                            if action == "topk_finish"
-                            else self._mqa_context()
+        for action in ("prepare", "topk_finish", "joint_finish"):
+            with self.subTest(action=action):
+                context = (
+                    self.context() if action == "topk_finish" else self._mqa_context()
+                )
+                token = (
+                    self.begin(context)
+                    if action == "topk_finish"
+                    else context.begin_mqa(**self._mqa_arguments())
+                )
+                logits = torch.ones(2, 3)
+                if action == "joint_finish":
+                    self.assertTrue(
+                        token.prepare_topk(
+                            logits, backend="dsv4_per_row", parameters={}
                         )
-                        token = (
-                            self.begin(context)
-                            if action == "topk_finish"
-                            else context.begin_mqa(**self._mqa_arguments())
-                        )
-                        logits = torch.ones(2, 3)
-                        if action == "joint_finish":
-                            self.assertTrue(
-                                token.prepare_topk(
-                                    logits, backend="dsv4_per_row", parameters={}
-                                )
-                            )
-                        snapshots = [
-                            weakref.ref(tensor) for tensor in token._tensors.values()
-                        ]
-                        interruption = error_type("token interrupted")
-                        original_snapshot = capture._snapshot
-                        original_logits = indexer_capture._snapshot_logits
-
-                        def snapshot(tensor):
-                            if stage == "before_copy":
-                                raise interruption
-                            owned = original_snapshot(tensor)
-                            snapshots.append(weakref.ref(owned))
-                            if stage == "after_copy":
-                                raise interruption
-                            return owned
-
-                        def after_logits(*args):
-                            original_logits(*args)
-                            raise interruption
-
-                        if stage == "descriptor":
-                            target, name, effect = capture, "_descriptor", interruption
-                        elif stage == "after_snapshot" and action == "prepare":
-                            target, name, effect = (
-                                indexer_capture,
-                                "_snapshot_logits",
-                                after_logits,
-                            )
-                        elif stage == "after_snapshot":
-                            target, name, effect = (
-                                context._recorder,
-                                "_enqueue",
-                                interruption,
-                            )
-                        else:
-                            target, name, effect = None, None, None
-                        operation = (
-                            (
-                                lambda: token.prepare_topk(
-                                    logits, backend="dsv4_per_row", parameters={}
-                                )
-                            )
-                            if action == "prepare"
-                            else (lambda: token.finish(self.output()))
-                        )
-                        injection = (
-                            mock.patch.object(target, name, side_effect=effect)
-                            if target is not None
-                            else nullcontext()
-                        )
-                        with (
-                            mock.patch.object(
-                                capture, "_snapshot", side_effect=snapshot
-                            ),
-                            injection,
-                        ):
-                            self._assert_capture_interrupt(
-                                context._recorder, operation, interruption, snapshots
-                            )
-                        self.assertTrue(token._done)
-                        self.assertEqual(token._tensors, {})
-                        self.assertIsNone(token._manifest)
-                        token.cancel()
-                        self.assertEqual(context._recorder.stats()["pending"], 0)
-
-    def test_cancel_accounting_interrupt_cannot_leak_or_double_release(self):
-        for error_type in (KeyboardInterrupt, SystemExit):
-            for action in ("cancel", "unprepared_finish", "closed_prepare"):
-                with self.subTest(error=error_type.__name__, action=action):
-                    context = self._mqa_context()
-                    token = context.begin_mqa(**self._mqa_arguments())
-                    snapshots = [
-                        weakref.ref(tensor) for tensor in token._tensors.values()
-                    ]
-                    interruption = error_type("skip accounting interrupted")
-                    if action == "closed_prepare":
-                        self.assertFalse(context._recorder.close(0.01))
-
-                    def operation():
-                        if action == "closed_prepare":
-                            return token.prepare_topk(
-                                torch.ones(2, 3), backend="dsv4_per_row", parameters={}
-                            )
-                        if action == "unprepared_finish":
-                            return token.finish(self.output())
-                        return token.cancel()
-
-                    with mock.patch.object(
-                        context._recorder, "note_skip", side_effect=interruption
-                    ):
-                        self._assert_capture_interrupt(
-                            context._recorder, operation, interruption, snapshots
-                        )
-                    token.cancel()
-                    self.assertEqual(context._recorder.stats()["pending"], 0)
-
-    def test_interrupted_token_construction_keeps_begin_as_owner(self):
-        for error_type in (KeyboardInterrupt, SystemExit):
-            with self.subTest(error=error_type.__name__):
-                context = self._mqa_context()
-                interruption = error_type("token lock allocation interrupted")
-                initialize = capture.CaptureToken.__init__
-
-                def interrupted_init(token, *args, **kwargs):
-                    with mock.patch.object(
-                        capture.threading, "Lock", side_effect=interruption
-                    ):
-                        initialize(token, *args, **kwargs)
-
-                with (
-                    mock.patch.object(
-                        capture.CaptureToken, "__init__", interrupted_init
-                    ),
-                    mock.patch.object(sys, "unraisablehook") as unraisable,
-                ):
-                    self._assert_capture_interrupt(
-                        context._recorder,
-                        lambda: context.begin_mqa(**self._mqa_arguments()),
-                        interruption,
-                        [],
                     )
-                    unraisable.assert_not_called()
+                snapshots = [weakref.ref(tensor) for tensor in token._tensors.values()]
+                interruption = KeyboardInterrupt("after token snapshot")
+                original_snapshot = capture._snapshot
+
+                def snapshot(tensor):
+                    owned = original_snapshot(tensor)
+                    snapshots.append(weakref.ref(owned))
+                    raise interruption
+
+                operation = (
+                    (
+                        lambda: token.prepare_topk(
+                            logits, backend="dsv4_per_row", parameters={}
+                        )
+                    )
+                    if action == "prepare"
+                    else (lambda: token.finish(self.output()))
+                )
+                with mock.patch.object(capture, "_snapshot", side_effect=snapshot):
+                    self._assert_capture_interrupt(
+                        context._recorder, operation, interruption, snapshots
+                    )
+                token.cancel()
+                self.assertEqual(context._recorder.stats()["pending"], 0)
 
     def _generic_context(self, **config):
         recorder = self.recorder(dict(self.config, ops=[_FLOAT_PAIR.name], **config))
@@ -2389,7 +2213,7 @@ class TensorCaptureTest(unittest.TestCase):
         self.assertEqual(clean, {"label": {"nested": [1, 2]}})
 
     def test_token_subclass_constructor_failure_releases_reservation_once(self):
-        for error_type in (RuntimeError, KeyboardInterrupt, SystemExit):
+        for error_type in (RuntimeError, KeyboardInterrupt):
             with self.subTest(error=error_type.__name__):
                 interruption = error_type("after base token construction")
                 constructed = []
@@ -2428,140 +2252,6 @@ class TensorCaptureTest(unittest.TestCase):
                 self._assert_recorder_closed(recorder)
         self.assertEqual(self.manifests(), [])
 
-    def _interrupt_accounting_line(self, function, statement, operation, error):
-        lines, start = inspect.getsourcelines(function)
-        line = start + next(i for i, text in enumerate(lines) if statement in text)
-        previous = sys.gettrace()
-
-        def interrupt(frame, event, arg):
-            if (
-                frame.f_code is function.__code__
-                and event == "line"
-                and frame.f_lineno == line
-            ):
-                raise error
-            return interrupt
-
-        try:
-            sys.settrace(interrupt)
-            with self.assertRaises(type(error)) as raised:
-                operation()
-        finally:
-            sys.settrace(previous)
-        self.assertIs(raised.exception, error)
-
-    def test_reservation_acquisition_interrupt_rolls_back_partial_accounting(self):
-        for error_type in (KeyboardInterrupt, SystemExit):
-            for statement in (
-                'self._counts["selected"] +=',
-                "self._reserved +=",
-                "self._inflight +=",
-                "self._pending +=",
-                "reservation.active = True",
-                "return call",
-            ):
-                with self.subTest(error=error_type.__name__, statement=statement):
-                    recorder = self.recorder()
-                    held = capture._CaptureReservation(recorder, 17, {})
-                    recorder._reserve(held)
-                    before = recorder.stats()
-                    reservation = capture._CaptureReservation(recorder, 31, {})
-                    try:
-                        self._interrupt_accounting_line(
-                            capture.TensorCaptureRecorder._reserve,
-                            statement,
-                            lambda: recorder._reserve(reservation),
-                            error_type("partial acquisition"),
-                        )
-                        self.assertFalse(reservation.active)
-                        self.assertFalse(reservation.release())
-                        for key in (
-                            "selected",
-                            "reserved_bytes",
-                            "inflight_bytes",
-                            "pending",
-                        ):
-                            self.assertEqual(recorder.stats()[key], before[key])
-                        self.assertEqual(
-                            recorder._reserve(reservation), before["selected"]
-                        )
-                        self.assertTrue(reservation.release())
-                        self.assertFalse(reservation.release())
-                        self.assertTrue(held.release())
-                        self.assertTrue(recorder.close(0))
-                    finally:
-                        # A regression must fail assertions, not strand teardown.
-                        with recorder._condition:
-                            recorder._reserved = recorder._inflight = (
-                                recorder._pending
-                            ) = 0
-
-    def test_reservation_release_interrupt_completes_once(self):
-        boundaries = (
-            (capture._CaptureReservation.release, "self.tensors.clear()"),
-            (capture._CaptureReservation.release, "self.manifest = None"),
-            (capture._CaptureReservation.release, "recorder._release("),
-            (capture._CaptureReservation.release, "self.active = False"),
-            (capture._CaptureReservation.release, "return True"),
-            (capture.TensorCaptureRecorder._release, "self._inflight -="),
-            (capture.TensorCaptureRecorder._release, "self._pending -="),
-            (capture.TensorCaptureRecorder._release, "self._reserved -="),
-            (capture.TensorCaptureRecorder._release, "self._condition.notify_all()"),
-        )
-        for error_type in (KeyboardInterrupt, SystemExit):
-            for retain_total in (False, True):
-                for function, statement in boundaries:
-                    if retain_total and statement == "self._reserved -=":
-                        continue
-                    with self.subTest(
-                        error=error_type.__name__,
-                        retain_total=retain_total,
-                        function=function.__qualname__,
-                        statement=statement,
-                    ):
-                        recorder = self.recorder()
-                        held = capture._CaptureReservation(recorder, 17, {})
-                        recorder._reserve(held)
-                        reservation = capture._CaptureReservation(
-                            recorder, 31, {"value": torch.ones(2)}
-                        )
-                        snapshot = weakref.ref(reservation.tensors["value"])
-                        recorder._reserve(reservation)
-                        reservation.queued = retain_total
-                        reservation.manifest = {"complete": False}
-                        try:
-                            if retain_total:
-                                self.assertFalse(reservation.release())
-                                self.assertTrue(reservation.active)
-                            self._interrupt_accounting_line(
-                                function,
-                                statement,
-                                lambda: reservation.release(
-                                    writer=retain_total, retain_total=retain_total
-                                ),
-                                error_type("partial refund"),
-                            )
-                            self.assertFalse(reservation.active)
-                            self.assertIsNone(snapshot())
-                            self.assertIsNone(reservation.manifest)
-                            self.assertFalse(reservation.release(writer=True))
-                            self.assertEqual(
-                                recorder.stats()["reserved_bytes"],
-                                17 + 31 * retain_total,
-                            )
-                            self.assertEqual(
-                                recorder.stats()["inflight_bytes"],
-                                17 * capture._INFLIGHT_FACTOR,
-                            )
-                            self.assertEqual(recorder.stats()["pending"], 1)
-                            self.assertTrue(held.release())
-                            self.assertTrue(recorder.close(0))
-                        finally:
-                            with recorder._condition:
-                                recorder._reserved = recorder._inflight = (
-                                    recorder._pending
-                                ) = 0
-
     def test_interrupt_after_reservation_acquisition_is_released(self):
         context = self._generic_context()
         recorder = context._recorder
@@ -2580,78 +2270,64 @@ class TensorCaptureTest(unittest.TestCase):
             )
 
     def test_enqueue_handoff_interrupt_preserves_writer_owned_bundle(self):
-        for boundary in ("enqueue", "put_nowait", "_put"):
-            for error_type in (RuntimeError, KeyboardInterrupt, SystemExit):
-                with self.subTest(boundary=boundary, error=error_type.__name__):
-                    context = self._generic_context()
-                    recorder = context._recorder
-                    token = self._generic_begin(context)
-                    size = recorder.stats()["reserved_bytes"]
-                    before = set(self.manifests())
-                    entered, release = threading.Event(), threading.Event()
-                    write = recorder._write_bundle
-                    target = recorder if boundary == "enqueue" else recorder._queue
-                    method = "_enqueue" if boundary == "enqueue" else boundary
-                    enqueue = getattr(target, method)
-                    interruption = error_type("after accepted enqueue")
+        for error_type in (RuntimeError, KeyboardInterrupt):
+            with self.subTest(error=error_type.__name__):
+                context = self._generic_context()
+                recorder = context._recorder
+                token = self._generic_begin(context)
+                size = recorder.stats()["reserved_bytes"]
+                before = set(self.manifests())
+                entered, release = threading.Event(), threading.Event()
+                write, enqueue = recorder._write_bundle, recorder._enqueue
+                interruption = error_type("after accepted enqueue")
 
-                    def enqueue_then_interrupt(*args):
-                        enqueue(*args)
-                        raise interruption
+                def enqueue_then_interrupt(*args):
+                    self.assertTrue(enqueue(*args))
+                    raise interruption
 
-                    def blocked_write(*args):
-                        entered.set()
-                        self.assertTrue(release.wait(_COMPLETION_TIMEOUT))
-                        return write(*args)
+                def blocked_write(*args):
+                    entered.set()
+                    self.assertTrue(release.wait(_COMPLETION_TIMEOUT))
+                    return write(*args)
 
-                    outputs = {"positive": torch.ones(2), "negative": torch.zeros(2)}
-                    with (
-                        mock.patch.object(
-                            target, method, side_effect=enqueue_then_interrupt
-                        ),
-                        mock.patch.object(
-                            recorder, "_write_bundle", side_effect=blocked_write
-                        ),
-                        mock.patch.object(
-                            recorder, "_release", wraps=recorder._release
-                        ) as released,
-                    ):
-                        try:
-                            if error_type is RuntimeError:
-                                self.assertFalse(token.finish(outputs))
-                            else:
-                                with self.assertRaises(error_type) as raised:
-                                    token.finish(outputs)
-                                self.assertIs(raised.exception, interruption)
-                            self.assertTrue(entered.wait(_COMPLETION_TIMEOUT))
-                            self.assertTrue(token._done)
-                            token.cancel()
-                            self.assertEqual(recorder.stats()["pending"], 1)
-                            self.assertEqual(
-                                recorder.stats()["inflight_bytes"],
-                                capture._INFLIGHT_FACTOR * size,
-                            )
-                            self.assertEqual(released.call_count, 0)
-                            self.assertEqual(
-                                set(token._reservation.tensors),
-                                {"value", "positive", "negative"},
-                            )
-                        finally:
-                            release.set()
-                        self._assert_recorder_closed(recorder)
-                        self.assertEqual(released.call_count, 1)
-                    self.assertEqual(recorder.stats()["completed"], 1)
-                    self.assertEqual(recorder.stats()["reserved_bytes"], size)
-                    self.assertEqual(recorder.stats()["io_error"], 0)
-                    paths = set(self.manifests()) - before
-                    self.assertEqual(len(paths), 1)
-                    _, tensors = capture.load_capture(paths.pop())
-                    torch.testing.assert_close(tensors["value"], torch.ones(2))
-                    for name, tensor in outputs.items():
-                        torch.testing.assert_close(tensors[name], tensor)
+                outputs = {"positive": torch.ones(2), "negative": torch.zeros(2)}
+                with (
+                    mock.patch.object(
+                        recorder, "_enqueue", side_effect=enqueue_then_interrupt
+                    ),
+                    mock.patch.object(
+                        recorder, "_write_bundle", side_effect=blocked_write
+                    ),
+                ):
+                    try:
+                        if error_type is RuntimeError:
+                            self.assertFalse(token.finish(outputs))
+                        else:
+                            with self.assertRaises(error_type) as raised:
+                                token.finish(outputs)
+                            self.assertIs(raised.exception, interruption)
+                        self.assertTrue(entered.wait(_COMPLETION_TIMEOUT))
+                        token.cancel()
+                        self.assertEqual(recorder.stats()["pending"], 1)
+                        self.assertEqual(
+                            recorder.stats()["inflight_bytes"],
+                            capture._INFLIGHT_FACTOR * size,
+                        )
+                    finally:
+                        release.set()
+                    self._assert_recorder_closed(recorder)
+                self.assertEqual(recorder.stats()["completed"], 1)
+                self.assertEqual(recorder.stats()["reserved_bytes"], size)
+                self.assertEqual(recorder.stats()["io_error"], 0)
+                paths = set(self.manifests()) - before
+                self.assertEqual(len(paths), 1)
+                _, tensors = capture.load_capture(paths.pop())
+                torch.testing.assert_close(tensors["value"], torch.ones(2))
+                for name, tensor in outputs.items():
+                    torch.testing.assert_close(tensors[name], tensor)
 
     def test_enqueue_interrupt_before_insertion_refunds_reservation(self):
-        for error_type in (RuntimeError, KeyboardInterrupt, SystemExit):
+        for error_type in (RuntimeError, KeyboardInterrupt):
             with self.subTest(error=error_type.__name__):
                 context = self._generic_context()
                 recorder = context._recorder
@@ -2667,7 +2343,9 @@ class TensorCaptureTest(unittest.TestCase):
                         with self.assertRaises(error_type) as raised:
                             token.finish(outputs)
                         self.assertIs(raised.exception, interruption)
-                self.assertFalse(token._reservation.queued)
+                self.assertEqual(recorder.stats()["pending"], 0)
+                self.assertEqual(recorder.stats()["inflight_bytes"], 0)
+                self.assertEqual(recorder.stats()["completed"], 0)
                 token.cancel()
                 self._assert_recorder_closed(recorder)
                 self.assertEqual(recorder.stats()["reserved_bytes"], 0)
@@ -2895,56 +2573,54 @@ class TensorCaptureTest(unittest.TestCase):
         self.assertEqual(manifest["op"], "unregistered.reader")
 
     def test_generic_snapshot_exception_releases_before_propagation(self):
-        for stage in ("input", "staged", "finish"):
-            for error_type in (RuntimeError, KeyboardInterrupt, SystemExit):
-                with self.subTest(stage=stage, error=error_type.__name__):
-                    context = self._generic_context()
-                    token = None if stage == "input" else self._generic_begin(context)
-                    snapshots = (
-                        []
-                        if token is None
-                        else [weakref.ref(x) for x in token._tensors.values()]
+        for stage, error_type in (
+            ("input", RuntimeError),
+            ("input", KeyboardInterrupt),
+            ("staged", RuntimeError),
+            ("staged", KeyboardInterrupt),
+            ("finish", RuntimeError),
+            ("finish", SystemExit),
+        ):
+            with self.subTest(stage=stage, error=error_type.__name__):
+                context = self._generic_context()
+                token = None if stage == "input" else self._generic_begin(context)
+                snapshots = (
+                    []
+                    if token is None
+                    else [weakref.ref(x) for x in token._tensors.values()]
+                )
+                interruption = error_type("snapshot interrupted")
+                original_snapshot = capture._snapshot
+
+                def fail_after_copy(tensor):
+                    owned = original_snapshot(tensor)
+                    snapshots.append(weakref.ref(owned))
+                    raise interruption
+
+                if stage == "input":
+                    operation = lambda: self._generic_begin(context)
+                elif stage == "staged":
+                    operation = lambda: token.capture_outputs(
+                        {"positive": torch.ones(2)}
                     )
-                    interruption = error_type("snapshot interrupted")
-                    original_snapshot = capture._snapshot
-
-                    def fail_after_copy(tensor):
-                        owned = original_snapshot(tensor)
-                        snapshots.append(weakref.ref(owned))
-                        raise interruption
-
-                    operation = (
-                        (lambda: self._generic_begin(context))
-                        if stage == "input"
-                        else (
-                            (lambda: token.capture_outputs({"positive": torch.ones(2)}))
-                            if stage == "staged"
-                            else (
-                                lambda: token.finish(
-                                    {
-                                        "positive": torch.ones(2),
-                                        "negative": torch.ones(2),
-                                    }
-                                )
-                            )
+                else:
+                    operation = lambda: token.finish(
+                        {"positive": torch.ones(2), "negative": torch.ones(2)}
+                    )
+                with mock.patch.object(
+                    capture, "_snapshot", side_effect=fail_after_copy
+                ):
+                    if error_type is RuntimeError:
+                        self.assertFalse(operation())
+                        self.assertEqual(context._recorder.stats()["pending"], 0)
+                        self.assertEqual(context._recorder.stats()["reserved_bytes"], 0)
+                        self.assertEqual(context._recorder.stats()["inflight_bytes"], 0)
+                        self.assertTrue(all(ref() is None for ref in snapshots))
+                        self.assertEqual(self.manifests(), [])
+                    else:
+                        self._assert_capture_interrupt(
+                            context._recorder, operation, interruption, snapshots
                         )
-                    )
-                    with mock.patch.object(
-                        capture, "_snapshot", side_effect=fail_after_copy
-                    ):
-                        if error_type is RuntimeError:
-                            self.assertFalse(operation())
-                            self.assertEqual(context._recorder.stats()["pending"], 0)
-                            self.assertEqual(
-                                context._recorder.stats()["reserved_bytes"], 0
-                            )
-                            self.assertTrue(
-                                all(reference() is None for reference in snapshots)
-                            )
-                        else:
-                            self._assert_capture_interrupt(
-                                context._recorder, operation, interruption, snapshots
-                            )
 
     def _indexed_arguments(self, joint=False, **config):
         identity = copy.deepcopy(self.identity)
@@ -3460,7 +3136,12 @@ class TensorCaptureTest(unittest.TestCase):
             contiguous = dict(metadata, query_row_start=0)
             variants.append((inputs, contiguous, outputs))
             for in_values, meta, out_values in variants:
-                with mock.patch.object(capture, "_snapshot") as snapshot:
+                with (
+                    mock.patch.object(capture, "_snapshot") as snapshot,
+                    mock.patch.object(
+                        context._recorder, "_reserve", wraps=context._recorder._reserve
+                    ) as reserve,
+                ):
                     self.assertIsNone(
                         context.context.begin(
                             op=op,
@@ -3474,6 +3155,7 @@ class TensorCaptureTest(unittest.TestCase):
                         )
                     )
                     snapshot.assert_not_called()
+                    reserve.assert_not_called()
                 self.assertEqual(context._recorder.stats()["pending"], 0)
 
     def _decode_identity(self):

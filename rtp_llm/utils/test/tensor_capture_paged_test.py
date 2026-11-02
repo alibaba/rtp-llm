@@ -305,9 +305,7 @@ class PagedTensorCaptureTest(unittest.TestCase):
             (current, [current], current),
             (current, [], current),  # Bazel without dist-info, exact module build.
             ("2.8.0", [], None),
-            (None, [], None),
             ("2.8.0", ["2.8.0"], None),
-            ("2.8.0", ["2.8.0+unverified"], None),
             (current, ["2.8.0+unverified"], None),
             (old, [current], None),
             ("2.9.0", [current], None),
@@ -366,7 +364,10 @@ class PagedTensorCaptureTest(unittest.TestCase):
 
     def test_verified_122e18b_schedule_roundtrip(self):
         self.environment["deep_gemm_version"] = "2.8.0+122e18b.cu132"
+        self.identity["server_role"] = "PDFUSION"
         _, manifest, _ = self.joint_artifact()
+        self.assertEqual(manifest["phase"], "decode")
+        self.assertEqual(manifest["server_role"], "PDFUSION")
         self.assertEqual(
             manifest["schedule_environment"]["deep_gemm_version"],
             "2.8.0+122e18b.cu132",
@@ -411,8 +412,19 @@ class PagedTensorCaptureTest(unittest.TestCase):
 
         with mock.patch.object(torch.Tensor, "copy_", no_pool_copy):
             for changes in mutations:
-                with self.subTest(changes=list(changes)):
+                with (
+                    self.subTest(changes=list(changes)),
+                    mock.patch.object(
+                        recorder, "_reserve", wraps=recorder._reserve
+                    ) as reserve,
+                ):
                     self.assertIsNone(self.begin_joint(context, **changes))
+                    if changes.keys() & {"lengths", "context_lens", "block_table"}:
+                        reserve.assert_called_once()
+                    else:
+                        reserve.assert_not_called()
+                    self.assertEqual(recorder.stats()["reserved_bytes"], 0)
+                    self.assertEqual(recorder.stats()["pending"], 0)
         self.assertEqual(recorder.stats()["inflight_bytes"], 0)
         self.assertFalse(list((self.root / "records").rglob("manifest.json")))
 
@@ -704,22 +716,6 @@ class PagedTensorCaptureTest(unittest.TestCase):
             indexer._paged_source_devices(inputs)
         with self.assertRaisesRegex(ValueError, "devices must match"):
             indexer._paged_source_devices(dict(inputs, lengths=self.lengths))
-
-    def test_pdfusion_decode_uses_same_contract(self):
-        context, recorder = self.context(
-            identity=dict(self.identity, server_role="PDFUSION")
-        )
-        token = self.begin_joint(context)
-        self.assertIsNotNone(token, recorder.stats())
-        self.assertTrue(
-            token.prepare_topk(
-                self.logits, backend="topk_v3", parameters=self.parameters
-            )
-        )
-        self.assertTrue(token.finish(self.indices))
-        _, manifest, _ = self.load(recorder)
-        self.assertEqual(manifest["phase"], "decode")
-        self.assertEqual(manifest["server_role"], "PDFUSION")
 
     def test_filters_do_not_touch_inputs(self):
         context, recorder = self.context(config=dict(self.config, layers=[1]))

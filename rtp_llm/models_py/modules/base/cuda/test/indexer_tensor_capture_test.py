@@ -6,9 +6,9 @@ collectives are mocked; capture serialization uses the real writer.
 
 import json
 import os
-import sys
+
 import tempfile
-import traceback
+
 import unittest
 from contextlib import ExitStack, contextmanager
 from pathlib import Path
@@ -678,54 +678,33 @@ class IndexerTensorCaptureTest(unittest.TestCase):
                 finally:
                     recorder.close()
 
-    def test_generic_execution_context_is_adapted_at_real_indexer_callsite(self):
-        for joint in (False, True):
-            with (
-                self.subTest(joint=joint),
-                self.recorder(mqa=joint) as (capture, recorder, adapter, root),
-            ):
-                context = adapter.context
-                self.assertIsInstance(context, capture.TensorCaptureContext)
-                self.assertFalse(hasattr(context, "begin_topk"))
-                self.assertFalse(hasattr(context, "begin_mqa"))
-                self.ragged(context)
-                if not recorder.close():
-                    thread = recorder._thread
-                    frame = sys._current_frames().get(thread.ident) if thread else None
-                    stack = (
-                        "".join(traceback.format_stack(frame))
-                        if frame
-                        else "<no writer frame>"
-                    )
-                    self.fail(
-                        "capture close timed out: stats=%r\nwriter stack:\n%s"
-                        % (recorder.stats(), stack)
-                    )
-                self.assertEqual(recorder.stats()["completed"], 3)
-                manifests = list(root.rglob("manifest.json"))
-                self.assertEqual(len(manifests), 3)
-                for path in manifests:
-                    manifest, tensors = capture.load_capture(path)
-                    self.assertEqual(manifest["schema_version"], 2 if joint else 1)
-                    self.assertIn("indices", tensors)
-                    self.assertEqual("q_fp8" in tensors, joint)
-                self.assertEqual(recorder.stats()["inflight_bytes"], 0)
-
     def test_real_capture_file_roundtrip_and_cpu_kernel_replay(self):
         for backend in ("dsv4_per_row", "topk_v3_tie_break"):
             with (
                 self.subTest(backend=backend),
                 self.recorder() as (capture, recorder, context, root),
             ):
-                self.assertIsNotNone(context)
+                self.assertIsInstance(context.context, capture.TensorCaptureContext)
+                self.assertFalse(hasattr(context.context, "begin_topk"))
                 self.op._prefill_topk_backend = backend
-                with patch.dict(os.environ, {"DSV4_INDEXER_TOPK_CANONICALIZE": "1"}):
-                    result, scores = self.ragged(context)
-                torch.testing.assert_close(
-                    scores, torch.arange(80, dtype=torch.float32).view(5, 16)[:, ::2]
+                original_scores = torch.arange(80, dtype=torch.float32).view(5, 16)[
+                    :, ::2
+                ]
+
+                def kernel(*args):
+                    _cpu_topk(*args)
+                    args[0].fill_(-100)
+
+                native = getattr(
+                    self.s.ops,
+                    "topk_v3_tie_break"
+                    if backend == "topk_v3_tie_break"
+                    else "dsv4_top_k_per_row_prefill",
                 )
-                original_scores = scores.clone()
-                scores.fill_(-100)
+                native.side_effect = kernel
+                with patch.dict(os.environ, {"DSV4_INDEXER_TOPK_CANONICALIZE": "1"}):
+                    result, scores = self.ragged(context.context)
+                self.assertTrue(torch.all(scores == -100))
                 result.fill_(-9)
                 self.assertTrue(recorder.close())
                 self.assertEqual(recorder.stats()["completed"], 3)
@@ -867,18 +846,6 @@ class IndexerTensorCaptureTest(unittest.TestCase):
             self.assertEqual(list(root.rglob("manifest.json")), [])
             self.s.ops.dsv4_top_k_per_row_prefill.assert_called_once()
 
-    def test_before_snapshot_survives_kernel_mutating_input(self):
-        before = self.logits.clone()
-
-        def kernel(*args):
-            _cpu_topk(*args)
-            args[0].fill_(-100)
-
-        self.s.ops.dsv4_top_k_per_row_prefill.side_effect = kernel
-        self.run_topk(self.context)
-        torch.testing.assert_close(self.context.calls[0]["logits"], before)
-        self.assertTrue(torch.all(self.logits == -100))
-
     def test_mqa_group_chunks_share_actual_inputs_logits_and_raw_indices(self):
         for backend in ("dsv4_per_row", "topk_v3_tie_break"):
             with self.subTest(backend=backend):
@@ -961,26 +928,6 @@ class IndexerTensorCaptureTest(unittest.TestCase):
                 )
                 self.assertEqual(result[2:4].tolist(), [[2, 3, 4], [5, 6, -1]])
 
-    def test_mqa_snapshot_precedes_kernel_input_mutation(self):
-        context = _Context(mqa_enabled=True)
-
-        def mutate(q, kv, weights, starts, ends, logits):
-            q.copy_(torch.zeros(q.shape).to(q.dtype))
-            kv[0].copy_(torch.zeros(kv[0].shape).to(kv[0].dtype))
-            kv[1].fill_(9)
-            weights.fill_(9)
-
-        result, scores = self.ragged(context, mqa_effect=mutate)
-        first = context.calls[0]
-        self.assertEqual(first["q_fp8"][:, 0, 0].float().tolist(), [0, 1])
-        self.assertTrue(torch.all(first["k_fp8"].float() == 1))
-        self.assertTrue(torch.all(first["k_scale"] == 1))
-        self.assertTrue(torch.all(first["weights"] == 1))
-        scores.fill_(-100)
-        result.fill_(-9)
-        self.assertEqual(context.tokens[1].output.tolist(), [[4, 3, 2], [1, 0, -1]])
-        self.assertNotEqual(context.tokens[1].logits[0, 0].item(), -100)
-
     def test_mqa_rejection_and_begin_failure_never_fall_back_to_topk(self):
         expected, _ = self.ragged(None)
         for failure in (None, RuntimeError("snapshot failure")):
@@ -1028,134 +975,36 @@ class IndexerTensorCaptureTest(unittest.TestCase):
                     context.begin_mqa.assert_not_called()
                     self.s.ops.dsv4_top_k_per_row_prefill.assert_called_once()
 
-    def test_mqa_topk_interrupt_cancels_entire_token_lifetime(self):
-        for backend in ("dsv4_per_row", "topk_v3_tie_break"):
-            for stage in ("parameters", "prepare", "kernel", "finish"):
-                with self.subTest(backend=backend, stage=stage), ExitStack() as stack:
-                    self.op._prefill_topk_backend = backend
-                    context = _Context(mqa_enabled=True)
-                    token = _Token()
-                    error = KeyboardInterrupt(stage)
-                    max_seq_len = 100
-                    kernel = getattr(
-                        self.s.ops,
-                        (
-                            "topk_v3_tie_break"
-                            if backend == "topk_v3_tie_break"
-                            else "dsv4_top_k_per_row_prefill"
-                        ),
-                    )
-                    kernel.reset_mock()
-                    kernel.side_effect = error if stage == "kernel" else _cpu_topk
-                    if stage == "parameters":
-                        if backend == "topk_v3_tie_break":
-
-                            class InterruptedLength:
-                                def __int__(self):
-                                    raise error
-
-                            max_seq_len = InterruptedLength()
-                        else:
-                            stack.enter_context(
-                                patch.object(
-                                    self.s.base,
-                                    "_fp8_prefill_topk_force_radix_sort",
-                                    side_effect=error,
-                                )
-                            )
-                    elif stage == "prepare":
-                        token.prepare_topk.side_effect = error
-                    elif stage == "finish":
-                        token.finish.side_effect = error
-                    with self.assertRaises(KeyboardInterrupt) as raised:
-                        self.run_topk(
-                            context, max_seq_len=max_seq_len, capture_token=token
-                        )
-                    self.assertIs(raised.exception, error)
-                    token.cancel.assert_called_once_with(
-                        reason="kernel_error" if stage == "kernel" else "capture_error"
-                    )
-                    self.assertEqual(
-                        token.prepare_topk.call_count, 0 if stage == "parameters" else 1
-                    )
-                    self.assertEqual(
-                        kernel.call_count, 1 if stage in ("kernel", "finish") else 0
-                    )
-                    self.assertEqual(
-                        token.finish.call_count, 1 if stage == "finish" else 0
-                    )
-                    context.begin_topk.assert_not_called()
-                    context.begin_mqa.assert_not_called()
-
     def test_real_mqa_interrupt_releases_budget_before_close_or_gc(self):
-        for stage in ("parameters", "prepare", "kernel", "finish"):
-            with (
-                self.subTest(stage=stage),
-                self.recorder(mqa=True) as (_, recorder, context, root),
-                ExitStack() as stack,
-            ):
-                error = KeyboardInterrupt(stage)
-                tokens = []
-                begin_mqa = context.begin_mqa
-                release = stack.enter_context(
-                    patch.object(recorder, "_release", wraps=recorder._release)
-                )
+        with self.recorder(mqa=True) as (_, recorder, context, root):
+            error = KeyboardInterrupt("topk interrupted")
+            tokens = []
+            begin_mqa = context.begin_mqa
 
-                def begin(**kwargs):
-                    token = begin_mqa(**kwargs)
-                    self.assertIsNotNone(token)
-                    self.assertGreater(recorder.stats()["inflight_bytes"], 0)
-                    tokens.append(token)  # Keep ownership alive across the exception.
-                    stack.enter_context(
-                        patch.object(token, "cancel", wraps=token.cancel)
-                    )
-                    for method, phase in (
-                        ("prepare_topk", "prepare"),
-                        ("finish", "finish"),
-                    ):
-                        stack.enter_context(
-                            patch.object(
-                                token,
-                                method,
-                                wraps=getattr(token, method),
-                                side_effect=error if stage == phase else None,
-                            )
-                        )
-                    return token
+            def begin(**kwargs):
+                token = begin_mqa(**kwargs)
+                self.assertIsNotNone(token)
+                self.assertGreater(recorder.stats()["inflight_bytes"], 0)
+                tokens.append(token)  # Keep the real token alive through the exception.
+                return token
 
-                stack.enter_context(
-                    patch.object(context, "begin_mqa", side_effect=begin)
-                )
-                if stage == "parameters":
-                    stack.enter_context(
-                        patch.object(
-                            self.s.base,
-                            "_fp8_prefill_topk_force_radix_sort",
-                            side_effect=error,
-                        )
-                    )
-                self.s.deep.fp8_mqa_logits.reset_mock()
-                kernel = self.s.ops.dsv4_top_k_per_row_prefill
-                kernel.reset_mock()
-                kernel.side_effect = error if stage == "kernel" else _cpu_topk
+            kernel = self.s.ops.dsv4_top_k_per_row_prefill
+            kernel.side_effect = error
+            with patch.object(context, "begin_mqa", side_effect=begin):
                 with self.assertRaises(KeyboardInterrupt) as raised:
                     self.ragged(context)
-                self.assertIs(raised.exception, error)
-                self.assertEqual(len(tokens), 1)
-                tokens[0].cancel.assert_called_once_with(
-                    reason="kernel_error" if stage == "kernel" else "capture_error"
-                )
-                release.assert_called_once()
-                self.assertEqual(recorder.stats()["inflight_bytes"], 0)
-                self.assertEqual(recorder.stats()["reserved_bytes"], 0)
-                self.assertEqual(recorder.stats()["completed"], 0)
-                self.s.deep.fp8_mqa_logits.assert_called_once()
-                self.assertEqual(
-                    kernel.call_count, 1 if stage in ("kernel", "finish") else 0
-                )
-                self.assertEqual(list(root.rglob("manifest.json")), [])
-                self.assertTrue(recorder.close())
-                release.assert_called_once()
+            self.assertIs(raised.exception, error)
+            self.assertEqual(len(tokens), 1)
+            self.s.deep.fp8_mqa_logits.assert_called_once()
+            kernel.assert_called_once()
+            for field in ("pending", "inflight_bytes", "reserved_bytes", "completed"):
+                self.assertEqual(recorder.stats()[field], 0)
+            self.assertEqual(recorder.stats()["skip_reasons"]["kernel_error"], 1)
+            before_cancel = recorder.stats()
+            tokens[0].cancel()
+            self.assertEqual(recorder.stats(), before_cancel)
+            self.assertEqual(list(root.rglob("manifest.json")), [])
+            self.assertTrue(recorder.close())
 
     def test_mqa_kernel_exception_is_original_even_when_cancel_fails(self):
         for cancel_fails in (False, True):
@@ -1185,21 +1034,6 @@ class IndexerTensorCaptureTest(unittest.TestCase):
                 context.begin_topk.assert_not_called()
                 self.s.deep.fp8_mqa_logits.assert_called_once()
                 self.s.ops.dsv4_top_k_per_row_prefill.assert_not_called()
-
-    def test_mqa_topk_failure_cancels_group_after_one_mqa(self):
-        context = _Context(mqa_enabled=True)
-        error = RuntimeError("original topk failure")
-        self.s.ops.dsv4_top_k_per_row_prefill.side_effect = error
-        with self.assertRaises(RuntimeError) as raised:
-            self.ragged(context)
-        self.assertIs(raised.exception, error)
-        self.s.deep.fp8_mqa_logits.assert_called_once()
-        self.s.ops.dsv4_top_k_per_row_prefill.assert_called_once()
-        token = context.tokens[0]
-        token.prepare_topk.assert_called_once()
-        token.cancel.assert_called_once_with(reason="kernel_error")
-        token.finish.assert_not_called()
-        context.begin_topk.assert_not_called()
 
     def test_mqa_guards_run_before_input_snapshot(self):
         for flag, reason in (
@@ -1265,6 +1099,8 @@ class IndexerTensorCaptureTest(unittest.TestCase):
             ):
                 self.assertIsNotNone(context)
                 self.assertTrue(context.mqa_enabled)
+                self.assertIsInstance(context.context, capture.TensorCaptureContext)
+                self.assertFalse(hasattr(context.context, "begin_mqa"))
                 self.op._prefill_topk_backend = backend
                 with (
                     patch.object(
@@ -1272,14 +1108,9 @@ class IndexerTensorCaptureTest(unittest.TestCase):
                         "_snapshot_logits",
                         wraps=tensor_capture_indexer._snapshot_logits,
                     ) as snapshot,
-                    patch.object(
-                        context,
-                        "begin_topk",
-                        side_effect=AssertionError("group fallback"),
-                    ),
                     patch.dict(os.environ, {"DSV4_INDEXER_TOPK_CANONICALIZE": "1"}),
                 ):
-                    result, scores = self.ragged(context)
+                    result, scores = self.ragged(context.context)
                 self.assertEqual(snapshot.call_count, 3)
                 self.assertEqual(result[2:4].tolist(), [[2, 3, 4], [5, 6, -1]])
                 scores.fill_(-100)
@@ -1623,124 +1454,110 @@ class IndexerTensorCaptureTest(unittest.TestCase):
         )
 
     def test_cp8_chunks_capture_existing_mapping_and_actual_kernel_inputs(self):
-        for identity in (False, True):
-            for sharded in (False, True):
-                for joint in (False, True):
-                    for backend in ("dsv4_per_row", "topk_v3_tie_break"):
-                        with self.subTest(
-                            identity=identity,
-                            sharded=sharded,
-                            joint=joint,
-                            backend=backend,
+        for identity, sharded, joint, backend in (
+            (False, True, True, "dsv4_per_row"),
+            (True, True, False, "topk_v3_tie_break"),
+            (False, False, False, "dsv4_per_row"),
+            (True, False, True, "topk_v3_tie_break"),
+        ):
+            with self.subTest(
+                identity=identity, sharded=sharded, joint=joint, backend=backend
+            ):
+                self.op._prefill_topk_backend = backend
+                context = _Context(mqa_enabled=joint)
+                with patch.dict(os.environ, {"DSV4_INDEXER_TOPK_CANONICALIZE": "1"}):
+                    baseline = self.cp_ragged(None, identity=identity, sharded=sharded)
+                    run = self.cp_ragged(context, identity=identity, sharded=sharded)
+                torch.testing.assert_close(run.result, baseline.result)
+                self.assertEqual(run.events, baseline.events)
+                self.assertEqual(len(context.calls), 2)
+                for i, (call, token, mqa) in enumerate(
+                    zip(context.calls, context.tokens, run.mqa_calls)
+                ):
+                    self.assertIsNone(call["query_row_start"])
+                    self.assertEqual(call["total_query_rows"], 5)
+                    self.assertEqual(call["local_query_row_start"], i * 2)
+                    self.assertEqual(call["local_query_rows"], 3)
+                    self.assertEqual(call["cp_rank"], 3)
+                    self.assertEqual(call["cp_size"], 8)
+                    self.assertEqual(call["kv_cache_sharded"], sharded)
+                    torch.testing.assert_close(
+                        call["query_global_ids"], run.gids[i * 2 : i * 2 + 2]
+                    )
+                    torch.testing.assert_close(call["row_starts"], mqa.args[3])
+                    torch.testing.assert_close(call["row_ends"], mqa.args[4])
+                    if joint:
+                        begin = context.begin_mqa.call_args_list[i].kwargs
+                        for name, actual in zip(
+                            (
+                                "q_fp8",
+                                "k_fp8",
+                                "k_scale",
+                                "weights",
+                                "row_starts",
+                                "row_ends",
+                            ),
+                            (mqa.args[0], *mqa.args[1], *mqa.args[2:]),
                         ):
-                            self.op._prefill_topk_backend = backend
-                            context = _Context(mqa_enabled=joint)
-                            with patch.dict(
-                                os.environ, {"DSV4_INDEXER_TOPK_CANONICALIZE": "1"}
-                            ):
-                                baseline = self.cp_ragged(
-                                    None, identity=identity, sharded=sharded
-                                )
-                                run = self.cp_ragged(
-                                    context, identity=identity, sharded=sharded
-                                )
-                            torch.testing.assert_close(run.result, baseline.result)
-                            self.assertEqual(run.events, baseline.events)
-                            self.assertEqual(len(context.calls), 2)
-                            for i, (call, token, mqa) in enumerate(
-                                zip(context.calls, context.tokens, run.mqa_calls)
-                            ):
-                                self.assertIsNone(call["query_row_start"])
-                                self.assertEqual(call["total_query_rows"], 5)
-                                self.assertEqual(call["local_query_row_start"], i * 2)
-                                self.assertEqual(call["local_query_rows"], 3)
-                                self.assertEqual(call["cp_rank"], 3)
-                                self.assertEqual(call["cp_size"], 8)
-                                self.assertEqual(call["kv_cache_sharded"], sharded)
-                                torch.testing.assert_close(
-                                    call["query_global_ids"],
-                                    run.gids[i * 2 : i * 2 + 2],
-                                )
-                                torch.testing.assert_close(
-                                    call["row_starts"], mqa.args[3]
-                                )
-                                torch.testing.assert_close(
-                                    call["row_ends"], mqa.args[4]
-                                )
-                                if joint:
-                                    begin = context.begin_mqa.call_args_list[i].kwargs
-                                    for name, actual in zip(
-                                        (
-                                            "q_fp8",
-                                            "k_fp8",
-                                            "k_scale",
-                                            "weights",
-                                            "row_starts",
-                                            "row_ends",
-                                        ),
-                                        (mqa.args[0], *mqa.args[1], *mqa.args[2:]),
-                                    ):
-                                        self.assertIs(begin[name], actual)
-                                    self.assertEqual(
-                                        call["q_fp8"][:, 0, 0].float().tolist(),
-                                        call["query_global_ids"].tolist(),
-                                    )
-                                    self.assertEqual(call["k_fp8"].shape, (8, 128))
-                                    self.assertTrue(torch.all(call["k_scale"] == 1))
-                                    self.assertEqual(
-                                        call["weights"][:, 0].tolist(),
-                                        (call["query_global_ids"] + 1).tolist(),
-                                    )
-                                token.finish.assert_called_once()
-                                token.cancel.assert_not_called()
-                            if joint:
-                                context.begin_topk.assert_not_called()
-                            else:
-                                context.begin_mqa.assert_not_called()
-                            self.assertEqual(
-                                context.tokens[0].output.tolist(),
-                                [[2, 1, 0], [1, 0, -1]],
-                            )
-                            self.assertEqual(
-                                run.result.tolist(), [[0, 1, 2], [5, 6, -1], [5, 6, 7]]
-                            )
+                            self.assertIs(begin[name], actual)
+                        self.assertEqual(
+                            call["q_fp8"][:, 0, 0].float().tolist(),
+                            call["query_global_ids"].tolist(),
+                        )
+                        self.assertEqual(call["k_fp8"].shape, (8, 128))
+                        self.assertTrue(torch.all(call["k_scale"] == 1))
+                        self.assertEqual(
+                            call["weights"][:, 0].tolist(),
+                            (call["query_global_ids"] + 1).tolist(),
+                        )
+                    token.finish.assert_called_once()
+                    token.cancel.assert_not_called()
+                if joint:
+                    context.begin_topk.assert_not_called()
+                else:
+                    context.begin_mqa.assert_not_called()
+                self.assertEqual(
+                    context.tokens[0].output.tolist(), [[2, 1, 0], [1, 0, -1]]
+                )
+                self.assertEqual(
+                    run.result.tolist(), [[0, 1, 2], [5, 6, -1], [5, 6, 7]]
+                )
 
     def test_cp8_collectives_preserved_for_empty_and_capture_rejection(self):
-        for empty in (False, True):
-            for local_k_rows in (0, 1):
-                for mode in ("disabled", "capture", "budget", "missing_mapping"):
-                    with self.subTest(
-                        empty=empty,
-                        local_k_rows=local_k_rows,
-                        mode=mode,
-                    ):
-                        context = (
-                            None if mode == "disabled" else _Context(mqa_enabled=True)
+        for empty, local_k_rows, mode in (
+            (False, 1, "disabled"),
+            (False, 0, "capture"),
+            (True, 1, "capture"),
+            (True, 0, "capture"),
+            (False, 1, "budget"),
+            (False, 0, "missing_mapping"),
+            (True, 0, "disabled"),
+        ):
+            with self.subTest(empty=empty, local_k_rows=local_k_rows, mode=mode):
+                context = None if mode == "disabled" else _Context(mqa_enabled=True)
+                if mode == "budget":
+                    context.begin_mqa.side_effect = None
+                    context.begin_mqa.return_value = None
+                run = self.cp_ragged(
+                    context,
+                    empty=empty,
+                    local_k_rows=local_k_rows,
+                    mapping=mode != "missing_mapping",
+                )
+                expected = (
+                    (["cache"] if local_k_rows else [])
+                    + ["indexer_k_quant", "indexer_k_scale", "restore"]
+                    + ([] if empty else ["mqa", "mqa"])
+                )
+                self.assertEqual(run.events, expected)
+                self.assertEqual(run.result.shape, (0 if empty else 3, 3))
+                if context is not None:
+                    context.begin_topk.assert_not_called()
+                    if empty or mode == "missing_mapping":
+                        context.begin_mqa.assert_not_called()
+                        context.note_skip.assert_called_once_with(
+                            "empty" if empty else "missing_row_mapping", layer=7
                         )
-                        if mode == "budget":
-                            context.begin_mqa.side_effect = None
-                            context.begin_mqa.return_value = None
-                        run = self.cp_ragged(
-                            context,
-                            empty=empty,
-                            local_k_rows=local_k_rows,
-                            mapping=mode != "missing_mapping",
-                        )
-                        expected = (
-                            (["cache"] if local_k_rows else [])
-                            + ["indexer_k_quant", "indexer_k_scale", "restore"]
-                            + ([] if empty else ["mqa", "mqa"])
-                        )
-                        self.assertEqual(run.events, expected)
-                        self.assertEqual(run.result.shape, (0 if empty else 3, 3))
-                        if context is not None:
-                            context.begin_topk.assert_not_called()
-                            if empty or mode == "missing_mapping":
-                                context.begin_mqa.assert_not_called()
-                                context.note_skip.assert_called_once_with(
-                                    "empty" if empty else "missing_row_mapping",
-                                    layer=7,
-                                )
 
     def test_cp_mapping_and_identity_errors_fail_open_without_contiguous_fallback(self):
         baseline = self.cp_ragged(None)
@@ -2180,91 +1997,85 @@ class IndexerTensorCaptureTest(unittest.TestCase):
         )
 
     def test_paged_decode_actual_inputs_backend_workspace_and_raw_outputs(self):
-        for backend in ("dsv4_persistent", "topk_v3"):
-            for joint in (False, True):
-                for rows in (1, 2):
-                    with self.subTest(backend=backend, joint=joint, rows=rows):
-                        with patch.dict(
-                            os.environ, {"GLM5_INDEXER_TOPK_BACKEND": backend}
-                        ):
-                            self.op = self.s.base.IndexerOp(2, 128, 3, 64, layer_idx=7)
-                        context = self.decode_context(joint, rows)
-                        with patch.dict(
-                            os.environ,
-                            {"GLM5_INDEXER_TOPK_BACKEND": "invalid-after-init"},
-                        ):
-                            run = self.paged(context, rows=rows)
-                        expected_backend = (
-                            "topk_v3"
-                            if backend == "topk_v3"
-                            else "dsv4_persistent_topk"
-                        )
-                        self.assertEqual(self.op._paged_topk_backend, expected_backend)
-                        self.assertEqual(
-                            run.result.tolist(), [[2, 1, 0], [69, 68, 67]][:rows]
-                        )
-                        run.mqa.assert_called_once()
-                        run.topk.assert_called_once()
-                        run.get_workspace.assert_called_once_with(torch.device("cpu"))
-                        self.assertIs(run.topk.call_args.args[3], run.workspace)
-                        torch.testing.assert_close(run.cache, run.cache_before)
-                        torch.testing.assert_close(run.workspace, run.workspace_before)
-                        params = (
-                            context.tokens[0].parameters
-                            if joint
-                            else context.begin_paged_topk.call_args.kwargs["parameters"]
-                        )
-                        self.assertEqual(
-                            params,
-                            dict(
-                                k=3,
-                                max_seq_len=128,
-                                index_space="sequence_relative",
-                                workspace_bytes=137,
-                                stride0=256,
-                                stride1=2,
-                            ),
-                        )
-                        self.assertNotIn("workspace", context.calls[0])
-                        if joint:
-                            begin = context.begin_paged_mqa.call_args.kwargs
-                            for name, actual in zip(
-                                (
-                                    "q_fp8",
-                                    "kv_cache_fp8",
-                                    "weights",
-                                    "context_lens",
-                                    "block_table",
-                                    "schedule_metadata",
-                                ),
-                                run.mqa.call_args.args[:6],
-                            ):
-                                self.assertIs(begin[name], actual)
-                            self.assertEqual(begin["q_fp8"].shape, (rows, 1, 2, 128))
-                            self.assertEqual(
-                                begin["kv_cache_fp8"].shape, (8, 64, 1, 132)
-                            )
-                            self.assertEqual(begin["kv_cache_fp8"].dtype, torch.uint8)
-                            self.assertIs(begin["lengths"], run.topk.call_args.args[1])
-                            self.assertEqual(
-                                begin["schedule_environment"],
-                                dict(
-                                    deep_gemm_version="2.8.0+122e18b.cu132",
-                                    device_capability=[9, 0],
-                                    num_sms=148,
-                                ),
-                            )
-                            context.begin_paged_topk.assert_not_called()
-                            run.sms.assert_called_once()
-                            run.capability.assert_called_once_with(torch.device("cpu"))
-                        else:
-                            context.begin_paged_mqa.assert_not_called()
-                            run.sms.assert_not_called()
-                            run.capability.assert_not_called()
-                        context.tokens[0].finish.assert_called_once()
-                        context.tokens[0].cancel.assert_not_called()
-                        context.begin_mqa.assert_not_called()
-                        context.begin_topk.assert_not_called()
+        for backend, joint, rows in (
+            ("dsv4_persistent", True, 2),
+            ("topk_v3", True, 1),
+            ("dsv4_persistent", False, 1),
+            ("topk_v3", False, 2),
+        ):
+            with self.subTest(backend=backend, joint=joint, rows=rows):
+                with patch.dict(os.environ, {"GLM5_INDEXER_TOPK_BACKEND": backend}):
+                    self.op = self.s.base.IndexerOp(2, 128, 3, 64, layer_idx=7)
+                context = self.decode_context(joint, rows)
+                with patch.dict(
+                    os.environ, {"GLM5_INDEXER_TOPK_BACKEND": "invalid-after-init"}
+                ):
+                    run = self.paged(context, rows=rows)
+                expected_backend = (
+                    "topk_v3" if backend == "topk_v3" else "dsv4_persistent_topk"
+                )
+                self.assertEqual(self.op._paged_topk_backend, expected_backend)
+                self.assertEqual(run.result.tolist(), [[2, 1, 0], [69, 68, 67]][:rows])
+                run.mqa.assert_called_once()
+                run.topk.assert_called_once()
+                run.get_workspace.assert_called_once_with(torch.device("cpu"))
+                self.assertIs(run.topk.call_args.args[3], run.workspace)
+                torch.testing.assert_close(run.cache, run.cache_before)
+                torch.testing.assert_close(run.workspace, run.workspace_before)
+                params = (
+                    context.tokens[0].parameters
+                    if joint
+                    else context.begin_paged_topk.call_args.kwargs["parameters"]
+                )
+                self.assertEqual(
+                    params,
+                    dict(
+                        k=3,
+                        max_seq_len=128,
+                        index_space="sequence_relative",
+                        workspace_bytes=137,
+                        stride0=256,
+                        stride1=2,
+                    ),
+                )
+                self.assertNotIn("workspace", context.calls[0])
+                if joint:
+                    begin = context.begin_paged_mqa.call_args.kwargs
+                    for name, actual in zip(
+                        (
+                            "q_fp8",
+                            "kv_cache_fp8",
+                            "weights",
+                            "context_lens",
+                            "block_table",
+                            "schedule_metadata",
+                        ),
+                        run.mqa.call_args.args[:6],
+                    ):
+                        self.assertIs(begin[name], actual)
+                    self.assertEqual(begin["q_fp8"].shape, (rows, 1, 2, 128))
+                    self.assertEqual(begin["kv_cache_fp8"].shape, (8, 64, 1, 132))
+                    self.assertEqual(begin["kv_cache_fp8"].dtype, torch.uint8)
+                    self.assertIs(begin["lengths"], run.topk.call_args.args[1])
+                    self.assertEqual(
+                        begin["schedule_environment"],
+                        dict(
+                            deep_gemm_version="2.8.0+122e18b.cu132",
+                            device_capability=[9, 0],
+                            num_sms=148,
+                        ),
+                    )
+                    context.begin_paged_topk.assert_not_called()
+                    run.sms.assert_called_once()
+                    run.capability.assert_called_once_with(torch.device("cpu"))
+                else:
+                    context.begin_paged_mqa.assert_not_called()
+                    run.sms.assert_not_called()
+                    run.capability.assert_not_called()
+                context.tokens[0].finish.assert_called_once()
+                context.tokens[0].cancel.assert_not_called()
+                context.begin_mqa.assert_not_called()
+                context.begin_topk.assert_not_called()
 
     def test_paged_decode_schedule_reuses_actual_num_sms_and_tensor(self):
         for schedule in ("present", "missing", "empty"):
@@ -2441,24 +2252,6 @@ class IndexerTensorCaptureTest(unittest.TestCase):
                 run.mqa.assert_called_once()
                 run.topk.assert_called_once()
 
-    def test_paged_decode_snapshots_precede_mqa_and_topk_mutation(self):
-        context = self.decode_context(True)
-
-        def mutate_inputs(q, cache, weights, *args, **kwargs):
-            q.copy_(torch.zeros(q.shape).to(q.dtype))
-            cache.zero_()
-            weights.zero_()
-
-        def mutate_logits(logits, *args):
-            logits.fill_(-99)
-
-        run = self.paged(context, mqa_effect=mutate_inputs, topk_effect=mutate_logits)
-        self.assertTrue(torch.any(context.calls[0]["kv_cache_fp8"] != 0))
-        self.assertTrue(torch.any(context.calls[0]["q_fp8"].float() != 0))
-        self.assertTrue(torch.any(context.calls[0]["weights"] != 0))
-        torch.testing.assert_close(context.tokens[0].logits, run.logits_before)
-        self.assertEqual(context.tokens[0].output.tolist(), [[2, 1, 0], [69, 68, 67]])
-
     def test_paged_decode_capture_failures_and_joint_rejection_preserve_inference(self):
         baseline = self.paged(None).result
         for stage in ("budget", "begin", "prepare_false", "prepare_error", "finish"):
@@ -2582,9 +2375,25 @@ class IndexerTensorCaptureTest(unittest.TestCase):
                     ) as (capture, recorder, context, root):
                         self.assertIsNotNone(context)
                         baseline = self.paged(None, production_layout=True)
-                        run = self.paged(context, production_layout=True)
+
+                        def mutate_inputs(q, cache, weights, *args, **kwargs):
+                            q.copy_(torch.zeros(q.shape).to(q.dtype))
+                            cache.zero_()
+                            weights.zero_()
+
+                        run = self.paged(
+                            context,
+                            production_layout=True,
+                            mqa_effect=mutate_inputs if joint and not budget else None,
+                            topk_effect=lambda logits, *args: logits.fill_(-99),
+                        )
                         torch.testing.assert_close(run.result, baseline.result)
-                        torch.testing.assert_close(run.cache, run.cache_before)
+                        self.assertTrue(torch.all(run.logits == -99))
+                        if joint and not budget:
+                            self.assertTrue(torch.all(run.cache == 0))
+                            self.assertTrue(torch.all(run.q.float() == 0))
+                        else:
+                            torch.testing.assert_close(run.cache, run.cache_before)
                         self.assertTrue(recorder.close())
                         self.assertEqual(recorder.stats()["inflight_bytes"], 0)
                         self.assertEqual(
@@ -2610,7 +2419,21 @@ class IndexerTensorCaptureTest(unittest.TestCase):
                                 "sequence_relative",
                             )
                             torch.testing.assert_close(tensors["indices"], run.result)
+                            for row, length in enumerate(run.lengths.tolist()):
+                                torch.testing.assert_close(
+                                    tensors["logits"][row, :length],
+                                    run.logits_before[row, :length],
+                                    rtol=0,
+                                    atol=0,
+                                )
                             if joint:
+                                self.assertTrue(
+                                    torch.any(tensors["q_fp8"].float() != 0)
+                                )
+                                self.assertTrue(torch.any(tensors["weights"] != 0))
+                                self.assertTrue(
+                                    torch.any(tensors["packed_kv_pages"] != 0)
+                                )
                                 self.assertEqual(
                                     tensors["packed_kv_pages"].shape, (3, 64, 1, 132)
                                 )

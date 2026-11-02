@@ -69,6 +69,10 @@ Trusted and deployed across numerous LLM scenarios:
 - [Backend Tutorial](https://rtp-llm.ai/build/en/references/deepseek/index.html)
 - [Contribution Guide](https://rtp-llm.ai/build/en/references/Contributing.html)
 
+### Internal developer tools
+Tensor capture replay is a source-checkout developer tool, not part of the production capture package. From the checkout root, run `/opt/conda310/bin/python3 -m tools.tensor_capture_replay MANIFEST` (add `--device cuda` only with verified native libraries).
+The former `rtp_llm.utils.tensor_capture_replay` import/CLI path is no longer provided; replay tests now use `//tools:tensor_capture_replay_test`, `//tools:tensor_capture_replay_cuda_test`, and `//tools:tensor_capture_mqa_replay_cuda_test`.
+
 ## Benchmark and Performance
 Learn more about RTP-LLM's performance in our benchmark reports:
 - [Performance Benchmark Tool](https://rtp-llm.ai/build/en/benchmark/benchmark.html)

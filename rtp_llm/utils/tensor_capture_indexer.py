@@ -51,7 +51,8 @@ def _validate_mqa_inputs(inputs):
 def _parameters(parameters, k):
     clean = capture._parameters(parameters)
     if (
-        clean.get("k", k) != k
+        not capture._integer(k, 1)
+        or clean.get("k", k) != k
         or clean.get("index_space", "relative_to_row_start") != "relative_to_row_start"
     ):
         raise ValueError("inconsistent topk parameters")
@@ -307,43 +308,44 @@ class _IndexerContract(capture.CaptureContract):
         else:
             super().snapshot(name, tensor, tensors)
 
+    def input_specs(self, inputs, identity, metadata):
+        if self.version == 2:
+            expected = {"query_global_ids", "row_starts", "row_ends"} | (
+                {"logits"}
+                if self.name == _TOPK
+                else {"q_fp8", "k_fp8", "k_scale", "weights"}
+            )
+            if set(inputs) != expected or not _INDEXED_FIELDS.issubset(metadata):
+                raise ValueError(
+                    "indexed contract requires indexed named inputs and metadata"
+                )
+        elif _INDEXED_FIELDS.intersection(metadata) or "query_global_ids" in inputs:
+            raise ValueError("legacy contract requires contiguous mapping")
+        if self.name == _TOPK:
+            logits = inputs["logits"]
+            if logits.dtype != torch.float32 or logits.ndim != 2:
+                raise ValueError("logits must be float32 [rows, columns]")
+            rows, columns = logits.shape
+            if self.version == 2 and any(
+                t.device != logits.device for t in inputs.values()
+            ):
+                raise ValueError("indexed input devices must match")
+        else:
+            rows, columns = _validate_mqa_inputs(inputs)
+        _validate_mapping(
+            identity,
+            rows,
+            columns,
+            inputs["row_starts"],
+            inputs["row_ends"],
+            1,
+            metadata,
+            inputs.get("query_global_ids"),
+        )
+        return {}
+
     def snapshot_inputs(self, inputs, tensors, identity, metadata):
-        # Check the frozen row mapping before copying large logits/FP8 payloads.
-        try:
-            if self.version == 2:
-                expected = {"query_global_ids", "row_starts", "row_ends"}
-                expected |= (
-                    {"logits"}
-                    if self.name == _TOPK
-                    else {"q_fp8", "k_fp8", "k_scale", "weights"}
-                )
-                if set(inputs) != expected or not _INDEXED_FIELDS.issubset(metadata):
-                    raise ValueError(
-                        "indexed contract requires indexed named inputs and metadata"
-                    )
-                operand = inputs["logits"] if self.name == _TOPK else inputs["q_fp8"]
-                if self.name == _TOPK:
-                    if operand.dtype != torch.float32 or operand.ndim != 2:
-                        raise ValueError("logits must be float32 [rows, columns]")
-                    rows, columns = operand.shape
-                else:
-                    rows, columns = _validate_mqa_inputs(inputs)
-                _validate_mapping(
-                    identity,
-                    rows,
-                    columns,
-                    inputs["row_starts"],
-                    inputs["row_ends"],
-                    1,
-                    metadata,
-                    inputs["query_global_ids"],
-                )
-                if any(t.device != operand.device for t in inputs.values()):
-                    raise ValueError("indexed input devices must match")
-            elif _INDEXED_FIELDS.intersection(metadata) or "query_global_ids" in inputs:
-                raise ValueError("legacy contract requires contiguous mapping")
-        except ValueError as error:
-            raise capture.CaptureContractError(str(error)) from error
+        # Check owned mapping values before copying large logits/FP8 payloads.
         names = (
             ("query_global_ids", "row_starts", "row_ends")
             if self.version == 2
@@ -723,12 +725,72 @@ def _paged_snapshot_logits(logits, tensors):
 class _PagedIndexerContract(capture.CaptureContract):
     def input_specs(self, inputs, identity, metadata):
         expected = _paged_expected_lengths(identity, metadata["total_query_rows"])
-        if self.name == _TOPK:
-            return {}
-        block, dimension, capacity = _validate_paged_layout(
-            metadata["cache_layout"], expected
+        rows = len(expected)
+        _paged_source_devices(inputs)
+        _paged_require(
+            metadata["query_mapping"] == _PAGED_QUERY_MAPPING,
+            "invalid paged query mapping",
         )
+        _paged_tensor(inputs["lengths"], torch.int32, (rows,), "lengths")
+        if self.name == _TOPK:
+            _paged_require(
+                set(inputs) == {"logits", "lengths"}, "invalid paged TopK inputs"
+            )
+            logits = inputs["logits"]
+            _paged_require(logits.ndim == 2, "invalid paged logits")
+            _paged_tensor(
+                logits, torch.float32, (rows, logits.shape[1]), "logits", contiguous=False
+            )
+            _paged_require(
+                logits.stride(1) == 1 and max(expected) <= logits.shape[1],
+                "invalid paged logits capacity or stride",
+            )
+            return {}
+        _paged_require(set(inputs) == _PAGED_INPUTS, "invalid paged MQA inputs")
+        layout = metadata["cache_layout"]
+        block, dimension, capacity = _validate_paged_layout(layout, expected)
+        max_seq_len = metadata["mqa_parameters"]["max_seq_len"]
+        _paged_require(
+            capture._integer(max_seq_len, 1)
+            and max_seq_len % block == 0
+            and max(expected) <= max_seq_len,
+            "invalid paged sequence capacity",
+        )
+        q = inputs["q_fp8"]
+        _paged_require(q.ndim == 4 and q.shape[2] > 0, "invalid paged query")
+        _paged_tensor(
+            q, torch.float8_e4m3fn, (rows, 1, q.shape[2], dimension), "q_fp8"
+        )
+        _paged_tensor(
+            inputs["weights"],
+            torch.float32,
+            (rows, q.shape[2]),
+            "weights",
+            contiguous=False,
+        )
+        _paged_require(inputs["weights"].stride(1) == 1, "invalid weights stride")
+        _paged_tensor(inputs["kvlen_2d"], torch.int32, (rows, 1), "kvlen_2d")
+        _paged_tensor(
+            inputs["block_table"],
+            torch.int32,
+            (rows, max_seq_len // block),
+            "block_table",
+            contiguous=False,
+        )
+        _paged_require(
+            inputs["block_table"].stride(1) == 1, "invalid block table stride"
+        )
+        _validate_paged_schedule(
+            metadata["schedule_environment"], inputs["schedule_metadata"], block
+        )
+        _validate_paged_heads(q.shape[2], metadata["schedule_environment"])
         stride = dimension + 4 * (dimension // 128)
+        _paged_tensor(
+            inputs["packed_kv_pages"],
+            torch.uint8,
+            (layout["source_page_count"], block, 1, stride),
+            "packed_kv_pages source",
+        )
         return {
             "packed_kv_pages": capture.TensorSpec(
                 (capacity, block, 1, stride), torch.uint8
@@ -779,63 +841,23 @@ class _PagedIndexerContract(capture.CaptureContract):
 
     def snapshot_inputs(self, inputs, tensors, identity, metadata):
         try:
-            expected = _paged_expected_lengths(identity, metadata["total_query_rows"])
-            rows = len(expected)
-            _paged_source_devices(inputs)
-            _paged_require(
-                metadata["query_mapping"] == _PAGED_QUERY_MAPPING,
-                "invalid paged query mapping",
-            )
-            _paged_tensor(inputs["lengths"], torch.int32, (rows,), "lengths")
+            # input_specs validated the frozen identity and capture-owned metadata
+            # before reserve; only source tensor values remain to be checked here.
+            expected = [row["kv_len"] + 1 for row in identity["requests"]]
             self.snapshot("lengths", inputs["lengths"], tensors)
             _paged_require(
                 tensors["lengths"].tolist() == expected,
                 "runtime lengths differ from frozen decode batch",
             )
             if self.name == _TOPK:
-                _paged_require(
-                    set(inputs) == {"logits", "lengths"}, "invalid paged TopK inputs"
-                )
                 self.snapshot("logits", inputs["logits"], tensors)
                 return
-            _paged_require(set(inputs) == _PAGED_INPUTS, "invalid paged MQA inputs")
             layout = metadata["cache_layout"]
-            block, dimension, capacity = _validate_paged_layout(layout, expected)
-            max_seq_len = metadata["mqa_parameters"]["max_seq_len"]
-            _paged_require(
-                capture._integer(max_seq_len, 1)
-                and max_seq_len % block == 0
-                and max(expected) <= max_seq_len,
-                "invalid paged sequence capacity",
+            block, dimension, capacity = (
+                layout["block_size"],
+                layout["head_dim"],
+                layout["page_capacity"],
             )
-            q = inputs["q_fp8"]
-            _paged_require(q.ndim == 4 and q.shape[2] > 0, "invalid paged query")
-            _paged_tensor(
-                q, torch.float8_e4m3fn, (rows, 1, q.shape[2], dimension), "q_fp8"
-            )
-            _paged_tensor(
-                inputs["weights"],
-                torch.float32,
-                (rows, q.shape[2]),
-                "weights",
-                contiguous=False,
-            )
-            _paged_require(inputs["weights"].stride(1) == 1, "invalid weights stride")
-            _paged_tensor(inputs["kvlen_2d"], torch.int32, (rows, 1), "kvlen_2d")
-            _paged_tensor(
-                inputs["block_table"],
-                torch.int32,
-                (rows, max_seq_len // block),
-                "block_table",
-                contiguous=False,
-            )
-            _paged_require(
-                inputs["block_table"].stride(1) == 1, "invalid block table stride"
-            )
-            _validate_paged_schedule(
-                metadata["schedule_environment"], inputs["schedule_metadata"], block
-            )
-            _validate_paged_heads(q.shape[2], metadata["schedule_environment"])
             self.snapshot("kvlen_2d", inputs["kvlen_2d"], tensors)
             _paged_require(
                 tensors["kvlen_2d"].flatten().tolist() == expected,
@@ -859,12 +881,6 @@ class _PagedIndexerContract(capture.CaptureContract):
             tensors["block_table"] = table
             stride = dimension + 4 * (dimension // 128)
             source = inputs["packed_kv_pages"]
-            _paged_tensor(
-                source,
-                torch.uint8,
-                (layout["source_page_count"], block, 1, stride),
-                "packed_kv_pages source",
-            )
             pages = torch.zeros((capacity, block, 1, stride), dtype=torch.uint8)
             ids = torch.full((capacity,), -1, dtype=torch.int64)
             valid = torch.zeros((capacity,), dtype=torch.int32)
@@ -883,6 +899,15 @@ class _PagedIndexerContract(capture.CaptureContract):
                 self.snapshot(name, inputs[name], tensors)
         except (ValueError, KeyError, TypeError, IndexError) as error:
             raise capture.CaptureContractError(str(error)) from error
+
+    def error_reason(self, stage):
+        if stage == "contract":
+            return (
+                "invalid_paged_topk_contract"
+                if self.name == _TOPK
+                else "invalid_paged_mqa_contract"
+            )
+        return super().error_reason(stage)
 
 
 def validate_paged_capture(manifest, tensors):
@@ -1273,24 +1298,14 @@ class IndexerCaptureContext:
         if not self.context.selected(_TOPK, layer):
             return None
         try:
-            expected = _paged_expected_lengths(self.identity, total_query_rows)
             _paged_require(backend in _PAGED_BACKENDS, "unsupported paged TopK backend")
-            _validate_paged_topk_parameters(parameters, len(expected))
-            _paged_require(type(k) is int and k == parameters["k"], "paged k mismatch")
-            _paged_tensor(
-                logits,
-                torch.float32,
-                (len(expected), parameters["max_seq_len"]),
-                "logits",
-                contiguous=False,
-            )
-            _paged_tensor(lengths, torch.int32, (len(expected),), "lengths")
             _paged_require(
-                tuple(logits.stride()) == (parameters["stride0"], parameters["stride1"])
-                and max(expected) <= parameters["max_seq_len"],
+                logits.ndim == 2
+                and logits.shape[1] == parameters["max_seq_len"]
+                and tuple(logits.stride())
+                == (parameters["stride0"], parameters["stride1"]),
                 "paged logits layout mismatch",
             )
-            _paged_source_devices({"logits": logits, "lengths": lengths})
             return self.context.begin(
                 op=_TOPK,
                 contract_version=3,
@@ -1298,12 +1313,12 @@ class IndexerCaptureContext:
                 inputs=dict(logits=logits, lengths=lengths),
                 outputs={
                     "indices": capture.TensorSpec(
-                        (len(expected), k), torch.int32, logits.device
+                        (total_query_rows, k), torch.int32, logits.device
                     )
                 },
                 backend=backend,
                 parameters=parameters,
-                metadata=_paged_metadata(len(expected)),
+                metadata=_paged_metadata(total_query_rows),
             )
         except Exception:
             self.note_skip("invalid_paged_topk_contract", layer)
@@ -1332,71 +1347,14 @@ class IndexerCaptureContext:
         if not self.context.selected(_JOINT, layer):
             return None
         try:
-            expected = _paged_expected_lengths(self.identity, total_query_rows)
-            rows = len(expected)
-            _paged_require(
-                type(k) is int and k in (512, 1024, 2048), "unsupported paged k"
-            )
-            _paged_require(
-                capture._integer(block_size, 1)
-                and capture._integer(max_seq_len, 1)
-                and max_seq_len % block_size == 0
-                and max(expected) <= max_seq_len,
-                "invalid paged sequence capacity",
-            )
-            _paged_require(
-                isinstance(q_fp8, torch.Tensor)
-                and q_fp8.ndim == 4
-                and q_fp8.shape[2] > 0,
-                "invalid paged query",
-            )
+            _paged_require(capture._integer(block_size, 1), "invalid paged block size")
             dimension = q_fp8.shape[3]
-            _paged_tensor(
-                q_fp8,
-                torch.float8_e4m3fn,
-                (rows, 1, q_fp8.shape[2], dimension),
-                "q_fp8",
-            )
-            _paged_require(dimension == 128, "unsupported paged head dimension")
-            _paged_tensor(
-                weights,
-                torch.float32,
-                (rows, q_fp8.shape[2]),
-                "weights",
-                contiguous=False,
-            )
-            _paged_require(weights.stride(1) == 1, "invalid weights stride")
-            _paged_tensor(context_lens, torch.int32, (rows, 1), "kvlen_2d")
-            _paged_tensor(lengths, torch.int32, (rows,), "lengths")
-            _paged_tensor(
-                block_table,
-                torch.int32,
-                (rows, max_seq_len // block_size),
-                "block_table",
-                contiguous=False,
-            )
-            _paged_require(block_table.stride(1) == 1, "invalid block table stride")
-            _validate_paged_schedule(
-                schedule_environment, schedule_metadata, block_size
-            )
-            _validate_paged_heads(q_fp8.shape[2], schedule_environment)
-            _paged_require(
-                isinstance(kv_cache_fp8, torch.Tensor)
-                and kv_cache_fp8.ndim == 4
-                and kv_cache_fp8.shape[0] > 0,
-                "invalid packed cache",
-            )
-            stride = dimension + 4 * (dimension // 128)
-            _paged_tensor(
-                kv_cache_fp8,
-                torch.uint8,
-                (kv_cache_fp8.shape[0], block_size, 1, stride),
-                "packed cache",
-            )
+            # input_specs enforces single-token decode before this capacity is used.
             capacity = sum(
-                (length + block_size - 1) // block_size for length in expected
+                (row["kv_len"] + block_size) // block_size
+                for row in self.identity["requests"]
             )
-            metadata = _paged_metadata(rows)
+            metadata = _paged_metadata(total_query_rows)
             metadata.update(
                 cache_layout=dict(
                     version=1,
@@ -1428,7 +1386,6 @@ class IndexerCaptureContext:
                 page_ids=block_table,
                 page_valid_tokens=lengths,
             )
-            _paged_source_devices(inputs)
             return self.context.begin(
                 op=_JOINT,
                 contract_version=3,
@@ -1436,9 +1393,11 @@ class IndexerCaptureContext:
                 inputs=inputs,
                 outputs={
                     "logits": capture.TensorSpec(
-                        (rows, max_seq_len), torch.float32, q_fp8.device
+                        (total_query_rows, max_seq_len), torch.float32, q_fp8.device
                     ),
-                    "indices": capture.TensorSpec((rows, k), torch.int32, q_fp8.device),
+                    "indices": capture.TensorSpec(
+                        (total_query_rows, k), torch.int32, q_fp8.device
+                    ),
                 },
                 backend="pending",
                 parameters={},
@@ -1473,13 +1432,7 @@ class IndexerCaptureContext:
         if not self.context.selected(_TOPK, layer):
             return None
         try:
-            if (
-                logits.dtype != torch.float32
-                or logits.ndim != 2
-                or logits.shape[0] == 0
-            ):
-                raise ValueError("only nonempty float32 logits supported")
-            rows, columns = logits.shape
+            rows = logits.shape[0]
             metadata = self._manifest(
                 rows,
                 query_row_start,
@@ -1491,21 +1444,9 @@ class IndexerCaptureContext:
                 cp_size,
                 kv_cache_sharded,
             )
-            _validate_mapping(
-                self.identity,
-                rows,
-                columns,
-                row_starts,
-                row_ends,
-                k,
-                metadata,
-                query_global_ids,
-            )
             inputs = dict(row_starts=row_starts, row_ends=row_ends, logits=logits)
             if query_global_ids is not None:
                 inputs["query_global_ids"] = query_global_ids
-                if any(t.device != logits.device for t in inputs.values()):
-                    raise ValueError("indexed TopK input devices must match")
             return self.context.begin(
                 op=_TOPK,
                 contract_version=2 if query_global_ids is not None else 1,
@@ -1556,7 +1497,7 @@ class IndexerCaptureContext:
             )
             if query_global_ids is not None:
                 inputs["query_global_ids"] = query_global_ids
-            rows, columns = _validate_mqa_inputs(inputs)
+            rows, columns = q_fp8.shape[0], k_fp8.shape[0]
             metadata = self._manifest(
                 rows,
                 query_row_start,
@@ -1567,16 +1508,6 @@ class IndexerCaptureContext:
                 cp_rank,
                 cp_size,
                 kv_cache_sharded,
-            )
-            _validate_mapping(
-                self.identity,
-                rows,
-                columns,
-                row_starts,
-                row_ends,
-                k,
-                metadata,
-                query_global_ids,
             )
             metadata.update(
                 mqa_parameters=dict(

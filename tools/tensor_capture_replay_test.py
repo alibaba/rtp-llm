@@ -1,9 +1,9 @@
 """Model-free replay tests. CPU tests never skip.
 
 CPU only:
-  /opt/conda310/bin/python3 -m unittest rtp_llm.utils.test.tensor_capture_replay_test.TensorCaptureReplayTest -v
+  /opt/conda310/bin/python3 -m unittest tools.tensor_capture_replay_test.TensorCaptureReplayTest -v
 Real TopK CUDA (Bazel-built libraries, explicit opt-in set by the target):
-  bazelisk test --config=cuda13 --config=sm120 //rtp_llm/utils/test:tensor_capture_replay_cuda_test
+  bazelisk test --config=cuda13 --config=sm120 //tools:tensor_capture_replay_cuda_test
 TensorCaptureMqaReplayCudaTest additionally requires a coordinated Bazel target
 with //rtp_llm/models_py:deep_gemm (production wheel) and RTP_LLM_TEST_CAPTURE_REPLAY_CUDA=1.
 Do not run CUDA classes against unverified libraries in a bare Python environment.
@@ -11,7 +11,7 @@ Once opted in, missing GPU/library or unsupported architecture FAILS, except the
 real paged MQA test explicitly skips devices outside the verified SM90/SM100
 families (the SM100 family includes SM103). It can run model-free against an installed RTP
 wheel plus the matching capture/replay sources and a verified DeepGEMM wheel:
-  RTP_LLM_TEST_CAPTURE_REPLAY_CUDA=1 /opt/conda310/bin/python3 tensor_capture_replay_test.py TensorCaptureMqaReplayCudaTest.test_paged_mqa_shared_partial_pages_reuse_and_rebuild -v
+  RTP_LLM_TEST_CAPTURE_REPLAY_CUDA=1 /opt/conda310/bin/python3 -m tools.tensor_capture_replay_test TensorCaptureMqaReplayCudaTest.test_paged_mqa_shared_partial_pages_reuse_and_rebuild -v
 Temporary bundles use TEST_TMPDIR, TMPDIR, then RTP_LLM_TEST_LOCAL_LAB.
 Without these variables, tempfile chooses the default temporary directory.
 """
@@ -29,8 +29,8 @@ from unittest import mock
 import torch
 
 from rtp_llm.utils import tensor_capture as capture
-from rtp_llm.utils import tensor_capture_replay as replay
 from rtp_llm.utils.tensor_capture_indexer import for_context
+from tools import tensor_capture_replay as replay
 
 
 class _FloatPairReplayAdapter:

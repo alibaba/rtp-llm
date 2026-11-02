@@ -1,12 +1,12 @@
-"""Validate captures or replay CUDA operators through statically registered contracts.
+"""Internal tool to validate captures or replay CUDA operators via registered contracts.
 
 Schema3 dispatches by (contract.name, contract.version). Registration is explicit
 Python code; capture metadata never names a module to import or a DAG to execute.
 Unknown contracts remain loadable but cannot be validated or replayed here.
 Legacy schema1 TopK/schema2 MQA+TopK delegate to the Indexer adapter unchanged.
 
-    /opt/conda310/bin/python3 -m rtp_llm.utils.tensor_capture_replay MANIFEST
-    /opt/conda310/bin/python3 -m rtp_llm.utils.tensor_capture_replay MANIFEST --device cuda
+    /opt/conda310/bin/python3 -m tools.tensor_capture_replay MANIFEST
+    /opt/conda310/bin/python3 -m tools.tensor_capture_replay MANIFEST --device cuda
 
 CPU mode checks the current source contract, NOT execution of the captured kernel.
 This is the stable-index contract, not a promise about arbitrary older binaries:

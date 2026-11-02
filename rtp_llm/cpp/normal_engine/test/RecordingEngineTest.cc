@@ -528,6 +528,7 @@ void RecordingEngineTest::runCaptureConstructorFailure() {
 import ctypes
 events = []
 fail_close = False
+fail_initialize = True
 class Recorder:
     def __init__(self, config_path, *, tp_rank, world_rank):
         events.append('created')
@@ -544,7 +545,9 @@ class Model:
     def initialize(self, resources):
         assert isinstance(resources, PyModelInitResources)
         events.append('initialized')
-        raise RuntimeError('expected-model-init-failure')
+        if fail_initialize:
+            raise RuntimeError('expected-model-init-failure')
+        return True
 model = Model()
 )",
              scope);
@@ -559,6 +562,7 @@ model = Model()
             throw std::runtime_error("failed to create constructor test directory");
         }
         params.profiling_debug_logging_config.tensor_capture_config = writeCaptureConfig(directory, false);
+        params.hw_kernel_config.enable_cuda_graph                   = false;
         params.py_model                                             = scope["model"].cast<py::object>();
         for (bool fail_close : {false, true}) {
             scope["fail_close"] = fail_close;
@@ -573,6 +577,16 @@ model = Model()
             EXPECT_EQ(scope["events"].cast<std::vector<std::string>>(),
                       (std::vector<std::string>{"created", "initialized", "closed", "destroyed"}));
         }
+        scope["fail_initialize"] = false;
+        scope["fail_close"]      = false;
+        scope["events"].attr("clear")();
+        {
+            NormalExecutor executor(params, nullptr, /*warm_up=*/true);
+            EXPECT_EQ(scope["events"].cast<std::vector<std::string>>(),
+                      (std::vector<std::string>{"created", "initialized"}));
+        }
+        EXPECT_EQ(scope["events"].cast<std::vector<std::string>>(),
+                  (std::vector<std::string>{"created", "initialized", "closed", "destroyed"}));
     } catch (...) {
         module.attr("TensorCaptureRecorder") = original_recorder;
         throw;

@@ -193,12 +193,12 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
     profile_step_finish_(std::move(profile_step_finish)),
     dispatch_runner_(cuda_graph::graphGetStreamFromPool(true)) {
     enable_detail_log_ = params.profiling_debug_logging_config.enable_detail_log;
-    tensor_capture_enabled_ =
+    const bool tensor_capture_enabled =
         PyWrappedModel::tensorCaptureConfigEnabled(params.profiling_debug_logging_config.tensor_capture_config);
-    tensor_capture_prefill_enabled_ = tensor_capture_enabled_
+    tensor_capture_prefill_enabled_ = tensor_capture_enabled
                                       && PyWrappedModel::tensorCaptureConfigEnabled(
                                           params.profiling_debug_logging_config.tensor_capture_config, "prefill");
-    tensor_capture_decode_enabled_ = tensor_capture_enabled_
+    tensor_capture_decode_enabled_ = tensor_capture_enabled
                                      && PyWrappedModel::tensorCaptureConfigEnabled(
                                          params.profiling_debug_logging_config.tensor_capture_config, "decode");
     const bool capture_records_decode =
@@ -235,7 +235,7 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
             RTP_LLM_LOG_WARNING("batch recorder initialization failed; configuration was not published");
         }
     }
-    if (tensor_capture_enabled_ && !warm_up_ && !is_propose_ && !recorder.enabled()) {
+    if (tensor_capture_enabled && !warm_up_ && !is_propose_ && !recorder.enabled()) {
         throw std::runtime_error(
             "tensor capture requires a ready ExecutionRecorder; set RTP_LLM_RECORD_DIR and RTP_LLM_RECORD_SESSION "
             "and check recorder initialization errors");
@@ -441,9 +441,8 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
     if (tp_rank_ == 0 && model_input.record_execution_id) {
         try {
             recorded_batch = recordBatchInputs(model_input, stream_groups);
-            if ((capture_prefill || capture_decode) && recorded_batch && !warm_up_ && !is_propose_
-                && !model_input.warmup && !model_input.is_fake_stream && !model_input.is_target_verify
-                && !model_input.is_draft_extend) {
+            if ((capture_prefill || capture_decode) && recorded_batch && !model_input.warmup
+                && !model_input.is_fake_stream && !model_input.is_target_verify && !model_input.is_draft_extend) {
                 // Preserve global request lengths before PyWrappedModel performs the CP split.
                 model_input.tensor_capture_context_json =
                     recorded_batch->tensorCaptureContextJson(roleTypeToString(role_type_));
