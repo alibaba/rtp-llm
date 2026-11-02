@@ -36,8 +36,10 @@ def _producer(
     KN: gl.constexpr,
     D: gl.constexpr,
     SLOTS: gl.constexpr,
+    Base,
+    Tile,
 ):
-    tile = gl.cdiv(S, POSITIONS) - 1 - gl.program_id(1 if G == 4 else 0)
+    tile = Tile
     tiles = gl.cdiv(gl.minimum(S, (tile + 1) * POSITIONS), KN)
     for operand in range(2 * tiles):
         slot = operand % SLOTS
@@ -48,11 +50,11 @@ def _producer(
         kt = operand // 2
         if operand % 2 == 0:
             tma.async_copy_global_to_shared(
-                K, [kt * KN, 0], full.index(slot), buf.index(slot)
+                K, [Base + kt * KN, 0], full.index(slot), buf.index(slot)
             )
         else:
             tma.async_copy_global_to_shared(
-                V, [kt * KN, 0], full.index(slot), buf.index(slot)
+                V, [Base + kt * KN, 0], full.index(slot), buf.index(slot)
             )
 
 
@@ -81,6 +83,9 @@ def _consumer(
     SLOTS: gl.constexpr,
     WM: gl.constexpr,
     EARLY: gl.constexpr,
+    Base,
+    Tile,
+    TAIL: gl.constexpr,
 ):
     mma: gl.constexpr = NVMMADistributedLayout(
         version=[2, 0], warps_per_cta=[WM, 4 // WM], instr_shape=[16, 8]
@@ -88,7 +93,7 @@ def _consumer(
     lhs: gl.constexpr = DotOperandLayout(0, mma, 2)
     rhs: gl.constexpr = DotOperandLayout(1, mma, 2)
     load_layout: gl.constexpr = BlockedLayout([1, 4], [4, 8], [4, 1], [1, 0])
-    tile = gl.cdiv(S, POSITIONS) - 1 - gl.program_id(1 if G == 4 else 0)
+    tile = Tile
     group = gl.program_id(0 if G == 4 else 1)
     rr = gl.arange(0, QM, layout=SliceLayout(1, load_layout))
     dd = gl.arange(0, D, layout=SliceLayout(0, load_layout))
@@ -96,7 +101,7 @@ def _consumer(
     hh = group * G + rr % G
     active = (rr < POSITIONS * G) & (pp < S)
     q = gl.load(
-        Q + hh[:, None] * QH + pp[:, None] * QS + dd[None, :],
+        Q + hh[:, None] * QH + (Base + pp[:, None]) * QS + dd[None, :],
         active[:, None],
         other=0.0,
     )
@@ -123,11 +128,11 @@ def _consumer(
             vp = iteration & 1
             mbarrier.expect(full.index(ks), KN * D * 2)
             tma.async_copy_global_to_shared(
-                K, [kt * KN, 0], full.index(ks), buf.index(ks)
+                K, [Base + kt * KN, 0], full.index(ks), buf.index(ks)
             )
             mbarrier.expect(full.index(vs), KN * D * 2)
             tma.async_copy_global_to_shared(
-                V, [kt * KN, 0], full.index(vs), buf.index(vs)
+                V, [Base + kt * KN, 0], full.index(vs), buf.index(vs)
             )
         mbarrier.wait(full.index(ks), kp, deps=[buf])
         k = buf.index(ks).permute((1, 0)).load(rhs)
@@ -142,7 +147,7 @@ def _consumer(
             mbarrier.arrive(empty.index(ks))
         column = kt * KN + c
         bits = gl.load(
-            Mask + pos[:, None] * WORDS + column[None, :] // 32,
+            Mask + (Base + pos[:, None]) * WORDS + column[None, :] // 32,
             live[:, None] & (column[None, :] < S),
             other=0,
         ).to(gl.uint32)
@@ -162,7 +167,15 @@ def _consumer(
             normalizer = normalizer * alpha + gl.sum(p, 1)
             maximum = next_max
         mbarrier.wait(full.index(vs), vp, deps=[buf])
-        v = buf.index(vs).load(rhs)
+        if TAIL == 2:
+            v = buf.index(vs).load(mma)
+            vr = gl.arange(0, KN, layout=SliceLayout(1, mma))
+            v = gl.convert_layout(gl.where((kt * KN + vr < S)[:, None], v, 0.0), rhs)
+        else:
+            v = buf.index(vs).load(rhs)
+            if TAIL == 1:
+                vr = gl.arange(0, KN, layout=SliceLayout(1, rhs))
+                v = gl.where((kt * KN + vr < S)[:, None], v, 0.0)
         acc = mma_v2(hi, v, acc)
         acc = mma_v2(lo, v, acc)
         gl.thread_barrier()
@@ -176,14 +189,14 @@ def _consumer(
     dc = gl.arange(0, D, layout=SliceLayout(0, mma))
     heads = group * G + r % G
     gl.store(
-        O + heads[:, None] * OH + pos[:, None] * OS + dc[None, :],
+        O + heads[:, None] * OH + (Base + pos[:, None]) * OS + dc[None, :],
         output.to(O.dtype.element_ty),
         live[:, None],
     )
 
 
-@g.jit(do_not_specialize=["S", "WORDS"])
-def _pipelined_prefill(
+@g.jit
+def _execute_prefill(
     Q,
     K,
     V,
@@ -191,19 +204,22 @@ def _pipelined_prefill(
     O,
     S,
     WORDS,
+    D: gl.constexpr,
     G: gl.constexpr,
     QM: gl.constexpr,
+    KN: gl.constexpr,
+    POSITIONS: gl.constexpr,
     QH: gl.constexpr,
     QS: gl.constexpr,
+    OH: gl.constexpr,
     OS: gl.constexpr,
     PIPE: gl.constexpr,
+    WM: gl.constexpr,
     EARLY: gl.constexpr,
+    Base,
+    Tile,
+    TAIL: gl.constexpr,
 ):
-    D: gl.constexpr = 256
-    KN: gl.constexpr = 32
-    POSITIONS: gl.constexpr = QM // G
-    WM: gl.constexpr = QM // 16
-    OH: gl.constexpr = D
     # K and V occupy successive slots in one ring, allowing V to arrive
     # while QK and softmax execute without allocating separate K/V pipelines.
     slots: gl.constexpr = 3 if PIPE else 2
@@ -243,11 +259,14 @@ def _pipelined_prefill(
                         slots,
                         WM,
                         EARLY,
+                        Base,
+                        Tile,
+                        TAIL,
                     ),
                 ),
                 (
                     _producer,
-                    (K, V, buf, full, empty, S, POSITIONS, G, KN, D, slots),
+                    (K, V, buf, full, empty, S, POSITIONS, G, KN, D, slots, Base, Tile),
                 ),
             ],
             worker_num_warps=[4],
@@ -278,10 +297,58 @@ def _pipelined_prefill(
             slots,
             WM,
             EARLY,
+            Base,
+            Tile,
+            TAIL,
         )
     for i in gl.static_range(slots):
         mbarrier.invalidate(full.index(i))
         mbarrier.invalidate(empty.index(i))
+
+
+@g.jit(do_not_specialize=["S", "WORDS"])
+def _pipelined_prefill(
+    Q,
+    K,
+    V,
+    Mask,
+    O,
+    S,
+    WORDS,
+    G: gl.constexpr,
+    QM: gl.constexpr,
+    QH: gl.constexpr,
+    QS: gl.constexpr,
+    OS: gl.constexpr,
+    PIPE: gl.constexpr,
+    EARLY: gl.constexpr,
+):
+    positions: gl.constexpr = QM // G
+    tile = gl.cdiv(S, positions) - 1 - gl.program_id(1 if G == 4 else 0)
+    _execute_prefill(
+        Q,
+        K,
+        V,
+        Mask,
+        O,
+        S,
+        WORDS,
+        256,
+        G,
+        QM,
+        32,
+        positions,
+        QH,
+        QS,
+        256,
+        OS,
+        PIPE,
+        QM // 16,
+        EARLY,
+        0,
+        tile,
+        0,
+    )
 
 
 _KV_LAYOUT = NVMMASharedLayout(128, 16)

@@ -431,7 +431,10 @@ class Qwen4ExpAttention(Qwen3NextAttention):
                     and "forward_causal_from_projected" not in self.qsa_indexer.__dict__
                     and callable(trusted_setter)
                 ):
-                    trusted_setter(selected)
+                    trusted_setter(
+                        selected,
+                        cu_seqlens=qsa_runtime.main_inputs.cu_seqlens_device,
+                    )
                 else:
                     set_selected(selected)
                 fused_gate_forward = getattr(

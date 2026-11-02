@@ -197,3 +197,45 @@ def try_causal_qsa_prefill(
         num_stages=1,
     )
     return output_view
+
+
+def try_ragged_causal_qsa_prefill(q, k, v, selected, lengths, cu_seqlens):
+    """Consume packed views with the indexer's validated request partition.
+
+    The caller owns both selection and CU provenance. Contents are not read
+    back here; unrelated or injected metadata must keep the per-request path.
+    """
+    if not (
+        2 <= len(lengths) <= 32
+        and min(lengths) > 0
+        and max(lengths) <= 1024
+        and q.ndim == k.ndim == v.ndim == 2
+        and q.is_cuda
+        and torch.version.hip is None
+        and q.dtype == k.dtype == v.dtype == torch.bfloat16
+        and k.shape == v.shape == (q.shape[0], 256)
+        and q.shape[1] in (6 * 256, 12 * 256)
+        and sum(lengths) == q.shape[0]
+        and selected.shape == (q.shape[0], 2051)
+        and selected.dtype == torch.int32
+        and selected.is_contiguous()
+        and isinstance(cu_seqlens, torch.Tensor)
+        and cu_seqlens.shape == (len(lengths) + 1,)
+        and cu_seqlens.dtype == torch.int32
+        and cu_seqlens.is_contiguous()
+        and all(t.device == q.device for t in (k, v, selected, cu_seqlens))
+        and all(t.stride(1) == 1 for t in (q, k, v))
+        and all(t.stride(0) >= 256 and t.stride(0) % 8 == 0 for t in (k, v))
+        and all(t.data_ptr() % 16 == 0 for t in (k, v))
+        and torch.cuda.get_device_capability(q.device) == (12, 0)
+    ):
+        return None
+    try:
+        from .tma_ragged_pipeline import run_prefill
+    except ImportError:
+        return None
+    tokens, width = q.shape
+    q = q.view(1, tokens, width // 256, 256).transpose(1, 2)
+    k = k.view(1, tokens, 1, 256).transpose(1, 2)
+    v = v.view(1, tokens, 1, 256).transpose(1, 2)
+    return run_prefill(q, k, v, selected, cu_seqlens, lengths)

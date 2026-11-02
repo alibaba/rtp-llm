@@ -73,6 +73,7 @@ class SparseGqaFmhaImpl(FMHAImplBase):
         self._is_mtp_draft = False
         self._selected_indices: Optional[torch.Tensor] = None
         self._trusted_selected_indices = False
+        self._trusted_prefill_cu_seqlens: Optional[torch.Tensor] = None
         self._qsa_main_cache_mutation_started = False
         self._qsa_target_visible_lengths = None
         self._validate_runtime_mode()
@@ -202,11 +203,18 @@ class SparseGqaFmhaImpl(FMHAImplBase):
             raise RuntimeError("qwen4_exp sparse GQA has an unconsumed selection")
         self._selected_indices = selected_indices
         self._trusted_selected_indices = False
+        self._trusted_prefill_cu_seqlens = None
 
-    def set_trusted_selected_indices(self, selected_indices: torch.Tensor) -> None:
+    def set_trusted_selected_indices(
+        self,
+        selected_indices: torch.Tensor,
+        *,
+        cu_seqlens: Optional[torch.Tensor] = None,
+    ) -> None:
         """Accept a selection produced by this model's causal QSA indexer."""
         self.set_selected_indices(selected_indices)
         self._trusted_selected_indices = True
+        self._trusted_prefill_cu_seqlens = cu_seqlens
 
     def _prepare_paged_inputs(
         self,
@@ -457,6 +465,7 @@ class SparseGqaFmhaImpl(FMHAImplBase):
             )
             if uses_stored_selection:
                 self._selected_indices = None
+                self._trusted_prefill_cu_seqlens = None
             return output
         is_incremental_prefill = self._is_prefix_reuse_prefill()
 
@@ -558,6 +567,7 @@ class SparseGqaFmhaImpl(FMHAImplBase):
             )
             if uses_stored_selection:
                 self._selected_indices = None
+                self._trusted_prefill_cu_seqlens = None
             return output
         if is_incremental_prefill:
             if int(qkv.shape[1]) < self.q_width:
@@ -573,6 +583,7 @@ class SparseGqaFmhaImpl(FMHAImplBase):
             )
             if uses_stored_selection:
                 self._selected_indices = None
+                self._trusted_prefill_cu_seqlens = None
             return output
         if not self.is_prefill:
             if qkv.dim() != 2 or int(qkv.shape[1]) != self.q_width:
@@ -592,6 +603,7 @@ class SparseGqaFmhaImpl(FMHAImplBase):
             output = self._forward_paged(qkv, kv_cache, paged_plan, output_gate)
             if uses_stored_selection:
                 self._selected_indices = None
+                self._trusted_prefill_cu_seqlens = None
             return output
 
         common.apply_write_cache_store(
@@ -603,6 +615,7 @@ class SparseGqaFmhaImpl(FMHAImplBase):
         )
         from rtp_llm.models_py.modules.qwen4_exp.qsa.tma_prefill import (
             try_causal_qsa_prefill,
+            try_ragged_causal_qsa_prefill,
         )
 
         tokens = int(qkv.shape[0])
@@ -631,6 +644,25 @@ class SparseGqaFmhaImpl(FMHAImplBase):
                 "selected_indices must be packed [total_tokens, K], got "
                 f"{tuple(selected_indices.shape)} for total_tokens={tokens}"
             )
+
+        cu = getattr(self, "_trusted_prefill_cu_seqlens", None)
+        owner_cu = getattr(self.attn_inputs, "cu_seqlens_device", None)
+        if (
+            trusted_selected
+            and self.attn_configs.indexer_topk == 512
+            and isinstance(cu, torch.Tensor)
+            and isinstance(owner_cu, torch.Tensor)
+            and cu.device == owner_cu.device
+            and cu.data_ptr() == owner_cu.data_ptr()
+        ):
+            output = try_ragged_causal_qsa_prefill(
+                q, k, v, selected_indices, lengths, cu
+            )
+            if output is not None:
+                if uses_stored_selection:
+                    self._selected_indices = None
+                    self._trusted_prefill_cu_seqlens = None
+                return output
 
         outputs = []
         offset = 0
@@ -662,6 +694,7 @@ class SparseGqaFmhaImpl(FMHAImplBase):
         output = outputs[0] if len(outputs) == 1 else torch.cat(outputs, dim=0)
         if uses_stored_selection:
             self._selected_indices = None
+            self._trusted_prefill_cu_seqlens = None
         return output
 
     def _forward_paged(

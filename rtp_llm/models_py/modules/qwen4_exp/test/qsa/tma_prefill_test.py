@@ -6,7 +6,10 @@ from unittest.mock import patch
 
 import torch
 
-from rtp_llm.models_py.modules.qwen4_exp.qsa.tma_prefill import try_causal_qsa_prefill
+from rtp_llm.models_py.modules.qwen4_exp.qsa.tma_prefill import (
+    try_causal_qsa_prefill,
+    try_ragged_causal_qsa_prefill,
+)
 
 
 def make_selection(tokens):
@@ -184,6 +187,34 @@ class TmaPrefillTest(unittest.TestCase):
         )
         torch.testing.assert_close(actual, expected, atol=0.0078125, rtol=0.008)
 
+        # Packed launches require CU metadata supplied by the indexer owner.
+        inputs.cu_seqlens_device = torch.tensor(
+            [0, 129, 257], dtype=torch.int32, device=packed.device
+        )
+        packed_selection = torch.cat(selections, dim=1)[0]
+        with patch(
+            "rtp_llm.models_py.modules.qwen4_exp.qsa.tma_prefill.try_ragged_causal_qsa_prefill",
+            wraps=try_ragged_causal_qsa_prefill,
+        ) as fast:
+            impl.set_trusted_selected_indices(
+                packed_selection, cu_seqlens=inputs.cu_seqlens_device
+            )
+            actual = impl.forward(packed, None)
+            fast.assert_called_once()
+        torch.testing.assert_close(actual, expected, atol=0.0078125, rtol=0.008)
+        self.assertTrue(actual.is_contiguous())
+        self.assertIsNone(impl._trusted_prefill_cu_seqlens)
+
+        old_cu = inputs.cu_seqlens_device
+        inputs.cu_seqlens_device = old_cu.clone()
+        with patch(
+            "rtp_llm.models_py.modules.qwen4_exp.qsa.tma_prefill.try_ragged_causal_qsa_prefill",
+            side_effect=AssertionError("CU owner changed"),
+        ):
+            impl.set_trusted_selected_indices(packed_selection, cu_seqlens=old_cu)
+            actual = impl.forward(packed, None)
+        torch.testing.assert_close(actual, expected, atol=0.0078125, rtol=0.008)
+
     def test_graph_replay_refreshes_membership_and_qkv(self):
         packed, q, k, v = make_inputs(257, 12)
         selected = make_selection(257)
@@ -239,6 +270,75 @@ class TmaPrefillTest(unittest.TestCase):
         self.assertIsNotNone(actual)
         torch.testing.assert_close(
             actual, reference(q, k, v, selected), atol=0.0078125, rtol=0.008
+        )
+
+    def test_packed_ragged_refreshes_request_partition_and_isolates_tail_tiles(self):
+        for heads in (6, 12):
+            with self.subTest(heads=heads):
+                packed, q, k, v = make_inputs(257, heads)
+                flat_q, flat_k, flat_v = packed.split([heads * 256, 256, 256], -1)
+                selected = torch.cat([make_selection(129), make_selection(128)], 1)[0]
+                cu = torch.tensor([0, 129, 257], dtype=torch.int32, device=q.device)
+
+                def run():
+                    return try_ragged_causal_qsa_prefill(
+                        flat_q, flat_k, flat_v, selected, [129, 128], cu
+                    )
+
+                actual = run()
+                self.assertIsNotNone(actual)
+                expected = reference(
+                    q[:, :, :129], k[:, :, :129], v[:, :, :129], selected[None, :129]
+                )
+                # Only the following request is poisoned; the first tail tile stays isolated.
+                flat_v[129:] = torch.nan
+                actual = run()
+                torch.testing.assert_close(
+                    actual[:129],
+                    expected.transpose(1, 2).reshape(129, -1),
+                    atol=0.0078125,
+                    rtol=0.008,
+                )
+                packed.copy_(torch.randn_like(packed))
+                torch.cuda.synchronize()
+                graph = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(graph):
+                    actual = run()
+                selected.fill_(-1)
+                graph.replay()
+                self.assertTrue((actual == 0).all())
+                cu.copy_(
+                    torch.tensor([0, 128, 257], dtype=torch.int32, device=q.device)
+                )
+                selected.copy_(
+                    torch.cat([make_selection(128), make_selection(129)], 1)[0]
+                )
+                graph.replay()
+                expected = torch.cat(
+                    [
+                        reference(
+                            q[:, :, a:b],
+                            k[:, :, a:b],
+                            v[:, :, a:b],
+                            selected[None, a:b],
+                        )
+                        .transpose(1, 2)
+                        .reshape(b - a, -1)
+                        for a, b in ((0, 128), (128, 257))
+                    ]
+                )
+                torch.testing.assert_close(actual, expected, atol=0.0078125, rtol=0.008)
+
+    def test_packed_ragged_guards_keep_unsupported_metadata_on_general_path(self):
+        packed, _, _, _ = make_inputs(257, 12)
+        q, k, v = packed.split([12 * 256, 256, 256], -1)
+        ids = torch.cat([make_selection(129), make_selection(128)], 1)[0]
+        cu = torch.tensor([0, 129, 257], dtype=torch.int32, device=q.device)
+        self.assertIsNone(try_ragged_causal_qsa_prefill(q, k, v, ids, [257], cu))
+        self.assertIsNone(try_ragged_causal_qsa_prefill(q, k, v, ids, [129, 129], cu))
+        self.assertIsNone(try_ragged_causal_qsa_prefill(q, k, v, ids, [129, 128], None))
+        self.assertIsNone(
+            try_ragged_causal_qsa_prefill(q, k, v, ids, [129, 128], cu.long())
         )
 
     def test_runtime_lengths_reuse_compiled_pipeline(self):
