@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from contextlib import AsyncExitStack, aclosing
 from typing import Optional
 
@@ -36,6 +37,7 @@ _FORWARD_CHANNEL_OPTS: list[tuple[str, int]] = [
     ("grpc.http2.max_pings_without_data", 0),
 ]
 _CHANNEL_CLEANUP_INTERVAL_S = 60
+_BUFFER_FIRST_CHUNK_ENV_KEY = "DASH_SC_GRPC_PROXY_BUFFER_FIRST_CHUNK"
 
 
 def _is_stream_done(resp: predict_v2_pb2.ModelStreamInferResponse) -> bool:
@@ -71,6 +73,9 @@ class DashScProxyServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
             cleanup_interval=_CHANNEL_CLEANUP_INTERVAL_S,
         )
         self._discovery = create_service_discovery_from_env()
+        self._buffer_first_chunk = (
+            os.environ.get(_BUFFER_FIRST_CHUNK_ENV_KEY, "1").strip() != "0"
+        )
         # Access-log identity, injected at construction (``DashScApp`` owns the
         # rank/server identity). The two ids are the only state the log + metric
         # projections need; ``server_id`` arrives as the snowflake string,
@@ -82,7 +87,10 @@ class DashScProxyServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
         # detection.
         self._rank_id = rank_id
         self._server_id = to_optional_int(server_id)
-        logging.info("[DashScGrpc] DashScProxyServicer configured")
+        logging.info(
+            "[DashScGrpc] DashScProxyServicer configured: buffer_first_chunk=%s",
+            self._buffer_first_chunk,
+        )
 
     async def open(self) -> None:
         """Keep the proxy lifecycle hook explicit; channels are opened lazily."""
@@ -302,7 +310,11 @@ class DashScProxyServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
         # ``finished=True`` and the actual downstream cancel is what lets the
         # backend (and access logs) record a clean stream end as a late
         # client-cancel race.
-        buffered = self._buffered_iter(downstream_iter, access_record)
+        buffered = self._buffered_iter(
+            downstream_iter,
+            access_record,
+            buffer_first_chunk=self._buffer_first_chunk,
+        )
         try:
             try:
                 async for resp in buffered:
@@ -382,13 +394,17 @@ class DashScProxyServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
             pass
 
     @staticmethod
-    async def _buffered_iter(downstream_iter, access_record=None):
-        """Hold the first chunk until the second arrives, then yield both back-to-back.
+    async def _buffered_iter(
+        downstream_iter, access_record=None, *, buffer_first_chunk=True
+    ):
+        """Optionally hold the first chunk until the second, then yield both.
 
         Smooths PD-disaggregation TPOT perception: in PD mode the gap between
         token 1 (emitted by prefill) and token 2 (emitted by decode, after KV cache
         handoff) is much larger than steady-state TPOT. Buffering delays token 1
         until token 2 is ready, so clients see a uniform inter-token cadence.
+        Set ``DASH_SC_GRPC_PROXY_BUFFER_FIRST_CHUNK=0`` to forward immediately;
+        the default is ``1`` for compatibility with existing PD deployments.
 
         ``access_record`` is the forward access record (or ``None`` in tests);
         the stage labels it receives distinguish the three failure shapes at a
@@ -418,12 +434,25 @@ class DashScProxyServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
                     pass
 
         it = downstream_iter.__aiter__()
+        if not buffer_first_chunk:
+            _set_stage("disabled")
+            async for resp in it:
+                yield resp
+                if _is_stream_done(resp):
+                    return
+            return
+
         buffered = None
         _set_stage("waiting_first")
         try:
             try:
                 buffered = await it.__anext__()
             except StopAsyncIteration:
+                return
+            if _is_stream_done(buffered):
+                yield buffered
+                buffered = None
+                _set_stage("flushed_first")
                 return
             _set_stage("waiting_second")
             try:
@@ -443,10 +472,9 @@ class DashScProxyServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
                 yield remaining
                 if _is_stream_done(remaining):
                     return
-        except GeneratorExit:
-            # Consumer called ``aclose()`` on the outer RPC generator —
-            # yielding is forbidden after GeneratorExit. The buffered frame
-            # is lost; there is no wire to flush to.
+        except (asyncio.CancelledError, GeneratorExit):
+            # A cancelled/closed caller cannot consume a buffered frame. Unwind
+            # immediately so the outer finally can close the downstream call.
             if buffered is not None:
                 _set_stage("dropped_buffered_on_exception")
             raise
