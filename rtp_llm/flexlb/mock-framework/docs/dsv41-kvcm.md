@@ -18,6 +18,16 @@ KVCM 服务 bootstrap 使用 `MODEL_SERVICE_CONFIG.kvcm.address/port`，通过�
 
 部署前需要替换示例中的发现域名、Meta HTTP 地址、模型目录和资源值，确认实际实例组存在且允许原生注册。KVCM gRPC bootstrap 与事件 HTTP 是两种不同端口，不能互换。示例不创建或修改 Whale 部署。
 
+### Engine 事件上报的服务发现
+
+与本分支 real Engine 使用相同的原生属性和 ENV 绑定：`kvcm_enable_vipserver` 对应 `RECO_ENABLE_VIPSERVER`，`kvcm_vipserver_domain` 对应 `RECO_VIPSERVER_DOMAIN`，`kvcm_server_address` 对应 `RECO_SERVER_ADDRESS`。Case 的配置使用原生属性名；Whale 使用这些 ENV，不另造 Mock 发现参数。
+
+没有 `KV_CACHE_EVENT_MANAGER_ENDPOINT` 覆盖时，通过 VIPServer SDK 获取健康 RPC 端点，或使用 `RECO_SERVER_ADDRESS` 的 RPC 地址，然后调用原生 `GetClusterInfo(instance_id)`，校验 leader 身份并读取其 `meta_http_port`。VIP 域名不交给系统 DNS 解析。VIP 注册端口必须是 KVCM Meta RPC 端口（默认 6381），HTTP 事件发送到服务返回的 Meta HTTP 端口（默认 6382），不是 Admin HTTP 6492。VIP 探针使用 KVCM 原生健康入口，与注册端口分别配置。
+
+发现由现有事件线程执行，不占用 Scheduler/Compute；缓存的 leader 最长保留一秒。成员或 leader 变化后重新查询，失败沿用事件上报重试和全量快照恢复，不发送到猜测地址。原生 HTTP 直连覆盖仍优先，适用于本地测试或明确提供的稳定服务地址；Whale 示例使用发现，不写 Pod IP。
+
+内部镜像复用已有 `vipserver` 组件，通过 Java 标准 ServiceLoader 接入，不复制 SDK 或增加发现进程。`package-engine.py` 在内部源码目录存在时启用 `internal-discovery` Maven profile，并检查最终 JAR 的 SDK、provider 类和服务声明；普通本地构建不需要内部依赖。开源包启用 VIP 配置会明确拒绝启动，不静默改用 DNS。
+
 - 开启：Master `KVCM`；P/D `KV_CACHE_EVENT_PUBLISHER_TYPE=kvcm`。
 - 关闭：Master `LOCAL_SYNC`；P/D `KV_CACHE_EVENT_PUBLISHER_TYPE=none`、`ENABLE_REMOTE_CACHE=false`，不注册也不发送控制心跳。KVCM 服务可以不部署；无效的 KVCM topology 不应触发连接。
 - Frontend 和 ViT 不增加 KVCM 开关，保持两组相同。ViT 默认执行图片读取，Whale 不使用本地假 URL 跳过模式。

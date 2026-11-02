@@ -30,9 +30,10 @@
     "ENABLE_REMOTE_CACHE": "false",
     "MOCK_COMPUTE_FORWARD_EXPRESSION": "1 + batchSize",
     "KV_CACHE_EVENT_PUBLISHER_TYPE": "kvcm",
-    "KV_CACHE_EVENT_MANAGER_ENDPOINT": "http://kvcm-meta-http:6492",
     "KV_CACHE_EVENT_INSTANCE_GROUP": "dsv41-kvcm",
-    "KV_CACHE_EVENT_INSTANCE_ID": "dsv41-kvcm_128"
+    "KV_CACHE_EVENT_INSTANCE_ID": "dsv41-kvcm_128",
+    "RECO_ENABLE_VIPSERVER": "true",
+    "RECO_VIPSERVER_DOMAIN": "kvcm-meta-domain"
   },
   "decode": {
     "ROLE_TYPE": "DECODE",
@@ -48,8 +49,9 @@
     "ENABLE_REMOTE_CACHE": "false",
     "MOCK_COMPUTE_FORWARD_EXPRESSION": "1 + batchSize",
     "KV_CACHE_EVENT_PUBLISHER_TYPE": "kvcm",
-    "KV_CACHE_EVENT_MANAGER_ENDPOINT": "http://kvcm-meta-http:6492",
     "KV_CACHE_EVENT_INSTANCE_GROUP": "dsv41-kvcm",
-    "KV_CACHE_EVENT_INSTANCE_ID": "dsv41-kvcm_128"
+    "KV_CACHE_EVENT_INSTANCE_ID": "dsv41-kvcm_128",
+    "RECO_ENABLE_VIPSERVER": "true",
+    "RECO_VIPSERVER_DOMAIN": "kvcm-meta-domain"
   }
 }
