@@ -46,6 +46,7 @@ public:
                        std::shared_ptr<kvcm::ClientWrapper>       client_wrapper   = nullptr,
                        std::shared_ptr<kmonitor::MetricsReporter> metrics_reporter = nullptr);
     ~KVCMStorageBackend() override;
+    BlockTreeQueueSizes queueSizes() const override;
 
     struct ControlConfig {
         std::string              instance_group;
@@ -66,7 +67,12 @@ protected:
     bool               initImpl() override;
     StorageMatchResult matchImpl(const StorageRequest& request) override;
     void readImpl(const StorageRequest& request, const std::shared_ptr<StorageBackendMatchMeta>& match_meta) override;
+    bool usesAsyncPayload(const StorageRequest& request, bool is_write) const noexcept override;
+    bool readAsyncImpl(const StorageRequest&                           request,
+                       const std::shared_ptr<StorageBackendMatchMeta>& match_meta,
+                       ReadCompletion                                  done) override;
     void writeImpl(const StorageRequest& request) override;
+    bool startWriteImpl(const StorageRequest& request, WriteCompletion done) override;
     void shutdownImpl() noexcept override;
     void onRemoteCacheSkipped(const char* stage) noexcept override;
     void onQuarantined(bool is_write, StorageQuarantineReason reason, size_t block_count) noexcept override;

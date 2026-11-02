@@ -33,11 +33,12 @@ kv_cache_manager::WriteLocation singleWriteLocation() {
     return result;
 }
 
-TEST(KVCMSafetyTest, LocalSdkResultPreservesTimeoutAndReleasesNormalPins) {
+TEST(KVCMSafetyTest, LocalSdkResultPermanentlyProtectsUnknownCompletion) {
     for (const auto code :
          {kv_cache_manager::ER_OK, kv_cache_manager::ER_SDKREAD_ERROR, kv_cache_manager::ER_SDK_TIMEOUT}) {
         auto environment = makeBackendEnvironment("kvcm_safety_local_status");
         auto wrapper     = std::make_shared<MockClientWrapper>();
+        wrapper->load_status = code;
         EXPECT_CALL(*wrapper, initForPools(_, _, _, _)).WillOnce(Return(true));
         EXPECT_CALL(*wrapper, shutdown()).Times(1);
         auto backend = makeBackend(environment, singleRankConfig(), wrapper);
@@ -55,13 +56,14 @@ TEST(KVCMSafetyTest, LocalSdkResultPreservesTimeoutAndReleasesNormalPins) {
                   code == kv_cache_manager::ER_SDK_TIMEOUT ? ErrorCode::DEADLINE_EXCEEDED :
                                                              ErrorCode::EXECUTION_EXCEPTION);
         ASSERT_TRUE(waitForBackendOperationsForTest(*backend.backend));
-        const bool timeout = code == kv_cache_manager::ER_SDK_TIMEOUT;
-        EXPECT_EQ(environment.device_pool->isFrozen(environment.block_id), timeout);
-        EXPECT_EQ(environment.device_pool->refCount(environment.block_id), timeout ? 2u : 1u);
-        EXPECT_EQ(backend->quarantined_task_count_, timeout ? 1u : 0u);
+        const bool unknown = code != kv_cache_manager::ER_OK;
+        EXPECT_EQ(environment.device_pool->isFrozen(environment.block_id), unknown);
+        EXPECT_EQ(environment.device_pool->refCount(environment.block_id), unknown ? 2u : 1u);
+        EXPECT_EQ(backend->quarantined_task_count_, unknown ? 1u : 0u);
         backend->shutdown();
         EXPECT_TRUE(keys.expired());
-        EXPECT_EQ(environment.device_pool->isFrozen(environment.block_id), timeout);
+        EXPECT_EQ(environment.device_pool->isFrozen(environment.block_id), unknown);
+        EXPECT_EQ(environment.device_pool->refCount(environment.block_id), unknown ? 2u : 1u);
         EXPECT_EQ(backend->quarantined_task_count_, 0u);
     }
 }
@@ -380,6 +382,8 @@ TEST(KVCMSafetyTest, UnknownWriteCompensationFailurePreservesFrozenProtection) {
     for (const bool compensation_throws : {false, true}) {
         auto environment = makeBackendEnvironment("kvcm_safety_write_cleanup");
         auto wrapper     = std::make_shared<MockClientWrapper>();
+        // Mark the SDK call as submitted so its timeout has unknown completion.
+        wrapper->save_status = kv_cache_manager::ER_SDK_TIMEOUT;
         EXPECT_CALL(*wrapper, initForPools(_, _, _, _)).WillOnce(Return(true));
         EXPECT_CALL(*wrapper, shutdown()).Times(1);
         auto backend = makeBackend(environment, singleRankConfig(), wrapper);
@@ -405,6 +409,9 @@ TEST(KVCMSafetyTest, UnknownWriteCompensationFailurePreservesFrozenProtection) {
         ASSERT_TRUE(waitForBackendOperationsForTest(*backend.backend));
         EXPECT_TRUE(environment.device_pool->isFrozen(environment.block_id));
         EXPECT_EQ(environment.device_pool->refCount(environment.block_id), 2u);
+        backend->shutdown();
+        EXPECT_TRUE(environment.device_pool->isFrozen(environment.block_id));
+        EXPECT_EQ(environment.device_pool->refCount(environment.block_id), 2u);
     }
 }
 
@@ -420,7 +427,7 @@ TEST(KVCMSafetyTest, QuarantineAbortRatioParsingRejectsInvalidValues) {
     }
 }
 
-TEST(KVCMSafetyTest, LocalSdkExceptionKeepsFeatureOrdinaryFailureSemantics) {
+TEST(KVCMSafetyTest, LocalSdkExceptionPermanentlyProtectsDestination) {
     auto environment = makeBackendEnvironment("kvcm_safety_local_exception");
     auto wrapper     = std::make_shared<MockClientWrapper>();
     EXPECT_CALL(*wrapper, initForPools(_, _, _, _)).WillOnce(Return(true));
@@ -436,8 +443,11 @@ TEST(KVCMSafetyTest, LocalSdkExceptionKeepsFeatureOrdinaryFailureSemantics) {
         }));
     EXPECT_EQ(readStatus(*backend.backend, makeStorageRequest(environment), matched.match_meta).code(),
               ErrorCode::EXECUTION_EXCEPTION);
-    EXPECT_FALSE(environment.device_pool->isFrozen(environment.block_id));
-    EXPECT_EQ(environment.device_pool->refCount(environment.block_id), 1u);
+    EXPECT_TRUE(environment.device_pool->isFrozen(environment.block_id));
+    EXPECT_EQ(environment.device_pool->refCount(environment.block_id), 2u);
+    backend->shutdown();
+    EXPECT_TRUE(environment.device_pool->isFrozen(environment.block_id));
+    EXPECT_EQ(environment.device_pool->refCount(environment.block_id), 2u);
 }
 
 TEST(KVCMSafetyTest, AttemptedNormalFinishWriteIsNeverCompensatedAfterThrow) {

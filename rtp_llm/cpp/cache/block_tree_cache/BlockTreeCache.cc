@@ -255,6 +255,8 @@ void BlockTreeCache::reportMetrics() const {
     metrics_reporter_->reportVictimSelectionMetrics(victim_selection);
     metrics_reporter_->reportQueueBacklog(task_pool_->queueSizes(), "business");
     metrics_reporter_->reportQueueBacklog(transfer_dispatcher_->queueSizes(), "transfer");
+    if (storage_backend_)
+        metrics_reporter_->reportQueueBacklog(storage_backend_->queueSizes(), "remote");
 }
 
 void BlockTreeCache::setEventPublisher(KVCacheEventPublisherPtr        publisher,
