@@ -227,6 +227,28 @@ def try_select_qsa_tokens(
         output = try_radix_qsa_tokens(scores, lengths, finite_only=finite_only)
         if output is not None:
             return output
+    if (
+        not packed_count
+        and 1024 <= columns <= 8192
+        and 32 < rows <= 65536
+        and scores.is_contiguous()
+        and lengths.is_contiguous()
+        and torch.cuda.get_device_capability(scores.device) == (9, 0)
+    ):
+        # SM90 prefill rows: the sglang v0.5.22 fast-topk select ported into
+        # cub_topk - one coarse fp16-truncated byte pass, boundary-bin
+        # candidate collection with the fused next-byte histogram, then
+        # refinement rounds over the candidates only, plus the length<=512
+        # short-circuit. Same output contract as the decode kernel above
+        # (frozen native order, internal past-complete masking), rows
+        # unrestricted.
+        from rtp_llm.models_py.modules.qwen4_exp.qsa.cub_topk import (
+            try_prefill_radix_qsa_tokens,
+        )
+
+        output = try_prefill_radix_qsa_tokens(scores, lengths, finite_only=finite_only)
+        if output is not None:
+            return output
     # Paged scoring has already stored -inf past each completed-block limit.
     # Only callers owning that producer contract may skip the duplicate mask.
     if scores_are_masked and scores.is_contiguous():

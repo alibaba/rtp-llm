@@ -175,6 +175,163 @@ def main():
             print(f"prod rows={rows} cols={columns}: {'OK' if ok else 'MISMATCH'}")
             if not ok:
                 FAILURES.append(f"prod rows={rows} cols={columns}")
+
+    # Prefill rows (rows > 32): the ported sglang fast-topk select. The
+    # dispatch gates on the runtime torch build; on dev boxes with a
+    # different torch the direct kernel call keeps the grid runnable.
+    from rtp_llm.models_py.modules.qwen4_exp.qsa import cub_topk as _cub
+
+    def prefill_fused(scores, lengths, finite_only):
+        fused = try_select_qsa_tokens(
+            scores, lengths, compress_ratio=4, token_budget=2048,
+            scores_are_masked=False, finite_only=finite_only,
+        )
+        if fused is not None:
+            return fused, "dispatch"
+        if not (
+            scores.is_cuda
+            and scores.dtype == torch.float32
+            and scores.ndim == 2
+            and 32 < scores.shape[0]
+            and 1024 <= scores.shape[1] <= 8192
+            and scores.is_contiguous()
+        ):
+            return None, "gate"
+        module = _cub._load_module(scores.device)
+        if module is None:
+            return None, "build"
+        out = torch.empty(
+            (scores.shape[0], 2051), device=scores.device, dtype=torch.int32
+        )
+        module.qsa_radix_topk_p(scores, lengths, out, finite_only)
+        return out, "direct"
+
+    def masked_like(scores, lengths):
+        complete = lengths // 4
+        col_ids = torch.arange(scores.shape[1], device="cuda")
+        return torch.where(
+            col_ids[None, :] < complete[:, None],
+            scores,
+            torch.full_like(scores, float("-inf")),
+        ).contiguous()
+
+    print("prefill grid (rows > 32):")
+    print(f"{'rows':>5} {'cols':>5} {'native us':>9} {'fused us':>9} {'speedup':>7}  parity")
+    for columns in (1024, 2048, 4096, 8192):
+        for rows in (33, 64, 128, 512, 1024, 2048):
+            seed = 31000 + rows * 100 + columns
+            scores = make_scores(rows, columns, seed)
+            gl = torch.Generator(device="cuda").manual_seed(seed + 1)
+            # Causal ramp like the prefill row layout, with random rows mixed in.
+            ramp = torch.minimum(
+                torch.arange(rows, device="cuda", dtype=torch.int32) * 8 + 2600,
+                torch.full((rows,), columns * 4, device="cuda", dtype=torch.int32),
+            )
+            lengths = torch.where(
+                torch.arange(rows, device="cuda") % 7 == 3,
+                torch.randint(
+                    1, columns * 4 + 4, (rows,), device="cuda",
+                    dtype=torch.int32, generator=gl,
+                ),
+                ramp,
+            )
+            masked = masked_like(scores, lengths)
+            fused, mode = prefill_fused(masked, lengths, True)
+            native = native_select(masked, lengths)
+            if fused is None:
+                print(f"{rows:>5} {columns:>5}  fused path not taken ({mode})")
+                FAILURES.append(f"prefill gate rows={rows} cols={columns}")
+                continue
+            parity = torch.equal(fused, native)
+            if not parity:
+                FAILURES.append(f"prefill parity rows={rows} cols={columns}")
+            t_native = bench(lambda: native_select(masked, lengths))
+            t_fused = bench(lambda: prefill_fused(masked, lengths, True)[0])
+            print(
+                f"{rows:>5} {columns:>5} {t_native:>9.1f} {t_fused:>9.1f} "
+                f"{t_native / t_fused:>6.2f}x {mode:>8}  {'OK' if parity else 'MISMATCH'}"
+            )
+
+    # Prefill edge cases: short rows (complete <= 512 short-circuit), tie
+    # fields wider than the candidate buffers (four-pass fallback), NaN inputs
+    # (fallback), and the raw production signature (finite_only=False).
+    for columns in (1024, 2048, 8192):
+        for rows in (33, 128, 512):
+            for kind in ("short", "ties", "wide-ties", "nan", "raw"):
+                g = torch.Generator(device="cuda").manual_seed(
+                    41000 + rows * 100 + columns
+                )
+                scores = torch.randn(rows, columns, device="cuda", generator=g)
+                finite_only = True
+                if kind == "short":
+                    lengths = torch.randint(
+                        1, 2048, (rows,), device="cuda", dtype=torch.int32,
+                        generator=g,
+                    )
+                elif kind == "ties":
+                    scores = torch.round(scores * 8) / 8
+                    lengths = torch.randint(
+                        1, columns * 4 + 4, (rows,), device="cuda",
+                        dtype=torch.int32, generator=g,
+                    )
+                elif kind == "wide-ties":
+                    # One fp16 coarse byte bin wider than the candidate
+                    # buffers: must take the frozen four-pass fallback.
+                    scores[0, : columns - 512] = 1.0
+                    lengths = torch.full(
+                        (rows,), columns * 4, device="cuda", dtype=torch.int32
+                    )
+                elif kind == "nan":
+                    scores[0, : columns // 2] = 1.0
+                    scores[1, 0] = float("nan")
+                    scores[1, 1] = float("inf")
+                    scores[1, 2] = float("-inf")
+                    lengths = torch.full(
+                        (rows,), columns * 4, device="cuda", dtype=torch.int32
+                    )
+                else:
+                    scores = torch.relu(scores)
+                    finite_only = False
+                    lengths = torch.randint(
+                        1, columns * 4 + 4, (rows,), device="cuda",
+                        dtype=torch.int32, generator=g,
+                    )
+                masked = masked_like(scores, lengths)
+                kernel_in = scores if kind == "raw" else masked
+                fused, mode = prefill_fused(kernel_in, lengths, finite_only)
+                native = native_select(masked, lengths, finite_only)
+                ok = fused is not None and torch.equal(fused, native)
+                print(
+                    f"prefill edge rows={rows} cols={columns} kind={kind}: "
+                    f"{'OK' if ok else 'MISMATCH'}"
+                )
+                if not ok:
+                    FAILURES.append(f"prefill edge rows={rows} cols={columns} kind={kind}")
+
+    # Cross-check the decode kernel and the prefill port at shared shapes:
+    # both must produce the identical 2051-slot rows.
+    print(
+        f"cross pre-state: module={'loaded' if _cub._MODULE is not None else 'None'} "
+        f"build_failed={_cub._BUILD_FAILED}"
+    )
+    module = _cub._load_module(torch.cuda.current_device())
+    if module is not None:
+        for columns in (1024, 2048, 4096, 8192):
+            for rows in (1, 4, 32):
+                scores = make_scores(rows, columns, 53000 + rows * 100 + columns)
+                lengths = torch.randint(
+                    1, columns * 4 + 4, (rows,), device="cuda", dtype=torch.int32
+                )
+                out_a = torch.empty((rows, 2051), device="cuda", dtype=torch.int32)
+                out_b = torch.empty((rows, 2051), device="cuda", dtype=torch.int32)
+                module.qsa_radix_topk(scores, lengths, out_a, True)
+                module.qsa_radix_topk_p(scores, lengths, out_b, True)
+                ok = torch.equal(out_a, out_b)
+                print(f"cross rows={rows} cols={columns}: {'OK' if ok else 'MISMATCH'}")
+                if not ok:
+                    FAILURES.append(f"cross rows={rows} cols={columns}")
+    else:
+        FAILURES.append("cross build")
     print("ALL-PASS" if not FAILURES else "FAILURES: " + ", ".join(FAILURES))
     sys.exit(1 if FAILURES else 0)
 

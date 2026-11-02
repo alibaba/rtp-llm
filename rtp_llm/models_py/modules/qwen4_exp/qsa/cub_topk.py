@@ -234,6 +234,427 @@ struct QsaGreater {
         return a > b;
     }
 };
+
+// Ported from sglang v0.5.22 fast_topk (kernels/jit/csrc/elementwise/
+// fast_topk.cuh): one coarse fp16-truncated byte pass narrows the top-512
+// boundary, the boundary-bin candidates are collected into double-buffered
+// shared memory while the next-byte histogram is fused into the collection,
+// and three refinement rounds touch only those candidates instead of
+// rescanning every column (the frozen four-pass select below rescans four
+// times). Complete-block masking, the stable CUB order restore, the NaN
+// repair pass and the 2051-slot token expansion are shared with qsaRadixTopK,
+// so the output contract (frozen native order, ties by ascending column) is
+// unchanged. Rows are unrestricted (prefill batch x max_rows); inputs with NaN
+// or boundary bins wider than the candidate buffers fall back to the frozen
+// four-pass select, which handles every distribution.
+template<int Threads = 512>
+__global__ void qsaRadixTopKP(const float*   scores,
+                              const int32_t* lengths,
+                              int32_t*       output,
+                              int            columns,
+                              bool           finite_only) {
+    constexpr int K         = 512;
+    constexpr int MAX_ITEMS = 16;
+    constexpr int CAND      = 2048;
+    using SelectedSort      = cub::BlockRadixSort<uint32_t, Threads, 1, uint32_t>;
+    using BlockScan         = cub::BlockScan<uint32_t, Threads>;
+    __shared__ union SharedOps {
+        typename SelectedSort::TempStorage sort;
+        typename BlockScan::TempStorage    scan;
+    } ops;
+    __shared__ uint32_t hist[258];
+    __shared__ uint32_t hist2[258];
+    __shared__ uint32_t sel_key[K];
+    __shared__ uint32_t sel_col[K];
+    __shared__ uint32_t cbuf[2][CAND];
+    __shared__ uint32_t sh_threshold;
+    __shared__ uint32_t sh_ties;
+    __shared__ uint32_t sh_count;
+    __shared__ uint32_t sh_total;
+    __shared__ uint32_t sh_boundary;
+    __shared__ int      sh_fallback;
+
+    const int      row      = blockIdx.x;
+    const int64_t  length   = lengths[row];
+    const int64_t  complete = (length - (length < 0 ? 3 : 0)) / 4;
+    const float*   srow     = scores + (int64_t)row * columns;
+    const int      items    = (columns + Threads - 1) / Threads;
+    const uint32_t base     = threadIdx.x * items;
+
+    uint32_t key[MAX_ITEMS];
+    uint8_t  coarse[MAX_ITEMS];
+    bool     cand[MAX_ITEMS];
+    bool     has_nan = false;
+#pragma unroll 4
+    for (int i = 0; i < items; ++i) {
+        const uint32_t col  = base + (uint32_t)i;
+        const uint32_t bits = (col < (uint32_t)columns && col < (uint32_t)complete)
+                                  ? __float_as_uint(srow[col]) : 0xff800000u;
+        const uint32_t ordered = (bits & 0x80000000u) ? ~bits : bits ^ 0x80000000u;
+        const bool     is_nan  =
+            (bits & 0x7f800000u) == 0x7f800000u && (bits & 0x007fffffu) != 0;
+        key[i]  = is_nan ? 0xffffffffu : ordered;
+        // sglang convert_to_uint8: the fp16-rounded, sign-flipped top byte is
+        // a weakly monotonic coarse key, so the boundary-bin partition stays
+        // order-consistent with the exact fp32 keys.
+        const __half   h  = __float2half_rn(__uint_as_float(bits));
+        const uint16_t hb = __half_as_ushort(h);
+        const uint16_t hk =
+            (hb & 0x8000u) ? (uint16_t)~hb : (uint16_t)(hb | 0x8000u);
+        coarse[i] = (uint8_t)(hk >> 8);
+        cand[i]   = col < (uint32_t)columns;
+        has_nan  |= is_nan && cand[i];
+    }
+    if (threadIdx.x == 0) {
+        sh_threshold = 0;
+        sh_ties      = 0;
+        sh_fallback  = 0;
+    }
+    __syncthreads();
+
+    // NaN visibility is per-thread (only the owning lane sees it); resolve it
+    // block-wide before branching. The selection paths below are full of
+    // __syncthreads, so a divergent branch here deadlocks the barrier.
+    const bool any_nan = __syncthreads_or(has_nan);
+    if (complete <= K) {
+        // sglang naive_topk, order-corrected: every complete block fits the
+        // 512 budget, so the boundary is the -inf key and the shared
+        // selection machinery below fills the remainder with -inf ties.
+        uint32_t mine = 0;
+#pragma unroll 4
+        for (int i = 0; i < items; ++i)
+            if (cand[i] && key[i] > 0x007fffffu) ++mine;
+        uint32_t base_rank = 0, total = 0;
+        BlockScan(ops.scan).ExclusiveSum(mine, base_rank, total);
+        __syncthreads();
+        if (threadIdx.x == 0) {
+            sh_threshold = 0x007fffffu;
+            sh_ties      = K > total ? K - total : 0u;
+        }
+    } else if (any_nan) {
+        if (threadIdx.x == 0) sh_fallback = 1;
+        __syncthreads();
+    } else {
+        // Stage 1: one coarse fp16-byte histogram over all candidates.
+        for (int j = threadIdx.x; j <= 257; j += Threads) hist[j] = 0;
+        __syncthreads();
+#pragma unroll 4
+        for (int i = 0; i < items; ++i)
+            if (cand[i]) atomicAdd(&hist[coarse[i] + 1], 1u);
+        __syncthreads();
+        // Suffix scan over hist, parallel across the block (sglang run_cumsum):
+        // sfx[i] = count(coarse >= i - 1) with the raw counts at bin + 1, so
+        // count(coarse >= d) = sfx[d+1] and count(coarse > d) = sfx[d+2].
+        {
+            uint32_t* cur = hist;
+            uint32_t* nxt = hist2;
+            for (int s = 0; s < 9; ++s) {
+                const int j = 1 << s;
+                if (threadIdx.x <= 257)
+                    nxt[threadIdx.x] =
+                        cur[threadIdx.x]
+                        + (threadIdx.x + j <= 257 ? cur[threadIdx.x + j] : 0u);
+                __syncthreads();
+                uint32_t* swp = cur;
+                cur           = nxt;
+                nxt           = swp;
+            }
+            // Boundary: the unique d with count(coarse >= d) >= K >
+            // count(coarse >= d + 1); one lane per bin finds it.
+            if (threadIdx.x < 256) {
+                const uint32_t d = threadIdx.x;
+                if (cur[d + 1] >= (uint32_t)K && cur[d + 2] < (uint32_t)K)
+                    sh_boundary = d;
+            }
+            __syncthreads();
+            if (threadIdx.x == 0) {
+                const uint32_t b = sh_boundary;
+                sh_threshold = b << 24;
+                sh_ties      = (uint32_t)K - cur[b + 2];
+                sh_count     = 0;
+            }
+        }
+        __syncthreads();
+        // Collect the boundary-bin candidates and fuse the exact-key byte-3
+        // histogram into the same pass (sglang stage 1). ties >= 1 always
+        // holds at the boundary, so the collection runs unconditionally.
+        {
+            const uint8_t b3 = (uint8_t)(sh_threshold >> 24);
+            uint32_t mine = 0;
+#pragma unroll 4
+            for (int i = 0; i < items; ++i)
+                if (cand[i] && coarse[i] == b3) ++mine;
+            const uint32_t start = atomicAdd(&sh_count, mine);
+            __syncthreads();
+            if (sh_count > CAND) {
+                sh_fallback = 1;
+            } else {
+                for (int j = threadIdx.x; j <= 257; j += Threads) hist[j] = 0;
+                __syncthreads();
+                uint32_t rank = start;
+#pragma unroll 4
+                for (int i = 0; i < items; ++i) {
+                    if (!cand[i] || coarse[i] != b3) continue;
+                    cbuf[0][rank++] = base + (uint32_t)i;
+                    atomicAdd(&hist[((key[i] >> 24) & 0xffu) + 1], 1u);
+                }
+                __syncthreads();
+            }
+        }
+        // Rounds: refine the exact key bytes 3..0 over the candidates only
+        // (sglang stage 2). The coarse fp16 byte stays a collection filter;
+        // the threshold must end up a full exact key, or keys below the
+        // coarse bin but with a larger exact top byte would mis-select.
+        for (int round = 0; round < 4 && !sh_fallback; ++round) {
+            const uint32_t     shift = (uint32_t)(3 - round) * 8;
+            const uint32_t*    buf   = cbuf[round & 1];
+            const uint32_t    rem   = sh_ties;
+            // Parallel suffix scan over hist (same layout as stage 1).
+            uint32_t* cur = hist;
+            uint32_t* nxt = hist2;
+            for (int s = 0; s < 9; ++s) {
+                const int j = 1 << s;
+                if (threadIdx.x <= 257)
+                    nxt[threadIdx.x] =
+                        cur[threadIdx.x]
+                        + (threadIdx.x + j <= 257 ? cur[threadIdx.x + j] : 0u);
+                __syncthreads();
+                uint32_t* swp = cur;
+                cur           = nxt;
+                nxt           = swp;
+            }
+            if (threadIdx.x < 256) {
+                const uint32_t d = threadIdx.x;
+                if (cur[d + 1] >= rem && cur[d + 2] < rem) sh_boundary = d;
+            }
+            __syncthreads();
+            if (threadIdx.x == 0) {
+                const uint32_t b = sh_boundary;
+                if (round == 0)
+                    sh_threshold = b << 24;
+                else
+                    sh_threshold |= b << shift;
+                sh_ties  = rem - cur[b + 2];
+                sh_total = sh_count;
+                sh_count = 0;
+            }
+            __syncthreads();
+            if (round == 3) break;
+            for (int j = threadIdx.x; j <= 257; j += Threads) hist[j] = 0;
+            __syncthreads();
+            const uint8_t  b = (uint8_t)((sh_threshold >> shift) & 0xffu);
+            const uint32_t n = sh_total;
+            uint32_t mine = 0;
+            for (uint32_t j = threadIdx.x; j < n; j += Threads) {
+                const uint32_t col = buf[j];
+                const uint32_t bits = (col < (uint32_t)complete)
+                                          ? __float_as_uint(srow[col]) : 0xff800000u;
+                const uint32_t k =
+                    (bits & 0x80000000u) ? ~bits : bits ^ 0x80000000u;
+                if (((k >> shift) & 0xffu) == b) ++mine;
+            }
+            const uint32_t start = atomicAdd(&sh_count, mine);
+            __syncthreads();
+            if (sh_count > CAND) {
+                sh_fallback = 1;
+                break;
+            }
+            uint32_t rank = start;
+            for (uint32_t j = threadIdx.x; j < n; j += Threads) {
+                const uint32_t col = buf[j];
+                const uint32_t bits = (col < (uint32_t)complete)
+                                          ? __float_as_uint(srow[col]) : 0xff800000u;
+                const uint32_t k =
+                    (bits & 0x80000000u) ? ~bits : bits ^ 0x80000000u;
+                if (((k >> shift) & 0xffu) != b) continue;
+                cbuf[(round + 1) & 1][rank++] = col;
+                atomicAdd(&hist[((k >> (shift - 8)) & 0xffu) + 1], 1u);
+            }
+            __syncthreads();
+        }
+    }
+    if (sh_fallback) {
+        // Frozen qsaRadixTopK select (four full passes): the fallback for
+        // NaN inputs and boundary bins wider than the candidate buffers.
+        uint32_t threshold = 0;
+        int      remaining = K;
+        for (int p = 3; p >= 0; --p) {
+            for (int j = threadIdx.x; j <= 257; j += Threads) hist[j] = 0;
+            __syncthreads();
+            const uint32_t shift = (uint32_t)p * 8;
+#pragma unroll 4
+            for (int i = 0; i < items; ++i)
+                if (cand[i]) atomicAdd(&hist[((key[i] >> shift) & 0xffu) + 1], 1u);
+            __syncthreads();
+            if (threadIdx.x == 0) {
+                uint32_t ge_above = 0;
+                int      boundary = 0;
+                for (int d = 255; d >= 0; --d) {
+                    const uint32_t ge_d = ge_above + hist[d + 1];
+                    if (ge_d >= (uint32_t)remaining) { boundary = d; break; }
+                    ge_above = ge_d;
+                }
+                remaining -= (int)ge_above;
+                threshold  = (threshold << 8) | (uint32_t)boundary;
+                sh_boundary = (uint32_t)boundary;
+            }
+            __syncthreads();
+#pragma unroll 4
+            for (int i = 0; i < items; ++i)
+                cand[i] = cand[i] && (((key[i] >> shift) & 0xffu) == sh_boundary);
+            __syncthreads();
+        }
+        if (threadIdx.x == 0) {
+            sh_threshold = threshold;
+            sh_ties      = (uint32_t)remaining;
+        }
+        __syncthreads();
+    }
+    __syncthreads();
+    const uint32_t thr = sh_threshold;
+
+    // Trailing slots: rows with fewer than 512 selectable blocks must emit -1
+    // at the tail, exactly like the native expansion.
+    for (int j = threadIdx.x; j < K; j += Threads) {
+        sel_key[j] = 0u;
+        sel_col[j] = (uint32_t)columns;
+    }
+    __syncthreads();
+
+    // Selection: strictly above the threshold plus the first `ties`
+    // threshold-valued columns in column order. Native topk gathers the
+    // above-threshold items in column order and appends the boundary ties,
+    // then value-sorts stably: the zero group (+0.0 and -0.0 share one value
+    // but hold two radix keys) needs that exact compaction order, so above
+    // items compact first and tie items second, and the sort key below
+    // collapses -0.0 onto +0.0.
+    {
+        uint32_t tie_n = 0;
+#pragma unroll 4
+        for (int i = 0; i < items; ++i) {
+            const uint32_t col = base + (uint32_t)i;
+            if (col < (uint32_t)columns && key[i] == thr)
+                ++tie_n;
+        }
+        uint32_t tie_base = 0;
+        BlockScan(ops.scan).ExclusiveSum(tie_n, tie_base);
+        __syncthreads();
+        bool kept_above[MAX_ITEMS];
+        bool kept_tie[MAX_ITEMS];
+        {
+            uint32_t tie_rank = tie_base;
+#pragma unroll 4
+            for (int i = 0; i < items; ++i) {
+                const uint32_t col = base + (uint32_t)i;
+                kept_above[i] = false;
+                kept_tie[i] = false;
+                if (col < (uint32_t)columns) {
+                    if (key[i] > thr)
+                        kept_above[i] = true;
+                    else if (key[i] == thr) {
+                        kept_tie[i] = tie_rank < sh_ties;
+                        ++tie_rank;
+                    }
+                }
+            }
+        }
+        uint32_t above_n = 0;
+#pragma unroll 4
+        for (int i = 0; i < items; ++i)
+            if (kept_above[i])
+                ++above_n;
+        uint32_t above_base = 0, above_total = 0;
+        BlockScan(ops.scan).ExclusiveSum(above_n, above_base, above_total);
+        __syncthreads();
+        uint32_t tie2_n = 0;
+#pragma unroll 4
+        for (int i = 0; i < items; ++i)
+            if (kept_tie[i])
+                ++tie2_n;
+        uint32_t tie2_base = 0;
+        BlockScan(ops.scan).ExclusiveSum(tie2_n, tie2_base);
+        __syncthreads();
+        {
+            uint32_t rank = above_base;
+#pragma unroll 4
+            for (int i = 0; i < items; ++i) {
+                if (!kept_above[i])
+                    continue;
+                sel_key[rank] = key[i];
+                sel_col[rank] = base + (uint32_t)i;
+                ++rank;
+            }
+            rank = above_total + tie2_base;
+#pragma unroll 4
+            for (int i = 0; i < items; ++i) {
+                if (!kept_tie[i])
+                    continue;
+                sel_key[rank] = key[i];
+                sel_col[rank] = base + (uint32_t)i;
+                ++rank;
+            }
+        }
+        __syncthreads();
+    }
+
+    // Stable descending sort by key; the compaction order (above items first,
+    // then tie items, each in column order) is preserved for ties, matching
+    // the frozen native TopK order. The sort key collapses -0.0 onto +0.0:
+    // natively they compare equal, so the stable sort keeps the compaction
+    // order across the whole zero group.
+    {
+        uint32_t s_key[1], s_col[1];
+        s_key[0] = sel_key[threadIdx.x] == 0x7fffffffu ? 0x80000000u
+                                                       : sel_key[threadIdx.x];
+        s_col[0] = sel_col[threadIdx.x];
+        SelectedSort(ops.sort).SortDescending(s_key, s_col);
+        __syncthreads();
+
+        // If a NaN was selected, re-sort by its raw radix bits so NaN payloads
+        // sit exactly where the native kernel places them.
+        {
+            const uint32_t bits = (s_col[0] < (uint32_t)columns && s_col[0] < (uint32_t)complete)
+                                      ? __float_as_uint(srow[s_col[0]])
+                                      : 0xff800000u;
+            const bool nan_selected =
+                (bits & 0x7f800000u) == 0x7f800000u && (bits & 0x007fffffu) != 0;
+            if (__syncthreads_or(nan_selected)) {
+                const uint32_t raw_ordered =
+                    (bits & 0x80000000u) ? ~bits : bits ^ 0x80000000u;
+                sel_key[threadIdx.x] = raw_ordered;
+                sel_col[threadIdx.x] = s_col[0];
+                __syncthreads();
+                uint32_t r_key[1], r_col[1];
+                r_key[0] = sel_key[threadIdx.x];
+                r_col[0] = sel_col[threadIdx.x];
+                SelectedSort(ops.sort).SortDescending(r_key, r_col);
+                __syncthreads();
+                s_key[0] = r_key[0];
+                s_col[0] = r_col[0];
+            }
+            __syncthreads();
+
+            // Emit: one thread per selected rank, token expansion plus the tail.
+            const uint32_t bits2 = (s_col[0] < (uint32_t)columns && s_col[0] < (uint32_t)complete)
+                                        ? __float_as_uint(srow[s_col[0]])
+                                        : 0xff800000u;
+            const bool valid = ((bits2 & 0x7f800000u) != 0x7f800000u
+                                || (!finite_only && bits2 == 0x7f800000u))
+                               && s_col[0] < (uint32_t)columns
+                               && s_col[0] < (uint32_t)complete;
+#pragma unroll
+            for (int j = 0; j < 4; ++j)
+                output[row * 2051 + threadIdx.x * 4 + j] =
+                    valid ? (int32_t)(s_col[0] * 4 + j) : -1;
+        }
+        if (threadIdx.x == 0) {
+#pragma unroll
+            for (int j = 0; j < 3; ++j)
+                output[row * 2051 + 2048 + j] =
+                    j < length - complete * 4 ? (int32_t)(complete * 4 + j) : -1;
+        }
+    }
+}
 template<int N, int Threads, bool UseMerge = false, bool DraftPacked = false>
 __global__ void qsaCubStableTopK(const float*   scores,
                                  const int32_t* lengths,
@@ -484,6 +905,29 @@ void qsa_radix_topk(torch::Tensor scores, torch::Tensor lengths, torch::Tensor o
         finite_only);
     C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
+void qsa_radix_topk_p(torch::Tensor scores, torch::Tensor lengths, torch::Tensor output, bool finite_only) {
+    TORCH_CHECK(scores.is_cuda() && lengths.is_cuda() && output.is_cuda());
+    TORCH_CHECK(scores.scalar_type() == at::kFloat && lengths.scalar_type() == at::kInt
+                && output.scalar_type() == at::kInt);
+    TORCH_CHECK(scores.dim() == 2 && lengths.dim() == 1 && output.dim() == 2);
+    TORCH_CHECK(scores.is_contiguous() && lengths.is_contiguous() && output.is_contiguous());
+    TORCH_CHECK(scores.device() == lengths.device() && scores.device() == output.device());
+    const int rows = scores.size(0), columns = scores.size(1);
+    TORCH_CHECK(rows >= 1 && rows <= 65536, "prefill radix topk expects 1..65536 rows");
+    TORCH_CHECK(columns >= 512 && columns <= 8192, "prefill radix topk expects 512..8192 score columns");
+    TORCH_CHECK(lengths.numel() == rows && output.size(0) == rows && output.size(1) == 2051);
+    if (!rows)
+        return;
+    c10::cuda::CUDAGuard guard(scores.device());
+    auto                 stream = at::cuda::getCurrentCUDAStream().stream();
+    rtp_llm::qsaRadixTopKP<512><<<rows, 512, 0, stream>>>(
+        scores.data_ptr<float>(),
+        lengths.data_ptr<int32_t>(),
+        output.data_ptr<int32_t>(),
+        columns,
+        finite_only);
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
 """
 
 
@@ -543,9 +987,14 @@ def _load_module(device):
                 ).hexdigest()[:16]
                 _MODULE = load_inline(
                     name="qwen4_qsa_topk_" + identity,
-                    cpp_sources="void qsa_cub_topk(torch::Tensor scores, torch::Tensor lengths, torch::Tensor output, int64_t threads, bool finite_only, bool merge); void qsa_cub_topk_draft(torch::Tensor scores, torch::Tensor lengths, torch::Tensor output, torch::Tensor row_lengths, torch::Tensor cu); void qsa_radix_topk(torch::Tensor scores, torch::Tensor lengths, torch::Tensor output, bool finite_only);",
+                    cpp_sources="void qsa_cub_topk(torch::Tensor scores, torch::Tensor lengths, torch::Tensor output, int64_t threads, bool finite_only, bool merge); void qsa_cub_topk_draft(torch::Tensor scores, torch::Tensor lengths, torch::Tensor output, torch::Tensor row_lengths, torch::Tensor cu); void qsa_radix_topk(torch::Tensor scores, torch::Tensor lengths, torch::Tensor output, bool finite_only); void qsa_radix_topk_p(torch::Tensor scores, torch::Tensor lengths, torch::Tensor output, bool finite_only);",
                     cuda_sources=_CUDA_SOURCE,
-                    functions=["qsa_cub_topk", "qsa_cub_topk_draft", "qsa_radix_topk"],
+                    functions=[
+                        "qsa_cub_topk",
+                        "qsa_cub_topk_draft",
+                        "qsa_radix_topk",
+                        "qsa_radix_topk_p",
+                    ],
                     extra_cflags=["-O2"],
                     extra_cuda_cflags=flags,
                     with_cuda=True,
@@ -649,4 +1098,45 @@ def try_radix_qsa_tokens(scores, lengths, *, finite_only=True):
         (scores.shape[0], 2051), device=scores.device, dtype=torch.int32
     )
     module.qsa_radix_topk(scores, lengths, output, finite_only)
+    return output
+
+
+def prefill_radix_supported(scores, lengths):
+    return (
+        scores.is_cuda
+        and torch.version.hip is None
+        and torch.version.git_version == _TORCH_GIT
+        and scores.dtype == torch.float32
+        and scores.ndim == 2
+        and 32 < scores.shape[0] <= 65536
+        and 1024 <= scores.shape[1] <= 8192
+        and scores.is_contiguous()
+        and lengths.dtype == torch.int32
+        and lengths.shape == (scores.shape[0],)
+        and lengths.device == scores.device
+        and lengths.is_contiguous()
+        and not (scores.requires_grad or lengths.requires_grad)
+        and torch.cuda.get_device_capability(scores.device) == (9, 0)
+    )
+
+
+def try_prefill_radix_qsa_tokens(scores, lengths, *, finite_only=True):
+    """Ported sglang v0.5.22 fast-topk select for SM90 prefill rows.
+
+    One coarse fp16-truncated byte pass plus candidate-only refinement rounds
+    replace the four full histogram passes, and rows are unrestricted (grid
+    = rows). The output contract (frozen native order, ties by ascending
+    column, 2051-slot expansion) matches try_radix_qsa_tokens; NaN inputs and
+    boundary bins wider than the candidate buffers fall back to the frozen
+    four-pass select inside the kernel.
+    """
+    if not prefill_radix_supported(scores, lengths):
+        return None
+    module = _load_module(scores.device)
+    if module is None:
+        return None
+    output = torch.empty(
+        (scores.shape[0], 2051), device=scores.device, dtype=torch.int32
+    )
+    module.qsa_radix_topk_p(scores, lengths, output, finite_only)
     return output
