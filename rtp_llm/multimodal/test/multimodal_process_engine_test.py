@@ -689,6 +689,194 @@ class AsyncSubmitGetEmbeddingTest(TestCase):
             release.set()
             engine.stop()
 
+    def test_single_request_with_81_or_82_media_fits_capacity_80(self):
+        for count in (81, 82):
+            with self.subTest(count=count):
+                engine = self._make_engine(vit_concurrency=16, vit_max_queue_size=64)
+                computed = []
+                peak_admitted = 0
+                lock = threading.Lock()
+
+                def compute(mm_inputs, cache_key, entry, request_id=0):
+                    nonlocal peak_admitted
+                    with lock:
+                        peak_admitted = max(peak_admitted, engine._async_admitted)
+                        computed.append(mm_inputs[0].url)
+                    entry.complete((torch.tensor(len(mm_inputs[0].url)), None))
+
+                engine._async_compute = compute
+                inputs = [self._make_input(f"fake://large-{i}") for i in range(count)]
+                try:
+                    results = engine.get_embedding_result(inputs, request_id=801)
+                    self.assertEqual(len(results), count)
+                    self.assertCountEqual(computed, [item.url for item in inputs])
+                    self.assertLessEqual(peak_admitted, 80)
+                    for item, result in zip(inputs, results):
+                        self.assertEqual(result.embeddings[0].item(), len(item.url))
+                finally:
+                    engine.stop()
+                    engine._async_compute_executor.shutdown(wait=True)
+                self.assertEqual(engine._async_admitted, 0)
+                self.assertFalse(engine._async_tasks)
+
+    def test_oversized_submission_waits_without_holding_completion_lock(self):
+        engine = self._make_engine(vit_concurrency=1, vit_max_queue_size=1)
+        release = threading.Event()
+        started = threading.Event()
+        computed = []
+
+        def compute(mm_inputs, cache_key, entry, request_id=0):
+            started.set()
+            release.wait(timeout=5)
+            computed.append(mm_inputs[0].url)
+            entry.complete((torch.tensor(1), None))
+
+        engine._async_compute = compute
+        inputs = [self._make_input(f"fake://window-{i}") for i in range(5)]
+        try:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                submission = executor.submit(engine.async_submit, inputs, 802)
+                self.assertTrue(started.wait(timeout=2))
+                self.assertFalse(submission.done())
+                with engine._async_task_lock:
+                    self.assertEqual(engine._async_admitted, 2)
+                    self.assertEqual(
+                        sum(
+                            task.future is not None
+                            for task in engine._async_tasks.values()
+                        ),
+                        2,
+                    )
+                release.set()
+                self.assertEqual(len(submission.result(timeout=3)), 5)
+            self.assertEqual(
+                len(engine.get_embedding_result(inputs, request_id=802)), 5
+            )
+            self.assertCountEqual(computed, [item.url for item in inputs])
+        finally:
+            release.set()
+            engine.stop()
+            engine._async_compute_executor.shutdown(wait=True)
+        self.assertEqual(engine._async_admitted, 0)
+
+    def test_oversized_submission_timeout_resolves_unsubmitted_claims(self):
+        engine = self._make_engine(vit_concurrency=1, vit_max_queue_size=0)
+        release = threading.Event()
+
+        def compute(mm_inputs, cache_key, entry, request_id=0):
+            release.wait(timeout=5)
+            entry.complete((torch.tensor(1), None))
+
+        engine._async_compute = compute
+        inputs = [self._make_input(f"fake://window-timeout-{i}") for i in range(3)]
+        try:
+            with self.assertRaises(FtRuntimeException) as raised:
+                engine.get_embedding_result(inputs, timeout_ms=30, request_id=803)
+            self.assertEqual(
+                raised.exception.exception_type, ExceptionType.GENERATE_TIMEOUT
+            )
+            self.assertLessEqual(engine._async_admitted, 1)
+            with engine._async_task_lock:
+                self.assertTrue(
+                    all(
+                        task.future is not None for task in engine._async_tasks.values()
+                    )
+                )
+            for item in inputs[1:]:
+                self.assertIsNone(engine._embedding_cache.peek(item.cache_key()))
+        finally:
+            release.set()
+            engine.stop()
+            engine._async_compute_executor.shutdown(wait=True)
+        self.assertEqual(engine._async_admitted, 0)
+        self.assertFalse(engine._async_tasks)
+
+    def test_cancel_oversized_submission_does_not_enqueue_later_windows(self):
+        engine = self._make_engine(vit_concurrency=1, vit_max_queue_size=1)
+        release = threading.Event()
+        started = threading.Event()
+        cancelled = threading.Event()
+        computed = []
+
+        def compute(mm_inputs, cache_key, entry, request_id=0):
+            computed.append(mm_inputs[0].url)
+            started.set()
+            release.wait(timeout=5)
+            entry.complete((torch.tensor(1), None))
+
+        engine._async_compute = compute
+        inputs = [self._make_input(f"fake://window-cancel-{i}") for i in range(5)]
+        try:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                result = executor.submit(
+                    engine.get_embedding_result,
+                    inputs,
+                    timeout_ms=2000,
+                    request_id=804,
+                    cancellation_event=cancelled,
+                )
+                self.assertTrue(started.wait(timeout=2))
+                cancelled.set()
+                with self.assertRaises(FtRuntimeException) as raised:
+                    result.result(timeout=1)
+                self.assertEqual(
+                    raised.exception.exception_type, ExceptionType.CANCELLED_ERROR
+                )
+                self.assertEqual(computed, [inputs[0].url])
+                self.assertLessEqual(engine._async_admitted, 1)
+        finally:
+            release.set()
+            engine.stop()
+            engine._async_compute_executor.shutdown(wait=True)
+        self.assertEqual(engine._async_admitted, 0)
+        self.assertFalse(engine._async_tasks)
+
+    def test_cancel_oversized_request_keeps_unsubmitted_shared_entry(self):
+        engine = self._make_engine(vit_concurrency=1, vit_max_queue_size=1)
+        release = threading.Event()
+        started = threading.Event()
+        cancelled = threading.Event()
+        computed = []
+
+        def compute(mm_inputs, cache_key, entry, request_id=0):
+            computed.append(mm_inputs[0].url)
+            started.set()
+            release.wait(timeout=5)
+            entry.complete((torch.tensor(1), None))
+
+        engine._async_compute = compute
+        inputs = [self._make_input(f"fake://window-shared-{i}") for i in range(5)]
+        try:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                result = executor.submit(
+                    engine.get_embedding_result,
+                    inputs,
+                    timeout_ms=2000,
+                    request_id=805,
+                    cancellation_event=cancelled,
+                )
+                self.assertTrue(started.wait(timeout=2))
+                # Attach a second request to a claimed entry in a later window
+                # before it has a future. Cancelling 805 must not strand 806.
+                engine.async_submit([inputs[2]], request_id=806)
+                cancelled.set()
+                with self.assertRaises(FtRuntimeException) as raised:
+                    result.result(timeout=1)
+                self.assertEqual(
+                    raised.exception.exception_type, ExceptionType.CANCELLED_ERROR
+                )
+                release.set()
+                self.assertEqual(
+                    len(engine.get_embedding_result([inputs[2]], request_id=806)), 1
+                )
+                self.assertEqual(computed, [inputs[0].url, inputs[2].url])
+        finally:
+            release.set()
+            engine.stop()
+            engine._async_compute_executor.shutdown(wait=True)
+        self.assertEqual(engine._async_admitted, 0)
+        self.assertFalse(engine._async_tasks)
+
     def test_cancel_request_removes_only_queued_work(self):
         engine = self._make_engine(vit_concurrency=1, vit_max_queue_size=1)
         release = threading.Event()

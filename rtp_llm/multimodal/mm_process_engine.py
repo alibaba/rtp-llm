@@ -516,6 +516,7 @@ class MMProcessEngine:
         self._async_queue_size = async_queue_size
         self._async_admission_capacity = async_compute_workers + async_queue_size
         self._async_admission_lock = threading.Lock()
+        self._async_admission_changed = threading.Condition(self._async_admission_lock)
         self._async_admitted = 0
         # Protect task ownership from the gap between cache claim and executor
         # submission. An RLock is required because Future.cancel() invokes done
@@ -1035,6 +1036,8 @@ class MMProcessEngine:
         """Asynchronously submit multimodal URLs for embedding computation.
 
         Each input is submitted independently, keyed by its own cache_key.
+        Requests larger than the admission capacity submit bounded windows;
+        submission can wait for earlier windows within the request deadline.
         Returns the list of cache keys. Inputs already in-progress or complete
         are not recomputed.
         """
@@ -1122,6 +1125,7 @@ class MMProcessEngine:
             pending,
             request_id=request_id,
             queue_timeout_ms=queue_timeout_ms,
+            cancellation_event=cancellation_event,
         )
         self._raise_if_async_request_cancelled(request_id, cancellation_event)
         return claims
@@ -1212,6 +1216,7 @@ class MMProcessEngine:
                     self._async_admitted,
                 )
                 self._async_admitted = 0
+            self._async_admission_changed.notify_all()
 
     def _resolve_async_timeout_ms(
         self,
@@ -1290,40 +1295,101 @@ class MMProcessEngine:
         pending: List[Tuple[MultimodalInput, str, MMEmbeddingCacheEntry]],
         request_id: int = 0,
         queue_timeout_ms: Optional[int] = None,
+        cancellation_event: Optional[threading.Event] = None,
     ) -> None:
         if not pending:
             return
 
+        timeout_ms = self._resolve_async_timeout_ms(pending, queue_timeout_ms)
+        deadline = time.monotonic() + timeout_ms / 1000.0
+        capacity = self._async_admission_capacity
+        # One legitimate request can contain more media than the queue can
+        # hold. Admit it in windows instead of rejecting it even when idle.
+        # Ordinary requests keep the existing immediate overload rejection.
+        wait_for_slots = len(pending) > capacity
+        try:
+            for start in range(0, len(pending), capacity):
+                self._submit_async_compute_window(
+                    pending[start : start + capacity],
+                    request_id,
+                    deadline,
+                    wait_for_slots,
+                    cancellation_event,
+                )
+        except Exception as error:
+            # Later windows have cache claims but no future. Resolve those
+            # claims too, so deduplicated waiters cannot be left waiting forever.
+            with self._async_task_lock:
+                for _, cache_key, entry in pending:
+                    task = self._async_tasks.get(entry)
+                    if task is not None and task.future is None:
+                        self._forget_async_task_locked(entry)
+                        self._fail_async_compute(cache_key, entry, error)
+            raise
+
+    def _submit_async_compute_window(
+        self,
+        pending: List[Tuple[MultimodalInput, str, MMEmbeddingCacheEntry]],
+        request_id: int,
+        deadline: float,
+        wait_for_slots: bool,
+        cancellation_event: Optional[threading.Event],
+    ) -> None:
+        while True:
+            if cancellation_event is not None and cancellation_event.is_set():
+                # Remove this owner's claims, but still submit shared entries
+                # whose other waiters need a future. The caller raises the
+                # cancellation after submission finishes.
+                self.cancel_queued_request(request_id)
+            with self._async_task_lock:
+                active_pending = [
+                    item
+                    for item in pending
+                    if item[2] in self._async_tasks
+                    and self._async_tasks[item[2]].request_ids
+                ]
+                if not active_pending:
+                    return
+                if time.monotonic() >= deadline:
+                    raise FtRuntimeException(
+                        ExceptionType.GENERATE_TIMEOUT,
+                        "ViT queue wait timed out during submission",
+                    )
+                accepted, admitted = self._try_reserve_async_slots(len(active_pending))
+                if accepted:
+                    self._submit_reserved_async_compute(
+                        active_pending, request_id, deadline
+                    )
+                    return
+                if not wait_for_slots:
+                    raise FtRuntimeException(
+                        ExceptionType.CONCURRENCY_LIMIT_ERROR,
+                        "ViT queue is full: "
+                        f"admitted={admitted}, capacity={self._async_admission_capacity}, "
+                        f"requested={len(active_pending)}",
+                    )
+
+            # Done callbacks need _async_task_lock to release admission slots.
+            # Wait outside that lock and periodically recheck cancellation of
+            # entries that have not acquired a slot/future yet.
+            with self._async_admission_changed:
+                remaining = deadline - time.monotonic()
+                if (
+                    remaining > 0
+                    and self._async_admitted + len(active_pending)
+                    > self._async_admission_capacity
+                ):
+                    self._async_admission_changed.wait(timeout=min(remaining, 0.1))
+
+    def _submit_reserved_async_compute(
+        self,
+        active_pending: List[Tuple[MultimodalInput, str, MMEmbeddingCacheEntry]],
+        request_id: int,
+        deadline: float,
+    ) -> None:
         # Serialize submission with cancellation so a request cannot create new
         # queued work after its cancellation callback has already run.
         with self._async_task_lock:
-            active_pending = [
-                item
-                for item in pending
-                if item[2] in self._async_tasks
-                and self._async_tasks[item[2]].request_ids
-            ]
-            if not active_pending:
-                return
-
-            accepted, admitted = self._try_reserve_async_slots(len(active_pending))
-            if not accepted:
-                error = FtRuntimeException(
-                    ExceptionType.CONCURRENCY_LIMIT_ERROR,
-                    "ViT queue is full: "
-                    f"admitted={admitted}, capacity={self._async_admission_capacity}, "
-                    f"requested={len(active_pending)}",
-                )
-                logging.warning(error.message)
-                for _, cache_key, entry in active_pending:
-                    self._forget_async_task_locked(entry)
-                    self._fail_async_compute(cache_key, entry, error)
-                raise error
-
-            timeout_ms = self._resolve_async_timeout_ms(
-                active_pending, queue_timeout_ms
-            )
-            deadline = time.monotonic() + timeout_ms / 1000.0
             submitted = 0
             try:
                 for mm_input, cache_key, entry in active_pending:
