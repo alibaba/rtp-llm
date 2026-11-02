@@ -4,8 +4,10 @@ The default invocation runs CPU contracts without probing a CUDA device.
 Set DSV41_TEST_FUSED_INDEXER_GPU=1 to additionally run the real DeepGEMM path.
 """
 
+import gc
 import os
 import unittest
+import weakref
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -13,6 +15,7 @@ import torch
 
 from rtp_llm.models_py.modules.dsv41.fp8 import _indexer_score as score_backend
 from rtp_llm.models_py.modules.dsv41.fp8 import _v41_prefill_indexer as indexer
+from rtp_llm.models_py.modules.dsv41.fp8 import attention_v41 as attention
 from rtp_llm.models_py.modules.dsv41.fp8.attention_v41 import (
     mask_candidate_logits,
     select_candidate_blocks,
@@ -170,15 +173,28 @@ class V41PrefillIndexerCPU(unittest.TestCase):
 
     def test_logit_chunks_bound_long_context_workspace(self):
         cap = 256 * 1024 * 1024
+        self.assertEqual(indexer._MAX_LOGITS_BYTES, cap)
         for keys in (1, 32768, 65536, 131072, 262144, 524288, cap):
             with self.subTest(keys=keys):
+                if keys * 4 > cap:
+                    with self.assertRaisesRegex(ValueError, "cannot hold one"):
+                        indexer.logits_chunk_rows(keys)
+                    continue
                 rows = indexer.logits_chunk_rows(keys)
                 self.assertGreaterEqual(rows, 1)
                 self.assertLessEqual(rows, 4096)
-                if keys * 4 <= cap:
-                    self.assertLessEqual(rows * keys * 4, cap)
-                else:
-                    self.assertEqual(rows, 1)
+                self.assertLessEqual(rows * keys * 4, cap)
+
+    def test_logit_chunks_honor_shared_budget(self):
+        with patch.object(indexer, "_MAX_LOGITS_BYTES", 64 * 1024 * 1024):
+            for keys in (512, 32768, 51200, 131072, 1048576):
+                with self.subTest(keys=keys):
+                    rows = indexer.logits_chunk_rows(keys)
+                    self.assertLessEqual(rows * keys * 4, 64 * 1024 * 1024)
+        self.assertEqual(indexer.logits_chunk_rows(51200), 1310)
+        with patch.object(indexer, "_MAX_LOGITS_BYTES", 1024):
+            with self.assertRaisesRegex(ValueError, "cannot hold one"):
+                indexer.logits_chunk_rows(1021)
 
     def test_score_clamps_bounds_and_masks_zero_visible_rows(self):
         q_payload = torch.zeros(3, 32, 64, dtype=torch.int8)
@@ -659,6 +675,80 @@ class V41PrefillIndexerCUDA(unittest.TestCase):
             ]
         )
         torch.testing.assert_close(batched, chunked, rtol=0, atol=0)
+
+    def test_dense_chunks_release_previous_score_and_bound_peak(self):
+        rows, keys = 513, 524224
+        q, weights, k = self._inputs(rows, 32, keys, 2743)
+        qp, qs = indexer.quantize_indexer_q(q)
+        kp, ks = indexer.quantize_indexer_k_reference(k)
+        del k
+        positions = torch.cat(
+            (
+                torch.arange(130800, 131056, device=self.device),
+                torch.arange(917392, 917649, device=self.device),
+            )
+        )
+        x = torch.empty(rows, 1, device=self.device)
+        shared = {
+            "global": {2: [(None, indexer.PrefillIndexerKeys(kp, ks))]},
+            "ced_indexer_projection": lambda value, weight: weights,
+        }
+        owner = SimpleNamespace(
+            is_index_source=True,
+            index_source_layer_id=2,
+            kv_source_layer_id=2,
+            layer_id=2,
+            index_topk=512,
+            index_n_heads=32,
+            index_head_dim=128,
+            rope_head_dim=0,
+            compress_ratio=2,
+            index_wq=None,
+            index_weights=None,
+            freqs_cis=torch.empty(1, 1, dtype=torch.complex64, device=self.device),
+            _lin=lambda weight, value: q,
+            v41_config={},
+            _shared_attention=shared,
+        )
+        previous, calls = None, []
+        real_score = indexer.score_indexer_chunk
+
+        def tracked(*args, **kwargs):
+            nonlocal previous
+            if previous is not None:
+                self.assertIsNone(previous(), "Previous score survived next allocation")
+            logits = real_score(*args, **kwargs)
+            previous = weakref.ref(logits)
+            calls.append(args[0].shape[0])
+            return logits
+
+        def prepared(*args, **kwargs):
+            return qp.unsqueeze(1), qs.unsqueeze(1), weights.unsqueeze(1)
+
+        torch.cuda.synchronize()
+        gc.collect()
+        before = torch.cuda.memory_allocated()
+        torch.cuda.reset_peak_memory_stats()
+        with patch.object(
+            attention.indexer_q_fusion, "try_fused_indexer_q", new=prepared
+        ), patch.object(indexer, "score_indexer_chunk", new=tracked):
+            selected = attention.AttentionV41FP8._select_indices(
+                owner,
+                x,
+                q,
+                positions,
+                torch.zeros(rows, dtype=torch.int32, device=self.device),
+            )
+        torch.cuda.synchronize()
+        peak = torch.cuda.max_memory_allocated() - before
+        self.assertEqual(calls, [128, 128, 128, 128, 1])
+        self.assertLessEqual(peak, 256 * 1024 * 1024)
+        self.assertEqual(selected.shape, (rows, 512))
+        self.assertTrue(
+            bool(
+                ((selected < ((positions + 1) // 2)[:, None]) | (selected == -1)).all()
+            )
+        )
 
 
 if __name__ == "__main__":

@@ -683,7 +683,7 @@ class OwnedPoolCudaTest(unittest.TestCase):
         for batch in (129, 1024):
             for ratio in (1, 2):
                 with self.subTest(batch=batch, ratio=ratio):
-                    self.check((1,) * batch, 4, ratio)
+                    self.check((1,) * batch, 4, ratio, direct=True)
 
     def test_table_dtypes_and_non_direct_output(self):
         for dtype in (torch.int32, torch.int64):

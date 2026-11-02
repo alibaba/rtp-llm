@@ -136,7 +136,7 @@ _X86_TESTS = [
         srcs = [
             name + ".py",
             "//rtp_llm/test/pytest:pytest_main.py",
-        ] + (["test_v41_prefill_indexer.py"] if name == "test_v41_prefill_indexer_schedule" else []),
+        ],
         main = "//rtp_llm/test/pytest:pytest_main.py",
         args = ["--cuda-devices", "1", "$(location :" + name + ".py)"],
         deps = [
@@ -148,7 +148,7 @@ _X86_TESTS = [
         tags = ["dsv41_cuda13"],
         legacy_create_init = 0,
     )
-    for name in ["test_v41_prefill_indexer", "test_v41_prefill_indexer_schedule", "test_attention_v41_prefill_selection"]
+    for name in ["test_v41_prefill_indexer", "test_attention_v41_prefill_selection"]
 ]
 
 

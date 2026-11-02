@@ -1933,7 +1933,7 @@ class AttentionV41FP8(AttentionFP8):
             if pending is not None:
                 with record_function_range("dsv41.prefill.pool.wait"):
                     pending.wait()
-            if fused_indexer and len(globals_by_req) > 1:
+            if fused_indexer:
                 from ._v41_batched_prefill_select import try_select_batched
 
                 if try_select_batched(
@@ -1991,17 +1991,11 @@ class AttentionV41FP8(AttentionFP8):
                         self.index_topk,
                     )
                 )
-                use_schedule = False
                 return_bf16 = fused_indexer and prefill_topk.supports_bf16()
                 if sparse_request:
                     chunk_rows = sparse_prefill_indexer.MAX_CHUNK_ROWS
                 elif fused_indexer:
-                    chunk_rows, use_schedule = prefill_indexer.logits_chunk_plan(
-                        key_count,
-                        device=x.device,
-                        num_heads=self.index_n_heads,
-                        return_bf16=return_bf16,
-                    )
+                    chunk_rows = prefill_indexer.logits_chunk_rows(key_count)
                 else:
                     chunk_rows = 64
                 request_bounds = None
@@ -2021,10 +2015,6 @@ class AttentionV41FP8(AttentionFP8):
                         )
                         if request_bounds is not None:
                             cache[bounds_key] = request_bounds
-                if use_schedule:
-                    # A preceding request may have used the legacy path.
-                    # Do not retain its score through this first allocation.
-                    logits = None
                 for chunk_index, start in enumerate(range(0, row_count, chunk_rows)):
                     stop = min(start + chunk_rows, row_count)
                     output_rows = (
@@ -2095,7 +2085,6 @@ class AttentionV41FP8(AttentionFP8):
                                 visible,
                                 return_bf16=return_bf16,
                                 **({"bounds": bounds} if bounds is not None else {}),
-                                **({"use_schedule": True} if use_schedule else {}),
                             )
                     else:
                         logits = torch.einsum(
@@ -2137,14 +2126,12 @@ class AttentionV41FP8(AttentionFP8):
                             )
                         scores, selected = logits.topk(k, dim=-1)
                         selected = torch.where(scores.isfinite(), selected, -1).int()
-                        if use_schedule:
-                            del scores
+                        del scores
                     if selected is not target:
                         out[output_rows, :k] = selected
-                    if use_schedule:
-                        # Finish all same-stream consumers before the next
-                        # RHS allocation; the allocator tracks queued use.
-                        del logits, selected, target
+                    # Same-stream consumers have been enqueued; release the
+                    # score before allocating the next bounded chunk.
+                    del logits, selected, target
         shared["topk"] = {self.layer_id: out}
         return out
 

@@ -655,6 +655,7 @@ def _gather_planned(
     pack_tile = codec.FP4_ROWS_PER_CTA if pack_words else 1
     result = [None] * len(ends)
     long_outputs = {}
+    index_allocations = []
     for group in plan.groups:
         first, stop, rows, local = group.first, group.stop, group.rows, group.local_rows
         segmented = getattr(group, "base", -1) >= 0
@@ -668,6 +669,7 @@ def _gather_planned(
             oq = torch.empty((padded, 64), dtype=torch.int8, device=device)
             os = torch.empty(padded, dtype=torch.int32, device=device)
             long_outputs[first] = (global_keys, oq, os)
+            index_allocations.extend((oq, os))
             result[first] = (
                 (
                     global_keys[: counts[first]]
@@ -738,6 +740,7 @@ def _gather_planned(
             )
             oq = torch.empty((rows, 64), dtype=torch.int8, device=device)
             os = torch.empty(rows, dtype=torch.int32, device=device)
+            index_allocations.extend((oq, os))
         if rows:
             with record_function_range("dsv41.prefill.pool.owned.restore"):
                 kernels[3 if workspace is not None else 2][(rows, 1, 1)](
@@ -769,7 +772,11 @@ def _gather_planned(
                     joint._split_rows(os, partitions),
                 )
             ]
-    return result if workspace is None else workspace.publish(result)
+    return (
+        result
+        if workspace is None
+        else workspace.publish(result, tuple(index_allocations))
+    )
 
 
 def try_gather(

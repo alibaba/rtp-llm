@@ -118,10 +118,6 @@ def try_gather_prefill_pools(
     ):
         return None
     counts = tuple(end // attn.compress_ratio for end in ends)
-    padded_counts = tuple(
-        (count + _KEY_ALIGNMENT - 1) // _KEY_ALIGNMENT * _KEY_ALIGNMENT
-        for count in counts
-    )
     groups = _request_groups(counts)
     if any(count < 0 for count in counts):
         return None
@@ -149,6 +145,11 @@ def try_gather_prefill_pools(
 
     if groups is None:
         return None
+
+    padded_counts = tuple(
+        (count + _KEY_ALIGNMENT - 1) // _KEY_ALIGNMENT * _KEY_ALIGNMENT
+        for count in counts
+    )
 
     if (
         main_pool.dtype != torch.uint8
