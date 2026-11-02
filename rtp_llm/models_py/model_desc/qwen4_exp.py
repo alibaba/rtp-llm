@@ -198,15 +198,61 @@ class Qwen4ExpAttention(Qwen3NextAttention):
             and hidden_states.dtype == torch.bfloat16
             and torch.cuda.get_device_capability(hidden_states.device) == (12, 0)
         )
+
+        def _host_prefix_present(inputs) -> bool:
+            # Host-mirror-only read: a device prefix_lengths tensor keeps the
+            # legacy projected path instead of adding a readback here.
+            prefixes = getattr(inputs, "prefix_lengths", None)
+            return (
+                isinstance(prefixes, torch.Tensor)
+                and prefixes.device.type == "cpu"
+                and bool(prefixes.numel())
+                and bool(torch.any(prefixes != 0).item())
+            )
+
+        # A prefix-reuse target prefill may hand the runtime the raw query so
+        # the fused preparation kernel owns the gemma norm; the runtime then
+        # applies this exact norm inline whenever the fused writer declines.
+        prefix_reuse_raw = (
+            bool(qsa_runtime.main_inputs.is_prefill)
+            and not bool(qsa_runtime.main_inputs.is_target_verify)
+            and not bool(getattr(qsa_runtime.main_inputs, "is_cuda_graph", False))
+            and not bool(getattr(self, "is_mtp_draft", False))
+            and _host_prefix_present(qsa_runtime.main_inputs)
+            and callable(getattr(self.qsa_indexer, "project_raw", None))
+            and hidden_states.is_cuda
+            and torch.version.hip is None
+            and hidden_states.dtype == torch.bfloat16
+            and int(getattr(self.qsa_indexer, "compress_ratio", 0) or 0) == 4
+            and int(getattr(self.qsa_indexer, "head_dim", 0) or 0) == 128
+            and int(
+                getattr(
+                    getattr(qsa_runtime, "indexer_kv_cache", None),
+                    "seq_size_per_block",
+                    0,
+                )
+                or 0
+            )
+            == 128
+            and int(
+                getattr(
+                    getattr(qsa_runtime, "indexer_state_cache", None),
+                    "seq_size_per_block",
+                    0,
+                )
+                or 0
+            )
+            == 128
+        )
         if projected is None:
             q, raw_keys = (
                 self.qsa_indexer.project_raw(hidden_states)
-                if raw_query
+                if raw_query or prefix_reuse_raw
                 else self.qsa_indexer.project(hidden_states)
             )
         else:
             q, raw_keys = projected
-            if not raw_query:
+            if not raw_query and not prefix_reuse_raw:
                 from rtp_llm.models_py.modules.base.common.zero_centered_rms_norm import (
                     exact_head_rms_norm,
                 )
@@ -270,6 +316,7 @@ class Qwen4ExpAttention(Qwen3NextAttention):
                 raw_keys,
                 indexer=self.qsa_indexer,
                 rope_config=self.qsa_rope_config,
+                raw_query=prefix_reuse_raw,
             )
         lengths, rope_cos, rope_sin, indexer_write = (
             qsa_runtime.write_prefill_indexer_cache(
