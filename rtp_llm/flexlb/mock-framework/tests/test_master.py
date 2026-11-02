@@ -52,10 +52,10 @@ def test_generic_transport_probe_does_not_require_a_native_master(tmp_path):
     assert master_environment({'a': {'b': 2}}, [], tmp_path) == {}
 
 
-@pytest.mark.parametrize('replicas,batched,history_overflow', [
-    (1, False, False), (2, False, False), (1, True, False), (2, True, False), (1, False, True),
-], ids=['single-one-master', 'single-two-masters', 'batch-one-master', 'batch-two-masters', 'late-master-after-history-overflow'])
-def test_real_master_routes_to_isolated_rtp_processes(tmp_path, batched, replicas, history_overflow):
+@pytest.mark.parametrize('replicas,batched,history_overflow,kvcm,vision', [
+    (1, False, False, False, False), (2, False, False, False, False), (1, True, False, False, False), (2, True, False, False, False), (1, False, True, False, False), (1, False, False, True, True), (1, False, False, False, True),
+], ids=['single-one-master', 'single-two-masters', 'batch-one-master', 'batch-two-masters', 'late-master-after-history-overflow', 'kvcm-cold-warm', 'vit-local-sync'])
+def test_real_master_routes_to_isolated_rtp_processes(tmp_path, batched, replicas, history_overflow, kvcm, vision, native_kvcm):
     from mock_framework.execution.master import master_port
     try:
         master_port(replicas)
@@ -84,8 +84,30 @@ def test_real_master_routes_to_isolated_rtp_processes(tmp_path, batched, replica
     if batched:
         native['scheduler']['decision'] = {'type': 'FIXED_WINDOW', 'maxRequests': 2, 'maxCollectionWaitMs': 20}
     master_config = configuration(); master_config['FLEXLB_CONFIG'] = json.dumps(native)
+    meta = native_kvcm() if kvcm else None
+    if kvcm:
+        native['cacheMatching'] = {'type': 'KVCM', 'medium': ['hbm'], 'requestTimeoutMs': 3000}
+        master_config['FLEXLB_CONFIG'] = json.dumps(native)
+        route = json.loads(master_config['MODEL_SERVICE_CONFIG'])
+        route['kvcm'] = {'address': '127.0.0.1', 'port': meta['rpc_port'], 'namespace': 'mock'}
+        master_config['MODEL_SERVICE_CONFIG'] = json.dumps(route)
     engine_config = {'seq_size_per_block': 16, 'test_block_num': 9, 'reserve_block_ratio': 0,
                      'max_seq_len': 4096, 'mock.compute.forward.expression': '1 + batchSize'}
+    if vision:
+        model = tmp_path / 'model'
+        model.mkdir()
+        (model / 'config.json').write_text(json.dumps({'image_token_id': 1000,
+            'text_config': {'hidden_size': 4}, 'vision_config': {'patch_size': 14,
+            'downsample_ratio': 3, 'min_pixels': 0, 'max_image_tokens': 1024}}))
+        engine_config['checkpoint_path'] = str(model)
+        engine_config.update(reuse_cache=True, enable_memory_cache=False)
+        route = json.loads(master_config['MODEL_SERVICE_CONFIG'])
+        route['role_endpoints'][0]['vit_endpoint'] = {'address': 'v-domain', 'protocol': 'grpc'}
+        master_config['MODEL_SERVICE_CONFIG'] = json.dumps(route)
+    if kvcm:
+        engine_config.update(reuse_cache=True, enable_memory_cache=False,
+            kv_cache_event_publisher_type='kvcm', kv_cache_event_manager_endpoint=meta['http'],
+            kv_cache_event_instance_id='mock_16', kv_cache_event_instance_group='test')
     document = {'id': 'production_master_probe', 'describe': '真实Master与新P/D及Client接线验证',
         'environment': {'master': {'deployment': {'replicas': replicas}, 'config': master_config},
                         'prefill': {'engine': 'rtp', 'config': engine_config},
@@ -95,10 +117,13 @@ def test_real_master_routes_to_isolated_rtp_processes(tmp_path, batched, replica
             {'id': 'decodes', 'describe': '实际登记D集合', 'interface': 'master/engine/get', 'args': {'role': 'decode'}},
             {'id': 'leader', 'describe': 'ZK选举产生唯一Leader', 'interface': 'master/get', 'args': {'is_leader': True}, 'expect': {'count': 1},
              'wait_after': '20s' if replicas == 2 else '12s'}]}]}
+    if vision:
+        document['environment']['vit'] = {'config': {'checkpoint_path': str(model),
+            'mock.vit.skip.download': True, 'mock.compute.forward.expression': '1 + batchSize'}}
     if history_overflow:
         document['phases'][0]['steps'].append({'id': 'still_healthy', 'describe': '多轮同步后Engine仍可发现',
             'interface': 'master/engine/get', 'args': {'role': 'prefill'}})
-    dynamic = replicas == 1 and not batched and not history_overflow
+    dynamic = replicas == 1 and not batched and not history_overflow and not vision
     if dynamic:
         document['phases'][0]['timeout'] = '45s'
         document['phases'][0]['steps'].extend([
@@ -110,7 +135,7 @@ def test_real_master_routes_to_isolated_rtp_processes(tmp_path, batched, replica
     case_file = tmp_path / 'case.yaml'; case_file.write_text(yaml.safe_dump(document, allow_unicode=True))
     registry = Registry.standard(); case = compile_case(case_file, registry)
     components = {'master': {'command': [str(java), '-XX:ActiveProcessorCount=2', '-cp', master_classpath, 'org.flexlb.mock.master.LateMasterNode' if history_overflow else 'org.flexlb.MasterNode'], 'startup_timeout': '60s'}}
-    for role in ('prefill', 'decode'):
+    for role in (('prefill', 'decode', 'vit') if vision else ('prefill', 'decode')):
         components[role] = {'command': [str(java), '-cp', str(root / 'java/host/target/mock-engine-service-1.0-SNAPSHOT-all.jar'), 'org.flexlb.mock.host.EngineHost']}
     launch = prepare_launch({'components': components,
         'zookeeper': {'command': [str(java), '-XX:ActiveProcessorCount=2', '-cp', master_classpath,
@@ -128,7 +153,7 @@ def test_real_master_routes_to_isolated_rtp_processes(tmp_path, batched, replica
             endpoints = json.loads((ready.parent / 'endpoints.json').read_text())
             actual = tmp_path / 'client.json'
             probe = await asyncio.to_thread(subprocess.run,
-                [str(java), '-cp', client_classpath, 'org.flexlb.mock.client.MasterProbe', endpoints['rpc'], str(batched).lower(), str(actual)],
+                [str(java), '-cp', client_classpath, 'org.flexlb.mock.client.KvcmMasterProbe' if vision else 'org.flexlb.mock.client.MasterProbe', endpoints['rpc'], str(batched).lower(), str(actual), *([meta['http']] if kvcm else [])],
                 capture_output=True, text=True, timeout=20)
             assert probe.returncode == 0, probe.stderr
             result = json.loads(actual.read_text())

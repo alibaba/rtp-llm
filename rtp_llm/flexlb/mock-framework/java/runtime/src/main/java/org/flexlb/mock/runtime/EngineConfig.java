@@ -95,5 +95,25 @@ public final class EngineConfig {
         return value.intValue();
     }
 
+    /** Same model-owned namespace as configure_v41_kv_cache/get_v41_cache_key_seed. */
+    public static long cacheKeySeed(JsonNode config) throws IOException {
+        var model = model(config);
+        boolean v41 = model.path("model_type").asText().startsWith("deepseek_v41")
+            || model.path("architectures").toString().contains("DeepseekV41")
+            || System.getenv().getOrDefault("MODEL_TYPE", "").startsWith("deepseek_v41");
+        if (!v41) {
+            if (model.has("cache_key_hash_seed")) {
+                var seed = model.get("cache_key_hash_seed");
+                if (!seed.isIntegralNumber() || !seed.canConvertToLong())
+                    throw new IllegalArgumentException("Model cache_key_hash_seed must be int64");
+                return seed.longValue();
+            }
+            return 0;
+        }
+        boolean bounded = java.util.Set.of("1", "true", "yes", "on").contains(
+            System.getenv().getOrDefault("DSV41_SWA_BOUNDED_REPLAY", "0").toLowerCase(java.util.Locale.ROOT));
+        return bounded ? 0x4453563431494231L : 0x4453563431494631L;
+    }
+
     private EngineConfig() {}
 }

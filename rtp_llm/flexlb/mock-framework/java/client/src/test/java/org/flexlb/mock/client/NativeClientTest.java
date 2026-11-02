@@ -365,4 +365,23 @@ class NativeClientTest {
         }
     }
 
+
+    @Test void textRoutingKeysUseTheSameModelSeedAsTheEngine() throws Exception {
+        var observed = new AtomicReference<FlexlbScheduleRequestPB>();
+        var server = ServerBuilder.forPort(0).addService(new FlexlbServiceGrpc.FlexlbServiceImplBase() {
+            @Override public void schedule(FlexlbScheduleRequestPB request, StreamObserver<FlexlbScheduleResponsePB> out) {
+                observed.set(request);
+                out.onNext(FlexlbScheduleResponsePB.newBuilder().setSuccess(false).setCode(605).setErrorMessage("probe").build());
+                out.onCompleted();
+            }
+        }).build().start();
+        long seed = 0x4453563431494631L;
+        try (var client = new NativeClient(() -> List.of("127.0.0.1:" + server.getPort()), e -> {}, -200, seed)) {
+            client.send(request(987).toBuilder().setCacheKeyBlockSize(2).build(), Duration.ofSeconds(3))
+                    .completion().toCompletableFuture().get(4, TimeUnit.SECONDS);
+            assertNotNull(observed.get());
+            assertEquals(new org.flexlb.mock.cache.CacheSequence(2, List.of(1, 2, 3), List.of(), seed).keys(),
+                    observed.get().getBlockCacheKeysList());
+        } finally { server.shutdownNow().awaitTermination(2, TimeUnit.SECONDS); }
+    }
 }

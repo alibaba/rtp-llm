@@ -65,10 +65,14 @@ public final class RtpNode implements org.flexlb.mock.runtime.EngineInstance {
         if (type.equals("none") && (!RtpConfig.nativeBool(values, "enable_remote_cache", false) || endpoint.isBlank())) return null;
         var settings = new KvcmReporter.Configuration(java.net.URI.create(endpoint), type.equals("kvcm"),
             RtpConfig.nativeInt(values, "kv_cache_event_snapshot_interval_ms", 600000, 1, Integer.MAX_VALUE));
+        String instance = values.path("kv_cache_event_instance_id").asText();
+        String host = values.path("kv_cache_event_host_ip_port").asText(address.rpc(rpc.getPort() - 1));
+        if (instance.isBlank() || host.isBlank())
+            throw new IllegalArgumentException("KVCM requires a shared instance_id and a nonempty Master-visible host_ip_port");
         var identity = new KvcmReporter.Identity(
-            values.path("kv_cache_event_instance_id").asText(config.id() + "-" + UUID.randomUUID()),
+            instance,
             values.path("kv_cache_event_instance_group").asText("default"),
-            values.path("kv_cache_event_host_ip_port").asText(rpcAddress()),
+            host,
             values.path("model_name").asText("mock-full-kv"), "FP16", false,
             config.blockSize(), config.tpSize(), config.dpSize(), "rtp_llm_hbm_" + config.blockSize() + "_full");
         return new KvcmReporter(settings, identity, cache);
