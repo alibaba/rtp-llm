@@ -8,24 +8,19 @@ import java.time.Duration;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.function.Supplier;
 import static org.flexlb.mock.cache.CacheMetadata.Medium.*;
 
 /** KVCM Meta reporting only. Cache locks enqueue immutable changes; all HTTP runs here. */
 public final class KvcmReporter implements AutoCloseable {
     private static final ObjectMapper JSON = new ObjectMapper();
     private static final int QUEUE_CAPACITY = 100000, BATCH_SIZE = 1000;
-    public record Configuration(Supplier<URI> endpoint, boolean events, long snapshotMillis) {
+    public record Configuration(KvcmDiscovery endpoint, boolean events, long snapshotMillis) {
         public Configuration {
             Objects.requireNonNull(endpoint);
             if (snapshotMillis < 1) throw new IllegalArgumentException("Invalid KVCM snapshot interval");
         }
         public Configuration(URI endpoint, boolean events, long snapshotMillis) {
-            this(fixed(endpoint), events, snapshotMillis);
-        }
-        private static Supplier<URI> fixed(URI endpoint) {
-            validateEndpoint(endpoint);
-            return () -> endpoint;
+            this(KvcmDiscovery.direct(endpoint), events, snapshotMillis);
         }
         public static URI validateEndpoint(URI endpoint) {
             if (endpoint == null || !("http".equals(endpoint.getScheme()) || "https".equals(endpoint.getScheme()))
@@ -116,14 +111,28 @@ public final class KvcmReporter implements AutoCloseable {
         return root;
     }
     private JsonNode post(String path, ObjectNode request) throws Exception {
+        return post(config.endpoint().get(), path, request);
+    }
+    private JsonNode post(URI target, String path, ObjectNode request) throws Exception {
         request.put("trace_id", UUID.randomUUID().toString());
-        var target = Configuration.validateEndpoint(config.endpoint().get());
-        var response = http.send(HttpRequest.newBuilder(URI.create(target.toString().replaceAll("/$", "") + path))
-            .timeout(Duration.ofMillis(1500)).header("Content-Type", "application/json")
-            .POST(HttpRequest.BodyPublishers.ofString(JSON.writeValueAsString(request))).build(), HttpResponse.BodyHandlers.ofString());
-        if (response.statusCode() != 200 || response.body().length() > 1048576)
-            throw new IllegalStateException("Invalid KVCM HTTP response: " + response.statusCode());
-        return JSON.readTree(response.body());
+        try {
+            var response = http.send(HttpRequest.newBuilder(URI.create(target.toString().replaceAll("/$", "") + path))
+                .timeout(Duration.ofMillis(1500)).header("Content-Type", "application/json")
+                .POST(HttpRequest.BodyPublishers.ofString(JSON.writeValueAsString(request))).build(), HttpResponse.BodyHandlers.ofString());
+            if (response.statusCode() != 200 || response.body().length() > 1048576)
+                throw new IllegalStateException("Invalid KVCM HTTP response: " + response.statusCode());
+            var body = JSON.readTree(response.body());
+            if (notLeader(body.path("header").path("status"))) config.endpoint().invalidate(target);
+            var items = body.has("item_results") ? body.path("item_results") : body.path("itemResults");
+            for (var item : items) if (notLeader(item)) config.endpoint().invalidate(target);
+            return body;
+        } catch (Exception error) {
+            config.endpoint().invalidate(target);
+            throw error;
+        }
+    }
+    private static boolean notLeader(JsonNode value) {
+        return Set.of("9", "SERVER_NOT_LEADER").contains(code(value));
     }
     private static String code(JsonNode value) {
         if (value.isObject()) return code(value.has("code") ? value.path("code") : value.path("status"));
@@ -189,16 +198,17 @@ public final class KvcmReporter implements AutoCloseable {
         if (closed) return;
         closed = true;
         try { observation.close(); } catch (Exception error) { throw new IllegalStateException(error); }
-        worker.shutdown();
+        worker.shutdownNow();
         try {
             if (!worker.awaitTermination(3, TimeUnit.SECONDS)) {
                 worker.shutdownNow();
                 if (!worker.awaitTermination(3, TimeUnit.SECONDS)) throw new IllegalStateException("KVCM reporter did not stop");
             }
-            if (registered) try { accepted(post("/api/reportEvent", control("HOST_DOWN")), false); }
+            URI endpoint = config.endpoint().current();
+            if (registered && endpoint != null) try { accepted(post(endpoint, "/api/reportEvent", control("HOST_DOWN")), false); }
             catch (Exception error) { failure = error.toString(); }
         } catch (InterruptedException error) {
             worker.shutdownNow(); Thread.currentThread().interrupt();
-        } finally { http.close(); }
+        } finally { try { config.endpoint().close(); } finally { http.shutdownNow(); } }
     }
 }

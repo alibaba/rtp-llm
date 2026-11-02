@@ -16,12 +16,12 @@ public final class KvcmMetaProbe {
     public static void main(String[] args) throws Exception {
         var json = new ObjectMapper();
         var spaces = new ConcurrentHashMap<String, ConcurrentHashMap<String, Set<Long>>>();
-        var queries = new AtomicLong(); var positive = new AtomicLong(); var rpcPort = new AtomicInteger();
+        var queries = new AtomicLong(); var positive = new AtomicLong(); var rpcPort = new AtomicInteger(); var httpPort = new AtomicInteger();
         var ok = CommonResponseHeader.newBuilder().setStatus(org.flexlb.kvcm.grpc.Status.newBuilder().setCode(ErrorCode.OK)).build();
         var rpc = ServerBuilder.forPort(0).addService(new MetaServiceGrpc.MetaServiceImplBase() {
             @Override public void getClusterInfo(GetClusterInfoRequest request, StreamObserver<GetClusterInfoResponse> out) {
-                out.onNext(GetClusterInfoResponse.newBuilder().setHeader(ok).setLeaderEndpoint(
-                    MetaNodeEndpoint.newBuilder().setHost("127.0.0.1").setMetaRpcPort(rpcPort.get())).build()); out.onCompleted();
+                out.onNext(GetClusterInfoResponse.newBuilder().setHeader(ok).setLeaderNodeId("leader").setLeaderEndpoint(
+                    MetaNodeEndpoint.newBuilder().setNodeId("leader").setHost("127.0.0.1").setMetaRpcPort(rpcPort.get()).setMetaHttpPort(httpPort.get())).build()); out.onCompleted();
             }
             @Override public void getHostCacheState(GetHostCacheStateRequest request, StreamObserver<GetHostCacheStateResponse> out) {
                 queries.incrementAndGet(); var response = GetHostCacheStateResponse.newBuilder().setHeader(ok);
@@ -64,7 +64,7 @@ public final class KvcmMetaProbe {
                 byte[] bytes = json.writeValueAsBytes(Map.of("queries", queries.get(), "positive_queries", positive.get(), "keys", keys));
                 exchange.sendResponseHeaders(200, bytes.length); exchange.getResponseBody().write(bytes);
             }
-        }); http.start();
+        }); http.start(); httpPort.set(http.getAddress().getPort());
         Runtime.getRuntime().addShutdownHook(new Thread(() -> { http.stop(0); rpc.shutdownNow(); }));
         Path ready = Path.of(args[0]), temporary = ready.resolveSibling("kvcm-ready.tmp");
         json.writeValue(temporary.toFile(), Map.of("http", "http://127.0.0.1:" + http.getAddress().getPort(), "rpc_port", rpc.getPort()));

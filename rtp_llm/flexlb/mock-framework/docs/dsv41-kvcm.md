@@ -24,7 +24,9 @@ KVCM 服务 bootstrap 使用 `MODEL_SERVICE_CONFIG.kvcm.address/port`，通过�
 
 没有 `KV_CACHE_EVENT_MANAGER_ENDPOINT` 覆盖时，通过 VIPServer SDK 获取健康 RPC 端点，或使用 `RECO_SERVER_ADDRESS` 的 RPC 地址，然后调用原生 `GetClusterInfo(instance_id)`，校验 leader 身份并读取其 `meta_http_port`。VIP 域名不交给系统 DNS 解析。VIP 注册端口必须是 KVCM Meta RPC 端口（默认 6381），HTTP 事件发送到服务返回的 Meta HTTP 端口（默认 6382），不是 Admin HTTP 6492。VIP 探针使用 KVCM 原生健康入口，与注册端口分别配置。
 
-发现由现有事件线程执行，不占用 Scheduler/Compute；缓存的 leader 最长保留一秒。成员或 leader 变化后重新查询，失败沿用事件上报重试和全量快照恢复，不发送到猜测地址。原生 HTTP 直连覆盖仍优先，适用于本地测试或明确提供的稳定服务地址；Whale 示例使用发现，不写 Pod IP。
+发现与上报由 `shared/cache` 的 KvcmDiscovery/KvcmReporter 负责，RTP 只映射 native 配置和装配。按候选列表逐个查询 bootstrap，单个地址失败不掩盖后续可用地址。成功的 leader 一直缓存，不做每秒刷新；HTTP 传输失败或 SERVER_NOT_LEADER 后使对应地址失效，再通过原有上报重试恢复注册和全量快照。旧地址的迟到失败不会清除新地址，不发送到猜测地址。
+
+网络查询不占用 Scheduler/Compute 或缓存锁。VIP 查询有等待上限，关闭可取消 VIP 查询与 gRPC；不持有覆盖网络调用的关闭锁。正常关闭仅向已缓存的 endpoint 尝试 HOST_DOWN，不为退出重新发现；Reporter 统一释放 resolver 和传输资源。没有新增发现进程、定时器或模块。原生 HTTP 直连覆盖仍优先，适用于本地测试或明确提供的稳定服务地址；Whale 示例使用发现，不写 Pod IP。
 
 内部镜像复用已有 `vipserver` 组件，通过 Java 标准 ServiceLoader 接入，不复制 SDK 或增加发现进程。`package-engine.py` 在内部源码目录存在时启用 `internal-discovery` Maven profile，并检查最终 JAR 的 SDK、provider 类和服务声明；普通本地构建不需要内部依赖。开源包启用 VIP 配置会明确拒绝启动，不静默改用 DNS。
 
@@ -53,13 +55,13 @@ Mock Client 配置 `seq_size_per_block`，与 P/D 一致；不配置时不声称
 
 - Java 测试覆盖原生 leader 查询、signed int64 key 原样传输、namespace、候选过滤、local/global 区分、故障重发现、开关和回退，以及原有 ViT/PD 路径。
 - `tests/test_cache_key_contract.py` 用本分支真实 Frontend 函数和 C++ HashUtil.h 对照 Java CacheSequence，覆盖纯文本、负数、图片跨 block、图片变化、多图片、末尾不足 block、DSV full/bounded seed。
-- `test_master.py` 的 `kvcm-cold-warm` 使用独立真实 DSV Master、Mock V/P/D 和原生协议 Meta 测试进程，检查首次请求产出缓存、HTTP 事件进入查询空间、随后 gRPC 查询命中并完成多模态生成；`vit-local-sync` 使用相同输入验证关闭模式。Meta 测试进程不能代替真实 KVCM 的部署验收。
+- `test_master.py` 的 `kvcm-cold-warm` 使用独立真实 DSV Master、Mock V/P/D 和原生协议 Meta 测试进程，Engine 通过原生 bootstrap RPC 发现 Meta HTTP 地址，检查首次请求产出缓存、HTTP 事件进入查询空间、随后 gRPC 查询命中并完成多模态生成；`vit-local-sync` 使用相同输入验证关闭模式。Meta 测试进程不能代替真实 KVCM 的部署验收。
 
 Whale 首次验收还必须核对实际镜像 SHA、发现身份、Meta 服务版本、有效配置、真实 ViT URL、请求结果及实际缓存命中。仅有请求成功不表示 KVCM 在生效，回退成功也不能当作 KVCM 查询成功。
 
 ### 本地验证结果
 
-本批 228 个 Java 定向测试通过，18 组真实 Frontend/C++ 与 Java key 对照通过。独立进程的普通 LOCAL_SYNC、ViT LOCAL_SYNC、ViT KVCM 场景均通过。ViT KVCM 场景完成两次请求，Meta 测试进程收到 2 次查询、2 次正命中；关闭场景不启动 Meta 服务，两次生成同样完成。两种多模态场景使用同一输入、模型设置和模拟计算参数。这些结果是本地协议与功能验证，不代表线上 KVCM、真实图片下载或容量验证。
+缓存 key 的跨语言验证覆盖真实 Frontend/C++ 与 Java；发现、缓存、上报及 Client/ViT 的 47 个 Java 定向测试通过。独立进程的普通 LOCAL_SYNC、ViT LOCAL_SYNC、ViT KVCM 场景均通过。ViT KVCM 场景完成两次请求，Meta 测试进程收到 2 次查询、2 次正命中；关闭场景不启动 Meta 服务，两次生成同样完成。两种多模态场景使用同一输入、模型设置和模拟计算参数。这些结果是本地协议与功能验证，不代表线上 KVCM、真实图片下载或容量验证。
 
 构建框架后，可在框架目录运行：
 
