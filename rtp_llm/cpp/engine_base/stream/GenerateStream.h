@@ -16,6 +16,7 @@
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
 #include <atomic>
 #include <condition_variable>
+#include <functional>
 #include <iterator>
 #include <memory>
 #include <mutex>
@@ -175,6 +176,18 @@ public:
     }
 
     virtual ErrorResult<GenerateOutputs> nextOutput() = 0;
+    // The callback is borrowed only for this call; do not retain RPC context
+    // pointers after pollStreamOutput returns.
+    virtual ErrorResult<GenerateOutputs> nextOutput(const std::function<bool()>& is_cancelled) {
+        if (is_cancelled && is_cancelled()) {
+            if (!hasError()) {
+                reportError(ErrorCode::CANCELLED, "request cancelled by user");
+            }
+            return statusInfo();
+        }
+        return nextOutput();
+    }
+
     virtual bool                         hasOutput() {
         return false;
     }

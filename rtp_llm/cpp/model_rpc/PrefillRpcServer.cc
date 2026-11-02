@@ -21,6 +21,7 @@
 #include <vector>
 #include <strings.h>
 #include <fstream>
+#include <functional>
 #include <iomanip>
 #include <limits>
 #include <memory>
@@ -39,6 +40,120 @@ using grpc::ClientContext;
 namespace rtp_llm {
 
 namespace {
+
+// P/D stages own this stream serially. Use a private completion queue so their
+// blocking API can observe cancellation even when no Decode packet arrives.
+// In batch mode the FetchResponse ServerContext is bound after ALLOCATE, so
+// linking only the ClientContext's original parent cannot cover that path.
+class CancellableDecodeClientStream: public PrefillGenerateContext::ClientStream {
+public:
+    CancellableDecodeClientStream(RpcService::Stub*              stub,
+                                  std::shared_ptr<ClientContext> context,
+                                  std::function<bool()>          is_cancelled):
+        context_(std::move(context)), is_cancelled_(std::move(is_cancelled)) {
+        stream_  = stub->AsyncRemoteGenerate(context_.get(), &completion_queue_, &operation_tag_);
+        started_ = waitForOperation();
+    }
+
+    ~CancellableDecodeClientStream() override {
+        // Do not invoke the borrowed owner callback during member destruction.
+        // Its cancel-state members may already have been destroyed.
+        if (!finished_) {
+            context_->TryCancel();
+            finish(/*observe_owner=*/false);
+        }
+        completion_queue_.Shutdown();
+        void* tag = nullptr;
+        bool  ok  = false;
+        while (completion_queue_.Next(&tag, &ok)) {}
+    }
+
+    bool Read(GenerateOutputsPB* response) override {
+        std::lock_guard<std::mutex> lock(operation_mutex_);
+        if (!started_ || finished_) {
+            return false;
+        }
+        stream_->Read(response, &operation_tag_);
+        return waitForOperation();
+    }
+
+    bool Write(const GenerateRequestPB& request, grpc::WriteOptions options) override {
+        std::lock_guard<std::mutex> lock(operation_mutex_);
+        if (!started_ || finished_) {
+            return false;
+        }
+        stream_->Write(request, options, &operation_tag_);
+        return waitForOperation();
+    }
+
+    bool WritesDone() override {
+        std::lock_guard<std::mutex> lock(operation_mutex_);
+        if (!started_ || finished_) {
+            return false;
+        }
+        stream_->WritesDone(&operation_tag_);
+        return waitForOperation();
+    }
+
+    grpc::Status Finish() override {
+        std::lock_guard<std::mutex> lock(operation_mutex_);
+        return finish(/*observe_owner=*/true);
+    }
+
+    void WaitForInitialMetadata() override {
+        std::lock_guard<std::mutex> lock(operation_mutex_);
+        if (started_ && !finished_) {
+            stream_->ReadInitialMetadata(&operation_tag_);
+            waitForOperation();
+        }
+    }
+
+    bool NextMessageSize(uint32_t*) override {
+        return false;
+    }
+
+private:
+    bool waitForOperation(bool observe_owner = true) {
+        while (true) {
+            if (observe_owner && is_cancelled_ && is_cancelled_()) {
+                context_->TryCancel();
+            }
+            void* tag      = nullptr;
+            bool  ok       = false;
+            auto  deadline = std::chrono::system_clock::now() + std::chrono::milliseconds(100);
+            auto  result   = completion_queue_.AsyncNext(&tag, &ok, deadline);
+            if (result == grpc::CompletionQueue::NextStatus::TIMEOUT) {
+                continue;
+            }
+            if (result == grpc::CompletionQueue::NextStatus::SHUTDOWN) {
+                return false;
+            }
+            RTP_LLM_CHECK_WITH_INFO(tag == &operation_tag_, "unexpected P/D RPC completion tag");
+            return ok;
+        }
+    }
+
+    grpc::Status finish(bool observe_owner) {
+        if (!finished_) {
+            stream_->Finish(&status_, &operation_tag_);
+            if (!waitForOperation(observe_owner) && status_.ok()) {
+                status_ = grpc::Status(grpc::StatusCode::UNKNOWN, "Decode RPC completion queue closed");
+            }
+            finished_ = true;
+        }
+        return status_;
+    }
+
+    grpc::CompletionQueue                                                                         completion_queue_;
+    std::shared_ptr<ClientContext>                                                                context_;
+    std::function<bool()>                                                                         is_cancelled_;
+    std::unique_ptr<grpc::ClientAsyncReaderWriterInterface<GenerateRequestPB, GenerateOutputsPB>> stream_;
+    std::mutex                                                                                    operation_mutex_;
+    grpc::Status                                                                                  status_;
+    char                                                                                          operation_tag_ = 0;
+    bool                                                                                          started_  = false;
+    bool                                                                                          finished_ = false;
+};
 
 bool envValueIsFalse(const char* value) {
     return value != nullptr
@@ -648,7 +763,16 @@ PrefillRpcServer::makeRemoteAllocateInput(const PrefillGenerateContext& prefill_
 void PrefillRpcServer::remoteAllocateResource(PrefillGenerateContext& prefill_context) {
     RTP_LLM_PROFILE_FUNCTION();
     RTP_LLM_LOG_DEBUG("request [%ld] start to remote allocate resource", prefill_context.request_id);
-    auto    client_context     = std::make_shared<ClientContext>();
+    std::shared_ptr<ClientContext> client_context;
+    if (prefill_context.server_context) {
+        grpc::PropagationOptions options;
+        // Preserve the explicit per-request/default deadline below, while
+        // letting upstream cancellation interrupt a blocked Decode Read.
+        options.enable_cancellation_propagation().disable_deadline_propagation();
+        client_context = ClientContext::FromServerContext(*prefill_context.server_context, options);
+    } else {
+        client_context = std::make_shared<ClientContext>();
+    }
     auto    request_timeout_ms = prefill_context.request_timeout_ms;
     auto    max_rpc_timeout_ms = maga_init_params_.pd_sep_config.max_rpc_timeout_ms;
     int64_t final_timeout_ms   = request_timeout_ms > 0 ? request_timeout_ms : max_rpc_timeout_ms;
@@ -663,8 +787,10 @@ void PrefillRpcServer::remoteAllocateResource(PrefillGenerateContext& prefill_co
         client_context->TryCancel();
     }
     // final_timeout_ms <= 0: skip set_deadline; gRPC treats it as no deadline.
-    prefill_context.client_stream =
-        std::move(prefill_context.grpc_connection.stub->RemoteGenerate(client_context.get()));
+    prefill_context.client_stream = std::make_shared<CancellableDecodeClientStream>(
+        prefill_context.grpc_connection.stub.get(), client_context, [&prefill_context] {
+            return prefill_context.isRequestCancelled();
+        });
     auto&             client_stream = prefill_context.client_stream;
     GenerateRequestPB alloc_request;
     alloc_request.set_stage(RemoteStage::ALLOCATE);
@@ -898,6 +1024,9 @@ void PrefillRpcServer::pollRemoteOutput(PrefillGenerateContext& prefill_context)
             prefill_context.error_status = grpc::Status(grpc::StatusCode::CANCELLED, "request output consumer closed");
             return;
         }
+    }
+    if (prefill_context.error_status.ok() && prefill_context.isRequestCancelled()) {
+        prefill_context.error_status = grpc::Status(grpc::StatusCode::CANCELLED, "request cancelled");
     }
     auto status = prefill_context.closeGrpcStream();
     if (!status.ok() && status.error_code() != grpc::StatusCode::CANCELLED) {

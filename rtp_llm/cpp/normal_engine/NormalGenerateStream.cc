@@ -5,9 +5,18 @@
 namespace rtp_llm {
 
 ErrorResult<GenerateOutputs> NormalGenerateStream::nextOutput() {
-    if (output_predicate_wait_) {
+    return nextOutput({});
+}
+
+ErrorResult<GenerateOutputs> NormalGenerateStream::nextOutput(const std::function<bool()>& is_cancelled) {
+    // A nonstreaming request can publish no output for a long time. Its gRPC
+    // cancellation must be checked while waiting, including when the legacy
+    // output-wait option was selected for calls without a cancellation check.
+    if (output_predicate_wait_ || is_cancelled) {
         std::unique_lock<std::mutex> lock(*mutex_);
-        const auto ready = [this] { return hasError() || isFinished() || !generate_outputs_queue_.isEmpty(); };
+        const auto                   ready = [this, &is_cancelled] {
+            return hasError() || isFinished() || !generate_outputs_queue_.isEmpty() || (is_cancelled && is_cancelled());
+        };
         while (!ready()) {
             // checkTimeout reports an event and acquires mutex_ itself.
             lock.unlock();
@@ -16,7 +25,7 @@ ErrorResult<GenerateOutputs> NormalGenerateStream::nextOutput() {
             // Output publication and terminal state transitions use mutex_.
             // Use their condition variable too: SynchronizedQueue::waitNotEmpty
             // waits unconditionally and can miss a push between isEmpty/wait.
-            // Keep the timeout solely to recheck the request deadline.
+            // Recheck the request deadline and RPC cancellation at least once per second.
             RTP_LLM_PROFILE_SCOPE("stream.output_wait.predicate");
             cv_->wait_for(lock, std::chrono::seconds(1), ready);
         }
@@ -26,6 +35,9 @@ ErrorResult<GenerateOutputs> NormalGenerateStream::nextOutput() {
             RTP_LLM_PROFILE_SCOPE("stream.output_wait.legacy");
             generate_outputs_queue_.waitNotEmpty();
         }
+    }
+    if (!hasError() && is_cancelled && is_cancelled()) {
+        reportError(ErrorCode::CANCELLED, "request cancelled by user");
     }
     if (hasError() && !hasPendingFrontendMetricOutput()) {
         setPendingFrontendMetricTerminalError(false);

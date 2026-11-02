@@ -38,6 +38,7 @@ public:
 
     bool                         hasOutput() override;
     ErrorResult<GenerateOutputs> nextOutput() override;
+    ErrorResult<GenerateOutputs> nextOutput(const std::function<bool()>& is_cancelled) override;
     void                         updateOutput(const StreamUpdateInfo& update_info) override;
 
 private:
