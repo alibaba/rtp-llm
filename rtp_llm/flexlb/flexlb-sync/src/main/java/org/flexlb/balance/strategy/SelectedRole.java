@@ -57,6 +57,8 @@ public final class SelectedRole implements AutoCloseable {
             throw new IllegalArgumentException(
                     "Decode selection requires a Decode endpoint role");
         }
+        // Publish the exact selection incarnation for asynchronous cache prediction feedback.
+        serverStatus.setWorkerGeneration(generationPin.generationId());
         this.prefillWorkMs = prefillWorkMs;
         if (placementVersion < 0L) {
             throw new IllegalArgumentException(

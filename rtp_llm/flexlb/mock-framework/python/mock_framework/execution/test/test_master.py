@@ -92,7 +92,7 @@ def test_real_master_routes_to_isolated_rtp_processes(tmp_path, batched, replica
     master_config = configuration(); master_config['FLEXLB_CONFIG'] = json.dumps(native)
     meta = native_kvcm() if kvcm else None
     if kvcm:
-        native['cacheMatching'] = {'type': 'KVCM', 'medium': ['hbm'], 'requestTimeoutMs': 3000}
+        native['cacheMatching'] = {'type': 'KVCM', 'medium': ['hbm'], 'globalKvsHostCount': 0, 'requestTimeoutMs': 3000}
         master_config['FLEXLB_CONFIG'] = json.dumps(native)
         route = json.loads(master_config['MODEL_SERVICE_CONFIG'])
         route['kvcm'] = {'address': '127.0.0.1', 'port': meta['rpc_port'], 'namespace': 'mock'}

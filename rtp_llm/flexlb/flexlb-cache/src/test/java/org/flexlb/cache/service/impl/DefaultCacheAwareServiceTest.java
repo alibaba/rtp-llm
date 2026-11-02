@@ -23,7 +23,7 @@ class DefaultCacheAwareServiceTest {
     @Test
     void cachePollAndRetirementKeepTheirExactDiagnosticOwner() {
         var cache = mock(KvCacheManager.class);
-        var service = new DefaultCacheAwareService(cache, mock(CacheMetricsReporter.class));
+        var service = localService(cache, mock(CacheMetricsReporter.class));
         var worker = WorkerStatus.createDiscovered(RoleType.PREFILL, "group", "127.0.0.1", 8080, 8081, "site");
         var status = new CacheStatus();
         Set<Long> keys = Set.of(1L, 2L);
@@ -51,7 +51,7 @@ class DefaultCacheAwareServiceTest {
     void mutationWithoutTheGenerationCacheLockFailsBeforeReadingOrChangingKeys() {
         var cache = mock(KvCacheManager.class);
         var metrics = mock(CacheMetricsReporter.class);
-        var service = new DefaultCacheAwareService(cache, metrics);
+        var service = localService(cache, metrics);
         var worker = WorkerStatus.createDiscovered(RoleType.PREFILL, "group", "127.0.0.1", 8080, 8081, "site");
 
         assertThrows(IllegalStateException.class, () -> service.updateEngineBlockCache(worker, null));
@@ -72,7 +72,7 @@ class DefaultCacheAwareServiceTest {
         KvCacheManager cache = mock(KvCacheManager.class);
         CacheMetricsReporter metrics = mock(CacheMetricsReporter.class);
         DefaultCacheAwareService service =
-                new DefaultCacheAwareService(cache, metrics);
+                localService(cache, metrics);
         IllegalStateException failure =
                 new IllegalStateException("index unavailable");
         List<Long> keys = List.of(1L);
@@ -89,29 +89,33 @@ class DefaultCacheAwareServiceTest {
                 eq(RoleType.PREFILL), anyLong(), eq("1"));
     }
 
-    @Test void enabledUsesKvcmAndFailureFallsBackToExistingIndex() {
+    @Test void enabledFailureUsesStandbyInsteadOfSynchronizedIndex() {
         var cache = mock(KvCacheManager.class);
-        var kvcm = mock(org.flexlb.engine.grpc.KvcmGrpcClient.class);
-        var service = new DefaultCacheAwareService(cache, mock(CacheMetricsReporter.class), kvcm);
+        var kvcm = mock(org.flexlb.engine.grpc.client.KvcmGrpcClient.class);
+        var config = mock(org.flexlb.config.CacheMatchConfiguration.class);
+        var failover = mock(org.flexlb.cache.match.CacheMatchFailoverManager.class);
+        var standby = mock(org.flexlb.cache.match.localstandby.LocalStandbyCacheManager.class);
+        when(config.isKvcmEnabled()).thenReturn(true);
+        when(failover.activeSource()).thenReturn(org.flexlb.cache.domain.CacheMatchSource.KVCM);
+        var service = new DefaultCacheAwareService(cache, mock(CacheMetricsReporter.class), kvcm, config, failover, standby);
         var keys = List.of(11L, 22L); var candidates = List.of("127.0.0.1:18080");
-        when(kvcm.enabled()).thenReturn(true);
-        when(kvcm.findMatchingEngines(keys, 16, candidates)).thenReturn(java.util.Map.of(candidates.getFirst(), 2));
+        when(kvcm.findMatchingEngines("", keys, 16, RoleType.PREFILL, null))
+                .thenReturn(java.util.Map.of(candidates.getFirst() + "@0", new org.flexlb.dao.cache.HostCacheMatch(2, 2)));
         org.junit.jupiter.api.Assertions.assertEquals(java.util.Map.of(candidates.getFirst(), 2),
                 service.findMatchingEngines(keys, RoleType.PREFILL, candidates, 16));
         org.mockito.Mockito.verifyNoInteractions(cache);
-        when(kvcm.findMatchingEngines(keys, 16, candidates)).thenThrow(new IllegalStateException("unavailable"));
-        when(cache.findMatchingEngines(keys, candidates)).thenReturn(java.util.Map.of(candidates.getFirst(), 1));
+        when(kvcm.findMatchingEngines("", keys, 16, RoleType.PREFILL, null))
+                .thenThrow(new org.flexlb.exception.KvcmQueryException("unavailable"));
+        when(standby.findMatchingEngines(keys, RoleType.PREFILL, candidates, 16)).thenReturn(java.util.Map.of(candidates.getFirst(), 1));
         org.junit.jupiter.api.Assertions.assertEquals(java.util.Map.of(candidates.getFirst(), 1),
                 service.findMatchingEngines(keys, RoleType.PREFILL, candidates, 16));
+        org.mockito.Mockito.verifyNoInteractions(cache);
     }
-
-    @Test void disabledBypassesKvcmEvenWithConfiguredTopology() {
-        var cache = mock(KvCacheManager.class);
-        var kvcm = mock(org.flexlb.engine.grpc.KvcmGrpcClient.class);
-        var service = new DefaultCacheAwareService(cache, mock(CacheMetricsReporter.class), kvcm);
-        service.findMatchingEngines(List.of(11L), RoleType.PREFILL, List.of("host:1"), 16);
-        org.mockito.Mockito.verify(kvcm).enabled();
-        org.mockito.Mockito.verifyNoMoreInteractions(kvcm);
-        verify(cache).findMatchingEngines(List.of(11L), List.of("host:1"));
+    private static DefaultCacheAwareService localService(KvCacheManager cache, CacheMetricsReporter metrics) {
+        return new DefaultCacheAwareService(cache, metrics,
+                mock(org.flexlb.engine.grpc.client.KvcmGrpcClient.class),
+                mock(org.flexlb.config.CacheMatchConfiguration.class),
+                mock(org.flexlb.cache.match.CacheMatchFailoverManager.class),
+                mock(org.flexlb.cache.match.localstandby.LocalStandbyCacheManager.class));
     }
 }

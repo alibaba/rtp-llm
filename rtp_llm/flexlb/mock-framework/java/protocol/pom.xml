@@ -7,8 +7,8 @@
 <dependency><groupId>com.fasterxml.jackson.core</groupId><artifactId>jackson-databind</artifactId><version>2.18.3</version></dependency>
 <dependency><groupId>org.junit.jupiter</groupId><artifactId>junit-jupiter</artifactId><version>5.8.2</version><scope>test</scope></dependency>
 <dependency><groupId>org.flexlb</groupId><artifactId>flexlb-grpc</artifactId><version>1.0.0-SNAPSHOT</version><exclusions><exclusion><groupId>*</groupId><artifactId>*</artifactId></exclusion></exclusions></dependency>
-<dependency><groupId>io.grpc</groupId><artifactId>grpc-netty</artifactId><version>1.65.0</version></dependency>
-<dependency><groupId>io.grpc</groupId><artifactId>grpc-stub</artifactId><version>1.65.0</version></dependency>
-<dependency><groupId>io.grpc</groupId><artifactId>grpc-protobuf</artifactId><version>1.65.0</version></dependency>
+<dependency><groupId>io.grpc</groupId><artifactId>grpc-netty</artifactId><version>1.65.1</version></dependency>
+<dependency><groupId>io.grpc</groupId><artifactId>grpc-stub</artifactId><version>1.65.1</version></dependency>
+<dependency><groupId>io.grpc</groupId><artifactId>grpc-protobuf</artifactId><version>1.65.1</version></dependency>
 </dependencies>
 </project>

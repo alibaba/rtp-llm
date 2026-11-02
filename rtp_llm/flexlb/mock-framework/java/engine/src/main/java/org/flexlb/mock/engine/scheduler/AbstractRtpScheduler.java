@@ -541,7 +541,7 @@ public abstract class AbstractRtpScheduler implements EngineScheduler {
         long executionMillis = finished ? Math.max(0, (now - entry.timingStarted) / 1_000_000 - waitMillis) : -1;
         return new Task(entry.input.requestId(), entry.input.groupId(), entry.input.tokens(), entry.reused,
             entry.input.priority(), phase, progress.iterations(), waitMillis, executionMillis,
-            endTimeMillis, failure);
+            endTimeMillis, failure, entry.lease != null);
     }
     private ReportedPhase reportedPhase(Entry entry) {
         return entry.phase == FORWARD || entry.phase == RUNNING || !prefill() && entry.phase == OUTPUT

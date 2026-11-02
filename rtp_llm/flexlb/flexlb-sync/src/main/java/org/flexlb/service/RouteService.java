@@ -1,5 +1,6 @@
 package org.flexlb.service;
 
+import org.flexlb.cache.service.CacheAwareService;
 import com.google.protobuf.ByteString;
 import org.flexlb.balance.scheduler.CancelReason;
 import org.flexlb.balance.scheduler.DefaultRouter;
@@ -23,6 +24,7 @@ public class RouteService {
     private final RequestScheduler requestScheduler;
     @Autowired
     private DefaultRouter router;
+    @Autowired private CacheAwareService cacheAwareService;
     private final RecentCacheKeyTraceReporter recentCacheKeyTraceReporter;
 
     public RouteService(RequestScheduler requestScheduler,
@@ -66,6 +68,8 @@ public class RouteService {
                 balanceContext.setResponse(result);
                 if (result != null && result.isSuccess() && !balanceContext.getRequest().isVitRouteOnly()) {
                     recentCacheKeyTraceReporter.report(balanceContext);
+                    if (cacheAwareService != null) cacheAwareService.updateFromRoutedRequest(
+                            balanceContext.getRequest(), result.getServerStatus());
                 }
             } catch (RuntimeException completionSideEffectFailure) {
                 Logger.warn("Route completion side effect failed: request_id={}",

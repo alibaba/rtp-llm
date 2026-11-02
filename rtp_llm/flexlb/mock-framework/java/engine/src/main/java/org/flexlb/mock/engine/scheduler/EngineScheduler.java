@@ -76,7 +76,7 @@ public interface EngineScheduler extends AutoCloseable {
     enum ReportedPhase { PENDING, RECEIVED, KV_ALLOCATED, RUNNING }
     record Task(long requestId, long batchId, int inputLength, int prefixLength, int priority,
                 ReportedPhase phase, int iterations, long waitingMillis, long executionMillis,
-                long endTimeMillis, RequestFailure failure) {}
+                long endTimeMillis, RequestFailure failure, boolean prefixLengthValid) {}
     record Status(List<Task> tasks, List<Task> finished, long finishedVersion, int waiting, int running) {
         public Status { tasks = List.copyOf(tasks); finished = List.copyOf(finished); }
     }

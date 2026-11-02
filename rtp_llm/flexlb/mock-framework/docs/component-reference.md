@@ -240,6 +240,10 @@ java -jar java/engine/target/mock-engine-service-1.0-SNAPSHOT-all.jar
 
 ## DSV4.1 Engine / KVCM 契约
 
+Master 的 KVCM 通信、后台 leader 刷新、连接池、查询预算、健康阈值和 Local Standby 采用生产候选 `codex/dsv41-mu-rebase-vit-field28@1f81c1a16c` 的设计，接入 DSV 现有请求生命周期。LOCAL_SYNC 模式保留真实缓存同步索引；KVCM 模式不再拉取 P/D 完整 key 或维护该索引，查询失败使用有界、带 TTL 的 Local Standby 预测，健康恢复后返回 KVCM。预测来自成功路由的 P/PDFusion 请求，按 Engine 代次隔离，不代表已计算或真实驻留的 KV；ViT 缓存链路保持不变。
+
+WorkerStatusPB 与生产候选统一为 `block_size=23`、`block_hash_lookahead_tokens=24`、`kv_cache_group_mode=25`、`cache_match_rollback_blocks=26`、`last_step_metrics=27`、`mm_inflight_inputs=28`；相关角色必须使用同一份协议重新构建，不保留 ViT 字段 23 别名。DSV 仍使用的传输/KVCM 完成查询 RPC 保留。Mock 的 traits 和 `prefix_length_valid` 由实际缓存规则与准入结果提供，经 Engine RPC 接入层转换及 Master 不可变状态提交，不补造未模拟的 step 遥测。当前支持显式 namespace、Full Attention、单 Engine/端点、CP=1；自动 namespace/查询类型解析和完整命中比较反馈尚未迁移。
+
 ViT 的 GetWorkerStatus 总是显式提供 `mm_inflight_inputs`（包括真实零值），计数来自去重后的媒体所有权；缓存命中不增加，重复等待者不重复增加，排队/执行/缓存结果发布完成前不提前减少。RPC 等待者数不是该指标。状态查询不经过阻塞的结果等待执行器。真实图片由 Java 下载，ImageIO 读取 PNG/JPEG/GIF/BMP 尺寸，WebP 读取格式头；仅提取尺寸，不做完整像素解码校验。文件字节的 SHA-256 摘要与模型几何参数共同生成模拟特征身份，不执行神经网络或物化 embedding 张量，不依赖 Python、Pillow 或解码子进程。未知格式明确拒绝，不回退到请求中的尺寸提示；需要的新格式按实际输入补齐。
 
 V 仍按 URL/预处理 key 缓存和合并在途请求，命中时不重新下载；同 URL 内容变化需等缓存失效后重新读取。同一份文件通过不同 URL 获取时，在模型几何参数相同的条件下产生相同模拟特征身份；不同文件编码不保证 hash 相同，也不承诺与真实权重的 hash 数值一致。本地 `mock.vit.skip.download=true` 使用输入宽高和原有模拟身份，其余调度与计算路径相同。

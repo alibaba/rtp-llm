@@ -82,7 +82,7 @@ final class PrefillRpcServer implements AutoCloseable {
                 if (request != null) { engine.finish(request, failure); return; }
                 var task = RpcMessages.pending(input);
                 finished.add(new EngineScheduler.Task(id, task.batchId(), task.inputLength(), 0, task.priority(),
-                    EngineScheduler.ReportedPhase.PENDING, 0, 0, 0, System.currentTimeMillis(), failure));
+                    EngineScheduler.ReportedPhase.PENDING, 0, 0, 0, System.currentTimeMillis(), failure, false));
                 ended = true;
                 sessions.remove(id, this);
             }

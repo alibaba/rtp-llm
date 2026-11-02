@@ -1,0 +1,235 @@
+package org.flexlb.engine.grpc.core;
+
+import io.grpc.ConnectivityState;
+import io.grpc.ManagedChannel;
+import lombok.Getter;
+import lombok.extern.slf4j.Slf4j;
+
+import java.util.Collection;
+import java.util.HashSet;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Function;
+
+/**
+ * Thread-safe keyed cache for reusable gRPC channels.
+ */
+@Slf4j
+public class GrpcChannelPool<K> {
+
+    private final ConcurrentMap<K, PooledChannel> channels = new ConcurrentHashMap<>();
+    private final Function<K, ManagedChannel> channelFactory;
+
+    public GrpcChannelPool(Function<K, ManagedChannel> channelFactory) {
+        this.channelFactory = Objects.requireNonNull(channelFactory, "channelFactory");
+    }
+
+    public PooledChannel getOrCreate(K key) {
+        PooledChannel current = channels.get(key);
+        if (current != null && current.isUsable()) {
+            return current;
+        }
+        return channels.compute(
+                key,
+                (ignored, existing) -> {
+                    if (existing != null && existing.isUsable()) {
+                        return existing;
+                    }
+                    if (existing != null) {
+                        existing.shutdown(CloseReason.REPLACED);
+                    }
+                    return create(key);
+                });
+    }
+
+    public PooledChannel replace(K key, PooledChannel old) {
+        PooledChannel replacement = create(key);
+        boolean replaced;
+        if (old == null) {
+            PooledChannel existing = channels.putIfAbsent(key, replacement);
+            replaced = existing == null;
+        } else {
+            replaced = channels.replace(key, old, replacement);
+        }
+
+        if (replaced) {
+            if (old != null) {
+                old.shutdown(CloseReason.REPLACED);
+            }
+            return replacement;
+        }
+
+        replacement.shutdown(CloseReason.DUPLICATE_DISCARDED);
+        return getOrCreate(key);
+    }
+
+    /**
+     * Removes and shuts down channels whose keys are absent from the active set.
+     */
+    public void removeStaleChannels(Collection<K> activeChannelKeys) {
+        removeChannelsForInactiveGroups(activeChannelKeys, Function.identity());
+    }
+
+    /**
+     * Removes all channels belonging to groups that are no longer active. Channels with different
+     * keys in an active group are retained.
+     */
+    public <G> void removeChannelsForInactiveGroups(
+            Collection<G> activeGroupKeys, Function<K, G> groupKeyExtractor) {
+        Set<G> activeGroupKeySet = new HashSet<>(activeGroupKeys);
+        for (Map.Entry<K, PooledChannel> entry : channels.entrySet()) {
+            if (!activeGroupKeySet.contains(groupKeyExtractor.apply(entry.getKey()))
+                    && channels.remove(entry.getKey(), entry.getValue())) {
+                entry.getValue().shutdown(CloseReason.DISCOVERY_REMOVED);
+            }
+        }
+    }
+
+    public int size() {
+        return channels.size();
+    }
+
+    public void shutdown() {
+        for (Map.Entry<K, PooledChannel> entry : channels.entrySet()) {
+            if (channels.remove(entry.getKey(), entry.getValue())) {
+                entry.getValue().shutdown();
+            }
+        }
+    }
+
+    public void shutdown(long timeout, TimeUnit unit) {
+        for (Map.Entry<K, PooledChannel> entry : channels.entrySet()) {
+            if (channels.remove(entry.getKey(), entry.getValue())) {
+                entry.getValue().shutdown(timeout, unit);
+            }
+        }
+    }
+
+    private PooledChannel create(K key) {
+        ManagedChannel channel =
+                Objects.requireNonNull(channelFactory.apply(key), "channelFactory returned null");
+        return new PooledChannel(String.valueOf(key), channel);
+    }
+
+    public enum CloseReason {
+        DISCOVERY_REMOVED,
+        REPLACED,
+        CLIENT_SHUTDOWN,
+        DUPLICATE_DISCARDED
+    }
+
+    public record CloseObservation(CloseReason reason, long nanoTime, boolean forced) {}
+
+    public static final class PooledChannel {
+
+        @Getter private final String description;
+        @Getter private final ManagedChannel channel;
+        @Getter private final long createTimeUs;
+        private final AtomicReference<CloseObservation> closeObservation = new AtomicReference<>();
+
+        public CloseObservation getCloseObservation() {
+            return closeObservation.get();
+        }
+
+        private final AtomicBoolean shutdown = new AtomicBoolean();
+        @Getter private volatile long lastUsedTimeUs;
+        private volatile long expireTimeUs;
+
+        private PooledChannel(String description, ManagedChannel channel) {
+            this.description = description;
+            this.channel = channel;
+            this.createTimeUs = System.nanoTime() / 1000;
+            this.lastUsedTimeUs = createTimeUs;
+        }
+
+        public boolean isUsable() {
+            if (shutdown.get() || channel.isShutdown() || channel.isTerminated()) {
+                return false;
+            }
+            ConnectivityState state = channel.getState(true);
+            return state != ConnectivityState.SHUTDOWN
+                    && state != ConnectivityState.TRANSIENT_FAILURE;
+        }
+
+        public void markUsed() {
+            lastUsedTimeUs = System.nanoTime() / 1000;
+        }
+
+        public void markExpired() {
+            expireTimeUs = System.nanoTime() / 1000;
+        }
+
+        public long getConnectionDurationUs() {
+            long endTimeUs = expireTimeUs > 0 ? expireTimeUs : System.nanoTime() / 1000;
+            return endTimeUs - createTimeUs;
+        }
+
+        public void shutdown() {
+            shutdown(CloseReason.CLIENT_SHUTDOWN);
+        }
+
+        public void shutdown(CloseReason reason) {
+            if (!shutdown.compareAndSet(false, true)) {
+                return;
+            }
+            try {
+                closeObservation.compareAndSet(
+                        null, new CloseObservation(reason, System.nanoTime(), false));
+                channel.shutdown();
+                if (reason == CloseReason.REPLACED || reason == CloseReason.DUPLICATE_DISCARDED) {
+                    if (!channel.isTerminated()) {
+                        forceShutdown(reason);
+                    }
+                } else if (!channel.awaitTermination(1, TimeUnit.SECONDS)) {
+                    forceShutdown(reason);
+                }
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                forceShutdown(reason);
+            } catch (RuntimeException | Error e) {
+                forceShutdown(reason);
+                log.warn("Failed to shut down gRPC channel: {}", description, e);
+            }
+        }
+
+        private void forceShutdown(CloseReason reason) {
+            try {
+                closeObservation.set(new CloseObservation(reason, System.nanoTime(), true));
+            } catch (RuntimeException | Error ignored) {
+                // Diagnostics must not prevent releasing an unusable channel.
+            }
+            channel.shutdownNow();
+        }
+
+        public void shutdown(long timeout, TimeUnit unit) {
+            if (!shutdown.compareAndSet(false, true)) {
+                return;
+            }
+            try {
+                closeObservation.compareAndSet(
+                        null,
+                        new CloseObservation(
+                                CloseReason.CLIENT_SHUTDOWN, System.nanoTime(), false));
+                channel.shutdown();
+                if (!channel.awaitTermination(timeout, unit)) {
+                    closeObservation.set(
+                            new CloseObservation(
+                                    CloseReason.CLIENT_SHUTDOWN, System.nanoTime(), true));
+                    channel.shutdownNow();
+                }
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                channel.shutdownNow();
+            } catch (Exception e) {
+                log.warn("Failed to shut down gRPC channel: {}", description, e);
+                channel.shutdownNow();
+            }
+        }
+    }
+}
