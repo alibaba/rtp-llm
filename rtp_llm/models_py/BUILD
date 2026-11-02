@@ -1,5 +1,12 @@
 load("//bazel:arch_select.bzl", "requirement")
 
+# Leaf startup flags are also imported by standalone collective/kernel users.
+py_library(
+    name = "optimization_settings",
+    srcs = ["prefill_optimization.py", "mtp_optimization.py"],
+    visibility = ["//visibility:public"],
+)
+
 py_library(
     name = "utils",
     srcs = glob([
@@ -47,6 +54,7 @@ py_library(
     ]),
     deps = [
         ":utils",
+        ":optimization_settings",
         ":tile_kernels_mhc",
         "//rtp_llm/models_py/triton_kernels:triton_kernels",
         "//rtp_llm/models_py/distributed:deepep_wrapper",
@@ -153,6 +161,7 @@ py_library(
         "kernels/**/*.py",
     ]),
     data = ["kernels/cuda/prefill_cpu_ops.cc", "kernels/cuda/mtp_frontend.cu"],
+    deps = [":optimization_settings"],
 )
 
 py_library(

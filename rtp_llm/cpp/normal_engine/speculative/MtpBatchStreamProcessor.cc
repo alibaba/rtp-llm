@@ -587,19 +587,18 @@ absl::Status MtpBatchStreamProcessor::dispatchPrefill(const StreamGroups&      s
 }
 
 MtpDecodeDispatchSnapshot makeMtpDecodeDispatchSnapshot(const torch::Tensor& all_probs,
-                                                       const torch::Tensor& last_hidden_states,
-                                                       const torch::Tensor& accept_tokens,
-                                                       const torch::Tensor& accepted_indices) {
+                                                        const torch::Tensor& last_hidden_states,
+                                                        const torch::Tensor& accept_tokens,
+                                                        const torch::Tensor& accepted_indices) {
     RTP_LLM_CHECK(accept_tokens.defined() && accept_tokens.is_cuda() && accept_tokens.dim() == 2);
-    RTP_LLM_CHECK(accepted_indices.defined() && accepted_indices.dim() == 1
-                  && accepted_indices.scalar_type() == torch::kInt64
-                  && accepted_indices.device() == accept_tokens.device()
-                  && accepted_indices.numel() == accept_tokens.size(0));
+    RTP_LLM_CHECK(
+        accepted_indices.defined() && accepted_indices.dim() == 1 && accepted_indices.scalar_type() == torch::kInt64
+        && accepted_indices.device() == accept_tokens.device() && accepted_indices.numel() == accept_tokens.size(0));
     MtpDecodeDispatchSnapshot snapshot;
-    snapshot.all_probs = all_probs;
+    snapshot.all_probs          = all_probs;
     snapshot.last_hidden_states = last_hidden_states;
-    snapshot.target_tokens = accept_tokens.gather(1, accepted_indices.unsqueeze(1)).squeeze(1).to(torch::kInt32);
-    snapshot.ready = std::make_shared<torch::Event>(cuda_graph::makeGraphEvent());
+    snapshot.target_tokens      = accept_tokens.gather(1, accepted_indices.unsqueeze(1)).squeeze(1).to(torch::kInt32);
+    snapshot.ready              = std::make_shared<torch::Event>(cuda_graph::makeGraphEvent());
     snapshot.ready->record(cuda_graph::graphGetCurrentStream());
     return snapshot;
 }
@@ -613,8 +612,8 @@ absl::Status MtpBatchStreamProcessor::dispatchDecode(const StreamGroups&        
 absl::Status MtpBatchStreamProcessor::dispatchDecode(const StreamGroups&                          stream_groups,
                                                      const speculative::SpeculativeSamplerOutput& spec_decode_output,
                                                      const MergedOutput&                          draft_prefill_output,
-                                                     MtpTargetLogprobs target_logprobs,
-                                                     const MtpDecodeDispatchSnapshot* snapshot) const {
+                                                     MtpTargetLogprobs                            target_logprobs,
+                                                     const MtpDecodeDispatchSnapshot*             snapshot) const {
     RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
 
     std::vector<StreamSpecUpdateInfo> spec_update_infos;
@@ -776,7 +775,7 @@ void MtpBatchStreamProcessor::updateProposeTokens(const StreamGroups&           
 
 void MtpBatchStreamProcessor::prepareDecodeDraftModelInput(const StreamGroups& stream_groups,
                                                            GptModelInputs&     model_input,
-                                                           TensorHolder&       host_holder) {
+                                                           TensorHolder&       host_holder) const {
     const size_t batch_size = stream_groups.size();
     if (batch_size == 0) {
         model_input.combo_tokens      = emptyInt32OnCuda({0});
@@ -792,7 +791,7 @@ void MtpBatchStreamProcessor::prepareDecodeDraftModelInput(const StreamGroups& s
         std::vector<MtpNextInputRow> rows;
         rows.reserve(batch_size);
         torch::TensorOptions options;
-        bool supported = true;
+        bool                 supported = true;
         for (const auto& stream : stream_groups.allStreams()) {
             const auto& state = stream->getMtpAsyncDeviceState();
             const auto& batch = state.batch;
@@ -800,15 +799,13 @@ void MtpBatchStreamProcessor::prepareDecodeDraftModelInput(const StreamGroups& s
                 supported = false;
                 break;
             }
-            const auto& lengths = batch->next_lengths;
+            const auto& lengths   = batch->next_lengths;
             const auto& proposals = batch->propose_tokens;
-            if (!lengths.defined() || !proposals.defined() || !lengths.is_cuda()
-                || !proposals.is_cuda() || lengths.scalar_type() != torch::kInt32
-                || proposals.scalar_type() != torch::kInt32 || !lengths.is_contiguous()
-                || !proposals.is_contiguous() || lengths.dim() != 1 || proposals.dim() != 2
-                || proposals.size(1) <= 0 || state.batch_row >= lengths.size(0)
-                || state.batch_row >= proposals.size(0) || proposals.device() != lengths.device()
-                || (!rows.empty() && lengths.device() != options.device())) {
+            if (!lengths.defined() || !proposals.defined() || !lengths.is_cuda() || !proposals.is_cuda()
+                || lengths.scalar_type() != torch::kInt32 || proposals.scalar_type() != torch::kInt32
+                || !lengths.is_contiguous() || !proposals.is_contiguous() || lengths.dim() != 1 || proposals.dim() != 2
+                || proposals.size(1) <= 0 || state.batch_row >= lengths.size(0) || state.batch_row >= proposals.size(0)
+                || proposals.device() != lengths.device() || (!rows.empty() && lengths.device() != options.device())) {
                 supported = false;
                 break;
             }
@@ -817,11 +814,10 @@ void MtpBatchStreamProcessor::prepareDecodeDraftModelInput(const StreamGroups& s
                             lengths.data_ptr<int32_t>() + state.batch_row});
         }
         torch::Tensor packed;
-        if (supported && tryMtpPrepareNextInputs(rows, options, packed,
-                                                 cuda_graph::graphGetCurrentStream().stream())) {
-            model_input.combo_tokens = packed.select(0, 0);
-            model_input.sequence_lengths = packed.select(0, 1);
-            model_input.prefix_lengths = packed.select(0, 2);
+        if (supported && tryMtpPrepareNextInputs(rows, options, packed, cuda_graph::graphGetCurrentStream().stream())) {
+            model_input.combo_tokens      = packed.select(0, 0);
+            model_input.sequence_lengths  = packed.select(0, 1);
+            model_input.prefix_lengths    = packed.select(0, 2);
             model_input.lm_output_indexes = packed.select(0, 3);
             // Preserve input_lengths from the scheduler; do not assume every
             // caller uses the same empty/decode convention.
@@ -1311,12 +1307,13 @@ void MtpBatchStreamProcessor::prepareDecodeSpecUpdateInfo(
     const MergedOutput&                          draft_prefill_output,
     MtpTargetLogprobs&                           target_logprobs,
     std::vector<StreamSpecUpdateInfo>&           spec_update_infos,
-    const MtpDecodeDispatchSnapshot*            snapshot) const {
+    const MtpDecodeDispatchSnapshot*             snapshot) const {
     if (snapshot) {
         const auto batch_size = static_cast<int64_t>(stream_groups.allStreams().size());
         RTP_LLM_CHECK(snapshot->ready != nullptr);
-        RTP_LLM_CHECK(snapshot->all_probs.defined() && snapshot->all_probs.is_cuda()
-                      && snapshot->all_probs.dim() == 2 && snapshot->all_probs.size(0) == batch_size);
+        RTP_LLM_CHECK((snapshot->compact_point_mass && !snapshot->all_probs.defined())
+                      || (snapshot->all_probs.defined() && snapshot->all_probs.is_cuda()
+                          && snapshot->all_probs.dim() == 2 && snapshot->all_probs.size(0) == batch_size));
         RTP_LLM_CHECK(snapshot->target_tokens.defined() && snapshot->target_tokens.is_cuda()
                       && snapshot->target_tokens.dim() == 1 && snapshot->target_tokens.size(0) == batch_size
                       && snapshot->target_tokens.scalar_type() == torch::kInt32);
@@ -1360,7 +1357,9 @@ void MtpBatchStreamProcessor::prepareDecodeSpecUpdateInfo(
         }
         torch::Tensor propose_all_probs;
         if (snapshot) {
-            propose_all_probs = snapshot->all_probs.narrow(0, batch_idx_out, next_batch_size);
+            if (snapshot->all_probs.defined()) {
+                propose_all_probs = snapshot->all_probs.narrow(0, batch_idx_out, next_batch_size);
+            }
         } else if (draft_sampler_output.all_probs.defined()) {
             propose_all_probs =
                 draft_sampler_output.all_probs.narrow(0, batch_idx_out, next_batch_size).to(torch::kCUDA).clone();
@@ -1373,8 +1372,9 @@ void MtpBatchStreamProcessor::prepareDecodeSpecUpdateInfo(
 
         torch::Tensor last_hidden_states;
         if (propose_step_ > 1) {
-            last_hidden_states = snapshot ? snapshot->last_hidden_states.narrow(0, batch_idx_out, 1) :
-                cloneHiddenSlice(draft_model_output.all_hidden_states, token_offset + cur_accept_len - 1, 1);
+            last_hidden_states =
+                snapshot ? snapshot->last_hidden_states.narrow(0, batch_idx_out, 1) :
+                           cloneHiddenSlice(draft_model_output.all_hidden_states, token_offset + cur_accept_len - 1, 1);
         }
 
         torch::Tensor accept_tokens_tensor =

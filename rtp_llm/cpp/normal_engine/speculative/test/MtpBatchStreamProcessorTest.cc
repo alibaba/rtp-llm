@@ -23,6 +23,7 @@
 #include "rtp_llm/cpp/testing/TestBase.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/config/StaticConfig.h"
+#include "rtp_llm/cpp/utils/MtpFusion.h"
 
 using namespace std;
 
@@ -169,7 +170,8 @@ TEST_F(MtpBatchStreamProcessorTest, testDispatchSnapshotBatchTargetGatherMatches
                 SCOPED_TRACE(std::to_string(batch) + "/" + std::to_string(width));
                 // Transpose supplies a noncontiguous accepted-token matrix.
                 auto tokens = torch::arange(batch * width, torch::TensorOptions().dtype(dtype).device(torch::kCUDA))
-                                  .reshape({width, batch}).transpose(0, 1);
+                                  .reshape({width, batch})
+                                  .transpose(0, 1);
                 auto indices = torch::arange(batch, torch::TensorOptions().dtype(torch::kInt64).device(torch::kCUDA))
                                    .remainder(width);
                 auto snapshot = makeMtpDecodeDispatchSnapshot({}, {}, tokens, indices);
@@ -194,51 +196,57 @@ TEST_F(MtpBatchStreamProcessorTest, testDispatchSnapshotMatchesLegacyAndOwnsRoun
                 SCOPED_TRACE(std::to_string(propose_step) + "/" + std::to_string(batch));
                 ModelConfig model_config;
                 model_config.max_seq_len = 2048;
-                model_config.vocab_size = 128;
-                model_config.num_layers = 1;
-                RuntimeConfig runtime_config;
+                model_config.vocab_size  = 128;
+                model_config.num_layers  = 1;
+                RuntimeConfig   runtime_config;
                 ResourceContext resource_context;
-                resource_context.cache_manager = std::make_shared<KVCacheManager>(test::makeSimpleMhaCacheConfig(
-                    1, 100, 2, rtp_llm::TYPE_INT8, 1, 64));
+                resource_context.cache_manager = std::make_shared<KVCacheManager>(
+                    test::makeSimpleMhaCacheConfig(1, 100, 2, rtp_llm::TYPE_INT8, 1, 64));
                 std::list<GenerateStreamPtr> streams;
                 for (int i = 0; i < batch; ++i) {
                     // Reverse insertion: batch row is not a request's creation order.
                     streams.push_front(createContextStream(model_config, runtime_config, resource_context, {1}, i + 1));
                 }
-                StreamGroups groups(streams);
+                StreamGroups               groups(streams);
                 SpeculativeExecutionConfig sp_config;
                 sp_config.gen_num_per_cycle = propose_step;
-                TestableMtpBatchStreamProcessor processor(
-                    model_config, {}, {}, {}, sp_config, false);
-                const int width = propose_step + 1;
+                TestableMtpBatchStreamProcessor       processor(model_config, {}, {}, {}, sp_config, false);
+                const int                             width = propose_step + 1;
                 speculative::SpeculativeSamplerOutput spec;
                 spec.accept_len_cpu = torch::arange(batch, torch::kInt32).remainder(width) + 1;
-                spec.accept_tokens_cpu = torch::arange(batch * width, torch::kInt32).remainder(128).reshape({batch, width});
-                spec.accept_len = spec.accept_len_cpu.to(torch::kCUDA);
+                spec.accept_tokens_cpu =
+                    torch::arange(batch * width, torch::kInt32).remainder(128).reshape({batch, width});
+                spec.accept_len    = spec.accept_len_cpu.to(torch::kCUDA);
                 spec.accept_tokens = spec.accept_tokens_cpu.to(torch::kCUDA);
                 spec.transfer_done_event->record(cuda_graph::graphGetCurrentStream());
                 MergedOutput draft;
-                draft.sampler_output.all_probs = torch::arange(batch * 128, torch::kFloat32)
-                                                     .reshape({128, batch}).transpose(0, 1).to(torch::kCUDA);
+                draft.sampler_output.all_probs =
+                    torch::arange(batch * 128, torch::kFloat32).reshape({128, batch}).transpose(0, 1).to(torch::kCUDA);
                 draft.model_output.all_hidden_states = torch::arange(batch * width * 8, torch::kFloat32)
-                                                           .reshape({batch * width, 8}).to(hidden_dtype).to(torch::kCUDA);
-                MtpTargetLogprobs logprobs;
+                                                           .reshape({batch * width, 8})
+                                                           .to(hidden_dtype)
+                                                           .to(torch::kCUDA);
+                MtpTargetLogprobs                 logprobs;
                 std::vector<StreamSpecUpdateInfo> expected;
                 processor.prepareDecodeSpecUpdateInfo(groups, spec, draft, logprobs, expected);
                 for (auto& info : expected) {
                     info.target_token_gpu = info.target_token_gpu.clone();
                 }
-                auto indices = (spec.accept_len - 1).to(torch::kInt64);
+                auto          indices = (spec.accept_len - 1).to(torch::kInt64);
                 torch::Tensor hidden;
                 if (propose_step > 1) {
                     hidden = draft.model_output.all_hidden_states.reshape({batch, width, 8})
-                                 .gather(1, indices.reshape({batch, 1, 1}).expand({batch, 1, 8})).squeeze(1);
+                                 .gather(1, indices.reshape({batch, 1, 1}).expand({batch, 1, 8}))
+                                 .squeeze(1);
                 }
                 auto snapshot = makeMtpDecodeDispatchSnapshot(
                     draft.sampler_output.all_probs.clone(), hidden, spec.accept_tokens, indices);
-                auto owned_probs = snapshot.all_probs;
-                auto owned_hidden = snapshot.last_hidden_states;
-                auto owned_target = snapshot.target_tokens;
+                auto owned_probs                    = snapshot.all_probs;
+                auto owned_hidden                   = snapshot.last_hidden_states;
+                auto owned_target                   = snapshot.target_tokens;
+                auto compact_snapshot               = snapshot;
+                compact_snapshot.all_probs          = torch::Tensor();
+                compact_snapshot.compact_point_mass = true;
                 // Both graph-owned outputs and mutable stream state may change
                 // before bookkeeping. The captured round must remain untouched.
                 draft.sampler_output.all_probs.fill_(-100);
@@ -251,6 +259,17 @@ TEST_F(MtpBatchStreamProcessorTest, testDispatchSnapshotMatchesLegacyAndOwnsRoun
                 }
                 std::vector<StreamSpecUpdateInfo> actual;
                 processor.prepareDecodeSpecUpdateInfo(groups, spec, draft, logprobs, actual, &snapshot);
+                std::vector<StreamSpecUpdateInfo> compact_actual;
+                processor.prepareDecodeSpecUpdateInfo(groups, spec, draft, logprobs, compact_actual, &compact_snapshot);
+                ASSERT_EQ(compact_actual.size(), expected.size());
+                for (size_t i = 0; i < compact_actual.size(); ++i) {
+                    EXPECT_FALSE(compact_actual[i].draft_token_probs.defined());
+                    EXPECT_TRUE(torch::equal(compact_actual[i].target_token_gpu, expected[i].target_token_gpu));
+                    if (propose_step > 1) {
+                        EXPECT_TRUE(
+                            torch::equal(compact_actual[i].draft_hidden_states, expected[i].draft_hidden_states));
+                    }
+                }
                 snapshot = {};  // Views in update_info, not the closure, keep storage alive.
                 ASSERT_EQ(actual.size(), expected.size());
                 for (int i = 0; i < batch; ++i) {
@@ -269,10 +288,10 @@ TEST_F(MtpBatchStreamProcessorTest, testDispatchSnapshotMatchesLegacyAndOwnsRoun
                 }
                 // Release every batch owner, not just the worker payload. Only
                 // the per-request update views now keep the allocations alive.
-                owned_probs = torch::Tensor();
+                owned_probs  = torch::Tensor();
                 owned_hidden = torch::Tensor();
                 owned_target = torch::Tensor();
-                hidden = torch::Tensor();
+                hidden       = torch::Tensor();
                 for (int i = 0; i < batch; ++i) {
                     EXPECT_TRUE(torch::equal(actual[i].draft_token_probs, expected[i].draft_token_probs));
                     EXPECT_TRUE(torch::equal(actual[i].target_token_gpu, expected[i].target_token_gpu));
@@ -288,49 +307,50 @@ TEST_F(MtpBatchStreamProcessorTest, testDispatchSnapshotMatchesLegacyAndOwnsRoun
 TEST_F(MtpBatchStreamProcessorTest, testDispatchSnapshotWaitsForProducerEvent) {
     ModelConfig model_config;
     model_config.max_seq_len = 2048;
-    model_config.vocab_size = 4;
-    model_config.num_layers = 1;
-    RuntimeConfig runtime_config;
+    model_config.vocab_size  = 4;
+    model_config.num_layers  = 1;
+    RuntimeConfig   runtime_config;
     ResourceContext resource_context;
-    resource_context.cache_manager = std::make_shared<KVCacheManager>(test::makeSimpleMhaCacheConfig(
-        1, 10, 2, rtp_llm::TYPE_INT8, 1, 64));
-    auto stream = createContextStream(model_config, runtime_config, resource_context, {1}, 1);
-    StreamGroups groups({stream});
+    resource_context.cache_manager =
+        std::make_shared<KVCacheManager>(test::makeSimpleMhaCacheConfig(1, 10, 2, rtp_llm::TYPE_INT8, 1, 64));
+    auto                       stream = createContextStream(model_config, runtime_config, resource_context, {1}, 1);
+    StreamGroups               groups({stream});
     SpeculativeExecutionConfig sp_config;
     sp_config.gen_num_per_cycle = 3;
-    TestableMtpBatchStreamProcessor processor(model_config, {}, {}, {}, sp_config, false);
+    TestableMtpBatchStreamProcessor       processor(model_config, {}, {}, {}, sp_config, false);
     speculative::SpeculativeSamplerOutput spec;
-    spec.accept_len_cpu = torch::tensor({2}, torch::kInt32);
+    spec.accept_len_cpu    = torch::tensor({2}, torch::kInt32);
     spec.accept_tokens_cpu = torch::tensor({{1, 3, 0, 0}}, torch::kInt32);
     // Already complete: acceptance readiness must not accidentally mask a
     // missing dependency on the LATER snapshot-ready event.
     spec.transfer_done_event->record(cuda_graph::graphGetCurrentStream());
     spec.transfer_done_event->synchronize();
-    auto producer = c10::cuda::getStreamFromPool();
+    auto                      producer = c10::cuda::getStreamFromPool();
     MtpDecodeDispatchSnapshot snapshot;
     {
         c10::cuda::CUDAStreamGuard guard(producer);
-        auto options = torch::TensorOptions().device(torch::kCUDA);
-        auto probs = torch::zeros({1, 4}, options.dtype(torch::kFloat32));
-        auto hidden = torch::zeros({1, 8}, options.dtype(torch::kBFloat16));
-        auto tokens = torch::zeros({1, 4}, options.dtype(torch::kInt32));
-        auto indices = torch::ones({1}, options.dtype(torch::kInt64));
+        auto                       options = torch::TensorOptions().device(torch::kCUDA);
+        auto                       probs   = torch::zeros({1, 4}, options.dtype(torch::kFloat32));
+        auto                       hidden  = torch::zeros({1, 8}, options.dtype(torch::kBFloat16));
+        auto                       tokens  = torch::zeros({1, 4}, options.dtype(torch::kInt32));
+        auto                       indices = torch::ones({1}, options.dtype(torch::kInt64));
         // Warm the producer's allocator/kernel path before introducing delay,
         // so a first cudaMalloc cannot hide a missing cross-stream dependency.
         auto warm = makeMtpDecodeDispatchSnapshot(probs, hidden, tokens, indices);
         warm.ready->synchronize();
         warm = {};
-        ASSERT_EQ(cudaLaunchHostFunc(producer.stream(), [](void*) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
-        }, nullptr), cudaSuccess);
+        ASSERT_EQ(
+            cudaLaunchHostFunc(
+                producer.stream(), [](void*) { std::this_thread::sleep_for(std::chrono::milliseconds(100)); }, nullptr),
+            cudaSuccess);
         probs.fill_(0.25);
         hidden.fill_(7.0);
         tokens.fill_(3);
         snapshot = makeMtpDecodeDispatchSnapshot(probs, hidden, tokens, indices);
         ASSERT_EQ(cudaStreamQuery(producer.stream()), cudaErrorNotReady);
     }
-    MergedOutput draft;  // No source output required on the optimized worker path.
-    MtpTargetLogprobs logprobs;
+    MergedOutput                      draft;  // No source output required on the optimized worker path.
+    MtpTargetLogprobs                 logprobs;
     std::vector<StreamSpecUpdateInfo> infos;
     processor.prepareDecodeSpecUpdateInfo(groups, spec, draft, logprobs, infos, &snapshot);
     ASSERT_EQ(infos.size(), 1);
@@ -339,13 +359,17 @@ TEST_F(MtpBatchStreamProcessorTest, testDispatchSnapshotWaitsForProducerEvent) {
     EXPECT_EQ(infos[0].target_token_gpu.item<int32_t>(), 3);
     struct ExceptionModeGuard {
         bool saved = StaticConfig::user_ft_core_dump_on_exception;
-        ExceptionModeGuard() { StaticConfig::user_ft_core_dump_on_exception = false; }
-        ~ExceptionModeGuard() { StaticConfig::user_ft_core_dump_on_exception = saved; }
+        ExceptionModeGuard() {
+            StaticConfig::user_ft_core_dump_on_exception = false;
+        }
+        ~ExceptionModeGuard() {
+            StaticConfig::user_ft_core_dump_on_exception = saved;
+        }
     } exception_mode;
     auto invalid = snapshot;
     invalid.ready.reset();
     EXPECT_ANY_THROW(processor.prepareDecodeSpecUpdateInfo(groups, spec, draft, logprobs, infos, &invalid));
-    invalid = snapshot;
+    invalid           = snapshot;
     invalid.all_probs = snapshot.all_probs.narrow(0, 0, 0);
     EXPECT_ANY_THROW(processor.prepareDecodeSpecUpdateInfo(groups, spec, draft, logprobs, infos, &invalid));
 }

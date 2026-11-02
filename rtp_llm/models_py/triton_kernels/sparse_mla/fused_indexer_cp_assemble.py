@@ -78,16 +78,20 @@ def _pack_padded_k_scale(k, scale, rows, src_for_padded=None):
     width = k.size(1) + scale.size(1)
     out = torch.empty((rows, width), dtype=torch.uint8, device=k.device)
     if rows:
-        _pack_padded_k_scale_kernel[(rows,)](
-            k.view(torch.uint8),
-            scale.view(torch.uint8),
-            src_for_padded,
-            out,
-            k.size(1),
-            scale.size(1),
-            k.size(0),
-            src_for_padded is not None,
-            triton.next_power_of_2(width),
+        _cpu_launch.launch(
+            _pack_padded_k_scale_kernel,
+            (rows,),
+            (
+                k.view(torch.uint8),
+                scale.view(torch.uint8),
+                src_for_padded,
+                out,
+                k.size(1),
+                scale.size(1),
+                k.size(0),
+                src_for_padded is not None,
+                triton.next_power_of_2(width),
+            ),
         )
     return out
 
@@ -224,32 +228,40 @@ def _restore_packed_indexer_k(packed, out_k, out_s, indices):
         and k_cols == 128
         and s_cols in (1, 4)
     ):
-        _gather_restore_tiled_kernel[(triton.cdiv(rows, 16),)](
-            packed,
-            out_k,
-            out_s,
-            indices,
-            rows,
-            k_cols + s_cols,
-            k_cols,
-            s_cols,
-            block_k,
-            block_s,
-            16,
+        _cpu_launch.launch(
+            _gather_restore_tiled_kernel,
+            (triton.cdiv(rows, 16),),
+            (
+                packed,
+                out_k,
+                out_s,
+                indices,
+                rows,
+                k_cols + s_cols,
+                k_cols,
+                s_cols,
+                block_k,
+                block_s,
+                16,
+            ),
             num_warps=4,
         )
     else:
-        _gather_restore_fused_kernel[(rows,)](
-            packed,
-            out_k,
-            out_s,
-            indices,
-            k_cols + s_cols,
-            k_cols,
-            s_cols,
-            rows,
-            block_k,
-            block_s,
+        _cpu_launch.launch(
+            _gather_restore_fused_kernel,
+            (rows,),
+            (
+                packed,
+                out_k,
+                out_s,
+                indices,
+                k_cols + s_cols,
+                k_cols,
+                s_cols,
+                rows,
+                block_k,
+                block_s,
+            ),
         )
 
 
@@ -432,17 +444,21 @@ def fused_copy_and_assemble_indexer_k(
             local_s = torch.empty(
                 (total_local_T, scale_dim), dtype=actual_k_scale.dtype, device=device
             )
-            _fused_zero_scatter_kernel[(total_local_T,)](
-                actual_k_quant.view(torch.uint8),
-                actual_k_scale,
-                local_k.view(torch.uint8),
-                local_s,
-                src_for_padded,
-                head_dim,
-                scale_dim,
-                total_local_T,
-                BLOCK_K,
-                BLOCK_S,
+            _cpu_launch.launch(
+                _fused_zero_scatter_kernel,
+                (total_local_T,),
+                (
+                    actual_k_quant.view(torch.uint8),
+                    actual_k_scale,
+                    local_k.view(torch.uint8),
+                    local_s,
+                    src_for_padded,
+                    head_dim,
+                    scale_dim,
+                    total_local_T,
+                    BLOCK_K,
+                    BLOCK_S,
+                ),
             )
         else:
             local_k = torch.zeros(
@@ -475,17 +491,21 @@ def fused_copy_and_assemble_indexer_k(
             gathered_k, out_k_quant.view(torch.uint8), out_k_scale, restore_indices
         )
     else:
-        _gather_restore_separate_kernel[(chunk_T,)](
-            gathered_k.view(torch.uint8),
-            gathered_s,
-            out_k_quant.view(torch.uint8),
-            out_k_scale,
-            restore_indices,
-            head_dim,
-            scale_dim,
-            chunk_T,
-            BLOCK_K,
-            BLOCK_S,
+        _cpu_launch.launch(
+            _gather_restore_separate_kernel,
+            (chunk_T,),
+            (
+                gathered_k.view(torch.uint8),
+                gathered_s,
+                out_k_quant.view(torch.uint8),
+                out_k_scale,
+                restore_indices,
+                head_dim,
+                scale_dim,
+                chunk_T,
+                BLOCK_K,
+                BLOCK_S,
+            ),
         )
 
 
@@ -540,17 +560,21 @@ if not PREFILL_OPTIMIZATIONS_ENABLED:
             local_s = torch.empty(
                 (total_local_T, scale_dim), dtype=actual_k_scale.dtype, device=device
             )
-            _fused_zero_scatter_kernel[(total_local_T,)](
-                actual_k_quant.view(torch.uint8),
-                actual_k_scale,
-                local_k.view(torch.uint8),
-                local_s,
-                src_for_padded,
-                head_dim,
-                scale_dim,
-                total_local_T,
-                BLOCK_K,
-                BLOCK_S,
+            _cpu_launch.launch(
+                _fused_zero_scatter_kernel,
+                (total_local_T,),
+                (
+                    actual_k_quant.view(torch.uint8),
+                    actual_k_scale,
+                    local_k.view(torch.uint8),
+                    local_s,
+                    src_for_padded,
+                    head_dim,
+                    scale_dim,
+                    total_local_T,
+                    BLOCK_K,
+                    BLOCK_S,
+                ),
             )
         else:
             local_k = torch.zeros(
@@ -579,30 +603,38 @@ if not PREFILL_OPTIMIZATIONS_ENABLED:
         # Step 3: keep the existing fused local restore in both communication modes.
         restore_indices = plan.restore_indices
         if gathered_s is None:
-            _gather_restore_fused_kernel[(chunk_T,)](
-                gathered_k,
-                out_k_quant.view(torch.uint8),
-                out_k_scale,
-                restore_indices,
-                q_cols + s_cols,
-                head_dim,
-                scale_dim,
-                chunk_T,
-                BLOCK_K,
-                BLOCK_S,
+            _cpu_launch.launch(
+                _gather_restore_fused_kernel,
+                (chunk_T,),
+                (
+                    gathered_k,
+                    out_k_quant.view(torch.uint8),
+                    out_k_scale,
+                    restore_indices,
+                    q_cols + s_cols,
+                    head_dim,
+                    scale_dim,
+                    chunk_T,
+                    BLOCK_K,
+                    BLOCK_S,
+                ),
             )
         else:
-            _gather_restore_separate_kernel[(chunk_T,)](
-                gathered_k.view(torch.uint8),
-                gathered_s,
-                out_k_quant.view(torch.uint8),
-                out_k_scale,
-                restore_indices,
-                head_dim,
-                scale_dim,
-                chunk_T,
-                BLOCK_K,
-                BLOCK_S,
+            _cpu_launch.launch(
+                _gather_restore_separate_kernel,
+                (chunk_T,),
+                (
+                    gathered_k.view(torch.uint8),
+                    gathered_s,
+                    out_k_quant.view(torch.uint8),
+                    out_k_scale,
+                    restore_indices,
+                    head_dim,
+                    scale_dim,
+                    chunk_T,
+                    BLOCK_K,
+                    BLOCK_S,
+                ),
             )
 
     fused_copy_and_assemble_indexer_k = _baseline_fused_copy_and_assemble_indexer_k

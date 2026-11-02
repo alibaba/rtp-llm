@@ -3983,8 +3983,11 @@ absl::Status MtpExecutor::dispatchDecodeAsync(const StreamGroups&               
     // The batch device-state layout has one row per request. Preserve the
     // legacy worker for nonstandard/multi-output callers instead of imposing
     // a new restriction on those dispatch paths.
-    const bool reuse_dispatch_snapshot = draft_probs_all.defined() && draft_probs_all.is_cuda()
-        && draft_probs_all.dim() == 2 && draft_probs_all.size(0) == batch_size
+    dispatch_snapshot.compact_point_mass = fast_topk_sampler_->compactPointMassEnabled() && !draft_probs_all.defined();
+    const bool reuse_dispatch_snapshot =
+        (dispatch_snapshot.compact_point_mass
+         || (draft_probs_all.defined() && draft_probs_all.is_cuda()
+             && draft_probs_all.dim() == 2 && draft_probs_all.size(0) == batch_size))
         && (propose_step_ <= 1 || (last_hidden_all.defined() && last_hidden_all.is_cuda()))
         && std::all_of(all_streams.begin(), all_streams.end(), [](const auto& stream) {
             return stream->nextBatchSize() == 1;

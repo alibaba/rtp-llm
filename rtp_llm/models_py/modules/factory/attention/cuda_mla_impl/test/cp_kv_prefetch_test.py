@@ -112,6 +112,32 @@ class PrefixPlanTest(unittest.TestCase):
                 owner,
             )
 
+    def test_native_and_python_plan_have_identical_complete_metadata(self):
+        from rtp_llm.models_py.kernels.cuda import prefill_cpu_ops
+
+        library = prefill_cpu_ops.native()
+        self.assertIsNotNone(library, "native planner must be exercised")
+        for prefixes, lengths, size, owner in [
+            ([1, 511, 4097, 0], [6, 1025, 13, 0], 8, 512),
+            ([0, 64, 513], [257, 0, 1], 4, 64),
+            ([0, 0], [1, 0], 4, 512),
+            ([13, 0], [0, 0], 3, 7),
+        ]:
+            for rank in range(size):
+                with self.subTest(prefixes=prefixes, rank=rank):
+                    with patch.object(prefill_cpu_ops, "NATIVE_PLAN", False):
+                        reference = kv.prefix_plan(prefixes, lengths, size, rank, owner)
+                    with patch.object(prefill_cpu_ops, "NATIVE_PLAN", True):
+                        actual = kv.prefix_plan(prefixes, lengths, size, rank, owner)
+                    self.assertEqual(actual.keys(), reference.keys())
+                    for key, value in reference.items():
+                        if isinstance(value, torch.Tensor):
+                            self.assertEqual(actual[key].dtype, value.dtype, key)
+                            self.assertEqual(actual[key].shape, value.shape, key)
+                            self.assertTrue(torch.equal(actual[key], value), key)
+                        else:
+                            self.assertEqual(actual[key], value, key)
+
     def test_invalid_plan_rejected(self):
         for args in [
             ([], [], 1, 0, 1),
@@ -197,7 +223,12 @@ class PipelineProtocolTest(unittest.TestCase):
         p = self.pipeline
         self.assertNotEqual(p.buffers[0].data_ptr(), p.buffers[1].data_ptr())
         p.prefetch(1)
-        self.assertEqual(self.producer.wait_stream.call_count, 2)
+        self.assertEqual(
+            self.producer.wait_stream.call_count, 1 if p.reuse_events else 2
+        )
+        if p.reuse_events:
+            p.compute_ready.record.assert_called_once_with(self.compute)
+            self.producer.wait_event.assert_called_once_with(p.compute_ready)
         self.producer.wait_stream.assert_called_with(self.compute)
         self.compute.wait_event.assert_not_called()
         self.compute.wait_stream.assert_not_called()
@@ -206,8 +237,12 @@ class PipelineProtocolTest(unittest.TestCase):
         self.compute.wait_event.assert_called_once_with(first_ready)
         p.release(1)
         p.prefetch(3)
-        self.producer.wait_event.assert_called_once_with(p.free[1])
-        self.assertIsNot(p.ready[1], first_ready)
+        self.assertIs(self.producer.wait_event.call_args.args[0], p.free[1])
+        self.assertEqual(p.ready[1].record.call_count, 2 if p.reuse_events else 1)
+        if p.reuse_events:
+            self.assertIs(p.ready[1], first_ready)
+        else:
+            self.assertIsNot(p.ready[1], first_ready)
         p.wait_before_moe()
         self.assertIs(self.compute.wait_event.call_args.args[0], p.ready[1])
         self.assertEqual(self.gather.call_count, 2)
@@ -226,7 +261,10 @@ class PipelineProtocolTest(unittest.TestCase):
             ready,
         )
         self.pipeline.prefetch(1)
-        self.producer.wait_event.assert_called_once_with(ready)
+        self.assertIs(self.producer.wait_event.call_args.args[0], ready)
+        self.assertEqual(
+            self.producer.wait_event.call_count, 2 if self.pipeline.reuse_events else 1
+        )
         self.compute.wait_event.assert_not_called()
 
     def test_next_history_is_submitted_before_current_q_and_consumption(self):
@@ -260,7 +298,11 @@ class PipelineProtocolTest(unittest.TestCase):
             kv_cache_base=torch.zeros(1, 64, 656, dtype=torch.uint8)
         )
         fused, ready = p.prepare(1, target)
-        self.assertIsNot(ready, history_ready)
+        if p.reuse_events:
+            self.assertIs(ready, history_ready)
+            self.assertEqual(ready.record.call_count, 2)
+        else:
+            self.assertIsNot(ready, history_ready)
         self.assertIs(ready, p.ready[1])
         self.assertIs(p.latest_ready, p.ready[2 % 2])
         self.assertEqual(len(calls), 2)
@@ -389,6 +431,14 @@ class ImmutablePlanUploadTest(unittest.TestCase):
         consumer.synchronize()
         for result, reference in zip(results, expected):
             self.assertTrue(torch.equal(result.cpu(), reference))
+
+
+class PipelineProtocolWithoutFusionTest(PipelineProtocolTest):
+    def setUp(self):
+        toggle = patch.object(kv._prefill_optimization, "ENABLED", False)
+        toggle.start()
+        self.addCleanup(toggle.stop)
+        super().setUp()
 
 
 if __name__ == "__main__":

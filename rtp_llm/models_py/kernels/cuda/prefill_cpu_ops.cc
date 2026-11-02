@@ -306,9 +306,11 @@ py::dict prefixPlan(const std::vector<int64_t>& prefixes,
     }
     auto restore = at::empty({history + total}, i64);
     auto scatter = at::empty({actual}, i64), dest = at::empty({total}, i64);
-    auto new_restore     = at::empty({total}, i64);
-    auto history_lengths = at::empty({static_cast<int64_t>(prefixes.size())}, i32);
-    auto history_starts  = at::empty_like(history_lengths);
+    auto new_restore            = at::empty({total}, i64);
+    auto history_lengths        = at::empty({static_cast<int64_t>(prefixes.size())}, i32);
+    auto history_starts         = at::empty_like(history_lengths);
+    auto history_padded_lengths = at::empty_like(history_lengths);
+    auto history_padded_starts  = at::empty_like(history_lengths);
     auto rp = restore.data_ptr<int64_t>(), sp = scatter.data_ptr<int64_t>(), dp = dest.data_ptr<int64_t>();
     std::fill(rp, rp + history + total, int64_t(0));
     auto                              nr = new_restore.data_ptr<int64_t>();
@@ -318,6 +320,9 @@ py::dict prefixPlan(const std::vector<int64_t>& prefixes,
         auto p = prefixes[i], q = lengths[i];
         history_lengths.data_ptr<int32_t>()[i] = counts[i];
         history_starts.data_ptr<int32_t>()[i]  = act_start;
+        TORCH_CHECK(pads[i] <= INT32_MAX && pad_start <= INT32_MAX);
+        history_padded_lengths.data_ptr<int32_t>()[i] = pads[i];
+        history_padded_starts.data_ptr<int32_t>()[i]  = pad_start;
         for (int64_t block = 0; block * owner < p; ++block) {
             auto count = std::min(owner, p - block * owner);
             auto start = (block % size) * padded + pad_start + block / size * owner;
@@ -343,16 +348,18 @@ py::dict prefixPlan(const std::vector<int64_t>& prefixes,
     auto local_rows = at::empty({static_cast<int64_t>(rows[rank].size())}, i64);
     std::copy(rows[rank].begin(), rows[rank].end(), local_rows.data_ptr<int64_t>());
     py::dict result;
-    result["history_lengths"] = history_lengths;
-    result["history_starts"]  = history_starts;
-    result["history_scatter"] = scatter;
-    result["history_restore"] = restore;
-    result["new_local_rows"]  = local_rows;
-    result["new_restore"]     = new_restore;
-    result["new_dest"]        = dest;
-    result["history_padded"]  = padded;
-    result["history_actual"]  = actual;
-    result["new_max"]         = new_max;
+    result["history_lengths"]        = history_lengths;
+    result["history_starts"]         = history_starts;
+    result["history_padded_lengths"] = history_padded_lengths;
+    result["history_padded_starts"]  = history_padded_starts;
+    result["history_scatter"]        = scatter;
+    result["history_restore"]        = restore;
+    result["new_local_rows"]         = local_rows;
+    result["new_restore"]            = new_restore;
+    result["new_dest"]               = dest;
+    result["history_padded"]         = padded;
+    result["history_actual"]         = actual;
+    result["new_max"]                = new_max;
     return result;
 }
 
