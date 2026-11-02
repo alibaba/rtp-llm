@@ -33,7 +33,7 @@ for variant in ['before', 'after']:
         for line in log.read_text().splitlines():
             m = re.fullmatch(r'(\w+) ns=([\d.]+) cpu=([\d.]+) bytes=([\d.]+) checksum=([\d.]+)', line)
             if m: samples.setdefault(m[1], []).append(list(map(float, m.groups()[1:])))
-    assert len(samples) == 6 and all(len(v) == 9 for v in samples.values())
+    assert len(samples) == 7 and all(len(v) == 9 for v in samples.values())
     results[variant] = {k: dict(zip(['ns','cpu','bytes','checksum'], map(statistics.median, zip(*v)))) for k,v in samples.items()}
 for name, before in results['before'].items():
     after = results['after'][name]
