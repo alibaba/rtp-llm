@@ -843,10 +843,11 @@ TEST(BlockTreeCacheMetricsTest, FrozenSnapshotsTrackReferencesAcrossAllTiers) {
         auto block = pool->malloc();
         ASSERT_TRUE(block.has_value());
         pool->incTreeRef(*block, BlockTreeRefType::STORE);
+        // Two overlapping holders: distinct-block metrics must still count one.
         pool->freezeBlock(*block);
         pool->freezeBlock(*block);
         pool->decTreeRef(*block, BlockTreeRefType::STORE);
-        EXPECT_EQ(pool->treeRefCount(*block), 1u);
+        EXPECT_EQ(pool->treeRefCount(*block), 2u);
         frozen_blocks.emplace_back(pool, *block);
     }
     const auto after = reporter.collectPoolMetricsSnapshots(groups);
@@ -856,6 +857,14 @@ TEST(BlockTreeCacheMetricsTest, FrozenSnapshotsTrackReferencesAcrossAllTiers) {
         EXPECT_EQ(snapshot.store_ref_blocks, 0u);
         EXPECT_EQ(snapshot.load_ref_blocks, 0u);
         EXPECT_EQ(snapshot.eviction_target_ref_blocks, 0u);
+    }
+    for (const auto& [pool, block] : frozen_blocks) {
+        pool->unfreezeBlock(block);
+        EXPECT_TRUE(pool->isFrozen(block));
+        EXPECT_TRUE(pool->isAllocated(block));
+    }
+    for (const auto& snapshot : reporter.collectPoolMetricsSnapshots(groups)) {
+        EXPECT_EQ(snapshot.frozen_ref_blocks, 1u);
     }
     for (const auto& [pool, block] : frozen_blocks) {
         pool->unfreezeBlock(block);

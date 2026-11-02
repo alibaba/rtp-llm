@@ -359,13 +359,14 @@ TEST(IBlockPoolTest, FrozenReferencesCountHoldsAndTrackDistinctBlocks) {
 
     EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::FROZEN), 0u);
     EXPECT_FALSE(pool->isFrozen(load_block));
+    // Two tasks freeze the load block independently; each holds one reference.
     pool->freezeBlock(load_block);
     pool->freezeBlock(load_block);
     pool->incTreeRef(*blocks, BlockTreeRefType::FROZEN);
     EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::FROZEN), 2u);
     EXPECT_TRUE(pool->isFrozen(load_block));
     EXPECT_TRUE(pool->isFrozen(eviction_block));
-    EXPECT_EQ(pool->treeRefCount(load_block), 4u);
+    EXPECT_EQ(pool->treeRefCount(load_block), 5u);
     EXPECT_EQ(pool->treeRefCount(eviction_block), 3u);
 
     // Ordinary reference releases must not remove the frozen hold.
@@ -374,7 +375,7 @@ TEST(IBlockPoolTest, FrozenReferencesCountHoldsAndTrackDistinctBlocks) {
     pool->decTreeRef(load_block, BlockTreeRefType::LOAD);
     pool->decTreeRef(eviction_block, BlockTreeRefType::EVICTION);
     pool->decTreeRef(*blocks, BlockTreeRefType::CACHE);
-    EXPECT_EQ(pool->treeRefCount(load_block), 2u);
+    EXPECT_EQ(pool->treeRefCount(load_block), 3u);
     EXPECT_EQ(pool->treeRefCount(eviction_block), 1u);
     EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::CACHE), 0u);
     EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::LOAD), 0u);
@@ -392,11 +393,15 @@ TEST(IBlockPoolTest, FrozenReferencesCountHoldsAndTrackDistinctBlocks) {
     pool->decTreeRef(3, BlockTreeRefType::STORE);
 
     pool->decTreeRef(*blocks, BlockTreeRefType::FROZEN);
-    EXPECT_EQ(pool->treeRefCount(load_block), 1u);
+    EXPECT_EQ(pool->treeRefCount(load_block), 2u);
     EXPECT_TRUE(pool->isFrozen(load_block));
     EXPECT_FALSE(pool->isFrozen(eviction_block));
     EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::FROZEN), 1u);
     EXPECT_EQ(pool->freeBlocksNum(), 2u);
+    // Releasing one holder keeps the block frozen until the last hold goes away.
+    pool->decTreeRef(load_block, BlockTreeRefType::FROZEN);
+    EXPECT_TRUE(pool->isFrozen(load_block));
+    EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::FROZEN), 1u);
     pool->decTreeRef(load_block, BlockTreeRefType::FROZEN);
     EXPECT_FALSE(pool->isFrozen(load_block));
     EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::FROZEN), 0u);
@@ -417,7 +422,7 @@ TEST(IBlockPoolTest, FrozenReferencesCountHoldsAndTrackDistinctBlocks) {
     EXPECT_EQ(other_pool->freeBlocksNum(), other_pool->totalBlocksNum());
 }
 
-TEST(IBlockPoolTest, ConcurrentFreezeKeepsSingleReference) {
+TEST(IBlockPoolTest, ConcurrentFreezeCountsEachHold) {
     auto pool  = makeInitializedPool(3);
     auto block = pool->malloc();
     ASSERT_TRUE(block.has_value());
@@ -430,10 +435,12 @@ TEST(IBlockPoolTest, ConcurrentFreezeKeepsSingleReference) {
     for (auto& thread : threads) {
         thread.join();
     }
-    EXPECT_EQ(pool->treeRefCount(*block), 2u);
+    EXPECT_EQ(pool->treeRefCount(*block), 1u + thread_count);
     EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::FROZEN), 1u);
-    pool->decTreeRef(*block, BlockTreeRefType::FROZEN);
-    EXPECT_FALSE(pool->isFrozen(*block));
+    for (size_t i = 0; i < thread_count; ++i) {
+        pool->decTreeRef(*block, BlockTreeRefType::FROZEN);
+        EXPECT_EQ(pool->isFrozen(*block), i + 1 < thread_count);
+    }
     EXPECT_EQ(pool->treeRefCount(*block), 1u);
     EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::FROZEN), 0u);
     pool->decTreeRef(*block, BlockTreeRefType::CACHE);
