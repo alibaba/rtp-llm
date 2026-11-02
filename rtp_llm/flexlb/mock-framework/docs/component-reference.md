@@ -276,8 +276,13 @@ ViT 的 GetWorkerStatus 总是显式提供 `mm_inflight_inputs`（包括真实�
 
 P 在 GENERATE 阶段发送 `prefill_kv_handoff.computed_kv_end`，为已计算 prompt 的排他边界，不包含首个采样 token。D 校验请求身份、已 LOAD 阶段和边界；缺省字段保留原生旧调用兼容，显式错误断言拒绝。未实现的 logprobs 请求明确返回 UNIMPLEMENTED，不伪造概率输出。
 
-KVCM 使用 real 的 Meta HTTP 请求格式：`/api/registerInstance` 与 `/api/reportEvent`，支持 NODE_REGISTER、HEARTBEAT、BLOCK_SNAPSHOT、BLOCK_ADD、BLOCK_DELETE、HOST_DOWN。注册/节点失效会重新注册并恢复快照；事件来自本实例真实逻辑 HBM 缓存，失败/取消请求不产生成功缓存。采样变化按一秒周期收敛，ACK 成功后才推进已发送视图；不引入无界事件历史。HOST_DOWN 在实例关闭时尽力发送，服务端仍需按心跳失效处理意外退出。
+共享缓存元信息由 `shared/cache/CacheMetadata` 描述，来源始终是 KvCache/BlockTree 已提交的有效块，不包含仅分配但尚未计算的工作块。快照记录逻辑 key、HBM/Host 驻留和版本；插入、介质迁移、淘汰与清空推进同一版本，并在缓存锁内投递短变更通知。Master 的原生 GetCacheStatus 仍返回逻辑可复用集合与容量，版本未改变时省略 key；Host 迁移不会误删除仍可复用的逻辑 key。
 
+`shared/cache/KvcmReporter` 消费同一来源，按 real Meta HTTP `/api/registerInstance`、`/api/reportEvent` 编码注册、NODE_REGISTER、HEARTBEAT、BLOCK_SNAPSHOT、BLOCK_ADD、BLOCK_DELETE 和 HOST_DOWN。当前 Full-KV 只发布实际 HBM 驻留；迁移到 Host 发送 HBM 删除，恢复到 HBM 发送新增，Host-only 缓存不会冒充 HBM。注册模型、布局和 spec 由 RTP 装配方明确传入；Reporter 不依赖 RtpConfig 或 Scheduler。旧 backend/rtp/KvcmPublisher 已删除，没有双实现或兼容入口。
+
+变更使用有界内存队列（100000 条），每次最多取 1000 条，按同 key 最后一次转换合并，避免 Meta 先处理 ADD 再处理 DELETE 导致结果逆序。网络工作在独立线程中，每 20ms 检查增量、每秒心跳；网络失败、队列溢出或服务端要求恢复时，以当前快照修复，不扫描差集代替变更，也不保存磁盘事件历史。快照带本地版本界限，已被快照覆盖的队列事件会丢弃，避免旧事件覆盖新快照。正常关闭尽力上报 HOST_DOWN；意外退出由服务端心跳失效处理。
+
+Master 与 KVCM 是两个独立消费者，不要求跨服务原子提交。KVCM 不可用时不会阻塞调度或 Master RPC；最近错误、注册状态和待发送数量可从 Engine 端点的 kvcm 状态查看。未实现远端 KV 查找/加载/写回；事件位置仅声明本地持有缓存，不能当成成功的远端 payload 写入。
 ```yaml
 kv_cache_event_publisher_type: kvcm
 kv_cache_event_manager_endpoint: http://<meta-http-host>:<port>

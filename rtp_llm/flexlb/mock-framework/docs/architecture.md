@@ -432,4 +432,4 @@ EngineInstances 只完成配置解析和实例装配，返回实例及生效配�
 
 Engine 的 HTTP 与原生健康检查读取现有 Loop/Scheduler 失败状态，不采集指标。独立进程每秒调用同一检查，不可恢复失败退出。不开新的健康管理模块，不把普通请求失败当作 Engine 故障。
 
-本分支使用 DSV4.1 的原始多模态 RPC 与内部 PD cache spans；Prepared 输入准备仍在 Scheduler 之前完成，Scheduler 只消费长度和规范化 key。KVCM 控制/事件由 RTP 实例拥有，运行在独立的有界周期任务中，不把 HTTP 或 SDK 调用放进调度锁。具体范围见组件参考中的 DSV4.1 Engine / KVCM 契约。
+本分支使用 DSV4.1 的原始多模态 RPC 与内部 PD cache spans；Prepared 输入准备仍在 Scheduler 之前完成，Scheduler 只消费长度和规范化 key。缓存元信息归 shared/cache，Master RPC 与共享 KvcmReporter 消费同一份有效块状态。RTP 实例仅装配 Reporter 的配置、实例身份和实际缓存能力；缓存锁只投递变更，网络线程负责 KVCM 注册、事件与恢复，不增加远端 KV 加载。具体范围见组件参考中的 DSV4.1 Engine / KVCM 契约。

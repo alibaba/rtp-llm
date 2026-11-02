@@ -86,6 +86,55 @@ class KvcmProtocolTest {
             assertEquals(true,((Map<?,?>)node.endpoints().get("kvcm")).get("remote_enabled"));
         }
     }
+    @Test void sharedReporterTracksHbmRemovalAndRestorationWithoutAnRtpScheduler() throws Exception {
+        try (var meta = new Meta(); var cache = new org.flexlb.mock.cache.KvCache(1, 4, 0,
+                org.flexlb.mock.cache.KvCache.EvictionPolicy.LRU, true, 2,
+                org.flexlb.mock.cache.KvCache.EvictionPolicy.LRU, new org.flexlb.mock.cache.KvCache.Watermark(.25, .75), null);
+             var reporter = new org.flexlb.mock.cache.KvcmReporter(
+                new org.flexlb.mock.cache.KvcmReporter.Configuration(URI.create(meta.endpoint()), true, 600000),
+                new org.flexlb.mock.cache.KvcmReporter.Identity("shared", "test-group", "127.0.0.1:12345",
+                    "full", "FP16", false, 1, 1, 1, "rtp_llm_hbm_1_full"), cache)) {
+            await(() -> meta.has("EVENT_BLOCK_SNAPSHOT"));
+            try (var lease = cache.acquire(1, List.of()).lease()) { lease.publish(List.of(99L), 1); }
+            await(() -> meta.has("EVENT_BLOCK_ADD"));
+            try (var pressure = cache.acquire(3, List.of()).lease()) {
+                await(() -> meta.has("EVENT_BLOCK_DELETE"));
+                assertEquals(Set.of(99L), cache.metadata().keys(org.flexlb.mock.cache.CacheMetadata.Medium.HOST));
+            }
+            try (var restored = cache.acquire(1, List.of(99L)).lease()) { assertEquals(1, restored.reusedTokens()); }
+            await(() -> meta.requests.stream().mapToLong(r -> r.path("events").findValues("block_add").size()).sum() >= 2);
+        }
+    }
+
+    @Test void hostOnlyCacheRemainsVisibleToMasterButIsNeverReportedAsHbm() throws Exception {
+        try (var meta = new Meta()) {
+            var root = JSON.<ObjectNode>valueToTree(RtpNodeTest.configuration("prefill"));
+            var values = (ObjectNode) root.path("component").path("config");
+            values.put("kv_cache_event_publisher_type", "kvcm").put("kv_cache_event_manager_endpoint", meta.endpoint())
+                .put("kv_cache_event_instance_id", "host-only").put("reuse_cache", true)
+                .put("enable_device_cache", false).put("enable_memory_cache", true).put("mock.cache.memory.blocks", 8);
+            try (var node = RtpNode.start(RtpConfig.load(root))) {
+                await(() -> meta.has("EVENT_BLOCK_SNAPSHOT"));
+                try (var lease = node.cache().acquire(32, List.of()).lease()) { lease.publish(List.of(11L, 22L), 32); }
+                var channel = ManagedChannelBuilder.forTarget(node.rpcAddress()).usePlaintext().build();
+                try {
+                    var rpc = RpcServiceGrpc.newBlockingStub(channel).withDeadlineAfter(2, TimeUnit.SECONDS);
+                    var first = rpc.getCacheStatus(CacheVersionPB.newBuilder().setLatestCacheVersion(-1).setNeedCacheKeys(true).build());
+                    assertEquals(Set.of(11L, 22L), first.getCacheKeysMap().keySet());
+                    assertEquals(16, first.getBlockSize());
+                    var unchanged = rpc.getCacheStatus(CacheVersionPB.newBuilder().setLatestCacheVersion(first.getVersion()).setNeedCacheKeys(true).build());
+                    assertEquals(first.getVersion(), unchanged.getVersion()); assertTrue(unchanged.getCacheKeysMap().isEmpty());
+                    // A fresh snapshot must exclude Host-only keys as well as incremental reports.
+                    meta.expire.set(true); await(() -> meta.registrations.get() >= 2);
+                    await(() -> meta.requests.stream().filter(r -> r.path("events").findValuesAsText("event_type").contains("EVENT_BLOCK_SNAPSHOT")).count() >= 2);
+                    assertFalse(meta.has("EVENT_BLOCK_ADD"));
+                    for (var report : meta.requests) for (var snapshot : report.path("events").findValues("block_snapshot"))
+                        assertTrue(snapshot.path("blocks").isEmpty());
+                } finally { channel.shutdownNow().awaitTermination(2, TimeUnit.SECONDS); }
+            }
+        }
+    }
+
     @Test void unimplementedPayloadIoAndRankShutdownNeverFabricateSuccess() throws Exception {
         var path = directory.resolve("native.json"); JSON.writeValue(path.toFile(),RtpNodeTest.configuration("prefill"));
         try(var node = RtpNode.start(RtpConfig.load(path))) {

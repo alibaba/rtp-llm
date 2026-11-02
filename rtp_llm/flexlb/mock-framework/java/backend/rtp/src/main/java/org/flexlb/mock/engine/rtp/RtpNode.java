@@ -9,6 +9,7 @@ import java.util.*;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import org.flexlb.mock.cache.KvCache;
+import org.flexlb.mock.cache.KvcmReporter;
 import org.flexlb.mock.engine.Scheduler;
 import org.flexlb.mock.runtime.ApiServer;
 
@@ -21,7 +22,7 @@ public final class RtpNode implements org.flexlb.mock.runtime.EngineInstance {
     private final org.flexlb.mock.runtime.EngineAddress address = org.flexlb.mock.runtime.EngineAddress.local();
     private Server rpc;
     private ApiServer api;
-    private KvcmPublisher publisher;
+    private KvcmReporter publisher;
 
     private RtpNode(RtpConfig config, Scheduler.Factory schedulers) {
         this.config = Objects.requireNonNull(config);
@@ -51,9 +52,26 @@ public final class RtpNode implements org.flexlb.mock.runtime.EngineInstance {
             node.rpc = builder.build().start();
             node.api = new ApiServer(node.address.listener(controlPort)).health(node::checkHealthy).metrics(node.service::scrapeMetrics);
             node.api.start();
-            node.publisher = KvcmPublisher.start(config, node.cache, node.rpcAddress());
+            node.publisher = node.startMetadataReporter();
             return node;
         } catch (IOException | RuntimeException error) { node.close(); throw error; }
+    }
+
+    private KvcmReporter startMetadataReporter() {
+        var values = config.business();
+        String type = values.path("kv_cache_event_publisher_type").asText("none");
+        if (!Set.of("none", "kvcm").contains(type)) throw new IllegalArgumentException("Invalid kv_cache_event_publisher_type");
+        String endpoint = values.path("kv_cache_event_manager_endpoint").asText();
+        if (type.equals("none") && (!RtpConfig.nativeBool(values, "enable_remote_cache", false) || endpoint.isBlank())) return null;
+        var settings = new KvcmReporter.Configuration(java.net.URI.create(endpoint), type.equals("kvcm"),
+            RtpConfig.nativeInt(values, "kv_cache_event_snapshot_interval_ms", 600000, 1, Integer.MAX_VALUE));
+        var identity = new KvcmReporter.Identity(
+            values.path("kv_cache_event_instance_id").asText(config.id() + "-" + UUID.randomUUID()),
+            values.path("kv_cache_event_instance_group").asText("default"),
+            values.path("kv_cache_event_host_ip_port").asText(rpcAddress()),
+            values.path("model_name").asText("mock-full-kv"), "FP16", false,
+            config.blockSize(), config.tpSize(), config.dpSize(), "rtp_llm_hbm_" + config.blockSize() + "_full");
+        return new KvcmReporter(settings, identity, cache);
     }
 
     public String rpcAddress() { return address.rpc(rpc.getPort()); }
