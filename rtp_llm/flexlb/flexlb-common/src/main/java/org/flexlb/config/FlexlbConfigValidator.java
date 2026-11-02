@@ -121,6 +121,15 @@ final class FlexlbConfigValidator {
         positive(config.getEngineGrpc().getEventLoopThreads(), "engineGrpc.eventLoopThreads");
         require(config.getSchemaVersion() == FlexlbConfig.CURRENT_SCHEMA_VERSION,
                 "schemaVersion", "must equal " + FlexlbConfig.CURRENT_SCHEMA_VERSION);
+        require(config.getCacheMatching() != null, "cacheMatching", "is required");
+        if (config.getCacheMatching() instanceof KvcmCacheMatchingConfig kvcm) {
+            require(kvcm.getGlobalKvsHostCount() == 0 && !kvcm.isEnableP2p(),
+                    "cacheMatching", "globalKvsHostCount must be 0 and enableP2p false without remote KV loading");
+            positive(kvcm.getRequestTimeoutMs(), "cacheMatching.requestTimeoutMs");
+            positive(kvcm.getLeaderRefreshIntervalMs(), "cacheMatching.leaderRefreshIntervalMs");
+            require(kvcm.getMedium() != null && !kvcm.getMedium().isEmpty() && kvcm.getMedium().stream().allMatch("hbm"::equals),
+                    "cacheMatching.medium", "only local hbm residency is supported");
+        }
         require(config.getScheduler() != null, "scheduler", "is required");
         require(config.getScheduler().getType() != null, "scheduler.type", "is required");
         validateNettyMemoryReporter(config.getScheduler().getNettyMemoryReporter());
