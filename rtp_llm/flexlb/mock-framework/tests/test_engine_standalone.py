@@ -51,6 +51,7 @@ def environment(role, port):
                MOCK_BIND_HOST='0.0.0.0', MOCK_ADVERTISE_HOST='127.0.0.1')
     if role == 'vit':
         env['MOCK_VIT_HIDDEN_SIZE'] = '4'
+        env['MOCK_VIT_SKIP_DOWNLOAD'] = 'true'
     else:
         env.update(SEQ_SIZE_PER_BLOCK='16', MAX_SEQ_LEN='4096', TEST_BLOCK_NUM='9', RESERVE_BLOCK_RATIO='0')
     return env

@@ -29,7 +29,7 @@ def test_vision_playback_through_real_master(tmp_path, mode):
         'grpcServer': {'executorCoreSize': 4, 'executorMaxSize': 8, 'executorQueueSize': 64, 'shutdownQuietPeriodMs': 10}})
     engine = {'engine': 'rtp', 'config': {'seq_size_per_block': 2, 'test_block_num': 128,
         'reserve_block_ratio': 0, 'max_seq_len': 128, 'mock.compute.forward.expression': '1'}}
-    vision = {'config': {'mock.vit.hidden.size': 4, 'mm_cache_gpu_max_bytes': 1024,
+    vision = {'config': {'mock.vit.skip.download': True, 'mock.vit.hidden.size': 4, 'mm_cache_gpu_max_bytes': 1024,
         'mm_cache_cpu_max_bytes': 1024, 'mock.compute.forward.expression': '2 + batchSize'}}
     data = {'id': 'vision_playback', 'describe': 'Native V selection, metadata preparation, P/D generation',
         'environment': {'master': {'config': native}, 'prefill': engine, 'decode': engine, 'vit': vision, 'client': {'config': {}}},

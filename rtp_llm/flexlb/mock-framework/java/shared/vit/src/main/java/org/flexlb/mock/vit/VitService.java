@@ -8,7 +8,6 @@ import io.grpc.stub.*;
 import java.io.ByteArrayOutputStream;
 import java.util.*;
 import java.util.concurrent.*;
-import java.util.concurrent.atomic.AtomicInteger;
 import org.flexlb.engine.grpc.EngineRpcService.*;
 import org.flexlb.engine.grpc.MultimodalRpcServiceGrpc;
 
@@ -17,33 +16,25 @@ final class VitService extends MultimodalRpcServiceGrpc.MultimodalRpcServiceImpl
     private final VitMetrics metrics = new VitMetrics();
     private final VitCache cache;
     private final VitScheduler scheduler;
+    private final VitPreparation preparation;
     private final String instance=UUID.randomUUID().toString();
     private final ExecutorService replies=Executors.newVirtualThreadPerTaskExecutor();
-    private final AtomicInteger calls=new AtomicInteger();
     private volatile boolean closed;
-    VitService(VitConfig config) { this.config=config;cache=new VitCache(config,metrics);scheduler=new VitScheduler(config,cache,metrics); }
+    VitService(VitConfig config) { this.config=config;cache=new VitCache(config,metrics);scheduler=new VitScheduler(config,metrics);preparation=new VitPreparation(config,cache,scheduler,metrics); }
     private List<VitCache.Claim> submit(MultimodalInputsPB input) {
         if(closed) throw Status.UNAVAILABLE.withDescription("V stopped").asRuntimeException();
-        var images=VitGeometry.images(input,config.patch(),config.merge());
-        if(config.batchSize()>1 && images.size()>config.batchImages()) throw MediaInput.invalid("Image count exceeds V forward budget");
-        var claims=new ArrayList<VitCache.Claim>(); var producers=new ArrayList<VitCache.Claim>();
-        try {
-            for(var image:images) { var claim=cache.acquire(image);claims.add(claim);if(claim.producer()) producers.add(claim); }
-            scheduler.submit(producers);
-        } catch(RuntimeException error) { producers.forEach(c->cache.complete(c,error));claims.forEach(VitCache::release);throw error; }
-        return claims;
+        return preparation.submit(input);
     }
     private List<VitGeometry.Image> compute(MultimodalInputsPB input, Context context) throws Exception {
         long started = System.nanoTime();
         metrics.events.increment("py_rtp_vit_qps");
-        List<VitCache.Claim> claims;
-        try { claims=submit(input); }
-        catch (RuntimeException error) { metrics.events.increment("py_rtp_vit_error_qps"); throw error; }
+        List<VitCache.Claim> claims=List.of();
+        try {
+        claims=submit(input);
         metrics.events.observe("py_rtp_vit_image_count", claims.size());
-        long budget=TimeUnit.MILLISECONDS.toNanos(input.getTimeoutMs()>0?input.getTimeoutMs():120000);
+        long budget=TimeUnit.MILLISECONDS.toNanos(input.getTimeoutMs()>0?input.getTimeoutMs():config.timeoutMs());
         if(context.getDeadline()!=null) budget=Math.min(budget,context.getDeadline().timeRemaining(TimeUnit.NANOSECONDS));
         long end=System.nanoTime()+Math.max(0,budget);
-        try {
         var result=new ArrayList<VitGeometry.Image>();
         for(var claim:claims) {
             while(true) {
@@ -54,24 +45,23 @@ final class VitService extends MultimodalRpcServiceGrpc.MultimodalRpcServiceImpl
                 catch(ExecutionException error) { throw Status.fromThrowable(error.getCause()).asRuntimeException(); }
             }
         }
-        metrics.events.observe("py_rtp_vit_embedding_length", result.stream().mapToLong(VitGeometry.Image::rows).sum());
-        metrics.events.observe("py_rtp_vit_embedding_rt", (System.nanoTime() - started) / 1e6);
+        long rows=result.stream().mapToLong(VitGeometry.Image::rows).sum();
+        if(rows>1048576) throw Status.RESOURCE_EXHAUSTED.withDescription("Request image output exceeds row limit").asRuntimeException();
+        metrics.events.observe("py_rtp_vit_embedding_length", rows);
         metrics.events.increment("py_rtp_vit_success_qps");
         return result;
         } catch (Exception error) { metrics.events.increment("py_rtp_vit_error_qps"); throw error; }
         finally {
             claims.forEach(VitCache::release);
+            metrics.events.observe("py_rtp_vit_request_rt",(System.nanoTime()-started)/1e6);
         }
     }
     private <T> void reply(StreamObserver<T> response, Callable<T> operation) {
-        if(closed || calls.incrementAndGet()>config.queueSize()+config.batchSize()) {
-            if(!closed) calls.decrementAndGet();response.onError(Status.RESOURCE_EXHAUSTED.withDescription("V RPC capacity full").asRuntimeException());return;
-        }
+        if(closed) { response.onError(Status.UNAVAILABLE.withDescription("V stopped").asRuntimeException()); return; }
         try { replies.execute(()-> {
             try { response.onNext(operation.call());response.onCompleted(); }
             catch(Exception error) { response.onError(error instanceof StatusRuntimeException?error:Status.INTERNAL.withDescription(error.getMessage()).withCause(error).asRuntimeException()); }
-            finally { calls.decrementAndGet(); }
-        }); } catch(RejectedExecutionException error) { calls.decrementAndGet();response.onError(Status.UNAVAILABLE.asRuntimeException()); }
+        }); } catch(RejectedExecutionException error) { response.onError(Status.UNAVAILABLE.asRuntimeException()); }
     }
     @Override public void remoteMultimodalEmbedding(MultimodalInputsPB input,StreamObserver<MultimodalOutputPB> response) {
         var context=Context.current(); reply(response,()->output(compute(input,context)));
@@ -90,7 +80,7 @@ final class VitService extends MultimodalRpcServiceGrpc.MultimodalRpcServiceImpl
             if(input.getTimeoutMs()<0 || input.getTimeoutMs()>3600000) throw MediaInput.invalid("Invalid hash request timeout");
             if(input.hasInputs()) {
                 var media=input.getInputs();
-                VitGeometry.images(media,config.patch(),config.merge());
+                VitGeometry.validate(media,config.skipDownload());
                 var requested=new LinkedHashSet<>(input.getKeysList());
                 var byKey=new LinkedHashMap<String,MultimodalInputPB>();
                 for(var image:media.getMultimodalInputsList()) {
@@ -121,7 +111,12 @@ final class VitService extends MultimodalRpcServiceGrpc.MultimodalRpcServiceImpl
         });
     }
     @Override public void asyncSubmitEmbedding(MultimodalInputsPB input,StreamObserver<EmptyPB> response) {
-        reply(response,()-> { submit(input);return EmptyPB.getDefaultInstance(); });
+        reply(response,()-> {
+            var claims = submit(input);
+            CompletableFuture.allOf(claims.stream().map(VitCache.Claim::result).toArray(CompletableFuture[]::new))
+                .whenComplete((value,error) -> claims.forEach(VitCache::release));
+            return EmptyPB.getDefaultInstance();
+        });
     }
     @Override public void getWorkerStatus(StatusVersionPB input,StreamObserver<WorkerStatusPB> response) {
         try { scheduler.checkHealthy();response.onNext(WorkerStatusPB.newBuilder().setRole("VIT").setAlive(true).setStatusVersion(1).build());response.onCompleted(); }
@@ -134,7 +129,7 @@ final class VitService extends MultimodalRpcServiceGrpc.MultimodalRpcServiceImpl
         if(result.build().getSerializedSize()>4*1024*1024) { response.onError(Status.RESOURCE_EXHAUSTED.withDescription("V cache snapshot exceeds RPC limit").asRuntimeException());return; }
         response.onNext(result.build());response.onCompleted();
     }
-    String metrics() { return metrics.scrape(scheduler,cache); }
+    String metrics() { return metrics.scrape(scheduler,cache,preparation); }
     void checkHealthy() { scheduler.checkHealthy(); }
-    @Override public void close() { closed=true;scheduler.close();cache.close();replies.shutdownNow(); }
+    @Override public void close() { closed=true;scheduler.close();preparation.close();cache.close();replies.shutdownNow(); }
 }

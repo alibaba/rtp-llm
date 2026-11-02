@@ -21171,7 +21171,7 @@
         {
           "id": 300452,
           "type": "timeseries",
-          "title": "vit preprocess rt · 待埋点",
+          "title": "vit preprocess rt · 部分支持",
           "gridPos": {
             "x": 12,
             "y": 1302,
@@ -21243,7 +21243,7 @@
               ]
             }
           },
-          "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。 参考 RTP-LLM 大盘 v514 / panel 452。",
+          "description": "参考 RTP-LLM 大盘 v514 / panel 452。\n下载部分已上报；像素解码、resize 和 tensor 预处理未模拟，other 曲线留空。",
           "links": [
             {
               "title": "RTP-LLM 原面板",
@@ -21255,7 +21255,7 @@
         {
           "id": 310350,
           "type": "timeseries",
-          "title": "vit download rt · 待埋点",
+          "title": "vit download rt",
           "gridPos": {
             "x": 0,
             "y": 1311,
@@ -21318,7 +21318,7 @@
               ]
             }
           },
-          "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。 参考 RTP-LLM 大盘 v514 / panel 10350。",
+          "description": "参考 RTP-LLM 大盘 v514 / panel 10350。\n实际 HTTP 图片读取耗时，单位 ms；本地跳过读取时无样本。",
           "links": [
             {
               "title": "RTP-LLM 原面板",
@@ -21405,7 +21405,7 @@
         {
           "id": 310365,
           "type": "timeseries",
-          "title": "vit preprocess waiting queue size · 待埋点",
+          "title": "vit preprocess waiting queue size",
           "gridPos": {
             "x": 0,
             "y": 1320,
@@ -21468,7 +21468,7 @@
               ]
             }
           },
-          "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。 参考 RTP-LLM 大盘 v514 / panel 10365。",
+          "description": "参考 RTP-LLM 大盘 v514 / panel 10365。\n尚未完成准备的唯一媒体数，包含执行器排队与正在读取/准备的工作，不包含等待 Forward 或结果发布的任务。",
           "links": [
             {
               "title": "RTP-LLM 原面板",
@@ -21618,7 +21618,7 @@
               ]
             }
           },
-          "description": "参考 RTP-LLM 大盘 v514 / panel 456。\n已按 real 名称接入；事件 Gauge 为每次采集窗口的观测均值，QPS 为窗口事件数/实际秒数。无事件的耗时窗口不补零。",
+          "description": "参考 RTP-LLM 大盘 v514 / panel 456。\n每份成功媒体工作从进入 GPU 就绪队列到 Forward 完成的耗时，单位 ms；不含下载、准备和缓存命中等待。",
           "links": [
             {
               "title": "RTP-LLM 原面板",
@@ -22905,7 +22905,7 @@
         {
           "id": 310637,
           "type": "timeseries",
-          "title": "请求总耗时 · 待埋点",
+          "title": "请求总耗时",
           "gridPos": {
             "x": 0,
             "y": 1410,
@@ -22968,7 +22968,7 @@
               ]
             }
           },
-          "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。 参考 RTP-LLM 大盘 v514 / panel 10637。",
+          "description": "参考 RTP-LLM 大盘 v514 / panel 10637。\n阻塞媒体请求从进入处理到完成或失败的总耗时，单位 ms；包含缓存等待、异步排队、下载、计算及结果发布，排除异步提交 ACK。",
           "links": [
             {
               "title": "RTP-LLM 原面板",

@@ -10,7 +10,7 @@ Prefill 和 Decode 分开提供吞吐/延迟/负载、PD RPC、KV、KV 分池、
 
 线上 Engine 查询主要使用全局 `hippo_role`，并非每个面板都硬编码了 Prefill/Decode。源码语义、线上 PD 分离分区和局部业务过滤共同决定本地归属；Master 的 `role=PREFILL/DECODE/PDFUSION` 是被观察 Worker 的角色，不是 Master 自己的角色，保留原查询的具体限制，不能替换为 Engine 自报的小写 role。
 
-ViT 已接入共享 vision engine：QPS、成功/错误、图片数、Embedding 长度/请求等待耗时、队列深度/等待时间、Forward/合批大小和缓存命中/未命中/合并等待/淘汰/驻留 Tokens/Bytes。使用 real 的 `py_rtp_vit_*` 名称，耗时单位为毫秒。Forward 与请求级 Embedding 分开；缓存全部命中时不制造 Forward。下载、预处理子进程、CUDA Graph、GreenNet 没有模拟，保留待埋点。请求总耗时 `py_rtp_vit_request_rt` 的 RPC 全链路边界也未冒充成 Embedding 等待耗时。
+ViT 已接入共享 vision engine：QPS、成功/错误、图片数、Embedding 长度/请求等待耗时、队列深度/等待时间、Forward/合批大小和缓存命中/未命中/合并等待/淘汰/驻留 Tokens/Bytes。使用 real 的 `py_rtp_vit_*` 名称，耗时单位为毫秒。Forward、就绪排队加 Forward（py_rtp_vit_embedding_rt）和请求总耗时（py_rtp_vit_request_rt）分别记录；缓存命中不制造 Embedding/Forward 样本。真实 URL 读取提供 py_rtp_vit_download_rt（ms）和 rtp_llm_vit_image_fetch_rt_us（μs）；跳过读取时不制造零值。预处理子进程、CUDA Graph、GreenNet 尚未模拟。py_rtp_vit_request_rt 覆盖阻塞媒体处理调用的成功或失败，包括下载和共享结果等待，不含异步提交 ACK、RPC 传输及输出编码。py_rtp_vit_preprocess_queue_size 统计准备尚未完成的媒体（排队＋执行中），不包含等待计算或发布的任务；没有独立 CPU 子进程，因此 dispatch/return 指标保持缺失。
 
 ## 已实现与缺口
 
@@ -63,8 +63,8 @@ View 的 `annotation_steps` 只配置默认选择，省略则全部显示，空�
 | Forward 组装 | `rtp_llm_context_batch_size` / `generate_batch_size`，`execute_token_size`，`max_seq_len`；含 Context 的条件系列只在 P 上产生 | Decode 执行 Token 取 verify/step，不拿整段历史输入相加；不把 running 请求数当作本批大小 |
 | 请求终态 | `rtp_llm_latency_us`、`wait_latency_us`、`first_token_latency_us`、`input_token_length`、`output_token_length`、`iterate_count`、`query_batch_size` | 如 real，仅 success/cancel/timeout 产生流统计；无首 Token 则不报首 Token 耗时；query batch 是 beam 数，当前为 1 |
 | D Loading | `rtp_llm_stream_loading_cache_latency_us` | 从实际 beginTransfer 到 transferCompleted，不含等待 P 计算；其他 loading 阶段不混用 |
-| ViT 调度 | `py_rtp_vit_embedding_queue_size` / `queue_wait_rt` / `batch_size` / `forward_rt` | 队列项是提交的工作 chunk；运行图片数另为 Mock 辅助项 |
-| ViT 请求 | `py_rtp_vit_qps` / `success_qps` / `error_qps`，`image_count` / `embedding_length` / `embedding_rt` | 统计计算/等待调用；纯 metadata/hash 命中不产生新的计算请求；没有下载或 Tensor 数据搬运 |
+| ViT 调度 | `py_rtp_vit_embedding_queue_size` / `queue_wait_rt` / `batch_size` / `forward_rt` | 就绪队列按去重后的图片工作计数；运行图片数另为 Mock 辅助项 |
+| ViT 请求 | `py_rtp_vit_qps` / `success_qps` / `error_qps`，`image_count` / `embedding_length` / `embedding_rt` | 统计计算/等待调用；纯 metadata/hash 命中不产生新的计算请求；下载由异步准备执行器完成，没有 Tensor 数据搬运 |
 | ViT 缓存 | `py_rtp_vit_embedding_cache_{hit,miss,inflight,eviction}_qps`、`tokens` / `bytes` | GPU+CPU 逻辑驻留合计，不能作为真实 GPU/JVM 物理占用 |
 
 新增事件 Gauge 用采集窗口均值而非只保留最后一个事件；无事件时不发耗时样本。`_sum` / `_count` 为本地累计查询辅助量。QPS 按实际窗口秒数换算，空闲为零。它们与 KMonitor 的固定上报周期并非逐点相同；共享 JVM 不能导出可信的单 Engine CPU/堆/GPU 利用率，资源面板继续留空。

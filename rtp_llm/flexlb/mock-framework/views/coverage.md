@@ -242,10 +242,10 @@
 | vit | 449 | vit qps | 已上报 | py_rtp_vit_qps |
 | vit | 458 | vit success qps | 已上报 | py_rtp_vit_success_qps |
 | vit | 457 | vit error qps | 已上报 | py_rtp_vit_error_qps |
-| vit | 452 | vit preprocess rt | 待埋点 | py_rtp_vit_download_rt,py_rtp_vit_preprocess_other_rt |
-| vit | 10350 | vit download rt | 待埋点 | py_rtp_vit_download_rt |
+| vit | 452 | vit preprocess rt | 部分支持 | py_rtp_vit_download_rt,py_rtp_vit_preprocess_other_rt |
+| vit | 10350 | vit download rt | 已上报 | py_rtp_vit_download_rt |
 | vit | 10351 | vit preprocess rt(except download) | 待埋点 | py_rtp_vit_preprocess_other_rt |
-| vit | 10365 | vit preprocess waiting queue size | 待埋点 | py_rtp_vit_preprocess_queue_size |
+| vit | 10365 | vit preprocess waiting queue size | 已上报 | py_rtp_vit_preprocess_queue_size |
 | vit | 10366 | vit images total num | 已上报 | py_rtp_vit_image_count |
 | vit | 456 | vit embedding rt | 已上报 | py_rtp_vit_embedding_rt |
 | vit | 10352 | vit embedding batch rt | 待埋点 | py_rtp_vit_embedding_batch_rt |
@@ -265,7 +265,7 @@
 | vit | 10626 | vit greennet rt | 待埋点 | py_rtp_greennet_rt |
 | vit | 10627 | 提交cpu任务到预处理开始耗时 | 待埋点 | py_rtp_vit_preprocess_dispatch_rt |
 | vit | 10628 | 预处理完成到主进程回调耗时 | 待埋点 | py_rtp_vit_preprocess_return_rt |
-| vit | 10637 | 请求总耗时 | 待埋点 | py_rtp_vit_request_rt |
+| vit | 10637 | 请求总耗时 | 已上报 | py_rtp_vit_request_rt |
 | master | 9102 | 前端路由异常：每秒多少次、什么原因 | 待埋点 | py_rtp_master_route_error_qps |
 | master | 10524 | 前端路由成功：每秒多少次 | 待埋点 | py_rtp_master_route_qps |
 | master | 9103 | 前端取得 Master 路由要多久：平均 / P99 | 待埋点 | py_rtp_master_route_rt |

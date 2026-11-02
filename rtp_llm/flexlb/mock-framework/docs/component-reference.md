@@ -109,6 +109,9 @@ vit:
     mock.vit.patch.size: 14
     mock.vit.spatial.merge.size: 2
     mock.vit.hidden.size: 4096
+    mock.vit.skip.download: true
+    vit_concurrency: 64
+    vit_max_queue_size: 64
     gpu_max_batch_size: 8
     gpu_max_batch_images: 200
     gpu_batch_wait_ms: 10
@@ -119,9 +122,9 @@ vit:
     mock.compute.forward.expression: "2 + 0.00001 * totalImagePixels"
 ```
 
-图像输入携带明确的 width/height（原生 mm_preprocess_config），不下载/解码实际图片。输出行数为 ceil(width/(patch_size*spatial_merge_size))*ceil(height/(patch_size*spatial_merge_size))。这是可配置的 Mock 几何模型，不宣称复现某个真实视觉模型的 resize/crop。首版只接受 IMAGE URL 身份和显式尺寸；视频、音频、tensor 输入、V4.1 prepared patches 在 V 模块边界明确拒绝，不由 Client 或 P 的核心校验器按多模态类别拒绝。数据文件的 Image.length 要事先按模型几何生成，旧数据仅离线转换，不新增运行时兼容格式。
+默认异步下载 HTTP(S) 图片并读取头部宽高，不构造像素 tensor；本地假 URL 配置 `mock.vit.skip.download: true`，此时必须提供明确的 width/height（原生 mm_preprocess_config）。输出行数为 ceil(width/(patch_size*spatial_merge_size))*ceil(height/(patch_size*spatial_merge_size))。这是可配置的 Mock 几何模型，不宣称复现某个真实视觉模型的 resize/crop。仅接受 IMAGE URL；视频、音频、tensor 输入、V4.1 prepared patches 在 V 模块边界明确拒绝，不由 Client 或 P 的核心校验器按多模态类别拒绝。数据文件的 Image.length 要事先按模型几何生成，旧数据仅离线转换，不新增运行时兼容格式。
 
-V 以 miss 的图片组成 ForwardBatch，复用公式和 SimulatedCompute。计算完成后登记缓存、通知等待者；Compute 不直接改变缓存。命中和在途合并不重复计入 forward。提供 real 名称的 py_rtp_vit_embedding_forward_rt、batch_size、cache 指标及 mock_vit_theoretical_forward_rt；元数据模拟不能代替真实模型计时校准。
+V 按唯一媒体准入并合并在途请求；`VitPreparation` 负责下载、超时/取消和共享结果终态发布，`VitCache` 只管理身份、共享 Future 与逻辑驻留。`VitScheduler` 只接收准备完成的图片，组成 ForwardBatch，复用公式和 SimulatedCompute；只完成计算阶段，不直接登记缓存。慢下载不阻塞 Forward，最后一个等待者退出时取消准备/排队工作，已进入 Forward 的计算仍安全收尾。准入在结果发布完成后释放，旧任务不能发布到新一代同名请求。命中和在途合并不重复计入 forward。提供 real 名称的 py_rtp_vit_embedding_forward_rt、batch_size、cache 指标及 mock_vit_theoretical_forward_rt；元数据模拟不能代替真实模型计时校准。
 
 Embedding Device/Host 按逻辑 rows*hidden_size*BF16(2 bytes) 计费，各自 LRU；Device 淘汰转存 Host，Host 淘汰移除 embedding。Hash 独立按行数和 key 字节计费，因此 hash_hit 与 embedding_hit 不等价。在途计算使用独立 claim，失败移除，旧 claim 的迟到完成不能覆盖新 claim。消费者持有不可变结果，不依赖缓存继续驻留。缓存 key 对齐 Linux real MultimodalInput 的 URL/type/preprocess 身份，hash 内容是稳定模拟值，不宣称与实际 tensor 的 hash 相等。
 
@@ -215,7 +218,9 @@ Mock 专用参数使用小写点号名称，例如 `mock.compute.forward.express
 | block_tree_device_evict_low/high_watermark_ratio | 0.82 / 0.90 | Device 水位。 |
 | block_tree_memory_evict_low/high_watermark_ratio | 0.90 / 0.94 | Host 水位。 |
 | gpu_max_batch_size / gpu_max_batch_images / gpu_batch_wait_ms | 1 / 200 / 10 ms | 仅 V；batch=1 时有效等待为 0。 |
-| mm_max_queue_size | 1024 | V 等待队列容量。 |
+| mm_max_queue_size | 1024 | V GPU 就绪队列容量；与异步任务准入分别限制。 |
+| vit_concurrency / vit_max_queue_size | 64 / 64 | V 异步执行并发与额外等待容量；去重媒体任务上限为二者之和，覆盖下载、就绪排队、计算和发布。 |
+| mm_timeout_ms / mm_image_max_file_size_kb / download_headers | 120000 ms / 102400 KiB / 空 | 媒体任务默认期限、下载体积限制与 JSON 字符串请求头；下载另保留 10 MiB 安全上限，不模拟 tensor 搬运。 |
 | mm_cache_gpu_max_bytes / mm_cache_cpu_max_bytes | 各 2 GiB | V embedding 缓存逻辑预算，单位 byte。 |
 | mm_hash_key_cache_max_bytes | 256 MiB | V hash 缓存逻辑预算，单位 byte。 |
 
@@ -226,6 +231,7 @@ real 默认值和映射以 `rtp_llm/server/server_args`、`rtp_llm/config/engine
 | 参数 | 含义 |
 | --- | --- |
 | mock.cache.memory.blocks | P/D Host 逻辑块预算，默认 0；不是 real 的 memory_cache_size_mb。本模型不加载层/head/dtype 来计算每块字节数，所以忽略 memory_cache_size_mb，不能把 MB 当块数。 |
+| mock.vit.skip.download | 默认 false；本地显式设 true 后用输入宽高跳过 HTTP 读取，其他队列、计算、缓存链路相同。 |
 | mock.vit.patch.size / mock.vit.spatial.merge.size / mock.vit.hidden.size | V 简化几何模型，默认 14 / 2 / 4096，不冒充 real 的模型加载配置。 |
 | mock.compute.forward.expression | 必填，Forward 公式，结果单位 ms。 |
 | mock.compute.forward.noise.stddev.ms / stddev.ratio / max.deviation.ms / seed | 有界噪声，详见 Compute；数值后缀均相对 mock.compute.forward.noise。 |
@@ -287,7 +293,7 @@ Prefill 的 context TPS 用计算 Tokens／执行时间，含缓存 TPS 用输�
 
 P/D 已补 `rtp_llm_{context,generate}_batch_size`、执行 Token 数、最长序列、逐请求等待/首 Token/总延迟、输入/输出长度与迭代数；Decode 传输等待接入 `rtp_llm_stream_loading_cache_latency_us`。Query batch 的 native 语义是 beam 数，不能用调度批大小代替。
 
-ViT 使用相同的物理元数据与 Prometheus instance 发现；QPS、Embedding 队列/等待/Forward/合批、请求图片数/输出长度，以及缓存命中/未命中/在途合并/淘汰和逻辑驻留量均按 real 名称导出。毫秒指标不转换成微秒名，未实现的下载、预处理子进程和 CUDA Graph 不补零。详见 [指标覆盖与边界](../views/README.md)。
+ViT 使用相同的物理元数据与 Prometheus instance 发现；QPS、Embedding 队列/等待/Forward/合批、请求图片数/输出长度，以及缓存命中/未命中/在途合并/淘汰和逻辑驻留量均按 real 名称导出。下载分别上报 real 的 `py_rtp_vit_download_rt`（ms）与 `rtp_llm_vit_image_fetch_rt_us`（μs）。请求总耗时、就绪等待加计算、Forward 分别统计，命中不制造计算耗时；跳过下载及未模拟的预处理子进程、CUDA Graph 不补零。详见 [指标覆盖与边界](../views/README.md)。
 
 新增事件 Gauge 为采集窗口均值，无事件的窗口不发耗时样本；其 `_sum` / `_count` 辅助累计量不清零。QPS 使用真实窗口秒数换算，空闲归零；窗口与 KMonitor 固定周期不保证逐点相同。原有 Forward 最近值与 Histogram 口径保持不变。
 
@@ -335,3 +341,7 @@ prometheus/ 保存配置、targets、版本、日志、data/TSDB/WAL 和 collect
 缓存身份由 shared/cache/CacheSequence 统一计算。Decode 除 prompt 外还缓存已完成计算的输出前缀，最后一个仅采样但未进入 Forward 的 token 不计入有效 KV。main 保留现有图片布局和 hash-token 输入协议；此能力不依赖 DSV4.1 的 PD 新字段。
 
 使用 real 名称 kv_cache_event_publisher_type=kvcm 与 kv_cache_event_manager_endpoint（直接 Meta HTTP 地址）启用 HBM 事件；可选 kv_cache_event_instance_id、kv_cache_event_instance_group、kv_cache_event_host_ip_port、kv_cache_event_snapshot_interval_ms。仅 enable_remote_cache=true 且给出直接 endpoint 时可进行控制心跳；不会产生实际远端读取或命中。有效配置和端点标明 payload_io=false，ExecuteFunction 数据读写仍未实现，不承诺 SDK、GDR 或混合 KV 布局。
+
+### main 的 ViT 适配边界
+
+保留 main 的展开 token span、数据集 `Image.length` 和原有几何公式，不引入 DSV4.1 的占位 token 协议或模型配置结构。下载得出的行数仍须与输入 span 长度一致。`gpu_max_batch_size` 和 `gpu_max_batch_images` 分别保留配置，图片工作按两个上限的较小值组批，batch=1 不收集等待；队列按准备完成的唯一图片计数。main 的原生 WorkerStatus 没有 `mm_inflight_inputs`，不补造协议字段，准备中数量从指标查看。

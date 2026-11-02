@@ -17,6 +17,9 @@ class VitConfigTest {
         var root = root();
         var defaults = VitConfig.load(root);
         assertEquals(1, defaults.batchSize());
+        assertEquals(200, defaults.batchImages());
+        assertEquals(1024, defaults.queueSize());
+        assertFalse(defaults.skipDownload());
         assertEquals(0, defaults.effective().path("gpu_batch_wait_ms").intValue());
         assertEquals(2L * 1024 * 1024 * 1024, defaults.deviceBytes());
         assertEquals(defaults.deviceBytes(), defaults.hostBytes());
@@ -27,11 +30,17 @@ class VitConfigTest {
         config.put("gpu_max_batch_size", 4).put("gpu_max_batch_images", 30).put("gpu_batch_wait_ms", 7)
             .put("mm_cache_gpu_max_bytes", 0).put("mm_cache_cpu_max_bytes", 4096)
             .put("mock.vit.patch.size", 16).put("mock.vit.hidden.size", 8);
+        config.put("vit_concurrency",4).put("vit_max_queue_size",3).put("mm_max_queue_size",17).put("mock.vit.skip.download",true);
         var parsed = VitConfig.load(root);
-        assertEquals(parsed.effective(), VitConfig.fromEnvironment("vit-0", Map.of(
+        assertEquals(7,parsed.admissionCapacity());
+        assertEquals(17,parsed.queueSize());
+        assertEquals(30,parsed.batchImages());
+        var env = new HashMap<>(Map.of(
             "MOCK_COMPUTE_FORWARD_EXPRESSION", "batchSize + 1", "VIT_GPU_MAX_BATCH_SIZE", "4",
             "VIT_GPU_MAX_BATCH_IMAGES", "30", "VIT_GPU_BATCH_WAIT_MS", "7", "MM_CACHE_GPU_MAX_BYTES", "0",
-            "MM_CACHE_CPU_MAX_BYTES", "4096", "MOCK_VIT_PATCH_SIZE", "16", "MOCK_VIT_HIDDEN_SIZE", "8")).effective());
+            "MM_CACHE_CPU_MAX_BYTES", "4096", "MOCK_VIT_PATCH_SIZE", "16", "MOCK_VIT_HIDDEN_SIZE", "8"));
+        env.putAll(Map.of("VIT_CONCURRENCY","4","VIT_MAX_QUEUE_SIZE","3","MM_MAX_QUEUE_SIZE","17","MOCK_VIT_SKIP_DOWNLOAD","true"));
+        assertEquals(parsed.effective(), VitConfig.fromEnvironment("vit-0",env).effective());
         ((ObjectNode) root.path("component")).set("config", parsed.effective());
         assertEquals(parsed.effective(), VitConfig.load(root).effective());
     }

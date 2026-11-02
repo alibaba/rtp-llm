@@ -435,3 +435,7 @@ Engine 的 HTTP 与原生健康检查读取现有 Loop/Scheduler 失败状态，
 CacheSequence 在 shared/cache 中维护不可变 token 序列并计算完整物理块的规范 key，不依赖 RPC。main 的接入层将当前协议准备后的 token 交给它，不引入 DSV4.1 的缓存区间 wire 字段。Decode 成功结束时发布 prompt 和已计算输出的完整块，排除最后一个尚未计算 KV 的采样 token；取消、失败及预留容量不发布。GENERATE 许可携带原生首 token，重复输出模型使用同一 token 推导输出前缀身份。
 
 KvCache/BlockTree 提供 CacheMetadata 快照与介质变更事件；仅有效缓存块进入元数据，工作租约和预留块不进入。注册、删除和 HBM/Host 迁移都推进版本。KvcmReporter 位于 shared/cache，只接收规范身份、配置和元数据；RTP 负责实例配置装配，调度锁内不执行网络。队列溢出退回完整快照，保持数据最终一致。仅实现 Meta HTTP 注册、心跳及 HBM 缓存事件，没有远端 payload 读写。
+
+### 共享 ViT 的准备与计算边界
+
+`VitPreparation` 负责唯一媒体任务从准入到结果发布的完整生命周期。下载在有界并发执行器异步进行，完成后才提交 `VitScheduler` 的就绪队列；Scheduler 只负责组批和 Forward，不拥有缓存发布与等待者状态。`VitCache` 管理共享 Future、缓存身份和逻辑驻留，不拥有准入计数；任务终态集中在 Preparation。最后一个等待者取消会撤销尚未执行的工作，停止时取消下载并结束等待。所有角色仍走同一 TCP RPC。
