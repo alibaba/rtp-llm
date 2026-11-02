@@ -12,9 +12,13 @@ import triton
 import triton.language as tl
 
 
-@triton.jit
-def _build_membership(Ids, Mask, S: tl.constexpr, WORDS: tl.constexpr):
+@triton.jit(do_not_specialize=["S", "WORDS"])
+def _build_membership(Ids, Mask, S, WORDS, MAX_WORDS: tl.constexpr):
     row = tl.program_id(0).to(tl.int64)
+    word = tl.arange(0, MAX_WORDS)
+    tl.store(Mask + row * WORDS + word, 0, word < WORDS)
+    # Every row belongs to one CTA; finish initialization before any atomic OR.
+    tl.debug_barrier()
     block = tl.arange(0, 512)
     start = tl.load(Ids + row * 2051 + block * 4)
     bits = tl.full((512,), 15, tl.uint32) << (start % 32)
@@ -140,21 +144,33 @@ def try_causal_qsa_prefill(
     ):
         return None
     try:
-        from triton.tools.tensor_descriptor import TensorDescriptor
+        from .tma_pipeline import run_prefill
     except ImportError:
-        return None
+        run_prefill = None
+        try:
+            from triton.tools.tensor_descriptor import TensorDescriptor
+        except ImportError:
+            return None
 
     _, heads, tokens, dim = q.shape
-    # Keep the accumulator and KV operands within the register/SMEM budget.
-    # Larger head groups split across CTAs when sharing longer query tiles.
+    words = triton.cdiv(tokens, 32)
+    membership = torch.empty((tokens, words), dtype=torch.int32, device=q.device)
+    _build_membership[(tokens,)](
+        selected,
+        membership,
+        tokens,
+        words,
+        16 if tokens <= 512 else 128,
+        num_warps=4,
+    )
+    if run_prefill is not None:
+        return run_prefill(q, k, v, membership)
+    # Keep the standard Triton path for installations without Gluon.
     if tokens <= 512:
         query_tile, group_heads = (16, 12) if heads == 12 else (32, 6)
     else:
         query_tile, group_heads = 32, 4 if heads == 12 else 6
     key_tile = 32
-    words = triton.cdiv(tokens, 32)
-    membership = torch.zeros((tokens, words), dtype=torch.int32, device=q.device)
-    _build_membership[(tokens,)](selected, membership, tokens, words, num_warps=4)
     output = torch.empty((1, tokens, heads, dim), dtype=q.dtype, device=q.device)
     output_view = output.transpose(1, 2)
     key = TensorDescriptor(k, [tokens, dim], [k.stride(2), 1], [key_tile, dim])

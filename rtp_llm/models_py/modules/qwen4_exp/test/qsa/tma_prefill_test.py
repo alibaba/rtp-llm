@@ -1,4 +1,5 @@
 import math
+import sys
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -228,6 +229,48 @@ class TmaPrefillTest(unittest.TestCase):
         torch.testing.assert_close(
             actual, reference(q, k, v, selected), atol=0.0078125, rtol=0.008
         )
+
+    def test_missing_gluon_retains_standard_tma_fallback(self):
+        _, q, k, v = make_inputs(257, 6)
+        selected = make_selection(257)
+        module = "rtp_llm.models_py.modules.qwen4_exp.qsa.tma_pipeline"
+        with patch.dict(sys.modules, {module: None}):
+            actual = try_causal_qsa_prefill(q, k, v, selected)
+        self.assertIsNotNone(actual)
+        torch.testing.assert_close(
+            actual, reference(q, k, v, selected), atol=0.0078125, rtol=0.008
+        )
+
+    def test_runtime_lengths_reuse_compiled_pipeline(self):
+        try:
+            from rtp_llm.models_py.modules.qwen4_exp.qsa import tma_pipeline
+        except ImportError:
+            self.skipTest("Gluon TMA pipeline unavailable")
+        kernel = tma_pipeline._pipelined_prefill
+        run = kernel.run
+        hashes = []
+
+        def record(*args, **kwargs):
+            compiled = run(*args, **kwargs)
+            hashes.append(compiled.hash)
+            return compiled
+
+        for heads, lengths in ((6, (257, 509)), (12, (769, 1021))):
+            with self.subTest(heads=heads):
+                hashes.clear()
+                with patch.object(kernel, "run", side_effect=record):
+                    for tokens in lengths:
+                        _, q, k, v = make_inputs(tokens, heads)
+                        selected = make_selection(tokens)
+                        actual = try_causal_qsa_prefill(q, k, v, selected)
+                        torch.testing.assert_close(
+                            actual,
+                            reference(q, k, v, selected),
+                            atol=0.0078125,
+                            rtol=0.008,
+                        )
+                self.assertEqual(len(hashes), len(lengths))
+                self.assertEqual(len(set(hashes)), 1)
 
 
 if __name__ == "__main__":
