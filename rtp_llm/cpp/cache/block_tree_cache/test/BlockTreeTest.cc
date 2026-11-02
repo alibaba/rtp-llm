@@ -720,4 +720,91 @@ TEST(BlockTreeTest, VisitNodeRangeLockedStopsAtMaxNodes) {
 }
 
 }  // namespace
+
+TEST(BlockTreeTest, StateObserverReportsFullAndPointTailReadinessWithoutTouchingAccessOrder) {
+    std::vector<GroupSetPtr> groups{
+        std::make_shared<FullGroupSet>(
+            std::vector<DeviceBlockPoolPtr>{block_tree_cache_test::makeStructuralDevicePool(0)}, nullptr, nullptr),
+        std::make_shared<LinearGroupSet>(
+            std::vector<DeviceBlockPoolPtr>{block_tree_cache_test::makeStructuralDevicePool(1)}, nullptr, nullptr)};
+    block_tree_cache_test::prepareGroupSetsForTest(groups);
+    BlockTree tree(std::move(groups));
+    std::unordered_map<CacheKeyType, BlockTreeCacheState> observed;
+    tree.setStateObserver([&](const BlockTreeCacheState& state) { observed[state.key] = state; });
+    const CacheKeyType key = static_cast<CacheKeyType>(uint64_t{1} << 63);
+    auto inserted = tree.insertNode({key}, make2DResources(2, 1, 10), true, false);
+    ASSERT_EQ(inserted.path.size(), 1u);
+    auto* node = inserted.path[0];
+    ASSERT_TRUE(observed.count(key));
+    EXPECT_TRUE(observed[key].present);
+    EXPECT_TRUE(observed[key].full_ready);
+    EXPECT_TRUE(observed[key].tail_ready);
+    EXPECT_TRUE(observed[key].hybrid_tail_required);
+    EXPECT_EQ(observed[key].cached_blocks, 1u);
+
+    auto& tail = node->group_set_resources[1];
+    tail.candidate_meta.last_access_seq = 91;
+    for (auto state : {GroupSetTransferState::DEMOTING, GroupSetTransferState::LOAD_PENDING}) {
+        tail.transfer_state = state;
+        tree.refreshPublishedState(node);
+        EXPECT_TRUE(observed[key].full_ready);
+        EXPECT_FALSE(observed[key].tail_ready);
+    }
+    tail.transfer_state = GroupSetTransferState::IDLE;
+    tree.refreshPublishedState(node);
+    EXPECT_TRUE(observed[key].tail_ready);
+    tail.transfer_detached = true;
+    tree.refreshPublishedState(node);
+    EXPECT_FALSE(observed[key].tail_ready);
+    tail.transfer_detached = false;
+    tree.refreshPublishedState(node);
+    EXPECT_TRUE(observed[key].tail_ready);
+    EXPECT_EQ(tail.candidate_meta.last_access_seq, 91u);
+
+    for (auto& resource : node->group_set_resources) {
+        resource.device_blocks.clear();
+    }
+    tree.refreshPublishedState(node);
+    EXPECT_FALSE(observed[key].present);
+    EXPECT_FALSE(observed[key].full_ready);
+    EXPECT_FALSE(observed[key].tail_ready);
+    tree.removeNodeAndEmptyAncestors(node);
+    EXPECT_FALSE(observed[key].present);
+    EXPECT_EQ(observed[key].cached_blocks, 0u);
+}
+
+TEST(BlockTreeTest, StateObserverTracksNativeSwaWindowAfterAncestorChangesAndReattachment) {
+    BlockTree tree(makeFullSwaGroupSets());
+    auto inserted = tree.insertNode({100, 200, 300}, make2DResources(2, 3, 10), true, false);
+    std::unordered_map<CacheKeyType, BlockTreeCacheState> observed;
+    tree.setStateObserver([&](const BlockTreeCacheState& state) { observed[state.key] = state; });
+    ASSERT_EQ(observed.size(), 3u);
+    auto verify_native = [&] {
+        auto validator = tree.groupSets()[1]->createMatchValidator();
+        for (auto* node : inserted.path) {
+            EXPECT_EQ(observed[node->cache_key].tail_ready, validator->validate(node->group_set_resources[1]))
+                << node->cache_key;
+        }
+    };
+    verify_native();
+    auto& root_tail = inserted.path[0]->group_set_resources[1];
+    // Introduce, remove, and reintroduce the same unavailable ancestor.
+    for (int repeat = 0; repeat < 2; ++repeat) {
+        root_tail.transfer_state = GroupSetTransferState::DEMOTING;
+        tree.refreshPublishedState(inserted.path[0]);
+        verify_native();
+        EXPECT_FALSE(observed[200].tail_ready);
+        EXPECT_TRUE(observed[300].tail_ready);
+        root_tail.transfer_state = GroupSetTransferState::IDLE;
+        tree.refreshPublishedState(inserted.path[0]);
+        verify_native();
+        EXPECT_TRUE(observed[200].tail_ready);
+    }
+    tree.setStateObserver({});
+    observed.clear();
+    tree.setStateObserver([&](const BlockTreeCacheState& state) { observed[state.key] = state; });
+    verify_native();
+    EXPECT_EQ(tree.findNode({100, 200, 300}).size(), 3u);
+}
+
 }  // namespace rtp_llm

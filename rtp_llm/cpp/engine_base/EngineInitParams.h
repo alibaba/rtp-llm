@@ -12,6 +12,10 @@
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "kmonitor/client/MetricsReporter.h"
 
+namespace navi_sched {
+class NaviSchedAgent;
+}
+
 namespace th = torch;
 
 namespace rtp_llm {
@@ -104,6 +108,8 @@ struct EngineInitParams {
     ParallelismConfig            parallelism_config;
     NcclCommConfig               nccl_comm_config;  // NCCL ip/ports
     py::object                   server_config;     // Python ServerConfig; RPC/HTTP ports read from it
+    std::string                  server_ip;
+    int32_t                      rpc_server_port = 0;
     RuntimeConfig                runtime_config;
     EPLBConfig                   eplb_config;
     PDSepConfig                  pd_sep_config;
@@ -129,6 +135,7 @@ struct EngineInitParams {
     py::object                   py_sp_model;
     py::object                   weight_manager;
     kmonitor::MetricsReporterPtr metrics_reporter = nullptr;
+    std::shared_ptr<navi_sched::NaviSchedAgent> navi_sched_agent;
 
 public:
     void showDebugInfo() const {

@@ -9,6 +9,7 @@ using namespace autil;
 namespace rtp_llm {
 
 EngineBase::EngineBase(const EngineInitParams& params) {
+    resource_context_.navi_sched_agent = params.navi_sched_agent;
     initRuntime(params);
 }
 

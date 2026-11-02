@@ -1,3 +1,4 @@
+load("@internal_impls//:impls.bzl", "navi_sched_test_deps")
 load("@arch_config//:arch_select.bzl", get_triton_deps = "triton_deps", "internal_deps")
 
 py_test(
@@ -33,6 +34,15 @@ py_test(
         "//rtp_llm:testlib",
         "//rtp_llm/server:server",
     ],
+    tags = ["manual"],
+)
+
+py_test(
+    name = "navi_sched_adapter_test",
+    srcs = ["navi_sched_adapter_test.py"],
+    deps = [
+        "//rtp_llm/server:navi_sched_adapter",
+    ] + navi_sched_test_deps(),
     tags = ["manual"],
 )
 

@@ -1,0 +1,37 @@
+NAVI_SCHED_CPP_0.1 {
+    global:
+        _ZN10navi_sched14NaviSchedAgentD*;
+        _ZN10navi_sched14NaviSchedAgent4stopEv;
+        _ZN10navi_sched14NaviSchedAgent4initEv;
+        _ZN10navi_sched28NaviSchedBatchFinishReporterD*;
+        extern "C++" {
+            navi_sched::NaviSchedAgent::NaviSchedAgent*;
+            navi_sched::NaviSchedAgent::getGrpcPort*;
+            navi_sched::NaviSchedAgent::addBatchRequest*;
+            navi_sched::NaviSchedAgent::reportCacheInserted*;
+            navi_sched::NaviSchedAgent::reportCacheRemoved*;
+            navi_sched::NaviSchedBatchFinishReporter::startBatch*;
+            navi_sched::NaviSchedBatchFinishReporter::finishBatch*;
+            navi_sched::NaviSchedBatchFinishReporter::abortRequests*;
+            navi_sched::createRtpLLMAgentFromEnvironment*;
+            navi_sched::getRtpLLMAgentGrpcPort*;
+            navi_sched::stopRtpLLMAgent*;
+            navi_sched::setRtpLLMForwardBatchHandler*;
+            navi_sched::addRtpLLMBatchRequest*;
+            navi_sched::retainRtpLLMReadyBatch*;
+            navi_sched::acquireRtpLLMRetainedBatchLease*;
+            navi_sched::RtpLLMRetainedBatchLease::*;
+            navi_sched::abortRetainedRtpLLMBatch*;
+            navi_sched::startRetainedRtpLLMBatches*;
+            navi_sched::startRtpLLMBatch*;
+            navi_sched::finishRtpLLMBatch*;
+            navi_sched::recordRtpLLMPrefillBatch*;
+            navi_sched::recordRtpLLMObservedPrefillBatch*;
+            navi_sched::reportRtpLLMExecutionLoad*;
+            navi_sched::reportRtpLLMCache*;
+            navi_sched::resetRtpLLMCacheReportLatency*;
+            navi_sched::takeRtpLLMCacheReportLatencyUs*;
+        };
+    local:
+        *;
+};

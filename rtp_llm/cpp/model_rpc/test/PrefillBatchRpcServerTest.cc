@@ -479,6 +479,7 @@ TEST(PrefillBatchRpcServerTest, AdmitGroupCopiesBatchMetadataAndLease) {
     request.set_batch_id(7);
     request.set_dp_rank(0);
     request.set_fetch_attach_timeout_ms(999);
+    request.set_navi_sched(true);
     request.add_requests()->mutable_input()->set_request_id(61);
     request.add_requests()->mutable_input()->set_request_id(62);
     EnqueueBatchResponsePB                        response;
@@ -490,10 +491,56 @@ TEST(PrefillBatchRpcServerTest, AdmitGroupCopiesBatchMetadataAndLease) {
     ASSERT_TRUE(slots[0].input->has_group_id());
     EXPECT_EQ(slots[0].input->group_id().value(), 7);
     EXPECT_EQ(slots[0].fetch_attach_timeout_ms, 999);
+    EXPECT_TRUE(slots[0].navi_sched);
     EXPECT_EQ(slots[1].input->group_size(), 2);
     ASSERT_TRUE(slots[1].input->has_group_id());
     EXPECT_EQ(slots[1].input->group_id().value(), 7);
     EXPECT_EQ(slots[1].fetch_attach_timeout_ms, 999);
+    EXPECT_TRUE(slots[1].navi_sched);
+}
+
+TEST(PrefillBatchRpcServerTest, LocalPrefillBypassesPdResourcePreparation) {
+    PrefillBatchRpcServer server;
+    server.meta_ = std::make_shared<RpcServerRuntimeMeta>();
+
+    std::vector<PrefillBatchRpcServer::BatchSlot> slots(1);
+    auto&                                         slot = slots.front();
+    slot.input                                         = std::make_shared<GenerateInputPB>();
+    slot.input->set_request_id(71);
+    slot.input->add_token_ids(1);
+    slot.input->mutable_generate_config()->set_max_new_tokens(1);
+    slot.input->mutable_generate_config()->set_num_beams(1);
+    slot.input->mutable_generate_config()->set_can_use_pd_separation(true);
+
+    server.buildSlotContexts(slots);
+
+    EXPECT_TRUE(slot.deferred->local_execution);
+    auto results = server.prepareGroup(slots);
+    ASSERT_EQ(results.size(), 1);
+    EXPECT_TRUE(results.front().prepared);
+    EXPECT_TRUE(results.front().stage_status.ok());
+    ASSERT_NE(slot.deferred->context->generate_input, nullptr);
+    EXPECT_EQ(slot.deferred->context->generate_input->request_id, 71);
+}
+
+TEST(PrefillBatchRpcServerTest, MultiTokenPrefillKeepsPdResourcePreparation) {
+    PrefillBatchRpcServer server;
+    server.meta_ = std::make_shared<RpcServerRuntimeMeta>();
+
+    std::vector<PrefillBatchRpcServer::BatchSlot> slots(1);
+    auto&                                         slot = slots.front();
+    slot.input                                         = std::make_shared<GenerateInputPB>();
+    slot.input->set_request_id(72);
+    slot.input->add_token_ids(1);
+    slot.input->mutable_generate_config()->set_max_new_tokens(2);
+    slot.input->mutable_generate_config()->set_num_beams(1);
+    slot.input->mutable_generate_config()->set_can_use_pd_separation(true);
+
+    server.buildSlotContexts(slots);
+
+    EXPECT_FALSE(slot.deferred->local_execution);
+    ASSERT_NE(slot.deferred->context, nullptr);
+    EXPECT_EQ(slot.deferred->context->generate_input, nullptr);
 }
 
 TEST(PrefillBatchRpcServerTest, ContextCapturesAdmittedEnvelopeBeforeQueryConversion) {

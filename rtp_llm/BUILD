@@ -1,3 +1,5 @@
+load("@internal_impls//:impls.bzl", "extension_whl_requires")
+
 package(default_visibility = ["//visibility:public"])
 
 exports_files([
@@ -561,6 +563,8 @@ py_library(
 py_library(
     name = "rtp_llm_frontend_lib",
     deps = [
+        ":async_model",
+        ":models",
         ":utils",
         ":eplb",
         ":ops",
@@ -579,6 +583,7 @@ py_library(
         ":frontend",
         ":embedding",
         "//rtp_llm/tools:model_assistant",
+        "//rtp_llm/tools/convert:convert",
         "//rtp_llm/distribute:distribute",
         ":tokenizer",
         "//rtp_llm/aios/kmonitor:kmonitor_py",
@@ -786,7 +791,7 @@ py_wheel(
         ":rtp_llm_frontend_package",
         "@rtp_deps//:extension_package_frontend"
     ],
-    requires = whl_reqs_frontend,
+    requires = whl_reqs_frontend + extension_whl_requires(),
 )
 
 rename_wheel(
@@ -856,7 +861,7 @@ py_wheel(
         ":rtp_llm_package",
         "@rtp_deps//:extension_package"
     ],
-    requires = whl_reqs,
+    requires = whl_reqs + extension_whl_requires(),
 )
 
 py_wheel(

@@ -236,6 +236,7 @@ absl::Status StreamCacheResource::initKVBlock() {
 
     MallocResult result = resource_context_.cache_manager->malloc(malloc_info);
     recordCacheReuseMallocResult(result);
+    stream_->addKVCacheMallocBreakdown(result);
     if (!result.success) {
         malloc_failed_times_++;
         switch (result.status) {
@@ -436,6 +437,7 @@ absl::Status StreamCacheResource::incrKVBlock(int seq_len_override) {
     malloc_info.incr_seq_len_override        = seq_len_override;
 
     auto result = resource_context_.cache_manager->malloc(malloc_info);
+    stream_->addKVCacheMallocBreakdown(result);
     if (!result.success) {
         malloc_failed_times_++;
         return absl::InternalError("malloc failed");

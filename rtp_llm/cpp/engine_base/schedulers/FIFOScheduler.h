@@ -106,6 +106,12 @@ private:
     void moveGroupToNewStreams(StreamGroup& group);
     void moveGroupToAllocatingGroup(StreamGroup& group);
     void dispatchPreparedGroup(StreamGroup& group);
+    bool advanceLoadingNaviSchedGroup(StreamGroup& group);
+    bool isNaviSchedGroup(const StreamGroup& group) const;
+    bool fitsNaviSchedExecutionLimits(const std::vector<GenerateStreamPtr>& streams) const;
+    bool canAdmitNaviSchedGroup(const StreamGroup& group) const;
+    void evaluateWaitingNaviSchedGroup(StreamGroup& group);
+
 
     void    cancelExtraStreams() override;
     int64_t extraOnflightStreams() const override;

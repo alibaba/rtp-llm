@@ -588,11 +588,52 @@ public:
         return generate_input_->group_id;
     }
 
+    bool isNaviSched() const {
+        return generate_input_->navi_sched;
+    }
+
     int64_t enqueueTime() const {
         return generate_input_->begin_time_us;
     }
     int64_t schedulerEnqueueTimeUs() const {
         return scheduler_enqueue_time_us_ > 0 ? scheduler_enqueue_time_us_ : enqueueTime();
+    }
+    int64_t canRunTimeUs() const {
+        return can_run_time_us_;
+    }
+    int64_t enqueueToCanRunUs() const {
+        return scheduler_enqueue_time_us_ > 0 && can_run_time_us_ > scheduler_enqueue_time_us_ ?
+                   can_run_time_us_ - scheduler_enqueue_time_us_ :
+                   0;
+    }
+    int64_t canRunToRunningUs() const {
+        return can_run_time_us_ > 0 && first_running_time_us_ > can_run_time_us_ ?
+                   first_running_time_us_ - can_run_time_us_ :
+                   0;
+    }
+    int64_t loadingCacheLatencyUs() const {
+        return loading_cache_latency_us_;
+    }
+    void addKVBlockInitLatencyUs(int64_t latency_us) {
+        kv_block_init_latency_us_ += latency_us;
+    }
+    int64_t kvBlockInitLatencyUs() const {
+        return kv_block_init_latency_us_;
+    }
+    void addKVCacheLoadSetupLatencyUs(int64_t latency_us) {
+        kv_cache_load_setup_latency_us_ += latency_us;
+    }
+    int64_t kvCacheLoadSetupLatencyUs() const {
+        return kv_cache_load_setup_latency_us_;
+    }
+    void addKVCacheMallocBreakdown(const MallocResult& result) {
+        kv_cache_malloc_breakdown_.add(result);
+    }
+    const MallocResult& kvCacheMallocBreakdown() const {
+        return kv_cache_malloc_breakdown_;
+    }
+    int64_t loadDoneToRunningUs() const {
+        return load_done_to_running_us_;
     }
 
     const std::vector<BaseLogitsProcessorPtr>& getAllLogitsProcessorPtr() const {
@@ -923,6 +964,9 @@ protected:
     int64_t                               running_started_time_us_     = 0;
     bool                                  generation_done_             = false;
     int64_t                               generation_done_time_us_     = 0;
+    int64_t kv_block_init_latency_us_ = 0;
+    int64_t kv_cache_load_setup_latency_us_ = 0;
+    MallocResult kv_cache_malloc_breakdown_{true, 0};
     std::shared_ptr<StreamCacheResource>  stream_cache_resource_;
     // Prefill-to-decode transition is committed by the output/bookkeeping
     // worker and observed by the scheduler thread. Keep this flag atomic; the
