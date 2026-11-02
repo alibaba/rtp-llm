@@ -3,6 +3,7 @@
 
 #include <cstdint>
 #include <cstdlib>
+#include <limits>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -58,6 +59,13 @@ TEST(AlignedHostMemoryTest, AllocatesAlignedWritablePinnedMemory) {
     memory.data()[kUsableBytes - 1] = 0x34;
     EXPECT_EQ(memory.data()[0], 0x12);
     EXPECT_EQ(memory.data()[kUsableBytes - 1], 0x34);
+}
+
+TEST(AlignedHostMemoryTest, RejectsOverflowAndZeroAlignmentBeforeAllocation) {
+    EXPECT_THROW(AlignedHostMemory(std::numeric_limits<size_t>::max(), 4096, "overflow"), std::overflow_error);
+    EXPECT_THROW(AlignedHostMemory(static_cast<size_t>(std::numeric_limits<int64_t>::max()), 1, "signed overflow"),
+                 std::overflow_error);
+    EXPECT_THROW(AlignedHostMemory(64, 0, "zero alignment"), std::invalid_argument);
 }
 
 #if USING_CUDA

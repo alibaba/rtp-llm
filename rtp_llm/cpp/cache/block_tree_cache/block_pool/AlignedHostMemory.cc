@@ -4,6 +4,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <exception>
+#include <limits>
 #include <stdexcept>
 
 #include <sys/mman.h>
@@ -122,6 +123,13 @@ torch::Tensor allocateRegisteredCpuTensor(size_t size_bytes, bool use_memfd, int
 }  // namespace
 
 AlignedHostMemory::AlignedHostMemory(size_t usable_bytes, size_t alignment, const std::string& allocation_name) {
+    if (alignment == 0) {
+        throw std::invalid_argument("host memory alignment must be positive");
+    }
+    if (usable_bytes > std::numeric_limits<size_t>::max() - alignment
+        || usable_bytes + alignment > static_cast<size_t>(std::numeric_limits<int64_t>::max())) {
+        throw std::overflow_error("aligned host memory backing size overflow");
+    }
     backing_bytes_ = usable_bytes + alignment;
     try {
         const auto mode = hostPinMode();
