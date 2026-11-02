@@ -200,6 +200,15 @@ class V41ImageDownloadTimingTest(unittest.TestCase):
         self.assertEqual(requests, 1)
         self.assertEqual(elapsed_ms, 125.0)
 
+    def test_ssrf_client_error_is_preserved_without_retry(self):
+        error = FtRuntimeException(
+            ExceptionType.MM_WRONG_FORMAT_ERROR, "url ssrf check failed"
+        )
+        result, elapsed_ms, attempts = self.run_loader([error])
+        self.assertIs(result, error)
+        self.assertEqual(attempts, 1)
+        self.assertEqual(elapsed_ms, 125.0)
+
     def test_network_timeouts_keep_timeout_code_and_exclude_retry_backoff(self):
         result, elapsed_ms, attempts = self.run_loader(
             [requests.Timeout("download timeout") for _ in range(3)]

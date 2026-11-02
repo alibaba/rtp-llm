@@ -1098,6 +1098,14 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
     async def test_multimodal_error_keeps_public_contract(self) -> None:
         cases = (
             (
+                ExceptionType.MM_WRONG_FORMAT_ERROR,
+                "url ssrf check failed",
+                400,
+                "InvalidParameter",
+                LLMFinishReason.STOP_ENGINE_PARAM,
+                LLMFinishReason.USE_PARAMETER_STATUS,
+            ),
+            (
                 ExceptionType.MM_DOWNLOAD_FAILED,
                 "Failed to download multimodal content",
                 400,

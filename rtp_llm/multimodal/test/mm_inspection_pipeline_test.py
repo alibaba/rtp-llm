@@ -13,6 +13,7 @@ from unittest.mock import MagicMock, patch
 
 import torch
 
+from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.py_config_modules import VitConfig
 from rtp_llm.metrics.kmonitor_metric_reporter import GaugeMetrics
 from rtp_llm.multimodal.greennet_hook import (
@@ -412,6 +413,42 @@ class InspectionPipelineTest(TestCase):
                     self.assertEqual(record["exception"], "embedding failed")
                 finally:
                     engine.stop()
+
+    def test_ssrf_preprocessing_error_survives_inspection_wait(self):
+        error = FtRuntimeException(
+            ExceptionType.MM_WRONG_FORMAT_ERROR, "url ssrf check failed"
+        )
+        with patch.object(SourceModel, "preprocess_input", side_effect=error):
+            engine = self._make_engine(SourceModel())
+            provider = SourceProvider()
+            engine._inspection._greennet_provider = provider
+            try:
+                with self.assertRaises(FtRuntimeException) as raised:
+                    engine.wait_greennet_verdict(
+                        [self._make_input("http://10.0.0.1/image.png")],
+                        timeout_ms=5000,
+                        request_id=92,
+                    )
+                self.assertIs(raised.exception, error)
+                self.assertEqual(provider.calls, [])
+                self.assertEqual(engine.mm_part.forward_urls, [])
+            finally:
+                engine.stop()
+
+    def test_untyped_preprocessing_failure_keeps_process_error_verdict(self):
+        with patch.object(
+            SourceModel, "preprocess_input", side_effect=RuntimeError("backend failed")
+        ):
+            engine = self._make_engine(SourceModel())
+            engine._inspection._greennet_provider = SourceProvider()
+            try:
+                verdict = engine.wait_greennet_verdict(
+                    [self._make_input("fake://broken")], timeout_ms=5000
+                )
+                self.assertFalse(verdict.passed)
+                self.assertEqual(verdict.code, 11)
+            finally:
+                engine.stop()
 
     def test_cancelled_queued_continuation_finishes_terminal_future(self):
         source, queued = concurrent.futures.Future(), concurrent.futures.Future()

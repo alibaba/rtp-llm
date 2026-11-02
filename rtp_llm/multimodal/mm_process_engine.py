@@ -1532,7 +1532,14 @@ class MMProcessEngine:
     ) -> None:
         self.report_vit_error(error, entry)
         try:
-            if not entry.is_greennet_decided:
+            if (
+                isinstance(error, FtRuntimeException)
+                and error.exception_type == ExceptionType.MM_WRONG_FORMAT_ERROR
+            ):
+                # Invalid media (including SSRF rejection) is a client error,
+                # not an inspection-service failure. Preserve it for RPC waiters.
+                entry.set_greennet_error(error)
+            elif not entry.is_greennet_decided:
                 verdict = GreenNetVerdict(passed=False, code=11, message=str(error))
                 try:
                     if getattr(error, "_vit_error_qps_reported", False):

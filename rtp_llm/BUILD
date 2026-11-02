@@ -391,6 +391,11 @@ py_library(
 )
 
 py_library(
+    name = "config_exceptions",
+    srcs = ["config/exceptions.py"],
+)
+
+py_library(
     name = "config",
     srcs = glob([
         "config/*.py",
