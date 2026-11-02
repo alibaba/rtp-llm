@@ -507,7 +507,7 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         bind_to=(kv_cache_config, "kvcm_storage_thread_num"),
         type=int,
         default=4,
-        help="kvcm SdkWrapper中任务处理线程数量",
+        help="KVCM SDK 任务池线程数。多 rank 普通 remote 搬运在每个 rank 使用独立的 RTP 读池和写池，各用此线程数。",
     )
     kv_cache_group.add_argument(
         "--kvcm_storage_queue_size",
@@ -570,16 +570,16 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         env_name="RECO_ASYNCWRAPPER_THREAD_NUM",
         bind_to=(kv_cache_config, "kvcm_asyncwrapper_thread_num"),
         type=int,
-        default=16,
-        help="异步包装器线程数量",
+        default=4,
+        help="Remote Cache 读写共用的业务线程数，独立于 BTC。单 rank 本地搬运池使用相同的线程数。",
     )
     kv_cache_group.add_argument(
         "--kvcm_asyncwrapper_queue_size",
         env_name="RECO_ASYNCWRAPPER_QUEUE_SIZE",
         bind_to=(kv_cache_config, "kvcm_asyncwrapper_queue_size"),
         type=int,
-        default=1000,
-        help="异步包装器队列大小",
+        default=10000,
+        help="Remote Cache 业务队列容量，另为读任务预留 64 个位置。各 RTP 搬运池也用此值配置队列容量。0 表示不限长度。",
     )
     kv_cache_group.add_argument(
         "--kvcm_get_broadcast_timeout",

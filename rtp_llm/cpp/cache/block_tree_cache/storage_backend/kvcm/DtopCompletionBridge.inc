@@ -332,8 +332,7 @@ std::vector<FunctionResponsePB> transferCompletedDecode(const std::vector<Functi
     std::vector<FunctionResponsePB> responses(requests.size());
     block_tree_cache_detail::ScopeRollback collect_sdk_failures([&] {
         for (const auto& response : responses) {
-            if (response.has_remote_response() && response.remote_response().has_sdk_failed()
-                && response.remote_response().sdk_failed()) sdk_failed = true;
+            if (response.has_remote_response() && response.remote_response().sdk_failed()) sdk_failed = true;
         }
     });
     // Prebuild error payloads and all source descriptors before the first SDK

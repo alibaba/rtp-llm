@@ -1,5 +1,6 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/test/KVCMMockTestBase.h"
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <csignal>
@@ -19,9 +20,13 @@
 #include "rtp_llm/cpp/cache/events/KVCacheEventReporter.h"
 #include "rtp_llm/cpp/cache/test/BlockPoolTestHelper.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
+#include "rtp_llm/cpp/utils/AsyncProfilingScope.h"
+#include "rtp_llm/cpp/utils/AsyncProfileTrace.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/SdkBufferSafety.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/DecodePublicationAccounting.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/ScopeRollback.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/test/BoundedThreadTestUtils.h"
 
 namespace rtp_llm {
 namespace {
@@ -1279,6 +1284,164 @@ TEST(KVCMLocalTest, InvalidMatchLocationReportsNoHitAndDoesNotDispatchPayload) {
     EXPECT_FALSE(observation.success);
     EXPECT_EQ(observation.matched_blocks_num, 0u);
     EXPECT_EQ(observation.match_meta, nullptr);
+}
+
+TEST(KVCMLocalTest, TP2PayloadWaitReleasesCoordinatorAndShutdownDrainsSettlement) {
+    autil::EnvGuard decode_publish("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "0");
+    for (const auto& [write, late] : {std::make_pair(false, false), std::make_pair(false, true),
+                                      std::make_pair(true, false), std::make_pair(true, true)}) {
+        SCOPED_TRACE(::testing::Message() << "write=" << write << ", late=" << late);
+        auto environment = std::make_shared<BackendEnvironment>(
+            makeBackendEnvironment(write ? "kvcm_tp2_deferred_write" : "kvcm_tp2_deferred_read"));
+        auto client      = std::make_shared<MockClientWrapper>();
+        EXPECT_CALL(*client, initForPools(_, _, _, _)).WillOnce(Return(true));
+        EXPECT_CALL(*client, shutdown()).Times(1);
+        auto first_state         = std::make_shared<KVCMBroadcastState>();
+        auto second_state        = std::make_shared<KVCMBroadcastState>();
+        auto entered             = std::make_shared<std::promise<void>>();
+        auto release             = std::make_shared<std::promise<void>>();
+        auto rank_entered        = entered->get_future();
+        auto released            = release->get_future().share();
+        second_state->on_request = [entered, released, first_call = std::make_shared<std::atomic<bool>>(true)] {
+            if (first_call->exchange(false)) {
+                entered->set_value();
+                released.wait();
+            }
+        };
+        KVCMBroadcastRpcServer first(0, first_state), second(1, second_state);
+        ASSERT_TRUE(first.start());
+        ASSERT_TRUE(second.start());
+        auto broadcast = std::make_shared<BroadcastManager>(std::vector<std::string>{first.address(), second.address()});
+        ASSERT_TRUE(broadcast->init());
+        auto parallel    = singleRankConfig();
+        parallel.tp_size = 2;
+        KVCacheConfig config;
+        config.kvcm_asyncwrapper_thread_num = 1;
+        config.kvcm_asyncwrapper_queue_size = 0;
+        auto backend =
+            std::make_shared<BackendHandle>(makeBackend(*environment, parallel, client, broadcast, nullptr, false, config));
+        block_tree_cache_detail::ScopeRollback unblock([release] { release->set_value(); });
+        ASSERT_TRUE(initSingleRank(*backend->backend, *environment));
+        auto profile = AsyncProfileSession::start(128);
+        ASSERT_TRUE(profile);
+        block_tree_cache_detail::ScopeRollback stop_profile([&] { profile->finish(); });
+        const kv_cache_manager::Locations locations{{{"tp0_Fdefault", "pace://read0"}, {"tp1_Fdefault", "pace://read1"}}};
+        auto request = makeStorageRequest(*environment);
+        request.request_id = 42;
+        if (late)
+            request.transfer_task.emplace(std::vector<TransferDescriptor>{}, std::chrono::seconds(2));
+        const auto refs = environment->device_pool->refCount(environment->block_id);
+        auto completed = std::make_shared<std::promise<void>>();
+        auto result = completed->get_future();
+        auto progressed = std::make_shared<std::promise<bool>>();
+        auto next = progressed->get_future();
+        if (write) {
+            kv_cache_manager::WriteLocation allocation;
+            allocation.write_session_id = "deferred-write";
+            allocation.block_mask = kv_cache_manager::BlockMaskOffset{0};
+            allocation.locations = locations;
+            auto next_allocation = allocation;
+            next_allocation.write_session_id = "next-write";
+            EXPECT_CALL(*client, getWriteLocation(_, _, _, _, _, _, 0))
+                .WillOnce(Return(std::make_pair(true, allocation)))
+                .WillOnce(Return(std::make_pair(true, next_allocation)));
+            const auto all_written = ::testing::Eq(kv_cache_manager::BlockMask{kv_cache_manager::BlockMaskOffset{1}});
+            EXPECT_CALL(*client, finishWrite(_, _, "next-write", all_written, _))
+                .WillOnce(::testing::InvokeWithoutArgs([progressed] {
+                    progressed->set_value(true);
+                    return true;
+                }));
+            auto acknowledge = ::testing::InvokeWithoutArgs([completed] { completed->set_value(); return true; });
+            if (late) {
+                EXPECT_CALL(*client, finishWrite(_, _, "deferred-write", _, _)).Times(0);
+                EXPECT_CALL(*client, abortWrite(_, _, "deferred-write")).WillOnce(acknowledge);
+            } else {
+                EXPECT_CALL(*client, abortWrite(_, _, _)).Times(0);
+                EXPECT_CALL(*client, finishWrite(_, _, "deferred-write", all_written, _))
+                    .WillOnce(acknowledge);
+            }
+            ASSERT_TRUE(backend->backend->write(backend->backend->prepareWrite(request)));
+        } else {
+            EXPECT_CALL(*client, match(_, _, _, _, _, _)).WillRepeatedly(Return(std::make_pair(true, locations)));
+            auto matched = match(*backend->backend, request);
+            ASSERT_TRUE(matched.success);
+            backend->backend->read(request, matched.match_meta, [completed, expect_late = late](ErrorInfo e) {
+                if (expect_late)
+                    EXPECT_EQ(e.code(), ErrorCode::DEADLINE_EXCEEDED);
+                else
+                    EXPECT_TRUE(e.ok());
+                completed->set_value();
+            });
+        }
+        ASSERT_EQ(rank_entered.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+        EXPECT_EQ(result.wait_for(std::chrono::milliseconds(0)), std::future_status::timeout);
+        EXPECT_EQ(environment->device_pool->refCount(environment->block_id), refs + 1);
+        if (write) {
+            auto next_request = makeStorageRequest(*environment, {102});
+            next_request.request_id = 43;
+            ASSERT_TRUE(backend->backend->write(backend->backend->prepareWrite(std::move(next_request))));
+        } else {
+            backend->backend->match(request, [progressed](size_t, auto, bool ok) { progressed->set_value(ok); });
+        }
+        ASSERT_EQ(next.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+        EXPECT_TRUE(next.get());
+        if (late) {
+            auto worker_entered = std::make_shared<std::promise<void>>();
+            auto worker = worker_entered->get_future();
+            std::promise<void> release_worker;
+            auto worker_released = release_worker.get_future().share();
+            block_tree_cache_detail::ScopeRollback unblock_worker([&] { release_worker.set_value(); });
+            ASSERT_TRUE(backend->backend->executor_->submit([worker_entered, worker_released] {
+                worker_entered->set_value();
+                worker_released.wait();
+            }, BlockTreeTaskClass::LOAD));
+            ASSERT_EQ(worker.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+            unblock.run();
+            const auto deadline = request.transfer_task->deadline();
+            // Observe successful RPC completion queued before the deadline, then
+            // delay only its settlement. A transport timeout is a different case.
+            while (backend->backend->executor_->queueSizes().completion == 0
+                   && std::chrono::steady_clock::now() < deadline)
+                ASSERT_EQ(result.wait_for(std::chrono::milliseconds(1)), std::future_status::timeout);
+            ASSERT_EQ(backend->backend->executor_->queueSizes().completion, 1u);
+            ASSERT_EQ(result.wait_until(deadline), std::future_status::timeout);
+        }
+        block_tree_cache_test::BoundedThread<void> stopping([backend, environment] { backend->backend->shutdown(); });
+        if (!late) {
+            EXPECT_EQ(stopping.waitFor(std::chrono::milliseconds(50)), std::future_status::timeout);
+            EXPECT_EQ(result.wait_for(std::chrono::milliseconds(0)), std::future_status::timeout);
+            unblock.run();
+        }
+        ASSERT_EQ(stopping.waitFor(std::chrono::seconds(5)), std::future_status::ready);
+        stopping.get();
+        ASSERT_EQ(result.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+        result.get();
+        EXPECT_FALSE(environment->device_pool->isFrozen(environment->block_id));
+        EXPECT_EQ(environment->device_pool->refCount(environment->block_id), refs);
+        const auto events = profile->finish();
+        stop_profile.dismiss();
+        const std::string io_stage = write ? "write_io" : "read_io";
+        const auto count = std::count_if(events.begin(), events.end(), [&](const auto& event) {
+            return event.record.stage == io_stage && event.record.kind == AsyncProfileKind::Lifecycle;
+        });
+        EXPECT_EQ(count, write ? 2 : 1);
+        const auto trace = mergeAsyncProfileTrace(R"({"traceEvents":[]})", events);
+        EXPECT_EQ(trace.find("cache.transfer.storage_backend." + io_stage + "("), std::string::npos);
+        for (const auto* stage : {write ? "write_submit" : "read_submit", write ? "write_complete" : "read_complete"}) {
+            size_t executions = 0;
+            for (const auto& event : events) {
+                if (event.record.stage != stage)
+                    continue;
+                ++executions;
+                EXPECT_EQ(event.record.kind, AsyncProfileKind::Execution);
+                EXPECT_GT(event.record.start_tid, 0);
+                EXPECT_EQ(event.record.start_tid, event.end_tid);
+                EXPECT_GE(event.record.request_id, 0);
+                EXPECT_NE(trace.find(event.name), std::string::npos);
+            }
+            EXPECT_EQ(executions, write ? 2u : 1u) << stage;
+        }
+    }
 }
 
 TEST(KVCMLocalTest, TP2DuplicateRankMatchReportsNoHitAndDoesNotDispatchPayload) {

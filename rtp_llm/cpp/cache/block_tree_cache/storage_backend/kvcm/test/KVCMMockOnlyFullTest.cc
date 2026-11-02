@@ -1,5 +1,6 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/test/KVCMMockTestBase.h"
 
+#include <future>
 #include <tuple>
 #include <thread>
 
@@ -339,6 +340,7 @@ TEST(KVCMMockOnlyFullTest, BackendReadPreservesLocalPrefixAndStopsAtRemoteMiss) 
 }
 
 TEST(KVCMMockOnlyFullTest, TP2WorkerRegistersItsRankAndExecutesLocalPayload) {
+    autil::EnvGuard decode_publish("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "0");
     auto environment    = makeBackendEnvironment("kvcm_storage_backend_tp2_worker");
     auto client_wrapper = std::make_shared<MockClientWrapper>();
 
@@ -371,7 +373,10 @@ TEST(KVCMMockOnlyFullTest, TP2WorkerRegistersItsRankAndExecutesLocalPayload) {
         }));
     EXPECT_CALL(*client_wrapper, shutdown()).Times(1);
 
-    auto backend = makeBackend(environment, parallelism_config, client_wrapper);
+    KVCacheConfig config;
+    config.kvcm_storage_thread_num      = 1;
+    config.kvcm_asyncwrapper_thread_num = 1;
+    auto backend = makeBackend(environment, parallelism_config, client_wrapper, nullptr, nullptr, false, config);
     ASSERT_TRUE(backend->init(environment.cache_config.topologyPtr(),
                               environment.pools_by_tag,
                               [&](int layer_id, const std::string& tag, int block_id) {
@@ -380,8 +385,12 @@ TEST(KVCMMockOnlyFullTest, TP2WorkerRegistersItsRankAndExecutesLocalPayload) {
                               }));
 
     const kv_cache_manager::UriStrVec expected_read_uris{"read_uri"};
+    std::promise<void> read_entered, write_entered;
+    auto               reading         = read_entered.get_future();
+    auto               writing         = write_entered.get_future();
+    const auto         read_rpc_thread = std::this_thread::get_id();
     EXPECT_CALL(*client_wrapper, loadKvCachesForTag("default", expected_read_uris, _, _))
-        .WillOnce(Invoke([](const std::string&,
+        .WillOnce(Invoke([&](const std::string&,
                             const kv_cache_manager::UriStrVec&,
                             kv_cache_manager::BlockBuffers& buffers,
                             const std::shared_ptr<kv_cache_manager::TransferTraceInfo>&) {
@@ -389,6 +398,8 @@ TEST(KVCMMockOnlyFullTest, TP2WorkerRegistersItsRankAndExecutesLocalPayload) {
             if (!buffers.empty()) {
                 EXPECT_EQ(buffers.front().iovs.size(), 1u);
             }
+            EXPECT_NE(std::this_thread::get_id(), read_rpc_thread);
+            read_entered.set_value();
             return true;
         }));
     RemoteOperationRequestPB read_request;
@@ -397,18 +408,31 @@ TEST(KVCMMockOnlyFullTest, TP2WorkerRegistersItsRankAndExecutesLocalPayload) {
     read_request.add_block_ids(environment.block_id);
     read_request.add_uris(expected_read_uris.front());
     RemoteOperationResponsePB read_response;
-    EXPECT_TRUE(backend->execute(read_request, read_response));
 
     const kv_cache_manager::UriStrVec expected_write_uris{"write_uri"};
+    std::thread::id write_rpc_thread;
     EXPECT_CALL(*client_wrapper, saveKvCachesForTag("default", expected_write_uris, _, _))
-        .WillOnce(Return(std::make_pair(true, kv_cache_manager::UriStrVec{"actual_write_uri"})));
+        .WillOnce(::testing::InvokeWithoutArgs([&] {
+            EXPECT_NE(std::this_thread::get_id(), write_rpc_thread);
+            write_entered.set_value();
+            const bool read_ran = reading.wait_for(std::chrono::seconds(5)) == std::future_status::ready;
+            return std::make_pair(read_ran, kv_cache_manager::UriStrVec{"actual_write_uri"});
+        }));
+    ScopedReferencedBlocks source(environment.device_pool, 1);
     RemoteOperationRequestPB write_request;
     write_request.set_op(REMOTE_OPERATION_WRITE);
     write_request.add_group_tags("default");
-    write_request.add_block_ids(environment.block_id);
+    write_request.add_block_ids(source.get().front());
     write_request.add_uris(expected_write_uris.front());
     RemoteOperationResponsePB write_response;
-    ASSERT_TRUE(backend->execute(write_request, write_response));
+    // Hold the sole RTP write worker in the mock transfer until the read is dispatched.
+    auto write_result = std::async(std::launch::async, [&] {
+        write_rpc_thread = std::this_thread::get_id();
+        return backend->execute(write_request, write_response);
+    });
+    ASSERT_EQ(writing.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+    EXPECT_TRUE(backend->execute(read_request, read_response));
+    ASSERT_TRUE(write_result.get());
     ASSERT_EQ(write_response.actual_uris_size(), 1);
     EXPECT_EQ(write_response.actual_uris(0), "actual_write_uri");
 }
@@ -626,48 +650,53 @@ TEST(KVCMMockOnlyFullTest, TP2BroadcastFailureAbortsWriteSessionAndFreezesSource
     EXPECT_DOUBLE_EQ(quarantineGauge(quarantine_metrics->quarantined_block_ratio_metric), 0);
 }
 
-TEST(KVCMMockOnlyFullTest, TP2ReadRpcTimeoutFreezesDestinationAndPreservesDeadline) {
-    auto environment            = makeBackendEnvironment("kvcm_storage_backend_tp2_read_rpc_timeout");
-    auto client_wrapper         = std::make_shared<MockClientWrapper>();
-    auto timeout_state          = std::make_shared<KVCMBroadcastState>();
-    timeout_state->fail         = true;
-    timeout_state->failure_code = grpc::StatusCode::DEADLINE_EXCEEDED;
-    KVCMBroadcastRpcServer first_server(0, std::make_shared<KVCMBroadcastState>());
-    KVCMBroadcastRpcServer timeout_server(1, timeout_state);
-    ASSERT_TRUE(first_server.start());
-    ASSERT_TRUE(timeout_server.start());
-    auto broadcast_manager =
-        std::make_shared<BroadcastManager>(std::vector<std::string>{first_server.address(), timeout_server.address()});
-    ASSERT_TRUE(broadcast_manager->init());
-    ParallelismConfig parallelism_config;
-    parallelism_config.tp_size    = 2;
-    parallelism_config.tp_rank    = 0;
-    parallelism_config.local_rank = 0;
-    EXPECT_CALL(*client_wrapper, initForPools(_, _, _, _)).WillOnce(Return(true));
-    EXPECT_CALL(*client_wrapper, shutdown()).Times(1);
-    auto backend = makeBackend(environment, parallelism_config, client_wrapper, broadcast_manager);
-    ASSERT_TRUE(backend->init(environment.cache_config.topologyPtr(),
-                              environment.pools_by_tag,
-                              [&](int layer_id, const std::string&, int block_id) {
-                                  return environment.device_pool->convertIndexToBuffer(layer_id, block_id);
-                              }));
-    kv_cache_manager::Locations locations{kv_cache_manager::Location{
-        kv_cache_manager::LocationSpecUnit{"tp0_Fdefault", "read_rank_0"},
-        kv_cache_manager::LocationSpecUnit{"tp1_Fdefault", "read_rank_1"},
-    }};
-    EXPECT_CALL(*client_wrapper, match(_, _, _, _, _, _)).WillOnce(Return(std::make_pair(true, locations)));
-    auto matched = match(*backend.backend, makeStorageRequest(environment));
-    ASSERT_TRUE(matched.success);
-    ASSERT_NE(matched.match_meta, nullptr);
-    const auto request_ref_count = environment.device_pool->refCount(environment.block_id);
-    const auto error = readResult(*backend.backend, makeStorageRequest(environment), std::move(matched.match_meta));
-    EXPECT_EQ(error.code(), ErrorCode::DEADLINE_EXCEEDED);
-    EXPECT_TRUE(environment.device_pool->isFrozen(environment.block_id));
-    EXPECT_EQ(environment.device_pool->treeRefCount(environment.block_id), 1u);
-    EXPECT_EQ(environment.device_pool->refCount(environment.block_id), request_ref_count + 1);
-    backend->shutdown();
-    EXPECT_TRUE(environment.device_pool->isFrozen(environment.block_id));
-    EXPECT_EQ(environment.device_pool->refCount(environment.block_id), request_ref_count + 1);
+TEST(KVCMMockOnlyFullTest, TP2ReadRpcFailureFreezesDestinationAndPreservesDeadline) {
+    autil::EnvGuard decode_publish("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "0");
+    for (auto failure_code : {grpc::StatusCode::DEADLINE_EXCEEDED, grpc::StatusCode::UNAVAILABLE}) {
+        SCOPED_TRACE(static_cast<int>(failure_code));
+        auto environment            = makeBackendEnvironment("kvcm_storage_backend_tp2_read_rpc_timeout");
+        auto client_wrapper         = std::make_shared<MockClientWrapper>();
+        auto timeout_state          = std::make_shared<KVCMBroadcastState>();
+        timeout_state->fail         = true;
+        timeout_state->failure_code = failure_code;
+        KVCMBroadcastRpcServer first_server(0, std::make_shared<KVCMBroadcastState>());
+        KVCMBroadcastRpcServer timeout_server(1, timeout_state);
+        ASSERT_TRUE(first_server.start());
+        ASSERT_TRUE(timeout_server.start());
+        auto broadcast_manager =
+            std::make_shared<BroadcastManager>(std::vector<std::string>{first_server.address(), timeout_server.address()});
+        ASSERT_TRUE(broadcast_manager->init());
+        ParallelismConfig parallelism_config;
+        parallelism_config.tp_size    = 2;
+        parallelism_config.tp_rank    = 0;
+        parallelism_config.local_rank = 0;
+        EXPECT_CALL(*client_wrapper, initForPools(_, _, _, _)).WillOnce(Return(true));
+        EXPECT_CALL(*client_wrapper, shutdown()).Times(1);
+        auto backend = makeBackend(environment, parallelism_config, client_wrapper, broadcast_manager);
+        ASSERT_TRUE(backend->init(environment.cache_config.topologyPtr(),
+                                  environment.pools_by_tag,
+                                  [&](int layer_id, const std::string&, int block_id) {
+                                      return environment.device_pool->convertIndexToBuffer(layer_id, block_id);
+                                  }));
+        kv_cache_manager::Locations locations{kv_cache_manager::Location{
+            kv_cache_manager::LocationSpecUnit{"tp0_Fdefault", "read_rank_0"},
+            kv_cache_manager::LocationSpecUnit{"tp1_Fdefault", "read_rank_1"},
+        }};
+        EXPECT_CALL(*client_wrapper, match(_, _, _, _, _, _)).WillOnce(Return(std::make_pair(true, locations)));
+        auto matched = match(*backend.backend, makeStorageRequest(environment));
+        ASSERT_TRUE(matched.success);
+        ASSERT_NE(matched.match_meta, nullptr);
+        const auto request_ref_count = environment.device_pool->refCount(environment.block_id);
+        const auto error = readResult(*backend.backend, makeStorageRequest(environment), std::move(matched.match_meta));
+        EXPECT_EQ(error.code(), failure_code == grpc::StatusCode::DEADLINE_EXCEEDED ?
+                                    ErrorCode::DEADLINE_EXCEEDED : ErrorCode::EXECUTION_EXCEPTION);
+        EXPECT_TRUE(environment.device_pool->isFrozen(environment.block_id));
+        EXPECT_EQ(environment.device_pool->treeRefCount(environment.block_id), 1u);
+        EXPECT_EQ(environment.device_pool->refCount(environment.block_id), request_ref_count + 1);
+        backend->shutdown();
+        EXPECT_TRUE(environment.device_pool->isFrozen(environment.block_id));
+        EXPECT_EQ(environment.device_pool->refCount(environment.block_id), request_ref_count + 1);
+    }
 }
 
 TEST(KVCMMockOnlyFullTest, RejectsMismatchedTransferVectorsBeforeClientIO) {

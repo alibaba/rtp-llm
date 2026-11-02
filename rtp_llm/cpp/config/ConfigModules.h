@@ -274,8 +274,8 @@ struct KVCacheConfig {
     std::string kvcm_model_user_data                 = "";
     std::string kvcm_model_extra_info                = "";
     std::string kvcm_instance_id_salt                = "";
-    size_t      kvcm_asyncwrapper_thread_num         = 16;
-    size_t      kvcm_asyncwrapper_queue_size         = 1000;
+    size_t      kvcm_asyncwrapper_thread_num         = 4;
+    size_t      kvcm_asyncwrapper_queue_size         = 10000;
     // Retained for parsing compatibility; BTC remote broadcasts inherit the task deadline.
     int         kvcm_get_broadcast_timeout = 15000;
     int         kvcm_put_broadcast_timeout = 15000;

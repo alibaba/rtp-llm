@@ -1809,11 +1809,11 @@ TEST_F(KVCacheManagerTest, Init_ReturnTrue_WhenHostCacheDisabled) {
 
 TEST_F(KVCacheManagerTest, InitRejectsInvalidRemoteExecutorConfigurationBeforeAllocation) {
     const auto cache_config = makeSimpleMhaCacheConfig(1, 4, 2, rtp_llm::DataType::TYPE_INT8);
-    for (const auto& [thread_count, queue_size] : {std::pair<size_t, size_t>{0, 1}, std::pair<size_t, size_t>{1, 0}}) {
-        SCOPED_TRACE(::testing::Message() << "thread_count=" << thread_count << " queue_size=" << queue_size);
+    for (size_t queue_size : {0u, 1u}) {
+        SCOPED_TRACE(queue_size);
         KVCacheConfig kv_cache_config;
         kv_cache_config.enable_remote_cache          = true;
-        kv_cache_config.kvcm_asyncwrapper_thread_num = thread_count;
+        kv_cache_config.kvcm_asyncwrapper_thread_num = 0;
         kv_cache_config.kvcm_asyncwrapper_queue_size = queue_size;
         auto manager = std::make_shared<KVCacheManager>(cache_config, false, nullptr, kv_cache_config);
         EXPECT_FALSE(manager->init());
