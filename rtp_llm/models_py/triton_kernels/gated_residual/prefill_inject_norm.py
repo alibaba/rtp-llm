@@ -55,7 +55,13 @@ def _inject_grouped_norm(x, sublayer, gates, gamma, eps=1e-6):
     rows = x.numel() // 10240
     residual = torch.empty_like(x)
     norm = torch.empty_like(x)
-    collect = 7 <= rows <= 32 or 4093 <= rows <= 4096 or 8192 <= rows <= 16384
+    sm90 = torch.cuda.get_device_capability(x.device) == (9, 0)
+    collect = (
+        7 <= rows <= 32
+        or 4093 <= rows <= 4096
+        or 8192 <= rows <= 16384
+        or (sm90 and 1 <= rows <= 4096)
+    )
     partial = (
         torch.empty(rows * 4, device=x.device, dtype=torch.float32)
         if collect
@@ -83,6 +89,7 @@ def _inject_grouped_norm(x, sublayer, gates, gamma, eps=1e-6):
             scale,
             N=rows * 4,
             BLOCK=triton.next_power_of_2(rows * 4),
+            ROUND_DIV=sm90,
             num_warps=4 if rows < 4096 else 16,
         )
     return residual, norm, scale
@@ -97,7 +104,14 @@ def try_inject_grouped_norm(x, sublayer, gates, gamma, eps):
         and sublayer.shape == (*x.shape[:-1], 2560)
         and gates.shape == (*x.shape[:-1], 4)
         and gamma.shape == (10240,)
-        and (1 <= x.numel() // 10240 <= 32 or 4093 <= x.numel() // 10240 <= 16384)
+        and (
+            1 <= x.numel() // 10240 <= 32
+            or 4093 <= x.numel() // 10240 <= 16384
+            or (
+                x.numel() // 10240 <= 4096
+                and torch.cuda.get_device_capability(x.device) == (9, 0)
+            )
+        )
         and all(
             t.dtype == torch.bfloat16
             and t.device == x.device
@@ -108,7 +122,7 @@ def try_inject_grouped_norm(x, sublayer, gates, gamma, eps):
         and isinstance(eps, (float, int))
         and math.isfinite(eps)
         and eps >= 0
-        and torch.cuda.get_device_capability(x.device) == (12, 0)
+        and torch.cuda.get_device_capability(x.device) in ((9, 0), (12, 0))
     ):
         return None
     return _inject_grouped_norm(x, sublayer, gates, gamma, eps)

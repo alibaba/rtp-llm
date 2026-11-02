@@ -84,11 +84,15 @@ def grouped_rms_norm_triton(
 
 
 @triton.jit
-def _norm_fp8_scale(AMAX, SCALE, N: tl.constexpr, BLOCK: tl.constexpr):
+def _norm_fp8_scale(
+    AMAX, SCALE, N: tl.constexpr, BLOCK: tl.constexpr, ROUND_DIV: tl.constexpr = False
+):
     offsets = tl.arange(0, BLOCK)
     maximum = tl.max(tl.load(AMAX + offsets, offsets < N, other=0.0), 0)
-    # Match the CUDA per-tensor quantizer's constant reciprocal multiplication.
-    scale = maximum * (1.0 / 448.0)
+    if ROUND_DIV:
+        scale = tl.div_rn(maximum, 448.0)
+    else:
+        scale = maximum * (1.0 / 448.0)
     scale = tl.where(scale < 1.1754943508222875e-38, 0.0, scale)
     tl.store(SCALE, scale)
 
@@ -96,17 +100,19 @@ def _norm_fp8_scale(AMAX, SCALE, N: tl.constexpr, BLOCK: tl.constexpr):
 def try_grouped_rms_norm_with_fp8_scale(x, gamma, group_size, eps):
     if not (
         is_supported(x, gamma, group_size)
-        and torch.cuda.get_device_capability(x.device) == (12, 0)
         and x.shape[-1] == 10240
         and group_size == 2560
-        and 256 <= x.numel() // 10240 <= 12288
         and not (x.requires_grad or gamma.requires_grad)
         and isinstance(eps, (float, int))
         and math.isfinite(eps)
         and eps >= 0
     ):
         return None
+    capability = torch.cuda.get_device_capability(x.device)
     rows = x.numel() // 10240
+    min_rows = 1 if capability == (9, 0) else 256
+    if capability not in ((9, 0), (12, 0)) or not min_rows <= rows <= 12288:
+        return None
     result = torch.empty_like(x)
     partial = torch.empty(rows * 4, device=x.device, dtype=torch.float32)
     scale = torch.empty(1, device=x.device, dtype=torch.float32)
@@ -127,6 +133,7 @@ def try_grouped_rms_norm_with_fp8_scale(x, gamma, group_size, eps):
         scale,
         N=rows * 4,
         BLOCK=triton.next_power_of_2(rows * 4),
+        ROUND_DIV=capability == (9, 0),
         num_warps=4 if rows < 4096 else 16,
     )
     return result, scale
