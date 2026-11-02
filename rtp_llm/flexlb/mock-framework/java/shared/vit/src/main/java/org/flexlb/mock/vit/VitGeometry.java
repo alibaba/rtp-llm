@@ -5,7 +5,6 @@ import com.google.protobuf.ByteString;
 import java.nio.*;
 import java.nio.charset.StandardCharsets;
 import java.security.*;
-import java.util.*;
 import org.flexlb.engine.grpc.EngineRpcService.*;
 import org.flexlb.mock.multimodal.MediaInput;
 
@@ -54,22 +53,18 @@ final class VitGeometry {
         }
         return Math.toIntExact((long) llmH * (llmW + 1) + 2);
     }
-    static List<Image> images(MultimodalInputsPB input, int patch, int merge, int minPixels, int maxTokens) {
-        if (input.getTimeoutMs()<0 || input.getTimeoutMs()>3600000) throw MediaInput.invalid("V timeout must be in 0..3600000 ms");
-        if (input.getMultimodalInputsCount() < 1 || input.getMultimodalInputsCount() > 256)
-            throw MediaInput.invalid("Expected 1..256 images");
-        var result = new ArrayList<Image>();
-        for (var media : input.getMultimodalInputsList()) {
-            if (media.getMultimodalType() != 1) throw Status.UNIMPLEMENTED.withDescription("Only image media are modeled by V").asRuntimeException();
-            if (media.hasMultimodalTensor()) throw Status.UNIMPLEMENTED.withDescription("Tensor media need an explicit geometry model").asRuntimeException();
-            var shape = media.getMmPreprocessConfig();
-            int width = shape.getWidth(), height = shape.getHeight();
-            if (width < 1 || height < 1 || width > 32768 || height > 32768)
-                throw MediaInput.invalid("Mock image inputs require explicit width/height in mm_preprocess_config, in 1..32768");
-            long rows = rows(width, height, patch, merge, minPixels, maxTokens);
-            result.add(new Image(MediaInput.key(media), width, height, (int) rows));
+    static void validate(MultimodalInputsPB input, boolean skipDownload) {
+        if(input.getTimeoutMs()<0 || input.getTimeoutMs()>3600000) throw MediaInput.invalid("Invalid media timeout");
+        if(input.getMultimodalInputsCount()<1 || input.getMultimodalInputsCount()>256) throw MediaInput.invalid("Expected 1..256 images");
+        for(var media:input.getMultimodalInputsList()) {
+            if(media.getMultimodalType()!=1 || media.hasMultimodalTensor())
+                throw Status.UNIMPLEMENTED.withDescription("V supports URL image inputs only").asRuntimeException();
+            MediaInput.key(media);
+            if(skipDownload) dimensions(media.getMmPreprocessConfig().getWidth(),media.getMmPreprocessConfig().getHeight());
         }
-        if (result.stream().mapToLong(Image::rows).sum() > 1048576) throw MediaInput.invalid("Request output exceeds row limit");
-        return List.copyOf(result);
+    }
+    static void dimensions(int width,int height) {
+        if(width<1 || height<1 || width>32768 || height>32768)
+            throw MediaInput.invalid("Image width/height must be in 1..32768; skip-download inputs require explicit dimensions");
     }
 }

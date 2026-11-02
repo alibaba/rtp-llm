@@ -34,8 +34,10 @@ def _validate(request):
     if len(request.images) > 256:
         raise ValueError('Too many images')
     for image in request.images:
-        if (not image.url.strip() or len(image.url) > 4096 or not 1 <= image.width <= 32768
-                or not 1 <= image.height <= 32768 or image.offset < end
+        size_provided = image.width != 0 or image.height != 0
+        if (not image.url.strip() or len(image.url) > 4096
+                or size_provided and not (1 <= image.width <= 32768 and 1 <= image.height <= 32768)
+                or image.offset < end
                 or image.offset >= len(request.token_ids)):
             raise ValueError('Invalid image placeholder or geometry')
         end = image.offset + 1

@@ -55,6 +55,7 @@ def environment(role, port, model):
             'text_config': {'hidden_size': 4}, 'vision_config': {'patch_size': 14, 'downsample_ratio': 3,
             'min_pixels': 0, 'max_image_tokens': 1024}}))
         env['CHECKPOINT_PATH'] = str(model)
+        env['MOCK_VIT_SKIP_DOWNLOAD'] = 'true'
     else:
         env.update(SEQ_SIZE_PER_BLOCK='16', MAX_SEQ_LEN='4096', TEST_BLOCK_NUM='9', RESERVE_BLOCK_RATIO='0')
     return env
@@ -70,6 +71,7 @@ def test_service_restarts_without_case_artifacts(tmp_path, role, source):
         config = {'mock.compute.forward.expression': '1'}
         if role == 'vit':
             config['checkpoint_path'] = str(model)
+            config['mock.vit.skip.download'] = True
         component = {'config': config}
         if role != 'vit':
             component['engine'] = 'rtp'

@@ -109,6 +109,12 @@ def test_image_placeholders_round_trip_and_reject_duplicate_offsets(tmp_path):
     path = tmp_path / 'images.binpb.zst'
     write_inputs(path, [request])
     assert list(read_inputs(path)) == [request]
+    without_size = pb.Request.FromString(request.SerializeToString())
+    without_size.images[0].ClearField('width')
+    without_size.images[0].ClearField('height')
+    url_only = tmp_path / 'url_only.binpb.zst'
+    write_inputs(url_only, [without_size])
+    assert list(read_inputs(url_only)) == [without_size]
     request.images.add().CopyFrom(image)
     with pytest.raises(ValueError, match='placeholder'):
         write_inputs(tmp_path / 'overlap.binpb.zst', [request])

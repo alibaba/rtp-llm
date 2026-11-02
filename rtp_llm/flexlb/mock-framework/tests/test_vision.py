@@ -34,7 +34,7 @@ def test_vision_playback_through_real_master(tmp_path, mode):
         'min_pixels': 0, 'max_image_tokens': 1024}}))
     engine = {'engine': 'rtp', 'config': {'checkpoint_path': 'model', 'seq_size_per_block': 2, 'test_block_num': 128,
         'reserve_block_ratio': 0, 'max_seq_len': 128, 'mock.compute.forward.expression': '1'}}
-    vision = {'config': {'checkpoint_path': 'model', 'mm_cache_gpu_max_bytes': 1024,
+    vision = {'config': {'checkpoint_path': 'model', 'mock.vit.skip.download': True, 'mm_cache_gpu_max_bytes': 1024,
         'mm_cache_cpu_max_bytes': 1024, 'mock.compute.forward.expression': '2 + batchSize'}}
     data = {'id': 'vision_playback', 'describe': 'Native V selection, metadata preparation, P/D generation',
         'environment': {'master': {'config': native}, 'prefill': engine, 'decode': engine, 'vit': vision, 'client': {'config': {'checkpoint_path': 'model'}}},

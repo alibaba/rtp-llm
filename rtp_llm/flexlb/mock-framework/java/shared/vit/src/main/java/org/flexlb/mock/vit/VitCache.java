@@ -1,55 +1,86 @@
 package org.flexlb.mock.vit;
 
-import org.flexlb.mock.multimodal.MediaInput;
-
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 
 /** Byte-budgeted embedding/hash LRU. Results held by callers outlive cache residency. */
 final class VitCache implements AutoCloseable {
-    record Claim(VitGeometry.Image image, CompletableFuture<VitGeometry.Image> result, AtomicInteger users, boolean producer) {}
+    record Claim(String key, CompletableFuture<VitGeometry.Image> result, AtomicInteger users, boolean producer,
+                 AtomicReference<VitGeometry.Image> prepared, AtomicReference<Runnable> abandoned) {
+        VitGeometry.Image image() { return prepared.get(); }
+        void prepare(VitGeometry.Image image) { prepared.set(image); }
+        void onAbandon(Runnable action) { abandoned.set(action); if(users.get()==0) action.run(); }
+    }
     private final VitConfig config;
     private final VitMetrics metrics;
-    private record Pending(CompletableFuture<VitGeometry.Image> result, AtomicInteger users) {}
+    private record Pending(CompletableFuture<VitGeometry.Image> result, AtomicInteger users,
+                           AtomicReference<VitGeometry.Image> prepared, AtomicReference<Runnable> abandoned) {}
     private final Map<String, Pending> pending = new HashMap<>();
     private final LinkedHashMap<String, VitGeometry.Image> device = new LinkedHashMap<>(16,.75f,true), host = new LinkedHashMap<>(16,.75f,true), hashes = new LinkedHashMap<>(16,.75f,true);
     private long deviceBytes, hostBytes, hashBytes;
     private boolean closed;
     VitCache(VitConfig config) { this(config, new VitMetrics()); }
     VitCache(VitConfig config, VitMetrics metrics) { this.config = config; this.metrics = metrics; }
-    synchronized Claim acquire(VitGeometry.Image image) {
-        if (closed) throw new IllegalStateException("V cache closed");
-        var result = device.get(image.key());
-        if (result == null && (result = host.remove(image.key())) != null) {
-            hostBytes -= bytes(result); retain(result);
+    synchronized List<Claim> acquire(List<String> keys) {
+        long missing=keys.stream().distinct().filter(key -> !pending.containsKey(key) && !device.containsKey(key) && !host.containsKey(key)).count();
+        if(closed) throw new IllegalStateException("V cache closed");
+        if(pending.size()+missing>config.queueSize())
+            throw io.grpc.Status.RESOURCE_EXHAUSTED.withDescription("V unique media admission full").asRuntimeException();
+        var claims=new ArrayList<Claim>();
+        try { for(var key:keys) claims.add(acquire(key)); return List.copyOf(claims); }
+        catch(RuntimeException error) {
+            // No newly created claim can escape this cache lock before commit.
+            for(var claim:claims) {
+                claim.users.decrementAndGet();
+                if(claim.producer) { pending.remove(claim.key); claim.result.completeExceptionally(error); }
+            }
+            throw error;
         }
-        if (result != null) { metrics.events.increment("py_rtp_vit_embedding_cache_hit_qps"); return new Claim(image, CompletableFuture.completedFuture(result),new AtomicInteger(1),false); }
-        var waiting = pending.get(image.key());
-        if (waiting != null) { metrics.events.increment("py_rtp_vit_embedding_cache_inflight_qps"); waiting.users.incrementAndGet();return new Claim(image,waiting.result,waiting.users,false); }
-        if (pending.size() >= config.queueSize()) throw io.grpc.Status.RESOURCE_EXHAUSTED.withDescription("V unique media admission full").asRuntimeException();
-        metrics.events.increment("py_rtp_vit_embedding_cache_miss_qps"); waiting = new Pending(new CompletableFuture<>(),new AtomicInteger(1));pending.put(image.key(),waiting);
-        return new Claim(image,waiting.result,waiting.users,true);
+    }
+    synchronized Claim acquire(VitGeometry.Image image) {
+        var claim=acquire(image.key()); if(claim.producer()) claim.prepare(image); return claim;
+    }
+    private Claim acquire(String key) {
+        if(closed) throw new IllegalStateException("V cache closed");
+        var result=device.get(key);
+        if(result==null && (result=host.remove(key))!=null) { hostBytes-=bytes(result); retain(result); }
+        if(result!=null) {
+            metrics.events.increment("py_rtp_vit_embedding_cache_hit_qps");
+            return new Claim(key,CompletableFuture.completedFuture(result),new AtomicInteger(1),false,
+                new AtomicReference<>(result),new AtomicReference<>());
+        }
+        var waiting=pending.get(key);
+        boolean producer=waiting==null;
+        if(producer) {
+            if(pending.size()>=config.queueSize()) throw io.grpc.Status.RESOURCE_EXHAUSTED.withDescription("V unique media admission full").asRuntimeException();
+            waiting=new Pending(new CompletableFuture<>(),new AtomicInteger(),new AtomicReference<>(),new AtomicReference<>());
+            pending.put(key,waiting);
+        }
+        metrics.events.increment(producer?"py_rtp_vit_embedding_cache_miss_qps":"py_rtp_vit_embedding_cache_inflight_qps");
+        waiting.users.incrementAndGet();
+        return new Claim(key,waiting.result,waiting.users,producer,waiting.prepared,waiting.abandoned);
     }
     void complete(Claim claim, Throwable error) {
         synchronized (this) {
-            var current=pending.get(claim.image.key());
+            var current=pending.get(claim.key());
             if(current==null || current.result!=claim.result) return;
-            pending.remove(claim.image.key());
+            pending.remove(claim.key());
             if (error == null && !closed) {
-                retain(claim.image);
-                long charge = hashBytes(claim.image);
+                retain(claim.image());
+                long charge = hashBytes(claim.image());
                 if (charge <= config.hashBytes()) {
-                    var previous = hashes.remove(claim.image.key()); if (previous != null) hashBytes -= hashBytes(previous);
+                    var previous = hashes.remove(claim.key()); if (previous != null) hashBytes -= hashBytes(previous);
                     while (hashBytes + charge > config.hashBytes() && !hashes.isEmpty()) {
                         var old = hashes.pollFirstEntry(); hashBytes -= hashBytes(old.getValue());
                     }
-                    hashes.put(claim.image.key(),claim.image); hashBytes += charge;
+                    hashes.put(claim.key(),claim.image()); hashBytes += charge;
                 }
             }
         }
         // Completion callbacks may acquire scheduler/RPC locks; never run them under the cache lock.
-        if (error == null) claim.result.complete(claim.image); else claim.result.completeExceptionally(error);
+        if (error == null) claim.result.complete(claim.image()); else claim.result.completeExceptionally(error);
     }
     private void retain(VitGeometry.Image image) {
         if (device.containsKey(image.key()) || host.containsKey(image.key())) return;
@@ -67,7 +98,11 @@ final class VitCache implements AutoCloseable {
         while (hostBytes > config.hostBytes() - bytes) { var old = host.pollFirstEntry(); hostBytes -= bytes(old.getValue()); metrics.events.increment("py_rtp_vit_embedding_cache_eviction_qps"); }
         host.put(image.key(),image); hostBytes += bytes;
     }
-    static void release(Claim claim) { if(claim.users.decrementAndGet()<0) throw new IllegalStateException("V claim released twice"); }
+    static void release(Claim claim) {
+        int remaining=claim.users.decrementAndGet();
+        if(remaining<0) throw new IllegalStateException("V claim released twice");
+        var cancel=claim.abandoned.get(); if(remaining==0 && cancel!=null) cancel.run();
+    }
     long bytes(VitGeometry.Image image) { return image.bytes(config.hidden(),2); }
     private static long hashBytes(VitGeometry.Image image) { return (long)image.rows()*4 + image.key().length(); }
     synchronized int inflight() { return pending.size(); }

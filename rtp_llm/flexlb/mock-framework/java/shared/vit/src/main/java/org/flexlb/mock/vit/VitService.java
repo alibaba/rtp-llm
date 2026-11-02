@@ -8,7 +8,6 @@ import io.grpc.stub.*;
 import java.io.ByteArrayOutputStream;
 import java.util.*;
 import java.util.concurrent.*;
-import java.util.concurrent.atomic.AtomicInteger;
 import org.flexlb.engine.grpc.EngineRpcService.*;
 import org.flexlb.engine.grpc.MultimodalRpcServiceGrpc;
 
@@ -17,19 +16,25 @@ final class VitService extends MultimodalRpcServiceGrpc.MultimodalRpcServiceImpl
     private final VitMetrics metrics = new VitMetrics();
     private final VitCache cache;
     private final VitScheduler scheduler;
+    private final VitPreparation preparation;
     private final String instance=UUID.randomUUID().toString();
     private final ExecutorService replies=Executors.newVirtualThreadPerTaskExecutor();
-    private final AtomicInteger calls=new AtomicInteger();
     private volatile boolean closed;
-    VitService(VitConfig config) { this.config=config;cache=new VitCache(config,metrics);scheduler=new VitScheduler(config,cache,metrics); }
+    VitService(VitConfig config) { this.config=config;cache=new VitCache(config,metrics);scheduler=new VitScheduler(config,cache,metrics);preparation=new VitPreparation(config,cache,scheduler,metrics); }
     private List<VitCache.Claim> submit(MultimodalInputsPB input) {
         if(closed) throw Status.UNAVAILABLE.withDescription("V stopped").asRuntimeException();
-        var images=VitGeometry.images(input,config.patch(),config.merge(),config.minPixels(),config.maxTokens());
-        var claims=new ArrayList<VitCache.Claim>(); var producers=new ArrayList<VitCache.Claim>();
+        VitGeometry.validate(input,config.skipDownload());
+        var media=input.getMultimodalInputsList();
+        var claims=cache.acquire(media.stream().map(MediaInput::key).toList());
+        long timeout=input.getTimeoutMs()>0?input.getTimeoutMs():media.stream()
+            .mapToInt(value->value.getMmPreprocessConfig().getMmTimeoutMs()).filter(value->value>0).max().orElse(config.timeoutMs());
+        long deadline=System.nanoTime()+TimeUnit.MILLISECONDS.toNanos(timeout);
         try {
-            for(var image:images) { var claim=cache.acquire(image);claims.add(claim);if(claim.producer()) producers.add(claim); }
-            scheduler.submit(producers);
-        } catch(RuntimeException error) { producers.forEach(c->cache.complete(c,error));claims.forEach(VitCache::release);throw error; }
+            for(int i=0;i<claims.size();i++) if(claims.get(i).producer()) preparation.submit(claims.get(i),media.get(i),deadline);
+        } catch(RuntimeException error) {
+            claims.stream().filter(VitCache.Claim::producer).forEach(claim->cache.complete(claim,error));
+            claims.forEach(VitCache::release); throw error;
+        }
         return claims;
     }
     private List<VitGeometry.Image> compute(MultimodalInputsPB input, Context context) throws Exception {
@@ -39,7 +44,7 @@ final class VitService extends MultimodalRpcServiceGrpc.MultimodalRpcServiceImpl
         try { claims=submit(input); }
         catch (RuntimeException error) { metrics.events.increment("py_rtp_vit_error_qps"); throw error; }
         metrics.events.observe("py_rtp_vit_image_count", claims.size());
-        long budget=TimeUnit.MILLISECONDS.toNanos(input.getTimeoutMs()>0?input.getTimeoutMs():120000);
+        long budget=TimeUnit.MILLISECONDS.toNanos(input.getTimeoutMs()>0?input.getTimeoutMs():config.timeoutMs());
         if(context.getDeadline()!=null) budget=Math.min(budget,context.getDeadline().timeRemaining(TimeUnit.NANOSECONDS));
         long end=System.nanoTime()+Math.max(0,budget);
         try {
@@ -53,7 +58,9 @@ final class VitService extends MultimodalRpcServiceGrpc.MultimodalRpcServiceImpl
                 catch(ExecutionException error) { throw Status.fromThrowable(error.getCause()).asRuntimeException(); }
             }
         }
-        metrics.events.observe("py_rtp_vit_embedding_length", result.stream().mapToLong(VitGeometry.Image::rows).sum());
+        long rows=result.stream().mapToLong(VitGeometry.Image::rows).sum();
+        if(rows>1048576) throw Status.RESOURCE_EXHAUSTED.withDescription("Request image output exceeds row limit").asRuntimeException();
+        metrics.events.observe("py_rtp_vit_embedding_length", rows);
         metrics.events.observe("py_rtp_vit_embedding_rt", (System.nanoTime() - started) / 1e6);
         metrics.events.increment("py_rtp_vit_success_qps");
         return result;
@@ -64,12 +71,10 @@ final class VitService extends MultimodalRpcServiceGrpc.MultimodalRpcServiceImpl
     }
     private <T> void reply(StreamObserver<T> response, Callable<T> operation) {
         if(closed) { response.onError(Status.UNAVAILABLE.withDescription("V stopped").asRuntimeException()); return; }
-        calls.incrementAndGet();
         try { replies.execute(()-> {
             try { response.onNext(operation.call());response.onCompleted(); }
             catch(Exception error) { response.onError(error instanceof StatusRuntimeException?error:Status.INTERNAL.withDescription(error.getMessage()).withCause(error).asRuntimeException()); }
-            finally { calls.decrementAndGet(); }
-        }); } catch(RejectedExecutionException error) { calls.decrementAndGet();response.onError(Status.UNAVAILABLE.asRuntimeException()); }
+        }); } catch(RejectedExecutionException error) { response.onError(Status.UNAVAILABLE.asRuntimeException()); }
     }
     @Override public void remoteMultimodalEmbedding(MultimodalInputsPB input,StreamObserver<MultimodalOutputPB> response) {
         var context=Context.current(); reply(response,()->output(compute(input,context)));
@@ -88,7 +93,7 @@ final class VitService extends MultimodalRpcServiceGrpc.MultimodalRpcServiceImpl
             if(input.getTimeoutMs()<0 || input.getTimeoutMs()>3600000) throw MediaInput.invalid("Invalid hash request timeout");
             if(input.hasInputs()) {
                 var media=input.getInputs();
-                VitGeometry.images(media,config.patch(),config.merge(),config.minPixels(),config.maxTokens());
+                VitGeometry.validate(media,config.skipDownload());
                 var requested=new LinkedHashSet<>(input.getKeysList());
                 var byKey=new LinkedHashMap<String,MultimodalInputPB>();
                 for(var image:media.getMultimodalInputsList()) {
@@ -139,5 +144,5 @@ final class VitService extends MultimodalRpcServiceGrpc.MultimodalRpcServiceImpl
     }
     String metrics() { return metrics.scrape(scheduler,cache); }
     void checkHealthy() { scheduler.checkHealthy(); }
-    @Override public void close() { closed=true;scheduler.close();cache.close();replies.shutdownNow(); }
+    @Override public void close() { closed=true;scheduler.close();preparation.close();cache.close();replies.shutdownNow(); }
 }

@@ -37,6 +37,11 @@ docker run --rm \
 
 V 使用 `ROLE_TYPE=VIT`；native 和 Mock 参数遵循[配置参考](component-reference.md#engine-配置规则)。未提供 MOCK_NODE_ID 时，身份使用 role 与本机发布地址；需要指定发布地址时设置 MOCK_ADVERTISE_HOST。共享主机上的实例物理资源仍由平台/JVM 统计，不伪造每 Engine 的 CPU/内存。
 
+多模态 V 设置 `CHECKPOINT_PATH` 指向可读的模型目录，仅读取 config.json。默认异步 GET 图片 URL 并读取尺寸，不依赖 Frontend 提供宽高；准备执行器和 Forward 队列分离。`VIT_CONCURRENCY` 限制异步媒体工作线程，`VIT_MAX_QUEUE_SIZE` 提供额外等待额度，`VIT_GPU_MAX_BATCH_SIZE`/`VIT_GPU_BATCH_WAIT_MS` 控制就绪工作的合批。`MM_TIMEOUT_MS`、`MM_IMAGE_MAX_FILE_SIZE_KB`、`DOWNLOAD_HEADERS` 使用 real 名称与单位。支持的 URL/图片格式和模拟边界见组件参考。
+
+本地假 URL 回放设置 `mock.vit.skip.download: true`（ENV 为 `MOCK_VIT_SKIP_DOWNLOAD=true`），并提供图片宽高；它只跳过读取，仍经过相同的准入、执行器、就绪队列和结果发布流程。Whale 使用默认 false；跳过读取不能用于评估真实下载吞吐。
+
+
 HTTP 为 START_PORT，gRPC 为 START_PORT+1；平台探针访问 HTTP `/health`，指标访问 `/metrics`。注册端口必须与 Master 配置的发现协议一致：GRPC 发现发布实际 gRPC 端口，HTTP 发现发布 HTTP 端口；当前 real WorkerAddressService 会据此转换地址，不能把任意控制端口注册进去。
 
 服务不读取本地 topology，不创建实验目录、ready 或 endpoints 文件。固定配置、实际端点在启动日志中记录。正常 TERM 关闭实例；内部 Loop/Scheduler 不可恢复故障使健康检查失败，进程随后非零退出，平台负责重拉。同一工作目录重启不受旧实验文件影响。

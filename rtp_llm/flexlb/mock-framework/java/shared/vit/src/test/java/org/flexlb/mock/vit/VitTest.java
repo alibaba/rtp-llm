@@ -23,10 +23,15 @@ class VitTest {
         return directory.toString();
     }
     VitConfig config(String expression,long device,long host,long hashes,int wait) throws Exception {
+        return config(expression,device,host,hashes,wait,Map.of());
+    }
+    VitConfig config(String expression,long device,long host,long hashes,int wait,Map<String,Object> overrides) throws Exception {
         var path=directory.resolve(UUID.randomUUID()+".json");
-        new ObjectMapper().writeValue(path.toFile(),Map.of("id","vit-0","component_role","vit","component",Map.of("config",Map.of(
-            "checkpoint_path",checkpoint(),"mm_cache_gpu_max_bytes",device,"mm_cache_cpu_max_bytes",host,"mm_hash_key_cache_max_bytes",hashes,
-            "gpu_max_batch_size",8,"gpu_batch_wait_ms",wait,"mock.compute",Map.of("forward",Map.of("expression",expression))))));
+        var settings=new HashMap<String,Object>(Map.of("checkpoint_path",checkpoint(),"mock.vit.skip.download",true,
+            "mm_cache_gpu_max_bytes",device,"mm_cache_cpu_max_bytes",host,"mm_hash_key_cache_max_bytes",hashes,
+            "gpu_max_batch_size",8,"gpu_batch_wait_ms",wait,"mock.compute",Map.of("forward",Map.of("expression",expression))));
+        settings.putAll(overrides);
+        new ObjectMapper().writeValue(path.toFile(),Map.of("id","vit-0","component_role","vit","component",Map.of("config",settings)));
         return VitConfig.load(path);
     }
     static MultimodalInputsPB input(String key) {
@@ -134,7 +139,7 @@ class VitTest {
         assertNotEquals(nativeInput.getTokenIdsList(),prepared.input().getTokenIdsList());
         assertThrows(StatusRuntimeException.class,()->MediaInput.apply(nativeInput,output.toBuilder().clearSplitSize().addSplitSize(1).build(),MediaInput.IMAGE_TOKEN));
         assertThrows(StatusRuntimeException.class,()->MediaInput.apply(nativeInput,output.toBuilder().clearMultimodalFeatureHash().build(),MediaInput.IMAGE_TOKEN));
-        assertThrows(StatusRuntimeException.class,()->VitGeometry.images(MultimodalInputsPB.getDefaultInstance(),14,3,0,1024));
+        assertThrows(StatusRuntimeException.class,()->VitGeometry.validate(MultimodalInputsPB.getDefaultInstance(),true));
     }
     @Test void cacheKeyUsesLinuxNativeIdentityAndExcludesTimeout() {
         String[] values={"https://example.com/image.png","中文url"};
@@ -150,10 +155,10 @@ class VitTest {
             "checkpoint_path",checkpoint(),"gpu_max_batch_size",1,"vit_concurrency",1,"vit_max_queue_size",1,"mock.compute",Map.of("forward",Map.of("expression","1000"))))));
         var config=VitConfig.load(path);
         try(var cache=new VitCache(config);var scheduler=new VitScheduler(config,cache)) {
-            var first=cache.acquire(new VitGeometry.Image("a",28,28,1));scheduler.submit(List.of(first));
+            var first=cache.acquire(new VitGeometry.Image("a",28,28,1));scheduler.submit(first);
             long end=System.nanoTime()+TimeUnit.SECONDS.toNanos(2);
             while(scheduler.snapshot().get("mock_vit_running_image_count") == 0) { assertTrue(System.nanoTime()<end);Thread.sleep(2); }
-            var second=cache.acquire(new VitGeometry.Image("b",28,28,1));scheduler.submit(List.of(second));
+            var second=cache.acquire(new VitGeometry.Image("b",28,28,1));scheduler.submit(second);
             var rejected=assertThrows(StatusRuntimeException.class,()->cache.acquire(new VitGeometry.Image("c",28,28,1)));
             assertEquals(Status.Code.RESOURCE_EXHAUSTED,rejected.getStatus().getCode());scheduler.close();
             assertThrows(ExecutionException.class,()->first.result().get(2,TimeUnit.SECONDS));
@@ -182,10 +187,10 @@ class VitTest {
     @Test void queuedWorkWithNoConsumersIsRemovedWithoutAnotherForward() throws Exception {
         try(var cache=new VitCache(config("120",16,16,1024,0));
             var scheduler=new VitScheduler(config("120",16,16,1024,0),cache)) {
-            var first=cache.acquire(new VitGeometry.Image("a",28,28,1));scheduler.submit(List.of(first));
+            var first=cache.acquire(new VitGeometry.Image("a",28,28,1));scheduler.submit(first);
             long end=System.nanoTime()+TimeUnit.SECONDS.toNanos(2);
             while(scheduler.snapshot().get("mock_vit_running_image_count") == 0) { assertTrue(System.nanoTime()<end);Thread.sleep(2); }
-            var abandoned=cache.acquire(new VitGeometry.Image("b",28,28,1));scheduler.submit(List.of(abandoned));VitCache.release(abandoned);
+            var abandoned=cache.acquire(new VitGeometry.Image("b",28,28,1));scheduler.submit(abandoned);VitCache.release(abandoned);
             first.result().get(2,TimeUnit.SECONDS);
             assertThrows(ExecutionException.class,()->abandoned.result().get(2,TimeUnit.SECONDS));
             assertEquals(0, scheduler.snapshot().get("mock_vit_running_image_count"));
