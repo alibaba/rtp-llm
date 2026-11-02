@@ -1,6 +1,7 @@
 #pragma once
 
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.grpc.pb.h"
+#include "rtp_llm/cpp/engine_base/stream/GenerateTypes.h"
 #include <condition_variable>
 #include <cstdint>
 #include <functional>
@@ -36,6 +37,7 @@ public:
         torch::Tensor                        propose_hidden;
         std::vector<int32_t>                 position_ids;
         std::map<std::string, torch::Tensor> first_token_tensors;
+        std::optional<PromptLogitsOutput>    prompt_logits;
     };
 
     void                           updateDeadline(const std::string& unique_key, int64_t deadline_ms);
