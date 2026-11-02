@@ -772,6 +772,9 @@ class DeliveryClaimTest {
             assertTrue(f.owner.tryStartSend(f.claim));
             f.owner.cancel(41L, 0L, CancelReason.CLIENT_CANCELLED);
             f.owner.onDeliveryEvidence(f.claim, new ContextResult.TransportResult(f.claim, DeliveryResult.uncertain(new IllegalStateException("reply lost")), System.currentTimeMillis()));
+            // Eight attempts include up to 1575 ms of backoff plus asynchronous work.
+            // Wait for the cleanup budget before the shared two-second archival assertions.
+            f.settlement().get(DeliveryCleanup.TIMEOUT_MS + 1_000L, TimeUnit.MILLISECONDS);
             f.assertArchivedAfterCleanup();
             assertEquals(successfulAttempt, calls.get());
             assertNull(SchedulerTestSupport.failure(f.owner));
