@@ -1,0 +1,6 @@
+.venv/
+*.egg-info/
+.pytest_cache/
+target/
+build/
+run/
