@@ -24,22 +24,26 @@ def mrope_interleaved_axis_of_freq(mrope_section, rotary_pairs: int, device) -> 
     interleaved-MRoPE contract — a literal mirror of the kernel's
     get_mrope_position_dim: slot tidx is H when tidx%%3==1 and tidx<3*dim2, W
     when tidx%%3==2 and tidx<3*dim3, otherwise T. Sections must sum to
-    rotary_pairs and fit the strided slots (same as the ROCm host validation)."""
+    rotary_pairs and fit the strided slots (same as the ROCm host validation).
+
+    Built and validated on CPU (no device sync), then moved to ``device`` —
+    this function runs inside the aclgraph capture region where host
+    readbacks of device tensors are not allowed."""
     if (len(mrope_section) != 3
             or any(int(s) < 0 for s in mrope_section)
             or sum(int(s) for s in mrope_section) != rotary_pairs):
         raise RuntimeError(
             f"interleaved MRoPE sections {mrope_section} must have 3 entries "
             f"summing to rotary_pairs={rotary_pairs}")
-    tidx = torch.arange(rotary_pairs, device=device)
-    axes = torch.zeros(rotary_pairs, dtype=torch.long, device=device)
+    tidx = torch.arange(rotary_pairs)
+    axes = torch.zeros(rotary_pairs, dtype=torch.long)
     axes[(tidx % 3 == 1) & (tidx < 3 * int(mrope_section[1]))] = 1
     axes[(tidx % 3 == 2) & (tidx < 3 * int(mrope_section[2]))] = 2
     if int((axes == 1).sum()) != int(mrope_section[1]) or int((axes == 2).sum()) != int(mrope_section[2]):
         raise RuntimeError(
             f"interleaved MRoPE sections {mrope_section} exceed the THW strided "
             f"slot capacity of rotary_pairs={rotary_pairs}")
-    return axes
+    return axes.to(device)
 
 
 def apply_mrope_interleaved(query, key, positions, mrope_section, cos_sin_cache):

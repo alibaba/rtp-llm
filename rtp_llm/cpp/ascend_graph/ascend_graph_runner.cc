@@ -764,7 +764,14 @@ void AscendGraphRunner::prepareInputs(const PyModelInputs& inputs, CudaGraphStat
     py_model_inputs.attention_inputs.context_total_kv_length =
         inputs.attention_inputs.context_total_kv_length;
     // -------- Padding region clear (batch < max) --------
+    // Mirror the CUDA-graph contract: padded rows carry zeroed inputs and
+    // benign attention geometry (ctx = 1 -> reserved block 0, position 0).
     if (state.current_batch_size < static_cast<int>(max_bs_)) {
+        py_model_inputs.input_ids.slice(0, token_num, max_bs_).fill_(0);
+        if (py_model_inputs.input_hiddens.defined() && py_model_inputs.input_hiddens.numel() > 0
+            && token_num < static_cast<int64_t>(py_model_inputs.input_hiddens.size(0))) {
+            py_model_inputs.input_hiddens.slice(0, token_num, max_bs_).fill_(0);
+        }
         py_model_inputs.attention_inputs.input_lengths.slice(0, state.current_batch_size, max_bs_).fill_(0);
         py_model_inputs.attention_inputs.input_lengths_device.slice(0, state.current_batch_size, max_bs_).fill_(0);
         py_model_inputs.attention_inputs.sequence_lengths.slice(0, state.current_batch_size, max_bs_).fill_(0);

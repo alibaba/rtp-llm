@@ -104,7 +104,7 @@ class AscendDecodeImpl(FMHAImplBase):
             block_offset = pos_long % kernel_page
             slot_block_numbers = torch.gather(
                 block_table, 1,
-                block_index.unsqueeze(1).to(block_table.dtype)
+                block_index.unsqueeze(1).to(torch.int64)
             ).squeeze(1).long().clamp(min=0)
             slot_mapping = (slot_block_numbers * kernel_page + block_offset).to(torch.int64)
         else:
