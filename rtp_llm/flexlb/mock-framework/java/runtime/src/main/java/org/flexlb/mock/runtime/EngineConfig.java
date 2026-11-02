@@ -82,8 +82,11 @@ public final class EngineConfig {
         if (path == null) return JSON.createObjectNode();
         if (!path.isTextual() || path.asText().isBlank())
             throw new IllegalArgumentException("checkpoint_path must be a model directory");
-        var model = read(Path.of(path.asText()).resolve("config.json"));
+        var directory = ModelPath.resolve(path.asText(), System.getenv());
+        var model = read(directory.resolve("config.json"));
         if (!model.isObject()) throw new IllegalArgumentException("Model config.json must be an object");
+        // Effective settings expose the mounted path, not credential-bearing OSS URLs.
+        ((ObjectNode) config).put("checkpoint_path", directory.toString());
         return model;
     }
 
