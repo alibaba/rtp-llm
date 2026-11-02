@@ -183,12 +183,19 @@ class PCPAllGatherAttnOp:
         k = k.contiguous()
         v = v.contiguous()
 
-        all_keys = all_gather(k, group=Group.TP).reshape(
-            k.shape[0] * self.prefill_cp_size, self.num_kv_heads, self.head_dim
-        )
-        all_values = all_gather(v, group=Group.TP).reshape(
-            v.shape[0] * self.prefill_cp_size, self.num_kv_heads, self.head_dim
-        )
+        # A single CP rank already owns the complete K/V. TP1 startup does
+        # not initialize a distributed process group, and no collective is
+        # needed to implement this identity case.
+        if self.prefill_cp_size == 1:
+            all_keys = k.reshape(-1, self.num_kv_heads, self.head_dim)
+            all_values = v.reshape(-1, self.num_kv_heads, self.head_dim)
+        else:
+            all_keys = all_gather(k, group=Group.TP).reshape(
+                k.shape[0] * self.prefill_cp_size, self.num_kv_heads, self.head_dim
+            )
+            all_values = all_gather(v, group=Group.TP).reshape(
+                v.shape[0] * self.prefill_cp_size, self.num_kv_heads, self.head_dim
+            )
         q_reshaped = q.reshape(-1, self.num_qo_heads, self.head_dim)
 
         # TODO: make write local kvcache async

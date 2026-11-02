@@ -289,9 +289,12 @@ std::shared_ptr<GenerateInput> QueryConverter::transQuery(const GenerateInputPB*
             for (const auto& crop_position : mm_preprocess_config->crop_positions()) {
                 crop_positions.push_back(crop_position);
             }
+            // URL-only requests have no tensor to forward to the ViT RPC.
+            // Leave explicit TensorPB handling unchanged in this path.
+            const bool url_only = !mm_input->multimodal_url().empty() && !mm_input->has_multimodal_tensor();
             mm_inputs.emplace_back(
                 mm_input->multimodal_url(),
-                torch::empty(1),
+                url_only ? torch::empty({0}) : torch::empty(1),
                 mm_input->multimodal_type(),
                 mm_preprocess_config->width(),
                 mm_preprocess_config->height(),

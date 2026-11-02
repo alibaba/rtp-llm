@@ -31,7 +31,7 @@ class KvMetaLookup:
         ]
 
     def size(self, key, *, trace_id=None, timeout_ms=None):
-        if not isinstance(key, str) or not key or len(key.encode()) > 4096:
+        if not isinstance(key, str) or not key or len(key.encode()) > 512:
             raise ValueError("invalid KVMeta object key")
         timeout_ms = self._config.call_timeout_ms if timeout_ms is None else timeout_ms
         if timeout_ms <= 0:

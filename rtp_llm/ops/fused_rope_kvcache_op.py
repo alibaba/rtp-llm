@@ -4,14 +4,15 @@ from functools import cache
 from typing import Optional
 
 import torch
-
 from librtp_compute_ops import LayerKVCache, PyAttentionInputs, get_scalar_type
-from rtp_llm.ops.attention_input_utils import select_prefill_position_ids
 from libth_transformer_config import (
     AttentionConfigs,
     check_rope_cache,
     get_rope_cache_once,
 )
+
+from rtp_llm.multimodal import emb_diagnostics
+from rtp_llm.ops.attention_input_utils import select_prefill_position_ids
 
 
 class DecodeRopeContractError(RuntimeError):
@@ -103,6 +104,9 @@ class FusedRopeKVCachePrefillOpBase:
         store_cache = kv_cache is not None
         rope_config = self.attn_configs.rope_config
         rope_cache = get_rope_cache_once(rope_config, self.attn_configs.max_seq_len)
+        emb_diagnostics.rope_input(
+            params.position_ids, rope_config, params.prefix_lengths
+        )
 
         return _get_fused_rope_kvcache().prefill_fused_rope_kvcache(
             qkv,
@@ -205,9 +209,16 @@ class FusedRopeKVCacheDecodeOp:
             num_pages = kv_cache.kv_cache_base.shape[0]
             # convert_offset_to_block_array encodes K offset = page*2, V offset = page*2+1,
             # so max offset is 2*num_pages-1 and scale buffer needs 2*num_pages blocks.
-            needed = 2 * num_pages * self.attn_configs.kernel_tokens_per_block * self.attn_configs.kv_head_num
+            needed = (
+                2
+                * num_pages
+                * self.attn_configs.kernel_tokens_per_block
+                * self.attn_configs.kv_head_num
+            )
             if self._dummy_scale is None or self._dummy_scale.numel() < needed:
-                self._dummy_scale = torch.ones(needed, dtype=torch.float32, device=kv_cache.kv_cache_base.device)
+                self._dummy_scale = torch.ones(
+                    needed, dtype=torch.float32, device=kv_cache.kv_cache_base.device
+                )
             return self._dummy_scale
         return None
 
@@ -254,9 +265,7 @@ class FusedRopeKVCacheDecodeOp:
             elif sequence_lengths.is_cuda:
                 device = sequence_lengths.device
             else:
-                sequence_lengths_plus_1 = (
-                    attn_inputs.sequence_lengths_plus_1_device
-                )
+                sequence_lengths_plus_1 = attn_inputs.sequence_lengths_plus_1_device
                 if (
                     sequence_lengths_plus_1 is None
                     or not sequence_lengths_plus_1.is_cuda
@@ -280,9 +289,8 @@ class FusedRopeKVCacheDecodeOp:
             or self._sequence_lengths_device.device != device
         )
         if needs_allocation:
-            if (
-                self._sequence_lengths_device is not None
-                and (forbid_reallocation or attn_inputs.is_cuda_graph)
+            if self._sequence_lengths_device is not None and (
+                forbid_reallocation or attn_inputs.is_cuda_graph
             ):
                 raise DecodeRopeContractError(
                     "CUDA graph replay cannot resize or move the captured sequence_lengths buffer"

@@ -51,7 +51,13 @@ class BackendManager(object):
             nccl_comm_config=self._distributed_server.get_nccl_comm_config(),
         )
 
-        if engine_config.parallelism_config.world_size > 1:
+        # CP native output reconstruction invokes registered communication
+        # callbacks even with one rank. Use the normal initialization path
+        # so its all-reduce/all-gather identity contracts are available.
+        if (
+            engine_config.parallelism_config.world_size > 1
+            or engine_config.parallelism_config.prefill_cp_config.is_enabled()
+        ):
             init_distributed_environment(
                 engine_config.parallelism_config,
                 nccl_comm_config=self._distributed_server.get_nccl_comm_config(),

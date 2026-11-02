@@ -369,6 +369,17 @@ class InspectionPipelineTest(TestCase):
         )
         self.assertAlmostEqual(values[GaugeMetrics.VIT_PREPROCESS_RETURN_RT_METRIC], 50)
 
+    def test_preprocess_benchmark_logger_failure_does_not_change_result(self):
+        payload = PreprocessTaskResult(None, 50, 10, [], 10.3, 10.35)
+        item = SimpleNamespace(
+            preprocess_submitted_at=10.0, preprocess_received_at=10.4
+        )
+        with patch.dict(os.environ, {"MM_EMB_BENCHMARK_TIMING": "1"}), patch(
+            "rtp_llm.multimodal.mm_preprocess.logging.info",
+            side_effect=RuntimeError("sink"),
+        ), patch("rtp_llm.metrics.kmonitor.report"):
+            _report_result_path(item, payload)
+
     def test_sources_are_optional_and_survive_worker_pickle(self):
         model = SourceModel()
         media = [self._make_input("https://example.com/a.jpg")]
@@ -497,6 +508,74 @@ class InspectionPipelineTest(TestCase):
         finally:
             release.set()
             engine.stop()
+
+
+class RemoteIdentityWorkerTest(TestCase):
+    def test_actual_decoder_identity_crosses_spawn_without_original_bytes(self):
+        import base64
+        import hashlib
+        import io
+
+        from PIL import Image
+
+        from rtp_llm.multimodal.multimodal_mixins.deepseek_v41.deepseek_v41_processor import (
+            V41ImageProcessorConfig,
+        )
+        from rtp_llm.multimodal.multimodal_mixins.deepseek_v41.deepseek_v41_vision import (
+            DeepSeekV41VisionEmbedding,
+        )
+
+        image = io.BytesIO()
+        Image.new("RGB", (42, 42), "red").save(image, format="PNG")
+        media = image.getvalue()
+        context = multiprocessing.get_context("spawn")
+        release, cancelled = context.Event(), context.Event()
+        records = context.Queue()
+        config = VitConfig()
+        config.mm_preprocess_max_workers = 1
+        config.mm_remote_cache_enable = True
+        config.url_cache_item_num = config.mm_cache_item_num = 0
+        executor = MultiprocessPreprocessExecutor(
+            context,
+            config,
+            dict(processor_config=V41ImageProcessorConfig(vision_min_pixels=1764)),
+            DeepSeekV41VisionEmbedding.preprocess_input,
+            inspection_factory=partial(
+                WorkerSourceProvider, release, records, cancelled
+            ),
+        )
+        item = MMWorkItem(
+            [
+                helpers.MMProcessEngineGreenNetTest._make_input(
+                    self, "data:image/png;base64," + base64.b64encode(media).decode()
+                )
+            ],
+            deadline=time.monotonic() + 30,
+        )
+        item.capture_inspection_sources = True
+        item.inspection_request = SimpleNamespace(id="identity", input_index_offset=0)
+        try:
+            executor.submit(item)
+            wire_result = item.future.get(timeout=30).result
+            self.assertEqual(wire_result.inspection_sources, [])
+            self.assertEqual(
+                wire_result.source_identity.sha256, hashlib.sha256(media).hexdigest()
+            )
+            self.assertEqual(wire_result.source_identity.nbytes, len(media))
+            executor.get_result(item)
+            self.assertEqual(item.source_identity, wire_result.source_identity)
+            self.assertIsNone(item.inspection_sources)
+            self.assertFalse(item.inspection_future.done())
+            worker_record = records.get(timeout=5)
+            self.assertNotEqual(worker_record[0], os.getpid())
+            self.assertEqual(worker_record[4], [media])
+            release.set()
+            self.assertTrue(item.inspection_future.result(5).passed)
+        finally:
+            release.set()
+            executor.shutdown()
+            records.close()
+            records.join_thread()
 
 
 if __name__ == "__main__":

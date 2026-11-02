@@ -264,8 +264,11 @@ def get_fmha_impl(
         if not impl.support(attn_configs, attn_inputs):
             continue
 
-        # Check if implementation supports parallelism config
-        if not impl.support_parallelism_config(parallelism_config):
+        # The MHA parallelism capability describes prefill CP only. Decode
+        # uses the ordinary attention path even when prefill CP is configured.
+        if attn_inputs.is_prefill and not impl.support_parallelism_config(
+            parallelism_config
+        ):
             continue
         kwargs = {"fmha_config": fmha_config} if impl.accepts_fmha_config else {}
         try:

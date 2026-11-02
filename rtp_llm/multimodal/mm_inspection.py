@@ -167,6 +167,17 @@ class MMInspectionCoordinator:
                 self._greennet_loop_thread = thread
         return self._greennet_loop
 
+    def requires_content_inspection(self, mm_inputs) -> bool:
+        from rtp_llm.multimodal.mm_preprocess_result import is_http_image_input
+
+        # A URL verdict is not a verdict for a later download at that URL.
+        # Resident entries still retain the verdict for their original tensor.
+        return bool(
+            getattr(self.vit_config, "mm_remote_cache_enable", False)
+            and getattr(self.mm_part, "supports_remote_source_identity", False)
+            and is_http_image_input(mm_inputs)
+        )
+
     def _begin_greennet(
         self,
         mm_inputs: List[MultimodalInput],
@@ -207,6 +218,7 @@ class MMInspectionCoordinator:
             service_name=service_name,
             greennet_passed=(
                 not self._request_scoped_inspection()
+                and not self.requires_content_inspection(mm_inputs)
                 and len(mm_inputs) == 1
                 and _input_has_url(mm_inputs[0])
                 and self._hash_key_cache.greennet_passed(mm_inputs[0].cache_key())

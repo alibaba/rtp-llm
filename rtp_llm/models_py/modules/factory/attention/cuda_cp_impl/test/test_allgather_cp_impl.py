@@ -7,6 +7,9 @@ Tests two scenarios:
 """
 
 import unittest
+from unittest.mock import patch
+
+import torch
 
 from rtp_llm.models_py.modules.factory.attention.cuda_cp_impl.prefill_mha.allgather_cp_impl import (
     PCPAllGatherAttnOp,
@@ -165,6 +168,51 @@ class TestPCPAllGatherAttnOp(CPAttnTestBase):
             prefix_lengths=[48, 32],
             cp_size=2,
             cp_rank=0,
+            tokens_per_block=16,
+        )
+
+
+class TestPCPAllGatherSingleRank(CPAttnTestBase):
+    OP_CLASS = PCPAllGatherAttnOp
+    AG_MODULE = _AG_MODULE
+
+    def setUp(self):
+        super().setUp()
+        self.assertFalse(torch.distributed.is_initialized())
+
+    def _extra_patches(self, stack):
+        # Replace the generic driver's simulated distributed gather: CP1
+        # must produce correct attention/KV bytes without calling it at all.
+        stack.enter_context(
+            patch(
+                f"{self.AG_MODULE}.all_gather",
+                side_effect=AssertionError("CP1 must not invoke a collective"),
+            )
+        )
+
+    def test_single_rank_no_prefix(self):
+        self.run_no_prefix(batch_size=1, sequence_lengths=[2], cp_size=1)
+
+    def test_single_rank_irregular_multi_batch(self):
+        self.run_no_prefix(batch_size=2, sequence_lengths=[20, 36], cp_size=1)
+
+    def test_single_rank_gqa_bfloat16(self):
+        self.run_no_prefix(
+            batch_size=1,
+            sequence_lengths=[128],
+            cp_size=1,
+            head_num=32,
+            kv_head_num=8,
+            head_dim=128,
+            tokens_per_block=64,
+        )
+
+    def test_single_rank_prefix_cache(self):
+        self.run_with_prefix(
+            batch_size=2,
+            new_lengths=[20, 36],
+            prefix_lengths=[48, 64],
+            cp_size=1,
             tokens_per_block=16,
         )
 

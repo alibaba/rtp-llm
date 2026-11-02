@@ -358,3 +358,35 @@ cuda13_sm100_py_test(
     size = "large",
     env = {"GPU_COUNT": "1", "WORLD_SIZE": "1"},
 )
+
+py_test(
+    name = "mm_remote_embedding_engine_test",
+    srcs = ["mm_remote_embedding_engine_test.py"],
+    deps = ["//rtp_llm:testlib"],
+)
+
+py_test(
+    name = "mm_kvcm_emb_client_integration_test",
+    timeout = "long",
+    srcs = [
+        "mm_kvcm_emb_client_integration_test.py",
+    ],
+    tags = ["manual"],
+    deps = [
+        "//rtp_llm:testlib",
+    ],
+)
+
+py_test(
+    name = "emb_diagnostics_test",
+    srcs = ["emb_diagnostics_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    exec_properties = {'gpu':'A10'},
+)
+
+py_test(
+    name = "emb_deepseek_diagnostics_test",
+    srcs = ["emb_deepseek_diagnostics_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    exec_properties = {'gpu':'A10'},
+)

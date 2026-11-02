@@ -358,6 +358,8 @@ class VitConfig:
             VitConfig.DEFAULT_MM_HASH_KEY_CACHE_MAX_BYTES
         )
         self.mm_remote_cache_enable: bool = False
+        self.mm_remote_cache_namespace: str = ""
+        self.mm_remote_cache_write_timeout_ms: int = 1000
         self.mm_remote_cache_max_object_bytes: int = 256 * 1024**2
         self.mm_remote_cache_max_inflight_bytes: int = 1024**3
         self.mm_remote_cache_max_pending: int = 8
@@ -478,6 +480,8 @@ class VitConfig:
             f"mm_cache_cpu_max_bytes: {self.mm_cache_cpu_max_bytes}\n"
             f"mm_hash_key_cache_max_bytes: {self.mm_hash_key_cache_max_bytes}\n"
             f"mm_remote_cache_enable: {self.mm_remote_cache_enable}\n"
+            f"mm_remote_cache_namespace: {self.mm_remote_cache_namespace}\n"
+            f"mm_remote_cache_write_timeout_ms: {self.mm_remote_cache_write_timeout_ms}\n"
             f"mm_remote_cache_max_object_bytes: {self.mm_remote_cache_max_object_bytes}\n"
             f"mm_remote_cache_max_inflight_bytes: {self.mm_remote_cache_max_inflight_bytes}\n"
             f"mm_remote_cache_max_pending: {self.mm_remote_cache_max_pending}\n"
