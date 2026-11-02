@@ -2,6 +2,7 @@
 
 from rtp_llm.models_py.distributed import collective_torch
 from rtp_llm.models_py.distributed.flashinfer_all_reduce import get_flashinfer_allreduce
+from rtp_llm.models_py.modules.qwen4_exp._profiler import record_function_range
 
 
 def install_target_graph_all_reduce(attention, mlp):
@@ -18,10 +19,12 @@ def install_target_graph_all_reduce(attention, mlp):
 
 
 def all_reduce_target_graph(tensor, group):
-    if tensor.is_cuda and group == collective_torch.Group.TP:
-        communicator = get_flashinfer_allreduce()
-        if communicator is not None and communicator.should_use_registered_graph_input(
-            tensor
-        ):
-            return collective_torch.all_reduce(tensor, group, inplace=False)
-    return collective_torch.all_reduce(tensor, group)
+    with record_function_range("qwen4.tp_all_reduce"):
+        if tensor.is_cuda and group == collective_torch.Group.TP:
+            communicator = get_flashinfer_allreduce()
+            if (
+                communicator is not None
+                and communicator.should_use_registered_graph_input(tensor)
+            ):
+                return collective_torch.all_reduce(tensor, group, inplace=False)
+        return collective_torch.all_reduce(tensor, group)

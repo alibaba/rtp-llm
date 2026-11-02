@@ -14,6 +14,12 @@ py_test(
 )
 
 py_test(
+    name = "qwen4_profiler_ranges_test",
+    srcs = ["qwen4_profiler_ranges_test.py"],
+    deps = ["//rtp_llm:testlib"],
+)
+
+py_test(
     name = "residual_stream_test",
     srcs = ["residual_stream_test.py"],
     deps = ["//rtp_llm:testlib", ":math_references"],
