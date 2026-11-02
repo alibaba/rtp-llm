@@ -415,22 +415,6 @@ private:
     AUTIL_LOG_DECLARE();
 };
 
-// Wall time for a whole batch's CPU stream updates, including grammar and output
-// bookkeeping, after D2H staging. Report once per nonempty decode dispatch in both
-// serial and parallel modes; parallel workers are not summed individually.
-class RtpLLMStreamUpdateMetricsCollector final {
-public:
-    int64_t latency_us = 0;
-};
-
-class RtpLLMStreamUpdateMetrics: public kmonitor::MetricsGroup {
-public:
-    bool init(kmonitor::MetricsGroupManager* manager) override;
-    void report(const kmonitor::MetricsTags* tags, RtpLLMStreamUpdateMetricsCollector* collector);
-
-    kmonitor::MutableMetric* latency_us_metric = nullptr;
-};
-
 class RtpLLMHiddenStateCaptureMetricsCollector final {
 public:
     bool batch_qps                  = false;
@@ -1602,6 +1586,10 @@ public:
     int64_t total_accepted_token_num       = 0;
     int64_t total_stream_num               = 0;
     int64_t spec_steps                     = 0;
+    // Main-thread waits in the current async MTP decode batch, before sampling.
+    // -1 excludes other paths; zero means this batch did not wait at that join.
+    int64_t main_thread_wait_bookkeeping_us = -1;
+    int64_t main_thread_wait_spec_verify_us = -1;
     // Current decode decision; zero is a valid anchor-only verification budget.
     int64_t verify_budget              = -1;
     int64_t decided_draft_token_num    = -1;
@@ -1622,6 +1610,8 @@ public:
     kmonitor::MutableMetric* propose_step_latency_us_metric        = nullptr;
     kmonitor::MutableMetric* score_step_latency_us_metric          = nullptr;
     kmonitor::MutableMetric* speculative_sampler_latency_us_metric = nullptr;
+    kmonitor::MutableMetric* main_thread_wait_bookkeeping_us_metric = nullptr;
+    kmonitor::MutableMetric* main_thread_wait_spec_verify_us_metric = nullptr;
     kmonitor::MutableMetric* total_propose_token_num_metric        = nullptr;
     kmonitor::MutableMetric* total_accepted_token_num_metric       = nullptr;
     kmonitor::MutableMetric* sp_avg_accept_token_num_metric        = nullptr;

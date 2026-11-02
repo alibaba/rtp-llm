@@ -477,16 +477,6 @@ void RtpLLMHiddenStateCaptureMetrics::report(const kmonitor::MetricsTags*       
     }
 }
 
-bool RtpLLMStreamUpdateMetrics::init(kmonitor::MetricsGroupManager* manager) {
-    REGISTER_GAUGE_MUTABLE_METRIC(latency_us_metric, "rtp_llm_stream_update_latency_us");
-    return true;
-}
-
-void RtpLLMStreamUpdateMetrics::report(const kmonitor::MetricsTags*        tags,
-                                       RtpLLMStreamUpdateMetricsCollector* collector) {
-    REPORT_MUTABLE_METRIC(latency_us_metric, collector->latency_us);
-}
-
 bool RtpLLMExecutorMetrics::init(kmonitor::MetricsGroupManager* manager) {
     REGISTER_GAUGE_MUTABLE_METRIC(context_batch_size_metric, "rtp_llm_context_batch_size");
     REGISTER_GAUGE_MUTABLE_METRIC(generate_batch_size_metric, "rtp_llm_generate_batch_size");
@@ -543,6 +533,10 @@ bool RtpLLMSpeculativeEngineMetrics::init(kmonitor::MetricsGroupManager* manager
     REGISTER_GAUGE_MUTABLE_METRIC(decided_draft_token_num_metric, "rtp_llm_sp_decided_draft_token_num");
     REGISTER_GAUGE_MUTABLE_METRIC(total_verify_draft_token_num_metric, "rtp_llm_sp_total_verify_draft_token_num");
     REGISTER_GAUGE_MUTABLE_METRIC(acceptance_metrics_dropped_metric, "rtp_llm_sp_acceptance_metrics_dropped");
+    REGISTER_GAUGE_MUTABLE_METRIC(main_thread_wait_bookkeeping_us_metric,
+                                  "rtp_llm_mtp_main_thread_wait_bookkeeping_us");
+    REGISTER_GAUGE_MUTABLE_METRIC(main_thread_wait_spec_verify_us_metric,
+                                  "rtp_llm_mtp_main_thread_wait_spec_verify_us");
     return true;
 }
 
@@ -552,6 +546,13 @@ void RtpLLMSpeculativeEngineMetrics::report(const kmonitor::MetricsTags*        
     REPORT_MUTABLE_METRIC(propose_step_latency_us_metric, collector->propose_step_latency_us);
     REPORT_MUTABLE_METRIC(score_step_latency_us_metric, collector->score_step_latency_us);
     REPORT_MUTABLE_METRIC(speculative_sampler_latency_us_metric, collector->speculative_sampler_latency_us);
+
+    if (collector->main_thread_wait_bookkeeping_us >= 0) {
+        REPORT_MUTABLE_METRIC(main_thread_wait_bookkeeping_us_metric, collector->main_thread_wait_bookkeeping_us);
+    }
+    if (collector->main_thread_wait_spec_verify_us >= 0) {
+        REPORT_MUTABLE_METRIC(main_thread_wait_spec_verify_us_metric, collector->main_thread_wait_spec_verify_us);
+    }
 
     // Decisions are host metadata for the current round. Acceptance arrives
     // asynchronously, so its denominator must use the completed round's budget.

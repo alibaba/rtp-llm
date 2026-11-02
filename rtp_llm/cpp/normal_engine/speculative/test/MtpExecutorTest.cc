@@ -749,6 +749,16 @@ private:
     std::vector<int32_t> observed_draft_tokens_;
 };
 
+class DelayedSpecProcessor: public RejectDraftTokenSpecProcessor {
+public:
+    using RejectDraftTokenSpecProcessor::RejectDraftTokenSpecProcessor;
+
+    ErrorResult<int> prepareSpeculative(const SpecLogitsProcessorRequest& request) override {
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        return RejectDraftTokenSpecProcessor::prepareSpeculative(request);
+    }
+};
+
 struct MtpExecutorComponents {
     std::unique_ptr<MtpExecutor>            executor;
     std::unique_ptr<FakeModel>              fake_target_model;
@@ -765,6 +775,7 @@ struct MtpExecutorComponents {
 class MtpExecutorTest: public DeviceTestBase {
 public:
     void              runDSparkSpecLogitsScenario(std::optional<int64_t> bounded_budget);
+    void              runMainThreadWaitScenario(int gamma, bool with_processor, bool bookkeeping_already_done = false);
     void              runDSparkPackedCommitScenario(bool adaptive);
     GenerateStreamPtr createContextStream(const ModelConfig&     model_config,
                                           const RuntimeConfig&   runtime_config,
@@ -2517,6 +2528,141 @@ TEST_F(MtpExecutorTest, testDSparkDecodeKeepsProposalAndMarkovContract) {
     EXPECT_FALSE(components.executor->dspark_prefill_commit_only_);
     EXPECT_TRUE(components.executor->dspark_markov_w1_.defined());
     EXPECT_TRUE(components.executor->dspark_markov_w2_.defined());
+}
+
+void MtpExecutorTest::runMainThreadWaitScenario(int gamma, bool with_processor, bool bookkeeping_already_done) {
+    MtpExecutorTestConfig config;
+    config.vocab_size = config.vocab_size_override = 4;
+    config.gen_num_per_cycle                       = gamma;
+    config.sp_type                                 = SP_TYPE_DSPARK;
+    config.dspark_mask_token_id                    = 0;
+    auto  components                               = createMtpExecutorComponents(config);
+    auto& executor                                 = *components.executor;
+    auto  stream =
+        createContextStream(components.model_config, components.runtime_config, components.resource_context, {0, 1});
+    stream->generateConfig()->do_sample   = false;
+    stream->generateConfig()->temperature = 0;
+    auto sp_buffer                        = std::make_shared<SpeculativeExecutorStreamOutput>();
+    sp_buffer->propose_step               = gamma;
+    sp_buffer->tokens                     = torch::empty({1, 1}, torch::kInt32);
+    stream->setSPOutputBuffer(sp_buffer);
+    stream->specUpdate({torch::tensor({{2}}, torch::kInt32), 1, -1, {}, {}});
+    if (with_processor) {
+        stream->logits_processor_list_.push_back(std::make_shared<DelayedSpecProcessor>(3, stream->outputTokenLen()));
+    }
+
+    const auto      f32 = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA);
+    const auto      i32 = f32.dtype(torch::kInt32);
+    GptModelOutputs target_output;
+    target_output.logits            = torch::ones({gamma + 1, 4}, f32);
+    target_output.all_hidden_states = torch::zeros({gamma + 1, 2}, f32);
+    components.fake_target_model->setMtpTargetHiddenStates(target_output.all_hidden_states);
+    components.fake_target_model->setSkipInputCheck(true);
+    components.fake_target_model->setOutputs({target_output});
+    GptModelOutputs proposal_output;
+    proposal_output.logits = torch::zeros({gamma, 4}, f32);
+    proposal_output.logits.select(1, 2).fill_(1);
+    components.fake_draft_model->setSkipInputCheck(true);
+    components.fake_draft_model->setOutputs({proposal_output});
+    GptModelOutputs commit_output;
+    commit_output.hidden_states = torch::zeros({gamma + 1, 2}, f32);
+    components.fake_draft_prefill_model->setSkipInputCheck(true);
+    components.fake_draft_prefill_model->setOutputs({commit_output});
+
+    auto expected_logits = target_output.logits.clone();
+    if (with_processor) {
+        expected_logits[0][3] = BaseLogitsProcessor::neg_inf;
+    }
+    components.fake_sampler->setInputs({SamplerInputs{expected_logits}});
+    SamplerOutput sample_output{torch::ones({gamma + 1, 1}, i32)};
+    sample_output.all_probs = torch::full({gamma + 1, 4}, 0.25, f32);
+    components.fake_sampler->setOutputs({sample_output});
+    speculative::SpeculativeSamplerOutput accepted;
+    accepted.accept_tokens_cpu = torch::ones({1, gamma + 1}, torch::kInt32);
+    accepted.accept_tokens     = accepted.accept_tokens_cpu.to(torch::kCUDA);
+    accepted.accept_len_cpu    = torch::tensor({1}, torch::kInt32);
+    accepted.accept_len        = accepted.accept_len_cpu.to(torch::kCUDA);
+    components.fake_speculative_sampler->setOutputs({accepted});
+
+    auto bookkeeping_done = std::make_shared<std::atomic<bool>>(false);
+    // Inject after round-head preparation, so only the pre-sampling join can
+    // consume this task. Completed tasks must not report their full duration.
+    components.fake_target_model->setForwardObserver([&] {
+        if (executor.useStreamAsync() && executor.useDropBroadSync()) {
+            executor.spec_bookkeeping_runner_.launch([bookkeeping_done] {
+                std::this_thread::sleep_for(std::chrono::milliseconds(200));
+                *bookkeeping_done = true;
+            });
+            if (bookkeeping_already_done) {
+                executor.spec_bookkeeping_runner_.sync(cuda_graph::graphGetCurrentStream());
+            }
+        }
+    });
+    setupFakeModels(&executor,
+                    std::move(components.fake_target_model),
+                    std::move(components.fake_draft_model),
+                    std::move(components.fake_fast_topk_sampler),
+                    std::move(components.fake_speculative_sampler),
+                    std::move(components.fake_sampler),
+                    std::move(components.fake_draft_prefill_model));
+    std::list<GenerateStreamPtr> prefill_streams, decode_streams;
+    executor.prepareStreams({stream}, prefill_streams, decode_streams);
+    ASSERT_TRUE(prefill_streams.empty());
+    ASSERT_EQ(decode_streams.size(), 1);
+    ASSERT_EQ(stream->scoreLen(), gamma + 1);
+    MtpMetricsCollector metrics;
+    const auto          status = executor.decodeStep(decode_streams, metrics);
+    ASSERT_TRUE(status.ok()) << status.ToString();
+    if (executor.useStreamAsync()) {
+        executor.spec_bookkeeping_runner_.sync(cuda_graph::graphGetCurrentStream());
+    }
+    EXPECT_EQ(stream->getCompleteTokenIds()->completeTokenIdsVec(0), (std::vector<int>{0, 1, 2, 1}));
+    const auto& waits = metrics.sp_engine_collector;
+    if (!executor.useStreamAsync()) {
+        EXPECT_EQ(waits.main_thread_wait_bookkeeping_us, -1);
+        EXPECT_EQ(waits.main_thread_wait_spec_verify_us, -1);
+        return;
+    }
+    if (!executor.useDropBroadSync()) {
+        EXPECT_EQ(waits.main_thread_wait_bookkeeping_us, 0);
+    } else {
+        EXPECT_TRUE(bookkeeping_done->load());
+        if (bookkeeping_already_done) {
+            EXPECT_LT(waits.main_thread_wait_bookkeeping_us, 100000);
+        } else {
+            EXPECT_GE(waits.main_thread_wait_bookkeeping_us, 100000);
+        }
+    }
+    if (with_processor && gamma > 1) {
+        EXPECT_GE(waits.main_thread_wait_spec_verify_us, 100000);
+    } else {
+        // Inline prepareSpeculative may take 200 ms, but is not an async wait.
+        EXPECT_EQ(waits.main_thread_wait_spec_verify_us, 0);
+    }
+}
+
+TEST_F(MtpExecutorTest, testMainThreadWaitBeforeAsyncVerify) {
+    runMainThreadWaitScenario(3, true);
+}
+
+TEST_F(MtpExecutorTest, testMainThreadWaitBeforeInlineVerify) {
+    runMainThreadWaitScenario(1, true);
+}
+
+TEST_F(MtpExecutorTest, testMainThreadWaitBeforeSamplerWithoutProcessor) {
+    runMainThreadWaitScenario(3, false);
+}
+
+TEST_F(MtpExecutorTest, testMainThreadWaitExcludesCompletedBookkeepingTask) {
+    runMainThreadWaitScenario(3, true, true);
+}
+
+TEST_F(MtpExecutorTest, testMainThreadWaitSkipsEmptyDecode) {
+    auto                components = createMtpExecutorComponents(MtpExecutorTestConfig{});
+    MtpMetricsCollector metrics;
+    ASSERT_TRUE(components.executor->decodeStep({}, metrics).ok());
+    EXPECT_EQ(metrics.sp_engine_collector.main_thread_wait_bookkeeping_us, -1);
+    EXPECT_EQ(metrics.sp_engine_collector.main_thread_wait_spec_verify_us, -1);
 }
 
 void MtpExecutorTest::runDSparkSpecLogitsScenario(std::optional<int64_t> bounded_budget) {
