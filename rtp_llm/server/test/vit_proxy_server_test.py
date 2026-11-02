@@ -1112,6 +1112,30 @@ class VitProxyRpcServerForwardingTest(TestCase):
             server.load_balancer.get_alive_worker_addresses(), ["failed", "live"]
         )
 
+    def test_exhausted_failover_preserves_last_worker_error(self):
+        error = RpcUnavailable()
+        wire = ErrorDetailsPB(
+            error_code=907, error_message="worker unavailable"
+        ).SerializeToString()
+        error.trailing_metadata = lambda: (
+            ("grpc-status-details-bin", wire),
+            (VIT_ERROR_REPORTED_METADATA_KEY, "1"),
+        )
+        worker = MagicMock()
+        worker.RemoteMultimodalEmbedding.future.return_value = FakeGrpcFuture(
+            error=error
+        )
+        server = self._make_server({"worker": worker})
+        context = RpcBoundaryFakeContext()
+        with self.assertRaises(AbortCalled):
+            server.RemoteMultimodalEmbedding(MultimodalInputsPB(), context)
+        self.assertEqual(context.code, grpc.StatusCode.UNAVAILABLE)
+        self.assertEqual(context.details, error.details())
+        self.assertEqual(
+            context.trailing_metadata, (("grpc-status-details-bin", wire),)
+        )
+        worker.RemoteMultimodalEmbedding.future.assert_called_once()
+
     def test_forwarding_deadline_does_not_retry_or_mark_unhealthy(self):
         timeout_stub = MagicMock()
         timeout_stub.RemoteMultimodalEmbedding.future.return_value = FakeGrpcFuture(
@@ -1172,7 +1196,11 @@ class RuntimeExceptionStatusTest(TestCase):
             report_vit_error = MMProcessEngine.report_vit_error
 
             def get_embedding_result(self, *args, **kwargs):
-                error = self.error_type("embedding failed")
+                error = (
+                    FtRuntimeException(self.error_type, "embedding failed")
+                    if isinstance(self.error_type, ExceptionType)
+                    else self.error_type("embedding failed")
+                )
                 if self.report_before_raise:
                     self.report_vit_error(error)
                 raise error
@@ -1226,12 +1254,22 @@ class RuntimeExceptionStatusTest(TestCase):
                 grpc.StatusCode.UNKNOWN,
                 "Exception calling application: embedding failed",
             ),
+        ) + tuple(
+            (code, status, f"[{code.name}] embedding failed")
+            for code, status in (
+                (ExceptionType.INVALID_PARAMS, grpc.StatusCode.INVALID_ARGUMENT),
+                (ExceptionType.TRAFFIC_LIMIT_ERROR, grpc.StatusCode.RESOURCE_EXHAUSTED),
+                (ExceptionType.MM_LONG_PROMPT_ERROR, grpc.StatusCode.INVALID_ARGUMENT),
+                (ExceptionType.MM_DOWNLOAD_FAILED, grpc.StatusCode.INTERNAL),
+                (ExceptionType.UNSAFE_INPUT_CONTENT, grpc.StatusCode.PERMISSION_DENIED),
+                (ExceptionType.CANCELLED_ERROR, grpc.StatusCode.CANCELLED),
+            )
         )
         try:
             for error_type, status, details in cases:
                 for report_before_raise in (False, True):
                     with self.subTest(
-                        error_type=error_type.__name__,
+                        error_type=getattr(error_type, "__name__", str(error_type)),
                         report_before_raise=report_before_raise,
                     ):
                         engine.error_type = error_type
@@ -1263,9 +1301,15 @@ class RuntimeExceptionStatusTest(TestCase):
                             typed_codes = {
                                 MMSchedulerOverloadError: ExceptionType.CONCURRENCY_LIMIT_ERROR,
                                 MMSchedulerTimeoutError: ExceptionType.GENERATE_TIMEOUT,
+                                MMSchedulerRequestTooLargeError: ExceptionType.MM_WRONG_FORMAT_ERROR,
                                 TimeoutError: ExceptionType.GENERATE_TIMEOUT,
                             }
-                            if error_type in typed_codes:
+                            expected_type = (
+                                error_type
+                                if isinstance(error_type, ExceptionType)
+                                else typed_codes.get(error_type)
+                            )
+                            if expected_type is not None:
                                 for received in (
                                     direct_error.exception,
                                     proxy_error.exception,
@@ -1274,9 +1318,7 @@ class RuntimeExceptionStatusTest(TestCase):
                                     parsed = ErrorDetailsPB.FromString(
                                         wire["grpc-status-details-bin"]
                                     )
-                                    self.assertEqual(
-                                        parsed.error_code, typed_codes[error_type]
-                                    )
+                                    self.assertEqual(parsed.error_code, expected_type)
                                     self.assertEqual(
                                         parsed.error_message, "embedding failed"
                                     )
@@ -1356,15 +1398,11 @@ class RuntimeExceptionStatusTest(TestCase):
 
                 self.assertEqual(context.code, expected_status)
                 self.assertTrue(context.details.startswith(f"[{expected_type.name}]"))
-                if expected_type in (
-                    ExceptionType.CONCURRENCY_LIMIT_ERROR,
-                    ExceptionType.GENERATE_TIMEOUT,
-                ):
-                    wire = dict(context.trailing_metadata)
-                    parsed = ErrorDetailsPB.FromString(wire["grpc-status-details-bin"])
-                    self.assertEqual(parsed.error_code, expected_type)
-                    self.assertEqual(parsed.error_message, str(error))
-                    self.assertEqual(wire[VIT_ERROR_REPORTED_METADATA_KEY], "1")
+                wire = dict(context.trailing_metadata)
+                parsed = ErrorDetailsPB.FromString(wire["grpc-status-details-bin"])
+                self.assertEqual(parsed.error_code, expected_type)
+                self.assertEqual(parsed.error_message, str(error))
+                self.assertEqual(wire[VIT_ERROR_REPORTED_METADATA_KEY], "1")
 
 
 def _rdma_slot(lease_id: str) -> MMRdmaSlotPB:

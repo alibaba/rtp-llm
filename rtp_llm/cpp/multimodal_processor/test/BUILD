@@ -18,6 +18,19 @@ test_copts = [
 ] + copts()
 
 cc_test(
+    name = "mm_grpc_error_test",
+    srcs = ["MMGrpcErrorTest.cc"],
+    copts = test_copts,
+    env = {"GPU_COUNT": "0"},
+    deps = [
+        "//rtp_llm/cpp/model_rpc/proto:model_rpc_service_cc_proto",
+        "//rtp_llm/cpp/multimodal_processor/transport/grpc:mm_grpc_error",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+cc_test(
     name = "multimodal_processor_test",
     srcs = glob([
         "MultimodalProcessorTest.cc",

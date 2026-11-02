@@ -386,12 +386,9 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
                 {"source": "vit_server", "reason": "request_too_large"},
             )
             self.engine.report_vit_error(e)
-            _mark_vit_error_reported(context)
-            context.abort(
-                grpc.StatusCode.INVALID_ARGUMENT,
-                format_mm_rpc_error(
-                    FtRuntimeException(ExceptionType.MM_WRONG_FORMAT_ERROR, str(e))
-                ),
+            _abort_ft_runtime(
+                context,
+                FtRuntimeException(ExceptionType.MM_WRONG_FORMAT_ERROR, str(e)),
             )
         except FtRuntimeException as e:
             grpc_status = _grpc_status_for_runtime_exception(e)
