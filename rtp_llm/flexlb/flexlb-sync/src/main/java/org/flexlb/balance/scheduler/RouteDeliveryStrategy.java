@@ -465,21 +465,28 @@ public final class RouteDeliveryStrategy implements DeliveryStrategy {
                 GroupPlanner.Plan<GroupPlanner.Item> plan,
                 RouteProjection.Predictions predictions) {
             RouteService service = SERVICE.get();
-            service.reset(plan, predictions);
+            service.reset(plan, predictions, null);
+            return service;
+        }
+
+        @Override
+        public RouteProjection.GroupService service(
+                GroupPlanner.Plan<GroupPlanner.Item> plan,
+                RouteProjection.Predictions predictions,
+                RouteProjection.GroupPlanning planning) {
+            RouteService service = SERVICE.get();
+            service.reset(plan, predictions, (RoutePlanning) planning);
             return service;
         }
 
         private static final class RoutePlanning
                 implements RouteProjection.GroupPlanning {
-            private GroupPlanner.Item[] previous = new GroupPlanner.Item[0];
             private long[] offsets = new long[0];
-            private int previousSize;
             private int computedThrough;
             private RouteProjection.Predictions predictions;
 
             private void reset(RouteProjection.Predictions exactPredictions) {
                 predictions = exactPredictions;
-                previousSize = 0;
                 computedThrough = -1;
             }
 
@@ -491,21 +498,9 @@ public final class RouteDeliveryStrategy implements DeliveryStrategy {
                         || requiredThroughIndex >= prefix.size()) {
                     throw new IndexOutOfBoundsException(requiredThroughIndex);
                 }
-                if (!isIdentityPrefix(prefix)) {
-                    ensureCapacity(prefix.size());
-                    for (int index = 0; index < prefix.size(); index++) {
-                        previous[index] = prefix.get(index);
-                    }
-                    previousSize = prefix.size();
-                    computedThrough = -1;
-                } else if (previousSize < prefix.size()) {
-                    ensureCapacity(prefix.size());
-                    for (int index = previousSize;
-                            index < prefix.size(); index++) {
-                        previous[index] = prefix.get(index);
-                    }
-                    previousSize = prefix.size();
-                }
+                // GroupPlanning owns one append-only selection. A new group,
+                // reordered membership or model always receives a fresh reset.
+                ensureCapacity(requiredThroughIndex + 1);
                 while (computedThrough < requiredThroughIndex) {
                     int next = computedThrough + 1;
                     long prior = next == 0 ? 0L : offsets[next - 1];
@@ -517,24 +512,11 @@ public final class RouteDeliveryStrategy implements DeliveryStrategy {
                 return offsets[requiredThroughIndex];
             }
 
-            private boolean isIdentityPrefix(List<GroupPlanner.Item> next) {
-                if (previousSize > next.size()) {
-                    return false;
-                }
-                for (int index = 0; index < previousSize; index++) {
-                    if (previous[index] != next.get(index)) {
-                        return false;
-                    }
-                }
-                return true;
-            }
-
             private void ensureCapacity(int size) {
-                if (previous.length >= size) {
+                if (offsets.length >= size) {
                     return;
                 }
-                previous = java.util.Arrays.copyOf(previous, size);
-                offsets = java.util.Arrays.copyOf(offsets, size);
+                offsets = java.util.Arrays.copyOf(offsets, Math.max(size, Math.max(8, offsets.length * 2)));
             }
         }
 
@@ -547,7 +529,8 @@ public final class RouteDeliveryStrategy implements DeliveryStrategy {
 
             private void reset(
                     GroupPlanner.Plan<GroupPlanner.Item> exactPlan,
-                    RouteProjection.Predictions exactPredictions) {
+                    RouteProjection.Predictions exactPredictions,
+                    RoutePlanning exactPlanning) {
                 plan = exactPlan;
                 predictions = exactPredictions;
                 if (offsets.length < exactPlan.items().size()) {
@@ -555,6 +538,11 @@ public final class RouteDeliveryStrategy implements DeliveryStrategy {
                             offsets, exactPlan.items().size());
                 }
                 computedThrough = -1;
+                if (exactPlanning != null) {
+                    int known = Math.min(exactPlan.items().size(), exactPlanning.computedThrough + 1);
+                    System.arraycopy(exactPlanning.offsets, 0, offsets, 0, known);
+                    computedThrough = known - 1;
+                }
             }
 
             @Override
