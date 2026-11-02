@@ -19,6 +19,8 @@ public class ServiceRoute {
     @JsonProperty("service_id")
     private String serviceId;
 
+    private KvcmConfig kvcm;
+
     @JsonProperty("role_endpoints")
     private List<GroupRoleEndPoint> roleEndpoints = new ArrayList<>();
 

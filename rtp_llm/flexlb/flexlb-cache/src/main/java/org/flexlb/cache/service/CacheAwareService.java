@@ -22,13 +22,14 @@ public interface CacheAwareService {
      * @param blockCacheKeys List of cache block IDs to query
      * @param roleType       Engine role to query
      * @param candidateEngineIpPorts exact live candidate addresses
+     * @param blockSize routed key granularity supplied by Frontend (tokens per key)
      * @return Engine matching result map, key: engineIpPort, value: prefixMatchLength
      */
     Map<String/*engineIpPort*/, Integer/*prefixMatchLength*/> findMatchingEngines(
             List<Long> blockCacheKeys,
             RoleType roleType,
-            List<String> candidateEngineIpPorts);
-    
+            List<String> candidateEngineIpPorts, long blockSize);
+
     /**
      * Update engine block KV cache status
      *

@@ -107,7 +107,7 @@ class PdfusionSchedulingTest {
         }
         WorkerDirectory directory = new WorkerDirectory(endpoints);
         CacheAwareService cache = mock(CacheAwareService.class);
-        when(cache.findMatchingEngines(any(), any(), any())).thenReturn(Map.of());
+        when(cache.findMatchingEngines(any(), any(), any(), org.mockito.ArgumentMatchers.anyLong())).thenReturn(Map.of());
         ModelMetaConfig model = mock(ModelMetaConfig.class);
         when(model.requiredRoles()).thenReturn(List.of(RoleType.PDFUSION));
         DefaultRouter router = new DefaultRouter(new CostBasedPrefillStrategy(directory, cache, mock(EngineHealthReporter.class)),

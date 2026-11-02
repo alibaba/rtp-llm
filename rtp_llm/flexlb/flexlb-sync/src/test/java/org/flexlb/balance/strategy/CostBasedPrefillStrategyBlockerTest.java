@@ -247,7 +247,7 @@ class CostBasedPrefillStrategyBlockerTest {
                     verify(outside, never()).admissionRejectReason(anyInt());
                     verify(secondEndpoint, never()).admissionRejectReason(anyInt());
                     verify(cache).findMatchingEngines(any(),
-                            eq(role), eq(List.of("first", "outside", "second")));
+                            eq(role), eq(List.of("first", "outside", "second")), org.mockito.ArgumentMatchers.anyLong());
                     verify(pin).close();
                 }
             }

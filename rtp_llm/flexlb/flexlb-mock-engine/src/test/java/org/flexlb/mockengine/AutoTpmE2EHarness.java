@@ -453,7 +453,7 @@ final class AutoTpmE2EHarness implements AutoCloseable {
     private DefaultRouter productionRouter() {
         WorkerDirectory workers = new WorkerDirectory(endpointRegistry);
         CacheAwareService cache = mock(CacheAwareService.class);
-        when(cache.findMatchingEngines(any(), any(), any()))
+        when(cache.findMatchingEngines(any(), any(), any(), org.mockito.ArgumentMatchers.anyLong()))
                 .thenReturn(Map.of());
         EngineHealthReporter healthReporter = mock(EngineHealthReporter.class);
         ModelMetaConfig modelMeta = mock(ModelMetaConfig.class);

@@ -16,6 +16,7 @@ public final class FlexlbConfig {
     public static final int CURRENT_SCHEMA_VERSION = 3;
 
     private int schemaVersion = CURRENT_SCHEMA_VERSION;
+    private CacheMatchingConfig cacheMatching = new LocalSyncCacheMatchingConfig();
     private SchedulerConfig scheduler = new SchedulerConfig();
     private DispatcherConfig dispatcher = new DispatcherConfig();
     private RequestLifecycleConfig requestLifecycle = new RequestLifecycleConfig();
