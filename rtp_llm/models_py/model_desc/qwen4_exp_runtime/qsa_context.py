@@ -45,6 +45,13 @@ from .qsa_plans import IncrementalPrefillPlan, TargetVerifyPlan
 
 @dataclass(frozen=True)
 class Qwen4ExpQSARuntimeContext:
+    """Per-layer QSA runtime wiring.
+
+    The model recreates one context per attention layer, so layer-independent
+    prefill metadata is NOT cached here: the frozen per-step plans live in
+    :mod:`.qsa_step_plan` (keyed by the step's ``main_inputs`` identity),
+    following the same freeze-once rationale as ``_target_verify_plan``.
+    """
     main_cache: LayerKVCache
     main_inputs: PyAttentionInputs
     indexer_kv_cache: LayerKVCache
