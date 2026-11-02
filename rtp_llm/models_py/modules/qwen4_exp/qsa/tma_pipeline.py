@@ -32,11 +32,12 @@ def _producer(
     empty,
     S,
     POSITIONS: gl.constexpr,
+    G: gl.constexpr,
     KN: gl.constexpr,
     D: gl.constexpr,
     SLOTS: gl.constexpr,
 ):
-    tile = gl.cdiv(S, POSITIONS) - 1 - gl.program_id(0)
+    tile = gl.cdiv(S, POSITIONS) - 1 - gl.program_id(1 if G == 4 else 0)
     tiles = gl.cdiv(gl.minimum(S, (tile + 1) * POSITIONS), KN)
     for operand in range(2 * tiles):
         slot = operand % SLOTS
@@ -87,8 +88,8 @@ def _consumer(
     lhs: gl.constexpr = DotOperandLayout(0, mma, 2)
     rhs: gl.constexpr = DotOperandLayout(1, mma, 2)
     load_layout: gl.constexpr = BlockedLayout([1, 4], [4, 8], [4, 1], [1, 0])
-    tile = gl.cdiv(S, POSITIONS) - 1 - gl.program_id(0)
-    group = gl.program_id(1)
+    tile = gl.cdiv(S, POSITIONS) - 1 - gl.program_id(1 if G == 4 else 0)
+    group = gl.program_id(0 if G == 4 else 1)
     rr = gl.arange(0, QM, layout=SliceLayout(1, load_layout))
     dd = gl.arange(0, D, layout=SliceLayout(0, load_layout))
     pp = tile * POSITIONS + rr // G
@@ -246,7 +247,7 @@ def _pipelined_prefill(
                 ),
                 (
                     _producer,
-                    (K, V, buf, full, empty, S, POSITIONS, KN, D, slots),
+                    (K, V, buf, full, empty, S, POSITIONS, G, KN, D, slots),
                 ),
             ],
             worker_num_warps=[4],
@@ -306,7 +307,11 @@ def run_prefill(q, k, v, membership):
         v, [tokens, dim], [v.stride(2), 1], [key_tile, dim], layout
     )
     positions = query_tile // group_heads
-    _pipelined_prefill[(triton.cdiv(tokens, positions), heads // group_heads)](
+    # Adjacent head groups traverse the same KV tiles together.
+    grid = (triton.cdiv(tokens, positions), heads // group_heads)
+    if group_heads == 4:
+        grid = grid[::-1]
+    _pipelined_prefill[grid](
         q,
         key,
         value,
