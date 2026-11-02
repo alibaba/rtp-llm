@@ -73,8 +73,8 @@ flowchart TB
 RTP_ENGRAM_COHORT=10.0.0.1:29483,10.0.0.2:29483   # N 个存储 host，host 互不相同，顺序=实例索引
 RTP_ENGRAM_INSTANCE_INDEX=0                        # 本实例在 cohort 中的下标
 ENGRAM_SHARD_COUNT=2                               # P，必须等于 cohort 长度（一 host 一片）
-RTP_ENGRAM_MODEL_REVISION=<rev>                    # 全组一致
-RTP_ENGRAM_GENERATION=<uuid>                       # 必填；本次组启动新生成的 UUID，全组一致，重启必须换新
+RTP_ENGRAM_MODEL_REVISION=<rev>                    # 同一 cohort 内一致
+RTP_ENGRAM_GENERATION=<uuid>                       # 必填；每个 cohort 一个，同 cohort 内逐字节一致
 RTP_ENGRAM_CHECKPOINT=/models/DeepSeek             # 本机完整 checkpoint
 RTP_ENGRAM_LOCAL_DEVICE=0                          # 建议显式给出；缺省回落 0 并告警
 RTP_ENGRAM_LOCAL_NUMA=0                            # 建议显式给出；该 NUMA node 需有足够空闲内存
@@ -86,8 +86,13 @@ RTP_ENGRAM_COHORT_TIMEOUT=1800                     # 可选
 RTP_ENGRAM_TLS_DIR=/run/engram/pki                 # 可选；不设则走 plain HTTP
 ```
 
-`RTP_ENGRAM_GENERATION` 必须由启动器生成并广播给全组：它标识"这一次启动"，不是部署标识。复用上一轮的
-generation 会让某个重启的成员在仍存活的 Store 里读到上一轮的 package key，从而导入已释放的 handle。
+`RTP_ENGRAM_GENERATION` 必须由启动器生成并广播给同一个 cohort 的所有 host：它标识"这个 cohort 的这一次
+启动"，不是部署标识。复用上一轮的 generation 会让某个重启的成员在仍存活的 Store 里读到上一轮的 package
+key，从而导入已释放的 handle。
+
+划分单位是 **cohort（共享同一组分片的 host 集合）**，不是 gang：prefill 侧两个 4 卡 gang 共享一组分片，
+属于同一个 cohort，因此必须用同一个 UUID（否则交换时 `GROUP_MISMATCH`）；decode 侧 8 rank gang 自成一个
+cohort。不同 cohort 之间（如 P 与 D）互不校验，不做要求，但建议取不同值以便区分是哪一次启动。
 
 `instance_id`、shard 分配和 `publisher_rank` 由这些输入确定性推导；只有 `RTP_ENGRAM_GENERATION` 需要启动器分发（一个 UUID，不是成员表）。
 
