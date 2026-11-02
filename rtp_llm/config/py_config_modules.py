@@ -309,6 +309,7 @@ class MMRdmaConfig:
         self.connect_timeout_ms: int = 250
         self.read_timeout_ms: int = 3000
         self.qp_count: int = 8
+        self.read_provider_count: int = 4
         self.slot_gc_timeout_ms: int = 60 * 1000
         self.max_slot_bytes: int = 1024 * 1024 * 1024
         self.max_receipt_bytes: int = 8 * 1024 * 1024 * 1024
@@ -506,6 +507,7 @@ class VitConfig:
             f"mm_rdma_connect_timeout_ms: {rdma.connect_timeout_ms}\n"
             f"mm_rdma_read_timeout_ms: {rdma.read_timeout_ms}\n"
             f"mm_rdma_qp_count: {rdma.qp_count}\n"
+            f"mm_rdma_read_provider_count: {rdma.read_provider_count}\n"
             f"mm_rdma_release_timeout_ms: {control.release_timeout_ms}\n"
             f"mm_rdma_slot_gc_timeout_ms: {rdma.slot_gc_timeout_ms}\n"
             f"mm_rdma_max_slot_bytes: {rdma.max_slot_bytes}\n"

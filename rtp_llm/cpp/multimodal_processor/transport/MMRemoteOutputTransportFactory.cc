@@ -1,5 +1,8 @@
 #include "rtp_llm/cpp/multimodal_processor/transport/MMRemoteOutputTransportFactory.h"
 
+#include <algorithm>
+#include <cstddef>
+#include <memory>
 #include <stdexcept>
 #include <utility>
 #include <vector>
@@ -20,12 +23,21 @@ createMMRemoteOutputTransport(const MMTransportConfig&     transport_config,
 
     std::vector<std::unique_ptr<MMReceiptReader>> readers;
     if (mode == kMMTransportModeRdma) {
-        auto reader = rdma_transport::createRdmaRead(transport_config.rdma, device_id);
-        if (reader == nullptr) {
-            throw std::runtime_error("failed to initialize RDMA reader for multimodal output transport");
+        // One dedicated provider per pool slot: providers serialize their own calls, so
+        // a pool of N lets N multimodal reads run concurrently instead of queueing the
+        // whole worker on a single serialization point. All-or-nothing initialization.
+        const size_t pool_size = std::max<size_t>(1, transport_config.rdma.read_provider_count);
+        std::vector<std::shared_ptr<rdma_transport::RdmaRead>> providers;
+        providers.reserve(pool_size);
+        for (size_t i = 0; i < pool_size; ++i) {
+            auto reader = rdma_transport::createRdmaRead(transport_config.rdma, device_id);
+            if (reader == nullptr) {
+                throw std::runtime_error("failed to initialize RDMA reader for multimodal output transport");
+            }
+            providers.push_back(std::move(reader));
         }
-        RTP_LLM_LOG_INFO("mm transport mode=rdma: reader initialized");
-        readers.push_back(std::make_unique<MMRdmaReader>(std::move(reader), transport_config.rdma));
+        RTP_LLM_LOG_INFO("mm transport mode=rdma: %zu pooled reader(s) initialized", pool_size);
+        readers.push_back(std::make_unique<MMRdmaReader>(std::move(providers), transport_config.rdma));
     } else {
         RTP_LLM_LOG_INFO("mm transport mode=grpc: rdma disabled, use inline grpc");
         readers.push_back(createMMRdmaReader(nullptr));

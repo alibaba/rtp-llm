@@ -110,8 +110,63 @@ private:
 
 }  // namespace
 
+std::vector<std::shared_ptr<rdma_transport::RdmaRead>>
+MMRdmaReader::poolOf(std::shared_ptr<rdma_transport::RdmaRead> reader, const RdmaConfig& rdma_config) {
+    const size_t pool_size = std::max<size_t>(1, rdma_config.read_provider_count);
+    std::vector<std::shared_ptr<rdma_transport::RdmaRead>> providers;
+    providers.reserve(pool_size);
+    for (size_t i = 0; i < pool_size; ++i) {
+        providers.push_back(reader);
+    }
+    return providers;
+}
+
+int MMRdmaReader::acquireProviderSlot(const std::chrono::steady_clock::time_point& deadline, int64_t* waited_ms) {
+    const auto start = std::chrono::steady_clock::now();
+    int        slot  = -1;
+    {
+        std::unique_lock<std::mutex> lock(pool_mutex_);
+        const size_t                 count = providers_.size();
+        if (count > 0) {
+            const size_t hint  = static_cast<size_t>(round_robin_.fetch_add(1) % count);
+            const auto   scan  = [&]() -> int {
+                for (size_t i = 0; i < count; ++i) {
+                    const size_t idx = (hint + i) % count;
+                    if (!slot_busy_[idx]) {
+                        return static_cast<int>(idx);
+                    }
+                }
+                return -1;
+            };
+            slot = scan();
+            if (slot < 0 && pool_cv_.wait_until(lock, deadline, [&]() { return scan() >= 0; })) {
+                slot = scan();
+            }
+            if (slot >= 0) {
+                slot_busy_[static_cast<size_t>(slot)] = true;
+            }
+        }
+    }
+    *waited_ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
+    return slot;
+}
+
+void MMRdmaReader::releaseProviderSlot(int slot) {
+    {
+        std::lock_guard<std::mutex> lock(pool_mutex_);
+        slot_busy_[static_cast<size_t>(slot)] = false;
+    }
+    pool_cv_.notify_one();
+}
+
+size_t MMRdmaReader::busySlotCount() {
+    std::lock_guard<std::mutex> lock(pool_mutex_);
+    return static_cast<size_t>(std::count(slot_busy_.begin(), slot_busy_.end(), true));
+}
+
 bool MMRdmaReader::advertise(const std::string& /*endpoint*/, MultimodalInputsPB& request_pb) {
-    if (reader_ == nullptr) {
+    if (!hasProvider()) {
         return false;
     }
     request_pb.set_support_rdma(true);
@@ -123,7 +178,7 @@ bool MMRdmaReader::matches(const MultimodalOutputPB& receipt) const {
 }
 
 ConsumeResult MMRdmaReader::consume(const MultimodalOutputPB& receipt, DeliveryContext& context) {
-    if (reader_ == nullptr) {
+    if (!hasProvider()) {
         return ConsumeResult::failure(
             ErrorInfo(ErrorCode::MM_PROCESS_ERROR, "rdma receipt reached an adapter with no RDMA reader"));
     }
@@ -307,6 +362,9 @@ bool MMRdmaReader::readAllSlots(const MultimodalOutputPB&        receipt,
     int64_t remaining = context.budget.remainingMs();
     if (remaining <= 0) {
         *deadline_exhausted = true;
+        RTP_LLM_LOG_WARNING("rdma read skipped: delivery budget exhausted before provider acquisition "
+                            "(budget_remaining_ms=%ld)",
+                            static_cast<long>(remaining));
         return false;
     }
     int64_t read_timeout_ms = remaining;
@@ -314,20 +372,42 @@ bool MMRdmaReader::readAllSlots(const MultimodalOutputPB&        receipt,
         read_timeout_ms = std::min(read_timeout_ms, rdma_config_->read_timeout_ms);
     }
     const auto read_deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(read_timeout_ms);
-    std::unique_lock<std::timed_mutex> provider_lock(provider_mutex_, std::defer_lock);
-    if (!provider_lock.try_lock_until(read_deadline)) {
+    int64_t    waited_ms     = 0;
+    const int  slot          = acquireProviderSlot(read_deadline, &waited_ms);
+    if (slot < 0) {
         *deadline_exhausted = context.budget.exhausted();
+        RTP_LLM_LOG_WARNING("rdma provider pool exhausted: waited_ms=%ld pool_size=%zu busy_slots=%zu "
+                            "read_window_ms=%ld budget_remaining_ms=%ld",
+                            static_cast<long>(waited_ms),
+                            providers_.size(),
+                            busySlotCount(),
+                            static_cast<long>(read_timeout_ms),
+                            static_cast<long>(context.budget.remainingMs()));
         return false;
     }
+    // Returns the borrowed provider to the pool on every exit path, including throws.
+    struct SlotGuard {
+        MMRdmaReader* self;
+        int           slot;
+        ~SlotGuard() {
+            self->releaseProviderSlot(slot);
+        }
+    } slot_guard{this, slot};
     remaining = context.budget.remainingMs();
     if (remaining <= 0) {
         *deadline_exhausted = true;
+        RTP_LLM_LOG_WARNING("rdma read skipped: delivery budget exhausted after provider acquisition "
+                            "(waited_ms=%ld)",
+                            static_cast<long>(waited_ms));
         return false;
     }
     const int64_t read_remaining_ms =
         std::chrono::duration_cast<std::chrono::milliseconds>(read_deadline - std::chrono::steady_clock::now()).count();
     if (read_remaining_ms <= 0) {
         *deadline_exhausted = context.budget.exhausted();
+        RTP_LLM_LOG_WARNING("rdma read window exhausted after provider acquisition: waited_ms=%ld read_window_ms=%ld",
+                            static_cast<long>(waited_ms),
+                            static_cast<long>(read_timeout_ms));
         return false;
     }
     read_timeout_ms = std::min(remaining, read_remaining_ms);
@@ -338,7 +418,8 @@ bool MMRdmaReader::readAllSlots(const MultimodalOutputPB&        receipt,
                 owner->releaseAsync(endpoint, handles);
             }
         };
-        result = reader_->readWithCleanup(descriptors, read_timeout_ms, std::move(release), release_deferred);
+        result = providers_[static_cast<size_t>(slot)]->readWithCleanup(
+            descriptors, read_timeout_ms, std::move(release), release_deferred);
     } catch (const std::exception& e) {
         RTP_LLM_LOG_WARNING("tensor rdma read threw an exception: %s", e.what());
         return false;
