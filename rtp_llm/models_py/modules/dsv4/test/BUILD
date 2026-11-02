@@ -74,6 +74,20 @@ dsv4_py_test(
     env = {"RTP_TEST_WATCHDOG_SECONDS": "300"},
 )
 
+# Cache-clear recompile coverage: clearing the Triton device caches forces
+# full JIT recompilation of all three CP metadata kernels, which dominates
+# wall-clock on the ARM lane. Kept out of the default/PR lanes via the
+# manual tag; run explicitly when touching the warmup/specialization
+# contract. `heavy` documents the reason for the exclusion.
+dsv4_py_test(
+    name = "test_cp_metadata_triton_recompile",
+    deps = _DSV4_TEST_DEPS,
+    tags = [
+        "heavy",
+        "manual",
+    ],
+)
+
 [
     dsv4_py_test(
         name = name,

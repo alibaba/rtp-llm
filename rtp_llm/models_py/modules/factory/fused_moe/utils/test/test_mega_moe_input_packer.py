@@ -52,6 +52,25 @@ class TestMegaMoEInputPacker(unittest.TestCase):
             raise RuntimeError("test_mega_moe_input_packer requires CUDA")
         if torch.cuda.get_device_capability()[0] != 10:
             raise RuntimeError("test_mega_moe_input_packer requires SM100")
+        # One-time warmup of the union of pack signatures the tests below
+        # exercise, so each test reuses warm Triton caches instead of
+        # JIT-compiling inline (ARM compiles dominate this target's runtime).
+        for tokens, dim, topk in (
+            (1, 256, 8),
+            (17, 256, 8),
+            (128, 256, 8),
+            (3, 256, 8),
+            (3, 256, 33),
+        ):
+            x = torch.randn(tokens, dim, device="cuda", dtype=torch.bfloat16)
+            weights = torch.rand(tokens, topk, device="cuda", dtype=torch.float32)
+            indices = torch.randint(
+                0, 256, (tokens, topk), device="cuda", dtype=torch.int64
+            )
+            FusedMegaMoEInputPacker().pack(
+                x, weights, indices, _make_buf(tokens, dim, topk, "cuda"), tokens
+            )
+        torch.cuda.synchronize()
 
     def test_dispatch(self):
         old = os.environ.pop("MEGA_MOE_INPUT_PACKER", None)
