@@ -19,6 +19,14 @@ def _register_impls(factory, **_ignored) -> None:
     factory.register(PpuInt8DeepGemmLinear)
     logging.info("[ppu linear register] Registered W8A8 INT8 DeepGEMM Linear")
 
+    # The unquantized implementation uses torch F.linear on PPU as well.
+    from rtp_llm.models_py.modules.factory.linear.impl.cuda.f16_linear import (
+        CudaF16Linear,
+    )
+
+    factory.register(CudaF16Linear)
+    logging.info("[ppu linear register] Registered unquantized torch Linear")
+
 
 def install() -> None:
     """Record the registration hook. Must run before the factory is imported."""
