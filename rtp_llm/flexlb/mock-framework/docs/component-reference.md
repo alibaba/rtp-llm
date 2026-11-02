@@ -97,7 +97,7 @@ Engine 是运行实例的概念，prefill/decode/vit 是 Engine 的角色；RTP/
 
 P/D/V 都实现 `EngineInstance` 生命周期句柄，各自拥有端口、队列、缓存和产物目录；V 拥有自己的调度器。本地同一个 `EngineHost` 平等管理三种 Engine；Whale 每 Pod 直接启动一个 Engine，无需 EngineHost。统一产物是 `java/host/target/mock-engine-service-1.0-SNAPSHOT-all.jar`，同时包含通用单实例入口和本地宿主入口，不为 V 单独打包。Master 始终独立 JVM。
 
-原生 `RemoteMultimodalEmbedding` 的一个请求可含多张图，并发请求由 V 调度器合成 batch，无额外 Batch RPC。`gpu_max_batch_size=1` 表示单请求执行并忽略收集窗口；否则按请求数、图数和收集窗口选 FIFO batch。队列和 RPC 等待者均有上限，超出返回 RESOURCE_EXHAUSTED。Client/P 只依赖 shared/multimodal，不依赖 V 服务模块。首版不拆分一个请求的图片组，超过单批图数预算明确拒绝。取消/超时仅释放当前等待者；同 key 的计算可被多个请求共享，无消费者且尚未执行的工作不再 forward，已开始的 batch 可以完成并登记缓存。
+原生 `RemoteMultimodalEmbedding` 的一个请求可含多张图，并发请求由 V 调度器合成 batch，无额外 Batch RPC。`gpu_max_batch_size=1` 表示单请求执行并忽略收集窗口；否则按请求数、图数和收集窗口选 FIFO batch。队列和 RPC 等待者均有上限，超出返回 RESOURCE_EXHAUSTED。Client/P 只依赖 shared/multimodal，不依赖 V 服务模块。batch 模式（gpu_max_batch_size>1）下，一个请求的图片组可按剩余图数预算拆到多个 Forward；余下图片留在队首，全部结果就绪后完成请求。gpu_max_batch_size=1 时仍按整个请求执行，不按图拆分。取消/超时仅释放当前等待者；同 key 的计算可被多个请求共享，无消费者且尚未执行的工作不再 forward，已开始的 batch 可以完成并登记缓存。
 
 `environment.vit` 不指定 engine 身份，配置示例：
 

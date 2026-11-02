@@ -37,7 +37,7 @@ def _validate(request):
         if (not image.url.strip() or len(image.url) > 4096 or not 1 <= image.width <= 32768
                 or not 1 <= image.height <= 32768 or image.offset < end
                 or image.offset >= len(request.token_ids)):
-            raise ValueError('Invalid expanded image span or geometry')
+            raise ValueError('Invalid image placeholder or geometry')
         end = image.offset + 1
 
 
