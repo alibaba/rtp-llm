@@ -19,7 +19,7 @@ public record RtpConfig(String id, Role role, int blockSize, int deviceBlocks, i
                         boolean reuseCache, boolean deviceCache, int hostBlocks, EvictionPolicy hostPolicy,
                         Watermark deviceWatermark, Watermark hostWatermark, boolean disableDecodeFirstReuse, int maxSeqLen, int maxBatchTokens,
                         int maxGenerateBatchSize, int maxInitedKvStreams, int maxUncachedBatchTokens, int cpSize, boolean cpEnabled, int tpSize, int dpSize,
-                        JsonNode business, ComputeModel compute, int imageToken) {
+                        JsonNode business, ComputeModel compute, int imageToken, long cacheKeySeed) {
     public static final int REQUEST_LIMIT = 1024;
     private static final ObjectMapper JSON = new ObjectMapper();
 
@@ -90,11 +90,11 @@ public record RtpConfig(String id, Role role, int blockSize, int deviceBlocks, i
             nativeInt(config, "max_inited_kv_cache_streams", 0, 0, Integer.MAX_VALUE),
             nativeInt(config, "max_batch_tokens_without_cache", 0, 0, Integer.MAX_VALUE),
             cpSize, cpEnabled, tpSize, dpSize,
-            config, compute, EngineConfig.imageToken(EngineConfig.model(config), org.flexlb.mock.multimodal.MediaInput.IMAGE_TOKEN));
+            config, compute, EngineConfig.imageToken(EngineConfig.model(config), org.flexlb.mock.multimodal.MediaInput.IMAGE_TOKEN), EngineConfig.cacheKeySeed(config));
     }
 
     public AdmissionConfig endpoint() {
-        return new AdmissionConfig(id, role, blockSize, tpSize, maxSeqLen, maxBatchTokens, compute, imageToken);
+        return new AdmissionConfig(id, role, blockSize, tpSize, maxSeqLen, maxBatchTokens, compute, imageToken, cacheKeySeed);
     }
 
     public ObjectNode effective() {
@@ -116,7 +116,7 @@ public record RtpConfig(String id, Role role, int blockSize, int deviceBlocks, i
         if (role == Role.prefill) {
             result.put("max_inited_kv_cache_streams", maxInitedKvStreams).put("max_batch_tokens_without_cache", maxUncachedBatchTokens); }
         if (business.has("checkpoint_path")) result.set("checkpoint_path", business.get("checkpoint_path"));
-        result.put("concurrency_limit", maxGenerateBatchSize);
+        result.put("concurrency_limit", maxGenerateBatchSize).put("cache_key_hash_seed", cacheKeySeed);
         boolean control = nativeBool(business,"enable_remote_cache",false);
         String events = business.path("kv_cache_event_publisher_type").asText("none");
         if (control || !events.equals("none")) {

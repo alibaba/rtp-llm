@@ -287,11 +287,11 @@ Master 与 KVCM 是两个独立消费者，不要求跨服务原子提交。KVCM
 kv_cache_event_publisher_type: kvcm
 kv_cache_event_manager_endpoint: http://<meta-http-host>:<port>
 kv_cache_event_instance_group: mock-experiment
-kv_cache_event_instance_id: prefill-0
+kv_cache_event_instance_id: deployment_128
 kv_cache_event_snapshot_interval_ms: 600000
 ```
 
-manager_endpoint 必须是直接 Meta HTTP 地址；本批不实现 VIP/Meta RPC 发现。instance_id 缺省为实例 ID 加启动 UUID，host_ip_port 缺省为实际 RPC 地址。关闭事件发布、仅配置 enable_remote_cache=true 时仍可注册并保持控制心跳，NODE_REGISTER 不宣称有 HBM 事件；心跳 extra_info 中的 rtp_remote_cache_enabled 单独记录，不能被解释成数据面已经接通。正式环境需使用匹配的 model_name 和实例组。
+manager_endpoint 必须是直接 Meta HTTP 地址；本批不实现 VIP/Meta RPC 发现。instance_id 必须显式配置为共享查询空间；host_ip_port 缺省为发布 IP 加 gRPC 端口减一，与 DSV Master 身份一致。关闭事件发布、仅配置 enable_remote_cache=true 时仍可注册并保持控制心跳，NODE_REGISTER 不宣称有 HBM 事件；心跳 extra_info 中的 rtp_remote_cache_enabled 单独记录，不能被解释成数据面已经接通。正式环境需使用匹配的 model_name 和实例组。
 
 `ExecuteFunction` 采用原生 FunctionRequest/Response：READ/WRITE 当前未提交任何外部 I/O，返回 FAILED_BUFFER_SAFE 且 payload_buffer_safe=true；其他未实现的 KVCM SDK 元数据操作返回 UNIMPLEMENTED。ShutdownRequest 的跨 rank 停机协调未模拟，返回 UNIMPLEMENTED，不生成排空证明；实例停止继续使用已有的进程生命周期和 TERM 清理路径。
 
@@ -377,3 +377,5 @@ Runner 不下载 binary；默认 scrape 1s、startup 30s，目前验证 Promethe
 收尾等待每个目标在收尾开始后成功采样，再停止组件、ZK，最后 TERM Prometheus，超时才 KILL。最后采样失败、采集器异常退出会标记数据不完整并令实验 ERROR。启动失败/取消仍清理并保留现场。
 
 prometheus/ 保存配置、targets、版本、日志、data/TSDB/WAL 和 collection.json；complete 仅说明采集边界及关闭成功，不代替业务指标或中途 up 判断。门禁 FAIL/主动取消也可以有完整采集。曲线不导出 JSON，数据不随收尾删除，后续回放服务在线查询；目前仍用默认保留策略，没有长期归档或正式报告服务。已完成实验可使用保存的大盘快照通过 View 回看，详见 [View 指南](view-guide.md)；Client 已提供 issued/finished Counter 及 TTFT/请求耗时 Histogram。
+
+DSV4.1 Master 的 KVCM 开关、部署 ENV、身份和 key 一致性见 [DSV4.1/KVCM 接线](dsv41-kvcm.md)。

@@ -128,3 +128,5 @@ PROMETHEUS_BIN="$PROMETHEUS_BIN" ./scripts/check.sh
 本机启动配方临时为 Master 设置 `-Dflexlb.monitor.metric-whitelist=flexlb_`，导出全部 FlexLB 业务指标，生产默认值保持不变。全量采集在规模压测下的序列数、采样耗时和资源开销仍需验证。
 
 Whale 单实例服务的镜像构建、ENV 启动和平台接线边界见 [Whale Engine 镜像与启动](docs/whale-engine.md)。
+
+DSV4.1 与 KVCM 的开关部署配置和验收方法见 [接线说明](docs/dsv41-kvcm.md)。
