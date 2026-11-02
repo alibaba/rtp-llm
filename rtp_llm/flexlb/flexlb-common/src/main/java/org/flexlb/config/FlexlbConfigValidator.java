@@ -254,6 +254,10 @@ final class FlexlbConfigValidator {
             if (rescue != null) {
                 positive(rescue.getMinWaitMs(), "router.roles.prefill.tokenBalance.hotspotRescue.minWaitMs");
                 positive(rescue.getMaxInputTokens(), "router.roles.prefill.tokenBalance.hotspotRescue.maxInputTokens");
+                positive(rescue.getMigrationIntervalMs(), "router.roles.prefill.tokenBalance.hotspotRescue.migrationIntervalMs");
+                require(rescue.getMigrationIntervalMs() <= Long.MAX_VALUE / 1_000_000L,
+                        "router.roles.prefill.tokenBalance.hotspotRescue.migrationIntervalMs", "is too large");
+                positive(rescue.getMaxMigrationsPerRound(), "router.roles.prefill.tokenBalance.hotspotRescue.maxMigrationsPerRound");
                 nonNegative(rescue.getMaxIdlePendingTokens(), "router.roles.prefill.tokenBalance.hotspotRescue.maxIdlePendingTokens");
                 require(rescue.getMaxIdlePendingTokens() < balance.getMaxPendingComputeTokens(),
                         "router.roles.prefill.tokenBalance.hotspotRescue.maxIdlePendingTokens", "must be below pending waterline");
