@@ -128,8 +128,7 @@ def main():
     from rtp_llm.models_py.modules.dsv41.engram_bootstrap import _load_native
     from rtp_llm.models_py.modules.dsv41.engram_shard import plan_shards
     from rtp_llm.models_py.modules.dsv41.engram_startup import (build_group, COHORT_ENV,
-        COUNT_ENV, INDEX_ENV, REVISION_ENV, DESCRIPTORS_ENV, TIMEOUT_ENV, CHECKPOINT_ENV,
-        GENERATION_ENV)
+        COUNT_ENV, INDEX_ENV, REVISION_ENV, DESCRIPTORS_ENV, TIMEOUT_ENV, CHECKPOINT_ENV)
     root = args.workdir
     root.mkdir(mode=0o700, parents=True, exist_ok=True)
     endpoint = f'127.0.0.1:{args.exchange_port}'
@@ -141,8 +140,6 @@ def main():
         TIMEOUT_ENV: '120',
         CHECKPOINT_ENV: str(root / 'checkpoint'),
         DESCRIPTORS_ENV: str(root / 'shard.json'),
-        # Both endpoints of this loopback probe share one fresh generation.
-        GENERATION_ENV: str(uuid4()),
     }
     config = build_group(env, 2)
     member = next(m for m in config['group']['members'] if m['instance_id'] == config['instance_id'])

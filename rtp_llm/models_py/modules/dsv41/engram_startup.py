@@ -17,7 +17,7 @@ from pathlib import Path
 import ssl
 import threading
 import time
-from uuid import UUID
+from uuid import NAMESPACE_URL, UUID, uuid5
 from datetime import timedelta
 
 from .engram_exchange import (Cohort, ExchangeError, ExchangeServer, decode, digest, encode,
@@ -227,13 +227,18 @@ def build_group(env, world_size):
     cohort = _cohort(env)
     if cohort is None:
         return None
-    raw_count = env.get(COUNT_ENV)
-    if raw_count is None or not raw_count.isdigit():
-        raise ExchangeError('STORAGE_HOST_COUNT_REQUIRED')
-    p = validate_count(int(raw_count))
     instances = len(cohort)
-    if p != instances:
-        raise ExchangeError('STORAGE_HOST_COUNT_MUST_MATCH_COHORT')
+    # One shard per storage host: the cohort list is the topology, so the count
+    # is only needed as a cross-check when a launcher still sets it.
+    raw_count = env.get(COUNT_ENV)
+    if raw_count is None:
+        p = validate_count(instances)
+    elif raw_count.isdigit():
+        p = validate_count(int(raw_count))
+        if p != instances:
+            raise ExchangeError('STORAGE_HOST_COUNT_MUST_MATCH_COHORT')
+    else:
+        raise ExchangeError('STORAGE_HOST_COUNT_REQUIRED')
     revision = env.get(REVISION_ENV)
     if not revision:
         raise ExchangeError('MODEL_REVISION_REQUIRED')
@@ -244,14 +249,21 @@ def build_group(env, world_size):
     raw_ranks = env.get(RANKS_ENV)
     if raw_ranks is not None and (not raw_ranks.isdigit() or int(raw_ranks) <= 0):
         raise ExchangeError('INVALID_RANKS_PER_INSTANCE')
-    # Addresses/revision identify a deployment, not a particular allocation
-    # lifetime. A fresh shared generation prevents mixing restart attempts.
+    # Namespace for this cohort's store keys. Derived from the deployment
+    # identity by default, so the platform only has to supply the address list;
+    # an explicit UUID can be passed to distinguish restarts in diagnostics.
+    # Partial restarts are unsupported either way: a member that comes back
+    # alone would read handles published by an allocation that no longer exists.
     generation = env.get(GENERATION_ENV)
-    try:
-        if str(UUID(generation)) != generation:
-            raise ValueError()
-    except (ValueError, TypeError, AttributeError):
-        raise ExchangeError('SHARED_GENERATION_UUID_REQUIRED') from None
+    if generation is None:
+        generation = str(uuid5(NAMESPACE_URL, 'engram|' + revision + '|' +
+                               ','.join(f'{host}:{port}' for host, port in cohort) + '|' + str(p)))
+    else:
+        try:
+            if str(UUID(generation)) != generation:
+                raise ValueError()
+        except (ValueError, TypeError, AttributeError):
+            raise ExchangeError('INVALID_GENERATION') from None
     # A cohort member is either a whole gang on its own host (prefill) or one
     # host of a gang shared by every member (decode); RANKS_ENV states which.
     local_world_size = world_size if raw_ranks is None else int(raw_ranks)

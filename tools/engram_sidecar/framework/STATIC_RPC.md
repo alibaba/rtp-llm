@@ -72,9 +72,9 @@ flowchart TB
 ```
 RTP_ENGRAM_COHORT=10.0.0.1:29483,10.0.0.2:29483   # N 个存储 host，host 互不相同，顺序=实例索引
 RTP_ENGRAM_INSTANCE_INDEX=0                        # 本实例在 cohort 中的下标
-ENGRAM_SHARD_COUNT=2                               # P，必须等于 cohort 长度（一 host 一片）
+ENGRAM_SHARD_COUNT=2                               # 可选；缺省=cohort 长度（一 host 一片），显式给出时必须一致
 RTP_ENGRAM_MODEL_REVISION=<rev>                    # 同一 cohort 内一致
-RTP_ENGRAM_GENERATION=<uuid>                       # 必填；每个 cohort 一个，同 cohort 内逐字节一致
+RTP_ENGRAM_GENERATION=<uuid>                       # 可选；缺省由 cohort+revision 推导
 RTP_ENGRAM_CHECKPOINT=/models/DeepSeek             # 本机完整 checkpoint
 RTP_ENGRAM_LOCAL_DEVICE=0                          # 建议显式给出；缺省回落 0 并告警
 RTP_ENGRAM_LOCAL_NUMA=0                            # 建议显式给出；该 NUMA node 需有足够空闲内存
@@ -86,17 +86,20 @@ RTP_ENGRAM_COHORT_TIMEOUT=1800                     # 可选
 RTP_ENGRAM_TLS_DIR=/run/engram/pki                 # 可选；不设则走 plain HTTP
 ```
 
-`RTP_ENGRAM_GENERATION` 必须由启动器生成并广播给同一个 cohort 的所有 host：它标识"这个 cohort 的这一次
-启动"，不是部署标识。复用上一轮的 generation 会让某个重启的成员在仍存活的 Store 里读到上一轮的 package
-key，从而导入已释放的 handle。
+平台只需要给出 **`RTP_ENGRAM_COHORT` 地址列表 + 本机 `RTP_ENGRAM_INSTANCE_INDEX`**：列表长度就是
+"几个实例共享一份 Engram"，分片数、成员表、shard 归属、store 命名空间全部由它推导。`ENGRAM_SHARD_COUNT`
+可以不给；给了只做一致性校验。
 
-划分单位是 **cohort（共享同一组分片的 host 集合）**，不是 gang：prefill 侧两个 4 卡 gang 共享一组分片，
-属于同一个 cohort，因此必须用同一个 UUID（否则交换时 `GROUP_MISMATCH`）；decode 侧 8 rank gang 自成一个
-cohort。不同 cohort 之间（如 P 与 D）互不校验，不做要求，但建议取不同值以便区分是哪一次启动。
+`RTP_ENGRAM_GENERATION` 是可选的诊断用覆盖值（例如想在一次实验里给两轮启动不同的名字）。它的语义是
+group digest 的一部分：同一个 cohort 内必须一致，否则交换时 `GROUP_MISMATCH`。
 
-`instance_id`、shard 分配和 `publisher_rank` 由这些输入确定性推导；只有 `RTP_ENGRAM_GENERATION` 需要启动器分发（一个 UUID，不是成员表）。
+**重启约束**：只能整组（整个 cohort / 整个 gang）一起重启，并且要等旧进程退出、fabric 分配释放之后再起新的。
+单独重启某个成员是未支持的行为——它会按同一个命名空间读到上一轮发布的 handle，而那些 handle 指向的分配
+已经不存在。
 
-上面是字段示例，文字占位符需要替换。`hosts` 顺序必须与实际 WORLD_RANK 分配一致：host index × local_world_size 对应本 host 的发布者 rank。每个实例允许不同 local_world_size，但目前同一实例内部使用一致的 local_world_size。
+`instance_id`、shard 分配和 `publisher_rank` 由这些输入确定性推导，不需要分发成员表，也不需要分发 UUID。
+
+`RTP_ENGRAM_COHORT` 的顺序必须与实际 WORLD_RANK 分配一致：host index × local_world_size 对应本 host 的发布者 rank。每个实例允许不同的 local_world_size，但同一实例内部必须一致。
 
 P 可配置为 2–64，N 为 1–64。每个实例至少持有一个分片；当前一物理 host 一 holder，因此 P≥N。物理 host 重叠时必须显式指定 storage_host.instance_id，不能重复加载一片。运行期间固定 N/P/成员/generation，不支持加入新实例、自动补片、缩组或选主。
 
@@ -106,7 +109,7 @@ P 可配置为 2–64，N 为 1–64。每个实例至少持有一个分片；�
 
 1. 为本次组启动生成一个 UUID；确定 N/P、完整成员表、host 身份及 rank 顺序。所有节点必须处于可共享的 NVLink/IMEX 域，并具有相应权限。IP 可达不代表 Fabric 可导入。
 2. 给每个实例的 rank 0 提供它自己的证书、私钥、CA 和相同的完整证书指纹表；使用平台 PKI。证书 SAN 必须覆盖 coordinator IP/域名。不要把 CA 私钥分发到业务节点。
-3. 按上节契约确定每个实例的 `RTP_ENGRAM_*` 取值；成员表和分片归属由 `RTP_ENGRAM_COHORT`/`RTP_ENGRAM_INSTANCE_INDEX`/`ENGRAM_SHARD_COUNT` 推导，`RTP_ENGRAM_GENERATION` 由启动器每次生成并广播。
+3. 按上节契约确定每个实例的 `RTP_ENGRAM_*` 取值；成员表、分片归属和 store 命名空间全部由 `RTP_ENGRAM_COHORT`/`RTP_ENGRAM_INSTANCE_INDEX` 推导，其余变量都是本机参数。
 4. 把 `RTP_ENGRAM_*` 设到对应实例的所有 host 环境里，并显式给出 `RTP_ENGRAM_LOCAL_DEVICE`/`RTP_ENGRAM_LOCAL_NUMA`（缺省回落 device 0/NUMA 0 并打印警告）。
    没有额外的持片进程需要启动：**无需人工收集/复制 Fabric handle，也不需要分发任何启动配置文件**。
 6. 对每个实例设置 `consumers[].env` 后启动原有 RTP 命令。`BackendManager.start()` 在 DistributedServer 就绪后、NCCL/模型创建前调用 `prepare_static_engram()`。

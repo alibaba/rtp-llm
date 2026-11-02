@@ -381,6 +381,9 @@ class RankSpaceTest(unittest.TestCase):
 
 
 class DeploymentIdentityTest(unittest.TestCase):
+    def AssertUuid(self, value):
+        self.assertEqual(str(UUID(value)), value)
+
     def test_physical_p_matches_explicit_hosts(self):
         for p in (2, 3, 5, 18):
             env = cohort_env(p, instances=p)
@@ -390,10 +393,22 @@ class DeploymentIdentityTest(unittest.TestCase):
         with self.assertRaisesRegex(e.ExchangeError, 'MUST_MATCH_COHORT'):
             s.build_group(cohort_env(4, instances=2), 8)
 
-    def test_missing_reused_or_duplicate_identity(self):
+    def test_generation_defaults_and_duplicate_hosts(self):
         env = cohort_env(2)
         del env[s.GENERATION_ENV]
-        with self.assertRaisesRegex(e.ExchangeError, 'GENERATION_UUID_REQUIRED'):
+        derived = s.build_group(env, 4)['group']['generation']
+        other = cohort_env(2)
+        del other[s.GENERATION_ENV]
+        self.assertEqual(derived, s.build_group(other, 4)['group']['generation'])
+        self.AssertUuid(derived)
+        # The address list is the topology: a different list derives a different id.
+        other[s.COHORT_ENV] = '127.0.0.1:10001,127.0.0.2:10002'
+        self.assertNotEqual(derived, s.build_group(other, 4)['group']['generation'])
+        # An explicit value still wins, and must be a canonical UUID.
+        self.assertEqual(s.build_group(cohort_env(2), 4)['group']['generation'], str(UUID(int=123)))
+        env = cohort_env(2)
+        env[s.GENERATION_ENV] = 'not-a-uuid'
+        with self.assertRaisesRegex(e.ExchangeError, 'INVALID_GENERATION'):
             s.build_group(env, 4)
         env = cohort_env(2)
         first = s.build_group(env, 4)['group']
