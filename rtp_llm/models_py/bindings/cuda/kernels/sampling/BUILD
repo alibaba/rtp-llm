@@ -1,14 +1,13 @@
-load("//:def.bzl", "cuda_copts")
+load("//:def.bzl", "copts", "cuda_copts")
 load("@arch_config//:arch_select.bzl", "torch_deps")
 
 package(default_visibility = ["//rtp_llm:__subpackages__"])
 
 cc_library(
     name = "sampling",
-    srcs = ["api.cu", "sampler_dispatch.cc"],
+    srcs = ["api.cu"],
     hdrs = [
         "sampling.h",
-        "sampler_dispatch.h",
         "flashinfer/air_top_p.cuh",
         "flashinfer/allocator.h",
         "flashinfer/exception.h",
@@ -21,8 +20,6 @@ cc_library(
     ],
     deps = [
         ":split_softmax",
-        "//rtp_llm/models_py/bindings/common/kernels:kernels_sampling",
-        "//rtp_llm/models_py/bindings/cuda/kernels:kernels_speculative_sampling",
         "@local_config_cuda//cuda:cuda_headers",
         "@local_config_cuda//cuda:cudart",
     ] + torch_deps(),
@@ -41,5 +38,19 @@ cc_library(
         "@local_config_cuda//cuda:cudart",
     ] + torch_deps(),
     copts = cuda_copts() + ["-nvcc_options=ftz=false"],
+    visibility = ["//visibility:public"],
+)
+
+# Host selection between the tuned kernel and PyTorch fallback.
+cc_library(
+    name = "softmax_host",
+    srcs = ["softmax_host.cc"],
+    hdrs = ["softmax_host.h"],
+    deps = [
+        ":split_softmax",
+        "@local_config_cuda//cuda:cuda_headers",
+        "@local_config_cuda//cuda:cudart",
+    ] + torch_deps(),
+    copts = copts(),
     visibility = ["//visibility:public"],
 )

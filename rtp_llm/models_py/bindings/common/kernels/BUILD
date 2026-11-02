@@ -50,6 +50,19 @@ cc_library(
     visibility = ["//visibility:public"],
 )
 
+# CUDA host dispatch for the temperature penalty kernel.
+cc_library(
+    name = "sampling_temperature",
+    srcs = ["sampling_temperature.cc"],
+    hdrs = ["sampling_temperature.h"],
+    deps = [
+        ":kernels_sampling",
+        "@local_config_cuda//cuda:cuda_headers",
+        "@local_config_cuda//cuda:cudart",
+    ] + torch_deps(),
+    copts = copts(),
+)
+
 cc_library(
     name = "kernels_sampling",
     srcs = [

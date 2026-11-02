@@ -316,12 +316,25 @@ cc_library(
     hdrs = glob([
         "speculative_sampling/*.h",
         "speculative_sampling/*.cuh",
-    ]),
+    ], exclude = ["speculative_sampling/sampling_host.h"]),
     deps = cuda_deps + [
         "//rtp_llm/models_py/bindings/cuda:launch_utils",
     ],
     copts = any_cuda_copts(),
     include_prefix = "src",
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "speculative_sampling_host",
+    srcs = ["speculative_sampling/sampling_host.cc"],
+    hdrs = ["speculative_sampling/sampling_host.h"],
+    deps = [
+        ":kernels_speculative_sampling",
+        "@local_config_cuda//cuda:cuda_headers",
+        "@local_config_cuda//cuda:cudart",
+    ] + torch_deps(),
+    copts = copts(),
     visibility = ["//visibility:public"],
 )
 

@@ -5,9 +5,6 @@
 
 namespace rtp_llm {
 
-void applySamplerTemperature(const torch::Tensor& logits, const torch::Tensor& temperatures, cudaStream_t stream);
-torch::Tensor samplerSoftmaxInplace(const torch::Tensor& logits);
-
 struct RejectionSamplingInputs {
     torch::Tensor draft_probs;
     torch::Tensor draft_ids;
