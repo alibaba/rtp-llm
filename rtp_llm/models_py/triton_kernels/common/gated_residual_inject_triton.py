@@ -85,3 +85,9 @@ def fused_inject(
             enable_fp_fusion=False,
         )
     return output
+
+
+def try_fused_inject(hyper_input, sublayer_out, inject_weights):
+    if not is_supported(hyper_input, sublayer_out, inject_weights):
+        return None
+    return fused_inject(hyper_input, sublayer_out, inject_weights)

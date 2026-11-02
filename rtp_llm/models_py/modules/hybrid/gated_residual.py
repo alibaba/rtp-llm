@@ -24,12 +24,12 @@ def grouped_rms_norm(
     """
     if x.is_cuda and torch.version.hip is None:
         from rtp_llm.models_py.triton_kernels.common.gated_residual_norm_triton import (
-            grouped_rms_norm_triton,
-            is_supported,
+            try_grouped_rms_norm,
         )
 
-        if is_supported(x, gamma, group_size):
-            return grouped_rms_norm_triton(x, gamma, group_size, eps)
+        result = try_grouped_rms_norm(x, gamma, group_size, eps)
+        if result is not None:
+            return result
     out = x.float().unflatten(-1, (x.shape[-1] // group_size, group_size))
     out = out * torch.rsqrt(out.pow(2).mean(-1, keepdim=True) + eps)
     return (out.flatten(-2) * (1.0 + gamma.float())).type_as(x)
@@ -47,12 +47,12 @@ def inject_into_residual(
     """
     if hyper_input.is_cuda and torch.version.hip is None:
         from rtp_llm.models_py.triton_kernels.common.gated_residual_inject_triton import (
-            fused_inject,
-            is_supported,
+            try_fused_inject,
         )
 
-        if is_supported(hyper_input, sublayer_out, inject_weights):
-            return fused_inject(hyper_input, sublayer_out, inject_weights)
+        result = try_fused_inject(hyper_input, sublayer_out, inject_weights)
+        if result is not None:
+            return result
     injection = sublayer_out.unsqueeze(-2) * inject_weights.unsqueeze(-1)
     return hyper_input + injection.flatten(-2)
 
@@ -281,18 +281,14 @@ class GatedResidual(nn.Module):
             )
         if mixed is None:
             mix_logits = dense_projection(mix, self.mix_up, self.up_projection)
-            branches = (self.hc_mult, self.hidden_size)
-            fused_mix = False
             if normed.is_cuda and torch.version.hip is None:
                 from rtp_llm.models_py.triton_kernels.common.gated_residual_mix_triton import (
-                    fused_mix_reduce,
-                    is_supported,
+                    try_fused_mix_reduce,
                 )
 
-                fused_mix = is_supported(mix_logits, normed, self.hc_mult)
-            if fused_mix:
-                mixed = fused_mix_reduce(mix_logits, normed, self.hc_mult)
-            else:
+                mixed = try_fused_mix_reduce(mix_logits, normed, self.hc_mult)
+            if mixed is None:
+                branches = (self.hc_mult, self.hidden_size)
                 mix = torch.sigmoid(mix_logits)
                 mixed = (
                     mix.unflatten(-1, branches) * normed.unflatten(-1, branches)

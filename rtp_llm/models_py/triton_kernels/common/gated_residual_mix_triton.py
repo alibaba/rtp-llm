@@ -72,3 +72,9 @@ def fused_mix_reduce(
         num_warps=warps,
     )
     return result
+
+
+def try_fused_mix_reduce(logits, normed, branches):
+    if not is_supported(logits, normed, branches):
+        return None
+    return fused_mix_reduce(logits, normed, branches)

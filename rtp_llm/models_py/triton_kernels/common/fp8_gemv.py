@@ -70,3 +70,9 @@ def fp8_hc_gemv(x, weight, scale):
         x, weight, scale, output, M=m, N=n, K=k, BN=4, BK=512, num_warps=4
     )
     return output
+
+
+def try_fp8_hc_gemv(x, weight, scale):
+    if not is_supported(x, weight, scale):
+        return None
+    return fp8_hc_gemv(x, weight, scale)

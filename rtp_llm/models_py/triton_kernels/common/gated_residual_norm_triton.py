@@ -130,3 +130,9 @@ def try_grouped_rms_norm_with_fp8_scale(x, gamma, group_size, eps):
         num_warps=4 if rows < 4096 else 16,
     )
     return result, scale
+
+
+def try_grouped_rms_norm(x, gamma, group_size, eps):
+    if not is_supported(x, gamma, group_size):
+        return None
+    return grouped_rms_norm_triton(x, gamma, group_size, eps)

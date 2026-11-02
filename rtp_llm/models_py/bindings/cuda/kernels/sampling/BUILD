@@ -5,9 +5,10 @@ package(default_visibility = ["//rtp_llm:__subpackages__"])
 
 cc_library(
     name = "sampling",
-    srcs = ["api.cu"],
+    srcs = ["api.cu", "sampler_dispatch.cc"],
     hdrs = [
         "sampling.h",
+        "sampler_dispatch.h",
         "flashinfer/air_top_p.cuh",
         "flashinfer/allocator.h",
         "flashinfer/exception.h",
@@ -20,6 +21,8 @@ cc_library(
     ],
     deps = [
         ":split_softmax",
+        "//rtp_llm/models_py/bindings/common/kernels:kernels_sampling",
+        "//rtp_llm/models_py/bindings/cuda/kernels:kernels_speculative_sampling",
         "@local_config_cuda//cuda:cuda_headers",
         "@local_config_cuda//cuda:cudart",
     ] + torch_deps(),

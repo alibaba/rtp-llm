@@ -15,7 +15,7 @@
 #include "rtp_llm/models_py/bindings/cuda/kernels/speculative_sampling/sampling.h"
 #include "rtp_llm/cpp/utils/DebugUtils.h"
 #include "rtp_llm/models_py/bindings/cuda/kernels/sampling/sampling.h"
-#include "rtp_llm/models_py/bindings/cuda/kernels/sampling/split_softmax.h"
+#include "rtp_llm/models_py/bindings/cuda/kernels/sampling/sampler_dispatch.h"
 #include <cstddef>
 #include <random>
 #include <memory>
@@ -194,27 +194,8 @@ void processLogits(const GreedyParams&  params,
     if (std::any_of(params.temperature.data_ptr<float>(),
                     params.temperature.data_ptr<float>() + batch_size,
                     [&](auto t) { return t != 1.0f; })) {
-        auto        temperature_gpu = params.temperature.to(torch::kCUDA, true);
-        const char* tiled_flag      = std::getenv("RTP_LLM_SAMPLER_TILED_TEMPERATURE");
-        const bool  tiled = tiled_flag != nullptr && std::strcmp(tiled_flag, "1") == 0 && batch_size > 0
-                            && batch_size <= 32 && vocab_size_padded == 248320 && params.logits.is_contiguous()
-                            && at::cuda::getCurrentDeviceProperties()->major == 12
-                            && at::cuda::getCurrentDeviceProperties()->minor == 0;
-        if (tiled) {
-            invokeTiledTemperaturePenalty(params.logits.data_ptr<float>(),
-                                          temperature_gpu.data_ptr<float>(),
-                                          batch_size,
-                                          vocab_size_padded,
-                                          cur_stream);
-        } else {
-            invokeBatchApplyTemperaturePenalty(params.logits.data_ptr<float>(),
-                                               (float*)nullptr,  // embedding_bias
-                                               temperature_gpu.data_ptr<float>(),
-                                               batch_size,
-                                               vocab_size_padded,
-                                               vocab_size_padded,
-                                               cur_stream);
-        }
+        auto temperature_gpu = params.temperature.to(torch::kCUDA, true);
+        applySamplerTemperature(params.logits, temperature_gpu, cur_stream);
     }
 
     if (params.repetition_penalty.has_value()) {
@@ -318,20 +299,7 @@ static GreedyOutput flashinferSampleGreedy(const GreedyParams&  params,
     // [batch_size, vocab_size] — compute softmax probabilities.
     // Copy result back to logits to preserve the in-place behavior of the original kernel,
     // since callers may reuse the logits tensor across iterations.
-    torch::Tensor probs_t;
-    const char*   split_flag = std::getenv("RTP_LLM_SAMPLER_SPLIT_SOFTMAX");
-    const bool split_enabled = split_flag != nullptr && std::strcmp(split_flag, "1") == 0
-                               && params.logits.is_contiguous() && params.logits.scalar_type() == torch::kFloat32
-                               && params.logits.dim() == 2 && batch_size > 0 && batch_size <= 32
-                               && params.logits.size(1) == 248320 && at::cuda::getCurrentDeviceProperties()->major == 12
-                               && at::cuda::getCurrentDeviceProperties()->minor == 0;
-    if (split_enabled) {
-        splitSoftmaxInplace(params.logits);
-        probs_t = params.logits;
-    } else {
-        probs_t = torch::softmax(params.logits, -1);
-        params.logits.copy_(probs_t, true);
-    }
+    auto probs_t = samplerSoftmaxInplace(params.logits);
     auto success = torch::empty({(int64_t)batch_size}, torch::TensorOptions().dtype(torch::kBool).device(torch::kCUDA));
 
     // [1, batch_size] — last row of transposed_tokens
@@ -590,50 +558,20 @@ void rejectionSampling(const RejectionSamplingParams& params) {
     auto config = validateRejectionSamplingParams(params);
     auto stream = at::cuda::getCurrentCUDAStream().stream();
 
-    // A point-mass draft distribution passes no draft_probs buffer at all; the
-    // kernel substitutes q(draft_token) == 1.
-    const char* split_flag = std::getenv("RTP_LLM_SPLIT_REJECTION");
-    const bool  split_enabled = split_flag != nullptr && std::strcmp(split_flag, "1") == 0;
-    if (split_enabled && config.batch_size > 0 && config.batch_size <= 8 && config.num_speculative_tokens == 3
-        && config.target_vocab_size == 248320 && at::cuda::getCurrentDeviceProperties()->major == 12
-        && at::cuda::getCurrentDeviceProperties()->minor == 0) {
-        const int tiles     = (config.target_vocab_size + 4095) / 4096;
-        auto      sums      = torch::empty({config.batch_size, tiles}, params.target_probs_d.options());
-        auto      positions = torch::empty({config.batch_size}, params.draft_token_ids_d.options());
-        check_cuda_value(invokeSplitRejectionSampling(
-            params.draft_probs_point_mass ? nullptr : params.draft_probs_d.data_ptr<float>(),
-            params.draft_token_ids_d.data_ptr<int32_t>(),
-            params.uniform_samples_d.data_ptr<float>(),
-            params.target_probs_d.data_ptr<float>(),
-            params.target_token_ids_d.data_ptr<int32_t>(),
-            config.target_token_stride,
-            params.output_token_ids_d.data_ptr<int32_t>(),
-            params.output_accepted_token_num_d.data_ptr<int32_t>(),
-            params.do_sample_d.data_ptr<bool>(),
-            config.batch_size,
-            config.num_speculative_tokens,
-            config.target_vocab_size,
-            params.draft_probs_point_mass,
-            sums.data_ptr<float>(),
-            positions.data_ptr<int32_t>(),
-            stream));
-        return;
-    }
-    float* draft_probs = params.draft_probs_point_mass ? nullptr : params.draft_probs_d.data_ptr<float>();
-    check_cuda_value(invokeRejectionSampling(draft_probs,
-                                             params.draft_token_ids_d.data_ptr<int32_t>(),
-                                             params.uniform_samples_d.data_ptr<float>(),
-                                             params.target_probs_d.data_ptr<float>(),
-                                             params.target_token_ids_d.data_ptr<int32_t>(),
-                                             config.target_token_stride,
-                                             params.output_token_ids_d.data_ptr<int32_t>(),
-                                             params.output_accepted_token_num_d.data_ptr<int32_t>(),
-                                             params.do_sample_d.data_ptr<bool>(),
-                                             config.batch_size,
-                                             config.num_speculative_tokens,
-                                             config.target_vocab_size,
-                                             stream,
-                                             params.draft_probs_point_mass));
+    check_cuda_value(dispatchRejectionSampling({params.draft_probs_d,
+                                                params.draft_token_ids_d,
+                                                params.uniform_samples_d,
+                                                params.target_probs_d,
+                                                params.target_token_ids_d,
+                                                params.output_token_ids_d,
+                                                params.output_accepted_token_num_d,
+                                                params.do_sample_d,
+                                                config.target_token_stride,
+                                                config.batch_size,
+                                                config.num_speculative_tokens,
+                                                config.target_vocab_size,
+                                                params.draft_probs_point_mass},
+                                               stream));
 }
 
 void mappingDraft2Target(const MappingDraft2TargetParams& params) {

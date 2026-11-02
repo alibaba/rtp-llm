@@ -129,14 +129,12 @@ class Fp8Linear(nn.Module):
             and tuple(self.weight.shape) == (10240, 320)
         ):
             from rtp_llm.models_py.triton_kernels.common.fp8_gemv import (
-                fp8_hc_gemv,
-                is_supported,
+                try_fp8_hc_gemv,
             )
 
-            if is_supported(rows, self.weight, self.scale):
-                out = fp8_hc_gemv(rows, self.weight, self.scale).reshape(
-                    *x.shape[:-1], self.weight.shape[0]
-                )
+            out = try_fp8_hc_gemv(rows, self.weight, self.scale)
+            if out is not None:
+                out = out.reshape(*x.shape[:-1], self.weight.shape[0])
                 return out if self.bias is None else (out + self.bias).to(x.dtype)
         padding = (-rows.shape[0]) % 16
         padded_output = None
