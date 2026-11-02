@@ -6,11 +6,11 @@ A multimodal model refers to an LLM that incorporates multimodal inputs. Current
 
 * The multimodal model must inherit from `MultimodalMixin` in `rtp_llm/models/multimodal/multimodal_mixin.py` and instantiate `mm_part` as the processing class for multimodal inputs.
 
-* `mm_part` has various interface implementations based on input types, such as images, videos, or audio. The logic must be self-consistent, with the most critical interfaces being `process_input`, `get_preprocess_params`, and `embedding`:
+* `mm_part` has various interface implementations based on input types, such as images, videos, or audio. The logic must be self-consistent, with the most critical interfaces being `preprocess_input`, `get_preprocess_params`, and `embedding`:
 
-    * `process_input` includes all CPU preprocessing tasks: such as downloading from URLs, resizing images, etc. These operations do not involve the GPU and are executed concurrently as subprocesses. It uses
+    * `preprocess_input` includes all CPU preprocessing tasks: such as downloading from URLs, resizing images, etc. These operations do not involve the GPU and are executed concurrently as subprocesses. It uses
 
-    * `get_preprocess_params` provides additional model-related inputs for process_input as dict. Note that model itself should not be passed directly to avoid hidden additional GPU memory overhead in subprocesses.
+    * `get_preprocess_params` provides additional model-related inputs for preprocess_input as dict. Note that model itself should not be passed directly to avoid hidden additional GPU memory overhead in subprocesses.
 
     * `embedding` handles GPU-based transformation of preprocessed inputs into outputs.
 

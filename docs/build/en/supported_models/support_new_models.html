@@ -487,135 +487,38 @@ document.write(`
                 <article class="bd-article">
 
   <section class="tex2jax_ignore mathjax_ignore" id="how-to-support-new-models">
-<h1>How to Support New Models<a class="headerlink" href="#how-to-support-new-models" title="Link to this heading">#</a></h1>
-<p>This document explains how to add support for new language models and multimodal large language models (MLLMs) in
-RTP-LLM. It also covers how to test new models and register external implementations.</p>
-<section id="how-to-support-a-new-language-model">
-<h2>How to Support a New Language Model<a class="headerlink" href="#how-to-support-a-new-language-model" title="Link to this heading">#</a></h2>
-<p>To support a new model in RTP-LLM, you only need to add a single file under
-the <a class="reference external" href="http://gitlab.alibaba-inc.com/foundation_models/RTP-LLM/tree/main/rtp_llm/models_py/">RTP-LLM Models Directory</a>. You can learn
-from existing model implementations and create a new file for your model. For most models, you should be able to find a
-similar model to start with (e.g., starting from Llama). Also refer how
-to <a class="reference internal" href="#port-a-model-from-vllm-to-rtp-llm"><span class="std std-ref">port a Model from vLLM to RTP-LLM</span></a></p>
-</section>
-<section id="how-to-support-a-new-multimodal-large-language-model">
-<h2>How to Support a New Multimodal Large Language Model<a class="headerlink" href="#how-to-support-a-new-multimodal-large-language-model" title="Link to this heading">#</a></h2>
-<p>To support a new multimodal large language model (MLLM) in RTP-LLM, there are several key components in addition to the
-standard LLM support:</p>
-<ol class="arabic simple">
-<li><p><strong>Register your new model as multimodal</strong>:
-Extend <code class="docutils literal notranslate"><span class="pre">is_multimodal_model</span></code>
-in <a class="reference external" href="http://gitlab.alibaba-inc.com/foundation_models/RTP-LLM/blob/0ab3f437aba729b348a683ab32b35b214456efc7/python/RTP-LLM/srt/configs/model_config.py#L561">model_config.py</a>
-to return <code class="docutils literal notranslate"><span class="pre">True</span></code> for your model.</p></li>
-<li><p><strong>Register a new chat-template</strong>
-See <a class="reference external" href="http://gitlab.alibaba-inc.com/foundation_models/RTP-LLM/blob/86a779dbe9e815c02f71ea82574608f6eae016b5/python/RTP-LLM/srt/conversation.py">conversation.py</a></p></li>
-<li><p><strong>Multimodal Data Processor</strong>:
-Define a new <code class="docutils literal notranslate"><span class="pre">Processor</span></code> class that inherits from <code class="docutils literal notranslate"><span class="pre">BaseMultimodalProcessor</span></code> and register this processor as your
-model’s dedicated processor.
-See <a class="reference external" href="http://gitlab.alibaba-inc.com/foundation_models/RTP-LLM/blob/main/python/RTP-LLM/srt/managers/multimodal_processor.py">multimodal_processor.py</a>
-for more details.</p></li>
-<li><p><strong>Handle Multimodal Tokens</strong>:
-Implement a <code class="docutils literal notranslate"><span class="pre">pad_input_ids</span></code> function for your new model. In this function, multimodal tokens in the prompt should be
-expanded (if necessary) and padded with multimodal-data-hashes so that RTP-LLM can recognize different multimodal data
-with <code class="docutils literal notranslate"><span class="pre">RadixAttention</span></code>.</p></li>
-<li><p><strong>Adapt to Vision Attention</strong>:
-Adapt the multi-headed <code class="docutils literal notranslate"><span class="pre">Attention</span></code> of ViT with RTP-LLM’s <code class="docutils literal notranslate"><span class="pre">VisionAttention</span></code>.</p></li>
-</ol>
-<p>You can refer to <a class="reference external" href="http://gitlab.alibaba-inc.com/foundation_models/RTP-LLM/blob/main/python/RTP-LLM/srt/models/qwen2_vl.py">Qwen2VL</a> or
-other mllm implementations. These models demonstrate how to correctly handle both multimodal and textual inputs.</p>
-<p>You should test the new MLLM locally against Hugging Face models. See the <a class="reference external" href="http://gitlab.alibaba-inc.com/foundation_models/RTP-LLM/tree/main/benchmark/mmmu">
-<code class="docutils literal notranslate"><span class="pre">mmmu</span></code></a> benchmark for an example.</p>
-</section>
-<section id="test-the-correctness">
-<h2>Test the Correctness<a class="headerlink" href="#test-the-correctness" title="Link to this heading">#</a></h2>
-<section id="interactive-debugging">
-<h3>Interactive Debugging<a class="headerlink" href="#interactive-debugging" title="Link to this heading">#</a></h3>
-<p>For interactive debugging, compare the outputs of Hugging Face/Transformers and RTP-LLM. The following two commands
-should give the same text output and very similar prefill logits:</p>
-<ul>
-<li><p>Get the reference output:</p>
-<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>python3<span class="w"> </span>scripts/playground/reference_hf.py<span class="w"> </span>--model-path<span class="w"> </span><span class="o">[</span>new<span class="w"> </span>model<span class="o">]</span><span class="w"> </span>--model-type<span class="w"> </span><span class="o">{</span>text,mllm<span class="o">}</span>
-</pre></div>
-</div>
-</li>
-<li><p>Get the RTP-LLM output:</p>
-<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>python3<span class="w"> </span>-m<span class="w"> </span>RTP-LLM.bench_one_batch<span class="w"> </span>--correct<span class="w"> </span>--model<span class="w"> </span><span class="o">[</span>new<span class="w"> </span>model<span class="o">]</span>
-</pre></div>
-</div>
-</li>
-</ul>
-</section>
-<section id="add-the-model-to-the-test-suite">
-<h3>Add the Model to the Test Suite<a class="headerlink" href="#add-the-model-to-the-test-suite" title="Link to this heading">#</a></h3>
-<p>To ensure the new model is well maintained, add it to the test suite by including it in the <code class="docutils literal notranslate"><span class="pre">ALL_OTHER_MODELS</span></code> list in
-the <a class="reference external" href="http://gitlab.alibaba-inc.com/foundation_models/RTP-LLM/blob/main/test/srt/models/test_generation_models.py">test_generation_models.py</a>
-file, test the new model on your local machine and report the results on demonstrative benchmarks (GSM8K, MMLU, MMMU,
-MMMU-Pro, etc.) in your PR.</p>
-<p>This is the command to test a new model on your local machine:</p>
-<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span class="nv">ONLY_RUN</span><span class="o">=</span>Qwen/Qwen2-1.5B<span class="w"> </span>python3<span class="w"> </span>-m<span class="w"> </span>unittest<span class="w"> </span>test_generation_models.TestGenerationModels.test_others
-</pre></div>
-</div>
-</section>
-</section>
-<section id="port-a-model-from-vllm-to-rtp-llm">
-<h2>Port a Model from vLLM to RTP-LLM<a class="headerlink" href="#port-a-model-from-vllm-to-rtp-llm" title="Link to this heading">#</a></h2>
-<p>The <a class="reference external" href="https://github.com/vllm-project/vllm/tree/main/vllm/model_executor/models">vLLM Models Directory</a> is a valuable
-resource, as vLLM covers many models. RTP-LLM reuses vLLM’s interface and some layers, making it easier to port models
-from vLLM to RTP-LLM.</p>
-<p>To port a model from vLLM to RTP-LLM:</p>
-<ul class="simple">
-<li><p>Compare these two files for guidance:</p>
-<ul>
-<li><p><a class="reference external" href="http://gitlab.alibaba-inc.com/foundation_models/RTP-LLM/blob/main/python/RTP-LLM/srt/models/llama.py">RTP-LLM Llama Implementation</a></p></li>
-<li><p><a class="reference external" href="https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/models/llama.py">vLLM Llama Implementation</a></p></li>
-</ul>
-</li>
-<li><p>The major differences include:</p>
-<ul>
-<li><p><strong>Replace vLLM’s <code class="docutils literal notranslate"><span class="pre">Attention</span></code> with <code class="docutils literal notranslate"><span class="pre">RadixAttention</span></code></strong> (ensure you pass <code class="docutils literal notranslate"><span class="pre">layer_id</span></code> to <code class="docutils literal notranslate"><span class="pre">RadixAttention</span></code>).</p></li>
-<li><p><strong>Replace vLLM’s <code class="docutils literal notranslate"><span class="pre">LogitsProcessor</span></code> with RTP-LLM’s <code class="docutils literal notranslate"><span class="pre">LogitsProcessor</span></code>.</strong></p></li>
-<li><p><strong>Replace the multi-headed <code class="docutils literal notranslate"><span class="pre">Attention</span></code> of ViT with RTP-LLM’s <code class="docutils literal notranslate"><span class="pre">VisionAttention</span></code>.</strong></p></li>
-<li><p><strong>Replace other vLLM layers</strong> (such as <code class="docutils literal notranslate"><span class="pre">RMSNorm</span></code>, <code class="docutils literal notranslate"><span class="pre">SiluAndMul</span></code>) with RTP-LLM layers.</p></li>
-<li><p><strong>Remove <code class="docutils literal notranslate"><span class="pre">Sample</span></code>.</strong></p></li>
-<li><p><strong>Change the <code class="docutils literal notranslate"><span class="pre">forward()</span></code> functions</strong> and add a <code class="docutils literal notranslate"><span class="pre">forward_batch()</span></code> method.</p></li>
-<li><p><strong>Add <code class="docutils literal notranslate"><span class="pre">EntryClass</span></code></strong> at the end.</p></li>
-<li><p><strong>Ensure that the new implementation uses only RTP-LLM components</strong> and does not rely on any vLLM components.</p></li>
-</ul>
-</li>
-</ul>
-<p>Note: make sure you add your new model to the supported models list in the supported models documentation.</p>
-</section>
-<section id="registering-an-external-model-implementation">
-<h2>Registering an External Model Implementation<a class="headerlink" href="#registering-an-external-model-implementation" title="Link to this heading">#</a></h2>
-<p>In addition to the methods above, you can register your new model with the <code class="docutils literal notranslate"><span class="pre">ModelRegistry</span></code> before launching the server.
-This allows you to integrate your model without modifying the source code.</p>
-<p>For example:</p>
-<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">from</span><span class="w"> </span><span class="nn">RTP</span><span class="o">-</span><span class="n">LLM</span><span class="o">.</span><span class="n">srt</span><span class="o">.</span><span class="n">models</span><span class="o">.</span><span class="n">registry</span> <span class="kn">import</span><span class="w"> </span><span class="nn">ModelRegistry</span>
-<span class="kn">from</span><span class="w"> </span><span class="nn">RTP</span><span class="o">-</span><span class="n">LLM</span><span class="o">.</span><span class="n">srt</span><span class="o">.</span><span class="n">entrypoints</span><span class="o">.</span><span class="n">http_server</span> <span class="kn">import</span><span class="w"> </span><span class="nn">launch_server</span>
+<h1>How to Support New Models</h1>
+<p>This guide describes the model registration, configuration, weight loading and multimodal interfaces in this repository. Start with an existing model that matches the checkpoint architecture; a new architecture can also require model-body or operator changes.</p>
+<h2 id="how-to-support-a-new-language-model">How to Support a New Language Model</h2>
+<p>Add the model entry under the <a href="https://github.com/alibaba/rtp-llm/tree/main/rtp_llm/models">models directory</a>. Read <a href="https://github.com/alibaba/rtp-llm/blob/main/rtp_llm/models/base_model.py">BaseModel</a> and an existing entry such as <a href="https://github.com/alibaba/rtp-llm/blob/main/rtp_llm/models/qwen_v2.py">Qwen2</a>.</p>
+<p>Follow the existing entry's configuration parsing, tokenizer construction and weight mapping. Where a Python model body is required, connect it through the entry's <code>_create_python_model</code> implementation. Check tensor shapes, attention configuration, quantization and supported parallelism against the checkpoint.</p>
+<p>Register the model type and supported Hugging Face architecture names with <a href="https://github.com/alibaba/rtp-llm/blob/main/rtp_llm/model_factory_register.py">register_model</a>. Keep registration in the model module so discovery and model loading use the same implementation. See <a href="#registering-an-external-model-implementation">Registering an External Model Implementation</a> for an application-owned module.</p>
+<p>For an in-tree built-in model, also add a matching <code>register_lazy_model</code> entry to <code>_register_builtin_lazy_models</code> in the same registry file. Specify the model type, importable module path and applicable Hugging Face architecture names or repository IDs. This metadata lets the factory discover and import the module before its module-level <code>register_model</code> call runs; use the same model type in both registrations.</p>
+<h2 id="how-to-support-a-new-multimodal-large-language-model">How to Support a New Multimodal Large Language Model</h2>
+<p>Use <a href="https://github.com/alibaba/rtp-llm/blob/main/rtp_llm/models/qwen2_vl.py">Qwen2-VL</a> and the <a href="https://github.com/alibaba/rtp-llm/blob/main/rtp_llm/multimodal/multimodal_mixins/base_multimodal_mixin.py">multimodal interfaces</a> as references. Follow the existing model's preprocessing, embedding and vision-weight loading paths.</p>
+<p>Preserve the checkpoint's tokenizer and chat-template conventions, including image or video placeholders and position information. Verify how multimodal embeddings are passed to the language model; do not assume that another serving framework's processor or attention APIs apply here.</p>
+<p>See the <a href="../backend/Multimodal.html">multimodal development guide</a> for the existing multimodal entry points and separate-deployment examples.</p>
+<h2 id="test-the-correctness">Test the Correctness</h2>
+<h3 id="interactive-debugging">Interactive Debugging</h3>
+<p>Prepare the environment using the <a href="../start/install.html">installation guide</a>. Compare the new implementation against the checkpoint's reference implementation with the same inputs, tokenizer, dtype and generation settings. Check preprocessing and weight mapping before investigating output differences.</p>
+<h3 id="add-the-model-to-the-test-suite">Add the Model to the Test Suite</h3>
+<p>Add focused configuration, weight-loading or operator tests beside the corresponding implementation. Add the model's request and expected-result fixtures to the existing Smoke framework and register the matching target in the <a href="https://github.com/alibaba/rtp-llm/blob/main/rtp_llm/test/smoke/BUILD">Smoke BUILD file</a>.</p>
+<p>Use the original comparison tolerances and declare the required hardware, GPU count and timeout. Run the complete applicable test target and retain its logs and reports. Add the model to the <a href="generative_models.html">supported models list</a> when its implementation and coverage are ready.</p>
+<h2 id="port-a-model-from-vllm-to-rtp-llm">Port a Model from vLLM to RTP-LLM</h2>
+<p>When porting a model, use the source implementation to understand checkpoint names, tensor layouts and numerical behavior. Adapt those details to RTP-LLM's configuration, weight-loading and model interfaces rather than copying framework-specific registries or runtime APIs.</p>
+<p>Reuse existing RTP-LLM operators where they implement the required behavior. Validate any new operator independently, then test the complete model with its original precision and generation expectations.</p>
+<h2 id="registering-an-external-model-implementation">Registering an External Model Implementation</h2>
+<p>An application can import its own model module and call <code>register_model</code> before the model is resolved or loaded. The following example assumes that <code>my_model_plugin</code> provides a compatible <code>MyModel</code> implementation:</p>
+<pre><code class="language-python">from my_model_plugin import MyModel
+from rtp_llm.model_factory_register import register_model
 
-<span class="c1"># For a single model, add it to the registry:</span>
-<span class="n">ModelRegistry</span><span class="o">.</span><span class="n">models</span><span class="p">[</span><span class="n">model_name</span><span class="p">]</span> <span class="o">=</span> <span class="n">model_class</span>
-
-<span class="c1"># For multiple models, you can imitate the import_model_classes() function:</span>
-<span class="kn">from</span><span class="w"> </span><span class="nn">functools</span><span class="w"> </span><span class="kn">import</span> <span class="n">lru_cache</span>
-
-<span class="nd">@lru_cache</span><span class="p">()</span>
-<span class="k">def</span><span class="w"> </span><span class="nf">import_new_model_classes</span><span class="p">():</span>
-    <span class="n">model_arch_name_to_cls</span> <span class="o">=</span> <span class="p">{}</span>
-    <span class="c1"># Populate model_arch_name_to_cls with your new model classes.</span>
-    <span class="o">...</span>
-    <span class="k">return</span> <span class="n">model_arch_name_to_cls</span>
-
-<span class="n">ModelRegistry</span><span class="o">.</span><span class="n">models</span><span class="o">.</span><span class="n">update</span><span class="p">(</span><span class="n">import_new_model_classes</span><span class="p">())</span>
-
-<span class="c1"># Launch the server with your server arguments:</span>
-<span class="n">launch_server</span><span class="p">(</span><span class="n">server_args</span><span class="p">)</span>
-</pre></div>
-</div>
-<hr class="docutils" />
-<p>By following these guidelines, you can add support for new language models and multimodal large language models in
-RTP-LLM and ensure they are thoroughly tested and easily integrated into the system.</p>
-</section>
+register_model(
+    &quot;my_model&quot;,
+    MyModel,
+    support_architectures=[&quot;MyModelForCausalLM&quot;],
+)
+</code></pre>
+<p>Run this registration in the same process that loads the model. Registration in an unrelated Python process does not configure a subsequently launched server. Follow the existing entry-point and model-factory code when integrating the application bootstrap.</p>
 </section>
 
 

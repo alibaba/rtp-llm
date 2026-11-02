@@ -486,82 +486,87 @@ document.write(`
 <div id="searchbox"></div>
                 <article class="bd-article">
 
-  <section id="multimodal-part-debug-and-separate-deployment">
-<h1>Multimodal Part Debug and Separate Deployment<a class="headerlink" href="#multimodal-part-debug-and-separate-deployment" title="Link to this heading">#</a></h1>
-<section id="multimodal-development">
-<h2>Multimodal Development<a class="headerlink" href="#multimodal-development" title="Link to this heading">#</a></h2>
+  <section class="tex2jax_ignore mathjax_ignore" id="multimodal-part-debug-and-separate-deployment">
+<h2>Multimodal Part Debug and Separate Deployment</h2>
+<h3 id="multimodal-development">Multimodal Development</h3>
 <p>A multimodal model refers to an LLM that incorporates multimodal inputs. Currently, the primary input format is URLs, which are distinguished by specific placeholders using OpenAI formatting. Each multimodal model has its unique preprocessing pipeline but must implement the following interfaces:</p>
-<ul class="simple">
-<li><p>The multimodal model must inherit from <code class="docutils literal notranslate"><span class="pre">MultimodalMixin</span></code> in <code class="docutils literal notranslate"><span class="pre">rtp_llm/models/multimodal/multimodal_mixin.py</span></code> and instantiate <code class="docutils literal notranslate"><span class="pre">mm_part</span></code> as the processing class for multimodal inputs.</p></li>
-<li><p><code class="docutils literal notranslate"><span class="pre">mm_part</span></code> has various interface implementations based on input types, such as images, videos, or audio. The logic must be self-consistent, with the most critical interfaces being <code class="docutils literal notranslate"><span class="pre">mm_embedding</span></code>, <code class="docutils literal notranslate"><span class="pre">_mm_preprocess</span></code>, and <code class="docutils literal notranslate"><span class="pre">mm_process</span></code>:</p>
 <ul>
-<li><p><code class="docutils literal notranslate"><span class="pre">mm_embedding</span></code> has a default implementation that calls <code class="docutils literal notranslate"><span class="pre">_mm_preprocess</span></code> and <code class="docutils literal notranslate"><span class="pre">mm_process</span></code>, converting the multimodal input URL into an embedding tensor and other information (e.g., position IDs).</p></li>
-<li><p><code class="docutils literal notranslate"><span class="pre">_mm_preprocess</span></code> also has default implementations for specific modalities, preprocessing byte data from input url and preparing inputs for mm_process. This separation is necessary because preprocessing is CPU-bound, while subsequent processing is GPU-bound.</p></li>
-<li><p><code class="docutils literal notranslate"><span class="pre">mm_process</span></code> handles GPU-based transformation of preprocessed inputs into outputs.</p></li>
+<li>
+<p>The multimodal model must inherit from <code>MultimodalMixin</code> in <code>rtp_llm/models/multimodal/multimodal_mixin.py</code> and instantiate <code>mm_part</code> as the processing class for multimodal inputs.</p>
+</li>
+<li>
+<p><code>mm_part</code> has various interface implementations based on input types, such as images, videos, or audio. The logic must be self-consistent, with the most critical interfaces being <code>preprocess_input</code>, <code>get_preprocess_params</code>, and <code>embedding</code>:</p>
+<ul>
+<li>
+<p><code>preprocess_input</code> includes all CPU preprocessing tasks: such as downloading from URLs, resizing images, etc. These operations do not involve the GPU and are executed concurrently as subprocesses. It uses</p>
+</li>
+<li>
+<p><code>get_preprocess_params</code> provides additional model-related inputs for preprocess_input as dict. Note that model itself should not be passed directly to avoid hidden additional GPU memory overhead in subprocesses.</p>
+</li>
+<li>
+<p><code>embedding</code> handles GPU-based transformation of preprocessed inputs into outputs.</p>
+</li>
 </ul>
 </li>
-<li><p>For model weights, the required weights must be registered in <code class="docutils literal notranslate"><span class="pre">GptInitModelParameters</span></code> under <code class="docutils literal notranslate"><span class="pre">mm_related_params.vit_weights</span></code>. Refer to <code class="docutils literal notranslate"><span class="pre">BaseVitWeights</span></code> for specific implementation logic.</p></li>
+<li>
+<p>For model weights, the required weights must be registered in <code>ModelConfig</code> under <code>mm_related_params.vit_weights</code>. Refer to <code>BaseVitWeights</code> for specific implementation logic.</p>
+</li>
 </ul>
-</section>
-<section id="debug">
-<h2>Debug<a class="headerlink" href="#debug" title="Link to this heading">#</a></h2>
+<h3 id="debug">Debug</h3>
 <p>Start multimodal part.</p>
-<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span class="nv">START_PORT</span><span class="o">=</span><span class="m">12345</span><span class="w"> </span><span class="se">\</span>
-<span class="nv">VIT_SEPARATION</span><span class="o">=</span><span class="m">1</span><span class="w"> </span><span class="se">\</span>
-<span class="nv">ACT_TYPE</span><span class="o">=</span>bf16<span class="w"> </span><span class="se">\</span>
-<span class="nv">MODEL_TYPE</span><span class="o">=</span>qwen2_5_vl<span class="w"> </span><span class="se">\</span>
-<span class="nv">CHECKPOINT_PATH</span><span class="o">=</span>/home/xieshui.yyx/Qwen2.5-VL-3B<span class="w"> </span><span class="se">\</span>
-/opt/conda310/bin/python<span class="w"> </span>-m<span class="w"> </span>rtp_llm.start_server
-</pre></div>
-</div>
+<pre><code class="language-bash">START_PORT=12345 \
+VIT_SEPARATION=1 \
+ACT_TYPE=bf16 \
+MODEL_TYPE=qwen2_5_vl \
+CHECKPOINT_PATH=/path/to/Qwen2.5-VL-3B \
+/opt/conda310/bin/python -m rtp_llm.start_server
+</code></pre>
 <p>Start a grpc client.</p>
-<div class="highlight-Python notranslate"><div class="highlight"><pre><span></span><span class="kn">from</span><span class="w"> </span><span class="nn">rtp_llm.cpp.proto.model_rpc_service_pb2_grpc</span><span class="w"> </span><span class="kn">import</span> <span class="p">(</span>
-    <span class="n">MultimodalRpcServiceStub</span><span class="p">,</span>
-<span class="p">)</span>
+<pre><code class="language-Python">from rtp_llm.cpp.proto.model_rpc_service_pb2_grpc import (
+    MultimodalRpcServiceStub,
+)
 
-<span class="kn">from</span><span class="w"> </span><span class="nn">rtp_llm.cpp.proto.model_rpc_service_pb2</span><span class="w"> </span><span class="kn">import</span> <span class="p">(</span>
-    <span class="n">MultimodalInputPB</span><span class="p">,</span>
-    <span class="n">MultimodalInputsPB</span>
-<span class="p">)</span>
+from rtp_llm.cpp.proto.model_rpc_service_pb2 import (
+    MultimodalInputPB,
+    MultimodalInputsPB
+)
 
-<span class="kn">from</span><span class="w"> </span><span class="nn">rtp_llm.utils.grpc_util</span><span class="w"> </span><span class="kn">import</span> <span class="n">trans_tensor</span>
+from rtp_llm.utils.grpc_util import trans_tensor
 
-<span class="kn">import</span><span class="w"> </span><span class="nn">grpc</span>
-<span class="kn">import</span><span class="w"> </span><span class="nn">torch</span>
+import grpc
+import torch
 
-<span class="k">def</span><span class="w"> </span><span class="nf">trans_multimodal_input</span><span class="p">(</span><span class="n">urls</span><span class="p">):</span>
-    <span class="n">input_pb</span> <span class="o">=</span> <span class="n">MultimodalInputsPB</span><span class="p">()</span>
-    <span class="k">for</span> <span class="n">url</span> <span class="ow">in</span> <span class="n">urls</span><span class="p">:</span>
-        <span class="n">mm_input_pb</span> <span class="o">=</span> <span class="n">MultimodalInputPB</span><span class="p">()</span>
-        <span class="n">mm_input_pb</span><span class="o">.</span><span class="n">multimodal_url</span> <span class="o">=</span> <span class="n">url</span>
-        <span class="n">mm_input_pb</span><span class="o">.</span><span class="n">multimodal_type</span> <span class="o">=</span> <span class="mi">1</span>
-        <span class="n">mm_input_pb</span><span class="o">.</span><span class="n">mm_preprocess_config</span><span class="o">.</span><span class="n">width</span> <span class="o">=</span> <span class="o">-</span><span class="mi">1</span>
-        <span class="n">mm_input_pb</span><span class="o">.</span><span class="n">mm_preprocess_config</span><span class="o">.</span><span class="n">height</span> <span class="o">=</span> <span class="o">-</span><span class="mi">1</span>
-        <span class="n">mm_input_pb</span><span class="o">.</span><span class="n">mm_preprocess_config</span><span class="o">.</span><span class="n">min_pixels</span> <span class="o">=</span> <span class="o">-</span><span class="mi">1</span>
-        <span class="n">mm_input_pb</span><span class="o">.</span><span class="n">mm_preprocess_config</span><span class="o">.</span><span class="n">max_pixels</span> <span class="o">=</span> <span class="o">-</span><span class="mi">1</span>
-        <span class="n">mm_input_pb</span><span class="o">.</span><span class="n">mm_preprocess_config</span><span class="o">.</span><span class="n">fps</span> <span class="o">=</span> <span class="o">-</span><span class="mi">1</span>
-        <span class="n">mm_input_pb</span><span class="o">.</span><span class="n">mm_preprocess_config</span><span class="o">.</span><span class="n">min_frames</span> <span class="o">=</span> <span class="o">-</span><span class="mi">1</span>
-        <span class="n">mm_input_pb</span><span class="o">.</span><span class="n">mm_preprocess_config</span><span class="o">.</span><span class="n">max_frames</span> <span class="o">=</span> <span class="o">-</span><span class="mi">1</span>
+def trans_multimodal_input(urls):
+    input_pb = MultimodalInputsPB()
+    for url in urls:
+        mm_input_pb = MultimodalInputPB()
+        mm_input_pb.multimodal_url = url
+        mm_input_pb.multimodal_type = 1
+        mm_input_pb.mm_preprocess_config.width = -1
+        mm_input_pb.mm_preprocess_config.height = -1
+        mm_input_pb.mm_preprocess_config.min_pixels = -1
+        mm_input_pb.mm_preprocess_config.max_pixels = -1
+        mm_input_pb.mm_preprocess_config.fps = -1
+        mm_input_pb.mm_preprocess_config.min_frames = -1
+        mm_input_pb.mm_preprocess_config.max_frames = -1
 
-        <span class="n">input_pb</span><span class="o">.</span><span class="n">multimodal_inputs</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">mm_input_pb</span><span class="p">)</span>
+        input_pb.multimodal_inputs.append(mm_input_pb)
 
-    <span class="k">return</span> <span class="n">input_pb</span>
+    return input_pb
 
-<span class="k">def</span><span class="w"> </span><span class="nf">main</span><span class="p">():</span>
-    <span class="k">with</span> <span class="n">grpc</span><span class="o">.</span><span class="n">insecure_channel</span><span class="p">(</span><span class="s1">&#39;localhost:12346&#39;</span><span class="p">,</span> <span class="n">options</span><span class="o">=</span><span class="p">[(</span><span class="s1">&#39;grpc.max_receive_message_length&#39;</span><span class="p">,</span> <span class="mi">1024</span> <span class="o">*</span> <span class="mi">1024</span> <span class="o">*</span> <span class="mi">1024</span><span class="p">),</span>
-                                                           <span class="p">(</span><span class="s1">&#39;grpc.max_send_message_length&#39;</span><span class="p">,</span> <span class="mi">1024</span> <span class="o">*</span> <span class="mi">1024</span> <span class="o">*</span> <span class="mi">1024</span><span class="p">)])</span> <span class="k">as</span> <span class="n">channel</span><span class="p">:</span>
-        <span class="n">stub</span> <span class="o">=</span> <span class="n">MultimodalRpcServiceStub</span><span class="p">(</span><span class="n">channel</span><span class="p">)</span>
-        <span class="n">response</span> <span class="o">=</span> <span class="n">stub</span><span class="o">.</span><span class="n">RemoteMultimodalEmbedding</span><span class="p">(</span><span class="n">trans_multimodal_input</span><span class="p">([</span><span class="s1">&#39;/mnt/nas1/hf/llava-v1.5-7b/1.jpg&#39;</span><span class="p">]))</span>
-    <span class="k">for</span> <span class="n">res</span> <span class="ow">in</span> <span class="n">response</span><span class="o">.</span><span class="n">multimodal_outputs</span><span class="p">:</span>
-        <span class="nb">print</span><span class="p">(</span><span class="n">trans_tensor</span><span class="p">(</span><span class="n">res</span><span class="o">.</span><span class="n">multimodal_embedding</span><span class="p">))</span>
-        <span class="nb">print</span><span class="p">(</span><span class="n">trans_tensor</span><span class="p">(</span><span class="n">res</span><span class="o">.</span><span class="n">multimodal_pos_id</span><span class="p">))</span>
+def main():
+    with grpc.insecure_channel('localhost:12346', options=[('grpc.max_receive_message_length', 1024 * 1024 * 1024),
+                                                           ('grpc.max_send_message_length', 1024 * 1024 * 1024)]) as channel:
+        stub = MultimodalRpcServiceStub(channel)
+        response = stub.RemoteMultimodalEmbedding(trans_multimodal_input(['/mnt/nas1/hf/llava-v1.5-7b/1.jpg']))
+    for res in response.multimodal_outputs:
+        print(trans_tensor(res.multimodal_embedding))
+        print(trans_tensor(res.multimodal_pos_id))
 
-<span class="k">if</span> <span class="vm">__name__</span> <span class="o">==</span> <span class="s1">&#39;__main__&#39;</span><span class="p">:</span>
-    <span class="n">main</span><span class="p">()</span>
-</pre></div>
-</div>
+if __name__ == '__main__':
+    main()
+</code></pre>
 <p>hints: Grpc port is START_PORT + 1.</p>
-</section>
 </section>
 
 

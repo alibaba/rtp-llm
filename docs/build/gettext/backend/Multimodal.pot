@@ -33,23 +33,23 @@ msgid "The multimodal model must inherit from `MultimodalMixin` in `rtp_llm/mode
 msgstr ""
 
 #: ../../backend/Multimodal.md:9
-msgid "`mm_part` has various interface implementations based on input types, such as images, videos, or audio. The logic must be self-consistent, with the most critical interfaces being `mm_embedding`, `_mm_preprocess`, and `mm_process`:"
+msgid "`mm_part` has various interface implementations based on input types, such as images, videos, or audio. The logic must be self-consistent, with the most critical interfaces being `preprocess_input`, `get_preprocess_params`, and `embedding`:"
 msgstr ""
 
 #: ../../backend/Multimodal.md:11
-msgid "`mm_embedding` has a default implementation that calls `_mm_preprocess` and `mm_process`, converting the multimodal input URL into an embedding tensor and other information (e.g., position IDs)."
+msgid "`preprocess_input` includes all CPU preprocessing tasks: such as downloading from URLs, resizing images, etc. These operations do not involve the GPU and are executed concurrently as subprocesses. It uses"
 msgstr ""
 
 #: ../../backend/Multimodal.md:13
-msgid "`_mm_preprocess` also has default implementations for specific modalities, preprocessing byte data from input url and preparing inputs for mm_process. This separation is necessary because preprocessing is CPU-bound, while subsequent processing is GPU-bound."
+msgid "`get_preprocess_params` provides additional model-related inputs for preprocess_input as dict. Note that model itself should not be passed directly to avoid hidden additional GPU memory overhead in subprocesses."
 msgstr ""
 
 #: ../../backend/Multimodal.md:15
-msgid "`mm_process` handles GPU-based transformation of preprocessed inputs into outputs."
+msgid "`embedding` handles GPU-based transformation of preprocessed inputs into outputs."
 msgstr ""
 
 #: ../../backend/Multimodal.md:17
-msgid "For model weights, the required weights must be registered in `GptInitModelParameters` under `mm_related_params.vit_weights`. Refer to `BaseVitWeights` for specific implementation logic."
+msgid "For model weights, the required weights must be registered in `ModelConfig` under `mm_related_params.vit_weights`. Refer to `BaseVitWeights` for specific implementation logic."
 msgstr ""
 
 #: ../../backend/Multimodal.md:19
@@ -60,8 +60,16 @@ msgstr ""
 msgid "Start multimodal part."
 msgstr ""
 
+#: ../../backend/Multimodal.md:23
+msgid "START_PORT=12345 \\\nVIT_SEPARATION=1 \\\nACT_TYPE=bf16 \\\nMODEL_TYPE=qwen2_5_vl \\\nCHECKPOINT_PATH=/path/to/Qwen2.5-VL-3B \\\n/opt/conda310/bin/python -m rtp_llm.start_server"
+msgstr ""
+
 #: ../../backend/Multimodal.md:32
 msgid "Start a grpc client."
+msgstr ""
+
+#: ../../backend/Multimodal.md:34
+msgid "from rtp_llm.cpp.proto.model_rpc_service_pb2_grpc import (\n    MultimodalRpcServiceStub,\n)\n\nfrom rtp_llm.cpp.proto.model_rpc_service_pb2 import (\n    MultimodalInputPB,\n    MultimodalInputsPB\n)\n\nfrom rtp_llm.utils.grpc_util import trans_tensor\n\nimport grpc\nimport torch\n\ndef trans_multimodal_input(urls):\n    input_pb = MultimodalInputsPB()\n    for url in urls:\n        mm_input_pb = MultimodalInputPB()\n        mm_input_pb.multimodal_url = url\n        mm_input_pb.multimodal_type = 1\n        mm_input_pb.mm_preprocess_config.width = -1\n        mm_input_pb.mm_preprocess_config.height = -1\n        mm_input_pb.mm_preprocess_config.min_pixels = -1\n        mm_input_pb.mm_preprocess_config.max_pixels = -1\n        mm_input_pb.mm_preprocess_config.fps = -1\n        mm_input_pb.mm_preprocess_config.min_frames = -1\n        mm_input_pb.mm_preprocess_config.max_frames = -1\n\n        input_pb.multimodal_inputs.append(mm_input_pb)\n\n    return input_pb\n\ndef main():\n    with grpc.insecure_channel('localhost:12346', options=[('grpc.max_receive_message_length', 1024 * 1024 * 1024),\n                                                           ('grpc.max_send_message_length', 1024 * 1024 * 1024)]) as channel:\n        stub = MultimodalRpcServiceStub(channel)\n        response = stub.RemoteMultimodalEmbedding(trans_multimodal_input(['/mnt/nas1/hf/llava-v1.5-7b/1.jpg']))\n    for res in response.multimodal_outputs:\n        print(trans_tensor(res.multimodal_embedding))\n        print(trans_tensor(res.multimodal_pos_id))\n\nif __name__ == '__main__':\n    main()"
 msgstr ""
 
 #: ../../backend/Multimodal.md:80

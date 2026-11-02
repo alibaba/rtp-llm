@@ -1,14 +1,9 @@
-"""DeepSeek-V4 model entry point (skeleton).
+"""DeepSeek-V4 model registration, checkpoint configuration and weight mapping.
 
-This file establishes the registration and HF config parsing for DeepseekV4.
-For M0 the forward path is intentionally not wired up — `_create_python_model`
-raises so the engine fails fast if you try to actually run inference. Subsequent
-milestones (M1 mHC, M2 HCA, M3 CSA, M4 heterogeneous KV cache) flesh out the
-real model body in `rtp_llm/models_py/model_desc/deepseek_v4_model.py`.
+`_create_python_model` constructs the implementation in
+`rtp_llm/models_py/model_desc/deepseek_v4_model.py`.
 
-Key V4 architecture differences vs V3 — see
-`/home/wangyin.yx/workspace/work_memory/plans/develop_ds_v4.md` for the full
-breakdown:
+Key V4 architecture differences vs V3:
 
   - MQA single-KV-head with head_dim=512 (no kv_lora_rank, no v_head_dim split)
   - Per-layer attention type from `compress_ratios`: 0=SWA-only, 4=CSA, 128=HCA
@@ -558,10 +553,10 @@ class DeepSeekV4Weight(DeepSeekV2Weight):
 
 
 class DeepSeekV4(DeepSeekV2):
-    """DeepSeek-V4 entry point.
+    """DeepSeek-V4 configuration and Python-model construction.
 
-    M0: parse HF config and register. Engine instantiation will fail at
-    `_create_python_model` until M2 lands the HCA-only forward path.
+    Parses checkpoint configuration and connects the DeepSeek-V4 model body
+    through `_create_python_model`.
     """
 
     @classmethod
