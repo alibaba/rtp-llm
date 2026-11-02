@@ -1,19 +1,26 @@
 """Ascend MoE strategy tests (CPU-only).
 
-AscendBf16FallbackStrategy is a placeholder that rejects every MoE
-configuration on Ascend: no NPU-capable MoE executor exists (Triton-based
-executors are excluded from Ascend deps) and Ascend TP (tp_size > 1) is not
-implemented either. These tests pin the fail-fast contract.
+Pins the fused-MoE strategy contract on Ascend:
+
+- AscendCannStrategy (priority 52) serves bf16 / non-quantized / pure-TP /
+  auto / non-fake-balance configs;
+- AscendBf16FallbackStrategy is a candidate for non-quantized configs CANN
+  rejects (e.g. fp16 act_type or non-auto MOE_STRATEGY), routing through
+  the shared BatchedDataRouter + BatchedTritonExperts chain;
+- quantized configs fail strategy selection with the registry's
+  "No suitable MOE strategy found" error.
 """
 
 import unittest
 
 from rtp_llm.config.model_config import ModelConfig
+from rtp_llm.config.quant_config import WeightOnlyInt8PerChannelQuantConfig
 from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
     MoEConfigAdapter,
 )
-from rtp_llm.models_py.modules.factory.fused_moe.impl.ascend.strategy.pytorch_fallback import (
+from rtp_llm.models_py.modules.factory.fused_moe.impl.ascend.strategy import (
     AscendBf16FallbackStrategy,
+    AscendCannStrategy,
 )
 from rtp_llm.models_py.modules.factory.fused_moe.strategy_registry import (
     StrategyRegistry,
@@ -23,18 +30,27 @@ from rtp_llm.models_py.modules.factory.fused_moe.utils.condition_checker import 
 )
 from rtp_llm.ops import MoeConfig, ParallelismConfig
 
+try:
+    import torch_npu  # noqa: F401
+
+    _HAS_TORCH_NPU = True
+except ImportError:
+    _HAS_TORCH_NPU = False
+
 
 def create_config_adapter(
     ep_size: int = 1,
     tp_size: int = 1,
     quant_config=None,
+    data_type: str = "fp16",
+    use_all_gather: bool = False,
 ) -> MoEConfigAdapter:
     """Helper function to create MoEConfigAdapter for testing"""
     model_config = ModelConfig()
     model_config.hidden_size = 1024
     model_config.expert_num = 8
     model_config.moe_k = 2
-    model_config.data_type = "fp16"
+    model_config.data_type = data_type
     model_config.quant_config = quant_config
 
     parallelism_config = ParallelismConfig()
@@ -51,6 +67,7 @@ def create_config_adapter(
 
     moe_config = MoeConfig()
     moe_config.ll_num_max_token = 128
+    moe_config.use_all_gather = use_all_gather
     return MoEConfigAdapter(
         model_config=model_config,
         parallelism_config=parallelism_config,
@@ -58,41 +75,61 @@ def create_config_adapter(
     )
 
 
-class TestAscendMoeStrategyRejected(unittest.TestCase):
-    """Ascend MoE must fail fast with a clear error."""
+class TestAscendMoeStrategyContract(unittest.TestCase):
+    """CANN serves the default; the fallback covers CANN opt-out configs."""
 
-    def _assert_rejected(self, config: MoEConfigAdapter) -> None:
+    def test_fallback_accepts_non_quantized(self):
+        """check_conditions only records conditions; it never raises."""
         checker = ConditionChecker("AscendBf16FallbackStrategy.check_conditions()")
-        with self.assertRaises(ValueError) as ctx:
-            AscendBf16FallbackStrategy.check_conditions(checker, config)
-        self.assertIn("Ascend MoE is not supported", str(ctx.exception))
-        self.assertIn("tp_size > 1", str(ctx.exception))
+        AscendBf16FallbackStrategy.check_conditions(checker, create_config_adapter())
+        self.assertTrue(checker.all_passed())
 
-    def test_rejects_single_gpu_bf16(self):
-        """Non-quantized, tp_size=1 (previously 'supported') must be rejected."""
-        self._assert_rejected(create_config_adapter())
+    def test_fallback_attributes_are_real(self):
+        """get_attributes wires the shared batched router/executor chain."""
+        attrs = AscendBf16FallbackStrategy().get_attributes()
 
-    def test_rejects_tp_gt_1(self):
-        """tp_size > 1 (pure TP topology, expert-dropping risk) must be rejected."""
-        self._assert_rejected(create_config_adapter(tp_size=2))
+        from rtp_llm.models_py.modules.factory.fused_moe.impl.common.executor.batched_triton_executor import (
+            BatchedTritonExperts,
+        )
+        from rtp_llm.models_py.modules.factory.fused_moe.impl.common.router.batched_data_router import (
+            BatchedDataRouter,
+        )
 
-    def test_rejects_ep_enabled(self):
-        """EP topologies must be rejected."""
-        self._assert_rejected(create_config_adapter(ep_size=2))
+        self.assertIs(attrs.router_class, BatchedDataRouter)
+        self.assertIs(attrs.executor_class, BatchedTritonExperts)
 
-    def test_registry_surfaces_error(self):
-        """The rejection must propagate through strategy selection.
+    @unittest.skipUnless(
+        _HAS_TORCH_NPU, "torch_npu is required for CANN strategy wiring"
+    )
+    def test_cann_selected_for_default_bf16_config(self):
+        """bf16 + non-quant + pure-TP + auto picks AscendCannStrategy."""
+        registry = StrategyRegistry()
+        registry.register(AscendCannStrategy())
+        registry.register(AscendBf16FallbackStrategy())
+        strategy = registry.get_strategy(
+            create_config_adapter(data_type="bf16", use_all_gather=True)
+        )
+        self.assertIsInstance(strategy, AscendCannStrategy)
 
-        can_handle() consults get_attributes() before check_conditions(), so
-        the registry path raises RuntimeError from get_attributes(); direct
-        check_conditions() calls raise ValueError. Both carry the same
-        message.
-        """
+    def test_fallback_serves_cann_rejected_config(self):
+        """fp16 (CANN is bf16-only) falls through to the fallback strategy."""
+        registry = StrategyRegistry()
+        registry.register(AscendCannStrategy())
+        registry.register(AscendBf16FallbackStrategy())
+        strategy = registry.get_strategy(create_config_adapter())
+        self.assertIsInstance(strategy, AscendBf16FallbackStrategy)
+
+    def test_quantized_config_fails_selection(self):
+        """Quantized configs have no Ascend candidate; registry raises."""
         registry = StrategyRegistry()
         registry.register(AscendBf16FallbackStrategy())
-        with self.assertRaises((ValueError, RuntimeError)) as ctx:
-            registry.get_strategy(create_config_adapter())
-        self.assertIn("Ascend MoE is not supported", str(ctx.exception))
+        with self.assertRaises(ValueError) as ctx:
+            registry.get_strategy(
+                create_config_adapter(
+                    quant_config=WeightOnlyInt8PerChannelQuantConfig()
+                )
+            )
+        self.assertIn("No suitable MOE strategy found", str(ctx.exception))
 
 
 if __name__ == "__main__":
