@@ -139,6 +139,51 @@ TEST_F(CudaSamplerTest, testCudaSamplingKernelTopK1) {
     ASSERT_EQ(output_token_ids_host[23], 7);
 }
 
+TEST_F(CudaSamplerTest, testLastColumnWritePreservesCpuAndStridedTokenStorage) {
+    constexpr int64_t batch = 3, history = 4, vocab = 7;
+    auto              options = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA);
+    auto              lengths = torch::zeros({batch}, torch::TensorOptions().dtype(torch::kInt32).pinned_memory(true));
+    auto              top_p   = torch::ones({batch}, lengths.options().dtype(torch::kFloat32));
+    for (bool cpu_tokens : {false, true}) {
+        for (bool strided : {false, true}) {
+            for (bool greedy : {false, true}) {
+                auto storage =
+                    torch::full({batch, history + 1 + (strided ? 2 : 0)},
+                                17,
+                                lengths.options().pinned_memory(false).device(cpu_tokens ? torch::kCPU : torch::kCUDA));
+                auto tokens   = storage.slice(1, 0, history + 1);
+                auto expected = storage.clone();
+                expected.select(1, history).fill_(2);
+                auto logits = torch::full({batch, vocab}, -std::numeric_limits<float>::infinity(), options);
+                logits.select(1, 2).zero_();
+                auto         top_k = torch::full_like(lengths, greedy ? 1 : 0);
+                GreedyParams params{logits,
+                                    lengths,
+                                    lengths,
+                                    tokens,
+                                    history,
+                                    top_k,
+                                    top_p,
+                                    top_p,
+                                    std::nullopt,
+                                    std::nullopt,
+                                    std::nullopt,
+                                    std::nullopt,
+                                    false,
+                                    std::nullopt,
+                                    std::nullopt,
+                                    std::nullopt,
+                                    std::nullopt,
+                                    std::vector<at::Generator>(batch)};
+                auto         result = execSampleGreedy(params);
+                at::cuda::getCurrentCUDAStream().synchronize();
+                ASSERT_TRUE(!result.success.defined() || result.success.all().item<bool>());
+                ASSERT_TRUE(torch::equal(storage.cpu(), expected.cpu()));
+            }
+        }
+    }
+}
+
 TEST_F(CudaSamplerTest, testCudaSamplingSeedOffsetSameAcrossBatchRows) {
     constexpr int64_t batch_size = 4;
     constexpr int64_t vocab_size = 6;

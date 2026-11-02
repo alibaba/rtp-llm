@@ -372,9 +372,10 @@ TEST_F(CudaSamplerSm120Test, testCompactOutputPreservesTokensProbabilitiesRngAnd
     setenv("RTP_LLM_SAMPLER_SPLIT_SOFTMAX", "1", 1);
     auto options = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA);
     torch::manual_seed(20261019);
-    for (int64_t batch : {1, 4, 17, 32}) {
+    for (int64_t batch : {1, 2, 4, 17, 32, 33}) {
         for (int64_t vocab : {257, 248320}) {
-            for (int penalty_case = 0; penalty_case < 6; ++penalty_case) {
+            for (int penalty_case = 0; penalty_case < 8; ++penalty_case) {
+                const bool  probability_outputs = penalty_case != 7;
                 const float gain   = penalty_case == 0 ? 0.0f : 1.0f;
                 auto        logits = torch::randn({batch, vocab}, options) * gain;
                 logits.slice(1, vocab - 13).fill_(-std::numeric_limits<float>::infinity());
@@ -382,6 +383,9 @@ TEST_F(CudaSamplerSm120Test, testCompactOutputPreservesTokensProbabilitiesRngAnd
                     torch::full({batch}, 128, torch::TensorOptions().dtype(torch::kInt32).pinned_memory(true));
                 auto top_p = torch::ones({batch}, torch::TensorOptions().dtype(torch::kFloat32).pinned_memory(true));
                 auto top_k = torch::zeros_like(lengths);
+                // Exercise argmax both with probability outputs and its fast path.
+                if (penalty_case >= 6)
+                    top_k.fill_(1);
                 auto temperature = torch::full_like(top_p, 0.7);
                 auto repetition  = torch::ones_like(top_p);
                 auto presence    = torch::zeros_like(top_p);
@@ -409,6 +413,7 @@ TEST_F(CudaSamplerSm120Test, testCompactOutputPreservesTokensProbabilitiesRngAnd
                         tokens.select(1, 0).fill_(3);
                         tokens.select(1, 1).fill_(5);
                         tokens.select(1, 128).fill_(17);
+                        auto         prefix  = tokens.slice(1, 0, 128).clone();
                         auto         probs   = torch::empty_like(logits);
                         auto         cum     = torch::full({batch}, -2.0, options);
                         auto         mutated = logits.clone();
@@ -422,17 +427,18 @@ TEST_F(CudaSamplerSm120Test, testCompactOutputPreservesTokensProbabilitiesRngAnd
                                              temperature,
                                              penalty_case == 0 ? std::nullopt : std::make_optional(repetition),
                                              ngram,
-                                             cum,
+                                             probability_outputs ? std::make_optional(cum) : std::nullopt,
                                              std::nullopt,
                                              false,
-                                             probs,
+                                             probability_outputs ? std::make_optional(probs) : std::nullopt,
                                              presence,
                                              frequency,
                                              std::nullopt,
                                              generators});
                         auto         result = execSampleGreedy(params);
                         check_cuda_error();
-                        ASSERT_TRUE(result.success.all().item<bool>());
+                        ASSERT_TRUE(!result.success.defined() || result.success.all().item<bool>());
+                        ASSERT_TRUE(torch::equal(tokens.slice(1, 0, 128), prefix));
                         if (flag[0] == '0') {
                             samples.push_back(tokens.clone());
                             probabilities.push_back(probs.clone());
@@ -442,7 +448,9 @@ TEST_F(CudaSamplerSm120Test, testCompactOutputPreservesTokensProbabilitiesRngAnd
                                 states.push_back(generator.get_state());
                         } else {
                             ASSERT_TRUE(torch::equal(tokens, samples[generation]));
-                            ASSERT_TRUE(torch::equal(probs, probabilities[generation]));
+                            if (probability_outputs) {
+                                ASSERT_TRUE(torch::equal(probs, probabilities[generation]));
+                            }
                             ASSERT_TRUE(torch::equal(mutated, in_place[generation]));
                             ASSERT_TRUE(torch::equal(cum, log_probabilities[generation]));
                             for (int64_t i = 0; i < batch; ++i)

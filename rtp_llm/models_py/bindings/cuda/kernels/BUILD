@@ -331,6 +331,8 @@ cc_library(
     hdrs = ["speculative_sampling/sampling_host.h"],
     deps = [
         ":kernels_speculative_sampling",
+        "//rtp_llm/models_py/bindings/core:op_data",
+        "//rtp_llm/models_py/bindings/common/kernels:sampling_host_utils",
         "@local_config_cuda//cuda:cuda_headers",
         "@local_config_cuda//cuda:cudart",
     ] + torch_deps(),
