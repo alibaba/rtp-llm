@@ -45,19 +45,20 @@ public class EngineGrpcClient extends AbstractGrpcClient {
     private static final boolean DEFAULT_KEEP_ALIVE_WITHOUT_CALLS = true;
     public static final String VIT_CACHE_MAX_INBOUND_MESSAGE_BYTES_PROPERTY =
             "flexlb.engine-grpc.vit-cache-max-inbound-message-bytes";
-    public static final String KV_CACHE_MAX_INBOUND_MESSAGE_BYTES_PROPERTY =
-            "flexlb.engine-grpc.kv-cache-max-inbound-message-bytes";
     private static final int DEFAULT_MAX_INBOUND_MESSAGE_BYTES = 8 * 1024 * 1024;
-    private static final int DEFAULT_KV_CACHE_MAX_INBOUND_MESSAGE_BYTES = 128 * 1024 * 1024;
     private static final int DEFAULT_VIT_CACHE_MAX_INBOUND_MESSAGE_BYTES = 16 * 1024 * 1024;
 
     @Value("${" + VIT_CACHE_MAX_INBOUND_MESSAGE_BYTES_PROPERTY + ":"
             + DEFAULT_VIT_CACHE_MAX_INBOUND_MESSAGE_BYTES + "}")
     private int vitCacheMaxInboundMessageBytes = DEFAULT_VIT_CACHE_MAX_INBOUND_MESSAGE_BYTES;
 
-    @Value("${" + KV_CACHE_MAX_INBOUND_MESSAGE_BYTES_PROPERTY + ":"
-            + DEFAULT_KV_CACHE_MAX_INBOUND_MESSAGE_BYTES + "}")
-    private int kvCacheMaxInboundMessageBytes = DEFAULT_KV_CACHE_MAX_INBOUND_MESSAGE_BYTES;
+    private org.flexlb.config.FlexlbConfig.EngineGrpcConfig engineGrpcConfig =
+            new org.flexlb.config.FlexlbConfig.EngineGrpcConfig();
+
+    @Autowired
+    public void configureEngineGrpc(org.flexlb.config.ConfigService configService) {
+        engineGrpcConfig = configService.loadBalanceConfig().getEngineGrpc();
+    }
 
     @Getter
     private final Executor executor;
@@ -499,7 +500,7 @@ public class EngineGrpcClient extends AbstractGrpcClient {
         int port = Integer.parseInt(parts[1]);
         int maxInboundMessageBytes = DEFAULT_MAX_INBOUND_MESSAGE_BYTES;
         if (ServiceType.CACHE_STATUS.getSuffix().equals(parts[2])) {
-            maxInboundMessageBytes = kvCacheMaxInboundMessageBytes;
+            maxInboundMessageBytes = engineGrpcConfig.getKvCacheMaxInboundMessageBytes();
         } else if (ServiceType.MULTIMODAL_CACHE_STATUS.getSuffix().equals(parts[2])) {
             maxInboundMessageBytes = vitCacheMaxInboundMessageBytes;
         }

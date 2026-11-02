@@ -23,6 +23,13 @@ public final class FlexlbConfig {
     private WorkerRegistryConfig workerRegistry = new WorkerRegistryConfig();
     private ObservabilityConfig observability = new ObservabilityConfig();
     private GrpcServerConfig grpcServer = new GrpcServerConfig();
+    private EngineGrpcConfig engineGrpc = new EngineGrpcConfig();
+
+    @Getter
+    @Setter
+    public static final class EngineGrpcConfig {
+        private int kvCacheMaxInboundMessageBytes = 128 * 1024 * 1024;
+    }
 
     @JsonIgnore
     private final InternalRuntimeSettings internalRuntime = new InternalRuntimeSettings();

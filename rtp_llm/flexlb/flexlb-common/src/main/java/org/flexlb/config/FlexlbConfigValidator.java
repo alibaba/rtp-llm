@@ -113,6 +113,8 @@ final class FlexlbConfigValidator {
     }
 
     static void validate(FlexlbConfig config) {
+        require(config.getEngineGrpc().getKvCacheMaxInboundMessageBytes() > 0,
+                "engineGrpc.kvCacheMaxInboundMessageBytes", "must be positive");
         require(config.getSchemaVersion() == FlexlbConfig.CURRENT_SCHEMA_VERSION,
                 "schemaVersion", "must equal " + FlexlbConfig.CURRENT_SCHEMA_VERSION);
         require(config.getScheduler() != null, "scheduler", "is required");
