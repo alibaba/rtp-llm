@@ -19,6 +19,7 @@ from rtp_llm.models_py.distributed.collective_torch import (
     all_gather,
     reduce_scatter_bf16 as reduce_scatter,
 )
+from rtp_llm.models_py.utils.module_profiler import profile_scope
 
 _AG_LOCAL_FP8_OVERLAP_MIN_ROWS = 4096
 
@@ -94,28 +95,34 @@ class KdaAttention(nn.Module):
         if isinstance(hidden, Fp8Activation) and not use_fused_ag:
             raise RuntimeError("prequantized FP8 input requires the FP8 AG/GEMM path")
         if use_fused_ag:
-            fused = self._fp8_collective.all_gather_gemm(hidden, self.input)
+            with profile_scope("RTP::attention.fp8_ag_gemm"):
+                fused = self._fp8_collective.all_gather_gemm(hidden, self.input)
         elif self._bf16_collective is not None and self._bf16_collective.eligible(
             hidden.shape[0], attention_inputs, metadata,
         ):
-            fused = self._bf16_collective.all_gather_gemm(hidden, self.input)
+            with profile_scope("RTP::attention.bf16_ag_gemm"):
+                fused = self._bf16_collective.all_gather_gemm(hidden, self.input)
         elif use_overlap:
             from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp8_comm_fusion import (
                 all_gather_project_local_overlap,
             )
 
-            fused = all_gather_project_local_overlap(
-                hidden, self.input, _get_group(Group.TP)
-            )
+            with profile_scope("RTP::attention.kda.ag_local_fp8_overlap"):
+                fused = all_gather_project_local_overlap(
+                    hidden, self.input, _get_group(Group.TP)
+                )
         else:
-            full_hidden = (
-                all_gather(hidden, Group.TP) if self.tp_size > 1 else hidden
-            )
-            fused = self.input(full_hidden)
+            with profile_scope("RTP::attention.input_all_gather"):
+                full_hidden = (
+                    all_gather(hidden, Group.TP) if self.tp_size > 1 else hidden
+                )
+            with profile_scope("RTP::attention.kda.input_proj"):
+                fused = self.input(full_hidden)
         layout = getattr(metadata, "query_layout", None)
         if layout is not None:
-            fused = layout.gather_natural(fused)
-            attention_inputs = layout.natural_attention(attention_inputs)
+            with profile_scope("RTP::attention.kda.zigzag_to_natural"):
+                fused = layout.gather_natural(fused)
+                attention_inputs = layout.natural_attention(attention_inputs)
         logical_width = 4 * self.width + self.fa_width + self.heads
         if fused.shape[-1] < logical_width:
             raise ValueError(
@@ -126,45 +133,49 @@ class KdaAttention(nn.Module):
         qkv, gate, fa, beta = fused.split(
             [3 * self.width, self.width, self.fa_width, self.heads], dim=-1
         )
-        forget = self._project_forget(fa)
+        with profile_scope("RTP::attention.kda.forget_proj"):
+            forget = self._project_forget(fa)
         kernel = (
             self.prefill
             if attention_inputs.is_prefill and not metadata.is_target_verify
             else self.decode
         )
-        output = kernel(
-            qkv if kernel is self.prefill else qkv.contiguous(),
-            forget,
-            beta,
-            attention_inputs,
-            cache,
-            metadata,
-        )
+        with profile_scope("RTP::attention.kda.core"):
+            output = kernel(
+                qkv if kernel is self.prefill else qkv.contiguous(),
+                forget,
+                beta,
+                attention_inputs,
+                cache,
+                metadata,
+            )
         valid_mask = attention_inputs.valid_token_mask
         if valid_mask is not None:
             # Paged KDA skips null-block rows, leaving their output unspecified.
             output = torch.where(valid_mask[:, None], output.reshape(-1, self.width), 0)
-        if self._fp8_output_norm:
-            from rtp_llm.models_py.triton_kernels.common.activation import (
-                rmsnorm_sigmoid_gate_per_token_group_quant_fp8,
-            )
-
-            values, scales = rmsnorm_sigmoid_gate_per_token_group_quant_fp8(
-                output.reshape(-1, self.heads, self.dim),
-                gate.reshape(-1, self.heads, self.dim),
-                self.norm.weight,
-                self.norm.eps,
-            )
-        else:
-            output = self.norm(
-                output.reshape(-1, self.heads, self.dim),
-                gate.reshape(-1, self.heads, self.dim),
-            )
-        if layout is not None:
+        with profile_scope("RTP::attention.kda.output_norm_quant"):
             if self._fp8_output_norm:
-                values, scales = layout.scatter_rankmajor(values, scales)
+                from rtp_llm.models_py.triton_kernels.common.activation import (
+                    rmsnorm_sigmoid_gate_per_token_group_quant_fp8,
+                )
+
+                values, scales = rmsnorm_sigmoid_gate_per_token_group_quant_fp8(
+                    output.reshape(-1, self.heads, self.dim),
+                    gate.reshape(-1, self.heads, self.dim),
+                    self.norm.weight,
+                    self.norm.eps,
+                )
             else:
-                output, _ = layout.scatter_rankmajor(output.reshape(-1, self.width))
+                output = self.norm(
+                    output.reshape(-1, self.heads, self.dim),
+                    gate.reshape(-1, self.heads, self.dim),
+                )
+        if layout is not None:
+            with profile_scope("RTP::attention.kda.natural_to_zigzag"):
+                if self._fp8_output_norm:
+                    values, scales = layout.scatter_rankmajor(values, scales)
+                else:
+                    output, _ = layout.scatter_rankmajor(output.reshape(-1, self.width))
         use_fused_rs = (
             self._fp8_collective is not None
             and self._fp8_collective.eligible_rs(
@@ -175,18 +186,22 @@ class KdaAttention(nn.Module):
             )
         )
         if use_fused_rs:
-            return self._fp8_collective.gemm_reduce_scatter(
-                values, scales, self.output
-            )
+            with profile_scope("RTP::attention.fp8_gemm_rs"):
+                return self._fp8_collective.gemm_reduce_scatter(
+                    values, scales, self.output
+                )
         if self._bf16_collective is not None and self._bf16_collective.eligible(
             output.numel() // self.width, attention_inputs, metadata, gathered=True,
         ):
-            return self._bf16_collective.gemm_reduce_scatter(
-                output.reshape(-1, self.width), self.output,
+            with profile_scope("RTP::attention.bf16_gemm_rs"):
+                return self._bf16_collective.gemm_reduce_scatter(
+                    output.reshape(-1, self.width), self.output,
+                )
+        with profile_scope("RTP::attention.kda.output_proj"):
+            output = (
+                self.output.forward_quantized(values, scales)
+                if self._fp8_output_norm
+                else self.output(output.reshape(-1, self.width))
             )
-        output = (
-            self.output.forward_quantized(values, scales)
-            if self._fp8_output_norm
-            else self.output(output.reshape(-1, self.width))
-        )
-        return reduce_scatter(output, Group.TP) if self.tp_size > 1 else output
+        with profile_scope("RTP::attention.output_reduce_scatter"):
+            return reduce_scatter(output, Group.TP) if self.tp_size > 1 else output

@@ -94,6 +94,78 @@ def select_experts(
         raise ValueError(f"Unsupported grouped topk: {use_grouped_topk}")
 
 
+class KimiK3FusedRouterTest(TestCase):
+    """Selection, ordering and empty rows across the Prefill dispatch boundary."""
+
+    def setUp(self):
+        if not torch.cuda.is_available():
+            raise SkipTest("CUDA is not available")
+        from rtp_llm.models_py.modules.base.cuda.select_topk import GroupTopK
+
+        self.op = GroupTopK()
+        torch.manual_seed(3101)
+
+    @staticmethod
+    def reference(logits, bias, renormalize):
+        valid = torch.isfinite(logits) & torch.isfinite(bias)[None, :]
+        activation = torch.where(valid, logits.sigmoid(), 0.0)
+        choice = torch.where(valid, activation + bias, -torch.inf)
+        choice = torch.where(choice == 0, 0.0, choice)
+        ids = torch.argsort(choice, dim=1, descending=True, stable=True)[:, :16]
+        values = activation.gather(1, ids)
+        if renormalize:
+            values = values / (values.sum(1, keepdim=True) + 1e-20)
+        return values * 2.5, ids
+
+    def call(self, logits, bias, renormalize, dtype):
+        values = torch.empty((logits.size(0), 16), device="cuda", dtype=torch.float32)
+        ids = torch.empty(values.shape, device="cuda", dtype=dtype)
+        self.op.forward_fused_sigmoid(values, ids, logits, bias, 16, renormalize, 2.5)
+        return values, ids
+
+    def check(self, logits, bias):
+        for renormalize, dtype in itertools.product((False, True), (torch.int32, torch.int64)):
+            actual, ids = self.call(logits, bias, renormalize, dtype)
+            expected, expected_ids = self.reference(logits, bias, renormalize)
+            torch.testing.assert_close(ids.long(), expected_ids, rtol=0, atol=0)
+            torch.testing.assert_close(actual, expected, rtol=2e-5, atol=2e-6)
+            self.assertTrue(bool(actual.isfinite().all()))
+
+    def test_prefill_shapes_and_threshold(self):
+        for rows in (1, 7, 256, 1023, 1024, 4096, 8192):
+            with self.subTest(rows=rows):
+                self.check(torch.randn(rows, 896, device="cuda"),
+                           torch.randn(896, device="cuda") * 0.01)
+
+    def test_ties_and_invalid_rows(self):
+        for rows in (7, 1024):
+            x = torch.zeros(rows, 896, device="cuda")
+            bias = torch.zeros(896, device="cuda")
+            self.check(x, bias)
+            x[0].fill_(torch.nan)
+            x[1, :8] = torch.inf
+            x[2].fill_(-1000)
+            x[3, ::2] = -0.0
+            bias[40:48] = torch.nan
+            self.check(x, bias)
+
+    def test_graph_replay_uses_updated_inputs(self):
+        x = torch.randn(1024, 896, device="cuda")
+        bias = torch.randn(896, device="cuda") * 0.01
+        self.call(x, bias, True, torch.int32)
+        torch.cuda.synchronize()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            values, ids = self.call(x, bias, True, torch.int32)
+        x.copy_(torch.randn_like(x))
+        x[0].fill_(torch.nan)
+        graph.replay()
+        torch.cuda.synchronize()
+        expected, expected_ids = self.reference(x, bias, True)
+        torch.testing.assert_close(ids.long(), expected_ids, rtol=0, atol=0)
+        torch.testing.assert_close(values, expected, rtol=2e-5, atol=2e-6)
+
+
 class MLATest(TestCase):
     SEQ_LEN = [7]
     NUM_EXPERT = [256]

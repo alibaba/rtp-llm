@@ -7,6 +7,10 @@ py_library(
         "grammar_smoke.py",
         "jit_smoke.py",
         "logprobs_smoke.py",
+        "mtp_contract.py",
+        "k31_full_smoke.py",
+        "audit_k31_full_smoke.py",
+        "smoke_request_identity.py",
         "request_smoke.py",
         "result_check.py",
         "server_launcher.py",
@@ -14,7 +18,7 @@ py_library(
     ],
     # Preserve the scripts' sibling imports as well as their package imports.
     imports = ["."],
-    deps = ["//rtp_llm:zstandard"],
+    deps = ["//rtp_llm:zstandard", "//rtp_llm:speculative_acceptance"],
 )
 
 py_library(
@@ -39,8 +43,12 @@ _OFFLINE_TESTS = [
     "test_remote_pd",
     "test_result_check",
     "test_server_launcher",
+    "test_server_launcher_k31",
     "test_text_smoke_capped",
     "test_text_smoke_mtp",
+    "test_mtp_contract",
+    "test_k31_full_smoke",
+    "test_audit_k31_full_smoke",
     "test_worker",
 ]
 

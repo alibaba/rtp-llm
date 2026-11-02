@@ -692,6 +692,62 @@ TEST_F(HybridPoolCoordinatorCacheManagerTest, LinearReplayReservesOnlyTheCurrent
     allocator->free(FreeInfo{resource, tokens});
 }
 
+TEST_F(HybridPoolCoordinatorCacheManagerTest, DecodeReplayPoolKeepsFullCohortAcrossPageBoundary) {
+    constexpr int kBatch = 32;
+    auto sizing = makeTinyMultiPoolHybridConfig();
+    ParallelismConfig parallelism;
+    parallelism.role_type = RoleType::DECODE;
+    RuntimeConfig runtime;
+    runtime.enable_linear_replay = true;
+    runtime.max_generate_batch_size = kBatch;
+    CacheConfigCreator::configureDecodeLinearPool(sizing, parallelism, runtime);
+
+    auto config = makeTinyMultiPoolHybridConfig(sizing.group("linear").policy.explicit_block_num, 256);
+    config.linear_step = 1;
+    config.linear_replay.group_ids = {static_cast<int>(config.topology().groupIdForTag("linear"))};
+    auto allocator = makeAllocator(config, RoleType::DECODE);
+    ASSERT_TRUE(allocator->init());
+    std::vector<BatchKVCacheResourcePtr> resources;
+    std::vector<CompleteTokenIdsPtr> tokens;
+    std::vector<BlockIndicesType> original;
+    for (int request = 0; request < kBatch; ++request) {
+        auto resource = makeBatchResource(1, config);
+        auto token_ids = makeCompleteTokenIds(1, 8, 4);
+        token_ids->setReserveStep(4);
+        MallocInfo info{resource, token_ids};
+        info.enable_cache_lookup = false;
+        // Two completed states remain live until the preceding GPU round
+        // retires. No cross-request prefix sharing can hide their cost.
+        info.reuse_cache = true;
+        info.enable_remove_skipped_blocks = false;
+        ASSERT_TRUE(allocator->malloc(info).success) << "initial request=" << request;
+        ASSERT_EQ(validBlockCount(resource->blocks(0, "linear")), 2u);
+        original.push_back(resource->blocks(0, "linear"));
+        resources.push_back(std::move(resource));
+        tokens.push_back(std::move(token_ids));
+    }
+    for (int request = 0; request < kBatch; ++request) {
+        tokens[request]->setSeqLength(9);
+        MallocInfo info{resources[request], tokens[request]};
+        info.enable_cache_lookup = false;
+        info.reuse_cache = false;
+        info.preserve_inflight = true;
+        // Allocate the next page before any request's previous consumers
+        // finish. A two-block-per-stream pool fails partway through this wave.
+        ASSERT_TRUE(allocator->malloc(info).success) << "boundary request=" << request;
+        const auto& blocks = resources[request]->blocks(0, "linear");
+        ASSERT_EQ(validBlockCount(blocks), 3u);
+        EXPECT_EQ(blocks[0], original[request][0]);
+        EXPECT_EQ(blocks[1], original[request][1]);
+    }
+    for (int request = 0; request < kBatch; ++request) {
+        allocator->free(FreeInfo{resources[request], tokens[request]});
+    }
+    for (const auto& pool : allocator->groupBlockPools()) {
+        EXPECT_EQ(pool->freeBlocksNum(), pool->totalBlocksNum());
+    }
+}
+
 TEST_F(HybridPoolCoordinatorCacheManagerTest, OrdinaryLinearGroupKeepsSpeculativeReserveBlocks) {
     auto config = makeTinyMultiPoolHybridConfig(/*linear_block_num=*/6, /*full_block_num=*/8);
     auto allocator = makeAllocator(config, RoleType::DECODE);

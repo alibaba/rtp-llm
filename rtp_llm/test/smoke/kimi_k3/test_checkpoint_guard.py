@@ -17,7 +17,9 @@ from rtp_llm.test.smoke.kimi_k3 import server_launcher as launch
 
 class CheckpointGuardTest(unittest.TestCase):
     def setUp(self):
-        self.temporary = tempfile.TemporaryDirectory()
+        # Keep the negative local-storage fixture outside /data*, even when
+        # the task's TMPDIR points at an approved data disk.
+        self.temporary = tempfile.TemporaryDirectory(dir="/tmp")
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)
         self.checkpoint = self.root / "checkpoint"

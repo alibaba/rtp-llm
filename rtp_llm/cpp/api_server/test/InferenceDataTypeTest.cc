@@ -126,6 +126,7 @@ TEST(InferenceDataTypeTest, AuxInfoAdapter) {
     aux_info.disk_reuse_len                       = 128;
     aux_info.prefill_disk_reuse_len               = 256;
     aux_info.decode_disk_reuse_len                = 64;
+    aux_info.speculative_metrics = {{"accepted_draft_tokens", 6}, {"verified_candidates", 12}};
     aux_info.speculative_draft_rounds             = 4;
     aux_info.speculative_accepted_tokens_per_pos  = {3, 2, 1};
     aux_info.generation_prefill_cuda_graph_status = "attention_backend_unsupported";
@@ -142,6 +143,8 @@ TEST(InferenceDataTypeTest, AuxInfoAdapter) {
     ASSERT_TRUE(jsonStr.find(R"("prefill_disk_reuse_len":256)") != std::string::npos);
     ASSERT_TRUE(jsonStr.find(R"("decode_disk_reuse_len":64)") != std::string::npos);
     ASSERT_TRUE(jsonStr.find(R"("beam_responses":[])") != std::string::npos);
+    ASSERT_TRUE(jsonStr.find(R"("accepted_draft_tokens":6)") != std::string::npos);
+    ASSERT_TRUE(jsonStr.find(R"("verified_candidates":12)") != std::string::npos);
     ASSERT_TRUE(jsonStr.find(R"("speculative_draft_rounds":4)") != std::string::npos);
     ASSERT_TRUE(jsonStr.find(R"("speculative_accepted_tokens_per_pos":[3,2,1])") != std::string::npos);
     ASSERT_TRUE(jsonStr.find(R"("generation_prefill_cuda_graph_status":"attention_backend_unsupported")")

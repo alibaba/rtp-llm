@@ -43,6 +43,41 @@
 
 namespace rtp_llm {
 
+void MtpExecutor::recordSmokeForward(const char* event, const GptModelInputs& inputs,
+                                     const StreamGroups* streams, bool prefill) {
+    static const bool enabled = [] {
+        const char* value = std::getenv("KIMI_K3_SMOKE_EVIDENCE");
+        return value != nullptr && std::strcmp(value, "1") == 0;
+    }();
+    if (!enabled || warm_up_) return;
+    ++smoke_forward_step_;
+    const bool authoritative = tp_rank_ == 0;
+    const bool real_streams = authoritative && !inputs.is_fake_stream && streams != nullptr;
+    std::string ids, lengths, prefixes;
+    int64_t logical_batch = authoritative ? 0 : -1;
+    if (real_streams) {
+        const auto& requests = prefill ? streams->contextStreams() : streams->decodeStreams();
+        logical_batch = prefill ? streams->totalContextBatchSize() : streams->totalDecodeBatchSize();
+        for (const auto& stream : requests) {
+            if (!ids.empty()) { ids += ','; lengths += ','; prefixes += ','; }
+            ids += std::to_string(stream->streamId());
+            lengths += std::to_string(stream->contextLength());
+            prefixes += std::to_string(stream->reuseLength());
+        }
+    }
+    RTP_LLM_LOG_INFO(
+        "[K3_SMOKE_EVENT] {\"event\":\"%s\",\"execution_step\":%ld,"
+        "\"world_rank\":%ld,\"dp_rank\":%ld,\"tp_rank\":%d,"
+        "\"logical_authoritative\":%s,\"logical_batch\":%ld,\"request_ids\":[%s],"
+        "\"context_lengths\":[%s],\"reuse_lengths\":[%s],\"input_rows\":%ld,\"token_rows\":%ld,"
+        "\"fake\":%s,\"time_ns\":%ld}",
+        event, static_cast<long>(smoke_forward_step_), static_cast<long>(parallelism_config_.world_rank),
+        static_cast<long>(parallelism_config_.dp_rank), tp_rank_, authoritative ? "true" : "false",
+        static_cast<long>(logical_batch), ids.c_str(), lengths.c_str(), prefixes.c_str(),
+        inputs.input_lengths.numel(), inputs.combo_tokens.numel(), inputs.is_fake_stream ? "true" : "false",
+        static_cast<long>(autil::TimeUtility::currentTimeInMicroSeconds() * 1000));
+}
+
 bool MtpExecutor::dsparkPrefillCPRoleIsValid(const PrefillCPConfig& prefill_cp_config, RoleType role_type) {
     return !prefill_cp_config.is_enabled() || role_type == RoleType::PREFILL;
 }
@@ -1247,6 +1282,7 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
         RTP_LLM_PROFILE_SCOPE("executor.mtp.prefill_step(target_model_forward)");
         maybePrintModelInput(model_input, "prefill target model");
         int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
+        recordSmokeForward("mtp_target_prefill_forward", model_input, &stream_groups, true);
         model_output          = std::move(forwardModel(model_.get(), model_input, ModelInputsModelRole::TARGET));
         maybeOverrideLastHiddenWithMtpBuffer(model_output, *model_, cp_enabled ? -1 : model_input.combo_tokens.numel());
         model_forward_us += autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
@@ -2214,6 +2250,7 @@ GptModelOutputs MtpExecutor::runTargetVerifyForward(GptModelInputs& model_input,
     RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(target_model_verify)");
     maybePrintModelInput(model_input, "decode target model");
     model_input.is_target_verify = true;
+    recordSmokeForward("mtp_target_verify_forward", model_input, &stream_groups);
     RTP_LLM_LOG_DEBUG(
         "[MTP decode] target model verify forward start, input_lengths_size=%ld, prefix_lengths_size=%ld, seq_lengths_size=%ld",
         model_input.input_lengths.size(0),
@@ -2498,6 +2535,7 @@ GptModelOutputs MtpExecutor::runDraftPrefillForward(GptModelInputs& model_input)
     // Use sp_prefill_draft_model_ if CUDA graph is enabled, otherwise use draft_model_.
     auto* draft_prefill_model = sp_prefill_draft_model_ ? sp_prefill_draft_model_.get() : draft_model_.get();
     RTP_LLM_CHECK_WITH_INFO(draft_prefill_model != nullptr, "commit model is null before forward");
+    recordSmokeForward("mtp_draft_update_forward", model_input, nullptr);
     auto draft_prefill_model_output = draft_prefill_model->forward(model_input);
     // Ordinary MTP chains this output into the next autoregressive draft step.
     maybeOverrideLastHiddenWithMtpBuffer(draft_prefill_model_output, *draft_prefill_model);
@@ -2846,6 +2884,7 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
             "[MTP draftDecode] loop step %zu/%zu start, batch_size %zu", i, propose_step_ - 1, batch_size);
         ensureModelInputsOnCuda(model_input, "draft_decode.loop_forward");
         int64_t start_time_us     = autil::TimeUtility::currentTimeInMicroSeconds();
+        recordSmokeForward("mtp_draft_decode_forward", model_input, &stream_groups);
         draft_decode_model_output = forwardModel(draft_model_.get(), model_input, ModelInputsModelRole::DRAFT);
         model_forward_us += autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
         maybeOverrideLastHiddenWithMtpBuffer(draft_decode_model_output, *draft_model_);

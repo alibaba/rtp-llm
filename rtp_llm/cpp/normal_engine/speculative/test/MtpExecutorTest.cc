@@ -1785,6 +1785,16 @@ void MtpExecutorTest::runSingleBatchPrefillScenario(bool simulate_cp_mutation, b
     if (simulate_cp_mutation) {
         components.executor->parallelism_config_.prefill_cp_config.method = CPRotateMethod::ALL_GATHER;
     }
+    std::vector<std::string> profile_events;
+    components.executor->profile_step_start_ = [&]() { profile_events.push_back("start"); };
+    components.executor->profile_step_finish_ = [&]() { profile_events.push_back("finish"); };
+    // The TP-synchronized empty polls before admission must preserve a future
+    // timeline window rather than consume its requested step count.
+    ASSERT_TRUE(components.executor->process({}).ok());
+    ASSERT_TRUE(profile_events.empty());
+    components.executor->startProfileStep(/*is_fake_stream=*/true);
+    ASSERT_TRUE(profile_events.empty());
+    ASSERT_FALSE(components.executor->profile_step_started_);
 
     size_t batch_size = 1;
 
@@ -1882,6 +1892,8 @@ void MtpExecutorTest::runSingleBatchPrefillScenario(bool simulate_cp_mutation, b
     if (simulate_cp_mutation) {
         EXPECT_FALSE(stream1->hasError());
     }
+    EXPECT_EQ(profile_events, (std::vector<std::string>{"start", "finish"}));
+    EXPECT_FALSE(components.executor->profile_step_started_);
 
     // check stream result
     checkOutput(stream1, {0, 1, 2, 3, 1}, {1, 2}, {0.0, 0.0, 1.0, 0.0}, {0.17, 0.18});

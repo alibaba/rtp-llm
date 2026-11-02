@@ -1,4 +1,6 @@
 #include "rtp_llm/cpp/api_server/ChatService.h"
+#include <chrono>
+#include <cstdlib>
 
 #include "rtp_llm/cpp/api_server/http_server/http_server/HttpResponseWriter.h"
 #include "rtp_llm/cpp/api_server/http_server/http_server/HttpRequest.h"
@@ -199,6 +201,17 @@ void ChatService::chatCompletions(const std::unique_ptr<http_server::HttpRespons
     auto       chat_render    = openai_endpoint_->getChatRender();
     const auto rendered_input = chat_render->render_chat_request(body);
 
+    const char* smoke_evidence = std::getenv("KIMI_K3_SMOKE_EVIDENCE");
+    if (smoke_evidence != nullptr && std::string(smoke_evidence) == "1"
+        && chat_request.user.has_value() && chat_request.user->rfind("k31-smoke:", 0) == 0) {
+        const auto case_json = ToJsonString(chat_request.user->substr(10), true);
+        const auto time_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count();
+        RTP_LLM_LOG_INFO("[K3_SMOKE_EVENT] {\"event\":\"frontend_request\",\"request_id\":%ld,"
+                         "\"case\":%s,\"input_tokens\":%zu,\"time_ns\":%ld}",
+                         static_cast<long>(request_id), case_json.c_str(), rendered_input.input_ids.size(),
+                         static_cast<long>(time_ns));
+    }
     auto input  = fillGenerateInput(request_id, chat_request, rendered_input);
     auto stream = engine_->enqueue(input);
 

@@ -236,6 +236,48 @@ TEST_F(KVCacheManagerCPSlotMapperTest, DecodeTpReplicatesFullPagesWhilePrefillCp
     }
 }
 
+// DCP uses the target TP group for its compact table, independently of the
+// source Prefill group. Regression for a global table consumed as owner-local:
+// logical pages 1 and 2 would otherwise both resolve to table column zero.
+TEST_F(KVCacheManagerCPSlotMapperTest, DecodePageRRAllocatesCompactOwnerTables) {
+    constexpr int page = 1024;
+    for (const int target_tp : {4, 8}) {
+        for (const int rank : {0, target_tp - 1}) {
+            ParallelismConfig par;
+            par.role_type = RoleType::DECODE;
+            par.tp_size = target_tp;
+            par.tp_rank = rank;
+            par.prefill_cp_config.method = CPRotateMethod::PREFILL_CP;
+            par.prefill_cp_config.kv_cache_sharded = true;
+            par.prefill_cp_config.prefill_cp_size = 8;
+            par.prefill_cp_config.decode_kv_cache_sharded = true;
+            PDSepConfig pd;
+            pd.role_type = RoleType::DECODE;
+            auto config = makeTestConfig(20, page);
+            auto manager = std::make_shared<KVCacheManager>(
+                config, false, nullptr, KVCacheConfig{}, par, RuntimeConfig{}, SpeculativeExecutionConfig{}, pd);
+            ASSERT_TRUE(manager->init());
+            auto mapper = manager->cpSlotMapper();
+            ASSERT_NE(mapper, nullptr);
+            EXPECT_EQ(mapper->cpSize(), target_tp);
+            EXPECT_EQ(mapper->cpRank(), rank);
+            EXPECT_FALSE(par.prefill_cp_config.is_enabled());
+            EXPECT_EQ(par.get_attn_tp_size(), target_tp);
+            for (const int length : {1023, 1024, 1025, 2047, 2048, 2049,
+                                     2776, 2777, 2778, 8191, 8192, 8193}) {
+                SCOPED_TRACE(::testing::Message() << "tp=" << target_tp << " rank=" << rank << " len=" << length);
+                auto resource = makeResource(1, config);
+                auto tokens = makeTokenIds(1, length, page);
+                ASSERT_TRUE(manager->malloc(MallocInfo{resource, tokens}).success);
+                const size_t local_pages = (length + page * target_tp - 1) / (page * target_tp);
+                EXPECT_EQ(resource->blocksNum(0, "default"), local_pages);
+                EXPECT_EQ(resource->kernelBlocks(0, "default").size(), local_pages);
+                manager->free(FreeInfo{resource, tokens});
+            }
+        }
+    }
+}
+
 // When kv_cache_sharded is false (default), cpSlotMapper() should return nullptr.
 TEST_F(KVCacheManagerCPSlotMapperTest, NoCPSharding_ReturnsNullMapper) {
     auto              config = makeTestConfig();

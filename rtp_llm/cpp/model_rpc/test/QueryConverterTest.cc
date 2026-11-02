@@ -465,6 +465,7 @@ TEST_F(QueryConverterTest, testTransOutput) {
     res.aux_info.iter_count                           = 9;
     res.aux_info.input_len                            = 8;
     res.aux_info.output_len                           = 7;
+    res.aux_info.speculative_metrics = {{"accepted_draft_tokens", 6}, {"verified_candidates", 12}};
     res.aux_info.speculative_draft_rounds             = 4;
     res.aux_info.speculative_accepted_tokens_per_pos  = {3, 2, 1};
     res.aux_info.generation_prefill_cuda_graph_status = "replayed";
@@ -485,6 +486,8 @@ TEST_F(QueryConverterTest, testTransOutput) {
     EXPECT_EQ(aux_info_pb.iter_count(), 9);
     EXPECT_EQ(aux_info_pb.input_len(), 8);
     EXPECT_EQ(aux_info_pb.output_len(), 7);
+    EXPECT_EQ(aux_info_pb.speculative_metrics().at("accepted_draft_tokens"), 6);
+    EXPECT_EQ(aux_info_pb.speculative_metrics().at("verified_candidates"), 12);
     EXPECT_EQ(aux_info_pb.speculative_draft_rounds(), 4);
     EXPECT_EQ(aux_info_pb.speculative_accepted_tokens_per_pos_size(), 3);
     EXPECT_EQ(aux_info_pb.speculative_accepted_tokens_per_pos(0), 3);

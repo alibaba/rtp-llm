@@ -28,6 +28,7 @@ from rtp_llm.models_py.modules.factory.linear.impl.cuda.f16_linear import (
     linear_add_inplace,
 )
 from rtp_llm.models_py.triton_kernels.moe.activation import situ_and_mul
+from rtp_llm.models_py.utils.module_profiler import profile_scope
 
 
 _FUSED_SHARED_BUFFERS = {}
@@ -411,6 +412,11 @@ class KimiK3LatentMoE(nn.Module):
             if runtime.latent_moe_use_norm else None
         )
         cfg.moe_strategy = "mega_moe"
+        if parallelism.role_type == RoleType.PREFILL:
+            from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.prefill_backend import (
+                get_prefill_situ_backend,
+            )
+            cfg.mega_moe_backend = get_prefill_situ_backend()
         cfg.max_tokens_per_rank = max(int(moe_capacity), 1)
         cfg.moe_quant_method = "FP8_FP4"
         cfg.dim = cfg.hidden_size = runtime.routed_expert_hidden_size
@@ -457,37 +463,47 @@ class KimiK3LatentMoE(nn.Module):
         )
 
     def _fused_expert_step(self, hidden, routed_input, routing, ids, valid_mask):
-        return self.experts(hidden, routed_input, routing, ids, valid_mask)
+        with profile_scope("RTP::moe.fused_routed_shared_experts"):
+            return self.experts(hidden, routed_input, routing, ids, valid_mask)
 
     def _separate_expert_step(self, hidden, routed_input, routing, ids, valid_mask):
-        routed = self.experts(routed_input, routing, ids, activation="situ")
-        gate_up_weight = self.shared_gate_up
-        if self.shared_expert_weight_shard:
-            gate_up_weight = all_gather(gate_up_weight.contiguous(), group=Group.TP)
-        gate_up = F.linear(hidden, gate_up_weight)
-        if self.shared_expert_weight_shard:
-            del gate_up_weight
-        gate, up = gate_up.chunk(2, dim=-1)
-        shared_input = situ_and_mul(gate, up, self.beta, self.linear_beta)
+        with profile_scope("RTP::moe.routed_experts"):
+            routed = self.experts(routed_input, routing, ids, activation="situ")
+        with profile_scope("RTP::moe.shared_gate_up_proj"):
+            gate_up_weight = self.shared_gate_up
+            if self.shared_expert_weight_shard:
+                with profile_scope("RTP::moe.shared_gate_up_weight_all_gather"):
+                    gate_up_weight = all_gather(gate_up_weight.contiguous(), group=Group.TP)
+            gate_up = F.linear(hidden, gate_up_weight)
+            if self.shared_expert_weight_shard:
+                del gate_up_weight
+        with profile_scope("RTP::moe.shared_activation"):
+            gate, up = gate_up.chunk(2, dim=-1)
+            shared_input = situ_and_mul(gate, up, self.beta, self.linear_beta)
         del gate, up, gate_up
-        if self.shared_expert_weight_shard:
-            down_weight = all_gather(self.shared_down_weight.contiguous(), group=Group.TP)
-            shared = torch.matmul(shared_input, down_weight)
-            del down_weight
-        else:
-            shared = self.shared_down(shared_input)
+        with profile_scope("RTP::moe.shared_down_proj"):
+            if self.shared_expert_weight_shard:
+                with profile_scope("RTP::moe.shared_down_weight_all_gather"):
+                    down_weight = all_gather(self.shared_down_weight.contiguous(), group=Group.TP)
+                shared = torch.matmul(shared_input, down_weight)
+                del down_weight
+            else:
+                shared = self.shared_down(shared_input)
         del shared_input
         return routed, shared
 
     def forward(self, hidden, valid_mask=None, residual=None):
-        routing, ids = self.router(hidden)
+        with profile_scope("RTP::moe.router"):
+            routing, ids = self.router(hidden)
         routing, ids = self.mask_routes(routing, ids, valid_mask)
-        routed_input = self.down(hidden)
+        with profile_scope("RTP::moe.routed_down_proj"):
+            routed_input = self.down(hidden)
         routed, shared = self.expert_step(
             hidden, routed_input, routing, ids, valid_mask
         )
         if self.norm is not None:
-            routed = self.norm(routed.contiguous())
+            with profile_scope("RTP::moe.routed_norm"):
+                routed = self.norm(routed.contiguous())
         bf16_up = (
             isinstance(self.up, CudaF16Linear)
             and self.up.weight.is_cuda
@@ -498,21 +514,23 @@ class KimiK3LatentMoE(nn.Module):
                 raise ValueError("MoE residual fusion requires the BF16 Decode shared expert")
             from rtp_llm.models_py.triton_kernels.moe.output_add import add_moe_output
 
+            with profile_scope("RTP::moe.routed_up_proj_add_shared"):
+                routed_up = self.up(routed)
+                return add_moe_output(routed_up, shared, residual)
+        with profile_scope("RTP::moe.routed_up_proj_add_shared"):
+            if bf16_up:
+                # Match native K3: combine the routed projection and shared
+                # output in a single addmm GEMM call.
+                if (
+                    routed.is_cuda
+                    and routed.ndim == 2
+                    and routed.shape[0] >= 4096
+                    and routed.dtype == self.up.weight.dtype == shared.dtype == torch.bfloat16
+                    and shared.is_contiguous()
+                    and self.up.bias is None
+                    and not torch.cuda.is_current_stream_capturing()
+                ):
+                    return linear_add_inplace(routed, self.up.weight, shared)
+                return self.up(routed, residual=shared)
             routed_up = self.up(routed)
-            return add_moe_output(routed_up, shared, residual)
-        if bf16_up:
-            # Match native K3: combine the routed projection and shared
-            # output in a single addmm GEMM call.
-            if (
-                routed.is_cuda
-                and routed.ndim == 2
-                and routed.shape[0] >= 4096
-                and routed.dtype == self.up.weight.dtype == shared.dtype == torch.bfloat16
-                and shared.is_contiguous()
-                and self.up.bias is None
-                and not torch.cuda.is_current_stream_capturing()
-            ):
-                return linear_add_inplace(routed, self.up.weight, shared)
-            return self.up(routed, residual=shared)
-        routed_up = self.up(routed)
-        return routed_up + shared
+            return routed_up + shared

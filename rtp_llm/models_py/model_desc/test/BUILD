@@ -183,3 +183,14 @@ py_test(
     exec_properties = {"gpu": "L20_CU13", "gpu_count": "1"},
     tags = ["L20_CU13"],
 )
+
+# K3.1 CP handoff uses the shared K3 modeling without a full checkpoint.
+[
+    py_test(
+        name = name,
+        srcs = [name + ".py"],
+        deps = py_test_deps + ["//rtp_llm:models", "//rtp_llm/models_py:models"],
+        env = {"GPU_COUNT": "0"},
+    )
+    for name in ["kimi_k3_mtp_cp_hidden_test", "kimi_k31_cache_routing_test"]
+]

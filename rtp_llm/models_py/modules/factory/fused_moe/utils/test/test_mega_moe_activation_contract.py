@@ -112,6 +112,22 @@ class MegaMoeActivationContractTest(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "matching MegaMoE situ"):
                 ACTIVATION.mega_moe_functions("situ")
 
+    def test_explicit_backend_keeps_one_complete_situ_abi(self):
+        functions = (lambda: None, lambda: None, lambda: None)
+        backend = SimpleNamespace(
+            fp8_fp4_mega_moe_k3=functions[0],
+            transform_weights_for_mega_moe_k3=functions[1],
+            get_symm_buffer_for_mega_moe_k3=functions[2],
+        )
+        # The installed module must not supply part of an explicit backend's ABI.
+        with patch.dict(sys.modules, {"deep_gemm": SimpleNamespace()}):
+            self.assertEqual(
+                ACTIVATION.mega_moe_functions("situ", backend=backend), functions
+            )
+        del backend.get_symm_buffer_for_mega_moe_k3
+        with self.assertRaisesRegex(RuntimeError, "matching MegaMoE situ"):
+            ACTIVATION.mega_moe_functions("situ", backend=backend)
+
     def test_independent_scales_match_an_analytic_result(self):
         def kernel(gate, up, *, activation_beta, activation_linear_beta):
             gate = (

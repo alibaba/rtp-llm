@@ -32,6 +32,9 @@
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
 #include "rtp_llm/cpp/model_rpc/BroadcastManager.h"
 #include "rtp_llm/cpp/utils/Logger.h"
+#if USING_CUDA
+#include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
+#endif
 
 namespace rtp_llm {
 
@@ -892,6 +895,147 @@ TEST_F(KVCacheManagerTest, AllocationWaitObservesReleaseGeneration) {
     EXPECT_EQ(waiter.wait_for(std::chrono::milliseconds(100)), std::future_status::ready);
     EXPECT_TRUE(waiter.get());
 }
+
+#if USING_CUDA
+namespace {
+// Keep the last-use event pending until the test releases it. All synchronization
+// here belongs to the fixture; production reclamation must only query events.
+struct DelayedReplayUse {
+    cuda_graph::GraphStream stream = cuda_graph::graphGetStreamFromPool(false);
+    std::shared_ptr<std::promise<void>> release = std::make_shared<std::promise<void>>();
+    std::shared_future<void> gate = release->get_future().share();
+    std::shared_ptr<torch::Event> event = std::make_shared<torch::Event>(cuda_graph::makeGraphEvent());
+    std::shared_ptr<void> cleanup = std::shared_ptr<void>(nullptr, [done = release, work = stream](void*) {
+        done->set_value();
+        work.synchronize();
+    });
+
+    DelayedReplayUse() {
+        // Finish first-use event initialization before blocking a CUDA stream.
+        event->record(stream);
+        event->synchronize();
+        const auto result = cudaLaunchHostFunc(
+            stream.stream(),
+            [](void* value) {
+                static_cast<std::shared_future<void>*>(value)->wait_for(std::chrono::seconds(10));
+            },
+            &gate);
+        RTP_LLM_CHECK_WITH_INFO(result == cudaSuccess, "could not enqueue replay test gate: %d", result);
+        event->record(stream);
+    }
+
+    void complete() {
+        cleanup.reset();
+    }
+};
+}  // namespace
+
+TEST_F(KVCacheManagerTest, AdmissionReclaimsCompletedLinearReplayRetirements) {
+    auto manager = std::make_shared<KVCacheManager>(makeLinearReplayLifetimeConfig(2));
+    ASSERT_TRUE(manager->init());
+    auto pool = manager->coordinator_manager_->groupBlockPools().front();
+    auto block = pool->malloc();
+    ASSERT_TRUE(block.has_value());
+    pool->incRef(*block);
+    auto previous = std::make_shared<BatchKVCacheResource>();
+    previous->resetBatchSize(1);
+    previous->initGroups(manager->cacheConfig().topologyPtr());
+    previous->setBatchBlocks(0, "linear", {*block});
+    auto hold = manager->holdLinearReplayBlocks(previous);
+    DelayedReplayUse use;
+    ASSERT_FALSE(use.event->query());
+    hold->recordLastUse(use.event);
+    pool->decRef(*block);
+    previous->clearBlocks();
+    hold.reset();
+    ASSERT_EQ(pool->freeBlocksNum(), 0u);
+    // Admission and status polling must leave an in-flight last use retained.
+    auto pending = std::make_shared<BatchKVCacheResource>();
+    pending->resetBatchSize(1);
+    pending->initGroups(manager->cacheConfig().topologyPtr());
+    auto tokens = makeDSV4CompleteTokenIds(1, 4, 4);
+    MallocInfo pending_info{pending, tokens};
+    pending_info.reuse_cache = false;
+    pending_info.enable_cache_lookup = false;
+    EXPECT_FALSE(manager->malloc(pending_info).success);
+    EXPECT_EQ(manager->getKVCacheInfo(-1, false).available_kv_cache, 0u);
+    EXPECT_FALSE(manager->waitForAllocationChange(manager->allocationGeneration(), 1));
+    ASSERT_EQ(pool->freeBlocksNum(), 0u);
+    use.complete();
+    // Completed events do not release references without a reaper. Admission
+    // must reach that reaper before it attempts its first destination block.
+    ASSERT_TRUE(use.event->query());
+    ASSERT_EQ(pool->freeBlocksNum(), 0u);
+    auto next = std::make_shared<BatchKVCacheResource>();
+    next->resetBatchSize(1);
+    next->initGroups(manager->cacheConfig().topologyPtr());
+    MallocInfo info{next, tokens};
+    info.reuse_cache = false;
+    info.enable_cache_lookup = false;
+    const auto result = manager->malloc(info);
+    EXPECT_TRUE(result.success);
+    if (result.success) {
+        manager->free(FreeInfo{next, tokens});
+    }
+}
+
+TEST_F(KVCacheManagerTest, AdmissionWaitReapsReplayEventsWithoutAnotherForward) {
+    auto manager = std::make_shared<KVCacheManager>(makeLinearReplayLifetimeConfig(2));
+    ASSERT_TRUE(manager->init());
+    auto pool = manager->coordinator_manager_->groupBlockPools().front();
+    auto block = pool->malloc();
+    ASSERT_TRUE(block.has_value());
+    pool->incRef(*block);
+    auto previous = std::make_shared<BatchKVCacheResource>();
+    previous->resetBatchSize(1);
+    previous->initGroups(manager->cacheConfig().topologyPtr());
+    previous->setBatchBlocks(0, "linear", {*block});
+    auto hold = manager->holdLinearReplayBlocks(previous);
+    DelayedReplayUse use;
+    ASSERT_FALSE(use.event->query());
+    hold->recordLastUse(use.event);
+    pool->decRef(*block);
+    previous->clearBlocks();
+    hold.reset();
+    const auto generation = manager->allocationGeneration();
+    std::promise<void> entered;
+    auto ready = entered.get_future();
+    auto waiter = std::async(std::launch::async, [&] {
+        entered.set_value();
+        return manager->waitForAllocationChange(generation, 100);
+    });
+    ready.get();
+    EXPECT_EQ(waiter.wait_for(std::chrono::milliseconds(10)), std::future_status::timeout);
+    use.complete();
+    ASSERT_EQ(waiter.wait_for(std::chrono::seconds(1)), std::future_status::ready);
+    EXPECT_TRUE(waiter.get());
+    EXPECT_EQ(pool->freeBlocksNum(), 1u);
+}
+
+TEST_F(KVCacheManagerTest, CapacityPollingReclaimsCompletedLinearReplayRetirements) {
+    auto manager = std::make_shared<KVCacheManager>(makeLinearReplayLifetimeConfig(2));
+    ASSERT_TRUE(manager->init());
+    auto pool = manager->coordinator_manager_->groupBlockPools().front();
+    auto block = pool->malloc();
+    ASSERT_TRUE(block.has_value());
+    pool->incRef(*block);
+    auto previous = std::make_shared<BatchKVCacheResource>();
+    previous->resetBatchSize(1);
+    previous->initGroups(manager->cacheConfig().topologyPtr());
+    previous->setBatchBlocks(0, "linear", {*block});
+    auto hold = manager->holdLinearReplayBlocks(previous);
+    DelayedReplayUse use;
+    hold->recordLastUse(use.event);
+    pool->decRef(*block);
+    previous->clearBlocks();
+    hold.reset();
+    EXPECT_EQ(manager->getKVCacheInfo(-1, false).available_kv_cache, 0u);
+    ASSERT_EQ(pool->freeBlocksNum(), 0u);
+    use.complete();
+    EXPECT_EQ(manager->getKVCacheInfo(-1, false).available_kv_cache, 4u);
+    EXPECT_EQ(pool->freeBlocksNum(), 1u);
+}
+#endif
 
 TEST_F(KVCacheManagerTest, ConnectorReferenceReleaseWakesAllocationWaiter) {
     auto cache_config = makeSimpleMhaCacheConfig(

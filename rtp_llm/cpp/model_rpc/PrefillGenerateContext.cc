@@ -1,5 +1,7 @@
 #include "rtp_llm/cpp/model_rpc/PrefillGenerateContext.h"
 #include "rtp_llm/cpp/model_rpc/RpcErrorCode.h"
+#include <chrono>
+#include <cstdlib>
 
 using grpc::Status;
 using grpc::ClientContext;
@@ -217,6 +219,28 @@ PriorityPreemptionRequestResult PrefillGenerateContext::requestPriorityPreempt()
                 meta->markPriorityPreemptionCanceling(task_identity_);
             }
             result = PriorityPreemptionRequestResult::INSTALLED;
+        }
+    }
+    // Cancel is acknowledged when the priority latch is installed. Finalization
+    // first joins the downstream RPC and may observe an already-settled Host
+    // load, so its later scheduler transition cannot date the original Cancel.
+    // This opt-in snapshot changes neither cancellation nor load completion.
+    const auto* smoke_evidence = std::getenv("KIMI_K3_SMOKE_EVIDENCE");
+    if (result == PriorityPreemptionRequestResult::INSTALLED
+        && smoke_evidence != nullptr && std::string(smoke_evidence) == "1") {
+        std::lock_guard<std::mutex> lock(priority_finalize_mu_);
+        if (stream_) {
+            // Timestamp before observing pending=true: completion can race
+            // after that observation without invalidating the recorded order.
+            const auto time_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::system_clock::now().time_since_epoch()).count();
+            const auto pending = stream_->smokePendingHostReuseTokens();
+            if (pending > 0) {
+                RTP_LLM_LOG_INFO(
+                    "[K3_SMOKE_EVENT] {\"event\":\"host_cache_priority_cancel_requested_while_pending\","
+                    "\"request_id\":%ld,\"host_reuse_len\":%zu,\"time_ns\":%ld}",
+                    static_cast<long>(request_id), pending, static_cast<long>(time_ns));
+            }
         }
     }
     // seq_cst pairs with remoteAllocateResource's seq_cst publication/check:

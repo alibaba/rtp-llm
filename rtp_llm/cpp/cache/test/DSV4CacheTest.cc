@@ -518,7 +518,7 @@ TEST(CacheConfigCreatorTest, DecodeLinearPoolUsesConcurrencyForEveryDeviceLinear
     runtime.enable_linear_replay    = true;
     runtime.max_generate_batch_size = 7;
     CacheConfigCreator::configureDecodeLinearPool(config, parallelism, runtime);
-    EXPECT_EQ(config.group("linear_a").policy.explicit_block_num, 22u);  // 2 * (7 + 4)
+    EXPECT_EQ(config.group("linear_a").policy.explicit_block_num, 33u);  // (2 retained + 1 new) * (7 + 4)
     EXPECT_TRUE(config.group("linear_a").policy.charge_to_paged_budget);
     EXPECT_EQ(config.group("linear_b").policy.explicit_block_num, 19u);
     EXPECT_EQ(config.group("full").policy.explicit_block_num, 0u);
@@ -526,7 +526,28 @@ TEST(CacheConfigCreatorTest, DecodeLinearPoolUsesConcurrencyForEveryDeviceLinear
     parallelism.role_type = RoleType::PREFILL;
     runtime.max_generate_batch_size = 15;
     CacheConfigCreator::configureDecodeLinearPool(config, parallelism, runtime);
-    EXPECT_EQ(config.group("linear_a").policy.explicit_block_num, 22u);
+    EXPECT_EQ(config.group("linear_a").policy.explicit_block_num, 33u);
+}
+
+TEST(CacheConfigCreatorTest, DecodeLinearPoolPreservesDeclaredTailsAndRejectsOverflow) {
+    auto linear = makeTestGroup(std::make_shared<LinearKVCacheSpec>("linear", 16, 16, 1),
+                                CacheGroupType::LINEAR,
+                                {0});
+    linear.policy.active_tail_blocks = 5;
+    CacheConfig config;
+    config.layer_num = 1;
+    config.setTopology({linear}, {{0, {"linear"}}});
+    ParallelismConfig parallelism;
+    parallelism.role_type = RoleType::DECODE;
+    RuntimeConfig runtime;
+    runtime.enable_linear_replay = true;
+    runtime.max_generate_batch_size = 7;
+    CacheConfigCreator::configureDecodeLinearPool(config, parallelism, runtime);
+    EXPECT_EQ(config.group("linear").policy.explicit_block_num, 66u);
+
+    linear.policy.active_tail_blocks = std::numeric_limits<uint32_t>::max();
+    config.setTopology({linear}, {{0, {"linear"}}});
+    EXPECT_ANY_THROW(CacheConfigCreator::configureDecodeLinearPool(config, parallelism, runtime));
 }
 
 TEST(CacheConfigCreatorTest, ReplaySelectsTargetLinearGroupsAndReservesLogMemory) {

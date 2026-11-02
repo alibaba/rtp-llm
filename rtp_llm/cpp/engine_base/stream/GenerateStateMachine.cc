@@ -3,6 +3,7 @@
 #include "rtp_llm/cpp/engine_base/stream/StreamCacheResource.h"
 #include "rtp_llm/cpp/config/RoleTypes.h"
 #include <cstdlib>
+#include <chrono>
 #include <string>
 
 using namespace std;
@@ -15,6 +16,20 @@ bool asyncDebugEnabled() {
     return env != nullptr && std::string(env) == "1";
 }
 
+bool k3SmokeEvidenceEnabled() {
+    static const bool enabled = [] {
+        const char* env = std::getenv("KIMI_K3_SMOKE_EVIDENCE");
+        return env != nullptr && std::string(env) == "1";
+    }();
+    return enabled;
+}
+
+int64_t smokeTimeNs() {
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(
+               std::chrono::system_clock::now().time_since_epoch())
+        .count();
+}
+
 }  // namespace
 // ============================================================================
 // GenerateStateMachine method implementations
@@ -23,6 +38,25 @@ bool asyncDebugEnabled() {
 StreamState GenerateStateMachine::moveToNext() {
     // Error 最高优先级，任何状态下直接终止
     if (events_.has(StreamEvents::Error)) {
+        // Both ordinary cancellation and the shared priority-preemption RPC
+        // reach this scheduler-owned transition. The RPC need not call
+        // finishOrCancel(). Observe the live load before releasing resources;
+        // a completed async load must never count as cancellation during DMA.
+        if (k3SmokeEvidenceEnabled()
+            && status.load(std::memory_order_acquire) == StreamState::LOADING_CACHE
+            && stream_cache_resource_->resourceContext().role_type == RoleType::PREFILL
+            && (error_info.code() == ErrorCode::CANCELLED
+                || error_info.code() == ErrorCode::PRIORITY_PREEMPTED)) {
+            const auto pending = stream_cache_resource_->smokePendingHostReuseTokens();
+            const auto stream = stream_cache_resource_->stream();
+            if (pending > 0 && stream != nullptr) {
+                RTP_LLM_LOG_INFO(
+                    "[K3_SMOKE_EVENT] {\"event\":\"host_cache_cancelled_during_load\","
+                    "\"request_id\":%ld,\"host_reuse_len\":%zu,\"time_ns\":%ld}",
+                    static_cast<long>(stream->streamId()), pending,
+                    static_cast<long>(smokeTimeNs()));
+            }
+        }
         status.store(StreamState::FINISHED, std::memory_order_release);
         releaseResource();
         return StreamState::FINISHED;
@@ -82,6 +116,15 @@ void GenerateStateMachine::handleWaiting() {
         if (ret) {
             if (stream != nullptr) {
                 stream->recordLoadingCacheStartTime();
+                if (k3SmokeEvidenceEnabled()
+                    && stream_cache_resource_->resourceContext().role_type == RoleType::PREFILL
+                    && stream_cache_resource_->smokePendingHostReuseTokens() > 0) {
+                    RTP_LLM_LOG_INFO(
+                        "[K3_SMOKE_EVENT] {\"event\":\"host_cache_load_started\","
+                        "\"request_id\":%ld,\"host_reuse_len\":%zu,\"time_ns\":%ld}",
+                        static_cast<long>(stream->streamId()), stream_cache_resource_->smokePendingHostReuseTokens(),
+                        static_cast<long>(smokeTimeNs()));
+                }
             }
             status.store(StreamState::LOADING_CACHE, std::memory_order_release);
         } else if (stream_cache_resource_->resourceContext().role_type != RoleType::DECODE) {
@@ -120,6 +163,15 @@ void GenerateStateMachine::handleLoading() {
         auto stream = stream_cache_resource_->stream();
         if (stream != nullptr) {
             stream->recordLoadingCacheDoneTime();
+            if (k3SmokeEvidenceEnabled()
+                && stream_cache_resource_->resourceContext().role_type == RoleType::PREFILL
+                && stream->hostReuseLength() > 0) {
+                RTP_LLM_LOG_INFO(
+                    "[K3_SMOKE_EVENT] {\"event\":\"host_cache_load_done\","
+                    "\"request_id\":%ld,\"host_reuse_len\":%d,\"time_ns\":%ld}",
+                    static_cast<long>(stream->streamId()), stream->hostReuseLength(),
+                    static_cast<long>(smokeTimeNs()));
+            }
         }
         status.store(StreamState::WAITING, std::memory_order_release);
     }

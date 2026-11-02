@@ -67,6 +67,7 @@ def make_database(files: List[FakeCkptFileInfo]) -> CkptDatabase:
 
 class RecordingDeployWeightInfo(ModelDeployWeightInfo):
     def __init__(self, database: CkptDatabase, returned_weight_info: ModelWeightInfo):
+        self._num_layers = 1
         self.database = database
         self.returned_weight_info = returned_weight_info
         self.output_vocab_ids = ()
@@ -87,6 +88,15 @@ class RecordingDeployWeightInfo(ModelDeployWeightInfo):
 
 
 class ModelDeployWeightInfoCkptRegexTest(unittest.TestCase):
+    def test_runtime_layer_view_keeps_experts_and_literal_remaps(self):
+        pattern = ModelDeployWeightInfo._ckpt_tensor_name_to_regex(
+            "model.layers.{i}.mlp.experts.{expert_id}.w1", range(4)
+        )
+        self.assertIsNotNone(pattern.fullmatch("model.layers.3.mlp.experts.895.w1"))
+        self.assertIsNone(pattern.fullmatch("model.layers.4.mlp.experts.0.w1"))
+        remap = ModelDeployWeightInfo._ckpt_tensor_name_to_regex("model.layers.93.norm.weight", range(1))
+        self.assertIsNotNone(remap.fullmatch("model.layers.93.norm.weight"))
+
     def test_ckpt_tensor_name_regex_matches_layer_and_expert_placeholders(self):
         pattern = ModelDeployWeightInfo._ckpt_tensor_name_to_regex(
             "model.layers.{i_1}.mlp.experts.{expert_id}.down_proj.weight"

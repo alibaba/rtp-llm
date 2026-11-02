@@ -109,6 +109,7 @@ private:
     int                   propose_model_index_ = 0;
     int                   tp_rank_             = 0;
     ParallelismConfig     parallelism_config_;
+    int64_t               smoke_forward_step_  = 0;
     RoleType              role_type_ = RoleType::PDFUSION;
     std::function<void()> profile_step_start_;
     std::function<void()> profile_step_finish_;

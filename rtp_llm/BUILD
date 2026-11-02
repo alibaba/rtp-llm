@@ -977,3 +977,9 @@ py_library(
         ":aiohttp",
     ]
 )
+
+# CPU-only smoke accounting shares the production counter contract.
+py_library(
+    name = "speculative_acceptance",
+    srcs = ["utils/speculative_acceptance.py"],
+)

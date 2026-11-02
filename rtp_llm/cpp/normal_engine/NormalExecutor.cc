@@ -31,6 +31,14 @@ bool readEnvFlagOnce(const char* env_name, const char* log_tag, const char* labe
     return on;
 }
 
+bool normalSmokeEvidenceEnabled() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("KIMI_K3_SMOKE_EVIDENCE");
+        return value != nullptr && std::string(value) == "1";
+    }();
+    return enabled;
+}
+
 void holdSamplerInputHostBuffers(TensorHolder& holder, const SamplerInputs& inputs) {
     holder.hold_host(inputs.token_ids);
     holder.hold_host(inputs.input_lengths);
@@ -80,6 +88,7 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
     profile_step_finish_(std::move(profile_step_finish)),
     dispatch_runner_(cuda_graph::graphGetStreamFromPool(true)) {
     has_engram_         = !params.model_config_.attn_config.v41_kv_source_layer_ids.empty();
+    (void)normalSmokeEvidenceEnabled();
     enable_detail_log_  = params.profiling_debug_logging_config.enable_detail_log;
     tp_rank_            = params.parallelism_config.tp_rank;
     parallelism_config_ = params.parallelism_config;
@@ -320,6 +329,49 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
         if (model_inputs_logger_) {
             const auto role = is_propose_ ? ModelInputsModelRole::DRAFT : ModelInputsModelRole::NORMAL;
             model_inputs_logger_->log(model_input, role, model_->model_id_);
+        }
+        if (normalSmokeEvidenceEnabled() && !warm_up_ && !is_propose_) {
+            ++smoke_forward_step_;
+            const auto decode_rows = model_input.sequence_lengths.defined() ?
+                                         model_input.sequence_lengths.numel() : 0;
+            const auto input_rows = model_input.input_lengths.defined() ? model_input.input_lengths.numel() : 0;
+            if (decode_rows > 0 && decode_rows == input_rows && !model_input.is_target_verify) {
+                // Stream identity is authoritative only on the owner TP root.
+                // Other ranks report synchronized tensor metadata, not a fake
+                // logical batch inferred from SP rows or a CUDA Graph bucket.
+                const bool authoritative = tp_rank_ == 0;
+                const bool real_streams  = authoritative && !model_input.is_fake_stream;
+                std::string ids;
+                if (real_streams) {
+                    for (const auto& stream : stream_groups.decodeStreams()) {
+                        if (!ids.empty()) {
+                            ids += ',';
+                        }
+                        ids += std::to_string(stream->streamId());
+                    }
+                }
+                RTP_LLM_LOG_INFO(
+                    "[K3_SMOKE_EVENT] {\"event\":\"normal_target_decode_forward\","
+                    "\"execution_step\":%ld,\"world_rank\":%ld,\"dp_rank\":%ld,\"tp_rank\":%d,"
+                    "\"logical_authoritative\":%s,\"logical_stream_count\":%ld,\"logical_batch\":%ld,"
+                    "\"request_ids\":[%s],\"input_rows\":%ld,\"sequence_rows\":%ld,\"token_rows\":%ld,"
+                    "\"fake\":%s,\"time_ns\":%ld}",
+                    static_cast<long>(smoke_forward_step_),
+                    static_cast<long>(parallelism_config_.world_rank),
+                    static_cast<long>(parallelism_config_.dp_rank),
+                    tp_rank_,
+                    authoritative ? "true" : "false",
+                    real_streams ? static_cast<long>(stream_groups.decodeStreams().size()) :
+                                   (authoritative ? 0L : -1L),
+                    real_streams ? static_cast<long>(stream_groups.totalDecodeBatchSize()) :
+                                   (authoritative ? 0L : -1L),
+                    ids.c_str(),
+                    static_cast<long>(input_rows),
+                    static_cast<long>(decode_rows),
+                    static_cast<long>(model_input.combo_tokens.numel()),
+                    model_input.is_fake_stream ? "true" : "false",
+                    static_cast<long>(autil::TimeUtility::currentTimeInMicroSeconds() * 1000));
+            }
         }
         model_output                        = std::move(model_->forward(model_input));
         executor_collector.model_forward_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;

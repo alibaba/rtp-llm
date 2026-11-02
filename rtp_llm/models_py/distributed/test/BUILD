@@ -1,3 +1,19 @@
+py_test(
+    name = "bf16_collective_projection_contract_test",
+    srcs = ["bf16_collective_projection_test.py"],
+    deps = ["//rtp_llm:testlib", "//rtp_llm/models_py:modules"],
+    timeout = "short",
+)
+
+py_test(
+    name = "bf16_collective_projection_sm103_gpu_test",
+    srcs = ["bf16_collective_projection_gpu_test.py"],
+    deps = ["//rtp_llm:testlib", "//rtp_llm/models_py:modules"],
+    tags = ["SM103_CU13"],
+    exec_properties = {"gpu": "SM103_CU13", "gpu_count": "8"},
+    timeout = "long",
+)
+
 py_test (
     name = "deepep_test",
     srcs = ["deepep_test.py"],

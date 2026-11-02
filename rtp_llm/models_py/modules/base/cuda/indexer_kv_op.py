@@ -127,5 +127,7 @@ class IndexerKVOp(nn.Module):
             output = workspace("gathered_indices", (padded, self.topk), torch.int32)
             all_gather_into(running[1], output, Group.TP)
             output = output[: execution.rows]
+        from rtp_llm.models_py.utils.smoke_evidence import completed_dsa_chunks
+        completed_dsa_chunks("indexer", params, len(execution.blocks), execution.rows)
         execution.finish()
         return output

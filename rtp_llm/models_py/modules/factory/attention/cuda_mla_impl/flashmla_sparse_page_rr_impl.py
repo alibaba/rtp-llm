@@ -130,6 +130,8 @@ class PageRRSparseMlaOp(SparseMlaOp):
                 self.workspace_owner.value_weights[layer_id],
                 out=output.transpose(0, 1),
             )
+        from rtp_llm.models_py.utils.smoke_evidence import completed_dsa_chunks
+        completed_dsa_chunks("sfa", params, len(execution.blocks), rows)
         output = self.communicator.restore_queries(output)
         execution.finish()
         return output

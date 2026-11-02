@@ -1828,4 +1828,28 @@ TEST_F(StreamCacheResourceTest, PollAllocatorLoadCompletesOnlyAfterTransfersSett
     EXPECT_EQ(resource.allocator_load_context_, nullptr);
 }
 
+TEST_F(StreamCacheResourceTest, SmokePendingHostLoadObservationDoesNotAdvanceLifecycle) {
+    prepareResource(true, RoleType::PREFILL);
+    auto& resource = stream_->streamCacheResource();
+    auto context = makeAllocatorLoadContext(1, {Tier::HOST});
+    ASSERT_FALSE(context->done());
+    resource.allocator_load_context_ = context;
+    stream_->generate_status_->status.store(StreamState::WAITING);
+    EXPECT_EQ(stream_->smokePendingHostReuseTokens(), 0u);
+    stream_->generate_status_->status.store(StreamState::LOADING_CACHE);
+    EXPECT_EQ(stream_->smokePendingHostReuseTokens(), resource.reuseBlockTokens());
+    EXPECT_EQ(stream_->getStatus(), StreamState::LOADING_CACHE);
+    EXPECT_FALSE(context->done());
+    EXPECT_EQ(resource.allocator_load_context_, context);
+    resource.resource_context_.role_type = RoleType::DECODE;
+    EXPECT_EQ(stream_->smokePendingHostReuseTokens(), 0u);
+    resource.resource_context_.role_type = RoleType::PREFILL;
+    ASSERT_TRUE(context->completeTransfers(1, true));
+    ASSERT_TRUE(context->done());
+    EXPECT_EQ(stream_->smokePendingHostReuseTokens(), 0u);
+    EXPECT_EQ(stream_->getStatus(), StreamState::LOADING_CACHE);
+    resource.allocator_load_context_.reset();
+    EXPECT_EQ(stream_->smokePendingHostReuseTokens(), 0u);
+}
+
 }  // namespace rtp_llm

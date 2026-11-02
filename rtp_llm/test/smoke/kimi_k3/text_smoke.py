@@ -23,7 +23,35 @@ from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass, replace
 from typing import Any, Callable
 
+if __package__:
+    from .mtp_contract import acceptance_contract, synthetic_fixture
+else:
+    from mtp_contract import acceptance_contract, synthetic_fixture
+
 MAX_PREFILL_CONCURRENCY = 16
+
+
+def collect_grouped_responses(fetch, request_ids, cancel):
+    """Cancel the task group on its first failed RPC, preserving input order."""
+    request_ids = tuple(request_ids)
+    with ThreadPoolExecutor(max_workers=len(request_ids)) as pool:
+        futures = {pool.submit(fetch, request_id): request_id for request_id in request_ids}
+        pending, results = set(futures), {}
+        try:
+            while pending:
+                done, pending = wait(pending, return_when=FIRST_COMPLETED)
+                for future in done:
+                    results[futures[future]] = future.result()
+        except BaseException:
+            # Cancel before leaving the executor: __exit__ waits for the other
+            # streams, which may otherwise hide this failure for many minutes.
+            for request_id in request_ids:
+                try:
+                    cancel(request_id)
+                except Exception:
+                    pass
+            raise
+    return [results[request_id] for request_id in request_ids]
 
 
 @dataclass(frozen=True)
@@ -209,7 +237,11 @@ def parse_args() -> argparse.Namespace:
         type=int,
         help="Prefill service startup timestamp, including pre-readiness publication",
     )
+    parser.add_argument("--synthetic-draft-checkpoint", type=pathlib.Path,
+                        help="explicit untrained K3.1 fixture; allows zero acceptance with verified A/V counters")
     args = parser.parse_args()
+    args.synthetic_draft = (synthetic_fixture(args.synthetic_draft_checkpoint)
+                            if args.synthetic_draft_checkpoint else None)
     # The full-model run is fixed; phases and MTP cannot be disabled.
     config = json.loads((args.long_prefix_checkpoint / "config.json").read_text())
     text_config = config.get("text_config", config)
@@ -354,11 +386,30 @@ def cache_block_boundaries(
 
 class Runner:
     @property
+    def cache_probe_tokens(self) -> int:
+        return max(32769, self.reuse_unit_tokens + 1)
+
+    @property
+    def cache_partial_minimum(self) -> int:
+        return 32768
+
+    @property
     def reuse_unit_tokens(self) -> int:
         """Cache reuse granularity: one page, or one checkpoint span."""
         return int(getattr(self.args, "reuse_unit_tokens", 0)) or int(
             self.args.block_size
         )
+
+    def cache_boundary_tokens(self) -> tuple[int, ...]:
+        return cache_block_boundaries(
+            self.args.block_size, self.reuse_unit_tokens, self.args.chunk_tokens
+        )
+
+    def decode_boundary_tokens(self) -> tuple[int, ...]:
+        return tuple(sorted(set(range(self.args.block_size,
+                                      self.reuse_unit_tokens + 1,
+                                      self.args.block_size))
+                            | {2 * self.reuse_unit_tokens, self.args.chunk_tokens}))
 
     def __init__(self, args: argparse.Namespace):
         self.args = args
@@ -381,6 +432,7 @@ class Runner:
     def save(self, passed: bool, error: str | None = None) -> None:
         payload = {
             "run_kind": "full-93",
+            "synthetic_draft": getattr(self.args, "synthetic_draft", None),
             "suite": self.args.suite,
             "case_profile": (
                 "compact-64k-v1"
@@ -508,6 +560,7 @@ class Runner:
                 ) from exc
 
     def request(self, case: Case, barrier=None) -> dict[str, Any]:
+        case = self.prepare_case(case)
         with self._record_lock:
             self._artifact_counter += 1
             number = self._artifact_counter
@@ -650,6 +703,7 @@ class Runner:
             payload["extra_configs"] = {
                 "role_addrs": [self.decode_role_addrs[case.decode_owner_rank]]
             }
+        payload = self.prepare_http_payload(payload, case)
         audit["request"] = payload
         persist()
         wire_payload = json.dumps(
@@ -691,6 +745,7 @@ class Runner:
                     capture_output=True,
                     timeout=deadline + 1,
                     check=False,
+                    env=self.http_process_environment(),
                 )
             except subprocess.TimeoutExpired as exc:
                 audit["response_body"] = (exc.output or b"").decode(
@@ -929,7 +984,13 @@ class Runner:
                 )
         iter_count = int(aux.get("iter_count", 0))
         mtp_accepted_tokens = output_len - iter_count
-        if case.require_mtp and (iter_count <= 0 or mtp_accepted_tokens <= 0):
+        untrained = bool(getattr(self.args, "synthetic_draft", None))
+        try:
+            mtp_metrics = acceptance_contract(aux, untrained=untrained,
+                                              required=case.require_mtp or case.require_mtp_draft)
+        except ValueError as exc:
+            raise SmokeFailure(f"{case.name}: {exc}") from exc
+        if case.require_mtp and (iter_count <= 0 or (not untrained and mtp_accepted_tokens <= 0)):
             raise SmokeFailure(
                 f"{case.name}: MTP produced no accepted draft token: "
                 f"output_len={output_len}, iter_count={iter_count}"
@@ -974,6 +1035,9 @@ class Runner:
             "output_len": output_len,
             "iter_count": iter_count,
             "mtp_accepted_tokens": mtp_accepted_tokens,
+            "mtp_draft_kind": "synthetic_untrained" if untrained else "trained",
+            "mtp_metrics": mtp_metrics,
+            "speculative_metrics": aux.get("speculative_metrics") or {},
             "mtp_draft_rounds": mtp_draft_rounds,
             "require_mtp": case.require_mtp,
             "require_mtp_draft": case.require_mtp_draft,
@@ -1045,6 +1109,25 @@ class Runner:
                 return results
         return [self.request(case) for case in cases]
 
+    def prepare_case(self, case: Case) -> Case:
+        return case
+
+    def http_process_environment(self) -> dict | None:
+        return None
+
+    def prepare_http_payload(self, payload: dict, case: Case) -> dict:
+        return payload
+
+    def prepare_group_config(self, config: Any, case: Case) -> Any:
+        return config
+
+    def max_grouped_prefill_requests(self) -> int:
+        return MAX_PREFILL_CONCURRENCY
+
+    def group_tokenizer(self, factory):
+        return factory.from_pretrained(
+            self.args.long_prefix_checkpoint, trust_remote_code=True)
+
     def request_cases_group(self, cases: list[Case]) -> dict[str, int]:
         """Use the existing PD-aware group RPC to prove one target forward.
 
@@ -1052,8 +1135,10 @@ class Runner:
         the normal P-to-D handoff. Its request IDs are saved with the raw RPC
         records so the result checker can verify the exact four members.
         """
-        if len(cases) > MAX_PREFILL_CONCURRENCY:
-            raise SmokeFailure("Prefill grouped requests must not exceed 16")
+        cases = [self.prepare_case(case) for case in cases]
+        if len(cases) > self.max_grouped_prefill_requests():
+            raise SmokeFailure(
+                f"Prefill grouped requests must not exceed {self.max_grouped_prefill_requests()}")
         runfiles = self.args.prefill_rpc_runfiles
         roots = [runfiles / "rtp_llm", *sorted(runfiles.glob("pip*/site-packages"))]
         sys.path[:0] = [str(root) for root in roots]
@@ -1083,14 +1168,13 @@ class Runner:
                 f"PD group RPC dependencies are missing from {runfiles}: {exc}"
             ) from exc
 
+        rpc_timeout = self.args.timeout
         group_id = time.time_ns() % (2**62)
         group = EnqueueGroupRequestPB(
-            batch_id=group_id, dp_rank=0, fetch_attach_timeout_ms=300000
+            batch_id=group_id, dp_rank=0, fetch_attach_timeout_ms=rpc_timeout * 1000
         )
         inputs: dict[int, tuple[Case, list[int], dict[str, Any]]] = {}
-        tokenizer = AutoTokenizer.from_pretrained(
-            self.args.long_prefix_checkpoint, trust_remote_code=True
-        )
+        tokenizer = self.group_tokenizer(AutoTokenizer)
         stop_ids = [
             tokenizer.encode(marker, add_special_tokens=False)
             for marker in ("<|end_of_msg|>", "<|close|>response<|sep|>")
@@ -1108,7 +1192,7 @@ class Runner:
                 do_sample=False,
                 top_k=1,
                 top_p=0.95,
-                timeout_ms=300000,
+                timeout_ms=rpc_timeout * 1000,
                 aux_info=True,
                 random_seed=0,
                 thinking_mode=ThinkingMode.DISABLED,
@@ -1123,6 +1207,7 @@ class Runner:
                     )
                 ],
             )
+            config = self.prepare_group_config(config, case)
             input_py = GenerateInput(
                 request_id=request_id,
                 token_ids=torch.tensor(token_ids, dtype=torch.int32),
@@ -1130,7 +1215,15 @@ class Runner:
                 generate_config=config,
                 request_info=RequestInfo(request_id=case.name),
             )
-            group.requests.add().input.CopyFrom(trans_input(input_py))
+            wire_input = trans_input(input_py)
+            group.requests.add().input.CopyFrom(wire_input)
+            if getattr(self.args, "capture_rpc_frames", False):
+                from google.protobuf.json_format import MessageToDict
+                directory = self.args.output.parent / "rpc-frames"
+                directory.mkdir(parents=True, exist_ok=True)
+                (directory / f"{request_id}-input.json").write_text(json.dumps(
+                    MessageToDict(wire_input, preserving_proto_field_name=True),
+                    ensure_ascii=False, indent=2))
             payload = {
                 "model": "kimi-k3",
                 "messages": [{"role": "user", "content": case.prompt}],
@@ -1169,7 +1262,7 @@ class Runner:
         with grpc.insecure_channel(address) as channel:
             stub = RpcServiceStub(channel)
             try:
-                ack = stub.EnqueueGroup(group, timeout=300)
+                ack = stub.EnqueueGroup(group, timeout=rpc_timeout)
             except grpc.RpcError as exc:
                 raise SmokeFailure(
                     f"PD group enqueue failed; artifact={group_artifact}: {exc}"
@@ -1192,9 +1285,10 @@ class Runner:
                 output_ids: list[int] = []
                 final_aux = None
                 finished = False
+                frame_path = self.args.output.parent / "rpc-frames" / f"{request_id}-output.jsonl"
                 try:
                     for frame in stub.FetchResponse(
-                        FetchRequestPB(request_id=request_id), timeout=300
+                        FetchRequestPB(request_id=request_id), timeout=rpc_timeout
                     ):
                         flat = frame.flatten_output
                         if flat.HasField("output_ids"):
@@ -1204,28 +1298,35 @@ class Runner:
                         if flat.aux_info:
                             final_aux = flat.aux_info[0]
                         finished = bool(flat.finished and flat.finished[0])
+                        if getattr(self.args, "capture_rpc_frames", False):
+                            from google.protobuf.json_format import MessageToDict
+                            with frame_path.open("a") as stream:
+                                stream.write(json.dumps(dict(time_ns=time.time_ns(), frame=MessageToDict(frame, preserving_proto_field_name=True))) + "\n")
                     if not finished or final_aux is None or not output_ids:
                         raise SmokeFailure("PD group response did not finish")
                 except Exception as exc:
+                    if getattr(self.args, "capture_rpc_frames", False):
+                        error_path = frame_path.with_suffix(".error.json")
+                        with error_path.open("x") as stream:
+                            json.dump(dict(time_ns=time.time_ns(), request_id=request_id,
+                                           name=case.name, owner=case.decode_owner_rank,
+                                           error=f"{type(exc).__name__}: {exc}",
+                                           input_path=str(frame_path.parent / f"{request_id}-input.json"),
+                                           frames_path=str(frame_path), group_path=str(group_artifact)),
+                                      stream, ensure_ascii=False, indent=2)
                     raise SmokeFailure(
                         f"case={case.name} owner={case.decode_owner_rank} "
                         f"request_id={request_id} artifact={group_artifact}: {exc}"
                     ) from exc
                 return request_id, output_ids, final_aux
 
-            try:
-                with ThreadPoolExecutor(max_workers=len(cases)) as pool:
-                    results = list(pool.map(fetch, inputs))
-            except Exception:
-                for request_id in accepted:
-                    try:
-                        stub.Cancel(CancelRequestPB(request_id=request_id), timeout=5)
-                    except grpc.RpcError:
-                        pass
-                raise
+            def cancel(request_id):
+                stub.Cancel(CancelRequestPB(request_id=request_id), timeout=5)
+
+            results = collect_grouped_responses(fetch, inputs, cancel)
 
         for request_id, output_ids, aux in results:
-            case, _, payload = inputs[request_id]
+            case, input_ids, payload = inputs[request_id]
             visible_ids = output_ids
             for stop in sorted(stop_ids, key=len, reverse=True):
                 if stop and visible_ids[-len(stop) :] == stop:
@@ -1244,6 +1345,7 @@ class Runner:
                 "prefill_memory_reuse_len": int(aux.prefill_memory_reuse_len),
                 "prefill_disk_reuse_len": int(aux.prefill_disk_reuse_len),
                 "speculative_draft_rounds": int(aux.speculative_draft_rounds),
+                "speculative_metrics": dict(aux.speculative_metrics),
                 "role_addrs": [role],
             }
             response = {
@@ -1258,7 +1360,8 @@ class Runner:
                     }
                 ],
                 "aux_info": auxiliary,
-                "debug_info": {"output_ids": [output_ids]},
+                "debug_info": {"output_ids": [output_ids], "input_ids": input_ids,
+                               "input_source": "group_rpc_wire"},
             }
             artifact = {
                 "name": case.name,
@@ -1289,6 +1392,11 @@ class Runner:
                     verified_input_len=len(inputs[request_id][1]),
                 )
                 row["phase"] = artifact["phase"]
+                row["request_id"] = request_id
+                # AuxInfoPB has no observed owner field. This is the requested
+                # route, and must be corroborated by Decode execution events.
+                row["route_echo_only"] = True
+                row["owner_execution_verified"] = False
                 artifact.update(passed=True, result=row)
                 with self._record_lock:
                     self.records.append(row)
@@ -1390,6 +1498,7 @@ class Runner:
         admission_wave_size: int | None = None,
         admission_gap_s: float = 0,
     ) -> None:
+        cases = [self.prepare_case(case) for case in cases]
         started = time.time()
         stage = {
             "name": name,
@@ -1496,6 +1605,9 @@ class Runner:
     ) -> tuple[str, list[int]]:
         # Query the serving tokenizer, including its exact chat template. The
         # filler is inert; all authoritative records and instructions are last.
+        minimum = len(self.tokenize(head + tail))
+        if minimum > target:
+            raise SmokeFailure(f"prompt/template overhead {minimum} exceeds target {target}")
         lo, hi = 0, target * 2
         while lo <= hi:
             count = (lo + hi) // 2
@@ -1658,14 +1770,18 @@ class Runner:
                 (e for e in errors if not isinstance(e, TransportFailure)), errors[0]
             )
 
+    def prefix_branch_target_tokens(self) -> int:
+        target = self.reuse_unit_tokens * 2 + self.args.block_size
+        if self.args.suite in ("main-text-64k", "main-text-64k-capped"):
+            target = min(target, 65536)
+        return target
+
     def run_prefix_branches(self) -> None:
         head = f"档案 {self.args.namespace}/prefix-branches。以下 x 为无关填充。\n"
         tail_a = '\n唯一有效记录：key=chosen; value=CEDAR-AMBER。只输出 JSON {"value":"CEDAR-AMBER"}，不要解释。'
         tail_b = '\n唯一有效记录：key=chosen; value=MAPLE-VIOLET。只输出 JSON {"value":"MAPLE-VIOLET"}，不要解释。'
         unit = self.reuse_unit_tokens
-        target_tokens = unit * 2 + self.args.block_size
-        if self.args.suite in ("main-text-64k", "main-text-64k-capped"):
-            target_tokens = min(target_tokens, 65536)
+        target_tokens = self.prefix_branch_target_tokens()
         prompt_a, tokens_a = self.fit_prompt(head, tail_a, target_tokens)
         prompt_b = prompt_a[: -len(tail_a)] + tail_b
         tokens_b = self.tokenize(prompt_b)
@@ -1765,7 +1881,7 @@ class Runner:
     def run_cache_block_boundaries(self) -> None:
         page = self.args.block_size
         unit = self.reuse_unit_tokens
-        boundaries = cache_block_boundaries(page, unit, self.args.chunk_tokens)
+        boundaries = self.cache_boundary_tokens()
         if self.args.suite in ("main-text-64k", "main-text-64k-capped"):
             boundaries = tuple(b for b in boundaries if b + 1 <= 65536)
         owners = max(1, len(self.decode_role_addrs))
@@ -1818,11 +1934,7 @@ class Runner:
         # Start one token before each ordinary cache-block boundary.
         # Long exact answers ensure actual accepted Decode progress crosses
         # two page starts, independently of how many tokens MTP proposes.
-        decode_boundaries = tuple(
-            sorted(
-                set(range(page, unit + 1, page)) | {2 * unit, self.args.chunk_tokens}
-            )
-        )
+        decode_boundaries = self.decode_boundary_tokens()
         if self.args.suite == "main-text-64k-capped":
             # Cross one committed Decode page start with a short exact answer.
             # Long outputs are checked separately in the bounded batch matrix.
@@ -2148,10 +2260,9 @@ class Runner:
         return int(matches[-1])
 
     def _orthogonal_cache_seed(self) -> None:
-        unit = self.reuse_unit_tokens
-        # KDA state is reusable only after a complete 32768-token checkpoint;
-        # a shorter MLA-only prefix can hit Decode while Prefill still misses.
-        target = max(32769, unit + 1)
+        # K3 defaults to its complete checkpoint span. Model-specific traffic
+        # adapters derive this seed from their observed cache geometry.
+        target = self.cache_probe_tokens
         if target > 65536:
             raise SmokeFailure("cache-tier smoke seed exceeds the 64K Q budget")
         self._memory_candidates = []
@@ -2216,7 +2327,7 @@ class Runner:
             )
         owner_count = max(1, len(self.decode_role_addrs))
         device_blocks = self._orthogonal_device_blocks()
-        target = max(32769, self.reuse_unit_tokens + 1)
+        target = self.cache_probe_tokens
         for attempt, (tag, memory_seed, memory_value) in enumerate(
             self._memory_candidates
         ):
@@ -2256,7 +2367,7 @@ class Runner:
                 ),
                 min(len(seed_ids), len(query_ids)),
             )
-            if common < 32768 or len(query_ids) > 65536:
+            if common < self.cache_partial_minimum or len(query_ids) > 65536:
                 raise SmokeFailure(
                     "partial cache prompt does not retain the KDA checkpoint"
                 )
@@ -2364,7 +2475,7 @@ class Runner:
             prompt, _ = self.fit_prompt(
                 f"CACHE-PRESSURE:{self.args.namespace}:{index}\n",
                 "\nReply 1.",
-                32769,
+                self.cache_probe_tokens,
                 enable_thinking=False,
             )
             case = Case(
@@ -2495,7 +2606,7 @@ class Runner:
             prompt, _ = self.fit_prompt(
                 f"CACHE:{self.args.namespace}:cancel:{attempt}\n",
                 tail,
-                32769,
+                self.cache_probe_tokens,
                 enable_thinking=False,
             )
             seed = self._orthogonal_answer(
@@ -2546,6 +2657,10 @@ class Runner:
         self.stages[-1]["cancel_attempts"] = attempts
         self.stages[-1]["functional_passed"] = True
         self.stages[-1]["host_load_timing_verified"] = False
+
+    def before_pending_cancel(self, request_id: int) -> dict[str, Any]:
+        """Optional test-side load observation; shared K3 keeps immediate Cancel."""
+        return {}
 
     def _cancel_pending_request(self, seed: Case, attempt: int) -> dict[str, Any]:
         """Verify synchronous Cancel and Fetch contracts for an admitted request.
@@ -2624,6 +2739,7 @@ class Runner:
                 request_id
             ] or ack.errors:
                 raise SmokeFailure(f"PD cancel enqueue rejected: {ack}")
+            observation = self.before_pending_cancel(request_id)
             cancel = stub.Cancel(CancelRequestPB(request_id=request_id), timeout=5)
             try:
                 frames = list(
@@ -2651,6 +2767,7 @@ class Runner:
             "fetch": fetch,
             "cancel_accepted": cancel_accepted,
             "host_load_timing_verified": False,
+            "before_cancel_observation": observation,
         }
 
     def run_single_prefill_64k(self) -> None:

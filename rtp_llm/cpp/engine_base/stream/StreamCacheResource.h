@@ -141,6 +141,8 @@ public:
     }
 
     bool reuseCache() const;
+    // Read-only evidence from the shared allocator's pending Host load.
+    size_t smokePendingHostReuseTokens() const;
     bool enableMemoryCache() const;
     bool enableDeviceCache() const;
     bool enableDiskCache() const;

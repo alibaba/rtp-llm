@@ -377,6 +377,8 @@ public:
     StreamState moveToNext();
 
     virtual StreamState getStatus() const;
+    // Smoke-only observation; serialize with scheduler state/resource release.
+    size_t smokePendingHostReuseTokens() const;
     bool                isFinished() const;  // Returns true if stream is finished
     // Complete a Decode stream owned by the RPC handler, before scheduler enqueue.
     bool finishWithoutGenerate();

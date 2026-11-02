@@ -14,6 +14,12 @@ from collections import Counter
 from typing import Any
 
 
+if __package__:
+    from .mtp_contract import acceptance_contract
+else:
+    from mtp_contract import acceptance_contract
+
+
 def failure_details(accuracy_path: pathlib.Path | str) -> str:
     """Keep the first case/stage failure visible in the outer Bazel test log."""
     path = pathlib.Path(accuracy_path)
@@ -73,7 +79,15 @@ def independent_answer_check(row: dict[str, Any]) -> list[str]:
         errors.append(f"{name}: no output tokens")
     if row.get("require_mtp_draft") and row.get("mtp_draft_rounds", 0) <= 0:
         errors.append(f"{name}: no MTP draft round")
-    if row.get("require_mtp") and row.get("mtp_accepted_tokens", 0) <= 0:
+    untrained = row.get("mtp_draft_kind") == "synthetic_untrained"
+    if untrained:
+        try:
+            acceptance_contract({"speculative_metrics":row.get("speculative_metrics"),
+                                 "speculative_draft_rounds":row.get("mtp_draft_rounds",0)},
+                                untrained=True, required=bool(row.get("require_mtp") or row.get("require_mtp_draft")))
+        except ValueError as exc:
+            errors.append(f"{name}: {exc}")
+    if row.get("require_mtp") and not untrained and row.get("mtp_accepted_tokens", 0) <= 0:
         errors.append(f"{name}: no MTP acceptance")
     if row.get("allow_long_history") and (
         int(row.get("input_len", 0)) - int(row.get("effective_reuse_len", 0)) > 65536
@@ -262,6 +276,9 @@ def _raw_consistency(
         for key, value in comparisons.items():
             if row.get(key) != value:
                 errors.append(f"{name}: summary {key} differs from raw response")
+        if row.get("mtp_draft_kind") == "synthetic_untrained":
+            if row.get("speculative_metrics") != (aux.get("speculative_metrics") or {}):
+                errors.append(f"{name}: authoritative MTP counters differ from raw response")
         if row.get("mtp_accepted_tokens") != aux["output_len"] - aux["iter_count"]:
             errors.append(f"{name}: MTP acceptance summary differs from raw response")
         if row.get("observed_decode_role_addrs") != aux.get("role_addrs", []):

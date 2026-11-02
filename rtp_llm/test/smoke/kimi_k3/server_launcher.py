@@ -28,13 +28,39 @@ def launch_config(args):
     draft = Path(args.draft_checkpoint).resolve(strict=True)
     config = json.loads((checkpoint / "config.json").read_text())
     text = config.get("text_config", config)
-    if text.get("num_hidden_layers") != 93:
-        raise ValueError("Bazel native smoke requires the complete 93-layer target")
+    model_type = getattr(args, "model_type", "kimi_k3")
+    expected_layers = int(getattr(args, "expected_target_layers", 93))
+    if model_type == "kimi_k3" and (
+        expected_layers != 93 or text.get("num_hidden_layers") != 93
+    ):
+        raise ValueError("Smoke target must be a complete 93-layer checkpoint")
+    if expected_layers not in (4, 93) or text.get("num_hidden_layers") != expected_layers:
+        raise ValueError("Smoke target must match its explicit four/93-layer contract")
+    if model_type == "kimi_k31":
+        if config.get("model_type") != "kimi_k31" or fp8_gemm or fp8_kv_cache:
+            raise ValueError("K3.1 requires FP8 Indexer with BF16 SFA/KDA")
+        draft_config = json.loads((draft / "config.json").read_text())
+        draft_text = draft_config.get("text_config", draft_config)
+        fixture = draft_config.get("rtp_llm_fixture", {})
+        if (not getattr(args, "allow_synthetic_draft", False)
+                or fixture.get("kind") != "synthetic_dsa_mtp"
+                or fixture.get("synthetic") is not True
+                or fixture.get("native") is not False
+                or fixture.get("trained") is not False
+                or draft_text.get("num_hidden_layers") != expected_layers
+                or draft_text.get("num_nextn_predict_layers") != 1):
+            raise ValueError("K3.1 smoke needs the explicitly declared untrained DSA draft")
     orthogonal_smoke = bool(getattr(args, "orthogonal_smoke", False))
     tp_size = int(getattr(args, "tp_size", 8))
     dp_size = int(getattr(args, "dp_size", 1))
     ep_size = int(getattr(args, "ep_size", tp_size * dp_size))
     world_size = tp_size * dp_size
+    prefill_capacity = getattr(args, "prefill_token_capacity", None)
+    if prefill_capacity is not None and (
+        model_type != "kimi_k31" or args.role != "PREFILL"
+        or not 1024 <= prefill_capacity <= 65536 or prefill_capacity % 1024
+    ):
+        raise ValueError("K3.1 Prefill fixture token capacity must be page-aligned in [1024,65536]")
     source_tp_size = int(getattr(args, "prefill_source_tp_size", 8))
     if tp_size < 1 or dp_size < 1 or ep_size != world_size or source_tp_size < 1:
         raise ValueError("PD topology requires positive TP/DP and EP=TP×DP")
@@ -73,7 +99,7 @@ def launch_config(args):
             "MEGA_MOE_INPUT_PACKER_IMPL must be legacy|optimized|fast_finite"
         )
     environment = {
-        "MODEL_TYPE": "kimi_k3",
+        "MODEL_TYPE": model_type,
         "CHECKPOINT_PATH": str(checkpoint),
         "TOKENIZER_PATH": str(checkpoint),
         "LOAD_METHOD": "fastsafetensors",
@@ -113,7 +139,7 @@ def launch_config(args):
             }
         ),
         "SP_TYPE": "mtp",
-        "SP_MODEL_TYPE": "kimi_k3_mtp",
+        "SP_MODEL_TYPE": model_type + "_mtp",
         "SP_CHECKPOINT_PATH": str(draft),
         "SP_ACT_TYPE": "BF16",
         "FT_DISABLE_CUSTOM_AR": "1",
@@ -199,6 +225,10 @@ def launch_config(args):
             # at the 64-request capture bucket; the fixed feat smoke uses 0.
             environment["NCCL_GRAPH_REGISTER"] = "0"
             environment["NCCL_MAX_CTAS"] = "8"
+    if model_type == "kimi_k31":
+        environment["RTP_MTP_ACCEPTANCE_STATS"] = "1"
+    if getattr(args, "execution_evidence", False):
+        environment["KIMI_K3_SMOKE_EVIDENCE"] = "1"
     decode_capture_batches = (
         [1, 2, 4, 8, 16, 32]
         if orthogonal_smoke and dp_size > 1
@@ -217,6 +247,9 @@ def launch_config(args):
         "prefill_cp_size": source_tp_size if orthogonal_smoke else 1,
         "remote_server_port": args.peer_port,
         "use_local": 1,
+        # K3.1's longest smoke history is655360, plus generation. Preserve
+        # every case while budgeting BF16 synthetic-draft Graph buckets for
+        # that declared service range. The checkpoint is never rewritten.
         "max_seq_len": 2097152 if orthogonal_smoke else 262144,
         # MTP update capture uses this request capacity independently of the
         # Decode runner. It must cover every configured proposal/Verify bucket.
@@ -228,8 +261,8 @@ def launch_config(args):
         "max_batch_tokens_size": 262144 if orthogonal_smoke else 65536,
         **({"max_batch_tokens_without_cache": 65536} if orthogonal_smoke else {}),
         "concurrency_limit": 64 if orthogonal_smoke and args.role == "DECODE" else 16,
-        "seq_size_per_block": 4096,
-        "kernel_seq_size_per_block": 128 if fp8_kv_cache else 64,
+        "seq_size_per_block": 1024 if model_type == "kimi_k31" else 4096,
+        "kernel_seq_size_per_block": 128 if model_type == "kimi_k31" or fp8_kv_cache else 64,
         "linear_step": 1,
         "ssm_state_dtype": "fp32",
         "fp8_kv_cache": int(fp8_kv_cache),
@@ -258,6 +291,29 @@ def launch_config(args):
         options["memory_cache_size_mb"] = getattr(args, "memory_cache_size_mb", 32768)
     if kv_cache_mem_mb is not None:
         options["kv_cache_mem_mb"] = kv_cache_mem_mb
+    if model_type == "kimi_k31":
+        options["cp_force_single_prefill"] = 0
+        if orthogonal_smoke and args.role == "PREFILL":
+            # Retain the full inventory's short-input Decode63/64 groups.
+            # Existing64K token admission limits still bound the rectangle.
+            # max_context_batch_size controls the synthetic max-history
+            # startup warmup, not FIFO's real request concurrency. Keep the
+            # shared16-row warmup;64 x2M virtual histories exceed DSA budgets.
+            options["concurrency_limit"] = 64
+        elif orthogonal_smoke and args.role == "DECODE":
+            # Each independent DP owner needs32 requests for globalBS64.
+            # LINEAR tail/replay pools use this per-owner concurrency too.
+            options["concurrency_limit"] = 64 // dp_size
+    if getattr(args, "test_block_num", None) is not None:
+        if args.test_block_num < 2:
+            raise ValueError("test cache pool must include reserved block zero and a real block")
+        options["test_block_num"] = args.test_block_num
+    if prefill_capacity is not None:
+        # Explicit fixture admission/workspace capacity, not an in-model Q loop.
+        # The caller must prove each complete physical query fits this capacity.
+        environment["PREFILL_CHUNK_SIZE"] = str(prefill_capacity)
+        options["max_batch_tokens_without_cache"] = prefill_capacity
+        options["max_batch_tokens_size"] = prefill_capacity
     if args.role == "DECODE":
         options["decode_capture_config"] = ",".join(map(str, decode_capture_batches))
     command = [str(Path(args.server).resolve(strict=True))]
@@ -503,6 +559,9 @@ def main():
         help="Physical Prefill attention TP / PageRR shard count for Decode",
     )
     parser.add_argument("--checkpoint", required=True)
+    parser.add_argument("--model-type", choices=("kimi_k3", "kimi_k31"), default="kimi_k3")
+    parser.add_argument("--expected-target-layers", type=int, choices=(4, 93), default=93)
+    parser.add_argument("--allow-synthetic-draft", action="store_true")
     parser.add_argument("--draft-checkpoint", required=True)
     parser.add_argument("--peer-ip", required=True)
     parser.add_argument("--start-port", required=True, type=int)
@@ -590,6 +649,12 @@ def main():
         default=250,
         help="Required free memory on each selected GPU (default: 250 GiB)",
     )
+    parser.add_argument("--execution-evidence", action="store_true",
+                        help="Record optional CPU execution evidence;disable for performance")
+    parser.add_argument("--test-block-num", type=int,
+                        help="Explicit bounded cache-pool size for reproducible tier-pressure smoke")
+    parser.add_argument("--prefill-token-capacity", type=int,
+                        help="K3.1 fixture-only page-aligned token/workspace capacity;default65536 unchanged")
     args = parser.parse_args()
     if args.expected_draft_shards is not None and args.expected_draft_shards < 1:
         parser.error("--expected-draft-shards requires a positive count")
@@ -702,10 +767,10 @@ def main():
             {
                 "profile": (
                     f"{'fp8' if args.fp8_kv_cache or args.fp8_gemm else 'bf16'}-"
-                    "full93-"
+                    f"real{args.expected_target_layers}-"
                     f"dp{args.dp_size}-tp{args.tp_size}-ep{args.ep_size}-sp-mtp3-rdma"
                 ),
-                "full_model_acceptance_eligible": True,
+                "full_model_acceptance_eligible": args.expected_target_layers == 93,
                 "environment": environment,
                 "command": command,
                 "pid": os.getpid(),

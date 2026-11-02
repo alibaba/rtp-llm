@@ -1,4 +1,18 @@
 py_test(
+    name = "kimi_k31_dsa_fused_buffers_test",
+    srcs = ["kimi_k31_dsa_fused_buffers_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    exec_properties = {"gpu": "B300"},
+)
+
+py_test(
+    name = "kimi_k31_topk_native_merge_test",
+    srcs = ["kimi_k31_topk_native_merge_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    exec_properties = {"gpu": "B300"},
+)
+
+py_test(
     name = "kv_cache_specs_test",
     srcs = [
         "kv_cache_specs_test.py",
@@ -617,3 +631,31 @@ py_test(
     tags = ["L20_CU13"],
     exec_properties = {"gpu": "L20_CU13", "gpu_count": "1"},
 )
+
+py_test(
+    name = "kimi_k31_kda_metadata_cuda_test",
+    srcs = ["kimi_k31_kda_metadata_test.py"],
+    main = "kimi_k31_kda_metadata_test.py",
+    deps = ["//rtp_llm:testlib"],
+    tags = ["SM103_CU13"],
+    exec_properties = {"gpu": "SM103_CU13", "gpu_count": "1"},
+)
+
+# Configuration and metadata contracts run without occupying a GPU.
+[
+    py_test(
+        name = name,
+        srcs = [name + ".py"],
+        deps = ["//rtp_llm:testlib"],
+        env = {"GPU_COUNT": "0"},
+    )
+    for name in [
+        "kimi_k31_bf16_weight_storage_test", "kimi_k31_config_test",
+        "kimi_k31_fp8_indexer_policy_test", "kimi_k31_graph_workspace_test",
+        "kimi_k31_kv_chunk_plan_test", "kimi_k31_query_layout_test",
+        "kimi_k31_kda_metadata_test",
+        "kimi_k31_flash_mla_policy_test",
+        "kimi_k31_routes_test", "kimi_k31_smoke_evidence_test",
+        "kimi_k31_warmup_slots_test", "speculative_acceptance_test",
+    ]
+]

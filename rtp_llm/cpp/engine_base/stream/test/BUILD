@@ -4,6 +4,13 @@ load("//bazel:device_defs.bzl", "device_impl_target")
 
 cc_test = cc_test_wrapper
 
+cc_test(
+    name = "speculative_acceptance_test",
+    srcs = ["SpeculativeAcceptanceTest.cc"],
+    copts = ["-UNDEBUG"],
+    deps = ["//rtp_llm/cpp/engine_base/stream:generate_types"],
+)
+
 test_copts = [
     "-fno-access-control",
 ] + copts()
@@ -102,6 +109,16 @@ cc_test(
     env = {
         "TEST_USING_DEVICE": "CUDA",
     },
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
+)
+
+cc_test(
+    name = "mtp_stream_commit_test",
+    srcs = ["MtpStreamCommitTest.cc"],
+    copts = test_copts,
+    deps = test_deps,
+    env = {"TEST_USING_DEVICE": "CUDA"},
     exec_properties = {"gpu": "L20_CU13"},
     tags = ["L20_CU13"],
 )

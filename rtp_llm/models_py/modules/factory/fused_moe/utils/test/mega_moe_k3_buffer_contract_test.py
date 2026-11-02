@@ -127,6 +127,24 @@ class K3BufferContractTest(unittest.TestCase):
         )
         self.assertEqual(self.backend.size_calls[0], ("generic", 17, True, "swiglu"))
 
+    def test_explicit_backend_does_not_reuse_installed_backend_storage(self):
+        installed = self.module._get_or_create_mega_buf(**self.shape, activation="situ")
+        class UnhashableBackend(_Backend):
+            __hash__ = None
+
+        override = UnhashableBackend()
+        isolated = self.module._get_or_create_mega_buf(
+            **self.shape, activation="situ", backend=override
+        )
+        reused = self.module._get_or_create_mega_buf(
+            **self.shape, activation="situ", backend=override
+        )
+        self.assertIsNot(installed, isolated)
+        self.assertIs(isolated, reused)
+        self.assertEqual(override.calls, [("k3", 17, "fp8xfp4", "situ")])
+        self.assertEqual(override.size_calls, [("k3", 32, "fp8xfp4", "situ")])
+        self.assertEqual(self.backend.calls, [("k3", 17, "fp8xfp4", "situ")])
+
     def test_missing_k3_api_does_not_fall_back_to_generic_layout(self):
         backend = types.SimpleNamespace(
             _C=self.backend._C,

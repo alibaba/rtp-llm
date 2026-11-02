@@ -878,6 +878,16 @@ StreamState GenerateStream::getStatus() const {
     return generate_status_->getStatus();
 }
 
+size_t GenerateStream::smokePendingHostReuseTokens() const {
+    std::lock_guard<std::mutex> lock(*mutex_);
+    if (getStatus() != StreamState::LOADING_CACHE
+        || stream_cache_resource_->resourceContext().role_type != RoleType::PREFILL
+        || stream_cache_resource_->isResourceReleased()) {
+        return 0;
+    }
+    return stream_cache_resource_->smokePendingHostReuseTokens();
+}
+
 bool GenerateStream::isFinished() const {
     return getStatus() == StreamState::FINISHED;
 }

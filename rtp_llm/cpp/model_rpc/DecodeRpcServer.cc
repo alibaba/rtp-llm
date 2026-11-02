@@ -1323,6 +1323,8 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCache(const LoadKVCacheCon
         const auto legacy_partition_it = legacy_partitions.find(peer_addr);
         const auto* legacy_partition =
             legacy_partition_it != legacy_partitions.end() ? &legacy_partition_it->second : nullptr;
+        size_t smoke_mla_pages = 0, smoke_kda_blocks = 0, smoke_mtp_blocks = 0;
+        size_t smoke_first_page = std::numeric_limits<size_t>::max(), smoke_last_page = 0;
         using SourcePartition = std::pair<int, int>;
         std::map<SourcePartition, std::vector<std::shared_ptr<RequestBlockBuffer>>> load_batches;
         RTP_LLM_LOG_DEBUG("load context request id is %d", load_context.request_id);
@@ -1367,6 +1369,14 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCache(const LoadKVCacheCon
                     auto block_id = block_ids[block_pos];
                     if (isNullBlockIdx(block_id)) {
                         continue;
+                    }
+                    if (group_type == CacheGroupType::FULL) {
+                        const auto logical_page = cache_key_index / cache_keys_per_physical_block;
+                        ++smoke_mla_pages;
+                        smoke_first_page = std::min(smoke_first_page, logical_page);
+                        smoke_last_page = std::max(smoke_last_page, logical_page);
+                    } else if (linear_spec != nullptr) {
+                        ++smoke_kda_blocks;
                     }
                     auto cache_key =
                         makeCacheKey(model_id, std::to_string(load_context.cache_keys[cache_key_index]), layer_id, tag);
@@ -1523,6 +1533,7 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCache(const LoadKVCacheCon
                                 if (isNullBlockIdx(block_id)) {
                                     continue;
                                 }
+                                ++smoke_mtp_blocks;
                                 auto cache_key = makeCacheKey(
                                     model_id, std::to_string(load_context.cache_keys[cache_key_index]), layer_id, tag);
                                 const bool mtp_use_mla = mtp_cache_cfg.use_mla;
@@ -1638,6 +1649,34 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCache(const LoadKVCacheCon
                 return {ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED, "load kv cache failed"), 0};
             }
             load_contexts.emplace_back(peer_addr, layer_cache_load_context);
+            const char* smoke_evidence = std::getenv("KIMI_K3_SMOKE_EVIDENCE");
+            if (smoke_evidence != nullptr && std::string(smoke_evidence) == "1") {
+                const auto time_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    std::chrono::system_clock::now().time_since_epoch()).count();
+                size_t transfer_bytes = 0, transfer_blocks = 0;
+                for (const auto& buffers : layer_caches) {
+                    transfer_bytes += buffers->getBlocksSize();
+                    transfer_blocks += buffers->getBlocksCount();
+                }
+                RTP_LLM_LOG_INFO(
+                    "[K3_SMOKE_EVENT] {\"event\":\"pd_transfer_submitted\",\"request_id\":%ld,"
+                    "\"dp_rank\":%d,\"attn_tp_rank\":%d,\"source_tp_rank\":%d,\"source_tp\":%d,"
+                    "\"destination_tp\":%d,\"source_partition_count\":%d,\"source_partition_id\":%d,"
+                    "\"layer_buffers\":%zu,\"transfer_blocks\":%zu,\"transfer_bytes\":%zu,"
+                    "\"mla_pages\":%zu,\"first_mla_page\":%zu,\"last_mla_page\":%zu,"
+                    "\"kda_blocks\":%zu,\"mtp_blocks\":%zu,"
+                    "\"kda_source_partitions\":%d,\"kda_source_partition\":%d,"
+                    "\"kda_destination_partitions\":%d,\"kda_destination_partition\":%d,\"time_ns\":%ld}",
+                    static_cast<long>(load_context.request_id),
+                    static_cast<int>(maga_init_params_.parallelism_config.dp_rank), decode_attention_rank,
+                    i, peer_cnt, decode_attention_tp, source_partition.first, source_partition.second,
+                    layer_caches.size(), transfer_blocks, transfer_bytes, smoke_mla_pages,
+                    smoke_mla_pages ? smoke_first_page : 0, smoke_last_page, smoke_kda_blocks, smoke_mtp_blocks,
+                    head_partition ? head_partition->remote_partition_count : 0,
+                    head_partition ? head_partition->remote_partition_id : 0,
+                    head_partition ? head_partition->local_partition_count : 0,
+                    head_partition ? head_partition->local_partition_id : 0, static_cast<long>(time_ns));
+            }
         }
     }
 
@@ -1705,6 +1744,21 @@ grpc::Status DecodeRpcServer::RemoteLoad(grpc::ServerContext*          server_co
     response->mutable_error_info()->set_error_message(load_result.error_info.ToString());
     response->set_loaded_cache_block_count(static_cast<int64_t>(load_result.loaded_cache_block_count));
     response->set_done_time_us(currentTimeUs());
+    const char* smoke_evidence = std::getenv("KIMI_K3_SMOKE_EVIDENCE");
+    if (smoke_evidence != nullptr && std::strcmp(smoke_evidence, "1") == 0
+        && load_result.error_info.ok()) {
+        const auto time_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count();
+        RTP_LLM_LOG_INFO(
+            "[K3_SMOKE_EVENT] {\"event\":\"pd_cache_loaded\",\"request_id\":%ld,"
+            "\"dp_rank\":%d,\"attn_tp_rank\":%d,\"partition_id\":%d,"
+            "\"partition_count\":%d,\"loaded_blocks\":%ld,\"time_ns\":%ld}",
+            static_cast<long>(request->request_id()),
+            static_cast<int>(maga_init_params_.parallelism_config.dp_rank),
+            static_cast<int>(maga_init_params_.parallelism_config.get_attn_tp_rank()),
+            request->partition_id(), request->partition_count(),
+            static_cast<long>(load_result.loaded_cache_block_count), static_cast<long>(time_ns));
+    }
     RTP_LLM_LOG_DEBUG("request: %s, remote load cache grpc done", request->request_key().c_str());
     return grpc::Status::OK;
 }

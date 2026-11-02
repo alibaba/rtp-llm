@@ -274,6 +274,9 @@ private:
                                int64_t              model_forward_us);
 
     GptModelOutputs forwardModel(ModelBase* model, const GptModelInputs& inputs, ModelInputsModelRole role);
+    void recordSmokeForward(const char* event, const GptModelInputs& inputs,
+                            const StreamGroups* streams, bool prefill = false);
+    uint64_t smoke_forward_step_{0};
 
     std::unique_ptr<ModelBase>                                               model_;
     std::unique_ptr<Sampler>                                                 sampler_;

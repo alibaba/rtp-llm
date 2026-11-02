@@ -103,11 +103,12 @@ class KimiK31DSA(KimiK3MLA):
         with profile_scope("RTP::attention.mla.output_proj"):
             output = self.output(output)
         if not local_query and self.tp_size > 1:
-            output = (
-                self._mtp_bf16_collectives.reduce_scatter(output)
-                if self._mtp_bf16_collectives is not None
-                else reduce_scatter_bf16(output, Group.TP)
-            )
+            with profile_scope("RTP::attention.output_reduce_scatter"):
+                output = (
+                    self._mtp_bf16_collectives.reduce_scatter(output)
+                    if self._mtp_bf16_collectives is not None
+                    else reduce_scatter_bf16(output, Group.TP)
+                )
         owner = getattr(next(iter(fmha.values())), "workspace_owner", None)
         if owner is not None:
             owner.release_eager_buffers()

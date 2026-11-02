@@ -540,6 +540,12 @@ bool StreamCacheResource::asyncLoadCache() {
     return allocator_load_context_ != nullptr;
 }
 
+size_t StreamCacheResource::smokePendingHostReuseTokens() const {
+    const auto load = std::dynamic_pointer_cast<LoadAsyncContext>(allocator_load_context_);
+    return load && !load->done() ?
+               load->matchedBlocks(Tier::HOST) * static_cast<size_t>(reuseBlockTokens()) : 0;
+}
+
 bool StreamCacheResource::loadCacheDone() {
     if (allocator_load_context_) {
         if (!allocator_load_context_->done()) {

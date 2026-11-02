@@ -54,6 +54,7 @@ _KNOWN_HANG_TESTS = [
 
 _GPU_TESTS = [
     "test_cp_metadata_triton",
+    "test_indexer_score_triton",
     "test_indexer_topk_backend",
     "test_fused_inv_rope_fp8_quant",
     "test_fused_rmsnorm_rope",
