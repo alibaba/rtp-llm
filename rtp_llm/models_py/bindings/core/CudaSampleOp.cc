@@ -1068,16 +1068,25 @@ GreedyOutput sampleGreedy(const GreedyParams& params) {
     if (decoder_batch_size > 0 && params.no_repeat_ngram_size.has_value()) {
         RTP_LLM_CHECK_WITH_INFO(params.no_repeat_ngram_size.value().numel() >= decoder_batch_size,
                                 "no_repeat_ngram_size length is smaller than decoder batch size");
-        RTP_LLM_CHECK_WITH_INFO(params.sequence_lengths.device().is_cpu()
-                                    && params.no_repeat_ngram_size.value().device().is_cpu()
-                                    && device_tokens.device().is_cpu(),
-                                "generic no-repeat n-gram fallback requires CPU tensors");
-        auto       sequence_lengths_ptr = params.sequence_lengths.data_ptr<int32_t>();
-        auto       ngram_sizes_ptr      = params.no_repeat_ngram_size.value().data_ptr<int32_t>();
-        auto       tokens_ptr           = device_tokens.data_ptr<int32_t>();
+        // This scan walks raw host pointers, but token_ids were moved to the
+        // compute device above, so the old "requires CPU tensors" assertion
+        // could only pass when the compute device is the CPU. Run the identical
+        // algorithm on host copies instead. The n-gram sizes are checked first:
+        // when none is positive -- the default -- no token history is copied.
+        const auto host_ngram_sizes = params.no_repeat_ngram_size.value().to(torch::kCPU).contiguous();
+        bool       any_ngram        = false;
+        for (int64_t b = 0; b < decoder_batch_size; ++b) {
+            any_ngram = any_ngram || host_ngram_sizes.data_ptr<int32_t>()[b] > 0;
+        }
+        const auto host_sequence_lengths =
+            any_ngram ? params.sequence_lengths.to(torch::kCPU).contiguous() : torch::Tensor();
+        const auto host_tokens          = any_ngram ? device_tokens.to(torch::kCPU).contiguous() : torch::Tensor();
+        auto       sequence_lengths_ptr = any_ngram ? host_sequence_lengths.data_ptr<int32_t>() : nullptr;
+        auto       ngram_sizes_ptr      = host_ngram_sizes.data_ptr<int32_t>();
+        auto       tokens_ptr           = any_ngram ? host_tokens.data_ptr<int32_t>() : nullptr;
         const auto token_stride         = device_tokens.size(1);
 
-        for (int64_t batch = 0; batch < decoder_batch_size; ++batch) {
+        for (int64_t batch = 0; any_ngram && batch < decoder_batch_size; ++batch) {
             const int64_t ngram_size = ngram_sizes_ptr[batch];
             // sequence_lengths already counts valid history tokens; the final column is the output slot.
             const int64_t length = sequence_lengths_ptr[batch];
@@ -1221,6 +1230,18 @@ void mappingDraft2Target(const MappingDraft2TargetParams& params) {
     auto safe_tokens   = active_tokens.to(torch::kLong).clamp(0, params.d2t_map.numel() - 1);
     auto mapped_tokens = params.d2t_map.index_select(0, safe_tokens.flatten()).reshape_as(active_tokens);
     active_tokens.copy_(torch::where(valid_tokens, mapped_tokens.to(active_tokens.dtype()), active_tokens));
+}
+
+// Present in both GPU arms but previously missing here, so any non-CUDA/ROCm
+// build failed to LOAD with "undefined symbol rtp_llm::sampleFromProbs".
+// torch::multinomial draws one index per row from unnormalised non-negative
+// weights, which is the CUDA kernel's contract; it dispatches natively on the
+// input's device. Only the speculative sampler calls this.
+torch::Tensor sampleFromProbs(const torch::Tensor& probabilities) {
+    RTP_LLM_CHECK_WITH_INFO(probabilities.defined() && probabilities.dim() == 2
+                                && probabilities.scalar_type() == torch::kFloat32,
+                            "probability sampling expects FP32 [batch,vocab] probabilities");
+    return torch::multinomial(probabilities, /*num_samples=*/1, /*replacement=*/false).squeeze(-1).to(torch::kInt32);
 }
 
 #endif  // USING_CUDA / USING_ROCM / generic fallback
