@@ -252,13 +252,11 @@ class NativeClientTest {
             assertTrue(h.streamCancelled.await(2, TimeUnit.SECONDS));
         }
     }
-    @Test void cumulativeAndMultiTokenFramesCountActualReceivedPayload() throws Exception {
+    @Test void nativeChunksIgnoreFrontendCumulativeFlagAndSupportMultipleTokens() throws Exception {
         try (var h = new Harness()) {
             h.output = (id, response) -> {
                 for (int count = 1; count <= 3; count++) {
-                    var frame = token(id, count, count == 3).toBuilder();
-                    frame.getFlattenOutputBuilder().getOutputIdsBuilder().setShape(2, count).setInt32Data(ByteString.copyFrom(new byte[count * 4]));
-                    response.onNext(frame.build());
+                    response.onNext(token(id, count, count == 3));
                 }
                 response.onCompleted();
             };
@@ -271,6 +269,22 @@ class NativeClientTest {
                 response.onNext(frame.build()); response.onCompleted();
             };
             assertEquals(NativeClient.Outcome.success, h.result(h.client.send(request(39), Duration.ofSeconds(2))).outcome());
+        }
+    }
+    @Test void cumulativeEngineFramesAreRejectedEvenWhenFrontendFlagIsFalse() throws Exception {
+        try (var h = new Harness()) {
+            h.output = (id, response) -> {
+                response.onNext(token(id, 1, false));
+                var second = token(id, 2, false).toBuilder();
+                second.getFlattenOutputBuilder().getOutputIdsBuilder().setShape(2, 2)
+                        .setInt32Data(ByteString.copyFrom(new byte[8]));
+                response.onNext(second.build()); response.onCompleted();
+            };
+            var nativeInput = input(43).toBuilder(); nativeInput.getGenerateConfigBuilder().setReturnIncremental(false);
+            var result = h.result(h.client.send(request(43).toBuilder()
+                    .setGenerateInput(nativeInput.build().toByteString()).build(), Duration.ofSeconds(2)));
+            assertEquals(NativeClient.Outcome.error, result.outcome());
+            assertEquals("DATA_LOSS", result.grpcCode());
         }
     }
     @Test void firstTokenCallbackMayCancelImmediatelyWithoutLosingTheObservedToken() throws Exception {
