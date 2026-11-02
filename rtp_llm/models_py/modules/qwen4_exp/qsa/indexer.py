@@ -315,6 +315,24 @@ def build_qsa_rope(
     raise ValueError(f"qwen4 QSA does not support RoPE style {rope_config.style!r}")
 
 
+def mrope_decode_tail_verdict(
+    positions: torch.Tensor, compress_ratio: int
+) -> torch.Tensor:
+    """0-dim boolean verdict for validate_mrope_decode_tail (True=valid).
+
+    Computes the same tail predicate without any host synchronization so
+    per-request callers can consume it with a device-side assert.
+    """
+    tail_count = int(positions.shape[0]) % compress_ratio
+    if tail_count == 0:
+        return torch.ones((), dtype=torch.bool, device=positions.device)
+    tail = positions[-tail_count:].to(torch.long)
+    expected = positions.max().to(torch.long) - torch.arange(
+        tail_count - 1, -1, -1, device=positions.device
+    )
+    return (tail == expected[:, None].expand_as(tail)).all()
+
+
 def validate_mrope_decode_tail(positions: torch.Tensor, compress_ratio: int) -> None:
     """Prove that decode can reconstruct an unfinished group's first position.
 
@@ -325,14 +343,7 @@ def validate_mrope_decode_tail(positions: torch.Tensor, compress_ratio: int) -> 
     Page-aligned prefix reuse calls this on its new suffix (pages are divisible
     by the compression ratio), so the entire unfinished group is present.
     """
-    tail_count = int(positions.shape[0]) % compress_ratio
-    if tail_count == 0:
-        return
-    tail = positions[-tail_count:].to(torch.long)
-    expected = positions.max().to(torch.long) - torch.arange(
-        tail_count - 1, -1, -1, device=positions.device
-    )
-    if not torch.equal(tail, expected[:, None].expand_as(tail)):
+    if not bool(mrope_decode_tail_verdict(positions, compress_ratio)):
         raise ValueError(
             "qwen4 QSA unfinished MRoPE compression group requires a "
             "consecutive equal-axis text tail ending at the maximum position; "

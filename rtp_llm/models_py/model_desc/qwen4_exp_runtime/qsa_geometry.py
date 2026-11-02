@@ -14,10 +14,18 @@ from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer import (
     build_qsa_rope,
     build_qsa_rope_from_logical_positions,
     is_qsa_rope_style,
+    mrope_decode_tail_verdict,
     validate_mrope_decode_tail,
 )
 
-from .qsa_cache_views import _block_table, _typed_2d_pool, _validate_required_blocks
+from .qsa_cache_views import (
+    _block_table,
+    _required_blocks_verdict,
+    _typed_2d_pool,
+    _validate_required_blocks,
+    qsa_assert_valid,
+    qsa_strict_validation_enabled,
+)
 from .qsa_plans import IncrementalPrefillPlan, TargetVerifyPlan
 
 
@@ -91,26 +99,31 @@ def _draft_incremental_prefill_geometry(
             f"the {token_count} packed draft tokens"
         )
 
-    prefixes = self.main_inputs.prefix_lengths
+    prefixes_host = self.main_inputs.prefix_lengths
     if (
-        prefixes.dim() != 1
-        or int(prefixes.numel()) != batch_size
-        or prefixes.dtype != torch.int32
+        prefixes_host.dim() != 1
+        or int(prefixes_host.numel()) != batch_size
+        or prefixes_host.dtype != torch.int32
     ):
         raise RuntimeError(
             "qwen4_exp QSA draft incremental prefill requires int32 "
             "prefix_lengths [B]"
         )
-    prefixes = prefixes.to(
-        device=device, dtype=torch.int64, non_blocking=True
-    ).contiguous()
-    invalid_prefixes = prefixes <= 0 if draft else prefixes < 0
-    if bool(torch.any(invalid_prefixes).item()):
+    # Request-data checks stay on the pinned host mirror (free fail-fast) and
+    # the host values replace every later device readback of the prefixes.
+    prefix_values = prefixes_host.tolist()
+    invalid_prefix = any(
+        value <= 0 if draft else value < 0 for value in prefix_values
+    )
+    if invalid_prefix:
         requirement = "nonzero" if draft else "non-negative"
         raise RuntimeError(
             f"qwen4_exp QSA {label} requires every prefix length to be "
             f"{requirement}"
         )
+    prefixes = prefixes_host.to(
+        device=device, dtype=torch.int64, non_blocking=True
+    ).contiguous()
     sequence_lengths = self.main_inputs.sequence_lengths
     if sequence_lengths.numel() != 0:
         raise RuntimeError(
@@ -124,19 +137,34 @@ def _draft_incremental_prefill_geometry(
         cu_seqlens.dim() != 1
         or cu_seqlens.dtype != torch.int32
         or cu_seqlens.device != device
-        or not bool(torch.equal(cu_seqlens, expected_cu))
     ):
         raise RuntimeError(
             "qwen4_exp QSA draft incremental prefill cu_seqlens do not "
             "match input_lengths"
         )
+    if qsa_strict_validation_enabled():
+        if not bool(torch.equal(cu_seqlens, expected_cu)):
+            raise RuntimeError(
+                "qwen4_exp QSA draft incremental prefill cu_seqlens do not "
+                "match input_lengths"
+            )
+    else:
+        qsa_assert_valid(
+            (cu_seqlens == expected_cu).all(),
+            "qwen4_exp QSA draft incremental prefill cu_seqlens do not "
+            "match input_lengths",
+        )
     expected_cu_kv = torch.zeros_like(expected_cu)
     visible_ends = prefixes + torch.tensor(lengths, dtype=torch.int64, device=device)
-    if bool(torch.any(visible_ends > torch.iinfo(torch.int32).max).item()):
+    # int32 headroom is host arithmetic on the mirror values; no device read.
+    int32_max = torch.iinfo(torch.int32).max
+    if max(
+        prefix + length for prefix, length in zip(prefix_values, lengths)
+    ) > int32_max:
         raise RuntimeError(
             "qwen4_exp QSA draft incremental prefill positions exceed int32"
         )
-    if int(visible_ends.sum().item()) > torch.iinfo(torch.int32).max:
+    if sum(prefix + length for prefix, length in zip(prefix_values, lengths)) > int32_max:
         raise RuntimeError(
             "qwen4_exp QSA draft incremental prefill cumulative KV lengths "
             "exceed int32"
@@ -152,21 +180,42 @@ def _draft_incremental_prefill_geometry(
             "qwen4_exp QSA draft incremental prefill cu_kv_seqlens do not "
             "provide device int32 [B + 1] metadata"
         )
-    if not bool(torch.equal(cu_kv_seqlens, expected_cu_kv)):
-        if not draft_prefix_reuse:
-            raise RuntimeError(
-                "qwen4_exp QSA draft incremental prefill cu_kv_seqlens do not "
-                "match prefix+input lengths"
-            )
-        if int(cu_kv_seqlens.numel()) != batch_size + 1 or bool(
-            torch.any(cu_kv_seqlens[1:] < cu_kv_seqlens[:-1]).item()
-        ):
+    if qsa_strict_validation_enabled():
+        if not bool(torch.equal(cu_kv_seqlens, expected_cu_kv)):
+            if not draft_prefix_reuse:
+                raise RuntimeError(
+                    "qwen4_exp QSA draft incremental prefill cu_kv_seqlens do not "
+                    "match prefix+input lengths"
+                )
+            if int(cu_kv_seqlens.numel()) != batch_size + 1 or bool(
+                torch.any(cu_kv_seqlens[1:] < cu_kv_seqlens[:-1]).item()
+            ):
+                raise RuntimeError(
+                    "qwen4_exp QSA MTP draft prefix-reuse has invalid local "
+                    "cu_kv_seqlens metadata"
+                )
+    elif draft_prefix_reuse:
+        # Local cu_kv coordinates only need monotonicity (equality with the
+        # absolute expected ends is intentionally not required here).
+        if int(cu_kv_seqlens.numel()) != batch_size + 1:
             raise RuntimeError(
                 "qwen4_exp QSA MTP draft prefix-reuse has invalid local "
                 "cu_kv_seqlens metadata"
             )
+        qsa_assert_valid(
+            torch.all(cu_kv_seqlens[1:] >= cu_kv_seqlens[:-1]),
+            "qwen4_exp QSA MTP draft prefix-reuse has invalid local "
+            "cu_kv_seqlens metadata",
+        )
+    else:
+        qsa_assert_valid(
+            (cu_kv_seqlens == expected_cu_kv).all(),
+            "qwen4_exp QSA draft incremental prefill cu_kv_seqlens do not "
+            "match prefix+input lengths",
+        )
 
-    prefix_values = prefixes.tolist()
+    # prefix_values already came from the pinned host mirror above; no device
+    # readback is needed for the logical positions.
     logical_positions = torch.cat(
         [
             torch.arange(prefix, prefix + length, device=device)
@@ -190,9 +239,21 @@ def _draft_incremental_prefill_geometry(
             offset = 0
             position_rows = position_ids.reshape(token_count, index_factor)
             for length in lengths:
-                validate_mrope_decode_tail(
-                    position_rows[offset : offset + length], ratio
-                )
+                if qsa_strict_validation_enabled():
+                    validate_mrope_decode_tail(
+                        position_rows[offset : offset + length], ratio
+                    )
+                else:
+                    # One enqueue-only device assert per request; a violation
+                    # traps fail-stop at the next host synchronization.
+                    qsa_assert_valid(
+                        mrope_decode_tail_verdict(
+                            position_rows[offset : offset + length], ratio
+                        ),
+                        "qwen4_exp QSA unfinished MRoPE compression group requires "
+                        "a consecutive equal-axis text tail ending at the maximum "
+                        "position",
+                    )
                 offset += length
         current_cos, current_sin = build_qsa_rope(
             position_ids,
@@ -216,7 +277,8 @@ def _draft_incremental_prefill_geometry(
         )
     if state_tokens_per_block <= 0:
         raise RuntimeError("qwen4_exp QSA indexer state page size must be positive")
-    if not draft and bool((prefixes % kv_tokens_per_block != 0).any().item()):
+    # Page alignment is request data: host arithmetic on the prefix mirror.
+    if not draft and any(value % kv_tokens_per_block for value in prefix_values):
         raise RuntimeError(
             "qwen4_exp QSA prefix reuse requires prefixes aligned to the "
             f"indexer KV page size ({kv_tokens_per_block})"
@@ -279,34 +341,67 @@ def _draft_incremental_prefill_geometry(
     required_kv_columns = (
         final_compressed_lengths + kv_entries_per_block - 1
     ) // kv_entries_per_block
-    _validate_required_blocks(
-        kv_table,
-        required_kv_columns,
-        pool_blocks=int(kv_pool.shape[0]),
-        tag=INDEXER_KV_TAG,
-    )
+    if qsa_strict_validation_enabled():
+        _validate_required_blocks(
+            kv_table,
+            required_kv_columns,
+            pool_blocks=int(kv_pool.shape[0]),
+            tag=INDEXER_KV_TAG,
+        )
+    else:
+        qsa_assert_valid(
+            _required_blocks_verdict(
+                kv_table,
+                required_kv_columns,
+                pool_blocks=int(kv_pool.shape[0]),
+            ),
+            "QSA cache 'indexer_kv' block table does not cover or resolve the "
+            "draft incremental tail",
+        )
 
     # A completed group may read committed raw keys preceding the new rows.
     # Validate that source tail and every destination absolute state page.
-    state_table_width = int(state_table.shape[1])
-    for request_idx, (prefix, length) in enumerate(zip(prefix_values, lengths)):
-        first_needed = prefix - (prefix % ratio)
-        logical_blocks = {
-            position // state_tokens_per_block
-            for position in range(first_needed, prefix + length)
-        }
-        for logical_block in logical_blocks:
-            if logical_block < 0 or logical_block >= state_table_width:
-                raise RuntimeError(
-                    "QSA cache 'indexer_state' block table does not cover the "
-                    "draft incremental tail"
-                )
-            block_id = int(state_table[request_idx, logical_block].item())
-            if block_id <= 0 or block_id >= int(state_pool.shape[0]):
-                raise RuntimeError(
-                    "QSA cache 'indexer_state' draft incremental tail resolves "
-                    "to an unallocated or out-of-range physical block"
-                )
+    # Production folds the per-request, per-block state_table[i, j].item()
+    # loop into one required-blocks verdict over the full [0, required) prefix
+    # window (a superset of the old tail window); strict mode keeps the
+    # original per-block diagnostics.
+    required_state_columns = torch.tensor(
+        [
+            (prefix + length + state_tokens_per_block - 1) // state_tokens_per_block
+            for prefix, length in zip(prefix_values, lengths)
+        ],
+        dtype=torch.int32,
+    )
+    if qsa_strict_validation_enabled():
+        state_table_width = int(state_table.shape[1])
+        for request_idx, (prefix, length) in enumerate(zip(prefix_values, lengths)):
+            first_needed = prefix - (prefix % ratio)
+            logical_blocks = {
+                position // state_tokens_per_block
+                for position in range(first_needed, prefix + length)
+            }
+            for logical_block in logical_blocks:
+                if logical_block < 0 or logical_block >= state_table_width:
+                    raise RuntimeError(
+                        "QSA cache 'indexer_state' block table does not cover the "
+                        "draft incremental tail"
+                    )
+                block_id = int(state_table[request_idx, logical_block].item())
+                if block_id <= 0 or block_id >= int(state_pool.shape[0]):
+                    raise RuntimeError(
+                        "QSA cache 'indexer_state' draft incremental tail resolves "
+                        "to an unallocated or out-of-range physical block"
+                    )
+    else:
+        qsa_assert_valid(
+            _required_blocks_verdict(
+                state_table,
+                required_state_columns,
+                pool_blocks=int(state_pool.shape[0]),
+            ),
+            "QSA cache 'indexer_state' draft incremental tail is not covered or "
+            "resolves to an unallocated or out-of-range physical block",
+        )
 
     block_starts = logical_positions - logical_positions.remainder(ratio)
     try:
@@ -596,38 +691,71 @@ def _target_verify_geometry(
         required_kv_columns = (
             compressed_lengths[:, -1] + kv_entries_per_block - 1
         ) // kv_entries_per_block
-        _validate_required_blocks(
-            kv_table,
-            required_kv_columns,
-            pool_blocks=int(kv_pool.shape[0]),
-            tag=INDEXER_KV_TAG,
-        )
+        if qsa_strict_validation_enabled():
+            _validate_required_blocks(
+                kv_table,
+                required_kv_columns,
+                pool_blocks=int(kv_pool.shape[0]),
+                tag=INDEXER_KV_TAG,
+            )
+        else:
+            qsa_assert_valid(
+                _required_blocks_verdict(
+                    kv_table,
+                    required_kv_columns,
+                    pool_blocks=int(kv_pool.shape[0]),
+                ),
+                "QSA cache 'indexer_kv' block table does not cover or resolve the "
+                "target-verify tail",
+            )
 
     # STATE_RING payload offsets wrap, but the framework block table keeps
     # absolute logical-page columns (including sentinel holes). Validate the
     # small committed-tail + candidate window explicitly before any write.
-    state_table_width = int(state_table.shape[1])
-    for request_idx, prefix in enumerate(
-        prefixes.tolist() if graph_target else prefixes_device.tolist()
-    ):
-        first_needed = max(0, prefix - (prefix % ratio))
-        logical_blocks = {
-            position // state_tokens_per_block
-            for position in range(first_needed, prefix + query_len)
-        }
-        for logical_block in logical_blocks:
-            if logical_block < 0 or logical_block >= state_table_width:
-                raise RuntimeError(
-                    "QSA cache 'indexer_state' block table does not cover the "
-                    "target-verify tail"
-                )
-            if not graph_target:
-                block_id = int(state_table[request_idx, logical_block].item())
-                if block_id <= 0 or block_id >= int(state_pool.shape[0]):
+    # Production folds the per-request, per-block state_table[i, j].item()
+    # loop into one required-blocks verdict over the full [0, required) prefix
+    # window (a superset of the old tail window); strict mode keeps the
+    # original per-block diagnostics. Host prefix values come from the pinned
+    # prefix_lengths mirror for both graph and eager modes.
+    prefix_values = prefixes.tolist()
+    required_state_columns = torch.tensor(
+        [
+            (prefix + query_len + state_tokens_per_block - 1) // state_tokens_per_block
+            for prefix in prefix_values
+        ],
+        dtype=torch.int32,
+    )
+    if qsa_strict_validation_enabled():
+        state_table_width = int(state_table.shape[1])
+        for request_idx, prefix in enumerate(prefix_values):
+            first_needed = max(0, prefix - (prefix % ratio))
+            logical_blocks = {
+                position // state_tokens_per_block
+                for position in range(first_needed, prefix + query_len)
+            }
+            for logical_block in logical_blocks:
+                if logical_block < 0 or logical_block >= state_table_width:
                     raise RuntimeError(
-                        "QSA cache 'indexer_state' target-verify tail resolves to "
-                        "an unallocated or out-of-range physical block"
+                        "QSA cache 'indexer_state' block table does not cover the "
+                        "target-verify tail"
                     )
+                if not graph_target:
+                    block_id = int(state_table[request_idx, logical_block].item())
+                    if block_id <= 0 or block_id >= int(state_pool.shape[0]):
+                        raise RuntimeError(
+                            "QSA cache 'indexer_state' target-verify tail resolves to "
+                            "an unallocated or out-of-range physical block"
+                        )
+    else:
+        qsa_assert_valid(
+            _required_blocks_verdict(
+                state_table,
+                required_state_columns,
+                pool_blocks=int(state_pool.shape[0]),
+            ),
+            "QSA cache 'indexer_state' target-verify tail is not covered or "
+            "resolves to an unallocated or out-of-range physical block",
+        )
 
     return TargetVerifyPlan(
         **{
