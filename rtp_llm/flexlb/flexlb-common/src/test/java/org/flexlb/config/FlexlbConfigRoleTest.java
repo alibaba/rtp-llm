@@ -13,7 +13,7 @@ class FlexlbConfigRoleTest {
         FlexlbConfig config = new FlexlbConfig();
         assertNull(config.getRequestLifecycle().getRequest().getTimeoutMs());
         assertEquals(2.0, config.getRequestLifecycle().getDecision().getLifetime());
-        assertEquals(2, config.getDispatcher().getMaxInflightPerPrefillWorker());
-        assertEquals(2, ConfigTestSupport.nonBatch().getMaxInflightPerPrefillWorker());
+        assertEquals(128, config.getDispatcher().getMaxInflightPerPrefillWorker());
+        assertEquals(128, ConfigTestSupport.nonBatch().getMaxInflightPerPrefillWorker());
     }
 }

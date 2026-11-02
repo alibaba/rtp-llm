@@ -320,6 +320,7 @@ class WorkerBatcherRequestCapacityTest {
     private static FlexlbConfig preemptionConfig() {
         FlexlbConfig config = productionConfig();
         config.setDispatcher(ConfigTestSupport.nonBatch());
+        config.getDispatcher().setMaxInflightPerPrefillWorker(2);
         config.getScheduler().setOrdering(ConfigTestSupport.priority());
         return config;
     }
@@ -355,16 +356,16 @@ class WorkerBatcherRequestCapacityTest {
     }
 
     @Test
-    void singleDecisionUsesTheDefaultTwoRequestLimit() {
+    void singleDecisionUsesTheDefault128RequestLimit() {
         FlexlbConfig config = productionConfig();
         config.setDispatcher(ConfigTestSupport.nonBatch());
         config.getScheduler().setDecision(ConfigTestSupport.single());
         try (Fixture fixture = fixture(config)) {
-            for (long requestId = 1L; requestId <= 2L; requestId++) {
+            for (long requestId = 1L; requestId <= 128L; requestId++) {
                 assertTrue(EndpointTestSupport.offer(fixture.endpoint, item(config, fixture.endpoint, requestId)));
             }
-            assertEquals(2L, fixture.endpoint.ownership.admissionSummary(0, fixture.endpoint.requestLimit).occupiedRequests());
-            assertFalse(EndpointTestSupport.offer(fixture.endpoint, item(config, fixture.endpoint, 3L)));
+            assertEquals(128L, fixture.endpoint.ownership.admissionSummary(0, fixture.endpoint.requestLimit).occupiedRequests());
+            assertFalse(EndpointTestSupport.offer(fixture.endpoint, item(config, fixture.endpoint, 129L)));
         }
     }
 
@@ -397,35 +398,36 @@ class WorkerBatcherRequestCapacityTest {
     }
 
     @Test
-    void defaultBatchLimitAllowsTwoReservationsAndReopensAfterRelease() {
+    void defaultBatchLimitAllows128ReservationsAndReopensAfterRelease() {
         FlexlbConfig config = productionConfig();
         config.getDispatcher().setType(org.flexlb.config.DispatcherConfig.Type.BATCH);
+        int limit = config.getDispatcher().getMaxInflightPerPrefillWorker();
+        assertEquals(128, limit);
         try (Fixture fixture = fixture(config)) {
             var items = new ArrayList<RequestRoute>();
             var reservations = new ArrayList<PrefillState.BatchReservation>();
             try {
-                for (long id = 1L; id <= 3L; id++) {
+                for (long id = 1L; id <= limit + 1L; id++) {
                     RequestRoute queued = item(config, fixture.endpoint, id);
                     items.add(queued);
-                    assertEquals(2, config.getDispatcher().getMaxInflightPerPrefillWorker());
                     assertTrue(EndpointTestSupport.offer(fixture.endpoint, queued),
                             "BATCH does not impose an additional request-count limit on the waiting queue");
                 }
-                for (int index = 0; index < 2; index++) {
+                for (int index = 0; index < limit; index++) {
                     var result = fixture.endpoint.reserveBatch(items.get(index), 100L + index,
                             config.getDispatcher().getMaxInflightPerPrefillWorker());
                     assertEquals(PrefillState.CapacityStatus.ACQUIRED, result.status());
                     reservations.add(result.reservation());
                 }
                 assertEquals(PrefillState.CapacityStatus.CAPACITY_FULL,
-                        fixture.endpoint.reserveBatch(items.get(2), 102L, 2).status());
-                assertEquals(2, fixture.endpoint.ownership.progress().batchSlots());
+                        fixture.endpoint.reserveBatch(items.get(limit), 100L + limit, limit).status());
+                assertEquals(limit, fixture.endpoint.ownership.progress().batchSlots());
                 var released = fixture.endpoint.ownership.release(reservations.removeFirst(), null);
                 assertEquals(PrefillState.RequestRelease.RESERVED, released.kind());
                 assertNotNull(released.generationHandoff());
                 released.generationHandoff().close();
-                assertEquals(1, fixture.endpoint.ownership.progress().batchSlots());
-                var replacement = fixture.endpoint.reserveBatch(items.get(2), 102L, 2);
+                assertEquals(limit - 1, fixture.endpoint.ownership.progress().batchSlots());
+                var replacement = fixture.endpoint.reserveBatch(items.get(limit), 100L + limit, limit);
                 assertEquals(PrefillState.CapacityStatus.ACQUIRED, replacement.status());
                 reservations.add(replacement.reservation());
             } finally {

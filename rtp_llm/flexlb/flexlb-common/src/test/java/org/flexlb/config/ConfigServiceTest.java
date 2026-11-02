@@ -87,7 +87,7 @@ class ConfigServiceTest {
         assertEquals(8, config.decisionPolicy().getMaxRequests());
         assertEquals(300L, config.decisionPolicy().getMaxCollectionWaitMs());
         assertNull(config.decisionPolicy().getMaxPredictedExecutionMs());
-        assertEquals(2, config.getDispatcher().getMaxInflightPerPrefillWorker());
+        assertEquals(128, config.getDispatcher().getMaxInflightPerPrefillWorker());
         var prefill = config.getRouter().getRoles().getPrefill();
         assertEquals(RoutingConfig.EstimatorType.FORMULA, prefill.getExecutionTimeEstimator().getType());
         assertEquals("sum(computeTokens) + 0.3*sum(hitCacheTokens)",
