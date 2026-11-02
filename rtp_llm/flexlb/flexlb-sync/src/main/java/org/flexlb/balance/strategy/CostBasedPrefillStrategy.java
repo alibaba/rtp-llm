@@ -57,6 +57,7 @@ public class CostBasedPrefillStrategy {
     private final RoutingConfig.CacheAffinityConfig cacheAffinity;
     private final double cacheAffinityMinHitRate;
     private final String deliveryMode;
+    private final int maxInflightBatches;
     private final RoutingConfig.TokenBalanceConfig tokenBalance;
     private final Object tokenSelectionLock = new Object();
 
@@ -73,6 +74,7 @@ public class CostBasedPrefillStrategy {
         priorityOrdering = config.isPriorityOrdering();
         preemptQueued = config.allowsPreemption(VictimStage.PREFILL_QUEUED);
         deliveryMode = config.getDispatcher().typeName();
+        maxInflightBatches = config.getDispatcher().requiresGenerateInput() ? config.getDispatcher().getMaxInflightPerPrefillWorker() : 0;
         tokenBalance = config.getRouter().getRoles().getPrefill().getTokenBalance();
         var affinity = config.getRouter().getRoles().getPrefill().getCacheAffinity();
         cacheAffinity = affinity;
@@ -191,6 +193,14 @@ public class CostBasedPrefillStrategy {
             }
         }
 
+        boolean hot = tokenBalance != null && PrefillTokenBalance.cacheFirst(
+                fleetMaxHit, seqLen, tokenBalance.getMinPrefixHitPercent());
+        route.setColdTokenBalance(tokenBalance != null && !hot);
+        boolean migrating = tokenBalance != null && tokenBalance.getHotspotRescue() != null
+                && route.ctx().prefillMigrationSource() != null;
+        // A migrated hot request must recheck target load and exclude its old worker,
+        // while retaining the same maximum-cache-hit eligibility as normal routing.
+        rescue = migrating || (rescue && !hot);
         int selectedIndex;
         if (tokenBalance == null) {
             selectedIndex = selectBestCandidate(survivors, survivors.minimumTtftRank, roleType, group, seqLen);
@@ -200,7 +210,7 @@ public class CostBasedPrefillStrategy {
             synchronized (tokenSelectionLock) {
                 selectedIndex = rescue ? selectRescueCandidate(survivors, roleType, group, seqLen, fleetMaxHit, route.ctx().prefillMigrationSource())
                         : selectTokenBalancedCandidate(survivors, roleType, group, seqLen, fleetMaxHit);
-                if (selectedIndex < 0 && rescue && hasEngineQueueAdmission(survivors)) {
+                if (selectedIndex < 0 && rescue && !migrating && hasEngineQueueAdmission(survivors)) {
                     selectedIndex = selectTokenBalancedCandidate(survivors, roleType, group, seqLen, fleetMaxHit);
                 }
                 if (selectedIndex >= 0) {
@@ -506,7 +516,7 @@ public class CostBasedPrefillStrategy {
             if (!PrefillTokenBalance.eligible(candidates.cacheHit(i), maxHit, cacheFirst)) { continue; }
             var work = candidates.endpoint(i).ownership.tokenWorkload();
             if (candidates.endpoint(i) == excluded || work.pendingTokens() + work.plannedTokens() > tokenBalance.getHotspotRescue().getMaxIdlePendingTokens()) { continue; }
-            scores[i] = work.score() + Math.max(0L, seqLen - candidates.cacheHit(i));
+            scores[i] = cacheFirst ? 0.0 : work.score() + Math.max(0L, seqLen - candidates.cacheHit(i));
             minimum = Math.min(minimum, scores[i]);
         }
         if (!Double.isFinite(minimum)) { return -1; }
@@ -529,7 +539,7 @@ public class CostBasedPrefillStrategy {
             // Preserve a busy cache leader by parking globally, where existing HIT_RATE shedding applies.
             if (!PrefillTokenBalance.hasCapacity(work.pendingTokens(), tokenBalance.getMaxPendingComputeTokens())
                     && !candidates.endpoint(i).engineQueueAllowsAdmission()) { continue; }
-            scores[i] = work.score() + Math.max(0L, seqLen - candidates.cacheHit(i));
+            scores[i] = cacheFirst ? 0.0 : work.score() + Math.max(0L, seqLen - candidates.cacheHit(i));
             minimum = Math.min(minimum, scores[i]);
         }
         if (!Double.isFinite(minimum)) { return -1; }
@@ -695,6 +705,8 @@ public class CostBasedPrefillStrategy {
             registered++;
             // Capacity can remove dispatch candidates, but must not redefine cache eligibility.
             if (tokenBalance != null) { cacheCandidates.add(entry); }
+            if (tokenBalance != null && maxInflightBatches > 0
+                    && !endpoint.ownership.batchCapacityAvailable(maxInflightBatches)) { continue; }
             if ((endpoint.requestLimit == 0L || endpoint.ownership.progress().outstandingRequests() < endpoint.requestLimit)
                     || preemptQueued && endpoint.ownership.canPreemptQueuedRequest(metadata.priority(), endpoint.requestLimit)) {
                 if (group == null && matching.isEmpty()) { matching.ensureCapacity(directory.size()); }

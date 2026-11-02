@@ -142,7 +142,7 @@ public class PrefillBalanceSimulation {
                 for(int i:cached.keySet()) {
                     if(pendingTokens[i]>=cap || !PrefillTokenBalance.eligible((long)hits[i],max,affinity))continue;
                     var w=workers[i];
-                    double score=policy==Policy.CACHE_WINDOW ? workScores[i]+q.tokens-hits[i]
+                    double score=policy==Policy.CACHE_WINDOW ? (affinity ? 0 : workScores[i]+q.tokens-hits[i])
                         : Math.max(0,w.busyUntil-now)*TPS/1000+w.pendingCompute+q.tokens-hits[i];
                     if(score<best || score==best && (selected<0 || Math.floorMod(i-cursor,N)<Math.floorMod(selected-cursor,N))) {
                         best=score;selected=i;

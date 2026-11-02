@@ -138,7 +138,7 @@ public final class PrefillState {
     }
 
     /** One exact ownership transaction; predictions are computed before entering the ledger lock. */
-    public enum CommitKind { DIRECT, QUEUED, BATCH }
+    public enum CommitKind { DIRECT, QUEUED, BATCH, UNQUEUED_BATCH }
 
     public record CommitPlan(CommitKind kind, List<RequestRoute> items, List<RouteReservation> routeReservations,
             BatchReservation batchReservation, long[] predictions, RequestRoute failedMember, long selectionTimeMs) {
@@ -604,6 +604,27 @@ public final class PrefillState {
         }
     }
 
+    /** Cold batch requests acquire a batch slot and token work without entering a worker queue. */
+    ReservationResult<BatchReservation> reserveUnqueuedBatch(RequestRoute route, long batchId, int maximum,
+            EndpointGenerationLifecycle.HandoffPermit handoff) {
+        checkArgument(maximum > 0, "maximumInflightBatches must be positive");
+        lock.lock();
+        try {
+            if (requests.containsKey(route.requestId())) { return new ReservationResult<>(CapacityStatus.REQUEST_ALREADY_RESERVED, null); }
+            if (batches.containsKey(batchId)) { return new ReservationResult<>(CapacityStatus.BATCH_ID_ALREADY_RESERVED, null); }
+            if (!tokenCapacityAvailable() || batches.size() >= maximum) { return new ReservationResult<>(CapacityStatus.CAPACITY_FULL, null); }
+            var entry = new RequestEntry(route, OwnershipStage.DIRECT_RESERVED);
+            var lease = new BatchReservation(this, entry, batchId, handoff);
+            entry.reservation = lease;
+            requests.put(route.requestId(), entry);
+            batches.put(batchId, new PrefillBatch(batchId, lease));
+            acceptTokenWork(route);
+            committedWorkCapture = null;
+            recordMutationLocked();
+            return new ReservationResult<>(CapacityStatus.ACQUIRED, lease);
+        } finally { lock.unlock(); }
+    }
+
     public boolean batchCapacityAvailable(int maximum) {
         checkArgument(maximum > 0, "maximumInflightBatches must be positive");
         lock.lock();
@@ -621,11 +642,12 @@ public final class PrefillState {
         var leases = plan.routeReservations();
         var batchLease = plan.batchReservation();
         var predictions = plan.predictions;
-        boolean direct = plan.kind() == CommitKind.DIRECT;
+        boolean direct = plan.kind() == CommitKind.DIRECT || plan.kind() == CommitKind.UNQUEUED_BATCH;
+        boolean batchPlan = plan.kind() == CommitKind.BATCH || plan.kind() == CommitKind.UNQUEUED_BATCH;
         if (plan.kind() == CommitKind.BATCH && !ownsSelectionLocked(items, plan.selectionTimeMs())) { return null; }
-        checkArgument((plan.kind() == CommitKind.BATCH) == (batchLease != null), "plan kind does not match batch preparation");
-        checkArgument(direct ? !leases.isEmpty() : leases.isEmpty(), "DIRECT plan requires reservations; queued plan cannot own them");
-        checkArgument(direct ? predictions.length == 0 : predictions.length == (batchLease == null ? items.size() : 1),
+        checkArgument(batchPlan == (batchLease != null), "plan kind does not match batch preparation");
+        checkArgument(direct && !batchPlan ? !leases.isEmpty() : leases.isEmpty(), "DIRECT plan requires reservations; queued plan cannot own them");
+        checkArgument(direct && !batchPlan ? predictions.length == 0 : predictions.length == (batchLease == null ? items.size() : 1),
                 "prediction count does not match plan");
         checkState(!items.isEmpty(), "committed group requires members");
         Set<RequestEntry> unique = java.util.Collections.newSetFromMap(new IdentityHashMap<>());
@@ -638,7 +660,7 @@ public final class PrefillState {
             checkState(activeIndex.contains(route) == !direct, "plan member has inconsistent queue ownership");
             members.add(entry);
         }
-        checkArgument(!direct || leases.size() == items.size(), "DIRECT plan requires one exact lease per member");
+        checkArgument(!direct || batchPlan || leases.size() == items.size(), "DIRECT plan requires one exact lease per member");
         PrefillBatch batch = batchLease == null ? null : batches.get(batchLease.batchId);
         if (batchLease != null) {
             checkState(batchLease.owner == this && batch != null && batch.preparation == batchLease
@@ -649,7 +671,7 @@ public final class PrefillState {
         Objects.requireNonNull(handoff, "generationHandoff");
         for (int i = 0; i < members.size(); i++) {
             var member = members.get(i);
-            Reservation expected = direct ? leases.get(i) : batchLease != null && member == batchLease.originalOwner ? batchLease : null;
+            Reservation expected = direct && !batchPlan ? leases.get(i) : batchLease != null && member == batchLease.originalOwner ? batchLease : null;
             checkArgument(expected == null || expected.owner == this, "preparation belongs to another ledger");
             checkState(member.reservation == expected && (expected == null
                     || expected.originalOwner == member), "plan does not own exact member preparation");

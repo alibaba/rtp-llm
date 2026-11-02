@@ -38,6 +38,14 @@ public final class RequestRoute implements GroupPlanner.Input, AutoCloseable {
     private ServerStatus decode;
     private ServerStatus vit;
     private long prefillWorkMs;
+    private boolean coldTokenBalance;
+
+    public void setColdTokenBalance(boolean cold) {
+        checkState(constructionState == BUILDING, "routing policy is frozen after selection");
+        coldTokenBalance = cold;
+    }
+
+    boolean coldTokenBalance() { return coldTokenBalance; }
     private org.flexlb.balance.strategy.PrefillTokenWorkload.Reservation tokenPlan;
 
     public void reserveTokenPlan(org.flexlb.balance.strategy.PrefillTokenWorkload.Reservation plan) {
@@ -74,6 +82,7 @@ public final class RequestRoute implements GroupPlanner.Input, AutoCloseable {
             prefill = selected.prefill;
             decode = selected.decode;
             prefillWorkMs = selected.prefillWorkMs;
+            coldTokenBalance = selected.coldTokenBalance;
             tokenPlan = selected.tokenPlan;
             prefillVersion = selected.prefillVersion;
             decodeVersion = selected.decodeVersion;
