@@ -1,0 +1,14 @@
+--- a/deep_gemm/__init__.py
++++ b/deep_gemm/__init__.py
+@@ -1,6 +1,11 @@
+ import os
+ import subprocess
+ import torch
++
++os.environ.setdefault(
++    "RTP_PPU_MEGA_LUT_PATH",
++    os.path.join(os.path.dirname(__file__), "configs", "dsv4_flash_bm64"),
++)
+ 
+ # SDK root: env PPU_SDK > env PPU_HOME > default
+ PPU_HOME = os.environ.get('PPU_SDK') or os.environ.get('PPU_HOME') or '/usr/local/PPU_SDK'
