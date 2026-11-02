@@ -243,7 +243,12 @@ class IndexerPrefixReuseTritonTest(unittest.TestCase):
             device="cuda",
             dtype=torch.bfloat16,
         )
-        q, token_k = torch.split(qk, [self.HEADS * 128, 128], dim=-1)
+        q, token_k, *_ = torch.split(
+            qk,
+            [self.HEADS * 128, 128]
+            + ([extra_columns] if extra_columns else []),
+            dim=-1,
+        )
         args["q"] = q.reshape(tokens, self.HEADS, 128)
         args["raw"] = token_k.reshape(tokens, 1, 128).squeeze(-2)
         self.assertFalse(args["q"].is_contiguous())
