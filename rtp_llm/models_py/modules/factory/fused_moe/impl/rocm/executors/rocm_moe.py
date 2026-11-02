@@ -189,6 +189,20 @@ class RocmExpertsFp8PerChannel(FusedMoeExpertExecutor):
         self.quant_config.per_out_ch_quant = True
         self.quant_config.block_shape = None
 
+        # Only the validated single-EP gfx942 per-channel path is changed.
+        self._fp32_topk_reduce = False
+        if (
+            config.rocm_moe_fp32_topk_reduce
+            and torch.version.hip
+            and config.ep_size == 1
+            and weights[W.moe_w1].is_cuda
+        ):
+            arch = torch.cuda.get_device_properties(weights[W.moe_w1].device).gcnArchName
+            self._fp32_topk_reduce = (
+                arch.split(":", 1)[0] == "gfx942"
+                and weights[W.moe_w1].dtype == torch.float8_e4m3fnuz
+            )
+
         self.num_experts = config.expert_num
         self.ep_rank = config.ep_rank
         self.ep_size = config.ep_size
@@ -245,6 +259,10 @@ class RocmExpertsFp8PerChannel(FusedMoeExpertExecutor):
         )
 
         hidden_states = payload.expert_x
+        if hidden_states.size(0) == 0:
+            return CombineForwardPayload(
+                fused_expert_output=hidden_states.new_empty((0, self.w2.size(1)))
+            )
         if apply_router_weight_on_input:
             assert (
                 topk_weights.dim() == 2
@@ -256,7 +274,20 @@ class RocmExpertsFp8PerChannel(FusedMoeExpertExecutor):
             hidden_states = hidden_states * topk_weights.to(hidden_states.dtype)
             topk_weights = torch.ones_like(topk_weights, dtype=torch.float32)
 
-        output = fused_moe(
+        moe_impl = fused_moe
+        if (
+            self._fp32_topk_reduce
+            and hidden_states.dtype == torch.bfloat16
+            and topk_ids.size(1) > 1
+            and effective_expert_mask is None
+        ):
+            from rtp_llm.models_py.modules.factory.fused_moe.impl.rocm.executors.fp32_topk_reduce import (
+                fp8_moe_fp32_topk_reduce,
+            )
+
+            moe_impl = fp8_moe_fp32_topk_reduce
+
+        output = moe_impl(
             hidden_states,
             self.w1,
             self.w2,

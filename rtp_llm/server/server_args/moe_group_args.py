@@ -186,6 +186,16 @@ def init_moe_group_args(parser, moe_config, eplb_config, deep_ep_config):
         help="指定moe strategy, 默认为auto",
     )
     moe_group.add_argument(
+        "--rocm_moe_fp32_topk_reduce",
+        env_name="ROCM_MOE_FP32_TOPK_REDUCE",
+        bind_to=(moe_config, "rocm_moe_fp32_topk_reduce"),
+        type=str2bool,
+        default=False,
+        help="Opt in to fixed-order FP32 expert reduction for gfx942 per-channel FP8 MoE "
+        "(EP=1, BF16 input, top-k>1, no expert mask). Adds runtime overhead; "
+        "does not guarantee deterministic end-to-end inference.",
+    )
+    moe_group.add_argument(
         "--fp4_moe_op",
         env_name="FP4_MOE_OP",
         bind_to=(moe_config, "fp4_moe_op"),

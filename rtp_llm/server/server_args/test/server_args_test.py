@@ -90,6 +90,19 @@ class DecodeGraphCapacityArgumentsTest(TestCase):
         disabled = self.create_engine(["--enable_decode_cascade_attention", "0"], env)
         self.assertFalse(disabled.hw_kernel_config.enable_decode_cascade_attention)
 
+    def test_rocm_moe_fp32_reduce_is_opt_in_and_cli_overrides_env(self):
+        self.assertFalse(self.create_engine().moe_config.rocm_moe_fp32_topk_reduce)
+        env = {"ROCM_MOE_FP32_TOPK_REDUCE": "1"}
+        self.assertTrue(self.create_engine(env=env).moe_config.rocm_moe_fp32_topk_reduce)
+        for args in (
+            ["--rocm_moe_fp32_topk_reduce", "0"],
+            ["--rocm_moe_fp32_topk_reduce=false"],
+        ):
+            with self.subTest(args=args):
+                self.assertFalse(
+                    self.create_engine(args, env).moe_config.rocm_moe_fp32_topk_reduce
+                )
+
     def test_disabling_graph_allows_rollback_with_retained_buckets(self):
         config = self.create_engine(
             ["--concurrency_limit", "8", "--decode_capture_config", "2048"]

@@ -93,7 +93,9 @@ def _make_parallelism_config():
     return p
 
 
-def _make_config_adapter(expert_num: int, top_k: int, inter_dim: int):
+def _make_config_adapter(
+    expert_num: int, top_k: int, inter_dim: int, fp32_topk_reduce: bool = False
+):
     model_config = ModelConfig()
     model_config.attn_config.head_num = 4
     model_config.attn_config.size_per_head = 64
@@ -105,10 +107,12 @@ def _make_config_adapter(expert_num: int, top_k: int, inter_dim: int):
     model_config.inter_size = inter_dim
     model_config.activation_type = "silu"
 
+    moe_config = MoeConfig()
+    moe_config.rocm_moe_fp32_topk_reduce = fp32_topk_reduce
     return MoEConfigAdapter(
         model_config=model_config,
         parallelism_config=_make_parallelism_config(),
-        moe_config=MoeConfig(),
+        moe_config=moe_config,
     )
 
 
@@ -204,6 +208,8 @@ class RocmExpertsFp8PerChannelTest(_Fp8MoeBaseTest):
             config_adapter, FusedMoEQuantConfig(), weights
         )
 
+        self.assertFalse(executor._fp32_topk_reduce)
+
         out = executor.execute(
             payload=payload,
             activation="silu",
@@ -229,6 +235,79 @@ class RocmExpertsFp8PerChannelTest(_Fp8MoeBaseTest):
 class RocmPerChannelPrefillGraphTest(_Fp8MoeBaseTest):
     """Replay a fixed bucket with different routing and sentinel token counts."""
 
+    def test_fused_quantization_matches_aiter(self):
+        import aiter
+        import triton
+
+        from rtp_llm.models_py.modules.factory.fused_moe.impl.rocm.executors.fp32_topk_reduce import (
+            _quantize_expand,
+        )
+
+        if torch.cuda.get_device_properties(0).gcnArchName.split(":")[0] != "gfx942":
+            raise SkipTest("FNUZ quantization is gfx942-specific")
+        for width in (256, 1024, 4096):
+            inputs = torch.randn(33, width, dtype=torch.bfloat16, device=self.device)
+            inputs[0].zero_()
+            inputs[1].fill_(0.125)
+            inputs[2].mul_(32)
+            inputs[3].mul_(1e-8)
+            reference, reference_scale = aiter.get_hip_quant(aiter.QuantType.per_Token)(
+                inputs, quant_dtype=self.fp8_dtype
+            )
+            quantized = torch.empty(
+                (33 * 8, width), dtype=self.fp8_dtype, device=self.device
+            )
+            scales = torch.empty((33 * 8, 1), dtype=torch.float32, device=self.device)
+            _quantize_expand[(33,)](
+                inputs, quantized, scales, width, 8, triton.next_power_of_2(width)
+            )
+            for slot in range(8):
+                self.assertTrue(
+                    torch.equal(
+                        quantized.view(torch.uint8).view(33, 8, width)[1:, slot],
+                        reference.view(torch.uint8)[1:],
+                    )
+                )
+                self.assertTrue(
+                    torch.equal(scales.view(33, 8)[:, slot], reference_scale.reshape(33))
+                )
+            self.assertEqual(torch.count_nonzero(quantized[:8].float()).item(), 0)
+
+    def test_reduction_uses_updated_graph_inputs(self):
+        import triton
+
+        from rtp_llm.models_py.modules.factory.fused_moe.impl.rocm.executors.fp32_topk_reduce import (
+            _reduce_topk,
+        )
+
+        tokens, topk, width = 3, 8, 513
+        inputs = torch.randn(tokens, topk, width, dtype=torch.bfloat16, device=self.device)
+        output = torch.empty(tokens, width, dtype=torch.bfloat16, device=self.device)
+
+        def run():
+            _reduce_topk[(tokens, triton.cdiv(width, 256))](inputs, output, width, topk, 256)
+
+        def reference():
+            value = torch.zeros(tokens, width, dtype=torch.float32, device=self.device)
+            for index in range(topk):
+                value.add_(inputs[:, index].float())
+            return value.bfloat16()
+
+        run()
+        self.assertTrue(torch.equal(output, reference()))
+        stream = torch.cuda.Stream()
+        stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(stream):
+            run()
+        torch.cuda.current_stream().wait_stream(stream)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            run()
+        for _ in range(3):
+            inputs.normal_()
+            graph.replay()
+            self.assertTrue(torch.equal(output, reference()))
+
     def test_replay_updates_routing_and_padding(self):
         experts, width, inter, topk = 16, 256, 256, 8
         q1, s1 = _per_channel_quant_fp8(
@@ -240,7 +319,7 @@ class RocmPerChannelPrefillGraphTest(_Fp8MoeBaseTest):
             self.fp8_dtype,
         )
         executor = RocmExpertsFp8PerChannel(
-            _make_config_adapter(experts, topk, 2 * inter),
+            _make_config_adapter(experts, topk, 2 * inter, fp32_topk_reduce=True),
             FusedMoEQuantConfig(),
             {
                 W.moe_w1: shuffle_weight(q1, (16, 16)),

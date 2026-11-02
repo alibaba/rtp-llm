@@ -1,7 +1,31 @@
 import pickle
 import unittest
 
-from rtp_llm.ops import DeviceResourceConfig, GrammarConfig, HWKernelConfig
+from rtp_llm.ops import DeviceResourceConfig, GrammarConfig, HWKernelConfig, MoeConfig
+
+
+class MoeConfigPickleTest(unittest.TestCase):
+    def test_fp32_topk_reduce_round_trip(self):
+        self.assertFalse(MoeConfig().rocm_moe_fp32_topk_reduce)
+        for enabled in (False, True):
+            with self.subTest(enabled=enabled):
+                config = MoeConfig()
+                config.rocm_moe_fp32_topk_reduce = enabled
+                restored = pickle.loads(pickle.dumps(config))
+                self.assertEqual(restored.rocm_moe_fp32_topk_reduce, enabled)
+                self.assertIn("rocm_moe_fp32_topk_reduce", restored.to_string())
+
+    def test_previous_layout_defaults_to_disabled(self):
+        config = MoeConfig()
+        config.rocm_moe_fp32_topk_reduce = True
+        restored = MoeConfig.__new__(MoeConfig)
+        restored.__setstate__(config.__getstate__()[:12])
+        self.assertFalse(restored.rocm_moe_fp32_topk_reduce)
+
+    def test_invalid_layout_is_rejected(self):
+        config = MoeConfig.__new__(MoeConfig)
+        with self.assertRaisesRegex(RuntimeError, "Invalid state"):
+            config.__setstate__((False,))
 
 
 class HWKernelConfigPickleTest(unittest.TestCase):

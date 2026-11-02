@@ -262,7 +262,8 @@ std::string MoeConfig::to_string() const {
         << "use_all_gather: " << use_all_gather << "\n"
         << "ll_num_max_token: " << ll_num_max_token << "\n"
         << "moe_strategy: " << moe_strategy << "\n"
-        << "fp4_moe_op: " << fp4_moe_op;
+        << "fp4_moe_op: " << fp4_moe_op << "\n"
+        << "rocm_moe_fp32_topk_reduce: " << rocm_moe_fp32_topk_reduce;
     return oss.str();
 }
 
