@@ -9,6 +9,24 @@ requirement([
 ])
 
 py_test(
+    name = "test_selected_states",
+    srcs = ["test_selected_states.py"],
+    deps = [
+        "//rtp_llm/models_py/triton_kernels:fla",
+        "//rtp_llm/models_py/triton_kernels:kimi_kda",
+    ] + [
+        ":einops",
+        ":numpy",
+        ":packaging",
+        ":torch",
+        ":triton",
+    ],
+    visibility = ["//visibility:public"],
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
+)
+
+py_test(
     name = "test_kda_ops",
     srcs = [
         "test_kda_ops.py",

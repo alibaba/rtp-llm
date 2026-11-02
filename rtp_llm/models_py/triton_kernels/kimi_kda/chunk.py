@@ -10,6 +10,9 @@
 
 import torch
 
+from rtp_llm.models_py.triton_kernels.fla.chunk_delta_h import (
+    _validate_selected_state_output_alias,
+)
 from rtp_llm.models_py.triton_kernels.fla.index import prepare_chunk_indices
 from rtp_llm.models_py.triton_kernels.fla.l2norm import l2norm_fwd
 from rtp_llm.models_py.triton_kernels.kimi_kda.chunk_fwd import chunk_kda_fwd
@@ -33,6 +36,8 @@ class ChunkKDAFunction(torch.autograd.Function):
         use_gate_in_kernel: bool = False,
         cu_seqlens: torch.LongTensor | None = None,
         return_intermediate_states: bool = False,
+        state_positions: torch.Tensor | None = None,
+        selected_states: torch.Tensor | None = None,
     ):
         chunk_size = 64
 
@@ -68,6 +73,8 @@ class ChunkKDAFunction(torch.autograd.Function):
                 dt_bias=dt_bias,
                 disable_recompute=False,
                 return_intermediate_states=return_intermediate_states,
+                state_positions=state_positions,
+                selected_states=selected_states,
             )
         )
 
@@ -91,6 +98,8 @@ def chunk_kda(
     use_gate_in_kernel: bool = False,
     cu_seqlens: torch.LongTensor | None = None,
     return_intermediate_states: bool = False,
+    state_positions: torch.Tensor | None = None,
+    selected_states: torch.Tensor | None = None,
     **kwargs,
 ):
     r"""
@@ -110,10 +119,36 @@ def chunk_kda(
             If True, kwargs must contain `A_log` and optionally `dt_bias`.
         cu_seqlens (torch.LongTensor): Cumulative sequence lengths `[N+1]`.
         return_intermediate_states (bool): Return intermediate states for inference.
+        state_positions (torch.Tensor): Optional contiguous CUDA int32/int64
+            `[N, S]` sequence-local prefix lengths. Zero selects initial state;
+            invalid positions write zeros. Duplicates and unsorted slots work.
+        selected_states (torch.Tensor): Optional caller-owned contiguous CUDA
+            FP32 `[N, S, H, K, V]` destination. Supply together with positions;
+            it must not share storage with inputs. Existing returns are unchanged.
 
     Returns:
         (o, final_state) or (o, final_state, h) if return_intermediate_states=True.
     """
+    if (state_positions is None) != (selected_states is None):
+        raise ValueError(
+            "state_positions and selected_states must be provided together"
+        )
+    if selected_states is not None:
+        if not selected_states.is_contiguous():
+            raise ValueError("selected_states must be contiguous")
+        _validate_selected_state_output_alias(
+            selected_states,
+            q=q,
+            k=k,
+            v=v,
+            g=g,
+            beta=beta,
+            initial_state=initial_state,
+            cu_seqlens=cu_seqlens,
+            state_positions=state_positions,
+            A_log=kwargs.get("A_log"),
+            dt_bias=kwargs.get("dt_bias"),
+        )
     if cu_seqlens is not None:
         if q.shape[0] != 1:
             raise ValueError(
@@ -160,4 +195,6 @@ def chunk_kda(
         use_gate_in_kernel,
         cu_seqlens,
         return_intermediate_states,
+        state_positions,
+        selected_states,
     )
