@@ -268,7 +268,7 @@ class Qwen4ExpStepPlanTest(unittest.TestCase):
 
         found = qsa_step_plan.lookup_prefill_step_plan(context.main_inputs, 5)
         self.assertIs(found, plan.step)
-        self.assertEqual(found.kv_lens_rows[0].tolist(), [9, 10, 11, 12, 13])
+        self.assertEqual(found.kv_lens_rows[0].reshape(-1).tolist(), [9, 10, 11, 12, 13])
         self.assertEqual(found.cu_host, [0, 5])
         self.assertEqual(
             found.padded_kv_lens.shape,
@@ -301,7 +301,10 @@ class Qwen4ExpStepPlanTest(unittest.TestCase):
         )
         self.assertEqual(
             step.padded_kv_lens.tolist(),
-            [[8 + row + 1 if row < 5 else 0 for row in range(max_rows)]],
+            [
+                [8 + row + 1 if row < 5 else 0 for row in range(max_rows)],
+                [16 + row + 1 if row < 8 else 0 for row in range(max_rows)],
+            ],
         )
 
     def test_cold_plan_hits_within_one_step_and_keeps_the_rope_table(self):
