@@ -16,7 +16,12 @@ from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer import (
     build_qsa_rope_from_logical_positions,
 )
 
-from .qsa_cache_views import _block_table, _same_tensor_metadata, _typed_2d_pool
+from .qsa_cache_views import (
+    _block_table,
+    _same_tensor_metadata,
+    _typed_2d_pool,
+    qsa_strict_validation_enabled,
+)
 from .qsa_selection import select_qsa_paged_tokens
 from .qsa_step_plan import get_cold_step_plan
 
@@ -452,10 +457,21 @@ def select_prefix_reuse_prefill_tokens(
     *,
     indexer: Any,
     rope_config: Any,
+    raw_query: bool = False,
 ) -> torch.Tensor:
-    """Selection for a page-aligned prefix-reuse target prefill."""
+    """Selection for a page-aligned prefix-reuse target prefill.
+
+    ``raw_query=True`` hands over an un-normed projection; the fused
+    preparation writer then owns the gemma norm, and this path applies the
+    exact model-level norm inline whenever that writer declines.
+    """
     return self._incremental_prefill_selection(
-        q, raw_keys, indexer=indexer, rope_config=rope_config, draft=False
+        q,
+        raw_keys,
+        indexer=indexer,
+        rope_config=rope_config,
+        draft=False,
+        raw_query=raw_query,
     )
 
 
@@ -493,6 +509,7 @@ def _incremental_prefill_selection(
     rope_config: Any,
     draft: bool,
     draft_prefix_reuse: bool = False,
+    raw_query: bool = False,
 ) -> torch.Tensor:
     """Shared paged selection for incremental prefill builds.
 
@@ -507,6 +524,11 @@ def _incremental_prefill_selection(
     weights and the int32 length/prefix mirrors) come from the frozen step
     plan inside ``plan``; the legacy inline rebuilds remain as the fallback
     for plans assembled without one.
+
+    ``raw_query=True`` (target prefix reuse only) hands over an un-normed
+    ``q``: the fused preparation writer then owns the gemma norm, and a
+    decline falls back to the exact model-level norm plus the legacy
+    staged-vectorized path.
     """
     label = "draft incremental prefill" if draft else "prefix-reuse prefill"
 
@@ -542,107 +564,166 @@ def _incremental_prefill_selection(
         raise RuntimeError(
             f"qwen4_exp QSA {label} paged scoring requires " "CUDA tensors"
         )
-    triton_draft_window = (
-        draft
-        and max(plan.lengths) <= 4
-        and int(plan.ratio) == 4
-        and int(plan.head_dim) == 128
-        and int(plan.kv_tokens_per_block) in (64, 128)
-        and int(plan.state_tokens_per_block) == int(plan.kv_tokens_per_block)
-    )
-    if triton_draft_window:
-        from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_decode_triton import (
-            write_draft_window_with_undo_,
+    fused = None
+    if (
+        raw_query
+        and not draft
+        and not draft_prefix_reuse
+        and step is not None
+        and step.selection_valid_rows is not None
+        and step.padded_score_weights is not None
+        and not qsa_strict_validation_enabled()
+    ):
+        # The frozen step plan carries every table the fused preparation
+        # writer consumes. Strict validation keeps the legacy staged writer
+        # with its per-check host diagnostics.
+        from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_prefill_triton import (
+            write_prefix_reuse_prefill,
         )
 
         if self._side_cache_undo is not None:
             raise RuntimeError("qwen4_exp QSA side-cache transaction is already active")
-        undo = write_draft_window_with_undo_(
+        fused = write_prefix_reuse_prefill(
+            q,
             raw_keys,
             plan.cu_seqlens,
-            (
-                step.prefixes_i32
-                if step is not None
-                else plan.prefixes.to(torch.int32).contiguous()
-            ),
-            (
-                step.input_lengths_i32
-                if step is not None
-                else self.main_inputs.input_lengths.to(
-                    device=raw_keys.device, dtype=torch.int32
-                ).contiguous()
-            ),
+            step.prefixes_i32,
+            plan.lengths,
+            step.prefix_values,
+            plan.current_cos,
+            plan.current_sin,
             plan.rope_cos,
             plan.rope_sin,
+            indexer.q_norm_gamma,
             indexer.k_norm_gamma,
             plan.kv_pool,
             plan.kv_table,
             plan.state_pool,
             plan.state_table,
-            norm_eps=float(indexer.norm_eps),
-        )
-        object.__setattr__(self, "_side_cache_undo", undo)
-    else:
-        self._write_indexer_cache_transactional(
-            raw_keys,
-            plan.cu_seqlens,
-            plan.prefixes,
-            plan.rope_cos,
-            plan.rope_sin,
-            indexer.k_norm_gamma,
-            plan.kv_pool,
-            plan.kv_table,
-            plan.state_pool,
-            plan.state_table,
-            ratio=int(plan.ratio),
             kv_tokens_per_block=int(plan.kv_tokens_per_block),
             state_tokens_per_block=int(plan.state_tokens_per_block),
             norm_eps=float(indexer.norm_eps),
-            rope_is_token_aligned=True,
+        )
+    if fused is None and raw_query:
+        # The fused writer declined this geometry: apply the model-level norm
+        # here so the staged writer sees exactly the query it would have.
+        from rtp_llm.models_py.modules.base.common.zero_centered_rms_norm import (
+            exact_head_rms_norm,
         )
 
-    rotated_q = apply_partial_rope(
-        q,
-        plan.current_cos.unsqueeze(1),
-        plan.current_sin.unsqueeze(1),
-    )
+        q = exact_head_rms_norm(q, indexer.q_norm_gamma, indexer.norm_eps)
+
     from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_paged_score import (
         qsa_paged_indexer_score,
     )
 
-    # The draft has at most one compression group's worth of rows per
-    # request. Pad only that short dimension so all requests share one
-    # paged-score launch and one top-k selection. Invalid rows have zero
-    # visible context and are removed before returning packed token IDs.
-    lengths = plan.lengths
-    batch_size = len(lengths)
-    max_rows = max(lengths)
-    if step is not None and step.selection_row_map is not None:
-        # Frozen per-step constants: the row map, the packed valid rows and
-        # the padded score weights were built once for the whole step.
-        row_map = step.selection_row_map
+    if fused is not None:
+        object.__setattr__(self, "_side_cache_undo", fused["undo"])
+        # The fused kernel already emitted the padded, rotated, normed query.
+        padded_q = fused["padded_q"]
         valid_rows_map = step.selection_valid_rows
         padded_weights = step.padded_score_weights
     else:
-        offsets = []
-        valid_rows = []
-        offset = 0
-        for request_idx, length in enumerate(lengths):
-            offsets.extend(offset + min(row, length - 1) for row in range(max_rows))
-            valid_rows.extend(request_idx * max_rows + row for row in range(length))
-            offset += length
-        row_map = torch.tensor(offsets, dtype=torch.int64, device=q.device)
-        valid_rows_map = torch.tensor(valid_rows, dtype=torch.int64, device=q.device)
-        score_weights = torch.full(
-            (token_count, head_num),
-            1.0 / math.sqrt(head_dim),
-            dtype=torch.float32,
-            device=q.device,
+        triton_draft_window = (
+            draft
+            and max(plan.lengths) <= 4
+            and int(plan.ratio) == 4
+            and int(plan.head_dim) == 128
+            and int(plan.kv_tokens_per_block) in (64, 128)
+            and int(plan.state_tokens_per_block) == int(plan.kv_tokens_per_block)
         )
-        padded_weights = score_weights.index_select(0, row_map)
-    padded_q = rotated_q.index_select(0, row_map).reshape(
-        batch_size, max_rows, head_num, head_dim
-    )
+        if triton_draft_window:
+            from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_decode_triton import (
+                write_draft_window_with_undo_,
+            )
+
+            if self._side_cache_undo is not None:
+                raise RuntimeError(
+                    "qwen4_exp QSA side-cache transaction is already active"
+                )
+            undo = write_draft_window_with_undo_(
+                raw_keys,
+                plan.cu_seqlens,
+                (
+                    step.prefixes_i32
+                    if step is not None
+                    else plan.prefixes.to(torch.int32).contiguous()
+                ),
+                (
+                    step.input_lengths_i32
+                    if step is not None
+                    else self.main_inputs.input_lengths.to(
+                        device=raw_keys.device, dtype=torch.int32
+                    ).contiguous()
+                ),
+                plan.rope_cos,
+                plan.rope_sin,
+                indexer.k_norm_gamma,
+                plan.kv_pool,
+                plan.kv_table,
+                plan.state_pool,
+                plan.state_table,
+                norm_eps=float(indexer.norm_eps),
+            )
+            object.__setattr__(self, "_side_cache_undo", undo)
+        else:
+            self._write_indexer_cache_transactional(
+                raw_keys,
+                plan.cu_seqlens,
+                plan.prefixes,
+                plan.rope_cos,
+                plan.rope_sin,
+                indexer.k_norm_gamma,
+                plan.kv_pool,
+                plan.kv_table,
+                plan.state_pool,
+                plan.state_table,
+                ratio=int(plan.ratio),
+                kv_tokens_per_block=int(plan.kv_tokens_per_block),
+                state_tokens_per_block=int(plan.state_tokens_per_block),
+                norm_eps=float(indexer.norm_eps),
+                rope_is_token_aligned=True,
+            )
+
+        rotated_q = apply_partial_rope(
+            q,
+            plan.current_cos.unsqueeze(1),
+            plan.current_sin.unsqueeze(1),
+        )
+
+        # The draft has at most one compression group's worth of rows per
+        # request. Pad only that short dimension so all requests share one
+        # paged-score launch and one top-k selection. Invalid rows have zero
+        # visible context and are removed before returning packed token IDs.
+        lengths = plan.lengths
+        batch_size = len(lengths)
+        max_rows = max(lengths)
+        if step is not None and step.selection_row_map is not None:
+            # Frozen per-step constants: the row map, the packed valid rows
+            # and the padded score weights were built once for the whole step.
+            row_map = step.selection_row_map
+            valid_rows_map = step.selection_valid_rows
+            padded_weights = step.padded_score_weights
+        else:
+            offsets = []
+            valid_rows = []
+            offset = 0
+            for request_idx, length in enumerate(lengths):
+                offsets.extend(offset + min(row, length - 1) for row in range(max_rows))
+                valid_rows.extend(request_idx * max_rows + row for row in range(length))
+                offset += length
+            row_map = torch.tensor(offsets, dtype=torch.int64, device=q.device)
+            valid_rows_map = torch.tensor(valid_rows, dtype=torch.int64, device=q.device)
+            score_weights = torch.full(
+                (token_count, head_num),
+                1.0 / math.sqrt(head_dim),
+                dtype=torch.float32,
+                device=q.device,
+            )
+            padded_weights = score_weights.index_select(0, row_map)
+        padded_q = rotated_q.index_select(0, row_map).reshape(
+            batch_size, max_rows, head_num, head_dim
+        )
     compressed_lengths = plan.compressed_lengths
     block_logits = qsa_paged_indexer_score(
         padded_q,
