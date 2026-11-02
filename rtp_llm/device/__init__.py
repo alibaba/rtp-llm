@@ -16,6 +16,7 @@ _LAZY_EXPORTS = {
     "CudaImpl": ("rtp_llm.device.device_impl", "CudaImpl"),
     "PpuImpl": ("rtp_llm.device.device_impl", "PpuImpl"),
     "RocmImpl": ("rtp_llm.device.device_impl", "RocmImpl"),
+    "XpuImpl": ("rtp_llm.device.device_impl", "XpuImpl"),
 }
 
 
@@ -38,6 +39,7 @@ def get_device_cls(type: DeviceType) -> Type:
         CudaImpl,
         PpuImpl,
         RocmImpl,
+        XpuImpl,
     )
 
     if type == DeviceType.Cpu:
@@ -50,6 +52,8 @@ def get_device_cls(type: DeviceType) -> Type:
         return PpuImpl
     elif type == DeviceType.ROCm:
         return RocmImpl
+    elif type == DeviceType.Xpu:
+        return XpuImpl
     else:
         raise ValueError(f"Invalid device type {type}")
 

@@ -707,6 +707,31 @@ class CudaImpl(GpuImpl):
         )
 
 
+class XpuImpl(DeviceBase):
+    """Intel GPU (XPU) device implementation.
+
+    Inherits DeviceBase rather than GpuImpl: GpuImpl.get_device_id() calls
+    torch.cuda.current_device(), which is wrong here because XPU lives in a
+    separate torch namespace and does not masquerade as cuda.
+
+    The weight-rewrite and quantization hooks are deliberately left inheriting
+    DeviceBase's defaults -- maybe_rewrite_weight_by_key returns the weight
+    unchanged, and the quant preprocessors raise NotImplementedError. Adopting
+    the CUDA or ROCm swizzle/packing policy here would produce
+    plausible-but-wrong output with nothing raised; quantization is excluded
+    from the XPU support contract for now, so raising is correct.
+    """
+
+    def get_device_id(self) -> int:
+        return torch.xpu.current_device()
+
+    def _get_mem_info(self) -> MemInfo:
+        # torch.xpu.mem_get_info() returns (free, total) in bytes. Reporting
+        # host memory here instead would mis-size the KV cache pool.
+        free, total = torch.xpu.mem_get_info()
+        return MemInfo(free=free, used=total - free)
+
+
 class PpuImpl(CudaImpl):
     @property
     def support_dio_load(self) -> bool:

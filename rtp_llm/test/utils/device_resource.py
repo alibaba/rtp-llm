@@ -39,7 +39,12 @@ def report_driver_details():
     print("CUDA probe diagnostics: " + json.dumps(details), file=sys.stderr)
 
 try:
-    if torch.cuda.is_available():
+    # Intel GPUs live under torch.xpu and do NOT masquerade as cuda, so
+    # torch.cuda.is_available() is False on an XPU host. Probing cuda alone
+    # reports no device, every test SKIPS, and the run looks green.
+    if hasattr(torch, "xpu") and torch.xpu.is_available():
+        device_info = {torch.xpu.get_device_name(0): torch.xpu.device_count()}
+    elif torch.cuda.is_available():
         device_info = {torch.cuda.get_device_name(0): torch.cuda.device_count()}
     else:
         device_info = {}
@@ -48,7 +53,7 @@ try:
 except Exception as e:
     report_driver_details()
     # 捕获并打印内部错误，避免子进程静默失败
-    print(json.dumps({"error": str(e), "note": "Failed to get CUDA info"}), file=sys.stderr)
+    print(json.dumps({"error": str(e), "note": "Failed to get accelerator info"}), file=sys.stderr)
     sys.exit(1) # 告知外部进程执行失败
 """
 
@@ -127,7 +132,11 @@ def get_cuda_info():
             # fallback to get device count when subprocess execute failed
             import torch
 
-            if torch.cuda.is_available():
+            # Keep the same precedence as the subprocess probe above: XPU first,
+            # since it does not masquerade as cuda.
+            if hasattr(torch, "xpu") and torch.xpu.is_available():
+                device_info = {torch.xpu.get_device_name(0): torch.xpu.device_count()}
+            elif torch.cuda.is_available():
                 device_info = {torch.cuda.get_device_name(0): torch.cuda.device_count()}
             else:
                 device_info = {}

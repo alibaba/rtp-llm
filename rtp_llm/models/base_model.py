@@ -174,7 +174,9 @@ class BaseModel(object):
 
     def _get_device_str(self) -> str:
         """Get device string from parallelism_config."""
-        return f"cuda:{self.parallelism_config.local_rank}"
+        from rtp_llm.device.device_type import torch_device_type
+
+        return f"{torch_device_type()}:{self.parallelism_config.local_rank}"
 
     @timer_wrapper(description="load model")
     def load(self, skip_python_model: bool = False):
