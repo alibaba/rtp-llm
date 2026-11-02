@@ -8,18 +8,31 @@ import java.time.Duration;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.Supplier;
 import static org.flexlb.mock.cache.CacheMetadata.Medium.*;
 
 /** KVCM Meta reporting only. Cache locks enqueue immutable changes; all HTTP runs here. */
 public final class KvcmReporter implements AutoCloseable {
     private static final ObjectMapper JSON = new ObjectMapper();
     private static final int QUEUE_CAPACITY = 100000, BATCH_SIZE = 1000;
-    public record Configuration(URI endpoint, boolean events, long snapshotMillis) {
+    public record Configuration(Supplier<URI> endpoint, boolean events, long snapshotMillis) {
         public Configuration {
-            if (!Set.of("http", "https").contains(endpoint.getScheme()) || endpoint.getHost() == null
-                    || endpoint.getRawQuery() != null || endpoint.getRawFragment() != null || endpoint.getUserInfo() != null)
-                throw new IllegalArgumentException("KVCM requires a direct Meta HTTP endpoint");
+            Objects.requireNonNull(endpoint);
             if (snapshotMillis < 1) throw new IllegalArgumentException("Invalid KVCM snapshot interval");
+        }
+        public Configuration(URI endpoint, boolean events, long snapshotMillis) {
+            this(fixed(endpoint), events, snapshotMillis);
+        }
+        private static Supplier<URI> fixed(URI endpoint) {
+            validateEndpoint(endpoint);
+            return () -> endpoint;
+        }
+        public static URI validateEndpoint(URI endpoint) {
+            if (endpoint == null || !("http".equals(endpoint.getScheme()) || "https".equals(endpoint.getScheme()))
+                    || endpoint.getHost() == null || endpoint.getRawQuery() != null
+                    || endpoint.getRawFragment() != null || endpoint.getUserInfo() != null)
+                throw new IllegalArgumentException("Invalid KVCM Meta HTTP endpoint");
+            return endpoint;
         }
     }
     /** Caller describes the capability it actually implements; no model/layout inference in the reporter. */
@@ -104,7 +117,8 @@ public final class KvcmReporter implements AutoCloseable {
     }
     private JsonNode post(String path, ObjectNode request) throws Exception {
         request.put("trace_id", UUID.randomUUID().toString());
-        var response = http.send(HttpRequest.newBuilder(URI.create(config.endpoint().toString().replaceAll("/$", "") + path))
+        var target = Configuration.validateEndpoint(config.endpoint().get());
+        var response = http.send(HttpRequest.newBuilder(URI.create(target.toString().replaceAll("/$", "") + path))
             .timeout(Duration.ofMillis(1500)).header("Content-Type", "application/json")
             .POST(HttpRequest.BodyPublishers.ofString(JSON.writeValueAsString(request))).build(), HttpResponse.BodyHandlers.ofString());
         if (response.statusCode() != 200 || response.body().length() > 1048576)

@@ -42,7 +42,7 @@ public record RtpConfig(String id, Role role, int blockSize, int deviceBlocks, i
     public static RtpConfig fromEnvironment(String id, Role role, Map<String, String> env) throws IOException {
         var root = JSON.createObjectNode().put("id", id).put("component_role", role.name());
         var component = root.putObject("component").put("engine", "rtp");
-        component.set("config", EngineConfig.environment(env, RtpSettings.environmentNames(role), RtpSettings.mockNames()));
+        component.set("config", RtpSettings.environment(env, role));
         return load(root);
     }
 
@@ -120,7 +120,7 @@ public record RtpConfig(String id, Role role, int blockSize, int deviceBlocks, i
         boolean control = nativeBool(business,"enable_remote_cache",false);
         String events = business.path("kv_cache_event_publisher_type").asText("none");
         if (control || !events.equals("none")) {
-            for (String key : List.of("kv_cache_event_manager_endpoint","kv_cache_event_instance_id","kv_cache_event_instance_group","kv_cache_event_host_ip_port"))
+            for (String key : List.of("kv_cache_event_manager_endpoint","kv_cache_event_instance_id","kv_cache_event_instance_group","kv_cache_event_host_ip_port", "kvcm_enable_vipserver", "kvcm_vipserver_domain", "kvcm_server_address"))
                 if (business.has(key)) result.set(key,business.get(key));
             result.put("kv_cache_event_publisher_type",events)
                 .put("kv_cache_event_snapshot_interval_ms",nativeInt(business,"kv_cache_event_snapshot_interval_ms",600000,1,Integer.MAX_VALUE))
