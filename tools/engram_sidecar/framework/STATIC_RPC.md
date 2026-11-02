@@ -71,7 +71,7 @@ flowchart TB
 
 ```
 RTP_ENGRAM_COHORT=10.0.0.1,10.0.0.2             # 共享一份 Engram 的 host 列表，顺序=part 序号
-RTP_ENGRAM_COHORT_PORT=29483                       # 可选；列表项不带端口时用，缺省 29483
+RTP_ENGRAM_COHORT_PORT=29483                       # 可选；平台指定优先，缺省 29483
 RTP_ENGRAM_INSTANCE_INDEX=0                       # 可选；缺省=本机 IP 在列表中的位置
 RTP_ENGRAM_MODEL_REVISION=<rev>                   # 同一 cohort 内一致
 RTP_ENGRAM_CHECKPOINT=/models/DeepSeek            # 本机完整 checkpoint
@@ -89,9 +89,10 @@ RTP_ENGRAM_TLS_DIR=/run/engram/pki                # 可选；不设则走 plain 
 平台只需要给出 **host 列表**：列表里有几台 host，就是几个 part 在共享这份 Engram，顺序即 part 序号；
 分片数、成员表、shard 归属、store 命名空间全部由它推导。
 
-交换端口也不必指定：**整组只有列表里第 0 台需要监听**，而且只在启动窗口内（发布+握手，通常几十秒到几分钟），
-握手结束即关闭；其余成员只有出站连接。缺省端口 29483，平台若希望落在自己的保留端口段内可用
-`RTP_ENGRAM_COHORT_PORT` 覆盖。单机部署（列表只有一个元素）连这个端口都不需要。
+交换端口由平台决定，不指定就用默认值：**整组只有列表里第 0 台需要监听**，而且只在启动窗口内（发布+握手，
+通常几十秒到几分钟），握手结束即关闭；其余成员只有出站连接。平台可以用 `RTP_ENGRAM_COHORT_PORT` 指定一个
+落在自己保留端口段内的值（默认 29483）；如果每个 pod 的端口不同，就用 `ip:port` 逐项给出。
+单机部署（列表只有一个元素）连这个端口都不需要。
 
 本条中的 `RTP_ENGRAM_INSTANCE_INDEX`（“本机是第几片”）也不是必填的：程序会把本机 IPv4 与列表比对，
 命中恰好一项就用它的位置。只有当容器不在 host 网络、本机 IP 与列表项对不上时，才需要显式给出，否则会报
