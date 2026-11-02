@@ -21,6 +21,14 @@ final class BlockTree {
     private final Map<Long, Node> nodes = new HashMap<>(), roots = new HashMap<>();
     private final NavigableSet<Node> deviceLeaves, hostLeaves;
     private long sequence, version;
+    private java.util.function.Consumer<CacheMetadata.Change> observer = change -> {};
+    void observe(java.util.function.Consumer<CacheMetadata.Change> observer) { this.observer = observer; }
+    private static CacheMetadata.Medium medium(boolean host) {
+        return host ? CacheMetadata.Medium.HOST : CacheMetadata.Medium.HBM;
+    }
+    private void changed(long key, CacheMetadata.Medium before, CacheMetadata.Medium after) {
+        observer.accept(new CacheMetadata.Change(++version, key, before, after));
+    }
 
     BlockTree(KvCache.EvictionPolicy devicePolicy, KvCache.EvictionPolicy hostPolicy) {
         deviceLeaves = new TreeSet<>(order(devicePolicy)); hostLeaves = new TreeSet<>(order(hostPolicy));
@@ -60,7 +68,7 @@ final class BlockTree {
         var node = new Node(key, parent, cache, host, ++sequence);
         nodes.put(key, node); (parent == null ? roots : parent.children).put(key, node);
         refresh(node); if (parent != null) refresh(parent);
-        version++; return node;
+        changed(key, CacheMetadata.Medium.NONE, medium(host)); return node;
     }
     // Transactions pin the complete matched/published prefix, including every ancestor.
     void pin(Node node) { removeCandidate(node); node.pins++; }
@@ -74,9 +82,10 @@ final class BlockTree {
         if (node.parent != null) {
             removeCandidate(node.parent); node.parent.deviceChildren += host ? -1 : 1;
         }
+        var previous = medium(node.host);
         node.cache.close(); node.cache = target; node.host = host; node.admission = ++sequence;
         refresh(node); if (node.parent != null) refresh(node.parent);
-        // Moving tiers keeps the same advertised logical key set.
+        changed(node.key, previous, medium(host));
     }
     boolean evict(boolean host) {
         var candidates = host ? hostLeaves : deviceLeaves;
@@ -89,17 +98,25 @@ final class BlockTree {
         var pending = new ArrayDeque<Node>(); pending.add(node);
         while (!pending.isEmpty()) {
             var removed = pending.removeFirst(); pending.addAll(removed.children.values());
-            removeCandidate(removed); nodes.remove(removed.key); removed.cache.close(); version++;
+            removeCandidate(removed); nodes.remove(removed.key); removed.cache.close();
+            changed(removed.key, medium(removed.host), CacheMetadata.Medium.NONE);
         }
         if (node.parent != null) refresh(node.parent);
         return true;
     }
     long version() { return version; }
+    CacheMetadata.Snapshot metadata() {
+        var blocks = new HashMap<Long, CacheMetadata.Medium>();
+        nodes.forEach((key, node) -> blocks.put(key, medium(node.host)));
+        return new CacheMetadata.Snapshot(version, blocks);
+    }
     Set<Long> keys() { return Set.copyOf(nodes.keySet()); }
     void clear() {
         if (nodes.values().stream().anyMatch(n -> n.pins != 0)) throw new IllegalStateException("Cannot clear a pinned tree");
-        for (var node : nodes.values()) node.cache.close();
-        version += nodes.size(); nodes.clear(); roots.clear(); deviceLeaves.clear(); hostLeaves.clear();
+        for (var node : nodes.values()) {
+            node.cache.close(); changed(node.key, medium(node.host), CacheMetadata.Medium.NONE);
+        }
+        nodes.clear(); roots.clear(); deviceLeaves.clear(); hostLeaves.clear();
     }
     private void removeCandidate(Node node) { deviceLeaves.remove(node); hostLeaves.remove(node); }
     private void refresh(Node node) {

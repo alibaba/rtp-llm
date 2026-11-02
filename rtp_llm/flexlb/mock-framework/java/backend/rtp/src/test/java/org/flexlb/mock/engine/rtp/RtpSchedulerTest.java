@@ -11,6 +11,7 @@ import java.util.concurrent.*;
 import org.flexlb.mock.compute.SimulatedCompute;
 import org.flexlb.mock.engine.*;
 import org.flexlb.mock.cache.KvCache;
+import org.flexlb.mock.cache.CacheSequence;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -27,7 +28,7 @@ class RtpSchedulerTest {
         var path = directory.resolve(role + ".json"); json.writeValue(path.toFile(), root); return RtpConfig.load(path);
     }
     private static Scheduler.Input input(long id, boolean retained) {
-        return new Scheduler.Input(Long.toString(id), id, 0, 5, 3, 0, System.nanoTime(), Long.MAX_VALUE, List.of(), false, retained, 0, false);
+        return new Scheduler.Input(Long.toString(id), id, 0, 5, 3, 0, System.nanoTime(), Long.MAX_VALUE, new CacheSequence(2, Collections.nCopies(5, 0), List.of()), false, retained, 0, false);
     }
     private static class Listener implements Scheduler.Listener {
         final CompletableFuture<Scheduler.Request> allocated = new CompletableFuture<>();
@@ -55,7 +56,7 @@ class RtpSchedulerTest {
     }
     private static void generate(Scheduler scheduler, Scheduler.Request request) {
         loaded(scheduler, request);
-        scheduler.control(request, Control.GENERATE);
+        scheduler.control(request, new Control.Generate(42));
     }
 
     @Test void retainedPrefillKeepsKvThroughReadUntilTransferAcknowledgement() throws Exception {
@@ -132,12 +133,12 @@ class RtpSchedulerTest {
             var old = scheduler.input(input(1, false), listener);
             scheduler.maintain(); drain(scheduler);
             assertEquals(new QueueSnapshot(0, 0, 1, 0), scheduler.queues());
-            assertThrows(RequestFailure.class, () -> scheduler.control(old, Control.GENERATE));
+            assertThrows(RequestFailure.class, () -> scheduler.control(old, new Control.Generate(42)));
             loaded(scheduler, old); assertNull(scheduler.schedule());
             scheduler.finish(old, new RequestFailure(RequestFailure.Reason.CANCELLED, "cancel")); drain(scheduler);
             var replacement = scheduler.input(input(1, false), new Listener());
             scheduler.maintain(); scheduler.finish(old, null);
-            scheduler.control(old, Control.GENERATE);
+            scheduler.control(old, new Control.Generate(42));
             assertFalse(replacement.snapshot().terminating());
             assertEquals(0, replacement.snapshot().generated()); assertNull(scheduler.schedule());
         }
@@ -204,7 +205,7 @@ class RtpSchedulerTest {
             complete(scheduler, work, config); drain(scheduler);
             complete(scheduler, scheduler.schedule(), config); drain(scheduler);
             assertEquals(12, cache.snapshot(0, false).availableBlocks());
-            var oversized = new Scheduler.Input("large", 3, 0, 6, 1, 0, System.nanoTime(), Long.MAX_VALUE, List.of(), false, false, 0, false);
+            var oversized = new Scheduler.Input("large", 3, 0, 6, 1, 0, System.nanoTime(), Long.MAX_VALUE, new CacheSequence(2, Collections.nCopies(6, 0), List.of()), false, false, 0, false);
             scheduler.input(oversized, new Listener());
             var singleton = scheduler.schedule(); assertNotNull(singleton);
             assertEquals(1, singleton.batch().dps().getFirst().requests().size());
@@ -292,7 +293,7 @@ class RtpSchedulerTest {
                 var scheduler = new RtpScheduler(new Object(), config, cache); var listener = new Listener();
                 try {
                     var request = scheduler.input(new Scheduler.Input("r", 1, 0, 123, 10, 0, System.nanoTime(),
-                        Long.MAX_VALUE, List.of(), false, false, 0, true), listener);
+                        Long.MAX_VALUE, new CacheSequence(128, Collections.nCopies(123, 0), List.of()), false, false, 0, true), listener);
                     scheduler.maintain(); drain(scheduler); generate(scheduler, request);
                     var work = scheduler.schedule();
                     if (capacity == 1) {
@@ -361,7 +362,7 @@ class RtpSchedulerTest {
             var expired = new Listener(); var cancelled = new Listener();
             long now = System.nanoTime();
             engine.input(new Scheduler.Input("1", 1, 0, 5, 3, 0, now,
-                now + TimeUnit.MILLISECONDS.toNanos(100), List.of(), false, false, 0, false), expired);
+                now + TimeUnit.MILLISECONDS.toNanos(100), new CacheSequence(2, Collections.nCopies(5, 0), List.of()), false, false, 0, false), expired);
             var request = engine.input(input(2, false), cancelled);
             engine.finish(request, new RequestFailure(RequestFailure.Reason.CANCELLED, "test"));
             assertEquals(RequestFailure.Reason.CANCELLED, cancelled.terminal.get(2, TimeUnit.SECONDS).reason());
@@ -385,7 +386,7 @@ class RtpSchedulerTest {
             var oversized = new Listener(); var small = new Listener();
             scheduler.input(input(1, false), oversized);
             scheduler.input(new Scheduler.Input("2", 2, 0, 1, 3, 0, System.nanoTime(),
-                Long.MAX_VALUE, List.of(), false, false, 0, false), small);
+                Long.MAX_VALUE, new CacheSequence(2, Collections.nCopies(1, 0), List.of()), false, false, 0, false), small);
             var work = scheduler.schedule(); drain(scheduler);
             assertEquals(RequestFailure.Reason.CAPACITY, oversized.terminal.get(1, TimeUnit.SECONDS).reason());
             assertNotNull(work); assertEquals(1, work.batch().dps().getFirst().requests().size());
@@ -398,7 +399,7 @@ class RtpSchedulerTest {
 
     private static Scheduler.Input sized(long id, int tokens) {
         return new Scheduler.Input(Long.toString(id), id, 81, tokens, 3, 0, System.nanoTime(),
-            Long.MAX_VALUE, List.of(), false, false, 0, false);
+            Long.MAX_VALUE, new CacheSequence(2, Collections.nCopies(tokens, 0), List.of()), false, false, 0, false);
     }
     private static List<Scheduler.InputItem> batch(Scheduler.Input... inputs) {
         return Arrays.stream(inputs).map(input -> new Scheduler.InputItem(input, new Listener())).toList();
@@ -517,7 +518,7 @@ class RtpSchedulerTest {
         try (var cache = new KvCache(2, 20, 0, KvCache.EvictionPolicy.LRU);
              var scheduler = new RtpScheduler(new Object(), config, cache)) {
             var one = new Scheduler.Input("1", 1, 81, 5, 1, 0, System.nanoTime(),
-                Long.MAX_VALUE, List.of(), false, false, 0, false);
+                Long.MAX_VALUE, new CacheSequence(2, Collections.nCopies(5, 0), List.of()), false, false, 0, false);
             scheduler.input(batch(one, sized(2, 5)));
             var work = scheduler.schedule(); assertEquals(List.of(1L, 2L), ids(work));
             complete(scheduler, work, config); drain(scheduler);

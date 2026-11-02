@@ -23,6 +23,7 @@ public final class KvCache implements AutoCloseable {
     private final Watermark deviceWatermark, hostWatermark;
     private final Set<Lease> active = Collections.newSetFromMap(new IdentityHashMap<>());
     private boolean closed, balancing, deviceTriggered, hostTriggered;
+    private java.util.function.Consumer<CacheMetadata.Change> metadataObserver;
     private Runnable capacityChanged = () -> {};
 
     /** The observer must only signal; it must never acquire an Engine scheduling lock. */
@@ -76,6 +77,17 @@ public final class KvCache implements AutoCloseable {
         var lease = new Lease(slots, matched.size()); active.add(lease);
         balance();
         return new Admission(lease, null, device.generation());
+    }
+    /** Snapshot and subscription share the cache monitor. Observers must only enqueue, never block. */
+    public synchronized CacheMetadata.Snapshot metadata() { return tree.metadata(); }
+    public synchronized AutoCloseable observeMetadata(java.util.function.Consumer<CacheMetadata.Change> observer) {
+        if (closed) throw new IllegalStateException("Cache is closed");
+        if (metadataObserver != null) throw new IllegalStateException("Cache metadata already has a reporter");
+        metadataObserver = Objects.requireNonNull(observer);
+        tree.observe(observer);
+        return () -> { synchronized (KvCache.this) {
+            if (metadataObserver == observer) { metadataObserver = null; tree.observe(change -> {}); }
+        } };
     }
     private Admission rejected(Failure failure) { return new Admission(null, failure, device.generation()); }
     public long allocationGeneration() { return device.generation(); }

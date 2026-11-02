@@ -3,6 +3,7 @@ package org.flexlb.mock.engine;
 import java.util.List;
 import java.util.Objects;
 import org.flexlb.mock.cache.KvCache;
+import org.flexlb.mock.cache.CacheSequence;
 import org.flexlb.mock.compute.ForwardBatch;
 import org.flexlb.mock.compute.SimulatedCompute;
 
@@ -15,12 +16,14 @@ public interface Scheduler extends AutoCloseable {
     }
 
     record Input(String identity, long requestId, long groupId, int tokens, int maxNewTokens, int priority,
-                 long started, long deadline, List<Long> keys, boolean reuse, boolean retained, int minNewTokens, boolean ignoreEos) {
+                 long started, long deadline, CacheSequence cacheSequence, boolean reuse, boolean retained, int minNewTokens, boolean ignoreEos) {
         public Input {
             if (identity == null || identity.isBlank() || tokens < 1 || maxNewTokens < 1 || minNewTokens < 0 || minNewTokens > maxNewTokens)
                 throw new IllegalArgumentException("Invalid scheduling input");
-            keys = List.copyOf(keys);
+            Objects.requireNonNull(cacheSequence);
+            if (cacheSequence.tokens().size() != tokens) throw new IllegalArgumentException("Cache identity length differs from input");
         }
+        public List<Long> keys() { return cacheSequence.keys(); }
     }
 
     /** Read-only handle. Late callbacks must keep this identity, not look up a reusable request ID. */

@@ -6,6 +6,10 @@ import org.flexlb.engine.grpc.EngineRpcService.*;
 
 /** Synthetic token payload, real native tensor shape/encoding; never model inference. */
 final class LocalResponse {
+    static int sampledToken(GenerateInputPB input) {
+        int last=input.getTokenIds(input.getTokenIdsCount()-1);
+        return last>=0?last:42; // Cache-only image hashes are not generated vocabulary tokens.
+    }
     static GenerateOutputsPB token(GenerateInputPB input, int tokenId, int generated, int stepTokens, int reused, long elapsedNanos, boolean finished, boolean pd) {
         int width = input.getGenerateConfig().getReturnIncremental() ? stepTokens : generated;
         var tokens = ByteBuffer.allocate(Math.multiplyExact(4, width)).order(ByteOrder.LITTLE_ENDIAN);

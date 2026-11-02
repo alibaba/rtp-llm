@@ -23,7 +23,7 @@ class HostCacheTest {
                 assertNotNull(lease); assertEquals(4, lease.reusedTokens());
                 assertEquals(4, cache.hostSnapshot().free());
                 assertEquals(0, cache.snapshot(-1, false).availableBlocks());
-                assertEquals(version, cache.snapshot(-1, true).version());
+                assertTrue(cache.snapshot(-1, true).version() > version); // Residency changes advance shared metadata.
                 assertEquals(KvCache.Failure.RETRYABLE, cache.acquire(1, List.of()).failure());
             }
             assertEquals(4, cache.snapshot(-1, false).availableBlocks());

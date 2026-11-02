@@ -239,7 +239,7 @@ final class PrefillGeneration implements AutoCloseable {
                 long ttft = System.nanoTime() - started;
                 boolean prefillFinished = first.output().getFlattenOutput().getFinished(0);
                 int prefillReuse = first.output().getFlattenOutput().getAuxInfo(0).getTotalReuseLen();
-                send(LocalResponse.token(input, input.getTokenIds(input.getTokenIdsCount() - 1), 1, 1, prefillReuse, ttft, prefillFinished, true));
+                send(LocalResponse.token(input, LocalResponse.sampledToken(input), 1, 1, prefillReuse, ttft, prefillFinished, true));
                 var loaded = inbox.next();
                 if (loaded == null || !loaded.hasErrorInfo() || loaded.getErrorInfo().getErrorCodeValue() != 0)
                     throw Status.DATA_LOSS.withDescription("Invalid LOAD acknowledgement").asRuntimeException();
@@ -250,7 +250,7 @@ final class PrefillGeneration implements AutoCloseable {
                     transferUse.close(); transferUse = null;
                 }
                 if (prefillFinished) stream.onNext(frame(RemoteStage.PREFILL_COMPLETE));
-                else stream.onNext(frame(RemoteStage.GENERATE).toBuilder().setFirstGenerateTokenId(input.getTokenIds(input.getTokenIdsCount() - 1)).build());
+                else stream.onNext(frame(RemoteStage.GENERATE).toBuilder().setFirstGenerateTokenId(LocalResponse.sampledToken(input)).build());
                 stream.onCompleted();
                 boolean finished = prefillFinished;
                 for (GenerateOutputsPB output; (output = inbox.next()) != null;) {

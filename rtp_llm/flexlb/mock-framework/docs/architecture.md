@@ -428,3 +428,10 @@ PROMETHEUS_BIN=/path/to/prometheus ./scripts/check.sh
 EngineInstances 只完成配置解析和实例装配，返回实例及生效配置。EngineHost 负责本地实验的 effective-config/endpoints/ready 文件，并保留新实例不可覆盖旧产物的约束。EngineMain 不依赖这些文件，使用 START_PORT 启动单个服务，在日志中输出配置和地址；平台发现与重拉不经过 Python Runner。
 
 Engine 的 HTTP 与原生健康检查读取现有 Loop/Scheduler 失败状态，不采集指标。独立进程每秒调用同一检查，不可恢复失败退出。不开新的健康管理模块，不把普通请求失败当作 Engine 故障。
+
+
+### 公共缓存身份与元数据
+
+CacheSequence 在 shared/cache 中维护不可变 token 序列并计算完整物理块的规范 key，不依赖 RPC。main 的接入层将当前协议准备后的 token 交给它，不引入 DSV4.1 的缓存区间 wire 字段。Decode 成功结束时发布 prompt 和已计算输出的完整块，排除最后一个尚未计算 KV 的采样 token；取消、失败及预留容量不发布。GENERATE 许可携带原生首 token，重复输出模型使用同一 token 推导输出前缀身份。
+
+KvCache/BlockTree 提供 CacheMetadata 快照与介质变更事件；仅有效缓存块进入元数据，工作租约和预留块不进入。注册、删除和 HBM/Host 迁移都推进版本。KvcmReporter 位于 shared/cache，只接收规范身份、配置和元数据；RTP 负责实例配置装配，调度锁内不执行网络。队列溢出退回完整快照，保持数据最终一致。仅实现 Meta HTTP 注册、心跳及 HBM 缓存事件，没有远端 payload 读写。

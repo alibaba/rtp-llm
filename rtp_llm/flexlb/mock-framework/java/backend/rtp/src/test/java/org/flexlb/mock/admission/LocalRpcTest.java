@@ -172,6 +172,6 @@ class LocalRpcTest {
 
     @Test void nativePrefixKeysAgreeWithProductionCppReferenceIncludingNegativeToken() {
         var input = GenerateInputPB.newBuilder().addAllTokenIds(List.of(1, 2, 3, 4, 5, -1)).build();
-        assertEquals(List.of(-8366447769517741626L, 455111481605203084L, 3534810267006820515L), PrefixKeys.completeBlocks(input, 2));
+        assertEquals(List.of(-8366447769517741626L, 455111481605203084L, 3534810267006820515L), new org.flexlb.mock.cache.CacheSequence(2, input.getTokenIdsList(), java.util.List.of()).keys());
     }
 }

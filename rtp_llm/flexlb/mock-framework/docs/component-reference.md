@@ -328,3 +328,10 @@ Runner 不下载 binary；默认 scrape 1s、startup 30s，目前验证 Promethe
 收尾等待每个目标在收尾开始后成功采样，再停止组件、ZK，最后 TERM Prometheus，超时才 KILL。最后采样失败、采集器异常退出会标记数据不完整并令实验 ERROR。启动失败/取消仍清理并保留现场。
 
 prometheus/ 保存配置、targets、版本、日志、data/TSDB/WAL 和 collection.json；complete 仅说明采集边界及关闭成功，不代替业务指标或中途 up 判断。门禁 FAIL/主动取消也可以有完整采集。曲线不导出 JSON，数据不随收尾删除，后续回放服务在线查询；目前仍用默认保留策略，没有长期归档或正式报告服务。已完成实验可使用保存的大盘快照通过 View 回看，详见 [View 指南](view-guide.md)；Client 已提供 issued/finished Counter 及 TTFT/请求耗时 Histogram。
+
+
+## 公共缓存与 KVCM 元数据
+
+缓存身份由 shared/cache/CacheSequence 统一计算。Decode 除 prompt 外还缓存已完成计算的输出前缀，最后一个仅采样但未进入 Forward 的 token 不计入有效 KV。main 保留现有图片布局和 hash-token 输入协议；此能力不依赖 DSV4.1 的 PD 新字段。
+
+使用 real 名称 kv_cache_event_publisher_type=kvcm 与 kv_cache_event_manager_endpoint（直接 Meta HTTP 地址）启用 HBM 事件；可选 kv_cache_event_instance_id、kv_cache_event_instance_group、kv_cache_event_host_ip_port、kv_cache_event_snapshot_interval_ms。仅 enable_remote_cache=true 且给出直接 endpoint 时可进行控制心跳；不会产生实际远端读取或命中。有效配置和端点标明 payload_io=false，ExecuteFunction 数据读写仍未实现，不承诺 SDK、GDR 或混合 KV 布局。

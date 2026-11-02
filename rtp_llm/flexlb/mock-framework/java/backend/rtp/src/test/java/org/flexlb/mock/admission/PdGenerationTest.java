@@ -128,7 +128,7 @@ class PdGenerationTest {
             }
             // Cache identity must use the prepared hash, not the image placeholder token.
             var prepared = image(input(d, 0, 4, 1, 3000, true), vision.getPort()).toBuilder().setTokenIds(1, 777).build();
-            var keys = PrefixKeys.completeBlocks(prepared, 2);
+            var keys = new org.flexlb.mock.cache.CacheSequence(2, prepared.getTokenIdsList(), java.util.List.of()).keys();
             var cached = rpc.getCacheStatus(CacheVersionPB.newBuilder().setNeedCacheKeys(true).build());
             assertTrue(keys.stream().allMatch(cached.getCacheKeysMap()::containsKey));
             assertEquals(6, calls.size());

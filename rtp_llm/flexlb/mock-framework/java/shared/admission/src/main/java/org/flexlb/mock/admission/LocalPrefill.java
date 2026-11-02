@@ -34,7 +34,7 @@ final class LocalPrefill implements AutoCloseable {
         void expire() { finish(Status.DEADLINE_EXCEEDED.withDescription("RPC deadline expired"), 603); }
         private void finish(Status status, long code) { engine.finish(request, RpcErrors.scheduling(status, code)); }
         private Result success(Scheduler.Request request, boolean finished) {
-            return new Result(LocalResponse.token(input, input.getTokenIds(input.getTokenIdsCount() - 1), 1, 1, request.reused(), System.nanoTime() - request.input().started(), finished, false), Status.OK, 0);
+            return new Result(LocalResponse.token(input, LocalResponse.sampledToken(input), 1, 1, request.reused(), System.nanoTime() - request.input().started(), finished, false), Status.OK, 0);
         }
         @Override public void output(Scheduler.Request request, Scheduler.Output output) {
             if (retained) result.complete(success(request, output.finished()));

@@ -77,6 +77,28 @@ class DecodeAdmissionTest {
         return ErrorDetailsPB.parseFrom(trailers.get(Metadata.Key.of("grpc-status-details-bin", Metadata.BINARY_BYTE_MARSHALLER))).getErrorCode();
     }
 
+    @Test void completedDecodeCachesComputedOutputButNotTheFinalSample() throws Exception {
+        try(var node=node(false);var call=new Call(node,0)) {
+            var allocate=input("p",71,3,3000).toBuilder();
+            allocate.getInputBuilder().getGenerateConfigBuilder().setMaxNewTokens(5).setIgnoreEos(true);
+            call.request.onNext(allocate.build());call.ack();
+            call.request.onNext(GenerateRequestPB.newBuilder().setRequestId(71).setStage(RemoteStage.LOAD).build());
+            assertInstanceOf(GenerateOutputsPB.class,call.replies.poll(3,TimeUnit.SECONDS));
+            call.request.onNext(GenerateRequestPB.newBuilder().setRequestId(71).setClientId("p")
+                .setStage(RemoteStage.GENERATE).setFirstGenerateTokenId(7).build());
+            Object reply;
+            do {
+                reply=call.replies.poll(3,TimeUnit.SECONDS);assertNotNull(reply);
+                assertTrue(reply instanceof GenerateOutputsPB || "completed".equals(reply),String.valueOf(reply));
+            } while(!"completed".equals(reply));
+            var tokens=new ArrayList<>(allocate.getInput().getTokenIdsList());tokens.addAll(Collections.nCopies(5,7));
+            var allKeys=new org.flexlb.mock.cache.CacheSequence(2,tokens,List.of()).keys();
+            await(()->node.node.cache().snapshot(-1,true).keys().equals(Set.copyOf(allKeys.subList(0,3))));
+            assertFalse(node.node.cache().snapshot(-1,true).keys().contains(allKeys.get(3)));
+            try(var lease=node.node.cache().acquire(8,allKeys).lease()) { assertNotNull(lease);assertEquals(6,lease.reusedTokens()); }
+        }
+    }
+
     @Test void allocateAcknowledgementOwnsKvAndCancellationReleasesItWithoutPublishing() throws Exception {
         try (var node = node(false); var call = new Call(node, 0)) {
             call.request.onNext(input("p", 1, 5, 0)); call.ack();
@@ -139,7 +161,7 @@ class DecodeAdmissionTest {
         for (boolean disabled : List.of(false, true)) {
             try (var node = node(disabled); var call = new Call(node, 0)) {
                 var input = input("p", 1, 5, 0);
-                var keys = PrefixKeys.completeBlocks(input.getInput(), 2);
+                var keys = new org.flexlb.mock.cache.CacheSequence(2, input.getInput().getTokenIdsList(), java.util.List.of()).keys();
                 try (var lease = node.node.cache().acquire(6, List.of()).lease()) {
                     lease.publish(keys, 5);
                 }
