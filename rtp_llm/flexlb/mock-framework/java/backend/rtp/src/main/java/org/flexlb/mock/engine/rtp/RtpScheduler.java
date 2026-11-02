@@ -37,7 +37,7 @@ public final class RtpScheduler implements Scheduler {
         final ArrayDeque<Notice> notices = new ArrayDeque<>();
         ArrayDeque<Entry> group;
         KvCache.Lease lease;
-        int reused;
+        int reused, outputToken;
         boolean prefillFinished;
         final long begun = System.nanoTime();
         long queuedAt = begun, waitNanos, firstToken, transferStarted;
@@ -116,15 +116,17 @@ public final class RtpScheduler implements Scheduler {
         var entry = entry(handle);
         if (entry.state.terminating()) return;
         if (entry.state.expired()) { finish(entry, new RequestFailure(TIMEOUT, "Control arrived after deadline")); return; }
+        if (control instanceof org.flexlb.mock.admission.Control.Generate generate) {
+            if (prefill() || !entry.loaded || entry.generating || entry.prefillFinished || generate.tokenId() < 0)
+                throw new RequestFailure(INVALID, "Generation requires loaded KV and a new generation permit");
+            entry.outputToken = generate.tokenId();
+            entry.generating = true;
+            entry.state.transferred(1);
+            entry.phase = QUEUED; entry.queuedAt = System.nanoTime(); waiting.addLast(entry);
+            return;
+        }
         if (!(control instanceof org.flexlb.mock.admission.Control event)) throw new RequestFailure(INVALID, "Foreign RTP control");
         switch (event) {
-            case GENERATE -> {
-                if (prefill() || !entry.loaded || entry.generating || entry.prefillFinished)
-                    throw new RequestFailure(INVALID, "Generation requires loaded KV and a new generation permit");
-                entry.generating = true;
-                entry.state.transferred(1);
-                entry.phase = QUEUED; entry.queuedAt = System.nanoTime(); waiting.addLast(entry);
-            }
             case PREFILL_COMPLETE -> {
                 if (prefill() || !entry.loaded || entry.generating)
                     throw new RequestFailure(INVALID, "Unexpected Prefill-only completion");
@@ -444,9 +446,10 @@ public final class RtpScheduler implements Scheduler {
         if (entry.attemptedGeneration == generation) return KvCache.Failure.RETRYABLE;
         boolean reuse = config.reuseCache() && (config.deviceCache() || config.hostBlocks() > 0) && entry.input.reuse()
             && (prefill() || !config.disableDecodeFirstReuse());
-        int matched = Math.min(entry.input.keys().size(), (entry.input.tokens() - 1) / config.blockSize());
+        var keys = entry.input.keys();
+        int matched = Math.min(keys.size(), (entry.input.tokens() - 1) / config.blockSize());
         long capacityTokens = (long) entry.input.tokens() + (prefill() ? 0 : config.compute().kvReserveTokens());
-        var admission = cache.acquire(capacityTokens, reuse ? entry.input.keys().subList(0, matched) : List.of());
+        var admission = cache.acquire(capacityTokens, reuse ? keys.subList(0, matched) : List.of());
         entry.attemptedGeneration = admission.generation();
         if (admission.lease() == null) return admission.failure();
         if (entry.admittedAt == Long.MIN_VALUE) {
@@ -455,8 +458,13 @@ public final class RtpScheduler implements Scheduler {
         }
         entry.lease = admission.lease();
         entry.reused = Math.toIntExact(admission.lease().reusedTokens());
-        entry.state.attach(entry.lease, () -> entry.lease.publish(
-            config.reuseCache() && (config.deviceCache() || config.hostBlocks() > 0) && entry.input.reuse() ? entry.input.keys() : List.of(), entry.input.tokens()));
+        entry.state.attach(entry.lease, () -> {
+            // The final sampled token has not entered a Forward and owns no computed KV.
+            int computedOutput = !prefill() && entry.generating ? Math.max(0, entry.state.snapshot().generated() - 1) : 0;
+            boolean publish = config.reuseCache() && (config.deviceCache() || config.hostBlocks() > 0) && entry.input.reuse();
+            entry.lease.publish(publish ? entry.input.cacheSequence().keys(computedOutput, entry.outputToken) : List.of(),
+                (long) entry.input.tokens() + computedOutput);
+        });
         metrics.cacheLookup(entry.input.tokens(), entry.reused);
         return null;
     }

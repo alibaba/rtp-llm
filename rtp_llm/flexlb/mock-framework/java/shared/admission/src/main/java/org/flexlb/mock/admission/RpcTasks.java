@@ -17,7 +17,7 @@ final class RpcTasks {
             : after(started, TimeUnit.MILLISECONDS.toNanos(input.getGenerateConfig().getTimeoutMs())));
         return new Scheduler.Input(identity, input.getRequestId(), input.hasGroupId() ? input.getGroupId().getValue() : 0,
             input.getTokenIdsCount(), input.getGenerateConfig().getMaxNewTokens(), input.getPriority(), started, deadline,
-            org.flexlb.mock.multimodal.MediaInput.cacheKeys(prepared, blockSize), input.getGenerateConfig().getReuseCache(), retained, input.getGenerateConfig().getMinNewTokens(), input.getGenerateConfig().getIgnoreEos());
+            org.flexlb.mock.multimodal.MediaInput.sequence(prepared, blockSize), input.getGenerateConfig().getReuseCache(), retained, input.getGenerateConfig().getMinNewTokens(), input.getGenerateConfig().getIgnoreEos());
     }
     static TaskInfoPB task(Scheduler.Task task) {
         var result = TaskInfoPB.newBuilder().setRequestId(task.requestId()).setBatchId(task.batchId())

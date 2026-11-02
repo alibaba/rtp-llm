@@ -61,6 +61,14 @@ Python async 只表达非阻塞等待，不代表任意 step 可以脱离 Runner
 
 本轮重构按职责变化整体重写 Registry、Step 模型、编译和执行主链，联动 CLI、启动配方、夹具和构建入口；复用严格 YAML 解析、进程回收、采集与记录等仍成立的机制。Java 内部端点保留明确的请求/响应协议，但不再声明整套 Case API；配置类型留在所属组件，不能随旧接口目录误删。保留引用重校验、固定时间窗口、错误结果和取消清理的验收，不保留另一套旧 Case 执行入口作为兼容分支。
 
+### KV 容量的明确简化边界
+
+每个 Engine 使用一套统一的逻辑 KV block 容量计量。不同模型网络层的 KV 成本合并在这个预算中；不实现按模型层分池、Full/SWA/Linear 多资源组、各组独立配额及它们之间的联合分配。这是有意的 Mock 模型边界，不是后续必须补齐的 real 能力。Device/Host 仅表示已有的缓存存放介质，不扩展成每层或每种注意力各自的资源池。涉及真实混合池瓶颈和逐层容量的实验不由此模型给出结论。
+
+Scheduler 决定申请、增长和提交时机；KvCache 管匹配、分配、索引及引用。正常结束且 Compute/PD 使用结束后，P 提交已计算 prompt；D 提交 prompt 加实际已计算的输出前缀，排除最后一个仅采样、尚未计算 KV 的 token。共享 CacheSequence 保存语义输入和 cache-only 多模态区间，并统一生成完整 block key；生成 token 值由接入层从原生 GENERATE 传入，不能猜测为 prompt 最后一个 token。失败或取消不发布新缓存。
+
+当前 Host↔Device 保持瞬时逻辑迁移。对齐的 feature 源码中，Host→Device 加载使用异步任务和完成上下文，Device→Host 转存也由后台任务执行；调用方在源/目标资源尚未就绪时保留引用。因而瞬时模型不覆盖搬运延迟、传输重叠和在途额外占用，不能表述成 real 使用同步瞬时迁移。
+
 ### 公共 Engine 与独立调度域
 
 RTP 和 vLLM 的设计目标是复用请求事实、资源机制、EngineLoop、Forward、输出和生命周期工具；各自的 Scheduler 拥有队列模型、准入、组批、抢占恢复和结果后的状态转换。替换调度策略不应修改 Compute 或 EngineLoop。原生协议和计算模型参数仍在各自接入/配置边界适配，不宣称两个真实后端只有调度差异。
@@ -324,7 +332,7 @@ Python 接口与 Java 内部协议已分开；Engine 已接通共享/独立宿�
 | `java/shared/multimodal/` | 原生媒体输入、Mock 元数据校验与 TCP 客户端，无 V 服务、计算或缓存依赖。 |
 | `java/shared/engine/` | EngineLoop/Scheduler 执行边界及工厂契约、RequestState 进度与终态/资源使用权、QueueSnapshot 请求计数。 |
 | `java/shared/compute/` | Forward batch、公式、噪声、Decode 推进、停止模型和可取消计时。 |
-| `java/shared/cache/` | BlockPool 物理容量与引用、KvCache 块租约及前缀发布、BlockTree 叶子候选与驱逐。 |
+| `java/shared/cache/` | BlockPool 物理容量与引用、KvCache 块租约及前缀发布、BlockTree 叶子候选与驱逐、CacheSequence 语义序列与缓存身份。 |
 | `java/shared/metrics/` | 物理标签、Prometheus 文本导出与窗口均值/QPS 统计；不包含 RTP 调度语义，不提供查询代理。 |
 | `tests/`、各模块 `src/test/` | Python/跨语言集成与 Java 测试；探针不作为正式业务入口。 |
 | `scripts/` | 构建和检查入口。 |
@@ -432,4 +440,4 @@ EngineInstances 只完成配置解析和实例装配，返回实例及生效配�
 
 Engine 的 HTTP 与原生健康检查读取现有 Loop/Scheduler 失败状态，不采集指标。独立进程每秒调用同一检查，不可恢复失败退出。不开新的健康管理模块，不把普通请求失败当作 Engine 故障。
 
-本分支使用 DSV4.1 的原始多模态 RPC 与内部 PD cache spans；Prepared 输入准备仍在 Scheduler 之前完成，Scheduler 只消费长度和规范化 key。缓存元信息归 shared/cache，Master RPC 与共享 KvcmReporter 消费同一份有效块状态。RTP 实例仅装配 Reporter 的配置、实例身份和实际缓存能力；缓存锁只投递变更，网络线程负责 KVCM 注册、事件与恢复，不增加远端 KV 加载。具体范围见组件参考中的 DSV4.1 Engine / KVCM 契约。
+本分支使用 DSV4.1 的原始多模态 RPC 与内部 PD cache spans；Prepared 输入准备仍在 Scheduler 之前完成，Scheduler 消费长度和只读缓存身份，不处理媒体 RPC。缓存元信息归 shared/cache，Master RPC 与共享 KvcmReporter 消费同一份有效块状态。RTP 实例仅装配 Reporter 的配置、实例身份和实际缓存能力；缓存锁只投递变更，网络线程负责 KVCM 注册、事件与恢复，不增加远端 KV 加载。具体范围见组件参考中的 DSV4.1 Engine / KVCM 契约。

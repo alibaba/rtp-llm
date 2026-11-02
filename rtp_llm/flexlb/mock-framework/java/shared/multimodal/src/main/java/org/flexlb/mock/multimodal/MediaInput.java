@@ -2,6 +2,7 @@ package org.flexlb.mock.multimodal;
 
 import com.google.protobuf.ByteString;
 import io.grpc.Status;
+import org.flexlb.mock.cache.CacheSequence;
 import java.nio.*;
 import java.nio.charset.StandardCharsets;
 import java.util.*;
@@ -100,24 +101,15 @@ public final class MediaInput {
         return new Prepared(result.build(), spans);
     }
 
-    /** Mirrors CompleteTokenIds::multimodalCacheIdentity and the native rolling block hash. */
+    public static CacheSequence sequence(Prepared prepared, int blockSize) {
+        validateSpans(prepared.input(), prepared.spans());
+        return new CacheSequence(blockSize, prepared.input().getTokenIdsList(),
+            prepared.spans().stream().map(span -> new CacheSequence.Span(
+                span.getOffset(), span.getRowHashesList())).toList());
+    }
     public static List<Long> cacheKeys(Prepared prepared, int blockSize) {
         if (blockSize < 1) throw invalid("Invalid cache block size");
-        validateSpans(prepared.input(), prepared.spans());
-        var keys = new ArrayList<Long>(); long hash = 0;
-        int length = prepared.input().getTokenIdsCount();
-        for (int start = 0; start + blockSize <= length; start += blockSize) {
-            for (int i = start; i < start + blockSize; i++) hash = roll(hash, prepared.input().getTokenIds(i));
-            for (var span : prepared.spans()) {
-                int begin = Math.max(start, span.getOffset());
-                int end = Math.min(start + blockSize, span.getOffset() + span.getRowHashesCount());
-                if (begin >= end) continue;
-                for (int value : new int[]{-42, begin-start, span.getRowHashesCount(), begin-span.getOffset(), end-begin}) hash = roll(hash,value);
-                for (int i = begin; i < end; i++) hash = roll(hash, span.getRowHashes(i-span.getOffset()));
-            }
-            keys.add(hash);
-        }
-        return List.copyOf(keys);
+        return sequence(prepared, blockSize).keys();
     }
     public static void validateSpans(GenerateInputPB input, List<MultimodalCacheSpanPB> spans) {
         long previous = 0;
@@ -128,7 +120,6 @@ public final class MediaInput {
             previous = end;
         }
     }
-    private static long roll(long hash, long value) { return hash ^ (value + 0x9e3779b97f4a7c15L + (hash << 12) + (hash >> 32)); }
     public static String address(GenerateInputPB input) {
         var addresses = input.getGenerateConfig().getRoleAddrsList().stream().filter(a -> a.getRole() == RoleAddrPB.RoleType.VIT).toList();
         if (addresses.size() != 1 || addresses.getFirst().getIp().isBlank() || addresses.getFirst().getGrpcPort() < 1 || addresses.getFirst().getGrpcPort() > 65535)

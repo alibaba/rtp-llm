@@ -102,7 +102,7 @@ final class DecodeAdmission implements AutoCloseable {
                     throw Status.FAILED_PRECONDITION.withDescription("Single-token request is already complete at Prefill").asRuntimeException();
                 call.stage = Stage.GENERATING;
                 call.token = frame.getFirstGenerateTokenId();
-                engine.control(call.request, Control.GENERATE);
+                engine.control(call.request, new Control.Generate(call.token));
             } else {
                 throw Status.FAILED_PRECONDITION.withDescription("Expected ALLOCATE, LOAD, then GENERATE or PREFILL_COMPLETE").asRuntimeException();
             }

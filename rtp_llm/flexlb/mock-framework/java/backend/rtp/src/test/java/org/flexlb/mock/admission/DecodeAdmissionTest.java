@@ -160,6 +160,44 @@ class DecodeAdmissionTest {
         }
     }
 
+    @Test void completedDecodeCachesComputedOutputButNotTheFinalSample() throws Exception {
+        for (boolean media : List.of(false, true)) {
+            try (var node = node(false); var call = new Call(node, 0)) {
+                var allocate = input("p", 71, 3, 3000).toBuilder();
+                allocate.getInputBuilder().getGenerateConfigBuilder().setMaxNewTokens(5).setIgnoreEos(true);
+                var spans = new ArrayList<MultimodalCacheSpanPB>();
+                if (media) {
+                    allocate.getInputBuilder().setTokenIds(2, -200);
+                    spans.add(MultimodalCacheSpanPB.newBuilder().setOffset(2).addRowHashes(777).build());
+                    allocate.addAllMultimodalCacheSpans(spans);
+                }
+                call.request.onNext(allocate.build()); call.ack();
+                call.request.onNext(GenerateRequestPB.newBuilder().setRequestId(71).setStage(RemoteStage.LOAD).build());
+                assertInstanceOf(GenerateOutputsPB.class, call.replies.poll(3, TimeUnit.SECONDS));
+                call.request.onNext(GenerateRequestPB.newBuilder().setRequestId(71).setClientId("p")
+                    .setStage(RemoteStage.GENERATE).setFirstGenerateTokenId(7).build());
+                Object reply;
+                do {
+                    reply = call.replies.poll(3, TimeUnit.SECONDS);
+                    assertNotNull(reply);
+                    assertTrue(reply instanceof GenerateOutputsPB || "completed".equals(reply), String.valueOf(reply));
+                } while (!"completed".equals(reply));
+                var all = allocate.getInput().toBuilder().addAllTokenIds(Collections.nCopies(5, 7)).build();
+                var full = new org.flexlb.mock.multimodal.MediaInput.Prepared(all, spans);
+                var allKeys = org.flexlb.mock.multimodal.MediaInput.cacheKeys(full, 2);
+                // Three input tokens + four computed output tokens: three full blocks.
+                var expected = Set.copyOf(allKeys.subList(0, 3));
+                await(() -> node.node.cache().snapshot(-1, true).keys().equals(expected));
+                assertFalse(node.node.cache().snapshot(-1, true).keys().contains(allKeys.get(3)));
+                // A later request reuses the output prefix, including a block crossing the media tail.
+                try (var lease = node.node.cache().acquire(8, allKeys).lease()) {
+                    assertNotNull(lease);
+                    assertEquals(6, lease.reusedTokens());
+                }
+            }
+        }
+    }
+
     @Test void loadUsesTheExistingConnectionAndNeedsNoCallbackAddress() throws Exception {
         try (var node = node(false); var call = new Call(node, 0)) {
             call.request.onNext(input("p", 1, 5, 0)); call.ack();
