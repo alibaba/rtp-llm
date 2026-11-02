@@ -72,7 +72,11 @@ from rtp_llm.models_py.model_desc.qwen4_exp_runtime import (
 from rtp_llm.models_py.model_desc.qwen4_exp_runtime.qsa_context import (
     Qwen4ExpQSARuntimeContext,
 )
-from rtp_llm.models_py.modules.qwen4_exp.qsa import fmha_inputs, indexer_paged_score
+from rtp_llm.models_py.modules.qwen4_exp.qsa import (
+    fmha_inputs,
+    indexer_paged_score,
+    indexer_prefill_triton,
+)
 from rtp_llm.models_py.modules.qwen4_exp.qsa.sparse_gqa_impl import SparseGqaFmhaImpl
 from rtp_llm.utils.model_weight import W
 
@@ -488,6 +492,7 @@ def main():
 
     _install_segment_timers()
     plan_stats_before = qsa_step_plan.step_plan_cache_stats()
+    fused_stats_before = indexer_prefill_triton.prefix_reuse_fused_stats()
     torch.cuda.synchronize()
     first_clock = time.perf_counter()
     output = fixture.forward(attention, fmha)
@@ -559,6 +564,14 @@ def main():
     print(
         "step plan cache: "
         + "  ".join(f"{key}={plan_delta[key]}" for key in plan_delta)
+    )
+    fused_stats = indexer_prefill_triton.prefix_reuse_fused_stats()
+    fused_delta = {
+        key: fused_stats[key] - fused_stats_before[key] for key in fused_stats
+    }
+    print(
+        "fused prefix-reuse writer: "
+        + "  ".join(f"{key}={fused_delta[key]}" for key in fused_delta)
     )
     print(
         f"first forward (plan build included): {first_ms:.3f} ms vs steady-state"
