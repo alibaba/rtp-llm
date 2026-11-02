@@ -313,7 +313,7 @@ class PrefillRequestCapacityTest {
 
     private static WorkerStatus.TaskObservation observed(long id) {
         return new WorkerStatus.TaskObservation(id, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, "", 0L,
-                TaskPhase.RUNNING, 0L, PriorityPreemptionProgress.NONE);
+                TaskPhase.RUNNING, 0L, PriorityPreemptionProgress.NONE, false);
     }
 
     private static ScheduledRequest item(long id) {

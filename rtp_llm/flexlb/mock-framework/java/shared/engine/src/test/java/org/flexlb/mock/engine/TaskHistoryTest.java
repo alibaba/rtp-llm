@@ -8,7 +8,7 @@ import org.junit.jupiter.api.Test;
 
 class TaskHistoryTest {
     private static Scheduler.Task task(long id) {
-        return new Scheduler.Task(id, 0, 1, 0, 0, Scheduler.ReportedPhase.RECEIVED, 0, 0, 0, -1, null);
+        return new Scheduler.Task(id, 0, 1, 0, 0, Scheduler.ReportedPhase.RECEIVED, 0, 0, 0, -1, null, false);
     }
     @Test void laggingReadersKeepCurrentStateAndReceiveExplicitGapEvidence() {
         var history = new TaskHistory();

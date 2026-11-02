@@ -19,7 +19,7 @@ final class RpcTasks {
     }
     static Scheduler.Task pending(GenerateInputPB input) {
         return new Scheduler.Task(input.getRequestId(), input.hasGroupId() ? input.getGroupId().getValue() : 0,
-            input.getTokenIdsCount(), 0, input.getPriority(), Scheduler.ReportedPhase.PENDING, 0, 0, -1, -1, null);
+            input.getTokenIdsCount(), 0, input.getPriority(), Scheduler.ReportedPhase.PENDING, 0, 0, -1, -1, null, false);
     }
     static long deadline(GenerateInputPB input, long started, long rpcDeadline) {
         int timeout = input.getGenerateConfig().getTimeoutMs();
@@ -27,6 +27,7 @@ final class RpcTasks {
     }
     static TaskInfoPB task(Scheduler.Task task) {
         var result = TaskInfoPB.newBuilder().setRequestId(task.requestId()).setBatchId(task.batchId())
+            .setRequestIdStr(Long.toString(task.requestId())).setPrefixLengthValid(task.prefixLengthValid())
             .setInputLength(task.inputLength()).setPrefixLength(task.prefixLength()).setPriority(task.priority())
             .setDpRank(0).setPhase(switch (task.phase()) {
                 case PENDING -> TaskPhase.TASK_PHASE_PENDING;

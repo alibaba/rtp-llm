@@ -121,6 +121,20 @@ final class FlexlbConfigValidator {
                     "cacheMatching", "globalKvsHostCount must be 0 and enableP2p false without remote KV loading");
             positive(kvcm.getRequestTimeoutMs(), "cacheMatching.requestTimeoutMs");
             positive(kvcm.getLeaderRefreshIntervalMs(), "cacheMatching.leaderRefreshIntervalMs");
+            positive(kvcm.getHeartbeatFailureThreshold(), "cacheMatching.heartbeatFailureThreshold");
+            positive(kvcm.getQueryFailureThreshold(), "cacheMatching.queryFailureThreshold");
+            nonNegative(kvcm.getMaxQueryRetryCount(), "cacheMatching.maxQueryRetryCount");
+            positive(kvcm.getRecoverySuccessThreshold(), "cacheMatching.recoverySuccessThreshold");
+            require(kvcm.getLocalStandby() != null, "cacheMatching.localStandby", "is required");
+            LocalStandbyConfig standby = kvcm.getLocalStandby();
+            positive(standby.getMinimumTtlMs(), "cacheMatching.localStandby.minimumTtlMs");
+            require(standby.getMinimumTtlMs() <= standby.getTtlMs(), "cacheMatching.localStandby.ttlMs", "must be at least minimumTtlMs");
+            positive(standby.getAsyncQueueCapacity(), "cacheMatching.localStandby.asyncQueueCapacity");
+            positive(standby.getMaximumEntries(), "cacheMatching.localStandby.maximumEntries");
+            require(Double.isFinite(standby.getTtlReductionStartRatio()) && standby.getTtlReductionStartRatio() >= 0
+                    && standby.getTtlReductionStartRatio() <= 1, "cacheMatching.localStandby.ttlReductionStartRatio", "must be in [0,1]");
+            require(Double.isFinite(standby.getCapacityMultiplier()) && standby.getCapacityMultiplier() >= 1,
+                    "cacheMatching.localStandby.capacityMultiplier", "must be finite and at least 1");
             require(kvcm.getMedium() != null && !kvcm.getMedium().isEmpty() && kvcm.getMedium().stream().allMatch("hbm"::equals),
                     "cacheMatching.medium", "only local hbm residency is supported");
         }

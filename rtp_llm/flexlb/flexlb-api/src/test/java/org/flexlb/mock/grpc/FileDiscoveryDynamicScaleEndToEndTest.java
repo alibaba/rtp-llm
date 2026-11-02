@@ -135,7 +135,7 @@ class FileDiscoveryDynamicScaleEndToEndTest extends FlexLBMockTestBase {
         healthReporter = mock(EngineHealthReporter.class);
         workerAddressService = new WorkerAddressService(
                 healthReporter, modelMetaConfig, fileServiceDiscovery, configService);
-        engineGrpcService = new EngineGrpcService(grpcClient);
+        engineGrpcService = new EngineGrpcService(grpcClient, org.mockito.Mockito.mock(org.flexlb.config.CacheMatchConfiguration.class));
         // Upstream's schedule refactor removed the cache-generation
         // activate/retire gate from the discovery publish path; the cache
         // poll now runs as an independent GrpcCacheStatusCheckRunner whose

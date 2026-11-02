@@ -73,7 +73,7 @@ final class PrefillAdmission implements AutoCloseable {
                 if (request != null) { engine.finish(request, failure); return; }
                 var task = RpcTasks.pending(input);
                 finished.add(new Scheduler.Task(id, task.batchId(), task.inputLength(), 0, task.priority(),
-                    Scheduler.ReportedPhase.PENDING, 0, 0, 0, System.currentTimeMillis(), failure));
+                    Scheduler.ReportedPhase.PENDING, 0, 0, 0, System.currentTimeMillis(), failure, false));
                 ended = true;
                 sessions.remove(id, this);
             }

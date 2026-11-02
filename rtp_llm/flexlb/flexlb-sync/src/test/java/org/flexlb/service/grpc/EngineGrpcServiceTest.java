@@ -20,7 +20,7 @@ class EngineGrpcServiceTest {
     @CsvSource({"DECODE,false", "PREFILL,true", "PDFUSION,true"})
     void cacheRequestOnlyFetchesDetailedKeysWhenNeeded(RoleType role, boolean needsCacheKeys) {
         EngineGrpcClient client = mock(EngineGrpcClient.class);
-        EngineGrpcService service = new EngineGrpcService(client);
+        EngineGrpcService service = new EngineGrpcService(client, org.mockito.Mockito.mock(org.flexlb.config.CacheMatchConfiguration.class));
         WorkerStatus status = RunnerTestSupport.discovered(
                 role, null, "127.0.0.1", 8080, 8081, "test-site");
 
