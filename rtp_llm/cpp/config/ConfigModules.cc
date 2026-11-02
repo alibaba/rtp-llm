@@ -174,6 +174,8 @@ std::string KVCacheConfig::to_string() const {
         << "kv_cache_event_snapshot_interval_ms: " << kv_cache_event_snapshot_interval_ms << "\n"
         << "kvcm_read_backend_type: " << kvcm_read_backend_type << "\n"
         << "kvcm_min_replica_count: " << kvcm_min_replica_count << "\n"
+        << "kvcm_asyncwrapper_thread_num: " << kvcm_asyncwrapper_thread_num << "\n"
+        << "kvcm_asyncwrapper_queue_size: " << kvcm_asyncwrapper_queue_size << "\n"
         << "block_tree_full_prefix_scan_interval_ms: " << block_tree_full_prefix_scan_interval_ms << "\n";
     return oss.str();
 }

@@ -332,7 +332,7 @@ TEST_F(KVCMIndependentPoolTest, FactoryPublishesHeterogeneousSpecsAndRoundTripsE
     EXPECT_EQ(state_->destroyed, 3u);
 }
 
-TEST_F(KVCMIndependentPoolTest, PartialWriteFailureAbortsSessionAndReleasesPins) {
+TEST_F(KVCMIndependentPoolTest, PartialWriteFailureAbortsSessionAndPermanentlyProtectsPins) {
     ASSERT_TRUE(initialize());
     kv_cache_manager::WriteLocation proposal;
     proposal.write_session_id = "failed_session";
@@ -352,18 +352,25 @@ TEST_F(KVCMIndependentPoolTest, PartialWriteFailureAbortsSessionAndReleasesPins)
     ASSERT_TRUE(waitForBackendOperationsForTest(*backend_));
     EXPECT_EQ(state_->writes, (std::vector<size_t>{1, 0, 0}));
     for (size_t group = 0; group < pools_.size(); ++group) {
-        EXPECT_FALSE(pools_[group]->isFrozen(blocks_[group]));
-        EXPECT_EQ(pools_[group]->refCount(blocks_[group]), 1u);
+        EXPECT_TRUE(pools_[group]->isFrozen(blocks_[group]));
+        EXPECT_EQ(pools_[group]->treeRefCount(blocks_[group]), 1u);
+        EXPECT_EQ(pools_[group]->refCount(blocks_[group]), 2u);
     }
     backend_->shutdown();
     EXPECT_EQ(state_->destroyed, 3u);
+    refs_.clear();
+    for (size_t group = 0; group < pools_.size(); ++group) {
+        EXPECT_TRUE(pools_[group]->isFrozen(blocks_[group]));
+        EXPECT_TRUE(pools_[group]->isAllocated(blocks_[group]));
+        EXPECT_EQ(pools_[group]->refCount(blocks_[group]), 1u);
+    }
 }
 
 class KVCMIndependentPoolFailureTest:
     public KVCMIndependentPoolTest,
     public ::testing::WithParamInterface<std::tuple<bool, int, bool>> {};
 
-TEST_P(KVCMIndependentPoolFailureTest, SdkFailureProtectsWholeTaskOnlyOnTimeout) {
+TEST_P(KVCMIndependentPoolFailureTest, SdkFailurePermanentlyProtectsWholeTask) {
     const auto [write, failed_pool, timeout] = GetParam();
     ASSERT_TRUE(initialize());
     const kv_cache_manager::Locations locations{
@@ -413,25 +420,26 @@ TEST_P(KVCMIndependentPoolFailureTest, SdkFailureProtectsWholeTaskOnlyOnTimeout)
         ASSERT_EQ(matched.matched_blocks_num, 1u);
         auto promise = std::make_shared<std::promise<ErrorInfo>>();
         auto result  = promise->get_future();
-        backend_->read(
-            request(), matched.match_meta, [promise, timeout, pools = pools_, blocks = blocks_](ErrorInfo error) {
-                for (size_t group = 0; group < pools.size(); ++group) {
-                    EXPECT_EQ(pools[group]->isFrozen(blocks[group]), timeout);
-                    EXPECT_EQ(pools[group]->treeRefCount(blocks[group]), timeout ? 1u : 0u);
-                    EXPECT_EQ(pools[group]->refCount(blocks[group]), timeout ? 2u : 1u);
-                }
-                promise->set_value(std::move(error));
-            });
+        backend_->read(request(), matched.match_meta, [promise, pools = pools_, blocks = blocks_](ErrorInfo error) {
+            for (size_t group = 0; group < pools.size(); ++group) {
+                EXPECT_TRUE(pools[group]->isFrozen(blocks[group]));
+                EXPECT_EQ(pools[group]->treeRefCount(blocks[group]), 1u);
+                EXPECT_EQ(pools[group]->refCount(blocks[group]), 2u);
+            }
+            promise->set_value(std::move(error));
+        });
         EXPECT_EQ(await(result).code(), timeout ? ErrorCode::DEADLINE_EXCEEDED : ErrorCode::EXECUTION_EXCEPTION);
     }
     ASSERT_TRUE(waitForBackendOperationsForTest(*backend_));
     EXPECT_EQ(sdk_failures, 1u);
     EXPECT_EQ(write ? state_->writes : state_->reads,
               (failed_pool == 0 ? std::vector<size_t>{0, 0, 0} : std::vector<size_t>{1, 0, 0}));
+    // A submitted SDK call returning an error has unknown completion, even
+    // without a timeout. Protect the whole task until process teardown.
     for (size_t group = 0; group < pools_.size(); ++group) {
-        EXPECT_EQ(pools_[group]->isFrozen(blocks_[group]), timeout);
-        EXPECT_EQ(pools_[group]->treeRefCount(blocks_[group]), timeout ? 1u : 0u);
-        EXPECT_EQ(pools_[group]->refCount(blocks_[group]), timeout ? 2u : 1u);
+        EXPECT_TRUE(pools_[group]->isFrozen(blocks_[group]));
+        EXPECT_EQ(pools_[group]->treeRefCount(blocks_[group]), 1u);
+        EXPECT_EQ(pools_[group]->refCount(blocks_[group]), 2u);
         for (const auto block : refs_[group]->get()) {
             if (block != blocks_[group]) {
                 EXPECT_FALSE(pools_[group]->isFrozen(block));
@@ -442,11 +450,9 @@ TEST_P(KVCMIndependentPoolFailureTest, SdkFailureProtectsWholeTaskOnlyOnTimeout)
     backend_->shutdown();
     refs_.clear();
     for (size_t group = 0; group < pools_.size(); ++group) {
-        EXPECT_EQ(pools_[group]->isFrozen(blocks_[group]), timeout);
-        EXPECT_EQ(pools_[group]->isAllocated(blocks_[group]), timeout);
-        if (timeout) {
-            EXPECT_EQ(pools_[group]->refCount(blocks_[group]), 1u);
-        }
+        EXPECT_TRUE(pools_[group]->isFrozen(blocks_[group]));
+        EXPECT_TRUE(pools_[group]->isAllocated(blocks_[group]));
+        EXPECT_EQ(pools_[group]->refCount(blocks_[group]), 1u);
     }
 }
 
