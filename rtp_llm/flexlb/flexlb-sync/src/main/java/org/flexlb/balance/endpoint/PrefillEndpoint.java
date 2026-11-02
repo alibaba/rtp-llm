@@ -47,7 +47,8 @@ public class PrefillEndpoint extends WorkerEndpoint {
 
     public PrefillState.CommittedHandoff commitLocked(PrefillState.CommitPlan plan) {
         checkState(ownership.lock.isHeldByCurrentThread(), "commit requires Prefill ownership lock");
-        if (plan.kind() != PrefillState.CommitKind.DIRECT && !ownership.ownsSelectionLocked(plan.items(), plan.selectionTimeMs())) { return null; }
+        if (plan.kind() != PrefillState.CommitKind.DIRECT && plan.kind() != PrefillState.CommitKind.UNQUEUED_BATCH
+                && !ownership.ownsSelectionLocked(plan.items(), plan.selectionTimeMs())) { return null; }
         if (plan.batchReservation() != null) { return ownership.commitLocked(plan, null); }
         var handoff = tryAcquireGenerationHandoff();
         if (handoff == null) { return null; }
@@ -306,6 +307,18 @@ public class PrefillEndpoint extends WorkerEndpoint {
                 handoffPermit.close();
             }
         }
+    }
+
+    public PrefillState.ReservationResult<PrefillState.BatchReservation> reserveUnqueuedBatch(
+            GenerationPin pin, RequestRoute route, long batchId, int maximum) {
+        requirePinnedGeneration(pin);
+        var handoff = tryAcquireGenerationHandoff();
+        if (handoff == null) { return new PrefillState.ReservationResult<>(PrefillState.CapacityStatus.ENDPOINT_RETIRED, null); }
+        PrefillState.ReservationResult<PrefillState.BatchReservation> result = null;
+        try {
+            result = ownership.reserveUnqueuedBatch(route, batchId, maximum, handoff);
+            return result;
+        } finally { if (result == null || result.reservation() == null) { handoff.close(); } }
     }
 
     /**

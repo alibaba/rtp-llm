@@ -540,6 +540,23 @@ class CostBasedPrefillSelectionMetricTest {
         } finally { a.ownership.release(lease, null); }
     }
 
+    @Test
+    void equalHotCacheMatchesRotateWithoutTokenLoadRanking() {
+        configureEngineQueueAdmission();
+        publish("10.0.0.2", 8080);
+        var a = (PrefillEndpoint) registry.get(RoleType.PREFILL, "10.0.0.1:8080");
+        var b = (PrefillEndpoint) registry.get(RoleType.PREFILL, "10.0.0.2:8080");
+        var load = a.ownership.planTokenWork(1_000_000L);
+        context.data().setRequest(context.data().getRequest().toBuilder()
+                .blockCacheKeys(List.of(1L,2L,3L,4L,5L,6L,7L,8L,9L)).cacheKeyBlockSize(100L).build());
+        when(cache.findMatchingEngines(any(), any(), any())).thenReturn(Map.of(a.ipPort(), 9, b.ipPort(), 9));
+        try (load; var first = select(); var second = select()) {
+            assertEquals(900, first.hitCache());
+            assertEquals(900, second.hitCache());
+            assertEquals(Set.of(a, b), Set.of(first.prefillEp(), second.prefillEp()));
+        }
+    }
+
     private void configureEngineQueueAdmission() {
         registry.close();
         var balance = new RoutingConfig.TokenBalanceConfig();
@@ -650,6 +667,49 @@ class CostBasedPrefillSelectionMetricTest {
             }
         }
         source.ownership.release(lease, null);
+    }
+
+    @ParameterizedTest
+    @CsvSource({"0,9,true", "50,9,true", "51,9,false", "0,8,false", "0,0,false"})
+    void migratedHotRequestRechecksTargetLoadAndCacheWithoutReturningToSource(long targetPending,
+            int targetHitBlocks, boolean allowed) {
+        registry.close();
+        var balance = new RoutingConfig.TokenBalanceConfig();
+        balance.setEngineQueueAdmissionThreshold(0L);
+        var rescue = new RoutingConfig.HotspotRescueConfig();
+        rescue.setMaxIdlePendingTokens(50);
+        balance.setHotspotRescue(rescue);
+        config.getRouter().getRoles().getPrefill().setTokenBalance(balance);
+        registry = StrategyTestSupport.endpointRegistry(SchedulingTestConfig.configService(config));
+        publish("10.0.0.1", 8080);
+        publish("10.0.0.2", 8080);
+        strategy = new CostBasedPrefillStrategy(registry, cache, reporter, cacheReporter,
+                SchedulingTestConfig.configService(config));
+        var source = (PrefillEndpoint) registry.get(RoleType.PREFILL, "10.0.0.1:8080");
+        var target = (PrefillEndpoint) registry.get(RoleType.PREFILL, "10.0.0.2:8080");
+        var running = mock(RequestRoute.class);
+        when(running.requestId()).thenReturn(99999L);
+        when(running.seqLen()).thenReturn(targetPending);
+        var lease = target.ownership.reserveUnqueuedRoute(running, 1, 0).reservation();
+        when(cache.findMatchingEngines(any(), any(), any())).thenReturn(
+                Map.of("10.0.0.1:8080", 9, "10.0.0.2:8080", targetHitBlocks));
+        var ctx = new RequestContext(config);
+        ctx.data().setRequest(Request.builder().requestId(10001L).seqLen(1000L).rawPriority(50)
+                .blockCacheKeys(List.of(1L,2L,3L,4L,5L,6L,7L,8L,9L)).cacheKeyBlockSize(100L).build());
+        long now = System.currentTimeMillis();
+        ctx.data().setSchedulingMetadata(SchedulingMetadata.explicit(50, now + 60000));
+        ctx.register(10001L, now - 10000, now + 60000, 60000);
+        org.springframework.test.util.ReflectionTestUtils.setField(ctx, "prefillMigrationSource", source);
+        try (var route = new RequestRoute(ctx)) {
+            var result = strategy.select(ctx.data().getRequest(), ctx.data().getSchedulingMetadata(), RoleType.PREFILL, null, route);
+            assertEquals(allowed ? PlacementResult.Status.SUCCESS : PlacementResult.Status.BLOCKED, result.status());
+            if (allowed) {
+                assertEquals(target, route.prefillEp());
+                assertEquals(900, route.hitCache());
+            }
+        } finally {
+            target.ownership.release(lease, null);
+        }
     }
 
     private RequestRoute select() {

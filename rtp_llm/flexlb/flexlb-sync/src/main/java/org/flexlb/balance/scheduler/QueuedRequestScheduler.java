@@ -61,7 +61,9 @@ import static org.flexlb.dao.loadbalance.Response.buildErrorResponse;
  * later requests from trying the same worker with different resource demands.
  * Planning is bounded and parallel; completed plans are published without waiting
  * for earlier planners. Arrivals and wakeups do not invalidate in-flight work.
- * WorkerBatcher owns SINGLE/FIXED_WINDOW grouping.</p>
+ * WorkerBatcher owns SINGLE/FIXED_WINDOW grouping for affinity and TTFT routes.
+ * Cold token-balanced requests reserve delivery immediately in the planning turn,
+ * including singleton BATCH delivery, and never enter a worker waiting queue.</p>
  */
 public final class QueuedRequestScheduler extends AbstractRequestScheduler implements AutoCloseable {
 
@@ -105,6 +107,7 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler imple
     private volatile Map<String, Object> latestQueueWaitSnapshot = Map.of("cause", "waiting for placement");
     private final ExecutorService planners;
     private final Thread decisionThread;
+    private final Runnable removeDeliveryCapacityListener;
     private final AtomicBoolean closed = new AtomicBoolean();
     private final PlacementAvailability.Listener availabilityListener =
             key -> postEvent(new QueueEvent(EventKind.CAPACITY, null, null, key));
@@ -140,6 +143,11 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler imple
             close();
         });
         availability.addListener(availabilityListener);
+        removeDeliveryCapacityListener = config.getDispatcher().requiresGenerateInput() && balance != null
+                ? runtime.deliveries().watchDeliveryCapacity(() -> {
+                    availability.changed(PlacementKey.anyGroup(RoleType.PREFILL));
+                    availability.changed(PlacementKey.anyGroup(RoleType.PDFUSION));
+                }) : () -> { };
     }
 
     /** Start scheduler workers before accepting requests. */
@@ -492,6 +500,7 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler imple
         } finally {
             closed.set(true);
             availability.removeListener(availabilityListener);
+            removeDeliveryCapacityListener.run();
             planners.shutdown();
             drainOnClose();
         }
@@ -517,6 +526,10 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler imple
                                 plan.result = Objects.requireNonNull(router.select(entry.context, entry.routingGroup), "placement result");
                                 plan.handle.recordDiagnostics(plan.result.diagnostics());
                                 plan.waitKey = plan.result.blocker();
+                                if (plan.result.status() == PlacementResult.Status.SUCCESS
+                                        && plan.result.value().coldTokenBalance()) {
+                                    dispatchColdRoute(plan);
+                                }
                             }
                         }
                     }
@@ -525,6 +538,33 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler imple
             });
         } catch (Throwable failure) {
             publishPlan(Plan.failure(entry, failure, availability.sequence()));
+        }
+    }
+
+    /** Cold requests select and acquire delivery capacity in the same planning turn. */
+    private void dispatchColdRoute(Plan plan) {
+        var adopted = plan.pendingDecodeRollback;
+        plan.pendingDecodeRollback = null;
+        plan.immediateResult = ImmediateRouteAdmission.commit(this, plan.entry.context, plan.result.value(), adopted);
+        if (plan.immediateResult.status() == PlacementResult.Status.BLOCKED) {
+            var key = plan.immediateResult.blocker();
+            // Any worker in the eligible pool may serve the next attempt; retain no old assignment.
+            plan.waitKey = new PlacementKey(key.role(), key.group(), null);
+        } else if (plan.immediateResult.status() == PlacementResult.Status.SUCCESS) {
+            var delivery = plan.immediateResult.value();
+            Throwable failure = Failures.run(null, plan::finishAdmission);
+            failure = Failures.run(failure, () -> {
+                if (delivery.batch() != null) {
+                    runtime.dispatcher.deliverBatch(delivery.batch());
+                } else {
+                    long now = System.currentTimeMillis();
+                    long visibility = org.flexlb.balance.prediction.PrefillPredictionBoundary.predictedVisibilityDeadlineMs(
+                            delivery.precedingWork(), delivery.unstartedWorkMs(),
+                            plan.entry.context.data().getConfig().getRequestLifecycle().getDecision().getLifetime(), now);
+                    onDeliveryEvidence(delivery.claim(), new ContextResult.RouteDelivered(delivery.claim(), visibility, now));
+                }
+            });
+            Failures.rethrow(failure, "immediate delivery publication failed");
         }
     }
 
@@ -628,6 +668,24 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler imple
                 }
             }
             if (rejection == null && (reclaimed || (!entry.removed && !entry.context.data().getFuture().isDone()))) {
+                if (reclaimed && plan.immediateResult != null) { refreshColdPlanAfterReclaim(plan); }
+                if (plan.immediateResult != null) {
+                    switch (plan.immediateResult.status()) {
+                        case SUCCESS, CLOSED -> { removeRequest(entry); return Outcome.DONE; }
+                        case REJECTED -> {
+                            plan.handle.terminate(plan.immediateResult.failure());
+                            removeRequest(entry);
+                            return Outcome.DONE;
+                        }
+                        case BLOCKED -> {
+                            if (plan.immediateResult.blocker().endpoint() == null) { return Outcome.BLOCKED; }
+                            WorkerEndpoint blocked = plan.result.value().blockedEndpointIfCurrent(plan.immediateResult.blocker());
+                            if (blocked == null) { return Outcome.REPLAN; }
+                            if (!reclaimed && tryPriorityRescue(plan, blocked)) { return Outcome.PENDING; }
+                            return Outcome.BLOCKED;
+                        }
+                    }
+                }
                 PlacementResult<RequestRoute, PlacementKey> result = plan.result;
                 switch (result.status()) {
                     case REJECTED -> {
@@ -663,6 +721,29 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler imple
         return Outcome.DONE;
     }
 
+    /** Eviction may take arbitrarily long: never dispatch its old cold Prefill assignment. */
+    private void refreshColdPlanAfterReclaim(Plan plan) {
+        RequestRoute previous = plan.result.value();
+        var adopted = plan.pendingDecodeRollback;
+        plan.pendingDecodeRollback = null;
+        try (previous) {
+            previous.releaseTokenPlan();
+            plan.result = Objects.requireNonNull(router.select(plan.entry.context, plan.entry.routingGroup));
+            plan.handle.recordDiagnostics(plan.result.diagnostics());
+            plan.waitKey = plan.result.blocker();
+            plan.immediateResult = null;
+            if (plan.result.status() == PlacementResult.Status.SUCCESS) {
+                if (previous.decodeEp() == plan.result.value().decodeEp()) {
+                    plan.pendingDecodeRollback = adopted;
+                    adopted = null;
+                }
+                if (plan.result.value().coldTokenBalance()) { dispatchColdRoute(plan); }
+            }
+        } finally {
+            if (adopted != null) { previous.decodeEp().release(adopted, DecodeResources.ReleaseReason.LOCAL_ROLLBACK).status(); }
+        }
+    }
+
     private boolean tryPriorityRescue(Plan plan, WorkerEndpoint blockedEndpoint) {
         GlobalQueueEntry entry = plan.entry;
         if (!queueSettings.priorityOrdering() || entry.context.data().getFuture().isDone()) { return false; }
@@ -674,6 +755,7 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler imple
         if (execution == null) {
             return false;
         }
+        if (plan.immediateResult != null) { plan.result.value().releaseTokenPlan(); }
         pendingPreemptions.add(plan);
         execution.whenComplete((result, failure) -> {
             plan.preemptionResult = result;
@@ -1019,6 +1101,7 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler imple
     public void close() {
         if (closed.compareAndSet(false, true)) {
             availability.removeListener(availabilityListener);
+            removeDeliveryCapacityListener.run();
             lock.lock();
             try { changed.signal(); } finally { lock.unlock(); }
             // Late planner results release their own route ownership.
@@ -1070,6 +1153,7 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler imple
         // The plan owns selection pins and uncommitted Decode capacity.
         private PrefillQueueShedding.Estimate estimate;
         private PlacementResult<RequestRoute, PlacementKey> result;
+        private PlacementResult<ImmediateRouteAdmission.Delivery, PlacementKey> immediateResult;
         private final long availabilitySequence;
         // Retained after selection pins close so the request can be parked.
         private PlacementKey waitKey;

@@ -1,22 +1,15 @@
 package org.flexlb.balance.scheduler;
 
-import org.flexlb.dao.route.RoleType;
-
 import org.flexlb.balance.PlacementResult;
-import org.flexlb.balance.delivery.CapacityBoundary;
 import org.flexlb.balance.endpoint.DecodeResources;
-import org.flexlb.balance.endpoint.PrefillEndpoint;
-import org.flexlb.balance.endpoint.PrefillState;
 import org.flexlb.balance.projection.WorkSnapshot;
 import org.flexlb.balance.prediction.PrefillPredictionBoundary;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.service.RecentCacheKeyTraceReporter;
-import org.flexlb.util.Failures;
 import org.flexlb.util.Logger;
 
-import java.util.List;
 import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
 
@@ -116,118 +109,14 @@ public final class DirectRequestScheduler extends AbstractRequestScheduler {
         }
     }
 
-    PlacementResult<RouteDelivery, PlacementKey> commitDirectRoute(
-            RequestContext context, RequestRoute routing) {
-        var request = context.data().getRequest();
-        DecodeResources.ReservationHandle pendingDecodeRollback = routing.decodeEp() == null ? null
-                : routing.decodeEp().tryReserveQueuedRequest(routing.decodePin(), routing.requestId(),
-                        request.getHardKvTokens(), request.getExpectedKvTokens(), routing.priority(), null).handle();
-        if (routing.decodeEp() != null && pendingDecodeRollback == null) {
-            return PlacementResult.blocked(routing.placementKey(RoleType.DECODE));
-        }
-        Throwable failure = null;
-        RequestRoute acquired = null;
-        var placement = context.snapshot().placement();
-        var token = placement == null ? null : placement.operation();
-        boolean delivered = false;
-        try {
-            RequestRoute route = acquired = RequestRoute.create(context, routing, pendingDecodeRollback);
-            CapacityBoundary.Attempt<DeliveryDispatcher.Member> attempt = DeliveryDispatcher.Member.prepare(route, decodeAdmissionCapacity);
-            if (!attempt.accepted()) {
-                return switch (attempt.boundary().status()) {
-                    case UNAVAILABLE -> PlacementResult.blocked(routing.placementKey(RoleType.DECODE));
-                    case OWNERSHIP_LOST -> PlacementResult.rejected(Response.error(StrategyErrorType.RESOURCE_EXHAUSTED));
-                    case FAILED -> throw new IllegalStateException("route admission failed", attempt.boundary().cause());
-                };
-            }
-            DeliveryDispatcher.Member member = attempt.value();
-            try (member) {
-                var reservationAttempt = new PrefillReservationAttempt(route);
-                try {
-                    PrefillState.CommittedHandoff handoff = null;
-                    try {
-                        PlacementResult.Status result = this.commitRoute(route, reservationAttempt);
-                        if (result != PlacementResult.Status.SUCCESS) {
-                            return result == PlacementResult.Status.CLOSED ? PlacementResult.closed()
-                                    : PlacementResult.rejected(Response.error(reservationAttempt.failure()));
-                        }
-                        handoff = routing.prefillEp().commit(new PrefillState.CommitPlan(PrefillState.CommitKind.DIRECT, List.of(route),
-                                List.of(reservationAttempt.reservation()), null, new long[0], null, System.currentTimeMillis()));
-                        if (handoff == null) { return PlacementResult.rejected(Response.error(StrategyErrorType.DISPATCH_FAILED)); }
-                        WorkSnapshot precedingWork = handoff.precedingWork().materialize();
-                        var claim = this.claimDelivery(route, DeliveryClaimKind.ROUTE_DECISION, 0L,
-                                member.decode());
-                        if (claim == null) { return PlacementResult.closed(); }
-                        delivered = true;
-                        pendingDecodeRollback = null;
-                        return PlacementResult.success(new RouteDelivery(claim, precedingWork, routing.prefillWorkMs()));
-                    } finally {
-                        Throwable cleanup = DeliveryDispatcher.closeCommitted(List.of(), handoff);
-                        if (cleanup != null) { runtime.recordFailure(cleanup); }
-                    }
-                } finally {
-                    if (reservationAttempt.reservation() != null) { routing.prefillEp().release(reservationAttempt.reservation(), null); }
-                }
-            }
-        } catch (RuntimeException | Error cause) {
-            failure = cause;
-            throw cause;
-        } finally {
-            if (!delivered) {
-                Throwable rollbackFailure = null;
-                try { if (acquired != null) { acquired.prefillEp().release(null, acquired); } }
-                catch (RuntimeException | Error problem) { rollbackFailure = problem; }
-                try {
-                    if (pendingDecodeRollback != null) {
-                        var released = routing.decodeEp().release(pendingDecodeRollback, DecodeResources.ReleaseReason.LOCAL_ROLLBACK).status();
-                        if (released != DecodeResources.ReservationReleaseResult.RELEASED && released != DecodeResources.ReservationReleaseResult.STALE) {
-                            throw new IllegalStateException("placement rollback retained Decode resources");
-                        }
-                    }
-                } catch (RuntimeException | Error problem) { rollbackFailure = Failures.append(rollbackFailure, problem); }
-                if (rollbackFailure == null && acquired != null && token != null) {
-                    context.bindPlacement(token, acquired, PublicationResult.ROLLBACK_COMPLETED);
-                }
-                if (rollbackFailure != null) {
-                    if (failure == null) { Failures.rethrow(rollbackFailure, "DIRECT rollback failed"); }
-                    else { Failures.append(failure, rollbackFailure); }
-                }
-            }
-        }
+    PlacementResult<RouteDelivery, PlacementKey> commitDirectRoute(RequestContext context, RequestRoute routing) {
+        var result = ImmediateRouteAdmission.commit(this, context, routing, null);
+        return switch (result.status()) {
+            case SUCCESS -> PlacementResult.success(new RouteDelivery(result.value().claim(),
+                    result.value().precedingWork(), result.value().unstartedWorkMs()));
+            case BLOCKED -> PlacementResult.blocked(result.blocker());
+            case CLOSED -> PlacementResult.closed();
+            case REJECTED -> PlacementResult.rejected(result.failure());
+        };
     }
-
-    /** Holds acquisition output without mixing a failed publication with capacity pressure. */
-    private static final class PrefillReservationAttempt implements Publication {
-        private final RequestRoute route;
-        private PrefillState.ReservationResult<PrefillState.RouteReservation> result;
-
-        PrefillReservationAttempt(RequestRoute route) {
-            this.route = route;
-        }
-
-        @Override
-        public void publish() {
-            result = route.prefillEp().reserveUnqueuedRoute(route.prefillPin(), route, route.prefillWorkMs());
-        }
-
-        @Override public boolean published() {
-            return result != null && result.status() == PrefillState.CapacityStatus.ACQUIRED;
-        }
-
-        PrefillState.RouteReservation reservation() {
-            return result == null ? null : result.reservation();
-        }
-
-        StrategyErrorType failure() {
-            if (result == null) { return StrategyErrorType.REQUEST_CANCELLED; }
-            return switch (result.status()) {
-                case CAPACITY_FULL -> StrategyErrorType.RESOURCE_EXHAUSTED;
-                case ENDPOINT_RETIRED -> StrategyErrorType.DISPATCH_FAILED;
-                case REQUEST_ALREADY_RESERVED, REQUEST_NOT_ACTIVE, BATCH_ID_ALREADY_RESERVED ->
-                        StrategyErrorType.RESOURCE_EXHAUSTED;
-                case ACQUIRED -> throw new IllegalStateException("successful admission cannot be rejected");
-            };
-        }
-    }
-
 }

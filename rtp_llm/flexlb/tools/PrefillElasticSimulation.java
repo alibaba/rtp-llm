@@ -160,13 +160,14 @@ public class PrefillElasticSimulation {
                 for(int i:cached.keySet())if(i<active && hits[i]==max && pendingTokens[i]<cap){escape=false;break;}
             }
             if(q.migratedFrom>=0)escape=true;
+            escape &= !affinity;
             q.escaping=escape;
             if(escape && idleCount==0)return -1;
             if((windowPolicy() || policy==Policy.CACHE_ONLY) && max>0 && !escape) {
                 for(int i:cached.keySet()) {
                     if(i>=active || pendingTokens[i]>=cap || !PrefillTokenBalance.eligible((long)hits[i],max,affinity))continue;
                     var w=workers[i];
-                    double score=windowPolicy() ? workScores[i]+q.tokens-hits[i]
+                    double score=windowPolicy() ? (affinity ? 0 : workScores[i]+q.tokens-hits[i])
                         : Math.max(0,w.busyUntil-now)*TPS/1000+w.pendingCompute+q.tokens-hits[i];
                     if(score<best || score==best && (selected<0 || Math.floorMod(i-cursor,N)<Math.floorMod(selected-cursor,N))) {
                         best=score;selected=i;
