@@ -98,6 +98,7 @@ def _causal_conv1d_fwd_kernel(  # continuous batching
     w_ptr,  # (dim, width)
     bias_ptr,
     initial_states_ptr,  # conv_states_ptr
+    private_initial_states_ptr,
     block_map_ptr,  # conv_state_indices_ptr
     prefix_lengths_ptr,
     query_start_loc_ptr,
@@ -117,6 +118,9 @@ def _causal_conv1d_fwd_kernel(  # continuous batching
     stride_istate_seq: tl.constexpr,
     stride_istate_dim: tl.constexpr,
     stride_istate_token: tl.constexpr,
+    stride_private_initial_seq: tl.constexpr,
+    stride_private_initial_dim: tl.constexpr,
+    stride_private_initial_token: tl.constexpr,
     stride_o_seq: tl.constexpr,
     stride_o_dim: tl.constexpr,
     stride_o_token: tl.constexpr,
@@ -133,6 +137,7 @@ def _causal_conv1d_fwd_kernel(  # continuous batching
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
     SEQ_SIZE_PER_BLOCK: tl.constexpr,
+    USE_PRIVATE_INITIAL_STATE: tl.constexpr,
 ):
     conv_states_ptr = initial_states_ptr
     stride_conv_state_seq = stride_istate_seq
@@ -177,19 +182,31 @@ def _causal_conv1d_fwd_kernel(  # continuous batching
     if chunk_offset == 0:
         # read from conv_states
         if HAS_CACHE and prefix_length > 0:
-            init_state_block_pos = (prefix_length - 1) // SEQ_SIZE_PER_BLOCK
-            init_state_block_idx = tl.load(
-                block_map_ptr + idx_seq * stride_block_map + init_state_block_pos
-            ).to(tl.int64)
-            tl.device_assert(
-                init_state_block_idx >= 0,
-                "causal_conv1d: init_state_block_idx must be non-negative",
-            )
-            conv_states_base = (
-                conv_states_ptr
-                + (init_state_block_idx * stride_conv_state_seq)
-                + (idx_feats * stride_conv_state_dim)
-            )  # [BLOCK_N,]
+            if USE_PRIVATE_INITIAL_STATE:
+                # A restored non-aligned prefix may write the runtime cache
+                # block while this first program is still reading it. Read a
+                # per-request private copy instead; runtime writes below remain
+                # directed to conv_states_ptr.
+                initial_states_base = (
+                    private_initial_states_ptr
+                    + (idx_seq * stride_private_initial_seq)
+                    + (idx_feats * stride_private_initial_dim)
+                )
+            else:
+                init_state_block_pos = (prefix_length - 1) // SEQ_SIZE_PER_BLOCK
+                init_state_block_idx = tl.load(
+                    block_map_ptr + idx_seq * stride_block_map + init_state_block_pos
+                ).to(tl.int64)
+                tl.device_assert(
+                    init_state_block_idx >= 0,
+                    "causal_conv1d: init_state_block_idx must be non-negative",
+                )
+                initial_states_base = (
+                    conv_states_ptr
+                    + (init_state_block_idx * stride_conv_state_seq)
+                    + (idx_feats * stride_conv_state_dim)
+                )
+            conv_states_base = initial_states_base  # [BLOCK_N,]
             # load from conv_states
             prior_tokens = conv_states_base + (state_len - 1) * stride_conv_state_tok
             mask_w = idx_feats < dim
@@ -458,6 +475,8 @@ def causal_conv1d_fn(
     pad_slot_id: int = PAD_SLOT_ID,
     metadata: Optional[CausalConv1dMetadata] = None,
     validate_data=False,
+    *,
+    initial_states: Optional[torch.Tensor] = None,
 ):
     """support varlen + continuous batching when x is 2D tensor
 
@@ -503,6 +522,11 @@ def causal_conv1d_fn(
         Providing precomputed metadata can improve performance when
         calling this function multiple times with the same sequence configuration.
 
+    initial_states (optional): per-request private initial state
+        ``[batch, dim, width - 1]``. When supplied, the kernel reads restoration
+        history from it while still writing new runtime states to
+        ``conv_states``. This protects a non-aligned restored prefix from a
+        read/write race in the cache block.
     out: same shape as `x`
     """
     if isinstance(activation, bool) and activation:
@@ -539,7 +563,21 @@ def causal_conv1d_fn(
     stride_istate_seq = 0
     stride_istate_dim = 0
     stride_istate_token = 0
+    stride_private_initial_seq = 0
+    stride_private_initial_dim = 0
+    stride_private_initial_token = 0
     stride_block_map = block_map.stride(0) if block_map is not None else 0
+    if initial_states is not None:
+        if conv_states is None:
+            raise ValueError("private initial states require runtime conv_states")
+        if initial_states.dim() != 3 or initial_states.shape[0] != padded_batch:
+            raise ValueError("initial_states must have shape [batch, dim, width - 1]")
+        if dim != initial_states.shape[1] or width - 1 > initial_states.shape[2]:
+            raise ValueError("initial_states dimensions do not match conv kernel")
+        stride_private_initial_seq = initial_states.stride(0)
+        stride_private_initial_dim = initial_states.stride(1)
+        stride_private_initial_token = initial_states.stride(2)
+        assert stride_private_initial_dim == 1
     if conv_states is not None:
         # extensions to support vLLM:
         # 1. conv_states is used to replaced initial_states
@@ -593,6 +631,11 @@ def causal_conv1d_fn(
             else conv_states
         ),
         (
+            torch.empty([0], device=x.device, dtype=x.dtype)
+            if initial_states is None
+            else initial_states
+        ),
+        (
             torch.empty([0], device=x.device, dtype=torch.int32)
             if block_map is None
             else block_map
@@ -615,6 +658,9 @@ def causal_conv1d_fn(
         stride_istate_seq,
         stride_istate_dim,
         stride_istate_token,
+        stride_private_initial_seq,
+        stride_private_initial_dim,
+        stride_private_initial_token,
         stride_o_seq,
         stride_o_dim,
         stride_o_token,
@@ -631,8 +677,75 @@ def causal_conv1d_fn(
         NP2_STATELEN=np2_statelen,
         BLOCK_M=BLOCK_M,
         BLOCK_N=BLOCK_N,
+        USE_PRIVATE_INITIAL_STATE=initial_states is not None,
     )
     return out.to(original_x_dtype)
+
+
+def has_nonaligned_conv_prefix(
+    prefix_lengths: torch.Tensor, seq_size_per_block: int
+) -> bool:
+    """Return whether any restored prefix needs a private conv initial read."""
+    if seq_size_per_block <= 0:
+        raise ValueError("seq_size_per_block must be positive")
+    if prefix_lengths.numel() == 0:
+        return False
+    if prefix_lengths.device.type == "cpu":
+        return any(
+            int(length) % seq_size_per_block != 0
+            for length in prefix_lengths.reshape(-1).tolist()
+        )
+    return bool(torch.any((prefix_lengths % seq_size_per_block) != 0).item())
+
+
+def gather_conv_initial_states(
+    conv_states: torch.Tensor,
+    prefix_lengths: torch.Tensor,
+    block_map: torch.Tensor,
+    seq_size_per_block: int,
+) -> torch.Tensor:
+    """Materialize per-request conv history from immutable runtime blocks."""
+    if seq_size_per_block <= 0:
+        raise ValueError("seq_size_per_block must be positive")
+    if prefix_lengths.dim() != 1 or prefix_lengths.numel() != block_map.shape[0]:
+        raise ValueError("prefix lengths and block map rows must match")
+
+    device = conv_states.device
+    prefix = (
+        prefix_lengths
+        if prefix_lengths.device == device
+        else prefix_lengths.to(device, non_blocking=True)
+    ).to(torch.int64)
+    runtime_map = (
+        block_map
+        if block_map.device == device
+        else block_map.to(device, non_blocking=True)
+    ).to(torch.int32)
+    if runtime_map.shape[1] == 0:
+        raise ValueError("block map has no cache columns")
+
+    source_columns = ((prefix - 1) // seq_size_per_block).clamp(
+        min=0, max=runtime_map.shape[1] - 1
+    )
+    source_block_ids = runtime_map.gather(1, source_columns[:, None]).squeeze(1)
+    # A prefix-zero row can legitimately have an all-``-1`` block table.
+    # Clamp before gathering, then mask that row back to zero without a host
+    # synchronization or an invalid negative index.
+    safe_source_ids = source_block_ids.clamp(min=0).to(torch.int64)
+    initial_states = conv_states.index_select(0, safe_source_ids)
+    valid = (prefix > 0) & (source_block_ids >= 0)
+    zero = torch.zeros_like(initial_states)
+    gathered = torch.where(valid[:, None, None], initial_states, zero)
+    # The Triton kernel consumes channel-last [batch, dim, width - 1] history.
+    # Materialize that layout explicitly instead of returning a row-major
+    # contiguous tensor whose dim stride is width.
+    result = torch.empty(
+        (prefix.numel(), conv_states.shape[2], conv_states.shape[1]),
+        device=conv_states.device,
+        dtype=conv_states.dtype,
+    ).transpose(1, 2)
+    result.copy_(gathered)
+    return result
 
 
 @triton.jit()
