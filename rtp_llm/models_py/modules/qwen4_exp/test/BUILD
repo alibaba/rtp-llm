@@ -824,3 +824,15 @@ py_test(
     tags = ["H20_CU13"],
     exec_properties = {"gpu": "H20_CU13", "gpu_count": "1"},
 )
+
+# Manual single-layer QSA prefix-reuse bench (DtoH sync points + layer wall);
+# see the module docstring. Not part of the test suite: run it explicitly.
+py_test(
+    name = "qsa_single_layer_bench",
+    srcs = ["qsa_single_layer_bench.py"],
+    main = "qsa_single_layer_bench.py",
+    deps = ["//rtp_llm:testlib"],
+    env = {"GPU_COUNT": "1"},
+    tags = ["H20_CU13", "manual"],
+    exec_properties = {"gpu": "H20_CU13", "gpu_count": "1"},
+)
