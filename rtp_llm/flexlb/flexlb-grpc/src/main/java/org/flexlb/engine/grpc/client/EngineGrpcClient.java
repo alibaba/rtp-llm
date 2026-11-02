@@ -44,6 +44,9 @@ import java.util.function.Function;
 @Component
 public class EngineGrpcClient implements EngineAddressResolver.Listener {
 
+    @Value("${flexlb.engine-grpc.kv-cache-max-inbound-message-bytes:134217728}")
+    private int kvCacheMaxInboundMessageBytes = 128 * 1024 * 1024;
+
     private final GrpcChannelFactory channelFactory;
     private final GrpcChannelPool<EngineChannelKey> channelPool;
     private final GrpcReporter grpcReporter;
@@ -601,7 +604,9 @@ public class EngineGrpcClient implements EngineAddressResolver.Listener {
         return executeGrpcCallAsync(
                 ip,
                 port,
-                stub -> stub.rpcServiceStub().getCacheStatus(request),
+                stub -> stub.rpcServiceStub()
+                        .withMaxInboundMessageSize(kvCacheMaxInboundMessageBytes)
+                        .getCacheStatus(request),
                 requestTimeoutMs,
                 ServiceType.CACHE_STATUS);
     }
