@@ -15,7 +15,10 @@ namespace rtp_llm {
 
 namespace kvcm {
 
-std::string genLocationSpecName(int tp_rank, const std::string& group_name, const std::string& model_name = {});
+std::string genLocationSpecName(int                tp_rank,
+                                const std::string& group_name,
+                                const std::string& model_name = {},
+                                bool               merge_full = false);
 
 struct LocationSpecUnitView {
     LocationSpecUnitView(const kv_cache_manager::LocationSpecUnit& unit): spec_name(unit.spec_name), uri(unit.uri) {}
@@ -48,9 +51,11 @@ public:
     };
     using GroupIdMap = std::map<int32_t, Group>;
     struct SpecInfo {
+        // Representative fields retain FULL reuse semantics; payloads use every group_id.
         int32_t     group_id;
         int32_t     tp_rank;
         std::string tag;
+        std::vector<int32_t> group_ids;
     };
     using SpecInfoMap        = std::map<std::string, SpecInfo, std::less<>>;
     using SpecNames          = std::vector<std::string>;
@@ -87,7 +92,7 @@ public:
     }
 
     // Aggregate group masks that getNeedWriteGroups() can actually emit.
-    // Singleton specs are registered independently by KVCM.
+    // Unmerged singleton specs are registered independently by KVCM.
     virtual std::vector<uint64_t> reachableAggregateMasks() const {
         return {};
     }
@@ -96,7 +101,8 @@ public:
     // canonical group-name order used by the legacy KVCM protocol.
     bool buildLocationSpecGroups(int                 tp_size,
                                  LocationSpecGroups& location_spec_groups,
-                                 const std::string&  model_name = {});
+                                 const std::string&  model_name = {},
+                                 bool                merge_full = false);
 
     const SpecInfoMap& spec_info_map() const {
         return spec_name_to_info_;
