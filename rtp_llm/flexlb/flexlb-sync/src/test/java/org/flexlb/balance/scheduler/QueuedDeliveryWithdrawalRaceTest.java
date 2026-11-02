@@ -135,6 +135,33 @@ class QueuedDeliveryWithdrawalRaceTest {
         }
     }
 
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.CsvSource({"1000,1", "2000,2"})
+    void migrationPacingIsIndependentOfPlannerCountAndDoesNotBankIdleRounds(long intervalMs, int perRound) throws Exception {
+        var rescue = new org.flexlb.config.RoutingConfig.HotspotRescueConfig();
+        rescue.setMigrationIntervalMs(intervalMs);
+        rescue.setMaxMigrationsPerRound(perRound);
+        try (var fixture = new Fixture(rescue)) {
+            var owner = spy(fixture.owner);
+            var candidates = List.of(mock(RequestRoute.class), mock(RequestRoute.class), mock(RequestRoute.class));
+            when(fixture.router.hotspotMigrationCandidates(perRound)).thenReturn(candidates);
+            doReturn(true).when(owner).migrateQueuedRoute(any());
+            long start = TimeUnit.SECONDS.toNanos(1);
+            long interval = TimeUnit.MILLISECONDS.toNanos(intervalMs);
+            owner.migrateHotspotQueues(start);
+            verify(owner, times(perRound)).migrateQueuedRoute(any());
+            for (int i = 1; i < 100; i++) { owner.migrateHotspotQueues(start + interval * i / 100); }
+            verify(owner, times(perRound)).migrateQueuedRoute(any());
+            verify(fixture.router, times(1)).hotspotMigrationCandidates(perRound);
+            owner.migrateHotspotQueues(start + interval);
+            verify(owner, times(2 * perRound)).migrateQueuedRoute(any());
+            owner.migrateHotspotQueues(start + interval * 100);
+            owner.migrateHotspotQueues(start + interval * 100 + 1);
+            verify(owner, times(3 * perRound)).migrateQueuedRoute(any());
+            verify(fixture.router, times(3)).hotspotMigrationCandidates(perRound);
+        }
+    }
+
     private static PrefillTimePredictor.Evaluator evaluator(Runnable predictionBarrier) {
         return new PrefillTimePredictor.Evaluator() {
             @Override public long estimateMs(long total, long hit) { return 1L; }
@@ -152,6 +179,7 @@ class QueuedDeliveryWithdrawalRaceTest {
 
     private static final class Fixture implements AutoCloseable {
         final EngineGrpcClient client = mock(EngineGrpcClient.class);
+        final RequestWorkerSelector router = mock(RequestWorkerSelector.class);
         final SchedulerRuntime runtime;
         final QueuedRequestScheduler owner;
         final PrefillEndpoint prefill;
@@ -163,7 +191,17 @@ class QueuedDeliveryWithdrawalRaceTest {
         final RequestRoute route;
 
         Fixture() throws Exception {
+            this(null);
+        }
+
+        Fixture(org.flexlb.config.RoutingConfig.HotspotRescueConfig rescue) throws Exception {
             var config = SchedulingTestConfig.batchConfig();
+            if (rescue != null) {
+                var balance = new org.flexlb.config.RoutingConfig.TokenBalanceConfig();
+                balance.setHotspotRescue(rescue);
+                config.getRouter().getRoles().getPrefill().setTokenBalance(balance);
+                ReflectionTestUtils.setField(config.getInternalRuntime(), "queuePlannerThreads", 8);
+            }
             SchedulingTestConfig.usePriorityQueue(config);
             SchedulingTestConfig.useSingleDecision(config);
             var service = mock(ConfigService.class);
@@ -183,7 +221,7 @@ class QueuedDeliveryWithdrawalRaceTest {
             var directory = new EndpointRegistry(service, repository, reporter, dispatcher, availability);
             runtime = new SchedulerRuntime(repository, directory, reporter,
                     mock(RequestSchedulerReporter.class), dispatcher, service, mock(EngineGrpcClient.class));
-            owner = new QueuedRequestScheduler(config, mock(RequestWorkerSelector.class), reporter,
+            owner = new QueuedRequestScheduler(config, router, reporter,
                     mock(DecodeCapacityAcquirer.class), runtime, availability,
                     new DecodeResources.AdmissionCapacity(64L, 90), mock(RecentCacheKeyTraceReporter.class));
             runtime.registerScheduler(owner);

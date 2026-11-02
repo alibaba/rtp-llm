@@ -47,7 +47,7 @@ public final class RoutingConfig {
          * overflow only within cache-eligible workers; excludes Master queues and running requests.
          */
         private Long engineQueueAdmissionThreshold;
-        /** Optional rescue of small, aged requests to idle cache-eligible workers. */
+        /** Optional rescue of small, aged requests to lightly loaded cache-eligible workers. */
         private HotspotRescueConfig hotspotRescue;
     }
 
@@ -57,7 +57,12 @@ public final class RoutingConfig {
         private long minWaitMs = 5_000L;
         /** Total input, not just uncached tokens: a cache miss on the target must stay cheap. */
         private long maxInputTokens = 32_768L;
+        /** Target's outstanding uncached tokens (pending + planned), excluding completed history. */
         private long maxIdlePendingTokens = 0L;
+        /** Minimum interval between local queue migration rounds; unused rounds never accumulate. */
+        private long migrationIntervalMs = 1_000L;
+        /** Maximum withdrawals per round, shared by all workers in this model scheduler. */
+        private int maxMigrationsPerRound = 1;
     }
 
     @Getter

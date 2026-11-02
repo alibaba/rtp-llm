@@ -81,7 +81,8 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler imple
     private final Map<String, PrefillQueueShedding.Controller> sheddingControllers = new LinkedHashMap<>();
     private long nextRescueRetryNanos;
     private Set<PlacementKey> idleRescueDomains = Set.of();
-    private long nextLocalMigrationNanos;
+    private long lastLocalMigrationNanos = Long.MIN_VALUE;
+    private long nextRescueDomainScanNanos;
     private final org.flexlb.config.RoutingConfig.HotspotRescueConfig hotspotRescue;
     /** Mutated only by the decision owner; ingress/retry events remain separately classified. */
     private final Map<String, PrefillTrafficTrend> trafficTrends = new LinkedHashMap<>();
@@ -902,13 +903,24 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler imple
     }
 
     private void migrateHotspotQueues() {
-        if (hotspotRescue == null || closed.get() || System.nanoTime() < nextLocalMigrationNanos) { return; }
-        nextLocalMigrationNanos = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(100L);
-        idleRescueDomains = router.hotspotRescueDomains();
-        List<RequestRoute> candidates = router.hotspotMigrationCandidates(plannerCount);
+        migrateHotspotQueues(System.nanoTime());
+    }
+
+    /** Decision-owner only. One bounded round, with no catch-up burst after idle periods. */
+    void migrateHotspotQueues(long nowNanos) {
+        if (hotspotRescue == null || closed.get()) { return; }
+        if (nowNanos >= nextRescueDomainScanNanos) {
+            nextRescueDomainScanNanos = nowNanos + TimeUnit.MILLISECONDS.toNanos(100L);
+            idleRescueDomains = router.hotspotRescueDomains();
+        }
+        if (lastLocalMigrationNanos != Long.MIN_VALUE && nowNanos - lastLocalMigrationNanos
+                < TimeUnit.MILLISECONDS.toNanos(hotspotRescue.getMigrationIntervalMs())) { return; }
+        lastLocalMigrationNanos = nowNanos;
+        int limit = Math.min(plannerCount, hotspotRescue.getMaxMigrationsPerRound());
+        List<RequestRoute> candidates = router.hotspotMigrationCandidates(limit);
         int migrated = 0;
         for (var route : candidates) {
-            if (migrated >= plannerCount) { break; }
+            if (migrated >= limit) { break; }
             if (migrateQueuedRoute(route)) { migrated++; }
         }
     }

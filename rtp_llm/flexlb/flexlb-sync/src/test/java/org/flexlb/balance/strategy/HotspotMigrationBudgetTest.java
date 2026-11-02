@@ -106,6 +106,62 @@ class HotspotMigrationBudgetTest {
         assertEquals(allowed ? List.of(route) : List.of(), strategy.hotspotMigrationCandidates(1));
     }
 
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.CsvSource({"0,0,0,true", "0,1,0,false", "50,20,30,true", "50,20,31,false"})
+    void targetWatermarkIncludesPendingAndPlansButNotCompletedHistory(long threshold, long pending,
+            long planned, boolean allowed) {
+        var config = SchedulingTestConfig.newConfig();
+        var balance = new RoutingConfig.TokenBalanceConfig();
+        balance.setMaxPendingComputeTokens(100L);
+        var rescue = new RoutingConfig.HotspotRescueConfig();
+        rescue.setMaxIdlePendingTokens(threshold);
+        balance.setHotspotRescue(rescue);
+        config.getRouter().getRoles().getPrefill().setTokenBalance(balance);
+        var registry = mock(EndpointRegistry.class);
+        var source = endpoint(0, false);
+        var target = endpoint(1, true);
+        when(target.ownership.tokenWorkload()).thenReturn(new PrefillTokenWorkload.Snapshot(10_000, pending, planned));
+        var route = route(1000, 1);
+        when(route.prefillEp()).thenReturn(source);
+        when(source.ownership.captureQueue(anyInt())).thenReturn(new PrefillState.QueueSnapshot(1, 1, List.of(route), route));
+        when(registry.prefillRoutingSnapshot(RoleType.PREFILL)).thenReturn(List.of(
+                new EndpointRegistry.PrefillRoutingEntry("a", source), new EndpointRegistry.PrefillRoutingEntry("b", target)));
+        var cache = mock(CacheAwareService.class);
+        when(cache.findMatchingEngines(org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.any()))
+                .thenReturn(java.util.Map.of("a", 9, "b", 9));
+        var strategy = new CostBasedPrefillStrategy(registry, cache, mock(EngineHealthReporter.class),
+                mock(CacheMetricsReporter.class), SchedulingTestConfig.configService(config));
+        assertEquals(allowed ? List.of(route) : List.of(), strategy.hotspotMigrationCandidates(1));
+        assertEquals(allowed, !strategy.hotspotRescueDomains().isEmpty());
+    }
+
+    @Test
+    void shortestTotalInputWinsEvenWhenLongRequestHasLessUncachedWork() {
+        var config = SchedulingTestConfig.newConfig();
+        var balance = new RoutingConfig.TokenBalanceConfig();
+        balance.setMaxPendingComputeTokens(100L);
+        balance.setHotspotRescue(new RoutingConfig.HotspotRescueConfig());
+        config.getRouter().getRoles().getPrefill().setTokenBalance(balance);
+        var registry = mock(EndpointRegistry.class);
+        var source = endpoint(0, false);
+        var idle = endpoint(1, true);
+        var shortRoute = route(900, 2); // 800 hit + 100 compute
+        var longRoute = route(950, 1);  // 900 hit + 50 compute
+        when(shortRoute.hitCache()).thenReturn(800L);
+        when(longRoute.hitCache()).thenReturn(900L);
+        for (var route : List.of(shortRoute, longRoute)) { when(route.prefillEp()).thenReturn(source); }
+        when(source.ownership.captureQueue(anyInt())).thenReturn(
+                new PrefillState.QueueSnapshot(1, 1, List.of(longRoute, shortRoute), longRoute));
+        when(registry.prefillRoutingSnapshot(RoleType.PREFILL)).thenReturn(List.of(
+                new EndpointRegistry.PrefillRoutingEntry("a", source), new EndpointRegistry.PrefillRoutingEntry("b", idle)));
+        var cache = mock(CacheAwareService.class);
+        when(cache.findMatchingEngines(org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.any()))
+                .thenReturn(java.util.Map.of("a", 8, "b", 8));
+        var strategy = new CostBasedPrefillStrategy(registry, cache, mock(EngineHealthReporter.class),
+                mock(CacheMetricsReporter.class), SchedulingTestConfig.configService(config));
+        assertEquals(List.of(shortRoute), strategy.hotspotMigrationCandidates(1));
+    }
+
     private PrefillEndpoint endpoint(int id, boolean idle) {
         var endpoint = mock(PrefillEndpoint.class);
         var ownership = mock(PrefillState.class);
