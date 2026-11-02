@@ -42,6 +42,12 @@ py_library(
     ],
 )
 
+models_py_test(
+    name = "qwen4_profiler_ranges_test",
+    src = "qwen4_profiler_ranges_test.py",
+    gpus = 0,
+)
+
 py_library(
     name = "upstream_fixture",
     srcs = ["parity/upstream_fixture.py"],
