@@ -65,6 +65,7 @@ public final class EngineLoop implements AutoCloseable {
     public Scheduler.Status status(long latestFinishedVersion) {
         synchronized (lock) { checkFailure(); return scheduler.status(latestFinishedVersion); }
     }
+    public void checkHealthy() { synchronized (lock) { ensureOpen(); } }
     public String scrapeMetrics() { synchronized (lock) { checkFailure(); return scheduler.scrapeMetrics(); } }
 
     private <T> T change(Supplier<T> operation) {

@@ -93,7 +93,7 @@ components:
 
 配方必须覆盖 Case 实际声明的组件。组件通过 `MOCK_CONFIG_FILE` 读取本实例配置和完整 environment；`MOCK_NODE_ID`、`MOCK_COMPONENT`、`MOCK_OUTPUT_DIR` 提供身份和目录。初始化并绑定端口后原子发布 `MOCK_READY_FILE`，启动超时或提前退出都失败并回收已有进程。
 
-统一 Engine JAR 的默认入口为 `EngineMain`，只启动配置指定的一个 P/D/V Engine，不启动管理接口。Whale 每个 Pod 用 `java -jar <Engine JAR>` 运行一个实例，生命周期由 Whale 管理。
+统一 Engine JAR 的默认入口为 `EngineMain`，只启动配置指定的一个 P/D/V Engine，不启动管理接口。Whale 每个 Pod 用镜像内固定的 `whale_start.sh` 运行一个实例，生命周期由 Whale 管理。EngineMain 不发布本地实验文件；本地 Case 通过 EngineHost 管理实例和产物。
 
 本地 Runner 显式用 `java -cp <Engine JAR> org.flexlb.mock.host.EngineHost` 启动宿主；同一个宿主管理 P/D/V，不为 V 单设管理者。共享模式下 P/D/V 的 command、cwd、env 和 startup_timeout 必须一致；角色差异写入各自 config，不能用进程 env 区分同 JVM 的实例。宿主读取 `MOCK_COMPONENTS_DIR`，按实例目录读取配置并创建对象。Runner 的 isolated 模式仍使用每 JVM 一个对象的本地宿主，便于验证统一扩缩容协议；这不是 Whale 的启动方式。两种入口共用实例装配，RtpNode/VitNode 不再各自提供进程入口或可执行 JAR。
 

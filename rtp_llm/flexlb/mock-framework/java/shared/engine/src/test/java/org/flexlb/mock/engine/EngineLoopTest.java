@@ -47,6 +47,31 @@ class EngineLoopTest {
         return new EngineLoop(lock, policy, new org.flexlb.mock.cache.KvCache(1, 1, 0, org.flexlb.mock.cache.KvCache.EvictionPolicy.LRU), new ComputeModel(new ComputeSpec(new ComputeSpec.Forward(expression, null), null, null)), Role.prefill, "test");
     }
 
+    @Test void healthChecksDoNotCollectWindowMetricsAndExposeLoopFailures() throws Exception {
+        var scrapes = new java.util.concurrent.atomic.AtomicInteger();
+        var fail = new java.util.concurrent.atomic.AtomicBoolean();
+        var policy = new Policy(false) {
+            @Override public Work schedule() {
+                if (fail.get()) throw new IllegalStateException("broken scheduling loop");
+                return super.schedule();
+            }
+            @Override public String scrapeMetrics() { scrapes.incrementAndGet(); return ""; }
+        };
+        try (var loop = engine(policy, policy, "1")) {
+            loop.checkHealthy(); loop.checkHealthy();
+            assertEquals(0, scrapes.get());
+            fail.set(true); loop.wake();
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);
+            while (true) {
+                try { loop.checkHealthy(); }
+                catch (IllegalStateException error) { assertTrue(error.getMessage().contains("broken scheduling loop")); break; }
+                assertTrue(System.nanoTime() < deadline);
+                Thread.sleep(5);
+            }
+            assertEquals(0, scrapes.get());
+        }
+    }
+
     @Test void idleLoopsCannotExhaustVirtualThreadCarriers() throws Exception {
         var loops = new ArrayList<EngineLoop>();
         var policies = new ArrayList<Policy>();

@@ -41,6 +41,10 @@ public final class RpcService extends RpcServiceGrpc.RpcServiceImplBase implemen
         }
         if (failure != null) throw failure;
     }
+    public void checkHealthy() {
+        if (closed) throw new IllegalStateException("Engine closed");
+        if (requests == null) decode.checkHealthy(); else requests.checkHealthy();
+    }
     public String scrapeMetrics() { return requests == null ? decode.scrapeMetrics() : requests.scrapeMetrics(); }
 
     @Override public StreamObserver<GenerateRequestPB> remoteGenerate(StreamObserver<GenerateOutputsPB> observer) {
@@ -117,7 +121,7 @@ public final class RpcService extends RpcServiceGrpc.RpcServiceImplBase implemen
     }
 
     @Override public void checkHealth(EmptyPB request, StreamObserver<CheckHealthResponsePB> response) {
-        reply(response, () -> CheckHealthResponsePB.newBuilder().setHealth("OK").build());
+        reply(response, () -> { checkHealthy(); return CheckHealthResponsePB.newBuilder().setHealth("OK").build(); });
     }
 
     @Override public void getWorkerStatus(StatusVersionPB request, StreamObserver<WorkerStatusPB> response) {

@@ -133,9 +133,13 @@ VP 同 JVM 和跨进程都走 TCP gRPC，只传 shape/dtype、split_size 和逐�
 
 P/D/V 的单实例入口统一为 `java -jar java/host/target/mock-engine-service-1.0-SNAPSHOT-all.jar`。本地 Host 使用每实例配置文件，多个实例共享 JVM 时仍保留各自配置；不从进程 ENV 覆盖实例业务参数。
 
-独立 JVM 可选择两种输入方式：设置 `MOCK_CONFIG_FILE` 时，只读取文件中的 id/component_role/component.config；未设置时，只读取业务 ENV，身份由 `ROLE_TYPE=PREFILL|DECODE|VIT` 与 `MOCK_NODE_ID=prefill-0|decode-0|vit-0` 提供。文件和 ENV 不叠加，没有第二套默认值。P/D 文件还需提供 `component.engine: rtp`。
+独立 JVM 可选择两种输入方式：设置 `MOCK_CONFIG_FILE` 时，只读取文件中的 id/component_role/component.config；未设置时，只读取业务 ENV，身份由 `ROLE_TYPE=PREFILL|DECODE|VIT` 提供；可用 `MOCK_NODE_ID` 显式指定，否则使用 role 与发布地址生成诊断身份。文件和 ENV 不叠加，没有第二套默认值。P/D 文件还需提供 `component.engine: rtp`。
 
-入口目前仍要求框架变量 `MOCK_OUTPUT_DIR`、`MOCK_READY_FILE`，可设置 `MOCK_RPC_PORT`、`MOCK_CONTROL_PORT`、`MOCK_BIND_HOST`、`MOCK_ADVERTISE_HOST`。这些控制监听地址和产物，不属于 Engine 模型参数。每实例独立写 effective-config、endpoints、ready；关闭删除 ready，旧产物目录拒绝覆盖。此处描述启动入口，不表示已完成 Whale 镜像和平台部署。无论是否共 JVM，VP/PD 都走 TCP、只传元数据。
+独立入口使用 real 的 `START_PORT`（默认 8088），HTTP 为 START_PORT，gRPC 为 START_PORT+1。`MOCK_BIND_HOST`、`MOCK_ADVERTISE_HOST` 只控制进程监听和发布地址；监听通配地址且未显式指定发布地址时，通过主机名解析本机 IP。镜像默认监听 0.0.0.0，本地 Host 默认监听 127.0.0.1。
+
+EngineMain 不要求输出目录或 ready 文件，也不写 effective-config/endpoints。启动时输出一条包含生效配置、实际端点的 JSON 日志；每秒检查现有 Engine 健康状态，内部不可恢复故障使进程非零退出。HTTP `/health` 与原生 CheckHealth 使用同一条不采集指标的检查链，健康为 200/status=ok，故障为 503。TERM 触发关闭与资源释放。实验文件只由本地 EngineHost 发布，并继续保留目录防覆盖约束。
+
+镜像和 CI 使用方法见 [Whale 镜像与启动](whale-engine.md)。无论是否共 JVM，VP/PD 都走 TCP、只传元数据。
 
 ## Compute、Forward、Decode 和 EOS
 
@@ -240,7 +244,7 @@ ROLE_TYPE=DECODE MOCK_NODE_ID=decode-0 \
 SEQ_SIZE_PER_BLOCK=128 MAX_SEQ_LEN=32768 TEST_BLOCK_NUM=1025 \
 CONCURRENCY_LIMIT=32 MOCK_COMPUTE_FORWARD_EXPRESSION='19.5 + 0.175 * batchSize' \
 MOCK_COMPUTE_DECODE_TOKENS_PER_STEP=2.6 \
-MOCK_OUTPUT_DIR=/tmp/mock-decode-0 MOCK_READY_FILE=/tmp/mock-decode-0/ready.json \
+START_PORT=8088 \
 java -jar java/host/target/mock-engine-service-1.0-SNAPSHOT-all.jar
 ```
 

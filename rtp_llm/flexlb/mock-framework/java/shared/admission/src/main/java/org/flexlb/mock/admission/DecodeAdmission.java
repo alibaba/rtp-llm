@@ -188,6 +188,7 @@ final class DecodeAdmission implements AutoCloseable {
     }
 
     Scheduler.Status snapshot(long latestFinished) { return engine.status(latestFinished); }
+    void checkHealthy() { engine.checkHealthy(); }
     String scrapeMetrics() { return engine.scrapeMetrics(); }
     @Override public void close() {
         synchronized (this) {
