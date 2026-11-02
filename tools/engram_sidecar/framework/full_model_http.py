@@ -36,6 +36,7 @@ TEXT_FIELDS = ("num_hidden_layers", "hidden_size", "vocab_size", "num_attention_
                "engram_pad_token_id", "engram_vocab_size")
 STORAGE_MODES = ("external-egm", "local-pinned")
 EXTERNAL_ENV = ("RTP_ENGRAM_COHORT", "RTP_ENGRAM_INSTANCE_INDEX", "RTP_ENGRAM_MODEL_REVISION",
+                "RTP_ENGRAM_GENERATION", "RTP_ENGRAM_RANKS_PER_INSTANCE",
                 "RTP_ENGRAM_LOCAL_DESCRIPTORS", "RTP_ENGRAM_COHORT_TIMEOUT",
                 "RTP_ENGRAM_TLS_DIR", "RTP_ENGRAM_CHECKPOINT", "ENGRAM_SHARD_COUNT",
                 "RTP_ENGRAM_GRAPH_MODE",

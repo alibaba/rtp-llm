@@ -1,12 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Private local-cache bootstrap for process-lifetime external Engram.
+"""In-memory bootstrap for process-lifetime distributed Engram.
 
-Startup RPC materializes this cache automatically; the explicit offline launcher
-can also transfer the small private files over an authenticated channel.
-This module does not discover an Owner, load a checkpoint table, run RPC, compile
-native code, or permit live generation replacement. The Owner must outlive all
-consumer processes. Experimental decode Graph requires the model attachment's
-permanent process-lifetime pin; in-process detach is not supported.
+RTP workers publish their own shards and exchange capabilities at startup.
+No serving-time file/RPC reads or live generation replacement. All publishing
+processes must outlive consumers; captured graphs keep process-lifetime pins.
 """
 from __future__ import annotations
 

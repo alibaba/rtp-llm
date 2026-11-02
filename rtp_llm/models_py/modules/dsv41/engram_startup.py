@@ -2,7 +2,7 @@
 """Backend startup adapter: existing intra-instance Store + temporary leader RPC.
 
 Only called before engine construction. No lookup/kernel/Graph code calls this
-module. Holders remain owned by the launcher's static cohort lifecycle.
+module. Backing is retained by the publishing RTP worker until process exit.
 
 The exchanged package stays in memory and is handed to the model attach through
 ``engram_bootstrap.stage_package``; serving never reads bundle files.
@@ -17,7 +17,8 @@ from pathlib import Path
 import ssl
 import threading
 import time
-from uuid import NAMESPACE_URL, uuid5
+from uuid import UUID
+from datetime import timedelta
 
 from .engram_exchange import (Cohort, ExchangeError, ExchangeServer, decode, digest, encode,
                               remote_exchange, tls_context, validate_group)
@@ -35,6 +36,7 @@ TLS_DIR_ENV = 'RTP_ENGRAM_TLS_DIR'
 CHECKPOINT_ENV = 'RTP_ENGRAM_CHECKPOINT'
 COUNT_ENV = 'ENGRAM_SHARD_COUNT'
 RANKS_ENV = 'RTP_ENGRAM_RANKS_PER_INSTANCE'
+GENERATION_ENV = 'RTP_ENGRAM_GENERATION'
 DEFAULT_TIMEOUT = 1800
 
 
@@ -144,20 +146,16 @@ def package_from_descriptors(paths, checkpoint, samples=checkpoint_samples):
 
 
 def _wait(store, keys, deadline):
-    # c10d Store.wait()/check() is collective: every rank must pass the same key
-    # set. Ranks here wait on different keys (own config vs. the shared package),
-    # so a collective wait deadlocks across the gang. Blocking get() is per-key.
-    pending = list(keys)
-    while pending:
-        if time.monotonic() >= deadline:
-            raise ExchangeError('INSTANCE_STARTUP_TIMEOUT')
-        try:
-            store.get(pending[0])
-        except KeyError:
-            # A local store answers immediately; retry until the peer publishes.
-            time.sleep(0.05)
-            continue
-        pending.pop(0)
+    # TCPStore.wait is a key-availability operation, not a rank collective.
+    # Use its per-call timeout: get() otherwise inherits the Store's (possibly
+    # very long) timeout. Never mutate the shared Store's global timeout.
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise ExchangeError('INSTANCE_STARTUP_TIMEOUT')
+    try:
+        store.wait(keys, timedelta(seconds=remaining))
+    except RuntimeError:
+        raise ExchangeError('INSTANCE_STORE_WAIT_FAILED_OR_TIMEOUT') from None
 
 
 def _cohort(env):
@@ -175,6 +173,8 @@ def _cohort(env):
         members.append((host, int(port)))
     if not members:
         raise ExchangeError('INVALID_COHORT')
+    if len({host for host, _ in members}) != len(members):
+        raise ExchangeError('DISTINCT_STORAGE_HOST_ADDRESSES_REQUIRED')
     return members
 
 
@@ -232,8 +232,8 @@ def build_group(env, world_size):
         raise ExchangeError('STORAGE_HOST_COUNT_REQUIRED')
     p = validate_count(int(raw_count))
     instances = len(cohort)
-    if p < instances:
-        raise ExchangeError('STORAGE_HOST_COUNT_BELOW_INSTANCE_COUNT')
+    if p != instances:
+        raise ExchangeError('STORAGE_HOST_COUNT_MUST_MATCH_COHORT')
     revision = env.get(REVISION_ENV)
     if not revision:
         raise ExchangeError('MODEL_REVISION_REQUIRED')
@@ -244,25 +244,22 @@ def build_group(env, world_size):
     raw_ranks = env.get(RANKS_ENV)
     if raw_ranks is not None and (not raw_ranks.isdigit() or int(raw_ranks) <= 0):
         raise ExchangeError('INVALID_RANKS_PER_INSTANCE')
-    generation = str(uuid5(NAMESPACE_URL, 'engram|' + revision + '|' +
-                           ','.join(f'{host}:{port}' for host, port in cohort) + '|' + str(p)))
+    # Addresses/revision identify a deployment, not a particular allocation
+    # lifetime. A fresh shared generation prevents mixing restart attempts.
+    generation = env.get(GENERATION_ENV)
+    try:
+        if str(UUID(generation)) != generation:
+            raise ValueError()
+    except (ValueError, TypeError, AttributeError):
+        raise ExchangeError('SHARED_GENERATION_UUID_REQUIRED') from None
     # A cohort member is either a whole gang on its own host (prefill) or one
     # host of a gang shared by every member (decode); RANKS_ENV states which.
     local_world_size = world_size if raw_ranks is None else int(raw_ranks)
     if local_world_size != world_size and local_world_size * instances != world_size:
         raise ExchangeError('WORLD_SIZE_NOT_DIVISIBLE_BY_INSTANCES')
-    base, extra = divmod(p, instances)
-    members = []
-    for member_index in range(instances):
-        start = member_index * base + min(member_index, extra)
-        count = base + (1 if member_index < extra else 0)
-        if local_world_size % count:
-            raise ExchangeError('WORLD_SIZE_NOT_DIVISIBLE_BY_LOCAL_HOSTS')
-        publishers = local_world_size // count
-        host = cohort[member_index][0]
-        shards = [dict(index=start + offset, host_id=f'{host}#{start + offset}',
-                       publisher_rank=offset * publishers) for offset in range(count)]
-        members.append(dict(instance_id=f'i{member_index}', world_size=local_world_size, shards=shards))
+    members = [dict(instance_id=f'i{i}', world_size=local_world_size,
+                    shards=[dict(index=i, host_id=host, publisher_rank=0)])
+               for i, (host, _) in enumerate(cohort)]
     group = dict(generation=generation, model_revision=revision, members=members)
     validate_group(group)
     local = members[index]
@@ -294,6 +291,8 @@ def build_config(env, world_size):
     config['local_device'] = _placement(env, 'RTP_ENGRAM_LOCAL_DEVICE')
     config['local_numa'] = _placement(env, 'RTP_ENGRAM_LOCAL_NUMA')
     config['release_page_cache'] = env.get('RTP_ENGRAM_RELEASE_INPUT_PAGE_CACHE') == '1'
+    from .engram_capacity import capacity_from_environ
+    config['max_allocation_bytes'], config['budget_bytes'] = capacity_from_environ(env)
     return config
 
 
@@ -388,7 +387,8 @@ def prepare_static_engram(store, *, rank, world_size, environ=None, leader_excha
                 config['checkpoint'], group['model_revision'], shard['host_id'],
                 group['generation'], shard['index'], p,
                 device=config['local_device'], numa=config['local_numa'],
-                release_input_page_cache=config['release_page_cache'], deadline=deadline)
+                release_input_page_cache=config['release_page_cache'], deadline=deadline,
+                max_allocation_bytes=config['max_allocation_bytes'], budget_bytes=config['budget_bytes'])
             payload = encode(document)
         else:
             descriptor = Path(descriptors[offset])

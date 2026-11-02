@@ -70,17 +70,26 @@ flowchart TB
 启动器不再生成任何 JSON 启动配置；它把契约直接写进每个实例的环境变量：
 
 ```
-RTP_ENGRAM_COHORT=10.0.0.1:29483,10.0.0.2:29483   # N 个实例端点，顺序=实例索引
-RTP_ENGRAM_INSTANCE_INDEX=0                        # 本实例索引
-ENGRAM_SHARD_COUNT=4                               # P
-RTP_ENGRAM_MODEL_REVISION=<rev>
+RTP_ENGRAM_COHORT=10.0.0.1:29483,10.0.0.2:29483   # N 个存储 host，host 互不相同，顺序=实例索引
+RTP_ENGRAM_INSTANCE_INDEX=0                        # 本实例在 cohort 中的下标
+ENGRAM_SHARD_COUNT=2                               # P，必须等于 cohort 长度（一 host 一片）
+RTP_ENGRAM_MODEL_REVISION=<rev>                    # 全组一致
+RTP_ENGRAM_GENERATION=<uuid>                       # 必填；本次组启动新生成的 UUID，全组一致，重启必须换新
+RTP_ENGRAM_CHECKPOINT=/models/DeepSeek             # 本机完整 checkpoint
+RTP_ENGRAM_LOCAL_DEVICE=0                          # 建议显式给出；缺省回落 0 并告警
+RTP_ENGRAM_LOCAL_NUMA=0                            # 建议显式给出；该 NUMA node 需有足够空闲内存
+RTP_ENGRAM_MAX_ALLOCATION_BYTES=137438953472       # 必填；默认仅 1GiB
+RTP_ENGRAM_MAX_TOTAL_ALLOCATION_BYTES=274877906944 # 必填；默认仅 8GiB
+RTP_ENGRAM_RANKS_PER_INSTANCE=4                    # 可选；torch gang 跨多个 cohort 成员时需要
 RTP_ENGRAM_LOCAL_DESCRIPTORS=<shard-a.json>,<shard-b.json>   # 可选；仅离线诊断模式需要
-RTP_ENGRAM_CHECKPOINT=/models/DeepSeek
 RTP_ENGRAM_COHORT_TIMEOUT=1800                     # 可选
 RTP_ENGRAM_TLS_DIR=/run/engram/pki                 # 可选；不设则走 plain HTTP
 ```
 
-`generation`、`instance_id`、shard 分配和 `publisher_rank` 全部由这些输入确定性推导，不需要分发 UUID 或成员表。
+`RTP_ENGRAM_GENERATION` 必须由启动器生成并广播给全组：它标识"这一次启动"，不是部署标识。复用上一轮的
+generation 会让某个重启的成员在仍存活的 Store 里读到上一轮的 package key，从而导入已释放的 handle。
+
+`instance_id`、shard 分配和 `publisher_rank` 由这些输入确定性推导；只有 `RTP_ENGRAM_GENERATION` 需要启动器分发（一个 UUID，不是成员表）。
 
 上面是字段示例，文字占位符需要替换。`hosts` 顺序必须与实际 WORLD_RANK 分配一致：host index × local_world_size 对应本 host 的发布者 rank。每个实例允许不同 local_world_size，但目前同一实例内部使用一致的 local_world_size。
 
@@ -92,7 +101,7 @@ P 可配置为 2–64，N 为 1–64。每个实例至少持有一个分片；�
 
 1. 为本次组启动生成一个 UUID；确定 N/P、完整成员表、host 身份及 rank 顺序。所有节点必须处于可共享的 NVLink/IMEX 域，并具有相应权限。IP 可达不代表 Fabric 可导入。
 2. 给每个实例的 rank 0 提供它自己的证书、私钥、CA 和相同的完整证书指纹表；使用平台 PKI。证书 SAN 必须覆盖 coordinator IP/域名。不要把 CA 私钥分发到业务节点。
-3. 按上节契约确定每个实例的 `RTP_ENGRAM_*` 取值（`generation`、成员表和分片归属由 `RTP_ENGRAM_COHORT`/`RTP_ENGRAM_INSTANCE_INDEX`/`ENGRAM_SHARD_COUNT` 确定性推导）。
+3. 按上节契约确定每个实例的 `RTP_ENGRAM_*` 取值；成员表和分片归属由 `RTP_ENGRAM_COHORT`/`RTP_ENGRAM_INSTANCE_INDEX`/`ENGRAM_SHARD_COUNT` 推导，`RTP_ENGRAM_GENERATION` 由启动器每次生成并广播。
 4. 把 `RTP_ENGRAM_*` 设到对应实例的所有 host 环境里，并显式给出 `RTP_ENGRAM_LOCAL_DEVICE`/`RTP_ENGRAM_LOCAL_NUMA`（缺省回落 device 0/NUMA 0 并打印警告）。
    没有额外的持片进程需要启动：**无需人工收集/复制 Fabric handle，也不需要分发任何启动配置文件**。
 6. 对每个实例设置 `consumers[].env` 后启动原有 RTP 命令。`BackendManager.start()` 在 DistributedServer 就绪后、NCCL/模型创建前调用 `prepare_static_engram()`。

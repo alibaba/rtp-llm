@@ -48,11 +48,12 @@ def package(group, docs):
     return s.assemble_package(group, docs, None, samples=samples)
 
 
-def cohort_env(p, instances=1, index=0, timeout=3):
+def cohort_env(p, instances=2, index=0, timeout=3):
     return {
-        s.COHORT_ENV: ','.join(f'127.0.0.1:{29500 + i}' for i in range(instances)),
+        s.COHORT_ENV: ','.join(f'127.0.0.{i + 1}:{29500 + i}' for i in range(instances)),
         s.INDEX_ENV: str(index),
         s.REVISION_ENV: 'test-revision',
+        s.GENERATION_ENV: str(UUID(int=123)),
         s.COUNT_ENV: str(p),
         s.TIMEOUT_ENV: str(timeout),
         s.CHECKPOINT_ENV: '/tmp/checkpoint',
@@ -221,9 +222,9 @@ class IntraInstanceTest(unittest.TestCase):
         store = MemoryStore(); calls = []
         def exchange(cfg, local, deadline):
             calls.append(local)
-            return package(cfg['group'], local)
+            return package(cfg['group'], docs)
         with tempfile.TemporaryDirectory() as directory:
-            self._descriptor_env(env, docs, directory)
+            self._descriptor_env(env, docs[:1], directory)
             envs = [dict(env) for _ in range(4)]
             with ThreadPoolExecutor(4) as pool:
                 futures = [pool.submit(s.prepare_static_engram, store, rank=i, world_size=4,
@@ -254,7 +255,7 @@ class IntraInstanceTest(unittest.TestCase):
         prefix = 'engram/' + config['group']['generation'] + '/i0/'
         store.set(prefix + 'config/1', b'wrong-group')
         with tempfile.TemporaryDirectory() as directory:
-            self._descriptor_env(env, docs, directory)
+            self._descriptor_env(env, docs[:1], directory)
             with self.assertRaisesRegex(e.ExchangeError, 'INSTANCE_GROUP_CONFIG_MISMATCH'):
                 s.prepare_static_engram(store, rank=0, world_size=2, environ=env)
         self.assertNotIn(prefix + 'package', store.data)
@@ -273,13 +274,15 @@ class IntraInstanceTest(unittest.TestCase):
             self.assertEqual(revision, config['group']['model_revision'])
             self.assertEqual(generation, config['group']['generation'])
             self.assertEqual(shards, 2)
-            self.assertEqual(host_id, f'127.0.0.1#{shard}')  # the shard's own host, not the member's
+            self.assertEqual(host_id, '127.0.0.1')  # the shard's own host, not the member's
             self.assertIsNotNone(kwargs['deadline'])
+            self.assertEqual(kwargs['max_allocation_bytes'], 1 << 30)
+            self.assertEqual(kwargs['budget_bytes'], 8 << 30)
             published.append((host_id, shard))
             return docs[shard]
 
         def exchange(cfg, local, deadline):
-            return package(cfg['group'], local)
+            return package(cfg['group'], docs)
 
         with patch.object(engram_publish, 'publish_shard', publish), \
                 self.assertLogs('rtp_llm.models_py.modules.dsv41.engram_startup', 'WARNING'):
@@ -288,7 +291,7 @@ class IntraInstanceTest(unittest.TestCase):
                                        environ=dict(env), leader_exchange=exchange)
                            for i in range(2)]
                 [result.result() for result in results]
-        self.assertEqual(sorted(published), [('127.0.0.1#0', 0), ('127.0.0.1#1', 1)])
+        self.assertEqual(published, [('127.0.0.1', 0)])
         staged = b.staged_package()
         self.assertIsNotNone(staged)
         self.assertEqual(staged['generation'], config['group']['generation'])
@@ -352,9 +355,6 @@ class MutualTLSTest(unittest.TestCase):
             server.shutdown(); server.server_close(); thread.join()
 
 
-if __name__ == '__main__': unittest.main(verbosity=2)
-
-
 class RankSpaceTest(unittest.TestCase):
     """A member is either a whole gang or one host of a gang shared by members."""
 
@@ -378,3 +378,43 @@ class RankSpaceTest(unittest.TestCase):
         env[s.RANKS_ENV] = '3'
         with self.assertRaises(e.ExchangeError):
             s.build_group(env, 8)
+
+
+class DeploymentIdentityTest(unittest.TestCase):
+    def test_physical_p_matches_explicit_hosts(self):
+        for p in (2, 3, 5, 18):
+            env = cohort_env(p, instances=p)
+            group = s.build_group(env, 4)['group']
+            self.assertEqual([m['shards'][0]['host_id'] for m in group['members']],
+                             [f'127.0.0.{i+1}' for i in range(p)])
+        with self.assertRaisesRegex(e.ExchangeError, 'MUST_MATCH_COHORT'):
+            s.build_group(cohort_env(4, instances=2), 8)
+
+    def test_missing_reused_or_duplicate_identity(self):
+        env = cohort_env(2)
+        del env[s.GENERATION_ENV]
+        with self.assertRaisesRegex(e.ExchangeError, 'GENERATION_UUID_REQUIRED'):
+            s.build_group(env, 4)
+        env = cohort_env(2)
+        first = s.build_group(env, 4)['group']
+        env[s.GENERATION_ENV] = str(UUID(int=456))
+        self.assertNotEqual(e.validate_group(first), e.validate_group(s.build_group(env, 4)['group']))
+        env[s.COHORT_ENV] = '127.0.0.1:10001,127.0.0.1:10002'
+        with self.assertRaisesRegex(e.ExchangeError, 'DISTINCT_STORAGE_HOST'):
+            s.build_group(env, 4)
+
+    def test_wait_uses_bounded_operation_not_blocking_get(self):
+        class Store:
+            def get(self, key):
+                raise AssertionError('unbounded get must not implement wait')
+            def wait(self, keys, timeout):
+                self.keys, self.timeout = keys, timeout.total_seconds()
+                raise RuntimeError('timeout')
+        store = Store()
+        with self.assertRaisesRegex(e.ExchangeError, 'WAIT_FAILED_OR_TIMEOUT'):
+            s._wait(store, ['a', 'b'], time.monotonic() + 0.1)
+        self.assertEqual(store.keys, ['a', 'b'])
+        self.assertTrue(0 < store.timeout <= 0.1)
+
+
+if __name__ == '__main__': unittest.main(verbosity=2)

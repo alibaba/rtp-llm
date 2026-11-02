@@ -195,6 +195,8 @@ class ExchangeServer(ThreadingHTTPServer):
     def get_request(self):
         raw, address = super().get_request()
         try:
+            # Bound every unauthenticated read: one wedged peer must not hold a
+            # handler slot for the whole cohort window. The longest frame is 4 MiB.
             raw.settimeout(min(5, self.cohort.remaining()))
             if self.context is None:
                 self.connections += 1
