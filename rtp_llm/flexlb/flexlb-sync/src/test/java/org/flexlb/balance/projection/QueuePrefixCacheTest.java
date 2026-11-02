@@ -81,6 +81,24 @@ class QueuePrefixCacheTest {
     }
 
     @Test
+    void publishedGroupsAreImmutableAndWarmHitsDoNotReplaceTheEntry() {
+        var cache = new QueuePrefixCache();
+        Object model = new Object();
+        var groups = new ArrayList<QueuePrefixCache.Group>();
+        groups.add(new QueuePrefixCache.Group(2, 100));
+        groups.add(new QueuePrefixCache.Group(2, 200));
+        cache.publish(model, batch, 1000, 2000, groups);
+        var published = cache.read(model, batch, 1000);
+        groups.clear();
+        assertEquals(2, published.groups().size());
+        cache.publish(model, batch, 1001, 2000, List.of(new QueuePrefixCache.Group(2, 100)));
+        assertSame(published, cache.read(model, batch, 1001));
+        assertNull(cache.read(model, batch, 2000));
+        cache.publish(model, batch, 2000, 3000, List.of(new QueuePrefixCache.Group(1, 42)));
+        assertEquals(42, cache.read(model, batch, 2000).groups().getFirst().durationMs());
+    }
+
+    @Test
     void concurrentReadersAndPublishersMatchUncachedProjection() throws Exception {
         var inputs = input(3, 10_000, 0);
         var oracle = new RouteProjection.Inputs(inputs.queue(), inputs.work(), 1, null);
