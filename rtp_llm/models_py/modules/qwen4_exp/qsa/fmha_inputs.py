@@ -3,6 +3,7 @@
 from typing import Optional
 
 import torch
+
 from rtp_llm.ops.compute_ops import LayerKVCache
 
 from .fmha_plans import IncrementalPrefillInputs, PagedInputs, PrefillRequest
@@ -274,6 +275,7 @@ def _prepare_incremental_prefill_inputs(
     )
 
     cu_host = expected_cu.cpu().tolist()
+    prefix_host = prefixes.tolist() if prefixes.device.type == "cpu" else None
     requests = []
     for request_idx in range(batch):
         start, end = cu_host[request_idx : request_idx + 2]
@@ -299,6 +301,7 @@ def _prepare_incremental_prefill_inputs(
                 end,
                 kv_lens.unsqueeze(0).contiguous(),
                 request_selection.unsqueeze(0).contiguous(),
+                None if prefix_host is None else int(prefix_host[request_idx]),
             )
         )
 

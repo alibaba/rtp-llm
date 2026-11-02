@@ -24,6 +24,51 @@ from triton.experimental.gluon.nvidia.hopper import TensorDescriptor
 
 
 @g.jit
+def _value_half(
+    Smem,
+    start: gl.constexpr,
+    S,
+    kt,
+    KN: gl.constexpr,
+    mma: gl.constexpr,
+    rhs: gl.constexpr,
+):
+    value = Smem.slice(start, 128, dim=1).load(mma)
+    rows = gl.arange(0, KN, layout=SliceLayout(1, mma))
+    return gl.convert_layout(gl.where((kt * KN + rows < S)[:, None], value, 0.0), rhs)
+
+
+@g.jit
+def _packed_pv(
+    hi,
+    lo,
+    Smem,
+    acc,
+    S,
+    kt,
+    QM: gl.constexpr,
+    KN: gl.constexpr,
+    mma: gl.constexpr,
+    rhs: gl.constexpr,
+):
+    left, right = acc.reshape((QM, 2, 128)).permute((0, 2, 1)).split()
+    left = gl.convert_layout(left, mma, assert_trivial=True)
+    right = gl.convert_layout(right, mma, assert_trivial=True)
+    value = _value_half(Smem, 0, S, kt, KN, mma, rhs)
+    left = mma_v2(hi, value, left)
+    left = mma_v2(lo, value, left)
+    value = _value_half(Smem, 128, S, kt, KN, mma, rhs)
+    right = mma_v2(hi, value, right)
+    right = mma_v2(lo, value, right)
+    # Splitting accumulator columns only renames registers in this MMA layout.
+    return gl.convert_layout(
+        gl.join(left, right).permute((0, 2, 1)).reshape((QM, 256)),
+        mma,
+        assert_trivial=True,
+    )
+
+
+@g.jit
 def _producer(
     K,
     V,
@@ -167,17 +212,22 @@ def _consumer(
             normalizer = normalizer * alpha + gl.sum(p, 1)
             maximum = next_max
         mbarrier.wait(full.index(vs), vp, deps=[buf])
-        if TAIL == 2:
-            v = buf.index(vs).load(mma)
-            vr = gl.arange(0, KN, layout=SliceLayout(1, mma))
-            v = gl.convert_layout(gl.where((kt * KN + vr < S)[:, None], v, 0.0), rhs)
+        if TAIL == 2 and QM == 32:
+            acc = _packed_pv(hi, lo, buf.index(vs), acc, S, kt, QM, KN, mma, rhs)
         else:
-            v = buf.index(vs).load(rhs)
-            if TAIL == 1:
-                vr = gl.arange(0, KN, layout=SliceLayout(1, rhs))
-                v = gl.where((kt * KN + vr < S)[:, None], v, 0.0)
-        acc = mma_v2(hi, v, acc)
-        acc = mma_v2(lo, v, acc)
+            if TAIL == 2:
+                v = buf.index(vs).load(mma)
+                vr = gl.arange(0, KN, layout=SliceLayout(1, mma))
+                v = gl.convert_layout(
+                    gl.where((kt * KN + vr < S)[:, None], v, 0.0), rhs
+                )
+            else:
+                v = buf.index(vs).load(rhs)
+                if TAIL == 1:
+                    vr = gl.arange(0, KN, layout=SliceLayout(1, rhs))
+                    v = gl.where((kt * KN + vr < S)[:, None], v, 0.0)
+            acc = mma_v2(hi, v, acc)
+            acc = mma_v2(lo, v, acc)
         gl.thread_barrier()
         fence_async_shared()
         if PIPE:
@@ -222,7 +272,7 @@ def _execute_prefill(
 ):
     # K and V occupy successive slots in one ring, allowing V to arrive
     # while QK and softmax execute without allocating separate K/V pipelines.
-    slots: gl.constexpr = 3 if PIPE else 2
+    slots: gl.constexpr = 3 if PIPE and TAIL != 1 else 2
     buf = gl.allocate_shared_memory(gl.bfloat16, [slots, KN, D], K.layout)
     full = gl.allocate_shared_memory(gl.int64, [slots, 1], mbarrier.MBarrierLayout())
     empty = gl.allocate_shared_memory(gl.int64, [slots, 1], mbarrier.MBarrierLayout())

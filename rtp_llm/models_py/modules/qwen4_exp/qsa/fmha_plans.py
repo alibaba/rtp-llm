@@ -1,6 +1,7 @@
 """Validated paged FMHA reader inputs, materialized before main-cache mutation."""
 
 from dataclasses import dataclass
+from typing import Optional
 
 import torch
 
@@ -22,6 +23,7 @@ class PrefillRequest:
     end: int
     kv_lens: torch.Tensor
     selected_indices: torch.Tensor
+    prefix: Optional[int] = None
 
 
 @dataclass(frozen=True)

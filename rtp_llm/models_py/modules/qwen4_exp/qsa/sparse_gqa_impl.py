@@ -579,7 +579,10 @@ class SparseGqaFmhaImpl(FMHAImplBase):
                 self.write_cache_store_impl, self.attn_inputs, kv_cache
             )
             output = self._forward_ragged_paged(
-                qkv[:, : self.q_width], kv_cache, paged_plan
+                qkv[:, : self.q_width],
+                kv_cache,
+                paged_plan,
+                trusted_selected=trusted_selected,
             )
             if uses_stored_selection:
                 self._selected_indices = None
@@ -750,6 +753,8 @@ class SparseGqaFmhaImpl(FMHAImplBase):
         q: torch.Tensor,
         kv_cache: Optional[LayerKVCache],
         plan: PagedInputs | IncrementalPrefillInputs,
+        *,
+        trusted_selected: bool = False,
     ) -> torch.Tensor:
         """Run paged attention over packed incremental-prefill requests."""
         assert kv_cache is not None
@@ -824,21 +829,36 @@ class SparseGqaFmhaImpl(FMHAImplBase):
             start, end = int(request.start), int(request.end)
             query_len = end - start
             request_q = q[start:end].view(1, query_len, self.head_num, self.head_dim)
-            request_q = request_q.transpose(1, 2).contiguous()
-            request_output = sparse_paged_gqa_attn(
-                request_q,
-                kv_cache.kv_cache_base,
-                block_table[request_idx : request_idx + 1].contiguous(),
-                request.kv_lens,
-                request.selected_indices,
-                page_size=page_size,
-                kv_head_num=self.kv_head_num,
-                **self._paged_kv_scale_args(kv_cache),
-            )
+            request_q = request_q.transpose(1, 2)
+            request_output = None
+            if trusted_selected and self.attn_configs.indexer_topk == 512:
+                from .tma_prefill import try_paged_causal_qsa_prefill
+
+                request_output = try_paged_causal_qsa_prefill(
+                    request_q,
+                    kv_cache.kv_cache_base,
+                    block_table[request_idx : request_idx + 1],
+                    request.selected_indices,
+                    prefix=request.prefix,
+                    page_size=page_size,
+                    kv_head_num=self.kv_head_num,
+                    **self._paged_kv_scale_args(kv_cache),
+                )
+            if request_output is None:
+                request_output = sparse_paged_gqa_attn(
+                    request_q.contiguous(),
+                    kv_cache.kv_cache_base,
+                    block_table[request_idx : request_idx + 1].contiguous(),
+                    request.kv_lens,
+                    request.selected_indices,
+                    page_size=page_size,
+                    kv_head_num=self.kv_head_num,
+                    **self._paged_kv_scale_args(kv_cache),
+                )
             outputs.append(
                 request_output.transpose(1, 2).reshape(query_len, self.q_width)
             )
-        return torch.cat(outputs, dim=0)
+        return outputs[0] if len(outputs) == 1 else torch.cat(outputs, dim=0)
 
 
 def create_sparse_gqa_impl(

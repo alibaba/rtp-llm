@@ -131,7 +131,7 @@ def try_causal_qsa_prefill(
         and k.shape[1] == 1
         and q.shape[1] in (6, 12)
         and q.shape[2] == k.shape[2]
-        and 128 <= q.shape[2] <= 4096
+        and 1 <= q.shape[2] <= 4096
         and q.shape[3] == k.shape[3] == 256
         and all(t.device == q.device for t in (k, v, selected))
         and all(t.stride(-1) == 1 for t in (q, k, v))
@@ -239,3 +239,76 @@ def try_ragged_causal_qsa_prefill(q, k, v, selected, lengths, cu_seqlens):
     k = k.view(1, tokens, 1, 256).transpose(1, 2)
     v = v.view(1, tokens, 1, 256).transpose(1, 2)
     return run_prefill(q, k, v, selected, cu_seqlens, lengths)
+
+
+def try_paged_causal_qsa_prefill(
+    q, cache, table, selected, *, prefix, page_size, kv_head_num, kv_scale=None
+):
+    """Consume a prevalidated indexer selection and paged request, or return None.
+
+    The caller validates visible indices and physical pages before writing KV.
+    Prefix is its CPU plan snapshot; this helper never reads metadata back from
+    the device. Arbitrary injected selections retain the general sparse path.
+    """
+    if not (
+        isinstance(prefix, int)
+        and prefix >= 0
+        and q.ndim == 4
+        and q.shape[0] == 1
+        and q.is_cuda
+        and torch.version.hip is None
+        and q.dtype == torch.bfloat16
+        and q.shape[1] in (6, 12)
+        and q.shape[3] == 256
+        and 128 <= q.shape[2]
+        and prefix + q.shape[2] <= 4096
+        and q.stride(-1) == 1
+        and min(q.stride()) > 0
+        and kv_head_num == 1
+        and page_size == 128
+        and cache.dtype in (torch.bfloat16, torch.float8_e4m3fn)
+        and cache.ndim in (2, 5)
+        and cache.shape[0] > 0
+        and all(t.device == q.device for t in (cache, table, selected))
+        and cache.data_ptr() % 16 == 0
+        and cache.stride(0) % 256 == 0
+        and cache.stride(0) >= 2 * page_size * 256
+        and cache.shape[0] * (cache.stride(0) // 256) < 2**31
+        and table.ndim == 2
+        and table.shape[0] == 1
+        and table.shape[1] >= triton.cdiv(prefix + q.shape[2], page_size)
+        and table.dtype == torch.int32
+        and table.stride(1) == 1
+        and selected.shape == (1, q.shape[2], 2051)
+        and selected.dtype == torch.int32
+        and selected.is_contiguous()
+        and torch.cuda.get_device_capability(q.device) == (12, 0)
+    ):
+        return None
+    if cache.ndim == 2:
+        if cache.shape[1] < 2 * page_size * 256 or cache.stride(1) != 1:
+            return None
+    elif cache.shape[1:] != (2, 1, page_size, 256) or cache.stride()[1:] != (
+        page_size * 256,
+        page_size * 256,
+        256,
+        1,
+    ):
+        return None
+    if cache.dtype == torch.float8_e4m3fn:
+        if not (
+            kv_scale is not None
+            and kv_scale.device == q.device
+            and kv_scale.dtype == torch.float32
+            and kv_scale.shape == (cache.shape[0], 2, 1, page_size)
+            and kv_scale.stride()[1:] == (page_size, page_size, 1)
+            and kv_scale.stride(0) >= 2 * page_size
+        ):
+            return None
+    else:
+        kv_scale = None
+    try:
+        from .tma_paged_pipeline import run_prefill
+    except ImportError:
+        return None
+    return run_prefill(q, cache, table, selected, prefix, page_size, kv_scale)
