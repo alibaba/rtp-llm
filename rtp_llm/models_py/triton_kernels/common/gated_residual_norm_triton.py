@@ -87,17 +87,18 @@ def grouped_rms_norm_triton(
 def _norm_fp8_scale(AMAX, SCALE, N: tl.constexpr, BLOCK: tl.constexpr):
     offsets = tl.arange(0, BLOCK)
     maximum = tl.max(tl.load(AMAX + offsets, offsets < N, other=0.0), 0)
-    # Match the CUDA per-tensor quantizer's constant reciprocal multiplication.
-    tl.store(SCALE, maximum * (1.0 / 448.0))
+    # Match the native per-tensor absmax's true division; multiplying by the
+    # rounded reciprocal diverges by 1 ULP on some amax values.
+    tl.store(SCALE, tl.div_rn(maximum, 448.0))
 
 
 def try_grouped_rms_norm_with_fp8_scale(x, gamma, group_size, eps):
     if not (
         is_supported(x, gamma, group_size)
-        and torch.cuda.get_device_capability(x.device) == (12, 0)
+        and torch.cuda.get_device_capability(x.device) in ((9, 0), (12, 0))
         and x.shape[-1] == 10240
         and group_size == 2560
-        and 256 <= x.numel() // 10240 <= 12288
+        and 1 <= x.numel() // 10240 <= 12288
         and not (x.requires_grad or gamma.requires_grad)
         and isinstance(eps, (float, int))
         and math.isfinite(eps)

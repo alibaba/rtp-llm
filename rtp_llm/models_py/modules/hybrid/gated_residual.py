@@ -155,7 +155,10 @@ class GatedResidual(nn.Module):
             self.down_projection is not None
             and self.down_projection.use_scaled_mm
             and tuple(self.down_projection.weight.shape) == (320, 10240)
-            and 8192 <= hyper_input.numel() // self.hc_hidden_size <= 12288
+            and (
+                1 <= hyper_input.numel() // self.hc_hidden_size <= 32
+                or 8192 <= hyper_input.numel() // self.hc_hidden_size <= 12288
+            )
             and hyper_input.is_cuda
             and torch.version.hip is None
         ):

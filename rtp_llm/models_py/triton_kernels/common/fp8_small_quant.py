@@ -14,7 +14,9 @@ def _small_fp8_quant(
     absolute = tl.abs(values)
     # CUDA fmaxf ignores NaNs during the native amax reduction.
     maximum = tl.max(tl.where(absolute == absolute, absolute, 0), 0)
-    output_scale = maximum * (1.0 / 448.0)
+    # The native per-tensor absmax divides by FP8_E4M3_MAX directly; a
+    # multiply by the rounded reciprocal diverges by 1 ULP on some inputs.
+    output_scale = tl.div_rn(maximum, 448.0)
     # The native CUDA build flushes subnormal FP32 scales to zero. Preserve
     # the stored scale itself, even when both paths quantize the values to zero.
     output_scale = tl.where(output_scale < 1.1754943508222875e-38, 0, output_scale)
@@ -50,7 +52,7 @@ def _silu_mul_fp8_quant(
     activated = ((gate * tl.sigmoid(gate)) * up).to(tl.bfloat16).to(tl.float32)
     absolute = tl.abs(activated)
     maximum = tl.max(tl.where(absolute == absolute, absolute, 0), 0)
-    output_scale = maximum * (1.0 / 448.0)
+    output_scale = tl.div_rn(maximum, 448.0)
     output_scale = tl.where(output_scale < 1.1754943508222875e-38, 0, output_scale)
     if tl.program_id(0) == 0:
         tl.store(scale, output_scale)
@@ -85,7 +87,7 @@ def try_silu_mul_fp8_quant(gate_up, *, output=None):
         and gate_up.is_contiguous()
         and gate_up.shape[0] in (4, 8, 12, 16)
         and gate_up.shape[1] == 1280
-        and torch.cuda.get_device_capability(gate_up.device) == (12, 0)
+        and torch.cuda.get_device_capability(gate_up.device) in ((9, 0), (12, 0))
     ):
         return None
     rows, width = gate_up.shape[0], 640
@@ -135,7 +137,7 @@ def is_supported(x, output=None):
             )
         )
         and x.numel() <= 65536
-        and torch.cuda.get_device_capability(x.device) == (12, 0)
+        and torch.cuda.get_device_capability(x.device) in ((9, 0), (12, 0))
     ):
         return False
     return output is None or (
