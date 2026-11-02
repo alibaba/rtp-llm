@@ -1,7 +1,6 @@
 """Shared DSV4 utility functions used across BF16 and FP8 paths."""
 
 import torch
-from deep_gemm.utils.layout import get_mn_major_tma_aligned_packed_ue8m0_tensor
 
 from rtp_llm.config.quant_config import Fp8BlockWiseQuantConfig
 from rtp_llm.models_py.modules.factory.linear import LinearFactory
@@ -11,6 +10,8 @@ _V4_FP8_BLOCK_CFG = Fp8BlockWiseQuantConfig()
 
 def _repack_v4_fp8_scale_to_int32(scale: torch.Tensor) -> torch.Tensor:
     """V4 ckpt UE8M0 ``[N/128, K/128]`` to DeepGEMM int32-packed scale."""
+    from deep_gemm.utils.layout import get_mn_major_tma_aligned_packed_ue8m0_tensor
+
     assert scale.dtype == torch.float8_e8m0fnu, f"unexpected scale dtype {scale.dtype}"
     assert scale.dim() == 2, f"unexpected scale dim {scale.dim()}"
 
