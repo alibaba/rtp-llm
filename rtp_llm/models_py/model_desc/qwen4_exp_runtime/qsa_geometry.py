@@ -10,13 +10,6 @@ from rtp_llm.models.qwen4_exp.qwen4_exp_kv_cache import (
     INDEXER_KV_TAG,
     INDEXER_STATE_TAG,
 )
-from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer import (
-    build_qsa_rope,
-    build_qsa_rope_from_logical_positions,
-    is_qsa_rope_style,
-    mrope_decode_tail_verdict,
-    validate_mrope_decode_tail,
-)
 
 from .qsa_cache_views import (
     _block_table,
@@ -27,6 +20,7 @@ from .qsa_cache_views import (
     qsa_strict_validation_enabled,
 )
 from .qsa_plans import IncrementalPrefillPlan, TargetVerifyPlan
+from .qsa_step_plan import get_prefill_step_plan
 
 
 def _draft_incremental_prefill_geometry(
@@ -47,243 +41,39 @@ def _draft_incremental_prefill_geometry(
     position, every reused prefix block is a complete compressed block held
     by the side pool, and the writer seals complete blocks exactly as the
     draft path does.
+
+    The layer-independent metadata (lengths, prefixes, cu boundaries, logical
+    positions, visible/compressed lengths, both indexer RoPE tables) is
+    frozen once per model step in a ``Qwen4ExpPrefillStepPlan``
+    (:mod:`.qsa_step_plan`) and reused by every layer; revalidating the same
+    GPU lengths and rebuilding the same device tensors per layer would add
+    host work without seeing new metadata (the ``_target_verify_plan``
+    precedent).  What stays per layer here is what IS layer-local: this
+    layer's pool views and block tables, and their required-blocks verdicts
+    enqueued before any pool mutation.
     """
-    if draft_prefix_reuse:
-        if draft or not self.is_mtp_draft:
-            raise RuntimeError(
-                "qwen4_exp QSA draft prefix-reuse requires an explicit MTP "
-                "draft context"
-            )
-        label = "MTP draft prefix-reuse prefill"
-    else:
-        label = "draft incremental prefill" if draft else "prefix-reuse prefill"
-    lengths = self._validate_mode_and_metadata(
-        expect_prefill=True,
-        allow_draft_incremental=draft,
-        allow_prefix_reuse=not draft,
+    step = get_prefill_step_plan(
+        self,
+        indexer=indexer,
+        token_count=token_count,
+        device=device,
+        rope_config=rope_config,
+        draft=draft,
+        draft_prefix_reuse=draft_prefix_reuse,
     )
-    if self._target_verify_enabled():
-        raise RuntimeError(
-            "qwen4_exp QSA draft incremental prefill cannot be target verification"
-        )
-    if draft and not is_qsa_rope_style(rope_config, "Base"):
-        # The MTP draft runs Base RoPE; the target keeps its own style
-        # (MRoPE for the released checkpoint), which build_qsa_rope
-        # dispatches on for both the writer and the scoring rotation.
-        raise RuntimeError(
-            "qwen4_exp QSA MTP draft incremental prefill requires Base RoPE"
-        )
+    head_dim = step.head_dim
+    kv_entries_per_block = step.kv_entries_per_block
 
-    batch_size = len(lengths)
-    head_dim = int(indexer.head_dim)
-    head_num = int(indexer.n_heads)
-    ratio = int(indexer.compress_ratio)
-    token_budget = int(indexer.token_budget)
-    if min(head_dim, head_num, ratio) <= 0:
-        raise RuntimeError(
-            "qwen4_exp QSA draft incremental prefill has invalid indexer geometry"
-        )
-    if token_budget <= 0 or token_budget % ratio:
-        raise RuntimeError(
-            "qwen4_exp QSA draft incremental prefill token budget must be "
-            "positive and divisible by the compression ratio"
-        )
-    if draft and max(lengths) > ratio:
-        raise RuntimeError(
-            "qwen4_exp QSA draft incremental prefill requires "
-            f"max(input_lengths)={max(lengths)} <= compress_ratio={ratio}"
-        )
-    if sum(lengths) != token_count:
-        raise RuntimeError(
-            f"qwen4_exp QSA input_lengths={lengths} do not partition "
-            f"the {token_count} packed draft tokens"
-        )
-
-    prefixes_host = self.main_inputs.prefix_lengths
+    k_norm_gamma = indexer.k_norm_gamma
     if (
-        prefixes_host.dim() != 1
-        or int(prefixes_host.numel()) != batch_size
-        or prefixes_host.dtype != torch.int32
+        not isinstance(k_norm_gamma, torch.Tensor)
+        or tuple(k_norm_gamma.shape) != (head_dim,)
+        or k_norm_gamma.device != device
     ):
         raise RuntimeError(
-            "qwen4_exp QSA draft incremental prefill requires int32 "
-            "prefix_lengths [B]"
+            "qwen4_exp QSA draft incremental prefill k-norm gamma must be a "
+            f"device-local [{head_dim}] tensor"
         )
-    # Request-data checks stay on the pinned host mirror (free fail-fast) and
-    # the host values replace every later device readback of the prefixes.
-    prefix_values = prefixes_host.tolist()
-    invalid_prefix = any(
-        value <= 0 if draft else value < 0 for value in prefix_values
-    )
-    if invalid_prefix:
-        requirement = "nonzero" if draft else "non-negative"
-        raise RuntimeError(
-            f"qwen4_exp QSA {label} requires every prefix length to be "
-            f"{requirement}"
-        )
-    prefixes = prefixes_host.to(
-        device=device, dtype=torch.int64, non_blocking=True
-    ).contiguous()
-    sequence_lengths = self.main_inputs.sequence_lengths
-    if sequence_lengths.numel() != 0:
-        raise RuntimeError(
-            "qwen4_exp QSA draft incremental prefill requires empty " "sequence_lengths"
-        )
-
-    cu_seqlens = self.main_inputs.cu_seqlens_device
-    expected_cu = torch.zeros(batch_size + 1, dtype=torch.int32, device=device)
-    expected_cu[1:] = torch.tensor(lengths, dtype=torch.int32, device=device).cumsum(0)
-    if (
-        cu_seqlens.dim() != 1
-        or cu_seqlens.dtype != torch.int32
-        or cu_seqlens.device != device
-    ):
-        raise RuntimeError(
-            "qwen4_exp QSA draft incremental prefill cu_seqlens do not "
-            "match input_lengths"
-        )
-    if qsa_strict_validation_enabled():
-        if not bool(torch.equal(cu_seqlens, expected_cu)):
-            raise RuntimeError(
-                "qwen4_exp QSA draft incremental prefill cu_seqlens do not "
-                "match input_lengths"
-            )
-    else:
-        qsa_assert_valid(
-            (cu_seqlens == expected_cu).all(),
-            "qwen4_exp QSA draft incremental prefill cu_seqlens do not "
-            "match input_lengths",
-        )
-    expected_cu_kv = torch.zeros_like(expected_cu)
-    visible_ends = prefixes + torch.tensor(lengths, dtype=torch.int64, device=device)
-    # int32 headroom is host arithmetic on the mirror values; no device read.
-    int32_max = torch.iinfo(torch.int32).max
-    if max(
-        prefix + length for prefix, length in zip(prefix_values, lengths)
-    ) > int32_max:
-        raise RuntimeError(
-            "qwen4_exp QSA draft incremental prefill positions exceed int32"
-        )
-    if sum(prefix + length for prefix, length in zip(prefix_values, lengths)) > int32_max:
-        raise RuntimeError(
-            "qwen4_exp QSA draft incremental prefill cumulative KV lengths "
-            "exceed int32"
-        )
-    expected_cu_kv[1:] = visible_ends.to(torch.int32).cumsum(0)
-    cu_kv_seqlens = self.main_inputs.cu_kv_seqlens_device
-    if (
-        cu_kv_seqlens.dim() != 1
-        or cu_kv_seqlens.dtype != torch.int32
-        or cu_kv_seqlens.device != device
-    ):
-        raise RuntimeError(
-            "qwen4_exp QSA draft incremental prefill cu_kv_seqlens do not "
-            "provide device int32 [B + 1] metadata"
-        )
-    if qsa_strict_validation_enabled():
-        if not bool(torch.equal(cu_kv_seqlens, expected_cu_kv)):
-            if not draft_prefix_reuse:
-                raise RuntimeError(
-                    "qwen4_exp QSA draft incremental prefill cu_kv_seqlens do not "
-                    "match prefix+input lengths"
-                )
-            if int(cu_kv_seqlens.numel()) != batch_size + 1 or bool(
-                torch.any(cu_kv_seqlens[1:] < cu_kv_seqlens[:-1]).item()
-            ):
-                raise RuntimeError(
-                    "qwen4_exp QSA MTP draft prefix-reuse has invalid local "
-                    "cu_kv_seqlens metadata"
-                )
-    elif draft_prefix_reuse:
-        # Local cu_kv coordinates only need monotonicity (equality with the
-        # absolute expected ends is intentionally not required here).
-        if int(cu_kv_seqlens.numel()) != batch_size + 1:
-            raise RuntimeError(
-                "qwen4_exp QSA MTP draft prefix-reuse has invalid local "
-                "cu_kv_seqlens metadata"
-            )
-        qsa_assert_valid(
-            torch.all(cu_kv_seqlens[1:] >= cu_kv_seqlens[:-1]),
-            "qwen4_exp QSA MTP draft prefix-reuse has invalid local "
-            "cu_kv_seqlens metadata",
-        )
-    else:
-        qsa_assert_valid(
-            (cu_kv_seqlens == expected_cu_kv).all(),
-            "qwen4_exp QSA draft incremental prefill cu_kv_seqlens do not "
-            "match prefix+input lengths",
-        )
-
-    # prefix_values already came from the pinned host mirror above; no device
-    # readback is needed for the logical positions.
-    logical_positions = torch.cat(
-        [
-            torch.arange(prefix, prefix + length, device=device)
-            for prefix, length in zip(prefix_values, lengths)
-        ]
-    ).to(torch.int64)
-    position_ids = self.main_inputs.combo_position_ids
-    index_factor = int(rope_config.index_factor)
-    if position_ids is None or int(position_ids.numel()) != token_count * index_factor:
-        actual = 0 if position_ids is None else int(position_ids.numel())
-        raise RuntimeError(
-            "qwen4_exp QSA draft incremental prefill position ids do not "
-            f"match index_factor={index_factor}: got {actual} values for "
-            f"{token_count} tokens"
-        )
-    target_mrope = (
-        not draft and not self.is_mtp_draft and is_qsa_rope_style(rope_config, "Mrope")
-    )
-    try:
-        if target_mrope:
-            offset = 0
-            position_rows = position_ids.reshape(token_count, index_factor)
-            for length in lengths:
-                if qsa_strict_validation_enabled():
-                    validate_mrope_decode_tail(
-                        position_rows[offset : offset + length], ratio
-                    )
-                else:
-                    # One enqueue-only device assert per request; a violation
-                    # traps fail-stop at the next host synchronization.
-                    qsa_assert_valid(
-                        mrope_decode_tail_verdict(
-                            position_rows[offset : offset + length], ratio
-                        ),
-                        "qwen4_exp QSA unfinished MRoPE compression group requires "
-                        "a consecutive equal-axis text tail ending at the maximum "
-                        "position",
-                    )
-                offset += length
-        current_cos, current_sin = build_qsa_rope(
-            position_ids,
-            rope_config,
-            token_count=token_count,
-            dtype=torch.bfloat16,
-            device=device,
-            logical_positions=None if target_mrope else logical_positions,
-        )
-    except ValueError as error:
-        raise RuntimeError(
-            f"qwen4_exp QSA draft incremental prefill {error}"
-        ) from error
-
-    kv_tokens_per_block = int(self.indexer_kv_cache.seq_size_per_block)
-    state_tokens_per_block = int(self.indexer_state_cache.seq_size_per_block)
-    if kv_tokens_per_block <= 0 or kv_tokens_per_block % ratio:
-        raise RuntimeError(
-            "qwen4_exp QSA indexer KV page size must be positive and divisible "
-            f"by ratio={ratio}, got {kv_tokens_per_block}"
-        )
-    if state_tokens_per_block <= 0:
-        raise RuntimeError("qwen4_exp QSA indexer state page size must be positive")
-    # Page alignment is request data: host arithmetic on the prefix mirror.
-    if not draft and any(value % kv_tokens_per_block for value in prefix_values):
-        raise RuntimeError(
-            "qwen4_exp QSA prefix reuse requires prefixes aligned to the "
-            f"indexer KV page size ({kv_tokens_per_block})"
-        )
-    kv_entries_per_block = kv_tokens_per_block // ratio
     kv_pool = _typed_2d_pool(
         self.indexer_kv_cache,
         tag=INDEXER_KV_TAG,
@@ -297,19 +87,9 @@ def _draft_incremental_prefill_geometry(
         tag=INDEXER_STATE_TAG,
         storage_dtype=torch.float32,
         payload_dtype=torch.float32,
-        entries=2 * ratio,
+        entries=2 * step.ratio,
         width=head_dim,
     )
-    k_norm_gamma = indexer.k_norm_gamma
-    if (
-        not isinstance(k_norm_gamma, torch.Tensor)
-        or tuple(k_norm_gamma.shape) != (head_dim,)
-        or k_norm_gamma.device != device
-    ):
-        raise RuntimeError(
-            "qwen4_exp QSA draft incremental prefill k-norm gamma must be a "
-            f"device-local [{head_dim}] tensor"
-        )
     if kv_pool.device != device or state_pool.device != device:
         raise RuntimeError(
             "qwen4_exp QSA side pools and draft projection must share a device"
@@ -318,33 +98,21 @@ def _draft_incremental_prefill_geometry(
         self.indexer_kv_inputs,
         "kv_cache_kernel_block_id_device",
         tag=INDEXER_KV_TAG,
-        batch_size=batch_size,
+        batch_size=step.batch_size,
         device=device,
     )
     state_table = _block_table(
         self.indexer_state_inputs,
         "kv_cache_block_id_device",
         tag=INDEXER_STATE_TAG,
-        batch_size=batch_size,
+        batch_size=step.batch_size,
         device=device,
     )
 
-    row_offsets = torch.arange(max(lengths), dtype=torch.int64, device=device)
-    visible_lengths = prefixes[:, None] + row_offsets[None, :] + 1
-    valid_rows = (
-        row_offsets[None, :]
-        < torch.tensor(lengths, dtype=torch.int64, device=device)[:, None]
-    )
-    visible_lengths = torch.where(valid_rows, visible_lengths, 0)
-    compressed_lengths = (visible_lengths // ratio).to(torch.int32)
-    final_compressed_lengths = (visible_ends // ratio).to(torch.int32)
-    required_kv_columns = (
-        final_compressed_lengths + kv_entries_per_block - 1
-    ) // kv_entries_per_block
     if qsa_strict_validation_enabled():
         _validate_required_blocks(
             kv_table,
-            required_kv_columns,
+            step.required_kv_columns,
             pool_blocks=int(kv_pool.shape[0]),
             tag=INDEXER_KV_TAG,
         )
@@ -352,7 +120,7 @@ def _draft_incremental_prefill_geometry(
         qsa_assert_valid(
             _required_blocks_verdict(
                 kv_table,
-                required_kv_columns,
+                step.required_kv_columns,
                 pool_blocks=int(kv_pool.shape[0]),
             ),
             "QSA cache 'indexer_kv' block table does not cover or resolve the "
@@ -365,19 +133,14 @@ def _draft_incremental_prefill_geometry(
     # loop into one required-blocks verdict over the full [0, required) prefix
     # window (a superset of the old tail window); strict mode keeps the
     # original per-block diagnostics.
-    required_state_columns = torch.tensor(
-        [
-            (prefix + length + state_tokens_per_block - 1) // state_tokens_per_block
-            for prefix, length in zip(prefix_values, lengths)
-        ],
-        dtype=torch.int32,
-    )
     if qsa_strict_validation_enabled():
         state_table_width = int(state_table.shape[1])
-        for request_idx, (prefix, length) in enumerate(zip(prefix_values, lengths)):
-            first_needed = prefix - (prefix % ratio)
+        for request_idx, (prefix, length) in enumerate(
+            zip(step.prefix_values, step.lengths)
+        ):
+            first_needed = prefix - (prefix % step.ratio)
             logical_blocks = {
-                position // state_tokens_per_block
+                position // step.state_tokens_per_block
                 for position in range(first_needed, prefix + length)
             }
             for logical_block in logical_blocks:
@@ -396,74 +159,40 @@ def _draft_incremental_prefill_geometry(
         qsa_assert_valid(
             _required_blocks_verdict(
                 state_table,
-                required_state_columns,
+                step.required_state_columns_device,
                 pool_blocks=int(state_pool.shape[0]),
             ),
             "QSA cache 'indexer_state' draft incremental tail is not covered or "
             "resolves to an unallocated or out-of-range physical block",
         )
 
-    block_starts = logical_positions - logical_positions.remainder(ratio)
-    try:
-        if target_mrope:
-            # Each page-aligned suffix contains the first row of every new
-            # group, including image groups with unequal/nonlinear axes.
-            sources = torch.arange(token_count, device=device)
-            sources = sources - logical_positions.remainder(ratio)
-            block_positions = (
-                position_ids.to(device=device)
-                .reshape(token_count, index_factor)
-                .index_select(0, sources)
-            )
-            rope_cos, rope_sin = build_qsa_rope(
-                block_positions.reshape(-1),
-                rope_config,
-                token_count=token_count,
-                dtype=torch.bfloat16,
-                device=device,
-            )
-        else:
-            rope_cos, rope_sin = build_qsa_rope_from_logical_positions(
-                block_starts,
-                rope_config,
-                token_count=token_count,
-                dtype=torch.bfloat16,
-                device=device,
-            )
-    except ValueError as error:
-        raise RuntimeError(
-            f"qwen4_exp QSA draft incremental prefill {error}"
-        ) from error
-
     return IncrementalPrefillPlan(
         **{
-            "lengths": lengths,
-            "batch_size": batch_size,
-            "head_dim": head_dim,
-            "head_num": head_num,
-            "ratio": ratio,
-            "token_budget": token_budget,
-            "prefixes": prefixes,
-            "cu_seqlens": expected_cu,
-            "logical_positions": logical_positions,
-            "current_cos": current_cos,
-            "current_sin": current_sin,
-            "visible_lengths": visible_lengths,
-            "compressed_lengths": compressed_lengths,
-            "max_ctx_len": max(
-                (prefix + length) // ratio
-                for prefix, length in zip(prefix_values, lengths)
-            ),
-            "kv_tokens_per_block": kv_tokens_per_block,
-            "kv_entries_per_block": kv_entries_per_block,
-            "state_tokens_per_block": state_tokens_per_block,
+            "lengths": step.lengths,
+            "batch_size": step.batch_size,
+            "head_dim": step.head_dim,
+            "head_num": step.head_num,
+            "ratio": step.ratio,
+            "token_budget": step.token_budget,
+            "prefixes": step.prefixes_i64,
+            "cu_seqlens": step.cu_seqlens,
+            "logical_positions": step.logical_positions,
+            "current_cos": step.current_cos,
+            "current_sin": step.current_sin,
+            "visible_lengths": step.visible_lengths,
+            "compressed_lengths": step.compressed_lengths,
+            "max_ctx_len": step.max_ctx_len,
+            "kv_tokens_per_block": step.kv_tokens_per_block,
+            "kv_entries_per_block": step.kv_entries_per_block,
+            "state_tokens_per_block": step.state_tokens_per_block,
             "kv_pool": kv_pool,
             "state_pool": state_pool,
             "kv_table": kv_table,
             "state_table": state_table,
-            "rope_cos": rope_cos,
-            "rope_sin": rope_sin,
-        }
+            "rope_cos": step.rope_cos,
+            "rope_sin": step.rope_sin,
+        },
+        step=step,
     )
 
 
