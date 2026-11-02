@@ -2,6 +2,8 @@
 
 P/D/V 共用一个 Mock Engine 镜像，每 Pod 一个 JVM。Master、Frontend 继续使用各自正常镜像；镜像内不带 Case Runner、本地 Prometheus/Grafana、Master bundle 或代码覆盖程序。
 
+Whale 拆分部署的角色类型使用 `PY_PREFILL`、`PY_DECODE`、`PY_VIT`、`PY_MASTER`、`PY_FRONT_APP`、`PY_KVCM`。不要把 Prefill、Decode 都定义成 `PY_INFERENCE` 再靠 ENV 或手改域名区分；平台会把它们识别为融合角色。P/D/V、Master、Frontend、KVCM 使用各自部署独立的发现域名，发布前回读角色类型与实际 Carbon 注册计划。
+
 ## 构建
 
 在框架目录执行：

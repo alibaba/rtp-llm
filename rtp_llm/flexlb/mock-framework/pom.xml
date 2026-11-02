@@ -14,6 +14,10 @@
     <maven.compiler.release>21</maven.compiler.release>
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
   </properties>
+  <dependencyManagement><dependencies>
+    <!-- Match native FlexLB; an SDK must not replace gRPC's runtime Guava API. -->
+    <dependency><groupId>com.google.guava</groupId><artifactId>guava</artifactId><version>33.4.8-jre</version></dependency>
+  </dependencies></dependencyManagement>
   <profiles><profile>
     <id>internal-discovery</id>
     <modules><module>../../../internal_source/java/vipserver</module></modules>
