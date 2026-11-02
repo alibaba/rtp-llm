@@ -89,5 +89,7 @@ py_test(
 py_test(
     name = "nvfp4_cache_test",
     srcs = ["nvfp4_cache_test.py"],
+    env = {"GPU_COUNT": "0"},
+    visibility = ["//rtp_llm/test/qwen4_exp:__pkg__"],
     deps = ["//rtp_llm:testlib"],
 )

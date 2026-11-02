@@ -1556,7 +1556,9 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
             ["301", "301", "302"],
         )
         middle = _record_for_request(result, 302)
-        self.assertTrue(all("_tag_full" in block["key"] for block in middle["blocks"]))
+        self.assertTrue(
+            all("_tag_full" in block["key"] for block in middle["blocks"])
+        )
         blocks = _blocks_by_key(result)
         for tag, stride, expected in (
             ("swa", 24, {3103: 3, 3104: 4}),
@@ -1912,9 +1914,7 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
             scenarios += ["capture_fp8", "capture_cp"]
         for scenario in scenarios:
             namespace = (
-                "ProfileActor" + "A" * 256
-                if scenario == "capture_bf16"
-                else "TestActor"
+                "ProfileActor" + "A" * 256 if scenario == "capture_bf16" else "TestActor"
             )
             with self.subTest(scenario=scenario), patch.dict(
                 os.environ, {_MOONCAKE_STORE_KEY_NAMESPACE_ENV: namespace}
@@ -1940,8 +1940,7 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
                 self.assertEqual(result["hidden_width"], baseline["hidden_width"])
                 for name in _CAPTURE_QPS_METRICS | _CAPTURE_STATUS_METRICS:
                     self.assertEqual(
-                        result["capture_metrics"][name],
-                        baseline["capture_metrics"][name],
+                        result["capture_metrics"][name], baseline["capture_metrics"][name]
                     )
                 self.assertEqual(
                     len(result["forward_hidden_states"]),
@@ -2002,9 +2001,7 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
                 children = {e.name: e for e in events if e.cpu_parent is publish[0]}
                 if scenario == "capture_non_owner":
                     self.assertNotIn("hidden_state_capture.gil_acquire", children)
-                    self.assertNotIn(
-                        "hidden_state_capture.observe_async_errors", children
-                    )
+                    self.assertNotIn("hidden_state_capture.observe_async_errors", children)
                     self.assertNotIn("hidden_state_capture.prepare_payload", children)
                     self.assertNotIn("hidden_state_capture.put_batch_admit", children)
                     self.assertNotIn("hidden_state_capture.flush", children)
@@ -2020,9 +2017,7 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
                     if scenario == "capture_bf16":
                         self.assertGreater(len(marker.name), 256)
                     self.assertIs(marker.cpu_parent, publish[0])
-                    self.assertLessEqual(
-                        prepare.time_range.end, marker.time_range.start
-                    )
+                    self.assertLessEqual(prepare.time_range.end, marker.time_range.start)
                     self.assertLessEqual(marker.time_range.start, marker.time_range.end)
                     self.assertLessEqual(marker.time_range.end, admit.time_range.start)
                     self.assertLessEqual(prepare.time_range.end, admit.time_range.start)
@@ -2108,12 +2103,8 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
                 self.assertEqual(
                     metrics[f"{_CAPTURE_METRIC_PREFIX}publish_success_qps"], 0
                 )
-                self.assertEqual(
-                    metrics[f"{_CAPTURE_METRIC_PREFIX}store_failure_qps"], 1
-                )
-                self.assertEqual(
-                    metrics[f"{_CAPTURE_METRIC_PREFIX}prepare_failure_qps"], 0
-                )
+                self.assertEqual(metrics[f"{_CAPTURE_METRIC_PREFIX}store_failure_qps"], 1)
+                self.assertEqual(metrics[f"{_CAPTURE_METRIC_PREFIX}prepare_failure_qps"], 0)
                 self.assertCaptureStatus(metrics, enabled=1, broken=0)
                 events = prof.events()
                 self.assertCaptureProfileStoreCalls(events, store_calls)

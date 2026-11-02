@@ -147,28 +147,19 @@ py_test(
     },
 )
 
-py_test(
+test_suite(
     name = "qwen4_exp_layer_test",
-    srcs = ["qwen4_exp_layer_test.py", "ple_page_reference.py"],
-    deps = py_test_deps + [
-        "//rtp_llm:testlib",
-        "//rtp_llm/models_py:models",
-        "//rtp_llm:config",
+    tests = [
+        "//rtp_llm/models_py/model_desc/test/qwen4_exp:ple_cache_test",
+        "//rtp_llm/models_py/model_desc/test/qwen4_exp:ple_graph_test",
+        "//rtp_llm/models_py/model_desc/test/qwen4_exp:ple_host_test",
+        "//rtp_llm/models_py/model_desc/test/qwen4_exp:ple_prefetch_test",
+        "//rtp_llm/models_py/model_desc/test/qwen4_exp:qsa_wiring_test",
+        "//rtp_llm/models_py/model_desc/test/qwen4_exp:wiring_test",
     ],
-    env = {"GPU_COUNT": "1"},
-    tags = ["L20_CU13"],
-    exec_properties = {"gpu": "L20_CU13", "gpu_count": "1"},
 )
 
-py_test(
+alias(
     name = "qwen4_exp_mtp_test",
-    srcs = ["qwen4_exp_mtp_test.py"],
-    deps = py_test_deps + [
-        "//rtp_llm:testlib",
-        "//rtp_llm/models_py:models",
-        "//rtp_llm:config",
-    ],
-    env = {"GPU_COUNT": "1"},
-    tags = ["L20_CU13"],
-    exec_properties = {"gpu": "L20_CU13", "gpu_count": "1"},
+    actual = "//rtp_llm/models_py/model_desc/test/qwen4_exp:mtp_test",
 )

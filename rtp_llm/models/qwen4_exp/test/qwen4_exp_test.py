@@ -13,13 +13,26 @@ from rtp_llm.config.quant_config import (
     ModelOptFp4Config,
     init_quant_config,
 )
-from rtp_llm.model_factory_register import ModelDict, _model_factory
+from rtp_llm.frontend.tokenizer_factory.tokenizer_factory_register import (
+    _tokenizer_factory,
+    ensure_tokenizer_registered,
+)
+from rtp_llm.model_factory_register import (
+    ModelDict,
+    _model_factory,
+    _model_type_to_module,
+    ensure_model_registered,
+)
 from rtp_llm.models.qwen3_next.qwen3_next import Qwen35Moe
 from rtp_llm.models.qwen4_exp.qwen4_exp import Qwen4Exp
 from rtp_llm.models.qwen4_exp.qwen4_exp_weight import Qwen4ExpWeight
 from rtp_llm.multimodal.multimodal_mixin_register import get_multimodal_mixin_cls
 from rtp_llm.multimodal.multimodal_mixins.qwen3_5_moe.qwen3_5_moe_mixin import (
     Qwen3_5MoeMixin,
+)
+from rtp_llm.openai.renderer_factory_register import (
+    _renderer_factory,
+    ensure_renderer_registered,
 )
 from rtp_llm.ops import (
     DataType,
@@ -590,6 +603,30 @@ class Qwen4ExpTest(unittest.TestCase):
                 "patch_size": 16,
             },
         }
+
+
+class Qwen4RegistrationTest(unittest.TestCase):
+    def test_qwen4_exp_lazy_renderer_registration(self):
+        self.assertTrue(ensure_renderer_registered("qwen4_exp"))
+        renderer_type = _renderer_factory["qwen4_exp"]
+        self.assertEqual(renderer_type.__name__, "Qwen4Renderer")
+        self.assertEqual(
+            renderer_type.__module__, "rtp_llm.openai.renderers.qwen35_renderer"
+        )
+
+    def test_qwen4_exp_mtp_lazy_registration(self):
+        self.assertEqual(
+            _model_type_to_module["qwen4_exp_mtp"],
+            "rtp_llm.models.qwen4_exp.qwen4_exp_mtp",
+        )
+        self.assertTrue(ensure_renderer_registered("qwen4_exp_mtp"))
+        self.assertEqual(_renderer_factory["qwen4_exp_mtp"].__name__, "Qwen4Renderer")
+        self.assertTrue(ensure_model_registered("qwen4_exp_mtp"))
+        self.assertEqual(_model_factory["qwen4_exp_mtp"].__name__, "Qwen4ExpMTP")
+        self.assertTrue(ensure_tokenizer_registered("qwen4_exp_mtp"))
+        self.assertEqual(
+            _tokenizer_factory["qwen4_exp_mtp"].__name__, "QWenV2Tokenizer"
+        )
 
 
 if __name__ == "__main__":

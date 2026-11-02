@@ -232,18 +232,6 @@ py_test(
 )
 
 py_test(
-    name = "lazy_registry_test",
-    srcs = [
-        "lazy_registry_test.py",
-    ],
-    deps = [
-        "//rtp_llm:testlib",
-    ],
-    tags = ["L20_CU13"],
-    exec_properties = {"gpu": "L20_CU13"},
-)
-
-py_test(
     name = "pipeline_test",
     srcs = [
         "pipeline_test.py",
@@ -495,7 +483,7 @@ py_test(
 py_test(
     name = "qwen4_request_admission_test",
     srcs = ["qwen4_request_admission_test.py"],
+    env = {"GPU_COUNT": "0"},
+    visibility = ["//rtp_llm/test/qwen4_exp:__pkg__"],
     deps = ["//rtp_llm:testlib"],
-    tags = ["L20_CU13"],
-    exec_properties = {"gpu": "L20_CU13"},
 )

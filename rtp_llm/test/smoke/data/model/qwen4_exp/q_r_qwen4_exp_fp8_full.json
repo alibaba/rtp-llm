@@ -1,6 +1,6 @@
 {
   "model_type": "qwen4_exp",
-  "model_path": "${QWEN4_EXP_CHECKPOINT}",
+  "model_path": "/mnt/fuse/smoke-test/hf/Qwen--Qwen3.8-Flash-Next-FP8--236dfdf285828023ca3bcd3f37366c58a3469b13",
   "query_result": [
     {
       "endpoint": "/v1/chat/completions",

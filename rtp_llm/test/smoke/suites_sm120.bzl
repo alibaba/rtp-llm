@@ -79,19 +79,20 @@ def sm120_suites():
     native.test_suite(
         name = "smoke_sm120_qwen4_exp",
         tests = [
-            _qwen4_contract("qwen4_exp_fp8_mtp_graph_sm120", 1),
-            _qwen4_contract("qwen4_exp_fp8_mtp_eager_sm120", 0),
+            _qwen4_scenarios("qwen4_exp_mixed_tp2_eager_sm120", 0, False),
+            _qwen4_scenarios("qwen4_exp_mixed_tp2_mtp_eager_sm120", 0, True),
+            _qwen4_scenarios("qwen4_exp_mixed_tp2_mtp_graph_sm120", 1, True),
         ],
     )
 
-def _qwen4_contract(name, graph):
+def _qwen4_scenarios(name, graph, mtp):
     return custom_smoke_test(
         name = name,
-        main = "qwen4_exp_sm120_contract_test.py",
-        smoke_args = _QWEN4_SMOKE_ARGS + " --enable_cuda_graph " + str(graph),
+        main = "qwen4_exp_smoke_test.py",
+        smoke_args = _QWEN4_SMOKE_ARGS + (" --sp_type mtp --sp_model_type qwen4_exp_mtp --sp_act_type BF16 --gen_num_per_cycle 3" if mtp else "") + " --enable_cuda_graph " + str(graph),
         gpu_type = ["RTX_5000_PRO_CU13"],
-        data = ["data/model/qwen4_exp/q_r_qwen4_exp_fp8_full.json", "//rtp_llm:sdk"],
+        data = ["//rtp_llm:sdk", ":smoke_framework_srcs", "data/model/qwen4_exp/q_r_qwen4_exp_fp8_full.json"],
         deps = ["//rtp_llm:transformers"],
     )
 
-_QWEN4_SMOKE_ARGS = '--load_method scratch --act_type BF16 --tp_size 2 --dp_size 1 --ep_size 2 --ffn_sp_size 2 --world_size 2 --reserver_runtime_mem_mb 4096 --max_seq_len 32768 --seq_size_per_block 128 --kernel_seq_size_per_block 128 --sp_type mtp --sp_model_type qwen4_exp_mtp --sp_act_type BF16 --gen_num_per_cycle 3 --fp8_kv_cache 1 --quantization QWEN4_FP8_NVFP4 --moe_strategy nvfp4_cutlass --fp4_moe_op cutlass --use_deepep_moe 0 --enable_fp32_lm_head 0 --reuse_cache 1'
+_QWEN4_SMOKE_ARGS = "--load_method scratch --act_type BF16 --tp_size 2 --dp_size 1 --ep_size 2 --ffn_sp_size 2 --world_size 2 --reserver_runtime_mem_mb 4096 --max_seq_len 32768 --seq_size_per_block 128 --kernel_seq_size_per_block 128 --fp8_kv_cache 1 --quantization QWEN4_FP8_NVFP4 --moe_strategy nvfp4_cutlass --fp4_moe_op cutlass --use_deepep_moe 0 --enable_fp32_lm_head 0 --reuse_cache 1"
