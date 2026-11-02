@@ -180,6 +180,13 @@ def get_json_result_from_url(url: str, download_headers: str = ""):
                 res = response.content.decode("utf-8")
             else:
                 raise Exception(f"download failed, error code: {response.status_code}")
+        elif url.startswith("alake"):
+            from internal_source.rtp_llm.utils.alake_util import (
+                get_bytes_from_alake_path,
+            )
+
+            bytes_data = get_bytes_from_alake_path(url)
+            res = bytes_data.decode("utf-8")
         elif get_base64_prefix(url) > 0:
             bytes_data = base64.b64decode(url[get_base64_prefix(url) :])
             res = bytes_data.decode("utf-8")
@@ -277,6 +284,12 @@ def get_bytes_io_from_url(
                 from rtp_llm.utils.oss_util import get_bytes_io_from_oss_path
 
                 res = get_bytes_io_from_oss_path(url)
+            elif url.startswith("alake"):
+                from internal_source.rtp_llm.utils.alake_util import (
+                    get_bytes_from_alake_path,
+                )
+
+                res = BytesIO(get_bytes_from_alake_path(url))
             elif get_base64_prefix(url) > 0:
                 res = BytesIO(base64.b64decode(url[get_base64_prefix(url) :]))
             else:
@@ -287,6 +300,8 @@ def get_bytes_io_from_url(
             _validate_file_size(res.getbuffer().nbytes, max_file_size_kb)
         except FtRuntimeException:
             raise
+        except (TimeoutError, requests.exceptions.Timeout):
+            raise_mm(MMErr.DL_TIMEOUT, ExceptionType.MM_DOWNLOAD_FAILED)
         except Exception:
             logger.exception("failed to load multimodal content")
             raise_mm(MMErr.DL_FAILED, ExceptionType.MM_DOWNLOAD_FAILED)

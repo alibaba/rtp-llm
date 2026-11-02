@@ -229,7 +229,8 @@ def whl_deps():
     })
 
 def platform_deps():
-    return select({
+    # Internal builds select a newer PyArrow compatible with the ALake SDK.
+    return ["pyarrow==14.0.0"] + select({
         "@rtp_llm//:using_cuda13_arm": ["av==16.1.0"],
         "@rtp_llm//:using_arm": [],
         "@rtp_llm//:using_cuda12_arm": [],

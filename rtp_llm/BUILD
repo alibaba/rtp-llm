@@ -683,7 +683,6 @@ whl_reqs = [
     "tiktoken==0.7.0",
     "lru-dict",
     "py-spy",
-    "pyarrow==14.0.0",
     "safetensors",
     "cpm_kernels",
     "Pillow",
