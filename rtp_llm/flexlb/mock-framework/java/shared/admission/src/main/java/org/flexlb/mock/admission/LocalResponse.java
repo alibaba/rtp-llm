@@ -12,7 +12,9 @@ final class LocalResponse {
         return last >= 0 ? last : 42;
     }
     static GenerateOutputsPB token(GenerateInputPB input, int tokenId, int generated, int stepTokens, int reused, long elapsedNanos, boolean finished, boolean pd) {
-        int width = input.getGenerateConfig().getReturnIncremental() ? stepTokens : generated;
+        // Native Engine RPC always emits newly produced tokens. Frontend owns
+        // cumulative responses and applies return_incremental at its boundary.
+        int width = stepTokens;
         var tokens = ByteBuffer.allocate(Math.multiplyExact(4, width)).order(ByteOrder.LITTLE_ENDIAN);
         for (int i = 0; i < width; i++) tokens.putInt(tokenId);
         var aux = AuxInfoPB.newBuilder().setInputLen(input.getTokenIdsCount()).setOutputLen(generated).setStepOutputLen(stepTokens)
