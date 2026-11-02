@@ -200,7 +200,8 @@ void copyKvCacheBlocksToModelInput(GptModelInputs&             model_input,
             + (row * batch + static_cast<size_t>(model_batch_idx)) * model_input.kv_cache_block_id.size(2);
         if (borrowed && stream->isMiddleChunk()) {
             // Cyclic banks will be overwritten; publish them only after the final chunk.
-            std::fill_n(store_dst, physical_blocks.size(), NULL_BLOCK_IDX);
+            // Mask padding too: the publisher tests the entire batch-width row.
+            std::fill_n(store_dst, model_input.kv_cache_block_id.size(2), NULL_BLOCK_IDX);
         } else {
             std::memcpy(store_dst, physical_blocks.data(), physical_blocks.size() * sizeof(int32_t));
         }

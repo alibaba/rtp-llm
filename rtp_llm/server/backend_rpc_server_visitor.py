@@ -1144,7 +1144,10 @@ class BackendRPCServerVisitor:
                         ExceptionType.ROUTE_ERROR,
                         "/batch_infer requires a PDFUSION target or a Prefill/Decode pair",
                     )
-        elif self.host_service.service_available:
+        elif (
+            self.pd_sep_config.role_type != RoleType.PDFUSION
+            and self.host_service.service_available
+        ):
             for input in inputs:
                 await self.route_ips(input)
 

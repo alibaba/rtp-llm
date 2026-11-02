@@ -180,7 +180,7 @@ bool P2PConnectorDecode::readPerRank(int64_t                                 req
                                     block_ids.size());
                 return reject_read(error_message);
             }
-            if (cache_keys.empty() || layer_id < 0 || !config_.worker_config.topology
+            if (cache_keys.empty() || !config_.worker_config.topology
                 || static_cast<size_t>(layer_id) >= config_.worker_config.topology->layers().size()) {
                 return reject_read("READ request has empty blocks or invalid layer");
             }
@@ -199,11 +199,6 @@ bool P2PConnectorDecode::readPerRank(int64_t                                 req
                                               + layer_block_pb.cache_tag();
             if (!route_layer_tag_keys.insert(layer_tag_key).second) {
                 return reject_read("READ request contains duplicate layer/tag within one route");
-            }
-            for (const auto block_id : block_ids) {
-                if (block_id < 0) {
-                    return reject_read("READ request contains invalid block id");
-                }
             }
             const std::set<int64_t> distinct_keys(cache_keys.begin(), cache_keys.end());
             if (distinct_keys.size() != static_cast<size_t>(cache_keys.size())) {

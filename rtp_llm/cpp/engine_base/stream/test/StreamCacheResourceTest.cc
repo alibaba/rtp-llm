@@ -2108,7 +2108,7 @@ TEST_F(StreamCacheResourceTest, testP2PDsparkHandoffAcceptsAbsentAndZeroElementT
 }
 
 TEST_F(StreamCacheResourceTest, testP2PHandoffRejectsIncompleteProposalAndMalformedTensor) {
-    for (int invalid_case : {0, 1, 2}) {
+    for (int invalid_case : {0, 1, 2, 3}) {
         SCOPED_TRACE(invalid_case);
         prepareResource(/*reuse_cache=*/true, RoleType::DECODE);
         stream_->generateConfig()->pd_separation = true;
@@ -2129,12 +2129,17 @@ TEST_F(StreamCacheResourceTest, testP2PHandoffRejectsIncompleteProposalAndMalfor
             auto* tensor = (*payload->mutable_tensors())["propose_hidden"].mutable_tensor();
             tensor->set_data_type(TensorPB::FP16);
             tensor->add_shape(1);
-        } else {
+        } else if (invalid_case == 2) {
             const int32_t token  = 7;
             auto*         tensor = (*payload->mutable_tensors())["propose_tokens"].mutable_tensor();
             tensor->set_data_type(TensorPB::INT32);
             tensor->add_shape(1);
             tensor->set_int32_data(&token, sizeof(token));
+        } else {
+            // First-token output decoding must fail this request, not the engine loop.
+            auto* tensor = (*payload->mutable_tensors())["first_token_hidden_states"].mutable_tensor();
+            tensor->set_data_type(TensorPB::FP16);
+            tensor->add_shape(1);
         }
         completeP2PSideChannel(std::move(response));
         ASSERT_TRUE(stream_->hasError());
@@ -2632,6 +2637,24 @@ TEST_F(StreamCacheResourceTest, testCancelCompletionRetainsP2PLeaseProofAfterStr
     stream_->streamCacheResource().p2p_load_context_ = context;
     EXPECT_TRUE(stream_->hasPendingP2PResourceHold());
     stream_->releaseResource();
+    EXPECT_EQ(stream_->streamCacheResource().p2p_load_context_, nullptr);
+    // Clearing the stream's load pointer must not turn an in-flight lease into a release proof.
+    EXPECT_TRUE(stream_->hasPendingP2PResourceHold());
+    context->lease_hold_pending_.store(false);
+    EXPECT_FALSE(stream_->hasPendingP2PResourceHold());
+}
+
+TEST_F(StreamCacheResourceTest, testFailedP2PLoadRetainsPhysicalLeaseProof) {
+    prepareResource(/*reuse_cache=*/false);
+    auto context = std::make_shared<P2PConnectorAsyncReadContext>(
+        std::make_shared<KVCacheResource>(), "cancel-cleanup-lease", nullptr, /*lease_query_timeout_ms=*/1000);
+    context->cancel(nullptr);
+    ASSERT_TRUE(context->done());
+    context->lease_hold_pending_.store(true);
+    stream_->streamCacheResource().p2p_load_context_ = context;
+    EXPECT_TRUE(stream_->hasPendingP2PResourceHold());
+    EXPECT_TRUE(stream_->streamCacheResource().loadCacheDone());
+    EXPECT_TRUE(stream_->hasError());
     EXPECT_EQ(stream_->streamCacheResource().p2p_load_context_, nullptr);
     // Clearing the stream's load pointer must not turn an in-flight lease into a release proof.
     EXPECT_TRUE(stream_->hasPendingP2PResourceHold());

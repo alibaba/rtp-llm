@@ -32,6 +32,7 @@
 #include "autil/NetUtil.h"
 #include <cerrno>
 #include <cstring>
+#include <unistd.h>
 #include <utility>
 #include <unordered_set>
 #include <c10/core/InferenceMode.h>
@@ -88,7 +89,8 @@ std::string prefillAddress(const GenerateInputPB& request) {
 }  // namespace
 
 std::string makeDecodeEntranceUniqueKey(const std::string& bind_ip, int64_t unique_key_id, int64_t current_time_us) {
-    return bind_ip + "_" + std::to_string(unique_key_id) + "_" + std::to_string(current_time_us);
+    return bind_ip + "_" + std::to_string(getpid()) + "_" + std::to_string(unique_key_id) + "_"
+           + std::to_string(current_time_us);
 }
 
 GenerateInputPB makeDecodeEntranceHandoffRequest(const GenerateInputPB& request,

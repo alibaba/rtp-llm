@@ -175,6 +175,10 @@ std::shared_ptr<P2PBroadcastClient::Result> P2PBroadcastClient::cancel(const std
     }
 
     int64_t timeout_ms = cancel_broadcast_timeout_ms_;
+    if (timeout_ms <= 0) {
+        RTP_LLM_LOG_WARNING("P2P cancel requires a positive broadcast timeout, unique_key: %s", unique_key.c_str());
+        return nullptr;
+    }
 
     // Define the RPC call lambda for ExecuteFunction
     auto rpc_call = [](std::shared_ptr<RpcService::Stub>&    stub,

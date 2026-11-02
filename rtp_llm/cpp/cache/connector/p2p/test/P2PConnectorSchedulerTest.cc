@@ -1358,7 +1358,8 @@ TEST_F(P2PConnectorSchedulerTest, AsyncRead_StartLoadTimeout_HoldsTargetUntilAll
     }
     EXPECT_TRUE(waitUntil([&]() { return allocated.allocator->freeBlocksNum() == allocated.free_blocks_before; }));
     EXPECT_TRUE(allBlockRefsEqual(allocated, 0));
-    EXPECT_TRUE(weak_context.expired());
+    // Releasing blocks precedes the checker's final shared_ptr destruction.
+    ASSERT_TRUE(waitUntil([&]() { return weak_context.expired(); }));
 }
 
 TEST_F(P2PConnectorSchedulerTest, AsyncRead_ReadPerRankTimeout_WaitsForEveryRankLease) {

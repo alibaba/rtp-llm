@@ -135,6 +135,8 @@ private:
     bool        stopping_{false};
     uint64_t    deadline_generation_{0};
 
+    void notifyRequestReleased(int64_t request_id, int64_t deadline_ms);
+    std::mutex callback_mutex_;
     std::function<void(int64_t, int64_t)> on_request_released_;
 
 public:

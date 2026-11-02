@@ -36,10 +36,10 @@ class BatchTraceCarrier: public opentelemetry::context::propagation::TextMapCarr
 public:
     explicit BatchTraceCarrier(const TraceContextPB& context): context_(context) {}
     opentelemetry::nostd::string_view Get(opentelemetry::nostd::string_view key) const noexcept override {
-        if (key == "traceparent") {
+        if (key == "traceparent" && context_.traceparent().size() <= 256) {
             return {context_.traceparent().data(), context_.traceparent().size()};
         }
-        if (key == "tracestate") {
+        if (key == "tracestate" && context_.tracestate().size() <= 512) {
             return {context_.tracestate().data(), context_.tracestate().size()};
         }
         return {};
@@ -184,7 +184,8 @@ std::unique_ptr<GenerateContext> PrefillRpcServer::makeBatchRequestContext(
             auto propagator = opentelemetry::context::propagation::GlobalTextMapPropagator::GetGlobalPropagator();
             opentelemetry::context::Context empty_context;
             auto remote = propagator->Extract(carrier, empty_context);
-            if (opentelemetry::trace::GetSpan(remote)->GetContext().IsValid()) {
+            const auto remote_span = opentelemetry::trace::GetSpan(remote);
+            if (remote_span && remote_span->GetContext().IsValid() && remote_span->GetContext().IsRemote()) {
                 options.parent = remote;
             }
             span = telemetry::TelemetryRuntime::tracer()->StartSpan("rtp_llm.prefill_batch_request", options);

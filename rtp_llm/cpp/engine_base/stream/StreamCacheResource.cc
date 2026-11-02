@@ -800,7 +800,12 @@ bool StreamCacheResource::loadCacheDone() {
         }
         if (p2p_load_context_->success()) {
             if (const auto* payload = p2pSideChannel(p2p_load_context_)) {
-                applyP2PSideChannel(*payload, stream_);
+                try {
+                    applyP2PSideChannel(*payload, stream_);
+                } catch (const std::exception& error) {
+                    stream_->reportErrorWithoutLock(ErrorCode::P2P_CONNECTOR_LOAD_FROM_PREFILL_FAILED,
+                                                     std::string("invalid P2P side-channel payload: ") + error.what());
+                }
             }
             p2p_load_context_.reset();
         } else {
@@ -810,6 +815,9 @@ bool StreamCacheResource::loadCacheDone() {
             // resources, and Prefill registration itself. None of these
             // failures is a benign cache miss.
             const auto error = p2p_load_context_->errorInfo();
+            // The scheduler may still retain the target lease after logical failure.
+            // Keep its physical-completion proof visible to cancellation cleanup.
+            released_p2p_load_context_ = p2p_load_context_;
             p2p_load_context_.reset();
             RTP_LLM_LOG_WARNING(
                 "P2P cache load failed, stream=%ld error=%s", stream_->streamId(), error.ToString().c_str());
