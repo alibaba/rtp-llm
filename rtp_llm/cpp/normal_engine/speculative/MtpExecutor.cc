@@ -2608,8 +2608,8 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
                 const auto  state         = stream->getMtpAsyncDeviceState();
                 const auto& accept_tokens = state.accept_tokens_gpu;
                 const auto& accept_len    = state.accept_len_gpu;
-                if (!accept_tokens.defined() || !accept_tokens.is_cuda() || !accept_len.defined()
-                    || !accept_len.is_cuda()) {
+                if (!accept_tokens.defined() || (!accept_tokens.is_cuda() && !accept_tokens.is_privateuseone())
+                    || !accept_len.defined() || (!accept_len.is_cuda() && !accept_len.is_privateuseone())) {
                     all_device_state = false;
                     break;
                 }
@@ -2843,7 +2843,7 @@ void MtpExecutor::publishSyncMtpDeviceState(const StreamGroups&                 
 
     // Batch compute next_seq_len from host seqLength (sync path: host is authoritative)
     const auto pin_i32          = torch::TensorOptions().dtype(torch::kInt32).pinned_memory(true);
-    const auto cuda_i32         = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+    const auto cuda_i32         = torch::TensorOptions().dtype(torch::kInt32).device(getTorchCudaDevice());
     auto       next_seq_len_cpu = torch::empty({batch_size}, pin_i32);
     {
         int64_t i = 0;
@@ -2927,8 +2927,8 @@ absl::Status MtpExecutor::dispatchDecodeAsync(const StreamGroups&               
 
     // --- Batch-level ops ---
 
-    const auto cuda_i32 = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
-    const auto cuda_i64 = torch::TensorOptions().dtype(torch::kInt64).device(torch::kCUDA);
+    const auto cuda_i32 = torch::TensorOptions().dtype(torch::kInt32).device(getTorchCudaDevice());
+    const auto cuda_i64 = torch::TensorOptions().dtype(torch::kInt64).device(getTorchCudaDevice());
 
     torch::Tensor prev_seq_len_all;
     torch::Tensor next_seq_len_all;
@@ -2940,7 +2940,7 @@ absl::Status MtpExecutor::dispatchDecodeAsync(const StreamGroups&               
         prev_slices.reserve(batch_size);
         for (const auto& stream : all_streams) {
             const auto& gpu_val = stream->getNextSeqLenGpu();
-            if (gpu_val.defined() && gpu_val.is_cuda()) {
+            if (gpu_val.defined() && (gpu_val.is_cuda() || gpu_val.is_privateuseone())) {
                 prev_slices.push_back(gpu_val.reshape({1}));
             } else {
                 prev_slices.push_back(torch::tensor({static_cast<int32_t>(stream->seqLength())}, cuda_i32));
