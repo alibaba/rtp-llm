@@ -1,17 +1,29 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/block_pool/HostStagingBlockPool.h"
 
 #include <exception>
+#include <limits>
 #include <mutex>
 #include <optional>
+#include <stdexcept>
 
 #include "rtp_llm/cpp/utils/Logger.h"
 
 namespace rtp_llm {
+namespace {
+
+size_t stagingBytes(size_t block_count, size_t stride_bytes) {
+    if (stride_bytes != 0 && block_count > std::numeric_limits<size_t>::max() / stride_bytes) {
+        throw std::overflow_error("host staging pool backing size overflow");
+    }
+    return block_count * stride_bytes;
+}
+
+}  // namespace
 
 HostStagingBlockPool::HostStagingBlockPool(size_t block_count, size_t stride_bytes):
     block_count_(block_count),
     stride_bytes_(stride_bytes),
-    backing_(block_count_ * stride_bytes_, kAlignment, "host staging block pool") {
+    backing_(stagingBytes(block_count_, stride_bytes_), kAlignment, "host staging block pool") {
     const size_t total_bytes = block_count_ * stride_bytes_;
     free_id_list_.reserve(block_count_);
     for (size_t block_id = 0; block_id < block_count_; ++block_id) {

@@ -448,6 +448,19 @@ TEST_F(CopyBoundsTest, RejectsInvalidBatchDimensionsAndHostCapacity) {
     EXPECT_EQ(executor.generatePlan({host}, {descriptor}, {group_set_.get()}).first, TransferStatus::INVALID_ARGS);
 }
 
+TEST_F(CopyBoundsTest, RejectsDeviceAddressOutsidePool) {
+    BlockTreeTaskPool          task_pool(1, 8, "CopyBoundsTest");
+    DeviceHostTransferExecutor executor(task_pool, 8);
+    std::vector<uint8_t>       data(host_block_size_, 0x6b);
+    HostBufferView             host{data.data(), data.size(), data.size()};
+    const auto                 descriptor    = TransferDescriptor::deviceToHost(0, device_blocks_, 1);
+    auto*                      original_base = device_pool_->cache_base_ptr_;
+    device_pool_->cache_base_ptr_            = static_cast<uint8_t*>(original_base) + device_pool_->getTotalSizeBytes();
+    EXPECT_THROW(executor.generatePlan({host}, {descriptor}, {group_set_.get()}), RTPException);
+    device_pool_->cache_base_ptr_ = original_base;
+    EXPECT_TRUE(std::all_of(data.begin(), data.end(), [](uint8_t value) { return value == 0x6b; }));
+}
+
 TEST_F(CopyBoundsTest, RejectsWidthMismatchButAllowsEqualWidthAndHostPadding) {
     BlockTreeTaskPool          task_pool(1, 8, "CopyBoundsTest");
     DeviceHostTransferExecutor executor(task_pool, 8);
