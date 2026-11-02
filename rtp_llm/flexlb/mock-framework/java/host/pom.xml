@@ -10,12 +10,7 @@
 <profiles><profile>
   <id>internal-discovery</id>
   <dependencies>
-    <dependency><groupId>org.flexlb</groupId><artifactId>vipserver</artifactId><version>1.0.0-SNAPSHOT</version>
-      <exclusions><exclusion><groupId>*</groupId><artifactId>*</artifactId></exclusion></exclusions>
-    </dependency>
-    <dependency><groupId>com.taobao.vipserver</groupId><artifactId>vipserver-client</artifactId><version>4.9.7</version></dependency>
-    <dependency><groupId>org.apache.commons</groupId><artifactId>commons-lang3</artifactId><version>3.12.0</version></dependency>
-    <dependency><groupId>org.slf4j</groupId><artifactId>slf4j-api</artifactId><version>1.7.36</version></dependency>
+    <dependency><groupId>org.flexlb</groupId><artifactId>vipserver</artifactId><version>1.0.0-SNAPSHOT</version></dependency>
   </dependencies>
   <build><resources>
     <resource><directory>src/main/resources</directory></resource>
