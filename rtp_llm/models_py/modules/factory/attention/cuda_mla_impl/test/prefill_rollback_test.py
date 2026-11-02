@@ -41,6 +41,7 @@ class PrefillRollbackTest(unittest.TestCase):
         self.assertFalse(pynccl_cp._TORCH_SYMM_GATHER)
 
     def test_preserves_historical_flag_defaults_and_overrides(self):
+        self.assertEqual(cp._REMAP_HISTORY_TOPK_DEFAULT, "0")
         flags = {
             "RTP_LLM_CP_KV_INDEX_OPT": "1",
             "RTP_LLM_CP_KV_REGISTERED": "1",

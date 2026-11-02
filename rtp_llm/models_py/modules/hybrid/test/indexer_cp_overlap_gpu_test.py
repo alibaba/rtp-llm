@@ -18,7 +18,7 @@ import torch.distributed as dist
 import torch.multiprocessing as mp
 
 
-def run_case(rank, lengths, owner, fused, zero_queries, side):
+def run_case(rank, lengths, owner, fused, zero_queries, side, prologue=False):
     from rtp_llm.models_py.distributed import pynccl_cp
     from rtp_llm.models_py.modules.base.cuda.indexer_op import IndexerOp
     from rtp_llm.models_py.modules.dsv4.fp8._indexer_cp_assembler import (
@@ -80,12 +80,27 @@ def run_case(rank, lengths, owner, fused, zero_queries, side):
         starts.append(cumulative[b])
         ends.append(g + 1)
     i32 = lambda v: torch.tensor(v, dtype=torch.int32, device=device)
+    from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashmla_sparse_cp_impl import (
+        SparseMlaFp8CPOp,
+    )
+
+    rope_plan = SparseMlaFp8CPOp.__new__(SparseMlaFp8CPOp)
+    rope_plan.use_cuda_graph = False
+    rope_plan.full_rope_pos_ids = None
+    rope_plan.total_local_ids = local_ids
+    rope_plan.total_global_ids = torch.tensor(
+        global_ids, dtype=torch.long, device=device
+    )
+    # Exercise production metadata, including ranks with no valid Q rows.
+    rope_plan._refresh_full_rope_positions(
+        torch.arange(n, device=device, dtype=torch.int32) % rows, rows
+    )
     cp = NS(
         kv_cache_sharded=True,
         cp_size=size,
         cp_rank=rank,
         total_kv_len=n,
-        full_rope_pos_ids=torch.arange(rows, device=device, dtype=torch.int32),
+        full_rope_pos_ids=rope_plan.full_rope_pos_ids,
         sharded_slot_mapping=slots,
         kv_restore_unpad_indices=torch.arange(n, device=device, dtype=torch.int64),
         cu_kv_seqlens_global=i32(cumulative),
@@ -176,7 +191,21 @@ def run_case(rank, lengths, owner, fused, zero_queries, side):
                 with patch.object(
                     indexer_module.deep_gemm, "fp8_mqa_logits", observe_logits
                 ):
-                    result = model.forward(hidden, q, cache, fmha, attn, False, cp)
+                    if prologue and async_mode:
+                        with model.prefetch_cp_k(hidden, cache, attn, cp) as prepared:
+                            assert prepared is not None, "all ranks must prefetch K"
+                            result = model.forward(
+                                hidden,
+                                q,
+                                cache,
+                                fmha,
+                                attn,
+                                False,
+                                cp,
+                                prepared_cp_k=prepared,
+                            )
+                    else:
+                        result = model.forward(hidden, q, cache, fmha, attn, False, cp)
             # Exercise auxiliary allocator reuse before main-stream logits finish.
             with torch.cuda.stream(side):
                 junk = torch.empty((n, 128), dtype=torch.float8_e4m3fn, device=device)
@@ -268,6 +297,9 @@ def worker(rank, port, world_size):
     )
     assert side is not None
     results = []
+    # Short ordinary requests share startup warmup's empty-Q CP boundary.
+    for lengths in ([1], [2], [3], [7]):
+        results.append(run_case(rank, lengths, 512, True, False, side, prologue=True))
     for lengths in ([1, 0, 513, 4097], [64], [513, 1025]):
         for fused in (True, False):
             for zero_queries in (True, False):

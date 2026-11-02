@@ -69,3 +69,34 @@ cc_test(
     },
     exec_properties = {'gpu':'H20'},
 )
+
+# Keep the real overlap-path regressions enabled without shell overrides.
+cc_test(
+    name = "mtp_forward_overlap_test",
+    srcs = glob([
+        "MtpExecutorTest.cc",
+    ]),
+    data = [],
+    copts = test_copts,
+    deps = [
+        "//rtp_llm/cpp/testing:device_test_utils",
+        "//rtp_llm/models_py/bindings/cuda/ops:cuda_impl",
+        "//rtp_llm/cpp/normal_engine:normal_engine",
+        "//rtp_llm/cpp/models:models",
+        "//rtp_llm/cpp/config:config_modules",
+        "//rtp_llm/cpp/normal_engine/test:mock_engine",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+        "@local_config_cuda//cuda:cuda_headers",
+        "@local_config_cuda//cuda:cudart",
+    ] + torch_deps() + cuda13_torch_link_deps,
+    env = {
+        "TEST_USING_DEVICE": "CUDA",
+        "RTP_LLM_MTP_FORWARD_OVERLAP": "1",
+        "RTP_LLM_STREAM_ASYNC": "1",
+        "RTP_LLM_DEVICE_INPUT": "1",
+        "RTP_LLM_MTP_ASYNC_PREPARE": "0",
+        "GTEST_FILTER": "MtpExecutorTest.testForwardOverlap*",
+    },
+    exec_properties = {'gpu':'H20'},
+)
