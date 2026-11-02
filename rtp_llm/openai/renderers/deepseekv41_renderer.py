@@ -27,6 +27,7 @@ from rtp_llm.openai.renderers.sglang_helpers.function_call.deepseekv41_detector 
     DeepSeekV41Detector,
 )
 from rtp_llm.openai.renderers.v41_recipe import (
+    PromptTokenizer,
     convert_request,
     render_request,
     resolve_thinking,
@@ -99,6 +100,12 @@ class DeepseekV41Renderer(DeepseekV4Renderer):
     # owned by the normal multimodal engine, not by this frontend thread.
     render_chat_in_thread = True
 
+    def __init__(self, tokenizer, *args, **kwargs):
+        super().__init__(tokenizer, *args, **kwargs)
+        self.prompt_tokenizer = PromptTokenizer(
+            tokenizer.get_real_tokenizer().backend_tokenizer
+        )
+
     def _load_encoding_module(self, ckpt_path: str):
         script = os.path.join(ckpt_path, "encoding", "encoding.py")
         if not os.path.isfile(script):
@@ -166,12 +173,12 @@ class DeepseekV41Renderer(DeepseekV4Renderer):
         return prompt, {"images": images}
 
     def _build_prompt(self, request):
-        return self._encode_request(request)[0]
+        return self._encode_request(request)[0].text
 
     def render_chat(self, request):
         prompt, media = self._encode_request(request)
         try:
-            input_ids = list(self.tokenizer.encode(prompt))
+            input_ids = self.prompt_tokenizer.encode(prompt)
             urls = _image_records_to_urls(
                 input_ids, media["images"], self.image_token_id
             )
@@ -181,7 +188,7 @@ class DeepseekV41Renderer(DeepseekV4Renderer):
             ) from error
         return RenderedInputs(
             input_ids=input_ids,
-            rendered_prompt=prompt,
+            rendered_prompt=prompt.text,
             input_urls=urls,
             input_urls_type=[MMUrlType.IMAGE] * len(urls),
         )

@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import torch
+from tokenizers import Tokenizer, decoders, models, pre_tokenizers
 
 from rtp_llm.config.generate_config import GenerateConfig
 from rtp_llm.config.py_config_modules import (
@@ -24,6 +25,15 @@ from rtp_llm.openai.renderers.deepseekv4_renderer import DeepseekV4Renderer
 from rtp_llm.openai.renderers.deepseekv41_renderer import (
     IMAGE_PLACEHOLDER,
     DeepseekV41Renderer,
+)
+from rtp_llm.openai.renderers.v41_recipe import (
+    ASSISTANT,
+    BOS,
+    DSML,
+    EOS,
+    SYSTEM,
+    USER,
+    PromptTokenizer,
 )
 from rtp_llm.utils.base_model_datatypes import AuxInfo, GenerateOutput, GenerateOutputs
 
@@ -48,6 +58,16 @@ class CharacterTokenizer:
 def make_renderer():
     renderer = DeepseekV41Renderer.__new__(DeepseekV41Renderer)
     renderer.tokenizer = CharacterTokenizer()
+    vocabulary = {
+        text: index
+        for index, text in enumerate(sorted(pre_tokenizers.ByteLevel.alphabet()))
+    }
+    specials = [BOS, EOS, SYSTEM, USER, ASSISTANT, DSML, "<think>", "</think>"]
+    backend = Tokenizer(models.BPE(vocabulary, []))
+    backend.pre_tokenizer = pre_tokenizers.ByteLevel(add_prefix_space=False)
+    backend.decoder = decoders.ByteLevel()
+    backend.add_special_tokens([*specials, IMAGE_PLACEHOLDER])
+    renderer.prompt_tokenizer = PromptTokenizer(backend)
     renderer.think_mode = False
     renderer.generate_env_config = GenerateEnvConfig()
     renderer.think_start_tag = "<think>"
@@ -57,7 +77,7 @@ def make_renderer():
     renderer.extra_stop_words = []
     renderer.extra_stop_word_ids_list = []
     renderer.stop_words_id_list = []
-    renderer.image_token_id = 129264
+    renderer.image_token_id = backend.token_to_id(IMAGE_PLACEHOLDER)
     return renderer
 
 
@@ -302,22 +322,7 @@ class EndpointAsyncPreparationTest(unittest.IsolatedAsyncioTestCase):
             start_backend.assert_not_called()
 
     async def test_slow_image_render_keeps_text_and_existing_sse_responsive(self):
-        class ImageTokenizer(CharacterTokenizer):
-            def encode(self, text, **kwargs):
-                tokens = []
-                for index, part in enumerate(text.split(IMAGE_PLACEHOLDER)):
-                    if index:
-                        tokens.append(129264)
-                    tokens.extend(super().encode(part, **kwargs))
-                return tokens
-
-            def convert_tokens_to_ids(self, text):
-                if text == IMAGE_PLACEHOLDER:
-                    return 129264
-                return super().convert_tokens_to_ids(text)
-
         renderer = make_renderer()
-        renderer.tokenizer = ImageTokenizer()
         endpoint = make_endpoint(renderer)
         server = FrontendServer.__new__(FrontendServer)
         server._openai_endpoint = endpoint
@@ -357,7 +362,9 @@ class EndpointAsyncPreparationTest(unittest.IsolatedAsyncioTestCase):
             async def enqueue(self, inputs):
                 check_loop()
                 received.append(inputs)
-                prompt = renderer.tokenizer.decode(inputs.token_ids.flatten().tolist())
+                prompt = renderer.prompt_tokenizer.plain_tokenizer.decode(
+                    inputs.token_ids.flatten().tolist()
+                )
                 is_sse = "sse" in prompt
 
                 async def source():
@@ -463,7 +470,9 @@ class EndpointAsyncPreparationTest(unittest.IsolatedAsyncioTestCase):
             json.loads(image_response.body)["choices"][0]["message"]["content"],
             "answer ",
         )
-        self.assertEqual(received[-1].token_ids.flatten().tolist().count(129264), 1)
+        self.assertEqual(
+            received[-1].token_ids.flatten().tolist().count(renderer.image_token_id), 1
+        )
         self.assertEqual(len(received[-1].mm_inputs), 1)
         self.assertEqual(
             received[-1].mm_inputs[0].url, "https://image.invalid/slow.png"
@@ -476,6 +485,82 @@ class EndpointAsyncPreparationTest(unittest.IsolatedAsyncioTestCase):
 
 
 class EndpointStreamTest(unittest.IsolatedAsyncioTestCase):
+    async def test_literal_image_in_tool_log_reaches_backend(self):
+        renderer = make_renderer()
+        endpoint = make_endpoint(renderer)
+        received = []
+        log = f"Image token: {IMAGE_PLACEHOLDER}, id: 129264"
+
+        class Visitor:
+            async def enqueue(self, inputs):
+                received.append(inputs)
+
+                async def source():
+                    yield GenerateOutputs(
+                        generate_outputs=[
+                            GenerateOutput(
+                                output_ids=torch.tensor([[ord(char) for char in "ok"]]),
+                                finished=True,
+                                aux_info=AuxInfo(input_len=5, output_len=2),
+                            )
+                        ]
+                    )
+
+                return source()
+
+        endpoint.backend_rpc_server_visitor = Visitor()
+        for streaming in (False, True):
+            for with_image in (False, True):
+                with self.subTest(streaming=streaming, with_image=with_image):
+                    content = [{"type": "text", "text": log}]
+                    if with_image:
+                        content.append(
+                            {
+                                "type": "image_url",
+                                "image_url": {"url": "https://example.invalid/a.png"},
+                            }
+                        )
+                    req = request(
+                        stream=streaming,
+                        messages=[
+                            {"role": "user", "content": "head -40 probe_fake1.log"},
+                            {
+                                "role": "assistant",
+                                "tool_calls": [
+                                    {
+                                        "id": "a",
+                                        "type": "function",
+                                        "function": {
+                                            "name": "shell",
+                                            "arguments": "{}",
+                                        },
+                                    }
+                                ],
+                            },
+                            {"role": "tool", "tool_call_id": "a", "content": content},
+                        ],
+                    )
+                    original = req.model_dump()
+                    rendered = endpoint.render_chat(req)
+                    self.assertIn(log, rendered.rendered_prompt)
+                    self.assertEqual(
+                        rendered.input_ids.count(renderer.image_token_id),
+                        int(with_image),
+                    )
+                    response = await endpoint.chat_completion_async(
+                        1, req, SimpleNamespace(headers={})
+                    )
+                    frames = [frame async for frame in response]
+                    complete = await response.gen_complete_response_once()
+                    self.assertTrue(frames)
+                    self.assertEqual(complete.choices[0].message.content, "ok")
+                    self.assertEqual(complete.choices[0].finish_reason, "stop")
+                    self.assertEqual(len(received[-1].mm_inputs), int(with_image))
+                    self.assertEqual(
+                        received[-1].token_ids.flatten().tolist(), rendered.input_ids
+                    )
+                    self.assertEqual(req.model_dump(), original)
+
     async def test_user_template_entrypoint_stops_stream_and_complete_response(self):
         endpoint = make_endpoint(make_renderer())
         received = []
