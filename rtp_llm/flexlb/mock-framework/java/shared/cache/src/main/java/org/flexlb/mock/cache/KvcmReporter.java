@@ -198,7 +198,8 @@ public final class KvcmReporter implements AutoCloseable {
         if (closed) return;
         closed = true;
         try { observation.close(); } catch (Exception error) { throw new IllegalStateException(error); }
-        worker.shutdownNow();
+        // Complete an in-flight registration before sending HOST_DOWN; interrupt only on timeout.
+        worker.shutdown();
         try {
             if (!worker.awaitTermination(3, TimeUnit.SECONDS)) {
                 worker.shutdownNow();
