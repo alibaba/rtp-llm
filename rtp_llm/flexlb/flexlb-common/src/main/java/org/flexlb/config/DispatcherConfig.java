@@ -8,7 +8,7 @@ import lombok.Setter;
 @Setter
 public final class DispatcherConfig {
 
-    public static final int DEFAULT_MAX_INFLIGHT_PER_PREFILL_WORKER = 2;
+    public static final int DEFAULT_MAX_INFLIGHT_PER_PREFILL_WORKER = 128;
     public static final int DEFAULT_FETCH_ATTACH_TIMEOUT_MS = 60_000;
 
     public enum Type {

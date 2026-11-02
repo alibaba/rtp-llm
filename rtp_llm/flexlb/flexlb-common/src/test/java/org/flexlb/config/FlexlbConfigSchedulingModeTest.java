@@ -97,7 +97,7 @@ class FlexlbConfigSchedulingModeTest {
         assertEquals(8, batch.decisionPolicy().getMaxRequests());
         assertEquals(300L, batch.decisionPolicy().getMaxCollectionWaitMs());
         assertNull(batch.decisionPolicy().getMaxPredictedExecutionMs());
-        assertEquals(2, batch.getDispatcher().getMaxInflightPerPrefillWorker());
+        assertEquals(128, batch.getDispatcher().getMaxInflightPerPrefillWorker());
 
         FlexlbConfig nonBatchDefault = ConfigTestFixtures.parse("""
                 {
@@ -119,7 +119,7 @@ class FlexlbConfigSchedulingModeTest {
         assertEquals(DecisionPolicyConfig.Type.SINGLE,
                 nonBatchSingle.decisionPolicy().getType());
         DispatcherConfig dispatcher = nonBatchSingle.getDispatcher();
-        assertEquals(2, dispatcher.getMaxInflightPerPrefillWorker());
+        assertEquals(128, dispatcher.getMaxInflightPerPrefillWorker());
     }
 
     @Test
@@ -236,7 +236,7 @@ class FlexlbConfigSchedulingModeTest {
         for (String mode : new String[]{"QUEUE/BATCH", "QUEUE/NON_BATCH", "DIRECT/NON_BATCH"}) {
             String[] parts = mode.split("/");
             FlexlbConfig config = parse(parts[0], parts[1], "");
-            assertEquals(2, config.getDispatcher().getMaxInflightPerPrefillWorker(), mode);
+            assertEquals(128, config.getDispatcher().getMaxInflightPerPrefillWorker(), mode);
             for (int limit : new int[]{1, 7, Integer.MAX_VALUE}) {
                 config = parse(parts[0], parts[1], ",\"maxInflightPerPrefillWorker\":" + limit);
                 assertEquals(limit, config.getDispatcher().getMaxInflightPerPrefillWorker(), mode);
