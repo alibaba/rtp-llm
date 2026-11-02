@@ -358,6 +358,12 @@ def test_collect_remote_files_stages_ppu_runtime_libs(tmp_path, monkeypatch):
     (sdk_cupti / "libcupti.so.12").write_bytes(b"cupti")
     (sdk_lib / "libhgml.so").write_bytes(b"hgml")
     (sdk_lib / "libuki.so").write_bytes(b"uki")
+    for name in (
+        "libnccl.so.2", "libpccl.so.2", "libcusparse.so.12", "libcufft.so.12",
+        "libcufile.so.0", "libcurand.so.10", "libcudnn.so.8", "libcusolver.so.12",
+        "libnvrtc.so.13", "liblt_oki.so", "libhggc_wrapper.so", "libhg_wrapper.so", "liboki.so",
+    ):
+        (sdk_lib / name).write_bytes(name.encode())
     monkeypatch.setattr(
         remote_exec_rtp,
         "_ppu_runtime_search_dirs",
@@ -392,6 +398,9 @@ def test_ppu_runtime_search_dirs_include_sdk_and_system_cupti(monkeypatch):
     assert Path("/opt/ppu/CUDA_SDK/extras/CUPTI/lib64") in search_dirs
     assert Path("/opt/ppu/CUDA_SDK/targets/x86_64-linux/lib") in search_dirs
     assert Path("/usr/local/cuda/extras/CUPTI/lib64") in search_dirs
+    assert Path("/opt/ppu/targets/x86_64-linux/lib") in search_dirs
+    assert Path("/opt/ppu/pccl/nccl_wrapper/lib") in search_dirs
+    assert Path("/opt/ppu/pccl/lib") in search_dirs
 
 
 def test_collect_remote_files_ppu_requires_controller_runtime_libs(
@@ -1693,6 +1702,104 @@ def test_collect_session_files_requires_staged_runtime_libs(tmp_path):
         assert "Run `python setup.py build_ext --inplace` first" in str(exc)
     else:
         raise AssertionError("collect_session_files should require staged runtime libs")
+
+
+
+_PPU_SESSION_FIXTURE_LIBS = (
+    "libcudart.so.13", "libcublas.so.13", "libcublasLt.so.13", "libcupti.so.13",
+    "libhgml.so", "libuki.so", "libnccl.so.2", "libpccl.so.2", "libcusparse.so.12",
+    "libcufft.so.12", "libcufile.so.0", "libcurand.so.10", "libcudnn.so.8",
+    "libcusolver.so.12", "libnvrtc.so.13", "liblt_oki.so", "libhggc_wrapper.so",
+    "libhg_wrapper.so", "liboki.so",
+)
+
+
+@pytest.mark.parametrize("gpu_type", ["PPU_ZW810E", "H20"])
+def test_session_input_collection_receives_the_resolved_gpu_request(
+    tmp_path, monkeypatch, gpu_type
+):
+    controller = object.__new__(remote_plugin.RemoteREAPIPlugin)
+    controller.mode = remote_plugin.RemoteDispatchMode.SESSION
+    controller._gpu_request = remote_exec_rtp.GPURequest(gpu_type, 4)
+    controller.rootdir = tmp_path
+    controller.cas = object()
+    controller.config = SimpleNamespace()
+    controller._ensure_remote_clients = lambda: None
+    observed = []
+
+    def collect(rootdir, *, gpu_type):
+        observed.append((rootdir, gpu_type))
+        return ["original-input"]
+
+    class StopBeforeUpload(Exception):
+        pass
+
+    def stop_before_upload(cas, rootdir, files, config):
+        assert observed == [(tmp_path, gpu_type)]
+        assert files == ["original-input"]
+        raise StopBeforeUpload
+
+    monkeypatch.setattr(remote_plugin, "collect_session_files", collect)
+    monkeypatch.setattr(remote_plugin, "_upload_directory_with_progress", stop_before_upload)
+    with pytest.raises(StopBeforeUpload):
+        controller.pytest_runtestloop(SimpleNamespace())
+
+
+def _ppu_session_fixture(tmp_path, monkeypatch):
+    root = tmp_path / "repo"
+    lib = root / "rtp_llm/libs"
+    lib.mkdir(parents=True)
+    for name in ("libth_transformer_config.so", "libth_grammar_tokenizer_info.so",
+                 "libth_transformer.so", "librtp_compute_ops.so"):
+        (lib / name).write_bytes(b"fixture")
+    sdk = tmp_path / "frozen-sdk"
+    sdk.mkdir()
+    for name in _PPU_SESSION_FIXTURE_LIBS:
+        (sdk / name).write_bytes(name.encode())
+    monkeypatch.setattr(remote_exec_rtp, "_ppu_runtime_search_dirs", lambda: [sdk])
+    return root, sdk
+
+
+@pytest.mark.parametrize("gpu_type", ["PPU-ZW810E", "PPU_ZW810E"])
+def test_session_explicit_ppu_type_supplies_full_runtime_without_local_items(
+    tmp_path, monkeypatch, gpu_type
+):
+    root, sdk = _ppu_session_fixture(tmp_path, monkeypatch)
+    files = remote_exec_rtp.collect_session_files(root, gpu_type=gpu_type)
+    prefix = ".pytest_cache/remote_inputs/ppu_runtime/"
+    assert {p for p in files if p.startswith(prefix)} == {
+        prefix + name for name in _PPU_SESSION_FIXTURE_LIBS
+    }
+    for name in _PPU_SESSION_FIXTURE_LIBS:
+        assert (root / prefix / name).resolve() == sdk / name
+
+
+@pytest.mark.parametrize("missing", ["libnccl.so.2", "libcudnn.so.8", "libpccl.so.2"])
+def test_session_missing_original_ppu_runtime_fails_before_upload(
+    tmp_path, monkeypatch, missing
+):
+    root, sdk = _ppu_session_fixture(tmp_path, monkeypatch)
+    (sdk / missing).unlink()
+    with pytest.raises(RuntimeError, match="PPU remote tests require controller runtime"):
+        remote_exec_rtp.collect_session_files(root, gpu_type="PPU_ZW810E")
+
+
+def test_session_broken_ppu_runtime_symlink_is_missing_data(tmp_path, monkeypatch):
+    root, sdk = _ppu_session_fixture(tmp_path, monkeypatch)
+    (sdk / "libnccl.so.2").unlink()
+    (sdk / "libnccl.so.2").symlink_to(sdk / "absent-wrapper")
+    with pytest.raises(RuntimeError, match="PPU NCCL wrapper"):
+        remote_exec_rtp.collect_session_files(root, gpu_type="PPU_ZW810E")
+
+
+@pytest.mark.parametrize("gpu_type", ["", "H20", "MI308X"])
+def test_non_ppu_session_does_not_collect_sdk_runtime(tmp_path, monkeypatch, gpu_type):
+    root, sdk = _ppu_session_fixture(tmp_path, monkeypatch)
+    def unexpected_sdk_search():
+        raise AssertionError("Non-PPU sessions must not inspect the PPU SDK")
+    monkeypatch.setattr(remote_exec_rtp, "_ppu_runtime_search_dirs", unexpected_sdk_search)
+    files = remote_exec_rtp.collect_session_files(root, gpu_type=gpu_type)
+    assert not any("ppu_runtime/" in p for p in files)
 
 
 def test_cas_find_missing_retries_transient_unavailable(monkeypatch):

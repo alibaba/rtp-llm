@@ -1612,7 +1612,7 @@ class RemoteREAPIPlugin:
         gpu_req = self._gpu_request
 
         self._ensure_remote_clients()
-        files = collect_session_files(self.rootdir)
+        files = collect_session_files(self.rootdir, gpu_type=gpu_req.gpu_type)
         input_root = _upload_directory_with_progress(
             self.cas, self.rootdir, files, self.config
         )

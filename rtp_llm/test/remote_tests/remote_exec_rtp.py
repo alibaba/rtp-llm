@@ -84,6 +84,21 @@ _PPU_RUNTIME_LIB_PATTERNS = (
     ("CUDA profiling runtime", "libcupti.so*"),
     ("PPU device runtime", "libhgml.so*"),
     ("PPU kernel runtime", "libuki.so*"),
+    # Original SDK2.2 shims required by the frozen Torch PPU wheel, plus
+    # PCCL's SDK dependencies. These are SDK inputs, never NVIDIA replacements.
+    ("PPU NCCL wrapper", "libnccl.so*"),
+    ("PPU collective runtime", "libpccl.so*"),
+    ("cuSPARSE", "libcusparse.so*"),
+    ("cuFFT", "libcufft.so*"),
+    ("cuFile", "libcufile.so*"),
+    ("cuRAND", "libcurand.so*"),
+    ("cuDNN", "libcudnn.so*"),
+    ("cuSOLVER", "libcusolver.so*"),
+    ("NVRTC", "libnvrtc.so*"),
+    ("PPU low-level runtime", "liblt_oki.so*"),
+    ("PPU compiler wrapper", "libhggc_wrapper.so*"),
+    ("PPU device wrapper", "libhg_wrapper.so*"),
+    ("PPU compiler runtime", "liboki.so*"),
 )
 
 
@@ -699,6 +714,9 @@ def _ppu_runtime_search_dirs() -> List[Path]:
                 sdk_root / "CUDA_SDK" / "targets" / "x86_64-linux" / "lib",
                 sdk_root / "lib",
                 sdk_root / "sailSHMEM" / "lib",
+                sdk_root / "targets" / "x86_64-linux" / "lib",
+                sdk_root / "pccl" / "nccl_wrapper" / "lib",
+                sdk_root / "pccl" / "lib",
             )
         )
     candidates.extend(
@@ -712,7 +730,9 @@ def _ppu_runtime_search_dirs() -> List[Path]:
     return list(dict.fromkeys(candidates))
 
 
-def _prepare_ppu_runtime_libs(rootdir: Path, items: List[Any]) -> List[str]:
+def _prepare_ppu_runtime_libs(
+    rootdir: Path, items: List[Any], *, gpu_type: str = ""
+) -> List[str]:
     """Expose controller-side PPU runtimes as explicit REAPI inputs.
 
     Bazel tests obtain these libraries through target data/runfiles. Native
@@ -720,7 +740,7 @@ def _prepare_ppu_runtime_libs(rootdir: Path, items: List[Any]) -> List[str]:
     guaranteed to contain the SDK. Stage symlinks in the ignored pytest cache;
     the Merkle builder follows them and materializes regular files remotely.
     """
-    if not any(
+    if not gpu_type.upper().startswith("PPU") and not any(
         resolve_item_gpu_request(item).gpu_type.upper().startswith("PPU")
         for item in items
     ):
@@ -736,7 +756,7 @@ def _prepare_ppu_runtime_libs(rootdir: Path, items: List[Any]) -> List[str]:
                 matches = sorted(
                     path
                     for path in directory.glob(pattern)
-                    if path.is_file() or path.is_symlink()
+                    if path.is_file()
                 )
             if matches:
                 break
@@ -987,10 +1007,11 @@ def _check_no_lfs_pointers(rootdir: Path, rel_files: List[str]) -> None:
         )
 
 
-def collect_session_files(rootdir: Path) -> List[str]:
+def collect_session_files(rootdir: Path, *, gpu_type: str = "") -> List[str]:
     """Collect remote-session execution inputs."""
     files = _collect_base_files(rootdir)
     files.extend(_collect_repo_runtime_files(rootdir, include_libs=False))
+    files.extend(_prepare_ppu_runtime_libs(rootdir, [], gpu_type=gpu_type))
     files.extend(_collect_smoke_files(rootdir))
     files.extend(_collect_session_extra_files(rootdir))
     files.append(_prepare_runtime_libs_archive(rootdir))
