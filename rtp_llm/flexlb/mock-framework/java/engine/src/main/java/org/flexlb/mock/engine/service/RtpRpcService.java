@@ -148,6 +148,7 @@ public final class RtpRpcService extends RpcServiceGrpc.RpcServiceImplBase imple
             long collected = System.nanoTime();
             var result = WorkerStatusPB.newBuilder().setRole("RoleType." + role)
                 .setRoleType(RoleTypePB.valueOf("ROLE_TYPE_" + role)).setAlive(true).setKvCacheGroupMode(KvCacheGroupModePB.KV_CACHE_GROUP_MODE_FULL_ATTENTION_ONLY)
+                .setBlockSize(config.blockSize()).setBlockHashLookaheadTokens(0).setCacheMatchRollbackBlocks(0)
                 .setDpSize(1).setDpRank(0).setTpSize(config.cacheKeyStride()).setPrecision("FP16")
                 .setStatusVersion(version).setMaxSeqLen(config.maxSeqLen()).setMaxBatchTokensSize(config.maxBatchTokens())
                 .setTotalKvCache(tokens(snapshot.totalBlocks())).setAvailableKvCache(tokens(snapshot.availableBlocks()))

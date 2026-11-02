@@ -30,6 +30,9 @@ public interface CacheAwareService {
             RoleType roleType,
             List<String> candidateEngineIpPorts, long blockSize);
 
+    void updateFromRoutedRequest(org.flexlb.dao.loadbalance.Request request,
+                                List<org.flexlb.dao.loadbalance.ServerStatus> selected);
+
     /**
      * Update engine block KV cache status
      *

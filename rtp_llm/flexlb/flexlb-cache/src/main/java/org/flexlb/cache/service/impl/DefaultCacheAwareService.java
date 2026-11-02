@@ -1,5 +1,13 @@
 package org.flexlb.cache.service.impl;
 
+import org.flexlb.engine.grpc.client.KvcmGrpcClient;
+import org.flexlb.config.CacheMatchConfiguration;
+import org.flexlb.cache.match.CacheMatchFailoverManager;
+import org.flexlb.cache.match.localstandby.LocalStandbyCacheManager;
+import org.flexlb.cache.domain.CacheMatchSource;
+import org.flexlb.exception.KvcmQueryException;
+import org.flexlb.dao.loadbalance.Request;
+import org.flexlb.dao.loadbalance.ServerStatus;
 import lombok.extern.slf4j.Slf4j;
 import org.flexlb.cache.core.KvCacheManager;
 import org.flexlb.cache.domain.WorkerCacheUpdateResult;
@@ -12,7 +20,6 @@ import org.flexlb.dao.route.RoleType;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 
-import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -34,19 +41,23 @@ public class DefaultCacheAwareService implements CacheAwareService {
     private final KvCacheManager kvCacheManager;
     private final CacheMetricsReporter cacheMetricsReporter;
 
-    private final org.flexlb.engine.grpc.KvcmGrpcClient kvcm;
-    private final java.util.concurrent.atomic.AtomicLong nextKvcmWarning = new java.util.concurrent.atomic.AtomicLong();
-
-    public DefaultCacheAwareService(KvCacheManager manager, CacheMetricsReporter reporter) {
-        this(manager, reporter, null);
-    }
+    private final KvcmGrpcClient kvcm;
+    private final CacheMatchConfiguration configuration;
+    private final CacheMatchFailoverManager failover;
+    private final LocalStandbyCacheManager standby;
 
     @Autowired
     public DefaultCacheAwareService(
             KvCacheManager kvCacheManager,
             CacheMetricsReporter cacheMetricsReporter,
-            org.flexlb.engine.grpc.KvcmGrpcClient kvcm) {
-        this.kvcm = kvcm;
+            KvcmGrpcClient kvcm,
+            CacheMatchConfiguration configuration,
+            CacheMatchFailoverManager failover,
+            LocalStandbyCacheManager standby) {
+        this.kvcm = java.util.Objects.requireNonNull(kvcm, "kvcm");
+        this.configuration = java.util.Objects.requireNonNull(configuration, "configuration");
+        this.failover = java.util.Objects.requireNonNull(failover, "failover");
+        this.standby = java.util.Objects.requireNonNull(standby, "standby");
         this.kvCacheManager = java.util.Objects.requireNonNull(
                 kvCacheManager, "kvCacheManager");
         this.cacheMetricsReporter = java.util.Objects.requireNonNull(
@@ -58,16 +69,25 @@ public class DefaultCacheAwareService implements CacheAwareService {
             List<String> candidates, long blockSize) {
         if (keys == null || keys.isEmpty() || candidates.isEmpty()) return Map.of();
         long started = TimeUnit.NANOSECONDS.toMicros(System.nanoTime());
-        if (kvcm != null && kvcm.enabled()) {
+        if (configuration.isKvcmEnabled()) {
+            if (failover.activeSource() == CacheMatchSource.LOCAL_STANDBY) {
+                cacheMetricsReporter.reportStandbyFallback("active_source");
+                return standby.findMatchingEngines(keys, role, candidates, blockSize);
+            }
             try {
-                var result = kvcm.findMatchingEngines(keys, blockSize, candidates);
+                var raw = kvcm.findMatchingEngines("", keys, blockSize, role, null);
+                Map<String, Integer> matches = new java.util.HashMap<>();
+                for (String address : candidates) {
+                    var match = raw.get(address + "@0");
+                    if (match == null) match = raw.get(address);
+                    if (match != null) matches.put(address, Math.toIntExact(match.localMatchBlocks()));
+                }
                 reportFindLatency(role, started, FIND_METRIC_SUCCESS);
-                return result;
-            } catch (RuntimeException failure) {
+                return Map.copyOf(matches);
+            } catch (KvcmQueryException failure) {
                 reportFindLatency(role, started, FIND_METRIC_FAILURE);
-                long now = System.nanoTime(), next = nextKvcmWarning.get();
-                if (now >= next && nextKvcmWarning.compareAndSet(next, now + TimeUnit.SECONDS.toNanos(30)))
-                    log.warn("KVCM lookup failed; using synchronized Engine cache index: {}", failure.toString());
+                cacheMetricsReporter.reportStandbyFallback("kvcm_query_failure");
+                return standby.findMatchingEngines(keys, role, candidates, blockSize);
             }
         }
         try {
@@ -78,6 +98,12 @@ public class DefaultCacheAwareService implements CacheAwareService {
             reportFindLatency(role, started, FIND_METRIC_FAILURE);
             throw failure;
         }
+    }
+
+    @Override
+    public void updateFromRoutedRequest(Request request,
+                                       List<ServerStatus> selected) {
+        standby.updateFromRoutedRequest(request, selected);
     }
 
     private void reportFindLatency(
@@ -115,6 +141,11 @@ public class DefaultCacheAwareService implements CacheAwareService {
             }
 
             Set<Long> cachedKeys = cacheStatus.getCachedKeys();
+            standby.observe(workerStatus);
+            if (configuration.isKvcmEnabled()) {
+                return WorkerCacheUpdateResult.builder().success(false).engineIpPort(ipPort)
+                        .errorMessage("LOCAL_SYNC indexing disabled in KVCM mode").build();
+            }
 
             // Update cache
             kvCacheManager.updateEngineCache(ipPort, role, cachedKeys, pollTrace);
@@ -140,6 +171,7 @@ public class DefaultCacheAwareService implements CacheAwareService {
     public void removeEngineBlockCache(
             WorkerStatus workerStatus, EndpointTrace trace) {
         requireCacheMutationLock(workerStatus);
+        standby.remove(workerStatus);
         kvCacheManager.removeEngineCache(workerStatus.getIpPort(), trace);
     }
 

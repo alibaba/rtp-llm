@@ -1,6 +1,8 @@
 package org.flexlb.cache.monitor;
 
 import lombok.extern.slf4j.Slf4j;
+import org.flexlb.cache.domain.CacheMatchSource;
+import static org.flexlb.constant.MetricConstant.*;
 import org.flexlb.cache.core.RecentCacheKeyWindow;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.FlexMetricType;
@@ -73,6 +75,11 @@ public class CacheMetricsReporter {
     @PostConstruct
     public void init() {
         registerCacheMetrics();
+        monitor.register(CACHE_MATCH_ACTIVE_SOURCE, FlexMetricType.GAUGE);
+        monitor.register(CACHE_MATCH_SOURCE_CHANGE_QPS, FlexMetricType.QPS);
+        monitor.register(CACHE_MATCH_STANDBY_FALLBACK_QPS, FlexMetricType.QPS);
+        monitor.register(CACHE_LOCAL_STANDBY_CAPACITY_REJECTED_QPS, FlexMetricType.QPS);
+        monitor.register(CACHE_LOCAL_STANDBY_MAPPING_COUNT, FlexMetricType.GAUGE);
         log.info("CacheMetricsReporter initialized and metrics registered");
     }
 
@@ -448,4 +455,39 @@ public class CacheMetricsReporter {
     public void reportEngineViewsMapSize(int mapSize) {
         monitor.report(CACHE_ENGINE_VIEWS_MAP_SIZE, mapSize);
     }
+    public void reportLocalStandbyCapacityRejected() {
+        monitor.report(CACHE_LOCAL_STANDBY_CAPACITY_REJECTED_QPS, 1.0);
+    }
+
+    public void reportLocalStandbyMappingCount(long mappingCount) {
+        monitor.report(CACHE_LOCAL_STANDBY_MAPPING_COUNT, mappingCount);
+    }
+
+    public void reportActiveCacheMatchSource(CacheMatchSource source) {
+        for (CacheMatchSource candidate : CacheMatchSource.values()) {
+            monitor.report(
+                    CACHE_MATCH_ACTIVE_SOURCE,
+                    FlexMetricTags.of("source", candidate.name()),
+                    candidate == source ? 1.0 : 0.0);
+        }
+    }
+
+    public void reportCacheMatchSourceChange(CacheMatchSource previousSource,
+                                             CacheMatchSource currentSource) {
+        reportActiveCacheMatchSource(currentSource);
+        monitor.report(
+                CACHE_MATCH_SOURCE_CHANGE_QPS,
+                FlexMetricTags.of(
+                        "from", previousSource.name(),
+                        "to", currentSource.name()),
+                1.0);
+    }
+
+    public void reportStandbyFallback(String reason) {
+        monitor.report(
+                CACHE_MATCH_STANDBY_FALLBACK_QPS,
+                FlexMetricTags.of("reason", reason),
+                1.0);
+    }
+
 }

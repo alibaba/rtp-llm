@@ -96,7 +96,7 @@ public class WorkerStatus {
             long batchId,
             TaskPhase phase,
             long executionTimeMs,
-            PriorityPreemptionProgress priorityPreemptionProgress) {
+            PriorityPreemptionProgress priorityPreemptionProgress, boolean prefixLengthValid) {
 
         /** A pending observation that reports only priority cancellation progress. */
         @JsonIgnore
@@ -126,7 +126,10 @@ public class WorkerStatus {
             long maxSeqLen,
             long maxBatchTokensSize,
             long runningQueryLen,
-            long waitingQueryLen) {
+            long waitingQueryLen,
+            long blockSize,
+            int blockHashLookaheadTokens,
+            int cacheMatchRollbackBlocks) {
 
         public EngineObservation {
             Objects.requireNonNull(role, "role");
@@ -453,7 +456,7 @@ public class WorkerStatus {
                         0L,
                         0L,
                         0L,
-                        0L));
+                        0L, 0L, 0, 0));
     }
 
     @JsonIgnore
@@ -695,6 +698,14 @@ public class WorkerStatus {
     public long getDpRank() {
         return committedStatus.get().fields().dpRank();
     }
+
+    /** Cache hashing traits are committed atomically with the Engine status. */
+    @JsonIgnore
+    public long getBlockSize() { return committedEngineObservation().blockSize(); }
+    @JsonIgnore
+    public int getBlockHashLookaheadTokens() { return committedEngineObservation().blockHashLookaheadTokens(); }
+    @JsonIgnore
+    public int getCacheMatchRollbackBlocks() { return committedEngineObservation().cacheMatchRollbackBlocks(); }
 
     /** Model-level maximum sequence length reported by the Engine. */
     public long getMaxSeqLen() {

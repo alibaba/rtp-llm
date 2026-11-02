@@ -70,6 +70,8 @@ Mock Engine 启动不读取 checkpoint 或请求 C2 Fuse 挂载。P/D 使用显�
 
 这里只启用缓存元信息查询和上报，未实现远端 KV 数据加载。Engine 的共享 instance_id 必须等于 Master 查询的 `<namespace>_<cacheKeyBlockSize>`，host 身份必须与 Master 发现结果一致。更改 Master 查询模式需要重启。
 
+当前 KVCM 查询只使用本地 HBM 命中，Master 的 cacheMatching 同时显式配置 `medium: [hbm]`、`globalKvsHostCount: 0`、`enableP2p: false`。仍需核对实际 MetaService descriptor；不能将 global 命中或本地回退成功当成 KVCM 本地查询成功。协议及回退边界见[组件参考](component-reference.md#dsv41-engine--kvcm-契约)。
+
 
 ## 监控自动选择
 
