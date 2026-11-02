@@ -124,3 +124,26 @@ cc_test(
     exec_properties = {"gpu": "L20_CU13"},
     tags = ["L20_CU13"],
 )
+
+cc_test(
+    name = "mm_rdma_reader_concurrency_test",
+    srcs = [
+        "MMRdmaReaderConcurrencyTest.cc",
+    ],
+    copts = test_copts,
+    deps = torch_deps() + cuda13_torch_link_deps + [
+        "//rtp_llm/cpp/config:config_modules",
+        "//rtp_llm/cpp/multimodal_processor/transport/rdma:mm_rdma_exporter",
+        "//rtp_llm/cpp/multimodal_processor/transport/rdma:mm_rdma_reader",
+        "//rtp_llm/cpp/rdma_transport",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:statusor",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ],
+    # Timing-sensitive concurrency regression for pooled RDMA read providers.
+    # CPU-only assertions, but libtorch_cuda needs libcuda.so.1 to load, so it
+    # lands on a GPU node like the sibling loopback test.
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
+)
