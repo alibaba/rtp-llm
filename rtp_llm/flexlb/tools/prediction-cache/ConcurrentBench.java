@@ -25,7 +25,7 @@ public class ConcurrentBench {
         var refs = new AtomicReferenceArray<RouteProjection.Inputs>(endpoints);
         for (int e = 0; e < endpoints; e++) {
             var items = new ArrayList<GroupPlanner.Item>();
-            for (int i = 0; i < 128; i++) items.add(new GroupPlanner.Item(i, 0, i, 1000,
+            for (int i = 0; i < 128; i++) items.add(new GroupPlanner.Item(Integer.toString(i), 0, i, 1000,
                     1_000_000, 1000 + i + e, i % 100));
             refs.set(e, new RouteProjection.Inputs(new QueueSnapshot(1000, true,
                     Comparator.comparingLong(GroupPlanner.Item::enqueueSeq),
@@ -35,7 +35,7 @@ public class ConcurrentBench {
         var probes = new RouteProjection.Probe[64];
         var expected = new RouteProjection.Candidate[64][endpoints];
         for (int p = 0; p < 64; p++) {
-            probes[p] = new RouteProjection.Probe(999999, 0, 1000, 1_000_000,
+            probes[p] = new RouteProjection.Probe("probe", 0, 1000, 1_000_000,
                     1024 + p * 32, p * 8, p * 8);
             for (int e = 0; e < endpoints; e++) expected[p][e] = RouteProjection.project(refs.get(e), probes[p], model, policy);
         }

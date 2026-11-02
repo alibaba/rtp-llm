@@ -20,7 +20,7 @@ public class CacheBench {
             var items = new ArrayList<GroupPlanner.Item>();
             for (int i = 0; i < depth; i++) {
                 long shape = churn ? (e * depth + i) : i % 64;
-                items.add(new GroupPlanner.Item(i, 0, i, 1000, 1_000_000,
+                items.add(new GroupPlanner.Item(Integer.toString(i), 0, i, 1000, 1_000_000,
                         1000 + shape, shape % 100));
             }
             snapshots.add(new RouteProjection.Inputs(new QueueSnapshot(1000, true,
@@ -35,7 +35,7 @@ public class CacheBench {
             do {
                 // Visit the exact same 64 probes in every measured operation.
                 for (int p = 0; p < 64; p++) {
-                    var probe = new RouteProjection.Probe(999999, 0, 1000, 1_000_000,
+                    var probe = new RouteProjection.Probe("probe", 0, 1000, 1_000_000,
                             1024 + p * 32, p * 8, p * 8);
                     for (int e = 0; e < 5; e++) {
                         var input = snapshots.get((p + e) & 63);

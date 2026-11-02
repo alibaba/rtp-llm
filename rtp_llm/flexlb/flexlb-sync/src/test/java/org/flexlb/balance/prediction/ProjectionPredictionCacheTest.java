@@ -23,7 +23,7 @@ class ProjectionPredictionCacheTest {
             public int size() { return 512; }
             public GroupPlanner.Item get(int index) {
                 reads.incrementAndGet();
-                return new GroupPlanner.Item(index, 0, index, 1000, 100_000, 100, 0);
+                return new GroupPlanner.Item(Integer.toString(index), 0, index, 1000, 100_000, 100, 0);
             }
         };
         var boundary = new RouteProjection.Predictions() {

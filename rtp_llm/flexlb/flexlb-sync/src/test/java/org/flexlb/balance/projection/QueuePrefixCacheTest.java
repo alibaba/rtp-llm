@@ -21,7 +21,7 @@ class QueuePrefixCacheTest {
 
     private static RouteProjection.Inputs input(int limit, long expiry, long window) {
         var items = new ArrayList<GroupPlanner.Item>();
-        for (int i = 0; i < 24; i++) items.add(new GroupPlanner.Item(i, i / 8, i * 2, 1000,
+        for (int i = 0; i < 24; i++) items.add(new GroupPlanner.Item(Integer.toString(i), i / 8, i * 2, 1000,
                 i % 3 == 0 ? expiry : Long.MAX_VALUE, 100 + i * 10, i));
         return new RouteProjection.Inputs(new QueueSnapshot(1000, true, ORDER,
                 new GroupPlanner.Constraints(limit, 10_000, 100_000, 700, window), items, null),
@@ -44,7 +44,7 @@ class QueuePrefixCacheTest {
             var inputs = input(2, 10_000, 0);
             var calls = new AtomicInteger();
             var model = model(calls);
-            var probe = new RouteProjection.Probe(999, 3, 1000, 100_000, 100, 0, 0);
+            var probe = new RouteProjection.Probe("probe", 3, 1000, 100_000, 100, 0, 0);
             var first = RouteProjection.project(inputs, probe, model, policy);
             int cold = calls.get();
             calls.set(0);
@@ -67,11 +67,11 @@ class QueuePrefixCacheTest {
             var inputs = input(1 + trial % 6, 1002 + trial % 7, trial % 3 == 0 ? 5 : 0);
             var oracle = new RouteProjection.Inputs(inputs.queue(), inputs.work(), 1, null);
             // Warm the longest unaffected prefix first, then try inserting anywhere.
-            RouteProjection.project(inputs, new RouteProjection.Probe(999, 9, 1000, 100_000, 100, 0, 0),
+            RouteProjection.project(inputs, new RouteProjection.Probe("probe", 9, 1000, 100_000, 100, 0, 0),
                     model, batch, 1000);
             for (int i = 0; i < 50; i++) {
                 var policy = (i / 10) % 2 == 0 ? batch : route;
-                var probe = new RouteProjection.Probe(999, random.nextInt(5), random.nextInt(50),
+                var probe = new RouteProjection.Probe("probe", random.nextInt(5), random.nextInt(50),
                         1000, i % 7 == 0 ? 1003 : 100_000, 100 + random.nextInt(1000), 0, 0);
                 long now = 1000 + i % 12;
                 assertEquals(RouteProjection.project(oracle, probe, model, policy, now),
@@ -108,7 +108,7 @@ class QueuePrefixCacheTest {
             for (int i = 0; i < 200; i++) {
                 int p = i;
                 tasks.add(() -> {
-                    var probe = new RouteProjection.Probe(999, p % 5, p % 50, 1000, 100_000, 100 + p, 0, 0);
+                    var probe = new RouteProjection.Probe("probe", p % 5, p % 50, 1000, 100_000, 100 + p, 0, 0);
                     assertEquals(RouteProjection.project(oracle, probe, model, batch),
                             RouteProjection.project(inputs, probe, model, batch));
                     return null;
