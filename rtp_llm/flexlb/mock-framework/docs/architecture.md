@@ -422,3 +422,9 @@ PROMETHEUS_BIN=/path/to/prometheus ./scripts/check.sh
 测试按能力归属：Java 验证组件行为和配置边界，Python 验证编译、协调、指标与跨语言接线。非法参数的组合在负责校验的组件内覆盖，不为每组参数启动 JVM；已有接线测试能覆盖的行为直接补进原测试。集成测试使用最小输入，不依赖正式 Case 的部署规模、倍率或等待时间。所有随仓 Case 统一检查可编译及输入文件存在；完整场景通过 `mock-case run` 执行，判定条件由 YAML 管理，不另写 Python 配置快照或逐个 Case 的 pytest 包装。进程回收、部分失败、取消、数据完整性和协议兼容的行为覆盖保留。
 
 构建复用生产 `flexlb-common`、`flexlb-grpc` 的公式与协议。Master 还使用生产 cache/sync/api，Spring 只进入 Master 运行时。框架构建跳过 Boot 重打包和 Whale 分发归档，不改变生产模块独立构建的默认行为。
+
+### 独立 Engine 服务与本地实验的边界
+
+EngineInstances 只完成配置解析和实例装配，返回实例及生效配置。EngineHost 负责本地实验的 effective-config/endpoints/ready 文件，并保留新实例不可覆盖旧产物的约束。EngineMain 不依赖这些文件，使用 START_PORT 启动单个服务，在日志中输出配置和地址；平台发现与重拉不经过 Python Runner。
+
+Engine 的 HTTP 与原生健康检查读取现有 Loop/Scheduler 失败状态，不采集指标。独立进程每秒调用同一检查，不可恢复失败退出。不开新的健康管理模块，不把普通请求失败当作 Engine 故障。

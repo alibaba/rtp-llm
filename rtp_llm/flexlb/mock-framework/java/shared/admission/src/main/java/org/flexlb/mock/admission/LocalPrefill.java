@@ -128,6 +128,7 @@ final class LocalPrefill implements AutoCloseable {
         catch (RequestFailure failure) { throw RpcErrors.failure(failure); }
     }
     Scheduler.Status snapshot(long latestFinished) { return engine.status(latestFinished); }
+    void checkHealthy() { engine.checkHealthy(); }
     String scrapeMetrics() { return engine.scrapeMetrics(); }
     @Override public void close() { engine.close(); }
 }

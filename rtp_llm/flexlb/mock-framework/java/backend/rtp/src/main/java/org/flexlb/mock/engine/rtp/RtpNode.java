@@ -48,7 +48,7 @@ public final class RtpNode implements org.flexlb.mock.runtime.EngineInstance {
         try {
             var builder = NettyServerBuilder.forAddress(node.address.listener(rpcPort)).addService(node.service);
             node.rpc = builder.build().start();
-            node.api = new ApiServer(node.address.listener(controlPort)).metrics(node.service::scrapeMetrics);
+            node.api = new ApiServer(node.address.listener(controlPort)).health(node::checkHealthy).metrics(node.service::scrapeMetrics);
             node.api.start();
             return node;
         } catch (IOException | RuntimeException error) { node.close(); throw error; }
@@ -57,7 +57,8 @@ public final class RtpNode implements org.flexlb.mock.runtime.EngineInstance {
     public String rpcAddress() { return address.rpc(rpc.getPort()); }
     public void checkHealthy() {
         if (closed.get()) throw new IllegalStateException("Engine closed");
-        service.scrapeMetrics();
+        if (rpc == null || rpc.isShutdown()) throw new IllegalStateException("Engine RPC stopped");
+        service.checkHealthy();
     }
     public KvCache cache() { return cache; }
     public Map<String, Object> endpoints() {

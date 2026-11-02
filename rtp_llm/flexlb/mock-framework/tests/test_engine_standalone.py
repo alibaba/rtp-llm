@@ -1,84 +1,126 @@
-"""Whale starts the same packaged entry for one P/D/V engine, without a host manager."""
+"""Single-engine service startup owns no Case files and exits with its worker."""
 import json
 import os
 from pathlib import Path
 import socket
 import subprocess
 import time
+from urllib.error import URLError
 from urllib.request import urlopen
 
 import pytest
 
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def ports():
+    while True:
+        with socket.socket() as http, socket.socket() as rpc:
+            http.bind(('127.0.0.1', 0))
+            port = http.getsockname()[1]
+            if port > 65534:
+                continue
+            try:
+                rpc.bind(('127.0.0.1', port + 1))
+            except OSError:
+                continue
+            return port
+
+
+def wait_healthy(child, port, log):
+    deadline = time.monotonic() + 15
+    while time.monotonic() < deadline:
+        assert child.poll() is None, log.read_text()
+        try:
+            with urlopen(f'http://127.0.0.1:{port}/health', timeout=.5) as response:
+                assert json.load(response)['status'] == 'ok'
+                return
+        except (URLError, TimeoutError):
+            time.sleep(.02)
+    raise AssertionError(log.read_text())
+
+
+def command():
+    return [str(Path(os.environ['JAVA_HOME']) / 'bin/java'), '-XX:ActiveProcessorCount=2',
+            '-jar', str(ROOT / 'java/host/target/mock-engine-service-1.0-SNAPSHOT-all.jar')]
+
+
+def environment(role, port):
+    env = {key: value for key, value in os.environ.items() if not key.startswith('MOCK_')}
+    env.update(ROLE_TYPE=role.upper(), START_PORT=str(port), MOCK_COMPUTE_FORWARD_EXPRESSION='1',
+               MOCK_BIND_HOST='0.0.0.0', MOCK_ADVERTISE_HOST='127.0.0.1')
+    if role == 'vit':
+        env['MOCK_VIT_HIDDEN_SIZE'] = '4'
+    else:
+        env.update(SEQ_SIZE_PER_BLOCK='16', MAX_SEQ_LEN='4096', TEST_BLOCK_NUM='9', RESERVE_BLOCK_RATIO='0')
+    return env
+
 
 @pytest.mark.parametrize('source', ['file', 'env'])
 @pytest.mark.parametrize('role', ['prefill', 'decode', 'vit'])
-def test_one_engine_per_process_uses_the_common_jar_without_a_manager(tmp_path, role, source):
-    root = Path(__file__).resolve().parents[1]
-    java = str(Path(os.environ['JAVA_HOME']) / 'bin/java')
-    output = tmp_path / 'output'
-    output.mkdir()
-    config = tmp_path / 'config.json'
-    values = {'mock.compute': {'forward': {'expression': '1'}}}
-    component = {'config': values}
-    if role == 'vit':
-        values['mock.vit.hidden.size'] = 4
-    else:
-        component['engine'] = 'rtp'
-        values.update(seq_size_per_block=16, max_seq_len=4096, test_block_num=9, reserve_block_ratio=0)
-    config.write_text(json.dumps({'id': role + '-0', 'component_role': role, 'component': component}))
-    ready = output / 'ready.json'
-    with socket.socket() as first, socket.socket() as second:
-        first.bind(('127.0.0.1', 0))
-        second.bind(('127.0.0.1', 0))
-        rpc_port, control_port = first.getsockname()[1], second.getsockname()[1]
-    env = {key: value for key, value in os.environ.items() if not key.startswith('MOCK_')}
-    env.update(MOCK_CONFIG_FILE=str(config), MOCK_OUTPUT_DIR=str(output), MOCK_READY_FILE=str(ready),
-        MOCK_RPC_PORT=str(rpc_port), MOCK_CONTROL_PORT=str(control_port),
-        MOCK_BIND_HOST='0.0.0.0', MOCK_ADVERTISE_HOST='127.0.0.1')
-    if source == 'env':
-        env.pop('MOCK_CONFIG_FILE')
-        env.update(ROLE_TYPE=role.upper(), MOCK_NODE_ID=role + '-0', MOCK_COMPUTE_FORWARD_EXPRESSION='1')
-        if role == 'vit':
-            env['MOCK_VIT_HIDDEN_SIZE'] = '4'
-        else:
-            env.update(SEQ_SIZE_PER_BLOCK='16', MAX_SEQ_LEN='4096', TEST_BLOCK_NUM='9', RESERVE_BLOCK_RATIO='0')
-    else:
-        env['MOCK_COMPUTE_FORWARD_EXPRESSION'] = 'invalid expression: file must ignore this'
-    command = [java, '-XX:ActiveProcessorCount=2', '-jar',
-        str(root / 'java/host/target/mock-engine-service-1.0-SNAPSHOT-all.jar')]
-    with (output / 'process.log').open('w') as log:
-        child = subprocess.Popen(command, env=env, stdout=log, stderr=log)
-        try:
-            deadline = time.monotonic() + 15
-            while not ready.exists():
-                assert child.poll() is None, (output / 'process.log').read_text()
-                assert time.monotonic() < deadline
-                time.sleep(.02)
-            endpoint = json.loads((output / 'endpoints.json').read_text())
-            effective = json.loads((output / 'effective-config.json').read_text())
-            assert effective['id'] == endpoint['id'] == role + '-0'
-            assert effective['mock.compute.forward.expression'] == '1'
-            assert endpoint['role'] == role
-            assert endpoint['rpc'] == f'127.0.0.1:{rpc_port}'
-            assert endpoint['control'] == f'http://127.0.0.1:{control_port}'
-            with urlopen(endpoint['control'] + '/health', timeout=2) as response:
-                assert json.load(response)['interfaces'] == []
-            with urlopen(endpoint['metrics'], timeout=2) as response:
-                assert response.status == 200
-        finally:
-            child.terminate()
+def test_service_restarts_without_case_artifacts(tmp_path, role, source):
+    port = ports()
+    env = environment(role, port)
+    if source == 'file':
+        config = {'mock.compute.forward.expression': '1'}
+        component = {'config': config}
+        if role != 'vit':
+            component['engine'] = 'rtp'
+            config.update(seq_size_per_block=16, max_seq_len=4096, test_block_num=9, reserve_block_ratio=0)
+        path = tmp_path / 'config.json'
+        path.write_text(json.dumps(dict(id=role + '-0', component_role=role, component=component)))
+        env['MOCK_CONFIG_FILE'] = str(path)
+        env['MOCK_COMPUTE_FORWARD_EXPRESSION'] = 'invalid expression: file is the only source'
+    # Old experiment files must neither prevent service startup nor be overwritten.
+    sentinel = tmp_path / 'effective-config.json'
+    sentinel.write_text('local experiment evidence')
+    for attempt in range(2):
+        log = tmp_path / f'process-{attempt}.log'
+        with log.open('w') as stream:
+            child = subprocess.Popen(command(), env=env, cwd=tmp_path, stdout=stream, stderr=stream)
             try:
-                child.wait(timeout=5)
-            except subprocess.TimeoutExpired:
+                wait_healthy(child, port, log)
+                started = next(json.loads(line) for line in log.read_text().splitlines() if line.startswith('{'))
+                assert started['event'] == 'engine_started'
+                assert started['endpoints']['role'] == role
+                assert started['endpoints']['rpc'] == f'127.0.0.1:{port + 1}'
+                assert started['effective_config']['mock.compute.forward.expression'] == '1'
+                with urlopen(f'http://127.0.0.1:{port}/metrics', timeout=2) as response:
+                    assert response.status == 200
+            finally:
+                child.terminate()
+                try:
+                    child.wait(timeout=8)
+                except subprocess.TimeoutExpired:
+                    child.kill()
+                    child.wait(timeout=5)
+                    raise
+            assert child.returncode in (0, 143)
+        assert sentinel.read_text() == 'local experiment evidence'
+        assert not (tmp_path / 'ready.json').exists()
+        assert not (tmp_path / 'endpoints.json').exists()
+        for value in (port, port + 1):
+            with socket.socket() as probe:
+                assert probe.connect_ex(('127.0.0.1', value)) != 0
+
+
+def test_fatal_vit_compute_failure_exits_the_service(tmp_path):
+    port = ports()
+    env = environment('vit', port)
+    env['MOCK_COMPUTE_FORWARD_EXPRESSION'] = '-1'
+    log = tmp_path / 'process.log'
+    with log.open('w') as stream:
+        child = subprocess.Popen(command(), env=env, cwd=tmp_path, stdout=stream, stderr=stream)
+        try:
+            wait_healthy(child, port, log)
+            classpath = os.pathsep.join([str(ROOT / 'java/host/target/test-classes'),
+                                        str(ROOT / 'java/host/target/mock-engine-service-1.0-SNAPSHOT-all.jar')])
+            subprocess.run([command()[0], '-cp', classpath, 'org.flexlb.mock.host.EngineFailureProbe',
+                            f'127.0.0.1:{port + 1}'], check=True, capture_output=True, timeout=10)
+            child.wait(timeout=8)
+            assert child.returncode not in (0, 143)
+            assert 'V forward failed' in log.read_text()
+        finally:
+            if child.poll() is None:
                 child.kill()
                 child.wait(timeout=5)
-        assert not ready.exists()
-    # A replacement must use a fresh artifact directory, for every engine role.
-    endpoints_before = (output / 'endpoints.json').read_bytes()
-    retried = subprocess.run(command, env=env, capture_output=True, timeout=15)
-    assert retried.returncode != 0
-    assert (output / 'endpoints.json').read_bytes() == endpoints_before
-    assert not ready.exists()
-    for port in (rpc_port, control_port):
-        with socket.socket() as probe:
-            assert probe.connect_ex(('127.0.0.1', port)) != 0

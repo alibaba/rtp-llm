@@ -20,6 +20,7 @@ public final class ApiServer implements AutoCloseable {
     private final ExecutorService handlers = Executors.newVirtualThreadPerTaskExecutor();
     private final ExecutorService calls = Executors.newVirtualThreadPerTaskExecutor();
     private boolean started;
+    private Runnable health = () -> {};
 
     public ApiServer(InetSocketAddress address) throws IOException {
         server = HttpServer.create(address, 0);
@@ -27,9 +28,12 @@ public final class ApiServer implements AutoCloseable {
         server.createContext("/invoke", this::invoke);
         server.createContext("/health", exchange -> {
             try (exchange) {
-                if (exchange.getRequestMethod().equals("GET") && exchange.getRequestURI().toString().equals("/health"))
-                    send(exchange, 200, Map.of("interfaces", bindings.keySet()));
-                else send(exchange, 404, Map.of("error", "Unknown endpoint"));
+                if (!exchange.getRequestMethod().equals("GET") || !exchange.getRequestURI().toString().equals("/health")) {
+                    send(exchange, 404, Map.of("error", "Unknown endpoint")); return;
+                }
+                try { health.run(); }
+                catch (RuntimeException error) { send(exchange, 503, Map.of("status", "unavailable")); return; }
+                send(exchange, 200, Map.of("status", "ok", "interfaces", bindings.keySet()));
             }
         });
     }
@@ -44,6 +48,12 @@ public final class ApiServer implements AutoCloseable {
             if (bindings.putIfAbsent(name, new Binding(implementation, method, (Map<String, Object>) schemas.get(name))) != null)
                 throw new IllegalArgumentException("Duplicate binding: " + name);
         }
+        return this;
+    }
+
+    public ApiServer health(Runnable check) {
+        if (started) throw new IllegalStateException("Cannot bind after start");
+        health = Objects.requireNonNull(check);
         return this;
     }
 

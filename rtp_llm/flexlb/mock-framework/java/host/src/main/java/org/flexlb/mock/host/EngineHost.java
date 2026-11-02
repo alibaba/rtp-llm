@@ -28,10 +28,14 @@ public final class EngineHost implements EngineHostApi, AutoCloseable {
         if (ports.contains(args.rpcPort()) || ports.contains(args.controlPort()))
             throw new IllegalArgumentException("Listener port has already been used in this host");
         ports.add(args.rpcPort()); ports.add(args.controlPort());
-        EngineInstance node = EngineInstances.start(output.resolve("config.json"), output, args.rpcPort(), args.controlPort());
+        var started = EngineInstances.start(output.resolve("config.json"), args.rpcPort(), args.controlPort());
+        EngineInstance node = started.node();
         try {
-            EngineInstances.publish(output.resolve("endpoints.json"), node.endpoints());
-            EngineInstances.publish(output.resolve("ready.json"), Map.of("url", node.endpoints().get("control")));
+            try (var stream = Files.newOutputStream(output.resolve("effective-config.json"), StandardOpenOption.CREATE_NEW)) {
+                JSON.writeValue(stream, started.effective());
+            }
+            publish(output.resolve("endpoints.json"), node.endpoints());
+            publish(output.resolve("ready.json"), Map.of("url", node.endpoints().get("control")));
             nodes.put(args.id(), node);
             return instance(node);
         } catch (Exception error) {
@@ -73,6 +77,14 @@ public final class EngineHost implements EngineHostApi, AutoCloseable {
         nodes.clear();
         if (failed != null) throw failed;
     }
+    private static void publish(Path path, Object value) throws Exception {
+        var temporary = Files.createTempFile(path.toAbsolutePath().getParent(), ".publish-", ".json");
+        try {
+            JSON.writeValue(temporary.toFile(), value);
+            Files.move(temporary, path, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
+        } finally { Files.deleteIfExists(temporary); }
+    }
+
     public static void main(String[] args) throws Exception {
         if (args.length != 0) throw new IllegalArgumentException("Use launcher configuration");
         int port = Integer.parseInt(required("MOCK_HOST_PORT"));

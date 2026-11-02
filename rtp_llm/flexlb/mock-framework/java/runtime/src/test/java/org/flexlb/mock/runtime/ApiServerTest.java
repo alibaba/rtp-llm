@@ -52,6 +52,20 @@ class ApiServerTest {
         assertThrows(IllegalStateException.class, InvocationContext::current);
     }
 
+    @Test void unhealthyComponentsReturnUnavailableWithoutCollectingMetrics() throws Exception {
+        var broken = new java.util.concurrent.atomic.AtomicBoolean();
+        var scrapes = new java.util.concurrent.atomic.AtomicInteger();
+        try (var service = new ApiServer(new InetSocketAddress("127.0.0.1", 0))
+                .health(() -> { if (broken.get()) throw new IllegalStateException("worker failed"); })
+                .metrics(() -> { scrapes.incrementAndGet(); return ""; }).start()) {
+            var request = HttpRequest.newBuilder(URI.create(service.url() + "/health")).GET().build();
+            assertEquals(200, CLIENT.send(request, HttpResponse.BodyHandlers.ofString()).statusCode());
+            broken.set(true);
+            assertEquals(503, CLIENT.send(request, HttpResponse.BodyHandlers.ofString()).statusCode());
+            assertEquals(0, scrapes.get());
+        }
+    }
+
     @Test void nativeOnlyNodeHealthAdvertisesNoImplementedBusinessInterfaces() throws Exception {
         try (var nativeHost = new ApiServer(new InetSocketAddress("127.0.0.1", 0)).start()) {
             var response = CLIENT.send(HttpRequest.newBuilder(URI.create(nativeHost.url() + "/health")).GET().build(), HttpResponse.BodyHandlers.ofString());

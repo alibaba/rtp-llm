@@ -93,6 +93,20 @@ def main():
         env.update(MOCK_CONFIG_FILE=str(config_file), MOCK_OUTPUT_DIR=str(directory),
                    MOCK_READY_FILE=str(directory / "ready.json"), MOCK_NODE_ID=name,
                    MOCK_TOPOLOGY_FILE=str(root / "topology.json"))
+        if jar == engine_jar:
+            env.pop("MOCK_OUTPUT_DIR"); env.pop("MOCK_READY_FILE"); env.pop("MOCK_TOPOLOGY_FILE")
+            while True:
+                with socket.socket() as first, socket.socket() as second:
+                    first.bind(("127.0.0.1", 0))
+                    port = first.getsockname()[1]
+                    if port > 65534:
+                        continue
+                    try:
+                        second.bind(("127.0.0.1", port + 1))
+                    except OSError:
+                        continue
+                    break
+            env["START_PORT"] = str(port)
         command = [java, "-XX:ActiveProcessorCount=2", "-jar", str(jar)]
         with (directory / "process.log").open("w") as log:
             child = subprocess.Popen(command, env=env, stdout=log, stderr=log, start_new_session=True)
@@ -100,8 +114,16 @@ def main():
         save(name + "-command.json", command)
         def ready():
             check(child.poll() is None, f"{name} exited: {(directory / 'process.log').read_text()}")
+            if jar == engine_jar:
+                try:
+                    return http(f"http://127.0.0.1:{port}/health")["status"] == "ok"
+                except (URLError, TimeoutError):
+                    return False
             return (directory / "ready.json").exists()
         wait_for(ready)
+        if jar == engine_jar:
+            return dict(id=name, role=name.split("-")[0], rpc=f"127.0.0.1:{port + 1}",
+                        control=f"http://127.0.0.1:{port}", metrics=f"http://127.0.0.1:{port}/metrics")
         return json.loads((directory / "endpoints.json").read_text())
 
     try:

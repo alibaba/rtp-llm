@@ -1,50 +1,36 @@
 package org.flexlb.mock.host;
 
-import java.nio.file.*;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import java.nio.file.Path;
 import java.util.Map;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 
-/** One P/D/V engine per JVM; Whale owns the Pod lifecycle. */
+/** Foreground single-engine service. The platform owns discovery and process replacement. */
 public final class EngineMain {
     public static void main(String[] args) throws Exception {
         if (args.length != 0) throw new IllegalArgumentException("Use instance configuration variables");
+        int port = Integer.parseInt(System.getenv().getOrDefault("START_PORT", "8088"));
+        if (port < 1 || port > 65534) throw new IllegalArgumentException("START_PORT must be in 1..65534");
         String configuration = System.getenv("MOCK_CONFIG_FILE");
-        Path output = Path.of(required("MOCK_OUTPUT_DIR"));
-        Path ready = Path.of(required("MOCK_READY_FILE"));
-        int rpcPort = port("MOCK_RPC_PORT"), controlPort = port("MOCK_CONTROL_PORT");
-        if (rpcPort != 0 && rpcPort == controlPort)
-            throw new IllegalArgumentException("RPC and control ports must differ");
-        Files.createDirectories(output);
-        try (var node = configuration == null
-                ? EngineInstances.startEnvironment(System.getenv(), output, rpcPort, controlPort)
-                : EngineInstances.start(Path.of(configuration), output, rpcPort, controlPort)) {
+        var started = configuration == null
+            ? EngineInstances.startEnvironment(System.getenv(), port + 1, port)
+            : EngineInstances.start(Path.of(configuration), port + 1, port);
+        var stopped = new CountDownLatch(1);
+        try (var node = started.node()) {
             var hook = new Thread(() -> {
-                try { node.close(); } finally { deleteReady(ready); }
+                stopped.countDown();
+                node.close();
             }, "engine-shutdown");
             Runtime.getRuntime().addShutdownHook(hook);
             try {
-                EngineInstances.publish(output.resolve("endpoints.json"), node.endpoints());
-                EngineInstances.publish(ready, Map.of("url", node.endpoints().get("control")));
-                new CountDownLatch(1).await();
+                node.checkHealthy();
+                System.out.println(new ObjectMapper().writeValueAsString(Map.of(
+                    "event", "engine_started", "endpoints", node.endpoints(), "effective_config", started.effective())));
+                while (!stopped.await(1, TimeUnit.SECONDS)) node.checkHealthy();
             } finally {
-                deleteReady(ready);
                 try { Runtime.getRuntime().removeShutdownHook(hook); } catch (IllegalStateException stopping) { }
             }
         }
-    }
-
-    private static int port(String name) {
-        int value = Integer.parseInt(System.getenv().getOrDefault(name, "0"));
-        if (value < 0 || value > 65535) throw new IllegalArgumentException("Invalid " + name);
-        return value;
-    }
-    private static String required(String name) {
-        String value = System.getenv(name);
-        if (value == null || value.isBlank()) throw new IllegalArgumentException("Missing " + name);
-        return value;
-    }
-    private static void deleteReady(Path ready) {
-        try { Files.deleteIfExists(ready); }
-        catch (java.io.IOException error) { throw new IllegalStateException("Cannot remove Engine readiness", error); }
     }
 }

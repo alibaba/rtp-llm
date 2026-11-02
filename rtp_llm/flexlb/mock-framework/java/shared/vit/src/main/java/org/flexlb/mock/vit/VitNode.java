@@ -13,20 +13,20 @@ public final class VitNode implements EngineInstance {
     private final EngineAddress address=EngineAddress.local();
     private Server rpc;
     private ApiServer api;
-    private boolean closed;
+    private volatile boolean closed;
     private VitNode(VitConfig config) { this.config=config;service=new VitService(config); }
     public static VitNode start(VitConfig config,int rpcPort,int controlPort) throws Exception {
         var node=new VitNode(config);
         try {
             node.rpc=NettyServerBuilder.forAddress(node.address.listener(rpcPort)).addService(node.service).build().start();
-            node.api=new ApiServer(node.address.listener(controlPort)).metrics(node.service::metrics).start();return node;
+            node.api=new ApiServer(node.address.listener(controlPort)).health(node::checkHealthy).metrics(node.service::metrics).start();return node;
         } catch(Exception error) { node.close();throw error; }
     }
     @Override public Map<String,Object> endpoints() {
         return Map.of("id",config.id(),"role","vit","rpc",address.rpc(rpc.getPort()),"control",address.http(api.port()),
             "metrics",address.http(api.port())+"/metrics","metadata_only",true,"supported_rpc",List.of("GetWorkerStatus","GetCacheStatus","RemoteMultimodalEmbedding","GetMultimodalHashes","AsyncSubmitEmbedding"));
     }
-    @Override public void checkHealthy() { if(closed) throw new IllegalStateException("V closed");service.checkHealthy(); }
+    @Override public void checkHealthy() { if(closed || rpc == null || rpc.isShutdown()) throw new IllegalStateException("V stopped");service.checkHealthy(); }
     @Override public synchronized void close() {
         if(closed) return;closed=true;service.close();if(api!=null) api.close();
         if(rpc!=null) { rpc.shutdownNow();try { rpc.awaitTermination(3,TimeUnit.SECONDS); } catch(InterruptedException error) { Thread.currentThread().interrupt(); } }
