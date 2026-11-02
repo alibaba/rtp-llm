@@ -159,6 +159,8 @@ class Qwen2VLRenderer(QwenRenderer):
                 ]
             if message.tool_call_id:
                 msg_dict["tool_call_id"] = message.tool_call_id
+            if message.reasoning_content:
+                msg_dict["reasoning_content"] = message.reasoning_content
 
             final_messages.append(msg_dict)
 
