@@ -911,6 +911,9 @@ message RemoteOperationRequestPB {
     RemoteMetadataRequestPB metadata = 7;
     // Remaining task budget for READ/WRITE; metadata operations keep their own policy.
     int64 timeout_ms = 8;
+    // Empty preserves one block per URI. Otherwise each positive count gives
+    // the number of consecutive physical group_tags/block_ids for that URI.
+    repeated uint32 uri_block_counts = 9;
 }
 
 message RemoteMetadataRequestPB {

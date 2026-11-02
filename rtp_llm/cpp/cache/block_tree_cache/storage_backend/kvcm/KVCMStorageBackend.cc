@@ -16,6 +16,7 @@
 #include <cstdlib>
 #include <cstdint>
 #include <limits>
+#include <iterator>
 #include <mutex>
 #include <sstream>
 #include <stdexcept>
@@ -356,7 +357,7 @@ public:
                     }
                 }
             } else {
-                client_config_map = genClientConfig();
+                client_config_map = genClientConfig(full_group_tags);
             }
         } catch (const autil::legacy::ExceptionBase& error) {
             RTP_LLM_LOG_ERROR("parse KVCM_CLIENT_CONFIG failed: %s", error.what());
@@ -624,8 +625,14 @@ public:
         if (collect_bindings) {
             try {
                 size_t count = 0;
-                for (const auto& row : locations_view)
-                    count += row.size();
+                for (const auto& row : locations_view) {
+                    for (const auto& spec : row) {
+                        const auto info = spec_info.find(spec.spec_name);
+                        if (info != spec_info.end()) {
+                            count += info->second.group_ids.size();
+                        }
+                    }
+                }
                 origin_bindings.reserve(count);
             } catch (const std::bad_alloc&) {
                 collect_bindings = false;
@@ -650,30 +657,34 @@ public:
                 const auto        info = spec_info.find(location_spec.spec_name);
                 const std::string spec_name(location_spec.spec_name);
                 RTP_LLM_CHECK_WITH_INFO(info != spec_info.end(), "KVCM read has unknown spec [%s]", spec_name.c_str());
-                const StorageBlockHandle* handle = findHandle(request.handles[key_idx], info->second.tag);
-                RTP_LLM_CHECK_WITH_INFO(handle != nullptr,
-                                        "KVCM read has no destination handle for key=%zu tag=%s",
-                                        key_idx,
-                                        info->second.tag.c_str());
                 auto* remote = requests.at(static_cast<size_t>(info->second.tp_rank)).mutable_remote_request();
-                remote->add_group_tags(info->second.tag);
-                remote->add_block_ids(handle->block);
                 remote->add_uris(std::string(location_spec.uri));
-                if (track_origins && info->second.tp_rank == parallelism_config_.tp_rank) {
-                    const auto& pool        = pools_by_tag_.at(info->second.tag);
-                    const auto  incarnation = pool->decodeOriginIncarnation(handle->block);
-                    // A destination overwrite must not retain its previous
-                    // source, including a legacy or failed remote read. This
-                    // does not invalidate siblings sharing the physical page.
-                    pool->bindDecodeOrigin(handle->block, incarnation, info->second.tag, nullptr);
-                    if (origin && incarnation != 0) {
-                        try {
-                            origin_bindings.push_back(
-                                {key_idx, pool, handle->block, incarnation, info->second.tag, origin});
-                        } catch (const std::bad_alloc&) {
-                            origin_bindings.clear();
-                            collect_bindings = false;
-                            origin.reset();
+                if (merge_full_specs_)
+                    remote->add_uri_block_counts(info->second.group_ids.size());
+                for (const auto group_id : info->second.group_ids) {
+                    const auto& group = group_policy_->groups().at(group_id);
+                    const StorageBlockHandle* handle = findHandle(request.handles[key_idx], group.tag);
+                    RTP_LLM_CHECK_WITH_INFO(handle != nullptr,
+                                            "KVCM read has no destination handle for key=%zu tag=%s",
+                                            key_idx,
+                                            group.tag.c_str());
+                    remote->add_group_tags(group.tag);
+                    remote->add_block_ids(handle->block);
+                    if (track_origins && info->second.tp_rank == parallelism_config_.tp_rank) {
+                        const auto& pool        = pools_by_tag_.at(group.tag);
+                        const auto  incarnation = pool->decodeOriginIncarnation(handle->block);
+                        // A destination overwrite must not retain its previous
+                        // source, including a legacy or failed remote read. This
+                        // does not invalidate siblings sharing the physical page.
+                        pool->bindDecodeOrigin(handle->block, incarnation, group.tag, nullptr);
+                        if (origin && incarnation != 0) {
+                            try {
+                                origin_bindings.push_back({key_idx, pool, handle->block, incarnation, group.tag, origin});
+                            } catch (const std::bad_alloc&) {
+                                origin_bindings.clear();
+                                collect_bindings = false;
+                                origin.reset();
+                            }
                         }
                     }
                 }
@@ -903,19 +914,24 @@ public:
                     const auto info = spec_info.find(location_spec.spec_name);
                     RTP_LLM_CHECK_WITH_INFO(
                         info != spec_info.end(), "KVCM write has unknown spec [%s]", location_spec.spec_name.c_str());
-                    const StorageBlockHandle* handle = findHandle(request.handles[key_idx], info->second.tag);
-                    RTP_LLM_CHECK_WITH_INFO(handle != nullptr,
-                                            "KVCM write has no source handle for key=%zu tag=%s",
-                                            key_idx,
-                                            info->second.tag.c_str());
-                    transferred_bytes += group_policy_->groups().at(info->second.group_id).block_size_bytes;
                     const size_t rank   = static_cast<size_t>(info->second.tp_rank);
                     auto*        remote = requests.at(rank).mutable_remote_request();
-                    remote->add_group_tags(info->second.tag);
-                    remote->add_block_ids(request.decode_completion && !handle->peer_blocks.empty() ?
-                                              handle->peer_blocks.at(rank) :
-                                              handle->block);
                     remote->add_uris(location_spec.uri);
+                    if (merge_full_specs_)
+                        remote->add_uri_block_counts(info->second.group_ids.size());
+                    for (const auto group_id : info->second.group_ids) {
+                        const auto& group = group_policy_->groups().at(group_id);
+                        const StorageBlockHandle* handle = findHandle(request.handles[key_idx], group.tag);
+                        RTP_LLM_CHECK_WITH_INFO(handle != nullptr,
+                                                "KVCM write has no source handle for key=%zu tag=%s",
+                                                key_idx,
+                                                group.tag.c_str());
+                        transferred_bytes += group.block_size_bytes;
+                        remote->add_group_tags(group.tag);
+                        remote->add_block_ids(request.decode_completion && !handle->peer_blocks.empty() ?
+                                                  handle->peer_blocks.at(rank) :
+                                                  handle->block);
+                    }
                     actual_uri_gather[rank].push_back(&location_spec);
                 }
             }
@@ -1060,6 +1076,142 @@ public:
         }
     }
 
+    bool prepareBlockBuffers(const RemoteOperationRequestPB& request,
+                             const std::vector<std::string>& tags,
+                             const std::vector<int32_t>& blocks,
+                             kv_cache_manager::BlockBuffers& buffers,
+                             int peer = -1) {
+        if (tags.size() != blocks.size()) {
+            return false;
+        }
+        const bool grouped = !request.uri_block_counts().empty();
+        if ((!grouped && blocks.size() != static_cast<size_t>(request.uris_size()))
+            || (grouped && request.uri_block_counts_size() != request.uris_size())) {
+            return false;
+        }
+        // Reject the complete request before resolving any physical block or
+        // submitting I/O. Counts describe positions, including repeated URIs.
+        for (const auto& tag : tags) {
+            if (pools_by_tag_.find(tag) == pools_by_tag_.end()) {
+                RTP_LLM_LOG_ERROR("KVCM transfer contains unregistered tag [%s]", tag.c_str());
+                return false;
+            }
+        }
+        if (grouped) {
+            size_t begin = 0;
+            const auto& groups = group_policy_->groups();
+            const auto& infos = group_policy_->spec_info_map();
+            for (int uri = 0; uri < request.uris_size(); ++uri) {
+                const size_t count = request.uri_block_counts(uri);
+                if (count == 0 || count > blocks.size() - begin) {
+                    return false;
+                }
+                const auto group = std::find_if(groups.begin(), groups.end(), [&](const auto& entry) {
+                    return entry.second.tag == tags[begin];
+                });
+                if (group == groups.end()) {
+                    return false;
+                }
+                const auto name = kvcm::genLocationSpecName(peer < 0 ? parallelism_config_.tp_rank : peer,
+                                                            group->second.group_name,
+                                                            runtime_config_.model_name,
+                                                            merge_full_specs_);
+                const auto info = infos.find(name);
+                if (info == infos.end() || info->second.group_ids.size() != count) {
+                    return false;
+                }
+                for (size_t member = 0; member < count; ++member) {
+                    if (tags[begin + member] != groups.at(info->second.group_ids[member]).tag) {
+                        return false;
+                    }
+                }
+                begin += count;
+            }
+            if (begin != blocks.size()) {
+                return false;
+            }
+            if (blocks.size() != static_cast<size_t>(request.uris_size())
+                && !std::all_of(request.uris().begin(), request.uris().end(), [](const auto& uri) {
+                       return uri.compare(0, 7, "pace://") == 0;
+                   })) {
+                return false;
+            }
+        }
+        if (tags.empty()) {
+            return true;
+        }
+        setCudaDevice();
+        if (peer < 0) {
+            if (!group_policy_->genBlockBuffers(tags, blocks, buffers)) {
+                return false;
+            }
+        } else {
+            CPSlotMapper mapper(0, target_physical_shards_, cache_config_.seq_size_per_block);
+            buffers.reserve(blocks.size());
+            for (size_t member = 0; member < blocks.size(); ++member) {
+                const auto& tag = tags[member];
+                buffers.emplace_back();
+                auto& iovs = buffers.back().iovs;
+                const auto layer_ids = cache_config_.layerIdsForGroup(tag);
+                iovs.reserve(layer_ids.size() * 2);
+                size_t bytes = 0;
+                for (int layer : layer_ids) {
+                    const auto parts = mapper.sliceBlockForPeer(
+                        cache_config_, tag, file_resolver_(layer, tag, blocks[member]), peer);
+                    for (const auto& part : parts) {
+                        if (!part.is_cuda || !part.addr || !part.size_bytes
+                            || part.size_bytes > std::numeric_limits<size_t>::max() - bytes) {
+                            return false;
+                        }
+                        iovs.push_back({kv_cache_manager::MemoryType::GPU, part.addr, part.size_bytes, false});
+                        bytes += part.size_bytes;
+                    }
+                }
+                if (bytes != publicationWireBytes(tag)) {
+                    RTP_LLM_LOG_WARNING("Decode wire size mismatch tag=%s", tag.c_str());
+                    return false;
+                }
+            }
+        }
+        if (!grouped) {
+            return true;
+        }
+        size_t begin = 0;
+        for (int uri = 0; uri < request.uris_size(); ++uri) {
+            const size_t count = request.uri_block_counts(uri);
+            auto& buffer = buffers[begin];
+            if (count > 1) {
+                size_t iov_count = 0;
+                for (size_t member = begin; member < begin + count; ++member) {
+                    iov_count += buffers[member].iovs.size();
+                }
+                buffer.iovs.reserve(iov_count);
+                for (size_t member = begin + 1; member < begin + count; ++member) {
+                    auto& iovs = buffers[member].iovs;
+                    buffer.iovs.insert(buffer.iovs.end(), std::make_move_iterator(iovs.begin()),
+                                       std::make_move_iterator(iovs.end()));
+                }
+                // SDK gather/scatter groups by size. Use the same stable wire
+                // order for normal I/O; only pointer descriptors move here.
+                for (size_t i = 1; i < buffer.iovs.size(); ++i) {
+                    auto iov = std::move(buffer.iovs[i]);
+                    size_t j = i;
+                    while (j > 0 && buffer.iovs[j - 1].size > iov.size) {
+                        buffer.iovs[j] = std::move(buffer.iovs[j - 1]);
+                        --j;
+                    }
+                    buffer.iovs[j] = std::move(iov);
+                }
+            }
+            if (static_cast<size_t>(uri) != begin) {
+                buffers[uri] = std::move(buffer);
+            }
+            begin += count;
+        }
+        buffers.resize(request.uris_size());
+        return true;
+    }
+
     bool execute(const RemoteOperationRequestPB& request, RemoteOperationResponsePB& response,
                  const TransferTask* parent_task = nullptr, bool* source_may_be_touched = nullptr) {
         if (request.op() != REMOTE_OPERATION_READ && request.op() != REMOTE_OPERATION_WRITE) {
@@ -1079,8 +1231,9 @@ public:
         const std::vector<std::string>    tags(request.group_tags().begin(), request.group_tags().end());
         const std::vector<int32_t>        blocks(request.block_ids().begin(), request.block_ids().end());
         const kv_cache_manager::UriStrVec uris(request.uris().begin(), request.uris().end());
-        if (tags.size() != blocks.size() || blocks.size() != uris.size()) {
-            RTP_LLM_LOG_WARNING("KVCM transfer tag/block/URI count mismatch");
+        kv_cache_manager::BlockBuffers buffers;
+        if (!prepareBlockBuffers(request, tags, blocks, buffers)) {
+            RTP_LLM_LOG_WARNING("KVCM transfer has invalid block/URI layout");
             response.set_transfer_status(REMOTE_TRANSFER_STATUS_FAILED);
             return false;
         }
@@ -1088,29 +1241,13 @@ public:
             response.set_transfer_status(REMOTE_TRANSFER_STATUS_SUCCESS);
             return true;
         }
-        // Validate the complete route before resolving any block into an IOV.
-        // Requests arrive over RPC, so an unknown tag is a request failure and
-        // must not escape as an assertion or allow a valid prefix to start I/O.
-        for (const auto& tag : tags) {
-            if (pools_by_tag_.find(tag) == pools_by_tag_.end()) {
-                RTP_LLM_LOG_ERROR("KVCM transfer contains unregistered tag [%s]", tag.c_str());
-                response.set_transfer_status(REMOTE_TRANSFER_STATUS_FAILED);
-                return false;
-            }
-        }
-        setCudaDevice();
-        kv_cache_manager::BlockBuffers buffers;
-        if (!group_policy_->genBlockBuffers(tags, blocks, buffers)) {
-            response.set_transfer_status(REMOTE_TRANSFER_STATUS_FAILED);
-            return false;
-        }
         bool unknown = false;
         block_tree_cache_detail::ScopeRollback reconcile_completion([&] {
             response.set_payload_buffer_safe(!unknown);
             if (source_may_be_touched) *source_may_be_touched = unknown;
         });
         const auto result = executeTagTransfers(request.op(), tags, blocks, uris, buffers, response,
-                                                unknown, nullptr, task);
+                                                unknown, nullptr, task, &request);
         response.set_transfer_status(result == TransferResult::SUCCESS ? REMOTE_TRANSFER_STATUS_SUCCESS :
                                      result == TransferResult::TIMEOUT ? REMOTE_TRANSFER_STATUS_TIMEOUT :
                                                                          REMOTE_TRANSFER_STATUS_FAILED);
@@ -1122,14 +1259,9 @@ public:
         // Preflight rejection cannot have submitted a payload. The SDK scope
         // below replaces this proof before any potentially asynchronous I/O.
         response.set_payload_buffer_safe(true);
-        if (completion_stopped_.load() || request.group_tags_size() != request.block_ids_size()
-            || request.group_tags_size() != request.uris_size()) {
+        if (completion_stopped_.load()) {
             response.set_transfer_status(REMOTE_TRANSFER_STATUS_FAILED);
             return false;
-        }
-        if (request.group_tags_size() == 0) {
-            response.set_transfer_status(REMOTE_TRANSFER_STATUS_SUCCESS);
-            return true;
         }
         auto operation = std::make_shared<CompletionResources::Operation>();
         operation->tags.assign(request.group_tags().begin(), request.group_tags().end());
@@ -1141,19 +1273,16 @@ public:
             response.set_transfer_status(REMOTE_TRANSFER_STATUS_FAILED);
             return false;
         }
-        operation->client = client_wrapper_;
-        for (const auto& tag : operation->tags) {
-            if (!pools_by_tag_.count(tag)) {
-                response.set_transfer_status(REMOTE_TRANSFER_STATUS_FAILED);
-                return false;
-            }
-        }
-        for (const auto& pool : pools_by_tag_) operation->pools.push_back(pool.second);
-        setCudaDevice();
-        if (!group_policy_->genBlockBuffers(operation->tags, operation->blocks, operation->buffers)) {
+        if (!prepareBlockBuffers(request, operation->tags, operation->blocks, operation->buffers)) {
             response.set_transfer_status(REMOTE_TRANSFER_STATUS_FAILED);
             return false;
         }
+        if (operation->tags.empty()) {
+            response.set_transfer_status(REMOTE_TRANSFER_STATUS_SUCCESS);
+            return true;
+        }
+        operation->client = client_wrapper_;
+        for (const auto& pool : pools_by_tag_) operation->pools.push_back(pool.second);
         // The controller's prepared task pins the globally shared block IDs.
         // This independent local record retains the worker's actual backing,
         // SDK registrations and borrowed IOV/URI descriptors across UNKNOWN.
@@ -1170,7 +1299,7 @@ public:
         });
         response.set_payload_buffer_safe(false);
         const auto result = executeTagTransfers(request.op(), operation->tags, operation->blocks,
-            operation->uris, operation->buffers, response, unknown, nullptr, task);
+            operation->uris, operation->buffers, response, unknown, nullptr, task, &request);
         response.set_transfer_status(result == TransferResult::SUCCESS ? REMOTE_TRANSFER_STATUS_SUCCESS :
                                      result == TransferResult::TIMEOUT ? REMOTE_TRANSFER_STATUS_TIMEOUT :
                                                                          REMOTE_TRANSFER_STATUS_FAILED);
@@ -1302,7 +1431,8 @@ private:
                 (void)id;
                 bool available = true;
                 for (int rank = 0; rank < parallelism_config_.tp_size; ++rank) {
-                    const auto name = kvcm::genLocationSpecName(rank, group.group_name, runtime_config_.model_name);
+                    const auto name = kvcm::genLocationSpecName(
+                        rank, group.group_name, runtime_config_.model_name, merge_full_specs_);
                     const auto found = present.find(name);
                     available = available && found != present.end() && !found->second->uri.empty();
                 }
@@ -1418,20 +1548,24 @@ private:
             group_policy_->buildLocationSpecGroups(
                 decode_publication_enabled_ ? target_prefill_tp_ : static_cast<int>(parallelism_config_.tp_size),
                 *groups,
-                runtime_config_.model_name),
+                runtime_config_.model_name,
+                merge_full_specs_),
             "failed to build KVCM location spec groups");
         for (const auto& [group_id, group] : group_policy_->groups()) {
             for (int rank = 0; rank < (decode_publication_enabled_ ? target_prefill_tp_ : parallelism_config_.tp_size);
                  ++rank) {
                 const std::string spec_name =
-                    kvcm::genLocationSpecName(rank, group.group_name, runtime_config_.model_name);
-                infos->emplace(spec_name, group.block_size_bytes);
+                    kvcm::genLocationSpecName(rank, group.group_name, runtime_config_.model_name, merge_full_specs_);
+                auto& size = (*infos)[spec_name];
+                RTP_LLM_CHECK_WITH_INFO(group.block_size_bytes <= static_cast<size_t>(std::numeric_limits<int64_t>::max() - size),
+                                        "KVCM location spec size overflow [%s]", spec_name.c_str());
+                size += group.block_size_bytes;
             }
         }
         return {std::move(infos), std::move(groups)};
     }
 
-    kvcm::ClientWrapper::ConfigMap genClientConfig() {
+    kvcm::ClientWrapper::ConfigMap genClientConfig(const std::vector<std::string>& full_group_tags) {
         std::vector<std::string> addresses;
         if (!kv_cache_config_.kvcm_server_address.empty()) {
             addresses.push_back(kv_cache_config_.kvcm_server_address);
@@ -1444,6 +1578,25 @@ private:
                                                             kv_cache_config_.kvcm_put_timeout_ms,
                                                             kv_cache_config_.kvcm_get_timeout_ms);
         sdk->parseBackendConfigs(kv_cache_config_.kvcm_model_sdk_config);
+        const auto& backends = sdk->sdk_backend_configs();
+        if (runtime_config_.model_name == "DeepSeekV41" && full_group_tags.size() == 3 && backends.size() == 1
+            && std::dynamic_pointer_cast<kvcm::TairMempoolSdkConfig>(backends.front())) {
+            const auto& first = topology_->group(full_group_tags.front());
+            std::set<std::string> names;
+            bool compatible = true;
+            for (const auto& [id, group] : group_policy_->groups()) {
+                (void)id;
+                if (!group.is_full)
+                    continue;
+                names.insert(kvcm::genLocationSpecName(0, group.group_name, runtime_config_.model_name));
+                const auto& member = topology_->group(group.tag);
+                compatible = compatible && member.seqSizePerBlock() == first.seqSizePerBlock()
+                             && member.cacheKeyTokenStride() == first.cacheKeyTokenStride()
+                             && member.policy.cp_mapping == first.policy.cp_mapping
+                             && member.policy.cp_slice == first.policy.cp_slice;
+            }
+            merge_full_specs_ = compatible && names == std::set<std::string>{"F0_TP0", "F1_TP0", "F2_TP0"};
+        }
         auto [location_infos, location_groups] = genLocationSpecs();
 
         const std::string model_name = runtime_config_.model_name;
@@ -1566,7 +1719,8 @@ private:
                 {pool->getBaseAddress(), registration_size},
                 kvcm::genLocationSpecName(static_cast<int>(parallelism_config_.tp_rank),
                                           groups.at(group_id).group_name,
-                                          runtime_config_.model_name)};
+                                          runtime_config_.model_name,
+                                          merge_full_specs_)};
             if (use_gdr) {
 #if USING_CUDA
                 const long page_size = sysconf(_SC_PAGESIZE);
@@ -1617,7 +1771,8 @@ private:
                     decode_publication_enabled_ && is_decode_role_ ? peer :
                                                                      static_cast<int>(parallelism_config_.tp_rank),
                     groups.at(group_id).group_name,
-                    runtime_config_.model_name);
+                    runtime_config_.model_name,
+                    merge_full_specs_);
                 registration_tags.push_back(publicationPeerTag(tag, peer));
                 registrations.push_back(std::move(wire_registration));
             }
@@ -1646,10 +1801,11 @@ private:
                                          kv_cache_manager::UriStrVec&       actual_uris,
                                          bool& source_may_be_touched,
                                          bool* transfer_attempted,
-                                         const TransferTask& task) {
-        const auto                           trace_info = makeTransferTraceInfo(blocks);
+                                         const TransferTask& task,
+                                         const RemoteOperationRequestPB* request = nullptr) {
+        const auto                           trace_info = makeTransferTraceInfo(blocks, request);
         RtpLLMRemoteCacheSDKMetricsCollector collector;
-        collector.remote_sdk_block_num               = static_cast<int64_t>(blocks.size());
+        collector.remote_sdk_block_num               = static_cast<int64_t>(uris.size());
         const auto                             start = Clock::now();
         block_tree_cache_detail::ScopeRollback report([&] {
             collector.remote_sdk_cost_time_us = elapsedTimeUs(start);
@@ -1705,7 +1861,8 @@ private:
                                        RemoteOperationResponsePB&         response,
                                        bool& source_may_be_touched,
                                        bool* transfer_attempted,
-                                       const TransferTask& task) {
+                                       const TransferTask& task,
+                                       const RemoteOperationRequestPB* request = nullptr) {
         if (operation != REMOTE_OPERATION_READ && operation != REMOTE_OPERATION_WRITE) {
             RTP_LLM_LOG_WARNING("KVCM transfer has invalid operation [%d]", operation);
             return TransferResult::FAILED;
@@ -1716,7 +1873,7 @@ private:
             // request unchanged; the SDK selects normal or gather/scatter mode.
             const auto result =
                 executeClientTransfer(operation, registration_tags_.front(), blocks, uris, buffers, actual_uris,
-                                      source_may_be_touched, transfer_attempted, task);
+                                      source_may_be_touched, transfer_attempted, task, request);
             if (result != TransferResult::SUCCESS) {
                 return result;
             }
@@ -1970,15 +2127,30 @@ private:
     }
 
     std::shared_ptr<kv_cache_manager::TransferTraceInfo>
-    makeTransferTraceInfo(const std::vector<int32_t>& block_ids) const {
+    makeTransferTraceInfo(const std::vector<int32_t>& block_ids,
+                           const RemoteOperationRequestPB* request = nullptr) const {
         if (!sdk_check_enabled_) {
             return nullptr;
         }
         auto trace_info        = std::make_shared<kv_cache_manager::TransferTraceInfo>();
         trace_info->need_print = true;
-        trace_info->block_ids.reserve(block_ids.size());
-        for (const auto block_id : block_ids) {
-            trace_info->block_ids.push_back(std::to_string(block_id));
+        if (request && !request->uri_block_counts().empty()) {
+            trace_info->block_ids.reserve(request->uris_size());
+            size_t begin = 0;
+            for (const auto count : request->uri_block_counts()) {
+                std::string ids;
+                for (size_t member = 0; member < count; ++member) {
+                    if (member)
+                        ids += ',';
+                    ids += std::to_string(block_ids[begin++]);
+                }
+                trace_info->block_ids.push_back(std::move(ids));
+            }
+        } else {
+            trace_info->block_ids.reserve(block_ids.size());
+            for (const auto block_id : block_ids) {
+                trace_info->block_ids.push_back(std::to_string(block_id));
+            }
         }
         return trace_info;
     }
@@ -2020,6 +2192,7 @@ private:
     const bool            sdk_check_enabled_;
     const CacheTopology*  topology_ = nullptr;
     bool                  has_swa_ = false;
+    bool                  merge_full_specs_ = false;
     const int32_t         default_query_type_ = static_cast<int32_t>(kv_cache_manager::QueryType::QT_PREFIX_MATCH);
 };
 

@@ -329,7 +329,6 @@ std::vector<FunctionResponsePB> transferCompletedDecode(const std::vector<Functi
     std::vector<std::shared_ptr<Batch>> batches;
     batches.reserve(requests.size());
     std::vector<FunctionResponsePB> responses(requests.size());
-    CPSlotMapper mapper(0, target_physical_shards_, cache_config_.seq_size_per_block);
     // Prebuild error payloads and all source descriptors before the first SDK
     // operation. A failure after any peer begins is conservatively unknown.
     const auto unknown = completion_unknown_failure_;
@@ -337,34 +336,22 @@ std::vector<FunctionResponsePB> transferCompletedDecode(const std::vector<Functi
     for (size_t peer = 0; peer < requests.size(); ++peer) {
         const auto& remote = requests[peer].remote_request();
         (void)responses[peer].mutable_remote_response();
-        RTP_LLM_CHECK(remote.block_ids_size() == remote.group_tags_size()
-                      && remote.block_ids_size() == remote.uris_size());
         auto operation = std::make_shared<Batch>();
         operation->client = client_wrapper_;
         for (const auto& pool : pools_by_tag_) operation->pools.push_back(pool.second);
         auto& batch = *operation;
-        for (int i = 0; i < remote.block_ids_size(); ++i) {
-            const auto& tag = remote.group_tags(i);
-            const int block = remote.block_ids(i);
-            RTP_LLM_CHECK_WITH_INFO(remote.uris(i).compare(0, 7, "pace://") == 0,
+        batch.uris.assign(remote.uris().begin(), remote.uris().end());
+        for (const auto& uri : batch.uris) {
+            RTP_LLM_CHECK_WITH_INFO(uri.compare(0, 7, "pace://") == 0,
                                     "Decode DRAM publication received a non-PACE destination");
-            batch.tags.push_back(publicationPeerTag(tag, peer));
-            batch.blocks.push_back(block);
-            batch.uris.push_back(remote.uris(i));
-            batch.buffers.emplace_back();
-            size_t bytes = 0;
-            for (int layer : cache_config_.layerIdsForGroup(tag)) {
-                const auto parts = mapper.sliceBlockForPeer(
-                    cache_config_, tag, file_resolver_(layer, tag, block), peer);
-                for (const auto& part : parts) {
-                    RTP_LLM_CHECK(part.is_cuda && part.addr && part.size_bytes);
-                    batch.buffers.back().iovs.push_back(
-                        {kv_cache_manager::MemoryType::GPU, part.addr, part.size_bytes, false});
-                    RTP_LLM_CHECK(part.size_bytes <= std::numeric_limits<size_t>::max() - bytes);
-                    bytes += part.size_bytes;
-                }
-            }
-            RTP_LLM_CHECK_WITH_INFO(bytes == publicationWireBytes(tag), "Decode wire size mismatch tag=%s", tag.c_str());
+        }
+        batch.tags.assign(remote.group_tags().begin(), remote.group_tags().end());
+        batch.blocks.assign(remote.block_ids().begin(), remote.block_ids().end());
+        RTP_LLM_CHECK_WITH_INFO(
+            prepareBlockBuffers(remote, batch.tags, batch.blocks, batch.buffers, static_cast<int>(peer)),
+            "Decode publication received invalid block buffers");
+        for (auto& tag : batch.tags) {
+            tag = publicationPeerTag(tag, peer);
         }
         batches.push_back(std::move(operation));
     }
@@ -386,7 +373,7 @@ std::vector<FunctionResponsePB> transferCompletedDecode(const std::vector<Functi
             });
             const auto result = executeTagTransfers(
                 REMOTE_OPERATION_WRITE, batch.tags, batch.blocks, batch.uris, batch.buffers, response,
-                source_may_be_touched, &transfer_attempted, task);
+                source_may_be_touched, &transfer_attempted, task, &requests[peer].remote_request());
             if (result == TransferResult::TIMEOUT) {
                 std::rethrow_exception(timeout);
             }
