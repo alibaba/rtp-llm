@@ -57,3 +57,15 @@ HTTP 为 START_PORT，gRPC 为 START_PORT+1；平台探针访问 HTTP `/health`�
 `/metrics` 是 Prometheus 导出；目标部署必须配置实际采集链路。它不等于已经接入 KMonitor，原生指标命名也不代表采集器已经抓到数据。KMonitor SDK/平台采集接线需另行验证，不能以端点存在代替验收。
 
 首次平台验收应检查实际镜像与生效配置、P/D/V 注册地址、真实请求、TERM 与故障重拉、指标采集。本批不部署到 Whale。
+
+## KVCM 开关
+
+两套部署使用相同镜像、模型、输入和计算配置，只在 Whale 中调整下列原生配置；本地运行直接配置 Case，不另外维护完整部署配置副本。
+
+| Role | 开启 | 关闭 |
+| --- | --- | --- |
+| Master（全部主备） | `FLEXLB_CONFIG.cacheMatching.type=KVCM`，配置 `MODEL_SERVICE_CONFIG.kvcm` 的服务地址、端口和 namespace | `cacheMatching.type=LOCAL_SYNC` |
+| P/D | `KV_CACHE_EVENT_PUBLISHER_TYPE=kvcm`，配置原生 `RECO_*` 发现参数及共享 `KV_CACHE_EVENT_INSTANCE_ID` | `KV_CACHE_EVENT_PUBLISHER_TYPE=none`、`ENABLE_REMOTE_CACHE=false` |
+| Frontend、ViT | 保持原有链路和配置 | 相同 |
+
+这里只启用缓存元信息查询和上报，未实现远端 KV 数据加载，开启组的 `ENABLE_REMOTE_CACHE` 也保持 false。Engine 的共享 instance_id 必须等于 Master 查询的 `<namespace>_<cacheKeyBlockSize>`，host 身份必须与 Master 发现结果一致。更改 Master 查询模式需要重启。
