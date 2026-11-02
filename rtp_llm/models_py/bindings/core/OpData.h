@@ -11,6 +11,7 @@
 #include <cstddef>
 #include <optional>
 #include <memory>
+#include <string>
 #include <torch/extension.h>
 #include <torch/python.h>
 #include <ATen/Generator.h>
@@ -39,6 +40,8 @@ struct GptModelInputs {
     };
     std::optional<RecordedLengths> record_lengths;
     int64_t                        record_execution_id = 0;
+    // Owner-only snapshot from RecordedBatch; deliberately not broadcast to TP peers.
+    std::string tensor_capture_context_json;
     // input_lengths holds original input length for requests,
     // shape [decoder_batch_size + context_batch_size], int32
     // sequence_lengths holds current sequence length for incremental decoding requests,

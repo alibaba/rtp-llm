@@ -50,7 +50,7 @@ cc_test(
     srcs = glob([
         "MtpExecutorTest.cc",
     ]),
-    data = [],
+    data = ["//rtp_llm:utils"],
     copts = test_copts,
     deps = [
         "//rtp_llm/models_py/bindings/cuda/kernels:mtp_token_gather",

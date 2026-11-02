@@ -71,6 +71,9 @@ public:
                    MtpIndexerRole            mtp_indexer_role           = MtpIndexerRole::NORMAL);
     ~PyWrappedModel();
 
+    // Delegate all configuration validation to the Python recorder's single loader.
+    static bool tensorCaptureConfigEnabled(const std::string& config_path, const std::string& phase = {});
+
     GptModelOutputs forward(const GptModelInputs& inputs) override;
     GptModelOutputs forwardMicroBatched(const GptModelInputs& inputs);
     void            releaseBuffers() override;
@@ -125,6 +128,17 @@ private:
     std::pair<std::vector<GptModelInputs>, std::vector<TokenSliceInfo>>
          splitInputsIntoMicroBatches(const GptModelInputs& inputs, const MicroBatchPlan& micro_batch_plan);
     void holdInputsHostBuffers(const GptModelInputs& inputs);
+    friend class RecordingEngineTest;
+    static const char* tensorCaptureSkipReason(const GptModelInputs&               inputs,
+                                               const torch_ext::PyAttentionInputs& attention_inputs,
+                                               const ExecProperties&               device_props,
+                                               RoleType                            server_role,
+                                               bool                                graph_warmup,
+                                               bool                                graph_capture);
+    // Caller holds the GIL, including on constructor failure.
+    static void closeTensorCaptureRecorder(py::object& recorder) noexcept;
+    void        noteTensorCaptureSkip(const char* reason);
+    void prepareTensorCaptureContext(const GptModelInputs& inputs, torch_ext::PyAttentionInputs& attention_inputs);
 
     // Member variables (formerly inherited from GptModel)
     const rtp_llm::ExecProperties            device_props_;
@@ -140,6 +154,9 @@ private:
     GraphBase*     graph_runner_{nullptr};
     py::object     py_model_;
     py::object     held_attn_pyobj_;
+    py::object     tensor_capture_recorder_;
+    bool           tensor_capture_error_reported_{false};
+    RoleType       tensor_capture_server_role_{RoleType::PDFUSION};
     bool           enable_cuda_graph_{false};
     bool           is_prefill_cuda_graph_mode_{false};
     bool           use_spec_decoding_{false};
@@ -182,6 +199,7 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
     weights_          = params.weights;
     model_id_         = params.model_id;
     mtp_indexer_role_ = int(device_props_.enable_layer_micro_batch) ? MtpIndexerRole::NORMAL : mtp_indexer_role;
+    tensor_capture_server_role_ = params.parallelism_config.role_type;
     if (mtp_indexer_role != MtpIndexerRole::NORMAL && int(device_props_.enable_layer_micro_batch)) {
         RTP_LLM_LOG_WARNING("MTP indexer share is disabled when layer micro-batching is enabled");
     }
@@ -206,6 +224,34 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
 
     py::gil_scoped_acquire          gil;
     torch_ext::PyModelInitResources init_resources;
+
+    // A failed constructor skips ~PyWrappedModel(); clean up before releasing the GIL.
+    struct ConstructorFailureGuard {
+        PyWrappedModel& model;
+        py::object&     py_instance;
+        bool            armed{true};
+        ~ConstructorFailureGuard() {
+            if (!armed) {
+                return;
+            }
+            PyWrappedModel::closeTensorCaptureRecorder(model.tensor_capture_recorder_);
+            model.held_attn_pyobj_                         = py::object();
+            model.py_model_                                = py::object();
+            model.attention_inputs_.headwise_config        = py::object();
+            model.attention_inputs_.tensor_capture_context = py::object();
+            py_instance                                    = py::object();
+            delete model.graph_runner_;
+            model.graph_runner_ = nullptr;
+        }
+    } failure_guard{*this, py_instance};
+
+    if (!params.profile_debug_logging_config.tensor_capture_config.empty()) {
+        tensor_capture_recorder_ =
+            py::module_::import("rtp_llm.utils.tensor_capture")
+                .attr("TensorCaptureRecorder")(params.profile_debug_logging_config.tensor_capture_config,
+                                               py::arg("tp_rank")    = params.parallelism_config.tp_rank,
+                                               py::arg("world_rank") = params.parallelism_config.world_rank);
+    }
 
     if (params.kv_cache_layer_layout.has_value()) {
         torch_ext::KVCache kv_cache;
@@ -422,6 +468,7 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
     }
 
     RTP_LLM_LOG_INFO("PyWrappedModel initialized done.");
+    failure_guard.armed = false;
 }
 
 }  // namespace rtp_llm

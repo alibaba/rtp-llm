@@ -352,6 +352,9 @@ struct PyAttentionInputs {
 
     // Headwise attention config (Python dict or None).
     py::object headwise_config{py::none()};
+
+    // Attached only to the local eager forward inputs, never cached for CUDA graphs.
+    py::object tensor_capture_context{py::none()};
 };
 
 struct BertEmbeddingInputs {

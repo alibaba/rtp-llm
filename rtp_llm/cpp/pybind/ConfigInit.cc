@@ -561,6 +561,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("ft_alog_conf_path", &ProfilingDebugLoggingConfig::ft_alog_conf_path)
         .def_readwrite("gen_timeline_sync", &ProfilingDebugLoggingConfig::gen_timeline_sync)
         .def_readwrite("torch_cuda_profiler_dir", &ProfilingDebugLoggingConfig::torch_cuda_profiler_dir)
+        .def_readwrite("tensor_capture_config", &ProfilingDebugLoggingConfig::tensor_capture_config)
         .def_readwrite("log_file_backup_count", &ProfilingDebugLoggingConfig::log_file_backup_count)
         .def_readwrite("debug_load_server", &ProfilingDebugLoggingConfig::debug_load_server)
         .def_readwrite("hack_layer_num", &ProfilingDebugLoggingConfig::hack_layer_num)
@@ -581,10 +582,11 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.hack_layer_num,
                                       self.debug_start_fake_process,
                                       self.enable_detail_log,
-                                      self.check_nan);
+                                      self.check_nan,
+                                      self.tensor_capture_config);
             },
             [](py::tuple t) {
-                if (t.size() != 12)
+                if (t.size() != 12 && t.size() != 13)
                     throw std::runtime_error("Invalid state!");
 
                 ProfilingDebugLoggingConfig c;
@@ -601,6 +603,9 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     c.debug_start_fake_process  = t[9].cast<bool>();
                     c.enable_detail_log         = t[10].cast<bool>();
                     c.check_nan                 = t[11].cast<bool>();
+                    if (t.size() == 13) {
+                        c.tensor_capture_config = t[12].cast<std::string>();
+                    }
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("ProfilingDebugLoggingConfig unpickle error: ") + e.what());
                 }

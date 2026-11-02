@@ -20,6 +20,7 @@
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include <c10/core/InferenceMode.h>
 #include <sstream>
+#include <stdexcept>
 #if USING_CUDA
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDACachingAllocator.h>
@@ -1359,6 +1360,12 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
     // profiling state to the worker thread can crash while perf timelines are
     // being recorded.
     spec_bookkeeping_runner_(cuda_graph::graphGetStreamFromPool(true), false) {
+    if (PyWrappedModel::tensorCaptureConfigEnabled(params.profiling_debug_logging_config.tensor_capture_config)
+        || PyWrappedModel::tensorCaptureConfigEnabled(
+            propose_params->getEngineInitParams().profiling_debug_logging_config.tensor_capture_config)) {
+        throw std::runtime_error(
+            "tensor capture is not supported by MtpExecutor; use non-speculative eager prefill or Q=1 decode");
+    }
     data_type_        = params.model_config_.data_type;
     hidden_size_      = params.model_config_.hidden_size * params.model_config_.hc_mult;
     propose_step_     = propose_params->gen_num_per_circle;

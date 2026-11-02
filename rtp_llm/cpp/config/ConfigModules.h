@@ -232,6 +232,7 @@ struct ProfilingDebugLoggingConfig {
     std::string ft_alog_conf_path         = "";
     bool        gen_timeline_sync         = false;
     std::string torch_cuda_profiler_dir   = "";
+    std::string tensor_capture_config     = "";
     int         log_file_backup_count     = 16;
     bool        debug_load_server         = false;
     int         hack_layer_num            = 0;

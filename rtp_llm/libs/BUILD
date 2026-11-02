@@ -224,6 +224,16 @@ filegroup(
 )
 
 filegroup(
+    name = "tensor_capture_replay_test_libs",
+    srcs = [
+        ":libs",
+        ":librtp_compute_ops_so",
+        ":libth_transformer_config_so",
+    ],
+    visibility = ["//tools:__pkg__"],
+)
+
+filegroup(
     name = "whl_package_libs",
     srcs = [],
     data = [

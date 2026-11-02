@@ -183,6 +183,108 @@ int main(int argc, char** argv) {
         assert(!failed.configure(0, 0, {}));
         assert(!failed.submitBatch("{}"));
     }
+    {
+        ExecutionRecorder recorder(std::string(directory) + "/capture-metadata", "capture-session");
+        assert(recorder.configure(4, 2, {}));
+        const std::string       execution_id = "9007199254740993";
+        ExecutionRecorder::Json record{
+            {"schema_version", 1}, {"owner_id", recorder.owner()}, {"exec_id", execution_id}};
+        std::vector<ExecutionRecorder::Json> rows{
+            {{"phase", std::string("prefill")}, {"request_id", std::string("r7")}, {"q_len", 3}, {"kv_len", 5}},
+            {{"phase", std::string("prefill")},
+             {"request_id", std::string("r7")},
+             {"sequence_id", 1},
+             {"q_len", 2},
+             {"kv_len", 0}},
+            {{"phase", std::string("prefill")}, {"is_fake", true}}};
+        std::string snapshot;
+        {
+            RecordedBatch batch(recorder, record, rows);
+            snapshot = batch.tensorCaptureContextJson();
+            const auto context =
+                autil::legacy::AnyCast<ExecutionRecorder::Json>(autil::legacy::json::ParseJson(snapshot));
+            assert(autil::legacy::AnyCast<std::string>(context.at("exec_id")) == execution_id);
+            assert(autil::legacy::AnyCast<std::string>(context.at("session_id")) == "capture-session");
+            assert(autil::legacy::AnyCast<std::string>(context.at("owner_id")) == recorder.owner());
+            assert(autil::legacy::AnyCast<std::string>(context.at("model_role")) == "target");
+            assert(context.count("server_role") == 0);
+            assert(batch.tensorCaptureContextJson("") == snapshot);
+            for (const auto& role : {std::string("PREFILL"), std::string("PDFUSION")}) {
+                auto role_context = autil::legacy::AnyCast<ExecutionRecorder::Json>(
+                    autil::legacy::json::ParseJson(batch.tensorCaptureContextJson(role)));
+                assert(autil::legacy::AnyCast<std::string>(role_context.at("server_role")) == role);
+                assert(autil::legacy::AnyCast<std::string>(role_context.at("model_role")) == "target");
+                role_context.erase("server_role");
+                assert(ExecutionRecorder::toJson(role_context) == snapshot);
+            }
+            for (const auto& field : recorder.identity()) {
+                assert(ExecutionRecorder::toJson(context.at(field.first)) == ExecutionRecorder::toJson(field.second));
+            }
+            const auto requests = autil::legacy::AnyCast<ExecutionRecorder::JsonArray>(context.at("requests"));
+            assert(requests.size() == rows.size());
+            for (size_t i = 0; i < rows.size(); ++i) {
+                assert(ExecutionRecorder::toJson(requests[i]) == ExecutionRecorder::toJson(rows[i]));
+            }
+            // Timing updates and mutations of caller-owned copies cannot change the snapshot.
+            batch.timings[0].ttft_us = 1250;
+            rows[0]["q_len"]         = 99;
+            record["exec_id"]        = std::string("other");
+            assert(batch.tensorCaptureContextJson() == snapshot);
+            for (const auto& role : {std::string("PREFILL"), std::string("PDFUSION")}) {
+                auto role_context = autil::legacy::AnyCast<ExecutionRecorder::Json>(
+                    autil::legacy::json::ParseJson(batch.tensorCaptureContextJson(role)));
+                role_context.erase("server_role");
+                assert(ExecutionRecorder::toJson(role_context) == snapshot);
+            }
+            assert(snapshot.find("ttft_us") == std::string::npos);
+        }
+        recorder.close();
+        assert(snapshot.find(execution_id) != std::string::npos);
+        assert(snapshot.find("ttft_us") == std::string::npos);
+        RecordedBatch empty(recorder, {{"exec_id", std::string("empty")}}, {});
+        const auto    context = autil::legacy::AnyCast<ExecutionRecorder::Json>(
+            autil::legacy::json::ParseJson(empty.tensorCaptureContextJson()));
+        assert(autil::legacy::AnyCast<ExecutionRecorder::JsonArray>(context.at("requests")).empty());
+    }
+    // Every TP=1 DP replica owns its local execution/request namespace. A D
+    // capture does not replace those identities with P-side or frontend IDs.
+    for (int dp_rank = 0; dp_rank < 8; ++dp_rank) {
+        ExecutionRecorder recorder(std::string(directory) + "/decode-dp-" + std::to_string(dp_rank), "decode-session");
+        assert(recorder.configure(dp_rank, dp_rank, {}));
+        const ExecutionRecorder::Json        record{{"exec_id", std::to_string(recorder.nextId())}};
+        const RecordedRequest                request(recorder);
+        std::vector<ExecutionRecorder::Json> rows{{{"phase", std::string("decode")},
+                                                   {"request_id", "r" + std::to_string(request.id())},
+                                                   {"q_len", 1},
+                                                   {"kv_len", 3}},
+                                                  {{"phase", std::string("decode")},
+                                                   {"request_id", "r" + std::to_string(request.id())},
+                                                   {"sequence_id", 1},
+                                                   {"q_len", 1},
+                                                   {"kv_len", 7}}};
+        {
+            RecordedBatch batch(recorder, record, rows);
+            for (const auto& role : {std::string("DECODE"), std::string("PDFUSION")}) {
+                const auto snapshot = batch.tensorCaptureContextJson(role);
+                const auto context =
+                    autil::legacy::AnyCast<ExecutionRecorder::Json>(autil::legacy::json::ParseJson(snapshot));
+                assert(autil::legacy::AnyCast<std::string>(context.at("model_role")) == "target");
+                assert(autil::legacy::AnyCast<std::string>(context.at("server_role")) == role);
+                assert(autil::legacy::AnyCast<std::string>(context.at("owner_id")) == recorder.owner());
+                assert(ExecutionRecorder::toJson(context.at("dp_rank")) == std::to_string(dp_rank));
+                assert(ExecutionRecorder::toJson(context.at("world_rank")) == std::to_string(dp_rank));
+                const auto requests = autil::legacy::AnyCast<ExecutionRecorder::JsonArray>(context.at("requests"));
+                assert(requests.size() == 2);
+                assert(ExecutionRecorder::toJson(requests[0]) == ExecutionRecorder::toJson(rows[0]));
+                assert(ExecutionRecorder::toJson(requests[1]) == ExecutionRecorder::toJson(rows[1]));
+                batch.timings[0].ttft_us = 42;
+                assert(batch.tensorCaptureContextJson(role) == snapshot);
+                assert(snapshot.find("trace_id") == std::string::npos);
+                assert(snapshot.find("client_id") == std::string::npos);
+            }
+        }
+        recorder.close();
+    }
     const std::string special = "中文\n\r\t\"\\" + std::string(1, '\0');
     const auto        encoded = ExecutionRecorder::quote(special);
     assert(encoded.find('\n') == std::string::npos);

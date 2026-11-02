@@ -40,7 +40,7 @@ public:
     // for disabled, already configured, closed or failed recorders; never mutates
     // a published configuration. Initialization failures also increment errors.
     [[nodiscard]] bool configure(int rank, int dp_rank, Json metadata);
-    int64_t nextId() {
+    int64_t            nextId() {
         return next_id_.fetch_add(1);
     }
     Json               identity() const;
@@ -59,23 +59,29 @@ public:
     void close();
 
 private:
-    enum class State { Disabled, Unconfigured, Ready, Failed, Closed };
+    enum class State {
+        Disabled,
+        Unconfigured,
+        Ready,
+        Failed,
+        Closed
+    };
     void run();
     void manifest(bool closed);
     using Task = std::function<std::string()>;
-    std::string                 directory_, session_, owner_, replica_;
-    Json                        metadata_;
-    int                         rank_ = 0, dp_rank_ = 0;
-    size_t                      capacity_, max_total_bytes_, total_bytes_ = 0;
-    std::atomic<State>          state_{State::Disabled};
-    std::atomic<int64_t>        next_id_{1};
-    std::atomic<int64_t>        next_warning_ns_{0};
-    std::atomic<uint64_t>       generated_{0}, submitted_{0}, dropped_{0}, errors_{0};
-    std::mutex                  mutex_;
-    std::condition_variable     ready_;
-    std::deque<Task>            queue_;
-    bool                        stop_ = false;
-    std::thread                 worker_;
+    std::string             directory_, session_, owner_, replica_;
+    Json                    metadata_;
+    int                     rank_ = 0, dp_rank_ = 0;
+    size_t                  capacity_, max_total_bytes_, total_bytes_ = 0;
+    std::atomic<State>      state_{State::Disabled};
+    std::atomic<int64_t>    next_id_{1};
+    std::atomic<int64_t>    next_warning_ns_{0};
+    std::atomic<uint64_t>   generated_{0}, submitted_{0}, dropped_{0}, errors_{0};
+    std::mutex              mutex_;
+    std::condition_variable ready_;
+    std::deque<Task>        queue_;
+    bool                    stop_ = false;
+    std::thread             worker_;
 };
 
 // Filled under the stream update lock; never read by the JSON writer until frozen.
@@ -91,9 +97,11 @@ public:
                   ExecutionRecorder::Json              record,
                   std::vector<ExecutionRecorder::Json> rows);
     ~RecordedBatch() noexcept;
-    RecordedBatch(const RecordedBatch&)                              = delete;
-    RecordedBatch&                   operator=(const RecordedBatch&) = delete;
-    void                            markTimingError() noexcept;
+    RecordedBatch(const RecordedBatch&)            = delete;
+    RecordedBatch& operator=(const RecordedBatch&) = delete;
+    void           markTimingError() noexcept;
+    // Independent immutable metadata for this forward; excludes mutable token timings.
+    std::string                      tensorCaptureContextJson(const std::string& server_role = {}) const;
     std::vector<RecordedTokenTiming> timings;
 
 private:

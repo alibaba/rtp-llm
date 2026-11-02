@@ -2,6 +2,9 @@
 #include <memory>
 #include <limits>
 #include <chrono>
+#include <fstream>
+#include <unistd.h>
+#include <pybind11/embed.h>
 #include "torch/all.h"
 #include "autil/EnvUtil.h"
 #include "gtest/gtest.h"
@@ -38,11 +41,13 @@ using namespace std;
 namespace spec = speculative;
 
 struct MtpExecutorTestConfig {
-    size_t max_seq_len         = 2048;
-    size_t vocab_size          = 4;
-    size_t num_layers          = 1;
-    size_t gen_num_per_cycle   = 4;
-    size_t vocab_size_override = 0;  // 0 means use vocab_size
+    size_t      max_seq_len         = 2048;
+    size_t      vocab_size          = 4;
+    size_t      num_layers          = 1;
+    size_t      gen_num_per_cycle   = 4;
+    size_t      vocab_size_override = 0;  // 0 means use vocab_size
+    std::string tensor_capture_config;
+    std::string draft_tensor_capture_config;
 };
 
 template<typename T>
@@ -430,6 +435,7 @@ public:
 
         EngineInitParams params = createEngineInitParams(config, model_config, runtime_config, kv_cache_config);
         params.sp_config        = sp_config;
+        params.profiling_debug_logging_config.tensor_capture_config = test_config.tensor_capture_config;
         if (test_config.vocab_size_override > 0) {
             params.model_config_.vocab_size = test_config.vocab_size_override;
         }
@@ -438,6 +444,7 @@ public:
         auto mtp_model_params   = std::make_unique<std::vector<std::unique_ptr<EngineInitParams>>>();
         auto mtp_params         = std::make_unique<EngineInitParams>(params);
         mtp_params->py_sp_model = py::none();
+        mtp_params->profiling_debug_logging_config.tensor_capture_config = test_config.draft_tensor_capture_config;
 
         mtp_model_params->push_back(std::move(mtp_params));
 
@@ -515,6 +522,47 @@ public:
         return output;
     }
 };
+
+TEST_F(MtpExecutorTest, testTensorCaptureRejectsEnabledTargetOrDraft) {
+    if (!Py_IsInitialized()) {
+        py::initialize_interpreter();
+    }
+    char directory[] = "/tmp/rtp-mtp-capture-XXXXXX";
+    ASSERT_NE(mkdtemp(directory), nullptr);
+    const std::string path = std::string(directory) + "/capture.json";
+    for (const auto* phases : {"\"prefill\"", "\"decode\"", "\"prefill\",\"decode\""}) {
+        SCOPED_TRACE(phases);
+        {
+            std::ofstream file(path);
+            ASSERT_TRUE(file.good());
+            file << R"({"enabled":true,"authorized_capture":true,"layers":[0],"ops":["indexer.topk"],"phases":[)"
+                 << phases << R"(],"rank_filter":"record_owner","max_calls":1,
+                    "max_bundle_bytes":1024,"max_total_bytes":1024,"max_inflight_bytes":4096})";
+        }
+        for (bool draft : {false, true}) {
+            SCOPED_TRACE(draft);
+            MtpExecutorTestConfig config;
+            (draft ? config.draft_tensor_capture_config : config.tensor_capture_config) = path;
+            try {
+                auto components = createMtpExecutorComponents(config);
+                FAIL() << "enabled tensor capture must be rejected by MTP";
+            } catch (const std::runtime_error& e) {
+                EXPECT_NE(std::string(e.what()).find("tensor capture is not supported by MtpExecutor"),
+                          std::string::npos);
+            }
+        }
+    }
+    {
+        std::ofstream file(path);
+        file << R"({"enabled":false})";
+    }
+    autil::EnvGuard       record_dir("RTP_LLM_RECORD_DIR", "");
+    autil::EnvGuard       record_session("RTP_LLM_RECORD_SESSION", "");
+    MtpExecutorTestConfig disabled;
+    disabled.tensor_capture_config       = path;
+    disabled.draft_tensor_capture_config = path;
+    EXPECT_NO_THROW(createMtpExecutorComponents(disabled));
+}
 
 TEST_F(MtpExecutorTest, testDeterministicDraftSamplerReportsPointMassProposal) {
     auto identity_map = torch::arange(4, torch::TensorOptions().dtype(torch::kInt64).device(torch::kCUDA));
@@ -1329,7 +1377,7 @@ TEST_F(MtpExecutorTest, testCudaSelectedMtpLogprobsAvoidDenseAcceptedRowCopy) {
 TEST_F(MtpExecutorTest, testSingleBatchPrefill) {
     autil::EnvGuard                 snapshot_env("RTP_LLM_CACHE_STATUS_SNAPSHOT", "1");
     std::shared_ptr<KVCacheManager> cache_manager;
-    MtpExecutorTestConfig test_config;
+    MtpExecutorTestConfig           test_config;
     test_config.gen_num_per_cycle = 4;
     bool target_forward_finished  = false;
     bool target_sampler_started   = false;
@@ -1858,9 +1906,9 @@ TEST_F(MtpExecutorTest, testErroredSpecLogitsStreamDoesNotAbortExecutor) {
     test_config.vocab_size_override = vocab_size;
     auto components                 = createMtpExecutorComponents(test_config);
 
-    auto stream_new_tokens        = torch::tensor({{2}}, torch::kInt32);
-    auto stream_hidden_states     = torch::tensor({{0.03f, 0.04f}});
-    auto stream_draft_token_probs = torch::tensor({{0.0f, 0.0f, 0.0f, 1.0f}});
+    auto                 stream_new_tokens        = torch::tensor({{2}}, torch::kInt32);
+    auto                 stream_hidden_states     = torch::tensor({{0.03f, 0.04f}});
+    auto                 stream_draft_token_probs = torch::tensor({{0.0f, 0.0f, 0.0f, 1.0f}});
     StreamSpecUpdateInfo spec_update_info{stream_new_tokens, 1, 3, stream_hidden_states, stream_draft_token_probs};
 
     GenerateStreamPtr stream = createDecodeStream(
@@ -1868,8 +1916,8 @@ TEST_F(MtpExecutorTest, testErroredSpecLogitsStreamDoesNotAbortExecutor) {
     stream->logits_processor_list_.push_back(std::make_shared<IneligibleSpecProcessor>());
     stream->reportError(ErrorCode::INVALID_PARAMS, "grammar accept_token error: parser rejected token");
 
-    auto target_input              = GptModelInputs{};
-    auto target_output             = GptModelOutputs{};
+    auto target_input  = GptModelInputs{};
+    auto target_output = GptModelOutputs{};
     // GLM5's MtpBatchStreamProcessor zero-fills target tokens for streams that
     // have already entered an error state; the executor must still avoid
     // escalating the request-level grammar failure into a process abort.

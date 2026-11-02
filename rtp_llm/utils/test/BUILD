@@ -102,6 +102,25 @@ py_test(
     deps = ["//rtp_llm:utils"],
 )
 
+py_test(
+    name = "tensor_capture_paged_test",
+    size = "small",
+    srcs = ["tensor_capture_paged_test.py"],
+    deps = [
+        "//rtp_llm:torch",
+        "//rtp_llm:utils",
+    ],
+)
+
+py_test(
+    name = "tensor_capture_test",
+    srcs = ["tensor_capture_test.py"],
+    deps = [
+        "//rtp_llm:torch",
+        "//rtp_llm:utils",
+    ],
+)
+
 
 py_test(
     name = "util_test",
@@ -165,8 +184,6 @@ py_test(
     ],
     exec_properties = {'gpu':'H20'}
 )
-
-load("//bazel:arch_select.bzl", "requirement")
 
 requirement([
     "grpcio",

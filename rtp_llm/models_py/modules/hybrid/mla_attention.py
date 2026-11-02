@@ -8,7 +8,10 @@ from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce
 from rtp_llm.models_py.modules import RMSNorm
 from rtp_llm.models_py.modules.factory import LinearFactory
 from rtp_llm.models_py.modules.factory.attention.attn_factory import MlaImplBase
-from rtp_llm.models_py.modules.hybrid.indexer import Indexer
+from rtp_llm.models_py.modules.hybrid.indexer import (
+    Indexer,
+    _note_indexer_capture_skip,
+)
 from rtp_llm.ops import AttentionConfigs, HWKernelConfig, ParallelismConfig
 from rtp_llm.ops.compute_ops import LayerKVCache
 from rtp_llm.utils.model_weight import W
@@ -181,15 +184,26 @@ class MlaAttention(nn.Module):
     ) -> Optional[torch.Tensor]:
         if self.reuse_topk_indices or force_reuse_topk_indices:
             if not fmha_impl.is_sparse():
+                _note_indexer_capture_skip(
+                    getattr(fmha_impl, "attn_inputs", None),
+                    "dense_fast_path",
+                    self.layer_idx,
+                )
                 return None
             if prev_topk_indices is None:
                 raise RuntimeError(
                     f"DSA shared layer {self.layer_idx} needs previous top-k "
                     "indices, but none were provided"
                 )
+            _note_indexer_capture_skip(
+                getattr(fmha_impl, "attn_inputs", None), "reused", self.layer_idx
+            )
             return prev_topk_indices
 
         if self.indexer is None:
+            _note_indexer_capture_skip(
+                getattr(fmha_impl, "attn_inputs", None), "no_indexer", self.layer_idx
+            )
             return None
         q_for_indexer = q_c if self.q_lora_rank > 0 else q_view
         return self.indexer(
