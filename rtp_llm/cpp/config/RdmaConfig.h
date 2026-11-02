@@ -15,6 +15,9 @@ struct RdmaConfig {
     int64_t read_timeout_ms = 3000;
     // Parallel RC QPs used to stripe one descriptor read.
     uint32_t qp_count = 8;
+    // Independent read providers per LLM worker. Each provider is borrowed by at
+    // most one concurrent read; waiting and reading share one timeout window.
+    uint32_t read_provider_count = 4;
     // Reclaim exported slots that were not released.
     int64_t slot_gc_timeout_ms = 60 * 1000;
     // Larger outputs are split across slots.

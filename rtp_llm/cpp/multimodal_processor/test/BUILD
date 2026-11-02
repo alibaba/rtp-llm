@@ -162,3 +162,21 @@ cc_test(
     exec_properties = {"gpu": "L20_CU13"},
     tags = ["L20_CU13"],
 )
+
+# CPU tensors and controlled provider gates validate pool ownership and deadlines.
+cc_test(
+    name = "mm_rdma_provider_pool_test",
+    srcs = ["MMRdmaProviderPoolTest.cc"],
+    copts = test_copts,
+    env = {"GPU_COUNT": "0"},
+    deps = torch_deps() + cuda13_torch_link_deps + [
+        "//rtp_llm/cpp/multimodal_processor/transport/rdma:mm_rdma_reader",
+        "//rtp_llm/cpp/rdma_transport",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ],
+    timeout = "short",
+    # The CUDA torch shared libraries still need the driver to load.
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
+)

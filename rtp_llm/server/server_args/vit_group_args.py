@@ -342,6 +342,14 @@ def init_vit_group_args(parser, vit_config):
         help="LLM 侧每个 ViT endpoint 的并行 RDMA QP 数，必须为正整数",
     )
     vit_group.add_argument(
+        "--mm_rdma_read_provider_count",
+        env_name="MM_RDMA_READ_PROVIDER_COUNT",
+        bind_to=(rdma_config, "read_provider_count"),
+        type=_positive_int,
+        default=4,
+        help="LLM 侧独立 RDMA READ provider 数量；每个 provider 同时处理一个读取，等待与读取共享超时预算。必须为正整数",
+    )
+    vit_group.add_argument(
         "--mm_rdma_release_timeout_ms",
         env_name="MM_RDMA_RELEASE_TIMEOUT_MS",
         bind_to=(control_config, "release_timeout_ms"),

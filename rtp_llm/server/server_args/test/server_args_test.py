@@ -16,6 +16,36 @@ from rtp_llm.utils import backend_registry
 from rtp_llm.utils.backend_registry import register_backend_hook
 
 
+class MMRdmaProviderArgumentsTest(TestCase):
+    def parse_config(self, args, env):
+        from rtp_llm.config.py_config_modules import PyEnvConfigs
+        from rtp_llm.server.server_args.server_args import EnvArgumentParser
+        from rtp_llm.server.server_args.vit_group_args import init_vit_group_args
+
+        configs = PyEnvConfigs()
+        parser = EnvArgumentParser()
+        parser.set_root_config(configs)
+        init_vit_group_args(parser, configs.vit_config)
+        with patch.dict(os.environ, env, clear=True):
+            parser.parse_args(args)
+        return configs.vit_config.output_transport.rdma
+
+    def test_default_environment_and_cli_provider_count(self):
+        self.assertEqual(self.parse_config([], {}).read_provider_count, 4)
+        env = {"MM_RDMA_READ_PROVIDER_COUNT": "2"}
+        self.assertEqual(self.parse_config([], env).read_provider_count, 2)
+        config = self.parse_config(["--mm_rdma_read_provider_count", "1"], env)
+        self.assertEqual(pickle.loads(pickle.dumps(config)).read_provider_count, 1)
+
+    def test_provider_count_must_be_positive(self):
+        for value in ("0", "-1", "invalid"):
+            with self.subTest(value=value):
+                with self.assertRaises(SystemExit):
+                    self.parse_config(["--mm_rdma_read_provider_count", value], {})
+                with self.assertRaises(SystemExit):
+                    self.parse_config([], {"MM_RDMA_READ_PROVIDER_COUNT": value})
+
+
 class CustomAllReduceArgumentsTest(TestCase):
     def test_explicit_cli_value_is_preserved_for_python_collectives(self):
         from rtp_llm.server.server_args import server_args
@@ -383,7 +413,11 @@ class CacheConfigArgumentsTest(TestCase):
         cases = (
             ([], {}, 20000),
             ([], {"KVCM_TASK_TIMEOUT_MS": "23000"}, 23000),
-            (["--kvcm_task_timeout_ms", "24000"], {"KVCM_TASK_TIMEOUT_MS": "23000"}, 24000),
+            (
+                ["--kvcm_task_timeout_ms", "24000"],
+                {"KVCM_TASK_TIMEOUT_MS": "23000"},
+                24000,
+            ),
         )
         for args, env, expected in cases:
             with self.subTest(args=args, env=env):
