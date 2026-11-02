@@ -28,14 +28,13 @@ final class VitService extends MultimodalRpcServiceGrpc.MultimodalRpcServiceImpl
     private List<VitGeometry.Image> compute(MultimodalInputsPB input, Context context) throws Exception {
         long started = System.nanoTime();
         metrics.events.increment("py_rtp_vit_qps");
-        List<VitCache.Claim> claims;
-        try { claims=submit(input); }
-        catch (RuntimeException error) { metrics.events.increment("py_rtp_vit_error_qps"); throw error; }
+        List<VitCache.Claim> claims=List.of();
+        try {
+        claims=submit(input);
         metrics.events.observe("py_rtp_vit_image_count", claims.size());
         long budget=TimeUnit.MILLISECONDS.toNanos(input.getTimeoutMs()>0?input.getTimeoutMs():config.timeoutMs());
         if(context.getDeadline()!=null) budget=Math.min(budget,context.getDeadline().timeRemaining(TimeUnit.NANOSECONDS));
         long end=System.nanoTime()+Math.max(0,budget);
-        try {
         var result=new ArrayList<VitGeometry.Image>();
         for(var claim:claims) {
             while(true) {
@@ -49,12 +48,12 @@ final class VitService extends MultimodalRpcServiceGrpc.MultimodalRpcServiceImpl
         long rows=result.stream().mapToLong(VitGeometry.Image::rows).sum();
         if(rows>1048576) throw Status.RESOURCE_EXHAUSTED.withDescription("Request image output exceeds row limit").asRuntimeException();
         metrics.events.observe("py_rtp_vit_embedding_length", rows);
-        metrics.events.observe("py_rtp_vit_embedding_rt", (System.nanoTime() - started) / 1e6);
         metrics.events.increment("py_rtp_vit_success_qps");
         return result;
         } catch (Exception error) { metrics.events.increment("py_rtp_vit_error_qps"); throw error; }
         finally {
             claims.forEach(VitCache::release);
+            metrics.events.observe("py_rtp_vit_request_rt",(System.nanoTime()-started)/1e6);
         }
     }
     private <T> void reply(StreamObserver<T> response, Callable<T> operation) {
@@ -130,7 +129,7 @@ final class VitService extends MultimodalRpcServiceGrpc.MultimodalRpcServiceImpl
         if(result.build().getSerializedSize()>4*1024*1024) { response.onError(Status.RESOURCE_EXHAUSTED.withDescription("V cache snapshot exceeds RPC limit").asRuntimeException());return; }
         response.onNext(result.build());response.onCompleted();
     }
-    String metrics() { return metrics.scrape(scheduler,cache); }
+    String metrics() { return metrics.scrape(scheduler,cache,preparation); }
     void checkHealthy() { scheduler.checkHealthy(); }
     @Override public void close() { closed=true;scheduler.close();preparation.close();cache.close();replies.shutdownNow(); }
 }

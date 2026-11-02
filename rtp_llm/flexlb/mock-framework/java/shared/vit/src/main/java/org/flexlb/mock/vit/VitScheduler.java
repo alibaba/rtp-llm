@@ -78,8 +78,13 @@ final class VitScheduler implements AutoCloseable {
                 metrics.events.observe("mock_vit_theoretical_forward_rt",sample.planned().toNanos()/1e6);
                 synchronized(this) { running=0; }
                 Throwable error=result.state()==SimulatedCompute.State.COMPLETED?null:Status.UNAVAILABLE.withDescription("V forward cancelled").asRuntimeException();
-                for(var job:batch) complete(job,error!=null?error:System.nanoTime()>=job.deadline
-                    ?Status.DEADLINE_EXCEEDED.withDescription("V media computation expired").asRuntimeException():null);
+                long completed=System.nanoTime();
+                for(var job:batch) {
+                    Throwable failure=error!=null?error:completed>=job.deadline
+                        ?Status.DEADLINE_EXCEEDED.withDescription("V media computation expired").asRuntimeException():null;
+                    if(failure==null) metrics.events.observe("py_rtp_vit_embedding_rt",(completed-job.enqueued)/1e6);
+                    complete(job,failure);
+                }
             }
         } catch(InterruptedException error) { Thread.currentThread().interrupt(); fail(batch,Status.UNAVAILABLE.withCause(error).asRuntimeException()); }
         catch(Exception error) { fail(batch,new IllegalStateException("V forward failed",error)); }

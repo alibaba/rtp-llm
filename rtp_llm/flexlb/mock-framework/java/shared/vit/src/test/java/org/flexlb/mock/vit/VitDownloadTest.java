@@ -43,6 +43,13 @@ class VitDownloadTest {
         while(!condition.getAsBoolean()) { assertTrue(System.nanoTime()<end,"Timed out waiting for V state"); Thread.sleep(5); }
     }
 
+    private static String metrics(VitNode node) throws Exception {
+        try(var client=java.net.http.HttpClient.newHttpClient()) {
+            return client.send(java.net.http.HttpRequest.newBuilder(URI.create((String)node.endpoints().get("metrics"))).GET().build(),
+                java.net.http.HttpResponse.BodyHandlers.ofString()).body();
+        }
+    }
+
     @Test void blockedDownloadDoesNotBlockForwardAndNativeAdmissionCountsUniqueMedia() throws Exception {
         var firstEntered=new CountDownLatch(1);var secondEntered=new CountDownLatch(1);
         var releaseFirst=new CountDownLatch(1);var releaseSecond=new CountDownLatch(1);
@@ -70,6 +77,9 @@ class VitDownloadTest {
                     rpc.asyncSubmitEmbedding(input(server,"/queued"));
                     assertEquals(3,rpc.getWorkerStatus(StatusVersionPB.getDefaultInstance()).getMmInflightInputs().getValue());
                     assertFalse(hits.containsKey("/queued"));
+                    String snapshot=metrics(node);
+                    assertEquals(3,VitTest.sample(snapshot,"py_rtp_vit_preprocess_queue_size"));
+                    assertEquals(0,VitTest.sample(snapshot,"py_rtp_vit_embedding_queue_size"));
                     assertEquals(Status.Code.RESOURCE_EXHAUSTED,assertThrows(StatusRuntimeException.class,
                         ()->rpc.asyncSubmitEmbedding(input(server,"/overflow"))).getStatus().getCode());
                     releaseSecond.countDown();
@@ -141,6 +151,12 @@ class VitDownloadTest {
                     var urlOnly=input(server,"/good").toBuilder();
                     urlOnly.setMultimodalInputs(0,urlOnly.getMultimodalInputs(0).toBuilder().clearMmPreprocessConfig());
                     assertEquals(5,rpc.withDeadlineAfter(3,TimeUnit.SECONDS).remoteMultimodalEmbedding(urlOnly.build()).getMultimodalEmbedding().getShape(0));
+                    rpc.withDeadlineAfter(3,TimeUnit.SECONDS).remoteMultimodalEmbedding(urlOnly.build()); // Cache hit is still a request, not a Forward.
+                    String snapshot=metrics(node);
+                    assertEquals(6,VitTest.sample(snapshot,"py_rtp_vit_request_rt_count"));
+                    assertEquals(1,VitTest.sample(snapshot,"py_rtp_vit_embedding_rt_count"));
+                    assertEquals(5,VitTest.sample(snapshot,"py_rtp_vit_download_rt_count"));
+                    assertEquals(0,VitTest.sample(snapshot,"py_rtp_vit_preprocess_queue_size"));
                 } finally { channel.shutdownNow().awaitTermination(2,TimeUnit.SECONDS); }
             } finally { stalled.countDown();server.stop(0); }
         }

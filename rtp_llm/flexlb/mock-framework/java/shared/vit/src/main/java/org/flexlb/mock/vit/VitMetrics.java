@@ -15,8 +15,9 @@ final class VitMetrics {
                 "py_rtp_vit_embedding_cache_inflight_qps", "py_rtp_vit_embedding_cache_eviction_qps",
                 "py_rtp_vit_embedding_overload_qps")) events.observe(name, 0);
     }
-    String scrape(VitScheduler scheduler, VitCache cache) {
+    String scrape(VitScheduler scheduler, VitCache cache, VitPreparation preparation) {
         var state = new TreeMap<>(scheduler.snapshot()); state.putAll(cache.snapshot());
+        state.put("py_rtp_vit_preprocess_queue_size",(double)preparation.preparing());
         var gauges = new Collector() {
             @Override public List<MetricFamilySamples> collect() {
                 var result = new ArrayList<MetricFamilySamples>();

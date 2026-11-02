@@ -62,7 +62,7 @@ final class VitPreparation implements AutoCloseable {
         private final VitImageSource source=new VitImageSource(config,metrics,client);
         private Thread runner;
         private VitScheduler.Work work;
-        private boolean cancelled,finished;
+        private boolean cancelled,finished,prepared;
 
         Task(VitCache.Claim claim,MultimodalInputPB media,long deadline) { this.claim=claim; this.media=media; this.deadline=deadline; }
         @Override public void run() {
@@ -71,7 +71,7 @@ final class VitPreparation implements AutoCloseable {
             try {
                 check();
                 var image=source.prepare(media,deadline);
-                synchronized(this) { check(); work=scheduler.submit(image,deadline); }
+                synchronized(this) { check(); prepared=true; work=scheduler.submit(image,deadline); }
                 result=work.result().get();
             } catch(InterruptedException error) {
                 Thread.currentThread().interrupt(); failure=Status.CANCELLED.withDescription("V preparation interrupted").asRuntimeException();
@@ -101,6 +101,9 @@ final class VitPreparation implements AutoCloseable {
     }
 
     int inflight() { return tasks.size(); }
+    int preparing() {
+        return (int)tasks.stream().filter(task->{ synchronized(task) { return !task.finished && !task.prepared; } }).count();
+    }
     @Override public void close() {
         synchronized(this) { closed=true; }
         for(var task:tasks) task.cancel();
