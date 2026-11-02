@@ -127,10 +127,47 @@ void IBlockPool::freezeBlock(BlockIdxType block) noexcept {
     std::lock_guard<std::mutex> lock(mutex_);
     checkInitializedNoLock();
     checkAllocatedNoLock(block);
-    if (treeRefCountNoLock(block, BlockTreeRefType::FROZEN) != 0) {
-        return;
+    // Each transfer task holds its own FROZEN reference. Overlapping tasks
+    // (e.g. an eviction copy and a remote write) each add one hold; the block
+    // stays frozen until every holder has confirmed its I/O has stopped.
+    const size_t frozen_index = treeRefTypeIndex(BlockTreeRefType::FROZEN);
+    incTreeRefNoLock(block, frozen_index);
+    if (config_->pool_type == BlockPoolType::DEVICE) {
+        const size_t frozen_blocks = tree_referenced_block_counts_[frozen_index];
+        const size_t total_blocks  = totalBlocksNumNoLock();
+        if (frozen_blocks * 10 > total_blocks * 3) {
+            RTP_LLM_LOG_ERROR("device pool [%s] frozen blocks exceed 30%%: frozen=%zu total=%zu",
+                              config_->pool_name.c_str(),
+                              frozen_blocks,
+                              total_blocks);
+            std::abort();
+        }
     }
-    incTreeRefNoLock(block, treeRefTypeIndex(BlockTreeRefType::FROZEN));
+}
+
+void IBlockPool::unfreezeBlock(BlockIdxType block) {
+    const auto frozen_index = treeRefTypeIndex(BlockTreeRefType::FROZEN);
+    mutateAllocatedBlocks(
+        BlockIdList{block},
+        [this, frozen_index](BlockIdxType block) {
+            RTP_LLM_CHECK(tree_refcounts_by_type_[frozen_index][block] > 0);
+        },
+        [this, frozen_index](BlockIdxType block) {
+            const bool was_active    = isActiveNoLock(block);
+            const bool was_available = isAvailableNoLock(block);
+
+            uint32_t& typed_refcount = tree_refcounts_by_type_[frozen_index][block];
+            --typed_refcount;
+            if (typed_refcount == 0) {
+                --tree_referenced_block_counts_[frozen_index];
+            }
+            --tree_refcounts_[block];
+            if (tree_refcounts_[block] == 0 && onLastTreeRefNoLock(block)) {
+                freeAllocatedBlockNoLock(block);
+            }
+            updateActiveBlocksNumNoLock(block, was_active);
+            updateAvailableBlocksNumNoLock(block, was_available);
+        });
 }
 
 bool IBlockPool::isFrozen(BlockIdxType block) const {

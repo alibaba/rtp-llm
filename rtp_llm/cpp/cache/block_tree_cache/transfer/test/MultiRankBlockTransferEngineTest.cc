@@ -1205,6 +1205,43 @@ TEST_F(MultiRankBlockTransferEngineTest, TransferAndKvcmRecoveryWithSameIdStayIn
     EXPECT_TRUE(dispatcher.multi_rank_engine_->kvcm_cleanup_->ids.empty());
 }
 
+TEST_F(MultiRankBlockTransferEngineTest, OverlappingTransferAndKvcmFrozenTasksReleaseIndependently) {
+    auto state = std::make_shared<MultiRankBlockTransferRpcState>();
+    ASSERT_TRUE(state->registry.start("eviction"));
+    ASSERT_TRUE(state->registry.finish("eviction"));
+    ASSERT_TRUE(state->kvcm_registry.start("write"));
+    std::vector<std::unique_ptr<MultiRankBlockTransferRpcServer>> servers;
+    auto manager = makeBroadcastManager({{true, MemoryOperationResponsePB::OK, grpc::Status::OK, state}}, servers);
+    ASSERT_NE(manager, nullptr);
+    auto cache = makeBroadcastCache(manager);
+    auto& dispatcher = *cache->transfer_dispatcher_;
+    dispatcher.stopFrozenPolling();
+
+    // An eviction copy and a remote write overlap on the same device block.
+    // Each UNKNOWN completion holds its own frozen reference; releasing the
+    // finished task must not unfreeze the block while the other I/O is unknown.
+    auto pool = makeStructuralDevicePool(0);
+    const BlockIdxType block = 1;
+    dispatcher.retainFrozenTask(makeRecoverableFrozenTask("eviction", pool, block));
+    dispatcher.retainFrozenTask(makeRecoverableFrozenTask("write", pool, block, FrozenTask::QueryKind::KVCM));
+    EXPECT_TRUE(pool->isFrozen(block));
+    EXPECT_EQ(pool->treeRefCount(block), 2u);
+
+    dispatcher.pollFrozenTasks();
+    EXPECT_TRUE(pool->isFrozen(block));
+    EXPECT_TRUE(pool->isAllocated(block));
+    EXPECT_EQ(pool->treeRefCount(block), 1u);
+    EXPECT_EQ(dispatcher.frozen_tasks_.size(), 1u);
+    EXPECT_EQ(dispatcher.multi_rank_engine_->cleanup_->ids.count("eviction"), 1u);
+    EXPECT_TRUE(dispatcher.multi_rank_engine_->kvcm_cleanup_->ids.empty());
+
+    ASSERT_TRUE(state->kvcm_registry.finish("write"));
+    dispatcher.pollFrozenTasks();
+    EXPECT_FALSE(pool->isAllocated(block));
+    EXPECT_TRUE(dispatcher.frozen_tasks_.empty());
+    EXPECT_EQ(dispatcher.multi_rank_engine_->kvcm_cleanup_->ids.count("write"), 1u);
+}
+
 TEST_F(MultiRankBlockTransferEngineTest, FinishedKVCMOperationsAreForgottenWithRetry) {
     auto first = std::make_shared<MultiRankBlockTransferRpcState>();
     auto second = std::make_shared<MultiRankBlockTransferRpcState>();
