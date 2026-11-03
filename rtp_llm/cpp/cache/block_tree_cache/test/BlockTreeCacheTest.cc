@@ -842,7 +842,6 @@ TEST(BlockTreeCacheMetricsTest, FrozenSnapshotsTrackReferencesAcrossAllTiers) {
         auto block = pool->malloc();
         ASSERT_TRUE(block.has_value());
         pool->incTreeRef(*block, BlockTreeRefType::STORE);
-        // Two overlapping holders: distinct-block metrics must still count one.
         pool->freezeBlock(*block);
         pool->freezeBlock(*block);
         pool->decTreeRef(*block, BlockTreeRefType::STORE);
