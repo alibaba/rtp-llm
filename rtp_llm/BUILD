@@ -283,12 +283,17 @@ py_library(
     }) + arch_dep,
 )
 
-py_library(
-    name = "models",
+filegroup(
+    name = "model_definition_files",
     srcs = glob([
         "models/*.py",
         "models/**/*.py",
     ], exclude=["models/test/*.py"]),
+)
+
+py_library(
+    name = "models",
+    srcs = [":model_definition_files"],
     deps = [
         ":sentencepiece",
         ":sentence-transformers",
@@ -560,7 +565,12 @@ py_library(
 
 py_library(
     name = "rtp_llm_frontend_lib",
+    # ModelFactory imports the registered model class to read its configuration.
+    # Share the Python sources without pulling GPU kernels into the CPU wheel.
+    srcs = [":model_definition_files"],
     deps = [
+        ":async_model",
+        "//rtp_llm/model_loader:loader",
         ":utils",
         ":eplb",
         ":ops",
