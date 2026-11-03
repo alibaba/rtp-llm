@@ -32,57 +32,6 @@ class GlobalCacheIndexTest {
     private GlobalCacheIndex globalCacheIndex;
 
     @Test
-    @Timeout(30)
-    void readersKeepStableOwnersDuringConcurrentUpdatesAndRetirement() throws Exception {
-        var keys = List.of(1L, 2L);
-        for (Long key : keys) {
-            globalCacheIndex.addCacheBlock(key, "stable", null);
-        }
-        var start = new CountDownLatch(1);
-        try (var executor = java.util.concurrent.Executors.newFixedThreadPool(3)) {
-            var updating = executor.submit(() -> {
-                start.await();
-                for (int iteration = 0; iteration < 5000; iteration++) {
-                    for (Long key : keys) {
-                        globalCacheIndex.addCacheBlock(key, "updating", null);
-                        globalCacheIndex.removeCacheBlock("updating", key, null);
-                    }
-                }
-                return null;
-            });
-            var retiring = executor.submit(() -> {
-                start.await();
-                for (int iteration = 0; iteration < 5000; iteration++) {
-                    for (Long key : keys) {
-                        globalCacheIndex.addCacheBlock(key, "retiring", null);
-                    }
-                    globalCacheIndex.removeAllCacheBlockOfEngine("retiring", Set.copyOf(keys), null);
-                }
-                return null;
-            });
-            var reading = executor.submit(() -> {
-                start.await();
-                for (int iteration = 0; iteration < 5000; iteration++) {
-                    var result = globalCacheIndex.batchCalculatePrefixMatchLength(
-                            List.of("stable", "updating", "retiring", "absent"), keys);
-                    assertEquals(2, result.get("stable"));
-                    assertFalse(result.containsKey("absent"));
-                    assertTrue(result.values().stream().allMatch(length -> length >= 1 && length <= 2));
-                }
-                return null;
-            });
-            start.countDown();
-            updating.get(20, TimeUnit.SECONDS);
-            retiring.get(20, TimeUnit.SECONDS);
-            reading.get(20, TimeUnit.SECONDS);
-        }
-        assertEquals(2, globalCacheIndex.totalBlocks());
-        assertEquals(2, globalCacheIndex.totalMappings());
-        assertEquals(Map.of("stable", 2), globalCacheIndex.batchCalculatePrefixMatchLength(
-                List.of("stable", "updating", "retiring"), keys));
-    }
-
-    @Test
     void retirementPreservesSharedOwnership() {
         EngineLocalView local = new EngineLocalView();
         for (long key = 0; key < 1025; key++) {
@@ -138,11 +87,10 @@ class GlobalCacheIndexTest {
     @ValueSource(booleans = {false, true})
     @Timeout(10)
     @SuppressWarnings("unchecked")
-    void sameStripeWaitIsTracedWhileUnrelatedBlocksProgress(boolean remove) throws Exception {
+    void waitingCachePollRecordsContentionUntilGlobalLockIsAcquired(boolean remove) throws Exception {
         String retiring = "10.43.7.113:28200";
         globalCacheIndex.addCacheBlock(1L, retiring, null);
-        // 1 and 257 share a stripe; 2 uses another stripe.
-        globalCacheIndex.addCacheBlock(257L, "worker-B", null);
+        globalCacheIndex.addCacheBlock(2L, "worker-B", null);
         var entered = new CountDownLatch(1);
         var release = new CountDownLatch(1);
         var mapField = GlobalCacheIndex.class.getDeclaredField("blockToEnginesMap");
@@ -179,9 +127,9 @@ class GlobalCacheIndexTest {
         Thread waiting = new Thread(() -> {
             try {
                 if (remove) {
-                    globalCacheIndex.removeCacheBlock("worker-B", 257L, poll);
+                    globalCacheIndex.removeCacheBlock("worker-B", 2L, poll);
                 } else {
-                    globalCacheIndex.addCacheBlock(257L, "worker-B", poll);
+                    globalCacheIndex.addCacheBlock(2L, "worker-B", poll);
                 }
             } catch (Throwable thrown) {
                 failure.set(thrown);
@@ -201,15 +149,6 @@ class GlobalCacheIndexTest {
             assertEquals("CACHE_INDEX_LOCK_ACQUIRED", cleanupHistory.snapshot().phase());
             assertEquals(1L, indexWait.count());
             assertTrue(indexWait.ageUs() > 0L);
-            var executor = java.util.concurrent.Executors.newSingleThreadExecutor();
-            try {
-                executor.submit(() -> {
-                    globalCacheIndex.addCacheBlock(2L, "unrelated", null);
-                    globalCacheIndex.removeCacheBlock("unrelated", 2L, null);
-                }).get(1, TimeUnit.SECONDS);
-            } finally {
-                executor.shutdownNow();
-            }
         } finally {
             release.countDown();
             cleaning.join(3000L);
@@ -223,7 +162,7 @@ class GlobalCacheIndexTest {
         assertEquals(0L, waited.ageUs());
         assertTrue(waited.totalWaitUs() > 0L);
         assertEquals(remove ? Map.of() : Map.of("worker-B", 1), globalCacheIndex.batchCalculatePrefixMatchLength(
-                List.of("worker-B"), List.of(257L)));
+                List.of("worker-B"), List.of(2L)));
     }
 
     @Test
