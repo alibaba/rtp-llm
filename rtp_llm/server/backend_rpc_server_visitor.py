@@ -29,6 +29,7 @@ from rtp_llm.server.master_client import (
     MasterClient,
 )
 from rtp_llm.server.misc import format_exception
+from rtp_llm.server.mm_cache_metadata import snapshot_from_metadata
 from rtp_llm.server.mm_cache_routing import multimodal_routing_tokens
 from rtp_llm.server.recent_cache_key_window import RecentCacheKeyWindow
 from rtp_llm.server.request_headers import (
@@ -276,6 +277,9 @@ class BackendRPCServerVisitor:
         Returns None on success; on failure returns FlexlbResponse for routing decisions.
         request_id is frontend-generated and is not overwritten.
         """
+        # A retry re-routes the request; never expose a previous attempt's
+        # expansion snapshot to the early-first-packet hook.
+        input.mm_routing_snapshot = None
         vit_metadata_complete = False
         multimodal_cache_spans = []
         semantic_mm_token_id = -1
@@ -368,6 +372,9 @@ class BackendRPCServerVisitor:
                 if full_length is not None:
                     vit_metadata_complete = True
                     route_args["seq_len"] = full_length - input.prefix_length
+                    snapshot = snapshot_from_metadata(keys, metadata, full_length)
+                    if snapshot is not None:
+                        input.mm_routing_snapshot = snapshot
             except (
                 ValueError,
                 KeyError,
@@ -499,12 +506,16 @@ class BackendRPCServerVisitor:
                 if full_length is None:
                     selected_vit = None
                     vit_metadata_complete = False
+                    input.mm_routing_snapshot = None
                     route_args.pop("seq_len", None)
                 else:
                     vit_metadata_complete = True
                     route_args.update(
                         selected_vit=status, seq_len=full_length - input.prefix_length
                     )
+                    snapshot = snapshot_from_metadata(keys, metadata, full_length)
+                    if snapshot is not None:
+                        input.mm_routing_snapshot = snapshot
                 del metadata, original_tokens, token_ids
                 route_result = await self.master_client.get_backend_role_addrs(
                     block_cache_keys=block_cache_keys,
@@ -850,9 +861,14 @@ class BackendRPCServerVisitor:
             )
 
     @torch.inference_mode()
-    async def enqueue(
-        self, input: GenerateInput
-    ) -> AsyncGenerator[GenerateOutputs, None]:
+    async def enqueue(self, input: GenerateInput) -> AsyncGenerator[object, None]:
+        """Route, then stream backend outputs.
+
+        When ``input.on_mm_routed`` is set (DashScope early-first-packet), the
+        callback runs after ViT token expansion and before the prefill enqueue;
+        its non-None return value is yielded ahead of the real stream.
+        """
+
         def set_aux_info(e: BaseException) -> None:
             if getattr(e, "aux_info", None):
                 return
@@ -884,22 +900,41 @@ class BackendRPCServerVisitor:
             set_aux_info(e)
             raise
 
-        async def route_and_enqueue(attempt_input: GenerateInput):
+        on_mm_routed = getattr(input, "on_mm_routed", None)
+
+        async def route_only(attempt_input: GenerateInput) -> GenerateInput:
             if self.host_service.service_available:
                 await self.route_ips(attempt_input)
-            return self.model_rpc_client.enqueue(attempt_input)
+            return attempt_input
 
         async def stream_with_aux_info():
             attempt = 0
             attempt_input = input
             is_streaming = bool(getattr(input.generate_config, "is_streaming", False))
             first_exc: Optional[BaseException] = None
+            fake_sent = False
             try:
                 while True:
                     yielded_output = False
                     stream = None
                     try:
-                        stream = await route_and_enqueue(attempt_input)
+                        routed_input = await route_only(attempt_input)
+                        if on_mm_routed is not None and not fake_sent:
+                            # Best-effort: an early packet must never fail the
+                            # request or trigger a route retry.
+                            fake_sent = True
+                            try:
+                                early = on_mm_routed(routed_input)
+                            except Exception:
+                                route_logger.warning(
+                                    "early first packet hook failed, request_id=%s",
+                                    input.request_id,
+                                    exc_info=True,
+                                )
+                                early = None
+                            if early is not None:
+                                yield early
+                        stream = self.model_rpc_client.enqueue(routed_input)
                         if is_streaming:
                             async for output in stream:
                                 yielded_output = True

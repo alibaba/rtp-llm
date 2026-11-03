@@ -88,6 +88,7 @@ from rtp_llm.dash_sc.proto import predict_v2_pb2, predict_v2_pb2_grpc
 from rtp_llm.metrics import AccMetrics
 from rtp_llm.ops import RoleType
 from rtp_llm.server.master_client import FLEXLB_GRPC_PORT_OFFSET, MasterClient
+from rtp_llm.server.mm_cache_metadata import MMRoutingSnapshot
 from rtp_llm.telemetry import tracing
 from rtp_llm.utils.base_model_datatypes import (
     AuxInfo,
@@ -170,6 +171,27 @@ class _MultiStreamVisitor:
         self.last_generate_input = generate_input
         self.generate_inputs.append(generate_input)
         return self._streams[self.enqueue_called - 1]
+
+
+class _RoutingFakeVisitor:
+    """Simulates the backend visitor's route-time early packet hook."""
+
+    def __init__(self, stream, snapshot):
+        self._stream = stream
+        self._snapshot = snapshot
+        self.enqueue_called = 0
+        self.last_generate_input = None
+
+    async def enqueue(self, generate_input):
+        self.enqueue_called += 1
+        self.last_generate_input = generate_input
+        generate_input.mm_routing_snapshot = self._snapshot
+        callback = getattr(generate_input, "on_mm_routed", None)
+        if callback is not None:
+            signal = callback(generate_input)
+            if signal is not None:
+                return _FakeAsyncStream([signal, *self._stream._chunks])
+        return self._stream
 
 
 class DashErrorSpecForFtExceptionTest(unittest.TestCase):
@@ -628,6 +650,115 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(_unpack_int32_le(by_name["generated_ids"]), [3, 4])
         self.assertEqual(infer.parameters["prompt_token_num"].int64_param, 2)
         self.assertEqual(infer.parameters["prompt_cached_token_num"].int64_param, 0)
+
+    async def test_fake_first_packet_precedes_real_frame(self) -> None:
+        req = self._minimal_request()
+        snapshot = MMRoutingSnapshot(
+            prompt_token_num=1200,
+            split_sizes=(600, 400),
+            feature_hashes=tuple(range(1000)),
+        )
+        out = GenerateOutput(
+            output_ids=torch.tensor([3], dtype=torch.int32),
+            finished=True,
+            aux_info=AuxInfo(input_len=1200, reuse_len=0),
+        )
+        visitor = _RoutingFakeVisitor(
+            _FakeAsyncStream([GenerateOutputs(generate_outputs=[out])]),
+            snapshot,
+        )
+        chunks = await _drain(
+            iter_real_model_stream_infer(
+                req,
+                [1, 2],
+                SamplingParams(),
+                DashScRequestControls(),
+                visitor,
+                rtp_llm_request_id=1,
+                yield_access_stats=True,
+                mm_inputs=[object()],
+                enable_fake_first_packet=True,
+            )
+        )
+        self.assertEqual(len(chunks), 2)
+        fake, fake_stats = chunks[0]
+        self.assertEqual(fake_stats[0], 0)
+        self.assertFalse(fake_stats[1])
+        self.assertEqual(fake_stats[3], 1200)
+        infer = fake.infer_response
+        self.assertTrue(infer.parameters["estimated_usage"].bool_param)
+        self.assertEqual(infer.parameters["image_tokens"].int64_param, 1000)
+        metadata = json.loads(infer.parameters["multimodal_metadata"].string_param)
+        self.assertEqual(
+            [item["llm_sequence_length"] for item in metadata["items"]],
+            [600, 400],
+        )
+        self.assertEqual([item["item_id"] for item in metadata["items"]], ["m0", "m1"])
+        real, _ = chunks[1]
+        self.assertEqual(_gen_ids(real), [3])
+
+    async def test_fake_first_packet_text_only(self) -> None:
+        req = self._minimal_request()
+        out = GenerateOutput(
+            output_ids=torch.tensor([3], dtype=torch.int32),
+            finished=True,
+            aux_info=AuxInfo(input_len=2, reuse_len=0),
+        )
+        visitor = _RoutingFakeVisitor(
+            _FakeAsyncStream([GenerateOutputs(generate_outputs=[out])]),
+            MMRoutingSnapshot(
+                prompt_token_num=999,
+                split_sizes=(1,),
+                feature_hashes=(7,),
+            ),
+        )
+        chunks = await _drain(
+            iter_real_model_stream_infer(
+                req,
+                [1, 2],
+                SamplingParams(),
+                DashScRequestControls(),
+                visitor,
+                rtp_llm_request_id=1,
+                yield_access_stats=True,
+                enable_fake_first_packet=True,
+            )
+        )
+        self.assertEqual(len(chunks), 2)
+        fake, fake_stats = chunks[0]
+        self.assertEqual(fake_stats[3], 2)
+        infer = fake.infer_response
+        self.assertEqual(infer.parameters["image_tokens"].int64_param, 0)
+        metadata = json.loads(infer.parameters["multimodal_metadata"].string_param)
+        self.assertEqual(metadata, {"version": 1, "items": []})
+
+    async def test_fake_first_packet_disabled_by_default(self) -> None:
+        req = self._minimal_request()
+        out = GenerateOutput(
+            output_ids=torch.tensor([3], dtype=torch.int32),
+            finished=True,
+            aux_info=AuxInfo(input_len=2, reuse_len=0),
+        )
+        visitor = _RoutingFakeVisitor(
+            _FakeAsyncStream([GenerateOutputs(generate_outputs=[out])]),
+            MMRoutingSnapshot(
+                prompt_token_num=2,
+                split_sizes=(),
+                feature_hashes=(),
+            ),
+        )
+        chunks = await _drain(
+            iter_real_model_stream_infer(
+                req,
+                [1, 2],
+                SamplingParams(),
+                DashScRequestControls(),
+                visitor,
+                rtp_llm_request_id=1,
+            )
+        )
+        self.assertEqual(len(chunks), 1)
+        self.assertFalse(hasattr(visitor.last_generate_input, "on_mm_routed"))
 
     async def test_v41_standard_input_failure_returns_protocol_error_before_enqueue(
         self,

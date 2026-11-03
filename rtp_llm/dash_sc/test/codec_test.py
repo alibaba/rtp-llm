@@ -2830,6 +2830,84 @@ class BuildStreamResponseFromGenerateOutputsTest(TestCase):
         self.assertEqual(_unpack_int32_le(by_name["generated_ids"]), [2])
 
 
+class FakeFirstPacketTest(TestCase):
+    def _builder(self, **overrides):
+        static = {
+            "dash_sc_request_id": "fake-1",
+            "model_name": "default",
+            "request_log_tag": "fake-1",
+        }
+        static.update(overrides)
+        return StreamResponseBuilder(**static)
+
+    def test_multimodal_metadata_and_accounting(self) -> None:
+        response = self._builder().build_fake_first_packet(
+            prompt_token_num=1200,
+            split_sizes=(600, 400),
+            feature_hashes=tuple(range(1000)),
+        )
+        infer = response.infer_response
+        self.assertEqual(infer.id, "fake-1")
+        self.assertEqual(infer.model_name, "default")
+        self.assertTrue(infer.parameters["estimated_usage"].bool_param)
+        self.assertEqual(infer.parameters["prompt_token_num"].int64_param, 1200)
+        self.assertEqual(infer.parameters["image_tokens"].int64_param, 1000)
+        self.assertEqual(infer.parameters["incremental_output"].int64_param, 1)
+        metadata = json.loads(infer.parameters["multimodal_metadata"].string_param)
+        self.assertEqual(metadata["version"], 1)
+        self.assertEqual([item["item_id"] for item in metadata["items"]], ["m0", "m1"])
+        self.assertEqual(
+            [item["llm_sequence_length"] for item in metadata["items"]], [600, 400]
+        )
+        self.assertTrue(all(len(item["mm_key"]) == 32 for item in metadata["items"]))
+        self.assertNotEqual(
+            metadata["items"][0]["mm_key"], metadata["items"][1]["mm_key"]
+        )
+        by_name = {
+            output.name: raw
+            for output, raw in zip(infer.outputs, infer.raw_output_contents)
+        }
+        generated = next(out for out in infer.outputs if out.name == "generated_ids")
+        self.assertEqual(list(generated.shape), [1, 0])
+        self.assertEqual(_unpack_int32_le(by_name["prompt_token_num"]), [1200])
+        self.assertEqual(_unpack_int32_le(by_name["prompt_cached_token_num"]), [0])
+        self.assertEqual(
+            _unpack_int64_le(by_name["finish_reason"]),
+            [int(LLMFinishReason.STREAMING)],
+        )
+        self.assertEqual(by_name["finished"], b"\x00")
+
+    def test_text_only_metadata_is_empty(self) -> None:
+        response = self._builder(is_streaming=False).build_fake_first_packet(
+            prompt_token_num=7
+        )
+        infer = response.infer_response
+        self.assertEqual(infer.parameters["image_tokens"].int64_param, 0)
+        self.assertEqual(infer.parameters["incremental_output"].int64_param, 0)
+        metadata = json.loads(infer.parameters["multimodal_metadata"].string_param)
+        self.assertEqual(metadata, {"version": 1, "items": []})
+
+    def test_fake_packet_does_not_initialize_template(self) -> None:
+        builder = self._builder()
+        builder.build_fake_first_packet(
+            prompt_token_num=3, split_sizes=(2,), feature_hashes=(1, 2)
+        )
+        self.assertIsNone(builder._template)
+        go = GenerateOutputs(
+            generate_outputs=[
+                GenerateOutput(
+                    output_ids=torch.tensor([9]),
+                    finished=True,
+                    aux_info=AuxInfo(input_len=3, reuse_len=0),
+                )
+            ]
+        )
+        response = builder.build(go)
+        self.assertEqual(
+            response.infer_response.parameters["prompt_token_num"].int64_param, 3
+        )
+
+
 class PrependToGeneratedIdsTensorTest(TestCase):
     def _build_infer_with_generated_ids(self, ids: list[int]):
         out = GenerateOutput(

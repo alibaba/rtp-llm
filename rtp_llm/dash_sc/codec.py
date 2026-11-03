@@ -9,6 +9,7 @@ Defaults for ``SamplingParams`` align with ``rtp_llm.config.generate_config.Gene
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import struct
@@ -1569,6 +1570,42 @@ def _first_int(value: int | list[int] | tuple[int, ...] | None) -> int | None:
     return int(value)
 
 
+def _mm_key_for_hashes(hashes: Iterable[int]) -> str:
+    """Stable 32-hex identifier for one media item's feature-hash segment."""
+    values = [int(value) for value in hashes]
+    payload = struct.pack("<%di" % len(values), *values) if values else b""
+    return hashlib.sha256(payload).hexdigest()[:32]
+
+
+def _build_multimodal_metadata(
+    split_sizes: Iterable[int], feature_hashes: Iterable[int]
+) -> dict[str, Any]:
+    sizes = [int(size) for size in split_sizes]
+    hashes = [int(value) for value in feature_hashes]
+    if not sizes:
+        if hashes:
+            raise ValueError("multimodal metadata size/hash mismatch")
+        return {"version": 1, "items": []}
+    if sum(sizes) != len(hashes):
+        raise ValueError("multimodal metadata size/hash mismatch")
+    items = []
+    offset = 0
+    for index, size in enumerate(sizes):
+        if size <= 0:
+            raise ValueError("multimodal metadata segment length must be positive")
+        segment = hashes[offset : offset + size]
+        offset += size
+        items.append(
+            {
+                "item_id": f"m{index}",
+                "modality": "image",
+                "mm_key": _mm_key_for_hashes(segment),
+                "llm_sequence_length": size,
+            }
+        )
+    return {"version": 1, "items": items}
+
+
 def _append_prompt_token_ids_output(
     infer: predict_v2_pb2.ModelInferResponse,
     prompt_token_ids: list[int],
@@ -2632,6 +2669,51 @@ class StreamResponseBuilder:
         self._template_prompt_tokens: int | None = None
         self._template_cached_tokens: int | None = None
         self._template_think_token_num: int | None = None
+
+    def build_fake_first_packet(
+        self,
+        *,
+        prompt_token_num: int,
+        split_sizes: Iterable[int] = (),
+        feature_hashes: Iterable[int] = (),
+    ) -> predict_v2_pb2.ModelStreamInferResponse:
+        """Build a standalone prefill-time frame without touching the template.
+
+        The frame carries estimated prompt/media accounting and per-image hash
+        metadata, but no generated tokens. It must be emitted before the first
+        real ``build()`` call so the cached template still initializes from a
+        genuine backend output.
+        """
+        response = predict_v2_pb2.ModelStreamInferResponse()
+        infer = response.infer_response
+        infer.id = self._dash_sc_request_id
+        infer.model_name = self._model_name
+        if self._return_input_ids and self._request_input_ids is not None:
+            _append_prompt_token_ids_output(infer, self._request_input_ids)
+        _append_generated_ids_output(infer, [])
+        _append_finish_reason_output(infer, False, int(LLMFinishReason.STREAMING))
+        _append_finished_output(infer, False)
+        _append_int32_scalar_output(infer, "prompt_token_num", prompt_token_num)
+        _append_int32_scalar_output(infer, "prompt_cached_token_num", 0)
+        infer.parameters["estimated_usage"].bool_param = True
+        infer.parameters["prompt_token_num"].int64_param = int(prompt_token_num)
+        infer.parameters["image_tokens"].int64_param = sum(
+            int(size) for size in split_sizes
+        )
+        infer.parameters["incremental_output"].int64_param = (
+            1 if self._is_streaming else 0
+        )
+        infer.parameters["multimodal_metadata"].string_param = json.dumps(
+            _build_multimodal_metadata(split_sizes, feature_hashes),
+            separators=(",", ":"),
+        )
+        _append_dashllm_limit_parameters(
+            infer,
+            generate_config=self._generate_config,
+            eos_token_id=self._eos_token_id,
+            max_token_id=self._max_token_id,
+        )
+        return response
 
     def build(
         self,
