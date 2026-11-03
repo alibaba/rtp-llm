@@ -536,6 +536,46 @@ TEST_F(StreamCacheResourceTest, ReplaySlotShortageRetriesWithoutRemallocatingOrL
     EXPECT_EQ(stream_->initialReuseLength(), 2);
 }
 
+TEST_F(StreamCacheResourceTest, ReplayTailShortageRetriesWithoutRemallocatingOrLosingReuse) {
+    auto config = test::makeSimpleHybridMhaCacheConfig(4, 16, 2, DataType::TYPE_FP16, 2);
+    const int group_id = static_cast<int>(config.topology().groupIdForTag("linear"));
+    config.linear_replay = LinearReplayPlan::create({group_id}, 1, 4, {1, 1}, {1, 1}, false, DataType::TYPE_FP16, 1);
+    prepareResourceWithCacheConfig(config, {1, 2, 3, 4, 5, 6}, false, RoleType::DECODE);
+    auto& resource = stream_->streamCacheResource();
+    ASSERT_TRUE(resource.initKVBlock().ok());
+    const auto pool = cache_manager_->coordinator_manager_->groupBlockPools().at(group_id);
+    const auto source = resource.kvCache().blocks(0, "linear").back();
+    pool->incRef(source);
+    auto occupied = pool->malloc(pool->freeBlocksNum());
+    ASSERT_TRUE(occupied.has_value());
+    pool->incRef(*occupied);
+    stream_->setIsContextStream(false);
+
+    EXPECT_TRUE(absl::IsUnavailable(resource.initKVBlock()));
+    EXPECT_TRUE(resource.waitingForLinearReplaySlot());
+    const auto lease = resource.linearReplayLease();
+    ASSERT_NE(lease, nullptr);
+    const auto blocks = resource.kvCache().blocks(0, "linear");
+    stream_->setReuseLength(2);
+    stream_->setInitialReuseLength(2);
+    EXPECT_TRUE(absl::IsUnavailable(resource.initKVBlock()));
+    EXPECT_EQ(resource.kvCache().blocks(0, "linear"), blocks);
+    EXPECT_EQ(resource.linearReplayLease(), lease);
+    EXPECT_EQ(stream_->reuseLength(), 2);
+    EXPECT_EQ(stream_->initialReuseLength(), 2);
+
+    const auto generation = cache_manager_->allocationGeneration();
+    pool->decRef(*occupied);
+    EXPECT_TRUE(cache_manager_->waitForAllocationChange(generation, 1));
+    ASSERT_TRUE(resource.initKVBlock().ok());
+    EXPECT_FALSE(resource.waitingForLinearReplaySlot());
+    EXPECT_EQ(resource.linearReplayLease(), lease);
+    EXPECT_EQ(stream_->reuseLength(), 2);
+    EXPECT_EQ(stream_->initialReuseLength(), 2);
+    EXPECT_EQ(pool->refCount(source), 2u);  // External request plus retained replay anchor.
+    pool->decRef(source);
+}
+
 TEST_F(StreamCacheResourceTest, CancelledReplayBatchBackpressuresReplacementsUntilBookkeepingReleasesLeases) {
     auto config          = test::makeSimpleHybridMhaCacheConfig(4, 32, 2, DataType::TYPE_FP16, 2);
     config.linear_replay = LinearReplayPlan::create({static_cast<int>(config.topology().groupIdForTag("linear"))},

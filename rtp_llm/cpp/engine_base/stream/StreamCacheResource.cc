@@ -227,7 +227,7 @@ absl::Status StreamCacheResource::initKVBlock() {
 
     if (linear_replay_.waiting_for_slot) {
         // KV and any asynchronous prefix load have already been committed. A
-        // lease retry must preserve that allocation and its published reuse lengths.
+        // replay resource retry must preserve that allocation and its reuse lengths.
         return prepareLinearReplayResources();
     }
 
@@ -531,8 +531,12 @@ absl::Status StreamCacheResource::prepareLinearReplayResources(bool prepare_tail
             linear_replay_.initial_state_hold, stream_->linearReplayStateBlockHold()};
         if (!manager->makeLinearReplayTailsPrivate(
                 batch_kv_cache_resource_, std::max(0, stream_->seqLength() - 1), request_holds)) {
-            return absl::ResourceExhaustedError("LINEAR replay tail copy-on-write allocation failed");
+            // Like log slots, tail slots can be pinned by a retired GPU round
+            // until its completion event is reaped on a bounded admission retry.
+            linear_replay_.waiting_for_slot = true;
+            return absl::UnavailableError("LINEAR replay tail slots are temporarily unavailable");
         }
+        linear_replay_.waiting_for_slot = false;
     }
     return absl::OkStatus();
 }

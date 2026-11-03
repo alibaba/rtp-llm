@@ -768,7 +768,10 @@ bool KVCacheManager::makeLinearReplayTailsPrivate(
             const auto& blocks = resource->blocks(batch, group.tag);
             size_t begin = blocks.size() > 2 ? blocks.size() - 2 : 0;
             if (min_processed_length >= 0) {
-                begin = std::min(begin, static_cast<size_t>(min_processed_length) / group.seqSizePerBlock());
+                // Replay writes at floor(processed / block_size), or a later
+                // slot if GPU acceptance is ahead of host bookkeeping. Earlier
+                // slots remain read-only sources, even when retained/shared.
+                begin = static_cast<size_t>(min_processed_length) / group.seqSizePerBlock();
             }
             active_begins.push_back({batch, group.tag, begin});
             for (size_t position = begin; position < blocks.size(); ++position) {
@@ -783,7 +786,17 @@ bool KVCacheManager::makeLinearReplayTailsPrivate(
                 if (source > 0 && pool->isExclusiveRequestBlock(source, owned_references)) {
                     continue;
                 }
-                const auto destination = pool->malloc();
+                auto destination = pool->malloc();
+                if (!destination) {
+                    coordinator_manager_->cacheGroups().at(static_cast<size_t>(group_id))->ensureFreeBlocks(1);
+                    // Eviction can also remove the source's tree reference.
+                    // Request/round holds still pin its bytes until the full
+                    // replacement transaction below has succeeded.
+                    if (source > 0 && pool->isExclusiveRequestBlock(source, owned_references)) {
+                        continue;
+                    }
+                    destination = pool->malloc();
+                }
                 if (!destination) {
                     RTP_LLM_LOG_WARNING("LINEAR replay tail copy failed tag=%s batch=%d position=%zu free=%zu "
                                         "total=%zu staged=%zu",

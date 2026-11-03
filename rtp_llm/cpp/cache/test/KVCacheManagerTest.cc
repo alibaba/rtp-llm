@@ -106,6 +106,67 @@ TEST_F(KVCacheManagerTest, LinearReplayOwnLifetimeHoldsDoNotRequireCopyOnWrite) 
     pool->decRef(*block);
 }
 
+TEST_F(KVCacheManagerTest, LinearReplayTailCopyEvictsAndRollsBackBeforeRetry) {
+    auto config = makeLinearReplayLifetimeConfig(4);
+    KVCacheManager manager(config);
+    ASSERT_TRUE(manager.init());
+    auto pool = manager.coordinator_manager_->groupBlockPools().front();
+    auto allocated = pool->malloc(3);
+    ASSERT_TRUE(allocated.has_value());
+    const BlockIndicesType sources{(*allocated)[0], (*allocated)[1]};
+    const auto cached = (*allocated)[2];
+    pool->incRef(sources);
+    pool->incRef(sources);  // Another request keeps both source states alive.
+    pool->incTreeRef(cached, BlockTreeRefType::CACHE);
+    int evictions = 0;
+    manager.coordinator_manager_->cacheGroups().front()->setEvictCallback([&](size_t) {
+        if (evictions != 0) {
+            return size_t{0};
+        }
+        ++evictions;
+        pool->decTreeRef(cached, BlockTreeRefType::CACHE);
+        return size_t{1};
+    });
+    auto resource = std::make_shared<BatchKVCacheResource>();
+    resource->resetBatchSize(1);
+    resource->initGroups(config.topologyPtr());
+    resource->setBatchBlocks(0, "linear", sources);
+
+    // One evictable block cannot cover both destinations. Staging must roll
+    // back without replacing either source or releasing its external owner.
+    EXPECT_FALSE(manager.makeLinearReplayTailsPrivate(resource));
+    EXPECT_EQ(evictions, 1);
+    EXPECT_EQ(resource->blocks(0, "linear"), sources);
+    EXPECT_EQ(pool->freeBlocksNum(), 1u);
+    EXPECT_EQ(pool->refCount(sources[0]), 2u);
+    EXPECT_EQ(pool->refCount(sources[1]), 2u);
+
+    pool->decRef(sources[1]);
+    ASSERT_TRUE(manager.makeLinearReplayTailsPrivate(resource));
+    EXPECT_EQ(resource->blocks(0, "linear"), (BlockIndicesType{cached, sources[1]}));
+    EXPECT_EQ(pool->refCount(sources[0]), 1u);
+    EXPECT_EQ(pool->refCount(sources[1]), 1u);
+    pool->decRef(BlockIndicesType{sources[0], sources[1], cached});
+}
+
+TEST_F(KVCacheManagerTest, LinearReplayDoesNotAllocatePastNullSlots) {
+    auto config = makeLinearReplayLifetimeConfig(2);
+    KVCacheManager manager(config);
+    ASSERT_TRUE(manager.init());
+    auto pool = manager.coordinator_manager_->groupBlockPools().front();
+    const auto tail = pool->malloc();
+    ASSERT_TRUE(tail.has_value());
+    pool->incRef(*tail);
+    auto resource = std::make_shared<BatchKVCacheResource>();
+    resource->resetBatchSize(1);
+    resource->initGroups(config.topologyPtr());
+    resource->setBatchBlocks(0, "linear", {NULL_BLOCK_IDX, *tail});
+    EXPECT_TRUE(manager.makeLinearReplayTailsPrivate(resource, /*min_processed_length=*/4));
+    EXPECT_EQ(resource->blocks(0, "linear"), (BlockIndicesType{NULL_BLOCK_IDX, *tail}));
+    EXPECT_EQ(pool->freeBlocksNum(), 0u);
+    pool->decRef(*tail);
+}
+
 TEST_F(KVCacheManagerTest, LinearReplayRetainsOnlyItsAnchorAcrossPageCrossing) {
     auto           config = makeLinearReplayLifetimeConfig(3);
     KVCacheManager manager(config);
@@ -359,6 +420,57 @@ makeDSV4CompleteTokenIds(int initial_seq_len, int max_seq_len, int seq_size_per_
     complete_token_ids->setSeqLength(initial_seq_len);
     return complete_token_ids;
 }
+
+TEST_F(KVCacheManagerTest, ReplaySharedPrefixFlowsAdvanceAtFullCapacity) {
+    auto config = makeSimpleLinearCacheConfig(1, 4, 16, DataType::TYPE_BF16, 1, 2);
+    config.linear_step = 1;
+    config.linear_replay = LinearReplayPlan::create({0}, 2, 2, {1, 2}, {1, 2}, false, DataType::TYPE_BF16, 1);
+    KVCacheConfig kv_cache;
+    kv_cache.reserve_block_ratio = 0;
+    KVCacheManager manager(config, false, nullptr, kv_cache);
+    ASSERT_TRUE(manager.init());
+    auto pool = manager.coordinator_manager_->groupBlockPools().front();
+
+    auto seed = makeDSV4BatchResource(config);
+    auto seed_tokens = makeDSV4CompleteTokenIds(16, 17, 16);
+    MallocInfo seed_info{seed, seed_tokens};
+    seed_info.reuse_cache = false;
+    seed_info.enable_cache_lookup = false;
+    ASSERT_TRUE(manager.malloc(seed_info).success);
+    size_t resident_prefix = 0;
+    manager.insertIntoCache({seed, seed_tokens, false}, resident_prefix);
+    manager.free({seed, seed_tokens});
+
+    auto tokens = makeDSV4CompleteTokenIds(17, 17, 16);
+    auto first = makeDSV4BatchResource(config);
+    auto second = makeDSV4BatchResource(config);
+    for (const auto& resource : {first, second}) {
+        const auto result = manager.malloc({resource, tokens});
+        ASSERT_TRUE(result.success);
+        ASSERT_EQ(result.reuse_len, 16);
+    }
+    const auto prefix = first->blocks(0, "linear").front();
+    ASSERT_EQ(second->blocks(0, "linear").front(), prefix);
+    ASSERT_EQ(pool->freeBlocksNum(), 0u);  // P, T1 and T2 fill the pool.
+
+    // After prefill, processed=17 selects T1/T2 as replay destinations. P is
+    // before that lower bound and remains a shared read-only prefix.
+    auto first_anchor = manager.holdLinearReplayBlocks(first, 16);
+    auto second_anchor = manager.holdLinearReplayBlocks(second, 16);
+    for (const auto& resource : {first, second}) {
+        manager.markLinearReplayStarted(resource, 17);
+    }
+    EXPECT_TRUE(manager.makeLinearReplayTailsPrivate(first, 17, {first_anchor}));
+    EXPECT_TRUE(manager.makeLinearReplayTailsPrivate(second, 17, {second_anchor}));
+    EXPECT_EQ(first->blocks(0, "linear").front(), prefix);
+    EXPECT_EQ(second->blocks(0, "linear").front(), prefix);
+    EXPECT_EQ(pool->freeBlocksNum(), 0u);
+    first_anchor.reset();
+    second_anchor.reset();
+    manager.free({first, tokens});
+    manager.free({second, tokens});
+}
+
 
 static void writeDsv4RegionPattern(const std::shared_ptr<KVCacheManager>& manager,
                                    int                                    block_id,
