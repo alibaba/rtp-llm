@@ -4,7 +4,7 @@ new ``BaseMultiModalMixin`` / mixin-factory pattern.
 The actual ViT (vision tower + projector) lives in :mod:`kimi_k3_vit`.
 This file just bridges it to the runtime via ``KimiK3Mixin``, which is
 the class the :class:`MultimodalMixinFactory` instantiates when
-``model_config.model_type == "kimi_k3"``.
+``model_config.model_type`` is ``"kimi_k3"`` or ``"kimi_k31"``.
 """
 
 import torch
@@ -65,4 +65,4 @@ class KimiK3Mixin(BaseMultiModalMixin):
         )
 
 
-register_multimodal_mixin(["kimi_k3"], KimiK3Mixin)
+register_multimodal_mixin(["kimi_k3", "kimi_k31"], KimiK3Mixin)

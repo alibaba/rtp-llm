@@ -1,8 +1,12 @@
+import json
+import tempfile
 import unittest
 from dataclasses import replace
+from pathlib import Path
 from unittest.mock import patch
 
 from rtp_llm.models.kimi_k3.kimi_k3 import KimiK3, KimiK3ModelConfig, KimiK3Mtp
+from rtp_llm.models.kimi_k3.kimi_k31 import KimiK31, KimiK31Mtp
 from rtp_llm.ops import (
     DataType,
     HybridAttentionType,
@@ -137,6 +141,51 @@ class KimiK3MtpMediaTokenConfigTest(unittest.TestCase):
                 },
             },
         }
+
+    def test_k31_checkpoint_enables_vision_only_for_target(self):
+        checkpoint = self._checkpoint_config()
+        checkpoint.update(
+            model_type="kimi_k31",
+            rtp_llm_fixture={"kind": "synthetic_dsa_mtp"},
+            media_placeholder_token_id=17,
+            image_placeholder="<|kimi_image_placeholder|>",
+        )
+        text = checkpoint["text_config"]
+        text["dsa_config"] = {
+            "index_num_heads": 8,
+            "index_head_dim": 128,
+            "index_topk": 32,
+            "index_rope_dim": 0,
+            "index_k_norm_type": "layernorm",
+            "index_topk_freq": 1,
+            "index_skip_topk_offset": 1,
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "preprocessor_config.json").write_text(
+                json.dumps({"media_proc_cfg": {"patch_size": 14}})
+            )
+            for model_class in (KimiK31, KimiK31Mtp):
+                is_mtp = model_class is KimiK31Mtp
+                layers = [4, 5] if is_mtp else [4]
+                text["linear_attn_config"]["full_attn_layers"] = layers
+                text["dsa_config"]["dsa_layers"] = layers
+                for has_vision in (True, False):
+                    with self.subTest(model=model_class.MODEL_TYPE, vision=has_vision):
+                        if has_vision:
+                            checkpoint["vision_config"] = {"vt_hidden_size": 8}
+                        else:
+                            checkpoint.pop("vision_config")
+                        (root / "config.json").write_text(json.dumps(checkpoint))
+                        config = model_class._create_config(directory)
+                        enabled = has_vision and not is_mtp
+                        self.assertEqual(config.mm_model_config.is_multimodal, enabled)
+                        self.assertEqual(
+                            "vision_config" in config.mm_related_params.config, enabled
+                        )
+                        self.assertEqual(
+                            config.k3_runtime_config.dsa.indexer_use_fp8, not is_mtp
+                        )
 
     def test_media_token_is_retained_without_configuring_vit(self):
         for media_token_id in (0, 17, 127):

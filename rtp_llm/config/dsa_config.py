@@ -53,7 +53,7 @@ class DsaConfig:
             index_topk=integer("index_topk", 1),
             index_rope_dim=integer("index_rope_dim", 0),
             index_k_norm_type=raw.get("index_k_norm_type"),
-            indexer_use_fp8=raw.get("indexer_use_fp8"),
+            indexer_use_fp8=raw.get("indexer_use_fp8", False),
             index_topk_freq=integer("index_topk_freq", 1),
             index_skip_topk_offset=integer("index_skip_topk_offset", 0),
         )

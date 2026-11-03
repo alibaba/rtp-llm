@@ -68,7 +68,6 @@ class KimiK31(KimiK3):
     HF_MODEL_TYPE = "kimi_k31"
     MODEL_TYPE = "kimi_k31"
     CONFIG_CLASS = KimiK31ModelConfig
-    ENABLE_MULTIMODAL = False
 
     @staticmethod
     def get_weight_cls():

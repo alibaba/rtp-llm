@@ -142,6 +142,7 @@ class KimiK3MultimodalTest(unittest.TestCase):
 
     def test_config_binds_single_placeholder_and_registered_mixin(self) -> None:
         self.assertIs(get_multimodal_mixin_cls("kimi_k3"), KimiK3Mixin)
+        self.assertIs(get_multimodal_mixin_cls("kimi_k31"), KimiK3Mixin)
         config = ModelConfig()
         config.ckpt_path = str(_CONFIG_PATH.parent)
         configure_kimi_k3_multimodal(

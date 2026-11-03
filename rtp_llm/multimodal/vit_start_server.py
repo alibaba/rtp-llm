@@ -42,7 +42,7 @@ def vit_start_server(
 
     manager = None
     try:
-        if py_env_configs.model_args.model_type == "kimi_k3":
+        if py_env_configs.model_args.model_type in ("kimi_k3", "kimi_k31"):
             try:
                 from rtp_llm.utils.jit_cache_manager import start_from_config
 
