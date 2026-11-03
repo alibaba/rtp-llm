@@ -32,6 +32,7 @@ class GoldenSDPAImpl(FMHAImplBase):
         self.kv_head_num = attn_configs.kv_head_num
         self.head_dim = attn_configs.size_per_head
         self.scale = self.head_dim**-0.5
+        self.last_attention_contribution = None
         self.fmha_params = rtp_llm_ops.FlashInferMlaAttnParams()
         self.fmha_params.fill_params(
             attn_inputs.prefix_lengths,
@@ -51,6 +52,7 @@ class GoldenSDPAImpl(FMHAImplBase):
         kv_cache: Optional[LayerKVCache],
         layer_idx: int = 0,
     ) -> torch.Tensor:
+        self.last_attention_contribution = None
         q, k, v = self._split_qkv(qkv)
         self.cache_writer.write(
             qkv, k, v, kv_cache
@@ -59,7 +61,7 @@ class GoldenSDPAImpl(FMHAImplBase):
         attention_inputs = self.attn_inputs
         outputs = []
         if attention_inputs.is_prefill:
-            cu = attention_inputs.cu_seqlens.tolist()
+            cu = self._prefill_cu_seqlens(attention_inputs)
             prefix_lengths = attention_inputs.prefix_lengths.tolist()
             input_lengths = attention_inputs.input_lengths.tolist()
             assert len(prefix_lengths) == len(self.history)
@@ -78,6 +80,7 @@ class GoldenSDPAImpl(FMHAImplBase):
                     self._sdpa(q[s:e], seg_k, seg_v, prefix_len=prefix_len, causal=True)
                 )
         else:  # decode: one row per sequence
+            contributions = []
             sequence_lengths = attention_inputs.sequence_lengths.tolist()
             assert len(sequence_lengths) == len(self.history)
             for batch_idx in range(len(sequence_lengths)):
@@ -102,7 +105,43 @@ class GoldenSDPAImpl(FMHAImplBase):
                         causal=False,
                     )
                 )
+                contributions.append(
+                    self._attention_contribution(
+                        q[batch_idx : batch_idx + 1], seg_k, seg_v
+                    )
+                )
+            self.last_attention_contribution = torch.cat(contributions, dim=0)
         return torch.cat(outputs, 0).reshape(qkv.shape[0], -1)
+
+    @staticmethod
+    def _prefill_cu_seqlens(attention_inputs: PyAttentionInputs) -> list[int]:
+        for field in ("cu_seqlens_device", "cu_seqlens"):
+            value = getattr(attention_inputs, field, None)
+            if isinstance(value, torch.Tensor) and value.numel() > 1:
+                return value.tolist()
+        input_lengths = getattr(attention_inputs, "input_lengths", None)
+        if isinstance(input_lengths, torch.Tensor) and input_lengths.numel() > 0:
+            cumulative = input_lengths.detach().to("cpu", torch.int64).cumsum(0)
+            return [0, *cumulative.tolist()]
+        raise ValueError(
+            "golden prefill requires cu_seqlens_device, cu_seqlens, or input_lengths"
+        )
+
+    def _attention_contribution(
+        self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor
+    ) -> torch.Tensor:
+        """Return RMS over D of the token-weighted V contribution per head."""
+        group = self.head_num // self.kv_head_num
+        if group > 1:
+            k = k.repeat_interleave(group, dim=1)
+            v = v.repeat_interleave(group, dim=1)
+        q = q.transpose(0, 1).unsqueeze(0).float()
+        k = k.transpose(0, 1).unsqueeze(0).float()
+        v = v.transpose(0, 1).unsqueeze(0).float()
+        scores = torch.matmul(q, k.transpose(-1, -2)) * self.scale
+        probabilities = torch.softmax(scores, dim=-1)
+        contribution_sq = torch.matmul(probabilities.square(), v.square())
+        return contribution_sq.clamp_min(0).sqrt().mean(-1).squeeze(-1)
 
     def _sdpa(
         self,

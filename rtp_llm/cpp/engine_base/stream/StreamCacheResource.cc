@@ -510,17 +510,19 @@ void StreamCacheResource::setKVCache(const BatchKVCacheResource& kv_cache_resour
     *batch_kv_cache_resource_ = kv_cache_resource;
 }
 
-bool StreamCacheResource::updateKVBlock(const std::vector<int>& block_src_batch, bool copy_last_block) {
-    return resource_context_.cache_manager->updateKVBlock(
+bool StreamCacheResource::updateKVBlock(const std::vector<int>& block_src_batch,
+                                        bool                    copy_last_block,
+                                        int                     valid_tail_tokens) {
+    const bool success = resource_context_.cache_manager->updateKVBlock(
         batch_kv_cache_resource_, block_src_batch, copy_last_block, block_update_mapping_);
-}
-
-void StreamCacheResource::referenceRequestBlocks(const BlockIndicesType& src_block_ids) {
-    RTP_LLM_CHECK_WITH_INFO(resource_context_.cache_manager != nullptr,
-                            "referenceRequestBlocks: cache manager is null");
-    bool ok = resource_context_.cache_manager->referenceRequestBlocks(
-        batch_kv_cache_resource_, /*batch_id=*/0, /*group_id=*/0, src_block_ids);
-    RTP_LLM_CHECK_WITH_INFO(ok, "referenceRequestBlocks failed");
+    if (success && copy_last_block) {
+        // Bind the live prefix to this ownership transaction, before later steps
+        // can change the stream length. Unknown callers retain full-copy (zero).
+        for (auto& mapping : block_update_mapping_) {
+            mapping.valid_tokens = valid_tail_tokens;
+        }
+    }
+    return success;
 }
 
 bool StreamCacheResource::hasCacheKeys() const {

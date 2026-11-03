@@ -1,23 +1,67 @@
 load("//:def.bzl", "copts")
 load("@arch_config//:arch_select.bzl", "torch_deps")
 
+# Header-only PP wire types so consumers can depend on them without the whole executor.
+cc_library(
+    name = "pipeline_types",
+    hdrs = ["pipeline/PPTypes.h"],
+    copts = copts(),
+    deps = [
+        "//rtp_llm/cpp/models:models",
+        "//rtp_llm/cpp/engine_base/stream:generate_config",
+        "//rtp_llm/cpp/engine_base/stream:generate_types",
+        "//rtp_llm/cpp/utils:error_code",
+        "//rtp_llm/models_py/bindings/core:op_data",
+    ] + torch_deps(),
+    visibility = ["//visibility:public"],
+)
+
 cc_library(
     name = "normal_engine",
     hdrs = glob([
         "*.h",
         "speculative/*.h",
         "accuracy/*.h",
-    ]),
+    ]) + [
+        "pipeline/PPBatchStreamProcessor.h",
+        "pipeline/PPExecutor.h",
+        "pipeline/PPSerialization.h",
+        "pipeline/PPTransport.h",
+    ],
     srcs = glob([
         "*.cc",
         "speculative/*.cc",
-        "accuracy/*.cc",
-    ]),
+    ]) + [
+        "pipeline/PPBatchStreamProcessor.cc",
+        "pipeline/PPExecutor.cc",
+        "pipeline/PPSerialization.cc",
+        "pipeline/PPTransport.cc",
+    ] + select({
+        "//:using_cuda": glob(["accuracy/*.cc"]),
+        "//conditions:default": [],
+    }),
     deps = [
+        "//rtp_llm/cpp/distribute:cpu_tp_broadcaster",
+        ":pipeline_types",
+        "//rtp_llm/cpp/cache:cache",
+        "//rtp_llm/cpp/cache:cache_config",
+        "//rtp_llm/cpp/cache:pp_topology_validator",
+        "//rtp_llm/cpp/cache/block_tree_cache",
+        "//rtp_llm/cpp/config:config_modules",
+        "//rtp_llm/cpp/config:rank_layout",
+        "//rtp_llm/cpp/config:stage_layer_range",
+        "//rtp_llm/cpp/config:role_types",
+        "//rtp_llm/cpp/cuda_graph:cuda_graph_hdrs_lib",
+        "//rtp_llm/cpp/engine_base:executor",
+        "//rtp_llm/cpp/metrics",
+        "//rtp_llm/cpp/model_utils:model_utils",
         "//rtp_llm/cpp/models:models",
-        "//rtp_llm/models_py/bindings/core:exec_ops_hdr",
+        "//rtp_llm/cpp/models:logits_processor",
+        "//rtp_llm/cpp/observability:execution_recorder",
         "//rtp_llm/cpp/engine_base:engine_base",
+        "//rtp_llm/cpp/utils:device_pin",
         "//rtp_llm/cpp/engine_base/stream:generate_config",
+        "//rtp_llm/cpp/engine_base/stream:generate_types",
         "//rtp_llm/cpp/engine_base:worker_status_info",
         "//rtp_llm/cpp/engine_base:profiler",
         "//rtp_llm/cpp/engine_base/schedulers:schedulers",
@@ -28,15 +72,27 @@ cc_library(
         "//rtp_llm/cpp/cuda_graph:cuda_graph_base",
         "//rtp_llm/cpp/utils:tensor_debug_utils",
         "//rtp_llm/cpp/utils:profiling_scope",
+        "//rtp_llm/cpp/utils:core_utils",
+        "//rtp_llm/cpp/utils:torch_cuda_oom",
+        "//rtp_llm/cpp/multimodal_processor:multimodal_input_utils",
+        "//rtp_llm/models_py/bindings/core:exec_ops_hdr",
+        "//rtp_llm/models_py/bindings/core:op_data",
+        "//rtp_llm/models_py/bindings/core:tensor_holder",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:statusor",
+        "@havenask//aios/autil:json",
+        "@havenask//aios/autil:lock_free",
+        "//rtp_llm/models_py/bindings:op_defs",
     ] + select({
         "//:using_cuda": [
             "//rtp_llm/models_py/bindings/cuda/ops:standalone_ops",
+            "//rtp_llm/models_py/bindings/cuda/kernels:mtp_target_verify_prepare",
             "//rtp_llm/cpp/cuda_graph:cuda_graph_impl",
         ],
         "@//:using_rocm": [
             "//rtp_llm/cpp/cuda_graph:cuda_graph_impl",
         ],
         "//conditions:default": [],
-    }),
+    }) + torch_deps(),
     visibility = ["//visibility:public"],
 )

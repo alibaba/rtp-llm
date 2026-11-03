@@ -63,7 +63,8 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
                                bool                                   is_propose,
                                int                                    propose_model_index,
                                std::function<void()>                  profile_step_start,
-                               std::function<void()>                  profile_step_finish):
+                               std::function<void()>                  profile_step_finish,
+                               bool                                   allow_cuda_graph):
     Executor(),
     cache_manager_(cache_manager),
     warm_up_(warm_up),
@@ -169,7 +170,7 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
          cache_manager,
          is_propose_ ? std::make_optional(propose_model_index_) : std::nullopt,
          params.model_config_.hc_mult});
-    model_init_params.owns_py_model                  = !warm_up_;
+    model_init_params.owns_py_model                  = !warm_up_ && !accuracy_check_mode_;
     model_init_params.metrics_reporter               = metrics_reporter_;
     model_init_params.hidden_state_capture_layer_ids = selectHiddenStateCaptureLayerIds(
         is_propose_ ? HiddenStateCaptureModelRole::DRAFT : HiddenStateCaptureModelRole::TARGET,
@@ -211,7 +212,13 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
 
     if (!params.py_model.is_none()) {
         RTP_LLM_LOG_INFO("init executor with python model");
-        model_.reset(new PyWrappedModel(model_init_params, params.py_model));
+        if (params.hw_kernel_config.enable_dynamic_decode_backend) {
+            py::gil_scoped_acquire gil;
+            params.py_model.attr("configure_dynamic_decode")(params.hw_kernel_config.enable_dynamic_decode_backend
+                                                             && !warm_up && allow_cuda_graph);
+        }
+        model_.reset(new PyWrappedModel(
+            model_init_params, params.py_model, false, false, DSparkModelRole::NONE, allow_cuda_graph));
     } else if (test_model_factory) {
         RTP_LLM_LOG_INFO("init executor with test model factory");
         model_ = test_model_factory(model_init_params);

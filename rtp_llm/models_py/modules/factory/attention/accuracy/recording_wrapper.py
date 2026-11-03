@@ -37,12 +37,20 @@ class RecordingWrapper(FMHAImplBase):
         # the record copy is always flattened to packed [T, Hq*D]
         # But the model still gets inner's raw out
         out_rec = out.reshape(out.shape[0], -1)
+        reference_contribution = getattr(
+            self.inner, "last_attention_contribution", None
+        )
         self.layer_records[layer_idx] = AttentionLayerRecord(
             layer_idx=layer_idx,
             q=q,
             k=k,
             v=v,
             output=out_rec.detach().clone(),
+            reference_contribution=(
+                reference_contribution.detach().clone()
+                if reference_contribution is not None
+                else None
+            ),
         )
         return out
 
