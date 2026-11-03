@@ -7,7 +7,6 @@ from torch import nn
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce
-from rtp_llm.models_py.model_desc.block_map import select_block_map_for_layer
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.modules import (
     CausalAttention,
@@ -34,7 +33,6 @@ from rtp_llm.models_py.modules.hybrid.glm5_cmp import (
 )
 from rtp_llm.ops import HWKernelConfig, MoeConfig, ParallelismConfig
 from rtp_llm.ops.compute_ops import LayerKVCache, PyModelInputs, PyModelOutputs
-from rtp_llm.utils.dsa_indexing import dsa_layer_has_indexer, dsa_layer_skips_topk
 from rtp_llm.utils.model_weight import W
 
 try:
@@ -556,24 +554,13 @@ class GenericMoeDecoderLayer(nn.Module):
         # Get quant_config from model_config
         quant_config = config.quant_config
         if config.attn_config.use_mla:
-            self.self_attn = MlaAttention(
-                config.attn_config,
+            self.self_attn = MlaAttention.from_model_config(
+                config,
                 parallelism_config,
                 weights,
                 layer_idx,
-                config.layernorm_eps,
-                quant_config,
-                hw_kernel_config,
                 global_weights=global_weights,
-                has_indexer=dsa_layer_has_indexer(config, layer_idx),
-                reuse_topk_indices=dsa_layer_skips_topk(config, layer_idx),
-                indexer_layernorm_eps=getattr(
-                    config, "indexer_layernorm_eps", None
-                ),
-                indexer_scale_fmt=getattr(config, "indexer_scale_fmt", None),
-                indexer_use_hadamard=getattr(
-                    config, "indexer_use_hadamard", True
-                ),
+                hw_kernel_config=hw_kernel_config,
             )
         else:
             attn_configs = config.getAttentionConfigs(
@@ -975,12 +962,12 @@ class GenericMoeModel(GptModelBase):
             self.kv_cache,
         )
         for i, decoder_layer in enumerate(self.layers[: self.layer_num]):
-            select_block_map_for_layer(inputs.attention_inputs, i)
+            layer_cache = self.prepare_decoder_layer(inputs.attention_inputs, i)
             output = decoder_layer(
                 hidden_states,
                 residual,
                 fmha_impl,
-                kv_cache=self.kv_cache.get_layer_cache(i) if self.kv_cache else None,
+                kv_cache=layer_cache,
                 prev_topk_indices=prev_topk_indices,
                 enable_cmp=enable_cmp,
             )

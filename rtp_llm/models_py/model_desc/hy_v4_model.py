@@ -11,16 +11,19 @@ from torch import nn
 
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_loader.model_weight_info import ModelWeights
-from rtp_llm.models_py.model_desc.block_map import select_block_map_for_layer
 from rtp_llm.models_py.model_desc.generic_moe import GenericMoeLayer
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
-from rtp_llm.models_py.modules import DenseMLP, Embedding, FMHAImplBase, MlaAttention, RMSNorm
+from rtp_llm.models_py.modules import (
+    DenseMLP,
+    Embedding,
+    FMHAImplBase,
+    MlaAttention,
+    RMSNorm,
+)
 from rtp_llm.models_py.modules.hy_v4 import Hy4IHCHead, Hy4IHCUnit
 from rtp_llm.ops import HWKernelConfig, MoeConfig, ParallelismConfig
 from rtp_llm.ops.compute_ops import LayerKVCache, PyModelInputs, PyModelOutputs
-from rtp_llm.utils.dsa_indexing import dsa_layer_has_indexer, dsa_layer_skips_topk
 from rtp_llm.utils.model_weight import W
-
 
 _IHC_MXFP8_QUANT_ENV = "RTP_LLM_HY4_IHC_MXFP8_QUANT"
 
@@ -72,20 +75,13 @@ class Hy4DecoderLayer(nn.Module):
                 f"weights: {missing_attention}"
             )
         self.layer_idx = layer_idx
-        self.self_attn = MlaAttention(
-            config.attn_config,
+        self.self_attn = MlaAttention.from_model_config(
+            config,
             parallelism_config,
             weights,
             layer_idx,
-            config.layernorm_eps,
-            config.quant_config,
-            hw_kernel_config,
             global_weights=global_weights,
-            has_indexer=dsa_layer_has_indexer(config, layer_idx),
-            reuse_topk_indices=dsa_layer_skips_topk(config, layer_idx),
-            indexer_layernorm_eps=config.indexer_layernorm_eps,
-            indexer_scale_fmt=config.indexer_scale_fmt,
-            indexer_use_hadamard=config.indexer_use_hadamard,
+            hw_kernel_config=hw_kernel_config,
         )
         if layer_idx in config.moe_layer_index:
             self.mlp = GenericMoeLayer(
@@ -304,11 +300,11 @@ class Hy4Model(GptModelBase):
 
         prev_topk_indices = None
         for idx, decoder_layer in enumerate(self.layers[: self.layer_num]):
-            select_block_map_for_layer(inputs.attention_inputs, idx)
+            layer_cache = self.prepare_decoder_layer(inputs.attention_inputs, idx)
             output = decoder_layer(
                 channels,
                 fmha_impl,
-                kv_cache=self.kv_cache.get_layer_cache(idx) if self.kv_cache else None,
+                kv_cache=layer_cache,
                 prev_topk_indices=prev_topk_indices,
             )
             channels = output.channels

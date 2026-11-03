@@ -6,7 +6,6 @@ from torch import nn
 
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_loader.model_weight_info import ModelWeights
-from rtp_llm.models_py.model_desc.block_map import select_block_map_for_layer
 from rtp_llm.models_py.model_desc.generic_moe import GenericMoeDecoderLayer
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.modules import Embedding, LinearFactory, RMSNorm, RMSResNorm
@@ -265,27 +264,9 @@ class GenericMoeMTPModel(GptModelBase):
         self._mtp_shared_topk_indices[:batch_size].copy_(selected)
 
     def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
-        input_ids: torch.Tensor = inputs.input_ids
         if fmha_impl is None:
             fmha_impl = self.prepare_fmha_impl(inputs)
-        inputs_embeds = self.embed_tokens(input_ids)
-        fmha_impl.pinned_mla_groups = self.pinned_mla_groups
-        inputs_embeds = self._mask_position_zero_embeddings(inputs_embeds, fmha_impl)
-        last_hidden_states = inputs.input_hiddens
-
-        e_norm = self.pre_fc_norm_embedding(inputs_embeds)
-        h_norm = self.pre_fc_norm_hidden(last_hidden_states)
-        cat_hidden_states = torch.cat([e_norm, h_norm], -1)
-        hidden_states = self.fc(cat_hidden_states)
-
-        # These front-end activations are not consumed by the decoder layer.
-        # Without an explicit del, Python keeps their independent storages live
-        # until the whole MTP forward returns, overlapping every Indexer/SparseMLA
-        # layer. CUDA allocator stream tracking makes this release asynchronous
-        # and safe; do not synchronize or call empty_cache on the hot path.
-        del inputs_embeds, e_norm, h_norm, cat_hidden_states
-
-        residual = torch.zeros_like(hidden_states)
+        hidden_states, residual = self._prepare_mtp_inputs(inputs, fmha_impl)
         reuse_topk_indices = (
             self._mtp_indexer_share_enabled
             and self._mtp_indexer_role == _MTP_INDEXER_ROLE_REUSE
@@ -305,12 +286,12 @@ class GenericMoeMTPModel(GptModelBase):
             force_reuse_topk_indices=reuse_topk_indices,
         )
         for i, decoder_layer in enumerate(self.layers[: self.layer_num]):
-            select_block_map_for_layer(inputs.attention_inputs, i)
+            layer_cache = self.prepare_decoder_layer(inputs.attention_inputs, i)
             output = decoder_layer(
                 hidden_states,
                 residual,
                 fmha_impl,
-                kv_cache=self.kv_cache.get_layer_cache(i) if self.kv_cache else None,
+                kv_cache=layer_cache,
                 prev_topk_indices=prev_topk_indices,
                 enable_cmp=enable_cmp,
                 force_reuse_topk_indices=reuse_topk_indices,
@@ -329,6 +310,19 @@ class GenericMoeMTPModel(GptModelBase):
 
         hidden_states, _ = self.norm(hidden_states, residual)
         return PyModelOutputs(hidden_states, fmha_impl.fmha_params)
+
+    def _prepare_mtp_inputs(
+        self, inputs: PyModelInputs, fmha_impl: Any
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        inputs_embeds = self.embed_tokens(inputs.input_ids)
+        fmha_impl.pinned_mla_groups = self.pinned_mla_groups
+        inputs_embeds = self._mask_position_zero_embeddings(inputs_embeds, fmha_impl)
+        e_norm = self.pre_fc_norm_embedding(inputs_embeds)
+        h_norm = self.pre_fc_norm_hidden(inputs.input_hiddens)
+        cat_hidden_states = torch.cat([e_norm, h_norm], -1)
+        hidden_states = self.fc(cat_hidden_states)
+        del inputs_embeds, e_norm, h_norm, cat_hidden_states
+        return hidden_states, torch.zeros_like(hidden_states)
 
     def _mask_position_zero_embeddings(
         self, inputs_embeds: torch.Tensor, fmha_impl: Any

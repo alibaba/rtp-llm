@@ -6,10 +6,13 @@ from torch import Tensor, nn
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.device.device_type import DeviceType, get_device_type
 from rtp_llm.model_loader.model_weight_info import ModelWeights
+from rtp_llm.models_py.model_desc.block_map import select_block_map_for_layer
 from rtp_llm.models_py.modules import AttnImplFactory
 from rtp_llm.ops import DeviceResourceConfig
 from rtp_llm.ops.compute_ops import (
     KVCache,
+    LayerKVCache,
+    PyAttentionInputs,
     PyModelInitResources,
     PyModelInputs,
     PyModelOutputs,
@@ -131,3 +134,9 @@ class GptModelBase(nn.Module):
 
     def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
         raise NotImplementedError("forward method must be implemented in subclass")
+
+    def prepare_decoder_layer(
+        self, attention_inputs: PyAttentionInputs, layer_idx: int
+    ) -> Optional[LayerKVCache]:
+        select_block_map_for_layer(attention_inputs, layer_idx)
+        return self.kv_cache.get_layer_cache(layer_idx) if self.kv_cache else None

@@ -9,6 +9,12 @@ py_test_deps = [
 ]
 
 py_test(
+    name = "shared_decoder_inputs_test",
+    srcs = ["shared_decoder_inputs_test.py"],
+    deps = py_test_deps,
+)
+
+py_test(
     name = "glm5_cmp_test",
     srcs = ["glm5_cmp_test.py"],
     deps = py_test_deps + [

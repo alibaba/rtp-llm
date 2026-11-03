@@ -3,6 +3,7 @@ from typing import Any, Dict, Optional, Tuple, Union
 import torch
 from torch import nn
 
+from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.device.device_type import DeviceType, get_device_type
 from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce
 from rtp_llm.models_py.modules import RMSNorm
@@ -11,6 +12,7 @@ from rtp_llm.models_py.modules.factory.attention.attn_factory import MlaImplBase
 from rtp_llm.models_py.modules.hybrid.indexer import Indexer
 from rtp_llm.ops import AttentionConfigs, HWKernelConfig, ParallelismConfig
 from rtp_llm.ops.compute_ops import LayerKVCache
+from rtp_llm.utils.dsa_indexing import dsa_layer_has_indexer, dsa_layer_skips_topk
 from rtp_llm.utils.model_weight import W
 
 # CUDA-only fused strided RMSNorm (replaces .contiguous() + RMSNorm). When
@@ -71,6 +73,33 @@ class MlaAttention(nn.Module):
     """MLA attention. Supports both dense and sparse (indexer/top-k) modes.
     Whether to use Indexer is determined by attn_config.is_sparse.
     """
+
+    @classmethod
+    def from_model_config(
+        cls,
+        config: ModelConfig,
+        parallelism_config: ParallelismConfig,
+        weights: Dict[str, torch.Tensor],
+        layer_idx: int,
+        *,
+        global_weights: Dict[str, torch.Tensor],
+        hw_kernel_config: Optional[HWKernelConfig] = None,
+    ) -> "MlaAttention":
+        return cls(
+            config.attn_config,
+            parallelism_config,
+            weights,
+            layer_idx,
+            config.layernorm_eps,
+            config.quant_config,
+            hw_kernel_config,
+            global_weights=global_weights,
+            has_indexer=dsa_layer_has_indexer(config, layer_idx),
+            reuse_topk_indices=dsa_layer_skips_topk(config, layer_idx),
+            indexer_layernorm_eps=getattr(config, "indexer_layernorm_eps", None),
+            indexer_scale_fmt=getattr(config, "indexer_scale_fmt", None),
+            indexer_use_hadamard=getattr(config, "indexer_use_hadamard", True),
+        )
 
     def __init__(
         self,
