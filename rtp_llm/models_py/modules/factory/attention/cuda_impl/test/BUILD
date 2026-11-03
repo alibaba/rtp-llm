@@ -59,6 +59,34 @@ flashinfer_test_deps = py_test_deps + select({
     "//conditions:default": [],
 })
 
+py_test(
+    name = "dynamic_decode_replay_test",
+    srcs = ["dynamic_decode_replay_test.py", "base_attention_test.py"],
+    main = "dynamic_decode_replay_test.py",
+    deps = flashinfer_test_deps,
+    env = {"GPU_COUNT": "1"},
+    tags = ["H20_CU13"],
+    exec_properties = {"gpu": "H20_CU13", "gpu_count": "1"},
+    target_compatible_with = select({
+        "@//:using_cu12_9_or_13_x86": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+)
+
+py_test(
+    name = "dynamic_decode_xqa_test",
+    srcs = ["dynamic_decode_xqa_test.py", "base_attention_test.py"],
+    main = "dynamic_decode_xqa_test.py",
+    deps = py_test_deps + flashinfer_deps,
+    env = {"GPU_COUNT": "1"},
+    tags = ["H20_CU13"],
+    exec_properties = {"gpu": "H20_CU13", "gpu_count": "1"},
+    target_compatible_with = select({
+        "@//:using_cu12_9_or_13_x86": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+)
+
 flashinfer_platforms = [
     {
         "sm": "sm90",

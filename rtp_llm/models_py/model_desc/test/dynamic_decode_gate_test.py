@@ -35,7 +35,9 @@ from rtp_llm.models_py.modules.factory.attention.dispatch.gate_recorder import (
 from rtp_llm.models_py.modules.factory.attention.dispatch.precision_metrics import (
     DecodeGateConfig,
     DecodeGateEnvelope,
+    FP8_GATE_CONFIG,
     evaluate_precision,
+    gate_config,
     load_gate_profiles,
     validate_calibration_target,
 )
@@ -139,12 +141,54 @@ class DecodePrecisionGateTest(unittest.TestCase):
         noise = torch.ones_like(golden) * 0.08
         noise[:, ::2] *= -1
         contribution = torch.ones((1, 2))
-        verdict = evaluate_precision(golden + noise, golden, contribution, True)
+        verdict = evaluate_precision(golden + noise, golden, contribution, False)
         self.assertEqual(verdict["low_signal_sequences"], [])
         self.assertFalse(verdict["overall_pass"])
         self.assertFalse(
-            evaluate_precision(golden * 1.4, golden, contribution, True)["overall_pass"]
+            evaluate_precision(golden * 1.4, golden, contribution, False)[
+                "overall_pass"
+            ]
         )
+
+    def test_fp8_profile_accepts_calibrated_quantization_loss(self):
+        golden = torch.tensor(
+            [[1.0, -1.0, 1.0, -1.0, 1.0, -1.0, 1.0, -1.0]],
+            dtype=torch.bfloat16,
+        )
+        quantization_noise = torch.tensor(
+            [[0.1, -0.1, -0.1, 0.1, 0.1, -0.1, -0.1, 0.1]],
+            dtype=torch.bfloat16,
+        )
+        candidate = golden + quantization_noise
+        contribution = torch.ones((1, 2))
+        fp8 = evaluate_precision(candidate, golden, contribution, True)
+        bf16 = evaluate_precision(candidate, golden, contribution, False)
+        self.assertTrue(fp8["overall_pass"])
+        self.assertFalse(bf16["overall_pass"])
+
+    def test_fp8_profile_rejects_scale_and_token_order_faults(self):
+        golden = torch.tensor(
+            [
+                [1.0, -1.0, 1.0, -1.0, 1.0, -1.0, 1.0, -1.0],
+                [-1.0, 1.0, -1.0, 1.0, -1.0, 1.0, -1.0, 1.0],
+            ],
+            dtype=torch.bfloat16,
+        )
+        contribution = torch.ones((2, 2))
+        self.assertFalse(
+            evaluate_precision(golden * 1.2, golden, contribution, True)["overall_pass"]
+        )
+        self.assertFalse(
+            evaluate_precision(golden.flip(0), golden, contribution, True)[
+                "overall_pass"
+            ]
+        )
+
+    def test_fp8_and_bf16_use_independent_calibrations(self):
+        self.assertEqual(gate_config(False).calibration_id, "h20-qwen3-20261030-v1")
+        self.assertEqual(gate_config(True).calibration_id, "h20-qwen3-fp8-20261105-v2")
+        self.assertEqual(gate_config(False).cosine_limit, 0.9995)
+        self.assertEqual(gate_config(True).cosine_limit, FP8_GATE_CONFIG.cosine_limit)
 
     def test_zero_output_is_valid(self):
         self.assertTrue(
@@ -347,6 +391,54 @@ class DecodePrecisionGateTest(unittest.TestCase):
         self.assertIn("calibration id: `sm10-qwen3-test`", report)
         self.assertIn("target SM major: `10`", report)
         self.assertIn("target model family: `qwen3`", report)
+
+    def test_calibration_report_adds_qdq_diagnostics_without_admission(self):
+        reference = torch.tensor(
+            [[1.0, -1.0, 1.0, -1.0, 1.0, -1.0, 1.0, -1.0]],
+            dtype=torch.bfloat16,
+        )
+        quantization_loss = torch.tensor(
+            [[0.1, -0.1, -0.1, 0.1, 0.1, -0.1, -0.1, 0.1]],
+            dtype=torch.bfloat16,
+        )
+        qdq_reference = reference + quantization_loss
+        candidate = qdq_reference + quantization_loss * 0.01
+        contribution = torch.ones((1, 2))
+        records = [
+            {
+                "candidate": candidate,
+                "reference": reference,
+                "qdq_reference": qdq_reference,
+                "contribution": contribution,
+                "fp8": True,
+                "kind": "normal",
+                "cohort": "fp8-normal",
+            }
+        ]
+        selected = {
+            "fp8": {
+                "config": FP8_GATE_CONFIG.to_dict(),
+                "normal_pass_rate": 1.0,
+                "minimum_fault_detection_rate": 1.0,
+            }
+        }
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            input_path = temp / "records.pt"
+            grid_path = temp / "grid.json"
+            input_path.write_text("records")
+            grid_path.write_text("{}")
+            report = _report(
+                selected,
+                input_path,
+                grid_path,
+                "h20-qwen3-fp8-test",
+                9,
+                "qwen3",
+                records,
+            )
+        self.assertIn("QDQ references are diagnostic only", report)
+        self.assertIn("| fp8 | 1 | 1.0000 | 1.0000 | 1.0000 |", report)
 
     def test_golden_feedback_records_actual_output(self):
         configs = SimpleNamespace(head_num=2, kv_head_num=1, size_per_head=4)
