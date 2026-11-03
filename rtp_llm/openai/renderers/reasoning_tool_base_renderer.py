@@ -285,7 +285,20 @@ class ReasoningToolBaseRenderer(CustomChatRenderer, ABC):
         for delta in deltas[1:]:
             self._merge_output_str(merged, delta)
             if delta.logprobs is not None:
-                merged.logprobs = delta.logprobs
+                if merged.logprobs is None:
+                    merged.logprobs = delta.logprobs
+                else:
+                    previous = (
+                        merged.logprobs
+                        if isinstance(merged.logprobs, list)
+                        else [merged.logprobs]
+                    )
+                    current = (
+                        delta.logprobs
+                        if isinstance(delta.logprobs, list)
+                        else [delta.logprobs]
+                    )
+                    merged.logprobs = previous + current
 
         return merged
 
