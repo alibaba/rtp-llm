@@ -1,5 +1,6 @@
 import threading
 import unittest
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from rtp_llm.server.backend_manager import BackendManager
@@ -139,6 +140,56 @@ class BackendManagerStopTest(unittest.TestCase):
 
         self.assertTrue(engine.stopped)
         self.assertTrue(nfs_manager.unmounted)
+
+
+class BackendManagerDeepEPTest(unittest.TestCase):
+    def test_mega_moe_skips_deepep_but_other_strategies_initialize_it(self):
+        for strategy in (
+            "mega_moe",
+            "mega_moe_se",
+            "mega_moe_fp8",
+            "mega_moe_fp8_se",
+            "mega_moe_fused",
+            "auto",
+        ):
+            with self.subTest(strategy=strategy):
+                manager = BackendManager.__new__(BackendManager)
+                manager.py_env_configs = Mock()
+                manager._distributed_server = Mock()
+                manager._mark_serving_when_ready = Mock()
+                config = Mock()
+                config.parallelism_config.world_size = 4
+                config.moe_config.use_all_gather = False
+                config.moe_config.use_deepep_moe = True
+                config.moe_config.use_mori_ep = False
+                config.moe_config.moe_strategy = strategy
+                factory = Mock()
+                factory.create_model_config.return_value.expert_num = 8
+                init_deepep = Mock()
+                with patch.multiple(
+                    "rtp_llm.server.backend_manager",
+                    EngineConfig=Mock(create=Mock(return_value=config)),
+                    ModelFactory=factory,
+                    init_distributed_environment=Mock(),
+                    get_world_info=Mock(),
+                    update_worker_addrs=Mock(),
+                    validate_hw_kernel_group_args=Mock(),
+                ), patch.dict(
+                    "sys.modules",
+                    {
+                        "rtp_llm.models_py.distributed.deepep_wrapper": SimpleNamespace(
+                            init_deepep_wrapper=init_deepep
+                        )
+                    },
+                ):
+                    manager.start()
+                if strategy == "auto":
+                    init_deepep.assert_called_once_with(
+                        config, factory.create_model_config.return_value
+                    )
+                else:
+                    init_deepep.assert_not_called()
+                factory.from_model_configs.assert_called_once()
 
 
 if __name__ == "__main__":
