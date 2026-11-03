@@ -7,6 +7,8 @@
 #include <vector>
 
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCache.h"
+#include "rtp_llm/cpp/cache/KVCacheHashUtil.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 
@@ -69,6 +71,7 @@ namespace {
 struct AdmissionStreamInfo {
     GenerateStreamPtr stream;
     int               remaining_kv_steps;
+    int64_t           reusable_device_blocks = 0;
 };
 
 struct AdmissionPeak {
@@ -121,7 +124,8 @@ AdmissionPeak estimateApproximatePeak(const std::vector<AdmissionStreamInfo>& st
         if (stream.remaining_kv_steps < peak.decode_step) {
             break;
         }
-        peak.need_blocks += estimateNeedBlocks(stream.stream, peak.decode_step);
+        peak.need_blocks +=
+            std::max<int64_t>(0, estimateNeedBlocks(stream.stream, peak.decode_step) - stream.reusable_device_blocks);
     }
     return peak;
 }
@@ -295,8 +299,9 @@ void PDFusionRatioScheduler::buildAdmissionPeakState() {
     state->streams.reserve(loading_cache_streams_.size() + running_streams_.size() + pending_decode_streams_.size()
                            + waiting_streams_.size());
     auto append_stream = [&](const GenerateStreamPtr& s) {
-        state->streams.push_back({s, remainingKVAllocationSteps(s)});
-        state->initial_need_blocks += estimateInitialNeedBlocks(s);
+        const int64_t reused = reusableDeviceBlocks(s);
+        state->streams.push_back({s, remainingKVAllocationSteps(s), reused});
+        state->initial_need_blocks += std::max<int64_t>(0, estimateInitialNeedBlocks(s) - reused);
     };
     for (const auto& s : loading_cache_streams_) {
         append_stream(s);
@@ -317,6 +322,47 @@ void PDFusionRatioScheduler::buildAdmissionPeakState() {
     admission_peak_state_ = std::move(state);
 }
 
+int64_t PDFusionRatioScheduler::reusableDeviceBlocks(const GenerateStreamPtr& stream) const {
+    // A fresh, single-sequence prefill can borrow already-resident prefix
+    // blocks. The normal allocator still performs the authoritative match and
+    // capacity check; this read-only peek only removes known reusable blocks
+    // from the scheduler's conservative no-hit admission estimate.
+    if (!cache_manager_ || !stream->reuseCache() || stream->curBlocksNum() != 0 || stream->maxBatchSize() != 1
+        || cache_manager_->cpSlotMapper()) {
+        return 0;
+    }
+    const auto cache = cache_manager_->blockTreeCache();
+    if (!cache) {
+        return 0;
+    }
+    const auto& cfg = cache_manager_->cacheConfig();
+    const int   unit = std::max(1, static_cast<int>(cfg.seq_size_per_block));
+    CacheKeysType keys;
+    const auto    tokens = stream->completeTokenIdsPtr();
+    if (stream->hasCacheKeys()) {
+        keys = stream->cacheKeys();
+    } else {
+        // The allocator normally creates the keys at first malloc, after
+        // admission. Compute the same hashes into a temporary resource so the
+        // admission peek can see a warm prefix without mutating the stream or
+        // suppressing the allocator's first-hit metrics.
+        auto temporary = std::make_shared<BatchKVCacheResource>();
+        temporary->resetBatchSize(1);
+        temporary->initGroups(cfg.topologyPtr());
+        initCacheKeys(temporary, tokens, unit, cfg.cache_key_hash_seed);
+        keys = temporary->cacheKeys(0);
+    }
+    keys.resize(std::min(keys.size(), static_cast<size_t>(cfg.maxPrefixReuseTokens(stream->seqLength()) / unit)));
+    while (!keys.empty() && !tokens->isValidReuseLength(static_cast<int>(keys.size()) * unit,
+                                                         cfg.cache_min_replay_tokens)) {
+        keys.pop_back();
+    }
+    return std::min<int64_t>(estimateInitialNeedBlocks(stream),
+                             static_cast<int64_t>(cache->reusableDeviceBlocks(keys, [tokens, unit](size_t count) {
+                                 return tokens->isValidReuseLength(static_cast<int>(count) * unit);
+                             })));
+}
+
 bool PDFusionRatioScheduler::tryAddToAdmissionPeakState(const GenerateStreamPtr& new_stream,
                                                         int64_t                  initial_capacity,
                                                         int64_t                  lifecycle_capacity) {
@@ -324,9 +370,10 @@ bool PDFusionRatioScheduler::tryAddToAdmissionPeakState(const GenerateStreamPtr&
     const int remaining_kv_steps = remainingKVAllocationSteps(new_stream);
     // Preserve the idle fast path, where the allocator reports an impossible standalone request.
     const bool    enforce_capacity = !state.streams.empty();
-    // Device KV-cache matching happens later in the allocator. At scheduler admission time the actual prefix hit is
-    // unknown, so use the conservative no-hit estimate here.
-    const int64_t initial_delta    = estimateInitialNeedBlocks(new_stream);
+    // Device KV-cache matching happens later in the allocator. A read-only
+    // lookup accounts for already-resident prefix blocks during admission.
+    const int64_t reused           = reusableDeviceBlocks(new_stream);
+    const int64_t initial_delta    = std::max<int64_t>(0, estimateInitialNeedBlocks(new_stream) - reused);
 
     if (enforce_capacity
         && (state.initial_need_blocks + initial_delta > initial_capacity
@@ -336,9 +383,9 @@ bool PDFusionRatioScheduler::tryAddToAdmissionPeakState(const GenerateStreamPtr&
 
     const auto insert_it = std::lower_bound(state.streams.begin(),
                                             state.streams.end(),
-                                            AdmissionStreamInfo{new_stream, remaining_kv_steps},
+                                            AdmissionStreamInfo{new_stream, remaining_kv_steps, reused},
                                             longerLifetimeFirst);
-    const auto candidate_it   = state.streams.insert(insert_it, {new_stream, remaining_kv_steps});
+    const auto candidate_it   = state.streams.insert(insert_it, {new_stream, remaining_kv_steps, reused});
     auto       candidate_peak = estimateApproximatePeak(state.streams);
     // Adding work cannot invalidate a block requirement already sampled before this candidate.
     candidate_peak.need_blocks = std::max(candidate_peak.need_blocks, state.peak.need_blocks);

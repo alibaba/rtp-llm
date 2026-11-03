@@ -54,6 +54,7 @@ private:
     bool      promotePendingDecodeStreams();
     RoundType chooseRound();
     bool      tryAdmitKVForPrefill(const GenerateStreamPtr& new_stream);
+    int64_t   reusableDeviceBlocks(const GenerateStreamPtr& stream) const;
 
     struct AdmissionPeakState;
     void buildAdmissionPeakState();

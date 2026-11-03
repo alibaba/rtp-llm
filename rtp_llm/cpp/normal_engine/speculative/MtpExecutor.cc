@@ -3575,6 +3575,11 @@ absl::Status MtpExecutor::dispatchDecodeAsync(const StreamGroups&               
     auto* processor          = batch_stream_processor_.get();
     auto  spec_decode_copy   = spec_decode_output;
     auto  draft_prefill_copy = std::move(draft_prefill_output);
+    // Reuse the owned graph-output copy already published as per-stream device
+    // state instead of cloning every vocabulary-sized row in the worker.
+    if (draft_probs_all.defined()) {
+        draft_prefill_copy.sampler_output.all_probs = draft_probs_all;
+    }
     auto  stream_groups_copy = stream_groups;
 
     auto streams_for_inc = stream_groups_copy.allStreams();
@@ -3605,7 +3610,8 @@ absl::Status MtpExecutor::dispatchDecodeAsync(const StreamGroups&               
             draft_event->block(cuda_graph::graphGetCurrentStream());
         }
 
-        auto status = processor->dispatchDecode(stream_groups_copy, spec_decode_copy, draft_prefill_copy);
+        auto status = processor->dispatchDecode(
+            stream_groups_copy, spec_decode_copy, draft_prefill_copy, /*draft_probs_owned=*/true);
         if (!status.ok()) {
             RTP_LLM_LOG_ERROR("[stream-async] dispatchDecode (worker) failed: %s", status.ToString().c_str());
         }

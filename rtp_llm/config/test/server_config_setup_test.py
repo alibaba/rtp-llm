@@ -14,6 +14,7 @@ from rtp_llm.config.server_config_setup import (
     configure_kv_cache_event_host_ip_port,
     set_parallelism_config,
     setup_and_configure_server,
+    setup_default_args,
 )
 from rtp_llm.ops import CPRotateMethod, NcclCommConfig, RoleType
 from rtp_llm.server.server_args.server_args import setup_args
@@ -29,6 +30,61 @@ _PINNED_DEVICES = {
 
 def _jit_env(**values):
     return {**_PINNED_DEVICES, "MODEL_TYPE": "fake_model", **values}
+
+
+class AtomQwen4ExpModelRoutingTest(TestCase):
+    def _resolve(self, model_type, packages, draft_type="qwen4_exp_mtp"):
+        configs = PyEnvConfigs()
+        configs.model_args.model_type = model_type
+        configs.model_args.ckpt_path = "/unused/qwen4_exp"
+        configs.model_args.external_model_packages = packages
+        configs.sp_config.model_type = draft_type
+        with (
+            patch("rtp_llm.config.server_config_setup.set_parallelism_config"),
+            patch("rtp_llm.config.server_config_setup.load_external_model_packages"),
+            patch(
+                "rtp_llm.config.server_config_setup._infer_model_type",
+                return_value="qwen4_exp",
+            ),
+            patch(
+                "rtp_llm.config.server_config_setup.torch.cuda.is_available",
+                return_value=False,
+            ),
+        ):
+            setup_default_args(configs)
+        return configs.model_args.model_type, configs.sp_config.model_type
+
+    def test_inferred_qwen4_exp_routes_target_and_draft_with_plugin(self):
+        self.assertEqual(
+            self._resolve("", ["atom.plugin.rtpllm.models"]),
+            ("atom_qwen4_exp", "atom_qwen4_exp_mtp"),
+        )
+
+    def test_explicit_native_names_route_with_plugin(self):
+        self.assertEqual(
+            self._resolve("qwen4_exp", ["other.models", "atom.plugin.rtpllm.models"]),
+            ("atom_qwen4_exp", "atom_qwen4_exp_mtp"),
+        )
+
+    def test_without_plugin_keeps_native_target_and_draft(self):
+        for packages in (None, [], ["other.models"]):
+            with self.subTest(packages=packages):
+                self.assertEqual(
+                    self._resolve("", packages),
+                    ("qwen4_exp", "qwen4_exp_mtp"),
+                )
+
+    def test_plugin_does_not_route_other_models(self):
+        self.assertEqual(
+            self._resolve("qwen35_moe", ["atom.plugin.rtpllm.models"]),
+            ("qwen35_moe", "qwen4_exp_mtp"),
+        )
+
+    def test_legacy_atom_names_remain_supported(self):
+        self.assertEqual(
+            self._resolve("atom_qwen4_exp", ["atom.plugin.rtpllm.models"]),
+            ("atom_qwen4_exp", "atom_qwen4_exp_mtp"),
+        )
 
 
 class ServerConfigPortLayoutTest(TestCase):

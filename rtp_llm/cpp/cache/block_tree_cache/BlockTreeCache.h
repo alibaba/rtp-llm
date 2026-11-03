@@ -123,6 +123,8 @@ public:
     void shutdownLoads();
 
     BlockTreeMatchResult match(const CacheKeysType& cache_keys, const std::function<bool(size_t)>& valid_prefix = {});
+    size_t reusableDeviceBlocks(const CacheKeysType&               cache_keys,
+                                const std::function<bool(size_t)>& valid_prefix = {}) const;
     void                 insert(const CacheKeysType&                              cache_keys,
                                 const std::vector<std::vector<GroupSetResource>>& resources,
                                 Tier                                              target_tier);

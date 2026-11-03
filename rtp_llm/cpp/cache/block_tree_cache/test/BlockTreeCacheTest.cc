@@ -306,6 +306,25 @@ TEST_F(BlockTreeCacheTest, MatchEmptyThenFullAndPartialPath) {
     block_tree_cache_test::releaseRequestRefsForTest(*cache_, partial_result.matched_device_resources);
 }
 
+TEST_F(BlockTreeCacheTest, ReusableDeviceBlocksIsReadOnlyAndRespectsPrefixValidity) {
+    EXPECT_EQ(cache_->reusableDeviceBlocks({100, 200}), 0u);
+
+    std::vector<std::vector<GroupSetResource>> resources(3, std::vector<GroupSetResource>(1));
+    resources[0][0].device_blocks = {42};
+    resources[1][0].device_blocks = {43};
+    resources[2][0].device_blocks = {44};
+    cache_->insert({100, 200, 300}, resources, Tier::DEVICE);
+
+    EXPECT_EQ(cache_->reusableDeviceBlocks({100, 200, 999}), 2u);
+    EXPECT_EQ(cache_->reusableDeviceBlocks({100, 200, 300}, [](size_t n) { return n <= 2; }), 2u);
+    EXPECT_EQ(cache_->reusableDeviceBlocks({100, 200, 300}, [](size_t) { return false; }), 0u);
+
+    // The peek does not take request references or consume the cached match.
+    BlockTreeMatchResult match = cache_->match({100, 200, 300});
+    EXPECT_EQ(match.matched_device_blocks, 3u);
+    block_tree_cache_test::releaseRequestRefsForTest(*cache_, match.matched_device_resources);
+}
+
 TEST_F(BlockTreeCacheTest, ReuseTimeMetricsIncludeFirstIntervalAndReportFirstHitOnce) {
     std::vector<std::vector<GroupSetResource>> resources(2, std::vector<GroupSetResource>(1));
     resources[0][0].device_blocks = {42};

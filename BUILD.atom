@@ -20,7 +20,7 @@ py_package(
 py_wheel(
     name = "atom_whl",
     distribution = "atom",
-    version = "0.1.8+gbdec681249",
+    version = "0.1.8+g9af739efc",
     python_tag = "py3",
     visibility = ["//visibility:public"],
     deps = [":atom_package"],

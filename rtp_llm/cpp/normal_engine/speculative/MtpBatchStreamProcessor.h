@@ -39,7 +39,8 @@ public:
 
     absl::Status dispatchDecode(const StreamGroups&                          stream_groups,
                                 const speculative::SpeculativeSamplerOutput& spec_decode_output,
-                                const MergedOutput&                          draft_prefill_output) const;
+                                const MergedOutput&                          draft_prefill_output,
+                                bool                                         draft_probs_owned = false) const;
 
     absl::StatusOr<GptModelInputs> gatherDecodeModelInput(const StreamGroups& stream_groups,
                                                           TensorHolder&       host_holder) const;
@@ -174,7 +175,8 @@ protected:
     void prepareDecodeSpecUpdateInfo(const StreamGroups&                          stream_groups,
                                      const speculative::SpeculativeSamplerOutput& spec_decode_output,
                                      const MergedOutput&                          draft_prefill_output,
-                                     std::vector<StreamSpecUpdateInfo>&           spec_update_infos) const;
+                                     std::vector<StreamSpecUpdateInfo>&           spec_update_infos,
+                                     bool                                         draft_probs_owned) const;
 
     torch::Tensor compactAcceptedPositionIds(const torch::Tensor&    combo_position_ids,
                                              const std::vector<int>& accept_lens,

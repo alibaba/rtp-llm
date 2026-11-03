@@ -809,12 +809,14 @@ absl::Status MtpBatchStreamProcessor::dispatchPrefill(const StreamGroups&  strea
 
 absl::Status MtpBatchStreamProcessor::dispatchDecode(const StreamGroups&                          stream_groups,
                                                      const speculative::SpeculativeSamplerOutput& spec_decode_output,
-                                                     const MergedOutput& draft_prefill_output) const {
+                                                     const MergedOutput&                          draft_prefill_output,
+                                                     bool                                         draft_probs_owned) const {
     RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
 
     std::vector<StreamSpecUpdateInfo> spec_update_infos;
 
-    prepareDecodeSpecUpdateInfo(stream_groups, spec_decode_output, draft_prefill_output, spec_update_infos);
+    prepareDecodeSpecUpdateInfo(
+        stream_groups, spec_decode_output, draft_prefill_output, spec_update_infos, draft_probs_owned);
 
     // to avoid cuda sync, we need to set propose token in extra loop
     updateProposeTokens(stream_groups, draft_prefill_output, spec_update_infos);
@@ -1846,7 +1848,8 @@ void MtpBatchStreamProcessor::prepareDecodeSpecUpdateInfo(
     const StreamGroups&                          stream_groups,
     const speculative::SpeculativeSamplerOutput& spec_decode_output,
     const MergedOutput&                          draft_prefill_output,
-    std::vector<StreamSpecUpdateInfo>&           spec_update_infos) const {
+    std::vector<StreamSpecUpdateInfo>&           spec_update_infos,
+    bool                                         draft_probs_owned) const {
     // wait for the transfer to complete
     spec_decode_output.transfer_done_event->synchronize();
     const auto& accept_len    = spec_decode_output.accept_len_cpu;
@@ -1854,6 +1857,14 @@ void MtpBatchStreamProcessor::prepareDecodeSpecUpdateInfo(
 
     const auto& draft_model_output   = draft_prefill_output.model_output;
     const auto& draft_sampler_output = draft_prefill_output.sampler_output;
+
+    // Keep graph-owned output alive once per batch. Async dispatch already
+    // copied it on the main stream, so its worker must not copy every row.
+    torch::Tensor owned_draft_probs;
+    if (draft_sampler_output.all_probs.defined()) {
+        owned_draft_probs = draft_probs_owned ? draft_sampler_output.all_probs :
+                                               draft_sampler_output.all_probs.to(torch::kCUDA).clone();
+    }
 
     int batch_idx_in  = 0;
     int batch_idx_out = 0;
@@ -1864,11 +1875,8 @@ void MtpBatchStreamProcessor::prepareDecodeSpecUpdateInfo(
         auto next_batch_size = stream->nextBatchSize();
 
         // speculative decoding info
-        torch::Tensor propose_all_probs;
-        if (draft_sampler_output.all_probs.defined()) {
-            propose_all_probs =
-                draft_sampler_output.all_probs.narrow(0, batch_idx_out, next_batch_size).to(torch::kCUDA).clone();
-        }
+        torch::Tensor propose_all_probs =
+            owned_draft_probs.defined() ? owned_draft_probs.narrow(0, batch_idx_out, next_batch_size) : torch::Tensor();
 
         // This scalar read runs on the bookkeeping worker after accept_len is
         // ready, so it does not sync the main thread. Move to main thread only
@@ -1877,8 +1885,13 @@ void MtpBatchStreamProcessor::prepareDecodeSpecUpdateInfo(
 
         torch::Tensor last_hidden_states;
         if (propose_step_ > 1 && !is_dspark_) {
-            last_hidden_states =
-                cloneHiddenSlice(draft_model_output.all_hidden_states, token_offset + cur_accept_len - 1, 1);
+            if (draft_probs_owned) {
+                last_hidden_states = stream->getLastHiddenStatesGpu();
+            }
+            if (!last_hidden_states.defined()) {
+                last_hidden_states =
+                    cloneHiddenSlice(draft_model_output.all_hidden_states, token_offset + cur_accept_len - 1, 1);
+            }
         }
 
         torch::Tensor accept_tokens_tensor =
