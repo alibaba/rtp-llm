@@ -59,11 +59,15 @@ final class VitImageSource implements AutoCloseable {
         catch(IllegalArgumentException error) { throw MediaInput.invalid("Invalid image URL"); }
         if(uri.getHost()==null || (!"http".equalsIgnoreCase(uri.getScheme()) && !"https".equalsIgnoreCase(uri.getScheme())))
             throw MediaInput.invalid("Image download requires an HTTP(S) URL");
-        final long maxBytes=config.maxFileSizeKb()>0 ? config.maxFileSizeKb()*1024L : Integer.MAX_VALUE-8L;
+        // DSV4.1 load_image_source caps original media at 10 MiB, even when the generic file limit is disabled.
+        final long maxBytes=config.maxFileSizeKb()>0 ? Math.min(10L*1024*1024,config.maxFileSizeKb()*1024L) : 10L*1024*1024;
         for(int attempt=0; ; attempt++) {
             check(deadline);
-            var message=HttpRequest.newBuilder(uri).timeout(Duration.ofNanos(Math.max(1,deadline-System.nanoTime())))
-                .header("User-Agent","RTP-LLM-Mock/1.0");
+            var message=HttpRequest.newBuilder(uri).timeout(Duration.ofNanos(Math.max(1,deadline-System.nanoTime())));
+            if(config.downloadHeaders().isEmpty()) {
+                message.header("User-Agent","Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36 Edg/124.0.0.0");
+                message.header("Accept","text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7");
+            }
             config.downloadHeaders().forEach(message::setHeader);
             var output=new ByteArrayOutputStream();
             var future=client.sendAsync(message.GET().build(),info->{
@@ -80,7 +84,9 @@ final class VitImageSource implements AutoCloseable {
                 var response=future.get(Math.max(1,deadline-System.nanoTime()),TimeUnit.NANOSECONDS);
                 int status=response.statusCode();
                 if(status!=200) {
-                    if(attempt<2 && (status==408 || status==429 || status==500 || status==502 || status==503 || status==504)) continue;
+                    if(attempt<2 && (status==408 || status==429 || status==500 || status==502 || status==503 || status==504)) {
+                        retryPause(attempt,deadline); continue;
+                    }
                     throw Status.UNAVAILABLE.withDescription("Image download HTTP " + status).asRuntimeException();
                 }
                 check(deadline); return output.toByteArray();
@@ -97,8 +103,16 @@ final class VitImageSource implements AutoCloseable {
                 check(deadline);
                 if(cause instanceof HttpTimeoutException && !(cause instanceof HttpConnectTimeoutException)) throw Status.DEADLINE_EXCEEDED.withDescription("Image download expired").asRuntimeException();
                 if(attempt>=2) throw Status.UNAVAILABLE.withDescription("Image download failed").withCause(cause).asRuntimeException();
+                retryPause(attempt,deadline);
             } finally { future.cancel(true); request=null; }
         }
+    }
+
+    private void retryPause(int attempt,long deadline) {
+        check(deadline);
+        try { TimeUnit.NANOSECONDS.sleep(Math.min(TimeUnit.MILLISECONDS.toNanos(200L << attempt),deadline-System.nanoTime())); }
+        catch(InterruptedException error) { Thread.currentThread().interrupt(); }
+        check(deadline);
     }
 
     private void check(long deadline) {

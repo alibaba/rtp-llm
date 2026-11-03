@@ -27,6 +27,8 @@ Master 使用 127.0.0.1、127.0.0.2 等地址，相同 HTTP 端口，gRPC=HTTP+2
 
 ## RTP 节点与公共校验
 
+原生输入与配置不叠加 Mock 自定的 URL 长度、图片数量、图片边长、特征行数、并发 1024 等上限。保留输入格式、正数和整数溢出校验，以及原生配置对应的计算、队列和缓存预算。
+
 节点仅监听本机回环地址；每个实例独立绑定原生 gRPC、控制 HTTP 和指标端点，共 JVM 不合并这些端点。`endpoints.json` 写实际地址、支持的 RPC 和阶段范围；`/health` 只列已绑定的公共接口，当前 Engine 没有绑定 Case 查询接口，Python 查询直接访问 Prometheus。
 
 ```yaml
@@ -137,7 +139,7 @@ vit:
 
 image_token_id 必须使用所选模型的实际值，示例值不代表 DSV4.1 的固定标记。text_config.hidden_size 控制视觉结果的逻辑字节预算。无关模型字段忽略；所需几何字段缺失或非法直接报错。
 
-`mock.vit.skip.download` 默认 false，Whale ENV 对应 `MOCK_VIT_SKIP_DOWNLOAD`。默认模式 GET 真实 HTTP(S) URL，仅读取图片头尺寸，不生成 RGB tensor；请求中的预处理 width/height 不冒充原图尺寸。支持 JDK ImageIO 图片格式（含 PNG/JPEG/GIF/BMP）及 WebP 头尺寸，其他格式明确拒绝。使用 real 的 `download_headers`（JSON 字符串）、`mm_image_max_file_size_kb` 和 `mm_timeout_ms`；文件大小只按 mm_image_max_file_size_kb 限制，不叠加 10 MiB 上限；下载总期限最多 60 秒，并受任务剩余期限约束，瞬态失败最多尝试三次。队列等待同样计入任务期限。
+`mock.vit.skip.download` 默认 false，Whale ENV 对应 `MOCK_VIT_SKIP_DOWNLOAD`。默认模式 GET 真实 HTTP(S) URL，仅读取图片头尺寸，不生成 RGB tensor；请求中的预处理 width/height 不冒充原图尺寸。支持 JDK ImageIO 图片格式（含 PNG/JPEG/GIF/BMP）及 WebP 头尺寸，其他格式明确拒绝。使用 real 的 `download_headers`（JSON 字符串）、`mm_image_max_file_size_kb` 和 `mm_timeout_ms`；文件大小取 mm_image_max_file_size_kb（正数时）和 DSV4.1 原生 `deepseek_v41_processor.py::load_image_source` 的 10 MiB 上限中较小值（`mm_image_max_file_size_kb <= 0` 仅关闭通用限制）；下载总期限最多 60 秒，并受任务剩余期限约束，瞬态网络错误及 HTTP 408/429/500/502/503/504 最多尝试三次，重试等待 200/400ms 且不超出剩余期限。队列等待同样计入任务期限。
 
 本地假 URL 设置 `mock.vit.skip.download=true`，从回放宽高获取尺寸；仍走同一执行器、准入、队列和完成流程，不模拟下载耗时，也不伪造下载指标。真实 URL 回放可省略宽高。几何继续使用 V4.1 `plan_image_grid`/`num_image_tokens`，参数来自模型 config.json 的 vision_config；视频、音频和 tensor 输入未实现。
 
@@ -283,9 +285,9 @@ P 在 GENERATE 阶段发送 `prefill_kv_handoff.computed_kv_end`，为已计算 
 
 `shared/cache/KvcmReporter` 消费同一来源，按 real Meta HTTP `/api/registerInstance`、`/api/reportEvent` 编码注册、NODE_REGISTER、HEARTBEAT、BLOCK_SNAPSHOT、BLOCK_ADD、BLOCK_DELETE 和 HOST_DOWN。当前 Full-KV 只发布实际 HBM 驻留；迁移到 Host 发送 HBM 删除，恢复到 HBM 发送新增，Host-only 缓存不会冒充 HBM。注册模型、布局和 spec 由 RTP 装配方明确传入；Reporter 和共享 KvcmDiscovery 不依赖 RtpConfig 或 Scheduler；Reporter 统一拥有发现和传输资源的关闭责任。旧 backend/rtp/KvcmPublisher 已删除，没有双实现或兼容入口。
 
-变更使用有界内存队列（100000 条），每次最多取 1000 条，按同 key 最后一次转换合并，避免 Meta 先处理 ADD 再处理 DELETE 导致结果逆序。数据执行者每 20ms 检查注册、快照、增量和重试，串行管理待确认请求与 ACK；心跳执行者每秒发送心跳，只反馈重新注册、快照请求和远端启用状态，不操作快照载荷或版本。两者均不占用 Scheduler 线程。
+变更使用有界内存队列（100000 条），每次最多取 1000 条，按同 key 最后一次转换合并，避免 Meta 先处理 ADD 再处理 DELETE 导致结果逆序。注册和增量由同一个执行者每 20ms 处理，快照与心跳分别使用独立执行者，慢快照不阻塞 ADD/DELETE 或心跳。它们均不占用 Scheduler 线程。
 
-快照在缓存锁内一次捕获 HBM long[] 与版本，在锁外流式 JSON 编码，不构建逐 key JSON 对象树；仍保留完整请求体，并非零拷贝。未确认快照使用同一请求体、trace 和版本重试，确认前不发送后续增量；重新注册后丢弃旧快照并捕获当前状态。失败使用一套带抖动的指数退避，数据上报遵守 retry_after_ms（最多 5 分钟），不暂停独立心跳；首次快照按地址错峰，连续快照至少间隔 1 秒。控制请求超时 1.5 秒，快照上传超时 30 秒。队列溢出、增量发送失败和服务端恢复要求通过全量快照修复，不维护磁盘事件历史。快照确认后过滤版本界限以内的旧事件。关闭先停止心跳并收尾数据执行者，再尽力上报 HOST_DOWN；意外退出由服务端心跳失效处理。
+快照在缓存锁内一次捕获 HBM long[] 与版本，在锁外流式 JSON 编码，不构建逐 key JSON 对象树；仍保留完整请求体，并非零拷贝。对齐原生 Publisher：快照失败（包括限流）丢弃本轮，不重放、不暂停增量；下一次周期或服务端恢复请求捕获新快照。重新注册后旧快照回包不影响新注册，增量不按快照 ACK 过滤。注册和增量失败按原生默认 500ms→16s 指数退避；不使用 retry_after_ms 暂停整个数据通道。控制请求超时 1.5 秒，快照上传超时 30 秒。队列溢出和增量失败请求新快照，不维护磁盘事件历史。关闭停止快照和心跳、收尾增量执行者，再尽力上报 HOST_DOWN；意外退出由服务端心跳失效处理。启用 enable_remote_cache 时，kv_cache_event_snapshot_interval_ms 非正数关闭数据上报，保留注册和心跳；未启用 remote 时非正数无效。
 
 Master 与 KVCM 是两个独立消费者，不要求跨服务原子提交。KVCM 不可用时不会阻塞调度或 Master RPC；最近错误、注册状态和待发送数量可从 Engine 端点的 kvcm 状态查看。远端 KV 已提供统一准备流程和逻辑读写接口，但未安装真实存储适配；事件位置仅声明本地持有缓存，不能当成成功的远端 payload 写入。
 ```yaml
@@ -391,7 +393,7 @@ prometheus/ 保存配置、targets、版本、日志、data/TSDB/WAL 和 collect
 
 `KvCache.prepare` 返回准备操作或明确的永久/可重试容量错误。关闭远端时只执行本地匹配和分配，不创建传输线程。开启时，P 对本地缺失的连续前缀异步查询、读取；查到位置不增加复用量，读取成功才发布有效块并完成准备。读取失败保留有效本地前缀，由普通调度器重算缺失部分；请求总 deadline 不重置。D 的 PD 加载仍使用原有流程，不重复查询远端。
 
-`shared/cache/remote/RemoteCache` 仅定义逻辑 match/read/write，位置凭据由适配器自己持有，KvCache 持有本地容量和引用。接口执行在锁外虚拟线程中，整个查询/读取共用一次任务；最多保留 1024 个在途读写，无额外等待队列。达到上限时读取回退本地，写入阶段返回异常。接口返回/抛异常必须表示已停止访问本次资源；interrupt 只请求取消，不作为释放证明。尚未实现真实数据传输、存储 SDK、KVCM 写会话或 KVS。
+`shared/cache/remote/RemoteCache` 仅定义逻辑 match/read/write，位置凭据由适配器自己持有，KvCache 持有本地容量和引用。接口执行在锁外虚拟线程中，整个查询/读取共用一次任务；不另设固定在途读写数量上限，资源占用由已有 KV 容量、引用和请求期限控制。接口返回/抛异常必须表示已停止访问本次资源；interrupt 只请求取消，不作为释放证明。尚未实现真实数据传输、存储 SDK、KVCM 写会话或 KVS。
 
 普通 RtpScheduler 将未就绪请求放入独立 CACHE_LOADING 阶段；完成通知只唤醒 EngineLoop，maintain 在调度锁内更新有效前缀、把请求放回 waiting 队尾。loading 不阻塞其他请求，也计入本轮准入预算与已初始化 KV 请求数。回调不查找可复用的 request_id；取消后原操作不能再发布。LOAD 引用一直持有到工作线程退出，即使请求已取消。
 

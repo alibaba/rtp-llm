@@ -28,7 +28,6 @@ final class PrefillAdmission implements AutoCloseable {
     private final Map<Long, Call> active = new HashMap<>();
     private final Map<Long, BufferedOutput> outputs = new LinkedHashMap<>();
     private record Fence(long expires, boolean preempted) {}
-    private static final int MAX_ACTIVE_REQUESTS = 1024;
     private static final long REGISTRY_TTL = TimeUnit.MINUTES.toNanos(10);
     private final Map<Long, Fence> fences = new LinkedHashMap<>();
     private long nextOutputSweep;
@@ -289,17 +288,10 @@ final class PrefillAdmission implements AutoCloseable {
             sweepFences();
             if (response == null && fences.containsKey(input.getRequestId()) && fences.get(input.getRequestId()).preempted()) throw preempted();
             if (active.containsKey(input.getRequestId())) throw Status.ALREADY_EXISTS.withDescription("Active Prefill request id").asRuntimeException();
-            if (active.size() >= MAX_ACTIVE_REQUESTS)
-                throw Status.RESOURCE_EXHAUSTED.withDescription("Mock P/D request registry full").asRuntimeException();
             long now = System.nanoTime();
             if (now >= nextOutputSweep) {
                 outputs.entrySet().removeIf(e -> e.getValue().expired() || e.getValue().discardable());
                 nextOutputSweep = now + TimeUnit.SECONDS.toNanos(1);
-            }
-            if (outputs.size() >= 65536) {
-                var oldest = outputs.entrySet().stream().filter(e -> e.getValue().finished()).findFirst();
-                if (oldest.isEmpty()) throw Status.RESOURCE_EXHAUSTED.withDescription("Mock output registry full").asRuntimeException();
-                outputs.remove(oldest.get().getKey());
             }
             if (outputs.containsKey(input.getRequestId())) throw Status.ALREADY_EXISTS.withDescription("Retained output request id").asRuntimeException();
             call = new Call(input, response, host + ":" + target.getGrpcPort(), attachMillis, grouped);

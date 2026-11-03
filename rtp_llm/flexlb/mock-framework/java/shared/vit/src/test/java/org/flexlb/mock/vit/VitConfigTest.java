@@ -75,4 +75,27 @@ class VitConfigTest {
         assertEquals(7200000, parsed.timeoutMs());
     }
 
+    @Test void nativeValuesHaveNoInventedUpperBounds() throws Exception {
+        var root = root();
+        var settings = (ObjectNode) root.path("component").path("config");
+        settings.put("gpu_max_batch_size", 2048).put("gpu_batch_wait_ms", 60001)
+            .put("mm_image_max_file_size_kb", -1).put("mm_timeout_ms", 0);
+        var model = (ObjectNode) new ObjectMapper().readTree(directory.resolve("config.json").toFile());
+        ((ObjectNode) model.path("vision_config")).put("patch_size", 2048).put("downsample_ratio", 64)
+            .put("max_image_tokens", 1048577);
+        ((ObjectNode) model.path("text_config")).put("hidden_size", 65537);
+        new ObjectMapper().writeValue(directory.resolve("config.json").toFile(), model);
+        var parsed = VitConfig.load(root);
+        assertEquals(2048, parsed.batchSize()); assertEquals(60001, parsed.waitMs());
+        assertEquals(-1, parsed.maxFileSizeKb()); assertEquals(65537, parsed.hidden());
+        assertEquals(0, parsed.timeoutMs());
+        var image = VitTest.input("http://example/" + "x".repeat(5000)).getMultimodalInputs(0).toBuilder()
+            .setMmPreprocessConfig(org.flexlb.engine.grpc.EngineRpcService.MMPreprocessConfigPB.newBuilder()
+                .setWidth(40000).setHeight(40000)).build();
+        var inputs = org.flexlb.engine.grpc.EngineRpcService.MultimodalInputsPB.newBuilder();
+        for (int i = 0; i < 257; i++) inputs.addMultimodalInputs(image);
+        assertDoesNotThrow(() -> VitGeometry.validate(inputs.build(), true));
+        assertTrue(VitGeometry.rows(40000, 40000, 14, 3, 0, 1024) <= 1024);
+    }
+
 }

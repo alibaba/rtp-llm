@@ -46,7 +46,6 @@ final class VitService extends MultimodalRpcServiceGrpc.MultimodalRpcServiceImpl
             }
         }
         long rows=result.stream().mapToLong(VitGeometry.Image::rows).sum();
-        if(rows>1048576) throw Status.RESOURCE_EXHAUSTED.withDescription("Request image output exceeds row limit").asRuntimeException();
         metrics.events.observe("py_rtp_vit_embedding_length", rows);
         metrics.events.increment("py_rtp_vit_success_qps");
         return result;
@@ -67,7 +66,7 @@ final class VitService extends MultimodalRpcServiceGrpc.MultimodalRpcServiceImpl
         var context=Context.current(); reply(response,()->output(compute(input,context)));
     }
     private MultimodalOutputPB output(List<VitGeometry.Image> images) throws Exception {
-        int rows=images.stream().mapToInt(VitGeometry.Image::rows).sum();var hashes=new ByteArrayOutputStream();
+        int rows=Math.toIntExact(images.stream().mapToLong(VitGeometry.Image::rows).sum());var hashes=new ByteArrayOutputStream();
         var output=MultimodalOutputPB.newBuilder();
         for(var image:images) { output.addSplitSize(image.rows());VitGeometry.hashes(image.featureIdentity(),image.rows()).writeTo(hashes); }
         return output.setMultimodalEmbedding(TensorPB.newBuilder().setDataType(TensorPB.DataType.BF16).addShape(rows).addShape(config.hidden()))
@@ -75,7 +74,7 @@ final class VitService extends MultimodalRpcServiceGrpc.MultimodalRpcServiceImpl
     }
     @Override public void getMultimodalHashes(MultimodalHashRequestPB input,StreamObserver<MultimodalHashResponsePB> response) {
         var context=Context.current(); reply(response,()-> {
-            if(input.getKeysCount()>256 || input.getKeysList().stream().anyMatch(k->k.isBlank() || k.length()>4096)) throw MediaInput.invalid("Oversized hash query");
+            if(input.getKeysList().stream().anyMatch(String::isBlank)) throw MediaInput.invalid("Empty hash query key");
             Map<String,VitGeometry.Image> computed=new HashMap<>();
             if(input.getTimeoutMs()<0) throw MediaInput.invalid("Invalid hash request timeout");
             if(input.hasInputs()) {
@@ -126,7 +125,6 @@ final class VitService extends MultimodalRpcServiceGrpc.MultimodalRpcServiceImpl
         var result=CacheStatusPB.newBuilder();
         if(input.getNeedCacheKeys()) result.setMultimodalCache(MultimodalCacheStatusPB.newBuilder().setWorkerInstance(instance)
             .addAllKeys(cache.keys()).addAllGpuEmbeddingKeys(cache.deviceKeys()).addAllCpuEmbeddingKeys(cache.hostKeys()));
-        if(result.build().getSerializedSize()>4*1024*1024) { response.onError(Status.RESOURCE_EXHAUSTED.withDescription("V cache snapshot exceeds RPC limit").asRuntimeException());return; }
         response.onNext(result.build());response.onCompleted();
     }
     java.util.List<io.prometheus.client.Collector.MetricFamilySamples> collectMetrics() { return metrics.collect(scheduler,cache,preparation); }
