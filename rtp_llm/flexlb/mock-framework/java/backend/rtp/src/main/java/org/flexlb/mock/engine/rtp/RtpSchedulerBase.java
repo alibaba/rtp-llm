@@ -8,12 +8,13 @@ import org.flexlb.mock.api.model.Types.Role;
 import org.flexlb.mock.compute.*;
 import org.flexlb.mock.engine.*;
 import org.flexlb.mock.cache.KvCache;
+import org.flexlb.mock.cache.CacheLoad;
 import static org.flexlb.mock.engine.RequestFailure.Reason.*;
 import static org.flexlb.mock.engine.rtp.RtpSchedulerBase.Phase.*;
 
 /** Shared RTP request, KV, PD and Forward lifecycle; admission policies own their queues. */
 abstract class RtpSchedulerBase implements Scheduler {
-    enum Phase { QUEUED, CAPACITY, LOADING, TRANSFERRING, TRANSFERRED, RUNNING, OUTPUT, FORWARD, READY }
+    enum Phase { QUEUED, CAPACITY, CACHE_LOADING, LOADING, TRANSFERRING, TRANSFERRED, RUNNING, OUTPUT, FORWARD, READY }
     private final TaskHistory history = new TaskHistory();
     private final Object lock;
     protected final RtpConfig config;
@@ -34,6 +35,8 @@ abstract class RtpSchedulerBase implements Scheduler {
         final RequestState state;
         final ArrayDeque<Notice> notices = new ArrayDeque<>();
         KvCache.Lease lease;
+        CacheLoad preparation;
+        boolean cacheReported;
         int reused, outputToken;
         boolean prefillFinished;
         final long begun = System.nanoTime();
@@ -183,13 +186,22 @@ abstract class RtpSchedulerBase implements Scheduler {
 
     protected final void admitPrefill(ArrayDeque<Entry> queue, List<Entry> selected, int uncachedLimit) {
         long uncached = 0;
+        var admitted = new ArrayList<Entry>();
         for (var entry : List.copyOf(queue)) {
             if (!live(entry)) continue;
-            if (selected.size() >= config.maxGenerateBatchSize()) break;
+            if (admitted.size() >= config.maxGenerateBatchSize()) break;
             if (uncachedLimit > 0 && uncached >= uncachedLimit) continue;
             if (entry.lease == null && config.maxInitedKvStreams() > 0
                     && active.values().stream().filter(e -> e.lease != null).count() >= config.maxInitedKvStreams()) continue;
-            if (workTokens(entry) <= 0 || !fitsPrefill(selected, entry) || !reserve(entry)) continue;
+            if (workTokens(entry) <= 0 || !fitsPrefill(admitted, entry)) continue;
+            if (!reserve(entry)) {
+                if (entry.phase == CACHE_LOADING) {
+                    admitted.add(entry);
+                    uncached += entry.input.tokens() - entry.reused;
+                }
+                continue;
+            }
+            admitted.add(entry);
             queue.remove(entry); running.add(entry); selected.add(entry);
             uncached += entry.input.tokens() - entry.reused;
         }
@@ -226,7 +238,9 @@ abstract class RtpSchedulerBase implements Scheduler {
             var failure = acquire(entry);
             if (failure == KvCache.Failure.PERMANENT)
                 finish(entry, new RequestFailure(RequestFailure.Reason.CAPACITY, "Prefill allocation exceeds capacity"));
-            return failure == null;
+            if (failure != null) return false;
+            if (!cacheReady(entry)) { cacheLoading(entry); return false; }
+            return true;
         }
         long tokens = (long) entry.input.tokens() + entry.state.snapshot().generated() + entry.nextStep.additionalKvTokens();
         var failure = entry.lease.ensureCapacity(tokens);
@@ -388,7 +402,7 @@ abstract class RtpSchedulerBase implements Scheduler {
     }
 
     private boolean liveForDelivery(Entry entry) { synchronized (lock) { return live(entry); } }
-    private boolean live(Entry entry) {
+    protected final boolean live(Entry entry) {
         if (entry.state.terminating()) return false;
         if (entry.state.expired()) finish(entry, new RequestFailure(TIMEOUT, "Request budget expired"));
         else if (entry.listener.cancelled()) finish(entry, new RequestFailure(CANCELLED, "Output consumer closed"));
@@ -401,32 +415,46 @@ abstract class RtpSchedulerBase implements Scheduler {
     }
     protected final boolean prefill() { return config.role() == Role.prefill; }
     private KvCache.Failure acquire(Entry entry) {
-        if (entry.lease != null) return null;
+        if (entry.preparation != null) { cacheReady(entry); return null; }
         long generation = cache.allocationGeneration();
         if (entry.attemptedGeneration == generation) return KvCache.Failure.RETRYABLE;
-        boolean reuse = config.reuseCache() && (config.deviceCache() || config.hostBlocks() > 0) && entry.input.reuse()
+        boolean reuse = config.reuseCache() && (config.deviceCache() || config.hostBlocks() > 0 || cache.remoteEnabled()) && entry.input.reuse()
             && (prefill() || !config.disableDecodeFirstReuse());
         var keys = entry.input.keys();
         int matched = Math.min(keys.size(), (entry.input.tokens() - 1) / config.blockSize());
         long capacityTokens = (long) entry.input.tokens() + (prefill() ? 0 : config.compute().kvReserveTokens());
-        var admission = cache.acquire(capacityTokens, reuse ? keys.subList(0, matched) : List.of());
+        var admission = cache.prepare(capacityTokens, reuse ? keys.subList(0, matched) : List.of(),
+            entry.input.deadline(), remoteLookup());
         entry.attemptedGeneration = admission.generation();
-        if (admission.lease() == null) return admission.failure();
+        if (admission.load() == null) return admission.failure();
         if (entry.admittedAt == Long.MIN_VALUE) {
             entry.admittedAt = System.nanoTime();
             if (!prefill() && entry.queuedAt != 0) { entry.waitNanos += entry.admittedAt - entry.queuedAt; entry.queuedAt = 0; }
         }
-        entry.lease = admission.lease();
-        entry.reused = Math.toIntExact(admission.lease().reusedTokens());
-        entry.state.attach(entry.lease, () -> {
+        entry.preparation = admission.load();
+        entry.lease = entry.preparation.lease();
+        entry.reused = Math.toIntExact(entry.lease.reusedTokens());
+        entry.state.attach(entry.preparation, () -> {
             // The final sampled token has not entered a Forward and owns no computed KV.
             int computedOutput = !prefill() && entry.generating ? Math.max(0, entry.state.snapshot().generated() - 1) : 0;
-            boolean publish = config.reuseCache() && (config.deviceCache() || config.hostBlocks() > 0) && entry.input.reuse();
-            entry.lease.publish(publish ? entry.input.cacheSequence().keys(computedOutput, entry.outputToken) : List.of(),
-                (long) entry.input.tokens() + computedOutput);
+            boolean publish = config.reuseCache() && (config.deviceCache() || config.hostBlocks() > 0 || cache.remoteEnabled()) && entry.input.reuse();
+            entry.lease.publishAndStore(publish ? entry.input.cacheSequence().keys(computedOutput, entry.outputToken) : List.of(),
+                (long) entry.input.tokens() + computedOutput, entry.input.deadline());
         });
-        metrics.cacheLookup(entry.input.tokens(), entry.reused);
+        cacheReady(entry);
         return null;
+    }
+    protected boolean remoteLookup() { return false; }
+    protected void cacheLoading(Entry entry) { throw new IllegalStateException("Asynchronous cache loading is not supported by this policy"); }
+    protected final boolean cacheReady(Entry entry) {
+        var result = entry.preparation.result();
+        if (result == null) return false;
+        if (!entry.cacheReported) {
+            entry.reused = Math.toIntExact(result.reusedTokens());
+            metrics.cacheLookup(entry.input.tokens(), entry.reused);
+            entry.cacheReported = true;
+        }
+        return true;
     }
     @Override public List<Request> requests() { return new ArrayList<>(active.values()); }
     @Override public QueueSnapshot queues() {
