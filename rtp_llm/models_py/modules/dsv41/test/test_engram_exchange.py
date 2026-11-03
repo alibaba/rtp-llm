@@ -277,8 +277,8 @@ class IntraInstanceTest(unittest.TestCase):
             self.assertEqual(shards, 2)
             self.assertEqual(host_id, '127.0.0.1')  # the shard's own host, not the member's
             self.assertIsNotNone(kwargs['deadline'])
-            self.assertEqual(kwargs['max_allocation_bytes'], 1 << 30)
-            self.assertEqual(kwargs['budget_bytes'], 8 << 30)
+            self.assertEqual(kwargs['max_allocation_bytes'], 128 << 30)
+            self.assertEqual(kwargs['budget_bytes'], 256 << 30)
             published.append((host_id, shard))
             return docs[shard]
 
@@ -465,27 +465,55 @@ class TopologySourceTest(unittest.TestCase):
         for rank, host in enumerate(['10.0.0.1', '10.0.0.1', '10.0.0.2', '10.0.0.2']):
             store.set(s.TOPOLOGY_PREFIX + 'host/' + str(rank), host.encode())
         with mock.patch.object(s, '_local_addresses', lambda: {'10.0.0.1'}):
-            members = s._gang_cohort({s.RANKS_ENV: '2'}, store, 0, 4)
+            members, per_instance = s._gang_cohort({s.COUNT_ENV: '2'}, store, 0, 4)
         self.assertEqual(members, [('10.0.0.1', s.DEFAULT_COHORT_PORT),
                                    ('10.0.0.2', s.DEFAULT_COHORT_PORT)])
+        self.assertEqual(per_instance, 2)
         self.assertEqual(store.get(s.TOPOLOGY_PREFIX + 'host/3'), b'10.0.0.2')
+
+    def test_a_part_is_a_run_of_consecutive_ranks(self):
+        # Two ranks per part, four parts: no count beyond N is needed.
+        store = MemoryStore()
+        hosts = ['10.0.0.1', '10.0.0.1', '10.0.0.2', '10.0.0.2',
+                 '10.0.0.3', '10.0.0.3', '10.0.0.4', '10.0.0.4']
+        for rank, host in enumerate(hosts):
+            store.set(s.TOPOLOGY_PREFIX + 'host/' + str(rank), host.encode())
+        with mock.patch.object(s, '_local_addresses', lambda: {'10.0.0.1'}):
+            members, per_instance = s._gang_cohort({s.COUNT_ENV: '4'}, store, 0, 8)
+        self.assertEqual([host for host, _ in members],
+                         ['10.0.0.1', '10.0.0.2', '10.0.0.3', '10.0.0.4'])
+        self.assertEqual(per_instance, 2)
 
     def test_ranks_inside_one_part_must_agree(self):
         store = MemoryStore()
-        for rank, host in enumerate(['10.0.0.1', '10.0.0.9', '10.0.0.2', '10.0.0.2']):
+        for rank, host in enumerate(['10.0.0.1', '10.0.0.1', '10.0.0.2', '10.0.0.2']):
+            store.set(s.TOPOLOGY_PREFIX + 'host/' + str(rank), host.encode())
+        with mock.patch.object(s, '_local_addresses', lambda: {'10.0.0.7'}):
+            # The local rank publishes itself into its own block and breaks it.
+            with self.assertRaisesRegex(e.ExchangeError, 'UNEVEN_PART_SIZE'):
+                s._gang_cohort({s.COUNT_ENV: '2'}, store, 1, 4)
+
+    def test_the_declared_count_must_match_the_gang(self):
+        store = MemoryStore()
+        for rank, host in enumerate(['10.0.0.1', '10.0.0.1', '10.0.0.2', '10.0.0.2']):
             store.set(s.TOPOLOGY_PREFIX + 'host/' + str(rank), host.encode())
         with mock.patch.object(s, '_local_addresses', lambda: {'10.0.0.1'}):
-            with self.assertRaisesRegex(e.ExchangeError, 'GANG_HOST_MISMATCH'):
-                s._gang_cohort({s.RANKS_ENV: '2'}, store, 0, 4)
+            with self.assertRaisesRegex(e.ExchangeError, 'MUST_MATCH_COHORT'):
+                s._gang_cohort({s.COUNT_ENV: '3'}, store, 0, 4)
+            with self.assertRaisesRegex(e.ExchangeError, 'RANKS_PER_INSTANCE_MISMATCH'):
+                s._gang_cohort({s.RANKS_ENV: '4'}, store, 0, 4)
 
-    def test_a_single_host_gang_stays_unconfigured(self):
+    def test_a_single_host_gang_asks_for_the_list(self):
         # Prefill is one gang per host: its four ranks cannot see the other hosts.
-        self.assertIsNone(s._gang_cohort({s.RANKS_ENV: '4'}, MemoryStore(), 0, 4))
-        self.assertIsNone(s._gang_cohort({}, MemoryStore(), 0, 16))
+        store = MemoryStore()
+        for rank in range(4):
+            store.set(s.TOPOLOGY_PREFIX + 'host/' + str(rank), b'10.0.0.1')
+        with mock.patch.object(s, '_local_addresses', lambda: {'10.0.0.1'}):
+            with self.assertRaisesRegex(e.ExchangeError, 'COHORT_REQUIRED'):
+                s._gang_cohort({s.RANKS_ENV: '4'}, store, 0, 4)
+        self.assertEqual(s._gang_cohort({}, MemoryStore(), 0, 16), (None, None))
         with self.assertRaisesRegex(e.ExchangeError, 'INSTANCE_STORE_REQUIRED'):
-            s._gang_cohort({s.RANKS_ENV: '4'}, None, 0, 16)
-        with self.assertRaisesRegex(e.ExchangeError, 'INVALID_RANKS_PER_INSTANCE'):
-            s._gang_cohort({s.RANKS_ENV: 'x'}, MemoryStore(), 0, 16)
+            s._gang_cohort({s.COUNT_ENV: '4'}, None, 0, 16)
 
     def test_platform_directory_supplies_the_list(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -513,6 +541,33 @@ class TopologySourceTest(unittest.TestCase):
             group = s.build_group(env, 4)['group']
             self.assertEqual([m['shards'][0]['host_id'] for m in group['members']],
                              ['127.0.0.1', '127.0.0.2'])
+
+
+class RevisionTest(unittest.TestCase):
+    def test_revision_is_derived_from_the_checkpoint(self):
+        with tempfile.TemporaryDirectory() as directory:
+            index = Path(directory) / 'model.safetensors.index.json'
+            index.write_text('{"weight_map": {"a": "a.safetensors"}}')
+            env = cohort_env(2)
+            del env[s.REVISION_ENV]
+            env[s.CHECKPOINT_ENV] = directory
+            first = s.build_group(env, 4)['group']['model_revision']
+            self.assertTrue(first.startswith('ckpt@'))
+            # Identical weights give identical identity, wherever they are mounted.
+            other = cohort_env(2)
+            del other[s.REVISION_ENV]
+            other[s.CHECKPOINT_ENV] = directory
+            self.assertEqual(first, s.build_group(other, 4)['group']['model_revision'])
+            index.write_text('{"weight_map": {"a": "b.safetensors"}}')
+            self.assertNotEqual(first, s.build_group(env, 4)['group']['model_revision'])
+            # An explicit revision still wins, and a checkpoint without either
+            # index is refused rather than given an accidental identity.
+            explicit = dict(env, **{s.REVISION_ENV: 'release-1019'})
+            self.assertEqual(s.build_group(explicit, 4)['group']['model_revision'], 'release-1019')
+            empty = Path(directory) / 'empty'
+            empty.mkdir()
+            with self.assertRaisesRegex(e.ExchangeError, 'MODEL_REVISION_REQUIRED'):
+                s.build_group(dict(env, **{s.CHECKPOINT_ENV: str(empty)}), 4)
 
 
 if __name__ == '__main__': unittest.main(verbosity=2)

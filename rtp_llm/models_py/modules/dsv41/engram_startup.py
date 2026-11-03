@@ -243,19 +243,18 @@ def _ganginfo_cohort(env):
 
 
 def _gang_cohort(env, store, rank, world_size):
-    """One gang spanning several hosts already knows its own parts; exchange addresses.
+    """One gang spanning several hosts already knows its own parts.
 
-    Only usable when the ranks really are one gang: a deployment of independent
-    single-host instances (prefill) sees just its own ranks and keeps the list.
+    Consecutive ranks on the same address form one part, so both the number of
+    parts and the ranks each member owns fall out of the gang itself. Only used
+    when the deployment asked for Engram without giving an address list: a
+    single-host gang (prefill's independent instances) still needs that list,
+    because it cannot see the other hosts.
     """
-    raw = env.get(RANKS_ENV)
-    if raw is None:
-        return None
-    if not raw.isdigit() or int(raw) <= 0:
-        raise ExchangeError('INVALID_RANKS_PER_INSTANCE')
-    per_instance = int(raw)
-    if world_size % per_instance or world_size // per_instance <= 1:
-        return None
+    raw_count = env.get(COUNT_ENV)
+    raw_ranks = env.get(RANKS_ENV)
+    if raw_count is None and raw_ranks is None:
+        return None, None
     if store is None:
         raise ExchangeError('INSTANCE_STORE_REQUIRED')
     timeout = DEFAULT_TIMEOUT if env.get(TIMEOUT_ENV) is None else float(env[TIMEOUT_ENV])
@@ -268,13 +267,26 @@ def _gang_cohort(env, store, rank, world_size):
     store.set(key + str(rank), ','.join(local).encode())
     keys = [key + str(i) for i in range(world_size)]
     _wait(store, keys, time.monotonic() + timeout)
-    hosts = []
-    for begin in range(0, world_size, per_instance):
-        seen = {store.get(key + str(i)).decode() for i in range(begin, begin + per_instance)}
-        if len(seen) != 1:
-            raise ExchangeError('GANG_HOST_MISMATCH')
-        hosts.append(sorted(seen.pop().split(','))[0])
-    return _parse_members(','.join(hosts), env.get(PORT_ENV))
+    blocks = []
+    for i in range(world_size):
+        address = store.get(key + str(i)).decode()
+        if blocks and blocks[-1][0] == address:
+            blocks[-1][1] += 1
+        else:
+            blocks.append([address, 1])
+    if len(blocks) < 2:
+        # One address for the whole gang: the other parts are other gangs.
+        raise ExchangeError('COHORT_REQUIRED')
+    sizes = {size for _, size in blocks}
+    if len(sizes) != 1:
+        raise ExchangeError('UNEVEN_PART_SIZE')
+    per_instance = sizes.pop()
+    if raw_ranks is not None and (not raw_ranks.isdigit() or int(raw_ranks) != per_instance):
+        raise ExchangeError('RANKS_PER_INSTANCE_MISMATCH')
+    if raw_count is not None and (not raw_count.isdigit() or int(raw_count) != len(blocks)):
+        raise ExchangeError('STORAGE_HOST_COUNT_MUST_MATCH_COHORT')
+    hosts = [sorted(address.split(','))[0] for address, _ in blocks]
+    return _parse_members(','.join(hosts), env.get(PORT_ENV)), per_instance
 
 
 def _local_addresses():
@@ -286,6 +298,20 @@ def _local_addresses():
     except OSError:
         pass
     return found
+
+
+def _checkpoint_revision(checkpoint):
+    """Identity of the weights this host serves, read from the checkpoint itself.
+
+    Every member has the same checkpoint, so hashing its index gives the whole
+    cohort the same namespace without anyone having to name a revision.
+    """
+    root = Path(checkpoint)
+    for name in ('model.safetensors.index.json', 'config.json'):
+        path = root / name
+        if path.is_file():
+            return 'ckpt@' + hashlib.sha256(path.read_bytes()).hexdigest()[:16]
+    raise ExchangeError('MODEL_REVISION_REQUIRED')
 
 
 def _instance_index(env, cohort):
@@ -358,8 +384,9 @@ def build_group(env, world_size, store=None, rank=0):
     cohort = _cohort(env)
     if cohort is None:
         cohort = _ganginfo_cohort(env)
+    discovered = None
     if cohort is None:
-        cohort = _gang_cohort(env, store, rank, world_size)
+        cohort, discovered = _gang_cohort(env, store, rank, world_size)
     if cohort is None:
         return None
     instances = len(cohort)
@@ -374,9 +401,10 @@ def build_group(env, world_size, store=None, rank=0):
             raise ExchangeError('STORAGE_HOST_COUNT_MUST_MATCH_COHORT')
     else:
         raise ExchangeError('STORAGE_HOST_COUNT_REQUIRED')
-    revision = env.get(REVISION_ENV)
-    if not revision:
-        raise ExchangeError('MODEL_REVISION_REQUIRED')
+    checkpoint = env.get(CHECKPOINT_ENV) or env.get('CHECKPOINT_PATH')
+    if not checkpoint:
+        raise ExchangeError('CHECKPOINT_REQUIRED')
+    revision = env.get(REVISION_ENV) or _checkpoint_revision(checkpoint)
     index = _instance_index(env, cohort)
     raw_ranks = env.get(RANKS_ENV)
     if raw_ranks is not None and (not raw_ranks.isdigit() or int(raw_ranks) <= 0):
@@ -397,8 +425,15 @@ def build_group(env, world_size, store=None, rank=0):
         except (ValueError, TypeError, AttributeError):
             raise ExchangeError('INVALID_GENERATION') from None
     # A cohort member is either a whole gang on its own host (prefill) or one
-    # host of a gang shared by every member (decode); RANKS_ENV states which.
-    local_world_size = world_size if raw_ranks is None else int(raw_ranks)
+    # host of a gang shared by every member (decode). A list the platform gave
+    # us describes prefill, so the member owns the whole gang; a gang that
+    # reported its own split tells us how many ranks each member owns.
+    if raw_ranks is not None and discovered is not None and int(raw_ranks) != discovered:
+        raise ExchangeError('RANKS_PER_INSTANCE_MISMATCH')
+    if raw_ranks is not None:
+        local_world_size = int(raw_ranks)
+    else:
+        local_world_size = world_size if discovered is None else discovered
     if local_world_size != world_size and local_world_size * instances != world_size:
         raise ExchangeError('WORLD_SIZE_NOT_DIVISIBLE_BY_INSTANCES')
     members = [dict(instance_id=f'i{i}', world_size=local_world_size,
@@ -407,9 +442,6 @@ def build_group(env, world_size, store=None, rank=0):
     group = dict(generation=generation, model_revision=revision, members=members)
     validate_group(group)
     local = members[index]
-    checkpoint = env.get(CHECKPOINT_ENV) or env.get('CHECKPOINT_PATH')
-    if not checkpoint:
-        raise ExchangeError('CHECKPOINT_REQUIRED')
     raw_timeout = env.get(TIMEOUT_ENV)
     timeout = DEFAULT_TIMEOUT if raw_timeout is None else float(raw_timeout)
     if not 0 < timeout <= 86400:

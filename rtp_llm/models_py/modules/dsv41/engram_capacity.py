@@ -1,10 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 """Trusted local capacity policy; no CUDA, allocation or checkpoint imports.
 
-The hard ceilings are development safety bounds, not available-memory claims.
-Only a local launcher may raise the small defaults. A manifest or launch bundle
-must never supply these limits. Budget counts unique padded backing, not RSS,
-file cache, other model weights or driver mapping overhead.
+The ceilings are hard safety bounds on a machine that actually serves Engram,
+so they default to them: a real shard is tens of GiB and asking every
+deployment to restate two byte counts just invited wrong values. A manifest or
+launch bundle must never supply these limits; only the local launcher may, and
+only to lower them on a small machine. Budget counts unique padded backing, not
+RSS, file cache, other model weights or driver mapping overhead.
 """
 from __future__ import annotations
 
@@ -12,10 +14,10 @@ import os
 import re
 
 
-DEFAULT_MAX_ALLOCATION_BYTES = 1 << 30
-DEFAULT_MAX_TOTAL_ALLOCATION_BYTES = 8 << 30
 HARD_MAX_ALLOCATION_BYTES = 128 << 30
 HARD_MAX_TOTAL_ALLOCATION_BYTES = 256 << 30
+DEFAULT_MAX_ALLOCATION_BYTES = HARD_MAX_ALLOCATION_BYTES
+DEFAULT_MAX_TOTAL_ALLOCATION_BYTES = HARD_MAX_TOTAL_ALLOCATION_BYTES
 MAX_ALLOCATION_ENV = "RTP_ENGRAM_MAX_ALLOCATION_BYTES"
 MAX_TOTAL_ALLOCATION_ENV = "RTP_ENGRAM_MAX_TOTAL_ALLOCATION_BYTES"
 _DECIMAL = re.compile(r"[1-9][0-9]{0,11}\Z")

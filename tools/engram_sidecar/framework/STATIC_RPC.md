@@ -74,13 +74,14 @@ RTP_ENGRAM_COHORT=10.0.0.1,10.0.0.2             # 可选；共享一份 Engram �
 RTP_ENGRAM_GANGINFO_DIR=/etc/ganginfo             # 可选；改平台写拓扑的目录，缺省即此路径
 RTP_ENGRAM_COHORT_PORT=29483                       # 可选；平台指定优先，缺省 29483
 RTP_ENGRAM_INSTANCE_INDEX=0                       # 可选；缺省=本机 IP 在列表中的位置
-RTP_ENGRAM_MODEL_REVISION=<rev>                   # 同一 cohort 内一致
-RTP_ENGRAM_CHECKPOINT=/models/DeepSeek            # 本机完整 checkpoint
+RTP_ENGRAM_MODEL_REVISION=<rev>                   # 可选；缺省由 checkpoint 索引哈希推导
+RTP_ENGRAM_CHECKPOINT=/models/DeepSeek            # 可选；缺省回落 CHECKPOINT_PATH
 RTP_ENGRAM_LOCAL_DEVICE=0                         # 建议显式给出；缺省回落 0 并告警
 RTP_ENGRAM_LOCAL_NUMA=0                           # 建议显式给出；该 NUMA node 需有足够空闲内存
-RTP_ENGRAM_MAX_ALLOCATION_BYTES=137438953472      # 必填；默认仅 1GiB
-RTP_ENGRAM_MAX_TOTAL_ALLOCATION_BYTES=274877906944 # 必填；默认仅 8GiB
-RTP_ENGRAM_RANKS_PER_INSTANCE=4                   # 可选；torch gang 跨多个 cohort 成员时需要（也用于自动发现）
+RTP_ENGRAM_MAX_ALLOCATION_BYTES=137438953472      # 可选；缺省即硬上限 128GiB，只在小机器上收紧时才给
+RTP_ENGRAM_MAX_TOTAL_ALLOCATION_BYTES=274877906944 # 可选；缺省即硬上限 256GiB
+ENGRAM_SHARD_COUNT=4                              # 可选；N=分片数=part 数，给了只做一致性校验
+RTP_ENGRAM_RANKS_PER_INSTANCE=4                   # 可选；给了只做一致性校验，缺省从 gang 推导
 RTP_ENGRAM_GENERATION=<uuid>                      # 可选；缺省由 cohort+revision 推导
 RTP_ENGRAM_LOCAL_DESCRIPTORS=<a.json>,<b.json>    # 可选；仅离线诊断模式需要
 RTP_ENGRAM_COHORT_TIMEOUT=1800                    # 可选
@@ -96,16 +97,16 @@ host 列表有三个来源，按顺序取第一个可用的：
 2. **`/etc/ganginfo` 目录**：平台写拓扑的位置。目录里放一个 `cohort`（或 `hosts`/`members`）文件，
    一行一个 host（或 `host:port`，`#` 起注释）；也可以按 part 拆成 `part-0`、`part-1`…（或
    `rank-0`、`node-0`），按名字里的数字排序。两种都没有则视为未配置。
-3. **gang 自身**：一个 gang 本来就跨多台 host 时（decode 单实例多 part），在 `RANKS_PER_INSTANCE` 已给出
-   的前提下，各 rank 把本机 IPv4 写进共享 Store 的 `engram/topology/host/<rank>`，再按
-   `rank // ranks_per_instance` 分块去重取 host——`part 数 = world_size / ranks_per_instance`。
+3. **gang 自身**：一个 gang 本来就跨多台 host 时（decode 单实例多 part），各 rank 把本机 IPv4 写进共享
+   Store 的 `engram/topology/host/<rank>`，连续的 rank 落在同一地址就归为一个 part：`N = 连续块数`，
+   每片 rank 数 = 块大小。**所以 decode 一个 IP 都不用给**，只要让程序知道“要开 engram”并且 N 是多大
+   （给 `ENGRAM_SHARD_COUNT=4`，或 `RANKS_PER_INSTANCE`，两者都只用来交叉校验推导结果）。
 
-   gang 推导只在 `world_size / ranks_per_instance > 1` 时生效；单机 gang（prefill 的每个 pod 只有 4 个
-   rank）推出来只有一台，会被当作“未配置”跳过，所以不会把 prefill 误判成单 part。一个 part 内的 rank
-   报出的 host 不一致会报 `GANG_HOST_MISMATCH`。
+   单机 gang（prefill 每个 pod 只有 4 个 rank）推出来只有一块，会报 `COHORT_REQUIRED` 要求给列表，
+   不会静默把 prefill 当成单 part。块大小不一致报 `UNEVEN_PART_SIZE`，N 与推导不符报
+   `STORAGE_HOST_COUNT_MUST_MATCH_COHORT`。
 
-平台至少要给出 **host 列表**（或平台目录、或让 gang 自描述）：列表里有几台 host，就是几个 part 在共享
-这份 Engram，顺序即 part 序号；分片数、成员表、shard 归属、store 命名空间全部由它推导。
+三个来源都拿不到时 engram 直接不启用（返回 None，不占端口、不建连接）。
 
 交换端口由平台决定，不指定就用默认值：**整组只有列表里第 0 台需要监听**，而且只在启动窗口内（发布+握手，
 通常几十秒到几分钟），握手结束即关闭；其余成员只有出站连接。平台可以用 `RTP_ENGRAM_COHORT_PORT` 指定一个

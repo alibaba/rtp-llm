@@ -12,8 +12,9 @@ spec.loader.exec_module(c)
 
 
 class CapacityTest(unittest.TestCase):
-    def test_small_defaults_are_unchanged(self):
-        self.assertEqual(c.capacity_from_environ({}), (1 << 30, 8 << 30))
+    def test_defaults_are_the_hard_bounds(self):
+        self.assertEqual(c.capacity_from_environ({}),
+                         (c.HARD_MAX_ALLOCATION_BYTES, c.HARD_MAX_TOTAL_ALLOCATION_BYTES))
 
     def test_explicit_local_ceiling_is_supported(self):
         self.assertEqual(c.capacity_from_environ({
@@ -24,7 +25,7 @@ class CapacityTest(unittest.TestCase):
     def test_each_limit_can_be_lowered_independently(self):
         self.assertEqual(c.validate_capacity(1 << 30, 64 << 20), (1 << 30, 64 << 20))
         self.assertEqual(c.capacity_from_environ({c.MAX_ALLOCATION_ENV: "4096"}),
-                         (4096, 8 << 30))
+                         (4096, 256 << 30))
 
     def test_capacity_types_and_hard_bounds(self):
         for allocation, total in ((0, 1), (1, 0), (-1, 1), (True, 1),
@@ -44,10 +45,10 @@ class CapacityTest(unittest.TestCase):
                     with self.assertRaisesRegex(c.CapacityError, "INVALID_CAPACITY_LIMIT"):
                         c.capacity_from_environ({key: value})
 
-    def test_bundle_like_keys_cannot_increase_limits(self):
+    def test_bundle_like_keys_cannot_change_limits(self):
         self.assertEqual(c.capacity_from_environ({"budget_bytes": str(256 << 30),
                                                   "max_allocation_bytes": str(128 << 30)}),
-                         (1 << 30, 8 << 30))
+                         (c.HARD_MAX_ALLOCATION_BYTES, c.HARD_MAX_TOTAL_ALLOCATION_BYTES))
 
     def test_real_layout_padded_capacity_uses_64_bit_offsets(self):
         sizes = [rows * (256 + 8) for rows in (384006168, 384016682)]
