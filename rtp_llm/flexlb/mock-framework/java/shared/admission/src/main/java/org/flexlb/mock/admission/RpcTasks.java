@@ -13,11 +13,17 @@ final class RpcTasks {
     static Scheduler.Input input(org.flexlb.mock.multimodal.MediaInput.Prepared prepared, String identity, long started, long rpcDeadline,
                                  boolean retained, int blockSize, long seed) {
         var input = prepared.input();
-        long deadline = Math.min(rpcDeadline, input.getGenerateConfig().getTimeoutMs() == 0 ? Long.MAX_VALUE
-            : after(started, TimeUnit.MILLISECONDS.toNanos(input.getGenerateConfig().getTimeoutMs())));
         return new Scheduler.Input(identity, input.getRequestId(), input.hasGroupId() ? input.getGroupId().getValue() : 0,
-            input.getTokenIdsCount(), input.getGenerateConfig().getMaxNewTokens(), input.getPriority(), started, deadline,
+            input.getTokenIdsCount(), input.getGenerateConfig().getMaxNewTokens(), input.getPriority(), started, rpcDeadline,
             org.flexlb.mock.multimodal.MediaInput.sequence(prepared, blockSize, seed), input.getGenerateConfig().getReuseCache(), retained, input.getGenerateConfig().getMinNewTokens(), input.getGenerateConfig().getIgnoreEos());
+    }
+    static Scheduler.Task pending(GenerateInputPB input) {
+        return new Scheduler.Task(input.getRequestId(), input.hasGroupId() ? input.getGroupId().getValue() : 0,
+            input.getTokenIdsCount(), 0, input.getPriority(), Scheduler.ReportedPhase.PENDING, 0, 0, -1, -1, null);
+    }
+    static long deadline(GenerateInputPB input, long started, long rpcDeadline) {
+        int timeout = input.getGenerateConfig().getTimeoutMs();
+        return Math.min(rpcDeadline, timeout <= 0 ? Long.MAX_VALUE : after(started, TimeUnit.MILLISECONDS.toNanos(timeout)));
     }
     static TaskInfoPB task(Scheduler.Task task) {
         var result = TaskInfoPB.newBuilder().setRequestId(task.requestId()).setBatchId(task.batchId())
@@ -30,8 +36,11 @@ final class RpcTasks {
             }).setIsWaiting(task.phase() != Scheduler.ReportedPhase.RUNNING)
             .setIterateCount(task.iterations()).setWaitingTimeMs(task.waitingMillis())
             .setExecutionTimeMs(task.executionMillis()).setEndTimeMs(task.endTimeMillis());
-        if (task.errorCode() != 0)
-            result.setErrorInfo(ErrorDetailsPB.newBuilder().setErrorCode(task.errorCode()).setErrorMessage(task.errorMessage()));
+        if (task.failure() != null) {
+            long code = RpcErrors.code(task.failure());
+            if (code == 0) code = RpcErrors.status(task.failure()).getCode().value();
+            result.setErrorInfo(ErrorDetailsPB.newBuilder().setErrorCode(code).setErrorMessage(java.util.Objects.toString(task.failure().getMessage(), "")));
+        }
         return result.build();
     }
     static long after(long now, long nanos) {

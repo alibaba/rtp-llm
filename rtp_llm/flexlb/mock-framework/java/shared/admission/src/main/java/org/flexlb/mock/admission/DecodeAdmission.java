@@ -18,7 +18,7 @@ final class DecodeAdmission implements AutoCloseable {
 
     DecodeAdmission(AdmissionConfig config, KvCache cache, Scheduler.Factory schedulers) {
         this.config = config;
-        engine = new EngineLoop(this, schedulers.create(this, cache), cache, config.compute(), config.role(), config.id());
+        engine = new EngineLoop(this, schedulers, cache, config.compute(), config.role(), config.id());
     }
 
     StreamObserver<GenerateRequestPB> open(StreamObserver<GenerateOutputsPB> observer) {
@@ -78,7 +78,7 @@ final class DecodeAdmission implements AutoCloseable {
                 call.input = frame.getInput();
                 call.client = frame.getClientId();
                 call.request = engine.input(RpcTasks.input(new org.flexlb.mock.multimodal.MediaInput.Prepared(call.input, frame.getMultimodalCacheSpansList()), call.client + "/" + call.input.getRequestId(),
-                    call.started, call.rpcDeadline, false, config.blockSize(), config.cacheKeySeed()), call);
+                    call.started, RpcTasks.deadline(call.input, call.started, call.rpcDeadline), false, config.blockSize(), config.cacheKeySeed()), call);
                 return;
             }
             if (frame.getRequestId() != call.input.getRequestId()
