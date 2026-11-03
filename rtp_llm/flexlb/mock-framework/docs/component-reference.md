@@ -63,7 +63,7 @@ PD 只执行调度器之间的交接，不模拟 KV 数据传输。P/D 只使用
 
 已接受的批量请求不随入队 RPC 结束而取消；请求 timeout 覆盖全程，Fetch 接入期限默认 10min，接入后撤销。Fetch 重复为 ALREADY_EXISTS，过期/缺失为 NOT_FOUND。Cancel 只面向批量请求；活动项 ACCEPTED，未登记项 TOMBSTONED，已完成项 NOT_FOUND；抢占锁定原生 8429，墓碑和完成记录保留 10min。ACK 不承诺远端已经释放，直接 Generate 通过 RPC 取消。
 
-P/D 都按实际 Forward 计时，token 是重复输入末 token 的模拟载荷，不做词表推理。incremental 返回新 token，否则返回累计输出；aux.output_len 始终累计。P 首 token 计入总长度，非推测模式 D 执行 N−1 轮。Client TTFT 必须来自实际接收，不能使用 Engine aux 或计算耗时替代。
+P/D 都按实际 Forward 计时，token 是重复输入末 token 的模拟载荷，不做词表推理。Engine RPC 始终返回本轮新增 token，`aux.output_len` 始终累计；用户侧 incremental/累计展示由 Frontend 处理。P 首 token 计入总长度，非推测模式 D 执行 N−1 轮。Client TTFT 必须来自实际接收，不能使用 Engine aux 或计算耗时替代。
 
 请求总预算取 timeout_ms 和 RPC deadline 较早者，不逐阶段重置；取消、超时和关闭只释放一次，旧回调不能影响复用身份的新请求。602/603/605 使用原生 ErrorDetailsPB。P 转发采用受控拉取/有限 Inbox，遵守发送就绪；共享连接不随单请求取消关闭。Mock 保护上限是 1024 活动请求，TaskHistory 保留 1024 项。旧游标越过历史窗口时，按 real 的恢复方式继续返回完整当前状态、仍保留的完成记录和推进后的游标，不以 OUT_OF_RANGE 阻断健康同步；超前游标不倒退。每次缺口读取在组件日志中记录 `finished_history_gap`，包含 requested_version、dropped_through、latest_version、retained，不能把这段完成记录当成完整请求历史。生产 proto 没有历史完整性字段，缺口证据保存在实验组件日志；需要完整逐请求证据时不能依赖 WorkerStatus 的有限窗口。real 当前为 1000 条/5s 保留，Mock 的 1024 条是明确的模拟边界，不宣称保留策略完全相同。
 
@@ -230,6 +230,7 @@ real 默认值和映射以 `rtp_llm/server/server_args`、`rtp_llm/config/engine
 
 | 参数 | 含义 |
 | --- | --- |
+| mock.scheduler.mode | P 调度方式，默认 `group` 保留显式组语义；`fifo` 按单请求入队、自主组 Forward batch，拒绝 `EnqueueBatch`/`EnqueueGroup`。ENV 为 `MOCK_SCHEDULER_MODE`；D 始终使用普通调度。 |
 | mock.cache.memory.blocks | P/D Host 逻辑块预算，默认 0；不是 real 的 memory_cache_size_mb。本模型不加载层/head/dtype 来计算每块字节数，所以忽略 memory_cache_size_mb，不能把 MB 当块数。 |
 | mock.vit.skip.download | 默认 false；本地显式设 true 后用输入宽高跳过 HTTP 读取，其他队列、计算、缓存链路相同。 |
 | mock.vit.patch.size / mock.vit.spatial.merge.size / mock.vit.hidden.size | V 简化几何模型，默认 14 / 2 / 4096，不冒充 real 的模型加载配置。 |
@@ -350,3 +351,7 @@ prometheus/ 保存配置、targets、版本、日志、data/TSDB/WAL 和 collect
 ### main 的 ViT 适配边界
 
 保留 main 的展开 token span、数据集 `Image.length` 和原有几何公式，不引入 DSV4.1 的占位 token 协议或模型配置结构。下载得出的行数仍须与输入 span 长度一致。`gpu_max_batch_size` 和 `gpu_max_batch_images` 分别保留配置，图片工作按两个上限的较小值组批，batch=1 不收集等待；队列按准备完成的唯一图片计数。main 的原生 WorkerStatus 没有 `mm_inflight_inputs`，不补造协议字段，准备中数量从指标查看。
+
+### RTP 调度实现边界
+
+`RtpSchedulerBase` 共享请求状态、KV 引用、PD 生命周期、Forward 提交、取消和指标；`RtpScheduler` 仅做普通 FIFO 准入，`RtpGroupScheduler` 单独拥有显式组队列、残余成员和普通/组之间的选择。组标识不改变普通请求的调度方式。选择在 Engine 启动时完成，不从 Master 配置推断，也不在运行中按请求切换。`fifo` 模式应配合 Master 的 `NON_BATCH` 交付；它仍会动态组成多请求 Forward batch。当前拆分保留既有同步缓存行为，尚未增加远端 KV 加载或组级异步加载。

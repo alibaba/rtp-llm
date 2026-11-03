@@ -57,6 +57,9 @@ public record RtpConfig(String id, Role role, int blockSize, int deviceBlocks, i
         if (config.has("capacity") || config.has("capacity.device_blocks") || config.has("capacity.reserve_blocks"))
             throw new IllegalArgumentException("Removed Mock capacity settings: use test_block_num and reserve_block_ratio");
         config = RtpSettings.normalize(config, role);
+        var scheduler = config.path("mock.scheduler.mode");
+        if (!scheduler.isMissingNode() && (!scheduler.isTextual() || !Set.of("fifo", "group").contains(scheduler.textValue())))
+            throw new IllegalArgumentException("Invalid mock.scheduler.mode: expected fifo or group");
         // Native pools reserve block zero; test_block_num counts that physical block too.
         int blocks = nativeInt(config, "test_block_num", null, 2, Integer.MAX_VALUE) - 1;
         int ratio = nativeInt(config, "reserve_block_ratio", 5, 0, 100);
@@ -93,6 +96,10 @@ public record RtpConfig(String id, Role role, int blockSize, int deviceBlocks, i
             config, compute, EngineConfig.cacheKeySeed(config));
     }
 
+    public boolean groupScheduling() {
+        return role == Role.prefill && business.path("mock.scheduler.mode").asText("group").equals("group");
+    }
+
     public AdmissionConfig endpoint() {
         return new AdmissionConfig(id, role, blockSize, tpSize, maxSeqLen, maxBatchTokens, compute, cacheKeySeed);
     }
@@ -127,6 +134,7 @@ public record RtpConfig(String id, Role role, int blockSize, int deviceBlocks, i
                 .put("enable_remote_cache",control);
             result.putObject("kvcm_capabilities").put("payload_io",false).put("hbm_events",events.equals("kvcm"));
         }
+        if (role == Role.prefill) result.put("mock.scheduler.mode", groupScheduling() ? "group" : "fifo");
         result.setAll((ObjectNode) compute.effectiveSettings());
         return result;
     }

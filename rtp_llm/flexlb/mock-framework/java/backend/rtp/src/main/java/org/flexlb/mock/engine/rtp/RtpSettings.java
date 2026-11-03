@@ -41,7 +41,7 @@ final class RtpSettings {
     }
     static Set<String> mockNames() {
         var names = new HashSet<>(ComputeModel.settingNames());
-        names.add("mock.cache.memory.blocks");
+        names.addAll(Set.of("mock.cache.memory.blocks", "mock.scheduler.mode"));
         return Set.copyOf(names);
     }
     static ObjectNode normalize(JsonNode config, Role role) {

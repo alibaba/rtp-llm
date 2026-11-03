@@ -414,10 +414,27 @@ class RtpSchedulerTest {
             .put("max_inited_kv_cache_streams", inited).put("max_batch_tokens_without_cache", uncached);
         var path = directory.resolve("limits.json"); json.writeValue(path.toFile(), root); return RtpConfig.load(path);
     }
-    @Test void explicitBatchesWithTheSameReportedIdNeverMergeEvenWhenSingleton() throws Exception {
+    @Test void ordinarySchedulerIgnoresGroupMetadataAndRejectsExplicitGroupsWithoutAdmission() throws Exception {
         var config = config("prefill", "1", 4, 100);
         try (var cache = new KvCache(2, 20, 0, KvCache.EvictionPolicy.LRU);
              var scheduler = new RtpScheduler(new Object(), config, cache)) {
+            assertThrows(RequestFailure.class, () -> scheduler.input(batch(sized(9, 5))));
+            assertTrue(scheduler.requests().isEmpty());
+            assertEquals(20, cache.snapshot(0, false).freeBlocks());
+            scheduler.input(sized(1, 5), new Listener());
+            scheduler.input(sized(2, 5), new Listener());
+            var work = scheduler.schedule();
+            assertEquals(List.of(1L, 2L), ids(work));
+            complete(scheduler, work, config); drain(scheduler);
+            assertTrue(scheduler.requests().isEmpty());
+            assertEquals(20, cache.snapshot(0, false).freeBlocks());
+        }
+    }
+
+    @Test void explicitBatchesWithTheSameReportedIdNeverMergeEvenWhenSingleton() throws Exception {
+        var config = config("prefill", "1", 4, 100);
+        try (var cache = new KvCache(2, 20, 0, KvCache.EvictionPolicy.LRU);
+             var scheduler = new RtpGroupScheduler(new Object(), config, cache)) {
             assertEquals(2, scheduler.input(batch(sized(1, 5), sized(2, 5))).size());
             scheduler.input(batch(sized(3, 5)));
             var first = scheduler.schedule(); assertEquals(List.of(1L, 2L), ids(first));
@@ -430,7 +447,7 @@ class RtpSchedulerTest {
     @Test void groupCapacityScanKeepsResidualMembersAndCanAdmitLaterSmallerMembers() throws Exception {
         var config = config("prefill", "1", 4, 100);
         try (var cache = new KvCache(2, 4, 0, KvCache.EvictionPolicy.LRU);
-             var scheduler = new RtpScheduler(new Object(), config, cache)) {
+             var scheduler = new RtpGroupScheduler(new Object(), config, cache)) {
             scheduler.input(batch(sized(1, 5), sized(2, 5), sized(3, 1)));
             var first = scheduler.schedule(); assertEquals(List.of(1L, 3L), ids(first));
             assertEquals(1, scheduler.queues().waiting());
@@ -443,7 +460,7 @@ class RtpSchedulerTest {
     @Test void ordinaryAndGroupWorkAlternateAtEmptyForwardBoundariesWithoutMixing() throws Exception {
         var config = config("prefill", "1", 4, 100);
         try (var cache = new KvCache(2, 20, 0, KvCache.EvictionPolicy.LRU);
-             var scheduler = new RtpScheduler(new Object(), config, cache)) {
+             var scheduler = new RtpGroupScheduler(new Object(), config, cache)) {
             scheduler.input(batch(sized(1, 5), sized(2, 5)));
             scheduler.input(sized(3, 5), new Listener());
             var normal = scheduler.schedule(); assertEquals(List.of(3L), ids(normal));
@@ -458,7 +475,7 @@ class RtpSchedulerTest {
     @Test void oversizedGroupFallsBackToOrdinaryAdmissionAndCanMergeWithSingles() throws Exception {
         var config = config("prefill", "1", 2, 100);
         try (var cache = new KvCache(2, 20, 0, KvCache.EvictionPolicy.LRU);
-             var scheduler = new RtpScheduler(new Object(), config, cache)) {
+             var scheduler = new RtpGroupScheduler(new Object(), config, cache)) {
             scheduler.input(batch(sized(1, 5), sized(2, 5), sized(3, 5)));
             scheduler.input(sized(4, 5), new Listener());
             var first = scheduler.schedule(); assertEquals(List.of(1L, 2L), ids(first));
@@ -470,7 +487,7 @@ class RtpSchedulerTest {
     @Test void initializedKvLimitProtectsRetainedSourcesAndCountsAsAnOversizedGroupLimit() throws Exception {
         var config = admissionLimits(config("prefill", "1", 4, 100), 1, 0);
         try (var cache = new KvCache(2, 20, 0, KvCache.EvictionPolicy.LRU);
-             var scheduler = new RtpScheduler(new Object(), config, cache)) {
+             var scheduler = new RtpGroupScheduler(new Object(), config, cache)) {
             var held = scheduler.input(input(9, true), new Listener());
             var first = scheduler.schedule(); complete(scheduler, first, config); drain(scheduler);
             scheduler.input(batch(sized(1, 5), sized(2, 5)));
@@ -485,7 +502,7 @@ class RtpSchedulerTest {
     @Test void prefillRectangleLimitsGroupsAndUncachedQuotaAppliesToOrdinaryAdmission() throws Exception {
         var config = admissionLimits(config("prefill", "1", 4, 100), 0, 1);
         try (var cache = new KvCache(2, 100, 0, KvCache.EvictionPolicy.LRU);
-             var scheduler = new RtpScheduler(new Object(), config, cache)) {
+             var scheduler = new RtpGroupScheduler(new Object(), config, cache)) {
             scheduler.input(batch(sized(1, 60), sized(2, 30)));
             var first = scheduler.schedule(); assertEquals(List.of(1L), ids(first));
             complete(scheduler, first, config); drain(scheduler);
@@ -503,7 +520,7 @@ class RtpSchedulerTest {
     @Test void rejectedAndCancelledGroupMembersDoNotCancelOtherMembers() throws Exception {
         var config = config("prefill", "1", 4, 100);
         try (var cache = new KvCache(2, 20, 0, KvCache.EvictionPolicy.LRU);
-             var scheduler = new RtpScheduler(new Object(), config, cache)) {
+             var scheduler = new RtpGroupScheduler(new Object(), config, cache)) {
             var admitted = scheduler.input(batch(sized(1, 5), sized(1, 5), sized(2, 5)));
             assertEquals(RequestFailure.Reason.DUPLICATE, admitted.get(1).failure().reason());
             scheduler.finish(admitted.get(0).request(), new RequestFailure(RequestFailure.Reason.CANCELLED, "test")); drain(scheduler);
@@ -516,7 +533,7 @@ class RtpSchedulerTest {
     @Test void oneTokenGenerationCanShareAGroupWithMultiTokenGeneration() throws Exception {
         var config = config("prefill", "1", 4, 100);
         try (var cache = new KvCache(2, 20, 0, KvCache.EvictionPolicy.LRU);
-             var scheduler = new RtpScheduler(new Object(), config, cache)) {
+             var scheduler = new RtpGroupScheduler(new Object(), config, cache)) {
             var one = new Scheduler.Input("1", 1, 81, 5, 1, 0, System.nanoTime(),
                 Long.MAX_VALUE, new CacheSequence(2, Collections.nCopies(5, 0), List.of()), false, false, 0, false);
             scheduler.input(batch(one, sized(2, 5)));

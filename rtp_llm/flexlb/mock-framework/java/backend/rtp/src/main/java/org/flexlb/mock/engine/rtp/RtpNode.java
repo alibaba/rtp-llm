@@ -29,7 +29,7 @@ public final class RtpNode implements org.flexlb.mock.runtime.EngineInstance {
         Objects.requireNonNull(schedulers);
         cache = new KvCache(config.blockSize(), config.deviceBlocks(), config.reserveBlocks(), config.evictionPolicy(),
             config.deviceCache(), config.hostBlocks(), config.hostPolicy(), config.deviceWatermark(), config.hostWatermark());
-        try { service = new RpcService(config.endpoint(), cache, schedulers); }
+        try { service = new RpcService(config.endpoint(), cache, schedulers, config.groupScheduling()); }
         catch (RuntimeException error) { cache.close(); throw error; }
     }
 
@@ -96,8 +96,12 @@ public final class RtpNode implements org.flexlb.mock.runtime.EngineInstance {
         var result = new LinkedHashMap<String, Object>();
         result.put("id", config.id()); result.put("role", config.role().name()); result.put("engine", "rtp");
         result.put("rpc", rpcAddress()); result.put("control", address.http(api.port())); result.put("metrics", address.http(api.port()) + "/metrics");
-        result.put("supported_rpc", prefill ? List.of("CheckHealth", "GetWorkerStatus", "GetCacheStatus", "GenerateStreamCall", "EnqueueBatch", "EnqueueGroup", "FetchResponse", "Cancel")
-            : List.of("CheckHealth", "GetWorkerStatus", "GetCacheStatus", "RemoteGenerate"));
+        var supported = new ArrayList<>(List.of("CheckHealth", "GetWorkerStatus", "GetCacheStatus"));
+        if (prefill) {
+            supported.addAll(List.of("GenerateStreamCall", "FetchResponse", "Cancel"));
+            if (config.groupScheduling()) supported.addAll(List.of("EnqueueBatch", "EnqueueGroup"));
+        } else supported.add("RemoteGenerate");
+        result.put("supported_rpc", List.copyOf(supported));
         if (publisher != null) result.put("kvcm",publisher.status());
         result.put("local_generation", prefill ? Map.of("max_new_tokens", 1, "multimodal", true) : Map.of());
         result.put("pd_generation", prefill ? Map.of("rpc", "GenerateStreamCall", "decode_target", "role_addrs", "multimodal", true) : Map.of());
