@@ -287,3 +287,25 @@ cc_test(
     exec_properties = {"gpu": "L20_CU13"},
     tags = ["L20_CU13"],
 )
+
+# Separate processes cover the cached PDL switch in both modes.
+[cc_test(
+    name = "attn_res_pdl_" + mode + "_" + arch + "_test",
+    srcs = ["AttnResPdlTest.cc"],
+    copts = copts(),
+    deps = [
+        "//rtp_llm/cpp/config:static_config",
+        "//rtp_llm/models_py/bindings/cuda/kernels:attn_res",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+        "@local_config_cuda//cuda:cuda_headers",
+        "@local_config_cuda//cuda:cudart",
+    ] + torch_deps() + cuda13_torch_link_deps,
+    env = {"ATTN_RES_DISABLE_PDL": "1"} if mode == "disabled" else {},
+    target_compatible_with = CUDA13_ONLY + ["@platforms//cpu:" + cpu],
+    exec_properties = {"gpu": gpu},
+    tags = [gpu],
+) for arch, cpu, gpu in [
+    ("x86", "x86_64", "SM103_CU13"),
+    ("arm", "aarch64", "SM100_ARM_CU13"),
+] for mode in ["enabled", "disabled"]]

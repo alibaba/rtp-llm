@@ -17,6 +17,7 @@
 // csrc/libtorch_stable/kimi_k3/attn_res_kernel.cu (Apache-2.0).
 // Device algorithm unchanged; RTP uses the regular ATen ABI.
 #include "rtp_llm/models_py/bindings/cuda/kernels/attn_res.h"
+#include "rtp_llm/models_py/bindings/cuda/launch_utils.h"
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAGuard.h>
 #include <cuda_bf16.h>
@@ -370,8 +371,11 @@ __global__ void __launch_bounds__(BLK, 1) attn_res_fwd_online_v2_kernel(
 
   if (wid == 0) {
     if (elect_one_sync()) {
+      // Both the running prefix and delta may be written by the predecessor.
+      // Wait before issuing any asynchronous input load, including on CTAs
+      // with no token work so their completion signal remains transitive.
+      cudaGridDependencySynchronize();
       long long gci = 0;
-      bool pdl_waited = false;
       for (int tb = blockIdx.x; tb < TB; tb += num_ctas) {
         const int t = tb / B;
         for (int ci = 0; ci < num_chunks; ci++, gci++) {
@@ -395,20 +399,12 @@ __global__ void __launch_bounds__(BLK, 1) attn_res_fwd_online_v2_kernel(
             const bf16_t* src =
                 residual_addr(block_res, layer_res, ns + n, N, t,
                               block_stride_m, block_stride_r, H);
-            if (!has_delta && ns + n == N - 1 && !pdl_waited) {
-              cudaGridDependencySynchronize();
-              pdl_waited = true;
-            }
             cp_async_bulk(buf_ptr(slot), src, H * sizeof(bf16_t),
                           plan.bar_ready[chunk_slot]);
           }
           if (has_delta) {
             int prefix_n = N - 1 - ns;
             if (prefix_n >= 0 && prefix_n < an) {
-              if (!pdl_waited) {
-                cudaGridDependencySynchronize();
-                pdl_waited = true;
-              }
               cp_async_bulk(delta_buf_ptr(chunk_slot),
                             delta + (long long)tb * H, H * sizeof(bf16_t),
                             plan.bar_ready[chunk_slot]);
@@ -416,7 +412,6 @@ __global__ void __launch_bounds__(BLK, 1) attn_res_fwd_online_v2_kernel(
           }
         }
       }
-      cudaTriggerProgrammaticLaunchCompletion();
     }
   } else {
     float acc32[ACC_PER_THREAD] = {};
@@ -879,7 +874,12 @@ __global__ void __launch_bounds__(BLK, 1) attn_res_fwd_online_v2_kernel(
     }
   }
 
+  // A successor can consume output, prefix, and written block anchors. All
+  // consumer warps must finish those stores before this CTA signals readiness.
   __syncthreads();
+  if (tid == 0) {
+    cudaTriggerProgrammaticLaunchCompletion();
+  }
   if (wid == 1) {
     tmem_free(plan.tmem_base, TMEM_COLS_ALLOC);
   }
@@ -923,7 +923,7 @@ static void launch_fwd(bf16_t* block_residual, bf16_t* layer_residual,
   config.stream = stream;
   cudaLaunchAttribute attrs[1];
   attrs[0].id = cudaLaunchAttributeProgrammaticStreamSerialization;
-  attrs[0].val.programmaticStreamSerializationAllowed = 1;
+  attrs[0].val.programmaticStreamSerializationAllowed = rtp_llm::getEnvEnablePDL();
   config.attrs = attrs;
   config.numAttrs = 1;
   cudaLaunchKernelEx(&config, kernel, block_residual, layer_residual, delta,

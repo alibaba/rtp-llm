@@ -431,6 +431,7 @@ cc_library(
     srcs = ["attn_res.cu"],
     hdrs = ["attn_res.h"],
     deps = torch_deps() + [
+        "//rtp_llm/models_py/bindings/cuda:launch_utils",
         "@local_config_cuda//cuda:cuda_headers",
         "@local_config_cuda//cuda:cudart",
     ],
