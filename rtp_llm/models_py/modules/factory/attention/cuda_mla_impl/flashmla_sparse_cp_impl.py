@@ -839,9 +839,7 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
         if self._gather is not None:
             out0 = self._attend_gather(q0, kv_cache, topk, attn_sink)
         else:
-            out0 = self._attend_with_kvcache(
-                q0, kv_cache, topk, layer_id, attn_sink
-            )
+            out0 = self._attend_with_kvcache(q0, kv_cache, topk, layer_id, attn_sink)
 
         if use_identity_q:
             return out0
@@ -1094,7 +1092,7 @@ class SparseMlaCpImpl(SparseMlaImpl):
         self._glm53_prefill_workspace: Optional[Glm53PrefillWorkspace] = None
 
     def enable_glm53_prefill_workspace(self) -> None:
-        """Enable GLM5.3's per-forward attention workspace manager."""
+        """Enable the per-forward attention workspace for GLM5 and HY4."""
         self._glm53_prefill_workspace = Glm53PrefillWorkspace()
 
     def prepare(

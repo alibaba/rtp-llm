@@ -1,4 +1,4 @@
-"""Workspace manager for GLM5.3 context-parallel SparseMLA prefill.
+"""Workspace manager for GLM5/HY4 context-parallel SparseMLA prefill.
 
 The input projection produces ``q_transformed[T, H, K+R]``. Once SparseMLA
 has consumed it, the same storage can hold the CP scatter result

@@ -1,10 +1,56 @@
 import unittest
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 import torch
 
+from rtp_llm.models_py.modules.factory.attention.attn_factory import AttnImplFactory
 from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.glm53_prefill_workspace import (
     Glm53PrefillWorkspace,
 )
+
+
+class Hy4PrefillWorkspaceRoutingTest(unittest.TestCase):
+    def select_impl(self, model_type: str, *, is_cuda_graph: bool = False):
+        implementation = Mock()
+        model = SimpleNamespace(
+            model_type=model_type,
+            getAttentionConfigs=lambda _: SimpleNamespace(use_mla=True),
+            quant_config=None,
+            max_seq_len=8192,
+            force_sparse_mla=False,
+        )
+        parallelism = SimpleNamespace(get_attn_tp_size=lambda: 8)
+        with patch.dict(
+            AttnImplFactory.FMHA_IMPL_REGISTRY,
+            {"mla": Mock(return_value=implementation)},
+        ):
+            result = AttnImplFactory.get_fmha_impl(
+                model,
+                parallelism,
+                None,
+                SimpleNamespace(),
+                is_cuda_graph=is_cuda_graph,
+            )
+        self.assertIs(result, implementation)
+        return implementation
+
+    def test_hy4_prefill_enables_workspace(self):
+        self.select_impl(
+            "hy_v4"
+        ).enable_glm53_prefill_workspace.assert_called_once_with()
+
+    def test_hy4_mtp_prefill_enables_workspace(self):
+        self.select_impl(
+            "hy_v4_mtp"
+        ).enable_glm53_prefill_workspace.assert_called_once_with()
+
+    def test_graph_capture_does_not_enable_reallocating_workspace(self):
+        implementation = self.select_impl("hy_v4", is_cuda_graph=True)
+        implementation.enable_glm53_prefill_workspace.assert_not_called()
+
+    def test_unrelated_model_does_not_enable_workspace(self):
+        self.select_impl("qwen_3").enable_glm53_prefill_workspace.assert_not_called()
 
 
 class Glm53PrefillWorkspaceTest(unittest.TestCase):

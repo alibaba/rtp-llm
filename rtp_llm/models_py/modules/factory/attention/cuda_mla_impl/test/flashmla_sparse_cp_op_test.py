@@ -348,16 +348,20 @@ class SparseMlaFp8CPOpTest(TestCase):
             cp_gather_shapes.append(tuple(dst.shape))
             dst.zero_()
 
-        with patch(
-            "rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashmla_sparse_cp_impl.all_gather",
-            side_effect=_record_all_gather,
-        ), patch(
-            "rtp_llm.models_py.modules.factory.attention.common.apply_write_cache_store",
-            lambda *_args, **_kwargs: None,
-        ), patch.object(
-            rtp_llm_ops,
-            "cp_gather_and_upconvert_fp8_kv_cache_v2",
-            side_effect=_record_cp_gather,
+        with (
+            patch(
+                "rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashmla_sparse_cp_impl.all_gather",
+                side_effect=_record_all_gather,
+            ),
+            patch(
+                "rtp_llm.models_py.modules.factory.attention.common.apply_write_cache_store",
+                lambda *_args, **_kwargs: None,
+            ),
+            patch.object(
+                rtp_llm_ops,
+                "cp_gather_and_upconvert_fp8_kv_cache_v2",
+                side_effect=_record_cp_gather,
+            ),
         ):
             out = op.forward(
                 q,
@@ -611,6 +615,39 @@ class SparseMlaFp8CPOpTest(TestCase):
             "CP output should match non-CP when tp_size=1 (all_gather identity)",
         )
 
+        from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.glm53_prefill_workspace import (
+            Glm53PrefillWorkspace,
+        )
+
+        sink = torch.full((num_heads,), -1.0, dtype=torch.float32, device=device)
+        reference = non_cp_op.forward(
+            q, kv_cache_flat, topk_indices, layer_id=0, attn_sink=sink
+        )
+        workspace = Glm53PrefillWorkspace()
+        q_owner = workspace.q_transformed(
+            total_q_len, num_heads, qk_head_dim, dtype=q.dtype, device=device
+        )
+        q_owner.copy_(q)
+        aliased_scatter = workspace.scatter_output(total_q_len, num_heads, kv_lora_rank)
+        with patch(
+            "rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashmla_sparse_cp_impl.all_gather",
+            side_effect=_identity_all_gather,
+        ):
+            out_aliased = cp_op.forward(
+                q_owner,
+                compressed_kv,
+                k_pe,
+                topk_cat,
+                batch_indice_d,
+                kv_cache,
+                layer_id=0,
+                scatter_out=aliased_scatter,
+                attn_sink=sink,
+            )
+        torch.cuda.synchronize()
+        self.assertEqual(out_aliased.data_ptr(), q_owner.data_ptr())
+        torch.testing.assert_close(out_aliased, reference, atol=1e-2, rtol=1e-2)
+
     def test_cp_op_forward_output_shape(self):
         """CP op forward returns correct shape [total_q_len, num_heads, kv_lora_rank]."""
         from rtp_llm.models_py.modules.factory.attention.cuda_cp_impl.prefill_mha.cp_utils import (
@@ -736,12 +773,15 @@ class SparseMlaFp8CPOpTest(TestCase):
         topk0 = torch.index_select(topk_indices, 0, q0_idx_t).contiguous()
         topk1 = torch.index_select(topk_indices, 0, q1_idx_t).contiguous()
         topk_cat = torch.cat([topk0, topk1], dim=0)
-        with patch(
-            "rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashmla_sparse_cp_impl.all_gather",
-            side_effect=_identity_all_gather,
-        ), patch(
-            "rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashmla_sparse_cp_impl.triton_kv_scatter"
-        ) as scatter_mock:
+        with (
+            patch(
+                "rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashmla_sparse_cp_impl.all_gather",
+                side_effect=_identity_all_gather,
+            ),
+            patch(
+                "rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashmla_sparse_cp_impl.triton_kv_scatter"
+            ) as scatter_mock,
+        ):
             out = cp_op.forward(
                 q,
                 compressed_kv,

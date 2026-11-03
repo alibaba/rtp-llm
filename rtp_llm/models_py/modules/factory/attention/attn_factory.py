@@ -278,6 +278,8 @@ class AttnImplFactory(object):
         if not is_cuda_graph and str(getattr(model_config, "model_type", "")) in (
             "glm_5",
             "glm_5_mtp",
+            "hy_v4",
+            "hy_v4_mtp",
         ):
             enable_workspace = getattr(instance, "enable_glm53_prefill_workspace", None)
             if enable_workspace is not None:
