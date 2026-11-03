@@ -1174,7 +1174,7 @@ py::dict runPyWrappedModelCacheStoreScenario(py::object         py_model,
     RTP_LLM_CHECK_WITH_INFO(forward_count > 0, "forward_count must be positive");
 
     const bool inspect_padding  = scenario_name.rfind("request_padding ", 0) == 0;
-    const bool cacheless_warmup = scenario_name == "cacheless_warmup";
+    const bool cacheless_warmup = scenario_name == "cacheless_warmup" || scenario_name == "cacheless_device_warmup";
     const bool inspect_split = scenario_name == "micro_batch_split_pinned" || scenario_name == "micro_batch_split_cuda"
                                || scenario_name == "micro_batch_split_single_group"
                                || scenario_name == "micro_batch_split_2d";
@@ -1282,6 +1282,10 @@ py::dict runPyWrappedModelCacheStoreScenario(py::object         py_model,
     if (cacheless_warmup) {
         params.cache_manager                     = nullptr;
         scenario.inputs.warmup                   = true;
+        if (scenario_name == "cacheless_device_warmup") {
+            scenario.inputs.input_lengths  = scenario.inputs.input_lengths.cuda();
+            scenario.inputs.prefix_lengths = scenario.inputs.prefix_lengths.cuda();
+        }
         scenario.inputs.kv_cache_block_id        = torch::Tensor();
         scenario.inputs.kv_cache_kernel_block_id = torch::Tensor();
     }

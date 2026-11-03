@@ -456,13 +456,15 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
     const auto host_i32 = torch::TensorOptions(torch::kInt32).device(torch::kCPU).pinned_memory(true);
 
     // LINEAR prefill plans convolution and checkpoint metadata on the host.
-    // Keep the device mirrors above for kernels and the decode/verify fast path.
-    const bool linear_prefill =
-        context_batch_size > 0 && !inputs.is_target_verify && kv_cache_layer_layout_.has_value()
-        && std::any_of(kv_cache_layer_layout_->topology().groups().begin(),
-                       kv_cache_layer_layout_->topology().groups().end(),
-                       [](const auto& group) { return group.policy.group_type == CacheGroupType::LINEAR; });
-    if (linear_prefill && py_attn_inputs.input_lengths.is_cuda()) {
+    // A cacheless framework warmup has no layout to identify these consumers,
+    // so retain host metadata there too. Device mirrors still serve the kernels.
+    const bool host_prefill_metadata =
+        context_batch_size > 0 && !inputs.is_target_verify
+        && (!kv_cache_layer_layout_.has_value()
+            || std::any_of(kv_cache_layer_layout_->topology().groups().begin(),
+                           kv_cache_layer_layout_->topology().groups().end(),
+                           [](const auto& group) { return group.policy.group_type == CacheGroupType::LINEAR; }));
+    if (host_prefill_metadata && py_attn_inputs.input_lengths.is_cuda()) {
         py_attn_inputs.input_lengths  = normalize_i32(py_attn_inputs.input_lengths.cpu());
         py_attn_inputs.prefix_lengths = normalize_i32(py_attn_inputs.prefix_lengths.cpu());
     }

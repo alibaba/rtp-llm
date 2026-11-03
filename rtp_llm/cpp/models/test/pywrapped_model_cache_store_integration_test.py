@@ -1496,6 +1496,8 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
         )
 
     def test_cacheless_multigroup_warmup_exposes_single_input(self):
+        owner = self
+
         class WarmupModel(CacheStoreForwardModel):
             def _forward_one(self, inputs):
                 assert self.kv_cache is None
@@ -1508,6 +1510,10 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
                 assert attention_inputs.kv_cache_kernel_block_id is None
                 assert attention_inputs.kv_cache_kernel_block_id_device is None
                 assert attention_inputs.cache_store_inputs is None
+                owner.assertEqual(attention_inputs.cu_seqlens.device.type, "cpu")
+                owner.assertEqual(attention_inputs.cu_seqlens.tolist(), [0, 4])
+                owner.assertEqual(attention_inputs.prefix_lengths.tolist(), [0])
+                owner.assertTrue(attention_inputs.cu_seqlens_device.is_cuda)
                 return PyModelOutputs(
                     torch.zeros(
                         (inputs.input_ids.numel(), 1),
@@ -1516,11 +1522,12 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
                     )
                 )
 
-        model = WarmupModel()
-        result = run_scenario(model, "cacheless_warmup")
-
-        self.assertEqual(model.forward_calls, 1)
-        self.assertEqual(result["records"], [])
+        for scenario in ("cacheless_warmup", "cacheless_device_warmup"):
+            with self.subTest(scenario=scenario):
+                model = WarmupModel()
+                result = run_scenario(model, scenario)
+                self.assertEqual(model.forward_calls, 1)
+                self.assertEqual(result["records"], [])
 
     def setUp(self) -> None:
         previous_torchspec_modules = _install_fake_torchspec_modules()
