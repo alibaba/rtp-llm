@@ -142,7 +142,7 @@ py_library(
 
 py_library(
     name = "models",
-    srcs = glob([
+    srcs = ["prefill_optimization.py", "mtp_optimization.py"] + glob([
         "model_desc/*.py",
         "model_desc/cuda_graph/*.py"
     ]),

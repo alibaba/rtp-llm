@@ -28,6 +28,23 @@ logger = logging.getLogger(__name__)
 _DEPENDENCIES_LOGGED = False
 
 
+def _fix_cutlass_namespace_path():
+    # Bazel pip runfiles keep each nvidia-cutlass-dsl wheel in its own
+    # site-packages, so the `cutlass` namespace package only resolves when the
+    # wheels' dsl_packages dirs are all on sys.path (the wheel's own .pth
+    # handling never runs there). Mirror the fix already used in
+    # models_py/modules/factory/linear/factory.py.
+    import sys
+
+    for path in list(sys.path):
+        dsl_packages = os.path.join(path, "nvidia_cutlass_dsl", "dsl_packages")
+        if (
+            os.path.isdir(os.path.join(dsl_packages, "cutlass"))
+            and dsl_packages not in sys.path
+        ):
+            sys.path.insert(0, dsl_packages)
+
+
 def transform_gc_routed_fp4(l1, l2, w1_layout: str):
     """Convert RTP's W1 order, then invoke GC's own routed transform."""
     import gc_moe
@@ -74,6 +91,8 @@ def log_gc_dependencies_once():
     if _DEPENDENCIES_LOGGED:
         return
     import cuda.bindings
+
+    _fix_cutlass_namespace_path()
     import cutlass
     import gc_moe
 

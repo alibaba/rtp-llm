@@ -1,8 +1,10 @@
 import json
 import logging
+import math
 import os
 import time
 from concurrent.futures import Future, ProcessPoolExecutor, ThreadPoolExecutor
+from dataclasses import asdict
 from typing import Any, Dict, List, Optional, Union
 
 import requests
@@ -125,6 +127,7 @@ class BatchPerfImpl(object):
         reuse_cache_seed_query: Optional[Union[str, List[str]]] = None,
         query_variants: Optional[List[Union[str, List[str]]]] = None,
         target_reuse_len: int = 0,
+        expected_input_len: Optional[int] = None,
     ):
         self.base_port = base_port
         self.dp_size = dp_size
@@ -144,6 +147,8 @@ class BatchPerfImpl(object):
         self.profile = profile
         self.generate_config = generate_config or {}
         self.profile_trace_name = profile_trace_name
+        self.validation_errors: List[str] = []
+        self.expected_input_len = expected_input_len
         self.query_variants = (
             [self._normalize_queries(q) for q in query_variants]
             if query_variants
@@ -267,6 +272,59 @@ class BatchPerfImpl(object):
             logging.warning(f"[PERF_PREARM_PROFILE] failed: {e}")
 
     # warmup (JIT compile), measure timing, profile (optional, torch profiler affects accuracy)
+    def _record_decode_round(self, phase, index, responses):
+        if os.environ.get("PERF_VALIDATE_DECODE") != "1" or not self.is_decode:
+            return
+        fields = (
+            "success",
+            "input_len",
+            "output_len",
+            "wait_time",
+            "total_time",
+            "prefill_time",
+            "decode_time",
+            "decode_time_per_token",
+            "reuse_len",
+        )
+        rows = [{key: getattr(r, key) for key in fields} for r in responses]
+        valid = len(rows) == self.batch_size and all(
+            r["success"]
+            and r["output_len"] == self.decode_test_length
+            and (
+                self.expected_input_len is None
+                or r["input_len"] == self.expected_input_len
+            )
+            and math.isfinite(r["decode_time_per_token"])
+            and r["decode_time_per_token"] > 0
+            for r in rows
+        )
+        if not valid:
+            self.validation_errors.append(f"{phase} round {index}: invalid responses")
+        metrics = asdict(analyze_results(responses))
+        # Keep invalid latency evidence in standards-compliant JSON as well.
+        for row in rows + [metrics]:
+            for key, value in row.items():
+                if isinstance(value, float) and not math.isfinite(value):
+                    row[key] = str(value)
+        directory = os.environ.get("TEST_UNDECLARED_OUTPUTS_DIR", ".")
+        os.makedirs(directory, exist_ok=True)
+        with open(os.path.join(directory, "decode_rounds.jsonl"), "a") as f:
+            f.write(
+                json.dumps(
+                    dict(
+                        trace=self.profile_trace_name,
+                        phase=phase,
+                        round=index,
+                        expected_requests=self.batch_size,
+                        valid=valid,
+                        responses=rows,
+                        metrics=metrics,
+                    ),
+                    allow_nan=False,
+                )
+                + "\n"
+            )
+
     def run(self):
         self._set_concurrency()
         for i in range(self.warmup_runs):
@@ -277,7 +335,10 @@ class BatchPerfImpl(object):
                 self.warmup_runs,
                 self.profile_trace_name,
             )
-            _ = self._curl_server(input_queries=self._next_input_queries())
+            responses = self._curl_server_responses(
+                input_queries=self._next_input_queries()
+            )
+            self._record_decode_round("warmup", i + 1, responses)
 
         all_measure_responses: List[ResponseInfo] = []
         for i in range(self.measure_runs):
@@ -286,6 +347,7 @@ class BatchPerfImpl(object):
                 input_queries=self._next_input_queries()
             )
             metric = analyze_results(responses)
+            self._record_decode_round("formal", i + 1, responses)
             self._validate_reuse_metric(metric)
             logging.info(
                 "[PERF_MEASURE_RUN] %d/%d trace=%s success=%d/%d "

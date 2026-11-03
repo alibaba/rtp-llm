@@ -60,7 +60,7 @@ class TestFusedLogitsHeadGate(unittest.TestCase):
 
     def test_glm5_like(self):
         """GLM5-like shape: hidden=6144 (non power-of-2)."""
-        for T in (1, 32, 256):
+        for T in (1, 32, 64, 256):
             with self.subTest(T=T):
                 self._run(T, K=6144, N=64)
 

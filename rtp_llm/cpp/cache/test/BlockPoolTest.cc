@@ -195,9 +195,30 @@ makeMtpCacheConfigByCreateSpConfig(uint32_t main_layers, int mtp_module_num, uin
 
 }  // namespace
 
+TEST(CacheConfigCreatorTest, UnspecifiedKernelBlockDefaultsToPhysicalBlock) {
+    auto model_config                                = makeTestModelConfig(/*num_layers=*/2);
+    model_config.attn_config.use_mla                 = true;
+    model_config.attn_config.tokens_per_block        = 64;
+    model_config.attn_config.kernel_tokens_per_block = 64;
+
+    ParallelismConfig parallelism_config;
+    RuntimeConfig     runtime_config;
+    KVCacheConfig     kv_cache_config;
+    kv_cache_config.seq_size_per_block        = 64;
+    kv_cache_config.kernel_seq_size_per_block = 0;
+    kv_cache_config.test_block_num            = 16;
+
+    const auto config =
+        CacheConfigCreator::createConfig(model_config, parallelism_config, runtime_config, kv_cache_config);
+
+    EXPECT_EQ(config.seq_size_per_block, 64u);
+    EXPECT_EQ(config.kernel_seq_size_per_block, 64u);
+    EXPECT_EQ(config.kernelBlocksPerKvBlock(), 1u);
+}
+
 TEST_F(BlockPoolTest, GpuCacheTensorsCoverWholeMtpAllocation) {
     auto cache_config = makeMtpCacheConfigByCreateSpConfig(2, 2, 4);
-    auto config = BlockPoolConfigHelper::createConfig(cache_config);
+    auto config       = BlockPoolConfigHelper::createConfig(cache_config);
     ASSERT_EQ(config.memory_layouts.size(), 3u);
     for (bool use_cuda_malloc : {false, true}) {
         BlockPool pool(config, AllocationType::DEVICE, false, use_cuda_malloc);
@@ -209,7 +230,7 @@ TEST_F(BlockPoolTest, GpuCacheTensorsCoverWholeMtpAllocation) {
         EXPECT_EQ(tensors[0].data_ptr(), pool.getBaseAddress());
         EXPECT_EQ(tensors[0].nbytes(), config.total_size_bytes);
         const auto begin = reinterpret_cast<uintptr_t>(tensors[0].data_ptr());
-        const auto end = begin + tensors[0].nbytes();
+        const auto end   = begin + tensors[0].nbytes();
         for (const auto& views : {pool.allLayerCacheBase(), pool.allLayerScaleCacheBase()}) {
             for (const auto& view : views) {
                 ASSERT_TRUE(view.defined());
@@ -227,19 +248,19 @@ TEST_F(BlockPoolTest, GpuCacheTensorsCoverWholeMtpAllocation) {
 }
 
 TEST_F(BlockPoolTest, GpuCacheTensorsCoverTieredMlaIndexerAndHbm) {
-    auto model = makeTestModelConfig(2);
-    model.attn_config.use_mla = true;
-    model.attn_config.is_sparse = true;
-    model.attn_config.kv_cache_dtype = KvCacheDataType::FP8;
-    model.attn_config.kv_lora_rank = 512;
-    model.attn_config.rope_head_dim = 64;
+    auto model                         = makeTestModelConfig(2);
+    model.attn_config.use_mla          = true;
+    model.attn_config.is_sparse        = true;
+    model.attn_config.kv_cache_dtype   = KvCacheDataType::FP8;
+    model.attn_config.kv_lora_rank     = 512;
+    model.attn_config.rope_head_dim    = 64;
     model.attn_config.indexer_head_dim = 128;
     ParallelismConfig parallelism;
-    auto cache_config = SingleConfigCreator::createSingleConfig(model, parallelism, false);
-    cache_config.block_num = 8;
+    auto              cache_config       = SingleConfigCreator::createSingleConfig(model, parallelism, false);
+    cache_config.block_num               = 8;
     cache_config.dsa_mla_resident_tokens = cache_config.seq_size_per_block;
-    cache_config.dsa_mla_hbm_blocks = 3;
-    auto config = BlockPoolConfigHelper::createConfig(cache_config);
+    cache_config.dsa_mla_hbm_blocks      = 3;
+    auto config                          = BlockPoolConfigHelper::createConfig(cache_config);
     for (bool use_cuda_malloc : {false, true}) {
         BlockPool pool(config, AllocationType::DEVICE, false, use_cuda_malloc);
         ASSERT_TRUE(pool.init());
@@ -298,29 +319,29 @@ TEST_F(BlockPoolTest, Glm52SharedIndexerKvCacheIsOptIn) {
 }
 
 TEST_F(BlockPoolTest, PinnedMlaKeepsIndexerOnGpuAndVersionsRecycledBlocks) {
-    auto model = makeTestModelConfig(4);
-    model.model_type = "glm_5";
-    model.attn_config.use_mla = true;
-    model.attn_config.is_sparse = true;
-    model.attn_config.kv_cache_dtype = KvCacheDataType::FP8;
-    model.attn_config.kv_lora_rank = 512;
-    model.attn_config.rope_head_dim = 64;
-    model.attn_config.indexer_head_dim = 128;
+    auto model                                 = makeTestModelConfig(4);
+    model.model_type                           = "glm_5";
+    model.attn_config.use_mla                  = true;
+    model.attn_config.is_sparse                = true;
+    model.attn_config.kv_cache_dtype           = KvCacheDataType::FP8;
+    model.attn_config.kv_lora_rank             = 512;
+    model.attn_config.rope_head_dim            = 64;
+    model.attn_config.indexer_head_dim         = 128;
     model.enable_glm52_shared_indexer_kv_cache = true;
-    model.glm52_indexer_kv_slot_mapping = {0, 1, 1, 1};
+    model.glm52_indexer_kv_slot_mapping        = {0, 1, 1, 1};
     ParallelismConfig parallelism;
-    auto config = SingleConfigCreator::createSingleConfig(model, parallelism, false);
-    config.block_num = 8;
+    auto              config       = SingleConfigCreator::createSingleConfig(model, parallelism, false);
+    config.block_num               = 8;
     config.dsa_mla_resident_tokens = config.seq_size_per_block;
-    config.dsa_mla_hbm_blocks = 3;
-    auto pool_ptr = std::make_shared<BlockPool>(BlockPoolConfigHelper::createConfig(config),
+    config.dsa_mla_hbm_blocks      = 3;
+    auto  pool_ptr                 = std::make_shared<BlockPool>(BlockPoolConfigHelper::createConfig(config),
                                                 AllocationType::DEVICE,
                                                 /*use_pinned_cpu_backing=*/false,
                                                 /*use_cuda_malloc_backing=*/true);
-    auto& pool = *pool_ptr;
+    auto& pool                     = *pool_ptr;
     ASSERT_TRUE(pool.init());
-    const auto kv = pool.allLayerCacheBase();
-    const auto hbm = pool.allLayerHbmCacheBase();
+    const auto kv      = pool.allLayerCacheBase();
+    const auto hbm     = pool.allLayerHbmCacheBase();
     const auto indexer = pool.allLayerScaleCacheBase();
     for (const auto& layer : kv) {
         EXPECT_FALSE(layer.is_cuda());
@@ -360,7 +381,7 @@ TEST_F(BlockPoolTest, PinnedMlaKeepsIndexerOnGpuAndVersionsRecycledBlocks) {
 #endif
     auto blocks = pool.malloc(1);
     ASSERT_EQ(blocks.size(), 1u);
-    const int block = blocks.front();
+    const int  block = blocks.front();
     const auto parts = pool.convertIndexToBuffer(0, block);
     ASSERT_EQ(parts.size(), 2u);
     EXPECT_TRUE(parts[0].is_cuda);
@@ -424,7 +445,7 @@ TEST_F(BlockPoolTest, PinnedMlaKeepsIndexerOnGpuAndVersionsRecycledBlocks) {
     BlockDependency child;
     child.has_parent = true;
     child.parent_key = 10;
-    child.ordinal = 1;
+    child.ordinal    = 1;
     tree_cache.put(11, {rest[0]}, false, SharedBlockCache::kDefaultNamespace, child);
     tree_cache.put(12, {rest[2]}, false, SharedBlockCache::kDefaultNamespace, child);
     pool.requestFree({block, rest[0], rest[2]});
@@ -445,24 +466,24 @@ TEST_F(BlockPoolTest, PinnedMlaCheckpointKeepsGraphAddressAndDiscardsPages) {
 #if USING_CUDA
     autil::EnvGuard numa("RTP_LLM_HOST_BLOCK_POOL_NUMA_POLICY", "none");
     autil::EnvGuard prefault("RTP_LLM_HOST_BLOCK_POOL_PREFAULT_THREADS", "2");
-    auto model = makeTestModelConfig(2);
-    model.model_type = "glm_5";
-    model.attn_config.use_mla = true;
-    model.attn_config.is_sparse = true;
-    model.attn_config.kv_cache_dtype = KvCacheDataType::FP8;
-    model.attn_config.kv_lora_rank = 512;
-    model.attn_config.rope_head_dim = 64;
+    auto            model              = makeTestModelConfig(2);
+    model.model_type                   = "glm_5";
+    model.attn_config.use_mla          = true;
+    model.attn_config.is_sparse        = true;
+    model.attn_config.kv_cache_dtype   = KvCacheDataType::FP8;
+    model.attn_config.kv_lora_rank     = 512;
+    model.attn_config.rope_head_dim    = 64;
     model.attn_config.indexer_head_dim = 128;
-    auto config = SingleConfigCreator::createSingleConfig(model, ParallelismConfig{}, false);
-    config.block_num = 256;
-    config.dsa_mla_resident_tokens = config.seq_size_per_block;
-    config.dsa_mla_hbm_blocks = 3;
+    auto config                        = SingleConfigCreator::createSingleConfig(model, ParallelismConfig{}, false);
+    config.block_num                   = 256;
+    config.dsa_mla_resident_tokens     = config.seq_size_per_block;
+    config.dsa_mla_hbm_blocks          = 3;
     BlockPool pool(BlockPoolConfigHelper::createConfig(config), AllocationType::DEVICE, false, true);
     ASSERT_TRUE(pool.init());
-    const auto host_view = pool.allLayerCacheBase()[0];
-    void* const ptr = pool.getBaseAddress();
-    const size_t bytes = pool.getTotalSizeBytes();
-    const auto gpu_buffers = pool.gpuCacheTensors();
+    const auto   host_view   = pool.allLayerCacheBase()[0];
+    void* const  ptr         = pool.getBaseAddress();
+    const size_t bytes       = pool.getTotalSizeBytes();
+    const auto   gpu_buffers = pool.gpuCacheTensors();
 
     auto blocks = pool.malloc(1);
     EXPECT_ANY_THROW(pool.releaseMlaHostCacheForCheckpoint());
@@ -470,9 +491,9 @@ TEST_F(BlockPoolTest, PinnedMlaCheckpointKeepsGraphAddressAndDiscardsPages) {
     pool.requestFree(blocks);
     auto generations = pool.blockGenerations().clone();
 
-    auto output = torch::empty({1}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
-    cudaStream_t stream;
-    cudaGraph_t graph;
+    auto            output = torch::empty({1}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
+    cudaStream_t    stream;
+    cudaGraph_t     graph;
     cudaGraphExec_t executable;
     // MLA kernels dereference mapped host KV directly. A graph memcpy node
     // instead retains registration-specific state and is not this pool's path.
@@ -490,12 +511,12 @@ TEST_F(BlockPoolTest, PinnedMlaCheckpointKeepsGraphAddressAndDiscardsPages) {
     ret;
 }
 )ptx";
-    CUmodule module;
-    CUfunction read_host;
+    CUmodule    module;
+    CUfunction  read_host;
     ASSERT_EQ(cuModuleLoadData(&module, ptx), CUDA_SUCCESS);
     ASSERT_EQ(cuModuleGetFunction(&read_host, module, "read_host"), CUDA_SUCCESS);
     void* source = ptr;
-    void* dest = output.data_ptr();
+    void* dest   = output.data_ptr();
     void* args[] = {&source, &dest};
     ASSERT_EQ(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking), cudaSuccess);
     ASSERT_EQ(cudaStreamBeginCapture(stream, cudaStreamCaptureModeThreadLocal), cudaSuccess);
@@ -507,7 +528,7 @@ TEST_F(BlockPoolTest, PinnedMlaCheckpointKeepsGraphAddressAndDiscardsPages) {
         pool.releaseMlaHostCacheForCheckpoint();
         pool.releaseMlaHostCacheForCheckpoint();
         EXPECT_EQ(pool.getBaseAddress(), ptr);
-        const size_t page_size = sysconf(_SC_PAGESIZE);
+        const size_t               page_size = sysconf(_SC_PAGESIZE);
         std::vector<unsigned char> resident((bytes + page_size - 1) / page_size);
         ASSERT_EQ(mincore(ptr, bytes, resident.data()), 0);
         EXPECT_TRUE(std::all_of(resident.begin(), resident.end(), [](auto flags) { return !(flags & 1); }));
@@ -536,7 +557,7 @@ TEST_F(BlockPoolTest, PinnedMlaCheckpointKeepsGraphAddressAndDiscardsPages) {
 }
 
 TEST_F(BlockPoolTest, CheckpointDoesNotReleaseOrdinaryHostPool) {
-    auto config = BlockPoolConfigHelper::createConfig(makeMtpCacheConfigByCreateSpConfig(1, 0, 4));
+    auto      config = BlockPoolConfigHelper::createConfig(makeMtpCacheConfigByCreateSpConfig(1, 0, 4));
     BlockPool pool(config, AllocationType::HOST);
     ASSERT_TRUE(pool.init());
     auto view = pool.allLayerCacheBase()[0].view(torch::kUInt8);
@@ -549,36 +570,35 @@ TEST_F(BlockPoolTest, CheckpointDoesNotReleaseOrdinaryHostPool) {
 // Scale the 48 x 16K + 16 x 192K workload to one/twelve blocks per query.
 // Under long-first arrival, adaptive admission leaves HBM available for short queries.
 TEST_F(BlockPoolTest, PinnedMlaLengthAwareAllocation) {
-    auto model = makeTestModelConfig(1);
-    model.model_type = "glm_5";
-    model.attn_config.use_mla = true;
-    model.attn_config.is_sparse = true;
-    model.attn_config.kv_cache_dtype = KvCacheDataType::FP8;
-    model.attn_config.kv_lora_rank = 512;
-    model.attn_config.rope_head_dim = 64;
+    auto model                         = makeTestModelConfig(1);
+    model.model_type                   = "glm_5";
+    model.attn_config.use_mla          = true;
+    model.attn_config.is_sparse        = true;
+    model.attn_config.kv_cache_dtype   = KvCacheDataType::FP8;
+    model.attn_config.kv_lora_rank     = 512;
+    model.attn_config.rope_head_dim    = 64;
     model.attn_config.indexer_head_dim = 128;
-    auto config = SingleConfigCreator::createSingleConfig(model, ParallelismConfig(), false);
-    config.block_num = 241;
-    config.dsa_mla_hbm_blocks = 49;
-    config.dsa_mla_resident_tokens = config.seq_size_per_block;
+    auto config                        = SingleConfigCreator::createSingleConfig(model, ParallelismConfig(), false);
+    config.block_num                   = 241;
+    config.dsa_mla_hbm_blocks          = 49;
+    config.dsa_mla_resident_tokens     = config.seq_size_per_block;
     for (const auto denominator : {"0", "3"}) {
         autil::EnvGuard guard("RTP_LLM_DSA_MLA_HBM_SHARE_DENOMINATOR", denominator);
-        auto pool = std::make_shared<BlockPool>(BlockPoolConfigHelper::createConfig(config));
+        auto            pool = std::make_shared<BlockPool>(BlockPoolConfigHelper::createConfig(config));
         ASSERT_TRUE(pool->init());
         FullKVCacheGroup group({0}, config.cache_specs[0], pool, 0);
         ASSERT_TRUE(group.init());
         for (int round = 0; round < 3; ++round) {
             std::vector<BlockIds> requests(64);
-            int host_queries = 0;
+            int                   host_queries = 0;
             for (int i = 0; i < 64; ++i) {
                 const bool is_long = round == 1 ? i >= 48 : i < 16;
                 ASSERT_TRUE(group.initMalloc(requests[i], (is_long ? 12 : 1) * config.seq_size_per_block));
-                const auto& blocks = requests[i].blocks();
-                const bool on_host = std::any_of(blocks.begin(), blocks.end(), [](int id) { return id >= 49; });
+                const auto& blocks  = requests[i].blocks();
+                const bool  on_host = std::any_of(blocks.begin(), blocks.end(), [](int id) { return id >= 49; });
                 host_queries += on_host;
             }
-            EXPECT_EQ(host_queries, std::string(denominator) == "0" ? (round == 1 ? 16 : 60) :
-                                                                    (round == 1 ? 18 : 38));
+            EXPECT_EQ(host_queries, std::string(denominator) == "0" ? (round == 1 ? 16 : 60) : (round == 1 ? 18 : 38));
             EXPECT_EQ(pool->freeBlocksNum(), 0u);
             EXPECT_TRUE(pool->malloc(1, 48).empty());
             for (const auto& request : requests) {
@@ -595,19 +615,19 @@ TEST_F(BlockPoolTest, PinnedMlaLengthAwareAllocation) {
 
 TEST_F(BlockPoolTest, PinnedMlaLengthAwareGrowthAndFallback) {
     autil::EnvGuard guard("RTP_LLM_DSA_MLA_HBM_SHARE_DENOMINATOR", "3");
-    auto model = makeTestModelConfig(1);
-    model.model_type = "glm_5";
-    model.attn_config.use_mla = true;
-    model.attn_config.is_sparse = true;
-    model.attn_config.kv_cache_dtype = KvCacheDataType::FP8;
-    model.attn_config.kv_lora_rank = 512;
-    model.attn_config.rope_head_dim = 64;
+    auto            model              = makeTestModelConfig(1);
+    model.model_type                   = "glm_5";
+    model.attn_config.use_mla          = true;
+    model.attn_config.is_sparse        = true;
+    model.attn_config.kv_cache_dtype   = KvCacheDataType::FP8;
+    model.attn_config.kv_lora_rank     = 512;
+    model.attn_config.rope_head_dim    = 64;
     model.attn_config.indexer_head_dim = 128;
-    auto config = SingleConfigCreator::createSingleConfig(model, ParallelismConfig(), false);
-    config.block_num = 20;
-    config.dsa_mla_hbm_blocks = 10;
-    config.dsa_mla_resident_tokens = config.seq_size_per_block;
-    auto pool = std::make_shared<BlockPool>(BlockPoolConfigHelper::createConfig(config));
+    auto config                        = SingleConfigCreator::createSingleConfig(model, ParallelismConfig(), false);
+    config.block_num                   = 20;
+    config.dsa_mla_hbm_blocks          = 10;
+    config.dsa_mla_resident_tokens     = config.seq_size_per_block;
+    auto pool                          = std::make_shared<BlockPool>(BlockPoolConfigHelper::createConfig(config));
     ASSERT_TRUE(pool->init());
     FullKVCacheGroup group({0}, config.cache_specs[0], pool, 0);
     ASSERT_TRUE(group.init());
@@ -627,7 +647,7 @@ TEST_F(BlockPoolTest, PinnedMlaLengthAwareGrowthAndFallback) {
     pool->connectorReference(10);
     group.free(long_query.blocks());
     EXPECT_EQ(pool->malloc(4, 8), (BlockIndicesType{11, 12, 13, 14}));  // HBM exhausted.
-    EXPECT_TRUE(pool->malloc(1, 48).empty());  // In-flight RDMA still owns 10.
+    EXPECT_TRUE(pool->malloc(1, 48).empty());                           // In-flight RDMA still owns 10.
     pool->connectorFree(10);
     EXPECT_EQ(pool->malloc(1, 48), (BlockIndicesType{10}));
     EXPECT_EQ(pool->blockGenerations().data_ptr<int64_t>()[10], 2);
@@ -647,8 +667,7 @@ TEST_F(BlockPoolTest, PinnedMlaLengthAwareGrowthAndFallback) {
     group.reference(reused_query, {1, 2, 3});
     ASSERT_TRUE(group.initMalloc(reused_query, 16));
     EXPECT_EQ(reused_query.blocks(), (BlockIndicesType{1, 2, 3, 13}));  // Long suffix goes to host.
-    EXPECT_EQ(pool->blockGenerations().data_ptr<int64_t>()[1], 2);  // Prefix was only referenced.
-
+    EXPECT_EQ(pool->blockGenerations().data_ptr<int64_t>()[1], 2);      // Prefix was only referenced.
 }
 
 static ModelConfig makeLayeredPrefillModel() {
@@ -799,34 +818,41 @@ TEST_F(BlockPoolTest, LayeredPrefillDefaultOnlyAppliesToPrefillRole) {
     // Empty/unset env selects the default, not an explicit opt-in.
     autil::EnvGuard placement("RTP_LLM_DSA_PREFILL_LAYOUT", "");
     autil::EnvGuard decode_host_cache("RTP_LLM_DSA_MLA_HOST_CACHE_MB", "0");
-    auto model = makeLayeredPrefillModel();
-    auto mtp_model = model;
-    mtp_model.num_layers = 1;
+    auto            model                          = makeLayeredPrefillModel();
+    auto            mtp_model                      = model;
+    mtp_model.num_layers                           = 1;
     mtp_model.enable_glm52_shared_indexer_kv_cache = false;
     mtp_model.glm52_indexer_kv_slot_mapping.clear();
     KVCacheConfig options;
-    options.seq_size_per_block = 64;
+    options.seq_size_per_block        = 64;
     options.kernel_seq_size_per_block = 64;
-    options.test_block_num = 16;
-    options.memory_cache_size_mb = 8;
-    options.enable_remote_cache = false;
+    options.test_block_num            = 16;
+    options.memory_cache_size_mb      = 8;
+    options.enable_remote_cache       = false;
     RuntimeConfig runtime;
     runtime.fifo_scheduler_config.max_batch_kv_len = 128;
     SpeculativeExecutionConfig speculative;
-    speculative.type = SP_TYPE_MTP;
+    speculative.type              = SP_TYPE_MTP;
     speculative.gen_num_per_cycle = 1;
     for (const auto role : {RoleType::PDFUSION, RoleType::DECODE, RoleType::PREFILL}) {
         for (bool memory_cache : {false, true}) {
             for (bool mtp : {false, true}) {
                 SCOPED_TRACE(::testing::Message() << "role=" << static_cast<int>(role)
-                                                 << " memory_cache=" << memory_cache << " mtp=" << mtp);
+                                                  << " memory_cache=" << memory_cache << " mtp=" << mtp);
                 ParallelismConfig parallelism;
-                parallelism.role_type = role;
+                parallelism.role_type       = role;
                 options.enable_memory_cache = memory_cache;
-                auto create = [&] {
-                    return mtp ? CacheConfigCreator::createSpConfig(model, mtp_model, parallelism, runtime, options,
-                                                                   speculative, std::nullopt, true, false) :
-                                 CacheConfigCreator::createConfig(model, parallelism, runtime, options, std::nullopt);
+                auto create                 = [&] {
+                    return mtp ? CacheConfigCreator::createSpConfig(model,
+                                                                    mtp_model,
+                                                                    parallelism,
+                                                                    runtime,
+                                                                    options,
+                                                                    speculative,
+                                                                    std::nullopt,
+                                                                    true,
+                                                                    false) :
+                                                 CacheConfigCreator::createConfig(model, parallelism, runtime, options, std::nullopt);
                 };
                 const auto config = create();
                 if (role == RoleType::PREFILL) {
@@ -838,12 +864,13 @@ TEST_F(BlockPoolTest, LayeredPrefillDefaultOnlyAppliesToPrefillRole) {
                     EXPECT_EQ(config.block_num, options.test_block_num);
                     PDSepConfig pd;
                     pd.role_type = role;
-                    EXPECT_NO_THROW(KVCacheManager(config, true, nullptr, options, parallelism, runtime, speculative, pd));
+                    EXPECT_NO_THROW(
+                        KVCacheManager(config, true, nullptr, options, parallelism, runtime, speculative, pd));
                     // Explicit opt-in retains the existing role validation.
                     autil::EnvGuard explicit_layout("RTP_LLM_DSA_PREFILL_LAYOUT", "1");
-                    const auto explicit_config = create();
-                    EXPECT_ANY_THROW(KVCacheManager(explicit_config, true, nullptr, options, parallelism, runtime,
-                                                    speculative, pd));
+                    const auto      explicit_config = create();
+                    EXPECT_ANY_THROW(
+                        KVCacheManager(explicit_config, true, nullptr, options, parallelism, runtime, speculative, pd));
                 }
             }
         }
@@ -1055,26 +1082,26 @@ TEST_F(BlockPoolTest, LayeredPrefillUsesSchedulerKvBudgetAndMemoryCacheSize) {
 TEST_F(BlockPoolTest, PinnedMlaRoundsAutomaticWorkingSetToPhysicalBlocks) {
     autil::EnvGuard host_budget("RTP_LLM_DSA_MLA_HOST_CACHE_MB", "256");
     autil::EnvGuard automatic_resident("RTP_LLM_DSA_MLA_RESIDENT_TOKENS", "0");
-    auto model = makeTestModelConfig(4);
-    model.model_type = "glm_5";
-    model.attn_config.use_mla = true;
-    model.attn_config.is_sparse = true;
-    model.attn_config.kv_cache_dtype = KvCacheDataType::FP8;
-    model.attn_config.kv_lora_rank = 512;
-    model.attn_config.rope_head_dim = 64;
-    model.attn_config.indexer_head_dim = 128;
-    model.attn_config.indexer_topk = 2048;
-    model.attn_config.tokens_per_block = 4096;
+    auto            model                      = makeTestModelConfig(4);
+    model.model_type                           = "glm_5";
+    model.attn_config.use_mla                  = true;
+    model.attn_config.is_sparse                = true;
+    model.attn_config.kv_cache_dtype           = KvCacheDataType::FP8;
+    model.attn_config.kv_lora_rank             = 512;
+    model.attn_config.rope_head_dim            = 64;
+    model.attn_config.indexer_head_dim         = 128;
+    model.attn_config.indexer_topk             = 2048;
+    model.attn_config.tokens_per_block         = 4096;
     model.enable_glm52_shared_indexer_kv_cache = true;
-    model.glm52_indexer_kv_slot_mapping = {0, 1, 1, 1};
+    model.glm52_indexer_kv_slot_mapping        = {0, 1, 1, 1};
     ParallelismConfig parallelism;
-    RuntimeConfig runtime;
+    RuntimeConfig     runtime;
     runtime.max_generate_batch_size = 3;
     KVCacheConfig cache_options;
-    cache_options.seq_size_per_block = 4096;
+    cache_options.seq_size_per_block        = 4096;
     cache_options.kernel_seq_size_per_block = 64;
-    cache_options.test_block_num = 16;
-    auto create = [&] {
+    cache_options.test_block_num            = 16;
+    auto create                             = [&] {
         return CacheConfigCreator::createConfig(model, parallelism, runtime, cache_options, std::nullopt);
     };
 
@@ -1150,7 +1177,7 @@ TEST_F(BlockPoolTest, Glm52CompactScoreKeepsMtpIndexerLayoutIndependent) {
 TEST_F(BlockPoolTest, PinnedMlaSharedIndexerMtpBudgetCoversAllQueries) {
     autil::EnvGuard host_budget("RTP_LLM_DSA_MLA_HOST_CACHE_MB", "256");
     autil::EnvGuard resident_budget("RTP_LLM_DSA_MLA_RESIDENT_TOKENS", "0");
-    auto score_model_config                                 = makeTestModelConfig(/*num_layers=*/4);
+    auto            score_model_config                      = makeTestModelConfig(/*num_layers=*/4);
     score_model_config.model_type                           = "glm_5";
     score_model_config.attn_config.use_mla                  = true;
     score_model_config.attn_config.is_sparse                = true;
@@ -1161,8 +1188,8 @@ TEST_F(BlockPoolTest, PinnedMlaSharedIndexerMtpBudgetCoversAllQueries) {
     score_model_config.enable_glm52_shared_indexer_kv_cache = true;
     score_model_config.glm52_indexer_kv_slot_mapping        = {0, 1, 1, 1};
 
-    score_model_config.attn_config.indexer_topk = 2048;
-    score_model_config.attn_config.tokens_per_block = 64;
+    score_model_config.attn_config.indexer_topk               = 2048;
+    score_model_config.attn_config.tokens_per_block           = 64;
     auto propose_model_config                                 = score_model_config;
     propose_model_config.num_layers                           = 1;
     propose_model_config.enable_glm52_shared_indexer_kv_cache = false;
@@ -1173,7 +1200,7 @@ TEST_F(BlockPoolTest, PinnedMlaSharedIndexerMtpBudgetCoversAllQueries) {
     rtp_llm::RuntimeConfig runtime_config;
     runtime_config.max_generate_batch_size = 8;
     rtp_llm::KVCacheConfig kv_cache_config;
-    kv_cache_config.test_block_num = 2048;
+    kv_cache_config.test_block_num     = 2048;
     kv_cache_config.seq_size_per_block = 64;
     rtp_llm::SpeculativeExecutionConfig sp_config;
     sp_config.type              = SP_TYPE_MTP;
@@ -1204,7 +1231,6 @@ TEST_F(BlockPoolTest, PinnedMlaSharedIndexerMtpBudgetCoversAllQueries) {
         EXPECT_EQ(layout.kv_scale_pool_size_bytes,
                   layout.scale_layer_num * layout.block_num * layout.kv_scale_stride_bytes);
     }
-
 }
 
 TEST_F(BlockPoolTest, MTPConvertIndexGlobalIdMapping) {
