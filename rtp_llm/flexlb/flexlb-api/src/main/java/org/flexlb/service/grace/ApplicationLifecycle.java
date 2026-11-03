@@ -137,6 +137,10 @@ public class ApplicationLifecycle implements ApplicationContextAware {
         return warmUpFinished && !shutdownReceived;
     }
 
+    public boolean isShuttingDown() {
+        return shutdownReceived;
+    }
+
     public boolean shutdownCompletedSuccessfully() {
         return shutdownCompletedSuccessfully;
     }
