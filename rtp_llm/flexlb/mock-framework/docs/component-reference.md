@@ -67,9 +67,9 @@ PD 只执行调度器之间的交接，不模拟 KV 数据传输。P/D 只使用
 
 P/D 都按实际 Forward 计时，token 是重复输入末 token 的模拟载荷，不做词表推理。Engine RPC 始终返回本轮新增 token，`aux.output_len` 始终累计；用户侧 incremental/累计展示由 Frontend 处理。P 首 token 计入总长度，非推测模式 D 执行 N−1 轮。Client TTFT 必须来自实际接收，不能使用 Engine aux 或计算耗时替代。
 
-请求总预算取 timeout_ms 和 RPC deadline 较早者，不逐阶段重置；取消、超时和关闭只释放一次，旧回调不能影响复用身份的新请求。602/603/605 使用原生 ErrorDetailsPB。P 转发采用受控拉取/有限 Inbox，遵守发送就绪；共享连接不随单请求取消关闭。Mock 保护上限是 1024 活动请求，TaskHistory 保留 1024 项。旧游标越过历史窗口时，按 real 的恢复方式继续返回完整当前状态、仍保留的完成记录和推进后的游标，不以 OUT_OF_RANGE 阻断健康同步；超前游标不倒退。每次缺口读取在组件日志中记录 `finished_history_gap`，包含 requested_version、dropped_through、latest_version、retained，不能把这段完成记录当成完整请求历史。生产 proto 没有历史完整性字段，缺口证据保存在实验组件日志；需要完整逐请求证据时不能依赖 WorkerStatus 的有限窗口。real 当前为 1000 条/5s 保留，Mock 的 1024 条是明确的模拟边界，不宣称保留策略完全相同。
+请求总预算取 timeout_ms 和 RPC deadline 较早者，不逐阶段重置；取消、超时和关闭只释放一次，旧回调不能影响复用身份的新请求。602/603/605 使用原生 ErrorDetailsPB。P 转发采用受控拉取/有限 Inbox，遵守发送就绪；共享连接不随单请求取消关闭。请求数不叠加固定保护上限，TaskHistory 保留 1024 项。旧游标越过历史窗口时，按 real 的恢复方式继续返回完整当前状态、仍保留的完成记录和推进后的游标，不以 OUT_OF_RANGE 阻断健康同步；超前游标不倒退。每次缺口读取在组件日志中记录 `finished_history_gap`，包含 requested_version、dropped_through、latest_version、retained，不能把这段完成记录当成完整请求历史。生产 proto 没有历史完整性字段，缺口证据保存在实验组件日志；需要完整逐请求证据时不能依赖 WorkerStatus 的有限窗口。real 当前为 1000 条/5s 保留，Mock 的 1024 条是明确的模拟边界，不宣称保留策略完全相同。
 
-WorkerStatus 报真实等待/执行任务、finished/version，available_concurrency 保持生产默认 0，KV 以 token 为单位；CacheStatus 提供 block size 与版本。D 当前要求 input+max_new_tokens<max_seq_len，未实现完整真实截断。显式投机按 RTP reserveStep 预留，成功且 reuse 与缓存层开启时提交完整有效块；P 提交 prompt，D 提交 prompt 与已计算的生成前缀，失败不提交。没有完整动态 batch、GPU 或混合 KV 布局模拟。
+WorkerStatus 报真实等待/执行任务、finished/version，available_concurrency 保持生产默认 0，KV 以 token 为单位；CacheStatus 提供 block size 与版本。P/D 入队前检查 prompt 的最大 KV 容纳长度及上下文预留；临时容量不足仍等待。期望输出可以超过剩余上下文，实际生成长度取 max_new_tokens 与 max_seq_len−reserveStep−input 的较小值。P 的首 token 已达到 D 上限时，D 只回送结束标志，不执行 Forward 或重复输出 token。显式投机按 RTP reserveStep 预留，成功且 reuse 与缓存层开启时提交完整有效块；P 提交 prompt，D 提交 prompt 与已计算的生成前缀，失败不提交。没有完整动态 batch、GPU 或混合 KV 布局模拟。
 
 ## Block 容量与 RTP 缓存
 
@@ -209,7 +209,7 @@ Decode 有两种互斥模型。默认普通模式每轮一个 token；平均模�
 
 长度边界在接受结果后统一处理。显式投机模式按固定 k 个草稿、k+1 个验证位置及 seq_len+k+1 的 KV 预留执行（普通 Decode reserveStep=0），对齐当前 RTP 的固定验证窗口；不能因为只剩 R 个输出位置就提前缩小验证量。候选产出 5 个而只剩 4 个时，只提交 4 个并返回 finished=true，验证成本仍按完整计划累计。平均进度模型每轮仍计一个 target 输入，KV 仅覆盖最终可能提交的输出前缀。EOS 只检查接受后的候选 token，按绝对输出位置生成固定概率事件；相同 seed、请求身份和概率下，改变 batch、轮宽、接受模型或调用顺序不会重抽已经走过的位置。拒绝的草稿不参与结束判断。
 
-StoppingModel 遵守 min_new_tokens，ignore_eos 只屏蔽 EOS，不屏蔽长度上限。完成判定的上限同时受 max_new_tokens 与 maxSequence−inputTokens 约束；RTP 接入仍保留前述较严格的序列准入规则；显式投机在首次分配和后续增长中另外预留 reserveStep。EOS 位于本轮中间时截断实际产出，但本轮已执行的验证成本和在途资源引用不撤销。固定概率只是 Mock EOS hazard，不宣称真实输出分布。标准回放发送 ignore_eos=true，所以 Case 可保留 P/D 的 EOS 参数而不再次缩短数据中的目标长度。
+StoppingModel 遵守 min_new_tokens，ignore_eos 只屏蔽 EOS，不屏蔽长度上限。完成判定的上限同时受 max_new_tokens 与 maxSequence−inputTokens 约束；RTP 调度器传入已扣除 reserveStep 的有效上下文上限；显式投机在首次分配和后续增长中另外预留 reserveStep。EOS 位于本轮中间时截断实际产出，但本轮已执行的验证成本和在途资源引用不撤销。固定概率只是 Mock EOS hazard，不宣称真实输出分布。标准回放发送 ignore_eos=true，所以 Case 可保留 P/D 的 EOS 参数而不再次缩短数据中的目标长度。
 
 real 依据：MtpExecutor::decodeStep 先 target verify Forward，再执行 speculative_sampler；MtpBatchStreamProcessor::prepareDecodeSpecUpdateInfo 提取接受后的 token，GenerateStream::specUpdate 经 NormalGenerateStream::updateOutput 检查 EOS/max；CompleteTokenIds::matchEosToken 截断到第一个 EOS。PrefillRpcServer::remoteLoadCacheEnd 保留 LOAD ACK、释放源 KV 和 PREFILL_COMPLETE 顺序。当前 Mock 不支持 stop words/beam search 等未实现条件，显式请求会拒绝。
 
@@ -226,7 +226,7 @@ Mock 专用参数使用小写点号名称，例如 `mock.compute.forward.express
 | 参数 | 默认值/约束 | 行为 |
 | --- | --- | --- |
 | seq_size_per_block / max_seq_len / test_block_num | 必填；正数，test_block_num ≥ 2 | 逻辑分配粒度、序列上限、Device 物理块数（含 null block）。 |
-| concurrency_limit | 32，1–1024 | P/D 每轮请求数上限；real 的 ConcurrencyConfig 输入经 engine_config.py 写入内部 max_generate_batch_size。 |
+| concurrency_limit | 32，正整数 | P/D 每轮请求数上限；real 的 ConcurrencyConfig 输入经 engine_config.py 写入内部 max_generate_batch_size。 |
 | reserve_block_ratio | 5，0–100 | 首次分配预留百分比。 |
 | reuse_cache / enable_device_cache | false / true | 前缀复用和 Device 索引。 |
 | enable_memory_cache | false | Host 缓存开关；开启时须同时给出正数 mock.cache.memory.blocks。 |
@@ -287,7 +287,7 @@ P 在 GENERATE 阶段发送 `prefill_kv_handoff.computed_kv_end`，为已计算 
 
 变更使用有界内存队列（100000 条），每次最多取 1000 条，按同 key 最后一次转换合并，避免 Meta 先处理 ADD 再处理 DELETE 导致结果逆序。注册和增量由同一个执行者每 20ms 处理，快照与心跳分别使用独立执行者，慢快照不阻塞 ADD/DELETE 或心跳。它们均不占用 Scheduler 线程。
 
-快照在缓存锁内一次捕获 HBM long[] 与版本，在锁外流式 JSON 编码，不构建逐 key JSON 对象树；仍保留完整请求体，并非零拷贝。对齐原生 Publisher：快照失败（包括限流）丢弃本轮，不重放、不暂停增量；下一次周期或服务端恢复请求捕获新快照。重新注册后旧快照回包不影响新注册，增量不按快照 ACK 过滤。注册和增量失败按原生默认 500ms→16s 指数退避；不使用 retry_after_ms 暂停整个数据通道。控制请求超时 1.5 秒，快照上传超时 30 秒。队列溢出和增量失败请求新快照，不维护磁盘事件历史。关闭停止快照和心跳、收尾增量执行者，再尽力上报 HOST_DOWN；意外退出由服务端心跳失效处理。启用 enable_remote_cache 时，kv_cache_event_snapshot_interval_ms 非正数关闭数据上报，保留注册和心跳；未启用 remote 时非正数无效。
+快照在缓存锁内一次捕获 HBM long[] 与版本，在锁外流式 JSON 编码，不构建逐 key JSON 对象树；仍保留完整请求体，并非零拷贝。对齐原生 Publisher：快照失败（包括限流）丢弃本轮，不重放、不暂停增量；下一次周期或服务端恢复请求捕获新快照。重新注册后旧快照回包不影响新注册，增量不按快照 ACK 过滤。注册和增量失败按原生默认 500ms→16s 指数退避；不使用 retry_after_ms 暂停整个数据通道。控制请求超时 1.5 秒，快照上传超时 30 秒。KVCM 响应先汇总 header 与全部 item 的恢复信号，再判断是否失败，前面的普通错误不会遮蔽后面的注册失效。心跳连续 snapshot_required=true 只触发一次，false 或重新注册重置。正常心跳或非空增量 ACK 启动/刷新 60 秒恢复窗口；超期后的心跳失败触发一次重新注册，注册和快照 ACK 不启动或续期该窗口，避免恢复风暴。队列溢出和增量失败请求新快照，不维护磁盘事件历史。关闭停止快照和心跳、收尾增量执行者，再尽力上报 HOST_DOWN；意外退出由服务端心跳失效处理。启用 enable_remote_cache 时，kv_cache_event_snapshot_interval_ms 非正数关闭数据上报，保留注册和心跳；未启用 remote 时非正数无效。
 
 Master 与 KVCM 是两个独立消费者，不要求跨服务原子提交。KVCM 不可用时不会阻塞调度或 Master RPC；最近错误、注册状态和待发送数量可从 Engine 端点的 kvcm 状态查看。远端 KV 已提供统一准备流程和逻辑读写接口，但未安装真实存储适配；事件位置仅声明本地持有缓存，不能当成成功的远端 payload 写入。
 ```yaml

@@ -68,13 +68,16 @@ public final class KvCache implements AutoCloseable {
         this.blockSize = blockSize; this.reserve = reserve; this.deviceCache = deviceCache;
         this.deviceWatermark = deviceWatermark; this.hostWatermark = hostWatermark;
     }
+    /** Maximum size of one request, independent of current leases and evictable cache entries. */
+    public synchronized long maxRequestTokens() { return (long) (device.snapshot().total() - reserve) * blockSize; }
+
     public synchronized Admission acquire(long requiredTokens, List<Long> keys) {
         if (closed) throw new IllegalStateException("Cache is closed");
         validate(keys);
         long blockDemand = blocksFor(requiredTokens);
         if (keys.size() > requiredTokens / blockSize) throw new IllegalArgumentException("Keys exceed complete input blocks");
         tree.validatePath(keys);
-        if (blockDemand > device.snapshot().total() - reserve) return rejected(Failure.PERMANENT);
+        if (requiredTokens > maxRequestTokens()) return rejected(Failure.PERMANENT);
         int demand = (int) blockDemand;
         var matched = tree.match(keys);
         matched.forEach(tree::pin);
