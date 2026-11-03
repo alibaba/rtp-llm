@@ -46,6 +46,9 @@ from rtp_llm.models_py.model_desc.qwen4_exp_runtime.ple_transaction import (
 from rtp_llm.models_py.model_desc.qwen4_exp_runtime.qsa_context import (
     Qwen4ExpQSARuntimeContext,
 )
+from rtp_llm.models_py.model_desc.qwen4_exp_runtime.qsa_step_plan import (
+    host_input_mirror,
+)
 from rtp_llm.models_py.modules import FMHAImplBase
 from rtp_llm.models_py.modules.base.common.zero_centered_rms_norm import (
     ZeroCenteredFusedQKRMSNorm,
@@ -199,13 +202,14 @@ class Qwen4ExpAttention(Qwen3NextAttention):
             and torch.cuda.get_device_capability(hidden_states.device) == (12, 0)
         )
 
-        def _host_prefix_present(inputs) -> bool:
-            # Host-mirror-only read: a device prefix_lengths tensor keeps the
-            # legacy projected path instead of adding a readback here.
-            prefixes = getattr(inputs, "prefix_lengths", None)
+        def _prefix_present(inputs) -> bool:
+            # Per-step mirror read: a device prefix_lengths tensor
+            # (RTP_LLM_DEVICE_INPUT) is read back once per step and cached by
+            # (inputs object, fingerprint); the layers of one step reuse it
+            # without another synchronization.
+            prefixes = host_input_mirror(inputs, "prefix_lengths")
             return (
                 isinstance(prefixes, torch.Tensor)
-                and prefixes.device.type == "cpu"
                 and bool(prefixes.numel())
                 and bool(torch.any(prefixes != 0).item())
             )
@@ -218,7 +222,7 @@ class Qwen4ExpAttention(Qwen3NextAttention):
             and not bool(qsa_runtime.main_inputs.is_target_verify)
             and not bool(getattr(qsa_runtime.main_inputs, "is_cuda_graph", False))
             and not bool(getattr(self, "is_mtp_draft", False))
-            and _host_prefix_present(qsa_runtime.main_inputs)
+            and _prefix_present(qsa_runtime.main_inputs)
             and callable(getattr(self.qsa_indexer, "project_raw", None))
             and hidden_states.is_cuda
             and torch.version.hip is None
@@ -283,11 +287,13 @@ class Qwen4ExpAttention(Qwen3NextAttention):
                 rope_config=self.qsa_rope_config,
                 **({"raw_query": True} if raw_query else {}),
             )
-        prefixes = qsa_runtime.main_inputs.prefix_lengths
+        prefixes = host_input_mirror(qsa_runtime.main_inputs, "prefix_lengths")
         has_prefix = bool(prefixes.numel()) and bool(torch.any(prefixes != 0).item())
         if not bool(qsa_runtime.main_inputs.is_target_verify) and has_prefix:
             if self.is_mtp_draft:
-                input_lengths = qsa_runtime.main_inputs.input_lengths
+                input_lengths = host_input_mirror(
+                    qsa_runtime.main_inputs, "input_lengths"
+                )
                 max_input_length = max(int(length) for length in input_lengths.tolist())
                 # PD prefix hits retain local draft-prefill cu_kv coordinates
                 # even when only one token remains. Publication distinguishes

@@ -41,6 +41,7 @@ from rtp_llm.ops.compute_ops import LayerKVCache, PyAttentionInputs
 from . import qsa_decode, qsa_geometry, qsa_prefill, qsa_target
 from .qsa_cache_views import _same_tensor_metadata
 from .qsa_plans import IncrementalPrefillPlan, TargetVerifyPlan
+from .qsa_step_plan import host_input_mirror
 
 
 @dataclass(frozen=True)
@@ -198,7 +199,8 @@ class Qwen4ExpQSARuntimeContext:
                     f"qwen4_exp QSA cache-region metadata {name!r} is inconsistent"
                 )
 
-        lengths = [int(value) for value in self.main_inputs.input_lengths.tolist()]
+        lengths_mirror = host_input_mirror(self.main_inputs, "input_lengths")
+        lengths = [int(value) for value in lengths_mirror.tolist()]
         if not lengths or any(length <= 0 for length in lengths):
             raise RuntimeError(f"qwen4_exp QSA has invalid input_lengths={lengths}")
         return lengths

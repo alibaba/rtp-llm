@@ -811,6 +811,7 @@ class Qwen4ExpQSARuntimeTest(TestCase):
                 is_prefill=True,
                 is_target_verify=True,
                 is_cuda_graph=True,
+                is_exact_cuda_graph_batch=True,
                 is_s_padded=False,
                 context_parallel_info=None,
                 cache_store_inputs=None,
