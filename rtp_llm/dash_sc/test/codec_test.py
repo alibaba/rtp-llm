@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import json
+import math
 import struct
 from unittest import TestCase, main
 from unittest.mock import patch
 
 import torch
 
+from rtp_llm.config.generate_config import ReturnAllProbsMode
 from rtp_llm.dash_sc.client import build_model_infer_request
 from rtp_llm.dash_sc import codec
 from rtp_llm.dash_sc.codec import (
@@ -24,6 +26,7 @@ from rtp_llm.dash_sc.codec import (
     ParsedInputIds,
     SamplingParams,
     StreamResponseBuilder,
+    _token_logprobs_payload,
     build_dash_error_response,
     is_logging_consent_allowed,
     parse_dash_sc_grpc_request,
@@ -329,6 +332,39 @@ class DashScGrpcRequestTest(TestCase):
         self.assertEqual(sp.num_return_sequences, 1)
         self.assertEqual(sp.min_new_tokens, 2)
 
+    def test_logprobs_request_precedence_and_config(self) -> None:
+        req = predict_v2_pb2.ModelInferRequest()
+        req.parameters["ds_header_attributes"].string_param = json.dumps(
+            {"parameters": {"logprobs": True, "top_logprobs": 2}}
+        )
+        req.parameters["logprobs"].bool_param = True
+        req.parameters["top_logprobs"].int64_param = 3
+        _add_tensor(req, "logprobs", "BOOL", [1], b"\x00")
+        _add_tensor(req, "top_logprobs", "INT32", [1], struct.pack("<i", 4))
+        sampling = parse_sampling_params(req)
+        self.assertFalse(sampling.logprobs)
+        self.assertEqual(sampling.top_logprobs, 4)
+        self.assertEqual(sampling.to_generate_config().return_all_probs, 0)
+
+        req = build_model_infer_request(
+            request_id="logprobs", model_name="m", input_ids=[1],
+            sampling=SamplingParams(logprobs=True, top_logprobs=3),
+        )
+        sampling = parse_sampling_params(req)
+        self.assertTrue(sampling.logprobs)
+        self.assertEqual(sampling.top_logprobs, 3)
+        self.assertEqual(
+            sampling.to_generate_config().return_all_probs, ReturnAllProbsMode.ORIGINAL
+        )
+
+    def test_top_logprobs_alone_does_not_request_probabilities(self) -> None:
+        req = predict_v2_pb2.ModelInferRequest()
+        req.parameters["top_logprobs"].int64_param = 5
+        sampling = parse_sampling_params(req)
+        self.assertFalse(sampling.logprobs)
+        self.assertEqual(sampling.top_logprobs, 5)
+        self.assertEqual(sampling.to_generate_config().return_all_probs, 0)
+
     def test_parse_sampling_response_format_parameters(self) -> None:
         req = predict_v2_pb2.ModelInferRequest()
         req.parameters["response_format"].string_param = json.dumps(
@@ -551,17 +587,39 @@ class DashScGrpcRequestTest(TestCase):
 
     def test_parse_sampling_tool_call_structural_tag_parameter(self) -> None:
         tag = _tool_call_structural_tag()
-        req = predict_v2_pb2.ModelInferRequest()
-        req.parameters["tool_call_structural_tag"].string_param = json.dumps(
-            tag, ensure_ascii=False
-        )
+        for response_format in (None, {"type": "text"}):
+            with self.subTest(response_format=response_format):
+                req = predict_v2_pb2.ModelInferRequest()
+                req.parameters["tool_call_structural_tag"].string_param = json.dumps(
+                    tag, ensure_ascii=False
+                )
+                if response_format is not None:
+                    req.parameters["response_format"].string_param = json.dumps(
+                        response_format
+                    )
 
-        sp = parse_sampling_params(req)
-        config = sp.to_generate_config()
+                sp = parse_sampling_params(req)
+                config = sp.to_generate_config()
 
-        self.assertEqual(json.loads(sp.structural_tag), tag)
-        self.assertEqual(config.structural_tag, tag)
-        self.assertIsNone(config.response_format)
+                self.assertEqual(json.loads(sp.structural_tag), tag)
+                self.assertEqual(config.structural_tag, tag)
+                self.assertIsNone(config.response_format)
+                config.finalize_response_format()
+                self.assertEqual(
+                    config.structural_tag, {"type": "structural_tag", **tag}
+                )
+
+    def test_json_response_format_still_overrides_tool_call_structural_tag(self) -> None:
+        config = SamplingParams(
+            response_format='{"type":"json_object"}',
+            structural_tag=json.dumps(_tool_call_structural_tag()),
+        ).to_generate_config()
+
+        self.assertEqual(config.response_format.type, "json_object")
+        self.assertIsNone(config.structural_tag)
+        config.finalize_response_format()
+        self.assertIsNone(config.structural_tag)
+        self.assertIsNotNone(config.json_schema)
 
     def test_parse_sampling_normalizes_dashscope_sequence_structural_tag(self) -> None:
         tag = _dashscope_sequence_tool_call_structural_tag()
@@ -738,6 +796,10 @@ class DashScGrpcRequestTest(TestCase):
         sp = parse_sampling_params(req)
         self.assertEqual(sp.max_new_tokens, 64)
         self.assertFalse(sp.max_new_tokens_from_completion_alias)
+
+        req = predict_v2_pb2.ModelInferRequest()
+        sp = parse_sampling_params(req)
+        self.assertEqual(sp.max_new_tokens, 32000)
 
     def test_parse_sampling_top_p_as_int32(self) -> None:
         req = predict_v2_pb2.ModelInferRequest()
@@ -1427,6 +1489,128 @@ class DashScMultimodalRequestTest(TestCase):
 
 
 class BuildStreamResponseFromGenerateOutputsTest(TestCase):
+    def test_top_logprobs_uses_original_probabilities_with_top_k_one(self) -> None:
+        request = build_model_infer_request(
+            request_id="top-two",
+            model_name="m",
+            input_ids=[0],
+            sampling=SamplingParams(logprobs=True, top_logprobs=2, top_k=1),
+        )
+        sampling = parse_sampling_params(request)
+        config = sampling.to_generate_config()
+        self.assertEqual(config.return_all_probs, ReturnAllProbsMode.ORIGINAL)
+        self.assertEqual(config.top_k, 1)
+
+        # The selected token is still the greedy winner, but response scores
+        # come from the target distribution before top-k collapses it to one.
+        output = GenerateOutput(
+            output_ids=torch.tensor([2]),
+            all_probs=torch.tensor([[[0.1, 0.3, 0.6]]]),
+            aux_info=AuxInfo(input_len=1),
+        )
+        frame = StreamResponseBuilder(
+            dash_sc_request_id="top-two",
+            model_name="m",
+            request_log_tag="top-two",
+            generate_config=config,
+            top_logprobs=sampling.top_logprobs,
+        ).build(GenerateOutputs(generate_outputs=[output]))
+        rows = json.loads(frame.infer_response.parameters["logprobs"].string_param)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(list(rows[0]), ["2", "1"])
+        self.assertAlmostEqual(rows[0]["2"], math.log(0.6), places=6)
+        self.assertAlmostEqual(rows[0]["1"], math.log(0.3), places=6)
+
+    def test_top_logprobs_excludes_filtered_zero_probability_tokens(self) -> None:
+        config = SamplingParams(logprobs=True, top_logprobs=3).to_generate_config()
+        output = GenerateOutput(
+            output_ids=torch.tensor([1, 2]),
+            all_probs=torch.tensor([[[0.0, 1.0, 0.0, 0.0], [0.1, 0.0, 0.9, 0.0]]]),
+            aux_info=AuxInfo(input_len=1),
+        )
+        frame = StreamResponseBuilder(
+            dash_sc_request_id="filtered",
+            model_name="m",
+            request_log_tag="filtered",
+            generate_config=config,
+            top_logprobs=3,
+        ).build(GenerateOutputs(generate_outputs=[output]))
+
+        def reject_non_json_constant(value: str) -> None:
+            raise ValueError(f"non-JSON number: {value}")
+
+        rows = json.loads(
+            frame.infer_response.parameters["logprobs"].string_param,
+            parse_constant=reject_non_json_constant,
+        )
+        self.assertEqual(list(rows[0]), ["1"])
+        self.assertEqual(rows[0]["1"], 0.0)
+        self.assertEqual(set(rows[1]), {"0", "2"})
+        self.assertAlmostEqual(rows[1]["2"], math.log(0.9), places=6)
+
+    def test_logprobs_follow_token_positions_and_cached_frames(self) -> None:
+        config = SamplingParams(logprobs=True, top_logprobs=2).to_generate_config()
+        builder = StreamResponseBuilder(
+            dash_sc_request_id="prob", model_name="m", request_log_tag="prob",
+            generate_config=config, top_logprobs=2,
+        )
+        first = GenerateOutput(
+            output_ids=torch.tensor([1, 2, 1]),
+            all_probs=torch.tensor(
+                [[[0.1, 0.8, 0.1], [0.2, 0.2, 0.6], [0.3, 0.4, 0.3]]]
+            ),
+            aux_info=AuxInfo(input_len=1),
+        )
+        first_frame = builder.build(GenerateOutputs(generate_outputs=[first]))
+        first_scores = json.loads(
+            first_frame.infer_response.parameters["logprobs"].string_param
+        )
+        self.assertEqual(len(first_scores), 3)
+        self.assertAlmostEqual(first_scores[0]["1"], math.log(0.8), places=6)
+        self.assertAlmostEqual(first_scores[1]["2"], math.log(0.6), places=6)
+        self.assertAlmostEqual(first_scores[2]["1"], math.log(0.4), places=6)
+        self.assertEqual(len(first_scores[0]), 2)
+        self.assertIn("1", first_scores[0])
+
+        second = GenerateOutput(
+            output_ids=torch.tensor([2]), all_probs=torch.tensor([[0.1, 0.2, 0.7]]),
+            aux_info=AuxInfo(input_len=1),
+        )
+        second_frame = builder.build(GenerateOutputs(generate_outputs=[second]))
+        second_scores = json.loads(
+            second_frame.infer_response.parameters["logprobs"].string_param
+        )
+        self.assertEqual(len(second_scores), 1)
+        self.assertEqual(set(second_scores[0]), {"1", "2"})
+        self.assertAlmostEqual(second_scores[0]["2"], math.log(0.7), places=6)
+        self.assertEqual(
+            json.loads(first_frame.infer_response.parameters["logprobs"].string_param),
+            first_scores,
+        )
+
+        synthetic = builder.build(
+            GenerateOutputs(generate_outputs=[second]), token_ids=[99],
+            emit_logprobs=False,
+        )
+        self.assertNotIn("logprobs", synthetic.infer_response.parameters)
+        resumed = builder.build(GenerateOutputs(generate_outputs=[second]))
+        self.assertEqual(
+            json.loads(resumed.infer_response.parameters["logprobs"].string_param),
+            second_scores,
+        )
+
+    def test_logprobs_require_matching_engine_rows(self) -> None:
+        output = GenerateOutput(
+            output_ids=torch.tensor([1, 2]), all_probs=torch.tensor([[0.2, 0.8, 0.0]]),
+            aux_info=AuxInfo(input_len=1),
+        )
+        self.assertIsNone(_token_logprobs_payload(output, [1, 2], 2))
+        with self.assertRaisesRegex(RuntimeError, "cannot be aligned"):
+            StreamResponseBuilder(
+                dash_sc_request_id="prob", model_name="m", request_log_tag="prob",
+                generate_config=SamplingParams(logprobs=True).to_generate_config(),
+            ).build(GenerateOutputs(generate_outputs=[output]))
+
     def test_empty_generate_outputs_raises(self) -> None:
         go = GenerateOutputs(generate_outputs=[])
         builder = StreamResponseBuilder(
@@ -1478,6 +1662,89 @@ class BuildStreamResponseFromGenerateOutputsTest(TestCase):
             4,
         )
         self.assertEqual(infer.parameters["prompt_token_num"].int64_param, 10)
+
+    def test_multimodal_usage_matches_engine_counts_on_every_frame(self) -> None:
+        for is_streaming in (True, False):
+            for first_lengths in ({}, {MMUrlType.IMAGE: 0}):
+                builder = StreamResponseBuilder(
+                    dash_sc_request_id="mm",
+                    model_name="m",
+                    request_log_tag="mm",
+                    is_streaming=is_streaming,
+                )
+                for lengths in (
+                    first_lengths,
+                    {MMUrlType.IMAGE: 128, MMUrlType.VIDEO: 256, MMUrlType.AUDIO: 64},
+                    {MMUrlType.IMAGE: 512},
+                    {},
+                ):
+                    with self.subTest(streaming=is_streaming, lengths=lengths):
+                        out = GenerateOutput(
+                            output_ids=torch.tensor([7], dtype=torch.int32),
+                            finished=True,
+                            aux_info=AuxInfo(
+                                input_len=1024,
+                                reuse_len=10,
+                                multimodal_lengths=lengths,
+                            ),
+                        )
+                        go = GenerateOutputs(generate_outputs=[out])
+                        response = builder.build(go)
+                        stateless = codec.build_stream_response_from_generate_outputs(
+                            "mm",
+                            "m",
+                            go,
+                            "mm",
+                            is_streaming=is_streaming,
+                        )
+                        self.assertEqual(response, stateless)
+                        params = response.infer_response.parameters
+                        self.assertEqual(params["prompt_token_num"].int64_param, 1024)
+                        for mm_type, field in (
+                            (MMUrlType.IMAGE, "image_tokens"),
+                            (MMUrlType.VIDEO, "video_tokens"),
+                            (MMUrlType.AUDIO, "audio_tokens"),
+                        ):
+                            if mm_type in lengths:
+                                self.assertEqual(
+                                    params[field].int64_param, lengths[mm_type]
+                                )
+                            else:
+                                self.assertNotIn(field, params)
+
+    def test_error_response_keeps_legacy_finish_reasons(self) -> None:
+        for spec, finish_reason in (
+            (codec.DASH_ERROR_TOO_LONG, LLMFinishReason.STOP_ENGINE_PARAM),
+            (codec.DASH_ERROR_UNSUPPORTED, LLMFinishReason.STOP_ENGINE_PARAM),
+            (
+                codec.DASH_ERROR_INVALID_OUTPUT,
+                LLMFinishReason.STOP_ENGINE_INVALID_OUTPUT,
+            ),
+            (codec.DASH_ERROR_INTERNAL, LLMFinishReason.INNER_ENGINE_ERROR),
+        ):
+            with self.subTest(spec=spec):
+                response = build_dash_error_response(
+                    "req-error",
+                    "m",
+                    error_spec=spec,
+                    status_message="engine diagnostic",
+                )
+                infer = response.infer_response
+                by_name = {
+                    output.name: raw
+                    for output, raw in zip(infer.outputs, infer.raw_output_contents)
+                }
+                self.assertEqual(
+                    _unpack_int64_le(by_name["finish_reason"]),
+                    [finish_reason],
+                )
+                self.assertEqual(
+                    infer.parameters["error_no"].int64_param, spec.error_no
+                )
+                payload = json.loads(infer.parameters["error_msg"].string_param)
+                self.assertEqual(payload["status_code"], spec.status_code)
+                self.assertEqual(payload["status_name"], spec.status_name)
+                self.assertEqual(payload["status_message"], "engine diagnostic")
 
     def test_dash_error_response_uses_inner_error_fields(self) -> None:
         resp = build_dash_error_response(
