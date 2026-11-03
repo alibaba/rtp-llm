@@ -272,7 +272,7 @@ TEST_P(OutputDispatchTest, testExecutorUsesGatheredModeAndPreservesCaptureErrors
             first->reportError(ErrorCode::INVALID_PARAMS, "original request error");
         }
         second->setIsContextStream(!test_case.second_is_decode);
-        ASSERT_TRUE(executor.process({first, second}).ok());
+        ASSERT_TRUE(executor.process(ScheduleOutput{{first, second}}).ok());
         EXPECT_EQ(observed_model->forward_count, 1);
         EXPECT_FALSE(first->hasPendingAsyncBookkeeping());
         EXPECT_FALSE(second->hasPendingAsyncBookkeeping());
@@ -1088,16 +1088,13 @@ class ChunkedPrefillBatchStreamProcessorTest: public NormalBatchStreamProcessorT
 protected:
     void SetUp() override {
         DeviceTestBase::SetUp();
-        model_config_.max_seq_len            = 2048;
-        model_config_.vocab_size             = 2048;
-        model_config_.num_layers             = 1;
+        model_config_.max_seq_len             = 2048;
+        model_config_.vocab_size              = 2048;
+        model_config_.num_layers              = 1;
         model_config_.has_positional_encoding = true;
         initFullCacheConfig(cache_config_, model_config_.num_layers);
-        processor_ = make_unique<NormalBatchStreamProcessor>(model_config_,
-                                                             PDSepConfig{},
-                                                             ProfilingDebugLoggingConfig{},
-                                                             cache_config_,
-                                                             false);
+        processor_ = make_unique<NormalBatchStreamProcessor>(
+            model_config_, PDSepConfig{}, ProfilingDebugLoggingConfig{}, cache_config_, false);
     }
 
     GenerateStreamPtr makeRunningStream(const std::vector<int32_t>&     input_ids,
@@ -1105,8 +1102,8 @@ protected:
         auto query             = make_shared<GenerateInput>();
         query->input_ids       = hostIntBuffer(input_ids);
         query->generate_config = generate_config ? generate_config : make_shared<GenerateConfig>();
-        auto stream = make_shared<NormalGenerateStream>(
-            query, model_config_, RuntimeConfig{}, ResourceContext{}, nullptr);
+        auto stream =
+            make_shared<NormalGenerateStream>(query, model_config_, RuntimeConfig{}, ResourceContext{}, nullptr);
         stream->generate_status_->status = StreamState::RUNNING;
         return stream;
     }
@@ -1326,7 +1323,7 @@ TEST_F(NormalBatchStreamProcessorTest, testDeviceStateFastPathWaitsForBlockingLo
     NormalExecutor executor(params, nullptr, true);
 
     EXPECT_TRUE(executor.gatherCanUseDeviceState(stream_groups));
-    stream->logits_processor_list_.push_back(std::make_shared<TestStatefulLogitsProcessor>(false));
+    stream->sampling_state_.logits_processors.push_back(std::make_shared<TestStatefulLogitsProcessor>(false));
     stream->incPendingAsyncBookkeeping();
     EXPECT_FALSE(executor.gatherCanUseDeviceState(stream_groups));
     stream->decPendingAsyncBookkeepingAndMaybeRelease();
@@ -1355,7 +1352,7 @@ TEST_F(NormalBatchStreamProcessorTest, testDeviceStateFastPathAllowsAsyncLogitsP
         .last_real_seq_len     = 3,
         .next_real_seq_len     = 4,
     });
-    stream->logits_processor_list_.push_back(std::make_shared<TestStatefulLogitsProcessor>(true));
+    stream->sampling_state_.logits_processors.push_back(std::make_shared<TestStatefulLogitsProcessor>(true));
 
     std::list<GenerateStreamPtr> streams{stream};
     StreamGroups                 stream_groups(streams);
@@ -1385,7 +1382,9 @@ TEST_P(OutputDispatchTest, testSoftmaxProbs) {
     std::shared_ptr<GenerateInput> query1         = make_shared<GenerateInput>();
     query1->input_ids                             = hostIntBuffer({1});
     query1->generate_config                       = make_shared<GenerateConfig>();
+    query1->generate_config->return_logits        = true;
     query1->generate_config->return_softmax_probs = true;
+    query1->generate_config->is_streaming         = true;
     GenerateStreamPtr stream1 =
         make_shared<NormalGenerateStream>(query1, model_config, runtime_config, resource_context, nullptr);
     BatchKVCacheResource addr1;
@@ -1418,6 +1417,12 @@ TEST_P(OutputDispatchTest, testSoftmaxProbs) {
     merge_outputs.sampler_output.cum_log_probs = torch::tensor({1.0f}).to(torch::kCUDA);
     auto status                                = processor.dispatch(stream_groups, merge_outputs);
     EXPECT_TRUE(status.ok());
+    auto output_status = stream1->nextOutput(1000);
+    ASSERT_TRUE(output_status.ok());
+    const auto& outputs = output_status.value().generate_outputs;
+    ASSERT_EQ(outputs.size(), 1u);
+    ASSERT_TRUE(outputs[0].logits.has_value());
+    EXPECT_EQ(toVec<float>(*outputs[0].logits), (std::vector<float>{1.0f, 2.0f}));
 
     auto softmax_probs = stream1->getSoftmaxProbs();
     EXPECT_TRUE(softmax_probs.defined());
@@ -1915,13 +1920,14 @@ TEST_F(NormalBatchStreamProcessorTest, testOutputVocabPassesCompactEosOnlyToMult
     auto stream = make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
 
     ASSERT_FALSE(stream->hasError());
-    ASSERT_EQ(stream->logits_processor_list_.size(), 1);
-    ASSERT_NE(std::dynamic_pointer_cast<MultiSeqLogitsProcessor>(stream->logits_processor_list_[0]), nullptr);
+    auto& logits_processor_list_ = stream->sampling_state_.logits_processors;
+    ASSERT_EQ(logits_processor_list_.size(), 1);
+    ASSERT_NE(std::dynamic_pointer_cast<MultiSeqLogitsProcessor>(logits_processor_list_[0]), nullptr);
 
     SamplerInputs inputs;
     inputs.logits        = torch::zeros({2, 5}, torch::kFloat32).to(torch::kCUDA);
     inputs.finished_mask = torch::tensor({false, true}, torch::kBool);
-    stream->logits_processor_list_[0]->process(inputs, 0, 2);
+    logits_processor_list_[0]->process(inputs, 0, 2);
 
     auto processed_logits = inputs.logits.cpu();
     for (int token_id = 0; token_id < 5; ++token_id) {
@@ -2132,10 +2138,12 @@ TEST_P(OutputDispatchTest, testLoss) {
     addr1.setBatchBlocks(0, "default", {1});
     stream1->setKVCache(addr1);
 
-    std::shared_ptr<GenerateInput> query3   = make_shared<GenerateInput>();
-    query3->input_ids                       = hostIntBuffer({0, 1});
-    query3->generate_config                 = make_shared<GenerateConfig>();
-    query3->generate_config->calculate_loss = 2;
+    std::shared_ptr<GenerateInput> query3         = make_shared<GenerateInput>();
+    query3->input_ids                             = hostIntBuffer({0, 1});
+    query3->generate_config                       = make_shared<GenerateConfig>();
+    query3->generate_config->calculate_loss       = 2;
+    query3->generate_config->max_new_tokens       = 1;
+    query3->generate_config->return_hidden_states = true;
     GenerateStreamPtr stream3 =
         make_shared<NormalGenerateStream>(query3, model_config, runtime_config, resource_context, nullptr);
     BatchKVCacheResource addr3;
@@ -2175,7 +2183,7 @@ TEST_P(OutputDispatchTest, testLoss) {
 
     SamplerInputs sampler_inputs;
     MergedOutput  merge_outputs;
-    auto loss_hidden_tensor = torch::tensor({1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f}).reshape({3, 2}).to(torch::kCUDA);
+    auto loss_hidden_tensor = torch::tensor({1.0f, 2.0f, 5.0f, 6.0f, 11.0f, 12.0f}).reshape({3, 2}).to(torch::kCUDA);
     auto loss_logits_tensor = torch::tensor({1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f}).reshape({3, 2}).to(torch::kCUDA);
     auto loss_all_logits_tensor =
         torch::tensor({1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f, 7.0f, 8.0f, 9.0f, 10.0f, 11.0f, 12.0f})
@@ -2194,6 +2202,11 @@ TEST_P(OutputDispatchTest, testLoss) {
     auto loss3 = stream3->getLoss();
     EXPECT_EQ(1, loss3.numel());
     EXPECT_NEAR(0.31326, loss3.data_ptr<float>()[0], 0.0001);
+    auto output3 = stream3->nextOutput(1000);
+    ASSERT_TRUE(output3.ok());
+    ASSERT_EQ(output3.value().generate_outputs.size(), 1);
+    ASSERT_TRUE(output3.value().generate_outputs[0].hidden_states.has_value());
+    EXPECT_EQ(toVec<float>(*output3.value().generate_outputs[0].hidden_states), (std::vector<float>{5.0f, 6.0f}));
     EXPECT_TRUE(stream4->getLoss().defined());
     auto loss4 = stream4->getLoss();
     EXPECT_EQ(2, loss4.numel());
@@ -2506,8 +2519,7 @@ TEST_F(NormalBatchStreamProcessorTest, testMisalignedMultimodalExtraInputIsRejec
 }
 
 TEST_F(ChunkedPrefillBatchStreamProcessorTest, testChunkedPrefillPositionIdsCopyCurrentChunkOnly) {
-    auto chunk_stream =
-        makeMiddleChunkStream({1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18});
+    auto chunk_stream = makeMiddleChunkStream({1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18});
     chunk_stream->setReuseLength(8);
 
     StreamGroups stream_groups({chunk_stream});
@@ -2658,8 +2670,8 @@ TEST_F(ChunkedPrefillBatchStreamProcessorTest, testChunkedPrefillSamplerInputSki
     auto chunk_config         = make_shared<GenerateConfig>();
     chunk_config->do_sample   = true;
     chunk_config->random_seed = 123;
-    auto chunk_stream = makeMiddleChunkStream(
-        {10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27}, chunk_config);
+    auto chunk_stream =
+        makeMiddleChunkStream({10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27}, chunk_config);
 
     auto plain_config         = make_shared<GenerateConfig>();
     plain_config->do_sample   = true;
@@ -2683,15 +2695,15 @@ TEST_F(ChunkedPrefillBatchStreamProcessorTest, testChunkedPrefillSamplerInputSki
 
 TEST_F(ChunkedPrefillBatchStreamProcessorTest, testMiddleChunkDoesNotAdvanceNormalDeviceState) {
     autil::EnvGuard device_input_env("RTP_LLM_DEVICE_INPUT", "1");
-    auto stream = makeRunningStream({1, 2, 3, 4, 5, 6, 7, 8});
+    auto            stream = makeRunningStream({1, 2, 3, 4, 5, 6, 7, 8});
     stream->setChunkSize(4);
     setKvCacheBlocks(stream, {1});
 
     EngineInitParams params;
     params.model_config_                         = model_config_;
     params.model_config_.has_positional_encoding = false;
-    params.py_model                             = py::none();
-    NormalExecutor executor(params, nullptr, true);
+    params.py_model                              = py::none();
+    NormalExecutor             executor(params, nullptr, true);
     NormalBatchStreamProcessor processor(
         params.model_config_, PDSepConfig{}, ProfilingDebugLoggingConfig{}, cache_config_, false);
     MergedOutput outputs;
@@ -2724,9 +2736,9 @@ TEST_F(ChunkedPrefillBatchStreamProcessorTest, testMiddleChunkDoesNotAdvanceNorm
 }
 
 TEST_F(ChunkedPrefillBatchStreamProcessorTest, testMiddleChunkPreservesNormalDeviceStateAndSamplerRowOrder) {
-    auto middle_stream = makeMiddleChunkStream({1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18});
-    auto plain_stream  = makeRunningStream({1, 2, 3});
-    const auto cuda_i32 = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+    auto       middle_stream = makeMiddleChunkStream({1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18});
+    auto       plain_stream  = makeRunningStream({1, 2, 3});
+    const auto cuda_i32      = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
     middle_stream->setNormalAsyncDeviceState(GenerateStream::NormalAsyncDeviceState{
         .last_sample_token_gpu = torch::full({1}, 41, cuda_i32),
         .next_seq_len_gpu      = torch::full({1}, 10, cuda_i32),
@@ -2738,7 +2750,7 @@ TEST_F(ChunkedPrefillBatchStreamProcessorTest, testMiddleChunkPreservesNormalDev
     params.model_config_ = model_config_;
     params.py_model      = py::none();
     NormalExecutor executor(params, nullptr, true);
-    SamplerOutput outputs;
+    SamplerOutput  outputs;
     outputs.token_ids = torch::tensor({42, 43}, torch::kInt32).reshape({2, 1}).cuda();
     executor.publishNormalDeviceState(StreamGroups({middle_stream, plain_stream}), outputs);
 

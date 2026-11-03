@@ -60,6 +60,15 @@ std::string ParallelismConfig::to_string() const {
         << "world_size: " << world_size << "\n"
         << "world_rank: " << world_rank << "\n"
         << "pp_size: " << pp_size << "\n"
+        << "pp_rank: " << pp_rank << "\n"
+        << "pp_stage_layer_counts: [";
+    for (size_t i = 0; i < pp_stage_layer_counts.size(); ++i) {
+        if (i != 0) {
+            oss << ", ";
+        }
+        oss << pp_stage_layer_counts[i];
+    }
+    oss << "]\n"
         << "local_world_size: " << local_world_size << "\n"
         << "local_rank: " << local_rank << "\n"
         << "ffn_sp_size: " << ffn_sp_size << "\n"

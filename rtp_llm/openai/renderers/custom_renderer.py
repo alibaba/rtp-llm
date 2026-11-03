@@ -676,7 +676,10 @@ class CustomChatRenderer:
         return chat_logprob
 
     async def _generate_extra_outputs(
-        self, output: GenerateOutput, generate_config: GenerateConfig
+        self,
+        output: GenerateOutput,
+        generate_config: GenerateConfig,
+        include_final_choice_outputs: bool = True,
     ) -> Optional[ChatCompletionExtraOutputs]:
         final_result = None
 
@@ -686,7 +689,11 @@ class CustomChatRenderer:
                 final_result = ChatCompletionExtraOutputs()
             return final_result
 
-        if generate_config.return_hidden_states and output.hidden_states is not None:
+        if (
+            include_final_choice_outputs
+            and generate_config.return_hidden_states
+            and output.hidden_states is not None
+        ):
             result().hidden_states = output.hidden_states.tolist()
         if (
             generate_config.return_all_hidden_states
@@ -695,17 +702,61 @@ class CustomChatRenderer:
             result().all_hidden_states = output.all_hidden_states.tolist()
         if generate_config.calculate_loss != 0 and output.loss is not None:
             result().loss = output.loss.tolist()
-        if generate_config.return_logits and output.logits is not None:
+        if (
+            include_final_choice_outputs
+            and generate_config.return_logits
+            and output.logits is not None
+        ):
             result().logits = output.logits.tolist()
         if generate_config.return_output_ids and output.output_ids is not None:
             result().output_ids = output.output_ids.tolist()
-        if generate_config.return_input_ids and output.input_ids is not None:
+        if (
+            include_final_choice_outputs
+            and generate_config.return_input_ids
+            and output.input_ids is not None
+        ):
             result().input_ids = output.input_ids.tolist()
         # deployment-level gate (post-layers CustomHandler), no per-request flag
         if output.custom_output is not None:
             result().custom_output = output.custom_output.tolist()
 
         return final_result
+
+    def _collect_final_choice_outputs(
+        self,
+        status_list: List[StreamStatus],
+        generate_config: GenerateConfig,
+    ) -> ChatCompletionExtraOutputs:
+        def collect_rows(name: str):
+            rows = []
+            has_value = False
+            for status in status_list:
+                if status.output is None:
+                    raise Exception("last output should not be None")
+                tensor = getattr(status.output, name)
+                if tensor is None:
+                    rows.append([])
+                    continue
+                value = tensor.tolist()
+                has_value = True
+                rows.append(value[0] if len(value) == 1 else value)
+            return rows if has_value else None
+
+        return ChatCompletionExtraOutputs(
+            input_ids=(
+                collect_rows("input_ids")
+                if generate_config.return_input_ids
+                else None
+            ),
+            hidden_states=(
+                collect_rows("hidden_states")
+                if generate_config.return_hidden_states
+                else None
+            ),
+            logits=(
+                collect_rows("logits") if generate_config.return_logits else None
+            ),
+        )
 
     def _process_stop_words(
         self,
@@ -1003,6 +1054,46 @@ class CustomChatRenderer:
                 )
             )
 
+        last_extra_outputs = items[-1].extra_outputs
+        extra_outputs = (
+            last_extra_outputs.model_copy(deep=True)
+            if last_extra_outputs is not None
+            else None
+        )
+        for name in ("all_hidden_states", "loss"):
+            for item in items:
+                if item.extra_outputs is None:
+                    continue
+                value = getattr(item.extra_outputs, name)
+                if value is not None:
+                    if extra_outputs is None:
+                        extra_outputs = ChatCompletionExtraOutputs()
+                    setattr(extra_outputs, name, value)
+                    break
+        if len(items) > 1:
+            for name in ("input_ids", "output_ids", "hidden_states", "logits"):
+                values = [
+                    (
+                        getattr(item.extra_outputs, name)
+                        if item.extra_outputs is not None
+                        else None
+                    )
+                    for item in items
+                ]
+                if any(value is not None for value in values):
+                    if extra_outputs is None:
+                        extra_outputs = ChatCompletionExtraOutputs()
+                    # Keep the choice index even when a sequence has no new row.
+                    rows = []
+                    for value in values:
+                        if value is None or len(value) == 0:
+                            rows.append([])
+                        elif isinstance(value[0], list):
+                            rows.extend(value)
+                        else:
+                            rows.append(value)
+                    setattr(extra_outputs, name, rows)
+
         return StreamResponseObject(
             choices=all_choices,
             usage=UsageInfo(
@@ -1022,8 +1113,7 @@ class CustomChatRenderer:
                     reuse_lengths, items[0].multimodal_lengths
                 ),
             ),
-            # TODO(zhangjianning.zjn): merge all extra outputs for streaming request
-            extra_outputs=items[-1].extra_outputs,
+            extra_outputs=extra_outputs,
         )
 
     def _should_yield_stream_response(
@@ -1170,6 +1260,16 @@ class CustomChatRenderer:
         )
         nums_output = last_num_beams if last_num_beams != 1 else nums_output
         status_list = await self._create_status_list(nums_output, request)
+        defer_final_choice_outputs = (
+            not bool(request.stream)
+            and generate_config.is_streaming
+            and generate_config.num_return_sequences > 1
+            and (
+                generate_config.return_input_ids
+                or generate_config.return_hidden_states
+                or generate_config.return_logits
+            )
+        )
         index = 0
         resolved_thinking_mode = generate_config.thinking_mode
         if resolved_thinking_mode == ThinkingMode.ADAPTIVE:
@@ -1204,6 +1304,7 @@ class CustomChatRenderer:
                     )
                 delta_list: List[OutputDelta] = []
                 for status, output in zip(status_list, outputs.generate_outputs):
+                    was_finished = status.finish_reason is not None
                     delta = await self._update_single_status(
                         status,
                         output,
@@ -1214,8 +1315,18 @@ class CustomChatRenderer:
                     )
                     if delta.extra_outputs is None:
                         delta.extra_outputs = await self._generate_extra_outputs(
-                            output, generate_config
+                            status.output,
+                            generate_config,
+                            include_final_choice_outputs=(
+                                not defer_final_choice_outputs
+                            ),
                         )
+                    if (
+                        delta.extra_outputs is not None
+                        and generate_config.return_output_ids
+                        and was_finished
+                    ):
+                        delta.extra_outputs.output_ids = [[]]
                     delta_list.append(delta)
                 stream_response = await self._generate_stream_response(
                     delta_list, think_status_list
@@ -1244,6 +1355,10 @@ class CustomChatRenderer:
             final_response = await self._generate_final(
                 status_list, request, think_status_list
             )
+            if defer_final_choice_outputs:
+                final_response.extra_outputs = self._collect_final_choice_outputs(
+                    status_list, generate_config
+                )
             if self._should_yield_stream_response(final_response, is_final=True):
                 yield final_response
 

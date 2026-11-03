@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union
 
 import torch
 
+from rtp_llm.config.layer_partition import local_layer_range
 from rtp_llm.config.quant_config import (
     Fp8PerTensorQuantConfig,
     ModelOptFp4Config,
@@ -196,6 +197,7 @@ class ModelDeployWeightInfo:
     ):
         """Initialize ModelDeployWeightInfo with independent configuration objects."""
         self.model_config = model_config
+        self.layer_range = local_layer_range(model_config, parallelism_config)
         self.merge_lora = merge_lora
         # Model-specific descriptor builders may use the serving role to retain
         # only tensors reachable by a role-specialized execution graph.
@@ -216,9 +218,21 @@ class ModelDeployWeightInfo:
         self.ep_rank = parallelism_config.ep_rank
         self.dp_size = parallelism_config.dp_size
         self.dp_rank = parallelism_config.dp_rank
-        self.num_nodes: int = (
-            parallelism_config.world_size // parallelism_config.local_world_size
-        )
+        self.pp_size = parallelism_config.pp_size
+        self.pp_rank = parallelism_config.pp_rank
+        local_world_size = parallelism_config.local_world_size
+        if self.pp_size > 1:
+            # An EP group is ep_size contiguous world ranks starting at
+            # world_rank - ep_rank; count the machines it actually spans.
+            group_base = parallelism_config.world_rank - self.ep_rank
+            num_nodes = (
+                (group_base + self.ep_size - 1) // local_world_size
+                - group_base // local_world_size
+                + 1
+            )
+        else:
+            num_nodes = parallelism_config.world_size // local_world_size
+        self.num_nodes = num_nodes
         self.ffn_tp_rank = parallelism_config.get_ffn_tp_rank()
         self.ffn_tp_size = parallelism_config.get_ffn_tp_size()
 
@@ -789,6 +803,7 @@ class ModelDeployWeightInfo:
             ep_rank=self.ep_rank,
             dp_size=self.dp_size,
             dp_rank=self.dp_rank,
+            layer_range=self.layer_range,
             lm_head_tp_rank=self.lm_head_tp_rank,
             lm_head_tp_size=self.lm_head_tp_size,
             num_nodes=self.num_nodes,

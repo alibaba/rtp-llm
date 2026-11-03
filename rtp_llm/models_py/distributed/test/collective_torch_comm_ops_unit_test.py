@@ -11,25 +11,37 @@ from rtp_llm.models_py.distributed import collective_torch as collective
 
 
 class CollectiveTorchCommOpsUnitTest(unittest.TestCase):
-    def _registered_callbacks(self, config=None, process_group=None):
+    def _registered_callbacks(self, config=None, process_group=None, stage_group=None):
         if process_group is None:
             process_group = MagicMock()
             process_group.size.return_value = 1
+        if stage_group is None:
+            stage_group = process_group
         if config is None:
             config = SimpleNamespace(
                 tp_size=1,
                 dp_size=1,
+                pp_size=1,
                 world_size=1,
                 local_world_size=1,
                 tp_rank=0,
             )
         compute_ops = SimpleNamespace(register_comm_ops=MagicMock())
 
-        with patch.dict(sys.modules, {"librtp_compute_ops": compute_ops}), patch.object(
-            collective,
-            "_group_map",
-            {collective.Group.DP_AND_TP: process_group},
-        ), patch.object(collective, "_parallelism_config", config):
+        with (
+            patch.dict(sys.modules, {"librtp_compute_ops": compute_ops}),
+            patch.object(
+                collective,
+                "_group_map",
+                {
+                    collective.Group.WORLD: process_group,
+                    collective.Group.STAGE: stage_group,
+                },
+            ),
+            patch.object(collective, "_parallelism_config", config),
+            patch.object(collective, "_get_group", return_value=process_group),
+            patch.object(torch.distributed, "get_rank", return_value=0),
+        ):
             collective._register_process_groups_to_cpp()
 
         compute_ops.register_comm_ops.assert_called_once()
@@ -42,43 +54,73 @@ class CollectiveTorchCommOpsUnitTest(unittest.TestCase):
         allreduce = self._registered_allreduce()
         tensor = torch.tensor([1.0, 2.0])
 
-        result = allreduce(
-            tensor,
-            0,
-            collective._CPP_PARALLEL_MODE_DP_AND_TP,
-            None,
-        )
-
-        self.assertIs(result, tensor)
+        for mode in (
+            collective._CPP_PARALLEL_MODE_STAGE,
+            collective._CPP_PARALLEL_MODE_WORLD,
+        ):
+            with self.subTest(mode=mode):
+                result = allreduce(tensor, 0, mode, None)
+                self.assertIs(result, tensor)
 
     def test_single_rank_allreduce_copies_into_dest(self):
         allreduce = self._registered_allreduce()
         tensor = torch.tensor([1.0, 2.0])
-        dest = torch.full_like(tensor, -1)
-
-        result = allreduce(
-            tensor,
-            0,
-            collective._CPP_PARALLEL_MODE_DP_AND_TP,
-            dest,
-        )
-
-        self.assertIs(result, dest)
-        torch.testing.assert_close(dest, tensor)
+        for mode in (
+            collective._CPP_PARALLEL_MODE_STAGE,
+            collective._CPP_PARALLEL_MODE_WORLD,
+        ):
+            with self.subTest(mode=mode):
+                dest = torch.full_like(tensor, -1)
+                result = allreduce(tensor, 0, mode, dest)
+                self.assertIs(result, dest)
+                torch.testing.assert_close(dest, tensor)
 
     def test_single_rank_allgather_copies_explicit_send_buffer(self):
         allgather = self._registered_callbacks()[2]
         send = torch.tensor([1.0, 2.0])
-        recv = torch.full((1, 2), -1.0)
+        for mode in (
+            collective._CPP_PARALLEL_MODE_STAGE,
+            collective._CPP_PARALLEL_MODE_WORLD,
+        ):
+            with self.subTest(mode=mode):
+                recv = torch.full((1, 2), -1.0)
+                allgather([recv], mode, [send], False)
+                torch.testing.assert_close(recv, send.reshape_as(recv))
 
-        allgather(
-            [recv],
-            collective._CPP_PARALLEL_MODE_DP_AND_TP,
-            [send],
-            False,
+    def test_allreduce_uses_registered_stage_and_world_groups(self):
+        world_group = MagicMock()
+        world_group.size.return_value = 4
+        stage_group = MagicMock()
+        stage_group.size.return_value = 2
+        config = SimpleNamespace(
+            tp_size=1,
+            dp_size=2,
+            pp_size=2,
+            world_size=4,
+            local_world_size=4,
+            tp_rank=0,
+            dp_rank=0,
         )
+        allreduce = self._registered_callbacks(config, world_group, stage_group)[1]
+        tensor = MagicMock(spec=torch.Tensor)
+        tensor.is_cuda = True
 
-        torch.testing.assert_close(recv, send.reshape_as(recv))
+        for mode, process_group in (
+            (collective._CPP_PARALLEL_MODE_STAGE, stage_group),
+            (collective._CPP_PARALLEL_MODE_WORLD, world_group),
+        ):
+            with (
+                self.subTest(mode=mode),
+                patch.object(torch.cuda, "current_device", return_value=0),
+                patch.object(torch.distributed, "all_reduce") as all_reduce,
+            ):
+                result = allreduce(tensor, 0, mode, None)
+                self.assertIs(result, tensor)
+                all_reduce.assert_called_once_with(
+                    tensor,
+                    op=torch.distributed.ReduceOp.SUM,
+                    group=process_group,
+                )
 
     def test_pure_dp_registers_world_group_for_cpp_callback(self):
         process_group = MagicMock()
@@ -86,15 +128,19 @@ class CollectiveTorchCommOpsUnitTest(unittest.TestCase):
         config = SimpleNamespace(
             tp_size=1,
             dp_size=2,
+            pp_size=1,
             world_size=2,
             local_world_size=2,
             tp_rank=0,
         )
 
         broadcast = self._registered_callbacks(config, process_group)[0]
-        with patch.object(
-            torch.distributed, "get_global_rank", return_value=0
-        ) as get_global_rank, patch.object(torch.cuda, "current_device", return_value=0):
+        with (
+            patch.object(
+                torch.distributed, "get_global_rank", return_value=0
+            ) as get_global_rank,
+            patch.object(torch.cuda, "current_device", return_value=0),
+        ):
             broadcast([], 0, collective._CPP_PARALLEL_MODE_DP)
 
         get_global_rank.assert_called_once_with(process_group, 0)
@@ -107,20 +153,14 @@ class CollectiveTorchCommOpsUnitTest(unittest.TestCase):
 
         with (
             patch.object(collective, "_get_rocm_rccl", return_value=None),
-            patch.object(
-                collective, "_get_flashinfer_allreduce"
-            ) as flashinfer,
+            patch.object(collective, "_get_flashinfer_allreduce") as flashinfer,
             patch.object(collective, "_get_symm_mem") as symm_mem,
             patch.object(collective, "_get_group", return_value=object()),
-            patch.object(
-                torch.distributed, "all_reduce", side_effect=reduce_in_place
-            ),
+            patch.object(torch.distributed, "all_reduce", side_effect=reduce_in_place),
         ):
             flashinfer.return_value.get_flashinfer_allreduce.return_value = None
             symm_mem.return_value.get_symm_mem_communicator.return_value = None
-            result = collective.all_reduce(
-                tensor, collective.Group.TP, inplace=False
-            )
+            result = collective.all_reduce(tensor, collective.Group.TP, inplace=False)
 
         self.assertIsNot(result, tensor)
         torch.testing.assert_close(tensor, torch.tensor([1.0, 2.0]))
@@ -131,21 +171,81 @@ class CollectiveTorchCommOpsUnitTest(unittest.TestCase):
         capture = MagicMock()
         capture.ensure_capture_comm_ready.return_value = None
         capture.should_use_capture_collectives.return_value = True
-        capture.capture_all_reduce.side_effect = lambda target, _group: target.add_(
-            10
-        )
+        capture.capture_all_reduce.side_effect = lambda target, _group: target.add_(10)
 
         with (
             patch.object(collective, "_get_rocm_rccl", return_value=capture),
             patch.object(collective, "_get_group", return_value=object()),
         ):
-            result = collective.all_reduce(
-                tensor, collective.Group.TP, inplace=False
-            )
+            result = collective.all_reduce(tensor, collective.Group.TP, inplace=False)
 
         self.assertIsNot(result, tensor)
         torch.testing.assert_close(tensor, torch.tensor([1.0, 2.0]))
         torch.testing.assert_close(result, torch.tensor([11.0, 12.0]))
+
+    def test_tp_locality_controls_uds_and_flashinfer(self):
+        # Include the reported TP3 layout and a supported FlashInfer TP2 layout.
+        # The middle PP stages cross nodes even though TP <= local world size.
+        for world_size, pp_size, tp_size, local_size, local_ranks in (
+            (12, 4, 3, 4, {0, 1, 2, 9, 10, 11}),
+            (6, 3, 2, 3, {0, 1, 4, 5}),
+            (8, 1, 8, 4, set()),
+            (4, 1, 1, 4, set()),  # FFN disaggregation keeps the TP1 shortcut.
+        ):
+            for rank in range(world_size):
+                with self.subTest(world=world_size, pp=pp_size, tp=tp_size, rank=rank):
+                    config = SimpleNamespace(
+                        world_size=world_size,
+                        world_rank=rank,
+                        pp_size=pp_size,
+                        dp_size=1,
+                        tp_size=tp_size,
+                        dp_rank=0,
+                        tp_rank=rank % tp_size,
+                        local_world_size=local_size,
+                        local_rank=rank % local_size,
+                    )
+                    compute_ops = SimpleNamespace(
+                        register_comm_ops=MagicMock(),
+                        init_cpu_tp_broadcaster=MagicMock(),
+                    )
+                    flashinfer = MagicMock()
+                    group = object()
+                    with (
+                        patch.dict(sys.modules, {"librtp_compute_ops": compute_ops}),
+                        patch.object(collective, "_parallelism_config", config),
+                        patch.object(collective, "_group_map", {}),
+                        patch.object(
+                            collective, "_cpu_tp_broadcaster_base_path", "/tmp/tp_test"
+                        ),
+                        patch.object(collective, "_get_group", return_value=group),
+                        patch.object(torch.distributed, "get_rank", return_value=rank),
+                        patch.object(
+                            collective,
+                            "_get_flashinfer_allreduce",
+                            return_value=flashinfer,
+                        ),
+                    ):
+                        collective._register_process_groups_to_cpp()
+                        collective._init_flashinfer_allreduce(config)
+
+                    compute_ops.register_comm_ops.assert_called_once()
+                    if rank in local_ranks:
+                        compute_ops.init_cpu_tp_broadcaster.assert_called_once_with(
+                            config.tp_rank, tp_size, "/tmp/tp_test"
+                        )
+                    else:
+                        compute_ops.init_cpu_tp_broadcaster.assert_not_called()
+
+                    if tp_size > 1:
+                        flashinfer.init_flashinfer_allreduce.assert_called_once_with(
+                            group,
+                            torch.device("cuda", config.local_rank),
+                            single_node=rank in local_ranks,
+                            disable_custom_all_reduce=None,
+                        )
+                    else:
+                        flashinfer.init_flashinfer_allreduce.assert_not_called()
 
 
 if __name__ == "__main__":

@@ -5,6 +5,7 @@ from typing import Any, Optional
 import torch
 from torch import nn
 
+from rtp_llm.config.layer_partition import local_layer_range
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.device.device_type import DeviceType, get_device_type
 from rtp_llm.model_loader.model_weight_info import ModelWeights
@@ -61,15 +62,14 @@ class GptModelBase(nn.Module):
         self._mtp_aux_capture_layer_ids = tuple(
             config.capture_aux_hidden_layer_ids or ()
         )
-        self._mtp_aux_capture_layer_id_set = frozenset(
-            self._mtp_aux_capture_layer_ids
-        )
+        self._mtp_aux_capture_layer_id_set = frozenset(self._mtp_aux_capture_layer_ids)
         self._mtp_target_hidden_states: Optional[torch.Tensor] = None
         self._mtp_target_graph_buffer: Optional[torch.Tensor] = None
         self._mtp_target_prompt_buffer: Optional[torch.Tensor] = None
         self._mtp_aux_capture_buffer: Optional[torch.Tensor] = None
         self._mtp_aux_capture_rows = 0
         self._mtp_aux_capture_index = 0
+        self._mtp_aux_capture_expected_parts = 0
 
         self._capture_context = CaptureContext.unsupported()
 
@@ -96,6 +96,14 @@ class GptModelBase(nn.Module):
 
     def capture_context(self, requested: bool) -> CaptureContext:
         return self._capture_context.for_forward(requested)
+
+    def layer_ids(self) -> range:
+        """Global layer IDs constructed and executed by this model instance."""
+        return local_layer_range(self.config, self.parallelism_config)
+
+    def make_empty_intermediate_tensors(self, hidden_template: Any) -> dict[str, Any]:
+        """Build this model's stage-boundary inputs for stage-local PP warmup."""
+        return {"hidden_states": hidden_template}
 
     def initialize(self, init_resource: PyModelInitResources) -> bool:
         self.kv_cache = init_resource.kv_cache
@@ -160,25 +168,44 @@ class GptModelBase(nn.Module):
         """Model hook: None means every attention-input tag requires FMHA."""
         return None
 
-    def begin_aux_hidden_capture(
-        self, hidden_states: torch.Tensor, is_target_verify: bool
-    ) -> None:
-        """Start one target auxiliary-hidden capture.
+    def _aux_hidden_capture_parts(self) -> tuple[int, int]:
+        """Count configured boundaries before and through this model's layers."""
+        if not self._mtp_aux_capture_layer_ids:
+            return 0, 0
+        layer_ids = self.layer_ids()
+        previous_parts = sum(
+            layer_id < layer_ids[0] for layer_id in self._mtp_aux_capture_layer_ids
+        )
+        expected_parts = sum(
+            layer_id <= layer_ids[-1] for layer_id in self._mtp_aux_capture_layer_ids
+        )
+        return previous_parts, expected_parts
 
-        Decode graphs keep one grow-only buffer so every captured batch bucket
-        writes to a stable address. Prompt prefill owns a separate grow-only
-        buffer because its token count can exceed the decode graph capacity.
+    def begin_aux_hidden_capture(
+        self,
+        hidden_states: torch.Tensor,
+        is_target_verify: bool,
+        upstream_hidden: Optional[torch.Tensor] = None,
+    ) -> None:
+        """Capture this model's configured layers after any upstream prefix.
+
+        Prompt and verify use separate grow-only buffers so prompt growth does
+        not change the addresses used by decode graphs. The executor snapshots
+        PP outputs before another forward can reuse these buffers.
         """
         self._mtp_target_hidden_states = None
         self._mtp_aux_capture_buffer = None
         self._mtp_aux_capture_rows = int(hidden_states.shape[0])
-        self._mtp_aux_capture_index = 0
+        previous_parts, expected_parts = self._aux_hidden_capture_parts()
+        # Local captures append after the slots supplied by upstream stages.
+        self._mtp_aux_capture_index = previous_parts
+        self._mtp_aux_capture_expected_parts = expected_parts
 
-        layer_ids = self._mtp_aux_capture_layer_ids
-        if not layer_ids:
+        if expected_parts == 0:
             return
 
-        width = len(layer_ids) * int(hidden_states.shape[-1])
+        hidden_width = int(hidden_states.shape[-1])
+        width = expected_parts * hidden_width
         buffer = (
             self._mtp_target_graph_buffer
             if is_target_verify
@@ -200,7 +227,10 @@ class GptModelBase(nn.Module):
                 self._mtp_target_graph_buffer = buffer
             else:
                 self._mtp_target_prompt_buffer = buffer
-        self._mtp_aux_capture_buffer = buffer
+        self._mtp_aux_capture_buffer = buffer[: self._mtp_aux_capture_rows]
+        if previous_parts:
+            prefix_width = previous_parts * hidden_width
+            self._mtp_aux_capture_buffer[:, :prefix_width].copy_(upstream_hidden)
 
     def capture_aux_hidden(
         self,
@@ -229,7 +259,8 @@ class GptModelBase(nn.Module):
         self._mtp_aux_capture_index += 1
 
     def finish_aux_hidden_capture(self) -> None:
-        expected_parts = len(self._mtp_aux_capture_layer_ids)
+        """Validate this stage's prefix; only a complete target publishes it."""
+        expected_parts = self._mtp_aux_capture_expected_parts
         if expected_parts == 0:
             return
         if self._mtp_aux_capture_index != expected_parts:
@@ -239,13 +270,10 @@ class GptModelBase(nn.Module):
             )
         if self._mtp_aux_capture_buffer is None:
             raise RuntimeError("auxiliary hidden capture buffer is unavailable")
-        self._mtp_target_hidden_states = self._mtp_aux_capture_buffer[
-            : self._mtp_aux_capture_rows
-        ]
+        if self.layer_num - 1 in self.layer_ids():
+            self._mtp_target_hidden_states = self._mtp_aux_capture_buffer
 
-    def get_mtp_target_hidden_states(
-        self, num_tokens: int
-    ) -> Optional[torch.Tensor]:
+    def get_mtp_target_hidden_states(self, num_tokens: int) -> Optional[torch.Tensor]:
         hidden = self._mtp_target_hidden_states
         if hidden is None:
             return None

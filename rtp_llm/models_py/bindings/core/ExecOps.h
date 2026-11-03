@@ -13,6 +13,7 @@
 #include <exception>
 #include <functional>
 #include <mutex>
+#include <string>
 #include <vector>
 
 #if USING_ROCM
@@ -30,7 +31,7 @@ namespace rtp_llm {
 class CacheConfig;
 class CacheStore;
 
-using CacheStoreCompletionCallback = std::function<void(std::exception_ptr)>;
+using CacheStoreCompletionCallback  = std::function<void(std::exception_ptr)>;
 using CacheStoreCompletionRegistrar = std::function<CacheStoreCompletionCallback(
     const std::vector<int64_t>&, const std::vector<int32_t>&, const std::string&)>;
 
@@ -121,6 +122,26 @@ AllReduceOutput execAllReduce(const AllReduceParams& params);
 void            execAllGather(const AllGatherParams& params);
 void            execSyncCommunication(bool timeout = true);
 void            execSyncCommunication(ParallelMode mode, bool timeout = true);
+
+class P2PWork {
+public:
+    virtual ~P2PWork() = default;
+
+    /**
+     * 1. CPU blocks until the local transfer completes.
+     * 2. CUDA enqueues a completion wait on the tensor device's current stream and may return before the GPU transfer
+     * completes.
+     */
+    virtual void wait() = 0;
+
+    /** Query the reported completion state without blocking; completion does not guarantee success.
+     * Depending on the backend, completion may only become observable after wait(). */
+    virtual bool isCompleted() = 0;
+};
+
+/** The group name identifies one ProcessGroup in the registered Python callbacks. */
+std::unique_ptr<P2PWork> execISend(const torch::Tensor& tensor, int64_t global_peer, const std::string& group_name);
+std::unique_ptr<P2PWork> execIRecv(torch::Tensor& tensor, int64_t global_peer, const std::string& group_name);
 
 // ===================================================================
 // MOE / EPLB

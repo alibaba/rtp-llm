@@ -240,6 +240,7 @@ class Dsv4MoeConfigTest(unittest.TestCase):
                         use_batch_decode_scheduler=False,
                     ),
                     pd_sep_config=SimpleNamespace(role_type=RoleType.PREFILL),
+                    parallelism_config=ParallelismConfig(),
                 )
                 ModelFactory.update_engine_config_from_model_config(
                     engine_config, model_config
@@ -335,6 +336,7 @@ class Dsv4MoeConfigTest(unittest.TestCase):
                             use_batch_decode_scheduler=False,
                         ),
                         pd_sep_config=SimpleNamespace(role_type=RoleType.PREFILL),
+                        parallelism_config=ParallelismConfig(),
                     ),
                     config,
                 )

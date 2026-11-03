@@ -17,8 +17,7 @@ EmbeddingEngine::EmbeddingEngine(const EngineInitParams& params, py::object hand
     concurrency_config(params.concurrency_config),
     metrics_reporter_(params.metrics_reporter),
     step_profiler_(params.profiling_debug_logging_config.torch_cuda_profiler_dir,
-                   params.parallelism_config.dp_rank * params.parallelism_config.tp_size
-                       + params.parallelism_config.tp_rank) {
+                   params.parallelism_config.world_rank) {
     {
         size_t device_id = params.parallelism_config.world_rank % params.parallelism_config.local_world_size;
         rtp_llm::initRuntime(device_id,

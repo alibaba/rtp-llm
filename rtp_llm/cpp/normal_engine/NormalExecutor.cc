@@ -23,7 +23,6 @@ namespace rtp_llm {
 
 namespace {
 
-
 bool readEnvFlagOnce(const char* env_name, const char* log_tag, const char* label) {
     const char* env = std::getenv(env_name);
     const bool  on  = (env != nullptr && std::string(env) == "1");
@@ -105,9 +104,8 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
                                                        params.model_config_.num_layers,
                                                        moe_inter_size,
                                                        params.model_config_.hidden_size,
-                                                       params.parallelism_config.ep_rank,
-                                                       params.parallelism_config.ep_size,
-                                                       params.parallelism_config.world_size,
+                                                       params.parallelism_config,
+                                                       std::pair<int64_t, int64_t>{0, params.model_config_.num_layers},
                                                        params.py_eplb,
                                                        moe_weight_type,
                                                        params.model_config_.quant_algo,
@@ -142,13 +140,13 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
          cache_manager,
          is_propose_ ? std::make_optional(propose_model_index_) : std::nullopt,
          params.model_config_.hc_mult});
-    model_init_params.metrics_reporter = metrics_reporter_;
+    model_init_params.metrics_reporter               = metrics_reporter_;
     model_init_params.hidden_state_capture_layer_ids = selectHiddenStateCaptureLayerIds(
         is_propose_ ? HiddenStateCaptureModelRole::DRAFT : HiddenStateCaptureModelRole::TARGET,
         role_type_,
         warm_up_,
         params.model_config_.hidden_state_capture_layer_ids);
-    model_init_params.hidden_state_capture_dtype     = params.model_config_.hidden_state_capture_dtype;
+    model_init_params.hidden_state_capture_dtype = params.model_config_.hidden_state_capture_dtype;
 #if USING_CUDA || USING_ROCM
     if (params.hw_kernel_config.enable_cuda_graph && model_init_params.kv_cache_layer_layout.has_value()) {
         const auto& model_cache_config =
@@ -216,7 +214,8 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
     cudaProfilerBegin();
 }
 
-absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams, int64_t schedule_time_us) {
+absl::Status NormalExecutor::process(const ScheduleOutput& schedule_output, int64_t schedule_time_us) {
+    const auto&   streams               = schedule_output.streams;
     const int64_t process_start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
     if (schedule_time_us <= 0) {
         schedule_time_us = process_start_time_us;

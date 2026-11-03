@@ -26,7 +26,7 @@ public:
 
     ~PDFusionRatioScheduler() override;
 
-    absl::StatusOr<std::list<GenerateStreamPtr>> schedule() override;
+    absl::StatusOr<ScheduleOutput> schedule() override;
 
     // for test
     using FIFOSchedulerBase::runningStreamsSize;
