@@ -699,12 +699,15 @@ class TmaPrefillTest(unittest.TestCase):
         torch.testing.assert_close(
             staged[0], torch.zeros_like(staged[0]), atol=0, rtol=0
         )
+        torch.testing.assert_close(
+            scales[0], torch.zeros_like(scales[0]), atol=0, rtol=0
+        )
+        view = staged.view(-1, 2, 1, 128, 256)
         for row, (length, prefix) in enumerate(zip(lengths, prefixes)):
             positions = torch.arange(prefix + length, device=q.device)
             source = table[row, positions // 128].long()
             dest = mapped[row, positions // 128].long()
             offsets = positions % 128
-            view = staged.view(-1, 2, 1, 128, 256)
             for kv in (0, 1):
                 torch.testing.assert_close(
                     view[dest, kv, 0, offsets],
@@ -718,17 +721,29 @@ class TmaPrefillTest(unittest.TestCase):
                     atol=0,
                     rtol=0,
                 )
+            padding = torch.arange(
+                prefix + length, mapped.shape[1] * 128, device=q.device
+            )
+            padded_dest = 1 + row * mapped.shape[1] + padding // 128
+            for actual in (
+                view[padded_dest, :, 0, padding % 128],
+                scales[padded_dest, :, 0, padding % 128],
+            ):
+                torch.testing.assert_close(
+                    actual, torch.zeros_like(actual), atol=0, rtol=0
+                )
         torch.testing.assert_close(backing.view(torch.uint8), original, atol=0, rtol=0)
         torch.testing.assert_close(
             scale.view(torch.int32), original_scale, atol=0, rtol=0
         )
         # Missing pages stay mapped to the zero sentinel without reading the pool.
         table[:, :3] = torch.tensor([0, -1, backing.shape[0]], device=q.device)
-        staged, mapped, _ = stage_paged_kv(
+        staged, mapped, scales = stage_paged_kv(
             backing, table, scale, max(prefixes) + max(lengths), 128, cu, pd
         )
         self.assertTrue((mapped[:, :3] == 0).all())
         self.assertTrue((staged[0] == 0).all())
+        self.assertTrue((scales[0] == 0).all())
 
     def test_staged_fp8_graph_refreshes_partition_pages_and_scales(self):
         for heads in (6, 12):

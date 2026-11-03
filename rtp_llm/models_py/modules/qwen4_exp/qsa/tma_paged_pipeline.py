@@ -58,30 +58,55 @@ def _producer(
 ):
     tile = Tile
     tiles = gl.cdiv(gl.minimum(Prefix + S, Prefix + (tile + 1) * POSITIONS), KN)
-    for operand in range(2 * tiles):
-        slot = operand % SLOTS
-        iteration = operand // SLOTS
-        if operand >= SLOTS:
-            mbarrier.wait(empty.index(slot), (iteration - 1) & 1)
-        mbarrier.expect(full.index(slot), KN * D * (1 if RAW_FP8 else 2))
-        kt = tiles - 1 - operand // 2 if FRONTIER else operand // 2
-        physical, page_valid, page_offset = _page(
-            Table, kt, KN, PAGE_SIZE, WIDTH, PAGES
-        )
-        if operand % 2 == 0:
-            tma.async_copy_global_to_shared(
-                K,
-                [physical * CACHE_ROWS + page_offset, 0],
-                full.index(slot),
-                buf.index(slot),
+    if SLOTS == 2:
+        for iteration in range(tiles):
+            kt = tiles - 1 - iteration if FRONTIER else iteration
+            physical, page_valid, page_offset = _page(
+                Table, kt, KN, PAGE_SIZE, WIDTH, PAGES
             )
-        else:
-            tma.async_copy_global_to_shared(
-                V,
-                [physical * CACHE_ROWS + PAGE_SIZE + page_offset, 0],
-                full.index(slot),
-                buf.index(slot),
+            for slot in gl.static_range(2):
+                if iteration > 0:
+                    mbarrier.wait(empty.index(slot), (iteration - 1) & 1)
+                mbarrier.expect(full.index(slot), KN * D * (1 if RAW_FP8 else 2))
+                if slot == 0:
+                    tma.async_copy_global_to_shared(
+                        K,
+                        [physical * CACHE_ROWS + page_offset, 0],
+                        full.index(slot),
+                        buf.index(slot),
+                    )
+                else:
+                    tma.async_copy_global_to_shared(
+                        V,
+                        [physical * CACHE_ROWS + PAGE_SIZE + page_offset, 0],
+                        full.index(slot),
+                        buf.index(slot),
+                    )
+    else:
+        for operand in range(2 * tiles):
+            slot = operand % SLOTS
+            iteration = operand // SLOTS
+            if operand >= SLOTS:
+                mbarrier.wait(empty.index(slot), (iteration - 1) & 1)
+            mbarrier.expect(full.index(slot), KN * D * (1 if RAW_FP8 else 2))
+            kt = tiles - 1 - operand // 2 if FRONTIER else operand // 2
+            physical, page_valid, page_offset = _page(
+                Table, kt, KN, PAGE_SIZE, WIDTH, PAGES
             )
+            if operand % 2 == 0:
+                tma.async_copy_global_to_shared(
+                    K,
+                    [physical * CACHE_ROWS + page_offset, 0],
+                    full.index(slot),
+                    buf.index(slot),
+                )
+            else:
+                tma.async_copy_global_to_shared(
+                    V,
+                    [physical * CACHE_ROWS + PAGE_SIZE + page_offset, 0],
+                    full.index(slot),
+                    buf.index(slot),
+                )
 
 
 @g.jit
@@ -132,6 +157,10 @@ def _attention_step(
     lhs: gl.constexpr = DotOperandLayout(0, mma, 2)
     rhs: gl.constexpr = DotOperandLayout(1, mma, 2)
     raw_rhs: gl.constexpr = DotOperandLayout(1, mma, 4 if RAW_FP8 else 2)
+    # Preparation zeroes invalid pages and tail rows for these staged tiles.
+    padded: gl.constexpr = (
+        SCALED and not RAW_FP8 and QM == 32 and (G != 6 or not PIPE or SLOTS != 2)
+    )
     kt = tiles - 1 - iteration if FRONTIER else iteration
     physical, page_valid, page_offset = _page(Table, kt, KN, PAGE_SIZE, WIDTH, PAGES)
     if PIPE:
@@ -176,7 +205,11 @@ def _attention_step(
     if SCALED:
         ks_value = gl.load(
             Scales + physical.to(gl.int64) * SCALE_PAGE + page_offset + c,
-            page_valid & ((column < Prefix + S) if CHECK_LENGTH else True),
+            (
+                (page_valid & ((column < Prefix + S) if CHECK_LENGTH else True))
+                if not padded
+                else True
+            ),
             other=0.0,
         )
         scores = scores * ks_value[None, :]
@@ -203,7 +236,11 @@ def _attention_step(
     if SCALED:
         vs_value = gl.load(
             Scales + physical.to(gl.int64) * SCALE_PAGE + SCALE_KV + page_offset + c,
-            page_valid & ((column < Prefix + S) if CHECK_LENGTH else True),
+            (
+                (page_valid & ((column < Prefix + S) if CHECK_LENGTH else True))
+                if not padded
+                else True
+            ),
             other=0.0,
         )
         # Fold per-key V scales into P while preserving its BF16 residual.
@@ -222,11 +259,12 @@ def _attention_step(
     v = buf.index(vs).load(raw_rhs)
     if RAW_FP8:
         v = gl.convert_layout(v.to(gl.bfloat16), rhs)
-    vr = gl.arange(0, KN, layout=SliceLayout(1, rhs))
-    if CHECK_LENGTH:
-        v = gl.where((page_valid & (kt * KN + vr < Prefix + S))[:, None], v, 0.0)
-    else:
-        v = gl.where(page_valid, v, 0.0)
+    if not padded:
+        vr = gl.arange(0, KN, layout=SliceLayout(1, rhs))
+        if CHECK_LENGTH:
+            v = gl.where((page_valid & (kt * KN + vr < Prefix + S))[:, None], v, 0.0)
+        else:
+            v = gl.where(page_valid, v, 0.0)
     acc = mma_v2(hi, v, acc)
     acc = mma_v2(lo, v, acc)
     gl.thread_barrier()
