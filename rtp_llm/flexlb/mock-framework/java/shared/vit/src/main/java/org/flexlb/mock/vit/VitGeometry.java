@@ -34,7 +34,7 @@ final class VitGeometry {
         return (int)rows;
     }
     static void validate(MultimodalInputsPB input,boolean skipDownload) {
-        if(input.getTimeoutMs()<0 || input.getTimeoutMs()>3600000) throw MediaInput.invalid("Invalid media timeout");
+        if(input.getTimeoutMs()<0) throw MediaInput.invalid("Invalid media timeout");
         if(input.hasV41Inputs()) throw Status.UNIMPLEMENTED.withDescription("Prepared V4.1 patch layout needs its own geometry model").asRuntimeException();
         if(input.getMultimodalInputsCount()<1 || input.getMultimodalInputsCount()>256) throw MediaInput.invalid("Expected 1..256 images");
         for(var media:input.getMultimodalInputsList()) {

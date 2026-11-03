@@ -10,7 +10,7 @@ P/D/V 共用一个 Mock Engine 镜像，每 Pod 一个 JVM。Master、Frontend �
 JAVA_HOME=/path/to/jdk21 python3 scripts/package-engine.py
 ```
 
-脚本调用现有 Maven 构建入口，编译 `java/host` 及其依赖，生成 `target/image`。该目录只包含 Dockerfile、固定启动脚本、Engine JAR 和 build-manifest.json。manifest 记录源码 SHA、CI 配方 SHA（本地未提供时为空）、JAR SHA256；打包默认跳过单测执行，并如实记录 tests_executed=false。修改工作区后做的本地打包不能仅凭 HEAD SHA 作为干净源码构建的证明。
+脚本调用现有 Maven 构建入口，编译 `java/host` 及其依赖，生成 `target/image`。该目录只包含 Dockerfile、固定启动脚本、Engine JAR 和 build-manifest.json。manifest 记录源码 SHA、CI 配方 SHA（本地未提供时为空）、JAR SHA256；打包默认跳过单测执行，并如实记录 tests_executed=false。构建完成后以隔离 ENV 和临时目录启动实际 JAR，检查所属子进程的启动记录及健康接口，通过后记录 service_startup_verified=true。修改工作区后做的本地打包不能仅凭 HEAD SHA 作为干净源码构建的证明。
 
 ```sh
 docker build -t mock-engine:local target/image

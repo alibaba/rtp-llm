@@ -11,7 +11,8 @@ final class LocalResponse {
         return last>=0?last:42; // Cache-only image hashes are not generated vocabulary tokens.
     }
     static GenerateOutputsPB token(GenerateInputPB input, int tokenId, int generated, int stepTokens, int reused, long elapsedNanos, boolean finished, boolean pd) {
-        int width = input.getGenerateConfig().getReturnIncremental() ? stepTokens : generated;
+        // Native RPC carries new tokens; Frontend owns cumulative responses.
+        int width = stepTokens;
         var tokens = ByteBuffer.allocate(Math.multiplyExact(4, width)).order(ByteOrder.LITTLE_ENDIAN);
         for (int i = 0; i < width; i++) tokens.putInt(tokenId);
         var aux = AuxInfoPB.newBuilder().setInputLen(input.getTokenIdsCount()).setOutputLen(generated).setStepOutputLen(stepTokens)

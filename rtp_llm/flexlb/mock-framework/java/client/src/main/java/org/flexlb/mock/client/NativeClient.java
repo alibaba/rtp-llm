@@ -216,7 +216,7 @@ public final class NativeClient implements AutoCloseable {
                                     || flat.getOutputIds().getDataType() != TensorPB.DataType.INT32
                                     || flat.getOutputIds().getInt32Data().isEmpty() || flat.getOutputIds().getInt32Data().size() % 4 != 0
                                     || flat.getOutputIds().getShapeCount() != 3 || flat.getOutputIds().getShape(0) != 1 || flat.getOutputIds().getShape(1) != 1
-                                    || flat.getOutputIds().getShape(2) != width || width != (input.getGenerateConfig().getReturnIncremental() ? length - outputTokens : length)
+                                    || flat.getOutputIds().getShape(2) != width || width != length - outputTokens
                                     || length <= outputTokens || length > input.getGenerateConfig().getMaxNewTokens()) {
                                 finish(Status.DATA_LOSS.withDescription("Invalid generation output stream"), 0, Outcome.error); return;
                             }
