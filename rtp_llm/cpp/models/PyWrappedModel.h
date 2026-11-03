@@ -607,15 +607,31 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
             graph_params.decode_capture_batch_sizes   = params.hw_kernel_config.decode_capture_batch_sizes;
 
             // Derive hybrid KV cache geometry from the layer layout topology:
-            // page sizes from the first group, layer->group index from tags.
+            // Page geometry from the first group, layer->group index from tags.
+            // All capture buffers (default + per-tag block tables) are sized
+            // from a single group's geometry, so hybrid layouts with
+            // non-uniform page sizes across groups would silently truncate the
+            // wider groups' tables at replay. Fail fast instead (uniform
+            // geometries — including every validated config — are unaffected).
             if (params.kv_cache_layer_layout.has_value()) {
                 const auto& topology = params.kv_cache_layer_layout->topology();
                 const auto& tags     = topology.groupTags();
                 graph_params.kv_cache_group_num = static_cast<int32_t>(tags.size());
                 graph_params.kv_cache_group_tags = tags;
                 if (!topology.groups().empty()) {
-                    graph_params.tokens_per_block        = static_cast<int>(topology.groups().front().seqSizePerBlock());
-                    graph_params.kernel_tokens_per_block = static_cast<int>(topology.groups().front().kernelSeqSizePerBlock());
+                    const auto& first = topology.groups().front();
+                    for (const auto& group : topology.groups()) {
+                        RTP_LLM_CHECK_WITH_INFO(
+                            group.seqSizePerBlock() == first.seqSizePerBlock()
+                                && group.kernelSeqSizePerBlock() == first.kernelSeqSizePerBlock(),
+                            "AscendGraphRunner: hybrid kv cache with non-uniform page geometry across groups "
+                            "(seq=%u/kernel=%u vs first group seq=%u/kernel=%u) is not supported by aclgraph capture; "
+                            "use uniform seq/kernel block sizes (see Known Limitations).",
+                            group.seqSizePerBlock(), group.kernelSeqSizePerBlock(),
+                            first.seqSizePerBlock(), first.kernelSeqSizePerBlock());
+                    }
+                    graph_params.tokens_per_block        = static_cast<int>(first.seqSizePerBlock());
+                    graph_params.kernel_tokens_per_block = static_cast<int>(first.kernelSeqSizePerBlock());
                 }
                 std::vector<int32_t> layer_to_group;
                 for (const auto& layer : topology.layers()) {

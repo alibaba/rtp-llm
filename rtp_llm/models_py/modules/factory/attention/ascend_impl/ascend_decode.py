@@ -236,7 +236,10 @@ class AscendDecodeAttnOp:
         if getattr(attn_inputs, "is_cuda_graph", False):
             self.block_table = attn_inputs.kv_cache_kernel_block_id_device
             if self.block_table is not None:
-                self.block_table = self.block_table.clamp(min=0)
+                # In-place: the captured FIA task binds THIS persistent buffer's
+                # storage; an out-of-place clamp would snapshot the capture-time
+                # seed table and every replay would read stale block ids.
+                self.block_table = self.block_table.clamp_(min=0)
                 if self.block_table.ndim != 2:
                     self.block_table = self.block_table.reshape(-1, self.block_table.shape[-1])
             seq_plus1 = attn_inputs.sequence_lengths_plus_1_device
