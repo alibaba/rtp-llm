@@ -76,8 +76,11 @@ def _next_power_of_two(value: int) -> int:
 
 
 def _cumsum_block_size(chunk_size: int) -> int:
-    # Mirrors the FLA-NPU tiling-side BLOCK_T computation used by the
-    # standalone GPU/NPU golden tests in example/ascendc_npu.
+    # Mirrors the FLA-NPU tiling-side BLOCK_T computation
+    # (chunk_local_cumsum_tiling.cpp: NextPowerOfTwo((1 << 17) / chunkSize),
+    # tail fixed to 1) as used by its golden tests
+    # (fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_local_cumsum/test/test.py and
+    # examples/flash_gated_delta_rule.py in the fla-npu repo).
     return _next_power_of_two((1 << 17) // chunk_size)
 
 
