@@ -184,7 +184,13 @@ class TmaPrefillTest(unittest.TestCase):
     def test_paged_cache_padding_scales_and_graph_updates(self):
         for heads in (6, 12):
             for fp8 in (False, True):
-                for prefix, tokens in ((127, 129), (1024, 513), (3072, 1024)):
+                for prefix, tokens in (
+                    (127, 129),
+                    (1024, 129),
+                    (3072, 257),
+                    (1024, 513),
+                    (3072, 1024),
+                ):
                     with self.subTest(
                         heads=heads, fp8=fp8, prefix=prefix, tokens=tokens
                     ):
@@ -510,6 +516,22 @@ class TmaPrefillTest(unittest.TestCase):
                 value.transpose(1, 2).reshape(request.end - request.start, -1)
             )
         torch.testing.assert_close(actual, torch.cat(outputs), atol=0, rtol=0)
+
+    def test_long_prefix_fp8_value_scales_preserve_bf16_range(self):
+        q, backing, cache, table, selected, scale = self._paged_case(
+            12, 1024, 129, True
+        )
+        kwargs = dict(prefix=1024, page_size=128, kv_head_num=1, kv_scale=scale)
+        original = try_paged_causal_qsa_prefill(q, backing, table, selected, **kwargs)
+        scale[:, 1].mul_(2**17)
+        actual = try_paged_causal_qsa_prefill(q, backing, table, selected, **kwargs)
+        torch.testing.assert_close(actual, original * (2**17), atol=0, rtol=0)
+        torch.testing.assert_close(
+            actual,
+            self._paged_reference(q, cache, table, selected, 1024, scale),
+            atol=1024,
+            rtol=0.008,
+        )
 
     def test_paged_runtime_preserves_selection_provenance(self):
         from rtp_llm.models_py.modules.qwen4_exp.qsa import sparse_gqa_impl

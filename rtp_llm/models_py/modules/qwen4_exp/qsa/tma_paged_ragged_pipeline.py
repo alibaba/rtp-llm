@@ -92,6 +92,7 @@ def _batched_paged_prefill(
     QS: gl.constexpr,
     OS: gl.constexpr,
     PIPE: gl.constexpr,
+    FRONTIER: gl.constexpr,
 ):
     positions: gl.constexpr = QM // G
     request, base, length, tile = _locate(Cu, B, positions, G)
@@ -127,6 +128,7 @@ def _batched_paged_prefill(
         SCALE_KV,
         FP8,
         CACHE_ROWS,
+        FRONTIER,
     )
 
 
@@ -191,6 +193,7 @@ def run_prefill(
         q.stride(0),
         output.stride(0),
         (not fp8 or heads == 6) and bound <= 2048,
+        heads == 12 or bound > 2048,
         num_warps=4,
     )
     return output

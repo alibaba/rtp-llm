@@ -222,6 +222,12 @@ def _prepare_incremental_prefill_inputs(
     batch = int(input_lengths.numel())
     if batch <= 0 or int(prefixes.numel()) != batch:
         raise ValueError("qwen4_exp incremental prefill lengths and prefixes disagree")
+    plan = _try_prepare_host_incremental_prefill(
+        self, qkv, kv_cache, selected_indices, input_lengths, prefixes
+    )
+    if plan is not None:
+        return plan
+
     input_lengths_device = input_lengths.to(
         device=qkv.device, dtype=torch.int32, non_blocking=True
     )
@@ -316,4 +322,85 @@ def _prepare_incremental_prefill_inputs(
             "prefixes_device": prefixes_device,
             "cu_seqlens": cu_seqlens,
         }
+    )
+
+
+def _try_prepare_host_incremental_prefill(
+    self, qkv, cache, selected, lengths, prefixes
+):
+    """Derive request offsets on CPU and validate the device partition once.
+
+    All device contents are checked for this invocation. Nothing is cached across
+    layers or calls; in-place metadata updates still take effect before KV writes.
+    """
+    from .fmha_validation import _validate_main_cache_layout
+    from .prefill_validation import validate_prefill_inputs
+
+    cu = self.attn_inputs.cu_seqlens_device
+    tokens = int(qkv.shape[0])
+    batch = int(lengths.numel())
+    if not (
+        lengths.device.type == prefixes.device.type == "cpu"
+        and lengths.dtype in (torch.int32, torch.int64)
+        and prefixes.dtype in (torch.int32, torch.int64)
+        and isinstance(cu, torch.Tensor)
+        and cu.device == qkv.device
+        and cu.dtype == torch.int32
+        and cu.shape == (batch + 1,)
+        and cu.is_contiguous()
+        and selected.ndim == 2
+        and selected.shape[0] == tokens
+        and selected.shape[1] > 0
+        and selected.shape[1] <= 8192
+        and selected.dtype == torch.int32
+        and selected.device == qkv.device
+        and max(batch, tokens) < 2**30
+        and batch <= 256
+    ):
+        return None
+    lens = lengths.tolist()
+    prefix_host = prefixes.tolist()
+    if any(x <= 0 for x in lens):
+        raise ValueError("qwen4_exp incremental prefill input lengths must be positive")
+    if any(x < 0 for x in prefix_host):
+        raise ValueError("qwen4_exp incremental prefill prefixes must be non-negative")
+    if sum(lens) != tokens:
+        raise ValueError(
+            "qwen4_exp incremental prefill cu_seqlens do not partition qkv"
+        )
+    # Keep int32 visible positions and device lengths inside their supported range.
+    if any(p + s >= 2**31 for p, s in zip(prefix_host, lens)):
+        return None
+    ld = lengths.to(device=qkv.device, dtype=torch.int32, non_blocking=True)
+    pd = prefixes.to(device=qkv.device, dtype=torch.int32, non_blocking=True)
+    table = self.attn_inputs.kv_cache_kernel_block_id_device
+    page_size, cache_blocks = _validate_main_cache_layout(
+        self, cache.kv_cache_base, table, batch, qkv.device
+    )
+    visible = validate_prefill_inputs(
+        selected,
+        cu,
+        ld,
+        pd,
+        table,
+        page_size,
+        cache_blocks,
+        bool(self.attn_inputs.is_s_padded),
+    )
+    requests = []
+    start = 0
+    for length, prefix in zip(lens, prefix_host):
+        end = start + length
+        requests.append(
+            PrefillRequest(
+                start,
+                end,
+                visible[None, start:end],
+                selected[None, start:end].contiguous(),
+                int(prefix),
+            )
+        )
+        start = end
+    return IncrementalPrefillInputs(
+        batch, tokens, table, page_size, requests, selected, pd, cu
     )

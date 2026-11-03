@@ -817,6 +817,151 @@ class SparseGqaImplForwardTest(unittest.TestCase):
         torch.testing.assert_close(got, expected, atol=2e-2, rtol=2e-2)
         self.assertEqual(calls, [((2, _H_Q, 3, _D), [[4, 5, 6], [8, 9, 0]], (2, 3, 6))])
 
+    def _incremental_plan_case(self):
+        configs, inputs = _configs(is_prefill=True)
+        inputs.input_lengths = torch.tensor([3, 2], dtype=torch.int32)
+        inputs.prefix_lengths = torch.tensor([3, 7], dtype=torch.int32)
+        inputs.cu_seqlens_device = torch.tensor(
+            [0, 3, 5], device=_DEV, dtype=torch.int32
+        )
+        inputs.kv_cache_kernel_block_id_device = torch.tensor(
+            [[1, 2, 3], [4, 5, 6]], device=_DEV, dtype=torch.int32
+        )
+        with patch.object(
+            sparse_gqa_impl, "FusedRopeKVCachePrefillOpQKVOut", self._IdentityRopeWriter
+        ):
+            impl = SparseGqaFmhaImpl(configs, inputs)
+        qkv = torch.randn(5, (_H_Q + 2 * _H_KV) * _D, device=_DEV, dtype=torch.bfloat16)
+        cache = SimpleNamespace(
+            kv_cache_base=torch.randn(
+                7, 2, _H_KV, 4, _D, device=_DEV, dtype=torch.bfloat16
+            )
+        )
+        selected = torch.full((5, 6), -1, device=_DEV, dtype=torch.int32)
+        selected[:, 0] = 0
+        return impl, qkv, cache, selected
+
+    def test_incremental_plan_refreshes_host_and_device_metadata(self):
+        impl, qkv, cache, selected = self._incremental_plan_case()
+        plan = impl._prepare_incremental_prefill_inputs(qkv, cache, selected)
+        self.assertEqual(
+            [r.kv_lens.tolist() for r in plan.requests], [[[4, 5, 6]], [[8, 9]]]
+        )
+        self.assertIs(plan.cu_seqlens, impl.attn_inputs.cu_seqlens_device)
+        # Reusing storage must not reuse a previously validated partition.
+        impl.attn_inputs.cu_seqlens_device[1] = 2
+        with self.assertRaisesRegex(ValueError, "cu_seqlens"):
+            impl._prepare_incremental_prefill_inputs(qkv, cache, selected)
+        impl.attn_inputs.input_lengths.copy_(torch.tensor([2, 3], dtype=torch.int32))
+        plan = impl._prepare_incremental_prefill_inputs(qkv, cache, selected)
+        self.assertEqual(
+            [(r.start, r.end, r.prefix) for r in plan.requests], [(0, 2, 3), (2, 5, 7)]
+        )
+        self.assertEqual(
+            [r.kv_lens.tolist() for r in plan.requests], [[[4, 5]], [[8, 9, 10]]]
+        )
+        impl.attn_inputs.prefix_lengths[0] = 2
+        plan = impl._prepare_incremental_prefill_inputs(qkv, cache, selected)
+        self.assertEqual(plan.requests[0].kv_lens.tolist(), [[3, 4]])
+
+    def test_incremental_plan_accepts_strided_and_duplicate_selection(self):
+        impl, qkv, cache, _ = self._incremental_plan_case()
+        storage = torch.full((5, 12), -99, device=_DEV, dtype=torch.int32)
+        selected = storage[:, ::2]
+        selected.fill_(-1)
+        selected[:, :2] = 0
+        plan = impl._prepare_incremental_prefill_inputs(qkv, cache, selected)
+        for request in plan.requests:
+            torch.testing.assert_close(
+                request.selected_indices[0],
+                selected[request.start : request.end],
+                atol=0,
+                rtol=0,
+            )
+        selected[3, -1] = 8
+        with self.assertRaisesRegex(ValueError, "visible KV"):
+            impl._prepare_incremental_prefill_inputs(qkv, cache, selected)
+        selected[3, -1] = -2
+        with self.assertRaisesRegex(ValueError, "padding"):
+            impl._prepare_incremental_prefill_inputs(qkv, cache, selected)
+
+    def test_incremental_invalid_inputs_fail_before_main_cache_mutation(self):
+        for corruption in (
+            "cu_start",
+            "cu_end",
+            "cu_middle",
+            "padding",
+            "future",
+            "page",
+            "capacity_overflow",
+            "unused_page",
+        ):
+            with self.subTest(corruption=corruption):
+                impl, qkv, cache, selected = self._incremental_plan_case()
+                original = cache.kv_cache_base.clone()
+                if corruption == "cu_start":
+                    impl.attn_inputs.cu_seqlens_device[0] = 1
+                elif corruption == "cu_end":
+                    impl.attn_inputs.cu_seqlens_device[-1] = 6
+                elif corruption == "cu_middle":
+                    impl.attn_inputs.cu_seqlens_device[1] = -2147483648
+                elif corruption == "padding":
+                    selected[0, 0] = -2
+                elif corruption == "future":
+                    selected[3, 0] = 8
+                elif corruption == "capacity_overflow":
+                    impl.attn_inputs.prefix_lengths[0] = 2147483644
+                elif corruption == "unused_page":
+                    # Request 0 needs only two pages; the final column is unused.
+                    impl.attn_inputs.kv_cache_kernel_block_id_device[0, -1] = 1000
+                else:
+                    impl.attn_inputs.kv_cache_kernel_block_id_device[1, 0] = 0
+                with patch.object(
+                    impl.rope_kvcache_impl,
+                    "forward",
+                    side_effect=AssertionError("writer must not run"),
+                ) as writer:
+                    with self.assertRaises((ValueError, RuntimeError)):
+                        impl.forward(qkv, cache, selected_indices=selected)
+                    writer.assert_not_called()
+                self.assertFalse(impl.qsa_main_cache_mutation_started())
+                torch.testing.assert_close(
+                    cache.kv_cache_base, original, atol=0, rtol=0
+                )
+
+    def test_incremental_padded_rows_and_strided_page_tables(self):
+        impl, qkv, cache, selected = self._incremental_plan_case()
+        original = impl.attn_inputs.kv_cache_kernel_block_id_device
+        storage = torch.full((2, 6), 1000, device=_DEV, dtype=torch.int32)
+        table = storage[:, ::2]
+        table.copy_(original)
+        impl.attn_inputs.kv_cache_kernel_block_id_device = table
+        impl.attn_inputs.is_s_padded = True
+        table[1] = 0
+        selected[3:] = -1
+        plan = impl._prepare_incremental_prefill_inputs(qkv, cache, selected)
+        self.assertIs(plan.block_table, table)
+        table[1, 0] = 4
+        with self.assertRaisesRegex(RuntimeError, "visible KV"):
+            impl._prepare_incremental_prefill_inputs(qkv, cache, selected)
+        table[1].copy_(original[1])
+        plan = impl._prepare_incremental_prefill_inputs(qkv, cache, selected)
+        self.assertEqual(plan.requests[1].kv_lens.tolist(), [[8, 9]])
+
+    def test_incremental_device_lengths_keep_general_plan_path(self):
+        impl, qkv, cache, selected = self._incremental_plan_case()
+        expected = impl._prepare_incremental_prefill_inputs(qkv, cache, selected)
+        impl.attn_inputs.input_lengths = impl.attn_inputs.input_lengths.to(_DEV)
+        impl.attn_inputs.prefix_lengths = impl.attn_inputs.prefix_lengths.to(_DEV)
+        with patch(
+            "rtp_llm.models_py.modules.qwen4_exp.qsa.prefill_validation.validate_prefill_inputs",
+            side_effect=AssertionError("host plan requires host metadata"),
+        ):
+            actual = impl._prepare_incremental_prefill_inputs(qkv, cache, selected)
+        for a, b in zip(actual.requests, expected.requests):
+            self.assertIsNone(a.prefix)
+            torch.testing.assert_close(a.kv_lens, b.kv_lens, atol=0, rtol=0)
+
     def test_nonzero_prefix_requires_the_paged_bridge_not_local_prefill(self):
         events = []
 
