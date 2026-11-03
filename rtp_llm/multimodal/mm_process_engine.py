@@ -2,6 +2,7 @@ import concurrent.futures
 import gc
 import logging
 import multiprocessing.pool
+import os
 import threading
 import time
 from functools import wraps
@@ -25,6 +26,7 @@ from rtp_llm.multimodal.mm_embedding_cache import (
     MMEmbeddingCache,
     MMEmbeddingCacheEntry,
     MMHashKeyCache,
+    ShardedMMEmbeddingCache,
 )
 from rtp_llm.multimodal.mm_inspection import MMInspectionCoordinator, SourceInspection
 from rtp_llm.multimodal.mm_preprocess import (
@@ -340,9 +342,22 @@ class MMProcessEngine:
         self._hash_key_cache = MMHashKeyCache(
             max_bytes=self.vit_config.mm_hash_key_cache_max_bytes
         )
-        self._embedding_cache = MMEmbeddingCache(
+        # Shard the fixed pools so the global transfer lock and the first-fit
+        # free-list scan are bounded by one shard's entries, not the whole
+        # cache. MM_CACHE_SHARDS=1 preserves the previous single-cache layout.
+        # Tiny caches (unit tests) stay single-shard: splitting a few bytes
+        # across shards would change eviction semantics without any benefit.
+        cache_shards = int(os.environ.get("MM_CACHE_SHARDS", "0"))
+        if cache_shards <= 0:
+            largest_cache = max(
+                self.vit_config.mm_cache_gpu_max_bytes,
+                self.vit_config.mm_cache_cpu_max_bytes,
+            )
+            cache_shards = 8 if largest_cache >= 256 * 1024 * 1024 else 1
+        self._embedding_cache = ShardedMMEmbeddingCache(
             gpu_max_bytes=self.vit_config.mm_cache_gpu_max_bytes,
             cpu_max_bytes=self.vit_config.mm_cache_cpu_max_bytes,
+            shards=max(1, cache_shards),
             report_metrics=True,
             on_cpu_evict=(
                 self._remote_embedding_cache.submit_eviction
