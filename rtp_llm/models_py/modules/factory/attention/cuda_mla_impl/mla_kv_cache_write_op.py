@@ -6,7 +6,6 @@ which uses a compressed KV cache layout.
 
 from typing import Any, Optional, Tuple
 
-import flashinfer.page as page
 import torch
 
 from rtp_llm.ops import KvCacheDataType, compute_ops
@@ -19,10 +18,15 @@ class MlaKVCacheWriteOp:
     def __init__(
         self,
         kv_cache_dtype: KvCacheDataType,
+        fp8_compute: bool = False,
     ) -> None:
+        if fp8_compute and kv_cache_dtype != KvCacheDataType.FP8:
+            raise ValueError("FP8 MLA compute requires ordinary FP8 cache")
         self.kv_cache_type = (
             "fp8_ds_mla" if kv_cache_dtype == KvCacheDataType.FP8 else "auto"
         )
+        if fp8_compute:
+            self.kv_cache_type = "fp8"
         # Scale tensor is required for concat_and_cache_mla even in non-FP8 mode
         self.scale = torch.tensor(1.0, dtype=torch.float32, device="cuda")
 
