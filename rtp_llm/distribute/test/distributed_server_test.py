@@ -316,7 +316,7 @@ class DistributedServerTest(unittest.TestCase):
         @patch.dict(
             "os.environ",
             {
-                "GANG_ANNOCATION_PATH": "rtp_llm/distribute/test/testdata/annocation",
+                "GANG_ANNOTATION_PATH": "rtp_llm/distribute/test/testdata/annocation",
                 "TP_SIZE": "2",
                 "PP_SIZE": "1",
                 "WORLD_SIZE": "2",
@@ -377,7 +377,7 @@ class DistributedServerTest(unittest.TestCase):
         @patch.dict(
             "os.environ",
             {
-                "GANG_ANNOCATION_PATH": "rtp_llm/distribute/test/testdata/annocation",
+                "GANG_ANNOTATION_PATH": "rtp_llm/distribute/test/testdata/annocation",
                 "MODEL_TYPE": "fake_model",
             },
             clear=True,

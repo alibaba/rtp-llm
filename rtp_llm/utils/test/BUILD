@@ -292,3 +292,16 @@ py_test(
     srcs = ["dsa_indexing_test.py"],
     data = ["//rtp_llm:utils/dsa_indexing.py"],
 )
+
+py_test(
+    name = "gang_info_test",
+    srcs = ["gang_info_test.py"],
+    deps = ["//rtp_llm:utils"],
+)
+
+
+py_test(
+    name = "signal_guard_test",
+    srcs = ["signal_guard_test.py"],
+    deps = ["//rtp_llm:utils"],
+)
