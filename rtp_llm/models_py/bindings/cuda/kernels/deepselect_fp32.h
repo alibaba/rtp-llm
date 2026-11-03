@@ -7,6 +7,10 @@ namespace torch_ext {
 
 bool deepselect_fp32_available();
 
+// Draft only. Returns temperature-scaled FP32 values and int64 vocabulary IDs.
+std::tuple<torch::Tensor, torch::Tensor>
+draft_markov_topk(const torch::Tensor& logits, const torch::Tensor& bias, const torch::Tensor& temperature, int64_t k);
+
 // FP32 K512 token selection, without an intermediate score copy/workspace.
 // logits: CUDA FP32 [M,N], 512 <= N < 2^23; unit inner stride, row stride a
 //         multiple of 1024B, base aligned to 16B. Storage must back the final

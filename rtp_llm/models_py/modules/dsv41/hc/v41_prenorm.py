@@ -1,8 +1,8 @@
 """Decode-sized V4.1 mHC projection with split-K and FP32 RMS reduction.
 
 Like vLLM's delayed mHC, use DeepGEMM's combined projection/square-sum
-primitive to distribute the long K dimension across SMs. Preserve RTP's
-existing TF32 weight rounding and leave delayed mixing to the caller.
+primitive to distribute the long K dimension across SMs. Native TMA converts
+raw FP32 weights to TF32 with RN-even; delayed mixing stays with the caller.
 """
 
 import importlib
@@ -125,16 +125,16 @@ def prenorm(
 
     # vLLM bounds its small-token prenorm specialization to 16 K partitions.
     splits = 16
-    weight = prepare_tf32_weight(fn)
     partial = torch.empty(
         (splits, tokens, 24), dtype=torch.float32, device=residual.device
     )
     square_sum = torch.empty(
         (splits, tokens), dtype=torch.float32, device=residual.device
     )
-    tf32_hc_prenorm_gemm(
-        residual.view(tokens, 20480), weight, partial, square_sum, splits
-    )
+    # The native tensor map converts the raw FP32 weight to TF32 with its
+    # round-to-nearest-even rule. Pre-rounding with the old TileLang bias
+    # changes exact halfway values before that conversion.
+    tf32_hc_prenorm_gemm(residual.view(tokens, 20480), fn, partial, square_sum, splits)
     _reduce_prenorm_kernel[(tokens,)](
         partial,
         square_sum,

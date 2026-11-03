@@ -122,7 +122,10 @@ def _cubic(distance: float) -> float:
     return 0.0
 
 
-@lru_cache(maxsize=16)
+# The coefficient computation is a pure-Python double loop. Production sees
+# hundreds of distinct (in_size, out_size) pairs per hour and this cache is
+# per preprocess worker, so 16 entries thrashes every worker independently.
+@lru_cache(maxsize=256)
 def _coefficients(in_size: int, out_size: int):
     """Private read-only CPU tensors: (start,count) and signed 22-bit weights.
 

@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/normal_engine/speculative/SpeculativeSampler.h"
+#include "rtp_llm/cpp/normal_engine/speculative/DSparkSampleSeed.h"
 #include "rtp_llm/cpp/models/Sampler.h"
 
 #include <algorithm>
@@ -19,6 +20,7 @@
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 #if USING_CUDA
 #include <ATen/autocast_mode.h>
+#include <ATen/cuda/CUDAContext.h>
 #include <c10/util/ScopeExit.h>
 #include "rtp_llm/models_py/bindings/cuda/ops/StandaloneOps.h"
 #include "rtp_llm/models_py/bindings/cuda/Bf16GemmOp.h"
@@ -58,6 +60,111 @@ TEST(FastTopKSamplerTest, TopKGreaterThanOneReturnsTopKIndices) {
 }
 
 #if USING_CUDA
+TEST(DSparkSamplerTest, BoundedResidualUsesReservedUniformWithoutChangingUnboundedLayout) {
+    const c10::cuda::CUDAGuard guard(0);
+    constexpr int              batch = 2, gamma = 5, vocab = 4;
+    const auto                 ints        = torch::TensorOptions().device(torch::kCUDA).dtype(torch::kInt32);
+    const auto                 floats      = ints.dtype(torch::kFloat32);
+    auto                       draft_probs = torch::zeros({batch, gamma, vocab}, floats);
+    draft_probs.select(2, 3).fill_(1.0f);
+    auto target_probs = torch::zeros({batch, gamma + 1, vocab}, floats);
+    target_probs.narrow(2, 0, 2).fill_(0.5f);
+    const auto draft_ids  = torch::full({batch, gamma}, 3, ints);
+    const auto target_ids = torch::zeros({batch * (gamma + 1), 1}, ints);
+    const auto do_sample  = torch::ones({batch}, ints.dtype(torch::kBool));
+    const auto valid      = torch::tensor({1, gamma}, ints);
+    auto       uniforms   = torch::full({batch, gamma + 1}, 0.1f, floats);
+    uniforms.select(1, 1).fill_(0.75f);
+    uniforms.select(1, gamma).fill_(0.25f);
+    // The first draft is certainly rejected. In the same residual (1/2,1/2),
+    // bounded rows must use the reserved final column, while legacy callers
+    // retain their historical pos+1 draw.
+    for (const bool bounded : {false, true}) {
+        auto tokens  = torch::empty({batch, gamma + 1}, ints);
+        auto lengths = torch::empty({batch}, ints);
+        execRejectionSampling({draft_probs,
+                               draft_ids,
+                               uniforms,
+                               target_probs,
+                               target_ids,
+                               tokens,
+                               lengths,
+                               do_sample,
+                               false,
+                               false,
+                               {},
+                               true,
+                               bounded ? valid : torch::Tensor()});
+        EXPECT_TRUE(torch::equal(lengths.cpu(), torch::ones({batch}, torch::kInt32)));
+        EXPECT_TRUE(torch::equal(tokens.select(1, 0).cpu(), torch::full({batch}, bounded ? 0 : 1, torch::kInt32)));
+        EXPECT_EQ(tokens.narrow(1, 1, gamma).count_nonzero().item<int64_t>(), 0);
+    }
+}
+
+TEST(DSparkSamplerTest, TwoRoundResidualHistoryPreservesConditionalAcceptance) {
+    const c10::cuda::CUDAGuard guard(0);
+    constexpr int              batch = 4096, gamma = 5, vocab = 4;
+    constexpr int64_t          base        = 4096;
+    const auto                 ints        = torch::TensorOptions().device(torch::kCUDA).dtype(torch::kInt32);
+    const auto                 floats      = ints.dtype(torch::kFloat32);
+    auto                       draft_probs = torch::zeros({batch, gamma, vocab}, floats);
+    draft_probs.select(2, 3).fill_(1.0f);
+    const auto draft_ids    = torch::full({batch, gamma}, 3, ints);
+    const auto do_sample    = torch::ones({batch}, ints.dtype(torch::kBool));
+    const auto valid        = torch::ones({batch}, ints);
+    auto       first_target = torch::zeros({batch, gamma + 1, vocab}, floats);
+    first_target.narrow(2, 0, 2).fill_(0.5f);
+    std::vector<float> first_values(batch * (gamma + 1)), next_values(first_values.size());
+    for (int row = 0; row < batch; ++row) {
+        for (int slot = 0; slot <= gamma; ++slot) {
+            first_values[row * (gamma + 1) + slot] = dsparkRejectionUniformAt(row, base, slot, gamma);
+            next_values[row * (gamma + 1) + slot]  = dsparkRejectionUniformAt(row, base + 1, slot, gamma);
+        }
+    }
+    const auto cpu_floats     = torch::TensorOptions().dtype(torch::kFloat32);
+    const auto first_uniforms = torch::tensor(first_values, cpu_floats).view({batch, gamma + 1}).to(torch::kCUDA);
+    const auto next_uniforms  = torch::tensor(next_values, cpu_floats).view({batch, gamma + 1}).to(torch::kCUDA);
+    auto       run            = [&](const torch::Tensor& target, const torch::Tensor& uniforms) {
+        auto tokens     = torch::empty({batch, gamma + 1}, ints);
+        auto lengths    = torch::empty({batch}, ints);
+        auto target_ids = target.argmax(-1).reshape({batch * (gamma + 1), 1}).to(torch::kInt32);
+        execRejectionSampling({draft_probs,
+                               draft_ids,
+                               uniforms,
+                               target,
+                               target_ids,
+                               tokens,
+                               lengths,
+                               do_sample,
+                               false,
+                               false,
+                               {},
+                               true,
+                               valid});
+        return std::make_pair(tokens, lengths);
+    };
+    for (const bool reuse_residual_as_next_acceptance : {false, true}) {
+        auto uniforms = first_uniforms.clone();
+        if (reuse_residual_as_next_acceptance) {
+            // Negative control: this is exactly the historical counter reuse.
+            uniforms.select(1, gamma).copy_(next_uniforms.select(1, 0));
+        }
+        auto first = run(first_target, uniforms);
+        EXPECT_TRUE(torch::equal(first.second.cpu(), torch::ones({batch}, torch::kInt32)));
+        const auto history = first.first.select(1, 0);
+        EXPECT_TRUE(history.ge(0).logical_and(history.le(1)).all().item<bool>());
+        // Same fixed conditional model as the exact Fraction oracle: q=delta(3),
+        // p(3|H=0)=1, p(3|H=1)=1/2, with the other mass on token 0.
+        auto next_target      = torch::zeros_like(first_target);
+        auto accept_threshold = torch::where(history.eq(0), 1.0f, 0.5f).unsqueeze(1);
+        next_target.select(2, 3).copy_(accept_threshold.expand({batch, gamma + 1}));
+        next_target.select(2, 0).copy_((1.0f - accept_threshold).expand({batch, gamma + 1}));
+        const auto next       = run(next_target, next_uniforms);
+        const auto acceptance = next.second.sub(1).to(torch::kFloat32).mean().item<float>();
+        EXPECT_NEAR(acceptance, reuse_residual_as_next_acceptance ? 0.50f : 0.75f, 0.03f);
+    }
+}
+
 TEST(DSparkSamplerTest, CompactRejectionMatchesDenseForAcceptedAndRejectedTokens) {
     const c10::cuda::CUDAGuard guard(0);
     const auto                 ints           = torch::TensorOptions().device(torch::kCUDA).dtype(torch::kInt32);
@@ -450,7 +557,10 @@ TEST(DSparkSamplerTest, Int32IndicesPreserveGreedyAndStochasticResults) {
                         auto scratch = torch::empty({batch, vocab}, options.dtype(torch::kFloat32));
                         std::vector<torch::Tensor> columns;
                         for (int64_t step = 0; step < static_cast<int64_t>(steps); ++step) {
-                            auto          bias = torch::mm(w1.index_select(0, previous), w2.transpose(0, 1));
+                            auto          embedding = w1.index_select(0, previous);
+                            auto          bias      = dtype == torch::kBFloat16 ?
+                                                          torch_ext::cublas_gemm_bf16_bf16_fp32(embedding, w2) :
+                                                          torch::mm(embedding, w2.transpose(0, 1));
                             torch::Tensor tokens;
                             if (greedy) {
                                 tokens = execMarkovArgmaxStep({proposals.select(1, step), bias, temperature});
@@ -482,6 +592,63 @@ TEST(DSparkSamplerTest, Int32IndicesPreserveGreedyAndStochasticResults) {
             }
         }
     }
+}
+
+TEST(DSparkSamplerTest, Bf16MarkovKeepsFp32TermsForDenseGreedyAndTopK) {
+    const c10::cuda::CUDAGuard guard(0);
+    const auto                 fp32  = torch::TensorOptions().device(torch::kCUDA).dtype(torch::kFloat32);
+    constexpr int64_t          batch = 3, gamma = 5, vocab = 4, rank = 2;
+    // Every previous token has the same embedding, so all paths use an
+    // identical prefix. Products and sums below are exact dyadic FP32 values.
+    auto w1           = torch::ones({vocab, rank}, fp32.dtype(torch::kBFloat16));
+    auto w2           = torch::tensor({{1.0f, 1.0f / 256}, {1.0f, 1.0f / 128}, {0.0f, 0.0f}, {0.0f, 0.0f}},
+                            fp32.dtype(torch::kBFloat16));
+    auto row_logits   = torch::tensor({-1.0f, -1.0f - 3.0f / 512, -4.0f, -4.0f}, fp32);
+    auto logits       = row_logits.repeat({batch * gamma, 1});
+    auto anchors      = torch::tensor({0, 2, 3}, fp32.dtype(torch::kInt32));
+    auto temperatures = torch::tensor({0.75f, 1.0f, 2.0f}, fp32);
+    // Independent host double reference; no production GEMM or Markov op.
+    auto         expected_cpu    = torch::empty({batch, gamma, vocab}, torch::kFloat32);
+    const double combined[vocab] = {1.0 / 256, 1.0 / 512, -4.0, -4.0};
+    const double scales[batch]   = {0.75, 1.0, 2.0};
+    for (int64_t row = 0; row < batch; ++row) {
+        double normalizer = 0.0;
+        for (double score : combined) {
+            normalizer += std::exp(score / scales[row]);
+        }
+        for (int64_t step = 0; step < gamma; ++step) {
+            for (int64_t token = 0; token < vocab; ++token) {
+                expected_cpu[row][step][token] =
+                    static_cast<float>(std::exp(combined[token] / scales[row]) / normalizer);
+            }
+        }
+    }
+    auto expected = expected_cpu.to(torch::kCUDA);
+    // Negative control: the former BF16 GEMM rounds 1+1/256 to 1.0 and
+    // changes the winning token from 0 to 1 before any sampling randomness.
+    auto old_bias   = torch::mm(w1.index_select(0, anchors), w2.transpose(0, 1));
+    auto old_scores = row_logits + old_bias.to(torch::kFloat32);
+    ASSERT_TRUE(old_scores.argmax(-1).eq(1).all().item<bool>());
+    auto old_q = torch::softmax(old_scores / temperatures.unsqueeze(1), -1);
+    ASSERT_GT((old_q - expected.select(1, 0)).abs().max().item<float>(), 1.0e-4f);
+
+    SpeculativeSampler sampler({}, gamma);
+    auto               dense = sampler.sampleDSparkDraft(logits, anchors, temperatures, {}, {}, w1, w2, vocab, false);
+    ASSERT_FALSE(dense.token_ids_are_point_mass);
+    ASSERT_TRUE(torch::allclose(dense.all_probs, expected, 2.0e-6, 1.0e-7));
+    auto greedy = sampler.sampleDSparkDraft(logits, anchors, temperatures, {}, {}, w1, w2, vocab, true);
+    ASSERT_TRUE(greedy.token_ids_are_point_mass);
+    ASSERT_TRUE(greedy.token_ids.eq(0).all().item<bool>());
+    auto top_k    = torch::ones({batch}, anchors.options());
+    auto filtered = sampler.sampleDSparkDraft(logits, anchors, temperatures, top_k, {}, w1, w2, vocab, false);
+    auto one_hot  = torch::zeros_like(expected);
+    one_hot.select(2, 0).fill_(1.0f);
+    ASSERT_TRUE(torch::equal(filtered.all_probs, one_hot));
+    ASSERT_TRUE(filtered.token_ids.eq(0).all().item<bool>());
+    auto compact = sampler.sampleDSparkDraft(logits, anchors, temperatures, {}, {}, w1, w2, vocab, false, 1);
+    ASSERT_TRUE(compact.token_ids.eq(0).all().item<bool>());
+    ASSERT_TRUE(compact.all_probs_indices.eq(0).all().item<bool>());
+    ASSERT_TRUE(compact.all_probs.eq(1.0f).all().item<bool>());
 }
 
 TEST(DSparkSamplerTest, FusedOutputPreservesEmbeddingBitsAndStrides) {
@@ -1052,7 +1219,7 @@ TEST(DSparkDraftCommitTest, FiveStepCompactConfidenceMatchesFrozenTorchChainAndR
             auto                       previous = anchors.to(torch::kInt64);
             torch::manual_seed(71132);
             for (int64_t step = 0; step < gamma; ++step) {
-                auto bias     = w1.index_select(0, previous).mm(w2.transpose(0, 1));
+                auto bias     = torch_ext::cublas_gemm_bf16_bf16_fp32(w1.index_select(0, previous), w2);
                 auto selected = torch_ext::deepselect_fp32_topk(
                     torch_ext::markov_scaled_logits(
                         logits.view({batch, gamma, vocab}).select(1, step), bias, temperatures),
@@ -1187,6 +1354,53 @@ TEST(DSparkDraftCommitTest, ProductionShapeCommitBenchmark) {
     }
 }
 
+TEST(DSparkSamplerTest, Compact4096StridedRowsPreserveMasksTiesAndTemperature) {
+    const c10::cuda::CUDAGuard guard(0);
+    auto                       opts = torch::TensorOptions().device(torch::kCUDA).dtype(torch::kFloat32);
+    constexpr int64_t          k = 4096, v = 8201;  // deliberately unaligned row ends
+    for (int64_t b : {1, 17, 48}) {
+        // Exact FP16 scores with many ties. Tiny temperatures would overflow
+        // if division were incorrectly performed before the FP16 store.
+        auto x = torch::randint(-16, 17, {b, 3, v}, opts).select(1, 1);
+        auto t = torch::linspace(0.00001, 1.25, b, opts);
+        x.slice(1, 0, v, 5).fill_(-std::numeric_limits<float>::infinity());
+        for (auto dtype : {at::kFloat, at::kHalf, at::kBFloat16}) {
+            auto bias          = torch::randint(-4, 5, {b, v}, opts).to(dtype);
+            auto scores        = x + bias.to(at::kFloat);
+            auto [values, ids] = torch_ext::draft_markov_topk(x, bias, t, k);
+            auto sorted_ids    = std::get<0>(ids.sort(-1));
+            ASSERT_TRUE(sorted_ids.slice(1, 1, k).gt(sorted_ids.slice(1, 0, k - 1)).all().item<bool>());
+            auto selected = scores.gather(1, ids);
+            EXPECT_TRUE(torch::allclose(values, selected / t.unsqueeze(1), 1e-5, 1e-5));
+            auto remaining = scores.scatter(1, ids, -std::numeric_limits<float>::infinity());
+            EXPECT_TRUE(remaining.amax(1).le(selected.amin(1)).all().item<bool>());
+        }
+    }
+}
+
+TEST(DSparkSamplerTest, Compact4096RoundsAfterFp32MarkovAddition) {
+    const c10::cuda::CUDAGuard guard(0);
+    const auto*                device = at::cuda::getDeviceProperties(0);
+    if (CUDART_VERSION < 13000 || device->major != 10 || (device->minor != 0 && device->minor != 3)) {
+        GTEST_SKIP() << "FP16 draft Top4096 requires the CUDA 13 Blackwell path";
+    }
+    constexpr int64_t k      = 4096;
+    const auto        opts   = torch::TensorOptions().device(torch::kCUDA).dtype(torch::kFloat32);
+    auto              logits = torch::full({1, k + 2}, -2048.0f, opts);
+    auto              bias   = torch::full_like(logits, 2044.0f);
+    bias.narrow(1, 0, k - 1).fill_(2052.0f);  // k-1 clear winners, corrected score 4
+    // Both corrected scores round to 1 in FP16. Rounding bias before addition
+    // gives 2; selecting in FP32 keeps the larger score above 1.
+    bias.select(1, k - 1).fill_(2049.0f + 1.0f / 4096);
+    bias.select(1, k).fill_(2049.0f + 1.0f / 2048);
+    auto [values, ids] = torch_ext::draft_markov_topk(logits, bias, torch::ones({1}, opts), k);
+    auto boundary      = ids.masked_select(values.eq(1.0f));
+    ASSERT_EQ(boundary.numel(), 1);
+    EXPECT_EQ(values.eq(4.0f).sum().item<int64_t>(), k - 1);
+    const auto id = boundary.item<int64_t>();
+    EXPECT_TRUE(id == k - 1 || id == k);
+}
+
 TEST(DSparkDraftCommitTest, ProductionShapeDraftTrace) {
     const char* output_dir = std::getenv("TEST_UNDECLARED_OUTPUTS_DIR");
     if (output_dir == nullptr || *output_dir == '\0') {
@@ -1198,8 +1412,8 @@ TEST(DSparkDraftCommitTest, ProductionShapeDraftTrace) {
     const auto                 fp32   = torch::TensorOptions().device(torch::kCUDA).dtype(torch::kFloat32);
     const auto                 stream = at::cuda::getCurrentCUDAStream();
     constexpr int64_t          batch = 48, gamma = 5, width = 4096, vocab = 129280, rank = 256;
-    // Matches the supplied trace's sampled tensors: FP32 proposal logits,
-    // BF16 Markov GEMM output, K4096 top-p sampling, and a confidence finish.
+    // Production tensor shapes with FP32 proposal logits and Markov output,
+    // BF16 Markov weights, K4096 top-p sampling, and a confidence finish.
     // Only the final rank columns of the head weight cross this scalar API.
     auto               w1           = torch::randn({vocab, rank}, fp32.dtype(torch::kBFloat16));
     auto               w2           = torch::randn({vocab, rank}, w1.options());
@@ -1229,9 +1443,9 @@ TEST(DSparkDraftCommitTest, ProductionShapeDraftTrace) {
         columns.reserve(gamma);
         for (int64_t step = 0; step < gamma; ++step) {
             auto embedding = w1.index_select(0, previous);
-            auto bias      = torch::mm(embedding, w2.transpose(0, 1));
-            auto selected =
-                torch_ext::deepselect_fp32_markov_topk_prefilter(proposals.select(1, step), bias, temperatures);
+            auto bias      = torch_ext::cublas_gemm_bf16_bf16_fp32(embedding, w2);
+            auto selected  = torch_ext::deepselect_fp32_topk(
+                torch_ext::markov_scaled_logits(proposals.select(1, step), bias, temperatures), width);
             auto q   = torch::softmax(std::get<0>(selected), -1);
             auto ids = std::get<1>(selected);
             top_p_renorm_probs(q, filtered, top_p, 1.0, reinterpret_cast<uintptr_t>(stream.stream()));
@@ -1263,10 +1477,27 @@ TEST(DSparkDraftCommitTest, ProductionShapeDraftTrace) {
     torch::manual_seed(seed);
     auto actual     = candidate();
     auto actual_rng = torch::rand({16}, fp32);
-    ASSERT_TRUE(torch::equal(actual.token_ids, expected.token_ids));
-    ASSERT_TRUE(torch::equal(actual.all_probs, expected.all_probs));
-    ASSERT_TRUE(torch::equal(actual.all_probs_indices, expected.all_probs_indices));
-    ASSERT_TRUE(torch::equal(actual.confidence_rates, expected.confidence_rates));
+    // The unordered selector may assign the same RNG draw to a different token.
+    // Compare the common first-step q in vocabulary coordinates, then verify
+    // each subsequent sampled token against its own conditional distribution.
+    auto dense_first = [&](const SamplerOutput& out) {
+        return torch::zeros({batch, vocab}, fp32)
+            .scatter_(1, out.all_probs_indices.select(1, 0).to(torch::kLong), out.all_probs.select(1, 0));
+    };
+    EXPECT_LT((dense_first(actual) - dense_first(expected)).abs().sum(1).mean().item<float>() * 0.5f, 0.02f);
+    auto chosen = actual.all_probs_indices.eq(actual.token_ids.unsqueeze(-1));
+    EXPECT_TRUE((chosen & actual.all_probs.gt(0)).any(-1).all().item<bool>());
+    EXPECT_TRUE(torch::allclose(actual.all_probs.sum(-1), torch::ones({batch, gamma}, fp32), 1e-4, 1e-5));
+    auto rates = torch::empty_like(actual.confidence_rates);
+    invokeDSparkConfidenceRates(anchors.reshape({batch}),
+                                actual.token_ids,
+                                w1,
+                                head.narrow(1, 1, rank).to(torch::kFloat32).view({rank, 1}),
+                                hidden.view({batch, gamma, 1}),
+                                rates,
+                                0.65f,
+                                stream.stream());
+    EXPECT_TRUE(torch::allclose(actual.confidence_rates, rates, 1e-5, 1e-6));
     ASSERT_TRUE(torch::equal(actual_rng, expected_rng));
     stream.synchronize();
 
@@ -1280,7 +1511,7 @@ TEST(DSparkDraftCommitTest, ProductionShapeDraftTrace) {
             for (int call = 0; call < 5; ++call) {
                 RTP_LLM_PROFILE_SCOPE_DYNAMIC(
                     "dspark_draft_profile(kind=%s,call=%d,batch=48,gamma=5,vocab=129280,K=4096,rank=256,"
-                    "logits=fp32,markov=bf16,confidence=1)",
+                    "logits=fp32,markov=fp32,markov_weights=bf16,confidence=1)",
                     kind == 0 ? "old_chain" : "candidate",
                     call);
                 actual = kind == 0 ? reference() : candidate();
@@ -1296,7 +1527,7 @@ TEST(DSparkDraftCommitTest, ProductionShapeDraftTrace) {
     const auto path = std::string(output_dir) + "/dspark_draft_b48_g5_k4096_confidence.json";
     trace->save(path);
     std::cout << "DSPARK_DRAFT_TRACE path=" << path << " calls_per_kind=5 warmup_per_kind=5"
-              << " logits=fp32 markov=bf16 fixture_only=1" << std::endl;
+              << " logits=fp32 markov=fp32 markov_weights=bf16 fixture_only=1" << std::endl;
 }
 
 TEST(DSparkConfidenceSamplerTest, RejectsIncompleteOrMalformedConfidenceInputs) {

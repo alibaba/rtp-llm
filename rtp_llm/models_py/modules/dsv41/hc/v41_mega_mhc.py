@@ -21,7 +21,6 @@ from typing import TYPE_CHECKING, Callable
 import torch
 
 from rtp_llm.models_py.modules.dsv41.hc.delayed import DelayedHCUnit
-from rtp_llm.models_py.modules.dsv41.hc.v41_prenorm import prepare_tf32_weight
 
 if TYPE_CHECKING:
     from rtp_llm.models_py.modules.dsv41.moe.mega_se_input_packer import MegaMoEInputs
@@ -308,10 +307,6 @@ def try_fused_post_pre(
             dtype=torch.int32,
         ).T[:execution_tokens]
         quantized = (q, sf)
-    # Both the small-token DeepGEMM prenorm and the large-prefill TileLang
-    # fallback use the same biased TF32 weight rounding. Cache that boundary
-    # instead of feeding raw FP32 weights to TMA's TF32 conversion.
-    weight = prepare_tf32_weight(next_hc.fn)
     with torch.cuda.device(attn_out.device):
         capturing = torch.cuda.is_current_stream_capturing()
         arguments = dict(
@@ -320,7 +315,9 @@ def try_fused_post_pre(
             shifted_prev_mix=previous_pre,
             post_mix=post,
             comb_res_mix=comb,
-            fn=weight,
+            # Let the native TF32 tensor map convert the checkpoint FP32
+            # weights, including its round-to-nearest-even halfway rule.
+            fn=next_hc.fn,
             mix_scales=next_hc.scale,
             mix_bases=next_hc.base,
             hc_mult=4,

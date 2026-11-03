@@ -1,6 +1,5 @@
 package org.flexlb.mock;
 
-import org.flexlb.testfixture.WorkerStatusTestFixtures;
 import com.google.protobuf.ByteString;
 import io.netty.channel.nio.NioEventLoopGroup;
 import org.flexlb.balance.PlacementResult;
@@ -16,13 +15,11 @@ import org.flexlb.balance.scheduler.RequestSchedulerTestRuntime;
 import org.flexlb.balance.scheduler.RouteAdmission;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
-import org.flexlb.config.InternalRuntimeSettings;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.master.WorkerStatus;
-import org.flexlb.testfixture.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.EngineGrpcClient;
 import org.flexlb.engine.grpc.EngineRpcService;
@@ -32,6 +29,8 @@ import org.flexlb.metric.NoOpFlexMonitor;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.flexlb.sync.status.WorkerDirectory;
+import org.flexlb.testfixture.WorkerStatusResponse;
+import org.flexlb.testfixture.WorkerStatusTestFixtures;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.slf4j.Logger;
@@ -148,12 +147,12 @@ public abstract class FlexLBMockTestBase {
         when(configService.loadBalanceConfig()).thenReturn(config);
 
         // 3. Create gRPC infrastructure
-        InternalRuntimeSettings runtime = config.getInternalRuntime();
-        eventLoopGroup = new NioEventLoopGroup(runtime.getGrpcClientEventLoopThreads());
+        var engineGrpc = config.getEngineGrpc();
+        eventLoopGroup = new NioEventLoopGroup(engineGrpc.getEventLoopThreads());
         grpcExecutor = new ThreadPoolExecutor(
-                runtime.getGrpcClientExecutorThreads(), runtime.getGrpcClientExecutorThreads(),
+                engineGrpc.getExecutorThreads(), engineGrpc.getExecutorThreads(),
                 60L, TimeUnit.SECONDS,
-                new LinkedBlockingQueue<>(runtime.getGrpcClientExecutorQueueCapacity()));
+                new LinkedBlockingQueue<>(engineGrpc.getExecutorQueueCapacity()));
 
         CustomNameResolver nameResolver = (listener) -> { /* no-op */ };
         GrpcReporter grpcReporter = new GrpcReporter(new NoOpFlexMonitor());

@@ -138,6 +138,7 @@ class FlexlbGrpcDrainTest {
                 Thread.sleep(10);
             }
             assertTrue(server.isShutdown());
+            assertFalse(grpc.isServing(), "shutting down transport must withdraw readiness before pending RPC completes");
             assertFalse(pending.isDone());
             assertTrue(drainer.isAlive());
             resume.countDown();
@@ -158,12 +159,14 @@ class FlexlbGrpcDrainTest {
         try (var fixture = new Fixture(300)) {
             Thread.sleep(700); // Idle before TERM does not count toward drain.
             assertFalse(fixture.server.isShutdown());
+            assertTrue(fixture.grpc.isServing());
             long started = System.nanoTime();
             fixture.startDrain();
             fixture.drainer.join(100);
             assertTrue(fixture.drainer.isAlive());
             fixture.drainer.join(3000);
             assertFalse(fixture.drainer.isAlive());
+            assertFalse(fixture.grpc.isServing());
             assertTrue(System.nanoTime() - started >= TimeUnit.MILLISECONDS.toNanos(300));
         }
     }
@@ -231,6 +234,7 @@ class FlexlbGrpcDrainTest {
                             responses.add(observer);
                         }
                     }, timing)).build().start();
+            assertFalse(grpc.isServing(), "transport is not available until the server has started");
             ReflectionTestUtils.setField(grpc, "server", server);
             channel = NettyChannelBuilder.forAddress("127.0.0.1", server.getPort()).usePlaintext().build();
         }

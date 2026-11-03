@@ -414,9 +414,10 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         env_name="BLOCK_TREE_FULL_PREFIX_SCAN_INTERVAL_MS",
         bind_to=(kv_cache_config, "block_tree_full_prefix_scan_interval_ms"),
         type=int,
-        default=0,
-        help="BlockTreeCache FULL 前缀异常扫描周期，单位毫秒；0 表示关闭且不创建线程，非 0 时必须不小于 1000。"
-        "单轮扫描节点数和单 cycle 明细上限由 scanner 内部常量固定，不可配置。",
+        default=30000,
+        help="BlockTreeCache FULL 前缀异常扫描批次间隔，单位毫秒；默认 30000（30 秒），"
+        "0 表示关闭且不创建线程，非 0 时必须不小于 1000。仅非 FFN 服务的 TP rank 0 执行扫描。"
+        "单批扫描节点数和单轮明细上限由 scanner 内部常量固定，不可配置。",
     )
 
     # KVCM storage backend configuration arguments

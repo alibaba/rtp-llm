@@ -41,6 +41,8 @@ LoadTaskRunner::TaskPtr LoadTaskRunner::createTask(const std::shared_ptr<LoadAsy
         TransferTask(
             std::move(disk_to_device_descriptors), std::chrono::milliseconds(disk_timeout_ms_), context->requestId()),
         context);
+    task->host_to_device_task.setWorkflow(context->workflowId(), context->workflowId());
+    task->disk_to_device_task.setWorkflow(context->workflowId(), context->workflowId());
     return task;
 }
 

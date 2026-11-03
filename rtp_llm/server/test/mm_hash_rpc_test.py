@@ -341,6 +341,11 @@ class MMHashRpcTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(list(forwarded.token_ids), [1, 99, 2])
             self.assertEqual(len(forwarded.multimodal_inputs), 1)
             self.assertEqual(self.request.token_ids.tolist(), [1, 99, 2])
+            snapshot = self.request.mm_routing_snapshot
+            self.assertIsNotNone(snapshot)
+            self.assertEqual(snapshot.prompt_token_num, len(expected_tokens))
+            self.assertEqual(snapshot.split_sizes, (4,))
+            self.assertEqual(snapshot.feature_hashes, (-2147483648, -7, 0, 2147483647))
             self.assertEqual(
                 self.request.generate_config.role_addrs, [prefill, self.address]
             )

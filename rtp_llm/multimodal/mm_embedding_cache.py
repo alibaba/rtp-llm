@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import queue
 import sys
 import threading
 import time
@@ -65,13 +66,20 @@ class _TensorMemoryPool:
         )
         self._pending: List[Tuple[_PoolBlock, List[Any]]] = []
         self._used_bytes = 0
+        # Bytes dropped because they are smaller than the allocation alignment
+        # and can never satisfy an aligned request.
+        self._wasted_bytes = 0
 
     @staticmethod
     def _align(value: int, alignment: int) -> int:
         return (value + alignment - 1) // alignment * alignment
 
     def _insert_free_locked(self, offset: int, size: int) -> None:
-        if size == 0:
+        if size < self._alignment:
+            # A sub-alignment fragment can never satisfy an aligned
+            # allocation. Keeping it in the free list only makes every
+            # first-fit scan longer, so account it as wasted instead.
+            self._wasted_bytes += size
             return
         # The list stays address-ordered and fully coalesced. Only the two
         # neighbors can touch a newly freed block; list insertion is still O(n).
@@ -100,7 +108,16 @@ class _TensorMemoryPool:
     def reserve(self, requested_bytes: int) -> Optional[_PoolBlock]:
         if requested_bytes == 0:
             return None
-        size = requested_bytes
+        # Align the allocation size as well as the offset. Aligning only the
+        # offset leaves a misaligned suffix that the next allocation must
+        # re-align, producing an ever-growing population of unusable
+        # sub-alignment fragments (observed as ~128k free-list entries).
+        size = self._align(requested_bytes, self._alignment)
+        if size > self.capacity_bytes:
+            # Tiny pools can be smaller than one aligned allocation. Fall back
+            # to the exact request so they remain usable; the block end may be
+            # unaligned, but there is no room for another allocation anyway.
+            size = requested_bytes
         if size > self.capacity_bytes:
             raise _PoolCapacityError(
                 f"{self.device.type} pool request {size} exceeds capacity "
@@ -120,14 +137,20 @@ class _TensorMemoryPool:
                     suffix_size = offset + free_size - suffix_offset
                     # Splitting one free block preserves order and cannot
                     # introduce adjacent free blocks outside this slice.
+                    parts = (
+                        (offset, prefix_size),
+                        (suffix_offset, suffix_size),
+                    )
                     self._free[index : index + 1] = [
                         (part_offset, part_size)
-                        for part_offset, part_size in (
-                            (offset, prefix_size),
-                            (suffix_offset, suffix_size),
-                        )
-                        if part_size
+                        for part_offset, part_size in parts
+                        if part_size >= self._alignment
                     ]
+                    self._wasted_bytes += sum(
+                        part_size
+                        for _, part_size in parts
+                        if 0 < part_size < self._alignment
+                    )
                     self._used_bytes += size
                     return block
                 if self._pending:
@@ -176,7 +199,10 @@ class _TensorMemoryPool:
                 "capacity_bytes": self.capacity_bytes,
                 "used_bytes": self._used_bytes,
                 "pending_bytes": pending_bytes,
-                "free_bytes": self.capacity_bytes - self._used_bytes,
+                "wasted_bytes": self._wasted_bytes,
+                "free_bytes": (
+                    self.capacity_bytes - self._used_bytes - self._wasted_bytes
+                ),
                 "largest_free_block_bytes": max(
                     (
                         max(
@@ -372,8 +398,12 @@ def _copy_pooled_result_to_devices(result: Any, devices: Any) -> Any:
                 )
             return copied[identity]
         if isinstance(value, tuple):
+            if target is None:
+                return tuple(visit(item, None) for item in value)
             return tuple(visit(item, target[i]) for i, item in enumerate(value))
         if isinstance(value, list):
+            if target is None:
+                return [visit(item, None) for item in value]
             return [visit(item, target[i]) for i, item in enumerate(value)]
         if isinstance(value, dict):
             return {key: visit(item, target[key]) for key, item in value.items()}
@@ -447,8 +477,12 @@ def _copy_result_to_devices(result: Any, devices: Any) -> Any:
                 )
             return copied[identity]
         if isinstance(value, tuple):
+            if target is None:
+                return tuple(visit(item, None) for item in value)
             return tuple(visit(item, target[i]) for i, item in enumerate(value))
         if isinstance(value, list):
+            if target is None:
+                return [visit(item, None) for item in value]
             return [visit(item, target[i]) for i, item in enumerate(value)]
         if isinstance(value, dict):
             return {key: visit(item, target[key]) for key, item in value.items()}
@@ -509,6 +543,7 @@ class MMEmbeddingCacheEntry:
         self._on_read = on_read
         self.result: Optional[Any] = None
         self.error: Optional[Exception] = None
+        self._pending_before_publish: Optional[Callable[[], None]] = None
         self.generation = uuid.uuid4().hex
         # Error telemetry may be observed from several places (the producer
         # callback, a cache waiter, and an RPC handler). Keep one atomic claim
@@ -584,13 +619,34 @@ class MMEmbeddingCacheEntry:
             raise self.error
 
     def complete(
-        self, result: Any, *, before_publish: Optional[Callable[[], None]] = None
+        self,
+        result: Any,
+        *,
+        before_publish: Optional[Callable[[], None]] = None,
+        defer: bool = False,
     ) -> bool:
         with self._state_lock:
             if self._terminal:
                 return False
             self._terminal = True
             self.result = result
+            self._pending_before_publish = before_publish
+        if defer:
+            # Publish the result to waiters immediately; the cache insertion is
+            # best-effort and runs on the cache's publication thread. A failed
+            # insertion must never turn a successful computation into an error.
+            self._event.set()
+            try:
+                if self._on_complete is not None:
+                    self._on_complete(self, result)
+            except Exception as error:
+                logging.warning("ViT cache publication enqueue failed: %s", error)
+                try:
+                    if self._on_fail is not None:
+                        self._on_fail(self, error)
+                except Exception:
+                    logging.exception("Failed to remove unqueued ViT cache entry")
+            return True
         try:
             if self._on_complete is not None:
                 self._on_complete(self, result)
@@ -677,8 +733,8 @@ class MMEmbeddingCacheEntry:
 
 
 class _HashCacheValue:
-    # All lifecycle fields use the owning hash cache's index lock. A lease
-    # prevents explicit pool release; a Tensor reference alone does not.
+    # All lifecycle fields use the owning hash cache's index lock. A reader
+    # lease keeps a retired value alive until its clone completes.
     __slots__ = (
         "hashes",
         "generation",
@@ -700,7 +756,7 @@ class _HashCacheValue:
 
 
 class MMHashKeyCache:
-    """Byte-bounded CPU-pool cache for multimodal feature-hash token ids.
+    """Byte-bounded CPU tensor cache for multimodal feature-hash token ids.
 
     Charge tensor storage plus Python key/value metadata. The latter is an
     estimate (not process RSS), but bounds even entries with very few hashes.
@@ -722,8 +778,6 @@ class MMHashKeyCache:
         self._resident_bytes = 0
         self._building_bytes = 0
         self._retired_bytes = 0
-        self._resizing = False
-        self._pool = _TensorMemoryPool(max_bytes, torch.device("cpu"))
         self.instance_id = uuid.uuid4().hex
 
     @property
@@ -773,7 +827,7 @@ class MMHashKeyCache:
             return
         generation = generation or ""
         # Estimate the final owned int32 value before allocating/copying it.
-        # Staging and pool reservations are bounded by the in-flight charge.
+        # Staging is bounded by the in-flight charge.
         charge_bytes = (
             sum(h.numel() * 4 for h in feature_hashes)
             + sys.getsizeof(cache_key)
@@ -787,7 +841,7 @@ class MMHashKeyCache:
 
         def current(action):
             # The only nested index order is embedding -> hash, and these
-            # callbacks only update metadata: no tensor/pool work or waits.
+            # callbacks only update metadata: no tensor work or waits.
             if entry is None:
                 return action()
             return embedding_cache._with_current_entry(cache_key, entry, action)
@@ -797,7 +851,7 @@ class MMHashKeyCache:
 
         def begin():
             with self._lock:
-                if self._resizing or not self.enabled:
+                if not self.enabled:
                     return False
                 if entry is not None:
                     existing = self._pending.get(cache_key) or self._entries.get(
@@ -831,32 +885,25 @@ class MMHashKeyCache:
         def reserve():
             with self._lock:
                 if self._pending.get(cache_key) is not value:
-                    return None
+                    return False
                 if self._used_bytes_locked() + charge_bytes > self._max_bytes:
-                    return None  # Pinned readers/builders still own this budget.
+                    return False  # Pinned readers/builders still own this budget.
                 self._building_bytes += charge_bytes
-                return self._pool
+                return True
 
-        pool = current(reserve)
+        if not current(reserve):
+            return
         published = False
         try:
-            if pool is None:
-                return
+            # Hash tensors are a few KB. A fixed first-fit pool only adds a
+            # linear free-list scan to every publication; store the CPU tensors
+            # directly and let the byte-bounded LRU own eviction.
             with cuda_graph_gate.operation():
-                hashes = [
+                value.hashes = [
                     h.detach().to(device="cpu", dtype=torch.int32).clone()
                     for h in feature_hashes
                 ]
-            devices = _map_tensors(hashes, lambda _: torch.device("cpu"))
-            try:
-                value.hashes, value.owners, _, _, _ = _pool_result(
-                    hashes, devices, None, pool
-                )
-            except _PoolCapacityError:
-                logging.warning(
-                    "Hash-key cache CPU pool is full; bypassing key %s", cache_key
-                )
-                return
+            value.owners = []
 
             def publish():
                 with self._lock:
@@ -874,15 +921,10 @@ class MMHashKeyCache:
             published = bool(current(publish))
         finally:
             if not published:
-                # Releasing may enter the CUDA graph gate: never hold an index
-                # lock. Keep the charge until the block is actually reusable.
-                for owner in value.owners:
-                    owner.release()
                 with self._lock:
                     if self._pending.get(cache_key) is value:
                         self._pending.pop(cache_key)
-                    if pool is not None:
-                        self._building_bytes -= charge_bytes
+                    self._building_bytes -= charge_bytes
                     self._drained.notify_all()
 
     def _remove_locked(self, cache_key: str, retired: List[_HashCacheValue]) -> int:
@@ -971,46 +1013,24 @@ class MMHashKeyCache:
             raise ValueError("hash cache max_bytes must be non-negative")
         retired = []
         with self._drained:
-            while self._resizing:
-                self._drained.wait()
-            grow = max_bytes > self._pool.capacity_bytes
-            self._resizing = grow
             self._pending.clear()
             self._max_bytes = max_bytes
             reclaimable = 0
             while self._entries and (
-                grow or self._used_bytes_locked() - reclaimable > max_bytes
+                self._used_bytes_locked() - reclaimable > max_bytes
             ):
                 reclaimable += self._remove_locked(next(iter(self._entries)), retired)
         self._release_retired(retired)
-        if grow:
-            try:
-                # Do not create accumulating retired arenas. Readers/writers
-                # drain with the index unlocked; new puts bypass during growth.
-                with self._drained:
-                    while self._used_bytes_locked():
-                        self._drained.wait()
-                pool = _TensorMemoryPool(max_bytes, torch.device("cpu"))
-                with self._lock:
-                    self._pool = pool
-            finally:
-                with self._drained:
-                    self._resizing = False
-                    self._drained.notify_all()
 
     def stats(self) -> Dict[str, int]:
         with self._lock:
-            stats = {
+            return {
                 "resident_entries": len(self._entries),
                 "resident_bytes": self._resident_bytes,
                 "building_bytes": self._building_bytes,
                 "retired_bytes": self._retired_bytes,
                 "max_bytes": self._max_bytes,
             }
-            pool = self._pool
-        pool_stats = pool.stats()
-        stats.update({f"pool_{key}": value for key, value in pool_stats.items()})
-        return stats
 
     def metadata(
         self,
@@ -1084,6 +1104,8 @@ class MMEmbeddingCache:
         cpu_max_bytes: int,
         report_metrics: bool = False,
         on_cpu_evict: Optional[Callable[[str, MMEmbeddingCacheEntry], None]] = None,
+        async_publication: bool = False,
+        publish_queue_size: int = 1024,
     ):
         self._on_cpu_evict = on_cpu_evict
         self._validate_limits(gpu_max_bytes, cpu_max_bytes)
@@ -1118,7 +1140,20 @@ class MMEmbeddingCache:
             "demotion": 0,
             "promotion": 0,
             "transfer_error": 0,
+            "publish_drop": 0,
         }
+        self._publish_queue: Optional["queue.Queue"] = None
+        self._publish_thread: Optional[threading.Thread] = None
+        self._publish_pending = 0
+        self._publish_cond = threading.Condition()
+        if async_publication:
+            self._publish_queue = queue.Queue(maxsize=max(1, publish_queue_size))
+            self._publish_thread = threading.Thread(
+                target=self._publish_worker,
+                name="mm-cache-publish",
+                daemon=True,
+            )
+            self._publish_thread.start()
 
     @staticmethod
     def _validate_limits(gpu_max_bytes: int, cpu_max_bytes: int) -> None:
@@ -1469,6 +1504,90 @@ class MMEmbeddingCache:
     def _on_complete(
         self, cache_key: str, entry: MMEmbeddingCacheEntry, result: Any
     ) -> None:
+        if self._publish_queue is not None:
+            self._enqueue_publication(
+                cache_key, entry, result, entry._pending_before_publish
+            )
+            return
+        self._on_complete_sync(cache_key, entry, result)
+
+    def _drop_pending_entry(self, cache_key: str, entry: MMEmbeddingCacheEntry) -> None:
+        """Remove an unqueued PENDING entry without taking the transfer lock."""
+        with self._lock:
+            if self._entries.get(cache_key) is entry:
+                self._entries.pop(cache_key, None)
+
+    def _enqueue_publication(
+        self,
+        cache_key: str,
+        entry: MMEmbeddingCacheEntry,
+        result: Any,
+        before_publish: Optional[Callable[[], None]],
+    ) -> None:
+        with self._publish_cond:
+            if self._publish_pending >= self._publish_queue.maxsize:
+                drop = True
+            else:
+                self._publish_pending += 1
+                drop = False
+        if drop:
+            with self._lock:
+                self._stats["publish_drop"] += 1
+            logging.warning("ViT cache publication queue full; dropping %s", cache_key)
+            self._drop_pending_entry(cache_key, entry)
+            return
+        try:
+            self._publish_queue.put_nowait((cache_key, entry, result, before_publish))
+        except queue.Full:
+            with self._publish_cond:
+                self._publish_pending -= 1
+                self._publish_cond.notify_all()
+            with self._lock:
+                self._stats["publish_drop"] += 1
+            logging.warning("ViT cache publication queue full; dropping %s", cache_key)
+            self._drop_pending_entry(cache_key, entry)
+
+    def _publish_worker(self) -> None:
+        while True:
+            item = self._publish_queue.get()
+            if item is None:
+                break
+            cache_key, entry, result, before_publish = item
+            try:
+                self._on_complete_sync(cache_key, entry, result)
+                if before_publish is not None:
+                    before_publish()
+            except Exception:
+                logging.warning(
+                    "ViT cache publication failed for %s", cache_key, exc_info=True
+                )
+                self._remove_if_same(cache_key, entry)
+            finally:
+                with self._publish_cond:
+                    self._publish_pending -= 1
+                    self._publish_cond.notify_all()
+
+    def flush(self) -> None:
+        """Wait for queued cache publications to finish (tests/shutdown)."""
+        if self._publish_queue is None:
+            return
+        with self._publish_cond:
+            while self._publish_pending:
+                self._publish_cond.wait()
+
+    def close(self) -> None:
+        """Stop the publication thread after draining queued work."""
+        if self._publish_queue is None:
+            return
+        self._publish_queue.put(None)
+        if self._publish_thread is not None:
+            self._publish_thread.join(timeout=10)
+        self._publish_queue = None
+        self._publish_thread = None
+
+    def _on_complete_sync(
+        self, cache_key: str, entry: MMEmbeddingCacheEntry, result: Any
+    ) -> None:
         entry.original_devices = _map_tensors(result, lambda tensor: tensor.device)
         entry.ready_events = self._record_ready_events(result)
         gpu_bytes, cpu_bytes = _compact_tensor_tier_bytes(
@@ -1503,6 +1622,8 @@ class MMEmbeddingCache:
             result = entry.result
             events = entry.ready_events
             owners = list(entry.pool_owners)
+            if devices is None:
+                devices = _map_tensors(result, lambda tensor: tensor.device)
             if not owners:
                 self._ready_result(result, events)
                 entry.ready_events = []
@@ -1613,7 +1734,17 @@ class MMEmbeddingCache:
         *,
         before_publish: Optional[Callable[[], None]] = None,
     ) -> bool:
-        return entry.complete(result, before_publish=before_publish)
+        # Prepare reader-visible metadata BEFORE the entry publishes its event.
+        # The deferred (async publication) path wakes waiters before the
+        # publication thread runs _on_complete_sync; without this a waiter can
+        # observe original_devices=None and crash in _copy_result_to_devices.
+        entry.original_devices = _map_tensors(result, lambda tensor: tensor.device)
+        entry.ready_events = self._record_ready_events(result)
+        return entry.complete(
+            result,
+            before_publish=before_publish,
+            defer=self._publish_queue is not None,
+        )
 
     def fail(
         self, cache_key: str, entry: MMEmbeddingCacheEntry, error: Exception
@@ -1768,6 +1899,152 @@ class MMEmbeddingCache:
             return
         kmonitor.report(GaugeMetrics.VIT_EMBEDDING_CACHE_TOKENS_METRIC, tokens)
         kmonitor.report(GaugeMetrics.VIT_EMBEDDING_CACHE_BYTES_METRIC, size_bytes)
+
+
+def _split_budget(total: int, shards: int) -> List[int]:
+    """Split a byte budget into `shards` parts whose sum is exactly `total`."""
+    base, remainder = divmod(total, shards)
+    return [base + (1 if index < remainder else 0) for index in range(shards)]
+
+
+class ShardedMMEmbeddingCache:
+    """Route embedding-cache keys across independent cache shards.
+
+    Each shard owns its own index lock, transfer lock, LRU and fixed pools.
+    Sharding bounds both the critical section and the first-fit free-list scan
+    by the shard's entry count instead of the whole cache.
+    """
+
+    def __init__(
+        self,
+        gpu_max_bytes: int,
+        cpu_max_bytes: int,
+        *,
+        shards: int = 8,
+        report_metrics: bool = False,
+        on_cpu_evict: Optional[Callable[[str, MMEmbeddingCacheEntry], None]] = None,
+        async_publication: bool = False,
+    ):
+        if shards < 1:
+            raise ValueError("embedding cache shards must be positive")
+        self._shards = [
+            MMEmbeddingCache(
+                gpu_bytes,
+                cpu_bytes,
+                report_metrics=report_metrics,
+                on_cpu_evict=on_cpu_evict,
+                async_publication=async_publication,
+            )
+            for gpu_bytes, cpu_bytes in zip(
+                _split_budget(gpu_max_bytes, shards),
+                _split_budget(cpu_max_bytes, shards),
+            )
+        ]
+        self.instance_id = uuid.uuid4().hex
+
+    @property
+    def enabled(self) -> bool:
+        return any(shard.enabled for shard in self._shards)
+
+    @property
+    def shard_count(self) -> int:
+        return len(self._shards)
+
+    def _shard(self, cache_key: str) -> MMEmbeddingCache:
+        return self._shards[hash(cache_key) % len(self._shards)]
+
+    def try_acquire(self, cache_key: str) -> Tuple[str, MMEmbeddingCacheEntry]:
+        return self._shard(cache_key).try_acquire(cache_key)
+
+    def try_acquire_lazy(
+        self, key_factory: Callable[[], str]
+    ) -> Tuple[str, str, MMEmbeddingCacheEntry]:
+        if not self.enabled:
+            return "", "miss", MMEmbeddingCacheEntry()
+        key = key_factory()
+        state, entry = self._shard(key).try_acquire(key)
+        return key, state, entry
+
+    def complete(
+        self,
+        cache_key: str,
+        entry: MMEmbeddingCacheEntry,
+        result: Any,
+        *,
+        before_publish: Optional[Callable[[], None]] = None,
+    ) -> bool:
+        return self._shard(cache_key).complete(
+            cache_key, entry, result, before_publish=before_publish
+        )
+
+    def fail(
+        self, cache_key: str, entry: MMEmbeddingCacheEntry, error: Exception
+    ) -> bool:
+        return self._shard(cache_key).fail(cache_key, entry, error)
+
+    def remove(self, cache_key: str) -> None:
+        self._shard(cache_key).remove(cache_key)
+
+    def peek(self, cache_key: str) -> Optional[MMEmbeddingCacheEntry]:
+        return self._shard(cache_key).peek(cache_key)
+
+    def _with_current_entry(self, cache_key, expected, action):
+        return self._shard(cache_key)._with_current_entry(cache_key, expected, action)
+
+    def resident_tiers(
+        self, keys: Optional[List[str]] = None, limit: Optional[int] = None
+    ) -> Dict[str, str]:
+        if limit is not None and limit <= 0:
+            return {}
+        if keys is not None:
+            tiers: Dict[str, str] = {}
+            for key in keys:
+                tier = self._shard(key).resident_tiers([key]).get(key)
+                if tier is not None:
+                    tiers[key] = tier
+                    if limit is not None and len(tiers) >= limit:
+                        break
+            return tiers
+        tiers = {}
+        for shard in self._shards:
+            tiers.update(shard.resident_tiers(limit=limit))
+            if limit is not None and len(tiers) >= limit:
+                break
+        return tiers
+
+    def clear(self, error: Optional[Exception] = None) -> None:
+        for shard in self._shards:
+            shard.clear(error)
+
+    def flush(self) -> None:
+        for shard in self._shards:
+            shard.flush()
+
+    def close(self) -> None:
+        for shard in self._shards:
+            shard.close()
+
+    def resize(self, gpu_max_bytes: int, cpu_max_bytes: int) -> None:
+        for shard, gpu_bytes, cpu_bytes in zip(
+            self._shards,
+            _split_budget(gpu_max_bytes, len(self._shards)),
+            _split_budget(cpu_max_bytes, len(self._shards)),
+        ):
+            shard.resize(gpu_bytes, cpu_bytes)
+
+    def stats(self) -> Dict[str, int]:
+        per_shard = [shard.stats() for shard in self._shards]
+        stats: Dict[str, int] = {}
+        for shard_stats in per_shard:
+            for key, value in shard_stats.items():
+                if key.endswith("largest_free_block_bytes"):
+                    stats[key] = max(stats.get(key, 0), value)
+                elif isinstance(value, (int, float)):
+                    stats[key] = stats.get(key, 0) + value
+                else:
+                    stats.setdefault(key, value)
+        stats["shards"] = len(self._shards)
+        return stats
 
 
 # Compatibility alias for internal callers that imported the previous class.

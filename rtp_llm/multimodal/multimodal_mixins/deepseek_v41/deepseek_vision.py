@@ -15,7 +15,10 @@ from rtp_llm.models_py.modules.dsv41.vision_residual_add import (
 )
 
 
-@lru_cache(32)
+# Production traffic sees ~400 distinct image grids per hour. A 32-entry cache
+# thrashes and rebuilds the rotary tables on nearly every image; size it for
+# the observed working set instead.
+@lru_cache(512)
 def _vision_cos_sin(n_h: int, n_w: int, dim: int, theta: float, device: str):
     inv_freq = 1.0 / (
         theta ** (torch.arange(0, dim, 2, dtype=torch.float32, device=device) / dim)

@@ -17,10 +17,12 @@ intermediate) and writes the BF16 activation consumed by the following
 MXFP8 linear.
 
 ``silu_mul_fp8_g32_quant`` additionally fuses the following group32 quantizer,
-keeping the BF16 rounding in registers and returning only E4M3/UE8M0 outputs.
+returning only E4M3/UE8M0 outputs. Its default retains the BF16 activation
+rounding; native V4.1 shared experts select FP32 activation quantization to
+match MegaMoE's shared branch.
 The BF16-only entry retains its original kernel and allocation contract.
 
-Numerical contract (bit-identical to the chain above):
+Legacy numerical contract (bit-identical to the chain above):
   - BF16 -> FP32 conversion is exact, so loading the BF16 halves and
     converting in-kernel yields the same FP32 ``gate``/``up`` values the old
     ``.float()`` produced.
@@ -104,6 +106,7 @@ if triton is not None:
         N: tl.constexpr,
         APPLY_CLAMP: tl.constexpr,
         CLAMP_LIMIT: tl.constexpr,
+        ROUND_TO_BF16: tl.constexpr,
         BLOCK_N: tl.constexpr,
     ):
         GROUPS: tl.constexpr = BLOCK_N // 32
@@ -120,8 +123,11 @@ if triton is not None:
             u = tl.where(u < -CLAMP_LIMIT, -CLAMP_LIMIT, u)
             g = tl.where(g > CLAMP_LIMIT, CLAMP_LIMIT, g)
         s = g * tl.sigmoid(g)
-        # Quantize the same BF16-rounded value as the two-launch chain.
-        y = (s * u).to(tl.bfloat16).to(tl.float32).reshape((GROUPS, 32))
+        y = s * u
+        if ROUND_TO_BF16:
+            # Legacy callers quantize a materialized BF16 activation.
+            y = y.to(tl.bfloat16).to(tl.float32)
+        y = y.reshape((GROUPS, 32))
         # Native fmaxf ignores NaNs and seeds each lane with FP32 tiny.
         amax = tl.max(
             tl.maximum(tl.abs(y), 2.0**-126, propagate_nan=tl.PropagateNan.NONE), 1
@@ -185,12 +191,17 @@ def silu_mul_split_bf16(
 
 
 def silu_mul_fp8_g32_quant(
-    gate_up: torch.Tensor, clamp_limit: float = 0.0
+    gate_up: torch.Tensor,
+    clamp_limit: float = 0.0,
+    *,
+    round_to_bf16: bool = True,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """SwiGLU followed by native group32 E4M3/UE8M0 quantization.
 
     The MXFP8 caller supplies contiguous BF16 [M,2N], with N divisible by
-    32. Preserve the BF16 rounding boundary without materializing hidden.
+    32. ``round_to_bf16=False`` quantizes the FP32 SwiGLU result directly,
+    matching native MegaMoE shared experts. The default preserves the legacy
+    BF16 rounding boundary without materializing hidden.
     Quantization honors the existing per-call DSV4_FP8_QUANT_KERNEL policy;
     auto uses the legacy scale policy for every shape. Unused scale-pack bytes
     are unspecified; this entry initializes them to zero, as v2 does.
@@ -217,6 +228,7 @@ def silu_mul_fp8_g32_quant(
         N=n,
         APPLY_CLAMP=apply_clamp,
         CLAMP_LIMIT=float(clamp_limit) if apply_clamp else 0.0,
+        ROUND_TO_BF16=round_to_bf16,
         BLOCK_N=1024,
         num_warps=8,
         enable_fp_fusion=False,

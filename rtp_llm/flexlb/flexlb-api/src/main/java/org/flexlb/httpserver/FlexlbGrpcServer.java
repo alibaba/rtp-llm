@@ -64,7 +64,7 @@ public class FlexlbGrpcServer {
     @Autowired(required = false)
     private FlexMonitor flexMonitor;
 
-    private Server server;
+    private volatile Server server;
     private NioEventLoopGroup bossGroup;
     private ThreadPoolExecutor grpcExecutor;
     private ThreadPoolExecutor grpcControlExecutor;
@@ -244,6 +244,11 @@ public class FlexlbGrpcServer {
             grpcControlExecutor.getQueue().size(), grpcControlExecutor.getActiveCount(),
             guard.receivingBytes(), guard.controlReceivingBytes()};
         for (int i = 0; i < RECEIVING_METRICS.length; i++) monitor.report(RECEIVING_METRICS[i], values[i]);
+    }
+
+    public boolean isServing() {
+        Server current = server;
+        return current != null && !current.isShutdown() && !current.isTerminated();
     }
 
     /** Called before Spring destroys any serving resources. */

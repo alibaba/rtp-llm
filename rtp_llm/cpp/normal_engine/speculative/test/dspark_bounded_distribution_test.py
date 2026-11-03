@@ -350,6 +350,36 @@ class DSparkBoundedDistributionTest(unittest.TestCase):
             self.assertEqual(dict(marginal), {0: F(1, 2), 1: F(1, 2)})
         self.assertEqual(_total_variation(wrong, expected), F(1, 2))
 
+    def test_residual_uniform_reused_next_round_changes_conditional_output_law(self):
+        # Round one: q=delta(2), p=(1/2,1/2,0), so reject certainly and
+        # resample history token H from the first two vocabulary entries.
+        # Round two: q=delta(2), p(2|H=0)=1, p(2|H=1)=1/2. A rejected
+        # second draft has residual delta(0). Enumerate exact elementary
+        # intervals, rather than compare two sampled engine trajectories.
+        uniforms = (F(1, 8), F(3, 8), F(5, 8), F(7, 8))
+
+        def output_law(reuse_uniform):
+            output = defaultdict(F)
+            accepted_mass = F(0)
+            for residual_uniform in uniforms:
+                history = int(residual_uniform >= F(1, 2))
+                threshold = F(1) if history == 0 else F(1, 2)
+                acceptance_draws = (residual_uniform,) if reuse_uniform else uniforms
+                mass = F(1, len(uniforms) * len(acceptance_draws))
+                for acceptance_uniform in acceptance_draws:
+                    accepted = acceptance_uniform < threshold
+                    accepted_mass += mass * accepted
+                    output[(history, 2 if accepted else 0)] += mass
+            return dict(output), accepted_mass
+
+        expected = {(0, 2): F(1, 2), (1, 2): F(1, 4), (1, 0): F(1, 4)}
+        independent, independent_acceptance = output_law(False)
+        reused, reused_acceptance = output_law(True)
+        self.assertEqual(independent, expected)
+        self.assertEqual(independent_acceptance, F(3, 4))
+        self.assertEqual(reused_acceptance, F(1, 2))
+        self.assertEqual(_total_variation(reused, expected), F(1, 4))
+
 
 if __name__ == "__main__":
     unittest.main()

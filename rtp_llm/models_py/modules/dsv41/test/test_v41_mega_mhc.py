@@ -5,6 +5,7 @@ storage because its post operation writes in place. CUDA graph tests update
 the input tensors between replays, including the delayed predecessor mix.
 """
 
+import importlib
 import json
 import os
 import unittest
@@ -158,6 +159,50 @@ class V41MegaMHCCudaTest(unittest.TestCase):
 
     def setUp(self):
         torch.manual_seed(41)
+
+    @torch.no_grad()
+    def test_raw_halfway_fn_reaches_native_tensor_map(self):
+        case = make_case((1, 1))
+        case["residual"].fill_(1)
+        case["attn_out"].zero_()
+        case["post"].zero_()
+        case["comb"].copy_(torch.eye(4, device="cuda").reshape(1, 1, 4, 4))
+        case["previous"].pre_mix_out.fill_(0.25)
+        unit = case["next_hc"]
+        unit.base.zero_()
+        unit.scale.copy_(torch.tensor([0.2, 0.4, 0.3], device="cuda"))
+        # RN-even maps the positive halfway value to +0.125. The negative
+        # half is already exactly -0.125, so every host-oracle dot is zero.
+        # The legacy bias instead raises the positive half by one TF32 ULP.
+        halfway = torch.tensor(0x3E001000, dtype=torch.int32).view(torch.float32)
+        unit.fn[:, :10240].fill_(halfway.item())
+        unit.fn[:, 10240:].fill_(-0.125)
+        expected = unfused(case)
+        operation = importlib.import_module(_MODULE)._get_mega_mhc()
+        observed_weights = []
+
+        def observed(**kwargs):
+            observed_weights.append(kwargs["fn"])
+            return operation(**kwargs)
+
+        with patch(f"{_MODULE}._get_mega_mhc", return_value=observed), patch(
+            "rtp_llm.models_py.modules.dsv41.hc.v41_prenorm.prepare_tf32_weight",
+            side_effect=AssertionError("native MHC must receive raw FP32 fn"),
+        ):
+            actual = fused(case)
+        self.assertTrue(observed_weights)
+        self.assertTrue(all(weight is unit.fn for weight in observed_weights))
+        assert_outputs_close(actual, expected)
+        torch.testing.assert_close(
+            actual[2], torch.ones_like(actual[2]), rtol=0, atol=1e-6
+        )
+        original_fn = unit.fn
+        unit.fn = ((original_fn.view(torch.int32) + 0x1000) & -8192).view(torch.float32)
+        try:
+            legacy = fused(case)
+        finally:
+            unit.fn = original_fn
+        self.assertGreater((actual[2] - legacy[2]).abs().max().item(), 0.1)
 
     @torch.inference_mode()
     def test_fp8_compact_padding(self):

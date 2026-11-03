@@ -48,6 +48,7 @@ cc_library(
         "@havenask//aios/autil:lock_free",
     ] + select({
         "//:using_cuda": [
+            "//rtp_llm/models_py/bindings/cuda:bf16_gemm_op",
             "//rtp_llm/models_py/bindings/cuda/ops:standalone_ops",
             "//rtp_llm/models_py/bindings/cuda/kernels:deepselect_fp32",
             "//rtp_llm/models_py/bindings/cuda/kernels:dspark_confidence",

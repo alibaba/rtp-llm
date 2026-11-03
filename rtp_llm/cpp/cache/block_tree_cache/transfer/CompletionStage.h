@@ -75,7 +75,10 @@ struct CompletionStageContext {
 
 class CompletionStageScope {
 public:
-    CompletionStageScope(const CompletionStageContext& context, const char* stage, const char* scope) noexcept:
+    CompletionStageScope(const CompletionStageContext& context,
+                         const char*                   stage,
+                         const char*                   scope,
+                         AsyncProfileKind              kind = AsyncProfileKind::Execution) noexcept:
         success_(context.success), exceptions_(std::uncaught_exceptions()) {
         if (context.enabled)
             timer_.emplace(*context.reporter,
@@ -86,7 +89,8 @@ public:
                            -1,
                            scope,
                            context.transfer_id,
-                           context.identity);
+                           context.identity,
+                           kind);
     }
     ~CompletionStageScope() {
         if (timer_)
@@ -114,7 +118,8 @@ class CompletionStageTimers {
                   -1,
                   "business_completion",
                   context.transfer_id,
-                  context.identity),
+                  context.identity,
+                  AsyncProfileKind::Lifecycle),
             queue(*context.reporter,
                   "completion_queue_wait",
                   context.request_id,
@@ -123,7 +128,8 @@ class CompletionStageTimers {
                   -1,
                   "business_completion",
                   context.transfer_id,
-                  context.identity) {}
+                  context.identity,
+                  AsyncProfileKind::Wait) {}
         TransferStageTimer total;
         TransferStageTimer queue;
     };

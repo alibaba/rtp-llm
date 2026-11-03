@@ -2,6 +2,7 @@ import concurrent.futures
 import gc
 import random
 import threading
+import time
 import unittest
 import weakref
 from contextlib import contextmanager
@@ -27,24 +28,27 @@ class TensorMemoryPoolFreeListTest(unittest.TestCase):
         self.assertEqual([b.offset for b in (first, middle, last)], [0, 16, 32])
         pool.release(first, [])
         pool.release(last, [])
-        self.assertEqual(pool._free, [(0, 16), (25, 39)])
+        self.assertEqual(pool._free, [(0, 16), (32, 32)])
         pool.release(middle, [])
         self.assertEqual(pool._free, [(0, 64)])
         self.assertEqual(pool.reserve(64).offset, 0)
         self.assertEqual(pool._free, [])
 
     def test_random_operations_match_full_sort_and_coalesce(self):
-        # Differential check against the previous allocator: identical first-fit
-        # placement, failures and free blocks imply identical fragmentation.
+        # Differential check against a reference allocator that aligns the
+        # allocation size and drops sub-alignment fragments. Every free block
+        # must stay usable and coalesced; wasted bytes are accounted separately.
         for seed in (11, 29, 47):
             rng = random.Random(seed)
             capacity = 4096
             pool = _TensorMemoryPool(capacity, torch.device("cpu"))
             reference = [(0, capacity)]
             live = []
+            wasted = [0]
 
             def insert(offset, size):
-                if not size:
+                if size < 8:
+                    wasted[0] += size
                     return
                 reference.append((offset, size))
                 reference.sort()
@@ -59,13 +63,18 @@ class TensorMemoryPoolFreeListTest(unittest.TestCase):
             def reserve(size):
                 if size == 0:
                     return None
+                aligned_size = (size + 7) // 8 * 8
                 for index, (offset, count) in enumerate(reference):
                     aligned = (offset + 7) // 8 * 8
-                    if count - (aligned - offset) >= size:
+                    prefix = aligned - offset
+                    if count - prefix >= aligned_size:
                         reference.pop(index)
-                        insert(offset, aligned - offset)
-                        insert(aligned + size, offset + count - aligned - size)
-                        return aligned
+                        insert(offset, prefix)
+                        insert(
+                            aligned + aligned_size,
+                            offset + count - aligned - aligned_size,
+                        )
+                        return aligned, aligned_size
                 raise _PoolCapacityError("reference full")
 
             for _ in range(3000):
@@ -85,25 +94,29 @@ class TensorMemoryPoolFreeListTest(unittest.TestCase):
                         if expected is None:
                             self.assertIsNone(actual)
                         else:
-                            self.assertEqual(actual.offset, expected)
+                            self.assertEqual(actual.offset, expected[0])
                             self.assertEqual(actual.offset % 8, 0)
-                            self.assertEqual(actual.size, size)
+                            self.assertEqual(actual.size, expected[1])
                             live.append(actual)
                 self.assertEqual(pool._free, reference)
+                self.assertTrue(
+                    all(offset % 8 == 0 and size >= 8 for offset, size in pool._free)
+                )
                 used = sum(block.size for block in live)
                 self.assertEqual(pool.stats()["used_bytes"], used)
-                self.assertEqual(used + sum(n for _, n in pool._free), capacity)
-                intervals = sorted(
-                    [(block.offset, block.size) for block in live] + pool._free
+                self.assertEqual(pool.stats()["wasted_bytes"], wasted[0])
+                self.assertEqual(
+                    used + sum(n for _, n in pool._free) + wasted[0], capacity
                 )
-                self.assertEqual(intervals[0][0], 0)
-                self.assertEqual(sum(intervals[-1]), capacity)
-                for left, right in zip(intervals, intervals[1:]):
-                    self.assertEqual(sum(left), right[0])
             rng.shuffle(live)
             for block in live:
                 pool.release(block, [])
-            self.assertEqual(pool._free, [(0, capacity)])
+            self.assertEqual(sum(n for _, n in pool._free) + wasted[0], capacity)
+            self.assertTrue(
+                all(offset % 8 == 0 and size >= 8 for offset, size in pool._free)
+            )
+            for left, right in zip(pool._free, pool._free[1:]):
+                self.assertLess(sum(left), right[0])
 
     def test_pending_event_delays_reuse_and_coalesces_after_wait(self):
         class Event:
@@ -130,6 +143,35 @@ class TensorMemoryPoolFreeListTest(unittest.TestCase):
         self.assertEqual(pool.stats()["pending_bytes"], 0)
         pool.release(whole, [])
         self.assertEqual(pool._free, [(0, 64)])
+
+    def test_variable_size_churn_keeps_free_list_bounded(self):
+        # Regression: aligning only the offset produced sub-alignment
+        # fragments under churn, making every reserve() an O(n) scan. Align the
+        # allocation size and drop sub-alignment fragments instead.
+        pool = _TensorMemoryPool(1024 * 1024, torch.device("cpu"))
+        live = []
+        rng = random.Random(7)
+        for _ in range(12000):
+            if live and (len(live) > 64 or rng.random() < 0.35):
+                block = live.pop(rng.randrange(len(live)))
+                pool.release(block, [])
+            else:
+                try:
+                    live.append(pool.reserve(rng.randrange(1, 4096)))
+                except _PoolCapacityError:
+                    block = live.pop(rng.randrange(len(live)))
+                    pool.release(block, [])
+            self.assertLessEqual(len(pool._free), len(live) + 1)
+            self.assertTrue(
+                all(offset % 8 == 0 and size >= 8 for offset, size in pool._free)
+            )
+        stats = pool.stats()
+        # Aligned sizes keep every free block usable, so no bytes are wasted.
+        self.assertEqual(stats["wasted_bytes"], 0)
+        self.assertEqual(
+            stats["used_bytes"] + stats["free_bytes"] + stats["wasted_bytes"],
+            stats["capacity_bytes"],
+        )
 
 
 def _assert_read_copies_are_released(testcase, entry, device_type):
@@ -825,9 +867,7 @@ class HashCapacityTest(unittest.TestCase):
                 raise TimeoutError("publisher not released")
             return original_clone(tensor, *args, **kwargs)
 
-        with patch.object(torch.Tensor, "clone", new=clone), patch.object(
-            hashes._pool, "reserve", wraps=hashes._pool.reserve
-        ) as reserve:
+        with patch.object(torch.Tensor, "clone", new=clone):
             with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
                 args = ("a", [torch.tensor([1, 2])], entry, embeddings)
                 first = pool.submit(hashes.put_for_entry, *args)
@@ -842,7 +882,6 @@ class HashCapacityTest(unittest.TestCase):
                 finally:
                     release.set()
                 first.result(timeout=5)
-            self.assertEqual(reserve.call_count, 1)
         self.assertEqual(hashes.get("a", entry.generation)[0].tolist(), [1, 2])
 
     def test_approval_follows_hash_lifetime_and_replacement(self):
@@ -920,19 +959,26 @@ class HashCapacityTest(unittest.TestCase):
         self.assertEqual(hashes[0].device.type, "cpu")
         self.assertIsNone(cache.get("a", "g2"))
 
-    def test_hash_pool_reuse_cannot_overwrite_a_returned_hash(self):
+    def test_hash_cache_has_no_custom_pool(self):
         cache = MMHashKeyCache(max_bytes=8192)
-        arena_ptr = cache._pool._storage.data_ptr()
+        self.assertFalse(hasattr(cache, "_pool"))
+        cache.put("a", [torch.arange(128, dtype=torch.int32)], "g")
+        self.assertEqual(cache.get("a", "g")[0].tolist(), list(range(128)))
+        stats = cache.stats()
+        self.assertNotIn("pool_free_bytes", stats)
+        self.assertGreater(stats["resident_bytes"], 0)
+        cache.resize(0)
+        self.assertEqual(cache.keys(), [])
+        self.assertEqual(cache.stats()["resident_bytes"], 0)
+
+    def test_returned_hash_survives_cache_clear_and_reuse(self):
+        cache = MMHashKeyCache(max_bytes=8192)
         cache.put("a", [torch.tensor([1, 2, 3])], "g1")
         held = cache.get("a", "g1")[0]
         cache.clear()
         cache.put("b", [torch.tensor([7, 8, 9])], "g2")
-        self.assertEqual(cache._pool._storage.data_ptr(), arena_ptr)
         self.assertEqual(held.tolist(), [1, 2, 3])
         self.assertEqual(cache.get("b", "g2")[0].tolist(), [7, 8, 9])
-        self.assertLessEqual(
-            cache.stats()["pool_used_bytes"], cache.stats()["pool_capacity_bytes"]
-        )
 
     def test_oversized_update_drops_stale_generation_only(self):
         cache = MMHashKeyCache(max_bytes=4096)
@@ -1101,59 +1147,60 @@ class CacheLockIsolationTest(unittest.TestCase):
         hashes.put("b", [torch.ones(256)], "g")
         self.assertTrue(hashes.contains("b"))
 
-    def test_growth_waits_for_reader_without_holding_index(self):
+    def test_resize_does_not_block_on_reader(self):
         hashes = MMHashKeyCache(4096)
         hashes.put("a", [torch.tensor([17])])
-        old_pool = hashes._pool
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as resizer:
-            with self.paused(torch.Tensor, "clone") as (pool, entered):
-                read = pool.submit(hashes.get, "a")
-                self.assertTrue(entered.wait(5))
-                drained = threading.Event()
-                original_release = hashes._release_retired
-
-                def release(values):
-                    original_release(values)
-                    drained.set()
-
-                with patch.object(hashes, "_release_retired", side_effect=release):
-                    growth = resizer.submit(hashes.resize, 16384)
-                    self.assertTrue(drained.wait(5))
-                    self.assertFalse(growth.done())
-                    self.assertEqual(self.quick(hashes.keys), [])
-                    self.assertIs(hashes._pool, old_pool)
-                    self.quick(hashes.put, "b", [torch.tensor([18])])
-                    self.assertFalse(hashes.contains("b"))
-            self.assertEqual(read.result(5)[0].tolist(), [17])
-            growth.result(5)
-        self.assertEqual(hashes.stats()["pool_capacity_bytes"], 16384)
+        with self.paused(torch.Tensor, "clone") as (pool, entered):
+            read = pool.submit(hashes.get, "a")
+            self.assertTrue(entered.wait(5))
+            self.quick(hashes.resize, 16384)
+        self.assertEqual(read.result(5)[0].tolist(), [17])
+        self.quick(hashes.put, "b", [torch.tensor([18])])
+        self.assertTrue(hashes.contains("b"))
+        self.assertEqual(hashes.stats()["max_bytes"], 16384)
         self.assertEqual(hashes.stats()["retired_bytes"], 0)
 
-    def test_pool_copy_is_unlocked_and_clear_invalidates_builder(self):
+    def test_hash_copy_is_unlocked_and_clear_invalidates_builder(self):
         hashes = MMHashKeyCache(8192)
         hashes.put("b", [torch.tensor([4])])
-        with self.paused(cache_module, "_pool_result") as (pool, entered):
-            write = pool.submit(hashes.put, "a", [torch.tensor([1])], "old")
-            self.assertTrue(entered.wait(5))
-            self.assertEqual(self.quick(hashes.get, "b")[0].tolist(), [4])
-            self.assertGreater(hashes.stats()["building_bytes"], 0)
-            self.quick(hashes.clear)
-            self.quick(hashes.put, "a", [torch.tensor([2])], "new")
-        write.result(5)
+        original_clone = torch.Tensor.clone
+        entered, release = threading.Event(), threading.Event()
+        writer = [None]
+
+        def clone(tensor, *args, **kwargs):
+            if threading.current_thread() is writer[0]:
+                entered.set()
+                if not release.wait(5):
+                    raise TimeoutError("publisher not released")
+            return original_clone(tensor, *args, **kwargs)
+
+        with patch.object(torch.Tensor, "clone", new=clone):
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                def put():
+                    writer[0] = threading.current_thread()
+                    hashes.put("a", [torch.tensor([1])], "old")
+
+                write = pool.submit(put)
+                self.assertTrue(entered.wait(5))
+                self.assertEqual(self.quick(hashes.get, "b")[0].tolist(), [4])
+                self.assertGreater(hashes.stats()["building_bytes"], 0)
+                self.quick(hashes.clear)
+                self.quick(hashes.put, "a", [torch.tensor([2])], "new")
+                release.set()
+                write.result(5)
         self.assertEqual(hashes.get("a", "new")[0].tolist(), [2])
         self.assertEqual(hashes.stats()["building_bytes"], 0)
         self.assertEqual(hashes.stats()["retired_bytes"], 0)
 
-    def test_resize_invalidates_builder_and_releases_reservation(self):
+    def test_resize_invalidates_builder(self):
         hashes = MMHashKeyCache(8192)
-        with self.paused(cache_module, "_pool_result") as (pool, entered):
+        with self.paused(torch.Tensor, "clone") as (pool, entered):
             write = pool.submit(hashes.put, "a", [torch.arange(256)])
             self.assertTrue(entered.wait(5))
             self.quick(hashes.resize, 0)
         write.result(5)
         stats = hashes.stats()
         self.assertEqual(stats["building_bytes"], 0)
-        self.assertEqual(stats["pool_used_bytes"], 0)
         self.assertEqual(hashes.keys(), [])
 
     def test_copy_exceptions_release_leases_and_builder_budget(self):
@@ -1166,7 +1213,7 @@ class CacheLockIsolationTest(unittest.TestCase):
                 hashes.get("a")
         hashes.clear()
         with patch.object(
-            cache_module, "_pool_result", side_effect=RuntimeError("copy failed")
+            torch.Tensor, "clone", side_effect=RuntimeError("copy failed")
         ):
             with self.assertRaisesRegex(RuntimeError, "copy failed"):
                 hashes.put("a", [torch.tensor([1])])
@@ -1175,7 +1222,6 @@ class CacheLockIsolationTest(unittest.TestCase):
             "building_bytes",
             "retired_bytes",
             "resident_bytes",
-            "pool_used_bytes",
         ):
             self.assertEqual(stats[key], 0, key)
         self.assertFalse(hashes._pending)
@@ -1241,6 +1287,101 @@ class CacheLockIsolationTest(unittest.TestCase):
         entry.complete(torch.tensor([3.0, 4.0]))
         self.quick(cache.resize, 0, 0)
         self.assertEqual(seen, [("a", None, [3.0, 4.0])])
+
+
+class ShardedEmbeddingCacheTest(unittest.TestCase):
+    def test_routes_keys_and_aggregates_stats(self):
+        from rtp_llm.multimodal.mm_embedding_cache import ShardedMMEmbeddingCache
+
+        cache = ShardedMMEmbeddingCache(
+            gpu_max_bytes=0, cpu_max_bytes=4096, shards=4
+        )
+        self.assertEqual(cache.shard_count, 4)
+        keys = ["k%d" % i for i in range(32)]
+        for key in keys:
+            state, entry = cache.try_acquire(key)
+            self.assertEqual(state, "miss")
+            entry.complete(torch.tensor([float(len(key))]))
+        stats = cache.stats()
+        self.assertEqual(stats["resident_entries"], len(keys))
+        self.assertEqual(stats["shards"], 4)
+        self.assertEqual(stats["cpu_max_bytes"], 4096)
+        tiers = cache.resident_tiers(keys)
+        self.assertEqual(set(tiers), set(keys))
+        for key in keys:
+            self.assertIs(cache.peek(key), cache._shard(key).peek(key))
+        cache.clear()
+        self.assertEqual(cache.stats()["resident_entries"], 0)
+
+    def test_budget_split_is_exact(self):
+        from rtp_llm.multimodal.mm_embedding_cache import (
+            ShardedMMEmbeddingCache,
+            _split_budget,
+        )
+
+        self.assertEqual(_split_budget(10, 3), [4, 3, 3])
+        self.assertEqual(sum(_split_budget(10, 3)), 10)
+        cache = ShardedMMEmbeddingCache(
+            gpu_max_bytes=0, cpu_max_bytes=10, shards=3
+        )
+        self.assertEqual(cache.stats()["cpu_max_bytes"], 10)
+
+
+class AsyncPublicationTest(unittest.TestCase):
+    def test_complete_publishes_result_before_insertion(self):
+        cache = MMEmbeddingCache(0, 64, async_publication=True)
+        try:
+            state, entry = cache.try_acquire("a")
+            self.assertEqual(state, "miss")
+            self.assertTrue(entry.complete(torch.tensor([1.0])))
+            # The result is visible immediately; insertion is deferred.
+            self.assertEqual(entry.wait().tolist(), [1.0])
+            cache.flush()
+            self.assertIs(cache.peek("a"), entry)
+            self.assertEqual(cache.stats()["resident_entries"], 1)
+        finally:
+            cache.close()
+
+    def test_failed_publication_does_not_poison_result(self):
+        cache = MMEmbeddingCache(0, 64, async_publication=True)
+        try:
+            _, entry = cache.try_acquire("a")
+            with patch.object(
+                cache, "_on_complete_sync", side_effect=RuntimeError("boom")
+            ):
+                self.assertTrue(entry.complete(torch.tensor([2.0])))
+                cache.flush()
+            self.assertEqual(entry.wait().tolist(), [2.0])
+            self.assertIsNone(cache.peek("a"))
+            self.assertIsNone(entry.error)
+        finally:
+            cache.close()
+
+    def test_full_queue_drops_without_blocking(self):
+        cache = MMEmbeddingCache(0, 64, async_publication=True, publish_queue_size=1)
+        release = threading.Event()
+        original = cache._on_complete_sync
+
+        def blocked(*args):
+            release.wait(5)
+            return original(*args)
+
+        try:
+            with patch.object(cache, "_on_complete_sync", side_effect=blocked):
+                _, first = cache.try_acquire("a")
+                first.complete(torch.tensor([1.0]))
+                deadline = time.monotonic() + 5
+                while cache._publish_pending == 0 and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                _, second = cache.try_acquire("b")
+                second.complete(torch.tensor([2.0]))
+                self.assertEqual(second.wait().tolist(), [2.0])
+                self.assertGreaterEqual(cache.stats()["publish_drop"], 1)
+                release.set()
+                cache.flush()
+        finally:
+            release.set()
+            cache.close()
 
 
 if __name__ == "__main__":

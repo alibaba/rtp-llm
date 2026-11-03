@@ -5,14 +5,6 @@ import io.grpc.Status;
 import io.grpc.netty.NettyServerBuilder;
 import io.grpc.stub.StreamObserver;
 import io.netty.channel.nio.NioEventLoopGroup;
-import org.flexlb.engine.grpc.EngineGrpcClient;
-import org.flexlb.engine.grpc.EngineRpcService.CacheStatusPB;
-import org.flexlb.engine.grpc.EngineRpcService.CacheVersionPB;
-import org.flexlb.engine.grpc.EngineRpcService.MultimodalCacheStatusPB;
-import org.flexlb.engine.grpc.MultimodalRpcServiceGrpc;
-import org.flexlb.engine.grpc.RpcServiceGrpc;
-import org.flexlb.engine.grpc.monitor.GrpcReporter;
-import org.flexlb.engine.grpc.nameresolver.CustomNameResolver;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.endpoint.EndpointRegistry.VitRoutingEntry;
 import org.flexlb.config.ConfigService;
@@ -22,6 +14,14 @@ import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
+import org.flexlb.engine.grpc.EngineGrpcClient;
+import org.flexlb.engine.grpc.EngineRpcService.CacheStatusPB;
+import org.flexlb.engine.grpc.EngineRpcService.CacheVersionPB;
+import org.flexlb.engine.grpc.EngineRpcService.MultimodalCacheStatusPB;
+import org.flexlb.engine.grpc.MultimodalRpcServiceGrpc;
+import org.flexlb.engine.grpc.RpcServiceGrpc;
+import org.flexlb.engine.grpc.monitor.GrpcReporter;
+import org.flexlb.engine.grpc.nameresolver.CustomNameResolver;
 import org.flexlb.sync.status.WorkerDirectory;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -43,8 +43,8 @@ import java.util.stream.IntStream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.any;
 import static org.mockito.Mockito.eq;
 import static org.mockito.Mockito.mock;
@@ -451,6 +451,11 @@ class VitCacheDirectoryTest {
         var eventLoop = new NioEventLoopGroup(1);
         var client = new EngineGrpcClient(mock(CustomNameResolver.class), executor, eventLoop,
                 mock(GrpcReporter.class), 1000, 5000);
+        var transportConfig = new FlexlbConfig();
+        transportConfig.getEngineGrpc().setKvCacheMaxInboundMessageBytes(8 * 1024 * 1024);
+        var configService = mock(ConfigService.class);
+        when(configService.loadBalanceConfig()).thenReturn(transportConfig);
+        client.configureEngineGrpc(configService);
         try {
             var request = CacheVersionPB.newBuilder().setNeedCacheKeys(true).build();
             for (int i = 0; i < 2; i++) {

@@ -39,6 +39,23 @@ deepselect_cuda_copts = [
 deepselect_bf16_cuda_copts = ["-DRTP_DEEPSELECT_BF16_ENABLED"] + deepselect_cuda_copts
 deepselect_fp32_cuda_copts = ["-DRTP_DEEPSELECT_FP32_ENABLED"] + deepselect_cuda_copts
 
+# Compile the same headers as the locked FlashInfer wheel (no extra download,
+# Python dispatch or service-time JIT). These are the transitive header inputs
+# of fast_topk_clusters_exact.cuh, including the TVM FFI check macro.
+fi13 = {"@//:using_cuda13_x86": "pip_gpu_cuda13_torch", "@//:using_cuda13_arm": "pip_cuda13_arm_torch"}
+fi_includes = ["flashinfer_python/site-packages/flashinfer/data/include", "apache_tvm_ffi/site-packages/tvm_ffi/include"]
+fi_headers = ["flashinfer/" + h + ".cuh" for h in ["fast_topk_clusters_exact", "topk_common", "vec_dtypes"]]
+tvm_headers = ["dlpack/dlpack.h"] + ["tvm/ffi/" + h + ".h" for h in ["error", "base_details", "c_api", "endian", "memory", "object"]]
+draft_topk_hdrs = select(dict([
+    (arch, ["@" + repo + "_flashinfer_python//:site-packages/flashinfer/data/include/" + h for h in fi_headers] +
+           ["@" + repo + "_apache_tvm_ffi//:site-packages/tvm_ffi/include/" + h for h in tvm_headers])
+    for arch, repo in fi13.items()
+] + [("//conditions:default", [])]))
+draft_topk_copts = select(dict([
+    (arch, ["-DRTP_FLASHINFER_DRAFT_TOPK"] + ["-Iexternal/" + repo + "_" + inc for inc in fi_includes])
+    for arch, repo in fi13.items()
+] + [("//conditions:default", [])]))
+
 cuda_deps = [
     "//rtp_llm/models_py/bindings/cuda:cuda_host_utils",
     ":cuda_utils_common",
@@ -248,12 +265,12 @@ filegroup(
 
 cc_library(
     name = "deepselect_fp32",
-    srcs = ["deepselect_fp32.cu"],
-    hdrs = ["deepselect_fp32.h"] + glob([
+    srcs = ["deepselect_fp32.cu", "draft_markov_topk.cu"],
+    hdrs = ["deepselect_fp32.h"] + draft_topk_hdrs + glob([
         "deepselect/**/*.h",
         "deepselect/**/*.cuh",
     ]),
-    copts = copts() + cuda_default_copts_without_arch() + select({
+    copts = copts() + cuda_default_copts_without_arch() + draft_topk_copts + select({
         "@//:using_cuda13_x86": deepselect_fp32_cuda_copts,
         "@//:using_cuda13_arm": deepselect_fp32_cuda_copts,
         "@//:using_cuda12_9": deepselect_fp32_cuda_copts,

@@ -309,6 +309,7 @@ class MMRdmaConfig:
         self.connect_timeout_ms: int = 250
         self.read_timeout_ms: int = 3000
         self.qp_count: int = 8
+        self.read_provider_count: int = 4
         self.slot_gc_timeout_ms: int = 60 * 1000
         self.max_slot_bytes: int = 1024 * 1024 * 1024
         self.max_receipt_bytes: int = 8 * 1024 * 1024 * 1024
@@ -357,6 +358,9 @@ class VitConfig:
         self.mm_hash_key_cache_max_bytes: int = (
             VitConfig.DEFAULT_MM_HASH_KEY_CACHE_MAX_BYTES
         )
+        # Publish cache insertions on a background thread so a slow pool
+        # eviction/copy never blocks the request that produced the embedding.
+        self.mm_cache_async_publish: bool = True
         self.mm_remote_cache_enable: bool = False
         self.mm_remote_cache_max_object_bytes: int = 256 * 1024**2
         self.mm_remote_cache_max_inflight_bytes: int = 1024**3
@@ -506,6 +510,7 @@ class VitConfig:
             f"mm_rdma_connect_timeout_ms: {rdma.connect_timeout_ms}\n"
             f"mm_rdma_read_timeout_ms: {rdma.read_timeout_ms}\n"
             f"mm_rdma_qp_count: {rdma.qp_count}\n"
+            f"mm_rdma_read_provider_count: {rdma.read_provider_count}\n"
             f"mm_rdma_release_timeout_ms: {control.release_timeout_ms}\n"
             f"mm_rdma_slot_gc_timeout_ms: {rdma.slot_gc_timeout_ms}\n"
             f"mm_rdma_max_slot_bytes: {rdma.max_slot_bytes}\n"

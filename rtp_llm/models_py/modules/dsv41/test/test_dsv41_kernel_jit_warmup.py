@@ -1076,7 +1076,7 @@ class V41KernelJitWarmupTest(unittest.TestCase):
             (gate_up,) = call.args
             self.assertEqual(gate_up.dtype, torch.bfloat16)
             self.assertTrue(gate_up.is_contiguous())
-            self.assertEqual(call.kwargs, {"clamp_limit": 7.0})
+            self.assertEqual(call.kwargs, {"clamp_limit": 7.0, "round_to_bf16": False})
         combine.assert_called_once()
         routed, shared, out_dtype = combine.call_args.args
         self.assertEqual(routed.shape, (2, 8))

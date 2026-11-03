@@ -18,6 +18,7 @@ import asyncio
 import inspect
 import json
 import logging
+import os
 import time
 from dataclasses import dataclass, replace
 from typing import (
@@ -69,6 +70,7 @@ from rtp_llm.dash_sc.codec import (
     DASH_ERROR_INVALID_OUTPUT,
     DASH_ERROR_RESOURCE_EXHAUSTED,
     DASH_ERROR_TIMEOUT,
+    DASH_ERROR_TPM_THROTTLED,
     DASH_ERROR_TOO_LONG,
     DASH_ERROR_UNSUPPORTED,
     DashErrorSpec,
@@ -99,10 +101,16 @@ from rtp_llm.dash_sc.inference.grammar_validator import (
     GrammarCompilationError,
     GrammarValidator,
 )
+from rtp_llm.dash_sc.inference.tpm_recheck import (
+    DEFAULT_TPM_RECHECK_TIMEOUT_MS,
+    TpmRecheckResult,
+    recheck_tpm,
+)
 from rtp_llm.dash_sc.proto import predict_v2_pb2, predict_v2_pb2_grpc
 from rtp_llm.dash_sc.repetition_monitor import RequestRepetitionMonitorConfig
 from rtp_llm.frontend.request_id_generator import generate_request_id
 from rtp_llm.metrics import AccMetrics, kmonitor
+from rtp_llm.server.mm_cache_metadata import MMRoutingSnapshot
 from rtp_llm.server.request_headers import (
     extract_correlation_request_id,
     extract_request_headers,
@@ -137,6 +145,15 @@ _EMPTY_THINK_BODY = "\n"
 _DEFAULT_TERMINATE_TOKEN_ID = 1
 # Model types whose dash_sc protocol uses the empty-think second pass.
 _EMPTY_THINK_PHASE2_MODEL_TYPES = {"deepseek_v4", "deepseek_v41", "deepseek_v41_dspark"}
+# Early first packet is opt-in: it is a protocol extension for clients that
+# want prompt/media accounting before prefill. Default off in production.
+_FAKE_FIRST_PACKET_ENV = "DASHSC_ENABLE_FAKE_FIRST_PACKET"
+
+
+def _env_flag(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in ("1", "true", "yes", "on")
+
+
 _INT32_MAX = 2_147_483_647
 _PARTIAL_RESPONSE_METADATA = (("x-dashscope-partialresponse", "true"),)
 GrpcMetadata = Iterable[tuple[object, object]]
@@ -564,7 +581,7 @@ def _hf_tokenizer(tokenizer: BaseTokenizer | None) -> _TextEncoder | None:
 
 
 class _BackendVisitor(Protocol):
-    async def enqueue(self, input: GenerateInput) -> AsyncIterator[GenerateOutputs]: ...
+    async def enqueue(self, input: GenerateInput) -> AsyncIterator[object]: ...
 
 
 def _decode_env_tag(value: str) -> str:
@@ -899,6 +916,61 @@ def _slice_generate_output_token_span(
     return source_ids[start:end]
 
 
+_TPM_RECHECK_TIMEOUT_ENV = "DASHSC_TPM_RECHECK_TIMEOUT_MS"
+
+
+def _tpm_recheck_timeout_ms() -> int:
+    raw = os.environ.get(_TPM_RECHECK_TIMEOUT_ENV, "")
+    if not raw:
+        return DEFAULT_TPM_RECHECK_TIMEOUT_MS
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        return DEFAULT_TPM_RECHECK_TIMEOUT_MS
+
+
+# Public gateway contract for any TPM recheck rejection. The callback's own
+# status code, status name, and message are passed through in extra response
+# parameters for downstream diagnosis.
+_TPM_RECHECK_PUBLIC_MESSAGE = "Requests throttling triggered."
+
+
+def _tpm_recheck_detail(
+    result: TpmRecheckResult, elapsed_ms: int, interval_ms: int
+) -> str:
+    message = (
+        f"TPM limit exceeded: request waited {elapsed_ms}ms before prefill "
+        f"(recheck threshold {interval_ms}ms); "
+        f"usage callback returned HTTP {result.callback_status_code}"
+    )
+    if result.callback_error_code:
+        message += f" (error_code={result.callback_error_code})"
+    if result.message:
+        message += f": {result.message}"
+    return message
+
+
+def _early_first_packet_snapshot(
+    input: GenerateInput,
+) -> Optional[MMRoutingSnapshot]:
+    """Snapshot for the pre-prefill frame.
+
+    Multimodal requests only emit it when the frontend route has complete ViT
+    hashes; text-only requests always have a known prompt length and no media.
+    """
+    if getattr(input, "mm_inputs", None):
+        return getattr(input, "mm_routing_snapshot", None)
+    token_ids = input.token_ids
+    prompt_token_num = (
+        int(token_ids.numel()) if hasattr(token_ids, "numel") else len(token_ids)
+    )
+    return MMRoutingSnapshot(
+        prompt_token_num=prompt_token_num,
+        split_sizes=(),
+        feature_hashes=(),
+    )
+
+
 def _make_generate_input(
     *,
     request_id: int,
@@ -1083,6 +1155,7 @@ async def iter_real_model_stream_infer(
     mm_inputs: Optional[list] = None,
     input_ids_tensor: Optional[torch.Tensor] = None,
     v41_image_token_id: Optional[int] = None,
+    enable_fake_first_packet: bool = False,
 ) -> AsyncIterator[predict_v2_pb2.ModelStreamInferResponse]:
     """Run enqueue on ``backend_visitor`` and yield one proto per chunk as the backend streams.
 
@@ -1239,6 +1312,10 @@ async def iter_real_model_stream_infer(
             mm_inputs=mm_inputs,
             input_ids_tensor=input_ids_tensor,
         )
+        if enable_fake_first_packet:
+            # The backend visitor invokes this after ViT expansion and before
+            # the prefill enqueue; the returned snapshot becomes an extra frame.
+            generate_input.on_mm_routed = _early_first_packet_snapshot
         is_streaming = bool(generate_config.is_streaming)
         logging.debug(
             "[DashScGrpc] [%s] generate_input: %s",
@@ -1276,6 +1353,90 @@ async def iter_real_model_stream_infer(
         phase2_triggered = False
         stream = await backend_visitor.enqueue(generate_input)
         async for go in stream:
+            if isinstance(go, MMRoutingSnapshot):
+                if not enable_fake_first_packet:
+                    continue
+                # Emitted by the backend visitor after ViT expansion and before
+                # prefill. It carries no generated tokens, so it must not touch
+                # the chunk counters or any real-frame state. Best-effort: a
+                # malformed snapshot must not fail an otherwise valid request.
+                try:
+                    fake = response_builder.build_fake_first_packet(
+                        prompt_token_num=go.prompt_token_num,
+                        split_sizes=go.split_sizes,
+                        feature_hashes=go.feature_hashes,
+                    )
+                except Exception:
+                    logging.warning(
+                        "[DashScGrpc] [%s] fake first packet build failed",
+                        tag,
+                        exc_info=True,
+                    )
+                    continue
+                fake_stats = (
+                    0,
+                    False,
+                    LLMFinishReason.STREAMING,
+                    go.prompt_token_num,
+                    0,
+                    (),
+                )
+                yield (fake, fake_stats) if yield_access_stats else fake
+                recheck = getattr(request_controls, "tpm_recheck", None)
+                if recheck is not None:
+                    elapsed_ms = int(time.time() * 1000) - recheck.request_ready_time_ms
+                    if elapsed_ms > recheck.interval_ms:
+                        result = await recheck_tpm(
+                            recheck.callback_url,
+                            timeout_ms=_tpm_recheck_timeout_ms(),
+                            request_id=str(request.id),
+                        )
+                        if not result.ok:
+                            error_resp = build_dash_error_response(
+                                str(request.id),
+                                request.model_name,
+                                error_spec=DASH_ERROR_TPM_THROTTLED,
+                                status_message=_TPM_RECHECK_PUBLIC_MESSAGE,
+                            )
+                            # Preserve the gateway callback's own code and
+                            # message for downstream diagnosis; the public
+                            # status is always 429 / Throttling.
+                            parameters = error_resp.infer_response.parameters
+                            parameters["callback_status_code"].int64_param = int(
+                                result.callback_status_code
+                            )
+                            if result.callback_error_code:
+                                parameters["callback_error_code"].string_param = (
+                                    result.callback_error_code
+                                )
+                            if result.status_name:
+                                parameters["callback_status_name"].string_param = (
+                                    result.status_name
+                                )
+                            if result.message:
+                                parameters["callback_status_message"].string_param = (
+                                    result.message
+                                )
+                            parameters["tpm_recheck_detail"].string_param = (
+                                _tpm_recheck_detail(
+                                    result, elapsed_ms, recheck.interval_ms
+                                )
+                            )
+                            error_stats = (
+                                0,
+                                True,
+                                DASH_ERROR_TPM_THROTTLED.finish_reason,
+                                go.prompt_token_num,
+                                0,
+                                (),
+                            )
+                            yield (
+                                (error_resp, error_stats)
+                                if yield_access_stats
+                                else error_resp
+                            )
+                            return
+                continue
             chunk_idx += 1
             logging.debug("[DashScGrpc] [%s] real infer chunk %s", tag, chunk_idx)
             if not go.generate_outputs:
@@ -1993,6 +2154,7 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
         # (invalid grammars surface as an engine-side error mid-stream).
         self._grammar_validator = grammar_validator
         self._v41_image_token_id = v41_image_token_id
+        self._enable_fake_first_packet = _env_flag(_FAKE_FIRST_PACKET_ENV)
 
     async def _validate_request_grammar(
         self, sampling: SamplingParams, request_id: str
@@ -2363,6 +2525,7 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
                     v41_image_token_id=self._v41_image_token_id,
                     yield_access_stats=True,
                     mm_inputs=mm_inputs,
+                    enable_fake_first_packet=self._enable_fake_first_packet,
                 )
                 try:
                     async for resp, stats in response_iter:

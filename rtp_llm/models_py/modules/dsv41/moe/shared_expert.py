@@ -177,8 +177,9 @@ class W13SharedExpert(nn.Module):
 
         The fused kernel reads the merged BF16 gate_up halves in place, so the
         old ``.float()`` cast, the two ``.contiguous()`` copies of the chunk
-        halves and the ``hidden.to(dtype)`` cast disappear while keeping the
-        FP32 accumulate contract and the single FP32->BF16 rounding step.
+        halves and the ``hidden.to(dtype)`` cast disappear. The FP32 SwiGLU
+        result goes directly to group32 FP8, matching native MegaMoE shared
+        experts without an extra intermediate BF16 rounding.
         """
         return (
             _MXFP8_FUSED_SILU_OK
@@ -194,7 +195,7 @@ class W13SharedExpert(nn.Module):
             gate_up = self.w13(x)
         with record_function_range("dsv4.shared_expert.silu_mul"):
             hidden_q, hidden_s = silu_mul_fp8_g32_quant(
-                gate_up, clamp_limit=self.swiglu_limit
+                gate_up, clamp_limit=self.swiglu_limit, round_to_bf16=False
             )
         with record_function_range("dsv4.shared_expert.w2"):
             return self.w2.forward_quantized(hidden_q, hidden_s)

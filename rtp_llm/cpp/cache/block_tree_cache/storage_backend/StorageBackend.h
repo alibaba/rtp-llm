@@ -30,6 +30,7 @@ namespace rtp_llm {
 
 class BatchKVCacheResource;
 class BlockTreeCacheMetricsReporter;
+enum class AsyncProfileKind;
 class TransferStageTimer;
 class SharedTransferStageTimer;
 
@@ -259,7 +260,8 @@ private:
     SharedTransferStageTimer stageTimer(const char*           stage,
                                         const StorageRequest& request,
                                         const char*           operation,
-                                        uint64_t              trace_id) const noexcept;
+                                        uint64_t              trace_id,
+                                        AsyncProfileKind      kind) const noexcept;
     TransferStageTimer       stageValue(const char*           stage,
                                         const StorageRequest& request,
                                         const char*           operation,

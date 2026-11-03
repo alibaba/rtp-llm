@@ -1,5 +1,7 @@
 #pragma once
 
+#include "rtp_llm/cpp/utils/AsyncProfilingScope.h"
+
 #include "absl/status/statusor.h"
 #include "autil/TimeUtility.h"
 #include "kmonitor/client/MetricsReporter.h"
@@ -1115,6 +1117,9 @@ protected:
     int prefill_tp_size_ = -1;
     // Effective Prefill KV-cache CP size; independent from TP size.
     int prefill_cp_size_ = -1;
+
+private:
+    AsyncProfileRequest request_profile_;
 };
 
 typedef std::shared_ptr<GenerateStream> GenerateStreamPtr;

@@ -54,7 +54,7 @@ struct BlockTreeCacheConfig {
     // ---- Per-tier eviction policy ----
     EvictionPolicy device_eviction_policy{EvictionPolicy::LRU};
     EvictionPolicy host_eviction_policy{EvictionPolicy::LRU};
-    EvictionPolicy disk_eviction_policy{EvictionPolicy::FIFO};
+    EvictionPolicy disk_eviction_policy{EvictionPolicy::LRU};
 
     // ---- Shared Store/Load/Evict task pool ----
     int    task_pool_size{4};
@@ -76,7 +76,7 @@ struct BlockTreeCacheConfig {
 
     // ---- FULL prefix invariant scanner (diagnostic only) ----
     // The factory zeroes this on ranks that do not own a mutable BlockTree.
-    int64_t full_prefix_scan_interval_ms{0};  // 0 = disabled, no thread
+    int64_t full_prefix_scan_interval_ms{30000};  // 30 seconds; 0 = disabled, no thread
 
     // ---- Query helpers ----
     bool isTierEnabled(Tier tier) const {

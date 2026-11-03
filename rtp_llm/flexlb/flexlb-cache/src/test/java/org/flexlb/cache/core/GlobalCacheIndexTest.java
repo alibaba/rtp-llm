@@ -53,6 +53,44 @@ class GlobalCacheIndexTest {
         assertEquals(514L, globalCacheIndex.totalMappings());
     }
 
+    @Test
+    @Timeout(30)
+    void concurrentOwnerChurnDoesNotLoseOtherOwnersOrPublishPartialReads() throws Exception {
+        GlobalCacheIndex index = new GlobalCacheIndex();
+        index.addCacheBlock(17L, "stable", null);
+        try (var executor = java.util.concurrent.Executors.newFixedThreadPool(9)) {
+            var jobs = new java.util.ArrayList<java.util.concurrent.Future<?>>();
+            for (int writer = 0; writer < 8; writer++) {
+                String owner = "writer-" + writer;
+                jobs.add(executor.submit(() -> {
+                    for (int iteration = 0; iteration < 10_000; iteration++) {
+                        index.addCacheBlock(17L, owner, null);
+                        index.addCacheBlock(18L, owner, null);
+                        assertEquals(Map.of(owner, 1), index.batchCalculatePrefixMatchLength(
+                                List.of(owner), List.of(18L)));
+                        index.removeCacheBlock(owner, 18L, null);
+                        index.removeCacheBlock(owner, 17L, null);
+                    }
+                    index.addCacheBlock(18L, owner, null);
+                }));
+            }
+            jobs.add(executor.submit(() -> {
+                for (int iteration = 0; iteration < 30_000; iteration++) {
+                    assertEquals(Map.of("stable", 1), index.batchCalculatePrefixMatchLength(
+                            List.of("stable"), List.of(17L)));
+                }
+            }));
+            for (var job : jobs) job.get(25, TimeUnit.SECONDS);
+        }
+        assertEquals(9L, index.totalMappings());
+        assertEquals(2L, index.totalBlocks());
+        for (int writer = 0; writer < 8; writer++) {
+            String owner = "writer-" + writer;
+            assertEquals(Map.of(owner, 1), index.batchCalculatePrefixMatchLength(
+                    List.of(owner), List.of(18L)));
+        }
+    }
+
     @BeforeEach
     void setUp() {
         globalCacheIndex = new GlobalCacheIndex();
@@ -71,14 +109,13 @@ class GlobalCacheIndexTest {
     }
 
     @Test
-    void cleanupRecordsActualLockSpanAndScanCountsWithoutChangingOtherOwners() {
+    void cleanupRecordsScanCountsWithoutChangingOtherOwners() {
         globalCacheIndex.addCacheBlock(1L, "retiring", null);
         globalCacheIndex.addCacheBlock(1L, "survivor", null);
         globalCacheIndex.addCacheBlock(2L, "retiring", null);
         var history = new EndpointTrace();
         globalCacheIndex.removeAllCacheBlockOfEngine("retiring", Set.of(1L, 2L), history);
         var snapshot = history.snapshot();
-        assertEquals("CACHE_INDEX_LOCK_RELEASED", snapshot.phase());
         assertEquals(2L, snapshot.scannedKeys());
         assertEquals(2L, snapshot.removedMappings());
     }
@@ -87,7 +124,7 @@ class GlobalCacheIndexTest {
     @ValueSource(booleans = {false, true})
     @Timeout(10)
     @SuppressWarnings("unchecked")
-    void waitingCachePollRecordsContentionUntilGlobalLockIsAcquired(boolean remove) throws Exception {
+    void unrelatedShardUpdatesProgressWhileCleanupIsBlocked(boolean remove) throws Exception {
         String retiring = "10.43.7.113:28200";
         globalCacheIndex.addCacheBlock(1L, retiring, null);
         globalCacheIndex.addCacheBlock(2L, "worker-B", null);
@@ -95,7 +132,7 @@ class GlobalCacheIndexTest {
         var release = new CountDownLatch(1);
         var mapField = GlobalCacheIndex.class.getDeclaredField("blockToEnginesMap");
         mapField.setAccessible(true);
-        var map = (Map<Long, Set<String>>) mapField.get(globalCacheIndex);
+        var map = (org.flexlb.cache.primitive.LongObjectMap<Set<String>>) mapField.get(globalCacheIndex);
         var blockingOwners = new java.util.HashSet<String>() {
             @Override
             public boolean remove(Object value) {
@@ -112,7 +149,8 @@ class GlobalCacheIndexTest {
             }
         };
         blockingOwners.add(retiring);
-        map.put(1L, blockingOwners);
+        map.remove(1L);
+        map.computeIfAbsent(1L, ignored -> blockingOwners);
         var cleanupHistory = new EndpointTrace();
         var waiterHistory = new EndpointTrace();
         var poll = waiterHistory.beginPoll("CACHE", 2L);
@@ -139,16 +177,8 @@ class GlobalCacheIndexTest {
             cleaning.start();
             assertTrue(entered.await(3, TimeUnit.SECONDS));
             waiting.start();
-            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(3);
-            while (waiting.getState() != Thread.State.WAITING && System.nanoTime() < deadline) {
-                Thread.onSpinWait();
-            }
-            assertEquals(Thread.State.WAITING, waiting.getState());
-            var snapshot = waiterHistory.snapshot();
-            var indexWait = snapshot.cachePoll().indexWait();
-            assertEquals("CACHE_INDEX_LOCK_ACQUIRED", cleanupHistory.snapshot().phase());
-            assertEquals(1L, indexWait.count());
-            assertTrue(indexWait.ageUs() > 0L);
+            waiting.join(1000L);
+            assertFalse(waiting.isAlive(), "unrelated shard must progress before cleanup is released");
         } finally {
             release.countDown();
             cleaning.join(3000L);
@@ -160,7 +190,7 @@ class GlobalCacheIndexTest {
         assertEquals(null, failure.get());
         var waited = waiterHistory.snapshot().cachePoll().indexWait();
         assertEquals(0L, waited.ageUs());
-        assertTrue(waited.totalWaitUs() > 0L);
+        assertEquals(0L, waited.totalWaitUs());
         assertEquals(remove ? Map.of() : Map.of("worker-B", 1), globalCacheIndex.batchCalculatePrefixMatchLength(
                 List.of("worker-B"), List.of(2L)));
     }

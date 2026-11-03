@@ -316,6 +316,125 @@ class SiluMulGroup32QuantEquivTest(unittest.TestCase):
                         )
         torch.cuda.current_stream().wait_stream(stream)
 
+    @staticmethod
+    def fp32_quant_reference(gate_up, clamp):
+        """Independent FP32 SwiGLU and mathematical E4M3/UE8M0 reference."""
+        gate, up = gate_up.float().chunk(2, dim=-1)
+        if clamp > 0:
+            gate = gate.clamp(max=clamp)
+            up = up.clamp(-clamp, clamp)
+        hidden = torch.nn.functional.silu(gate) * up
+        rows, width = hidden.shape
+        groups = hidden.reshape(rows, width // 32, 32)
+        maximum = groups.abs().amax(dim=-1)
+        # All fixture groups contain a nonzero, normal maximum, so the legacy
+        # and v2 tiny-value floors do not affect this independent reference.
+        raw_scale = maximum * (1.0 / 448.0)
+        bits = raw_scale.view(torch.int32)
+        encoded = (bits >> 23) + ((bits & 0x7FFFFF) != 0).to(torch.int32)
+        scale = (encoded << 23).view(torch.float32)
+        quant = (groups / scale.unsqueeze(-1)).clamp(-448, 448)
+        quant = quant.reshape(rows, width).to(torch.float8_e4m3fn)
+        scale_bytes = torch.zeros(
+            (rows, (width + 127) // 128 * 4),
+            dtype=torch.uint8,
+            device=gate_up.device,
+        )
+        scale_bytes[:, : width // 32] = encoded.to(torch.uint8)
+        scales = torch.empty(
+            ((width + 127) // 128, (rows + 3) // 4 * 4),
+            dtype=torch.int32,
+            device=gate_up.device,
+        ).T[:rows]
+        scales.copy_(scale_bytes.contiguous().view(torch.int32))
+        return quant, scales
+
+    @staticmethod
+    def quant_threshold_fixture(rows, width):
+        # Each group has a maximum 56.0967... which rounds to 56 in BF16.
+        # Direct FP32 quantization needs scale 1/4; BF16 intermediate needs
+        # scale 1/8. Other values straddle E4M3 midpoints after BF16 rounding.
+        up = torch.tensor(
+            [
+                0.8984375,
+                1.0703125,
+                1.2421875,
+                1.796875,
+                2.140625,
+                2.484375,
+                3.59375,
+                4.28125,
+            ],
+            dtype=torch.bfloat16,
+            device="cuda",
+        ).repeat(width // 8)
+        gate = torch.ones(width, dtype=torch.bfloat16, device="cuda")
+        gate[::32] = 8.125
+        up[::32] = 6.90625
+        return torch.cat((gate, up)).repeat(rows, 1)
+
+    def test_fp32_swiglu_quantization_thresholds_preserve_legacy(self):
+        gate_up = self.quant_threshold_fixture(5, 128)
+        for mode in ("legacy", "v2", "auto"):
+            with self.subTest(mode=mode), patch.dict(
+                os.environ, DSV4_FP8_QUANT_KERNEL=mode
+            ):
+                actual = self.fused(gate_up, clamp_limit=10, round_to_bf16=False)
+                expected = self.fp32_quant_reference(gate_up, 10)
+                self.assert_exact(actual, expected, 128)
+                legacy = self.fused(gate_up, clamp_limit=10)
+                explicit_legacy = self.fused(
+                    gate_up, clamp_limit=10, round_to_bf16=True
+                )
+                self.assert_exact(legacy, explicit_legacy, 128)
+                self.assert_exact(legacy, self.reference(gate_up, 10, mode), 128)
+                # A singleton packed dimension may retain its TMA stride even
+                # when is_contiguous() is true; unpack values without a dtype view.
+                codes = torch.stack(
+                    [(actual[1] >> shift) & 255 for shift in (0, 8, 16, 24)], dim=-1
+                )
+                old_codes = torch.stack(
+                    [(legacy[1] >> shift) & 255 for shift in (0, 8, 16, 24)], dim=-1
+                )
+                self.assertTrue(bool((codes == 125).all()))
+                self.assertTrue(bool((old_codes == 124).all()))
+                self.assertFalse(
+                    torch.equal(
+                        actual[0].view(torch.uint8), legacy[0].view(torch.uint8)
+                    )
+                )
+
+    def test_fp32_swiglu_quantization_shapes_and_clamp(self):
+        for rows, width in ((1, 32), (33, 160), (5, 2304)):
+            gate_up = self.quant_threshold_fixture(rows, width)
+            for clamp in (0.0, 10.0):
+                if clamp:
+                    gate_up[:, :width:32] = 12
+                    gate_up[:, width::32] = -12
+                for mode in ("legacy", "v2"):
+                    with self.subTest(rows=rows, width=width, clamp=clamp, mode=mode):
+                        with patch.dict(os.environ, DSV4_FP8_QUANT_KERNEL=mode):
+                            actual = self.fused(
+                                gate_up, clamp_limit=clamp, round_to_bf16=False
+                            )
+                        self.assert_exact(
+                            actual, self.fp32_quant_reference(gate_up, clamp), width
+                        )
+
+    def test_fp32_swiglu_quantization_graph_replay(self):
+        gate_up = self.quant_threshold_fixture(5, 2304)
+        with patch.dict(os.environ, DSV4_FP8_QUANT_KERNEL="legacy"):
+            for _ in range(3):
+                self.fused(gate_up, clamp_limit=10, round_to_bf16=False)
+            torch.cuda.synchronize()
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph):
+                actual = self.fused(gate_up, clamp_limit=10, round_to_bf16=False)
+            for sign in (1, -1):
+                gate_up[:, 2304:].mul_(sign)
+                graph.replay()
+                self.assert_exact(actual, self.fp32_quant_reference(gate_up, 10), 2304)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -553,7 +553,9 @@ class V41HCJitWarmupCPU(unittest.TestCase):
         source = unit()
         ops = Mock()
         with patch.object(warmup, "_tile_ops", return_value=ops), patch.object(
-            warmup.v41_prenorm, "prepare_tf32_weight", return_value=source.fn
+            warmup.v41_prenorm,
+            "prepare_tf32_weight",
+            side_effect=AssertionError("native warmup must receive raw FP32 fn"),
         ):
             for tokens, backend in ((1, "deepgemm"), (65, None)):
                 warmup._launch_fused_pre(source, tokens, "cpu")
@@ -563,18 +565,19 @@ class V41HCJitWarmupCPU(unittest.TestCase):
         ops.mhc_pre_norm_fn.assert_not_called()
         ops.mhc_pre_split_mixes.assert_not_called()
 
-    def test_fused_decode_prewarm_uses_prepared_tf32_weights(self):
+    def test_fused_decode_prewarm_uses_raw_fp32_weights(self):
         source = unit()
-        prepared = torch.ones_like(source.fn)
         ops = Mock()
         with patch.dict(
             os.environ, {"DSV4_MHC_PRE_GEMM_BACKEND": "deepgemm"}
         ), patch.object(warmup, "_tile_ops", return_value=ops), patch.object(
-            warmup.v41_prenorm, "prepare_tf32_weight", return_value=prepared
+            warmup.v41_prenorm,
+            "prepare_tf32_weight",
+            side_effect=AssertionError("native warmup must receive raw FP32 fn"),
         ):
             for tokens in (1, 65, 384, 512):
                 warmup._launch_fused_pre(source, tokens, "cpu")
-                self.assertIs(ops.mhc_pre_big_fuse.call_args.args[1], prepared)
+                self.assertIs(ops.mhc_pre_big_fuse.call_args.args[1], source.fn)
                 self.assertEqual(
                     ops.mhc_pre_big_fuse.call_args.kwargs["gemm_backend"], "deepgemm"
                 )

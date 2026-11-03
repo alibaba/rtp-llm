@@ -18,6 +18,7 @@ from rtp_llm.server.backend_rpc_server_visitor import (
 )
 from rtp_llm.server.cache_key_routing import route_cache_keys_for_page_rr
 from rtp_llm.server.master_client import FlexlbResponse
+from rtp_llm.server.mm_cache_metadata import MMRoutingSnapshot
 from rtp_llm.telemetry import attributes as trace_attrs
 
 
@@ -1030,6 +1031,41 @@ class BackendRPCServerVisitorRetryTest(unittest.IsolatedAsyncioTestCase):
             ExceptionType.PRIORITY_PREEMPTED,
         )
         self.assertEqual(client.attempts, 2)
+
+    async def test_enqueue_yields_early_packet_before_model_stream(self):
+        client = _SuccessfulModelRpcClient(["real-output"])
+        visitor = self._visitor(client)
+        visitor.host_service.service_available = True
+        routed = []
+
+        async def route_ips(input):
+            routed.append(input)
+            input.mm_routing_snapshot = MMRoutingSnapshot(
+                prompt_token_num=5,
+                split_sizes=(2,),
+                feature_hashes=(1, 2),
+            )
+
+        visitor.route_ips = route_ips
+        request = _FakeInput(is_streaming=True)
+        callback_inputs = []
+
+        def on_mm_routed(input):
+            callback_inputs.append(input)
+            return getattr(input, "mm_routing_snapshot", None)
+
+        request.on_mm_routed = on_mm_routed
+
+        stream = await visitor.enqueue(request)
+        outputs = [output async for output in stream]
+
+        self.assertEqual(len(outputs), 2)
+        self.assertIsInstance(outputs[0], MMRoutingSnapshot)
+        self.assertEqual(outputs[0].prompt_token_num, 5)
+        self.assertEqual(outputs[1], "real-output")
+        self.assertEqual(len(callback_inputs), 1)
+        self.assertEqual(len(routed), 1)
+        self.assertIs(callback_inputs[0], routed[0])
 
 
 class MixedFrontendBatchTest(unittest.IsolatedAsyncioTestCase):

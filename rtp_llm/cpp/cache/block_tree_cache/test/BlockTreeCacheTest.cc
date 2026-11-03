@@ -1192,6 +1192,7 @@ TEST(BlockTreeCacheMetricsTest, PairedCompletionTimersFinishOnceAcrossThreads) {
     auto                          session     = AsyncProfileSession::start();
     auto                          observation = CompletionStageContext::forTransfer(reporter, task, "evict");
     auto                          timers      = CompletionStageTimers::create(observation);
+    const auto                    owner_tid   = asyncProfileThreadId();
     ASSERT_TRUE(timers);
     std::thread worker([timers, observation] {
         timers.finishQueue(true);
@@ -1206,6 +1207,17 @@ TEST(BlockTreeCacheMetricsTest, PairedCompletionTimersFinishOnceAcrossThreads) {
     for (const auto& event : events) {
         EXPECT_NE(event.name.find("host_to_disk"), std::string::npos);
         EXPECT_EQ(event.name.find("incomplete=1"), std::string::npos);
+    const std::string stage(event.record.stage);
+        if (stage == "completion_execute") {
+            EXPECT_EQ(event.record.kind, AsyncProfileKind::Execution);
+            EXPECT_NE(event.record.start_tid, owner_tid);
+            EXPECT_EQ(event.record.start_tid, event.end_tid);
+        } else {
+            EXPECT_EQ(event.record.kind,
+                      stage == "completion_total" ? AsyncProfileKind::Lifecycle : AsyncProfileKind::Wait);
+            EXPECT_EQ(event.record.start_tid, owner_tid);
+            EXPECT_NE(event.end_tid, owner_tid);
+        }
     }
     reporter.flushStageMetrics();
     auto*                 metrics = raw->getMetricsGroup<RtpLLMCacheTransferMetrics>();

@@ -383,6 +383,13 @@ class MMProcessEngineTest(TestCase):
         ]
         self.assertEqual(lengths, [3])
 
+        tps_lengths = [
+            call.args[1]
+            for call in report.call_args_list
+            if call.args and call.args[0] == AccMetrics.VIT_EMBEDDING_TPS_METRIC
+        ]
+        self.assertEqual(tps_lengths, [3])
+
         image_counts = [
             call.args[1]
             for call in report.call_args_list
@@ -749,6 +756,9 @@ class MMProcessEngineGpuBatchTest(TestCase):
         vit_config.mm_cache_item_num = 0
         vit_config.mm_cache_cpu_max_bytes = 0
         vit_config.mm_cache_gpu_max_bytes = 0
+        # Keep cache assertions deterministic; async publication has its own
+        # unit tests in mm_embedding_cache_test.
+        vit_config.mm_cache_async_publish = False
         for key, value in vit_overrides.items():
             setattr(vit_config, key, value)
         engine = MMProcessEngine(
@@ -1732,6 +1742,7 @@ class AsyncSubmitGetEmbeddingTest(TestCase):
         vit_config.mm_cache_gpu_max_bytes = 0
         vit_config.mm_cache_cpu_max_bytes = 1024 * 1024
         vit_config.mm_hash_key_cache_max_bytes = 1024 * 1024
+        vit_config.mm_cache_async_publish = False
         vit_config.vit_concurrency = vit_concurrency
         vit_config.vit_max_queue_size = vit_max_queue_size
         return MMProcessEngine(
@@ -2467,6 +2478,7 @@ class MMProcessEngineGreenNetTest(TestCase):
         vit_config.mm_cache_gpu_max_bytes = 0
         vit_config.mm_cache_cpu_max_bytes = 1024 * 1024
         vit_config.mm_hash_key_cache_max_bytes = 1024 * 1024
+        vit_config.mm_cache_async_publish = False
         vit_config.vit_source_download_concurrency = source_download_concurrency
         return MMProcessEngine(
             model.mm_part,

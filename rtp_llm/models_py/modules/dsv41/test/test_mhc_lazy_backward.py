@@ -120,10 +120,7 @@ class MHCLazyBackwardTest(unittest.TestCase):
         if not torch.cuda.is_available() or torch.cuda.get_device_capability()[0] != 10:
             self.skipTest("requires Blackwell CUDA")
         from rtp_llm.models_py.modules.dsv41.hc.delayed import DelayedHCUnit, _tile_ops
-        from rtp_llm.models_py.modules.dsv41.hc.v41_prenorm import (
-            _has_prenorm_gemm,
-            prepare_tf32_weight,
-        )
+        from rtp_llm.models_py.modules.dsv41.hc.v41_prenorm import _has_prenorm_gemm
 
         torch.manual_seed(29)
         fn = torch.randn(24, 20480, device="cuda") / 20480**0.5
@@ -157,7 +154,7 @@ class MHCLazyBackwardTest(unittest.TestCase):
                     self.assertEqual(fused.call_args.kwargs["gemm_backend"], "deepgemm")
                     self.assertEqual(
                         fused.call_args.args[1].data_ptr(),
-                        prepare_tf32_weight(unit.fn).data_ptr(),
+                        unit.fn.data_ptr(),
                     )
                 torch.testing.assert_close(actual[0], expected[0], rtol=0, atol=0)
                 for got, ref in zip(actual[1:], expected[1:]):

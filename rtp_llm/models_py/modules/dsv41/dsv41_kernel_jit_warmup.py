@@ -313,7 +313,12 @@ def warmup_v41_shared_expert_jit(model, *, max_m, device):
             common._run_triton_warmup_launch_with_retry(
                 "DSV41 SharedExpert",
                 f"{name} silu M={rows} D={inter} clamp={clamp}",
-                partial(silu_mul_fp8_g32_quant, gate_up, clamp_limit=clamp),
+                partial(
+                    silu_mul_fp8_g32_quant,
+                    gate_up,
+                    clamp_limit=clamp,
+                    round_to_bf16=False,
+                ),
                 device=device,
             )
         if fused_add:

@@ -207,7 +207,7 @@ bool BlockTreeStorer::settleTask(const StoreTask& task, const CompletionStageCon
     {
         std::unique_lock<std::mutex> lock(mutex_, std::defer_lock);
         {
-            CompletionStageScope wait(observation, "completion_lock_wait", "business_completion");
+            CompletionStageScope wait(observation, "completion_lock_wait", "business_completion", AsyncProfileKind::Wait);
             lock.lock();
         }
         CompletionStageScope tree(observation, "completion_settle", "business_completion");

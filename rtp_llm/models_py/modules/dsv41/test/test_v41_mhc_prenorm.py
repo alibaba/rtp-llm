@@ -39,6 +39,29 @@ def _old_mixes(residual, fn):
     return _tile_ops().mhc_pre_norm_fn(residual, fn, None, _EPS, n_splits=1)
 
 
+def _tf32_rne_host(weight):
+    """Independent host oracle for the native tensor-map conversion."""
+    bits = weight.detach().cpu().contiguous().view(torch.int32).to(torch.int64)
+    bits = bits & 0xFFFFFFFF
+    special = (bits & 0x7F800000) == 0x7F800000
+    rounded = (bits + 0xFFF + ((bits >> 13) & 1)) & 0xFFFFE000
+    return torch.where(special, bits, rounded).to(torch.int32).view(torch.float32)
+
+
+def _native_mixes_oracle(residual, fn):
+    x = residual.detach().cpu().reshape(-1, 20480).double()
+    weight = _tf32_rne_host(fn).double()
+    return (
+        (x @ weight.T) * torch.rsqrt(x.square().mean(-1, keepdim=True) + _EPS)
+    ).reshape(*residual.shape[:-2], 24)
+
+
+def _native_mixes(residual, fn):
+    return _native_mixes_oracle(residual, fn).to(
+        device=residual.device, dtype=torch.float32
+    )
+
+
 def _split_mixes(mixes, base, scale):
     # The existing coefficient kernel requires [batch, tokens, 24].
     ops = _tile_ops()
@@ -49,6 +72,40 @@ def _split_mixes(mixes, base, scale):
 
 
 class V41MHCPreNormCPUContractTest(unittest.TestCase):
+    def test_native_rne_halfway_oracle_differs_from_legacy_bias(self):
+        bits = torch.tensor(
+            [
+                0x3F800FFF,
+                0x3F801000,
+                0x3F803000,
+                0xBF801000,
+                0xBF803000,
+                0x00000000,
+                0x80000000,
+                0x7F800000,
+                0x7FC01234,
+            ],
+            dtype=torch.int64,
+        ).to(torch.int32)
+        expected = torch.tensor(
+            [
+                0x3F800000,
+                0x3F800000,
+                0x3F804000,
+                0xBF800000,
+                0xBF804000,
+                0x00000000,
+                0x80000000,
+                0x7F800000,
+                0x7FC01234,
+            ],
+            dtype=torch.int64,
+        ).to(torch.int32)
+        actual = _tf32_rne_host(bits.view(torch.float32))
+        torch.testing.assert_close(actual.view(torch.int32), expected, rtol=0, atol=0)
+        legacy = ((bits[:5] + 0x1000) & -8192).view(torch.float32)
+        self.assertFalse(torch.equal(legacy, actual[:5]))
+
     def test_tf32_tie_rule_and_weight_cache_invalidation(self):
         # RTP adds half a TF32 ULP before truncation, including negative ties;
         # this differs from round-to-nearest-even at the exact halfway value.
@@ -141,7 +198,7 @@ class V41MHCPreNormCudaTest(unittest.TestCase):
 
     @torch.no_grad()
     def _check_mixes_and_coefficients(self, residual, fn, base, scale):
-        expected = _old_mixes(residual, fn)
+        expected = _native_mixes(residual, fn)
         actual = prenorm(residual, fn, _EPS)
         self.assertIsNotNone(actual)
         self._assert_mixes_close(actual, expected)
@@ -150,6 +207,35 @@ class V41MHCPreNormCudaTest(unittest.TestCase):
         ):
             torch.testing.assert_close(got, ref, rtol=2e-4, atol=1e-5)
         return actual
+
+    @torch.no_grad()
+    def test_native_halfway_weights_match_host_oracle_not_legacy_bias(self):
+        residual = torch.zeros(2, 4, 5120, device="cuda", dtype=torch.bfloat16)
+        residual[0, 0, 0] = 1
+        residual[1, 0, 0] = -1
+        bits = torch.tensor(
+            [0x3F801000, 0x3F803000, 0xBF801000, 0xBF803000],
+            dtype=torch.int64,
+        ).to(torch.int32)
+        fn = torch.zeros(24, 20480, device="cuda", dtype=torch.float32)
+        fn[:, 0] = bits.view(torch.float32).repeat(6).cuda()
+        with patch(
+            "rtp_llm.models_py.modules.dsv41.hc.v41_prenorm.prepare_tf32_weight",
+            side_effect=AssertionError("native prenorm must receive raw FP32 fn"),
+        ):
+            actual = prenorm(residual, fn, _EPS)
+        self.assertIsNotNone(actual)
+        expected = _native_mixes(residual, fn)
+        self._assert_mixes_close(actual, expected)
+        legacy_weight = ((fn.cpu().view(torch.int32) + 0x1000) & -8192).view(
+            torch.float32
+        )
+        legacy = _native_mixes(residual, legacy_weight)
+        self.assertGreater((actual - legacy).abs().max().item(), 0.05)
+        self.assertLess(
+            (actual - expected).abs().max().item(),
+            (actual - legacy).abs().max().item() * 0.001,
+        )
 
     @torch.no_grad()
     @patch.dict(os.environ, {"DSV4_MHC_PRE_GEMM_BACKEND": "deepgemm"})
@@ -198,7 +284,6 @@ class V41MHCPreNormCudaTest(unittest.TestCase):
     def test_delayed_entry_and_previous_mix_semantics(self):
         residual, fn, base, scale = self._inputs(6)
         residual = residual.reshape(1, 6, 4, 5120)
-        observations = []
         for enabled in ("0", "1"):
             with patch(
                 "rtp_llm.models_py.modules.dsv41.hc.v41_prenorm._has_prenorm_gemm",
@@ -214,23 +299,18 @@ class V41MHCPreNormCudaTest(unittest.TestCase):
                 torch.testing.assert_close(second_y, expected_y, rtol=0, atol=0)
                 own_y = collapse_delayed(residual, second.pre_mix_out)
                 self.assertFalse(torch.equal(second_y, own_y))
-                observations.append(
-                    (
-                        first.pre_mix_out,
-                        first_post,
-                        first_comb,
-                        second.pre_mix_out,
-                        second_post,
-                        second_comb,
-                        second_y,
-                    )
-                )
-        for actual, expected in zip(observations[1][:-1], observations[0][:-1]):
-            torch.testing.assert_close(actual, expected, rtol=2e-4, atol=1e-5)
-        # Keep the pre-existing full delayed-HC graph tolerance unchanged.
-        torch.testing.assert_close(
-            observations[1][-1], observations[0][-1], rtol=0.02, atol=0.03125
-        )
+                reference = _native_mixes if enabled == "1" else _old_mixes
+                for unit, weight, bias, got_post, got_comb in (
+                    (first, fn, base, first_post, first_comb),
+                    (second, fn * -0.7, base + 0.4, second_post, second_comb),
+                ):
+                    expected = _split_mixes(reference(residual, weight), bias, scale)
+                    for got, ref in zip(
+                        (unit.pre_mix_out, got_post, got_comb), expected
+                    ):
+                        torch.testing.assert_close(
+                            got, ref.reshape_as(got), rtol=2e-4, atol=1e-5
+                        )
 
     @torch.no_grad()
     def test_graph_replay_changes_inputs(self):
@@ -252,7 +332,7 @@ class V41MHCPreNormCudaTest(unittest.TestCase):
                 for amplitude in (-0.75, 2.0):
                     residual.copy_(torch.randn_like(residual) * amplitude)
                     graph.replay()
-                    expected = _old_mixes(residual, fn)
+                    expected = _native_mixes(residual, fn)
                     self._assert_mixes_close(output, expected)
                     self.assertFalse(torch.equal(output, initial))
                     torch.testing.assert_close(
@@ -269,10 +349,8 @@ class V41MHCPreNormCudaTest(unittest.TestCase):
     def test_weight_inplace_update_and_replacement_reach_gemm(self):
         residual, fn, base, scale = self._inputs(6)
         before = prenorm(residual, fn, _EPS)
-        prepared = prepare_tf32_weight(fn)
         fn.mul_(-0.5)
         changed = self._check_mixes_and_coefficients(residual, fn, base, scale)
-        self.assertIsNot(prepare_tf32_weight(fn), prepared)
         self.assertFalse(torch.equal(before, changed))
         replacement = fn.clone().add_(0.001)
         replaced = self._check_mixes_and_coefficients(
@@ -355,21 +433,12 @@ class V41MHCPreNormCudaTest(unittest.TestCase):
                 fn, base, scale = weights
                 for tokens in (1, 6, 24):
                     residual = self._inputs(tokens)[0].reshape(1, tokens, 4, 5120)
-                    old = _old_mixes(residual, fn)
                     actual = prenorm(residual, fn, _EPS)
                     self.assertIsNotNone(actual)
                     # Build the reference independently of the production
-                    # weight-preparation function. Long-K FP32 summation in
-                    # the old kernel has larger cancellation error than DG:
-                    # per-element comparison to that result is not an oracle.
-                    rounded = ((fn.view(torch.int32) + 0x1000) & -8192).view(
-                        torch.float32
-                    )
-                    x64 = residual.reshape(tokens, 20480).double()
-                    oracle = (
-                        (x64 @ rounded.double().T)
-                        * torch.rsqrt(x64.square().mean(-1, keepdim=True) + _EPS)
-                    ).reshape_as(actual)
+                    # weight-preparation function. The host oracle applies
+                    # TMA's RN-even conversion before its FP64 GEMM/RMSNorm.
+                    oracle = _native_mixes_oracle(residual, fn).to(actual.device)
                     self.assertEqual(actual.dtype, torch.float32)
                     self.assertTrue(torch.isfinite(actual).all().item())
                     reference_rms = oracle.square().mean().sqrt().item()
@@ -381,14 +450,11 @@ class V41MHCPreNormCudaTest(unittest.TestCase):
                     self.assertLessEqual(
                         error.abs().max().item(), 1e-7 + 2e-5 * reference_rms
                     )
-                    old_error = actual.double() - old.double()
-                    self.assertLessEqual(
-                        old_error.square().mean().sqrt().item(),
-                        1e-6 + 1e-4 * reference_rms,
-                    )
                     for got, ref in zip(
                         _split_mixes(actual, base.reshape(24), scale.reshape(3)),
-                        _split_mixes(old, base.reshape(24), scale.reshape(3)),
+                        _split_mixes(
+                            oracle.float(), base.reshape(24), scale.reshape(3)
+                        ),
                     ):
                         torch.testing.assert_close(got, ref, rtol=2e-4, atol=1e-5)
 

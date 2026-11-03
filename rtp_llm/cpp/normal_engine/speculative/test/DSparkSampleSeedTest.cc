@@ -78,6 +78,40 @@ TEST(DSparkSampleSeedTest, NegativeSeedsAreAddressable) {
               dsparkUniformAt(seed, kDSparkTargetSeedNamespace, 4));
 }
 
+TEST(DSparkSampleSeedTest, BoundedRejectionReservesAnIndependentResidualDraw) {
+    const uint64_t seed = 20261103;
+    for (int64_t gamma : {1LL, 3LL, 5LL}) {
+        for (int64_t base : {0LL, 1LL, 92871LL}) {
+            for (int64_t slot = 0; slot < gamma; ++slot) {
+                EXPECT_EQ(dsparkRejectionUniformAt(seed, base, slot, gamma),
+                          dsparkUniformAt(seed, kDSparkTargetSeedNamespace, base + slot));
+            }
+            EXPECT_EQ(dsparkRejectionUniformAt(seed, base, gamma, gamma),
+                      dsparkUniformAt(seed, kDSparkResidualSeedNamespace, base));
+        }
+    }
+}
+
+TEST(DSparkSampleSeedTest, ResidualHistoryDoesNotBiasTheNextRoundAcceptance) {
+    // Round one always rejects: q=delta(2), p=(1/2,1/2,0). Its residual
+    // uniform chooses history token 0 or 1. In round two q=delta(2), with
+    // p(2|history=0)=1 and p(2|history=1)=1/2, so correct acceptance is 3/4.
+    // Reusing the residual uniform as the next acceptance uniform gives 1/2.
+    constexpr uint64_t trials   = 65536;
+    constexpr int64_t  base     = 4096;
+    uint64_t           accepted = 0, legacy_accepted = 0;
+    for (uint64_t seed = 0; seed < trials; ++seed) {
+        const float next_accept = dsparkRejectionUniformAt(seed, base + 1, 0, 5);
+        const float residual    = dsparkRejectionUniformAt(seed, base, 5, 5);
+        const float threshold   = residual < 0.5f ? 1.0f : 0.5f;
+        accepted += next_accept < threshold;
+        const float legacy_threshold = next_accept < 0.5f ? 1.0f : 0.5f;
+        legacy_accepted += next_accept < legacy_threshold;
+    }
+    EXPECT_NEAR(static_cast<double>(accepted) / trials, 0.75, 0.01);
+    EXPECT_NEAR(static_cast<double>(legacy_accepted) / trials, 0.50, 0.01);
+}
+
 }  // namespace
 }  // namespace speculative
 }  // namespace rtp_llm
