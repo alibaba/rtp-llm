@@ -54,10 +54,11 @@ def cohort_env(p, instances=2, index=0, timeout=3):
         s.COHORT_ENV: ','.join(f'127.0.0.{i + 1}:{29500 + i}' for i in range(instances)),
         s.INDEX_ENV: str(index),
         s.REVISION_ENV: 'test-revision',
-        s.GENERATION_ENV: str(UUID(int=123)),
         s.COUNT_ENV: str(p),
         s.TIMEOUT_ENV: str(timeout),
         s.CHECKPOINT_ENV: '/tmp/checkpoint',
+        'RTP_ENGRAM_LOCAL_DEVICE': '0',
+        'RTP_ENGRAM_LOCAL_NUMA': '0',
     }
 
 
@@ -198,6 +199,12 @@ class MemoryStore:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0: raise RuntimeError('store timeout')
                 self.condition.wait(remaining)
+    def add(self, key, amount):
+        with self.condition:
+            result = int(self.data.get(key, b'0')) + amount
+            self.data[key] = str(result).encode()
+            self.condition.notify_all()
+            return result
     def delete_key(self, key):
         with self.condition: return self.data.pop(key, None) is not None
 
@@ -206,15 +213,13 @@ class IntraInstanceTest(unittest.TestCase):
     def tearDown(self):
         b.clear_staged_package()
 
-    def _descriptor_env(self, env, docs, directory):
-        root = Path(directory)
-        paths = []
-        for doc in docs:
-            path = root / str(doc['shard'])
-            path.write_bytes(e.encode(doc))
-            path.chmod(0o600)
-            paths.append(str(path))
-        env[s.DESCRIPTORS_ENV] = ','.join(paths)
+    def _mock_publisher(self, env, docs, directory):
+        from rtp_llm.models_py.modules.dsv41 import engram_publish
+        by_index = {d['shard']: d for d in docs}
+        stub = mock.patch.object(engram_publish, 'publish_shard',
+                                 lambda checkpoint, revision, host, generation, shard, count, **kw: by_index[shard])
+        stub.start()
+        self.addCleanup(stub.stop)
         return env
 
     def test_only_rank_zero_exchanges_and_all_ranks_receive_identical_backing(self):
@@ -225,7 +230,7 @@ class IntraInstanceTest(unittest.TestCase):
             calls.append(local)
             return package(cfg['group'], docs)
         with tempfile.TemporaryDirectory() as directory:
-            self._descriptor_env(env, docs[:1], directory)
+            self._mock_publisher(env, docs[:1], directory)
             envs = [dict(env) for _ in range(4)]
             with ThreadPoolExecutor(4) as pool:
                 futures = [pool.submit(s.prepare_static_engram, store, rank=i, world_size=4,
@@ -233,7 +238,7 @@ class IntraInstanceTest(unittest.TestCase):
                 results = [f.result() for f in futures]
             self.assertEqual(len(calls), 1)
             self.assertTrue(all(r is None for r in results))
-            self.assertEqual(store.data, {})
+            self.assertFalse({k: v for k, v in store.data.items() if not k.startswith('engram/start_count/')})
             self.assertTrue(all(item['ENGRAM_SHARD_COUNT'] == '2' for item in envs))
             staged = b.staged_package()
             self.assertIsNotNone(staged)
@@ -247,16 +252,16 @@ class IntraInstanceTest(unittest.TestCase):
         env[s.COUNT_ENV] = '1'
         with self.assertRaisesRegex(ValueError, 'STORAGE_HOST_COUNT'):
             s.prepare_static_engram(store, rank=0, world_size=2, environ=env)
-        self.assertEqual(store.data, {})
+        self.assertFalse({k: v for k, v in store.data.items() if not k.startswith('engram/start_count/')})
 
     def test_inconsistent_worker_group_never_publishes_package(self):
         env = cohort_env(2, timeout=0.2)
         config, docs = derived(env, world_size=2)
         store = MemoryStore()
-        prefix = 'engram/' + config['group']['generation'] + '/i0/'
+        prefix = 'engram/' + config['group']['generation'] + '/attempt/1/i0/'
         store.set(prefix + 'config/1', b'wrong-group')
         with tempfile.TemporaryDirectory() as directory:
-            self._descriptor_env(env, docs[:1], directory)
+            self._mock_publisher(env, docs[:1], directory)
             with self.assertRaisesRegex(e.ExchangeError, 'INSTANCE_GROUP_CONFIG_MISMATCH'):
                 s.prepare_static_engram(store, rank=0, world_size=2, environ=env)
         self.assertNotIn(prefix + 'package', store.data)
@@ -266,6 +271,8 @@ class IntraInstanceTest(unittest.TestCase):
         from unittest.mock import patch
 
         env = cohort_env(2)
+        env.pop('RTP_ENGRAM_LOCAL_DEVICE')
+        env.pop('RTP_ENGRAM_LOCAL_NUMA')
         config, docs = derived(env, world_size=2)
         store = MemoryStore()
         published = []
@@ -296,7 +303,7 @@ class IntraInstanceTest(unittest.TestCase):
         staged = b.staged_package()
         self.assertIsNotNone(staged)
         self.assertEqual(staged['generation'], config['group']['generation'])
-        self.assertEqual(store.data, {})  # descriptors went through Store, not files
+        self.assertFalse({k: v for k, v in store.data.items() if not k.startswith('engram/start_count/')})  # descriptors went through Store, not files
 
     def test_unconfigured_models_do_nothing(self):
         self.assertIsNone(s.prepare_static_engram(None, rank=0, world_size=8, environ={}))
@@ -420,27 +427,11 @@ class DeploymentIdentityTest(unittest.TestCase):
             with self.assertRaisesRegex(e.ExchangeError, 'AMBIGUOUS_LOCAL_ADDRESS'):
                 s.build_group(env, 4)
 
-    def test_generation_defaults_and_duplicate_hosts(self):
+    def test_generation_is_not_a_user_input(self):
         env = cohort_env(2)
-        del env[s.GENERATION_ENV]
-        derived = s.build_group(env, 4)['group']['generation']
-        other = cohort_env(2)
-        del other[s.GENERATION_ENV]
-        self.assertEqual(derived, s.build_group(other, 4)['group']['generation'])
-        self.AssertUuid(derived)
-        # The address list is the topology: a different list derives a different id.
-        other[s.COHORT_ENV] = '127.0.0.1:10001,127.0.0.2:10002'
-        self.assertNotEqual(derived, s.build_group(other, 4)['group']['generation'])
-        # An explicit value still wins, and must be a canonical UUID.
-        self.assertEqual(s.build_group(cohort_env(2), 4)['group']['generation'], str(UUID(int=123)))
-        env = cohort_env(2)
-        env[s.GENERATION_ENV] = 'not-a-uuid'
-        with self.assertRaisesRegex(e.ExchangeError, 'INVALID_GENERATION'):
-            s.build_group(env, 4)
-        env = cohort_env(2)
-        first = s.build_group(env, 4)['group']
-        env[s.GENERATION_ENV] = str(UUID(int=456))
-        self.assertNotEqual(e.validate_group(first), e.validate_group(s.build_group(env, 4)['group']))
+        expected = s.build_group(env, 4)['group']
+        env['RTP_ENGRAM_GENERATION'] = 'ignored-legacy-setting'
+        self.assertEqual(s.build_group(env, 4)['group'], expected)
         env[s.COHORT_ENV] = '127.0.0.1:10001,127.0.0.1:10002'
         with self.assertRaisesRegex(e.ExchangeError, 'DISTINCT_STORAGE_HOST'):
             s.build_group(env, 4)
@@ -460,89 +451,70 @@ class DeploymentIdentityTest(unittest.TestCase):
 
 
 class TopologySourceTest(unittest.TestCase):
-    """The address list can come from the gang, the platform directory or env."""
+    def test_reuse_gang_topology_without_store_or_hostname_lookup(self):
+        env = {s.COUNT_ENV: '2', s.REVISION_ENV: 'rev', s.CHECKPOINT_ENV: '/model'}
+        with mock.patch.object(s, '_local_addresses', side_effect=AssertionError('must reuse RTP IP')):
+            cfg = s.build_group(env, 4, rank=2,
+                                gang_hosts=['10.0.0.1'] * 2 + ['10.0.0.2'] * 2)
+        self.assertEqual(cfg['index'], 1)
+        self.assertEqual(cfg['rank_base'], 2)
+        self.assertTrue(cfg['single_gang'])
+        self.assertEqual([m['world_size'] for m in cfg['group']['members']], [2, 2])
 
-    def test_one_gang_derives_its_own_parts(self):
-        store = MemoryStore()
-        for rank, host in enumerate(['10.0.0.1', '10.0.0.1', '10.0.0.2', '10.0.0.2']):
-            store.set(s.TOPOLOGY_PREFIX + 'host/' + str(rank), host.encode())
-        with mock.patch.object(s, '_local_addresses', lambda: {'10.0.0.1'}):
-            members, per_instance = s._gang_cohort({s.COUNT_ENV: '2'}, store, 0, 4)
-        self.assertEqual(members, [('10.0.0.1', s.DEFAULT_COHORT_PORT),
-                                   ('10.0.0.2', s.DEFAULT_COHORT_PORT)])
-        self.assertEqual(per_instance, 2)
-        self.assertEqual(store.get(s.TOPOLOGY_PREFIX + 'host/3'), b'10.0.0.2')
+    def test_explicit_list_does_not_hide_multihost_gang(self):
+        env = cohort_env(4, instances=4, index=3)
+        # Second of two independent 2-host instances: local ranks start at zero.
+        cfg = s.build_group(env, 8, rank=5, gang_hosts=['127.0.0.3'] * 4 + ['127.0.0.4'] * 4)
+        self.assertEqual(cfg['rank_base'], 4)
+        self.assertEqual(cfg['group']['members'][3]['world_size'], 4)
+        self.assertFalse(cfg['single_gang'])
+        env[s.INDEX_ENV] = '2'
+        with self.assertRaisesRegex(e.ExchangeError, 'INDEX_HOST_MISMATCH'):
+            s.build_group(env, 8, rank=5, gang_hosts=['127.0.0.3'] * 4 + ['127.0.0.4'] * 4)
 
-    def test_a_part_is_a_run_of_consecutive_ranks(self):
-        # Two ranks per part, four parts: no count beyond N is needed.
-        store = MemoryStore()
-        hosts = ['10.0.0.1', '10.0.0.1', '10.0.0.2', '10.0.0.2',
-                 '10.0.0.3', '10.0.0.3', '10.0.0.4', '10.0.0.4']
-        for rank, host in enumerate(hosts):
-            store.set(s.TOPOLOGY_PREFIX + 'host/' + str(rank), host.encode())
-        with mock.patch.object(s, '_local_addresses', lambda: {'10.0.0.1'}):
-            members, per_instance = s._gang_cohort({s.COUNT_ENV: '4'}, store, 0, 8)
-        self.assertEqual([host for host, _ in members],
-                         ['10.0.0.1', '10.0.0.2', '10.0.0.3', '10.0.0.4'])
-        self.assertEqual(per_instance, 2)
+    def test_invalid_rank_layouts_fail_before_allocation(self):
+        for hosts, error in [(['a', 'a', 'b'], 'UNEVEN'),
+                             (['a', 'b', 'a', 'b'], 'NONCONTIGUOUS')]:
+            with self.assertRaisesRegex(e.ExchangeError, error):
+                s._gang_parts(hosts, len(hosts))
+        with self.assertRaisesRegex(e.ExchangeError, 'INVALID_GANG'):
+            s._gang_parts(['a'], 4)
+        env = cohort_env(2)
+        env[s.RANKS_ENV] = '4'
+        with self.assertRaisesRegex(e.ExchangeError, 'RANKS_PER_INSTANCE_MISMATCH'):
+            s.build_group(env, 4, gang_hosts=['127.0.0.1'] * 2 + ['127.0.0.2'] * 2)
 
-    def test_ranks_inside_one_part_must_agree(self):
-        store = MemoryStore()
-        for rank, host in enumerate(['10.0.0.1', '10.0.0.1', '10.0.0.2', '10.0.0.2']):
-            store.set(s.TOPOLOGY_PREFIX + 'host/' + str(rank), host.encode())
-        with mock.patch.object(s, '_local_addresses', lambda: {'10.0.0.7'}):
-            # The local rank publishes itself into its own block and breaks it.
-            with self.assertRaisesRegex(e.ExchangeError, 'UNEVEN_PART_SIZE'):
-                s._gang_cohort({s.COUNT_ENV: '2'}, store, 1, 4)
-
-    def test_the_declared_count_must_match_the_gang(self):
-        store = MemoryStore()
-        for rank, host in enumerate(['10.0.0.1', '10.0.0.1', '10.0.0.2', '10.0.0.2']):
-            store.set(s.TOPOLOGY_PREFIX + 'host/' + str(rank), host.encode())
-        with mock.patch.object(s, '_local_addresses', lambda: {'10.0.0.1'}):
-            with self.assertRaisesRegex(e.ExchangeError, 'MUST_MATCH_COHORT'):
-                s._gang_cohort({s.COUNT_ENV: '3'}, store, 0, 4)
-            with self.assertRaisesRegex(e.ExchangeError, 'RANKS_PER_INSTANCE_MISMATCH'):
-                s._gang_cohort({s.RANKS_ENV: '4'}, store, 0, 4)
-
-    def test_a_single_host_gang_asks_for_the_list(self):
-        # Prefill is one gang per host: its four ranks cannot see the other hosts.
-        store = MemoryStore()
-        for rank in range(4):
-            store.set(s.TOPOLOGY_PREFIX + 'host/' + str(rank), b'10.0.0.1')
-        with mock.patch.object(s, '_local_addresses', lambda: {'10.0.0.1'}):
-            with self.assertRaisesRegex(e.ExchangeError, 'COHORT_REQUIRED'):
-                s._gang_cohort({s.RANKS_ENV: '4'}, store, 0, 4)
-        self.assertEqual(s._gang_cohort({}, MemoryStore(), 0, 16), (None, None))
-        with self.assertRaisesRegex(e.ExchangeError, 'INSTANCE_STORE_REQUIRED'):
-            s._gang_cohort({s.COUNT_ENV: '4'}, None, 0, 16)
-
-    def test_platform_directory_supplies_the_list(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            (root / 'hosts').write_text('# deployment topology\n10.0.0.1\n\n10.0.0.2\n')
-            self.assertEqual(s._ganginfo_cohort({s.GANGINFO_ENV: directory}),
-                             [('10.0.0.1', s.DEFAULT_COHORT_PORT),
-                              ('10.0.0.2', s.DEFAULT_COHORT_PORT)])
-            (root / 'hosts').unlink()
-            (root / 'part-1').write_text('10.0.0.4\n')
-            (root / 'part-0').write_text('10.0.0.3\n')
-            (root / 'unrelated').write_text('ignored\n')
-            self.assertEqual([host for host, _ in s._ganginfo_cohort({s.GANGINFO_ENV: directory})],
-                             ['10.0.0.3', '10.0.0.4'])
-            (root / 'part-1').write_text('10.0.0.4:29500\n')
-            self.assertEqual(s._ganginfo_cohort({s.GANGINFO_ENV: directory})[1], ('10.0.0.4', 29500))
-            self.assertIsNone(s._ganginfo_cohort({s.GANGINFO_ENV: '/nonexistent/ganginfo'}))
-
-    def test_explicit_environment_wins_over_the_directory(self):
+    def test_platform_directory_is_topology_not_an_enable_switch(self):
         with tempfile.TemporaryDirectory() as directory:
             (Path(directory) / 'hosts').write_text('10.0.0.1\n10.0.0.2\n')
-            env = cohort_env(2)
+            env = {s.GANGINFO_ENV: directory}
+            self.assertIsNone(s.build_group(env, 4))
+            env.update({s.COUNT_ENV: '2', s.INDEX_ENV: '0', s.REVISION_ENV: 'rev',
+                        s.CHECKPOINT_ENV: '/model'})
+            cfg = s.build_group(env, 4, gang_hosts=['10.0.0.1'] * 2 + ['10.0.0.2'] * 2)
+            self.assertTrue(cfg['single_gang'])
             env[s.COHORT_ENV] = '127.0.0.1,127.0.0.2'
-            env[s.GANGINFO_ENV] = directory
-            group = s.build_group(env, 4)['group']
-            self.assertEqual([m['shards'][0]['host_id'] for m in group['members']],
-                             ['127.0.0.1', '127.0.0.2'])
+            cfg = s.build_group(env, 4)
+            self.assertEqual(cfg['coordinator']['host'], '127.0.0.1')
+        with self.assertRaisesRegex(e.ExchangeError, 'INVALID_GANGINFO'):
+            s._ganginfo_cohort({s.GANGINFO_ENV: '/nonexistent/ganginfo'})
+        self.assertIsNone(s._ganginfo_cohort({}))
+
+    def test_single_gang_needs_no_tls_files_and_legacy_descriptor_mode_is_removed(self):
+        env = cohort_env(2)
+        env[s.TLS_DIR_ENV] = '/not-present/pki'
+        hosts = ['127.0.0.1', '127.0.0.2']
+        self.assertIsNone(s.build_config(env, 2, gang_hosts=hosts)['tls'])
+        env['RTP_ENGRAM_LOCAL_DESCRIPTORS'] = '/obsolete/shard.json'
+        with self.assertRaisesRegex(e.ExchangeError, 'REMOVED_LOCAL_DESCRIPTOR'):
+            s.build_config(env, 2, gang_hosts=hosts)
+
+    def test_missing_framework_topology_does_not_guess(self):
+        env = {s.COUNT_ENV: '2'}
+        with self.assertRaisesRegex(e.ExchangeError, 'GANG_TOPOLOGY_REQUIRED'):
+            s.build_group(env, 4)
+        with self.assertRaisesRegex(e.ExchangeError, 'COHORT_REQUIRED'):
+            s.build_group(env, 4, gang_hosts=['a'] * 4)
 
 
 class RevisionTest(unittest.TestCase):
@@ -570,6 +542,90 @@ class RevisionTest(unittest.TestCase):
             empty.mkdir()
             with self.assertRaisesRegex(e.ExchangeError, 'MODEL_REVISION_REQUIRED'):
                 s.build_group(dict(env, **{s.CHECKPOINT_ENV: str(empty)}), 4)
+
+
+class StartupScopeTest(unittest.TestCase):
+    def tearDown(self):
+        b.clear_staged_package()
+
+    def test_single_gang_uses_store_only_and_does_not_read_stale_package(self):
+        from rtp_llm.models_py.modules.dsv41 import engram_publish
+        hosts = ['127.0.0.1'] * 2 + ['127.0.0.2'] * 2
+        env = cohort_env(2)
+        env.pop(s.COHORT_ENV)
+        env.pop(s.INDEX_ENV)
+        config = s.build_group(env, 4, gang_hosts=hosts)
+        _, docs = derived(cohort_env(2), world_size=2)
+        for d in docs:
+            d['generation'] = config['group']['generation']
+        store = MemoryStore()
+        for rank in range(4):
+            store.add(f'engram/start_count/{rank}', 1)
+        old = f'engram/{config["group"]["generation"]}/attempt/1/gang/package'
+        store.set(old, b'old invalid capability package')
+        published = []
+        def publish(checkpoint, revision, host_id, generation, shard, shards, **kw):
+            published.append(shard)
+            return docs[shard]
+        def no_rpc(*a):
+            raise AssertionError('one gang must not open a new connection')
+        with mock.patch.object(engram_publish, 'publish_shard', publish), \
+                mock.patch.object(s, 'checkpoint_samples', samples):
+            # Default argument binds checkpoint_samples at definition time.
+            original = s.assemble_package
+            with mock.patch.object(s, 'assemble_package',
+                                   lambda g, d, c: original(g, d, c, samples=samples)):
+                with ThreadPoolExecutor(4) as pool:
+                    jobs = [pool.submit(s.prepare_static_engram, store, rank=r, world_size=4,
+                                        environ=dict(env), gang_hosts=hosts,
+                                        leader_exchange=no_rpc) for r in range(4)]
+                    [job.result() for job in jobs]
+        self.assertEqual(sorted(published), [0, 1])
+        self.assertIsNotNone(b.staged_package())
+        self.assertEqual(store.get(old), b'old invalid capability package')
+        self.assertFalse(any('/attempt/2/' in k for k in store.data))
+        self.assertTrue(all(store.get(f'engram/start_count/{r}') == b'2' for r in range(4)))
+
+    def test_partial_restart_cannot_read_previous_attempt(self):
+        env = cohort_env(2, timeout=0.04)
+        cfg = s.build_group(env, 2)
+        store = MemoryStore()
+        store.add('engram/start_count/1', 1)
+        old = f'engram/{cfg["group"]["generation"]}/attempt/1/i0/package'
+        store.set(old, b'stale')
+        with self.assertRaisesRegex(e.ExchangeError, 'TIMEOUT'):
+            s.prepare_static_engram(store, rank=1, world_size=2, environ=env)
+        self.assertIsNone(b.staged_package())
+
+    def test_two_multihost_instances_each_publish_their_local_shards(self):
+        from rtp_llm.models_py.modules.dsv41 import engram_publish
+        base = cohort_env(4, instances=4)
+        base.pop(s.INDEX_ENV)
+        group = s.build_group(base, 4, gang_hosts=['127.0.0.1'] * 2 + ['127.0.0.2'] * 2)['group']
+        _, docs = derived(cohort_env(4, instances=4), world_size=2)
+        cohort = e.Cohort(group, lambda d: package(group, d), 3)
+        stores = [MemoryStore(), MemoryStore()]
+        published, calls = [], []
+        def publish(checkpoint, revision, host_id, generation, shard, shards, **kw):
+            self.assertEqual(host_id, docs[shard]['host_id'])
+            self.assertEqual(generation, docs[shard]['generation'])
+            published.append(shard)
+            return docs[shard]
+        def exchange(cfg, local, deadline):
+            calls.append(cfg['instance_id'])
+            return e.decode(cohort.submit(cfg['instance_id'], e.validate_group(cfg['group']), local))['package']
+        with mock.patch.object(engram_publish, 'publish_shard', publish):
+            with ThreadPoolExecutor(8) as pool:
+                jobs = []
+                for gang in range(2):
+                    hosts = [f'127.0.0.{2*gang+1}'] * 2 + [f'127.0.0.{2*gang+2}'] * 2
+                    for rank in range(4):
+                        jobs.append(pool.submit(s.prepare_static_engram, stores[gang], rank=rank,
+                                    world_size=4, environ=dict(base), gang_hosts=hosts,
+                                    leader_exchange=exchange))
+                [job.result() for job in jobs]
+        self.assertEqual(sorted(published), list(range(4)))
+        self.assertEqual(sorted(calls), ['i0', 'i1', 'i2', 'i3'])
 
 
 if __name__ == '__main__': unittest.main(verbosity=2)

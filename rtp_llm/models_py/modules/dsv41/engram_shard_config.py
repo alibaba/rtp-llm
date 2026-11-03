@@ -2,7 +2,7 @@
 """Distributed storage P is independent of model instances and TP/DP/EP.
 
 No role election, endpoints, sidecar or implicit single-owner deployment.
-Startup exchange (or an explicit offline launcher) delivers one immutable bundle.
+Startup exchange delivers one immutable in-memory package.
 """
 from __future__ import annotations
 
@@ -11,6 +11,11 @@ from dataclasses import dataclass
 
 ENV_COUNT = "ENGRAM_SHARD_COUNT"
 MAX_SHARDS = 64  # manifest ABI limit, not an NVL rack size
+
+
+def shared_storage_requested(environ):
+    """Only explicit sharing inputs enable distributed Engram."""
+    return ENV_COUNT in environ or "RTP_ENGRAM_COHORT" in environ
 
 
 class ShardConfigError(ValueError):

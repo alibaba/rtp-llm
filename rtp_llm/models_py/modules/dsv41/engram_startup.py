@@ -18,7 +18,7 @@ import socket
 import ssl
 import threading
 import time
-from uuid import NAMESPACE_URL, UUID, uuid5
+from uuid import NAMESPACE_URL, uuid5
 from datetime import timedelta
 
 from .engram_exchange import (Cohort, ExchangeError, ExchangeServer, decode, digest, encode,
@@ -26,27 +26,21 @@ from .engram_exchange import (Cohort, ExchangeError, ExchangeServer, decode, dig
 from .engram_bootstrap import _json, _private_read, stage_package
 from .engram_descriptors import build_manifest
 from .engram_manifest import parse_manifest
-from .engram_shard_config import validate_count
+from .engram_shard_config import shared_storage_requested, validate_count
 
 COHORT_ENV = 'RTP_ENGRAM_COHORT'
 INDEX_ENV = 'RTP_ENGRAM_INSTANCE_INDEX'
 REVISION_ENV = 'RTP_ENGRAM_MODEL_REVISION'
-DESCRIPTORS_ENV = 'RTP_ENGRAM_LOCAL_DESCRIPTORS'
 TIMEOUT_ENV = 'RTP_ENGRAM_COHORT_TIMEOUT'
 TLS_DIR_ENV = 'RTP_ENGRAM_TLS_DIR'
 CHECKPOINT_ENV = 'RTP_ENGRAM_CHECKPOINT'
 COUNT_ENV = 'ENGRAM_SHARD_COUNT'
 RANKS_ENV = 'RTP_ENGRAM_RANKS_PER_INSTANCE'
-GENERATION_ENV = 'RTP_ENGRAM_GENERATION'
 PORT_ENV = 'RTP_ENGRAM_COHORT_PORT'
 GANGINFO_ENV = 'RTP_ENGRAM_GANGINFO_DIR'
 # Only the first member listens, only during startup; everything else is outbound.
 DEFAULT_COHORT_PORT = 29483
 DEFAULT_TIMEOUT = 1800
-# Where the platform drops the topology, and the Store prefix used to derive it
-# from a gang that already spans the hosts.
-GANGINFO_DIR = '/etc/ganginfo'
-TOPOLOGY_PREFIX = 'engram/topology/'
 
 
 def checkpoint_samples(checkpoint, manifest):
@@ -176,8 +170,8 @@ def _parse_members(raw, default_port):
         item = item.strip()
         if not item:
             continue
-        # A bare host takes the shared cohort port; "host:port" still works for
-        # a deployment that has to spread the exchange servers over ports.
+        # Only the first address listens. Its explicit port overrides the
+        # shared port; non-coordinator ports never affect the group identity.
         host, _, port = item.rpartition(':')
         if not host:
             host, port = item, ''
@@ -228,9 +222,12 @@ def _ganginfo_entries(root):
 
 
 def _ganginfo_cohort(env):
-    root = Path(env.get(GANGINFO_ENV) or GANGINFO_DIR)
-    if not root.is_dir():
+    directory = env.get(GANGINFO_ENV)
+    if directory is None:
         return None
+    root = Path(directory)
+    if not root.is_dir():
+        raise ExchangeError('INVALID_GANGINFO')
     try:
         raw = _ganginfo_entries(root)
     except OSError as error:
@@ -238,55 +235,27 @@ def _ganginfo_cohort(env):
         # misconfiguration; silently serving with Engram off would hide it.
         raise ExchangeError('INVALID_GANGINFO') from error
     if raw is None:
-        return None
+        raise ExchangeError('EMPTY_GANGINFO')
     return _parse_members(raw, env.get(PORT_ENV))
 
 
-def _gang_cohort(env, store, rank, world_size):
-    """One gang spanning several hosts already knows its own parts.
-
-    Consecutive ranks on the same address form one part, so both the number of
-    parts and the ranks each member owns fall out of the gang itself. Only used
-    when the deployment asked for Engram without giving an address list: a
-    single-host gang (prefill's independent instances) still needs that list,
-    because it cannot see the other hosts.
-    """
-    raw_count = env.get(COUNT_ENV)
-    raw_ranks = env.get(RANKS_ENV)
-    if raw_count is None and raw_ranks is None:
+def _gang_parts(gang_hosts, world_size):
+    """Use the completed DistributedServer topology, never rediscover NICs."""
+    if gang_hosts is None:
         return None, None
-    if store is None:
-        raise ExchangeError('INSTANCE_STORE_REQUIRED')
-    timeout = DEFAULT_TIMEOUT if env.get(TIMEOUT_ENV) is None else float(env[TIMEOUT_ENV])
-    if not 0 < timeout <= 86400:
-        raise ExchangeError('INVALID_TIMEOUT')
-    local = sorted(address for address in _local_addresses() if not address.startswith('127.'))
-    if not local:
-        raise ExchangeError('INSTANCE_INDEX_REQUIRED')
-    key = TOPOLOGY_PREFIX + 'host/'
-    store.set(key + str(rank), ','.join(local).encode())
-    keys = [key + str(i) for i in range(world_size)]
-    _wait(store, keys, time.monotonic() + timeout)
+    if len(gang_hosts) != world_size or any(type(h) is not str or not h for h in gang_hosts):
+        raise ExchangeError('INVALID_GANG_TOPOLOGY')
     blocks = []
-    for i in range(world_size):
-        address = store.get(key + str(i)).decode()
-        if blocks and blocks[-1][0] == address:
+    for host in gang_hosts:
+        if blocks and blocks[-1][0] == host:
             blocks[-1][1] += 1
         else:
-            blocks.append([address, 1])
-    if len(blocks) < 2:
-        # One address for the whole gang: the other parts are other gangs.
-        raise ExchangeError('COHORT_REQUIRED')
-    sizes = {size for _, size in blocks}
-    if len(sizes) != 1:
+            blocks.append([host, 1])
+    if len({host for host, _ in blocks}) != len(blocks):
+        raise ExchangeError('NONCONTIGUOUS_GANG_HOST')
+    if len({size for _, size in blocks}) != 1:
         raise ExchangeError('UNEVEN_PART_SIZE')
-    per_instance = sizes.pop()
-    if raw_ranks is not None and (not raw_ranks.isdigit() or int(raw_ranks) != per_instance):
-        raise ExchangeError('RANKS_PER_INSTANCE_MISMATCH')
-    if raw_count is not None and (not raw_count.isdigit() or int(raw_count) != len(blocks)):
-        raise ExchangeError('STORAGE_HOST_COUNT_MUST_MATCH_COHORT')
-    hosts = [sorted(address.split(','))[0] for address, _ in blocks]
-    return _parse_members(','.join(hosts), env.get(PORT_ENV)), per_instance
+    return [host for host, _ in blocks], blocks[0][1]
 
 
 def _local_addresses():
@@ -301,10 +270,10 @@ def _local_addresses():
 
 
 def _checkpoint_revision(checkpoint):
-    """Identity of the weights this host serves, read from the checkpoint itself.
+    """Checkpoint metadata namespace, NOT a weight-content checksum.
 
-    Every member has the same checkpoint, so hashing its index gives the whole
-    cohort the same namespace without anyone having to name a revision.
+    Equal indices do not prove equal tensor bytes. Publication hashes and GPU
+    sample validation remain separate; deployments must use one immutable model.
     """
     root = Path(checkpoint)
     for name in ('model.safetensors.index.json', 'config.json'):
@@ -314,15 +283,17 @@ def _checkpoint_revision(checkpoint):
     raise ExchangeError('MODEL_REVISION_REQUIRED')
 
 
-def _instance_index(env, cohort):
+def _instance_index(env, cohort, local_host=None):
     raw = env.get(INDEX_ENV)
     if raw is not None:
         if not raw.isdigit() or not 0 <= int(raw) < len(cohort):
             raise ExchangeError('INVALID_INSTANCE_INDEX')
+        if local_host is not None and cohort[int(raw)][0] != local_host:
+            raise ExchangeError('INSTANCE_INDEX_HOST_MISMATCH')
         return int(raw)
     # The platform only has to hand over the address list: a host that appears
     # in it exactly once knows which shard it is.
-    local = _local_addresses()
+    local = {local_host} if local_host is not None else _local_addresses()
     matches = [i for i, (host, _) in enumerate(cohort) if host in local]
     if not matches:
         raise ExchangeError('INSTANCE_INDEX_REQUIRED')
@@ -338,20 +309,6 @@ def _placement(env, name):
     if not raw.isdigit() or int(raw) > 4096:
         raise ExchangeError('INVALID_LOCAL_PLACEMENT')
     return int(raw)
-
-
-def _descriptors(env, count):
-    """Descriptors may come from files (harness) or be published in-process."""
-    raw = env.get(DESCRIPTORS_ENV)
-    if raw is None:
-        return None
-    paths = [item.strip() for item in raw.split(',') if item.strip()]
-    if len(paths) != count:
-        raise ExchangeError('LOCAL_DESCRIPTOR_COUNT_MISMATCH')
-    for path in paths:
-        if not Path(path).is_absolute():
-            raise ExchangeError('DESCRIPTOR_PATH_MUST_BE_ABSOLUTE')
-    return paths
 
 
 def _tls(env, index, instances):
@@ -375,20 +332,29 @@ def _tls(env, index, instances):
                 instance_cert_sha256=fingerprints)
 
 
-def build_group(env, world_size, store=None, rank=0):
-    """Derive cohort membership and shard ownership from the environment only.
+def build_group(env, world_size, *, rank=0, gang_hosts=None):
+    """Derive membership from explicit sharing inputs and the completed gang.
 
     The address list may come from the environment, from the topology directory
     the platform writes, or from the gang itself when one gang spans the hosts.
     """
+    # Ordinary deployments must not opt in merely because /etc/ganginfo exists.
+    if not shared_storage_requested(env):
+        return None
+    if type(world_size) is not int or world_size <= 0 or not 0 <= rank < world_size:
+        raise ExchangeError('INVALID_WORLD_SIZE')
+    parts, discovered = _gang_parts(gang_hosts, world_size)
     cohort = _cohort(env)
     if cohort is None:
         cohort = _ganginfo_cohort(env)
-    discovered = None
     if cohort is None:
-        cohort, discovered = _gang_cohort(env, store, rank, world_size)
-    if cohort is None:
-        return None
+        if parts is None:
+            raise ExchangeError('GANG_TOPOLOGY_REQUIRED')
+        if len(parts) < 2:
+            raise ExchangeError('COHORT_REQUIRED')
+        cohort = _parse_members(','.join(parts), env.get(PORT_ENV))
+    if parts is not None and not set(parts) <= {host for host, _ in cohort}:
+        raise ExchangeError('GANG_HOST_NOT_IN_COHORT')
     instances = len(cohort)
     # One shard per storage host: the cohort list is the topology, so the count
     # is only needed as a cross-check when a launcher still sets it.
@@ -405,36 +371,21 @@ def build_group(env, world_size, store=None, rank=0):
     if not checkpoint:
         raise ExchangeError('CHECKPOINT_REQUIRED')
     revision = env.get(REVISION_ENV) or _checkpoint_revision(checkpoint)
-    index = _instance_index(env, cohort)
+    index = _instance_index(env, cohort, gang_hosts[rank] if gang_hosts is not None else None)
     raw_ranks = env.get(RANKS_ENV)
     if raw_ranks is not None and (not raw_ranks.isdigit() or int(raw_ranks) <= 0):
         raise ExchangeError('INVALID_RANKS_PER_INSTANCE')
-    # Namespace for this cohort's store keys. Derived from the deployment
-    # identity by default, so the platform only has to supply the address list;
-    # an explicit UUID can be passed to distinguish restarts in diagnostics.
-    # Partial restarts are unsupported either way: a member that comes back
-    # alone would read handles published by an allocation that no longer exists.
-    generation = env.get(GENERATION_ENV)
-    if generation is None:
-        generation = str(uuid5(NAMESPACE_URL, 'engram|' + revision + '|' +
-                               ','.join(f'{host}:{port}' for host, port in cohort) + '|' + str(p)))
-    else:
-        try:
-            if str(UUID(generation)) != generation:
-                raise ValueError()
-        except (ValueError, TypeError, AttributeError):
-            raise ExchangeError('INVALID_GENERATION') from None
-    # A cohort member is either a whole gang on its own host (prefill) or one
-    # host of a gang shared by every member (decode). A list the platform gave
-    # us describes prefill, so the member owns the whole gang; a gang that
-    # reported its own split tells us how many ranks each member owns.
+    # Internal topology namespace, NOT a deployment input or restart token.
+    # Store attempt counters below isolate repeated/partial startup attempts.
+    generation = str(uuid5(NAMESPACE_URL, 'engram|' + revision + '|' +
+                           ','.join(host for host, _ in cohort) + '|' + str(cohort[0][1]) + '|' + str(p)))
     if raw_ranks is not None and discovered is not None and int(raw_ranks) != discovered:
         raise ExchangeError('RANKS_PER_INSTANCE_MISMATCH')
     if raw_ranks is not None:
         local_world_size = int(raw_ranks)
     else:
         local_world_size = world_size if discovered is None else discovered
-    if local_world_size != world_size and local_world_size * instances != world_size:
+    if world_size % local_world_size or instances % (world_size // local_world_size):
         raise ExchangeError('WORLD_SIZE_NOT_DIVISIBLE_BY_INSTANCES')
     members = [dict(instance_id=f'i{i}', world_size=local_world_size,
                     shards=[dict(index=i, host_id=host, publisher_rank=0)])
@@ -453,17 +404,21 @@ def build_group(env, world_size, store=None, rank=0):
         checkpoint=checkpoint,
         coordinator=dict(host=cohort[0][0], port=cohort[0][1]),
         timeout_seconds=timeout,
-        local_shards=local['shards'],
+        rank_base=(rank // local_world_size) * local_world_size if parts is not None
+                  else (index % (world_size // local_world_size)) * local_world_size,
+        single_gang=parts is not None and len(parts) == instances,
     )
 
 
-def build_config(env, world_size, store=None, rank=0):
-    """Add the local-only inputs (descriptor paths, optional mTLS material)."""
-    config = build_group(env, world_size, store, rank)
+def build_config(env, world_size, *, rank=0, gang_hosts=None):
+    """Add local allocation policy and optional mTLS material."""
+    config = build_group(env, world_size, rank=rank, gang_hosts=gang_hosts)
     if config is None:
         return None
-    config['tls'] = _tls(env, config['index'], len(config['group']['members']))
-    config['local_descriptors'] = _descriptors(env, len(config['local_shards']))
+    if 'RTP_ENGRAM_LOCAL_DESCRIPTORS' in env:
+        raise ExchangeError('REMOVED_LOCAL_DESCRIPTOR_MODE')
+    config['tls'] = None if config['single_gang'] else _tls(
+        env, config['index'], len(config['group']['members']))
     config['local_device'] = _placement(env, 'RTP_ENGRAM_LOCAL_DEVICE')
     config['local_numa'] = _placement(env, 'RTP_ENGRAM_LOCAL_NUMA')
     config['release_page_cache'] = env.get('RTP_ENGRAM_RELEASE_INPUT_PAGE_CACHE') == '1'
@@ -511,10 +466,10 @@ def exchange_leaders(config, documents, deadline, build=None):
         thread.join(timeout=5)
 
 
-def prepare_static_engram(store, *, rank, world_size, environ=None, leader_exchange=exchange_leaders):
-    """All ranks enter once. Only the member-local rank 0 opens cross-instance connections."""
+def prepare_static_engram(store, *, rank, world_size, environ=None, gang_hosts=None, leader_exchange=exchange_leaders):
+    """All ranks enter once; only host representatives use cross-gang RPC."""
     env = os.environ if environ is None else environ
-    config = build_config(env, world_size, store, rank)
+    config = build_config(env, world_size, rank=rank, gang_hosts=gang_hosts)
     if config is None:
         return None
     group = config['group']
@@ -522,13 +477,7 @@ def prepare_static_engram(store, *, rank, world_size, environ=None, leader_excha
     members = {m['instance_id']: m for m in group['members']}
     member = members[config['instance_id']]
     local_world_size = member['world_size']
-    if local_world_size == world_size:
-        # Whole gang per member: ranks are already member-local.
-        local_rank = rank
-    elif local_world_size * len(group['members']) == world_size:
-        local_rank = rank - config['index'] * local_world_size
-    else:
-        raise ExchangeError('INSTANCE_WORLD_SIZE_MISMATCH')
+    local_rank = rank - config['rank_base']
     if not 0 <= local_rank < local_world_size:
         raise ExchangeError('INSTANCE_WORLD_SIZE_MISMATCH')
     p = sum(len(m['shards']) for m in group['members'])
@@ -539,57 +488,57 @@ def prepare_static_engram(store, *, rank, world_size, environ=None, leader_excha
             raise ExchangeError('INSTANCE_STORE_REQUIRED')
         from torch.distributed import HashStore
         store = HashStore()
-    prefix = 'engram/' + group['generation'] + '/' + config['instance_id'] + '/'
-    # Each worker must agree on the public contract, even if its config differs.
-    store.set(prefix + f'config/{local_rank}', group_digest.encode())
-    if local_rank == 0:
-        config_keys = [prefix + f'config/{i}' for i in range(local_world_size)]
+    # One monotonically increasing counter per rank, retained in the gang Store.
+    # A restarted rank advances to a fresh namespace and cannot read old packages.
+    # Partial restart fails boundedly; recovery recreates the whole gang/Store.
+    attempt = store.add(f'engram/start_count/{rank}', 1)
+    shared = config['single_gang']
+    receiver_rank = rank if shared else local_rank
+    receivers = world_size if shared else local_world_size
+    leader = receiver_rank == 0
+    scope = 'gang' if shared else config['instance_id']
+    prefix = f'engram/{group["generation"]}/attempt/{attempt}/{scope}/'
+    store.set(prefix + f'config/{receiver_rank}', group_digest.encode())
+    config_keys = [prefix + f'config/{i}' for i in range(receivers)]
+    if leader:
         _wait(store, config_keys, deadline)
         if any(store.get(k) != group_digest.encode() for k in config_keys):
             raise ExchangeError('INSTANCE_GROUP_CONFIG_MISMATCH')
-    descriptors = config['local_descriptors']
-    for offset, shard in enumerate(member['shards']):
+    for shard in member['shards']:
         if shard['publisher_rank'] != local_rank:
             continue
-        if descriptors is None:
-            # This member owns the shard: allocate it here and describe it.
-            from rtp_llm.models_py.modules.dsv41.engram_publish import publish_shard
-            if env.get('RTP_ENGRAM_LOCAL_DEVICE') is None or env.get('RTP_ENGRAM_LOCAL_NUMA') is None:
-                logging.getLogger(__name__).warning(
-                    'RTP_ENGRAM_LOCAL_DEVICE/RTP_ENGRAM_LOCAL_NUMA unset; the self-published'
-                    ' shard allocates on device %d / NUMA %d by default',
-                    config['local_device'], config['local_numa'])
-            document = publish_shard(
-                config['checkpoint'], group['model_revision'], shard['host_id'],
-                group['generation'], shard['index'], p,
-                device=config['local_device'], numa=config['local_numa'],
-                release_input_page_cache=config['release_page_cache'], deadline=deadline,
-                max_allocation_bytes=config['max_allocation_bytes'], budget_bytes=config['budget_bytes'])
-            payload = encode(document)
-        else:
-            descriptor = Path(descriptors[offset])
-            while not descriptor.exists():
-                if time.monotonic() >= deadline:
-                    raise ExchangeError('LOCAL_SHARD_NOT_READY')
-                time.sleep(0.05)
-            payload = _private_read(descriptor, 1 << 20)
-        store.set(prefix + f'shard/{shard["index"]}', payload)
-    if local_rank == 0:
-        keys = [prefix + f'shard/{s["index"]}' for s in member['shards']]
+        from rtp_llm.models_py.modules.dsv41.engram_publish import publish_shard
+        if env.get('RTP_ENGRAM_LOCAL_DEVICE') is None or env.get('RTP_ENGRAM_LOCAL_NUMA') is None:
+            logging.getLogger(__name__).warning(
+                'RTP_ENGRAM_LOCAL_DEVICE/RTP_ENGRAM_LOCAL_NUMA unset; the self-published'
+                ' shard allocates on device %d / NUMA %d by default',
+                config['local_device'], config['local_numa'])
+        document = publish_shard(
+            config['checkpoint'], group['model_revision'], shard['host_id'],
+            group['generation'], shard['index'], p,
+            device=config['local_device'], numa=config['local_numa'],
+            release_input_page_cache=config['release_page_cache'], deadline=deadline,
+            max_allocation_bytes=config['max_allocation_bytes'], budget_bytes=config['budget_bytes'])
+        store.set(prefix + f'shard/{shard["index"]}', encode(document))
+    if leader:
+        shards = [sh for m in group['members'] for sh in m['shards']] if shared else member['shards']
+        keys = [prefix + f'shard/{sh["index"]}' for sh in shards]
         _wait(store, keys, deadline)
         documents = [decode(store.get(key)) for key in keys]
-        package = leader_exchange(config, documents, deadline)
+        # A single multi-host gang already has a control channel. No extra socket.
+        package = (assemble_package(group, documents, config['checkpoint']) if shared
+                   else leader_exchange(config, documents, deadline))
         verify_package(group, package)
         store.set(prefix + 'package', encode(package))
     _wait(store, [prefix + 'package'], deadline)
     package = decode(store.get(prefix + 'package'))
     stage_package(to_memory_package(group, package))
     env[COUNT_ENV] = str(p)
-    store.set(prefix + f'received/{local_rank}', b'1')
-    if local_rank == 0:
-        _wait(store, [prefix + f'received/{i}' for i in range(local_world_size)], deadline)
+    store.set(prefix + f'received/{receiver_rank}', b'1')
+    if leader:
+        _wait(store, [prefix + f'received/{i}' for i in range(receivers)], deadline)
         # Every worker holds the package in memory. No serving-time Store reads.
         for key in ([prefix + 'package'] + keys + config_keys +
-                    [prefix + f'received/{i}' for i in range(local_world_size)]):
+                    [prefix + f'received/{i}' for i in range(receivers)]):
             store.delete_key(key)
     return None

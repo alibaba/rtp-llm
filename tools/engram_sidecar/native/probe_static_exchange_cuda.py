@@ -33,7 +33,7 @@ def private_write(path, value):
         stream.write(encode(value))
 
 
-def worker(rank, env, store_port, rows, device):
+def worker(rank, env, store_port, rows, device, descriptor):
     import torch
     from torch.distributed import TCPStore
     from rtp_llm.models_py.modules.dsv41.engram_bootstrap import staged_package, _verify_samples, _load_native
@@ -57,13 +57,20 @@ def worker(rank, env, store_port, rows, device):
     baseline = native.resource_counters()
     store = TCPStore('127.0.0.1', store_port, 2, rank == 0, timedelta(seconds=120))
     started = time.monotonic()
-    prepare_static_engram(store, rank=rank, world_size=2, environ=env)
+    # Synthetic allocation fixture only; never enable file-backed descriptors
+    # in the serving startup path. The parent owns these test allocations.
+    from unittest.mock import patch
+    from rtp_llm.models_py.modules.dsv41 import engram_publish
+    with patch.object(engram_publish, 'publish_shard', return_value=descriptor):
+        prepare_static_engram(store, rank=rank, world_size=2, environ=env)
     startup_ms = (time.monotonic() - started) * 1000
     package = staged_package()
     if package is None:
         raise RuntimeError('startup exchange did not stage a package')
     # Test oracle only: prove graph replay does not require a live RPC listener.
-    host, port = env['RTP_ENGRAM_COHORT'].split(',')[0].rsplit(':', 1)
+    from rtp_llm.models_py.modules.dsv41.engram_startup import build_group
+    endpoint = build_group(env, 2)['coordinator']
+    host, port = endpoint['host'], endpoint['port']
     deadline = time.monotonic() + 10
     while True:
         try:
@@ -118,6 +125,7 @@ def main():
     parser.add_argument('--workdir', required=True, type=Path)
     parser.add_argument('--shard', required=True, type=int, choices=(0, 1))
     parser.add_argument('--exchange-port', required=True, type=int)
+    parser.add_argument('--cohort', required=True, help='two distinct host IPv4 addresses, same order on both hosts')
     parser.add_argument('--store-port', required=True, type=int)
     parser.add_argument('--device', type=int, default=0)
     parser.add_argument('--numa', type=int, default=0)
@@ -128,18 +136,17 @@ def main():
     from rtp_llm.models_py.modules.dsv41.engram_bootstrap import _load_native
     from rtp_llm.models_py.modules.dsv41.engram_shard import plan_shards
     from rtp_llm.models_py.modules.dsv41.engram_startup import (build_group, COHORT_ENV,
-        COUNT_ENV, INDEX_ENV, REVISION_ENV, DESCRIPTORS_ENV, TIMEOUT_ENV, CHECKPOINT_ENV)
+        COUNT_ENV, INDEX_ENV, REVISION_ENV, PORT_ENV, TIMEOUT_ENV, CHECKPOINT_ENV)
     root = args.workdir
     root.mkdir(mode=0o700, parents=True, exist_ok=True)
-    endpoint = f'127.0.0.1:{args.exchange_port}'
     env = {
-        COHORT_ENV: f'{endpoint},{endpoint}',
+        COHORT_ENV: args.cohort,
+        PORT_ENV: str(args.exchange_port),
         INDEX_ENV: str(args.shard),
         COUNT_ENV: '2',
         REVISION_ENV: 'probe-revision',
         TIMEOUT_ENV: '120',
         CHECKPOINT_ENV: str(root / 'checkpoint'),
-        DESCRIPTORS_ENV: str(root / 'shard.json'),
     }
     config = build_group(env, 2)
     member = next(m for m in config['group']['members'] if m['instance_id'] == config['instance_id'])
@@ -171,8 +178,6 @@ def main():
     descriptor = dict(schema_version=2, shard=args.shard, shards=2, generation=config['group']['generation'],
         model_revision=config['group']['model_revision'], hash_abi=HASH, host_id=host, owner_id=host,
         owner_incarnation=str(uuid4()), tensors=tensors)
-    path = Path(env[DESCRIPTORS_ENV])
-    private_write(path, descriptor)
     # Only the coordinator needs the tiny synthetic reference checkpoint.
     if args.shard == 0:
         checkpoint = Path(env[CHECKPOINT_ENV])
@@ -188,7 +193,7 @@ def main():
         private_write(checkpoint / 'model.safetensors.index.json', {'weight_map': {k: 'probe.safetensors' for k in weights}})
         del table, weights
     print(json.dumps(dict(status='HOLDER_READY', host=host, shard=args.shard, backing_bytes=plan.shard_bytes)), flush=True)
-    mp.spawn(worker, args=(env, args.store_port, plan.total_rows, args.device), nprocs=2, join=True)
+    mp.spawn(worker, args=(env, args.store_port, plan.total_rows, args.device, descriptor), nprocs=2, join=True)
     print(json.dumps(dict(status='PASS', instance=config['instance_id'], consumers_exited=True)), flush=True)
     # Test-only owner retirement. Production cohort launcher must coordinate drain.
     while not (root / 'STOP').exists():

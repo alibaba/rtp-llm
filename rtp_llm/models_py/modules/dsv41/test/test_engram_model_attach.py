@@ -167,6 +167,12 @@ class ModelAttachTest(unittest.TestCase):
             self.run_init()
         self.assertEqual(self.trace, ["layout"])
 
+    def test_cohort_enabled_without_exchange_does_not_silently_load_locally(self):
+        b.clear_staged_package()
+        with self.assertRaisesRegex(attach.EngramModelInitializationError,
+                                    "DISTRIBUTED_ENGRAM_REQUIRES_EXCHANGE"):
+            self.run_init(environ={"RTP_ENGRAM_COHORT": "10.0.0.1,10.0.0.2"})
+
     def graph_env(self):
         return {**self.env, attach.EXTERNAL_GRAPH_MODE_ENV: attach.PROCESS_LIFETIME_GRAPH}
 
@@ -398,15 +404,15 @@ class ModelAttachTest(unittest.TestCase):
 
     def test_eager_graph_api_rejected_and_normal_eager_allowed(self):
         self.run_init()
-        attach.require_eager_engram(self.model, capture_check=lambda: False)
+        attach.require_engram_runtime(self.model, capture_check=lambda: False)
         with self.assertRaisesRegex(attach.EngramModelInitializationError, "GRAPH_UNSUPPORTED"):
-            attach.require_eager_engram(self.model, is_cuda_graph=True)
+            attach.require_engram_runtime(self.model, is_cuda_graph=True)
         with self.assertRaisesRegex(attach.EngramModelInitializationError, "GRAPH_UNSUPPORTED"):
-            attach.require_eager_engram(self.model, capture_check=lambda: True)
+            attach.require_engram_runtime(self.model, capture_check=lambda: True)
 
     def test_legacy_guard_does_not_query_cuda_capture(self):
         self.model._engram_attachment = attach.EngramModelAttachment(phase="READY")
-        attach.require_eager_engram(
+        attach.require_engram_runtime(
             self.model, is_cuda_graph=True,
             capture_check=lambda: self.fail("legacy mode must not query CUDA"),
         )
@@ -414,7 +420,7 @@ class ModelAttachTest(unittest.TestCase):
     def test_failed_external_model_cannot_forward(self):
         self.model._engram_attachment = attach.EngramModelAttachment(phase="FAILED", external=True)
         with self.assertRaisesRegex(attach.EngramModelInitializationError, "NOT_READY"):
-            attach.require_eager_engram(self.model)
+            attach.require_engram_runtime(self.model)
 
     def test_legacy_success_cannot_be_switched_in_process(self):
         b.clear_staged_package()

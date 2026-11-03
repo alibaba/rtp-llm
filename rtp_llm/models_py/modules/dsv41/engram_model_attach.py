@@ -76,10 +76,6 @@ def require_engram_runtime(
         raise EngramModelInitializationError("EXTERNAL_ENGRAM_GRAPH_UNSUPPORTED")
 
 
-# Preserve the previous experimental helper import; its default is still eager.
-require_eager_engram = require_engram_runtime
-
-
 def initialize_model_engram(
     model,
     *,
@@ -131,7 +127,9 @@ def initialize_model_engram(
         from rtp_llm.models_py.modules.dsv41.engram_bootstrap import staged_package
 
         package = staged_package()
-        if package is None and "ENGRAM_SHARD_COUNT" in env:
+        from rtp_llm.models_py.modules.dsv41.engram_shard_config import shared_storage_requested
+
+        if package is None and shared_storage_requested(env):
             raise EngramModelInitializationError("DISTRIBUTED_ENGRAM_REQUIRES_EXCHANGE")
         attachment.external = package is not None
         if attachment.external:
@@ -242,6 +240,5 @@ __all__ = [
     "EngramModelAttachment",
     "EngramModelInitializationError",
     "initialize_model_engram",
-    "require_eager_engram",
     "require_engram_runtime",
 ]

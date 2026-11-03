@@ -266,10 +266,19 @@ py_library(
 )
 
 py_library(
+    name = "engram_bootstrap_contract_cpu",
+    testonly = True,
+    srcs = ["modules/dsv41/engram_bootstrap.py"],
+    deps = [":engram_capacity", ":engram_manifest", ":engram_storage_cpu"],
+    visibility = ["//visibility:public"],
+)
+
+py_library(
     name = "engram_publish_cpu",
     testonly = True,
     srcs = ["modules/dsv41/engram_publish.py"],
     deps = [
+        ":engram_bootstrap_contract_cpu",
         ":engram_descriptors_cpu",
         ":engram_storage_cpu",
     ],
@@ -332,6 +341,7 @@ py_library(
     name = "engram_model_attach_cpu",
     testonly = True,
     srcs = ["modules/dsv41/engram_model_attach.py"],
+    deps = [":engram_bootstrap_contract_cpu"],
     visibility = ["//visibility:public"],
 )
 
@@ -372,11 +382,12 @@ py_library(
     name = "engram_exchange_cpu",
     testonly = True,
     srcs = [
-        "modules/dsv41/engram_bootstrap.py",
         "modules/dsv41/engram_exchange.py",
         "modules/dsv41/engram_startup.py",
     ],
     deps = [
+        ":engram_bootstrap_contract_cpu",
+        ":engram_publish_cpu",
         ":engram_capacity",
         ":engram_descriptors_cpu",
         ":engram_manifest",

@@ -46,12 +46,16 @@ class BackendManager(object):
         """Initialize backend server without entering service loop"""
         self._distributed_server.start(self.py_env_configs)
         # One-shot metadata exchange before model loading/NCCL capture. Reuse the
-        # existing instance Store; only instance rank 0 participates in RPC.
+        # existing gang topology/Store; cross-gang host representatives use RPC.
         from rtp_llm.models_py.modules.dsv41.engram_startup import prepare_static_engram
         pc = self.py_env_configs.parallelism_config
+        world_info = self._distributed_server.get_world_info(
+            self.py_env_configs.server_config, self.py_env_configs.distribute_config, pc
+        )
         prepare_static_engram(
             getattr(self._distributed_server, "store", None),
             rank=pc.world_rank, world_size=pc.world_size,
+            gang_hosts=tuple(w.ip for w in sorted(world_info.members, key=lambda w: w.world_rank)),
         )
         # Create EngineConfig from py_env_configs (server/distribute config already adjusted for this rank)
         engine_config = EngineConfig.create(
