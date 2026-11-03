@@ -18,6 +18,11 @@ from rtp_llm.utils.concurrency_controller import (
     ConcurrencyController,
     set_global_controller,
 )
+from rtp_llm.utils.scr_template_utils import (
+    ScrParticipantManifest,
+    arrive_scr_template_barrier,
+    is_scr_template_phase_active,
+)
 
 setup_logging()
 
@@ -37,6 +42,7 @@ def start_frontend_server(
     server_id: int,
     global_controller: ConcurrencyController,
     py_env_configs: PyEnvConfigs,
+    scr_manifest: ScrParticipantManifest | None = None,
 ):
     _install_hot_hook_runtime(f"frontend_rank_{rank_id}_server_{server_id}")
     # Set rank_id and server_id on the passed config so port properties match this rank
@@ -53,7 +59,7 @@ def start_frontend_server(
     # Sync parallelism_config (and ffn_disaggregate_config) with world_rank, same as backend
     set_parallelism_config(
         py_env_configs.parallelism_config,
-        rank_id,
+        py_env_configs.parallelism_config.world_rank + rank_id,
         py_env_configs.ffn_disaggregate_config,
         py_env_configs.prefill_cp_config,
     )
@@ -69,7 +75,25 @@ def start_frontend_server(
         set_global_controller(global_controller)
         separated_frontend = py_env_configs.role_config.role_type == RoleType.FRONTEND
         app = FrontendApp(py_env_configs, separated_frontend)
-        app.start()
+
+        def on_prebind() -> None:
+            if scr_manifest is None or not is_scr_template_phase_active():
+                return
+            worker_id = scr_manifest.worker_id("frontend", f"{rank_id}:{server_id}")
+            result = arrive_scr_template_barrier(
+                worker_id=worker_id,
+                worker_num=scr_manifest.worker_num,
+                generation=scr_manifest.generation or None,
+                fail_closed=True,
+            )
+            logging.info(
+                "sCR frontend reached prebind arrival worker_id=%d worker_num=%d result=%r",
+                worker_id,
+                scr_manifest.worker_num,
+                result,
+            )
+
+        app.start(on_prebind=on_prebind)
     except BaseException as e:
         logging.error(
             f"start frontend server error: {e}, trace: {traceback.format_exc()}"

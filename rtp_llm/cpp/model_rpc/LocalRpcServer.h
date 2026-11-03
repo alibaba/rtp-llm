@@ -38,6 +38,13 @@ public:
                               std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> propose_params,
                               py::object                                             mm_process_engine);
 
+    virtual void startDeferredServices();
+    virtual void updateRuntimeEndpoints(const RuntimeConfig& runtime_config);
+    void setDeferServiceStart(bool defer) {
+        defer_tp_broadcaster_ = defer;
+        defer_engine_loop_ = defer;
+    }
+
     grpc::Status
     GetWorkerStatus(grpc::ServerContext* context, const ::StatusVersionPB* request, ::WorkerStatusPB* response);
 
@@ -176,6 +183,8 @@ protected:
     std::chrono::steady_clock::time_point torch_allocator_dump_last_completed_at_;
     std::unordered_set<std::string>       torch_allocator_dump_ids_;
     std::deque<std::string>               torch_allocator_dump_id_order_;
+    bool                                  defer_tp_broadcaster_{false};
+    bool                                  defer_engine_loop_{false};
 };
 
 }  // namespace rtp_llm

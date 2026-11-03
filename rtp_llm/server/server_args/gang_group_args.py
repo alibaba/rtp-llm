@@ -15,9 +15,9 @@ def init_gang_group_args(parser, distribute_config):
         help="在多机启动时的fake行为",
     )
     gang_group.add_argument(
-        "--gang_annocation_path",
-        env_name="GANG_ANNOCATION_PATH",
-        bind_to=(distribute_config, "gang_annocation_path"),
+        "--gang_annotation_path",
+        env_name="GANG_ANNOTATION_PATH",
+        bind_to=(distribute_config, "gang_annotation_path"),
         type=str,
         default="/etc/podinfo/annotations",
         help="GANG信息的路径",
