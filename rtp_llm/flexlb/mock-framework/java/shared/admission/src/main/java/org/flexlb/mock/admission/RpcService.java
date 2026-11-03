@@ -18,11 +18,17 @@ public final class RpcService extends RpcServiceGrpc.RpcServiceImplBase implemen
     private final org.flexlb.mock.multimodal.MediaClient vision;
     private final DecodeAdmission decode;
     private final PrefillGeneration generation;
+    private final boolean groups;
     private final AtomicLong statusVersion = new AtomicLong();
     private volatile boolean closed;
 
     public RpcService(AdmissionConfig config, KvCache cache, Scheduler.Factory schedulers) {
+        this(config, cache, schedulers, true);
+    }
+
+    public RpcService(AdmissionConfig config, KvCache cache, Scheduler.Factory schedulers, boolean groups) {
         this.config = config;
+        this.groups = groups;
         this.cache = cache;
         requests = config.role() == org.flexlb.mock.api.model.Types.Role.prefill ? new LocalPrefill(config, cache, schedulers) : null;
         vision = requests == null ? null : new org.flexlb.mock.multimodal.MediaClient(config.imageToken());
@@ -66,12 +72,12 @@ public final class RpcService extends RpcServiceGrpc.RpcServiceImplBase implemen
     }
 
     @Override public void enqueueBatch(EnqueueBatchRequestPB request, StreamObserver<EnqueueBatchResponsePB> response) {
-        if (generation == null) { super.enqueueBatch(request, response); return; }
+        if (generation == null || !groups) { super.enqueueBatch(request, response); return; }
         PrefillBatch.enqueue(generation, request, response);
     }
 
     @Override public void enqueueGroup(EnqueueGroupRequestPB request, StreamObserver<EnqueueBatchResponsePB> response) {
-        if (generation == null) { super.enqueueGroup(request, response); return; }
+        if (generation == null || !groups) { super.enqueueGroup(request, response); return; }
         var slot = EnqueueBatchDpSlotPB.newBuilder().setDpRank(request.getDpRank());
         for (var item : request.getRequestsList()) {
             var external = EnqueueBatchExternalInputPB.newBuilder();

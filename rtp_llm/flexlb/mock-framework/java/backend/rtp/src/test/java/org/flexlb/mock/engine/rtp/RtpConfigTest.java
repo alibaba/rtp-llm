@@ -15,6 +15,25 @@ class RtpConfigTest {
     }
     private ObjectNode root() { return JSON.valueToTree(RtpNodeTest.configuration("prefill")); }
 
+    @Test void schedulerModeSelectsPolicyAndRejectsUnknownValues() throws Exception {
+        var root = root();
+        var values = (ObjectNode) root.path("component").path("config");
+        var defaults = load(root);
+        try (var cache = new org.flexlb.mock.cache.KvCache(16, 8, 0, org.flexlb.mock.cache.KvCache.EvictionPolicy.LRU);
+             var scheduler = RtpScheduler.factory(defaults).create(new Object(), cache)) {
+            assertInstanceOf(RtpGroupScheduler.class, scheduler);
+        }
+        values.put("mock.scheduler.mode", "fifo");
+        var fifo = load(root);
+        try (var cache = new org.flexlb.mock.cache.KvCache(16, 8, 0, org.flexlb.mock.cache.KvCache.EvictionPolicy.LRU);
+             var scheduler = RtpScheduler.factory(fifo).create(new Object(), cache)) {
+            assertInstanceOf(RtpScheduler.class, scheduler);
+            assertEquals("fifo", fifo.effective().path("mock.scheduler.mode").asText());
+        }
+        values.put("mock.scheduler.mode", "unknown");
+        assertThrows(IllegalArgumentException.class, () -> load(root));
+    }
+
     @Test void normalizesRecognizedNativeEnvValuesAndKeepsAnImmutableRequestedConfiguration() throws Exception {
         var root = root(); var config = (ObjectNode) root.path("component").path("config");
         config.remove("seq_size_per_block"); config.put("SEQ_SIZE_PER_BLOCK", "32").put("REUSE_CACHE", "on")
@@ -178,7 +197,7 @@ class RtpConfigTest {
             var root = JSON.<ObjectNode>valueToTree(RtpNodeTest.configuration(role));
             var config = (ObjectNode) root.path("component").path("config");
             config.put("cp_rotate_method", "ALL_GATHER").put("tp_size", 4).put("dp_size", 3);
-            config.put("enable_memory_cache", true).put("mock.cache.memory.blocks", 20);
+            config.put("enable_memory_cache", true).put("mock.cache.memory.blocks", 20).put("mock.scheduler.mode", "fifo");
             var parsed = load(root);
             var env = new java.util.HashMap<String, String>();
             parsed.business().fields().forEachRemaining(entry -> env.put(entry.getKey().toUpperCase(java.util.Locale.ROOT).replace('.', '_'), entry.getValue().asText()));
