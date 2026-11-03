@@ -99,7 +99,7 @@ def main():
     weights_by_layer = [None] * config.num_layers
     layers, recorders, globals_by_layer = [], [], {}
     for index in indices:
-        weights, global_weights = fx.layer_weights(config, parallel, seed=args.seed + index)
+        weights, global_weights = fx.loader_weights(config, parallel, seed=args.seed + index)
         weights_by_layer[index] = weights
         globals_by_layer[index] = global_weights
         layers.append(fx.build_layer(config, parallel, weights, index))

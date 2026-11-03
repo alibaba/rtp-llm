@@ -133,7 +133,7 @@ def main():
     for queries, cases in by_queries.items():
         config = fx.load_config(args.config_json, max_seq_len=args.max_seq_len, queries=queries)
         layer_index = config.k3_runtime_config.dsa.layers[0]
-        weights, _ = fx.layer_weights(config, parallel, seed=args.seed)
+        weights, _ = fx.loader_weights(config, parallel, seed=args.seed)
         layer = fx.build_layer(config, parallel, weights, layer_index)
         weights_by_layer = [None] * config.num_layers
         weights_by_layer[layer_index] = weights

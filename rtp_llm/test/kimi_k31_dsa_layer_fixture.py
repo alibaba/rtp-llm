@@ -13,7 +13,8 @@
   with zero hidden rows, prepare_cuda_graph before every replay.
 
 Recorder keeps the tensors the layer hands to the Indexer selection and to sparse MLA. Under a
-graph they are the captured buffers, so every replay leaves its own values in them.
+graph they are the captured buffers, so every replay leaves its own values in them. With the decode
+prologue (DSA_DCP_PROLOGUE) the recorded sparse-MLA query is its absorbed all-head kernel query.
 """
 
 import json
@@ -141,7 +142,18 @@ def layer_weights(config, parallel, seed):
         W.mla_indexer_k_norm_b: torch.zeros(index_dim, dtype=torch.bfloat16, device="cuda"),
         W.mla_indexer_weights_proj_w: randn(hidden, index_heads, fan_in=hidden, dtype=torch.float32),
     }
-    return weights, SimpleNamespace(key_up=key_up, value_up=value_up)
+    return weights, SimpleNamespace(key_up=key_up, value_up=value_up, q_b=q_b)
+
+
+def loader_weights(config, parallel, seed):
+    """The upstream decode loader replicates q_b and kc in every prologue mode."""
+    weights, global_weights = layer_weights(config, parallel, seed)
+    return query_head_weights(weights, global_weights), global_weights
+
+
+def query_head_weights(weights, global_weights):
+    """Decode loader layout: q_b and kc of every head on every rank."""
+    return {**weights, W.mla_q_b_w: global_weights.q_b, W.mla_kc: global_weights.key_up}
 
 
 def build_layer(config, parallel, weights, layer_index):
@@ -349,16 +361,35 @@ class Recorder:
             return selected
 
         indexer._quantize_q_k, indexer._compute_topk = record_quantize, record_select
+        # The decode prologue (DSA_DCP_PROLOGUE) writes keys and builds the sparse-MLA query itself.
+        write_keys = indexer.indexer_op.write_keys
+
+        def record_write_keys(key, *args, **kwargs):
+            self.last["index_key"] = key
+            return write_keys(key, *args, **kwargs)
+
+        indexer.indexer_op.write_keys = record_write_keys
 
     def attach(self, sfa):
-        forward = sfa.forward
+        forward, write_cache, forward_prepared = sfa.forward, sfa.write_decode_cache, sfa.forward_decode_prepared
 
         def record_forward(q, compressed_kv, k_pe, *args, **kwargs):
             output = forward(q, compressed_kv, k_pe, *args, **kwargs)
             self.last.update(sfa_query=q, latent=compressed_kv, suffix=k_pe, sfa_output=output)
             return output
 
+        def record_write_cache(latent, suffix, *args, **kwargs):
+            self.last.update(latent=latent, suffix=suffix)
+            return write_cache(latent, suffix, *args, **kwargs)
+
+        def record_forward_prepared(query, *args, **kwargs):
+            output = forward_prepared(query, *args, **kwargs)
+            self.last.update(sfa_query=query, sfa_output=output)
+            return output
+
         sfa.forward = record_forward
+        sfa.write_decode_cache = record_write_cache
+        sfa.forward_decode_prepared = record_forward_prepared
 
 
 def build_fmha(config, parallel, weights_by_layer, inputs, owner, recorder, *, graph):

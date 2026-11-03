@@ -46,6 +46,8 @@ ARMS = {
     "dev": {},
     "mega_topk": {"DSA_DCP_TOPK": "mega_topk"},
     "mega_a2a": {"DSA_DCP_TOPK": "mega_topk", "DSA_DCP_COMBINE": "mega_a2a"},
+    "serial": {"DSA_DCP_TOPK": "mega_topk", "DSA_DCP_COMBINE": "mega_a2a", "DSA_DCP_PROLOGUE": "serial"},
+    "final": {"DSA_DCP_TOPK": "mega_topk", "DSA_DCP_COMBINE": "mega_a2a", "DSA_DCP_PROLOGUE": "multi_stream"},
 }
 
 
@@ -331,11 +333,15 @@ def check_attention(step, recorded, pools, weights, tp, rank, softmax_scale, chu
     rows, heads = step.rows, weights.key_up.shape[0]
     local_heads = heads // tp
     query = recorded["sfa_query"][: step.padded_rows]
-    gathered = [torch.empty_like(query) for _ in range(tp)]
-    dist.all_gather(gathered, query.contiguous())
-    query = torch.stack(gathered, 1).flatten(1, 2)[:rows].float()  # [rows, heads, 192]
-    absorbed = torch.einsum("rhd,hdl->rhl", query[..., :NOPE], weights.key_up.float())
-    query = torch.cat((absorbed, query[..., NOPE:]), dim=-1)
+    if query.shape[-1] == LATENT + ROPE:
+        # The decode prologue's absorbed all-head query in the kernel's head layout.
+        query = query[:rows, :heads].float()
+    else:
+        gathered = [torch.empty_like(query) for _ in range(tp)]
+        dist.all_gather(gathered, query.contiguous())
+        query = torch.stack(gathered, 1).flatten(1, 2)[:rows].float()  # [rows, heads, 192]
+        absorbed = torch.einsum("rhd,hdl->rhl", query[..., :NOPE], weights.key_up.float())
+        query = torch.cat((absorbed, query[..., NOPE:]), dim=-1)
     selected = recorded["selected"][:rows].long()
     latent = pools["full"].cache.view(-1, LATENT + ROPE)
     request_of = torch.arange(len(step.requests), device="cuda").repeat_interleave(step.queries)
@@ -387,10 +393,11 @@ class Step:
 
 
 class Arm:
-    def __init__(self, name, config, parallel, weights, layer_index, buckets, queries):
+    def __init__(self, name, config, parallel, weights, global_weights, layer_index, buckets, queries):
         unit = fx.sp_unit(parallel.tp_size, queries)
         saved = {key: os.environ.get(key) for key in ARMS[name]}
         os.environ.update(ARMS[name])
+        weights = fx.query_head_weights(weights, global_weights)
         try:
             self.layer = fx.build_layer(config, parallel, weights, layer_index)
             self.owner = fx.build_owner(
@@ -458,7 +465,8 @@ def main():
         layer_index = config.k3_runtime_config.dsa.layers[0]
         weights, global_weights = fx.layer_weights(config, parallel, seed=args.seed)
         pools = {tag: fx.Pool(tag, args.pool_pages, "cuda") for tag in fx.TAGS}
-        arms = [Arm(name, config, parallel, weights, layer_index, buckets, queries) for name in json.loads(args.arms)]
+        arms = [Arm(name, config, parallel, weights, global_weights, layer_index, buckets, queries)
+                for name in json.loads(args.arms)]
         server = Server(queries, pools, max_seq_len=args.max_seq_len, tp=tp, rank=rank, seed=args.seed + queries)
         pool_handle = torch.cuda.graph_pool_handle()
         decisions = random.Random(args.seed * 7 + queries)

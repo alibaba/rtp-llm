@@ -7,6 +7,7 @@ import torch
 import torch.nn.functional as F
 
 from rtp_llm.models_py.utils.module_profiler import profile_scope
+from rtp_llm.utils.model_weight import W
 
 from .dsa_page_rr_params import DsaPageRRParams
 from .flashmla_sparse_impl import SparseMlaImpl, SparseMlaOp, flash_mla_sparse_fwd
@@ -206,7 +207,7 @@ class PageRRSparseMlaOp(SparseMlaOp):
         execution.finish()
         return output
 
-    def forward(self, q, kv, topk_indices, kv_scale=None, layer_id=0):
+    def forward(self, q, kv, topk_indices, kv_scale=None, layer_id=0, prepared_query=False):
         from rtp_llm.models_py.kernels.cuda.dsa_kv_chunk import (
             map_dsa_chunk_slots,
             normalize_sparse_partial,
@@ -218,8 +219,9 @@ class PageRRSparseMlaOp(SparseMlaOp):
         execution = params.sfa_execution
         workspace = execution.begin()
         heads = self.communicator.heads
-        if params.is_prefill and params.query_cp and q.shape[1] == self.kernel_heads:
-            # The Prefill producer has already built the kernel's final layout.
+        if prepared_query or (params.is_prefill and params.query_cp and q.shape[1] == self.kernel_heads):
+            # The producer has already built the kernel's final layout (Prefill query CP,
+            # SparseMlaPageRRImpl.decode_query).
             query = q
         else:
             query = self.execute(q)
@@ -337,6 +339,34 @@ class SparseMlaPageRRImpl(SparseMlaImpl):
         # SM100 sparse Decode loads FP32 scales through E8M0 conversion.
         # Prefill and Decode must therefore write the same power-of-two scales.
         self.kv_cache_write_op.use_ue8m0 = workspace_owner.sfa_use_fp8
+
+    def decode_query(self, query, layer_id):
+        """Absorbed decode query of every head [rows, heads, 192] in the kernel's head layout.
+
+        For producers that compute all heads on every rank (DSA_DCP_PROLOGUE): the result skips
+        the query all-gather and padding of forward(); kc must hold every head.
+        """
+        rows, heads = query.shape[:2]
+        key_up = self.weights[layer_id][W.mla_kc]
+        if key_up.shape[0] != heads:
+            raise ValueError("an all-head decode query needs the all-head kc weight")
+        output = query.new_empty((rows, self.fmha_impl.kernel_heads, self.kv_lora_rank + self.rope_head_dim))
+        nope, pe = query.split([self.nope_head_dim, self.rope_head_dim], dim=-1)
+        output[:, :heads, self.kv_lora_rank :] = pe
+        output[:, heads:].zero_()
+        torch.bmm(nope.transpose(0, 1), key_up, out=output[:, :heads, : self.kv_lora_rank].transpose(0, 1))
+        return output
+
+    def write_decode_cache(self, latent, suffix, kv_cache):
+        """forward()'s cache write, for producers of decode_query (K3.1 applies no RoPE here)."""
+        self._write_kv_cache(latent, suffix, kv_cache)
+
+    def forward_decode_prepared(self, query, kv_cache, layer_id, topk_indices):
+        """forward() over a decode_query result whose step's cache write_decode_cache has written."""
+        base = kv_cache.kv_cache_base
+        return self.fmha_impl.forward(
+            query, base.view(-1, 1, base.size(-1)), topk_indices, layer_id=layer_id, prepared_query=True
+        )
 
     def create_params(self, inputs):
         self.fmha_params = self.page_rr_params

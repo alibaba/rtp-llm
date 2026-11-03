@@ -742,3 +742,13 @@ py_binary(
     ],
     tags = ["manual"],
 )
+
+# One-GPU pieces of the K3.1 DSA decode prologue (DSA_DCP_PROLOGUE): BF16x3 head gate, StreamDag.
+py_test(
+    name = "kimi_k31_dsa_prologue_test",
+    srcs = ["kimi_k31_dsa_prologue_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    env = {"GPU_COUNT": "1"},
+    exec_properties = {"gpu": "SM103_CU13", "gpu_count": "1"},
+    tags = ["SM103_CU13"],
+)

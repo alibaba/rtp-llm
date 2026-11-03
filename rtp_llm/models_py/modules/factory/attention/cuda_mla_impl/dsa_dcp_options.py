@@ -1,6 +1,7 @@
 """Decode DCP execution switches for the K3.1 DSA target (FP8 Indexer, Page-RR KV over the TP group).
 
-Each switch is read once, when the DSA workspace owner is built; the defaults keep the original path.
+Each switch is read once, when the DSA workspace owner (DSA_DCP_PROLOGUE: the layer and its weights)
+is built; the defaults keep the original path.
 
 DSA_DCP_TOPK
     a2a        Every rank all-to-alls its local FP32 Indexer scores, selects the exact top-k of its
@@ -12,6 +13,12 @@ DSA_DCP_COMBINE
                (default).
     mega_a2a   MegaA2A: peers pull their heads' partial outputs from symmetric memory and merge them
                inside one kernel.
+DSA_DCP_PROLOGUE
+    dev           The layer's projections, Indexer and sparse-MLA query as they are (default).
+    serial        Every rank computes every query head (q_b and kc load all heads; no query
+                  all-gather), the Indexer head gate is one BF16 GEMM over its FP32 weight split
+                  into three BF16 parts, on one stream.
+    multi_stream  The same operators, with the work MQA does not wait for on side streams.
 """
 
 import os
@@ -30,3 +37,7 @@ def dcp_topk_mode():
 
 def dcp_combine_backend():
     return _option("DSA_DCP_COMBINE", "a2a", ("a2a", "mega_a2a"))
+
+
+def dcp_prologue_mode():
+    return _option("DSA_DCP_PROLOGUE", "dev", ("dev", "serial", "multi_stream"))
