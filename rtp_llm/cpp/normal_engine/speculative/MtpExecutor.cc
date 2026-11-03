@@ -56,9 +56,13 @@ struct CachedEnvFlag {
     std::string value;
 };
 
-CachedEnvFlag cacheEnvFlag(const char* env_name, const char* log_tag, const char* label) {
+CachedEnvFlag cacheEnvFlag(const char* env_name, const char* log_tag, const char* label, bool default_on = false) {
     const char* env = std::getenv(env_name);
-    return CachedEnvFlag{env_name, log_tag, label, env != nullptr && std::string(env) == "1", env ? env : "(unset)"};
+    return CachedEnvFlag{env_name,
+                         log_tag,
+                         label,
+                         env ? std::string(env) == "1" : default_on,
+                         env ? env : (default_on ? "1 (default)" : "(unset)")};
 }
 
 void logCachedEnvFlag(const CachedEnvFlag& flag) {
@@ -96,8 +100,8 @@ const CachedEnvFlag kAsyncDeviceStateFlag =
     cacheEnvFlag("RTP_LLM_MTP_ASYNC_DEVICE_STATE", "async-device-state", "enabled");
 const CachedEnvFlag kDropBroadSyncFlag = cacheEnvFlag("RTP_LLM_DROP_BROAD_SYNC", "drop-broad-sync", "enabled");
 const CachedEnvFlag kForwardOverlapFlag =
-    cacheEnvFlag("RTP_LLM_MTP_FORWARD_OVERLAP", "mtp-forward-overlap", "enabled");
-const CachedEnvFlag kAsyncPrepareFlag  = cacheEnvFlag("RTP_LLM_MTP_ASYNC_PREPARE", "async-prepare", "enabled");
+    cacheEnvFlag("RTP_LLM_MTP_FORWARD_OVERLAP", "mtp-forward-overlap", "enabled", /*default_on=*/true);
+const CachedEnvFlag kAsyncPrepareFlag = cacheEnvFlag("RTP_LLM_MTP_ASYNC_PREPARE", "async-prepare", "enabled");
 const CachedEnvFlag kMtpIndexerShareFlag =
     cacheEnvFlag("RTP_LLM_ENABLE_MTP_INDEXER_SHARE", "mtp-indexer-share", "enabled");
 const bool kDebugTargetVerifyInputEnabled  = cacheDebugFlag("RTP_LLM_DEBUG_TARGET_VERIFY_INPUT");
