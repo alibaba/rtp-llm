@@ -1866,7 +1866,7 @@ class BazelTest(Command):
     Usage:
         python setup.py test                          # run all C++ tests
         python setup.py test --compile-only           # compile test targets only
-        python setup.py test --test-target=//rtp_llm/cpp/cache/test:...
+        python setup.py test --test-target=//rtp_llm/cpp/cache/test/...
 
     Bazel flags: same as build — RTP_BAZEL_CONFIG / RTP_BAZEL_APPEND_CONFIG when set,
     otherwise auto-detected platform (detect_build_config) supplies ``--config=``.

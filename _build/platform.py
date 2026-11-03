@@ -31,9 +31,9 @@ from pathlib import Path
 # infers cuda12_* / rocm from the machine and setup.py passes ``--config=...``.
 #
 # Optional override when auto-detect is wrong or you need extra flags:
-#   export RTP_BAZEL_CONFIG="--config=cuda12_6 --config=sm9x"
+#   export RTP_BAZEL_CONFIG="--config=cuda12_6"
 #   export RTP_BAZEL_CONFIG="--config=rocm --jobs=200"
-#   export RTP_BAZEL_APPEND_CONFIG="--config=sm9x --jobs=200"
+#   export RTP_BAZEL_APPEND_CONFIG="--jobs=200"
 #
 # Common configs:
 #   --config=cuda12_6     CUDA 12.6
@@ -203,7 +203,7 @@ def parse_bazel_config(default_config: str = "") -> list:
 
     Examples:
         "--config=custom_accel" -> ["--config=custom_accel"]
-        "--config=cuda12_6 --config=sm9x" -> ["--config=cuda12_6", "--config=sm9x"]
+        "--config=cuda12_6 --jobs=200" -> ["--config=cuda12_6", "--jobs=200"]
     """
     bazel_config = _get_bazel_config()
     append_config = _get_bazel_append_config()
@@ -507,7 +507,7 @@ def detect_build_config(verbose: bool = True) -> str:
     raise RuntimeError(
         "Cannot detect build configuration. Please set RTP_BAZEL_CONFIG to a "
         "supported accelerator config. Example: export "
-        "RTP_BAZEL_CONFIG='--config=cuda12_6 --config=sm9x'. CPU/ARM pip "
+        "RTP_BAZEL_CONFIG='--config=cuda12_6'. CPU/ARM pip "
         "packaging configs are deprecated."
     )
 

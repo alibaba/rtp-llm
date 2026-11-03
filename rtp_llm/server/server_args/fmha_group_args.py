@@ -102,7 +102,7 @@ def init_fmha_group_args(parser, fmha_config):
         bind_to=(fmha_config, "disable_flash_infer"),
         type=str2bool,
         default=False,
-        help="控制是否禁用FlashInfer Attention机制。设置为 True 启用, False 禁用。",
+        help="控制是否禁用FlashInfer Attention机制。设置为 True 禁用, False 启用。",
     )
     fmha_group.add_argument(
         "--disable_flashinfer_hybrid_prefill",

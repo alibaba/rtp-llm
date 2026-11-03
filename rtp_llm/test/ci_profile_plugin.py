@@ -7,9 +7,10 @@ Use --rtp-ci-profile=NAME.
 Can be combined with -m; final markexpr is:
     (<profile markexpr>) and (<user -m markexpr>)
 
-When a profile is active, [tool.rtp_llm.pytest_ci].default_pytest_cli is applied:
-sets PYTEST_ARGS for --remote-session workers and updates local pytest options
-unless PYTEST_ARGS is already set in the environment.
+When a profile is active, [tool.rtp_llm.pytest_ci].default_pytest_cli updates
+local pytest options without overriding explicit CLI options. For --remote-session,
+the remote plugin forwards these defaults to workers; use --remote-pytest-args
+for additional worker arguments.
 """
 
 from __future__ import annotations

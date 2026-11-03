@@ -505,7 +505,7 @@ def pytest_addoption(parser):
         "--remote-outputs-dir",
         default=None,
         metavar="PATH",
-        help="Local directory for remote outputs (default: .pytest_cache/remote_outputs)",
+        help="Local directory for remote outputs (default: bazel-testlogs/pytest/remote_outputs)",
     )
     g.addoption(
         "--remote-outputs-max-mb",

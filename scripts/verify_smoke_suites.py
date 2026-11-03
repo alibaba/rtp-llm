@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Validate smoke test manifests after per-suite split.
 
-Each suite is its own `<suite>_cases.py` file under `suites/`. This
+Each suite is its own `test_smoke_<suite>.py` file under `suites/`. This
 script discovers them, loads their SMOKE_CASES dict, and runs the same checks
 verify_smoke_suites used to apply to the monolith SMOKE_TESTS dict:
 
