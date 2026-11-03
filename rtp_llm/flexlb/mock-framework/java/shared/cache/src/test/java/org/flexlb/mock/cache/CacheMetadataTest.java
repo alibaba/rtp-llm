@@ -38,4 +38,12 @@ class CacheMetadataTest {
             }
         }
     }
+    @org.junit.jupiter.api.Test void modelNamespaceDoesNotGuessBackendSpecificSeeds() throws Exception {
+        var json = new com.fasterxml.jackson.databind.ObjectMapper();
+        assertEquals(0, CacheSequence.cacheKeySeed(json.readTree("{\"model_type\":\"deepseek_v41\"}")));
+        assertEquals(17, CacheSequence.cacheKeySeed(json.readTree("{\"cache_key_hash_seed\":17}")));
+        assertThrows(IllegalArgumentException.class,
+            () -> CacheSequence.cacheKeySeed(json.readTree("{\"cache_key_hash_seed\":1.5}")));
+    }
+
 }

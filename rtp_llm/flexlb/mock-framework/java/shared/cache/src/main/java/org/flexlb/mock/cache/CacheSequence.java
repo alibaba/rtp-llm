@@ -41,6 +41,14 @@ public record CacheSequence(int blockSize, List<Integer> tokens, List<Span> span
         }
         return List.copyOf(keys);
     }
+    public static long cacheKeySeed(com.fasterxml.jackson.databind.JsonNode model) {
+        var seed = model.get("cache_key_hash_seed");
+        if (seed == null) return 0;
+        if (!seed.isIntegralNumber() || !seed.canConvertToLong())
+            throw new IllegalArgumentException("Model cache_key_hash_seed must be int64");
+        return seed.longValue();
+    }
+
     private static long roll(long hash, long value) {
         return hash ^ (value + 0x9e3779b97f4a7c15L + (hash << 12) + (hash >> 32));
     }

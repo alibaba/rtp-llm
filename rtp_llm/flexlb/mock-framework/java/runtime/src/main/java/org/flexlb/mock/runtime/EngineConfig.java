@@ -76,18 +76,18 @@ public final class EngineConfig {
         return result;
     }
 
-    public static long cacheKeySeed(JsonNode config) throws IOException {
+    public static JsonNode model(JsonNode config) throws IOException { return model(config, System.getenv()); }
+
+    public static JsonNode model(JsonNode config, Map<String, String> env) throws IOException {
         var path = config.get("checkpoint_path");
-        if (path == null) return 0;
-        if (!path.isTextual() || path.asText().isBlank()) throw new IllegalArgumentException("checkpoint_path must be a model directory");
-        var directory = ModelPath.resolve(path.asText(), System.getenv());
+        if (path == null) return JSON.createObjectNode();
+        if (!path.isTextual() || path.asText().isBlank())
+            throw new IllegalArgumentException("checkpoint_path must be a model directory");
+        var directory = ModelPath.resolve(path.asText(), env);
         var model = read(directory.resolve("config.json"));
-        if (model == null || !model.isObject()) throw new IllegalArgumentException("Model config.json must be an object");
+        if (!model.isObject()) throw new IllegalArgumentException("Model config.json must be an object");
         ((ObjectNode) config).put("checkpoint_path", directory.toString());
-        var seed = model.get("cache_key_hash_seed");
-        if (seed == null) return 0;
-        if (!seed.isIntegralNumber() || !seed.canConvertToLong()) throw new IllegalArgumentException("Model cache_key_hash_seed must be int64");
-        return seed.longValue();
+        return model;
     }
 
     private EngineConfig() {}

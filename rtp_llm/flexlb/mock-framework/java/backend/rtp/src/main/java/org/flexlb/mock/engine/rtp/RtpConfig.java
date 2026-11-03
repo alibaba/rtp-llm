@@ -43,10 +43,12 @@ public record RtpConfig(String id, Role role, int blockSize, int deviceBlocks, i
         var root = JSON.createObjectNode().put("id", id).put("component_role", role.name());
         var component = root.putObject("component").put("engine", "rtp");
         component.set("config", RtpSettings.environment(env,role));
-        return load(root);
+        return load(root, env);
     }
 
-    public static RtpConfig load(JsonNode root) throws IOException {
+    public static RtpConfig load(JsonNode root) throws IOException { return load(root, System.getenv()); }
+
+    private static RtpConfig load(JsonNode root, Map<String, String> env) throws IOException {
         String component = root.path("component_role").asText();
         Role role;
         try { role = Role.valueOf(component); } catch (RuntimeException error) { throw new IllegalArgumentException("Missing/invalid RTP component role", error); }
@@ -57,6 +59,8 @@ public record RtpConfig(String id, Role role, int blockSize, int deviceBlocks, i
         if (config.has("capacity") || config.has("capacity.device_blocks") || config.has("capacity.reserve_blocks"))
             throw new IllegalArgumentException("Removed Mock capacity settings: use test_block_num and reserve_block_ratio");
         config = RtpSettings.normalize(config, role);
+        var model = EngineConfig.model(config, env);
+        finalizeSettings((ObjectNode) config, model);
         var scheduler = config.path("mock.scheduler.mode");
         if (!scheduler.isMissingNode() && (!scheduler.isTextual() || !Set.of("fifo", "group").contains(scheduler.textValue())))
             throw new IllegalArgumentException("Invalid mock.scheduler.mode: expected fifo or group");
@@ -93,15 +97,17 @@ public record RtpConfig(String id, Role role, int blockSize, int deviceBlocks, i
             nativeInt(config, "max_inited_kv_cache_streams", 0, 0, Integer.MAX_VALUE),
             nativeInt(config, "max_batch_tokens_without_cache", 0, 0, Integer.MAX_VALUE),
             cpSize, cpEnabled, tpSize, dpSize,
-            config, compute, EngineConfig.cacheKeySeed(config));
+            config, compute, org.flexlb.mock.cache.CacheSequence.cacheKeySeed(model));
     }
+
+    public boolean forceSinglePrefill() { return cpEnabled && business.path("cp_force_single_prefill").asBoolean(true); }
 
     public boolean groupScheduling() {
         return role == Role.prefill && business.path("mock.scheduler.mode").asText("fifo").equals("group");
     }
 
     public AdmissionConfig endpoint() {
-        return new AdmissionConfig(id, role, blockSize, tpSize, maxSeqLen, maxBatchTokens, compute, cacheKeySeed);
+        return new AdmissionConfig(id, role, blockSize, tpSize, dpSize, maxSeqLen, maxBatchTokens, compute, cacheKeySeed);
     }
 
     public ObjectNode effective() {
@@ -113,6 +119,8 @@ public record RtpConfig(String id, Role role, int blockSize, int deviceBlocks, i
             .put("reuse_cache", reuseCache).put("enable_device_cache", deviceCache)
             .put("disable_decode_first_malloc_device_reuse", disableDecodeFirstReuse)
             .put("max_seq_len", maxSeqLen).put("max_batch_tokens_size", maxBatchTokens)
+            .put("max_context_batch_size", business.path("max_context_batch_size").asInt())
+            .put("cp_force_single_prefill", business.path("cp_force_single_prefill").asBoolean())
             .put("dp_size", dpSize).put("tp_size", tpSize).put("cp_rotate_method", cpMethod(business))
             .put("enable_memory_cache", hostBlocks > 0).put("mock.cache.memory.blocks", hostBlocks)
             .put("memory_eviction_policy", hostPolicy.name().toLowerCase(Locale.ROOT))
@@ -137,6 +145,27 @@ public record RtpConfig(String id, Role role, int blockSize, int deviceBlocks, i
         if (role == Role.prefill) result.put("mock.scheduler.mode", groupScheduling() ? "group" : "fifo");
         result.setAll((ObjectNode) compute.effectiveSettings());
         return result;
+    }
+
+    private static void finalizeSettings(ObjectNode config, JsonNode model) {
+        int blockSize = nativeInt(config, "seq_size_per_block", 0, 0, Integer.MAX_VALUE);
+        if (blockSize == 0) blockSize = 64;
+        int maxSeqLen = nativeInt(config, "max_seq_len", 0, 0, Integer.MAX_VALUE);
+        if (maxSeqLen == 0) {
+            if (!model.isEmpty())
+                throw new IllegalArgumentException("Set max_seq_len explicitly for models without an implemented native length resolver");
+            maxSeqLen = 8192;
+        }
+        int contextBatch = nativeInt(config, "max_context_batch_size", 1, 1, Integer.MAX_VALUE);
+        int maxBatchTokens = nativeInt(config, "max_batch_tokens_size", 0, 0, Integer.MAX_VALUE);
+        if (maxBatchTokens == 0) {
+            long derived = (long) contextBatch * maxSeqLen;
+            if (derived > Integer.MAX_VALUE) throw new IllegalArgumentException("Derived max_batch_tokens_size exceeds supported integer range");
+            maxBatchTokens = (int) derived;
+        }
+        config.put("seq_size_per_block", blockSize).put("max_seq_len", maxSeqLen)
+            .put("max_context_batch_size", contextBatch).put("max_batch_tokens_size", maxBatchTokens)
+            .put("cp_force_single_prefill", nativeBool(config, "cp_force_single_prefill", true));
     }
 
     private static String cpMethod(JsonNode config) {

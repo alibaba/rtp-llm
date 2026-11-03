@@ -61,7 +61,7 @@ class RtpConfigTest {
         var root = root(); var config = (ObjectNode) root.path("component").path("config");
         config.put("SEQ_SIZE_PER_BLOCK", "16");
         assertThrows(IllegalArgumentException.class, () -> load(root));
-        config.remove("SEQ_SIZE_PER_BLOCK"); config.put("seq_size_per_block", 0);
+        config.remove("SEQ_SIZE_PER_BLOCK"); config.put("seq_size_per_block", -1);
         assertThrows(IllegalArgumentException.class, () -> load(root));
         config.put("seq_size_per_block", 16).put("REUSE_CACHE", 1);
         assertThrows(IllegalArgumentException.class, () -> load(root));
@@ -96,9 +96,9 @@ class RtpConfigTest {
         assertThrows(java.io.IOException.class, () -> RtpConfig.load(path));
     }
 
-    @Test void requiresExplicitGeometryAndMatchingRoleFormula() throws Exception {
+    @Test void usesNativeBlockDefaultAndRequiresMatchingRoleFormula() throws Exception {
         var root = root(); var config = (ObjectNode) root.path("component").path("config");
-        config.remove("seq_size_per_block"); assertThrows(IllegalArgumentException.class, () -> load(root));
+        config.remove("seq_size_per_block"); assertEquals(64, load(root).blockSize());
         config.put("seq_size_per_block", 16); config.remove("mock.compute");
         assertThrows(Exception.class, () -> load(root));
     }
@@ -221,5 +221,25 @@ class RtpConfigTest {
         config.put("mock.cache.memory.blocks", 32).put("block_tree_memory_evict_low_watermark_ratio", .95);
         assertThrows(IllegalArgumentException.class, () -> load(root));
     }
+
+    @Test void resolvesNativeAutomaticBudgetsAndPreservesExplicitOverrides() throws Exception {
+        var root = root(); var config = (ObjectNode) root.path("component").path("config");
+        config.remove("max_batch_tokens_size");
+        config.put("max_seq_len", 100).put("max_context_batch_size", 3).put("seq_size_per_block", 0);
+        var parsed = load(root);
+        assertEquals(300, parsed.maxBatchTokens()); assertEquals(64, parsed.blockSize());
+        assertEquals(300, parsed.business().path("max_batch_tokens_size").intValue());
+        assertEquals(parsed.effective(), RtpConfig.fromEnvironment(parsed.id(), parsed.role(), environmentOf(parsed.business())).effective());
+        config.put("max_batch_tokens_size", 50); assertEquals(50, load(root).maxBatchTokens());
+        config.put("max_batch_tokens_size", 0).put("max_seq_len", Integer.MAX_VALUE);
+        assertThrows(IllegalArgumentException.class, () -> load(root));
+    }
+
+    private static java.util.Map<String, String> environmentOf(JsonNode config) {
+        var env = new java.util.HashMap<String, String>();
+        config.fields().forEachRemaining(e -> env.put(e.getKey().toUpperCase(java.util.Locale.ROOT).replace('.', '_'), e.getValue().asText()));
+        return env;
+    }
+
 
 }

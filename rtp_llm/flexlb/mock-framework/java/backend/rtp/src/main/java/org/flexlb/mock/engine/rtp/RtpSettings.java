@@ -11,7 +11,7 @@ import org.flexlb.mock.runtime.EngineConfig;
 final class RtpSettings {
     private static final Set<String> COMMON = Set.of(
         "test_block_num", "reserve_block_ratio", "device_eviction_policy", "seq_size_per_block", "reuse_cache",
-        "enable_device_cache", "disable_decode_first_malloc_device_reuse", "max_seq_len", "max_batch_tokens_size",
+        "enable_device_cache", "disable_decode_first_malloc_device_reuse", "max_seq_len", "max_batch_tokens_size", "max_context_batch_size", "cp_force_single_prefill",
         "kv_cache_event_publisher_type", "kv_cache_event_manager_endpoint", "kv_cache_event_instance_id",
         "kv_cache_event_instance_group", "kv_cache_event_host_ip_port", "kv_cache_event_snapshot_interval_ms",
         "kvcm_enable_vipserver", "kvcm_vipserver_domain", "kvcm_server_address",

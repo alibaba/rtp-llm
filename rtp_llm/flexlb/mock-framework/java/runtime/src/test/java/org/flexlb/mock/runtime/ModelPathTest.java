@@ -16,14 +16,12 @@ import static org.junit.jupiter.api.Assertions.*;
 class ModelPathTest {
     @TempDir Path directory;
 
-    @Test void modelOwnsTheOptionalCacheNamespace() throws Exception {
-        var json=new ObjectMapper();
-        assertEquals(0,EngineConfig.cacheKeySeed(json.createObjectNode()));
-        var config=json.createObjectNode().put("checkpoint_path",directory.toString());
-        json.writeValue(directory.resolve("config.json").toFile(),Map.of("cache_key_hash_seed",17));
-        assertEquals(17,EngineConfig.cacheKeySeed(config));
-        json.writeValue(directory.resolve("config.json").toFile(),Map.of("cache_key_hash_seed",1.5));
-        assertThrows(IllegalArgumentException.class,()->EngineConfig.cacheKeySeed(config));
+    @Test void modelMetadataUsesTheSuppliedConfiguration() throws Exception {
+        var json = new ObjectMapper();
+        assertTrue(EngineConfig.model(json.createObjectNode(), Map.of()).isEmpty());
+        var config = json.createObjectNode().put("checkpoint_path", directory.toString());
+        json.writeValue(directory.resolve("config.json").toFile(), Map.of("cache_key_hash_seed", 17));
+        assertEquals(17, EngineConfig.model(config, Map.of()).path("cache_key_hash_seed").longValue());
     }
 
     @Test void localPathsNeedNoFuseService() throws Exception {

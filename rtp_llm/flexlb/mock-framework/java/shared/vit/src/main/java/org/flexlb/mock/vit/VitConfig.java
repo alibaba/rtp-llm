@@ -47,8 +47,8 @@ public record VitConfig(String id, int patch, int merge, int hidden, int batchSi
         var effective = new ObjectMapper().createObjectNode().put("id", root.path("id").asText()).put("role", "vit");
         var result = new VitConfig(root.path("id").asText(), integer(config,"mock.vit.patch.size",14,1,1024), integer(config,"mock.vit.spatial.merge.size",2,1,32), integer(config,"mock.vit.hidden.size",4096,1,65536),
             integer(config,"gpu_max_batch_size",1,1,1024), integer(config,"gpu_max_batch_images",200,1,4096), integer(config,"gpu_batch_wait_ms",10,0,60000), integer(config,"mm_max_queue_size",1024,1,65536),
-            integer(config,"vit_concurrency",64,1,65536),integer(config,"vit_max_queue_size",64,0,65536),
-            bool(config,"mock.vit.skip.download",false),integer(config,"mm_timeout_ms",120000,1,3600000),
+            Math.max(1,signedInteger(config,"vit_concurrency",64)),Math.max(0,signedInteger(config,"vit_max_queue_size",64)),
+            bool(config,"mock.vit.skip.download",false),integer(config,"mm_timeout_ms",120000,1,Integer.MAX_VALUE),
             integer(config,"mm_image_max_file_size_kb",102400,0,Integer.MAX_VALUE),headers(config),
             number(config,"mm_cache_gpu_max_bytes",2147483648L), number(config,"mm_cache_cpu_max_bytes",2147483648L), number(config,"mm_hash_key_cache_max_bytes",268435456L),compute,effective);
         effective.put("mock.vit.patch.size",result.patch).put("mock.vit.spatial.merge.size",result.merge).put("mock.vit.hidden.size",result.hidden)
@@ -82,6 +82,15 @@ public record VitConfig(String id, int patch, int merge, int hidden, int batchSi
             headers.put(entry.getKey(),entry.getValue().asText());
         });
         return Map.copyOf(headers);
+    }
+    private static int signedInteger(JsonNode config, String key, int fallback) {
+        var value = config.get(key);
+        if (value == null) return fallback;
+        if (value.isIntegralNumber() || value.isTextual() && value.asText().matches("[+-]?\\d+")) {
+            try { return Integer.parseInt(value.asText()); }
+            catch (NumberFormatException ignored) { }
+        }
+        throw new IllegalArgumentException("Invalid V " + key);
     }
     private static int integer(JsonNode node,String key,int fallback,int low,int high) {
         long value = number(node,key,fallback); if (value < low || value > high) throw new IllegalArgumentException("Invalid V " + key); return (int)value;
