@@ -305,6 +305,8 @@ class TmaPrefillTest(unittest.TestCase):
                 for prefix, tokens in (
                     (127, 129),
                     (1024, 129),
+                    (512, 512),
+                    (3584, 512),
                     (3072, 257),
                     (1024, 513),
                     (3072, 1024),

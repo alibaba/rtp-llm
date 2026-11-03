@@ -496,10 +496,11 @@ def _execute_prefill(
     SCALED: gl.constexpr,
     CACHE_ROWS: gl.constexpr,
     FRONTIER: gl.constexpr,
+    OPERAND_SLOTS: gl.constexpr = 0,
 ):
     # K and V occupy successive slots in one ring, allowing V to arrive
     # while QK and softmax execute without allocating separate K/V pipelines.
-    slots: gl.constexpr = 3 if PIPE else 2
+    slots: gl.constexpr = OPERAND_SLOTS if OPERAND_SLOTS else (3 if PIPE else 2)
     buf = gl.allocate_shared_memory(K.dtype, [slots, KN, D], K.layout)
     full = gl.allocate_shared_memory(gl.int64, [slots, 1], mbarrier.MBarrierLayout())
     empty = gl.allocate_shared_memory(gl.int64, [slots, 1], mbarrier.MBarrierLayout())
@@ -656,6 +657,7 @@ def _paged_prefill(
     EARLY: gl.constexpr,
     FRONTIER: gl.constexpr,
     KN: gl.constexpr,
+    OPERAND_SLOTS: gl.constexpr = 0,
 ):
     positions: gl.constexpr = QM // G
     tile = gl.cdiv(S, positions) - 1 - gl.program_id(1 if G == 4 else 0)
@@ -692,6 +694,7 @@ def _paged_prefill(
         SCALED,
         CACHE_ROWS,
         FRONTIER,
+        OPERAND_SLOTS,
     )
 
 
@@ -742,7 +745,11 @@ def run_prefill(q, cache, table, selected, prefix, page_size, scale):
     grid = (triton.cdiv(tokens, qm // group), heads // group)
     if group == 4:
         grid = grid[::-1]
-    pipe = (not scaled or heads == 6) and prefix + tokens <= 2048
+    # Compact staged operands let small single-request queries overlap loads
+    # with compute using two operand slots and a bounded register budget.
+    compact_pipe = scaled and not fp8 and heads == 6 and tokens <= 512
+    pipe = compact_pipe or ((not scaled or heads == 6) and prefix + tokens <= 2048)
+    launch_options = {"maxnreg": 232} if compact_pipe else {}
     _paged_prefill[grid](
         q,
         descriptor,
@@ -770,6 +777,8 @@ def run_prefill(q, cache, table, selected, prefix, page_size, scale):
         True,
         scaled or heads == 12 or not pipe,
         key_tile,
+        2 if compact_pipe else 0,
         num_warps=4,
+        **launch_options,
     )
     return output
