@@ -505,7 +505,7 @@ public:
         try {
             std::vector<FunctionRequestPB> requests(static_cast<size_t>(parallelism_config_.tp_size));
             ActualUriGather                actual_uri_gather(requests.size());
-            initializeRequests(requests, REMOTE_OPERATION_WRITE, trace_id, request.operation_id);
+            initializeRequests(requests, REMOTE_OPERATION_WRITE, trace_id);
             const auto key_indices = unmaskedKeyIndices(write_location.block_mask, valid_keys_size);
             RTP_LLM_CHECK_WITH_INFO(key_indices.size() == write_location.locations.size(),
                                     "KVCM write mask/location mismatch: keys=%zu locations=%zu",
@@ -1365,12 +1365,10 @@ private:
 
     void initializeRequests(std::vector<FunctionRequestPB>& requests,
                             RemoteOpType                    operation,
-                            const std::string&              trace_id,
-                            const std::string&              operation_id) const {
+                            const std::string&              trace_id) const {
         for (auto& request : requests) {
             request.mutable_remote_request()->set_op(operation);
             request.mutable_remote_request()->set_trace_id(trace_id);
-            request.mutable_remote_request()->set_operation_id(operation_id);
         }
     }
 
@@ -1570,7 +1568,6 @@ KVCMStorageBackend::KVCMStorageBackend(const CacheConfig&                       
                    std::make_shared<BlockTreeCacheMetricsReporter>(metrics_reporter),
                    parallelism_config.world_rank,
                    std::chrono::milliseconds(kv_cache_config.kvcm_task_timeout_ms)),
-    distributed_completion_queries_(parallelism_config.tp_size > 1 && broadcast_manager != nullptr),
     impl_(std::make_unique<Impl>(*this,
                                  cache_config,
                                  kv_cache_config,

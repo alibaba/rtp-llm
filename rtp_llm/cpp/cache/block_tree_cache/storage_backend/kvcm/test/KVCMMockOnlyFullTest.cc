@@ -1149,8 +1149,7 @@ TEST(KVCMMockOnlyFullTest, LatePayloadCompletionReturnsDeadlineAndKeepsFrozenPin
     const auto original_refs = environment.device_pool->refCount(environment.block_id);
     auto read_request = makeStorageRequest(environment);
     read_request.transfer_task = task.subtask({});
-    ScopedReferencedBlocks write_blocks(environment.device_pool, 1);
-    auto write_request = makeStorageRequest(environment, {101}, 0, write_blocks.get());
+    auto write_request = makeStorageRequest(environment);
     write_request.transfer_task = task.subtask({});
     auto read_done = std::make_shared<std::promise<ErrorInfo>>();
     auto read_result = read_done->get_future();

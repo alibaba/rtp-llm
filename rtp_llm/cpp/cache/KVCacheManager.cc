@@ -729,45 +729,6 @@ KVCacheManager::incrKVCacheRef(const KVCacheResource& resource, const CacheKeysT
     return coordinator_manager_->incrKVCacheRef(resource, cache_keys, is_connector);
 }
 
-bool KVCacheManager::queryTransferTasks(const QueryTransferTasksRequestPB& request,
-                                       QueryTransferTasksResponsePB& response) const {
-    response.clear_tasks();
-    if (!block_tree_cache_) return false;
-    using State = TransferTaskRegistry::State;
-    using PB = QueryTransferTasksResponsePB::TaskState;
-    for (const auto& id : request.task_ids()) {
-        auto* entry = response.add_tasks();
-        entry->set_task_id(id);
-        switch (block_tree_cache_->queryTransferTask(id)) {
-            case State::NOT_FOUND: entry->set_state(PB::NOT_FOUND); break;
-            case State::RUNNING: entry->set_state(PB::RUNNING); break;
-            case State::FINISHED: entry->set_state(PB::FINISHED); break;
-        }
-    }
-    return true;
-}
-
-bool KVCacheManager::queryKVCMOperations(const QueryKVCMOperationsRequestPB& request,
-                                         QueryKVCMOperationsResponsePB& response) const {
-    response.clear_operations();
-    using State = KVCMOperationRegistry::State;
-    using PB = QueryKVCMOperationsResponsePB::OperationState;
-    for (const auto& id : request.operation_ids()) {
-        auto* entry = response.add_operations();
-        entry->set_operation_id(id);
-        switch (kvcm_operation_registry_.query(id)) {
-            case State::NOT_FOUND: entry->set_state(PB::NOT_FOUND); break;
-            case State::RUNNING: entry->set_state(PB::RUNNING); break;
-            case State::FINISHED: entry->set_state(PB::FINISHED); break;
-        }
-    }
-    return true;
-}
-
-bool KVCacheManager::forgetKVCMOperation(const std::string& operation_id) {
-    return kvcm_operation_registry_.forget(operation_id);
-}
-
 bool KVCacheManager::executeFunction(const FunctionRequestPB& request, FunctionResponsePB& response) {
     if (request.has_remote_request()) {
 #ifdef RTP_LLM_USE_REMOTE_KV_CACHE
@@ -826,8 +787,7 @@ bool KVCacheManager::executeFunction(const FunctionRequestPB& request, FunctionR
                                timeout,
                                request.mem_request().has_transfer_request_id() ?
                                    std::optional<int64_t>(request.mem_request().transfer_request_id()) :
-                                   std::nullopt,
-                               request.mem_request().task_id());
+                                   std::nullopt);
     transfer_task.setTraceId(request.mem_request().transfer_trace_id());
     const auto status = block_tree_cache_->executeTransfer(std::move(transfer_task));
     BlockTransferRequestConverter::encodeTransferResult(*memory_response, status);

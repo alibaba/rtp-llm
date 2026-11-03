@@ -96,10 +96,6 @@ public:
         if (pool_ == 1) {
             actual.clear();
         }
-        if (static_cast<int>(pool_) == state_->malformed_uri_pool) {
-            actual = uris;
-            actual.push_back("extra_uri");
-        }
         return {kv_cache_manager::ClientErrorCode::ER_OK, std::move(actual)};
     }
 
