@@ -9,19 +9,23 @@ import org.flexlb.config.FlexlbConfig;
 import org.flexlb.consistency.LBStatusConsistencyService;
 import org.flexlb.dao.master.CacheStatus;
 import org.flexlb.dao.master.WorkerStatus;
+import org.flexlb.dao.route.RoleType;
 import org.flexlb.domain.consistency.MasterChangeNotifyResp;
 import org.flexlb.service.grace.ApplicationLifecycle;
 import org.flexlb.service.grace.GracefulLifecycleReporter;
 import org.flexlb.sync.status.WorkerDirectory;
-import org.flexlb.sync.synchronizer.MasterEngineSynchronizer;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.EnumSource;
+import org.springframework.boot.SpringApplication;
+import org.springframework.boot.context.event.ApplicationReadyEvent;
+import org.springframework.context.annotation.AnnotationConfigApplicationContext;
 import org.springframework.http.MediaType;
 import org.springframework.mock.env.MockEnvironment;
 import org.springframework.test.web.reactive.server.WebTestClient;
 
+import java.time.Duration;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -41,12 +45,10 @@ class HttpLoadBalanceServerTest {
         when(configService.loadBalanceConfig()).thenReturn(config);
         RequestScheduler scheduler = mock(RequestScheduler.class);
         EndpointRegistry endpointRegistry = mock(EndpointRegistry.class);
-        MasterEngineSynchronizer synchronizer = mock(MasterEngineSynchronizer.class);
         ApplicationLifecycle lifecycle = mock(ApplicationLifecycle.class);
         when(consistency.getMasterHostIpPort()).thenReturn("127.0.0.1:7001");
         when(scheduler.getQueuedRequestCount()).thenReturn(7);
-        when(synchronizer.isReady()).thenReturn(true);
-        when(lifecycle.isShuttingDown()).thenReturn(false);
+        when(lifecycle.isReady()).thenReturn(true);
 
         HttpLoadBalanceServer server = new HttpLoadBalanceServer(
                 consistency,
@@ -54,7 +56,6 @@ class HttpLoadBalanceServerTest {
                 scheduler,
                 endpointRegistry,
                 mock(WorkerDirectory.class),
-                synchronizer,
                 lifecycle,
                 new ServerScheduleLatencyRecorder());
         WebTestClient client = WebTestClient
@@ -80,66 +81,61 @@ class HttpLoadBalanceServerTest {
 
     @ParameterizedTest
     @CsvSource({
-            "false, false, false, true, true, true",
-            "false, true, true, true, true, true",
-            "false, true, false, true, true, false",
-            "true, false, false, true, true, false",
-            "true, true, true, true, true, false",
-            "false, false, false, true, false, false",
-            "false, true, true, true, false, false",
-            "false, false, false, false, false, false"
+            "false, true, false, true, true, false, false",
+            "true, false, false, true, true, false, false",
+            "true, true, true, true, true, false, false",
+            "true, true, false, false, false, false, true",
+            "true, true, false, false, false, true, true",
+            "true, true, false, true, true, true, true",
+            "true, true, false, true, false, true, true"
     })
-    void masterInfoReadinessRequiresHealthyServingOwnerAndSynchronizedWorkers(
-            boolean shuttingDown, boolean consistencyEnabled, boolean master,
-            boolean synchronizerPresent, boolean workersReady, boolean expectedReady) {
+    void masterInfoReadinessDependsOnlyOnTheMasterProcess(
+            boolean processReady, boolean grpcServing, boolean shuttingDown,
+            boolean consistencyEnabled, boolean master, boolean unhealthyWorker, boolean expectedReady) {
         LBStatusConsistencyService consistency = mock(LBStatusConsistencyService.class);
         when(consistency.isNeedConsistency()).thenReturn(consistencyEnabled);
         when(consistency.isMaster()).thenReturn(master);
-        ApplicationLifecycle lifecycle = mock(ApplicationLifecycle.class);
-        when(lifecycle.isShuttingDown()).thenReturn(shuttingDown);
-        MasterEngineSynchronizer synchronizer = mock(MasterEngineSynchronizer.class);
-        when(synchronizer.isReady()).thenReturn(workersReady);
-        ConfigService config = mock(ConfigService.class);
-        when(config.loadBalanceConfig()).thenReturn(new FlexlbConfig());
-        HttpLoadBalanceServer server = new HttpLoadBalanceServer(
-                consistency, config, mock(RequestScheduler.class),
-                mock(EndpointRegistry.class), mock(WorkerDirectory.class),
-                synchronizerPresent ? synchronizer : null, lifecycle,
-                new ServerScheduleLatencyRecorder());
-
-        WebTestClient.bindToRouterFunction(server.loadBalancePrefill()).build()
-                .post().uri("/rtp_llm/master/info")
-                .contentType(MediaType.APPLICATION_JSON).bodyValue("{}")
-                .exchange().expectStatus().isOk().expectBody()
-                .jsonPath("$.success").isEqualTo(true)
-                .jsonPath("$.code").isEqualTo(200)
-                .jsonPath("$.ready").isEqualTo(expectedReady);
-    }
-
-    @Test
-    void standaloneReadinessDoesNotRequireOnlineHookAndIsWithdrawnOnShutdown() {
-        LBStatusConsistencyService consistency = mock(LBStatusConsistencyService.class);
-        ApplicationLifecycle lifecycle = new ApplicationLifecycle(
-                consistency, mock(FlexlbGrpcServer.class),
-                mock(GracefulLifecycleReporter.class), new MockEnvironment());
-        assertFalse(lifecycle.isHealthy(), "standalone startup has not called the platform online hook");
-        MasterEngineSynchronizer synchronizer = mock(MasterEngineSynchronizer.class);
-        when(synchronizer.isReady()).thenReturn(true);
-        ConfigService config = mock(ConfigService.class);
-        when(config.loadBalanceConfig()).thenReturn(new FlexlbConfig());
-        HttpLoadBalanceServer server = new HttpLoadBalanceServer(
-                consistency, config, mock(RequestScheduler.class),
-                mock(EndpointRegistry.class), mock(WorkerDirectory.class),
-                synchronizer, lifecycle, new ServerScheduleLatencyRecorder());
-        WebTestClient client = WebTestClient.bindToRouterFunction(server.loadBalancePrefill()).build();
-
-        client.post().uri("/rtp_llm/master/info")
-                .contentType(MediaType.APPLICATION_JSON).bodyValue("{}")
-                .exchange().expectStatus().isOk().expectBody().jsonPath("$.ready").isEqualTo(true);
-        lifecycle.offline();
-        client.post().uri("/rtp_llm/master/info")
-                .contentType(MediaType.APPLICATION_JSON).bodyValue("{}")
-                .exchange().expectStatus().isOk().expectBody().jsonPath("$.ready").isEqualTo(false);
+        when(consistency.getMasterHostIpPort()).thenReturn("127.0.0.1:7001");
+        FlexlbGrpcServer grpc = mock(FlexlbGrpcServer.class);
+        when(grpc.isServing()).thenReturn(grpcServing);
+        try (var context = new AnnotationConfigApplicationContext()) {
+            ApplicationLifecycle lifecycle = new ApplicationLifecycle(
+                    consistency, grpc, mock(GracefulLifecycleReporter.class), new MockEnvironment());
+            context.registerBean(ApplicationLifecycle.class, () -> lifecycle);
+            context.refresh();
+            if (processReady) {
+                context.publishEvent(new ApplicationReadyEvent(
+                        new SpringApplication(), new String[0], context, Duration.ZERO));
+            }
+            assertFalse(lifecycle.isHealthy(), "master readiness must not require the platform online hook");
+            if (shuttingDown) {
+                lifecycle.offline();
+            }
+            WorkerDirectory directory = mock(WorkerDirectory.class);
+            if (unhealthyWorker) {
+                WorkerStatus worker = mock(WorkerStatus.class);
+                when(worker.pollHealth()).thenReturn(new WorkerStatus.PollHealth(0, 0, 0, false, false));
+                when(directory.statusSnapshot(RoleType.DECODE)).thenReturn(Map.of("worker:8080", worker));
+            }
+            ConfigService config = mock(ConfigService.class);
+            when(config.loadBalanceConfig()).thenReturn(new FlexlbConfig());
+            HttpLoadBalanceServer server = new HttpLoadBalanceServer(
+                    consistency, config, mock(RequestScheduler.class),
+                    mock(EndpointRegistry.class), directory, lifecycle,
+                    new ServerScheduleLatencyRecorder());
+            WebTestClient client = WebTestClient.bindToRouterFunction(server.loadBalancePrefill()).build();
+            var body = client.post().uri("/rtp_llm/master/info")
+                    .contentType(MediaType.APPLICATION_JSON).bodyValue("{}")
+                    .exchange().expectStatus().isOk().expectBody()
+                    .jsonPath("$.success").isEqualTo(true)
+                    .jsonPath("$.code").isEqualTo(200)
+                    .jsonPath("$.real_master_host").isEqualTo("127.0.0.1:7001")
+                    .jsonPath("$.ready").isEqualTo(expectedReady);
+            if (unhealthyWorker) {
+                body.jsonPath("$.worker_summary.DECODE.discovered").isEqualTo(1)
+                        .jsonPath("$.worker_summary.DECODE.alive").isEqualTo(0);
+            }
+        }
     }
 
     @Test
@@ -169,7 +165,6 @@ class HttpLoadBalanceServerTest {
                 scheduler,
                 endpointRegistry,
                 mock(WorkerDirectory.class),
-                mock(MasterEngineSynchronizer.class),
                 mock(ApplicationLifecycle.class),
                 new ServerScheduleLatencyRecorder());
         WebTestClient client = WebTestClient
@@ -204,7 +199,6 @@ class HttpLoadBalanceServerTest {
                 mock(RequestScheduler.class),
                 mock(EndpointRegistry.class),
                 mock(WorkerDirectory.class),
-                mock(MasterEngineSynchronizer.class),
                 mock(ApplicationLifecycle.class),
                 new ServerScheduleLatencyRecorder());
         WebTestClient client = WebTestClient
