@@ -77,7 +77,7 @@ def test_real_master_routes_to_isolated_rtp_processes(tmp_path, batched, replica
         (root / 'java/master/target/dependencies.txt').read_text().strip()])
     client_classpath = os.pathsep.join([str(root / 'java/client/target/test-classes'), str(root / 'java/client/target/classes'),
         str(root / 'java/host/target/mock-engine-service-1.0-SNAPSHOT-all.jar')])
-    native = {'scheduler': {'type': 'QUEUE' if batched else 'DIRECT'},
+    native = {'schemaVersion': 3, 'scheduler': {'type': 'QUEUE' if batched else 'DIRECT'},
               'dispatcher': {'type': 'BATCH' if batched else 'NON_BATCH'},
               'requestLifecycle': {'request': {'timeoutMs': 60000}},
               'grpcServer': {'executorCoreSize': 4, 'executorMaxSize': 8, 'executorQueueSize': 64, 'shutdownQuietPeriodMs': 10}}
@@ -109,11 +109,11 @@ def test_real_master_routes_to_isolated_rtp_processes(tmp_path, batched, replica
             {'id': 'after_remove', 'describe': 'Master清除旧P', 'interface': 'master/engine/get'}])
     case_file = tmp_path / 'case.yaml'; case_file.write_text(yaml.safe_dump(document, allow_unicode=True))
     registry = Registry.standard(); case = compile_case(case_file, registry)
-    components = {'master': {'command': [str(java), '-XX:ActiveProcessorCount=2', '-cp', master_classpath, 'org.flexlb.mock.master.LateMasterNode' if history_overflow else 'org.flexlb.MasterNode'], 'startup_timeout': '60s'}}
+    components = {'master': {'command': [str(java), '-XX:ActiveProcessorCount=2', '-Dflexlb.monitor.provider=micrometer', '-Dflexlb.monitor.metric-whitelist=flexlb_', '-cp', master_classpath, 'org.flexlb.mock.master.LateMasterNode' if history_overflow else 'org.flexlb.MasterNode'], 'startup_timeout': '60s'}}
     for role in ('prefill', 'decode'):
         components[role] = {'command': [str(java), '-cp', str(root / 'java/host/target/mock-engine-service-1.0-SNAPSHOT-all.jar'), 'org.flexlb.mock.host.EngineHost']}
     launch = prepare_launch({'components': components,
-        'zookeeper': {'command': [str(java), '-XX:ActiveProcessorCount=2', '-cp', master_classpath,
+        'zookeeper': {'command': [str(java), '-XX:ActiveProcessorCount=2', '-Dflexlb.monitor.provider=micrometer', '-Dflexlb.monitor.metric-whitelist=flexlb_', '-cp', master_classpath,
                                   'org.flexlb.mock.master.ZookeeperNode']}}, case, tmp_path)
     output = tmp_path / 'result'
 
@@ -174,14 +174,16 @@ def test_real_master_routes_to_isolated_rtp_processes(tmp_path, batched, replica
         gap = (output / 'hosts/engine-shared/stderr.log').read_text()
         assert 'finished_history_gap requested_version=-1 dropped_through=1 latest_version=1025 retained=1024' in gap
     effective = json.loads((output / 'components/master-0/effective-config.json').read_text())
-    assert effective['FLEXLB_CONFIG'] == master_config['FLEXLB_CONFIG']
+    business = json.loads(effective['FLEXLB_CONFIG'])
+    election = business.pop('consistency')
+    assert business == json.loads(master_config['FLEXLB_CONFIG'])
     native_env = json.loads((output / 'components/master-0/native-environment.json').read_text())
     assert native_env['HIPPO_ROLE'] == effective['HIPPO_ROLE']
     events = [json.loads(row) for row in (output / 'events.jsonl').read_text().splitlines()]
     started = [event for event in events if event['event'] == 'process_started']
     assert [event['node'] for event in started] == ['zookeeper', 'engine-shared'] + [f'master-{i}' for i in range(replicas)]
-    election = effective['FLEXLB_SYNC_CONSISTENCY_CONFIG']
-    assert election['needConsistency'] is True
+    assert election == effective['consistency']
+    assert election['type'] == 'ZOOKEEPER'
     gates = [json.loads(row) for row in (output / 'gates.jsonl').read_text().splitlines()]
     addresses = {name: json.loads((output / f'components/{name}/endpoints.json').read_text())['rpc']
                  for name in ['prefill-0', 'decode-0'] + [f'master-{i}' for i in range(replicas)]}
@@ -200,7 +202,7 @@ def test_real_master_routes_to_isolated_rtp_processes(tmp_path, batched, replica
         assert other['advertised_ip'] == '127.0.0.2' and effective['advertised_ip'] == '127.0.0.1'
         assert other['server_port'] == effective['server_port']
         assert other['HIPPO_ROLE'] == effective['HIPPO_ROLE']
-        assert other['FLEXLB_SYNC_CONSISTENCY_CONFIG'] == election
+        assert other['consistency'] == election
     stopped = [event['node'] for event in events if event['event'] == 'process_stopped']
     assert stopped[-1] == 'zookeeper'
     for event in started:

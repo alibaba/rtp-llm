@@ -53,6 +53,7 @@ def _environment(config, topology, directory, *, require_engines):
                     addresses.append(f'{host}:{port}')
             if require_engines and not addresses:
                 raise ValueError(f'No running Engines for native {role}_endpoint')
+            endpoint["discovery"] = {"type": "file"}
             hosts[domain] = addresses
         if not hosts or route['role_endpoints'][0].get('pd_fusion_endpoint') is not None:
             raise ValueError('local Master supports separate P/D/V endpoints only')
@@ -84,6 +85,7 @@ class MasterGroup:
         self.launcher, self.supervisor, self.topology = launcher, supervisor, topology
         self.records, self.monitoring = records, monitoring
         self.environment, self._owned = {}, []
+        self.consistency = None
         self._next = 0
         self._instances = {}
         self._lock = asyncio.Lock()
@@ -106,9 +108,11 @@ class MasterGroup:
                 raise ExecutionError('Invalid ZooKeeper readiness address')
             return value['connect']
         connect = await self.supervisor.guard(await_ready(), float(duration(recipe['startup_timeout'])))
-        self.environment = {'HIPPO_ROLE': 'mock-' + uuid.uuid4().hex,
-            'FLEXLB_SYNC_CONSISTENCY_CONFIG': json.dumps({'needConsistency': True,
-                'zookeeperConfig': {'zkHost': connect, 'zkTimeoutMs': 6000}}),
+        identity = 'mock-' + uuid.uuid4().hex
+        self.consistency = {'type': 'ZOOKEEPER', 'connectString': connect,
+                            'sessionTimeoutMs': 6000, 'connectionTimeoutMs': 6000}
+        self.environment = {'HIPPO_ROLE': identity, 'BIZ_NAME': 'mock',
+            'DEPLOYMENT_NAME': identity, 'ZONE_NAME': 'local',
             'MOCK_MASTER_PORT': str(master_port(self.component['deployment']['replicas']))}
         self.records.emit(event='process_ready', node='zookeeper', connect=connect)
         write_json(directory / 'master-environment.json', self.environment)
@@ -119,6 +123,9 @@ class MasterGroup:
         if self.environment:
             host = master_host(index)
             check_master_ports(host, int(self.environment['MOCK_MASTER_PORT']))
+            native = json.loads(env["FLEXLB_CONFIG"])
+            native["consistency"] = self.consistency
+            env["FLEXLB_CONFIG"] = json.dumps(native, ensure_ascii=False)
             env.update(self.environment, FLEXLB_ADVERTISED_IP=host)
             write_json(directory / 'native-environment.json', env)
         return env

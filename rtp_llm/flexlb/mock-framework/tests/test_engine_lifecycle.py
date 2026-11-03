@@ -36,7 +36,7 @@ def setup_case(tmp_path, operation, mode='shared', monitor=False, invalid=False,
     if master:
         from test_master import configuration
         config = configuration()
-        config['FLEXLB_CONFIG'] = json.dumps({'scheduler': {'type': 'DIRECT'}, 'dispatcher': {'type': 'NON_BATCH'},
+        config['FLEXLB_CONFIG'] = json.dumps({'schemaVersion': 3, 'scheduler': {'type': 'DIRECT'}, 'dispatcher': {'type': 'NON_BATCH'},
             'requestLifecycle': {'request': {'timeoutMs': 3000}},
             'grpcServer': {'executorCoreSize': 4, 'executorMaxSize': 8, 'executorQueueSize': 64, 'shutdownQuietPeriodMs': 10}})
         env['master'] = {'config': config}

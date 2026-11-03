@@ -116,7 +116,7 @@ def test_client_playback_through_real_master(tmp_path, replicas, large_input):
         (root / 'java/master/target/dependencies.txt').read_text().strip()])
     native = configuration()
     # Match the sender's concurrency so this test measures playback, not DIRECT admission rejection.
-    native['FLEXLB_CONFIG'] = json.dumps({'scheduler': {'type': 'DIRECT'},
+    native['FLEXLB_CONFIG'] = json.dumps({'schemaVersion': 3, 'scheduler': {'type': 'DIRECT'},
         'dispatcher': {'type': 'NON_BATCH', 'maxInflightPerPrefillWorker': 16},
         'requestLifecycle': {'request': {'timeoutMs': 5000}},
         'grpcServer': {'executorCoreSize': 4, 'executorMaxSize': 8, 'executorQueueSize': 64, 'shutdownQuietPeriodMs': 10}})
@@ -144,11 +144,11 @@ def test_client_playback_through_real_master(tmp_path, replicas, large_input):
         'interface': 'client/requests', 'args': {'limit': 2}})
     path = tmp_path / 'case.yaml'; path.write_text(yaml.safe_dump(data))
     registry = Registry.standard(); case = compile_case(path, registry)
-    components = {'master': {'command': [java, '-XX:ActiveProcessorCount=2', '-cp', master_classpath, 'org.flexlb.MasterNode'], 'startup_timeout': '60s'},
+    components = {'master': {'command': [java, '-XX:ActiveProcessorCount=2', '-Dflexlb.monitor.provider=micrometer', '-Dflexlb.monitor.metric-whitelist=flexlb_', '-cp', master_classpath, 'org.flexlb.MasterNode'], 'startup_timeout': '60s'},
                   'client': {'command': [java, '-jar', str(root / 'java/client/target/mock-client-1.0-SNAPSHOT-all.jar')]}}
     for role in ('prefill', 'decode'):
         components[role] = {'command': [java, '-cp', str(root / 'java/host/target/mock-engine-service-1.0-SNAPSHOT-all.jar'), 'org.flexlb.mock.host.EngineHost']}
-    recipe = {'components': components, 'zookeeper': {'command': [java, '-XX:ActiveProcessorCount=2', '-cp', master_classpath, 'org.flexlb.mock.master.ZookeeperNode']}}
+    recipe = {'components': components, 'zookeeper': {'command': [java, '-XX:ActiveProcessorCount=2', '-Dflexlb.monitor.provider=micrometer', '-Dflexlb.monitor.metric-whitelist=flexlb_', '-cp', master_classpath, 'org.flexlb.mock.master.ZookeeperNode']}}
     if os.environ.get('PROMETHEUS_BIN'):
         recipe['prometheus'] = {'binary': os.environ['PROMETHEUS_BIN'], 'scrape_interval': '250ms'}
         data['phases'][0]['steps'].insert(1, {'id': 'qps', 'describe': 'Check aggregate issued rate',

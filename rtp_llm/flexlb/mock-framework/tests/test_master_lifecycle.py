@@ -176,7 +176,7 @@ def test_real_master_replacement_with_uninterrupted_client_plan(tmp_path, batche
     java = str(Path(os.environ['JAVA_HOME']) / 'bin/java')
     classpath = os.pathsep.join([str(root / 'java/master/target/classes'), (root / 'java/master/target/dependencies.txt').read_text().strip()])
     config = configuration()
-    config['FLEXLB_CONFIG'] = json.dumps({'scheduler': {'type': 'QUEUE' if batched else 'DIRECT'},
+    config['FLEXLB_CONFIG'] = json.dumps({'schemaVersion': 3, 'scheduler': {'type': 'QUEUE' if batched else 'DIRECT'},
         'dispatcher': {'type': 'BATCH' if batched else 'NON_BATCH'},
         'requestLifecycle': {'request': {'timeoutMs': 5000}},
         'grpcServer': {'executorCoreSize': 4, 'executorMaxSize': 8, 'executorQueueSize': 64, 'shutdownQuietPeriodMs': 10}})
@@ -233,7 +233,7 @@ def test_real_master_replacement_with_uninterrupted_client_plan(tmp_path, batche
     assert len(masters) == 3 and len({v['rpc'] for v in masters}) == 3 and len({v['control'] for v in masters}) == 3
     native_envs = [json.loads((output / f"components/{v['id']}/native-environment.json").read_text()) for v in masters]
     assert len({v['HIPPO_ROLE'] for v in native_envs}) == 1
-    assert len({v['FLEXLB_SYNC_CONSISTENCY_CONFIG'] for v in native_envs}) == 1
+    assert len({json.dumps(json.loads(v['FLEXLB_CONFIG'])['consistency'], sort_keys=True) for v in native_envs}) == 1
     assert len({v['MOCK_MASTER_PORT'] for v in native_envs}) == 1
     assert json.loads((output / 'topology.json').read_text()) == []
     assert all(not (output / f'components/{node}/ready.json').exists() for node in ('master-0', 'master-1'))

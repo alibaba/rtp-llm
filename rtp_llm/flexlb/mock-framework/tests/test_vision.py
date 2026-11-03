@@ -23,7 +23,7 @@ def test_vision_playback_through_real_master(tmp_path, mode):
     route = json.loads(native['MODEL_SERVICE_CONFIG'])
     route['role_endpoints'][0]['vit_endpoint'] = {'address': 'v-domain', 'protocol': 'grpc'}
     native['MODEL_SERVICE_CONFIG'] = json.dumps(route)
-    native['FLEXLB_CONFIG'] = json.dumps({'scheduler': {'type': 'DIRECT'},
+    native['FLEXLB_CONFIG'] = json.dumps({'schemaVersion': 3, 'scheduler': {'type': 'DIRECT'},
         'dispatcher': {'type': 'NON_BATCH', 'maxInflightPerPrefillWorker': 16},
         'requestLifecycle': {'request': {'timeoutMs': 5000}},
         'grpcServer': {'executorCoreSize': 4, 'executorMaxSize': 8, 'executorQueueSize': 64, 'shutdownQuietPeriodMs': 10}})
@@ -51,13 +51,13 @@ def test_vision_playback_through_real_master(tmp_path, mode):
     registry = Registry.standard()
     case = compile_case(path, registry)
     host = root / 'java/host/target/mock-engine-service-1.0-SNAPSHOT-all.jar'
-    components = {'master': {'command': [java, '-XX:ActiveProcessorCount=2', '-cp', master_classpath, 'org.flexlb.MasterNode'], 'startup_timeout': '60s'},
+    components = {'master': {'command': [java, '-XX:ActiveProcessorCount=2', '-Dflexlb.monitor.provider=micrometer', '-Dflexlb.monitor.metric-whitelist=flexlb_', '-cp', master_classpath, 'org.flexlb.MasterNode'], 'startup_timeout': '60s'},
         'client': {'command': [java, '-jar', str(root / 'java/client/target/mock-client-1.0-SNAPSHOT-all.jar')]}}
     for role in ('prefill', 'decode', 'vit'):
         components[role] = {'command': [java, '-XX:ActiveProcessorCount=2', '-cp', str(host), 'org.flexlb.mock.host.EngineHost'],
             'env': {'MOCK_BIND_HOST': '0.0.0.0', 'MOCK_ADVERTISE_HOST': '127.0.0.1'}}
     launch = prepare_launch({'engine_mode': mode, 'components': components,
-        'zookeeper': {'command': [java, '-XX:ActiveProcessorCount=2', '-cp', master_classpath, 'org.flexlb.mock.master.ZookeeperNode']}}, case, tmp_path)
+        'zookeeper': {'command': [java, '-XX:ActiveProcessorCount=2', '-Dflexlb.monitor.provider=micrometer', '-Dflexlb.monitor.metric-whitelist=flexlb_', '-cp', master_classpath, 'org.flexlb.mock.master.ZookeeperNode']}}, case, tmp_path)
     output = tmp_path / 'result'
     result = asyncio.run(run_case(case, registry, launch, output))
     assert result['status'] == 'PASS', result

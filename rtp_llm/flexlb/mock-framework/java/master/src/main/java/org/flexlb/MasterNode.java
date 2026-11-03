@@ -35,8 +35,11 @@ public final class MasterNode {
         var directory = Path.of(required("MOCK_OUTPUT_DIR"));
         int port = Integer.parseInt(required("MOCK_MASTER_PORT"));
         String host = required("FLEXLB_ADVERTISED_IP");
-        var election = json.readTree(required("FLEXLB_SYNC_CONSISTENCY_CONFIG"));
-        if (!election.path("needConsistency").asBoolean())
+        var behavior = json.readTree(required("FLEXLB_CONFIG"));
+        if (behavior.path("schemaVersion").asInt() != 3)
+            throw new IllegalArgumentException("Local Master requires FLEXLB_CONFIG schemaVersion=3");
+        var election = behavior.path("consistency");
+        if (!election.path("type").asText().equals("ZOOKEEPER"))
             throw new IllegalArgumentException("Master requires ZooKeeper election");
         SpringProperties.setFlag(AbstractEnvironment.IGNORE_GETENV_PROPERTY_NAME);
         org.flexlb.OpenTelemetryBootstrap.configureFromEnvironment();
@@ -64,7 +67,7 @@ public final class MasterNode {
                     "metrics", nativeUrl + "/prometheus"));
                 json.writerWithDefaultPrettyPrinter().writeValue(directory.resolve("effective-config.json").toFile(), Map.of(
                     "FLEXLB_CONFIG", required("FLEXLB_CONFIG"), "MODEL_SERVICE_CONFIG", required("MODEL_SERVICE_CONFIG"),
-                    "server_port", port, "advertised_ip", host, "FLEXLB_SYNC_CONSISTENCY_CONFIG", election, "HIPPO_ROLE", required("HIPPO_ROLE")));
+                    "server_port", port, "advertised_ip", host, "consistency", election, "HIPPO_ROLE", required("HIPPO_ROLE")));
                 Runtime.getRuntime().addShutdownHook(new Thread(() -> { api.close(); context.close(); }, "mock-master-close"));
                 api.publishReady(Path.of(required("MOCK_READY_FILE")));
                 new CountDownLatch(1).await();
