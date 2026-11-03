@@ -70,7 +70,8 @@ flowchart TB
 启动器不再生成任何 JSON 启动配置；它把契约直接写进每个实例的环境变量：
 
 ```
-RTP_ENGRAM_COHORT=10.0.0.1,10.0.0.2             # 共享一份 Engram 的 host 列表，顺序=part 序号
+RTP_ENGRAM_COHORT=10.0.0.1,10.0.0.2             # 可选；共享一份 Engram 的 host 列表，顺序=part 序号
+RTP_ENGRAM_GANGINFO_DIR=/etc/ganginfo             # 可选；改平台写拓扑的目录，缺省即此路径
 RTP_ENGRAM_COHORT_PORT=29483                       # 可选；平台指定优先，缺省 29483
 RTP_ENGRAM_INSTANCE_INDEX=0                       # 可选；缺省=本机 IP 在列表中的位置
 RTP_ENGRAM_MODEL_REVISION=<rev>                   # 同一 cohort 内一致
@@ -79,15 +80,32 @@ RTP_ENGRAM_LOCAL_DEVICE=0                         # 建议显式给出；缺省�
 RTP_ENGRAM_LOCAL_NUMA=0                           # 建议显式给出；该 NUMA node 需有足够空闲内存
 RTP_ENGRAM_MAX_ALLOCATION_BYTES=137438953472      # 必填；默认仅 1GiB
 RTP_ENGRAM_MAX_TOTAL_ALLOCATION_BYTES=274877906944 # 必填；默认仅 8GiB
-RTP_ENGRAM_RANKS_PER_INSTANCE=4                   # 可选；torch gang 跨多个 cohort 成员时需要
+RTP_ENGRAM_RANKS_PER_INSTANCE=4                   # 可选；torch gang 跨多个 cohort 成员时需要（也用于自动发现）
 RTP_ENGRAM_GENERATION=<uuid>                      # 可选；缺省由 cohort+revision 推导
 RTP_ENGRAM_LOCAL_DESCRIPTORS=<a.json>,<b.json>    # 可选；仅离线诊断模式需要
 RTP_ENGRAM_COHORT_TIMEOUT=1800                    # 可选
 RTP_ENGRAM_TLS_DIR=/run/engram/pki                # 可选；不设则走 plain HTTP
 ```
 
-平台只需要给出 **host 列表**：列表里有几台 host，就是几个 part 在共享这份 Engram，顺序即 part 序号；
-分片数、成员表、shard 归属、store 命名空间全部由它推导。
+### 拓扑从哪来
+
+host 列表有三个来源，按顺序取第一个可用的：
+
+1. **`RTP_ENGRAM_COHORT`**：显式列表，优先级最高，也是 prefill 现在用的方式——prefill 的 N 个实例是
+   N 个互不相通的 gang，谁也看不到别人，只能由平台给。
+2. **`/etc/ganginfo` 目录**：平台写拓扑的位置。目录里放一个 `cohort`（或 `hosts`/`members`）文件，
+   一行一个 host（或 `host:port`，`#` 起注释）；也可以按 part 拆成 `part-0`、`part-1`…（或
+   `rank-0`、`node-0`），按名字里的数字排序。两种都没有则视为未配置。
+3. **gang 自身**：一个 gang 本来就跨多台 host 时（decode 单实例多 part），在 `RANKS_PER_INSTANCE` 已给出
+   的前提下，各 rank 把本机 IPv4 写进共享 Store 的 `engram/topology/host/<rank>`，再按
+   `rank // ranks_per_instance` 分块去重取 host——`part 数 = world_size / ranks_per_instance`。
+
+   gang 推导只在 `world_size / ranks_per_instance > 1` 时生效；单机 gang（prefill 的每个 pod 只有 4 个
+   rank）推出来只有一台，会被当作“未配置”跳过，所以不会把 prefill 误判成单 part。一个 part 内的 rank
+   报出的 host 不一致会报 `GANG_HOST_MISMATCH`。
+
+平台至少要给出 **host 列表**（或平台目录、或让 gang 自描述）：列表里有几台 host，就是几个 part 在共享
+这份 Engram，顺序即 part 序号；分片数、成员表、shard 归属、store 命名空间全部由它推导。
 
 交换端口由平台决定，不指定就用默认值：**整组只有列表里第 0 台需要监听**，而且只在启动窗口内（发布+握手，
 通常几十秒到几分钟），握手结束即关闭；其余成员只有出站连接。平台可以用 `RTP_ENGRAM_COHORT_PORT` 指定一个

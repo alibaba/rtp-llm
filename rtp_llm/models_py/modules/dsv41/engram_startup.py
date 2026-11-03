@@ -39,9 +39,14 @@ COUNT_ENV = 'ENGRAM_SHARD_COUNT'
 RANKS_ENV = 'RTP_ENGRAM_RANKS_PER_INSTANCE'
 GENERATION_ENV = 'RTP_ENGRAM_GENERATION'
 PORT_ENV = 'RTP_ENGRAM_COHORT_PORT'
+GANGINFO_ENV = 'RTP_ENGRAM_GANGINFO_DIR'
 # Only the first member listens, only during startup; everything else is outbound.
 DEFAULT_COHORT_PORT = 29483
 DEFAULT_TIMEOUT = 1800
+# Where the platform drops the topology, and the Store prefix used to derive it
+# from a gang that already spans the hosts.
+GANGINFO_DIR = '/etc/ganginfo'
+TOPOLOGY_PREFIX = 'engram/topology/'
 
 
 def checkpoint_samples(checkpoint, manifest):
@@ -162,11 +167,8 @@ def _wait(store, keys, deadline):
         raise ExchangeError('INSTANCE_STORE_WAIT_FAILED_OR_TIMEOUT') from None
 
 
-def _cohort(env):
-    raw = env.get(COHORT_ENV)
-    if raw is None:
-        return None
-    default_port = env.get(PORT_ENV)
+def _parse_members(raw, default_port):
+    """Turn one "host[,host...]" string into validated (host, port) members."""
     if default_port is not None and (not default_port.isdigit() or not 1 <= int(default_port) <= 65535):
         raise ExchangeError('INVALID_COHORT')
     members = []
@@ -191,6 +193,88 @@ def _cohort(env):
     if len({host for host, _ in members}) != len(members):
         raise ExchangeError('DISTINCT_STORAGE_HOST_ADDRESSES_REQUIRED')
     return members
+
+
+def _cohort(env):
+    raw = env.get(COHORT_ENV)
+    if raw is None:
+        return None
+    return _parse_members(raw, env.get(PORT_ENV))
+
+
+def _ganginfo_entries(root):
+    """Member list from the directory the platform writes the topology into."""
+    for name in ('cohort', 'hosts', 'members'):
+        path = root / name
+        if path.is_file():
+            lines = [line.split('#', 1)[0].strip() for line in path.read_text().splitlines()]
+            return ','.join(line for line in lines if line) or None
+    # Fall back to one file per part, ordered by the number in the name.
+    numbered = []
+    for path in root.iterdir():
+        if not path.is_file():
+            continue
+        for prefix in ('rank-', 'rank', 'part-', 'part', 'node-', 'node'):
+            suffix = path.name[len(prefix):]
+            if path.name.startswith(prefix) and suffix.isdigit():
+                numbered.append((int(suffix), path))
+                break
+    items = []
+    for _, path in sorted(numbered):
+        content = path.read_text().splitlines()
+        if content and content[0].strip():
+            items.append(content[0].strip())
+    return ','.join(items) or None
+
+
+def _ganginfo_cohort(env):
+    root = Path(env.get(GANGINFO_ENV) or GANGINFO_DIR)
+    if not root.is_dir():
+        return None
+    try:
+        raw = _ganginfo_entries(root)
+    except OSError as error:
+        # A directory the deployment points at but cannot read is a
+        # misconfiguration; silently serving with Engram off would hide it.
+        raise ExchangeError('INVALID_GANGINFO') from error
+    if raw is None:
+        return None
+    return _parse_members(raw, env.get(PORT_ENV))
+
+
+def _gang_cohort(env, store, rank, world_size):
+    """One gang spanning several hosts already knows its own parts; exchange addresses.
+
+    Only usable when the ranks really are one gang: a deployment of independent
+    single-host instances (prefill) sees just its own ranks and keeps the list.
+    """
+    raw = env.get(RANKS_ENV)
+    if raw is None:
+        return None
+    if not raw.isdigit() or int(raw) <= 0:
+        raise ExchangeError('INVALID_RANKS_PER_INSTANCE')
+    per_instance = int(raw)
+    if world_size % per_instance or world_size // per_instance <= 1:
+        return None
+    if store is None:
+        raise ExchangeError('INSTANCE_STORE_REQUIRED')
+    timeout = DEFAULT_TIMEOUT if env.get(TIMEOUT_ENV) is None else float(env[TIMEOUT_ENV])
+    if not 0 < timeout <= 86400:
+        raise ExchangeError('INVALID_TIMEOUT')
+    local = sorted(address for address in _local_addresses() if not address.startswith('127.'))
+    if not local:
+        raise ExchangeError('INSTANCE_INDEX_REQUIRED')
+    key = TOPOLOGY_PREFIX + 'host/'
+    store.set(key + str(rank), ','.join(local).encode())
+    keys = [key + str(i) for i in range(world_size)]
+    _wait(store, keys, time.monotonic() + timeout)
+    hosts = []
+    for begin in range(0, world_size, per_instance):
+        seen = {store.get(key + str(i)).decode() for i in range(begin, begin + per_instance)}
+        if len(seen) != 1:
+            raise ExchangeError('GANG_HOST_MISMATCH')
+        hosts.append(sorted(seen.pop().split(','))[0])
+    return _parse_members(','.join(hosts), env.get(PORT_ENV))
 
 
 def _local_addresses():
@@ -265,9 +349,17 @@ def _tls(env, index, instances):
                 instance_cert_sha256=fingerprints)
 
 
-def build_group(env, world_size):
-    """Derive cohort membership and shard ownership from the environment only."""
+def build_group(env, world_size, store=None, rank=0):
+    """Derive cohort membership and shard ownership from the environment only.
+
+    The address list may come from the environment, from the topology directory
+    the platform writes, or from the gang itself when one gang spans the hosts.
+    """
     cohort = _cohort(env)
+    if cohort is None:
+        cohort = _ganginfo_cohort(env)
+    if cohort is None:
+        cohort = _gang_cohort(env, store, rank, world_size)
     if cohort is None:
         return None
     instances = len(cohort)
@@ -333,9 +425,9 @@ def build_group(env, world_size):
     )
 
 
-def build_config(env, world_size):
+def build_config(env, world_size, store=None, rank=0):
     """Add the local-only inputs (descriptor paths, optional mTLS material)."""
-    config = build_group(env, world_size)
+    config = build_group(env, world_size, store, rank)
     if config is None:
         return None
     config['tls'] = _tls(env, config['index'], len(config['group']['members']))
@@ -390,7 +482,7 @@ def exchange_leaders(config, documents, deadline, build=None):
 def prepare_static_engram(store, *, rank, world_size, environ=None, leader_exchange=exchange_leaders):
     """All ranks enter once. Only the member-local rank 0 opens cross-instance connections."""
     env = os.environ if environ is None else environ
-    config = build_config(env, world_size)
+    config = build_config(env, world_size, store, rank)
     if config is None:
         return None
     group = config['group']

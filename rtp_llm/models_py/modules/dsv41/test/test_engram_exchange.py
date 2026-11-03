@@ -457,4 +457,62 @@ class DeploymentIdentityTest(unittest.TestCase):
         self.assertTrue(0 < store.timeout <= 0.1)
 
 
+class TopologySourceTest(unittest.TestCase):
+    """The address list can come from the gang, the platform directory or env."""
+
+    def test_one_gang_derives_its_own_parts(self):
+        store = MemoryStore()
+        for rank, host in enumerate(['10.0.0.1', '10.0.0.1', '10.0.0.2', '10.0.0.2']):
+            store.set(s.TOPOLOGY_PREFIX + 'host/' + str(rank), host.encode())
+        with mock.patch.object(s, '_local_addresses', lambda: {'10.0.0.1'}):
+            members = s._gang_cohort({s.RANKS_ENV: '2'}, store, 0, 4)
+        self.assertEqual(members, [('10.0.0.1', s.DEFAULT_COHORT_PORT),
+                                   ('10.0.0.2', s.DEFAULT_COHORT_PORT)])
+        self.assertEqual(store.get(s.TOPOLOGY_PREFIX + 'host/3'), b'10.0.0.2')
+
+    def test_ranks_inside_one_part_must_agree(self):
+        store = MemoryStore()
+        for rank, host in enumerate(['10.0.0.1', '10.0.0.9', '10.0.0.2', '10.0.0.2']):
+            store.set(s.TOPOLOGY_PREFIX + 'host/' + str(rank), host.encode())
+        with mock.patch.object(s, '_local_addresses', lambda: {'10.0.0.1'}):
+            with self.assertRaisesRegex(e.ExchangeError, 'GANG_HOST_MISMATCH'):
+                s._gang_cohort({s.RANKS_ENV: '2'}, store, 0, 4)
+
+    def test_a_single_host_gang_stays_unconfigured(self):
+        # Prefill is one gang per host: its four ranks cannot see the other hosts.
+        self.assertIsNone(s._gang_cohort({s.RANKS_ENV: '4'}, MemoryStore(), 0, 4))
+        self.assertIsNone(s._gang_cohort({}, MemoryStore(), 0, 16))
+        with self.assertRaisesRegex(e.ExchangeError, 'INSTANCE_STORE_REQUIRED'):
+            s._gang_cohort({s.RANKS_ENV: '4'}, None, 0, 16)
+        with self.assertRaisesRegex(e.ExchangeError, 'INVALID_RANKS_PER_INSTANCE'):
+            s._gang_cohort({s.RANKS_ENV: 'x'}, MemoryStore(), 0, 16)
+
+    def test_platform_directory_supplies_the_list(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / 'hosts').write_text('# deployment topology\n10.0.0.1\n\n10.0.0.2\n')
+            self.assertEqual(s._ganginfo_cohort({s.GANGINFO_ENV: directory}),
+                             [('10.0.0.1', s.DEFAULT_COHORT_PORT),
+                              ('10.0.0.2', s.DEFAULT_COHORT_PORT)])
+            (root / 'hosts').unlink()
+            (root / 'part-1').write_text('10.0.0.4\n')
+            (root / 'part-0').write_text('10.0.0.3\n')
+            (root / 'unrelated').write_text('ignored\n')
+            self.assertEqual([host for host, _ in s._ganginfo_cohort({s.GANGINFO_ENV: directory})],
+                             ['10.0.0.3', '10.0.0.4'])
+            (root / 'part-1').write_text('10.0.0.4:29500\n')
+            self.assertEqual(s._ganginfo_cohort({s.GANGINFO_ENV: directory})[1], ('10.0.0.4', 29500))
+            self.assertIsNone(s._ganginfo_cohort({s.GANGINFO_ENV: '/nonexistent/ganginfo'}))
+
+    def test_explicit_environment_wins_over_the_directory(self):
+        with tempfile.TemporaryDirectory() as directory:
+            (Path(directory) / 'hosts').write_text('10.0.0.1\n10.0.0.2\n')
+            env = cohort_env(2)
+            env[s.COHORT_ENV] = '127.0.0.1,127.0.0.2'
+            env[s.GANGINFO_ENV] = directory
+            group = s.build_group(env, 4)['group']
+            self.assertEqual([m['shards'][0]['host_id'] for m in group['members']],
+                             ['127.0.0.1', '127.0.0.2'])
+
+
 if __name__ == '__main__': unittest.main(verbosity=2)
