@@ -24,6 +24,8 @@ namespace rtp_llm {
 class CPSlotMapper;
 class CacheStore;
 class BroadcastManager;
+struct BlockTreeCacheLayout;
+using BlockTreeCacheLayoutConstPtr = std::shared_ptr<const BlockTreeCacheLayout>;
 class PrefillCacheHitMetricsReporter;
 class KVCacheAllocationWaitState;
 
@@ -38,7 +40,8 @@ public:
                    const SpeculativeExecutionConfig&  sp_config                    = SpeculativeExecutionConfig{},
                    const PDSepConfig&                 pd_sep_config                = PDSepConfig{},
                    const CacheStoreConfig&            cache_store_config           = CacheStoreConfig{},
-                   bool                               use_device_malloc_block_pool = false);
+                   bool                               use_device_malloc_block_pool = false,
+                   BlockTreeCacheLayoutConstPtr       block_tree_layout            = nullptr);
     ~KVCacheManager();
 
     // 初始化和配置相关
@@ -47,9 +50,9 @@ public:
         return coordinator_manager_ != nullptr;
     }
 
-    // TP0 owns request block allocation; other ranks only receive the block IDs.
+    /** The first stage's TP0 allocates request blocks; other ranks receive its block IDs. */
     bool isAllocatorOwner() const {
-        return parallelism_config_.tp_rank == 0;
+        return parallelism_config_.pp_rank == 0 && parallelism_config_.tp_rank == 0;
     }
 
     const CacheConfig& cacheConfig() const;
@@ -87,18 +90,15 @@ public:
     void blockBatchCopy(const torch::Tensor& copy_mapping);
     void blockBatchCopy(const BlockIdPair* copy_mapping_begin, const BlockIdPair* copy_mapping_end);
     void blockBatchCopyByGroup(const std::vector<TaggedBlockIdPair>& copy_mapping);
-    void blockBatchCopyForForward(const torch::Tensor& copy_mapping, const std::vector<std::string>& group_tags);
+    void blockBatchCopyForForward(const torch::Tensor&            copy_mapping,
+                                  const std::vector<std::string>& group_tags,
+                                  const torch::Tensor&            valid_token_lengths = torch::Tensor());
 
     bool updateKVBlock(const BatchKVCacheResourcePtr&  batch_kv_cache_resource,
                        const std::vector<int>&         block_src_batch,
                        bool                            copy_last_block,
                        std::vector<TaggedBlockIdPair>& block_update_mapping);
-    // Append externally-owned physical blocks into the batch_kv_cache_resource[batch_id][group_id] block table
-    // with a request-family reference.
-    bool referenceRequestBlocks(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
-                                int                            batch_id,
-                                int                            group_id,
-                                const BlockIndicesType&        src_block_ids);
+
     // 地址转换和缓冲区访问
     BlockAddrInfo          convertIndexToAddr(int block_index, int layer_id) const;
     std::vector<BlockInfo> convertIndexToBuffer(int block_index, int layer_id) const;
@@ -171,6 +171,7 @@ private:
     const PDSepConfig                  pd_sep_config_;
     const bool                         use_device_malloc_block_pool_;
     const bool                         warmup_;
+    const BlockTreeCacheLayoutConstPtr block_tree_layout_;
     KVCacheEventPublisherPtr           cache_event_publisher_;
     bool                               hasTailSparseReuseGroup() const;
     void                               initCacheEventPublisher();

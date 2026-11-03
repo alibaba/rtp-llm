@@ -1743,6 +1743,13 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
         self.assertFalse(result["logits_defined"])
         self.assertEqual(result["records"], [])
 
+    def test_pd_prefill_without_cache_store_skips_write_cycle(self) -> None:
+        result = run_scenario(
+            CacheStoreForwardModel(), "prefill_only_pd_cache_store_disabled"
+        )
+
+        self.assertEqual(result["records"], [])
+
     def test_skip_lm_head_without_explicit_capture_does_not_publish(self) -> None:
         model = CacheStoreForwardModel()
 
