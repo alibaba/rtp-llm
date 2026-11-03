@@ -829,6 +829,7 @@ class CudaFp8LinearTestBase:
             + 0.001
         )
         # Create FP8 per block linear layer
+        weight, weight_scales = self._apply_ue8m0_requant(weight, weight_scales)
         cuda_fp8_linear = self.get_linear_cls()(weight, weight_scales)
         # Create trace file directory if not exists
         if os.path.exists("./trace_files"):
