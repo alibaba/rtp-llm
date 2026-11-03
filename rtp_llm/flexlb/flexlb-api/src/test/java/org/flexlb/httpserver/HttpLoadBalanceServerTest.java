@@ -1,6 +1,7 @@
 package org.flexlb.httpserver;
 
 import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -15,12 +16,16 @@ import org.flexlb.consistency.LBStatusConsistencyService;
 import org.flexlb.dao.master.CacheStatus;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.domain.consistency.MasterChangeNotifyResp;
+import org.flexlb.service.grace.ApplicationLifecycle;
+import org.flexlb.service.grace.GracefulLifecycleReporter;
 import org.flexlb.sync.status.WorkerDirectory;
 import org.flexlb.sync.synchronizer.MasterEngineSynchronizer;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.EnumSource;
 import org.springframework.http.MediaType;
+import org.springframework.mock.env.MockEnvironment;
 import org.springframework.test.web.reactive.server.WebTestClient;
 
 import java.util.Map;
@@ -73,9 +78,11 @@ class HttpLoadBalanceServerTest {
         RequestScheduler scheduler = mock(RequestScheduler.class);
         EndpointRegistry endpointRegistry = mock(EndpointRegistry.class);
         MasterEngineSynchronizer synchronizer = mock(MasterEngineSynchronizer.class);
+        ApplicationLifecycle lifecycle = mock(ApplicationLifecycle.class);
         when(consistency.getMasterHostIpPort()).thenReturn("127.0.0.1:7001");
         when(scheduler.getQueuedRequestCount()).thenReturn(7);
         when(synchronizer.isReady()).thenReturn(true);
+        when(lifecycle.isShuttingDown()).thenReturn(false);
 
         HttpLoadBalanceServer server =
                 new HttpLoadBalanceServer(
@@ -85,6 +92,7 @@ class HttpLoadBalanceServerTest {
                         endpointRegistry,
                         mock(WorkerDirectory.class),
                         synchronizer,
+                        lifecycle,
                         new ServerScheduleLatencyRecorder());
         WebTestClient client =
                 WebTestClient.bindToRouterFunction(server.loadBalancePrefill()).build();
@@ -110,6 +118,114 @@ class HttpLoadBalanceServerTest {
                 .isEqualTo(true);
 
         verify(scheduler).getQueuedRequestCount();
+    }
+
+    @ParameterizedTest
+    @CsvSource({
+        "false, false, false, true, true, true",
+        "false, true, true, true, true, true",
+        "false, true, false, true, true, false",
+        "true, false, false, true, true, false",
+        "true, true, true, true, true, false",
+        "false, false, false, true, false, false",
+        "false, true, true, true, false, false",
+        "false, false, false, false, false, false"
+    })
+    void masterInfoReadinessRequiresHealthyServingOwnerAndSynchronizedWorkers(
+            boolean shuttingDown,
+            boolean consistencyEnabled,
+            boolean master,
+            boolean synchronizerPresent,
+            boolean workersReady,
+            boolean expectedReady) {
+        LBStatusConsistencyService consistency = mock(LBStatusConsistencyService.class);
+        when(consistency.isNeedConsistency()).thenReturn(consistencyEnabled);
+        when(consistency.isMaster()).thenReturn(master);
+        ApplicationLifecycle lifecycle = mock(ApplicationLifecycle.class);
+        when(lifecycle.isShuttingDown()).thenReturn(shuttingDown);
+        MasterEngineSynchronizer synchronizer = mock(MasterEngineSynchronizer.class);
+        when(synchronizer.isReady()).thenReturn(workersReady);
+        ConfigService config = mock(ConfigService.class);
+        when(config.loadBalanceConfig()).thenReturn(new FlexlbConfig());
+        HttpLoadBalanceServer server =
+                new HttpLoadBalanceServer(
+                        consistency,
+                        config,
+                        mock(RequestScheduler.class),
+                        mock(EndpointRegistry.class),
+                        mock(WorkerDirectory.class),
+                        synchronizerPresent ? synchronizer : null,
+                        lifecycle,
+                        new ServerScheduleLatencyRecorder());
+
+        WebTestClient.bindToRouterFunction(server.loadBalancePrefill())
+                .build()
+                .post()
+                .uri("/rtp_llm/master/info")
+                .contentType(MediaType.APPLICATION_JSON)
+                .bodyValue("{}")
+                .exchange()
+                .expectStatus()
+                .isOk()
+                .expectBody()
+                .jsonPath("$.success")
+                .isEqualTo(true)
+                .jsonPath("$.code")
+                .isEqualTo(200)
+                .jsonPath("$.ready")
+                .isEqualTo(expectedReady);
+    }
+
+    @Test
+    void standaloneReadinessDoesNotRequireOnlineHookAndIsWithdrawnOnShutdown() {
+        LBStatusConsistencyService consistency = mock(LBStatusConsistencyService.class);
+        ApplicationLifecycle lifecycle =
+                new ApplicationLifecycle(
+                        consistency,
+                        mock(FlexlbGrpcServer.class),
+                        mock(GracefulLifecycleReporter.class),
+                        new MockEnvironment());
+        assertFalse(
+                lifecycle.isHealthy(),
+                "standalone startup has not called the platform online hook");
+        MasterEngineSynchronizer synchronizer = mock(MasterEngineSynchronizer.class);
+        when(synchronizer.isReady()).thenReturn(true);
+        ConfigService config = mock(ConfigService.class);
+        when(config.loadBalanceConfig()).thenReturn(new FlexlbConfig());
+        HttpLoadBalanceServer server =
+                new HttpLoadBalanceServer(
+                        consistency,
+                        config,
+                        mock(RequestScheduler.class),
+                        mock(EndpointRegistry.class),
+                        mock(WorkerDirectory.class),
+                        synchronizer,
+                        lifecycle,
+                        new ServerScheduleLatencyRecorder());
+        WebTestClient client =
+                WebTestClient.bindToRouterFunction(server.loadBalancePrefill()).build();
+
+        client.post()
+                .uri("/rtp_llm/master/info")
+                .contentType(MediaType.APPLICATION_JSON)
+                .bodyValue("{}")
+                .exchange()
+                .expectStatus()
+                .isOk()
+                .expectBody()
+                .jsonPath("$.ready")
+                .isEqualTo(true);
+        lifecycle.offline();
+        client.post()
+                .uri("/rtp_llm/master/info")
+                .contentType(MediaType.APPLICATION_JSON)
+                .bodyValue("{}")
+                .exchange()
+                .expectStatus()
+                .isOk()
+                .expectBody()
+                .jsonPath("$.ready")
+                .isEqualTo(false);
     }
 
     @Test
@@ -139,6 +255,7 @@ class HttpLoadBalanceServerTest {
                         endpointRegistry,
                         mock(WorkerDirectory.class),
                         mock(MasterEngineSynchronizer.class),
+                        mock(ApplicationLifecycle.class),
                         new ServerScheduleLatencyRecorder());
         WebTestClient client =
                 WebTestClient.bindToRouterFunction(server.loadBalancePrefill()).build();
@@ -177,6 +294,7 @@ class HttpLoadBalanceServerTest {
                         mock(EndpointRegistry.class),
                         mock(WorkerDirectory.class),
                         mock(MasterEngineSynchronizer.class),
+                        mock(ApplicationLifecycle.class),
                         new ServerScheduleLatencyRecorder());
         WebTestClient client =
                 WebTestClient.bindToRouterFunction(server.loadBalancePrefill()).build();

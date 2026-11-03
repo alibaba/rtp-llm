@@ -63,6 +63,7 @@ class WorkerStatusHealthTest {
         assertFalse(worker.pollHealth().healthy(), "an invalid alive field is not a health observation");
         assertFalse(worker.isAvailableForScheduling());
         assertEquals(0L, worker.pollHealth().consecutiveWorkerFailures());
+        assertEquals(0L, worker.pollHealth().lastSuccessfulPollUs());
         assertNull(worker.retirementReason());
 
         WorkerStatusTestFixtures.receive(worker, true, null);
@@ -156,6 +157,7 @@ class WorkerStatusHealthTest {
         try (var invalid = worker.tryBeginStatusPoll(4L)) {
             worker.recordStatusRpcResult(invalid, false, true, null);
         }
+        assertSame(firstFailure, worker.pollHealth(), "invalid responses cannot refresh successful-poll timing");
         assertEquals(1L, worker.pollHealth().consecutiveWorkerFailures());
         assertFalse(worker.pollHealth().reportedAlive());
         assertTrue(worker.isAvailableForScheduling());
