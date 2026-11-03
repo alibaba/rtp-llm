@@ -395,7 +395,7 @@ grpc::Status DecodeRpcServer::BatchGenerateCall(grpc::ServerContext*        cont
         std::vector<GenerateStreamPtr>                streams;
         std::unordered_set<int64_t>                   submitted_prefill;
         grpc::Status                                  status;
-        bool                                          scheduled = false;
+        size_t                                        enqueued_stream_count = 0;
         bool                                          completed = false;
         ~BatchContextGuard() {
             if (!completed) {
@@ -417,11 +417,10 @@ grpc::Status DecodeRpcServer::BatchGenerateCall(grpc::ServerContext*        cont
                     ctx->error_info   = reason;
                     ctx->error_status = grpcStatusFromErrorInfo(reason);
                 }
-                if (!scheduled) {
-                    // Canceled streams still need the engine's terminal/resource cleanup.
-                    for (auto& stream : streams)
-                        engine.enqueue(stream);
-                }
+                // Canceled streams still need the engine's terminal/resource cleanup.
+                // Resume after any partial submission without enqueueing a stream twice.
+                for (size_t i = enqueued_stream_count; i < streams.size(); ++i)
+                    engine.enqueue(streams[i]);
             }
             contexts.clear();
             for (const auto& handle : handles) {
@@ -527,18 +526,15 @@ grpc::Status DecodeRpcServer::BatchGenerateCall(grpc::ServerContext*        cont
                                grpc::Status(grpc::StatusCode::INTERNAL, "Prefill batch ACK request mismatch");
             }
         }
-        // makeStream installs engine invariants; enqueueGroup preserves peer TP/CP and cancel bindings.
-        const auto enqueued = engine_->getScheduler().enqueueGroup(guard.streams);
-        guard.scheduled     = true;
-        if (enqueued.first.size() != guard.streams.size())
-            return guard.status = grpc::Status(grpc::StatusCode::INTERNAL, "Decode batch enqueue size mismatch");
-        for (size_t i = 0; i < enqueued.first.size(); ++i) {
-            if (!enqueued.first[i]) {
-                const auto error    = guard.streams[i]->statusInfo();
-                return guard.status = grpcStatusFromErrorInfo(
-                           error.hasError() ? error :
-                                              ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "Decode batch item rejected"));
-            }
+        // Prefill stays grouped; Decode streams independently join ordinary dynamic batching.
+        for (auto& stream : guard.streams) {
+            engine_->enqueue(stream);
+            ++guard.enqueued_stream_count;
+        }
+        for (const auto& stream : guard.streams) {
+            const auto error = stream->statusInfo();
+            if (error.hasError())
+                return guard.status = grpcStatusFromErrorInfo(error);
         }
         guard.status    = pollBatchStreamOutput(context, guard.streams, response);
         guard.completed = guard.status.ok() && !client_cancelled();
