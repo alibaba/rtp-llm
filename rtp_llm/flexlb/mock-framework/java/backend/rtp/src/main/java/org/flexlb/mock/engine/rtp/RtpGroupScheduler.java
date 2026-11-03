@@ -11,7 +11,10 @@ final class RtpGroupScheduler extends RtpSchedulerBase {
     private final Map<Entry, ArrayDeque<Entry>> memberships = new IdentityHashMap<>();
     private boolean preferGroup;
 
-    RtpGroupScheduler(Object lock, RtpConfig config, KvCache cache) { super(lock, config, cache); }
+    RtpGroupScheduler(Object lock, RtpConfig config, KvCache cache) {
+        super(lock, config, cache);
+        if (cache.remoteEnabled()) throw new IllegalArgumentException("Remote KV requires mock.scheduler.mode=fifo");
+    }
 
     @Override public List<InputResult> input(List<InputItem> batch) {
         if (closed) throw new RequestFailure(CLOSED, "Engine is closing");

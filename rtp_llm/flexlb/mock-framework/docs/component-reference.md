@@ -75,21 +75,21 @@ WorkerStatus 报真实等待/执行任务、finished/version，available_concurr
 
 `KvCache` 和 `BlockTree` 目前固定实现 RTP Full-KV 语义，文件保留在 `java/shared/cache`，不为未知的 vLLM 行为增加策略层或适配接口。每个 Engine 各自拥有 Device/Host 池、前缀索引和请求租约，同 JVM 不共享缓存内容。树内 `lru/lfu/fifo` 只改变合法候选的排序，Device 和 Host 可以分别配置。一次 match 用同一访问序号刷新整条命中路径，release/重叠 publish 不刷新；每次成功进入新存储层都会刷新该层的 FIFO 入层顺序。
 
-正式 `acquire` 在同一锁内完成前缀匹配、取得使用引用、申请缺少的 Device 容量和本地读取；没有先查询再占用的 Scheduler 接口。状态/前缀快照只读，不保证后续请求仍然命中。本地 Host/Device 读取和转存瞬间完成，不建立本地 loading 队列、异步任务或带宽模型；PD 网络交接仍按原有生命周期执行。
+Scheduler 统一调用 `prepare` 取得 `CacheLoad`；其本地阶段使用 `acquire`，在同一锁内完成前缀匹配、取得使用引用、申请缺少的 Device 容量和本地读取。状态/前缀快照只读，不保证后续请求仍然命中。本地 Host/Device 读取和转存瞬间完成，不建立本地 loading 队列、异步任务或带宽模型；PD 网络交接仍按原有生命周期执行。
 
 对齐当前 real BlockTree：开启 Device cache 时，Host 读取成功后把已有有效前缀注册到 Device，再移除 Host 副本；关闭 Device cache 时，Host 源保留，Device 工作副本不注册。申请失败不能消费 Host。驱逐候选按所在层的直接子节点判断叶子，不要求整棵树的全局叶子；Full-KV 前缀被删除时，所有失效后缀跨层清理。Device 水位触发时向 Host 转存；Host 分配失败时保留 Device 源，不为了转存强制删除 Host 缓存，也不退化成丢弃 Device。未配置 Host 时水位回收可以直接删除 Device 索引。紧急 Device 分配允许直接回收 Device 缓存及失效后缀，不额外删除无关 Host 根。层间移动保持逻辑 key 和索引版本，真正插入/删除才改变 key 版本。Host 不计入 WorkerStatus/CacheStatus 的 Device 执行容量。
 
 容量使用原生 `test_block_num` 和 `reserve_block_ratio`。Device 可用块数=test_block_num−1；Host 使用 `mock.cache.memory.blocks` 个块。reserve 默认 5%，约束首次分配，运行中增长可以使用预留。需求超过单实例上限为永久不足，暂时被其他请求占用为可重试；增长一次补齐差额，失败不留下半次新增分配。容量不足后的等待/结束决定仍在 Scheduler，运行中的 RTP Decode 增长失败会结束该请求，不实现主动换出。显式投机的首次 D 分配也包含 reserveStep，在 PD 交接前准备目标容量。
 
-容量失败处理沿用上述边界：首次 `acquire` 返回 RETRYABLE 时，P 留在 waiting、D 留在容量等待阶段；同一容量版本不重复申请，资源释放后唤醒重试，并保留请求原 deadline。PERMANENT 立即结束单请求，返回容量错误 602；等待中超时返回 603，取消和超时后不再分配。运行中 Decode 的 `ensureCapacity` 无论暂时还是永久不足，都结束该请求，等待其 Compute/PD 使用归零后释放引用，其他请求继续；释放的容量可供等待请求重新准入。不增加抢占、请求换出或重新排队重算接口。
+容量失败处理沿用上述边界：首次 `acquire` 返回 RETRYABLE 时，P 留在 waiting、D 留在容量等待阶段；同一分配版本不重复申请，资源释放或新前缀变为可复用后唤醒重试，并保留请求原 deadline。PERMANENT 立即结束单请求，返回容量错误 602；等待中超时返回 603，取消和超时后不再分配。运行中 Decode 的 `ensureCapacity` 无论暂时还是永久不足，都结束该请求，等待其 Compute/PD 使用归零后释放引用，其他请求继续；释放的容量可供等待请求重新准入。不增加抢占、请求换出或重新排队重算接口。
 
 Host 转存目标不足由 KV 内部保留源，不直接上升为请求失败。成功终态的 `publish` 抛异常时，RequestState 将请求改为内部错误，并在 finally 中关闭租约；失败/取消不发布。`acquire/ensureCapacity` 的预期容量失败必须以 Failure 返回，未预期的内部异常按 Engine 故障停止处理，不能伪装成容量不足继续运行。
 
-Scheduler 与 KV 管理器按 Token 交互：`acquire(requiredTokens, keys)` 首次取得资源，`Lease.ensureCapacity(requiredTokens)` 保证本轮容量，`reusedTokens()` 返回复用 Token 数。容量的 Block 换算和向上取整封装在 KV 管理器中；已有容量足够或需求变小时不缩容、不重复申请，超过容量上限返回永久不足。容量配置、物理池和状态快照仍使用原生 Block 口径。
+Scheduler 与 KV 管理器按 Token 交互：`prepare(requiredTokens, keys, deadline, remoteLookup)` 首次准备资源，`Lease.ensureCapacity(requiredTokens)` 保证本轮容量，`CacheLoad.Result.reusedTokens` 返回已就绪的总复用 Token 数，`Lease.reusedTokens()` 仍描述初次本地匹配。容量的 Block 换算和向上取整封装在 KV 管理器中；已有容量足够或需求变小时不缩容、不重复申请，超过容量上限返回永久不足。容量配置、物理池和状态快照仍使用原生 Block 口径。
 
 不再每轮调用 markValid，也不在 Lease 中重复保存计算进度。Scheduler 在成功终态且所有 Compute/PD 使用结束后调用 `publish(keys, validTokens)`，一次声明有效范围并注册完整有效块；P 仅提交 prompt，D 同时提交已计算的输出前缀，排除最后一个未计算 KV 的采样 token；KV 管理器校验有效范围未超过已分配容量、key 数未超过完整有效块数。`publish` 不关闭租约，`close` 只释放请求引用。投机拒绝区域、预留空间、失败/取消请求不发布，生成内容与输入使用同一 CacheSequence 算法建立前缀索引；当前输出模型重复原生 GENERATE 给出的首 token。多个请求可共享已注册的不可变 Device 块。缓存索引引用与请求物理引用独立：索引可以在请求运行中注销或迁往 Host，请求仍保留原 Device 块，最后一个引用释放才归还物理容量。acquire/publish 仅在同步事务内临时保护完整前缀。状态中的 referenced 只统计仍同时被索引和请求引用的 Device 物理块；注销或转存后仍被请求持有的块计入 held。Host-only 的私有 Device 副本与 Host 记作两层真实占用。
 
-Device/Host 水位按物理占用比例工作：达到 high 后，尽量回收到 low，未达到 low 时保留触发状态。加载、发布、增长和请求释放完成后同步检查，顺序为 Host、Device，不建后台扫描线程；运行中请求的引用可能使物理占用暂时无法下降。`enable_memory_cache` 要求显式正数 `mock.cache.memory.blocks`。Disk/Remote 及 Host 传输超时参数直接忽略，本地瞬间完成不使用这些参数。Host-only 写回暂保留可容纳的部分前缀，尚未对齐 real 的整批目标预分配与整批失败回滚；Device+Host 主路径不依赖此简化。异步传输队列及 Disk/Remote 仍不实现。明确不建模按网络层分池或 Hybrid/SWA/Linear 多资源 KV 布局，所有层统一折算为一套逻辑 KV 容量。
+Device/Host 水位按物理占用比例工作：达到 high 后，尽量回收到 low，未达到 low 时保留触发状态。加载、发布、增长和请求释放完成后同步检查，顺序为 Host、Device，不建后台扫描线程；运行中请求的引用可能使物理占用暂时无法下降。`enable_memory_cache` 要求显式正数 `mock.cache.memory.blocks`。Disk/Remote 及 Host 传输超时参数直接忽略，本地瞬间完成不使用这些参数。Host-only 写回暂保留可容纳的部分前缀，尚未对齐 real 的整批目标预分配与整批失败回滚；Device+Host 主路径不依赖此简化。远端准备流程与逻辑读写接口已实现，具体远端存储适配和真实 payload 未实现；Disk 仍不实现。明确不建模按网络层分池或 Hybrid/SWA/Linear 多资源 KV 布局，所有层统一折算为一套逻辑 KV 容量。
 
 ## 通用 V 与输入准备
 
@@ -283,7 +283,7 @@ P 在 GENERATE 阶段发送 `prefill_kv_handoff.computed_kv_end`，为已计算 
 
 变更使用有界内存队列（100000 条），每次最多取 1000 条，按同 key 最后一次转换合并，避免 Meta 先处理 ADD 再处理 DELETE 导致结果逆序。网络工作在独立线程中，每 20ms 检查增量、每秒心跳；网络失败、队列溢出或服务端要求恢复时，以当前快照修复，不扫描差集代替变更，也不保存磁盘事件历史。快照带本地版本界限，已被快照覆盖的队列事件会丢弃，避免旧事件覆盖新快照。正常关闭尽力上报 HOST_DOWN；意外退出由服务端心跳失效处理。
 
-Master 与 KVCM 是两个独立消费者，不要求跨服务原子提交。KVCM 不可用时不会阻塞调度或 Master RPC；最近错误、注册状态和待发送数量可从 Engine 端点的 kvcm 状态查看。未实现远端 KV 查找/加载/写回；事件位置仅声明本地持有缓存，不能当成成功的远端 payload 写入。
+Master 与 KVCM 是两个独立消费者，不要求跨服务原子提交。KVCM 不可用时不会阻塞调度或 Master RPC；最近错误、注册状态和待发送数量可从 Engine 端点的 kvcm 状态查看。远端 KV 已提供统一准备流程和逻辑读写接口，但未安装真实存储适配；事件位置仅声明本地持有缓存，不能当成成功的远端 payload 写入。
 ```yaml
 kv_cache_event_publisher_type: kvcm
 kv_cache_event_manager_endpoint: http://<meta-http-host>:<port>
@@ -292,7 +292,7 @@ kv_cache_event_instance_id: deployment_128
 kv_cache_event_snapshot_interval_ms: 600000
 ```
 
-manager_endpoint 是显式 Meta HTTP 覆盖地址，优先于发现；未配置时，shared/cache/KvcmDiscovery 使用 kvcm_enable_vipserver、kvcm_vipserver_domain 或 kvcm_server_address，通过原生 GetClusterInfo 发现 Meta HTTP leader。成功地址缓存到失败后失效，依次尝试 bootstrap 候选，不做周期轮询。instance_id 必须显式配置为共享查询空间；host_ip_port 缺省为发布 IP 加 gRPC 端口减一，与 DSV Master 身份一致。关闭事件发布、仅配置 enable_remote_cache=true 时仍可注册并保持控制心跳，NODE_REGISTER 不宣称有 HBM 事件；心跳 extra_info 中的 rtp_remote_cache_enabled 单独记录，不能被解释成数据面已经接通。正式环境需使用匹配的 model_name 和实例组。
+manager_endpoint 是显式 Meta HTTP 覆盖地址，优先于发现；未配置时，shared/cache/KvcmDiscovery 使用 kvcm_enable_vipserver、kvcm_vipserver_domain 或 kvcm_server_address，通过原生 GetClusterInfo 发现 Meta HTTP leader。成功地址缓存到失败后失效，依次尝试 bootstrap 候选，不做周期轮询。instance_id 必须显式配置为共享查询空间；host_ip_port 缺省为发布 IP 加 gRPC 端口减一，与 DSV Master 身份一致。显式装配远端适配器并开启 enable_remote_cache=true 后，即使关闭事件发布仍可注册并保持控制心跳；未装配适配器却开启此项会在启动时报错。NODE_REGISTER 不宣称有 HBM 事件；心跳 extra_info 中的 rtp_remote_cache_enabled 单独记录，不能被解释成数据面已经接通。正式环境需使用匹配的 model_name 和实例组。
 
 `ExecuteFunction` 采用原生 FunctionRequest/Response：READ/WRITE 当前未提交任何外部 I/O，返回 FAILED_BUFFER_SAFE 且 payload_buffer_safe=true；其他未实现的 KVCM SDK 元数据操作返回 UNIMPLEMENTED。ShutdownRequest 的跨 rank 停机协调未模拟，返回 UNIMPLEMENTED，不生成排空证明；实例停止继续使用已有的进程生命周期和 TERM 清理路径。
 
@@ -381,4 +381,14 @@ prometheus/ 保存配置、targets、版本、日志、data/TSDB/WAL 和 collect
 
 ### RTP 调度实现边界
 
-`RtpSchedulerBase` 共享请求状态、KV 引用、PD 生命周期、Forward 提交、取消和指标；`RtpScheduler` 仅做普通 FIFO 准入，`RtpGroupScheduler` 单独拥有显式组队列、残余成员和普通/组之间的选择。组标识不改变普通请求的调度方式。选择在 Engine 启动时完成，不从 Master 配置推断，也不在运行中按请求切换。`fifo` 模式应配合 Master 的 `NON_BATCH` 交付；它仍会动态组成多请求 Forward batch。当前拆分保留既有同步缓存行为，尚未增加远端 KV 加载或组级异步加载。
+`RtpSchedulerBase` 共享请求状态、KV 引用、PD 生命周期、Forward 提交、取消和指标；`RtpScheduler` 仅做普通 FIFO 准入，`RtpGroupScheduler` 单独拥有显式组队列、残余成员和普通/组之间的选择。组标识不改变普通请求的调度方式。选择在 Engine 启动时完成，不从 Master 配置推断，也不在运行中按请求切换。`fifo` 模式应配合 Master 的 `NON_BATCH` 交付；它仍会动态组成多请求 Forward batch。本地准备立即完成；普通调度器支持远端异步准备，显式 group 暂不支持远端适配器。
+
+### 缓存准备与远端接口
+
+`KvCache.prepare` 返回准备操作或明确的永久/可重试容量错误。关闭远端时只执行本地匹配和分配，不创建传输线程。开启时，P 对本地缺失的连续前缀异步查询、读取；查到位置不增加复用量，读取成功才发布有效块并完成准备。读取失败保留有效本地前缀，由普通调度器重算缺失部分；请求总 deadline 不重置。D 的 PD 加载仍使用原有流程，不重复查询远端。
+
+`shared/cache/remote/RemoteCache` 仅定义逻辑 match/read/write，位置凭据由适配器自己持有，KvCache 持有本地容量和引用。接口执行在锁外虚拟线程中，整个查询/读取共用一次任务；最多保留 1024 个在途读写，无额外等待队列。达到上限时读取回退本地，写入阶段返回异常。接口返回/抛异常必须表示已停止访问本次资源；interrupt 只请求取消，不作为释放证明。尚未实现真实数据传输、存储 SDK、KVCM 写会话或 KVS。
+
+普通 RtpScheduler 将未就绪请求放入独立 CACHE_LOADING 阶段；完成通知只唤醒 EngineLoop，maintain 在调度锁内更新有效前缀、把请求放回 waiting 队尾。loading 不阻塞其他请求，也计入本轮准入预算与已初始化 KV 请求数。回调不查找可复用的 request_id；取消后原操作不能再发布。LOAD 引用一直持有到工作线程退出，即使请求已取消。
+
+成功请求通过 `Lease.publishAndStore` 发布有效完整块，并以独立 STORE 引用提交后台写；请求终态不等写入，失败不回滚有效本地缓存。返回的 CompletionStage 反映写入及资源释放结果。节点关闭请求取消在途任务，未安全结束的任务继续持有引用，禁止提前复用块。`enable_remote_cache=false` 为默认；当前命令行/Whale 入口未安装适配器，不能直接开启为真实远端模式。测试仅通过显式 Java 装配注入可控适配器，不提供运行时假存储。

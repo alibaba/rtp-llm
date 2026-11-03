@@ -1,6 +1,8 @@
 package org.flexlb.mock.cache;
 
 import java.util.*;
+import java.util.concurrent.*;
+import org.flexlb.mock.cache.remote.RemoteCache;
 import static org.flexlb.mock.cache.BlockPool.Kind.*;
 
 /** RTP Full-KV storage. Local tier copies are instantaneous under this owner's monitor. */
@@ -14,9 +16,13 @@ public final class KvCache implements AutoCloseable {
         }
     }
     public record Admission(Lease lease, Failure failure, long generation) {}
+    public record Preparation(CacheLoad load, Failure failure, long generation) {}
     public record Snapshot(int totalBlocks, int availableBlocks, int freeBlocks, int heldBlocks,
                            int referencedBlocks, long version, Set<Long> keys) {}
     private final BlockPool device, host;
+    private final RemoteCache remote;
+    private final Set<RemoteTask> transfers = Collections.newSetFromMap(new IdentityHashMap<>());
+    private static final int MAX_TRANSFERS = 1024;
     private final BlockTree tree;
     private final int blockSize, reserve;
     private final boolean deviceCache;
@@ -24,16 +30,21 @@ public final class KvCache implements AutoCloseable {
     private final Set<Lease> active = Collections.newSetFromMap(new IdentityHashMap<>());
     private boolean closed, balancing, deviceTriggered, hostTriggered;
     private java.util.function.Consumer<CacheMetadata.Change> metadataObserver;
-    private Runnable capacityChanged = () -> {};
+    private Runnable changed = () -> {};
 
     /** The observer must only signal; it must never acquire an Engine scheduling lock. */
-    public synchronized void onCapacityChange(Runnable observer) { capacityChanged = Objects.requireNonNull(observer); }
+    public synchronized void onChange(Runnable observer) { changed = Objects.requireNonNull(observer); }
 
     public KvCache(int blockSize, int blocks, int reserve, EvictionPolicy policy) {
         this(blockSize, blocks, reserve, policy, true, 0, policy, null, null);
     }
     public KvCache(int blockSize, int blocks, int reserve, EvictionPolicy policy, boolean deviceCache, int hostBlocks,
                    EvictionPolicy hostPolicy, Watermark deviceWatermark, Watermark hostWatermark) {
+        this(blockSize, blocks, reserve, policy, deviceCache, hostBlocks, hostPolicy, deviceWatermark, hostWatermark, null);
+    }
+    public KvCache(int blockSize, int blocks, int reserve, EvictionPolicy policy, boolean deviceCache, int hostBlocks,
+                   EvictionPolicy hostPolicy, Watermark deviceWatermark, Watermark hostWatermark, RemoteCache remote) {
+        this.remote = remote;
         if (blockSize < 1 || blocks <= 0 || reserve < 0 || reserve > blocks || hostBlocks < 0)
             throw new IllegalArgumentException("Invalid block capacity/reserve");
         device = new BlockPool(blocks); host = new BlockPool(hostBlocks);
@@ -76,8 +87,114 @@ public final class KvCache implements AutoCloseable {
         matched.forEach(tree::unpin);
         var lease = new Lease(slots, matched.size()); active.add(lease);
         balance();
-        return new Admission(lease, null, device.generation());
+        return new Admission(lease, null, allocationGeneration());
     }
+    public boolean remoteEnabled() { return remote != null; }
+
+    /** Local allocation is immediate; only a missing reusable prefix may start remote work. */
+    public synchronized Preparation prepare(long requiredTokens, List<Long> keys, long deadline, boolean remoteLookup) {
+        keys = List.copyOf(keys);
+        var admission = acquire(requiredTokens, keys);
+        if (admission.lease() == null) return new Preparation(null, admission.failure(), admission.generation());
+        var lease = admission.lease();
+        var load = new CacheLoad(this, lease);
+        long localTokens = lease.reusedTokens();
+        int localBlocks = Math.toIntExact(localTokens / blockSize);
+        if (remote == null || !remoteLookup || localBlocks == keys.size()) {
+            load.result = new CacheLoad.Result(localTokens, 0, null);
+        } else {
+            var requested = keys;
+            var pins = retain(lease, localBlocks, keys.size(), LOAD);
+            var task = new RemoteTask(pins, () -> {
+                CacheLoad.Result result;
+                try {
+                    checkLoad(load, deadline);
+                    var match = Objects.requireNonNull(remote.match(requested, localBlocks, deadline));
+                    int prefix = match.prefixBlocks();
+                    if (prefix < localBlocks || prefix > requested.size())
+                        throw new IllegalArgumentException("Remote prefix exceeds requested bounds");
+                    if (prefix > localBlocks) {
+                        checkLoad(load, deadline);
+                        remote.read(match, requested.subList(localBlocks, prefix), deadline);
+                    }
+                    checkLoad(load, deadline);
+                    synchronized (KvCache.this) {
+                        if (closed || load.closed) return;
+                        // Read completion, rather than metadata lookup, makes these blocks valid.
+                        lease.publish(requested.subList(0, prefix), (long) prefix * blockSize);
+                    }
+                    result = new CacheLoad.Result((long) prefix * blockSize, (long) (prefix - localBlocks) * blockSize, null);
+                } catch (Exception error) {
+                    if (error instanceof InterruptedException) Thread.currentThread().interrupt();
+                    result = new CacheLoad.Result(localTokens, 0, error);
+                }
+                synchronized (KvCache.this) {
+                    if (!closed && !load.closed) { load.result = result; changed.run(); }
+                }
+            });
+            load.worker = task.thread;
+            if (!submit(task)) load.result = new CacheLoad.Result(localTokens, 0,
+                new RejectedExecutionException("Remote cache transfer limit reached"));
+        }
+        return new Preparation(load, null, admission.generation());
+    }
+
+    void cancel(CacheLoad load) {
+        synchronized (this) {
+            if (load.closed) return;
+            load.closed = true;
+            if (load.worker != null) load.worker.interrupt();
+            load.lease.close(); // Transfer-owned LOAD references remain until the worker returns.
+        }
+    }
+
+    private List<BlockPool.Reference> retain(Lease lease, int from, int to, BlockPool.Kind kind) {
+        var pins = new ArrayList<BlockPool.Reference>();
+        try {
+            for (int i = from; i < to; i++) pins.add(device.retain(lease.slots.get(i).reference, kind));
+            return pins;
+        } catch (RuntimeException error) { pins.forEach(BlockPool.Reference::close); throw error; }
+    }
+    private void checkLoad(CacheLoad load, long deadline) throws TimeoutException, InterruptedException {
+        checkDeadline(deadline);
+        synchronized (this) {
+            if (closed || load.closed) throw new CancellationException("Cache preparation closed");
+        }
+    }
+    private static void checkDeadline(long deadline) throws TimeoutException, InterruptedException {
+        if (Thread.currentThread().isInterrupted()) throw new InterruptedException("Cache transfer cancelled");
+        if (System.nanoTime() >= deadline) throw new TimeoutException("Cache transfer deadline exceeded");
+    }
+    private boolean submit(RemoteTask task) {
+        if (closed || transfers.size() >= MAX_TRANSFERS) {
+            task.pins.forEach(BlockPool.Reference::close);
+            task.completion.completeExceptionally(new RejectedExecutionException("Remote cache transfer limit reached"));
+            return false;
+        }
+        transfers.add(task);
+        task.thread.start();
+        return true;
+    }
+    private final class RemoteTask implements Runnable {
+        final List<BlockPool.Reference> pins;
+        final Runnable action;
+        final CompletableFuture<Void> completion = new CompletableFuture<>();
+        final Thread thread = Thread.ofVirtual().name("mock-cache-transfer").unstarted(this);
+        RemoteTask(List<BlockPool.Reference> pins, Runnable action) { this.pins = pins; this.action = action; }
+        @Override public void run() {
+            Throwable failure = null;
+            try { action.run(); } catch (Throwable error) { failure = error; }
+            finally {
+                synchronized (KvCache.this) {
+                    pins.forEach(BlockPool.Reference::close);
+                    transfers.remove(this);
+                    changed.run();
+                }
+                if (failure == null) completion.complete(null); else completion.completeExceptionally(failure);
+            }
+        }
+    }
+
     /** Snapshot and subscription share the cache monitor. Observers must only enqueue, never block. */
     public synchronized CacheMetadata.Snapshot metadata() { return tree.metadata(); }
     public synchronized AutoCloseable observeMetadata(java.util.function.Consumer<CacheMetadata.Change> observer) {
@@ -89,8 +206,9 @@ public final class KvCache implements AutoCloseable {
             if (metadataObserver == observer) { metadataObserver = null; tree.observe(change -> {}); }
         } };
     }
-    private Admission rejected(Failure failure) { return new Admission(null, failure, device.generation()); }
-    public long allocationGeneration() { return device.generation(); }
+    private Admission rejected(Failure failure) { return new Admission(null, failure, allocationGeneration()); }
+    /** Both freed capacity and newly reusable prefixes can make a rejected request admissible. */
+    public synchronized long allocationGeneration() { return device.generation() + tree.version(); }
     public synchronized Snapshot snapshot(long latestVersion, boolean needKeys) {
         var state = device.snapshot();
         int indexed = device.cachedActiveBlocks();
@@ -154,6 +272,25 @@ public final class KvCache implements AutoCloseable {
                 } finally { publicationPins.forEach(tree::unpin); balance(); }
             }
         }
+        /** Publish computed blocks locally, then let a separately pinned write outlive the request. */
+        public CompletionStage<Void> publishAndStore(List<Long> keys, long validTokens, long deadline) {
+            synchronized (KvCache.this) {
+                if (terminal || closed) throw new IllegalStateException("Cache lease is closed");
+                keys = List.copyOf(keys);
+                publish(keys, validTokens);
+                if (remote == null || keys.isEmpty()) return CompletableFuture.completedFuture(null);
+                var published = keys;
+                var task = new RemoteTask(retain(this, 0, keys.size(), STORE), () -> {
+                    try { checkDeadline(deadline); remote.write(published, deadline); checkDeadline(deadline); }
+                    catch (Exception error) {
+                        if (error instanceof InterruptedException) Thread.currentThread().interrupt();
+                        throw new CompletionException(error);
+                    }
+                });
+                submit(task);
+                return task.completion.minimalCompletionStage();
+            }
+        }
         @Override public void close() {
             synchronized (KvCache.this) {
                 if (terminal) return;
@@ -163,16 +300,21 @@ public final class KvCache implements AutoCloseable {
                 }
                 slots.clear(); terminal = true; active.remove(this);
                 if (!closed) balance();
-                if (device.snapshot().available() > available) capacityChanged.run();
+                if (device.snapshot().available() > available) changed.run();
             }
         }
         private void requireOpen() { if (terminal) throw new IllegalStateException("Lease is closed"); }
     }
-    @Override public synchronized void close() {
-        if (closed) return;
-        closed = true;
-        for (var lease : List.copyOf(active)) lease.close();
-        tree.clear();
+    @Override public void close() {
+        synchronized (this) {
+            if (closed) return;
+            closed = true;
+            for (var task : List.copyOf(transfers)) task.thread.interrupt();
+            for (var lease : List.copyOf(active)) lease.close();
+            tree.clear();
+        }
+        // Backend shutdown can block; never perform it under the cache monitor.
+        if (remote != null) remote.close();
     }
     private boolean makeDeviceFree(int count) {
         // Forced reclamation removes the index; request references keep their physical blocks alive.
