@@ -81,7 +81,8 @@ public:
                    bool                      use_spec_decoding            = false,
                    DSparkModelRole           dspark_model_role            = DSparkModelRole::NONE,
                    bool                      allow_cuda_graph             = true,
-                   bool                      track_cache_store_completion = false);
+                   bool                      track_cache_store_completion = false,
+                   bool                      enable_cache_store           = true);
     ~PyWrappedModel();
 
     GptModelOutputs            forward(const GptModelInputs& inputs) override;
@@ -208,7 +209,8 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
                                       bool                      use_spec_decoding,
                                       DSparkModelRole           dspark_model_role,
                                       bool                      allow_cuda_graph,
-                                      bool                      track_cache_store_completion):
+                                      bool                      track_cache_store_completion,
+                                      bool                      enable_cache_store):
     device_props_(buildExecProperties(params.parallelism_config, params.device_resource_config)),
     // Every prefill-shaped forward of a CP-enabled model goes through the
     // standard split/gather path — including the DSpARK draft commit, whose
@@ -598,11 +600,13 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         throw std::runtime_error("PyWrappedModel constructor: Python model initialization failed.");
     }
 
-    cache_store_async_writer_ =
-        std::make_shared<CacheStoreAsyncWriter>(static_cast<int>(params.parallelism_config.local_rank),
-                                                cache_manager_,
-                                                model_id_,
-                                                params.mtp_cache_config_index);
+    if (enable_cache_store) {
+        cache_store_async_writer_ =
+            std::make_shared<CacheStoreAsyncWriter>(static_cast<int>(params.parallelism_config.local_rank),
+                                                    cache_manager_,
+                                                    model_id_,
+                                                    params.mtp_cache_config_index);
+    }
 
     if (py::hasattr(py_model_, "has_mtp_hidden_buffer")) {
         has_mtp_hidden_buffer_ = py_model_.attr("has_mtp_hidden_buffer")().cast<bool>();

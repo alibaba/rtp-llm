@@ -180,6 +180,22 @@ class DecodePlanTest(unittest.TestCase):
             self.assertEqual(instance.decode_gate_max_kv_length, 128)
             self.assertEqual(select.call_count, 1)
 
+    def test_capture_publishes_batch_specific_replay_kv_guard(self):
+        self.model.set_decode_backend_gate(
+            [self.backend.__name__],
+            DecodeGateEnvelope((2, 4), 256, 8, "test-profile", ((2, 128), (4, 256))),
+        )
+        self.model.configure_dynamic_decode(True)
+        module = "rtp_llm.models_py.modules.factory.attention.dispatch.backend_selector"
+        instance = SimpleNamespace(name="actual")
+        with patch(module + ".select_decode_backend", return_value=self.backend), patch(
+            module + ".instantiate_decode_backend", return_value=instance
+        ):
+            self.model.prepare_fmha_impl(
+                SimpleNamespace(attention_inputs=self.inputs), True
+            )
+        self.assertEqual(instance.decode_gate_max_kv_length, 128)
+
     def test_plan_falls_back_outside_validated_batch(self):
         self.model.set_decode_backend_gate(
             [self.backend.__name__],

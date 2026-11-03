@@ -27,7 +27,7 @@ def init_engine_group_args(parser, runtime_config):
         bind_to=(runtime_config, "enable_accuracy_check"),
         type=str2bool,
         default=False,
-        help="Record attention tensors during startup",
+        help="Run the decode-backend precision gate during startup; diagnostic when dynamic decode is disabled",
     )
     engine_group.add_argument(
         "--warm_up",

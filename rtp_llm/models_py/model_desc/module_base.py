@@ -220,18 +220,19 @@ class GptModelBase(nn.Module):
                         self,
                         primary,
                         self._decode_gate,
-                        envelope.max_kv_length if envelope is not None else 0,
+                        envelope.max_kv_for(batch) if envelope is not None else 0,
                     )
                 if capture_in_envelope and batch in self.decode_backend_plan:
                     cls = self.decode_backend_plan[batch]
                     instance = instantiate_decode_backend(self, primary, cls)
-                    instance.decode_gate_max_kv_length = envelope.max_kv_length
+                    validated_kv_length = envelope.max_kv_for(batch)
+                    instance.decode_gate_max_kv_length = validated_kv_length
                     logging.info(
                         "dynamic decode capture batch=%d backend=%s "
                         "validated_kv=%d capture_kv=%d",
                         batch,
                         cls.__name__,
-                        envelope.max_kv_length,
+                        validated_kv_length,
                         kv_length,
                     )
                     if isinstance(attention_inputs, Mapping):

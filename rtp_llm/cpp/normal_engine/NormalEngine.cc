@@ -3,6 +3,7 @@
 #include "rtp_llm/cpp/normal_engine/NormalExecutor.h"
 #include "rtp_llm/cpp/normal_engine/NormalEngine.h"
 #include "rtp_llm/cpp/normal_engine/accuracy/AccuracyChecker.h"
+#include "rtp_llm/cpp/normal_engine/accuracy/AttentionAccuracyCheckResourceRelease.h"
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
 #include "rtp_llm/cpp/utils/StatusUtil.h"
 #include "rtp_llm/cpp/engine_base/schedulers/FIFOScheduler.h"
@@ -820,21 +821,23 @@ absl::Status NormalEngine::runAttentionAccuracyCheck(const EngineInitParams& par
         || cache_config.topology().groups().front().policy.group_type != CacheGroupType::FULL) {
         return absl::FailedPreconditionError("attention accuracy check requires one FULL KV cache group");
     }
-    cache_config.finalizeBlockNums(AccuracyChecker::computeTemporaryBlockNum(model_config_, check_config),
-                                   runtime_config);
+    cache_config.finalizeBlockNums(
+        AccuracyChecker::computeTemporaryBlockNum(cache_config.seq_size_per_block, check_config), runtime_config);
     ResourceContext check_context;
     check_context.initCacheConfig(check_config);
-    check_context.role_type = pd_sep_config.role_type;
-    absl::Status status;
+    check_context.role_type  = pd_sep_config.role_type;
+    absl::Status status      = absl::OkStatus();
     bool         cache_ready = false;
     try {
         check_context.cache_manager = std::make_shared<KVCacheManager>(
             cache_config, false, nullptr, check_config, parallelism_config, runtime_config);
         cache_ready = check_context.cache_manager->init();
+        cudaSyncAndCheck();
     } catch (const std::exception& e) {
         RTP_LLM_LOG_ERROR("accuracy temporary cache setup failed: %s", e.what());
+    } catch (...) {
+        RTP_LLM_LOG_ERROR("accuracy temporary cache setup failed: unknown");
     }
-    cudaSyncAndCheck();
     if (parallelism_config.world_size > 1) {
         auto ready  = torch::tensor({cache_ready ? 1 : 0}, torch::dtype(torch::kInt32).device(torch::kCUDA));
         ready       = execAllReduce({ready, ReduceOp::Min, false, ParallelMode::DP_AND_TP}).buffer;
@@ -843,23 +846,63 @@ absl::Status NormalEngine::runAttentionAccuracyCheck(const EngineInitParams& par
     if (!cache_ready) {
         return absl::InternalError("accuracy temporary cache setup failed on at least one rank");
     }
+    std::unique_ptr<NormalExecutor> check_executor;
+    bool                            executor_ready = true;
     try {
-        NormalExecutor check_executor(
-            params, check_context.cache_manager, false, false, 0, mla_ops_type_, nullptr, nullptr, false);
-        auto check_runtime                                     = runtime_config;
-        check_runtime.fifo_scheduler_config.prefill_chunk_size = 0;
-        AccuracyChecker checker(model_config_, check_runtime, parallelism_config, dynamic);
-        status = checker.runAll(&check_executor, check_context);
+        check_executor = std::make_unique<NormalExecutor>(
+            params, check_context.cache_manager, false, false, 0, mla_ops_type_, nullptr, nullptr, false, true);
     } catch (const std::exception& e) {
-        status = absl::InternalError(e.what());
+        executor_ready = false;
+        RTP_LLM_LOG_ERROR("accuracy check executor construction failed: %s", e.what());
+    } catch (...) {
+        executor_ready = false;
+        RTP_LLM_LOG_ERROR("accuracy check executor construction failed: unknown");
     }
+    if (parallelism_config.world_size > 1) {
+        auto ready     = torch::tensor({executor_ready ? 1 : 0}, torch::dtype(torch::kInt32).device(torch::kCUDA));
+        ready          = execAllReduce({ready, ReduceOp::Min, false, ParallelMode::DP_AND_TP}).buffer;
+        executor_ready = ready.item<int>() != 0;
+    }
+    if (!executor_ready) {
+        status = absl::InternalError("accuracy check executor construction failed on at least one rank");
+    } else {
+        try {
+            auto check_runtime                                     = runtime_config;
+            check_runtime.fifo_scheduler_config.prefill_chunk_size = 0;
+            AccuracyChecker checker(model_config_, check_runtime, parallelism_config);
+            status = checker.runAll(check_executor.get(), check_context);
+        } catch (const std::exception& e) {
+            status = absl::InternalError(e.what());
+        } catch (...) {
+            status = absl::InternalError("attention accuracy check failed with an unknown exception");
+        }
+    }
+    bool reset_ready = true;
     {
         py::gil_scoped_acquire gil;
-        params.py_model.attr("initialize")(torch_ext::PyModelInitResources{});
+        try {
+            params.py_model.attr("initialize")(torch_ext::PyModelInitResources{});
+        } catch (const std::exception& e) {
+            RTP_LLM_LOG_ERROR("accuracy check empty-model initialize failed: %s", e.what());
+            reset_ready = false;
+        } catch (...) {
+            RTP_LLM_LOG_ERROR("accuracy check empty-model initialize failed: unknown");
+            reset_ready = false;
+        }
     }
-    check_context.cache_manager.reset();
-    cudaSyncAndCheck();
-    c10::cuda::CUDACachingAllocator::emptyCache();
+    if (parallelism_config.world_size > 1) {
+        auto ready  = torch::tensor({reset_ready ? 1 : 0}, torch::dtype(torch::kInt32).device(torch::kCUDA));
+        ready       = execAllReduce({ready, ReduceOp::Min, false, ParallelMode::DP_AND_TP}).buffer;
+        reset_ready = ready.item<int>() != 0;
+    }
+    if (!reset_ready) {
+        status = absl::InternalError("accuracy check empty-model initialize failed on at least one rank");
+    }
+    attention_accuracy_check::releaseResources(
+        check_executor,
+        check_context.cache_manager,
+        []() { cudaSyncAndCheck(); },
+        []() { c10::cuda::CUDACachingAllocator::emptyCache(); });
     return status;
 #endif
 }
