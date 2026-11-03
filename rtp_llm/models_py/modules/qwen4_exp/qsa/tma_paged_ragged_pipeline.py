@@ -67,7 +67,7 @@ def _locate(Cu, B, POSITIONS: gl.constexpr, G: gl.constexpr):
     return request, base, length, work - first
 
 
-@g.jit(do_not_specialize=["B", "WORDS", "WIDTH", "PAGES"])
+@g.jit(do_not_specialize=["B", "WORDS", "WIDTH", "PAGES", "TABLE_ROW"])
 def _batched_paged_prefill(
     Q,
     Cache,
@@ -81,7 +81,7 @@ def _batched_paged_prefill(
     WORDS,
     WIDTH,
     PAGES,
-    TABLE_ROW: gl.constexpr,
+    TABLE_ROW,
     PAGE_SIZE: gl.constexpr,
     SCALE_PAGE: gl.constexpr,
     SCALE_KV: gl.constexpr,

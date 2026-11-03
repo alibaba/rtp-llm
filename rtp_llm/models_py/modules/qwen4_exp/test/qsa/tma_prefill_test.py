@@ -882,6 +882,62 @@ class TmaPrefillTest(unittest.TestCase):
             try_ragged_causal_qsa_prefill(q, k, v, ids, [129, 128], cu.long())
         )
 
+    def test_batched_paged_table_geometry_reuses_compiled_pipeline(self):
+        try:
+            from rtp_llm.models_py.modules.qwen4_exp.qsa import (
+                tma_paged_ragged_pipeline,
+            )
+        except ImportError:
+            self.skipTest("Gluon paged pipeline unavailable")
+        kernel = tma_paged_ragged_pipeline._batched_paged_prefill
+        run = kernel.run
+        hashes = []
+
+        def record(*args, **kwargs):
+            compiled = run(*args, **kwargs)
+            hashes.append(compiled.hash)
+            return compiled
+
+        for heads in (6, 12):
+            for fp8 in (False, True):
+                with self.subTest(heads=heads, fp8=fp8):
+                    lengths, prefixes = [229, 239, 259], [512] * 3
+                    q, backing, cache, original, ids, scale, cu, pd = (
+                        self._paged_batch_case(heads, lengths, prefixes, fp8)
+                    )
+                    expected = self._paged_batch_reference(
+                        q, cache, original, ids, lengths, prefixes, scale
+                    )
+                    hashes.clear()
+                    with patch.object(kernel, "run", side_effect=record):
+                        for capacity, padding in ((8, 0), (16, 0), (31, 3), (64, 3)):
+                            storage = torch.zeros(
+                                (3, capacity + padding),
+                                dtype=torch.int32,
+                                device=q.device,
+                            )
+                            table = storage[:, :capacity]
+                            copied = min(capacity, original.shape[1])
+                            table[:, :copied].copy_(original[:, :copied])
+                            actual = try_ragged_paged_qsa_prefill(
+                                q,
+                                backing,
+                                table,
+                                ids,
+                                lengths,
+                                prefixes,
+                                cu,
+                                pd,
+                                page_size=128,
+                                kv_head_num=1,
+                                kv_scale=scale,
+                            )
+                            torch.testing.assert_close(
+                                actual, expected, atol=0.0078125, rtol=0.008
+                            )
+                    self.assertEqual(len(hashes), 4)
+                    self.assertEqual(len(set(hashes)), 1)
+
     def test_runtime_lengths_reuse_compiled_pipeline(self):
         try:
             from rtp_llm.models_py.modules.qwen4_exp.qsa import tma_pipeline
