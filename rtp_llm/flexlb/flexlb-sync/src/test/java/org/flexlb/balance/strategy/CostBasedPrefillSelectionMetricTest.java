@@ -609,6 +609,77 @@ class CostBasedPrefillSelectionMetricTest {
         } finally { a.ownership.release(lease, null); }
     }
 
+    @Test
+    void coldAdmissionUsesCurrentCapacityWithoutCacheAffinityOrReservations() {
+        configureEngineQueueAdmission();
+        config.getRouter().getRoles().getPrefill().getTokenBalance().setEngineQueueAdmissionThreshold(null);
+        publish("10.0.0.2", 8080);
+        var a = (PrefillEndpoint) registry.get(RoleType.PREFILL, "10.0.0.1:8080");
+        var b = (PrefillEndpoint) registry.get(RoleType.PREFILL, "10.0.0.2:8080");
+        var leases = new java.util.ArrayList<org.flexlb.balance.endpoint.PrefillState.RouteReservation>();
+        try {
+            for (var endpoint : List.of(a, b)) {
+                updateEngineQueue(endpoint, 1, 0);
+                assertEquals(CostBasedPrefillStrategy.ColdAdmission.AVAILABLE, coldAdmission(null));
+                var busy = mock(RequestRoute.class);
+                when(busy.requestId()).thenReturn(endpoint == a ? 21001L : 21002L);
+                when(busy.seqLen()).thenReturn(2_100_000L);
+                leases.add(endpoint.ownership.reserveUnqueuedRoute(busy, 1, 0).reservation());
+            }
+            assertEquals(CostBasedPrefillStrategy.ColdAdmission.FULL, coldAdmission(null));
+            b.ownership.release(leases.removeLast(), null);
+            assertEquals(CostBasedPrefillStrategy.ColdAdmission.AVAILABLE, coldAdmission(null));
+            assertEquals(0L, b.ownership.tokenWorkload().pendingTokens());
+            assertEquals(0L, b.ownership.tokenWorkload().plannedTokens());
+            try (var selected = select()) { assertEquals(b, selected.prefillEp()); }
+        } finally {
+            a.ownership.release(leases.getFirst(), null);
+        }
+    }
+
+    @Test
+    void idleWorkerInAnotherGroupCannotAuthorizeTheRequest() {
+        configureEngineQueueAdmission();
+        var a = (PrefillEndpoint) registry.get(RoleType.PREFILL, "10.0.0.1:8080");
+        updateEngineQueue(a, 1, 0);
+        var status = StrategyTestSupport.workerStatus(RoleType.PREFILL, "other", "10.0.0.2", 8080, 8081,
+                true, 1_000_000L, 1_000_000L);
+        StrategyTestSupport.publishEndpoint(registry, RoleType.PREFILL, "10.0.0.2:8080", status);
+        var busy = mock(RequestRoute.class);
+        when(busy.requestId()).thenReturn(22001L); when(busy.seqLen()).thenReturn(2_100_000L);
+        var b = (PrefillEndpoint) registry.get(RoleType.PREFILL, "10.0.0.2:8080");
+        updateEngineQueue(b, 1, 0);
+        var lease = b.ownership.reserveUnqueuedRoute(busy, 1, 0).reservation();
+        try {
+            assertEquals(CostBasedPrefillStrategy.ColdAdmission.AVAILABLE, coldAdmission(null));
+            assertEquals(CostBasedPrefillStrategy.ColdAdmission.FULL, coldAdmission("other"));
+            assertEquals(CostBasedPrefillStrategy.ColdAdmission.UNKNOWN, coldAdmission("missing"));
+        } finally { b.ownership.release(lease, null); }
+    }
+
+    @Test
+    void coldAdmissionHonorsInflightCountAndEngineQueueTokenOverride() {
+        configureEngineQueueAdmission();
+        var a = (PrefillEndpoint) registry.get(RoleType.PREFILL, "10.0.0.1:8080");
+        var leases = new java.util.ArrayList<org.flexlb.balance.endpoint.PrefillState.RouteReservation>();
+        try {
+            for (int i = 0; i < 10; i++) {
+                var busy = mock(RequestRoute.class);
+                when(busy.requestId()).thenReturn(23000L + i); when(busy.seqLen()).thenReturn(i == 0 ? 2_100_000L : 1L);
+                leases.add(a.ownership.reserveUnqueuedRoute(busy, 1, 0).reservation());
+            }
+            assertEquals(CostBasedPrefillStrategy.ColdAdmission.FULL, coldAdmission(null));
+            a.ownership.release(leases.removeLast(), null);
+            assertEquals(CostBasedPrefillStrategy.ColdAdmission.AVAILABLE, coldAdmission(null), "Engine queue override admits full token backlog");
+            updateEngineQueue(a, 1, 0);
+            assertEquals(CostBasedPrefillStrategy.ColdAdmission.FULL, coldAdmission(null));
+        } finally { for (var lease : leases) { a.ownership.release(lease, null); } }
+    }
+
+    private CostBasedPrefillStrategy.ColdAdmission coldAdmission(String group) {
+        return strategy.coldAdmission(context.data().getRequest(), context.data().getSchedulingMetadata(), RoleType.PREFILL, group);
+    }
+
     private void configureEngineQueueAdmission() {
         registry.close();
         var balance = new RoutingConfig.TokenBalanceConfig();

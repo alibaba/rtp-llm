@@ -44,6 +44,10 @@ public final class RequestContext {
     private long absoluteDeadline;
     private boolean requestDeadlineConsumed;
     private long inactivityMs;
+    // Retain request policy/VIT scope after global placement transfers to a Worker queue.
+    private volatile String prefillQueuePool;
+    String prefillQueuePool() { return prefillQueuePool; }
+    void setPrefillQueuePool(String pool) { prefillQueuePool = pool; }
     /** One local queue migration per request; retries retain the source to prevent ping-pong. */
     private volatile org.flexlb.balance.endpoint.PrefillEndpoint prefillMigrationSource;
     public org.flexlb.balance.endpoint.PrefillEndpoint prefillMigrationSource() { return prefillMigrationSource; }

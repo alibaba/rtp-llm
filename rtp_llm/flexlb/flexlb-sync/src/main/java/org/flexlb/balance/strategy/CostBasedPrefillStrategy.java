@@ -572,6 +572,37 @@ public class CostBasedPrefillStrategy {
                 .anyMatch(entry -> entry.endpoint().engineQueueAllowsAdmission());
     }
 
+    public enum ColdAdmission { AVAILABLE, FULL, UNKNOWN }
+
+    /** Read-only veto for cold shedding. Use the routing admission filters, never a TTFT threshold.
+     * No cache affinity, route pin, soft token reservation or round-robin state is acquired here.
+     */
+    public ColdAdmission coldAdmission(Request request, SchedulingMetadata metadata, RoleType role, String group) {
+        if (tokenBalance == null) { return ColdAdmission.UNKNOWN; }
+        try {
+            var discovery = discoverAvailableEndpoints(request, metadata, role, group);
+            if (discovery.registeredCount() == 0) { return ColdAdmission.UNKNOWN; }
+            if (discovery.candidates().isEmpty()) { return ColdAdmission.FULL; }
+            var blockers = new EnumMap<RoleType, Integer>(RoleType.class);
+            var candidates = new PrefillCandidateSet();
+            evaluateCandidates(discovery, request, metadata, Map.of(), new java.util.HashMap<>(), blockers,
+                    candidates, true);
+            // A different role or an indeterminate projection is not proof of Prefill overload.
+            if (candidates.size() == 0) { return ColdAdmission.UNKNOWN; }
+            for (int i = 0; i < candidates.size(); i++) {
+                var endpoint = candidates.endpoint(i);
+                var work = endpoint.ownership.tokenWorkload();
+                if (PrefillTokenBalance.hasCapacity(work.pendingTokens(), tokenBalance.getMaxPendingComputeTokens())
+                        || endpoint.engineQueueAllowsAdmission()) { return ColdAdmission.AVAILABLE; }
+            }
+            return ColdAdmission.FULL;
+        } catch (RuntimeException failure) {
+            // Missing/invalid telemetry must not become evidence authorizing early rejection.
+            Logger.debug("Cold Prefill admission check unavailable, request_id={}", request.getRequestId(), failure);
+            return ColdAdmission.UNKNOWN;
+        }
+    }
+
     private static double normalizedHitRate(double configuredRate) {
         return Double.isNaN(configuredRate)
                 ? RoutingConfig.PERCENTAGE_SCALE

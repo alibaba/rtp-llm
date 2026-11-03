@@ -13,6 +13,8 @@ public final class PrefillQueueSheddingConfig {
     private long maxWaitMs = 60_000L;
     /** Optional relief may reduce actual-age eviction, never trigger it or extend deadlines. */
     private RecoveryConfig recovery;
+    /** Gradually withdraw cold-request age exemption after sustained actual queue hard timeouts. */
+    private boolean sustainedOverloadProtection = true;
 
     @Getter
     @Setter
