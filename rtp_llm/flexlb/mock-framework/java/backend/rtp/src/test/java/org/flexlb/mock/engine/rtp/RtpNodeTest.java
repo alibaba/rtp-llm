@@ -64,6 +64,28 @@ public class RtpNodeTest {
         }
     }
 
+    @Test void fifoModeRejectsGroupRpcsButStillGeneratesIndividualRequests() throws Exception {
+        var root = JSON.<com.fasterxml.jackson.databind.node.ObjectNode>valueToTree(configuration("prefill"));
+        ((com.fasterxml.jackson.databind.node.ObjectNode) root.path("component").path("config"))
+            .put("mock.scheduler.mode", "fifo");
+        try (var node = RtpNode.start(RtpConfig.load(root))) {
+            assertFalse(((List<?>) node.endpoints().get("supported_rpc")).contains("EnqueueBatch"));
+            var channel = ManagedChannelBuilder.forTarget(node.rpcAddress()).usePlaintext().build();
+            try {
+                var rpc = RpcServiceGrpc.newBlockingStub(channel).withDeadlineAfter(2, TimeUnit.SECONDS);
+                var batch = assertThrows(StatusRuntimeException.class, () -> rpc.enqueueBatch(EnqueueBatchRequestPB.getDefaultInstance()));
+                assertEquals(Status.Code.UNIMPLEMENTED, batch.getStatus().getCode());
+                var group = assertThrows(StatusRuntimeException.class, () -> rpc.enqueueGroup(EnqueueGroupRequestPB.getDefaultInstance()));
+                assertEquals(Status.Code.UNIMPLEMENTED, group.getStatus().getCode());
+                var request = GenerateInputPB.newBuilder().setRequestId(1).addTokenIds(42)
+                    .setGenerateConfig(GenerateConfigPB.newBuilder().setMaxNewTokens(1)).build();
+                var outputs = rpc.generateStreamCall(request);
+                assertTrue(outputs.next().getFlattenOutput().getFinished(0));
+                assertFalse(outputs.hasNext());
+            } finally { channel.shutdownNow().awaitTermination(3, TimeUnit.SECONDS); }
+        }
+    }
+
     @Test void exportsClasspathForNativeCrossProcessProbe() throws Exception {
         Files.writeString(Path.of("target/rtp-classpath.txt"), System.getProperty("surefire.test.class.path", System.getProperty("java.class.path")));
     }
