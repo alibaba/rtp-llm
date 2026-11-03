@@ -25,7 +25,6 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/StorageBackendExecutor.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferTypes.h"
 #include "rtp_llm/cpp/utils/ErrorCode.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/transfer/FrozenTask.h"
 
 namespace rtp_llm {
 
@@ -114,7 +113,6 @@ struct StorageRequest {
     std::optional<int64_t> prefill_computed_tokens;
     std::shared_ptr<void> completion_budget_lease;
     std::shared_ptr<StorageCompletionAdmission> completion_admission;
-    std::string operation_id;
 
     bool empty() const {
         for (const auto& key_handles : handles) {
@@ -172,7 +170,6 @@ public:
     using Done           = std::function<void(ErrorInfo error)>;
     using PoolsByTag     = std::unordered_map<std::string, DeviceBlockPoolPtr>;
     using BufferResolver = std::function<std::vector<BlockInfo>(int layer_id, const std::string& tag, int block_id)>;
-    using FinishedOperationHandler = std::function<void(const std::string& operation_id)>;
 
     // An injected executor may be observed by its owner but belongs to only
     // one backend; init rejects binding the same instance a second time.
@@ -208,8 +205,6 @@ public:
     }
     // Must not be called from backend I/O or completion callbacks.
     void shutdown();
-    void setFrozenTaskRetainer(std::function<void(FrozenTask)> retainer);
-    void setFinishedOperationHandler(FinishedOperationHandler handler);
 
 protected:
     // Worker RPC payloads bypass the executor. Count their whole transaction,
@@ -227,8 +222,7 @@ protected:
     virtual StorageMatchResult matchImpl(const StorageRequest& request)                             = 0;
     virtual void               readImpl(const StorageRequest&                           request,
                                         const std::shared_ptr<StorageBackendMatchMeta>& match_meta) = 0;
-    virtual void               writeImpl(const StorageRequest& request) = 0;
-    virtual bool               supportsCompletionQueries() const noexcept { return false; }
+    virtual void               writeImpl(const StorageRequest& request)                             = 0;
     virtual void               shutdownImpl() noexcept {}
     virtual void               onRemoteCacheSkipped(const char*) noexcept {}
     virtual void               onQuarantined(bool, StorageQuarantineReason, size_t) noexcept {}
@@ -301,13 +295,6 @@ private:
     size_t                     quarantined_block_count_{0};
     uint64_t                   quarantine_generation_{0};
     StorageQuarantineBreakdown quarantined_breakdown_{};
-
-    std::mutex frozen_mutex_;
-    std::vector<FrozenTask> frozen_tasks_;
-    std::function<void(FrozenTask)> frozen_task_retainer_;
-
-    std::mutex finished_operation_mutex_;
-    FinishedOperationHandler finished_operation_handler_;
 
     friend class LoadAsyncContext;
 };

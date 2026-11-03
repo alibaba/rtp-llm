@@ -54,9 +54,6 @@ public:
     void incRef(const BlockIdList& blocks, DeviceBlockRefType ref_type = DeviceBlockRefType::REQUEST);
     void decRef(BlockIdxType block, DeviceBlockRefType ref_type = DeviceBlockRefType::REQUEST);
     void decRef(const BlockIdList& blocks, DeviceBlockRefType ref_type = DeviceBlockRefType::REQUEST);
-    // Ordinary remote writes own their source exclusively until completion.
-    // The FROZEN check and connector acquisition share one pool critical section.
-    bool tryPinForRemoteConnector(BlockIdxType block);
 
     // EOS publication only. Allocate the release closure and reserve free-list
     // capacity before acquiring the connector reference. The caller must keep

@@ -163,7 +163,6 @@ cc_test(
     deps = [
         "//rtp_llm/cpp/model_rpc:broadcast_manager",
         "//rtp_llm/cpp/model_rpc/proto:model_rpc_service_cc_proto",
-        "//rtp_llm/cpp/utils:error_code",
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",
         "@havenask//aios/autil:net",
