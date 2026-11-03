@@ -1302,10 +1302,12 @@ class PrefillStateSnapshotTest {
     }
 
     @ParameterizedTest
-    @org.junit.jupiter.params.provider.CsvSource({"BATCH,false", "NON_BATCH,false", "BATCH,true", "NON_BATCH,true"})
-    void terminalReleasesOriginalReservationAndOptionallyRetainsActualHistory(DispatcherConfig.Type mode, boolean history) {
+    @org.junit.jupiter.params.provider.CsvSource({"BATCH,false,false", "NON_BATCH,false,false", "BATCH,true,false", "NON_BATCH,true,false",
+            "BATCH,false,true", "NON_BATCH,false,true", "BATCH,true,true", "NON_BATCH,true,true"})
+    void terminalReleasesOriginalReservationAndRetainsConsistentHistory(DispatcherConfig.Type mode, boolean history, boolean cold) {
         state.enableTokenWorkload(1_000_000, () -> false, history ? 10_000 : 0);
         var request = item(71);
+        when(request.coldTokenBalance()).thenReturn(cold);
         if (mode == DispatcherConfig.Type.BATCH) {
             commitBatch(List.of(request), 300L);
         } else {
@@ -1322,11 +1324,12 @@ class PrefillStateSnapshotTest {
         terminal.setPrefixLength(90L);
         reconcile(Map.of("71", terminal), Map.of(), unused -> 0L);
         assertEquals(0, state.tokenWorkload().pendingTokens());
-        assertEquals(history ? 10 : 0, state.tokenWorkload().score());
+        int completed = history ? cold ? 100 : 10 : 0;
+        assertEquals(completed, state.tokenWorkload().score());
         enqueue(item(72));
-        assertEquals(history ? 110 : 100, state.tokenWorkload().score());
+        assertEquals(completed + 100, state.tokenWorkload().score());
         reconcile(Map.of("71", terminal), Map.of(), unused -> 0L);
-        assertEquals(history ? 110 : 100, state.tokenWorkload().score(), "duplicate terminal neither releases nor records twice");
+        assertEquals(completed + 100, state.tokenWorkload().score(), "duplicate terminal neither releases nor records twice");
     }
 
     @Test

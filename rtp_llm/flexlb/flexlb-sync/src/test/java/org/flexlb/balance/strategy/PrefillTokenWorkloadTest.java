@@ -75,14 +75,14 @@ class PrefillTokenWorkloadTest {
         active.forEach(work::release);
         assertEquals(0, work.snapshot().score());
     }
-    @Test void strictThresholdAndWeakCacheNeverSendToZeroHitWorker() {
+    @Test void strictThresholdAndColdRequestsIncludeZeroHitWorkers() {
         assertFalse(PrefillTokenBalance.cacheFirst(500, 1000, 50));
         assertTrue(PrefillTokenBalance.cacheFirst(501, 1000, 50));
         assertFalse(PrefillTokenBalance.cacheFirst(0, 0, 0));
         assertFalse(PrefillTokenBalance.eligible(400, 900, true));
         assertTrue(PrefillTokenBalance.eligible(900, 900, true));
         assertTrue(PrefillTokenBalance.eligible(200, 400, false));
-        assertFalse(PrefillTokenBalance.eligible(0, 400, false));
+        assertTrue(PrefillTokenBalance.eligible(0, 400, false));
         assertTrue(PrefillTokenBalance.eligible(0, 0, false));
     }
 }

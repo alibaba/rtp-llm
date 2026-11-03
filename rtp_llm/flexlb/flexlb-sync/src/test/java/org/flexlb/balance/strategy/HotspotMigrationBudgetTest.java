@@ -83,8 +83,8 @@ class HotspotMigrationBudgetTest {
     }
 
     @org.junit.jupiter.params.ParameterizedTest
-    @org.junit.jupiter.params.provider.CsvSource({"9,0,false", "9,5,false", "9,9,true", "4,0,false", "4,2,true", "0,0,true"})
-    void migrationCannotTradeCacheEligibilityForAnIdleWorker(int sourceHit, int idleHit, boolean allowed) {
+    @org.junit.jupiter.params.provider.CsvSource({"9,0,false", "9,5,false", "9,9,true", "4,0,true", "4,2,true", "0,0,true"})
+    void migrationPreservesHotCacheAffinityAndIgnoresColdCacheAffinity(int sourceHit, int idleHit, boolean allowed) {
         var config = SchedulingTestConfig.newConfig();
         var balance = new RoutingConfig.TokenBalanceConfig();
         balance.setMaxPendingComputeTokens(100L);
