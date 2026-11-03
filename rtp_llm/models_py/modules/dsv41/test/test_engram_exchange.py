@@ -408,7 +408,9 @@ class DeploymentIdentityTest(unittest.TestCase):
     def test_instance_index_is_discovered_from_the_local_address(self):
         env = cohort_env(2)
         del env[s.INDEX_ENV]
-        self.assertEqual(s.build_group(env, 4)['index'], 0)
+        # Do not assume the test host's hostname resolves to loopback.
+        with mock.patch.object(s, '_local_addresses', lambda: {'127.0.0.1'}):
+            self.assertEqual(s.build_group(env, 4)['index'], 0)
         with mock.patch.object(s, '_local_addresses', lambda: {'127.0.0.2'}):
             self.assertEqual(s.build_group(env, 4)['index'], 1)
         with mock.patch.object(s, '_local_addresses', lambda: {'10.9.9.9'}):
