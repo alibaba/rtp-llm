@@ -55,6 +55,13 @@ KVCM 客户端通过 `isWarmupFinished()` 读取状态。该状态类不依赖 g
 `GET /health` 通过 `ApplicationLifecycle.isHealthy()` 判断状态：
 预热完成且未收到下线信号时返回 200，否则返回 404。
 
+### Master readiness
+
+`POST /rtp_llm/master/info` 的 `ready` 由 master 自身状态决定：所属 Spring 容器已发布
+`ApplicationReadyEvent`、gRPC 服务已启动且未关闭、未进入下线流程。该判断不依赖
+Worker、role 或 HA leader 身份，standalone 无需 online hook；`real_master_host` 保留主从转发语义。
+下线开始即撤销 ready，不等待注销或 gRPC drain 完成。`/hook/process_ok` 复用同一启动标志。
+
 ### 指标
 
 `GracefulLifecycleReporter`：gauge `graceful.lifecycle.event`，tag `type`

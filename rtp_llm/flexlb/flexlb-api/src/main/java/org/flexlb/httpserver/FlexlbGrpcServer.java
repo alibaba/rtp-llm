@@ -52,7 +52,7 @@ public class FlexlbGrpcServer {
     private final GrpcServerTimingInterceptor grpcServerTimingInterceptor;
     private final GrpcQosHeaderInterceptor grpcQosHeaderInterceptor;
 
-    private Server server;
+    private volatile Server server;
     private NioEventLoopGroup bossGroup;
     private volatile ThreadPoolExecutor grpcExecutor;
     private final RejectedExecutionHandler rejectionHandler;
@@ -200,6 +200,11 @@ public class FlexlbGrpcServer {
             grpcControlExecutor.getQueue().size(), grpcControlExecutor.getActiveCount(),
             guard.receivingBytes(), guard.controlReceivingBytes()};
         for (int i = 0; i < RECEIVING_METRICS.length; i++) monitor.report(RECEIVING_METRICS[i], values[i]);
+    }
+
+    public boolean isServing() {
+        Server current = server;
+        return current != null && !current.isShutdown() && !current.isTerminated();
     }
 
     /** Called before Spring destroys any serving resources. */

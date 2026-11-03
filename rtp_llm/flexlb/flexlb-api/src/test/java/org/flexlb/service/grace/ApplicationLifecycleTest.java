@@ -13,11 +13,14 @@ import org.flexlb.httpserver.FlexlbGrpcServer;
 import org.flexlb.listener.ApplicationWarmupState;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.DisposableBean;
+import org.springframework.boot.SpringApplication;
+import org.springframework.boot.context.event.ApplicationReadyEvent;
 import org.springframework.context.annotation.AnnotationConfigApplicationContext;
 import org.springframework.context.event.ContextClosedEvent;
 import org.springframework.core.env.Environment;
 import org.springframework.test.util.ReflectionTestUtils;
 
+import java.time.Duration;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
@@ -56,9 +59,14 @@ class ApplicationLifecycleTest {
         context.registerBean(ApplicationLifecycle.class, () -> lifecycle);
         context.registerBean("servingResource", DisposableBean.class, () -> () -> destroyed.set(true));
         context.refresh();
+        when(grpc.isServing()).thenReturn(true);
+        context.publishEvent(new ApplicationReadyEvent(
+                new SpringApplication(), new String[0], context, Duration.ZERO));
+        assertTrue(lifecycle.isReady());
         var closing = CompletableFuture.runAsync(context::close);
         try {
             assertTrue(draining.await(2, TimeUnit.SECONDS));
+            assertFalse(lifecycle.isReady(), "readiness must be withdrawn while gRPC is still draining");
             assertThrows(TimeoutException.class, () -> closing.get(100, TimeUnit.MILLISECONDS));
             assertFalse(destroyed.get());
         } finally {
@@ -84,6 +92,36 @@ class ApplicationLifecycleTest {
         }
         verify(consistency).offline();
         verify(grpc).drain();
+    }
+
+    @Test
+    void readinessWaitsForOwningApplicationAndTracksTransportAvailability() {
+        var consistency = mock(LBStatusConsistencyService.class);
+        var grpc = mock(FlexlbGrpcServer.class);
+        when(grpc.isServing()).thenReturn(true);
+        try (var context = new AnnotationConfigApplicationContext();
+             var child = new AnnotationConfigApplicationContext()) {
+            var lifecycle = new ApplicationLifecycle(consistency, grpc,
+                    mock(GracefulLifecycleReporter.class), context.getEnvironment(), new ApplicationWarmupState(), 0L);
+            context.registerBean(ApplicationLifecycle.class, () -> lifecycle);
+            context.refresh();
+            assertFalse(lifecycle.isProcessReady());
+            assertFalse(lifecycle.isReady());
+            context.publishEvent(new ApplicationReadyEvent(
+                    new SpringApplication(), new String[0], child, Duration.ZERO));
+            assertFalse(lifecycle.isProcessReady(), "a child management context cannot make the master ready");
+            context.publishEvent(new ApplicationReadyEvent(
+                    new SpringApplication(), new String[0], context, Duration.ZERO));
+            assertTrue(lifecycle.isProcessReady());
+            assertTrue(lifecycle.isReady(), "standalone master requires no online hook");
+            assertFalse(lifecycle.isHealthy(), "platform hook health keeps its existing warm-up contract");
+            verifyNoInteractions(consistency);
+            when(grpc.isServing()).thenReturn(false);
+            assertFalse(lifecycle.isReady(), "a stopped transport cannot accept scheduling RPCs");
+            lifecycle.online();
+            assertTrue(lifecycle.isHealthy());
+            assertFalse(lifecycle.isReady(), "the online hook must not make a stopped transport ready");
+        }
     }
 
     @Test

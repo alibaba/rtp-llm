@@ -6,7 +6,6 @@ import org.flexlb.cache.match.localsync.DynamicCacheIntervalService;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.ModelMetaConfig;
-import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.service.address.WorkerAddressService;
 import org.flexlb.service.grpc.EngineGrpcService;
@@ -18,9 +17,7 @@ import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 
 import javax.annotation.PreDestroy;
-import java.util.HashSet;
 import java.util.List;
-import java.util.Set;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.RejectedExecutionHandler;
 import java.util.concurrent.ScheduledThreadPoolExecutor;
@@ -153,37 +150,6 @@ public final class MasterEngineSynchronizer {
         } catch (Exception e) {
             logger.error("sync engine prefill status error", e);
         }
-    }
-
-    public boolean isReady() {
-        long nowUs = System.nanoTime() / 1000;
-        long maxAgeUs = TimeUnit.MILLISECONDS.toMicros(
-                Math.max(syncRequestTimeoutMs, 3 * syncEngineStatusInterval));
-        Set<String> groups = new HashSet<>();
-        groups.add(null);
-        for (RoleType role : requiredRoles) {
-            Set<String> nextGroups = new HashSet<>();
-            for (var entry : workerDirectory.statusSnapshot(role).entrySet()) {
-                WorkerStatus status = entry.getValue();
-                WorkerStatus.PollHealth health = status.pollHealth();
-                if (!status.isAvailableForScheduling()
-                        || !health.reportedAlive()
-                        || health.lastSuccessfulPollUs() <= 0L
-                        || nowUs - health.lastSuccessfulPollUs() > maxAgeUs
-                        || workerDirectory.exactEndpoint(role, entry.getKey(), status) == null) {
-                    continue;
-                }
-                String group = status.topologySnapshot().group();
-                if (groups.contains(null) || groups.contains(group)) {
-                    nextGroups.add(group);
-                }
-            }
-            if (nextGroups.isEmpty()) {
-                return false;
-            }
-            groups = nextGroups;
-        }
-        return !requiredRoles.isEmpty();
     }
 
     @PreDestroy

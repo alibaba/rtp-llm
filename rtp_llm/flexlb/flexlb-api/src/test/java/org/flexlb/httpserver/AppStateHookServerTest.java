@@ -46,6 +46,7 @@ class AppStateHookServerTest {
     void handleProcessOk_ShouldReturn200_WhenLocalhostRequestAndProcessReady() {
         when(serverRequest.remoteAddress()).thenReturn(Optional.of(new InetSocketAddress("127.0.0.1", 12345)));
 
+        when(applicationLifecycle.isProcessReady()).thenReturn(true);
         server.onApplicationReady();
 
         Mono<ServerResponse> result = server.handleProcessOk(serverRequest);
@@ -60,6 +61,7 @@ class AppStateHookServerTest {
     void handleProcessOk_ShouldReturn200_WhenLoopbackRequestAndProcessReady() {
         when(serverRequest.remoteAddress()).thenReturn(Optional.of(new InetSocketAddress(InetAddress.getLoopbackAddress(), 12345)));
 
+        when(applicationLifecycle.isProcessReady()).thenReturn(true);
         server.onApplicationReady();
 
         Mono<ServerResponse> result = server.handleProcessOk(serverRequest);
@@ -114,6 +116,7 @@ class AppStateHookServerTest {
     void handleProcessOk_ShouldReturn200_WhenLocalHostAddressRequestAndProcessReady() throws UnknownHostException {
         when(serverRequest.remoteAddress()).thenReturn(Optional.of(new InetSocketAddress(InetAddress.getLocalHost(), 12345)));
 
+        when(applicationLifecycle.isProcessReady()).thenReturn(true);
         server.onApplicationReady();
 
         Mono<ServerResponse> result = server.handleProcessOk(serverRequest);
