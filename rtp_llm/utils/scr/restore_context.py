@@ -18,7 +18,7 @@ class RestoreContext:
     def endpoint_manifest(self) -> dict[str, Any] | None:
         # Identity-only participants need not import the distributed stack.
         # A new context is created on every restore, even for the same seed.
-        from rtp_llm.utils.scr_endpoint_provider import read_restore_manifest
+        from rtp_llm.utils.scr.endpoint import read_restore_manifest
 
         return read_restore_manifest(self.generation)
 
@@ -26,18 +26,18 @@ class RestoreContext:
         self, current, parallelism_config, gang_info: GangInfoReader
     ):
         """Apply the same endpoint/readiness policy in backend and frontend."""
-        from rtp_llm.utils import scr_vip
-        from rtp_llm.utils.scr_endpoint_provider import (
+        from rtp_llm.utils.scr import network
+        from rtp_llm.utils.scr.endpoint import (
             is_restore_phase,
             resolve_world_info,
         )
 
-        if scr_vip.enabled(parallelism_config):
+        if network.enabled(parallelism_config):
             if self.endpoint_manifest is not None:
                 raise RuntimeError(
                     "SCR VIP and endpoint manifest modes are mutually exclusive"
                 )
-            return scr_vip.validate_world_info(current, parallelism_config, gang_info)
+            return network.validate_world_info(current, parallelism_config, gang_info)
 
         manifest = self.endpoint_manifest
         # Single-Pod control channels use loopback; CacheStore and P/D RPC

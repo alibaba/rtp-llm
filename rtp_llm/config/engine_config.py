@@ -36,8 +36,8 @@ from rtp_llm.ops import (
     SpeculativeExecutionConfig,
     VitSeparation,
 )
-from rtp_llm.utils import scr_vip
-from rtp_llm.utils.scr_local_comm import cache_store_advertise_ip
+from rtp_llm.utils.scr import network
+from rtp_llm.utils.scr.network import cache_store_advertise_ip
 
 
 def resolve_pd_role_type(py_env_configs) -> RoleType:
@@ -293,7 +293,7 @@ def update_worker_addrs(
     worker_addrs = []
     worker_grpc_addrs = []
     advertise_ip = cache_store_advertise_ip(world_info, parallelism_config)
-    if scr_vip.enabled(parallelism_config) and real_ip_by_vip is None:
+    if network.enabled(parallelism_config) and real_ip_by_vip is None:
         raise ValueError("SCR VIP CacheStore requires a current VIP-to-real-IP mapping")
     local_rank = parallelism_config.local_rank
     for member in world_info.members:

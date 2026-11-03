@@ -30,11 +30,11 @@ from rtp_llm.utils.process_manager import (
     DEFER_FIRST_SIGTERM_VALUE,
     ProcessManager,
 )
-from rtp_llm.utils.scr_template_utils import ScrParticipantManifest
-from rtp_llm.utils.scr_template_utils import (
+from rtp_llm.utils.scr.template_utils import ScrParticipantManifest
+from rtp_llm.utils.scr.template_utils import (
     arrive_scr_template_barrier as arrive_scr_checkpoint_barrier,
 )
-from rtp_llm.utils.scr_template_utils import (
+from rtp_llm.utils.scr.template_utils import (
     build_scr_participant_manifest,
     configure_scr_environment,
     get_scr_barrier_return_time,

@@ -14,7 +14,7 @@ from pydantic import BaseModel, Field
 from rtp_llm.config.generate_config import RoleAddr, RoleType
 from rtp_llm.metrics import kmonitor
 from rtp_llm.metrics.kmonitor_metric_reporter import GaugeMetrics
-from rtp_llm.utils.scr_template_lifecycle import (
+from rtp_llm.utils.scr.lifecycle import (
     CallbackHook,
     get_template_lifecycle,
     template_phase_active,

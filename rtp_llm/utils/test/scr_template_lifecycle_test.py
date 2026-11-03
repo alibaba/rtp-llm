@@ -2,8 +2,8 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock
 
-from rtp_llm.utils.scr_restore_context import RestoreContext
-from rtp_llm.utils.scr_template_lifecycle import CallbackHook, TemplateLifecycle
+from rtp_llm.utils.scr.restore_context import RestoreContext
+from rtp_llm.utils.scr.lifecycle import CallbackHook, TemplateLifecycle
 
 
 class TemplateLifecycleTest(unittest.TestCase):

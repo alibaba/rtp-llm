@@ -1,10 +1,16 @@
-"""Stable, controller-owned intra-gang addresses for multi-node SCR.
+"""Peer addressing for SCR: VIP topology plus single-Pod loopback.
 
-RTPLLM_ENABLE_SCR selects this path for multi-node checkpoint/restore phases.
-C2 gang membership comes from the existing Pod annotations projection.
-The platform provides scr_vxlan0 and the network-manager readiness socket.
-Missing or invalid platform state fails startup; it never falls back to Pod IPs. RTP does not assign an address range. External service
-advertisements still use Pod IPs.
+Both shapes answer the same question: where does this rank advertise and how
+does it reach its peers?
+
+* multi-node: the platform provides ``scr_vxlan0`` and a network-manager
+  readiness socket; gang membership comes from the existing Pod annotation
+  projection.  Missing or invalid platform state fails startup instead of
+  falling back to Pod IPs.
+* single-Pod: every rank shares one network namespace, so control addresses
+  stay on loopback while external advertisements keep the Pod IP.
+
+``RTPLLM_ENABLE_SCR`` selects either path; without it every helper is inert.
 """
 
 import ipaddress
@@ -22,7 +28,7 @@ NETWORK_READY_SOCKET = Path("/scr-share/snm/daemon.sock")
 
 
 def enabled(pc) -> bool:
-    from rtp_llm.utils.scr_template_lifecycle import template_phase_active
+    from rtp_llm.utils.scr.lifecycle import template_phase_active
 
     return template_phase_active() and pc.world_size > pc.local_world_size
 
@@ -166,3 +172,72 @@ def validate_world_info(current, pc, gang_info: GangInfoReader):
                 "SCR restore cannot change the checkpointed VIP/rank topology"
             )
     return current
+
+
+def local_comm_enabled(
+    world_size: int, local_world_size: int, num_nodes: int = 1
+) -> bool:
+    from rtp_llm.utils.scr.lifecycle import template_phase_active
+
+    return (
+        template_phase_active()
+        and world_size > 0
+        and world_size == local_world_size
+        and num_nodes == 1
+    )
+
+
+def current_pod_ip():
+    """Resolve the current network namespace, never a checkpoint-cached IP."""
+    address = socket.gethostbyname(socket.gethostname())
+    parsed = ipaddress.IPv4Address(address)
+    if parsed.is_loopback or parsed.is_unspecified or parsed.is_multicast:
+        raise ValueError("SCR external endpoints require a non-loopback Pod IP")
+    return address
+
+
+def cache_store_advertise_ip(world_info, parallelism_config):
+    """Keep local control addresses separate from cross-Pod KV advertisements.
+
+    Return an override only for the single-Pod SCR loopback topology. Explicit
+    routable manifest addresses retain their authority. Resolve on every fixup
+    because both the seed environment and server configuration survive CRIU.
+    """
+    if not local_comm_enabled(
+        parallelism_config.world_size,
+        parallelism_config.local_world_size,
+        world_info.num_nodes,
+    ):
+        return None
+    validate_local_members(world_info, parallelism_config)
+    if world_info.members[0].ip != "127.0.0.1":
+        return None
+    from rtp_llm.utils.scr.runtime_fixup import get_restore_runtime_identity
+
+    identity = get_restore_runtime_identity()
+    if identity is not None:
+        return identity.pod_ip
+    return current_pod_ip()
+
+
+def validate_local_world(world_size, local_world_size, num_nodes):
+    if world_size < 1 or local_world_size != world_size or num_nodes != 1:
+        raise ValueError("SCR loopback communication requires all ranks in one Pod")
+
+
+def validate_local_members(world_info, parallelism_config):
+    pc = parallelism_config
+    validate_local_world(pc.world_size, pc.local_world_size, world_info.num_nodes)
+    members = world_info.members
+    # self.ip can retain the seed address while members resolve the restored Pod.
+    # Validate the current topology, never equality with the checkpoint's self.ip.
+    if (
+        len(members) != pc.world_size
+        or len({member.ip for member in members}) != 1
+        or sorted(member.world_rank for member in members) != list(range(pc.world_size))
+        or sorted(member.local_rank for member in members)
+        != list(range(pc.local_world_size))
+    ):
+        raise ValueError(
+            "SCR loopback communication requires a complete local rank topology"
+        )

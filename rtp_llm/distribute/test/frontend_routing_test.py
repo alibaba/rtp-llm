@@ -7,9 +7,9 @@ from unittest.mock import MagicMock, patch
 
 from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.distribute import distributed_server as ds
-from rtp_llm.utils import scr_vip
-from rtp_llm.utils.scr_restore_context import RestoreContext
-from rtp_llm.utils.scr_template_utils import _BackendVisitorTemplateHook
+from rtp_llm.utils.scr import network
+from rtp_llm.utils.scr.restore_context import RestoreContext
+from rtp_llm.utils.scr.template_utils import _BackendVisitorTemplateHook
 
 
 class FrontendRoutingTest(unittest.TestCase):
@@ -42,7 +42,7 @@ class FrontendRoutingTest(unittest.TestCase):
                         },
                         clear=True,
                     ), patch.object(
-                        scr_vip, "topology", return_value={0: "22.0.1.2", 1: "22.0.1.3"}
+                        network, "topology", return_value={0: "22.0.1.2", 1: "22.0.1.3"}
                     ), patch.object(
                         ds, "get_master", return_value=(f"{prefix}.2", "22290")
                     ), patch.object(
@@ -125,7 +125,7 @@ class FrontendRoutingTest(unittest.TestCase):
             {"RTPLLM_ENABLE_SCR": "1", "SCR_PHASE": "checkpoint", "RANK_ID": "1"},
             clear=True,
         ), patch.object(
-            scr_vip, "topology", return_value={0: "22.0.1.2", 1: "22.0.1.3"}
+            network, "topology", return_value={0: "22.0.1.2", 1: "22.0.1.3"}
         ), patch.object(
             ds, "TCPStore"
         ) as store:
@@ -142,7 +142,7 @@ class FrontendRoutingTest(unittest.TestCase):
             visitor.update_addresses.assert_called_with(["22.0.1.2:23001"])
             self.assertEqual(visitor.source_ip, "10.2.0.3")
             with patch.object(
-                scr_vip, "topology", return_value={0: "22.0.1.9", 1: "22.0.1.3"}
+                network, "topology", return_value={0: "22.0.1.9", 1: "22.0.1.3"}
             ):
                 with self.assertRaisesRegex(RuntimeError, "cannot change"):
                     hook.restore_fixup(RestoreContext("seed", "10.3.0.3"))

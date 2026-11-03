@@ -30,16 +30,16 @@ from rtp_llm.utils.concurrency_controller import (
 from rtp_llm.utils.oom_diag import install_oom_dump
 from rtp_llm.utils.process_lifecycle import arm_parent_death_sigkill
 from rtp_llm.utils.process_manager import ProcessManager
-from rtp_llm.utils.scr_template_utils import (
+from rtp_llm.utils.scr.template_utils import (
     SCR_GENERATION_ENV,
     SCR_INACTIVITY_TIMEOUT_ENV,
     SCR_TIMEOUT_ENV,
     ScrParticipantManifest,
 )
-from rtp_llm.utils.scr_template_utils import (
+from rtp_llm.utils.scr.template_utils import (
     arrive_scr_template_barrier as arrive_scr_checkpoint_barrier,
 )
-from rtp_llm.utils.scr_template_utils import (
+from rtp_llm.utils.scr.template_utils import (
     configure_scr_environment,
     is_scr_template_phase_active,
     register_for_scr,

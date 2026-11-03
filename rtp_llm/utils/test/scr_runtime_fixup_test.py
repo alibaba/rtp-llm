@@ -7,10 +7,10 @@ import unittest
 from types import SimpleNamespace as NS
 from unittest.mock import Mock, patch
 
-from rtp_llm.utils import scr_runtime_fixup as runtime
-from rtp_llm.utils import scr_template_utils as scr
-from rtp_llm.utils.scr_local_comm import cache_store_advertise_ip
-from rtp_llm.utils.scr_template_lifecycle import CallbackHook, TemplateLifecycle
+from rtp_llm.utils.scr import runtime_fixup as runtime
+from rtp_llm.utils.scr import template_utils as scr
+from rtp_llm.utils.scr.network import cache_store_advertise_ip
+from rtp_llm.utils.scr.lifecycle import CallbackHook, TemplateLifecycle
 
 
 class ScrRuntimeFixupTest(unittest.TestCase):
@@ -334,13 +334,13 @@ class ScrRuntimeFixupTest(unittest.TestCase):
         lifecycle.prepare_for_template("g1", "restore")
         # This test exercises the legacy endpoint-manifest path; VIP restore
         # has separate topology and checkpointed-route tests.
-        with patch("rtp_llm.utils.scr_vip.enabled", return_value=False), patch.dict(
+        with patch("rtp_llm.utils.scr.network.enabled", return_value=False), patch.dict(
             os.environ, {"SCR_PHASE": "restore"}
         ), patch.dict(
             sys.modules,
             {
                 "rtp_llm.distribute.distributed_server": distributed_module,
-                "rtp_llm.utils.scr_endpoint_provider": endpoint_module,
+                "rtp_llm.utils.scr.endpoint": endpoint_module,
             },
         ):
             runtime.fixup_runtime_after_restore(

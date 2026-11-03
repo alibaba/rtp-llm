@@ -36,7 +36,7 @@ from rtp_llm.utils.complete_response_async_generator import (
     CompleteResponseAsyncGenerator,
 )
 from rtp_llm.utils.prompt_logits_utils import build_prompt_logits_dict
-from rtp_llm.utils.scr_template_utils import (
+from rtp_llm.utils.scr.template_utils import (
     register_backend_visitor_template_hook,
     register_server_config_template_hook,
 )
