@@ -6184,6 +6184,40 @@ static CacheConfig makeChunkCpGroupCacheConfig(size_t group_block_size,
     return config;
 }
 
+TEST_F(FIFOSchedulerTest, testShortMultimodalContextsWaitForFullPrefillGrant) {
+    ChunkSchedulerTestConfig             config;
+    const auto                           cache_config = makeChunkCpGroupCacheConfig(8, false, 4, false);
+    ChunkSchedulerTestEnv<FIFOScheduler> env(config, cache_config);
+    ASSERT_TRUE(env.init());
+    const auto make_multimodal = [&] {
+        auto query                 = std::make_shared<GenerateInput>();
+        query->input_ids           = torch::ones({12}, torch::kInt32);
+        query->generate_config     = makeTestGenerateConfig();
+        query->multimodal_features = std::vector<torch::Tensor>{torch::zeros({2, 4})};
+        return std::make_shared<NormalGenerateStream>(
+            query, env.model_config, env.runtime_config, env.resource_context, nullptr);
+    };
+    auto first  = make_multimodal();
+    auto second = make_multimodal();
+    ASSERT_FALSE(first->chunkedPrefillEnabled());
+    ASSERT_FALSE(second->chunkedPrefillEnabled());
+    ASSERT_TRUE(enqueueIndividually(env.scheduler(), {first, second}));
+    auto batch = env.scheduler().schedule();
+    ASSERT_TRUE(batch.ok());
+    ASSERT_EQ(batch->size(), 1);
+    EXPECT_EQ(batch->front(), first);
+    EXPECT_FALSE(first->chunkedPrefillEnabled());
+    EXPECT_FALSE(second->chunkedPrefillEnabled());
+    first->update(makeSingleTokenUpdate(42));
+    auto next = env.scheduler().schedule();
+    ASSERT_TRUE(next.ok());
+    ASSERT_EQ(next->size(), 1);
+    EXPECT_EQ(next->front(), second);
+    EXPECT_EQ(second->contextLength(), 12);
+    EXPECT_FALSE(second->chunkedPrefillEnabled());
+    EXPECT_FALSE(second->hasError());
+}
+
 TEST_F(FIFOSchedulerTest, testChunkedPrefillChecksCyclicGroupBlocks) {
     struct TestCase {
         const char* name;

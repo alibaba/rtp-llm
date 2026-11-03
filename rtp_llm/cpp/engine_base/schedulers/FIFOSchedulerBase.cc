@@ -337,6 +337,23 @@ std::list<GenerateStreamPtr> FIFOSchedulerBase::selectPrefillPrefix(std::list<Ge
             continue;
         }
 
+        // Short multimodal streams were admitted without cyclic chunk banks.
+        // Keep their original full-context contract when sharing this round's budget.
+        if (!stream->chunkedPrefillEnabled()) {
+            if (rows <= 0 || remaining > budget_left / rows) {
+                if (!selected.empty()) {
+                    break;
+                }
+                it = finish_invalid_stream(
+                    it, ErrorCode::INVALID_PARAMS, "unchunked context exceeds the full prefill token budget");
+                continue;
+            }
+            selected.push_back(stream);
+            budget_left -= remaining * rows;
+            ++it;
+            continue;
+        }
+
         // Page-RR reuse stripes and sparse LINEAR checkpoints can span several
         // base blocks. Every middle chunk must publish a state for its next prefix.
         bool invalid_group_prefix = false;
