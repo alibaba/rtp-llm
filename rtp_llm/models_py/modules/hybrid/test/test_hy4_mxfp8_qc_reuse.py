@@ -1,7 +1,7 @@
 """HY4 full-Indexer q_c MXFP8 reuse plumbing tests."""
 
 from types import MethodType, SimpleNamespace
-from unittest import TestCase
+from unittest import TestCase, main
 from unittest.mock import patch
 
 import torch
@@ -50,7 +50,12 @@ class _FMHA:
 
 class TestHy4Mxfp8QcReuse(TestCase):
     def test_full_indexer_uses_fp8_qc_without_bf16_output(self):
-        """The full-Indexer path must pass only MXFP8 q_c to both WQ-B uses."""
+        self.check_qc_reuse(paired=False)
+
+    def test_paired_norm_keeps_shared_fp8_qc_without_bf16_output(self):
+        self.check_qc_reuse(paired=True)
+
+    def check_qc_reuse(self, paired):
         attention = MlaAttention.__new__(MlaAttention)
         torch.nn.Module.__init__(attention)
         attention.q_lora_rank = 2048
@@ -62,7 +67,7 @@ class TestHy4Mxfp8QcReuse(TestCase):
         attention.layer_idx = 0
         attention._reuse_mxfp8_hidden_quant = False
         attention._fuse_q_a_norm_mode = "mxfp8_indexer"
-        attention._fuse_kv_a_norm = False
+        attention._fuse_kv_a_norm = paired
         attention.attn_sink = None
         attention.gate_proj = None
         attention.parallelism_config = SimpleNamespace(get_attn_tp_size=lambda: 1)
@@ -89,13 +94,28 @@ class TestHy4Mxfp8QcReuse(TestCase):
         expected_scale = torch.zeros(2, 16, dtype=torch.int32)
 
         with patch(
+            "rtp_llm.models_py.modules.hybrid.mla_attention._prefill_optimization.ENABLED",
+            paired,
+        ), patch(
+            "rtp_llm.models_py.triton_kernels.common.mla_norm_pair.try_mla_norm_pair",
+            return_value=(
+                None,
+                expected_fp8,
+                expected_scale,
+                torch.zeros(2, 512, dtype=torch.bfloat16),
+            ),
+        ) as pair, patch(
             "rtp_llm.models_py.modules.hybrid.mla_attention."
             "fused_strided_rmsnorm_per_token_fp8_quant",
             return_value=(expected_fp8, expected_scale),
         ) as quant:
             output = attention(hidden, fmha)
 
-        quant.assert_called_once()
+        self.assertEqual(quant.call_count, int(not paired))
+        self.assertEqual(pair.call_count, int(paired))
+        if paired:
+            self.assertTrue(pair.call_args.kwargs["mxfp8"])
+            self.assertFalse(pair.call_args.kwargs["bf16_output"])
         self.assertIsNone(captured["q_c"])
         self.assertIs(captured["q_c_fp8"], expected_fp8)
         self.assertIs(captured["q_c_scale"], expected_scale)
@@ -104,3 +124,7 @@ class TestHy4Mxfp8QcReuse(TestCase):
         self.assertIs(attention.q_b_proj.calls[0][1], expected_scale)
         self.assertEqual(tuple(fmha.q_view.shape), (2, 64, 256))
         self.assertEqual(tuple(output.shape), (2, 6144))
+
+
+if __name__ == "__main__":
+    main()

@@ -2,8 +2,10 @@ import unittest
 from unittest.mock import patch
 
 import torch
+
 from rtp_llm.models_py.triton_kernels.common.fused_strided_rmsnorm import (
     fused_strided_rmsnorm,
+    fused_strided_rmsnorm_per_token_fp8_quant,
     fused_strided_rmsnorm_per_token_fp8_quant_with_bf16_output,
 )
 from rtp_llm.models_py.triton_kernels.common.mla_norm_pair import try_mla_norm_pair
@@ -11,6 +13,85 @@ from rtp_llm.models_py.triton_kernels.common.mla_norm_pair import try_mla_norm_p
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
 class MlaNormPairTest(unittest.TestCase):
+
+    def test_mxfp8_group32_matches_separate_norms(self):
+        torch.manual_seed(759)
+        for n in (0, 1, 17, 257, 2024):
+            x = torch.randn(n, 2624, device="cuda", dtype=torch.bfloat16)
+            x[:, :32] = 0
+            x[:, 32:64] *= 1e-7
+            qw = torch.randn(2048, device="cuda", dtype=torch.bfloat16)
+            kw = torch.randn(512, device="cuda", dtype=torch.bfloat16)
+            q, kv = x[:, :2048], x[:, 2048:2560]
+            for dual in (False, True):
+                got = try_mla_norm_pair(
+                    q, kv, qw, kw, 1e-5, 1e-6, mxfp8=True, bf16_output=dual
+                )
+                self.assertIsNotNone(got)
+                fp8, scale = fused_strided_rmsnorm_per_token_fp8_quant(
+                    q, qw, 1e-5, group_size=32, scale_ue8m0=True, mxfp8_semantics=True
+                )
+                self.assertEqual(got[2].shape, (n, 16))
+                self.assertEqual(got[2].stride(), scale.stride())
+                for label, actual, expected in zip(
+                    ("fp8", "scale", "kv"),
+                    got[1:],
+                    (fp8, scale, fused_strided_rmsnorm(kv, kw, 1e-6)),
+                ):
+                    self.assertTrue(
+                        torch.equal(
+                            actual.contiguous().view(torch.uint8),
+                            expected.contiguous().view(torch.uint8),
+                        ),
+                        f"n={n}, dual={dual}, component={label}, different_values={(actual.float() != expected.float()).sum().item()}, max_abs={(actual.float()-expected.float()).abs().max().item() if actual.numel() else 0}",
+                    )
+                if dual:
+                    original_dual = (
+                        fused_strided_rmsnorm_per_token_fp8_quant_with_bf16_output(
+                            q,
+                            qw,
+                            1e-5,
+                            group_size=32,
+                            scale_ue8m0=True,
+                            mxfp8_semantics=True,
+                        )
+                    )
+                    self.assertTrue(
+                        torch.equal(got[0], original_dual[0]),
+                        f"n={n}, BF16 output differs from existing MXFP8 dual-output kernel",
+                    )
+                else:
+                    self.assertIsNone(got[0])
+
+    def test_mxfp8_graph_replay_with_changed_inputs(self):
+        x = torch.randn(17, 2624, device="cuda", dtype=torch.bfloat16)
+        qw = torch.ones(2048, device="cuda", dtype=torch.bfloat16)
+        kw = torch.ones(512, device="cuda", dtype=torch.bfloat16)
+        q, kv = x[:, :2048], x[:, 2048:2560]
+
+        def forward():
+            return try_mla_norm_pair(
+                q, kv, qw, kw, 1e-5, 1e-6, mxfp8=True, bf16_output=False
+            )
+
+        forward()
+        torch.cuda.synchronize()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            captured = forward()
+        for factor in (0.01, 2.0, 100.0):
+            x.normal_().mul_(factor)
+            graph.replay()
+            expected = forward()
+            self.assertIsNone(captured[0])
+            for actual, reference in zip(captured[1:], expected[1:]):
+                self.assertTrue(
+                    torch.equal(
+                        actual.contiguous().view(torch.uint8),
+                        reference.contiguous().view(torch.uint8),
+                    )
+                )
+
     def test_scale_view_preserves_padded_storage(self):
         from rtp_llm.models_py.kernels.cuda.fp8_kernel import (
             create_per_token_group_quant_fp8_output_scale as allocate,

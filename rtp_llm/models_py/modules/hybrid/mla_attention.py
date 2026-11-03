@@ -395,6 +395,23 @@ class MlaAttention(nn.Module):
         return_topk: bool = False,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, Optional[torch.Tensor]]]:
         prepare = getattr(self.indexer, "prefetch_cp_k", None)
+        prefetch = (
+            prepare is not None
+            and PREFILL_OPTIMIZATIONS_ENABLED
+            and not self.reuse_topk_indices
+            and not force_reuse_topk_indices
+            and fmha_impl.is_sparse()
+        )
+        if (
+            prefetch
+            and _prefill_optimization.ENABLED
+            and getattr(self, "_reuse_mxfp8_hidden_quant", False)
+            and x_fp8 is None
+            and x_scale is None
+            and hidden_states.dim() == 2
+            and hidden_states.is_contiguous()
+        ):
+            x_fp8, x_scale = mxfp8_quant_act_packed(hidden_states)
         context = (
             prepare(
                 hidden_states,
@@ -404,13 +421,7 @@ class MlaAttention(nn.Module):
                 x_fp8,
                 x_scale,
             )
-            if (
-                prepare is not None
-                and PREFILL_OPTIMIZATIONS_ENABLED
-                and not self.reuse_topk_indices
-                and not force_reuse_topk_indices
-                and fmha_impl.is_sparse()
-            )
+            if prefetch
             else nullcontext(None)
         )
         with context as prepared_cp_k:
@@ -476,7 +487,8 @@ class MlaAttention(nn.Module):
             paired = None
             if (
                 _prefill_optimization.ENABLED
-                and self._fuse_q_a_norm_mode in ("fp8_dual", "bf16")
+                and self._fuse_q_a_norm_mode
+                in ("fp8_dual", "bf16", "mxfp8", "mxfp8_dual", "mxfp8_indexer")
                 and self._fuse_kv_a_norm
             ):
                 from rtp_llm.models_py.triton_kernels.common.mla_norm_pair import (
@@ -490,8 +502,14 @@ class MlaAttention(nn.Module):
                     self.kv_a_layernorm.weight.data,
                     self.q_a_layernorm.variance_epsilon,
                     self.kv_a_layernorm.variance_epsilon,
-                    fp8=self._fuse_q_a_norm_mode == "fp8_dual",
-                    scale_ue8m0=getattr(self.q_b_proj, "scale_ue8m0", False),
+                    fp8=self._fuse_q_a_norm_mode != "bf16",
+                    scale_ue8m0=(
+                        self._fuse_q_a_norm_mode.startswith("mxfp8")
+                        or getattr(self.q_b_proj, "scale_ue8m0", False)
+                    ),
+                    mxfp8=self._fuse_q_a_norm_mode.startswith("mxfp8"),
+                    bf16_output=self._fuse_q_a_norm_mode
+                    in ("fp8_dual", "bf16", "mxfp8_dual"),
                 )
             if paired is not None:
                 q_c, q_c_fp8, q_c_scale, paired_kv = paired

@@ -14,6 +14,7 @@ from rtp_llm.models_py.modules.hybrid.mla_attention import MlaAttention
 
 
 class IndexerProloguePrefetchTest(unittest.TestCase):
+
     def protocol(self, early=True, fail=None, consume=True, captured=False):
         calls = []
 
@@ -78,7 +79,10 @@ class IndexerProloguePrefetchTest(unittest.TestCase):
         cache = object()
         attn = object()
         seen = []
-        with patch.dict(
+        with patch(
+            "rtp_llm.models_py.prefill_optimization.ENABLED",
+            True,
+        ), patch.dict(
             Indexer.prefetch_cp_k.__wrapped__.__globals__,
             {
                 "_DEVICE_TYPE": Indexer.prefetch_cp_k.__wrapped__.__globals__[
@@ -181,7 +185,10 @@ class IndexerProloguePrefetchTest(unittest.TestCase):
 
     def test_hy4_without_hadamard_preserves_the_existing_quantization_path(self):
         indexer = NS(use_hadamard=False)
-        with patch.dict(
+        with patch(
+            "rtp_llm.models_py.prefill_optimization.ENABLED",
+            True,
+        ), patch.dict(
             "os.environ", {"RTP_LLM_CP_INDEXER_PROLOGUE_PREFETCH": "1"}
         ), patch.dict(
             Indexer.prefetch_cp_k.__wrapped__.__globals__,
@@ -236,6 +243,41 @@ class IndexerProloguePrefetchTest(unittest.TestCase):
                             else ["body"]
                         ),
                     )
+
+    def test_mla_prefetch_and_projection_share_one_hidden_quantization(self):
+        observed = []
+
+        @contextmanager
+        def prepare(hidden, cache, attn, cp, fp8, scale):
+            observed.append((fp8, scale))
+            yield None
+
+        def body(hidden, fmha, cache, fp8, scale, *args, **kwargs):
+            observed.append((fp8, scale))
+
+        obj = NS(
+            indexer=NS(prefetch_cp_k=prepare),
+            reuse_topk_indices=False,
+            _reuse_mxfp8_hidden_quant=True,
+            _forward_impl=body,
+        )
+        fmha = NS(is_sparse=lambda: True, attn_inputs=None, cp_params=None)
+        fp8, scale = torch.empty(2, 6144, dtype=torch.float8_e4m3fn), torch.empty(
+            2, 48, dtype=torch.int32
+        )
+        with patch(
+            "rtp_llm.models_py.modules.hybrid.mla_attention._prefill_optimization.ENABLED",
+            True,
+        ), patch(
+            "rtp_llm.models_py.modules.hybrid.mla_attention.mxfp8_quant_act_packed",
+            return_value=(fp8, scale),
+        ) as quant:
+            MlaAttention.forward(obj, torch.zeros(2, 6144, dtype=torch.bfloat16), fmha)
+        quant.assert_called_once()
+        self.assertEqual(len(observed), 2)
+        for q, s in observed:
+            self.assertIs(q, fp8)
+            self.assertIs(s, scale)
 
 
 if __name__ == "__main__":

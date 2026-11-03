@@ -3,11 +3,13 @@
 import torch
 import triton as tr
 import triton.language as tl
+
 from rtp_llm.models_py import prefill_optimization as _prefill_optimization
 from rtp_llm.models_py.kernels.cuda import prefill_cpu_ops as _cpu_ops
 from rtp_llm.models_py.kernels.cuda.fp8_kernel import (
     create_per_token_group_quant_fp8_output_scale,
 )
+from rtp_llm.models_py.kernels.cuda.mxfp8_ops import create_mxfp8_packed_scale
 from rtp_llm.models_py.triton_kernels.common import fast_launch as _cpu_launch
 from rtp_llm.models_py.triton_kernels.common.fused_strided_rmsnorm import (
     _fused_strided_rmsnorm_singlepass_kernel,
@@ -37,6 +39,8 @@ def _pair(
     KH: tl.constexpr,
     FP8: tl.constexpr,
     UE8: tl.constexpr,
+    MXFP8: tl.constexpr,
+    BF16_OUT: tl.constexpr,
 ):
     _fused_strided_rmsnorm_singlepass_kernel(
         Q,
@@ -54,10 +58,11 @@ def _pair(
         SST,
         SSG,
         H,
-        128,
-        True,
+        32 if MXFP8 else 128,
+        BF16_OUT,
         FP8,
         UE8,
+        MXFP8,
     )
     # Preserve the existing H=512, two-warp kernel's reduction: eight
     # consecutive BF16 squares per lane, then a 64-lane butterfly. Letting
@@ -75,7 +80,24 @@ def _pair(
     tl.store(KB + token * 512 + col, (x * inv * w).to(tl.bfloat16))
 
 
-def try_mla_norm_pair(q, kv, qw, kw, q_eps, kv_eps, *, fp8=True, scale_ue8m0=True):
+def try_mla_norm_pair(
+    q: torch.Tensor,
+    kv: torch.Tensor,
+    qw: torch.Tensor,
+    kw: torch.Tensor,
+    q_eps: float,
+    kv_eps: float,
+    *,
+    fp8: bool = True,
+    scale_ue8m0: bool = True,
+    mxfp8: bool = False,
+    bf16_output: bool = True,
+) -> (
+    tuple[torch.Tensor | None, torch.Tensor | None, torch.Tensor | None, torch.Tensor]
+    | None
+):
+    if (mxfp8 and not (fp8 and scale_ue8m0)) or (not fp8 and not bf16_output):
+        return None
     if not (
         q.is_cuda
         and q.ndim == kv.ndim == 2
@@ -95,23 +117,35 @@ def try_mla_norm_pair(q, kv, qw, kw, q_eps, kv_eps, *, fp8=True, scale_ue8m0=Tru
     ):
         return None
     n = q.shape[0]
-    allocator = _cpu_ops.native() if _cpu_ops.NATIVE_ALLOC and fp8 else None
+    allocator = (
+        _cpu_ops.native()
+        if _cpu_ops.NATIVE_ALLOC and fp8 and bf16_output and not mxfp8
+        else None
+    )
     if allocator is not None:
         qb, qf, qs, kb = allocator.norm_outputs(
             n, 2048, 512, q.device.index, scale_ue8m0, True
         )
     else:
-        qb = torch.empty((n, 2048), device=q.device, dtype=torch.bfloat16)
+        qb = (
+            torch.empty((n, 2048), device=q.device, dtype=torch.bfloat16)
+            if bf16_output
+            else None
+        )
         kb = torch.empty((n, 512), device=q.device, dtype=torch.bfloat16)
     if fp8 and allocator is None:
         qf = torch.empty((n, 2048), device=q.device, dtype=torch.float8_e4m3fn)
-        qs = create_per_token_group_quant_fp8_output_scale(
-            (n, 2048),
-            q.device,
-            group_size=128,
-            column_major_scales=True,
-            scale_tma_aligned=True,
-            scale_ue8m0=scale_ue8m0,
+        qs = (
+            create_mxfp8_packed_scale(n, 2048, q.device)
+            if mxfp8
+            else create_per_token_group_quant_fp8_output_scale(
+                (n, 2048),
+                q.device,
+                group_size=128,
+                column_major_scales=True,
+                scale_tma_aligned=True,
+                scale_ue8m0=scale_ue8m0,
+            )
         )
     elif not fp8:
         qf, qs = qb, qb
@@ -121,7 +155,7 @@ def try_mla_norm_pair(q, kv, qw, kw, q_eps, kv_eps, *, fp8=True, scale_ue8m0=Tru
             kv,
             qw,
             kw,
-            qb,
+            qb if qb is not None else qf,
             qf,
             qs,
             kb,
@@ -135,6 +169,8 @@ def try_mla_norm_pair(q, kv, qw, kw, q_eps, kv_eps, *, fp8=True, scale_ue8m0=Tru
             512,
             fp8,
             scale_ue8m0,
+            mxfp8,
+            bf16_output,
         )
         if _CPU_PATH:
             # The support gate already fixes input types and 16-byte alignment;
@@ -150,6 +186,8 @@ def try_mla_norm_pair(q, kv, qw, kw, q_eps, kv_eps, *, fp8=True, scale_ue8m0=Tru
                 args[13],
                 fp8,
                 scale_ue8m0,
+                mxfp8,
+                bf16_output,
             )
         else:
             key = tuple(
