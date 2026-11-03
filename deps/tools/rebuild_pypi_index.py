@@ -51,6 +51,8 @@ CACHE_VERSION = 1
 # their arch family, matching the arm lanes which pin those same any-tagged wheels.
 # Any other directory under rtp_llm/ (test/, utils/, eic/, ...) is skipped.
 ARCH_PLATFORMS = {
+    "ppu":       {"x86": ["simple-ppu"],        "arm": [],
+                  "any": ["simple-ppu"]},
     "cpu":       {"x86": ["simple-cpu"],        "arm": ["simple-cpu"],
                   "any": ["simple-cpu"]},
     "cu126":     {"x86": ["simple-cuda12"],     "arm": ["simple-cuda12_arm"],
