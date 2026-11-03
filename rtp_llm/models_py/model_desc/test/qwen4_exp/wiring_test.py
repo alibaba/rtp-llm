@@ -34,6 +34,7 @@ from rtp_llm.models_py.modules.hybrid.gated_residual import (
     inject_into_residual,
 )
 from rtp_llm.ops import HybridAttentionType, MoeConfig, ParallelismConfig
+from rtp_llm.ops.compute_ops import PyAttentionInputs, PyModelInputs
 from rtp_llm.utils.model_weight import W
 
 
@@ -266,6 +267,31 @@ class Qwen4ExpAttentionTagRoutingTest(TestCase):
         self.assertEqual(len(descs[1]), 3)
         self.assertEqual(model._attention_tag(1), descs[1][0].tag)
         self.assertNotIn(model._attention_tag(1), (PLE_STATE_TAG, PLE_NGRAM_CTX_TAG))
+
+    def test_first_linear_layer_metadata_excludes_ple_regions(self):
+        descs = build_qwen4_exp_kv_cache_spec_descs(
+            _spec_config(), ple_layer_indices=[0], ple_conv_kernel_size=4, ngram_size=3
+        )
+        model = _bare_model(descs, _hybrid_types())
+        model.parallelism_config = ParallelismConfig()
+        linear = PyAttentionInputs()
+        linear.is_prefill = False
+        linear.is_target_verify = True
+        side = PyAttentionInputs()
+        side.is_prefill = False
+        side.is_target_verify = False
+        inputs = PyModelInputs()
+        # Side regions deliberately come first so primary-map order cannot
+        # accidentally select the right metadata.
+        inputs.attention_inputs = {
+            PLE_STATE_TAG: side,
+            PLE_NGRAM_CTX_TAG: side,
+            descs[0][0].tag: linear,
+        }
+        for graph in (False, True):
+            meta = model._build_attn_meta(inputs, torch.device("cpu"), graph)
+            self.assertTrue(meta.is_target_verify)
+            self.assertEqual(meta.is_cuda_graph, graph)
 
     def test_plain_layers_resolve_their_own_region(self):
         descs = self._descs()

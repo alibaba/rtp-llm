@@ -38,11 +38,11 @@ public:
     // later distributed init can bootstrap a fresh base_path.
     void reset();
 
-    // Cancel this non-root rank's blocking input receive before joining its
-    // engine thread. SHUT_RD keeps rank 0's endpoint alive for model teardown
-    // collectives. No-op for rank 0, TP1, or an uninitialized broadcaster.
-    // The receiver cannot be used again until reset()/initialize().
-    void interruptReceive();
+    // Request shutdown without interrupting an in-flight model step. Non-root
+    // ranks keep receiving until rank 0 publishes the stop frame at a step boundary.
+    void requestStop();
+    bool shouldStop(bool locally_requested);
+    void finish();
 
     bool isInitialized() const {
         return initialized_.load(std::memory_order_acquire);
@@ -57,9 +57,10 @@ private:
     std::mutex        mu_;
     std::mutex        broadcast_mu_;
     std::atomic<bool> initialized_{false};
-    std::atomic<bool> receive_interrupted_{false};
-    int               tp_rank_ = 0;
-    int               tp_size_ = 1;
+    std::atomic<bool> stop_requested_{false};
+    bool              broadcast_stopped_ = false;  // protected by broadcast_mu_
+    int               tp_rank_           = 0;
+    int               tp_size_           = 1;
     std::string       base_path_;
     int               listen_fd_ = -1;  // rank 0 only
     // peer_fds_[k] = fd connecting this rank to rank k. peer_fds_[tp_rank_] = -1.

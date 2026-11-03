@@ -1583,7 +1583,9 @@ class Qwen3NextModel(GptModelBase):
         is_cuda_graph: bool = False,
         cuda_graph_selection_mode: Optional[str] = None,
     ):
-        impls = super().prepare_fmha_impl(inputs, is_cuda_graph, cuda_graph_selection_mode)
+        impls = super().prepare_fmha_impl(
+            inputs, is_cuda_graph, cuda_graph_selection_mode
+        )
         if torch.version.hip is None:
             return impls
         attention_inputs = get_attention_inputs_value(inputs)
@@ -1697,6 +1699,7 @@ class Qwen3NextModel(GptModelBase):
         inputs: PyModelInputs,
         device: torch.device,
         is_cuda_graph: bool = False,
+        linear_attention_inputs: Optional[PyAttentionInputs] = None,
     ) -> Qwen3NextMetadata:
         attention_inputs = get_primary_attention_inputs(inputs, self.kv_cache)
         linear_layer_idx = next(
@@ -1708,9 +1711,10 @@ class Qwen3NextModel(GptModelBase):
             None,
         )
         if linear_layer_idx is not None:
-            linear_attention_inputs = select_attention_inputs_for_layer(
-                inputs, self.kv_cache, linear_layer_idx
-            )
+            if linear_attention_inputs is None:
+                linear_attention_inputs = select_attention_inputs_for_layer(
+                    inputs, self.kv_cache, linear_layer_idx
+                )
             if isinstance(linear_attention_inputs, list):
                 raise RuntimeError(
                     "Qwen3Next LINEAR layer must map to exactly one attention-input tag"

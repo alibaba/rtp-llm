@@ -100,7 +100,7 @@ int connectWithRetry(const std::string& path) {
             return -1;
         }
 
-        struct sockaddr_un addr {};
+        struct sockaddr_un addr{};
         addr.sun_family = AF_UNIX;
         std::strncpy(addr.sun_path, path.c_str(), sizeof(addr.sun_path) - 1);
         if (::connect(fd, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr)) == 0) {
@@ -133,7 +133,7 @@ int fakeServerWrongProbe(const std::string& base) {
         return 1;
     }
 
-    struct sockaddr_un addr {};
+    struct sockaddr_un addr{};
     addr.sun_family = AF_UNIX;
     std::strncpy(addr.sun_path, path.c_str(), sizeof(addr.sun_path) - 1);
     if (::bind(listen_fd, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr)) != 0) {
@@ -289,101 +289,102 @@ void runHappyPath(int tp_size) {
     cleanupTempBase(base, tp_size);
 }
 
-TEST(CpuTpBroadcasterTest, PeerStopInterruptsBackpressuredRootWrite) {
+// A stop can arrive after root checked the step boundary, including before a
+// receiver consumes already-published inputs. Every frame and later model
+// collective of that step must still complete on every rank.
+void runStopDuringStep(int tp_size) {
+    const auto base = makeTempBase();
+    int        requested[2];
+    ASSERT_EQ(::pipe(requested), 0);
+    std::vector<pid_t> pids;
+    for (int rank = 0; rank < tp_size; ++rank) {
+        pids.push_back(spawnChild([=] {
+            auto& bcast = CpuTpBroadcaster::instance();
+            bcast.reset();
+            bcast.initialize(rank, tp_size, base);
+            constexpr size_t  kBytes = 8 * 1024 * 1024;
+            std::vector<char> payload(kBytes, rank == 0 ? 42 : 0);
+            if (rank == 0) {
+                ::close(requested[1]);
+                char ack = 0;
+                if (readAllRaw(requested[0], &ack, 1) != 1 || ack != 1)
+                    return 1;
+                // Simulate root having entered the step before the request.
+                bcast.broadcast(payload.data(), payload.size(), 0);
+                int next_phase = 19;
+                bcast.broadcast(&next_phase, sizeof(next_phase), 0);
+                if (!bcast.shouldStop(false))
+                    return 1;
+                bcast.finish();
+                bcast.finish();
+                ::close(requested[0]);
+            } else {
+                ::close(requested[0]);
+                if (rank == tp_size - 1) {
+                    bcast.requestStop();
+                    bcast.requestStop();
+                    if (bcast.shouldStop(true))
+                        return 1;
+                    const char ack = 1;
+                    if (::write(requested[1], &ack, 1) != 1)
+                        return 1;
+                }
+                ::close(requested[1]);
+                bcast.broadcast(payload.data(), payload.size(), 0);
+                for (char value : payload) {
+                    if (value != 42)
+                        return 1;
+                }
+                int next_phase = 0;
+                bcast.broadcast(&next_phase, sizeof(next_phase), 0);
+                if (next_phase != 19)
+                    return 1;
+                if (expectThrowContains([&] { bcast.broadcast(&next_phase, sizeof(next_phase), 0); }, "step boundary"))
+                    return 1;
+                // Repeated receives fail locally after the terminal frame.
+                if (expectThrowContains([&] { bcast.broadcast(&next_phase, sizeof(next_phase), 0); }, "step boundary"))
+                    return 1;
+            }
+            bcast.reset();
+            return 0;
+        }));
+    }
+    ::close(requested[0]);
+    ::close(requested[1]);
+    expectChildrenOk(pids);
+    cleanupTempBase(base, tp_size);
+}
+
+TEST(CpuTpBroadcasterTest, StopRequestPreservesInFlightStepTp2) {
+    runStopDuringStep(2);
+}
+
+TEST(CpuTpBroadcasterTest, StopRequestPreservesWholeFanoutTp4) {
+    runStopDuringStep(4);
+}
+
+TEST(CpuTpBroadcasterTest, RootStopWakesIdleReceiverBeforeTeardown) {
     const auto         base = makeTempBase();
     std::vector<pid_t> pids;
     pids.push_back(spawnChild([=] {
         auto& bcast = CpuTpBroadcaster::instance();
         bcast.reset();
         bcast.initialize(0, 2, base);
-        int value = 19;
-        bcast.broadcast(&value, sizeof(value), 0);
-        std::vector<char> payload(64 * 1024 * 1024);
-        try {
-            bcast.broadcast(payload.data(), payload.size(), 0);
-        } catch (const CpuTpBroadcastStopped&) {
-            bcast.reset();
-            return 0;
-        }
-        return 1;
+        if (!bcast.shouldStop(true))
+            return 1;
+        bcast.finish();
+        bcast.reset();
+        return 0;
     }));
     pids.push_back(spawnChild([=] {
         auto& bcast = CpuTpBroadcaster::instance();
         bcast.reset();
         bcast.initialize(1, 2, base);
-        int value = 0;
-        bcast.broadcast(&value, sizeof(value), 0);
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
-        bcast.interruptReceive();
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        int       value = 0;
+        const int rc    = expectThrowContains([&] { bcast.broadcast(&value, sizeof(value), 0); }, "step boundary");
         bcast.reset();
-        return value == 19 ? 0 : 1;
+        return rc;
     }));
-    expectChildrenOk(pids);
-    cleanupTempBase(base, 2);
-}
-
-TEST(CpuTpBroadcasterTest, InterruptReceiveAllowsBothRanksToReachTeardown) {
-    const std::string base = makeTempBase();
-    int               reached[2];
-    ASSERT_EQ(::pipe(reached), 0);
-    std::vector<pid_t> pids;
-    pids.push_back(spawnChild([=] {
-        ::close(reached[1]);
-        auto& bcast = CpuTpBroadcaster::instance();
-        bcast.reset();
-        bcast.interruptReceive();  // Uninitialized no-op.
-        bcast.initialize(0, 2, base);
-        bcast.interruptReceive();  // Rank 0 must remain usable.
-        int value = 19;
-        bcast.broadcast(&value, sizeof(value), 0);
-        // Model teardown needs the peer to leave its input loop first. Keep
-        // the root socket open until the peer explicitly reaches teardown.
-        char       ack = 0;
-        const auto n   = readAllRaw(reached[0], &ack, 1);
-        bcast.reset();
-        ::close(reached[0]);
-        return n == 1 && ack == 42 ? 0 : 1;
-    }));
-    pids.push_back(spawnChild([=] {
-        ::close(reached[0]);
-        auto& bcast = CpuTpBroadcaster::instance();
-        bcast.reset();
-        bcast.initialize(1, 2, base);
-        int value = 0;
-        bcast.broadcast(&value, sizeof(value), 0);
-        if (value != 19)
-            return 1;
-        std::atomic<bool> entered{false}, returned{false};
-        std::thread       receiver([&] {
-            entered.store(true, std::memory_order_release);
-            try {
-                bcast.broadcast(&value, sizeof(value), 0);
-            } catch (const std::exception&) {
-                returned.store(true, std::memory_order_release);
-            }
-        });
-        while (!entered.load(std::memory_order_acquire))
-            std::this_thread::yield();
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
-        const auto start = std::chrono::steady_clock::now();
-        bcast.interruptReceive();
-        bcast.interruptReceive();  // Idempotent while the reader unwinds.
-        receiver.join();
-        const auto elapsed = std::chrono::steady_clock::now() - start;
-        if (!returned.load(std::memory_order_acquire) || elapsed > std::chrono::seconds(1))
-            return 1;
-        if (expectThrowContains([&] { bcast.broadcast(&value, sizeof(value), 0); }, "receive interrupted"))
-            return 1;
-        const char ack = 42;
-        const auto n   = ::write(reached[1], &ack, 1);
-        bcast.reset();
-        bcast.reset();
-        ::close(reached[1]);
-        return n == 1 ? 0 : 1;
-    }));
-    ::close(reached[0]);
-    ::close(reached[1]);
     expectChildrenOk(pids);
     cleanupTempBase(base, 2);
 }

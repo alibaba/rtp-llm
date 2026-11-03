@@ -292,6 +292,8 @@ class Qwen4ExpTest(unittest.TestCase):
         self.assertEqual(cfg.quant_config.online_cache_dir, "/tmp/qwen4-test-cache")
         self.assertEqual(cfg.quant_config.group_size(), 16)
         self.assertTrue(cfg._qwen4_full_fp8_nvfp4)
+        self.assertEqual(cfg.dense_weight_dtype, "fp8")
+        self.assertEqual(cfg.expert_weight_dtype, "fp4")
 
     def test_quantization_preset_carries_the_complete_recipe(self):
         cfg = init_quant_config("QWEN4_FP8_NVFP4")

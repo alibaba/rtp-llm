@@ -1191,6 +1191,26 @@ class Qwen4ExpModel(Qwen35Model):
             )
         return tags[0]
 
+    def _build_attn_meta(self, inputs, device, is_cuda_graph=False):
+        linear_inputs = None
+        if self.kv_cache is not None:
+            linear_layer_idx = next(
+                (
+                    i
+                    for i, layer in enumerate(self.layers)
+                    if layer.layer_type == HybridAttentionType.LINEAR
+                ),
+                None,
+            )
+            if linear_layer_idx is not None:
+                linear_inputs = select_attention_inputs_for_tag(
+                    get_attention_inputs_value(inputs),
+                    self._attention_tag(linear_layer_idx),
+                )
+        return super()._build_attn_meta(
+            inputs, device, is_cuda_graph, linear_attention_inputs=linear_inputs
+        )
+
     def _get_fmha_group_tags(self) -> Optional[list[str]]:
         """The attention regions only; side regions need no FMHA impl.
 

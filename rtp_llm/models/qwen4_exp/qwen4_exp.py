@@ -2,7 +2,7 @@ import json
 from pathlib import Path
 from typing import Dict, List
 
-from rtp_llm.config.model_config import ModelConfig
+from rtp_llm.config.model_config import ModelConfig, apply_quant_scope_to_pricing
 from rtp_llm.config.qwen4_exp_config import (
     build_qwen4_quant_config,
     freeze_runtime_config,
@@ -78,6 +78,7 @@ class Qwen4Exp(Qwen35Moe):
         )
         if config.quant_config is not None:
             config.quant_algo.setQuantAlgo("modelopt_fp4", 4, 16)
+            apply_quant_scope_to_pricing(config, config.quant_config)
 
     @classmethod
     def _parse_extra_text_config(cls, config_json: dict, config: ModelConfig) -> None:

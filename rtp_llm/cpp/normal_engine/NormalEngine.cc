@@ -847,10 +847,9 @@ absl::Status NormalEngine::stop() {
     RTP_LLM_LOG_INFO("stop normal engine");
     running_ = false;
     RETURN_IF_STATUS_ERROR(scheduler_->stop());
-    // A non-root idle MTP loop may be waiting for the next CPU input frame.
-    // Wake it before join; otherwise rank 0's model teardown collective waits
-    // for a peer that cannot reach its own model destructor.
-    CpuTpBroadcaster::instance().interruptReceive();
+    // Ask rank 0 to stop at a step boundary. Receivers must finish all model
+    // collectives for inputs that rank 0 has already published before exiting.
+    CpuTpBroadcaster::instance().requestStop();
     loop_thread_->join();
     // Join the async dispatch runner and release the dispatcher-owned worker pool.
     executor_.reset();
@@ -863,7 +862,8 @@ void NormalEngine::loop() {
     RTP_LLM_LOG_INFO("loop begin");
     c10::InferenceMode inference_guard(true);
     setCurrentThreadDevice(getDeviceId());
-    while (running_) {
+    auto& tp_broadcaster = CpuTpBroadcaster::instance();
+    while (!tp_broadcaster.shouldStop(!running_)) {
         try {
             auto status = step();
             if (!status.ok()) {
@@ -886,6 +886,10 @@ void NormalEngine::loop() {
             break;
         }
     }
+    running_ = false;
+    // Publish only after the last complete step, while sockets remain alive
+    // for the receivers and subsequent model teardown collectives.
+    tp_broadcaster.finish();
 }
 
 absl::Status NormalEngine::trySaveStepError() const {

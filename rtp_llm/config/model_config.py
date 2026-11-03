@@ -8,6 +8,7 @@ import torch
 
 from rtp_llm.config.py_config_modules import VitConfig
 from rtp_llm.config.quant_config import (
+    QWEN4_FP8_NVFP4_RECIPE,
     CompressedW4A8Int4PerChannelQuantConfig,
     Fp8BlockWiseQuantConfig,
     ModelOptFp4Config,
@@ -59,7 +60,9 @@ def apply_quant_scope_to_pricing(model_config: "ModelConfig", quant_config) -> N
             # Online NVFP4 (--quantization MODELOPT_FP4 on a BF16 MoE
             # checkpoint): experts are quantized to FP4 in flight (resident
             # ~0.53 B/param) while the dense slice stays BF16.
-            model_config.dense_weight_dtype = "bf16"
+            model_config.dense_weight_dtype = (
+                "fp8" if quant_config.model_recipe == QWEN4_FP8_NVFP4_RECIPE else "bf16"
+            )
             if not (model_config.expert_weight_dtype or "").strip():
                 model_config.expert_weight_dtype = "fp4"
         elif quant_config.mixed_attention:
