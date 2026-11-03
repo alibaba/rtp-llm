@@ -41,6 +41,7 @@ py_library(
         "proxy/service_route.py",
         "proxy/service_route_config.py",
         "proxy/servicer.py",
+        "proxy/workload_route.py",
         "repetition_monitor.py",
         "server.py",
         "status.py",
@@ -53,6 +54,7 @@ py_library(
     ],
     visibility = ["//visibility:public"],
     deps = [
+        "//rtp_llm:aiohttp",
         ":xgrammar_core_dump_control",
         "//rtp_llm:telemetry",
         "//rtp_llm/server:server",

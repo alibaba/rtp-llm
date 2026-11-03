@@ -1,6 +1,15 @@
 load("@arch_config//:arch_select.bzl", "telemetry_test_deps")
 
 py_test(
+    name = "workload_route_test",
+    srcs = ["proxy/workload_route_test.py"],
+    main = "proxy/workload_route_test.py",
+    deps = ["//rtp_llm/dash_sc:dash_sc_grpc_server"],
+    data = ["//rtp_llm/libs:libth_transformer_config_so"],
+    imports = [],
+)
+
+py_test(
     name = "codec_test",
     srcs = ["codec_test.py"],
     deps = ["//rtp_llm:testlib"],

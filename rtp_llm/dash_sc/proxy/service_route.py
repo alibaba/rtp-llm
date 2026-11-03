@@ -73,6 +73,9 @@ class IpPortListServiceDiscovery:
     def resolve(self) -> Optional[BackendAddr]:
         return self._addrs[random.randrange(len(self._addrs))]
 
+    def candidates(self) -> tuple[BackendAddr, ...]:
+        return self._addrs
+
 
 class VipServerServiceDiscovery:
     """Dynamic address discovery backed by ``rtp_llm.vipserver.vip_client``."""
@@ -106,6 +109,17 @@ class VipServerServiceDiscovery:
                 exc_info=True,
             )
             return None
+
+    def candidates(self) -> tuple[BackendAddr, ...]:
+        from rtp_llm.vipserver.vip_client import get_host_list_by_domain
+
+        try:
+            return tuple(dict.fromkeys(BackendAddr.from_host(host)
+                                       for host in get_host_list_by_domain(self._domain)))
+        except Exception:
+            logging.warning("[DashScGrpc] vipserver candidate lookup failed: domain=%s",
+                            self._domain, exc_info=True)
+            return ()
 
 
 def create_service_discovery_from_env():

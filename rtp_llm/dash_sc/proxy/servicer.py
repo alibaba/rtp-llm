@@ -31,6 +31,7 @@ from rtp_llm.dash_sc.codec import (
 from rtp_llm.dash_sc.grpc_metrics import report_chunk, report_forwarder_rpc_done
 from rtp_llm.dash_sc.proto import predict_v2_pb2, predict_v2_pb2_grpc
 from rtp_llm.dash_sc.proxy.service_route import create_service_discovery_from_env
+from rtp_llm.dash_sc.proxy.workload_route import create_workload_router_from_env
 from rtp_llm.server.server_args.grpc_group_args import (
     DEFAULT_DASH_SC_GRPC_MAX_MESSAGE_BYTES,
 )
@@ -203,6 +204,7 @@ class DashScProxyServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
             cleanup_interval=_CHANNEL_CLEANUP_INTERVAL_S,
         )
         self._discovery = create_service_discovery_from_env()
+        self._workload_router = create_workload_router_from_env()
         self._buffer_first_chunk = (
             os.environ.get(_BUFFER_FIRST_CHUNK_ENV_KEY, "1").strip() != "0"
         )
@@ -233,6 +235,8 @@ class DashScProxyServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
         the cache's force-close of any residue cannot interrupt a live RPC.
         """
         await self._channel_pool.close()
+        if self._workload_router is not None:
+            await self._workload_router.close()
 
     def _record_and_report_chunk(self, record: GrpcAccessRecord, resp) -> None:
         """Capture the frame and fan out per-chunk metrics (records, no log)."""
@@ -255,6 +259,7 @@ class DashScProxyServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
         except Exception:
             invocation_metadata = ()
         client_span = None
+        route_lease = None
         # Self-managed access-log lifecycle (the shared interceptor is gone).
         # Create/arrival/query go first — before any inbound frame — so a
         # frame-less RPC (peer closed before sending) still reports arrival and
@@ -352,7 +357,11 @@ class DashScProxyServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
                 finally:
                     record.mark_request_done(status)
 
-            route_addr = self._discovery.resolve()
+            if self._workload_router is None:
+                route_addr = self._discovery.resolve()
+            else:
+                route_lease = await self._workload_router.acquire(self._discovery)
+                route_addr = route_lease.addr if route_lease is not None else None
             if route_addr is None:
                 record.mark_request_done("eof")
                 msg = "forward backend unavailable"
@@ -370,6 +379,9 @@ class DashScProxyServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
                 return
 
             grpc_target = route_addr.grpc_target
+            if route_lease is not None:
+                logging.info("[DashScGrpc] workload dispatch: request_id=%r backend=%s",
+                             str(first_request.id), grpc_target)
             try:
                 channel = await self._channel_pool.get(grpc_target)
             except RuntimeError as e:
@@ -436,6 +448,8 @@ class DashScProxyServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
                 )
             raise
         finally:
+            if self._workload_router is not None:
+                self._workload_router.release(route_lease)
             _ensure_span()
             status_exc = _status_exception_for_proxy(record, exc)
             end_ts = record.resolve_status(context, status_exc)
