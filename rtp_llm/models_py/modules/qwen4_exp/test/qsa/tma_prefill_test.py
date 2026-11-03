@@ -65,6 +65,124 @@ class TmaPrefillTest(unittest.TestCase):
             self.skipTest("SM120 required")
         torch.manual_seed(471)
 
+    def test_packed_graph_partition_changes_rounded_tile_count(self):
+        for heads, lengths, updated in (
+            (6, [130, 140, 135], [131, 139, 135]),
+            (12, [520, 528, 536], [521, 527, 536]),
+        ):
+            with self.subTest(heads=heads):
+                tokens = sum(lengths)
+                packed, q, k, v = make_inputs(tokens, heads)
+                flat_q, flat_k, flat_v = packed.split([heads * 256, 256, 256], -1)
+                ids = torch.empty(tokens, 2051, device=q.device, dtype=torch.int32)
+                cu = torch.empty(4, device=q.device, dtype=torch.int32)
+
+                def refresh(active):
+                    cu.copy_(
+                        torch.tensor(
+                            [0, active[0], active[0] + active[1], tokens],
+                            device=q.device,
+                            dtype=torch.int32,
+                        )
+                    )
+                    ids.copy_(torch.cat([make_selection(s)[0] for s in active]))
+
+                def run(active):
+                    return try_ragged_causal_qsa_prefill(
+                        flat_q, flat_k, flat_v, ids, active, cu
+                    )
+
+                for planned, replayed in ((lengths, updated), (updated, lengths)):
+                    refresh(planned)
+                    self.assertIsNotNone(run(planned))
+                    graph = torch.cuda.CUDAGraph()
+                    with torch.cuda.graph(graph):
+                        actual = run(planned)
+                    refresh(replayed)
+                    actual.fill_(137)
+                    graph.replay()
+                    expected = []
+                    start = 0
+                    for length in replayed:
+                        end = start + length
+                        value = reference(
+                            q[:, :, start:end],
+                            k[:, :, start:end],
+                            v[:, :, start:end],
+                            ids[None, start:end],
+                        )
+                        expected.append(value.transpose(1, 2).reshape(length, -1))
+                        start = end
+                    torch.testing.assert_close(
+                        actual, torch.cat(expected), atol=0.0078125, rtol=0.008
+                    )
+
+    def test_paged_graph_partition_changes_rounded_tile_count(self):
+        for heads, lengths, updated in (
+            (6, [130, 140, 135], [131, 139, 135]),
+            (12, [520, 528, 536], [521, 527, 536]),
+        ):
+            for fp8 in (False, True):
+                with self.subTest(heads=heads, fp8=fp8):
+                    prefixes = [1024] * 3
+                    q, backing, cache, table, ids, scale, cu, pd = (
+                        self._paged_batch_case(heads, lengths, prefixes, fp8)
+                    )
+                    # The changed partition can expose more rows inside a valid page.
+                    cache.copy_(
+                        torch.randn(cache.shape, device=q.device).to(cache.dtype)
+                    )
+                    if scale is not None:
+                        scale.fill_(1)
+
+                    def refresh(active):
+                        cu.copy_(
+                            torch.tensor(
+                                [0, active[0], active[0] + active[1], sum(active)],
+                                device=q.device,
+                                dtype=torch.int32,
+                            )
+                        )
+                        ids.copy_(
+                            torch.cat(
+                                [
+                                    make_selection(p + s)[0, p:]
+                                    for p, s in zip(prefixes, active)
+                                ]
+                            )
+                        )
+
+                    def run(active):
+                        return try_ragged_paged_qsa_prefill(
+                            q,
+                            backing,
+                            table,
+                            ids,
+                            active,
+                            prefixes,
+                            cu,
+                            pd,
+                            page_size=128,
+                            kv_head_num=1,
+                            kv_scale=scale,
+                        )
+
+                    for planned, replayed in ((lengths, updated), (updated, lengths)):
+                        refresh(planned)
+                        self.assertIsNotNone(run(planned))
+                        graph = torch.cuda.CUDAGraph()
+                        with torch.cuda.graph(graph):
+                            actual = run(planned)
+                        refresh(replayed)
+                        actual.fill_(137)
+                        graph.replay()
+                        expected = self._paged_batch_reference(
+                            q, cache, table, ids, replayed, prefixes, scale
+                        )
+                        torch.testing.assert_close(
+                            actual, expected, atol=0.0078125, rtol=0.008
+                        )
+
     def test_packed_qkv_matches_fp64_with_partial_tiles_holes_and_empty_rows(self):
         for heads, tokens in ((6, 257), (12, 257), (6, 513), (12, 513)):
             with self.subTest(heads=heads, tokens=tokens):

@@ -96,7 +96,7 @@ def _batched_paged_prefill(
 ):
     positions: gl.constexpr = QM // G
     request, base, length, tile = _locate(Cu, B, positions, G)
-    prefix = gl.load(Prefixes + request)
+    prefix = gl.load(Prefixes + request, request < B, other=0)
     _execute_prefill(
         Q + base.to(gl.int64) * QS,
         Cache,
@@ -165,7 +165,9 @@ def run_prefill(
         NVMMASharedLayout(128, 8 if fp8 else 16),
     )
     output = torch.empty((tokens, width), dtype=q.dtype, device=q.device)
-    tiles = sum(triton.cdiv(s, qm // group) for s in lengths)
+    # Positive partitions of a fixed token count can round to different tile counts.
+    # Bound all such partitions so replay can change CU contents within the plan.
+    tiles = len(lengths) + (tokens - len(lengths)) // (qm // group)
     grid = (tiles, heads // group)
     if group == 4:
         grid = grid[::-1]

@@ -135,7 +135,9 @@ def run_prefill(q, k, v, selected, cu, lengths):
     key = TensorDescriptor(k, [tokens, dim], [k.stride(2), 1], [32, dim], _KV_LAYOUT)
     value = TensorDescriptor(v, [tokens, dim], [v.stride(2), 1], [32, dim], _KV_LAYOUT)
     positions = qm // group
-    tiles = sum(triton.cdiv(length, positions) for length in lengths)
+    # Cover every positive partition with the same total, including graph replays.
+    # Surplus work resolves to an empty request and performs no Q/K/V reads.
+    tiles = len(lengths) + (tokens - len(lengths)) // positions
     grid = (tiles, heads // group)
     if group == 4:
         grid = grid[::-1]
