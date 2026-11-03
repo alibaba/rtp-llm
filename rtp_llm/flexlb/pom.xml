@@ -430,6 +430,8 @@
                                 <configuration combine.self="override">
                                     <includes>
                                         <include>**/CacheDiffPerformanceTest.java</include>
+                                        <include>**/CacheRetirementPerformanceTest.java</include>
+                                        <include>**/CacheFleetChurnPerformanceTest.java</include>
                                     </includes>
                                     <groups>performance-regression</groups>
                                     <forkCount>1</forkCount>

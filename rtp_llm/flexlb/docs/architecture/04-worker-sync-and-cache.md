@@ -160,7 +160,9 @@ cache 版本做增量；响应恒更新 KV token 总量，版本更新时把 `ca
 ### LOCAL_SYNC 两级索引
 
 - **大表** `GlobalCacheIndex`：`LongObjectMap<Set<String>>` 保存 primitive block hash，owner 用 `SmallOwnerSet` 保存，
-  变更加单把 `ReentrantLock`。`batchCalculatePrefixMatchLength`：按序遍历请求 block 链，
+  单个 key 的 owner 增删与读取快照共用 `LongObjectMap` 的分片锁；读取返回不可变 owner 快照。
+  Worker 清理逐 key 删除，不跨全量 key 持锁；生命周期层仍保护旧代清理与同地址新代发布。
+  跨 key 查询不是整批一致快照。`batchCalculatePrefixMatchLength`：按序遍历请求 block 链，
   用候选集过滤 + 首个未命中即淘汰该引擎（早停），返回每引擎的前缀匹配块数。
 - **小表** `EngineLocalView`：`ConcurrentHashMap<String engineIpPort, Set<Long>>`。
   每个 worker 的 key 集合使用 `LongKeySet`，写入持有 generation 的 `cacheMutationLock`。
