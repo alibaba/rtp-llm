@@ -12,8 +12,15 @@
   </modules>
   <properties>
     <maven.compiler.release>21</maven.compiler.release>
+    <lombok.version>1.18.32</lombok.version>
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
   </properties>
+  <dependencyManagement><dependencies>
+    <dependency>
+      <groupId>org.projectlombok</groupId><artifactId>lombok</artifactId>
+      <version>${lombok.version}</version><scope>provided</scope>
+    </dependency>
+  </dependencies></dependencyManagement>
   <build><pluginManagement><plugins>
     <plugin><groupId>org.apache.maven.plugins</groupId><artifactId>maven-compiler-plugin</artifactId><version>3.13.0</version></plugin>
     <plugin><groupId>org.apache.maven.plugins</groupId><artifactId>maven-surefire-plugin</artifactId><version>3.2.5</version></plugin>
