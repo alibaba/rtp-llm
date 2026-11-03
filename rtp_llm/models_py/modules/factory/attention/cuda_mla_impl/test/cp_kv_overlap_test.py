@@ -242,6 +242,131 @@ class CpKvOverlapTest(unittest.TestCase):
                     pipeline.prepare.assert_called_once_with(2, cache)
                     compute.wait_stream.assert_not_called()
 
+    def test_prefetched_new_kv_rejects_invalid_plan_before_cache_write(self):
+        for missing_pipeline in (False, True):
+            with self.subTest(missing_pipeline=missing_pipeline):
+                wrapper = self.make_wrapper()
+                pipeline = Mock()
+                wrapper._cross_layer_prefetch = None if missing_pipeline else pipeline
+                wrapper.fmha_impl._rank_major_write_slots.return_value = torch.arange(3)
+                compute, ready = Mock(), Mock()
+                k = torch.ones(2, 512, dtype=torch.bfloat16)
+                pe = torch.ones(2, 64, dtype=torch.bfloat16)
+                raw = torch.zeros(4, 576, dtype=torch.bfloat16)
+                error = RuntimeError if missing_pipeline else ValueError
+                message = (
+                    "requires the cross-layer pipeline"
+                    if missing_pipeline
+                    else "writer plan"
+                )
+                with patch.object(torch.cuda, "current_stream", return_value=compute):
+                    with self.assertRaisesRegex(error, message):
+                        with wrapper.prepare_kv(
+                            k, k, pe, object(), new_kv=(raw, ready)
+                        ):
+                            self.fail("invalid plan must not reach attention")
+                wrapper.fmha_impl.write_kv.assert_not_called()
+                pipeline.prepare.assert_not_called()
+                if missing_pipeline:
+                    compute.wait_event.assert_not_called()
+                else:
+                    compute.wait_event.assert_called_once_with(ready)
+                compute.wait_stream.assert_not_called()
+
+    def test_prefetched_new_kv_empty_local_shard_preserves_event_order(self):
+        wrapper = self.make_wrapper()
+        wrapper._cross_layer_prefetch = Mock()
+        wrapper.fmha_impl._rank_major_write_slots.return_value = torch.arange(4)
+        raw = torch.arange(4 * 576).reshape(4, 576).to(torch.bfloat16)
+        k = torch.empty(0, 512, dtype=torch.bfloat16)
+        pe = torch.empty(0, 64, dtype=torch.bfloat16)
+        compute, ready = Mock(), Mock()
+        order = []
+        compute.wait_event.side_effect = lambda _: order.append("ready")
+        wrapper.fmha_impl.write_kv.side_effect = lambda *a, **kw: order.append("write")
+        wrapper._cross_layer_prefetch.prepare.side_effect = lambda *a: order.append(
+            "history"
+        )
+        with patch.object(
+            torch.cuda, "current_stream", return_value=compute
+        ) as current:
+            with wrapper.prepare_kv(k, k, pe, object(), new_kv=(raw, ready)):
+                self.assertEqual(order, ["ready", "write", "history"])
+        current.assert_called_once_with(k.device)
+        ckv, kpe, _ = wrapper.fmha_impl.write_kv.call_args.kwargs["gathered_kv"]
+        torch.testing.assert_close(torch.cat((ckv, kpe), dim=-1), raw, rtol=0, atol=0)
+        compute.wait_event.assert_called_once_with(ready)
+        compute.wait_stream.assert_not_called()
+        wrapper._apply_rope.assert_not_called()
+
+    @unittest.skipUnless(torch.cuda.is_available(), "requires CUDA")
+    def test_prefetched_new_kv_real_event_orders_cache_write(self):
+        # The gathered buffer is produced asynchronously. Test the real event
+        # wait on the production consumer, not only mocked method ordering.
+        device = torch.device("cuda", torch.cuda.current_device())
+        compute = torch.cuda.current_stream(device)
+        producer = torch.cuda.Stream(device=device)
+        for rank_major in (False, True):
+            for local_rows in (0, 2):
+                for iteration in range(4):
+                    with self.subTest(
+                        rank_major=rank_major,
+                        local_rows=local_rows,
+                        iteration=iteration,
+                    ):
+                        wrapper = self.make_wrapper()
+                        wrapper._cross_layer_prefetch = Mock()
+                        wrapper._kv_overlap_stream = producer
+                        op = wrapper.fmha_impl
+                        op._rank_major_write_slots.return_value = (
+                            torch.arange(4, device=device) if rank_major else None
+                        )
+                        op.kv_restore_unpad_indices = torch.tensor(
+                            [3, 0, 2], device=device
+                        )
+                        raw = torch.zeros((4, 576), dtype=torch.bfloat16, device=device)
+                        k = torch.empty(
+                            (local_rows, 512), dtype=torch.bfloat16, device=device
+                        )
+                        pe = torch.empty(
+                            (local_rows, 64), dtype=torch.bfloat16, device=device
+                        )
+                        expected = (
+                            torch.arange(4 * 576, device=device)
+                            .reshape(4, 576)
+                            .remainder(127)
+                            .to(torch.bfloat16)
+                        )
+                        expected.add_(iteration)
+                        ready = torch.cuda.Event()
+                        producer.wait_stream(compute)
+                        with torch.cuda.stream(producer):
+                            torch.cuda._sleep(20000)
+                            raw.copy_(expected)
+                            ready.record(producer)
+                        written = []
+
+                        def write(*args, gathered_kv):
+                            ckv, kpe, stream = gathered_kv
+                            self.assertIsNone(stream)
+                            written.append(torch.cat((ckv, kpe), dim=-1).clone())
+
+                        op.write_kv.side_effect = write
+                        with wrapper.prepare_kv(
+                            k, k, pe, object(), new_kv=(raw, ready)
+                        ):
+                            pass
+                        reference = (
+                            expected
+                            if rank_major
+                            else expected[op.kv_restore_unpad_indices]
+                        )
+                        torch.testing.assert_close(
+                            written[0], reference, rtol=0, atol=0
+                        )
+                        wrapper._apply_rope.assert_not_called()
+                        wrapper._cross_layer_prefetch.prepare.assert_called_once()
+
     def test_producer_joined_after_indexer_exception(self):
         wrapper = self.make_wrapper()
         compute = Mock()
