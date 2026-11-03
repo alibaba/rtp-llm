@@ -82,6 +82,34 @@ def _producer(
                         full.index(slot),
                         buf.index(slot),
                     )
+    elif SCALED and not RAW_FP8 and G == 6:
+        # Reuse each page lookup while preserving the wait for each operand.
+        for iteration in range(tiles):
+            kt = tiles - 1 - iteration if FRONTIER else iteration
+            physical, page_valid, page_offset = _page(
+                Table, kt, KN, PAGE_SIZE, WIDTH, PAGES
+            )
+            for kind in gl.static_range(2):
+                operand = 2 * iteration + kind
+                slot = operand % SLOTS
+                cycle = operand // SLOTS
+                if operand >= SLOTS:
+                    mbarrier.wait(empty.index(slot), (cycle - 1) & 1)
+                mbarrier.expect(full.index(slot), KN * D * (1 if RAW_FP8 else 2))
+                if kind == 0:
+                    tma.async_copy_global_to_shared(
+                        K,
+                        [physical * CACHE_ROWS + page_offset, 0],
+                        full.index(slot),
+                        buf.index(slot),
+                    )
+                else:
+                    tma.async_copy_global_to_shared(
+                        V,
+                        [physical * CACHE_ROWS + PAGE_SIZE + page_offset, 0],
+                        full.index(slot),
+                        buf.index(slot),
+                    )
     else:
         for operand in range(2 * tiles):
             slot = operand % SLOTS
@@ -160,7 +188,10 @@ def _attention_step(
     raw_rhs: gl.constexpr = DotOperandLayout(1, mma, 4 if RAW_FP8 else 2)
     # Preparation zeroes invalid pages and tail rows for these staged tiles.
     padded: gl.constexpr = (
-        SCALED and not RAW_FP8 and QM == 32 and (G != 6 or not PIPE or SLOTS != 2)
+        SCALED
+        and not RAW_FP8
+        and QM == 32
+        and (G != 6 or not PIPE or SLOTS != 2 or (SINGLE_REQUEST and num_warps() == 4))
     )
     kt = tiles - 1 - iteration if FRONTIER else iteration
     physical, page_valid, page_offset = _page(Table, kt, KN, PAGE_SIZE, WIDTH, PAGES)
@@ -229,7 +260,14 @@ def _attention_step(
         and QM == 32
         and SCALED
         and not RAW_FP8
-        and (G == 12 or (G == 6 and PIPE and SLOTS == 3))
+        and (
+            G == 12
+            or (
+                G == 6
+                and PIPE
+                and (SLOTS == 3 or (SINGLE_REQUEST and num_warps() == 4))
+            )
+        )
     )
     if broadcast:
         word = gl.load(Mask + pos * WORDS + kt, live & (kt < WORDS), other=0).to(
@@ -822,6 +860,8 @@ def run_prefill(q, cache, table, selected, prefix, page_size, scale):
     # operand slots while keeping the complete CTA within its register budget.
     compact_pipe = scaled and not fp8 and heads == 6 and tokens <= 512
     pipe = compact_pipe or ((not scaled or heads == 6) and prefix + tokens <= 2048)
+    # Longer staged tiles use the paired loader with four compute warps.
+    long_pipe = scaled and not fp8 and heads == 6 and tokens > 512 and pipe
     launch_options = {"maxnreg": 168} if compact_pipe else {}
     _paged_prefill[grid](
         q,
@@ -850,7 +890,7 @@ def run_prefill(q, cache, table, selected, prefix, page_size, scale):
         True,
         scaled or heads == 12 or not pipe,
         key_tile,
-        2 if compact_pipe else 0,
+        2 if compact_pipe or long_pipe else 0,
         num_warps=8 if compact_pipe else 4,
         **launch_options,
     )

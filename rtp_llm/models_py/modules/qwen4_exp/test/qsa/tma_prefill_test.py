@@ -746,7 +746,14 @@ class TmaPrefillTest(unittest.TestCase):
         self.assertTrue((scales[0] == 0).all())
 
     def test_staged_sparse_frontier_updates_after_empty_tiles(self):
-        for heads, prefix, tokens in ((6, 1024, 513), (6, 3072, 513), (12, 1024, 257)):
+        for heads, prefix, tokens in (
+            (6, 1024, 513),
+            (6, 1534, 513),
+            (6, 1535, 513),
+            (6, 1536, 513),
+            (6, 3072, 513),
+            (12, 1024, 257),
+        ):
             with self.subTest(heads=heads, prefix=prefix, tokens=tokens):
                 q, backing, cache, table, selected, scale = self._paged_case(
                     heads, prefix, tokens, True
