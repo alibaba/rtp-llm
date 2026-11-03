@@ -1,12 +1,14 @@
+import io
 import os
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import av
 import numpy as np
 import torch
+from PIL import Image
 
 from rtp_llm.multimodal.multimodal_mixins.glm5_3_flash import (
     glm5_3_flash_mixin as glm53_mixin,
@@ -333,6 +335,52 @@ class Glm53FlashVitTest(unittest.TestCase):
                     self.assertEqual(vision_tokens, frame_count // 2 * 13 * 23)
                 else:
                     self.assertGreater(vision_tokens, 20000)
+
+    def test_image_pixel_limits_use_single_image_area(self):
+        for input_size, min_pixels, max_pixels, expected_size in (
+            (1536, -1, 1003520, 980),
+            (1536, -1, -1, 1540),
+            (28, 224 * 224, -1, 224),
+        ):
+            with self.subTest(
+                input_size=input_size, min_pixels=min_pixels, max_pixels=max_pixels
+            ):
+                image_data = io.BytesIO()
+                Image.new("RGB", (input_size, input_size)).save(image_data, "PNG")
+                image_data.seek(0)
+                processor = Mock(
+                    return_value={"pixel_values": object(), "image_grid_thw": object()}
+                )
+                mm_input = SimpleNamespace(
+                    url="memory://image",
+                    mm_type=MMUrlType.IMAGE,
+                    mm_preprocess_config=SimpleNamespace(
+                        min_pixels=min_pixels, max_pixels=max_pixels
+                    ),
+                )
+                processor_config = {
+                    "image_processor": {
+                        "patch_size": 14,
+                        "temporal_patch_size": 2,
+                        "merge_size": 2,
+                        "min_image_tokens": 16,
+                        "max_image_tokens": 8000,
+                    }
+                }
+                with patch.object(
+                    glm53_mixin, "get_bytes_io_from_url", return_value=image_data
+                ):
+                    Glm53FlashImageEmbedding.preprocess_input(
+                        [mm_input],
+                        SimpleNamespace(download_headers=""),
+                        processor=processor,
+                        video_processor=None,
+                        processor_config=processor_config,
+                    )
+                self.assertEqual(
+                    processor.call_args.kwargs["images"].size,
+                    (expected_size, expected_size),
+                )
 
     def test_real_mp4_decord_preprocess(self):
         video_path = Path(os.environ["TEST_TMPDIR"]) / "glm53_decord_test.mp4"
