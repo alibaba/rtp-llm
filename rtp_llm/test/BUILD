@@ -675,3 +675,70 @@ py_test(
         "kimi_k31_warmup_slots_test", "speculative_acceptance_test",
     ]
 ]
+
+# Procedural history, Page-RR geometry and a serving-sized page pool for the K3.1 DSA tests.
+py_library(
+    name = "kimi_k31_dsa_fixture",
+    srcs = ["kimi_k31_dsa_fixture.py"],
+)
+
+# 8-GPU K3.1 DSA decode (FP8 Indexer -> top-k -> BF16 sparse MLA -> V-up -> combine) against an
+# fp32 reference. Run with torchrun --no-python on eight idle GPUs.
+py_binary(
+    name = "kimi_k31_dsa_dcp_decode_test",
+    srcs = ["kimi_k31_dsa_dcp_decode_test.py"],
+    deps = [
+        ":kimi_k31_dsa_fixture",
+        "//rtp_llm:testlib",
+    ],
+    tags = ["manual"],
+)
+
+# One KimiK31DSA decode layer built from the serving config, with CUDA Graph capture/replay as the
+# decode runner does it.
+py_library(
+    name = "kimi_k31_dsa_layer_fixture",
+    srcs = ["kimi_k31_dsa_layer_fixture.py"],
+)
+
+# 8-GPU K3.1 DSA layer under a simulated decode server (Q 1..16, mixed context lengths up to 1M,
+# graph buckets with dummy rows); every launch checked against fp32. torchrun --no-python.
+py_library(
+    name = "kimi_k31_dsa_layer_test_lib",
+    srcs = ["kimi_k31_dsa_layer_test.py"],
+    deps = [":kimi_k31_dsa_layer_fixture"],
+)
+
+py_binary(
+    name = "kimi_k31_dsa_layer_test",
+    srcs = ["kimi_k31_dsa_layer_test.py"],
+    deps = [
+        ":kimi_k31_dsa_layer_test_lib",
+        "//rtp_llm:testlib",
+    ],
+    tags = ["manual"],
+)
+
+# 8-GPU K3.1 DSA decode layer latency (graph replay, L2 flush, max over ranks of the median).
+py_binary(
+    name = "kimi_k31_dsa_layer_bench",
+    srcs = ["kimi_k31_dsa_layer_bench.py"],
+    deps = [
+        ":kimi_k31_dsa_layer_fixture",
+        "//rtp_llm:testlib",
+    ],
+    tags = ["manual"],
+)
+
+# 8-GPU K3.1 DSA long replay run: every DSA layer per graph, several buckets in random order with
+# eager calls between them; replays bit-exact with the first, periodic fp32 checks.
+py_binary(
+    name = "kimi_k31_dsa_layer_stateful_test",
+    srcs = ["kimi_k31_dsa_layer_stateful_test.py"],
+    deps = [
+        ":kimi_k31_dsa_layer_fixture",
+        ":kimi_k31_dsa_layer_test_lib",
+        "//rtp_llm:testlib",
+    ],
+    tags = ["manual"],
+)
