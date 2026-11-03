@@ -1,0 +1,123 @@
+diff --git a/deep_gemm/include/deep_gemm/epilogue/sm100_dsv41_qkv.cuh b/deep_gemm/include/deep_gemm/epilogue/sm100_dsv41_qkv.cuh
+--- a/deep_gemm/include/deep_gemm/epilogue/sm100_dsv41_qkv.cuh
++++ b/deep_gemm/include/deep_gemm/epilogue/sm100_dsv41_qkv.cuh
+@@ -308,9 +308,11 @@
+         const auto base = n - 1280 + col;
+         const auto inv = inv_rms(kv_sum(summary, row), 512.f, a.eps);
+ #pragma unroll
+-        for (int i = 0; i < 8; ++i)
+-            v[i] = __fmul_rn(__fmul_rn(v[i], inv),
+-                             prefetched->norm[i]);
++        for (int i = 0; i < 8; ++i) {
++            // KV RMSNorm materializes BF16 before the interleaved RoPE.
++            v[i] = __bfloat162float(__float2bfloat16_rn(
++                __fmul_rn(__fmul_rn(v[i], inv), prefetched->norm[i])));
++        }
+         if (base >= 448) {
+             auto f = prefetched->frequency[work];
+ #pragma unroll
+@@ -329,20 +331,29 @@
+             v[i]       = __bfloat162float(rounded[i]);
+             maximum    = fmaxf(maximum, fabsf(v[i]));
+         }
++        maximum   = fmaxf(maximum, __shfl_xor_sync(mask, maximum, 1));
++        maximum   = fmaxf(maximum, __shfl_xor_sync(mask, maximum, 2));
++        const auto exp = bf16_quant_exp(maximum, 105);
++        const auto inv_scale = __uint_as_float((254 - exp) << 23);
++        const auto scale = __uint_as_float(exp << 23);
++        uint64_t packed = 0;
++#pragma unroll
++        for (int i = 0; i < 8 / 2; ++i)
++            packed |= uint64_t(__nv_cvt_float2_to_fp8x2(
++                make_float2(__fmul_rn(v[2*i], inv_scale), __fmul_rn(v[2*i+1], inv_scale)),
++                __NV_SATFINITE, __NV_E4M3)) << (16 * i);
++        // Fresh attention and the paged cache consume the same MXFP8 value.
++        // A masked cache slot suppresses only the store, never the castback.
++#pragma unroll
++        for (int i = 0; i < 8; ++i) {
++            __nv_fp8_e4m3 quantized;
++            quantized.__x = uint8_t(packed >> (8 * i));
++            rounded[i] = __float2bfloat16_rn(__fmul_rn(static_cast<float>(quantized), scale));
++        }
+         auto kdst = static_cast<__nv_bfloat16*>(a.kv) + r * 512 + base;
+         *reinterpret_cast<uint4*>(kdst) = *reinterpret_cast<uint4*>(rounded);
+-        maximum   = fmaxf(maximum, __shfl_xor_sync(mask, maximum, 1));
+-        maximum   = fmaxf(maximum, __shfl_xor_sync(mask, maximum, 2));
+         auto dst = prefetched->cache[work];
+         if (dst) {
+-            auto     exp    = bf16_quant_exp(maximum, 105);
+-            auto     scale  = __uint_as_float((254 - exp) << 23);
+-            uint64_t packed = 0;
+-#pragma unroll
+-            for (int i = 0; i < 8 / 2; ++i)
+-                packed |= uint64_t(__nv_cvt_float2_to_fp8x2(
+-                    make_float2(__fmul_rn(v[2*i], scale), __fmul_rn(v[2*i+1], scale)),
+-                    __NV_SATFINITE, __NV_E4M3)) << (16 * i);
+             *reinterpret_cast<uint64_t*>(dst + base) = packed;
+             if (lane % (32 / 8) == 0)
+                 dst[512 + base / 32] = uint8_t(exp);
+diff --git a/deep_gemm/include/deep_gemm/impls/dsv41_qb/side_workers.cuh b/deep_gemm/include/deep_gemm/impls/dsv41_qb/side_workers.cuh
+--- a/deep_gemm/include/deep_gemm/impls/dsv41_qb/side_workers.cuh
++++ b/deep_gemm/include/deep_gemm/impls/dsv41_qb/side_workers.cuh
+@@ -2,6 +2,7 @@
+ // Ported from Alibaba RTP-LLM; original implementation by zsnoob.
+ #pragma once
+ #include <deep_gemm/layout/dsv41_qb.cuh>
++#include <cuda_fp8.h>
+ // V4.1 BF16 RMSNorm -> RoPE64 -> BF16 -> native MXFP8 cache528.
+ // Independent of Q GEMM; side warps own grid-stride KV rows.
+ namespace deep_gemm::dsv41_qb {
+@@ -36,7 +37,8 @@
+         #pragma unroll
+         for(int j=0;j<4;++j) {
+             const int col=g*128+lane*4+j;
+-            v[g*4+j]=__fmul_rn(__fmul_rn(v[g*4+j],inv),__bfloat162float(a.gamma[col]));
++            v[g*4+j]=__bfloat162float(__float2bfloat16_rn(
++                __fmul_rn(__fmul_rn(v[g*4+j],inv),__bfloat162float(a.gamma[col]))));
+         }
+     }
+     if(lane>=16) {
+@@ -54,14 +56,13 @@
+         #pragma unroll
+         for(int j=0;j<4;++j) {
+             auto rounded=__float2bfloat16_rn(v[g*4+j]);
+-            a.kv_out[int64_t(row)*512+g*128+lane*4+j]=rounded;
+             v[g*4+j]=__bfloat162float(rounded);
+         }
+     }
+     int64_t slot=a.slots64?a.slots64[row]:a.slots32[row];
+-    if(slot<0)return;
+-    if(slot/a.entries>=a.pages){if(a.trap_invalid)asm volatile("trap;");return;}
+-    uint8_t* dst=a.pool+(slot/a.entries)*a.page_stride+(slot%a.entries)*528;
++    const bool valid_slot=slot>=0&&slot/a.entries<a.pages;
++    if(slot>=0&&!valid_slot&&a.trap_invalid)asm volatile("trap;");
++    uint8_t* dst=valid_slot?a.pool+(slot/a.entries)*a.page_stride+(slot%a.entries)*528:nullptr;
+     #pragma unroll
+     for(int g=0;g<4;++g) {
+         float maximum=0;
+@@ -69,13 +70,20 @@
+         for(int j=0;j<4;++j)maximum=fmaxf(maximum,fabsf(v[g*4+j]));
+         #pragma unroll
+         for(int mask=4;mask;mask/=2)maximum=fmaxf(maximum,__shfl_xor_sync(0xffffffff,maximum,mask));
+-        maximum=fmaxf(maximum,1e-4f);
+-        int exponent=static_cast<int>(ceilf(log2f(maximum*(1.0f/448.0f))));
++        // All inputs are finite BF16: exact 448*2^k thresholds avoid
++        // approximate log2/ceil at the power-of-two scale boundary.
++        const unsigned bits=__float_as_uint(maximum);
++        const int exponent=int(bits>>23)-8+((bits&0x7fffff)>0x600000);
++        const unsigned encoded=exponent>105?exponent:105; // amax floor 1e-4
++        const float inv_scale=__uint_as_float((254-encoded)<<23);
++        const float scale=__uint_as_float(encoded<<23);
+         #pragma unroll
+         for(int j=0;j<4;++j) {
+-            float scaled=fminf(448.0f,fmaxf(-448.0f,v[g*4+j]*exp2f(-float(exponent))));
+-            dst[g*128+lane*4+j]=__nv_fp8_e4m3(scaled).__x;
++            const __nv_fp8_e4m3 quantized(__fmul_rn(v[g*4+j],inv_scale));
++            a.kv_out[int64_t(row)*512+g*128+lane*4+j]=
++                __float2bfloat16_rn(__fmul_rn(static_cast<float>(quantized),scale));
++            if(dst)dst[g*128+lane*4+j]=quantized.__x;
+         }
+-        if(lane%8==0)dst[512+g*4+lane/8]=static_cast<uint8_t>(max(0,min(255,exponent+127)));
++        if(dst&&lane%8==0)dst[512+g*4+lane/8]=static_cast<uint8_t>(encoded);
+     }
+ }

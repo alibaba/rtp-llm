@@ -226,19 +226,6 @@ msgstr ""
 msgid "Dynamically adjust the service log level."
 msgstr ""
 
-#: ../../backend/native_api.ipynb:61 ../../backend/native_api.ipynb:355
-msgid "``/update_eplb_config``"
-msgstr ""
-
-#: ../../backend/native_api.ipynb:61
-#, python-brace-format
-msgid "``{\"model\": \"EPLB\", \"update_time\":1000}``"
-msgstr ""
-
-#: ../../backend/native_api.ipynb:61
-msgid "Update the EPLB (Elastic Load Balancer) configuration."
-msgstr ""
-
 #: ../../backend/native_api.ipynb:64
 msgid "``/v1/embeddings``"
 msgstr ""
@@ -407,10 +394,6 @@ msgstr ""
 
 #: ../../backend/native_api.ipynb:325
 msgid "Update Log Level"
-msgstr ""
-
-#: ../../backend/native_api.ipynb:353
-msgid "Update EPLB Config for MoE"
 msgstr ""
 
 #: ../../backend/native_api.ipynb:381

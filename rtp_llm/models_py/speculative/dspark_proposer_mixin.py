@@ -217,6 +217,10 @@ class DSparkProposerMixin:
         """Reduce backbone output to ``[B*width, dim]`` when needed."""
         return hidden.contiguous()
 
+    def compute_draft_outputs(self, hidden: torch.Tensor) -> PyModelOutputs:
+        """Build proposal outputs, with optional model-specific side outputs."""
+        return PyModelOutputs(self.compute_draft_hidden_states(hidden))
+
     # ------------------------------------------------------------------
     # Shared per-round flow
     # ------------------------------------------------------------------
@@ -432,4 +436,4 @@ class DSparkProposerMixin:
         if batch_size == 0:
             return self.dspark_empty_outputs(0, device)
 
-        return PyModelOutputs(self.compute_draft_hidden_states(hidden))
+        return self.compute_draft_outputs(hidden)

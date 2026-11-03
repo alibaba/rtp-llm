@@ -386,8 +386,11 @@ class V41DecodeGlobalCPU(unittest.TestCase):
         self.assertEqual(len(set(slots[12:].tolist())), 8)
         owner._block_tables_by_type[CSA_STATE][0, 0] = 0
         owner._block_tables_by_type[CSA_STATE][1, 1] = -1
+        pool = owner._source_pool(CSA_STATE)
+        before = pool.clone()
         got = owner._read_state(torch.tensor([7, 257]), torch.tensor([0, 1]))
         torch.testing.assert_close(got, torch.zeros(2, 1024), rtol=0, atol=0)
+        torch.testing.assert_close(pool, before, rtol=0, atol=0)
 
     def test_cpu_gate_returns_false_without_mutating_pools(self):
         case = _case("cpu", 2, 1, 6)

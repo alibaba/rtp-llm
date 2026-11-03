@@ -22,6 +22,8 @@
 #include "rtp_llm/cpp/cache/KVCacheResource.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCacheFactory.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/ScopeRollback.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeCacheTestUtils.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/test/BoundedThreadTestUtils.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/StorageBackend.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/load/LoadAsyncContext.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorAsyncContext.h"
@@ -125,6 +127,9 @@ makeAllocatorLoadContext(size_t matched_blocks, const std::vector<Tier>& source_
 
 class StreamReadStorageBackend: public StorageBackend {
 public:
+    explicit StreamReadStorageBackend(std::chrono::milliseconds timeout = std::chrono::seconds(10)):
+        StorageBackend(nullptr, nullptr, -1, timeout) {}
+
     ~StreamReadStorageBackend() override {
         shutdown();
     }
@@ -369,7 +374,9 @@ protected:
     std::shared_ptr<StreamReadStorageBackend> prepareStorageBackendResource(bool     block_matches,
                                                                             bool     seed_host     = false,
                                                                             RoleType role_type     = RoleType::PDFUSION,
-                                                                            bool     seed_resident = false) {
+                                                                            bool     seed_resident = false,
+                                                                            std::chrono::milliseconds timeout =
+                                                                                std::chrono::seconds(10)) {
         KVCacheConfig kv_cache_config;
         kv_cache_config.enable_remote_cache   = true;
         kv_cache_config.enable_memory_cache   = seed_host;
@@ -381,7 +388,7 @@ protected:
         prepareResourceWithCacheConfig(
             init_config(), {1, 2, 3, 4, 5, 6}, /*reuse_cache=*/true, role_type, manager_kv_cache_config);
 
-        auto backend = std::make_shared<StreamReadStorageBackend>();
+        auto backend = std::make_shared<StreamReadStorageBackend>(timeout);
         if (block_matches) {
             backend->blockMatches();
         }
@@ -522,7 +529,8 @@ TEST_F(StreamCacheResourceTest, SwapLinearBlocksUsesPolicyAndTagAfterGroupReorde
     }
 }
 
-TEST_F(StreamCacheResourceTest, testAllocateResource) {
+TEST_F(StreamCacheResourceTest, testAllocateResourceIgnoresObsoleteBenchmarkSwitch) {
+    autil::EnvGuard obsolete_benchmark("RTP_DTOP_BENCH_READ_ONLY_REQUESTS", "1");
     for (const bool with_backend : {false, true}) {
         for (const bool ignore_request_switches : {false, true}) {
             for (const bool request_reuse : {false, true}) {
@@ -1310,6 +1318,42 @@ TEST_F(StreamCacheResourceTest, StorageMatchDefersReusePublicationUntilReadCompl
     EXPECT_EQ(resource.kvCache().cacheResource(0).storageBackendReuseBlockNum(), 2u);
 }
 
+TEST_F(StreamCacheResourceTest, OverallDeadlineReturnsBeforeReadAndLateCompletionCannotPublishReuse) {
+    auto backend = prepareStorageBackendResource(false, false, RoleType::PREFILL, false, std::chrono::seconds(1));
+    auto& resource = stream_->streamCacheResource();
+    backend->blockReads();
+    block_tree_cache_detail::ScopeRollback release_read([&] { backend->releaseReads(); });
+    ASSERT_TRUE(resource.initKVBlock().ok());
+    ASSERT_TRUE(backend->waitForReadsFor(1));
+    auto context = std::dynamic_pointer_cast<LoadAsyncContext>(resource.allocator_load_context_);
+    ASSERT_NE(context, nullptr);
+    const auto original_resource = resource.batch_kv_cache_resource_;
+    const auto original_blocks = original_resource->blocks(0, "default");
+    ASSERT_FALSE(original_blocks.empty());
+    auto pool = cache_manager_->coordinator_manager_->groupBlockPools().front();
+    block_tree_cache_test::BoundedThread<absl::Status> waiter([stream = stream_] {
+        return stream->streamCacheResource().waitForAllocatorLoad();
+    });
+    ASSERT_EQ(waiter.waitFor(std::chrono::seconds(5)), std::future_status::ready);
+    EXPECT_EQ(waiter.get().code(), absl::StatusCode::kDeadlineExceeded);
+    EXPECT_NE(resource.batch_kv_cache_resource_, original_resource);
+    EXPECT_EQ(resource.kvCache().curBlocksNum(), 0);
+    EXPECT_FALSE(resource.allocator_load_context_);
+    EXPECT_GE(pool->refCount(original_blocks.front()), 1u);
+    EXPECT_EQ(stream_->reuseLength(), 0);
+    EXPECT_FALSE(resource.cache_reuse_metrics_.load_success);
+    EXPECT_TRUE(resource.cache_reuse_metrics_.report_match_to_ready_latency);
+
+    release_read.run();
+    backend->shutdown();
+    block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache_manager_->block_tree_cache_);
+    EXPECT_FALSE(context->success());
+    EXPECT_EQ(context->errorInfo().code(), ErrorCode::DEADLINE_EXCEEDED);
+    EXPECT_EQ(stream_->reuseLength(), 0);
+    EXPECT_EQ(resource.kvCache().curBlocksNum(), 0);
+    EXPECT_FALSE(pool->isAllocated(original_blocks.front()));
+}
+
 TEST_F(StreamCacheResourceTest, RemoteTimeoutKeepsHostPrefixAndReplacesFrozenSuffix) {
     auto  backend  = prepareStorageBackendResource(false, true, RoleType::PREFILL);
     auto& resource = stream_->streamCacheResource();
@@ -1408,6 +1452,16 @@ TEST_F(StreamCacheResourceTest, RemoteTimeoutAllocationRetryKeepsLocalLookupAndS
         auto  backend  = prepareStorageBackendResource(false, true, RoleType::PREFILL, resident);
         auto& resource = stream_->streamCacheResource();
         initCacheKeys(resource.batch_kv_cache_resource_, stream_->completeTokenIdsPtr(), 2);
+        auto cache = cache_manager_->block_tree_cache_;
+        ASSERT_EQ(cache->groupSets().size(), 1u);
+        const auto group_id   = cache->groupSets().front()->groupSetId();
+        const auto prefix_key = resource.batch_kv_cache_resource_->cacheKeys(0).front();
+        const auto prefix     = cache->tree()->findNode({prefix_key});
+        ASSERT_EQ(prefix.size(), 1u);
+        ASSERT_TRUE(prefix.back()->group_set_resources[group_id].hasTier(Tier::HOST));
+        // The helper seeds the tree directly. Register its HOST candidate as
+        // a production insertion would, rather than silently omitting the heap.
+        block_tree_cache_test::BlockTreeCacheTestPeer::refreshCandidateForTest(*cache, prefix.back(), group_id);
         backend->blockReads();
         block_tree_cache_detail::ScopeRollback release_read([&] { backend->releaseReads(); });
         backend->timeoutNextRead();
@@ -1428,19 +1482,33 @@ TEST_F(StreamCacheResourceTest, RemoteTimeoutAllocationRetryKeepsLocalLookupAndS
         EXPECT_TRUE(absl::IsUnavailable(resource.waitForAllocatorLoad()));
         EXPECT_EQ(resource.curBlocksNum(), 0);
         EXPECT_EQ(stream_->reuseLength(), 0);
+        EXPECT_TRUE(resource.skip_remote_cache_);
+        // Finished loads may still own source tickets through this inspection
+        // reference. Release them before exercising production eviction.
+        context.reset();
+        block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
+        for (const auto tier : {Tier::DEVICE, Tier::HOST}) {
+            const bool dropped = block_tree_cache_test::BlockTreeCacheTestPeer::demoteOneForGroupSetForTest(
+                *cache, group_id, tier, /*force_drop=*/true);
+            if (resident) {
+                EXPECT_FALSE(dropped);
+            }
+        }
+        const auto remaining              = cache->tree()->findNode({prefix_key});
+        const bool local_prefix_available = !remaining.empty()
+                                            && (remaining.back()->group_set_resources[group_id].hasTier(Tier::DEVICE)
+                                                || remaining.back()->group_set_resources[group_id].hasTier(Tier::HOST)
+                                                || remaining.back()->group_set_resources[group_id].hasTier(Tier::DISK));
+        ASSERT_EQ(local_prefix_available, resident);
         pool->decRef(*held);
         release_held.dismiss();
         ASSERT_TRUE(resource.initKVBlock().ok());
         ASSERT_TRUE(resource.waitForAllocatorLoad().ok());
         EXPECT_EQ(backend->matchCalls(), 1u);
-        // Ordinary prefixes may survive or be evicted; resident prefixes must survive.
-        const auto local_reuse = stream_->reuseLength();
-        if (resident) {
-            EXPECT_EQ(local_reuse, 2);
-        } else {
-            EXPECT_TRUE(local_reuse == 0 || local_reuse == 2);
-        }
-        EXPECT_EQ(stream_->deviceReuseLength(), local_reuse);
+        // Retry sees the explicitly evicted ordinary prefix or the preserved
+        // resident prefix. DEVICE pressure alone need not remove the HOST copy.
+        EXPECT_EQ(stream_->reuseLength(), resident ? 2 : 0);
+        EXPECT_EQ(stream_->deviceReuseLength(), resident ? 2 : 0);
         EXPECT_EQ(stream_->remoteReuseLength(), 0);
     }
 }

@@ -19,6 +19,7 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeCacheTestUtils.h"
 #include "rtp_llm/cpp/config/StaticConfig.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
+#include "rtp_llm/cpp/utils/AsyncProfilingScope.h"
 
 namespace rtp_llm {
 namespace {
@@ -105,7 +106,7 @@ public:
     bool start() override {
         return true;
     }
-    bool submit(Task task) override {
+    bool submit(Task task, BlockTreeTaskClass = BlockTreeTaskClass::BACKGROUND) override {
         {
             std::lock_guard<std::mutex> lock(mutex_);
             tasks_.push_back(std::move(task));
@@ -400,15 +401,14 @@ protected:
             EXPECT_EQ(node->group_set_resources[0].getTopTier(), succeeded ? Tier::DEVICE : GetParam());
         }
 
-        const size_t resident_prefix_length =
-            env_->cache->insert(keys_, resources_, Tier::DEVICE, /*is_resident=*/true);
-        EXPECT_EQ(resident_prefix_length, succeeded ? keys_.size() : 0u);
         if (succeeded) {
+            const size_t resident_prefix_length =
+                env_->cache->insert(keys_, resources_, Tier::DEVICE, /*is_resident=*/true);
+            EXPECT_EQ(resident_prefix_length, keys_.size());
             expectResidentPrefix(target_blocks);
             EXPECT_EQ(env_->poolFor(GetParam()).referencedBlocksNum(BlockTreeRefType::CACHE), 0u);
         } else {
-            // A failed load retains the only source; resident insertion must not
-            // publish a second serving tier or mark an unpromoted prefix resident.
+            // Before any replacement insert, a failed load retains its source for retry.
             for (const TreeNode* node : settled_path) {
                 EXPECT_FALSE(node->is_resident);
                 EXPECT_EQ(node->group_set_resources[0].getTopTier(), GetParam());
@@ -433,23 +433,25 @@ protected:
     std::vector<BlockIndicesType>                         request_holds_;
 };
 
-TEST_P(ResidentTieredCacheTest, ResidentInsertDoesNotDuplicateExistingLowerTier) {
+TEST_P(ResidentTieredCacheTest, ResidentInsertReplacesIdleLowerTierWithoutCopy) {
     EXPECT_EQ(candidateCountForTier(*env_->cache, GetParam()), 1u);
+    const auto   original_path    = env_->cache->tree()->findNode(keys_);
+    const size_t submitted_before = engine_->submittedBatchCount();
     {
         const size_t resident_prefix_length =
             env_->cache->insert(keys_, resources_, Tier::DEVICE, /*is_resident=*/true);
-        EXPECT_EQ(resident_prefix_length, 0u);
+        EXPECT_EQ(resident_prefix_length, keys_.size());
     }
     const auto path = env_->cache->tree()->findNode(keys_);
-    ASSERT_EQ(path.size(), keys_.size());
-    for (const TreeNode* node : path) {
-        EXPECT_FALSE(node->is_resident);
-        EXPECT_EQ(node->group_set_resources[0].getTopTier(), GetParam());
-        EXPECT_EQ(node->group_set_resources[0].servingTierCount(), 1u);
+    EXPECT_EQ(path, original_path);
+    EXPECT_EQ(engine_->submittedBatchCount(), submitted_before);
+    BlockIndicesType expected_blocks;
+    for (const auto& resource : resources_) {
+        expected_blocks.push_back(resource[0].device_blocks.front());
     }
-    EXPECT_EQ(env_->poolFor(GetParam()).referencedBlocksNum(BlockTreeRefType::CACHE), keys_.size());
-    EXPECT_EQ(candidateCountForTier(*env_->cache, GetParam()), 1u);
-    EXPECT_EQ(candidateCountForTier(*env_->cache, Tier::DEVICE), 0u);
+    expectResidentPrefix(expected_blocks);
+    EXPECT_EQ(env_->poolFor(GetParam()).referencedBlocksNum(BlockTreeRefType::CACHE), 0u);
+    EXPECT_EQ(env_->poolFor(GetParam()).freeBlocksNum(), env_->poolFor(GetParam()).totalBlocksNum());
 }
 
 TEST_P(ResidentTieredCacheTest, SuccessfulAsyncLoadCanBePromotedToResidentAfterSettlement) {
@@ -523,8 +525,33 @@ TEST(BlockTreeStorerTest, StorePublishesTargetTierOnlyWithoutDeviceResidency) {
 
         MultiNodeBlocks request_holder = allocateDeviceBlocksForTest(*env.groups[0], 1);
         ASSERT_EQ(request_holder.size(), 1u);
+        auto session = AsyncProfileSession::start();
         env.cache->insert({100}, deviceSourceResources({request_holder[0]}), target_tier);
         block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*env.cache);
+        const auto        events           = session->finish();
+        const std::string direction        = target_tier == Tier::HOST ? "device_to_host" : "device_to_disk";
+        const auto        completion_event = [&](const char* stage) -> const AsyncProfileEvent* {
+            const auto name = "cache.transfer." + direction + "." + stage + "(";
+            for (const auto& event : events)
+                if (event.name.find(name) == 0 && event.name.find("operation=store") != std::string::npos)
+                    return &event;
+            return nullptr;
+        };
+        const auto* total   = completion_event("completion_total");
+        const auto* queue   = completion_event("completion_queue_wait");
+        const auto* execute = completion_event("completion_execute");
+        ASSERT_NE(total, nullptr);
+        ASSERT_NE(queue, nullptr);
+        ASSERT_NE(execute, nullptr);
+        EXPECT_LE(total->start_us, queue->start_us);
+        EXPECT_LE(queue->end_us, execute->start_us);
+        EXPECT_GE(total->end_us, execute->end_us);
+        for (const char* stage : {"callback_total",
+                                  "completion_lock_wait",
+                                  "completion_publish_tree",
+                                  "completion_release_refs",
+                                  "completion_watermark"})
+            EXPECT_NE(completion_event(stage), nullptr) << stage;
 
         auto find = env.cache->tree()->findNode({100});
         ASSERT_EQ(find.size(), 1u);

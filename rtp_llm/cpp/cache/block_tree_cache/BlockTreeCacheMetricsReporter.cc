@@ -6,6 +6,7 @@
 #include <utility>
 
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTree.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/CacheStageMetrics.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeTaskPool.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/evict/BlockTreeEvictor.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
@@ -65,8 +66,21 @@ BlockTreePoolMetricsSnapshot makeDevicePoolMetricsSnapshot(const DeviceBlockPool
 }  // namespace
 
 BlockTreeCacheMetricsReporter::BlockTreeCacheMetricsReporter(
-    std::shared_ptr<kmonitor::MetricsReporter> metrics_reporter):
-    metrics_reporter_(std::move(metrics_reporter)) {}
+    std::shared_ptr<kmonitor::MetricsReporter> metrics_reporter,
+    bool                                       enable_stage_metrics,
+    std::chrono::milliseconds                  stage_interval):
+    metrics_reporter_(std::move(metrics_reporter)) {
+    if (metrics_reporter_ && enable_stage_metrics) {
+        try {
+            stage_metrics_ = std::make_unique<CacheStageMetrics>(metrics_reporter_, stage_interval);
+        } catch (...) {}  // Optional observer initialization must never fail cache creation.
+    }
+}
+BlockTreeCacheMetricsReporter::~BlockTreeCacheMetricsReporter() = default;
+void BlockTreeCacheMetricsReporter::flushStageMetrics() const {
+    if (stage_metrics_)
+        stage_metrics_->flush();
+}
 
 std::vector<BlockTreePoolMetricsSnapshot>
 BlockTreeCacheMetricsReporter::collectPoolMetricsSnapshots(const std::vector<GroupSetPtr>&       group_sets,
@@ -349,6 +363,25 @@ void BlockTreeCacheMetricsReporter::reportLoadJoinWait(int64_t join_wait_latency
     collector.join_wait_latency_us  = join_wait_latency_us;
     collector.report_load_join_wait = true;
     metrics_reporter_->report<RtpLLMCacheReuseMetrics, RtpLLMCacheReuseMetricsCollector>(nullptr, &collector);
+}
+
+void BlockTreeCacheMetricsReporter::reportDiskLoadStage(
+    const char* stage, int64_t latency_us, bool success, int64_t rank, const char* scope) const noexcept {
+    reportTransferStage(stage, latency_us, success, rank, scope, "load", "DISK", "DEVICE");
+}
+
+void BlockTreeCacheMetricsReporter::reportTransferStage(const char* stage,
+                                                        int64_t     latency_us,
+                                                        bool        success,
+                                                        int64_t     rank,
+                                                        const char* scope,
+                                                        const char* operation,
+                                                        const char* source_tier,
+                                                        const char* target_tier) const noexcept {
+    if (!stage_metrics_ || latency_us < 0) {
+        return;
+    }
+    stage_metrics_->record(stage, latency_us, success, rank, scope, operation, source_tier, target_tier);
 }
 
 int BlockTreeCacheMetricsReporter::transferDirectionIndex(Tier source_tier, Tier target_tier) {

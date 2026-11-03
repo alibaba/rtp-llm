@@ -7,81 +7,83 @@ import org.junit.jupiter.api.Test;
 
 class GrpcReceivingBudgetTest {
   @Test
-  void default64GiBHasBodyHeadroomAndBoundedCounts() {
-    var b = GrpcReceivingBudget.resolve(new FlexlbConfig.GrpcServerConfig(), 64L << 30);
-    assertEquals(1016, b.scheduleCalls());
-    assertEquals(8, b.controlCalls());
-    assertEquals(16L << 30, b.budgetBytes());
-    assertEquals(128L << 20, b.controlBudgetBytes());
-    assertEquals(16256L << 20, b.scheduleBudgetBytes());
-    assertEquals(8L << 20, b.initialReservationBytes());
-    assertEquals(30000, b.timeoutMs());
-    headroom(b);
+  void defaultCountsDoNotDependOnDirectMemory() {
+    for (long direct : new long[] {2L << 30, 8L << 30, 16L << 30, 64L << 30}) {
+      var b = GrpcReceivingBudget.resolve(new FlexlbConfig.GrpcServerConfig(), direct);
+      assertEquals(1024, b.scheduleCalls());
+      assertEquals(128, b.controlCalls());
+      assertEquals(direct / 4, b.budgetBytes());
+      assertEquals(30000, b.timeoutMs());
+      assertEquals(b.budgetBytes(), b.scheduleBudgetBytes() + b.controlBudgetBytes());
+    }
   }
 
   @Test
-  void default8GiBKeepsNormalSmallMessageCapacity() {
-    var b = GrpcReceivingBudget.resolve(new FlexlbConfig.GrpcServerConfig(), 8L << 30);
-    assertEquals(120, b.scheduleCalls());
-    assertEquals(8, b.controlCalls());
-    assertEquals(2L << 30, b.budgetBytes());
-    assertEquals(1920L << 20, b.scheduleBudgetBytes());
-    headroom(b);
-  }
-
-  @Test
-  void smallerDirectUsesSamePolicyWithoutWorstCaseMessageReservation() {
+  void zeroCountsRemainAnAliasForFixedDefaults() {
     var c = new FlexlbConfig.GrpcServerConfig();
+    c.setMaxReceivingRequests(0);
+    c.setMaxReceivingControlRequests(0);
     var b = GrpcReceivingBudget.resolve(c, 2L << 30);
-    assertEquals(28, b.scheduleCalls());
-    assertEquals(4, b.controlCalls());
-    assertEquals(512L << 20, b.budgetBytes());
-    headroom(b);
-    assertThrows(IllegalArgumentException.class, () -> GrpcReceivingBudget.resolve(c, 64L << 20));
+    assertEquals(1024, b.scheduleCalls());
+    assertEquals(128, b.controlCalls());
   }
 
   @Test
-  void explicitBudgetMustFitDirectAndBothLanes() {
+  void configuredCountsAreIndependentOfBodyBudget() {
     var c = new FlexlbConfig.GrpcServerConfig();
-    c.setReceiveBudgetBytes(31L << 20);
-    assertThrows(IllegalArgumentException.class, () -> GrpcReceivingBudget.resolve(c, 8L << 30));
-    c.setReceiveBudgetBytes(32L << 20);
+    c.setMaxReceivingRequests(4096);
+    c.setMaxReceivingControlRequests(32);
+    c.setReceiveBudgetBytes(64L << 20);
+    var b = GrpcReceivingBudget.resolve(c, 2L << 30);
+    assertEquals(4096, b.scheduleCalls());
+    assertEquals(32, b.controlCalls());
+    assertEquals(56L << 20, b.scheduleBudgetBytes());
+    assertEquals(8L << 20, b.controlBudgetBytes());
+    c.setMaxReceivingRequests(1);
+    c.setMaxReceivingControlRequests(1);
+    var reduced = GrpcReceivingBudget.resolve(c, 2L << 30);
+    assertEquals(b.scheduleBudgetBytes(), reduced.scheduleBudgetBytes());
+    assertEquals(b.controlBudgetBytes(), reduced.controlBudgetBytes());
+  }
+
+  @Test
+  void controlBudgetIsReservedIndependentlyAndCapped() {
+    var c = new FlexlbConfig.GrpcServerConfig();
+    var smaller = GrpcReceivingBudget.resolve(c, 2L << 30);
+    assertEquals(64L << 20, smaller.controlBudgetBytes());
+    assertEquals(448L << 20, smaller.scheduleBudgetBytes());
+    var larger = GrpcReceivingBudget.resolve(c, 16L << 30);
+    assertEquals(128L << 20, larger.controlBudgetBytes());
+    assertEquals(3968L << 20, larger.scheduleBudgetBytes());
+  }
+
+  @Test
+  void bodyBudgetMustFitDirectAndLeaveBothLanesPositive() {
+    var c = new FlexlbConfig.GrpcServerConfig();
+    c.setReceiveBudgetBytes(1L << 20);
     var b = GrpcReceivingBudget.resolve(c, 8L << 30);
-    assertEquals(1, b.scheduleCalls());
-    assertEquals(1, b.controlCalls());
-    headroom(b);
+    assertEquals(1024, b.scheduleCalls());
+    assertTrue(b.controlBudgetBytes() > 0);
+    assertTrue(b.scheduleBudgetBytes() > 0);
     c.setReceiveBudgetBytes(9L << 30);
     assertThrows(IllegalArgumentException.class, () -> GrpcReceivingBudget.resolve(c, 8L << 30));
     c.setReceiveBudgetBytes(-1);
     assertThrows(IllegalArgumentException.class, () -> GrpcReceivingBudget.resolve(c, 8L << 30));
+    c.setReceiveBudgetBytes(7);
+    assertThrows(IllegalArgumentException.class, () -> GrpcReceivingBudget.resolve(c, 8L << 30));
+    assertThrows(IllegalArgumentException.class, () -> GrpcReceivingBudget.resolve(c, 0));
   }
 
   @Test
-  void explicitCountsCannotConsumeBodyHeadroomOrExceedTotalCap() {
+  void rejectsNegativeCountsAndNonPositiveTimeout() {
     var c = new FlexlbConfig.GrpcServerConfig();
+    c.setMaxReceivingRequests(-1);
+    assertThrows(IllegalArgumentException.class, () -> GrpcReceivingBudget.resolve(c, 64L << 30));
     c.setMaxReceivingRequests(1024);
+    c.setMaxReceivingControlRequests(-1);
     assertThrows(IllegalArgumentException.class, () -> GrpcReceivingBudget.resolve(c, 64L << 30));
-    c.setMaxReceivingRequests(32);
-    c.setMaxReceivingControlRequests(2);
-    var b = GrpcReceivingBudget.resolve(c, 64L << 30);
-    assertEquals(32, b.scheduleCalls());
-    assertEquals(2, b.controlCalls());
-    assertEquals(32L << 20, b.controlBudgetBytes());
-    headroom(b);
-    c.setMaxReceivingControlRequests(1024);
+    c.setMaxReceivingControlRequests(8);
+    c.setReceiveTimeoutMs(0);
     assertThrows(IllegalArgumentException.class, () -> GrpcReceivingBudget.resolve(c, 64L << 30));
-  }
-
-  @Test
-  void hugeDirectStillCapsConcurrentReceivingAt1024() {
-    var b = GrpcReceivingBudget.resolve(new FlexlbConfig.GrpcServerConfig(), 1L << 40);
-    assertEquals(1024, b.scheduleCalls() + b.controlCalls());
-    headroom(b);
-  }
-
-  static void headroom(GrpcReceivingBudget.Limits b) {
-    assertTrue(b.scheduleCalls() * b.initialReservationBytes() <= b.scheduleBudgetBytes() / 2);
-    assertTrue(b.controlCalls() * b.initialReservationBytes() <= b.controlBudgetBytes() / 2);
-    assertEquals(b.budgetBytes(), b.scheduleBudgetBytes() + b.controlBudgetBytes());
   }
 }

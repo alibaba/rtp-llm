@@ -51,15 +51,13 @@ class TestEplbPyWrapper(unittest.TestCase):
         self.assertEqual(runtime.counts.stride(), counts.stride())
         torch.testing.assert_close(runtime.counts, counts)
 
-    def test_balance_result_and_config_update_are_forwarded(self):
+    def test_balance_result_is_forwarded(self):
         self.model.state.apply_on_calls = {2, 3}
         counts = torch.tensor([[2, 3]], dtype=torch.int32)
         self.assertFalse(self.wrapper.step(counts))
         self.assertTrue(self.wrapper.step(counts))
-        self.wrapper.update_config(mode=0, update_time=13)
-        self.assertFalse(self.wrapper.step(counts))
-        self.assertIn(("update", 0, 13), self.model.state.calls)
-        self.assertEqual(self.model.state.applied, 1)
+        self.assertTrue(self.wrapper.step(counts))
+        self.assertEqual(self.model.state.applied, 2)
 
     def test_python_failure_propagates_to_caller(self):
         with patch.object(FakeRuntime, "step", side_effect=RuntimeError("step failed")):

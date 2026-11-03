@@ -1,10 +1,12 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 
+#include <algorithm>
 #include <optional>
 
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_base.h"
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_runner.h"
+#include "rtp_llm/cpp/cuda_graph/dspark_cuda_graph_budget.h"
 #include "rtp_llm/models_py/bindings/OpDefs.h"
 
 namespace py = pybind11;
@@ -60,9 +62,9 @@ public:
         params.hidden_size              = static_cast<size_t>(hidden_size);
         params.input_hidden_size        = static_cast<size_t>(hidden_size);
         params.model_data_type          = c10::ScalarType::BFloat16;
-        params.prefill_capture_seq_lens   = std::move(prefill_capture_seq_lens);
-        params.kv_cache_group_tags        = std::move(group_tags);
-        params.kernel_block_table_width   = kernel_block_table_width;
+        params.prefill_capture_seq_lens = std::move(prefill_capture_seq_lens);
+        params.kv_cache_group_tags      = std::move(group_tags);
+        params.kernel_block_table_width = kernel_block_table_width;
 
         if (position_encoding.has_value()) {
             params.position_encoding = std::move(*position_encoding);
@@ -118,7 +120,8 @@ public:
                      std::vector<std::string> group_tags,
                      bool                     is_target_verify,
                      int64_t                  num_tokens_per_bs,
-                     int64_t                  position_id_len_factor) {
+                     int64_t                  position_id_len_factor,
+                     bool                     is_packed_target_verify) {
         reset_runner();
         GraphParams params;
         params.enable_cuda_graph            = true;
@@ -134,18 +137,80 @@ public:
         params.decode_capture_batch_sizes = std::move(decode_capture_batch_sizes);
         params.kv_cache_group_tags        = std::move(group_tags);
         params.is_target_verify           = is_target_verify;
+        params.is_packed_target_verify    = is_packed_target_verify;
         params.position_id_len_factor     = static_cast<int>(position_id_len_factor);
         params.kernel_block_table_width   = kernel_block_table_width;
 
         runner_ = CudaGraphRunner::initializeCapture(std::make_unique<CudaGraphRunner>(params, std::move(py_instance)));
     }
 
+    void init_dspark_budgets(py::object                   py_instance,
+                             int64_t                      hidden_size,
+                             int64_t                      max_seq_len,
+                             int64_t                      kernel_block_table_width,
+                             std::vector<int>             decode_capture_batch_sizes,
+                             std::vector<std::string>     group_tags,
+                             int                          gamma,
+                             int                          configured_budget,
+                             bool                         adaptive,
+                             std::optional<torch::Tensor> expert_token_counts) {
+        reset_runner();
+        RTP_LLM_CHECK_WITH_INFO(!decode_capture_batch_sizes.empty()
+                                    && std::all_of(decode_capture_batch_sizes.begin(),
+                                                   decode_capture_batch_sizes.end(),
+                                                   [](int batch) { return batch > 0; }),
+                                "test DSpARK graph bank requires positive capture batch sizes");
+        // Match the model's configured request capacity. initCapture performs
+        // its dtype-probe forward at this capacity before slicing graph buckets.
+        const auto max_batch = *std::max_element(decode_capture_batch_sizes.begin(), decode_capture_batch_sizes.end());
+        budgets_             = makeDSparkCudaGraphBudgets(gamma, configured_budget, adaptive);
+        budget_states_.resize(budgets_.size());
+        for (const auto& budget : budgets_) {
+            GraphParams params;
+            params.expert_token_counts        = expert_token_counts.value_or(torch::Tensor());
+            params.enable_cuda_graph          = true;
+            params.is_target_verify           = true;
+            params.is_packed_target_verify    = budget.packed;
+            params.role                       = CudaGraphRole::TARGET_VERIFY;
+            params.max_seq_len                = static_cast<int>(max_seq_len);
+            params.input_hidden_size          = static_cast<size_t>(hidden_size);
+            params.hidden_size                = static_cast<size_t>(hidden_size);
+            params.num_tokens_per_bs          = budget.tokensPerBatch();
+            params.model_data_type            = c10::ScalarType::BFloat16;
+            params.max_context_batch_size     = static_cast<size_t>(max_batch);
+            params.decode_capture_batch_sizes = decode_capture_batch_sizes;
+            params.kv_cache_group_tags        = group_tags;
+            params.kernel_block_table_width   = kernel_block_table_width;
+            try {
+                budget_runners_.emplace_back(
+                    CudaGraphRunner::initializeCapture(std::make_unique<CudaGraphRunner>(params, py_instance)));
+            } catch (const DirtyCudaGraphCaptureError&) {
+                for (auto& captured : budget_runners_) {
+                    (void)captured.release();
+                }
+                throw;
+            }
+        }
+    }
+
+    std::vector<int> capturedBudgets() const {
+        std::vector<int> result;
+        for (const auto& budget : budgets_) {
+            result.push_back(budget.budget);
+        }
+        return result;
+    }
+
+    int selectedBudget() const {
+        return runner_ == nullptr || budgets_.empty() ? -1 : budgets_.at(selected_budget_).budget;
+    }
+
     bool canRun(torch_ext::PyModelInputs& inputs) {
-        return runner_ != nullptr && runner_->canRun(inputs, state_);
+        return selectRunner(inputs) && runner_->canRun(inputs, activeState());
     }
 
     bool canPrepare(torch_ext::PyModelInputs& inputs) {
-        return runner_ != nullptr && runner_->canRun(inputs, state_, CudaGraphCheckMode::PREPARE);
+        return selectRunner(inputs) && runner_->canRun(inputs, activeState(), CudaGraphCheckMode::PREPARE);
     }
 
     void clearInputIds(torch_ext::PyModelInputs& inputs) {
@@ -159,14 +224,14 @@ public:
         prepare_inputs.input_ids             = torch::Tensor();
         prepare_inputs.input_hiddens         = torch::Tensor();
         prepare_inputs.bert_embedding_inputs = torch_ext::BertEmbeddingInputs();
-        if (runner_ == nullptr || !runner_->canRun(prepare_inputs, state_, CudaGraphCheckMode::PREPARE)) {
+        if (!selectRunner(inputs) || !runner_->canRun(prepare_inputs, activeState(), CudaGraphCheckMode::PREPARE)) {
             return false;
         }
         prepare_inputs.attention_inputs.input_lengths_device  = prepare_inputs.attention_inputs.input_lengths.cuda();
         prepare_inputs.attention_inputs.prefix_lengths_device = prepare_inputs.attention_inputs.prefix_lengths.cuda();
         prepare_inputs.attention_inputs.combo_position_ids    = prepare_inputs.combo_position_ids;
         refreshTaggedAttentionInputs(prepare_inputs);
-        runner_->prepareAttentionInputs(prepare_inputs, state_, skip_forward_event_sync);
+        runner_->prepareAttentionInputs(prepare_inputs, activeState(), skip_forward_event_sync);
         return true;
     }
 
@@ -184,21 +249,24 @@ public:
         // cannot assign them because the bindings intentionally expose them as
         // read-only, so reproduce that input-building step in the test wrapper.
         prepareDeviceMirrors(inputs);
-        return runner_->forward(inputs, state_);
+        RTP_LLM_CHECK_WITH_INFO(selectRunner(inputs), "test graph budget unavailable");
+        return runner_->forward(inputs, activeState());
     }
 
     void prepareAttentionInputs(torch_ext::PyModelInputs& inputs) {
         c10::InferenceMode inference_guard(true);
         prepareDeviceMirrors(inputs);
-        runner_->prepareAttentionInputs(inputs, state_);
+        RTP_LLM_CHECK_WITH_INFO(selectRunner(inputs), "test graph budget unavailable");
+        runner_->prepareAttentionInputs(inputs, activeState());
     }
 
     void updateBlockTables(torch_ext::PyModelInputs& inputs) {
-        runner_->updateKVCacheKernelBlockId(inputs, state_);
+        RTP_LLM_CHECK_WITH_INFO(selectRunner(inputs), "test graph budget unavailable");
+        runner_->updateKVCacheKernelBlockId(inputs, activeState());
     }
 
     int getCurrentRealGraphSize() {
-        return runner_ != nullptr ? runner_->getCurrentRealGraphSize(state_) : 0;
+        return runner_ != nullptr ? runner_->getCurrentRealGraphSize(activeState()) : 0;
     }
 
     bool captureSessionMayBeDirty() const {
@@ -206,7 +274,7 @@ public:
     }
 
     std::string getGenerationPrefillStatus() const {
-        return generationPrefillCudaGraphStatusString(state_.generation_prefill_status);
+        return generationPrefillCudaGraphStatusString(activeState().generation_prefill_status);
     }
 
     ~CudaGraphTestRunner() {
@@ -214,6 +282,30 @@ public:
     }
 
 private:
+    CudaGraphState& activeState() {
+        return budgets_.empty() ? state_ : budget_states_.at(selected_budget_);
+    }
+
+    const CudaGraphState& activeState() const {
+        return budgets_.empty() ? state_ : budget_states_.at(selected_budget_);
+    }
+
+    bool selectRunner(const torch_ext::PyModelInputs& inputs) {
+        if (budgets_.empty()) {
+            return runner_ != nullptr;
+        }
+        const auto& attention = inputs.attention_inputs;
+        const auto  selected  = selectDSparkCudaGraphBudget(
+            budgets_, attention.is_packed_target_verify, attention.input_lengths.numel(), attention.total_tokens);
+        if (!selected) {
+            runner_ = nullptr;
+            return false;
+        }
+        selected_budget_ = *selected;
+        runner_          = budget_runners_.at(selected_budget_).get();
+        return runner_ != nullptr;
+    }
+
     void prepareDeviceMirrors(torch_ext::PyModelInputs& inputs) {
         inputs.attention_inputs.input_lengths_device  = inputs.attention_inputs.input_lengths.cuda();
         inputs.attention_inputs.prefix_lengths_device = inputs.attention_inputs.prefix_lengths.cuda();
@@ -221,14 +313,23 @@ private:
     }
 
     void reset_runner() {
-        if (runner_ != nullptr) {
+        if (!budget_runners_.empty()) {
+            runner_ = nullptr;
+            budget_runners_.clear();
+            budget_states_.clear();
+            budgets_.clear();
+        } else if (runner_ != nullptr) {
             delete runner_;
             runner_ = nullptr;
         }
     }
 
-    CudaGraphRunner* runner_ = nullptr;
-    CudaGraphState   state_{};
+    CudaGraphRunner*                              runner_ = nullptr;
+    CudaGraphState                                state_{};
+    std::vector<DSparkCudaGraphBudget>            budgets_;
+    std::vector<std::unique_ptr<CudaGraphRunner>> budget_runners_;
+    std::vector<CudaGraphState>                   budget_states_;
+    size_t                                        selected_budget_ = 0;
 };
 
 }  // namespace rtp_llm
@@ -239,6 +340,20 @@ PYBIND11_MODULE(libtest_cuda_graph_runner, m) {
     py::class_<CudaGraphTestRunner>(m, "CudaGraphRunner")
         .def(py::init<>())
         .def_static("topologyWidths", &CudaGraphTestRunner::topologyWidths)
+        .def("init_dspark_budgets",
+             &CudaGraphTestRunner::init_dspark_budgets,
+             py::arg("py_instance"),
+             py::arg("hidden_size"),
+             py::arg("max_seq_len"),
+             py::arg("kernel_block_table_width"),
+             py::arg("decode_capture_batch_sizes"),
+             py::arg("group_tags"),
+             py::arg("gamma"),
+             py::arg("configured_budget"),
+             py::arg("adaptive"),
+             py::arg("expert_token_counts") = py::none())
+        .def("capturedBudgets", &CudaGraphTestRunner::capturedBudgets)
+        .def("selectedBudget", &CudaGraphTestRunner::selectedBudget)
         .def("init_prefill",
              &CudaGraphTestRunner::init_prefill,
              py::arg("py_instance"),
@@ -247,9 +362,9 @@ PYBIND11_MODULE(libtest_cuda_graph_runner, m) {
              py::arg("kernel_block_table_width"),
              py::arg("prefill_capture_seq_lens"),
              py::arg("hidden_size"),
-             py::arg("group_tags")            = std::vector<std::string>{},
-             py::arg("position_encoding")     = py::none(),
-             py::arg("token_type_embedding")  = py::none())
+             py::arg("group_tags")           = std::vector<std::string>{},
+             py::arg("position_encoding")    = py::none(),
+             py::arg("token_type_embedding") = py::none())
         .def("init_decode",
              &CudaGraphTestRunner::init_decode,
              py::arg("py_instance"),
@@ -257,10 +372,11 @@ PYBIND11_MODULE(libtest_cuda_graph_runner, m) {
              py::arg("max_seq_len"),
              py::arg("kernel_block_table_width"),
              py::arg("decode_capture_batch_sizes"),
-             py::arg("group_tags")            = std::vector<std::string>{},
-             py::arg("is_target_verify")      = false,
-             py::arg("num_tokens_per_bs")     = 1,
-             py::arg("position_id_len_factor") = 0)
+             py::arg("group_tags")              = std::vector<std::string>{},
+             py::arg("is_target_verify")        = false,
+             py::arg("num_tokens_per_bs")       = 1,
+             py::arg("position_id_len_factor")  = 0,
+             py::arg("is_packed_target_verify") = false)
         .def("init_generation_prefill",
              &CudaGraphTestRunner::init_generation_prefill,
              py::arg("py_instance"),

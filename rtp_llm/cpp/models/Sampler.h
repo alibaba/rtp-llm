@@ -14,7 +14,7 @@
 namespace rtp_llm {
 // Sampler would split logits into appropriate groups (mostly, based on beam size)
 // and calls device sampling apis (greedy, beam search, etc) for each group.
-// Sampler owns rotating host buffers, so forward() is intentionally single-threaded
+// Sampler owns rotating host/device buffers, so forward() is intentionally single-threaded
 // and non-reentrant per Sampler instance.
 class Sampler {
 public:
@@ -38,7 +38,8 @@ private:
     };
 
     // Rotate across forward calls. Pending slots retain their immutable host
-    // sources until the upload event completes; reuse never blocks serving.
+    // sources and device RNG arrays until sampling completes; reuse never
+    // blocks serving.
     static constexpr size_t kGreedySamplingBufferSlots = 3;
 
     bool                                                             fixed_max_batch_size_         = false;

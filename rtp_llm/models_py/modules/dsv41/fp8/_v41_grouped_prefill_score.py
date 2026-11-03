@@ -24,7 +24,7 @@ if not 0 < _MAX_LOGITS_BYTES <= 1024 * 1024 * 1024:
     )
 _MAX_GROUP_ROWS = 4096
 _MAX_LOGITS_INFLATION = 2
-_MAX_REQUESTS = 128
+_MAX_REQUESTS = 1024
 _MIN_BOUNDS_GROUPS = 4
 _MAX_BOUNDS_GROUPS = 256
 
@@ -44,17 +44,20 @@ def _write_score_bounds(
     BLOCK,
     RATIO: tl.constexpr,
 ):
-    # Both tiles are fixed: batch lengths and grouping never enter the JIT key.
+    # Each group spans at most 128 requests, independently of the batch size.
     ids = tl.arange(0, 128)
-    counts = tl.load(key_counts + ids, ids < REQUESTS, other=0).to(tl.int64)
+    counts = tl.load(
+        key_counts + FIRST + ids,
+        (FIRST + ids < STOP) & (FIRST + ids < REQUESTS),
+        other=0,
+    ).to(tl.int64)
     padded = tl.cdiv(tl.maximum(counts, 0), 256) * 256
     offsets = tl.cumsum(padded) - padded
-    origin = tl.sum(tl.where(ids == FIRST, offsets, 0))
     row = BLOCK * 128 + ids
     request = tl.load(request_ids + row, row < ROWS, other=-1).to(tl.int32)
-    safe_request = tl.minimum(tl.maximum(request, 0), 127)
+    safe_request = tl.minimum(tl.maximum(request - FIRST, 0), 127)
     count = tl.gather(counts, safe_request, 0)
-    start = tl.gather(offsets, safe_request, 0) - origin
+    start = tl.gather(offsets, safe_request, 0)
     valid = (
         (request >= FIRST)
         & (request < STOP)
@@ -155,7 +158,8 @@ def _bounds_descriptors(layout):
     """Bounded CPU-only descriptors, with exactly the original per-group CTAs."""
     if not 2 <= len(layout) <= _MAX_BOUNDS_GROUPS:
         return None
-    descriptors, tiles, cursor = [], 0, 0
+    origin = layout[0].rows.start
+    descriptors, tiles, cursor = [], 0, origin
     for group in layout:
         count = group.rows.stop - group.rows.start
         if group.rows.start != cursor or not 0 < count <= _MAX_GROUP_ROWS:
@@ -166,15 +170,15 @@ def _bounds_descriptors(layout):
                 end,
                 group.first,
                 group.stop,
-                cursor,
+                cursor - origin,
                 count,
                 group.scale.numel(),
-                group.width,
+                group.source_width or group.width,
                 tiles,
             )
         )
         tiles, cursor = end, group.rows.stop
-    return descriptors, tiles, cursor
+    return descriptors, tiles, cursor - origin
 
 
 @triton.jit(do_not_specialize=["WIDTH", "STRIDE"])
@@ -187,28 +191,10 @@ def _mask_tail_kernel(logits, ends, WIDTH, STRIDE, TILE: tl.constexpr):
         tl.store(logits + row * STRIDE + column, -float("inf"), column < WIDTH)
 
 
-def _slab_view(parts, *, padded=False):
-    """Return a metadata-only alias, or None for nonadjacent allocations."""
-    if not parts:
-        return None
-    first = parts[0]
-    offset = first.storage_offset()
-    storage = first.untyped_storage().data_ptr()
-    span = 0
-    for part in parts:
-        if (
-            part.dtype != first.dtype
-            or part.device != first.device
-            or part.shape[1:] != first.shape[1:]
-            or not part.is_contiguous()
-            or part.untyped_storage().data_ptr() != storage
-            or part.storage_offset() != offset
-        ):
-            return None
-        span = (offset - first.storage_offset()) // first.stride(0) + part.shape[0]
-        count = ((part.shape[0] + 255) // 256) * 256 if padded else part.shape[0]
-        offset += count * first.stride(0)
-    return first.as_strided((span, *first.shape[1:]), first.stride())
+def _adjacent_slab_view(first, last):
+    """Alias the span already checked for adjacency by ``_group_layout``."""
+    span = (last.storage_offset() - first.storage_offset()) // first.stride(0)
+    return first.as_strided((span + last.shape[0], *first.shape[1:]), first.stride())
 
 
 @dataclass(frozen=True)
@@ -219,18 +205,63 @@ class _ScoreGroup:
     width: int
     payload: torch.Tensor
     scale: torch.Tensor
+    source_width: int | None = None
 
 
-def _group_layout(keys, rows):
+def _cp_causal_plan(cp_ctx, keys, rows, ratio):
+    """Use host mirrors only when they describe these exact full zigzag rows."""
+    if cp_ctx is None:
+        return None
+    chunks = getattr(cp_ctx, "chunk_lengths_per_req", None)
+    fresh = getattr(cp_ctx, "input_lengths_global_host", None)
+    prefixes = getattr(cp_ctx, "prefix_lengths_host", None)
+    size = getattr(cp_ctx, "cp_size", 0)
+    rank = getattr(cp_ctx, "cp_rank", -1)
+    if (
+        chunks is None
+        or fresh is None
+        or prefixes is None
+        or len(chunks) != len(rows)
+        or len(fresh) != len(rows)
+        or len(prefixes) != len(rows)
+        or tuple(rows) != tuple(chunks)
+        or size <= 0
+        or not 0 <= rank < size
+        or any(
+            n <= 0
+            or prefix < 0
+            or chunk != ((n + 2 * size - 1) // (2 * size)) * 2
+            or len(key) != (prefix + n) // ratio
+            for key, n, prefix, chunk in zip(keys, fresh, prefixes, chunks)
+        )
+    ):
+        return None
+    return tuple(zip(prefixes, fresh, chunks))
+
+
+def _cp_causal_width(plan, rank, size, request, end, source_width, ratio):
+    prefix, fresh, chunk = plan[request]
+    half = chunk // 2
+    relative = (
+        rank * half + end - 1
+        if end <= half
+        else chunk * size - (rank + 1) * half + end - half - 1
+    )
+    visible = (prefix + min(relative, fresh - 1) + 1) // ratio
+    return min(source_width, max(512, (visible + 255) // 256 * 256))
+
+
+def _group_layout(keys, rows, *, cp_ctx=None, ratio=1):
     """Group adjacent requests and chunk oversized Q ranges without K copies."""
-    if len(keys) < 2 or len(rows) != len(keys) or any(n <= 0 for n in rows):
+    if not keys or len(rows) != len(keys) or any(n <= 0 for n in rows):
         return None
     device = keys[0].quant.device
     for key, count in zip(keys, rows):
         width = len(key)
+        if width == 0:
+            continue
         if (
-            width <= 0
-            or width * len(keys) >= 2**31
+            width * len(keys) >= 2**31
             or key.quant.shape != (width, 64)
             or key.scale.shape != (width,)
             or key.quant.dtype != torch.int8
@@ -243,10 +274,16 @@ def _group_layout(keys, rows):
             or key.scale.data_ptr() % 16
         ):
             return None
+    causal_plan = _cp_causal_plan(cp_ctx, keys, rows, ratio)
     groups = []
     first, row_start = 0, 0
     while first < len(keys):
+        if len(keys[first]) == 0:
+            row_start += rows[first]
+            first += 1
+            continue
         stop = first + 1
+        last_nonempty = first
         width, group_rows = len(keys[first]), rows[first]
         useful_scores = group_rows * width
         payload, scale = keys[first].quant, keys[first].scale
@@ -255,27 +292,62 @@ def _group_layout(keys, rows):
         if limit == 0:
             return None
         if group_rows > limit:
-            for offset in range(0, group_rows, limit):
+            offset = 0
+            while offset < group_rows:
+                count = min(limit, group_rows - offset)
+                output_width = width
+                if causal_plan is not None:
+                    remaining = group_rows - offset
+                    probe_width = _cp_causal_width(
+                        causal_plan,
+                        cp_ctx.cp_rank,
+                        cp_ctx.cp_size,
+                        first,
+                        offset + min(_MAX_GROUP_ROWS, remaining),
+                        width,
+                        ratio,
+                    )
+                    probe_stride = (probe_width + 255) // 256 * 256
+                    count = min(
+                        remaining,
+                        _MAX_GROUP_ROWS,
+                        _MAX_LOGITS_BYTES // (probe_stride * 4) // 4 * 4,
+                    )
+                    output_width = _cp_causal_width(
+                        causal_plan,
+                        cp_ctx.cp_rank,
+                        cp_ctx.cp_size,
+                        first,
+                        offset + count,
+                        width,
+                        ratio,
+                    )
                 groups.append(
                     _ScoreGroup(
                         first,
                         stop,
-                        slice(
-                            row_start + offset,
-                            row_start + min(offset + limit, group_rows),
-                        ),
-                        width,
+                        slice(row_start + offset, row_start + offset + count),
+                        output_width,
                         payload,
                         scale,
+                        width if causal_plan is not None else None,
                     )
                 )
+                offset += count
             row_start += group_rows
             first = stop
             continue
         while stop < len(keys):
-            next_width = max(width, len(keys[stop]))
-            next_rows = group_rows + rows[stop]
-            next_useful = useful_scores + rows[stop] * len(keys[stop])
+            next_nonempty = stop
+            while next_nonempty < len(keys) and len(keys[next_nonempty]) == 0:
+                next_nonempty += 1
+            if next_nonempty == len(keys):
+                break
+            if next_nonempty - first >= 128:
+                break
+            next_width = max(width, len(keys[next_nonempty]))
+            next_rows = group_rows + sum(rows[stop : next_nonempty + 1])
+            next_useful = useful_scores + rows[next_nonempty] * len(keys[next_nonempty])
             if (
                 next_rows > _MAX_GROUP_ROWS
                 or next_rows * next_width > _MAX_LOGITS_INFLATION * next_useful
@@ -285,7 +357,7 @@ def _group_layout(keys, rows):
                 break
             # Admission needs only adjacency metadata. Constructing a new
             # growing slab at every request creates two discarded ATen views.
-            previous, following = keys[stop - 1], keys[stop]
+            previous, following = keys[last_nonempty], keys[next_nonempty]
             padded = (len(previous) + 255) // 256 * 256
             if not all(
                 left.untyped_storage().data_ptr() == right.untyped_storage().data_ptr()
@@ -297,19 +369,14 @@ def _group_layout(keys, rows):
                 )
             ):
                 break
-            group_rows += rows[stop]
+            group_rows = next_rows
             width = next_width
             useful_scores = next_useful
-            stop += 1
+            last_nonempty = next_nonempty
+            stop = next_nonempty + 1
         if stop > first + 1:
-            payload = _slab_view(
-                tuple(key.quant for key in keys[first:stop]), padded=True
-            )
-            scale = _slab_view(
-                tuple(key.scale for key in keys[first:stop]), padded=True
-            )
-            if payload is None or scale is None:
-                return None
+            payload = _adjacent_slab_view(keys[first].quant, keys[last_nonempty].quant)
+            scale = _adjacent_slab_view(keys[first].scale, keys[last_nonempty].scale)
         groups.append(
             _ScoreGroup(
                 first,
@@ -322,10 +389,6 @@ def _group_layout(keys, rows):
         )
         row_start += group_rows
         first = stop
-    if len(groups) == len(keys) and all(
-        group.stop - group.first == 1 for group in groups
-    ):
-        return None
     return tuple(groups)
 
 
@@ -346,21 +409,19 @@ class _GroupedScores:
         self.q, self.sf, self.weights = q, sf, weights
         self.positions, self.ratio, self.shared = positions, ratio, shared
         self.rows, self.layout = rows, layout
-        self.group_rows = tuple(g.rows.stop - g.rows.start for g in layout)
         self.req_ids, self.key_counts = req_ids, key_counts
 
     def split_rows(self, tensor):
         """Make views for this call only; never cache layer activations."""
-        return (tensor,) if len(self.layout) == 1 else tensor.split(self.group_rows)
+        return (tensor[group.rows] for group in self.layout)
 
     def _bounds(self):
-        from ._v41_prefill_metadata import try_score_bounds
-
         # This cache is cleared at the existing forward boundary. Identity also
         # guards replacement of positions with an equal-shaped tensor mid-forward.
         cache = self.shared.setdefault("prefill_score_bounds", {})
         layout = tuple(
-            (g.first, g.stop, g.rows.start, g.rows.stop, g.width) for g in self.layout
+            (g.first, g.stop, g.rows.start, g.rows.stop, g.width, g.source_width)
+            for g in self.layout
         )
         key = ("grouped", self.rows, self.ratio, layout)
         entry = cache.get(key)
@@ -372,87 +433,63 @@ class _GroupedScores:
         # A captured host copy would require extending its pinned source lifetime
         # beyond this forward. Keep the existing device-only path for capture.
         if (
-            self.key_counts is not None
-            and _MIN_BOUNDS_GROUPS <= len(self.layout) <= _MAX_BOUNDS_GROUPS
+            _MIN_BOUNDS_GROUPS <= len(self.layout) <= _MAX_BOUNDS_GROUPS
             and not torch.cuda.is_current_stream_capturing()
         ):
-            description = _bounds_descriptors(self.layout)
-            if description is not None:
-                descriptors, tiles, total_rows = description
-                host = torch.tensor(descriptors, dtype=torch.int64, pin_memory=True)
-                device = host.to(self.q.device, non_blocking=True)
-                output = torch.empty(
-                    4 * total_rows, dtype=torch.int32, device=self.q.device
-                )
-                _all_grouped_score_bounds_kernel[(tiles,)](
-                    self.positions,
-                    self.req_ids,
-                    self.key_counts,
-                    device,
-                    output,
-                    self.key_counts.numel(),
-                    len(self.layout),
-                    self.ratio,
-                    num_warps=4,
-                )
-                vectors = output.split(
-                    tuple(n for n in self.group_rows for _ in range(4))
-                )
-                bounds = tuple(
-                    (g.rows, *vectors[4 * i : 4 * i + 4])
-                    for i, g in enumerate(self.layout)
-                )
+            bounds = self._fused_bounds(self.layout)
+            if bounds is not None:
                 cache[key] = (self.positions, self.req_ids, self.key_counts, bounds)
                 return bounds
-        bounds = []
-        for group in self.layout:
-            rows = group.rows
-            if self.key_counts is not None:
-                count = rows.stop - rows.start
-                output = torch.empty(
-                    (4, count), dtype=torch.int32, device=self.q.device
-                )
-                _grouped_score_bounds_kernel[(triton.cdiv(count, 128),)](
-                    self.positions[rows],
-                    self.req_ids[rows],
-                    self.key_counts,
-                    output,
-                    count,
-                    self.key_counts.numel(),
-                    group.first,
-                    group.stop,
-                    group.scale.numel(),
-                    group.width,
-                    self.ratio,
-                    num_warps=4,
-                )
-                starts, ends, zeros, visible = output.unbind(0)
-                bounds.append((rows, starts, ends, zeros, visible))
-                continue
-            zeros, visible = try_score_bounds(
-                self.positions[rows], group.width, self.ratio
-            )
-            counts = self.rows[group.first : group.stop]
-            if all(n == counts[0] for n in counts):
-                starts = torch.arange(
-                    rows.stop - rows.start, device=self.q.device, dtype=torch.int32
-                )
-                starts.div_(counts[0], rounding_mode="floor").mul_(
-                    (group.width + 255) // 256 * 256
-                )
-            else:
-                # Uncommon ragged batches: native fills avoid host uploads or
-                # layout-specialized JIT. Bounds are reused across source layers.
-                starts = torch.empty_like(visible)
-                offset = 0
-                for i, count in enumerate(counts):
-                    starts[offset : offset + count].fill_(
-                        i * ((group.width + 255) // 256 * 256)
-                    )
-                    offset += count
-            bounds.append((rows, starts, starts + visible, zeros, visible))
+        bounds = [self._one_group_bounds(group) for group in self.layout]
         cache[key] = (self.positions, self.req_ids, self.key_counts, tuple(bounds))
         return cache[key][3]
+
+    def _fused_bounds(self, layout):
+        description = _bounds_descriptors(layout)
+        if description is None:
+            return None
+        descriptors, tiles, total_rows = description
+        origin = layout[0].rows.start
+        host = torch.tensor(descriptors, dtype=torch.int64, pin_memory=True)
+        device = host.to(self.q.device, non_blocking=True)
+        output = torch.empty(4 * total_rows, dtype=torch.int32, device=self.q.device)
+        _all_grouped_score_bounds_kernel[(tiles,)](
+            self.positions[origin:],
+            self.req_ids[origin:],
+            self.key_counts,
+            device,
+            output,
+            self.key_counts.numel(),
+            len(layout),
+            self.ratio,
+            num_warps=4,
+        )
+        vectors = output.split(
+            tuple(g.rows.stop - g.rows.start for g in layout for _ in range(4))
+        )
+        return tuple(
+            (g.rows, *vectors[4 * i : 4 * i + 4]) for i, g in enumerate(layout)
+        )
+
+    def _one_group_bounds(self, group):
+        rows = group.rows
+        count = rows.stop - rows.start
+        output = torch.empty((4, count), dtype=torch.int32, device=self.q.device)
+        _grouped_score_bounds_kernel[(triton.cdiv(count, 128),)](
+            self.positions[rows],
+            self.req_ids[rows],
+            self.key_counts,
+            output,
+            count,
+            self.key_counts.numel(),
+            group.first,
+            group.stop,
+            group.scale.numel(),
+            group.source_width or group.width,
+            self.ratio,
+            num_warps=4,
+        )
+        return (rows, *output.unbind(0))
 
     def groups(self, *, mask_tail=True, return_bf16=False):
         """Yield (packed row slice, logits, visible, (zeros, visible)).
@@ -466,7 +503,7 @@ class _GroupedScores:
         """
         from ._indexer_score import fp8_fp4_mqa_indexer_score
 
-        bounds_by_group = self._bounds()
+        bounds_by_group = self._iter_bounds()
         for group, bounds, q, sf, weights in zip(
             self.layout,
             bounds_by_group,
@@ -494,6 +531,24 @@ class _GroupedScores:
             yield rows, logits, visible, (zeros, visible)
             del logits
 
+    def _iter_bounds(self):
+        # Retain at most 256 groups; larger layouts stream their bounds.
+        if len(self.layout) <= _MAX_BOUNDS_GROUPS:
+            yield from self._bounds()
+            return
+        for first in range(0, len(self.layout), _MAX_BOUNDS_GROUPS):
+            chunk = self.layout[first : first + _MAX_BOUNDS_GROUPS]
+            bounds = (
+                self._fused_bounds(chunk)
+                if len(chunk) >= 2 and not torch.cuda.is_current_stream_capturing()
+                else None
+            )
+            if bounds is not None:
+                yield from bounds
+            else:
+                for group in chunk:
+                    yield self._one_group_bounds(group)
+
 
 def try_grouped_scores(
     q,
@@ -507,6 +562,7 @@ def try_grouped_scores(
     *,
     req_ids=None,
     key_counts=None,
+    cp_ctx=None,
 ):
     """Return a lazy plan or None before GPU work for unsupported layouts.
 
@@ -517,7 +573,7 @@ def try_grouped_scores(
     """
     count = len(globals_by_req)
     if (
-        not 2 <= count <= _MAX_REQUESTS
+        not 1 <= count <= _MAX_REQUESTS
         or slices is None
         or len(slices) != count
         or q.device.type != "cuda"
@@ -564,20 +620,27 @@ def try_grouped_scores(
     keys = [entry[1] for entry in globals_by_req]
     if not all(isinstance(k, PrefillIndexerKeys) for k in keys):
         return None
-    layout = _group_layout(keys, rows)
+    layout = _group_layout(keys, rows, cp_ctx=cp_ctx, ratio=ratio)
     if layout is None or keys[0].quant.device != q.device:
         return None
-    if req_ids is not None or key_counts is not None:
-        if not all(
-            isinstance(value, torch.Tensor)
-            and value.device == q.device
-            and value.shape == shape
-            and value.dtype in (torch.int32, torch.int64)
-            and value.is_contiguous()
-            for value, shape in ((req_ids, (q.shape[0],)), (key_counts, (count,)))
-        ):
+    # TopK/candidate IDs are initialized by Q preparation. An optional
+    # candidate bitmap is not, so it cannot leave standalone zero-key rows.
+    if shared.get("prefill_candidate_mask") is not None:
+        cursor = 0
+        for group in layout:
+            if group.rows.start != cursor:
+                return None
+            cursor = group.rows.stop
+        if cursor != q.shape[0]:
             return None
-    elif len(set(len(k) for k in keys)) != 1:
+    if not all(
+        isinstance(value, torch.Tensor)
+        and value.device == q.device
+        and value.shape == shape
+        and value.dtype in (torch.int32, torch.int64)
+        and value.is_contiguous()
+        for value, shape in ((req_ids, (q.shape[0],)), (key_counts, (count,)))
+    ):
         return None
     from ._indexer_score import has_fp8_fp4_mqa_logits
 

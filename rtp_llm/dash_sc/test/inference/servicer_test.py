@@ -19,8 +19,9 @@ import struct
 import unittest
 import weakref
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
+import grpc
 import requests
 import torch
 
@@ -30,6 +31,14 @@ from rtp_llm.config.exceptions import (
     FtRuntimeException,
 )
 from rtp_llm.config.generate_config import GenerateConfig, RoleAddr, ThinkingMode
+from rtp_llm.config.response_format_compiler import ReasoningFormat
+from rtp_llm.cpp.model_rpc.proto.flexlb_schedule_service_pb2 import (
+    FlexlbScheduleResponsePB,
+)
+from rtp_llm.cpp.model_rpc.proto.flexlb_schedule_service_pb2_grpc import (
+    FlexlbServiceServicer,
+    add_FlexlbServiceServicer_to_server,
+)
 from rtp_llm.dash_sc import grpc_metrics
 from rtp_llm.dash_sc.access_log import DASH_SC_GRPC_ACCESS_LOGGER_NAME
 from rtp_llm.dash_sc.access_record import (
@@ -65,6 +74,7 @@ from rtp_llm.dash_sc.inference.servicer import (
     _build_mm_inputs_from_request,
     _dash_error_mapping_for_ft_exception,
     _dash_error_spec_for_ft_exception,
+    _dash_sc_reasoning_format,
     _derive_max_token_id,
     _finish_server_trace,
     _make_generate_input,
@@ -74,10 +84,10 @@ from rtp_llm.dash_sc.inference.servicer import (
     build_think_runtime,
     iter_real_model_stream_infer,
 )
-from rtp_llm.dash_sc.proto import predict_v2_pb2
+from rtp_llm.dash_sc.proto import predict_v2_pb2, predict_v2_pb2_grpc
 from rtp_llm.metrics import AccMetrics
 from rtp_llm.ops import RoleType
-from rtp_llm.server.master_client import MasterClient
+from rtp_llm.server.master_client import FLEXLB_GRPC_PORT_OFFSET, MasterClient
 from rtp_llm.telemetry import tracing
 from rtp_llm.utils.base_model_datatypes import (
     AuxInfo,
@@ -166,9 +176,16 @@ class DashErrorSpecForFtExceptionTest(unittest.TestCase):
     def test_non_default_exception_groups(self) -> None:
         cases = (
             (ExceptionType.INVALID_PARAMS, DASH_ERROR_BAD_REQUEST),
+            (ExceptionType.MM_WRONG_FORMAT_ERROR, DASH_ERROR_BAD_REQUEST),
+            (ExceptionType.MM_DOWNLOAD_FAILED, DASH_ERROR_BAD_REQUEST),
+            (ExceptionType.MM_PROCESS_ERROR, DASH_ERROR_INTERNAL),
+            (ExceptionType.MM_EMPTY_ENGINE_ERROR, DASH_ERROR_INTERNAL),
+            (ExceptionType.MM_REMOTE_RPC_FAILED, DASH_ERROR_INTERNAL),
             (ExceptionType.LONG_PROMPT_ERROR, DASH_ERROR_TOO_LONG),
+            (ExceptionType.MM_LONG_PROMPT_ERROR, DASH_ERROR_TOO_LONG),
             (ExceptionType.UNSUPPORTED_OPERATION, DASH_ERROR_UNSUPPORTED),
             (ExceptionType.MASTER_NO_AVAILABLE_WORKER, DASH_ERROR_CAPACITY),
+            (ExceptionType.CONCURRENCY_LIMIT_ERROR, DASH_ERROR_CAPACITY),
             (
                 ExceptionType.GRAMMAR_COMPILE_OVERLOADED,
                 DASH_ERROR_ADMISSION_OVERLOADED,
@@ -295,6 +312,8 @@ class _FakeTokenizer:
 class _GenerateEnvCfg:
     max_thinking_tokens = None
     think_mode = "adaptive"
+    enable_think_processor = True
+    enable_dash_sc_think_eos_phase2 = True
     think_end_token_id = -1
     think_start_tag = "<think>\n"
     think_end_tag = "</think>\n\n"
@@ -415,7 +434,55 @@ class DeriveMaxTokenIdTest(unittest.TestCase):
         self.assertIsNone(_derive_max_token_id(_Tokenizer()))
 
 
+class DashScReasoningFormatMetadataTest(unittest.TestCase):
+    def test_begin_reconstruction_preserves_reasoning_metadata(self):
+        base = ReasoningFormat(
+            tag_begin="",
+            tag_end={"type": "token", "token": 102},
+            suffix="\n",
+            no_think_excludes=("boundary",),
+        )
+        for prompt_has_begin in (False, True):
+            with self.subTest(prompt_has_begin=prompt_has_begin), patch.object(
+                ReasoningFormat, "from_generate_env_config", return_value=base
+            ):
+                resolved = _dash_sc_reasoning_format(
+                    _GenerateEnvCfg(), prompt_end_with_think=prompt_has_begin
+                )
+                self.assertEqual(
+                    resolved.tag_begin, "" if prompt_has_begin else "<think>\n"
+                )
+                self.assertEqual(resolved.tag_end, base.tag_end)
+                self.assertEqual(resolved.suffix, base.suffix)
+                self.assertEqual(resolved.no_think_excludes, base.no_think_excludes)
+        self.assertEqual(base.tag_begin, "")
+
+
 class BuildThinkRuntimeTest(unittest.TestCase):
+    def test_phase2_switch_preserves_boundaries_and_is_independent_of_processor(self):
+        for model_type in ("deepseek_v4", "deepseek_v41", "deepseek_v41_dspark"):
+            for processor_enabled in (True, False):
+                for phase2_enabled in (True, False):
+                    with self.subTest(
+                        model_type=model_type,
+                        processor_enabled=processor_enabled,
+                        phase2_enabled=phase2_enabled,
+                    ):
+                        env_cfg = _GenerateEnvCfg()
+                        env_cfg.enable_think_processor = processor_enabled
+                        env_cfg.enable_dash_sc_think_eos_phase2 = phase2_enabled
+                        runtime = build_think_runtime(
+                            _dsv4_tokenizer(), env_cfg, model_type
+                        )
+                        self.assertEqual(runtime.phase2_enabled, phase2_enabled)
+                        self.assertEqual(runtime.bos_tokens, (128821, 198))
+                        self.assertEqual(runtime.eos_tokens, (128822, 271))
+                        self.assertEqual(
+                            runtime.empty_tokens, (128821, 271, 128822, 271)
+                        )
+                        self.assertEqual(runtime.close_token_id, 128822)
+                        self.assertEqual(runtime.terminate_token_id, 1)
+
     def test_derives_eos_token_id_from_tokenizer(self) -> None:
         runtime = build_think_runtime(_FakeTokenizer({}), None, None)
 
@@ -1028,8 +1095,40 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("backend down", payload["status_message"])
         self.assertEqual(_finish_reason(chunks[0]), LLMFinishReason.INNER_ENGINE_ERROR)
 
-    async def test_content_inspection_error_keeps_public_contract(self) -> None:
+    async def test_multimodal_error_keeps_public_contract(self) -> None:
         cases = (
+            (
+                ExceptionType.MM_WRONG_FORMAT_ERROR,
+                "url ssrf check failed",
+                400,
+                "InvalidParameter",
+                LLMFinishReason.STOP_ENGINE_PARAM,
+                LLMFinishReason.USE_PARAMETER_STATUS,
+            ),
+            (
+                ExceptionType.MM_DOWNLOAD_FAILED,
+                "Failed to download multimodal content",
+                400,
+                "InvalidParameter",
+                LLMFinishReason.STOP_ENGINE_PARAM,
+                LLMFinishReason.USE_PARAMETER_STATUS,
+            ),
+            (
+                ExceptionType.MM_EMPTY_ENGINE_ERROR,
+                "ViT connection unavailable",
+                500,
+                "InternalError",
+                19,
+                LLMFinishReason.INNER_ENGINE_ERROR,
+            ),
+            (
+                ExceptionType.MM_REMOTE_RPC_FAILED,
+                "ViT RPC failed",
+                500,
+                "InternalError",
+                19,
+                LLMFinishReason.INNER_ENGINE_ERROR,
+            ),
             (
                 ExceptionType.UNSAFE_INPUT_CONTENT,
                 "Input image [1] data may contain inappropriate content.",
@@ -2449,8 +2548,7 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
     async def test_terminate_token_id_disabled_keeps_token_in_stream(self) -> None:
         """``terminate_token_id=None`` disables the in-stream "stop thinking"
         branch: token id 1 is emitted as a regular content token, with no
-        truncation and no phase-2 enqueue. (No ``</think>`` in the stream so the
-        regular close-driven phase-2 path also stays dormant.)"""
+        truncation and no phase-2 enqueue."""
         req = self._minimal_request()
         out = GenerateOutput(
             output_ids=torch.tensor([10, 1, 11], dtype=torch.int32),
@@ -2488,6 +2586,99 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(visitor.enqueue_called, 1)
         self.assertEqual(_gen_ids(chunks[0]), [10, 1, 11])
+
+    async def test_phase2_switch_off_preserves_thinking_eos_and_backend_finish(self):
+        for mode in ("enabled", "adaptive"):
+            for chunked in (False, True):
+                with self.subTest(mode=mode, chunked=chunked):
+                    req = self._minimal_request()
+                    env_cfg = _GenerateEnvCfg()
+                    env_cfg.think_mode = mode
+                    env_cfg.enable_dash_sc_think_eos_phase2 = False
+                    token_chunks = [[10, 1, 11], [12, 1]] if chunked else [[10, 1]]
+                    input_ids = [7, 8, 128821, 198]
+                    if mode == "adaptive":
+                        input_ids = [7, 8]
+                        token_chunks[0] = [128821, 198] + token_chunks[0]
+                    outputs = [
+                        GenerateOutputs(
+                            generate_outputs=[
+                                GenerateOutput(
+                                    output_ids=torch.tensor(ids, dtype=torch.int32),
+                                    finished=index == len(token_chunks) - 1,
+                                    aux_info=AuxInfo(
+                                        input_len=len(input_ids), reuse_len=0
+                                    ),
+                                )
+                            ]
+                        )
+                        for index, ids in enumerate(token_chunks)
+                    ]
+                    stream = _FakeAsyncStream(outputs)
+                    visitor = _FakeVisitor(stream)
+                    phase2_ids = MagicMock(return_value=200)
+                    tokenizer = _dsv4_tokenizer()
+                    with patch(
+                        "rtp_llm.dash_sc.inference.servicer.kmonitor.report"
+                    ) as report:
+                        results = await _drain(
+                            iter_real_model_stream_infer(
+                                req,
+                                input_ids,
+                                SamplingParams(max_new_tokens=32),
+                                DashScRequestControls(),
+                                visitor,
+                                rtp_llm_request_id=100,
+                                tokenizer=tokenizer,
+                                generate_env_config=env_cfg,
+                                think_runtime=build_think_runtime(
+                                    tokenizer, env_cfg, "deepseek_v41"
+                                ),
+                                phase2_request_id_factory=phase2_ids,
+                                yield_access_stats=True,
+                            )
+                        )
+                    responses = [response for response, _ in results]
+                    self.assertEqual(visitor.enqueue_called, 1)
+                    phase2_ids.assert_not_called()
+                    self.assertEqual(
+                        [_gen_ids(response) for response in responses], token_chunks
+                    )
+                    self.assertEqual(
+                        [stats[1] for _, stats in results],
+                        [False] * (len(token_chunks) - 1) + [True],
+                    )
+                    self.assertEqual(
+                        _finish_reason(responses[-1]), LLMFinishReason.STOP
+                    )
+                    for response in responses:
+                        self.assertNotEqual(response.infer_response.id, "trace-real-2")
+                        self.assertNotIn(
+                            "generate_think_token_num",
+                            response.infer_response.parameters,
+                        )
+                    self.assertEqual(
+                        [
+                            out.generate_outputs[0].output_ids.tolist()
+                            for out in outputs
+                        ],
+                        token_chunks,
+                    )
+                    self.assertTrue(stream.aclose_called)
+                    self.assertFalse(
+                        any(
+                            call.args[0] == AccMetrics.DASH_SC_DSV4_PHASE2_QPS_METRIC
+                            for call in report.call_args_list
+                        )
+                    )
+                    self.assertEqual(
+                        visitor.generate_inputs[0].generate_config.thinking_mode,
+                        (
+                            ThinkingMode.ENABLED
+                            if mode == "enabled"
+                            else ThinkingMode.ADAPTIVE
+                        ),
+                    )
 
     async def test_terminate_token_id_configurable_value(self) -> None:
         """A non-default ``terminate_token_id`` (here 42) drives the same
@@ -3466,6 +3657,14 @@ class _FakeGrpcContext:
     def __init__(self, metadata=()):
         self._metadata = tuple(metadata)
         self.initial_metadata = []
+        self._code = None
+        self._details = ""
+        self.abort = AsyncMock(side_effect=self._abort)
+
+    async def _abort(self, code, details):
+        self._code = code
+        self._details = details
+        raise grpc.aio.AbortError()
 
     def invocation_metadata(self):
         return self._metadata
@@ -3477,13 +3676,13 @@ class _FakeGrpcContext:
         return "ipv4:1.2.3.4:5678"
 
     def code(self):
-        return None
+        return self._code
 
     def is_active(self):
         return True
 
     def details(self):
-        return ""
+        return self._details
 
 
 class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
@@ -3502,7 +3701,7 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
             try:
                 async for _ in servicer.ModelStreamInfer(iterator, _FakeGrpcContext()):
                     pass
-            except asyncio.CancelledError:
+            except grpc.aio.AbortError:
                 self.assertFalse(log_failure)
             except RuntimeError as error:
                 self.assertTrue(log_failure)
@@ -5055,7 +5254,7 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
 
         with patch.object(
             logging.getLogger(DASH_SC_GRPC_ACCESS_LOGGER_NAME), "info"
-        ) as info, self.assertRaises(asyncio.CancelledError):
+        ) as info, self.assertRaises(grpc.aio.AbortError):
             await _drain(
                 servicer.ModelStreamInfer(
                     _areq_iter([self._valid_infer_request()]), _FakeGrpcContext()
@@ -5451,12 +5650,16 @@ class DashScInferenceTracingTest(unittest.IsolatedAsyncioTestCase):
                 return stream()
 
         servicer = DashScInferenceServicer(backend_visitor=_CancelVisitor())
-        with self.assertRaises(asyncio.CancelledError):
+        context = _FakeGrpcContext()
+        with self.assertRaises(grpc.aio.AbortError):
             await _drain(
                 servicer.ModelStreamInfer(
-                    _areq_iter([self._request("cancel")]), _FakeGrpcContext()
+                    _areq_iter([self._request("cancel")]), context
                 )
             )
+        context.abort.assert_awaited_once_with(
+            grpc.StatusCode.CANCELLED, "Request handling cancelled"
+        )
 
         span = self._finished_spans()[-1]
         self.assertEqual(span.status.status_code.name, "ERROR")
@@ -5562,6 +5765,192 @@ class DashScInferenceTracingTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(span.end_time)
         self.assertEqual(span.status.status_code.name, "ERROR")
         self.assertIsNone(tracing.CURRENT_TRACE_STATE.get())
+
+
+class _ControlledCancellationStream(_FakeAsyncStream):
+    def __init__(self, chunks=()):
+        super().__init__(chunks)
+        self.waiting = asyncio.Event()
+        self.release = asyncio.Event()
+        self.closed = asyncio.Event()
+
+    async def __anext__(self):
+        if self._emitted < len(self._chunks):
+            return await super().__anext__()
+        self.waiting.set()
+        await self.release.wait()
+        raise asyncio.CancelledError()
+
+    async def aclose(self):
+        await super().aclose()
+        self.closed.set()
+
+
+class DashScInferenceCancellationRpcTest(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.access_records = []
+        self.access_logged = asyncio.Event()
+
+        def capture_access(payload):
+            self.access_records.append(json.loads(payload))
+            self.access_logged.set()
+
+        log_patch = patch.object(
+            logging.getLogger(DASH_SC_GRPC_ACCESS_LOGGER_NAME),
+            "info",
+            side_effect=capture_access,
+        )
+        log_patch.start()
+        self.addCleanup(log_patch.stop)
+
+    async def _start_call(self, visitor, timeout=None):
+        self.frontend_server = grpc.aio.server()
+        servicer = DashScInferenceServicer(backend_visitor=visitor)
+        self.addAsyncCleanup(servicer.close)
+        self.addAsyncCleanup(self.frontend_server.stop, 0)
+        predict_v2_pb2_grpc.add_GRPCInferenceServiceServicer_to_server(
+            servicer, self.frontend_server
+        )
+        port = self.frontend_server.add_insecure_port("127.0.0.1:0")
+        self.assertGreater(port, 0)
+        await self.frontend_server.start()
+        channel = grpc.aio.insecure_channel(f"127.0.0.1:{port}")
+        self.addAsyncCleanup(channel.close)
+        stub = predict_v2_pb2_grpc.GRPCInferenceServiceStub(channel)
+        request = predict_v2_pb2.ModelInferRequest(
+            id="cancellation-test", model_name="default"
+        )
+        _add_input_tensor(request, "input_ids", "INT32", [1], struct.pack("<i", 42))
+        call = stub.ModelStreamInfer(_areq_iter([request]), timeout=timeout)
+        self.addCleanup(call.cancel)
+        return call
+
+    async def _assert_cancelled_terminal(self, call):
+        with self.assertRaises(grpc.aio.AioRpcError) as raised:
+            await asyncio.wait_for(call.read(), timeout=3)
+        self.assertEqual(raised.exception.code(), grpc.StatusCode.CANCELLED)
+        self.assertEqual(raised.exception.details(), "Request handling cancelled")
+        self.assertTrue(call.done())
+        await asyncio.wait_for(self.access_logged.wait(), timeout=3)
+
+    @staticmethod
+    def _chunk(finished=False):
+        return GenerateOutputs(
+            generate_outputs=[
+                GenerateOutput(
+                    output_ids=torch.tensor([9], dtype=torch.int32),
+                    finished=finished,
+                    aux_info=AuxInfo(input_len=1, output_len=1, reuse_len=0),
+                )
+            ]
+        )
+
+    async def test_internal_cancel_before_first_frame_sends_terminal_status(self):
+        stream = _ControlledCancellationStream()
+        call = await self._start_call(_FakeVisitor(stream))
+        await asyncio.wait_for(stream.waiting.wait(), timeout=3)
+        stream.release.set()
+        await self._assert_cancelled_terminal(call)
+        self.assertTrue(stream.aclose_called)
+        self.assertEqual(self.access_records[-1]["resp_count"], 0)
+        self.assertEqual(self.access_records[-1]["status"], "CANCELLED")
+        self.assertEqual(self.access_records[-1]["exc_type"], "CancelledError")
+
+    async def test_internal_cancel_after_output_sends_terminal_status(self):
+        stream = _ControlledCancellationStream([self._chunk()])
+        call = await self._start_call(_FakeVisitor(stream))
+        response = await asyncio.wait_for(call.read(), timeout=3)
+        self.assertEqual(_gen_ids(response), [9])
+        await asyncio.wait_for(stream.waiting.wait(), timeout=3)
+        stream.release.set()
+        await self._assert_cancelled_terminal(call)
+        self.assertTrue(stream.aclose_called)
+        self.assertEqual(self.access_records[-1]["resp_count"], 1)
+        self.assertEqual(self.access_records[-1]["status"], "CANCELLED")
+
+    async def test_master_client_close_finishes_pending_frontend_rpc(self):
+        schedule_entered = asyncio.Event()
+
+        class ScheduleService(FlexlbServiceServicer):
+            async def Schedule(self, request, context):
+                schedule_entered.set()
+                await asyncio.Event().wait()
+                return FlexlbScheduleResponsePB(code=200, success=True)
+
+        server = grpc.aio.server()
+        self.addAsyncCleanup(server.stop, 0)
+        add_FlexlbServiceServicer_to_server(ScheduleService(), server)
+        port = server.add_insecure_port("127.0.0.1:0")
+        self.assertGreater(port, 0)
+        await server.start()
+        master_client = MasterClient(
+            host_service=SimpleNamespace(
+                get_master_addr=lambda: f"127.0.0.1:{port - FLEXLB_GRPC_PORT_OFFSET}",
+                get_slave_addr=lambda: None,
+            ),
+            master_config=SimpleNamespace(master_default_timeout_ms=60000),
+        )
+        self.addAsyncCleanup(master_client.close)
+
+        class SchedulingVisitor:
+            async def enqueue(self, generate_input):
+                await master_client.get_backend_role_addrs(
+                    [], 1024, generate_input, generate_input.request_id
+                )
+                return _FakeAsyncStream([])
+
+        call = await self._start_call(SchedulingVisitor())
+        await asyncio.wait_for(schedule_entered.wait(), timeout=3)
+        await asyncio.wait_for(master_client.close(), timeout=3)
+        await self._assert_cancelled_terminal(call)
+        self.assertEqual(self.access_records[-1]["resp_count"], 0)
+        self.assertEqual(self.access_records[-1]["status"], "CANCELLED")
+
+    async def test_client_cancel_still_closes_backend_stream(self):
+        stream = _ControlledCancellationStream()
+        call = await self._start_call(_FakeVisitor(stream))
+        await asyncio.wait_for(stream.waiting.wait(), timeout=3)
+        self.assertTrue(call.cancel())
+        with self.assertRaises(asyncio.CancelledError):
+            await asyncio.wait_for(call.read(), timeout=3)
+        self.assertEqual(await call.code(), grpc.StatusCode.CANCELLED)
+        await asyncio.wait_for(stream.closed.wait(), timeout=3)
+        await asyncio.wait_for(self.access_logged.wait(), timeout=3)
+        self.assertEqual(self.access_records[-1]["status"], "CANCELLED")
+
+    async def test_client_deadline_still_closes_backend_stream(self):
+        stream = _ControlledCancellationStream()
+        call = await self._start_call(_FakeVisitor(stream), timeout=1)
+        await asyncio.wait_for(stream.waiting.wait(), timeout=3)
+        with self.assertRaises(grpc.aio.AioRpcError) as raised:
+            await asyncio.wait_for(call.read(), timeout=3)
+        self.assertEqual(raised.exception.code(), grpc.StatusCode.DEADLINE_EXCEEDED)
+        await asyncio.wait_for(stream.closed.wait(), timeout=3)
+        self.assertTrue(call.done())
+
+    async def test_server_stop_finishes_rpc_and_closes_backend_stream(self):
+        stream = _ControlledCancellationStream()
+        call = await self._start_call(_FakeVisitor(stream))
+        await asyncio.wait_for(stream.waiting.wait(), timeout=3)
+        await self.frontend_server.stop(0)
+        with self.assertRaises(grpc.aio.AioRpcError) as raised:
+            await asyncio.wait_for(call.read(), timeout=3)
+        self.assertEqual(raised.exception.code(), grpc.StatusCode.UNAVAILABLE)
+        await asyncio.wait_for(stream.closed.wait(), timeout=3)
+        self.assertTrue(call.done())
+
+    async def test_late_internal_cancel_preserves_completed_access_status(self):
+        stream = _ControlledCancellationStream([self._chunk(finished=True)])
+        call = await self._start_call(_FakeVisitor(stream))
+        response = await asyncio.wait_for(call.read(), timeout=3)
+        self.assertEqual(_gen_ids(response), [9])
+        await asyncio.wait_for(stream.waiting.wait(), timeout=3)
+        stream.release.set()
+        await self._assert_cancelled_terminal(call)
+        self.assertTrue(stream.aclose_called)
+        self.assertEqual(self.access_records[-1]["status"], "OK")
+        self.assertEqual(self.access_records[-1]["exc_type"], "CancelledError")
+        self.assertEqual(self.access_records[-1]["output_token_len"], 1)
 
 
 if __name__ == "__main__":

@@ -46,6 +46,11 @@ def _record_stream(value, stream):
                 item.record_stream(stream)
                 recorded.add(allocation)
             continue
+        record_tensors = getattr(item, "record_tensors", None)
+        if record_tensors is not None:
+            # The producer names its owned allocations; request views alias them.
+            pending.extend(record_tensors)
+            continue
         if isinstance(item, dict):
             pending.extend(item.values())
         elif isinstance(item, (tuple, list)):

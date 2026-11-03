@@ -19,6 +19,7 @@
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include <unordered_map>
 #include "rtp_llm/cpp/utils/TimeUtil.h"
+#include "rtp_llm/cpp/utils/RemoteCacheConfig.h"
 #include <iomanip>
 #include <numeric>
 #include <sstream>
@@ -130,7 +131,9 @@ MallocResult CoordinatorCacheManager::initMalloc(const MallocInfo& malloc_info) 
         std::dynamic_pointer_cast<LoadAsyncContext>(init_result.async_context);
     if (!load_context || !load_context->needBackendMatch()) {
         std::shared_ptr<AsyncContext> pending_async_context = std::move(init_result.async_context);
-        MallocResult                  incr_result           = incrMalloc(malloc_info);
+        auto                          prefill_info          = malloc_info;
+        prefill_info.enable_remove_skipped_blocks           = false;
+        MallocResult incr_result                            = incrMalloc(prefill_info);
         if (!incr_result.success) {
             if (load_context != nullptr) {
                 load_context->abortPending();
@@ -340,6 +343,26 @@ bool CoordinatorCacheManager::detachSharedBlocksForRecompute(const BatchKVCacheR
             }
         }
     }
+    if (remoteCacheDecodePublicationEnabled()) {
+        // The allocator may keep an exclusively owned numeric block ID for
+        // recomputation. Its payload will change without a new allocation:
+        // invalidate that suffix, while preserving the proven ready prefix
+        // and the old cache/other-request pages detached above.
+        for (const auto& group : groups) {
+            const auto& tag  = group->tag();
+            const auto& pool = group->blockPool();
+            const int   local_reuse_length =
+                cpEffectiveSeqLenForGroup(cp_slot_mapper_, config_, tag, device_ready_reuse_length);
+            const size_t begin = local_reuse_length / group->seqSizePerBlock();
+            for (int batch = 0; batch < resource->batchSize(); ++batch) {
+                const auto& blocks = resource->blocks(batch, tag);
+                for (size_t pos = begin; pos < blocks.size(); ++pos) {
+                    if (!isNullBlockIdx(blocks[pos]))
+                        pool->bindDecodeOrigin(blocks[pos], pool->decodeOriginIncarnation(blocks[pos]), tag, nullptr);
+                }
+            }
+        }
+    }
     rollback.dismiss();
     return true;
 }
@@ -482,6 +505,7 @@ CoordinatorCacheManager::prepareKVCache(const CacheKeysType&                 cac
     BlockTreeMatchResult match_result =
         block_tree_cache_->match(cache_keys, valid_prefix, enable_storage_backend, request_id);
     std::shared_ptr<LoadAsyncContext> load_context = std::move(match_result.async_context);
+    prepared.decode_sources                        = std::move(match_result.matched_device_decode_sources);
     prepared.matched_device_blocks                 = match_result.matched_device_blocks;
     prepared.total_logical_blocks =
         load_context ? load_context->localMatchedBlocks() : match_result.matched_device_blocks;
@@ -607,6 +631,7 @@ MallocResult CoordinatorCacheManager::initMallocForCommonLen(const MallocInfo& m
                             load_context};
         result.match_end_time_us = match_end_time_us;
         result.load_attempted    = load_attempted;
+        result.decode_sources    = deferred_prepared->decode_sources;
         return result;
     }
 
@@ -617,6 +642,7 @@ MallocResult CoordinatorCacheManager::initMallocForCommonLen(const MallocInfo& m
         true, static_cast<int>(prepared.matched_device_blocks) * reuse_unit_tokens, match_cost_time_us, load_context};
     result.match_end_time_us = match_end_time_us;
     result.load_attempted    = load_attempted;
+    result.decode_sources    = std::move(prepared.decode_sources);
     return result;
 }
 
@@ -726,7 +752,9 @@ bool CoordinatorCacheManager::finishDeferredMalloc(const MallocInfo& malloc_info
     std::lock_guard<std::mutex> lock(malloc_mutex_);
     bool                        success = materializeInitialBlocks(malloc_info, prepared, &context, matched_blocks);
     if (success) {
-        const auto incr_result = incrMalloc(malloc_info);
+        auto prefill_info                        = malloc_info;
+        prefill_info.enable_remove_skipped_blocks = false;
+        const auto incr_result                   = incrMalloc(prefill_info);
         success                = incr_result.success;
         if (!success) {
             prepared.materialize_status = incr_result.status;
@@ -771,8 +799,13 @@ MallocResult CoordinatorCacheManager::incrMalloc(const MallocInfo& malloc_info) 
             auto&       block_ids        = kv_resource->mutableBlockIds(b, tag);
             const int   group_seq_len    = cpEffectiveSeqLenForGroup(cp_mapper, config_, tag, raw_seq_len);
             auto&       filled_positions = backfilled_positions[static_cast<size_t>(b)][static_cast<size_t>(group_id)];
-            if (!kv_cache_groups_[static_cast<size_t>(group_id)]->malloc(
-                    block_ids, group_seq_len, malloc_info.reuse_cache, reserve_step, &filled_positions)) {
+            auto&       group            = kv_cache_groups_[static_cast<size_t>(group_id)];
+            const bool  allocated =
+                malloc_info.enable_remove_skipped_blocks ?
+                     group->mallocForDecode(
+                        block_ids, group_seq_len, malloc_info.reuse_cache, reserve_step, &filled_positions) :
+                     group->malloc(block_ids, group_seq_len, malloc_info.reuse_cache, reserve_step, &filled_positions);
+            if (!allocated) {
                 all_success  = false;
                 failed_batch = b;
                 failed_group = group_id;
@@ -894,6 +927,16 @@ void CoordinatorCacheManager::free(const FreeInfo& free_info) {
         }
     }
     kv_cache_resource->clearBlocks();
+}
+
+bool CoordinatorCacheManager::captureCompletedDecode(const BatchKVCacheResource& resource,
+                                                     size_t                      computed_end,
+                                                     bool                        decode_finished) const {
+    if (!block_tree_cache_) {
+        return false;
+    }
+    const auto backend = block_tree_cache_->storageBackend();
+    return backend && backend->captureCompletedDecode(resource, computed_end, decode_finished);
 }
 
 void CoordinatorCacheManager::insertIntoCache(const InsertInfo& insert_info, size_t& resident_prefix_length) {
@@ -1025,11 +1068,7 @@ std::shared_ptr<KVCacheResource> CoordinatorCacheManager::incrKVCacheRef(const K
     const auto ref_type              = is_connector ? DeviceBlockRefType::PD_CONNECTOR : DeviceBlockRefType::REQUEST;
     auto selected_resource_ptr = new KVCacheResource(kvcache_resource);
     auto       deleter               = [self = shared_from_this(), ref_type](KVCacheResource* resource) {
-        if (ref_type == DeviceBlockRefType::REQUEST) {
-            self->decrKVCacheRef(*resource);
-        } else {
-            self->decrKVCacheRef(*resource, ref_type);
-        }
+        self->decrKVCacheRef(*resource, ref_type);
         delete resource;
     };
     std::shared_ptr<KVCacheResource> selected_resource(selected_resource_ptr, deleter);
@@ -1106,10 +1145,6 @@ std::shared_ptr<KVCacheResource> CoordinatorCacheManager::incrKVCacheRef(const K
             .assign(std::move(selected_blocks[static_cast<size_t>(group_id)]));
     }
     return selected_resource;
-}
-
-void CoordinatorCacheManager::decrKVCacheRef(const KVCacheResource& kvcache_resource) {
-    decrKVCacheRef(kvcache_resource, DeviceBlockRefType::REQUEST);
 }
 
 void CoordinatorCacheManager::decrKVCacheRef(const KVCacheResource& kvcache_resource, DeviceBlockRefType ref_type) {
@@ -1240,7 +1275,7 @@ bool CoordinatorCacheManager::updateKVBlock(const BatchKVCacheResourcePtr&  batc
         for (const auto& [new_idx, old_idx] : retained_slots) {
             staged_resource.moveBatchResource(new_idx, std::move(batch_kv_cache_resource->cacheResource(old_idx)));
         }
-        batch_kv_cache_resource->swap(staged_resource);
+        batch_kv_cache_resource->swapBlockStorage(staged_resource);
         block_update_mapping.swap(staged_mapping);
         return true;
     }
@@ -1463,7 +1498,6 @@ int CoordinatorCacheManager::getNeedBlocks(const MallocInfo& malloc_info) const 
     const int   raw_seq_len        = malloc_info.complete_token_ids->seqLength();
     const int   reserve_step       = malloc_info.complete_token_ids->getReserveStep();
     const bool  reuse_enabled      = malloc_info.reuse_cache;
-    const int   reuse_blocks_len   = reuse_enabled ? malloc_info.batch_kv_cache_resource->curBlocksNum() : 0;
 
     int common_blocks_total = 0;
     int extra_blocks_total  = 0;
@@ -1472,8 +1506,9 @@ int CoordinatorCacheManager::getNeedBlocks(const MallocInfo& malloc_info) const 
         const auto  group            = kv_cache_groups_[static_cast<size_t>(group_id)];
         const int   group_common_seq = cpEffectiveSeqLenForGroup(cp_mapper, config_, tag, raw_common_seq_len);
         const int   group_seq_len    = cpEffectiveSeqLenForGroup(cp_mapper, config_, tag, raw_seq_len);
-        const auto  need             = kv_cache_groups_[static_cast<size_t>(group_id)]->getNeedBlocks(
-            group_common_seq, group_seq_len, reserve_step, reuse_blocks_len, reuse_enabled);
+        const int   reuse_blocks_len = reuse_enabled ? malloc_info.batch_kv_cache_resource->blocksNum(0, tag) : 0;
+        const auto  need =
+            group->getNeedBlocks(group_common_seq, group_seq_len, reserve_step, reuse_blocks_len, reuse_enabled);
         common_blocks_total += need.common_blocks;
         extra_blocks_total += need.extra_blocks;
     }
@@ -1622,10 +1657,12 @@ bool CoordinatorCacheManager::doInit() {
 
         SingleTypeCacheManagerPtr group;
         if (group_type == CacheGroupType::LINEAR) {
-            group = std::make_shared<LinearCacheManager>(cache_group, group_pool, group_id, config_.linear_step);
+            group = std::make_shared<LinearCacheManager>(
+                cache_group, group_pool, group_id, config_.reuse_cache_tail_blocks);
             linear_group_ids_.push_back(group_id);
         } else if (group_type == CacheGroupType::SWA) {
-            group = std::make_shared<SWACacheManager>(cache_group, group_pool, group_id, config_.linear_step);
+            group =
+                std::make_shared<SWACacheManager>(cache_group, group_pool, group_id, config_.reuse_cache_tail_blocks);
             swa_group_ids_.push_back(group_id);
         } else {
             group = std::make_shared<FullCacheManager>(cache_group, group_pool, group_id);
@@ -1816,6 +1853,16 @@ void CoordinatorCacheManager::blockBatchCopyForForward(const torch::Tensor&     
                                 tag.c_str());
     }
     if (gpu_block_copy_ && group_tags.size() == 1 && group_tags.front() == config_.groupTags().front()) {
+        if (remoteCacheDecodePublicationEnabled()) {
+            const auto& pool = group_block_pools_.front();
+            const auto* rows = copy_mapping.data_ptr<int32_t>();
+            for (int64_t i = 0; i < copy_mapping.size(0); ++i) {
+                if (rows[3 * i + 1] != rows[3 * i + 2]) {
+                    const auto target = rows[3 * i + 2];
+                    pool->bindDecodeOrigin(target, pool->decodeOriginIncarnation(target), group_tags.front(), nullptr);
+                }
+            }
+        }
         gpu_block_copy_->copy(copy_mapping);
         return;
     }
@@ -1845,6 +1892,10 @@ void CoordinatorCacheManager::blockBatchCopyByGroup(const std::vector<TaggedBloc
         const auto copy_type =
             BatchCopyParams::get_copy_type(group_block_pools_[static_cast<size_t>(group_id)]->where(),
                                            group_block_pools_[static_cast<size_t>(group_id)]->where());
+        if (mapping.src != mapping.dst && remoteCacheDecodePublicationEnabled()) {
+            const auto& pool = group_block_pools_[static_cast<size_t>(group_id)];
+            pool->bindDecodeOrigin(mapping.dst, pool->decodeOriginIncarnation(mapping.dst), mapping.tag, nullptr);
+        }
         for (int layer_id : config_.layerIdsForGroup(mapping.tag)) {
             const auto& physical_group = config_.physicalGroupForLayer(layer_id, mapping.tag);
             copy_nums[copy_type] += physical_group.kvScaleStrideBytes() > 0 ? 2 : 1;

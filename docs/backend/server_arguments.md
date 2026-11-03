@@ -99,14 +99,13 @@ The following legacy options and environment variables were removed and must no 
 | `--eplb_stats_window_size` | Rearrangement count window. Must be non-negative; a positive update interval requires `1 <= window <= interval`. | 100 |
 | `--eplb_rearrange_after_prefill` | On PDFUSION workers, collect prefill counts and rearrange on the next decode step. Otherwise PDFUSION prefill is excluded from rearrangement scheduling. Dedicated P/D workers retain their own eligible step schedule. | False |
 | `--eplb_rearrange_p2p_groups` | Positive P2P bucket count for rearrangement outside a shared NVLink domain. | 1 |
-| `--eplb_control_step` | (DEBUG) EPLB synchronization control parameter cycle. | 100 |
 | `--eplb_metrics_report_interval` | Report `moe_lb` every N target-model prefill/decode forwards (target verify during speculative decoding); draft models are excluded. `0` disables collection; `-1` selects 100 for PREFILL and 1000 for DECODE or PDFUSION. Other values must be positive. Unsupported devices or topologies (including PP, FFN disaggregation and MoE context parallelism without EP) log a warning and skip monitoring. Dense models retain empty-window `moe_lb=1` without a collective or device-to-host copy. This does not relax dynamic EPLB requirements. | -1 |
 | `--eplb_metrics_snapshot_max_files` | Snapshots retained per model instance in circular slots under `LOG_PATH/eplb_snapshot` (`LOG_PATH` defaults to `logs`). `0` disables snapshots. | 0 |
 | `--fake_balance_expert` | (DEBUG) Enables expert pseudo-balancing mechanism. | False |
 
 Each rearrangement handles every layer in a homogeneous weight-layout group. The former CPU layer-selection and debug options (`balance_method`, `eplb_balance_layer_per_step`, `eplb_force_repack`, and `eplb_test_mode`) have been removed.
 
-`POST /update_eplb_config` is disabled. Its backend RPC returns `UNIMPLEMENTED` without changing the engine configuration. Set `EPLB_MODE` and `EPLB_UPDATE_TIME` at startup; automatic rearrangement continues to follow that configuration.
+Set `EPLB_MODE` and `EPLB_UPDATE_TIME` at startup; automatic rearrangement follows that fixed configuration.
 
 `moe_lb` follows DeepInfer: sum the maximum EP-rank load for each step and layer,
 then divide by the sum of their mean EP-rank loads. `1.0` means balanced; larger

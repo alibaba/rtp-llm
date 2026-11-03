@@ -4,6 +4,7 @@
 #include "rtp_llm/cpp/cache/KVCacheSpec.h"
 
 #include <algorithm>
+#include <limits>
 
 namespace rtp_llm {
 
@@ -43,7 +44,23 @@ void MemoryLayoutStrategy::clearScaleTensor(torch::Tensor& kv_scale_tensor) {
 
 // Tensor processing functions
 void MemoryLayoutStrategy::processKVTensor(torch::Tensor& kv_cache_tensor) {
-    const size_t kv_elem_size          = rtp_llm::getTypeSize(data_type_);
+    const size_t kv_elem_size = rtp_llm::getTypeSize(data_type_);
+    RTP_LLM_CHECK_WITH_INFO(kv_elem_size > 0 && config_.kv_block_stride_bytes > 0
+                                && config_.kv_block_stride_bytes % kv_elem_size == 0,
+                            "KV block stride must be a positive multiple of dtype size: stride=%zu element=%zu",
+                            config_.kv_block_stride_bytes,
+                            kv_elem_size);
+    RTP_LLM_CHECK_WITH_INFO(config_.layer_num > 0 && config_.block_num > 0
+                                && config_.kv_block_stride_bytes
+                                       <= std::numeric_limits<size_t>::max() / config_.block_num / config_.layer_num,
+                            "invalid KV layout dimensions or byte size overflow");
+    const size_t expected_bytes = config_.kv_block_stride_bytes * config_.block_num * config_.layer_num;
+    RTP_LLM_CHECK_WITH_INFO(kv_cache_tensor.nbytes() == expected_bytes
+                                && config_.kv_block_pool_size_bytes == expected_bytes,
+                            "KV layout byte size mismatch: tensor=%zu configured=%zu expected=%zu",
+                            kv_cache_tensor.nbytes(),
+                            config_.kv_block_pool_size_bytes,
+                            expected_bytes);
     const size_t kv_block_stride_elems = config_.kv_block_stride_bytes / kv_elem_size;
 
     auto kv_options = torch::TensorOptions()

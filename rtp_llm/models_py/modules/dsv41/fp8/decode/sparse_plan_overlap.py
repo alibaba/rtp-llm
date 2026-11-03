@@ -95,14 +95,28 @@ def start_plan(attn, keys, lengths, *, query_len, producer_stream=None):
     table = keys.block_table
     candidate_mask = shared.get("candidate_mask")
     valid_requests = shared.get("decode_valid_requests")
+    request_ids = shared.get("decode_packed_request_ids")
     complete_prefix = sparse._has_complete_prefix(candidates, candidate_mask)
-    flags = None if complete_prefix else sparse._plan_candidate_flags(candidates, table, candidate_mask)
+    flags = (
+        None
+        if complete_prefix
+        else sparse._plan_candidate_flags(candidates, table, candidate_mask)
+    )
     warm_key = (
-        stream.cuda_stream, tuple(candidates.shape), tuple(table.shape),
-        table.stride(), lengths.dtype, query_len,
+        stream.cuda_stream,
+        tuple(candidates.shape),
+        tuple(table.shape),
+        table.stride(),
+        lengths.dtype,
+        query_len,
         None if flags is None else tuple(flags.shape),
         complete_prefix,
-        None if valid_requests is None else (tuple(valid_requests.shape), valid_requests.dtype),
+        (
+            None
+            if valid_requests is None
+            else (tuple(valid_requests.shape), valid_requests.dtype)
+        ),
+        None if request_ids is None else (tuple(request_ids.shape), request_ids.dtype),
     )
     warmed = shared.setdefault("decode_sparse_plan_warmed", set())
     # DeepGEMM initializes scheduler workspace once per stream, outside capture.
@@ -111,6 +125,8 @@ def start_plan(attn, keys, lengths, *, query_len, producer_stream=None):
     inputs = (candidates, lengths, table) + (() if flags is None else (flags,))
     if valid_requests is not None:
         inputs += (valid_requests,)
+    if request_ids is not None:
+        inputs += (request_ids,)
     work = SparsePlanWork(current, stream, inputs)
     stream.wait_stream(current)
     # FULL publishes candidate tensors while their writes are still queued on
@@ -122,9 +138,13 @@ def start_plan(attn, keys, lengths, *, query_len, producer_stream=None):
         with torch.cuda.stream(stream):
             with record_function_range("dsv41.decode.sparse_mqa_plan_async"):
                 work.plan = sparse.make_plan(
-                    candidates, lengths, table, query_len=query_len,
+                    candidates,
+                    lengths,
+                    table,
+                    query_len=query_len,
                     candidate_mask=candidate_mask,
                     valid_requests=valid_requests,
+                    request_ids=request_ids,
                 )
     except BaseException:
         work.wait()

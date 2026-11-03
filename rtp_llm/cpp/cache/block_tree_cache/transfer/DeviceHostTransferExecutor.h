@@ -22,7 +22,8 @@ public:
                                DeviceHostCopyOptions                          options          = {},
                                std::shared_ptr<BlockTreeCacheMetricsReporter> metrics_reporter = nullptr,
                                std::shared_ptr<CrcTransferService>            crc_service      = nullptr,
-                               BlockTreeTaskPool*                             load_task_pool   = nullptr);
+                               BlockTreeTaskPool*                             load_task_pool   = nullptr,
+                               int64_t                                        world_rank       = -1);
     ~DeviceHostTransferExecutor() = default;
 
 private:

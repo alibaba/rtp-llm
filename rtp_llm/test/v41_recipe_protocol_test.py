@@ -8,6 +8,8 @@ import sys
 import unittest
 from pathlib import Path
 
+from tokenizers import Tokenizer, decoders, models, pre_tokenizers
+
 
 def load_source(name, relative):
     path = Path(__file__).resolve().parents[1] / relative
@@ -91,6 +93,7 @@ class RequestFixtures(unittest.TestCase):
         converted = recipe.convert_request(request)
         self.assertIs(converted.tools[0]["strict"], True)
         prompt, _ = recipe.render_request(converted)
+        prompt = prompt.text
         expected = '{"name": "f", "description": "\u4e2d\u6587", "parameters": {"type": "object", "properties": {"z": {"type": "number", "enum": [0.0, -0.0, 0.0001, 1e-05, 1e-06, 1e-09, 1e+16, 1e+20]}, "a": {"description": "quote: \\"", "type": "string"}}}}'
         self.assertIn("### Available Tool Schemas\n\n" + expected + "\n\n", prompt)
         self.assertNotIn('"strict":', prompt)
@@ -115,6 +118,7 @@ class RequestFixtures(unittest.TestCase):
             ]
         }
         prompt, _ = recipe.render_request(recipe.convert_request(request))
+        prompt = prompt.text
         expected = '<\uff5cDSML\uff5c parameter name="z" string="false">{"b": 1, "a": 2}</\uff5cDSML\uff5c parameter>\n<\uff5cDSML\uff5c parameter name="a" string="false">true</\uff5cDSML\uff5c parameter>'
         self.assertIn(expected, prompt)
 
@@ -196,6 +200,7 @@ class RequestFixtures(unittest.TestCase):
     def test_literal_request_prompt_golden(self):
         request = {"messages": [{"role": "user", "content": "hello"}]}
         prompt, images = recipe.render_request(recipe.convert_request(request))
+        prompt = prompt.text
         self.assertEqual(
             prompt,
             "<\uff5cbegin\u2581of\u2581sentence\uff5c><\uff5cUser\uff5c>hello<\uff5cAssistant\uff5c></think>",
@@ -217,6 +222,7 @@ class RequestFixtures(unittest.TestCase):
             ],
         }
         prompt, _ = recipe.render_request(recipe.convert_request(request))
+        prompt = prompt.text
         expected = "<\uff5cbegin\u2581of\u2581sentence\uff5c><\uff5cSystem\uff5c>Reasoning Effort: 50 (range 1-100, the higher the value, the more thorough the reasoning)\n\n<\uff5cUser\uff5c>first\n\nsecond<\uff5cAssistant\uff5c><think>prior reasoning</think>answer<\uff5cend\u2581of\u2581sentence\uff5c><\uff5cSystem\uff5c>new instruction<\uff5cAssistant\uff5c><think>"
         self.assertEqual(prompt, expected)
 
@@ -232,6 +238,7 @@ class RequestFixtures(unittest.TestCase):
             }
             converted = recipe.convert_request(request)
             prompt, _ = recipe.render_request(converted)
+            prompt = prompt.text
             self.assertTrue(converted.force_tools)
             self.assertTrue(
                 prompt.endswith(
@@ -302,6 +309,7 @@ class RequestFixtures(unittest.TestCase):
         }
         original = copy.deepcopy(request)
         prompt, images = recipe.render_request(recipe.convert_request(request))
+        prompt = prompt.text
         self.assertEqual(
             [image["url"] for image in images],
             ["https://example.invalid/a.png", "https://example.invalid/b.png"],
@@ -332,6 +340,7 @@ class RequestFixtures(unittest.TestCase):
             ]
         }
         prompt, images = recipe.render_request(recipe.convert_request(request))
+        prompt = prompt.text
         self.assertEqual(
             prompt,
             "<\uff5cbegin\u2581of\u2581sentence\uff5c><\uff5cUser\uff5c>before\n\n<\uff5cdeepseek_image\uff5c>\n\nafter<\uff5cAssistant\uff5c></think>",
@@ -342,7 +351,6 @@ class RequestFixtures(unittest.TestCase):
         for request in (
             {"messages": []},
             {"messages": [{"role": "tool", "content": "orphan", "tool_call_id": "x"}]},
-            {"messages": [{"role": "user", "content": "<\uff5cdeepseek_image\uff5c>"}]},
             {"messages": [{"role": "assistant", "content": None}]},
             {"messages": [{"role": "user", "content": "go"}], "stop": ["x"] * 17},
             {
@@ -361,7 +369,184 @@ class RequestFixtures(unittest.TestCase):
         self.assertTrue(converted.json_output)
         self.assertIn(
             'schema to reply:\n{"type": "json_object"}',
-            recipe.render_request(converted)[0],
+            recipe.render_request(converted)[0].text,
+        )
+
+
+class PromptTokenizationTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        vocabulary = {
+            text: index
+            for index, text in enumerate(sorted(pre_tokenizers.ByteLevel.alphabet()))
+        }
+        cls.specials = [
+            recipe.BOS,
+            recipe.EOS,
+            recipe.SYSTEM,
+            recipe.USER,
+            recipe.ASSISTANT,
+            recipe.IMAGE,
+            recipe.DSML,
+            "<think>",
+            "</think>",
+            "<｜ref｜>",
+            "<｜/ref｜>",
+            "<｜box｜>",
+            "<｜/box｜>",
+            "<｜point｜>",
+            "<｜/point｜>",
+            "<｜polygon｜>",
+            "<｜/polygon｜>",
+        ]
+        cls.tokenizer = Tokenizer(models.BPE(vocabulary, []))
+        cls.tokenizer.pre_tokenizer = pre_tokenizers.ByteLevel(add_prefix_space=False)
+        cls.tokenizer.decoder = decoders.ByteLevel()
+        cls.tokenizer.add_special_tokens(cls.specials)
+        cls.encoder = recipe.PromptTokenizer(cls.tokenizer)
+        cls.image_id = cls.tokenizer.token_to_id(recipe.IMAGE)
+
+    def encode(self, request):
+        before = copy.deepcopy(request)
+        prompt, images = recipe.render_request(recipe.convert_request(request))
+        ids = self.encoder.encode(prompt)
+        self.assertEqual(
+            self.tokenizer.decode(ids, skip_special_tokens=False), prompt.text
+        )
+        self.assertEqual(request, before)
+        return prompt, images, ids
+
+    def test_token_spellings_in_api_text_are_plain(self):
+        text = "中文日志🖼: " + " ".join(self.specials)
+        for role in ("system", "user", "assistant"):
+            for content in (text, [{"type": "text", "text": text}]):
+                with self.subTest(role=role, content=content):
+                    prompt, images, ids = self.encode(
+                        {"messages": [{"role": role, "content": content}]}
+                    )
+                    self.assertIn(text, prompt.text)
+                    self.assertEqual(images, [])
+                    self.assertNotIn(self.image_id, ids)
+                    self.assertEqual(
+                        ids.count(self.tokenizer.token_to_id(recipe.BOS)), 1
+                    )
+                    self.assertEqual(
+                        ids.count(self.tokenizer.token_to_id(recipe.DSML)), 0
+                    )
+
+    def test_tool_log_and_json_escaped_arguments_are_plain(self):
+        text = f"Image token: {recipe.IMAGE}, id: 129264"
+        for arguments in (
+            json.dumps({"日志": text}),
+            json.dumps({"日志": text}, ensure_ascii=False),
+        ):
+            prompt, images, ids = self.encode(
+                {
+                    "messages": [
+                        {"role": "user", "content": "head -40 probe_fake1.log"},
+                        {
+                            "role": "assistant",
+                            "tool_calls": [
+                                {
+                                    "id": "a",
+                                    "function": {
+                                        "name": "shell",
+                                        "arguments": arguments,
+                                    },
+                                }
+                            ],
+                        },
+                        {"role": "tool", "tool_call_id": "a", "content": text},
+                    ]
+                }
+            )
+            self.assertEqual(prompt.text.count(text), 2)
+            self.assertEqual(images, [])
+            self.assertNotIn(self.image_id, ids)
+            self.assertEqual(ids.count(self.tokenizer.token_to_id(recipe.DSML)), 6)
+
+    def test_tool_schemas_and_historical_reasoning_are_plain(self):
+        text = recipe.IMAGE + recipe.DSML + "</think>"
+        tools = copy.deepcopy(TOOLS)
+        tools[0]["function"].update(
+            description=text, parameters={"type": "object", "description": text}
+        )
+        prompt, images, ids = self.encode(
+            {
+                "tools": tools,
+                "thinking": {"type": "enabled"},
+                "messages": [
+                    {"role": "user", "content": "go"},
+                    {"role": "assistant", "content": "done", "reasoning_content": text},
+                ],
+            }
+        )
+        self.assertEqual(prompt.text.count(text), 3)
+        self.assertEqual(images, [])
+        self.assertNotIn(self.image_id, ids)
+        specials = [prompt.text[start:end] for start, end in prompt.special_ranges]
+        self.assertEqual(
+            specials.count("</think>"), 3
+        )  # Two template examples and history.
+
+    def test_structured_images_and_literals_keep_their_order(self):
+        text = f"中文🖼 {recipe.IMAGE} {recipe.IMAGE}"
+        prompt, images, ids = self.encode(
+            {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": text},
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": "https://example.invalid/first.png"
+                                },
+                            },
+                            {"type": "text", "text": text},
+                            {
+                                "type": "image_url",
+                                "image_url": {"url": "data:image/png;base64,YQ=="},
+                            },
+                            {"type": "text", "text": text},
+                        ],
+                    }
+                ]
+            }
+        )
+        self.assertEqual(prompt.text.count(recipe.IMAGE), 8)
+        self.assertEqual(ids.count(self.image_id), 2)
+        self.assertEqual(
+            [image["url"] for image in images],
+            ["https://example.invalid/first.png", "data:image/png;base64,YQ=="],
+        )
+        image_positions = [i for i, token in enumerate(ids) if token == self.image_id]
+        self.assertEqual(
+            self.tokenizer.decode(
+                ids[image_positions[0] + 1 : image_positions[1]],
+                skip_special_tokens=False,
+            ),
+            "\n\n" + text + "\n\n",
+        )
+
+    def test_assistant_grounding_tokens_remain_special(self):
+        text = "<｜ref｜>猫<｜/ref｜><｜box｜>0,0,1,1<｜/box｜>"
+        for role in ("user", "assistant"):
+            _, _, ids = self.encode({"messages": [{"role": role, "content": text}]})
+            for token in ("<｜ref｜>", "<｜/ref｜>", "<｜box｜>", "<｜/box｜>"):
+                self.assertEqual(
+                    ids.count(self.tokenizer.token_to_id(token)),
+                    int(role == "assistant"),
+                )
+
+    def test_encoding_does_not_mutate_shared_tokenizer(self):
+        before = self.tokenizer.to_str()
+        self.encode({"messages": [{"role": "user", "content": recipe.IMAGE}]})
+        self.assertEqual(self.tokenizer.to_str(), before)
+        self.assertEqual(
+            self.tokenizer.encode(recipe.IMAGE, add_special_tokens=False).ids,
+            [self.image_id],
         )
 
 

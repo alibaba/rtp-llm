@@ -1493,6 +1493,9 @@ class W:
     dspark_hidden_norm_gamma = "dspark_hidden_norm.gamma"
     dspark_markov_w1 = "dspark_markov_w1.weight"
     dspark_markov_w2 = "dspark_markov_w2.weight"
+    # V4.1 acceptance-rate predictor: [1, hidden + markov_rank]. Checkpoint BF16
+    # is loaded as FP32; enabling confidence requires this checkpoint tensor.
+    dspark_confidence_head = "dspark_confidence_head.weight"
 
     gpt_style_tp_strategy: Dict[str, Any] = {
         embedding: sp_neg1,
@@ -1686,6 +1689,7 @@ class W:
         dspark_hidden_norm_gamma: sp_id,
         dspark_markov_w1: sp_id,
         dspark_markov_w2: sp_id,
+        dspark_confidence_head: sp_id,
     }
 
     weights_list = [

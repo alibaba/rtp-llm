@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <optional>
 #include <tuple>
+#include <vector>
 
 #include <torch/extension.h>
 
@@ -10,6 +11,15 @@ namespace rtp_llm {
 
 std::tuple<uint64_t, uint64_t> get_seed_and_offset(int                          increment_size,
                                                    std::optional<at::Generator> generator = std::nullopt);
+
+// Reserve each row's Philox range in input order. Consecutive rows sharing
+// a generator reserve one range while retaining the per-row offsets of
+// repeated get_seed_and_offset calls. Host materialization is eager-only.
+void get_sampling_seed_offsets(const std::vector<at::Generator>& generators,
+                               int64_t                           batch_size,
+                               int                               increment_size,
+                               int64_t*                          seeds,
+                               int64_t*                          offsets);
 
 void sampling_from_probs(torch::Tensor                probs,
                          torch::Tensor                output,

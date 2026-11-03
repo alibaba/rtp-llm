@@ -22,7 +22,7 @@ int greedyTop1RenormSplits(int batch_size, int vocab_size);
 size_t greedyTop1RenormPartialsBytes(int batch_size, int vocab_size);
 
 // Fused greedy (top_k == 1) target-side sampling distribution:
-//   samples_out[row]     = first argmax_v logits[row, v]
+//   samples_out[row * sample_stride] = first argmax_v logits[row, v]
 //   onehot_out[row, v]   = (v == samples_out[row]) ? 1.0f : 0.0f
 //
 // This is exactly what the replaced chain
@@ -57,6 +57,7 @@ cudaError_t invokeGreedyTop1Renorm(const float* logits,
                                    int          vocab_size,
                                    float*       partials,
                                    cudaStream_t stream,
-                                   bool         write_onehot = true);
+                                   bool         write_onehot  = true,
+                                   int64_t      sample_stride = 1);
 
 }  // namespace rtp_llm

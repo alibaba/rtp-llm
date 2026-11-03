@@ -370,7 +370,7 @@ def warmup_v41_engram_jit(model, *, max_m, device):
     prefetch_carveout = None
     from rtp_llm.models_py.modules.dsv41 import _engram_decode_prefetch
 
-    if engram_lookup_prefetch_enabled() or _engram_decode_prefetch.enabled():
+    if engram_lookup_prefetch_enabled():
         from rtp_llm.models_py.modules.dsv41._engram_triton import (
             PREFETCH_LOOKUP_CARVEOUT,
             PREFETCH_LOOKUP_CONFIG,

@@ -176,6 +176,46 @@ def _warm_swa_metadata(attn, layout, max_batch_size, device):
         attn.window_size, cu, positions, prefix, requests
     )
     ops.compute_prefill_gather_lens(lengths, cu, 1, 0, attn.window_size)
+    packed_origin = torch.zeros(1, dtype=torch.int64, device=device)
+    empty_topk = torch.zeros((rows, 0), dtype=torch.int32, device=device)
+    # Packed pointers select new JIT variants even though request lengths
+    # remain runtime values. Warm them before the first continuation request.
+    for prefix_dtype, request_dtype in product((torch.int32, torch.int64), repeat=2):
+        typed_prefix = prefix.to(prefix_dtype)
+        typed_requests = requests.to(request_dtype)
+        ops.compute_swa_slot_in_flat(
+            positions,
+            typed_requests,
+            typed_prefix,
+            M=rows + 1,
+            window_size=attn.window_size,
+            row_offsets=packed_origin,
+        )
+        ops.combine_topk_swa_indices_cp(
+            empty_topk,
+            positions,
+            1,
+            attn.window_size,
+            1,
+            0,
+            rows + 1,
+            0,
+            typed_requests,
+            typed_prefix,
+            row_offsets=packed_origin,
+        )
+    ops.combine_topk_swa_indices(
+        empty_topk,
+        cu,
+        lengths,
+        lengths,
+        attn.window_size,
+        1,
+        0,
+        rows + 1,
+        0,
+        row_offsets=packed_origin,
+    )
     for table_offset in (0, 1):
         table = torch.ones(2 + table_offset, dtype=torch.int32, device=device)[
             table_offset:
@@ -203,16 +243,19 @@ def _warm_swa_metadata(attn, layout, max_batch_size, device):
     # Exact request counts are runtime; only BLOCK_B requires multiple kernels.
     for batch in _swa_slot_batch_block_warmup_sizes(max_batch_size):
         full_cu = torch.arange(0, 2 * batch + 1, 2, dtype=torch.int32, device=device)
+        packed_offsets = torch.arange(0, 3 * batch, 3, dtype=torch.int64, device=device)
         for dtype in (torch.int32, torch.int64):
             prefixes = torch.ones(batch, dtype=dtype, device=device)
-            ops.compute_swa_slot_in_flat_from_cu(
-                full_cu,
-                prefixes,
-                num_tokens=2 * batch,
-                M=attn.window_size + 2,
-                window_size=attn.window_size,
-                base_offset=0,
-            )
+            for row_offsets in (None, packed_offsets):
+                ops.compute_swa_slot_in_flat_from_cu(
+                    full_cu,
+                    prefixes,
+                    num_tokens=2 * batch,
+                    M=attn.window_size + 2,
+                    window_size=attn.window_size,
+                    base_offset=0,
+                    row_offsets=row_offsets,
+                )
 
 
 def _warm_host_swa_metadata(layout, device):
@@ -332,6 +375,17 @@ def _warm_swa_byte_slices(layout, cp_size, cp_rank, device):
                     pages,
                     local_bytes,
                     layout.entries,
+                )
+                swa._gather_swa_rank_major(
+                    out.view(-1, 512),
+                    gathered,
+                    slots[None],
+                    lengths,
+                    1,
+                    pages,
+                    local_bytes,
+                    layout.entries,
+                    out_row_offsets=torch.zeros(1, dtype=torch.int64, device=device),
                 )
 
 
@@ -470,15 +524,17 @@ def _warm_pool(attn, layout, cp_size, cp_rank, max_batch_size, device):
                 swa.dequantize_and_gather_k_cache_slots(
                     out, pool, typed_slots[None], lengths, 1
                 )
+                swa.dequantize_and_gather_k_cache_slots(
+                    out.view(-1, 512),
+                    pool,
+                    typed_slots[None],
+                    lengths,
+                    1,
+                    out_row_offsets=torch.zeros(1, dtype=torch.int64, device=device),
+                )
         _warm_swa_byte_slices(layout, cp_size, cp_rank, device)
         return
     if layout.region == INDEXER_KV:
-        from . import _v41_grouped_gemm
-
-        if _v41_grouped_gemm._enabled():
-            _require_launch(
-                _v41_grouped_gemm.warmup(attn.index_wk), "grouped index GEMM"
-            )
         pool = _private_pool(layout, 68, device)
         projected = torch.zeros((rows, 128), dtype=torch.bfloat16, device=device)
         for offset, slot_offset in ((0, 0), (0, 1), (1, 0), (1, 1)):
@@ -587,49 +643,6 @@ def _warm_pool(attn, layout, cp_size, cp_rank, max_batch_size, device):
                             "main compression",
                             enabled=producer._enabled(values),
                         )
-        from . import _v41_batched_producer as batched
-
-        if batched.is_supported(kv):
-            _require_launch(
-                batched.warmup_projected_groups(device), "batched projection transport"
-            )
-            count = rows // layout.ratio
-            plan = batched.GroupPlan(
-                0,
-                rows,
-                0,
-                count,
-                layout.ratio,
-                ((0, rows, 0, count, layout.ratio - 1),),
-            )
-            prepared = batched.prepare(plan, device)
-            for stride in (512, 1024):
-                group = torch.zeros((rows, stride), dtype=torch.float32, device=device)
-                for offset, slot_offset in ((0, 0), (0, 1), (1, 0), (1, 1)):
-                    pos = _indexer_warmup_vector(rows, torch.int64, device, 1, offset)
-                    req = _indexer_warmup_vector(
-                        rows, torch.int64, device, 1, offset, fill=0
-                    )
-                    mapped = _private_slots(
-                        count + slot_offset, layout.entries, device
-                    )[slot_offset:]
-                    _require_launch(
-                        batched.compress_main(
-                            group[:, :512],
-                            group[:, -512:] if layout.ratio == 2 else None,
-                            attn.global_norm,
-                            attn.eps,
-                            pos,
-                            req,
-                            starts,
-                            previous,
-                            prepared,
-                            attn.freqs_cis,
-                            pool,
-                            mapped,
-                        ),
-                        "batched main compression",
-                    )
 
 
 def _warm_raw_producer_metadata(ratio, cp_size, device):
@@ -664,7 +677,7 @@ def _warm_raw_producer_metadata(ratio, cp_size, device):
             torch.tensor(host, dtype=torch.int64, device=device) for host in values
         ]
         _require_launch(
-            prepare_raw(cp, *vectors, ratio, slots, (1, 2, 3), tile_rows=65536),
+            prepare_raw(cp, *vectors, ratio, slots, (1, 2, 3)),
             "raw producer metadata",
         )
 
@@ -734,13 +747,43 @@ def _warm_fused_producer_metadata(layouts, cp_size, cp_rank, device):
                         ratio,
                         unexpected_fallback,
                         (1, 2, 3),
-                        tile_rows=65536,
                         slot_layouts=descriptors,
                     ),
                     "fused producer metadata",
                 )
                 if result.key_counts is None:
                     raise RuntimeError("fused producer warmup did not publish counts")
+        # The streamed source path uses a separate kernel specialized by the
+        # power-of-two request count. Scheduler updates can raise B after
+        # initialization, so compile every production B<=1024 bucket.
+        scratch = torch.empty(
+            (8, producer._RAW_TILE_ROWS), dtype=torch.int64, device=device
+        )
+        for batch in (1, 129, 257, 513):
+            starts = torch.zeros(batch, dtype=torch.int64, device=device)
+            lengths = torch.full((batch,), 2, dtype=torch.int64, device=device)
+            tile_layouts = tuple(
+                producer.SlotLayout(
+                    torch.ones((batch, 2), dtype=table_dtype, device=device),
+                    layout.entries,
+                    layout.tokens_per_block,
+                    layouts[0].owner_tokens_per_block,
+                    cp_size,
+                    cp_rank,
+                )
+                for layout in layouts
+            )
+            _require_launch(
+                producer.prepare_fused_tile(
+                    starts,
+                    lengths,
+                    ratio,
+                    tile_layouts,
+                    (0, 2, 0, 1 if ratio == 2 else 2),
+                    scratch,
+                ),
+                "streamed producer metadata",
+            )
 
 
 def _indexer_warmup_layouts():
@@ -1410,10 +1453,8 @@ def _warm_flash_mla(attn, device):
 def _warm_q_norm_rope(attn, device):
     import torch
 
-    from rtp_llm.models_py.modules.dsv41._fused_rmsnorm_rope_triton import (
-        fused_rmsnorm_rope,
-    )
     from rtp_llm.models_py.modules.dsv41._v41_fused_qkv import strided_q_rmsnorm
+    from rtp_llm.models_py.modules.dsv41.fp8._v41_swa_kv import swa_kv_norm_rope
     from rtp_llm.models_py.modules.dsv41.fp8.attention_v41 import rope_only
 
     rows = 2
@@ -1427,7 +1468,7 @@ def _warm_q_norm_rope(attn, device):
         (1, rows, rank + attn.head_dim), dtype=torch.bfloat16, device=device
     )
     strided_q_rmsnorm(combined[..., :rank], attn.q_norm, attn.eps)
-    fused_rmsnorm_rope(
+    swa_kv_norm_rope(
         combined[..., rank:],
         attn.kv_norm,
         frequencies,
@@ -1435,7 +1476,7 @@ def _warm_q_norm_rope(attn, device):
         eps=attn.eps,
     )
     # The unfused projection's contiguous KV is also reachable via the flag.
-    fused_rmsnorm_rope(
+    swa_kv_norm_rope(
         combined[..., rank:].contiguous(),
         attn.kv_norm,
         frequencies,
@@ -1567,7 +1608,7 @@ def warmup_v41_attention_jit(
                     if (
                         kv_cache_sharded
                         and cp_size > 1
-                        and max_batch_size >= 2
+                        and max_batch_size >= 1
                         and len(producer_layouts)
                         == (3 if main_layout.ratio == 2 else 2)
                     ):

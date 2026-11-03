@@ -1100,13 +1100,29 @@ class _EngramCPULookupSlot:
         self.host = torch.empty(
             (capacity, self.width), dtype=self.dtype, device="cpu", pin_memory=True
         )
+        self.hosts = (self.host,)
         self.stream = torch.cuda.Stream(device=self.device)
         self.copied = torch.cuda.Event()
+        self.stage_events = (self.copied,)
         self.allocated = torch.cuda.Event()
         current = torch.cuda.current_stream(self.device)
         self.allocated.record(current)
         self.stream.wait_event(self.allocated)
         self.copied.record(self.stream)
+
+    def enable_pipeline(self):
+        # The second staging buffer lets CPU lookup of the next chunk overlap
+        # the preceding chunk's H2D transfer. Each buffer has its own reuse event.
+        second = torch.empty(
+            (self.capacity, self.width),
+            dtype=self.dtype,
+            device="cpu",
+            pin_memory=True,
+        )
+        self.hosts = (self.host, second)
+        self.stage_events = (torch.cuda.Event(), torch.cuda.Event())
+        for event in self.stage_events:
+            event.record(self.stream)
 
     def allocate_output(self, count):
         current = torch.cuda.current_stream(self.device)
@@ -1137,9 +1153,7 @@ class _EngramCPULookupSlot:
                     self.last_timing = timing
                     if work.abandoned:
                         return None
-                ids = torch.from_numpy(
-                    np.ascontiguousarray(hashes.result().numpy()[:, self.hash_index])
-                )
+                ids = hashes.result()[:, self.hash_index].contiguous()
                 if timing is not None:
                     timing.update(getattr(hashes, "engram_timing", None) or {})
                 if work is not None and work.abandoned:
@@ -1152,14 +1166,15 @@ class _EngramCPULookupSlot:
 
                     lookup = lookup_host_rows_cpu_packed
                 count, capacity = output.shape[0], self.host.shape[0]
-                for begin in range(0, count, capacity):
+                for chunk, begin in enumerate(range(0, count, capacity)):
                     end = min(begin + capacity, count)
-                    # Reuse bounded pinned staging only after its preceding
-                    # H2D, including a previous chunk of this same request.
-                    self.copied.synchronize()
+                    stage = chunk % len(self.hosts)
+                    # Only wait for the previous H2D using this staging buffer.
+                    # The other buffer can be read by DMA while CPU fills this one.
+                    self.stage_events[stage].synchronize()
                     if work is not None and work.abandoned:
                         return None
-                    host = self.host[: end - begin]
+                    host = self.hosts[stage][: end - begin]
                     if timing is not None and begin == 0:
                         timing["lookup_started_ns"] = time.perf_counter_ns()
                     lookup(
@@ -1177,13 +1192,13 @@ class _EngramCPULookupSlot:
                     # see a partly initialized request output or race a UVA
                     # fallback. This may wait for later CPU chunks at deadline.
                     if work is None:
-                        self._copy(target, host)
+                        self._copy(target, host, self.stage_events[stage])
                     else:
                         with work.lock:
                             if work.abandoned:
                                 self.last_timing = timing
                                 return None
-                            self._copy(target, host)
+                            self._copy(target, host, self.stage_events[stage])
                             work.copy_submitted = True
                     if timing is not None:
                         timing["copy_submitted_ns"] = time.perf_counter_ns()
@@ -1193,10 +1208,12 @@ class _EngramCPULookupSlot:
                 self.stream.synchronize()
                 raise
 
-    def _copy(self, output, host):
+    def _copy(self, output, host, stage_event):
         with torch.cuda.stream(self.stream):
             self.stream.wait_event(self.allocated)
             output.copy_(host, non_blocking=True)
+            if stage_event is not self.copied:
+                stage_event.record(self.stream)
             self.copied.record(self.stream)
 
     def close(self):
@@ -1231,6 +1248,8 @@ class EngramCPULookupRuntime:
                 module = model.v4.layers[layer_id].engram
                 if layer_id < 20 and module.q_weight.is_cuda:
                     self.slots[layer_id] = _EngramCPULookupSlot(module, self.capacity)
+                    if self.max_rows > self.capacity:
+                        self.slots[layer_id].enable_pipeline()
             # Initialize the Python worker, native thread team and H2D stream /
             # events before readiness. Use real CPU hashes and each real table.
             state = model._engram_hash_state
@@ -1318,7 +1337,7 @@ def prepare_engram_cpu_lookup(model, *, max_m):
         len(runtime.slots),
         tuple(slot.num_threads for slot in runtime.slots.values()),
         sum(
-            slot.host.numel() * slot.host.element_size()
+            sum(host.numel() * host.element_size() for host in slot.hosts)
             for slot in runtime.slots.values()
         ),
         0,  # Device outputs are allocated per request and released after WKV.
@@ -1863,7 +1882,8 @@ class Engram(nn.Module):
             hidden, hash_ids, token_mask, out=hidden if inplace else None
         )
 
-    def _forward_rows(self, hidden, hash_ids, token_mask, *, out=None, cpu_rows=None):
+    def projection_input(self, hidden, hash_ids, *, cpu_rows=None):
+        """Consume this forward's lookup once, preserving packed FP8 inputs."""
         rows = cpu_rows
         del cpu_rows
         cpu_work = self._cpu_lookup_work
@@ -1881,21 +1901,9 @@ class Engram(nn.Module):
                 )
                 if pair is None:
                     del rows
-                    return self._forward_rows(hidden, hash_ids, token_mask, out=out)
-                kv = self.wkv.forward_quantized(*pair)
-                del pair
-            else:
-                kv = self.wkv(rows)
-            del rows
-            return gated_engram_residual(
-                hidden,
-                kv,
-                self.q_weight,
-                self.k_weight,
-                self.eps,
-                token_mask,
-                out=out,
-            )
+                    return Engram.projection_input(self, hidden, hash_ids)
+                return pair
+            return rows
         work = self._lookup_work
         rows = None
         if work is not None:
@@ -1903,10 +1911,15 @@ class Engram(nn.Module):
             rows = work.consume(hash_ids, hidden)
         if rows is None:
             rows = _lookup_for_projection(self, hash_ids, hidden.device)
+        return rows if isinstance(rows, tuple) else rows.flatten(-2)
+
+    def _forward_rows(self, hidden, hash_ids, token_mask, *, out=None, cpu_rows=None):
+        rows = Engram.projection_input(self, hidden, hash_ids, cpu_rows=cpu_rows)
         if isinstance(rows, tuple):
             kv = self.wkv.forward_quantized(*rows)
         else:
-            kv = self.wkv(rows.flatten(-2))
+            kv = self.wkv(rows)
+        del rows
         return gated_engram_residual(
             hidden, kv, self.q_weight, self.k_weight, self.eps, token_mask, out=out
         )

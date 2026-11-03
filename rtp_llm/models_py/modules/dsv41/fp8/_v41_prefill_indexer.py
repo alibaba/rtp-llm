@@ -9,7 +9,6 @@ indexer-query quantization), so DeepGEMM's MX mode applies both scale sets.
 
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass
 from typing import Callable
 
@@ -19,6 +18,9 @@ from rtp_llm.models_py.modules.dsv41.fp8._v41_fp4_triton import (
     FP4_INDEXER_GROUP,
     FP4_INDEXER_HEAD_DIM,
     quantize_rows_fp4,
+)
+from rtp_llm.models_py.modules.dsv41.fp8._v41_grouped_prefill_score import (
+    _MAX_LOGITS_BYTES,
 )
 
 
@@ -52,55 +54,20 @@ def is_supported(device: torch.device, num_heads: int, head_dim: int) -> bool:
 
 
 def logits_chunk_rows(num_keys: int) -> int:
-    """Bound logical FP32 logits to 256 MiB, with at most 4096 queries.
+    """Bound logical FP32 logits to the shared score budget, with at most 4096 queries.
 
     DeepGEMM additionally pads its row stride by up to 511 keys and aligns
     query rows to its small Q tile. This is independent of the head dimension;
     no [queries, heads, keys] temporary is materialized. The 4096-row query
     batch is the batched source scan: four times fewer scorer launches,
     topk calls and per-chunk glue than the 512-row cap at 16K+ contexts,
-    with the same 256 MiB logits bound.
+    with the same score budget.
     """
     if num_keys == 0:
         return 512
-    return max(1, min(4096, (256 * 1024 * 1024) // (4 * num_keys)))
-
-
-def logits_chunk_plan(
-    num_keys: int,
-    *,
-    device: torch.device,
-    num_heads: int,
-    return_bf16: bool,
-) -> tuple[int, bool]:
-    """Use larger scheduled BF16 chunks only within a bounded long-key path.
-
-    The single rollout switch also controls the caller's early logits release;
-    disabling it restores the old allocation overlap for same-source A/B.
-    Short requests whose old chunk is already at least 512 are unchanged.
-    """
-    rows = logits_chunk_rows(num_keys)
-    if (
-        os.environ.get("DSV41_PREFILL_INDEXER_SCHEDULED", "1") != "1"
-        or not return_bf16
-        or rows >= 512
-        or not 0 < num_keys <= (1 << 20)
-    ):
-        return rows, False
-    from ._indexer_score import supports_fp8_fp4_mqa_schedule
-
-    if not supports_fp8_fp4_mqa_schedule(device, num_heads):
-        return rows, False
-    # The native SM100 H32 ABI pads K to 384, then the BF16 row to 512;
-    # query allocations align to BLOCK_Q=4. Bound the *physical* score to
-    # 768 MiB, leaving room below the baseline +1 GiB runtime budget.
-    # Metadata is only a few KiB and is scoped to the same chunk.
-    stride = (((num_keys + 383) // 384) * 384 + 511) // 512 * 512
-    bounded_rows = ((768 * 1024 * 1024) // (2 * stride)) // 4 * 4
-    scheduled_rows = min(512, bounded_rows)
-    if scheduled_rows <= rows:
-        return rows, False
-    return scheduled_rows, True
+    if 4 * num_keys > _MAX_LOGITS_BYTES:
+        raise ValueError("score budget cannot hold one FP32 logits row")
+    return min(4096, _MAX_LOGITS_BYTES // (4 * num_keys))
 
 
 def quantize_indexer_q(q: torch.Tensor):
@@ -259,7 +226,6 @@ def score_indexer_chunk(
     *,
     bounds=None,
     return_bf16=False,
-    use_schedule=False,
 ):
     """Fused dot/ReLU/head reduction; keep causal padding at negative infinity."""
     from ._indexer_score import fp8_fp4_mqa_indexer_score
@@ -294,7 +260,6 @@ def score_indexer_chunk(
         # Preserve the masked FP32 compatibility result for other callers.
         max_seqlen_k=count if return_bf16 else 0,
         return_bf16=return_bf16,
-        **({"use_schedule": True} if use_schedule else {}),
     )
     if not return_bf16 and not _use_clean_logits_only(q_payload.device):
         logits.masked_fill_(

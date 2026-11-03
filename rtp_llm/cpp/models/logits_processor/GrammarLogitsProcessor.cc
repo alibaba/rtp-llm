@@ -323,10 +323,10 @@ GrammarLogitsProcessor::process(const SamplerInputs& inputs, size_t start_idx, s
     }
 
     std::lock_guard<std::mutex> lock(state_mutex_);
-    if (update_timed_out_) {
+    if (grammarDisabled()) {
         return std::nullopt;
     }
-    const auto                  logits_row = inputs.logits[start_idx];
+    const auto logits_row = inputs.logits[start_idx];
     if (!logits_row.defined() || logits_row.dim() != 1 || logits_row.stride(0) != 1) {
         return ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "grammar logits processor requires contiguous 1D logits rows");
     }
@@ -349,6 +349,7 @@ std::optional<ErrorInfo> GrammarLogitsProcessor::updateStatus(const torch::Tenso
     }
     RTP_LLM_CHECK(new_tokens.dim() == 2);
     RTP_LLM_CHECK(new_tokens.scalar_type() == torch::kInt32);
+    RTP_LLM_CHECK(num_new_tokens >= 0);
     RTP_LLM_CHECK(new_tokens.size(1) >= num_new_tokens);
     RTP_LLM_CHECK(new_tokens.is_contiguous());
 
@@ -360,8 +361,13 @@ std::optional<ErrorInfo> GrammarLogitsProcessor::updateStatus(const torch::Tenso
     }
     const auto* data = new_tokens.data_ptr<int32_t>();
 
-    std::unique_lock<std::mutex> lock(state_mutex_);
-    if (update_timed_out_) {
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    // Empty updates are not timed samples and must not reset either streak.
+    if (num_new_tokens == 0) {
+        return std::nullopt;
+    }
+    if (grammarDisabled()) {
+        committed_output_len_ += num_new_tokens;
         return std::nullopt;
     }
     // Measure only committed CPU state advancement, excluding lock wait and reporting.
@@ -369,55 +375,75 @@ std::optional<ErrorInfo> GrammarLogitsProcessor::updateStatus(const torch::Tenso
     const auto start   = std::chrono::steady_clock::now();
     auto       error   = acceptCommittedLocked(data, static_cast<size_t>(num_new_tokens));
     const auto elapsed = std::chrono::steady_clock::now() - start;
-    update_timed_out_  = elapsed > std::chrono::milliseconds(update_timeout_ms_);
-    // A timeout disables this request's grammar even when the slow update rejected a token.
-    if (update_timed_out_) {
-        lock.unlock();
-        RTP_LLM_LOG_WARNING("xgrammar state update timed out; grammar disabled for stream, %s",
-                            stream_log_tag_.c_str());
-        if (metrics_reporter_) {
-            RtpLLMGrammarUpdateMetricsCollector collector;
-            collector.update_timeout_qps = true;
-            metrics_reporter_->report<RtpLLMGrammarMetrics, RtpLLMGrammarUpdateMetricsCollector>(nullptr, &collector);
-        }
-        return std::nullopt;
-    }
+    // A slow parser rejection or rollback failure must still fail the request.
     if (error.hasError()) {
         return error;
+    }
+    consecutive_update_timeouts_ =
+        elapsed > std::chrono::milliseconds(update_timeout_ms_) ? consecutive_update_timeouts_ + 1 : 0;
+    if (consecutive_update_timeouts_ == kConsecutiveTimeoutLimit) {
+        reportTimeout("update/updateStatus",
+                      std::chrono::duration_cast<std::chrono::microseconds>(elapsed).count(),
+                      num_new_tokens);
     }
     return std::nullopt;
 }
 
 std::optional<int64_t> GrammarLogitsProcessor::committedOutputLen() const {
     std::lock_guard<std::mutex> lock(state_mutex_);
-    if (update_timed_out_) {
-        return std::nullopt;
-    }
     return committed_output_len_;
 }
 
 bool GrammarLogitsProcessor::updateTimedOut() const {
     std::lock_guard<std::mutex> lock(state_mutex_);
-    return update_timed_out_;
+    return grammarDisabled();
 }
 
 ErrorResult<int> GrammarLogitsProcessor::prepareSpeculative(const SpecLogitsProcessorRequest& request) {
-    int cap_out = 0;
-    {
-        std::lock_guard<std::mutex> lock(state_mutex_);
-        if (update_timed_out_) {
-            std::fill_n(request.bitmask_cpu_out,
-                        (static_cast<size_t>(request.propose_step) + 1) * request.bitmask_size_int32,
-                        SpecLogitsProcessorRequest::kBitmaskAllowAll);
-            return int(request.propose_step);
-        }
-        auto                        cap_or = prepareSpecMask(*matcher_, eos_token_id_, request);
-        if (!cap_or.ok()) {
-            return cap_or.status();
-        }
-        cap_out = cap_or.value();
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    if (grammarDisabled()) {
+        std::fill_n(request.bitmask_cpu_out,
+                    (static_cast<size_t>(request.propose_step) + 1) * request.bitmask_size_int32,
+                    SpecLogitsProcessorRequest::kBitmaskAllowAll);
+        return int(request.propose_step);
     }
-    return ErrorResult<int>(std::move(cap_out));
+    // Time mask construction, temporary acceptance and rollback, excluding lock wait.
+    const auto start   = std::chrono::steady_clock::now();
+    auto       cap     = prepareSpecMask(*matcher_, eos_token_id_, request);
+    const auto elapsed = std::chrono::steady_clock::now() - start;
+    // The matcher is restored before a slow successful verification can disable it.
+    if (!cap.ok()) {
+        return cap;
+    }
+    consecutive_verify_timeouts_ =
+        elapsed > std::chrono::milliseconds(update_timeout_ms_) ? consecutive_verify_timeouts_ + 1 : 0;
+    if (consecutive_verify_timeouts_ == kConsecutiveTimeoutLimit) {
+        reportTimeout("verify/prepareSpeculative",
+                      std::chrono::duration_cast<std::chrono::microseconds>(elapsed).count(),
+                      request.propose_step);
+    }
+    return cap;
+}
+
+bool GrammarLogitsProcessor::grammarDisabled() const {
+    return consecutive_update_timeouts_ == kConsecutiveTimeoutLimit
+           || consecutive_verify_timeouts_ == kConsecutiveTimeoutLimit;
+}
+
+void GrammarLogitsProcessor::reportTimeout(const char* stage, int64_t elapsed_us, int token_count) const {
+    RTP_LLM_LOG_WARNING("xgrammar timeout; grammar disabled for stream, stage=%s, consecutive_timeouts=%d, "
+                        "budget_ms=%d, elapsed_us=%ld, token_count=%d, %s",
+                        stage,
+                        kConsecutiveTimeoutLimit,
+                        update_timeout_ms_,
+                        static_cast<long>(elapsed_us),
+                        token_count,
+                        stream_log_tag_.c_str());
+    if (metrics_reporter_) {
+        RtpLLMGrammarUpdateMetricsCollector collector;
+        collector.update_timeout_qps = true;
+        metrics_reporter_->report<RtpLLMGrammarMetrics, RtpLLMGrammarUpdateMetricsCollector>(nullptr, &collector);
+    }
 }
 
 ErrorInfo GrammarLogitsProcessor::acceptCommittedLocked(const int32_t* tokens, size_t n) {

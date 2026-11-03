@@ -2,6 +2,16 @@ load("@arch_config//:arch_select.bzl", "cuda13_x86_test_gpu", "torch_deps")
 load("//:def.bzl", "copts")
 load("@rules_cc//cc:defs.bzl", cuda13_cc_test = "cc_test")
 
+cc_test(
+    name = "dspark_cuda_graph_budget_test",
+    srcs = ["dspark_cuda_graph_budget_test.cc"],
+    copts = copts(),
+    deps = [
+        "//rtp_llm/cpp/cuda_graph:dspark_cuda_graph_budget",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
 [
     cuda13_cc_test(
         name = "cuda_graph_replay_retry_integration_test_" + platform["suffix"],
@@ -107,6 +117,7 @@ cc_library(
     copts = copts(),
     deps = [
         "//rtp_llm/cpp/cuda_graph:cuda_graph_impl",
+        "//rtp_llm/cpp/cuda_graph:dspark_cuda_graph_budget",
         "//rtp_llm/cpp/pybind:py_utils",
         "//rtp_llm/cpp/pybind:th_compute_lib",
     ] + torch_deps(),

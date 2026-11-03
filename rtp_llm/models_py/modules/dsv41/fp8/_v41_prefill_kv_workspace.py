@@ -107,9 +107,19 @@ def _row_geometry(swa):
 class PreparedGlobalRows(tuple):
     """Immutable producer results owning their interleaved destination plan."""
 
-    def __new__(cls, values, workspace):
+    def __new__(cls, values, workspace, index_allocations=None):
         result = super().__new__(cls, values)
         result.workspace = workspace
+        result.record_tensors = (
+            (
+                workspace.output,
+                workspace.device_offsets,
+                workspace.refresh_layout,
+                *index_allocations,
+            )
+            if index_allocations is not None
+            else None
+        )
         return result
 
 
@@ -210,7 +220,7 @@ class PreparedGlobalWorkspace:
         self._refresh_metadata = (device, host, tiles)
         return self._refresh_metadata
 
-    def publish(self, globals_by_req):
+    def publish(self, globals_by_req, index_allocations=None):
         """Attach aliases created by the direct producer after all its writes.
 
         The producer constructs exact aliases from global_starts/global_sizes.
@@ -220,7 +230,7 @@ class PreparedGlobalWorkspace:
         values = tuple(globals_by_req)
         if len(values) != len(self.global_sizes):
             raise ValueError("Producer globals must cover every prepared request")
-        return PreparedGlobalRows(values, self)
+        return PreparedGlobalRows(values, self, index_allocations)
 
 
 def prepare_global_workspace(swa, global_sizes, *, output_stream=None):

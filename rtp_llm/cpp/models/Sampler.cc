@@ -56,6 +56,11 @@ void Sampler::allocateGreedySamplingBuffers(size_t max_batch_size) {
         buffers.offset_host          = torch::empty({(int64_t)max_batch_size_}, pinned_i64);
         buffers.output_ids_ptrs_host = torch::empty({(int64_t)max_batch_size_}, pinned_i64);
         buffers.max_batch_size       = max_batch_size_;
+#if USING_CUDA
+        auto device_i64       = torch::TensorOptions().dtype(torch::kInt64).device(torch::kCUDA);
+        buffers.seed_device   = torch::empty({(int64_t)max_batch_size_}, device_i64);
+        buffers.offset_device = torch::empty({(int64_t)max_batch_size_}, device_i64);
+#endif
         slot.ready_event.reset();
     }
 }
@@ -95,11 +100,14 @@ GreedySamplingBuffers& Sampler::nextGreedySamplingBuffers(size_t batch_size) {
         retirePendingGreedySamplingBuffers();
         if (!slot.ready_event->query()) {
             pending_greedy_sampling_slots_.push_back(std::move(slot));
-            auto pinned_i64 = torch::TensorOptions().dtype(torch::kInt64).pinned_memory(true);
-            slot.buffers    = {torch::empty({(int64_t)max_batch_size_}, pinned_i64),
-                               torch::empty({(int64_t)max_batch_size_}, pinned_i64),
-                               torch::empty({(int64_t)max_batch_size_}, pinned_i64),
-                               max_batch_size_};
+            auto pinned_i64            = torch::TensorOptions().dtype(torch::kInt64).pinned_memory(true);
+            slot.buffers               = {torch::empty({(int64_t)max_batch_size_}, pinned_i64),
+                                          torch::empty({(int64_t)max_batch_size_}, pinned_i64),
+                                          torch::empty({(int64_t)max_batch_size_}, pinned_i64),
+                                          max_batch_size_};
+            auto device_i64            = torch::TensorOptions().dtype(torch::kInt64).device(torch::kCUDA);
+            slot.buffers.seed_device   = torch::empty({(int64_t)max_batch_size_}, device_i64);
+            slot.buffers.offset_device = torch::empty({(int64_t)max_batch_size_}, device_i64);
         }
 #else
         slot.ready_event->synchronize();
@@ -277,7 +285,13 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
                 greedy_sampling_buffers.seed_host.narrow(0, from_batch_idx_in, batch_size_in),
                 greedy_sampling_buffers.offset_host.narrow(0, from_batch_idx_in, batch_size_in),
                 greedy_sampling_buffers.output_ids_ptrs_host.narrow(0, from_batch_idx_in, batch_size_in),
-                batch_size_in};
+                batch_size_in,
+                greedy_sampling_buffers.seed_device.defined() ?
+                    greedy_sampling_buffers.seed_device.narrow(0, from_batch_idx_in, batch_size_in) :
+                    torch::Tensor(),
+                greedy_sampling_buffers.offset_device.defined() ?
+                    greedy_sampling_buffers.offset_device.narrow(0, from_batch_idx_in, batch_size_in) :
+                    torch::Tensor()};
             GreedySamplingBuffers* greedy_sampling_buffer_ptr = &greedy_sampling_buffer_slice;
 
             RTP_LLM_PROFILE_SCOPE("sampler.forward.execSampleGreedy");
@@ -303,7 +317,11 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
                  greedy_sampling_buffer_ptr,
                  inputs.skip_logits_probs_restore,
                  inputs.all_probs_point_mass,
-                 inputs.force_topk});
+                 inputs.force_topk,
+                 all_probs.has_value() && inputs.all_probs_indices.defined() ?
+                     std::optional<torch::Tensor>(
+                         inputs.all_probs_indices.narrow(0, from_batch_idx_in, batch_size_in)) :
+                     std::nullopt});
             all_probs_point_mass = all_probs_point_mass && greedy_output.all_probs_point_mass;
             if (greedy_output.success.defined()) {
                 success.copy_(greedy_output.success);
@@ -386,6 +404,7 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
     // all_probs is a one-hot at token_ids and was never materialized, so
     // rejection sampling must synthesize q from token_ids instead of reading it.
     output.token_ids_are_point_mass = all_probs_point_mass;
+    output.all_probs_indices        = inputs.all_probs_indices;
     output.raw_logprobs_logits      = inputs.raw_logprobs_logits;
     output.raw_logprobs_row_indices = inputs.raw_logprobs_row_indices;
     return output;

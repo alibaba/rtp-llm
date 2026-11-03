@@ -231,6 +231,25 @@ TEST_F(MemoryLayoutStrategyTest, Initialization) {
     EXPECT_TRUE(init_result);
 }
 
+TEST_F(MemoryLayoutStrategyTest, InitializationRejectsTruncatedByteLayoutsBeforeClearingMemory) {
+    for (bool truncate_stride : {false, true}) {
+        SCOPED_TRACE(truncate_stride);
+        auto config  = createTestConfig(1, 2, 50, 50);
+        config.dtype = TYPE_FP16;
+        if (truncate_stride) {
+            config.kv_block_stride_bytes = 101;
+        } else {
+            ++config.kv_block_pool_size_bytes;
+        }
+        auto ctx = createTestContext(config);
+        ctx.kv_cache_buffer.fill_(0x5a);
+        const auto           before = ctx.kv_cache_buffer.clone();
+        MemoryLayoutStrategy strategy;
+        EXPECT_THROW(strategy.init(ctx.config, ctx.kv_cache_buffer, ctx.kv_scale_buffer, ctx.cache_ptr), RTPException);
+        EXPECT_TRUE(torch::equal(ctx.kv_cache_buffer, before));
+    }
+}
+
 TEST_F(MemoryLayoutStrategyTest, InitializationWithScaleTensor) {
     // Create an int8 config with kv-scale enabled (matches current production behavior).
     auto spec                = createTestKvCacheSpec(/*layer_num=*/4,

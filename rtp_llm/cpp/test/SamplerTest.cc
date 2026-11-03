@@ -36,6 +36,12 @@ TEST_F(SamplerTest, testDynamicGreedySamplingBuffersGrow) {
         ASSERT_GE(slot.buffers.seed_host.numel(), 2);
         ASSERT_GE(slot.buffers.offset_host.numel(), 2);
         ASSERT_GE(slot.buffers.output_ids_ptrs_host.numel(), 2);
+#if USING_CUDA
+        ASSERT_TRUE(slot.buffers.seed_device.is_cuda());
+        ASSERT_TRUE(slot.buffers.offset_device.is_cuda());
+        ASSERT_GE(slot.buffers.seed_device.numel(), 2);
+        ASSERT_GE(slot.buffers.offset_device.numel(), 2);
+#endif
     }
 
     GreedySamplingBuffers* used_slots[Sampler::kGreedySamplingBufferSlots] = {};
@@ -66,8 +72,14 @@ TEST_F(SamplerTest, testPendingGreedySamplingSourcesSurviveReuseAndGrowth) {
     for (const bool grow : {false, true}) {
         Sampler sampler(SamplerInitParams{2, false});
         auto&   source = sampler.nextGreedySamplingBuffers(2);
+        // First use of this int64 fill can lazily load its CUDA module and
+        // synchronize the context. Warm it before blocking the stream so the
+        // timed region measures buffer reuse rather than kernel loading.
+        source.seed_device.fill_(0);
+        at::cuda::getCurrentCUDAStream().synchronize();
         source.seed_host.fill_(37);
         auto               old_source = source.seed_host;
+        auto               old_device = source.seed_device;
         std::promise<void> release;
         auto               ready = release.get_future().share();
         ASSERT_EQ(cudaLaunchHostFunc(
@@ -75,7 +87,8 @@ TEST_F(SamplerTest, testPendingGreedySamplingSourcesSurviveReuseAndGrowth) {
                       [](void* data) { static_cast<std::shared_future<void>*>(data)->wait(); },
                       &ready),
                   cudaSuccess);
-        auto copied = source.seed_host.to(torch::kCUDA, /*non_blocking=*/true);
+        auto copied = source.seed_device;
+        copied.copy_(source.seed_host, /*non_blocking=*/true);
         sampler.markGreedySamplingBufferReady();
         std::thread releaser([&release] {
             std::this_thread::sleep_for(std::chrono::milliseconds(500));
@@ -89,12 +102,15 @@ TEST_F(SamplerTest, testPendingGreedySamplingSourcesSurviveReuseAndGrowth) {
         }
         auto& next = sampler.nextGreedySamplingBuffers(grow ? 3 : 2);
         next.seed_host.fill_(91);
+        next.seed_device.fill_(91);
         const auto elapsed =
             std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
-        const bool distinct_storage = next.seed_host.data_ptr() != old_source.data_ptr();
+        const bool distinct_storage        = next.seed_host.data_ptr() != old_source.data_ptr();
+        const bool distinct_device_storage = next.seed_device.data_ptr() != old_device.data_ptr();
         releaser.join();
         EXPECT_LT(elapsed, 250) << "reusing sampler staging must not wait for the GPU";
         EXPECT_TRUE(distinct_storage);
+        EXPECT_TRUE(distinct_device_storage);
         EXPECT_TRUE(torch::equal(copied.cpu(), torch::full({2}, 37, torch::kInt64)));
         EXPECT_TRUE(torch::equal(old_source, torch::full({2}, 37, torch::kInt64)));
     }
@@ -151,9 +167,13 @@ TEST_F(SamplerTest, testMixedDynamicBeamTransitionsUseIndependentOutput) {
                          torch::Tensor(),
                          false,
                          false,  // skip_logits_probs_restore
+                         0,      // force_topk
                          false,  // all_probs_point_mass
                          cum_log_probs,
                          torch::Tensor(),
+                         torch::Tensor(),  // all_probs_indices
+                         torch::Tensor(),  // raw_logprobs_logits
+                         torch::Tensor(),  // raw_logprobs_row_indices
                          generators};
 
     auto device_history_inputs          = inputs;
@@ -246,9 +266,13 @@ TEST_F(SamplerTest, testGeneralSampling) {
         torch::Tensor(),  // finished_mask
         false,            // return_original_all_probs
         false,            // skip_logits_probs_restore
+        0,                // force_topk
         false,            // all_probs_point_mass
         cum_log_probs.clone(),
         torch::Tensor(),  // all_probs
+        torch::Tensor(),  // all_probs_indices
+        torch::Tensor(),  // raw_logprobs_logits
+        torch::Tensor(),  // raw_logprobs_row_indices
         generator,
     };
 

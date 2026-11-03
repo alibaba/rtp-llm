@@ -17,7 +17,8 @@ _MAX_TEMP_BYTES = 256 * 1024 * 1024
 _BYTES_PER_ROW = 288 + 64 + 4 + 64 + 4 + 3 * 8
 _MAX_ROWS = _MAX_TEMP_BYTES // _BYTES_PER_ROW
 _KEY_ALIGNMENT = 256
-_MAX_REQUESTS = 128
+_MAX_REQUESTS = 1024
+_REQUESTS_PER_GROUP = 128
 
 
 def _trim_rows(tensor, count):
@@ -81,7 +82,7 @@ def _request_groups(counts):
     groups = []
     first, rows = 0, 0
     for index, count in enumerate(padded):
-        if rows + count > _MAX_ROWS:
+        if rows + count > _MAX_ROWS or index - first == _REQUESTS_PER_GROUP:
             groups.append((first, index, rows))
             first, rows = index, 0
         rows += count
@@ -117,12 +118,8 @@ def try_gather_prefill_pools(
     ):
         return None
     counts = tuple(end // attn.compress_ratio for end in ends)
-    padded_counts = tuple(
-        (count + _KEY_ALIGNMENT - 1) // _KEY_ALIGNMENT * _KEY_ALIGNMENT
-        for count in counts
-    )
     groups = _request_groups(counts)
-    if groups is None:
+    if any(count < 0 for count in counts):
         return None
     if (
         main_pool.device.type != "cuda"
@@ -145,6 +142,14 @@ def try_gather_prefill_pools(
     )
     if joint is not None:
         return joint
+
+    if groups is None:
+        return None
+
+    padded_counts = tuple(
+        (count + _KEY_ALIGNMENT - 1) // _KEY_ALIGNMENT * _KEY_ALIGNMENT
+        for count in counts
+    )
 
     if (
         main_pool.dtype != torch.uint8

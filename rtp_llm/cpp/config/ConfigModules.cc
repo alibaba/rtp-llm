@@ -140,7 +140,20 @@ std::string KVCacheConfig::to_string() const {
         << "block_tree_memory_evict_high_watermark_ratio: " << block_tree_memory_evict_high_watermark_ratio << "\n"
         << "block_tree_disk_evict_low_watermark_ratio: " << block_tree_disk_evict_low_watermark_ratio << "\n"
         << "block_tree_disk_evict_high_watermark_ratio: " << block_tree_disk_evict_high_watermark_ratio << "\n"
-        << "linear_step: " << linear_step << "\n"
+        << "block_tree_full_device_evict_low_watermark_ratio: " << block_tree_full_device_evict_low_watermark_ratio
+        << "\n"
+        << "block_tree_full_device_evict_high_watermark_ratio: " << block_tree_full_device_evict_high_watermark_ratio
+        << "\n"
+        << "block_tree_full_memory_evict_low_watermark_ratio: " << block_tree_full_memory_evict_low_watermark_ratio
+        << "\n"
+        << "block_tree_full_memory_evict_high_watermark_ratio: " << block_tree_full_memory_evict_high_watermark_ratio
+        << "\n"
+        << "block_tree_full_disk_evict_low_watermark_ratio: " << block_tree_full_disk_evict_low_watermark_ratio << "\n"
+        << "block_tree_full_disk_evict_high_watermark_ratio: " << block_tree_full_disk_evict_high_watermark_ratio
+        << "\n"
+        << "reuse_cache_tail_blocks: " << reuse_cache_tail_blocks << "\n"
+        << "linear_pool_blocks: " << linear_pool_blocks << "\n"
+        << "swa_pool_blocks: " << swa_pool_blocks << "\n"
         << "fp8_kv_cache: " << fp8_kv_cache << "\n"
         << "ssm_state_dtype: " << ssm_state_dtype << "\n"
         << "kv_cache_mem_mb: " << kv_cache_mem_mb << "\n"
@@ -342,7 +355,12 @@ std::string SpeculativeExecutionConfig::to_string() const {
         << "quantization: " << quantization << "\n"
         << "checkpoint_path: " << checkpoint_path << "\n"
         << "sp_dspark_mask_token_id: " << sp_dspark_mask_token_id << ", "
-        << "sp_dspark_sample_from_anchor: " << sp_dspark_sample_from_anchor;
+        << "sp_dspark_sample_from_anchor: " << sp_dspark_sample_from_anchor << "\n"
+        << "sp_dspark_confidence_mode: " << sp_dspark_confidence_mode << "\n"
+        << "sp_dspark_confidence_temperature: " << sp_dspark_confidence_temperature << "\n"
+        << "sp_dspark_verify_budget: " << sp_dspark_verify_budget << "\n"
+        << "sp_dspark_verify_mode: " << sp_dspark_verify_mode << "\n"
+        << "sp_dspark_verify_budget_mode: " << sp_dspark_verify_budget_mode;
     return oss.str();
 }
 

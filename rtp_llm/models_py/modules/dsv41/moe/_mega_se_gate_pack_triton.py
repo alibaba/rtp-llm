@@ -35,6 +35,9 @@ def fused_mega_moe_se_gate_pack_nonhash(
     block_m: int,
     route_scale: float,
     norm_eps: float = 1.0e-12,
+    to_physical_map: torch.Tensor | None = None,
+    logical_count: torch.Tensor | None = None,
+    ep_rank: int = 0,
 ) -> None:
     fused_mega_moe_gate_pack_nonhash(
         x,
@@ -46,6 +49,9 @@ def fused_mega_moe_se_gate_pack_nonhash(
         out_weights,
         route_scale=route_scale,
         norm_eps=norm_eps,
+        to_physical_map=to_physical_map,
+        logical_count=logical_count,
+        ep_rank=ep_rank,
     )
     stage_mega_moe_se_shared_l1_scales(out_sf, out_shared_l1_sf, x.size(0), block_m)
 
@@ -64,6 +70,9 @@ def fused_mega_moe_se_gate_pack_hash(
     block_m: int,
     route_scale: float,
     norm_eps: float = 1.0e-12,
+    to_physical_map: torch.Tensor | None = None,
+    logical_count: torch.Tensor | None = None,
+    ep_rank: int = 0,
 ) -> None:
     fused_mega_moe_gate_pack_hash(
         x,
@@ -76,6 +85,9 @@ def fused_mega_moe_se_gate_pack_hash(
         out_weights,
         route_scale=route_scale,
         norm_eps=norm_eps,
+        to_physical_map=to_physical_map,
+        logical_count=logical_count,
+        ep_rank=ep_rank,
     )
     stage_mega_moe_se_shared_l1_scales(out_sf, out_shared_l1_sf, x.size(0), block_m)
 

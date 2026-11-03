@@ -5,6 +5,8 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <future>
+#include <limits>
 #include <gtest/gtest.h>
 #include <mutex>
 #include <rapidjson/document.h>
@@ -288,6 +290,287 @@ TEST(KVCacheEventPublisherTest, KVCMResponseValidationCoversProtocolVariantsAndF
     for (const auto& [response, expected] : cases) {
         EXPECT_EQ(expected, detail::kvcmResponseIsOk(response)) << response;
     }
+}
+
+KVCacheEventPublisherContext makeControlContext() {
+    auto context = makeContext();
+    context.specs.clear();
+    context.register_instance_request = R"({"instance_group":"test_group","instance_id":"test_instance",
+        "block_size":64,"default_query_type":2,
+        "model_deployment":{"model_name":"remote_model","dtype":"fp16","tp_size":2,"dp_size":1,"pp_size":1},
+        "location_spec_infos":[{"name":"remote_TP0","size":4096},{"name":"remote_TP1","size":4096}],
+        "location_spec_groups":[{"name":"remote_group","spec_names":["remote_TP0","remote_TP1"]}]})";
+    return context;
+}
+
+TEST(KVCacheEventPublisherTest, ParsesRemoteCacheControlWithoutChangingEventAckSemantics) {
+    for (const bool enabled : {false, true}) {
+        const std::string response =
+            std::string(R"({"header":{"status":{"code":"OK"}},"extra_info":"{\"rtp_remote_cache_enabled\":)")
+            + (enabled ? "true" : "false") + R"(}"})";
+        const auto feedback = detail::parseKVCMReportFeedback(response);
+        ASSERT_TRUE(feedback.valid);
+        ASSERT_TRUE(feedback.ok);
+        ASSERT_TRUE(feedback.remote_cache_enabled.has_value());
+        EXPECT_EQ(*feedback.remote_cache_enabled, enabled);
+    }
+    const auto camel_case = detail::parseKVCMReportFeedback(
+        R"({"header":{"status":{"code":1}},"extraInfo":"{\"rtp_remote_cache_enabled\":false}"})");
+    ASSERT_TRUE(camel_case.remote_cache_enabled.has_value());
+    EXPECT_FALSE(*camel_case.remote_cache_enabled);
+    for (const auto* extra : {R"(null)", R"({})", R"("")", R"("not-json")", R"("[]")",
+                              R"("{\"metadata_backend_mode\":4}")",
+                              R"("{\"rtp_remote_cache_enabled\":0}")",
+                              R"("{\"rtp_remote_cache_enabled\":\"false\"}")"}) {
+        const std::string response =
+            std::string(R"({"header":{"status":{"code":"OK"}},"snapshot_required":true,"extra_info":)") + extra + "}";
+        const auto feedback = detail::parseKVCMReportFeedback(response);
+        EXPECT_TRUE(feedback.valid) << response;
+        EXPECT_TRUE(feedback.ok) << response;
+        EXPECT_TRUE(feedback.snapshot_required) << response;
+        EXPECT_FALSE(feedback.remote_cache_enabled.has_value()) << response;
+    }
+}
+
+class RemoteCacheControlUpdates {
+public:
+    void apply(bool enabled) {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            values_.push_back(enabled);
+        }
+        cv_.notify_all();
+    }
+
+    bool waitFor(size_t count) {
+        std::unique_lock<std::mutex> lock(mutex_);
+        return cv_.wait_for(lock, kAsyncTestTimeout, [&] { return values_.size() >= count; });
+    }
+
+    std::vector<bool> values() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return values_;
+    }
+
+private:
+    std::mutex mutex_;
+    std::condition_variable cv_;
+    std::vector<bool> values_;
+};
+
+TEST(KVCacheEventPublisherTest, ControlOnlyKeepsHeartbeatsAndControlWithoutCacheEvents) {
+    KVCacheEventPublisherConfig config;
+    config.publish_cache_events = false;
+    config.heartbeat_interval_ms = 5;
+    config.snapshot_interval_ms = 0;
+    // Control-only construction must not allocate the configured event ring.
+    config.queue_capacity = std::numeric_limits<size_t>::max();
+    auto reporter = std::make_shared<RecordingReporter>();
+    RemoteCacheControlUpdates updates;
+    reporter->replyNextBodyContaining("EVENT_NODE_REGISTER",
+        R"({"header":{"status":{"code":"OK"}},"extra_info":"{\"rtp_remote_cache_enabled\":false}"})", false);
+    std::atomic<size_t> captures{0};
+    KVCMPublisher publisher(config, makeControlContext(), [&] {
+        ++captures;
+        return KVCacheSnapshot{};
+    }, reporter, [&](bool enabled) { updates.apply(enabled); });
+    ASSERT_TRUE(publisher.start());
+    ASSERT_TRUE(updates.waitFor(1));
+    EXPECT_EQ(updates.values(), (std::vector<bool>{false}));
+    EXPECT_EQ(publisher.tryPublish({KVCacheEventType::BLOCK_ADD, 42, 0}), PublishResult::DISABLED);
+    reporter->replyNextBodiesContaining("EVENT_HEARTBEAT",
+        R"({"header":{"status":{"code":"OK"}},"snapshot_required":true,
+            "extra_info":"{\"rtp_remote_cache_enabled\":true}"})", false, 3);
+    ASSERT_TRUE(updates.waitFor(2));
+    ASSERT_TRUE(reporter->waitForReplyConsumed(kAsyncTestTimeout));
+    reporter->replyNextBodyContaining("EVENT_HEARTBEAT",
+        R"({"header":{"status":{"code":"OK"}},"extra_info":"{\"rtp_remote_cache_enabled\":false}"})", false);
+    ASSERT_TRUE(updates.waitFor(5));
+    publisher.stop();
+    EXPECT_FALSE(updates.values().back());
+    EXPECT_EQ(captures.load(), 0u);
+    EXPECT_EQ(publisher.status().queue_size, 0u);
+    EXPECT_EQ(publisher.status().accepted_count, 0u);
+    EXPECT_EQ(publisher.status().dropped_count, 0u);
+    const auto requests = reporter->requests();
+    ASSERT_FALSE(requests.empty());
+    EXPECT_NE(requests.back().body.find("EVENT_HOST_DOWN"), std::string::npos);
+    for (const auto& request : requests) {
+        EXPECT_EQ(request.body.find("EVENT_BLOCK_"), std::string::npos);
+        rapidjson::Document body;
+        body.Parse(request.body.c_str());
+        ASSERT_FALSE(body.HasParseError());
+        if (request.route == "/api/registerInstance") {
+            EXPECT_STREQ(body["instance_id"].GetString(), "test_instance");
+            EXPECT_EQ(body["location_spec_infos"].Size(), 2u);
+            EXPECT_EQ(body["location_spec_infos"][0]["size"].GetInt(), 4096);
+            EXPECT_STREQ(body["location_spec_groups"][0]["name"].GetString(), "remote_group");
+            EXPECT_STREQ(body["model_deployment"]["model_name"].GetString(), "remote_model");
+            EXPECT_TRUE(body.HasMember("trace_id"));
+        } else if (request.body.find("EVENT_NODE_REGISTER") != std::string::npos) {
+            EXPECT_TRUE(body["events"][0]["node_register"]["mediums"].Empty());
+        }
+    }
+}
+
+TEST(KVCacheEventPublisherTest, ControlOnlyReregistersWithoutSnapshotProvider) {
+    KVCacheEventPublisherConfig config;
+    config.publish_cache_events = false;
+    config.heartbeat_interval_ms = 5;
+    config.retry_interval_ms = 1;
+    auto reporter = std::make_shared<RecordingReporter>();
+    reporter->failNextBodyContaining("\"location_spec_infos\"");
+    KVCMPublisher publisher(config, makeControlContext(), {}, reporter);
+    ASSERT_TRUE(publisher.start());
+    ASSERT_TRUE(reporter->waitForBodyCount("\"location_spec_infos\"", 2, kAsyncTestTimeout));
+    ASSERT_TRUE(reporter->waitForBody("EVENT_HEARTBEAT", kAsyncTestTimeout));
+    reporter->replyNextBodyContaining("EVENT_HEARTBEAT",
+        R"({"header":{"status":{"code":"NODE_NOT_REGISTERED"}}})", false);
+    ASSERT_TRUE(reporter->waitForBodyCount("\"location_spec_infos\"", 3, kAsyncTestTimeout));
+    ASSERT_TRUE(reporter->waitForBodyCount("EVENT_NODE_REGISTER", 2, kAsyncTestTimeout));
+    ASSERT_TRUE(waitForState(publisher, PublisherState::READY, kAsyncTestTimeout));
+    publisher.stop();
+    for (const auto& request : reporter->requests()) {
+        EXPECT_EQ(request.body.find("EVENT_BLOCK_"), std::string::npos);
+    }
+}
+
+TEST(KVCacheEventPublisherTest, ControlOnlyRejectsInvalidOrMismatchedRegistration) {
+    KVCacheEventPublisherConfig config;
+    config.publish_cache_events = false;
+    for (const auto* request : {"broken", "{}",
+         R"({"instance_id":"other","instance_group":"test_group","location_spec_infos":[{"name":"s"}]})",
+         R"({"instance_id":"test_instance","instance_group":"other","location_spec_infos":[{"name":"s"}]})",
+         R"({"instance_id":"test_instance","instance_group":"test_group","location_spec_infos":[]})"}) {
+        auto context = makeControlContext();
+        context.register_instance_request = request;
+        auto reporter = std::make_shared<RecordingReporter>();
+        KVCMPublisher publisher(config, context, {}, reporter);
+        EXPECT_FALSE(publisher.start()) << request;
+        publisher.stop();
+        EXPECT_TRUE(reporter->requests().empty());
+    }
+}
+
+TEST(KVCacheEventPublisherTest, RemoteCacheControlUsesRegistrationAndHeartbeatsWhileEventsContinue) {
+    KVCacheEventPublisherConfig config;
+    config.heartbeat_interval_ms = 5;
+    auto reporter = std::make_shared<RecordingReporter>();
+    RemoteCacheControlUpdates updates;
+    reporter->replyNextBodyContaining("\"location_spec_infos\"",
+        R"({"header":{"status":{"code":"OK"}},"extra_info":"{\"rtp_remote_cache_enabled\":false}"})", false);
+    KVCMPublisher publisher(config, makeContext(), [] { return KVCacheSnapshot{}; }, reporter,
+                             [&](bool enabled) { updates.apply(enabled); });
+    ASSERT_TRUE(publisher.start());
+    ASSERT_TRUE(updates.waitFor(1));
+    EXPECT_EQ(updates.values(), std::vector<bool>{false});
+    ASSERT_TRUE(reporter->waitForBody("EVENT_BLOCK_SNAPSHOT", kAsyncTestTimeout));
+    reporter->replyNextBodyContaining("EVENT_BLOCK_ADD",
+        R"({"header":{"status":{"code":"OK"}},"extra_info":"{\"rtp_remote_cache_enabled\":true}"})", false);
+    ASSERT_EQ(PublishResult::ACCEPTED, publisher.tryPublish({KVCacheEventType::BLOCK_ADD, 42, 0}));
+    ASSERT_TRUE(reporter->waitForReplyConsumed(kAsyncTestTimeout));
+    ASSERT_TRUE(reporter->waitForBodyCount("EVENT_HEARTBEAT", 3, kAsyncTestTimeout));
+    EXPECT_EQ(updates.values(), std::vector<bool>{false});
+
+    reporter->replyNextBodyContaining("EVENT_HEARTBEAT",
+        R"({"header":{"status":{"code":"OK"}},"extra_info":"{\"rtp_remote_cache_enabled\":true}"})", false);
+    ASSERT_TRUE(updates.waitFor(2));
+    reporter->replyNextBodyContaining("EVENT_HEARTBEAT",
+        R"({"header":{"status":{"code":"OK"}},"extra_info":"{\"rtp_remote_cache_enabled\":false}"})", false);
+    ASSERT_TRUE(updates.waitFor(3));
+    publisher.stop();
+    EXPECT_EQ(updates.values(), (std::vector<bool>{false, true, false}));
+    EXPECT_NE(reporter->requests().back().body.find("EVENT_HOST_DOWN"), std::string::npos);
+}
+
+TEST(KVCacheEventPublisherTest, RemoteCacheControlIgnoresFailedHeartbeatsAndInvalidFields) {
+    KVCacheEventPublisherConfig config;
+    config.heartbeat_interval_ms = 5;
+    auto reporter = std::make_shared<RecordingReporter>();
+    RemoteCacheControlUpdates updates;
+    reporter->replyNextBodyContaining("EVENT_NODE_REGISTER",
+        R"({"header":{"status":{"code":"OK"}},"extra_info":"{\"rtp_remote_cache_enabled\":false}"})", false);
+    KVCMPublisher publisher(config, makeContext(), [] { return KVCacheSnapshot{}; }, reporter,
+                             [&](bool enabled) { updates.apply(enabled); });
+    ASSERT_TRUE(publisher.start());
+    ASSERT_TRUE(updates.waitFor(1));
+    const std::vector<std::pair<std::string, bool>> ignored{
+        {R"({"header":{"status":{"code":"OK"}},"extra_info":"{\"rtp_remote_cache_enabled\":true}"})", true},
+        {R"({"header":{"status":{"code":"FAILED"}},"extra_info":"{\"rtp_remote_cache_enabled\":true}"})", false},
+        {R"({"header":{"status":{"code":"OK"}},"extra_info":"{\"rtp_remote_cache_enabled\":\"true\"}"})", false},
+        {R"({"header":{"status":{"code":"OK"}},"extra_info":"broken"})", false},
+    };
+    for (const auto& [response, failure] : ignored) {
+        reporter->replyNextBodyContaining("EVENT_HEARTBEAT", response, failure);
+        ASSERT_TRUE(reporter->waitForReplyConsumed(kAsyncTestTimeout));
+    }
+    reporter->replyNextBodyContaining("EVENT_HEARTBEAT",
+        R"({"header":{"status":{"code":"OK"}},"extra_info":"{\"rtp_remote_cache_enabled\":true}"})", false);
+    ASSERT_TRUE(updates.waitFor(2));
+    publisher.stop();
+    EXPECT_EQ(updates.values(), (std::vector<bool>{false, true}));
+}
+
+class DelayedControlHeartbeatReporter final: public KVCacheEventReporter {
+public:
+    RecordingReporter requests;
+    std::promise<void> heartbeat_entered;
+    std::promise<void> release_heartbeat;
+    std::shared_future<void> released = release_heartbeat.get_future().share();
+
+    bool post(const std::string& route, const std::string& request, std::string& response) noexcept override {
+        requests.post(route, request, response);
+        if (request.find("EVENT_NODE_REGISTER") != std::string::npos) {
+            response = ++registrations_ == 1 ?
+                R"({"header":{"status":{"code":"OK"}},"extra_info":"{\"rtp_remote_cache_enabled\":false}"})" :
+                R"({"header":{"status":{"code":"OK"}},"extra_info":"{\"rtp_remote_cache_enabled\":true}"})";
+        } else if (request.find("EVENT_HEARTBEAT") != std::string::npos && !heartbeat_delayed_.exchange(true)) {
+            response = R"({"header":{"status":{"code":"OK"}},"extra_info":"{\"rtp_remote_cache_enabled\":false}"})";
+            heartbeat_entered.set_value();
+            return released.wait_for(kAsyncTestTimeout) == std::future_status::ready;
+        } else if (request.find("EVENT_BLOCK_ADD") != std::string::npos && !registration_lost_.exchange(true)) {
+            response = R"({"header":{"status":{"code":"NODE_NOT_REGISTERED"}}})";
+        }
+        return true;
+    }
+
+    void release() {
+        if (!released_.exchange(true)) {
+            release_heartbeat.set_value();
+        }
+    }
+
+private:
+    std::atomic<size_t> registrations_{0};
+    std::atomic<bool> heartbeat_delayed_{false};
+    std::atomic<bool> registration_lost_{false};
+    std::atomic<bool> released_{false};
+};
+
+TEST(KVCacheEventPublisherTest, DelayedHeartbeatCannotOverwriteNewRegistrationControl) {
+    KVCacheEventPublisherConfig config;
+    config.heartbeat_interval_ms = 5;
+    config.retry_interval_ms = 1;
+    auto reporter = std::make_shared<DelayedControlHeartbeatReporter>();
+    auto entered = reporter->heartbeat_entered.get_future();
+    RemoteCacheControlUpdates updates;
+    KVCMPublisher publisher(config, makeContext(), [] { return KVCacheSnapshot{}; }, reporter,
+                             [&](bool enabled) { updates.apply(enabled); });
+    struct ReleaseOnExit {
+        std::shared_ptr<DelayedControlHeartbeatReporter> reporter;
+        ~ReleaseOnExit() {
+            reporter->release();
+        }
+    } release_on_exit{reporter};
+    ASSERT_TRUE(publisher.start());
+    ASSERT_TRUE(updates.waitFor(1));
+    ASSERT_EQ(entered.wait_for(kAsyncTestTimeout), std::future_status::ready);
+    ASSERT_EQ(PublishResult::ACCEPTED, publisher.tryPublish({KVCacheEventType::BLOCK_ADD, 99, 0}));
+    ASSERT_TRUE(updates.waitFor(2));
+    reporter->release();
+    ASSERT_TRUE(reporter->requests.waitForBodyCount("EVENT_HEARTBEAT", 3, kAsyncTestTimeout));
+    publisher.stop();
+    EXPECT_EQ(updates.values(), (std::vector<bool>{false, true}));
 }
 
 TEST(KVCacheEventPublisherTest, ParsesSnapshotFeedbackOnSuccessAndFailure) {

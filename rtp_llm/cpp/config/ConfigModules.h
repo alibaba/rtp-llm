@@ -1,5 +1,6 @@
 #pragma once
 #include <cstdint>
+#include <limits>
 #include <optional>
 #include <string>
 #include <sstream>
@@ -191,7 +192,16 @@ struct KVCacheConfig {
     double block_tree_memory_evict_high_watermark_ratio = kDefaultMemoryHighWatermarkRatio;
     double block_tree_disk_evict_low_watermark_ratio    = kDefaultDiskLowWatermarkRatio;
     double block_tree_disk_evict_high_watermark_ratio   = kDefaultDiskHighWatermarkRatio;
-    int    linear_step                                  = 1;  // for linear attention cache reuse
+    // FULL-only per-tier overrides: -1/-1 inherits the shared watermarks.
+    double   block_tree_full_device_evict_low_watermark_ratio  = -1.0;
+    double   block_tree_full_device_evict_high_watermark_ratio = -1.0;
+    double   block_tree_full_memory_evict_low_watermark_ratio  = -1.0;
+    double   block_tree_full_memory_evict_high_watermark_ratio = -1.0;
+    double   block_tree_full_disk_evict_low_watermark_ratio    = -1.0;
+    double   block_tree_full_disk_evict_high_watermark_ratio   = -1.0;
+    int      reuse_cache_tail_blocks                           = std::numeric_limits<int>::max();
+    uint32_t linear_pool_blocks                                = 0;
+    uint32_t swa_pool_blocks                                   = 0;
     // Fields merged from PyKvCacheConfig
     int fp8_kv_cache = 0;
     // "auto" preserves a model-declared recurrent-state dtype. Models
@@ -215,17 +225,18 @@ struct KVCacheConfig {
 
     // DSV4 fixed-allocation pool block count. 0 means the fixed regions
     // (INDEXER_STATE / CSA_STATE / HCA_STATE / SWA_KV) use the normal
-    // linear-step-derived block count.
+    // automatically derived block count.
     uint32_t dsv4_fixed_pool_blocks = 0;
 
     // Optional V4.1 decoder-only SWA override, including reserved block zero.
     uint32_t dsv41_decoder_swa_pool_blocks = 0;
 
-    // Usable HOST SWA blocks per FULL block; does not change checkpoint spacing.
+    // 1.0 follows device pool proportions; other positive values override the
+    // usable HOST SWA blocks per FULL block without changing checkpoint spacing.
     double memory_cache_swa_block_ratio = 1.0;
 
     // Optional DSV4 HCA_STATE pool block count override. 0 means HCA_STATE
-    // follows dsv4_fixed_pool_blocks or the normal linear-step-derived count.
+    // follows dsv4_fixed_pool_blocks or the normal automatically derived count.
     uint32_t dsv4_hca_state_pool_blocks = 0;
 
     // DSV4 fixed-pool residency switch. false = GPU BlockPool; true = pinned
@@ -248,6 +259,7 @@ struct KVCacheConfig {
     std::string kvcm_vipserver_domain                = "";
     std::string kvcm_server_address                  = "";
     std::string kvcm_instance_group                  = "default";
+    int         kvcm_task_timeout_ms                 = 20000;
     int32_t     kvcm_read_backend_type               = 0;  // 0 uses MatchLocation
     int32_t     kvcm_min_replica_count               = 0;  // server interprets 0 as 1
     uint32_t    kvcm_meta_channel_retry_time         = 3;
@@ -263,9 +275,10 @@ struct KVCacheConfig {
     std::string kvcm_instance_id_salt                = "";
     size_t      kvcm_asyncwrapper_thread_num         = 16;
     size_t      kvcm_asyncwrapper_queue_size         = 1000;
-    int         kvcm_get_broadcast_timeout           = 15000;
-    int         kvcm_put_broadcast_timeout           = 15000;
-    std::string kvcm_client_config                   = "";
+    // Retained for parsing compatibility; BTC remote broadcasts inherit the task deadline.
+    int         kvcm_get_broadcast_timeout = 15000;
+    int         kvcm_put_broadcast_timeout = 15000;
+    std::string kvcm_client_config         = "";
     void        insertMultiTaskPromptTokens(std::string task_id, std::vector<int64_t> tokens_id);
     std::string to_string() const;
 };
@@ -384,7 +397,20 @@ struct SpeculativeExecutionConfig {
     int64_t sp_dspark_mask_token_id = -1;
     // True: gamma query rows, including the anchor prediction. False:
     // one conditioning anchor followed by gamma prediction rows.
-    bool        sp_dspark_sample_from_anchor = true;
+    bool sp_dspark_sample_from_anchor = true;
+    // DeepSeek V4.1 only. observe preserves fixed-width sampling; bounded
+    // verifies a confidence-selected prefix using a budget fixed before draw.
+    std::string sp_dspark_confidence_mode        = "off";
+    double      sp_dspark_confidence_temperature = 1.0;
+    // Average draft positions per request (not including the anchor), or -1
+    // for the full gamma budget. Also the cold-start budget in adaptive mode.
+    int64_t sp_dspark_verify_budget = -1;
+    // dense preserves the legacy physical width; packed computes only each
+    // selected prefix and its anchor in DeepSeek V4.1 decode.
+    std::string sp_dspark_verify_mode = "dense";
+    // fixed uses the configured budget; adaptive chooses it from historical
+    // confidence and measured GPU round times before sampling the next round.
+    std::string sp_dspark_verify_budget_mode = "fixed";
     std::string to_string() const;
     size_t      speculativeReserveStep() const;
 
@@ -498,8 +524,9 @@ struct GrammarConfig {
     int         compile_queue_size = 2;
     std::string tokenizer_info_json;
     // Total byte cap split between xgrammar's cache and the engine verdict LRU; <=0 = unlimited.
-    int64_t     compiler_cache_bytes = 2L * 1024L * 1024L * 1024L;
-    // Positive wall-clock budget in ms for a stream's CPU state update; exceeding it disables its grammar.
+    int64_t compiler_cache_bytes = 2L * 1024L * 1024L * 1024L;
+    // Positive wall-clock budget in ms for each CPU MTP verification or committed update.
+    // Each stage tracks its own streak; three consecutive overruns disable grammar for the stream.
     int         update_timeout_ms = 10;
     std::string to_string() const;
 };
@@ -683,7 +710,7 @@ struct GrpcMapsConfig {
 struct GrpcConfig: GrpcMapsConfig {
     /// If > 0, passed to gRPC sync server as ``MAX_POLLERS`` (per completion queue).
     int max_server_pollers = 0;
-    GrpcConfig(){};
+    GrpcConfig() {};
     GrpcConfig(const std::string& json_str);
     std::string to_string() const;
     void        from_json(const std::string& json_str);
@@ -692,7 +719,7 @@ struct GrpcConfig: GrpcMapsConfig {
 /// DashSc gRPC (predict_v2.proto) Python client/server channel options.
 struct DashScGrpcConfig: GrpcMapsConfig {
     int max_server_workers = 4;
-    DashScGrpcConfig(){};
+    DashScGrpcConfig() {};
     DashScGrpcConfig(const std::string& json_str);
     std::string to_string() const;
     void        from_json(const std::string& json_str);

@@ -29,7 +29,6 @@ _TESTS = [
     "test_attention_v41_request_rows",
     "test_attention_v41_sparse_selection",
     "test_v41_attention_jit_warmup",
-    "test_v41_batched_producer",
     "test_v41_candidate_deepselect",
     "test_v41_decode_attention_fusion",
     "test_v41_decode_device_metadata",
@@ -37,13 +36,13 @@ _TESTS = [
     "test_v41_decode_indexer",
     "test_v41_decode_topk",
     "test_v41_decode_preprocessing",
+    "test_v41_packed_verify",
     "test_v41_deepselect",
     "test_v41_fp4_codec",
     "test_v41_fp4_transport",
     "test_v41_global_overlap",
     "test_v41_merge_contracts",
     "test_v41_host_swa_metadata",
-    "test_v41_grouped_gemm",
     "test_v41_grouped_prefill_score",
     "test_v41_indexer_q_fusion",
     "test_v41_mega_attention",
@@ -78,6 +77,7 @@ _TESTS = [
 # The selection chain supports both SM100 ARM and SM100/SM103 x86.
 _X86_TESTS = [
     "test_v41_candidate_deepselect",
+    "test_v41_packed_verify",
     "test_v41_merge_contracts",
     "test_v41_attention_jit_warmup",
     "test_v41_owned_pool",
@@ -136,7 +136,7 @@ _X86_TESTS = [
         srcs = [
             name + ".py",
             "//rtp_llm/test/pytest:pytest_main.py",
-        ] + (["test_v41_prefill_indexer.py"] if name == "test_v41_prefill_indexer_schedule" else []),
+        ],
         main = "//rtp_llm/test/pytest:pytest_main.py",
         args = ["--cuda-devices", "1", "$(location :" + name + ".py)"],
         deps = [
@@ -148,7 +148,7 @@ _X86_TESTS = [
         tags = ["dsv41_cuda13"],
         legacy_create_init = 0,
     )
-    for name in ["test_v41_prefill_indexer", "test_v41_prefill_indexer_schedule", "test_attention_v41_prefill_selection"]
+    for name in ["test_v41_prefill_indexer", "test_attention_v41_prefill_selection"]
 ]
 
 
@@ -188,16 +188,31 @@ cuda13_sm100_py_test(
 )
 
 
+
 cuda13_sm100_py_test(
-    name = "test_attention_v41_cp_single_nccl",
+    name = "test_v41_swa_packed",
+    srcs = ["test_v41_swa_packed.py", "//rtp_llm/test/pytest:pytest_main.py"],
+    main = "//rtp_llm/test/pytest:pytest_main.py",
+    args = ["--cuda-devices", "1", "$(location :test_v41_swa_packed.py)"],
+    deps = [
+        "//rtp_llm:testlib",
+        "//rtp_llm/models_py:modules",
+        test_requirement("pytest"),
+    ],
+    tags = ["dsv41_cuda13"],
+    legacy_create_init = 0,
+)
+
+
+cuda13_sm100_py_test(
+    name = "test_v41_swa_packed_cp4_nccl",
     srcs = [
-        "test_attention_v41_cp_single_nccl.py",
-        "test_attention_v41_cp_mixed_nccl.py",
-        "test_attention_v41_cp_raw_groups.py",
+        "test_v41_swa_packed_cp4_nccl.py",
+        "test_v41_swa_packed.py",
         "//rtp_llm/test/pytest:pytest_main.py",
     ],
     main = "//rtp_llm/test/pytest:pytest_main.py",
-    args = ["--cuda-devices", "4", "$(location :test_attention_v41_cp_single_nccl.py)"],
+    args = ["--cuda-devices", "4", "$(location :test_v41_swa_packed_cp4_nccl.py)"],
     gpu_count = 4,
     deps = [
         "//rtp_llm:testlib",
@@ -274,7 +289,7 @@ cuda13_sm100_py_test(
         tags = ["dsv41_cuda13"],
         legacy_create_init = 0,
     )
-    for name in ["test_v41_deepgemm_producers", "test_v41_qkv_rope_cache", "test_v41_global_overlap"]
+    for name in ["test_v41_deepgemm_producers", "test_v41_qkv_rope_cache", "test_v41_swa_kv", "test_v41_global_overlap", "test_v41_full_projection"]
 ]
 
 dsv4_sm100_py_test(

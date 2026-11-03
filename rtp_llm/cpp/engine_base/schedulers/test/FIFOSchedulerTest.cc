@@ -2744,10 +2744,9 @@ TEST_F(FIFOSchedulerTest, testMultiSequenceAdmissionMatchesPhysicalFreeBlockWate
     ASSERT_EQ(min_free_blocks, free_before_admission - static_cast<size_t>(estimated_peak));
 }
 
-TEST_F(FIFOSchedulerTest, testHybridAdmissionAllowsUnderestimateAtDifferentBlockPeak) {
-    // The logical-token peak is at t=0, where the block estimate is 13. The short stream's physical
-    // block peak is 16 at t=9 because Hybrid block boundaries do not necessarily follow token volume.
-    // Admission intentionally accepts this underestimate instead of scanning every endpoint.
+TEST_F(FIFOSchedulerTest, testHybridAdmissionUsesTailOnlyLinearPeak) {
+    // At t=0 the two requests need 13 blocks. Without periodic Linear checkpoints,
+    // the long-lived request's later peak is only 13 blocks.
     auto cache_config = test::makeSimpleHybridMhaCacheConfig(
         /*layer_num=*/4, /*block_num=*/64, /*tokens_per_block=*/1, rtp_llm::DataType::TYPE_FP16);
     auto cache_manager = std::make_shared<KVCacheManager>(cache_config);
@@ -2784,7 +2783,7 @@ TEST_F(FIFOSchedulerTest, testHybridAdmissionAllowsUnderestimateAtDifferentBlock
 
     ASSERT_EQ(long_context_short_lifetime->estimatePeakNeedBlocks(/*remaining_tokens=*/0), 11);
     ASSERT_EQ(short_context_long_lifetime->estimatePeakNeedBlocks(/*remaining_tokens=*/0), 2);
-    ASSERT_EQ(short_context_long_lifetime->estimatePeakNeedBlocks(/*remaining_tokens=*/9), 16);
+    ASSERT_EQ(short_context_long_lifetime->estimatePeakNeedBlocks(/*remaining_tokens=*/9), 13);
 
     scheduler.buildAdmissionPeakState();
     ASSERT_TRUE(scheduler.tryAddToAdmissionPeakState(

@@ -23,6 +23,7 @@ from rtp_llm.openai.renderers.sglang_helpers.entrypoints.openai.protocol import 
 from rtp_llm.openai.renderers.sglang_helpers.function_call.deepseekv41_detector import (
     DeepSeekV41Detector,
 )
+from rtp_llm.openai.renderers.v41_recipe import PromptTokenizer
 
 
 class V41RequestTest(unittest.TestCase):
@@ -142,6 +143,7 @@ class V41OfficialEncodingTest(unittest.TestCase):
         renderer = DeepseekV41Renderer.__new__(DeepseekV41Renderer)
         renderer.encoding_module = renderer._load_encoding_module(str(checkpoint))
         renderer.tokenizer = Tokenizer()
+        renderer.prompt_tokenizer = PromptTokenizer(fast.backend_tokenizer)
         renderer.think_mode = False
         messages = [
             {"role": "system", "content": "First instruction"},

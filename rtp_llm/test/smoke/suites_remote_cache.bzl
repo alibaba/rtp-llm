@@ -56,7 +56,7 @@ def _pace_suites():
     tests.append(_pace_smoke(
         "remote_cache_pace_hybrid_tp2",
         "data/model/qwen3_next/q_r_next_fp8_tp2_long_input_reuse_remote_only.json",
-        "--tp_size 2 --act_type BF16 --seq_size_per_block 2048 --linear_step 2 --reuse_cache 1 --enable_remote_cache 1 --kvcm_put_timeout_ms 17000 --kvcm_get_timeout_ms 17000 --kvcm_get_broadcast_timeout 20000 --kvcm_put_broadcast_timeout 20000" + REMOTE_CACHE_DEVICE_STORE_ARGS,
+        "--tp_size 2 --act_type BF16 --seq_size_per_block 2048 --reuse_cache_tail_blocks 8 --reuse_cache 1 --enable_remote_cache 1 --kvcm_put_timeout_ms 17000 --kvcm_get_timeout_ms 17000 --kvcm_task_timeout_ms 20000" + REMOTE_CACHE_DEVICE_STORE_ARGS,
         gpu_type = "H20_CU13", sleep_time_qr = 20,
     ))
     native.test_suite(name = "smoke_cuda_remote_cache_pace", tests = tests)
@@ -124,7 +124,7 @@ def remote_cache_suites():
                 gpu_type = ["L20_CU13"],
                 kvcm_envs = ["SEQ_SIZE_PER_BLOCK=8", "KVCM_LOG_LEVEL=DEBUG"],
                 sleep_time_qr = 20,
-                smoke_args = "--warm_up 0 --reuse_cache 1 --act_type FP16 --seq_size_per_block 8 --tp_size 2 --enable_remote_cache true --kvcm_put_timeout_ms 12000 --kvcm_get_timeout_ms 12000 --kvcm_get_broadcast_timeout 15000 --kvcm_put_broadcast_timeout 15000" + REMOTE_CACHE_DEVICE_STORE_ARGS,
+                smoke_args = "--warm_up 0 --reuse_cache 1 --act_type FP16 --seq_size_per_block 8 --tp_size 2 --enable_remote_cache true --kvcm_put_timeout_ms 12000 --kvcm_get_timeout_ms 12000 --kvcm_task_timeout_ms 20000" + REMOTE_CACHE_DEVICE_STORE_ARGS,
                 task_info = "data/model/qwen25/q_r_l20_remote_cache_tpsize_2.json",
             ),
             smoke_test(
@@ -135,8 +135,8 @@ def remote_cache_suites():
                 sleep_time_qr = 20,
                 smoke_args = {
                     "frontend": "--max_seq_len 2048 --role_type FRONTEND --warm_up 0",
-                    "prefill": "--warm_up 0  --reuse_cache 1 --role_type PREFILL --act_type FP16 --seq_size_per_block 8 --enable_remote_cache true --kvcm_put_timeout_ms 12000 --kvcm_get_timeout_ms 12000 --kvcm_get_broadcast_timeout 15000 --kvcm_put_broadcast_timeout 15000" + REMOTE_CACHE_DEVICE_STORE_ARGS,
-                    "decode": "--warm_up 0  --reuse_cache 1 --role_type DECODE --act_type FP16 --seq_size_per_block 8 --enable_remote_cache true --load_cache_timeout_ms 120000 --kvcm_put_timeout_ms 12000 --kvcm_get_timeout_ms 12000 --kvcm_get_broadcast_timeout 15000 --kvcm_put_broadcast_timeout 15000" + REMOTE_CACHE_DEVICE_STORE_ARGS,
+                    "prefill": "--warm_up 0  --reuse_cache 1 --role_type PREFILL --act_type FP16 --seq_size_per_block 8 --enable_remote_cache true --kvcm_put_timeout_ms 12000 --kvcm_get_timeout_ms 12000 --kvcm_task_timeout_ms 20000" + REMOTE_CACHE_DEVICE_STORE_ARGS,
+                    "decode": "--warm_up 0  --reuse_cache 1 --role_type DECODE --act_type FP16 --seq_size_per_block 8 --enable_remote_cache true --load_cache_timeout_ms 120000 --kvcm_put_timeout_ms 12000 --kvcm_get_timeout_ms 12000 --kvcm_task_timeout_ms 20000" + REMOTE_CACHE_DEVICE_STORE_ARGS,
                 },
                 task_info = "data/model/qwen25/q_r_l20_remote_cache_pd_sep.json",
             ),

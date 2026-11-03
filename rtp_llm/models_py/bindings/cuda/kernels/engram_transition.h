@@ -1,0 +1,40 @@
+#pragma once
+#include <ATen/ATen.h>
+namespace rtp_llm {
+void engramWkvPost(const at::Tensor& a,
+                   const at::Tensor& sf,
+                   const at::Tensor& weight,
+                   const at::Tensor& weight_sf,
+                   const at::Tensor& x,
+                   const at::Tensor& residual,
+                   const at::Tensor& post,
+                   const at::Tensor& comb,
+                   const at::Tensor& kv,
+                   const at::Tensor& hp);
+void engramGateUpdate(const at::Tensor& hp,
+                      const at::Tensor& kv,
+                      const at::Tensor& qw,
+                      const at::Tensor& kw,
+                      const at::Tensor& mask,
+                      const at::Tensor& updated,
+                      double            eps);
+void engramPre(const at::Tensor& h,
+               const at::Tensor& previous,
+               const at::Tensor& fn,
+               const at::Tensor& scales,
+               const at::Tensor& bases,
+               const at::Tensor& weight,
+               const at::Tensor& partial,
+               const at::Tensor& sqr,
+               const at::Tensor& protocol,
+               const at::Tensor& pre,
+               const at::Tensor& post,
+               const at::Tensor& comb,
+               const at::Tensor& y,
+               const at::Tensor& q,
+               const at::Tensor& sf,
+               double            hc_eps,
+               double            mix_eps,
+               int64_t           iters,
+               double            norm_eps);
+}  // namespace rtp_llm

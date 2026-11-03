@@ -741,10 +741,9 @@ LocalRpcServer::GetCacheStatus(grpc::ServerContext* context, const CacheVersionP
     response->set_total_kv_cache(cache_status.total_kv_cache);
     response->set_block_size(cache_status.block_size);
     response->set_version(cache_status.version);
-    auto* cache_map = response->mutable_cache_keys();
-    for (const auto& key : cache_status.cached_keys) {
-        (*cache_map)[static_cast<int64_t>(key)] = true;
-    }
+    auto* cache_keys = response->mutable_cache_key_list();
+    cache_keys->Resize(static_cast<int>(cache_status.cached_keys.size()), 0);
+    std::copy(cache_status.cached_keys.begin(), cache_status.cached_keys.end(), cache_keys->mutable_data());
     return grpc::Status::OK;
 }
 
@@ -1237,13 +1236,6 @@ LocalRpcServer::CheckHealth(grpc::ServerContext* context, const EmptyPB* request
     return grpc::Status::OK;
 }
 
-grpc::Status LocalRpcServer::UpdateEplbConfig(grpc::ServerContext*, const UpdateEplbConfigRequestPB*, EmptyPB*) {
-    // Frontends on non-root DP ranks cannot publish a controller update.
-    // Reject all online updates until the request has a consistent owner.
-    return grpc::Status(grpc::StatusCode::UNIMPLEMENTED,
-                        "Runtime EPLB configuration updates are disabled; configure EPLB at startup");
-}
-
 void LocalRpcServer::reportWorkerStatusTime(int64_t request_begin_time_us, int64_t request_after_ws_time_us) {
     RpcWorkerStatusMetricsCollector collector;
     collector.qps         = true;
@@ -1310,6 +1302,23 @@ void LocalRpcServer::reportCacheStatusTime(int64_t request_begin_time_us) {
     if (!cache_manager) {
         RTP_LLM_LOG_WARNING("execute function failed, cache manager is null");
         return failure_status(grpc::StatusCode::INTERNAL, "cache manager is null");
+    }
+    FunctionRequestPB bounded_request;
+    if (request->has_remote_request()
+        && (request->remote_request().op() == REMOTE_OPERATION_READ
+            || request->remote_request().op() == REMOTE_OPERATION_WRITE)) {
+        if (request->remote_request().timeout_ms() <= 0) {
+            return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "remote task budget must be positive");
+        }
+        const auto remaining_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            context->deadline() - std::chrono::system_clock::now()).count();
+        if (remaining_ms <= 0) {
+            return grpc::Status(grpc::StatusCode::DEADLINE_EXCEEDED, "remote task expired before execution");
+        }
+        bounded_request.CopyFrom(*request);
+        bounded_request.mutable_remote_request()->set_timeout_ms(
+            std::min<int64_t>(request->remote_request().timeout_ms(), remaining_ms));
+        request = &bounded_request;
     }
     if (!cache_manager->executeFunction(*request, *response)) {
         std::string request_case;

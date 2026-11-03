@@ -12,6 +12,7 @@
 #include <map>
 #include <mutex>
 #include <optional>
+#include <pthread.h>
 #include <rapidjson/document.h>
 #include <rapidjson/stringbuffer.h>
 #include <rapidjson/writer.h>
@@ -110,6 +111,18 @@ KVCMReportFeedback parseKVCMReportFeedback(const std::string& response) {
             }
         }
     }
+    // extra_info is opaque to KVCM. A malformed control field must not turn
+    // an otherwise valid event ACK into a registration/snapshot failure.
+    const char* extra_key = document.HasMember("extra_info") ? "extra_info" :
+                            (document.HasMember("extraInfo") ? "extraInfo" : nullptr);
+    if (extra_key && document[extra_key].IsString()) {
+        rapidjson::Document extra;
+        extra.Parse(document[extra_key].GetString(), document[extra_key].GetStringLength());
+        if (!extra.HasParseError() && extra.IsObject() && extra.HasMember("rtp_remote_cache_enabled")
+            && extra["rtp_remote_cache_enabled"].IsBool()) {
+            feedback.remote_cache_enabled = extra["rtp_remote_cache_enabled"].GetBool();
+        }
+    }
     return feedback;
 }
 
@@ -156,7 +169,8 @@ public:
                 domains_ = {config.vipserver_domain};
             } else {
                 subscriber_ = std::make_unique<kvcm::DirectSubscriber>();
-                domains_ = {config.server_address};
+                domains_ = config.server_addresses.empty() ? std::vector<std::string>{config.server_address} :
+                                                            config.server_addresses;
             }
         }
     }
@@ -329,6 +343,7 @@ private:
         curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
         curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT_MS, static_cast<long>(request_timeout_ms_));
         curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, static_cast<long>(request_timeout_ms_));
+        curl_easy_setopt(curl, CURLOPT_EXPECT_100_TIMEOUT_MS, 0L);
         curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
         curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, appendCurlResponse);
         curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response);
@@ -375,6 +390,20 @@ void writeString(JsonWriter& writer, const char* key, const std::string& value) 
 }
 
 std::string buildRegisterInstanceRequest(const KVCacheEventPublisherContext& context, const std::string& trace_id) {
+    if (!context.register_instance_request.empty()) {
+        rapidjson::Document request;
+        request.Parse(context.register_instance_request.c_str());
+        auto& allocator = request.GetAllocator();
+        if (request.HasMember("trace_id")) {
+            request["trace_id"].SetString(trace_id.c_str(), allocator);
+        } else {
+            request.AddMember("trace_id", rapidjson::Value(trace_id.c_str(), allocator), allocator);
+        }
+        rapidjson::StringBuffer buffer;
+        JsonWriter writer(buffer);
+        request.Accept(writer);
+        return buffer.GetString();
+    }
     rapidjson::StringBuffer buffer;
     JsonWriter              writer(buffer);
     writer.StartObject();
@@ -511,7 +540,8 @@ enum class ControlEventType {
 };
 
 std::string
-buildControlReport(const KVCacheEventPublisherContext& context, const std::string& trace_id, ControlEventType type) {
+buildControlReport(const KVCacheEventPublisherContext& context, const std::string& trace_id, ControlEventType type,
+                   bool publish_cache_events = true) {
     rapidjson::StringBuffer buffer;
     JsonWriter              writer(buffer);
     writeReportHeader(writer, context, trace_id);
@@ -529,7 +559,9 @@ buildControlReport(const KVCacheEventPublisherContext& context, const std::strin
             writer.StartObject();
             writer.Key("mediums");
             writer.StartArray();
-            writer.String("hbm");
+            if (publish_cache_events) {
+                writer.String("hbm");
+            }
             writer.EndArray();
             writer.EndObject();
             break;
@@ -595,21 +627,26 @@ public:
     Impl(KVCacheEventPublisherConfig           config,
          KVCacheEventPublisherContext          context,
          KVCacheSnapshotProvider               snapshot_provider,
-         std::shared_ptr<KVCacheEventReporter> reporter):
+         std::shared_ptr<KVCacheEventReporter> reporter,
+         RemoteCacheControl                   remote_cache_control):
         config_(std::move(config)),
         context_(std::move(context)),
         snapshot_provider_(std::move(snapshot_provider)),
         reporter_(std::move(reporter)),
-        queue_(config_.queue_capacity) {
+        remote_cache_control_(std::move(remote_cache_control)),
+        queue_(config_.publish_cache_events ? config_.queue_capacity : 1) {
         if (reporter_) {
             snapshot_reporter_ = reporter_;
         } else if (!config_.manager_endpoint.empty()
-                   || (config_.enable_vipserver ? !config_.vipserver_domain.empty() : !config_.server_address.empty())) {
+                   || (config_.enable_vipserver ? !config_.vipserver_domain.empty() :
+                       (!config_.server_address.empty() || !config_.server_addresses.empty()))) {
             auto resolver = std::make_shared<KVCMEndpointResolver>(config_, context_.instance_id);
             reporter_ =
                 std::make_shared<CurlKVCacheEventReporter>(resolver, config_.request_timeout_ms);
-            snapshot_reporter_ =
-                std::make_shared<CurlKVCacheEventReporter>(resolver, config_.snapshot_timeout_ms);
+            if (config_.publish_cache_events) {
+                snapshot_reporter_ =
+                    std::make_shared<CurlKVCacheEventReporter>(resolver, config_.snapshot_timeout_ms);
+            }
         }
     }
 
@@ -644,8 +681,10 @@ public:
         try {
             worker_           = std::thread(&Impl::workerLoop, this);
             heartbeat_worker_ = std::thread(&Impl::heartbeatLoop, this);
-            snapshot_worker_  = std::thread(&Impl::snapshotLoop, this);
-            snapshot_sender_  = std::thread(&Impl::snapshotSendLoop, this);
+            if (config_.publish_cache_events) {
+                snapshot_worker_  = std::thread(&Impl::snapshotLoop, this);
+                snapshot_sender_  = std::thread(&Impl::snapshotSendLoop, this);
+            }
         } catch (const std::exception& e) {
             {
                 std::lock_guard<std::mutex> lock(snapshot_mu_);
@@ -677,6 +716,9 @@ public:
     }
 
     PublishResult tryPublish(KVCacheEvent event) noexcept {
+        if (!config_.publish_cache_events) {
+            return PublishResult::DISABLED;
+        }
         if (!started_.load(std::memory_order_relaxed) || stopping_.load(std::memory_order_relaxed)) {
             return PublishResult::NOT_RUNNING;
         }
@@ -749,6 +791,18 @@ public:
 
 private:
     bool isConfigValid() const {
+        if (!config_.publish_cache_events) {
+            rapidjson::Document request;
+            request.Parse(context_.register_instance_request.c_str());
+            return reporter_ && !context_.instance_group.empty() && !context_.instance_id.empty()
+                   && !context_.host_ip_port.empty() && !request.HasParseError() && request.IsObject()
+                   && request.HasMember("instance_id") && request["instance_id"].IsString()
+                   && context_.instance_id == request["instance_id"].GetString()
+                   && request.HasMember("instance_group") && request["instance_group"].IsString()
+                   && context_.instance_group == request["instance_group"].GetString()
+                   && request.HasMember("location_spec_infos") && request["location_spec_infos"].IsArray()
+                   && !request["location_spec_infos"].Empty();
+        }
         for (auto it = context_.specs.begin(); it != context_.specs.end(); ++it) {
             if (it->name.empty() || it->location_uri.empty()
                 || std::any_of(context_.specs.begin(), it, [&](const auto& spec) { return spec.name == it->name; })) {
@@ -776,6 +830,9 @@ private:
     }
 
     void requestSnapshot(uint64_t generation) {
+        if (!config_.publish_cache_events) {
+            return;
+        }
         {
             std::lock_guard<std::mutex> lock(snapshot_mu_);
             if (stopping_.load(std::memory_order_relaxed) || !registered_.load(std::memory_order_acquire)
@@ -787,12 +844,23 @@ private:
         snapshot_cv_.notify_all();
     }
 
+    void applyRemoteCacheControl(const detail::KVCMReportFeedback& feedback) noexcept {
+        if (feedback.remote_cache_enabled.has_value() && remote_cache_control_) {
+            try {
+                remote_cache_control_(*feedback.remote_cache_enabled);
+            } catch (...) {
+                RTP_LLM_LOG_WARNING("KVCMPublisher remote cache control callback failed");
+            }
+        }
+    }
+
     bool observeReportResponse(const detail::KVCMReportFeedback& feedback, bool success, uint64_t generation,
-                               bool normal_ack = false) {
+                               bool normal_ack = false, bool apply_remote_control = false) {
         const bool acknowledged = success && feedback.valid && feedback.ok;
         {
             std::lock_guard<std::mutex> lock(snapshot_mu_);
-            if (generation != registration_generation_.load(std::memory_order_acquire)) {
+            if (stopping_.load(std::memory_order_relaxed)
+                || generation != registration_generation_.load(std::memory_order_acquire)) {
                 return false;
             }
             // An unknown transport outcome does not prove that registration was lost.
@@ -801,6 +869,9 @@ private:
                 registered_.store(false, std::memory_order_release);
             } else if (acknowledged && normal_ack) {
                 refreshNormalAckDeadline();
+            }
+            if (acknowledged && apply_remote_control) {
+                applyRemoteCacheControl(feedback);
             }
         }
         if (feedback.registration_required) {
@@ -823,10 +894,17 @@ private:
         if (!reporter_->post("/api/registerInstance", buildRegisterInstanceRequest(context_, trace_id), response)) {
             return false;
         }
+        const auto registration_feedback = detail::parseKVCMReportFeedback(response);
+        if (!registration_feedback.valid || !registration_feedback.ok) {
+            return false;
+        }
         trace_id = nextTraceId("node-register");
         const bool success = reporter_->post(
-            "/api/reportEvent", buildControlReport(context_, trace_id, ControlEventType::NODE_REGISTER), response);
-        if (!observeReportResponse(detail::parseKVCMReportFeedback(response), success,
+            "/api/reportEvent",
+            buildControlReport(context_, trace_id, ControlEventType::NODE_REGISTER, config_.publish_cache_events),
+            response);
+        const auto node_feedback = detail::parseKVCMReportFeedback(response);
+        if (!observeReportResponse(node_feedback, success,
                                    registration_generation_.load(std::memory_order_acquire))) {
             return false;
         }
@@ -836,9 +914,16 @@ private:
         }
         {
             std::lock_guard<std::mutex> lock(snapshot_mu_);
+            if (stopping_.load(std::memory_order_relaxed)) {
+                return false;
+            }
             registration_generation_.fetch_add(1, std::memory_order_release);
+            // NODE_REGISTER is newer than RegisterInstance. Prefer its value
+            // when present, and publish before the heartbeat worker can run.
+            applyRemoteCacheControl(node_feedback.remote_cache_enabled.has_value() ? node_feedback :
+                                                                                     registration_feedback);
             snapshot_report_.reset();
-            snapshot_requested_ = true;
+            snapshot_requested_ = config_.publish_cache_events;
             registered_.store(true, std::memory_order_release);
         }
         registered_once_.store(true, std::memory_order_relaxed);
@@ -848,6 +933,7 @@ private:
     }
 
     void snapshotLoop() noexcept {
+        pthread_setname_np(pthread_self(), "kvcm_snapshot");
         const auto interval = std::chrono::milliseconds(config_.snapshot_interval_ms);
         auto next_snapshot = std::chrono::steady_clock::now();
         while (!stopping_.load(std::memory_order_relaxed)) {
@@ -902,6 +988,7 @@ private:
     }
 
     void snapshotSendLoop() noexcept {
+        pthread_setname_np(pthread_self(), "kvcm_snap_send");
         while (!stopping_.load(std::memory_order_relaxed)) {
             SnapshotReport report;
             {
@@ -975,12 +1062,12 @@ private:
         const bool success = reporter_->post(
             "/api/reportEvent", buildControlReport(context_, trace_id, ControlEventType::HEARTBEAT), response);
         const auto feedback = detail::parseKVCMReportFeedback(response);
-        if (!observeReportResponse(feedback, success, generation, /*normal_ack=*/true)) {
+        if (!observeReportResponse(feedback, success, generation, /*normal_ack=*/true, /*apply_remote_control=*/true)) {
             return false;
         }
         // Deliver a repeated heartbeat advisory once per consecutive streak,
         // as in the Subscriber. A false response or new registration rearms it.
-        if (feedback.snapshot_required && !heartbeat_snapshot_signal_delivered_) {
+        if (config_.publish_cache_events && feedback.snapshot_required && !heartbeat_snapshot_signal_delivered_) {
             requestSnapshot(generation);
         }
         heartbeat_snapshot_signal_delivered_ = feedback.snapshot_required;
@@ -988,6 +1075,7 @@ private:
     }
 
     void heartbeatLoop() noexcept {
+        pthread_setname_np(pthread_self(), "kvcm_heartbeat");
         const auto heartbeat_interval = std::chrono::milliseconds(std::max(config_.heartbeat_interval_ms, 1));
         size_t consecutive_failures = 0;
         while (!stopping_.load(std::memory_order_relaxed)) {
@@ -1053,6 +1141,7 @@ private:
     }
 
     void workerLoop() noexcept {
+        pthread_setname_np(pthread_self(), "kvcm_events");
         const auto    base_retry_interval   = std::chrono::milliseconds(std::max(config_.retry_interval_ms, 1));
         const int64_t max_retry_interval_ms = base_retry_interval.count() >= 30000 ?
                                                   base_retry_interval.count() :
@@ -1082,6 +1171,12 @@ private:
                         continue;
                     }
                     retry_interval = base_retry_interval;
+                }
+                if (!config_.publish_cache_events) {
+                    queue_.waitForStopOrInterrupt(
+                        std::chrono::milliseconds(std::max(config_.heartbeat_interval_ms, 1)),
+                        [this] { return !registered_.load(std::memory_order_acquire); });
+                    continue;
                 }
                 auto batch = queue_.waitPop(config_.report_batch_size,
                                             std::chrono::milliseconds(std::max(config_.flush_interval_ms, 1)));
@@ -1130,6 +1225,7 @@ private:
     KVCacheEventPublisherContext          context_;
     KVCacheSnapshotProvider               snapshot_provider_;
     std::shared_ptr<KVCacheEventReporter> reporter_;
+    RemoteCacheControl                   remote_cache_control_;
     std::shared_ptr<KVCacheEventReporter> snapshot_reporter_;
     detail::KVCacheEventQueue             queue_;
     std::thread                           worker_;
@@ -1164,9 +1260,11 @@ private:
 KVCMPublisher::KVCMPublisher(KVCacheEventPublisherConfig           config,
                              KVCacheEventPublisherContext          context,
                              KVCacheSnapshotProvider               snapshot_provider,
-                             std::shared_ptr<KVCacheEventReporter> reporter):
+                             std::shared_ptr<KVCacheEventReporter> reporter,
+                             RemoteCacheControl                   remote_cache_control):
     impl_(std::make_unique<Impl>(
-        std::move(config), std::move(context), std::move(snapshot_provider), std::move(reporter))) {}
+        std::move(config), std::move(context), std::move(snapshot_provider), std::move(reporter),
+        std::move(remote_cache_control))) {}
 
 KVCMPublisher::~KVCMPublisher() = default;
 

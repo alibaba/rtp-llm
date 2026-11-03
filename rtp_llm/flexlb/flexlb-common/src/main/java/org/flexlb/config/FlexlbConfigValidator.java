@@ -113,6 +113,8 @@ final class FlexlbConfigValidator {
     }
 
     static void validate(FlexlbConfig config) {
+        require(config.getEngineGrpc().getKvCacheMaxInboundMessageBytes() > 0,
+                "engineGrpc.kvCacheMaxInboundMessageBytes", "must be positive");
         require(config.getSchemaVersion() == FlexlbConfig.CURRENT_SCHEMA_VERSION,
                 "schemaVersion", "must equal " + FlexlbConfig.CURRENT_SCHEMA_VERSION);
         require(config.getScheduler() != null, "scheduler", "is required");
@@ -141,6 +143,7 @@ final class FlexlbConfigValidator {
         nonNegative(grpc.getMaxReceivingControlRequests(), "grpcServer.maxReceivingControlRequests");
         positive(grpc.getReceiveTimeoutMs(), "grpcServer.receiveTimeoutMs");
         positive(grpc.getShutdownQuietPeriodMs(), "grpcServer.shutdownQuietPeriodMs");
+        nonNegative(grpc.getPermitKeepAliveTimeMs(), "grpcServer.permitKeepAliveTimeMs");
         require(grpc.getExecutorMaxSize() >= grpc.getExecutorCoreSize(),
                 "grpcServer.executorMaxSize", "must be at least executorCoreSize");
     }

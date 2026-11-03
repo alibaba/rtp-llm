@@ -1,6 +1,13 @@
 load("//:def.bzl", "copts")
 load("//bazel:arch_select.bzl", "no_block_copy_link_deps", "torch_deps")
 
+cc_library(
+    name = "storage_completion_admission",
+    hdrs = ["storage_backend/StorageCompletionAdmission.h"],
+    copts = copts(),
+    visibility = ["//visibility:public"],
+)
+
 # Leaf pool target: DeviceBlockPool owns its backing and inherits the common
 # IBlockPool lifecycle. Keeping this target below allocator/group targets avoids
 # a cycle with the full block_tree_cache library.
@@ -22,6 +29,7 @@ cc_library(
         "//rtp_llm/cpp/cache:memory_layout_strategy",
         "//rtp_llm/cpp/disaggregate/cache_store:cache_store_interface",
         "//rtp_llm/cpp/utils:core_utils",
+        "//rtp_llm/cpp/utils:physical_decode_origins",
     ] + torch_deps() + select({
         "@//:using_cuda": [
             "//rtp_llm/models_py/bindings/cuda:cuda_host_utils",
@@ -66,6 +74,7 @@ cc_library(
         "storage_backend/StorageBackendExecutor.cc",
         "BlockTreeCacheFactory.cc",
         "BlockTreeCacheMetricsReporter.cc",
+        "CacheStageMetrics.cc",
         "group_set/GroupSetResource.cc",
         "evict/BlockTreeEvictor.cc",
         "evict/EvictionTaskRunner.cc",
@@ -108,6 +117,7 @@ cc_library(
         "diagnostic/FullPrefixInvariantScanner.h",
         "BlockTreeCacheFactory.h",
         "BlockTreeCacheMetricsReporter.h",
+        "CacheStageMetrics.h",
         "group_set/GroupSetResource.h",
         "evict/BlockTreeEvictor.h",
         "evict/EvictionTaskRunner.h",
@@ -142,6 +152,8 @@ cc_library(
         "transfer/HostDiskTransferExecutor.h",
         "transfer/DeviceDiskTransferExecutor.h",
         "transfer/TransferTypes.h",
+        "transfer/TransferStageTimer.h",
+        "transfer/CompletionStage.h",
         "block_pool/DiskBlockIO.h",
         "block_pool/DiskBlockPool.h",
         "block_pool/DiskMountGuard.h",
@@ -157,6 +169,7 @@ cc_library(
         ":block_tree_task_pool",
         ":crc_dump_writer",
         ":device_block_pool",
+        ":storage_completion_admission",
         "//rtp_llm/cpp/cache:batch_kv_cache_resource",
         "//rtp_llm/cpp/cache:cache_group_type",
         "//rtp_llm/cpp/cache:cache_types",
@@ -170,6 +183,7 @@ cc_library(
         "//rtp_llm/cpp/metrics:metrics",
         "//rtp_llm/cpp/utils:core_utils",
         "//rtp_llm/models_py/bindings:crc_block_copy",
+        "//rtp_llm/cpp/utils:async_profiling_scope",
         "//rtp_llm/models_py/bindings:no_block_copy_hdr",
         "@havenask//aios/autil:thread",
     ] + torch_deps() + no_block_copy_link_deps() + select({

@@ -3,6 +3,7 @@
 #include "rtp_llm/cpp/cache/test/TestLayoutSpec.h"
 
 #include <chrono>
+#include <atomic>
 #include <condition_variable>
 #include <cstdint>
 #include <cstdlib>
@@ -243,12 +244,12 @@ static void expectDsv4SwaAllocatedBlocks(const CacheConfig&      config,
                                          const std::string&      tag,
                                          const std::string&      label,
                                          bool                    enable_reuse_cache = false) {
-    const int  active_tail_blocks = dsv4ActiveTailBlocks(config, tag);
-    const int  tail_begin         = std::max(static_cast<int>(blocks.size()) - active_tail_blocks, 0);
-    const int  linear_step        = std::max(1, config.linear_step);
-    const bool effective_reuse    = enable_reuse_cache && !isHcaStateGroup(config, tag);
+    const int tail_blocks = enable_reuse_cache && config.group(tag).policy.enable_prefix_reuse ?
+                                config.reuse_cache_tail_blocks :
+                                dsv4ActiveTailBlocks(config, tag);
+    const int tail_begin  = std::max(static_cast<int>(blocks.size()) - tail_blocks, 0);
     for (int i = 0; i < static_cast<int>(blocks.size()); ++i) {
-        const bool should_allocate = i >= tail_begin || (effective_reuse && ((i + 1) % linear_step == 0));
+        const bool should_allocate = i >= tail_begin;
         if (should_allocate) {
             EXPECT_FALSE(isNullBlockIdx(blocks[static_cast<size_t>(i)])) << label << " group " << tag << " pos " << i;
         } else {
@@ -356,12 +357,19 @@ static void assertDsv4RegionPatternEq(const std::shared_ptr<KVCacheManager>& man
 
 class EventPublicationReporter final: public KVCacheEventReporter {
 public:
+    bool deliver_remote_control{false};
+    std::atomic<bool> remote_enabled{true};
+
     bool post(const std::string& route, const std::string& request, std::string& response) noexcept override {
         {
             std::lock_guard<std::mutex> lock(mutex_);
             requests_.emplace_back(route, request);
         }
         response = R"({"header":{"status":{"code":"OK"}}})";
+        if (deliver_remote_control) {
+            response = std::string(R"({"header":{"status":{"code":"OK"}},"extra_info":"{\"rtp_remote_cache_enabled\":)")
+                       + (remote_enabled.load() ? "true" : "false") + R"(}"})";
+        }
         cv_.notify_all();
         return true;
     }
@@ -434,6 +442,58 @@ static KVCacheConfig makeEventPublicationRuntimeConfig() {
     config.kv_cache_event_instance_id = "event_wiring_instance";
     config.kv_cache_event_host_ip_port = "127.0.0.1:19000";
     return config;
+}
+
+class EventControlStorageBackend final: public StorageBackend {
+protected:
+    bool initImpl() override {
+        return true;
+    }
+    StorageMatchResult matchImpl(const StorageRequest& request) override {
+        return {request.local_matched_blocks_num, nullptr};
+    }
+    void readImpl(const StorageRequest&, const std::shared_ptr<StorageBackendMatchMeta>&) override {}
+    void writeImpl(const StorageRequest&) override {}
+};
+
+TEST_F(KVCacheManagerTest, DisabledEventsWithoutRemoteBackendDoNotCreateControlPublisher) {
+    auto config = makeSimpleMhaCacheConfig(4, 128, 1, DataType::TYPE_FP16);
+    KVCacheManager manager(config, false, nullptr, KVCacheConfig{});
+    auto full = std::make_shared<FullGroupSet>(
+        std::vector<DeviceBlockPoolPtr>{block_tree_cache_test::makeStructuralDevicePool(0)}, nullptr, nullptr);
+    full->initialize(0, config.topologyPtr(), {"default"});
+    manager.block_tree_cache_ = block_tree_cache_test::makeBlockTreeCacheForTest({full});
+    auto reporter = std::make_shared<EventPublicationReporter>();
+    manager.initCacheEventPublisher(reporter);
+    EXPECT_EQ(manager.cache_event_publisher_, nullptr);
+    EXPECT_EQ(manager.block_tree_cache_->tree()->event_publisher_, nullptr);
+}
+
+TEST_F(KVCacheManagerTest, EventControlUpdatesRemoteBackendThroughRegistrationAndHeartbeat) {
+    auto config = makeSimpleMhaCacheConfig(4, 128, 1, DataType::TYPE_FP16);
+    RuntimeConfig runtime;
+    runtime.model_name = "event_control_model";
+    KVCacheManager manager(config, false, nullptr, makeEventPublicationRuntimeConfig(), {}, runtime);
+    auto full = std::make_shared<FullGroupSet>(
+        std::vector<DeviceBlockPoolPtr>{block_tree_cache_test::makeStructuralDevicePool(0)}, nullptr, nullptr);
+    full->initialize(0, config.topologyPtr(), {"default"});
+    manager.block_tree_cache_ = block_tree_cache_test::makeBlockTreeCacheForTest({full});
+    auto backend = std::make_shared<EventControlStorageBackend>();
+    manager.block_tree_cache_->storage_backend_ = backend;
+    auto reporter = std::make_shared<EventPublicationReporter>();
+    reporter->deliver_remote_control = true;
+    reporter->remote_enabled.store(false);
+    manager.initCacheEventPublisher(reporter);
+    ASSERT_NE(manager.cache_event_publisher_, nullptr);
+    ASSERT_TRUE(waitForEventPublisherReady(*manager.cache_event_publisher_));
+    EXPECT_FALSE(backend->remoteCacheEnabled());
+    reporter->remote_enabled.store(true);
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    while (!backend->remoteCacheEnabled() && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    EXPECT_TRUE(backend->remoteCacheEnabled());
+    manager.stopCacheEventPublisher();
 }
 
 TEST_F(KVCacheManagerTest, EventPublisherWiresEligibleGroupsInTopologyOrder) {
@@ -2007,8 +2067,7 @@ protected:
     void demote() {
         auto cache = manager_->blockTreeCache();
         // Capacity is 16: a positive ratio below 1/16 targets zero used
-        // blocks. Pending loads are ineligible; completed live requests keep
-        // their device references even if the tree's copy is demoted again.
+        // blocks. Pending loads and request-held device blocks are ineligible.
         BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::DEVICE, 0.01);
         BlockTreeCacheTestPeer::runMaintenanceForTest(*cache);
     }
@@ -2119,11 +2178,20 @@ protected:
             ASSERT_NO_FATAL_FAILURE(devicePayload(*req, /*write=*/false, 2));
         }
         if (concurrent) {
-            // Completion re-admits A/B to the eviction heap. The low watermark
-            // demotes their tree copies again, but the live requests above must
-            // still see the original GPU bytes through their request references.
-            ASSERT_NO_FATAL_FAILURE(hostPayload(a));
-            ASSERT_NO_FATAL_FAILURE(hostPayload(b));
+            // A/B keep their device copies while load_a/load_b hold request
+            // references. The same watermark still demotes the idle C/D blocks.
+            {
+                std::lock_guard<std::mutex> lock(cache->mutex_);
+                for (const auto* req : {&a, &b}) {
+                    const auto path = cache->tree()->findNode(req->keys);
+                    ASSERT_EQ(path.size(), 2u);
+                    for (const auto* node : path) {
+                        const auto& resource = node->group_set_resources[0];
+                        EXPECT_EQ(resource.transfer_state, GroupSetTransferState::IDLE);
+                        EXPECT_TRUE(resource.hasTier(Tier::DEVICE));
+                    }
+                }
+            }
             ASSERT_NO_FATAL_FAILURE(hostPayload(c));
             ASSERT_NO_FATAL_FAILURE(hostPayload(d));
         }
@@ -2139,10 +2207,18 @@ protected:
                 ADD_FAILURE() << "unexpected transfer direction";
             }
         }
-        EXPECT_EQ(d2h, concurrent ? 12u : 4u);  // Initial A/B, then C/D and re-demoted A/B.
+        EXPECT_EQ(d2h, concurrent ? 8u : 4u);  // Initial A/B, then only idle C/D.
         EXPECT_EQ(h2d, 4u);
         manager_->free(FreeInfo{load_a.resource, load_a.tokens});
         manager_->free(FreeInfo{load_b.resource, load_b.tokens});
+        if (concurrent) {
+            // Releasing the request references makes A/B eligible again.
+            demote();
+            BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
+            BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::DEVICE, 0.0);
+            ASSERT_NO_FATAL_FAILURE(hostPayload(a));
+            ASSERT_NO_FATAL_FAILURE(hostPayload(b));
+        }
         BlockTreeCacheTestPeer::reclaimBlocksForTest(*cache, 100, Tier::DEVICE);
         BlockTreeCacheTestPeer::reclaimBlocksForTest(*cache, 100, Tier::HOST);
         EXPECT_EQ(manager_->freeBlocksNum(), 16u);
@@ -3045,9 +3121,7 @@ TEST_F(KVCacheManagerTest, DSV4EvictionOnSWAGroupsDuringInferenceWithDecodeConti
     auto result_c = manager->malloc(malloc_c);
     ASSERT_TRUE(result_c.success) << "3rd allocation must succeed via SWA eviction";
 
-    // SWA pressure selects the older request's tier leaf. Its exclusive,
-    // unmatchable single-child ancestor chain is pruned upward as one cascade.
-    EXPECT_TRUE(manager->blockTreeCache()->tree()->findNode(keys_a).empty());
+    // Older FULL-only ancestors can remain after the SWA tail is evicted.
 
     // Direct proof of the SWA eviction itself: at least one cached SWA slot was
     // evicted, the evicted set is exactly an LRU-first prefix (every evicted

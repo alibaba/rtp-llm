@@ -80,7 +80,7 @@ class ResponseFormatPlan:
         final_constraint = _resolve_final_constraint(config)
         thinking_mode = _resolved_thinking_mode(config)
 
-        if thinking_mode in (ThinkingMode.ENABLED, ThinkingMode.ADAPTIVE):
+        if _uses_reasoning_envelope(config):
             if config.has_num_beams() or config.num_return_sequences > 1:
                 raise FtRuntimeException(
                     ExceptionType.ERROR_INPUT_FORMAT_ERROR,
@@ -149,7 +149,7 @@ def _resolved_thinking_mode(config: Any) -> "ThinkingMode":
 def _uses_reasoning_envelope(config: Any) -> bool:
     from rtp_llm.config.generate_config import ThinkingMode
 
-    return _resolved_thinking_mode(config) in (
+    return config._enable_think_processor and _resolved_thinking_mode(config) in (
         ThinkingMode.ENABLED,
         ThinkingMode.ADAPTIVE,
     )
@@ -251,7 +251,9 @@ def _adaptive_reasoning_envelope(
             "type": "or",
             "elements": [
                 _reasoning_sequence(
-                    reasoning_format, max_thinking_tokens, final_format
+                    reasoning_format,
+                    max_thinking_tokens,
+                    final_format,
                 ),
                 _add_no_think_excludes(final_format, reasoning_format),
             ],

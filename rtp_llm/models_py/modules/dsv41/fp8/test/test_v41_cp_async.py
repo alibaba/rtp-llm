@@ -125,6 +125,28 @@ class CPAsyncHostTest(unittest.TestCase):
         recorded = [entry[1] for entry in self.log if entry[0] == "record"]
         self.assertCountEqual(recorded, ["owner", "offsets", "quant", "scale"])
 
+    def test_owned_allocation_manifest_skips_request_view_walk(self):
+        owner = self.tensor("owner")
+        offsets = self.tensor("offsets")
+        quant = self.tensor("quant")
+        scale = self.tensor("scale")
+        view = self.tensor("view", base=owner)
+
+        def fail_storage():
+            raise AssertionError("request view was scanned")
+
+        view.untyped_storage = fail_storage
+        workspace = SimpleNamespace(
+            output=owner, device_offsets=offsets, refresh_layout=offsets
+        )
+        result = PreparedGlobalRows(((view, view),) * 1024, workspace, (quant, scale))
+        pending = async_cp.launch("cuda:0", lambda: result)
+        self.assertIs(pending.wait(), result)
+        self.assertCountEqual(
+            [entry[1] for entry in self.log if entry[0] == "record"],
+            ["owner", "offsets", "quant", "scale"],
+        )
+
     def test_exception_records_inputs_and_restores_current_stream(self):
         source = self.tensor("source")
 

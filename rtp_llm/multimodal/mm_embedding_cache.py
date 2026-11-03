@@ -527,6 +527,7 @@ class MMEmbeddingCacheEntry:
         self.storage_lock = threading.Lock()
         self._greennet_event = threading.Event()
         self._greennet_verdict: Optional[GreenNetVerdict] = None
+        self._greennet_error: Optional[Exception] = None
         self._greennet_checked = False
 
     @property
@@ -643,10 +644,16 @@ class MMEmbeddingCacheEntry:
         self._greennet_checked = checked
         self._greennet_event.set()
 
+    def set_greennet_error(self, error: Exception) -> None:
+        """Wake inspection waiters without losing a typed preprocessing error."""
+        self._greennet_error = error
+        self._greennet_event.set()
+
     @property
     def greennet_passed(self) -> bool:
         return (
             self.is_greennet_decided
+            and self._greennet_error is None
             and self._greennet_checked
             and self._greennet_verdict is not None
             and self._greennet_verdict.passed
@@ -660,6 +667,8 @@ class MMEmbeddingCacheEntry:
     ) -> GreenNetVerdict:
         if not _wait_event(self._greennet_event, timeout, cancellation_event):
             raise TimeoutError("Waiting for greennet verdict timed out")
+        if self._greennet_error is not None:
+            raise self._greennet_error
         return self._greennet_verdict
 
     @property

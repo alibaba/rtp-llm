@@ -32,6 +32,30 @@ def init_generate_group_args(parser, generate_env_config):
         help="深度思考模式: disabled/adaptive/enabled（兼容 0/1）",
     )
     generate_group.add_argument(
+        "--enable_think_processor",
+        env_name="ENABLE_THINK_PROCESSOR",
+        bind_to=(generate_env_config, "enable_think_processor"),
+        type=str2bool,
+        default=True,
+        help=(
+            "Apply automatic thinking grammar (including EOS suppression and "
+            "the thinking budget). Disabling this keeps thinking templates and "
+            "output parsing, and preserves explicit response-format constraints."
+        ),
+    )
+    generate_group.add_argument(
+        "--enable_dash_sc_think_eos_phase2",
+        env_name="ENABLE_DASH_SC_THINK_EOS_PHASE2",
+        bind_to=(generate_env_config, "enable_dash_sc_think_eos_phase2"),
+        type=str2bool,
+        default=True,
+        help=(
+            "Allow Dash SC to close thinking and start an empty-thinking second "
+            "phase on THINK_TERMINATE_TOKEN_ID. Disable to preserve the backend "
+            "EOS without synthesizing a thinking close or restarting generation."
+        ),
+    )
+    generate_group.add_argument(
         "--max_thinking_tokens",
         env_name="MAX_THINKING_TOKENS",
         bind_to=(generate_env_config, "max_thinking_tokens"),

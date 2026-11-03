@@ -231,6 +231,18 @@ class TestMultiModalUtil(unittest.TestCase):
 
         self.assertEqual(request_impl.call_count, 1)
 
+    def test_ssrf_client_error_is_preserved_without_retry(self):
+        error = FtRuntimeException(
+            ExceptionType.MM_WRONG_FORMAT_ERROR, "url ssrf check failed"
+        )
+        with patch(
+            "rtp_llm.multimodal.multimodal_util.REQUEST_GET", side_effect=error
+        ) as get:
+            with self.assertRaises(FtRuntimeException) as raised:
+                get_bytes_io_from_url("http://10.0.0.1/ssrf-blocked-image")
+        self.assertIs(raised.exception, error)
+        get.assert_called_once()
+
     def test_http_timeout(self):
         with patch(
             "rtp_llm.multimodal.multimodal_util.request_get",

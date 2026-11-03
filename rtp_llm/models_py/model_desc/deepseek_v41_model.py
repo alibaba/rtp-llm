@@ -114,10 +114,22 @@ class DeepSeekV41Model(DeepSeekV4Model):
         config = self._v4_args.v41_config
         windows = windows.to(device=self.v4.embed.weight.device, non_blocking=True)
         image_token = int(config.get("image_token_id", 129264))
-        hashes = self._engram_hash_state.hash_token_windows(
-            windows, dead_mask=windows == image_token
-        )
-        token_mask = (windows[:, 0] >= 0) & (windows[:, 0] != image_token)
+        if windows.is_cuda:
+            from rtp_llm.models_py.modules.dsv41 import _engram_triton
+
+            hashes, token_mask = _engram_triton.hash_token_windows(
+                windows,
+                None,
+                self._engram_hash_state.prepare_device(windows.device),
+                self._engram_hash_state.layout,
+                self._engram_hash_state.pad_id,
+                image_token=image_token,
+            )
+        else:
+            hashes = self._engram_hash_state.hash_token_windows(
+                windows, dead_mask=windows == image_token
+            )
+            token_mask = (windows[:, 0] >= 0) & (windows[:, 0] != image_token)
         for layer_id, hash_index in self._engram_layers:
             layer = self.v4.layers[layer_id]
             layer.engram_hashes = hashes[:, hash_index].contiguous()

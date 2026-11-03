@@ -12,6 +12,10 @@ import triton.language as tl
 from rtp_llm.models_py.modules.dsv41.fp8._trap_utils import (
     trap_invalid_kv_access_enabled,
 )
+from rtp_llm.models_py.modules.dsv41.fp8._v41_swa_kv import (
+    norm_rope_bf16,
+    quantize_swa_row,
+)
 from rtp_llm.models_py.modules.dsv41.fp8._v41_swa_triton import (
     is_supported as swa_is_supported,
 )
@@ -100,26 +104,12 @@ def _fused_qkv_rope_cache_kernel(
         kv_base = kv + row * kv_stride.to(tl.int64)
         values = tl.load(kv_base + columns).to(tl.float32)
         w = tl.load(weight + columns).to(tl.float32)
-        inv = tl.rsqrt(tl.sum(values * values, 0) / 512 + EPS)
-        normalized = values * inv * w
-        kv_real = tl.load(kv_base + 448 + 2 * pair).to(tl.float32) * inv
-        kv_imag = tl.load(kv_base + 448 + 2 * pair + 1).to(tl.float32) * inv
-        kv_real = kv_real * tl.load(weight + 448 + 2 * pair).to(tl.float32)
-        kv_imag = kv_imag * tl.load(weight + 448 + 2 * pair + 1).to(tl.float32)
-        kv_new_real = kv_real * cos - kv_imag * sin
-        kv_new_imag = kv_real * sin + kv_imag * cos
-        rope = tl.interleave(kv_new_real, kv_new_imag).to(tl.bfloat16)
-        # Quantization consumes the BF16 materialization of the old norm/RoPE
-        # producer, including its RoPE channels, rather than FP32 intermediates.
-        rounded = tl.where(
-            columns < 448,
-            normalized.to(tl.bfloat16),
-            tl.gather(rope, tl.maximum(columns - 448, 0), 0),
-        )
+        rounded = norm_rope_bf16(values, w, cos, sin, EPS)
+        payload, encoded, decoded = quantize_swa_row(rounded)
         if USE_PDL and KV_READY:
             # QA supplied raw KV before QB started; keep stores after QB's wait.
             tl.extra.cuda.gdc_wait()
-        tl.store(kv_out + row * 512 + columns, rounded)
+        tl.store(kv_out + row * 512 + columns, decoded)
         if not GATHERED_FREQS:
             tl.store(freqs_out + row * 64 + 2 * pair, cos)
             tl.store(freqs_out + row * 64 + 2 * pair + 1, sin)
@@ -134,13 +124,10 @@ def _fused_qkv_rope_cache_kernel(
             return
         position = slot % ENTRIES
         page_base = pool + page * block_stride.to(tl.int64)
-        groups = rounded.to(tl.float32).reshape((16, 32))
-        maximum = tl.maximum(tl.max(tl.abs(groups), 1), 1e-4)
-        exponent = tl.ceil(tl.log2(maximum * (1.0 / 448.0)))
-        scaled = tl.clamp(groups * tl.exp2(-exponent)[:, None], -448.0, 448.0)
-        payload = scaled.to(tl.float8e4nv).to(tl.uint8, bitcast=True).reshape((512,))
-        tl.store(page_base + position * 528 + columns, payload)
-        encoded = tl.clamp(exponent + 127.0, 0.0, 255.0).to(tl.uint8)
+        tl.store(
+            page_base + position * 528 + columns,
+            payload.to(tl.uint8, bitcast=True),
+        )
         tl.store(page_base + position * 528 + 512 + tl.arange(0, 16), encoded)
 
 
@@ -307,5 +294,6 @@ def try_fused_qkv_rope_cache(
             KV_READY=kv_ready,
             launch_pdl=use_pdl,
             num_warps=4,
+            enable_fp_fusion=False,
         )
     return FusedQKVRopeCache(q_out, kv_out, freqs_cis)

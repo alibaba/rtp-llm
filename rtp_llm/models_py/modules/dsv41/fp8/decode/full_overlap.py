@@ -111,8 +111,8 @@ def try_full_decode(
         return None
     batch, span, _ = x.shape
     rows = batch * span
-    req = metadata.req_id_per_token[:rows].long()
-    starts = metadata.start_pos[:batch].long()
+    req = metadata.req_id_per_token[:rows]
+    starts = metadata.start_pos[:batch]
     if not is_supported(attn, x, positions, req, starts):
         return None
     from rtp_llm.models_py.modules.dsv41.fp8.attention import _cuda_device_index
@@ -143,11 +143,24 @@ def try_full_decode(
     auxiliary.wait_stream(current)
     try:
         with torch.cuda.stream(global_stream):
-            attn._produce_global_decode(x, positions, req, starts)
+            from rtp_llm.models_py.modules.dsv41.fp8._v41_full_projection import project
+
+            projected = project(attn, x)
+            if projected is None:
+                attn._produce_global_decode(x, positions, req, starts)
+            else:
+                values, scores, work.weights = projected
+                work.outputs.extend(projected)
+                # Publish the head weights before compression/cache writes.
+                auxiliary.wait_stream(global_stream)
+                attn._produce_global_decode(
+                    x, positions, req, starts, projected=(values, scores)
+                )
         keys = attn._shared_attention["global"][attn.layer_id]
         with torch.cuda.stream(auxiliary):
-            work.weights = F.linear(x.reshape(rows, -1), attn.index_weights)
-            work.outputs.append(work.weights)
+            if work.weights is None:
+                work.weights = F.linear(x.reshape(rows, -1), attn.index_weights)
+                work.outputs.append(work.weights)
             work.metadata = _v41_decode_indexer.get_decode_metadata(
                 attn._shared_attention,
                 keys,
@@ -155,6 +168,7 @@ def try_full_decode(
                 batch_size=batch,
                 query_len=span,
                 compress_ratio=attn.compress_ratio,
+                request_ids=attn._shared_attention.get("decode_packed_request_ids"),
             )
             if work.metadata is not None:
                 plan = work.metadata
@@ -182,24 +196,7 @@ def try_full_decode(
         )
         if not qkv.swa_written:
             attn._decode_write_swa_fp8(qkv.kv, batch, span, metadata)
-        slot_plan = None
-        if os.environ.get("DSV41_FUSED_TOPK_SLOTS", "0") == "1":
-            from rtp_llm.models_py.modules.dsv41.fp8._kv_cache_utils import (
-                require_pool_tokens_per_block,
-            )
-
-            region = attn._global_region()
-            global_pool = attn._source_pool(region)
-            raw_tpb = require_pool_tokens_per_block(attn._kv_cache, region=region)
-            cp = attn._cp_ctx
-            sharded = cp is not None and cp.cp_size > 1 and cp.kv_cache_sharded
-            if not sharded and raw_tpb % attn.compress_ratio == 0:
-                slot_plan = _v41_decode_topk.make_slot_plan(
-                    metadata.req_id_per_token[:rows],
-                    attn._block_tables_by_type[region],
-                    entries=global_pool.shape[1],
-                    logical_entries=raw_tpb // attn.compress_ratio,
-                )
+        slot_plan = attn._decode_slot_plan(metadata.req_id_per_token[:rows])
         selected = attn._select_indices_decode(
             x,
             qkv.qr,
@@ -209,13 +206,15 @@ def try_full_decode(
             overlap=work,
             **({"slot_plan": slot_plan} if slot_plan is not None else {}),
         )
-        slots = None if slot_plan is None else slot_plan.slots
-        if slots is None:
-            slots = (
-                attn._decode_global_slots(selected, metadata.req_id_per_token[:rows])
-                .to(dtype=torch.int32)
-                .contiguous()
+        slots = (
+            attn._decode_global_slots(
+                selected,
+                metadata.req_id_per_token[:rows],
+                slots=None if slot_plan is None else slot_plan.slots,
             )
+            .to(dtype=torch.int32)
+            .contiguous()
+        )
         mega_positions = attn._mega_position_chunks(metadata.position_ids, rows, rows)[
             0
         ]

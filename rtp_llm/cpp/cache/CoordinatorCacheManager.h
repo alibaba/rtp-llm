@@ -126,6 +126,7 @@ public:
     }
 
     void attachBlockTreeCache(BlockTreeCachePtr block_tree_cache);
+    bool captureCompletedDecode(const BatchKVCacheResource&, size_t, bool = true) const;
 
     BlockTreeCachePtr blockTreeCache() const {
         return block_tree_cache_;
@@ -211,7 +212,6 @@ protected:
                                                      bool enable_reuse_cache,
                                                      int  target_batch_size) const;
     virtual void  checkCPShardedMallocResult(const MallocInfo&) const;
-    virtual void  decrKVCacheRef(const KVCacheResource& kvcache_resource);
     void          decrKVCacheRef(const KVCacheResource& kvcache_resource, DeviceBlockRefType ref_type);
     size_t        logicalSeqSizePerBlockForCapacity(const std::string& tag) const;
     int           deviceCacheMetricTokensPerBlock() const;
@@ -241,6 +241,7 @@ protected:
     std::mutex malloc_mutex_;
 
     struct PreparedKVCache {
+        DecodeReuseSourcesPtr          decode_sources;
         size_t                         matched_device_blocks = 0;
         size_t                         total_logical_blocks  = 0;
         std::vector<RequiredPositions> required_positions;

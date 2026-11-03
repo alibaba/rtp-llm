@@ -174,6 +174,8 @@ class EngramCpuHashTest(unittest.TestCase):
         )
         expected = numpy_hash(windows, *constants, pad_id, image_token)
         self.assertTrue(torch.equal(actual, expected))
+        for layer in range(actual.shape[1]):
+            self.assertTrue(actual[:, layer].is_contiguous())
         return actual
 
     def test_random_int64_overflow_and_prime_boundaries(self):

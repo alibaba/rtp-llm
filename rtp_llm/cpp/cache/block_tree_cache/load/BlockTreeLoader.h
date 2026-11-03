@@ -19,12 +19,14 @@ namespace rtp_llm {
 
 class BlockTransferDispatcher;
 class BlockTreeTaskPool;
+struct CompletionStageContext;
 
 struct BlockTreeMatchResult {
     size_t                                              matched_device_blocks{0};
     std::vector<MultiNodeResource>                      matched_device_resources;
     std::shared_ptr<LoadAsyncContext>                   async_context;
     std::vector<BlockTreeCacheReuseTimeMetricsSnapshot> reuse_time_metrics_snapshots;
+    DecodeReuseSourcesPtr                               matched_device_decode_sources;
 };
 
 // Owns matching and the complete lower-tier-to-device load workflow.
@@ -57,6 +59,7 @@ public:
     void                 shutdown();
 
 private:
+    DecodeReuseSourcesPtr snapshotDecodeSources(const std::vector<TreeNode*>& path, size_t prefix) const;
     bool                 validMatch(std::vector<TreeNode*>&            path,
                                     std::vector<bool>&                 candidate_valid,
                                     const std::function<bool(size_t)>& valid_prefix) const;
@@ -81,9 +84,10 @@ private:
     void                 scheduleContextSettlement(const LoadTaskRunner::TaskPtr&           task,
                                                    const std::shared_ptr<LoadAsyncContext>& context);
     bool                 validateLoadTaskLocked(const LoadTaskRunner::Task& task) const;
-    bool                 settleLoadLocked(LoadTaskRunner::Task&                           task,
-                                          bool                                            aggregate_success,
-                                          std::vector<std::shared_ptr<LoadAsyncContext>>& joined_contexts);
+    bool                  settleLoadLocked(LoadTaskRunner::Task&                           task,
+                                           bool                                            aggregate_success,
+                                           std::vector<std::shared_ptr<LoadAsyncContext>>& joined_contexts,
+                                           CompletionStageContext                          observation);
 
     bool changeTransferState(TreeNode*             node,
                              size_t                group_set_id,
@@ -102,6 +106,7 @@ private:
     LoadTaskRunner                          load_task_runner_;
     LoadJoinRegistry                        load_join_registry_;
     std::shared_ptr<LoadContextCoordinator> load_context_coordinator_;
+    bool                                    track_decode_origins_{false};
 };
 
 }  // namespace rtp_llm

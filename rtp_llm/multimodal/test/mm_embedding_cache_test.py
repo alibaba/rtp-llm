@@ -151,6 +151,24 @@ def _assert_read_copies_are_released(testcase, entry, device_type):
 
 
 class UncachedEntryReadinessTest(unittest.TestCase):
+    def test_inspection_error_survives_late_verdict(self):
+        from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
+        from rtp_llm.multimodal.greennet_hook import GreenNetVerdict
+
+        entry = MMEmbeddingCacheEntry()
+        error = FtRuntimeException(
+            ExceptionType.MM_WRONG_FORMAT_ERROR, "url ssrf check failed"
+        )
+        entry.set_greennet_error(error)
+        for verdict in (None, GreenNetVerdict(False, 11), GreenNetVerdict(True)):
+            with self.subTest(verdict=verdict):
+                if verdict is not None:
+                    entry.set_greennet_verdict(verdict)
+                with self.assertRaises(FtRuntimeException) as raised:
+                    entry.wait_greennet(timeout=0)
+                self.assertIs(raised.exception, error)
+                self.assertFalse(entry.greennet_passed)
+
     @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
     def test_wait_observes_output_from_another_stream(self):
         for stream_ordered in (False, True):

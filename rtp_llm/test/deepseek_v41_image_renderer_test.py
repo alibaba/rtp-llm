@@ -16,6 +16,7 @@ from rtp_llm.config.generate_config import GenerateConfig
 from rtp_llm.cpp.model_rpc.model_rpc_client import trans_input
 from rtp_llm.openai.api_datatype import ChatCompletionRequest
 from rtp_llm.openai.renderers.deepseekv41_renderer import DeepseekV41Renderer
+from rtp_llm.openai.renderers.v41_recipe import PromptTokenizer
 from rtp_llm.utils.base_model_datatypes import GenerateInput, MMUrlType
 
 
@@ -51,6 +52,7 @@ class V41ImageRendererTest(TestCase):
             str(checkpoint)
         )
         cls.renderer.tokenizer = Adapter()
+        cls.renderer.prompt_tokenizer = PromptTokenizer(backend)
         cls.renderer.think_mode = False
 
     def test_mixin_preserves_norm_precision_and_three_delimiters(self):
@@ -121,6 +123,7 @@ class V41ImageRendererTest(TestCase):
         )
         original = request.model_dump()
         prompt, media = self.renderer._encode_request(request)
+        prompt = prompt.text
         self.assertEqual([image["url"] for image in media["images"]], [first, second])
         rendered = self.renderer.render_chat(request)
         self.assertEqual(rendered.rendered_prompt, prompt)
@@ -222,6 +225,41 @@ class V41ImageRendererTest(TestCase):
             base64.b64decode(url.split(",", 1)[1]),
         )
 
+    def test_literal_image_in_tool_log_is_plain_with_checkpoint_tokenizer(self):
+        log = "Image token: <｜deepseek_image｜>, id: 129264"
+        for with_image in (False, True):
+            content = [{"type": "text", "text": log}]
+            if with_image:
+                content.append(
+                    {"type": "image_url", "image_url": {"url": data_url((1, 2, 3))}}
+                )
+            request = ChatCompletionRequest.model_validate(
+                {
+                    "messages": [
+                        {"role": "user", "content": "head -40 probe_fake1.log"},
+                        {
+                            "role": "assistant",
+                            "tool_calls": [
+                                {
+                                    "id": "a",
+                                    "type": "function",
+                                    "function": {"name": "shell", "arguments": "{}"},
+                                }
+                            ],
+                        },
+                        {"role": "tool", "tool_call_id": "a", "content": content},
+                    ]
+                }
+            )
+            with self.subTest(with_image=with_image):
+                result = self.renderer.render_chat(request)
+                self.assertIn(log, result.rendered_prompt)
+                self.assertEqual(
+                    result.input_ids.count(self.renderer.image_token_id),
+                    int(with_image),
+                )
+                self.assertEqual(len(result.multimodal_inputs), int(with_image))
+
     def test_normal_render_rejects_placeholder_mismatch_without_loading_image(self):
         request = ChatCompletionRequest.model_validate(
             {
@@ -238,7 +276,9 @@ class V41ImageRendererTest(TestCase):
                 ],
             }
         )
-        with patch.object(self.renderer.tokenizer, "encode", return_value=[17, 18]):
+        with patch.object(
+            self.renderer.prompt_tokenizer, "encode", return_value=[17, 18]
+        ):
             with self.assertRaisesRegex(FtRuntimeException, "placeholder count"):
                 self.renderer.render_chat(request)
 

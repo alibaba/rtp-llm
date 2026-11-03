@@ -80,7 +80,8 @@ public:
     bool all_probs_point_mass = false;
 
     mutable torch::Tensor cum_log_probs;  // shape: [batch_size]
-    mutable torch::Tensor all_probs;      // shape: [batch_size, vocab_size]
+    mutable torch::Tensor all_probs;      // shape: [batch_size, vocab_size], or compact [batch_size, K]
+    torch::Tensor all_probs_indices;      // optional CUDA int32 [batch_size, K] original vocabulary IDs
 
     // Raw LM-head rows needed by return_logprobs requests. The gatherer snapshots
     // only those rows before logits processors/sampling can mutate logits, and
@@ -104,8 +105,19 @@ public:
     // The draft distribution is a one-hot at token_ids and need not be
     // materialized as [batch, speculative_steps, vocab].
     bool          token_ids_are_point_mass = false;
+    torch::Tensor all_probs_indices;  // original vocabulary IDs when all_probs is compact
     torch::Tensor raw_logprobs_logits;
     torch::Tensor raw_logprobs_row_indices;
+    // DSpARK per-position acceptance-rate prediction from the draft model
+    // confidence head: [batch, propose_step] FP32 in [0, 1].  Undefined when
+    // the sampler ran with confidence disabled. Enabled V4.1 requires its head.
+    // Column i is the predicted probability that draft position i survives
+    // target verification, conditioned on all earlier positions surviving.
+    torch::Tensor confidence_rates;
+    // Optional CUDA int32 [B] valid draft prefix lengths. Undefined keeps the
+    // full-width rejection path. The physical draft/target strides stay gamma
+    // and gamma+1; confidence never changes the sampled draft distribution.
+    torch::Tensor valid_draft_lengths;
 };
 
 struct MergedOutput {

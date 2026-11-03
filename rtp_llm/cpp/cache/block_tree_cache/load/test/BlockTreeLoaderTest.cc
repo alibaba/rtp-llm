@@ -11,6 +11,7 @@
 #include <vector>
 
 #include <gtest/gtest.h>
+#include "autil/EnvUtil.h"
 
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeTaskPool.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/ScopeRollback.h"
@@ -31,6 +32,84 @@ using block_tree_cache_test::insertGroupSetResources;
 using block_tree_cache_test::makeHostPool;
 using block_tree_cache_test::makeStructuralDevicePool;
 using block_tree_cache_test::releaseDeviceBlocks;
+
+TEST(BlockTreeLoaderTest, LocalOnlyCompletionNeverFabricatesRemoteTiming) {
+    for (const bool enabled : {false, true}) {
+        autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", enabled ? "1" : "0");
+        auto            coordinator = std::make_shared<LoadContextCoordinator>(
+            [](const std::shared_ptr<LoadAsyncContext>&) { return true; }, LoadContextCoordinator::AbortCallback{});
+        auto context = coordinator->create({}, {}, 0);
+        auto origin  = DecodeCacheOrigin::parse("v1." + std::string(32, 'a') + ".4.0.8.8.9");
+        ASSERT_TRUE(origin);
+        auto sources = std::make_shared<const DecodeReuseSources>(
+            DecodeReuseSources{{std::make_shared<const DecodeCacheOrigin>(*origin), Tier::DEVICE}});
+        context->setLocalDecodeSources(sources);
+        EXPECT_FALSE(context->decodeSources());
+        ASSERT_TRUE(coordinator->registerContext(context));
+        ASSERT_TRUE(context->commit());
+        ASSERT_TRUE(context->success());
+        EXPECT_FALSE(context->remoteRestoreTiming().has_value());
+        EXPECT_EQ(context->decodeSources(), sources);
+    }
+}
+
+TEST(BlockTreeLoaderTest, DeviceHotOriginsRequirePhysicalRequiredMemberConsensusAndRespectFeatureOff) {
+    if (!cudaAvailable()) {
+        GTEST_SKIP() << "CUDA not available";
+    }
+    for (const bool enabled : {false, true}) {
+        autil::EnvGuard           feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", enabled ? "1" : "0");
+        FullSWAEnvironmentOptions options;
+        options.path_length = 1;
+        options.enable_disk = false;
+        auto environment    = FullSWAEnvironment::create(options);
+        ASSERT_NE(environment, nullptr);
+        environment->insertRequestPath();
+        environment->releaseRequestRefs();
+        const auto resources = environment->resourcesForPathNode(0);
+        const auto unit =
+            environment->groups.front()->group(environment->groups.front()->groupTags().front()).cacheKeyTokenStride();
+        auto origin = std::make_shared<const DecodeCacheOrigin>(DecodeCacheOrigin{std::string(32, 'a'),
+                                                                                  0,
+                                                                                  0,
+                                                                                  static_cast<int64_t>(unit),
+                                                                                  static_cast<int64_t>(unit),
+                                                                                  static_cast<int64_t>(unit + 1)});
+        for (size_t group_id = 0; group_id < environment->groups.size(); ++group_id) {
+            const auto& group = environment->groups[group_id];
+            for (size_t member = 0; member < group->groupTags().size(); ++member) {
+                const auto& pool  = group->devicePools()[member];
+                const auto  block = resources[group_id].device_blocks[member];
+                ASSERT_TRUE(pool->enableDecodeOriginTracking());
+                ASSERT_TRUE(pool->bindDecodeOrigin(
+                    block, pool->decodeOriginIncarnation(block), group->groupTags()[member], origin));
+            }
+        }
+        for (const bool consensus : {true, false}) {
+            if (!consensus) {
+                const auto& group = environment->groups.back();
+                const auto& pool  = group->devicePools().front();
+                const auto  block = resources.back().device_blocks.front();
+                auto        other = *origin;
+                other.session     = std::string(32, 'b');
+                ASSERT_TRUE(pool->bindDecodeOrigin(block,
+                                                   pool->decodeOriginIncarnation(block),
+                                                   group->groupTags().front(),
+                                                   std::make_shared<const DecodeCacheOrigin>(other)));
+            }
+            auto result = environment->cache->match(environment->keys);
+            ASSERT_EQ(result.matched_device_blocks, 1u);  // payload reuse remains usable
+            EXPECT_EQ(static_cast<bool>(result.matched_device_decode_sources), enabled && consensus);
+            if (result.matched_device_decode_sources) {
+                EXPECT_EQ(countDecodeReuse(*result.matched_device_decode_sources, unit).total(), unit);
+            }
+            for (const auto& resource : result.matched_device_resources)
+                environment->groups[resource.group_set_id]->unreferenceBlocks(resource);
+        }
+        environment->reclaimAll();
+        environment->expectFullyReclaimed();
+    }
+}
 
 class ReadFailureBackend final: public StorageBackend {
 public:
@@ -62,6 +141,7 @@ TEST(BlockTreeLoaderTest, LocalHostLoadSettlesDespiteBackendFailure) {
     if (!cudaAvailable()) {
         GTEST_SKIP() << "CUDA not available";
     }
+    autil::EnvGuard           feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "1");
     FullSWAEnvironmentOptions options;
     options.path_length = 1;
     options.enable_disk = false;
@@ -156,6 +236,8 @@ TEST(BlockTreeLoaderTest, LocalHostLoadSettlesDespiteBackendFailure) {
     backend->shutdown();
     EXPECT_EQ(backend->read_calls.load(), 1u);
     EXPECT_FALSE(context->success());
+    EXPECT_FALSE(context->remoteRestoreTiming().has_value());
+    EXPECT_FALSE(joined->remoteRestoreTiming().has_value());
     EXPECT_EQ(context->errorInfo().code(), ErrorCode::EXECUTION_EXCEPTION);
     resources = environment->resourcesForPathNode(0);
     EXPECT_TRUE(resources[0].hasTier(Tier::DEVICE));
@@ -864,8 +946,15 @@ TEST_P(BlockTreeLoaderCorruptionTest, FullCorruptionBlocksPendingKeyUntilDescend
     auto env               = FullSWAEnvironment::create(options);
     ASSERT_NE(env, nullptr);
     env->insertRequestPath();
-    // An older request can still hold valid GPU blocks after the cache is demoted.
+    env->releaseRequestRefs();
     env->demoteAll(Tier::DEVICE);
+    ASSERT_TRUE(env->allResourcesAtTier(Tier::HOST));
+    // A different request owns independent GPU allocations for reinserting the same keys.
+    std::vector<block_tree_cache_test::MultiNodeBlocks> replacement_blocks;
+    for (const auto& group : env->groups) {
+        replacement_blocks.push_back(block_tree_cache_test::allocateDeviceBlocksForTest(*group, env->keys.size()));
+        ASSERT_EQ(replacement_blocks.back().size(), env->keys.size());
+    }
     auto engine                                        = std::make_shared<DeferredLoadEngine>(env->groups);
     env->cache->transfer_dispatcher_->per_rank_engine_ = engine;
     auto owner                                         = env->cache->match({env->keys[0], env->keys[1]}).async_context;
@@ -906,7 +995,7 @@ TEST_P(BlockTreeLoaderCorruptionTest, FullCorruptionBlocksPendingKeyUntilDescend
     for (size_t i = 0; i < env->keys.size(); ++i) {
         std::vector<GroupSetResource> resources(env->groups.size());
         for (size_t group = 0; group < env->groups.size(); ++group) {
-            resources[group].device_blocks = env->request_blocks[group][i];
+            resources[group].device_blocks = replacement_blocks[group][i];
         }
         replacement_resources.push_back(std::move(resources));
     }
@@ -926,7 +1015,7 @@ TEST_P(BlockTreeLoaderCorruptionTest, FullCorruptionBlocksPendingKeyUntilDescend
         const auto& pools = env->groups[group]->devicePools();
         for (size_t i = 0; i < env->keys.size(); ++i) {
             for (size_t member = 0; member < pools.size(); ++member) {
-                EXPECT_EQ(pools[member]->refCount(env->request_blocks[group][i][member]), i < 2 ? 2u : 1u);
+                EXPECT_EQ(pools[member]->refCount(replacement_blocks[group][i][member]), i < 2 ? 2u : 1u);
             }
         }
     }
@@ -949,7 +1038,7 @@ TEST_P(BlockTreeLoaderCorruptionTest, FullCorruptionBlocksPendingKeyUntilDescend
     EXPECT_EQ(matched.matched_device_blocks, env->keys.size());
     env->releaseMatch(matched);
     for (size_t group = 0; group < env->groups.size(); ++group) {
-        for (const auto& blocks : env->request_blocks[group]) {
+        for (const auto& blocks : replacement_blocks[group]) {
             for (size_t member = 0; member < blocks.size(); ++member) {
                 EXPECT_EQ(env->groups[group]->devicePools()[member]->refCount(blocks[member]), 2u);
             }
@@ -957,7 +1046,9 @@ TEST_P(BlockTreeLoaderCorruptionTest, FullCorruptionBlocksPendingKeyUntilDescend
     }
     releaseTargets(owner_refs);
     releaseTargets(child_refs);
-    env->releaseRequestRefs();
+    for (size_t group = 0; group < env->groups.size(); ++group) {
+        block_tree_cache_test::unreferenceDeviceBlocksForTest(*env->groups[group], replacement_blocks[group]);
+    }
     env->reclaimAll();
     env->expectFullyReclaimed();
 }

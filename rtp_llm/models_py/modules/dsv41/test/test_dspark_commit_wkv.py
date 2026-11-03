@@ -58,7 +58,7 @@ class DSparkCommitWKVTest(unittest.TestCase):
                 stacked.stacked.weight_scales[i * 512 : (i + 1) * 512],
                 linear.weight_scales,
             )
-        for rows in (1, 6, 65, 192):
+        for rows in (1, 6, 42, 65, 192, 384, 390):
             x = torch.randn(rows, 5120, device="cuda", dtype=torch.bfloat16)
             for factor in (1.0, 1e-12, 0.0):
                 source = x * factor
@@ -125,7 +125,13 @@ class DSparkCommitWKVTest(unittest.TestCase):
             else:
                 for got, linear in zip(actual, self.linears):
                     exact(self, got, linear(x))
-        for capability in ((9, 0), (10, 0)):
+        with patch.object(torch.cuda, "get_device_capability", return_value=(10, 0)):
+            sm100 = self.prepare("auto")
+        self.assertIsNotNone(sm100.stacked)
+        source = x[:384]
+        for actual, linear in zip(sm100.project(source), self.linears):
+            exact(self, actual, linear(source))
+        for capability in ((9, 0), (10, 1)):
             with patch.object(
                 torch.cuda, "get_device_capability", return_value=capability
             ):

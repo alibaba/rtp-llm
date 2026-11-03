@@ -1,6 +1,5 @@
 #pragma once
 #include <memory>
-#include <mutex>
 #include <optional>
 #include <torch/extension.h>
 #include "rtp_llm/cpp/models/eplb/ExpertBalancerPythonWrapper.h"
@@ -13,24 +12,6 @@ namespace rtp_llm {
 class ExpertLoadMonitor;
 struct GptModelInitParams;
 
-class EplbController {
-public:
-    void init(const EPLBConfig& config, size_t world_size);
-    // For updates only, eplb_update_time == -1 preserves the last requested interval.
-    void setData(const EPLBConfig& config);
-    // All ranks call at the same boundary; only root's request is published.
-    std::optional<EPLBConfig> step();
-
-private:
-    std::mutex    mutex_;
-    EPLBConfig    requested_;
-    torch::Tensor host_;
-    torch::Tensor device_;
-    size_t        world_size_ = 1;
-    int           interval_   = 100;
-    int           steps_      = 0;
-};
-
 class ExpertBalancer {
 public:
     __attribute__((visibility("default"))) ExpertBalancer(const std::optional<MoeConfigs>& moe,
@@ -40,8 +21,6 @@ public:
     // Forward completed on the current GPU stream. Warmup discards counts;
     // Real steps sample/migrate before the monitor records and clears counts.
     void step(bool warmup = false, bool is_prompt = false);
-    // update_time == -1 is the RPC's omitted-interval sentinel, never a runtime interval.
-    bool updateEplbConfig(const EPLBConfig& config);
     // Fixed int32 [model_layers, local_physical] storage, shared with graph capture.
     const torch::Tensor& stable_expert_token_counts() const {
         return expert_token_counts_;
@@ -57,7 +36,6 @@ private:
     bool                               sync_prompt_phase_ = false;
     std::unique_ptr<ExpertLoadMonitor> load_monitor_;
     torch::Tensor                      expert_token_counts_;
-    EplbController                     controller_;
     kmonitor::MetricsReporterPtr       metrics_reporter_;
     ExpertBalancerPythonWrapper        python_;
 };

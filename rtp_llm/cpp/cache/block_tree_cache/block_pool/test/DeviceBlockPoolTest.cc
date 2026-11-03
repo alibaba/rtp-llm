@@ -1,7 +1,9 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/block_pool/DeviceBlockPool.h"
 
 #include <memory>
+#include <new>
 #include <optional>
+#include <stdexcept>
 #include <type_traits>
 #include <unistd.h>
 #include <vector>
@@ -254,6 +256,50 @@ TEST(DeviceBlockPoolTest, LifecycleStartsAllocatedBlockWithZeroRefCount) {
     EXPECT_FALSE(pool.isAllocated(*block));
 }
 
+TEST(DeviceBlockPoolTest, PublicationPinReleasesDespiteThrowingCapacityNotification) {
+    DeviceBlockPool pool(makeConfig());
+    ASSERT_TRUE(pool.init());
+    const auto block = pool.malloc().value();
+    pool.incRef(block);
+    size_t notifications = 0;
+    pool.setCapacityChangeCallback([&] {
+        ++notifications;
+        throw std::runtime_error("injected observer failure");
+    });
+    auto release = pool.pinForRemotePublication(block);
+    EXPECT_EQ(pool.refCount(block), 2u);
+    pool.decRef(block);
+    EXPECT_TRUE(pool.isAllocated(block));
+    EXPECT_NO_THROW(release());
+    EXPECT_EQ(notifications, 1u);
+    EXPECT_FALSE(pool.isAllocated(block));
+    EXPECT_EQ(pool.referencedBlocksNum(DeviceBlockRefType::REMOTE_CONNECTOR), 0u);
+}
+
+TEST(DeviceBlockPoolTest, PublicationPinCallbackAllocationFailureDoesNotAcquireReference) {
+    struct Observer {
+        std::shared_ptr<bool> fail;
+        explicit Observer(std::shared_ptr<bool> flag): fail(std::move(flag)) {}
+        Observer(const Observer& other): fail(other.fail) {
+            if (*fail) { throw std::bad_alloc(); }
+        }
+        Observer(Observer&&) noexcept = default;
+        void operator()() const {}
+    };
+    DeviceBlockPool pool(makeConfig());
+    ASSERT_TRUE(pool.init());
+    const auto block = pool.malloc().value();
+    pool.incRef(block);
+    auto fail = std::make_shared<bool>(false);
+    pool.setCapacityChangeCallback(Observer(fail));
+    *fail = true;
+    EXPECT_THROW(pool.pinForRemotePublication(block), std::bad_alloc);
+    EXPECT_EQ(pool.refCount(block), 1u);
+    EXPECT_EQ(pool.referencedBlocksNum(DeviceBlockRefType::REMOTE_CONNECTOR), 0u);
+    *fail = false;
+    pool.decRef(block);
+}
+
 TEST(DeviceBlockPoolTest, LifecycleUsesIBlockPoolSemantics) {
     auto            config = makeConfig();
     DeviceBlockPool pool(config);
@@ -430,6 +476,31 @@ TEST(DeviceBlockPoolTest, RequestReleaseCannotConsumeConnectorReference) {
     EXPECT_FALSE(pool.isExclusiveRequestBlock(block));
     pool.decRef(block, DeviceBlockRefType::REMOTE_CONNECTOR);
     EXPECT_FALSE(pool.isAllocated(block));
+}
+
+TEST(DeviceBlockPoolTest, DonorReuseChangesOriginIncarnationButAnUnchangedReferenceDoesNot) {
+    DeviceBlockPool pool(makeConfig());
+    ASSERT_TRUE(pool.init());
+    ASSERT_TRUE(pool.enableDecodeOriginTracking());
+    const auto donor = pool.malloc().value();
+    pool.incRef(donor);
+    const auto parsed = DecodeCacheOrigin::parse("v1." + std::string(32, 'a') + ".7680.7680.8192.8200.8201");
+    ASSERT_TRUE(parsed);
+    const auto source = std::make_shared<const DecodeCacheOrigin>(*parsed);
+    const auto first  = pool.decodeOriginIncarnation(donor);
+    ASSERT_TRUE(pool.bindDecodeOrigin(donor, first, "full", source));
+    BlockIndicesType replacements;
+    int              required_free = 0;
+    ASSERT_TRUE(pool.tryReplaceRequestReferences({{donor, 1, 1}}, 0, replacements, required_free));
+    EXPECT_EQ(pool.decodeOriginIncarnation(donor), first);
+    EXPECT_EQ(pool.decodeOrigin(donor, "full"), source);
+    ASSERT_TRUE(pool.tryReplaceRequestReferences({{donor, 1, 0}}, 1, replacements, required_free));
+    ASSERT_EQ(replacements, (BlockIndicesType{donor}));
+    EXPECT_NE(pool.decodeOriginIncarnation(donor), first);
+    EXPECT_FALSE(pool.decodeOrigin(donor, "full"));
+    EXPECT_FALSE(pool.bindDecodeOrigin(donor, first, "full", source));
+    pool.decRef(donor);
+    EXPECT_EQ(pool.freeBlocksNum(), pool.totalBlocksNum());
 }
 
 TEST(DeviceBlockPoolTest, RequestReplacementCannotRecycleConnectorHeldDonor) {

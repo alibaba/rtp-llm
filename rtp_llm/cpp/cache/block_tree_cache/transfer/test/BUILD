@@ -59,6 +59,7 @@ cc_test(
     deps = test_deps + [
         ":block_transfer_engine_test_utils",
         "//rtp_llm/cpp/cache/block_tree_cache/test:bounded_thread_test_utils",
+        "@havenask//aios/autil:env_util",
     ],
     env = {},
 )
@@ -72,6 +73,7 @@ cc_test(
     deps = test_deps + [
         ":block_transfer_engine_test_utils",
         "//rtp_llm/cpp/cache/test:cache_config_test_utils",
+        "@havenask//aios/autil:env_util",
     ],
     env = {},
     tags = ["L20_CU13"],

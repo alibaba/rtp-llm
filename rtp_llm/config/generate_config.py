@@ -2,6 +2,7 @@ import copy
 import hashlib
 import logging
 import time
+from dataclasses import replace
 from enum import IntEnum
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
 
@@ -121,6 +122,7 @@ class GenerateConfig(BaseModel):
     # --- private attrs（不参与序列化/schema，生命周期与实例绑定） ---
     _diverge_depth_warned: bool = PrivateAttr(default=False)
     _ban_auto_downgraded: bool = PrivateAttr(default=False)
+    _enable_think_processor: bool = PrivateAttr(default=True)
     _reasoning_envelope_applied: bool = PrivateAttr(default=False)
     _reasoning_final_constraint: Any = PrivateAttr(default=None)
 
@@ -718,6 +720,11 @@ class GenerateConfig(BaseModel):
         later request enrichment may only update grammar-independent fields.
         """
 
+        # Service policy controls automatic grammar, not thinking templates or
+        # output parsing. Keep it private so request fields cannot override it.
+        self._enable_think_processor = bool(
+            getattr(generate_env_config, "enable_think_processor", True)
+        )
         env_budget = getattr(generate_env_config, "max_thinking_tokens", None)
         if (
             env_budget is not None
@@ -755,15 +762,13 @@ class GenerateConfig(BaseModel):
 
             from rtp_llm.config.response_format_compiler import ReasoningFormat
 
-            if reasoning_format is None:
+            if self._enable_think_processor and reasoning_format is None:
                 base_format = ReasoningFormat.from_generate_env_config(
                     generate_env_config
                 )
-                reasoning_format = ReasoningFormat(
+                reasoning_format = replace(
+                    base_format,
                     tag_begin=normalize_think_tag(generate_env_config.think_start_tag),
-                    tag_end=base_format.tag_end,
-                    suffix=base_format.suffix,
-                    no_think_excludes=base_format.no_think_excludes,
                 )
             return self.finalize_response_format(reasoning_format=reasoning_format)
 
@@ -796,7 +801,11 @@ class GenerateConfig(BaseModel):
 
         from rtp_llm.config.response_format_compiler import ReasoningFormat
 
-        if self.in_think_mode and reasoning_format is None:
+        if (
+            self._enable_think_processor
+            and self.in_think_mode
+            and reasoning_format is None
+        ):
             reasoning_format = ReasoningFormat.from_generate_env_config(
                 generate_env_config
             )

@@ -176,6 +176,7 @@ class PyModelInputsCompatTest(unittest.TestCase):
 
         self.assertEqual(hidden_states.data_ptr(), outputs.hidden_states.data_ptr())
         self.assertIsNone(outputs.mtp_target_hidden_states)
+        self.assertIsNone(outputs.dspark_confidence_hidden_logits)
         self.assertFalse(hasattr(outputs, "params_ptr"))
 
         target_features = torch.ones(2, 3)
@@ -203,6 +204,18 @@ class PyModelInputsCompatTest(unittest.TestCase):
         self.assertEqual(
             inputs.expert_token_counts.data_ptr(), expert_token_counts.data_ptr()
         )
+
+    def test_model_outputs_keeps_scalar_confidence_separate(self):
+        hidden = torch.ones(2, 3, dtype=torch.bfloat16)
+        target = torch.ones(2, 9, dtype=torch.bfloat16)
+        partial = torch.tensor([[2.0], [-1.0]], dtype=torch.float32)
+        outputs = PyModelOutputs(hidden, target, partial)
+        self.assertEqual(
+            outputs.dspark_confidence_hidden_logits.data_ptr(), partial.data_ptr()
+        )
+        self.assertEqual(outputs.mtp_target_hidden_states.data_ptr(), target.data_ptr())
+        outputs.dspark_confidence_hidden_logits = partial + 1
+        torch.testing.assert_close(outputs.dspark_confidence_hidden_logits, partial + 1)
 
     def test_attention_inputs_field_updates_directly(self) -> None:
         inputs = PyModelInputs()

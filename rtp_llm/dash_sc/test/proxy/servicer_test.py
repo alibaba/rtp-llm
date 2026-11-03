@@ -17,8 +17,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import grpc
 
+from rtp_llm.config.py_config_modules import DASH_SC_GRPC_SERVER_PORT_OFFSET
 from rtp_llm.dash_sc.access_record import GrpcAccessRecord
-from rtp_llm.dash_sc.proto import predict_v2_pb2
+from rtp_llm.dash_sc.proto import predict_v2_pb2, predict_v2_pb2_grpc
 from rtp_llm.dash_sc.proxy import __main__ as proxy_main
 from rtp_llm.dash_sc.proxy.service_route import BackendAddr, VipServerServiceDiscovery
 from rtp_llm.dash_sc.proxy.service_route_config import (
@@ -1783,6 +1784,102 @@ class StreamCloseTimingTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             len(close_ts), 1, "second close re-entered GeneratorExit handler"
         )
+
+
+class ProxyCancellationRpcTest(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self) -> None:
+        self.backend_entered = asyncio.Event()
+        self.backend_closed = asyncio.Event()
+        self.release_backend = asyncio.Event()
+        self.access_logged = asyncio.Event()
+        self.access_records = []
+
+        async def infer(request_iterator, context):
+            try:
+                async for request in request_iterator:
+                    self.backend_entered.set()
+                    await self.release_backend.wait()
+                    yield _make_finished_response()
+                    return
+            finally:
+                self.backend_closed.set()
+
+        backend = predict_v2_pb2_grpc.GRPCInferenceServiceServicer()
+        backend.ModelStreamInfer = infer
+        backend_server = grpc.aio.server()
+        self.addAsyncCleanup(backend_server.stop, 0)
+        predict_v2_pb2_grpc.add_GRPCInferenceServiceServicer_to_server(
+            backend, backend_server
+        )
+        backend_port = backend_server.add_insecure_port("127.0.0.1:0")
+        self.assertGreater(backend_port, 0)
+        await backend_server.start()
+
+        self.servicer = _make_servicer(
+            [f"127.0.0.1:{backend_port - DASH_SC_GRPC_SERVER_PORT_OFFSET}"]
+        )
+        self.addAsyncCleanup(self.servicer.close)
+        await self.servicer.open()
+
+        def capture_access(record, **kwargs):
+            self.access_records.append((record.status, record.exc_type))
+            self.access_logged.set()
+
+        access_patcher = patch(
+            "rtp_llm.dash_sc.proxy.servicer.emit_access_log", side_effect=capture_access
+        )
+        access_patcher.start()
+        self.addCleanup(access_patcher.stop)
+        frontend_server = grpc.aio.server()
+        self.addAsyncCleanup(frontend_server.stop, 0)
+        predict_v2_pb2_grpc.add_GRPCInferenceServiceServicer_to_server(
+            self.servicer, frontend_server
+        )
+        frontend_port = frontend_server.add_insecure_port("127.0.0.1:0")
+        self.assertGreater(frontend_port, 0)
+        await frontend_server.start()
+        channel = grpc.aio.insecure_channel(f"127.0.0.1:{frontend_port}")
+        self.addAsyncCleanup(channel.close)
+        self.stub = predict_v2_pb2_grpc.GRPCInferenceServiceStub(channel)
+
+    async def _start_call(self):
+        call = self.stub.ModelStreamInfer(_request_gen(_make_request()))
+        self.addCleanup(call.cancel)
+        await asyncio.wait_for(self.backend_entered.wait(), timeout=5)
+        return call
+
+    async def test_owner_close_returns_cancelled_and_releases_downstream(self):
+        call = await self._start_call()
+        await asyncio.wait_for(self.servicer.close(), timeout=5)
+        with self.assertRaises(grpc.aio.AioRpcError) as raised:
+            await asyncio.wait_for(call.read(), timeout=5)
+        self.assertEqual(raised.exception.code(), grpc.StatusCode.CANCELLED)
+        self.assertEqual(raised.exception.details(), "Request handling cancelled")
+        self.assertTrue(call.done())
+        await asyncio.wait_for(self.backend_closed.wait(), timeout=5)
+        await asyncio.wait_for(self.access_logged.wait(), timeout=5)
+        self.assertEqual(self.access_records, [("CANCELLED", "CancelledError")])
+
+    async def test_peer_cancel_still_cancels_downstream(self):
+        call = await self._start_call()
+        self.assertTrue(call.cancel())
+        with self.assertRaises(asyncio.CancelledError):
+            await asyncio.wait_for(call.read(), timeout=5)
+        self.assertEqual(await call.code(), grpc.StatusCode.CANCELLED)
+        await asyncio.wait_for(self.backend_closed.wait(), timeout=5)
+        await asyncio.wait_for(self.access_logged.wait(), timeout=5)
+        self.assertEqual(self.access_records, [("CANCELLED", "CancelledError")])
+
+    async def test_normal_completion_still_returns_ok(self):
+        call = await self._start_call()
+        self.release_backend.set()
+        response = await asyncio.wait_for(call.read(), timeout=5)
+        self.assertEqual(response, _make_finished_response())
+        self.assertIs(await asyncio.wait_for(call.read(), timeout=5), grpc.aio.EOF)
+        self.assertEqual(await call.code(), grpc.StatusCode.OK)
+        await asyncio.wait_for(self.backend_closed.wait(), timeout=5)
+        await asyncio.wait_for(self.access_logged.wait(), timeout=5)
+        self.assertEqual(self.access_records[0][0], "OK")
 
 
 if __name__ == "__main__":

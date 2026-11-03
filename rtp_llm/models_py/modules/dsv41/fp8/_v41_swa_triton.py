@@ -21,6 +21,8 @@ import torch
 import triton
 import triton.language as tl
 
+from rtp_llm.models_py.modules.dsv41.fp8._v41_swa_kv import quantize_swa_row
+
 if TYPE_CHECKING:
     from rtp_llm.models_py.modules.dsv41.fp8._swa_cp_byte_sliced import (
         CPByteSlicedSlotCompaction,
@@ -97,11 +99,8 @@ def _quantize_and_insert_swa_kernel(
         values = original.to(tl.float32)
     else:
         values = tl.load(kv + row * input_stride.to(tl.int64) + columns).to(tl.float32)
-    groups = values.reshape((16, 32))
-    maximum = tl.maximum(tl.max(tl.abs(groups), 1), 1e-4)
-    exponent = tl.ceil(tl.log2(maximum * (1.0 / 448.0)))
-    scaled = tl.clamp(groups * tl.exp2(-exponent)[:, None], -448.0, 448.0)
-    payload = scaled.to(tl.float8e4nv).to(tl.uint8, bitcast=True).reshape((512,))
+    quantized, encoded, _ = quantize_swa_row(values)
+    payload = quantized.to(tl.uint8, bitcast=True)
     payload_byte = position * 528 + columns
     if CP_BYTES:
         begin = rank.to(tl.int64) * local_bytes
@@ -112,7 +111,6 @@ def _quantize_and_insert_swa_kernel(
         )
     else:
         tl.store(base + payload_byte, payload)
-    encoded = tl.clamp(exponent + 127.0, 0.0, 255.0).to(tl.uint8)
     scale_byte = position * 528 + 512 + tl.arange(0, 16)
     if CP_BYTES:
         tl.store(
@@ -197,6 +195,7 @@ def _gather_swa_kernel(
     compact_blocks=0,
     local_bytes=0,
     RANK_MAJOR: tl.constexpr = False,
+    out_row_offsets=None,
 ):
     batch = tl.program_id(0).to(tl.int64)
     column = tl.program_id(1).to(tl.int64)
@@ -209,10 +208,13 @@ def _gather_swa_kernel(
     values = _load_swa_row(
         pool, slot, block_stride, ENTRIES, compact_blocks, local_bytes, RANK_MAJOR
     )
+    batch_start = batch * out_stride0.to(tl.int64)
+    if out_row_offsets is not None:
+        batch_start = tl.load(out_row_offsets + batch).to(tl.int64) * out_stride1.to(
+            tl.int64
+        )
     output = (
-        out
-        + batch * out_stride0.to(tl.int64)
-        + (offset.to(tl.int64) + column) * out_stride1.to(tl.int64)
+        out + batch_start + (offset.to(tl.int64) + column) * out_stride1.to(tl.int64)
     )
     tl.store(output + tl.arange(0, 512), values)
 
@@ -263,18 +265,41 @@ def dequantize_swa_k_cache(
     return out
 
 
+def _normalize_gather_row_offsets(out, row_offsets, batch):
+    if row_offsets is None:
+        return None
+    if not (
+        out.ndim == 2
+        and out.shape[1] == HEAD_DIM
+        and out.stride(1) == 1
+        and out.stride(0) >= HEAD_DIM
+        and isinstance(row_offsets, torch.Tensor)
+        and row_offsets.device == out.device
+        and row_offsets.dtype in (torch.int32, torch.int64)
+        and row_offsets.shape == (batch,)
+    ):
+        raise ValueError("Packed SWA gather needs a row matrix and per-request offsets")
+    return row_offsets.contiguous()
+
+
 def dequantize_and_gather_k_cache_slots(
     out: torch.Tensor,
     k_cache: torch.Tensor,
     slot_mapping: torch.Tensor,
     gather_lens: Optional[torch.Tensor],
     offset: int,
+    *,
+    out_row_offsets: Optional[torch.Tensor] = None,
 ) -> None:
     """Gather ``[B, W]`` slots into strided ``out[:, offset:offset+W, :]``.
 
-    Rows outside each request's gather length are left untouched. Lengths
-    remain on device, including during CUDA graph capture and replay.
+    With ``out_row_offsets``, output is a packed matrix and each request
+    starts at its explicit row offset. Rows outside its gather length are
+    untouched. Lengths and offsets stay on device during graph replay.
     """
+    out_row_offsets = _normalize_gather_row_offsets(
+        out, out_row_offsets, slot_mapping.shape[0]
+    )
     if slot_mapping.numel():
         _gather_swa_kernel[tuple(slot_mapping.shape)](
             k_cache,
@@ -285,15 +310,24 @@ def dequantize_and_gather_k_cache_slots(
             slot_mapping.stride(0),
             slot_mapping.stride(1),
             out.stride(0),
-            out.stride(1),
+            out.stride(0) if out_row_offsets is not None else out.stride(1),
             offset,
             ENTRIES=k_cache.shape[1],
+            out_row_offsets=out_row_offsets,
             num_warps=4,
         )
 
 
 def _gather_swa_rank_major(
-    out, gathered, slots, lengths, offset, compact_blocks, local_bytes, entries
+    out,
+    gathered,
+    slots,
+    lengths,
+    offset,
+    compact_blocks,
+    local_bytes,
+    entries,
+    out_row_offsets=None,
 ):
     """Decode private or all-gathered CP4 bytes; this helper has no collective."""
     if slots.numel():
@@ -306,12 +340,13 @@ def _gather_swa_rank_major(
             slots.stride(0),
             slots.stride(1),
             out.stride(0),
-            out.stride(1),
+            out.stride(0) if out_row_offsets is not None else out.stride(1),
             offset,
             ENTRIES=entries,
             compact_blocks=compact_blocks,
             local_bytes=local_bytes,
             RANK_MAJOR=True,
+            out_row_offsets=out_row_offsets,
             num_warps=4,
         )
 
@@ -398,7 +433,8 @@ def quantize_and_insert_k_cache_cp_byte_sliced(
 
     Qualified CP4 layouts store only this rank's bytes directly. Other layouts
     retain the local-slice staging path; no writer all-gather is required.
-    Optional fresh output is a disjoint contiguous BF16 [B, M, 512] workspace.
+    Optional fresh output is a disjoint contiguous BF16 workspace, rectangular
+    [B, M, 512] or packed [sum(request_rows), 512].
     Only fresh_slots rows are written, with original BF16 bits preserved.
     """
     unique_blocks = compaction.unique_blocks
@@ -497,8 +533,13 @@ def dequantize_and_gather_k_cache_slots_cp_byte_sliced(
     cp_rank: int,
     cp_size: int,
     compaction: CPByteSlicedSlotCompaction,
+    *,
+    out_row_offsets: Optional[torch.Tensor] = None,
 ) -> None:
     """All-gather byte slices and decode qualified rank-major storage directly."""
+    out_row_offsets = _normalize_gather_row_offsets(
+        out, out_row_offsets, slot_mapping.shape[0]
+    )
     if slot_mapping.numel() == 0:
         return
     unique_blocks = compaction.unique_blocks
@@ -539,6 +580,7 @@ def dequantize_and_gather_k_cache_slots_cp_byte_sliced(
                     unique_blocks.numel(),
                     local_bytes,
                     full_entries_per_block,
+                    out_row_offsets=out_row_offsets,
                 )
                 return
             full_raw = (
@@ -552,5 +594,10 @@ def dequantize_and_gather_k_cache_slots_cp_byte_sliced(
         (full_raw.shape[1], ENTRY_BYTES, 1),
     )
     dequantize_and_gather_k_cache_slots(
-        out, full_view, compaction.compact_slots, gather_lens, offset
+        out,
+        full_view,
+        compaction.compact_slots,
+        gather_lens,
+        offset,
+        out_row_offsets=out_row_offsets,
     )

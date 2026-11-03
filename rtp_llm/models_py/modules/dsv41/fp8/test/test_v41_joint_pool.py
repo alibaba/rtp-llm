@@ -557,16 +557,53 @@ class JointPoolCudaTest(unittest.TestCase):
                 )
             attn._gather_shards.assert_not_called()
 
-    def test_small_batch_retains_original_three_transports(self):
+    def test_small_batch_uses_joint_packet_when_owned_is_unavailable(self):
         attn, main, index, host, ends = self.fixture((0, 1, 255, 256, 257, 1025), 1, 0)
         self.warm(1, 0, torch.int32)
         expected, _ = self.oracle(attn, main, index, host)
         attn._gather_shards = Mock()
         actual = pools.try_gather_prefill_pools(attn, main, index, host, ends)
-        self.assertEqual(attn._gather_shards.call_count, 3)
+        self.assertEqual(attn._gather_shards.call_count, 1)
         for (g, keys), refs in zip(actual, expected):
             for a, b in zip((g, keys.quant, keys.scale), refs):
                 self.assert_bits(a, b)
+
+    def test_batch_32_uses_owned_before_joint_packet(self):
+        from rtp_llm.models_py.modules.dsv41.fp8 import _v41_owned_pool
+
+        attn, main, index, host, ends = self.fixture((1,) * 32, 1, 0)
+        self.warm(1, 0, torch.int32)
+        result = object()
+        with patch.object(
+            _v41_owned_pool, "try_gather", return_value=result
+        ) as attempt:
+            self.assertIs(
+                joint.try_gather(
+                    attn,
+                    main,
+                    index,
+                    host,
+                    ends,
+                    groups=pools._request_groups((1,) * 32),
+                ),
+                result,
+            )
+        attempt.assert_called_once()
+
+    def test_missing_joint_groups_still_tries_fixed_owned_first(self):
+        from rtp_llm.models_py.modules.dsv41.fp8 import _v41_owned_pool
+
+        attn, main, index, host, ends = self.fixture((1,), 1, 0)
+        self.warm(1, 0, torch.int32)
+        result = object()
+        with patch.object(
+            _v41_owned_pool, "try_gather", return_value=result
+        ) as attempt:
+            self.assertIs(
+                joint.try_gather(attn, main, index, host, ends, groups=None),
+                result,
+            )
+        attempt.assert_called_once()
 
     def test_padded_region_layout_falls_back_for_every_rank(self):
         for rank in range(4):

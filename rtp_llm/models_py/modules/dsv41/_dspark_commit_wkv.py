@@ -81,7 +81,8 @@ class DSparkCommitWKV(torch.nn.Module):
         measured = (
             first.N == 512
             and first.K == 5120
-            and torch.cuda.get_device_capability(first.weight.device) == (10, 3)
+            and torch.cuda.get_device_capability(first.weight.device)
+            in ((10, 0), (10, 3))
         )
         if (mode == "stacked" or (mode == "auto" and measured)) and not sleep_enabled():
             if torch.cuda.is_current_stream_capturing():

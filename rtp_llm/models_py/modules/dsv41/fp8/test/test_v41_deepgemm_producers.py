@@ -8,9 +8,6 @@ from unittest.mock import patch
 import torch
 import torch.nn.functional as F
 
-from rtp_llm.models_py.modules.dsv41._fused_rmsnorm_rope_triton import (
-    fused_rmsnorm_rope,
-)
 from rtp_llm.models_py.modules.dsv41._v41_query_quant import query_norm_quant
 from rtp_llm.models_py.modules.dsv41.fp8 import _v41_decode_indexer
 from rtp_llm.models_py.modules.dsv41.fp8._v41_swa_triton import (
@@ -29,6 +26,10 @@ from rtp_llm.models_py.modules.dsv41.fp8.test.test_v41_decode_global import (
     _clone_case,
     _reference,
     _snapshot,
+)
+from rtp_llm.models_py.modules.dsv41.fp8.test.test_v41_swa_kv import (
+    reference_norm_rope,
+    reference_swa_kv,
 )
 from rtp_llm.models_py.modules.dsv41.utils import V41MXFP8Linear
 
@@ -97,8 +98,16 @@ class DeepGEMMProducerTest(unittest.TestCase):
     @torch.inference_mode()
     def test_decode_calls_native_qkv_and_preserves_original_outputs(self):
         attn = self.attn
-        for batch, span in ((1, 1), (11, 6), (32, 6), (64, 6), (512, 1)):
-            with self.subTest(batch=batch, span=span):
+        for batch, span, qb_pdl in (
+            (1, 1, False),
+            (11, 6, False),
+            (32, 6, False),
+            (64, 6, False),
+            (512, 1, False),
+            (64, 6, True),
+            (64, 5, False),
+        ):
+            with self.subTest(batch=batch, span=span, qb_pdl=qb_pdl):
                 rows = batch * span
                 x = torch.randn(batch, span, 5120, device="cuda").bfloat16()
                 positions = torch.arange(rows, device="cuda", dtype=torch.int32) * 7
@@ -118,11 +127,14 @@ class DeepGEMMProducerTest(unittest.TestCase):
                 )
                 q = attn.wq_b.forward_quantized(*pair).unflatten(-1, (64, 512))
                 _apply_v41_q_rope(q, freqs, 64)
-                kv = fused_rmsnorm_rope(
-                    projected[..., 1280:], attn.kv_norm, freqs, 64, eps=attn.eps
+                kv = reference_swa_kv(
+                    projected[..., 1280:], attn.kv_norm, freqs, eps=attn.eps
+                )
+                prequant = reference_norm_rope(
+                    projected[..., 1280:], attn.kv_norm, freqs, eps=attn.eps
                 )
                 quantize_and_insert_swa_k_cache(
-                    kv.reshape(rows, 512), expected_cache, slots
+                    prequant.reshape(rows, 512), expected_cache, slots
                 )
                 with patch.dict(
                     os.environ,
@@ -137,6 +149,7 @@ class DeepGEMMProducerTest(unittest.TestCase):
                         freqs,
                         swa_pool=cache,
                         swa_slots=slots,
+                        qb_pdl=qb_pdl,
                     )
                 self.assertEqual(native.call_count, 1, "production native QKV dispatch")
                 self.assertTrue(actual.swa_written)

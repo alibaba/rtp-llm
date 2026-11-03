@@ -7,6 +7,7 @@ or async generator so the whole proxy path stays on a single asyncio event loop.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from typing import Optional
@@ -415,6 +416,10 @@ class DashScProxyServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
                 yield resp
         except BaseException as e:
             exc = e
+            if isinstance(e, asyncio.CancelledError):
+                await context.abort(
+                    grpc.StatusCode.CANCELLED, "Request handling cancelled"
+                )
             if (
                 record.backend_addr
                 and isinstance(e, Exception)

@@ -1,5 +1,39 @@
 load("//:def.bzl", "cc_test_wrapper", "copts")
 
+cc_test(
+    name = "dtop_origin_metadata_test",
+    srcs = ["DtopOriginMetadataTest.cc"],
+    copts = copts(),
+    deps = [
+        "//rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm:dtop_origin_metadata",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "sdk_buffer_safety_test",
+    srcs = ["SdkBufferSafetyTest.cc"],
+    copts = copts(),
+    deps = [
+        "//rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm:sdk_buffer_safety",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "decode_publication_accounting_test",
+    srcs = ["DecodePublicationAccountingTest.cc"],
+    copts = copts(),
+    deps = [
+        "//rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm:decode_publication_accounting",
+        "//rtp_llm/cpp/utils:core_utils",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
 cc_test_wrapper(
     name = "client_wrapper_test",
     testonly = True,
@@ -185,4 +219,24 @@ cc_test_wrapper(
         "@local_config_cuda//cuda:cuda_headers",
         "@local_config_cuda//cuda:cudart",
     ],
+)
+
+cc_test_wrapper(
+    name = "native_dtop_completion_test",
+    exec_properties = {"gpu": "L20_CU13"},
+    srcs = [
+        "NativeDtopCompletionTest.cc",
+        "KVCMMockTestBase.h",
+        "MockKVCMClient.h",
+    ],
+    copts = ["-fno-access-control"] + copts(),
+    tags = [
+        "L20_CU13",
+        "exclusive-if-local",
+    ],
+    target_compatible_with = select({
+        "//:using_remote_kv_cache": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+    deps = kvcm_backend_test_deps,
 )

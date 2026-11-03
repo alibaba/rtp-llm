@@ -29,6 +29,29 @@ except Exception:  # pragma: no cover - CPU-only import
 if triton is not None:
 
     @triton.jit
+    def _map_eplb_ids(
+        logical_ids,
+        token_index,
+        valid,
+        to_physical_map_ptr,
+        logical_count_ptr,
+        ep_rank,
+        map_stride: tl.constexpr,
+    ):
+        valid = valid & (logical_ids >= 0)
+        logical = tl.maximum(logical_ids, 0).to(tl.int64)
+        count = tl.load(logical_count_ptr + logical, mask=valid, other=1).to(tl.uint32)
+        # Match DeepGEMM's uint32 arithmetic, including wraparound. Top-k
+        # columns share the current invocation's local token index.
+        rotation = ep_rank.to(tl.uint32) + token_index.to(tl.uint32) * 23333
+        replica = rotation % count
+        return tl.load(
+            to_physical_map_ptr + logical * map_stride + replica.to(tl.int64),
+            mask=valid,
+            other=-1,
+        ).to(tl.int64)
+
+    @triton.jit
     def _pack_x_block(
         x_ptr,
         out_fp8_ptr,
@@ -81,7 +104,7 @@ if triton is not None:
             mask=row_mask,
         )
 
-    @triton.jit(do_not_specialize=["M"])
+    @triton.jit(do_not_specialize=["M", "ep_rank"])
     def _mega_moe_gate_pack_nonhash_kernel(
         x_ptr,
         scores_ptr,
@@ -90,6 +113,9 @@ if triton is not None:
         out_sf_ptr,
         out_weights_ptr,
         out_indices_ptr,
+        to_physical_map_ptr,
+        logical_count_ptr,
+        ep_rank,
         M,
         N: tl.constexpr,
         E: tl.constexpr,
@@ -107,6 +133,8 @@ if triton is not None:
         BLOCK_M: tl.constexpr,
         BLOCK_E: tl.constexpr,
         BLOCK_K: tl.constexpr,
+        HAS_EPLB: tl.constexpr,
+        map_stride: tl.constexpr,
     ):
         pid_m_blk = tl.program_id(0).to(tl.int64)
         pid_blk = tl.program_id(1)
@@ -163,6 +191,16 @@ if triton is not None:
                     idx = tl.argmax(cur, axis=0)
                     weight = tl.sum(tl.where(offs_e == idx, active, 0.0), axis=0)
                     safe_idx = tl.where(row_is_finite, idx, k)
+                    if HAS_EPLB:
+                        safe_idx = _map_eplb_ids(
+                            safe_idx,
+                            row,
+                            row_mask,
+                            to_physical_map_ptr,
+                            logical_count_ptr,
+                            ep_rank,
+                            map_stride,
+                        )
                     tl.store(
                         out_indices_ptr + row * out_indices_stride_m + k,
                         safe_idx.to(tl.int64),
@@ -181,7 +219,7 @@ if triton is not None:
                     mask=k_mask,
                 )
 
-    @triton.jit(do_not_specialize=["M"])
+    @triton.jit(do_not_specialize=["M", "ep_rank"])
     def _mega_moe_gate_pack_hash_kernel(
         x_ptr,
         scores_ptr,
@@ -191,6 +229,9 @@ if triton is not None:
         out_sf_ptr,
         out_weights_ptr,
         out_indices_ptr,
+        to_physical_map_ptr,
+        logical_count_ptr,
+        ep_rank,
         M,
         N: tl.constexpr,
         E: tl.constexpr,
@@ -210,6 +251,8 @@ if triton is not None:
         fp8_max: tl.constexpr,
         BLOCK_M: tl.constexpr,
         BLOCK_K: tl.constexpr,
+        HAS_EPLB: tl.constexpr,
+        map_stride: tl.constexpr,
     ):
         pid_m_blk = tl.program_id(0).to(tl.int64)
         pid_blk = tl.program_id(1)
@@ -273,6 +316,16 @@ if triton is not None:
                 denom = tl.sum(tl.where(k_mask, weights, 0.0), axis=0) + norm_eps
                 weights = weights / denom * route_scale
                 weights = tl.where(row_is_finite, weights, route_scale / K)
+                if HAS_EPLB:
+                    idx = _map_eplb_ids(
+                        idx,
+                        row,
+                        k_mask,
+                        to_physical_map_ptr,
+                        logical_count_ptr,
+                        ep_rank,
+                        map_stride,
+                    )
                 tl.store(
                     out_indices_ptr + row * out_indices_stride_m + k_offs,
                     idx,
@@ -305,7 +358,16 @@ def fused_mega_moe_gate_pack_nonhash(
     *,
     route_scale: float,
     norm_eps: float = 1.0e-12,
+    to_physical_map: torch.Tensor | None = None,
+    logical_count: torch.Tensor | None = None,
+    ep_rank: int = 0,
 ) -> None:
+    """Pack inputs and routing, optionally writing EPLB physical IDs directly.
+
+    EPLB map/count are borrowed contiguous int32 tensors on the input device,
+    supplied together as [experts, replica capacity] and [experts]. Valid map
+    entries and positive counts are owned and validated by EplbLayer.
+    """
     tokens, dim = x.shape
     experts = scores_bf16.shape[1]
     topk = out_indices.shape[1]
@@ -324,6 +386,9 @@ def fused_mega_moe_gate_pack_nonhash(
         out_sf,
         out_weights,
         out_indices,
+        to_physical_map,
+        logical_count,
+        ep_rank,
         tokens,
         dim,
         experts,
@@ -341,6 +406,8 @@ def fused_mega_moe_gate_pack_nonhash(
         BLOCK_M=block_m,
         BLOCK_E=block_e,
         BLOCK_K=block_k,
+        HAS_EPLB=to_physical_map is not None,
+        map_stride=to_physical_map.stride(0) if to_physical_map is not None else 0,
         num_warps=4,
     )
 
@@ -357,7 +424,11 @@ def fused_mega_moe_gate_pack_hash(
     *,
     route_scale: float,
     norm_eps: float = 1.0e-12,
+    to_physical_map: torch.Tensor | None = None,
+    logical_count: torch.Tensor | None = None,
+    ep_rank: int = 0,
 ) -> None:
+    """Pack hash routes with the same borrowed EPLB map contract as nonhash."""
     tokens, dim = x.shape
     experts = scores_bf16.shape[1]
     topk = out_indices.shape[1]
@@ -376,6 +447,9 @@ def fused_mega_moe_gate_pack_hash(
         out_sf,
         out_weights,
         out_indices,
+        to_physical_map,
+        logical_count,
+        ep_rank,
         tokens,
         dim,
         experts,
@@ -395,6 +469,8 @@ def fused_mega_moe_gate_pack_hash(
         fp8_max,
         BLOCK_M=block_m,
         BLOCK_K=block_k,
+        HAS_EPLB=to_physical_map is not None,
+        map_stride=to_physical_map.stride(0) if to_physical_map is not None else 0,
         num_warps=4,
     )
 

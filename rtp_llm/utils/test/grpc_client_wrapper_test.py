@@ -128,53 +128,5 @@ class GrpcClientWrapperTest(unittest.IsolatedAsyncioTestCase):
         )
 
 
-class EplbConfigRpcTest(unittest.IsolatedAsyncioTestCase):
-    async def asyncSetUp(self):
-        self.client = GrpcClientWrapper(server_port=10000)
-        self.requests = []
-
-        class Stub:
-            async def UpdateEplbConfig(_, request):
-                self.requests.append(request)
-                return pb2.EmptyPB()
-
-        async def ensure_connection():
-            self.client.stub = Stub()
-
-        self.client._ensure_connection = ensure_connection
-
-    async def test_mode_only_preserves_interval_presence(self):
-        result = await self.client.update_eplb_config({"mode": "ALL"})
-        self.assertEqual(result, {"status": "ok"})
-        self.assertEqual(self.requests[0].mode, "ALL")
-        self.assertFalse(self.requests[0].HasField("update_time"))
-
-    async def test_explicit_interval_and_zero_are_not_replaced_by_wall_clock(self):
-        for interval in (0, 17):
-            with self.subTest(interval=interval):
-                result = await self.client.update_eplb_config(
-                    {"mode": "ALL", "update_time": interval}
-                )
-                self.assertEqual(result, {"status": "ok"})
-                self.assertTrue(self.requests[-1].HasField("update_time"))
-                self.assertEqual(self.requests[-1].update_time, interval)
-
-    async def test_json_body_preserves_interval(self):
-        result = await self.client.update_eplb_config(
-            '{"mode":"STATS","update_time":7}'
-        )
-        self.assertEqual(result, {"status": "ok"})
-        self.assertEqual(self.requests[0].update_time, 7)
-
-    async def test_invalid_intervals_never_reach_rpc(self):
-        for interval in (-1, 1.5, True, "7", None):
-            with self.subTest(interval=interval):
-                result = await self.client.update_eplb_config(
-                    {"mode": "ALL", "update_time": interval}
-                )
-                self.assertIn("non-negative integer", result["error"])
-        self.assertEqual(self.requests, [])
-
-
 if __name__ == "__main__":
     unittest.main()

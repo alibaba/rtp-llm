@@ -1,6 +1,7 @@
 workspace(name = "rtp_llm")
 
 load("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
+load("@bazel_tools//tools/build_defs/repo:git.bzl", "new_git_repository")
 
 http_archive(
     name = "io_opentelemetry_cpp",
@@ -47,6 +48,14 @@ http_deps()
 load("@rtp_deps//:git.bzl", "git_deps")
 
 git_deps()
+
+# Internal builds replace @rtp_deps; keep Engram's header dependency shared.
+new_git_repository(
+    name = "cutlass_engram",
+    remote = "https://github.com/NVIDIA/cutlass.git",
+    commit = "f3fde58372d33e9a5650ba7b80fc48b3b49d40c8",
+    build_file = "//3rdparty/cutlass:cutlass.BUILD",
+)
 
 load("//3rdparty/xgrammar:repositories.bzl", "xgrammar_deps")
 

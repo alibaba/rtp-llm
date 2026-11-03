@@ -44,9 +44,6 @@ from rtp_llm.models_py.modules.dsv41._dspark_metadata_triton import (
     DSparkMetadata,
     try_build_dspark_metadata,
 )
-from rtp_llm.models_py.modules.dsv41._fused_rmsnorm_rope_triton import (
-    fused_rmsnorm_rope,
-)
 from rtp_llm.models_py.modules.dsv41.attn_type import SWA_KV
 from rtp_llm.models_py.modules.dsv41.cp import build_cp_context_for_forward
 from rtp_llm.models_py.modules.dsv41.fp8._kv_cache_utils import (
@@ -56,6 +53,7 @@ from rtp_llm.models_py.modules.dsv41.fp8._kv_cache_utils import (
 from rtp_llm.models_py.modules.dsv41.fp8._swa_ops_triton import (
     compute_swa_slot_mapping_from_positions,
 )
+from rtp_llm.models_py.modules.dsv41.fp8._v41_swa_kv import swa_kv_norm_rope
 from rtp_llm.models_py.modules.dsv41.fp8.attention import BIND_KEEP, bind_attn_cache
 from rtp_llm.models_py.modules.dsv41.fp8.decode.compute_qkv import decode_compute_qkv
 from rtp_llm.models_py.modules.dsv41.fp8.decode.decode_attn_metadata import (
@@ -123,6 +121,7 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
     # Draft side: carries the capture ids for the shared-buffer row-width
     # derivation but consumes the features — only the target captures.
     _captures_aux_hidden = False
+    _dspark_confidence_enabled = False
 
     def __init__(
         self,
@@ -158,6 +157,11 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
             or str(role_type).upper().rsplit(".", 1)[-1] == "PREFILL"
         )
         self._v4_args.commit_only = self._commit_only_prefill
+        self._dspark_confidence_enabled = (
+            bool(getattr(model_config, "dspark_confidence_enabled", False))
+            and not self._commit_only_prefill
+        )
+        self._dspark_confidence_hidden_weight: Optional[torch.Tensor] = None
         if self._commit_only_prefill:
             logging.info(
                 "[DeepSeekV4DSparkModel] PREFILL role: enabling commit-only "
@@ -264,10 +268,26 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
             # Commit/proposal math reads device length mirrors and block
             # tables; no host metadata values are consumed during replay.
             cuda_graph_uses_device_metadata=True,
+            cuda_graph_preparation_in_graph=True,
         )
 
     def _load_extra_weights(self, weights: ModelWeights) -> None:
         gw = weights.global_weights
+        if self._dspark_confidence_enabled:
+            confidence_weight = gw[W.dspark_confidence_head]
+            expected_shape = (1, int(self._v4_args.dim) + self._dspark_markov_rank)
+            if (
+                tuple(confidence_weight.shape) != expected_shape
+                or confidence_weight.dtype != torch.float32
+            ):
+                raise ValueError(
+                    "V4.1 confidence head requires FP32 weight "
+                    f"{expected_shape}, got {tuple(confidence_weight.shape)} "
+                    f"{confidence_weight.dtype}"
+                )
+            self._dspark_confidence_hidden_weight = confidence_weight[
+                :, : int(self._v4_args.dim)
+            ]
         self.main_norm = RMSNorm(
             gw[W.v4_dspark_main_norm], float(self._v4_args.norm_eps)
         )
@@ -639,7 +659,7 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
             context_freqs = attn.freqs_cis.index_select(
                 0, safe_context_pos
             ).contiguous()
-            context_kv = fused_rmsnorm_rope(
+            context_kv = swa_kv_norm_rope(
                 (
                     attn._lin(attn.wkv, main_x).contiguous()
                     if projected_kv is None
@@ -890,16 +910,19 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
                 attn,
                 x,
                 query_positions.reshape(-1),
+                swa_pool=pool,
+                swa_slots=query_slots,
                 **({"mega_attention": mega} if mega is not None else {}),
             )
-            _write_dspark_swa(
-                kv=qkv.kv,
-                slot_mapping=query_slots,
-                swa_pool_3d=pool,
-                bsz=batch_size,
-                q_len=gamma,
-                head_dim=int(attn.head_dim),
-            )
+            if not qkv.swa_written:
+                _write_dspark_swa(
+                    kv=qkv.kv,
+                    slot_mapping=query_slots,
+                    swa_pool_3d=pool,
+                    bsz=batch_size,
+                    q_len=gamma,
+                    head_dim=int(attn.head_dim),
+                )
 
             if mega is not None:
                 # DSpark lengths are per request; Mega flattens query tokens.
@@ -1049,6 +1072,36 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
 
         head_hidden = self.v4._hc_head_reduce(hidden).reshape(batch_size * gamma, dim)
         return self.v4.norm(head_hidden)
+
+    def compute_draft_outputs(self, hidden: torch.Tensor) -> PyModelOutputs:
+        if not self._dspark_confidence_enabled:
+            return super().compute_draft_outputs(hidden)
+        batch_size, gamma = int(hidden.shape[0]), int(hidden.shape[1])
+        dim = int(self._v4_args.dim)
+        head_hidden = self.v4._hc_head_reduce(hidden).reshape(batch_size * gamma, dim)
+        if self._dspark_confidence_hidden_weight is None:
+            raise RuntimeError("V4.1 confidence head weight was not loaded")
+        # The checkpoint confidence head reads pre-norm hidden. Only its scalar
+        # hidden contribution crosses the Python/C++ boundary; the sampler adds
+        # the previous-token Markov contribution before applying sigmoid.
+        hidden_logits = torch.mm(
+            head_hidden.float(), self._dspark_confidence_hidden_weight.t()
+        )
+        outputs = PyModelOutputs(self.v4.norm(head_hidden))
+        outputs.dspark_confidence_hidden_logits = hidden_logits
+        return outputs
+
+    def dspark_empty_outputs(
+        self, batch_size: int, device: torch.device
+    ) -> PyModelOutputs:
+        outputs = super().dspark_empty_outputs(batch_size, device)
+        if self._dspark_confidence_enabled:
+            outputs.dspark_confidence_hidden_logits = torch.zeros(
+                (batch_size * self._dspark_query_width, 1),
+                dtype=torch.float32,
+                device=device,
+            )
+        return outputs
 
     def _forward_device(self) -> torch.device:
         if getattr(self, "_commit_only_prefill", False):

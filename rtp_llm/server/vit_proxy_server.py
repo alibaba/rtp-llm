@@ -244,6 +244,8 @@ def _worker_already_reported_vit_error(error: Optional[BaseException]) -> bool:
 
 def _forward_worker_error_metadata(context, error: BaseException) -> None:
     """Forward public worker error details without exposing the dedupe marker."""
+    if context is None:
+        return
     try:
         metadata = error.trailing_metadata()
     except Exception:
@@ -441,6 +443,7 @@ class VitProxyRpcServer(MultimodalRpcServiceServicer):
         so both real and test contexts carry the exact code/details."""
         code = error.code()
         details = error.details()
+        _forward_worker_error_metadata(context, error)
         abort = getattr(context, "abort", None) if context is not None else None
         if abort is not None:
             abort(code, details)
@@ -612,6 +615,8 @@ class VitProxyRpcServer(MultimodalRpcServiceServicer):
                 )
 
             exhausted_workers = True
+            if isinstance(last_error, grpc.RpcError):
+                self._abort_with_worker_status(context, last_error)
             details = "No healthy VIT worker behind proxy"
             if last_error:
                 details += f": {last_error}"

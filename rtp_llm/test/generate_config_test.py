@@ -3,6 +3,7 @@ import os
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional, Union
 from unittest import TestCase, main
+from unittest.mock import patch
 
 from transformers import AutoTokenizer
 
@@ -1858,6 +1859,197 @@ class RawUpdateAndGrammarConflictTest(TestCase):
             {"format": {"type": "regex", "pattern": "a"}},
         )
         self.assertEqual(remain, {"stranger": 1})
+
+
+class ThinkProcessorServicePolicyTest(TestCase):
+    def _env(self, enabled=True):
+        env = GenerateEnvConfig()
+        env.enable_think_processor = enabled
+        env.think_mode = "enabled"
+        env.think_start_tag = "<think>"
+        env.think_end_tag = "</think>"
+        return env
+
+    def test_default_service_preserves_strict_reasoning_budget(self):
+        for budget in (0, 1, 7):
+            with self.subTest(budget=budget):
+                cfg = GenerateConfig(max_thinking_tokens=budget)
+                self.assertTrue(cfg._enable_think_processor)
+                cfg.add_thinking_params(None, self._env())
+                grammar = cfg.structural_tag["format"]
+                self.assertEqual(grammar["type"], "sequence")
+                self.assertEqual(
+                    grammar["elements"][0],
+                    {
+                        "type": "tag",
+                        "begin": "",
+                        "content": {"type": "any_text", "max_tokens": budget},
+                        "end": "</think>",
+                    },
+                )
+                self.assertEqual(grammar["elements"][1], {"type": "any_text"})
+
+    def test_disabled_service_keeps_thinking_metadata_without_grammar(self):
+        for mode in (ThinkingMode.ENABLED, ThinkingMode.ADAPTIVE):
+            for response_format in (None, {"type": "text"}):
+                with self.subTest(mode=mode, response_format=response_format):
+                    cfg = GenerateConfig(
+                        thinking_mode=mode,
+                        max_thinking_tokens=7,
+                        begin_think_token_ids=[6],
+                        response_format=response_format,
+                    )
+                    env = self._env(False)
+                    env.think_end_token_id = 7
+                    cfg.add_thinking_params(None, env)
+                    self.assertEqual(cfg.thinking_mode, mode)
+                    self.assertEqual(cfg.in_think_mode, mode == ThinkingMode.ENABLED)
+                    self.assertEqual(cfg.max_thinking_tokens, 7)
+                    self.assertEqual(cfg.begin_think_token_ids, [6])
+                    self.assertEqual(cfg.end_think_token_ids, [7])
+                    self.assertIsNone(cfg.structural_tag)
+                    self.assertIsNone(cfg.json_schema)
+                    self.assertIsNone(cfg.regex)
+                    self.assertIsNone(cfg.ebnf)
+                    self.assertFalse(cfg._reasoning_envelope_applied)
+                    self.assertIsNone(cfg._reasoning_final_constraint)
+                    validate_engine_ready(cfg)
+
+    def test_disabled_service_preserves_each_explicit_final_constraint(self):
+        cases = (
+            {"response_format": {"type": "json_object"}},
+            {
+                "response_format": {
+                    "type": "json_schema",
+                    "json_schema": {"schema": {"type": "object"}},
+                }
+            },
+            {"regex": "[a-z]+"},
+            {"ebnf": 'root ::= "a"'},
+            {
+                "structural_tag": {
+                    "type": "structural_tag",
+                    "format": {"type": "any_text"},
+                }
+            },
+        )
+        for fields in cases:
+            with self.subTest(fields=fields):
+                expected = GenerateConfig(**fields)
+                expected_constraint = expected.finalize_response_format()
+                cfg = GenerateConfig(max_thinking_tokens=7, **fields)
+                actual = cfg.add_thinking_params(None, self._env(False))
+                self.assertEqual(actual, expected_constraint)
+                for field in ("json_schema", "regex", "ebnf", "structural_tag"):
+                    self.assertEqual(getattr(cfg, field), getattr(expected, field))
+                before = cfg.model_dump()
+                self.assertEqual(cfg.finalize_response_format(), actual)
+                self.assertEqual(cfg.model_dump(), before)
+
+    def test_policy_switch_restores_final_constraint_without_double_wrapping(self):
+        for fields in (
+            {},
+            {"regex": "[a-z]+"},
+            {"response_format": {"type": "json_object"}},
+        ):
+            with self.subTest(fields=fields):
+                cfg = GenerateConfig(max_thinking_tokens=7, **fields)
+                final = cfg.add_thinking_params(None, self._env())
+                first_envelope = copy.deepcopy(cfg.structural_tag)
+                self.assertTrue(cfg._reasoning_envelope_applied)
+                self.assertEqual(cfg.add_thinking_params(None, self._env()), final)
+                self.assertEqual(cfg.structural_tag, first_envelope)
+                self.assertEqual(cfg.add_thinking_params(None, self._env(False)), final)
+                self.assertTrue(cfg.in_think_mode)
+                self.assertFalse(cfg._reasoning_envelope_applied)
+                self.assertIsNone(cfg._reasoning_final_constraint)
+                expected = GenerateConfig(**fields)
+                expected.finalize_response_format()
+                for field in ("json_schema", "regex", "ebnf", "structural_tag"):
+                    self.assertEqual(getattr(cfg, field), getattr(expected, field))
+                disabled_dump = cfg.model_dump()
+                self.assertEqual(cfg.add_thinking_params(None, self._env(False)), final)
+                self.assertEqual(cfg.model_dump(), disabled_dump)
+                self.assertEqual(cfg.add_thinking_params(None, self._env()), final)
+                self.assertEqual(cfg.structural_tag, first_envelope)
+
+    def test_deep_copies_and_updates_preserve_private_policy_and_final_constraint(self):
+        cfg = GenerateConfig(regex="[a-z]+", max_thinking_tokens=7)
+        cfg.add_thinking_params(None, self._env())
+        original = cfg.model_dump()
+        for cloned in (copy.deepcopy(cfg), cfg.model_copy(deep=True)):
+            self.assertTrue(cloned._reasoning_envelope_applied)
+            self.assertEqual(
+                cloned._reasoning_final_constraint, cfg._reasoning_final_constraint
+            )
+            cloned.add_thinking_params(None, self._env(False))
+            cloned.update({"temperature": 0.7})
+            self.assertFalse(cloned._enable_think_processor)
+            cloned.finalize_response_format()
+            self.assertEqual(cloned.regex, "[a-z]+")
+            self.assertIsNone(cloned.structural_tag)
+            copied_disabled = cloned.model_copy(deep=True)
+            self.assertFalse(copied_disabled._enable_think_processor)
+            copied_disabled.finalize_response_format()
+            self.assertEqual(copied_disabled.regex, "[a-z]+")
+        self.assertEqual(cfg.model_dump(), original)
+        self.assertTrue(cfg._enable_think_processor)
+        self.assertTrue(cfg._reasoning_envelope_applied)
+
+    def test_service_policy_is_not_a_request_field_or_serialized_field(self):
+        cfg = GenerateConfig(
+            _enable_think_processor=False, enable_think_processor=False
+        )
+        self.assertTrue(cfg._enable_think_processor)
+        cfg.update({"_enable_think_processor": False, "enable_think_processor": False})
+        self.assertTrue(cfg._enable_think_processor)
+        cfg.add_thinking_params(None, self._env(False))
+        self.assertFalse(cfg._enable_think_processor)
+        for field in ("_enable_think_processor", "enable_think_processor"):
+            self.assertNotIn(field, cfg.model_dump())
+            self.assertNotIn(field, GenerateConfig.model_fields)
+        cfg.add_thinking_params(None, self._env())
+        self.assertTrue(cfg._enable_think_processor)
+
+    def test_disabled_service_does_not_remove_explicit_grammar_validation(self):
+        cfg = GenerateConfig(regex="a", ebnf='root ::= "a"')
+        with self.assertRaises(FtRuntimeException):
+            cfg.add_thinking_params(None, self._env(False))
+        cfg = GenerateConfig(response_format={"type": "json_object"}, num_beams=2)
+        with self.assertRaisesRegex(FtRuntimeException, "grammar-constrained"):
+            cfg.add_thinking_params(None, self._env(False))
+
+    def test_default_custom_boundaries_preserve_original_grammar(self):
+        for end in ("</think>\n\n", {"type": "token", "token": 123}, ["</think>"]):
+            with self.subTest(end=end):
+                cfg = GenerateConfig(in_think_mode=True, max_thinking_tokens=3)
+                fmt = ReasoningFormat(tag_begin="", tag_end=end)
+                cfg.finalize_response_format(reasoning_format=fmt)
+                self.assertEqual(cfg.structural_tag["format"]["type"], "sequence")
+                self.assertEqual(
+                    cfg.structural_tag["format"]["elements"][0]["end"], end
+                )
+
+    def test_openai_adaptive_copy_preserves_syntax_metadata(self):
+        endpoint = OpenaiEndpoint.__new__(OpenaiEndpoint)
+        endpoint.generate_env_config = self._env()
+        endpoint.tokenizer = SimpleNamespace(encode=lambda text, **_: [10])
+        fmt = ReasoningFormat(
+            tag_begin="",
+            tag_end="</think>",
+            suffix="TAIL",
+            no_think_excludes=("boundary",),
+        )
+        renderer = SimpleNamespace(get_reasoning_format=lambda: fmt)
+        for input_ids, expected_begin in (([1], "<think>"), ([1, 10], "")):
+            with self.subTest(input_ids=input_ids):
+                cfg = GenerateConfig(thinking_mode=ThinkingMode.ADAPTIVE)
+                resolved = endpoint._reasoning_format_for_prompt(
+                    cfg, renderer, input_ids
+                )
+                self.assertEqual(resolved.tag_begin, expected_begin)
+                self.assertEqual(resolved.suffix, fmt.suffix)
+                self.assertEqual(resolved.no_think_excludes, fmt.no_think_excludes)
 
 
 if __name__ == "__main__":

@@ -27,6 +27,8 @@ static const std::string multi_tokens_predict_d2t_map        = "multi_tokens_pre
 static const std::string multi_tokens_predict_t2d_map        = "multi_tokens_predict_t2d_map";
 static const std::string dspark_markov_w1                    = "dspark_markov_w1.weight";
 static const std::string dspark_markov_w2                    = "dspark_markov_w2.weight";
+// Optional DSpARK per-position acceptance-rate predictor [1, hidden + markov_rank].
+static const std::string dspark_confidence_head = "dspark_confidence_head.weight";
 
 // eagle3
 static const std::string eagle3_fc_proj          = "eagle3_fc.weight";

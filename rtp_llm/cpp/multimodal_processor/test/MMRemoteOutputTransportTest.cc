@@ -466,6 +466,19 @@ TEST(MMRemoteOutputTransportTest, strictRdmaRejectsInlineAndReleasesMalformedMix
     EXPECT_EQ(strict_client.control->released.front(), std::vector<std::string>({"unread-slot"}));
 }
 
+TEST(MMRemoteOutputTransportTest, expiredGrpcBudgetReturnsTimeoutBeforeConnecting) {
+    auto metrics = std::make_shared<MMTransportMetrics>(nullptr);
+    auto client  = createGrpcMMControlClient(metrics, 1000);
+    for (const int64_t timeout_ms : {0, -1}) {
+        DeadlineBudget     budget(timeout_ms);
+        MultimodalInputsPB request;
+        auto               result = client->request("127.0.0.1:1", request, budget);
+        ASSERT_FALSE(result.ok());
+        EXPECT_EQ(result.error().code(), ErrorCode::GENERATE_TIMEOUT);
+        EXPECT_EQ(result.error().ToString(), "vit rpc budget exhausted before the call");
+    }
+}
+
 TEST(MMRemoteOutputTransportTest, typedRequestBudgetDoesNotExtendConfiguredRpcBudget) {
     MultimodalInputsPB request;
     request.set_timeout_ms(8000);

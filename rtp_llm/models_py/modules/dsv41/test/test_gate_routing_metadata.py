@@ -153,8 +153,11 @@ class GateRoutingMetadataTest(unittest.TestCase):
                 moe.dim, moe.layer_id, moe.max_tokens_per_rank = 3, layer, 3
                 moe._gate_pack_static = False
                 moe._routed_includes_shared = True
-                moe._strategy = lambda x, weights, indices: (
-                    x + weights.sum(dim=-1, keepdim=True) + indices[:, :1]
+                moe.eplb_layer = None
+                moe._strategy = (
+                    lambda x, weights, indices, *, expert_load, eplb_layer: (
+                        x + weights.sum(dim=-1, keepdim=True) + indices[:, :1]
+                    )
                 )
                 real_gate = _gate(hashed=True)
                 seen = []
@@ -214,6 +217,8 @@ class GateRoutingMetadataTest(unittest.TestCase):
                 class ForwardLayer:
                     def __init__(self, layer_id):
                         self.layer_id = layer_id
+                        self.engram = None
+                        self.engram_hashes = None
 
                     def __call__(self, *args, **kwargs):
                         return layer(*args, **kwargs)
@@ -295,6 +300,8 @@ class GateRoutingMetadataTest(unittest.TestCase):
         class Layer:
             def __init__(self, layer_id):
                 self.layer_id = layer_id
+                self.engram = None
+                self.engram_hashes = None
 
             def __call__(self, hidden, *args, **kwargs):
                 return hidden + self.layer_id + 1

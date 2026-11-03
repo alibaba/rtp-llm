@@ -23,7 +23,6 @@ namespace rtp_llm {
 
 namespace {
 
-
 bool readEnvFlagOnce(const char* env_name, const char* log_tag, const char* label) {
     const char* env = std::getenv(env_name);
     const bool  on  = (env != nullptr && std::string(env) == "1");
@@ -131,7 +130,7 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
         role_type_,
         warm_up_,
         params.model_config_.hidden_state_capture_layer_ids);
-    model_init_params.hidden_state_capture_dtype     = params.model_config_.hidden_state_capture_dtype;
+    model_init_params.hidden_state_capture_dtype = params.model_config_.hidden_state_capture_dtype;
 #if USING_CUDA || USING_ROCM
     if (params.hw_kernel_config.enable_cuda_graph && model_init_params.kv_cache_layer_layout.has_value()) {
         const auto& model_cache_config =
@@ -170,7 +169,12 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
     }
     if (!params.py_model.is_none()) {
         RTP_LLM_LOG_INFO("init executor with python model");
-        model_.reset(new PyWrappedModel(model_init_params, params.py_model));
+        // A Decode worker may use the synthetic prefill memory warmup, which
+        // has no cache yet. Opt out explicitly; cache-backed decode warmup
+        // still captures graphs so its memory reservation includes them.
+        const bool allow_cuda_graph = !(params.sp_config.type == SP_TYPE_DSPARK && warm_up_ && !cache_manager);
+        model_.reset(new PyWrappedModel(
+            model_init_params, params.py_model, false, false, DSparkModelRole::NONE, allow_cuda_graph));
     } else if (test_model_factory) {
         RTP_LLM_LOG_INFO("init executor with test model factory");
         model_ = test_model_factory(model_init_params);
@@ -186,14 +190,12 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
 
     const int async_worker_count =
         tp_rank_ > 0 || warm_up_ || is_propose_ ? 0 : params.runtime_config.output_dispatcher_worker_count;
-    batch_stream_processor_.reset(
-        new NormalBatchStreamProcessor(params.model_config_,
-                                       params.pd_sep_config,
-                                       params.profiling_debug_logging_config,
-                                       cache_config,
-                                       warm_up_,
-                                       async_worker_count,
-                                       tp_rank_ == 0 && !warm_up_ && !is_propose_ ? metrics_reporter_ : nullptr));
+    batch_stream_processor_.reset(new NormalBatchStreamProcessor(params.model_config_,
+                                                                 params.pd_sep_config,
+                                                                 params.profiling_debug_logging_config,
+                                                                 cache_config,
+                                                                 warm_up_,
+                                                                 async_worker_count));
     LogitsProcessorFactory::init(params.model_config_,
                                  params.grammar_config,
                                  params.sp_config.tree_decode_config,
@@ -404,8 +406,12 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
         absl::Status result;
         if (zero_token_batch) {
             cudaSyncAndCheck();
-            result = batch_stream_processor_->dispatchPrefillOnly(stream_groups,
-                                                                  model_output.generation_prefill_cuda_graph_status);
+            const auto context_kv_gpu_ready_at =
+                model_output.context_kv_has_rank_completion_dependency ?
+                    std::optional<RemoteRestoreTiming::Clock::time_point>(RemoteRestoreTiming::Clock::now()) :
+                    std::nullopt;
+            result = batch_stream_processor_->dispatchPrefillOnly(
+                stream_groups, model_output.generation_prefill_cuda_graph_status, context_kv_gpu_ready_at);
         } else {
             MergedOutput merge_outputs{std::move(model_output), std::move(sampler_output)};
             if (useDeviceInput()) {
@@ -457,10 +463,6 @@ void NormalExecutor::reportMetrics(const StreamGroups&                        st
         tps_reporter_.report(&tps_collector);
         wall_tps_reporter_.report(&tps_collector);
     }
-}
-
-bool NormalExecutor::updateEplbConfig(const EPLBConfig& config) {
-    return model_ ? model_->updateEplbConfig(config) : true;
 }
 
 bool NormalExecutor::useStreamAsync() const {

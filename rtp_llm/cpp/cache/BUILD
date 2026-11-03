@@ -132,6 +132,7 @@ cc_library(
     copts = copts(),
     visibility = ["//visibility:public"],
     deps = [
+        ":decode_reuse_sources",
         ":block_info",
         ":batch_kv_cache_resource",
         ":cache_config",
@@ -144,6 +145,13 @@ cc_library(
         "//rtp_llm/cpp/utils:core_utils",
         "//rtp_llm/models_py/bindings/core:types",
     ] + torch_deps(),
+)
+
+cc_library(
+    name = "decode_reuse_sources",
+    hdrs = ["DecodeReuseSources.h", "CacheTier.h"],
+    deps = ["//rtp_llm/cpp/utils:decode_cache_origin"],
+    visibility = ["//visibility:public"],
 )
 
 cc_library(

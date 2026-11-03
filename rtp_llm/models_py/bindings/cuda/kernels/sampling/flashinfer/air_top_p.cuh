@@ -25,6 +25,7 @@
 #include <cub/cub.cuh>
 #include <cuda/atomic>
 #include <cuda/std/limits>
+#include <algorithm>
 #include <type_traits>
 
 namespace flashinfer {
@@ -191,6 +192,67 @@ __device__ constexpr void histAtomicAdd(HisT_* dst, T value) {
     }
 }
 
+// Histogram update for one element, folding a warp that maps entirely to one
+// bucket into a single shared-memory atomic pair.
+//
+// A flat probability row puts all `d` elements into one bucket. That happens
+// whenever the logits row is constant: softmax then yields exactly 1/d for
+// every entry, so every element has the same bit pattern and therefore the
+// same radix bucket. Without aggregation the per-element atomics serialize on
+// one address and dominate all `NUM_PASSES` sweeps -- measured on B300/SM103 at
+// 9.84 ms for 288 flat rows against 0.35 ms for the same count of real logits.
+// Rows that reach the sampler only as padding (unverified dense tail positions)
+// are exactly this shape, so the slow path was paid on rows nobody reads.
+//
+// The bucket test is a warp broadcast plus `__all_sync`, not `__match_any_sync`.
+// Both were measured: the per-lane match mask costs enough on peaked rows to
+// double their runtime (0.35 -> 0.71 ms), while the warp-uniform test keeps
+// them within 3% and still collapses the flat rows (5.20 -> 0.43 ms on a mixed
+// batch of 192 real plus 96 padded rows).
+//
+// Lanes that diverge into different buckets keep the plain per-lane atomics:
+// once buckets differ, contention is low and the aggregation is not worth it.
+//
+// Aggregation is attempted only when the whole warp is converged. The
+// per-element callback is also invoked from the divergent tail of
+// `vectorizedProcess`, where `__activemask()` is a lane subset; `__shfl_sync`
+// and `__all_sync` require every lane named in the mask to reach the same call,
+// so a partial mask would deadlock. The bulk of every sweep runs in the
+// converged loop body, which is where the aggregation pays off.
+template<bool IsDeterministic, typename T, typename HisT_>
+__device__ __forceinline__ void histAtomicAddWarp(HisT_* histDst, IdxT* countDst, int bucket, T value) {
+    constexpr unsigned kFullWarp = 0xffffffffu;
+    if (__activemask() == kFullWarp) {
+        int const head = __shfl_sync(kFullWarp, bucket, 0);
+        if (__all_sync(kFullWarp, bucket == head)) {
+            // Every lane shares the bucket: one butterfly reduction, one atomic.
+            IdxT count = __reduce_add_sync(kFullWarp, static_cast<IdxT>(1));
+            if constexpr (IsDeterministic) {
+                uint64_t total = static_cast<uint64_t>(calcMantissa(value));
+#pragma unroll
+                for (int offset = 16; offset > 0; offset >>= 1)
+                    total += __shfl_down_sync(kFullWarp, total, offset);
+                if ((threadIdx.x & 31) == 0) {
+                    atomicAdd(reinterpret_cast<unsigned long long*>(histDst), total);
+                    atomicAdd(countDst, count);
+                }
+            } else {
+                float total = static_cast<float>(value);
+#pragma unroll
+                for (int offset = 16; offset > 0; offset >>= 1)
+                    total += __shfl_down_sync(kFullWarp, total, offset);
+                if ((threadIdx.x & 31) == 0) {
+                    atomicAdd(histDst, static_cast<HisT_>(total));
+                    atomicAdd(countDst, count);
+                }
+            }
+            return;
+        }
+    }
+    histAtomicAdd<IsDeterministic, T>(histDst, value);
+    atomicAdd(countDst, static_cast<IdxT>(1));
+}
+
 // ======================== Vectorized process ========================
 
 template<typename T, typename Func>
@@ -249,8 +311,7 @@ __device__ __forceinline__ void filterAndHistogram(T const*    inBuf,
     if (pass == 0) {
         auto f = [startBit, mask, histogramSmem, countHistogramSmem](T value, IdxT) {
             int bucket = calcBucket<T>(value, startBit, mask);
-            histAtomicAdd<IsDeterministic, T>(histogramSmem + bucket, value);
-            atomicAdd(countHistogramSmem + bucket, static_cast<IdxT>(1));
+            histAtomicAddWarp<IsDeterministic, T>(histogramSmem + bucket, countHistogramSmem + bucket, bucket, value);
         };
         vectorizedProcess<T>(static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x,
                              static_cast<size_t>(blockDim.x) * gridDim.x,
@@ -271,8 +332,8 @@ __device__ __forceinline__ void filterAndHistogram(T const*    inBuf,
                         outBuf[pos] = value;
                     }
                     int bucket = calcBucket<T>(value, startBit, mask);
-                    histAtomicAdd<IsDeterministic, T>(histogramSmem + bucket, value);
-                    atomicAdd(countHistogramSmem + bucket, static_cast<IdxT>(1));
+                    histAtomicAddWarp<IsDeterministic, T>(
+                        histogramSmem + bucket, countHistogramSmem + bucket, bucket, value);
                 }
             };
         vectorizedProcess<T>(static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x,
@@ -505,6 +566,13 @@ uint32_t CalcAirTopPBlockNum(int batchSize, int len, int smCnt) {
     IdxT       bestNumBlocks       = 0;
     float      bestTailWavePenalty = 1.0f;
     IdxT const maxNumBlocks        = ceilDiv<IdxT>(len, VECTORIZED_READ_SIZE / (int)sizeof(T) * BLOCK_SIZE);
+    // A failed or unsupported occupancy query leaves activeBlocks at zero. The
+    // wave search below then divides by zero, producing a NaN penalty that no
+    // comparison accepts, and the loop never reaches its break condition. Fall
+    // back to the widest legal grid instead of spinning forever.
+    if (activeBlocks <= 0) {
+        return static_cast<uint32_t>(std::max<IdxT>(maxNumBlocks, 1));
+    }
     for (int numWaves = 1;; ++numWaves) {
         IdxT numBlocks = std::min(maxNumBlocks, static_cast<IdxT>(std::max(numWaves * activeBlocks / batchSize, 1)));
         IdxT itemsPerThread   = ceilDiv<IdxT>(len, numBlocks * BLOCK_SIZE);

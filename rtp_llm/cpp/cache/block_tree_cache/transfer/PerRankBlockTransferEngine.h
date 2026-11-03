@@ -48,6 +48,7 @@ private:
     std::unique_ptr<HostDiskTransferExecutor>   host_disk_executor_;
     std::unique_ptr<DeviceDiskTransferExecutor> device_disk_executor_;
     size_t                                      transfer_worker_count_{4};
+    bool                                        track_decode_origins_{false};
 };
 
 using PerRankBlockTransferEnginePtr = std::shared_ptr<PerRankBlockTransferEngine>;

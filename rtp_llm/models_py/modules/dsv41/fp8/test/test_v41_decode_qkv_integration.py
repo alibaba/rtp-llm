@@ -42,27 +42,47 @@ class DecodeQKVIntegrationCPU(unittest.TestCase):
         freqs = torch.ones(2, 32, dtype=torch.complex64)
         shared_input = (object(), object())
         index_q, prepared = object(), (object(), object(), object())
-        for is_source, pdl in ((True, False), (True, True), (False, False), (False, True)):
+        for is_source, pdl in (
+            (True, False),
+            (True, True),
+            (False, False),
+            (False, True),
+        ):
             with self.subTest(is_source=is_source, pdl=pdl):
                 merged = SimpleNamespace(
                     forward_quantized=Mock(return_value=(q, index_q)),
                     try_forward_prepared=Mock(return_value=(q, prepared)),
                 )
                 attn = SimpleNamespace(
-                    is_index_source=True, is_kv_source=is_source,
-                    rope_head_dim=64, head_dim=512, n_heads=1,
-                    skip_post_q_norm=True, freqs_cis=freqs, wq_b=object(),
-                    kv_norm=torch.ones(512, dtype=torch.bfloat16), eps=1e-6,
+                    is_index_source=True,
+                    is_kv_source=is_source,
+                    rope_head_dim=64,
+                    head_dim=512,
+                    n_heads=1,
+                    skip_post_q_norm=True,
+                    freqs_cis=freqs,
+                    wq_b=object(),
+                    kv_norm=torch.ones(512, dtype=torch.bfloat16),
+                    eps=1e-6,
                     _lin=Mock(side_effect=AssertionError("unexpected projection")),
                 )
-                with patch.object(front, "project", return_value=(qr, kv, quantized, head)) as fused, \
-                     patch.object(_v41_query_quant, "try_project_quantized_qkv",
-                                  return_value=(qr, kv, quantized)) as original, \
-                     patch.object(compute_qkv, "fused_rmsnorm_rope", return_value=kv):
+                with patch.object(
+                    front, "project", return_value=(qr, kv, quantized, head)
+                ) as fused, patch.object(
+                    _v41_query_quant,
+                    "try_project_quantized_qkv",
+                    return_value=(qr, kv, quantized),
+                ) as original, patch.object(
+                    compute_qkv, "swa_kv_norm_rope", return_value=kv
+                ):
                     result = compute_qkv.decode_compute_qkv(
-                        attn, qr, positions, freqs_cis=freqs,
+                        attn,
+                        qr,
+                        positions,
+                        freqs_cis=freqs,
                         mega_attention=SimpleNamespace(merged_qb=merged),
-                        shared_input_quant=shared_input, qb_pdl=pdl,
+                        shared_input_quant=shared_input,
+                        qb_pdl=pdl,
                     )
                 if is_source:
                     fused.assert_not_called()
@@ -119,7 +139,7 @@ class DecodeQKVIntegrationCPU(unittest.TestCase):
         ) as project, patch.object(
             rope_cache, "try_fused_qkv_rope_cache", return_value=completed
         ) as fused, patch.object(
-            compute_qkv, "fused_rmsnorm_rope"
+            compute_qkv, "swa_kv_norm_rope"
         ) as old_norm:
             result = compute_qkv.decode_compute_qkv(
                 attn,
@@ -168,7 +188,7 @@ class DecodeQKVIntegrationCPU(unittest.TestCase):
         with patch.object(
             _v41_query_quant, "try_project_quantized_qkv", return_value=None
         ), patch.object(compute_qkv, "_apply_v41_q_rope") as old_rope, patch.object(
-            compute_qkv, "fused_rmsnorm_rope", return_value=normalized
+            compute_qkv, "swa_kv_norm_rope", return_value=normalized
         ) as old_norm:
             result = compute_qkv.decode_compute_qkv(
                 attn, qr, positions, swa_pool=pool, swa_slots=torch.tensor([2, 5])
@@ -408,6 +428,33 @@ class DecodeQKVIntegrationCUDA(unittest.TestCase):
                 getattr(actual, name), getattr(expected, name), rtol=0, atol=0
             )
 
+    def assert_cache_values_equal(self, actual, expected, slots, fresh_kv):
+        # Re-encoding an already rounded MXFP8 row can choose a different
+        # exponent/payload pair with exactly the same decoded value. Compare
+        # the reader-visible values independently of the production decoder,
+        # while requiring every untouched cache byte to remain unchanged.
+        valid = slots >= 0
+        written = slots[valid].long()
+        block = written // actual.shape[1]
+        row = written % actual.shape[1]
+
+        def decoded(pool):
+            packed = pool[block, row]
+            payload = packed[:, :512].contiguous().view(torch.float8_e4m3fn)
+            scales = torch.exp2(packed[:, 512:].float() - 127)
+            return payload.float() * scales.repeat_interleave(32, dim=-1)
+
+        actual_values = decoded(actual)
+        torch.testing.assert_close(actual_values, decoded(expected), rtol=0, atol=0)
+        torch.testing.assert_close(
+            actual_values, fresh_kv.reshape(-1, 512)[valid].float(), rtol=0, atol=0
+        )
+        untouched = torch.ones(actual.shape[:2], device=actual.device, dtype=torch.bool)
+        untouched[block, row] = False
+        torch.testing.assert_close(
+            actual[untouched], expected[untouched], rtol=0, atol=0
+        )
+
     @torch.no_grad()
     def test_native_projection_cache_and_indexer_match_old_path(self):
         from rtp_llm.models_py.modules.dsv41.fp8.attention_v41 import AttentionV41FP8
@@ -426,7 +473,7 @@ class DecodeQKVIntegrationCUDA(unittest.TestCase):
                 self.assertIsNone(expected.qr_quantized)
                 self.assertIsNotNone(actual.qr_quantized)
                 self.assert_qkv_equal(actual, expected)
-                torch.testing.assert_close(pool, reference_pool, rtol=0, atol=0)
+                self.assert_cache_values_equal(pool, reference_pool, slots, actual.kv)
                 old_index_q = attn.index_wq(expected.qr)
                 new_index_q = attn.index_wq.forward_quantized(*actual.qr_quantized)
                 torch.testing.assert_close(new_index_q, old_index_q, rtol=0, atol=0)
@@ -467,7 +514,7 @@ class DecodeQKVIntegrationCUDA(unittest.TestCase):
                 graph.replay()
             torch.cuda.current_stream().wait_stream(stream)
             self.assert_qkv_equal(actual, expected)
-            torch.testing.assert_close(pool, reference_pool, rtol=0, atol=0)
+            self.assert_cache_values_equal(pool, reference_pool, slots, actual.kv)
             torch.testing.assert_close(index_q, expected_index_q, rtol=0, atol=0)
 
     @torch.no_grad()
@@ -513,7 +560,7 @@ class DecodeQKVIntegrationCUDA(unittest.TestCase):
             self.assertEqual(old_write.call_count, int(strided))
             self.assertEqual(computed[0].swa_written, not strided)
             self.assert_qkv_equal(computed[0], expected)
-            torch.testing.assert_close(pool, reference_pool, rtol=0, atol=0)
+            self.assert_cache_values_equal(pool, reference_pool, slots, computed[0].kv)
             torch.testing.assert_close(output, expected.q[:, :, 0, :], rtol=0, atol=0)
 
 

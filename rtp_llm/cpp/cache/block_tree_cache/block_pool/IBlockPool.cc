@@ -82,6 +82,7 @@ std::optional<BlockIdList> IBlockPool::mallocNoLock(size_t n) {
         const bool was_available = isAvailableNoLock(block);
         assert(was_available);
         allocated_[block]      = 1;
+        beginDecodeOriginIncarnationNoLock(block);
         tree_refcounts_[block] = 0;
         for (std::vector<uint32_t>& typed_refcounts : tree_refcounts_by_type_) {
             typed_refcounts[block] = 0;
@@ -207,6 +208,43 @@ bool IBlockPool::isAllocated(BlockIdxType block) const {
         return false;
     }
     return allocated_[block] != 0;
+}
+
+bool IBlockPool::enableDecodeOriginTracking() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    checkInitializedNoLock();
+    if (decode_origins_)
+        return true;
+    try {
+        auto origins = std::make_unique<PhysicalDecodeOrigins>(allocated_.size());
+        for (size_t block = 0; block < allocated_.size(); ++block)
+            if (allocated_[block])
+                origins->beginAllocation(block);
+        decode_origins_ = std::move(origins);
+    } catch (const std::bad_alloc&) {
+        return false;
+    }
+    return true;
+}
+
+uint64_t IBlockPool::decodeOriginIncarnation(BlockIdxType block) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return decode_origins_ && validBlockNoLock(block) && allocated_[block] ? decode_origins_->incarnation(block) : 0;
+}
+
+PhysicalDecodeOrigins::Origin IBlockPool::decodeOrigin(BlockIdxType block, std::string_view region) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return decode_origins_ && validBlockNoLock(block) && allocated_[block] ? decode_origins_->get(block, region) :
+                                                                             nullptr;
+}
+
+bool IBlockPool::bindDecodeOrigin(BlockIdxType                  block,
+                                  uint64_t                      expected_incarnation,
+                                  std::string_view              region,
+                                  PhysicalDecodeOrigins::Origin origin) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return decode_origins_ && validBlockNoLock(block) && allocated_[block]
+           && decode_origins_->bind(block, expected_incarnation, region, std::move(origin));
 }
 
 size_t IBlockPool::totalBlocksNum() const {
@@ -361,6 +399,8 @@ void IBlockPool::freeAllocatedBlockNoLock(BlockIdxType block) {
     for (size_t ref_type_index = 0; ref_type_index < kBlockTreeRefTypeCount; ++ref_type_index) {
         assert(tree_refcounts_by_type_[ref_type_index][block] == 0);
     }
+    if (decode_origins_)
+        decode_origins_->release(block);
     allocated_[block]      = 0;
     tree_refcounts_[block] = 0;
     pushFreeBlockNoLock(block);

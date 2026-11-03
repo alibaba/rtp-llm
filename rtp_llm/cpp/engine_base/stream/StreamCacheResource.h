@@ -12,6 +12,8 @@
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
 #include "rtp_llm/cpp/cache/CPSlotMapper.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
+#include "rtp_llm/cpp/utils/RemoteRestoreLifecycle.h"
+#include "rtp_llm/cpp/cache/DecodeReuseSources.h"
 
 namespace rtp_llm {
 
@@ -119,6 +121,14 @@ public:
     bool enableCacheLookup() const;
     Tier storeTarget() const;
     void reportCacheReuseMetrics();
+    bool hasPendingRemoteRestore() const {
+        return remote_restore_lifecycle_.pendingForward();
+    }
+    void reportRemoteContextReady(std::optional<RemoteRestoreTiming::Clock::time_point> gpu_ready_at = std::nullopt);
+    bool hasPendingDecodeReuse() const {
+        return decode_reuse_use_state_.pending();
+    }
+    void reportDecodeCacheUse(std::optional<RemoteRestoreTiming::Clock::time_point> gpu_ready_at);
 
     std::string debugString() const {
         std::stringstream debug_string;
@@ -136,8 +146,11 @@ private:
     void         recordCacheReuseMallocResult(const MallocResult& result);
     void         publishReuseLengths(int total_length, int host_length, int disk_length, int backend_length);
     absl::Status finalizeAllocatorLoad();
+    bool         deferAllocatorLoadRelease();
     void         publishAllocatorReuse(const LoadAsyncContext& context, bool local_only);
     size_t       treeCoveredBlockNum() const;
+    void         reportRemoteRestoreLatency(const char* mode, int64_t latency_us);
+    void         adoptDecodeReuse(DecodeReuseSourcesPtr sources, int64_t adopted_end);
 
     GenerateStream*                stream_;
     BatchKVCacheResourcePtr        batch_kv_cache_resource_;
@@ -158,6 +171,9 @@ private:
     std::weak_ptr<AsyncContext>      released_p2p_load_context_;
     absl::Status                     allocator_load_error_;
     bool                             p2p_cancel_requested_{false};
+    RemoteRestoreLifecycle                                remote_restore_lifecycle_;
+    DecodeReuseUseState                                   decode_reuse_use_state_;
+    std::optional<RemoteRestoreTiming::Clock::time_point> remote_restore_attempt_started_at_;
 
     // Physical block pins held for PD separation.
 };

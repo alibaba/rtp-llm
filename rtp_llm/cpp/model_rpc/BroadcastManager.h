@@ -10,6 +10,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <type_traits>
@@ -56,6 +57,8 @@ public:
         worker_contexts_(worker_rpc_contexts),
         finished_(worker_rpc_contexts.size(), false),
         rpc_succeeded_(worker_rpc_contexts.size(), false),
+        completion_times_us_(worker_rpc_contexts.size(), 0),
+        completion_wall_times_us_(worker_rpc_contexts.size(), 0),
         direction_(std::move(direction)),
         rpc_tag_("request_id=" + (request_id ? std::to_string(*request_id) : "none") + " direction=" + direction_),
         connect_failure_reporter_(std::move(connect_failure_reporter)) {}
@@ -66,7 +69,7 @@ public:
         return already_done_.load(std::memory_order_acquire);
     }
 
-    bool waitDone(int timeout_ms) {
+    bool waitDone(int timeout_ms, bool fatal_on_error = true) {
         std::unique_lock<std::mutex> lock(wait_done_mutex_);
         const auto                   completed = [this] { return already_done_.load(std::memory_order_acquire); };
         if (timeout_ms > 0) {
@@ -76,7 +79,7 @@ public:
         } else {
             wait_done_cv_.wait(lock, completed);
         }
-        const std::string fatal_error = fatal_error_.empty() ? std::string{} : failureSummaryNoLock();
+        const std::string fatal_error = fatal_on_error && !fatal_error_.empty() ? failureSummaryNoLock() : std::string{};
         lock.unlock();
         if (!fatal_error.empty()) {
             RTP_LLM_FAIL("%s", fatal_error.c_str());
@@ -151,6 +154,17 @@ public:
         return responses;
     }
 
+    // Coordinator-local monotonic timestamps; no cross-host clock subtraction.
+    std::vector<int64_t> completionTimesUs() const {
+        std::lock_guard<std::mutex> lock(wait_done_mutex_);
+        return completion_times_us_;
+    }
+
+    std::vector<int64_t> completionWallTimesUs() const {
+        std::lock_guard<std::mutex> lock(wait_done_mutex_);
+        return completion_wall_times_us_;
+    }
+
     void finishRank(size_t rank, bool cq_event_ok) {
         std::vector<DoneCallback> callbacks;
         bool                      report_connect_failure = false;
@@ -166,7 +180,13 @@ public:
             } else if (finished_[rank]) {
                 return;
             } else {
-                finished_[rank] = true;
+                finished_[rank]                 = true;
+                completion_times_us_[rank]      = std::chrono::duration_cast<std::chrono::microseconds>(
+                                                      std::chrono::steady_clock::now().time_since_epoch())
+                                                      .count();
+                completion_wall_times_us_[rank] = std::chrono::duration_cast<std::chrono::microseconds>(
+                                                      std::chrono::system_clock::now().time_since_epoch())
+                                                      .count();
                 ++finished_count_;
                 const auto& ctx      = worker_contexts_[rank];
                 rpc_succeeded_[rank] = cq_event_ok && ctx->status.ok();
@@ -301,6 +321,8 @@ private:
     std::vector<std::shared_ptr<WorkerRpcContext>> worker_contexts_;
     std::vector<bool>                              finished_;
     std::vector<bool>                              rpc_succeeded_;
+    std::vector<int64_t>                           completion_times_us_;
+    std::vector<int64_t>                           completion_wall_times_us_;
     const std::string                              direction_;
     const std::string                              rpc_tag_;
     const std::function<void(const std::string&)>  connect_failure_reporter_;
@@ -365,7 +387,8 @@ public:
                                                                       int                           timeout_ms,
                                                                       const RpcCall&                rpc_call,
                                                                       std::optional<int64_t> request_id = std::nullopt,
-                                                                      std::string direction = "unknown") const {
+                                                                      std::string direction = "unknown",
+                                                                      bool fatal_on_error = true) const {
         const auto rpc_tag =
             "request_id=" + (request_id ? std::to_string(*request_id) : "none") + " direction=" + direction;
         const auto worker_size = worker_addrs_.size();
@@ -401,14 +424,28 @@ public:
             auto& ctx = result->worker_contexts_.at(rank);
             try {
                 auto reader = rpc_call(ctx->stub, ctx->client_context, ctx->request, completion_queue_.get());
-                RTP_LLM_CHECK_WITH_INFO(reader != nullptr, "broadcast rpc call returned null reader, rank=%d", rank);
+                if (!reader) {
+                    throw std::runtime_error("broadcast rpc call returned null reader");
+                }
                 auto tag = std::make_unique<CompletionTag<ResultT>>(result, static_cast<size_t>(rank));
                 reader->Finish(&ctx->response, &ctx->status, tag.get());
                 (void)tag.release();
             } catch (const std::exception& error) {
-                RTP_LLM_FAIL("broadcast rpc dispatch failed, rank=%d err=%s %s", rank, error.what(), rpc_tag.c_str());
+                if (fatal_on_error) {
+                    RTP_LLM_FAIL("broadcast rpc dispatch failed, rank=%d err=%s %s", rank, error.what(), rpc_tag.c_str());
+                }
+                for (size_t pending = rank; pending < worker_size; ++pending) {
+                    result->finishRank(pending, false);
+                }
+                break;
             } catch (...) {
-                RTP_LLM_FAIL("broadcast rpc dispatch failed, rank=%d unknown error %s", rank, rpc_tag.c_str());
+                if (fatal_on_error) {
+                    RTP_LLM_FAIL("broadcast rpc dispatch failed, rank=%d unknown error %s", rank, rpc_tag.c_str());
+                }
+                for (size_t pending = rank; pending < worker_size; ++pending) {
+                    result->finishRank(pending, false);
+                }
+                break;
             }
         }
 

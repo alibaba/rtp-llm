@@ -33,7 +33,10 @@ from rtp_llm.models_py.modules.dsv41.bounded_replay import (
 from rtp_llm.models_py.modules.dsv41.chunk_env import (
     FLASH_MLA_SPARSE_Q_CHUNK as _FLASH_MLA_SPARSE_Q_CHUNK,
 )
-from rtp_llm.models_py.modules.dsv41.cp import _cp_restore_gathered_full_2d
+from rtp_llm.models_py.modules.dsv41.cp import (
+    _cp_restore_gathered_full_2d,
+    build_cp_full_prefill_positions,
+)
 from rtp_llm.models_py.modules.dsv41.fp8 import _v41_deepselect as prefill_deepselect
 from rtp_llm.models_py.modules.dsv41.fp8 import (
     _v41_indexer_q_triton as indexer_q_fusion,
@@ -76,113 +79,27 @@ from rtp_llm.models_py.utils.memory import dispose_tensor
 # Bound both CP hidden-state transfers and the subsequent projections.
 _PRODUCE_GLOBAL_TILE_ROWS = 32768
 
-# Global padded-row ceiling for raw CP gather. Mixed batches use large GEMMs
-# through 128K rows instead of per-request zigzag projections. Keep the existing
-# 64K single-request ceiling; long single requests retain projected transport.
-# At hidden=5120 the 128K gather plus restored BF16 storage is bounded to 2.5 GiB.
-_SMALL_CP_X_GATHER_MAX_ROWS = int(
-    os.environ.get("DSV41_SMALL_CP_X_GATHER_MAX_ROWS", "131072")
-)
-# Fixed-shape engine A/B: 96-128 MiB saved at B16 did not help, while
-# 192-256 MiB at B32 did. Apply that crossover to actual transfer bytes.
-_LOCAL_PROJECT_MIN_SAVED_BYTES = (
-    int(os.environ.get("DSV41_LOCAL_PROJECT_MIN_SAVED_MB", "160")) * 1024**2
-)
-# Serial groups retain at most one BF16 gather + restore (1280 MiB for
-# hidden=5120), plus three group-sized int64 index temporaries (1.5 MiB).
-_CP_X_GROUP_MAX_ROWS = 65536
-_CP_X_GROUP_MAX_BYTES = 2 * 65536 * 5120 * 2 + 3 * 65536 * 8
-# Large owner groups yield views of rank-major FP32 storage instead of restoring
-# another full tensor. Bound send + gather by the existing 128K raw gather's
-# gather + restore peak (2.5 GiB at hidden=5120).
-_CP_PROJECTED_OWNER_MAX_BYTES = 2 * 131072 * 5120 * 2
+# Bound projected CP transport independently of the total Prefill row count.
+# At CP4 and ratio=2 (width=1024), send plus gather use at most 160 MiB.
+_CP_PROJECTED_TRANSPORT_MAX_BYTES = 160 * 1024**2
 
 
-def _use_small_cp_x_gather(cp_ctx) -> bool:
-    """Whether the single-shot raw-x all-gather path serves this forward."""
-    lengths = getattr(cp_ctx, "input_lengths_global_host", None)
-    limit = _SMALL_CP_X_GATHER_MAX_ROWS
-    if lengths is None or len(lengths) <= 1:
-        limit = min(limit, 65536)
-    return cp_ctx.padded_seq_len <= limit
-
-
-def _project_before_small_cp_gather(x, cp_ctx, output_width) -> bool:
-    """Select local projection when it saves enough collective traffic.
-
-    The same projection also replaces a global-row GEMM with a local-row GEMM.
-    A small transfer saving does not repay the extra pre-gather launch and its
-    lost overlap with SWA work, so retain raw gather below that crossover.
-    """
-    if (
-        cp_ctx.cp_size <= 1
-        or x.ndim != 2
-        or x.dtype != torch.bfloat16
-        or not x.is_contiguous()
-        or x.shape[0] != cp_ctx.chunk_length
-        or cp_ctx.padded_seq_len != cp_ctx.cp_size * x.shape[0]
-    ):
-        return False
-    rows = cp_ctx.padded_seq_len
-    raw_bytes = rows * x.shape[1] * x.element_size()
-    projected_bytes = rows * output_width * torch.float32.itemsize
-    return projected_bytes < raw_bytes and (
-        raw_bytes - projected_bytes >= _LOCAL_PROJECT_MIN_SAVED_BYTES
+def _prefill_x_chunk_rows(cp_ctx, output_width):
+    bytes_per_row = (cp_ctx.cp_size + 1) * output_width * torch.float32.itemsize
+    return min(
+        _PRODUCE_GLOBAL_TILE_ROWS, _CP_PROJECTED_TRANSPORT_MAX_BYTES // bytes_per_row
     )
 
 
-def _prefill_x_group_fits(x, cp_ctx, local_rows, real_rows):
-    limit = min(_CP_X_GROUP_MAX_ROWS, _SMALL_CP_X_GATHER_MAX_ROWS)
-    padded = cp_ctx.cp_size * local_rows
-    row_bytes = x.shape[1] * x.element_size()
-    return (
-        0 < limit
-        and padded <= limit
-        and (padded + real_rows) * row_bytes + 3 * real_rows * 8
-        <= _CP_X_GROUP_MAX_BYTES
-    )
-
-
-def _prefill_projected_group_fits(cp_ctx, local_rows, real_rows, output_width):
-    # FP32 send, rank-major gather and restored output coexist. Packing the
-    # original GEMM tiles into send needs less storage than this gather peak.
-    projected_rows = (1 + cp_ctx.cp_size) * local_rows + real_rows
-    return (
-        output_width > 0
-        and projected_rows * output_width * torch.float32.itemsize + 3 * real_rows * 8
-        <= _CP_X_GROUP_MAX_BYTES
-    )
-
-
-def _prefill_projected_owner_group_fits(cp_ctx, local_rows, output_width):
-    return (
-        output_width > 0
-        and (1 + cp_ctx.cp_size) * local_rows * output_width * torch.float32.itemsize
-        <= _CP_PROJECTED_OWNER_MAX_BYTES
-    )
-
-
-def _prefill_x_group_plan(x, cp_ctx, *, allow_owner_tiles=False, output_width=None):
-    """Keep short groups; fit long requests or their CP halves by FP32 bytes.
-
-    Each tuple is (local_start, local_end, real_start, real_end). A half
-    contains the same front/back local slice on every rank, so its boundary
-    never cuts an original owner GEMM or producer tile. Large groups can consume
-    rank-major views within a separate send + gather budget, without a restore
-    copy; groups exceeding both budgets retain bounded owner broadcasts.
-    """
+def _prefill_x_group_plan(x, cp_ctx, *, output_width):
+    """Stream every zigzag source through bounded global-order packets."""
     lengths = getattr(cp_ctx, "input_lengths_global_host", None)
     chunks = getattr(cp_ctx, "chunk_lengths_per_req", None)
-    restore = getattr(cp_ctx, "unpad_restore", None)
-    limit = min(_CP_X_GROUP_MAX_ROWS, _SMALL_CP_X_GATHER_MAX_ROWS)
+    limit = _prefill_x_chunk_rows(cp_ctx, output_width) if output_width > 0 else 0
     if (
         limit <= 0
         or cp_ctx.cp_size < 1
-        or _use_small_cp_x_gather(cp_ctx)
         or lengths is None
-        or len(lengths) == 0
-        or (len(lengths) == 1 and output_width is None)
-        or (output_width is not None and output_width <= 0)
         or chunks is None
         or len(chunks) != len(lengths)
         or getattr(cp_ctx, "gather_restore_positions", None) is not None
@@ -195,250 +112,130 @@ def _prefill_x_group_plan(x, cp_ctx, *, allow_owner_tiles=False, output_width=No
         or sum(chunks) != cp_ctx.chunk_length
         or sum(lengths) != cp_ctx.seq_len_full
         or cp_ctx.padded_seq_len != cp_ctx.cp_size * cp_ctx.chunk_length
-        or restore is None
-        or restore.ndim != 1
-        or restore.numel() != cp_ctx.seq_len_full
-        or restore.dtype != torch.long
-        or restore.device != x.device
+    ):
+        return None
+    alignment = 2 * cp_ctx.cp_size
+    if any(
+        length < 0 or chunk != 2 * ((length + alignment - 1) // alignment)
+        for length, chunk in zip(lengths, chunks)
     ):
         return None
 
-    def fits(local_rows, real_rows):
-        return _prefill_x_group_fits(x, cp_ctx, local_rows, real_rows)
-
-    groups = []
-    local_start = real_start = local_end = real_end = 0
-    for length, chunk in zip(lengths, chunks):
-        if length <= 0 or chunk != 2 * ((length + 7) // 8):
-            return None
-        if not fits(chunk, length):
-            if not allow_owner_tiles:
-                return None
-            if local_end > local_start:
-                groups.append((local_start, local_end, real_start, real_end))
-            if (
-                output_width is not None
-                and length > cp_ctx.cp_size * (chunk // 2)
-                and not _prefill_projected_group_fits(
-                    cp_ctx, chunk, length, output_width
-                )
+    def packets():
+        pieces = []
+        counts = [0] * cp_ctx.cp_size
+        cursor = packet_start = 0
+        for owner, source, rows in _prefill_x_tile_plan(cp_ctx, limit):
+            if pieces and (
+                counts[owner] + rows > limit
+                or cursor - packet_start + rows > _PRODUCE_GLOBAL_TILE_ROWS
             ):
-                half = chunk // 2
-                front_rows = min(length, cp_ctx.cp_size * half)
-                if (
-                    not _prefill_projected_group_fits(
-                        cp_ctx, half, front_rows, output_width
-                    )
-                    and not _prefill_projected_group_fits(
-                        cp_ctx, half, length - front_rows, output_width
-                    )
-                    and _prefill_projected_owner_group_fits(cp_ctx, chunk, output_width)
-                ):
-                    # Only coalesce when both halves previously needed owner
-                    # broadcasts; preserve the established mixed-batch groups.
-                    groups.append(
-                        (local_end, local_end + chunk, real_end, real_end + length)
-                    )
-                else:
-                    groups.append(
-                        (local_end, local_end + half, real_end, real_end + front_rows)
-                    )
-                    groups.append(
-                        (
-                            local_end + half,
-                            local_end + chunk,
-                            real_end + front_rows,
-                            real_end + length,
-                        )
-                    )
-            else:
-                groups.append(
-                    (local_end, local_end + chunk, real_end, real_end + length)
-                )
-            local_end += chunk
-            real_end += length
-            local_start, real_start = local_end, real_end
-            continue
-        if not fits(local_end + chunk - local_start, real_end + length - real_start):
-            groups.append((local_start, local_end, real_start, real_end))
-            local_start, real_start = local_end, real_end
-        local_end += chunk
-        real_end += length
-    if local_end > local_start:
-        groups.append((local_start, local_end, real_start, real_end))
-    if not any(
-        (
-            fits(l1 - l0, r1 - r0)
-            if output_width is None
-            else (
-                _prefill_projected_group_fits(cp_ctx, l1 - l0, r1 - r0, output_width)
-                or _prefill_projected_owner_group_fits(cp_ctx, l1 - l0, output_width)
-            )
-        )
-        for l0, l1, r0, r1 in groups
-    ):
-        return None
-    return tuple(groups)
+                yield tuple(pieces), tuple(counts), packet_start, cursor
+                pieces, counts, packet_start = [], [0] * cp_ctx.cp_size, cursor
+            pieces.append((owner, source, rows, cursor))
+            counts[owner] += rows
+            cursor += rows
+        if pieces:
+            yield tuple(pieces), tuple(counts), packet_start, cursor
+        assert cursor == cp_ctx.seq_len_full
+
+    return packets()
 
 
-def _prefill_raw_x_groups(x, cp_ctx, groups):
-    """Group only transport; preserve every original owner/producer tile shape."""
-    segments = iter(_prefill_x_tile_plan(cp_ctx))
-    t0 = 0
-    for local_start, local_end, real_start, real_end in groups:
-        local_rows = local_end - local_start
-        indices = cp_ctx.unpad_restore[real_start:real_end]
-        restore = torch.div(indices, cp_ctx.chunk_length, rounding_mode="floor")
-        restore.mul_(local_rows)
-        restore.add_(torch.remainder(indices, cp_ctx.chunk_length)).sub_(local_start)
-        buffer = x.new_empty((cp_ctx.cp_size * local_rows, x.shape[1]))
-        pending = _start_prefill_x_gather_async(
-            x[local_start:local_end],
-            cp_ctx,
-            (None, 0, buffer.shape[0]),
-            buffer,
-        )
-        gathered = _wait_prefill_x_gather(pending)
-        full = gathered.index_select(0, restore)
-        del pending, gathered, buffer, restore, indices
-        try:
-            while t0 < real_end:
-                _, _, rows = next(segments)
-                # Complete-request groups never cut an original owner segment.
-                offset = t0 - real_start
-                yield t0, full[offset : offset + rows]
-                t0 += rows
-        finally:
-            del full
+def _prefill_projected_x_groups(x, cp_ctx, groups, weights):
+    """Project owner spans, exchange bounded packets, and restore global rows."""
+    from rtp_llm.ops.compute_ops import rtp_llm_ops
 
-
-def _prefill_projected_x_groups(x, cp_ctx, groups, weights, *, whole_groups=False):
-    """Gather FP32 groups; stream large rank-major groups in original tile order."""
-    from rtp_llm.models_py.modules.dsv41.fp8.compressor import _linear_bf16_bf16_fp32
-
-    if whole_groups and any(
-        not _prefill_x_group_fits(x, cp_ctx, l1 - l0, r1 - r0)
-        or not _prefill_projected_group_fits(
-            cp_ctx, l1 - l0, r1 - r0, weights[0].shape[0] * len(weights)
-        )
-        for l0, l1, r0, r1 in groups
-    ):
-        raise ValueError("Owner-tile requests cannot use whole-group production")
-    batched = None
-    if whole_groups and x.is_cuda:
-        from rtp_llm.models_py.modules.dsv41.fp8 import _v41_batched_producer as batched
-
-    segments = iter(_prefill_x_tile_plan(cp_ctx))
-    head = weights[0].shape[0]
-    t0 = 0
-    for local_start, local_end, real_start, real_end in groups:
-        local_rows = local_end - local_start
-        owner_views = not _prefill_projected_group_fits(
-            cp_ctx, local_rows, real_end - real_start, head * len(weights)
-        )
-        if owner_views and not _prefill_projected_owner_group_fits(
-            cp_ctx, local_rows, head * len(weights)
-        ):
-            owner_tiles = []
-            while t0 < real_end:
-                tile = next(segments)
-                owner_tiles.append(tile)
-                t0 += tile[2]
-            plan = iter(owner_tiles)
-            first_tile = next(plan)
-            buffers = [
-                torch.empty(
-                    (_PRODUCE_GLOBAL_TILE_ROWS, head * len(weights)),
-                    device=x.device,
-                    dtype=torch.float32,
-                )
-                for _ in range(2)
-            ]
-            pending = _start_prefill_x_gather_async(
-                x, cp_ctx, first_tile, buffers[0], weights
-            )
-            tiles = _prefill_x_tiles(x, cp_ctx, plan, pending, buffers, weights)
-            # The iterator owns the pending handle and buffers until it closes.
-            del pending
-            try:
-                for offset, tile in tiles:
-                    yield real_start + offset, tile
-                    del tile
-            finally:
-                tiles.close()
-                del tiles, buffers
-            continue
-        send = torch.zeros(
-            (local_rows, head * len(weights)), device=x.device, dtype=torch.float32
-        )
-        projections, group_tiles = [], []
-        offsets, columns = [], []
-        while t0 < real_end:
-            owner, start, rows = next(segments)
-            group_tiles.append((t0, rows, owner, start))
+    width = weights[0].shape[0] * len(weights)
+    limit = _prefill_x_chunk_rows(cp_ctx, width)
+    slab = torch.empty(
+        (_PRODUCE_GLOBAL_TILE_ROWS, width), device=x.device, dtype=torch.float32
+    )
+    emitted = filled = 0
+    for pieces, counts, start, end in groups:
+        assert pieces and start == emitted + filled
+        assert end > start and end - start <= _PRODUCE_GLOBAL_TILE_ROWS
+        packet_rows = max(counts)
+        assert 0 < packet_rows <= limit
+        send = torch.zeros((packet_rows, width), device=x.device, dtype=torch.float32)
+        offsets = [0] * cp_ctx.cp_size
+        local_views = []
+        for owner, source, rows, _ in pieces:
             if owner == cp_ctx.cp_rank:
-                offset = start - local_start
-                for column, weight in enumerate(weights):
-                    # Keep the native GEMM's original M, N and contiguous output.
-                    projections.append(
-                        _linear_bf16_bf16_fp32(x[start : start + rows], weight)
-                    )
-                    offsets.append(offset)
-                    columns.append(column * head)
-            t0 += rows
-        if projections:
-            if batched is None or not batched.pack_projected_group(
-                send, projections, offsets, columns
-            ):
-                destinations = [
-                    send[offset : offset + projection.shape[0], column : column + head]
-                    for projection, offset, column in zip(projections, offsets, columns)
-                ]
-                torch._foreach_copy_(destinations, projections)
-                del destinations
-        del projections, offsets, columns
-        buffer = send.new_empty((cp_ctx.cp_size * local_rows, send.shape[1]))
+                local_views.append(x[source : source + rows])
+            offsets[owner] += rows
+        assert tuple(offsets) == counts
+        if local_views:
+            local_rows = counts[cp_ctx.cp_rank]
+            packed = torch.empty(
+                (local_rows, x.shape[1]), device=x.device, dtype=x.dtype
+            )
+            targets = []
+            cursor = 0
+            for view in local_views:
+                targets.append(packed[cursor : cursor + view.shape[0]])
+                cursor += view.shape[0]
+            assert cursor == local_rows
+            torch._foreach_copy_(targets, local_views)
+            rtp_llm_ops.cublas_gemm_bf16_bf16_fp32_packed(packed, weights, send)
+            del packed, targets, local_views
+        owners = [rank for rank, count in enumerate(counts) if count]
+        collective_owner = owners[0] if len(owners) == 1 else None
+        exchanged = torch.empty(
+            (
+                (1 if collective_owner is not None else cp_ctx.cp_size) * packet_rows,
+                width,
+            ),
+            device=x.device,
+            dtype=torch.float32,
+        )
         pending = _start_prefill_x_gather_async(
-            send, cp_ctx, (None, 0, buffer.shape[0]), buffer
+            send,
+            cp_ctx,
+            (
+                collective_owner,
+                0,
+                (1 if collective_owner is not None else cp_ctx.cp_size) * packet_rows,
+            ),
+            exchanged,
         )
         gathered = _wait_prefill_x_gather(pending)
-        # The tile plan already specifies global order, including reversed CP
-        # back-half owners and partial tails. Views preserve the exact original
-        # GEMMs and producer carry boundaries without a second full allocation.
-        full = gathered if owner_views else None
-        if full is None and batched is not None:
-            full = batched.restore_projected_group(
-                gathered,
-                cp_ctx.unpad_restore,
-                local_start,
-                local_rows,
-                cp_ctx.chunk_length,
-                real_start,
-                real_end - real_start,
-            )
-        if full is None:
-            indices = cp_ctx.unpad_restore[real_start:real_end]
-            restore = torch.div(indices, cp_ctx.chunk_length, rounding_mode="floor")
-            restore.mul_(local_rows)
-            restore.add_(torch.remainder(indices, cp_ctx.chunk_length)).sub_(
-                local_start
-            )
-            full = gathered.index_select(0, restore)
-            del restore, indices
-        del pending, gathered, buffer, send
-        try:
-            if whole_groups:
-                yield real_start, full
-            else:
-                for start, rows, owner, local_offset in group_tiles:
-                    offset = (
-                        owner * local_rows + local_offset - local_start
-                        if owner_views
-                        else start - real_start
-                    )
-                    yield start, full[offset : offset + rows]
-        finally:
-            del full
+        del pending, send, exchanged
+        offsets = [0] * cp_ctx.cp_size
+        source_views, target_views = [], []
+        for owner, _, rows, destination in pieces:
+            assert destination == emitted + filled
+            base = 0 if collective_owner is not None else owner * packet_rows
+            copied = 0
+            while copied < rows:
+                count = min(rows - copied, _PRODUCE_GLOBAL_TILE_ROWS - filled)
+                source_views.append(
+                    gathered[
+                        base
+                        + offsets[owner]
+                        + copied : base
+                        + offsets[owner]
+                        + copied
+                        + count
+                    ]
+                )
+                target_views.append(slab[filled : filled + count])
+                copied += count
+                filled += count
+                if filled == _PRODUCE_GLOBAL_TILE_ROWS:
+                    torch._foreach_copy_(target_views, source_views)
+                    source_views, target_views = [], []
+                    yield emitted, slab
+                    emitted += filled
+                    filled = 0
+            offsets[owner] += rows
+        if source_views:
+            torch._foreach_copy_(target_views, source_views)
+        del source_views, target_views, gathered
+        assert end == emitted + filled
+    assert emitted + filled == cp_ctx.seq_len_full
+    if filled:
+        yield emitted, slab[:filled]
 
 
 def _prefill_request_row_slices(common):
@@ -478,47 +275,39 @@ class _V41AsyncXGather:
         self.gathered = gathered
 
 
-def _prefill_x_tile_plan(cp_ctx):
+def _prefill_x_tile_plan(cp_ctx, tile_rows=None):
     """Visit each request's zigzag halves in global order, excluding padding."""
+    if tile_rows is None:
+        tile_rows = _PRODUCE_GLOBAL_TILE_ROWS
     lengths = cp_ctx.input_lengths_global_host
     if lengths is None:
         lengths = cp_ctx.input_lengths_global.tolist()
     local_base = 0
     for length, chunk in zip(lengths, cp_ctx.chunk_lengths_per_req):
         half = chunk // 2
-        for segment in range(2 * cp_ctx.cp_size):
-            rows = min(half, max(0, length - segment * half))
+        active_segments = (
+            min(2 * cp_ctx.cp_size, (length + half - 1) // half) if half else 0
+        )
+        for segment in range(active_segments):
+            rows = min(half, length - segment * half)
             front = segment < cp_ctx.cp_size
             owner = segment if front else 2 * cp_ctx.cp_size - segment - 1
             local_start = local_base + (0 if front else half)
-            for offset in range(0, rows, _PRODUCE_GLOBAL_TILE_ROWS):
-                yield owner, local_start + offset, min(
-                    _PRODUCE_GLOBAL_TILE_ROWS, rows - offset
-                )
+            for offset in range(0, rows, tile_rows):
+                yield owner, local_start + offset, min(tile_rows, rows - offset)
         local_base += chunk
 
 
-def _start_prefill_x_gather_async(x: torch.Tensor, cp_ctx, tile, buffer, weights=()):
-    """Transfer a bounded hidden-state batch or owner-projected zigzag tile."""
+def _start_prefill_x_gather_async(x: torch.Tensor, cp_ctx, tile, buffer):
+    """Exchange one bounded projected source packet."""
     from rtp_llm.models_py.distributed import collective_torch
     from rtp_llm.models_py.distributed.collective_torch import Group
 
     owner, start, rows = tile
     process_group = collective_torch._get_group(Group.TP)
     gathered = buffer[:rows]
-    if owner == cp_ctx.cp_rank:
-        if weights:
-            from rtp_llm.models_py.modules.dsv41.fp8.compressor import (
-                _linear_bf16_bf16_fp32,
-            )
-
-            head = weights[0].shape[0]
-            for i, weight in enumerate(weights):
-                gathered[:, i * head : (i + 1) * head].copy_(
-                    _linear_bf16_bf16_fp32(x[start : start + rows], weight)
-                )
-        else:
-            gathered.copy_(x[start : start + rows])
+    if owner is not None and owner == cp_ctx.cp_rank:
+        gathered.copy_(x[start : start + rows])
     current = torch.cuda.current_stream(x.device)
     stream = _get_cp_comm_stream(x.device)
     stream.wait_stream(current)
@@ -548,32 +337,6 @@ def _wait_prefill_x_gather(handle: _V41AsyncXGather) -> torch.Tensor:
     current.wait_event(handle.completion_event)
     handle.work.wait()
     return handle.gathered
-
-
-def _prefill_x_tiles(x, cp_ctx, plan, pending, buffers, weights=()):
-    offset = 0
-    next_buffer = 1
-    try:
-        while pending is not None:
-            tile = _wait_prefill_x_gather(pending)
-            next_tile = next(plan, None)
-            pending = (
-                _start_prefill_x_gather_async(
-                    x, cp_ctx, next_tile, buffers[next_buffer], weights
-                )
-                if next_tile is not None
-                else None
-            )
-            yield offset, tile
-            offset += tile.shape[0]
-            next_buffer = 1 - next_buffer
-            del tile
-    finally:
-        if pending is not None:
-            # A consumer may close after yield while the next broadcast is in
-            # flight. Join its completion back to the allocation stream before
-            # the caller releases either buffer; this adds a GPU edge only.
-            _wait_prefill_x_gather(pending)
 
 
 def rms_norm(x, weight, eps):
@@ -866,8 +629,10 @@ class AttentionV41FP8(AttentionFP8):
 
     def init_rope_cache(self, device=None):
         super().init_rope_cache(device=device)
+        from ._v41_full_projection import prepare as prepare_full_projection
         from ._v41_mega_attention import prepare
 
+        prepare_full_projection(self)
         if self._mega_attention is not None:
             # Reinitialization must refresh the buffers captured by existing
             # graphs, including the shared Main/Indexer Q-B weight slices.
@@ -1148,30 +913,25 @@ class AttentionV41FP8(AttentionFP8):
         # Every V4.1 layer needs the full SWA prefix metadata, including global
         # layers. Build through the mature SWA planner with this layer's RoPE.
         ratio = self.compress_ratio
-        self.compress_ratio = 0
         # Only compressed bounded consumers bypass prefix concat. Pure SWA
         # still reads combined_indices even if bounded replay was requested.
         kwargs["swa_write_only"] = (
             bool(getattr(self, "swa_bounded_replay", False)) and ratio != 0
         )
+        kwargs["swa_query_meta"] = True
         reuse_common = kwargs.get("reuse_common_meta")
-        try:
-            cache = self._shared_attention.setdefault("prefill_meta_common", {})
-            key = self._v41_prefill_meta_cache_key(ratio, args, kwargs)
-            if reuse_common is None and key in cache:
-                return cache[key]
-            common = super()._build_shared_prefill_meta(*args, **kwargs)
-            if reuse_common is not None:
-                # Parent rechecks this layer's RoPE table but strips SWA Group-2
-                # for V4. V4.1 consumes the full same-region broadcast metadata.
-                common = common._replace(swa_meta=reuse_common.swa_meta)
-            common = common._replace(
-                request_row_slices=_prefill_request_row_slices(common)
-            )
-            cache[key] = common
-            return common
-        finally:
-            self.compress_ratio = ratio
+        cache = self._shared_attention.setdefault("prefill_meta_common", {})
+        key = self._v41_prefill_meta_cache_key(ratio, args, kwargs)
+        if reuse_common is None and key in cache:
+            return cache[key]
+        common = super()._build_shared_prefill_meta(*args, **kwargs)
+        if reuse_common is not None:
+            # Parent rechecks this layer's RoPE table but strips SWA Group-2
+            # for V4. V4.1 consumes the full same-region broadcast metadata.
+            common = common._replace(swa_meta=reuse_common.swa_meta)
+        common = common._replace(request_row_slices=_prefill_request_row_slices(common))
+        cache[key] = common
+        return common
 
     def _project_prefill_q(self, qr, freqs_cis, workspace):
         rows = qr.shape[0]
@@ -1310,10 +1070,13 @@ class AttentionV41FP8(AttentionFP8):
                     pending.wait()
             self._shared_attention["global"] = {}
             self._shared_attention["topk"] = {}
+            self._shared_attention.pop("decode_global_slots", None)
             self._shared_attention["candidates"] = None
             self._shared_attention.pop("candidate_mask", None)
             self._shared_attention.pop("decode_sparse_plan", None)
             self._shared_attention.pop("decode_valid_requests", None)
+            self._shared_attention.pop("decode_packed_request_ids", None)
+            self._shared_attention.pop("decode_input_lengths", None)
             self._shared_attention.pop("decode_indexer_metadata", None)
             self._shared_attention.pop("prefill_candidate_mask", None)
             self._shared_attention.pop("prefill_sparse_candidates", None)
@@ -1468,7 +1231,7 @@ class AttentionV41FP8(AttentionFP8):
                 len(positions), 2 * self.head_dim, device=positions.device
             )
         pool = self._source_pool(CSA_STATE)
-        state = pool[slots.clamp_min(0)].clone()
+        state = pool[slots.clamp_min(0)]
         state.masked_fill_((slots < 0).unsqueeze(-1), 0)
         return self._gather_shards(state)
 
@@ -1499,10 +1262,6 @@ class AttentionV41FP8(AttentionFP8):
         *,
         prefill,
         projected_tiles=None,
-        projected_full=False,
-        raw_tiles=None,
-        grouped_projection=False,
-        batched_groups=False,
         swa=None,
         previous_state=None,
     ):
@@ -1515,52 +1274,85 @@ class AttentionV41FP8(AttentionFP8):
 
         main_pool = self._source_pool(self._global_region())
         index_pool = self._source_pool(INDEXER_KV)
-        rows = int(positions.shape[0])
         cp = getattr(self, "_cp_ctx", None)
+        rows = cp.seq_len_full if positions is None else int(positions.shape[0])
         if cp is not None and cp.input_lengths_global_host is not None:
             lengths_host = cp.input_lengths_global_host
             prefixes_host = cp.prefix_lengths_host or (0,) * len(lengths_host)
         else:
             prefixes_host, lengths_host = torch.stack((starts, lengths)).tolist()
-        # Batch raw gather uses fewer, bounded GEMMs; retain original owner and
-        # single-request partitioning, including unbound startup materialization.
-        tile_rows = (
-            65536
-            if prefill
-            and main_pool is not None
-            and index_pool is not None
-            and cp is not None
-            and cp.cp_size > 1
-            and len(lengths_host) > 1
-            and raw_tiles is None
-            and projected_tiles is None
-            else _PRODUCE_GLOBAL_TILE_ROWS
-        )
+        tile_rows = _PRODUCE_GLOBAL_TILE_ROWS
         ends = [s + l for s, l in zip(prefixes_host, lengths_host)]
-        pair_ranges = []
-        base = 0
-        for start, length in zip(prefixes_host, lengths_host):
-            pair_ranges.append((base + (1 - start % 2), base + length))
-            base += length
+        pair_ranges = None
         producer_meta = None
-        state_pool = None
+        tile_metadata = positions is None
+        tile_plan = None
+        tile_scratch = None
+        if tile_metadata:
+            from . import _v41_producer_metadata
+
+            assert (
+                prefill
+                and projected_tiles is not None
+                and cp is not None
+                and cp.kv_cache_sharded
+                and main_pool is not None
+                and index_pool is not None
+            )
+            regions = (self._global_region(), INDEXER_KV)
+            if ratio == 2:
+                regions += (CSA_STATE,)
+            layouts = []
+            for region in regions:
+                pool = self._source_pool(region)
+                assert pool is not None and self._block_tables_by_type is not None
+                tpb = require_pool_tokens_per_block(self._kv_cache, region=region)
+                layouts.append(
+                    _v41_producer_metadata.SlotLayout(
+                        self._block_tables_by_type[region],
+                        self._source_entries(region, pool),
+                        tpb,
+                        self._kv_cache.get_seq_size_per_block(self._global_region()),
+                        cp.cp_size,
+                        cp.cp_rank,
+                    )
+                )
+            layouts = tuple(layouts)
+            assert _v41_producer_metadata._slot_layouts_supported(
+                layouts, ratio, len(lengths_host), x_full.device
+            )
+            tile_plan = iter(
+                _v41_producer_metadata.raw_tile_plan(lengths_host, prefixes_host, ratio)
+            )
+            tile_scratch = torch.empty(
+                (8, _PRODUCE_GLOBAL_TILE_ROWS),
+                device=x_full.device,
+                dtype=torch.int64,
+            )
+            key_counts = torch.div(starts + lengths, ratio, rounding_mode="floor").to(
+                torch.int32
+            )
+            score_cache = self._shared_attention.setdefault("prefill_score_bounds", {})
+            score_cache[("producer_key_counts", ratio)] = (
+                cp.prefix_lengths,
+                cp.input_lengths_global,
+                key_counts,
+            )
         if (
-            prefill
+            not tile_metadata
+            and prefill
             and main_pool is not None
             and index_pool is not None
             and cp is not None
             and cp.cp_size > 1
             and getattr(cp, "kv_cache_sharded", False)
             and len(lengths_host) >= 2
-            and raw_tiles is None
-            and projected_tiles is None
         ):
             from . import _v41_producer_metadata
 
             regions = (self._global_region(), INDEXER_KV)
             if ratio == 2:
                 regions += (CSA_STATE,)
-            sharded = cp.kv_cache_sharded
             layouts = []
             for region in regions:
                 pool = self._source_pool(region)
@@ -1572,13 +1364,9 @@ class AttentionV41FP8(AttentionFP8):
                         self._block_tables_by_type[region],
                         self._source_entries(region, pool),
                         tpb,
-                        (
-                            self._kv_cache.get_seq_size_per_block(self._global_region())
-                            if sharded
-                            else tpb
-                        ),
-                        cp.cp_size if sharded else 1,
-                        cp.cp_rank if sharded else 0,
+                        self._kv_cache.get_seq_size_per_block(self._global_region()),
+                        cp.cp_size,
+                        cp.cp_rank,
                     )
                 )
             producer_meta = _v41_producer_metadata.prepare_raw(
@@ -1614,24 +1402,18 @@ class AttentionV41FP8(AttentionFP8):
                         producer_meta.key_counts,
                     )
                 score_cache[counts_key] = cached
-                state_pool = self._source_pool(CSA_STATE) if ratio == 2 else None
-        if producer_meta is None:
+        if producer_meta is None and not tile_metadata:
             # Unsupported descriptors preserve the old dtype and callback path.
             starts, lengths = starts.long(), lengths.long()
         if (
             producer_meta is None
+            and not tile_metadata
             and prefill
             and main_pool is not None
             and index_pool is not None
             and (
-                raw_tiles is not None
-                or grouped_projection
-                or (
-                    ratio == 2
-                    and projected_tiles is None
-                    and cp is not None
-                    and cp.cp_size > 1
-                )
+                projected_tiles is not None
+                or (ratio == 2 and cp is not None and cp.cp_size > 1)
             )
         ):
             from rtp_llm.models_py.modules.dsv41.fp8 import _v41_producer_metadata
@@ -1639,36 +1421,22 @@ class AttentionV41FP8(AttentionFP8):
             state_pool = self._source_pool(CSA_STATE) if ratio == 2 else None
             if ratio == 1 or state_pool is not None:
                 regions = (self._global_region(), INDEXER_KV, CSA_STATE)
-                if raw_tiles is None and projected_tiles is None:
-                    producer_meta = _v41_producer_metadata.prepare_raw(
-                        cp,
-                        positions,
-                        req_ids,
-                        starts,
-                        lengths,
-                        ratio,
-                        self._slots,
-                        regions,
-                        tile_rows=tile_rows,
-                    )
-                else:
-                    producer_meta = _v41_producer_metadata.prepare(
-                        cp,
-                        positions,
-                        req_ids,
-                        starts,
-                        lengths,
-                        ratio,
-                        _prefill_x_tile_plan(cp),
-                        self._slots,
-                        regions,
-                    )
-        if batched_groups:
-            from . import _v41_batched_producer as batched_producer
-
+                producer_meta = _v41_producer_metadata.prepare_raw(
+                    cp,
+                    positions,
+                    req_ids,
+                    starts,
+                    lengths,
+                    ratio,
+                    self._slots,
+                    regions,
+                    tile_rows=tile_rows,
+                )
         previous = None
         producer_seq_ends = (
-            producer_meta.seq_ends if producer_meta is not None else None
+            starts + lengths
+            if tile_metadata
+            else producer_meta.seq_ends if producer_meta is not None else None
         )
         if ratio == 2:
             # Read the previous token before tail writes can reuse its ring slot.
@@ -1690,7 +1458,7 @@ class AttentionV41FP8(AttentionFP8):
         # them right after quantization.
         warm_keys = [] if main_pool is None else None
         carry = None
-        tiles = raw_tiles if raw_tiles is not None else projected_tiles
+        tiles = projected_tiles
         if tiles is None:
             tiles = (
                 (t0, x_full[t0 : t0 + tile_rows])
@@ -1698,34 +1466,37 @@ class AttentionV41FP8(AttentionFP8):
             )
         for t0, x_tile in tiles:
             t1 = t0 + x_tile.shape[0]
-            pos_tile = positions[t0:t1]
-            req_tile = req_ids[t0:t1]
+            if tile_metadata:
+                tile = next(tile_plan)
+                assert tile[:2] == (t0, t1)
+                (
+                    pos_tile,
+                    req_tile,
+                    boundary_idx,
+                    boundary_pos,
+                    boundary_req,
+                    main_slots,
+                    index_slots,
+                    state_slots,
+                ) = _v41_producer_metadata.prepare_fused_tile(
+                    starts, lengths, ratio, layouts, tile, tile_scratch
+                )
+            else:
+                pos_tile = positions[t0:t1]
+                req_tile = req_ids[t0:t1]
             values = (
                 x_tile[:, : self.head_dim]
-                if projected_tiles is not None or projected_full
+                if projected_tiles is not None
                 else _linear_bf16_bf16_fp32(x_tile, owner.global_wkv)
             )
             scores = None
             if ratio == 2:
                 scores = (
                     x_tile[:, self.head_dim :]
-                    if projected_tiles is not None or projected_full
+                    if projected_tiles is not None
                     else _linear_bf16_bf16_fp32(x_tile, owner.global_wgate)
                 )
-            group_plan = None
-            if batched_groups:
-                group_plan = batched_producer.make_plan(
-                    producer_meta, t0, t1, ratio=ratio, request_lengths=lengths_host
-                )
-                prepared = batched_producer.prepare(group_plan, x_full.device)
-                compact = slice(group_plan.first, group_plan.stop)
-                boundary_idx = prepared.boundaries
-                boundary_pos = producer_meta.positions[compact]
-                boundary_req = producer_meta.requests[compact]
-                main_slots = producer_meta.main_slots[compact]
-                index_slots = producer_meta.index_slots[compact]
-                state_slots = producer_meta.state_slots[t0:t1] if ratio == 2 else None
-            elif producer_meta is not None:
+            if producer_meta is not None:
                 (
                     boundary_idx,
                     boundary_pos,
@@ -1734,9 +1505,15 @@ class AttentionV41FP8(AttentionFP8):
                     index_slots,
                     state_slots,
                 ) = producer_meta.tile(t0, t1)
-            elif ratio == 2:
+            elif not tile_metadata and ratio == 2:
                 # Host lengths retain compact completed-pair rows without
                 # nonzero or doubling the index projection's GEMM row count.
+                if pair_ranges is None:
+                    pair_ranges = []
+                    base = 0
+                    for start, length in zip(prefixes_host, lengths_host):
+                        pair_ranges.append((base + (1 - start % 2), base + length))
+                        base += length
                 pair_cache = self._shared_attention.setdefault(
                     "prefill_meta_common", {}
                 ).setdefault("global_pairs", {})
@@ -1765,10 +1542,10 @@ class AttentionV41FP8(AttentionFP8):
                     pos_tile[boundary_idx],
                     req_tile[boundary_idx],
                 )
-            else:
+            elif not tile_metadata:
                 boundary_idx = torch.arange(t1 - t0, device=x_full.device)
                 boundary_pos, boundary_req = pos_tile, req_tile
-            if producer_meta is None:
+            if producer_meta is None and not tile_metadata:
                 main_slots = (
                     self._slots(self._global_region(), boundary_pos, boundary_req)
                     if main_pool is not None
@@ -1780,7 +1557,7 @@ class AttentionV41FP8(AttentionFP8):
                     else None
                 )
             latent = (
-                batched_producer.compress_main(
+                prefill_global.compress_main(
                     values,
                     scores,
                     owner.global_norm,
@@ -1789,32 +1566,15 @@ class AttentionV41FP8(AttentionFP8):
                     req_tile,
                     starts,
                     previous,
-                    prepared,
+                    boundary_idx,
                     self.freqs_cis,
                     main_pool,
                     main_slots,
+                    ratio,
+                    carry,
                 )
-                if batched_groups
-                else (
-                    prefill_global.compress_main(
-                        values,
-                        scores,
-                        owner.global_norm,
-                        self.eps,
-                        pos_tile,
-                        req_tile,
-                        starts,
-                        previous,
-                        boundary_idx,
-                        self.freqs_cis,
-                        main_pool,
-                        main_slots,
-                        ratio,
-                        carry,
-                    )
-                    if prefill and main_pool is not None
-                    else None
-                )
+                if prefill and main_pool is not None
+                else None
             )
             main_stored = latent is not None
             if latent is None:
@@ -1852,11 +1612,7 @@ class AttentionV41FP8(AttentionFP8):
             if ratio == 2:
                 # The immutable predecessor snapshot and old carry are consumed
                 # before any ring writes or publication of the next tile carry.
-                if batched_groups:
-                    batched_producer.store_states(
-                        values, scores, state_slots, state_pool, slots_are_unique=True
-                    )
-                elif producer_meta is None:
+                if producer_meta is None and not tile_metadata:
                     self._write_states(
                         values,
                         scores,
@@ -1870,42 +1626,16 @@ class AttentionV41FP8(AttentionFP8):
                         scores,
                         pos_tile,
                         req_tile,
-                        producer_meta.seq_ends,
+                        producer_seq_ends,
                         slots=state_slots,
                     )
-                if not batched_groups:
-                    carry = (values[-1:].clone(), scores[-1:].clone())
-            if batched_groups:
-                from ._v41_grouped_gemm import try_grouped_index_gemm
-
-                projected_index = try_grouped_index_gemm(
-                    latent,
-                    owner.index_wk,
-                    tuple(stop - first for _, _, first, stop, _ in group_plan.segments),
-                )
-                if projected_index is None:
-                    pieces = [
-                        F.linear(latent[first:stop], owner.index_wk)
-                        for _, _, first, stop, _ in group_plan.segments
-                        if stop > first
-                    ]
-                    projected_index = (
-                        torch.cat(pieces, dim=0)
-                        if pieces
-                        else latent.new_empty((0, 128))
-                    )
-                    del pieces
-            else:
-                projected_index = F.linear(latent, owner.index_wk)
+                carry = (values[-1:].clone(), scores[-1:].clone())
+            projected_index = F.linear(latent, owner.index_wk)
             index_stored = (
                 prefill
                 and main_pool is not None
                 and index_pool is not None
-                and (
-                    batched_producer.store_index
-                    if batched_groups
-                    else prefill_global.store_index
-                )(
+                and prefill_global.store_index(
                     projected_index,
                     owner.index_k_norm,
                     self.eps,
@@ -1944,12 +1674,10 @@ class AttentionV41FP8(AttentionFP8):
                 warm_keys.append((boundary_pos, boundary_req, global_keys, index_keys))
             # Release all consumer views before the next group is allocated.
             # The independent carry clones survive this storage's lifetime.
-            if raw_tiles is not None or projected_tiles is not None:
+            if projected_tiles is not None:
                 del x_tile, values, scores
-            if batched_groups:
-                # These group-sized outputs are dead after publication. Release
-                # them before the next group and the final full-cache gather.
-                del latent, projected_index, prepared, boundary_idx
+        if tile_metadata:
+            assert next(tile_plan, None) is None
         if producer_meta is not None and producer_meta.key_counts is not None:
             # Row views must not keep the fused slab alive through full-pool readback.
             producer_meta = None
@@ -2086,9 +1814,6 @@ class AttentionV41FP8(AttentionFP8):
         if not self.is_index_source:
             return shared["topk"][self.index_source_layer_id]
         globals_by_req = shared["global"][self.kv_source_layer_id]
-        out = torch.empty(
-            (x.shape[0], self.index_topk), dtype=torch.int32, device=x.device
-        )
         config = getattr(self, "v41_config", {})
         candidate_source = int(config.get("candidate_source_layer_id", -1))
         candidate_blocks = int(config.get("candidate_topk_blocks", 0))
@@ -2150,15 +1875,16 @@ class AttentionV41FP8(AttentionFP8):
         if max((len(k) for _, k in globals_by_req), default=0) <= self.index_topk:
             if candidates_out is not None:
                 candidates_out.fill_(-1)
-            ids = torch.arange(self.index_topk, device=x.device)
-            out.copy_(
-                torch.where(
-                    ids[None] < ((positions + 1) // self.compress_ratio)[:, None],
-                    ids[None],
-                    -1,
-                )
+            ids = torch.arange(self.index_topk, device=x.device, dtype=torch.int32)
+            out = torch.where(
+                ids[None] < ((positions + 1) // self.compress_ratio)[:, None],
+                ids[None],
+                -1,
             )
         else:
+            out = torch.empty(
+                (x.shape[0], self.index_topk), dtype=torch.int32, device=x.device
+            )
             q = self._lin(self.index_wq, qr).view(
                 -1, self.index_n_heads, self.index_head_dim
             )
@@ -2207,7 +1933,7 @@ class AttentionV41FP8(AttentionFP8):
             if pending is not None:
                 with record_function_range("dsv41.prefill.pool.wait"):
                     pending.wait()
-            if fused_indexer and len(globals_by_req) > 1:
+            if fused_indexer:
                 from ._v41_batched_prefill_select import try_select_batched
 
                 if try_select_batched(
@@ -2243,6 +1969,8 @@ class AttentionV41FP8(AttentionFP8):
                 if row_count == 0:
                     continue
                 key_count = len(keys)
+                if key_count == 0:
+                    continue
                 candidates = shared.get("candidates")
                 probe = slice(rows.start, rows.start + 1) if contiguous else rows[:1]
                 sparse_request = (
@@ -2263,17 +1991,11 @@ class AttentionV41FP8(AttentionFP8):
                         self.index_topk,
                     )
                 )
-                use_schedule = False
                 return_bf16 = fused_indexer and prefill_topk.supports_bf16()
                 if sparse_request:
                     chunk_rows = sparse_prefill_indexer.MAX_CHUNK_ROWS
                 elif fused_indexer:
-                    chunk_rows, use_schedule = prefill_indexer.logits_chunk_plan(
-                        key_count,
-                        device=x.device,
-                        num_heads=self.index_n_heads,
-                        return_bf16=return_bf16,
-                    )
+                    chunk_rows = prefill_indexer.logits_chunk_rows(key_count)
                 else:
                     chunk_rows = 64
                 request_bounds = None
@@ -2293,10 +2015,6 @@ class AttentionV41FP8(AttentionFP8):
                         )
                         if request_bounds is not None:
                             cache[bounds_key] = request_bounds
-                if use_schedule:
-                    # A preceding request may have used the legacy path.
-                    # Do not retain its score through this first allocation.
-                    logits = None
                 for chunk_index, start in enumerate(range(0, row_count, chunk_rows)):
                     stop = min(start + chunk_rows, row_count)
                     output_rows = (
@@ -2367,7 +2085,6 @@ class AttentionV41FP8(AttentionFP8):
                                 visible,
                                 return_bf16=return_bf16,
                                 **({"bounds": bounds} if bounds is not None else {}),
-                                **({"use_schedule": True} if use_schedule else {}),
                             )
                     else:
                         logits = torch.einsum(
@@ -2409,14 +2126,12 @@ class AttentionV41FP8(AttentionFP8):
                             )
                         scores, selected = logits.topk(k, dim=-1)
                         selected = torch.where(scores.isfinite(), selected, -1).int()
-                        if use_schedule:
-                            del scores
+                        del scores
                     if selected is not target:
                         out[output_rows, :k] = selected
-                    if use_schedule:
-                        # Finish all same-stream consumers before the next
-                        # RHS allocation; the allocator tracks queued use.
-                        del logits, selected, target
+                    # Same-stream consumers have been enqueued; release the
+                    # score before allocating the next bounded chunk.
+                    del logits, selected, target
         shared["topk"] = {self.layer_id: out}
         return out
 
@@ -2496,6 +2211,13 @@ class AttentionV41FP8(AttentionFP8):
         buf = self._swa_prefill_concat(qkv, common, fuse_cache_write=fuse_cache_write)
         prefixes_host = self._host_prefill_prefixes(common)
         tails = [min(int(p), self.window_size - 1) for p in prefixes_host]
+        packed_lengths = getattr(
+            getattr(common, "swa_meta", None), "packed_row_lengths", None
+        )
+        if packed_lengths is not None:
+            return prefill_kv_workspace.split_swa_rows(buf, packed_lengths), [
+                int(p) - t for p, t in zip(prefixes_host, tails)
+            ]
         row_stride, width_stride = buf.stride()[1:]
         base_offset, batch_stride = buf.storage_offset(), buf.stride(0)
         if buf.is_contiguous():
@@ -2514,11 +2236,14 @@ class AttentionV41FP8(AttentionFP8):
         ], [int(p) - t for p, t in zip(prefixes_host, tails)]
 
     def _swa_prefill_concat(self, qkv, common, *, fuse_cache_write=False):
-        """Read the 528B prefix before a new chunk overwrites the SWA ring."""
+        """Pack prefix tails and fresh BF16 rows before overwriting the SWA ring."""
         meta = common.swa_meta
         B, D = common.batch_size, self.head_dim
+        row_offsets = getattr(meta, "packed_row_offsets", None)
+        row_lengths = getattr(meta, "packed_row_lengths", None)
+        shape = (sum(row_lengths), D) if row_lengths is not None else (B, meta.M, D)
         allocate = torch.empty if fuse_cache_write else torch.zeros
-        buf = allocate(B, meta.M, D, dtype=torch.bfloat16, device=qkv.kv_full.device)
+        buf = allocate(shape, dtype=torch.bfloat16, device=qkv.kv_full.device)
         if meta.prefix_len_max > 0:
             if self._swa_cp_byte_sliced():
                 swa_codec.dequantize_and_gather_k_cache_slots_cp_byte_sliced(
@@ -2531,6 +2256,7 @@ class AttentionV41FP8(AttentionFP8):
                     cp_size=common.cp_ctx.cp_size,
                     cp_rank=common.cp_ctx.cp_rank,
                     compaction=meta.cache_compaction,
+                    out_row_offsets=row_offsets,
                 )
             else:
                 swa_codec.dequantize_and_gather_k_cache_slots(
@@ -2539,6 +2265,7 @@ class AttentionV41FP8(AttentionFP8):
                     slot_mapping=meta.cache_slot_mapping,
                     gather_lens=meta.cache_gather_lens,
                     offset=0,
+                    out_row_offsets=row_offsets,
                 )
         if fuse_cache_write:
             # Prefix reads finish first; all visible fresh rows are then stored
@@ -2571,6 +2298,33 @@ class AttentionV41FP8(AttentionFP8):
             # shorten SWA without moving global KV or changing its aliases.
             if workspace.try_layout(swa) is not None:
                 physical_offsets = workspace.device_offsets
+        pool_bound = (
+            min(len(globals_by_req), len(swa)) != 1
+            and self._source_pool(self._global_region()) is not None
+        )
+        if pool_bound:
+            from rtp_llm.models_py.modules.dsv41.cp import cp_swa_replay_starts
+
+            from ._v41_prefill_metadata import try_chunk_metadata
+
+            compact_replay = cp_swa_replay_starts(common.cp_ctx) is not None
+            meta = try_chunk_metadata(
+                common.prefix_lengths,
+                (
+                    common.cp_ctx.input_lengths_global
+                    if common.cp_on
+                    else common.input_lengths
+                ),
+                req_ids,
+                self.compress_ratio,
+                self.window_size,
+                self.swa_bounded_replay,
+                compact_replay=compact_replay,
+                physical_offsets=physical_offsets,
+            )
+            if meta is not None:
+                shared["prefill_chunk_meta"] = meta
+                return meta
         offsets, global_sizes = [], []
         offset = 0
         swa_sizes = (
@@ -2590,7 +2344,7 @@ class AttentionV41FP8(AttentionFP8):
             # directly and skip the device tensors (and their H2D copy) entirely.
             meta = (offsets[0], global_sizes[0], swa_starts[0])
         else:
-            if self._source_pool(self._global_region()) is None:
+            if not pool_bound:
                 # Pool-free warmup materializes only this chunk's closed
                 # groups, so its shapes need not include prefix history.
                 def device_values(values):
@@ -2605,28 +2359,6 @@ class AttentionV41FP8(AttentionFP8):
                 sizes = device_values(global_sizes)
                 starts_d = device_values(swa_starts)
             else:
-                from rtp_llm.models_py.modules.dsv41.cp import cp_swa_replay_starts
-
-                from ._v41_prefill_metadata import try_chunk_metadata
-
-                compact_replay = cp_swa_replay_starts(common.cp_ctx) is not None
-                meta = try_chunk_metadata(
-                    common.prefix_lengths,
-                    (
-                        common.cp_ctx.input_lengths_global
-                        if common.cp_on
-                        else common.input_lengths
-                    ),
-                    req_ids,
-                    self.compress_ratio,
-                    self.window_size,
-                    self.swa_bounded_replay,
-                    compact_replay=compact_replay,
-                    physical_offsets=physical_offsets,
-                )
-                if meta is not None:
-                    shared["prefill_chunk_meta"] = meta
-                    return meta
                 lengths = (
                     common.cp_ctx.input_lengths_global
                     if common.cp_on
@@ -2673,10 +2405,32 @@ class AttentionV41FP8(AttentionFP8):
             self._shared_attention.pop("prefill_chunk_meta", None)
             self._shared_attention.pop("prefill_index_plan", None)
         common = self._prefill_common_setup(x, positions)
+        if self.compress_ratio == 0:
+            qkv = self._prefill_compute_qkv(
+                x, common, shared_input_quant=shared_input_quant
+            )
+            # Read old SWA tails before the new rows wrap over their pool slots.
+            swa_only_workspace = (
+                self._swa_prefill_concat(qkv, common)
+                if common.any_cont and self._kv_cache is not None
+                else None
+            )
+            self._prefill_write_swa_fp8_paged(common, qkv.kv_full)
+            return common, qkv, None, None, swa_only_workspace
+        if not self.is_kv_source:
+            qkv = self._prefill_compute_qkv(
+                x, common, shared_input_quant=shared_input_quant
+            )
+            fuse_swa_fresh = self._can_fuse_swa_fresh(qkv, common)
+            swa, swa_starts = self._swa_prefill_workspace(
+                qkv, common, fuse_cache_write=fuse_swa_fresh
+            )
+            if not fuse_swa_fresh:
+                self._prefill_write_swa_fp8_paged(common, qkv.kv_full)
+            return common, qkv, swa, swa_starts, None
         previous_state = None
         if (
             x.is_cuda
-            and self.is_kv_source
             and self.compress_ratio == 2
             and common.cp_on
             and common.cp_ctx.cp_size > 1
@@ -2711,132 +2465,50 @@ class AttentionV41FP8(AttentionFP8):
         qkv = self._prefill_compute_qkv(
             x, common, shared_input_quant=shared_input_quant
         )
-        # Launch the first bounded hidden-state transfer after the QKV gather.
-        # It overlaps SWA work; subsequent transfers overlap global projection.
-        x_gather = None
-        small_cp = common.cp_on and _use_small_cp_x_gather(common.cp_ctx)
-        projected_small_cp = False
-        x_groups = (
-            _prefill_x_group_plan(
+        projected_tiles = None
+        if common.cp_on:
+            owner = self._owner()
+            weights = (
+                (owner.global_wkv, owner.global_wgate)
+                if self.compress_ratio == 2
+                else (owner.global_wkv,)
+            )
+            x_groups = _prefill_x_group_plan(
                 x,
                 common.cp_ctx,
-                allow_owner_tiles=True,
-                output_width=self.head_dim * (2 if self.compress_ratio == 2 else 1),
+                output_width=len(weights) * self.head_dim,
             )
-            if self.is_kv_source and common.cp_on and not small_cp
-            else None
-        )
-        if self.is_kv_source and common.cp_on and x_groups is None:
-            if small_cp:
-                # One bounded all-gather avoids per-half launches on short requests.
-                first_tile = (None, 0, common.cp_ctx.padded_seq_len)
-                weights = ()
-                projected_small_cp = self.compress_ratio in (
-                    1,
-                    2,
-                ) and _project_before_small_cp_gather(
-                    x, common.cp_ctx, self.compress_ratio * self.head_dim
-                )
-                if projected_small_cp:
-                    from rtp_llm.models_py.modules.dsv41.fp8.compressor import (
-                        _linear_bf16_bf16_fp32,
-                    )
-
-                    owner = self._owner()
-                    weight = (
-                        torch.cat((owner.global_wkv, owner.global_wgate), dim=0)
-                        if self.compress_ratio == 2
-                        else owner.global_wkv
-                    )
-                    with record_function_range("dsv41.prefill.project_local_before_ag"):
-                        x = _linear_bf16_bf16_fp32(x, weight)
-                x_buffers = [x.new_empty((first_tile[2], x.shape[-1]))]
-            else:
-                owner = self._owner()
-                weights = (
-                    (owner.global_wkv, owner.global_wgate)
-                    if self.compress_ratio == 2
-                    else (owner.global_wkv,)
-                )
-                x_plan = iter(_prefill_x_tile_plan(common.cp_ctx))
-                first_tile = next(x_plan)
-                # Replicated projection weights let only the owner compute each
-                # row. Transfer FP32 values/scores, preserving their pool boundary.
-                x_buffers = [
-                    torch.empty(
-                        (_PRODUCE_GLOBAL_TILE_ROWS, len(weights) * self.head_dim),
-                        device=x.device,
-                        dtype=torch.float32,
-                    )
-                    for _ in range(2)
-                ]
-            with record_function_range("dsv41.prefill.x_gather.async_start"):
-                x_gather = _start_prefill_x_gather_async(
-                    x, common.cp_ctx, first_tile, x_buffers[0], weights
-                )
+            assert (
+                x_groups is not None
+            ), "CP source groups require the full zigzag layout"
+            projected_tiles = _prefill_projected_x_groups(
+                x, common.cp_ctx, x_groups, weights
+            )
         # Read old SWA tails before writes wrap over them in long prefill chunks.
         fuse_swa_fresh = self._can_fuse_swa_fresh(qkv, common)
-        swa, swa_starts = (
-            self._swa_prefill_workspace(qkv, common, fuse_cache_write=fuse_swa_fresh)
-            if self.compress_ratio
-            else (None, None)
-        )
-        swa_only_workspace = (
-            self._swa_prefill_concat(qkv, common)
-            if not self.compress_ratio
-            and common.any_cont
-            and self._kv_cache is not None
-            else None
+        swa, swa_starts = self._swa_prefill_workspace(
+            qkv, common, fuse_cache_write=fuse_swa_fresh
         )
         if not fuse_swa_fresh:
             self._prefill_write_swa_fp8_paged(common, qkv.kv_full)
-        if not self.compress_ratio or not self.is_kv_source:
-            return common, qkv, swa, swa_starts, swa_only_workspace
         starts = common.prefix_lengths
         lengths = (
             common.cp_ctx.input_lengths_global if common.cp_on else common.input_lengths
         )
-        if not (
-            small_cp
-            and common.cp_ctx.cp_size > 1
+        starts, lengths = starts.long(), lengths.long()
+        rows = common.cp_ctx.seq_len_full if common.cp_on else x.shape[0]
+        x_full = x
+        stream_metadata = (
+            common.cp_on
             and common.cp_ctx.kv_cache_sharded
-            and common.batch_size >= 2
-        ):
-            starts, lengths = starts.long(), lengths.long()
-        if self.is_kv_source:
-            rows = common.cp_ctx.seq_len_full if common.cp_on else x.shape[0]
-            x_full, projected_tiles, raw_tiles = x, None, None
-            batched_groups = False
-            if small_cp:
-                x_full = _cp_restore_gathered_full_2d(
-                    _wait_prefill_x_gather(x_gather), common.cp_ctx
-                )
-            elif x_groups is not None:
-                if os.environ.get("RTP_V41_BATCHED_PRODUCER", "0") == "1" and all(
-                    _prefill_x_group_fits(x, common.cp_ctx, l1 - l0, r1 - r0)
-                    for l0, l1, r0, r1 in x_groups
-                ):
-                    from . import _v41_batched_producer
-
-                    batched_groups = _v41_batched_producer.can_batch_groups(
-                        self, x, common.cp_ctx
-                    )
-                owner = self._owner()
-                weights = (
-                    (owner.global_wkv, owner.global_wgate)
-                    if self.compress_ratio == 2
-                    else (owner.global_wkv,)
-                )
-                projected_tiles = _prefill_projected_x_groups(
-                    x, common.cp_ctx, x_groups, weights, whole_groups=batched_groups
-                )
-            elif common.cp_on:
-                projected_tiles = _prefill_x_tiles(
-                    x, common.cp_ctx, x_plan, x_gather, x_buffers, weights
-                )
-            x_gather = None
-            if common.cp_on and x_groups is None:
-                del x_buffers
+            and x.is_cuda
+            and self._source_pool(self._global_region()) is not None
+            and self._source_pool(INDEXER_KV) is not None
+            and (self.compress_ratio == 1 or self._source_pool(CSA_STATE) is not None)
+        )
+        if stream_metadata:
+            pos_full = ids_full = None
+        else:
             row_metadata = None
             if (
                 common.cp_on
@@ -2845,13 +2517,9 @@ class AttentionV41FP8(AttentionFP8):
                 and starts.is_contiguous()
                 and lengths.is_contiguous()
             ):
-                from rtp_llm.models_py.modules.dsv41._cp_metadata_triton import (
-                    try_build_cp_full_prefill_positions,
-                )
-
-                row_metadata = try_build_cp_full_prefill_positions(
-                    lengths, starts, total_tokens=rows
-                )
+                row_metadata = build_cp_full_prefill_positions(common.cp_ctx, x.device)[
+                    :2
+                ]
             if row_metadata is not None:
                 pos_full, ids_full = row_metadata
                 del row_metadata
@@ -2872,29 +2540,23 @@ class AttentionV41FP8(AttentionFP8):
                     - cu[ids_full]
                     + starts[ids_full]
                 )
-            try:
-                self._produce_global(
-                    x_full,
-                    pos_full,
-                    ids_full,
-                    starts,
-                    lengths,
-                    prefill=True,
-                    projected_tiles=projected_tiles,
-                    projected_full=projected_small_cp,
-                    raw_tiles=raw_tiles,
-                    grouped_projection=x_groups is not None,
-                    batched_groups=batched_groups,
-                    swa=swa,
-                    previous_state=previous_state,
-                )
-            finally:
-                if raw_tiles is not None:
-                    raw_tiles.close()
-                if projected_tiles is not None:
-                    projected_tiles.close()
-            del x_full
-        return common, qkv, swa, swa_starts, swa_only_workspace
+        try:
+            self._produce_global(
+                x_full,
+                pos_full,
+                ids_full,
+                starts,
+                lengths,
+                prefill=True,
+                projected_tiles=projected_tiles,
+                swa=swa,
+                previous_state=previous_state,
+            )
+        finally:
+            if projected_tiles is not None:
+                projected_tiles.close()
+        del x_full
+        return common, qkv, swa, swa_starts, None
 
     def _prefill_query(self, x, common, qkv, swa, swa_starts, swa_only_workspace=None):
         """Consume query rows without regenerating or writing source KV."""
@@ -2911,14 +2573,11 @@ class AttentionV41FP8(AttentionFP8):
                     profile_name="dsv41.prefill.swa_concat.flash_mla",
                     out=self._prefill_output_buffer(x, qkv.qr.shape[0]),
                 )
-            topk = common.topk_idxs
-            if topk.dim() == 3:
-                topk = topk.squeeze(0)
             out = self._prefill_sparse_attention(
                 qkv,
                 common,
                 kv=qkv.kv_full.unsqueeze(1),
-                indices=topk.to(torch.int32),
+                indices=common.topk_idxs,
                 topk_length=common.swa_meta.topk_length_kv_full,
                 profile_name="dsv41.prefill.swa.flash_mla_kv_full",
                 out=self._prefill_output_buffer(x, qkv.qr.shape[0]),
@@ -3002,7 +2661,7 @@ class AttentionV41FP8(AttentionFP8):
             out=self._prefill_output_buffer(x, qkv.qr.shape[0]),
         )
 
-    def _produce_global_decode(self, x, positions, req_ids, starts):
+    def _produce_global_decode(self, x, positions, req_ids, starts, *, projected=None):
         """Fixed-shape global writes and index reads, safe for CUDA graphs."""
         from rtp_llm.models_py.modules.dsv41.fp8._v41_fp4_triton import (
             dequantize_indexer_k_fp4,
@@ -3018,7 +2677,17 @@ class AttentionV41FP8(AttentionFP8):
             try_produce_global,
         )
 
-        if not try_produce_global(self, x, positions, req_ids, starts):
+        input_lengths = self._shared_attention.get("decode_input_lengths")
+        ends = None
+        if not try_produce_global(
+            self,
+            x,
+            positions,
+            req_ids,
+            starts,
+            projected=projected,
+            input_lengths=input_lengths,
+        ):
             flat = x.reshape(B * S, -1)
             values = _linear_bf16_bf16_fp32(flat, self.global_wkv)
             if self.compress_ratio == 2:
@@ -3026,7 +2695,11 @@ class AttentionV41FP8(AttentionFP8):
                 previous = self._read_state(
                     (starts - 1).clamp_min(0), torch.arange(B, device=x.device)
                 )
-                first = (torch.arange(B * S, device=x.device) % S == 0)[:, None]
+                first = (
+                    torch.arange(B * S, device=x.device) % S == 0
+                    if input_lengths is None
+                    else positions == starts[req_ids]
+                )[:, None]
                 value_prev = torch.where(
                     first, previous[req_ids, : self.head_dim], values.roll(1, 0)
                 )
@@ -3039,7 +2712,8 @@ class AttentionV41FP8(AttentionFP8):
                     self.global_norm,
                     self.eps,
                 )
-                slots = self._slots(CSA_STATE, positions, req_ids, state_end=starts + S)
+                ends = starts + (S if input_lengths is None else input_lengths)
+                slots = self._slots(CSA_STATE, positions, req_ids, state_end=ends)
                 state_rows = torch.cat((values, scores), -1)
                 # Slot zero is the allocator's unallocated sentinel; invalid rows
                 # may overwrite it, but no live request ever reads that slot.
@@ -3099,15 +2773,17 @@ class AttentionV41FP8(AttentionFP8):
                 )
             }
             return
+        # The fused producer and paged indexer need no end-position tensor.
+        # Materialize it only for the dense-key fallback below.
+        if ends is None:
+            ends = starts + (S if input_lengths is None else input_lengths)
         ids = torch.arange(capacity, device=x.device, dtype=torch.long).expand(B, -1)
         read_positions = (ids + 1) * self.compress_ratio - 1
         read_req = torch.arange(B, device=x.device)[:, None].expand_as(ids)
         slots = self._slots(
             INDEXER_KV, read_positions.reshape(-1), read_req.reshape(-1)
         ).view(B, capacity)
-        slots = torch.where(
-            ids < ((starts + S) // self.compress_ratio)[:, None], slots, -1
-        )
+        slots = torch.where(ids < (ends // self.compress_ratio)[:, None], slots, -1)
         keys = dequantize_indexer_k_fp4(index_pool, slots.reshape(-1)).view(
             B, capacity, self.index_head_dim
         )
@@ -3272,6 +2948,7 @@ class AttentionV41FP8(AttentionFP8):
                 batch_size=B,
                 query_len=S,
                 compress_ratio=self.compress_ratio,
+                request_ids=shared.get("decode_packed_request_ids"),
             )
         config = self.v41_config
         candidate_source = int(config.get("candidate_source_layer_id", -1))
@@ -3312,6 +2989,7 @@ class AttentionV41FP8(AttentionFP8):
                             query_len=S,
                             candidate_mask=shared.get("candidate_mask"),
                             valid_requests=shared.get("decode_valid_requests"),
+                            request_ids=shared.get("decode_packed_request_ids"),
                         )
                     shared["decode_sparse_plan"] = plan
                 with record_function_range("dsv41.decode.sparse_mqa_select"):
@@ -3324,6 +3002,7 @@ class AttentionV41FP8(AttentionFP8):
                         plan,
                         rope_head_dim=self.rope_head_dim,
                         prepared_query=prepared,
+                        **({"slot_plan": slot_plan} if slot_plan is not None else {}),
                     )
                 shared["topk"] = {self.layer_id: output}
                 return output
@@ -3351,6 +3030,7 @@ class AttentionV41FP8(AttentionFP8):
                 pad_invisible=False,
                 metadata=indexer_metadata,
                 prepared_query=prepared,
+                request_ids=shared.get("decode_packed_request_ids"),
             )
         else:
             weights = (
@@ -3501,7 +3181,16 @@ class AttentionV41FP8(AttentionFP8):
                 if paged:
                     logits = all_logits[start:end]
                 else:
-                    logits = torch.einsum("thd,kd->thk", q[start:end], keys[b]).relu_()
+                    request_ids = shared.get("decode_packed_request_ids")
+                    if request_ids is None:
+                        logits = torch.einsum(
+                            "thd,kd->thk", q[start:end], keys[b]
+                        ).relu_()
+                    else:
+                        query_keys = keys.index_select(0, request_ids[start:end].long())
+                        logits = torch.einsum(
+                            "thd,tkd->thk", q[start:end], query_keys
+                        ).relu_()
                     logits = (logits * weights[start:end, :, None]).sum(1)
                 visible = visible_per_token[start:end]
                 if not paged:
@@ -3554,7 +3243,26 @@ class AttentionV41FP8(AttentionFP8):
         shared["topk"] = {self.layer_id: output}
         return output
 
-    def _decode_global_slots(self, selected, req):
+    def _decode_slot_plan(self, req):
+        from . import _v41_decode_topk
+
+        if not self.is_index_source:
+            return None
+        cp = self._cp_ctx
+        if cp is not None and cp.cp_size > 1 and cp.kv_cache_sharded:
+            return None
+        region = self._global_region()
+        raw_tpb = require_pool_tokens_per_block(self._kv_cache, region=region)
+        if raw_tpb % self.compress_ratio:
+            return None
+        return _v41_decode_topk.make_slot_plan(
+            req,
+            self._block_tables_by_type[region],
+            entries=self._source_pool(region).shape[1],
+            logical_entries=raw_tpb // self.compress_ratio,
+        )
+
+    def _decode_global_slots(self, selected, req, *, slots=None):
         """Translate compressed indices without materializing token positions."""
         region = self._global_region()
         pool = self._source_pool(region)
@@ -3577,13 +3285,60 @@ class AttentionV41FP8(AttentionFP8):
                 translate_local_to_global_slots,
             )
 
-            return translate_local_to_global_slots(
-                req,
-                table,
-                selected,
-                entries_per_block=pool.shape[1],
-                tokens_per_block_for_block_table=logical_entries,
+            shared = getattr(self, "_shared_attention", None)
+            reuse = (
+                shared is not None
+                and shared.get("topk", {}).get(
+                    getattr(self, "index_source_layer_id", None)
+                )
+                is selected
             )
+            if reuse:
+                layout = (
+                    self.index_source_layer_id,
+                    self.kv_source_layer_id,
+                    region,
+                    self.compress_ratio,
+                    logical_entries,
+                    pool.data_ptr(),
+                    pool.shape,
+                    pool.stride(),
+                    table.data_ptr(),
+                    table.shape,
+                    table.stride(),
+                    req.data_ptr(),
+                    req.shape,
+                    req.stride(),
+                    selected.shape,
+                    selected.stride(),
+                    torch.cuda.current_stream(selected.device).cuda_stream,
+                )
+                cached = shared.get("decode_global_slots")
+                if (
+                    slots is None
+                    and cached is not None
+                    and cached[0] is selected
+                    and cached[1] == layout
+                ):
+                    return cached[2]
+            if slots is None:
+                slots = translate_local_to_global_slots(
+                    req,
+                    table,
+                    selected,
+                    entries_per_block=pool.shape[1],
+                    tokens_per_block_for_block_table=logical_entries,
+                )
+            if reuse:
+                # Capture records one producer per mapping; every replay still
+                # refreshes its output. Retain inputs until the forward ends.
+                shared["decode_global_slots"] = (
+                    selected,
+                    layout,
+                    slots,
+                    (pool, table, req),
+                )
+            return slots
         slots = self._slots(
             region,
             (selected.long().clamp_min(0) + 1).reshape(-1) * self.compress_ratio - 1,
@@ -3591,6 +3346,27 @@ class AttentionV41FP8(AttentionFP8):
         ).reshape_as(selected)
         slots.masked_fill_(selected < 0, -1)
         return slots.int()
+
+    _supports_engram_lookup_schedule = True
+
+    def forward_decode(
+        self, x, attn_metadata, kv_cache=None, *, shared_input_quant=None
+    ):
+        hook = getattr(self, "_engram_lookup_schedule", None)
+        if hook is None:
+            return super().forward_decode(
+                x, attn_metadata, kv_cache, shared_input_quant=shared_input_quant
+            )
+        try:
+            hook.before_attention()
+            result = super().forward_decode(
+                x, attn_metadata, kv_cache, shared_input_quant=shared_input_quant
+            )
+            hook.after_attention()
+            return result
+        except BaseException:
+            hook.abort()
+            raise
 
     def _forward_decode_body(self, x, metadata, shared_input_quant=None):
         from rtp_llm.models_py.modules.dsv41.fp8.decode.compute_qkv import (
@@ -3602,6 +3378,14 @@ class AttentionV41FP8(AttentionFP8):
 
         self._begin_forward()
         B, S, _ = x.shape
+        if getattr(metadata, "is_packed", False):
+            self._shared_attention["decode_packed_request_ids"] = (
+                metadata.req_id_per_token[: B * S]
+            )
+            self._shared_attention["decode_input_lengths"] = metadata.input_lengths[:B]
+        else:
+            self._shared_attention.pop("decode_packed_request_ids", None)
+            self._shared_attention.pop("decode_input_lengths", None)
         # Stable GPU contents are refreshed by prepare_cuda_graph each replay.
         # The mask affects selection only, not query/KV-write geometry.
         valid_requests = getattr(metadata, "valid_requests", None)
@@ -3634,6 +3418,9 @@ class AttentionV41FP8(AttentionFP8):
             )
         ):
             mega = None
+        hook = getattr(self, "_engram_lookup_schedule", None)
+        if hook is not None:
+            hook.before_projection(mega is not None)
         if mega is not None:
             from rtp_llm.models_py.modules.dsv41.fp8.decode.full_overlap import (
                 try_full_decode,
@@ -3694,6 +3481,11 @@ class AttentionV41FP8(AttentionFP8):
         finally:
             if global_work is not None:
                 global_work.finish()
+        slot_plan = (
+            self._decode_slot_plan(metadata.req_id_per_token[:T])
+            if self.compress_ratio and self.is_index_source
+            else None
+        )
         if mega is not None:
             slots = getattr(qkv, "global_slots", None)
             if self.compress_ratio and slots is None:
@@ -3708,9 +3500,14 @@ class AttentionV41FP8(AttentionFP8):
                     head_weights=qkv.head_weights,
                     index_prepared=qkv.index_prepared,
                     prepared_query=prepared_query,
+                    **({"slot_plan": slot_plan} if slot_plan is not None else {}),
                 )
                 slots = (
-                    self._decode_global_slots(selected, metadata.req_id_per_token[:T])
+                    self._decode_global_slots(
+                        selected,
+                        metadata.req_id_per_token[:T],
+                        slots=None if slot_plan is None else slot_plan.slots,
+                    )
                     .to(dtype=torch.int32)
                     .contiguous()
                 )
@@ -3739,6 +3536,7 @@ class AttentionV41FP8(AttentionFP8):
                 qkv.qr_quantized,
                 head_weights=qkv.head_weights,
                 prepared_query=prepared_query,
+                **({"slot_plan": slot_plan} if slot_plan is not None else {}),
             )
             from rtp_llm.models_py.modules.dsv41.fp8._v41_fp4_decode_attn import (
                 fp4_dual_decode_attention,
@@ -3747,7 +3545,11 @@ class AttentionV41FP8(AttentionFP8):
                 get_or_build_sched_meta,
             )
 
-            slots = self._decode_global_slots(selected, metadata.req_id_per_token[:T])
+            slots = self._decode_global_slots(
+                selected,
+                metadata.req_id_per_token[:T],
+                slots=None if slot_plan is None else slot_plan.slots,
+            )
             o = fp4_dual_decode_attention(
                 q=qkv.q,
                 swa_pool_3d=self._pool_view_3d_fp8(SWA_KV),

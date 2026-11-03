@@ -39,8 +39,10 @@ DeviceHostTransferExecutor::DeviceHostTransferExecutor(BlockTreeTaskPool&    tra
                                                        DeviceHostCopyOptions options,
                                                        std::shared_ptr<BlockTreeCacheMetricsReporter> metrics_reporter,
                                                        std::shared_ptr<CrcTransferService>            crc_service,
-                                                       BlockTreeTaskPool*                             load_task_pool):
-    TransferExecutor(transfer_task_pool, max_descriptors_per_batch, std::move(metrics_reporter), load_task_pool),
+                                                       BlockTreeTaskPool*                             load_task_pool,
+                                                       int64_t                                        world_rank):
+    TransferExecutor(
+        transfer_task_pool, max_descriptors_per_batch, std::move(metrics_reporter), load_task_pool, world_rank),
     crc_service_(std::move(crc_service)),
     options_(std::move(options)) {
     strategies_.push_back(std::make_unique<CudaBatchDeviceHostCopyStrategy>());

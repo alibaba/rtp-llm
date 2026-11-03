@@ -13,7 +13,7 @@
 
 #include "rtp_llm/cpp/model_rpc/MultimodalPbConverter.h"
 #include "rtp_llm/cpp/model_rpc/RPCPool.h"
-#include "rtp_llm/cpp/multimodal_processor/MultimodalError.h"
+#include "rtp_llm/cpp/multimodal_processor/transport/grpc/MMGrpcError.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 
 namespace rtp_llm {
@@ -72,7 +72,7 @@ public:
     ErrorResult<MultimodalOutputPB>
     request(const std::string& endpoint, MultimodalInputsPB& request_pb, DeadlineBudget& budget) override {
         if (budget.exhausted()) {
-            return ErrorInfo(ErrorCode::MM_PROCESS_ERROR, "vit rpc budget exhausted before the call");
+            return ErrorInfo(ErrorCode::GENERATE_TIMEOUT, "vit rpc budget exhausted before the call");
         }
         auto connection_status = pool_.getConnection(endpoint);
         if (!connection_status.ok()) {
@@ -111,23 +111,13 @@ public:
         if (!status.ok()) {
             metrics_->reportRpcClientError(
                 endpoint, kReasonGrpcError, std::to_string(static_cast<int>(status.error_code())));
-            if (auto error_info = parseMultimodalErrorMessage(status.error_message())) {
-                return *error_info;
+            auto error_info = parseMultimodalGrpcError(status);
+            if (error_info.code() == ErrorCode::UNKNOWN_ERROR) {
+                RTP_LLM_LOG_WARNING("multimodal RPC returned UNKNOWN_ERROR, grpc code [%d], message [%s]",
+                                    static_cast<int>(status.error_code()),
+                                    status.error_message().c_str());
             }
-            if (status.error_code() == grpc::StatusCode::CANCELLED) {
-                return ErrorInfo(ErrorCode::CANCELLED, status.error_message());
-            }
-            if (status.error_code() == grpc::StatusCode::RESOURCE_EXHAUSTED) {
-                return ErrorInfo(ErrorCode::CONCURRENCY_LIMIT_ERROR, status.error_message());
-            }
-            if (status.error_code() == grpc::StatusCode::UNAVAILABLE
-                || status.error_code() == grpc::StatusCode::DEADLINE_EXCEEDED) {
-                return ErrorInfo(ErrorCode::MM_REMOTE_RPC_FAILED, status.error_message());
-            }
-            RTP_LLM_LOG_WARNING("unclassified multimodal RPC error is not retryable, grpc code [%d], message [%s]",
-                                static_cast<int>(status.error_code()),
-                                status.error_message().c_str());
-            return ErrorInfo(ErrorCode::UNKNOWN_ERROR, status.error_message());
+            return error_info;
         }
         return receipt;
     }

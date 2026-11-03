@@ -330,6 +330,7 @@ message AuxInfoPB {
     int32 disk_reuse_len = 31;
     int32 prefill_disk_reuse_len = 32;
     int32 decode_disk_reuse_len = 33;
+    // Sticky once either MTP verification or updates exceed the budget three times consecutively.
     bool xgrammar_update_timeout = 34;
 }
 
@@ -507,6 +508,8 @@ message CacheStatusPB {
     int64 version = 4;
     map<int64, bool> cache_keys = 5;
     MultimodalCacheStatusPB multimodal_cache = 6;
+    // Prefer this list when nonempty; otherwise fall back to legacy cache_keys.
+    repeated sfixed64 cache_key_list = 7 [packed = true];
 }
 
 message MultimodalCacheStatusPB {
@@ -561,14 +564,6 @@ message TorchAllocatorDumpResponsePB {
 
 message CheckHealthResponsePB {
     string health = 1;
-}
-
-message UpdateEplbConfigRequestPB {
-    string mode = 1;
-    // Step interval: omitted keeps the current value; zero disables rearrangement.
-    oneof update_interval {
-        int32 update_time = 2;
-    }
 }
 
 enum TaskPhase {
@@ -702,6 +697,10 @@ message MemoryOperationRequestPB {
     repeated CopyItem copy_items = 1;
     CopyDirection copy_direction = 2;
     int64 timeout_ms = 3;
+    // Diagnostic identity only; absent on older peers. Never used for allocation or routing.
+    uint64 transfer_trace_id = 4;
+    int64 transfer_request_id = 5;
+    bool has_transfer_request_id = 6;
 }
 
 message MemoryOperationResponsePB {
@@ -982,6 +981,11 @@ message RemoteOperationRequestPB {
     repeated string group_tags = 6;
     // Metadata operations are served by TP rank 0 for this backend's instance.
     RemoteMetadataRequestPB metadata = 7;
+    // Remaining task budget for READ/WRITE; metadata operations keep their own policy.
+    int64 timeout_ms = 8;
+    // Empty preserves one block per URI. Otherwise each positive count gives
+    // the number of consecutive physical group_tags/block_ids for that URI.
+    repeated uint32 uri_block_counts = 9;
 }
 
 message RemoteMetadataRequestPB {
@@ -1030,16 +1034,25 @@ enum RemoteTransferStatusPB {
     REMOTE_TRANSFER_STATUS_SUCCESS = 1;
     REMOTE_TRANSFER_STATUS_FAILED = 2;
     REMOTE_TRANSFER_STATUS_TIMEOUT = 3;
+    // SDK failure/exception without proof that caller buffers are safe.
+    REMOTE_TRANSFER_STATUS_COMPLETION_UNKNOWN = 4;
+    // Explicit local-before-I/O rejection or SDK BUFFER_SAFE result. Unlike the
+    // legacy FAILED value, this status carries a buffer-lifetime guarantee.
+    REMOTE_TRANSFER_STATUS_FAILED_BUFFER_SAFE = 5;
 }
 
 message RemoteOperationResponsePB {
     RemoteBlockMaskPB succeed_block = 1;  // for read/write, TODO
     repeated string actual_uris = 2; // only for write
-    // Application-level transfer result. UNSPECIFIED is accepted as success
-    // from an older TP worker when the RPC itself completed successfully.
+    // Application-level result; UNSPECIFIED supplies no completion proof.
     RemoteTransferStatusPB transfer_status = 3;
     repeated RemoteHostCacheMatchPB hosts = 4;
     repeated RemoteBackendKeyLocationsPB backend_locations = 5;
+    // Caller-buffer proof for every READ/WRITE, independent of Decode publication.
+    // True means this worker submitted no payload I/O, or that all of its
+    // submitted payload I/O stopped accessing caller buffers. It does not prove
+    // a metadata commit or remote target drain. Absent/false remains unknown.
+    bool payload_buffer_safe = 6;
 }
 
 message FunctionResponsePB {
@@ -1132,7 +1145,6 @@ service RpcService {
     rpc BatchGenerateCall(BatchGenerateInputPB) returns (BatchGenerateOutputsPB);
 
     rpc CheckHealth(EmptyPB) returns (CheckHealthResponsePB);
-    rpc UpdateEplbConfig(UpdateEplbConfigRequestPB) returns (EmptyPB);
     rpc SetPause(EmptyPB) returns (EmptyPB);
     rpc SetRestart(EmptyPB) returns (EmptyPB);
     rpc SetLogLevel(SetLogLevelRequestPB) returns (EmptyPB);

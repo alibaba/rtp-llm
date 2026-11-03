@@ -18,6 +18,19 @@ test_copts = [
 ] + copts()
 
 cc_test(
+    name = "mm_grpc_error_test",
+    srcs = ["MMGrpcErrorTest.cc"],
+    copts = test_copts,
+    env = {"GPU_COUNT": "0"},
+    deps = [
+        "//rtp_llm/cpp/model_rpc/proto:model_rpc_service_cc_proto",
+        "//rtp_llm/cpp/multimodal_processor/transport/grpc:mm_grpc_error",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+cc_test(
     name = "multimodal_processor_test",
     srcs = glob([
         "MultimodalProcessorTest.cc",
@@ -56,6 +69,31 @@ cc_test(
         "@com_google_googletest//:gtest_main",
     ],
     env = {"TEST_USING_DEVICE": "CUDA"},
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
+)
+
+# Real GPU dependency gate against the public MM preprocessing entry point.
+# The host watchdog releases the gate without calling any CUDA API, bounding a
+# pre-fix failure even when a synchronous copy is holding a driver lock.
+cc_test(
+    name = "multimodal_cuda_stream_test",
+    srcs = ["MultimodalCudaStreamTest.cc"],
+    copts = copts(),
+    deps = torch_deps() + cuda13_torch_link_deps + [
+        "//rtp_llm/cpp/config:config_modules",
+        "//rtp_llm/cpp/multimodal_processor",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ] + select({
+        "@//:using_cuda": [
+            "@local_config_cuda//cuda:cuda_headers",
+            "@local_config_cuda//cuda:cuda_driver",
+            "@local_config_cuda//cuda:cudart",
+        ],
+        "//conditions:default": [],
+    }),
+    timeout = "short",
     exec_properties = {"gpu": "L20_CU13"},
     tags = ["L20_CU13"],
 )

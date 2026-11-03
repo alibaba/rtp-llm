@@ -5,15 +5,19 @@
 #include "rtp_llm/models_py/bindings/common/kernels/banRepeatNgram.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include <ATen/cuda/CUDAContext.h>
+#include "rtp_llm/models_py/bindings/cuda/kernels/attention_input_metadata.h"
+#include "rtp_llm/models_py/bindings/cuda/kernels/speculative_sampling/greedy_top1_renorm.h"
 #include <ATen/cuda/CUDAGeneratorImpl.h>
 #include <cuda_runtime.h>
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <functional>
 #include <iostream>
 #include <limits>
 #include <string>
 #include <vector>
+#include <c10/cuda/CUDAGuard.h>
 using namespace std;
 using namespace rtp_llm;
 
@@ -115,6 +119,186 @@ protected:
         return std::vector<float>(cpu.data_ptr<float>(), cpu.data_ptr<float>() + cpu.numel());
     }
 };
+
+TEST_F(CudaSamplerTest, testBatchedSeedOffsetsMatchSequentialGeneratorDraws) {
+    auto default_generator = at::cuda::detail::getDefaultCUDAGenerator();
+    struct RestoreGenerator {
+        at::Generator generator;
+        torch::Tensor state;
+        ~RestoreGenerator() {
+            generator.set_state(state);
+        }
+    } restore_default{default_generator, default_generator.get_state()};
+    auto first  = torch::make_generator<at::CUDAGeneratorImpl>();
+    auto second = torch::make_generator<at::CUDAGeneratorImpl>();
+    // Include adjacent aliases, an undefined/explicit-default run, and a
+    // returning nonadjacent generator. This matches verify's gamma+1 tiling.
+    std::vector<at::Generator> generators{
+        first, first, first, first, first, first, {}, default_generator, {}, second, second, first, {}, first};
+    const auto           batch_size = static_cast<int64_t>(generators.size());
+    std::vector<int64_t> seeds(batch_size), offsets(batch_size), expected_seeds(batch_size),
+        expected_offsets(batch_size);
+    for (const int increment : {0, 1, 5, 32}) {
+        SCOPED_TRACE(increment);
+        first.set_current_seed(0x123456789abcdef0ULL);
+        second.set_current_seed(0xfedcba9876543210ULL);
+        default_generator.set_current_seed(20261102);
+        const auto first_state   = first.get_state();
+        const auto second_state  = second.get_state();
+        const auto default_state = default_generator.get_state();
+        for (int64_t row = 0; row < batch_size; ++row) {
+            const auto values = get_seed_and_offset(
+                increment, generators[row].defined() ? std::make_optional(generators[row]) : std::nullopt);
+            expected_seeds[row]   = static_cast<int64_t>(std::get<0>(values));
+            expected_offsets[row] = static_cast<int64_t>(std::get<1>(values));
+        }
+        const auto expected_first   = first.get_state();
+        const auto expected_second  = second.get_state();
+        const auto expected_default = default_generator.get_state();
+        first.set_state(first_state);
+        second.set_state(second_state);
+        default_generator.set_state(default_state);
+        get_sampling_seed_offsets(generators, batch_size, increment, seeds.data(), offsets.data());
+        EXPECT_EQ(seeds, expected_seeds);
+        EXPECT_EQ(offsets, expected_offsets);
+        EXPECT_TRUE(torch::equal(first.get_state(), expected_first));
+        EXPECT_TRUE(torch::equal(second.get_state(), expected_second));
+        EXPECT_TRUE(torch::equal(default_generator.get_state(), expected_default));
+        // A subsequent caller must see exactly the same generator state.
+        EXPECT_EQ(first.get_offset(), static_cast<uint64_t>(expected_offsets.back()) + ((increment + 3) / 4) * 4);
+    }
+    EXPECT_NO_THROW(get_sampling_seed_offsets({}, 0, 32, nullptr, nullptr));
+    EXPECT_THROW(get_sampling_seed_offsets(generators, batch_size + 1, 32, seeds.data(), offsets.data()), c10::Error);
+    EXPECT_THROW(get_sampling_seed_offsets(generators, batch_size, -1, seeds.data(), offsets.data()), c10::Error);
+}
+
+TEST_F(CudaSamplerTest, testBatchedSeedOffsetsRejectCapture) {
+    auto generator = torch::make_generator<at::CUDAGeneratorImpl>();
+    generator.set_current_seed(20261102);
+    const auto                 state  = generator.get_state();
+    auto                       stream = at::cuda::getStreamFromPool();
+    c10::cuda::CUDAStreamGuard guard(stream);
+    int64_t                    seed = -1, offset = -1;
+    ASSERT_EQ(cudaStreamBeginCapture(stream.stream(), cudaStreamCaptureModeThreadLocal), cudaSuccess);
+    EXPECT_THROW(get_sampling_seed_offsets({generator}, 1, 32, &seed, &offset), c10::Error);
+    cudaGraph_t graph = nullptr;
+    ASSERT_EQ(cudaStreamEndCapture(stream.stream(), &graph), cudaSuccess);
+    ASSERT_EQ(cudaGraphDestroy(graph), cudaSuccess);
+    EXPECT_TRUE(torch::equal(generator.get_state(), state));
+    EXPECT_EQ(seed, -1);
+    EXPECT_EQ(offset, -1);
+}
+
+TEST_F(CudaSamplerTest, testPersistentSeedDeviceSlicesPreserveSamplingAndRefreshOffsets) {
+    const auto            device_i64    = torch::TensorOptions().device(torch::kCUDA).dtype(torch::kInt64);
+    const auto            pinned_i64    = torch::TensorOptions().pinned_memory(true).dtype(torch::kInt64);
+    auto                  seed_host     = torch::full({4}, -91, pinned_i64);
+    auto                  offset_host   = torch::full({4}, -91, pinned_i64);
+    auto                  seed_device   = torch::full({4}, -91, device_i64);
+    auto                  offset_device = torch::full({4}, -91, device_i64);
+    GreedySamplingBuffers buffers{seed_host.narrow(0, 1, 2),
+                                  offset_host.narrow(0, 1, 2),
+                                  torch::empty({2}, pinned_i64),
+                                  2,
+                                  seed_device.narrow(0, 1, 2),
+                                  offset_device.narrow(0, 1, 2)};
+    auto                  generator = torch::make_generator<at::CUDAGeneratorImpl>();
+    generator.set_current_seed(20261102);
+    auto logits = torch::linspace(-1.0, 1.0, 16, device_i64.dtype(torch::kFloat32)).repeat({2, 1});
+    auto sample = [&](bool persistent) {
+        auto         tokens = torch::zeros({2, 2}, device_i64.dtype(torch::kInt32));
+        auto         q      = torch::empty_like(logits);
+        GreedyParams params({logits.clone(),
+                             pinnedIntTensor({-1, -1}),
+                             pinnedIntTensor({1, 1}),
+                             tokens,
+                             1,
+                             pinnedIntTensor({0, 0}),
+                             pinnedFloatTensor({0.95f, 0.7f}),
+                             pinnedFloatTensor({1.0f, 1.0f})});
+        params.generator        = {generator, generator};
+        params.output_all_probs = q;
+        params.sampling_buffers = persistent ? &buffers : nullptr;
+        execSampleGreedy(params);
+        return std::make_pair(tokens, q);
+    };
+    for (int round = 0; round < 3; ++round) {
+        const auto state          = generator.get_state();
+        const auto expected       = sample(false);
+        const auto expected_state = generator.get_state();
+        generator.set_state(state);
+        const auto actual = sample(true);
+        EXPECT_TRUE(torch::equal(actual.first, expected.first));
+        EXPECT_TRUE(torch::equal(actual.second, expected.second));
+        EXPECT_TRUE(torch::equal(generator.get_state(), expected_state));
+        EXPECT_EQ(buffers.seed_device.data_ptr(), seed_device.narrow(0, 1, 2).data_ptr());
+        EXPECT_EQ(buffers.offset_device.data_ptr(), offset_device.narrow(0, 1, 2).data_ptr());
+        EXPECT_TRUE(torch::equal(seed_device.cpu(), torch::tensor({-91L, 20261102L, 20261102L, -91L}, torch::kInt64)));
+        EXPECT_TRUE(torch::equal(offset_device.cpu(),
+                                 torch::tensor({-91L, round * 64L, round * 64L + 32, -91L}, torch::kInt64)));
+    }
+}
+
+TEST_F(CudaSamplerTest, testBatchedSeedOffsetsCpuBenchmark) {
+    constexpr int64_t          batch_size = 48 * 6;
+    std::vector<at::Generator> tiled, independent, defaults(batch_size);
+    for (int64_t row = 0; row < batch_size; ++row) {
+        auto generator = torch::make_generator<at::CUDAGeneratorImpl>();
+        generator.set_current_seed(20261102 + row);
+        independent.push_back(generator);
+        if (row % 6 == 0) {
+            tiled.push_back(generator);
+        } else {
+            tiled.push_back(tiled.back());
+        }
+    }
+    auto default_generator = at::cuda::detail::getDefaultCUDAGenerator();
+    struct RestoreDefault {
+        at::Generator generator;
+        torch::Tensor state;
+        ~RestoreDefault() {
+            generator.set_state(state);
+        }
+    } restore_default{default_generator, default_generator.get_state()};
+    std::vector<int64_t> seeds(batch_size), offsets(batch_size);
+    for (const auto& fixture : {std::make_pair("verify_48x6", &tiled),
+                                std::make_pair("independent_288", &independent),
+                                std::make_pair("default_288", &defaults)}) {
+        auto run = [&](bool batched) {
+            if (batched) {
+                get_sampling_seed_offsets(*fixture.second, batch_size, 32, seeds.data(), offsets.data());
+            } else {
+                for (int64_t row = 0; row < batch_size; ++row) {
+                    const auto& generator = (*fixture.second)[row];
+                    auto        values =
+                        get_seed_and_offset(32, generator.defined() ? std::make_optional(generator) : std::nullopt);
+                    seeds[row]   = static_cast<int64_t>(std::get<0>(values));
+                    offsets[row] = static_cast<int64_t>(std::get<1>(values));
+                }
+            }
+        };
+        auto measure = [&](bool batched) {
+            for (int warmup = 0; warmup < 10; ++warmup) {
+                run(batched);
+            }
+            std::vector<double> times;
+            for (int sample = 0; sample < 7; ++sample) {
+                const auto start = std::chrono::steady_clock::now();
+                for (int repeat = 0; repeat < 32; ++repeat) {
+                    run(batched);
+                }
+                times.push_back(
+                    std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - start).count() / 32);
+            }
+            std::sort(times.begin(), times.end());
+            return times[times.size() / 2];
+        };
+        const auto legacy_us  = measure(false);
+        const auto batched_us = measure(true);
+        std::cout << "seed_offset_cpu fixture=" << fixture.first << " rows=" << batch_size
+                  << " legacy_median_us=" << legacy_us << " batched_median_us=" << batched_us << std::endl;
+    }
+}
 
 TEST_F(CudaSamplerTest, testDeepSelect4096ReturnsOriginalValues) {
     const auto* properties = at::cuda::getDeviceProperties(0);
@@ -795,6 +979,98 @@ TEST_F(CudaSamplerTest, testUnrestrictedTopPReturnsOriginalDistributionForReject
     ASSERT_TRUE(output.success.cpu().all().item<bool>());
     EXPECT_TRUE(torch::allclose(output_all_probs_t, expected, 1e-6, 1e-7));
     assertTokenIn(toHostInt(output_token_ids_t), 1, {0, 1, 2});
+}
+
+TEST_F(CudaSamplerTest, testPureTopPSamplesFromReturnedDistribution) {
+    constexpr int64_t batch = 2, vocab = 8192;
+    auto              dev    = torch::TensorOptions().device(torch::kCUDA);
+    auto              logits = torch::randn({batch, vocab}, dev.dtype(torch::kFloat32));
+    logits.select(0, 0).fill_(-std::numeric_limits<float>::infinity());
+    logits.index_put_({0, 17}, 4.0f);
+
+    for (int force_topk : {0, 4096}) {
+        auto tokens = torch::zeros({batch, 2}, dev.dtype(torch::kInt32));
+        auto q      = torch::empty({batch, force_topk > 0 ? force_topk : vocab}, dev.dtype(torch::kFloat32));
+        auto candidate_ids =
+            force_topk > 0 ? torch::empty({batch, force_topk}, dev.dtype(torch::kInt32)) : torch::Tensor();
+        GreedyParams params({logits.clone(),
+                             pinnedIntTensor({-1, -1}),
+                             pinnedIntTensor({1, 1}),
+                             tokens,
+                             1,
+                             pinnedIntTensor({0, 0}),
+                             pinnedFloatTensor({0.5f, 0.95f}),
+                             pinnedFloatTensor({1.0f, 1.0f})});
+        params.output_all_probs = q;
+        if (candidate_ids.defined()) {
+            params.output_all_probs_indices = candidate_ids;
+        }
+        params.skip_logits_probs_restore = true;
+        params.force_topk                = force_topk;
+        auto generator                   = torch::make_generator<at::CUDAGeneratorImpl>();
+        generator.set_current_seed(20261030);
+        params.generator = {generator, generator};
+
+        execSampleGreedy(params);
+        check_cuda_error();
+        EXPECT_TRUE(q.sum(-1).sub(1.0f).abs().lt(1e-4).all().item<bool>());
+        if (candidate_ids.defined()) {
+            EXPECT_TRUE(candidate_ids.ge(0).logical_and(candidate_ids.lt(vocab)).all().item<bool>());
+            auto full_q = torch::zeros({batch, vocab}, q.options());
+            full_q.scatter_(1, candidate_ids.to(torch::kLong), q);
+            EXPECT_TRUE(full_q.gather(1, tokens.select(1, 1).to(torch::kLong).unsqueeze(1)).gt(0).all().item<bool>());
+        } else {
+            EXPECT_TRUE(q.gather(1, tokens.select(1, 1).to(torch::kLong).unsqueeze(1)).gt(0).all().item<bool>());
+        }
+        EXPECT_EQ(tokens.index({0, 1}).item<int32_t>(), 17);
+    }
+}
+
+TEST_F(CudaSamplerTest, testAirTopPRenormHandlesFlatRowsInMixedBatch) {
+    // Regression: the DSpARK packed target-verify path scatters
+    // [packed_rows, vocab] logits into a zero-filled dense buffer, so the
+    // unverified tail rows reach the sampler as all-zero logits. softmax(0) is
+    // exactly uniform, which puts every element of such a row into a single
+    // radix bucket. The histogram update must fold a converged warp that maps
+    // to one bucket into a single atomic; otherwise the per-element shared
+    // atomics serialize and the three radix sweeps cost milliseconds instead
+    // of microseconds. This also guards the warp-aggregation fast path against
+    // deadlocking on the divergent tail of the vectorized sweep.
+    //
+    // 8192 is above NUM_BUCKETS and is not the 4096 special case, so this
+    // takes the radix path.
+    constexpr int64_t  batch = 4, width = 8192;
+    const float        flat = 1.0f / static_cast<float>(width);
+    std::vector<float> values(batch * width, flat);
+    // Rows 0 and 2 are peaked; rows 1 and 3 stay exactly flat.
+    for (int64_t row : {int64_t{0}, int64_t{2}}) {
+        for (int64_t col = 0; col < width; ++col)
+            values[row * width + col] = 0.0f;
+        values[row * width]     = 0.5f;
+        values[row * width + 1] = 0.3f;
+        values[row * width + 2] = 0.2f;
+    }
+    auto probs  = cudaTensor(values, {batch, width});
+    auto output = torch::empty_like(probs);
+    auto top_p  = pinnedFloatTensor({0.95f, 0.95f, 0.95f, 0.95f}).to(torch::kCUDA);
+    top_p_renorm_probs(probs, output, top_p, 1.0);
+    check_cuda_error();
+
+    // A flat row is already normalized inside the nucleus: every element is
+    // >= the threshold, so renormalization is the identity.
+    for (int64_t row : {int64_t{1}, int64_t{3}}) {
+        auto out_row = toHostFloat(output.select(0, row));
+        for (int64_t col = 0; col < width; col += 64)
+            EXPECT_NEAR(out_row[col], flat, 1e-7f) << "row " << row << " col " << col;
+        EXPECT_NEAR(output.select(0, row).sum().item<float>(), 1.0f, 1e-4f);
+    }
+    // The peaked rows keep the ordinary top-p semantics. 0.95 keeps the whole
+    // {0.5, 0.3, 0.2} nucleus, so the renormalized row is unchanged.
+    auto expected = cudaTensor({0.5f, 0.3f, 0.2f}, {3});
+    for (int64_t row : {int64_t{0}, int64_t{2}}) {
+        EXPECT_TRUE(torch::allclose(output.select(0, row).slice(0, 0, 3), expected, 1e-5, 1e-6));
+        EXPECT_NEAR(output.select(0, row).sum().item<float>(), 1.0f, 1e-5f);
+    }
 }
 
 TEST_F(CudaSamplerTest, testAirTopPRenormSkipsUnrestrictedRowsInMixedBatch) {
@@ -1653,4 +1929,70 @@ TEST_F(CudaSamplerTest, testExactJointSmallTopKUsesFullVocabularyTopPAndRetainsT
     EXPECT_EQ(sampled[3], 0);
     EXPECT_LT(sampled[5], 100);
     EXPECT_LT(sampled[7], 3);
+}
+
+TEST_F(CudaSamplerTest, AttentionMetadataMatchesSerialForRaggedAndMultiTileBatches) {
+    for (int batch : {0, 1, 7, 64, 257, 513}) {
+        for (bool with_prefix : {false, true}) {
+            std::vector<int32_t> lengths(batch), prefixes(batch), q{0}, kv{0}, offsets;
+            int                  max_len = 0;
+            for (int b = 0; b < batch; ++b) {
+                lengths[b]  = (b * 7 + 3) % 19;
+                prefixes[b] = with_prefix ? 32768 + b * 31 : 0;
+                max_len     = std::max(max_len, lengths[b]);
+                q.push_back(q.back() + lengths[b]);
+                kv.push_back(kv.back() + lengths[b] + prefixes[b]);
+            }
+            for (int b = 0; b < batch; ++b)
+                for (int j = 0; j < lengths[b]; ++j)
+                    offsets.push_back(b * max_len - q[b]);
+            auto len     = cudaIntTensor(lengths, {batch});
+            auto pre     = with_prefix ? cudaIntTensor(prefixes, {batch}) : torch::Tensor();
+            auto q_out   = torch::empty({batch + 1}, len.options());
+            auto kv_out  = torch::empty_like(q_out);
+            auto pad_out = torch::empty({q.back()}, len.options());
+            invokeBuildAttentionInputMetadata(len, pre, q_out, kv_out, pad_out, at::cuda::getCurrentCUDAStream());
+            EXPECT_EQ(toHostInt(q_out), q);
+            EXPECT_EQ(toHostInt(kv_out), kv);
+            EXPECT_EQ(toHostInt(pad_out), offsets);
+        }
+    }
+}
+
+TEST_F(CudaSamplerTest, GreedyTop1TokenStridePreservesHistoryAndTieRules) {
+    for (int batch : {1, 7, 64, 129, 384}) {
+        for (int vocab : {17, 64, 16385, 129280}) {
+            auto logits = torch::randn({batch, vocab}, torch::TensorOptions().device(torch::kCUDA));
+            logits.select(0, 0).fill_(-INFINITY);
+            if (batch > 1) {
+                logits.select(0, 1).fill_(0);
+                logits[1][3] = NAN;
+                logits[1][7] = NAN;
+            }
+            auto      expected = torch::argmax(logits, -1).to(torch::kInt32);
+            const int splits   = greedyTop1RenormSplits(batch, vocab);
+            auto      partials = torch::empty({2, batch, splits}, logits.options());
+            for (bool onehot : {false, true}) {
+                auto output = torch::full({batch, 11}, -7, expected.options());
+                auto probs  = torch::empty_like(logits);
+                ASSERT_EQ(invokeGreedyTop1Renorm(logits.data_ptr<float>(),
+                                                 probs.data_ptr<float>(),
+                                                 output.data_ptr<int32_t>() + 10,
+                                                 batch,
+                                                 vocab,
+                                                 partials.data_ptr<float>(),
+                                                 at::cuda::getCurrentCUDAStream(),
+                                                 onehot,
+                                                 11),
+                          cudaSuccess);
+                EXPECT_TRUE(torch::equal(output.select(1, 10), expected));
+                EXPECT_TRUE(output.narrow(1, 0, 10).eq(-7).all().item<bool>());
+                if (onehot) {
+                    auto reference = torch::zeros_like(probs);
+                    reference.scatter_(1, expected.to(torch::kLong).unsqueeze(1), 1);
+                    EXPECT_TRUE(torch::equal(probs, reference));
+                }
+            }
+        }
+    }
 }

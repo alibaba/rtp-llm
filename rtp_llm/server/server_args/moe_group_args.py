@@ -97,15 +97,6 @@ def init_moe_group_args(parser, moe_config, eplb_config, deep_ep_config):
     )
 
     moe_group.add_argument(
-        "--eplb_control_step",
-        env_name="EPLB_CONTROL_STEP",
-        bind_to=(eplb_config, "eplb_control_step"),
-        type=int,
-        default=100,
-        help="为 EPLB (Expert Placement Load Balancing) 控制器指定控制周期或步骤参数。这可能影响专家的负载均衡调整的频率或粒度。",
-    )
-
-    moe_group.add_argument(
         "--eplb_mode",
         env_name="EPLB_MODE",
         bind_to=(eplb_config, "eplb_mode"),

@@ -20,6 +20,9 @@ cc_test(
     srcs = ["MtpRoundHeadPrepareTest.cc"],
     copts = copts(),
     deps = [
+        "//rtp_llm/models_py/bindings/common/kernels:fuse_copy_util",
+        "//rtp_llm/models_py/bindings/cuda/kernels:attention_input_metadata",
+        "//rtp_llm/models_py/bindings/cuda/kernels:cuda_graph_prepare",
         "//rtp_llm/models_py/bindings/cuda/kernels:mtp_target_verify_prepare",
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",

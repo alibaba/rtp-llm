@@ -15,6 +15,7 @@
 #include "rtp_llm/cpp/cache/Types.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/StorageBackend.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferTypes.h"
+#include "rtp_llm/cpp/utils/RemoteRestoreLifecycle.h"
 
 namespace rtp_llm {
 
@@ -87,6 +88,12 @@ public:
     bool         localTransfersSucceeded() const;
     bool         localLoadSucceeded() const;
     bool         backendTimedOut() const;
+    bool         deadlineExceeded() const {
+        return backend_deadline_state_.load() == State::FAILED;
+    }
+    std::optional<RemoteRestoreTiming> remoteRestoreTiming() const;
+    void                               setLocalDecodeSources(DecodeReuseSourcesPtr sources);
+    DecodeReuseSourcesPtr              decodeSources(bool local_only = false) const;
     bool         settle(bool success);
     bool         onTaskFail();
     void         waitDone() override;
@@ -94,13 +101,14 @@ public:
     bool         done() const override;
     bool         success() const override;
     ErrorInfo    errorInfo() const override;
+    void         deferRelease(std::shared_ptr<BatchKVCacheResource> resource);
     MallocStatus mallocStatus() const;
 
 private:
     void markAborted();
     void rebuildMatchedBlocksByTier();
     void onBackendMatch(size_t matched_blocks_num, std::shared_ptr<StorageBackendMatchMeta> match_meta, bool success);
-    void onBackendRead(ErrorInfo error);
+    void      onBackendRead(ErrorInfo error, DecodeReuseSourcesPtr sources = {});
     void failBeforeCommit();
     void failCommit();
     void finishIfReadyLocked(bool& notify, SettlementReadyCallback& settlement_ready_callback);
@@ -120,11 +128,14 @@ private:
     std::shared_ptr<StorageBackend> storage_backend_;
     const std::optional<int64_t>    request_id_;
     StorageRequest                  storage_request_;
+    const TransferTask              backend_task_;
     std::function<bool(size_t)>     valid_prefix_;
     MatchCallback                   match_callback_;
     const bool                      need_backend_match_{false};
     bool                            backend_started_{false};
     bool                            backend_pending_{false};
+    // SUCCEEDED closes the remote business budget; FAILED latches its expiry.
+    mutable std::atomic<State>      backend_deadline_state_{State::SUCCEEDED};
     std::atomic<bool>               commit_started_{false};
     bool                            committed_{false};
 
@@ -142,6 +153,11 @@ private:
     ErrorInfo                 backend_error_{ErrorInfo::OkStatus()};
     ErrorInfo                 error_info_{ErrorInfo::OkStatus()};
     bool                      settlement_ready_{false};
+    const bool                                            track_remote_restore_{false};
+    std::optional<RemoteRestoreTiming::Clock::time_point> remote_read_started_at_;
+    std::optional<RemoteRestoreTiming::Clock::time_point> remote_gpu_ready_at_;
+    DecodeReuseSourcesPtr                                 local_decode_sources_;
+    DecodeReuseSourcesPtr                                 remote_decode_sources_;
     SettlementReadyCallback   settlement_ready_callback_;
     std::vector<DoneCallback> callbacks_;
 
@@ -153,7 +169,8 @@ public:
     using CommitCallback = std::function<bool(const std::shared_ptr<LoadAsyncContext>& context)>;
     using AbortCallback  = std::function<void(LoadAsyncContext& context)>;
 
-    LoadContextCoordinator(CommitCallback commit_callback, AbortCallback abort_callback);
+    LoadContextCoordinator(CommitCallback commit_callback, AbortCallback abort_callback,
+                           std::function<bool(std::function<void()>)> defer_cleanup = {});
 
     std::shared_ptr<LoadAsyncContext> create(std::vector<TransferDescriptor> load_descs,
                                              std::vector<bool>               joined_load,
@@ -181,6 +198,7 @@ private:
     PendingContextMap       pending_contexts_;
     CommitCallback          commit_callback_;
     AbortCallback           abort_callback_;
+    std::function<bool(std::function<void()>)> defer_cleanup_;
     std::function<void()>   shutdown_wait_observer_for_test_;
 };
 

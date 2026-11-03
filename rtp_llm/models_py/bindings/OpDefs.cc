@@ -157,6 +157,7 @@ void registerPyOpDefs(pybind11::module& m) {
         .def_readwrite("is_prefill", &PyAttentionInputs::is_prefill)
         .def_readwrite("is_cuda_graph", &PyAttentionInputs::is_cuda_graph)
         .def_readwrite("is_target_verify", &PyAttentionInputs::is_target_verify)
+        .def_readwrite("is_packed_target_verify", &PyAttentionInputs::is_packed_target_verify)
         .def_readwrite("prefix_lengths", &PyAttentionInputs::prefix_lengths)
         .def_readwrite("sequence_lengths", &PyAttentionInputs::sequence_lengths)
         .def_readwrite("input_lengths", &PyAttentionInputs::input_lengths)
@@ -306,9 +307,17 @@ void registerPyOpDefs(pybind11::module& m) {
              pybind11::arg("mtp_target_hidden_states"),
              "Initialize with hidden states and speculative target features")
         .def_readwrite("hidden_states", &PyModelOutputs::hidden_states, "Hidden states output tensor")
+        .def(pybind11::init<torch::Tensor, torch::Tensor, torch::Tensor>(),
+             pybind11::arg("hidden_states"),
+             pybind11::arg("mtp_target_hidden_states"),
+             pybind11::arg("dspark_confidence_hidden_logits"),
+             "Initialize with hidden states, target features and scalar V4.1 confidence contributions")
         .def_readwrite("mtp_target_hidden_states",
                        &PyModelOutputs::mtp_target_hidden_states,
-                       "Optional target features consumed by speculative decoding");
+                       "Optional target features consumed by speculative decoding")
+        .def_readwrite("dspark_confidence_hidden_logits",
+                       &PyModelOutputs::dspark_confidence_hidden_logits,
+                       "Optional FP32 [tokens, 1] pre-norm hidden contribution to V4.1 confidence logits");
 }
 
 }  // namespace torch_ext

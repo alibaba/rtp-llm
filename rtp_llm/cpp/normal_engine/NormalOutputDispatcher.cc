@@ -3,11 +3,9 @@
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/ErrorCode.h"
-#include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include <ATen/ThreadLocalState.h>
 #include <c10/core/InferenceMode.h>
 #include <cstdlib>
-#include <chrono>
 #include <stdexcept>
 #include <string>
 #include "rtp_llm/cpp/utils/TensorDebugUtils.h"
@@ -165,9 +163,8 @@ bool NormalOutputDispatcher::restoreCurrentTokenIds(const GenerateStreamPtr& str
     return true;
 }
 
-absl::Status NormalOutputDispatcher::dispatch(const StreamGroups&                 stream_groups,
-                                              const MergedOutput&                 merge_outputs,
-                                              const kmonitor::MetricsReporterPtr& metrics_reporter) const {
+absl::Status NormalOutputDispatcher::dispatch(const StreamGroups& stream_groups,
+                                              const MergedOutput& merge_outputs) const {
     RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
     const auto&  model_output         = merge_outputs.model_output;
     const auto&  sampler_output       = merge_outputs.sampler_output;
@@ -388,6 +385,12 @@ absl::Status NormalOutputDispatcher::dispatch(const StreamGroups&               
     compact_top_logprob_token_ids = copyToPinnedCpuAsync(compact_top_logprob_token_ids, need_d2h_sync);
     compact_top_logprobs          = copyToPinnedCpuAsync(compact_top_logprobs, need_d2h_sync);
     syncPinnedCpuCopies(need_d2h_sync);
+    // No new fence: this is evidence from the output copy's existing stream
+    // synchronization, combined with the producer's post-model rank dependency.
+    const auto context_kv_all_rank_gpu_ready_at =
+        need_d2h_sync && model_output.context_kv_has_rank_completion_dependency ?
+            std::optional<RemoteRestoreTiming::Clock::time_point>(RemoteRestoreTiming::Clock::now()) :
+            std::nullopt;
     RTP_LLM_LOG_DEBUG("new_all_token_ids = [%s]", tensorDebugStringWithData<int32_t>(token_ids_cpu).c_str());
 
     int  batch_idx_in       = 0;
@@ -412,7 +415,6 @@ absl::Status NormalOutputDispatcher::dispatch(const StreamGroups&               
     }
 
     int custom_output_offset = 0;
-    const auto update_start         = std::chrono::steady_clock::now();
     for (auto& stream : stream_groups.allStreams()) {
         auto cur_batch_size  = stream->currentBatchSize();
         auto next_batch_size = stream->nextBatchSize();
@@ -455,7 +457,8 @@ absl::Status NormalOutputDispatcher::dispatch(const StreamGroups&               
                                  logprobs_batch_idx,
                                  compact_token_logprobs,
                                  compact_top_logprob_token_ids,
-                                 compact_top_logprobs);
+                                 compact_top_logprobs,
+                                 context_kv_all_rank_gpu_ready_at);
         };
 
         if (thread_pool_) {
@@ -480,13 +483,6 @@ absl::Status NormalOutputDispatcher::dispatch(const StreamGroups&               
     for (auto& future : futures) {
         future.wait();
     }
-    if (metrics_reporter && stream_groups.totalDecodeBatchSize() > 0) {
-        RtpLLMStreamUpdateMetricsCollector collector;
-        collector.latency_us =
-            std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - update_start)
-                .count();
-        metrics_reporter->report<RtpLLMStreamUpdateMetrics, RtpLLMStreamUpdateMetricsCollector>(nullptr, &collector);
-    }
     for (auto& future : futures) {
         future.get();
     }
@@ -495,22 +491,24 @@ absl::Status NormalOutputDispatcher::dispatch(const StreamGroups&               
     return absl::OkStatus();
 }
 
-void NormalOutputDispatcher::dispatchSingleStream(GenerateStreamPtr    stream,
-                                                  const MergedOutput&  merge_outputs,
-                                                  int                  batch_idx_in,
-                                                  int                  batch_idx_out,
-                                                  int                  token_offset,
-                                                  bool                 return_all_probs,
-                                                  const torch::Tensor& new_tokens_all,
-                                                  const torch::Tensor& token_ids_cpu,
-                                                  const torch::Tensor& success_cpu,
-                                                  const torch::Tensor& custom_output_cpu,
-                                                  int                  custom_output_batch_idx,
-                                                  bool                 return_content_logprobs,
-                                                  int                  logprobs_batch_idx,
-                                                  const torch::Tensor& token_logprobs_cpu,
-                                                  const torch::Tensor& top_logprob_token_ids_cpu,
-                                                  const torch::Tensor& top_logprobs_cpu) const {
+void NormalOutputDispatcher::dispatchSingleStream(
+    GenerateStreamPtr                                     stream,
+    const MergedOutput&                                   merge_outputs,
+    int                                                   batch_idx_in,
+    int                                                   batch_idx_out,
+    int                                                   token_offset,
+    bool                                                  return_all_probs,
+    const torch::Tensor&                                  new_tokens_all,
+    const torch::Tensor&                                  token_ids_cpu,
+    const torch::Tensor&                                  success_cpu,
+    const torch::Tensor&                                  custom_output_cpu,
+    int                                                   custom_output_batch_idx,
+    bool                                                  return_content_logprobs,
+    int                                                   logprobs_batch_idx,
+    const torch::Tensor&                                  token_logprobs_cpu,
+    const torch::Tensor&                                  top_logprob_token_ids_cpu,
+    const torch::Tensor&                                  top_logprobs_cpu,
+    std::optional<RemoteRestoreTiming::Clock::time_point> context_kv_all_rank_gpu_ready_at) const {
 
     const auto&  model_output      = merge_outputs.model_output;
     const auto&  sampler_output    = merge_outputs.sampler_output;
@@ -791,7 +789,8 @@ void NormalOutputDispatcher::dispatchSingleStream(GenerateStreamPtr    stream,
                                  top_logprob_token_ids,
                                  top_logprobs,
                                  -1,
-                                 logprobs_offset};
+                                 logprobs_offset,
+                                 context_kv_all_rank_gpu_ready_at};
     stream->update(update_info);
 }
 

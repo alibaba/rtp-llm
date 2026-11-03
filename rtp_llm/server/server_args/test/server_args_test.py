@@ -64,6 +64,261 @@ class PrefillMultimodalRetryArgumentsTest(TestCase):
         self.assertEqual(config.prefill_retry_times, 0)
 
 
+class KVCacheControlArgumentsTest(TestCase):
+    def test_remote_control_accepts_unused_nonpositive_snapshot_interval(self):
+        from rtp_llm.server.server_args import server_args
+
+        for publisher in ("none", "kvcm"):
+            for interval in ("0", "-1"):
+                with self.subTest(publisher=publisher, interval=interval):
+                    with patch.dict(os.environ, {}, clear=True):
+                        configs = server_args.setup_args(
+                            [
+                                "--kv_cache_event_snapshot_interval_ms",
+                                interval,
+                                "--kv_cache_event_publisher_type",
+                                publisher,
+                                "--enable_remote_cache",
+                                "true",
+                            ]
+                        )
+                    self.assertTrue(configs.kv_cache_config.enable_remote_cache)
+                    self.assertEqual(
+                        configs.kv_cache_config.kv_cache_event_snapshot_interval_ms,
+                        int(interval),
+                    )
+
+    def test_remote_control_env_accepts_unused_snapshot_interval(self):
+        from rtp_llm.server.server_args import server_args
+
+        with patch.dict(
+            os.environ,
+            {
+                "ENABLE_REMOTE_CACHE": "1",
+                "KV_CACHE_EVENT_PUBLISHER_TYPE": "none",
+                "KV_CACHE_EVENT_SNAPSHOT_INTERVAL_MS": "0",
+            },
+            clear=True,
+        ):
+            configs = server_args.setup_args([])
+        self.assertTrue(configs.kv_cache_config.enable_remote_cache)
+        self.assertEqual(configs.kv_cache_config.kv_cache_event_snapshot_interval_ms, 0)
+
+    def test_nonpositive_snapshot_interval_without_remote_is_rejected(self):
+        from rtp_llm.server.server_args import server_args
+
+        with patch.dict(os.environ, {}, clear=True), self.assertRaises(SystemExit):
+            server_args.setup_args(["--kv_cache_event_snapshot_interval_ms", "0"])
+
+    def test_snapshot_interval_still_requires_int32(self):
+        from rtp_llm.server.server_args import server_args
+
+        with patch.dict(os.environ, {}, clear=True), self.assertRaises(SystemExit):
+            server_args.setup_args(
+                [
+                    "--enable_remote_cache",
+                    "true",
+                    "--kv_cache_event_snapshot_interval_ms",
+                    str(2**31),
+                ]
+            )
+
+
+class DSparkConfidenceArgumentsTest(TestCase):
+    def parse_config(self, args, env):
+        from rtp_llm.config.py_config_modules import PyEnvConfigs
+        from rtp_llm.server.server_args.server_args import EnvArgumentParser
+        from rtp_llm.server.server_args.speculative_decoding_group_args import (
+            init_speculative_decoding_group_args,
+        )
+
+        configs = PyEnvConfigs()
+        parser = EnvArgumentParser()
+        parser.set_root_config(configs)
+        init_speculative_decoding_group_args(parser, configs.sp_config)
+        with patch.dict(os.environ, env, clear=True), patch.object(
+            sys, "argv", ["server"]
+        ):
+            parser.parse_args(args)
+        return configs.sp_config
+
+    def test_defaults_keep_confidence_disabled(self):
+        config = self.parse_config([], {})
+        self.assertEqual(config.sp_dspark_confidence_mode, "off")
+        self.assertEqual(config.sp_dspark_confidence_temperature, 1.0)
+        self.assertEqual(config.sp_dspark_verify_budget, -1)
+        self.assertEqual(config.sp_dspark_verify_mode, "dense")
+        self.assertEqual(config.sp_dspark_verify_budget_mode, "fixed")
+
+    def test_cli_overrides_environment_and_survives_pickle(self):
+        config = self.parse_config(
+            [
+                "--sp_dspark_confidence_mode",
+                "bounded",
+                "--sp_dspark_confidence_temperature",
+                "0.75",
+                "--sp_dspark_verify_budget",
+                "2",
+                "--sp_dspark_verify_mode",
+                "packed",
+                "--sp_dspark_verify_budget_mode",
+                "adaptive",
+                "--gen_num_per_cycle",
+                "5",
+            ],
+            {
+                "SP_DSPARK_CONFIDENCE_MODE": "observe",
+                "SP_DSPARK_CONFIDENCE_TEMPERATURE": "1.5",
+                "SP_DSPARK_VERIFY_BUDGET": "-1",
+                "SP_DSPARK_VERIFY_MODE": "dense",
+                "SP_DSPARK_VERIFY_BUDGET_MODE": "fixed",
+            },
+        )
+        for value in (config, pickle.loads(pickle.dumps(config))):
+            self.assertEqual(value.sp_dspark_confidence_mode, "bounded")
+            self.assertEqual(value.sp_dspark_confidence_temperature, 0.75)
+            self.assertEqual(value.sp_dspark_verify_budget, 2)
+            self.assertEqual(value.sp_dspark_verify_mode, "packed")
+            self.assertEqual(value.sp_dspark_verify_budget_mode, "adaptive")
+            self.assertEqual(value.gen_num_per_cycle, 5)
+
+    def test_environment_binds_explicit_and_implicit_argument_lists(self):
+        for args in ([], None):
+            with self.subTest(args=args):
+                config = self.parse_config(
+                    args,
+                    {
+                        "SP_DSPARK_CONFIDENCE_MODE": "observe",
+                        "SP_DSPARK_CONFIDENCE_TEMPERATURE": "1.25",
+                        "SP_DSPARK_VERIFY_BUDGET": "-1",
+                    },
+                )
+                self.assertEqual(config.sp_dspark_confidence_mode, "observe")
+                self.assertEqual(config.sp_dspark_confidence_temperature, 1.25)
+                self.assertEqual(config.sp_dspark_verify_budget, -1)
+
+    def test_adaptive_budget_mode_binds_from_environment(self):
+        for args in ([], None):
+            with self.subTest(args=args):
+                config = self.parse_config(
+                    args,
+                    {
+                        "SP_DSPARK_CONFIDENCE_MODE": "bounded",
+                        "SP_DSPARK_VERIFY_MODE": "packed",
+                        "SP_DSPARK_VERIFY_BUDGET": "2",
+                        "SP_DSPARK_VERIFY_BUDGET_MODE": "adaptive",
+                    },
+                )
+                self.assertEqual(config.sp_dspark_verify_budget_mode, "adaptive")
+                self.assertEqual(config.sp_dspark_verify_budget, 2)
+
+    def test_legacy_pickle_keeps_fixed_budget_and_preserves_verify_mode(self):
+        config = self.parse_config(
+            [
+                "--sp_dspark_confidence_mode",
+                "bounded",
+                "--sp_dspark_verify_budget",
+                "2",
+                "--sp_dspark_verify_mode",
+                "packed",
+                "--sp_dspark_verify_budget_mode",
+                "adaptive",
+            ],
+            {},
+        )
+        state = config.__getstate__()
+        for size in (10, 11, 12, 15, 16):
+            with self.subTest(size=size):
+                restored = type(config).__new__(type(config))
+                restored.__setstate__(state[:size])
+                self.assertEqual(
+                    restored.sp_dspark_verify_mode, "packed" if size == 16 else "dense"
+                )
+                self.assertEqual(restored.sp_dspark_verify_budget_mode, "fixed")
+                self.assertEqual(
+                    restored.sp_dspark_confidence_mode,
+                    "bounded" if size >= 15 else "off",
+                )
+
+    def test_cli_and_environment_reject_invalid_mode_or_numeric_syntax(self):
+        for name, value in (
+            ("sp_dspark_confidence_mode", "adaptive"),
+            ("sp_dspark_verify_mode", "ragged"),
+            ("sp_dspark_verify_budget_mode", "dynamic"),
+            ("sp_dspark_confidence_temperature", "invalid"),
+            ("sp_dspark_confidence_temperature", "0"),
+            ("sp_dspark_confidence_temperature", "nan"),
+            ("sp_dspark_confidence_temperature", "inf"),
+            ("sp_dspark_verify_budget", "1.5"),
+            ("sp_dspark_verify_budget", "-2"),
+        ):
+            with self.subTest(source="cli", name=name), self.assertRaises(SystemExit):
+                self.parse_config(["--" + name, value], {})
+            for args in ([], None):
+                with self.subTest(
+                    source="env", name=name, args=args
+                ), self.assertRaises(SystemExit):
+                    self.parse_config(args, {name.upper(): value})
+
+
+class ThinkingProcessorArgumentsTest(TestCase):
+    def test_defaults_keep_both_thinking_controls_enabled(self):
+        from rtp_llm.server.server_args import server_args
+
+        with patch.dict(os.environ, {}, clear=True):
+            config = server_args.setup_args([]).generate_env_config
+
+        self.assertIs(config.enable_think_processor, True)
+        self.assertIs(config.enable_dash_sc_think_eos_phase2, True)
+
+    def test_environment_switches_are_independent_and_survive_fanout(self):
+        from rtp_llm.server.server_args import server_args
+
+        for env_name, field, other_field in (
+            (
+                "ENABLE_THINK_PROCESSOR",
+                "enable_think_processor",
+                "enable_dash_sc_think_eos_phase2",
+            ),
+            (
+                "ENABLE_DASH_SC_THINK_EOS_PHASE2",
+                "enable_dash_sc_think_eos_phase2",
+                "enable_think_processor",
+            ),
+        ):
+            with self.subTest(env_name=env_name), patch.dict(
+                os.environ, {env_name: "0"}, clear=True
+            ):
+                configs = server_args.setup_args([])
+                config = pickle.loads(pickle.dumps(configs)).generate_env_config
+                self.assertIs(getattr(config, field), False)
+                self.assertIs(getattr(config, other_field), True)
+                self.assertIn(f"{field}: False", config.to_string())
+
+    def test_explicit_cli_can_override_disabled_environment(self):
+        from rtp_llm.server.server_args import server_args
+
+        with patch.dict(
+            os.environ,
+            {
+                "ENABLE_THINK_PROCESSOR": "0",
+                "ENABLE_DASH_SC_THINK_EOS_PHASE2": "0",
+            },
+            clear=True,
+        ):
+            config = server_args.setup_args(
+                [
+                    "--enable_think_processor",
+                    "1",
+                    "--enable_dash_sc_think_eos_phase2",
+                    "1",
+                ]
+            ).generate_env_config
+
+        self.assertIs(config.enable_think_processor, True)
+        self.assertIs(config.enable_dash_sc_think_eos_phase2, True)
+
+
 class CacheConfigArgumentsTest(TestCase):
     # Keep the supported startup fields explicit, independently of parser registration.
     samples = {
@@ -149,6 +404,21 @@ class CacheConfigArgumentsTest(TestCase):
         with patch.dict(os.environ, env, clear=True), patch.object(sys, "argv", argv):
             parser.parse_args(None if use_sys_argv else args)
         return config
+
+    def test_remote_task_budget_is_independent_of_host_and_sdk(self):
+        cases = (
+            ([], {}, 20000),
+            ([], {"KVCM_TASK_TIMEOUT_MS": "23000"}, 23000),
+            (["--kvcm_task_timeout_ms", "24000"], {"KVCM_TASK_TIMEOUT_MS": "23000"}, 24000),
+        )
+        for args, env, expected in cases:
+            with self.subTest(args=args, env=env):
+                config = self.parse_cache_config(args, env)
+                self.assertEqual(config.kvcm_task_timeout_ms, expected)
+                self.assertEqual(config.memory_cache_sync_timeout_ms, 10000)
+                self.assertEqual(config.disk_cache_sync_timeout_ms, 30000)
+                self.assertEqual(config.kvcm_get_timeout_ms, 12000)
+                self.assertEqual(config.kvcm_put_timeout_ms, 12000)
 
     def test_pool_capacity_options_survive_startup_serialization(self):
         config = self.parse_cache_config(

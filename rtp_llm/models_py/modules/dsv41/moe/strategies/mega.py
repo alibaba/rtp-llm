@@ -611,6 +611,10 @@ class MegaMoEStrategy(RoutedExpertsStrategy):
         packed_x, packed_scale, topk_idx, topk_weights, y = self._gate_pack_views(T)
         import deep_gemm
 
+        physical_map, logical_count = None, None
+        if eplb_layer is not None:
+            physical_map = eplb_layer.logical_to_physical
+            logical_count = eplb_layer.logical_count
         with record_function_range("dsv4.moe.gate_linear_bf16"):
             scores_bf16 = gate._project_scores(x, gate._weight_bf16())
         with record_function_range("dsv4.moe.mega_gate_pack"):
@@ -626,6 +630,9 @@ class MegaMoEStrategy(RoutedExpertsStrategy):
                     topk_weights,
                     route_scale=float(gate.route_scale),
                     norm_eps=1e-12,
+                    to_physical_map=physical_map,
+                    logical_count=logical_count,
+                    ep_rank=self.cfg.ep_rank,
                 )
             else:
                 fused_mega_moe_gate_pack_nonhash(
@@ -638,8 +645,12 @@ class MegaMoEStrategy(RoutedExpertsStrategy):
                     topk_weights,
                     route_scale=float(gate.route_scale),
                     norm_eps=1e-12,
+                    to_physical_map=physical_map,
+                    logical_count=logical_count,
+                    ep_rank=self.cfg.ep_rank,
                 )
-        self.finalize_routing(buf.topk_idx[:T], buf.topk_weights[:T], eplb_layer)
+        if self.fake_balance_expert is not None:
+            self.finalize_routing(buf.topk_idx[:T], buf.topk_weights[:T], eplb_layer)
         self._maybe_pre_kernel_barrier(T)
         sync_cuda_graph_warmup_ranks(
             f"dsv4.mega_moe.layer{self.cfg.layer_id}.before_deepgemm", x.device

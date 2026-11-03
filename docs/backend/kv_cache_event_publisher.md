@@ -49,8 +49,16 @@ server and add it to the Instance Group's `event_report_storage_candidates`.
 Instance registrations must match the published schema and token stride. The `F0`/`F1`/`F2` to `F` change is a schema
 change: rollout requires a new HBM Instance ID or an explicit migration of the existing registration and metadata.
 Runtime pool names and Remote group names retain the attention-type naming: `hca_kv`/`csa_kv` and
-`Fhca_kv`/`Fcsa_kv`, including their aggregate group names. These groups use the original specs
-`F0_TP<n>`/`F1_TP<n>`; indexer and state specs remain `F2_TP<n>`/`S3_TP<n>`/`S4_TP<n>`.
+`Fhca_kv`/`Fcsa_kv`, including their aggregate group names. Automatic `DeepSeekV41` remote configuration
+with a single PACE DRAM backend merges the three compatible FULL groups into one `F_TP<n>` spec and
+remote allocation per rank, using the original GPU buffers directly. State specs remain
+`S3_TP<n>`/`S4_TP<n>`. Custom configurations, other backends, and `DeepSeekV41DSpark` retain
+`F0_TP<n>`/`F1_TP<n>`/`F2_TP<n>`.
+Merged FULL transfers use the SDK's existing `PACE_ENABLE_GATHERSCATTER` setting, cached at initialization;
+RTP does not override it. `OFF` selects normal batch I/O. `ON` supports compact direct RDMA for non-tiering,
+remote DRAM/OFFSET GAs when the Consumer supports foreign-GA bounds from Manager/SDK URIs and compact
+external GPU memory is negotiated. Both paths send the original GPU IOVs to offsets in the single GA,
+without payload packing. Other PACE configurations require separate validation before enabling `ON`.
 The automatic remote-cache Instance ID includes both specs and groups, so retaining the renamed groups can change
 that ID relative to an instance registered with `Fglobal_kv_1`/`Fglobal_kv_2` groups.
 This pool-name compatibility mapping applies to the `DeepSeekV41` and `DeepSeekV41DSpark` model names supplied by

@@ -70,7 +70,7 @@ def classify_rpc_exception(
     if isinstance(exc, GeneratorExit):
         return "CANCELLED", "client closed generator"
     if isinstance(exc, asyncio.CancelledError):
-        return "CANCELLED", "peer cancelled (async)"
+        return "CANCELLED", "request handling cancelled (async)"
     if not isinstance(exc, grpc.RpcError):
         return f"UNKNOWN_{type(exc).__name__}", repr(exc)
 

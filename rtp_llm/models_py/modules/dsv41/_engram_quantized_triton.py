@@ -20,9 +20,13 @@ produce zero FP8 values and neutral scales. The CPU table layout is unchanged.
 Allocate once, prepare outside graph capture, then reuse launch functions and
 fixed outputs with changing live IDs. Inputs, outputs and the registered UVA
 table owner must outlive captured graphs.
-SM100 and SM103 share the same capped grid configuration. No CUDA work is
-performed on import. Fresh graph capture defers uncached carveout setup until
-an eager call outside capture; preparation is not required for correctness.
+SM100 and SM103 default to one CTA per device SM; explicit CTA budgets are
+preserved for scheduled lookups. Full-device launches gather up to 16 rows per
+CTA iteration with four warps; small requests use smaller power-of-two tiles.
+Reduced-CTA launches retain one row and one warp for concurrent execution.
+No CUDA work is performed on import. Fresh graph capture defers uncached
+carveout setup until an eager call outside capture; preparation is not required
+for correctness.
 """
 
 from dataclasses import dataclass
@@ -34,8 +38,8 @@ import triton.language as tl
 
 HEADS = 24
 DIM = 256
-GRID = 128
-NUM_WARPS = 1
+BLOCK_ROWS = 16
+NUM_WARPS = 4
 CARVEOUT = 100
 EPILOGUE_BLOCK_TOKENS = 32
 _PREPARED_KERNELS = {}
@@ -65,19 +69,28 @@ def _lookup_quantized_epilogue_kernel(
     scale_ptrs,
     shard_rows,
     GRID: tl.constexpr,
+    BLOCK_R: tl.constexpr,
     SHARDED: tl.constexpr,
 ):
     weight32 = weight.to(tl.pointer_type(tl.uint32))
     values32 = values.to(tl.pointer_type(tl.uint32))
     words = tl.arange(0, 64)
-    for row in tl.range(tl.program_id(0), tokens * 24, GRID):
-        row64 = tl.cast(row, tl.int64)
+    for base in tl.range(tl.program_id(0) * BLOCK_R, tokens * 24, GRID * BLOCK_R):
+        row = base + tl.arange(0, BLOCK_R)
+        row64 = row.to(tl.int64)
         token, head = row64 // 24, row64 % 24
-        index = tl.load(indices + token * stride_t + head * stride_h).to(tl.int64)
-        valid = (index >= 0) & (index < table_rows)
+        active = row < tokens * 24
+        index = tl.load(
+            indices + token * stride_t + head * stride_h, active, other=-1
+        ).to(tl.int64)
+        valid = active & (index >= 0) & (index < table_rows)
         index = tl.where(valid, index, 0)
-        raw = tl.load(weight32 + index * 64 + words, valid, other=0)
-        tl.store(values32 + row64 * 64 + words, raw)
+        raw = tl.load(
+            weight32 + index[:, None] * 64 + words[None, :],
+            valid[:, None],
+            other=0,
+        )
+        tl.store(values32 + row64[:, None] * 64 + words[None, :], raw, active[:, None])
 
     # Independent scale tasks only read live IDs and GPU scales. They never
     # read another CTA's raw output, so no inter-CTA synchronization is needed.
@@ -251,10 +264,24 @@ def _scale_arguments(scales_gpu, indices, table_rows):
     )
 
 
-def _gather_grid(num_sms):
+@lru_cache(maxsize=None)
+def _device_sm_count(device):
+    return torch.cuda.get_device_properties(device).multi_processor_count
+
+
+def _gather_grid(num_sms, device=None):
+    if num_sms is None and device is not None:
+        num_sms = _device_sm_count(torch.device(device))
     if type(num_sms) is not int or num_sms <= 0:
         raise ValueError("num_sms must be a positive integer")
-    return min(GRID, num_sms)
+    return num_sms
+
+
+def _lookup_config(rows, grid, device):
+    if grid < _device_sm_count(torch.device(device)):
+        return 1, 1
+    block_rows = min(BLOCK_ROWS, triton.next_power_of_2(triton.cdiv(rows, grid)))
+    return block_rows, NUM_WARPS if block_rows == BLOCK_ROWS else 1
 
 
 @lru_cache(maxsize=None)
@@ -275,8 +302,8 @@ def supports_device(device):
 def is_supported(weight_uva, scales_gpu, indices, num_sms):
     """Metadata/capability gate for the shared SM100/SM103 implementation."""
     try:
-        _gather_grid(num_sms)
         _check_indices(indices)
+        _gather_grid(num_sms, indices.device)
         _check_table(weight_uva, indices, 256, "native UVA weight")
         _scale_arguments(scales_gpu, indices, weight_uva.shape[0])
     except (ValueError, AttributeError, TypeError):
@@ -309,7 +336,7 @@ def _prepare_kernel_cached(kernel):
     return value
 
 
-def launch_epilogue(weight_uva, scales_gpu, indices, outputs, num_sms=128):
+def launch_epilogue(weight_uva, scales_gpu, indices, outputs, num_sms=None):
     """Default single-kernel lookup into fixed output storage.
 
     The first eager launch prepares carveout for subsequent calls. Fresh JIT
@@ -325,7 +352,8 @@ def launch_epilogue(weight_uva, scales_gpu, indices, outputs, num_sms=128):
         scales_gpu, indices, weight_uva.shape[0]
     )
     _check_outputs(indices, outputs, (weight_uva, local_scales, peer_ptrs))
-    grid = _gather_grid(num_sms)
+    grid = _gather_grid(num_sms, indices.device)
+    block_rows, num_warps = _lookup_config(indices.numel(), grid, indices.device)
     with torch.cuda.device(indices.device):
         kernel = _lookup_quantized_epilogue_kernel[(grid,)](
             weight_uva,
@@ -341,8 +369,9 @@ def launch_epilogue(weight_uva, scales_gpu, indices, outputs, num_sms=128):
             peer_ptrs,
             shard_rows,
             GRID=grid,
+            BLOCK_R=block_rows,
             SHARDED=group_size > 1,
-            num_warps=NUM_WARPS,
+            num_warps=num_warps,
         )
         if not isinstance(scales_gpu, torch.Tensor):
             scales_gpu.record_stream(torch.cuda.current_stream(indices.device))
@@ -364,7 +393,7 @@ def lookup_host_rows(weight_uva, scales_gpu, indices, num_sms, *, prepare=False)
     return outputs.pair()
 
 
-def prepare_lookup(weight_uva, scales_gpu, indices, outputs, *, num_sms=128):
+def prepare_lookup(weight_uva, scales_gpu, indices, outputs, *, num_sms=None):
     """Prepare the default kernel outside capture and report its resources."""
     if torch.cuda.is_current_stream_capturing():
         raise RuntimeError("Quantized lookup prepare must run outside capture")
@@ -373,9 +402,13 @@ def prepare_lookup(weight_uva, scales_gpu, indices, outputs, *, num_sms=128):
         "epilogue"
     ]
     value = _prepare_kernel_cached(kernel)
-    grid = _gather_grid(num_sms)
+    grid = _gather_grid(num_sms, indices.device)
     rows = indices.numel()
-    loops = [max(0, triton.cdiv(rows - pid, grid)) for pid in range(grid)]
+    block_rows, num_warps = _lookup_config(rows, grid, indices.device)
+    loops = [
+        max(0, triton.cdiv(rows - pid * block_rows, grid * block_rows))
+        for pid in range(grid)
+    ]
     tasks = HEADS * triton.cdiv(outputs.scales.stride(1), EPILOGUE_BLOCK_TOKENS)
     scale_loops = [max(0, triton.cdiv(tasks - pid, grid)) for pid in range(grid)]
     local_scales, peer_ptrs, shard_rows, group_size = _scale_arguments(
@@ -384,14 +417,14 @@ def prepare_lookup(weight_uva, scales_gpu, indices, outputs, *, num_sms=128):
     resources = {
         "kernel_name": kernel.name,
         "grid": [grid, 1, 1],
-        "num_warps": NUM_WARPS,
-        "block_rows": 1,
-        "threads_per_cta": 32,
+        "num_warps": num_warps,
+        "block_rows": block_rows,
+        "threads_per_cta": num_warps * 32,
         "n_regs": kernel.n_regs,
         "shared_bytes": kernel.metadata.shared,
         "n_spills": getattr(kernel, "n_spills", None),
         "preferred_shared_memory_carveout": value,
-        "loop_rows_including_padding": rows,
+        "loop_rows_including_padding": triton.cdiv(rows, block_rows) * block_rows,
         "loop_iterations_min": min(loops),
         "loop_iterations_max": max(loops),
         "raw_loop_iterations_per_cta": loops,

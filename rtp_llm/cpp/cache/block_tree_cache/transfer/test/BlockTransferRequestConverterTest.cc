@@ -159,6 +159,32 @@ TEST(BlockTransferRequestConverterTest, ConvertsDeviceToHost) {
     EXPECT_EQ(output.blocksAt(Tier::DEVICE), (std::vector<BlockIdxType>{11, 12}));
 }
 
+TEST(BlockTransferRequestConverterTest, DiagnosticIdentitySurvivesSubtasksAndWireEncoding) {
+    auto         descriptor = TransferDescriptor::diskToDevice(0, 1, {2});
+    TransferTask task({descriptor}, std::chrono::seconds(10), 0);
+    auto         child = task.subtask({descriptor});
+    EXPECT_EQ(child.traceId(), task.traceId());
+    EXPECT_NE(child.traceId(), 0u);
+    auto rpc_first  = task.rpcSubtask({descriptor});
+    auto rpc_second = task.rpcSubtask({descriptor});
+    EXPECT_NE(rpc_first.traceId(), rpc_second.traceId());
+    EXPECT_NE(rpc_first.traceId(), task.traceId());
+    EXPECT_EQ(rpc_first.subtask({descriptor}).traceId(), rpc_first.traceId());
+    MemoryOperationRequestPB request;
+    ASSERT_TRUE(BlockTransferRequestConverter::encodeTransfer(request, child, groupSets()));
+    MemoryOperationRequestPB parsed;
+    ASSERT_TRUE(parsed.ParseFromString(request.SerializeAsString()));
+    EXPECT_EQ(parsed.transfer_trace_id(), task.traceId());
+    EXPECT_TRUE(parsed.has_transfer_request_id());
+    EXPECT_EQ(parsed.transfer_request_id(), 0);
+    std::vector<TransferDescriptor> decoded;
+    EXPECT_TRUE(BlockTransferRequestConverter::decodeTransfer(parsed, decoded, groupSets()));
+    parsed.clear_transfer_trace_id();
+    parsed.clear_transfer_request_id();
+    parsed.clear_has_transfer_request_id();
+    EXPECT_TRUE(BlockTransferRequestConverter::decodeTransfer(parsed, decoded, groupSets()));
+}
+
 TEST(BlockTransferRequestConverterTest, EncodeRejectsExpiredTask) {
     const auto               descriptor = TransferDescriptor::deviceToHost(0, {1}, 2);
     MemoryOperationRequestPB request;

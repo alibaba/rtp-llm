@@ -6,6 +6,59 @@
 
 namespace rtp_llm {
 
+struct MtpDSparkVerifyInputs {
+    torch::Tensor tokens, input_lengths, lm_indexes, history, positions, proposals;
+};
+
+// Assemble target tokens, Engram windows and metadata in a single launch.
+// Undefined tokens signal that the caller should retain its Torch fallback.
+MtpDSparkVerifyInputs tryMtpDSparkVerifyPrepare(const torch::Tensor& anchors,
+                                                const torch::Tensor& proposals,
+                                                const torch::Tensor& history,
+                                                const torch::Tensor& position_bases,
+                                                cudaStream_t         stream,
+                                                bool                 copy_proposals = false);
+
+struct MtpDSparkBudgetedVerifyInputs {
+    MtpDSparkVerifyInputs packed;
+    torch::Tensor         valid_draft_lengths, packed_to_dense, dense_tokens, dense_positions, sequence_lengths_plus_1;
+};
+
+// One launch computes bounded confidence lengths and both packed/dense verify
+// outputs. Supports CUDA FP32 [B,G] rates, 2 <= B <= 128, 1 <= G <= 8, and
+// B*G <= 1024. Integer sources follow tryMtpDSparkVerifyPrepare's int32/stride
+// contract. Zero budget is supported; full budget retains the dense fallback.
+// The pre-proposal identity permutation is copied into kernel arguments; no
+// host pointer or upload survives this call. A captured graph therefore keeps
+// that permutation, while all device input contents may change on replay.
+// Unsupported inputs return undefined packed.tokens before any launch. An
+// invalid host permutation throws before allocation or launch.
+MtpDSparkBudgetedVerifyInputs tryMtpDSparkBudgetedVerifyPrepare(const torch::Tensor&        rates,
+                                                                const std::vector<int64_t>& stable_order_host,
+                                                                const torch::Tensor&        anchors,
+                                                                const torch::Tensor&        proposals,
+                                                                const torch::Tensor&        history,
+                                                                const torch::Tensor&        position_bases,
+                                                                const torch::Tensor&        prefix_lengths,
+                                                                int64_t                     total_draft_budget,
+                                                                cudaStream_t                stream,
+                                                                bool                        copy_proposals = false);
+
+// Assemble both page tables directly from device snapshots and pinned host
+// suffixes. Returns false without launching for unsupported layouts/devices.
+bool tryMtpGatherPageSnapshots(const torch::Tensor&              physical_host,
+                               const torch::Tensor&              kernel_host,
+                               const std::vector<torch::Tensor>& physical_snapshots,
+                               const std::vector<torch::Tensor>& kernel_snapshots,
+                               torch::Tensor&                    physical_output,
+                               torch::Tensor&                    kernel_output,
+                               cudaStream_t                      stream);
+
+// Fuses flip/cat/index construction/gather for the four-token Engram history.
+// Returns undefined for layouts/dtypes that should use the Torch fallback.
+torch::Tensor
+tryMtpAdvanceEngramTokenWindows(const torch::Tensor& anchor, const torch::Tensor& tokens, const torch::Tensor& lengths);
+
 // A row may independently use a device anchor, a device sequence length, or
 // host scalar fallbacks. The caller owns all pointed-to int32 CUDA storage and
 // orders its producers before this launch. token_stride is measured in elements.
@@ -42,7 +95,10 @@ void invokeMtpDispatchStatePrepareRows(const std::vector<MtpSequenceRow>& rows,
                                        torch::Tensor&                     prev_seq_len,
                                        torch::Tensor&                     next_seq_len,
                                        torch::Tensor&                     hidden_idx,
-                                       cudaStream_t                       stream);
+                                       cudaStream_t                       stream,
+                                       const torch::Tensor&               engram_anchor   = {},
+                                       const torch::Tensor&               accepted_tokens = {},
+                                       const torch::Tensor&               engram_output   = {});
 
 // Each source row contains F contiguous CUDA int32 values, owned by the caller.
 void invokeMtpPositionGather(const std::vector<const int32_t*>& rows, torch::Tensor& bases, cudaStream_t stream);
@@ -50,6 +106,25 @@ void invokeMtpPositionGather(const std::vector<const int32_t*>& rows, torch::Ten
 // Expands [B, F] bases to flat [B * W * F], adding the step to each factor.
 // bases may have a non-contiguous row stride; its factor dimension is contiguous.
 void invokeMtpPositionExpand(const torch::Tensor& bases, torch::Tensor& output, int64_t width, cudaStream_t stream);
+
+// Materializes the speculative sampler token matrix in one launch.
+//
+// Every verify row of a request shares the same token history; only the `gamma`
+// columns starting at `base_lengths[b]` differ, holding that request's draft
+// proposal. Building the matrix row by row on the host copies the history
+// `rows` times, so this expands one history row per request instead:
+//   output[b, r, c] = c < base_lengths[b]         ? history[b, c]
+//                   : c < base_lengths[b] + gamma ? draft[b, c - base_lengths[b]]
+//                   :                               0
+// history is CUDA int32 [B, width]; draft is CUDA int32 [B, gamma];
+// base_lengths is CUDA int64 [B]; output is contiguous CUDA int32
+// [B, rows, width] with width == history.size(1).
+void invokeMtpSpecSamplerTokenMatrix(const torch::Tensor& history,
+                                     const torch::Tensor& draft,
+                                     const torch::Tensor& base_lengths,
+                                     torch::Tensor&       output,
+                                     int64_t              gamma,
+                                     cudaStream_t         stream);
 
 void invokeMtpTargetVerifyPrepare(const torch::Tensor& sequence_lengths,
                                   torch::Tensor&       input_lengths,

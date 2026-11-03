@@ -22,6 +22,18 @@ cuda13_sm100_py_test(
 )
 
 py_test(
+    name = "test_prefill_positions_upload",
+    srcs = ["test_prefill_positions_upload.py"],
+    deps = ["//rtp_llm:testlib", "//rtp_llm/models_py:modules"],
+    tags = ["dsv41_cuda13", "SM103_TEST"],
+    exec_properties = {"gpu": "SM103_TEST", "gpu_count": "1"},
+    target_compatible_with = select({
+        "@//:using_cuda13_x86": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+)
+
+py_test(
     name = "test_v41_front_gemm",
     srcs = ["test_v41_front_gemm.py"],
     deps = ["//rtp_llm:testlib", "//rtp_llm/models_py:modules"],
@@ -41,6 +53,8 @@ _ENGRAM_SM100_TESTS = [
     "test_engram_cuda",
     "test_engram_packed",
     "test_engram_prefetch",
+    "test_engram_decode_schedule",
+    "test_engram_quantized_slice",
 ]
 
 _TESTS = [
@@ -74,6 +88,7 @@ _TESTS = [
     "test_engram_cuda",
     "test_flash_mla_heads",
     "test_v41_cross_layer_mhc",
+    "test_engram_transition_cuda",
     "test_v41_aux_capture_mhc",
     "test_v41_decode_rope_metadata",
     "test_v41_delayed_hc",
@@ -108,7 +123,7 @@ _TESTS = [
         }),
         legacy_create_init = 0,
     )
-    for name in _TESTS if name not in ["test_prefill_workspace", "test_strategy_select", "test_gate_routing_metadata", "test_v41_aux_capture_mhc", "test_v41_cross_layer_mhc", "test_v41_mega_mhc", "test_mhc_moe_inputs", "test_v41_query_quant", "test_dsv41_kernel_jit_warmup"] + _ENGRAM_SM100_TESTS
+    for name in _TESTS if name not in ["test_prefill_workspace", "test_strategy_select", "test_gate_routing_metadata", "test_v41_aux_capture_mhc", "test_v41_cross_layer_mhc", "test_v41_mega_mhc", "test_mega_gate", "test_mhc_moe_inputs", "test_v41_query_quant", "test_dsv41_kernel_jit_warmup"] + _ENGRAM_SM100_TESTS
 ]
 
 py_test(
@@ -141,7 +156,7 @@ py_test(
         tags = ["dsv41_cuda13"],
         legacy_create_init = 0,
     )
-    for name in ["test_prefill_workspace", "test_strategy_select", "test_gate_routing_metadata", "test_v41_aux_capture_mhc", "test_v41_cross_layer_mhc", "test_v41_mega_mhc", "test_mhc_moe_inputs", "test_fake_balance_expert", "test_v41_query_quant", "test_dsv41_kernel_jit_warmup", "test_engram_decode_prefetch", "test_engram_quantized"] + _ENGRAM_SM100_TESTS
+    for name in ["test_prefill_workspace", "test_strategy_select", "test_gate_routing_metadata", "test_v41_aux_capture_mhc", "test_v41_cross_layer_mhc", "test_v41_mega_mhc", "test_mega_gate", "test_private_gate_pack_eplb", "test_mhc_moe_inputs", "test_fake_balance_expert", "test_v41_query_quant", "test_dsv41_kernel_jit_warmup", "test_engram_decode_prefetch", "test_engram_quantized"] + _ENGRAM_SM100_TESTS
 ]
 
 dsv4_sm100_py_test(

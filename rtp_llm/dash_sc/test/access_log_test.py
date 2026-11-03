@@ -16,6 +16,7 @@ transport-agnostic machinery those servicers compose:
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 import json
 import logging
@@ -240,6 +241,11 @@ class ClassifyErrorMessageTest(TestCase):
 
 
 class ClassifyRpcExceptionTest(TestCase):
+    def test_async_cancellation_does_not_attribute_the_source_to_peer(self) -> None:
+        status, detail = classify_rpc_exception(asyncio.CancelledError(), req_count=1)
+        self.assertEqual(status, "CANCELLED")
+        self.assertEqual(detail, "request handling cancelled (async)")
+
     def test_generator_exit_is_cancelled(self) -> None:
         status, detail = classify_rpc_exception(GeneratorExit(), req_count=0)
         self.assertEqual(status, "CANCELLED")

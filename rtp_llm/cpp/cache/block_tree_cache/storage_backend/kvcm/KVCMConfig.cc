@@ -1,10 +1,26 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/KVCMConfig.h"
 
+#include <utility>
+
 using namespace autil::legacy;
 
 namespace rtp_llm {
 namespace kvcm {
 namespace {
+// SSD uses the same PACE SDK family, with a distinct wire backend name. Keep
+// this implementation detail private; never serialize it as the DRAM "pace".
+class PaceSsdSdkConfig final: public SdkBackendConfig {
+public:
+    PaceSsdSdkConfig(): SdkBackendConfig(DataStorageType::DATA_STORAGE_TYPE_TAIR_MEMPOOL) {}
+    void Jsonize(autil::legacy::Jsonizable::JsonWrapper& json) override {
+        std::string type = "pace_ssd";
+        json.Jsonize("type", type);
+        if (type != "pace_ssd")
+            AUTIL_LEGACY_THROW(NotJsonizableException, "invalid PACE SSD backend name");
+        json.Jsonize("sdk_log_file_path", sdk_log_file_path_, "");
+        json.Jsonize("sdk_log_level", sdk_log_level_, "ERROR");
+    }
+};
 DataStorageType DataStorageTypeFromString(const std::string& type) {
     if (type == "local") {
         return DataStorageType::DATA_STORAGE_TYPE_LOCAL;
@@ -129,7 +145,8 @@ void SdkWrapperConfig::Jsonize(Jsonizable::JsonWrapper& json) {
             if (type_str == nullptr) {
                 AUTIL_LEGACY_THROW(NotJsonizableException, "sdk_backend config field 'type' must be a string");
             }
-            DataStorageType                   type = DataStorageTypeFromString(*type_str);
+            DataStorageType type = *type_str == "pace_ssd" ? DataStorageType::DATA_STORAGE_TYPE_TAIR_MEMPOOL :
+                                                             DataStorageTypeFromString(*type_str);
             std::shared_ptr<SdkBackendConfig> sdk_backend_config;
             switch (type) {
                 case DataStorageType::DATA_STORAGE_TYPE_LOCAL:
@@ -142,7 +159,10 @@ void SdkWrapperConfig::Jsonize(Jsonizable::JsonWrapper& json) {
                     sdk_backend_config = std::make_shared<MooncakeSdkConfig>();
                     break;
                 case DataStorageType::DATA_STORAGE_TYPE_TAIR_MEMPOOL:
-                    sdk_backend_config = std::make_shared<TairMempoolSdkConfig>();
+                    if (*type_str == "pace_ssd")
+                        sdk_backend_config = std::make_shared<PaceSsdSdkConfig>();
+                    else
+                        sdk_backend_config = std::make_shared<TairMempoolSdkConfig>();
                     break;
                 case DataStorageType::DATA_STORAGE_TYPE_NFS:
                     sdk_backend_config = std::make_shared<NfsSdkConfig>();
@@ -184,6 +204,36 @@ void MetaChannelConfig::Jsonize(Jsonizable::JsonWrapper& json) {
     json.Jsonize("retry_time", retry_time_, retry_time_);
     json.Jsonize("connection_timeout", connection_timeout_, connection_timeout_);
     json.Jsonize("call_timeout", call_timeout_, call_timeout_);
+}
+
+std::string KVCMConfig::registerInstanceRequest() const {
+    json::JsonMap request;
+    request["instance_group"] = instance_group_;
+    request["instance_id"] = instance_id_;
+    request["block_size"] = block_size_;
+    request["default_query_type"] = default_query_type_;
+    request["model_deployment"] = ToJson(model_deployment_);
+    json::JsonArray infos;
+    if (location_spec_info_map_) {
+        for (const auto& [name, size] : *location_spec_info_map_) {
+            json::JsonMap info;
+            info["name"] = name;
+            info["size"] = size;
+            infos.emplace_back(std::move(info));
+        }
+    }
+    request["location_spec_infos"] = std::move(infos);
+    json::JsonArray groups;
+    if (location_spec_groups_) {
+        for (const auto& [name, specs] : *location_spec_groups_) {
+            json::JsonMap group;
+            group["name"] = name;
+            group["spec_names"] = ToJson(specs);
+            groups.emplace_back(std::move(group));
+        }
+    }
+    request["location_spec_groups"] = std::move(groups);
+    return ToJsonString(request, true);
 }
 
 void KVCMConfig::Jsonize(Jsonizable::JsonWrapper& json) {

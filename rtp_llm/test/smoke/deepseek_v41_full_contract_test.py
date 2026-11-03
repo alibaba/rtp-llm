@@ -23,6 +23,7 @@ class DeepSeekV41FullContractTest(
     # Keep the PD token/text repeatability and CED checks, and the DSpark
     # acceptance and verify-graph checks inherited from the two runners.
     compare_generation_logits = False
+    golden_filename = "full_feature_cp2_dp2.json"
 
     def test_graph_engram_and_prefix_reuse(self):
         super().test_graph_engram_and_prefix_reuse()
@@ -42,8 +43,7 @@ class DeepSeekV41FullContractTest(
         )
         if os.environ.get("SAVE_RESPONSE", "False") != "True":
             golden = (
-                Path(__file__).parent
-                / "data/model/deepseek_v41/full_feature_cp2_dp2.json"
+                Path(__file__).parent / "data/model/deepseek_v41" / self.golden_filename
             )
             self.assertEqual(actual, json.loads(golden.read_text()))
         self.assert_openai_logprobs()

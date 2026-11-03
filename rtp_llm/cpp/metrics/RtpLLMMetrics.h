@@ -415,22 +415,6 @@ private:
     AUTIL_LOG_DECLARE();
 };
 
-// Wall time for a whole batch's CPU stream updates, including grammar and output
-// bookkeeping, after D2H staging. Report once per nonempty decode dispatch in both
-// serial and parallel modes; parallel workers are not summed individually.
-class RtpLLMStreamUpdateMetricsCollector final {
-public:
-    int64_t latency_us = 0;
-};
-
-class RtpLLMStreamUpdateMetrics: public kmonitor::MetricsGroup {
-public:
-    bool init(kmonitor::MetricsGroupManager* manager) override;
-    void report(const kmonitor::MetricsTags* tags, RtpLLMStreamUpdateMetricsCollector* collector);
-
-    kmonitor::MutableMetric* latency_us_metric = nullptr;
-};
-
 class RtpLLMHiddenStateCaptureMetricsCollector final {
 public:
     bool batch_qps                  = false;
@@ -1109,19 +1093,19 @@ public:
     void report(const kmonitor::MetricsTags* tags, RtpLLMCachePoolMetricsCollector* collector);
 
 public:
-    kmonitor::MutableMetric* block_size_bytes_metric           = nullptr;
-    kmonitor::MutableMetric* free_blocks_metric                = nullptr;
-    kmonitor::MutableMetric* used_blocks_metric                = nullptr;
-    kmonitor::MutableMetric* available_blocks_metric           = nullptr;
-    kmonitor::MutableMetric* active_blocks_metric              = nullptr;
-    kmonitor::MutableMetric* total_blocks_metric               = nullptr;
-    kmonitor::MutableMetric* reserve_blocks_metric             = nullptr;
-    kmonitor::MutableMetric* request_ref_blocks_metric         = nullptr;
+    kmonitor::MutableMetric* block_size_bytes_metric            = nullptr;
+    kmonitor::MutableMetric* free_blocks_metric                 = nullptr;
+    kmonitor::MutableMetric* used_blocks_metric                 = nullptr;
+    kmonitor::MutableMetric* available_blocks_metric            = nullptr;
+    kmonitor::MutableMetric* active_blocks_metric               = nullptr;
+    kmonitor::MutableMetric* total_blocks_metric                = nullptr;
+    kmonitor::MutableMetric* reserve_blocks_metric              = nullptr;
+    kmonitor::MutableMetric* request_ref_blocks_metric          = nullptr;
     kmonitor::MutableMetric* remote_connector_ref_blocks_metric = nullptr;
     kmonitor::MutableMetric* pd_connector_ref_blocks_metric     = nullptr;
-    kmonitor::MutableMetric* block_cache_ref_blocks_metric     = nullptr;
-    kmonitor::MutableMetric* load_ref_blocks_metric            = nullptr;
-    kmonitor::MutableMetric* eviction_target_ref_blocks_metric = nullptr;
+    kmonitor::MutableMetric* block_cache_ref_blocks_metric      = nullptr;
+    kmonitor::MutableMetric* load_ref_blocks_metric             = nullptr;
+    kmonitor::MutableMetric* eviction_target_ref_blocks_metric  = nullptr;
     // Compatibility alias retained while dashboards migrate to the clarified name.
     kmonitor::MutableMetric* eviction_ref_blocks_compat_metric = nullptr;
     kmonitor::MutableMetric* store_ref_blocks_metric           = nullptr;
@@ -1168,6 +1152,22 @@ public:
     std::string                     pool_type;
 };
 
+class RtpLLMCacheTransferStageMetricsCollector final {
+public:
+    std::string operation{"load"};
+    std::string source_tier{"DISK"};
+    std::string target_tier{"DEVICE"};
+    std::string stage;
+    std::string scope;
+    int64_t     rank       = -1;
+    double      latency_us     = 0;
+    bool        success    = true;
+    uint64_t    sample_count   = 1;
+    uint64_t    latency_sum_us = 0;
+    uint64_t    dropped_count  = 0;
+    bool        tags_prepared  = false;
+};
+
 class RtpLLMCacheCopyErrorMetricsCollector final {
 public:
     std::string error_type;
@@ -1179,11 +1179,12 @@ public:
     bool init(kmonitor::MetricsGroupManager* manager) override;
     void report(const kmonitor::MetricsTags* tags, RtpLLMCacheTransferMetricsCollector* collector);
     void report(const kmonitor::MetricsTags* tags, RtpLLMCacheCopyErrorMetricsCollector* collector);
+    void report(const kmonitor::MetricsTags* tags, RtpLLMCacheTransferStageMetricsCollector* collector);
 
 private:
     kmonitor::MutableMetric* transfer_qps_metric                = nullptr;
     kmonitor::MutableMetric* transfer_failed_qps_metric         = nullptr;
-    kmonitor::MutableMetric* memory_cache_copy_error_qps_metric = nullptr;
+    kmonitor::MutableMetric* host_cache_copy_error_qps_metric   = nullptr;
     kmonitor::MutableMetric* descriptors_per_transfer_metric    = nullptr;
     // Compatibility alias retained while dashboards migrate to the clarified name.
     kmonitor::MutableMetric* transfer_descriptor_count_compat_metric    = nullptr;
@@ -1195,6 +1196,10 @@ private:
     kmonitor::MutableMetric* task_queue_backlog_metric                  = nullptr;
     kmonitor::MutableMetric* transfer_in_flight_metric                  = nullptr;
     kmonitor::MutableMetric* transfer_bytes_metric                      = nullptr;
+    kmonitor::MutableMetric* transfer_stage_latency_us_metric           = nullptr;
+    kmonitor::MutableMetric* transfer_stage_qps_metric                  = nullptr;
+    kmonitor::MutableMetric* transfer_stage_latency_sum_us_metric       = nullptr;
+    kmonitor::MutableMetric* transfer_stage_dropped_qps_metric          = nullptr;
 
 private:
     AUTIL_LOG_DECLARE();
@@ -1298,6 +1303,105 @@ public:
     bool    report_load_join_wait         = false;
 };
 
+class RtpLLMDecodePublicationStateMetricsCollector final {
+public:
+    int64_t pending_bytes{0}, pending_jobs{0}, queued_jobs{0}, running_jobs{0}, quarantined_jobs{0};
+    int64_t byte_limit{0}, job_limit{0}, oldest_age_us{0};
+};
+
+class RtpLLMDecodePublicationEventMetricsCollector final {
+public:
+    const char*            outcome{"failed"};
+    std::optional<int64_t> eos_to_commit_us;
+};
+
+class RtpLLMDecodePublicationMetrics: public kmonitor::MetricsGroup {
+public:
+    bool                     init(kmonitor::MetricsGroupManager* manager) override;
+    void                     report(const kmonitor::MetricsTags*, RtpLLMDecodePublicationStateMetricsCollector*);
+    void                     report(const kmonitor::MetricsTags*, RtpLLMDecodePublicationEventMetricsCollector*);
+    kmonitor::MutableMetric* pending_bytes_metric{nullptr};
+    kmonitor::MutableMetric* pending_jobs_metric{nullptr};
+    kmonitor::MutableMetric* queued_jobs_metric{nullptr};
+    kmonitor::MutableMetric* running_jobs_metric{nullptr};
+    kmonitor::MutableMetric* quarantined_jobs_metric{nullptr};
+    kmonitor::MutableMetric* byte_limit_metric{nullptr};
+    kmonitor::MutableMetric* job_limit_metric{nullptr};
+    kmonitor::MutableMetric* oldest_age_us_metric{nullptr};
+    kmonitor::MutableMetric* outcome_qps_metric{nullptr};
+    kmonitor::MutableMetric* budget_skip_qps_metric{nullptr};
+    kmonitor::MutableMetric* eos_latency_bucket_qps_metric{nullptr};
+    kmonitor::MutableMetric* eos_latency_sum_us_qps_metric{nullptr};
+
+private:
+    AUTIL_LOG_DECLARE();
+};
+
+class RtpLLMRemoteRestoreLatencyMetricsCollector final {
+public:
+    const char* mode{"checkpoint_gpu_ready"};
+    int64_t     latency_us{0};
+};
+
+class RtpLLMRemoteRestoreLatencyMetrics: public kmonitor::MetricsGroup {
+public:
+    bool                     init(kmonitor::MetricsGroupManager* manager) override;
+    void                     report(const kmonitor::MetricsTags*, RtpLLMRemoteRestoreLatencyMetricsCollector*);
+    kmonitor::MutableMetric* latency_bucket_qps_metric{nullptr};
+    kmonitor::MutableMetric* latency_sum_us_qps_metric{nullptr};
+
+private:
+    AUTIL_LOG_DECLARE();
+};
+
+class RtpLLMRemoteCacheControlMetricsCollector final {
+public:
+    bool enabled{true};
+};
+
+class RtpLLMRemoteCacheControlMetrics: public kmonitor::MetricsGroup {
+public:
+    bool init(kmonitor::MetricsGroupManager* manager) override;
+    void report(const kmonitor::MetricsTags* tags, RtpLLMRemoteCacheControlMetricsCollector* collector);
+    kmonitor::MutableMetric* enabled_metric{nullptr};
+
+private:
+    AUTIL_LOG_DECLARE();
+};
+
+class RtpLLMRemoteCacheOutcomeMetricsCollector final {
+public:
+    const char* stage{"lookup"};
+    const char* outcome{"failed"};
+};
+
+class RtpLLMDecodeCacheTokenMetricsCollector final {
+public:
+    const char* stage{"restored"};
+    const char* tier{"REMOTE"};
+    int64_t     logical_tokens{0};
+};
+
+class RtpLLMDecodeCacheTokenMetrics: public kmonitor::MetricsGroup {
+public:
+    bool                     init(kmonitor::MetricsGroupManager* manager) override;
+    void                     report(const kmonitor::MetricsTags*, RtpLLMDecodeCacheTokenMetricsCollector*);
+    kmonitor::MutableMetric* logical_tokens_qps_metric{nullptr};
+
+private:
+    AUTIL_LOG_DECLARE();
+};
+
+class RtpLLMRemoteCacheOutcomeMetrics: public kmonitor::MetricsGroup {
+public:
+    bool                     init(kmonitor::MetricsGroupManager* manager) override;
+    void                     report(const kmonitor::MetricsTags*, RtpLLMRemoteCacheOutcomeMetricsCollector*);
+    kmonitor::MutableMetric* outcome_qps_metric{nullptr};
+
+private:
+    AUTIL_LOG_DECLARE();
+};
+
 class RtpLLMRemoteCacheMatchMetricsCollector final {
 public:
     bool    remote_match_qps             = true;
@@ -1324,6 +1428,23 @@ public:
     int64_t remote_get_write_location_time_us = 0;
     int64_t remote_write_broadcast_time_us    = 0;
     int64_t remote_finish_write_time_us       = 0;
+};
+
+class RtpLLMRemoteCachePayloadMetricsCollector final {
+public:
+    int64_t completed_payload_bytes{0};
+    bool    completion_unknown{false};
+};
+
+class RtpLLMRemoteCachePayloadMetrics: public kmonitor::MetricsGroup {
+public:
+    bool                     init(kmonitor::MetricsGroupManager* manager) override;
+    void                     report(const kmonitor::MetricsTags*, RtpLLMRemoteCachePayloadMetricsCollector*);
+    kmonitor::MutableMetric* completed_payload_bytes_qps_metric{nullptr};
+    kmonitor::MutableMetric* completion_unknown_qps_metric{nullptr};
+
+private:
+    AUTIL_LOG_DECLARE();
 };
 
 class RtpLLMRemoteCacheSDKMetricsCollector final {
@@ -1433,23 +1554,23 @@ public:
     void report(const kmonitor::MetricsTags* tags, RtpLLMCacheReuseMetricsCollector* collector);
 
 public:
-    kmonitor::MutableMetric* device_input_length_metric              = nullptr;
-    kmonitor::MutableMetric* kv_cache_reuse_length_metric            = nullptr;
-    kmonitor::MutableMetric* stream_cache_device_reuse_length_metric = nullptr;
-    kmonitor::MutableMetric* stream_cache_memory_reuse_length_metric = nullptr;
-    kmonitor::MutableMetric* stream_cache_disk_reuse_length_metric   = nullptr;
-    kmonitor::MutableMetric* stream_cache_remote_reuse_length_metric = nullptr;
+    kmonitor::MutableMetric* device_input_length_metric               = nullptr;
+    kmonitor::MutableMetric* kv_cache_reuse_length_metric             = nullptr;
+    kmonitor::MutableMetric* stream_cache_device_reuse_length_metric  = nullptr;
+    kmonitor::MutableMetric* stream_cache_memory_reuse_length_metric  = nullptr;
+    kmonitor::MutableMetric* stream_cache_disk_reuse_length_metric    = nullptr;
+    kmonitor::MutableMetric* stream_cache_remote_reuse_length_metric  = nullptr;
     kmonitor::MutableMetric* reuse_block_first_hit_idletime_ms_metric = nullptr;
     kmonitor::MutableMetric* reuse_block_hit_idletime_ms_metric       = nullptr;
-    kmonitor::MutableMetric* match_cost_time_us_metric               = nullptr;
-    kmonitor::MutableMetric* load_qps_metric                         = nullptr;
-    kmonitor::MutableMetric* load_fail_qps_metric                    = nullptr;
-    kmonitor::MutableMetric* load_prepare_latency_us_metric          = nullptr;
-    kmonitor::MutableMetric* load_wait_latency_us_metric             = nullptr;
-    kmonitor::MutableMetric* match_to_ready_latency_us_metric        = nullptr;
-    kmonitor::MutableMetric* load_joined_request_qps_metric          = nullptr;
-    kmonitor::MutableMetric* load_join_dependency_count_metric       = nullptr;
-    kmonitor::MutableMetric* load_join_wait_latency_us_metric        = nullptr;
+    kmonitor::MutableMetric* match_cost_time_us_metric                = nullptr;
+    kmonitor::MutableMetric* load_qps_metric                          = nullptr;
+    kmonitor::MutableMetric* load_fail_qps_metric                     = nullptr;
+    kmonitor::MutableMetric* load_prepare_latency_us_metric           = nullptr;
+    kmonitor::MutableMetric* load_wait_latency_us_metric              = nullptr;
+    kmonitor::MutableMetric* match_to_ready_latency_us_metric         = nullptr;
+    kmonitor::MutableMetric* load_joined_request_qps_metric           = nullptr;
+    kmonitor::MutableMetric* load_join_dependency_count_metric        = nullptr;
+    kmonitor::MutableMetric* load_join_wait_latency_us_metric         = nullptr;
 
 private:
     AUTIL_LOG_DECLARE();
@@ -1465,6 +1586,18 @@ public:
     int64_t total_accepted_token_num       = 0;
     int64_t total_stream_num               = 0;
     int64_t spec_steps                     = 0;
+    // Main-thread waits in the current async MTP decode batch, before sampling.
+    // -1 excludes other paths; zero means this batch did not wait at that join.
+    int64_t main_thread_wait_bookkeeping_us = -1;
+    int64_t main_thread_wait_spec_verify_us = -1;
+    // Current decode decision; zero is a valid anchor-only verification budget.
+    int64_t verify_budget              = -1;
+    int64_t decided_draft_token_num    = -1;
+    int64_t acceptance_metrics_dropped = 0;
+    // Completed verification budget, aligned with accepted tokens and stream
+    // count above. It may combine several ready rounds. -1 preserves legacy
+    // callers that verify spec_steps drafts per stream.
+    int64_t total_verify_draft_token_num = -1;
 };
 
 class RtpLLMSpeculativeEngineMetrics: public kmonitor::MetricsGroup {
@@ -1477,12 +1610,18 @@ public:
     kmonitor::MutableMetric* propose_step_latency_us_metric        = nullptr;
     kmonitor::MutableMetric* score_step_latency_us_metric          = nullptr;
     kmonitor::MutableMetric* speculative_sampler_latency_us_metric = nullptr;
+    kmonitor::MutableMetric* main_thread_wait_bookkeeping_us_metric = nullptr;
+    kmonitor::MutableMetric* main_thread_wait_spec_verify_us_metric = nullptr;
     kmonitor::MutableMetric* total_propose_token_num_metric        = nullptr;
     kmonitor::MutableMetric* total_accepted_token_num_metric       = nullptr;
     kmonitor::MutableMetric* sp_avg_accept_token_num_metric        = nullptr;
     kmonitor::MutableMetric* sp_avg_accept_rate_metric             = nullptr;
     kmonitor::MutableMetric* sp_avg_fix_accept_rate_metric         = nullptr;
     kmonitor::MutableMetric* sp_estimate_tpot_us_metric            = nullptr;
+    kmonitor::MutableMetric* verify_budget_metric                  = nullptr;
+    kmonitor::MutableMetric* decided_draft_token_num_metric        = nullptr;
+    kmonitor::MutableMetric* total_verify_draft_token_num_metric   = nullptr;
+    kmonitor::MutableMetric* acceptance_metrics_dropped_metric     = nullptr;
 
 private:
     AUTIL_LOG_DECLARE();
@@ -1625,6 +1764,10 @@ private:
 };
 
 bool initKmonitorFactory();
+// A KVCM-local payload reporter for nonroot ranks, leaving general metrics root-only.
+// Disabled returns before touching the factory; an existing reporter is reused.
+kmonitor::MetricsReporterPtr
+     remoteCachePayloadReporter(bool enabled, int64_t tp_rank, const kmonitor::MetricsReporterPtr& existing_reporter);
 void stopKmonitorFactory();
 
 void setHippoTags(kmonitor::MetricsConfig& config);

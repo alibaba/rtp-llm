@@ -475,15 +475,12 @@ void CacheConfig::finalizeBlockNums(uint32_t global_block_num, const RuntimeConf
         return;
     }
 
-    const auto step   = static_cast<uint32_t>(std::max(1, linear_step));
-    auto       groups = topology().groups();
+    auto groups = topology().groups();
     for (auto& group : groups) {
         const auto explicit_independent_blocks = group.policy.explicit_block_num;
         uint32_t   rule_blocks                 = global_block_num;
         if (explicit_independent_blocks > 0) {
             rule_blocks = explicit_independent_blocks;
-        } else if (group.policy.group_type == CacheGroupType::SWA) {
-            rule_blocks = global_block_num / step + (global_block_num % step != 0 ? 1u : 0u);
         }
         group.block_num = rule_blocks;
     }
@@ -527,7 +524,7 @@ std::string CacheConfig::debugString(size_t indent) const {
     }
 
     os << indent1 << "# Attention Configuration:\n";
-    OUTPUT_FIELD(linear_step);
+    OUTPUT_FIELD(reuse_cache_tail_blocks);
     OUTPUT_FIELD_EXPR("full_group_num",
                       std::count_if(topology_groups.begin(), topology_groups.end(), [](const GroupBase& group) {
                           return group.policy.group_type == CacheGroupType::FULL;

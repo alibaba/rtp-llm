@@ -8,6 +8,7 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeTaskPool.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/ScopeRollback.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferDispatcher.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/CompletionStage.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
@@ -114,7 +115,11 @@ void BlockTreeStorer::submitLowerTierLocked(const CacheKeysType&                
         std::chrono::milliseconds(target_tier == Tier::DISK ? disk_timeout_ms_ : host_timeout_ms_),
         request_id);
 
-    block_tree_cache_detail::ScopeRollback prepare_guard([this, &task]() { settleLocked(*task, /*publish=*/false); });
+    block_tree_cache_detail::ScopeRollback prepare_guard([this, &task]() {
+        settleLocked(*task,
+                     /*publish=*/false,
+                     CompletionStageContext::forTransfer(metrics_reporter_, task->transfer_task, "store", false));
+    });
 
     if (!store_task_runner_.prepareTask(*task, resources)) {
         return;
@@ -174,29 +179,41 @@ void BlockTreeStorer::runStoreTask(const StoreTaskPtr& task) {
 }
 
 void BlockTreeStorer::scheduleStoreSettlement(const StoreTaskPtr& task, ErrorInfo error) {
-    auto          settle      = [this, task, error = std::move(error)]() mutable { settleTask(*task, error.ok()); };
+    auto observation = CompletionStageContext::forTransfer(metrics_reporter_, task->transfer_task, "store", error.ok());
+    auto timers      = CompletionStageTimers::create(observation);
     const int64_t queue_begin = currentTimeUs();
-    if (!task_pool_->submitCompletion([this, settle, queue_begin]() mutable {
-            metrics_reporter_.reportQueueWaitMetric(true,
-                                                    "business",
-                                                    cacheTransferOperationName(CacheTransferOperation::STORE),
-                                                    Tier::NONE,
-                                                    Tier::NONE,
-                                                    currentTimeUs() - queue_begin);
-            settle();
-        })) {
+    auto          settle      = [this, task, observation, timers, queue_begin](bool queued) {
+        timers.finishQueue(observation.success);
+        bool                                   success = false;
+        block_tree_cache_detail::ScopeRollback finish([&] { timers.finish(success); });
+        CompletionStageScope                   execute(observation, "completion_execute", "business_completion");
+        if (queued) {
+            metrics_reporter_.reportQueueWaitMetric(
+                true, "business", "store", Tier::NONE, Tier::NONE, currentTimeUs() - queue_begin);
+        }
+        success = settleTask(*task, observation);
+        execute.setSuccess(success);
+    };
+    if (!task_pool_->submitCompletion([settle] { settle(true); })) {
         RTP_LLM_LOG_WARNING("store completion queue is closed; settling inline");
-        settle();
+        settle(false);
     }
 }
 
-void BlockTreeStorer::settleTask(const StoreTask& task, bool copy_success) {
+bool BlockTreeStorer::settleTask(const StoreTask& task, const CompletionStageContext& observation) {
+    const bool copy_success = observation.success;
     bool   stopping = false;
     size_t accepted = 0;
     {
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::unique_lock<std::mutex> lock(mutex_, std::defer_lock);
+        {
+            CompletionStageScope wait(observation, "completion_lock_wait", "business_completion");
+            lock.lock();
+        }
+        CompletionStageScope tree(observation, "completion_settle", "business_completion");
         stopping = stopping_.load();
-        accepted = settleLocked(task, copy_success && !stopping);
+        accepted = settleLocked(task, copy_success && !stopping, observation);
+        tree.setSuccess(copy_success && !stopping);
     }
 
     if (stopping) {
@@ -214,11 +231,14 @@ void BlockTreeStorer::settleTask(const StoreTask& task, bool copy_success) {
                           accepted,
                           task.descriptors().size() - accepted);
     }
+    return copy_success && !stopping;
 }
 
-size_t BlockTreeStorer::settleLocked(const StoreTask& task, bool publish) {
+size_t BlockTreeStorer::settleLocked(const StoreTask& task, bool publish, CompletionStageContext observation) {
+    observation.success = publish;
     BlockTreeInsertResult insert_result;
     if (publish) {
+        CompletionStageScope                       tree(observation, "completion_publish_tree", "business_completion");
         std::vector<std::vector<GroupSetResource>> resources(task.cache_keys.size(),
                                                              std::vector<GroupSetResource>(tree_->groupSets().size()));
         for (const TransferDescriptor& descriptor : task.descriptors()) {
@@ -228,12 +248,16 @@ size_t BlockTreeStorer::settleLocked(const StoreTask& task, bool publish) {
         insert_result = tree_->insertNode(task.cache_keys, resources, true, false);
     }
 
-    store_task_runner_.releaseTaskResources(task);
-
+    {
+        CompletionStageScope refs(observation, "completion_release_refs", "business_completion");
+        store_task_runner_.releaseTaskResources(task);
+    }
     if (insert_result.accepted_resource_count > 0) {
+        CompletionStageScope candidates(observation, "completion_candidates", "business_completion");
         evictor_.onInserted(insert_result);
     }
     if (!task.descriptors().empty()) {
+        CompletionStageScope watermark(observation, "completion_watermark", "business_completion");
         settled_(true);
     }
     return insert_result.accepted_resource_count;

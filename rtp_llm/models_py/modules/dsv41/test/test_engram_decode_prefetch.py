@@ -17,9 +17,22 @@ from rtp_llm.models_py.modules.dsv41 import _engram_decode_prefetch as prefetch
 
 
 class DecodePrefetchCPU(unittest.TestCase):
+    def test_enabled_by_default_with_explicit_opt_out(self):
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertTrue(prefetch.enabled())
+            with patch.dict(os.environ, {"DSV41_DECODE_ENGRAM_PREFETCH": "0"}):
+                self.assertFalse(prefetch.enabled())
+            with patch.dict(os.environ, {"DSV41_DECODE_ENGRAM_PREFETCH": "1"}):
+                self.assertTrue(prefetch.enabled())
+
     def test_explicitly_disabled_does_not_touch_cuda_or_layers(self):
         with patch.dict(
-            os.environ, {"DSV41_ENGRAM_DEVICE_SCALES": "0"}, clear=True
+            os.environ,
+            {
+                "DSV41_ENGRAM_DEVICE_SCALES": "0",
+                "DSV41_DECODE_ENGRAM_PREFETCH": "0",
+            },
+            clear=True,
         ), patch.object(torch.cuda, "current_stream") as current:
             work = prefetch.DecodeEngramPrefetch(object(), object())
             work.before_layer(0)
@@ -283,7 +296,7 @@ class DecodePrefetchCUDA(unittest.TestCase):
                     torch.testing.assert_close(actual, reference, rtol=0, atol=0)
 
     @torch.inference_mode()
-    def test_consumer_on_another_stream_and_abandoned_capture_work(self):
+    def test_unsupported_layout_cross_stream_capture_falls_back(self):
         metadata = SimpleNamespace(batch_size=1, q_len_per_req=6)
         windows = torch.full((6, 4), 7, device="cuda", dtype=torch.int32)
         hidden = torch.randn(6, 2, 32, device="cuda", dtype=torch.bfloat16)
@@ -302,8 +315,9 @@ class DecodePrefetchCUDA(unittest.TestCase):
                 layer = self.model.layers[1]
                 output = layer.engram(hidden.clone(), layer.engram_hashes)
             origin.wait_stream(consumer)
-            # Publish L14 but deliberately omit its consumer: close must join it.
-            plan.before_layer(12)
+            # This small BF16 test layout stays serial under the new policy.
+            plan.before_layer(10)
+            self.assertEqual(plan.work, [])
             plan.close()
         for token in (3, 11, 7):
             windows.fill_(token)

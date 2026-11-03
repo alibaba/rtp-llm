@@ -1,3 +1,5 @@
+# Copyright 2026 Co-developed by KDA (Kernel Design Agents)
+
 """Check decode Q fusion against the actual norm and CUDA quant producers."""
 
 import json
@@ -63,16 +65,24 @@ class QueryQuantGateTest(unittest.TestCase):
                     q_lora_rank=128,
                     eps=1e-6,
                 )
-                with self.subTest(shared=shared is not None, pdl=pdl), patch.dict(
-                    os.environ,
-                    {"DSV41_FUSED_QUERY_QUANT": "1", "DSV4_FP8_QUANT_KERNEL": "auto"},
-                ), patch(
-                    "rtp_llm.models_py.modules.dsv41._v41_query_quant.is_supported",
-                    return_value=True,
-                ), patch(
-                    "rtp_llm.models_py.modules.dsv41._v41_query_quant.query_norm_quant",
-                    return_value=(norm, quant),
-                ) as normalize:
+                with (
+                    self.subTest(shared=shared is not None, pdl=pdl),
+                    patch.dict(
+                        os.environ,
+                        {
+                            "DSV41_FUSED_QUERY_QUANT": "1",
+                            "DSV4_FP8_QUANT_KERNEL": "auto",
+                        },
+                    ),
+                    patch(
+                        "rtp_llm.models_py.modules.dsv41._v41_query_quant.is_supported",
+                        return_value=True,
+                    ),
+                    patch(
+                        "rtp_llm.models_py.modules.dsv41._v41_query_quant.query_norm_quant",
+                        return_value=(norm, quant),
+                    ) as normalize,
+                ):
                     result = try_project_quantized_qkv(attn, x, shared, pdl=pdl)
                 if shared is None:
                     linear.assert_called_once_with(x)
@@ -143,9 +153,12 @@ class QueryQuantCudaTest(unittest.TestCase):
         for model_class in (DeepSeekV41Model, DeepSeekV41DSparkModel):
             for decode in (False, True):
                 for setting in (None, "0"):
-                    with self.subTest(
-                        model=model_class.__name__, decode=decode, setting=setting
-                    ), patch.dict(os.environ):
+                    with (
+                        self.subTest(
+                            model=model_class.__name__, decode=decode, setting=setting
+                        ),
+                        patch.dict(os.environ),
+                    ):
                         os.environ.pop("DSV41_PDL", None)
                         os.environ.pop("DSV41_FULL_DECODE_QB_PDL", None)
                         if setting is not None:
@@ -277,10 +290,18 @@ class QueryQuantCudaTest(unittest.TestCase):
             torch.cuda.current_stream().wait_stream(stream)
 
     def assert_same(self, got, ref):
-        torch.testing.assert_close(got[0], ref[0], rtol=0, atol=0)
         torch.testing.assert_close(
-            got[1][0].view(torch.uint8), ref[1][0].view(torch.uint8)
+            got[0].view(torch.int16), ref[0].view(torch.int16), rtol=0, atol=0
         )
+        torch.testing.assert_close(
+            got[1][0].view(torch.uint8), ref[1][0].view(torch.uint8), rtol=0, atol=0
+        )
+        self.assertEqual(got[0].shape, ref[0].shape)
+        self.assertEqual(got[0].dtype, torch.bfloat16)
+        self.assertEqual(got[1][0].dtype, torch.float8_e4m3fn)
+        self.assertEqual(got[1][1].dtype, torch.int32)
+        self.assertTrue(got[0].is_contiguous())
+        self.assertTrue(got[1][0].is_contiguous())
         rows = got[0].numel() // got[0].shape[-1]
         groups = got[0].shape[-1] // 32
         for left, right in zip(
@@ -294,9 +315,110 @@ class QueryQuantCudaTest(unittest.TestCase):
         self.assertEqual(got[1][1].stride(), ref[1][1].stride())
         self.assertEqual(groups % 4, 0)
 
+    def test_cute_dispatch_and_triton_fallback(self):
+        if torch.cuda.get_device_capability() != (10, 0):
+            self.skipTest("CuTe query quant requires SM100")
+        import deep_gemm
+
+        from rtp_llm.models_py.modules.dsv41 import _v41_query_quant as query_module
+        from rtp_llm.models_py.modules.dsv41 import _v41_query_quant_cute as cute_module
+
+        self.addCleanup(deep_gemm.set_pdl, deep_gemm.get_pdl())
+        packed = torch.randn(1, 7, 1792, device="cuda", dtype=torch.bfloat16)
+        x = packed[..., :1280]
+        w = torch.randn(1280, device="cuda", dtype=torch.bfloat16)
+        original_x, original_w = packed.clone(), w.clone()
+        expected = reference(x, w)
+        for requested_pdl, runtime_pdl in (
+            (False, False),
+            (True, False),
+            (False, True),
+        ):
+            deep_gemm.set_pdl(runtime_pdl)
+            with (
+                self.subTest(pdl=requested_pdl, runtime_pdl=runtime_pdl),
+                patch.object(query_module, "_query_norm_quant_kernel") as triton_kernel,
+                patch.object(
+                    cute_module,
+                    "try_query_norm_quant",
+                    wraps=cute_module.try_query_norm_quant,
+                ) as dispatch,
+            ):
+                triton_kernel.__getitem__.side_effect = AssertionError(
+                    "supported input must use CuTe"
+                )
+                actual = query_norm_quant(x, w, 1e-6, pdl=requested_pdl)
+                dispatch.assert_called_once_with(
+                    x, w, 1e-6, pdl=requested_pdl or runtime_pdl
+                )
+            self.assert_same(actual, expected)
+            self.assertIn(
+                (
+                    x.device.index,
+                    x.view(-1, 1280).stride(0),
+                    requested_pdl or runtime_pdl,
+                ),
+                cute_module._COMPILED,
+            )
+            with patch.object(cute_module, "_supported", return_value=False):
+                self.assert_same(
+                    actual, query_norm_quant(x, w, 1e-6, pdl=requested_pdl)
+                )
+        torch.testing.assert_close(
+            packed.view(torch.int16), original_x.view(torch.int16), rtol=0, atol=0
+        )
+        torch.testing.assert_close(
+            w.view(torch.int16), original_w.view(torch.int16), rtol=0, atol=0
+        )
+
+        deep_gemm.set_pdl(False)
+        misaligned_w = torch.randn(1281, device="cuda", dtype=torch.bfloat16)[1:]
+        misaligned_rows = torch.randn(7, 1281, device="cuda", dtype=torch.bfloat16)
+        triton_launch = query_module._query_norm_quant_kernel[(7,)]
+        for unsupported_x, unsupported_w in (
+            (packed[..., :128], w[:128]),
+            (torch.randn(7, 2560, device="cuda", dtype=torch.bfloat16), w.repeat(2)),
+            (packed[..., 1:1281], w),
+            (misaligned_rows[:, :1280], w),
+            (x, misaligned_w),
+        ):
+            with (
+                self.subTest(
+                    shape=unsupported_x.shape,
+                    stride=unsupported_x.stride(),
+                    aligned_x=unsupported_x.data_ptr() % 16 == 0,
+                    aligned_w=unsupported_w.data_ptr() % 16 == 0,
+                ),
+                patch.object(query_module, "_query_norm_quant_kernel") as triton_kernel,
+                patch.object(
+                    cute_module,
+                    "try_query_norm_quant",
+                    wraps=cute_module.try_query_norm_quant,
+                ) as dispatch,
+            ):
+                triton_kernel.__getitem__.return_value = triton_launch
+                actual = query_norm_quant(unsupported_x, unsupported_w, 1e-6)
+                triton_kernel.__getitem__.assert_called_once_with((7,))
+                self.assertEqual(
+                    dispatch.call_count, int(unsupported_x.shape[-1] == 1280)
+                )
+            self.assert_same(actual, reference(unsupported_x, unsupported_w))
+
+    def test_cute_empty_rows_do_not_compile(self):
+        if torch.cuda.get_device_capability() != (10, 0):
+            self.skipTest("CuTe query quant requires SM100")
+        from rtp_llm.models_py.modules.dsv41 import _v41_query_quant_cute as cute_module
+
+        x = torch.empty(0, 1280, device="cuda", dtype=torch.bfloat16)
+        w = torch.ones(1280, device="cuda", dtype=torch.bfloat16)
+        with patch.object(cute_module.cute, "compile") as compile_kernel:
+            result = cute_module.try_query_norm_quant(x, w, 1e-6, pdl=True)
+            compile_kernel.assert_not_called()
+        self.assert_same(result, reference(x, w))
+
     def test_shapes_strides_and_dynamic_range(self):
         torch.manual_seed(13)
-        for rows in (0, 1, 4, 7, 20, 24, 40, 48, 97):
+        for rows in (0, 1, 4, 7, 20, 24, 40, 48, 97, 127, 128, 191, 192, 257):
             for width in (128, 1280, 2560):
                 with self.subTest(rows=rows, width=width):
                     packed = torch.randn(

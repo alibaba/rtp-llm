@@ -71,8 +71,20 @@ def can_use_mega_gate(x: torch.Tensor, gate) -> bool:
     )
 
 
-def mega_gate(x: torch.Tensor, gate, ep_rank: int = 0, *, out=None):
-    """Return (weights, global IDs); optional ``out`` is (IDs, weights)."""
+def mega_gate(
+    x: torch.Tensor,
+    gate,
+    ep_rank: int = 0,
+    *,
+    out=None,
+    to_physical_map=None,
+    logical_count=None,
+):
+    """Return (weights, IDs); optional ``out`` is (IDs, weights).
+
+    EPLB's int32 map/count buffers are borrowed without copies. When supplied,
+    the gate writes physical IDs directly; graph replay reads in-place updates.
+    """
     kernel = _native_gate()
     if kernel is None:
         raise RuntimeError("DeepGEMM does not provide bf16_mega_gate")
@@ -95,6 +107,8 @@ def mega_gate(x: torch.Tensor, gate, ep_rank: int = 0, *, out=None):
         ep_rank=ep_rank,
         scoring_func=gate.score_func,
         bias=gate.bias,
+        to_physical_map=to_physical_map,
+        logical_count=logical_count,
         out=(indices, weights),
     )
     return weights, indices

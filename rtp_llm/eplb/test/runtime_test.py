@@ -242,24 +242,24 @@ class RuntimeTest(unittest.TestCase):
             self.assertTrue(torch.equal(tensor, original))
             self.assertEqual(tensor.data_ptr(), pointer)
 
-    def test_mode_and_interval_changes_reset_but_identical_config_preserves_ring(self):
-        runtime = RuntimeExpertBalancer(
-            [make_layer()], make_config(eplb_mode=1), 0, 1, 0
-        )
-        group = runtime.groups[0]
-        group.step(torch.ones(1, 6, dtype=torch.int32), False, 1, 4)
-        runtime.update_config(1, 4)
-        self.assertEqual(group.window_index, 1)
-        self.assertEqual(group.window[0, 0].tolist(), [1] * 6)
-        runtime.update_config(2, 4)
-        self.assertEqual(group.window_index, 0)
-        self.assertEqual(group.steps, 3)
-        self.assertEqual(torch.count_nonzero(group.window).item(), 0)
-        group.step(torch.ones(1, 6, dtype=torch.int32), False, 1, 4)
-        runtime.update_config(2, 8)
-        self.assertEqual(group.window_index, 0)
-        self.assertEqual(group.steps, 6)
-        self.assertEqual(torch.count_nonzero(group.window).item(), 0)
+    def test_startup_config_sets_mode_and_initial_schedule(self):
+        for mode in (0, 1, 2, 3):
+            for interval in (0, 4, 1000):
+                with self.subTest(mode=mode, interval=interval):
+                    runtime = RuntimeExpertBalancer(
+                        [make_layer()],
+                        make_config(eplb_mode=mode, eplb_update_time=interval),
+                        0,
+                        1,
+                        0,
+                    )
+                    self.assertEqual((runtime.mode, runtime.interval), (mode, interval))
+                    group = runtime.groups[0]
+                    self.assertEqual(group.window_index, 0)
+                    self.assertEqual(
+                        group.steps, max(0, interval - max(1, interval // 4))
+                    )
+                    self.assertEqual(torch.count_nonzero(group.window).item(), 0)
 
     def test_ep_one_explicitly_skips_sampling_and_rearrange(self):
         with patch.object(

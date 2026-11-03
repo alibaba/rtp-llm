@@ -69,7 +69,7 @@ def try_select_batched(
     number of Python request objects. Projection arithmetic remains outside
     this helper at its original local-batch M.
     """
-    if len(globals_by_req) < 2 or request_row_slices is None or not q_payload.is_cuda:
+    if not globals_by_req or request_row_slices is None or not q_payload.is_cuda:
         return False
     shared = attn._shared_attention
     cp = getattr(attn, "_cp_ctx", None)
@@ -151,6 +151,7 @@ def try_select_batched(
         shared,
         req_ids=req_ids,
         key_counts=key_counts,
+        cp_ctx=cp,
     )
     if grouped is None:
         return False

@@ -1,0 +1,4 @@
+Device GEMM, TMA, MMA, layout, and PTX helpers are adapted from DeepGEMM
+(https://github.com/deepseek-ai/DeepGEMM), MIT licensed; see LICENSE.DeepGEMM.
+Engram Post/Gate and native-order Pre integration are maintained in RTP.
+CUTLASS headers are fetched at the pinned cutlass_engram repository commit.

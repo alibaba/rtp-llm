@@ -23,13 +23,14 @@ public:
                                const ProfilingDebugLoggingConfig& profiling_debug_logging_config,
                                const CacheConfig&                 cache_config,
                                bool                               warm_up,
-                               int                                async_worker_count = 0,
-                               kmonitor::MetricsReporterPtr       metrics_reporter   = nullptr);
+                               int                                async_worker_count = 0);
 
     virtual absl::Status dispatch(const StreamGroups& stream_groups, const MergedOutput& merge_outputs) const;
-    virtual absl::Status dispatchPrefillOnly(const StreamGroups&              stream_groups,
-                                             GenerationPrefillCudaGraphStatus generation_prefill_cuda_graph_status =
-                                                 GenerationPrefillCudaGraphStatus::NOT_REQUESTED) const;
+    virtual absl::Status dispatchPrefillOnly(
+        const StreamGroups&              stream_groups,
+        GenerationPrefillCudaGraphStatus generation_prefill_cuda_graph_status =
+            GenerationPrefillCudaGraphStatus::NOT_REQUESTED,
+        std::optional<RemoteRestoreTiming::Clock::time_point> context_kv_all_rank_gpu_ready_at = std::nullopt) const;
     virtual absl::StatusOr<GptModelInputs> gatherModelInput(const StreamGroups& stream_groups,
                                                             TensorHolder&       host_holder) const;
     virtual absl::StatusOr<SamplerInputs>  gatherSamplerInput(const StreamGroups&    stream_groups,
@@ -47,7 +48,8 @@ protected:
     SamplerInputs allocateSamplerInputs(const StreamGroups& stream_groups,
                                         size_t              total_batch_size_in,
                                         size_t              total_batch_size_out,
-                                        size_t              propose_step = 0) const;
+                                        size_t              propose_step               = 0,
+                                        bool                materialize_host_token_ids = true) const;
 
     void setCommonSamplerInputs(SamplerInputs&                sampler_inputs,
                                 std::list<GenerateStreamPtr>& all_streams,
@@ -66,7 +68,6 @@ protected:
                                   bool                          score_batch = false) const;
 
 protected:
-    kmonitor::MetricsReporterPtr                metrics_reporter_;
     NormalModelInputGathererConfig              model_input_gatherer_config_;
     std::unique_ptr<NormalModelInputGatherer>   model_input_gatherer_;
     std::unique_ptr<NormalSamplerInputGatherer> sampler_input_gatherer_;

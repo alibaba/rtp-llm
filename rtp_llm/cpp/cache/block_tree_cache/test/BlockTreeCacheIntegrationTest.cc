@@ -22,6 +22,7 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/FullGroupSet.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeCacheTestUtils.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/test/PerRankBlockTransferEngineTestUtils.h"
+#include "rtp_llm/cpp/utils/AsyncProfilingScope.h"
 
 namespace rtp_llm::block_tree_cache_test {
 class LoadShutdownTestPeer {
@@ -2847,8 +2848,24 @@ TEST_F(BlockTreeCacheIntegrationTest, MixedHostDiskFailureInstallsNoTargets) {
     }
     environment->scripted_per_rank_transfer_engine->enqueue(false);
 
+    const size_t descriptor_count = context->loadDescs().size();
+    ASSERT_NE(host_load_descs.size(), descriptor_count - host_load_descs.size());
+    auto completion_profile = AsyncProfileSession::start();
     ASSERT_TRUE(context->commit());
     context->waitDone();
+    BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*environment->cache);
+    const auto completion_events         = completion_profile->finish();
+    size_t     logical_completion_stages = 0;
+    for (const auto& event : completion_events) {
+        if (event.name.find("scope=business_completion,operation=load") == std::string::npos)
+            continue;
+        ++logical_completion_stages;
+        EXPECT_NE(event.name.find("mixed_to_device"), std::string::npos);
+        EXPECT_NE(event.name.find("batch=0:" + std::to_string(descriptor_count) + ","), std::string::npos)
+            << event.name;
+        EXPECT_EQ(event.name.find("incomplete=1"), std::string::npos);
+    }
+    EXPECT_GE(logical_completion_stages, 10u);
     ASSERT_TRUE(context->done());
     EXPECT_FALSE(context->success());
     EXPECT_EQ(environment->scripted_per_rank_transfer_engine->submittedBatchCount(),
@@ -3174,16 +3191,22 @@ TEST_F(BlockTreeCacheIntegrationTest, DeviceLoadAsyncCompletionKeepsRequestSourc
     for (const auto& [pool, block] : device_sources) {
         EXPECT_EQ(pool->refCount(block), 1u);
     }
-    // The FULL drop would cascade to freshly loaded SWA blocks still held by
-    // this request. Preserve the entire plan until those holders are released.
+    // FULL only checks its primary blocks. Freshly loaded SWA targets lose their
+    // CACHE references during the cascade but stay allocated for the request.
     const auto version_before_reclaim = environment->cache->getKeySnapshot().version;
-    EXPECT_EQ(environment->cache->evictForGroup("group0", 2), 0);
-    EXPECT_EQ(environment->cache->getKeySnapshot().version, version_before_reclaim);
-    for (const auto& [pool, block] : request_target_blocks) {
-        EXPECT_EQ(pool->refCount(block), 2u);
-        releaseDeviceBlocks(*environment->cache, pool, {block});
-    }
     EXPECT_EQ(environment->cache->evictForGroup("group0", 2), 2);
+    EXPECT_GT(environment->cache->getKeySnapshot().version, version_before_reclaim);
+    EXPECT_EQ(environment->cache->getStats().tree_node_count, tree_nodes_before - 2);
+    for (const auto& [pool, block] : request_target_blocks) {
+        EXPECT_TRUE(pool->isAllocated(block));
+        EXPECT_EQ(pool->refCount(block), 1u);
+        EXPECT_EQ(pool->treeRefCount(block), 0u);
+        releaseDeviceBlocks(*environment->cache, pool, {block});
+        EXPECT_FALSE(pool->isAllocated(block));
+    }
+    // The ready prefix still has two cached FULL blocks after dropping the suffix.
+    EXPECT_EQ(environment->cache->evictForGroup("group0", 2), 2);
+    EXPECT_EQ(environment->cache->getStats().tree_node_count, 0u);
     for (const auto& [pool, block] : device_sources) {
         EXPECT_FALSE(pool->isAllocated(block));
     }

@@ -207,6 +207,22 @@ def _prefill_fast_path_enabled(
     return layer_calls is not None
 
 
+def _int64_on_device(source: torch.Tensor, device: torch.device) -> torch.Tensor:
+    """H2D with dtype conversion that keeps the copy asynchronous.
+
+    ``source.to(device=..., dtype=torch.int64)`` converts the dtype on the host
+    first, and that intermediate is unpinned, so the H2D that follows is a
+    blocking pageable copy even when ``source`` is pinned. Allocating the
+    destination on the device and converting inside ``copy_`` keeps the pinned
+    source and the transfer asynchronous.
+    """
+    if source.is_cuda:
+        return source.to(dtype=torch.int64)
+    out = torch.empty(source.shape, dtype=torch.int64, device=device)
+    out.copy_(source, non_blocking=True)
+    return out
+
+
 def _build_positions_from_lengths(
     input_lengths: torch.Tensor,  # [B] int
     prefix_lengths: torch.Tensor,  # [B] int
@@ -224,8 +240,8 @@ def _build_positions_from_lengths(
     (``input_lengths`` / ``prefix_lengths``) during capture. Keep the
     body tensor-only so capture does not synchronize on scalar reads.
     """
-    input_lengths = input_lengths.to(device=device, dtype=torch.int64)
-    prefix_lengths = prefix_lengths.to(device=device, dtype=torch.int64)
+    input_lengths = _int64_on_device(input_lengths, device)
+    prefix_lengths = _int64_on_device(prefix_lengths, device)
     batch_size = int(input_lengths.numel())
     if total_tokens is None:
         total_tokens = int(input_lengths.sum().item())

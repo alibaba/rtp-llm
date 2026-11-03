@@ -247,7 +247,7 @@ custom_smoke_test(
     tags = ["dsv41_cuda13", "model_contract", "pd_contract", "dspark_contract", "eplb_contract"],
     data = [
         "//rtp_llm:sdk",
-        "data/model/deepseek_v41/full_feature_cp2_dp2.json",
+        "data/model/deepseek_v41/full_feature_cp2_dp2_mega_se.json",
         "deepseek_v41_contract_test.py",
         "deepseek_v41_pd_contract_test.py",
         "deepseek_v41_dspark_contract_test.py",

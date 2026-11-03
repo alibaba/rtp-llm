@@ -23,28 +23,50 @@ from rtp_llm.models_py.modules.dsv41.fp8.attention_v41 import (
 
 
 class AttentionV41Test(unittest.TestCase):
-    def test_small_cp_projection_uses_actual_transfer_width_and_geometry(self):
-        select = attention_v41_module._project_before_small_cp_gather
-        for cp, local_rows, output_width, expected in (
-            (4, 1024, 1024, False),
-            (4, 2048, 1024, False),
-            (4, 4096, 512, False),
-            (4, 4096, 1024, False),
-            (4, 8192, 1024, True),
-            (2, 4096, 1024, False),
-            (2, 16384, 1024, True),
-            (1, 8192, 1024, False),
-            (4, 8192, 5120, False),
+    def test_projected_cp_chunk_budget_is_shape_independent(self):
+        ctx = SimpleNamespace(cp_size=4)
+        for width in (512, 1024):
+            rows = attention_v41_module._prefill_x_chunk_rows(ctx, width)
+            self.assertGreater(rows, 0)
+            self.assertLessEqual(rows, attention_v41_module._PRODUCE_GLOBAL_TILE_ROWS)
+            self.assertLessEqual(
+                (ctx.cp_size + 1) * rows * width * 4,
+                attention_v41_module._CP_PROJECTED_TRANSPORT_MAX_BYTES,
+            )
+
+    def test_prefill_qkv_cp_gather_receives_token_major_rows(self):
+        attn = AttentionV41FP8.__new__(AttentionV41FP8)
+        torch.nn.Module.__init__(attn)
+        attn.layer_id, attn.kv_norm, attn.eps = 2, None, 1e-6
+        qr = torch.arange(12).view(1, 3, 4)
+        kv = torch.arange(24).view(1, 3, 1, 8)
+        x = torch.empty((3, 5120))
+        common = SimpleNamespace(
+            rd=None, freqs_cis=None, cp_on=True, cp_ctx=SimpleNamespace()
+        )
+
+        with (
+            patch.object(attn, "_try_fused_qr_kv", return_value=(qr, kv)),
+            patch(
+                "rtp_llm.models_py.modules.dsv41.fp8.attention.swa_kv_norm_rope",
+                side_effect=lambda value, *args, **kwargs: value,
+            ),
+            patch(
+                "rtp_llm.models_py.modules.dsv41.fp8.attention.cp_all_gather_full_varlen",
+                side_effect=lambda rows, *args, **kwargs: torch.cat(
+                    (rows, rows + 100), dim=0
+                ),
+            ) as gather,
         ):
-            with self.subTest(cp=cp, rows=local_rows, width=output_width):
-                x = torch.empty((local_rows, 5120), dtype=torch.bfloat16, device="meta")
-                ctx = SimpleNamespace(
-                    cp_size=cp,
-                    chunk_length=local_rows,
-                    padded_seq_len=cp * local_rows,
-                )
-                self.assertEqual(select(x, ctx, output_width), expected)
-        self.assertFalse(select(x[:, ::2], ctx, 1024))
+            result = attn._prefill_compute_qkv(x, common)
+            torch.testing.assert_close(result.qr, qr[0])
+            torch.testing.assert_close(result.kv_full, torch.cat((kv[0], kv[0] + 100)))
+            self.assertEqual(gather.call_args.args[0].shape, (3, 1, 8))
+            self.assertEqual(gather.call_args.kwargs["replay_only"], False)
+            common.cp_on = False
+            result = attn._prefill_compute_qkv(x, common)
+            torch.testing.assert_close(result.kv_full, kv[0])
+            self.assertEqual(gather.call_count, 1)
 
     def test_raw_pool_identity_keeps_reinterpret_and_strided_layout(self):
         attn = AttentionV41FP8.__new__(AttentionV41FP8)
@@ -394,6 +416,50 @@ class AttentionV41Test(unittest.TestCase):
                             self.assertEqual(result.dtype, torch.long)
                             torch.testing.assert_close(result, reference)
 
+    def test_prefill_chunk_meta_device_plan_skips_host_shape_scan(self):
+        class DeviceOnlyGlobals:
+            def __len__(self):
+                return 2
+
+            def __iter__(self):
+                raise AssertionError("device metadata must bypass global row shapes")
+
+        attn = self._chunk_meta_fixture(2, 128)
+        expected = tuple(torch.empty((3, 1), dtype=torch.long) for _ in range(3))
+        common = SimpleNamespace(
+            cp_on=False,
+            cp_ctx=None,
+            input_lengths=torch.tensor([3, 5], dtype=torch.int32),
+            prefix_lengths=torch.tensor([0, 8], dtype=torch.int32),
+        )
+        with patch(
+            "rtp_llm.models_py.modules.dsv41.fp8._v41_prefill_metadata.try_chunk_metadata",
+            return_value=expected,
+        ):
+            actual = attn._prefill_chunk_meta(
+                DeviceOnlyGlobals(),
+                [torch.empty(3, 4), torch.empty(5, 4)],
+                [0, 0],
+                torch.tensor([0, 1, 1]),
+                torch.device("cpu"),
+                common=common,
+            )
+        self.assertIs(actual, expected)
+
+    def test_prefill_chunk_meta_empty_pool_bound_rows(self):
+        attn = self._chunk_meta_fixture(2, 128)
+        empty = torch.empty(0, dtype=torch.long)
+        common = SimpleNamespace(
+            cp_on=False,
+            cp_ctx=None,
+            input_lengths=empty,
+            prefix_lengths=empty,
+        )
+        actual = attn._prefill_chunk_meta(
+            [], [], [], empty, torch.device("cpu"), common=common
+        )
+        self.assertTrue(all(value.shape == (0, 1) for value in actual))
+
     def test_prefill_chunk_meta_pool_free_keeps_new_boundary_shapes(self):
         lengths = [1, 3, 2]
         prefixes = [7, 8, 13]
@@ -481,36 +547,6 @@ class AttentionV41Test(unittest.TestCase):
         self.assertEqual(next_meta, (0, 1, 0))
         self.assertIsNot(next_meta, actual)
 
-    def test_small_cp_x_gather_ceiling_covers_mid_size_batches(self):
-        # The single-shot raw-x all-gather must cover the shared-prefix batch
-        # band (8x8192 = 65536 global rows and every smaller multi-request
-        # forward) while leaving large-context single requests on the tiled
-        # owner-projected path.
-        for padded, expected in [
-            (8192, True),
-            (16384, True),
-            (32768, True),
-            (40960, True),
-            (49152, True),
-            (57344, True),
-            (65536, True),
-            (65537, False),
-            (131072, False),
-        ]:
-            with self.subTest(padded=padded):
-                ctx = SimpleNamespace(padded_seq_len=padded)
-                self.assertEqual(
-                    attention_v41_module._use_small_cp_x_gather(ctx), expected
-                )
-        with patch.object(attention_v41_module, "_SMALL_CP_X_GATHER_MAX_ROWS", 32768):
-            ctx = SimpleNamespace(padded_seq_len=49152)
-            self.assertFalse(attention_v41_module._use_small_cp_x_gather(ctx))
-            self.assertTrue(
-                attention_v41_module._use_small_cp_x_gather(
-                    SimpleNamespace(padded_seq_len=32768)
-                )
-            )
-
     def test_cp_hidden_tiles_restore_padded_multiple_requests(self):
         for cp_size in (2, 4):
             lengths = (5, 19, 1, 32)
@@ -534,15 +570,17 @@ class AttentionV41Test(unittest.TestCase):
                 input_lengths_global_host=lengths,
             )
             for tile_rows in (1, 3, 7, 32768):
-                with patch.object(
-                    attention_v41_module, "_PRODUCE_GLOBAL_TILE_ROWS", tile_rows
-                ):
-                    plan = list(attention_v41_module._prefill_x_tile_plan(context))
+                plan = list(
+                    attention_v41_module._prefill_x_tile_plan(context, tile_rows)
+                )
                 actual = torch.cat(
-                    [local[rank][start : start + count] for rank, start, count in plan]
+                    [
+                        local[owner][source : source + rows]
+                        for owner, source, rows in plan
+                    ]
                 )
                 torch.testing.assert_close(actual, torch.cat(expected))
-                self.assertTrue(all(0 < count <= tile_rows for _, _, count in plan))
+                self.assertTrue(all(0 < rows <= tile_rows for _, _, rows in plan))
 
     def test_cp_gather_updates_input_with_symm_memory_wrapper(self):
         from rtp_llm.models_py.distributed import collective_torch as collectives
@@ -566,9 +604,10 @@ class AttentionV41Test(unittest.TestCase):
         symm = SimpleNamespace(
             get_symm_mem_communicator=lambda: SymmetricCommunicator()
         )
-        with patch.object(
-            collectives, "_get_rocm_rccl", return_value=None
-        ), patch.object(collectives, "_get_symm_mem", return_value=symm):
+        with (
+            patch.object(collectives, "_get_rocm_rccl", return_value=None),
+            patch.object(collectives, "_get_symm_mem", return_value=symm),
+        ):
             actual = AttentionV41FP8._gather_shards(source, value)
             projected = torch.tensor([[3.0, 5.0]])
             AttentionV41FP8._prefill_output_all_reduce(
@@ -875,16 +914,17 @@ class AttentionV41Test(unittest.TestCase):
             state_writes = []
             attn = self._kv_source_fixture(state_writes)
             projected = torch.cat((x_full.float(), x_full.float() * 0.125), -1)
-            source = (
-                projected if full_projected else (x_full[:1] if streamed else x_full)
-            )
-            with patch(
-                "rtp_llm.models_py.modules.dsv41.fp8.compressor._linear_bf16_bf16_fp32",
-                side_effect=lambda x, w: torch.nn.functional.linear(
-                    x.float(), w.float()
+            source = x_full[:1] if streamed or full_projected else x_full
+            with (
+                patch(
+                    "rtp_llm.models_py.modules.dsv41.fp8.compressor._linear_bf16_bf16_fp32",
+                    side_effect=lambda x, w: torch.nn.functional.linear(
+                        x.float(), w.float()
+                    ),
                 ),
-            ), patch.object(
-                attention_v41_module, "_PRODUCE_GLOBAL_TILE_ROWS", tile_rows
+                patch.object(
+                    attention_v41_module, "_PRODUCE_GLOBAL_TILE_ROWS", tile_rows
+                ),
             ):
                 attn._produce_global(
                     source,
@@ -893,14 +933,13 @@ class AttentionV41Test(unittest.TestCase):
                     starts,
                     lengths,
                     prefill=True,
-                    projected_full=full_projected,
                     projected_tiles=(
                         (
                             (start, projected[start : start + tile_rows])
                             for start in range(0, rows, tile_rows)
                         )
                         if streamed
-                        else None
+                        else iter(((0, projected),)) if full_projected else None
                     ),
                 )
             return attn._shared_attention["global"][2], state_writes
@@ -1021,7 +1060,7 @@ class PrefillCandidatesIntegrationTest(unittest.TestCase):
             out,
             flags,
             build_bitmap=True,
-            mask_tail=False
+            mask_tail=False,
         ):
             self.assertEqual(
                 out.untyped_storage().data_ptr(),
@@ -1045,13 +1084,15 @@ class PrefillCandidatesIntegrationTest(unittest.TestCase):
             return True
 
         helpers = attention_v41_module.prefill_candidates
-        with patch.object(
-            helpers, "select_candidates", side_effect=select
-        ), patch.object(
-            helpers, "build_flags", side_effect=AssertionError("Bitmap must be reused")
-        ), patch.object(
-            helpers, "mask_candidates", side_effect=mask
-        ) as mask_call:
+        with (
+            patch.object(helpers, "select_candidates", side_effect=select),
+            patch.object(
+                helpers,
+                "build_flags",
+                side_effect=AssertionError("Bitmap must be reused"),
+            ),
+            patch.object(helpers, "mask_candidates", side_effect=mask) as mask_call,
+        ):
             attention_v41_module._apply_prefill_candidates(
                 shared, logits, visible, rows, 2, 2, True
             )
@@ -1091,7 +1132,7 @@ class PrefillCandidatesIntegrationTest(unittest.TestCase):
             out,
             flags,
             build_bitmap=True,
-            mask_tail=False
+            mask_tail=False,
         ):
             self.assertNotEqual(
                 out.untyped_storage().data_ptr(),
@@ -1142,11 +1183,10 @@ class PrefillCandidatesIntegrationTest(unittest.TestCase):
         built = torch.tensor([[5], [6]], dtype=torch.int32)
         consumer = torch.arange(8, dtype=torch.float32).view(2, 4)
         reference = mask_candidate_logits(consumer.clone(), candidates[rows], 2)
-        with patch.object(
-            helpers, "build_flags", return_value=built
-        ) as build, patch.object(
-            helpers, "mask_candidates", return_value=False
-        ) as fused_mask:
+        with (
+            patch.object(helpers, "build_flags", return_value=built) as build,
+            patch.object(helpers, "mask_candidates", return_value=False) as fused_mask,
+        ):
             attention_v41_module._apply_prefill_candidates(
                 shared, consumer, visible, rows, 2, 3, False
             )
@@ -1225,35 +1265,42 @@ class PrefillCandidatesIntegrationTest(unittest.TestCase):
                         block_size,
                         topk,
                         publish,
-                        **kwargs
+                        **kwargs,
                     ):
                         self.assertTrue(publish)
                         selections.append(rows)
 
-                    with patch.object(
-                        attention_v41_module,
-                        "rope_only",
-                        side_effect=lambda q, *args: q,
-                    ), patch.object(
-                        attention_v41_module.prefill_indexer,
-                        "quantize_indexer_q",
-                        side_effect=lambda q: (q, torch.zeros(5, 1)),
-                    ), patch.object(
-                        attention_v41_module.prefill_indexer,
-                        "logits_chunk_rows",
-                        return_value=2,
-                    ), patch.object(
-                        attention_v41_module.prefill_indexer,
-                        "score_indexer_chunk",
-                        side_effect=score,
-                    ), patch.object(
-                        attention_v41_module.prefill_topk,
-                        "try_select_tokens",
-                        side_effect=select,
-                    ), patch.object(
-                        attention_v41_module,
-                        "_apply_prefill_candidates",
-                        side_effect=candidates,
+                    with (
+                        patch.object(
+                            attention_v41_module,
+                            "rope_only",
+                            side_effect=lambda q, *args: q,
+                        ),
+                        patch.object(
+                            attention_v41_module.prefill_indexer,
+                            "quantize_indexer_q",
+                            side_effect=lambda q: (q, torch.zeros(5, 1)),
+                        ),
+                        patch.object(
+                            attention_v41_module.prefill_indexer,
+                            "logits_chunk_rows",
+                            return_value=2,
+                        ),
+                        patch.object(
+                            attention_v41_module.prefill_indexer,
+                            "score_indexer_chunk",
+                            side_effect=score,
+                        ),
+                        patch.object(
+                            attention_v41_module.prefill_topk,
+                            "try_select_tokens",
+                            side_effect=select,
+                        ),
+                        patch.object(
+                            attention_v41_module,
+                            "_apply_prefill_candidates",
+                            side_effect=candidates,
+                        ),
                     ):
                         actual = AttentionV41FP8._select_indices(
                             attn, x, qr, positions, req_ids

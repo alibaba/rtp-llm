@@ -1,5 +1,6 @@
 #pragma once
 
+#include <memory>
 #include <optional>
 
 #include "rtp_llm/cpp/normal_engine/NormalBatchStreamProcessor.h"
@@ -116,15 +117,8 @@ public:
                             const ProfilingDebugLoggingConfig& profiling_debug_logging_config,
                             const CacheConfig&                 cache_config,
                             const SpeculativeExecutionConfig&  sp_config,
-                            bool                               warm_up,
-                            kmonitor::MetricsReporterPtr       metrics_reporter = nullptr):
-        NormalBatchStreamProcessor(model_config,
-                                   pd_sep_config,
-                                   profiling_debug_logging_config,
-                                   cache_config,
-                                   warm_up,
-                                   0,
-                                   std::move(metrics_reporter)),
+                            bool                               warm_up):
+        NormalBatchStreamProcessor(model_config, pd_sep_config, profiling_debug_logging_config, cache_config, warm_up),
         propose_step_(sp_config.gen_num_per_cycle),
         vocab_size_(model_config.vocab_size),
         is_dspark_(sp_config.type == SP_TYPE_DSPARK),
@@ -178,10 +172,18 @@ public:
                                                       const std::vector<CacheGroupType>& group_types,
                                                       int64_t                            seq_size_per_block);
 
-    absl::StatusOr<SamplerInputs> gatherSpecSamplerInput(const StreamGroups&                         stream_groups,
-                                                         const GptModelOutputs&                      model_output,
-                                                         const SpecLogitsVerifyRunner::LaunchResult& spec_logits_result,
-                                                         const torch::Tensor& draft_token_ids) const;
+    // `draft_tokens_ready` is recorded on the main stream after the proposal
+    // that produced `draft_token_ids`. When it is supplied the token-matrix
+    // expansion runs on the copy stream, ordered by that event, and overlaps the
+    // target-verify forward. The non-DSpARK MTP path assigns its draft tokens
+    // after the forward, so it passes nullptr and expands on the main stream.
+    absl::StatusOr<SamplerInputs>
+    gatherSpecSamplerInput(const StreamGroups&                         stream_groups,
+                           const GptModelOutputs&                      model_output,
+                           const SpecLogitsVerifyRunner::LaunchResult& spec_logits_result,
+                           const torch::Tensor&                        draft_token_ids,
+                           const std::shared_ptr<torch::Event>&        draft_tokens_ready          = nullptr,
+                           bool                                        has_draft_to_target_mapping = false) const;
 
     void prepareDecodeDraftModelInput(const StreamGroups& stream_groups,
                                       GptModelInputs&     model_input,
@@ -247,7 +249,42 @@ public:
     void prepareDSparkTargetVerifyModelInput(const DSparkRoundState& round_state,
                                              GptModelInputs&         model_input,
                                              const torch::Tensor&    proposals,
-                                             TensorHolder&           host_holder);
+                                             TensorHolder&           host_holder,
+                                             torch::Tensor*          owned_proposals = nullptr);
+
+    struct DSparkPackedTargetLayout {
+        // CUDA int64 [batch + total_draft_budget], in stable request order.
+        // Undefined when the full-width dense path is retained.
+        torch::Tensor packed_to_dense;
+        // Preserve the sampler/spec-logits and next-round position contracts.
+        torch::Tensor dense_tokens;  // [batch, propose_step + 1]
+        torch::Tensor dense_position_ids;
+    };
+
+    // The round-head planner guarantees 0 <= lengths <= propose_step and
+    // sum(lengths) == total_draft_budget. The host budget fixes the output shape
+    // without reading a CUDA scalar or computing a dynamic-size nonzero.
+    DSparkPackedTargetLayout prepareDSparkPackedTargetVerifyModelInput(const DSparkRoundState& round_state,
+                                                                       GptModelInputs&         model_input,
+                                                                       const torch::Tensor&    proposals,
+                                                                       const torch::Tensor&    valid_draft_lengths,
+                                                                       int64_t                 total_draft_budget,
+                                                                       TensorHolder&           host_holder,
+                                                                       torch::Tensor* owned_proposals = nullptr);
+
+    // Plan confidence prefixes and materialize packed verification inputs
+    // together. The host-known budget fixes every output shape; the identity
+    // permutation must have been frozen before sampling this round's drafts.
+    // Unsupported CUDA geometries retain the existing planner/packing path.
+    DSparkPackedTargetLayout prepareDSparkBoundedTargetVerifyModelInput(const DSparkRoundState&     round_state,
+                                                                        GptModelInputs&             model_input,
+                                                                        const torch::Tensor&        proposals,
+                                                                        const torch::Tensor&        confidence_rates,
+                                                                        const std::vector<int64_t>& stable_order,
+                                                                        int64_t                     total_draft_budget,
+                                                                        TensorHolder&               host_holder,
+                                                                        torch::Tensor&              valid_draft_lengths,
+                                                                        torch::Tensor* owned_proposals = nullptr);
 
     // Async target preparation runs before proposal sampling completes. Build
     // its verify-width positions locally from the TP-synchronized proposal

@@ -6,6 +6,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <functional>
+#include <cstdio>
 #include <mutex>
 #include <stdexcept>
 #include <thread>
@@ -21,6 +22,9 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/LinearGroupSet.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/SWAGroupSet.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferDispatcher.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferStageTimer.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/CompletionStage.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/load/LoadTaskRunner.h"
 #include "rtp_llm/cpp/cache/FullCacheManager.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeCacheTestUtils.h"
 #include "rtp_llm/cpp/cache/MHAKVCacheSpec.h"
@@ -851,16 +855,141 @@ TEST_F(BlockTreeCacheTest, InsertHardStopReportsOnceEvenWithoutAcceptedResources
             MultiNodeResource{index, Tier::DEVICE, {{node, resource.device_blocks}}}, BlockTreeRefType::CACHE);
         resource.evictFromTier(Tier::DEVICE);
         resource.host_block = 7;
+        resource.transfer_state = GroupSetTransferState::LOAD_PENDING;
     }
 
     cache_->insert({100, 200}, {{device, device}, {device, device}}, Tier::DEVICE);
     cache_->insert({100, 200}, {{device, device}, {device, device}}, Tier::DEVICE);
 
     kmonitor::MetricsTags tags("tier", "HOST");
-    tags.AddTag("operation", "idle");
+    tags.AddTag("operation", "load");
     EXPECT_EQ(metricSeriesCount(metric), 1u);
     EXPECT_DOUBLE_EQ(snapshotQps(metric, tags), 2);
     EXPECT_TRUE(node->children.empty());
+}
+
+TEST_F(BlockTreeCacheTest, InsertReplacesIdleLowerTierFullRefillsSwaAndRefreshesCandidates) {
+    for (Tier tier : {Tier::HOST, Tier::DISK}) {
+        SCOPED_TRACE(tierName(tier));
+        auto full = std::make_shared<FullGroupSet>(
+            std::vector<DeviceBlockPoolPtr>{makeStructuralDevicePool(0)},
+            block_tree_cache_test::makeHostPool(1, 4),
+            block_tree_cache_test::makeDiskPool(1, 4, std::make_unique<block_tree_cache_test::MemoryDiskBlockIO>()));
+        auto swa = std::make_shared<SWAGroupSet>(
+            128, 64, std::vector<DeviceBlockPoolPtr>{makeStructuralDevicePool(1)}, nullptr, nullptr);
+        auto                 reporter = std::make_shared<kmonitor::MetricsReporter>("", "", kmonitor::MetricsTags{});
+        BlockTreeCacheConfig config;
+        config.enable_host_cache = true;
+        config.enable_disk_cache = true;
+        auto        cache        = makeBlockTreeCacheForTest({full, swa}, config, nullptr, nullptr, reporter);
+        IBlockPool* pool         = tier == Tier::HOST ? static_cast<IBlockPool*>(full->hostPool().get()) :
+                                                        static_cast<IBlockPool*>(full->diskPool().get());
+        const auto  old_blocks   = full->allocateBlocks(2, tier, BlockTreeRefType::STORE);
+        ASSERT_TRUE(old_blocks.has_value());
+        std::vector<std::vector<GroupSetResource>> original(2, std::vector<GroupSetResource>(2));
+        for (size_t index = 0; index < 2; ++index) {
+            original[index][0].setBlocks(tier, {(*old_blocks)[index]});
+        }
+        const auto seeded = cache->tree()->insertNode({100, 200}, original, true, false);
+        ASSERT_EQ(seeded.path.size(), 2u);
+        cache->evictor_.onInserted(seeded);
+        full->releaseBlocks(tier, *old_blocks, BlockTreeRefType::STORE);
+        EXPECT_EQ(cache->evictor_.candidateCount(0, tier), 1u);
+        auto before = cache->match({100, 200});
+        EXPECT_EQ(before.matched_device_blocks, 0u);
+        releaseRequestRefsForTest(*cache, before.matched_device_resources);
+        seeded.path[0]->group_set_resources[0].candidate_meta.tier_enter_time_us = 1;
+
+        std::vector<std::vector<GroupSetResource>> incoming(3, std::vector<GroupSetResource>(2));
+        for (size_t index = 0; index < 3; ++index) {
+            incoming[index][0].device_blocks = {static_cast<BlockIdxType>(42 + index)};
+            incoming[index][1].device_blocks = {static_cast<BlockIdxType>(52 + index)};
+        }
+        cache->insert({100, 200, 300}, incoming, Tier::DEVICE);
+
+        const auto path = cache->tree()->findNode({100, 200, 300});
+        ASSERT_EQ(path.size(), 3u);
+        EXPECT_EQ(path[0], seeded.path[0]);
+        EXPECT_EQ(path[1], seeded.path[1]);
+        for (size_t index = 0; index < path.size(); ++index) {
+            EXPECT_EQ(path[index]->group_set_resources[1].device_blocks,
+                      (BlockIndicesType{static_cast<BlockIdxType>(52 + index)}));
+        }
+        for (const auto block : *old_blocks) {
+            EXPECT_FALSE(pool->isAllocated(block));
+        }
+        EXPECT_EQ(cache->evictor_.candidateCount(0, Tier::HOST), 0u);
+        EXPECT_EQ(cache->evictor_.candidateCount(0, Tier::DISK), 0u);
+        EXPECT_EQ(cache->evictor_.candidateCount(0, Tier::DEVICE), 1u);
+        EXPECT_EQ(cache->evictor_.candidateCount(1, Tier::DEVICE), 3u);
+        EXPECT_GT(path[0]->group_set_resources[0].candidate_meta.tier_enter_time_us, 1);
+        EXPECT_EQ(metricSeriesCount(reporter->getMetricsGroup<RtpLLMCacheInsertMetrics>()->insert_hard_stop_qps_metric),
+                  0u);
+        EXPECT_EQ(BlockTreeCacheTestPeer::reclaimBlocksForTest(*cache, 1, tier), 0);
+
+        auto after = cache->match({100, 200, 300});
+        EXPECT_EQ(after.matched_device_blocks, 3u);
+        EXPECT_EQ(cache->matchedBlocksForGroup("group0", after.matched_device_resources),
+                  (BlockIndicesType{42, 43, 44}));
+        EXPECT_EQ(cache->matchedBlocksForGroup("group1", after.matched_device_resources), (BlockIndicesType{53, 54}));
+        releaseRequestRefsForTest(*cache, after.matched_device_resources);
+    }
+}
+
+TEST_F(BlockTreeCacheTest, InsertClearsOnlyReplacedFullSourceTierCandidates) {
+    auto full = std::make_shared<FullGroupSet>(
+        std::vector<DeviceBlockPoolPtr>{makeStructuralDevicePool(0)},
+        block_tree_cache_test::makeHostPool(1, 4),
+        block_tree_cache_test::makeDiskPool(1, 4, std::make_unique<block_tree_cache_test::MemoryDiskBlockIO>()));
+    auto                 swa = std::make_shared<SWAGroupSet>(128,
+                                             64,
+                                             std::vector<DeviceBlockPoolPtr>{makeStructuralDevicePool(1)},
+                                             block_tree_cache_test::makeHostPool(1, 4),
+                                             nullptr);
+    BlockTreeCacheConfig config;
+    config.enable_host_cache = true;
+    config.enable_disk_cache = true;
+    auto       cache         = makeBlockTreeCacheForTest({full, swa}, config);
+    const auto full_host     = full->allocateBlocks(2, Tier::HOST, BlockTreeRefType::STORE);
+    const auto full_disk     = full->allocateBlocks(1, Tier::DISK, BlockTreeRefType::STORE);
+    const auto swa_host      = swa->allocateBlocks(1, Tier::HOST, BlockTreeRefType::STORE);
+    ASSERT_TRUE(full_host.has_value());
+    ASSERT_TRUE(full_disk.has_value());
+    ASSERT_TRUE(swa_host.has_value());
+    std::vector<std::vector<GroupSetResource>> original(2, std::vector<GroupSetResource>(2));
+    original[0][0].host_block = (*full_host)[0];
+    original[0][1].host_block = (*swa_host)[0];
+    original[1][0].disk_block = (*full_disk)[0];
+    const auto seeded         = cache->tree()->insertNode({100, 200}, original, true, false);
+    cache->evictor_.onInserted(seeded);
+    GroupSetResource sibling_resource;
+    sibling_resource.host_block = (*full_host)[1];
+    const auto sibling          = cache->tree()->insertNode({300}, {{sibling_resource, {}}}, true, false);
+    cache->evictor_.onInserted(sibling);
+    full->releaseBlocks(Tier::HOST, *full_host, BlockTreeRefType::STORE);
+    full->releaseBlocks(Tier::DISK, *full_disk, BlockTreeRefType::STORE);
+    swa->releaseBlocks(Tier::HOST, *swa_host, BlockTreeRefType::STORE);
+    ASSERT_EQ(seeded.path.size(), 2u);
+    ASSERT_EQ(sibling.path.size(), 1u);
+    EXPECT_FALSE(seeded.path[0]->children.empty());
+    EXPECT_EQ(cache->evictor_.candidateCount(0, Tier::HOST), 2u);
+    GroupSetResource incoming_full;
+    GroupSetResource incoming_swa;
+    incoming_full.device_blocks = {42};
+    incoming_swa.device_blocks  = {52};
+
+    cache->insert({100}, {{incoming_full, incoming_swa}}, Tier::DEVICE);
+
+    EXPECT_EQ(cache->tree()->findNode({100, 200}), seeded.path);
+    EXPECT_EQ(cache->evictor_.candidateNodes(0, Tier::HOST), sibling.path);
+    EXPECT_EQ(cache->evictor_.candidateNodes(0, Tier::DISK), (std::vector<TreeNode*>{seeded.path[1]}));
+    EXPECT_EQ(cache->evictor_.candidateNodes(1, Tier::HOST), (std::vector<TreeNode*>{seeded.path[0]}));
+    EXPECT_EQ(cache->evictor_.candidateNodes(0, Tier::DEVICE), (std::vector<TreeNode*>{seeded.path[0]}));
+    EXPECT_FALSE(full->hostPool()->isAllocated((*full_host)[0]));
+    EXPECT_TRUE(full->hostPool()->isAllocated((*full_host)[1]));
+    EXPECT_TRUE(full->diskPool()->isAllocated((*full_disk)[0]));
+    EXPECT_TRUE(swa->hostPool()->isAllocated((*swa_host)[0]));
+    EXPECT_EQ(swa->devicePools()[0]->treeRefCount(52), 0u);
 }
 
 TEST(BlockTreeCacheMetricsTest, BusinessQueueWaitReportsQpsLatencyOperationAndPool) {
@@ -886,6 +1015,319 @@ TEST(BlockTreeCacheMetricsTest, BusinessQueueWaitReportsQpsLatencyOperationAndPo
     EXPECT_DOUBLE_EQ(snapshotQps(transfer_metrics->callback_queue_waiting_tasks_metric, queue_wait_tags), 1);
     EXPECT_EQ(metricSeriesCount(transfer_metrics->transfer_qps_metric), 0u);
     EXPECT_EQ(metricSeriesCount(transfer_metrics->transfer_in_flight_metric), 0u);
+}
+
+TEST(BlockTreeCacheMetricsTest, DiskLoadStagesAreTaggedAndReportedOnceWithoutChangingTransferTotals) {
+    auto metrics_reporter = std::make_shared<kmonitor::MetricsReporter>("", "", kmonitor::MetricsTags{});
+    auto reporter         = std::make_shared<BlockTreeCacheMetricsReporter>(metrics_reporter);
+    {
+        TransferStageTimer timer(reporter, "disk_read", 12345, 0, 8, 3);
+        timer.finish(true);
+        timer.finish(false);
+    }
+    reporter->flushStageMetrics();
+    auto* metrics = metrics_reporter->getMetricsGroup<RtpLLMCacheTransferMetrics>();
+    ASSERT_NE(metrics, nullptr);
+    kmonitor::MetricsTags tags("operation", "load");
+    tags.AddTag("source_tier", "DISK");
+    tags.AddTag("target_tier", "DEVICE");
+    tags.AddTag("stage", "disk_read");
+    tags.AddTag("scope", "worker_batch");
+    tags.AddTag("success", "true");
+    tags.AddTag("transfer_rank", "3");
+    EXPECT_EQ(metricSeriesCount(metrics->transfer_stage_latency_us_metric), 1u);
+    EXPECT_EQ(metricSeriesCount(metrics->transfer_stage_qps_metric), 1u);
+    EXPECT_DOUBLE_EQ(snapshotQps(metrics->transfer_stage_qps_metric, tags), 1);
+    EXPECT_GE(snapshotQps(metrics->transfer_stage_latency_us_metric, tags), 0);
+    EXPECT_EQ(metricSeriesCount(metrics->transfer_qps_metric), 0u);
+    EXPECT_EQ(metricSeriesCount(metrics->transfer_in_flight_metric), 0u);
+    reporter->reportDiskLoadStage("disk_read", -1, true);
+    EXPECT_EQ(metricSeriesCount(metrics->transfer_stage_latency_us_metric), 1u);
+    {
+        TransferStageTimer cancelled(reporter, "staging_wait", 12345, 0, 8, 3);
+        // Destruction of a cancelled/unwinding callback reports failure once.
+    }
+    reporter->flushStageMetrics();
+    tags.DelTag("stage");
+    tags.AddTag("stage", "staging_wait");
+    tags.DelTag("success");
+    tags.AddTag("success", "false");
+    EXPECT_DOUBLE_EQ(snapshotQps(metrics->transfer_stage_qps_metric, tags), 1);
+    EXPECT_GE(snapshotQps(metrics->transfer_stage_latency_us_metric, tags), 0);
+    EXPECT_EQ(metricSeriesCount(metrics->transfer_stage_qps_metric), 2u);
+}
+
+TEST(BlockTreeCacheMetricsTest, UnifiedStageLabelsDistinguishHostDiskAndStorageOperations) {
+    auto metrics_reporter = std::make_shared<kmonitor::MetricsReporter>("", "", kmonitor::MetricsTags{});
+    auto reporter         = std::make_shared<BlockTreeCacheMetricsReporter>(metrics_reporter);
+    auto session          = AsyncProfileSession::start();
+    for (const auto identity : {CacheStageContext::local(Tier::HOST, Tier::DEVICE),
+                                CacheStageContext::local(Tier::DEVICE, Tier::HOST),
+                                CacheStageContext::local(Tier::HOST, Tier::DISK),
+                                CacheStageContext::local(Tier::DISK, Tier::HOST),
+                                CacheStageContext::local(Tier::DEVICE, Tier::DISK),
+                                CacheStageContext::storage("match"),
+                                CacheStageContext::storage("read"),
+                                CacheStageContext::storage("write")}) {
+        TransferStageTimer timer(reporter, "probe", 12345, 2, 4, 3, "test", 99, identity);
+        timer.finish(false);
+        timer.finish(true);
+        reporter->flushStageMetrics();
+        kmonitor::MetricsTags tags("operation", identity.operation);
+        tags.AddTag("source_tier", identity.source);
+        tags.AddTag("target_tier", identity.target);
+        tags.AddTag("scope", "test");
+        tags.AddTag("stage", "probe");
+        tags.AddTag("success", "false");
+        tags.AddTag("transfer_rank", "3");
+        auto* metrics = metrics_reporter->getMetricsGroup<RtpLLMCacheTransferMetrics>();
+        ASSERT_NE(metrics, nullptr);
+        EXPECT_DOUBLE_EQ(snapshotQps(metrics->transfer_stage_qps_metric, tags), 1);
+        EXPECT_GE(snapshotQps(metrics->transfer_stage_latency_us_metric, tags), 0);
+        EXPECT_EQ(metricSeriesCount(metrics->transfer_qps_metric), 0u);
+    }
+    const auto events = session->finish();
+    EXPECT_EQ(events.size(), 8u);
+    for (const auto& event : events) {
+        EXPECT_EQ(event.name.find("disk_to_device"), std::string::npos);
+        EXPECT_NE(event.name.find("request_id=12345"), std::string::npos);
+    }
+}
+
+TEST(BlockTreeCacheMetricsTest, CompletionTagsPreserveWorkflowDirectionWithoutRequestCardinality) {
+    auto                          raw = std::make_shared<kmonitor::MetricsReporter>("", "", kmonitor::MetricsTags{});
+    BlockTreeCacheMetricsReporter reporter(raw, true, std::chrono::hours(1));
+    for (int request = 0; request < 2; ++request) {
+        TransferTask         task({TransferDescriptor::hostToDevice(0, 1, {2})}, std::chrono::seconds(1), request);
+        auto                 observation = CompletionStageContext::forTask(reporter, task, "load");
+        CompletionStageScope scope(observation, "completion_execute", "business_completion");
+    }
+    reporter.flushStageMetrics();
+    auto* metrics = raw->getMetricsGroup<RtpLLMCacheTransferMetrics>();
+    ASSERT_NE(metrics, nullptr);
+    kmonitor::MetricsTags tags("operation", "load");
+    tags.AddTag("source_tier", "HOST");
+    tags.AddTag("target_tier", "DEVICE");
+    tags.AddTag("scope", "business_completion");
+    tags.AddTag("stage", "completion_execute");
+    tags.AddTag("success", "true");
+    EXPECT_EQ(metricSeriesCount(metrics->transfer_stage_qps_metric), 1u);
+    EXPECT_DOUBLE_EQ(snapshotQps(metrics->transfer_stage_qps_metric, tags), 2);
+    EXPECT_EQ(metricSeriesCount(metrics->transfer_qps_metric), 0u);
+}
+
+TEST(BlockTreeCacheMetricsTest, CompletionScopeReportsUnwindingAsFailureAndMixedSourcesExplicitly) {
+    auto                          raw = std::make_shared<kmonitor::MetricsReporter>("", "", kmonitor::MetricsTags{});
+    BlockTreeCacheMetricsReporter reporter(raw, true, std::chrono::hours(1));
+    TransferTask task({TransferDescriptor::hostToDevice(0, 1, {2}), TransferDescriptor::diskToDevice(0, 3, {4})},
+                      std::chrono::seconds(1),
+                      123);
+    auto         observation = CompletionStageContext::forTask(reporter, task, "load");
+    EXPECT_STREQ(observation.identity.source, "MIXED");
+    EXPECT_STREQ(observation.identity.target, "DEVICE");
+    EXPECT_STREQ(observation.identity.path, "mixed_to_device");
+    LoadTaskRunner::Task workflow(task.descriptors(),
+                                  TransferTask({task.descriptors()[0]}, std::chrono::seconds(1), 123),
+                                  TransferTask({task.descriptors()[1]}, std::chrono::seconds(1), 123));
+    EXPECT_EQ(workflow.completionTransfer().traceId(), workflow.host_to_device_task.traceId());
+    workflow.disk_result = TransferResult(1);
+    EXPECT_EQ(workflow.completionTransfer().traceId(), workflow.disk_to_device_task.traceId());
+    try {
+        CompletionStageScope scope(observation, "completion_settle", "business_completion");
+        throw std::runtime_error("settlement failure");
+    } catch (const std::runtime_error&) {}
+    reporter.flushStageMetrics();
+    auto* metrics = raw->getMetricsGroup<RtpLLMCacheTransferMetrics>();
+    ASSERT_NE(metrics, nullptr);
+    kmonitor::MetricsTags tags("operation", "load");
+    tags.AddTag("source_tier", "MIXED");
+    tags.AddTag("target_tier", "DEVICE");
+    tags.AddTag("scope", "business_completion");
+    tags.AddTag("stage", "completion_settle");
+    tags.AddTag("success", "false");
+    EXPECT_DOUBLE_EQ(snapshotQps(metrics->transfer_stage_qps_metric, tags), 1);
+}
+
+TEST(BlockTreeCacheMetricsTest, BorrowedCompletionTimersSupportTimelineWithoutKmonitor) {
+    BlockTreeCacheMetricsReporter reporter(nullptr);
+    TransferTask                  task({TransferDescriptor::hostToDisk(0, 1, 2)}, std::chrono::seconds(1), 123);
+    auto                          observation = CompletionStageContext::forTask(reporter, task, "evict");
+    EXPECT_FALSE(observation.start("completion_total", "business_completion"));
+    auto session = AsyncProfileSession::start();
+    observation  = CompletionStageContext::forTask(reporter, task, "evict");
+    auto total   = observation.start("completion_total", "business_completion");
+    ASSERT_TRUE(total);
+    std::thread worker([observation, total] {
+        { CompletionStageScope scope(observation, "completion_execute", "business_completion"); }
+        total.finish(true);
+        total.finish(false);
+    });
+    worker.join();
+    auto events = session->finish();
+    ASSERT_EQ(events.size(), 2u);
+    for (const auto& event : events) {
+        EXPECT_NE(event.name.find("host_to_disk"), std::string::npos);
+        EXPECT_NE(event.name.find("scope=business_completion,operation=evict"), std::string::npos);
+        EXPECT_NE(event.name.find("request_id=123"), std::string::npos);
+    }
+}
+
+TEST(BlockTreeCacheMetricsTest, DisabledCompletionContextDoesNotStartPartialCapture) {
+    BlockTreeCacheMetricsReporter reporter(nullptr);
+    TransferTask task({TransferDescriptor::hostToDevice(0, 1, {2}), TransferDescriptor::diskToDevice(0, 3, {4})},
+                      std::chrono::seconds(1),
+                      123);
+    auto         disabled = CompletionStageContext::forTask(reporter, task, "load");
+    EXPECT_FALSE(disabled.enabled);
+    auto session = AsyncProfileSession::start();
+    EXPECT_FALSE(CompletionStageTimers::create(disabled));
+    { CompletionStageScope ignored(disabled, "completion_execute", "business_completion"); }
+    EXPECT_TRUE(session->finish().empty());
+}
+
+TEST(BlockTreeCacheMetricsTest, PairedCompletionTimersFinishOnceAcrossThreads) {
+    auto                          raw = std::make_shared<kmonitor::MetricsReporter>("", "", kmonitor::MetricsTags{});
+    BlockTreeCacheMetricsReporter reporter(raw, true, std::chrono::hours(1));
+    TransferTask                  task({TransferDescriptor::hostToDisk(0, 1, 2)}, std::chrono::seconds(1), 123);
+    auto                          session     = AsyncProfileSession::start();
+    auto                          observation = CompletionStageContext::forTransfer(reporter, task, "evict");
+    auto                          timers      = CompletionStageTimers::create(observation);
+    ASSERT_TRUE(timers);
+    std::thread worker([timers, observation] {
+        timers.finishQueue(true);
+        timers.finishQueue(false);
+        { CompletionStageScope execute(observation, "completion_execute", "business_completion"); }
+        timers.finish(true);
+        timers.finish(false);
+    });
+    worker.join();
+    const auto events = session->finish();
+    ASSERT_EQ(events.size(), 3u);
+    for (const auto& event : events) {
+        EXPECT_NE(event.name.find("host_to_disk"), std::string::npos);
+        EXPECT_EQ(event.name.find("incomplete=1"), std::string::npos);
+    }
+    reporter.flushStageMetrics();
+    auto*                 metrics = raw->getMetricsGroup<RtpLLMCacheTransferMetrics>();
+    kmonitor::MetricsTags tags("operation", "evict");
+    tags.AddTag("source_tier", "HOST");
+    tags.AddTag("target_tier", "DISK");
+    tags.AddTag("scope", "business_completion");
+    tags.AddTag("success", "true");
+    for (const char* stage : {"completion_total", "completion_queue_wait", "completion_execute"}) {
+        tags.AddTag("stage", stage);
+        EXPECT_DOUBLE_EQ(snapshotQps(metrics->transfer_stage_qps_metric, tags), 1);
+        tags.DelTag("stage");
+    }
+}
+
+static kmonitor::MetricsTags stageTags(int rank = -1) {
+    kmonitor::MetricsTags tags("operation", "load");
+    tags.AddTag("source_tier", "DISK");
+    tags.AddTag("target_tier", "DEVICE");
+    tags.AddTag("stage", "disk_read");
+    tags.AddTag("scope", "worker_batch");
+    tags.AddTag("success", "true");
+    if (rank >= 0)
+        tags.AddTag("transfer_rank", std::to_string(rank));
+    return tags;
+}
+
+TEST(BlockTreeCacheMetricsTest, BufferedStagesPreserveWeightedSumAndCountAcrossUnequalFlushes) {
+    auto                          raw = std::make_shared<kmonitor::MetricsReporter>("", "", kmonitor::MetricsTags{});
+    BlockTreeCacheMetricsReporter reporter(raw, true, std::chrono::hours(1));
+    auto*                         metrics = raw->getMetricsGroup<RtpLLMCacheTransferMetrics>();
+    reporter.reportDiskLoadStage("disk_read", 100, true);
+    EXPECT_EQ(metricSeriesCount(metrics->transfer_stage_qps_metric), 0u);
+    reporter.flushStageMetrics();
+    for (size_t i = 0; i < 9; ++i)
+        reporter.reportDiskLoadStage("disk_read", 10, true);
+    reporter.flushStageMetrics();
+    const auto tags = stageTags();
+    EXPECT_DOUBLE_EQ(snapshotQps(metrics->transfer_stage_qps_metric, tags), 10);
+    EXPECT_DOUBLE_EQ(snapshotQps(metrics->transfer_stage_latency_sum_us_metric, tags), 190);
+    EXPECT_EQ(metricSeriesCount(metrics->transfer_qps_metric), 0u);
+}
+
+TEST(BlockTreeCacheMetricsTest, ConcurrentStageSamplesAreReportedOrAccountedAsDropped) {
+    auto                          raw = std::make_shared<kmonitor::MetricsReporter>("", "", kmonitor::MetricsTags{});
+    BlockTreeCacheMetricsReporter reporter(raw, true, std::chrono::hours(1));
+    constexpr size_t              threads = 8, samples = 10000;
+    std::vector<std::thread>      workers;
+    for (size_t i = 0; i < threads; ++i)
+        workers.emplace_back([&] {
+            for (size_t j = 0; j < samples; ++j)
+                reporter.reportDiskLoadStage("disk_read", 7, true, 0);
+        });
+    for (auto& worker : workers)
+        worker.join();
+    reporter.flushStageMetrics();
+    auto*      metrics  = raw->getMetricsGroup<RtpLLMCacheTransferMetrics>();
+    const auto tags     = stageTags(0);
+    const auto accepted = snapshotQps(metrics->transfer_stage_qps_metric, tags);
+    EXPECT_GT(accepted, 0);
+    double dropped = 0;
+    if (metricSeriesCount(metrics->transfer_stage_dropped_qps_metric))
+        dropped = snapshotQps(metrics->transfer_stage_dropped_qps_metric, kmonitor::MetricsTags{});
+    EXPECT_DOUBLE_EQ(accepted + dropped, threads * samples);
+    EXPECT_DOUBLE_EQ(snapshotQps(metrics->transfer_stage_latency_sum_us_metric, tags), accepted * 7);
+}
+
+TEST(BlockTreeCacheMetricsTest, StageSeriesCapacityIsBoundedAndOverflowIsVisible) {
+    auto                          raw = std::make_shared<kmonitor::MetricsReporter>("", "", kmonitor::MetricsTags{});
+    BlockTreeCacheMetricsReporter reporter(raw, true, std::chrono::hours(1));
+    for (int rank = 0; rank < 600; ++rank)
+        reporter.reportDiskLoadStage("disk_read", 1, true, rank);
+    reporter.flushStageMetrics();
+    auto*      metrics  = raw->getMetricsGroup<RtpLLMCacheTransferMetrics>();
+    const auto accepted = metricSeriesCount(metrics->transfer_stage_qps_metric);
+    EXPECT_GT(accepted, 0u);
+    EXPECT_LE(accepted, 512u);
+    const auto dropped = snapshotQps(metrics->transfer_stage_dropped_qps_metric, kmonitor::MetricsTags{});
+    EXPECT_DOUBLE_EQ(accepted + dropped, 600);
+}
+
+// Measures real producer APIs. KMonitor's synchronous tag/report path is the
+// previous implementation; buffered observations use the production fast path.
+TEST(BlockTreeCacheMetricsTest, StageProducerOverheadBenchmark) {
+    for (size_t threads : {1u, 8u}) {
+        auto raw = std::make_shared<kmonitor::MetricsReporter>("", "", kmonitor::MetricsTags{});
+        BlockTreeCacheMetricsReporter reporter(raw, true, std::chrono::hours(1));
+        constexpr size_t              samples = 10000;
+        const auto                    measure = [&](bool buffered) {
+            const auto               start = std::chrono::steady_clock::now();
+            std::vector<std::thread> workers;
+            for (size_t thread = 0; thread < threads; ++thread)
+                workers.emplace_back([&, thread] {
+                    for (size_t i = 0; i < samples; ++i) {
+                        if (buffered)
+                            reporter.reportDiskLoadStage("disk_read", 7, true, thread);
+                        else {
+                            RtpLLMCacheTransferStageMetricsCollector c;
+                            c.stage      = "disk_read";
+                            c.scope      = "worker_batch";
+                            c.latency_us = 7;
+                            c.success    = true;
+                            c.rank       = thread;
+                            raw->report<RtpLLMCacheTransferMetrics, RtpLLMCacheTransferStageMetricsCollector>(nullptr,
+                                                                                                              &c);
+                        }
+                    }
+                });
+            for (auto& worker : workers)
+                worker.join();
+            return std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start)
+                       .count()
+                   / static_cast<double>(threads * samples);
+        };
+        const auto synchronous = measure(false), buffered = measure(true);
+        std::printf("CACHE_STAGE_PRODUCER_BENCH threads=%zu samples=%zu synchronous_ns=%.1f buffered_ns=%.1f\n",
+                    threads,
+                    threads * samples,
+                    synchronous,
+                    buffered);
+        reporter.flushStageMetrics();
+    }
 }
 
 TEST(BlockTreeCacheMetricsTest, TransferQueueWaitReportsLatencyAndDirection) {
@@ -1104,7 +1546,7 @@ TEST(BlockTreeCacheMetricsTest, CopyErrorMetricKeepsLegacyNameDirectionsAndDiagn
             reporter.maybeReportCopyError(descriptor.source_tier, descriptor.target_tier, {failure, error});
         }
     }
-    auto* metric = metrics_reporter->getMetricsGroup<RtpLLMCacheTransferMetrics>()->memory_cache_copy_error_qps_metric;
+    auto* metric = metrics_reporter->getMetricsGroup<RtpLLMCacheTransferMetrics>()->host_cache_copy_error_qps_metric;
     EXPECT_EQ(metric->GetMetricType(), kmonitor::QPS);
     EXPECT_EQ(metricSeriesCount(metric), 24u);
     for (const char* direction : {"TO_GPU", "FROM_GPU", "TO_DISK", "FROM_DISK"}) {
@@ -1123,7 +1565,7 @@ TEST(BlockTreeCacheMetricsTest, CopyErrorMetricKeepsLegacyNameDirectionsAndDiagn
 
 TEST(BlockTreeCacheMetricsTest, CopyErrorsAreReportedOnlyForFailedLogicalCopiesWithReporter) {
     auto  metrics_reporter = std::make_shared<kmonitor::MetricsReporter>("", "", kmonitor::MetricsTags{});
-    auto* metric = metrics_reporter->getMetricsGroup<RtpLLMCacheTransferMetrics>()->memory_cache_copy_error_qps_metric;
+    auto* metric = metrics_reporter->getMetricsGroup<RtpLLMCacheTransferMetrics>()->host_cache_copy_error_qps_metric;
     BlockTreeCacheMetricsReporter worker(nullptr);
     BlockTreeCacheMetricsReporter leader(metrics_reporter);
     const ErrorInfo               failure(ErrorCode::EXECUTION_EXCEPTION, "copy failed");
@@ -1150,7 +1592,7 @@ TEST(BlockTreeCacheMetricsTest, ConfirmedCrcErrorWinsOverOtherBatchRpcFailureOnc
         result.merge({failure, mismatch ? CacheCopyError::CRC_MISMATCH : CacheCopyError::CRC_COMPUTE_FAILED});
         reporter.maybeReportCopyError(Tier::HOST, Tier::DEVICE, result);
         auto* metric =
-            metrics_reporter->getMetricsGroup<RtpLLMCacheTransferMetrics>()->memory_cache_copy_error_qps_metric;
+            metrics_reporter->getMetricsGroup<RtpLLMCacheTransferMetrics>()->host_cache_copy_error_qps_metric;
         EXPECT_EQ(metricSeriesCount(metric), 1u);
         kmonitor::MetricsTags tags("copy_direction", "TO_GPU");
         tags.AddTag("error_type", mismatch ? "CRC_MISMATCH" : "CRC_COMPUTE_FAILED");
@@ -1321,6 +1763,12 @@ TEST_F(BlockTreeCacheTest, ForceDropTriggerQpsCountsOneSuccessfulRequest) {
     force_drop_tags.AddTag("tier", tierName(Tier::DEVICE));
     force_drop_tags.AddTag("group_type", metricCacheGroupTypeName(CacheGroupType::FULL));
     EXPECT_DOUBLE_EQ(snapshotQps(eviction_metrics->eviction_trigger_qps_metric, force_drop_tags), 1);
+    kmonitor::MetricsTags required_tags = force_drop_tags;
+    required_tags.AddTag("block_type", "required");
+    kmonitor::MetricsTags scheduled_tags = force_drop_tags;
+    scheduled_tags.AddTag("block_type", "scheduled");
+    EXPECT_DOUBLE_EQ(snapshotQps(eviction_metrics->eviction_blocks_count_metric, required_tags), 2);
+    EXPECT_DOUBLE_EQ(snapshotQps(eviction_metrics->eviction_blocks_count_metric, scheduled_tags), 2);
     kmonitor::MetricsTags lifetime_tags("tier", tierName(Tier::DEVICE));
     lifetime_tags.AddTag("trigger_type", "force_drop");
     lifetime_tags.AddTag("group_type", metricCacheGroupTypeName(CacheGroupType::FULL));
@@ -1925,7 +2373,7 @@ TEST_F(BlockTreeCacheTest, ForceDropRequiresEveryDevicePoolMemberToBeReclaimable
     }
 }
 
-TEST_F(BlockTreeCacheTest, ForceDropPreservesRequestHeldCascadeResource) {
+TEST_F(BlockTreeCacheTest, FullForceDropKeepsRequestHeldCascadePhysicallyAlive) {
     const std::vector<DeviceBlockPoolPtr> pools = {makeStructuralDevicePool(0), makeStructuralDevicePool(1)};
     std::vector<GroupSetPtr> groups;
     for (const auto& pool : pools) {
@@ -1941,14 +2389,16 @@ TEST_F(BlockTreeCacheTest, ForceDropPreservesRequestHeldCascadeResource) {
     cache->insert({100}, resources, Tier::DEVICE);
 
     const size_t initial_free = pools[0]->freeBlocksNum();
-    EXPECT_EQ(cache->evictForGroup("group0", 1), 0);
-    EXPECT_EQ(pools[0]->freeBlocksNum(), initial_free);
-    EXPECT_EQ(pools[0]->refCount(42), 1u);
-    EXPECT_EQ(pools[1]->refCount(42), 2u);
-    EXPECT_FALSE(cache->tree()->findNode({100}).empty());
+    EXPECT_EQ(cache->evictForGroup("group0", 1), 1);
+    EXPECT_EQ(pools[0]->freeBlocksNum(), initial_free + 1);
+    EXPECT_FALSE(pools[0]->isAllocated(42));
+    EXPECT_TRUE(pools[1]->isAllocated(42));
+    EXPECT_EQ(pools[1]->refCount(42), 1u);
+    EXPECT_EQ(pools[1]->treeRefCount(42), 0u);
+    EXPECT_TRUE(cache->tree()->findNode({100}).empty());
 
     pools[1]->decRef(42);
-    EXPECT_EQ(cache->evictForGroup("group0", 1), 1);
+    EXPECT_EQ(cache->evictForGroup("group0", 1), 0);
     EXPECT_FALSE(pools[0]->isAllocated(42));
     EXPECT_FALSE(pools[1]->isAllocated(42));
     EXPECT_TRUE(cache->tree()->findNode({100}).empty());
@@ -3792,7 +4242,8 @@ TEST_F(BlockTreeCacheTest, EventPublicationTracksInsertDuplicateAndRealEviction)
     resources[0][0].device_blocks = {42};
     resources[1][0].device_blocks = {43};
     cache_->insert({100, 200}, resources, Tier::DEVICE);
-    EXPECT_EQ(cache_->logicalCacheSnapshot().block_groups, (std::map<int64_t, std::vector<size_t>>{{100, {0}}, {200, {0}}}));
+    EXPECT_EQ(cache_->logicalCacheSnapshot().block_groups,
+              (std::map<int64_t, std::vector<size_t>>{{100, {0}}, {200, {0}}}));
     const auto version = cache_->logicalCacheSnapshot().version;
     cache_->insert({100, 200}, resources, Tier::DEVICE);
     EXPECT_EQ(cache_->logicalCacheSnapshot().version, version);

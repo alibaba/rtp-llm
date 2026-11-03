@@ -331,7 +331,6 @@ class EPLBConfig:
     eplb_rearrange_p2p_groups: int
     eplb_metrics_report_interval: int
     eplb_metrics_snapshot_max_files: int
-    eplb_control_step: int
     eplb_stats_window_size: int
     eplb_update_time: int
     redundant_expert: int
@@ -756,9 +755,17 @@ class KVCacheConfig:
     block_tree_memory_evict_high_watermark_ratio: float
     block_tree_disk_evict_low_watermark_ratio: float
     block_tree_disk_evict_high_watermark_ratio: float
+    block_tree_full_device_evict_low_watermark_ratio: float
+    block_tree_full_device_evict_high_watermark_ratio: float
+    block_tree_full_memory_evict_low_watermark_ratio: float
+    block_tree_full_memory_evict_high_watermark_ratio: float
+    block_tree_full_disk_evict_low_watermark_ratio: float
+    block_tree_full_disk_evict_high_watermark_ratio: float
     fp8_kv_cache: int
     kv_cache_mem_mb: int
-    linear_step: int
+    reuse_cache_tail_blocks: int
+    linear_pool_blocks: int
+    swa_pool_blocks: int
     max_block_size_per_item: int
     memory_cache_size_mb: int
     memory_cache_swa_block_ratio: float
@@ -794,6 +801,7 @@ class KVCacheConfig:
     kvcm_server_address: str
     kvcm_storage_queue_size: int
     kvcm_storage_thread_num: int
+    kvcm_task_timeout_ms: int
     kvcm_vipserver_domain: str
     # Legacy aliases of the canonical KVCM members.
     reco_asyncwrapper_queue_size: int
@@ -1723,6 +1731,11 @@ class SpeculativeExecutionConfig:
     sp_max_token_match: int
     sp_min_token_match: int
     tree_decode_config: str
+    sp_dspark_confidence_mode: str
+    sp_dspark_confidence_temperature: float
+    sp_dspark_verify_budget: int
+    sp_dspark_verify_mode: str
+    sp_dspark_verify_budget_mode: str
     def __getstate__(self) -> tuple:
         ...
     def __init__(self) -> None:

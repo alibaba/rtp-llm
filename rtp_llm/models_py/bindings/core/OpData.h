@@ -106,6 +106,9 @@ struct GptModelInputs {
     // So, the model has different inference logic for target verify and normal inference.
     // To select correct inference mode, we need to set this flag manually.
     bool is_target_verify = false;
+    // V4.1 bounded verification uses packed query rows with ragged request
+    // lengths. Independent of is_target_verify, which also classifies proposal.
+    bool is_packed_target_verify = false;
 
     // not sync to other tp rank
     std::vector<std::string> trace_ids;
@@ -131,6 +134,11 @@ struct GptModelOutputs {
     // real graph-instance output from the ordinary decoder hidden tensor.
     torch::Tensor mtp_target_hidden_states;
 
+    // Optional V4.1 confidence-head hidden contribution, CUDA FP32 [B*gamma, 1].
+    // Owned by this forward result; the sampler adds the previous-token Markov
+    // contribution. Undefined for disabled confidence and non-proposal roles.
+    torch::Tensor dspark_confidence_hidden_logits;
+
     // A single request-visible status. `REPLAYED` means this forward actually
     // executed a captured generation-prefill CUDA Graph; every other non-default value is
     // the readable fallback reason returned through AuxInfo.
@@ -140,6 +148,10 @@ struct GptModelOutputs {
     torch::Tensor custom_output;
     // The dispatcher turns handler failures into per-stream execution errors.
     std::string custom_output_error;
+    // Producer-ordering proof, not a host completion timestamp. For CP this
+    // means the returned output depends on the existing post-model collective
+    // on every rank. A consumer must still complete its output stream.
+    bool context_kv_has_rank_completion_dependency = false;
 };
 
 struct CopyParams {
@@ -280,6 +292,8 @@ struct GreedySamplingBuffers {
     torch::Tensor offset_host;
     torch::Tensor output_ids_ptrs_host;
     size_t        max_batch_size = 0;
+    torch::Tensor seed_device;
+    torch::Tensor offset_device;
 };
 
 struct GreedyParams {
@@ -321,8 +335,9 @@ struct GreedyParams {
     // the fused greedy top-1 path may then skip materializing the one-hot
     // [batch, vocab] matrix and only write the token. Default false keeps
     // the legacy fully-materialized all_probs contract for every caller.
-    bool all_probs_point_mass = false;
-    int  force_topk           = 0;
+    bool                         all_probs_point_mass = false;
+    int                          force_topk           = 0;
+    std::optional<torch::Tensor> output_all_probs_indices;
 };
 
 struct GreedyOutput {
@@ -422,6 +437,16 @@ struct RejectionSamplingParams {
     // only; query execRejectionSamplingSupportsFinalize() before setting —
     // ROCm/generic reject the flag loudly and keep the legacy eager chain.
     bool finalize_outputs = false;
+    // Optional contiguous CUDA int32 [batch], each in [0, num_speculative_tokens].
+    // Only this prefix participates in rejection; all accepted uses target row
+    // L as bonus (including L=0). Undefined preserves the full-width path.
+    // CUDA only: other backends must reject a defined tensor explicitly.
+    torch::Tensor valid_draft_lengths_d;
+    // Optional DSpARK compact probabilities. Target indices are original
+    // vocabulary IDs [B, steps+1, K]; draft indices are [B, steps, K].
+    // When draft indices are absent, draft_probs_d is dense [B, steps, V].
+    torch::Tensor draft_probs_indices_d;
+    torch::Tensor target_probs_indices_d;
 };
 
 // One DSpARK draft step's fused distribution build:

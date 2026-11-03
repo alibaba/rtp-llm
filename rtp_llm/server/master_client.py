@@ -24,6 +24,7 @@ from rtp_llm.cpp.model_rpc.proto.flexlb_schedule_service_pb2 import (
     CANCEL_REASON_DEADLINE_EXCEEDED,
     FlexlbCancelRequestPB,
     FlexlbScheduleRequestPB,
+    FlexlbScheduleResponsePB,
 )
 from rtp_llm.cpp.model_rpc.proto.flexlb_schedule_service_pb2_grpc import (
     FlexlbServiceStub,
@@ -200,11 +201,6 @@ class MasterClient:
             )
         return self._channels[target]
 
-    async def _close_channel(self, target: str) -> None:
-        channel = self._channels.pop(target, None)
-        if channel is not None:
-            await channel.close()
-
     async def close(self) -> None:
         for channel in self._channels.values():
             await channel.close()
@@ -220,8 +216,8 @@ class MasterClient:
         request_pb: "FlexlbScheduleRequestPB",
         timeout_s: Optional[float],
         request_id: int,
-    ):
-        """Send gRPC schedule request. Returns proto response on success, None on transport failure."""
+    ) -> Optional[FlexlbScheduleResponsePB]:
+        """Return the RPC response or None; raise on deadline or cancellation."""
         target = self._get_grpc_target(addr)
         start = time.time()
         trace_metadata = []
@@ -300,7 +296,6 @@ class MasterClient:
                     exception_type=ExceptionType.DEADLINE_EXCEEDED,
                     message=f"FlexLB schedule deadline exceeded for request {request_id}",
                 ) from e
-            await self._close_channel(target)
             return None
         except asyncio.CancelledError:
             if "stub" in locals() and not request_pb.vit_route_only:
@@ -316,7 +311,6 @@ class MasterClient:
                 request_id,
                 elapsed,
             )
-            await self._close_channel(target)
             return None
 
     @staticmethod

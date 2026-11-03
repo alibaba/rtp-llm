@@ -8,9 +8,7 @@ NormalBatchStreamProcessor::NormalBatchStreamProcessor(
     const ProfilingDebugLoggingConfig& profiling_debug_logging_config,
     const CacheConfig&                 cache_config,
     bool                               warm_up,
-    int                                async_worker_count,
-    kmonitor::MetricsReporterPtr       metrics_reporter):
-    metrics_reporter_(std::move(metrics_reporter)) {
+    int                                async_worker_count) {
     model_input_gatherer_config_.num_layers              = model_config.num_layers;
     model_input_gatherer_config_.vocab_size              = model_config.vocab_size;
     model_input_gatherer_config_.input_vocab_size        = model_config.input_vocab_size;
@@ -57,28 +55,32 @@ NormalBatchStreamProcessor::NormalBatchStreamProcessor(
 
 absl::Status NormalBatchStreamProcessor::dispatch(const StreamGroups& stream_groups,
                                                   const MergedOutput& merge_outputs) const {
-    return output_dispatcher_->dispatch(stream_groups, merge_outputs, metrics_reporter_);
+    return output_dispatcher_->dispatch(stream_groups, merge_outputs);
 }
 
 absl::Status NormalBatchStreamProcessor::dispatchPrefillOnly(
-    const StreamGroups& stream_groups, GenerationPrefillCudaGraphStatus generation_prefill_cuda_graph_status) const {
+    const StreamGroups&                                   stream_groups,
+    GenerationPrefillCudaGraphStatus                      generation_prefill_cuda_graph_status,
+    std::optional<RemoteRestoreTiming::Clock::time_point> context_kv_all_rank_gpu_ready_at) const {
     for (const auto& stream : stream_groups.allStreams()) {
         auto empty_token_ids = torch::empty({stream->currentBatchSize(), 0}, torch::kInt32);
-        stream->update({empty_token_ids,
-                        /*num_new_tokens=*/0,
-                        /*hidden_states=*/torch::Tensor(),
-                        /*logits=*/torch::Tensor(),
-                        /*softmax_probs=*/torch::Tensor(),
-                        /*cum_log_probs=*/torch::Tensor(),
-                        /*all_probs=*/torch::Tensor(),
-                        /*loss=*/torch::Tensor(),
-                        /*src_batch_indices=*/torch::Tensor(),
-                        /*all_hidden_states=*/torch::Tensor(),
-                        /*update_remote_generate=*/false,
-                        /*force_update_info=*/false,
-                        /*prompt_logits=*/std::nullopt,
-                        /*error_info=*/std::nullopt,
-                        generation_prefill_cuda_graph_status});
+        StreamUpdateInfo update_info{empty_token_ids,
+                                     /*num_new_tokens=*/0,
+                                     /*hidden_states=*/torch::Tensor(),
+                                     /*logits=*/torch::Tensor(),
+                                     /*softmax_probs=*/torch::Tensor(),
+                                     /*cum_log_probs=*/torch::Tensor(),
+                                     /*all_probs=*/torch::Tensor(),
+                                     /*loss=*/torch::Tensor(),
+                                     /*src_batch_indices=*/torch::Tensor(),
+                                     /*all_hidden_states=*/torch::Tensor(),
+                                     /*update_remote_generate=*/false,
+                                     /*force_update_info=*/false,
+                                     /*prompt_logits=*/std::nullopt,
+                                     /*error_info=*/std::nullopt,
+                                     generation_prefill_cuda_graph_status};
+        update_info.context_kv_all_rank_gpu_ready_at = context_kv_all_rank_gpu_ready_at;
+        stream->update(update_info);
     }
     return absl::OkStatus();
 }
@@ -101,9 +103,10 @@ absl::StatusOr<torch::Tensor> NormalBatchStreamProcessor::gatherKvCacheKernelBlo
 SamplerInputs NormalBatchStreamProcessor::allocateSamplerInputs(const StreamGroups& stream_groups,
                                                                 size_t              total_batch_size_in,
                                                                 size_t              total_batch_size_out,
-                                                                size_t              propose_step) const {
+                                                                size_t              propose_step,
+                                                                bool                materialize_host_token_ids) const {
     return sampler_input_gatherer_->allocateSamplerInputs(
-        stream_groups, total_batch_size_in, total_batch_size_out, propose_step);
+        stream_groups, total_batch_size_in, total_batch_size_out, propose_step, materialize_host_token_ids);
 }
 
 void NormalBatchStreamProcessor::fillSamplerCommonInputs(SamplerInputs&                sampler_inputs,

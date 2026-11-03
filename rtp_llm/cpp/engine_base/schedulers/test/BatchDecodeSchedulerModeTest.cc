@@ -3,6 +3,7 @@
 #include <future>
 #include <stdexcept>
 #include <thread>
+#include "autil/EnvUtil.h"
 #include "gtest/gtest.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/load/LoadAsyncContext.h"
 #include "rtp_llm/cpp/engine_base/stream/StreamCacheResource.h"
@@ -177,7 +178,8 @@ TEST(BatchDecodeSchedulerStopTest, RejectedEnqueueAndGroupAreAlreadyTerminal) {
 }
 
 TEST(BatchDecodeSchedulerStopTest, IdleScheduleWakesOnStop) {
-    RuntimeConfig runtime;
+    autil::EnvGuard restore_env("RTP_LLM_SCHEDULER_POLL_INTERVAL_MS", "60000");
+    RuntimeConfig   runtime;
     runtime.batch_decode_scheduler_config.batch_decode_scheduler_batch_size = 1;
     BatchDecodeScheduler scheduler(runtime, nullptr, nullptr);
     std::promise<void>   entering;
@@ -194,6 +196,54 @@ TEST(BatchDecodeSchedulerStopTest, IdleScheduleWakesOnStop) {
     ASSERT_TRUE(result.ok());
     EXPECT_TRUE(result->empty());
     EXPECT_TRUE(scheduler.finalizeStop().ok());
+}
+
+TEST(BatchDecodeSchedulerModeTest, IdlePollReturnsWithoutAdmittingAnIncompleteBatch) {
+    autil::EnvGuard restore_env("RTP_LLM_SCHEDULER_POLL_INTERVAL_MS", "20");
+    for (const int pending_count : {0, 1}) {
+        SCOPED_TRACE(pending_count);
+        RuntimeConfig runtime;
+        runtime.batch_decode_scheduler_config.batch_decode_scheduler_batch_size = 2;
+        BatchDecodeScheduler scheduler(runtime, nullptr, nullptr);
+        GenerateStreamPtr    pending;
+        if (pending_count > 0) {
+            pending = makeShutdownStream();
+            ASSERT_TRUE(scheduler.enqueue(pending).ok());
+        }
+        for (int round = 0; round < 2; ++round) {
+            SCOPED_TRACE(round);
+            auto       elapsed   = std::chrono::steady_clock::duration::zero();
+            auto       scheduled = std::async(std::launch::async, [&] {
+                const auto started = std::chrono::steady_clock::now();
+                auto       result  = scheduler.schedule();
+                elapsed            = std::chrono::steady_clock::now() - started;
+                return result;
+            });
+            const bool returned  = scheduled.wait_for(std::chrono::seconds(2)) == std::future_status::ready;
+            EXPECT_TRUE(returned) << "idle schedule must return for engine collective alignment without stop";
+            if (!returned) {
+                // The old 30s wait must fail promptly without stranding a worker.
+                EXPECT_TRUE(scheduler.stop().ok());
+            }
+            auto result = scheduled.get();
+            ASSERT_TRUE(result.ok());
+            EXPECT_TRUE(result->empty());
+            EXPECT_TRUE(scheduler.running_streams_.empty());
+            EXPECT_EQ(scheduler.waiting_streams_.size(), pending_count);
+            if (!returned) {
+                break;
+            }
+            EXPECT_GE(elapsed, std::chrono::milliseconds(15));
+            EXPECT_FALSE(scheduler.stop_requested_.load());
+            if (pending) {
+                EXPECT_EQ(pending->getStatus(), StreamState::WAITING);
+                EXPECT_FALSE(pending->hasEvent(StreamEvents::CanRun));
+                EXPECT_FALSE(pending->hasError());
+            }
+        }
+        EXPECT_TRUE(scheduler.stop().ok());
+        EXPECT_TRUE(scheduler.finalizeStop().ok());
+    }
 }
 
 TEST(BatchDecodeSchedulerStopTest, StopDuringLoadingKeepsEverySelectedStreamForFinalize) {

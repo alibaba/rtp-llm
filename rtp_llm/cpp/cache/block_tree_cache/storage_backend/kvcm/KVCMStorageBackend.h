@@ -1,6 +1,9 @@
 #pragma once
 
 #include <memory>
+#include <optional>
+#include <string>
+#include <vector>
 
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/StorageBackend.h"
@@ -23,7 +26,7 @@ class ClientWrapper;
 // KVCM adapter for the BlockTree remote tier. Metadata operations are owned by
 // rank 0; payload copies are broadcast to the per-rank adapters so every
 // process transfers its own GPU blocks through its locally registered client.
-class KVCMStorageBackend final: public StorageBackend {
+class KVCMStorageBackend: public StorageBackend {
 public:
     KVCMStorageBackend(const CacheConfig&                            cache_config,
                        const KVCacheConfig&                          kv_cache_config,
@@ -36,9 +39,25 @@ public:
                        std::shared_ptr<kvcm::ClientWrapper>          client_wrapper = nullptr);
     ~KVCMStorageBackend() override;
 
+    struct ControlConfig {
+        std::string              instance_group;
+        std::string              instance_id;
+        std::string              register_instance_request;
+        bool                     enable_vipserver = false;
+        std::string              vipserver_domain;
+        std::vector<std::string> addresses;
+    };
+    // Immutable snapshot of the effective SDK registration, available after init.
+    std::optional<ControlConfig> controlConfig() const;
+
     // Returns whether the request was handled and response is valid. Transfer
     // success, failure, and timeout are carried by response.transfer_status().
     bool execute(const RemoteOperationRequestPB& request, RemoteOperationResponsePB& response);
+
+    // Optional EOS publication; true means handled/skipped, not committed.
+    bool captureCompletedDecode(const BatchKVCacheResource& resource,
+                                size_t computed_end,
+                                bool finished = true) override;
 
 protected:
     bool               initImpl() override;
@@ -46,6 +65,10 @@ protected:
     void readImpl(const StorageRequest& request, const std::shared_ptr<StorageBackendMatchMeta>& match_meta) override;
     void writeImpl(const StorageRequest& request) override;
     void shutdownImpl() noexcept override;
+    void onRemoteCacheSkipped(const char* stage) noexcept override;
+    bool protectUnknownCompletion() const noexcept override;
+    std::shared_ptr<void> completionResourceOwner() const override;
+    bool hasUnresolvedExternalIo() const noexcept override;
     void onQuarantined(bool is_write, StorageQuarantineReason reason, size_t block_count) noexcept override;
     void onQuarantineChanged(uint64_t                          generation,
                              size_t                            task_count,

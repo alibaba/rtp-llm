@@ -20,7 +20,15 @@ std::string getBitHashStr(uint64_t bithash, size_t width = 64) {
 
 }  // namespace
 
-std::string genLocationSpecName(int tp_rank, const std::string& group_name, const std::string& model_name) {
+std::string genLocationSpecName(int                tp_rank,
+                                const std::string& group_name,
+                                const std::string& model_name,
+                                bool               merge_full) {
+    if (merge_full && model_name == "DeepSeekV41"
+        && (group_name == "Fglobal_kv_1" || group_name == "Fhca_kv" || group_name == "Fglobal_kv_2"
+            || group_name == "Fcsa_kv" || group_name == "Findexer_kv")) {
+        return "F_TP" + std::to_string(tp_rank);
+    }
     const bool legacy_dsv41_specs = model_name == "DeepSeekV41" || model_name == "DeepSeekV41DSpark";
     if (group_name == "Fglobal_kv_1" || (legacy_dsv41_specs && group_name == "Fhca_kv")) {
         return "F0_TP" + std::to_string(tp_rank);
@@ -42,7 +50,8 @@ std::string genLocationSpecName(int tp_rank, const std::string& group_name, cons
 
 bool GroupPolicy::buildLocationSpecGroups(int                 tp_size,
                                           LocationSpecGroups& location_spec_groups,
-                                          const std::string&  model_name) {
+                                          const std::string&  model_name,
+                                          bool                merge_full) {
     if (tp_size <= 0 || groups_.empty()) {
         RTP_LLM_LOG_ERROR("cannot build KVCM location groups: tp_size=%d groups=%zu", tp_size, groups_.size());
         return false;
@@ -50,23 +59,43 @@ bool GroupPolicy::buildLocationSpecGroups(int                 tp_size,
     LocationSpecGroups                        new_location_spec_groups;
     std::unordered_map<uint64_t, std::string> new_location_spec_group_map;
     SpecInfoMap                               new_spec_name_to_info;
+    std::vector<std::string>                  compound_group_names;
+    uint64_t                                  compound_mask = 0;
     for (const auto& [group_id, group] : groups_) {
         auto [group_it, inserted] = new_location_spec_groups.emplace(group.group_name, std::vector<std::string>{});
         if (!inserted) {
             RTP_LLM_LOG_ERROR("duplicate KVCM singleton location group [%s]", group.group_name.c_str());
             return false;
         }
-        new_location_spec_group_map[group.group_name_bithash] = group.group_name;
+        const bool compound_member = genLocationSpecName(0, group.group_name, model_name, merge_full)
+                                     != genLocationSpecName(0, group.group_name, model_name);
+        if (compound_member) {
+            // The caller validates the three compatible FULL groups before enabling merge_full.
+            compound_group_names.push_back(group.group_name);
+            compound_mask |= group.group_name_bithash;
+        } else {
+            new_location_spec_group_map[group.group_name_bithash] = group.group_name;
+        }
         for (int rank = 0; rank < tp_size; ++rank) {
-            const std::string spec_name = genLocationSpecName(rank, group.group_name, model_name);
+            const std::string spec_name = genLocationSpecName(rank, group.group_name, model_name, merge_full);
             group_it->second.push_back(spec_name);
-            const auto [unused_it, spec_inserted] =
-                new_spec_name_to_info.emplace(spec_name, SpecInfo{group_id, rank, group.tag});
-            (void)unused_it;
+            const auto [spec_it, spec_inserted] =
+                new_spec_name_to_info.emplace(spec_name, SpecInfo{group_id, rank, group.tag, {group_id}});
             if (!spec_inserted) {
-                RTP_LLM_LOG_ERROR("duplicate KVCM location spec [%s]", spec_name.c_str());
-                return false;
+                if (!compound_member) {
+                    RTP_LLM_LOG_ERROR("duplicate KVCM location spec [%s]", spec_name.c_str());
+                    return false;
+                }
+                spec_it->second.group_ids.push_back(group_id);
             }
+        }
+    }
+    for (auto& [name, info] : new_spec_name_to_info) {
+        (void)name;
+        if (info.group_ids.size() > 1) {
+            std::sort(info.group_ids.begin(), info.group_ids.end(), [&](int32_t lhs, int32_t rhs) {
+                return groups_.at(lhs).group_name < groups_.at(rhs).group_name;
+            });
         }
     }
 
@@ -81,7 +110,8 @@ bool GroupPolicy::buildLocationSpecGroups(int                 tp_size,
             matched_mask |= group.group_name_bithash;
             selected_groups.emplace_back(group.group_name, new_location_spec_groups.at(group.group_name));
         }
-        if (aggregate_mask == 0 || matched_mask != aggregate_mask) {
+        if (aggregate_mask == 0 || matched_mask != aggregate_mask
+            || ((aggregate_mask & compound_mask) != 0 && (aggregate_mask & compound_mask) != compound_mask)) {
             RTP_LLM_LOG_ERROR("invalid KVCM aggregate mask [%lu], matched [%lu]", aggregate_mask, matched_mask);
             return false;
         }
@@ -90,7 +120,11 @@ bool GroupPolicy::buildLocationSpecGroups(int                 tp_size,
         std::vector<std::string> aggregate_specs;
         for (const auto& [group_name, singleton_specs] : selected_groups) {
             aggregate_name += group_name;
-            aggregate_specs.insert(aggregate_specs.end(), singleton_specs.begin(), singleton_specs.end());
+            for (const auto& spec_name : singleton_specs) {
+                if (std::find(aggregate_specs.begin(), aggregate_specs.end(), spec_name) == aggregate_specs.end()) {
+                    aggregate_specs.push_back(spec_name);
+                }
+            }
         }
         new_location_spec_group_map[aggregate_mask] = aggregate_name;
         const auto [unused_it, inserted] =
@@ -101,6 +135,9 @@ bool GroupPolicy::buildLocationSpecGroups(int                 tp_size,
             RTP_LLM_LOG_ERROR("duplicate KVCM aggregate location group");
             return false;
         }
+    }
+    for (const auto& group_name : compound_group_names) {
+        new_location_spec_groups.erase(group_name);
     }
     location_spec_group_map_ = std::move(new_location_spec_group_map);
     spec_name_to_info_       = std::move(new_spec_name_to_info);
@@ -184,7 +221,11 @@ std::string GroupPolicy::debugString() const {
     for (const auto& entry : spec_name_to_info_) {
         const auto& spec_info = entry.second;
         debug_ss << '\t' << entry.first << ":[" << spec_info.tag << "|" << spec_info.group_id << "|"
-                 << spec_info.tp_rank << "]\n";
+                 << spec_info.tp_rank << "|members=";
+        for (const auto group_id : spec_info.group_ids) {
+            debug_ss << group_id << ',';
+        }
+        debug_ss << "]\n";
     }
     return debug_ss.str();
 }
@@ -526,9 +567,7 @@ bool FullOtherGroupPolicy::getNeedWriteGroups(const StorageRequest&     request,
                             request.keys->size(),
                             request.handles.size());
     location_spec_group_names.resize(valid_keys_size);
-    bool   exist_full_other  = false;
-    size_t count             = write_interval_;
-    bool   is_all_full_other = true;
+    bool is_all_full_other = true;
     for (size_t key_idx = valid_keys_size; key_idx-- > 0;) {
         uint64_t groups_name_bithash = 0;
         for (const auto& handle : request.handles[key_idx]) {
@@ -546,22 +585,7 @@ bool FullOtherGroupPolicy::getNeedWriteGroups(const StorageRequest&     request,
             RTP_LLM_LOG_WARNING("invalid hybrid remote group mask [%lu]", groups_name_bithash);
             return false;
         }
-        if (write_interval_ > 0) {
-            ++count;
-            const bool need_full_other = groups_name_bithash == valid_full_other_bithash_ && count >= write_interval_;
-            if (need_full_other) {
-                groups_name_bithash = valid_full_other_bithash_;
-                count               = 0;
-            } else {
-                groups_name_bithash = valid_full_bithash_;
-                is_all_full_other   = false;
-            }
-        } else if (!exist_full_other && groups_name_bithash == valid_full_other_bithash_) {
-            exist_full_other = true;
-        } else {
-            groups_name_bithash = valid_full_bithash_;
-            is_all_full_other   = false;
-        }
+        is_all_full_other                  = is_all_full_other && groups_name_bithash == valid_full_other_bithash_;
         location_spec_group_names[key_idx] = location_spec_group_map_.at(groups_name_bithash);
     }
     if (is_all_full_other) {
@@ -631,7 +655,6 @@ std::string FullOtherGroupPolicy::debugString() const {
     size_t            gs = groups_.size();
     std::stringstream debug_ss;
     debug_ss << DefaultLayerGroupPolicy::debugString();
-    debug_ss << "write_interval : " << write_interval_ << '\n';
     debug_ss << "valid_full_bithash : " << getBitHashStr(valid_full_bithash_, gs) << '\n';
     debug_ss << "valid_full_other_bithash : " << getBitHashStr(valid_full_other_bithash_, gs) << '\n';
     debug_ss << "full_spec_names : ";

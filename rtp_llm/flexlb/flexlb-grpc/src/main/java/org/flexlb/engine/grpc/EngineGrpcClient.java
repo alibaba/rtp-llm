@@ -39,6 +39,10 @@ public class EngineGrpcClient extends AbstractGrpcClient {
     private static final int DEFAULT_CONNECT_TIMEOUT_MILLIS = 20;
     public static final String CONNECT_TIMEOUT_PROPERTY =
             "flexlb.engine-grpc.connect-timeout-ms";
+    public static final String KEEP_ALIVE_TIME_PROPERTY = "flexlb.engine-grpc.keep-alive-time-ms";
+    public static final String KEEP_ALIVE_WITHOUT_CALLS_PROPERTY = "flexlb.engine-grpc.keep-alive-without-calls";
+    private static final long DEFAULT_KEEP_ALIVE_TIME_MILLIS = 2_000L;
+    private static final boolean DEFAULT_KEEP_ALIVE_WITHOUT_CALLS = true;
     public static final String VIT_CACHE_MAX_INBOUND_MESSAGE_BYTES_PROPERTY =
             "flexlb.engine-grpc.vit-cache-max-inbound-message-bytes";
     private static final int DEFAULT_MAX_INBOUND_MESSAGE_BYTES = 8 * 1024 * 1024;
@@ -47,6 +51,14 @@ public class EngineGrpcClient extends AbstractGrpcClient {
     @Value("${" + VIT_CACHE_MAX_INBOUND_MESSAGE_BYTES_PROPERTY + ":"
             + DEFAULT_VIT_CACHE_MAX_INBOUND_MESSAGE_BYTES + "}")
     private int vitCacheMaxInboundMessageBytes = DEFAULT_VIT_CACHE_MAX_INBOUND_MESSAGE_BYTES;
+
+    private org.flexlb.config.FlexlbConfig.EngineGrpcConfig engineGrpcConfig =
+            new org.flexlb.config.FlexlbConfig.EngineGrpcConfig();
+
+    @Autowired
+    public void configureEngineGrpc(org.flexlb.config.ConfigService configService) {
+        engineGrpcConfig = configService.loadBalanceConfig().getEngineGrpc();
+    }
 
     @Getter
     private final Executor executor;
@@ -57,6 +69,10 @@ public class EngineGrpcClient extends AbstractGrpcClient {
     private static final long DEFAULT_ENQUEUE_TIMEOUT_MILLIS = 5000L;
     private final int connectTimeoutMillis;
     private final long enqueueTimeoutMillis;
+    @Getter
+    private final long keepAliveTimeMillis;
+    @Getter
+    private final boolean keepAliveWithoutCalls;
 
     private enum MetricOperation { CALL_METRICS, CONNECTION_DURATION, CALL_FAILURE, DELIVERY_DELAY }
     private final GrpcTransportObserver transportObserver = new GrpcTransportObserver();
@@ -74,7 +90,13 @@ public class EngineGrpcClient extends AbstractGrpcClient {
                             int connectTimeoutMillis,
                             @Value("${" + ENQUEUE_TIMEOUT_PROPERTY + ":"
                                     + DEFAULT_ENQUEUE_TIMEOUT_MILLIS + "}")
-                            long enqueueTimeoutMillis) {
+                            long enqueueTimeoutMillis,
+                            @Value("${" + KEEP_ALIVE_TIME_PROPERTY + ":"
+                                    + DEFAULT_KEEP_ALIVE_TIME_MILLIS + "}")
+                            long keepAliveTimeMillis,
+                            @Value("${" + KEEP_ALIVE_WITHOUT_CALLS_PROPERTY + ":"
+                                    + DEFAULT_KEEP_ALIVE_WITHOUT_CALLS + "}")
+                            boolean keepAliveWithoutCalls) {
         super(grpcReporter);
         if (enqueueTimeoutMillis <= 0L) {
             throw new IllegalArgumentException("enqueueTimeoutMillis must be positive");
@@ -84,10 +106,25 @@ public class EngineGrpcClient extends AbstractGrpcClient {
             throw new IllegalArgumentException(
                     "connectTimeoutMillis must be positive");
         }
+        if (keepAliveTimeMillis <= 0) {
+            throw new IllegalArgumentException("keepAliveTimeMillis must be positive");
+        }
         this.executor = executor;
         this.eventLoopGroup = eventLoopGroup;
         this.connectTimeoutMillis = connectTimeoutMillis;
+        this.keepAliveTimeMillis = keepAliveTimeMillis;
+        this.keepAliveWithoutCalls = keepAliveWithoutCalls;
         nameResolver.start(this);
+    }
+
+    public EngineGrpcClient(CustomNameResolver nameResolver,
+                            ThreadPoolExecutor executor,
+                            EventLoopGroup eventLoopGroup,
+                            GrpcReporter grpcReporter,
+                            int connectTimeoutMillis,
+                            long enqueueTimeoutMillis) {
+        this(nameResolver, executor, eventLoopGroup, grpcReporter, connectTimeoutMillis,
+                enqueueTimeoutMillis, DEFAULT_KEEP_ALIVE_TIME_MILLIS, DEFAULT_KEEP_ALIVE_WITHOUT_CALLS);
     }
 
     static boolean retriesBrokenConnections(ServiceType serviceType) {
@@ -461,8 +498,12 @@ public class EngineGrpcClient extends AbstractGrpcClient {
         String[] parts = parseServiceKey(channelKey);
         String ip = parts[0];
         int port = Integer.parseInt(parts[1]);
-        int maxInboundMessageBytes = ServiceType.MULTIMODAL_CACHE_STATUS.getSuffix().equals(parts[2])
-                ? vitCacheMaxInboundMessageBytes : DEFAULT_MAX_INBOUND_MESSAGE_BYTES;
+        int maxInboundMessageBytes = DEFAULT_MAX_INBOUND_MESSAGE_BYTES;
+        if (ServiceType.CACHE_STATUS.getSuffix().equals(parts[2])) {
+            maxInboundMessageBytes = engineGrpcConfig.getKvCacheMaxInboundMessageBytes();
+        } else if (ServiceType.MULTIMODAL_CACHE_STATUS.getSuffix().equals(parts[2])) {
+            maxInboundMessageBytes = vitCacheMaxInboundMessageBytes;
+        }
         Logger.info("Creating new channel for ip: {}, port: {}", ip, port);
         return NettyChannelBuilder.forAddress(ip, port)
                 .channelFactory(transportObserver::newChannel)
@@ -477,14 +518,15 @@ public class EngineGrpcClient extends AbstractGrpcClient {
                 // Receive/send buffer size
                 .withOption(ChannelOption.SO_RCVBUF, 512 * 1024)
                 .withOption(ChannelOption.SO_SNDBUF, 512 * 1024)
-                // ViT directory snapshots have a separate configurable message limit.
+                // KV and ViT cache snapshots have separate configurable message limits.
                 .maxInboundMessageSize(maxInboundMessageBytes)
                 // HTTP/2 initial flow control window: prevents transmission issues due to flow control
                 .initialFlowControlWindow(2 * 1024 * 1024)
-                // gRPC keepalive configuration: keeps connection active, prevents disconnection by intermediate devices
-                .keepAliveTime(2, TimeUnit.SECONDS)
+                // grpc-java raises intervals shorter than 10 seconds to 10 seconds.
+                .keepAliveTime(keepAliveTimeMillis, TimeUnit.MILLISECONDS)
                 .keepAliveTimeout(10, TimeUnit.SECONDS)
-                .keepAliveWithoutCalls(true)
+                // Disable idle pings for engines that enforce grpc-java's default keepalive policy.
+                .keepAliveWithoutCalls(keepAliveWithoutCalls)
                 .executor(executor)
                 .eventLoopGroup(eventLoopGroup)
                 .usePlaintext()

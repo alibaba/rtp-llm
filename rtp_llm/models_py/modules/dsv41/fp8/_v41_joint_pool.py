@@ -24,8 +24,6 @@ _PAYLOAD = codec.FP4_INDEXER_HEAD_DIM // 2
 _SCALE = codec.FP4_INDEXER_HEAD_DIM // codec.FP4_INDEXER_GROUP
 _RAW = codec.FP4_GLOBAL_ENTRY_BYTES
 _PACKED = _PAYLOAD + _SCALE + _RAW
-# CP4 performance is qualified at B32; apply this to the batch, not group tails.
-_MIN_BATCH = 32
 _READY = {}
 _LOCK = threading.Lock()
 _INDEX_DIM = tl.constexpr(codec.FP4_INDEXER_HEAD_DIM)
@@ -448,7 +446,7 @@ def try_gather(
     output_stream=None,
 ):
     """Choose the schedule from common host geometry and prepared pool layouts."""
-    if not 1 <= len(ends) <= 128:
+    if not 1 <= len(ends) <= 1024:
         return None
     cp, cache = getattr(attn, "_cp_ctx", None), getattr(attn, "_kv_cache", None)
     tables = getattr(attn, "_block_tables_by_type", None)
@@ -515,9 +513,7 @@ def try_gather(
     )
     if owned is not None:
         return owned
-    # Unsupported common geometry preserves the previous collective schedule.
-    # Once the owned path is selected, local errors propagate from that path.
-    if len(ends) < _MIN_BATCH:
+    if groups is None:
         return None
     from rtp_llm.models_py.modules.dsv41.fp8._v41_prefill_indexer import (
         PrefillIndexerKeys,
