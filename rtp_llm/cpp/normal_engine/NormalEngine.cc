@@ -127,7 +127,14 @@ public:
         baseline_free_bytes_ = getGpuExecStatus().device_memory_status.free_bytes;
         const auto stats     = c10::cuda::CUDACachingAllocator::getDeviceStats(device_);
         baseline_allocated_  = stats.allocated_bytes[0].current;
+        baseline_active_     = stats.active_bytes[0].current;
         baseline_reserved_   = stats.reserved_bytes[0].current;
+        c10::cuda::CUDACachingAllocator::resetPeakStats(device_);
+    }
+
+    void resetPeakStats() {
+        at::cuda::CUDAGuard device_guard(device_);
+        // Keep the pre-executor baseline so live buffers remain reserved.
         c10::cuda::CUDACachingAllocator::resetPeakStats(device_);
     }
 
@@ -139,10 +146,15 @@ public:
         const auto positive_delta = [](int64_t peak, int64_t baseline) -> size_t {
             return peak > baseline ? static_cast<size_t>(peak - baseline) : 0;
         };
-        const size_t driver_consumed = baseline_free_bytes_ - std::min(baseline_free_bytes_, current_free_bytes);
-        const size_t allocated_peak  = positive_delta(stats.allocated_bytes[0].peak, baseline_allocated_);
-        const size_t reserved_peak   = positive_delta(stats.reserved_bytes[0].peak, baseline_reserved_);
-        return std::max({driver_consumed, allocated_peak, reserved_peak});
+        const int64_t driver_delta = static_cast<int64_t>(baseline_free_bytes_)
+                                     - static_cast<int64_t>(current_free_bytes);
+        const int64_t allocator_delta = stats.reserved_bytes[0].current - baseline_reserved_;
+        const size_t non_allocator_consumed = positive_delta(driver_delta, allocator_delta);
+        const size_t allocated_peak = positive_delta(stats.allocated_bytes[0].peak, baseline_allocated_);
+        // Active bytes include pending asynchronous frees; inactive cached segments
+        // can be released before KV allocation and are not runtime reservations.
+        const size_t active_peak = positive_delta(stats.active_bytes[0].peak, baseline_active_);
+        return std::max(allocated_peak, active_peak) + non_allocator_consumed;
     }
 
 private:
@@ -152,6 +164,7 @@ private:
     c10::DeviceIndex             device_;
     size_t                       baseline_free_bytes_ = 0;
     int64_t                      baseline_allocated_  = 0;
+    int64_t                      baseline_active_     = 0;
     int64_t                      baseline_reserved_   = 0;
 };
 #endif
@@ -529,6 +542,34 @@ std::shared_ptr<GenerateInput> NormalEngine::makeFakeInput(size_t seq_len) {
     return fake_input;
 }
 
+absl::Status NormalEngine::runPrefillWarmupBatch(const ResourceContext& resource_context,
+                                               int64_t per_request_tokens,
+                                               int64_t token_budget,
+                                               int64_t max_input_length) {
+    c10::InferenceMode inference_guard(true);
+    const int64_t block_size = model_config_.attn_config.tokens_per_block;
+    if (block_size <= 0 || per_request_tokens <= 0 || token_budget <= 0) {
+        return absl::InvalidArgumentError("invalid batched prefill warmup dimensions");
+    }
+    std::list<GenerateStreamPtr> streams;
+    for (int64_t row = 0; row < runtime_config.fifo_scheduler_config.max_context_batch_size && token_budget > 0;
+         ++row) {
+        const int64_t tokens = std::min(per_request_tokens, token_budget);
+        const int64_t reuse = (max_input_length - tokens) / block_size * block_size;
+        auto input = makeFakeInput(static_cast<size_t>(reuse + tokens));
+        auto stream = std::make_shared<NormalGenerateStream>(
+            input, model_config_, runtime_config, resource_context, nullptr, 0, true);
+        stream->setIsFakeStream(true);
+        stream->setReuseLength(static_cast<int>(reuse));
+        stream->fakeInitKVBlock((stream->seqLength() + block_size - 1) / block_size);
+        stream->enableWarmupChunkWindow();
+        stream->setChunkSize(static_cast<int>(tokens));
+        streams.push_back(stream);
+        token_budget -= tokens;
+    }
+    return executor_->process(streams);
+}
+
 size_t NormalEngine::getWarmUpInputLength() const {
     const auto max_seq_len  = static_cast<size_t>(model_config_.max_seq_len);
     const auto reserve_step = reserve_step_ > 0 ? static_cast<size_t>(reserve_step_) : 0;
@@ -555,6 +596,13 @@ WarmUpResult NormalEngine::prefillWarmUp(const EngineInitParams& params) {
     auto fake_input = makeFakeInput(static_cast<size_t>(token_heavy_seq_len));
     fake_input->generate_config->num_return_sequences =
         use_global_budget_warmup ? 1 : runtime_config.fifo_scheduler_config.max_context_batch_size;
+    if (!use_global_budget_warmup) {
+        // Match the scheduler's total-token budget, including its oversized singleton.
+        const int64_t capacity = std::max<int64_t>(
+            runtime_config.fifo_scheduler_config.max_batch_tokens_size, model_config_.max_seq_len);
+        fake_input->generate_config->num_return_sequences = std::min<int64_t>(
+            fake_input->generate_config->num_return_sequences, std::max<int64_t>(1, capacity / token_heavy_seq_len));
+    }
     fake_input->generate_config->calculate_loss       = int(runtime_config.warm_up_with_loss);
     if (!use_global_budget_warmup) {
         const bool generation_prefill_cuda_graph_requested =
@@ -638,38 +686,43 @@ WarmUpResult NormalEngine::prefillWarmUp(const EngineInitParams& params) {
         rtp_llm::setTraceMemory(true);
         auto memory_tracker = std::make_unique<WarmupMemoryTracker>();
         executor_.reset(new NormalExecutor(params, warmup_cache_manager, true, false, 0, mla_ops_type_));
-        auto token_heavy_result = runPrefillWarmupShape(fake_input, warmup_resource_context, 0, token_budget);
-        THROW_IF_STATUSOR_ERROR(token_heavy_result);
+        const auto run_shapes = [&]() {
+            auto token_heavy_result = runPrefillWarmupShape(fake_input, warmup_resource_context, 0, token_budget);
+            THROW_IF_STATUSOR_ERROR(token_heavy_result);
+            token_heavy_result.value().reset();
+
+            const int64_t per_request_tokens = std::min(token_budget, token_heavy_seq_len);
+            if (token_budget > per_request_tokens) {
+                THROW_IF_STATUS_ERROR(runPrefillWarmupBatch(
+                    warmup_resource_context, per_request_tokens, token_budget, token_heavy_seq_len));
+            }
+            // Exercise many rows without multiplying the global query-token budget.
+            THROW_IF_STATUS_ERROR(runPrefillWarmupBatch(warmup_resource_context, 1, token_budget, token_heavy_seq_len));
+
+            const auto longest_system_prompt =
+                std::max_element(kv_cache_config.multi_task_prompt_tokens.begin(),
+                                 kv_cache_config.multi_task_prompt_tokens.end(),
+                                 [](const auto& lhs, const auto& rhs) { return lhs.second.size() < rhs.second.size(); });
+            if (longest_system_prompt != kv_cache_config.multi_task_prompt_tokens.end()
+                && !longest_system_prompt->second.empty()) {
+                // System-prompt construction still executes whole segments via preRun.
+                auto system_prompt_input = makeFakeInput(longest_system_prompt->second.size());
+                auto system_prompt_result = runPrefillWarmupShape(system_prompt_input, warmup_resource_context, 0, 0);
+                THROW_IF_STATUSOR_ERROR(system_prompt_result);
+            }
+        };
+        // Initialize kernels first; reserve the warm working set rather than cold JIT peaks.
+        run_shapes();
+        cudaDeviceSynchronize();
+        const auto initialization_peak = memory_tracker->maxConsumedBytes();
+        c10::cuda::CUDACachingAllocator::emptyCache();
+        memory_tracker->resetPeakStats();
+        run_shapes();
+        cudaDeviceSynchronize();
         max_consumed = memory_tracker->maxConsumedBytes();
-        token_heavy_result.value().reset();
-
-        const int64_t block_size       = model_config_.attn_config.tokens_per_block;
-        const int64_t row_count =
-            std::min(token_budget, runtime_config.fifo_scheduler_config.max_context_batch_size);
-        const int64_t row_heavy_tokens = std::min(token_budget, token_heavy_seq_len);
-        const int64_t row_heavy_reuse  = (token_heavy_seq_len - row_heavy_tokens) / block_size * block_size;
-        auto          row_heavy_input  = makeFakeInput(static_cast<size_t>(row_heavy_reuse + row_heavy_tokens));
-        row_heavy_input->generate_config->num_return_sequences = static_cast<int>(row_count);
-
-        // Conservatively combine multiple rows with a full chunk per row and a long prefix.
-        // Run once without splitting by the scheduler's global token budget.
-        auto row_heavy_result = runPrefillWarmupShape(
-            row_heavy_input, warmup_resource_context, static_cast<int>(row_heavy_reuse), 0);
-        THROW_IF_STATUSOR_ERROR(row_heavy_result);
-        max_consumed = std::max(max_consumed, memory_tracker->maxConsumedBytes());
-        row_heavy_result.value().reset();
-
-        const auto longest_system_prompt =
-            std::max_element(kv_cache_config.multi_task_prompt_tokens.begin(),
-                             kv_cache_config.multi_task_prompt_tokens.end(),
-                             [](const auto& lhs, const auto& rhs) { return lhs.second.size() < rhs.second.size(); });
-        if (longest_system_prompt != kv_cache_config.multi_task_prompt_tokens.end()
-            && !longest_system_prompt->second.empty()) {
-            auto system_prompt_input  = makeFakeInput(longest_system_prompt->second.size());
-            auto system_prompt_result = runPrefillWarmupShape(system_prompt_input, warmup_resource_context, 0, 0);
-            THROW_IF_STATUSOR_ERROR(system_prompt_result);
-            max_consumed = std::max(max_consumed, memory_tracker->maxConsumedBytes());
-        }
+        RTP_LLM_LOG_INFO("chunk prefill warmup memory: initialization_peak=%zu MiB, runtime_peak=%zu MiB",
+                         initialization_peak / 1024 / 1024,
+                         max_consumed / 1024 / 1024);
 
         if (!params.py_model.is_none()) {
             // PyWrappedModel initializes the shared Python model in place, so destroying the

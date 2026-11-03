@@ -720,6 +720,8 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
     vocab_size_                 = params.model_config_.vocab_size;
     draft_vocab_size_           = propose_params->getEngineInitParams().model_config_.vocab_size;
     is_dspark_                  = propose_params->sp_type == SP_TYPE_DSPARK;
+    platform_mtp_policy_         = platforms::mtpPolicy(params.model_config_.model_type, is_dspark_,
+                                                      params.model_config_.hidden_size, params.model_config_.num_layers);
     dspark_prefill_commit_only_ = is_dspark_ && role_type_ == RoleType::PREFILL;
 
     RTP_LLM_LOG_INFO("[speculative decoding] vocab_size_ = %d, draft_vocab_size_ = %d", vocab_size_, draft_vocab_size_);
@@ -1806,7 +1808,7 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     // DSpARK commit input was bound from the explicit target-forward output
     // above. Re-reading mutable Python model state here is both redundant and
     // invalid for CUDA graph replay, where Python is not executed.
-    if (!is_dspark_) {
+    if (!is_dspark_ && !platform_mtp_policy_.preserve_accepted_hidden) {
         maybeOverrideLastHiddenWithMtpBuffer(model_input, *model_);
     }
     broadcastPostRejectionInputs(model_input);
@@ -2881,12 +2883,17 @@ void MtpExecutor::publishSyncMtpDeviceState(const StreamGroups&                 
     torch::Tensor last_hidden_all;
     const auto    stream_hidden_len = static_cast<int64_t>(propose_step_ + 1);
     if (propose_step_ > 1 && !is_dspark_ && draft_all_hidden_full.defined()) {
-        const auto hidden_size = draft_all_hidden_full.size(1);
-        auto       hidden_3d   = draft_all_hidden_full.reshape({batch_size, stream_hidden_len, hidden_size});
-        auto       accept_i32  = accept_len_all.to(torch::kInt32);
-        auto       idx_long =
-            (accept_i32.to(torch::kInt64) - 1).reshape({batch_size, 1, 1}).expand({batch_size, 1, hidden_size});
-        last_hidden_all = hidden_3d.gather(1, idx_long).squeeze(1);
+        if (platform_mtp_policy_.select_hidden) {
+            last_hidden_all = platform_mtp_policy_.select_hidden(
+                draft_all_hidden_full, accept_len_all.to(torch::kInt64) - 1, batch_size, stream_hidden_len);
+        } else {
+            const auto hidden_size = draft_all_hidden_full.size(1);
+            auto       hidden_3d   = draft_all_hidden_full.reshape({batch_size, stream_hidden_len, hidden_size});
+            auto       accept_i32  = accept_len_all.to(torch::kInt32);
+            auto       idx_long =
+                (accept_i32.to(torch::kInt64) - 1).reshape({batch_size, 1, 1}).expand({batch_size, 1, hidden_size});
+            last_hidden_all = hidden_3d.gather(1, idx_long).squeeze(1);
+        }
     }
 
     // One clone for all probs
@@ -2990,10 +2997,15 @@ absl::Status MtpExecutor::dispatchDecodeAsync(const StreamGroups&               
     torch::Tensor last_hidden_all;
     const auto    stream_hidden_len = static_cast<int64_t>(propose_step_ + 1);
     if (propose_step_ > 1 && !is_dspark_ && draft_all_hidden_full.defined()) {
-        const auto hidden_size  = draft_all_hidden_full.size(1);
-        auto       hidden_3d    = draft_all_hidden_full.reshape({batch_size, stream_hidden_len, hidden_size});
-        auto       idx_expanded = hidden_idx_all.reshape({batch_size, 1, 1}).expand({batch_size, 1, hidden_size});
-        last_hidden_all         = hidden_3d.gather(1, idx_expanded).squeeze(1);
+        if (platform_mtp_policy_.select_hidden) {
+            last_hidden_all = platform_mtp_policy_.select_hidden(
+                draft_all_hidden_full, hidden_idx_all, batch_size, stream_hidden_len);
+        } else {
+            const auto hidden_size  = draft_all_hidden_full.size(1);
+            auto       hidden_3d    = draft_all_hidden_full.reshape({batch_size, stream_hidden_len, hidden_size});
+            auto       idx_expanded = hidden_idx_all.reshape({batch_size, 1, 1}).expand({batch_size, 1, hidden_size});
+            last_hidden_all         = hidden_3d.gather(1, idx_expanded).squeeze(1);
+        }
     }
 
     // 3. One clone for all probs
@@ -3024,7 +3036,10 @@ absl::Status MtpExecutor::dispatchDecodeAsync(const StreamGroups&               
         }
         const auto block_size  = static_cast<int>(cache_config.seq_size_per_block);
         const auto table_width = std::min(kv_cache_block_id.size(2), kv_cache_kernel_block_id.size(2));
-        if (hasLinearCacheSnapshotCapacity(all_streams, table_width, static_cast<int>(propose_step_ + 1), block_size)) {
+        if (platform_mtp_policy_.clone_cache_snapshot && platform_mtp_policy_.clone_cache_snapshot(group_types)) {
+            next_kv_cache_block_id = kv_cache_block_id.clone();
+            next_kv_cache_kernel_block_id = kv_cache_kernel_block_id.clone();
+        } else if (hasLinearCacheSnapshotCapacity(all_streams, table_width, static_cast<int>(propose_step_ + 1), block_size)) {
             auto accept_i32        = accept_len_gpu_all.to(torch::kInt32);
             next_kv_cache_block_id = MtpBatchStreamProcessor::advanceLinearCacheBlockTable(
                 kv_cache_block_id, prev_seq_len_all, accept_i32, group_types, block_size);

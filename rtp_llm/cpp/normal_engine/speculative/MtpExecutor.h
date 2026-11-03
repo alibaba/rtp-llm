@@ -19,6 +19,7 @@
 #include "rtp_llm/cpp/normal_engine/AsyncRunner.h"
 #include "rtp_llm/cpp/models/logits_processor/SpecLogitsVerifyRunner.h"
 #include "rtp_llm/cpp/normal_engine/speculative/SpeculativeSampler.h"
+#include "rtp_llm/platforms/MtpPolicy.h"
 
 namespace rtp_llm {
 
@@ -271,6 +272,7 @@ private:
     // Fixed-width block diffusion: one draft forward emits gamma proposals;
     // unlike MTP there is no autoregressive draft loop or hidden-state chain.
     bool is_dspark_ = false;
+    platforms::MtpPolicy platform_mtp_policy_;
     // Dedicated PREFILL workers only seed DSpARK's draft feature KV and must
     // not construct proposal wrappers or require proposal-only Markov weights.
     bool          dspark_prefill_commit_only_ = false;
