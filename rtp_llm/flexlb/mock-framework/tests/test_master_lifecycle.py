@@ -277,7 +277,7 @@ def test_native_restart_preserves_address_and_refreshes_only_current_discovery(t
     root = Path(__file__).resolve().parents[1]
     config = configuration()
     config['FLEXLB_CONFIG'] = json.dumps(json.loads(config['FLEXLB_CONFIG']) | {
-        'grpcServer': {'shutdownQuietPeriodMs': 5000}})
+        'schemaVersion': 3, 'grpcServer': {'shutdownQuietPeriodMs': 5000}})
     engine = {'engine': 'rtp', 'config': {'seq_size_per_block': 16, 'test_block_num': 256,
         'max_seq_len': 4096, 'mock.compute.forward.expression': '1'}}
     document = dict(id='restart', describe='Native restart and current discovery',
