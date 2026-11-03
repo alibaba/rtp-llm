@@ -1,6 +1,6 @@
 --- /dev/null
 +++ b/_k31_isolate.py
-@@ -0,0 +1,38 @@
+@@ -0,0 +1,50 @@
 +"""Hide private DeepGEMM/JIT definitions; preserve native code and public Python ABI."""
 +import hashlib
 +import json
@@ -8,14 +8,26 @@
 +import struct
 +import sys
 +
-+BEFORE = "0b42c5ea3c8b7e4c2d8f11c6186528455a639c6758fd5aef6fb29878d64f89fc"
-+AFTER = "84f5d7ca306a190c4fca7a4d7e2f7a88e381104e3dd8f0686823d01e5cb0dd2a"
++ARTIFACTS = {
++    62: (  # EM_X86_64
++        "0b42c5ea3c8b7e4c2d8f11c6186528455a639c6758fd5aef6fb29878d64f89fc",
++        "84f5d7ca306a190c4fca7a4d7e2f7a88e381104e3dd8f0686823d01e5cb0dd2a", 232,
++    ),
++    183: (  # EM_AARCH64
++        "ab358e4a7863715213664a50d5da886985bfe22c51600ddc208e330c18b77bf8",
++        "cb198ed7522dc8473b6902c1682c4ba9ee4414d5a97e21f6bb1bd4d62cd3a60f", 230,
++    ),
++}
 +path = next(Path(sys.argv[1]).glob("_C*.so"))
 +data = bytearray(path.read_bytes())
++machine = struct.unpack_from("<H", data, 18)[0]
++if data[:6] != b"\x7fELF\x02\x01" or machine not in ARTIFACTS:
++    raise ValueError("unrecognized MQA ELF architecture; review before transforming")
++BEFORE, AFTER, expected_changes = ARTIFACTS[machine]
 +original = hashlib.sha256(data).hexdigest()
 +if original == AFTER:
 +    sys.exit(0)
-+if original != BEFORE or data[:6] != b"\x7fELF\x02\x01" or struct.unpack_from("<H", data, 18)[0] != 62:
++if original != BEFORE:
 +    raise ValueError("unrecognized MQA native artifact; review before transforming")
 +shoff = struct.unpack_from("<Q", data, 40)[0]
 +shsize, shnum = struct.unpack_from("<HH", data, 58)
@@ -34,7 +46,7 @@
 +            # to itself. Binding, code/data, relocations and PyInit__C are intact.
 +            data[offset + 5] = (other & ~3) | 2
 +            changes.append(symbol.decode())
-+if len(changes) != 232 or "_ZN9deep_gemm3jitE" not in changes or hashlib.sha256(data).hexdigest() != AFTER:
++if len(changes) != expected_changes or "_ZN9deep_gemm3jitE" not in changes or hashlib.sha256(data).hexdigest() != AFTER:
 +    raise ValueError("MQA visibility transformation did not match the fixed artifact")
 +path.write_bytes(data)
 +Path("k31-mqa-visibility.json").write_text(json.dumps({"before":BEFORE,"after":AFTER,

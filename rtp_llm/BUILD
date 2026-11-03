@@ -665,6 +665,7 @@ py_package(
         "rtp_llm",
     ] + select({
         "@//:using_cuda13_x86": deep + ["deep_gemm_mqa"],
+        "@//:using_cuda13_arm": deep + ["deep_gemm_mqa"],
         "@//:using_cuda12": deep,
         "//conditions:default": [],
     }),
