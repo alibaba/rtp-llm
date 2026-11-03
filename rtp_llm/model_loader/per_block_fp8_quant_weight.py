@@ -856,6 +856,38 @@ class PerBlockFp8Weight(CompositeWeight, QuantWeight):
         # need reshape for kernel weight
         processed_res = super()._postprocess(tensor, device, load_config)
         kernel_weight = processed_res[self.kernel.name]
+
+        # Ascend W8A8_MXFP8 only (type-marked): real transpose + E8M0 scale
+        # swizzle; must run after the TP split (swizzle spans the K-group dim).
+        if getattr(self, "_use_npu_mxfp8_layout", False):
+            from rtp_llm.models_py.kernels.ascend.w8a8_mx_layout import (
+                swizzle_scale_to_npu_layout,
+            )
+
+            # 2D dense: [N, K] -> [K, N];  3D MoE: [E, N, K] -> [E, K, N]
+            if kernel_weight.dim() == 2:
+                kernel_weight = kernel_weight.transpose(0, 1).contiguous()
+            else:
+                kernel_weight = kernel_weight.transpose(1, 2).contiguous()
+            processed_res[self.kernel.name] = kernel_weight
+
+            if self.scale is not None:
+                scale_weight = processed_res[self.scale.name]
+                # [N, kp] -> [kp//2, N, 2]; [E, N, kp] -> [E, kp//2, N, 2]
+                scale_weight = swizzle_scale_to_npu_layout(scale_weight)
+                kernel_weight = (
+                    load_config.exported_device.maybe_rewrite_weight_by_key(
+                        "weight", kernel_weight
+                    )
+                )
+                scale_weight = load_config.exported_device.maybe_rewrite_weight_by_key(
+                    "scale", scale_weight
+                )
+                processed_res[self.scale.name] = scale_weight
+                processed_res[self.kernel.name] = kernel_weight
+
+            return processed_res
+
         from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import (
             is_deep_gemm_e8m0_used,
         )

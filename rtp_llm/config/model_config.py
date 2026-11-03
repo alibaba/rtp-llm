@@ -8,6 +8,7 @@ import torch
 
 from rtp_llm.config.py_config_modules import VitConfig
 from rtp_llm.config.quant_config import (
+    AscendW8A8MXFP8Config,
     Fp8BlockWiseQuantConfig,
     QuantizationConfig,
     W4a8Int4PerChannelQuantConfig,
@@ -682,12 +683,14 @@ class ModelConfig(CppModelConfig):
                 )
 
         # Apply quantization-specific overrides
-        if quant_config and isinstance(quant_config, Fp8BlockWiseQuantConfig):
+        if quant_config and isinstance(
+            quant_config, (Fp8BlockWiseQuantConfig, AscendW8A8MXFP8Config)
+        ):
             original_data_type = data_type
             data_type = WEIGHT_TYPE.BF16
             logging.info(
                 f"Overriding data_type from {original_data_type} to {data_type} "
-                f"because fp8_block_wise quantization only supports BF16"
+                f"because {type(quant_config).__name__} quantization only supports BF16"
             )
         elif quant_config and quant_config.get_method().lower() in [
             "smooth_quant",
