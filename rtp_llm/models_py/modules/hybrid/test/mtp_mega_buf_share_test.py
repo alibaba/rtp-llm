@@ -210,6 +210,7 @@ class MtpMegaBufShareTest(unittest.TestCase):
             "self_attn",
             "input_layernorm",
             "post_attention_layernorm",
+            "_drain_pinned_mla_before_moe",
             "_fuse_input_norm_quant",
             "_fuse_input_scale_ue8m0",
             "_fuse_post_norm_quant",
@@ -255,6 +256,7 @@ class MtpMegaBufShareTest(unittest.TestCase):
             "pre_fc_norm_embedding",
             "pre_fc_norm_hidden",
             "fc",
+            "_mtp_frontend_native",
             "norm",
         ):
             setattr(model, name, None)

@@ -22,7 +22,7 @@ class BatchDecodeTest(unittest.TestCase):
         failed = ResponseInfo({}, False)
         with patch.dict(os.environ, {"PERF_REQUIRE_ALL_REQUESTS_SUCCESS": "1"}):
             impl._validate_request_success([ok, ok])
-            for responses in ([ok, failed], [], [ok]):
+            for responses in ([ok, failed], [], [ok], [ok, ok, ok]):
                 with self.assertRaises(Exception):
                     impl._validate_request_success(responses)
         with patch.dict(os.environ, {"PERF_REQUIRE_ALL_REQUESTS_SUCCESS": "0"}):

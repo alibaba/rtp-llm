@@ -648,10 +648,12 @@ class ModelLoader:
             weights_info.phy_exp_num_,
         )
 
-        # static expert placement info
+        # Static placement describes checkpoint layers, before repeated execution.
+        from rtp_llm.utils.glm5_layer_repeat import checkpoint_layer_config
+
         phy2log_path = self.model_config.phy2log_path
         phy2log = LoadConfig.create_redundant_expert(
-            layer_num=self.model_config.num_layers,
+            layer_num=checkpoint_layer_config(self.model_config).num_layers,
             expert_num=self.model_config.expert_num,
             ep_size=weights_info.ep_size,
             num_nodes=weights_info.num_nodes,
