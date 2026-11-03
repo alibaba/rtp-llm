@@ -595,11 +595,11 @@ class PdGenerationTest {
         }
     }
 
-    @Test void cumulativeNativeRequestTraversesPAndDWithActualPerTokenCompute() throws Exception {
+    @Test void nonIncrementalFrontendRequestStillReceivesNativeDeltaChunks() throws Exception {
         try (var p = node("prefill", 8, 15); var d = node("decode", 8, 15); var call = new Call(p, input(d, 1, 5, 4, 2000, false))) {
             long ttft = -1;
             for (int i = 1; i <= 4; i++) {
-                var output = call.output(i, i == 4, i);
+                var output = call.output(i, i == 4, 1);
                 var ids = output.getFlattenOutput().getOutputIds().getInt32Data().asReadOnlyByteBuffer().order(ByteOrder.LITTLE_ENDIAN);
                 while (ids.hasRemaining()) assertEquals(5, ids.getInt());
                 long current = output.getFlattenOutput().getAuxInfo(0).getFirstTokenCostTimeUs();
