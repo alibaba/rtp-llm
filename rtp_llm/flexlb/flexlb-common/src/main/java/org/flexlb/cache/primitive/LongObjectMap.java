@@ -4,6 +4,8 @@ import it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap;
 import it.unimi.dsi.fastutil.HashCommon;
 import java.util.Objects;
 import java.util.function.LongFunction;
+import java.util.function.UnaryOperator;
+import java.util.function.Function;
 
 /** Primitive index with guarded reads so resize never exposes a partial table. */
 public final class LongObjectMap<V> {
@@ -43,6 +45,28 @@ public final class LongObjectMap<V> {
         }
     }
 
+    /** Atomically mutate an entry; null removes it. Callbacks must not reenter this map. */
+    public void compute(long key, UnaryOperator<V> update) {
+        var shard = shard(key);
+        synchronized (shard) {
+            V previous = shard.get(key);
+            V next = update.apply(previous);
+            if (next == null) {
+                shard.remove(key);
+            } else if (next != previous) {
+                shard.put(key, next);
+            }
+        }
+    }
+
+    /** Copy/project a value while protected; do not return a mutable stored value. */
+    public <R> R read(long key, Function<? super V, R> snapshot) {
+        var shard = shard(key);
+        synchronized (shard) {
+            return snapshot.apply(shard.get(key));
+        }
+    }
+
     public V remove(long key) {
         var shard = shard(key);
         synchronized (shard) {
@@ -61,10 +85,23 @@ public final class LongObjectMap<V> {
     }
 
     public void clear() {
-        for (var shard : shards) {
-            synchronized (shard) {
-                shard.clear();
-            }
+        clear(() -> {});
+    }
+
+    /** Clear and reset associated accounting atomically with respect to mutations. */
+    public void clear(Runnable resetAccounting) {
+        clearLocked(0, resetAccounting);
+    }
+
+    private void clearLocked(int index, Runnable resetAccounting) {
+        if (index == SHARDS) {
+            for (var shard : shards) shard.clear();
+            resetAccounting.run();
+            return;
+        }
+        // Fixed order; ordinary operations acquire only one shard.
+        synchronized (shards[index]) {
+            clearLocked(index + 1, resetAccounting);
         }
     }
 }
