@@ -297,6 +297,7 @@ struct HWKernelConfig {
     bool        use_swizzleA                 = false;
     bool        enable_cuda_graph            = false;
     bool        enable_dynamic_decode_backend = false;
+    std::optional<std::string> dyn_decode_gate_thresholds;
     bool        enable_cuda_graph_debug_mode = false;
     // Generation-prefill graph is enabled only when the CUDA graph master
     // switch is on and this capture bucket list is explicitly configured.

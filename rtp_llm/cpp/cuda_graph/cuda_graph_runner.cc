@@ -1375,7 +1375,6 @@ bool CudaGraphRunner::canReplaySelectedGraph(const PyModelInputs&  inputs,
         }
         return false;
     }
-
     if (isGenerationPrefillCudaGraph()) {
         const auto& captured_bert_inputs = graph_it->second.mem_hold_.py_model_inputs_.bert_embedding_inputs;
         const auto  dynamic_ids_match    = [mode, &state](const torch::Tensor& src, const torch::Tensor& dst) {

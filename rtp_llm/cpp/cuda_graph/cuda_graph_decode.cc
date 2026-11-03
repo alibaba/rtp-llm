@@ -76,9 +76,9 @@ void CudaGraphRunner::captureDecode() {
         // capture-specific metadata above was written after prepareCaptureInputs synchronized the tag map.
         refreshTaggedAttentionInputs(inputs);
 
-        graph_instances_[bs].mem_hold_ = createCaptureMemoryHold(inputs, bs * num_tokens_per_bs_);
-        graph_instances_[bs].mem_hold_.attn_pyobj_ =
-            prepareFmhaImpl(graph_instances_[bs].mem_hold_.py_model_inputs_, true);
+        auto& mem_hold = graph_instances_[bs].mem_hold_;
+        mem_hold       = createCaptureMemoryHold(inputs, bs * num_tokens_per_bs_);
+        mem_hold.attn_pyobj_ = prepareFmhaImpl(mem_hold.py_model_inputs_, true);
         captureDecodeOneBatchSize(bs);
         cuda_graph::finish_capture_session();
         replayAndSyncCheck(bs, "batch size");

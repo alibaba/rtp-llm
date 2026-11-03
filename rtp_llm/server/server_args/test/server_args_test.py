@@ -122,6 +122,33 @@ class PipelinePartitionArgumentsTest(TestCase):
                     server_args.setup_args(["--tp_size", "1"])
 
 
+class DynamicDecodeArgumentsTest(TestCase):
+    def test_retired_accuracy_check_environment_is_ignored(self):
+        from rtp_llm.server.server_args import server_args
+
+        with patch.dict(os.environ, {"ENABLE_ACCURACY_CHECK": "1"}, clear=True):
+            configs = server_args.setup_args([])
+            self.assertFalse(hasattr(configs.runtime_config, "enable_accuracy_check"))
+            restored = pickle.loads(pickle.dumps(configs.runtime_config))
+            self.assertFalse(hasattr(restored, "enable_accuracy_check"))
+            self.assertFalse(configs.py_hw_kernel_config.enable_dynamic_decode_backend)
+
+    def test_retired_accuracy_check_cli_is_rejected(self):
+        from rtp_llm.server.server_args import server_args
+
+        with patch.dict(os.environ, {}, clear=True):
+            with patch("sys.stderr", io.StringIO()), self.assertRaises(SystemExit):
+                server_args.setup_args(["--enable_accuracy_check", "1"])
+
+    def test_dynamic_decode_backend_parser_and_default(self):
+        from rtp_llm.server.server_args import server_args
+
+        enabled = server_args.setup_args(["--enable_dynamic_decode_backend", "1"])
+        disabled = server_args.setup_args([])
+        self.assertTrue(enabled.py_hw_kernel_config.enable_dynamic_decode_backend)
+        self.assertFalse(disabled.py_hw_kernel_config.enable_dynamic_decode_backend)
+
+
 class CacheConfigArgumentsTest(TestCase):
     # Keep the supported startup fields explicit, independently of parser registration.
     samples = {

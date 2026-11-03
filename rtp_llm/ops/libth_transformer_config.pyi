@@ -579,6 +579,7 @@ class GrpcConfig:
         ...
 class HWKernelConfig:
     enable_dynamic_decode_backend: bool
+    dyn_decode_gate_thresholds: typing.Optional[str]
     generation_prefill_cuda_graph_max_capture_buckets: typing.ClassVar[int]
     generation_prefill_cuda_graph_max_capture_tokens: typing.ClassVar[int]
     generation_prefill_cuda_graph_max_requests_limit: typing.ClassVar[int]

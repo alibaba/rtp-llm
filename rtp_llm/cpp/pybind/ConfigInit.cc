@@ -881,6 +881,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("use_swizzleA", &HWKernelConfig::use_swizzleA)
         .def_readwrite("enable_cuda_graph", &HWKernelConfig::enable_cuda_graph)
         .def_readwrite("enable_dynamic_decode_backend", &HWKernelConfig::enable_dynamic_decode_backend)
+        .def_readwrite("dyn_decode_gate_thresholds", &HWKernelConfig::dyn_decode_gate_thresholds)
         .def_readwrite("enable_cuda_graph_debug_mode", &HWKernelConfig::enable_cuda_graph_debug_mode)
         .def_readwrite("generation_prefill_cuda_graph_max_requests",
                        &HWKernelConfig::generation_prefill_cuda_graph_max_requests)
@@ -904,11 +905,12 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.enable_decode_cascade_attention,
                                       0,  // Reserved retired decode-capacity slot.
                                       self.enable_decode_cascade_attention,
-                                      self.enable_dynamic_decode_backend);
+                                      self.enable_dynamic_decode_backend,
+                                      self.dyn_decode_gate_thresholds);
             },
             [](py::tuple t) {
-                if (t.size() != 5 && t.size() != 7 && t.size() != 8 && t.size() != 9 && t.size() != 10
-                    && t.size() != 11)
+                if (t.size() != 5 && t.size() != 7 && t.size() != 8 && t.size() != 9 && t.size() != 10 && t.size() != 11
+                    && t.size() != 12)
                     throw std::runtime_error("Invalid state!");
                 HWKernelConfig c;
                 try {
@@ -930,8 +932,11 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     if (t.size() >= 10) {
                         c.enable_decode_cascade_attention = t[9].cast<bool>();
                     }
-                    if (t.size() == 11) {
+                    if (t.size() >= 11) {
                         c.enable_dynamic_decode_backend = t[10].cast<bool>();
+                    }
+                    if (t.size() >= 12) {
+                        c.dyn_decode_gate_thresholds = t[11].cast<std::optional<std::string>>();
                     }
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("HWKernelConfig unpickle error: ") + e.what());
