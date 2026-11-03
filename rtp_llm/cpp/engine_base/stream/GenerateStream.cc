@@ -1291,6 +1291,9 @@ void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info) {
         num_new_tokens = speculativeTokenCount(new_tokens, num_new_tokens);
         if (num_new_tokens <= 0) {
             if (needFinish()) {
+                if (queryPdSep() && update_info.update_remote_generate) {
+                    holdKVCacheForPDSep();
+                }
                 fillSubGenerateStatus(StreamState::FINISHED);
                 reportEventWithoutLock(StreamEvents::GenerateDone);
             }

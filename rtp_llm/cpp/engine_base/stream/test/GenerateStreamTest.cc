@@ -424,6 +424,12 @@ TEST_F(GenerateStreamTest, mtpProbabilitiesMatchOrdinaryOutputWindows) {
 
 TEST_F(GenerateStreamTest, mtpProbabilitiesFinishWhenSequenceBudgetIsExhausted) {
     auto stream = createMtpProbabilityStream(false);
+    auto manager = stream->resourceContext().cache_manager;
+    ASSERT_TRUE(manager->init());
+    const auto free_blocks = manager->freeBlocksNum();
+    ASSERT_TRUE(stream->initKVBlock().ok());
+    ASSERT_LT(manager->freeBlocksNum(), free_blocks);
+    stream->generateConfig()->pd_separation = true;
     stream->setReserveStep(stream->maxSeqLen() - stream->inputLength());
     ASSERT_EQ(stream->maxTokenNum(), 1);
 
@@ -436,6 +442,10 @@ TEST_F(GenerateStreamTest, mtpProbabilitiesFinishWhenSequenceBudgetIsExhausted) 
     auto result = stream->nextOutput(100);
     ASSERT_FALSE(result.ok());
     EXPECT_EQ(result.status().code(), ErrorCode::FINISHED);
+    stream->releaseResource();
+    EXPECT_LT(manager->freeBlocksNum(), free_blocks);
+    stream->releaseKVCacheForPDSep();
+    EXPECT_EQ(manager->freeBlocksNum(), free_blocks);
 }
 
 TEST_F(GenerateStreamTest, mtpProbabilitiesUseLastActuallyCommittedPosition) {
