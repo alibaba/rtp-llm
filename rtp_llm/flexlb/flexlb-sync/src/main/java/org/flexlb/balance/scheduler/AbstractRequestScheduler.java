@@ -120,6 +120,7 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
                         : StrategyErrorType.REQUEST_CANCELLED;
                 claim = ctx.requestCancel(new Cancellation(batchId, reason, false, System.currentTimeMillis(),
                         error, evidence == null ? message : String.valueOf(evidence.get("cause"))));
+                observeQueueDeadline(ctx, state, ctx.snapshot(), System.currentTimeMillis());
                 if (claim instanceof Granted<?> && evidence != null) { ctx.data().setSchedulingDiagnostics(evidence); }
             }
             if (claim instanceof Granted<CancelPermit> granted) {
@@ -226,6 +227,7 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
                     if (evidence != null) { ctx.data().setSchedulingDiagnostics(evidence); }
                 }
                 update = ctx.recordDeadline(exact, nowMs, diagnosis);
+                observeQueueDeadline(ctx, update.before(), update.after(), nowMs);
             }
             if (update.kind() == UpdateKind.STALE) { return; }
             accepted.submit(() -> {
@@ -351,6 +353,7 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
                 if (evidence != null) { ctx.data().setSchedulingDiagnostics(evidence); }
             }
             claim = ctx.beginDelivery(route, kind, batchId, nowMs);
+            observeQueueDeadline(ctx, before, ctx.snapshot(), nowMs);
             if (claim instanceof Granted<DeliveryClaim> granted) {
                 boolean transferred = false;
                 try {
@@ -892,5 +895,18 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
         closeRequest(ctx, new EndEvidence(state.route(), EndKind.FRONTEND, null, false, 0L,
                 cancellation.errorType(), cancellation.detail(), false, false), null);
     }
+    /** Called under the Context monitor; implementations must not acquire queue/endpoint locks. */
+    protected void onQueueDeadlineAccepted(RequestContext ctx, Snapshot before) { }
+
+    private void observeQueueDeadline(RequestContext ctx, Snapshot before, Snapshot after, long nowMs) {
+        if (before.phase() == Phase.OPEN && before.cancellation() == null && before.delivery() == null
+                && !before.engine().prefillObserved() && !before.engine().decodeAccepted()
+                && after.cancellation() != null && after.cancellation().reason() == CancelReason.DEADLINE_EXCEEDED
+                && (nowMs >= before.inactivityExpiresAtMs()
+                    || ctx.data().getRequestExpiresAtMs() > 0L && nowMs >= ctx.data().getRequestExpiresAtMs())) {
+            onQueueDeadlineAccepted(ctx, before);
+        }
+    }
+
     protected Map<String, Object> cancellationDiagnostics(RequestContext ctx, CancelReason reason, String detail) { return null; }
 }

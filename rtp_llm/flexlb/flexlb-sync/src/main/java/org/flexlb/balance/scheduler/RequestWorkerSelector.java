@@ -118,6 +118,18 @@ public class RequestWorkerSelector {
                 .anyMatch(role -> prefillSelector.hasEngineQueueAdmission(role, group));
     }
 
+    CostBasedPrefillStrategy.ColdAdmission coldPrefillAdmission(RequestContext context, String policyGroup) {
+        var request = context.data().getRequest();
+        var vit = request.getSelectedVit();
+        String group = vit == null ? policyGroup : vit.getGroup();
+        for (RoleType role : requiredRoles) {
+            if (role.supportsPrefill()) {
+                return prefillSelector.coldAdmission(request, context.data().getSchedulingMetadata(), role, group);
+            }
+        }
+        return CostBasedPrefillStrategy.ColdAdmission.UNKNOWN;
+    }
+
     PrefillQueueShedding.Estimate estimateQueuedWork(RequestContext context, String policyGroup) {
         // A pinned VIT selection further restricts the eligible Prefill pool.
         var selectedVit = context.data().getRequest().getSelectedVit();

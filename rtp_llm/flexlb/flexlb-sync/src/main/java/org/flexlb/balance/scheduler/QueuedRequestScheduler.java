@@ -26,6 +26,8 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
@@ -78,6 +80,7 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler imple
     private final double scanBudgetMultiplier;
     private final PrefillQueueSheddingConfig shedding;
     private long nextSheddingNanos;
+    private final java.util.function.LongSupplier protectionClock;
     private final Map<String, PrefillQueueShedding.Controller> sheddingControllers = new LinkedHashMap<>();
     private long nextRescueRetryNanos;
     private Set<PlacementKey> idleRescueDomains = Set.of();
@@ -92,7 +95,11 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler imple
     private final OrderedRequestQueue orderedQueue;
     private final PlacementCapacityWaitQueue waitingRequests;
     /** Entries exist only while the scheduler owns global placement. */
-    private final Map<RequestContext, GlobalQueueEntry> queuedEntries = new IdentityHashMap<>();
+    // Mutations remain decision-owned under lock; deadline observers only perform lock-free lookup.
+    private final Map<RequestContext, GlobalQueueEntry> queuedEntries = new ConcurrentHashMap<>();
+    private record QueueHardTimeout(String pool, long atMs) { }
+    private final ConcurrentLinkedQueue<QueueHardTimeout> hardTimeouts = new ConcurrentLinkedQueue<>();
+    private volatile Map<String, Object> coldProtectionSnapshot = Map.of();
     private final ArrayDeque<QueueEvent> events = new ArrayDeque<>();
     private final Set<Plan> pendingPreemptions = Collections.newSetFromMap(new IdentityHashMap<>());
     /** Waiting on local preemption slots, independent of physical Worker capacity edges. */
@@ -117,7 +124,17 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler imple
             DeliveryMetricsReporter reporter, DecodeCapacityAcquirer decodeCapacity,
             SchedulerRuntime runtime, PlacementAvailability availability,
             DecodeResources.AdmissionCapacity capacity, RecentCacheKeyTraceReporter traceReporter) {
+        this(config, router, reporter, decodeCapacity, runtime, availability, capacity, traceReporter,
+                () -> TimeUnit.NANOSECONDS.toMillis(System.nanoTime()));
+    }
+
+    QueuedRequestScheduler(FlexlbConfig config, RequestWorkerSelector router,
+            DeliveryMetricsReporter reporter, DecodeCapacityAcquirer decodeCapacity,
+            SchedulerRuntime runtime, PlacementAvailability availability,
+            DecodeResources.AdmissionCapacity capacity, RecentCacheKeyTraceReporter traceReporter,
+            java.util.function.LongSupplier protectionClock) {
         super(runtime, config, capacity, traceReporter);
+        this.protectionClock = Objects.requireNonNull(protectionClock, "protectionClock");
         this.queueSettings = QueueExecutionSettings.capture(config);
         this.router = Objects.requireNonNull(router, "router");
         this.reporter = Objects.requireNonNull(reporter, "reporter");
@@ -158,11 +175,30 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler imple
 
     public Map<String, Object> trafficTrendSnapshot() { return trafficTrendSnapshot; }
 
+    public Map<String, Object> coldRequestProtectionSnapshot() { return coldProtectionSnapshot; }
+
+    @Override
+    protected void onQueueDeadlineAccepted(RequestContext ctx, ContextResult.Snapshot before) {
+        if (shedding == null || !shedding.isSustainedOverloadProtection()) { return; }
+        String pool;
+        if (before.route() != null) {
+            if (!before.route().coldTokenBalance()) { return; }
+            pool = ctx.prefillQueuePool();
+        } else {
+            var entry = queuedEntries.get(ctx);
+            var blocker = entry == null ? null : entry.lastBlocker;
+            if (blocker == null || !blocker.role().supportsPrefill() || !entry.knownColdRequest) { return; }
+            pool = trafficPool(entry);
+        }
+        hardTimeouts.add(new QueueHardTimeout(pool, protectionClock.getAsLong()));
+    }
+
     /** Latest queue wait cause and counters; this snapshot is not specific to the current request. */
     Map<String, Object> getLatestQueueWaitSnapshot() {
-        if (trafficTrendSnapshot.isEmpty()) { return latestQueueWaitSnapshot; }
+        if (trafficTrendSnapshot.isEmpty() && coldProtectionSnapshot.isEmpty()) { return latestQueueWaitSnapshot; }
         var result = new LinkedHashMap<>(latestQueueWaitSnapshot);
-        result.put("trafficTrends", trafficTrendSnapshot);
+        if (!trafficTrendSnapshot.isEmpty()) { result.put("trafficTrends", trafficTrendSnapshot); }
+        if (!coldProtectionSnapshot.isEmpty()) { result.put("coldRequestProtection", coldProtectionSnapshot); }
         return Collections.unmodifiableMap(result);
     }
 
@@ -380,11 +416,15 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler imple
                     checkState(queuedEntries.putIfAbsent(entry.context, entry) == null,
                             "duplicate global queue identity");
                     if (event.kind == EventKind.REQUEUE) {
+                        entry.classifyArrival = false;
                         entry.context.data().setPlanType("");
                         entry.context.data().setPlanCost(0L);
                         entry.context.data().setVictimCount(0);
                         orderedQueue.restore(entry);
                     } else {
+                        if (shedding != null && shedding.isSustainedOverloadProtection()) {
+                            sheddingControllers.computeIfAbsent(trafficPool(entry), ignored -> new PrefillQueueShedding.Controller()).arrive();
+                        }
                         if (shedding != null && shedding.getRecovery() != null) {
                             trafficTrends.computeIfAbsent(trafficPool(entry),
                                     ignored -> new PrefillTrafficTrend(shedding.getRecovery()))
@@ -580,6 +620,14 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler imple
     }
 
     private void processCompletedPlan(Plan plan) {
+        plan.entry.context.setPrefillQueuePool(trafficPool(plan.entry));
+        if (shedding != null && shedding.isSustainedOverloadProtection()
+                && plan.entry.classifyArrival && plan.estimate != null) {
+            plan.entry.classifyArrival = false;
+            if (plan.estimate.hitTokens() == 0L) {
+                sheddingControllers.computeIfAbsent(trafficPool(plan.entry), ignored -> new PrefillQueueShedding.Controller()).coldArrival();
+            }
+        }
         boolean retry = false;
         boolean completingPreemption = plan.preemptionCompleted;
         Map<String, Object> diagnostics = plan.result.diagnostics();
@@ -867,6 +915,8 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler imple
         lock.lock();
         try {
             if (!(!plan.entry.removed && !plan.entry.context.data().getFuture().isDone())) { return true; }
+            plan.entry.knownColdRequest = plan.estimate != null && plan.estimate.hitTokens() == 0L;
+            plan.entry.lastBlocker = plan.waitKey;
             plan.entry.sheddingEstimate = plan.waitKey.role().supportsPrefill()
                     ? plan.estimate != null ? plan.estimate : new PrefillQueueShedding.Estimate(
                             Math.max(0L, plan.entry.context.data().getRequest().getSeqLen()), 0L, 0L, 1)
@@ -966,6 +1016,10 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler imple
         long nowNanos = System.nanoTime();
         if (shedding == null || nowNanos < nextSheddingNanos) { return; }
         nextSheddingNanos = nowNanos + TimeUnit.MILLISECONDS.toNanos(100L);
+        QueueHardTimeout hard;
+        while ((hard = hardTimeouts.poll()) != null) {
+            sheddingControllers.computeIfAbsent(hard.pool(), ignored -> new PrefillQueueShedding.Controller()).hardTimeout(hard.atMs());
+        }
         Map<String, List<PrefillQueueShedding.Candidate<GlobalQueueEntry>>> pools = new LinkedHashMap<>();
         List<GlobalQueueEntry> victims = new ArrayList<>();
         List<GlobalQueueEntry> expired = new ArrayList<>();
@@ -1016,39 +1070,71 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler imple
             trends.put(tracked.getKey() == null ? "<default>" : "group:" + tracked.getKey(), snapshot);
         }
         trafficTrendSnapshot = Collections.unmodifiableMap(trends);
+        // Empty pools still advance recovery; a temporary empty queue must not erase hard evidence.
+        for (String pool : sheddingControllers.keySet()) { pools.computeIfAbsent(pool, ignored -> List.of()); }
         for (var poolEntry : pools.entrySet()) {
             var pool = poolEntry.getValue();
             var snapshot = (PrefillTrafficTrend.Snapshot) trends.get(
                     poolEntry.getKey() == null ? "<default>" : "group:" + poolEntry.getKey());
-            if (router.hasEngineQueueAdmission(poolEntry.getKey())) {
-                sheddingControllers.remove(poolEntry.getKey());
-                continue;
-            }
             var controller = sheddingControllers.computeIfAbsent(poolEntry.getKey(), ignored -> new PrefillQueueShedding.Controller());
             victims.addAll(PrefillQueueShedding.adaptiveVictims(pool, shedding, snapshot, controller,
-                    TimeUnit.NANOSECONDS.toMillis(nowNanos)));
+                    protectionClock.getAsLong(), !router.hasEngineQueueAdmission(poolEntry.getKey())));
         }
-        sheddingControllers.keySet().retainAll(pools.keySet());
-        lock.lock();
-        try {
-            victims.removeIf(entry -> entry.context.data().getFuture().isDone()
-                    || entry.context.snapshot().cancellation() != null);
-            expired.forEach(this::removeRequest);
-            for (var victim : victims) {
-                var trend = trafficTrends.get(trafficPool(victim));
+        // Keep attribution alive until the real cancellation/publication wins Context arbitration.
+        for (var entry : expired) {
+            cancel(entry.context, 0L, CancelReason.DEADLINE_EXCEEDED);
+            removeRequest(entry);
+        }
+        Map<String, Integer> selected = new LinkedHashMap<>();
+        Map<String, Integer> accepted = new LinkedHashMap<>();
+        for (var victim : victims) {
+            String pool = trafficPool(victim);
+            selected.merge(pool, 1, Integer::sum);
+            if (victim.sheddingEstimate.hitTokens() == 0L) {
+                var domain = new PlacementKey(victim.lastBlocker.role(), pool, null);
+                long observed = availability.lastChangedSequence(domain);
+                var admission = router.coldPrefillAdmission(victim.context, victim.routingGroup);
+                if (admission != org.flexlb.balance.strategy.CostBasedPrefillStrategy.ColdAdmission.FULL
+                        || availability.lastChangedSequence(domain) != observed) {
+                    // Historical overload never overrides a current dispatch opportunity. Replan
+                    // without pinning a worker; cold selection still happens at real admission.
+                    lock.lock();
+                    try {
+                        if (!victim.removed && !victim.context.data().getFuture().isDone()) {
+                            waitingRequests.remove(victim);
+                            orderedQueue.markRequestReadyForRetry(victim);
+                            changed.signal();
+                        }
+                    } finally { lock.unlock(); }
+                    continue;
+                }
+            }
+            boolean published = completeDecisionResponse(victim, buildErrorResponse(StrategyErrorType.RESOURCE_EXHAUSTED,
+                    victim.sheddingEstimate.hitTokens() == 0L
+                            && TimeUnit.NANOSECONDS.toMillis(nowNanos - victim.queuedAtNanos) <= shedding.getExpectedWaitThresholdMs()
+                            ? "Prefill queue overload: sustained actual hard timeouts exhausted cold-request grace"
+                            : "Prefill queue overload: actual queue wait exceeded expectedWaitThresholdMs"));
+            if (published) {
+                accepted.merge(pool, 1, Integer::sum);
+                var trend = trafficTrends.get(pool);
                 if (trend != null) {
-                    int workers = poolWorkers.getOrDefault(trafficPool(victim), 0);
+                    int workers = poolWorkers.getOrDefault(pool, 0);
                     trend.discard((double) victim.sheddingEstimate.workMs()
                             / (workers > 0 ? workers : victim.sheddingEstimate.workers()));
                 }
-                removeRequest(victim);
             }
-        } finally { lock.unlock(); }
-        for (var entry : expired) { cancel(entry.context, 0L, CancelReason.DEADLINE_EXCEEDED); }
-        for (var entry : victims) {
-            completeDecisionResponse(entry, buildErrorResponse(StrategyErrorType.RESOURCE_EXHAUSTED,
-                    "Prefill queue overload: actual queue wait exceeded expectedWaitThresholdMs"));
+            removeRequest(victim);
         }
+        for (var count : selected.entrySet()) {
+            sheddingControllers.get(count.getKey()).recordEvictions(protectionClock.getAsLong(),
+                    count.getValue(), accepted.getOrDefault(count.getKey(), 0));
+        }
+        var protection = new LinkedHashMap<String, Object>();
+        if (shedding.isSustainedOverloadProtection()) {
+            sheddingControllers.forEach((pool, controller) -> protection.put(
+                    pool == null ? "<default>" : "group:" + pool, controller.protectionSnapshot()));
+        }
+        coldProtectionSnapshot = Collections.unmodifiableMap(protection);
     }
 
     private void removeRequest(GlobalQueueEntry entry) {
@@ -1063,11 +1149,12 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler imple
         } finally { if (acquire) { lock.unlock(); } }
     }
 
-    private void completeDecisionResponse(GlobalQueueEntry entry, Response response) {
-        try { publish(entry.context, response, false); }
+    private boolean completeDecisionResponse(GlobalQueueEntry entry, Response response) {
+        try { return publish(entry.context, response, false); }
         catch (Throwable failure) {
             Logger.error("Global queue response publication failed: request_id={}",
                     entry.context.data().getRequestId(), failure);
+            return false;
         }
     }
 

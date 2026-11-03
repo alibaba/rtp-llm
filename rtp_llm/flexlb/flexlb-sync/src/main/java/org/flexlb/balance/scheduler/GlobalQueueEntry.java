@@ -13,6 +13,10 @@ final class GlobalQueueEntry {
     final RequestContext context;
     final String routingGroup;
     PrefillQueueShedding.Estimate sheddingEstimate;
+    /** Exact request's last capacity blocker, readable by accepted deadline observers. */
+    volatile PlacementKey lastBlocker;
+    volatile boolean knownColdRequest;
+    boolean classifyArrival = true;
     final long queuedAtNanos = System.nanoTime();
     long sequence;
     volatile boolean removed = true;

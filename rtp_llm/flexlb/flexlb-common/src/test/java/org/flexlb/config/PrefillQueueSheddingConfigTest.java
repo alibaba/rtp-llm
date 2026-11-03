@@ -10,6 +10,12 @@ class PrefillQueueSheddingConfigTest {
                 + "},\"dispatcher\":{\"type\":\"NON_BATCH\"}}");
     }
 
+    @Test void sustainedProtectionDefaultsOnAndCanBeDisabled() {
+        assertTrue(parse("{}").queueScheduler().getPrefillQueueShedding().isSustainedOverloadProtection());
+        assertFalse(parse("{\"sustainedOverloadProtection\":false}").queueScheduler()
+                .getPrefillQueueShedding().isSustainedOverloadProtection());
+    }
+
     @Test void appliesDefaultThresholdsAndHardDeadline() {
         var config = parse("{}");
         assertEquals(30_000L, config.queueScheduler().getPrefillQueueShedding().getExpectedWaitThresholdMs());
