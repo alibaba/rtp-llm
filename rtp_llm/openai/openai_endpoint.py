@@ -2,7 +2,6 @@ import asyncio
 import itertools
 import json
 import logging
-from functools import partial
 from typing import Any, AsyncGenerator, List, Optional
 
 from fastapi import Request
@@ -23,7 +22,7 @@ from rtp_llm.config.py_config_modules import (
     VitConfig,
 )
 from rtp_llm.config.response_format import ResponseFormat, normalize_think_tag
-from rtp_llm.config.response_format_compiler import ReasoningFormat
+from rtp_llm.config.response_format_compiler import ReasoningFormat, ResponseFormatPlan
 from rtp_llm.config.thinking_mode import INT32_MAX
 from rtp_llm.frontend.recommendation_parser import parse_and_fill_banned_combo
 from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
@@ -355,18 +354,31 @@ class OpenaiEndpoint(object):
             config.max_new_tokens = backend_max_new_tokens
         elif request.max_tokens != None:
             config.max_new_tokens = request.max_tokens
-        config.add_thinking_params(
-            self.tokenizer,
+        # Model-specific request constraints must be installed before the
+        # common thinking/response-format compiler consumes grammar fields.
+        # This path is shared by single, batch, and chat_render requests.
+        self._apply_renderer_chat_constraints(renderer, request, config)
+        config.prepare_thinking_params(
             self.generate_env_config,
             enable_thinking=(
                 None
                 if config.thinking_mode == ThinkingMode.ADAPTIVE
                 else config.thinking_mode == ThinkingMode.ENABLED
             ),
-            reasoning_format=self._reasoning_format_for_prompt(
-                config, renderer, input_ids
-            ),
         )
+        build_plan = getattr(
+            renderer, "build_chat_completion_response_format_plan", None
+        )
+        if build_plan is None:
+            reasoning_format = config.prepare_thinking_boundaries(
+                self.tokenizer,
+                self.generate_env_config,
+                self._reasoning_format_for_prompt(config, renderer, input_ids),
+            )
+            plan = ResponseFormatPlan.compile(config, reasoning_format=reasoning_format)
+        else:
+            plan = build_plan(request, config, input_ids=input_ids)
+        plan.apply_to_config(config)
         if request.debug_info:
             config.return_output_ids = True
         return config
@@ -465,7 +477,10 @@ class OpenaiEndpoint(object):
         aux_info = None
         extra_outputs = None
         async for response in choice_generator:
-            if len(response.choices) != len(all_choices):
+            if not response.choices and response.usage is not None:
+                # The final usage-only stream frame does not replace choices.
+                pass
+            elif len(response.choices) != len(all_choices):
                 if all_choices == []:
                     all_choices = [
                         ChatCompletionResponseChoice(
@@ -711,7 +726,6 @@ class OpenaiEndpoint(object):
         parse_and_fill_banned_combo(
             rendered_input.rendered_prompt, generate_config, self.tokenizer
         )
-        self._apply_renderer_chat_constraints(renderer, chat_request, generate_config)
 
         mm_inputs = rendered_input.multimodal_inputs
 
@@ -874,6 +888,5 @@ class OpenaiEndpoint(object):
         generate_config = self._extract_generation_config(
             chat_request, rendered_input.input_ids, renderer
         )
-        self._apply_renderer_chat_constraints(renderer, chat_request, generate_config)
         debug_info = self._get_debug_info(renderer, rendered_input, generate_config)
         return debug_info
