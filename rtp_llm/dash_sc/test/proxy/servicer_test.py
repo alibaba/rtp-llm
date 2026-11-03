@@ -27,7 +27,11 @@ from rtp_llm.dash_sc.proxy.service_route_config import (
     load_service_route_config_from_env,
     parse_service_route_config,
 )
-from rtp_llm.dash_sc.proxy.servicer import DashScProxyServicer, _merge_trace_metadata
+from rtp_llm.dash_sc.proxy.servicer import (
+    _BUFFER_FIRST_CHUNK_ENV_KEY,
+    DashScProxyServicer,
+    _merge_trace_metadata,
+)
 from rtp_llm.telemetry import tracing
 from rtp_llm.utils.grpc_host_channel_pool import GrpcHostChannelPool
 
@@ -450,11 +454,34 @@ class ParameterValidationTest(unittest.IsolatedAsyncioTestCase):
         self.mock_stub.ModelStreamInfer.assert_called_once()
 
 
+class BufferFirstTokenConfigTest(unittest.IsolatedAsyncioTestCase):
+    async def test_default_preserves_buffering(self) -> None:
+        with patch.dict(os.environ):
+            os.environ.pop(_BUFFER_FIRST_CHUNK_ENV_KEY, None)
+            servicer = _make_servicer(["127.0.0.1:1"])
+        try:
+            self.assertTrue(servicer._buffer_first_chunk)
+        finally:
+            await servicer.close()
+
+    async def test_env_can_disable_buffering(self) -> None:
+        with patch.dict(os.environ, {_BUFFER_FIRST_CHUNK_ENV_KEY: "0"}):
+            servicer = _make_servicer(["127.0.0.1:1"])
+        try:
+            self.assertFalse(servicer._buffer_first_chunk)
+        finally:
+            await servicer.close()
+
+
 class BufferFirstTokenTest(unittest.IsolatedAsyncioTestCase):
     """First-chunk buffering preserves order, flushes on single-chunk end,
     re-raises cleanly on error."""
 
     async def asyncSetUp(self) -> None:
+        self.buffer_env_patcher = patch.dict(
+            os.environ, {_BUFFER_FIRST_CHUNK_ENV_KEY: "1"}
+        )
+        self.buffer_env_patcher.start()
         self.channel_patcher = patch(
             "rtp_llm.utils.grpc_host_channel_pool.aio.insecure_channel",
             side_effect=lambda addr, **_kwargs: _FakeChannel(addr),
@@ -470,6 +497,7 @@ class BufferFirstTokenTest(unittest.IsolatedAsyncioTestCase):
         await self.servicer.close()
         _stop_mock_stub(self.servicer)
         self.channel_patcher.stop()
+        self.buffer_env_patcher.stop()
 
     def _make_resp(self, tag: str) -> predict_v2_pb2.ModelStreamInferResponse:
         resp = _make_response()
@@ -519,6 +547,114 @@ class BufferFirstTokenTest(unittest.IsolatedAsyncioTestCase):
             )
         )
         self.assertEqual(out, [])
+
+    async def test_disabled_buffer_delivers_first_before_reading_second(self) -> None:
+        self.servicer._buffer_first_chunk = False
+        second_requested = asyncio.Event()
+
+        async def downstream_gen():
+            yield self._make_resp("first")
+            second_requested.set()
+            yield _make_finished_response()
+
+        self.mock_stub.ModelStreamInfer.return_value = downstream_gen()
+        ctx = MagicMock()
+        gen = self.servicer.ModelStreamInfer(_request_gen(_make_request()), ctx)
+        try:
+            first = await asyncio.wait_for(gen.__anext__(), timeout=1)
+            self.assertEqual(first.infer_response.id, "first")
+            self.assertFalse(second_requested.is_set())
+            remaining = await _drain(gen)
+            self.assertEqual(len(remaining), 1)
+            self.assertEqual(GrpcAccessRecord.from_context(ctx).buffered_stage, "disabled")
+        finally:
+            await gen.aclose()
+
+    async def test_disabled_buffer_stops_on_first_terminal_frame(self) -> None:
+        self.servicer._buffer_first_chunk = False
+
+        async def downstream_gen():
+            yield _make_finished_response()
+            self.fail("proxy read past the terminal frame")
+
+        self.mock_stub.ModelStreamInfer.return_value = downstream_gen()
+        out = await _drain(
+            self.servicer.ModelStreamInfer(_request_gen(_make_request()), MagicMock())
+        )
+        self.assertEqual(len(out), 1)
+
+    async def test_enabled_buffer_stops_on_first_terminal_frame(self) -> None:
+        async def downstream_gen():
+            yield _make_finished_response()
+            self.fail("proxy requested a second frame after stream end")
+
+        self.mock_stub.ModelStreamInfer.return_value = downstream_gen()
+        out = await _drain(
+            self.servicer.ModelStreamInfer(_request_gen(_make_request()), MagicMock())
+        )
+        self.assertEqual(len(out), 1)
+
+    async def _assert_cancellation_closes_backend(self, first_ready, buffering):
+        self.servicer._buffer_first_chunk = buffering
+        blocked = asyncio.Event()
+        release = asyncio.Event()
+        cancelled = MagicMock()
+
+        async def downstream_gen():
+            if first_ready:
+                yield self._make_resp("first")
+            blocked.set()
+            await release.wait()
+            self.fail("cancel should not wait for another backend frame")
+
+        class BlockingCall:
+            def __init__(self):
+                self.iterator = downstream_gen()
+
+            def __aiter__(self):
+                return self.iterator
+
+            def cancel(self):
+                cancelled()
+
+            async def aclose(self):
+                await self.iterator.aclose()
+
+        self.mock_stub.ModelStreamInfer.return_value = BlockingCall()
+        received = []
+
+        async def consume():
+            async for resp in self.servicer._forward(
+                self.mock_stub, "127.0.0.1:1", _request_gen(_make_request()),
+                MagicMock(), MagicMock(), (),
+            ):
+                received.append(resp.infer_response.id)
+
+        task = asyncio.create_task(consume())
+        try:
+            await asyncio.wait_for(blocked.wait(), timeout=1)
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await asyncio.wait_for(task, timeout=1)
+            cancelled.assert_called_once()
+            self.assertFalse(release.is_set())
+            self.assertEqual(received, ["first"] if first_ready and not buffering else [])
+        finally:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+    async def test_cancel_waiting_for_first_frame_closes_backend(self) -> None:
+        for buffering in (True, False):
+            with self.subTest(buffering=buffering):
+                await self._assert_cancellation_closes_backend(False, buffering)
+
+    async def test_cancel_waiting_for_second_frame_does_not_flush_buffer(self) -> None:
+        for buffering in (True, False):
+            with self.subTest(buffering=buffering):
+                await self._assert_cancellation_closes_backend(True, buffering)
 
     async def test_buffer_error_after_first_chunk_flushes_then_raises(self) -> None:
         class FakeRpcError(grpc.RpcError):
