@@ -137,7 +137,7 @@ vit:
 
 image_token_id 必须使用所选模型的实际值，示例值不代表 DSV4.1 的固定标记。text_config.hidden_size 控制视觉结果的逻辑字节预算。无关模型字段忽略；所需几何字段缺失或非法直接报错。
 
-`mock.vit.skip.download` 默认 false，Whale ENV 对应 `MOCK_VIT_SKIP_DOWNLOAD`。默认模式 GET 真实 HTTP(S) URL，仅读取图片头尺寸，不生成 RGB tensor；请求中的预处理 width/height 不冒充原图尺寸。支持 JDK ImageIO 图片格式（含 PNG/JPEG/GIF/BMP）及 WebP 头尺寸，其他格式明确拒绝。使用 real 的 `download_headers`（JSON 字符串）、`mm_image_max_file_size_kb` 和 `mm_timeout_ms`；沿用 DSV4.1 下载的 10 MiB 硬上限、60 秒总下载期限，并受任务剩余期限约束，瞬态失败最多尝试三次。队列等待同样计入任务期限。
+`mock.vit.skip.download` 默认 false，Whale ENV 对应 `MOCK_VIT_SKIP_DOWNLOAD`。默认模式 GET 真实 HTTP(S) URL，仅读取图片头尺寸，不生成 RGB tensor；请求中的预处理 width/height 不冒充原图尺寸。支持 JDK ImageIO 图片格式（含 PNG/JPEG/GIF/BMP）及 WebP 头尺寸，其他格式明确拒绝。使用 real 的 `download_headers`（JSON 字符串）、`mm_image_max_file_size_kb` 和 `mm_timeout_ms`；文件大小只按 mm_image_max_file_size_kb 限制，不叠加 10 MiB 上限；下载总期限最多 60 秒，并受任务剩余期限约束，瞬态失败最多尝试三次。队列等待同样计入任务期限。
 
 本地假 URL 设置 `mock.vit.skip.download=true`，从回放宽高获取尺寸；仍走同一执行器、准入、队列和完成流程，不模拟下载耗时，也不伪造下载指标。真实 URL 回放可省略宽高。几何继续使用 V4.1 `plan_image_grid`/`num_image_tokens`，参数来自模型 config.json 的 vision_config；视频、音频和 tensor 输入未实现。
 
@@ -273,7 +273,9 @@ java -jar java/host/target/mock-engine-service-1.0-SNAPSHOT-all.jar
 
 ## DSV4.1 Engine / KVCM 契约
 
-ViT 的 GetWorkerStatus 总是显式提供 `mm_inflight_inputs`（包括真实零值），计数来自去重后的媒体所有权；缓存命中不增加，重复等待者不重复增加，排队/执行/缓存结果发布完成前不提前减少。RPC 等待者数不是该指标。状态查询不经过阻塞的结果等待执行器。当前没有 GPU 预取、graph 和内容检查模型；实际下载仅用于读取尺寸，不模拟 tensor 预处理。
+ViT 的 GetWorkerStatus 总是显式提供 `mm_inflight_inputs`（包括真实零值），计数来自去重后的媒体所有权；缓存命中不增加，重复等待者不重复增加，排队/执行/缓存结果发布完成前不提前减少。RPC 等待者数不是该指标。状态查询不经过阻塞的结果等待执行器。真实图片由 Java 下载，ImageIO 读取 PNG/JPEG/GIF/BMP 尺寸，WebP 读取格式头；仅提取尺寸，不做完整像素解码校验。文件字节的 SHA-256 摘要与模型几何参数共同生成模拟特征身份，不执行神经网络或物化 embedding 张量，不依赖 Python、Pillow 或解码子进程。未知格式明确拒绝，不回退到请求中的尺寸提示；需要的新格式按实际输入补齐。
+
+V 仍按 URL/预处理 key 缓存和合并在途请求，命中时不重新下载；同 URL 内容变化需等缓存失效后重新读取。同一份文件通过不同 URL 获取时，在模型几何参数相同的条件下产生相同模拟特征身份；不同文件编码不保证 hash 相同，也不承诺与真实权重的 hash 数值一致。本地 `mock.vit.skip.download=true` 使用输入宽高和原有模拟身份，其余调度与计算路径相同。
 
 P 在 GENERATE 阶段发送 `prefill_kv_handoff.computed_kv_end`，为已计算 prompt 的排他边界，不包含首个采样 token。D 校验请求身份、已 LOAD 阶段和边界；缺省字段保留原生旧调用兼容，显式错误断言拒绝。未实现的 logprobs 请求明确返回 UNIMPLEMENTED，不伪造概率输出。
 
@@ -281,7 +283,9 @@ P 在 GENERATE 阶段发送 `prefill_kv_handoff.computed_kv_end`，为已计算 
 
 `shared/cache/KvcmReporter` 消费同一来源，按 real Meta HTTP `/api/registerInstance`、`/api/reportEvent` 编码注册、NODE_REGISTER、HEARTBEAT、BLOCK_SNAPSHOT、BLOCK_ADD、BLOCK_DELETE 和 HOST_DOWN。当前 Full-KV 只发布实际 HBM 驻留；迁移到 Host 发送 HBM 删除，恢复到 HBM 发送新增，Host-only 缓存不会冒充 HBM。注册模型、布局和 spec 由 RTP 装配方明确传入；Reporter 和共享 KvcmDiscovery 不依赖 RtpConfig 或 Scheduler；Reporter 统一拥有发现和传输资源的关闭责任。旧 backend/rtp/KvcmPublisher 已删除，没有双实现或兼容入口。
 
-变更使用有界内存队列（100000 条），每次最多取 1000 条，按同 key 最后一次转换合并，避免 Meta 先处理 ADD 再处理 DELETE 导致结果逆序。网络工作在独立线程中，每 20ms 检查增量、每秒心跳；网络失败、队列溢出或服务端要求恢复时，以当前快照修复，不扫描差集代替变更，也不保存磁盘事件历史。快照带本地版本界限，已被快照覆盖的队列事件会丢弃，避免旧事件覆盖新快照。正常关闭尽力上报 HOST_DOWN；意外退出由服务端心跳失效处理。
+变更使用有界内存队列（100000 条），每次最多取 1000 条，按同 key 最后一次转换合并，避免 Meta 先处理 ADD 再处理 DELETE 导致结果逆序。数据执行者每 20ms 检查注册、快照、增量和重试，串行管理待确认请求与 ACK；心跳执行者每秒发送心跳，只反馈重新注册、快照请求和远端启用状态，不操作快照载荷或版本。两者均不占用 Scheduler 线程。
+
+快照在缓存锁内一次捕获 HBM long[] 与版本，在锁外流式 JSON 编码，不构建逐 key JSON 对象树；仍保留完整请求体，并非零拷贝。未确认快照使用同一请求体、trace 和版本重试，确认前不发送后续增量；重新注册后丢弃旧快照并捕获当前状态。失败使用一套带抖动的指数退避，数据上报遵守 retry_after_ms（最多 5 分钟），不暂停独立心跳；首次快照按地址错峰，连续快照至少间隔 1 秒。控制请求超时 1.5 秒，快照上传超时 30 秒。队列溢出、增量发送失败和服务端恢复要求通过全量快照修复，不维护磁盘事件历史。快照确认后过滤版本界限以内的旧事件。关闭先停止心跳并收尾数据执行者，再尽力上报 HOST_DOWN；意外退出由服务端心跳失效处理。
 
 Master 与 KVCM 是两个独立消费者，不要求跨服务原子提交。KVCM 不可用时不会阻塞调度或 Master RPC；最近错误、注册状态和待发送数量可从 Engine 端点的 kvcm 状态查看。远端 KV 已提供统一准备流程和逻辑读写接口，但未安装真实存储适配；事件位置仅声明本地持有缓存，不能当成成功的远端 payload 写入。
 ```yaml
@@ -337,7 +341,7 @@ Prefill 的 context TPS 用计算 Tokens／执行时间，含缓存 TPS 用输�
 
 P/D 已补 `rtp_llm_{context,generate}_batch_size`、执行 Token 数、最长序列、逐请求等待/首 Token/总延迟、输入/输出长度与迭代数；`rtp_llm_stream_loading_cache_latency_us` 只统计 allocator loading 阶段，PD 协议等待不再混入。Query batch 的 native 语义是 beam 数，不能用调度批大小代替。
 
-ViT 使用相同的物理元数据与 Prometheus instance 发现；QPS、Embedding 队列/等待/Forward/合批、请求图片数/输出长度，以及缓存命中/未命中/在途合并/淘汰和逻辑驻留量均按 real 名称导出。实际读取时提供 py_rtp_vit_download_rt（ms）和 rtp_llm_vit_image_fetch_rt_us（μs）；跳过读取时不补零。py_rtp_vit_preprocess_queue_size 是尚未完成准备的工作数（含排队和执行），py_rtp_vit_embedding_rt 仅计成功工作的就绪排队加 Forward，py_rtp_vit_request_rt 覆盖阻塞媒体调用的成功/失败全程，包括缓存命中等待但不含 RPC 传输和输出编码。未实现的预处理子进程和 CUDA Graph 不补零。详见 [指标覆盖与边界](../views/README.md)。
+ViT 使用相同的物理元数据与 Prometheus instance 发现；QPS、Embedding 队列/等待/Forward/合批、请求图片数/输出长度，以及缓存命中/未命中/在途合并/淘汰和逻辑驻留量均按 real 名称导出。实际读取时提供 py_rtp_vit_download_rt（ms）和 rtp_llm_vit_image_fetch_rt_us（μs）；跳过读取时不补零。py_rtp_vit_preprocess_queue_size 是尚未完成准备的工作数（含排队和执行），py_rtp_vit_embedding_rt 仅计成功工作的就绪排队加 Forward，py_rtp_vit_request_rt 覆盖阻塞媒体调用的成功/失败全程，包括缓存命中等待但不含 RPC 传输和输出编码。未实现的像素预处理和 CUDA Graph 指标不补零。详见 [指标覆盖与边界](../views/README.md)。
 
 新增事件 Gauge 为采集窗口均值，无事件的窗口不发耗时样本；其 `_sum` / `_count` 辅助累计量不清零。QPS 使用真实窗口秒数换算，空闲归零；窗口与 KMonitor 固定周期不保证逐点相同。原有 Forward 最近值与 Histogram 口径保持不变。
 

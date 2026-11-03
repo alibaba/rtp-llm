@@ -69,7 +69,7 @@ final class VitService extends MultimodalRpcServiceGrpc.MultimodalRpcServiceImpl
     private MultimodalOutputPB output(List<VitGeometry.Image> images) throws Exception {
         int rows=images.stream().mapToInt(VitGeometry.Image::rows).sum();var hashes=new ByteArrayOutputStream();
         var output=MultimodalOutputPB.newBuilder();
-        for(var image:images) { output.addSplitSize(image.rows());VitGeometry.hashes(image.key(),image.rows()).writeTo(hashes); }
+        for(var image:images) { output.addSplitSize(image.rows());VitGeometry.hashes(image.featureIdentity(),image.rows()).writeTo(hashes); }
         return output.setMultimodalEmbedding(TensorPB.newBuilder().setDataType(TensorPB.DataType.BF16).addShape(rows).addShape(config.hidden()))
             .setMultimodalFeatureHash(TensorPB.newBuilder().setDataType(TensorPB.DataType.INT32).addShape(rows).setInt32Data(ByteString.copyFrom(hashes.toByteArray()))).build();
     }
@@ -104,7 +104,7 @@ final class VitService extends MultimodalRpcServiceGrpc.MultimodalRpcServiceImpl
                 var image=computed.get(key);if(image==null) image=cache.hash(key);
                 var entry=MultimodalHashEntryPB.newBuilder().setKey(key);String tier=cache.tier(key);
                 entry.setEmbeddingHit(!tier.isEmpty()).setEmbeddingTier(tier);
-                if(image!=null) entry.setHashHit(true).setEntryGeneration(instance+":"+key).addSplitSize(image.rows()).setFeatureHashes(VitGeometry.hashes(key,image.rows()));
+                if(image!=null) entry.setHashHit(true).setEntryGeneration(instance+":"+key).addSplitSize(image.rows()).setFeatureHashes(VitGeometry.hashes(image.featureIdentity(),image.rows()));
                 result.addEntries(entry);
             }
             return result.build();

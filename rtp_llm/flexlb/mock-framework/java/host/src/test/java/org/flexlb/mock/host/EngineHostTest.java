@@ -130,4 +130,53 @@ class EngineHostTest {
         assertThrows(IllegalArgumentException.class, () -> new EngineHostApi.Create("prefill-0", 12345, 12345));
     }
 
+    @Test void urlOnlyFrontendRequestDownloadsRealImageAndCompletesPrefillDecode() throws Exception {
+        var json = new ObjectMapper();
+        var model = directory.resolve("model"); Files.createDirectory(model);
+        json.writeValue(model.resolve("config.json").toFile(), Map.of("image_token_id", 1000,
+            "text_config", Map.of("hidden_size", 4),
+            "vision_config", Map.of("patch_size", 14, "downsample_ratio", 3, "min_pixels", 0, "max_image_tokens", 1024)));
+        var png = new java.io.ByteArrayOutputStream();
+        javax.imageio.ImageIO.write(new java.awt.image.BufferedImage(56, 28, java.awt.image.BufferedImage.TYPE_INT_RGB), "png", png);
+        var downloads = new java.util.concurrent.atomic.AtomicInteger();
+        var images = com.sun.net.httpserver.HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        images.createContext("/image", exchange -> {
+            try (exchange) {
+                downloads.incrementAndGet(); byte[] bytes = png.toByteArray();
+                exchange.sendResponseHeaders(200, bytes.length); exchange.getResponseBody().write(bytes);
+            }
+        }); images.start();
+        var pConfig = json.<ObjectNode>valueToTree(configuration("prefill"));
+        var dConfig = json.<ObjectNode>valueToTree(configuration("decode"));
+        for (var root : List.of(pConfig, dConfig)) ((ObjectNode) root.path("component").path("config"))
+            .put("checkpoint_path", model.toString()).put("seq_size_per_block", 2).put("reuse_cache", true);
+        var vConfig = org.flexlb.mock.vit.VitConfig.load(json.valueToTree(Map.of("id", "vit-0", "component_role", "vit",
+            "component", Map.of("config", Map.of("checkpoint_path", model.toString(), "vit_concurrency", 2,
+                "mock.compute.forward.expression", "1")))));
+        try (var p = org.flexlb.mock.engine.rtp.RtpNode.start(org.flexlb.mock.engine.rtp.RtpConfig.load(pConfig));
+             var d = org.flexlb.mock.engine.rtp.RtpNode.start(org.flexlb.mock.engine.rtp.RtpConfig.load(dConfig));
+             var v = org.flexlb.mock.vit.VitNode.start(vConfig, 0, 0)) {
+            int dPort = Integer.parseInt(d.rpcAddress().split(":")[1]);
+            int vPort = URI.create("http://" + v.endpoints().get("rpc")).getPort();
+            var request = GenerateInputPB.newBuilder().setRequestId(123).addAllTokenIds(List.of(7, 1000, 8))
+                .addMultimodalInputs(MultimodalInputPB.newBuilder().setMultimodalType(1)
+                    .setMultimodalUrl("http://127.0.0.1:" + images.getAddress().getPort() + "/image"))
+                .setGenerateConfig(GenerateConfigPB.newBuilder().setMaxNewTokens(3).setIgnoreEos(true).setReuseCache(true)
+                    .setCanUsePdSeparation(true).setTimeoutMs(5000).setReturnIncremental(true)
+                    .addRoleAddrs(RoleAddrPB.newBuilder().setRole(RoleAddrPB.RoleType.DECODE).setIp("127.0.0.1").setGrpcPort(dPort))
+                    .addRoleAddrs(RoleAddrPB.newBuilder().setRole(RoleAddrPB.RoleType.VIT).setIp("127.0.0.1").setGrpcPort(vPort))).build();
+            var channel = ManagedChannelBuilder.forTarget(p.rpcAddress()).usePlaintext().build();
+            try {
+                var replies = RpcServiceGrpc.newBlockingStub(channel).withDeadlineAfter(8, TimeUnit.SECONDS).generateStreamCall(request);
+                GenerateOutputsPB last = null;
+                while (replies.hasNext()) {
+                    last = replies.next(); assertEquals(7, last.getFlattenOutput().getAuxInfo(0).getInputLen());
+                }
+                assertNotNull(last); assertTrue(last.getFlattenOutput().getFinished(0));
+                assertEquals(3, last.getFlattenOutput().getAuxInfo(0).getOutputLen());
+                assertEquals(1, downloads.get());
+            } finally { channel.shutdownNow().awaitTermination(2, TimeUnit.SECONDS); }
+        } finally { images.stop(0); }
+    }
+
 }
