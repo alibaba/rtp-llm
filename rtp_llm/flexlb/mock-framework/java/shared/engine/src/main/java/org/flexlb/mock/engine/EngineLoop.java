@@ -1,9 +1,6 @@
 package org.flexlb.mock.engine;
 
 import java.util.List;
-import java.util.ArrayList;
-import java.util.LinkedHashMap;
-import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.*;
 import java.util.function.Supplier;
@@ -17,16 +14,7 @@ public final class EngineLoop implements AutoCloseable {
     private final java.util.concurrent.locks.ReentrantLock signal = new java.util.concurrent.locks.ReentrantLock();
     private final java.util.concurrent.locks.Condition changed = signal.newCondition();
     private final Scheduler scheduler;
-    private final TaskHistory finished = new TaskHistory();
-    private final Map<String, Admission> admissions = new LinkedHashMap<>();
-
-    /** Opaque pre-submission identity. Execution state stays in the Scheduler. */
-    public final class Admission {
-        private final String identity;
-        private final Scheduler.Task task;
-        private boolean pending = true;
-        private Admission(String identity, Scheduler.Task task) { this.identity = identity; this.task = task; }
-    }
+    private final TaskHistory finished;
     private final KvCache cache;
     private final ComputeModel model;
     private final Role role;
@@ -45,8 +33,9 @@ public final class EngineLoop implements AutoCloseable {
         Pending(Scheduler.Work work) { this.work = work; }
     }
 
-    public EngineLoop(Object lock, Scheduler.Factory schedulers, KvCache cache, ComputeModel model, Role role, String identity) {
+    public EngineLoop(Object lock, Scheduler.Factory schedulers, TaskHistory finished, KvCache cache, ComputeModel model, Role role, String identity) {
         this.lock = Objects.requireNonNull(lock);
+        this.finished = Objects.requireNonNull(finished);
         this.scheduler = Objects.requireNonNull(schedulers.create(lock, cache, finished));
         this.cache = Objects.requireNonNull(cache);
         this.model = Objects.requireNonNull(model);
@@ -54,72 +43,6 @@ public final class EngineLoop implements AutoCloseable {
         this.identity = Objects.requireNonNull(identity);
         cache.onChange(this::wake);
         Thread.ofVirtual().name("mock-engine-" + identity).start(this::run);
-    }
-
-    public Admission beginAdmission(String identity, Scheduler.Task task) {
-        synchronized (lock) {
-            ensureOpen();
-            if (admissions.containsKey(identity) || scheduler.requests().stream().anyMatch(r -> r.input().identity().equals(identity)))
-                throw new RequestFailure(RequestFailure.Reason.DUPLICATE, "Active request identity already exists");
-            var admission = new Admission(identity, Objects.requireNonNull(task));
-            admissions.put(identity, admission);
-            return admission;
-        }
-    }
-
-    public Scheduler.Request input(Admission admission, Scheduler.Input input, Scheduler.Listener listener) {
-        return change(() -> {
-            ensureOpen(); requirePending(admission, input);
-            var request = scheduler.input(input, listener);
-            submitted(admission);
-            return request;
-        });
-    }
-
-    public List<Scheduler.InputResult> input(List<Admission> pending, List<Scheduler.InputItem> batch) {
-        return change(() -> {
-            ensureOpen();
-            if (pending.size() != batch.size()) throw new IllegalArgumentException("Admission count differs from batch");
-            var eligible = new ArrayList<Scheduler.InputItem>();
-            var positions = new ArrayList<Integer>();
-            var results = new ArrayList<Scheduler.InputResult>(java.util.Collections.nCopies(batch.size(), null));
-            for (int i = 0; i < pending.size(); i++) {
-                try {
-                    requirePending(pending.get(i), batch.get(i).input());
-                    eligible.add(batch.get(i)); positions.add(i);
-                } catch (RequestFailure failure) { results.set(i, new Scheduler.InputResult(null, failure)); }
-            }
-            if (!eligible.isEmpty()) {
-                var accepted = scheduler.input(List.copyOf(eligible));
-                for (int i = 0; i < accepted.size(); i++) {
-                    int position = positions.get(i);
-                    if (accepted.get(i).failure() == null) submitted(pending.get(position));
-                    results.set(position, accepted.get(i));
-                }
-            }
-            return List.copyOf(results);
-        });
-    }
-
-    /** Only a still-pending admission may publish a pre-execution terminal record. */
-    public void finishAdmission(Admission admission, RequestFailure failure) {
-        synchronized (lock) {
-            if (!admission.pending || admissions.get(admission.identity) != admission) return;
-            submitted(admission);
-            var t = admission.task;
-            finished.add(new Scheduler.Task(t.requestId(), t.batchId(), t.inputLength(), 0, t.priority(),
-                Scheduler.ReportedPhase.PENDING, 0, 0, 0, System.currentTimeMillis(), failure));
-        }
-    }
-
-    private void requirePending(Admission admission, Scheduler.Input input) {
-        if (!admission.pending || admissions.get(admission.identity) != admission)
-            throw new RequestFailure(RequestFailure.Reason.CANCELLED, "Admission already ended");
-        if (!admission.identity.equals(input.identity())) throw new IllegalArgumentException("Admission identity changed");
-    }
-    private void submitted(Admission admission) {
-        admissions.remove(admission.identity, admission);
-        admission.pending = false;
     }
 
     public Scheduler.Request input(Scheduler.Input input, Scheduler.Listener listener) {
@@ -145,8 +68,7 @@ public final class EngineLoop implements AutoCloseable {
         synchronized (lock) {
             checkFailure();
             var counts = scheduler.queues();
-            var tasks = new ArrayList<>(scheduler.tasks());
-            admissions.values().forEach(admission -> tasks.add(admission.task));
+            var tasks = scheduler.tasks();
             return finished.snapshot(latestFinishedVersion, tasks, counts.waiting(), counts.running());
         }
     }
@@ -267,8 +189,6 @@ public final class EngineLoop implements AutoCloseable {
         if (closed) return;
         closed = true;
         cache.onChange(() -> {});
-        for (var admission : List.copyOf(admissions.values()))
-            finishAdmission(admission, new RequestFailure(RequestFailure.Reason.CLOSED, "Engine closed before submission"));
         scheduler.close();
         if (pending != null) {
             var current = pending;

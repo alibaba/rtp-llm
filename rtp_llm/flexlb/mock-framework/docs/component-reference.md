@@ -149,7 +149,7 @@ Embedding Device/Host 按逻辑 rows*hidden_size*BF16(2 bytes) 计费，各自 L
 
 Client 按 Master 的 V-only route 选 V，读取元数据、计算路由长度和缓存 key，再带 selected_vit 与原始输入请求完整 P/D 路由；Master 切换使 pin 失效时重新取一次 V 路由。P 在输入准备完成后才把规范化 token 序列交给 KV/Scheduler，并用同一输入准备 D ALLOCATE 和 PD 交接。P 的输入准备发生在调度锁外，受原请求 deadline/取消约束；这段准备暂不计入 P Scheduler 的队列快照，但计入 Client 端到端耗时。D 接收已准备输入，不重复编码。
 
-P 的本地单 token、P/D 单请求和 Master batch 都由 PrefillAdmission 管理输入准备，RpcService 只负责路由。提交 Scheduler 的单个与批量入口只接受已准备输入，不在调度器里调用 V。准备前登记 PENDING，提交成功后在同一执行锁内交给 Scheduler；准备失败同样发布 finished 增量，但不增加计算请求和队列指标。开始时间和 deadline 在接入时确定，显式组不会在准备结束后重置预算。
+P 的本地单 token、P/D 单请求和 Master batch 都由 PrefillAdmission 管理输入准备，RpcService 只负责路由。提交 Scheduler 的单个与批量入口只接受已准备输入，不在调度器里调用 V。接入层直接用 Session 登记 PENDING，并负责过滤已取消的 Batch 成员、整理逐项结果；提交成功后在同一执行锁内交给 Scheduler；准备失败同样发布 finished 增量，但不增加计算请求和队列指标。开始时间和 deadline 在接入时确定，显式组不会在准备结束后重置预算。
 
 VP 同 JVM 和跨进程都走 TCP gRPC，只传 shape/dtype、split_size 和逐行 INT32 hash，不生成 embedding payload，也不伪造 RDMA lease。Mock P 校验形状、长度和展开 span 后使用；此响应不能交给真实 tensor 解码器，VP 网络带宽和 GPU 内存复制不在模拟范围内。
 

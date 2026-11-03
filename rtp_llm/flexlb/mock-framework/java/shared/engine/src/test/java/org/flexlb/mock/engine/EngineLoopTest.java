@@ -44,7 +44,7 @@ class EngineLoopTest {
         public RequestState.Use beginTransfer(Request request) { throw new UnsupportedOperationException(); }
     }
     private EngineLoop engine(Object lock, Policy policy, String expression) {
-        return new EngineLoop(lock, (domain, cache, finished) -> policy, new org.flexlb.mock.cache.KvCache(1, 1, 0, org.flexlb.mock.cache.KvCache.EvictionPolicy.LRU), new ComputeModel(new ComputeSpec(new ComputeSpec.Forward(expression, null), null, null)), Role.prefill, "test");
+        return new EngineLoop(lock, (domain, cache, finished) -> policy, new TaskHistory(), new org.flexlb.mock.cache.KvCache(1, 1, 0, org.flexlb.mock.cache.KvCache.EvictionPolicy.LRU), new ComputeModel(new ComputeSpec(new ComputeSpec.Forward(expression, null), null, null)), Role.prefill, "test");
     }
 
     @Test void healthChecksDoNotCollectWindowMetricsAndExposeLoopFailures() throws Exception {
@@ -201,7 +201,7 @@ class EngineLoopTest {
                     lease.close(); super.computeCompleted(work, result);
                 }
             };
-            try (var loop = new EngineLoop(policy, (domain, storage, finished) -> policy, cache, new ComputeModel(new ComputeSpec(new ComputeSpec.Forward("1", null), null, null)), Role.prefill, "capacity")) {
+            try (var loop = new EngineLoop(policy, (domain, storage, finished) -> policy, new TaskHistory(), cache, new ComputeModel(new ComputeSpec(new ComputeSpec.Forward("1", null), null, null)), Role.prefill, "capacity")) {
                 loop.wake();
                 assertTrue(tried.await(2, TimeUnit.SECONDS));
                 Thread.sleep(100);

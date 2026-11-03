@@ -18,7 +18,7 @@ final class DecodeAdmission implements AutoCloseable {
 
     DecodeAdmission(AdmissionConfig config, KvCache cache, Scheduler.Factory schedulers) {
         this.config = config;
-        engine = new EngineLoop(this, schedulers, cache, config.compute(), config.role(), config.id());
+        engine = new EngineLoop(this, schedulers, new TaskHistory(), cache, config.compute(), config.role(), config.id());
     }
 
     StreamObserver<GenerateRequestPB> open(StreamObserver<GenerateOutputsPB> observer) {
