@@ -652,11 +652,17 @@ class CustomChatRenderer:
         if not status.request.logprobs:
             return None
         count = len(status.output_ids) - status.emitted_logprobs_count
+        return self._drain_token_probabilities(status, count, track_emitted_count=True)
+
+    def _drain_token_probabilities(
+        self, status: StreamStatus, count: int, *, track_emitted_count: bool = False
+    ) -> List[ChatCompletionTokenLogprob]:
         if count < 0 or count > len(status.pending_token_probs):
             raise ValueError("target probabilities do not cover emitted tokens")
         token_probs = status.pending_token_probs[:count]
         del status.pending_token_probs[:count]
-        status.emitted_logprobs_count += count
+        if track_emitted_count:
+            status.emitted_logprobs_count += count
         result = []
         for token_id, all_probs in token_probs:
             if token_id < 0 or token_id >= all_probs.numel():

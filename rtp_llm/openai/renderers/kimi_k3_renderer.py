@@ -34,7 +34,6 @@ from rtp_llm.openai.api_datatype import (
     FunctionCall,
     RoleEnum,
     ToolCall,
-    TopLogprob,
     UsageInfo,
     get_tool_choice_function_name,
 )
@@ -910,46 +909,6 @@ class KimiK3Renderer(CustomChatRenderer):
         if not status.request.logprobs:
             return None
         return self._drain_token_probabilities(status, status.last_token_length)
-
-    def _drain_token_probabilities(self, status, count):
-        if count > len(status.pending_token_probs):
-            raise ValueError("K3 target probabilities do not cover emitted tokens")
-        rows = status.pending_token_probs[:count]
-        del status.pending_token_probs[:count]
-        result = []
-        for token_id, probs in rows:
-            if token_id < 0 or token_id >= probs.numel():
-                raise ValueError("K3 output token is outside target vocabulary")
-            token = self.tokenizer.decode([token_id])
-            selected_prob = probs[token_id].log().item()
-            top_count = min(
-                (
-                    1
-                    if status.request.top_logprobs is None
-                    else status.request.top_logprobs
-                ),
-                int(probs.count_nonzero()),
-            )
-            top_probs, top_ids = probs.topk(top_count)
-            top_logprobs = []
-            for other_prob, other_id in zip(top_probs, top_ids):
-                other_token = self.tokenizer.decode([int(other_id)])
-                top_logprobs.append(
-                    TopLogprob(
-                        token=other_token,
-                        logprob=other_prob.log().item(),
-                        bytes=list(other_token.encode("utf-8", errors="replace")),
-                    )
-                )
-            result.append(
-                ChatCompletionTokenLogprob(
-                    token=token,
-                    logprob=selected_prob,
-                    bytes=list(token.encode("utf-8", errors="replace")),
-                    top_logprobs=top_logprobs,
-                )
-            )
-        return result
 
     @override
     async def _flush_buffer(

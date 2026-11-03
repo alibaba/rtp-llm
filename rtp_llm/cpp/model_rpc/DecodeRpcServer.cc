@@ -1610,14 +1610,6 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCache(const LoadKVCacheCon
         }
 
         auto ip_parts = autil::StringUtil::split(peer_addr, ":");
-        if (ip_parts.size() != 3) {
-            logReadFailures(load_context.request_id,
-                            peer_addr,
-                            ErrorCode::LOAD_KV_CACHE_FAILED,
-                            "invalid_peer",
-                            {});
-            return {ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED, "invalid peer ip"), 0};
-        }
 
         for (auto& [source_partition, layer_caches] : load_batches) {
             auto layer_cache_load_context =

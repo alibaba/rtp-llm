@@ -1090,7 +1090,7 @@ def is_same_host_group(group):
     return len(set(hosts)) == 1
 
 
-def _all_ready(ready: bool, group, device) -> bool:
+def _all_ready(ready: bool, group) -> bool:
     from rtp_llm.models_py.distributed.symm_mem import _agree_across_group
 
     return _agree_across_group(group, ready, "collective_workspace")
@@ -1130,7 +1130,7 @@ def create_push_reduce_scatter(group, device, *, max_m: int, n: int):
         )
     except Exception as exc:
         failure = str(exc)
-    if not _all_ready(not failure, group, device):
+    if not _all_ready(not failure, group):
         logging.info("[PUSH_RS] NCCL fallback: %s", failure or "unsupported peer")
         return None
 
@@ -1154,7 +1154,7 @@ def create_push_reduce_scatter(group, device, *, max_m: int, n: int):
             )
     except Exception as exc:
         failure = str(exc)
-    if not _all_ready(not failure, group, device):
+    if not _all_ready(not failure, group):
         logging.info(
             "[PUSH_RS] NCCL fallback: %s", failure or "unsupported peer topology"
         )
@@ -1172,7 +1172,7 @@ def create_push_reduce_scatter(group, device, *, max_m: int, n: int):
         )
     except Exception as exc:
         failure = str(exc)
-    if not _all_ready(not failure, group, device):
+    if not _all_ready(not failure, group):
         logging.warning(
             "[PUSH_RS] NCCL fallback allocating workspace: %s",
             failure or "peer allocation failed",
@@ -1188,7 +1188,7 @@ def create_push_reduce_scatter(group, device, *, max_m: int, n: int):
         storage.zero_()
     except Exception as exc:
         failure = str(exc)
-    if not _all_ready(not failure, group, device):
+    if not _all_ready(not failure, group):
         logging.warning(
             "[PUSH_RS] NCCL fallback mapping workspace: %s",
             failure or "peer mapping failed",
@@ -1330,7 +1330,7 @@ def create_custom_all_gather(
         )
     except Exception as exc:
         failure = str(exc)
-    if not _all_ready(not failure, group, device):
+    if not _all_ready(not failure, group):
         logging.info(
             "[CUSTOM_AG] existing backend retained: %s", failure or "unsupported peer"
         )
@@ -1356,7 +1356,7 @@ def create_custom_all_gather(
             )
     except Exception as exc:
         failure = str(exc)
-    if not _all_ready(not failure, group, device):
+    if not _all_ready(not failure, group):
         logging.info(
             "[CUSTOM_AG] existing backend retained: %s",
             failure or "unsupported topology",
@@ -1399,7 +1399,7 @@ def create_custom_all_gather(
     except Exception as exc:
         failure = str(exc)
     # Agree before entering any rendezvous, including when only one rank OOMs.
-    if not _all_ready(not failure, group, device):
+    if not _all_ready(not failure, group):
         logging.warning(
             "[CUSTOM_AG] workspace allocation failed: %s",
             failure or "peer allocation failed",
@@ -1414,7 +1414,7 @@ def create_custom_all_gather(
             handles[name] = handle
         except Exception as exc:
             failure = str(exc)
-        if not _all_ready(not failure, group, device):
+        if not _all_ready(not failure, group):
             logging.warning(
                 "[CUSTOM_AG] multicast mapping failed: %s",
                 failure or "peer mapping failed",
@@ -1723,7 +1723,6 @@ class MlaDcpCommunicator:
             or min(local_heads, q_dim, latent_dim) <= 0
         ):
             raise ValueError("MLA DCP requires BF16/E4M3 Q and an even latent dimension")
-        self.backend = "a2a"
         self._pack_a2a, self._combine_a2a = _get_mla_dcp_kernels()
         logging.info(
             "[MLA_DCP] backend=a2a tp=%d rank=%d world_rank=%d dp_rank=%d",

@@ -36,7 +36,6 @@ class KimiK3LoadFp8Weight(LoadQuantPerBlockFp8Weight):
         quant_config,
         *,
         derive_mla=False,
-        layer_id=-1,
         replicate_q_weights=False,
     ):
         if src_weight_info.name not in self.w8a8_weight_list:
@@ -44,7 +43,6 @@ class KimiK3LoadFp8Weight(LoadQuantPerBlockFp8Weight):
                 f"not a K3 FP8 attention projection: {src_weight_info.name}"
             )
         super().__init__(src_weight_info, quant_config, name=src_weight_info.name)
-        self.layer_id = layer_id
         self.tp_ranges = None
         self.source = src_weight_info
         self.derive_mla = derive_mla

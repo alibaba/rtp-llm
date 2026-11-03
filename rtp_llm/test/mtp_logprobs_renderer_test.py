@@ -144,6 +144,39 @@ class MtpLogprobsRendererTest(unittest.TestCase):
         )
         self.assertEqual(self._render_probs(second), [])
 
+    def test_k3_consumes_visible_rows_without_advancing_generic_counter(self):
+        request = ChatCompletionRequest(
+            messages=[ChatMessage(role=RoleEnum.user, content="test")],
+            logprobs=True,
+            top_logprobs=0,
+        )
+        self.status = _KimiK3StreamStatus(request, thinking=False)
+        output = _output([1, 2], [[0.1, 0.7, 0.2, 0.0], [0.1, 0.2, 0.7, 0.0]])
+        self._update(output)
+        self.status.last_token_length = 1
+        renderer = KimiK3Renderer.__new__(KimiK3Renderer)
+        renderer.tokenizer = _Tokenizer()
+
+        content = asyncio.run(renderer._generate_log_probs(self.status, output))
+
+        self.assertEqual([item.token for item in content], ["A"])
+        self.assertEqual(len(self.status.pending_token_probs), 1)
+        self.assertEqual(self.status.emitted_logprobs_count, 0)
+        remaining = renderer._drain_token_probabilities(self.status, 1)
+        self.assertEqual([item.token for item in remaining], ["B"])
+        self.assertEqual(self.status.pending_token_probs, [])
+        self.assertEqual(self.status.emitted_logprobs_count, 0)
+
+    def test_generic_counter_advances_with_consumed_rows_on_decode_error(self):
+        output = _output([4], [[0.1, 0.2, 0.3, 0.4]])
+        self._update(output)
+
+        with self.assertRaisesRegex(ValueError, "outside target vocabulary"):
+            self._render_probs(output)
+
+        self.assertEqual(self.status.pending_token_probs, [])
+        self.assertEqual(self.status.emitted_logprobs_count, 1)
+
     def test_stop_token_is_not_reported_as_visible_content(self):
         output = _output(
             [1, 2, 3],

@@ -285,21 +285,17 @@ class KimiK3MlaImpl(MlaImplBase):
             if self.kv_cache_type == KvCacheDataType.FP8:
                 restored = restored.to(torch.bfloat16)
             q_offsets = self._prefix_q_offsets
-            latent = torch.cat([
-                torch.cat((
-                    restored.narrow(0, sum(self._prefix_lens[:i]), prefix)[:, :self.kv_lora_rank],
-                    compressed_kv.narrow(0, q_offsets[i], q_offsets[i + 1] - q_offsets[i]),
-                ), dim=0)
-                for i, prefix in enumerate(self._prefix_lens)
-            ], dim=0)
-            suffix = torch.cat([
-                torch.cat((
-                    restored.narrow(0, sum(self._prefix_lens[:i]), prefix)[:, self.kv_lora_rank:],
-                    k_pe.narrow(0, q_offsets[i], q_offsets[i + 1] - q_offsets[i]),
-                ), dim=0)
-                for i, prefix in enumerate(self._prefix_lens)
-            ], dim=0)
-            return latent, suffix
+            latent_parts, suffix_parts = [], []
+            prefix_offset = 0
+            for i, prefix in enumerate(self._prefix_lens):
+                history = restored.narrow(0, prefix_offset, prefix)
+                q_start, q_end = q_offsets[i : i + 2]
+                latent_parts.append(history[:, : self.kv_lora_rank])
+                latent_parts.append(compressed_kv.narrow(0, q_start, q_end - q_start))
+                suffix_parts.append(history[:, self.kv_lora_rank :])
+                suffix_parts.append(k_pe.narrow(0, q_start, q_end - q_start))
+                prefix_offset += prefix
+            return torch.cat(latent_parts, dim=0), torch.cat(suffix_parts, dim=0)
         return compressed_kv, k_pe
 
     def _make_kv_b_proj(self, layer_id):
@@ -460,7 +456,8 @@ class KimiK3MlaImpl(MlaImplBase):
 
         # Reuse one packed KV workspace for current-query and historical-prefix
         # projections, matching feat/k3_dev's FlashMLA forward workspace.
-        packed_capacity = max(q.shape[0], plan.max_expanded_kv_tokens)
+        capacity = max(segment.length for segment in plan.slices)
+        packed_capacity = max(q.shape[0], capacity)
         packed_buffer = torch.empty(
             (packed_capacity, self.num_heads * sum(splits)),
             dtype=torch.bfloat16, device=q.device,
@@ -485,7 +482,6 @@ class KimiK3MlaImpl(MlaImplBase):
         del current_k, current_v, current_shaped, current_packed
         canonical = output.float() if plan.requires_fp32_accumulator else output
 
-        capacity = plan.max_expanded_kv_tokens
         latent_buffer = torch.empty(
             (capacity, self.kv_lora_rank), dtype=torch.bfloat16,
             device=q.device,

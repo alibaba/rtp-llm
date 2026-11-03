@@ -57,15 +57,7 @@ class Fp8CollectiveProjection:
         self.deep_gemm = None
         self.push_rs = None
         if enable_rs:
-            if decode_staging or self.world_size == 16:
-                self.push_rs = create_push_reduce_scatter(
-                    group, self.device,
-                    max_m=self.max_m if decode_staging else min(self.max_m, 512),
-                    n=self.hidden_size,
-                )
-                if self.push_rs is None and decode_staging:
-                    raise RuntimeError("Decode BF16 push ReduceScatter is unavailable")
-            else:
+            if not decode_staging and self.world_size != 16:
                 import deep_gemm
 
                 if not callable(getattr(deep_gemm, "fp8_gemm_rs_nt", None)):
@@ -76,9 +68,13 @@ class Fp8CollectiveProjection:
                     group, max_m=self.max_m, n=self.hidden_size, device=self.device
                 )
                 self.deep_gemm = deep_gemm
-                self.push_rs = create_push_reduce_scatter(
-                    group, self.device, max_m=min(self.max_m, 512), n=self.hidden_size,
-                )
+            self.push_rs = create_push_reduce_scatter(
+                group, self.device,
+                max_m=self.max_m if decode_staging else min(self.max_m, 512),
+                n=self.hidden_size,
+            )
+            if self.push_rs is None and decode_staging:
+                raise RuntimeError("Decode BF16 push ReduceScatter is unavailable")
 
     def can_run_ag(self, local_rows: int) -> bool:
         return 0 < local_rows and local_rows * self.world_size <= self.max_m

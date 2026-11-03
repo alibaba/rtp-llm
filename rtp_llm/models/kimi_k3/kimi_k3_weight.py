@@ -94,11 +94,6 @@ def split_kda_input(weight, heads, head_dim, tp_size, tp_rank):
     ).contiguous()
 
 
-def _merge_mla_latents(ts: List[torch.Tensor]) -> torch.Tensor:
-    """Keep KV-A's partial block at the end of the replicated FP8 matrix."""
-    return concat_0(ts).T.contiguous()
-
-
 def _merge_mla_input_projections(
     ts: List[torch.Tensor], *, tp_size: int, tp_rank: int
 ) -> torch.Tensor:
@@ -868,7 +863,7 @@ class KimiK3Weight(ModelDeployWeightInfo):
                     if source.name in KimiK3LoadFp8Weight.w8a8_weight_list:
                         converted.append(KimiK3LoadFp8Weight(
                             source, self.model_config.attention_projection_quant_config,
-                            derive_mla=derive_mla, layer_id=layer_id,
+                            derive_mla=derive_mla,
                             replicate_q_weights=self.role_type == RoleType.DECODE,
                         ))
                     else:

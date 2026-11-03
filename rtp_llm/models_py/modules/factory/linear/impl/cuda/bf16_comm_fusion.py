@@ -18,7 +18,6 @@ class Bf16CollectiveProjection:
         import torch.distributed._symmetric_memory as symm
 
         self.group = group
-        self.device = torch.device(device)
         self.world_size = group.size()
         self.max_m = max_m
         self.hidden_size = hidden_size

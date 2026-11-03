@@ -34,7 +34,6 @@ class PageRRMlaMetadata:
         self.local_causal_lens = None
         self.local_seq_lens = None
         self.global_causal_lens = None
-        self.block_tables = None
         self.query_block_tables = None
 
     def prepare_prefill(self, inputs) -> None:
@@ -84,7 +83,6 @@ class PageRRMlaMetadata:
             raise ValueError("valid_token_count must be within the slot-mapping extent")
         self.attn_inputs = inputs
         self.q_lens_host = q_lens
-        self.kv_lens_host = kv_lens
         self.prefix_lens_host = prefix_lens
         self.q_offsets_host = q_offsets
         self.max_q = max(q_lens)
@@ -97,7 +95,6 @@ class PageRRMlaMetadata:
         # indptr from the same host lengths used by the CPU chunk planner.
         self.prefill_ragged_kv_len_indptr_d = torch.tensor(kv_offsets, dtype=torch.int32, device=device)
         self.kv_lens_d = self.prefill_ragged_kv_len_indptr_d.diff()
-        self.block_tables = table
         fixed_q_len = q_lens[0] if all(q == q_lens[0] for q in q_lens) else 0
         padding = inputs.padding_offset if not fixed_q_len and total_q else self.qo_indptr_d
         if (padding is None or padding.device != device or padding.dtype != torch.int32
@@ -182,7 +179,6 @@ class PageRRMlaMetadata:
             self.local_causal_lens = torch.empty(shape, dtype=torch.int32, device=base.device)
             self.positions_d = torch.empty(shape[0] * shape[1], dtype=torch.int32, device=base.device)
             self.slot_mapping = torch.empty_like(self.positions_d, dtype=torch.int64)
-        self.block_tables = table
         rows = self.positions_d.numel()
         # A completely empty owner still needs a valid kernel table descriptor.
         # Its zero lengths prevent KV reads; no dummy page becomes a real key.
