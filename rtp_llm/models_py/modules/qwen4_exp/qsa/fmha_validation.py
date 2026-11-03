@@ -76,6 +76,60 @@ def _validate_main_cache_layout(self, cache, block_table, batch_size, device):
     return page_size, cache_blocks
 
 
+def _try_validate_main_paged_geometry(
+    self, cache, block_table, sequence_bases, query_lengths, device, graph_capture
+):
+    batch_size = int(sequence_bases.numel())
+    if not (
+        isinstance(cache, torch.Tensor)
+        and cache.is_cuda
+        and cache.ndim in (2, 5)
+        and cache.shape[0] <= 2**31 - 1
+        and isinstance(block_table, torch.Tensor)
+        and block_table.ndim == 2
+        and block_table.shape[1] <= 1024
+        and sequence_bases.dtype in (torch.int32, torch.int64)
+        and query_lengths.dtype in (torch.int32, torch.int64)
+        and batch_size <= (32 if graph_capture else 256)
+        and torch.version.hip is None
+        and torch.cuda.get_device_capability(device) == (12, 0)
+    ):
+        return None
+    page_size, cache_blocks = _validate_main_cache_layout(
+        self, cache, block_table, batch_size, device
+    )
+    if graph_capture:
+        bases = sequence_bases.tolist()
+        lengths = query_lengths.tolist()
+        if any(p < 0 or n <= 0 for p, n in zip(bases, lengths)):
+            raise RuntimeError(
+                "qwen4_exp QSA paged sequence bases must be non-negative and "
+                "query lengths positive"
+            )
+        if any(
+            p + n > int(block_table.shape[1]) * page_size
+            for p, n in zip(bases, lengths)
+        ):
+            raise RuntimeError(
+                "qwen4_exp QSA paged main block table does not cover the visible KV"
+            )
+        return page_size
+    from .paged_validation import validate_geometry
+
+    # Preserve int64 metadata until validation; narrowing first can hide overflow.
+    bases = sequence_bases.to(device=device, non_blocking=True)
+    lengths = query_lengths.to(device=device, non_blocking=True)
+    validate_geometry(
+        lengths,
+        bases,
+        block_table,
+        page_size,
+        cache_blocks,
+        bool(self.attn_inputs.is_s_padded),
+    )
+    return page_size
+
+
 def _validate_main_paged_geometry(
     self,
     cache: torch.Tensor,
@@ -98,6 +152,11 @@ def _validate_main_paged_geometry(
         sequence_bases.device.type != "cpu" or query_lengths.device.type != "cpu"
     ):
         raise RuntimeError("qwen4_exp sparse GQA Graph requires host lengths")
+    page_size = _try_validate_main_paged_geometry(
+        self, cache, block_table, sequence_bases, query_lengths, device, graph_capture
+    )
+    if page_size is not None:
+        return page_size
     invalid_lengths = (
         bool(torch.any(sequence_bases < 0).item())
         or bool(torch.any(query_lengths <= 0).item())

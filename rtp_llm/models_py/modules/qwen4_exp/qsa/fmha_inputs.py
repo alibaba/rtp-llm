@@ -280,8 +280,8 @@ def _prepare_incremental_prefill_inputs(
     page_size = self._validate_main_paged_geometry(
         kv_cache.kv_cache_base,
         block_table,
-        prefixes_device,
-        input_lengths_device,
+        prefixes,
+        input_lengths,
         qkv.device,
     )
 
@@ -375,7 +375,7 @@ def _try_prepare_host_incremental_prefill(
         )
     # Keep int32 visible positions and device lengths inside their supported range.
     if any(p + s >= 2**31 for p, s in zip(prefix_host, lens)):
-        return None
+        raise ValueError("qwen4_exp incremental prefill visible KV exceeds int32 range")
     ld = lengths.to(device=qkv.device, dtype=torch.int32, non_blocking=True)
     pd = prefixes.to(device=qkv.device, dtype=torch.int32, non_blocking=True)
     table = self.attn_inputs.kv_cache_kernel_block_id_device

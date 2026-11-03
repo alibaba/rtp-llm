@@ -841,6 +841,115 @@ class SparseGqaImplForwardTest(unittest.TestCase):
         selected[:, 0] = 0
         return impl, qkv, cache, selected
 
+    def test_paged_geometry_rechecks_strided_metadata_and_all_physical_pages(self):
+        for device in ("cpu", _DEV):
+            for dtype in (torch.int32, torch.int64):
+                with self.subTest(device=device, dtype=dtype):
+                    impl, qkv, cache, _ = self._incremental_plan_case()
+                    table_storage = torch.full(
+                        (2, 9), -1000, device=_DEV, dtype=torch.int32
+                    )
+                    table = table_storage[:, 1:7:2]
+                    table.copy_(impl.attn_inputs.kv_cache_kernel_block_id_device)
+                    metadata = torch.full((2, 4), -1000, device=device, dtype=dtype)
+                    prefixes, lengths = metadata[:, 0], metadata[:, 2]
+                    prefixes.copy_(torch.tensor([3, 7], device=device, dtype=dtype))
+                    lengths.copy_(torch.tensor([3, 2], device=device, dtype=dtype))
+
+                    def validate():
+                        return impl._validate_main_paged_geometry(
+                            cache.kv_cache_base, table, prefixes, lengths, qkv.device
+                        )
+
+                    self.assertEqual(validate(), 4)
+                    table[0, -1] = 1000
+                    with self.assertRaisesRegex(RuntimeError, "physical block"):
+                        validate()
+                    table[0, -1] = 3
+                    table[1, 0] = 0
+                    with self.assertRaisesRegex(RuntimeError, "visible KV"):
+                        validate()
+                    impl.attn_inputs.is_s_padded = True
+                    table[1].zero_()
+                    prefixes[1] = 100000
+                    self.assertEqual(validate(), 4)
+                    table[1, 0] = 4
+                    with self.assertRaisesRegex(RuntimeError, "cover the visible KV"):
+                        validate()
+
+    def test_graph_paged_geometry_uses_current_host_values_without_device_readback(
+        self,
+    ):
+        impl, qkv, cache, _ = self._incremental_plan_case()
+        inputs = impl.attn_inputs
+        original_item = torch.Tensor.item
+
+        def host_item(tensor, *args, **kwargs):
+            if tensor.is_cuda:
+                raise AssertionError("Graph validation must not read device values")
+            return original_item(tensor, *args, **kwargs)
+
+        def validate():
+            return impl._validate_main_paged_geometry(
+                cache.kv_cache_base,
+                inputs.kv_cache_kernel_block_id_device,
+                inputs.prefix_lengths,
+                inputs.input_lengths,
+                qkv.device,
+                graph_capture=True,
+            )
+
+        tick = torch.zeros(1, device=_DEV)
+        stream = torch.cuda.Stream()
+        stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(stream), patch.object(torch.Tensor, "item", host_item):
+            self.assertEqual(validate(), 4)
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph):
+                self.assertEqual(validate(), 4)
+                tick.add_(1)
+        torch.cuda.current_stream().wait_stream(stream)
+        graph.replay()
+        torch.testing.assert_close(tick, torch.ones_like(tick))
+        inputs.prefix_lengths[0] = 12
+        with self.assertRaisesRegex(RuntimeError, "cover the visible KV"):
+            validate()
+
+    def test_incremental_overflow_is_rejected_before_main_writer(self):
+        if torch.cuda.get_device_capability() != (12, 0):
+            self.skipTest("SM120 paged geometry overflow validation")
+        for device in ("cpu", _DEV):
+            for dtype in (torch.int32, torch.int64):
+                with self.subTest(device=device, dtype=dtype):
+                    impl, qkv, cache, selected = self._incremental_plan_case()
+                    impl.attn_inputs.input_lengths = impl.attn_inputs.input_lengths.to(
+                        device=device, dtype=dtype
+                    )
+                    impl.attn_inputs.prefix_lengths = torch.tensor(
+                        [2147483647, 7], device=device, dtype=dtype
+                    )
+                    original = cache.kv_cache_base.clone()
+                    with self.assertRaisesRegex(RuntimeError, "cover the visible KV"):
+                        impl._validate_main_paged_geometry(
+                            cache.kv_cache_base,
+                            impl.attn_inputs.kv_cache_kernel_block_id_device,
+                            impl.attn_inputs.prefix_lengths,
+                            impl.attn_inputs.input_lengths,
+                            qkv.device,
+                        )
+                    with patch.object(
+                        impl.rope_kvcache_impl,
+                        "forward",
+                        side_effect=AssertionError("writer must not run"),
+                    ) as writer:
+                        with self.assertRaises((ValueError, RuntimeError)):
+                            impl.forward(qkv, cache, selected_indices=selected)
+                        writer.assert_not_called()
+                    self.assertFalse(impl.qsa_main_cache_mutation_started())
+                    torch.testing.assert_close(
+                        cache.kv_cache_base, original, atol=0, rtol=0
+                    )
+
     def test_incremental_plan_refreshes_host_and_device_metadata(self):
         impl, qkv, cache, selected = self._incremental_plan_case()
         plan = impl._prepare_incremental_prefill_inputs(qkv, cache, selected)
