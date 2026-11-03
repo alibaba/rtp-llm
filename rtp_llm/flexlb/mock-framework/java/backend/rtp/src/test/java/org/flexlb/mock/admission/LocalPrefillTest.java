@@ -23,15 +23,17 @@ class LocalPrefillTest {
         return GenerateInputPB.newBuilder().setRequestId(id).addAllTokenIds(List.of(1, 2, 3, 4, 5))
             .setGenerateConfig(GenerateConfigPB.newBuilder().setMaxNewTokens(1).setTimeoutMs(timeout).setReuseCache(reuse)).build();
     }
-    RtpConfig config(String expression) throws Exception {
+    RtpConfig config(String expression) throws Exception { return config(expression, false); }
+    private RtpConfig config(String expression, boolean groups) throws Exception {
         var json = new ObjectMapper(); ObjectNode root = json.valueToTree(RtpNodeTest.configuration("prefill"));
         ((ObjectNode) root.path("component").path("config")).put("seq_size_per_block", 2).put("reuse_cache", true);
+        if (groups) ((ObjectNode) root.path("component").path("config")).put("mock.scheduler.mode", "group");
         ((ObjectNode) root.path("component").path("config").path("mock.compute").path("forward")).put("expression", expression);
         var path = directory.resolve("config.json"); json.writeValue(path.toFile(), root); return RtpConfig.load(path);
     }
 
     @Test void singleAndBatchSubmissionRejectUnpreparedMediaWithoutAdmission() throws Exception {
-        var config = config("1");
+        var config = config("1", true);
         try (var cache = new KvCache(config.blockSize(), 8, 0, KvCache.EvictionPolicy.LRU);
              var engine = new LocalPrefill(config.endpoint(), cache, RtpScheduler.factory(config))) {
             var raw = input(1, 0, true).toBuilder()

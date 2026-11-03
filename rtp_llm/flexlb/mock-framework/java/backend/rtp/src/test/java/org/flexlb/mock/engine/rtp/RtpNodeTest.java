@@ -64,10 +64,8 @@ public class RtpNodeTest {
         }
     }
 
-    @Test void fifoModeRejectsGroupRpcsButStillGeneratesIndividualRequests() throws Exception {
+    @Test void defaultFifoModeRejectsGroupRpcsButStillGeneratesIndividualRequests() throws Exception {
         var root = JSON.<com.fasterxml.jackson.databind.node.ObjectNode>valueToTree(configuration("prefill"));
-        ((com.fasterxml.jackson.databind.node.ObjectNode) root.path("component").path("config"))
-            .put("mock.scheduler.mode", "fifo");
         try (var node = RtpNode.start(RtpConfig.load(root))) {
             assertFalse(((List<?>) node.endpoints().get("supported_rpc")).contains("EnqueueBatch"));
             var channel = ManagedChannelBuilder.forTarget(node.rpcAddress()).usePlaintext().build();
