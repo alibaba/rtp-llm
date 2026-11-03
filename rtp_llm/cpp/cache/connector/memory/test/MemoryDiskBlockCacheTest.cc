@@ -1,5 +1,11 @@
 #include "gtest/gtest.h"
 
+#include <cstdlib>
+#include <stdexcept>
+#include <string>
+
+#include "rtp_llm/cpp/cache/BlockPool.h"
+
 #include "rtp_llm/cpp/cache/connector/memory/MemoryDiskBlockCache.h"
 
 namespace rtp_llm::test {
@@ -174,6 +180,167 @@ TEST(MemoryDiskBlockCacheTest, RemoveIfMatchChecksBackingAndSlot) {
     auto removed = cache.removeIfMatch(2, CacheBackingType::DISK, NULL_BLOCK_IDX, 20);
     ASSERT_TRUE(removed.has_value());
     EXPECT_FALSE(cache.contains(2));
+}
+
+}  // namespace rtp_llm::test
+
+namespace rtp_llm::test {
+
+TEST(MemoryDiskBlockCacheTest, CompletedReadCannotConsumeAnotherReadersUnpinnedBacking) {
+    for (const auto& item : {memoryItem(1, 10), diskItem(1, 20)}) {
+        SCOPED_TRACE(static_cast<int>(item.backing_type));
+        MemoryDiskBlockCache cache;
+        ASSERT_TRUE(cache.putCommitted(item).first);
+        cache.matchAndMarkInFlight(1);  // A's CopyPlan already owns its backing ref.
+        cache.matchAndMarkInFlight(1);  // B pauses before backing requestReference.
+        EXPECT_FALSE(cache.removeIfMatch(1,
+                                         item.backing_type,
+                                         item.block_index,
+                                         item.disk_slot,
+                                         /*completed_read=*/true));
+        EXPECT_TRUE(cache.contains(1));
+        cache.releaseInFlight(1, item.backing_type, item.block_index, item.disk_slot);  // A's plan is destroyed.
+        EXPECT_FALSE(cache.popOldestEvictable());  // B's marker still protects the cache owner.
+        // B acquires its backing ref, finishes its copy, then consumes as the
+        // sole remaining reader. This preserves the old single-reader behavior.
+        EXPECT_TRUE(cache.removeIfMatch(1,
+                                        item.backing_type,
+                                        item.block_index,
+                                        item.disk_slot,
+                                        /*completed_read=*/true));
+        EXPECT_FALSE(cache.contains(1));
+    }
+}
+
+TEST(MemoryDiskBlockCacheTest, OrdinaryRemovalNeverConsumesAnInFlightMarker) {
+    for (const auto& item : {memoryItem(1, 10), diskItem(1, 20)}) {
+        MemoryDiskBlockCache cache;
+        ASSERT_TRUE(cache.putCommitted(item).first);
+        cache.matchAndMarkInFlight(1);
+        EXPECT_FALSE(cache.removeIfMatch(1, item.backing_type, item.block_index, item.disk_slot));
+        EXPECT_FALSE(cache.remove(1));
+        if (item.backing_type == CacheBackingType::MEMORY) {
+            EXPECT_FALSE(cache.removeIfMatch(1, item.block_index));
+        }
+        cache.releaseInFlight(1, item.backing_type, item.block_index, item.disk_slot);
+        EXPECT_TRUE(cache.removeIfMatch(1, item.backing_type, item.block_index, item.disk_slot));
+        EXPECT_TRUE(cache.empty());
+    }
+}
+
+TEST(MemoryDiskBlockCacheTest, CompletedReadRequiresItsOwnMatchingMarker) {
+    MemoryDiskBlockCache cache;
+    ASSERT_TRUE(cache.putCommitted(memoryItem(1, 10)).first);
+    EXPECT_FALSE(cache.removeIfMatch(1, CacheBackingType::MEMORY, 10, -1, /*completed_read=*/true));
+    cache.matchAndMarkInFlight(1);
+    EXPECT_FALSE(cache.removeIfMatch(1, CacheBackingType::MEMORY, 11, -1, /*completed_read=*/true));
+    EXPECT_FALSE(cache.removeIfMatch(1, CacheBackingType::DISK, NULL_BLOCK_IDX, 10, /*completed_read=*/true));
+    EXPECT_TRUE(cache.removeIfMatch(1, CacheBackingType::MEMORY, 10, -1, /*completed_read=*/true));
+}
+
+TEST(MemoryDiskBlockCacheTest, AbortedSecondReaderReleasesMarkerWithoutPreventingFirstReaderConsume) {
+    for (const auto& item : {memoryItem(1, 10), diskItem(1, 20)}) {
+        MemoryDiskBlockCache cache;
+        ASSERT_TRUE(cache.putCommitted(item).first);
+        cache.matchAndMarkInFlight(1);
+        cache.matchAndMarkInFlight(1);
+        cache.releaseInFlight(1, item.backing_type, item.block_index, item.disk_slot);  // B aborts.
+        EXPECT_TRUE(cache.removeIfMatch(1,
+                                        item.backing_type,
+                                        item.block_index,
+                                        item.disk_slot,
+                                        /*completed_read=*/true));
+        cache.releaseInFlight(1, item.backing_type, item.block_index, item.disk_slot);  // A's plan retires.
+        EXPECT_TRUE(cache.empty());
+    }
+}
+
+namespace {
+class MemoryCopyPinTest: public ::testing::Test {
+protected:
+    void SetUp() override {
+        if (const char* value = std::getenv("RTP_LLM_PIN_HOST_BLOCK_POOL")) {
+            old_pin_ = value;
+        }
+        setenv("RTP_LLM_PIN_HOST_BLOCK_POOL", "0", 1);
+    }
+    void TearDown() override {
+        if (old_pin_) {
+            setenv("RTP_LLM_PIN_HOST_BLOCK_POOL", old_pin_->c_str(), 1);
+        } else {
+            unsetenv("RTP_LLM_PIN_HOST_BLOCK_POOL");
+        }
+    }
+    std::optional<std::string> old_pin_;
+};
+
+BlockPoolPtr oneBlockHostPool() {
+    MemoryLayoutConfig layout;
+    layout.layer_num                = 1;
+    layout.block_num                = 2;
+    layout.dtype                    = TYPE_FP16;
+    layout.kv_cache_offset_bytes    = 0;
+    layout.kv_scale_offset_bytes    = 2048;
+    layout.kv_block_stride_bytes    = 1024;
+    layout.k_block_stride_bytes     = 512;
+    layout.v_block_stride_bytes     = 512;
+    layout.kv_block_pool_size_bytes = 2048;
+    layout.kv_scale_pool_size_bytes = 0;
+    layout.total_size_bytes         = layout.kv_block_pool_size_bytes;
+    BlockPoolConfig config;
+    config.block_num        = 2;
+    config.total_size_bytes = layout.total_size_bytes;
+    config.memory_layouts   = {layout};
+    auto pool               = std::make_shared<BlockPool>(config, AllocationType::HOST);
+    if (!pool->init()) {
+        throw std::runtime_error("host pool init failed");
+    }
+    return pool;
+}
+}  // namespace
+
+TEST_F(MemoryCopyPinTest, FirstCompletionCannotFreeOrOverwriteSecondReadersMatchedHostBlock) {
+    auto pool   = oneBlockHostPool();
+    auto blocks = pool->malloc(1);
+    ASSERT_EQ(blocks.size(), 1u);
+    const auto block = blocks[0];
+    auto*      value = static_cast<uint64_t*>(pool->convertIndexToAddr(0, block).kv_addr);
+    ASSERT_NE(value, nullptr);
+    *value = 0x123456789abcdef0ULL;
+    pool->blockCacheReference(block);
+    pool->requestFree(block);  // Initial writer leaves the cache owner.
+    MemoryDiskBlockCache cache;
+    ASSERT_TRUE(cache.putCommitted(memoryItem(1, block)).first);
+
+    auto first = cache.matchAndMarkInFlight(1);
+    pool->requestReference(first.matched_index);   // A's CopyPlan owns one request ref.
+    auto second  = cache.matchAndMarkInFlight(1);  // B is paused before taking its ref.
+    auto removed = cache.removeIfMatch(1, CacheBackingType::MEMORY, block, -1, /*completed_read=*/true);
+    EXPECT_FALSE(removed);
+    if (removed) {
+        pool->blockCacheFree(removed->block_index);  // Exactly the old read_done callback.
+    }
+    pool->requestFree(first.matched_index);  // A's CopyPlan destructor.
+    cache.releaseInFlight(1, CacheBackingType::MEMORY, block, -1);
+    EXPECT_EQ(pool->freeBlocksNum(), 0u);
+    auto unrelated = pool->malloc(1);
+    EXPECT_TRUE(unrelated.empty());  // Old code can allocate/overwrite B's matched block here.
+    if (!unrelated.empty()) {
+        *value = 0;
+    }
+
+    pool->requestReference(second.matched_index);  // B resumes its real control flow.
+    EXPECT_EQ(*value, 0x123456789abcdef0ULL);
+    removed = cache.removeIfMatch(1, CacheBackingType::MEMORY, block, -1, /*completed_read=*/true);
+    ASSERT_TRUE(removed);
+    pool->blockCacheFree(removed->block_index);
+    pool->requestFree(second.matched_index);
+    cache.releaseInFlight(1, CacheBackingType::MEMORY, block, -1);
+    if (!unrelated.empty()) {
+        pool->requestFree(unrelated);
+    }
+    EXPECT_EQ(pool->freeBlocksNum(), 1u);
+    EXPECT_TRUE(cache.empty());
 }
 
 }  // namespace rtp_llm::test

@@ -1274,8 +1274,11 @@ std::shared_ptr<AsyncContext> KVCacheMemoryConnector::asyncRead(const std::share
                         releasePrefixCacheBacking(*removed_item);
                     }
                 } else {
-                    const auto removed_item = block_cache_->removeIfMatch(
-                        copy_info.cache_key, copy_info.backing_type, copy_info.mem_block, copy_info.disk_slot);
+                    const auto removed_item = block_cache_->removeIfMatch(copy_info.cache_key,
+                                                                          copy_info.backing_type,
+                                                                          copy_info.mem_block,
+                                                                          copy_info.disk_slot,
+                                                                          /*completed_read=*/true);
                     if (!removed_item.has_value()) {
                         continue;
                     }

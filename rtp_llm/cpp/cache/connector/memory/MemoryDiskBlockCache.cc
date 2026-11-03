@@ -78,7 +78,8 @@ MemoryDiskBlockCache::putCommitted(const CacheItem& input_item) {
 std::optional<MemoryDiskBlockCache::CacheItem> MemoryDiskBlockCache::removeIfMatch(CacheKeyType     cache_key,
                                                                                    CacheBackingType backing_type,
                                                                                    BlockIdxType expected_block_index,
-                                                                                   int32_t      expected_disk_slot) {
+                                                                                   int32_t      expected_disk_slot,
+                                                                                   bool         completed_read) {
     std::unique_lock<std::shared_mutex> lock(mutex_);
     auto                                it = items_.find(cache_key);
     if (it == items_.end() || it->second.backing_type != backing_type) {
@@ -88,6 +89,14 @@ std::optional<MemoryDiskBlockCache::CacheItem> MemoryDiskBlockCache::removeIfMat
         return std::nullopt;
     }
     if (backing_type == CacheBackingType::DISK && it->second.disk_slot != expected_disk_slot) {
+        return std::nullopt;
+    }
+    // A completed read still owns its request ref through CopyPlan. It may
+    // consume the cache owner only when its marker is the sole in-flight one.
+    // Otherwise another reader can be between matchAndMarkInFlight and its
+    // backing requestReference, and still needs this cache owner to stay alive.
+    const uint32_t owned_in_flight_refs = completed_read ? 1u : 0u;
+    if (it->second.in_flight_ref != owned_in_flight_refs) {
         return std::nullopt;
     }
     auto removed_item = it->second;
@@ -116,7 +125,7 @@ MemoryDiskBlockCache::put(const MemoryBlockCache::CacheItem& input_item) {
 std::optional<MemoryBlockCache::CacheItem> MemoryDiskBlockCache::remove(CacheKeyType cache_key) {
     std::unique_lock<std::shared_mutex> lock(mutex_);
     auto                                it = items_.find(cache_key);
-    if (it == items_.end()) {
+    if (it == items_.end() || it->second.in_flight_ref != 0) {
         return std::nullopt;
     }
     auto removed_item = it->second;

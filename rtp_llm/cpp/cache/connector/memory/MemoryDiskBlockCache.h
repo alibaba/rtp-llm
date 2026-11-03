@@ -49,10 +49,14 @@ public:
     bool        contains(CacheKeyType cache_key) const;
 
     std::pair<bool, std::optional<CacheItem>>                   putCommitted(const CacheItem& item);
+    // completed_read may consume its own single in-flight marker only while
+    // its CopyPlan still owns a backing request reference. Other readers may
+    // have marked in flight but not acquired their backing refs yet.
     std::optional<CacheItem>                                    removeIfMatch(CacheKeyType     cache_key,
                                                                               CacheBackingType backing_type,
                                                                               BlockIdxType     expected_block_index,
-                                                                              int32_t          expected_disk_slot);
+                                                                              int32_t          expected_disk_slot,
+                                                                              bool             completed_read = false);
     std::pair<bool, std::optional<MemoryBlockCache::CacheItem>> put(const MemoryBlockCache::CacheItem& item);
     std::optional<MemoryBlockCache::CacheItem>                  remove(CacheKeyType cache_key);
     std::optional<MemoryBlockCache::CacheItem> removeIfMatch(CacheKeyType cache_key, BlockIdxType expected_block_index);
