@@ -178,27 +178,25 @@ class PrefillAdmissionTest {
     @Test void boundedFinishedHistoryDoesNotBlockCurrentStateOrCursorRecovery() throws Exception {
         var config = config("0");
         try (var cache = new KvCache(config.blockSize(), 8, 0, KvCache.EvictionPolicy.LRU); var engine = new PrefillAdmission(config.endpoint(), cache, RtpScheduler.factory(config))) {
-            for (int i = 0; i <= RtpConfig.REQUEST_LIMIT; i++)
+            for (int i = 0; i <= 1024; i++)
                 engine.submit(input(i, 0, true)).completion().toCompletableFuture().get(2, TimeUnit.SECONDS);
             var snapshot = engine.snapshot(0);
-            assertEquals(RtpConfig.REQUEST_LIMIT, snapshot.finished().size());
-            assertEquals(RtpConfig.REQUEST_LIMIT + 1, snapshot.finishedVersion());
+            assertEquals(1024, snapshot.finished().size());
+            assertEquals(1024 + 1, snapshot.finishedVersion());
             assertTrue(engine.snapshot(snapshot.finishedVersion()).finished().isEmpty());
-            assertEquals(RtpConfig.REQUEST_LIMIT, engine.snapshot(1).finished().size());
+            assertEquals(1024, engine.snapshot(1).finished().size());
         }
     }
 
-    @Test void activeIdsAndRequestLimitRejectWithoutAllocatingWaitingKv() throws Exception {
+    @Test void duplicateIdsRejectButWaitingRequestsHaveNoInventedCapacity() throws Exception {
         var config = config("3600000");
         try (var cache = new KvCache(config.blockSize(), 8, 0, KvCache.EvictionPolicy.LRU); var engine = new PrefillAdmission(config.endpoint(), cache, RtpScheduler.factory(config))) {
             engine.submit(input(0, 0, true));
             var duplicate = assertThrows(io.grpc.StatusRuntimeException.class, () -> engine.submit(input(0, 0, true)));
             assertEquals(Status.Code.ALREADY_EXISTS, duplicate.getStatus().getCode());
-            for (int i = 1; i < RtpConfig.REQUEST_LIMIT; i++) engine.submit(input(i, 0, true));
-            var full = assertThrows(io.grpc.StatusRuntimeException.class, () -> engine.submit(input(RtpConfig.REQUEST_LIMIT, 0, true)));
-            assertEquals(Status.Code.RESOURCE_EXHAUSTED, full.getStatus().getCode());
+            for (int i = 1; i <= 1024; i++) engine.submit(input(i, 0, true));
             assertEquals(5, cache.snapshot(-1, false).availableBlocks());
-            assertEquals(RtpConfig.REQUEST_LIMIT - 1, engine.snapshot(0).waiting());
+            assertEquals(1024, engine.snapshot(0).waiting());
             engine.close(); assertEquals(8, cache.snapshot(-1, false).availableBlocks());
         }
     }

@@ -20,12 +20,11 @@ class KvcmReporterTest {
         }
     }
     @ParameterizedTest @ValueSource(booleans = {false, true})
-    void slowSnapshotKeepsHeartbeatsAndRecoversWithinItsRegistration(boolean registrationLost) throws Exception {
+    void slowFailedSnapshotDoesNotBlockDeltasOrReplayAcrossRegistration(boolean registrationLost) throws Exception {
         var entered = new CountDownLatch(1); var release = new CountDownLatch(1);
         var heartbeats = new AtomicInteger(); var registrations = new AtomicInteger();
-        var expire = new AtomicBoolean(registrationLost);
-        var bodies = new CopyOnWriteArrayList<String>(); var times = new CopyOnWriteArrayList<Long>();
-        var added = new AtomicBoolean();
+        var expire = new AtomicBoolean(registrationLost); var hint = new AtomicBoolean();
+        var bodies = new CopyOnWriteArrayList<String>(); var added = new AtomicBoolean();
         var server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
         try (var threads = Executors.newVirtualThreadPerTaskExecutor(); var cache = new KvCache(1, 8, 0, KvCache.EvictionPolicy.LRU)) {
             server.setExecutor(threads);
@@ -35,22 +34,24 @@ class KvcmReporterTest {
                     var body = JSON.readTree(raw);
                     String type = body.path("events").path(0).path("event_type").asText();
                     var response = JSON.createObjectNode();
-                    response.putObject("header").putObject("status").put("code", 1);
-                    if (body.has("model_deployment")) registrations.incrementAndGet();
+                    response.putObject("header").putObject("status").put("code", "OK");
+                    if (body.has("model_deployment")) {
+                        registrations.incrementAndGet();
+                        response.put("opaque_info", "x".repeat(1048577));
+                    }
                     if (type.equals("EVENT_HEARTBEAT")) {
                         heartbeats.incrementAndGet();
                         if (entered.getCount() == 0 && expire.compareAndSet(true, false))
-                            response.with("header").with("status").put("code", 8);
+                            response.with("header").with("status").put("code", "INSTANCE_NOT_EXIST");
+                        response.put("snapshot_required", hint.getAndSet(false));
                     }
                     if (type.equals("EVENT_BLOCK_ADD")) added.set(true);
                     if (type.equals("EVENT_BLOCK_SNAPSHOT")) {
-                        bodies.add(raw); times.add(System.nanoTime());
+                        bodies.add(raw);
                         if (bodies.size() == 1) {
                             entered.countDown(); release.await();
-                            if (!registrationLost) {
-                                response.with("header").with("status").put("code", 5);
-                                response.put("retry_after_ms", 1200);
-                            }
+                            response.with("header").with("status").put("code", registrationLost ? "INSTANCE_NOT_EXIST" : "SNAPSHOT_RATE_LIMITED");
+                            response.put("retry_after_ms", "18446744073709551615");
                         }
                     }
                     byte[] bytes = JSON.writeValueAsBytes(response);
@@ -62,25 +63,26 @@ class KvcmReporterTest {
                     URI.create("http://127.0.0.1:" + server.getAddress().getPort()), true, 600000),
                     new KvcmReporter.Identity("instance", "group", "127.0.0.1:9000", "model", "FP16", false, 1, 1, 1, "full"), cache)) {
                 assertTrue(entered.await(5, TimeUnit.SECONDS));
-                int before = heartbeats.get();
-                await(() -> heartbeats.get() > before);
+                int before = heartbeats.get(); await(() -> heartbeats.get() > before);
                 if (registrationLost) {
                     await(() -> Boolean.FALSE.equals(reporter.status().get("registered")));
-                    assertEquals(1, registrations.get(), "Registration cannot overtake an old snapshot upload");
+                    assertEquals(1, registrations.get(), "Re-registration must drain an old snapshot upload");
                 }
                 try (var lease = cache.acquire(1, List.of()).lease()) { lease.publish(List.of(99L), 1); }
-                long released = System.nanoTime(); release.countDown();
-                await(() -> times.size() >= 2);
-                if (registrationLost) {
-                    assertEquals(2, registrations.get());
-                    var blocks = JSON.readTree(bodies.get(1)).path("events").get(0).path("block_snapshot").path("blocks");
-                    assertEquals(1, blocks.size()); assertEquals("99", blocks.get(0).path("block_key").asText());
-                } else {
-                    assertEquals(bodies.get(0), bodies.get(1), "An uncertain snapshot must keep its cutoff, keys and trace");
-                    assertTrue(times.get(1) - released >= TimeUnit.MILLISECONDS.toNanos(1100), "Must honor Meta retry_after_ms");
-                    await(added::get);
+                if (!registrationLost) await(added::get); // The first snapshot is still uploading.
+                release.countDown();
+                if (!registrationLost) {
+                    await(() -> reporter.status().get("last_error").toString().contains("SNAPSHOT_RATE_LIMITED"));
+                    int beats = heartbeats.get(); await(() -> heartbeats.get() > beats);
+                    assertEquals(1, bodies.size(), "Failed snapshots must not be replayed");
+                    hint.set(true);
                 }
+                await(() -> bodies.size() == 2);
+                var blocks = JSON.readTree(bodies.get(1)).path("events").get(0).path("block_snapshot").path("blocks");
+                assertEquals(1, blocks.size()); assertEquals("99", blocks.get(0).path("block_key").asText());
+                assertNotEquals(bodies.get(0), bodies.get(1));
                 await(() -> reporter.status().get("last_error").equals(""));
+                assertEquals(registrationLost ? 2 : 1, registrations.get(), "Stale snapshot feedback must not invalidate a new registration");
             } finally { release.countDown(); server.stop(0); }
         }
     }

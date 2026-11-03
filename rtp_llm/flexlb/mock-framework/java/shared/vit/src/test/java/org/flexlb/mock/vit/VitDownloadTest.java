@@ -197,7 +197,9 @@ class VitDownloadTest {
         } finally { server.stop(0); }
     }
 
-    @Test void nativeFileLimitCanAllowImagesBeyondTheOldTenMiBCap() throws Exception {
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(ints = {-1, 0, 11000})
+    void dsvSourceLimitStillAppliesWhenGenericFileLimitIsLargerOrDisabled(int maxFileSizeKb) throws Exception {
         byte[] bytes = Arrays.copyOf(png(), 10 * 1024 * 1024 + 1);
         var server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
         server.createContext("/", exchange -> {
@@ -205,12 +207,31 @@ class VitDownloadTest {
                 exchange.sendResponseHeaders(200, bytes.length); exchange.getResponseBody().write(bytes);
             }
         }); server.start();
-        try (var node = VitNode.start(config(1, 0, 11000), 0, 0)) {
+        try (var node = VitNode.start(config(1, 0, maxFileSizeKb), 0, 0)) {
             var channel = VitTest.channel(node);
             try {
-                var output = MultimodalRpcServiceGrpc.newBlockingStub(channel).withDeadlineAfter(5, TimeUnit.SECONDS)
-                    .remoteMultimodalEmbedding(input(server, "/image"));
-                assertEquals(5, output.getMultimodalEmbedding().getShape(0));
+                var rpc = MultimodalRpcServiceGrpc.newBlockingStub(channel).withDeadlineAfter(5, TimeUnit.SECONDS);
+                assertEquals(Status.Code.INVALID_ARGUMENT, assertThrows(StatusRuntimeException.class,
+                    () -> rpc.remoteMultimodalEmbedding(input(server, "/image"))).getStatus().getCode());
+            } finally { channel.shutdownNow().awaitTermination(2, TimeUnit.SECONDS); }
+        } finally { server.stop(0); }
+    }
+
+    @Test void transientHttpServiceErrorsFollowDsvSourceRetryPolicy() throws Exception {
+        var attempts = new AtomicInteger();
+        var server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/", exchange -> {
+            attempts.incrementAndGet();
+            try (exchange) { exchange.sendResponseHeaders(503, -1); }
+        });
+        server.start();
+        try (var node = VitNode.start(config(1, 0), 0, 0)) {
+            var channel = VitTest.channel(node);
+            try {
+                var rpc = MultimodalRpcServiceGrpc.newBlockingStub(channel).withDeadlineAfter(3, TimeUnit.SECONDS);
+                assertEquals(Status.Code.UNAVAILABLE, assertThrows(StatusRuntimeException.class,
+                    () -> rpc.remoteMultimodalEmbedding(input(server, "/unavailable"))).getStatus().getCode());
+                assertEquals(3, attempts.get());
             } finally { channel.shutdownNow().awaitTermination(2, TimeUnit.SECONDS); }
         } finally { server.stop(0); }
     }

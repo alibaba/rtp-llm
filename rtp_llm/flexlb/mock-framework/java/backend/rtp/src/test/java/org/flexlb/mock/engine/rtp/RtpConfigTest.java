@@ -253,4 +253,10 @@ class RtpConfigTest {
         assertEquals(8192, load(root).maxSeqLen());
     }
 
+    @Test void nativeConcurrencyIsNotCappedByMockBookkeeping() throws Exception {
+        var root = root();
+        ((ObjectNode) root.path("component").path("config")).put("concurrency_limit", 2048);
+        assertEquals(2048, load(root).maxGenerateBatchSize());
+    }
+
 }

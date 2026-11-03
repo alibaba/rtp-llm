@@ -20,7 +20,6 @@ public record RtpConfig(String id, Role role, int blockSize, int deviceBlocks, i
                         Watermark deviceWatermark, Watermark hostWatermark, boolean disableDecodeFirstReuse, int maxSeqLen, int maxBatchTokens,
                         int maxGenerateBatchSize, int maxInitedKvStreams, int maxUncachedBatchTokens, int cpSize, boolean cpEnabled, int tpSize, int dpSize,
                         JsonNode business, ComputeModel compute, int imageToken, long cacheKeySeed) {
-    public static final int REQUEST_LIMIT = 1024;
     private static final ObjectMapper JSON = new ObjectMapper();
 
     public RtpConfig {
@@ -59,6 +58,9 @@ public record RtpConfig(String id, Role role, int blockSize, int deviceBlocks, i
         if (config.has("capacity") || config.has("capacity.device_blocks") || config.has("capacity.reserve_blocks"))
             throw new IllegalArgumentException("Removed Mock capacity settings: use test_block_num and reserve_block_ratio");
         config = RtpSettings.normalize(config, role);
+        if (nativeInt(config, "kv_cache_event_snapshot_interval_ms", 600000, Integer.MIN_VALUE, Integer.MAX_VALUE) <= 0
+                && !nativeBool(config, "enable_remote_cache", false))
+            throw new IllegalArgumentException("Nonpositive snapshot interval requires enable_remote_cache");
         var model = EngineConfig.model(config, env);
         finalizeSettings((ObjectNode) config, model, env);
         int blockSize = config.path("seq_size_per_block").intValue();
@@ -95,7 +97,7 @@ public record RtpConfig(String id, Role role, int blockSize, int deviceBlocks, i
             hostEnabled ? hostBlocks : 0, hostPolicy, watermark(config, "device", 0.82, 0.90), watermark(config, "memory", 0.90, 0.94),
             nativeBool(config, "disable_decode_first_malloc_device_reuse", false),
             maxSeqLen, maxBatchTokens,
-            nativeInt(config, "concurrency_limit", 32, 1, REQUEST_LIMIT),
+            nativeInt(config, "concurrency_limit", 32, 1, Integer.MAX_VALUE),
             nativeInt(config, "max_inited_kv_cache_streams", 0, 0, Integer.MAX_VALUE),
             nativeInt(config, "max_batch_tokens_without_cache", 0, 0, Integer.MAX_VALUE),
             cpSize, cpEnabled, tpSize, dpSize,
@@ -140,7 +142,7 @@ public record RtpConfig(String id, Role role, int blockSize, int deviceBlocks, i
             for (String key : List.of("kv_cache_event_manager_endpoint","kv_cache_event_instance_id","kv_cache_event_instance_group","kv_cache_event_host_ip_port", "kvcm_enable_vipserver", "kvcm_vipserver_domain", "kvcm_server_address"))
                 if (business.has(key)) result.set(key,business.get(key));
             result.put("kv_cache_event_publisher_type",events)
-                .put("kv_cache_event_snapshot_interval_ms",nativeInt(business,"kv_cache_event_snapshot_interval_ms",600000,1,Integer.MAX_VALUE))
+                .put("kv_cache_event_snapshot_interval_ms",nativeInt(business,"kv_cache_event_snapshot_interval_ms",600000,Integer.MIN_VALUE,Integer.MAX_VALUE))
                 .put("enable_remote_cache",control);
             result.putObject("kvcm_capabilities").put("payload_io",false).put("hbm_events",events.equals("kvcm"));
         }

@@ -410,8 +410,8 @@ RECEIVED、KV_ALLOCATED、RUNNING、KV 资源和按版本查询的 finished 记�
 本地阶段，D 在最终输出交给协议容器后结束计算阶段。Fetch 接入、网络可写和输出消费不参与这些状态转换。
 
 协议层缓冲输出并异步发送，Fetch 断开只丢弃该连接的待发输出，不取消计算；显式 Cancel 和请求 deadline
-仍终止计算。输出注册表最多保留 65536 个请求，未接入结果按 fetch_attach_timeout_ms（默认十分钟）
-过期，满时先回收已完成项，不覆盖活跃项。正常性能 Case 应在 Prefill 完成前接入 Fetch；晚接入可读取
+仍终止计算。输出注册表不叠加固定请求数上限，未接入结果按 fetch_attach_timeout_ms（默认十分钟）
+过期并回收已完成项，不另设会拒绝活跃请求的容量上限。正常性能 Case 应在 Prefill 完成前接入 Fetch；晚接入可读取
 保留输出，但补发间隔不代表真实 TPOT。不模拟输出消费者背压。
 
 公共 EngineLoop 使用 Condition 等待事件，避免 Java 21 Object.wait 占用共享虚拟线程承载线程。

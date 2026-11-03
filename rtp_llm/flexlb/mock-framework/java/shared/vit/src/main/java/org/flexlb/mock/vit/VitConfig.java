@@ -50,14 +50,14 @@ public record VitConfig(String id, int patch, int merge, int hidden, int minPixe
         if (!text.isObject()) throw new IllegalArgumentException("Model text_config must be an object");
         var compute = ComputeModel.fromSettings(config, Map.of());
         var effective = new ObjectMapper().createObjectNode().put("id", root.path("id").asText()).put("role", "vit");
-        int batchSize = integer(config,"gpu_max_batch_size",1,1,1024);
+        int batchSize = integer(config,"gpu_max_batch_size",1,1,Integer.MAX_VALUE);
         int concurrency = Math.max(1, signedInteger(config,"vit_concurrency",64));
         int pending = Math.max(0, signedInteger(config,"vit_max_queue_size",64));
-        var result = new VitConfig(root.path("id").asText(), integer(vision,"patch_size",null,1,1024), integer(vision,"downsample_ratio",null,1,32), integer(text,"hidden_size",null,1,65536),
-            integer(vision,"min_pixels",null,0,Integer.MAX_VALUE), integer(vision,"max_image_tokens",null,4,1048576),
-            batchSize, integer(config,"gpu_batch_wait_ms",10,0,60000), concurrency, Math.addExact(concurrency,pending),
-            bool(config,"mock.vit.skip.download",false), integer(config,"mm_timeout_ms",120000,1,Integer.MAX_VALUE),
-            integer(config,"mm_image_max_file_size_kb",102400,0,Integer.MAX_VALUE), headers(config),
+        var result = new VitConfig(root.path("id").asText(), integer(vision,"patch_size",null,1,Integer.MAX_VALUE), integer(vision,"downsample_ratio",null,1,Integer.MAX_VALUE), integer(text,"hidden_size",null,1,Integer.MAX_VALUE),
+            integer(vision,"min_pixels",null,0,Integer.MAX_VALUE), integer(vision,"max_image_tokens",null,4,Integer.MAX_VALUE),
+            batchSize, integer(config,"gpu_batch_wait_ms",10,0,Integer.MAX_VALUE), concurrency, Math.addExact(concurrency,pending),
+            bool(config,"mock.vit.skip.download",false), signedInteger(config,"mm_timeout_ms",120000),
+            signedInteger(config,"mm_image_max_file_size_kb",102400), headers(config),
             number(config,"mm_cache_gpu_max_bytes",2147483648L), number(config,"mm_cache_cpu_max_bytes",2147483648L), number(config,"mm_hash_key_cache_max_bytes",268435456L),compute,effective);
         effective.put("checkpoint_path",config.path("checkpoint_path").asText())
             .put("gpu_max_batch_size",result.batchSize).put("gpu_batch_wait_ms",result.batchSize == 1 ? 0 : result.waitMs)

@@ -76,7 +76,6 @@ abstract class RtpSchedulerBase implements Scheduler {
         if (prefill() ? length > config.maxSeqLen() : length >= config.maxSeqLen())
             throw new RequestFailure(INVALID, "Request exceeds scheduling limits");
         if (active.containsKey(input.identity())) throw new RequestFailure(DUPLICATE, "Active request identity already exists");
-        if (owned.size() >= RtpConfig.REQUEST_LIMIT) throw new RequestFailure(OVERLOADED, "Request/delivery limit reached");
         var entry = new Entry(input, Objects.requireNonNull(listener));
         active.put(input.identity(), entry);
         owned.add(entry);

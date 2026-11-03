@@ -16,7 +16,7 @@ final class VitPreparation implements AutoCloseable {
     private final VitMetrics metrics;
     private final ThreadPoolExecutor workers;
     private final HttpClient client=HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(5))
-        .followRedirects(HttpClient.Redirect.NORMAL).build();
+        .followRedirects(HttpClient.Redirect.ALWAYS).build();
     private final Set<Task> tasks=ConcurrentHashMap.newKeySet();
     private volatile boolean closed;
 
