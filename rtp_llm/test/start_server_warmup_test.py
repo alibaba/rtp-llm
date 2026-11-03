@@ -5,6 +5,50 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from rtp_llm import start_server
+from rtp_llm.ops import RoleType
+
+
+class Hy4StartupRealWarmupTest(unittest.TestCase):
+    def configs(self, role=RoleType.PREFILL, rank=0):
+        return SimpleNamespace(
+            model_args=SimpleNamespace(model_type="hy_v4", max_seq_len=8192),
+            role_config=SimpleNamespace(role_type=role),
+            parallelism_config=SimpleNamespace(
+                world_rank=rank, world_size=8, tp_size=8
+            ),
+        )
+
+    def test_prefill_entry_automatically_warms_hy4(self):
+        with patch.dict(os.environ, {"DSV4_STARTUP_REAL_WARMUP": "auto"}):
+            self.assertTrue(
+                start_server._should_run_startup_real_warmup(self.configs())
+            )
+
+    def test_explicit_disable_still_wins(self):
+        with patch.dict(os.environ, {"DSV4_STARTUP_REAL_WARMUP": "0"}):
+            self.assertFalse(
+                start_server._should_run_startup_real_warmup(self.configs())
+            )
+
+    def test_decode_and_nonentry_rank_do_not_warm(self):
+        with patch.dict(os.environ, {"DSV4_STARTUP_REAL_WARMUP": "auto"}):
+            self.assertFalse(
+                start_server._should_run_startup_real_warmup(
+                    self.configs(RoleType.DECODE)
+                )
+            )
+            self.assertFalse(
+                start_server._should_run_startup_real_warmup(self.configs(rank=1))
+            )
+
+    def test_configured_lengths_apply_to_hy4(self):
+        with patch.dict(
+            os.environ, {"RTP_LLM_STARTUP_REAL_WARMUP_TOKEN_LENS": "1024,4096"}
+        ):
+            self.assertEqual(
+                start_server._get_startup_real_warmup_token_lens(self.configs()),
+                [1024, 4096],
+            )
 
 
 class ServiceDrainingPropagationTest(unittest.TestCase):
