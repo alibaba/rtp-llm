@@ -14,9 +14,9 @@ from rtp_llm.distribute.distributed_server import (
     get_local_world_info,
     get_master,
 )
-from rtp_llm.utils import scr_vip
+from rtp_llm.utils.scr import network
 from rtp_llm.utils.gang_info import GangInfoReader
-from rtp_llm.utils.scr_restore_context import RestoreContext
+from rtp_llm.utils.scr.restore_context import RestoreContext
 
 
 class ScrVipIntegrationTest(unittest.TestCase):
@@ -46,7 +46,7 @@ class ScrVipIntegrationTest(unittest.TestCase):
                     "RANK_SIZE": "2",
                 },
                 clear=True,
-            ), patch.object(scr_vip, "validate_device"):
+            ), patch.object(network, "validate_device"):
                 self.assertEqual(
                     get_master(configs.distribute_config, pc), ("22.0.1.2", "")
                 )
@@ -69,7 +69,7 @@ class ScrVipIntegrationTest(unittest.TestCase):
             )
             with patch.dict(
                 os.environ, {"RTPLLM_ENABLE_SCR": "0"}, clear=True
-            ), patch.object(scr_vip, "validate_device") as device:
+            ), patch.object(network, "validate_device") as device:
                 self.assertEqual(
                     get_master(configs.distribute_config, pc), ("10.0.0.2", "1234")
                 )
@@ -141,7 +141,7 @@ class ScrVipIntegrationTest(unittest.TestCase):
                     },
                     clear=True,
                 ), patch.object(
-                    scr_vip, "topology", return_value={0: "22.0.1.2", 1: "22.0.1.3"}
+                    network, "topology", return_value={0: "22.0.1.2", 1: "22.0.1.3"}
                 ), patch(
                     "rtp_llm.distribute.distributed_server.TCPStore"
                 ) as store:

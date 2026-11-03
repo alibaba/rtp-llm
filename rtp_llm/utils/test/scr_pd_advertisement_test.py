@@ -13,12 +13,12 @@ from rtp_llm.distribute.distributed_server import (
 )
 from rtp_llm.distribute.worker_info import WorkerInfo
 from rtp_llm.ops import FfnDisAggregateConfig
-from rtp_llm.utils import scr_runtime_fixup as fixup
-from rtp_llm.utils import scr_template_utils as scr
-from rtp_llm.utils.scr_endpoint_provider import resolve_world_info
-from rtp_llm.utils.scr_restore_context import RestoreContext
-from rtp_llm.utils.scr_template_lifecycle import CallbackHook, TemplateLifecycle
-from rtp_llm.utils.scr_template_utils import _BackendVisitorTemplateHook
+from rtp_llm.utils.scr import runtime_fixup as fixup
+from rtp_llm.utils.scr import template_utils as scr
+from rtp_llm.utils.scr.endpoint import resolve_world_info
+from rtp_llm.utils.scr.restore_context import RestoreContext
+from rtp_llm.utils.scr.lifecycle import CallbackHook, TemplateLifecycle
+from rtp_llm.utils.scr.template_utils import _BackendVisitorTemplateHook
 
 
 class ScrPdAdvertisementTest(unittest.TestCase):
@@ -121,7 +121,7 @@ class ScrPdAdvertisementTest(unittest.TestCase):
             "rtp_llm.distribute.distributed_server.get_world_info",
             return_value=self.world,
         ), patch(
-            "rtp_llm.utils.scr_endpoint_provider.resolve_world_info",
+            "rtp_llm.utils.scr.endpoint.resolve_world_info",
             return_value=self.world,
         ), patch(
             "rtp_llm.distribute.distributed_server.get_dp_addrs_from_world_info",

@@ -17,8 +17,8 @@ from rtp_llm.ops import RoleType, VitSeparation
 
 class BackendScrIntegrationTest(unittest.TestCase):
     def test_parent_arrival_runs_template_lifecycle_hooks(self):
-        from rtp_llm.utils import scr_template_utils as scr
-        from rtp_llm.utils.scr_template_lifecycle import CallbackHook, TemplateLifecycle
+        from rtp_llm.utils.scr import template_utils as scr
+        from rtp_llm.utils.scr.lifecycle import CallbackHook, TemplateLifecycle
 
         order = []
         lifecycle = TemplateLifecycle()

@@ -1088,7 +1088,7 @@ def create_backend_rpc_server_visitor(
         model_config=model_config,
     )
 
-    from rtp_llm.utils.scr_template_utils import (
+    from rtp_llm.utils.scr.template_utils import (
         register_backend_visitor_template_hook,
         register_server_config_template_hook,
     )

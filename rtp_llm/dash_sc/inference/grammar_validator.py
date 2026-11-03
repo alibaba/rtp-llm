@@ -41,7 +41,7 @@ from rtp_llm.dash_sc.inference.core_dump_control import (
     _configure_xgrammar_sandbox_core_dump_for_current_process,
 )
 from rtp_llm.ops import GrammarConfig
-from rtp_llm.utils.scr_template_lifecycle import template_phase_active
+from rtp_llm.utils.scr.lifecycle import template_phase_active
 
 logger = logging.getLogger(__name__)
 

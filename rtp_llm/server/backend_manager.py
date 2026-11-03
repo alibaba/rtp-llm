@@ -16,10 +16,10 @@ from rtp_llm.ops import TaskType
 from rtp_llm.server.server_args.hw_kernel_group_args import (
     validate_hw_kernel_group_args,
 )
-from rtp_llm.utils import scr_vip
+from rtp_llm.utils.scr import network
 from rtp_llm.utils.concurrency_controller import get_global_controller
-from rtp_llm.utils.scr_restore_context import RestoreContext
-from rtp_llm.utils.scr_template_lifecycle import get_template_lifecycle
+from rtp_llm.utils.scr.restore_context import RestoreContext
+from rtp_llm.utils.scr.lifecycle import get_template_lifecycle
 
 if TYPE_CHECKING:
     from rtp_llm.async_decoder_engine.base_engine import BaseEngine
@@ -76,7 +76,7 @@ class BackendManager(object):
             engine_config.runtime_config,
             engine_config.parallelism_config,
             world_info,
-            scr_vip.real_ip_by_vip(
+            network.real_ip_by_vip(
                 self.py_env_configs.parallelism_config,
                 self._distributed_server.gang_info,
             ),
@@ -230,7 +230,7 @@ class BackendManager(object):
             self._engine_config.runtime_config,
             self._engine_config.parallelism_config,
             world_info,
-            scr_vip.real_ip_by_vip(
+            network.real_ip_by_vip(
                 self.py_env_configs.parallelism_config,
                 self._distributed_server.gang_info,
             ),

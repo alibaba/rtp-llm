@@ -16,11 +16,11 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from rtp_llm.utils.scr_local_comm import current_pod_ip
-from rtp_llm.utils.scr_restore_context import RestoreContext
+from rtp_llm.utils.scr.network import current_pod_ip
+from rtp_llm.utils.scr.restore_context import RestoreContext
 
 if TYPE_CHECKING:
-    from rtp_llm.utils.scr_template_lifecycle import TemplateLifecycle
+    from rtp_llm.utils.scr.lifecycle import TemplateLifecycle
 
 
 LOGGER = logging.getLogger(__name__)

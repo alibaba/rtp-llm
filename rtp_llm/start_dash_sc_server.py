@@ -17,7 +17,7 @@ from rtp_llm.utils.concurrency_controller import (
     ConcurrencyController,
     set_global_controller,
 )
-from rtp_llm.utils.scr_template_utils import (
+from rtp_llm.utils.scr.template_utils import (
     ScrParticipantManifest,
     arrive_scr_template_barrier,
     is_scr_template_phase_active,

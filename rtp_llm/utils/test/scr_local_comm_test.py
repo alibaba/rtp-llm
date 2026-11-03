@@ -3,7 +3,7 @@ import unittest
 from types import SimpleNamespace as NS
 from unittest.mock import patch
 
-from rtp_llm.utils.scr_local_comm import (
+from rtp_llm.utils.scr.network import (
     local_comm_enabled,
     validate_local_members,
     validate_local_world,

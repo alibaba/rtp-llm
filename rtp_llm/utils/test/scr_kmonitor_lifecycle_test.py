@@ -7,10 +7,10 @@ import unittest
 from types import SimpleNamespace
 from unittest import mock
 
-from rtp_llm.utils import scr_runtime_fixup as runtime
-from rtp_llm.utils import scr_template_utils as scr
-from rtp_llm.utils.scr_restore_context import RestoreContext
-from rtp_llm.utils.scr_template_lifecycle import CallbackHook, TemplateLifecycle
+from rtp_llm.utils.scr import runtime_fixup as runtime
+from rtp_llm.utils.scr import template_utils as scr
+from rtp_llm.utils.scr.restore_context import RestoreContext
+from rtp_llm.utils.scr.lifecycle import CallbackHook, TemplateLifecycle
 
 reporters = importlib.import_module(
     "rtp_llm.aios.kmonitor.python_client.kmonitor.report_worker"
