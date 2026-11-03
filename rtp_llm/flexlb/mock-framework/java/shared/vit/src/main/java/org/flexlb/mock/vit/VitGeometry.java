@@ -11,7 +11,8 @@ import org.flexlb.mock.multimodal.MediaInput;
 
 /** V-owned image geometry, logical output size and simulated feature hashes. */
 final class VitGeometry {
-    record Image(String key, int width, int height, int rows) {
+    record Image(String key, int width, int height, int rows, String featureIdentity) {
+        Image(String key, int width, int height, int rows) { this(key, width, height, rows, key); }
         public long bytes(int hidden, int dtypeBytes) { return Math.multiplyExact(Math.multiplyExact((long) rows, hidden), dtypeBytes); }
     }
     static ByteString hashes(String key, int rows) {

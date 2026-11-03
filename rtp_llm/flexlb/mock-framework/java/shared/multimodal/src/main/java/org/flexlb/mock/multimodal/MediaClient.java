@@ -17,20 +17,32 @@ public final class MediaClient implements AutoCloseable {
     public MultimodalOutputPB fetch(GenerateInputPB input,long deadline) {
         long remaining=deadline==Long.MAX_VALUE?TimeUnit.MINUTES.toNanos(2):deadline-System.nanoTime();
         if(remaining<=0) throw Status.DEADLINE_EXCEEDED.withDescription("Request expired preparing vision input").asRuntimeException();
-        return MultimodalRpcServiceGrpc.newBlockingStub(channel(MediaInput.address(input))).withDeadlineAfter(remaining,TimeUnit.NANOSECONDS)
+        checkActive();
+        var result=MultimodalRpcServiceGrpc.newBlockingStub(channel(MediaInput.address(input))).withDeadlineAfter(remaining,TimeUnit.NANOSECONDS)
             .remoteMultimodalEmbedding(MediaInput.media(input));
+        checkActive();
+        return result;
     }
     public GenerateInputPB routingInput(GenerateInputPB input,long deadline) {
         long remaining=deadline-System.nanoTime();
         if(remaining<=0) throw Status.DEADLINE_EXCEEDED.withDescription("Request expired acquiring vision hashes").asRuntimeException();
         var request=MultimodalHashRequestPB.newBuilder().addAllKeys(input.getMultimodalInputsList().stream().map(MediaInput::key).distinct().toList())
             .setInputs(MediaInput.media(input)).setTimeoutMs(Math.max(1,TimeUnit.NANOSECONDS.toMillis(remaining))).build();
+        checkActive();
         var metadata=MultimodalRpcServiceGrpc.newBlockingStub(channel(MediaInput.address(input))).withDeadlineAfter(remaining,TimeUnit.NANOSECONDS).getMultimodalHashes(request);
+        checkActive();
         return MediaInput.applyHashes(input,metadata);
     }
     public GenerateInputPB prepare(GenerateInputPB input,long deadline) {
         if(!MediaInput.present(input)) return input;
         return MediaInput.apply(input,fetch(input,deadline)).toBuilder().clearMultimodalInputs().clearMultimodalTokenLayout().clearV41Inputs().build();
+    }
+    private static void checkActive() {
+        var context=Context.current();
+        if(context.getDeadline()!=null && context.getDeadline().isExpired())
+            throw Status.DEADLINE_EXCEEDED.withDescription("Vision preparation expired").asRuntimeException();
+        if(context.isCancelled() || Thread.currentThread().isInterrupted())
+            throw Status.CANCELLED.withDescription("Vision preparation cancelled").asRuntimeException();
     }
     @Override public void close() {
         List<ManagedChannel> owned;

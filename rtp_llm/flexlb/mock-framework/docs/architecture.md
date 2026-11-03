@@ -447,3 +447,5 @@ KvCache/BlockTree 提供 CacheMetadata 快照与介质变更事件；仅有效�
 ### main 的调度状态和缓存指标
 
 调度器指标按实际队列报告 waiting/running，PD 等待不计入 waiting；完成时发布最终阶段耗时，缓存加载延迟不使用 PD 传输时间代替。缓存复用区分 Device/Host 来源；main 保留同步缓存模型，不引入远端加载任务。具体字段及指标见 [组件参考](component-reference.md)。
+
+配置在装配前完成归一和派生；KVCM 心跳与串行元数据传输分别执行，快照 ACK 决定版本推进。下载模式的模拟特征身份来自文件内容与几何参数，main 的图片 span 协议保持原有规则。详见组件参考。

@@ -363,3 +363,13 @@ prometheus/ 保存配置、targets、版本、日志、data/TSDB/WAL 和 collect
 调度器 waiting/running 指标来自实际队列，PD 协议等待不计入 waiting。WorkerStatus 与 real 一样保留旧 query_len 字段为默认值，主控通过任务列表读取每个请求的 phase/is_waiting。活动任务的 waiting 为 0、execution 为 -1；完成记录才发布最终耗时。Decode 收到 Generate 后重新开始计算阶段计时。`rtp_llm_stream_loading_cache_latency_us` 不再用 PD 传输耗时冒充；当前缓存加载同步完成，不发布异步加载或远端 read/write 指标。
 
 缓存复用按实际 Device/Host 命中分别上报 `rtp_llm_stream_cache_device_reuse_length` 和 `rtp_llm_stream_cache_memory_reuse_length`，长度单位为 token；`rtp_llm_kv_cache_active_blocks` 表示 Device 不可回收块数。本分支未引入远端存储适配器及其异步任务模型。
+
+### 通用配置初始化与 KVCM 上报
+
+RtpConfig 在装配组件前完成默认值、派生值和校验。`seq_size_per_block` 缺省或 0 时取普通设备默认 64；`max_batch_tokens_size` 缺省或 0 时取 `max_context_batch_size × max_seq_len`，乘积溢出在启动前报错。无模型时长度缺省 8192；提供模型而未实现其原生长度解析时仍需显式 max_seq_len。模型元信息只读一次，Client/Engine 共用 CacheSequence 解析原生 cache_key_hash_seed，默认 0。
+
+CP 启用时 cp_force_single_prefill 默认 true；显式 false 才允许同轮多个 Prefill。uncached token 配额按 2×CP size 对齐。WorkerStatus 上报配置的 dp_size；当前模拟实例只执行 rank 0。ViT 将 vit_concurrency 归一到至少 1、vit_max_queue_size 到至少 0，不添加一小时超时上限。
+
+KVCM 元数据仍只上报逻辑 KV。心跳独立于串行数据任务，大快照上传不阻塞心跳；快照保留原始 key 版本和请求体，成功 ACK 后才推进版本。重注册重建快照；重试尊重服务端 retry_after_ms 并退避，退出等待线程停止后发送 HOST_DOWN。
+
+下载模式按实际文件字节和几何参数生成模拟特征身份；相同字节从不同 URL 下载得到相同 hash。跳过下载时仍按媒体 key 生成模拟身份。URL 缓存的驻留和失效策略保持原有行为；此身份不是模型 embedding 的精确计算。文件大小遵守 mm_image_max_file_size_kb；下载仍在异步准备阶段执行。
