@@ -1317,7 +1317,7 @@ TEST_F(ExecOpsTest, testWriteCacheStoreLinearHeadTransferRequiresExplicitDescrip
             ASSERT_EQ(store->records.size(), 1u);
             const auto key = cacheKeyAt(inputs, 0, 0, "linear");
             const auto& blocks = store->records[0].blocks;
-            if (!enabled || cp_size == 1) {
+            if (!enabled) {
                 ASSERT_EQ(blocks.size(), 1u);
                 ASSERT_EQ(blocks.count("kv_" + key), 1u);
                 EXPECT_EQ(blocks.at("kv_" + key).len, spec->block_size_bytes());
