@@ -20,7 +20,26 @@ absl::StatusOr<SamplerInputs> NormalSamplerInputGatherer::gather(const StreamGro
     auto               total_batch_size_out = stream_groups.totalSamplerBatchSizeOut();
     ReturnAllProbsMode return_all_probs     = stream_groups.needReturnAllProbs();
 
-    SamplerInputs sampler_inputs = allocateSamplerInputs(stream_groups, total_batch_size_in, total_batch_size_out);
+    bool need_token_history = true;
+#if USING_CUDA
+    if (model_output.logits.is_cuda()) {
+        need_token_history = std::any_of(all_streams.begin(), all_streams.end(), [](const auto& stream) {
+            const auto& config = *stream->generateConfig();
+            return config.repetition_penalty != 1.0f || config.presence_penalty != 0.0f
+                   || config.frequency_penalty != 0.0f || config.no_repeat_ngram_size.value_or(0) != 0
+                   || stream->currentNumBeams() != 1 || stream->nextNumBeams() != 1;
+        });
+    }
+#endif
+    SamplerInputs sampler_inputs =
+        allocateSamplerInputs(stream_groups, total_batch_size_in, total_batch_size_out, 0, need_token_history);
+    if (!need_token_history) {
+        // Normal dispatch only consumes the last column without beams. The
+        // sampler writes it on device; no host history needs to be uploaded.
+        sampler_inputs.token_ids =
+            torch::empty({static_cast<int64_t>(total_batch_size_in), static_cast<int64_t>(sampler_inputs.step + 1)},
+                         model_output.logits.options().dtype(torch::kInt32));
+    }
     fillSamplerCommonInputs(sampler_inputs, all_streams);
 
     setLogitsProcessorInputs(sampler_inputs, all_streams);
@@ -41,10 +60,12 @@ absl::StatusOr<SamplerInputs> NormalSamplerInputGatherer::gather(const StreamGro
             stream->needTilingForSampling() ? stream->nextBatchSize() : stream->currentBatchSize();
 
         for (int i = 0; i < sampler_batch_size; ++i) {
-            int cur_batch = std::min(i, current_batch_size - 1);
-            memcpy(sampler_inputs.token_ids.data_ptr<int32_t>() + ((batch_idx) * (sampler_inputs.step + 1)),
-                   complete_token_ids.data_ptr<int32_t>() + cur_batch * complete_seq_len,
-                   seq_len * sizeof(int));
+            if (need_token_history) {
+                int cur_batch = std::min(i, current_batch_size - 1);
+                memcpy(sampler_inputs.token_ids.data_ptr<int32_t>() + ((batch_idx) * (sampler_inputs.step + 1)),
+                       complete_token_ids.data_ptr<int32_t>() + cur_batch * complete_seq_len,
+                       seq_len * sizeof(int));
+            }
             reinterpret_cast<bool*>(sampler_inputs.finished_mask.data_ptr())[batch_idx] =
                 stream->isSubGenerateDoneWithoutLock(i);
             batch_idx += 1;
@@ -61,9 +82,11 @@ absl::StatusOr<SamplerInputs> NormalSamplerInputGatherer::gather(const StreamGro
             }
         }
         model_batch_idx += current_batch_size;
-        RTP_LLM_LOG_DEBUG("stream [%ld], sampler inputs token ids = [%s]",
-                          stream->streamId(),
-                          tensorDebugStringWithData<int32_t>(sampler_inputs.token_ids).c_str());
+        if (need_token_history) {
+            RTP_LLM_LOG_DEBUG("stream [%ld], sampler inputs token ids = [%s]",
+                              stream->streamId(),
+                              tensorDebugStringWithData<int32_t>(sampler_inputs.token_ids).c_str());
+        }
     }
 
     auto       vocab_size            = (size_t)model_output.logits.size(1);

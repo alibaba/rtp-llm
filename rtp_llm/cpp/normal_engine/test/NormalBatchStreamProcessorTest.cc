@@ -25,6 +25,7 @@
 #include "rtp_llm/cpp/normal_engine/NormalExecutor.h"
 #include "rtp_llm/cpp/models/ModelTypes.h"
 #include "rtp_llm/cpp/models/SampleInfos.h"
+#include "rtp_llm/cpp/models/Sampler.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include "rtp_llm/cpp/models/logits_processor/MultiSeqLogitsProcessor.h"
 #include "rtp_llm/models_py/bindings/core/Types.h"
@@ -2996,6 +2997,91 @@ TEST_F(NormalBatchStreamProcessorTest, testSamplerInputSnapshotsOnlyRequestedRow
     EXPECT_EQ(toVec<int32_t>(logprobs_output.top_logprob_token_ids.value()), (std::vector<int32_t>{3, 2}));
     EXPECT_FALSE(plain_output.value().generate_outputs[0].token_logprobs.has_value());
 }
+
+#if USING_CUDA
+TEST_F(NormalBatchStreamProcessorTest, testSamplerInputSkipsHistoryWithoutPenalties) {
+    auto model_config = makeLogprobsModelConfig();
+    auto processor    = makeLogprobsProcessor(model_config);
+
+    // Cover both the top-k=1 path and full-vocabulary sampling, including a
+    // stateful logits processor that maintains its own committed history.
+    for (const int top_k : {1, 0}) {
+        SCOPED_TRACE(top_k);
+        auto first                      = makeLogprobsStream(model_config, false, 0, 2, true);
+        auto second                     = makeLogprobsStream(model_config, true, 0, 2, true);
+        first->generateConfig()->top_k  = top_k;
+        second->generateConfig()->top_k = top_k;
+        auto stateful_processor         = std::make_shared<TestStatefulLogitsProcessor>(false);
+        first->logits_processor_list_.push_back(stateful_processor);
+        Sampler sampler(SamplerInitParams{});
+
+        for (int round = 0; round < 2; ++round) {
+            StreamGroups    groups({first, second});
+            GptModelOutputs model_output;
+            model_output.logits = torch::full({2, 4},
+                                              -std::numeric_limits<float>::infinity(),
+                                              torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
+            model_output.logits[0][1].fill_(0.0f);
+            model_output.logits[1][2].fill_(0.0f);
+            auto inputs = processor->gatherSamplerInput(groups, GptModelInputs(), model_output);
+            ASSERT_TRUE(inputs.ok());
+            EXPECT_TRUE(inputs->token_ids.is_cuda());
+            EXPECT_EQ(inputs->step, groups.maxSeqLen());
+            EXPECT_EQ(inputs->token_ids.sizes(), (torch::IntArrayRef{2, static_cast<int64_t>(inputs->step + 1)}));
+
+            MergedOutput outputs;
+            outputs.model_output   = model_output;
+            outputs.sampler_output = sampler.forward(inputs.value());
+            ASSERT_TRUE(processor->dispatch(groups, outputs).ok());
+            ASSERT_FALSE(first->hasError());
+            ASSERT_FALSE(second->hasError());
+        }
+        EXPECT_EQ(first->completeTokenIdsVec(0), (std::vector<int>{0, 1, 1}));
+        EXPECT_EQ(second->completeTokenIdsVec(0), (std::vector<int>{0, 2, 2}));
+        EXPECT_EQ(stateful_processor->acceptedTokenLen(), 2);
+        ASSERT_TRUE(second->getTokenLogProbs().defined());
+        EXPECT_EQ(second->getTokenLogProbs().numel(), 2);
+    }
+}
+
+TEST_F(NormalBatchStreamProcessorTest, testSamplerInputPreservesHistoryForMixedBatchConstraints) {
+    auto model_config = makeLogprobsModelConfig();
+    auto processor    = makeLogprobsProcessor(model_config);
+    const std::vector<std::pair<const char*, std::function<void(GenerateConfig&)>>> cases = {
+        {"repetition", [](GenerateConfig& c) { c.repetition_penalty = 1.1f; }},
+        {"presence", [](GenerateConfig& c) { c.presence_penalty = 0.1f; }},
+        {"frequency", [](GenerateConfig& c) { c.frequency_penalty = 0.1f; }},
+        {"ngram", [](GenerateConfig& c) { c.no_repeat_ngram_size = 2; }},
+        {"beam", [](GenerateConfig& c) { c.num_beams = 2; }},
+    };
+    for (const auto& [name, configure] : cases) {
+        SCOPED_TRACE(name);
+        auto plain             = makeLogprobsStream(model_config, false, 0, 2, true);
+        auto query             = std::make_shared<GenerateInput>();
+        query->input_ids       = hostIntBuffer({2, 1});
+        query->generate_config = std::make_shared<GenerateConfig>();
+        configure(*query->generate_config);
+        ResourceContext resource_context;
+        RuntimeConfig   runtime_config;
+        auto            constrained =
+            std::make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
+        ASSERT_FALSE(constrained->hasError());
+        constrained->generate_status_->status = StreamState::RUNNING;
+        StreamGroups    groups({plain, constrained});
+        GptModelOutputs model_output;
+        model_output.logits = torch::zeros({2, 4}, torch::TensorOptions().device(torch::kCUDA));
+
+        auto inputs = processor->gatherSamplerInput(groups, GptModelInputs(), model_output);
+        ASSERT_TRUE(inputs.ok());
+        ASSERT_TRUE(inputs->token_ids.device().is_cpu());
+        EXPECT_TRUE(inputs->token_ids.is_pinned());
+        EXPECT_EQ(inputs->step, 2);
+        EXPECT_EQ(inputs->token_ids.sizes(), (torch::IntArrayRef{2, 3}));
+        EXPECT_EQ(inputs->token_ids[0][0].item<int32_t>(), 0);
+        EXPECT_EQ(toVec<int32_t>(inputs->token_ids[1].narrow(0, 0, 2)), (std::vector<int32_t>{2, 1}));
+    }
+}
+#endif
 
 TEST_F(NormalBatchStreamProcessorTest, testSamplerInputPreservesNarrowLogitsWithoutLogprobs) {
     auto           model_config = makeLogprobsModelConfig(100);
