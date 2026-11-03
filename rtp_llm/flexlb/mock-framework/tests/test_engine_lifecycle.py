@@ -31,6 +31,7 @@ def setup_case(tmp_path, operation, mode='shared', monitor=False, invalid=False,
               'mock.compute.forward.expression': '1'}
     env = {role: {'engine': 'rtp', 'deployment': {'replicas': 2 if role == 'prefill' else 1}, 'config': dict(config)}
            for role in ('prefill', 'decode')}
+    env['prefill']['config']['mock.scheduler.mode'] = 'group'  # NativeProbe also exercises batch RPCs.
     if invalid:
         env['decode']['config']['seq_size_per_block'] = 0
     if master:
