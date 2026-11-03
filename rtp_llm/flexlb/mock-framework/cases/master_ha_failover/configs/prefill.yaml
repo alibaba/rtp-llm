@@ -1,3 +1,5 @@
+# Master uses BATCH delivery; preserve explicit group scheduling.
+mock.scheduler.mode: group
 max_seq_len: 1048576
 cp_rotate_method: ALL_GATHER
 tp_size: 4

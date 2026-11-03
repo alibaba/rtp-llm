@@ -97,7 +97,7 @@ public record RtpConfig(String id, Role role, int blockSize, int deviceBlocks, i
     }
 
     public boolean groupScheduling() {
-        return role == Role.prefill && business.path("mock.scheduler.mode").asText("group").equals("group");
+        return role == Role.prefill && business.path("mock.scheduler.mode").asText("fifo").equals("group");
     }
 
     public AdmissionConfig endpoint() {

@@ -30,6 +30,7 @@ def test_runner_starts_isolated_packaged_rtp_nodes_and_native_client_reads_them(
     classpath = os.pathsep.join([str(ROOT / 'java/backend/rtp/target/test-classes'), str(ROOT / 'java/host/target/mock-engine-service-1.0-SNAPSHOT-all.jar')])
     environment = {role: {'engine': 'rtp', 'config': {'SEQ_SIZE_PER_BLOCK': '16', 'MAX_SEQ_LEN': '4096',
                     'TEST_BLOCK_NUM': '9', 'RESERVE_BLOCK_RATIO': '0'}} for role in ('prefill', 'decode')}
+    environment['prefill']['config']['mock.scheduler.mode'] = 'group'
     for group in environment.values():
         group['config']['mock.compute.forward.expression'] = '1 + batchSize'
     data = {'id': 'native_node_probe', 'describe': '仅验证节点启动及原生状态协议', 'environment': environment,

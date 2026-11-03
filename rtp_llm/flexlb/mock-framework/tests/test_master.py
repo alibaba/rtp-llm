@@ -91,7 +91,7 @@ def test_real_master_routes_to_isolated_rtp_processes(tmp_path, batched, replica
         route = json.loads(master_config['MODEL_SERVICE_CONFIG'])
         route['kvcm'] = {'address': '127.0.0.1', 'port': meta['rpc_port'], 'namespace': 'mock'}
         master_config['MODEL_SERVICE_CONFIG'] = json.dumps(route)
-    engine_config = {'seq_size_per_block': 16, 'test_block_num': 9, 'reserve_block_ratio': 0,
+    engine_config = {'mock.scheduler.mode': 'group' if batched else 'fifo', 'seq_size_per_block': 16, 'test_block_num': 9, 'reserve_block_ratio': 0,
                      'max_seq_len': 4096, 'mock.compute.forward.expression': '1 + batchSize'}
     if vision:
         model = tmp_path / 'model'

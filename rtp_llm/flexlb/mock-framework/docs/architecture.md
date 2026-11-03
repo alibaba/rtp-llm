@@ -414,7 +414,7 @@ Master HA Case 在 environment 中声明两个独立 Master JVM，启动后通�
 
 接入层只处理原生 RPC 的解析、响应关联和异步输出；Scheduler 是队列、计算进度、容量和终态的唯一来源。D 的网络不可写只阻塞输出缓冲发送，不再阻塞 Decode Forward 或 KV 释放；缓冲仍受请求生成长度和整体输出保留策略约束。PD 交接只保留 ALLOCATE→Prefill 完成→LOAD/ACK→GENERATE 或 PREFILL_COMPLETE，不实现额外来源注册表、Reader 所有权及自定义 proto。Wire 阶段仅用于拒绝乱序帧，不代替 Scheduler 的调度状态。
 
-接入组件独立为 `mock-admission`（`java/shared/admission`，包名 `org.flexlb.mock.admission`）。对外入口为 `RpcService`，接收 `AdmissionConfig`、实例自己的 `KvCache` 和现有 `Scheduler.Factory`；RtpNode 额外传入启动时确定的显式组接口开关，关闭时 EnqueueBatch/EnqueueGroup 返回 UNIMPLEMENTED。`AdmissionConfig` 只含身份、角色、块大小、TP、序列/批 Token 上限和 ComputeModel，不包含排队、抢占或组批策略。RTP 后端通过 `RtpConfig.endpoint()` 提供这些值，由 `RtpNode` 装配 `RtpScheduler.factory(config)`：P 的 `mock.scheduler.mode=group`（默认）选择 RtpGroupScheduler，`fifo` 选择 RtpScheduler；D 始终使用普通调度。换 Scheduler 不需要复制接入代码。模块只有当前这一套 RPC，不增加协议选择、接入基类或插件注册机制。
+接入组件独立为 `mock-admission`（`java/shared/admission`，包名 `org.flexlb.mock.admission`）。对外入口为 `RpcService`，接收 `AdmissionConfig`、实例自己的 `KvCache` 和现有 `Scheduler.Factory`；RtpNode 额外传入启动时确定的显式组接口开关，关闭时 EnqueueBatch/EnqueueGroup 返回 UNIMPLEMENTED。`AdmissionConfig` 只含身份、角色、块大小、TP、序列/批 Token 上限和 ComputeModel，不包含排队、抢占或组批策略。RTP 后端通过 `RtpConfig.endpoint()` 提供这些值，由 `RtpNode` 装配 `RtpScheduler.factory(config)`：P 的 `mock.scheduler.mode=fifo`（默认）选择 RtpScheduler，`group` 显式选择 RtpGroupScheduler；D 始终使用普通调度。换 Scheduler 不需要复制接入代码。模块只有当前这一套 RPC，不增加协议选择、接入基类或插件注册机制。
 
 接入层的独立测试只依赖共享组件，用独立测试 Scheduler 验证 P/D 入队、错误返回和锁归属；真实 RTP 策略的 RPC/PD 集成测试仍在后端模块中运行。模块依赖方向为后端→接入层→共享运行组件，不存在接入层→后端依赖。
 
