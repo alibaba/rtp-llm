@@ -16,7 +16,6 @@ from rtp_llm.models_py.kernels.cuda.quant_layouts import (
     per_token_cast_to_fp8_packed_ue8m0,
 )
 from rtp_llm.models_py.modules.factory.fused_moe.utils.config import (
-    mega_moe_input_packer_mode,
     strict_fused_moe_enabled,
 )
 
@@ -102,13 +101,4 @@ class FusedMegaMoEInputPacker(MegaMoEInputPacker):
 
 
 def get_mega_moe_input_packer() -> MegaMoEInputPacker:
-    mode = mega_moe_input_packer_mode()
-    if mode == "torch":
-        if strict_fused_moe_enabled():
-            raise RuntimeError("MOE_STRICT_FUSED=1 forbids MEGA_MOE_INPUT_PACKER=torch")
-        return TorchMegaMoEInputPacker()
-    if mode in ("auto", "fused"):
-        return FusedMegaMoEInputPacker()
-    raise ValueError(
-        f"invalid MEGA_MOE_INPUT_PACKER={mode!r}; expected auto|torch|fused"
-    )
+    return FusedMegaMoEInputPacker()

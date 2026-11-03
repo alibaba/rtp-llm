@@ -32,12 +32,18 @@ Output layout:
     ``sgl_per_token_group_quant_fp8(column_major_scales=True,
     scale_tma_aligned=True, scale_ue8m0=True)``.
 
+``silu_mul_fp8_quant_packed_g32`` is the group-32 (_MXFP8_) variant: same
+column-major packed UE8M0 contract, but one scale per 32 activations to match
+``recipe_a=(1, 32)``. It trades the BLOCK_M row tiling for one row per program
+so that all 32 lanes of a group live in a single warp-level reduction.
+
 Router weight is NOT folded in here — it's applied by the downstream
 ``ep_gather`` (Phase 2 optimization 4) so we only output silu(gate)*up.
 """
 
 from __future__ import annotations
 
+import os
 from typing import Optional, Tuple
 
 import torch
@@ -378,3 +384,118 @@ def silu_mul_fp8_quant_packed_from_parts(
     )
 
     return output_q, output_scale_packed
+
+
+@triton.jit
+def _mul_ftz(a, b):
+    return tl.inline_asm_elementwise(
+        "mul.ftz.f32 $0, $1, $2;",
+        "=f,f,f",
+        [a, b],
+        dtype=tl.float32,
+        is_pure=True,
+        pack=1,
+    )
+
+
+@triton.jit(do_not_specialize=["scale_stride", "legacy"])
+def _silu_mul_fp8_quant_packed_g32_kernel(
+    gate_up_ptr,  # [M, 2N] BF16 row-major (row stride 2N)
+    q_ptr,  # [M, N] FP8 e4m3fn
+    scales_ptr,  # column-major [num_packed_groups, tma_aligned_M] int32 view
+    scale_stride,
+    legacy,
+    N: tl.constexpr,
+    APPLY_CLAMP: tl.constexpr,
+    CLAMP_LIMIT: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+):
+    GROUPS: tl.constexpr = BLOCK_N // 32
+    PACKS: tl.constexpr = GROUPS // 4
+    pid_m = tl.program_id(0).to(tl.int64)
+    pid_n = tl.program_id(1).to(tl.int64)
+    n_off = pid_n * BLOCK_N + tl.arange(0, BLOCK_N).to(tl.int64)
+    mask = n_off < N
+    row = pid_m * (2 * N)
+    g = tl.load(gate_up_ptr + row + n_off, mask=mask, other=0.0).to(tl.float32)
+    u = tl.load(gate_up_ptr + row + N + n_off, mask=mask, other=0.0).to(tl.float32)
+    if APPLY_CLAMP:
+        u = tl.where(u > CLAMP_LIMIT, CLAMP_LIMIT, u)
+        u = tl.where(u < -CLAMP_LIMIT, -CLAMP_LIMIT, u)
+        g = tl.where(g > CLAMP_LIMIT, CLAMP_LIMIT, g)
+    s = g * tl.sigmoid(g)
+    # Quantize the same BF16-rounded value as the two-launch chain.
+    y = (s * u).to(tl.bfloat16).to(tl.float32).reshape((GROUPS, 32))
+    # Native fmaxf ignores NaNs and seeds each lane with FP32 tiny.
+    amax = tl.max(
+        tl.maximum(tl.abs(y), 2.0**-126, propagate_nan=tl.PropagateNan.NONE), 1
+    )
+    if legacy:
+        raw = tl.maximum(amax / 448.0, 1.0e-10)
+        scale = tl.exp2(tl.ceil(tl.log2(raw)))
+        scaled = y / scale[:, None]
+        biased = tl.log2(scale).to(tl.int32) + 127
+    else:
+        # CUDA13 native v2 uses FTZ and fast_log2_ceil/fast_pow2.
+        raw = _mul_ftz(amax, 1.0 / 448.0)
+        bits = raw.to(tl.int32, bitcast=True)
+        biased = ((bits >> 23) & 255) + ((bits & 0x7FFFFF) != 0).to(tl.int32)
+        reciprocal = ((254 - biased) << 23).to(tl.float32, bitcast=True)
+        scaled = _mul_ftz(y, reciprocal[:, None])
+    q = tl.minimum(
+        tl.maximum(scaled, -448.0, propagate_nan=tl.PropagateNan.NONE), 448.0
+    ).reshape((BLOCK_N,))
+    tl.store(q_ptr + pid_m * N + n_off, q.to(tl.float8e4nv), mask=mask)
+    group = pid_n * GROUPS + tl.arange(0, GROUPS)
+    biased = tl.where(group < N // 32, biased, 0).to(tl.uint8).to(tl.uint32)
+    packed = tl.sum(biased.reshape((PACKS, 4)) << (tl.arange(0, 4)[None, :] * 8), 1)
+    pack = pid_n * PACKS + tl.arange(0, PACKS)
+    tl.store(scales_ptr + pack * scale_stride + pid_m, packed, pack < tl.cdiv(N, 128))
+
+
+def silu_mul_fp8_quant_packed_g32(
+    gate_up: torch.Tensor, clamp_limit: float = 0.0
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """SwiGLU followed by native group-32 E4M3/UE8M0 quantization.
+
+    The MXFP8 caller supplies contiguous BF16 ``[M, 2N]``, with ``N`` divisible
+    by 32. Keeps the BF16 rounding boundary of the unfused chain without
+    materializing ``hidden``, so the FP8 input and its group-32 scales match
+    ``sgl_per_token_group_quant_fp8(..., group_size=32)`` bit-for-bit.
+
+    Quantization honors the repo-wide ``DSV4_FP8_QUANT_KERNEL`` policy; ``auto``
+    selects v2 at ``M*N >= 4Mi`` elements. Legacy's unused scale-pack bytes are
+    unspecified; this entry initializes them to zero, as v2 does.
+
+    Returns:
+      out_fp8: ``[M, N]`` torch.float8_e4m3fn.
+      out_scale: column-major TMA-aligned ``[M, cdiv(N, 128)]`` int32, packed
+                 4 UE8M0 per int32 (one per 32 activations).
+    """
+    m, two_n = gate_up.shape
+    n = two_n // 2
+    quant = torch.empty((m, n), dtype=torch.float8_e4m3fn, device=gate_up.device)
+    scales = torch.empty(
+        (triton.cdiv(n, 128), triton.cdiv(m, 4) * 4),
+        dtype=torch.int32,
+        device=gate_up.device,
+    ).T[:m]
+    if m * n == 0:
+        return quant, scales
+    mode = os.environ.get("DSV4_FP8_QUANT_KERNEL", "auto").strip().lower()
+    legacy = mode == "legacy" or (mode == "auto" and m * n < 4 * 1024 * 1024)
+    apply_clamp = clamp_limit is not None and clamp_limit > 0.0
+    _silu_mul_fp8_quant_packed_g32_kernel[(m, triton.cdiv(n, 1024))](
+        gate_up,
+        quant,
+        scales,
+        scales.stride(1),
+        legacy,
+        N=n,
+        APPLY_CLAMP=apply_clamp,
+        CLAMP_LIMIT=float(clamp_limit) if apply_clamp else 0.0,
+        BLOCK_N=1024,
+        num_warps=8,
+        enable_fp_fusion=False,
+    )
+    return quant, scales

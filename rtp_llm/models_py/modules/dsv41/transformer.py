@@ -60,6 +60,7 @@ class V4Args:
     moe_inter_dim: int = 2048
     n_routed_experts: int = 256
     n_shared_experts: int = 1
+    moe_strategy: str = "auto"
     n_activated_experts: int = 6
     score_func: str = "sqrtsoftplus"
     route_scale: float = 1.5
@@ -162,6 +163,7 @@ def _block_kwargs(
         ep_rank=args.ep_rank,
         max_tokens_per_rank=args.max_tokens_per_rank,
         is_decode_role=args.is_decode_role,
+        moe_strategy=args.moe_strategy,
         fp8_kv_cache=args.fp8_kv_cache,
         commit_only=commit_only,
     )

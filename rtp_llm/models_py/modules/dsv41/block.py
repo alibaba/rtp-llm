@@ -12,14 +12,39 @@ import torch
 import torch.nn as nn
 
 from rtp_llm.models_py.modules import RMSNorm
+from rtp_llm.models_py.modules.dsv41 import _profiler
+from rtp_llm.models_py.modules.dsv41.chunk_env import chunked_moe_enabled
 from rtp_llm.models_py.modules.dsv41.fp8.attention import (
     AttentionFP8,
     CommitOnlyAttentionFP8,
 )
 from rtp_llm.models_py.modules.dsv41.hc import build_hc_unit
-from rtp_llm.models_py.modules.dsv41.moe import MoE
+from rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.chunked_layer import (
+    ChunkedFp8Fp4MoeLayer,
+)
+from rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.weight_adapter import (
+    adapt_split_moe_weights,
+)
+from rtp_llm.utils.model_weight import W
 
 _PrefillFastHCImpls = Tuple[Callable, Callable, Callable, Callable]
+
+_MOE_WEIGHT_NAMES = {
+    "routed_gate": W.v4_routed_w1_w,
+    "routed_gate_scale": W.v4_routed_w1_s,
+    "routed_up": W.v4_routed_w3_w,
+    "routed_up_scale": W.v4_routed_w3_s,
+    "routed_down": W.v4_routed_w2_w,
+    "routed_down_scale": W.v4_routed_w2_s,
+    "router": W.v4_router_w,
+    "router_bias": W.v4_router_bias,
+    "router_tid2eid": W.v4_router_tid2eid,
+    "router_bias_vl": W.v4_router_bias_vl,
+    "shared_gate_up": W.v4_shared_w13_w,
+    "shared_gate_up_scale": W.v4_shared_w13_s,
+    "shared_down": W.v4_shared_w2_w,
+    "shared_down_scale": W.v4_shared_w2_s,
+}
 
 
 def _prefill_fast_norm(norm: nn.Module, x: torch.Tensor) -> torch.Tensor:
@@ -75,6 +100,7 @@ class Block(nn.Module):
         ep_rank: int = 0,
         max_tokens_per_rank: int = 8192,
         is_decode_role: bool = False,
+        moe_strategy: str = "auto",
         fp8_kv_cache: bool = False,
         commit_only: bool = False,
         v41_config: Optional[Dict] = None,
@@ -145,7 +171,12 @@ class Block(nn.Module):
             self.ffn_hc = None
             self._prefill_fast_hc_impls_cached = None
             return
-        self.ffn = MoE(
+        if layer_weights is None:
+            raise ValueError("Block requires per-layer weights")
+        adapt_split_moe_weights(
+            layer_weights, moe_inter_dim, n_shared_experts, _MOE_WEIGHT_NAMES
+        )
+        self.ffn = ChunkedFp8Fp4MoeLayer(
             layer_id=layer_id,
             dim=dim,
             moe_inter_dim=moe_inter_dim,
@@ -162,6 +193,11 @@ class Block(nn.Module):
             ep_rank=ep_rank,
             max_tokens_per_rank=max_tokens_per_rank,
             is_decode_role=is_decode_role,
+            strategy=moe_strategy,
+            chunking_enabled=chunked_moe_enabled(),
+            model_type="deepseek_v41",
+            moe_w1_layout="gate_up",
+            record_function_scope=_profiler.moe_record_function_scope,
         )
         if v41_config is not None and not is_decode_role:
             self.ffn.gate._prefill_gate_chunk_rows = 32768
@@ -170,8 +206,6 @@ class Block(nn.Module):
         # into ``RMSNorm`` at construction time.  Norms here see 2D inputs
         # ``[T, dim]`` from the hc_pre output, so framework ``RMSNorm``
         # (which expects 2D) drops in directly.
-        from rtp_llm.utils.model_weight import W
-
         self.attn_norm = RMSNorm(layer_weights[W.v4_attn_norm], norm_eps)
         self.ffn_norm = RMSNorm(layer_weights[W.v4_ffn_norm], norm_eps)
 
@@ -211,10 +245,9 @@ class Block(nn.Module):
             return
         if os.environ.get("DSV4_CP_SYNC_AFTER_ATTN_ONCE", "0") == "0":
             return
-        if getattr(getattr(self.ffn, "_strategy", None), "name", "") not in (
-            "mega",
-            "mega_fused",
-            "mega_se",
+        if self.ffn.strategy_name not in (
+            "mega_moe",
+            "mega_moe_se",
         ):
             return
         if getattr(self.attn, "_cp_ctx", None) is None:

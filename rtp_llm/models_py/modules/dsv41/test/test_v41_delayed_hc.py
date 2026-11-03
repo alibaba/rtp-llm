@@ -3,7 +3,9 @@ import unittest
 import torch
 
 from rtp_llm.models_py.modules.dsv41.hc.delayed import DelayedHCHead, DelayedHCUnit
-from rtp_llm.models_py.modules.dsv41.moe.shared_expert import get_shared_expert_executor
+from rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.shared_expert import (
+    get_shared_expert_executor,
+)
 
 
 class DelayedHCTest(unittest.TestCase):

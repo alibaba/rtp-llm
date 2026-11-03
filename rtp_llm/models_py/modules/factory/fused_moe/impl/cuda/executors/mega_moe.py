@@ -13,7 +13,8 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Any, Dict, Optional
+from functools import lru_cache
+from typing import Any, Dict
 
 import torch
 
@@ -22,13 +23,11 @@ from rtp_llm.models_py.kernels.cuda.quant_layouts import (
     prepare_fp4_weight_scale_for_deepgemm,
 )
 from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import ExpertGatePayload
-from rtp_llm.models_py.modules.factory.fused_moe.utils.config import (
-    strict_fused_moe_enabled,
-)
 from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.buffer import (
     _get_or_create_mega_buf,
     _get_or_create_mega_output,
     _mega_moe_available,
+    estimate_mega_moe_symm_buffer_bytes,
 )
 from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.input_packer import (
     get_mega_moe_input_packer,
@@ -39,18 +38,58 @@ from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.jit_warmup impor
     generate_mega_moe_jit_token_counts,
     mega_moe_jit_warmup_enabled,
     parse_mega_moe_jit_warmup_tokens_override,
+    resolve_mega_num_sms,
 )
 from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.warmup_sync import (
     sync_cuda_graph_warmup_ranks,
 )
+from rtp_llm.utils.model_weight import W
 
 from .fp8_fp4_base import Fp8Fp4ExecutorBase, normalize_moe_w13_gate_up
 
 _MEGA_MOE_JIT_WARMED_KEYS: set[tuple] = set()
 _MEGA_MOE_NVCC_TMPDIR_ENV = "MEGA_MOE_NVCC_TMPDIR"
-_PRE_KERNEL_BARRIER_ENV = "MEGA_MOE_PRE_KERNEL_BARRIER"
-_PRE_KERNEL_BARRIER_VERBOSE_ENV = "MEGA_MOE_PRE_KERNEL_BARRIER_VERBOSE"
-_PRE_KERNEL_BARRIER_LOGGED_KEYS: set[tuple[int, int]] = set()
+_MEGA_INTERMEDIATE_ALIGNMENT = 16 * FP4_BLOCK
+_MMA_TYPE = "fp8xfp4"
+
+
+@lru_cache(maxsize=None)
+def _native_mega_intermediate_supported(
+    group_size: int, num_experts: int, num_topk: int, hidden: int, intermediate: int
+) -> bool:
+    return (
+        estimate_mega_moe_symm_buffer_bytes(
+            group_size, num_experts, 384, num_topk, hidden, intermediate
+        )
+        is not None
+    )
+
+
+def _mega_intermediate_size(cfg) -> int:
+    """Intermediate width the Mega kernel and its resident weights use.
+
+    DeepGEMM bounds the symmetric buffer by a 384-token staging capacity. When
+    the checkpoint intermediate exceeds what fits, the routed FP4 buffers are
+    padded up to ``16 * FP4_BLOCK`` so the kernel sees a legal tile.
+    """
+    intermediate = int(cfg.moe_inter_dim)
+    # Aligned widths never pad; unaligned ones pad only when DeepGEMM cannot
+    # size a buffer for the native width.
+    if intermediate % _MEGA_INTERMEDIATE_ALIGNMENT == 0 or (
+        _native_mega_intermediate_supported(
+            cfg.ep_size,
+            cfg.n_routed_experts,
+            cfg.n_activated_experts,
+            cfg.dim,
+            intermediate,
+        )
+    ):
+        return intermediate
+    return (
+        (intermediate + _MEGA_INTERMEDIATE_ALIGNMENT - 1)
+        // _MEGA_INTERMEDIATE_ALIGNMENT
+        * _MEGA_INTERMEDIATE_ALIGNMENT
+    )
 
 
 def _mega_output_capacity(buf, requested_capacity: int) -> int:
@@ -95,53 +134,6 @@ def _restore_tmpdir(previous_tmpdir: str | None) -> None:
         os.environ["TMPDIR"] = previous_tmpdir
 
 
-def _pre_kernel_barrier_enabled() -> bool:
-    return os.environ.get(_PRE_KERNEL_BARRIER_ENV, "0") == "1"
-
-
-def _pre_kernel_barrier_verbose_enabled() -> bool:
-    return os.environ.get(_PRE_KERNEL_BARRIER_VERBOSE_ENV, "0") == "1"
-
-
-def _log_pre_kernel_barrier(
-    phase: str,
-    layer_id: int,
-    rank: int,
-    world_size: int,
-    tokens: int,
-    device: torch.device,
-) -> None:
-    if _pre_kernel_barrier_verbose_enabled():
-        logging.info(
-            "[MegaMoE] pre-kernel barrier %s: layer=%d rank=%d/%d "
-            "tokens=%d device=%s",
-            phase,
-            layer_id,
-            rank,
-            world_size,
-            tokens,
-            device,
-        )
-        return
-
-    if phase != "enter":
-        return
-    key = (layer_id, rank)
-    if key in _PRE_KERNEL_BARRIER_LOGGED_KEYS:
-        return
-    _PRE_KERNEL_BARRIER_LOGGED_KEYS.add(key)
-    logging.info(
-        "[MegaMoE] pre-kernel barrier enabled: layer=%d rank=%d/%d "
-        "tokens=%d device=%s; set %s=1 to log every barrier",
-        layer_id,
-        rank,
-        world_size,
-        tokens,
-        device,
-        _PRE_KERNEL_BARRIER_VERBOSE_ENV,
-    )
-
-
 def _get_validated_world_ep_group(cfg, dist):
     if not dist.is_initialized():
         raise RuntimeError("MegaMoE requires torch.distributed to be initialized")
@@ -162,12 +154,8 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
 
     @property
     def supports_gate_pack(self) -> bool:
-        pack_impl = (
-            os.environ.get("MEGA_MOE_INPUT_PACKER_IMPL", "optimized").strip().lower()
-        )
         return (
             self._input_packer.name == "fused"
-            and pack_impl == "optimized"
             and 1 <= self.cfg.n_activated_experts <= 32
         )
 
@@ -180,72 +168,14 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
         checker.check(_mega_moe_available())
 
     def setup_weights(self, layer_weights: Dict) -> None:
-        """Stack EP-local routed-expert SFs into the int32 UTCCP-transposed
-        layout ``fp8_fp4_mega_moe`` expects, then register the symm-mem
-        dispatch buffer.
-
-        Routed weights arrive as already-EP-sliced stacks (the loader handles
-        rank slicing), each shaped ``[E_local, ...]``. We pop them so the only references
-        kept alive are the kernel-consumable l1/l2 buffers below.
-
-        Mega MoE expects, per expert:
-          L1 w [2*inter, dim//2] int8 (gate | up rows concatenated)
-          L1 sf [2*inter, ...] int32  (post-``transform_sf_into_required_layout``
-            + ``transform_weights_for_mega_moe``: gate/up interleaved gran=8
-            along N, SF UTCCP-transposed)
-          L2 w [dim, inter//2] int8
-          L2 sf [dim, ...] int32
-
-        Memory: serialise L1 → L2 with ``del`` + ``empty_cache()`` between
-        stages. Pre-allocating both fp32 SF stacks at once also keeps the
-        transform's temporary allocations alive. Splitting keeps the live set
-        to at most one input stack.
-        """
+        """Keep the MegaMoE-resident weights and register the symm-mem buffer."""
         import deep_gemm
         import torch.distributed as dist
 
-        from rtp_llm.utils.model_weight import W
-
         cfg = self.cfg
-        E = cfg.n_local_experts
         D = cfg.dim
-        inter = cfg.moe_inter_dim
-
-        w13 = layer_weights.pop(W.moe_w1)
-        s13_raw = layer_weights.pop(W.moe_s1)
-        w13, s13_raw = normalize_moe_w13_gate_up(
-            w13,
-            s13_raw,
-            inter,
-            cfg.moe_w1_layout,
-        )
-        device = w13.device
-        s13_int = prepare_fp4_weight_scale_for_deepgemm(s13_raw, 2 * inter, D, E)
-        del s13_raw
-        torch.cuda.empty_cache()
-
-        w2 = layer_weights.pop(W.moe_w2)
-        s2_raw = layer_weights.pop(W.moe_s2)
-        s2_int = prepare_fp4_weight_scale_for_deepgemm(s2_raw, D, inter, E)
-        del s2_raw
-        torch.cuda.empty_cache()
-
-        # Mega MoE transform: L1 gate/up interleave (gran=8 along N) +
-        # both SFs UTCCP-transposed. Drop inputs immediately after.
-        (l1_w, l1_sf), (l2_w, l2_sf) = deep_gemm.transform_weights_for_mega_moe(
-            (w13, s13_int),
-            (w2, s2_int),
-        )
-        del w13, s13_int, w2, s2_int
-        torch.cuda.empty_cache()
-
-        # Stash as plain attributes (not Parameters — the kernel reads
-        # raw int8/int32 buffers with no autograd).  Original stacked
-        # fp32 SFs are dropped now that the int layout has been derived.
-        self._mega_l1_w = l1_w
-        self._mega_l1_sf = l1_sf
-        self._mega_l2_w = l2_w
-        self._mega_l2_sf = l2_sf
+        inter = _mega_intermediate_size(cfg)
+        device = self._transform_routed_weights(layer_weights, deep_gemm, inter)
 
         # (4) Allocate the symmetric-memory buffer.  Uses
         # ``torch.distributed.group.WORLD`` because our DP+EP layout has
@@ -279,7 +209,106 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
         self._input_packer = get_mega_moe_input_packer()
         self._maybe_warmup_jit_once()
 
-    def _resolve_jit_warmup_token_counts(self, num_sms: int) -> list[int]:
+    def _transform_routed_weights(
+        self, layer_weights: Dict, deep_gemm, inter: int
+    ) -> torch.device:
+        """Stack EP-local routed-expert SFs into the int32 UTCCP-transposed
+        layout ``fp8_fp4_mega_moe`` expects.
+
+        Routed weights arrive as already-EP-sliced stacks (the loader handles
+        rank slicing), each shaped ``[E_local, ...]``. We pop them so the only references
+        kept alive are the kernel-consumable l1/l2 buffers below.
+
+        Mega MoE expects, per expert:
+          L1 w [2*inter, dim//2] int8 (gate | up rows concatenated)
+          L1 sf [2*inter, ...] int32  (post-``transform_sf_into_required_layout``
+            + ``transform_weights_for_mega_moe``: gate/up interleaved gran=8
+            along N, SF UTCCP-transposed)
+          L2 w [dim, inter//2] int8
+          L2 sf [dim, ...] int32
+
+        When ``inter`` is padded above the checkpoint width, the tail of L1 and
+        L2 is zero-filled with neutral UE8M0 scales, so the extra columns
+        contribute exactly zero to the fused SwiGLU.
+
+        Memory: serialise L1 → L2 with ``del`` + ``empty_cache()`` between
+        stages. Pre-allocating both fp32 SF stacks at once also keeps the
+        transform's temporary allocations alive. Splitting keeps the live set
+        to at most one input stack.
+        """
+        cfg = self.cfg
+        E = cfg.n_local_experts
+        D = cfg.dim
+        source_inter = cfg.moe_inter_dim
+
+        w13 = layer_weights.pop(W.moe_w1)
+        s13_raw = layer_weights.pop(W.moe_s1)
+        w13, s13_raw = normalize_moe_w13_gate_up(
+            w13,
+            s13_raw,
+            source_inter,
+            cfg.moe_w1_layout,
+        )
+        device = w13.device
+        if inter != source_inter:
+            padded_w13 = torch.zeros(
+                (E, 2 * inter, D // 2), dtype=torch.int8, device=device
+            )
+            padded_s13 = torch.empty(
+                (E, 2 * inter, D // FP4_BLOCK),
+                dtype=torch.float8_e8m0fnu,
+                device=device,
+            )
+            padded_s13.view(torch.uint8).fill_(127)
+            padded_w13[:, :source_inter].copy_(w13[:, :source_inter])
+            padded_s13[:, :source_inter].copy_(s13_raw[:, :source_inter])
+            padded_w13[:, inter : inter + source_inter].copy_(w13[:, source_inter:])
+            padded_s13[:, inter : inter + source_inter].copy_(s13_raw[:, source_inter:])
+            del w13, s13_raw
+            w13, s13_raw = padded_w13, padded_s13
+        s13_int = prepare_fp4_weight_scale_for_deepgemm(s13_raw, 2 * inter, D, E)
+        del s13_raw
+        torch.cuda.empty_cache()
+
+        w2 = layer_weights.pop(W.moe_w2)
+        s2_raw = layer_weights.pop(W.moe_s2)
+        if inter != source_inter:
+            padded_w2 = torch.zeros((E, D, inter // 2), dtype=torch.int8, device=device)
+            padded_s2 = torch.empty(
+                (E, D, inter // FP4_BLOCK),
+                dtype=torch.float8_e8m0fnu,
+                device=device,
+            )
+            padded_s2.view(torch.uint8).fill_(127)
+            padded_w2[:, :, : source_inter // 2].copy_(w2)
+            padded_s2[:, :, : source_inter // FP4_BLOCK].copy_(s2_raw)
+            del w2, s2_raw
+            w2, s2_raw = padded_w2, padded_s2
+        s2_int = prepare_fp4_weight_scale_for_deepgemm(s2_raw, D, inter, E)
+        del s2_raw
+        torch.cuda.empty_cache()
+
+        # Mega MoE transform: L1 gate/up interleave (gran=8 along N) +
+        # both SFs UTCCP-transposed. Drop inputs immediately after.
+        (l1_w, l1_sf), (l2_w, l2_sf) = deep_gemm.transform_weights_for_mega_moe(
+            (w13, s13_int),
+            (w2, s2_int),
+        )
+        del w13, s13_int, w2, s2_int
+        torch.cuda.empty_cache()
+
+        # Stash as plain attributes (not Parameters — the kernel reads
+        # raw int8/int32 buffers with no autograd).  Original stacked
+        # fp32 SFs are dropped now that the int layout has been derived.
+        self._mega_l1_w = l1_w
+        self._mega_l1_sf = l1_sf
+        self._mega_l2_w = l2_w
+        self._mega_l2_sf = l2_sf
+        return device
+
+    def _resolve_jit_warmup_token_counts(
+        self, num_sms: int, deep_gemm=None
+    ) -> list[int]:
         cfg = self.cfg
         # Use the logical model/runtime token cap, not DeepGEMM's internally
         # aligned buffer capacity.  The JIT key is driven by request-visible T
@@ -289,15 +318,27 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
         override = parse_mega_moe_jit_warmup_tokens_override()
         if override is not None:
             return clamp_token_counts(override, max_tokens_per_rank)
+        get_block_m = getattr(deep_gemm, "get_block_m_for_mega_moe", None)
+        block_m_resolver = None
+        if callable(get_block_m):
+            block_m_resolver = lambda tokens: get_block_m(
+                cfg.ep_size,
+                cfg.n_routed_experts,
+                max_tokens_per_rank,
+                tokens,
+                cfg.n_activated_experts,
+                _MMA_TYPE,
+            )
         return generate_mega_moe_jit_token_counts(
             num_ranks=cfg.ep_size,
             num_experts=cfg.n_routed_experts,
             num_experts_per_rank=cfg.n_local_experts,
             num_topk=cfg.n_activated_experts,
-            intermediate_hidden=cfg.moe_inter_dim,
+            intermediate_hidden=_mega_intermediate_size(cfg),
             num_sms=num_sms,
             max_tokens_per_rank=max_tokens_per_rank,
             include_cap=cfg.warmup_include_capacity,
+            block_m_resolver=block_m_resolver,
         )
 
     def _maybe_warmup_jit_once(self) -> None:
@@ -312,8 +353,8 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
         import torch.distributed as dist
 
         cfg = self.cfg
-        num_sms = int(deep_gemm.get_num_sms())
-        token_counts = self._resolve_jit_warmup_token_counts(num_sms)
+        num_sms = resolve_mega_num_sms(deep_gemm, self._mega_l1_w.device)
+        token_counts = self._resolve_jit_warmup_token_counts(num_sms, deep_gemm)
         if not token_counts:
             return
 
@@ -452,7 +493,6 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
     def _launch(self, y: torch.Tensor, tokens: int, device: torch.device) -> None:
         import deep_gemm
 
-        self._maybe_pre_kernel_barrier(tokens)
         sync_cuda_graph_warmup_ranks(
             f"moe.mega_moe.layer{self.cfg.layer_id}.before_deepgemm",
             device,
@@ -546,49 +586,3 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
         y = self._mega_y[:tokens]
         self._launch(y, tokens, x.device)
         return y, buf.topk_weights[:tokens], buf.topk_idx[:tokens]
-
-    def _maybe_pre_kernel_barrier(self, tokens: int) -> None:
-        """Optional host-side rendezvous before the DeepGEMM MegaMoE kernel.
-
-        This is a diagnostic guard for cases where one rank does not enter the
-        peer-symmetric DeepGEMM kernel in time.  It intentionally synchronizes
-        the current stream first so the barrier represents "RTP-side pack is
-        done and this rank is ready to launch MegaMoE".
-        """
-        if not _pre_kernel_barrier_enabled():
-            return
-        if torch.cuda.is_current_stream_capturing():
-            raise RuntimeError(
-                f"{_PRE_KERNEL_BARRIER_ENV}=1 is incompatible with CUDA graph "
-                "capture"
-            )
-
-        import torch.distributed as dist
-
-        if not dist.is_initialized():
-            raise RuntimeError(
-                f"{_PRE_KERNEL_BARRIER_ENV}=1 requires torch.distributed "
-                "to be initialized"
-            )
-
-        cfg = self.cfg
-        group = getattr(self, "_mega_group", dist.group.WORLD)
-        rank = dist.get_rank(group)
-        world_size = dist.get_world_size(group)
-        device = self._mega_l1_w.device
-        _log_pre_kernel_barrier("enter", cfg.layer_id, rank, world_size, tokens, device)
-
-        if device.type == "cuda":
-            with torch.cuda.device(device):
-                torch.cuda.current_stream().synchronize()
-                try:
-                    dist.barrier(
-                        group=group,
-                        device_ids=[torch.cuda.current_device()],
-                    )
-                except TypeError:
-                    dist.barrier(group=group)
-        else:
-            dist.barrier(group=group)
-
-        _log_pre_kernel_barrier("leave", cfg.layer_id, rank, world_size, tokens, device)
