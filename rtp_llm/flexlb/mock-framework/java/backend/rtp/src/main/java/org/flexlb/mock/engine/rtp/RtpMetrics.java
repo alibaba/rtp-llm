@@ -186,5 +186,6 @@ final class RtpMetrics {
         actualForward.set(elapsedNanos / 1000.0);
         plannedForward.set(plannedNanos / 1000.0);
     }
+    public List<Collector.MetricFamilySamples> collect() { return MetricTags.collect(registry, tags); }
     public String scrape() { return MetricTags.scrape(registry, tags); }
 }

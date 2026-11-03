@@ -129,6 +129,7 @@ final class LocalPrefill implements AutoCloseable {
     }
     Scheduler.Status snapshot(long latestFinished) { return engine.status(latestFinished); }
     void checkHealthy() { engine.checkHealthy(); }
+    java.util.List<io.prometheus.client.Collector.MetricFamilySamples> collectMetrics() { return engine.collectMetrics(); }
     String scrapeMetrics() { return engine.scrapeMetrics(); }
     @Override public void close() { engine.close(); }
 }

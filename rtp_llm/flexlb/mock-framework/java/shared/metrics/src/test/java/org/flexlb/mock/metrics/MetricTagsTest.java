@@ -15,6 +15,17 @@ class MetricTagsTest {
         assertEquals("10.0.0.1", MetricTags.fromEnvironment(Map.of("HIPPO_ROLE", "role", "HIPPO_SLAVE_IP", "10.0.0.1")).get("container_ip"));
     }
 
+    @Test void platformTagsOverrideDerivedDefaultsAndMalformedTagsAreRejected() {
+        var tags = MetricTags.fromEnvironment(Map.of("HIPPO_ROLE", "derived", "HIPPO_SLAVE_IP", "10.0.0.1",
+            "kmonitorTags", "hippo_role^actual@container_ip^10.2.3.4@model^model-a"));
+        assertEquals("actual", tags.get("hippo_role"));
+        assertEquals("10.2.3.4", tags.get("container_ip"));
+        assertEquals("model-a", tags.get("model"));
+        assertEquals("10.0.0.1", tags.get("host_ip"));
+        for (String value : java.util.List.of("broken", "a^b@", "^value", "key^", "a^b^c"))
+            assertThrows(IllegalArgumentException.class, () -> MetricTags.fromEnvironment(Map.of("kmonitorTags", value)));
+    }
+
     @Test void enrichesCountersGaugesAndHistogramBucketsWithoutLosingDimensions() {
         var registry = new CollectorRegistry();
         Counter.build().name("calls").help("calls").labelNames("role").register(registry).labels("prefill").inc(2);

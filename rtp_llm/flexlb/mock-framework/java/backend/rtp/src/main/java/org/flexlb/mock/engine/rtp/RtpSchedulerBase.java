@@ -477,6 +477,7 @@ abstract class RtpSchedulerBase implements Scheduler {
                 kv.availableBlocks() * block, kv.freeBlocks() * block, kv.heldBlocks() * block, host.total() * block, host.free() * block, config.blockSize());
         }
     }
+    @Override public List<io.prometheus.client.Collector.MetricFamilySamples> collectMetrics() { return metrics.collect(); }
     @Override public String scrapeMetrics() { return metrics.scrape(); }
     @Override public void close() {
         if (closed) return;

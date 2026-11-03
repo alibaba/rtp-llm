@@ -22,6 +22,7 @@ public final class RtpNode implements org.flexlb.mock.runtime.EngineInstance {
     private final org.flexlb.mock.runtime.EngineAddress address = org.flexlb.mock.runtime.EngineAddress.local();
     private Server rpc;
     private ApiServer api;
+    private org.flexlb.mock.metrics.MetricsOutput metrics;
     private KvcmReporter publisher;
 
     private RtpNode(RtpConfig config, Scheduler.Factory schedulers) {
@@ -50,11 +51,16 @@ public final class RtpNode implements org.flexlb.mock.runtime.EngineInstance {
         try {
             var builder = NettyServerBuilder.forAddress(node.address.listener(rpcPort)).addService(node.service);
             node.rpc = builder.build().start();
-            node.api = new ApiServer(node.address.listener(controlPort)).health(node::checkHealthy).metrics(node.service::scrapeMetrics);
+            node.metrics = org.flexlb.mock.metrics.MetricsOutput.start(node.service::collectMetrics);
+            node.api = new ApiServer(node.address.listener(controlPort)).health(node::checkHealthy);
+            if (node.metrics.prometheus()) node.api.metrics(node.service::scrapeMetrics);
             node.api.start();
             node.publisher = node.startMetadataReporter();
             return node;
-        } catch (IOException | RuntimeException error) { node.close(); throw error; }
+        } catch (IOException | RuntimeException | Error error) {
+            try { node.close(); } catch (RuntimeException cleanup) { error.addSuppressed(cleanup); }
+            throw error;
+        }
     }
 
     private KvcmReporter startMetadataReporter() {
@@ -95,7 +101,9 @@ public final class RtpNode implements org.flexlb.mock.runtime.EngineInstance {
         boolean prefill = config.role() == org.flexlb.mock.api.model.Types.Role.prefill;
         var result = new LinkedHashMap<String, Object>();
         result.put("id", config.id()); result.put("role", config.role().name()); result.put("engine", "rtp");
-        result.put("rpc", rpcAddress()); result.put("control", address.http(api.port())); result.put("metrics", address.http(api.port()) + "/metrics");
+        result.put("rpc", rpcAddress()); result.put("control", address.http(api.port()));
+        result.put("metrics", metrics.prometheus() ? address.http(api.port()) + "/metrics" : "");
+        result.put("metrics_backend", metrics.prometheus() ? "prometheus" : "kmonitor");
         var supported = new ArrayList<>(List.of("CheckHealth", "GetWorkerStatus", "GetCacheStatus"));
         if (prefill) {
             supported.addAll(List.of("GenerateStreamCall", "FetchResponse", "Cancel"));
@@ -112,7 +120,10 @@ public final class RtpNode implements org.flexlb.mock.runtime.EngineInstance {
     @Override public void close() {
         if (!closed.compareAndSet(false, true)) return;
         RuntimeException failure = null;
-        try { service.close(); } catch (RuntimeException error) { failure = error; }
+        try { if (metrics != null) metrics.close(); } catch (RuntimeException error) { failure = error; }
+        try { service.close(); } catch (RuntimeException error) {
+            if (failure == null) failure = error; else failure.addSuppressed(error);
+        }
         try {
             if (rpc != null) {
                 rpc.shutdown();

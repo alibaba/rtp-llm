@@ -21,10 +21,19 @@ public final class MetricTags {
             var container = environment.getOrDefault("RequestedIP", environment.getOrDefault("HIPPO_SLAVE_IP", ""));
             if (!container.isBlank()) tags.put("container_ip", container);
         }
+        String injected = environment.getOrDefault("kmonitorTags", "");
+        if (!injected.isBlank()) {
+            for (String entry : injected.split("@", -1)) {
+                String[] pair = entry.split("\\^", -1);
+                if (pair.length != 2 || pair[0].isBlank() || pair[1].isBlank())
+                    throw new IllegalArgumentException("Invalid kmonitorTags: expected key^value@key^value");
+                tags.put(pair[0].trim(), pair[1].trim());
+            }
+        }
         return Map.copyOf(tags);
     }
 
-    public static String scrape(CollectorRegistry registry, Map<String, String> tags) {
+    public static List<MetricFamilySamples> collect(CollectorRegistry registry, Map<String, String> tags) {
         var ordered = new TreeMap<>(tags);
         var families = new ArrayList<MetricFamilySamples>();
         var source = registry.metricFamilySamples();
@@ -35,15 +44,21 @@ public final class MetricTags {
                 var names = new ArrayList<>(sample.labelNames);
                 var values = new ArrayList<>(sample.labelValues);
                 for (var tag : ordered.entrySet()) {
-                    if (names.contains(tag.getKey())) throw new IllegalArgumentException("Duplicate metric tag: " + tag.getKey());
-                    names.add(tag.getKey()); values.add(tag.getValue());
+                    int existing = names.indexOf(tag.getKey());
+                    if (existing >= 0) {
+                        values.set(existing, tag.getValue()); // Platform identity is authoritative.
+                    } else { names.add(tag.getKey()); values.add(tag.getValue()); }
                 }
                 samples.add(new MetricFamilySamples.Sample(sample.name, names, values, sample.value, sample.exemplar, sample.timestampMs));
             }
             families.add(new MetricFamilySamples(family.name, family.unit, family.type, family.help, samples));
         }
+        return List.copyOf(families);
+    }
+
+    public static String scrape(CollectorRegistry registry, Map<String, String> tags) {
         var text = new StringWriter();
-        try { TextFormat.write004(text, Collections.enumeration(families)); }
+        try { TextFormat.write004(text, Collections.enumeration(collect(registry, tags))); }
         catch (IOException impossible) { throw new UncheckedIOException(impossible); }
         return text.toString();
     }
